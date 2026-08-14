@@ -12,6 +12,8 @@ DSH Desktop 需要保留可供审查的 DeepSeek Harness 官方精确源码，�
 
 [`deepseek-harness/`](../../../../deepseek-harness/) 是 Git 子模块，固定到 [`upstream.json`](../../../../upstream.json) 记录的官方仓库和精确提交。桌面分支把该子模块视为只读内容。更新上游时，在独立提交中同时修改 gitlink 与元数据。
 
+外层 README 文件和资源由产品仓库拥有，并保留 `anywhere-labs/deepseek-harness-desktop` 已有的 DSH Desktop 落地页；这些内容不从官方源码子模块派生。package 级初始化和发行文档属于 [`dsh-plugin-desktop/README.md`](../../../../dsh-plugin-desktop/README.md)。
+
 外层仓库是使用 `node_modules` linker 的 Yarn 4 工作区，唯一的 workspace 成员是 [`dsh-plugin-desktop`](../../../../dsh-plugin-desktop/)。上游 checkout 按照自己的[包管理器决策](../../../../deepseek-harness/.agents/notes/implemented/process/2026-06-16-pnpm-over-yarn.zh.md)保持为独立的 pnpm 工作区。根目录的 `upstream:*` 脚本通过 Yarn portable shell 进入子模块，再由 Corepack 调用上游固定的 pnpm 版本。
 
 普通桌面构建从 npm registry 解析已发布的 DSH 包，不从子模块链接源码。`upstream.json` 分别记录源码版本和运行时包 family。固定的 GitHub 公开源码声明为 `0.1.0-rc.5`，桌面运行时使用已发布的 `0.1.0-rc.6` family；当 npm artifact 没有发布对应源码提交时，仓库不会虚构两者的对应关系。
@@ -36,6 +38,6 @@ DSH Desktop 需要保留可供审查的 DeepSeek Harness 官方精确源码，�
 
 ## Consequences
 
-桌面改动只有一个自有 package tree，官方 checkout 可以与其远端提交直接比较。产品安装与检查可由外层 Yarn lockfile 复现，上游验证则继续使用自己的 pnpm lockfile。
+桌面改动只有一个自有 package tree，官方 checkout 可以与其远端提交直接比较。外层落地页展示 DSH Desktop，package 使用方式由插件 README 负责。产品安装与检查可由外层 Yarn lockfile 复现，上游验证则继续使用自己的 pnpm lockfile。
 
 克隆时必须初始化子模块，贡献者也需要维护两套有意隔离的包管理器缓存。GitHub 公开修订与 npm 发布 family 可能不对应，因此源码 pin 更新和运行时 family 更新需要分别提供验证证据。
