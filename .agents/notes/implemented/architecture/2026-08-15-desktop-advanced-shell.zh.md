@@ -46,6 +46,8 @@ desktop frame 只拥有几何与 chrome：可折叠 sidebar rail、中心宽度�
 
 在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 在原生 vibrancy 上保持透明 sidebar surface，conversation surface 则使用解析后的 DSH theme token。
 
+workspace seat 会把官方 session 列表的渐隐 token 局部设为透明。官方列表会保留滚动与间距行为，但不会把 Web 侧边栏的不透明填充色绘制到原生材质上。
+
 在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: acrylic`、原生阴影、圆角与粗可调整边框。Renderer 会保留 drag region，并把控件、输入框、对话框与交互内容标记为不可拖动。
 
 高级模式不支持 Linux。Host 校验、托盘与原生窗口构造器都会强制同一边界，而不会静默降级。

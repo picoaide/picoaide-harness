@@ -46,6 +46,8 @@ Disabling official layout removes the presentation layer that normally projects 
 
 On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positioned traffic lights, a transparent background, `vibrancy: sidebar`, and `visualEffectState: followWindow`. The renderer keeps a transparent sidebar surface over the native vibrancy while the conversation surface uses resolved DSH theme tokens.
 
+The workspace seat scopes the official session-list fade token to transparent. The official list keeps its scrolling and spacing behavior without painting its opaque Web-sidebar fill over native material.
+
 On Windows the advanced window uses a hidden title bar with native title-bar overlay controls, a transparent background, `backgroundMaterial: acrylic`, native shadow, rounded corners, and a thick resizable frame. The renderer reserves the drag region and marks controls, inputs, dialogs, and interactive content as non-draggable.
 
 Advanced mode is unsupported on Linux. The Host validation, tray, and native window constructor enforce the same boundary instead of silently falling back.

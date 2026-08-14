@@ -21,7 +21,7 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopIconButton:hover, .dshDesktopNewSession:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dshDesktopNewSession { display: flex; flex: none; align-items: center; justify-content: center; gap: 6px; box-sizing: border-box; width: calc(100% - 4px); height: 38px; margin: 0 2px 8px; padding: 8px 16px; color: var(--dsw-alias-label-primary); font: inherit; font-weight: 500; cursor: pointer; background: var(--dsw-alias-button-elevated-fill); border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; }
 .dshDesktopSidebar:not([data-wide]) .dshDesktopNewSession { width: 36px; height: 36px; margin: 0 0 12px; padding: 0; background: transparent; border-color: transparent; }
-.dshDesktopWorkspaceRegion { display: flex; flex: 1; flex-direction: column; min-height: 0; margin-right: calc(-1 * var(--dsh-sidebar-inline-padding)); overflow: hidden; }
+.dshDesktopWorkspaceRegion { --dsw-specific-sidebar-fill: transparent; display: flex; flex: 1; flex-direction: column; min-height: 0; margin-right: calc(-1 * var(--dsh-sidebar-inline-padding)); overflow: hidden; }
 .dshDesktopSidebar:not([data-wide]) .dshDesktopWorkspaceRegion { width: 36px; margin-right: 0; }
 .dshDesktopSidebarFooter { display: flex; flex: none; flex-direction: column; width: 100%; }
 .dshDesktopSidebar:not([data-wide]) .dshDesktopSidebarFooter { align-items: center; width: 36px; }

@@ -49,6 +49,8 @@ The desktop Client then provides the `layout` service for its own Cordis-fiber l
 
 The advanced theme presenter projects the active upstream theme snapshot onto the document, including color scheme, resolved token values, dark-mode marker, and theme-color metadata. It subscribes to ordinary theme changes and removes only its own projected state when the generation disposes.
 
+The workspace seat makes the upstream session-list edge fade transparent, so its opaque Web-sidebar fill does not paint a dark strip over the native material.
+
 On macOS the advanced window uses a transparent hidden-inset title bar, positioned traffic lights, and native `sidebar` vibrancy. On Windows it uses a hidden title bar with native window controls, transparent overlay, acrylic background material, shadow, rounded corners, and a thick resizable frame. Linux rejects advanced mode rather than silently falling back to a presentation different from the persisted setting.
 
 ## Development

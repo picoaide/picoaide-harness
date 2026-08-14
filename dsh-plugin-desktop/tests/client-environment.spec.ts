@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { provideDesktopLayout } from '../src/client/layout-service.ts'
 import { parseDesktopClientEnvironment } from '../src/client/environment.ts'
 import { computeDesktopColumns, DesktopLayoutState, SIDEBAR_COLLAPSED } from '../src/client/layout-state.ts'
+import { installAdvancedStyles } from '../src/client/styles.ts'
 
 describe('desktop client environment', () => {
   it('accepts the Electron-owned kebab query markers', () => {
@@ -23,6 +24,33 @@ describe('desktop client environment', () => {
 })
 
 describe('advanced desktop layout', () => {
+  it('keeps the upstream session-list fade transparent over native glass', () => {
+    let css = ''
+    const remove = vi.fn()
+    const style = {
+      dataset: {},
+      get textContent() { return css },
+      set textContent(value: string) { css = value },
+      remove,
+    }
+    const appendChild = vi.fn()
+    vi.stubGlobal('document', {
+      createElement: () => style,
+      head: { appendChild },
+    })
+
+    try {
+      const dispose = installAdvancedStyles()
+      expect(css).toMatch(/\.dshDesktopWorkspaceRegion\s*\{[^}]*--dsw-specific-sidebar-fill:\s*transparent;/)
+      expect(appendChild).toHaveBeenCalledWith(style)
+      dispose()
+      expect(remove).toHaveBeenCalledOnce()
+    }
+    finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('releases the Cordis layout service with its owning effect', () => {
     let disposed = false
     const ctx = {

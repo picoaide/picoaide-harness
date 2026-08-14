@@ -49,6 +49,8 @@ desktop Client 随后在自身 Cordis fiber 生命期内提供 `layout` service�
 
 高级 theme presenter 会把当前上游 theme snapshot 投影到 document，包括 color scheme、解析后的 token 值、深色模式 marker 与 theme-color metadata。它订阅普通 theme 变化，generation dispose 时只移除由自身投影的状态。
 
+workspace seat 会把上游 session 列表的边缘渐隐设为透明，避免其 Web 侧边栏不透明填充色在原生材质上绘制暗色横条。
+
 在 macOS 上，高级窗口使用透明 hidden-inset 标题栏、定位后的红黄绿按钮与原生 `sidebar` vibrancy。在 Windows 上，它使用带原生窗口控件的隐藏标题栏、透明 overlay、acrylic 背景材质、阴影、圆角与粗可调整边框。Linux 会拒绝高级模式，而不会静默降级到与持久化设置不同的呈现。
 
 ## 开发
