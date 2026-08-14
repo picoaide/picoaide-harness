@@ -80,9 +80,10 @@ describe('Electron compatibility runtime', () => {
   it('passes only compatibility options to the real BrowserWindow call site', async () => {
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime()
-    const release = runtime.mountAfter(Promise.resolve(), () => spec)
+    const release = runtime.schedule(spec)
 
-    await runtime.whenMounted()
+    expect(electron.browserWindowOptions).toHaveLength(0)
+    await runtime.mountScheduled()
 
     expect(electron.browserWindowOptions).toHaveLength(1)
     const options = electron.browserWindowOptions[0]
@@ -114,5 +115,18 @@ describe('Electron compatibility runtime', () => {
     }
 
     await release()
+  })
+
+  it('does not mount a registration disposed before Host boot settles', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime()
+    const release = runtime.schedule(spec)
+
+    await release()
+
+    await expect(runtime.mountScheduled()).rejects.toThrow(
+      'the Cordis shell plugin did not register a window',
+    )
+    expect(electron.browserWindowOptions).toHaveLength(0)
   })
 })

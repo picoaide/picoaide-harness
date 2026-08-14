@@ -11,8 +11,8 @@ import type {} from './runtime.ts'
 /** Stable Cordis plugin name. */
 export const name = 'desktop-shell'
 
-/** Services required before the shell can schedule its renderer generation. */
-export const inject = ['desktopRuntime', 'webServer', 'webRuntime', 'appExit', 'loader']
+/** Services required before the shell can register its renderer generation. */
+export const inject = ['desktopRuntime', 'webServer', 'webRuntime', 'appExit']
 
 /** Native window configuration. */
 export interface Config {
@@ -47,7 +47,7 @@ export function desktopRendererUrl(port: number): string {
 }
 
 /**
- * Schedule the Electron shell after every Host plugin has settled.
+ * Register the Electron shell from active Web carrier values.
  * @param ctx - Host context carrying the Electron adapter and Web carrier.
  * @param config - validated native window values.
  */
@@ -61,13 +61,13 @@ export function apply(ctx: Context, config: Config): void {
   }
   const iconPath = fileURLToPath(new URL('../build/icon.png', import.meta.url))
   ctx.effect(
-    () => ctx.desktopRuntime.mountAfter(ctx.loader.await(), () => ({
+    () => ctx.desktopRuntime.schedule({
       ...config,
       url: desktopRendererUrl(ctx.webServer.port),
       productName: 'DSH Desktop',
       iconPath,
       requestQuit: appExit,
-    })),
+    }),
     'dsh-plugin-desktop: native shell generation',
   )
 }

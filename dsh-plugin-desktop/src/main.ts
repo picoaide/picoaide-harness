@@ -83,7 +83,7 @@ async function start(): Promise<void> {
       throw cause
     })
     current = ctx
-    await runtime.whenMounted()
+    await runtime.mountScheduled()
   } catch (cause) {
     process.stderr.write(`${BIN_NAME}: ${cause instanceof Error ? cause.stack ?? cause.message : String(cause)}\n`)
     await shutdown.request(1)

@@ -18,6 +18,8 @@ Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Nod
 
 `desktop-shell.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，并加载当前 DSH profile 未经修改的 Web 根页面。desktop package 不导出 client artifact，不贡献 DOM marker 或样式表，不替换任何 slot 或 service，并保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
 
+Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
+
 该 package 为单独组合的 desktop client shell 保留 `advanced` 模式名。当前选择该模式会在安排原生窗口之前明确失败，不会静默降级为兼容模式。
 
 ## 开发
@@ -29,7 +31,7 @@ yarn install
 yarn check
 ```
 
-该检查包含一个基于构建产物的 headless Loader smoke，会通过包名分别激活启动器拥有的 desktop row 与 profile 本地第三方 row。
+该检查会验证 197 个 package 的生产依赖图中，每个必需的第一方 peer 均由 desktop deploy root 声明。一个基于构建产物的 headless Loader smoke 会通过包名分别激活启动器拥有的 desktop row 与 profile 本地第三方 row。第二个 headless smoke 会启动完整的已发布 Web profile、请求其 loopback 根页面，并验证注入的 client manifest 包含官方 layout、sidebar 与 conversation entry。
 
 有图形会话时，显式启动桌面应用：
 
@@ -86,4 +88,4 @@ npx dsh-plugin-desktop
 - 上游 `dsh plugin` 命令会把参数转发给 pnpm，因此目前仍需另外安装 `dsh` CLI 与 pnpm。该运行时要求与 DSH Desktop 自身使用 Yarn workspace 相互独立。安装器必须先暴露或内置该管理路径，只有安装器的用户才能添加 package。
 - 纯新增 transport 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换 carrier 需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
 - 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。
-- `package:dir` 是用于 smoke 的未封装产物，而非可分发安装包。运行时闭包、签名、公证、Windows Authenticode 与安装行为仍未验证。
+- `package:dir` 是用于 smoke 的未封装产物，而非可分发安装包。源码安装中的组合运行时闭包已经过 headless 验证；打包后闭包、签名、公证、Windows Authenticode 与安装行为仍未验证。

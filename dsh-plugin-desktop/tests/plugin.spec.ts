@@ -1,13 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
-import { apply, Config, desktopRendererUrl, type Config as DesktopConfig } from '../src/index.ts'
+import { apply, Config, desktopRendererUrl, inject, type Config as DesktopConfig } from '../src/index.ts'
 import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
-
-function deferred(): { promise: Promise<void>; resolve(): void } {
-  let resolve!: () => void
-  const promise = new Promise<void>((settled) => { resolve = settled })
-  return { promise, resolve }
-}
 
 const config: DesktopConfig = {
   mode: 'compatibility',
@@ -31,35 +25,31 @@ describe('desktop Host plugin', () => {
     expect([...url.searchParams]).toEqual([])
   })
 
-  it('reads the ephemeral Web port only after the Host Loader settles', async () => {
-    const settled = deferred()
-    let port: number | undefined
+  it('registers the active Web port without re-entering global Loader settlement', () => {
     let shell: DesktopShellSpec | undefined
     const runtime: DesktopRuntime = {
       platform: 'darwin',
-      mountAfter: (ready, resolveSpec) => {
-        void ready.then(() => { shell = resolveSpec() })
+      schedule: (spec) => {
+        shell = spec
         return async () => {}
       },
-      whenMounted: async () => {},
+      mountScheduled: async () => {},
       show: () => {},
       prepareToQuit: () => {},
     }
+    const loaderAwait = vi.fn(() => new Promise<void>(() => {}))
     const ctx = {
       desktopRuntime: runtime,
-      webServer: { get port() { return port } },
-      loader: { await: () => settled.promise },
+      webServer: { port: 43120 },
+      loader: { await: loaderAwait },
       get: vi.fn(() => () => {}),
       effect: vi.fn((register: () => () => Promise<void>) => register()),
     } as unknown as Context
 
     apply(ctx, config)
-    expect(shell).toBeUndefined()
-    port = 43120
-    settled.resolve()
-    await settled.promise
-    await Promise.resolve()
 
+    expect(inject).not.toContain('loader')
+    expect(loaderAwait).not.toHaveBeenCalled()
     expect(shell).toEqual(expect.objectContaining({
       mode: 'compatibility',
       url: 'http://127.0.0.1:43120/',
@@ -69,8 +59,8 @@ describe('desktop Host plugin', () => {
   it('rejects advanced mode before scheduling a native window', () => {
     const runtime: DesktopRuntime = {
       platform: 'darwin',
-      mountAfter: vi.fn(() => async () => {}),
-      whenMounted: async () => {},
+      schedule: vi.fn(() => async () => {}),
+      mountScheduled: async () => {},
       show: () => {},
       prepareToQuit: () => {},
     }
@@ -83,6 +73,6 @@ describe('desktop Host plugin', () => {
       'advanced shell mode is not implemented',
     )
     expect(ctx.effect).not.toHaveBeenCalled()
-    expect(runtime.mountAfter).not.toHaveBeenCalled()
+    expect(runtime.schedule).not.toHaveBeenCalled()
   })
 })

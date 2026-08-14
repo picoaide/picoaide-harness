@@ -18,6 +18,8 @@ Bare Cordis plugin imports resolve from the persistent profile. A narrow Node re
 
 `desktop-shell.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame and loads the unmodified Web root from the active DSH profile. The desktop package exports no client artifact, contributes no DOM marker or stylesheet, replaces no slot or service, and leaves the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows active.
 
+The Cordis row registers the native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official and third-party client plugins without a Loader-wide wait inside the plugin itself.
+
 The package reserves the `advanced` mode name for a separately composed desktop client shell. Selecting it currently fails before a native window is scheduled; it never falls back to compatibility mode silently.
 
 ## Development
@@ -29,7 +31,7 @@ yarn install
 yarn check
 ```
 
-The check includes a built, headless Loader smoke that activates both the launcher-owned desktop row and a profile-local third-party row by package name.
+The check verifies that every required first-party peer in the 197-package production graph is declared by the desktop deploy root. A built, headless Loader smoke activates both the launcher-owned desktop row and a profile-local third-party row by package name. A second headless smoke boots the complete published Web profile, requests its loopback root, and verifies the official layout, sidebar, and conversation entries in the injected client manifest.
 
 Start the desktop application explicitly when a graphical session is available:
 
@@ -86,4 +88,4 @@ None. The same DSH Host and client plugin graph assemble model requests.
 - The upstream `dsh plugin` command is a pnpm forwarder and currently requires a separately installed `dsh` CLI and pnpm. This runtime requirement is independent of DSH Desktop using Yarn for its own workspace. An installer must expose or bundle that management path before installer-only users can add packages.
 - The additive transport is loopback HTTP and WebSocket, not Electron IPC. Replacing the carrier requires transport extension points in upstream DSH and is outside this standalone package.
 - This project currently pins the published DSH `0.1.0-rc.6` family, while the sibling `deepseek-harness/` source checkout predates that release. Tests therefore validate the published package interfaces rather than unpublished upstream sources.
-- `package:dir` is an unpacked smoke artifact, not a distributable installer. Runtime closure, signing, notarization, Windows Authenticode, and installation behavior remain unverified.
+- `package:dir` is an unpacked smoke artifact, not a distributable installer. The source installation's assembled runtime closure is verified headlessly; packaged closure, signing, notarization, Windows Authenticode, and installation behavior remain unverified.

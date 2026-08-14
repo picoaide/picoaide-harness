@@ -41,12 +41,13 @@ try {
 
   const runtime = {
     platform: 'darwin',
-    mountAfter(ready, resolveSpec) {
-      mounted = ready.then(() => { mountedSpec = resolveSpec() })
+    schedule(spec) {
+      mountedSpec = spec
       return async () => { await mounted }
     },
-    whenMounted() {
-      if (mounted === undefined) return Promise.reject(new Error('desktop shell was not scheduled'))
+    mountScheduled() {
+      if (mountedSpec === undefined) return Promise.reject(new Error('desktop shell was not registered'))
+      mounted ??= Promise.resolve()
       return mounted
     },
     show() {},
@@ -69,7 +70,7 @@ try {
     },
     prepared.bareModuleBaseUrl,
   )
-  await runtime.whenMounted()
+  await runtime.mountScheduled()
 
   const desktopEntry = ctx.loader.resolve('include:desktop-shell')
   const thirdPartyEntry = ctx.loader.resolve('include:third-party-smoke')

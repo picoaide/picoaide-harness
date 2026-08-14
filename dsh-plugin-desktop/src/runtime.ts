@@ -38,19 +38,17 @@ export interface DesktopRuntime {
   readonly platform: DesktopPlatform
 
   /**
-   * Own one shell generation after the Host Loader settles.
-   * @param ready - Host Loader settlement for the current profile generation.
-   * @param resolveSpec - reads native shell inputs after settlement, when
-   *   ephemeral services such as the Web server port are authoritative.
+   * Register one shell generation while the Cordis profile is activating.
+   * @param spec - native shell inputs resolved from active Host services.
    * @returns an asynchronous disposer for the shell generation.
    */
-  mountAfter(ready: Promise<void>, resolveSpec: () => DesktopShellSpec): () => Promise<void>
+  schedule(spec: DesktopShellSpec): () => Promise<void>
 
   /**
-   * Wait for the scheduled shell generation to load its renderer.
-   * @returns a promise that rejects when native shell setup fails.
+   * Mount the registered generation after the launcher has settled the profile.
+   * @returns a promise that rejects when registration or native setup fails.
    */
-  whenMounted(): Promise<void>
+  mountScheduled(): Promise<void>
 
   /** Reveal and focus the current window, if mounted. */
   show(): void

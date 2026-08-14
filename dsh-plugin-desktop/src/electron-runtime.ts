@@ -17,6 +17,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   private window: BrowserWindow | undefined
   private tray: Tray | undefined
+  private scheduled: DesktopShellSpec | undefined
   private mountTask: Promise<void> | undefined
   private release: (() => Promise<void>) | undefined
   private quitting = false
@@ -29,34 +30,33 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
-  mountAfter(ready: Promise<void>, resolveSpec: () => DesktopShellSpec): () => Promise<void> {
-    if (this.mountTask !== undefined) {
-      throw new Error('dsh-plugin-desktop: a native shell generation is already scheduled')
+  schedule(spec: DesktopShellSpec): () => Promise<void> {
+    if (this.scheduled !== undefined || this.mountTask !== undefined) {
+      throw new Error('dsh-plugin-desktop: a native shell generation is already registered')
     }
-    let cancelled = false
-    this.mountTask = (async () => {
-      await ready
-      if (cancelled) return
-      this.release = await this.mount(resolveSpec())
-      if (cancelled) await this.release()
-    })()
+    this.scheduled = spec
+    let disposed = false
     return async () => {
-      cancelled = true
+      if (disposed) return
+      disposed = true
       try {
         await this.mountTask
       } finally {
         await this.release?.()
         this.release = undefined
         this.mountTask = undefined
+        if (this.scheduled === spec) this.scheduled = undefined
       }
     }
   }
 
   /** @inheritdoc */
-  whenMounted(): Promise<void> {
-    if (this.mountTask === undefined) {
-      return Promise.reject(new Error('dsh-plugin-desktop: the Cordis shell plugin did not schedule a window'))
+  mountScheduled(): Promise<void> {
+    const spec = this.scheduled
+    if (spec === undefined) {
+      return Promise.reject(new Error('dsh-plugin-desktop: the Cordis shell plugin did not register a window'))
     }
+    this.mountTask ??= this.mount(spec).then((release) => { this.release = release })
     return this.mountTask
   }
 
