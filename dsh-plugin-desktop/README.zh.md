@@ -6,13 +6,19 @@
 
 ## 架构
 
-Electron 可执行文件只包含最小启动代码。它获取单实例锁、准备持久化 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过一个 Cordis effect 拥有 `BrowserWindow`、托盘、导航策略以及关闭与退出生命周期。它的浏览器侧通过现有 DSH 客户端模块图被发现，并为后续桌面贡献方标记当前 renderer generation。
+Electron 可执行文件只包含最小启动代码。它获取单实例锁、准备持久化 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过一个 Cordis effect 拥有 `BrowserWindow`、托盘、导航策略以及关闭与退出生命周期。
 
 首个纯新增版本有意复用现有 loopback Web carrier。profile 挂载普通 `dsh-base` 与 `dsh-web-app` bundle；Host 把 HTTP 与 WebSocket surface 绑定到 `127.0.0.1` 的临时端口；Electron 在沙箱 renderer 中加载该同源页面。Electron 不维护插件花名册，renderer 也不会获得原始 Electron API。
 
 启动器只修复由安装方拥有的 profile 前缀。由 `dsh plugin --profile desktop add third-party-plugin` 创建的 profile 会变为 `dsh-base`、`dsh-web-app`，随后是保持原有相对顺序的第三方 bundle。启动器在 `dsh-web-app` 之后插入自己的 desktop layer，但不会把自身持久化到由用户管理的 bundle 列表。
 
 Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Node resolve hook 只处理由 `@deepseek-ai/cordis-plugin-loader` 发起的导入，因此即使打包后的 Electron 不暴露 Node 内部 ESM Loader，profile 本地第三方包与修复后的启动器 fallback 仍使用同一条解析路径。
+
+## 兼容模式
+
+`desktop-shell.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，并加载当前 DSH profile 未经修改的 Web 根页面。desktop package 不导出 client artifact，不贡献 DOM marker 或样式表，不替换任何 slot 或 service，并保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
+
+该 package 为单独组合的 desktop client shell 保留 `advanced` 模式名。当前选择该模式会在安排原生窗口之前明确失败，不会静默降级为兼容模式。
 
 ## 开发
 
@@ -55,7 +61,7 @@ dsh plugin --profile desktop remove third-party-plugin
 npx dsh-plugin-desktop
 ```
 
-第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。Electron 不要求单独的客户端构建，也不引入桌面专用注册 API。
+第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。兼容模式由上游 Web 客户端模块图发现这些插件；Electron 不要求单独的客户端构建，也不引入桌面专用注册 API。
 
 ## 原生生命周期
 
@@ -76,6 +82,7 @@ npx dsh-plugin-desktop
 ## 已知限制与暂缓事项
 
 - 添加或删除 profile bundle 后必须重启 DSH Desktop；首个版本不监听 profile manifest。
+- 兼容模式不提供无边框窗口、半透明侧边栏、桌面专用布局或其他 renderer 呈现覆盖；这些功能需要单独组合的 advanced client shell。
 - 上游 `dsh plugin` 命令会把参数转发给 pnpm，因此目前仍需另外安装 `dsh` CLI 与 pnpm。该运行时要求与 DSH Desktop 自身使用 Yarn workspace 相互独立。安装器必须先暴露或内置该管理路径，只有安装器的用户才能添加 package。
 - 纯新增 transport 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换 carrier 需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
 - 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。

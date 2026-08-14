@@ -1,11 +1,11 @@
-/** DSH Desktop Host plugin: owns the Electron shell as one Cordis effect. */
+/** DSH Desktop compatibility Host plugin: owns the native shell without a client override. */
 
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { DesktopPlatform } from './runtime.ts'
+import type { DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
 /** Stable Cordis plugin name. */
@@ -16,6 +16,8 @@ export const inject = ['desktopRuntime', 'webServer', 'webRuntime', 'appExit', '
 
 /** Native window configuration. */
 export interface Config {
+  /** Native presentation mode. Advanced mode fails until its client shell ships. */
+  mode: DesktopShellMode
   /** Initial window width in CSS pixels. */
   width: number
   /** Initial window height in CSS pixels. */
@@ -28,6 +30,7 @@ export interface Config {
 
 /** Validated native window configuration. */
 export const Config: z<Config> = z.object({
+  mode: z.union(['compatibility', 'advanced'] as const).default('compatibility'),
   width: z.number().step(1).min(800).default(1280),
   height: z.number().step(1).min(600).default(840),
   minWidth: z.number().step(1).min(640).default(900),
@@ -35,15 +38,12 @@ export const Config: z<Config> = z.object({
 })
 
 /**
- * Construct the same-origin renderer URL for one native platform.
+ * Construct the unmodified upstream Web root URL.
  * @param port - active loopback Web server port.
- * @param platform - native Electron platform.
  * @returns the URL loaded by the BrowserWindow.
  */
-export function desktopRendererUrl(port: number, platform: DesktopPlatform): string {
-  const url = new URL(`http://127.0.0.1:${String(port)}/`)
-  url.searchParams.set('dsh-desktop-platform', platform)
-  return url.href
+export function desktopRendererUrl(port: number): string {
+  return new URL(`http://127.0.0.1:${String(port)}/`).href
 }
 
 /**
@@ -52,6 +52,9 @@ export function desktopRendererUrl(port: number, platform: DesktopPlatform): str
  * @param config - validated native window values.
  */
 export function apply(ctx: Context, config: Config): void {
+  if (config.mode !== 'compatibility') {
+    throw new Error('dsh-plugin-desktop: advanced shell mode is not implemented')
+  }
   const appExit = ctx.get('appExit')
   if (appExit === undefined) {
     throw new Error('dsh-plugin-desktop: the launcher did not provide ctx.appExit')
@@ -60,7 +63,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(
     () => ctx.desktopRuntime.mountAfter(ctx.loader.await(), () => ({
       ...config,
-      url: desktopRendererUrl(ctx.webServer.port, ctx.desktopRuntime.platform),
+      url: desktopRendererUrl(ctx.webServer.port),
       productName: 'DSH Desktop',
       iconPath,
       requestQuit: appExit,

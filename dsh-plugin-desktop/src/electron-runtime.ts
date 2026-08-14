@@ -9,6 +9,7 @@ import {
   Tray,
 } from 'electron'
 import type { DesktopPlatform, DesktopRuntime, DesktopShellSpec } from './runtime.ts'
+import { compatibilityWindowOptions } from './window-options.ts'
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
@@ -79,21 +80,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       throw new Error(`dsh-plugin-desktop: failed to load application icon ${spec.iconPath}`)
     }
     const origin = new URL(spec.url).origin
-    const window = new BrowserWindow({
-      title: spec.productName,
-      width: spec.width,
-      height: spec.height,
-      minWidth: spec.minWidth,
-      minHeight: spec.minHeight,
-      show: false,
-      icon,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webSecurity: true,
-      },
-    })
+    const window = new BrowserWindow(compatibilityWindowOptions(spec, icon))
     this.window = window
 
     const show = (): void => { this.show() }

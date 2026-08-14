@@ -79,7 +79,10 @@ try {
   if (thirdPartyEntry?.options.name !== THIRD_PARTY_NAME) {
     throw new Error('profile-local third-party plugin did not activate')
   }
-  if (mountedSpec?.url !== 'http://127.0.0.1:43120/?dsh-desktop-platform=darwin') {
+  if (mountedSpec?.mode !== 'compatibility') {
+    throw new Error(`desktop plugin produced an unexpected shell mode: ${String(mountedSpec?.mode)}`)
+  }
+  if (mountedSpec?.url !== 'http://127.0.0.1:43120/') {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
 } finally {

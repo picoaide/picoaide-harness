@@ -1,9 +1,10 @@
-# DSH Desktop is an ordinary dual-face Cordis plugin. The existing Web bundle
-# still owns the browser carrier and client roster; this row adds the native
-# shell and lets client-modules discover this package's ./client artifact.
+# Compatibility mode adds only the native Host shell. The existing Web bundle
+# keeps ownership of the browser carrier, client roster, and rendered UI.
 - insert:
     - id: desktop-shell
       name: dsh-plugin-desktop
+      config:
+        mode: compatibility
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime

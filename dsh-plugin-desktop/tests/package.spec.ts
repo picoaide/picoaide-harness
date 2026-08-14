@@ -6,7 +6,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
   name?: unknown
   bin?: Record<string, unknown>
   exports?: Record<string, unknown>
-  dsh?: { bundle?: { patch?: unknown }; client?: { platform?: unknown } }
+  dsh?: { bundle?: { patch?: unknown }; client?: unknown }
   build?: { productName?: unknown; appId?: unknown; files?: unknown }
   dependencies?: Record<string, unknown>
   devDependencies?: Record<string, unknown>
@@ -22,13 +22,13 @@ describe('published package surface', () => {
     })
   })
 
-  it('exposes the dual-face Cordis plugin', () => {
-    expect(manifest.exports).toHaveProperty('./client')
+  it('exposes a Host-only compatibility plugin', () => {
+    expect(manifest.exports).not.toHaveProperty('./client')
     expect(manifest.exports).toHaveProperty('./package.json')
     expect(manifest.dsh).toEqual({
       bundle: { patch: './cordis.patch.yml' },
-      client: { platform: 'web', inject: [] },
     })
+    expect(manifest.dsh?.client).toBeUndefined()
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
   })
 

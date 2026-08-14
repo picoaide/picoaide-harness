@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import {
   DESKTOP_PACKAGE_NAME,
   desktopBundleList,
@@ -73,14 +74,17 @@ describe('desktop profile composition', () => {
     expect(() => ensureDesktopProfile(home)).toThrow('dsh.profile.bundles must be an array')
   })
 
-  it('assembles base, Web, desktop, presets, and loopback binding from published packages', () => {
+  it('assembles the Host shell without replacing the upstream client shell', () => {
     const prepared = prepareDesktopProfile(undefined, temporaryHome())
     const patches = prepared.patches as Array<Record<string, unknown>>
     const inserted = patches.flatMap((patch) => {
       const rows = patch.insert
       return Array.isArray(rows) ? rows as Array<Record<string, unknown>> : []
     })
-    expect(inserted).toContainEqual(expect.objectContaining({ name: DESKTOP_PACKAGE_NAME }))
+    expect(inserted).toContainEqual(expect.objectContaining({
+      name: DESKTOP_PACKAGE_NAME,
+      config: { mode: 'compatibility' },
+    }))
     expect(patches).toContainEqual(expect.objectContaining({
       id: 'webserver',
       config: { host: '127.0.0.1', port: 0 },
@@ -91,5 +95,17 @@ describe('desktop profile composition', () => {
     }))
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(fileURLToPath(prepared.bareModuleBaseUrl)).toBe(join(prepared.profile.dir, 'package.json'))
+
+    const rows = composeEntries([prepared.patches])
+    for (const [id, name] of [
+      ['ui-layout', '@deepseek-ai/dsh-client-ui-layout'],
+      ['ui-sidebar', '@deepseek-ai/dsh-client-ui-sidebar'],
+      ['ui-conversation', '@deepseek-ai/dsh-client-ui-conversation'],
+    ] as const) {
+      const matching = rows.filter(row => row.id === id)
+      expect(matching).toHaveLength(1)
+      expect(matching[0]).toEqual(expect.objectContaining({ name }))
+      expect(matching[0]?.disabled).toBeFalsy()
+    }
   })
 })

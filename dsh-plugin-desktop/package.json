@@ -20,10 +20,6 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./client": {
-      "types": "./lib/types/client.d.ts",
-      "default": "./lib/client.js"
-    },
     "./profile": {
       "types": "./lib/types/profile.d.ts",
       "default": "./lib/profile.js"
@@ -46,10 +42,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": []
     }
   },
   "scripts": {

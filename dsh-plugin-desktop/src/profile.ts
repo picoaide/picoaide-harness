@@ -1,4 +1,4 @@
-/** Persistent desktop-profile composition owned by the standalone launcher. */
+/** Compatibility profile composition over the official Web bundle and user plugins. */
 
 import { createRequire } from 'node:module'
 import { existsSync, writeFileSync } from 'node:fs'

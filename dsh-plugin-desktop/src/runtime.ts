@@ -1,10 +1,15 @@
 import type { Context } from '@deepseek-ai/cordis'
 
-/** Electron platforms supported by the DSH Desktop renderer marker. */
+/** Electron platforms supported by the DSH Desktop native adapter. */
 export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
+
+/** Native presentation modes selected by the desktop-shell Cordis row. */
+export type DesktopShellMode = 'compatibility' | 'advanced'
 
 /** Window values resolved from the desktop-shell Cordis row. */
 export interface DesktopWindowConfig {
+  /** Native presentation mode selected before BrowserWindow construction. */
+  mode: DesktopShellMode
   /** Initial window width in CSS pixels. */
   width: number
   /** Initial window height in CSS pixels. */
@@ -17,7 +22,7 @@ export interface DesktopWindowConfig {
 
 /** Values the desktop-shell plugin hands to the Electron adapter. */
 export interface DesktopShellSpec extends DesktopWindowConfig {
-  /** Loopback URL served by the active DSH profile. */
+  /** Unmodified Web root served by the active DSH profile. */
   url: string
   /** Native application and tray label. */
   productName: string
