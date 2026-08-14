@@ -16,7 +16,7 @@ Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Nod
 
 ## 兼容模式
 
-`desktop-shell.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，并加载当前 DSH profile 未经修改的 Web 根页面。desktop package 不导出 client artifact，不贡献 DOM marker 或样式表，不替换任何 slot 或 service，并保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
+`desktop-shell.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，隐藏可见的页面标题但保留 `DSH Desktop` 无障碍标题，并加载当前 DSH profile 未经修改的 Web 根页面。原生标题栏颜色由操作系统控制并跟随系统外观；精确匹配 sidebar token 需要自定义标题栏，因此属于高级 client shell。desktop package 不导出 client artifact，不贡献 DOM marker 或样式表，不替换任何 slot 或 service，并保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
 
 Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
 

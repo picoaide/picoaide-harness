@@ -3,6 +3,9 @@ import type { DesktopShellSpec } from '../src/runtime.ts'
 
 const electron = vi.hoisted(() => {
   const browserWindowOptions: unknown[] = []
+  const browserWindows: BrowserWindow[] = []
+  const browserWindowOn = vi.fn()
+  const browserWindowOff = vi.fn()
   const icon = {
     isEmpty: vi.fn(() => false),
     resize: vi.fn(function resize() { return icon }),
@@ -15,9 +18,11 @@ const electron = vi.hoisted(() => {
 
   class BrowserWindow {
     readonly webContents = webContents
+    accessibleTitle = ''
 
     constructor(options: unknown) {
       browserWindowOptions.push(options)
+      browserWindows.push(this)
     }
 
     readonly isDestroyed = vi.fn(() => false)
@@ -25,8 +30,8 @@ const electron = vi.hoisted(() => {
     readonly restore = vi.fn()
     readonly show = vi.fn()
     readonly focus = vi.fn()
-    readonly on = vi.fn()
-    readonly off = vi.fn()
+    readonly on = browserWindowOn
+    readonly off = browserWindowOff
     readonly once = vi.fn()
     readonly destroy = vi.fn()
     readonly loadURL = vi.fn(async () => {})
@@ -43,6 +48,9 @@ const electron = vi.hoisted(() => {
     app: { on: vi.fn(), off: vi.fn() },
     BrowserWindow,
     browserWindowOptions,
+    browserWindows,
+    browserWindowOff,
+    browserWindowOn,
     Menu: { buildFromTemplate: vi.fn(() => ({})) },
     nativeImage: { createFromPath: vi.fn(() => icon) },
     shell: { openExternal: vi.fn(async () => {}) },
@@ -74,6 +82,7 @@ const spec: DesktopShellSpec = {
 describe('Electron compatibility runtime', () => {
   beforeEach(() => {
     electron.browserWindowOptions.length = 0
+    electron.browserWindows.length = 0
     vi.clearAllMocks()
   })
 
@@ -88,7 +97,7 @@ describe('Electron compatibility runtime', () => {
     expect(electron.browserWindowOptions).toHaveLength(1)
     const options = electron.browserWindowOptions[0]
     expect(options).toEqual(expect.objectContaining({
-      title: 'DSH Desktop',
+      title: '',
       width: 1280,
       height: 840,
       show: false,
@@ -113,8 +122,16 @@ describe('Electron compatibility runtime', () => {
     ]) {
       expect(options).not.toHaveProperty(option)
     }
+    expect(electron.browserWindows[0]?.accessibleTitle).toBe('DSH Desktop')
+
+    const titleListener = electron.browserWindowOn.mock.calls.find(([event]) => event === 'page-title-updated')?.[1]
+    expect(titleListener).toEqual(expect.any(Function))
+    const titleEvent = { preventDefault: vi.fn() }
+    titleListener(titleEvent)
+    expect(titleEvent.preventDefault).toHaveBeenCalledOnce()
 
     await release()
+    expect(electron.browserWindowOff).toHaveBeenCalledWith('page-title-updated', titleListener)
   })
 
   it('does not mount a registration disposed before Host boot settles', async () => {

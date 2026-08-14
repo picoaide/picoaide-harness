@@ -16,7 +16,7 @@ Bare Cordis plugin imports resolve from the persistent profile. A narrow Node re
 
 ## Compatibility mode
 
-`desktop-shell.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame and loads the unmodified Web root from the active DSH profile. The desktop package exports no client artifact, contributes no DOM marker or stylesheet, replaces no slot or service, and leaves the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows active.
+`desktop-shell.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame, suppresses the visible page title while retaining the `DSH Desktop` accessibility title, and loads the unmodified Web root from the active DSH profile. The operating system owns the native title-bar color and follows its own appearance; exact sidebar-token color belongs to the advanced client shell because it requires a custom title bar. The desktop package exports no client artifact, contributes no DOM marker or stylesheet, replaces no slot or service, and leaves the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows active.
 
 The Cordis row registers the native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official and third-party client plugins without a Loader-wide wait inside the plugin itself.
 

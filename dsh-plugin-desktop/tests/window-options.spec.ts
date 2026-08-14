@@ -21,7 +21,7 @@ describe('compatibility BrowserWindow options', () => {
     const options = compatibilityWindowOptions(spec, icon)
 
     expect(options).toEqual(expect.objectContaining({
-      title: 'DSH Desktop',
+      title: '',
       width: 1280,
       height: 840,
       minWidth: 900,

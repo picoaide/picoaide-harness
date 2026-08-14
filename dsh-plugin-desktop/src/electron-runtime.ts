@@ -81,6 +81,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     const origin = new URL(spec.url).origin
     const window = new BrowserWindow(compatibilityWindowOptions(spec, icon))
+    window.accessibleTitle = spec.productName
     this.window = window
 
     const show = (): void => { this.show() }
@@ -89,6 +90,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       event.preventDefault()
       window.hide()
     }
+    const preserveBlankTitle = (event: Electron.Event): void => { event.preventDefault() }
     const navigate = (event: Electron.Event<{ url: string }>): void => {
       let targetOrigin: string | undefined
       try {
@@ -101,6 +103,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     app.on('activate', show)
     window.on('close', close)
+    window.on('page-title-updated', preserveBlankTitle)
     window.webContents.on('will-frame-navigate', navigate)
     window.webContents.on('will-redirect', navigate)
     window.webContents.setWindowOpenHandler(({ url }) => {
@@ -132,6 +135,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       await window.loadURL(spec.url)
     } catch (cause) {
       app.off('activate', show)
+      window.off('page-title-updated', preserveBlankTitle)
       tray.destroy()
       window.destroy()
       this.tray = undefined
@@ -145,6 +149,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       released = true
       app.off('activate', show)
       window.off('close', close)
+      window.off('page-title-updated', preserveBlankTitle)
       window.webContents.off('will-frame-navigate', navigate)
       window.webContents.off('will-redirect', navigate)
       tray.destroy()

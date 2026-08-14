@@ -7,7 +7,7 @@ import type { DesktopShellSpec } from './runtime.ts'
  * Build a secure BrowserWindow while preserving the operating system frame.
  * @param spec - shell values resolved from the active Cordis row.
  * @param icon - validated application icon shared with the tray.
- * @returns options without custom title bars, transparency, or native materials.
+ * @returns options with a native frame, no visible title, and no custom materials.
  */
 export function compatibilityWindowOptions(
   spec: DesktopShellSpec,
@@ -17,7 +17,7 @@ export function compatibilityWindowOptions(
     throw new Error(`dsh-plugin-desktop: unsupported compatibility window mode ${spec.mode}`)
   }
   return {
-    title: spec.productName,
+    title: '',
     width: spec.width,
     height: spec.height,
     minWidth: spec.minWidth,

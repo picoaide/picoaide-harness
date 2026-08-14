@@ -20,7 +20,7 @@ The `desktop-shell` row registers a native shell specification while the profile
 
 ## Native lifecycle and security
 
-The compatibility adapter creates a normal `BrowserWindow` and omits custom-frame, title-bar, transparency, vibrancy, and native-material options. It retains renderer isolation, the Chromium sandbox, disabled Node integration, exact-origin navigation, tray ownership, close-to-hide behavior, single-instance activation, and bounded Cordis disposal on explicit quit.
+The compatibility adapter creates a normal `BrowserWindow` and omits custom-frame, title-bar, transparency, vibrancy, and native-material options. It suppresses visible page-title updates while retaining the product name as the accessibility title. The operating system owns native title-bar color and appearance; exact DSH sidebar-token color requires the advanced client shell. Compatibility retains renderer isolation, the Chromium sandbox, disabled Node integration, exact-origin navigation, tray ownership, close-to-hide behavior, single-instance activation, and bounded Cordis disposal on explicit quit.
 
 An advanced presentation requires a desktop-owned client plugin that is added only by advanced profile composition. It may replace documented slots or services, but it is not present in the compatibility client graph.
 
