@@ -11,6 +11,8 @@ export default defineConfig([
       profile: 'src/profile.ts',
       runtime: 'src/runtime.ts',
       'electron-runtime': 'src/electron-runtime.ts',
+      'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts',
+      'windows-acl-runner': 'src/windows-acl-runner.ts',
       main: 'src/main.ts',
     },
     outDir: 'lib',

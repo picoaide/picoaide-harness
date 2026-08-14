@@ -116,6 +116,18 @@ describe('desktop profile composition', () => {
     expect(rows.find(row => row.id === 'directory-picker')?.disabled).toBeFalsy()
     expect(rows.map(row => row.id)).not.toContain('desktop-directory-picker-browse-host')
     expect(rows.map(row => row.id)).not.toContain('desktop-directory-picker-browse-surface')
+    expect(rows.find(row => row.id === 'subprocess')).toEqual({
+      id: 'subprocess',
+      name: '@deepseek-ai/dsh-subprocess-local',
+    })
+    expect(rows.find(row => row.id === 'sandbox')).toEqual({
+      id: 'sandbox',
+      name: '@deepseek-ai/dsh-sandbox-local',
+    })
+    expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-pwsh-sandbox',
+    }))
+    expect(rows.map(row => row.id)).not.toContain('desktop-windows-pwsh-sandbox')
   })
 
   it('projects advanced YAML settings into the Host and client Loader rows', () => {
@@ -160,8 +172,17 @@ describe('desktop profile composition', () => {
     expect(() => readDesktopShellMode({ path })).toThrow('invalid settings document')
   })
 
-  it('pins the browse directory picker on Windows without loading the native backend', () => {
-    const prepared = prepareDesktopProfile(undefined, temporaryHome(), 'win32')
+  it('pins the Windows browse picker and desktop pwsh provider without replacing process boundaries', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- id: pwsh-sandbox',
+      "  name: '@deepseek-ai/dsh-pwsh-sandbox'",
+      '  config:',
+      "    cwd: 'C:\\workspace'",
+      '',
+    ].join('\n'))
+
+    const prepared = prepareDesktopProfile(undefined, home, 'win32')
     const rows = composeEntries([prepared.patches])
     const picker = rows.find(row => row.id === 'directory-picker')
 
@@ -179,5 +200,49 @@ describe('desktop profile composition', () => {
     }))
     expect(rows.map(row => row.name)).not.toContain('@deepseek-ai/dsh-host-directory-picker-native')
     expect(rows.map(row => row.name)).not.toContain('@deepseek-ai/dsh-client-ui-directory-picker-native')
+    expect(rows.find(row => row.id === 'subprocess')).toEqual({
+      id: 'subprocess',
+      name: '@deepseek-ai/dsh-subprocess-local',
+    })
+    expect(rows.find(row => row.id === 'sandbox')).toEqual({
+      id: 'sandbox',
+      name: '@deepseek-ai/dsh-sandbox-local',
+    })
+    expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-pwsh-sandbox',
+      disabled: true,
+    }))
+    expect(rows).toContainEqual(expect.objectContaining({
+      id: 'desktop-windows-pwsh-sandbox',
+      name: 'dsh-plugin-desktop/windows-pwsh-sandbox',
+      disabled: { __jsExpr: "process.platform !== 'win32'" },
+      config: { cwd: 'C:\\workspace' },
+    }))
+  })
+
+  it('preserves an explicitly disabled upstream pwsh provider and a third-party replacement', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- id: pwsh-sandbox',
+      "  name: '@deepseek-ai/dsh-pwsh-sandbox'",
+      '  disabled: true',
+      '- insert:',
+      '    - id: third-party-pwsh-sandbox',
+      "      name: 'third-party-pwsh-sandbox'",
+      '',
+    ].join('\n'))
+
+    const prepared = prepareDesktopProfile(undefined, home, 'win32')
+    const rows = composeEntries([prepared.patches])
+
+    expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-pwsh-sandbox',
+      disabled: true,
+    }))
+    expect(rows).toContainEqual(expect.objectContaining({
+      id: 'third-party-pwsh-sandbox',
+      name: 'third-party-pwsh-sandbox',
+    }))
+    expect(rows.map(row => row.id)).not.toContain('desktop-windows-pwsh-sandbox')
   })
 })

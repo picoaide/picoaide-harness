@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
+import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import {
   composeEntries,
@@ -47,6 +47,10 @@ const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
 const BROWSE_PICKER_BACKEND = '@deepseek-ai/dsh-host-directory-picker-browse'
 const BROWSE_PICKER_SURFACE = '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+const PWSH_SANDBOX_ROW_ID = 'pwsh-sandbox'
+const UPSTREAM_PWSH_SANDBOX_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox'
+const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
+const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = 'dsh-plugin-desktop/windows-pwsh-sandbox'
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
 const SETTINGS_FILE_PACKAGE = '@deepseek-ai/dsh-settings-file'
 const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
@@ -192,6 +196,19 @@ function rowConfig(row: EntryOptions | undefined): Record<string, unknown> {
     : {}
 }
 
+/** Resolve a Loader row's platform gate without mutating the host process. */
+function rowDisabledOnPlatform(row: EntryOptions, platform: NodeJS.Platform): boolean {
+  if (!isJsExpr(row.disabled)) return row.disabled === true
+  const scopedProcess = new Proxy(process, {
+    get(target, property) {
+      if (property === 'platform') return platform
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return Boolean(evaluate({ process: scopedProcess }, row.disabled.__jsExpr))
+}
+
 /**
  * Load and compose one desktop profile generation.
  * @param telemetryDisabled - inherited DSH telemetry opt-out value.
@@ -292,6 +309,27 @@ export function prepareDesktopProfile(
         ],
       },
     )
+    const pwshSandbox = rows.get(PWSH_SANDBOX_ROW_ID)
+    if (pwshSandbox?.name === UPSTREAM_PWSH_SANDBOX_PACKAGE
+      && !rowDisabledOnPlatform(pwshSandbox, platform)) {
+      patches.push(
+        {
+          id: PWSH_SANDBOX_ROW_ID,
+          name: UPSTREAM_PWSH_SANDBOX_PACKAGE,
+          disabled: true,
+        },
+        {
+          insert: [
+            {
+              id: DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID,
+              name: DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE,
+              ...(pwshSandbox.disabled === undefined ? {} : { disabled: pwshSandbox.disabled }),
+              config: rowConfig(pwshSandbox),
+            },
+          ],
+        },
+      )
+    }
   }
   // Loopback-only binding is a launcher security invariant, not user config.
   patches.push({

@@ -12,6 +12,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
   build?: {
     productName?: unknown
     appId?: unknown
+    electronFuses?: unknown
     files?: unknown
     mac?: { icon?: unknown }
     win?: { icon?: unknown }
@@ -33,6 +34,11 @@ describe('published package surface', () => {
 
   it('exposes the Host plugin and desktop-owned client face', () => {
     expect(manifest.exports).toHaveProperty('./client')
+    expect(manifest.exports).toHaveProperty('./windows-pwsh-sandbox', {
+      types: './lib/types/windows-pwsh-sandbox.d.ts',
+      default: './lib/windows-pwsh-sandbox.js',
+    })
+    expect(manifest.exports).not.toHaveProperty('./windows-acl-runner')
     expect(manifest.exports).toHaveProperty('./package.json')
     expect(manifest.dsh?.bundle).toEqual({ patch: './cordis.patch.yml' })
     expect(manifest.dsh?.client).toEqual({
@@ -45,9 +51,17 @@ describe('published package surface', () => {
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
   })
 
+  it('builds the public Windows executor and its private runner trampoline', () => {
+    const config = readFileSync(new URL('tsdown.config.ts', packageRoot), 'utf8')
+
+    expect(config).toContain("'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts'")
+    expect(config).toContain("'windows-acl-runner': 'src/windows-acl-runner.ts'")
+  })
+
   it('fixes the installed application identity', () => {
     expect(manifest.build?.productName).toBe('DSH Desktop')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
+    expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/tray-icon.svg',

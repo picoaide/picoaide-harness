@@ -2359,7 +2359,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-pwsh-sandbox@npm:^0.1.0-rc.6":
+"@deepseek-ai/dsh-pwsh-sandbox@npm:0.1.0-rc.6, @deepseek-ai/dsh-pwsh-sandbox@npm:^0.1.0-rc.6":
   version: 0.1.0-rc.6
   resolution: "@deepseek-ai/dsh-pwsh-sandbox@npm:0.1.0-rc.6"
   peerDependencies:
@@ -2420,7 +2420,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-sandbox-windows-acl@npm:^0.1.0-rc.6":
+"@deepseek-ai/dsh-sandbox-windows-acl@npm:0.1.0-rc.6, @deepseek-ai/dsh-sandbox-windows-acl@npm:^0.1.0-rc.6":
   version: 0.1.0-rc.6
   resolution: "@deepseek-ai/dsh-sandbox-windows-acl@npm:0.1.0-rc.6"
   dependencies:
@@ -6635,8 +6635,10 @@ __metadata:
     "@deepseek-ai/dsh-permission-presets": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-plan-mode": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-pwsh-local": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-pwsh-sandbox": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-sandbox": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-sandbox-policy": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-sandbox-windows-acl": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-scope": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-session": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-session-persistence": "npm:0.1.0-rc.6"
