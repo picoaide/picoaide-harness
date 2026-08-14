@@ -10,7 +10,19 @@ import {
 } from 'electron'
 import type { DesktopPlatform, DesktopRuntime, DesktopShellSpec } from './runtime.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
-import { compatibilityWindowOptions } from './window-options.ts'
+import { desktopWindowOptions } from './window-options.ts'
+
+/** Return the presentation mode opposite the active generation. */
+export function nextDesktopShellMode(mode: DesktopShellSpec['mode']): DesktopShellSpec['mode'] {
+  return mode === 'compatibility' ? 'advanced' : 'compatibility'
+}
+
+/** Return the tray command describing the mode that will be activated. */
+export function modeToggleLabel(mode: DesktopShellSpec['mode']): string {
+  return mode === 'compatibility'
+    ? 'Switch to Advanced Mode'
+    : 'Switch to Compatibility Mode'
+}
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
@@ -23,7 +35,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private release: (() => Promise<void>) | undefined
   private quitting = false
 
-  constructor() {
+  constructor(private readonly restart: () => Promise<void>) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: unsupported Electron platform ${process.platform}`)
     }
@@ -71,6 +83,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  async requestRestart(): Promise<void> {
+    await this.restart()
+  }
+
+  /** @inheritdoc */
   prepareToQuit(): void {
     this.quitting = true
   }
@@ -82,7 +99,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     if (this.platform === 'darwin') app.dock?.setIcon(icon)
     const origin = new URL(spec.url).origin
-    const window = new BrowserWindow(compatibilityWindowOptions(spec, icon, this.platform))
+    const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
     window.accessibleTitle = spec.windowTitle
     if (this.platform === 'win32') window.removeMenu()
     this.window = window
@@ -128,6 +145,16 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     tray.setToolTip(spec.productName)
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: `Open ${spec.productName}`, click: show },
+      { type: 'separator' },
+      {
+        label: modeToggleLabel(spec.mode),
+        enabled: this.platform !== 'linux',
+        click: () => {
+          void spec.requestModeChange(nextDesktopShellMode(spec.mode)).catch((cause: unknown) => {
+            process.stderr.write(`dsh-plugin-desktop: failed to change shell mode: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+          })
+        },
+      },
       { type: 'separator' },
       { label: 'Quit', click: () => { spec.requestQuit(0) } },
     ]))

@@ -1205,7 +1205,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-layout@npm:^0.1.0-rc.6":
+"@deepseek-ai/dsh-client-ui-layout@npm:0.1.0-rc.6, @deepseek-ai/dsh-client-ui-layout@npm:^0.1.0-rc.6":
   version: 0.1.0-rc.6
   resolution: "@deepseek-ai/dsh-client-ui-layout@npm:0.1.0-rc.6"
   peerDependencies:
@@ -2728,7 +2728,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-settings-file@npm:^0.1.0-rc.6":
+"@deepseek-ai/dsh-settings-file@npm:0.1.0-rc.6, @deepseek-ai/dsh-settings-file@npm:^0.1.0-rc.6":
   version: 0.1.0-rc.6
   resolution: "@deepseek-ai/dsh-settings-file@npm:0.1.0-rc.6"
   dependencies:
@@ -6600,6 +6600,7 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-directory-picker-browse": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-directory-picker-native": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-input-trigger": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-layout": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-primitives": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.0-rc.6"
@@ -6646,6 +6647,7 @@ __metadata:
     "@deepseek-ai/dsh-session-title": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-session-title-llm": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-settings": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-settings-file": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-shell": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-shell-env": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-skill": "npm:0.1.0-rc.6"
@@ -6680,6 +6682,7 @@ __metadata:
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
+    yaml: "npm:^2.9.0"
   peerDependencies:
     electron: 43.4.0
   bin:

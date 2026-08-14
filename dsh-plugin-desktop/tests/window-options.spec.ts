@@ -1,7 +1,11 @@
 import type { NativeImage } from 'electron'
 import { describe, expect, it } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
-import { compatibilityWindowOptions } from '../src/window-options.ts'
+import {
+  advancedWindowOptions,
+  compatibilityWindowOptions,
+  desktopWindowOptions,
+} from '../src/window-options.ts'
 
 const spec: DesktopShellSpec = {
   mode: 'compatibility',
@@ -18,6 +22,7 @@ const spec: DesktopShellSpec = {
     bluePath: '/tmp/tray-icon-blue.png',
   },
   requestQuit: () => {},
+  requestModeChange: async () => {},
 }
 
 describe('compatibility BrowserWindow options', () => {
@@ -69,5 +74,49 @@ describe('compatibility BrowserWindow options', () => {
       {} as NativeImage,
       'darwin',
     )).toThrow('unsupported compatibility window mode advanced')
+  })
+
+  it('uses hidden-inset transparent vibrancy on macOS advanced windows', () => {
+    const advanced = { ...spec, mode: 'advanced' as const }
+    const options = advancedWindowOptions(advanced, {} as NativeImage, 'darwin')
+
+    expect(options).toEqual(expect.objectContaining({
+      titleBarStyle: 'hiddenInset',
+      trafficLightPosition: { x: 16, y: 16 },
+      transparent: true,
+      backgroundColor: '#00000000',
+      vibrancy: 'sidebar',
+      visualEffectState: 'followWindow',
+    }))
+    expect(desktopWindowOptions(advanced, {} as NativeImage, 'darwin')).toEqual(options)
+  })
+
+  it('uses native Windows controls, acrylic, shadow, and rounded corners in advanced mode', () => {
+    const options = advancedWindowOptions(
+      { ...spec, mode: 'advanced' },
+      {} as NativeImage,
+      'win32',
+    )
+
+    expect(options).toEqual(expect.objectContaining({
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#00000000',
+        symbolColor: '#7f858f',
+        height: 48,
+      },
+      backgroundMaterial: 'acrylic',
+      hasShadow: true,
+      roundedCorners: true,
+      thickFrame: true,
+    }))
+  })
+
+  it('rejects advanced mode on Linux', () => {
+    expect(() => advancedWindowOptions(
+      { ...spec, mode: 'advanced' },
+      {} as NativeImage,
+      'linux',
+    )).toThrow('supported on macOS and Windows')
   })
 })

@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  createDesktopExitCoordinator,
   createDesktopShutdown,
   installShutdownRequests,
   type DesktopQuitEvent,
@@ -7,7 +8,42 @@ import {
   type DesktopSignalSource,
 } from '../src/shutdown.ts'
 
+afterEach(() => { vi.useRealTimers() })
+
 describe('application shutdown requests', () => {
+  it('relaunches only a successful exit after a mode change', () => {
+    const beforeExit = vi.fn()
+    const native = {
+      prepareToQuit: vi.fn(),
+      relaunch: vi.fn(),
+      exit: vi.fn(),
+    }
+    const coordinator = createDesktopExitCoordinator(native, beforeExit)
+
+    coordinator.requestRelaunch()
+    coordinator.finish(0)
+
+    expect(beforeExit).toHaveBeenCalledOnce()
+    expect(native.prepareToQuit).toHaveBeenCalledOnce()
+    expect(native.relaunch).toHaveBeenCalledOnce()
+    expect(native.exit).toHaveBeenCalledWith(0)
+  })
+
+  it('does not relaunch a failed generation', () => {
+    const native = {
+      prepareToQuit: vi.fn(),
+      relaunch: vi.fn(),
+      exit: vi.fn(),
+    }
+    const coordinator = createDesktopExitCoordinator(native, () => {})
+
+    coordinator.requestRelaunch()
+    coordinator.finish(1)
+
+    expect(native.relaunch).not.toHaveBeenCalled()
+    expect(native.exit).toHaveBeenCalledWith(1)
+  })
+
   it('exits after graceful disposal and ignores later completions', async () => {
     const dispose = vi.fn(async () => {})
     const exit = vi.fn()
@@ -35,8 +71,20 @@ describe('application shutdown requests', () => {
 
     expect(request).toBeInstanceOf(Promise)
     expect(exit).toHaveBeenCalledOnce()
-    expect(exit).toHaveBeenCalledWith(0)
-    vi.useRealTimers()
+    expect(exit).toHaveBeenCalledWith(1)
+  })
+
+  it('marks a failed disposal so a requested relaunch cannot proceed', async () => {
+    const exit = vi.fn()
+    const shutdown = createDesktopShutdown(
+      async () => { throw new Error('dispose failed') },
+      exit,
+    )
+
+    await shutdown.request(0)
+
+    expect(exit).toHaveBeenCalledOnce()
+    expect(exit).toHaveBeenCalledWith(1)
   })
 
   it('escalates a repeated request without waiting for disposal', async () => {

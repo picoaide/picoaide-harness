@@ -6,6 +6,7 @@ const electron = vi.hoisted(() => {
   const browserWindows: BrowserWindow[] = []
   const browserWindowOn = vi.fn()
   const browserWindowOff = vi.fn()
+  const menuTemplates: unknown[][] = []
   const appIcon = {
     isEmpty: vi.fn(() => false),
     setTemplateImage: vi.fn(),
@@ -77,7 +78,13 @@ const electron = vi.hoisted(() => {
     browserWindows,
     browserWindowOff,
     browserWindowOn,
-    Menu: { buildFromTemplate: vi.fn(() => ({})) },
+    Menu: {
+      buildFromTemplate: vi.fn((template: unknown[]) => {
+        menuTemplates.push(template)
+        return {}
+      }),
+    },
+    menuTemplates,
     nativeImage: { createFromPath },
     shell: { openExternal: vi.fn(async () => {}) },
     templateIcon,
@@ -110,6 +117,7 @@ const spec: DesktopShellSpec = {
     bluePath: '/tmp/tray-icon-blue.png',
   },
   requestQuit: () => {},
+  requestModeChange: vi.fn(async () => {}),
 }
 
 describe('Electron compatibility runtime', () => {
@@ -117,6 +125,7 @@ describe('Electron compatibility runtime', () => {
     electron.browserWindowOptions.length = 0
     electron.browserWindows.length = 0
     electron.trays.length = 0
+    electron.menuTemplates.length = 0
     vi.clearAllMocks()
   })
 
@@ -127,7 +136,7 @@ describe('Electron compatibility runtime', () => {
   it('uses the native macOS frame, Dock icon, and template tray image', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-    const runtime = new ElectronDesktopRuntime()
+    const runtime = new ElectronDesktopRuntime(async () => {})
     const release = runtime.schedule(spec)
 
     expect(electron.browserWindowOptions).toHaveLength(0)
@@ -167,6 +176,9 @@ describe('Electron compatibility runtime', () => {
     expect(electron.app.dock.setIcon).toHaveBeenCalledWith(electron.appIcon)
     expect(electron.templateIcon.setTemplateImage).toHaveBeenCalledWith(true)
     expect(electron.trays[0]?.image).toBe(electron.templateIcon)
+    expect(electron.menuTemplates[0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Switch to Advanced Mode', enabled: true }),
+    ]))
 
     const titleListener = electron.browserWindowOn.mock.calls.find(([event]) => event === 'page-title-updated')?.[1]
     expect(titleListener).toEqual(expect.any(Function))
@@ -182,7 +194,7 @@ describe('Electron compatibility runtime', () => {
   it('uses the Windows caption, hidden menu bar, removed menu, and fixed blue tray image', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-    const runtime = new ElectronDesktopRuntime()
+    const runtime = new ElectronDesktopRuntime(async () => {})
     const release = runtime.schedule(spec)
 
     await runtime.mountScheduled()
@@ -204,7 +216,7 @@ describe('Electron compatibility runtime', () => {
   it('does not mount a registration disposed before Host boot settles', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-    const runtime = new ElectronDesktopRuntime()
+    const runtime = new ElectronDesktopRuntime(async () => {})
     const release = runtime.schedule(spec)
 
     await release()
@@ -213,5 +225,42 @@ describe('Electron compatibility runtime', () => {
       'the Cordis shell plugin did not register a window',
     )
     expect(electron.browserWindowOptions).toHaveLength(0)
+  })
+
+  it('persists the opposite mode when its tray command is clicked', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const requestModeChange = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule({ ...spec, requestModeChange })
+
+    await runtime.mountScheduled()
+    const item = (electron.menuTemplates[0] as Array<{ label?: string, click?: () => void }>)
+      .find(candidate => candidate.label === 'Switch to Advanced Mode')
+    expect(item).toBeDefined()
+    item?.click?.()
+    await vi.waitFor(() => { expect(requestModeChange).toHaveBeenCalledWith('advanced') })
+
+    await release()
+  })
+
+  it('uses advanced macOS material options and offers compatibility mode', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule({ ...spec, mode: 'advanced' })
+
+    await runtime.mountScheduled()
+
+    expect(electron.browserWindowOptions[0]).toEqual(expect.objectContaining({
+      titleBarStyle: 'hiddenInset',
+      transparent: true,
+      vibrancy: 'sidebar',
+    }))
+    expect(electron.menuTemplates[0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Switch to Compatibility Mode', enabled: true }),
+    ]))
+
+    await release()
   })
 })

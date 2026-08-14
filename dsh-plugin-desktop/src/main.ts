@@ -13,7 +13,12 @@ import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { ElectronDesktopRuntime } from './electron-runtime.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { prepareDesktopProfile } from './profile.ts'
-import { createDesktopShutdown, installShutdownRequests } from './shutdown.ts'
+import {
+  createDesktopExitCoordinator,
+  createDesktopShutdown,
+  installShutdownRequests,
+  type DesktopShutdown,
+} from './shutdown.ts'
 
 const BIN_NAME = 'dsh-plugin-desktop'
 const PRODUCT_NAME = 'DSH Desktop'
@@ -26,15 +31,30 @@ async function start(): Promise<void> {
     return
   }
 
-  const runtime = new ElectronDesktopRuntime()
   let current: Context | undefined
+  let shutdown: DesktopShutdown | undefined
   let removeShutdownRequests: (() => void) | undefined
-  const finalExit = (code: number): void => {
-    removeShutdownRequests?.()
-    runtime.prepareToQuit()
-    app.exit(code)
-  }
-  const shutdown = createDesktopShutdown(
+  let runtime!: ElectronDesktopRuntime
+  const nativeExit = createDesktopExitCoordinator(
+    {
+      prepareToQuit: () => { runtime.prepareToQuit() },
+      relaunch: () => { app.relaunch() },
+      exit: code => { app.exit(code) },
+    },
+    () => { removeShutdownRequests?.() },
+  )
+  let restartRequested = false
+  runtime = new ElectronDesktopRuntime(async () => {
+    if (shutdown === undefined) {
+      throw new Error('dsh-plugin-desktop: shutdown coordinator is not ready')
+    }
+    if (restartRequested) return
+    restartRequested = true
+    nativeExit.requestRelaunch()
+    await shutdown.request(0)
+  })
+  const finalExit = (code: number): void => { nativeExit.finish(code) }
+  shutdown = createDesktopShutdown(
     async () => { await current?.fiber.dispose() },
     finalExit,
   )

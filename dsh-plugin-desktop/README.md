@@ -6,23 +6,52 @@ English | [中文](README.zh.md)
 
 ## Architecture
 
-The Electron executable is minimal bootstrap code. It acquires the single-instance lock, prepares the persistent `desktop` profile, provides the native runtime capability, and boots the Host Cordis root in the Electron main process. The `desktop-shell` Host plugin owns the `BrowserWindow`, tray, navigation policy, and close-versus-quit lifecycle through one Cordis effect.
+The Electron executable is minimal bootstrap code. It acquires the single-instance lock, prepares the persistent `desktop` profile, provides the native runtime capability, and boots the Host Cordis root in the Electron main process. The `desktop-shell` Host plugin owns the `BrowserWindow`, tray, navigation policy, settings namespace, and close-versus-quit lifecycle through Cordis effects.
 
-The first additive release deliberately reuses the current loopback Web carrier. The profile mounts the ordinary `dsh-base` and `dsh-web-app` bundles, the Host binds its HTTP and WebSocket surface to `127.0.0.1` on an ephemeral port, and Electron loads that same-origin page in a sandboxed renderer. There is no Electron-owned plugin roster and no raw Electron API in the renderer.
+Both presentation modes reuse the existing loopback Web carrier. The profile mounts the ordinary `dsh-base` and `dsh-web-app` bundles, the Host binds its HTTP and WebSocket surface to `127.0.0.1` on an ephemeral port, and Electron loads that same-origin page in a sandboxed renderer. There is no Electron-owned plugin roster, preload bridge, or raw Electron API in the renderer.
 
-The launcher repairs only its installation-owned profile prefix. A profile created by `dsh plugin --profile desktop add third-party-plugin` becomes `dsh-base`, `dsh-web-app`, then the same third-party bundles in their previous relative order. The launcher inserts its own desktop layer after `dsh-web-app`; it does not persist itself in the user-managed bundle list.
+The desktop package has normal Host and Web Client faces. Its Client face always contributes the standard **Desktop App** settings section. Compatibility mode stops there and leaves the official root, layout, and sidebar presentation untouched. Advanced mode additionally provides the desktop layout service and root/sidebar presentation described below. Third-party Web clients continue to use the ordinary DSH module graph in both modes.
+
+The launcher repairs only its installation-owned profile prefix. A profile changed by `dsh plugin --profile desktop add third-party-plugin` contains `dsh-base`, `dsh-web-app`, then the same third-party bundles in their previous relative order. The launcher inserts its own desktop layer after `dsh-web-app`; it does not persist itself in the user-managed bundle list.
 
 Bare Cordis plugin imports resolve from the persistent profile. A narrow Node resolve hook applies only to imports issued by `@deepseek-ai/cordis-plugin-loader`, so profile-local third-party packages and the healed launcher fallback use the same resolution path even when packaged Electron does not expose Node's internal ESM loader.
 
+## Mode setting and restart boundary
+
+The `dsh-desktop.mode` field in the DSH home `settings.yaml` document is the single source of truth:
+
+```yaml
+dsh-desktop:
+  mode: compatibility # or advanced
+```
+
+The launcher reads the same file resolved by the active `@deepseek-ai/dsh-settings-file` row before composing a generation. The Host registers the `dsh-desktop` namespace with the standard settings service. There is no parallel mode value in the profile manifest.
+
+The upstream settings description API intentionally exposes an allowlist and does not publish third-party namespaces, so the desktop Client does not pretend that `ctx.settingsScope` can read `dsh-desktop`. It takes the current mode only from the validated renderer URL and posts `{ "mode": "..." }` to the desktop-owned `/api/dsh-desktop/mode` endpoint. The Host registers that route only on its `127.0.0.1` Web server and requires the exact Host and Origin, `POST`, JSON media type, a bounded body, and an object containing only the supported mode field. A valid request delegates to the Host's registered settings scope and returns `204`; the renderer never writes `settings.yaml` directly.
+
+Users can select the mode from the tray or from Settings → **Desktop App**. Both entry points update the same registered settings namespace. A committed change requests one orderly restart: the current Cordis tree disposes first, then Electron relaunches only after a successful zero-code shutdown. The application never hot-swaps root slots, native window materials, or Loader rows inside a live renderer generation.
+
+Linux supports compatibility mode only. Its advanced option is disabled in the tray and settings page, and Host validation rejects an advanced write before persistence.
+
 ## Compatibility mode
 
-`desktop-shell.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame and loads the unmodified Web root from the active DSH profile. macOS suppresses the visible page title. Windows retains the native caption icon and displays `DeepSeek Harness Desktop`, but removes the window menu bar. The operating system owns native title-bar color and appearance; exact sidebar-token color belongs to the advanced client shell because it requires a custom title bar. The desktop package exports no client artifact, contributes no DOM marker or stylesheet, replaces no slot or service, and leaves the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows active.
+`dsh-desktop.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame and loads the official Web surface from the active DSH profile. macOS suppresses the visible page title. Windows retains the native caption icon and displays `DeepSeek Harness Desktop`, but removes the window menu bar. The operating system owns native title-bar color and appearance.
 
-The Cordis row registers the native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official and third-party client plugins without a Loader-wide wait inside the plugin itself.
+The desktop Client module is present so it can register the standard `settings.section` entry for **Desktop App** and its local settings-page styles. It does not provide or replace the `layout` service, register a `root` or `sidebar` occupant, or change the official conversation surface. The final profile keeps the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows enabled.
+
+The Cordis row registers native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official, desktop, and third-party client plugins without a Loader-wide wait inside the plugin itself.
 
 On Windows, the launcher pins the existing browse directory-picker backend and client surface instead of the adaptive native chooser. Workspace selection therefore remains inside the Web UI and never loads the native N-API dialog worker in the Electron main process. macOS and Linux retain the upstream adaptive chooser.
 
-The package reserves the `advanced` mode name for a separately composed desktop client shell. Selecting it currently fails before a native window is scheduled; it never falls back to compatibility mode silently.
+## Advanced mode
+
+Advanced mode is an explicitly composed desktop presentation for macOS and Windows. After all user patches have been read, the launcher disables the official `ui-layout` and `ui-sidebar` Loader rows, keeps `ui-conversation` enabled, and applies the selected mode to `desktop-shell`.
+
+The desktop Client then provides the `layout` service for its own Cordis-fiber lifetime and registers the `root` and `sidebar` slot occupants. Its root declares seats for the unchanged upstream conversation, details, and overlay contributions. Its sidebar declares seats for the unchanged upstream workspace browser, settings shell, and additive footer actions. This preserves feature ownership: the desktop package owns only frame and sidebar chrome, while official and third-party plugins continue to own their feature surfaces.
+
+The advanced theme presenter projects the active upstream theme snapshot onto the document, including color scheme, resolved token values, dark-mode marker, and theme-color metadata. It subscribes to ordinary theme changes and removes only its own projected state when the generation disposes.
+
+On macOS the advanced window uses a transparent hidden-inset title bar, positioned traffic lights, and native `sidebar` vibrancy. On Windows it uses a hidden title bar with native window controls, transparent overlay, acrylic background material, shadow, rounded corners, and a thick resizable frame. Linux rejects advanced mode rather than silently falling back to a presentation different from the persisted setting.
 
 ## Development
 
@@ -33,7 +62,7 @@ yarn install
 yarn check
 ```
 
-The check verifies that every required first-party peer in the 197-package production graph is declared by the desktop deploy root. A built, headless Loader smoke activates both the launcher-owned desktop row and a profile-local third-party row by package name. A second headless smoke boots the complete published Web profile, requests its loopback root, and verifies the official layout, sidebar, and conversation entries in the injected client manifest.
+The check verifies that every required first-party peer in the production graph is declared by the desktop deploy root. Headless Loader smokes activate the launcher-owned desktop row and a profile-local third-party row, then boot the published Web profile and inspect its loopback root and client manifest. Unit and type tests cover both profile compositions, the narrow desktop mode endpoint, restart fencing, client environment validation, desktop layout state, and platform-native window options.
 
 Start the desktop application explicitly when a graphical session is available:
 
@@ -65,15 +94,15 @@ The package can then be launched from npm with:
 npx dsh-plugin-desktop
 ```
 
-A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin with browser UI also publishes the normal `dsh.client` metadata with `platform: "web"` and an exported `./client` artifact. The upstream Web client module graph discovers it in compatibility mode; Electron does not require a separate client build or a desktop-specific registration API.
+A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin with browser UI also publishes the normal `dsh.client` metadata with `platform: "web"` and an exported `./client` artifact. The upstream Web client module graph discovers it in both modes; Electron does not require a separate client build or a desktop-specific registration API. Advanced-mode contributions must target services and slots that exist in that explicit composition rather than assuming the official layout or sidebar occupant owns them.
 
 ## Native lifecycle
 
-Closing the window hides it while the Host Cordis tree continues running. The tray reopens the window or requests an explicit quit. Native quit, `SIGINT`, and `SIGTERM` all request Cordis disposal before Electron exits; a five-second deadline or a repeated request forces the final exit. Navigation and redirects remain on the exact loopback origin; external HTTP, HTTPS, and mail links open in the operating system, while the renderer uses `contextIsolation`, the Chromium sandbox, and no Node integration.
+Closing the window hides it while the Host Cordis tree continues running. The tray reopens the window, changes mode through the standard settings namespace, or requests an explicit quit. Native quit, `SIGINT`, and `SIGTERM` all request Cordis disposal before Electron exits; a five-second deadline or a repeated request forces the final exit. Navigation and redirects remain on the exact loopback origin; external HTTP, HTTPS, and mail links open in the operating system, while the renderer uses `contextIsolation`, the Chromium sandbox, and no Node integration.
 
 ## Packaging
 
-`yarn package:dir` creates an unpacked directory for the current host platform. `build/app-icon.png` is the unmodified iOS Default application icon on macOS, Windows, and Linux. `build/tray-icon.svg` is the brand-blue tray source: the build derives a macOS template image that the system colors automatically and fixed brand-blue Windows and Linux tray images. Signed installers, notarization, packaged dependency-closure verification, and target-platform CI are separate release work and are not claimed by this first checkpoint.
+`yarn package:dir` creates an unpacked directory for the current host platform. `build/app-icon.png` is the unmodified iOS Default application icon on macOS, Windows, and Linux. `build/tray-icon.svg` is the brand-blue tray source: the build derives a macOS template image that the system colors automatically and fixed brand-blue Windows and Linux tray images. Signed installers, notarization, packaged dependency-closure verification, and target-platform CI remain separate release work.
 
 ## Model Experience
 
@@ -81,13 +110,14 @@ None. The desktop package changes application composition and native presentatio
 
 #### KV Cache effect
 
-None. The same DSH Host and client plugin graph assemble model requests.
+None. The same DSH Host and client feature plugins assemble model requests.
 
 ## Known Limitations and Deferred Work
 
-- Adding or removing a profile bundle requires restarting DSH Desktop; the first release does not watch the profile manifest.
-- Compatibility mode does not provide a frameless window, translucent sidebar, desktop-specific layout, or other renderer presentation overrides. Those features require the separately composed advanced client shell.
+- Adding or removing a profile bundle requires restarting DSH Desktop; the launcher does not watch the profile manifest.
+- Switching compatibility/advanced mode always restarts the application by design; a live generation never hot-swaps Loader rows, slot ownership, or native materials.
+- Advanced mode is unavailable on Linux. Linux continues to use the compatibility presentation.
 - The upstream `dsh plugin` command is a pnpm forwarder and currently requires a separately installed `dsh` CLI and pnpm. This runtime requirement is independent of DSH Desktop using Yarn for its own workspace. An installer must expose or bundle that management path before installer-only users can add packages.
-- The additive transport is loopback HTTP and WebSocket, not Electron IPC. Replacing the carrier requires transport extension points in upstream DSH and is outside this standalone package.
+- The shared carrier is loopback HTTP and WebSocket, not Electron IPC. Replacing it requires transport extension points in upstream DSH and is outside this standalone package.
 - This project currently pins the published DSH `0.1.0-rc.6` family, while the sibling `deepseek-harness/` source checkout predates that release. Tests therefore validate the published package interfaces rather than unpublished upstream sources.
-- `package:dir` is an unpacked smoke artifact, not a distributable installer. The source installation's assembled runtime closure is verified headlessly; packaged closure, signing, notarization, Windows Authenticode, and installation behavior remain unverified.
+- `package:dir` is an unpacked smoke artifact, not a distributable installer. The source installation's assembled runtime closure is verified headlessly; packaged closure, signing, notarization, Windows Authenticode, installation behavior, and native-material appearance on every target machine remain unverified.

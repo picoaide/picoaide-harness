@@ -9,6 +9,48 @@ export interface DesktopShutdown {
   request(code: number): Promise<void>
 }
 
+/** Native operations performed after the Host tree has disposed. */
+export interface DesktopNativeExit {
+  /** Mark the window close path as a final process exit. */
+  prepareToQuit(): void
+  /** Schedule a fresh Electron process using the current command line. */
+  relaunch(): void
+  /** End the current Electron process without another quit event. */
+  exit(code: number): void
+}
+
+/** Final-exit state shared by ordinary quits and mode-change relaunches. */
+export interface DesktopExitCoordinator {
+  /** Mark the next successful exit as a relaunch. */
+  requestRelaunch(): void
+  /** Complete one native exit after Cordis teardown. */
+  finish(code: number): void
+}
+
+/**
+ * Coordinate the final Electron action without relaunching failed generations.
+ * @param native - native application and runtime exit operations.
+ * @param beforeExit - listener cleanup that must precede app.exit.
+ * @returns a final-exit controller consumed by the shutdown path.
+ */
+export function createDesktopExitCoordinator(
+  native: DesktopNativeExit,
+  beforeExit: () => void,
+): DesktopExitCoordinator {
+  let relaunchRequested = false
+  return {
+    requestRelaunch() {
+      relaunchRequested = true
+    },
+    finish(code) {
+      beforeExit()
+      native.prepareToQuit()
+      if (relaunchRequested && code === 0) native.relaunch()
+      native.exit(code)
+    },
+  }
+}
+
 /**
  * Create one bounded shutdown around the Host Cordis disposer.
  * @param dispose - whole Host tree teardown.
@@ -38,10 +80,11 @@ export function createDesktopShutdown(
         exitOnce(code)
         return pending
       }
-      timeout = setTimeout(() => { exitOnce(code) }, timeoutMs)
+      const failureCode = code === 0 ? 1 : code
+      timeout = setTimeout(() => { exitOnce(failureCode) }, timeoutMs)
       pending = Promise.resolve().then(dispose).then(
         () => { exitOnce(code) },
-        () => { exitOnce(code) },
+        () => { exitOnce(failureCode) },
       )
       return pending
     },

@@ -6,23 +6,52 @@
 
 ## 架构
 
-Electron 可执行文件只包含最小启动代码。它获取单实例锁、准备持久化 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过一个 Cordis effect 拥有 `BrowserWindow`、托盘、导航策略以及关闭与退出生命周期。
+Electron 可执行文件只包含最小启动代码。它获取单实例锁、准备持久化 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过 Cordis effect 拥有 `BrowserWindow`、托盘、导航策略、settings namespace，以及关闭与退出生命周期。
 
-首个纯新增版本有意复用现有 loopback Web carrier。profile 挂载普通 `dsh-base` 与 `dsh-web-app` bundle；Host 把 HTTP 与 WebSocket surface 绑定到 `127.0.0.1` 的临时端口；Electron 在沙箱 renderer 中加载该同源页面。Electron 不维护插件花名册，renderer 也不会获得原始 Electron API。
+两种呈现模式都复用现有 loopback Web carrier。profile 挂载普通 `dsh-base` 与 `dsh-web-app` bundle；Host 把 HTTP 与 WebSocket surface 绑定到 `127.0.0.1` 的临时端口；Electron 在沙箱 renderer 中加载该同源页面。Electron 不维护自有插件 roster，不使用 preload bridge，renderer 也不会获得原始 Electron API。
 
-启动器只修复由安装方拥有的 profile 前缀。由 `dsh plugin --profile desktop add third-party-plugin` 创建的 profile 会变为 `dsh-base`、`dsh-web-app`，随后是保持原有相对顺序的第三方 bundle。启动器在 `dsh-web-app` 之后插入自己的 desktop layer，但不会把自身持久化到由用户管理的 bundle 列表。
+desktop package 拥有普通 Host 与 Web Client 两个 face。它的 Client face 始终贡献标准 **桌面程序** settings section。兼容模式只做到这一层，不改动官方 root、layout 与 sidebar 呈现。高级模式还会提供下文所述的 desktop layout service 与 root/sidebar 呈现。两种模式下，第三方 Web client 都继续使用普通 DSH 模块图。
 
-Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Node resolve hook 只处理由 `@deepseek-ai/cordis-plugin-loader` 发起的导入，因此即使打包后的 Electron 不暴露 Node 内部 ESM Loader，profile 本地第三方包与修复后的启动器 fallback 仍使用同一条解析路径。
+Launcher 只修复由安装方拥有的 profile 前缀。经 `dsh plugin --profile desktop add third-party-plugin` 修改的 profile 会包含 `dsh-base`、`dsh-web-app`，随后是保持原有相对顺序的第三方 bundle。Launcher 在 `dsh-web-app` 后插入自有 desktop layer，但不会把自身持久化到由用户管理的 bundle 列表。
+
+Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Node resolve hook 只处理由 `@deepseek-ai/cordis-plugin-loader` 发起的导入，因此即使打包后的 Electron 不暴露 Node 内部 ESM Loader，profile 本地第三方包与修复后的 launcher fallback 仍使用同一条解析路径。
+
+## 模式设置与重启边界
+
+DSH home `settings.yaml` 文档中的 `dsh-desktop.mode` 字段是单一事实源：
+
+```yaml
+dsh-desktop:
+  mode: compatibility # 或 advanced
+```
+
+Launcher 会在组合一个 generation 之前，读取当前 `@deepseek-ai/dsh-settings-file` row 解析到的同一份文件。Host 通过标准 settings service 注册 `dsh-desktop` namespace。profile manifest 中没有平行的模式值。
+
+上游 settings description API 会有意只暴露 allowlist，不会发布第三方 namespace，因此 desktop Client 不会假设 `ctx.settingsScope` 能读取 `dsh-desktop`。它只从已验证 renderer URL 获取当前模式，并把 `{ "mode": "..." }` POST 到 desktop 自有 `/api/dsh-desktop/mode` endpoint。Host 只会在自身 `127.0.0.1` Web server 上注册该路由，并要求精确的 Host 与 Origin、`POST`、JSON 媒体类型、有上限的 body，以及只包含受支持 mode 字段的对象。有效请求会委托给 Host 已注册 settings scope 并返回 `204`；renderer 绝不会直接写入 `settings.yaml`。
+
+用户可以从托盘或 Settings → **桌面程序** 选择模式。两个入口都更新同一个已注册 settings namespace。修改提交后会请求一次有序重启：先 dispose 当前 Cordis 树，仅当零退出码的 shutdown 成功时才让 Electron relaunch。应用绝不会在存活的 renderer generation 中热切换 root slot、原生窗口材质或 Loader row。
+
+Linux 只支持兼容模式。托盘与 settings 页面中的高级选项会被禁用，Host 校验也会在持久化之前拒绝 advanced 写入。
 
 ## 兼容模式
 
-`desktop-shell.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，并加载当前 DSH profile 未经修改的 Web 根页面。macOS 会隐藏可见的页面标题。Windows 保留原生标题栏图标并显示 `DeepSeek Harness Desktop`，但移除窗口菜单栏。原生标题栏颜色与外观由操作系统控制；精确匹配 sidebar token 需要自定义标题栏，因此属于高级 client shell。desktop package 不导出 client artifact，不贡献 DOM marker 或样式表，不替换任何 slot 或 service，并保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
+`dsh-desktop.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，并加载当前 DSH profile 中的官方 Web surface。macOS 会隐藏可见的页面标题。Windows 保留原生标题栏图标并显示 `DeepSeek Harness Desktop`，但会移除窗口菜单栏。原生标题栏颜色与外观由操作系统拥有。
 
-Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
+desktop Client module 会加载，以便为 **桌面程序** 注册标准 `settings.section` entry 与该设置页的局部样式。它不提供或替换 `layout` service，不注册 `root` 或 `sidebar` occupant，也不改动官方 conversation surface。最终 profile 会保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
 
-在 Windows 上，launcher 会固定使用现有的 browse 目录选择 backend 与 client surface，而不使用自适应的 native chooser。因此，workspace 选择始终在 Web UI 内完成，也不会在 Electron main 进程中加载原生 N-API 对话框 worker。macOS 与 Linux 仍使用上游自适应 chooser。
+Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方、desktop 与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
 
-该 package 为单独组合的 desktop client shell 保留 `advanced` 模式名。当前选择该模式会在安排原生窗口之前明确失败，不会静默降级为兼容模式。
+在 Windows 上，Launcher 会固定使用现有 browse 目录选择 backend 与 client surface，而不使用自适应 native chooser。因此 workspace 选择始终在 Web UI 内完成，也不会在 Electron main 进程中加载原生 N-API 对话框 worker。macOS 与 Linux 仍使用上游自适应 chooser。
+
+## 高级模式
+
+高级模式是为 macOS 与 Windows 显式组合的 desktop 呈现。Launcher 会在读取全部用户 patch 后禁用官方 `ui-layout` 与 `ui-sidebar` Loader row，保持 `ui-conversation` 启用，并把所选模式应用到 `desktop-shell`。
+
+desktop Client 随后在自身 Cordis fiber 生命期内提供 `layout` service，并注册 `root` 与 `sidebar` slot occupant。其 root 为不变的上游 conversation、details 与 overlay contribution 声明 seat；其 sidebar 为不变的上游 workspace browser、settings shell 与纯新增 footer action 声明 seat。这会保留 feature 所有权：desktop package 只拥有 frame 与 sidebar chrome，官方与第三方插件继续拥有各自的 feature surface。
+
+高级 theme presenter 会把当前上游 theme snapshot 投影到 document，包括 color scheme、解析后的 token 值、深色模式 marker 与 theme-color metadata。它订阅普通 theme 变化，generation dispose 时只移除由自身投影的状态。
+
+在 macOS 上，高级窗口使用透明 hidden-inset 标题栏、定位后的红黄绿按钮与原生 `sidebar` vibrancy。在 Windows 上，它使用带原生窗口控件的隐藏标题栏、透明 overlay、acrylic 背景材质、阴影、圆角与粗可调整边框。Linux 会拒绝高级模式，而不会静默降级到与持久化设置不同的呈现。
 
 ## 开发
 
@@ -33,7 +62,7 @@ yarn install
 yarn check
 ```
 
-该检查会验证 197 个 package 的生产依赖图中，每个必需的第一方 peer 均由 desktop deploy root 声明。一个基于构建产物的 headless Loader smoke 会通过包名分别激活启动器拥有的 desktop row 与 profile 本地第三方 row。第二个 headless smoke 会启动完整的已发布 Web profile、请求其 loopback 根页面，并验证注入的 client manifest 包含官方 layout、sidebar 与 conversation entry。
+该检查会验证生产依赖图中的每个必需第一方 peer 都由 desktop deploy root 声明。Headless Loader smoke 会激活 launcher 拥有的 desktop row 与 profile 本地第三方 row，然后启动已发布 Web profile 并检查其 loopback 根页面与 client manifest。单元和类型测试覆盖两种 profile 组合、窄 desktop 模式 endpoint、重启栅栏、client environment 校验、desktop layout 状态与各平台原生窗口选项。
 
 有图形会话时，显式启动桌面应用：
 
@@ -65,29 +94,30 @@ dsh plugin --profile desktop remove third-party-plugin
 npx dsh-plugin-desktop
 ```
 
-第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。兼容模式由上游 Web 客户端模块图发现这些插件；Electron 不要求单独的客户端构建，也不引入桌面专用注册 API。
+第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。上游 Web 客户端模块图会在两种模式下发现它；Electron 不要求单独的客户端构建，也不引入 desktop 专用注册 API。高级模式 contribution 必须面向该显式组合中存在的 service 与 slot，不能假设官方 layout 或 sidebar occupant 拥有它们。
 
 ## 原生生命周期
 
-关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口或请求显式退出。原生退出、`SIGINT` 与 `SIGTERM` 都会先请求 dispose Cordis 树，再退出 Electron；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
+关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口、通过标准 settings namespace 更改模式，或请求显式退出。原生退出、`SIGINT` 与 `SIGTERM` 都会先请求 dispose Cordis 树，再退出 Electron；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
 
 ## 打包
 
-`yarn package:dir` 为当前宿主平台创建未封装目录。`build/app-icon.png` 是 macOS、Windows 与 Linux 共用且未经修改的 iOS Default 应用图标。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。签名安装包、公证、打包后依赖闭包验证与目标平台 CI 属于后续发布工作，不在本次首个 checkpoint 的完成声明内。
+`yarn package:dir` 为当前宿主平台创建未封装目录。`build/app-icon.png` 是 macOS、Windows 与 Linux 共用且未经修改的 iOS Default 应用图标。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。签名安装包、公证、打包后依赖闭包验证与目标平台 CI 仍属于独立的发布工作。
 
 ## 模型体验
 
-无。桌面包只改变应用组合与原生呈现，不增加任何模型可见的指令、工具、事件或请求字段。
+无。desktop package 只改变应用组合与原生呈现，不增加任何模型可见的指令、工具、事件或请求字段。
 
 #### KV Cache 影响
 
-无。模型请求仍由同一套 DSH Host 与客户端插件图组装。
+无。模型请求仍由同一套 DSH Host 与 client feature plugin 组装。
 
 ## 已知限制与暂缓事项
 
-- 添加或删除 profile bundle 后必须重启 DSH Desktop；首个版本不监听 profile manifest。
-- 兼容模式不提供无边框窗口、半透明侧边栏、桌面专用布局或其他 renderer 呈现覆盖；这些功能需要单独组合的 advanced client shell。
+- 添加或删除 profile bundle 后必须重启 DSH Desktop；Launcher 不监听 profile manifest。
+- 切换 compatibility/advanced 模式按设计必然重启应用；存活的 generation 不会热切换 Loader row、slot 所有权或原生材质。
+- Linux 不支持高级模式。Linux 继续使用兼容呈现。
 - 上游 `dsh plugin` 命令会把参数转发给 pnpm，因此目前仍需另外安装 `dsh` CLI 与 pnpm。该运行时要求与 DSH Desktop 自身使用 Yarn workspace 相互独立。安装器必须先暴露或内置该管理路径，只有安装器的用户才能添加 package。
-- 纯新增 transport 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换 carrier 需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
+- 共享 carrier 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换它需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
 - 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。
-- `package:dir` 是用于 smoke 的未封装产物，而非可分发安装包。源码安装中的组合运行时闭包已经过 headless 验证；打包后闭包、签名、公证、Windows Authenticode 与安装行为仍未验证。
+- `package:dir` 是用于 smoke 的未封装产物，而非可分发安装包。源码安装中的组合运行时闭包已经过 headless 验证；打包后闭包、签名、公证、Windows Authenticode、安装行为，以及每台目标机器上的原生材质外观仍未验证。

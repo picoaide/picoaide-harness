@@ -51,6 +51,7 @@ try {
       return mounted
     },
     show() {},
+    async requestRestart() {},
     prepareToQuit() {},
   }
   ctx = await boot(
@@ -64,9 +65,23 @@ try {
       // Packaged Electron does not expose Node's internal ESM loader.
       host.loader.internal = undefined
       host.provide('desktopRuntime', runtime)
-      host.provide('webServer', { port: 43120 })
+      host.provide('webServer', {
+        host: '127.0.0.1',
+        port: 43120,
+        register: () => () => {},
+      })
       host.provide('webRuntime', {})
       host.provide('appExit', () => {})
+      host.provide('settings', {
+        register() {
+          return {
+            get: () => ({ mode: 'compatibility' }),
+            watch: () => () => {},
+            update: async () => {},
+            replace: async () => {},
+          }
+        },
+      })
     },
     prepared.bareModuleBaseUrl,
   )
@@ -83,7 +98,7 @@ try {
   if (mountedSpec?.mode !== 'compatibility') {
     throw new Error(`desktop plugin produced an unexpected shell mode: ${String(mountedSpec?.mode)}`)
   }
-  if (mountedSpec?.url !== 'http://127.0.0.1:43120/') {
+  if (mountedSpec?.url !== 'http://127.0.0.1:43120/?dsh-desktop-mode=compatibility&dsh-desktop-platform=darwin') {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
 } finally {

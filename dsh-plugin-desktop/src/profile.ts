@@ -1,7 +1,7 @@
 /** Compatibility profile composition over the official Web bundle and user plugins. */
 
 import { createRequire } from 'node:module'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
@@ -22,6 +22,12 @@ import {
   type ProfileManifest,
 } from '@deepseek-ai/dsh-app-boot'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import FileSettingsProvider, {
+  resolveSpec as resolveSettingsFileSpec,
+  type Config as SettingsFileConfig,
+} from '@deepseek-ai/dsh-settings-file'
+import { parseDocument } from 'yaml'
+import type { DesktopShellMode } from './runtime.ts'
 
 /** Persistent profile managed by the desktop launcher and the ordinary dsh plugin command. */
 export const DESKTOP_PROFILE_NAME = 'desktop'
@@ -41,6 +47,67 @@ const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
 const BROWSE_PICKER_BACKEND = '@deepseek-ai/dsh-host-directory-picker-browse'
 const BROWSE_PICKER_SURFACE = '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
+const SETTINGS_FILE_PACKAGE = '@deepseek-ai/dsh-settings-file'
+const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
+const UI_LAYOUT_PACKAGE = '@deepseek-ai/dsh-client-ui-layout'
+const UI_SIDEBAR_PACKAGE = '@deepseek-ai/dsh-client-ui-sidebar'
+const UI_CONVERSATION_PACKAGE = '@deepseek-ai/dsh-client-ui-conversation'
+
+/**
+ * Parse desktop presentation state and reject corrupted values.
+ * @param value - untrusted settings value.
+ * @returns a supported desktop shell mode.
+ */
+export function parseDesktopShellMode(value: unknown): DesktopShellMode {
+  if (value === undefined) return DEFAULT_DESKTOP_SHELL_MODE
+  if (value === 'compatibility' || value === 'advanced') return value
+  throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.mode must be "compatibility" or "advanced"`)
+}
+
+/**
+ * Read a desktop mode from one parsed settings document.
+ * @param document - untrusted settings document root.
+ * @returns the selected mode, defaulting to compatibility when absent.
+ */
+export function desktopShellModeFromSettings(document: unknown): DesktopShellMode {
+  if (typeof document !== 'object' || document === null || Array.isArray(document)) {
+    throw new Error(`${BIN_NAME}: settings document must be a map of namespace sections`)
+  }
+  const section = (document as Record<string, unknown>)[DESKTOP_SETTINGS_NAMESPACE]
+  if (section === undefined) return DEFAULT_DESKTOP_SHELL_MODE
+  if (typeof section !== 'object' || section === null || Array.isArray(section)) {
+    throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE} settings must be a map`)
+  }
+  return parseDesktopShellMode((section as Record<string, unknown>).mode)
+}
+
+/**
+ * Read startup mode from the same file resolved by the settings provider.
+ * @param config - validated settings-file row config.
+ * @returns the mode projected into the startup Loader graph.
+ */
+export function readDesktopShellMode(config: SettingsFileConfig): DesktopShellMode {
+  const spec = resolveSettingsFileSpec(config)
+  let text: string
+  try {
+    text = readFileSync(spec.filename, 'utf8')
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_DESKTOP_SHELL_MODE
+    throw cause
+  }
+  let document: unknown
+  if (spec.format === 'yaml') {
+    const parsed = parseDocument(text, { prettyErrors: true })
+    if (parsed.errors.length > 0) {
+      throw new Error(`${BIN_NAME}: invalid settings document at ${spec.filename}: ${parsed.errors.map(error => error.message).join('; ')}`)
+    }
+    document = parsed.toJS() ?? {}
+  } else {
+    document = text.trim().length === 0 ? {} : JSON.parse(text)
+  }
+  return desktopShellModeFromSettings(document)
+}
 
 /** Resolve the public Web template once and reject an incompatible DSH release. */
 function requiredWebBundles(): string[] {
@@ -61,6 +128,8 @@ export interface PreparedDesktopProfile {
   bareModuleBaseUrl: string
   /** Complete ordered patch list for this desktop generation. */
   patches: PatchOptions[]
+  /** Persisted shell mode applied after every user-owned patch. */
+  mode: DesktopShellMode
 }
 
 /**
@@ -165,6 +234,28 @@ export function prepareDesktopProfile(
   for (const row of composeEntries([patches])) {
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
+  const settings = rows.get('settings')
+  if (settings?.name !== SETTINGS_FILE_PACKAGE) {
+    throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_FILE_PACKAGE} in the settings row`)
+  }
+  const settingsConfig = FileSettingsProvider.Config({
+    dshHome: home,
+    ...rowConfig(settings),
+  } as SettingsFileConfig)
+  const mode = readDesktopShellMode(settingsConfig)
+  patches.push({
+    id: 'settings',
+    config: settingsConfig,
+  })
+  for (const [id, packageName] of [
+    ['ui-layout', UI_LAYOUT_PACKAGE],
+    ['ui-sidebar', UI_SIDEBAR_PACKAGE],
+    ['ui-conversation', UI_CONVERSATION_PACKAGE],
+  ] as const) {
+    if (rows.get(id)?.name !== packageName) {
+      throw new Error(`${BIN_NAME}: desktop profile must use ${packageName} in the ${id} row`)
+    }
+  }
   const presets = rows.get('agent-presets')
   if (presets !== undefined) {
     patches.push({
@@ -208,10 +299,33 @@ export function prepareDesktopProfile(
     disabled: false,
     config: { host: '127.0.0.1', port: 0 },
   })
+  patches.push(
+    { id: 'ui-layout', disabled: mode === 'advanced' },
+    { id: 'ui-sidebar', disabled: mode === 'advanced' },
+    { id: 'ui-conversation', disabled: false },
+  )
   if ((telemetryDisabled ?? '') !== '' && rows.has('session-telemetry-otel')) {
     patches.push({ id: 'session-telemetry-otel', disabled: true })
   }
-  return { profile, rootConfig, bareModuleBaseUrl, patches: structuredClone(patches) }
+  const desktopShell = rows.get('desktop-shell')
+  if (desktopShell === undefined) {
+    throw new Error(`${BIN_NAME}: desktop profile has no desktop-shell row`)
+  }
+  patches.push({
+    id: 'desktop-shell',
+    disabled: false,
+    config: {
+      ...rowConfig(desktopShell),
+      mode,
+    },
+  })
+  return {
+    profile,
+    rootConfig,
+    bareModuleBaseUrl,
+    patches: structuredClone(patches),
+    mode,
+  }
 }
 
 /** Expose the package anchor for focused resolution tests. */

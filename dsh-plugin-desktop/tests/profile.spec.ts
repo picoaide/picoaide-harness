@@ -6,9 +6,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import {
   DESKTOP_PACKAGE_NAME,
+  desktopShellModeFromSettings,
   desktopBundleList,
   ensureDesktopProfile,
   prepareDesktopProfile,
+  readDesktopShellMode,
 } from '../src/profile.ts'
 
 const homes: string[] = []
@@ -95,6 +97,7 @@ describe('desktop profile composition', () => {
     }))
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(fileURLToPath(prepared.bareModuleBaseUrl)).toBe(join(prepared.profile.dir, 'package.json'))
+    expect(prepared.mode).toBe('compatibility')
 
     const rows = composeEntries([prepared.patches])
     for (const [id, name] of [
@@ -113,6 +116,48 @@ describe('desktop profile composition', () => {
     expect(rows.find(row => row.id === 'directory-picker')?.disabled).toBeFalsy()
     expect(rows.map(row => row.id)).not.toContain('desktop-directory-picker-browse-host')
     expect(rows.map(row => row.id)).not.toContain('desktop-directory-picker-browse-surface')
+  })
+
+  it('projects advanced YAML settings into the Host and client Loader rows', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n')
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+
+    expect(prepared.mode).toBe('advanced')
+    expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
+      disabled: false,
+      config: expect.objectContaining({ mode: 'advanced' }),
+    }))
+    expect(rows.find(row => row.id === 'settings')).toEqual(expect.objectContaining({
+      config: expect.objectContaining({ dshHome: home }),
+    }))
+    expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
+  })
+
+  it('reads JSON settings and defaults an absent desktop namespace to compatibility', () => {
+    const home = temporaryHome()
+    const path = join(home, 'desktop-settings.json')
+    writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
+
+    expect(readDesktopShellMode({ path })).toBe('advanced')
+    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('compatibility')
+  })
+
+  it('rejects invalid settings roots, sections, modes, and YAML', () => {
+    expect(() => desktopShellModeFromSettings([])).toThrow('must be a map')
+    expect(() => desktopShellModeFromSettings({ 'dsh-desktop': true })).toThrow('settings must be a map')
+    expect(() => desktopShellModeFromSettings({ 'dsh-desktop': { mode: 'glass' } })).toThrow(
+      'must be "compatibility" or "advanced"',
+    )
+
+    const home = temporaryHome()
+    const path = join(home, 'invalid.yaml')
+    writeFileSync(path, 'dsh-desktop: [\n')
+    expect(() => readDesktopShellMode({ path })).toThrow('invalid settings document')
   })
 
   it('pins the browse directory picker on Windows without loading the native backend', () => {

@@ -42,6 +42,8 @@ export interface DesktopShellSpec extends DesktopWindowConfig {
   trayIcons: DesktopTrayIcons
   /** Request Cordis teardown followed by native application exit. */
   requestQuit(code: number): void
+  /** Persist another mode through the registered desktop settings scope. */
+  requestModeChange(mode: DesktopShellMode): Promise<void>
 }
 
 /** Electron bootstrap capability supplied before the profile tree mounts. */
@@ -64,6 +66,9 @@ export interface DesktopRuntime {
 
   /** Reveal and focus the current window, if mounted. */
   show(): void
+
+  /** Request orderly Cordis teardown followed by an Electron relaunch. */
+  requestRestart(): Promise<void>
 
   /** Allow the final native quit after the Cordis tree has disposed. */
   prepareToQuit(): void

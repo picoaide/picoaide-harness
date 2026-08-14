@@ -4,6 +4,7 @@
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
     "allowImportingTsExtensions": true,
     "rootDir": "src",
     "outDir": "lib/types",
@@ -19,5 +20,5 @@
     "verbatimModuleSyntax": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }
