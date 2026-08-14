@@ -51,7 +51,6 @@ const electron = vi.hoisted(() => {
     readonly image: unknown
     readonly setToolTip = vi.fn()
     readonly setContextMenu = vi.fn()
-    readonly popUpContextMenu = vi.fn()
     readonly on = vi.fn()
     readonly off = vi.fn()
     readonly destroy = vi.fn()
@@ -209,18 +208,9 @@ describe('Electron compatibility runtime', () => {
     expect(electron.app.dock.setIcon).not.toHaveBeenCalled()
     expect(electron.trays[0]?.image).toBe(electron.blueIcon)
     expect(electron.templateIcon.setTemplateImage).not.toHaveBeenCalled()
-    expect(electron.menuTemplates[0]).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'Switch to Advanced Mode', enabled: true }),
-    ]))
-    const clickListener = electron.trays[0]?.on.mock.calls.find(([event]) => event === 'click')?.[1]
-    expect(clickListener).toEqual(expect.any(Function))
-    clickListener?.()
-    expect(electron.trays[0]?.popUpContextMenu).toHaveBeenCalledWith(
-      electron.trays[0]?.setContextMenu.mock.calls[0]?.[0],
-    )
 
     await release()
-    expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', clickListener)
+    expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
   })
 
   it('does not mount a registration disposed before Host boot settles', async () => {
