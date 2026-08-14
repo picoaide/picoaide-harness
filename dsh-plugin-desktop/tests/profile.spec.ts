@@ -75,7 +75,7 @@ describe('desktop profile composition', () => {
   })
 
   it('assembles the Host shell without replacing the upstream client shell', () => {
-    const prepared = prepareDesktopProfile(undefined, temporaryHome())
+    const prepared = prepareDesktopProfile(undefined, temporaryHome(), 'darwin')
     const patches = prepared.patches as Array<Record<string, unknown>>
     const inserted = patches.flatMap((patch) => {
       const rows = patch.insert
@@ -107,5 +107,32 @@ describe('desktop profile composition', () => {
       expect(matching[0]).toEqual(expect.objectContaining({ name }))
       expect(matching[0]?.disabled).toBeFalsy()
     }
+    expect(rows.find(row => row.id === 'directory-picker')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-host-directory-picker-auto',
+    }))
+    expect(rows.find(row => row.id === 'directory-picker')?.disabled).toBeFalsy()
+    expect(rows.map(row => row.id)).not.toContain('desktop-directory-picker-browse-host')
+    expect(rows.map(row => row.id)).not.toContain('desktop-directory-picker-browse-surface')
+  })
+
+  it('pins the browse directory picker on Windows without loading the native backend', () => {
+    const prepared = prepareDesktopProfile(undefined, temporaryHome(), 'win32')
+    const rows = composeEntries([prepared.patches])
+    const picker = rows.find(row => row.id === 'directory-picker')
+
+    expect(picker).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-host-directory-picker-auto',
+      disabled: true,
+    }))
+    expect(rows).toContainEqual(expect.objectContaining({
+      id: 'desktop-directory-picker-browse-host',
+      name: '@deepseek-ai/dsh-host-directory-picker-browse',
+    }))
+    expect(rows).toContainEqual(expect.objectContaining({
+      id: 'desktop-directory-picker-browse-surface',
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse',
+    }))
+    expect(rows.map(row => row.name)).not.toContain('@deepseek-ai/dsh-host-directory-picker-native')
+    expect(rows.map(row => row.name)).not.toContain('@deepseek-ai/dsh-client-ui-directory-picker-native')
   })
 })

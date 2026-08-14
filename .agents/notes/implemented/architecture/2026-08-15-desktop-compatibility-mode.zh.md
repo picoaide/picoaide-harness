@@ -16,6 +16,8 @@ DSH Desktop 需要原生应用生命周期，但 Electron package 不能因此�
 
 持久化 `desktop` profile 仍按既有顺序包含 `dsh-base`、`dsh-web-app` 与用户安装的 bundle。第三方客户端插件使用普通 `dsh.client` 元数据，由官方 Web 客户端模块图发现。Electron 不维护第二套插件 roster。
 
+Launcher 会在用户 patch 之后添加一层平台安全 overlay。在 Windows 上，它禁用自适应目录选择 row，并插入现有 browse Host backend 与对应的 browse client surface。原生目录选择 package 不会在 Electron main 进程中激活。macOS 与 Linux 保留上游自适应 row。
+
 `desktop-shell` row 会在 profile 激活期间登记原生 shell spec，但不会从自身 Loader entry 内等待全局 Loader settlement。Launcher 只在 `app-boot` 返回后挂载该登记项，从而在首个 renderer 请求前保留激活审计，以及完整的官方与第三方 client manifest。
 
 ## Native lifecycle and security
@@ -26,7 +28,7 @@ DSH Desktop 需要原生应用生命周期，但 Electron package 不能因此�
 
 ## Verification
 
-Package 测试会拒绝导出 `./client` 或声明 `dsh.client` 的兼容 package。Profile 测试验证官方 layout、sidebar 与 conversation row 保持启用。Runtime 测试验证登记过程不会重新进入 Loader settlement，并且只有 launcher 挂载已登记 generation 后才会构造 `BrowserWindow`。窗口选项测试会拒绝兼容构造器中的高级原生选项。一个构建后的 Loader smoke 会激活 Host shell 和 profile 本地第三方插件；另一个会启动完整的已发布 Web profile，并验证其 HTTP 根页面与 client manifest。两者均不会导入 Electron 或打开窗口。
+Package 测试会拒绝导出 `./client` 或声明 `dsh.client` 的兼容 package。Profile 测试验证官方 layout、sidebar 与 conversation row 保持启用，并验证 Windows 组合包含 browse picker 且不包含 native picker row。Runtime 测试验证登记过程不会重新进入 Loader settlement，并且只有 launcher 挂载已登记 generation 后才会构造 `BrowserWindow`。窗口选项测试会拒绝兼容构造器中的高级原生选项。一个构建后的 Loader smoke 会激活 Host shell 和 profile 本地第三方插件；另一个会使用 Windows 组合启动完整的已发布 Web profile，并验证 HTTP 根页面、client manifest、browse picker 以及不存在 native picker。两者均不会导入 Electron 或打开窗口。
 
 Desktop deploy root 会直接提供其 197 个 package 的生产依赖图中的每个必需第一方 peer。Closure 检查会拒绝缺失声明，完整 profile smoke 则验证已发布 profile 可以访问 HTTP 根页面与官方 client manifest，而不依赖其他 package manager 自动安装 peer。
 

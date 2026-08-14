@@ -16,6 +16,8 @@ Compatibility mode is a Host-only overlay. `dsh-plugin-desktop` declares `dsh.bu
 
 The persistent `desktop` profile still contains `dsh-base`, `dsh-web-app`, and user-installed bundles in their preserved order. Third-party client plugins use their ordinary `dsh.client` metadata and are discovered by the official Web client module graph. Electron does not maintain a second plugin roster.
 
+The launcher adds one platform safety overlay after user patches. On Windows it disables the adaptive directory-picker row and inserts the existing browse Host backend with the matching browse client surface. The native directory-picker package never activates in the Electron main process. macOS and Linux keep the upstream adaptive row.
+
 The `desktop-shell` row registers a native shell specification while the profile is activating. It does not await global Loader settlement from inside its own Loader entry. The launcher mounts that registration only after `app-boot` returns, which preserves the activation audit and the complete official and third-party client manifest before the first renderer request.
 
 ## Native lifecycle and security
@@ -26,7 +28,7 @@ An advanced presentation requires a desktop-owned client plugin that is added on
 
 ## Verification
 
-Package tests reject a compatibility package that exports `./client` or declares `dsh.client`. Profile tests verify that the official layout, sidebar, and conversation rows remain enabled. Runtime tests verify that registration does not re-enter Loader settlement and that `BrowserWindow` construction starts only after the launcher mounts the registered generation. Window-option tests reject advanced-native options from the compatibility constructor. One built Loader smoke activates the Host shell and a profile-local third-party plugin; another boots the complete published Web profile and verifies its HTTP root and client manifest. Both run without importing Electron or opening a window.
+Package tests reject a compatibility package that exports `./client` or declares `dsh.client`. Profile tests verify that the official layout, sidebar, and conversation rows remain enabled and that Windows composition contains the browse picker without native picker rows. Runtime tests verify that registration does not re-enter Loader settlement and that `BrowserWindow` construction starts only after the launcher mounts the registered generation. Window-option tests reject advanced-native options from the compatibility constructor. One built Loader smoke activates the Host shell and a profile-local third-party plugin; another boots the complete published Web profile with Windows composition and verifies its HTTP root, client manifest, browse picker, and absence of the native picker. Both run without importing Electron or opening a window.
 
 The desktop deploy root directly supplies every required first-party peer in its 197-package production dependency graph. A closure check rejects missing declarations, while the complete-profile smoke verifies that the published profile reaches its HTTP root and official client manifest without relying on another package manager's automatic peer installation.
 

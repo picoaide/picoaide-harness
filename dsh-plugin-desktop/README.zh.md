@@ -20,6 +20,8 @@ Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Nod
 
 Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
 
+在 Windows 上，launcher 会固定使用现有的 browse 目录选择 backend 与 client surface，而不使用自适应的 native chooser。因此，workspace 选择始终在 Web UI 内完成，也不会在 Electron main 进程中加载原生 N-API 对话框 worker。macOS 与 Linux 仍使用上游自适应 chooser。
+
 该 package 为单独组合的 desktop client shell 保留 `advanced` 模式名。当前选择该模式会在安排原生窗口之前明确失败，不会静默降级为兼容模式。
 
 ## 开发

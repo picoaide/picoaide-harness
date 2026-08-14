@@ -20,6 +20,8 @@ Bare Cordis plugin imports resolve from the persistent profile. A narrow Node re
 
 The Cordis row registers the native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official and third-party client plugins without a Loader-wide wait inside the plugin itself.
 
+On Windows, the launcher pins the existing browse directory-picker backend and client surface instead of the adaptive native chooser. Workspace selection therefore remains inside the Web UI and never loads the native N-API dialog worker in the Electron main process. macOS and Linux retain the upstream adaptive chooser.
+
 The package reserves the `advanced` mode name for a separately composed desktop client shell. Selecting it currently fails before a native window is scheduled; it never falls back to compatibility mode silently.
 
 ## Development
