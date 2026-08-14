@@ -48,7 +48,7 @@ On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positio
 
 The workspace seat scopes the official session-list fade token to transparent. The official list keeps its scrolling and spacing behavior without painting its opaque Web-sidebar fill over native material.
 
-On Windows the advanced window uses a hidden title bar with native title-bar overlay controls, a transparent background, `backgroundMaterial: acrylic`, native shadow, rounded corners, and a thick resizable frame. The desktop frame owns a 48 CSS-pixel caption row across its conversation and details columns, reserves the native-control area inside that row, and places both complete slot surfaces on the next row. This caption geometry does not inspect or rearrange feature-owned header nodes, so upstream and third-party slot contributions move together. Controls, inputs, dialogs, and interactive content remain non-draggable.
+On Windows the advanced window uses a hidden title bar with native title-bar overlay controls, a transparent background, `backgroundMaterial: mica`, native shadow, rounded corners, and a thick resizable frame. Electron supports the system-drawn material on Windows 11 22H2 and later. The desktop frame owns a 48 CSS-pixel caption row across its conversation and details columns, reserves the native-control area inside that row, and places both complete slot surfaces on the next row. This caption geometry does not inspect or rearrange feature-owned header nodes, so upstream and third-party slot contributions move together. Controls, inputs, dialogs, and interactive content remain non-draggable.
 
 Advanced mode is unsupported on Linux. The Host validation, tray, and native window constructor enforce the same boundary instead of silently falling back.
 
@@ -60,7 +60,7 @@ Advanced mode does not add a preload script, Electron IPC transport, or Node cap
 
 Profile tests write `dsh-desktop.mode: advanced` to a temporary `settings.yaml` and verify projection into `desktop-shell`, disabled official layout/sidebar rows, and enabled conversation. Host tests cover the shared settings namespace, changed-value restart, tray update path, and pre-persistence Linux rejection. Client tests cover environment validation, scoped layout-service disposal, responsive column rules, Windows outer-slot caption geometry, slot registration, and theme projection. Type checking validates the desktop declarations against the published rc.6 slot and service contracts.
 
-Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Windows acrylic/native controls, Linux rejection, and the tray's opposite-mode update. Shutdown tests verify relaunch only after successful zero-code disposal and no relaunch for a failed generation. Client and Host bundles build headlessly; graphical native-material appearance remains a target-machine verification boundary.
+Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Windows Mica/native controls, Linux rejection, and the tray's opposite-mode update. Shutdown tests verify relaunch only after successful zero-code disposal and no relaunch for a failed generation. Client and Host bundles build headlessly; graphical native-material appearance remains a target-machine verification boundary.
 
 ## Alternatives considered
 

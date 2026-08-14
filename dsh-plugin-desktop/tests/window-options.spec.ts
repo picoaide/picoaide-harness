@@ -92,7 +92,7 @@ describe('compatibility BrowserWindow options', () => {
     expect(desktopWindowOptions(advanced, {} as NativeImage, 'darwin')).toEqual(options)
   })
 
-  it('uses native Windows controls, acrylic, shadow, and rounded corners in advanced mode', () => {
+  it('uses native Windows controls, Mica, shadow, and rounded corners in advanced mode', () => {
     const options = advancedWindowOptions(
       { ...spec, mode: 'advanced' },
       {} as NativeImage,
@@ -106,7 +106,7 @@ describe('compatibility BrowserWindow options', () => {
         symbolColor: '#7f858f',
         height: WINDOWS_TITLEBAR_HEIGHT,
       },
-      backgroundMaterial: 'acrylic',
+      backgroundMaterial: 'mica',
       hasShadow: true,
       roundedCorners: true,
       thickFrame: true,

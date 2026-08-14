@@ -51,7 +51,7 @@ The advanced theme presenter projects the active upstream theme snapshot onto th
 
 The workspace seat makes the upstream session-list edge fade transparent, so its opaque Web-sidebar fill does not paint a dark strip over the native material.
 
-On macOS the advanced window uses a transparent hidden-inset title bar, positioned traffic lights, and native `sidebar` vibrancy. On Windows it uses a hidden title bar with native window controls, transparent overlay, acrylic background material, shadow, rounded corners, and a thick resizable frame. A desktop-owned 48 CSS-pixel caption row spans the Windows conversation and details columns; the complete upstream slot surfaces start below that row, so official and third-party header contributions keep their ordinary relative layout without element-specific caption offsets. Linux rejects advanced mode rather than silently falling back to a presentation different from the persisted setting.
+On macOS the advanced window uses a transparent hidden-inset title bar, positioned traffic lights, and native `sidebar` vibrancy. On Windows it uses a hidden title bar with native window controls, transparent overlay, Mica background material, shadow, rounded corners, and a thick resizable frame. Electron exposes the system-drawn Mica material on Windows 11 22H2 and later. A desktop-owned 48 CSS-pixel caption row spans the Windows conversation and details columns; the complete upstream slot surfaces start below that row, so official and third-party header contributions keep their ordinary relative layout without element-specific caption offsets. Linux rejects advanced mode rather than silently falling back to a presentation different from the persisted setting.
 
 ## Development
 

@@ -90,7 +90,7 @@ export function advancedWindowOptions(
         height: WINDOWS_TITLEBAR_HEIGHT,
       },
       backgroundColor: '#00000000',
-      backgroundMaterial: 'acrylic',
+      backgroundMaterial: 'mica',
       hasShadow: true,
       roundedCorners: true,
       thickFrame: true,
