@@ -1,57 +1,56 @@
-# DeepSeek Harness
+# DSH Desktop
 
-English | [中文](README.zh.md)
+DSH Desktop 是 DeepSeek Harness 的桌面发行项目。官方 Harness 源码以固定提交的 Git 子模块保留，我们的 Electron 与 Cordis 实现位于独立的 Yarn workspace；桌面功能不得直接修改上游源码。
 
-DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
+## 仓库结构
 
-It uses an architecture where **everything is a plugin**, and is powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper).
-
-## Developer preview
-
-DeepSeek Harness is currently in _developer preview_ and is iterating rapidly. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
-
-## Run
-
-### Run from `npm`
-
-Install `Node.js`, then run:
-
-```sh
-npx @deepseek-ai/dsh web
+```text
+deepseek-harness-desktop/
+├── deepseek-harness/       # 官方 deepseek-ai/deepseek-harness 子模块
+├── dsh-plugin-desktop/     # DSH Desktop Cordis 插件与 Electron 启动器
+├── scripts/                # 产品仓库检查与发布脚本
+├── package.json
+└── yarn.lock
 ```
 
-The command starts the Web UI, served at `http://127.0.0.1:3080` by default. See [Web UI guide](docs/user/guide/index.md).
+`deepseek-harness` 保持官方的 pnpm workspace 和 lockfile。外层仓库及 `dsh-plugin-desktop` 使用 Yarn 4，并通过 `node_modules` linker 支持 Cordis 动态插件解析、Electron 和原生依赖。
 
-### Run from source
+当前 GitHub 官方 `master` 的源码版本是 `0.1.0-rc.5`，npm 官方 Registry 发布的运行时 family 是 `0.1.0-rc.6`。两者分别记录在 `upstream.json`；在官方发布可对应的 source tag 或 commit 前，不把 npm artifact 推断为子模块中的源码。
 
-To run from a repository checkout:
+## 初始化
 
 ```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
-pnpm install
-pnpm run build
-pnpm dsh web
+git clone --recurse-submodules https://github.com/anywhere-labs/deepseek-harness-desktop.git
+cd deepseek-harness-desktop
+corepack enable
+yarn install --immutable
+yarn check
 ```
 
-## Community and support
+已有 checkout 初始化子模块：
 
-- Feel free to submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).
-- Add the [`dsh-plugin`](https://github.com/topics/dsh-plugin) topic to your plugin repository for discoverability.
-- Join <a href="https://discord.gg/Ycq5dCaS4">DeepSeek Harness Discord community</a>.
+```sh
+git submodule update --init --recursive
+```
 
-## Contributing
+图形环境中启动桌面应用：
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+```sh
+yarn dev
+```
 
-## Development
+`dev` 会先构建桌面包，不需要手动运行 `yarn build`。
 
-Start with the [development guide](docs/development.md) and [architecture documentation](docs/architecture.md).
+## 上游边界
 
-For agents, follow [AGENTS.md](AGENTS.md).
+- `deepseek-harness` 只通过独立提交更新 gitlink，不在本仓库内打补丁。
+- 根 Yarn workspace 不包含 `deepseek-harness`。
+- 普通桌面构建依赖已发布的 DSH npm 包；子模块用于源码审计和显式的兼容性验证。
+- `yarn check:layout` 会拒绝脏子模块、错误远端、错误提交以及重新引入的嵌套 pnpm workspace。
 
-## License
+需要验证官方源码时，使用它自己的 pnpm 配置：
 
-[MIT](LICENSE)
-
-Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+```sh
+yarn upstream:install
+yarn upstream:build
+```

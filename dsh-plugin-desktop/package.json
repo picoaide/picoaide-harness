@@ -1,0 +1,131 @@
+{
+  "name": "dsh-plugin-desktop",
+  "version": "0.1.0",
+  "description": "DSH Desktop: an Electron shell composed as a DeepSeek Harness Cordis plugin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anywhere-labs/deepseek-harness-desktop.git",
+    "directory": "dsh-plugin-desktop"
+  },
+  "type": "module",
+  "main": "lib/main.js",
+  "types": "lib/types/index.d.ts",
+  "bin": {
+    "dsh-desktop": "lib/bin.js",
+    "dsh-plugin-desktop": "lib/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./profile": {
+      "types": "./lib/types/profile.d.ts",
+      "default": "./lib/profile.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "build/icon.png",
+    "cordis.patch.yml",
+    "lib/**/*.js",
+    "lib/**/*.map",
+    "lib/types/**/*.d.ts",
+    "README.md",
+    "README.zh.md",
+    "README.i18n.yaml"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "test": "vitest run",
+    "verify:loader": "node scripts/verify-loader-boot.mjs",
+    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:loader",
+    "start": "node lib/bin.js",
+    "dev": "yarn run build && node lib/bin.js",
+    "package:dir": "yarn run build && electron-builder --dir",
+    "prepack": "yarn run check"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/cordis-plugin-group": "1.0.1",
+    "@deepseek-ai/cordis-plugin-include": "1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-app-boot": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-base": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-cmdline": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-home-paths": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-launch-environment": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-shell-env": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-web-app": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "node-addon-require-builtin": "^0.1.4"
+  },
+  "peerDependencies": {
+    "electron": "43.4.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.20.0",
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  },
+  "build": {
+    "appId": "ai.deepseek.dsh.desktop",
+    "productName": "DSH Desktop",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "build/icon.png",
+      "cordis.patch.yml",
+      "lib/**",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.png"
+    }
+  }
+}
