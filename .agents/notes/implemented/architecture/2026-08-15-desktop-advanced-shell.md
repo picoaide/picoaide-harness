@@ -18,7 +18,7 @@ Advanced mode is a complete desktop-owned generation selected by `dsh-desktop.mo
 
 The DSH home `settings.yaml` document is the single source of truth. The launcher resolves it through the active `@deepseek-ai/dsh-settings-file` row and reads `dsh-desktop.mode` before it produces the final Loader patches. It does not persist a parallel mode in the profile manifest, Electron preferences, command-line flags, or another desktop file.
 
-The `desktop-shell` Host plugin registers `settingsNamespace('dsh-desktop')` with a schema containing `mode: compatibility | advanced` and `applies: restart`. The tray calls that registered scope's narrow `settings.update({ mode })` path. A user may instead edit the same `settings.yaml` document directly; the file provider and registered namespace observe that one durable value.
+The `desktop-shell` Host plugin registers `settingsNamespace('dsh-desktop')` with a schema containing `mode: compatibility | advanced` and `applies: restart`. The tray calls that registered scope's narrow `settings.update({ mode })` path. Windows opens the tray menu on a left click so the mode command is discoverable without an in-app settings page. A user may instead edit the same `settings.yaml` document directly; the file provider and registered namespace observe that one durable value.
 
 Linux supports compatibility only. The tray disables its mode command there, and an advanced value is rejected rather than being mapped to a different presentation.
 

@@ -143,7 +143,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const tray = new Tray(prepareTrayIcon(spec.trayIcons, this.platform))
     this.tray = tray
     tray.setToolTip(spec.productName)
-    tray.setContextMenu(Menu.buildFromTemplate([
+    const trayMenu = Menu.buildFromTemplate([
       { label: `Open ${spec.productName}`, click: show },
       { type: 'separator' },
       {
@@ -157,8 +157,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       },
       { type: 'separator' },
       { label: 'Quit', click: () => { spec.requestQuit(0) } },
-    ]))
-    tray.on('click', show)
+    ])
+    tray.setContextMenu(trayMenu)
+    const trayClick = this.platform === 'win32'
+      ? () => { tray.popUpContextMenu(trayMenu) }
+      : show
+    tray.on('click', trayClick)
 
     window.once('ready-to-show', show)
     try {
@@ -166,7 +170,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     } catch (cause) {
       app.off('activate', show)
       window.off('page-title-updated', preserveBlankTitle)
-      tray.off('click', show)
+      tray.off('click', trayClick)
       tray.destroy()
       window.destroy()
       this.tray = undefined
@@ -183,7 +187,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       window.off('page-title-updated', preserveBlankTitle)
       window.webContents.off('will-frame-navigate', navigate)
       window.webContents.off('will-redirect', navigate)
-      tray.off('click', show)
+      tray.off('click', trayClick)
       tray.destroy()
       if (!window.isDestroyed()) window.destroy()
       if (this.tray === tray) this.tray = undefined
