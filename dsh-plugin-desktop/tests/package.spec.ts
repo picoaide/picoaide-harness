@@ -40,7 +40,6 @@ describe('published package surface', () => {
       inject: [
         '@deepseek-ai/dsh-client-runtime',
         '@deepseek-ai/dsh-client-ui-theme',
-        '@deepseek-ai/dsh-client-locale',
       ],
     })
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')

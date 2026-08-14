@@ -20,7 +20,10 @@ export interface DesktopColumns {
   details: number
 }
 
-export const SIDEBAR_COLLAPSED = 90
+/** Compatibility-mode compact rail used by the upstream Windows sidebar. */
+export const SIDEBAR_COLLAPSED = 56
+/** Wider compact rail reserved for the desktop-owned macOS sidebar. */
+export const MACOS_SIDEBAR_COLLAPSED = 90
 export const SIDEBAR_DEFAULT = 280
 export const SIDEBAR_MIN = 264
 export const SIDEBAR_MAX = 420
@@ -37,8 +40,13 @@ export const CENTER_MIN = 640
  * @param details - details preference, where zero closes the panel.
  * @returns rendered column widths.
  */
-export function computeDesktopColumns(viewport: number, sidebar: number, details: number): DesktopColumns {
-  const sidebarWidth = sidebar === 0 ? SIDEBAR_COLLAPSED : clamp(sidebar, SIDEBAR_MIN, SIDEBAR_MAX)
+export function computeDesktopColumns(
+  viewport: number,
+  sidebar: number,
+  details: number,
+  collapsedWidth: number = SIDEBAR_COLLAPSED,
+): DesktopColumns {
+  const sidebarWidth = sidebar === 0 ? collapsedWidth : clamp(sidebar, SIDEBAR_MIN, SIDEBAR_MAX)
   const preferredDetails = details === 0 ? 0 : clamp(details, DETAILS_MIN, DETAILS_MAX)
   if (sidebarWidth + preferredDetails + CENTER_MIN <= viewport) {
     return { sidebar: sidebarWidth, center: viewport - sidebarWidth - preferredDetails, details: preferredDetails }
@@ -75,7 +83,7 @@ export class DesktopLayoutState {
     return () => { this.listeners.delete(listener) }
   }
 
-  /** Toggle the wide sidebar and compact 90 px rail. */
+  /** Toggle the wide sidebar and the platform-selected compact rail. */
   toggleSidebar(): void {
     if (this.snapshot.narrow) {
       this.publish({ ...this.snapshot, narrowExpanded: !this.snapshot.narrowExpanded })

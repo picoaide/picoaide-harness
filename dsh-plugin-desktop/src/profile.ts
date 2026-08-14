@@ -301,7 +301,7 @@ export function prepareDesktopProfile(
   })
   patches.push(
     { id: 'ui-layout', disabled: mode === 'advanced' },
-    { id: 'ui-sidebar', disabled: mode === 'advanced' },
+    { id: 'ui-sidebar', disabled: false },
     { id: 'ui-conversation', disabled: false },
   )
   if ((telemetryDisabled ?? '') !== '' && rows.has('session-telemetry-otel')) {

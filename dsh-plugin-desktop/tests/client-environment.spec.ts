@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { provideDesktopLayout } from '../src/client/layout-service.ts'
 import { parseDesktopClientEnvironment } from '../src/client/environment.ts'
-import { computeDesktopColumns, DesktopLayoutState, SIDEBAR_COLLAPSED } from '../src/client/layout-state.ts'
+import {
+  computeDesktopColumns, DesktopLayoutState, MACOS_SIDEBAR_COLLAPSED, SIDEBAR_COLLAPSED,
+} from '../src/client/layout-state.ts'
 import { installAdvancedStyles } from '../src/client/styles.ts'
 import { WINDOWS_CAPTION_CONTROLS_WIDTH, WINDOWS_TITLEBAR_HEIGHT } from '../src/window-chrome.ts'
 
@@ -42,7 +44,8 @@ describe('advanced desktop layout', () => {
 
     try {
       const dispose = installAdvancedStyles()
-      expect(css).toMatch(/\.dshDesktopWorkspaceRegion\s*\{[^}]*--dsw-specific-sidebar-fill:\s*transparent;/)
+      expect(css).toMatch(/\.dshDesktopSidebarSurface\s*\{[^}]*--dsw-specific-sidebar-fill:\s*transparent;/)
+      expect(css).toMatch(/data-desktop-platform="darwin"\]\[data-sidebar-collapsed\][^{]*\.dshDesktopUpstreamSidebar \{[^}]*width:\s*56px;[^}]*margin:\s*0 auto;/)
       expect(css).toContain(`grid-template-rows: ${WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr)`)
       expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopSidebarSurface \{ grid-row: 1 \/ -1; \}/)
       expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopConversationSurface,\s*\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopDetailsSurface \{ grid-row: 2; \}/)
@@ -76,9 +79,12 @@ describe('advanced desktop layout', () => {
     expect(disposed).toBe(true)
   })
 
-  it('keeps the collapsed sidebar at the product 90 px rail width', () => {
-    expect(computeDesktopColumns(1440, 0, 0)).toEqual({ sidebar: SIDEBAR_COLLAPSED, center: 1350, details: 0 })
-    expect(SIDEBAR_COLLAPSED).toBe(90)
+  it('uses the compatibility rail on Windows and the wider desktop rail on macOS', () => {
+    expect(computeDesktopColumns(1440, 0, 0)).toEqual({ sidebar: SIDEBAR_COLLAPSED, center: 1384, details: 0 })
+    expect(computeDesktopColumns(1440, 0, 0, MACOS_SIDEBAR_COLLAPSED))
+      .toEqual({ sidebar: MACOS_SIDEBAR_COLLAPSED, center: 1350, details: 0 })
+    expect(SIDEBAR_COLLAPSED).toBe(56)
+    expect(MACOS_SIDEBAR_COLLAPSED).toBe(90)
   })
 
   it('publishes mirrored panel transitions', () => {

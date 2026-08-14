@@ -15,8 +15,6 @@ export type { DesktopClientEnvironment, DesktopClientMode, DesktopClientPlatform
 export const inject = [
   'slots',
   'sessions',
-  'workspaces',
-  'locale',
   'theme',
 ]
 

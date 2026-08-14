@@ -3,12 +3,13 @@ import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-
 import type {} from './contracts.ts'
 import type { DesktopClientPlatform } from './environment.ts'
 import {
-  computeDesktopColumns, DesktopLayoutState, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT,
+  computeDesktopColumns, DesktopLayoutState, MACOS_SIDEBAR_COLLAPSED,
+  SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT,
 } from './layout-state.ts'
 
 /** Private values assembled by the advanced-shell registration. */
 export interface AdvancedFrameInjected {
-  /** Desktop-owned panel state synchronized with the upstream layout service. */
+  /** Desktop-owned panel state exposed through the standard layout service. */
   layout: DesktopLayoutState
   /** Host platform controlling native title-bar spacing. */
   platform: DesktopClientPlatform
@@ -58,6 +59,7 @@ export function AdvancedFrame({ layout, platform, renderSlot, useSessions }: Adv
     viewport,
     sidebarPreference,
     detailsSession === undefined ? 0 : panels.details,
+    platform === 'darwin' ? MACOS_SIDEBAR_COLLAPSED : SIDEBAR_COLLAPSED,
   )
 
   return (
@@ -70,7 +72,9 @@ export function AdvancedFrame({ layout, platform, renderSlot, useSessions }: Adv
     >
       {platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}
       <aside className="dshDesktopSidebarSurface">
-        {renderSlot('sidebar', { collapsed, width: columns.sidebar })}
+        <div className="dshDesktopUpstreamSidebar">
+          {renderSlot('sidebar', { collapsed, width: columns.sidebar })}
+        </div>
       </aside>
       <main className="dshDesktopConversationSurface">{renderSlot('conversation', {})}</main>
       <aside className="dshDesktopDetailsSurface">{renderSlot('details', {})}</aside>

@@ -30,13 +30,13 @@ The application never hot-swaps mode. Native material options are fixed at `Brow
 
 ### Advanced Client composition
 
-After bundle, profile, and home patches are composed, the launcher verifies the expected official row identities. Its final advanced overlay disables the official `ui-layout` and `ui-sidebar` rows and explicitly keeps `ui-conversation` enabled. Compatibility performs the inverse for the two presentation rows and also keeps conversation enabled.
+After bundle, profile, and home patches are composed, the launcher verifies the expected official row identities. Its final advanced overlay disables the official `ui-layout` row and explicitly keeps `ui-sidebar` and `ui-conversation` enabled. Compatibility keeps all three official rows enabled.
 
 The desktop Client validates the Host-supplied mode and platform URL markers before installing advanced effects. For one plugin-fiber lifetime it provides the `layout` service through Cordis reflection, backed by `DesktopLayoutState`. That service owns sidebar toggle and details open/close transitions and disappears with the same effect that installed it.
 
-The Client registers the `root` occupant and declares child seats for `sidebar`, `conversation`, `details`, and additive `shell.overlay` entries. It separately registers the `sidebar` occupant and declares seats for the upstream workspace browser, standard settings shell, and additive footer actions. The unchanged `ui-conversation` plugin continues to own the conversation and details surfaces; upstream workspace and settings features continue to own their corresponding sidebar surfaces. Third-party features can contribute to the documented seats present in this composition.
+The Client registers the `root` occupant and declares child seats for `sidebar`, `conversation`, `details`, and additive `shell.overlay` entries. The unchanged official `ui-sidebar` remains the sidebar occupant and keeps ownership of its workspace, settings, and additive footer-action seats. The unchanged `ui-conversation` plugin continues to own the conversation and details surfaces. Third-party features can contribute to the same documented seats as in compatibility mode.
 
-The desktop frame owns only geometry and chrome: a collapsible sidebar rail, a center floor, an optional details column, resize handles, native drag regions, and the desktop sidebar controls. It does not copy session, workspace, conversation, settings, or feature state.
+The desktop frame owns only geometry and chrome: a collapsible sidebar column, a center floor, an optional details column, resize handles, and native drag regions. It does not copy sidebar controls, session, workspace, conversation, settings, or feature state.
 
 ### Theme projection
 
@@ -44,11 +44,11 @@ Disabling official layout removes the presentation layer that normally projects 
 
 ### Native materials
 
-On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positioned traffic lights, a transparent background, `vibrancy: sidebar`, and `visualEffectState: followWindow`. The renderer keeps a transparent sidebar surface over the native vibrancy while the conversation surface uses resolved DSH theme tokens.
+On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positioned traffic lights, a transparent background, `vibrancy: sidebar`, and `visualEffectState: followWindow`. The renderer keeps a transparent sidebar surface over the native vibrancy and adds a traffic-light inset around the official sidebar. Its 90 CSS-pixel collapsed column centers the official 56-pixel rail.
 
-The workspace seat scopes the official session-list fade token to transparent. The official list keeps its scrolling and spacing behavior without painting its opaque Web-sidebar fill over native material.
+The desktop sidebar surface scopes the official sidebar-fill token to transparent. The official sidebar and session list keep their component behavior, scrolling, spacing, and fade without painting the opaque Web fill over native material.
 
-On Windows the advanced window uses a hidden title bar with native title-bar overlay controls, a transparent background, `backgroundMaterial: mica`, native shadow, rounded corners, and a thick resizable frame. Electron supports the system-drawn material on Windows 11 22H2 and later. The desktop frame owns a 48 CSS-pixel caption row across its conversation and details columns, reserves the native-control area inside that row, and places both complete slot surfaces on the next row. This caption geometry does not inspect or rearrange feature-owned header nodes, so upstream and third-party slot contributions move together. Controls, inputs, dialogs, and interactive content remain non-draggable.
+On Windows the advanced window uses a hidden title bar with native title-bar overlay controls, a transparent background, `backgroundMaterial: mica`, native shadow, rounded corners, and a thick resizable frame. Electron supports the system-drawn material on Windows 11 22H2 and later. The official sidebar retains compatibility geometry and transitions, including its 56-pixel compact rail and 280-pixel default expanded width, while its transparent surface reveals Mica. The desktop frame owns a 48 CSS-pixel caption row across its conversation and details columns, reserves the native-control area inside that row, and places both complete slot surfaces on the next row. This caption geometry does not inspect or rearrange feature-owned header nodes, so upstream and third-party slot contributions move together. Controls, inputs, dialogs, and interactive content remain non-draggable.
 
 Advanced mode is unsupported on Linux. The Host validation, tray, and native window constructor enforce the same boundary instead of silently falling back.
 
@@ -58,15 +58,15 @@ Advanced mode does not add a preload script, Electron IPC transport, or Node cap
 
 ## Verification
 
-Profile tests write `dsh-desktop.mode: advanced` to a temporary `settings.yaml` and verify projection into `desktop-shell`, disabled official layout/sidebar rows, and enabled conversation. Host tests cover the shared settings namespace, changed-value restart, tray update path, and pre-persistence Linux rejection. Client tests cover environment validation, scoped layout-service disposal, responsive column rules, Windows outer-slot caption geometry, slot registration, and theme projection. Type checking validates the desktop declarations against the published rc.6 slot and service contracts.
+Profile tests write `dsh-desktop.mode: advanced` to a temporary `settings.yaml` and verify projection into `desktop-shell`, disabled official layout, and enabled official sidebar and conversation rows. Host tests cover the shared settings namespace, changed-value restart, tray update path, and pre-persistence Linux rejection. Client tests cover environment validation, scoped layout-service disposal, platform-specific rail geometry, Windows outer-slot caption geometry, and theme projection. Type checking validates the desktop declarations against the published rc.6 slot and service contracts.
 
 Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Windows Mica/native controls, Linux rejection, and the tray's opposite-mode update. Shutdown tests verify relaunch only after successful zero-code disposal and no relaunch for a failed generation. Client and Host bundles build headlessly; graphical native-material appearance remains a target-machine verification boundary.
 
 ## Alternatives considered
 
-**Patch the official layout and sidebar in place.** This would modify upstream-owned implementation or make browser DSH depend on Electron presentation rules. Disabling the two official presentation rows and adding desktop-owned occupants preserves a mechanical ownership boundary.
+**Patch the official layout or sidebar in place.** This would modify upstream-owned implementation or make browser DSH depend on Electron presentation rules. Replacing only the layout row and hosting the official sidebar inside a transparent desktop-owned surface preserves component compatibility.
 
-**Keep official layout active and shadow only its root occupant.** The official plugin would still provide the `layout` service and own child declarations, creating split ownership and ambiguous disposal. Advanced mode replaces the service and the corresponding root/sidebar declarations as one generation.
+**Keep official layout active and shadow only its root occupant.** The official plugin would still provide the `layout` service and own root child declarations, creating split ownership and ambiguous disposal. Advanced mode replaces that service and root declaration while leaving the independent sidebar occupant active.
 
 **Copy conversation, workspace, or other feature surfaces into the desktop package.** Those are feature surfaces, not desktop chrome. Keeping their official plugins active avoids duplicated state and lets upstream and third-party improvements flow into the desktop composition.
 

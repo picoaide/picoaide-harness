@@ -30,13 +30,13 @@ Settings watcher 会比较已提交模式与当前 generation，并在两者不�
 
 ### 高级 Client 组合
 
-在 bundle、profile 与 home patch 完成组合后，Launcher 会验证预期官方 row 身份。其最终高级 overlay 禁用官方 `ui-layout` 与 `ui-sidebar` row，并明确保持 `ui-conversation` 启用。兼容模式对前两个呈现 row 采取相反设置，同样保持 conversation 启用。
+在 bundle、profile 与 home patch 完成组合后，Launcher 会验证预期官方 row 身份。其最终高级 overlay 禁用官方 `ui-layout` row，并明确保持 `ui-sidebar` 与 `ui-conversation` 启用。兼容模式会保持三个官方 row 全部启用。
 
 desktop Client 会在安装高级 effect 前校验 Host 提供的模式与平台 URL marker。它通过 Cordis reflection 在一个 plugin fiber 生命期内提供由 `DesktopLayoutState` 支撑的 `layout` service。该 service 拥有 sidebar toggle 与 details open/close transition，并与安装它的同一 effect 一起消失。
 
-Client 注册 `root` occupant，并为 `sidebar`、`conversation`、`details` 与纯新增 `shell.overlay` entry 声明子 seat。它还会单独注册 `sidebar` occupant，并为上游 workspace browser、标准 settings shell 与纯新增 footer action 声明 seat。不变的 `ui-conversation` plugin 继续拥有 conversation 与 details surface；上游 workspace 与 settings feature 继续拥有对应 sidebar surface。第三方 feature 可以向该组合中存在的已文档化 seat 贡献内容。
+Client 注册 `root` occupant，并为 `sidebar`、`conversation`、`details` 与纯新增 `shell.overlay` entry 声明子 seat。不变的官方 `ui-sidebar` 会继续作为 sidebar occupant，并保留其 workspace、settings 与纯新增 footer-action seat 的所有权。不变的 `ui-conversation` plugin 继续拥有 conversation 与 details surface。第三方 feature 可以向与兼容模式相同的已文档化 seat 贡献内容。
 
-desktop frame 只拥有几何与 chrome：可折叠 sidebar rail、中心宽度下限、可选 details 列、resize handle、原生 drag region 与 desktop sidebar 控件。它不会复制 session、workspace、conversation、settings 或 feature 状态。
+desktop frame 只拥有几何与 chrome：可折叠 sidebar 列、中心宽度下限、可选 details 列、resize handle 与原生 drag region。它不会复制 sidebar 控件、session、workspace、conversation、settings 或 feature 状态。
 
 ### Theme 投影
 
@@ -44,11 +44,11 @@ desktop frame 只拥有几何与 chrome：可折叠 sidebar rail、中心宽度�
 
 ### 原生材质
 
-在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 在原生 vibrancy 上保持透明 sidebar surface，conversation surface 则使用解析后的 DSH theme token。
+在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 会在原生 vibrancy 上保持 sidebar surface 透明，并在官方 sidebar 外添加红绿灯 inset。其 90 CSS 像素收起列会把官方 56 像素 rail 居中。
 
-workspace seat 会把官方 session 列表的渐隐 token 局部设为透明。官方列表会保留滚动与间距行为，但不会把 Web 侧边栏的不透明填充色绘制到原生材质上。
+desktop sidebar surface 会把官方 sidebar-fill token 局部设为透明。官方 sidebar 与 session 列表会保留组件行为、滚动、间距与渐隐，但不会把 Web 不透明填充色绘制到原生材质上。
 
-在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: mica`、原生阴影、圆角与粗可调整边框。Electron 在 Windows 11 22H2 及以上版本支持由系统绘制的该材质。Desktop frame 会在 conversation 与 details 两列上方拥有一个 48 CSS 像素 caption row，在该行内避让原生控件区域，并把两个完整 slot surface 放到下一行。该 caption 几何不会检查或重排 feature 自有的 Header 节点，因此上游与第三方 slot contribution 会整体移动。控件、输入框、对话框与交互内容仍然不可拖动。
+在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: mica`、原生阴影、圆角与粗可调整边框。Electron 在 Windows 11 22H2 及以上版本支持由系统绘制的该材质。官方 sidebar 会保留兼容模式的几何与过渡，包括 56 像素紧凑 rail 和 280 像素默认展开宽度，同时由透明 surface 透出 Mica。Desktop frame 会在 conversation 与 details 两列上方拥有一个 48 CSS 像素 caption row，在该行内避让原生控件区域，并把两个完整 slot surface 放到下一行。该 caption 几何不会检查或重排 feature 自有的 Header 节点，因此上游与第三方 slot contribution 会整体移动。控件、输入框、对话框与交互内容仍然不可拖动。
 
 高级模式不支持 Linux。Host 校验、托盘与原生窗口构造器都会强制同一边界，而不会静默降级。
 
@@ -58,15 +58,15 @@ workspace seat 会把官方 session 列表的渐隐 token 局部设为透明。�
 
 ## Verification
 
-Profile 测试会向临时 `settings.yaml` 写入 `dsh-desktop.mode: advanced`，并验证它被投影到 `desktop-shell`、官方 layout/sidebar row 已禁用，以及 conversation 已启用。Host 测试覆盖共享 settings namespace、值变化后重启、托盘更新路径，以及持久化前的 Linux 拒绝。Client 测试覆盖 environment 校验、作用域化 layout-service disposal、响应式列规则、Windows 外层 slot caption 几何、slot 注册与 theme 投影。类型检查会根据已发布 rc.6 slot 与 service contract 验证 desktop 声明。
+Profile 测试会向临时 `settings.yaml` 写入 `dsh-desktop.mode: advanced`，并验证它被投影到 `desktop-shell`、官方 layout 已禁用，以及官方 sidebar 与 conversation row 已启用。Host 测试覆盖共享 settings namespace、值变化后重启、托盘更新路径，以及持久化前的 Linux 拒绝。Client 测试覆盖 environment 校验、作用域化 layout-service disposal、平台专属 rail 几何、Windows 外层 slot caption 几何与 theme 投影。类型检查会根据已发布 rc.6 slot 与 service contract 验证 desktop 声明。
 
 窗口选项与 Electron-runtime 测试验证 macOS hidden-inset vibrancy、Windows Mica/原生控件、Linux 拒绝，以及托盘更新到相反模式。Shutdown 测试验证仅在成功零退出码 disposal 后 relaunch，且失败 generation 不会 relaunch。Client 与 Host bundle 均可 headless 构建；图形化原生材质外观仍是目标机器验证边界。
 
 ## Alternatives considered
 
-**就地 patch 官方 layout 与 sidebar。** 这会修改上游拥有的实现，或让浏览器 DSH 依赖 Electron 呈现规则。禁用两个官方呈现 row 并添加 desktop 自有 occupant，可以保留机械可验证的所有权边界。
+**就地 patch 官方 layout 或 sidebar。** 这会修改上游拥有的实现，或让浏览器 DSH 依赖 Electron 呈现规则。只替换 layout row，并把官方 sidebar 承载在透明的 desktop 自有 surface 中，可以保留组件兼容性。
 
-**保持官方 layout 激活，仅 shadow 其 root occupant。** 官方 plugin 仍会提供 `layout` service 并拥有子声明，从而造成分裂所有权与含糊 disposal。高级模式会把 service 与对应 root/sidebar 声明作为一个 generation 替换。
+**保持官方 layout 激活，仅 shadow 其 root occupant。** 官方 plugin 仍会提供 `layout` service 并拥有 root 子声明，从而造成分裂所有权与含糊 disposal。高级模式会替换该 service 与 root 声明，同时保持独立 sidebar occupant 启用。
 
 **把 conversation、workspace 或其他 feature surface 复制到 desktop package。** 这些是 feature surface，而非 desktop chrome。保持它们的官方 plugin 激活可避免重复状态，并让上游与第三方改进继续流入 desktop 组合。
 
