@@ -68,7 +68,6 @@ try {
       host.provide('webServer', {
         host: '127.0.0.1',
         port: 43120,
-        register: () => () => {},
       })
       host.provide('webRuntime', {})
       host.provide('appExit', () => {})

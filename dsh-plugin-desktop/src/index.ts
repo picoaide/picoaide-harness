@@ -1,7 +1,6 @@
 /** DSH Desktop Host plugin: owns the selected native shell generation. */
 
 import { fileURLToPath } from 'node:url'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-cmdline'
@@ -19,102 +18,10 @@ export const inject = ['desktopRuntime', 'webServer', 'webRuntime', 'appExit', '
 /** Standard settings namespace shared by tray and configuration surfaces. */
 export const DESKTOP_SETTINGS_NAMESPACE = settingsNamespace('dsh-desktop')
 
-/** Same-origin endpoint used only by the desktop settings page. */
-export const DESKTOP_MODE_ENDPOINT = '/api/dsh-desktop/mode'
-
-const MAX_MODE_REQUEST_BYTES = 128
-
 /** Desktop settings presented by the standard settings service. */
 export interface DesktopSettings {
   /** Native presentation selected for the next application generation. */
   mode: DesktopShellMode
-}
-
-/** Build the narrow loopback-only mode mutation handler. */
-export function createDesktopModeHandler(options: {
-  /** Exact authority of the desktop Web server. */
-  authority: string
-  /** Persist one schema-validated settings patch. */
-  update: (patch: DesktopSettings) => Promise<void>
-  /** Report rejected persistence without exposing details to the browser. */
-  reportError: (error: unknown) => void
-}): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const origin = `http://${options.authority}`
-  return async (req, res) => {
-    if (req.method !== 'POST') {
-      res.setHeader('allow', 'POST')
-      respond(res, 405, 'method-not-allowed')
-      return
-    }
-    if (req.headers.host !== options.authority || req.headers.origin !== origin) {
-      respond(res, 403, 'forbidden-origin')
-      return
-    }
-    const mediaType = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase()
-    if (mediaType !== 'application/json') {
-      respond(res, 415, 'unsupported-media-type')
-      return
-    }
-    let source: string
-    try {
-      source = await readRequestBody(req)
-    } catch (error) {
-      respond(res, error instanceof RequestTooLargeError ? 413 : 400, 'invalid-body')
-      return
-    }
-    let value: unknown
-    try {
-      value = JSON.parse(source)
-    } catch {
-      respond(res, 400, 'invalid-json')
-      return
-    }
-    if (!isModeBody(value)) {
-      respond(res, 400, 'invalid-mode')
-      return
-    }
-    try {
-      await options.update(value)
-    } catch (error) {
-      options.reportError(error)
-      respond(res, 400, 'mode-rejected')
-      return
-    }
-    res.writeHead(204)
-    res.end()
-  }
-}
-
-class RequestTooLargeError extends Error {}
-
-async function readRequestBody(req: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of req) {
-    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array)
-    size += bytes.byteLength
-    if (size > MAX_MODE_REQUEST_BYTES) throw new RequestTooLargeError()
-    chunks.push(bytes)
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
-
-function isModeBody(value: unknown): value is DesktopSettings {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const keys = Object.keys(value)
-  return keys.length === 1 && keys[0] === 'mode'
-    && ((value as Record<string, unknown>).mode === 'compatibility'
-      || (value as Record<string, unknown>).mode === 'advanced')
-}
-
-function respond(res: ServerResponse, status: number, error: string): void {
-  const body = JSON.stringify({ error })
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(body),
-    'cache-control': 'no-store',
-  })
-  res.end(body)
 }
 
 /** Schema registered with the standard settings service. */
@@ -174,7 +81,7 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('dsh-plugin-desktop: the launcher did not provide ctx.appExit')
   }
   if (ctx.webServer.host !== '127.0.0.1') {
-    throw new Error('dsh-plugin-desktop: desktop mode endpoint requires a loopback Web server')
+    throw new Error('dsh-plugin-desktop: desktop shell requires a loopback Web server')
   }
   const iconPath = fileURLToPath(new URL('../build/app-icon.png', import.meta.url))
   const trayIcons = {
@@ -192,19 +99,6 @@ export function apply(ctx: Context, config: Config): void {
         }
       },
     },
-  )
-  const authority = `127.0.0.1:${String(ctx.webServer.port)}`
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: DESKTOP_MODE_ENDPOINT,
-      handler: createDesktopModeHandler({
-        authority,
-        update: patch => settings.update(patch),
-        reportError: error => { ctx.logger.warn(error) },
-      }),
-    }),
-    'dsh-plugin-desktop: mode endpoint',
   )
   ctx.effect(() => {
     let pending: ReturnType<typeof setImmediate> | undefined

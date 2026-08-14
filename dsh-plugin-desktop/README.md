@@ -10,7 +10,7 @@ The Electron executable is minimal bootstrap code. It acquires the single-instan
 
 Both presentation modes reuse the existing loopback Web carrier. The profile mounts the ordinary `dsh-base` and `dsh-web-app` bundles, the Host binds its HTTP and WebSocket surface to `127.0.0.1` on an ephemeral port, and Electron loads that same-origin page in a sandboxed renderer. There is no Electron-owned plugin roster, preload bridge, or raw Electron API in the renderer.
 
-The desktop package has normal Host and Web Client faces. Its Client face always contributes the standard **Desktop App** settings section. Compatibility mode stops there and leaves the official root, layout, and sidebar presentation untouched. Advanced mode additionally provides the desktop layout service and root/sidebar presentation described below. Third-party Web clients continue to use the ordinary DSH module graph in both modes.
+The desktop package has normal Host and Web Client faces. Its Client face validates the Host-supplied mode and platform markers in both modes. Compatibility then returns without registering services, slots, styles, or presentation; advanced mode installs the desktop layout service and root/sidebar presentation described below. Third-party Web clients continue to use the ordinary DSH module graph in both modes.
 
 The launcher repairs only its installation-owned profile prefix. A profile changed by `dsh plugin --profile desktop add third-party-plugin` contains `dsh-base`, `dsh-web-app`, then the same third-party bundles in their previous relative order. The launcher inserts its own desktop layer after `dsh-web-app`; it does not persist itself in the user-managed bundle list.
 
@@ -27,17 +27,15 @@ dsh-desktop:
 
 The launcher reads the same file resolved by the active `@deepseek-ai/dsh-settings-file` row before composing a generation. The Host registers the `dsh-desktop` namespace with the standard settings service. There is no parallel mode value in the profile manifest.
 
-The upstream settings description API intentionally exposes an allowlist and does not publish third-party namespaces, so the desktop Client does not pretend that `ctx.settingsScope` can read `dsh-desktop`. It takes the current mode only from the validated renderer URL and posts `{ "mode": "..." }` to the desktop-owned `/api/dsh-desktop/mode` endpoint. The Host registers that route only on its `127.0.0.1` Web server and requires the exact Host and Origin, `POST`, JSON media type, a bounded body, and an object containing only the supported mode field. A valid request delegates to the Host's registered settings scope and returns `204`; the renderer never writes `settings.yaml` directly.
+Users can select the other mode from the tray or edit the DSH home `settings.yaml` document by hand. The tray updates the registered `dsh-desktop` settings namespace, while a manual edit changes the same file observed by the settings provider. A committed change requests one orderly restart: the current Cordis tree disposes first, then Electron relaunches only after a successful zero-code shutdown. The application never hot-swaps root slots, native window materials, or Loader rows inside a live renderer generation.
 
-Users can select the mode from the tray or from Settings → **Desktop App**. Both entry points update the same registered settings namespace. A committed change requests one orderly restart: the current Cordis tree disposes first, then Electron relaunches only after a successful zero-code shutdown. The application never hot-swaps root slots, native window materials, or Loader rows inside a live renderer generation.
-
-Linux supports compatibility mode only. Its advanced option is disabled in the tray and settings page, and Host validation rejects an advanced write before persistence.
+Linux supports compatibility mode only. Its tray mode command is disabled, and an advanced value is rejected rather than silently falling back.
 
 ## Compatibility mode
 
 `dsh-desktop.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame and loads the official Web surface from the active DSH profile. macOS suppresses the visible page title. Windows retains the native caption icon and displays `DeepSeek Harness Desktop`, but removes the window menu bar. The operating system owns native title-bar color and appearance.
 
-The desktop Client module is present so it can register the standard `settings.section` entry for **Desktop App** and its local settings-page styles. It does not provide or replace the `layout` service, register a `root` or `sidebar` occupant, or change the official conversation surface. The final profile keeps the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows enabled.
+The desktop Client module validates the mode and platform markers, then has no compatibility-mode effects. It does not provide or replace the `layout` service, register a `root` or `sidebar` occupant, install styles, or change the official conversation surface. The final profile keeps the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows enabled.
 
 The Cordis row registers native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official, desktop, and third-party client plugins without a Loader-wide wait inside the plugin itself.
 
@@ -62,7 +60,7 @@ yarn install
 yarn check
 ```
 
-The check verifies that every required first-party peer in the production graph is declared by the desktop deploy root. Headless Loader smokes activate the launcher-owned desktop row and a profile-local third-party row, then boot the published Web profile and inspect its loopback root and client manifest. Unit and type tests cover both profile compositions, the narrow desktop mode endpoint, restart fencing, client environment validation, desktop layout state, and platform-native window options.
+The check verifies that every required first-party peer in the production graph is declared by the desktop deploy root. Headless Loader smokes activate the launcher-owned desktop row and a profile-local third-party row, then boot the published Web profile and inspect its loopback root and client manifest. Unit and type tests cover both profile compositions, restart fencing, client environment validation, desktop layout state, and platform-native window options.
 
 Start the desktop application explicitly when a graphical session is available:
 

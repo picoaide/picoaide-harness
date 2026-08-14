@@ -35,20 +35,14 @@ describe('published package surface', () => {
     expect(manifest.exports).toHaveProperty('./client')
     expect(manifest.exports).toHaveProperty('./package.json')
     expect(manifest.dsh?.bundle).toEqual({ patch: './cordis.patch.yml' })
-    expect(manifest.dsh?.client).toEqual(expect.objectContaining({
+    expect(manifest.dsh?.client).toEqual({
       platform: 'web',
-      inject: expect.arrayContaining([
+      inject: [
         '@deepseek-ai/dsh-client-runtime',
         '@deepseek-ai/dsh-client-ui-theme',
-        '@deepseek-ai/dsh-client-ui-settings',
-      ]),
-    }))
-    expect(manifest.dsh?.client).not.toEqual(expect.objectContaining({
-      inject: expect.arrayContaining([
-        '@deepseek-ai/dsh-client-connection',
-        '@deepseek-ai/dsh-api-remotes',
-      ]),
-    }))
+        '@deepseek-ai/dsh-client-locale',
+      ],
+    })
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
   })
 

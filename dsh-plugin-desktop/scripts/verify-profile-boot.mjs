@@ -9,7 +9,7 @@ import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
-import { DESKTOP_MODE_ENDPOINT, DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
+import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 
@@ -96,15 +96,6 @@ try {
     '@deepseek-ai/dsh-client-ui-directory-picker-native',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
-  }
-  const origin = new URL(expectedUrl).origin
-  const modeResponse = await fetch(`${origin}${DESKTOP_MODE_ENDPOINT}`, {
-    method: 'POST',
-    headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ mode: 'advanced' }),
-  })
-  if (modeResponse.status !== 204) {
-    throw new Error(`assembled desktop mode endpoint returned HTTP ${String(modeResponse.status)}`)
   }
 } finally {
   await ctx?.fiber.dispose()

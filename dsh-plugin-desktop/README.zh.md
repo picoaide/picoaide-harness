@@ -10,7 +10,7 @@ Electron 可执行文件只包含最小启动代码。它获取单实例锁、�
 
 两种呈现模式都复用现有 loopback Web carrier。profile 挂载普通 `dsh-base` 与 `dsh-web-app` bundle；Host 把 HTTP 与 WebSocket surface 绑定到 `127.0.0.1` 的临时端口；Electron 在沙箱 renderer 中加载该同源页面。Electron 不维护自有插件 roster，不使用 preload bridge，renderer 也不会获得原始 Electron API。
 
-desktop package 拥有普通 Host 与 Web Client 两个 face。它的 Client face 始终贡献标准 **桌面程序** settings section。兼容模式只做到这一层，不改动官方 root、layout 与 sidebar 呈现。高级模式还会提供下文所述的 desktop layout service 与 root/sidebar 呈现。两种模式下，第三方 Web client 都继续使用普通 DSH 模块图。
+desktop package 拥有普通 Host 与 Web Client 两个 face。它的 Client face 会在两种模式下校验 Host 提供的模式与平台 marker。兼容模式随后直接返回，不注册 service、slot、样式或呈现；高级模式则安装下文所述的 desktop layout service 与 root/sidebar 呈现。两种模式下，第三方 Web client 都继续使用普通 DSH 模块图。
 
 Launcher 只修复由安装方拥有的 profile 前缀。经 `dsh plugin --profile desktop add third-party-plugin` 修改的 profile 会包含 `dsh-base`、`dsh-web-app`，随后是保持原有相对顺序的第三方 bundle。Launcher 在 `dsh-web-app` 后插入自有 desktop layer，但不会把自身持久化到由用户管理的 bundle 列表。
 
@@ -27,17 +27,15 @@ dsh-desktop:
 
 Launcher 会在组合一个 generation 之前，读取当前 `@deepseek-ai/dsh-settings-file` row 解析到的同一份文件。Host 通过标准 settings service 注册 `dsh-desktop` namespace。profile manifest 中没有平行的模式值。
 
-上游 settings description API 会有意只暴露 allowlist，不会发布第三方 namespace，因此 desktop Client 不会假设 `ctx.settingsScope` 能读取 `dsh-desktop`。它只从已验证 renderer URL 获取当前模式，并把 `{ "mode": "..." }` POST 到 desktop 自有 `/api/dsh-desktop/mode` endpoint。Host 只会在自身 `127.0.0.1` Web server 上注册该路由，并要求精确的 Host 与 Origin、`POST`、JSON 媒体类型、有上限的 body，以及只包含受支持 mode 字段的对象。有效请求会委托给 Host 已注册 settings scope 并返回 `204`；renderer 绝不会直接写入 `settings.yaml`。
+用户可以从托盘选择另一种模式，也可以手工编辑 DSH home 中的 `settings.yaml` 文档。托盘会更新已注册的 `dsh-desktop` settings namespace，手工编辑则修改 settings provider 观察的同一文件。修改提交后会请求一次有序重启：先 dispose 当前 Cordis 树，仅当零退出码的 shutdown 成功时才让 Electron relaunch。应用绝不会在存活的 renderer generation 中热切换 root slot、原生窗口材质或 Loader row。
 
-用户可以从托盘或 Settings → **桌面程序** 选择模式。两个入口都更新同一个已注册 settings namespace。修改提交后会请求一次有序重启：先 dispose 当前 Cordis 树，仅当零退出码的 shutdown 成功时才让 Electron relaunch。应用绝不会在存活的 renderer generation 中热切换 root slot、原生窗口材质或 Loader row。
-
-Linux 只支持兼容模式。托盘与 settings 页面中的高级选项会被禁用，Host 校验也会在持久化之前拒绝 advanced 写入。
+Linux 只支持兼容模式。其托盘模式命令会被禁用，advanced 值会被拒绝，而不会静默降级。
 
 ## 兼容模式
 
 `dsh-desktop.mode` 默认为 `compatibility`。该模式创建带有操作系统原生边框的普通窗口，并加载当前 DSH profile 中的官方 Web surface。macOS 会隐藏可见的页面标题。Windows 保留原生标题栏图标并显示 `DeepSeek Harness Desktop`，但会移除窗口菜单栏。原生标题栏颜色与外观由操作系统拥有。
 
-desktop Client module 会加载，以便为 **桌面程序** 注册标准 `settings.section` entry 与该设置页的局部样式。它不提供或替换 `layout` service，不注册 `root` 或 `sidebar` occupant，也不改动官方 conversation surface。最终 profile 会保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
+desktop Client module 会校验模式与平台 marker，随后在兼容模式下不产生任何 effect。它不提供或替换 `layout` service，不注册 `root` 或 `sidebar` occupant，不安装样式，也不改动官方 conversation surface。最终 profile 会保持官方 `ui-layout`、`ui-sidebar` 与 `ui-conversation` row 处于启用状态。
 
 Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方、desktop 与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
 
@@ -62,7 +60,7 @@ yarn install
 yarn check
 ```
 
-该检查会验证生产依赖图中的每个必需第一方 peer 都由 desktop deploy root 声明。Headless Loader smoke 会激活 launcher 拥有的 desktop row 与 profile 本地第三方 row，然后启动已发布 Web profile 并检查其 loopback 根页面与 client manifest。单元和类型测试覆盖两种 profile 组合、窄 desktop 模式 endpoint、重启栅栏、client environment 校验、desktop layout 状态与各平台原生窗口选项。
+该检查会验证生产依赖图中的每个必需第一方 peer 都由 desktop deploy root 声明。Headless Loader smoke 会激活 launcher 拥有的 desktop row 与 profile 本地第三方 row，然后启动已发布 Web profile 并检查其 loopback 根页面与 client manifest。单元和类型测试覆盖两种 profile 组合、重启栅栏、client environment 校验、desktop layout 状态与各平台原生窗口选项。
 
 有图形会话时，显式启动桌面应用：
 

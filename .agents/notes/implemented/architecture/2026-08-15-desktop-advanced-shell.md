@@ -8,21 +8,19 @@ English | [中文](2026-08-15-desktop-advanced-shell.zh.md)
 
 DSH Desktop needs a native-material presentation on macOS and Windows without editing the pinned upstream checkout or copying the official Web application. The presentation changes several axes together: native window construction, root/sidebar slot ownership, the `layout` service, and document-level theme projection. Applying only part of that set, or changing it inside a running renderer, would leave Host composition and Client presentation inconsistent.
 
-Mode selection also needs two user entry points—the application tray and the standard Settings UI—without allowing each entry point to invent its own persistence or restart behavior.
+Mode selection must use one durable source whether a user chooses the application tray command or edits the settings file by hand, and every change must cross the same restart boundary.
 
 ## Decision
 
 Advanced mode is a complete desktop-owned generation selected by `dsh-desktop.mode: advanced`. It remains on the upstream loopback Web carrier and ordinary Client module loader; only explicitly owned presentation and native-window seams change.
 
-### One settings source and two entry points
+### One settings source
 
 The DSH home `settings.yaml` document is the single source of truth. The launcher resolves it through the active `@deepseek-ai/dsh-settings-file` row and reads `dsh-desktop.mode` before it produces the final Loader patches. It does not persist a parallel mode in the profile manifest, Electron preferences, command-line flags, or another desktop file.
 
-The `desktop-shell` Host plugin registers `settingsNamespace('dsh-desktop')` with a schema containing `mode: compatibility | advanced` and `applies: restart`. The tray calls that registered scope's narrow `settings.update({ mode })` path.
+The `desktop-shell` Host plugin registers `settingsNamespace('dsh-desktop')` with a schema containing `mode: compatibility | advanced` and `applies: restart`. The tray calls that registered scope's narrow `settings.update({ mode })` path. A user may instead edit the same `settings.yaml` document directly; the file provider and registered namespace observe that one durable value.
 
-The upstream settings description API exposes a fixed allowlist and does not publish third-party namespaces, so the desktop Client cannot bind `dsh-desktop` through `ctx.settingsScope`. It reads the active mode only from the Host-validated renderer URL, registers the localized `settings.section` page, and posts a new value to `/api/dsh-desktop/mode` on the same loopback Web origin. The route exists only when the Web server is bound to `127.0.0.1`; its handler requires exact Host and Origin headers, `POST`, JSON media type, a body no larger than 128 bytes, and an object containing only one supported `mode`. It delegates a valid request to the Host's registered settings scope and returns `204`. Neither user entry point writes `settings.yaml` directly and the endpoint exposes no general settings mutation or Host error details.
-
-Linux validation rejects `advanced` before persistence. The Client disables and labels the advanced Settings choice on Linux, and the tray disables its mode command there.
+Linux supports compatibility only. The tray disables its mode command there, and an advanced value is rejected rather than being mapped to a different presentation.
 
 ### Restart is the composition boundary
 
@@ -50,7 +48,7 @@ On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positio
 
 On Windows the advanced window uses a hidden title bar with native title-bar overlay controls, a transparent background, `backgroundMaterial: acrylic`, native shadow, rounded corners, and a thick resizable frame. The renderer reserves the drag region and marks controls, inputs, dialogs, and interactive content as non-draggable.
 
-Advanced mode is unsupported on Linux. The Host schema, settings page, tray, and native window constructor all enforce the same boundary instead of silently falling back.
+Advanced mode is unsupported on Linux. The Host validation, tray, and native window constructor enforce the same boundary instead of silently falling back.
 
 ## Security and carrier boundary
 
@@ -58,7 +56,7 @@ Advanced mode does not add a preload script, Electron IPC transport, or Node cap
 
 ## Verification
 
-Profile tests write `dsh-desktop.mode: advanced` to a temporary `settings.yaml` and verify projection into `desktop-shell`, disabled official layout/sidebar rows, and enabled conversation. Host tests cover the shared settings namespace, POST-only endpoint, strict payload validation, changed-value restart, tray update path, and pre-persistence Linux rejection. Client tests cover environment validation, scoped layout-service disposal, responsive column rules, narrow mode submission, and response handling. Type checking validates the desktop declarations, including platform-gated UI, against the published rc.6 slot and service contracts.
+Profile tests write `dsh-desktop.mode: advanced` to a temporary `settings.yaml` and verify projection into `desktop-shell`, disabled official layout/sidebar rows, and enabled conversation. Host tests cover the shared settings namespace, changed-value restart, tray update path, and pre-persistence Linux rejection. Client tests cover environment validation, scoped layout-service disposal, responsive column rules, slot registration, and theme projection. Type checking validates the desktop declarations against the published rc.6 slot and service contracts.
 
 Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Windows acrylic/native controls, Linux rejection, and the tray's opposite-mode update. Shutdown tests verify relaunch only after successful zero-code disposal and no relaunch for a failed generation. Client and Host bundles build headlessly; graphical native-material appearance remains a target-machine verification boundary.
 
@@ -68,9 +66,9 @@ Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Win
 
 **Keep official layout active and shadow only its root occupant.** The official plugin would still provide the `layout` service and own child declarations, creating split ownership and ambiguous disposal. Advanced mode replaces the service and the corresponding root/sidebar declarations as one generation.
 
-**Copy conversation, workspace, or settings UI into the desktop package.** Those are feature surfaces, not desktop chrome. Keeping their official plugins active avoids duplicated state and lets upstream and third-party improvements flow into the desktop composition.
+**Copy conversation, workspace, or other feature surfaces into the desktop package.** Those are feature surfaces, not desktop chrome. Keeping their official plugins active avoids duplicated state and lets upstream and third-party improvements flow into the desktop composition.
 
-**Write a separate Electron preference from the tray.** Two stores could disagree. Both controls therefore converge on the Host's registered `dsh-desktop` namespace: the tray calls it directly, while the renderer reaches only its narrow same-origin endpoint.
+**Write a separate Electron preference from the tray.** Two stores could disagree. The tray therefore updates the Host's registered `dsh-desktop` namespace, and manual edits target the same `settings.yaml` document.
 
 **Hot-reload the Client shell after changing mode.** This cannot atomically reconstruct native window materials, Loader rows, service ownership, and root declarations. A bounded relaunch is the smallest coherent transition.
 
@@ -78,6 +76,6 @@ Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Win
 
 ## Consequences
 
-DSH Desktop gains a native-material macOS and Windows presentation without modifying the upstream submodule, copying the Web application, or introducing a second plugin or transport system. Settings and tray controls converge on one durable value, and a restart creates a coherent Host, Client, and native-window generation.
+DSH Desktop gains a native-material macOS and Windows presentation without modifying the upstream submodule, copying the Web application, or introducing a second plugin or transport system. Tray changes and manual `settings.yaml` edits converge on one durable value, and a restart creates a coherent Host, Client, and native-window generation.
 
 The desktop package now owns real Client presentation code and must track the published slot, theme, and service contracts it uses. Advanced mode deliberately has a different presentation-row composition from browser Web and compatibility mode. Native appearance also depends on operating-system support and must be verified on real target machines; Linux remains compatibility-only.
