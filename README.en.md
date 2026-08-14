@@ -12,6 +12,8 @@
 
 <p align="center"><sub><a href="README.md">中文</a> · English</sub></p>
 
+<h3 align="center">A modern desktop experience for the DeepSeek Harness ecosystem (<a href="#plugin-ecosystem">Plugin</a>)</h3>
+
 <a id="run"></a>
 
 <h3 align="center"><a href="https://www.deepseekdesktop.com"><ins>Download Desktop</ins></a></h3>
