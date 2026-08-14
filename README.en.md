@@ -1,4 +1,6 @@
-<h1 align="center">DeepSeek Harness Desktop</h1>
+<p align="center">
+  <img src="assets/desktop-hero-en.jpg" alt="DeepSeek Harness Desktop" width="100%">
+</p>
 
 <p align="center">
   <a href="https://github.com/anywhere-labs/deepseek-harness-desktop"><img src="https://img.shields.io/github/stars/anywhere-labs/deepseek-harness-desktop?style=flat&amp;label=%E2%98%85&amp;color=08C" alt="GitHub stars"></a>
@@ -9,12 +11,6 @@
 </p>
 
 <p align="center"><sub><a href="README.md">中文</a> · English</sub></p>
-
-<h3 align="center">A modern desktop experience for the DeepSeek Harness ecosystem (<a href="#plugin-ecosystem">Plugin</a>)</h3>
-
-<h4 align="center">
-  DeepSeek Harness currently launches its local Web UI from the command line. This project brings service startup, runtime management, and the desktop window into one ready-to-use experience, with no Node.js setup or commands required.
-</h4>
 
 <a id="run"></a>
 
