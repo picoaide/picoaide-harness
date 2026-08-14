@@ -40,6 +40,7 @@ export default defineConfig([
   {
     name: `${PACKAGE_NAME}/client`,
     entry: { client: 'src/client/index.ts' },
+    tsconfig: 'tsconfig.client.json',
     outDir: 'lib',
     format: 'cjs',
     platform: 'browser',
