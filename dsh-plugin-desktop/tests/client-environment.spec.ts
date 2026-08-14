@@ -4,6 +4,7 @@ import { provideDesktopLayout } from '../src/client/layout-service.ts'
 import { parseDesktopClientEnvironment } from '../src/client/environment.ts'
 import { computeDesktopColumns, DesktopLayoutState, SIDEBAR_COLLAPSED } from '../src/client/layout-state.ts'
 import { installAdvancedStyles } from '../src/client/styles.ts'
+import { WINDOWS_CAPTION_CONTROLS_WIDTH, WINDOWS_TITLEBAR_HEIGHT } from '../src/window-chrome.ts'
 
 describe('desktop client environment', () => {
   it('accepts the Electron-owned kebab query markers', () => {
@@ -24,7 +25,7 @@ describe('desktop client environment', () => {
 })
 
 describe('advanced desktop layout', () => {
-  it('keeps the upstream session-list fade transparent over native glass', () => {
+  it('owns Windows caption geometry without applying offsets to feature headers', () => {
     let css = ''
     const remove = vi.fn()
     const style = {
@@ -42,6 +43,12 @@ describe('advanced desktop layout', () => {
     try {
       const dispose = installAdvancedStyles()
       expect(css).toMatch(/\.dshDesktopWorkspaceRegion\s*\{[^}]*--dsw-specific-sidebar-fill:\s*transparent;/)
+      expect(css).toContain(`grid-template-rows: ${WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr)`)
+      expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopSidebarSurface \{ grid-row: 1 \/ -1; \}/)
+      expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopConversationSurface,\s*\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopDetailsSurface \{ grid-row: 2; \}/)
+      expect(css).toMatch(/\.dshDesktopWindowsCaptionRow \{[^}]*grid-column: 2 \/ -1;[^}]*grid-row: 1;/)
+      expect(css).toMatch(new RegExp(`\\.dshDesktopWindowsCaptionRow::before \\{[^}]*inset: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH}px 0 0;[^}]*-webkit-app-region: drag;`))
+      expect(css).not.toMatch(/data-desktop-platform="win32"[^{}]*header[^{}]*\{[^}]*padding-right/)
       expect(appendChild).toHaveBeenCalledWith(style)
       dispose()
       expect(remove).toHaveBeenCalledOnce()

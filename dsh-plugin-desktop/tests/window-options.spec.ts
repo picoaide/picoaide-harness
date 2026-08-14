@@ -6,6 +6,7 @@ import {
   compatibilityWindowOptions,
   desktopWindowOptions,
 } from '../src/window-options.ts'
+import { WINDOWS_TITLEBAR_HEIGHT } from '../src/window-chrome.ts'
 
 const spec: DesktopShellSpec = {
   mode: 'compatibility',
@@ -103,7 +104,7 @@ describe('compatibility BrowserWindow options', () => {
       titleBarOverlay: {
         color: '#00000000',
         symbolColor: '#7f858f',
-        height: 48,
+        height: WINDOWS_TITLEBAR_HEIGHT,
       },
       backgroundMaterial: 'acrylic',
       hasShadow: true,

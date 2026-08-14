@@ -48,7 +48,7 @@ desktop frame 只拥有几何与 chrome：可折叠 sidebar rail、中心宽度�
 
 workspace seat 会把官方 session 列表的渐隐 token 局部设为透明。官方列表会保留滚动与间距行为，但不会把 Web 侧边栏的不透明填充色绘制到原生材质上。
 
-在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: acrylic`、原生阴影、圆角与粗可调整边框。Renderer 会保留 drag region，并把控件、输入框、对话框与交互内容标记为不可拖动。
+在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: acrylic`、原生阴影、圆角与粗可调整边框。Desktop frame 会在 conversation 与 details 两列上方拥有一个 48 CSS 像素 caption row，在该行内避让原生控件区域，并把两个完整 slot surface 放到下一行。该 caption 几何不会检查或重排 feature 自有的 Header 节点，因此上游与第三方 slot contribution 会整体移动。控件、输入框、对话框与交互内容仍然不可拖动。
 
 高级模式不支持 Linux。Host 校验、托盘与原生窗口构造器都会强制同一边界，而不会静默降级。
 
@@ -58,7 +58,7 @@ workspace seat 会把官方 session 列表的渐隐 token 局部设为透明。�
 
 ## Verification
 
-Profile 测试会向临时 `settings.yaml` 写入 `dsh-desktop.mode: advanced`，并验证它被投影到 `desktop-shell`、官方 layout/sidebar row 已禁用，以及 conversation 已启用。Host 测试覆盖共享 settings namespace、值变化后重启、托盘更新路径，以及持久化前的 Linux 拒绝。Client 测试覆盖 environment 校验、作用域化 layout-service disposal、响应式列规则、slot 注册与 theme 投影。类型检查会根据已发布 rc.6 slot 与 service contract 验证 desktop 声明。
+Profile 测试会向临时 `settings.yaml` 写入 `dsh-desktop.mode: advanced`，并验证它被投影到 `desktop-shell`、官方 layout/sidebar row 已禁用，以及 conversation 已启用。Host 测试覆盖共享 settings namespace、值变化后重启、托盘更新路径，以及持久化前的 Linux 拒绝。Client 测试覆盖 environment 校验、作用域化 layout-service disposal、响应式列规则、Windows 外层 slot caption 几何、slot 注册与 theme 投影。类型检查会根据已发布 rc.6 slot 与 service contract 验证 desktop 声明。
 
 窗口选项与 Electron-runtime 测试验证 macOS hidden-inset vibrancy、Windows acrylic/原生控件、Linux 拒绝，以及托盘更新到相反模式。Shutdown 测试验证仅在成功零退出码 disposal 后 relaunch，且失败 generation 不会 relaunch。Client 与 Host bundle 均可 headless 构建；图形化原生材质外观仍是目标机器验证边界。
 

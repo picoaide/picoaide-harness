@@ -51,7 +51,7 @@ desktop Client 随后在自身 Cordis fiber 生命期内提供 `layout` service�
 
 workspace seat 会把上游 session 列表的边缘渐隐设为透明，避免其 Web 侧边栏不透明填充色在原生材质上绘制暗色横条。
 
-在 macOS 上，高级窗口使用透明 hidden-inset 标题栏、定位后的红黄绿按钮与原生 `sidebar` vibrancy。在 Windows 上，它使用带原生窗口控件的隐藏标题栏、透明 overlay、acrylic 背景材质、阴影、圆角与粗可调整边框。Linux 会拒绝高级模式，而不会静默降级到与持久化设置不同的呈现。
+在 macOS 上，高级窗口使用透明 hidden-inset 标题栏、定位后的红黄绿按钮与原生 `sidebar` vibrancy。在 Windows 上，它使用带原生窗口控件的隐藏标题栏、透明 overlay、acrylic 背景材质、阴影、圆角与粗可调整边框。Desktop 自有的 48 CSS 像素 caption row 会横跨 Windows 的 conversation 与 details 两列；完整的上游 slot surface 从该行下方开始，因此官方与第三方 Header contribution 会保持原有相对布局，无需针对具体元素设置 caption offset。Linux 会拒绝高级模式，而不会静默降级到与持久化设置不同的呈现。
 
 ## 开发
 

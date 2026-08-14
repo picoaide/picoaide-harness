@@ -68,6 +68,7 @@ export function AdvancedFrame({ layout, platform, renderSlot, useSessions }: Adv
       data-sidebar-collapsed={collapsed || undefined}
       style={{ gridTemplateColumns: `${columns.sidebar}px minmax(0, 1fr) ${columns.details}px` }}
     >
+      {platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}
       <aside className="dshDesktopSidebarSurface">
         {renderSlot('sidebar', { collapsed, width: columns.sidebar })}
       </aside>
