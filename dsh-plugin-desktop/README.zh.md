@@ -53,7 +53,7 @@ desktop Client 随后在自身 Cordis fiber 生命期内提供 `layout` service�
 
 desktop sidebar surface 会把上游 sidebar-fill token 局部设为透明，因此官方 sidebar 与 session 列表渐隐可以透出原生材质，而无需改变其组件样式。
 
-在 macOS 上，高级窗口使用透明 hidden-inset 标题栏、定位后的红黄绿按钮与原生 `sidebar` vibrancy。其 90 CSS 像素收起列会把官方 56 像素 rail 居中放在 desktop 自有的红绿灯顶部 inset 下方。在 Windows 上，官方 sidebar 保持兼容模式几何：收起 56 像素、默认展开 280 像素，并沿用相同的上游过渡行为；透明 surface 会透出 Mica。窗口使用带原生控件的隐藏标题栏、透明 overlay、Mica 背景材质、阴影、圆角与粗可调整边框。Electron 仅在 Windows 11 22H2 及以上版本提供由系统绘制的 Mica 材质。Desktop 自有的 48 CSS 像素 caption row 会横跨 Windows 的 conversation 与 details 两列；完整的上游 slot surface 从该行下方开始，因此官方与第三方 Header contribution 会保持原有相对布局，无需针对具体元素设置 caption offset。Linux 会拒绝高级模式，而不会静默降级到与持久化设置不同的呈现。
+在 macOS 上，高级窗口使用透明 hidden-inset 标题栏、定位后的红黄绿按钮与原生 `sidebar` vibrancy。其 90 CSS 像素收起列会把官方 56 像素 rail 居中放在 desktop 自有的红绿灯顶部 inset 下方。完整的上游 sidebar 不会作为原生窗口拖动区域；只有红绿灯右侧的空白标题栏条可以拖动窗口，因此官方与第三方 sidebar 交互内容都保持可点击。Conversation 与 details 完整 surface 上方另有一条 32 CSS 像素 caption row，提供稳定的 Session 窗口拖动目标，而不会选择或覆盖 feature 自有的 Header 节点。在 Windows 上，官方 sidebar 保持兼容模式几何：收起 56 像素、默认展开 280 像素，并沿用相同的上游过渡行为；透明 surface 会透出 Mica。窗口使用带原生控件的隐藏标题栏、透明 overlay、Mica 背景材质、阴影、圆角与粗可调整边框。Electron 仅在 Windows 11 22H2 及以上版本提供由系统绘制的 Mica 材质。Desktop 自有的 48 CSS 像素 caption row 会横跨 Windows 的 conversation 与 details 两列；完整的上游 slot surface 从该行下方开始，因此官方与第三方 Header contribution 会保持原有相对布局，无需针对具体元素设置 caption offset。Linux 会拒绝高级模式，而不会静默降级到与持久化设置不同的呈现。
 
 ## 开发
 

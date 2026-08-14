@@ -44,7 +44,7 @@ Disabling official layout removes the presentation layer that normally projects 
 
 ### Native materials
 
-On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positioned traffic lights, a transparent background, `vibrancy: sidebar`, and `visualEffectState: followWindow`. The renderer keeps a transparent sidebar surface over the native vibrancy and adds a traffic-light inset around the official sidebar. Its 90 CSS-pixel collapsed column centers the official 56-pixel rail.
+On macOS the advanced `BrowserWindow` uses `titleBarStyle: hiddenInset`, positioned traffic lights, a transparent background, `vibrancy: sidebar`, and `visualEffectState: followWindow`. The renderer keeps a transparent sidebar surface over the native vibrancy and adds a traffic-light inset around the official sidebar. Its 90 CSS-pixel collapsed column centers the official 56-pixel rail. The complete official sidebar and every contributed child are excluded from the native window drag region; a desktop-owned empty strip above the content and to the right of the traffic lights is the sidebar's only window drag region. A separate 32 CSS-pixel caption row spans the conversation and details columns, and both complete slot surfaces begin below it. The desktop shell therefore owns the Session-window drag target without inspecting, covering, or changing feature-owned Header nodes.
 
 The desktop sidebar surface scopes the official sidebar-fill token to transparent. The official sidebar and session list keep their component behavior, scrolling, spacing, and fade without painting the opaque Web fill over native material.
 

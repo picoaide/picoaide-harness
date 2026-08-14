@@ -44,7 +44,7 @@ desktop frame 只拥有几何与 chrome：可折叠 sidebar 列、中心宽度�
 
 ### 原生材质
 
-在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 会在原生 vibrancy 上保持 sidebar surface 透明，并在官方 sidebar 外添加红绿灯 inset。其 90 CSS 像素收起列会把官方 56 像素 rail 居中。
+在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 会在原生 vibrancy 上保持 sidebar surface 透明，并在官方 sidebar 外添加红绿灯 inset。其 90 CSS 像素收起列会把官方 56 像素 rail 居中。完整的官方 sidebar 及其全部 contribution child 都不会作为原生窗口拖动区域；内容上方且位于红绿灯右侧的 desktop 自有空白条是 sidebar 中唯一的窗口拖动区域。另一条 32 CSS 像素 caption row 会横跨 conversation 与 details 两列，两个完整 slot surface 都从其下方开始。因此，desktop shell 会拥有 Session 窗口拖动目标，而不会检查、覆盖或改变 feature 自有 Header 节点。
 
 desktop sidebar surface 会把官方 sidebar-fill token 局部设为透明。官方 sidebar 与 session 列表会保留组件行为、滚动、间距与渐隐，但不会把 Web 不透明填充色绘制到原生材质上。
 

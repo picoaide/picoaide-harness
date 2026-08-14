@@ -1,4 +1,9 @@
-import { WINDOWS_CAPTION_CONTROLS_WIDTH, WINDOWS_TITLEBAR_HEIGHT } from '../window-chrome.ts'
+import {
+  MACOS_TITLEBAR_HEIGHT,
+  MACOS_TRAFFIC_LIGHT_SAFE_WIDTH,
+  WINDOWS_CAPTION_CONTROLS_WIDTH,
+  WINDOWS_TITLEBAR_HEIGHT,
+} from '../window-chrome.ts'
 import { SIDEBAR_COLLAPSED } from './layout-state.ts'
 
 /** Advanced-shell stylesheet kept as a plain string so the package client bundle stays self-contained. */
@@ -6,11 +11,16 @@ const ADVANCED_STYLES = `
 html, body, #root { width: 100%; height: 100%; }
 body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !important; }
 .dshDesktopFrame { position: relative; display: grid; grid-template-rows: 100%; width: 100%; height: 100%; overflow: hidden; background: transparent; }
-.dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: transparent; grid-column: 1; grid-row: 1; min-width: 0; overflow: hidden; background: transparent; border-right: 1px solid var(--dsw-alias-border-l1); }
+.dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: transparent; position: relative; grid-column: 1; grid-row: 1; min-width: 0; overflow: hidden; background: transparent; border-right: 1px solid var(--dsw-alias-border-l1); }
 .dshDesktopUpstreamSidebar { box-sizing: border-box; width: 100%; height: 100%; }
-.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopUpstreamSidebar { padding-top: 32px; }
+.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopUpstreamSidebar { padding-top: ${MACOS_TITLEBAR_HEIGHT}px; -webkit-app-region: no-drag; }
 .dshDesktopFrame[data-desktop-platform="darwin"][data-sidebar-collapsed] .dshDesktopUpstreamSidebar { width: ${SIDEBAR_COLLAPSED}px; margin: 0 auto; }
-.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface { user-select: none; -webkit-app-region: drag; }
+.dshDesktopFrame[data-desktop-platform="darwin"] { grid-template-rows: ${MACOS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
+.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface { grid-row: 1 / -1; -webkit-app-region: no-drag; }
+.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopConversationSurface,
+.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopDetailsSurface { grid-row: 2; }
+.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface::before { content: ""; position: absolute; z-index: 1; top: 0; right: 0; left: ${MACOS_TRAFFIC_LIGHT_SAFE_WIDTH}px; height: ${MACOS_TITLEBAR_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
+.dshDesktopMacCaptionRow { grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); user-select: none; -webkit-app-region: drag; }
 .dshDesktopConversationSurface { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); }
 .dshDesktopDetailsSurface { grid-column: 3; grid-row: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--dsw-alias-bg-base); border-left: 1px solid var(--dsw-alias-border-l2); }
 .dshDesktopFrame[data-desktop-platform="win32"] { grid-template-rows: ${WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
@@ -23,19 +33,12 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopOverlay { position: absolute; z-index: 1000; inset: 0; pointer-events: none; }
 .dshDesktopOverlay > * { pointer-events: auto; }
 .dshDesktopResizeHandle { position: absolute; z-index: 50; top: 0; bottom: 0; width: 8px; margin-left: -4px; cursor: col-resize; touch-action: none; -webkit-app-region: no-drag; }
-.dshDesktopConversationSurface [data-phase] { position: relative; }
-.dshDesktopConversationSurface [data-phase] > header { user-select: none; -webkit-app-region: drag; }
-.dshDesktopConversationSurface [data-phase='hero']::before,
-.dshDesktopConversationSurface [data-phase='settling']::before { content: ""; position: absolute; z-index: 1; top: 0; right: 0; left: 0; height: 38px; user-select: none; -webkit-app-region: drag; }
 .dshDesktopNoDrag, button, input, textarea, select, a, [role="button"], [role="dialog"], [role="presentation"] { -webkit-app-region: no-drag; }
-.dshDesktopConversationSurface [data-phase] > header button,
-.dshDesktopConversationSurface [data-phase] > header a,
-.dshDesktopConversationSurface [data-phase] > header input,
 [role="dialog"], [aria-modal="true"] { -webkit-app-region: no-drag !important; }
 html:has([aria-modal="true"]) .dshDesktopWindowsCaptionRow::before,
+html:has([aria-modal="true"]) .dshDesktopMacCaptionRow,
 html:has([aria-modal="true"]) .dshDesktopSidebarSurface,
-html:has([aria-modal="true"]) .dshDesktopConversationSurface [data-phase] > header,
-html:has([aria-modal="true"]) .dshDesktopConversationSurface [data-phase]::before { -webkit-app-region: no-drag !important; }
+html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-region: no-drag !important; }
 @media (prefers-reduced-motion: reduce) { .dshDesktopFrame { transition: none !important; } }
 `
 

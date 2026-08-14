@@ -6,7 +6,12 @@ import {
   computeDesktopColumns, DesktopLayoutState, MACOS_SIDEBAR_COLLAPSED, SIDEBAR_COLLAPSED,
 } from '../src/client/layout-state.ts'
 import { installAdvancedStyles } from '../src/client/styles.ts'
-import { WINDOWS_CAPTION_CONTROLS_WIDTH, WINDOWS_TITLEBAR_HEIGHT } from '../src/window-chrome.ts'
+import {
+  MACOS_TITLEBAR_HEIGHT,
+  MACOS_TRAFFIC_LIGHT_SAFE_WIDTH,
+  WINDOWS_CAPTION_CONTROLS_WIDTH,
+  WINDOWS_TITLEBAR_HEIGHT,
+} from '../src/window-chrome.ts'
 
 describe('desktop client environment', () => {
   it('accepts the Electron-owned kebab query markers', () => {
@@ -27,7 +32,7 @@ describe('desktop client environment', () => {
 })
 
 describe('advanced desktop layout', () => {
-  it('owns Windows caption geometry without applying offsets to feature headers', () => {
+  it('owns native caption geometry without targeting feature headers', () => {
     let css = ''
     const remove = vi.fn()
     const style = {
@@ -46,6 +51,15 @@ describe('advanced desktop layout', () => {
       const dispose = installAdvancedStyles()
       expect(css).toMatch(/\.dshDesktopSidebarSurface\s*\{[^}]*--dsw-specific-sidebar-fill:\s*transparent;/)
       expect(css).toMatch(/data-desktop-platform="darwin"\]\[data-sidebar-collapsed\][^{]*\.dshDesktopUpstreamSidebar \{[^}]*width:\s*56px;[^}]*margin:\s*0 auto;/)
+      expect(css).toMatch(new RegExp(`data-desktop-platform="darwin"\\] \\.dshDesktopUpstreamSidebar \\{[^}]*padding-top: ${MACOS_TITLEBAR_HEIGHT}px;[^}]*-webkit-app-region: no-drag;`))
+      expect(css).toContain(`grid-template-rows: ${MACOS_TITLEBAR_HEIGHT}px minmax(0, 1fr)`)
+      expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="darwin"\] \.dshDesktopSidebarSurface \{[^}]*grid-row: 1 \/ -1;[^}]*-webkit-app-region: no-drag;/)
+      expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="darwin"\] \.dshDesktopConversationSurface,\s*\.dshDesktopFrame\[data-desktop-platform="darwin"\] \.dshDesktopDetailsSurface \{ grid-row: 2; \}/)
+      expect(css).toMatch(new RegExp(`data-desktop-platform="darwin"\\] \\.dshDesktopSidebarSurface::before \\{[^}]*left: ${MACOS_TRAFFIC_LIGHT_SAFE_WIDTH}px;[^}]*height: ${MACOS_TITLEBAR_HEIGHT}px;[^}]*-webkit-app-region: drag;`))
+      expect(css).toMatch(/\.dshDesktopMacCaptionRow \{[^}]*grid-column: 2 \/ -1;[^}]*grid-row: 1;[^}]*-webkit-app-region: drag;/)
+      expect(css).not.toMatch(/data-desktop-platform="darwin"\] \.dshDesktopSidebarSurface \{[^}]*-webkit-app-region:\s*drag;/)
+      expect(css).not.toContain('[data-phase')
+      expect(css).toMatch(/html:has\(\[aria-modal="true"\]\) \.dshDesktopMacCaptionRow,[\s\S]*html:has\(\[aria-modal="true"\]\) \.dshDesktopSidebarSurface::before \{ -webkit-app-region: no-drag !important; \}/)
       expect(css).toContain(`grid-template-rows: ${WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr)`)
       expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopSidebarSurface \{ grid-row: 1 \/ -1; \}/)
       expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopConversationSurface,\s*\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopDetailsSurface \{ grid-row: 2; \}/)

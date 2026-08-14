@@ -70,6 +70,7 @@ export function AdvancedFrame({ layout, platform, renderSlot, useSessions }: Adv
       data-sidebar-collapsed={collapsed || undefined}
       style={{ gridTemplateColumns: `${columns.sidebar}px minmax(0, 1fr) ${columns.details}px` }}
     >
+      {platform === 'darwin' && <div className="dshDesktopMacCaptionRow" aria-hidden="true" />}
       {platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}
       <aside className="dshDesktopSidebarSurface">
         <div className="dshDesktopUpstreamSidebar">
