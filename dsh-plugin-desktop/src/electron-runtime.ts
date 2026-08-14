@@ -9,6 +9,7 @@ import {
   Tray,
 } from 'electron'
 import type { DesktopPlatform, DesktopRuntime, DesktopShellSpec } from './runtime.ts'
+import { prepareTrayIcon } from './tray-icons.ts'
 import { compatibilityWindowOptions } from './window-options.ts'
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
@@ -79,9 +80,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (icon.isEmpty()) {
       throw new Error(`dsh-plugin-desktop: failed to load application icon ${spec.iconPath}`)
     }
+    if (this.platform === 'darwin') app.dock?.setIcon(icon)
     const origin = new URL(spec.url).origin
-    const window = new BrowserWindow(compatibilityWindowOptions(spec, icon))
-    window.accessibleTitle = spec.productName
+    const window = new BrowserWindow(compatibilityWindowOptions(spec, icon, this.platform))
+    window.accessibleTitle = spec.windowTitle
+    if (this.platform === 'win32') window.removeMenu()
     this.window = window
 
     const show = (): void => { this.show() }
@@ -120,7 +123,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       return { action: 'deny' }
     })
 
-    const tray = new Tray(icon.resize({ width: 18, height: 18 }))
+    const tray = new Tray(prepareTrayIcon(spec.trayIcons, this.platform))
     this.tray = tray
     tray.setToolTip(spec.productName)
     tray.setContextMenu(Menu.buildFromTemplate([
@@ -136,6 +139,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     } catch (cause) {
       app.off('activate', show)
       window.off('page-title-updated', preserveBlankTitle)
+      tray.off('click', show)
       tray.destroy()
       window.destroy()
       this.tray = undefined
@@ -152,6 +156,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       window.off('page-title-updated', preserveBlankTitle)
       window.webContents.off('will-frame-navigate', navigate)
       window.webContents.off('will-redirect', navigate)
+      tray.off('click', show)
       tray.destroy()
       if (!window.isDestroyed()) window.destroy()
       if (this.tray === tray) this.tray = undefined

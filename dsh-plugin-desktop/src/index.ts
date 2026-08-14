@@ -59,13 +59,19 @@ export function apply(ctx: Context, config: Config): void {
   if (appExit === undefined) {
     throw new Error('dsh-plugin-desktop: the launcher did not provide ctx.appExit')
   }
-  const iconPath = fileURLToPath(new URL('../build/icon.png', import.meta.url))
+  const iconPath = fileURLToPath(new URL('../build/app-icon.png', import.meta.url))
+  const trayIcons = {
+    templatePath: fileURLToPath(new URL('../build/tray-iconTemplate.png', import.meta.url)),
+    bluePath: fileURLToPath(new URL('../build/tray-icon-blue.png', import.meta.url)),
+  }
   ctx.effect(
     () => ctx.desktopRuntime.schedule({
       ...config,
       url: desktopRendererUrl(ctx.webServer.port),
       productName: 'DSH Desktop',
+      windowTitle: 'DeepSeek Harness Desktop',
       iconPath,
+      trayIcons,
       requestQuit: appExit,
     }),
     'dsh-plugin-desktop: native shell generation',

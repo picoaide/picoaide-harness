@@ -27,7 +27,9 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "build/icon.png",
+    "build/app-icon.png",
+    "build/tray-icon.svg",
+    "build/tray-icon*.png",
     "cordis.patch.yml",
     "lib/**/*.js",
     "lib/**/*.map",
@@ -45,7 +47,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build": "node scripts/generate-tray-icons.mjs && node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
@@ -168,6 +170,7 @@
     "@types/react": "^18",
     "electron": "43.4.0",
     "electron-builder": "26.15.3",
+    "sharp": "0.35.3",
     "tsdown": "0.22.2",
     "typescript": "6.0.3",
     "vitest": "4.1.8"
@@ -181,7 +184,9 @@
       "buildResources": "build"
     },
     "files": [
-      "build/icon.png",
+      "build/app-icon.png",
+      "build/tray-icon.svg",
+      "build/tray-icon*.png",
       "cordis.patch.yml",
       "lib/**",
       "package.json"
@@ -191,19 +196,19 @@
         "dir"
       ],
       "category": "public.app-category.developer-tools",
-      "icon": "build/icon.png"
+      "icon": "build/app-icon.png"
     },
     "win": {
       "target": [
         "dir"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/app-icon.png"
     },
     "linux": {
       "target": [
         "dir"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/app-icon.png"
     }
   }
 }

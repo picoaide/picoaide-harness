@@ -11,14 +11,19 @@ const spec: DesktopShellSpec = {
   minHeight: 640,
   url: 'http://127.0.0.1:43120/',
   productName: 'DSH Desktop',
-  iconPath: '/tmp/icon.png',
+  windowTitle: 'DeepSeek Harness Desktop',
+  iconPath: '/tmp/app-icon.png',
+  trayIcons: {
+    templatePath: '/tmp/tray-iconTemplate.png',
+    bluePath: '/tmp/tray-icon-blue.png',
+  },
   requestQuit: () => {},
 }
 
 describe('compatibility BrowserWindow options', () => {
   it('preserves the native frame and enables renderer isolation', () => {
     const icon = {} as NativeImage
-    const options = compatibilityWindowOptions(spec, icon)
+    const options = compatibilityWindowOptions(spec, icon, 'darwin')
 
     expect(options).toEqual(expect.objectContaining({
       title: '',
@@ -51,10 +56,18 @@ describe('compatibility BrowserWindow options', () => {
     }
   })
 
+  it('uses the native Windows caption while hiding the application menu', () => {
+    const options = compatibilityWindowOptions(spec, {} as NativeImage, 'win32')
+
+    expect(options.title).toBe('DeepSeek Harness Desktop')
+    expect(options.autoHideMenuBar).toBe(true)
+  })
+
   it('rejects an advanced spec before BrowserWindow construction', () => {
     expect(() => compatibilityWindowOptions(
       { ...spec, mode: 'advanced' },
       {} as NativeImage,
+      'darwin',
     )).toThrow('unsupported compatibility window mode advanced')
   })
 })

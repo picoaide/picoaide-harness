@@ -20,7 +20,7 @@ DSH Desktop 需要原生应用生命周期，但 Electron package 不能因此�
 
 ## Native lifecycle and security
 
-兼容适配器创建普通 `BrowserWindow`，并且不设置自定义边框、标题栏、透明、vibrancy 或原生材质选项。它会阻止可见页面标题更新，同时保留产品名作为无障碍标题。原生标题栏颜色与外观由操作系统控制；精确匹配 DSH sidebar token 需要高级 client shell。兼容模式仍保留 renderer 隔离、Chromium sandbox、禁用 Node integration、精确同源导航、托盘所有权、关闭后隐藏、单实例唤醒，以及显式退出时有界 dispose Cordis 的行为。
+兼容适配器创建普通 `BrowserWindow`，并且不设置自定义边框、标题栏、透明、vibrancy 或原生材质选项。macOS 会阻止可见页面标题更新。Windows 保留原生标题栏图标和固定的 `DeepSeek Harness Desktop` 标题，同时移除窗口菜单栏。原生标题栏颜色与外观由操作系统控制；精确匹配 DSH sidebar token 需要高级 client shell。所有受支持平台使用同一张 iOS Default 应用图标。托盘在 macOS 使用由品牌 SVG 派生的模板图，在 Windows 与 Linux 使用固定品牌蓝图。兼容模式仍保留 renderer 隔离、Chromium sandbox、禁用 Node integration、精确同源导航、托盘所有权、关闭后隐藏、单实例唤醒，以及显式退出时有界 dispose Cordis 的行为。
 
 高级呈现需要 desktop 自有的 client plugin，并且只由 advanced profile 组合加入。该插件可以替换文档化的 slot 或 service，但不会出现在兼容模式的客户端模块图中。
 

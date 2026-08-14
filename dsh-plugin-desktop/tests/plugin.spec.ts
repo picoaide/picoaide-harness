@@ -53,6 +53,13 @@ describe('desktop Host plugin', () => {
     expect(shell).toEqual(expect.objectContaining({
       mode: 'compatibility',
       url: 'http://127.0.0.1:43120/',
+      productName: 'DSH Desktop',
+      windowTitle: 'DeepSeek Harness Desktop',
+      iconPath: expect.stringMatching(/\/build\/app-icon\.png$/u),
+      trayIcons: {
+        templatePath: expect.stringMatching(/\/build\/tray-iconTemplate\.png$/u),
+        bluePath: expect.stringMatching(/\/build\/tray-icon-blue\.png$/u),
+      },
     }))
   })
 

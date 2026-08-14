@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
 
 const electron = vi.hoisted(() => {
@@ -6,9 +6,17 @@ const electron = vi.hoisted(() => {
   const browserWindows: BrowserWindow[] = []
   const browserWindowOn = vi.fn()
   const browserWindowOff = vi.fn()
-  const icon = {
+  const appIcon = {
     isEmpty: vi.fn(() => false),
-    resize: vi.fn(function resize() { return icon }),
+    setTemplateImage: vi.fn(),
+  }
+  const templateIcon = {
+    isEmpty: vi.fn(() => false),
+    setTemplateImage: vi.fn(),
+  }
+  const blueIcon = {
+    isEmpty: vi.fn(() => false),
+    setTemplateImage: vi.fn(),
   }
   const webContents = {
     on: vi.fn(),
@@ -35,26 +43,46 @@ const electron = vi.hoisted(() => {
     readonly once = vi.fn()
     readonly destroy = vi.fn()
     readonly loadURL = vi.fn(async () => {})
+    readonly removeMenu = vi.fn()
   }
 
   class Tray {
+    readonly image: unknown
     readonly setToolTip = vi.fn()
     readonly setContextMenu = vi.fn()
     readonly on = vi.fn()
+    readonly off = vi.fn()
     readonly destroy = vi.fn()
+
+    constructor(image: unknown) {
+      this.image = image
+      trays.push(this)
+    }
   }
 
+  const trays: Tray[] = []
+  const createFromPath = vi.fn((path: string) => {
+    if (path.endsWith('app-icon.png')) return appIcon
+    if (path.endsWith('tray-iconTemplate.png')) return templateIcon
+    if (path.endsWith('tray-icon-blue.png')) return blueIcon
+    throw new Error(`unexpected image path ${path}`)
+  })
+
   return {
-    app: { on: vi.fn(), off: vi.fn() },
+    app: { dock: { setIcon: vi.fn() }, on: vi.fn(), off: vi.fn() },
+    appIcon,
+    blueIcon,
     BrowserWindow,
     browserWindowOptions,
     browserWindows,
     browserWindowOff,
     browserWindowOn,
     Menu: { buildFromTemplate: vi.fn(() => ({})) },
-    nativeImage: { createFromPath: vi.fn(() => icon) },
+    nativeImage: { createFromPath },
     shell: { openExternal: vi.fn(async () => {}) },
+    templateIcon,
     Tray,
+    trays,
   }
 })
 
@@ -75,7 +103,12 @@ const spec: DesktopShellSpec = {
   minHeight: 640,
   url: 'http://127.0.0.1:43120/',
   productName: 'DSH Desktop',
-  iconPath: '/tmp/icon.png',
+  windowTitle: 'DeepSeek Harness Desktop',
+  iconPath: '/tmp/app-icon.png',
+  trayIcons: {
+    templatePath: '/tmp/tray-iconTemplate.png',
+    bluePath: '/tmp/tray-icon-blue.png',
+  },
   requestQuit: () => {},
 }
 
@@ -83,10 +116,16 @@ describe('Electron compatibility runtime', () => {
   beforeEach(() => {
     electron.browserWindowOptions.length = 0
     electron.browserWindows.length = 0
+    electron.trays.length = 0
     vi.clearAllMocks()
   })
 
-  it('passes only compatibility options to the real BrowserWindow call site', async () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('uses the native macOS frame, Dock icon, and template tray image', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime()
     const release = runtime.schedule(spec)
@@ -108,6 +147,7 @@ describe('Electron compatibility runtime', () => {
         webSecurity: true,
       },
     }))
+    expect(options).not.toHaveProperty('autoHideMenuBar')
     for (const option of [
       'frame',
       'titleBarStyle',
@@ -122,7 +162,11 @@ describe('Electron compatibility runtime', () => {
     ]) {
       expect(options).not.toHaveProperty(option)
     }
-    expect(electron.browserWindows[0]?.accessibleTitle).toBe('DSH Desktop')
+    expect(electron.browserWindows[0]?.accessibleTitle).toBe('DeepSeek Harness Desktop')
+    expect(electron.browserWindows[0]?.removeMenu).not.toHaveBeenCalled()
+    expect(electron.app.dock.setIcon).toHaveBeenCalledWith(electron.appIcon)
+    expect(electron.templateIcon.setTemplateImage).toHaveBeenCalledWith(true)
+    expect(electron.trays[0]?.image).toBe(electron.templateIcon)
 
     const titleListener = electron.browserWindowOn.mock.calls.find(([event]) => event === 'page-title-updated')?.[1]
     expect(titleListener).toEqual(expect.any(Function))
@@ -132,9 +176,33 @@ describe('Electron compatibility runtime', () => {
 
     await release()
     expect(electron.browserWindowOff).toHaveBeenCalledWith('page-title-updated', titleListener)
+    expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
+  })
+
+  it('uses the Windows caption, hidden menu bar, removed menu, and fixed blue tray image', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime()
+    const release = runtime.schedule(spec)
+
+    await runtime.mountScheduled()
+
+    expect(electron.browserWindowOptions[0]).toEqual(expect.objectContaining({
+      title: 'DeepSeek Harness Desktop',
+      autoHideMenuBar: true,
+    }))
+    expect(electron.browserWindows[0]?.accessibleTitle).toBe('DeepSeek Harness Desktop')
+    expect(electron.browserWindows[0]?.removeMenu).toHaveBeenCalledOnce()
+    expect(electron.app.dock.setIcon).not.toHaveBeenCalled()
+    expect(electron.trays[0]?.image).toBe(electron.blueIcon)
+    expect(electron.templateIcon.setTemplateImage).not.toHaveBeenCalled()
+
+    await release()
+    expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
   })
 
   it('does not mount a registration disposed before Host boot settles', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime()
     const release = runtime.schedule(spec)

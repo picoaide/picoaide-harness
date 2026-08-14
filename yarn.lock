@@ -6676,6 +6676,7 @@ __metadata:
     electron-builder: "npm:26.15.3"
     node-addon-require-builtin: "npm:^0.1.4"
     react: "npm:18.3.1"
+    sharp: "npm:0.35.3"
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
@@ -9835,7 +9836,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"sharp@npm:^0.35.3":
+"sharp@npm:0.35.3, sharp@npm:^0.35.3":
   version: 0.35.3
   resolution: "sharp@npm:0.35.3"
   dependencies:

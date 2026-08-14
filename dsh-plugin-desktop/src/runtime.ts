@@ -20,14 +20,26 @@ export interface DesktopWindowConfig {
   minHeight: number
 }
 
+/** Generated images consumed by the platform tray adapter. */
+export interface DesktopTrayIcons {
+  /** Black macOS template image with its Retina representation beside it. */
+  templatePath: string
+  /** Brand-blue Windows/Linux image with DPI representations beside it. */
+  bluePath: string
+}
+
 /** Values the desktop-shell plugin hands to the Electron adapter. */
 export interface DesktopShellSpec extends DesktopWindowConfig {
   /** Unmodified Web root served by the active DSH profile. */
   url: string
   /** Native application and tray label. */
   productName: string
+  /** Visible native caption on platforms that retain a title. */
+  windowTitle: string
   /** Original application icon shipped with the package. */
   iconPath: string
+  /** Generated tray assets derived from the repository-owned SVG. */
+  trayIcons: DesktopTrayIcons
   /** Request Cordis teardown followed by native application exit. */
   requestQuit(code: number): void
 }
