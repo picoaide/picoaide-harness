@@ -112,3 +112,5 @@ Discord：[加入 DeepSeek Harness Desktop 社区](https://discord.gg/TJeGqKRNM)
 本项目遵循 [MIT License](LICENSE)。
 
 > 本项目是基于 DeepSeek Harness 构建的社区桌面版本，并非 DeepSeek 官方产品。
+
+> 本项目完全开源免费。如果有人向您以任何形式出售此软件，请拒绝交易。
