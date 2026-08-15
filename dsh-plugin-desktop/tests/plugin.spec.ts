@@ -1,4 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { ThemePreference } from '@deepseek-ai/dsh-client-ui-theme'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   apply,
@@ -28,7 +30,9 @@ interface PluginHarness {
   shell(): DesktopShellSpec | undefined
   update: ReturnType<typeof vi.fn<(patch: object) => Promise<void>>>
   restart: ReturnType<typeof vi.fn<() => Promise<void>>>
+  setThemeSource: ReturnType<typeof vi.fn<(source: ThemePreference) => void>>
   notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
+  notifyTheme(preference: ThemePreference): void
 }
 
 function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginHarness {
@@ -36,6 +40,9 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   let watcher: ((next: DesktopSettings, prev: DesktopSettings) => void | Promise<void>) | undefined
   const update = vi.fn(async (_patch: object) => {})
   const restart = vi.fn(async () => {})
+  const setThemeSource = vi.fn<(source: ThemePreference) => void>()
+  let settingsUpdated: ((namespace: unknown, next: unknown) => void) | undefined
+  let themePreference: ThemePreference = 'system'
   const runtime: DesktopRuntime = {
     platform,
     updates: {
@@ -54,10 +61,14 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     show: () => {},
     registerTrayItem: () => ({ refresh: () => {}, dispose: () => {} }),
     openTerminal: () => {},
+    setThemeSource,
     requestRestart: restart,
     prepareToQuit: () => {},
   }
   const settings = {
+    get: vi.fn((namespace: unknown) => String(namespace) === 'ui-theme'
+      ? { preference: themePreference }
+      : undefined),
     register: vi.fn(() => ({
       get: () => ({ mode: config.mode }),
       watch: (callback: typeof watcher) => {
@@ -78,6 +89,10 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     logger: { warn: vi.fn(), error: vi.fn() },
     get: vi.fn(() => () => {}),
     effect: vi.fn((register: () => unknown) => register()),
+    on: vi.fn((event: string, listener: (namespace: unknown, next: unknown) => void) => {
+      if (event === 'settings/updated') settingsUpdated = listener
+      return () => { if (settingsUpdated === listener) settingsUpdated = undefined }
+    }),
   } as unknown as Context
   return {
     ctx,
@@ -85,7 +100,12 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     shell: () => shell,
     update,
     restart,
+    setThemeSource,
     notify: async (next, prev) => { await watcher?.(next, prev) },
+    notifyTheme: (preference) => {
+      themePreference = preference
+      settingsUpdated?.(settingsNamespace('ui-theme'), { preference })
+    },
   }
 }
 
@@ -131,7 +151,11 @@ describe('desktop Host plugin', () => {
         templatePath: expect.stringMatching(/\/build\/tray-iconTemplate\.png$/u),
         bluePath: expect.stringMatching(/\/build\/tray-icon-blue\.png$/u),
       },
+      readThemeSource: expect.any(Function),
     }))
+    expect(harness.shell()?.readThemeSource()).toBe('system')
+    harness.notifyTheme('dark')
+    expect(harness.setThemeSource).not.toHaveBeenCalled()
 
     await harness.shell()?.requestModeChange('advanced')
     expect(harness.update).toHaveBeenCalledWith({ mode: 'advanced' })
@@ -149,6 +173,15 @@ describe('desktop Host plugin', () => {
     await harness.notify({ mode: 'advanced' }, { mode: 'compatibility' })
     await vi.runAllTimersAsync()
     expect(harness.restart).toHaveBeenCalledOnce()
+  })
+
+  it('projects live built-in theme changes into an advanced native material', () => {
+    const harness = createHarness()
+    apply(harness.ctx, { ...config, mode: 'advanced' })
+
+    expect(harness.shell()?.readThemeSource()).toBe('system')
+    harness.notifyTheme('dark')
+    expect(harness.setThemeSource).toHaveBeenCalledWith('dark')
   })
 
   it('requires the desktop Web carrier to remain loopback-only', () => {

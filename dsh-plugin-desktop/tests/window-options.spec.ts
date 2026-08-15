@@ -22,6 +22,7 @@ const spec: DesktopShellSpec = {
     templatePath: '/tmp/tray-iconTemplate.png',
     bluePath: '/tmp/tray-icon-blue.png',
   },
+  readThemeSource: () => 'system',
   requestQuit: () => {},
   requestModeChange: async () => {},
 }

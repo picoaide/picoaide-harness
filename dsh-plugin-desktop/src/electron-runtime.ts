@@ -6,6 +6,7 @@ import {
   dialog,
   Menu,
   nativeImage,
+  nativeTheme,
   net,
   Notification,
   shell,
@@ -23,6 +24,7 @@ import type {
   DesktopRuntime,
   DesktopShellSpec,
   DesktopTerminalSpec,
+  DesktopThemeSource,
   DesktopTrayItem,
   DesktopTrayItemGroup,
   DesktopTrayItemRegistration,
@@ -91,6 +93,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (this.scheduled !== undefined || this.mountTask !== undefined) {
       throw new Error('dsh-plugin-desktop: a native shell generation is already registered')
     }
+    const previousThemeSource = nativeTheme.themeSource
     this.scheduled = spec
     let disposed = false
     return async () => {
@@ -99,10 +102,16 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       try {
         await this.mountTask
       } finally {
-        await this.release?.()
-        this.release = undefined
-        this.mountTask = undefined
-        if (this.scheduled === spec) this.scheduled = undefined
+        try {
+          await this.release?.()
+        } finally {
+          this.release = undefined
+          this.mountTask = undefined
+          if (this.scheduled === spec) {
+            if (spec.mode === 'advanced') nativeTheme.themeSource = previousThemeSource
+            this.scheduled = undefined
+          }
+        }
       }
     }
   }
@@ -183,6 +192,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       })
     } catch (cause) {
       this.reportTerminalLaunchError(cause)
+    }
+  }
+
+  /** @inheritdoc */
+  setThemeSource(source: DesktopThemeSource): void {
+    if (this.scheduled?.mode === 'advanced' && this.window !== undefined) {
+      nativeTheme.themeSource = source
     }
   }
 
@@ -303,6 +319,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     if (this.platform === 'darwin') app.dock?.setIcon(icon)
     const origin = new URL(spec.url).origin
+    if (spec.mode === 'advanced') nativeTheme.themeSource = spec.readThemeSource()
     const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
     window.accessibleTitle = spec.windowTitle
     if (this.platform === 'win32') window.removeMenu()

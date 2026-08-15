@@ -7,6 +7,9 @@ export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
 /** Native presentation modes selected by the desktop-shell Cordis row. */
 export type DesktopShellMode = 'compatibility' | 'advanced'
 
+/** Electron appearance source used by native frame and material rendering. */
+export type DesktopThemeSource = 'system' | 'light' | 'dark'
+
 /** Window values resolved from the desktop-shell Cordis row. */
 export interface DesktopWindowConfig {
   /** Native presentation mode selected before BrowserWindow construction. */
@@ -118,6 +121,8 @@ export interface DesktopShellSpec extends DesktopWindowConfig {
   iconPath: string
   /** Generated tray assets derived from the repository-owned SVG. */
   trayIcons: DesktopTrayIcons
+  /** Read the authoritative built-in theme preference after Host boot settles. */
+  readThemeSource(): DesktopThemeSource
   /** Request Cordis teardown followed by native application exit. */
   requestQuit(code: number): void
   /** Persist another mode through the registered desktop settings scope. */
@@ -159,6 +164,9 @@ export interface DesktopRuntime {
 
   /** Open a native terminal containing packaged DSH command shims. */
   openTerminal(): void
+
+  /** Apply a built-in theme preference to Electron's native appearance. */
+  setThemeSource(source: DesktopThemeSource): void
 
   /** Request orderly Cordis teardown followed by an Electron relaunch. */
   requestRestart(): Promise<void>

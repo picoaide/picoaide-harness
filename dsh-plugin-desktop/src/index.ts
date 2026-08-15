@@ -5,6 +5,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import {
+  THEME_SETTINGS_NAMESPACE,
+  type ThemeSettings,
+} from '@deepseek-ai/dsh-client-ui-theme'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
@@ -17,6 +21,8 @@ export const inject = ['desktopRuntime', 'webServer', 'webRuntime', 'appExit', '
 
 /** Standard settings namespace shared by tray and configuration surfaces. */
 export const DESKTOP_SETTINGS_NAMESPACE = settingsNamespace('dsh-desktop')
+
+const UI_THEME_SETTINGS_NAMESPACE = settingsNamespace(THEME_SETTINGS_NAMESPACE)
 
 /** Desktop settings presented by the standard settings service. */
 export interface DesktopSettings {
@@ -121,6 +127,12 @@ export function apply(ctx: Context, config: Config): void {
       if (pending !== undefined) clearImmediate(pending)
     }
   }, 'dsh-plugin-desktop: restart after mode change')
+  if (config.mode === 'advanced') {
+    ctx.on('settings/updated', (namespace, next) => {
+      if (namespace !== UI_THEME_SETTINGS_NAMESPACE) return
+      ctx.desktopRuntime.setThemeSource((next as ThemeSettings).preference)
+    })
+  }
   ctx.effect(
     () => ctx.desktopRuntime.schedule({
       ...config,
@@ -129,6 +141,13 @@ export function apply(ctx: Context, config: Config): void {
       windowTitle: 'DeepSeek Harness Desktop',
       iconPath,
       trayIcons,
+      readThemeSource: () => {
+        const theme = ctx.settings.get(UI_THEME_SETTINGS_NAMESPACE) as ThemeSettings | undefined
+        if (theme === undefined) {
+          throw new Error('dsh-plugin-desktop: advanced shell requires the ui-theme settings namespace')
+        }
+        return theme.preference
+      },
       requestQuit: appExit,
       requestModeChange: async mode => settings.update({ mode }),
     }),

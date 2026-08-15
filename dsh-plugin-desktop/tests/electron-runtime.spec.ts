@@ -10,6 +10,7 @@ vi.mock('../src/desktop-terminal.ts', async (importOriginal) => ({
 
 const electron = vi.hoisted(() => {
   const browserWindowOptions: unknown[] = []
+  const browserWindowThemeSources: string[] = []
   const browserWindows: BrowserWindow[] = []
   const browserWindowOn = vi.fn()
   const browserWindowOff = vi.fn()
@@ -34,6 +35,7 @@ const electron = vi.hoisted(() => {
     off: vi.fn(),
     setWindowOpenHandler: vi.fn(),
   }
+  const nativeTheme = { themeSource: 'system' }
 
   class BrowserWindow {
     readonly webContents = webContents
@@ -41,6 +43,7 @@ const electron = vi.hoisted(() => {
 
     constructor(options: unknown) {
       browserWindowOptions.push(options)
+      browserWindowThemeSources.push(nativeTheme.themeSource)
       browserWindows.push(this)
     }
 
@@ -102,6 +105,7 @@ const electron = vi.hoisted(() => {
     blueIcon,
     BrowserWindow,
     browserWindowOptions,
+    browserWindowThemeSources,
     browserWindows,
     browserWindowOff,
     browserWindowOn,
@@ -115,6 +119,7 @@ const electron = vi.hoisted(() => {
     },
     menuTemplates,
     nativeImage: { createFromPath },
+    nativeTheme,
     net: { fetch: vi.fn() },
     Notification,
     notifications,
@@ -131,6 +136,7 @@ vi.mock('electron', () => ({
   dialog: electron.dialog,
   Menu: electron.Menu,
   nativeImage: electron.nativeImage,
+  nativeTheme: electron.nativeTheme,
   net: electron.net,
   Notification: electron.Notification,
   shell: electron.shell,
@@ -151,6 +157,7 @@ const spec: DesktopShellSpec = {
     templatePath: '/tmp/tray-iconTemplate.png',
     bluePath: '/tmp/tray-icon-blue.png',
   },
+  readThemeSource: vi.fn(() => 'system' as const),
   requestQuit: () => {},
   requestModeChange: vi.fn(async () => {}),
 }
@@ -158,6 +165,7 @@ const spec: DesktopShellSpec = {
 describe('Electron compatibility runtime', () => {
   beforeEach(() => {
     electron.browserWindowOptions.length = 0
+    electron.browserWindowThemeSources.length = 0
     electron.browserWindows.length = 0
     electron.trays.length = 0
     electron.menuTemplates.length = 0
@@ -165,6 +173,7 @@ describe('Electron compatibility runtime', () => {
     vi.clearAllMocks()
     electron.loadURL.mockReset()
     electron.loadURL.mockResolvedValue(undefined)
+    electron.nativeTheme.themeSource = 'system'
   })
 
   afterEach(() => {
@@ -210,6 +219,8 @@ describe('Electron compatibility runtime', () => {
       expect(options).not.toHaveProperty(option)
     }
     expect(electron.browserWindows[0]?.accessibleTitle).toBe('DeepSeek Harness Desktop')
+    expect(spec.readThemeSource).not.toHaveBeenCalled()
+    expect(electron.nativeTheme.themeSource).toBe('system')
     expect(electron.browserWindows[0]?.removeMenu).not.toHaveBeenCalled()
     expect(electron.app.dock.setIcon).toHaveBeenCalledWith(electron.appIcon)
     expect(electron.templateIcon.setTemplateImage).toHaveBeenCalledWith(true)
@@ -511,12 +522,19 @@ describe('Electron compatibility runtime', () => {
 
   it('uses advanced macOS material options and offers compatibility mode', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    electron.nativeTheme.themeSource = 'light'
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
-    const release = runtime.schedule({ ...spec, mode: 'advanced' })
+    const readThemeSource = vi.fn(() => 'dark' as const)
+    const release = runtime.schedule({ ...spec, mode: 'advanced', readThemeSource })
 
+    runtime.setThemeSource('system')
+    expect(electron.nativeTheme.themeSource).toBe('light')
     await runtime.mountScheduled()
 
+    expect(readThemeSource).toHaveBeenCalledOnce()
+    expect(electron.browserWindowThemeSources).toEqual(['dark'])
+    expect(electron.nativeTheme.themeSource).toBe('dark')
     expect(electron.browserWindowOptions[0]).toEqual(expect.objectContaining({
       titleBarStyle: 'hiddenInset',
       transparent: true,
@@ -526,6 +544,29 @@ describe('Electron compatibility runtime', () => {
       expect.objectContaining({ label: 'Switch to Compatibility Mode', enabled: true }),
     ]))
 
+    runtime.setThemeSource('system')
+    expect(electron.nativeTheme.themeSource).toBe('system')
     await release()
+    expect(electron.nativeTheme.themeSource).toBe('light')
+    runtime.setThemeSource('dark')
+    expect(electron.nativeTheme.themeSource).toBe('light')
+  })
+
+  it('restores the preceding native appearance when advanced loading fails', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    electron.nativeTheme.themeSource = 'light'
+    electron.loadURL.mockRejectedValueOnce(new Error('renderer unavailable'))
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule({
+      ...spec,
+      mode: 'advanced',
+      readThemeSource: () => 'dark',
+    })
+
+    await expect(runtime.mountScheduled()).rejects.toThrow('renderer unavailable')
+    expect(electron.nativeTheme.themeSource).toBe('dark')
+    await expect(release()).rejects.toThrow('renderer unavailable')
+    expect(electron.nativeTheme.themeSource).toBe('light')
   })
 })

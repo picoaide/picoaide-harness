@@ -24,6 +24,7 @@ let ctx
 let releasePackageResolver
 let pnpmRuntime
 let mountedSpec
+let nativeThemeSource = 'system'
 const trayItems = []
 
 try {
@@ -81,6 +82,7 @@ try {
     },
     async mountScheduled() {
       if (mountedSpec === undefined) throw new Error('desktop shell was not registered')
+      nativeThemeSource = mountedSpec.readThemeSource()
     },
     show() {},
     registerTrayItem(item) {
@@ -94,6 +96,7 @@ try {
       }
     },
     openTerminal() {},
+    setThemeSource(source) { nativeThemeSource = source },
     async requestRestart() {},
     prepareToQuit() {},
   }
@@ -174,6 +177,9 @@ try {
   }
   if (mountedSpec?.mode !== 'advanced') {
     throw new Error(`desktop plugin produced an unexpected shell mode: ${String(mountedSpec?.mode)}`)
+  }
+  if (nativeThemeSource !== 'system') {
+    throw new Error(`desktop plugin produced an unexpected native theme source: ${nativeThemeSource}`)
   }
   const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
   if (desktopSettings?.mode !== 'advanced') {

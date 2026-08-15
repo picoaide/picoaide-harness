@@ -42,13 +42,15 @@ desktop frame 只拥有几何与 chrome：可折叠 sidebar 列、中心宽度�
 
 禁用官方 layout 会移除通常把当前 theme 投影到 document 的呈现层。因此，高级模式包含一个范围受限的 `DesktopThemePresenter`。它会读取普通上游 theme service，把解析后的 color scheme 与 token 值应用到 document，维护深色 theme marker 与 `theme-color` metadata，并订阅标准 `theme/change` 事件。Disposal 只会移除由该 presenter 拥有的 attribute、token 与 metadata。
 
+原生 adapter 会在 Host boot 完成后单独读取已注册的 `ui-theme.preference`，并在构造高级窗口前把内置 `light`、`dark` 或 `system` 值应用到 Electron。它会在当前 generation 内观察已提交的 preference 变化，使 macOS vibrancy 与 Windows 原生材质使用和内置 Client theme 相同的外观来源。释放 generation 会恢复此前的 Electron 外观。仅存在于 Client 的第三方 theme id 没有可同步的 Host preference，因此不会改变原生材质外观。
+
 ### 原生材质
 
-在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 会在原生 vibrancy 上保持 sidebar surface 透明，并在官方 sidebar 外添加红绿灯 inset。其 90 CSS 像素收起列会把官方 56 像素 rail 居中。完整的官方 sidebar 及其全部 contribution child 都不会作为原生窗口拖动区域；内容上方且位于红绿灯右侧的 desktop 自有空白条是 sidebar 中唯一的窗口拖动区域。另一条 20 CSS 像素 caption row 会横跨 conversation 与 details 两列，两个完整 slot surface 都从其下方开始。因此，desktop shell 会拥有 Session 窗口拖动目标，而不会检查、覆盖或改变 feature 自有 Header 节点。
+在 macOS 上，高级 `BrowserWindow` 使用 `titleBarStyle: hiddenInset`、定位后的红黄绿按钮、透明背景、`vibrancy: sidebar` 与 `visualEffectState: followWindow`。Renderer 会在原生 vibrancy 上保持 sidebar surface 透明，并在官方 sidebar 外添加红绿灯 inset。其 90 CSS 像素收起列会把官方 56 像素 rail 居中。Sidebar surface 本身不可拖动，内容上方且位于红绿灯右侧的 desktop 自有透明条则提供 32 CSS 像素窗口拖动目标。另一条 caption row 会在 conversation 与 details 两列上方保留 20 CSS 像素间距，同时让透明的原生拖动命中区域也维持 32 CSS 像素高度。desktop shell 因此可以保留紧凑视觉间距，而无需检查或重排 feature 自有 Header 节点。语义化控件与显式 no-drag contribution 仍可交互；顶部 32 像素内的自定义 pointer target 必须退出原生拖动区域。
 
 desktop sidebar surface 会把官方 sidebar-fill token 局部设为透明。官方 sidebar 与 session 列表会保留组件行为、滚动、间距与渐隐，但不会把 Web 不透明填充色绘制到原生材质上。
 
-在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: mica`、原生阴影、圆角与粗可调整边框。Electron 在 Windows 11 22H2 及以上版本支持由系统绘制的该材质。官方 sidebar 会保留兼容模式的几何与过渡，包括 56 像素紧凑 rail 和 280 像素默认展开宽度，同时由透明 surface 透出 Mica。Desktop frame 会在 conversation 与 details 两列上方拥有一个 48 CSS 像素 caption row，在该行内避让原生控件区域，并把两个完整 slot surface 放到下一行。该 caption 几何不会检查或重排 feature 自有的 Header 节点，因此上游与第三方 slot contribution 会整体移动。控件、输入框、对话框与交互内容仍然不可拖动。
+在 Windows 上，高级窗口使用带原生标题栏 overlay 控件的隐藏标题栏、透明背景、`backgroundMaterial: mica`、原生阴影、圆角与粗可调整边框。Electron 在 Windows 11 22H2 及以上版本支持由系统绘制的该材质。官方 sidebar 会保留兼容模式的几何与过渡，包括 56 像素紧凑 rail 和 280 像素默认展开宽度，同时由透明 surface 透出 Mica。Desktop frame 会在 conversation 与 details 两列上方拥有一个标准高度的 32 CSS 像素 caption row，在该行内避让原生控件区域，并把两个完整 slot surface 放到下一行。该 caption 几何不会检查或重排 feature 自有的 Header 节点，因此上游与第三方 slot contribution 会整体移动。控件、输入框、对话框与交互内容仍然不可拖动。
 
 高级模式不支持 Linux。Host 校验、托盘与原生窗口构造器都会强制同一边界，而不会静默降级。
 
@@ -60,7 +62,7 @@ desktop sidebar surface 会把官方 sidebar-fill token 局部设为透明。官
 
 Profile 测试会向临时 `settings.yaml` 写入 `dsh-desktop.mode: advanced`，并验证它被投影到 `desktop-shell`、官方 layout 已禁用，以及官方 sidebar 与 conversation row 已启用。Host 测试覆盖共享 settings namespace、值变化后重启、托盘更新路径，以及持久化前的 Linux 拒绝。Client 测试覆盖 environment 校验、作用域化 layout-service disposal、平台专属 rail 几何、Windows 外层 slot caption 几何与 theme 投影。类型检查会根据已发布 rc.6 slot 与 service contract 验证 desktop 声明。
 
-窗口选项与 Electron-runtime 测试验证 macOS hidden-inset vibrancy、Windows Mica/原生控件、Linux 拒绝，以及托盘更新到相反模式。Shutdown 测试验证仅在成功零退出码 disposal 后 relaunch，且失败 generation 不会 relaunch。Client 与 Host bundle 均可 headless 构建；图形化原生材质外观仍是目标机器验证边界。
+窗口选项与 Electron-runtime 测试验证 macOS hidden-inset vibrancy、Windows Mica/原生控件、内置原生 theme 初始化与实时更新、generation 范围的外观恢复、Linux 拒绝，以及托盘更新到相反模式。Shutdown 测试验证仅在成功零退出码 disposal 后 relaunch，且失败 generation 不会 relaunch。Client 与 Host bundle 均可 headless 构建；图形化原生材质外观仍是目标机器验证边界。
 
 ## Alternatives considered
 

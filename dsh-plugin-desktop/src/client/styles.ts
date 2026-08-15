@@ -1,4 +1,5 @@
 import {
+  MACOS_DRAG_REGION_HEIGHT,
   MACOS_TITLEBAR_HEIGHT,
   MACOS_TRAFFIC_LIGHT_SAFE_WIDTH,
   WINDOWS_CAPTION_CONTROLS_WIDTH,
@@ -19,8 +20,9 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface { grid-row: 1 / -1; -webkit-app-region: no-drag; }
 .dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopConversationSurface,
 .dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopDetailsSurface { grid-row: 2; }
-.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface::before { content: ""; position: absolute; z-index: 1; top: 0; right: 0; left: ${MACOS_TRAFFIC_LIGHT_SAFE_WIDTH}px; height: ${MACOS_TITLEBAR_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
-.dshDesktopMacCaptionRow { grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); user-select: none; -webkit-app-region: drag; }
+.dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface::before { content: ""; position: absolute; top: 0; right: 0; left: ${MACOS_TRAFFIC_LIGHT_SAFE_WIDTH}px; height: ${MACOS_DRAG_REGION_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
+.dshDesktopMacCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
+.dshDesktopMacCaptionRow::before { content: ""; position: absolute; top: 0; right: 0; left: 0; height: ${MACOS_DRAG_REGION_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
 .dshDesktopConversationSurface { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); }
 .dshDesktopDetailsSurface { grid-column: 3; grid-row: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--dsw-alias-bg-base); border-left: 1px solid var(--dsw-alias-border-l2); }
 .dshDesktopFrame[data-desktop-platform="win32"] { grid-template-rows: ${WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
@@ -36,7 +38,7 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopNoDrag, button, input, textarea, select, a, [role="button"], [role="dialog"], [role="presentation"] { -webkit-app-region: no-drag; }
 [role="dialog"], [aria-modal="true"] { -webkit-app-region: no-drag !important; }
 html:has([aria-modal="true"]) .dshDesktopWindowsCaptionRow::before,
-html:has([aria-modal="true"]) .dshDesktopMacCaptionRow,
+html:has([aria-modal="true"]) .dshDesktopMacCaptionRow::before,
 html:has([aria-modal="true"]) .dshDesktopSidebarSurface,
 html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-region: no-drag !important; }
 @media (prefers-reduced-motion: reduce) { .dshDesktopFrame { transition: none !important; } }
