@@ -93,7 +93,7 @@ Desktop 的插件能力已经可以使用。开发者可以通过两个公开接
 
 也感谢 [Koishi.js](https://koishi.chat/) 项目和社区长期积累的插件化实践、工具与经验，以及所有参与讨论、测试、反馈和插件开发的社区成员。
 
-And You.
+And you.
 
 <a id="run-from-source"></a>
 
