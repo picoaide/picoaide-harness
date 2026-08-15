@@ -52,17 +52,20 @@ describe('packaged desktop runtime verification', () => {
       .toThrow('unsupported Electron afterPack platform "mas"')
   })
 
-  it('fails loud when a required runtime entry is absent', () => {
-    const missing = 'lib/client.js'
+  it.each([
+    'lib/client.js',
+    'lib/desktop-runtime-environment.js',
+  ])('fails loud when required runtime entry %s is absent', (missing) => {
     const entries = completeArchiveEntries().filter(entry => entry !== `/${missing}`)
 
     expect(() => verifyPackagedRuntime(context('/build', 'win32'), () => entries, () => true))
       .toThrow(`missing required ASAR entries: ${missing}`)
   })
 
-  it('fails loud when the physical CLI runtime is absent from app.asar.unpacked', () => {
-    const missing = 'node_modules/@deepseek-ai/dsh/lib/bin.js'
-
+  it.each([
+    'node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node_modules/pnpm/bin/pnpm.mjs',
+  ])('fails loud when physical runtime entry %s is absent from app.asar.unpacked', (missing) => {
     expect(() => verifyPackagedRuntime(
       context('/build', 'win32'),
       () => completeArchiveEntries(),

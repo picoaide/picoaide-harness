@@ -27,6 +27,7 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/profile-manager.js',
   'lib/profiles.js',
   'lib/desktop-cli.js',
+  'lib/desktop-runtime-environment.js',
   'lib/desktop-terminal.js',
   'lib/terminal.js',
   'lib/update-checker.js',

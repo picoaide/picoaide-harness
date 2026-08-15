@@ -18,6 +18,8 @@ Profile selection is desktop-owned state under Electron user data, not another f
 
 Bare Cordis plugin imports resolve from the persistent profile. A narrow Node resolve hook applies only to imports issued by `@deepseek-ai/cordis-plugin-loader`, so profile-local third-party packages and the healed launcher fallback use the same resolution path even when packaged Electron does not expose Node's internal ESM loader.
 
+Before profile preparation and Cordis boot, the launcher prepends a private command directory containing only the pinned bundled `pnpm` command to the current Electron main process `PATH`. Host and third-party plugins can therefore discover that package manager from startup, including through ordinary DSH subprocess providers, without requiring a system Node.js installation. The public runtime path does not expose `node` or `dsh`; its private Electron-backed Node helper and the `ELECTRON_RUN_AS_NODE` and npm ABI variables exist only inside the pnpm subprocess tree. The launcher does not modify the system `PATH`, shell startup files, profile configuration, or `.env` documents.
+
 ## Mode setting and restart boundary
 
 The `dsh-desktop.mode` field in the DSH home `settings.yaml` document is the single source of truth:
@@ -138,7 +140,8 @@ None. The same DSH Host and client feature plugins assemble model requests.
 - Adding or removing a profile bundle requires restarting DSH Desktop; the launcher does not watch profile manifests. Selecting another profile from the tray performs that restart automatically.
 - Switching compatibility/advanced mode always restarts the application by design; a live generation never hot-swaps Loader rows, slot ownership, or native materials.
 - Advanced mode is unavailable on Linux. Linux continues to use the compatibility presentation.
-- The bundled `dsh`, `pnpm`, and `node` commands are exposed only inside the terminal opened from the macOS or Windows tray. The installer does not add them to the system `PATH`, and Linux currently has no desktop terminal command.
+- The macOS and Windows tray terminal exposes private `dsh`, `pnpm`, and `node` shims. Separately, the Host runtime exposes only the bundled `pnpm` command on the current Electron process `PATH`; none of these commands are added to the system `PATH`, and Linux currently has no desktop terminal command.
+- On Windows, `pnpm` is a `.cmd` shim. Upstream `dsh plugin`, PowerShell, and Command Prompt use a command interpreter and can resolve it, but a third-party plugin that calls Node `spawn('pnpm', { shell: false })` cannot execute that batch shim reliably. A lifecycle script that directly executes its `.cmd` `npm_node_execpath` with `shell: false` has the same restriction. Supporting those non-portable calls requires a native signed launcher.
 - Release checks discover and announce stable versions but do not download or apply them. Installing a discovered release remains an explicit user action on the validated GitHub release page.
 - The shared carrier is loopback HTTP and WebSocket, not Electron IPC. Replacing it requires transport extension points in upstream DSH and is outside this standalone package.
 - This project currently pins the published DSH `0.1.0-rc.6` family, while the sibling `deepseek-harness/` source checkout predates that release. Tests therefore validate the published package interfaces rather than unpublished upstream sources.

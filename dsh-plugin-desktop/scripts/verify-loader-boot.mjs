@@ -1,23 +1,54 @@
 /** Headless artifact smoke for profile-local and launcher-owned Cordis plugins. */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { boot } from '@deepseek-ai/dsh-app-boot'
+import {
+  createLaunchEnvironmentSnapshot,
+  DSH_LAUNCH_ENVIRONMENT_KEY,
+} from '@deepseek-ai/dsh-launch-environment'
+import { installDesktopPnpmRuntime } from '../lib/desktop-runtime-environment.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-loader-smoke'
 const THIRD_PARTY_NAME = 'dsh-desktop-loader-smoke-plugin'
+const RUNNER_ENVIRONMENT_NAMES = new Set([
+  'ELECTRON_RUN_AS_NODE',
+  'NPM_CONFIG_RUNTIME',
+  'NPM_CONFIG_TARGET',
+  'NPM_CONFIG_DISTURL',
+])
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-loader-'))
 let ctx
 let mounted
 let mountedSpec
 let releasePackageResolver
+let pnpmRuntime
+const runnerEnvironment = Object.entries(process.env)
+  .filter(([key]) => RUNNER_ENVIRONMENT_NAMES.has(key.toUpperCase()))
 
 try {
+  for (const [key] of runnerEnvironment) delete process.env[key]
+  const launchEnvironment = createLaunchEnvironmentSnapshot([{
+    source: 'process',
+    values: { ...process.env },
+  }])
+  const launchPath = launchEnvironment.get('PATH')?.value
+  const packageRoot = new URL('../', import.meta.url)
+  const pnpmBinPath = fileURLToPath(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
+  const electronVersion = JSON.parse(readFileSync(new URL('node_modules/electron/package.json', packageRoot), 'utf8')).version
+  pnpmRuntime = installDesktopPnpmRuntime({
+    platform: process.platform,
+    appExecutable: process.execPath,
+    pnpmBinPath,
+    electronVersion,
+    stateDir: join(home, 'runtime-commands'),
+    environment: process.env,
+  })
   const prepared = prepareDesktopProfile(undefined, home)
   const thirdPartyDir = join(prepared.profile.dir, 'node_modules', THIRD_PARTY_NAME)
   mkdirSync(thirdPartyDir, { recursive: true })
@@ -27,7 +58,20 @@ try {
     type: 'module',
     exports: './index.js',
   }) + '\n')
-  writeFileSync(join(thirdPartyDir, 'index.js'), 'export function apply() {}\n')
+  writeFileSync(join(thirdPartyDir, 'index.js'), [
+    "import { delimiter } from 'node:path'",
+    'export function apply(ctx) {',
+    `  const expected = ${JSON.stringify(pnpmRuntime.pathDir)}`,
+    '  const actual = (process.env.PATH ?? \'\').split(delimiter)[0]',
+    '  if (actual !== expected) throw new Error(`third-party plugin received ${actual} instead of packaged pnpm PATH ${expected}`)',
+    "  const launchPath = ctx.launchEnvironment?.get('PATH')?.value",
+    `  if (launchPath !== ${JSON.stringify(launchPath)}) throw new Error('third-party plugin received a mutated launch-environment PATH snapshot')`,
+    `  const runnerNames = new Set(${JSON.stringify([...RUNNER_ENVIRONMENT_NAMES])})`,
+    "  const leaked = Object.keys(process.env).filter(key => runnerNames.has(key.toUpperCase()))",
+    "  if (leaked.length > 0) throw new Error(`third-party plugin received runner-only environment: ${leaked.join(', ')}`)",
+    '}',
+    '',
+  ].join('\n'))
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const profileRequire = createRequire(prepared.bareModuleBaseUrl)
   const desktopManifest = fileURLToPath(new URL('../package.json', import.meta.url))
@@ -64,6 +108,7 @@ try {
     (host) => {
       // Packaged Electron does not expose Node's internal ESM loader.
       host.loader.internal = undefined
+      host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, launchEnvironment)
       host.provide('desktopRuntime', runtime)
       host.provide('webServer', {
         host: '127.0.0.1',
@@ -101,7 +146,23 @@ try {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
 } finally {
-  await ctx?.fiber.dispose()
-  releasePackageResolver?.()
-  rmSync(home, { recursive: true, force: true })
+  try {
+    await ctx?.fiber.dispose()
+  } finally {
+    try {
+      releasePackageResolver?.()
+    } finally {
+      try {
+        pnpmRuntime?.dispose()
+      } finally {
+        for (const key of Object.keys(process.env)) {
+          if (RUNNER_ENVIRONMENT_NAMES.has(key.toUpperCase())) {
+            delete process.env[key]
+          }
+        }
+        for (const [key, value] of runnerEnvironment) process.env[key] = value
+        rmSync(home, { recursive: true, force: true })
+      }
+    }
+  }
 }

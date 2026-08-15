@@ -18,6 +18,8 @@ Profile 选择保存在 Electron user data 下的 desktop 自有状态中，而�
 
 Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Node resolve hook 只处理由 `@deepseek-ai/cordis-plugin-loader` 发起的导入，因此即使打包后的 Electron 不暴露 Node 内部 ESM Loader，profile 本地第三方包与修复后的 launcher fallback 仍使用同一条解析路径。
 
+在 profile 准备与 Cordis boot 之前，Launcher 会把只包含固定版本内置 `pnpm` 命令的私有命令目录前置到当前 Electron main 进程的 `PATH`。因此 Host 与第三方插件从启动开始即可发现该 package manager，也可以通过普通 DSH subprocess provider 使用它，而无需系统安装 Node.js。公开 runtime path 不会暴露 `node` 或 `dsh`；其中私有、由 Electron 承载的 Node helper，以及 `ELECTRON_RUN_AS_NODE` 与 npm ABI 变量，都只存在于 pnpm subprocess tree 内。Launcher 不会修改系统 `PATH`、shell 启动文件、profile 配置或 `.env` 文档。
+
 ## 模式设置与重启边界
 
 DSH home `settings.yaml` 文档中的 `dsh-desktop.mode` 字段是单一事实源：
@@ -138,7 +140,8 @@ npx dsh-plugin-desktop
 - 添加或删除 profile bundle 后必须重启 DSH Desktop；Launcher 不监听 profile manifest。从托盘选择其他 profile 时会自动完成该重启。
 - 切换 compatibility/advanced 模式按设计必然重启应用；存活的 generation 不会热切换 Loader row、slot 所有权或原生材质。
 - Linux 不支持高级模式。Linux 继续使用兼容呈现。
-- 内置 `dsh`、`pnpm` 与 `node` 命令只在从 macOS 或 Windows 托盘打开的终端中提供。安装器不会把它们加入系统 `PATH`，Linux 目前也没有 desktop 终端命令。
+- macOS 与 Windows 托盘终端会提供私有 `dsh`、`pnpm` 与 `node` shim。除此之外，Host runtime 只会在当前 Electron 进程的 `PATH` 中公开内置 `pnpm` 命令；这些命令都不会加入系统 `PATH`，Linux 目前也没有 desktop 终端命令。
+- 在 Windows 上，`pnpm` 是 `.cmd` shim。上游 `dsh plugin`、PowerShell 与命令提示符会使用 command interpreter，因此可以解析它；但第三方插件直接调用 Node `spawn('pnpm', { shell: false })` 时，无法可靠执行该 batch shim。Lifecycle script 直接以 `shell: false` 执行其 `.cmd` `npm_node_execpath` 时也有相同限制。支持这些非可移植调用需要原生签名 launcher。
 - Release 检查只发现并提示 stable 版本，不会下载或应用更新。用户仍需在经过校验的 GitHub release 页面上显式执行安装。
 - 共享 carrier 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换它需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
 - 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。

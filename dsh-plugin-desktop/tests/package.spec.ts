@@ -64,6 +64,7 @@ describe('published package surface', () => {
     })
     expect(manifest.exports).not.toHaveProperty('./windows-acl-runner')
     expect(manifest.exports).not.toHaveProperty('./desktop-cli')
+    expect(manifest.exports).not.toHaveProperty('./desktop-runtime-environment')
     expect(manifest.exports).not.toHaveProperty('./desktop-terminal')
     expect(manifest.exports).not.toHaveProperty('./update-checker')
     expect(manifest.exports).toHaveProperty('./package.json')
@@ -87,11 +88,27 @@ describe('published package surface', () => {
     expect(config).toContain("'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts'")
     expect(config).toContain("'windows-acl-runner': 'src/windows-acl-runner.ts'")
     expect(config).toContain("'desktop-cli': 'src/desktop-cli.ts'")
+    expect(config).toContain("'desktop-runtime-environment': 'src/desktop-runtime-environment.ts'")
     expect(config).toContain("'desktop-terminal': 'src/desktop-terminal.ts'")
     expect(config).toContain("'profile-manager': 'src/profile-manager.ts'")
     expect(config).toContain("profiles: 'src/profiles.ts'")
     expect(config).toContain("terminal: 'src/terminal.ts'")
     expect(config).toContain("updates: 'src/updates.ts'")
+  })
+
+  it('installs the private pnpm PATH after the launch snapshot and before profile boot', () => {
+    const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
+    const snapshot = main.indexOf('const environment = loadLayeredEnv')
+    const install = main.indexOf('const pnpmRuntime = installDesktopPnpmRuntime')
+    const prepare = main.indexOf('const prepared = prepareDesktopProfile')
+    const boot = main.indexOf('const ctx = await boot')
+
+    expect(snapshot).toBeGreaterThanOrEqual(0)
+    expect(install).toBeGreaterThan(snapshot)
+    expect(prepare).toBeGreaterThan(install)
+    expect(boot).toBeGreaterThan(prepare)
+    expect(main).toContain("'dsh-plugin-desktop: packaged pnpm runtime PATH'")
+    expect(main).toContain('disposePnpmRuntime?.()')
   })
 
   it('fixes the installed application identity', () => {

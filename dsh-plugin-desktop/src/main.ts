@@ -12,8 +12,10 @@ import {
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import { installDesktopPnpmRuntime } from './desktop-runtime-environment.ts'
 import { ElectronDesktopRuntime } from './electron-runtime.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
+import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import {
   beginDesktopProfileStartup,
   listDesktopProfiles,
@@ -58,6 +60,7 @@ async function start(): Promise<void> {
   let profileStatePath: string | undefined
   let shutdown: DesktopShutdown | undefined
   let removeShutdownRequests: (() => void) | undefined
+  let disposePnpmRuntime: (() => void) | undefined
   let runtime!: ElectronDesktopRuntime
   const nativeExit = createDesktopExitCoordinator(
     {
@@ -79,7 +82,13 @@ async function start(): Promise<void> {
   })
   const finalExit = (code: number): void => { nativeExit.finish(code) }
   shutdown = createDesktopShutdown(
-    async () => { await current?.fiber.dispose() },
+    async () => {
+      try {
+        await current?.fiber.dispose()
+      } finally {
+        disposePnpmRuntime?.()
+      }
+    },
     finalExit,
   )
   const requestQuit = (code: number): void => { void shutdown.request(code) }
@@ -97,11 +106,29 @@ async function start(): Promise<void> {
     exit: finalExit,
   }
   installFailLoud(BIN_NAME, failLoudProcess, async () => {
-    await current?.fiber.dispose()
+    try {
+      await current?.fiber.dispose()
+    } finally {
+      disposePnpmRuntime?.()
+    }
   })
 
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
+    const electronVersion = process.versions.electron
+    if (electronVersion === undefined) {
+      throw new Error(`${BIN_NAME}: plugin runtime requires the Electron runtime version`)
+    }
+    const pnpmRuntime = installDesktopPnpmRuntime({
+      platform: process.platform,
+      appExecutable: process.execPath,
+      pnpmBinPath: packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs'),
+      electronVersion,
+      stateDir: join(app.getPath('userData'), 'runtime-commands'),
+      environment: process.env,
+    })
+    const releasePnpmRuntime = (): void => { pnpmRuntime.dispose() }
+    disposePnpmRuntime = releasePnpmRuntime
     const homeDir = resolveDshHome()
     const selectionStatePath = join(app.getPath('userData'), 'profile-selection', 'state.json')
     profileStatePath = selectionStatePath
@@ -124,6 +151,10 @@ async function start(): Promise<void> {
       prepared.rootConfig,
       prepared.patches,
       (hostCtx) => {
+        hostCtx.effect(
+          () => releasePnpmRuntime,
+          'dsh-plugin-desktop: packaged pnpm runtime PATH',
+        )
         current = hostCtx
         hostCtx.effect(
           () => releasePackageResolver,
