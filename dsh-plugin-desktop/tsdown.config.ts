@@ -9,6 +9,8 @@ export default defineConfig([
       index: 'src/index.ts',
       'module-resolution': 'src/module-resolution.ts',
       profile: 'src/profile.ts',
+      'profile-manager': 'src/profile-manager.ts',
+      profiles: 'src/profiles.ts',
       runtime: 'src/runtime.ts',
       'electron-runtime': 'src/electron-runtime.ts',
       'desktop-terminal': 'src/desktop-terminal.ts',

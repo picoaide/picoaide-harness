@@ -62,6 +62,13 @@ describe('packaged dsh bootstrap', () => {
     expect(withDefaultDesktopProfile(['web'], 'desktop')).toEqual(['web'])
     expect(withDefaultDesktopProfile(['--help'], 'desktop')).toEqual(['--help'])
     expect(withDefaultDesktopProfile(['--version'], 'desktop')).toEqual(['--version'])
+    expect(withDefaultDesktopProfile(['plugin', 'update'], '工作 profile')).toEqual([
+      'plugin',
+      '--profile',
+      '工作 profile',
+      'update',
+    ])
+    expect(() => withDefaultDesktopProfile([], '../desktop')).toThrow('invalid profile name')
   })
 
   it('uses the physical unpacked dependency tree only inside an Electron package', () => {

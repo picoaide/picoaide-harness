@@ -24,6 +24,8 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/main.js',
   'lib/client.js',
   'lib/profile.js',
+  'lib/profile-manager.js',
+  'lib/profiles.js',
   'lib/desktop-cli.js',
   'lib/desktop-terminal.js',
   'lib/terminal.js',

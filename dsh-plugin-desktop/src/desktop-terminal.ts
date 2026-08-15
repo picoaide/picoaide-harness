@@ -10,8 +10,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { basename, dirname, join, win32 } from 'node:path'
+import { assertDesktopProfileName } from './profile-manager.ts'
 
 const RUN_AS_NODE = 'ELECTRON_RUN_AS_NODE'
 const DEFAULT_PROFILE = 'DSH_DESKTOP_DEFAULT_PROFILE'
@@ -103,6 +104,19 @@ export interface DesktopTerminalLaunch {
   child: ChildProcess
 }
 
+/**
+ * Keep generated command shims stable for one selected profile.
+ * @param userDataDir - Electron-owned persistent data directory.
+ * @param profileName - profile embedded in the generated DSH shim.
+ * @returns private per-profile terminal state directory.
+ */
+export function desktopTerminalStateDirectory(userDataDir: string, profileName: string): string {
+  assertScriptValue('user data directory', userDataDir)
+  assertDesktopProfileName(profileName)
+  const identity = createHash('sha256').update(profileName, 'utf8').digest('hex')
+  return join(userDataDir, 'cli', identity)
+}
+
 interface DesktopTerminalFiles {
   shimDir: string
   dshShimPath: string
@@ -117,13 +131,6 @@ function assertScriptValue(label: string, value: string): void {
   if (value.length === 0) throw new Error(`dsh-plugin-desktop: terminal ${label} must not be empty`)
   if (/[\0\r\n]/.test(value)) {
     throw new Error(`dsh-plugin-desktop: terminal ${label} must not contain NUL or newlines`)
-  }
-}
-
-/** Profile names become command examples, so keep them on one printable token. */
-function assertProfileName(profileName: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profileName)) {
-    throw new Error('dsh-plugin-desktop: terminal profile name must be one portable profile token')
   }
 }
 
@@ -334,7 +341,7 @@ function macWelcome(
     `printf '%s\\n' ${quoteSh(`Profile: ${options.profileName}`)}`,
     `printf '%s\\n' ${quoteSh(`Profile directory: ${options.profileDir}`)}`,
     `printf '%s\\n' ${quoteSh(`Harness home: ${options.homeDir}`)}`,
-    `printf '%s\\n' ${quoteSh('Plugin commands without --profile modify the desktop profile.')}`,
+    `printf '%s\\n' ${quoteSh(`Plugin commands without --profile modify the ${options.profileName} profile.`)}`,
     `printf '%s\\n' ${quoteSh('Commands:')}`,
     `printf '  %s\\n' ${quoteSh(commandHelp)}`,
     `printf '  %s\\n' ${quoteSh(pluginAdd)}`,
@@ -378,7 +385,7 @@ function windowsWelcome(options: DesktopTerminalOptions, shimDir: string): strin
     `Write-Host ${quotePowerShell(`Profile: ${options.profileName}`)}`,
     `Write-Host ${quotePowerShell(`Profile directory: ${options.profileDir}`)}`,
     `Write-Host ${quotePowerShell(`Harness home: ${options.homeDir}`)}`,
-    `Write-Host ${quotePowerShell('Plugin commands without --profile modify the desktop profile.')}`,
+    `Write-Host ${quotePowerShell(`Plugin commands without --profile modify the ${options.profileName} profile.`)}`,
     `Write-Host ${quotePowerShell('Commands:')}`,
     `Write-Host ${quotePowerShell(`  ${commandHelp}`)}`,
     `Write-Host ${quotePowerShell(`  ${pluginAdd}`)}`,
@@ -405,7 +412,7 @@ function windowsCmdWelcome(options: DesktopTerminalOptions): string {
     `echo(${escapeBatchText(`Profile: ${options.profileName}`)}`,
     `echo(${escapeBatchText(`Profile directory: ${options.profileDir}`)}`,
     `echo(${escapeBatchText(`Harness home: ${options.homeDir}`)}`,
-    `echo(${escapeBatchText('Plugin commands without --profile modify the desktop profile.')}`,
+    `echo(${escapeBatchText(`Plugin commands without --profile modify the ${options.profileName} profile.`)}`,
     'echo(Commands:',
     `echo(  ${escapeBatchText(commandHelp)}`,
     `echo(  ${escapeBatchText(pluginAdd)}`,
@@ -422,7 +429,7 @@ function prepareDesktopTerminalFiles(options: DesktopTerminalOptions): DesktopTe
   if (options.platform !== 'darwin' && options.platform !== 'win32') {
     throw new Error(`dsh-plugin-desktop: terminal is unsupported on ${options.platform}`)
   }
-  assertProfileName(options.profileName)
+  assertDesktopProfileName(options.profileName)
   for (const [label, value] of [
     ['application executable', options.appExecutable],
     ['dsh bootstrap', options.dshBootstrapPath],

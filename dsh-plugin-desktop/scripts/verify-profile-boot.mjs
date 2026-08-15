@@ -56,6 +56,17 @@ try {
     async requestRestart() {},
     prepareToQuit() {},
   }
+  const desktopProfiles = {
+    currentProfileName: 'desktop',
+    list: () => [{
+      name: 'desktop',
+      dir: prepared.profile.dir,
+      exists: true,
+      bundles: prepared.profile.layers.map(layer => layer.packageName),
+      webCapable: true,
+    }],
+    select: () => {},
+  }
   ctx = await boot(
     BIN_NAME,
     prepared.rootConfig,
@@ -63,6 +74,7 @@ try {
     (host) => {
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopRuntime', runtime)
+      host.provide('desktopProfiles', desktopProfiles)
       provideCmdline(host, {
         args: ['--host', '127.0.0.1', '--port', '0'],
         exit: () => {},
@@ -98,6 +110,10 @@ try {
   if (process.platform !== 'linux'
     && !trayItems.some(item => item.label() === 'Open DSH Terminal')) {
     throw new Error('assembled desktop profile is missing the terminal tray command')
+  }
+  const profileMenu = trayItems.find(item => item.label() === 'Profile: desktop')
+  if (profileMenu?.submenu?.()[0]?.label() !== 'desktop') {
+    throw new Error('assembled desktop profile is missing the active profile tray submenu')
   }
   const response = await fetch(expectedUrl)
   const html = await response.text()

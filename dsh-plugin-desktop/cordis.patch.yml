@@ -8,6 +8,8 @@
     - id: desktop-terminal
       name: dsh-plugin-desktop/terminal
       disabled: !!js process.platform === 'linux'
+    - id: desktop-profiles
+      name: dsh-plugin-desktop/profiles
     - id: desktop-updates
       name: dsh-plugin-desktop/updates
 

@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { openDesktopTerminal } from './desktop-terminal.ts'
+import { desktopTerminalStateDirectory, openDesktopTerminal } from './desktop-terminal.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import type {
   DesktopNotification,
@@ -107,12 +107,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
-  mountScheduled(): Promise<void> {
+  mountScheduled(beforeInteractive?: () => void): Promise<void> {
     const spec = this.scheduled
     if (spec === undefined) {
       return Promise.reject(new Error('dsh-plugin-desktop: the Cordis shell plugin did not register a window'))
     }
-    this.mountTask ??= this.mount(spec).then((release) => { this.release = release })
+    this.mountTask ??= this.mount(spec, beforeInteractive).then((release) => { this.release = release })
     return this.mountTask
   }
 
@@ -175,7 +175,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       productVersion: PRODUCT_VERSION,
       profileDir: spec.profileDir,
       homeDir: spec.homeDir,
-      stateDir: join(app.getPath('userData'), 'cli'),
+      stateDir: desktopTerminalStateDirectory(app.getPath('userData'), spec.profileName),
       spawn,
       onLaunchError: cause => {
         this.showNotification({
@@ -200,15 +200,37 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     return [...this.trayItems.values()]
       .filter(item => item.group === group)
       .sort((left, right) => left.order - right.order)
-      .map(item => ({
-        label: item.label(),
-        enabled: item.enabled?.() ?? true,
-        click: () => {
-          void Promise.resolve().then(() => item.invoke()).catch((cause: unknown) => {
-            process.stderr.write(`dsh-plugin-desktop: tray command failed: ${cause instanceof Error ? cause.message : String(cause)}\n`)
-          })
-        },
-      }))
+      .map((item): Electron.MenuItemConstructorOptions => {
+        const common = {
+          label: item.label(),
+          enabled: item.enabled?.() ?? true,
+        }
+        if (item.submenu !== undefined) {
+          return {
+            ...common,
+            submenu: item.submenu().map(command => ({
+              label: command.label(),
+              enabled: command.enabled?.() ?? true,
+              ...(command.type === undefined ? {} : { type: command.type }),
+              ...(command.checked === undefined ? {} : { checked: command.checked() }),
+              click: this.trayCommand(() => command.invoke()),
+            })),
+          }
+        }
+        return {
+          ...common,
+          click: this.trayCommand(() => item.invoke()),
+        }
+      })
+  }
+
+  /** Contain asynchronous contribution failures outside Electron menu callbacks. */
+  private trayCommand(invoke: () => void | Promise<void>): () => void {
+    return () => {
+      void Promise.resolve().then(invoke).catch((cause: unknown) => {
+        process.stderr.write(`dsh-plugin-desktop: tray command failed: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+      })
+    }
   }
 
   private showNotification(notification: DesktopNotification): void {
@@ -235,11 +257,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     const show = (): void => { this.show() }
     const tools = this.contributedTrayItems('tools')
+    const profiles = this.contributedTrayItems('profiles')
     const status = this.contributedTrayItems('status')
     const template: Electron.MenuItemConstructorOptions[] = [
       { label: `Open ${spec.productName}`, click: show },
     ]
     if (tools.length > 0) template.push({ type: 'separator' }, ...tools)
+    if (profiles.length > 0) template.push({ type: 'separator' }, ...profiles)
     if (status.length > 0) template.push({ type: 'separator' }, ...status)
     template.push(
       { type: 'separator' },
@@ -258,7 +282,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     tray.setContextMenu(Menu.buildFromTemplate(template))
   }
 
-  private async mount(spec: DesktopShellSpec): Promise<() => Promise<void>> {
+  private async mount(
+    spec: DesktopShellSpec,
+    beforeInteractive: (() => void) | undefined,
+  ): Promise<() => Promise<void>> {
     const icon = nativeImage.createFromPath(spec.iconPath)
     if (icon.isEmpty()) {
       throw new Error(`dsh-plugin-desktop: failed to load application icon ${spec.iconPath}`)
@@ -306,25 +333,31 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       return { action: 'deny' }
     })
 
-    const tray = new Tray(prepareTrayIcon(spec.trayIcons, this.platform))
-    this.tray = tray
-    tray.setToolTip(spec.productName)
-    this.rebuildTrayMenu()
-    tray.on('click', show)
-
     window.once('ready-to-show', show)
+    let tray: Tray | undefined
     try {
       await window.loadURL(spec.url)
+      tray = new Tray(prepareTrayIcon(spec.trayIcons, this.platform))
+      this.tray = tray
+      tray.setToolTip(spec.productName)
+      this.rebuildTrayMenu()
+      tray.on('click', show)
+      beforeInteractive?.()
     } catch (cause) {
       app.off('activate', show)
       window.off('page-title-updated', preserveBlankTitle)
-      tray.off('click', show)
-      tray.destroy()
+      tray?.off('click', show)
+      tray?.destroy()
       window.destroy()
       this.tray = undefined
       this.window = undefined
       throw cause
     }
+
+    if (tray === undefined) {
+      throw new Error('dsh-plugin-desktop: native tray did not mount')
+    }
+    const mountedTray = tray
 
     let released = false
     return async () => {
@@ -335,10 +368,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       window.off('page-title-updated', preserveBlankTitle)
       window.webContents.off('will-frame-navigate', navigate)
       window.webContents.off('will-redirect', navigate)
-      tray.off('click', show)
-      tray.destroy()
+      mountedTray.off('click', show)
+      mountedTray.destroy()
       if (!window.isDestroyed()) window.destroy()
-      if (this.tray === tray) this.tray = undefined
+      if (this.tray === mountedTray) this.tray = undefined
       if (this.window === window) this.window = undefined
     }
   }

@@ -2,6 +2,7 @@
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
+import { assertDesktopProfileName } from './profile-manager.ts'
 
 const RUN_AS_NODE = 'ELECTRON_RUN_AS_NODE'
 const DEFAULT_PROFILE = 'DSH_DESKTOP_DEFAULT_PROFILE'
@@ -23,9 +24,7 @@ export function clearElectronRunAsNode(environment: NodeJS.ProcessEnv): void {
  * @returns argv accepted by the upstream DSH command parser.
  */
 export function withDefaultDesktopProfile(argv: readonly string[], profileName: string): string[] {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(profileName)) {
-    throw new Error('dsh-desktop: default profile must be one portable profile token')
-  }
+  assertDesktopProfileName(profileName)
   if (argv.some(argument => argument === '--profile' || argument.startsWith('--profile='))) {
     return [...argv]
   }

@@ -6,13 +6,15 @@ English | [中文](README.zh.md)
 
 ## Architecture
 
-The Electron executable is minimal bootstrap code. It acquires the single-instance lock, prepares the persistent `desktop` profile, provides the native runtime capability, and boots the Host Cordis root in the Electron main process. The `desktop-shell` Host plugin owns the `BrowserWindow`, navigation policy, settings namespace, and close-versus-quit lifecycle through Cordis effects. The native runtime owns the physical tray, while `desktop-shell`, `desktop-terminal`, and `desktop-updates` contribute effect-scoped commands through its ordered item registry.
+The Electron executable is minimal bootstrap code. It acquires the single-instance lock, resolves the selected DSH profile, provides the native runtime capability, and boots the Host Cordis root in the Electron main process. The `desktop-shell` Host plugin owns the `BrowserWindow`, navigation policy, settings namespace, and close-versus-quit lifecycle through Cordis effects. The native runtime owns the physical tray, while `desktop-shell`, `desktop-profiles`, `desktop-terminal`, and `desktop-updates` contribute effect-scoped commands through its ordered item registry.
 
 Both presentation modes reuse the existing loopback Web carrier. The profile mounts the ordinary `dsh-base` and `dsh-web-app` bundles, the Host binds its HTTP and WebSocket surface to `127.0.0.1` on an ephemeral port, and Electron loads that same-origin page in a sandboxed renderer. There is no Electron-owned plugin roster, preload bridge, or raw Electron API in the renderer.
 
 The desktop package has normal Host and Web Client faces. Its Client face validates the Host-supplied mode and platform markers in both modes. Compatibility then returns without registering services, slots, styles, or presentation; advanced mode installs the desktop layout service and root presentation described below. Third-party Web clients continue to use the ordinary DSH module graph in both modes.
 
-The launcher repairs only its installation-owned profile prefix. A profile changed by `dsh plugin --profile desktop add third-party-plugin` contains `dsh-base`, `dsh-web-app`, then the same third-party bundles in their previous relative order. The launcher inserts its own desktop layer after `dsh-web-app`; it does not persist itself in the user-managed bundle list.
+The tray profile selector lists existing profiles and the lazily available `desktop` and `web` defaults. A selectable profile directly composes `dsh-base` before `dsh-web-app`; headless, malformed, or already desktop-embedded profiles remain visible but disabled. `desktop` is the only launcher-managed profile: its installation-owned prefix is repaired while third-party bundle order is preserved. Every other selected profile keeps its manifest, user patch, and dependencies unchanged. The launcher inserts its own desktop layer after `dsh-web-app` for the active generation and never persists that layer in the selected bundle list.
+
+Profile selection is desktop-owned state under Electron user data, not another field inside a selected profile. A switch is recorded as pending and takes effect through an orderly restart. The new profile becomes last-known-good only after the Cordis tree and native window mount successfully; the tray is created after the Web surface loads, and that state commit completes synchronously before tray commands can run. A failed pending generation is rolled back and relaunched once. Official profiles use the same DSH home for sessions, settings, and storage by default, so switching does not copy or migrate records. A custom profile patch may deliberately redirect one of those persistence roots.
 
 Bare Cordis plugin imports resolve from the persistent profile. A narrow Node resolve hook applies only to imports issued by `@deepseek-ai/cordis-plugin-loader`, so profile-local third-party packages and the healed launcher fallback use the same resolution path even when packaged Electron does not expose Node's internal ESM loader.
 
@@ -35,13 +37,13 @@ Linux supports compatibility mode only. Its tray mode command is disabled, and a
 
 `dsh-desktop.mode` defaults to `compatibility`. This mode creates a normal operating-system window with its native frame and loads the official Web surface from the active DSH profile. macOS suppresses the visible page title. Windows retains the native caption icon and displays `DeepSeek Harness Desktop`, but removes the window menu bar. The operating system owns native title-bar color and appearance.
 
-The desktop Client module validates the mode and platform markers, then has no compatibility-mode effects. It does not provide or replace the `layout` service, register a `root` or `sidebar` occupant, install styles, or change the official conversation surface. The final profile keeps the official `ui-layout`, `ui-sidebar`, and `ui-conversation` rows enabled.
+The desktop Client module validates the mode and platform markers, then has no compatibility-mode effects. It does not provide or replace the `layout` service, register a `root` or `sidebar` occupant, install styles, or change the conversation surface. Compatibility mode preserves the selected profile's own layout, sidebar, and conversation composition; the ordinary `desktop` and `web` profiles therefore keep the official rows unchanged.
 
 The Cordis row registers native window values during profile activation. The launcher creates the window only after `app-boot` settles and audits the complete profile, so the first renderer manifest includes the active official, desktop, and third-party client plugins without a Loader-wide wait inside the plugin itself.
 
 On Windows, the launcher pins the existing browse directory-picker backend and client surface instead of the adaptive native chooser. Workspace selection therefore remains inside the Web UI and never loads the native N-API dialog worker in the Electron main process. macOS and Linux retain the upstream adaptive chooser.
 
-Windows PowerShell keeps the upstream `pwsh-sandbox` behavior and Windows ACL confinement in both presentation modes. The desktop profile replaces only that Host provider with the `dsh-plugin-desktop/windows-pwsh-sandbox` subpath from this same package. For the exact upstream ACL-runner argv, the adapter launches the packaged Electron executable in Node mode through a private trampoline, removes the Node-mode variable before the restricted PowerShell process is created, and delegates all policy and failure handling back to the upstream runner. Direct `danger-full-access` PowerShell, macOS, and Linux execution are unchanged; there is no automatic unrestricted fallback when Windows confinement fails.
+Windows PowerShell keeps the upstream `pwsh-sandbox` behavior and Windows ACL confinement in both presentation modes. The launcher generation replaces only that Host provider with the `dsh-plugin-desktop/windows-pwsh-sandbox` subpath from this same package. For the exact upstream ACL-runner argv, the adapter launches the packaged Electron executable in Node mode through a private trampoline, removes the Node-mode variable before the restricted PowerShell process is created, and delegates all policy and failure handling back to the upstream runner. Direct `danger-full-access` PowerShell, macOS, and Linux execution are unchanged; there is no automatic unrestricted fallback when Windows confinement fails.
 
 ## Advanced mode
 
@@ -83,13 +85,23 @@ node lib/bin.js --version
 
 ## Plugin workflow
 
-Manage the persistent profile with the ordinary DSH command:
+Manage any profile with the ordinary DSH command:
 
 ```sh
 dsh plugin --profile desktop add third-party-plugin
 dsh plugin --profile desktop remove third-party-plugin
 dsh plugin --profile desktop update
 ```
+
+The application starts with `desktop` by default. Choose another Web-capable profile from the tray's **Profile** submenu; switching profiles restarts the application. The generated DSH terminal defaults bare commands to the currently active profile, so the shorter forms below modify that profile directly:
+
+```sh
+dsh plugin add third-party-plugin
+dsh plugin remove third-party-plugin
+dsh plugin update
+```
+
+An explicit `--profile <name>` remains authoritative and is useful for preparing another profile before selecting it.
 
 The package can then be launched from npm with:
 
@@ -103,11 +115,11 @@ A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin wit
 
 Packaged applications check the fixed DSH Desktop GitHub repository for its latest stable release 60 seconds after startup and every six hours after a completed check. Each request has a 15-second deadline, shares one in-flight operation with manual checks, and uses a private conditional-request cache. Development and other unpackaged launches do not schedule network requests, but the tray always offers **Check for Updates…**, and a manual check reports its result through a native notification. A newer validated stable version changes that command into a release link; background discovery automatically notifies at most once per version. DSH Desktop only discovers the release and opens its exact GitHub page in the default browser; it does not download, install, replace, or restart the application.
 
-On macOS and Windows, **Open DSH Terminal** opens a system terminal rooted at the persistent `desktop` profile. Its welcome text identifies the application version, profile, profile directory, and DSH home, then lists configuration and plugin-management commands. Inside this terminal, bare `dsh`, `dsh --dump-config`, and plugin subcommands without a profile selection default to `desktop`; an explicit `--profile` and the upstream `web` alias keep their original meaning. The explicit profile examples above remain valid. DSH Desktop generates private `dsh`, `pnpm`, and `node` shims under its user-data directory, sets `DSH_HOME`, uses the profile as the working directory, and prepends the shim directory only to that terminal's `PATH`. It does not edit the global environment or shell startup files. The macOS launcher preserves the user's interactive zsh or bash setup before restoring the desktop-owned values; Windows selects PowerShell 7, Windows PowerShell, or Command Prompt in that order. Linux does not compose the terminal command.
+On macOS and Windows, **Open DSH Terminal** opens a system terminal rooted at the active profile. Its welcome text identifies the application version, active profile, profile directory, and DSH home, then lists configuration and plugin-management commands. Inside this terminal, bare `dsh`, `dsh --dump-config`, and plugin subcommands without a profile selection default to that active profile; an explicit `--profile` and the upstream `web` alias keep their original meaning. DSH Desktop generates private per-profile `dsh`, `pnpm`, and `node` shims under its user-data directory, sets `DSH_HOME`, uses the active profile as the working directory, and prepends the shim directory only to that terminal's `PATH`. A later profile switch therefore does not change commands in an already open terminal. It does not edit the global environment or shell startup files. The macOS launcher preserves the user's interactive zsh or bash setup before restoring the desktop-owned values; Windows selects PowerShell 7, Windows PowerShell, or Command Prompt in that order. Linux does not compose the terminal command.
 
 ## Native lifecycle
 
-Closing the window hides it while the Host Cordis tree continues running. The tray reopens the window, opens the isolated DSH terminal, checks for a stable release, changes mode through the standard settings namespace, or requests an explicit quit. Native quit, `SIGINT`, and `SIGTERM` all request Cordis disposal before Electron exits; a five-second deadline or a repeated request forces the final exit. Navigation and redirects remain on the exact loopback origin; external HTTP, HTTPS, and mail links open in the operating system, while the renderer uses `contextIsolation`, the Chromium sandbox, and no Node integration.
+Closing the window hides it while the Host Cordis tree continues running. The tray reopens the window, selects the active profile, opens the isolated DSH terminal, checks for a stable release, changes mode through the standard settings namespace, or requests an explicit quit. Profile and mode changes both dispose the current Cordis tree before Electron relaunches. Native quit, `SIGINT`, and `SIGTERM` also request disposal before exit; a five-second deadline or a repeated request forces the final exit. Navigation and redirects remain on the exact loopback origin; external HTTP, HTTPS, and mail links open in the operating system, while the renderer uses `contextIsolation`, the Chromium sandbox, and no Node integration.
 
 ## Packaging
 
@@ -123,7 +135,7 @@ None. The same DSH Host and client feature plugins assemble model requests.
 
 ## Known Limitations and Deferred Work
 
-- Adding or removing a profile bundle requires restarting DSH Desktop; the launcher does not watch the profile manifest.
+- Adding or removing a profile bundle requires restarting DSH Desktop; the launcher does not watch profile manifests. Selecting another profile from the tray performs that restart automatically.
 - Switching compatibility/advanced mode always restarts the application by design; a live generation never hot-swaps Loader rows, slot ownership, or native materials.
 - Advanced mode is unavailable on Linux. Linux continues to use the compatibility presentation.
 - The bundled `dsh`, `pnpm`, and `node` commands are exposed only inside the terminal opened from the macOS or Windows tray. The installer does not add them to the system `PATH`, and Linux currently has no desktop terminal command.

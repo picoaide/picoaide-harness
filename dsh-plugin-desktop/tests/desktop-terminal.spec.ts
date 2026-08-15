@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  desktopTerminalStateDirectory,
   openDesktopTerminal,
   type DesktopTerminalOptions,
   type DesktopTerminalSpawn,
@@ -98,6 +99,16 @@ afterEach(() => {
 })
 
 describe('desktop terminal environment', () => {
+  it('keeps generated shims isolated by active profile', () => {
+    const desktop = desktopTerminalStateDirectory('/tmp/dsh-desktop', 'desktop')
+    const work = desktopTerminalStateDirectory('/tmp/dsh-desktop', '工作 profile')
+
+    expect(desktop).toMatch(/^\/tmp\/dsh-desktop\/cli\/[a-f0-9]{64}$/u)
+    expect(work).toMatch(/^\/tmp\/dsh-desktop\/cli\/[a-f0-9]{64}$/u)
+    expect(work).not.toBe(desktop)
+    expect(desktopTerminalStateDirectory('/tmp/dsh-desktop', 'desktop')).toBe(desktop)
+  })
+
   it('generates private macOS shims and opens one quoted welcome command', () => {
     const stateDir = join(temporaryDirectory(), 'terminal state')
     const harness = spawnHarness()
@@ -353,7 +364,7 @@ describe('desktop terminal environment', () => {
     expect(harness.calls[0]?.options.shell).toBe(false)
   })
 
-  it('rejects unsupported platforms and unsafe profile tokens before writing state', () => {
+  it('accepts quoted Unicode profile names and rejects path escapes before writing state', () => {
     const root = temporaryDirectory()
     const harness = spawnHarness()
     const unsupported = macOptions(join(root, 'unsupported'), harness.spawn)
@@ -362,14 +373,20 @@ describe('desktop terminal environment', () => {
     expect(() => lstatSync(unsupported.stateDir)).toThrow()
 
     const unsafe = macOptions(join(root, 'unsafe'), harness.spawn)
-    unsafe.profileName = 'desktop; touch injected'
-    expect(() => openDesktopTerminal(unsafe)).toThrow('one portable profile token')
+    unsafe.profileName = '../desktop'
+    expect(() => openDesktopTerminal(unsafe)).toThrow('invalid profile name')
     expect(() => lstatSync(unsafe.stateDir)).toThrow()
+
+    const localized = macOptions(join(root, 'localized'), harness.spawn)
+    localized.profileName = '工作 profile'
+    openDesktopTerminal(localized)
+    expect(readFileSync(join(localized.stateDir, 'welcome.command'), 'utf8'))
+      .toContain('Profile: 工作 profile')
 
     const newline = macOptions(join(root, 'newline'), harness.spawn)
     newline.productVersion = '2.0.0\ntouch injected'
     expect(() => openDesktopTerminal(newline)).toThrow('must not contain NUL or newlines')
     expect(() => lstatSync(newline.stateDir)).toThrow()
-    expect(harness.calls).toHaveLength(0)
+    expect(harness.calls).toHaveLength(1)
   })
 })

@@ -54,6 +54,10 @@ describe('published package surface', () => {
       types: './lib/types/terminal.d.ts',
       default: './lib/terminal.js',
     })
+    expect(manifest.exports).toHaveProperty('./profiles', {
+      types: './lib/types/profiles.d.ts',
+      default: './lib/profiles.js',
+    })
     expect(manifest.exports).toHaveProperty('./updates', {
       types: './lib/types/updates.d.ts',
       default: './lib/updates.js',
@@ -73,6 +77,7 @@ describe('published package surface', () => {
     })
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/terminal')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/profiles')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
   })
 
@@ -83,6 +88,8 @@ describe('published package surface', () => {
     expect(config).toContain("'windows-acl-runner': 'src/windows-acl-runner.ts'")
     expect(config).toContain("'desktop-cli': 'src/desktop-cli.ts'")
     expect(config).toContain("'desktop-terminal': 'src/desktop-terminal.ts'")
+    expect(config).toContain("'profile-manager': 'src/profile-manager.ts'")
+    expect(config).toContain("profiles: 'src/profiles.ts'")
     expect(config).toContain("terminal: 'src/terminal.ts'")
     expect(config).toContain("updates: 'src/updates.ts'")
   })

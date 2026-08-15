@@ -11,7 +11,7 @@ export type DesktopCliAction = 'help' | 'version' | 'launch'
 /** Human-readable launcher help. */
 export const DESKTOP_CLI_HELP = `Usage: dsh-plugin-desktop [options]
 
-Launch DSH Desktop with the persistent "desktop" profile.
+Launch DSH Desktop with the selected Web-capable profile.
 
 Options:
   -h, --help     display help

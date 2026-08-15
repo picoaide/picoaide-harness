@@ -12,7 +12,7 @@ function isBareSpecifier(specifier: string): boolean {
 }
 
 /**
- * Resolve Cordis Loader bare imports from the persistent desktop profile.
+ * Resolve Cordis Loader bare imports from the selected persistent profile.
  * @param profileBaseUrl - file URL inside the profile that owns plugin dependencies.
  * @returns an idempotent hook disposer.
  */

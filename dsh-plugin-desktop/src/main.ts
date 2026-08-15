@@ -2,6 +2,7 @@
 
 import { app } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'
+import { join } from 'node:path'
 import {
   boot,
   installFailLoud,
@@ -9,10 +10,20 @@ import {
   type FailLoudProcess,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { ElectronDesktopRuntime } from './electron-runtime.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
+import {
+  beginDesktopProfileStartup,
+  listDesktopProfiles,
+  markDesktopProfileFailed,
+  markDesktopProfileHealthy,
+  selectDesktopProfile,
+  type DesktopProfileStartup,
+} from './profile-manager.ts'
 import { prepareDesktopProfile } from './profile.ts'
+import type { DesktopProfiles } from './profiles.ts'
 import {
   createDesktopExitCoordinator,
   createDesktopShutdown,
@@ -23,6 +34,17 @@ import {
 const BIN_NAME = 'dsh-plugin-desktop'
 const PRODUCT_NAME = 'DSH Desktop'
 
+/** Report profile recovery without changing startup or rollback outcomes. */
+function notifyProfileRecovery(runtime: ElectronDesktopRuntime, body: string): void {
+  try {
+    runtime.updates.notify({ title: 'Unable to Open Profile', body })
+  } catch (cause) {
+    process.stderr.write(
+      `${BIN_NAME}: failed to show profile recovery notification: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+    )
+  }
+}
+
 /** Start one Electron process and leave lifetime to the mounted desktop plugin. */
 async function start(): Promise<void> {
   app.setName(PRODUCT_NAME)
@@ -32,6 +54,8 @@ async function start(): Promise<void> {
   }
 
   let current: Context | undefined
+  let profileStartup: DesktopProfileStartup | undefined
+  let profileStatePath: string | undefined
   let shutdown: DesktopShutdown | undefined
   let removeShutdownRequests: (() => void) | undefined
   let runtime!: ElectronDesktopRuntime
@@ -78,12 +102,22 @@ async function start(): Promise<void> {
 
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
-    const prepared = prepareDesktopProfile()
-    runtime.configureTerminal({
-      profileName: 'desktop',
-      profileDir: prepared.profile.dir,
-      homeDir: prepared.homeDir,
-    })
+    const homeDir = resolveDshHome()
+    const selectionStatePath = join(app.getPath('userData'), 'profile-selection', 'state.json')
+    profileStatePath = selectionStatePath
+    profileStartup = beginDesktopProfileStartup(selectionStatePath, homeDir)
+    const activeProfileName = profileStartup.profileName
+    const prepared = prepareDesktopProfile(
+      process.env.DSH_TELEMETRY_DISABLED,
+      homeDir,
+      process.platform,
+      activeProfileName,
+    )
+    const desktopProfiles: DesktopProfiles = {
+      currentProfileName: activeProfileName,
+      list: () => listDesktopProfiles(homeDir),
+      select: name => { selectDesktopProfile(selectionStatePath, homeDir, name) },
+    }
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
     const ctx = await boot(
       BIN_NAME,
@@ -97,6 +131,7 @@ async function start(): Promise<void> {
         )
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
+        hostCtx.provide('desktopProfiles', desktopProfiles)
         provideCmdline(hostCtx, {
           args: ['--host', '127.0.0.1', '--port', '0'],
           exit: requestQuit,
@@ -108,10 +143,40 @@ async function start(): Promise<void> {
       throw cause
     })
     current = ctx
-    await runtime.mountScheduled()
+    runtime.configureTerminal({
+      profileName: activeProfileName,
+      profileDir: prepared.profile.dir,
+      homeDir: prepared.homeDir,
+    })
+    await runtime.mountScheduled(() => {
+      markDesktopProfileHealthy(selectionStatePath, activeProfileName)
+    })
+    if (profileStartup.rolledBackFrom !== undefined) {
+      notifyProfileRecovery(
+        runtime,
+        `Reopened last-known-good profile ${activeProfileName}.`,
+      )
+    }
   } catch (cause) {
     process.stderr.write(`${BIN_NAME}: ${cause instanceof Error ? cause.stack ?? cause.message : String(cause)}\n`)
-    await shutdown.request(1)
+    let exitCode = 1
+    if (profileStartup !== undefined && profileStatePath !== undefined) {
+      const retryLastKnownGood = profileStartup.profileName !== profileStartup.state.lastKnownGood
+      try {
+        markDesktopProfileFailed(profileStatePath, profileStartup.profileName)
+        if (retryLastKnownGood) {
+          nativeExit.requestRelaunch()
+          exitCode = 0
+          notifyProfileRecovery(
+            runtime,
+            `Reopening last-known-good profile ${profileStartup.state.lastKnownGood}.`,
+          )
+        }
+      } catch (stateCause) {
+        process.stderr.write(`${BIN_NAME}: failed to roll back desktop profile state: ${stateCause instanceof Error ? stateCause.message : String(stateCause)}\n`)
+      }
+    }
+    await shutdown.request(exitCode)
   }
 }
 

@@ -19,8 +19,8 @@ describe('desktop npm launcher', () => {
     expect(() => parseDesktopCli(['--port', '3000'])).toThrow('unknown arguments')
   })
 
-  it('names the installed product and persistent profile', () => {
+  it('names the installed product and selected profile behavior', () => {
     expect(DESKTOP_CLI_HELP).toContain('DSH Desktop')
-    expect(DESKTOP_CLI_HELP).toContain('desktop')
+    expect(DESKTOP_CLI_HELP).toContain('selected Web-capable profile')
   })
 })

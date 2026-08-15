@@ -3,13 +3,17 @@ import type { DesktopShellSpec } from '../src/runtime.ts'
 
 const terminal = vi.hoisted(() => ({ open: vi.fn() }))
 
-vi.mock('../src/desktop-terminal.ts', () => ({ openDesktopTerminal: terminal.open }))
+vi.mock('../src/desktop-terminal.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/desktop-terminal.ts')>(),
+  openDesktopTerminal: terminal.open,
+}))
 
 const electron = vi.hoisted(() => {
   const browserWindowOptions: unknown[] = []
   const browserWindows: BrowserWindow[] = []
   const browserWindowOn = vi.fn()
   const browserWindowOff = vi.fn()
+  const loadURL = vi.fn(async (_url: string) => {})
   const menuTemplates: unknown[][] = []
   const notifications: Notification[] = []
   const appIcon = {
@@ -48,7 +52,7 @@ const electron = vi.hoisted(() => {
     readonly off = browserWindowOff
     readonly once = vi.fn()
     readonly destroy = vi.fn()
-    readonly loadURL = vi.fn(async () => {})
+    readonly loadURL = loadURL
     readonly removeMenu = vi.fn()
   }
 
@@ -100,6 +104,7 @@ const electron = vi.hoisted(() => {
     browserWindows,
     browserWindowOff,
     browserWindowOn,
+    loadURL,
     Menu: {
       buildFromTemplate: vi.fn((template: unknown[]) => {
         menuTemplates.push(template)
@@ -155,6 +160,8 @@ describe('Electron compatibility runtime', () => {
     electron.menuTemplates.length = 0
     electron.notifications.length = 0
     vi.clearAllMocks()
+    electron.loadURL.mockReset()
+    electron.loadURL.mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -255,6 +262,30 @@ describe('Electron compatibility runtime', () => {
     expect(electron.browserWindowOptions).toHaveLength(0)
   })
 
+  it('keeps tray commands unavailable until the Web surface loads and startup commits', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    let finishLoad!: () => void
+    electron.loadURL.mockImplementationOnce(() => new Promise<void>((resolve) => { finishLoad = resolve }))
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    const beforeInteractive = vi.fn(() => {
+      expect(electron.trays).toHaveLength(1)
+    })
+
+    const mounted = runtime.mountScheduled(beforeInteractive)
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledOnce() })
+    expect(electron.trays).toHaveLength(0)
+    expect(beforeInteractive).not.toHaveBeenCalled()
+
+    finishLoad()
+    await mounted
+    expect(beforeInteractive).toHaveBeenCalledOnce()
+    expect(electron.trays).toHaveLength(1)
+
+    await release()
+  })
+
   it('persists the opposite mode when its tray command is clicked', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
@@ -328,7 +359,42 @@ describe('Electron compatibility runtime', () => {
     await release()
   })
 
-  it('opens the configured desktop profile through the packaged terminal adapter', async () => {
+  it('renders contributed radio submenus in their own profile section', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const invoke = vi.fn()
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    runtime.registerTrayItem({
+      group: 'profiles',
+      order: 10,
+      label: () => 'Profile: desktop',
+      invoke: () => {},
+      submenu: () => [{
+        label: () => 'web',
+        type: 'radio',
+        checked: () => false,
+        enabled: () => true,
+        invoke,
+      }],
+    })
+    const release = runtime.schedule(spec)
+
+    await runtime.mountScheduled()
+
+    const profile = (electron.menuTemplates.at(-1) as Array<{
+      label?: string
+      submenu?: Array<{ label?: string, type?: string, checked?: boolean, click?: () => void }>
+    }>).find(item => item.label === 'Profile: desktop')
+    expect(profile?.submenu).toEqual([
+      expect.objectContaining({ label: 'web', type: 'radio', checked: false }),
+    ])
+    profile?.submenu?.[0]?.click?.()
+    await vi.waitFor(() => { expect(invoke).toHaveBeenCalledOnce() })
+
+    await release()
+  })
+
+  it('opens the active profile through the packaged terminal adapter', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     Object.defineProperty(process.versions, 'electron', {
       configurable: true,
@@ -355,7 +421,7 @@ describe('Electron compatibility runtime', () => {
         productVersion: '2.0.0',
         profileDir: '/tmp/dsh-home/profiles/desktop',
         homeDir: '/tmp/dsh-home',
-        stateDir: '/tmp/dsh-desktop-user-data/cli',
+        stateDir: expect.stringMatching(/^\/tmp\/dsh-desktop-user-data\/cli\/[a-f0-9]{64}$/u),
         spawn: expect.any(Function),
         onLaunchError: expect.any(Function),
       }))

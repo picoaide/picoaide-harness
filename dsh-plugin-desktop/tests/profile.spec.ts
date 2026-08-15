@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { composeEntries } from '@deepseek-ai/dsh-app-boot'
+import { composeEntries, initProfile, PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 import {
   DESKTOP_PACKAGE_NAME,
   desktopShellModeFromSettings,
@@ -136,6 +136,43 @@ describe('desktop profile composition', () => {
     }))
     expect(rows.find(row => row.id === 'desktop-updates')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/updates',
+    }))
+    expect(rows.find(row => row.id === 'desktop-profiles')).toEqual(expect.objectContaining({
+      name: 'dsh-plugin-desktop/profiles',
+    }))
+  })
+
+  it('boots a selected Web profile without overriding its compatibility UI rows', () => {
+    const home = temporaryHome()
+    const webDir = join(home, 'profiles', 'web')
+    const bundles = PROFILE_TEMPLATES.web
+    if (bundles === undefined) throw new Error('test requires the shipped Web template')
+    initProfile(webDir, bundles)
+    writeFileSync(join(webDir, 'cordis.patch.yml'), [
+      '- id: ui-layout',
+      "  name: '@deepseek-ai/dsh-client-ui-layout'",
+      '  disabled: true',
+      '- insert:',
+      '    - id: third-party-layout',
+      "      name: 'third-party-layout'",
+      '',
+    ].join('\n'))
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin', 'web')
+    const rows = composeEntries([prepared.patches])
+
+    expect(prepared.profile.name).toBe('web')
+    expect(rows.find(row => row.id === 'ui-layout')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-client-ui-layout',
+      disabled: true,
+    }))
+    expect(rows.find(row => row.id === 'third-party-layout')).toEqual({
+      id: 'third-party-layout',
+      name: 'third-party-layout',
+    })
+    expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
+      name: 'dsh-plugin-desktop',
+      config: expect.objectContaining({ mode: 'compatibility' }),
     }))
   })
 

@@ -30,9 +30,23 @@ export interface DesktopTrayIcons {
 }
 
 /** Stable placement groups for Host plugins that extend the native tray. */
-export type DesktopTrayItemGroup = 'tools' | 'status'
+export type DesktopTrayItemGroup = 'tools' | 'profiles' | 'status'
 
-/** One effect-scoped command contributed to the native tray menu. */
+/** One command rendered below a contributed native tray submenu. */
+export interface DesktopTraySubmenuItem {
+  /** Resolve the current user-visible label when the menu is rebuilt. */
+  label(): string
+  /** Native menu selection behavior. */
+  type?: 'normal' | 'checkbox' | 'radio'
+  /** Resolve whether the command can currently be invoked. */
+  enabled?(): boolean
+  /** Resolve the selected state for checkbox and radio commands. */
+  checked?(): boolean
+  /** Run the command without blocking the Electron menu callback. */
+  invoke(): void | Promise<void>
+}
+
+/** One effect-scoped command or submenu contributed to the native tray menu. */
 export interface DesktopTrayItem {
   /** Menu section used for deterministic ordering and separators. */
   group: DesktopTrayItemGroup
@@ -44,6 +58,8 @@ export interface DesktopTrayItem {
   enabled?(): boolean
   /** Run the command without blocking the Electron menu callback. */
   invoke(): void | Promise<void>
+  /** Resolve optional child commands whenever the menu is rebuilt. */
+  submenu?(): readonly DesktopTraySubmenuItem[]
 }
 
 /** Lifecycle handle returned for one tray contribution. */
@@ -125,9 +141,11 @@ export interface DesktopRuntime {
 
   /**
    * Mount the registered generation after the launcher has settled the profile.
+   * @param beforeInteractive - synchronous launcher commit run after native setup
+   * succeeds and before tray commands can be dispatched.
    * @returns a promise that rejects when registration or native setup fails.
    */
-  mountScheduled(): Promise<void>
+  mountScheduled(beforeInteractive?: () => void): Promise<void>
 
   /** Reveal and focus the current window, if mounted. */
   show(): void

@@ -36,6 +36,10 @@
       "types": "./lib/types/terminal.d.ts",
       "default": "./lib/terminal.js"
     },
+    "./profiles": {
+      "types": "./lib/types/profiles.d.ts",
+      "default": "./lib/profiles.js"
+    },
     "./updates": {
       "types": "./lib/types/updates.d.ts",
       "default": "./lib/updates.js"

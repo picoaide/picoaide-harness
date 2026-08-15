@@ -216,16 +216,20 @@ function rowDisabledOnPlatform(row: EntryOptions, platform: NodeJS.Platform): bo
  * @param telemetryDisabled - inherited DSH telemetry opt-out value.
  * @param home - Harness home containing profiles and the machine-wide patch.
  * @param platform - native platform selecting launcher-owned safety overlays.
+ * @param profileName - existing or lazily available Web profile to compose.
  * @returns root config, profile metadata, and ordered patches.
  */
 export function prepareDesktopProfile(
   telemetryDisabled: string | undefined = process.env.DSH_TELEMETRY_DISABLED,
   home: string = resolveDshHome(),
   platform: NodeJS.Platform = process.platform,
+  profileName: string = DESKTOP_PROFILE_NAME,
 ): PreparedDesktopProfile {
-  const profileDir = ensureDesktopProfile(home)
+  const profileDir = profileName === DESKTOP_PROFILE_NAME
+    ? ensureDesktopProfile(home)
+    : resolveProfileDir(profileName, home)
   healProfilesModuleFallback(INSTALL_ANCHOR, home)
-  const profile = loadProfile(BIN_NAME, DESKTOP_PROFILE_NAME, INSTALL_ANCHOR, home)
+  const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
   const rootConfig = join(profileDir, DESKTOP_PROFILE_ROOT)
   const bareModuleBaseUrl = pathToFileURL(join(profile.dir, 'package.json')).href
   writeFileSync(rootConfig, '[]\n')
@@ -266,14 +270,21 @@ export function prepareDesktopProfile(
     id: 'settings',
     config: settingsConfig,
   })
-  for (const [id, packageName] of [
-    ['ui-layout', UI_LAYOUT_PACKAGE],
-    ['ui-sidebar', UI_SIDEBAR_PACKAGE],
-    ['ui-conversation', UI_CONVERSATION_PACKAGE],
-  ] as const) {
-    if (rows.get(id)?.name !== packageName) {
-      throw new Error(`${BIN_NAME}: desktop profile must use ${packageName} in the ${id} row`)
+  if (mode === 'advanced') {
+    for (const [id, packageName] of [
+      ['ui-layout', UI_LAYOUT_PACKAGE],
+      ['ui-sidebar', UI_SIDEBAR_PACKAGE],
+      ['ui-conversation', UI_CONVERSATION_PACKAGE],
+    ] as const) {
+      if (rows.get(id)?.name !== packageName) {
+        throw new Error(`${BIN_NAME}: advanced desktop mode must use ${packageName} in the ${id} row`)
+      }
     }
+    patches.push(
+      { id: 'ui-layout', disabled: true },
+      { id: 'ui-sidebar', disabled: false },
+      { id: 'ui-conversation', disabled: false },
+    )
   }
   const presets = rows.get('agent-presets')
   if (presets !== undefined) {
@@ -339,11 +350,6 @@ export function prepareDesktopProfile(
     disabled: false,
     config: { host: '127.0.0.1', port: 0 },
   })
-  patches.push(
-    { id: 'ui-layout', disabled: mode === 'advanced' },
-    { id: 'ui-sidebar', disabled: false },
-    { id: 'ui-conversation', disabled: false },
-  )
   if ((telemetryDisabled ?? '') !== '' && rows.has('session-telemetry-otel')) {
     patches.push({ id: 'session-telemetry-otel', disabled: true })
   }
