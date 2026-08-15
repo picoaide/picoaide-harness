@@ -78,6 +78,7 @@ describe('published package surface', () => {
     expect(manifest.exports).not.toHaveProperty('./desktop-runtime-environment')
     expect(manifest.exports).not.toHaveProperty('./desktop-terminal')
     expect(manifest.exports).not.toHaveProperty('./update-checker')
+    expect(manifest.exports).not.toHaveProperty('./update-download')
     expect(manifest.exports).toHaveProperty('./package.json')
     expect(manifest.dsh?.bundle).toEqual({ patch: './cordis.patch.yml' })
     expect(manifest.dsh?.client).toEqual({
@@ -112,6 +113,7 @@ describe('published package surface', () => {
     expect(config).toContain("pnpm: 'src/pnpm.ts'")
     expect(config).toContain("profiles: 'src/profiles.ts'")
     expect(config).toContain("terminal: 'src/terminal.ts'")
+    expect(config).toContain("'update-download': 'src/update-download.ts'")
     expect(config).toContain("updates: 'src/updates.ts'")
   })
 
@@ -188,6 +190,8 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run build')
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run typecheck')
     expect(manifest.scripts?.['check:win-package']).toContain('tests/package-win.spec.ts')
+    expect(manifest.scripts?.['check:win-package']).toContain('tests/update-checker.spec.ts')
+    expect(manifest.scripts?.['check:win-package']).toContain('tests/update-download.spec.ts')
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run verify:closure')
     expect(manifest.scripts?.['verify:cli']).toBe('node scripts/verify-cli-runtime.mjs')
     expect(manifest.scripts?.check).toContain('yarn run verify:cli')

@@ -70,10 +70,13 @@ try {
     platform: 'win32',
     updates: {
       isPackaged: false,
+      canDownload: true,
       currentVersion: '2.0.0',
       statePath: join(home, 'update-state.json'),
       request: async () => { throw new Error('profile smoke must not perform update requests') },
-      openRelease: async () => {},
+      confirmDownload: async () => false,
+      showManualCheckResult: async () => {},
+      downloadAndOpen: async () => {},
       notify: () => {},
     },
     schedule(spec) {

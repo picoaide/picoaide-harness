@@ -1,4 +1,4 @@
-/** Cordis Host plugin for scheduled and interactive DSH Desktop update checks. */
+/** Cordis Host plugin for scheduled and interactive DSH Desktop updates. */
 
 import { open } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
@@ -6,24 +6,19 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type {} from './runtime.ts'
 import {
-  UpdateCheckError,
   checkForStableUpdate,
-  compareSemVerVersions,
   parseSemVer,
-  parseStableRelease,
-  type StableRelease,
   type UpdateCheckResult,
 } from './update-checker.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-updates'
 
-/** Native adapter required for network, tray, notification, and browser access. */
+/** Native adapter required for network, tray, confirmation, and installer access. */
 export const inject = ['desktopRuntime']
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_STATE_BYTES = 4 * 1024
-const MAX_ETAG_LENGTH = 1024
 
 /** Scheduled update policy. */
 export interface Config {
@@ -33,7 +28,7 @@ export interface Config {
   initialDelayMs: number
   /** Delay between completion of one background check and the next attempt. */
   intervalMs: number
-  /** Maximum duration of one GitHub request before caller-owned cancellation. */
+  /** Maximum duration of one version request before caller-owned cancellation. */
   requestTimeoutMs: number
 }
 
@@ -45,15 +40,12 @@ export const Config: z<Config> = z.object({
   requestTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
 })
 
-interface UpdateStateV1 {
-  readonly version: 1
-  readonly checkedVersion?: string
-  readonly etag?: string
-  readonly lastNotifiedVersion?: string
-  readonly availableRelease?: StableRelease
+interface UpdateStateV2 {
+  readonly version: 2
+  readonly lastPromptedVersion?: string
 }
 
-const EMPTY_STATE: UpdateStateV1 = { version: 1 }
+const EMPTY_STATE: UpdateStateV2 = { version: 2 }
 
 /**
  * Register effect-scoped update polling and its dynamic tray command.
@@ -65,14 +57,16 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     let disposed = false
     let checking = false
-    let availableRelease: StableRelease | undefined
-    let state: UpdateStateV1 = EMPTY_STATE
+    let availableVersion: string | undefined
+    let downloadingVersion: string | undefined
+    let state: UpdateStateV2 = EMPTY_STATE
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     let requestTimer: ReturnType<typeof setTimeout> | undefined
     let requestController: AbortController | undefined
-    let inFlight: Promise<UpdateCheckResult> | undefined
+    let downloadController: AbortController | undefined
+    let inFlight: Promise<UpdateCheckResult | null> | undefined
     let manualTask: Promise<void> | undefined
-    const notifiedThisProcess = new Set<string>()
+    let downloadTask: Promise<void> | undefined
     let refreshTray = (): void => {}
 
     const persistState = async (): Promise<void> => {
@@ -81,63 +75,29 @@ export function apply(ctx: Context, config: Config): void {
           mode: 0o600,
           dirMode: 0o700,
         })
-      } catch (cause) {
-        if (!disposed) ctx.logger.warn(`dsh-plugin-desktop: failed to persist update state: ${formatCause(cause)}`)
+      } catch {
+        // Update state is optional; failures must not affect application startup or user activity.
       }
     }
 
     const stateReady = (async () => {
       try {
         state = parseState(await readState(adapter.statePath))
-        if (state.checkedVersion !== undefined && state.checkedVersion !== adapter.currentVersion) {
-          state = withStateValues(undefined, state.lastNotifiedVersion, undefined, undefined)
-          await persistState()
-        }
       } catch (cause) {
         if (isEnoent(cause)) return
         state = EMPTY_STATE
-        if (!disposed) {
-          ctx.logger.warn(`dsh-plugin-desktop: update state was reset: ${formatCause(cause)}`)
-          await persistState()
-        }
-      }
-      if (state.lastNotifiedVersion !== undefined) {
-        notifiedThisProcess.add(state.lastNotifiedVersion)
+        if (!disposed) await persistState()
       }
     })()
 
-    const applySuccessfulResult = async (result: UpdateCheckResult): Promise<UpdateCheckResult> => {
-      let checkedVersion = state.checkedVersion
-      let cachedRelease = state.availableRelease
-      if (result.status === 'update-available') {
-        checkedVersion = adapter.currentVersion
-        cachedRelease = result.release
-      } else if (result.status === 'up-to-date') {
-        checkedVersion = adapter.currentVersion
-        cachedRelease = undefined
-      }
-
-      const etag = checkedVersion === undefined || !isSafeEtag(result.etag)
-        ? undefined
-        : result.etag
-      const nextState = withStateValues(etag, state.lastNotifiedVersion, checkedVersion, cachedRelease)
-      if (renderState(nextState) !== renderState(state)) {
-        state = nextState
-        await persistState()
-      }
-      availableRelease = cachedRelease
-
-      if (result.status !== 'not-modified' || cachedRelease === undefined) return result
-      const currentVersion = parseSemVer(adapter.currentVersion)!.version
-      return {
-        status: 'update-available',
-        currentVersion,
-        release: cachedRelease,
-        ...(result.etag === undefined ? {} : { etag: result.etag }),
-      }
+    const rememberPrompt = async (version: string): Promise<void> => {
+      await stateReady
+      if (state.lastPromptedVersion === version) return
+      state = { version: 2, lastPromptedVersion: version }
+      await persistState()
     }
 
-    const startCheck = (trigger: 'background' | 'manual'): Promise<UpdateCheckResult> => {
+    const startCheck = (): Promise<UpdateCheckResult | null> => {
       if (inFlight !== undefined) return inFlight
       checking = true
       refreshTray()
@@ -145,17 +105,16 @@ export function apply(ctx: Context, config: Config): void {
       requestController = controller
 
       const task = (async () => {
-        await stateReady
-        if (disposed) throw new DOMException('Update plugin disposed.', 'AbortError')
         requestTimer = setTimeout(() => { controller.abort() }, config.requestTimeoutMs)
-        const result = await checkForStableUpdate({
-          currentVersion: adapter.currentVersion,
-          trigger,
-          ...(state.etag === undefined ? {} : { etag: state.etag }),
-          signal: controller.signal,
-          request: adapter.request,
-        })
-        return disposed ? result : applySuccessfulResult(result)
+        try {
+          return await checkForStableUpdate({
+            currentVersion: adapter.currentVersion,
+            signal: controller.signal,
+            request: adapter.request,
+          })
+        } catch {
+          return null
+        }
       })().finally(() => {
         if (requestTimer !== undefined) clearTimeout(requestTimer)
         requestTimer = undefined
@@ -168,77 +127,82 @@ export function apply(ctx: Context, config: Config): void {
       return task
     }
 
-    const notify = (title: string, body: string, openUrl?: string): void => {
-      try {
-        adapter.notify({ title, body, ...(openUrl === undefined ? {} : { openUrl }) })
-      } catch (cause) {
-        if (!disposed) ctx.logger.warn(`dsh-plugin-desktop: failed to show update notification: ${formatCause(cause)}`)
-      }
+    const observeResult = (result: UpdateCheckResult | null): string | undefined => {
+      if (disposed || result === null) return undefined
+      availableVersion = result.status === 'update-available' && adapter.canDownload
+        ? result.latestVersion
+        : undefined
+      refreshTray()
+      return availableVersion
     }
 
-    const notifyManualResult = (result: UpdateCheckResult): void => {
-      if (disposed) return
-      if (result.status === 'update-available') {
-        notify(
-          'DSH Desktop Update Available',
-          `Version ${result.release.version} is available.`,
-          result.release.htmlUrl,
-        )
-      } else if (result.status === 'up-to-date') {
-        notify(
-          'DSH Desktop is Up to Date',
-          `Version ${result.currentVersion} is the latest stable release.`,
-        )
-      } else {
-        notify('Update Check Complete', 'Release information has not changed.')
-      }
+    const startDownload = (version: string): Promise<void> => {
+      if (downloadTask !== undefined) return downloadTask
+      const task = (async () => {
+        let confirmed: boolean
+        try {
+          confirmed = await adapter.confirmDownload(version)
+        } catch {
+          return
+        }
+        if (!confirmed || disposed) return
+
+        const confirmedVersion = observeResult(await startCheck())
+        if (confirmedVersion !== version || disposed) return
+
+        const controller = new AbortController()
+        downloadController = controller
+        downloadingVersion = version
+        refreshTray()
+        try {
+          await adapter.downloadAndOpen(version, controller.signal)
+        } catch {
+          // Network, filesystem, and installer-opening failures are deliberately silent.
+        } finally {
+          if (downloadController === controller) downloadController = undefined
+          downloadingVersion = undefined
+          refreshTray()
+        }
+      })().finally(() => {
+        if (downloadTask === task) downloadTask = undefined
+      })
+      downloadTask = task
+      return task
+    }
+
+    const offerDownload = async (version: string, automatic: boolean): Promise<void> => {
+      if (disposed || !adapter.canDownload) return
+      await stateReady
+      if (disposed || (automatic && state.lastPromptedVersion === version)) return
+      await rememberPrompt(version)
+      if (!disposed) await startDownload(version)
     }
 
     const runManualCheck = (): Promise<void> => {
-      manualTask ??= startCheck('manual')
-        .then(notifyManualResult)
-        .catch((cause: unknown) => {
-          if (!disposed) notify('Unable to Check for Updates', formatCause(cause))
-        })
-        .finally(() => { manualTask = undefined })
+      manualTask ??= (async () => {
+        if (availableVersion !== undefined) {
+          await offerDownload(availableVersion, false)
+          return
+        }
+        const result = await startCheck()
+        if (disposed) return
+        const version = observeResult(result)
+        if (version !== undefined) {
+          await offerDownload(version, false)
+          return
+        }
+        await adapter.showManualCheckResult(result)
+      })().catch(() => undefined).finally(() => { manualTask = undefined })
       return manualTask
-    }
-
-    const openAvailableRelease = async (release: StableRelease): Promise<void> => {
-      try {
-        await adapter.openRelease(release.htmlUrl)
-      } catch (cause) {
-        if (!disposed) notify('Unable to Open Update', formatCause(cause))
-      }
     }
 
     const runBackgroundCheck = async (): Promise<void> => {
       if (inFlight !== undefined || disposed) return
       try {
-        const result = await startCheck('background')
-        if (disposed || result.status !== 'update-available') return
-        const version = result.release.version
-        if (notifiedThisProcess.has(version) || state.lastNotifiedVersion === version) return
-        notifiedThisProcess.add(version)
-        notify(
-          'DSH Desktop Update Available',
-          `Version ${version} is available.`,
-          result.release.htmlUrl,
-        )
-        state = withStateValues(
-          state.etag,
-          version,
-          state.checkedVersion,
-          state.availableRelease,
-        )
-        await persistState()
-      } catch (cause) {
-        if (!disposed) {
-          const category = cause instanceof UpdateCheckError ? cause.code : 'unexpected'
-          ctx.logger.warn(
-            `dsh-plugin-desktop: background update check failed (${category}): ${formatCause(cause)}`,
-          )
-        }
+        const version = observeResult(await startCheck())
+        if (version !== undefined) await offerDownload(version, true)
+      } catch {
+        // Scheduled checks never surface failures to the user or the application log.
       }
     }
 
@@ -254,58 +218,43 @@ export function apply(ctx: Context, config: Config): void {
     const registration = ctx.desktopRuntime.registerTrayItem({
       group: 'status',
       order: 10,
-      label: () => availableRelease === undefined
-        ? checking ? 'Checking for Updates…' : 'Check for Updates…'
-        : `DSH Desktop ${availableRelease.version} Available`,
-      invoke: () => availableRelease === undefined
-        ? runManualCheck()
-        : openAvailableRelease(availableRelease),
+      label: () => downloadingVersion === undefined
+        ? availableVersion === undefined
+          ? checking ? 'Checking for Updates…' : 'Check for Updates…'
+          : `DSH Desktop ${availableVersion} Available`
+        : `Downloading DSH Desktop ${downloadingVersion}…`,
+      invoke: runManualCheck,
     })
     refreshTray = registration.refresh
 
     if (adapter.isPackaged && config.enabled) scheduleBackgroundCheck(config.initialDelayMs)
 
-    return () => {
+    return async () => {
       disposed = true
       if (pollTimer !== undefined) clearTimeout(pollTimer)
       if (requestTimer !== undefined) clearTimeout(requestTimer)
       requestController?.abort()
+      downloadController?.abort()
       registration.dispose()
+      // Native dialogs are not cancellable. Await only file state and the abortable version request.
+      const pending: Promise<unknown>[] = [stateReady]
+      if (inFlight !== undefined) pending.push(inFlight)
+      await Promise.allSettled(pending)
     }
-  }, 'dsh-plugin-desktop: update polling and tray command')
+  }, 'dsh-plugin-desktop: update polling, confirmation, and installer handoff')
 }
 
-function parseState(text: string): UpdateStateV1 {
+function parseState(text: string): UpdateStateV2 {
   const value: unknown = JSON.parse(text)
   if (!isRecord(value)
-    || value.version !== 1
-    || (value.checkedVersion !== undefined && !isVersion(value.checkedVersion))
-    || (value.etag !== undefined && !isSafeEtag(value.etag))
-    || (value.lastNotifiedVersion !== undefined && !isStableVersion(value.lastNotifiedVersion))
-    || Object.keys(value).some(key => ![
-      'version',
-      'checkedVersion',
-      'etag',
-      'lastNotifiedVersion',
-      'availableRelease',
-    ].includes(key))) {
-    throw new Error('invalid v1 update state')
+    || value.version !== 2
+    || (value.lastPromptedVersion !== undefined && !isStableVersion(value.lastPromptedVersion))
+    || Object.keys(value).some(key => !['version', 'lastPromptedVersion'].includes(key))) {
+    throw new Error('invalid v2 update state')
   }
-  const checkedVersion = value.checkedVersion as string | undefined
-  const availableRelease = parseCachedRelease(value.availableRelease)
-  if ((value.etag !== undefined || availableRelease !== undefined) && checkedVersion === undefined) {
-    throw new Error('invalid v1 update state')
-  }
-  if (availableRelease !== undefined
-    && compareSemVerVersions(availableRelease.version, checkedVersion!)! <= 0) {
-    throw new Error('invalid v1 update state')
-  }
-  return withStateValues(
-    value.etag as string | undefined,
-    value.lastNotifiedVersion as string | undefined,
-    checkedVersion,
-    availableRelease,
-  )
+  return value.lastPromptedVersion === undefined
+    ? EMPTY_STATE
+    : { version: 2, lastPromptedVersion: value.lastPromptedVersion as string }
 }
 
 async function readState(filename: string): Promise<string> {
@@ -320,41 +269,8 @@ async function readState(filename: string): Promise<string> {
   }
 }
 
-function renderState(state: UpdateStateV1): string {
+function renderState(state: UpdateStateV2): string {
   return `${JSON.stringify(state, null, 2)}\n`
-}
-
-function withStateValues(
-  etag: string | undefined,
-  lastNotifiedVersion: string | undefined,
-  checkedVersion: string | undefined,
-  availableRelease: StableRelease | undefined,
-): UpdateStateV1 {
-  return {
-    version: 1,
-    ...(checkedVersion === undefined ? {} : { checkedVersion }),
-    ...(etag === undefined ? {} : { etag }),
-    ...(lastNotifiedVersion === undefined ? {} : { lastNotifiedVersion }),
-    ...(availableRelease === undefined ? {} : { availableRelease }),
-  }
-}
-
-function parseCachedRelease(value: unknown): StableRelease | undefined {
-  if (value === undefined) return undefined
-  if (!isRecord(value)
-    || typeof value.tagName !== 'string'
-    || typeof value.version !== 'string'
-    || typeof value.htmlUrl !== 'string'
-    || Object.keys(value).some(key => !['tagName', 'version', 'htmlUrl'].includes(key))) {
-    throw new Error('invalid v1 update state')
-  }
-  const release = parseStableRelease(value.tagName, value.htmlUrl)
-  if (release === null || release.version !== value.version) throw new Error('invalid v1 update state')
-  return release
-}
-
-function isVersion(value: unknown): value is string {
-  return typeof value === 'string' && parseSemVer(value) !== null
 }
 
 function isStableVersion(value: unknown): value is string {
@@ -363,21 +279,10 @@ function isStableVersion(value: unknown): value is string {
   return parsed !== null && parsed.prerelease.length === 0 && parsed.version === value
 }
 
-function isSafeEtag(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.length > 0
-    && value.length <= MAX_ETAG_LENGTH
-    && !/[\r\n]/u.test(value)
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isEnoent(value: unknown): boolean {
   return isRecord(value) && value.code === 'ENOENT'
-}
-
-function formatCause(value: unknown): string {
-  return value instanceof Error ? value.message : String(value)
 }

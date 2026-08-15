@@ -31,6 +31,8 @@ import type {
   DesktopUpdateAdapter,
 } from './runtime.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
+import { downloadDesktopUpdate } from './update-download.ts'
+import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
 
 /** Return the presentation mode opposite the active generation. */
@@ -65,10 +67,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
   readonly updates: DesktopUpdateAdapter = {
     get isPackaged() { return app.isPackaged },
+    get canDownload() { return app.isPackaged && (process.platform === 'darwin' || process.platform === 'win32') },
     get currentVersion() { return PRODUCT_VERSION },
     get statePath() { return join(app.getPath('userData'), 'updates', 'state.json') },
     request: (url, init) => net.fetch(url, init),
-    openRelease: async url => { await shell.openExternal(url) },
+    confirmDownload: version => this.confirmUpdateDownload(version),
+    showManualCheckResult: result => this.showManualUpdateCheckResult(result),
+    downloadAndOpen: (version, signal) => this.downloadAndOpenUpdate(version, signal),
     notify: notification => { this.showNotification(notification) },
   }
 
@@ -255,15 +260,139 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       title: notification.title,
       body: notification.body,
     })
-    const openUrl = notification.openUrl
-    if (openUrl !== undefined) {
-      nativeNotification.once('click', () => {
-        void this.updates.openRelease(openUrl).catch((cause: unknown) => {
-          process.stderr.write(`dsh-plugin-desktop: failed to open release page: ${cause instanceof Error ? cause.message : String(cause)}\n`)
-        })
-      })
-    }
     nativeNotification.show()
+  }
+
+  /** Ask before making the fixed download endpoint's counted request. */
+  private async confirmUpdateDownload(version: string): Promise<boolean> {
+    const result = await dialog.showMessageBox({
+      type: 'info',
+      title: 'DSH Desktop Update Available',
+      message: `DSH Desktop ${version} is available.`,
+      detail: 'Download this update now?',
+      buttons: ['Download', 'Later'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    })
+    return result.response === 0
+  }
+
+  /** Report one user-triggered check without exposing network or response details. */
+  private async showManualUpdateCheckResult(result: UpdateCheckResult | null): Promise<void> {
+    if (result === null) {
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: 'Unable to Check for Updates',
+        message: 'DSH Desktop could not check for updates.',
+        detail: 'Please try again later.',
+        buttons: ['OK'],
+        defaultId: 0,
+        noLink: true,
+      })
+      return
+    }
+
+    if (result.status === 'up-to-date') {
+      await dialog.showMessageBox({
+        type: 'info',
+        title: 'DSH Desktop Is Up to Date',
+        message: 'No newer version of DSH Desktop is available.',
+        detail: `Installed version: ${result.currentVersion}`,
+        buttons: ['OK'],
+        defaultId: 0,
+        noLink: true,
+      })
+      return
+    }
+
+    await dialog.showMessageBox({
+      type: 'info',
+      title: 'DSH Desktop Update Available',
+      message: `DSH Desktop ${result.latestVersion} is available.`,
+      detail: 'Installer downloads are unavailable in this build.',
+      buttons: ['OK'],
+      defaultId: 0,
+      noLink: true,
+    })
+  }
+
+  /** Download a confirmed installer and hand it to the native installation flow. */
+  private async downloadAndOpenUpdate(version: string, signal: AbortSignal): Promise<void> {
+    if (this.platform !== 'darwin' && this.platform !== 'win32') {
+      throw new Error(`dsh-plugin-desktop: updates are unavailable on ${this.platform}`)
+    }
+    const artifactPath = await downloadDesktopUpdate({
+      platform: this.platform,
+      version,
+      userDataPath: app.getPath('userData'),
+      request: (url, init) => net.fetch(url, init),
+      signal,
+    })
+    signal.throwIfAborted()
+
+    if (this.platform === 'darwin') {
+      const openError = await shell.openPath(artifactPath)
+      if (openError !== '') throw new Error(`dsh-plugin-desktop: failed to open update disk image: ${openError}`)
+      signal.throwIfAborted()
+      await dialog.showMessageBox({
+        type: 'info',
+        title: 'DSH Desktop Update Downloaded',
+        message: `DSH Desktop ${version} is ready to install.`,
+        detail: 'The disk image has opened. Replace DSH Desktop in Applications, then reopen it.',
+        buttons: ['OK'],
+        defaultId: 0,
+        noLink: true,
+      })
+      return
+    }
+
+    const result = await dialog.showMessageBox({
+      type: 'info',
+      title: 'DSH Desktop Update Downloaded',
+      message: `DSH Desktop ${version} is ready to install.`,
+      detail: 'Restart DSH Desktop and run the installer now?',
+      buttons: ['Restart and Install', 'Later'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    })
+    if (result.response !== 0) return
+
+    const spec = this.scheduled
+    if (spec === undefined) throw new Error('dsh-plugin-desktop: no active shell can exit for update installation')
+    signal.throwIfAborted()
+    await this.launchWindowsUpdateInstaller(artifactPath)
+    this.quitting = true
+    spec.requestQuit(0)
+  }
+
+  /** Start the downloaded NSIS installer before releasing the current process. */
+  private async launchWindowsUpdateInstaller(installerPath: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let child: ReturnType<typeof spawn>
+      try {
+        child = spawn(installerPath, ['--updated', '--force-run'], {
+          detached: true,
+          stdio: 'ignore',
+          shell: false,
+          windowsHide: false,
+        })
+      } catch (cause) {
+        reject(cause)
+        return
+      }
+      const fail = (cause: Error): void => { reject(cause) }
+      child.once('error', fail)
+      child.once('spawn', () => {
+        child.off('error', fail)
+        child.once('error', cause => {
+          process.stderr.write(`dsh-plugin-desktop: update installer failed after launch: ${cause.message}\n`)
+        })
+        child.unref()
+        resolve()
+      })
+    })
   }
 
   /** Keep native-terminal launch failures visible in a packaged GUI process. */

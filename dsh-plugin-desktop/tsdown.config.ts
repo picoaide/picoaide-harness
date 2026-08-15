@@ -20,6 +20,7 @@ export default defineConfig([
       'desktop-cli': 'src/desktop-cli.ts',
       terminal: 'src/terminal.ts',
       'update-checker': 'src/update-checker.ts',
+      'update-download': 'src/update-download.ts',
       updates: 'src/updates.ts',
       'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts',
       'windows-acl-runner': 'src/windows-acl-runner.ts',

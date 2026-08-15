@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { UpdateRequest } from './update-checker.ts'
+import type { UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 
 /** Electron platforms supported by the DSH Desktop native adapter. */
 export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
@@ -79,22 +79,26 @@ export interface DesktopNotification {
   title: string
   /** Concise user-facing status. */
   body: string
-  /** Trusted URL opened when the notification is selected. */
-  openUrl?: string
 }
 
 /** Electron capabilities used by the headless update plugin. */
 export interface DesktopUpdateAdapter {
   /** Whether the running executable came from an Electron package. */
   readonly isPackaged: boolean
+  /** Whether this platform has a fixed installer download endpoint. */
+  readonly canDownload: boolean
   /** Installed desktop product version. */
   readonly currentVersion: string
-  /** Private file used for conditional request and notification state. */
+  /** Private file used for update-prompt history. */
   readonly statePath: string
-  /** Request adapter backed by Electron's authenticated network session. */
+  /** Request adapter backed by Electron's native network session. */
   readonly request: UpdateRequest
-  /** Open one validated release page in the default browser. */
-  openRelease(url: string): Promise<void>
+  /** Ask whether one strictly newer version may be downloaded. */
+  confirmDownload(version: string): Promise<boolean>
+  /** Present the outcome of a user-triggered version check. */
+  showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
+  /** Download and hand one confirmed update to the platform installer. */
+  downloadAndOpen(version: string, signal: AbortSignal): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
 }
@@ -134,7 +138,7 @@ export interface DesktopRuntime {
   /** Current Electron platform. */
   readonly platform: DesktopPlatform
 
-  /** Native network, notification, and release-page adapter. */
+  /** Native network, update-download, and notification adapter. */
   readonly updates: DesktopUpdateAdapter
 
   /**
