@@ -128,6 +128,8 @@ Choose whichever platform you prefer to discuss usage, plugin development, and p
 
 Discord: [Join the DeepSeek Harness Desktop community](https://discord.gg/TJeGqKRNM)
 
+If you would like to join our technical team, contact us at [t4wefan@qq.com](mailto:t4wefan@qq.com).
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

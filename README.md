@@ -128,6 +128,8 @@ headless 检查使用 `corepack yarn check`；完整的构建、测试和发布�
 
 Discord：[加入 DeepSeek Harness Desktop 社区](https://discord.gg/TJeGqKRNM)
 
+如果您希望加入我们的技术团队，也欢迎通过 [t4wefan@qq.com](mailto:t4wefan@qq.com) 联系我们。
+
 ## 友情链接
 
 这里收录 DeepSeek Harness 生态项目及开发者工具。
