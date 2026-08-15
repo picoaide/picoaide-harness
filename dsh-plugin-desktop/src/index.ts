@@ -89,7 +89,10 @@ export function apply(ctx: Context, config: Config): void {
   if (ctx.webServer.host !== '127.0.0.1') {
     throw new Error('dsh-plugin-desktop: desktop shell requires a loopback Web server')
   }
-  const iconPath = fileURLToPath(new URL('../build/app-icon.png', import.meta.url))
+  const iconFilename = ctx.desktopRuntime.platform === 'darwin'
+    ? 'app-icon-mac.png'
+    : 'app-icon.png'
+  const iconPath = fileURLToPath(new URL(`../build/${iconFilename}`, import.meta.url))
   const trayIcons = {
     templatePath: fileURLToPath(new URL('../build/tray-iconTemplate.png', import.meta.url)),
     bluePath: fileURLToPath(new URL('../build/tray-icon-blue.png', import.meta.url)),

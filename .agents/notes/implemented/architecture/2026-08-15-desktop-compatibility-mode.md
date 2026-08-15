@@ -34,7 +34,7 @@ Cordis disposal releases Client effects, Host rows, the tray, and the window bef
 
 The compatibility adapter creates a normal `BrowserWindow` and omits custom-frame, title-bar, transparency, vibrancy, and native-material options. macOS suppresses visible page-title updates. Windows retains its native caption icon and fixed `DeepSeek Harness Desktop` caption while removing the window menu bar. The operating system owns native title-bar color and appearance.
 
-The application uses the same iOS Default icon across supported platforms. The tray uses a macOS template derived from the brand SVG and fixed brand-blue images on Windows and Linux. Compatibility retains renderer isolation, the Chromium sandbox, disabled Node integration, exact-origin navigation, tray ownership, close-to-hide behavior, single-instance activation, and bounded Cordis disposal on explicit quit.
+The application keeps the unmodified iOS Default icon on Windows and Linux. macOS uses a build-derived copy with a transparent visual inset, and the same platform-selected path feeds packaging, the live Dock, and the window specification. The tray uses a macOS template derived from the brand SVG and fixed brand-blue images on Windows and Linux. Compatibility retains renderer isolation, the Chromium sandbox, disabled Node integration, exact-origin navigation, tray ownership, close-to-hide behavior, single-instance activation, and bounded Cordis disposal on explicit quit.
 
 ## Verification
 

@@ -117,7 +117,7 @@ export interface DesktopShellSpec extends DesktopWindowConfig {
   productName: string
   /** Visible native caption on platforms that retain a title. */
   windowTitle: string
-  /** Original application icon shipped with the package. */
+  /** Platform-selected application icon shipped with the package. */
   iconPath: string
   /** Generated tray assets derived from the repository-owned SVG. */
   trayIcons: DesktopTrayIcons

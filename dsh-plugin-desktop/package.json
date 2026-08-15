@@ -56,6 +56,7 @@
   },
   "files": [
     "build/app-icon.png",
+    "build/app-icon-mac.png",
     "build/tray-icon.svg",
     "build/tray-icon*.png",
     "cordis.patch.yml",
@@ -83,7 +84,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/generate-tray-icons.mjs && node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
+    "build": "node scripts/generate-mac-app-icon.mjs && node scripts/generate-tray-icons.mjs && node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
@@ -243,6 +244,7 @@
     },
     "files": [
       "build/app-icon.png",
+      "build/app-icon-mac.png",
       "build/tray-icon.svg",
       "build/tray-icon*.png",
       "cordis.patch.yml",
@@ -255,7 +257,7 @@
       ],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
-      "icon": "build/app-icon.png",
+      "icon": "build/app-icon-mac.png",
       "notarize": true
     },
     "win": {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
 
 const packageRoot = new URL('../', import.meta.url)
@@ -143,19 +144,21 @@ describe('published package surface', () => {
     expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
+      'build/app-icon-mac.png',
       'build/tray-icon.svg',
       'build/tray-icon*.png',
       'docs/**',
     ]))
     expect(manifest.build?.files).toEqual([
       'build/app-icon.png',
+      'build/app-icon-mac.png',
       'build/tray-icon.svg',
       'build/tray-icon*.png',
       'cordis.patch.yml',
       'lib/**',
       'package.json',
     ])
-    expect(manifest.build?.mac?.icon).toBe('build/app-icon.png')
+    expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
     expect(manifest.build?.win?.target).toEqual([{
       target: 'nsis',
@@ -177,6 +180,7 @@ describe('published package surface', () => {
   it('separates unsigned smoke packaging from the signed macOS release', () => {
     const packageDir = readFileSync(new URL('scripts/package-dir.mjs', packageRoot), 'utf8')
 
+    expect(manifest.scripts?.build).toContain('node scripts/generate-mac-app-icon.mjs')
     expect(manifest.scripts?.['package:dir']).toBe('yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
     expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
@@ -216,12 +220,39 @@ describe('published package surface', () => {
     }
   })
 
-  it('ships the unmodified iOS Default application icon', () => {
+  it('keeps the iOS Default source icon unmodified', () => {
     const digest = createHash('sha256')
       .update(readFileSync(new URL('build/app-icon.png', packageRoot)))
       .digest('hex')
 
     expect(digest).toBe('315fbc6e57ff1f34894f21f66fb7f9f26deccf78333c71fad21a6cec64e7de80')
+  })
+
+  it('generates a centered macOS icon with a 100-pixel visual inset', async () => {
+    const source = await sharp(readFileSync(new URL('build/app-icon.png', packageRoot))).metadata()
+    const icon = sharp(readFileSync(new URL('build/app-icon-mac.png', packageRoot)))
+    const metadata = await icon.metadata()
+    const { info } = await icon
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 0 })
+      .toBuffer({ resolveWithObject: true })
+
+    expect(metadata).toEqual(expect.objectContaining({
+      format: 'png',
+      width: 1024,
+      height: 1024,
+      space: 'rgb16',
+      depth: 'ushort',
+      bitsPerSample: 16,
+      channels: 4,
+      hasAlpha: true,
+    }))
+    expect(metadata.icc).toEqual(source.icc)
+    expect(info).toEqual(expect.objectContaining({
+      width: 824,
+      height: 824,
+      trimOffsetLeft: -100,
+      trimOffsetTop: -100,
+    }))
   })
 
   it('keeps Electron out of production dependencies consumed by electron-builder', () => {

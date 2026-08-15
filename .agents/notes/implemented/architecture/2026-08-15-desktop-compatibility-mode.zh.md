@@ -34,7 +34,7 @@ Cordis disposal 会先释放 Client effect、Host row、托盘与窗口；仅当
 
 兼容适配器创建普通 `BrowserWindow`，并且不设置自定义边框、标题栏、透明、vibrancy 或原生材质选项。macOS 会阻止可见页面标题更新。Windows 保留原生标题栏图标与固定的 `DeepSeek Harness Desktop` 标题，同时移除窗口菜单栏。原生标题栏颜色与外观由操作系统拥有。
 
-所有受支持平台使用同一张 iOS Default 应用图标。托盘在 macOS 使用由品牌 SVG 派生的模板图，在 Windows 与 Linux 使用固定品牌蓝图。兼容模式仍保留 renderer 隔离、Chromium sandbox、禁用 Node integration、精确同源导航、托盘所有权、关闭后隐藏、单实例唤醒，以及显式退出时有界 dispose Cordis 的行为。
+Windows 与 Linux 保持使用未经修改的 iOS Default 应用图标。macOS 使用构建派生且带透明视觉边距的副本；打包、运行中的 Dock 与窗口 spec 都使用同一个按平台选择的路径。托盘在 macOS 使用由品牌 SVG 派生的模板图，在 Windows 与 Linux 使用固定品牌蓝图。兼容模式仍保留 renderer 隔离、Chromium sandbox、禁用 Node integration、精确同源导航、托盘所有权、关闭后隐藏、单实例唤醒，以及显式退出时有界 dispose Cordis 的行为。
 
 ## Verification
 

@@ -80,6 +80,7 @@ describe('packaged desktop runtime verification', () => {
 
   it.each([
     'package.json',
+    'build/app-icon-mac.png',
     'build/tray-iconTemplate.png',
     'lib/terminal.js',
     'node_modules/@deepseek-ai/dsh/lib/bin.js',

@@ -146,7 +146,7 @@ describe('desktop Host plugin', () => {
       url: 'http://127.0.0.1:43120/?dsh-desktop-mode=compatibility&dsh-desktop-platform=darwin',
       productName: 'DSH Desktop',
       windowTitle: 'DeepSeek Harness Desktop',
-      iconPath: expect.stringMatching(/\/build\/app-icon\.png$/u),
+      iconPath: expect.stringMatching(/\/build\/app-icon-mac\.png$/u),
       trayIcons: {
         templatePath: expect.stringMatching(/\/build\/tray-iconTemplate\.png$/u),
         bluePath: expect.stringMatching(/\/build\/tray-icon-blue\.png$/u),
@@ -160,6 +160,17 @@ describe('desktop Host plugin', () => {
     await harness.shell()?.requestModeChange('advanced')
     expect(harness.update).toHaveBeenCalledWith({ mode: 'advanced' })
   })
+
+  it.each(['win32', 'linux'] as const)(
+    'keeps the full-size application icon on %s',
+    (platform) => {
+      const harness = createHarness(platform)
+
+      apply(harness.ctx, config)
+
+      expect(harness.shell()?.iconPath).toMatch(/\/build\/app-icon\.png$/u)
+    },
+  )
 
   it('requests one orderly restart after the settings scope commits another mode', async () => {
     vi.useFakeTimers()
