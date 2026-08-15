@@ -22,7 +22,8 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
     electronFuses?: unknown
     files?: unknown
     mac?: { hardenedRuntime?: unknown; icon?: unknown; notarize?: unknown; target?: unknown }
-    win?: { icon?: unknown }
+    win?: { icon?: unknown; target?: unknown }
+    nsis?: Record<string, unknown>
     linux?: { icon?: unknown }
   }
   dependencies?: Record<string, unknown>
@@ -156,6 +157,20 @@ describe('published package surface', () => {
     ])
     expect(manifest.build?.mac?.icon).toBe('build/app-icon.png')
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
+    expect(manifest.build?.win?.target).toEqual([{
+      target: 'nsis',
+      arch: ['x64'],
+    }])
+    expect(manifest.build?.nsis).toEqual({
+      oneClick: false,
+      perMachine: false,
+      allowElevation: true,
+      allowToChangeInstallationDirectory: true,
+      createDesktopShortcut: true,
+      createStartMenuShortcut: true,
+      shortcutName: 'DSH Desktop',
+      artifactName: 'DSH-Desktop-${version}-${arch}-Setup.${ext}',
+    })
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
   })
 
@@ -165,9 +180,16 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['package:dir']).toBe('yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
     expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
+    expect(manifest.scripts?.['dist:win']).toBe('node scripts/package-win.ts')
+    expect(manifest.scripts?.['check:win-package']).toContain('yarn run build')
+    expect(manifest.scripts?.['check:win-package']).toContain('yarn run typecheck')
+    expect(manifest.scripts?.['check:win-package']).toContain('tests/package-win.spec.ts')
+    expect(manifest.scripts?.['check:win-package']).toContain('yarn run verify:closure')
     expect(manifest.scripts?.['verify:cli']).toBe('node scripts/verify-cli-runtime.mjs')
     expect(manifest.scripts?.check).toContain('yarn run verify:cli')
     expect(workspaceManifest.scripts?.['dist:mac']).toBe('yarn workspace dsh-plugin-desktop dist:mac')
+    expect(workspaceManifest.scripts?.['dist:win'])
+      .toBe('yarn workspace dsh-plugin-desktop dist:win')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
     expect(manifest.build?.mac).toEqual(expect.objectContaining({
       hardenedRuntime: true,
@@ -247,8 +269,8 @@ describe('published package surface', () => {
     expect(sandboxLocalRequire.resolve('@deepseek-ai/dsh-sandbox-windows-acl/package.json'))
       .toBe(sandboxManifest)
     expect(lockfile).toContain('@deepseek-ai/dsh-sandbox-windows-acl@patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.0-rc.6#./patches/dsh-sandbox-windows-acl@0.1.0-rc.6.patch')
-    expect(patch.match(/^\+\s*dwFlags: 257,$/gmu)).toHaveLength(2)
-    expect(patch.match(/^\+\s*wShowWindow: 0,$/gmu)).toHaveLength(2)
+    expect(patch.match(/^\+\s*dwFlags: 257,\r?$/gmu)).toHaveLength(2)
+    expect(patch.match(/^\+\s*wShowWindow: 0,\r?$/gmu)).toHaveLength(2)
     expect(runtimeChunks).toHaveLength(1)
     const installedRuntime = readFileSync(join(sandboxLib, runtimeChunks[0] as string), 'utf8')
     expect(installedRuntime.match(/dwFlags: 257,/gu)).toHaveLength(2)
