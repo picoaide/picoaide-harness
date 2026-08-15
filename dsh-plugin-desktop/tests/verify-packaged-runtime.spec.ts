@@ -81,10 +81,15 @@ describe('packaged desktop runtime verification', () => {
     'node_modules/@deepseek-ai/dsh/lib/bin.js',
     'node_modules/pnpm/bin/pnpm.mjs',
   ])('fails loud when physical runtime entry %s is absent from app.asar.unpacked', (missing) => {
+    const runtimeContext = context('/build', 'win32')
+    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
+    const missingPath = join(unpackedRoot, missing)
+
     expect(() => verifyPackagedRuntime(
-      context('/build', 'win32'),
+      runtimeContext,
       () => completeArchiveEntries(),
-      filename => !filename.endsWith(missing),
+      filename => filename !== missingPath,
+      completePackageResolver(unpackedRoot),
     )).toThrow(`missing required physical entries: ${missing}`)
   })
 
