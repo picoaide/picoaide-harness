@@ -23,6 +23,7 @@ interface SpawnHarness {
   child: ChildProcess
   unref: ReturnType<typeof vi.fn>
   emitError: (cause: Error) => void
+  emitExit: (code: number | null, signal?: NodeJS.Signals | null) => void
   spawn: DesktopTerminalSpawn
   calls: Array<{ command: string; args: readonly string[]; options: SpawnOptions }>
 }
@@ -42,6 +43,7 @@ function spawnHarness(): SpawnHarness {
     spawn,
     calls,
     emitError: cause => { emitter.emit('error', cause) },
+    emitExit: (code, signal = null) => { emitter.emit('exit', code, signal) },
   }
 }
 
@@ -210,7 +212,7 @@ describe('desktop terminal environment', () => {
     })
   })
 
-  it('generates Windows batch shims and launches the reliable PowerShell fallback', () => {
+  it('generates Windows batch shims and opens PowerShell through a visible-console broker', () => {
     const stateDir = join(temporaryDirectory(), 'terminal-state')
     const harness = spawnHarness()
     const options = windowsOptions(stateDir, harness.spawn)
@@ -220,73 +222,91 @@ describe('desktop terminal environment', () => {
     expect(readFileSync(launch.dshShimPath, 'utf8')).toContain([
       '@echo off',
       'setlocal DisableDelayedExpansion',
-      'set "DSH_DESKTOP_DEFAULT_PROFILE=desktop"',
       'set "ELECTRON_RUN_AS_NODE=1"',
-      '"C:\\Program Files\\DSH 100%% Desktop\\DSH Desktop.exe" --expose-internals',
+      '"%DSH_DESKTOP_APP_EXECUTABLE%" --expose-internals "%DSH_DESKTOP_DSH_BOOTSTRAP%"',
     ].join('\r\n'))
     const pnpmShim = readFileSync(launch.pnpmShimPath, 'utf8')
     expect(pnpmShim).toContain('set "npm_config_runtime=electron"')
-    expect(pnpmShim).toContain('set "npm_config_target=43.4.0"')
+    expect(pnpmShim).toContain('set "npm_config_target=%DSH_DESKTOP_ELECTRON_VERSION%"')
     expect(pnpmShim).toContain('set "npm_config_disturl=https://electronjs.org/headers"')
     expect(readFileSync(launch.nodeShimPath, 'utf8')).toContain(
-      '"C:\\Program Files\\DSH 100%% Desktop\\DSH Desktop.exe" %*',
+      '"%DSH_DESKTOP_APP_EXECUTABLE%" %*',
     )
     const welcome = readFileSync(launch.welcomePath, 'utf8')
     expect(welcome).toContain('Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue')
-    expect(welcome).toContain("Set-Location -LiteralPath 'C:\\Users\\Example\\DSH O''Brien\\profiles\\desktop'")
-    expect(welcome).toContain('DSH Desktop 2.0.0 terminal')
-    expect(welcome).toContain('Plugin commands without --profile modify the desktop profile.')
+    expect(welcome).toContain('Set-Location -LiteralPath $env:DSH_DESKTOP_PROFILE_DIRECTORY')
+    expect(welcome).toContain('"DSH Desktop {0} terminal" -f $env:DSH_DESKTOP_PRODUCT_VERSION')
+    expect(welcome).toContain('"Plugin commands without --profile modify the {0} profile."')
     expect(welcome).toContain('dsh --dump-config')
     expect(welcome).toContain('dsh plugin add <third-party-plugin>')
     expect(welcome).toContain('dsh plugin remove <third-party-plugin>')
     expect(welcome).toContain('dsh plugin update')
     expect(welcome).toContain('Restart DSH Desktop after plugin changes.')
 
+    expect(launch.windowsLauncherPath).toBe(join(stateDir, 'launch.cmd'))
+    const launcher = readFileSync(launch.windowsLauncherPath!, 'utf8')
+    expect(launcher).toContain('start "DSH Desktop" /D "!DSH_DESKTOP_PROFILE_DIRECTORY!"')
+    expect(launcher).toContain('"!DSH_DESKTOP_SHELL_EXECUTABLE!" -NoLogo -NoExit')
+    expect(launcher).toContain('-File "!DSH_DESKTOP_POWERSHELL_WELCOME!"')
+
     expect(harness.calls).toEqual([{
-      command: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      command: 'C:\\Windows\\System32\\cmd.exe',
       args: [
-        '-NoLogo',
-        '-NoExit',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        launch.welcomePath,
+        '/D',
+        '/S',
+        '/C',
+        'launch.cmd',
       ],
       options: {
-        cwd: options.profileDir,
-        detached: true,
+        cwd: stateDir,
+        detached: false,
         env: {
           SystemRoot: 'C:\\Windows',
           PATH: `${launch.shimDir};C:\\Windows\\System32;C:\\Windows`,
           DSH_HOME: options.homeDir,
+          DSH_DESKTOP_DEFAULT_PROFILE: options.profileName,
+          DSH_DESKTOP_APP_EXECUTABLE: options.appExecutable,
+          DSH_DESKTOP_DSH_BOOTSTRAP: options.dshBootstrapPath,
+          DSH_DESKTOP_ELECTRON_VERSION: options.electronVersion,
+          DSH_DESKTOP_PNPM_ENTRY: options.pnpmBinPath,
+          DSH_DESKTOP_PROFILE_DIRECTORY: options.profileDir,
+          DSH_DESKTOP_PRODUCT_VERSION: options.productVersion,
+          DSH_DESKTOP_SHIM_DIRECTORY: launch.shimDir,
+          DSH_DESKTOP_POWERSHELL_WELCOME: launch.welcomePath,
+          DSH_DESKTOP_CMD_WELCOME: join(stateDir, 'welcome.cmd'),
+          DSH_DESKTOP_SHELL_EXECUTABLE: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
         },
         shell: false,
         stdio: 'ignore',
-        windowsHide: false,
+        windowsHide: true,
       },
     }])
     expect(harness.unref).toHaveBeenCalledOnce()
   })
 
-  it('hosts PowerShell under a caller-selected Windows terminal without a command shell', () => {
+  it('opens a new Windows Terminal window when wt.exe is available', () => {
     const stateDir = join(temporaryDirectory(), 'terminal-state')
     const harness = spawnHarness()
     const options = windowsOptions(stateDir, harness.spawn)
-    options.windowsExecutableResolver = command => command === 'pwsh.exe'
-      ? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
-      : undefined
-    options.windowsTerminal = {
-      executable: 'wt.exe',
-      arguments: ['new-tab', '--title', 'DSH Desktop'],
+    options.windowsExecutableResolver = (command) => {
+      if (command === 'pwsh.exe') return 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+      if (command === 'wt.exe') return 'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe'
+      return undefined
     }
 
     const launch = openDesktopTerminal(options)
 
-    expect(harness.calls[0]?.command).toBe('wt.exe')
+    expect(harness.calls[0]?.command).toBe(
+      'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe',
+    )
     expect(harness.calls[0]?.args).toEqual([
+      '--window',
+      'new',
       'new-tab',
       '--title',
       'DSH Desktop',
+      '--startingDirectory',
+      options.profileDir,
       'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
       '-NoLogo',
       '-NoExit',
@@ -308,24 +328,27 @@ describe('desktop terminal environment', () => {
       ? 'C:\\Windows\\System32\\cmd.exe'
       : undefined
 
-    openDesktopTerminal(options)
+    const launch = openDesktopTerminal(options)
 
     expect(harness.calls[0]?.command).toBe('C:\\Windows\\System32\\cmd.exe')
     expect(harness.calls[0]?.args).toEqual([
       '/D',
-      '/K',
-      'call',
-      join(stateDir, 'welcome.cmd'),
+      '/S',
+      '/C',
+      'launch.cmd',
     ])
     expect(harness.calls[0]?.options.shell).toBe(false)
     const welcome = readFileSync(join(stateDir, 'welcome.cmd'), 'utf8')
-    expect(welcome).toContain('setlocal DisableDelayedExpansion')
+    expect(welcome).toContain('setlocal EnableDelayedExpansion')
     expect(welcome).toContain('set "ELECTRON_RUN_AS_NODE="')
-    expect(welcome).toContain('cd /d "C:\\Users\\Example\\DSH & Tools\\profiles\\desktop"')
-    expect(welcome).toContain('echo(Profile directory: C:\\Users\\Example\\DSH ^& Tools\\profiles\\desktop')
+    expect(welcome).toContain('cd /d "!DSH_DESKTOP_PROFILE_DIRECTORY!"')
+    expect(welcome).toContain('echo(Profile directory: !DSH_DESKTOP_PROFILE_DIRECTORY!')
+    const launcher = readFileSync(launch.windowsLauncherPath!, 'utf8')
+    expect(launcher).toContain('"!DSH_DESKTOP_SHELL_EXECUTABLE!" /D /K call')
+    expect(launcher).toContain('"!DSH_DESKTOP_CMD_WELCOME!"')
   })
 
-  it('prefers pwsh and handles detached child errors before they can be unhandled', () => {
+  it('prefers pwsh and reports broker errors and unsuccessful exits', () => {
     const stateDir = join(temporaryDirectory(), 'terminal-state')
     const harness = spawnHarness()
     const commands: string[] = []
@@ -333,7 +356,9 @@ describe('desktop terminal environment', () => {
     const options = windowsOptions(stateDir, harness.spawn)
     options.windowsExecutableResolver = (command) => {
       commands.push(command)
-      return command === 'pwsh.exe' ? 'C:\\PowerShell\\pwsh.exe' : undefined
+      if (command === 'pwsh.exe') return 'C:\\PowerShell\\pwsh.exe'
+      if (command === 'cmd.exe') return 'C:\\Windows\\System32\\cmd.exe'
+      return undefined
     }
     options.onLaunchError = onLaunchError
 
@@ -341,30 +366,93 @@ describe('desktop terminal environment', () => {
     const cause = new Error('launcher unavailable')
     expect(() => { harness.emitError(cause) }).not.toThrow()
 
-    expect(commands).toEqual(['pwsh.exe'])
-    expect(harness.calls[0]?.command).toBe('C:\\PowerShell\\pwsh.exe')
+    expect(commands).toEqual(['pwsh.exe', 'wt.exe', 'cmd.exe'])
+    expect(harness.calls[0]?.command).toBe('C:\\Windows\\System32\\cmd.exe')
     expect(onLaunchError).toHaveBeenCalledWith(cause)
+
+    harness.emitExit(1)
+    expect(onLaunchError).toHaveBeenCalledOnce()
+
+    const exitHarness = spawnHarness()
+    const exitReporter = vi.fn()
+    const exitOptions = windowsOptions(join(temporaryDirectory(), 'terminal-state'), exitHarness.spawn)
+    exitOptions.windowsExecutableResolver = options.windowsExecutableResolver
+    exitOptions.onLaunchError = exitReporter
+    openDesktopTerminal(exitOptions)
+    exitHarness.emitExit(1)
+    expect(exitReporter).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'terminal launcher exited with code 1' }),
+    )
+    exitHarness.emitError(new Error('late error'))
+    expect(exitReporter).toHaveBeenCalledOnce()
   })
 
-  it('uses the injectable existence probe in the default Windows resolver', () => {
+  it('discovers the Windows Terminal app execution alias through LocalAppData', () => {
     const stateDir = join(temporaryDirectory(), 'terminal-state')
     const harness = spawnHarness()
     const probes: string[] = []
     const options = windowsOptions(stateDir, harness.spawn)
     delete options.windowsExecutableResolver
+    options.environment = {
+      ...options.environment,
+      LocalAppData: 'C:\\Users\\Example\\AppData\\Local',
+    }
     options.windowsExecutableExists = (filename) => {
       probes.push(filename)
       return filename === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+        || filename === 'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe'
     }
 
     openDesktopTerminal(options)
 
     expect(probes).toContain('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(harness.calls[0]?.command).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(probes).toContain('C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe')
+    expect(harness.calls[0]?.command).toBe(
+      'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe',
+    )
     expect(harness.calls[0]?.options.shell).toBe(false)
   })
 
-  it('accepts quoted Unicode profile names and rejects path escapes before writing state', () => {
+  it('keeps Windows scripts ASCII and passes localized paths through the child environment', () => {
+    const stateDir = join(temporaryDirectory(), '终端 state')
+    const harness = spawnHarness()
+    const options = windowsOptions(stateDir, harness.spawn)
+    options.profileName = '工作 profile'
+    options.profileDir = 'C:\\用户\\工作 profile'
+    options.homeDir = 'C:\\用户'
+    options.appExecutable = 'C:\\程序\\DSH Desktop.exe'
+    options.dshBootstrapPath = 'C:\\程序\\resources\\app.asar\\lib\\desktop-cli.js'
+    options.pnpmBinPath = 'C:\\程序\\resources\\app.asar.unpacked\\node_modules\\pnpm\\bin\\pnpm.mjs'
+
+    const launch = openDesktopTerminal(options)
+
+    const launcherPath = launch.windowsLauncherPath
+    expect(launcherPath).toBe(join(stateDir, 'launch.cmd'))
+    for (const filename of [
+      launch.dshShimPath,
+      launch.pnpmShimPath,
+      launch.nodeShimPath,
+      launch.welcomePath,
+      join(stateDir, 'welcome.cmd'),
+      launcherPath!,
+    ]) {
+      expect(readFileSync(filename, 'utf8')).toMatch(/^[\x00-\x7F]*$/u)
+    }
+    expect(harness.calls[0]?.options.cwd).toBe(stateDir)
+    expect(harness.calls[0]?.options.env).toEqual(expect.objectContaining({
+      DSH_HOME: 'C:\\用户',
+      DSH_DESKTOP_DEFAULT_PROFILE: '工作 profile',
+      DSH_DESKTOP_APP_EXECUTABLE: 'C:\\程序\\DSH Desktop.exe',
+      DSH_DESKTOP_DSH_BOOTSTRAP: 'C:\\程序\\resources\\app.asar\\lib\\desktop-cli.js',
+      DSH_DESKTOP_ELECTRON_VERSION: '43.4.0',
+      DSH_DESKTOP_PNPM_ENTRY: 'C:\\程序\\resources\\app.asar.unpacked\\node_modules\\pnpm\\bin\\pnpm.mjs',
+      DSH_DESKTOP_PROFILE_DIRECTORY: 'C:\\用户\\工作 profile',
+      DSH_DESKTOP_POWERSHELL_WELCOME: join(stateDir, 'welcome.ps1'),
+      DSH_DESKTOP_CMD_WELCOME: join(stateDir, 'welcome.cmd'),
+    }))
+  })
+
+  it('accepts localized macOS profile names and rejects path escapes before writing state', () => {
     const root = temporaryDirectory()
     const harness = spawnHarness()
     const unsupported = macOptions(join(root, 'unsupported'), harness.spawn)

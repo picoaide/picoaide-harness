@@ -3,6 +3,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   Menu,
   nativeImage,
   net,
@@ -157,33 +158,32 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   /** @inheritdoc */
   openTerminal(): void {
-    const spec = this.terminalSpec
-    if (spec === undefined) {
-      throw new Error('dsh-plugin-desktop: terminal profile is not configured')
+    try {
+      const spec = this.terminalSpec
+      if (spec === undefined) {
+        throw new Error('dsh-plugin-desktop: terminal profile is not configured')
+      }
+      const electronVersion = process.versions.electron
+      if (electronVersion === undefined) {
+        throw new Error('dsh-plugin-desktop: terminal requires the Electron runtime version')
+      }
+      openDesktopTerminal({
+        platform: this.platform,
+        appExecutable: process.execPath,
+        dshBootstrapPath: fileURLToPath(new URL('./desktop-cli.js', import.meta.url)),
+        pnpmBinPath: packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs'),
+        electronVersion,
+        profileName: spec.profileName,
+        productVersion: PRODUCT_VERSION,
+        profileDir: spec.profileDir,
+        homeDir: spec.homeDir,
+        stateDir: desktopTerminalStateDirectory(app.getPath('userData'), spec.profileName),
+        spawn,
+        onLaunchError: cause => { this.reportTerminalLaunchError(cause) },
+      })
+    } catch (cause) {
+      this.reportTerminalLaunchError(cause)
     }
-    const electronVersion = process.versions.electron
-    if (electronVersion === undefined) {
-      throw new Error('dsh-plugin-desktop: terminal requires the Electron runtime version')
-    }
-    openDesktopTerminal({
-      platform: this.platform,
-      appExecutable: process.execPath,
-      dshBootstrapPath: fileURLToPath(new URL('./desktop-cli.js', import.meta.url)),
-      pnpmBinPath: packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs'),
-      electronVersion,
-      profileName: spec.profileName,
-      productVersion: PRODUCT_VERSION,
-      profileDir: spec.profileDir,
-      homeDir: spec.homeDir,
-      stateDir: desktopTerminalStateDirectory(app.getPath('userData'), spec.profileName),
-      spawn,
-      onLaunchError: cause => {
-        this.showNotification({
-          title: 'Unable to Open DSH Terminal',
-          body: cause.message,
-        })
-      },
-    })
   }
 
   /** @inheritdoc */
@@ -248,6 +248,17 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       })
     }
     nativeNotification.show()
+  }
+
+  /** Keep native-terminal launch failures visible in a packaged GUI process. */
+  private reportTerminalLaunchError(cause: unknown): void {
+    const error = cause instanceof Error ? cause : new Error(String(cause))
+    process.stderr.write(`dsh-plugin-desktop: failed to open terminal: ${error.message}\n`)
+    try {
+      dialog.showErrorBox('Unable to Open DSH Terminal', error.message)
+    } catch (dialogCause) {
+      process.stderr.write(`dsh-plugin-desktop: failed to show terminal error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}\n`)
+    }
   }
 
   private rebuildTrayMenu(): void {

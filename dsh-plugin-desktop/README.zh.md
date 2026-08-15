@@ -117,7 +117,7 @@ npx dsh-plugin-desktop
 
 打包后的应用会在启动 60 秒后检查固定 DSH Desktop GitHub 仓库中的最新 stable release，并在每次检查完成六小时后再次检查。每次请求的期限为 15 秒，自动检查与手工检查共用一个 in-flight operation，并使用私有的条件请求缓存。开发运行与其他未打包启动不会调度网络请求，但托盘始终提供 **Check for Updates…**，手工检查也会通过原生通知报告结果。发现经过校验的较新 stable 版本后，该命令会变为 release 链接；后台发现对每个版本最多自动通知一次。DSH Desktop 只发现 release，并在默认浏览器中打开其准确的 GitHub 页面；它不会下载、安装、替换或重启应用。
 
-在 macOS 与 Windows 上，**Open DSH Terminal** 会打开以当前激活 profile 为工作目录的系统终端。欢迎信息会显示应用版本、当前 profile、profile 目录与 DSH home，并列出配置与插件管理命令。在该终端内，裸 `dsh`、`dsh --dump-config`，以及没有选择 profile 的 plugin 子命令都会默认使用当前激活 profile；显式 `--profile` 与上游 `web` alias 会保留原有含义。DSH Desktop 会在自身 user-data 目录下按 profile 生成私有 `dsh`、`pnpm` 与 `node` shim，设置 `DSH_HOME`，使用当前 profile 作为工作目录，并且只在该终端的 `PATH` 前置 shim 目录；之后切换 profile 不会改变已经打开的终端命令。它不会修改全局环境或 shell 启动文件。macOS launcher 会先保留用户的交互式 zsh 或 bash 设置，再恢复 desktop 自有变量；Windows 会依次选择 PowerShell 7、Windows PowerShell 或命令提示符。Linux 不组合该终端命令。
+在 macOS 与 Windows 上，**Open DSH Terminal** 会打开以当前激活 profile 为工作目录的系统终端。欢迎信息会显示应用版本、当前 profile、profile 目录与 DSH home，并列出配置与插件管理命令。在该终端内，裸 `dsh`、`dsh --dump-config`，以及没有选择 profile 的 plugin 子命令都会默认使用当前激活 profile；显式 `--profile` 与上游 `web` alias 会保留原有含义。DSH Desktop 会在自身 user-data 目录下按 profile 生成私有 `dsh`、`pnpm` 与 `node` shim，设置 `DSH_HOME`，使用当前 profile 作为工作目录，并且只在该终端的 `PATH` 前置 shim 目录；之后切换 profile 不会改变已经打开的终端命令。它不会修改全局环境或 shell 启动文件。macOS launcher 会先保留用户的交互式 zsh 或 bash 设置，再恢复 desktop 自有变量。Windows 会依次选择 PowerShell 7、Windows PowerShell 或命令提示符，并在新的 Windows Terminal 窗口中打开；如果 `wt.exe` 不可用，则由私有 `cmd start` broker 创建可见控制台。同步启动失败与 broker 非正常退出会显示在原生错误对话框中。Linux 不组合该终端命令。
 
 ## 原生生命周期
 

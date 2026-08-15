@@ -16,6 +16,7 @@ const electron = vi.hoisted(() => {
   const loadURL = vi.fn(async (_url: string) => {})
   const menuTemplates: unknown[][] = []
   const notifications: Notification[] = []
+  const dialog = { showErrorBox: vi.fn() }
   const appIcon = {
     isEmpty: vi.fn(() => false),
     setTemplateImage: vi.fn(),
@@ -105,6 +106,7 @@ const electron = vi.hoisted(() => {
     browserWindowOff,
     browserWindowOn,
     loadURL,
+    dialog,
     Menu: {
       buildFromTemplate: vi.fn((template: unknown[]) => {
         menuTemplates.push(template)
@@ -126,6 +128,7 @@ const electron = vi.hoisted(() => {
 vi.mock('electron', () => ({
   app: electron.app,
   BrowserWindow: electron.BrowserWindow,
+  dialog: electron.dialog,
   Menu: electron.Menu,
   nativeImage: electron.nativeImage,
   net: electron.net,
@@ -430,6 +433,43 @@ describe('Electron compatibility runtime', () => {
         profileDir: '/other',
         homeDir: '/other',
       })).toThrow('already configured')
+    } finally {
+      delete (process.versions as { electron?: string }).electron
+    }
+  })
+
+  it('shows native errors for synchronous and asynchronous terminal launch failures', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    Object.defineProperty(process.versions, 'electron', {
+      configurable: true,
+      value: '43.4.0',
+    })
+    try {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.configureTerminal({
+        profileName: 'desktop',
+        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
+        homeDir: 'C:\\Users\\Example\\.dsh',
+      })
+      terminal.open.mockImplementationOnce(() => { throw new Error('cannot create launcher') })
+
+      expect(() => { runtime.openTerminal() }).not.toThrow()
+      expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+        'Unable to Open DSH Terminal',
+        'cannot create launcher',
+      )
+
+      terminal.open.mockImplementationOnce((options: { onLaunchError: (cause: Error) => void }) => {
+        options.onLaunchError(new Error('launcher exited with code 1'))
+      })
+      runtime.openTerminal()
+      expect(electron.dialog.showErrorBox).toHaveBeenLastCalledWith(
+        'Unable to Open DSH Terminal',
+        'launcher exited with code 1',
+      )
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to open terminal'))
     } finally {
       delete (process.versions as { electron?: string }).electron
     }
