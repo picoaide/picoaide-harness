@@ -28,6 +28,31 @@ export interface DesktopTrayIcons {
   bluePath: string
 }
 
+/** Stable placement groups for Host plugins that extend the native tray. */
+export type DesktopTrayItemGroup = 'tools' | 'status'
+
+/** One effect-scoped command contributed to the native tray menu. */
+export interface DesktopTrayItem {
+  /** Menu section used for deterministic ordering and separators. */
+  group: DesktopTrayItemGroup
+  /** Relative position inside the selected group. */
+  order: number
+  /** Resolve the current user-visible label when the menu is rebuilt. */
+  label(): string
+  /** Resolve whether the command can currently be invoked. */
+  enabled?(): boolean
+  /** Run the command without blocking the Electron menu callback. */
+  invoke(): void | Promise<void>
+}
+
+/** Lifecycle handle returned for one tray contribution. */
+export interface DesktopTrayItemRegistration {
+  /** Rebuild the menu after the contribution's observable state changes. */
+  refresh(): void
+  /** Remove the contribution. Repeated disposal has no effect. */
+  dispose(): void
+}
+
 /** Values the desktop-shell plugin hands to the Electron adapter. */
 export interface DesktopShellSpec extends DesktopWindowConfig {
   /** Unmodified Web root served by the active DSH profile. */
@@ -66,6 +91,13 @@ export interface DesktopRuntime {
 
   /** Reveal and focus the current window, if mounted. */
   show(): void
+
+  /**
+   * Contribute one command to the native tray for the current Cordis lifetime.
+   * @param item - dynamic label, state, and invocation owned by the caller.
+   * @returns a refreshable, idempotent registration handle.
+   */
+  registerTrayItem(item: DesktopTrayItem): DesktopTrayItemRegistration
 
   /** Request orderly Cordis teardown followed by an Electron relaunch. */
   requestRestart(): Promise<void>

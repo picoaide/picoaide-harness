@@ -244,6 +244,62 @@ describe('Electron compatibility runtime', () => {
     await release()
   })
 
+  it('rebuilds ordered effect-scoped tray contributions without replacing native commands', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const later = runtime.registerTrayItem({
+      group: 'tools',
+      order: 20,
+      label: () => 'Later Tool',
+      invoke: vi.fn(),
+    })
+    let statusLabel = 'Check for Updates…'
+    const status = runtime.registerTrayItem({
+      group: 'status',
+      order: 10,
+      label: () => statusLabel,
+      enabled: () => false,
+      invoke: vi.fn(),
+    })
+    const earlier = runtime.registerTrayItem({
+      group: 'tools',
+      order: 10,
+      label: () => 'Earlier Tool',
+      invoke: vi.fn(),
+    })
+    const release = runtime.schedule(spec)
+
+    await runtime.mountScheduled()
+
+    const labels = (electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label)
+    expect(labels).toEqual([
+      'Open DSH Desktop', undefined,
+      'Earlier Tool', 'Later Tool', undefined,
+      'Check for Updates…', undefined,
+      'Switch to Advanced Mode', undefined,
+      'Quit',
+    ])
+    expect(electron.menuTemplates.at(-1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Check for Updates…', enabled: false }),
+    ]))
+
+    statusLabel = 'Version 2.1.0 Available'
+    status.refresh()
+    expect(electron.menuTemplates.at(-1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Version 2.1.0 Available', enabled: false }),
+    ]))
+
+    earlier.dispose()
+    later.dispose()
+    status.dispose()
+    expect(electron.menuTemplates.at(-1)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Earlier Tool' }),
+    ]))
+
+    await release()
+  })
+
   it('uses advanced macOS material options and offers compatibility mode', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')

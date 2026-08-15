@@ -8,7 +8,14 @@ import {
   shell,
   Tray,
 } from 'electron'
-import type { DesktopPlatform, DesktopRuntime, DesktopShellSpec } from './runtime.ts'
+import type {
+  DesktopPlatform,
+  DesktopRuntime,
+  DesktopShellSpec,
+  DesktopTrayItem,
+  DesktopTrayItemGroup,
+  DesktopTrayItemRegistration,
+} from './runtime.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import { desktopWindowOptions } from './window-options.ts'
 
@@ -34,6 +41,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private mountTask: Promise<void> | undefined
   private release: (() => Promise<void>) | undefined
   private quitting = false
+  private readonly trayItems = new Map<symbol, DesktopTrayItem>()
 
   constructor(private readonly restart: () => Promise<void>) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
@@ -83,6 +91,25 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  registerTrayItem(item: DesktopTrayItem): DesktopTrayItemRegistration {
+    const key = Symbol()
+    this.trayItems.set(key, item)
+    this.rebuildTrayMenu()
+    let active = true
+    return {
+      refresh: () => {
+        if (active) this.rebuildTrayMenu()
+      },
+      dispose: () => {
+        if (!active) return
+        active = false
+        this.trayItems.delete(key)
+        this.rebuildTrayMenu()
+      },
+    }
+  }
+
+  /** @inheritdoc */
   async requestRestart(): Promise<void> {
     await this.restart()
   }
@@ -90,6 +117,51 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** @inheritdoc */
   prepareToQuit(): void {
     this.quitting = true
+  }
+
+  private contributedTrayItems(group: DesktopTrayItemGroup): Electron.MenuItemConstructorOptions[] {
+    return [...this.trayItems.values()]
+      .filter(item => item.group === group)
+      .sort((left, right) => left.order - right.order)
+      .map(item => ({
+        label: item.label(),
+        enabled: item.enabled?.() ?? true,
+        click: () => {
+          void Promise.resolve(item.invoke()).catch((cause: unknown) => {
+            process.stderr.write(`dsh-plugin-desktop: tray command failed: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+          })
+        },
+      }))
+  }
+
+  private rebuildTrayMenu(): void {
+    const tray = this.tray
+    const spec = this.scheduled
+    if (tray === undefined || spec === undefined) return
+
+    const show = (): void => { this.show() }
+    const tools = this.contributedTrayItems('tools')
+    const status = this.contributedTrayItems('status')
+    const template: Electron.MenuItemConstructorOptions[] = [
+      { label: `Open ${spec.productName}`, click: show },
+    ]
+    if (tools.length > 0) template.push({ type: 'separator' }, ...tools)
+    if (status.length > 0) template.push({ type: 'separator' }, ...status)
+    template.push(
+      { type: 'separator' },
+      {
+        label: modeToggleLabel(spec.mode),
+        enabled: this.platform !== 'linux',
+        click: () => {
+          void spec.requestModeChange(nextDesktopShellMode(spec.mode)).catch((cause: unknown) => {
+            process.stderr.write(`dsh-plugin-desktop: failed to change shell mode: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+          })
+        },
+      },
+      { type: 'separator' },
+      { label: 'Quit', click: () => { spec.requestQuit(0) } },
+    )
+    tray.setContextMenu(Menu.buildFromTemplate(template))
   }
 
   private async mount(spec: DesktopShellSpec): Promise<() => Promise<void>> {
@@ -143,21 +215,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const tray = new Tray(prepareTrayIcon(spec.trayIcons, this.platform))
     this.tray = tray
     tray.setToolTip(spec.productName)
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: `Open ${spec.productName}`, click: show },
-      { type: 'separator' },
-      {
-        label: modeToggleLabel(spec.mode),
-        enabled: this.platform !== 'linux',
-        click: () => {
-          void spec.requestModeChange(nextDesktopShellMode(spec.mode)).catch((cause: unknown) => {
-            process.stderr.write(`dsh-plugin-desktop: failed to change shell mode: ${cause instanceof Error ? cause.message : String(cause)}\n`)
-          })
-        },
-      },
-      { type: 'separator' },
-      { label: 'Quit', click: () => { spec.requestQuit(0) } },
-    ]))
+    this.rebuildTrayMenu()
     tray.on('click', show)
 
     window.once('ready-to-show', show)
