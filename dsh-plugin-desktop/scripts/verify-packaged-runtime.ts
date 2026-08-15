@@ -1,7 +1,8 @@
 /** Fail-loud verification of the runtime entries sealed into Electron's app.asar. */
 
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { listPackage } from '@electron/asar'
 
 /** AfterPack fields consumed without importing Electron Builder's incomplete declaration graph. */
@@ -43,6 +44,22 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
 
 /** Physical entries required because profile fallback symlinks cannot target ASAR paths. */
 export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
+  'package.json',
+  'cordis.patch.yml',
+  'build/app-icon.png',
+  'build/tray-iconTemplate.png',
+  'build/tray-icon-blue.png',
+  'lib/main.js',
+  'lib/client.js',
+  'lib/index.js',
+  'lib/profile.js',
+  'lib/profile-manager.js',
+  'lib/profile-service.js',
+  'lib/pnpm.js',
+  'lib/profiles.js',
+  'lib/terminal.js',
+  'lib/updates.js',
+  'lib/windows-pwsh-sandbox.js',
   'node_modules/@deepseek-ai/dsh/package.json',
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
@@ -50,11 +67,30 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
 
+/** Package exports that profile fallback links must resolve from the physical application tree. */
+export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
+  'dsh-plugin-desktop',
+  'dsh-plugin-desktop/profile',
+  'dsh-plugin-desktop/client',
+  'dsh-plugin-desktop/terminal',
+  'dsh-plugin-desktop/pnpm',
+  'dsh-plugin-desktop/profile-service',
+  'dsh-plugin-desktop/profiles',
+  'dsh-plugin-desktop/updates',
+  'dsh-plugin-desktop/windows-pwsh-sandbox',
+  'dsh-plugin-desktop/package.json',
+  '@deepseek-ai/dsh-base/package.json',
+  '@deepseek-ai/dsh-web-app/package.json',
+] as const
+
 /** Injectable archive listing seam used by focused tests. */
 export type ArchiveLister = (archivePath: string, options: { isPack: boolean }) => readonly string[]
 
 /** Injectable physical-file probe used by focused tests. */
 export type FileProbe = (filename: string) => boolean
+
+/** Injectable Node package resolver used by focused tests. */
+export type PackageResolver = (specifier: string) => string
 
 /**
  * Resolve the platform-specific archive produced by Electron Builder.
@@ -123,16 +159,53 @@ export function verifyPackagedAsar(
 }
 
 /**
+ * Verify package exports resolve through the physical tree instead of the build workspace.
+ * @param unpackedRoot - absolute path to app.asar.unpacked.
+ * @param resolvePackage - package resolver anchored at the physical root manifest.
+ * @returns Nothing; failure rejects missing exports and paths outside app.asar.unpacked.
+ */
+export function verifyUnpackedPackageResolution(
+  unpackedRoot: string,
+  resolvePackage: PackageResolver = createRequire(join(unpackedRoot, 'package.json')).resolve,
+): void {
+  for (const specifier of REQUIRED_UNPACKED_PACKAGE_SPECIFIERS) {
+    let resolvedPath: string
+    try {
+      resolvedPath = resolvePackage(specifier)
+    } catch (cause) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} cannot resolve required package export ${specifier}`,
+        { cause },
+      )
+    }
+
+    const relativePath = relative(unpackedRoot, resolvedPath)
+    if (
+      !isAbsolute(resolvedPath)
+      || relativePath === '..'
+      || relativePath.startsWith(`..${sep}`)
+      || isAbsolute(relativePath)
+    ) {
+      throw new Error(
+        `dsh-plugin-desktop: required package export ${specifier} resolved outside ${unpackedRoot}: ${resolvedPath}`,
+      )
+    }
+  }
+}
+
+/**
  * Verify Electron Builder's completed application before signing begins.
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
+ * @param resolvePackage - package resolver anchored at the physical root manifest.
  * @returns Nothing; failure rejects the package before signing.
  */
 export function verifyPackagedRuntime(
   context: PackagedRuntimeContext,
   list: ArchiveLister = listPackage,
   exists: FileProbe = existsSync,
+  resolvePackage?: PackageResolver,
 ): void {
   verifyPackagedAsar(resolvePackagedAsarPath(context), list)
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
@@ -142,6 +215,7 @@ export function verifyPackagedRuntime(
       `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing required physical entries: ${missing.join(', ')}`,
     )
   }
+  verifyUnpackedPackageResolution(unpackedRoot, resolvePackage)
 }
 
 /**

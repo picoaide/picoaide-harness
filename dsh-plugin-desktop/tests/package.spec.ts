@@ -132,7 +132,13 @@ describe('published package surface', () => {
     expect(manifest.version).toBe(workspaceManifest.version)
     expect(manifest.build?.productName).toBe('DSH Desktop')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
-    expect(manifest.build?.asarUnpack).toEqual(['node_modules/**'])
+    expect(manifest.build?.asarUnpack).toEqual([
+      'package.json',
+      'cordis.patch.yml',
+      'build/**',
+      'lib/**',
+      'node_modules/**',
+    ])
     expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',

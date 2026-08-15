@@ -2,12 +2,14 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+  REQUIRED_UNPACKED_PACKAGE_SPECIFIERS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   resolvePackagedAsarPath,
   resolvePackagedUnpackedRoot,
   verifyPackagedRuntime,
   type ArchiveLister,
   type FileProbe,
+  type PackageResolver,
   type PackagedRuntimeContext,
 } from '../scripts/verify-packaged-runtime.ts'
 
@@ -21,6 +23,10 @@ function context(appOutDir: string, electronPlatformName: string): PackagedRunti
 
 function completeArchiveEntries(separator = '/'): string[] {
   return REQUIRED_PACKAGED_RUNTIME_ENTRIES.map(entry => `${separator}${entry.replaceAll('/', separator)}`)
+}
+
+function completePackageResolver(unpackedRoot: string): PackageResolver {
+  return specifier => join(unpackedRoot, 'resolved', `${specifier.replaceAll('/', '-')}.js`)
 }
 
 describe('packaged desktop runtime verification', () => {
@@ -37,14 +43,18 @@ describe('packaged desktop runtime verification', () => {
     const list = vi.fn<ArchiveLister>(() => completeArchiveEntries(platform === 'win32' ? '\\' : '/'))
 
     const exists = vi.fn<FileProbe>(() => true)
+    const unpackedRoot = `${expectedPath}.unpacked`
+    const resolvePackage = vi.fn<PackageResolver>(completePackageResolver(unpackedRoot))
 
-    verifyPackagedRuntime(context('/build', platform), list, exists)
+    verifyPackagedRuntime(context('/build', platform), list, exists, resolvePackage)
 
     expect(resolvePackagedAsarPath(context('/build', platform))).toBe(expectedPath)
     expect(list).toHaveBeenCalledOnce()
     expect(list).toHaveBeenCalledWith(expectedPath, { isPack: false })
-    expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(`${expectedPath}.unpacked`)
+    expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(unpackedRoot)
     expect(exists).toHaveBeenCalledTimes(REQUIRED_UNPACKED_RUNTIME_ENTRIES.length)
+    expect(resolvePackage.mock.calls.map(([specifier]) => specifier))
+      .toEqual(REQUIRED_UNPACKED_PACKAGE_SPECIFIERS)
   })
 
   it('rejects an unsupported platform instead of guessing an archive layout', () => {
@@ -65,6 +75,9 @@ describe('packaged desktop runtime verification', () => {
   })
 
   it.each([
+    'package.json',
+    'build/tray-iconTemplate.png',
+    'lib/terminal.js',
     'node_modules/@deepseek-ai/dsh/lib/bin.js',
     'node_modules/pnpm/bin/pnpm.mjs',
   ])('fails loud when physical runtime entry %s is absent from app.asar.unpacked', (missing) => {
@@ -73,5 +86,44 @@ describe('packaged desktop runtime verification', () => {
       () => completeArchiveEntries(),
       filename => !filename.endsWith(missing),
     )).toThrow(`missing required physical entries: ${missing}`)
+  })
+
+  it('fails loud when a required package export cannot resolve from app.asar.unpacked', () => {
+    const runtimeContext = context('/build', 'win32')
+    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
+    const resolvePackage = vi.fn<PackageResolver>((specifier) => {
+      if (specifier === 'dsh-plugin-desktop/profiles') {
+        throw new Error('missing export')
+      }
+      return completePackageResolver(unpackedRoot)(specifier)
+    })
+
+    expect(() => verifyPackagedRuntime(
+      runtimeContext,
+      () => completeArchiveEntries(),
+      () => true,
+      resolvePackage,
+    )).toThrow(
+      `packaged runtime at ${unpackedRoot} cannot resolve required package export dsh-plugin-desktop/profiles`,
+    )
+  })
+
+  it('fails loud when a required package export escapes app.asar.unpacked', () => {
+    const runtimeContext = context('/build', 'win32')
+    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
+    const escapedPath = join('/workspace', 'node_modules', '@deepseek-ai', 'dsh-base', 'lib', 'index.js')
+    const resolvePackage = vi.fn<PackageResolver>((specifier) => {
+      if (specifier === '@deepseek-ai/dsh-base/package.json') return escapedPath
+      return completePackageResolver(unpackedRoot)(specifier)
+    })
+
+    expect(() => verifyPackagedRuntime(
+      runtimeContext,
+      () => completeArchiveEntries(),
+      () => true,
+      resolvePackage,
+    )).toThrow(
+      `required package export @deepseek-ai/dsh-base/package.json resolved outside ${unpackedRoot}: ${escapedPath}`,
+    )
   })
 })

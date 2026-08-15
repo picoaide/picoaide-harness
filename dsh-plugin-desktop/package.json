@@ -225,6 +225,10 @@
     "productName": "DSH Desktop",
     "asar": true,
     "asarUnpack": [
+      "package.json",
+      "cordis.patch.yml",
+      "build/**",
+      "lib/**",
       "node_modules/**"
     ],
     "afterPack": "./scripts/verify-packaged-runtime.ts",
