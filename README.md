@@ -29,7 +29,8 @@
 | 了解项目为什么存在 | [为什么做 DSH Desktop](docs/why-desktop.md) |
 | 安装和日常使用 | [用户指南](docs/user-guide.md) |
 | 编写普通或 Desktop 插件 | [插件开发](docs/plugin-development.md) |
-| 理解 Electron、Host、profile 和打包 | [架构说明](docs/architecture.md) |
+| 了解桌面插件可以使用的能力 | [桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md) |
+| 了解桌面应用如何工作 | [架构说明](docs/architecture.md) |
 | 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
 | 查阅包级构建与发布细节 | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
 
@@ -60,9 +61,11 @@
 
 ## 插件生态
 
-DeepSeek Harness 基于 [Cordis](https://github.com/cordiverse/cordis) 构建，并采用“一切皆插件”的架构。模型适配器、工具注册表、会话日志和 Agent Loop 等核心能力都以插件参与运行，可以通过 profile 与 bundle 自由组合或替换。Desktop 也遵循这个边界：它把窗口、托盘、profile 管理和打包环境作为桌面宿主能力，同时保留官方 DSH 的 agent、模型、工具、会话和 Web UI 语义。
+DeepSeek Harness 把模型、工具、界面和工作流做成可以自由组合的插件，就像积木一样。Desktop 沿用这种方式：它负责窗口、托盘和桌面运行环境，同时保留官方 DSH 的智能体、模型、工具、会话和 Web UI 体验。
 
-当前 `dsh-plugin-desktop` 已经作为桌面插件包交付，并提供两个受支持的 Host service：`desktopProfiles` 用于读取和切换当前 profile，`desktopPnpm` 用于在当前 profile 中执行受管的插件操作。兼容模式保持上游默认客户端；高级模式才安装 Desktop 自有的布局和原生材质。插件市场、手机远程和 Channels 仍是独立的 roadmap 项目。
+Desktop 的插件能力已经可以使用。开发者可以通过两个公开接口扩展桌面端：`desktopProfiles` 用来查看和切换工作配置，`desktopPnpm` 用来在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。
+
+兼容模式尽量保持官方默认体验；高级模式则提供更完整的桌面布局和系统效果。插件市场、手机远程和 Channels 仍是后续规划，不代表当前安装包已经提供这些入口。
 
 为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
 
@@ -70,15 +73,25 @@ DeepSeek Harness 基于 [Cordis](https://github.com/cordiverse/cordis) 构建，
 
 本项目基于 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 构建。
 
-DeepSeek Harness 的核心能力、插件系统和 Web UI 来自官方项目。本项目主要负责：
+本项目是基于 DeepSeek Harness 和 Cordis 插件思想的实现，旨在成为 DSH 桌面体验的基础设施。
+
+官方项目提供核心的智能体能力、插件系统和 Web UI。本项目主要负责：
 
 - 桌面应用封装
-- 本地服务生命周期管理
+- 本地服务的启动、停止与恢复
 - 桌面窗口和系统托盘集成
 - macOS、Windows 安装包构建与发布
-- 桌面环境下的界面适配
+- 更适合桌面使用的界面体验
 
 如果你希望通过命令行运行 Harness，或者参与核心功能开发，请优先查看官方仓库。
+
+## 特别感谢
+
+特别感谢 [DeepSeek Harness 原始仓库](https://github.com/deepseek-ai/deepseek-harness) 和 DeepSeek AI 团队。DSH Desktop 基于固定版本的上游源码构建，核心的智能体、模型、工具、会话、Web UI 和插件生态都来自这个项目。
+
+同时感谢 [Cordis](https://github.com/cordiverse/cordis) 项目提供的插件化基础。没有这些开源项目，就不会有 DSH Desktop。
+
+也感谢 [Koishi.js](https://koishi.chat/) 项目和社区长期积累的插件化实践、工具与经验，以及所有参与讨论、测试、反馈和插件开发的社区成员。
 
 <a id="run-from-source"></a>
 

@@ -29,7 +29,8 @@
 | Understand why the project exists | [Why DSH Desktop](docs/why-desktop.en.md) |
 | Install and use the application | [User guide](docs/user-guide.en.md) |
 | Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
-| Understand Electron, Host, profiles, and packaging | [Architecture](docs/architecture.en.md) |
+| See what Desktop plugins can use | [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) |
+| Understand how the desktop works | [Architecture](docs/architecture.en.md) |
 | See the full documentation and README map | [Documentation index](docs/README.en.md) |
 | Read package-level build and release details | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
 
@@ -60,9 +61,11 @@
 
 ## Plugin Ecosystem
 
-DeepSeek Harness is built on [Cordis](https://github.com/cordiverse/cordis) and follows an “everything is a plugin” architecture. Model adapters, the tool registry, session logs, and the Agent Loop participate as plugins that can be composed or replaced through profiles and bundles. Desktop follows the same boundary: it owns the window, tray, profile management, and packaged runtime while preserving upstream DSH semantics for agents, models, tools, sessions, and the Web UI.
+DeepSeek Harness turns models, tools, interfaces, and workflows into plugins that can be combined like building blocks. Desktop follows the same idea: it owns the window, tray, and desktop runtime while preserving the official DSH experience for agents, models, tools, sessions, and the Web UI.
 
-`dsh-plugin-desktop` is now shipped as the Desktop plugin package. It provides two supported Host services: `desktopProfiles` for reading and switching the active profile, and `desktopPnpm` for managed plugin operations in that profile. Compatibility mode keeps the upstream client; advanced mode installs the Desktop-owned layout and native materials. The plugin marketplace, mobile remote control, and Channels remain separate roadmap items.
+Desktop plugin capabilities are now available. Developers can extend the app through two public interfaces: `desktopProfiles` to view and switch work profiles, and `desktopPnpm` to install, update, and remove plugins in the active profile. See the [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) for complete usage details.
+
+Compatibility mode stays close to the official default experience; advanced mode adds a fuller desktop layout and system effects. The plugin marketplace, mobile remote control, and Channels remain future plans and are not part of the current installer.
 
 See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
 
@@ -70,15 +73,25 @@ See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plug
 
 This project is built on [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness).
 
-The core capabilities, plugin system, and Web UI come from the official DeepSeek Harness project. This project primarily provides:
+This project is an implementation built on DeepSeek Harness and the Cordis plugin model, intended to provide the foundation for the DSH desktop experience.
+
+The official project provides the core agent capabilities, plugin system, and Web UI. This project primarily provides:
 
 - Desktop application packaging
-- Local service lifecycle management
+- Starting, stopping, and recovering the local service
 - Desktop window and system tray integration
 - macOS and Windows installer builds and releases
-- Interface adaptations for desktop environments
+- An interface designed for desktop use
 
 If you prefer to run Harness from the command line or contribute to its core functionality, refer to the official repository first.
+
+## Special Thanks
+
+Special thanks to the [original DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) and the DeepSeek AI team. DSH Desktop is built from a pinned upstream checkout, and its core agents, models, tools, sessions, Web UI, and plugin ecosystem come from that project.
+
+We also thank [Cordis](https://github.com/cordiverse/cordis) for the plugin foundation that makes this composition possible. DSH Desktop would not exist without these open-source projects.
+
+We are also grateful to the [Koishi.js](https://koishi.chat/) project and community for their long-standing work on plugin practices, tooling, and shared knowledge, and to everyone who contributes discussions, testing, feedback, and plugins.
 
 <a id="run-from-source"></a>
 
