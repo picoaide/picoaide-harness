@@ -8,7 +8,7 @@ Status: implemented
 
 上游 Windows sandbox 会把 ACL runner argv 组合为 `[process.execPath, runner.js, ...]`。在 DSH CLI 下这是正确的，因为 `process.execPath` 是 Node。DSH Desktop 会在 Electron 内启动同一批 Host plugin，此时该值在开发环境中是 Electron executable，在打包后则是已安装的 `DSH Desktop.exe`。使用 runner 路径作为参数启动该 executable，并不会建立上游 runner 所预期的普通 Node 进程，反而可能启动另一个 desktop 应用实例。
 
-Windows sandbox 没有更弱的自动 provider fallback。因此，损坏的 runner 会让普通 workspace-write PowerShell 不可用；静默绕过 confinement 又会错误表示当前选择的权限模式。
+Windows sandbox 没有更弱的自动 provider fallback。因此，损坏的 runner 会让普通 workspace-write PowerShell 不可用；静默绕过 confinement 又会错误表示当前选择的权限模式。上游原生 spawn 还会有意省略 `CREATE_NO_WINDOW` 与 `CREATE_NEW_CONSOLE`，因为受限 child 使用任一 flag 都会在 DLL 初始化时失败。这对 console Host 是正确行为，但 Electron GUI Host 没有可供受限 PowerShell 继承的 console，因此 Windows 会为每次 shell 执行分配一个可见 console 窗口。
 
 ## Decision
 
@@ -20,9 +20,11 @@ Desktop package 会把 `dsh-plugin-desktop/windows-pwsh-sandbox` 发布为现有
 
 Electron build 会显式启用 `runAsNode` fuse，因为该 child launch protocol 依赖此能力。Trampoline 会保留上游 `windows-acl-run` 失败签名，并在自身校验或导入失败时以代码 127 退出，因此现有 sandbox layer 会继续把 runner 启动失败分类为不可用并 fail closed。
 
+Deploy root 会通过仓库自有的 Yarn patch 固定已发布的 rc.6 Windows ACL package。它的 pipe capture 与 inherited-stdio 两组 `STARTUPINFOW` 值都会把 `STARTF_USESHOWWINDOW` 和现有的 `STARTF_USESTDHANDLES` 组合起来，并把 `wShowWindow` 设为 `SW_HIDE`。Creation flag 保持不变，因此受限 child 仍会拥有或继承 console，并保留上游 token、job 与 stdio 行为，同时为新创建的 console 窗口请求隐藏的初始状态。Patch 会同时固定直接与传递的 rc.6 dependency descriptor；依赖测试会要求 sandbox provider 与 Desktop adapter 解析到同一个 patched package instance。
+
 ## Verification
 
-单元测试覆盖精确的 Windows Electron match、不变的非 Windows、普通 Node、错误 executable、错误 runner 与直接 PowerShell 调用、不区分大小写的环境移除、父进程环境隔离、trampoline 拒绝、公开 package export、build entry 与已启用 fuse。Profile 测试验证 Windows 替换、继承的配置与 gate、不变的 macOS 和 Linux 组合、不变的 subprocess 与 sandbox service，以及显式禁用或第三方 provider 会被保留。
+单元测试覆盖精确的 Windows Electron match、不变的非 Windows、普通 Node、错误 executable、错误 runner 与直接 PowerShell 调用、不区分大小写的环境移除、父进程环境隔离、trampoline 拒绝、公开 package export、build entry、已启用 fuse、准确的 Yarn patch resolution、两处隐藏 show-state 写入，以及没有使用 `CREATE_NO_WINDOW`。Profile 测试验证 Windows 替换、继承的配置与 gate、不变的 macOS 和 Linux 组合、不变的 subprocess 与 sandbox service，以及显式禁用或第三方 provider 会被保留。
 
 Host 与 Client compiler face 会独立通过 typecheck。Package 可以 headless build，197 节点的第一方 runtime graph 仍然闭合，Loader 与完整 profile smoke 均通过。一次 headless Electron 43 Node-mode smoke 会执行已构建 trampoline 并到达上游 ACL runner，后者会输出带签名的缺少参数错误。原生 Windows ACL confinement 与打包后的 `app.asar` 路径仍需要在目标机器上验证。
 
@@ -34,7 +36,9 @@ Host 与 Client compiler face 会独立通过 typecheck。Package 可以 headles
 
 **使用本地 PowerShell 替换 Windows sandbox。** 这会让 workspace-write 在没有声明的 ACL confinement 下执行。Adapter 会保留上游 sandbox provider 及其 fail-closed 行为。
 
-**Patch 上游 package 或 submodule。** 该缺陷来自在 Electron 内托管已发布 provider。Desktop 自有 subclass 与 profile overlay 会保持 pinned 上游 checkout 不变，同时使用 provider 受保护的 argv seam。
+**在 Node runner spawn 上增加 `windowsHide`。** 该选项只会影响 Electron 到 runner 的进程创建，无法改变 runner 直接执行的 `CreateProcessAsUserW`。若在受限 child 层把它转换为 `CREATE_NO_WINDOW`，会触发上游已经确认的 DLL 初始化失败。
+
+**修改 pinned 上游 submodule。** Console 呈现问题只存在于 desktop deploy artifact。仓库自有 Yarn patch 会保持上游 checkout 不变，并把原生 show-state 调整限制在 Desktop 消费的固定 package 内。
 
 **使用 Electron `utilityProcess`。** 上游 sandbox API 会向普通 subprocess provider 提供 argv prefix，而 utility process 使用独立的 lifecycle 与 stream interface。只适配预期 runner child 的范围更小，也能保留现有 provider 组合。
 
@@ -42,4 +46,4 @@ Host 与 Client compiler face 会独立通过 typecheck。Package 可以 headles
 
 两种 desktop 呈现模式都可以使用普通上游 Windows PowerShell tool 及其 ACL confinement，desktop 仍保持为纯新增 package。该 adapter 有意保持窄范围：上游 runner package、argv prefix 或 provider 身份发生变化时会 fail closed，而不会猜测新行为。
 
-已安装 executable 会有意保留 Electron RunAsNode 能力，用于这个内部 child protocol。Windows release 验证必须从打包后的应用执行一条 workspace-write PowerShell 命令，并在目标操作系统上确认已构建 trampoline、原生 ACL 设置、输出捕获与清理行为。
+已安装 executable 会有意保留 Electron RunAsNode 能力，用于这个内部 child protocol。Windows release 验证必须从打包后的应用执行 read-only 与 workspace-write PowerShell 命令，并在目标操作系统上确认已构建 trampoline、隐藏 console show state、原生 ACL 设置、输出捕获、退出传播、取消与清理行为。
