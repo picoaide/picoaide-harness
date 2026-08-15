@@ -244,6 +244,19 @@ Never fall back to a guessed `web` profile after `desktopProfiles` is present. A
 
 Type-only imports are erased from JavaScript. A cross-environment package can keep `dsh-plugin-desktop` as a development dependency for compilation, or as an optional peer if it publishes declarations that expose these types; it does not need a runtime import merely to probe the services.
 
+## Minimal runnable test plugin
+
+The repository includes a two-file profile-local fixture at [`tests/fixtures/desktop-host-services-smoke-plugin`](../tests/fixtures/desktop-host-services-smoke-plugin/). Its entry declares `inject = ['desktopProfiles', 'desktopPnpm']`, reads `desktopProfiles.current`, and confirms that `desktopPnpm.run()` and `runPlugin()` are available. It only publishes the result as a test probe; it never executes pnpm or changes a profile.
+
+The complete Profile Loader smoke copies that package into a temporary profile's `node_modules`, loads it as a normal bare-package Loader entry, and fails unless the probe reports the active profile and both package-manager methods. Run it with:
+
+```sh
+yarn workspace dsh-plugin-desktop build
+yarn workspace dsh-plugin-desktop verify:profile
+```
+
+This fixture is under `tests/`, is absent from the npm `files` list and Electron build files, and never enters a production archive.
+
 ## Failure and teardown checklist
 
 1. Start package mutations only from an explicit user or administrator action.

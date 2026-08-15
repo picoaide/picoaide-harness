@@ -243,6 +243,19 @@ export function apply(ctx: Context, config: { profile?: string }): void {
 
 Type-only import 会从 JavaScript 中消除。跨环境 package 可以把 `dsh-plugin-desktop` 作为编译所需 dev dependency；若发布的 declaration 会暴露这些类型，也可以将其声明为 optional peer。仅为了探测 service，不需要 runtime import。
 
+## 最小可运行测试插件
+
+仓库在 [`tests/fixtures/desktop-host-services-smoke-plugin`](../tests/fixtures/desktop-host-services-smoke-plugin/) 中提供了一个只有两个文件的 profile-local fixture。它的 entry 声明 `inject = ['desktopProfiles', 'desktopPnpm']`，读取 `desktopProfiles.current`，并确认 `desktopPnpm.run()` 与 `runPlugin()` 可用。它只把结果发布为测试 probe，绝不会执行 pnpm 或修改 profile。
+
+完整 Profile Loader smoke 会把该 package 复制到临时 profile 的 `node_modules`，以普通 bare-package Loader entry 加载，并在 probe 没有返回激活 profile 或两个 package-manager 方法时失败。运行命令：
+
+```sh
+yarn workspace dsh-plugin-desktop build
+yarn workspace dsh-plugin-desktop verify:profile
+```
+
+该 fixture 位于 `tests/`，不在 npm `files` 列表或 Electron build files 中，因此不会进入生产 archive。
+
 ## Failure 与 teardown checklist
 
 1. 只有显式用户或管理员操作才能启动 package mutation。

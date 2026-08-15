@@ -1,6 +1,6 @@
 /** Headless smoke for the complete published DSH Web profile and renderer manifest. */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +17,8 @@ import { prepareDesktopProfile } from '../lib/profile.js'
 import { DesktopProfileService } from '../lib/profile-service.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-profile-smoke'
+const HOST_SERVICE_PLUGIN_NAME = 'dsh-desktop-host-services-smoke-plugin'
+const HOST_SERVICE_PROBE_KEY = 'desktopHostServiceProbe'
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-'))
 let ctx
 let releasePackageResolver
@@ -27,6 +29,28 @@ const trayItems = []
 try {
   writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n')
   const prepared = prepareDesktopProfile('1', home, 'win32')
+  const hostServicePluginDir = join(
+    prepared.profile.dir,
+    'node_modules',
+    HOST_SERVICE_PLUGIN_NAME,
+  )
+  mkdirSync(join(prepared.profile.dir, 'node_modules'), { recursive: true })
+  cpSync(
+    fileURLToPath(new URL('../tests/fixtures/desktop-host-services-smoke-plugin/', import.meta.url)),
+    hostServicePluginDir,
+    { recursive: true, force: false, errorOnExist: true },
+  )
+  const patches = [
+    // Deliberately compose the consumer before the desktop-pnpm provider row.
+    // Its required injection must keep it pending until that service mounts.
+    {
+      insert: [{
+        id: 'desktop-host-services-smoke-plugin',
+        name: HOST_SERVICE_PLUGIN_NAME,
+      }],
+    },
+    ...prepared.patches,
+  ]
   const packageRoot = new URL('../', import.meta.url)
   const pnpmBinPath = fileURLToPath(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
   const electronVersion = JSON.parse(
@@ -76,7 +100,7 @@ try {
   ctx = await boot(
     BIN_NAME,
     prepared.rootConfig,
-    prepared.patches,
+    patches,
     async (host) => {
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopRuntime', runtime)
@@ -122,6 +146,17 @@ try {
   if (ctx.desktopProfiles.current.name !== 'desktop'
     || ctx.desktopProfiles.current.dir !== prepared.profile.dir) {
     throw new Error('assembled desktop profile service has the wrong active identity')
+  }
+  const hostServiceProbe = ctx.get(HOST_SERVICE_PROBE_KEY)
+  if (hostServiceProbe?.current?.name !== 'desktop'
+    || hostServiceProbe.current.dir !== prepared.profile.dir
+    || hostServiceProbe.pnpm?.serviceName !== 'desktopPnpm'
+    || hostServiceProbe.pnpm.lookupRun !== 'function'
+    || hostServiceProbe.pnpm.run !== 'function'
+    || hostServiceProbe.pnpm.runPlugin !== 'function') {
+    throw new Error(
+      `profile-local Host service plugin produced an unexpected probe: ${JSON.stringify(hostServiceProbe)}`,
+    )
   }
 
   const picker = ctx.directoryPicker.capability()
