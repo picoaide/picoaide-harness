@@ -1,8 +1,9 @@
 /** Headless smoke for the complete published DSH Web profile and renderer manifest. */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import {
@@ -10,19 +11,35 @@ import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
 import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
+import { installDesktopPnpmRuntime } from '../lib/desktop-runtime-environment.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
+import { DesktopProfileService } from '../lib/profile-service.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-profile-smoke'
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-'))
 let ctx
 let releasePackageResolver
+let pnpmRuntime
 let mountedSpec
 const trayItems = []
 
 try {
   writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n')
   const prepared = prepareDesktopProfile('1', home, 'win32')
+  const packageRoot = new URL('../', import.meta.url)
+  const pnpmBinPath = fileURLToPath(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
+  const electronVersion = JSON.parse(
+    readFileSync(new URL('node_modules/electron/package.json', packageRoot), 'utf8'),
+  ).version
+  pnpmRuntime = installDesktopPnpmRuntime({
+    platform: process.platform,
+    appExecutable: process.execPath,
+    pnpmBinPath,
+    electronVersion,
+    stateDir: join(home, 'runtime-commands'),
+    environment: process.env,
+  })
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const runtime = {
     platform: 'win32',
@@ -56,25 +73,40 @@ try {
     async requestRestart() {},
     prepareToQuit() {},
   }
-  const desktopProfiles = {
-    currentProfileName: 'desktop',
-    list: () => [{
-      name: 'desktop',
-      dir: prepared.profile.dir,
-      exists: true,
-      bundles: prepared.profile.layers.map(layer => layer.packageName),
-      webCapable: true,
-    }],
-    select: () => {},
-  }
   ctx = await boot(
     BIN_NAME,
     prepared.rootConfig,
     prepared.patches,
-    (host) => {
+    async (host) => {
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopRuntime', runtime)
-      host.provide('desktopProfiles', desktopProfiles)
+      host.provide('desktopPnpmBootstrap', {
+        activeProfileName: 'desktop',
+        activeProfileDir: prepared.profile.dir,
+        homeDir: prepared.homeDir,
+        appExecutable: process.execPath,
+        pnpmBinPath,
+        electronVersion,
+        nodeBinDir: pnpmRuntime.nodeBinDir,
+        nodeShimPath: pnpmRuntime.nodeShimPath,
+        clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
+        dshBootstrapPath: fileURLToPath(new URL('../lib/desktop-cli.js', import.meta.url)),
+      })
+      await host.plugin(DesktopProfileService, {
+        current: {
+          name: 'desktop',
+          dir: prepared.profile.dir,
+        },
+        list: () => [{
+          name: 'desktop',
+          dir: prepared.profile.dir,
+          exists: true,
+          bundles: prepared.profile.layers.map(layer => layer.packageName),
+          webCapable: true,
+        }],
+        persistSelection: () => {},
+        requestRestart: () => {},
+      })
       provideCmdline(host, {
         args: ['--host', '127.0.0.1', '--port', '0'],
         exit: () => {},
@@ -83,6 +115,14 @@ try {
     prepared.bareModuleBaseUrl,
   )
   await runtime.mountScheduled()
+
+  if (ctx.get('desktopPnpm') === undefined) {
+    throw new Error('assembled desktop profile is missing the desktop pnpm Host capability')
+  }
+  if (ctx.desktopProfiles.current.name !== 'desktop'
+    || ctx.desktopProfiles.current.dir !== prepared.profile.dir) {
+    throw new Error('assembled desktop profile service has the wrong active identity')
+  }
 
   const picker = ctx.directoryPicker.capability()
   if (picker.kind !== 'browse') {
@@ -143,5 +183,6 @@ try {
 } finally {
   await ctx?.fiber.dispose()
   releasePackageResolver?.()
+  pnpmRuntime?.dispose()
   rmSync(home, { recursive: true, force: true })
 }

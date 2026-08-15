@@ -26,6 +26,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
     linux?: { icon?: unknown }
   }
   dependencies?: Record<string, unknown>
+  optionalDependencies?: Record<string, unknown>
   devDependencies?: Record<string, unknown>
   peerDependencies?: Record<string, unknown>
 }
@@ -54,6 +55,14 @@ describe('published package surface', () => {
       types: './lib/types/terminal.d.ts',
       default: './lib/terminal.js',
     })
+    expect(manifest.exports).toHaveProperty('./pnpm', {
+      types: './lib/types/pnpm.d.ts',
+      default: './lib/pnpm.js',
+    })
+    expect(manifest.exports).toHaveProperty('./profile-service', {
+      types: './lib/types/profile-service.d.ts',
+      default: './lib/profile-service.js',
+    })
     expect(manifest.exports).toHaveProperty('./profiles', {
       types: './lib/types/profiles.d.ts',
       default: './lib/profiles.js',
@@ -78,8 +87,14 @@ describe('published package surface', () => {
     })
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/terminal')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/pnpm')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/profiles')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
+  })
+
+  it('keeps unaudited marketplace packages out of the published runtime', () => {
+    expect(manifest.dependencies).not.toHaveProperty('dshmarket')
+    expect(manifest.optionalDependencies ?? {}).not.toHaveProperty('dshmarket')
   })
 
   it('builds public Host plugins and their private native bootstraps', () => {
@@ -91,6 +106,8 @@ describe('published package surface', () => {
     expect(config).toContain("'desktop-runtime-environment': 'src/desktop-runtime-environment.ts'")
     expect(config).toContain("'desktop-terminal': 'src/desktop-terminal.ts'")
     expect(config).toContain("'profile-manager': 'src/profile-manager.ts'")
+    expect(config).toContain("'profile-service': 'src/profile-service.ts'")
+    expect(config).toContain("pnpm: 'src/pnpm.ts'")
     expect(config).toContain("profiles: 'src/profiles.ts'")
     expect(config).toContain("terminal: 'src/terminal.ts'")
     expect(config).toContain("updates: 'src/updates.ts'")
@@ -121,6 +138,7 @@ describe('published package surface', () => {
       'build/app-icon.png',
       'build/tray-icon.svg',
       'build/tray-icon*.png',
+      'docs/**',
     ]))
     expect(manifest.build?.files).toEqual([
       'build/app-icon.png',

@@ -2,24 +2,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { DesktopProfileSummary } from './profile-manager.ts'
+import type {} from './profile-service.ts'
 import type {} from './runtime.ts'
-
-/** Narrow profile capability supplied by the Electron launcher before boot. */
-export interface DesktopProfiles {
-  /** Profile backing the current Cordis generation. */
-  readonly currentProfileName: string
-  /** Read the current set of profile manifests without changing them. */
-  list(): readonly DesktopProfileSummary[]
-  /** Persist a compatible profile as pending for the next generation. */
-  select(name: string): void | Promise<void>
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    /** Launcher-owned profile discovery and selection boundary. */
-    desktopProfiles: DesktopProfiles
-  }
-}
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-profiles'
@@ -43,17 +27,16 @@ export function apply(ctx: Context): void {
     const registration = ctx.desktopRuntime.registerTrayItem({
       group: 'profiles',
       order: 10,
-      label: () => `Profile: ${ctx.desktopProfiles.currentProfileName}`,
+      label: () => `Profile: ${ctx.desktopProfiles.current.name}`,
       invoke: () => {},
       submenu: () => ctx.desktopProfiles.list().map(profile => ({
         label: () => profileLabel(profile),
         type: 'radio',
-        checked: () => profile.name === ctx.desktopProfiles.currentProfileName,
+        checked: () => profile.name === ctx.desktopProfiles.current.name,
         enabled: () => selectable(profile),
         invoke: async () => {
-          if (profile.name === ctx.desktopProfiles.currentProfileName) return
+          if (profile.name === ctx.desktopProfiles.current.name) return
           await ctx.desktopProfiles.select(profile.name)
-          await ctx.desktopRuntime.requestRestart()
         },
       })),
     })

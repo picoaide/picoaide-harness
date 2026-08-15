@@ -3,6 +3,7 @@
 import { app } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   boot,
   installFailLoud,
@@ -24,8 +25,9 @@ import {
   selectDesktopProfile,
   type DesktopProfileStartup,
 } from './profile-manager.ts'
+import { DesktopProfileService } from './profile-service.ts'
 import { prepareDesktopProfile } from './profile.ts'
-import type { DesktopProfiles } from './profiles.ts'
+import type { DesktopPnpmBootstrap } from './pnpm.ts'
 import {
   createDesktopExitCoordinator,
   createDesktopShutdown,
@@ -119,10 +121,11 @@ async function start(): Promise<void> {
     if (electronVersion === undefined) {
       throw new Error(`${BIN_NAME}: plugin runtime requires the Electron runtime version`)
     }
+    const pnpmBinPath = packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs')
     const pnpmRuntime = installDesktopPnpmRuntime({
       platform: process.platform,
       appExecutable: process.execPath,
-      pnpmBinPath: packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs'),
+      pnpmBinPath,
       electronVersion,
       stateDir: join(app.getPath('userData'), 'runtime-commands'),
       environment: process.env,
@@ -140,17 +143,24 @@ async function start(): Promise<void> {
       process.platform,
       activeProfileName,
     )
-    const desktopProfiles: DesktopProfiles = {
-      currentProfileName: activeProfileName,
-      list: () => listDesktopProfiles(homeDir),
-      select: name => { selectDesktopProfile(selectionStatePath, homeDir, name) },
+    const desktopPnpmBootstrap: DesktopPnpmBootstrap = {
+      activeProfileName,
+      activeProfileDir: prepared.profile.dir,
+      homeDir,
+      appExecutable: process.execPath,
+      pnpmBinPath,
+      electronVersion,
+      nodeBinDir: pnpmRuntime.nodeBinDir,
+      nodeShimPath: pnpmRuntime.nodeShimPath,
+      clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
+      dshBootstrapPath: fileURLToPath(new URL('./desktop-cli.js', import.meta.url)),
     }
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
     const ctx = await boot(
       BIN_NAME,
       prepared.rootConfig,
       prepared.patches,
-      (hostCtx) => {
+      async (hostCtx) => {
         hostCtx.effect(
           () => releasePnpmRuntime,
           'dsh-plugin-desktop: packaged pnpm runtime PATH',
@@ -162,7 +172,16 @@ async function start(): Promise<void> {
         )
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
-        hostCtx.provide('desktopProfiles', desktopProfiles)
+        hostCtx.provide('desktopPnpmBootstrap', desktopPnpmBootstrap)
+        await hostCtx.plugin(DesktopProfileService, {
+          current: {
+            name: activeProfileName,
+            dir: prepared.profile.dir,
+          },
+          list: () => listDesktopProfiles(homeDir),
+          persistSelection: name => { selectDesktopProfile(selectionStatePath, homeDir, name) },
+          requestRestart: () => runtime.requestRestart(),
+        })
         provideCmdline(hostCtx, {
           args: ['--host', '127.0.0.1', '--port', '0'],
           exit: requestQuit,

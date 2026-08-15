@@ -55,6 +55,8 @@ describe('packaged desktop runtime verification', () => {
   it.each([
     'lib/client.js',
     'lib/desktop-runtime-environment.js',
+    'lib/profile-service.js',
+    'lib/pnpm.js',
   ])('fails loud when required runtime entry %s is absent', (missing) => {
     const entries = completeArchiveEntries().filter(entry => entry !== `/${missing}`)
 

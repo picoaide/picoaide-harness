@@ -16,9 +16,17 @@ desktop package 拥有普通 Host 与 Web Client 两个 face。它的 Client fac
 
 Profile 选择保存在 Electron user data 下的 desktop 自有状态中，而不是被选 profile 内的另一个字段。切换会先记为 pending，再通过有序重启生效。只有 Cordis 树与原生窗口成功挂载后，新 profile 才会成为 last-known-good；托盘会在 Web surface 加载后才创建，而且该状态提交会在托盘命令能够运行前同步完成。Pending generation 启动失败时会回滚并自动重启一次。官方 profile 默认共用同一个 DSH home 中的 sessions、settings 与 storage，因此切换不会复制或迁移记录；自定义 profile patch 仍可主动重定向其中某个持久化根。
 
+Launcher 会在 Loader entry 挂载前注册作用于当前 generation 的 `ctx.desktopProfiles` service。其不可变 `current` 值包含激活 profile 的 `name` 与绝对 `dir`；`list()` 只读执行发现，`select(name)` 会串行化“先持久化、再重启”的切换，而不会就地改变当前 generation。该 service 是 Desktop Host capability，不是 renderer bridge，也不是当前上游 DSH 已提供的 active-profile API。
+
 Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Node resolve hook 只处理由 `@deepseek-ai/cordis-plugin-loader` 发起的导入，因此即使打包后的 Electron 不暴露 Node 内部 ESM Loader，profile 本地第三方包与修复后的 launcher fallback 仍使用同一条解析路径。
 
-在 profile 准备与 Cordis boot 之前，Launcher 会把只包含固定版本内置 `pnpm` 命令的私有命令目录前置到当前 Electron main 进程的 `PATH`。因此 Host 与第三方插件从启动开始即可发现该 package manager，也可以通过普通 DSH subprocess provider 使用它，而无需系统安装 Node.js。公开 runtime path 不会暴露 `node` 或 `dsh`；其中私有、由 Electron 承载的 Node helper，以及 `ELECTRON_RUN_AS_NODE` 与 npm ABI 变量，都只存在于 pnpm subprocess tree 内。Launcher 不会修改系统 `PATH`、shell 启动文件、profile 配置或 `.env` 文档。
+在 profile 准备与 Cordis boot 之前，Launcher 会把只包含固定版本内置 `pnpm` 命令的私有命令目录前置到当前 Electron main 进程的 `PATH`。因此 Host 与第三方插件从启动开始即可发现该 package manager，也可以通过普通 DSH subprocess provider 使用它，而无需系统安装 Node.js。该 ambient path 是兼容 surface，不是正式的插件管理 contract。
+
+`desktop-pnpm` Host row 会提供 `ctx.desktopPnpm`，用于针对不可变激活 profile 执行受管 package operation。`run(args, signal?)` 会在激活 profile 目录中直接执行内置 pnpm；它是低层 operation，不承诺 DSH profile 初始化、调用方相对 source 锚定或 bundle reconcile。`runPlugin(args, invokingDir, signal?)` 则会从调用方绝对目录启动内置的 `dsh plugin --profile <active>`。插件安装、卸载、更新与依赖修复必须使用 `runPlugin()`，使上游 CLI 继续拥有相对 `file:` 与 `link:` spec、pnpm profile working directory、首次初始化，以及成功后 `dsh.profile.bundles` reconcile 的权威语义。
+
+两个方法都会返回实时 stdout 与 stderr stream、在完整 process tree 退出后才 settle 的 `done` promise，以及 `cancel()`。每个 generation 同时最多运行一个 operation。Service 使用普通 DSH subprocess provider、准确的已打包 JavaScript entry、无 shell argv，以及只属于 child 的 DSH home、Electron-backed Node、CI 与 native-module ABI 值。公开 runtime path 仍不会暴露 `node` 或 `dsh`；其中私有 helper、`ELECTRON_RUN_AS_NODE` 与 npm ABI 变量只存在于 package-manager subprocess tree 内。Launcher 不会修改系统 `PATH`、shell 启动文件、profile 配置或 `.env` 文档。
+
+插件作者应遵循 [Desktop 插件 service 架构](docs/plugin-services.zh.md)中记录的受支持 contract import、生命周期规则与适配模式。
 
 ## 模式设置与重启边界
 
@@ -105,6 +113,10 @@ dsh plugin update
 
 显式 `--profile <name>` 始终具有更高优先级，可用于在切换前准备其他 profile。
 
+`dshmarket@1.2.3` 尚未预装，也不是 DSH Desktop 的 dependency。该版本仍从 config/argv 解析 profile，并通过私有 child-process 代码启动 `dsh plugin`；它既不读取 `desktopProfiles`，也不使用 `desktopPnpm`，package exports 也没有 runner injection seam。后续兼容版本必须动态探测 Desktop service，同时在普通 DSH 中保留现有 CLI fallback。此外，`1.2.3` 的源码仓库与 npm tarball 均未包含完整 MIT 许可文本或版权通知，因此该版本尚未通过内置再分发 gate。用户主动安装第三方 package 与 Desktop 将其嵌入 application archive 或 installer 是两个独立边界。
+
+Required injection、可选 Desktop 适配、TypeScript 示例、cancellation 与 fallback 指南详见[面向插件作者的 service 文档](docs/plugin-services.zh.md)。
+
 随后可以通过 npm 启动该包：
 
 ```sh
@@ -140,8 +152,9 @@ npx dsh-plugin-desktop
 - 添加或删除 profile bundle 后必须重启 DSH Desktop；Launcher 不监听 profile manifest。从托盘选择其他 profile 时会自动完成该重启。
 - 切换 compatibility/advanced 模式按设计必然重启应用；存活的 generation 不会热切换 Loader row、slot 所有权或原生材质。
 - Linux 不支持高级模式。Linux 继续使用兼容呈现。
-- macOS 与 Windows 托盘终端会提供私有 `dsh`、`pnpm` 与 `node` shim。除此之外，Host runtime 只会在当前 Electron 进程的 `PATH` 中公开内置 `pnpm` 命令；这些命令都不会加入系统 `PATH`，Linux 目前也没有 desktop 终端命令。
-- 在 Windows 上，`pnpm` 是 `.cmd` shim。上游 `dsh plugin`、PowerShell 与命令提示符会使用 command interpreter，因此可以解析它；但第三方插件直接调用 Node `spawn('pnpm', { shell: false })` 时，无法可靠执行该 batch shim。Lifecycle script 直接以 `shell: false` 执行其 `.cmd` `npm_node_execpath` 时也有相同限制。支持这些非可移植调用需要原生签名 launcher。
+- macOS 与 Windows 托盘终端会提供私有 `dsh`、`pnpm` 与 `node` shim。除此之外，Host runtime 会在当前 Electron 进程的 `PATH` 中公开内置 `pnpm` 命令作为 ambient compatibility，并提供受管 `desktopPnpm` service；这些命令都不会加入系统 `PATH`，Linux 目前也没有 desktop 终端命令。
+- 在 Windows 上，ambient `pnpm` 命令与 lifecycle Node helper 是 `.cmd` shim。`desktopPnpm.run()` 与 `runPlugin()` 会启动准确的已打包 entry，从而避免 manager process 的 shell lookup；上游 `dsh plugin`、PowerShell 与命令提示符则可通过 command interpreter 解析 ambient shim。第三方插件直接调用 Node `spawn('pnpm', { shell: false })`，或 lifecycle script 直接以 `shell: false` 执行其 `.cmd` `npm_node_execpath`，仍属于不可移植行为，应改用受管 service 或 shell-aware 启动路径。
+- `dshmarket@1.2.3` 仍是用户可选安装的第三方 package，而不是内置 marketplace。只有重新审计的版本同时消费可选 Desktop service、保留普通 DSH fallback，并包含再分发所需的完整 license notice 后，才会重新评估预装。
 - Release 检查只发现并提示 stable 版本，不会下载或应用更新。用户仍需在经过校验的 GitHub release 页面上显式执行安装。
 - 共享 carrier 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换它需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
 - 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。

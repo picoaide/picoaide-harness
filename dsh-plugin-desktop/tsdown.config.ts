@@ -10,6 +10,8 @@ export default defineConfig([
       'module-resolution': 'src/module-resolution.ts',
       profile: 'src/profile.ts',
       'profile-manager': 'src/profile-manager.ts',
+      'profile-service': 'src/profile-service.ts',
+      pnpm: 'src/pnpm.ts',
       profiles: 'src/profiles.ts',
       runtime: 'src/runtime.ts',
       'electron-runtime': 'src/electron-runtime.ts',

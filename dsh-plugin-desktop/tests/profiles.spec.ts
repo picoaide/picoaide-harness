@@ -1,10 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import type { DesktopRuntime, DesktopTrayItem } from '../src/runtime.ts'
-import { apply, inject, name, type DesktopProfiles } from '../src/profiles.ts'
+import type { DesktopProfiles } from '../src/profile-service.ts'
+import { apply, inject, name } from '../src/profiles.ts'
 
 describe('desktop profiles Host plugin', () => {
-  it('registers radio profile commands and restarts only after selection persists', async () => {
+  it('registers radio profile commands and delegates selection to the profile service', async () => {
     let trayItem: DesktopTrayItem | undefined
     let disposeEffect: (() => void) | undefined
     const events: string[] = []
@@ -14,10 +15,10 @@ describe('desktop profiles Host plugin', () => {
         trayItem = item
         return { refresh: () => {}, dispose: disposeRegistration }
       },
-      requestRestart: async () => { events.push('restart') },
+      requestRestart: vi.fn(async () => { events.push('unexpected restart') }),
     } as unknown as DesktopRuntime
     const profiles: DesktopProfiles = {
-      currentProfileName: 'desktop',
+      current: { name: 'desktop', dir: '/profiles/desktop' },
       list: () => [
         { name: 'desktop', dir: '/profiles/desktop', exists: true, bundles: [], webCapable: true },
         { name: '工作 profile', dir: '/profiles/work', exists: true, bundles: [], webCapable: true },
@@ -52,7 +53,8 @@ describe('desktop profiles Host plugin', () => {
     ])
 
     await commands[1]?.invoke()
-    expect(events).toEqual(['select:工作 profile', 'restart'])
+    expect(events).toEqual(['select:工作 profile'])
+    expect(runtime.requestRestart).not.toHaveBeenCalled()
     disposeEffect?.()
     expect(disposeRegistration).toHaveBeenCalledOnce()
   })

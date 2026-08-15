@@ -134,6 +134,9 @@ describe('desktop profile composition', () => {
       name: 'dsh-plugin-desktop/terminal',
       disabled: { __jsExpr: "process.platform === 'linux'" },
     }))
+    expect(rows.find(row => row.id === 'desktop-pnpm')).toEqual(expect.objectContaining({
+      name: 'dsh-plugin-desktop/pnpm',
+    }))
     expect(rows.find(row => row.id === 'desktop-updates')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/updates',
     }))

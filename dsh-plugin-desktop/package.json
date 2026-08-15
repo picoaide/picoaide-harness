@@ -36,6 +36,14 @@
       "types": "./lib/types/terminal.d.ts",
       "default": "./lib/terminal.js"
     },
+    "./pnpm": {
+      "types": "./lib/types/pnpm.d.ts",
+      "default": "./lib/pnpm.js"
+    },
+    "./profile-service": {
+      "types": "./lib/types/profile-service.d.ts",
+      "default": "./lib/profile-service.js"
+    },
     "./profiles": {
       "types": "./lib/types/profiles.d.ts",
       "default": "./lib/profiles.js"
@@ -51,6 +59,7 @@
     "build/tray-icon.svg",
     "build/tray-icon*.png",
     "cordis.patch.yml",
+    "docs/**",
     "lib/**/*.js",
     "lib/**/*.map",
     "lib/types/**/*.d.ts",
