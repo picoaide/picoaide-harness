@@ -17,12 +17,13 @@
 
 ## README 文件怎么分工
 
-目前外层仓库只有两份面向读者的产品 README：
+目前外层仓库有两份正式的产品 README，另保留一个旧链接兼容入口：
 
 - [`README.md`](../README.md)：中文产品入口。
 - [`README.en.md`](../README.en.md)：英文产品入口，与中文 README 保持同一产品范围。
+- [`README.zh.md`](../README.zh.md)：旧中文路径的兼容页，不维护独立内容。
 
-`README.i18n.yaml` 只记录这两个入口的双语 hash，不是用户指南。`dsh-plugin-desktop/README.md` 和 `README.zh.md` 是 npm 包随包发布的包级参考；它们比根 README 更技术化。`dsh-plugin-desktop/docs/` 是稳定 API 合同，不是营销页。`.agents/notes/implemented/` 是日期化的维护者决策记录，适合追溯取舍，不替代用户文档。
+`README.i18n.yaml` 只记录这两个正式入口的双语 hash，不是用户指南。`dsh-plugin-desktop/README.md` 和 `dsh-plugin-desktop/README.zh.md` 是 npm 包随包发布的包级参考；它们比根 README 更技术化。`dsh-plugin-desktop/docs/` 是稳定 API 合同，不是营销页。`.agents/notes/implemented/` 是日期化的维护者决策记录，适合追溯取舍，不替代用户文档。
 
 `deepseek-harness/` 是固定版本的官方上游子模块。它自己的 README 和 `docs/` 属于上游项目，不能当作 Desktop 文档，也不在本仓库的产品文档统计中。
 

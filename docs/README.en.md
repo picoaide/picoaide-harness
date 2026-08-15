@@ -17,12 +17,13 @@ This directory is the product and developer documentation index for DSH Desktop.
 
 ## How the README files are organized
 
-The outer repository has two reader-facing product READMEs:
+The outer repository has two formal product READMEs plus one legacy compatibility entry:
 
 - [`README.md`](../README.md): the Chinese product entry point.
 - [`README.en.md`](../README.en.md): the English product entry point with the same product scope.
+- [`README.zh.md`](../README.zh.md): a legacy Chinese-path compatibility page with no independent content.
 
-`README.i18n.yaml` records the bilingual blob hashes for those two entry points; it is not a user guide. `dsh-plugin-desktop/README.md` and `README.zh.md` ship with the npm package and are the more technical package reference. `dsh-plugin-desktop/docs/` contains stable API contracts rather than marketing copy. `.agents/notes/implemented/` contains dated maintainer decision records and does not replace user documentation.
+`README.i18n.yaml` records the bilingual blob hashes for those two formal entry points; it is not a user guide. `dsh-plugin-desktop/README.md` and `dsh-plugin-desktop/README.zh.md` ship with the npm package and are the more technical package reference. `dsh-plugin-desktop/docs/` contains stable API contracts rather than marketing copy. `.agents/notes/implemented/` contains dated maintainer decision records and does not replace user documentation.
 
 `deepseek-harness/` is the pinned upstream submodule. Its README and `docs/` belong to the upstream project, not to the Desktop product, and are excluded from the outer documentation inventory.
 
