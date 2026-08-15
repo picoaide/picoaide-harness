@@ -1,4 +1,6 @@
-<h1 align="center">DeepSeek Harness Desktop</h1>
+<p align="center">
+  <img src="assets/desktop-hero-en.jpg" alt="DeepSeek Harness Desktop" width="100%">
+</p>
 
 <p align="center">
   <a href="https://github.com/anywhere-labs/deepseek-harness-desktop"><img src="https://img.shields.io/github/stars/anywhere-labs/deepseek-harness-desktop?style=flat&amp;label=%E2%98%85&amp;color=08C" alt="GitHub stars"></a>
@@ -11,10 +13,6 @@
 <p align="center"><sub><a href="README.md">中文</a> · English</sub></p>
 
 <h3 align="center">A modern desktop experience for the DeepSeek Harness ecosystem (<a href="#plugin-ecosystem">Plugin</a>)</h3>
-
-<h4 align="center">
-  DeepSeek Harness currently launches its local Web UI from the command line. This project brings service startup, runtime management, and the desktop window into one ready-to-use experience, with no Node.js setup or commands required.
-</h4>
 
 <a id="run"></a>
 
@@ -108,22 +106,6 @@ Choose whichever platform you prefer to discuss usage, plugin development, and p
 </table>
 
 Discord: [Join the DeepSeek Harness Desktop community](https://discord.gg/TJeGqKRNM)
-
-## Friendly Links
-
-DeepSeek Harness ecosystem projects and developer tools.
-
-| Project | Description | Links |
-| --- | --- | --- |
-| DeepSeek Harness Orange Book | A community field guide to DeepSeek Harness. | [GitHub](https://github.com/alchaincyf/deepseek-harness-orange-book) |
-| Awesome DSH Plugin | A curated list of community DeepSeek Harness plugins. | [GitHub](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) · [Website](https://awesome-dsh-plugin.com) |
-| dsh-web-ui | Plugins and themes for the DeepSeek Harness Web UI. | [GitHub](https://github.com/zhu1090093659/dsh-web-ui) · [Gallery](https://gallery.dsh-market.com) |
-| dsh-TUI | A full-screen terminal interface for DeepSeek Harness. | [GitHub](https://github.com/ccch1mneyyy/dsh-TUI) |
-| Agents-Anywhere | Control coding agents remotely from your phone. | [GitHub](https://github.com/anywhere-labs/Agents-Anywhere) |
-| DSH-better-sidebar | A DeepSeek Harness sidebar workspace with files, terminal, Git, and subagents. | [GitHub](https://github.com/omdsh-dev/DSH-better-sidebar) |
-| MkSaaS · TanStarter (Sponsor) | Commercial SaaS starter kits for indie makers. MkSaaS is built on Next.js, while TanStarter uses TanStack Start and Cloudflare, with AI, authentication, payments, and dashboards included. | [MkSaaS](https://mksaas.com) · [TanStarter](https://tanstarter.dev) |
-
-<sub>To have your project listed, join the WeChat group and message @王博升Benson.</sub>
 
 ## License
 
