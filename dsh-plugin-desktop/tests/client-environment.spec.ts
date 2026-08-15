@@ -33,6 +33,7 @@ describe('desktop client environment', () => {
 
 describe('advanced desktop layout', () => {
   it('owns native caption geometry without targeting feature headers', () => {
+    expect(MACOS_TITLEBAR_HEIGHT).toBe(20)
     let css = ''
     const remove = vi.fn()
     const style = {
