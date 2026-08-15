@@ -124,6 +124,8 @@ function requiredWebBundles(): string[] {
 
 /** Prepared profile inputs consumed by app-boot. */
 export interface PreparedDesktopProfile {
+  /** Harness home shared by the launcher and generated command environment. */
+  homeDir: string
   /** Resolved profile and its persistent user layer. */
   profile: Profile
   /** Absolute empty root config included by the Cordis Loader. */
@@ -358,6 +360,7 @@ export function prepareDesktopProfile(
     },
   })
   return {
+    homeDir: home,
     profile,
     rootConfig,
     bareModuleBaseUrl,

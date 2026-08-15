@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
 
+const terminal = vi.hoisted(() => ({ open: vi.fn() }))
+
+vi.mock('../src/desktop-terminal.ts', () => ({ openDesktopTerminal: terminal.open }))
+
 const electron = vi.hoisted(() => {
   const browserWindowOptions: unknown[] = []
   const browserWindows: BrowserWindow[] = []
   const browserWindowOn = vi.fn()
   const browserWindowOff = vi.fn()
   const menuTemplates: unknown[][] = []
+  const notifications: Notification[] = []
   const appIcon = {
     isEmpty: vi.fn(() => false),
     setTemplateImage: vi.fn(),
@@ -61,6 +66,16 @@ const electron = vi.hoisted(() => {
     }
   }
 
+  class Notification {
+    static readonly isSupported = vi.fn(() => true)
+    readonly once = vi.fn()
+    readonly show = vi.fn()
+
+    constructor(readonly options: unknown) {
+      notifications.push(this)
+    }
+  }
+
   const trays: Tray[] = []
   const createFromPath = vi.fn((path: string) => {
     if (path.endsWith('app-icon.png')) return appIcon
@@ -70,7 +85,14 @@ const electron = vi.hoisted(() => {
   })
 
   return {
-    app: { dock: { setIcon: vi.fn() }, on: vi.fn(), off: vi.fn() },
+    app: {
+      dock: { setIcon: vi.fn() },
+      getPath: vi.fn(() => '/tmp/dsh-desktop-user-data'),
+      getVersion: vi.fn(() => '43.4.0'),
+      isPackaged: false,
+      on: vi.fn(),
+      off: vi.fn(),
+    },
     appIcon,
     blueIcon,
     BrowserWindow,
@@ -86,6 +108,9 @@ const electron = vi.hoisted(() => {
     },
     menuTemplates,
     nativeImage: { createFromPath },
+    net: { fetch: vi.fn() },
+    Notification,
+    notifications,
     shell: { openExternal: vi.fn(async () => {}) },
     templateIcon,
     Tray,
@@ -98,6 +123,8 @@ vi.mock('electron', () => ({
   BrowserWindow: electron.BrowserWindow,
   Menu: electron.Menu,
   nativeImage: electron.nativeImage,
+  net: electron.net,
+  Notification: electron.Notification,
   shell: electron.shell,
   Tray: electron.Tray,
 }))
@@ -126,6 +153,7 @@ describe('Electron compatibility runtime', () => {
     electron.browserWindows.length = 0
     electron.trays.length = 0
     electron.menuTemplates.length = 0
+    electron.notifications.length = 0
     vi.clearAllMocks()
   })
 
@@ -298,6 +326,81 @@ describe('Electron compatibility runtime', () => {
     ]))
 
     await release()
+  })
+
+  it('opens the configured desktop profile through the packaged terminal adapter', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    Object.defineProperty(process.versions, 'electron', {
+      configurable: true,
+      value: '43.4.0',
+    })
+    try {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.configureTerminal({
+        profileName: 'desktop',
+        profileDir: '/tmp/dsh-home/profiles/desktop',
+        homeDir: '/tmp/dsh-home',
+      })
+
+      runtime.openTerminal()
+
+      expect(terminal.open).toHaveBeenCalledWith(expect.objectContaining({
+        platform: 'darwin',
+        appExecutable: process.execPath,
+        dshBootstrapPath: expect.stringMatching(/\/src\/desktop-cli\.js$/u),
+        pnpmBinPath: expect.stringMatching(/\/node_modules\/pnpm\/bin\/pnpm\.mjs$/u),
+        electronVersion: '43.4.0',
+        profileName: 'desktop',
+        productVersion: '2.0.0',
+        profileDir: '/tmp/dsh-home/profiles/desktop',
+        homeDir: '/tmp/dsh-home',
+        stateDir: '/tmp/dsh-desktop-user-data/cli',
+        spawn: expect.any(Function),
+        onLaunchError: expect.any(Function),
+      }))
+      expect(() => runtime.configureTerminal({
+        profileName: 'desktop',
+        profileDir: '/other',
+        homeDir: '/other',
+      })).toThrow('already configured')
+    } finally {
+      delete (process.versions as { electron?: string }).electron
+    }
+  })
+
+  it('uses Electron networking and clickable native update notifications', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const response = new Response(null, { status: 304 })
+    electron.net.fetch.mockResolvedValueOnce(response)
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+
+    await expect(runtime.updates.request('https://example.test/latest', { method: 'GET' }))
+      .resolves.toBe(response)
+    expect(runtime.updates).toMatchObject({
+      isPackaged: false,
+      currentVersion: '2.0.0',
+      statePath: '/tmp/dsh-desktop-user-data/updates/state.json',
+    })
+
+    runtime.updates.notify({
+      title: 'Update Available',
+      body: 'Version 2.1.0 is available.',
+      openUrl: 'https://example.test/release',
+    })
+    const notification = electron.notifications[0]
+    expect(notification?.options).toEqual({
+      title: 'Update Available',
+      body: 'Version 2.1.0 is available.',
+    })
+    expect(notification?.show).toHaveBeenCalledOnce()
+    const click = notification?.once.mock.calls.find(([event]) => event === 'click')?.[1]
+    expect(click).toEqual(expect.any(Function))
+    click?.()
+    await vi.waitFor(() => {
+      expect(electron.shell.openExternal).toHaveBeenCalledWith('https://example.test/release')
+    })
   })
 
   it('uses advanced macOS material options and offers compatibility mode', async () => {

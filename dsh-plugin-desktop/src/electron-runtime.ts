@@ -5,16 +5,27 @@ import {
   BrowserWindow,
   Menu,
   nativeImage,
+  net,
+  Notification,
   shell,
   Tray,
 } from 'electron'
+import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { openDesktopTerminal } from './desktop-terminal.ts'
+import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import type {
+  DesktopNotification,
   DesktopPlatform,
   DesktopRuntime,
   DesktopShellSpec,
+  DesktopTerminalSpec,
   DesktopTrayItem,
   DesktopTrayItemGroup,
   DesktopTrayItemRegistration,
+  DesktopUpdateAdapter,
 } from './runtime.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import { desktopWindowOptions } from './window-options.ts'
@@ -31,9 +42,32 @@ export function modeToggleLabel(mode: DesktopShellSpec['mode']): string {
     : 'Switch to Compatibility Mode'
 }
 
+/**
+ * Read the desktop package version instead of Electron's development-app version.
+ * @param moduleUrl - module below the package's `src` or `lib` directory.
+ * @returns validated desktop product version.
+ */
+export function desktopProductVersion(moduleUrl: string = import.meta.url): string {
+  const value: unknown = JSON.parse(readFileSync(new URL('../package.json', moduleUrl), 'utf8'))
+  if (value === null || typeof value !== 'object' || typeof (value as { version?: unknown }).version !== 'string') {
+    throw new Error('dsh-plugin-desktop: package.json has no product version')
+  }
+  return (value as { version: string }).version
+}
+
+const PRODUCT_VERSION = desktopProductVersion()
+
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
+  readonly updates: DesktopUpdateAdapter = {
+    get isPackaged() { return app.isPackaged },
+    get currentVersion() { return PRODUCT_VERSION },
+    get statePath() { return join(app.getPath('userData'), 'updates', 'state.json') },
+    request: (url, init) => net.fetch(url, init),
+    openRelease: async url => { await shell.openExternal(url) },
+    notify: notification => { this.showNotification(notification) },
+  }
 
   private window: BrowserWindow | undefined
   private tray: Tray | undefined
@@ -42,6 +76,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private release: (() => Promise<void>) | undefined
   private quitting = false
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
+  private terminalSpec: DesktopTerminalSpec | undefined
 
   constructor(private readonly restart: () => Promise<void>) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
@@ -109,6 +144,48 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
   }
 
+  /**
+   * Fix the profile identity before Cordis plugins can contribute terminal commands.
+   * @param spec - launcher-resolved desktop profile and Harness home.
+   */
+  configureTerminal(spec: DesktopTerminalSpec): void {
+    if (this.terminalSpec !== undefined) {
+      throw new Error('dsh-plugin-desktop: terminal profile is already configured')
+    }
+    this.terminalSpec = { ...spec }
+  }
+
+  /** @inheritdoc */
+  openTerminal(): void {
+    const spec = this.terminalSpec
+    if (spec === undefined) {
+      throw new Error('dsh-plugin-desktop: terminal profile is not configured')
+    }
+    const electronVersion = process.versions.electron
+    if (electronVersion === undefined) {
+      throw new Error('dsh-plugin-desktop: terminal requires the Electron runtime version')
+    }
+    openDesktopTerminal({
+      platform: this.platform,
+      appExecutable: process.execPath,
+      dshBootstrapPath: fileURLToPath(new URL('./desktop-cli.js', import.meta.url)),
+      pnpmBinPath: packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs'),
+      electronVersion,
+      profileName: spec.profileName,
+      productVersion: PRODUCT_VERSION,
+      profileDir: spec.profileDir,
+      homeDir: spec.homeDir,
+      stateDir: join(app.getPath('userData'), 'cli'),
+      spawn,
+      onLaunchError: cause => {
+        this.showNotification({
+          title: 'Unable to Open DSH Terminal',
+          body: cause.message,
+        })
+      },
+    })
+  }
+
   /** @inheritdoc */
   async requestRestart(): Promise<void> {
     await this.restart()
@@ -127,11 +204,28 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         label: item.label(),
         enabled: item.enabled?.() ?? true,
         click: () => {
-          void Promise.resolve(item.invoke()).catch((cause: unknown) => {
+          void Promise.resolve().then(() => item.invoke()).catch((cause: unknown) => {
             process.stderr.write(`dsh-plugin-desktop: tray command failed: ${cause instanceof Error ? cause.message : String(cause)}\n`)
           })
         },
       }))
+  }
+
+  private showNotification(notification: DesktopNotification): void {
+    if (!Notification.isSupported()) return
+    const nativeNotification = new Notification({
+      title: notification.title,
+      body: notification.body,
+    })
+    const openUrl = notification.openUrl
+    if (openUrl !== undefined) {
+      nativeNotification.once('click', () => {
+        void this.updates.openRelease(openUrl).catch((cause: unknown) => {
+          process.stderr.write(`dsh-plugin-desktop: failed to open release page: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+        })
+      })
+    }
+    nativeNotification.show()
   }
 
   private rebuildTrayMenu(): void {

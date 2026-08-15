@@ -32,6 +32,14 @@
       "types": "./lib/types/windows-pwsh-sandbox.d.ts",
       "default": "./lib/windows-pwsh-sandbox.js"
     },
+    "./terminal": {
+      "types": "./lib/types/terminal.d.ts",
+      "default": "./lib/terminal.js"
+    },
+    "./updates": {
+      "types": "./lib/types/updates.d.ts",
+      "default": "./lib/updates.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -66,9 +74,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
+    "verify:cli": "node scripts/verify-cli-runtime.mjs",
     "verify:loader": "node scripts/verify-loader-boot.mjs",
     "verify:profile": "node scripts/verify-profile-boot.mjs",
-    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile",
+    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:cli && yarn run verify:loader && yarn run verify:profile",
     "start": "node lib/bin.js",
     "dev": "yarn run build && node lib/bin.js",
     "package:dir": "yarn run build && node scripts/package-dir.mjs",
@@ -179,6 +188,7 @@
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "node-addon-require-builtin": "^0.1.4",
+    "pnpm": "11.7.0",
     "react": "18.3.1",
     "yaml": "^2.9.0"
   },
@@ -201,6 +211,9 @@
     "appId": "ai.deepseek.dsh.desktop",
     "productName": "DSH Desktop",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/**"
+    ],
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "electronFuses": {
       "runAsNode": true

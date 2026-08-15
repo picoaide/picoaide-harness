@@ -18,6 +18,7 @@ const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-'))
 let ctx
 let releasePackageResolver
 let mountedSpec
+const trayItems = []
 
 try {
   writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n')
@@ -25,6 +26,14 @@ try {
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const runtime = {
     platform: 'win32',
+    updates: {
+      isPackaged: false,
+      currentVersion: '2.0.0',
+      statePath: join(home, 'update-state.json'),
+      request: async () => { throw new Error('profile smoke must not perform update requests') },
+      openRelease: async () => {},
+      notify: () => {},
+    },
     schedule(spec) {
       mountedSpec = spec
       return async () => {}
@@ -33,6 +42,17 @@ try {
       if (mountedSpec === undefined) throw new Error('desktop shell was not registered')
     },
     show() {},
+    registerTrayItem(item) {
+      trayItems.push(item)
+      return {
+        refresh() {},
+        dispose() {
+          const index = trayItems.indexOf(item)
+          if (index >= 0) trayItems.splice(index, 1)
+        },
+      }
+    },
+    openTerminal() {},
     async requestRestart() {},
     prepareToQuit() {},
   }
@@ -71,6 +91,13 @@ try {
   const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
   if (desktopSettings?.mode !== 'advanced') {
     throw new Error('assembled Host settings are missing the advanced dsh-desktop mode')
+  }
+  if (!trayItems.some(item => item.label() === 'Check for Updates…')) {
+    throw new Error('assembled desktop profile is missing the update tray command')
+  }
+  if (process.platform !== 'linux'
+    && !trayItems.some(item => item.label() === 'Open DSH Terminal')) {
+    throw new Error('assembled desktop profile is missing the terminal tray command')
   }
   const response = await fetch(expectedUrl)
   const html = await response.text()

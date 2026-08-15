@@ -77,7 +77,8 @@ describe('desktop profile composition', () => {
   })
 
   it('assembles the Host shell without replacing the upstream client shell', () => {
-    const prepared = prepareDesktopProfile(undefined, temporaryHome(), 'darwin')
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const patches = prepared.patches as Array<Record<string, unknown>>
     const inserted = patches.flatMap((patch) => {
       const rows = patch.insert
@@ -96,6 +97,7 @@ describe('desktop profile composition', () => {
       config: expect.objectContaining({ roots: [expect.objectContaining({ trust: 'system' })] }),
     }))
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
+    expect(prepared.homeDir).toBe(home)
     expect(fileURLToPath(prepared.bareModuleBaseUrl)).toBe(join(prepared.profile.dir, 'package.json'))
     expect(prepared.mode).toBe('compatibility')
 
@@ -128,6 +130,13 @@ describe('desktop profile composition', () => {
       name: '@deepseek-ai/dsh-pwsh-sandbox',
     }))
     expect(rows.map(row => row.id)).not.toContain('desktop-windows-pwsh-sandbox')
+    expect(rows.find(row => row.id === 'desktop-terminal')).toEqual(expect.objectContaining({
+      name: 'dsh-plugin-desktop/terminal',
+      disabled: { __jsExpr: "process.platform === 'linux'" },
+    }))
+    expect(rows.find(row => row.id === 'desktop-updates')).toEqual(expect.objectContaining({
+      name: 'dsh-plugin-desktop/updates',
+    }))
   })
 
   it('projects advanced YAML settings into the Host and client Loader rows', () => {

@@ -6732,6 +6732,7 @@ __metadata:
     electron: "npm:43.4.0"
     electron-builder: "npm:26.15.3"
     node-addon-require-builtin: "npm:^0.1.4"
+    pnpm: "npm:11.7.0"
     react: "npm:18.3.1"
     sharp: "npm:0.35.3"
     tsdown: "npm:0.22.2"
@@ -9273,6 +9274,20 @@ __metadata:
     base64-js: "npm:^1.5.1"
     xmlbuilder: "npm:^15.1.1"
   checksum: 10c0/af681277c2e541c6aab0ddee57f59459c43beeea1ee7aa2d4218aa39595fb41c068e2d2be3e4abb17e3252eaf2c1b806ecfb1d402fa5a3f4a6e1a7a32c880c9a
+  languageName: node
+  linkType: hard
+
+"pnpm@npm:11.7.0":
+  version: 11.7.0
+  resolution: "pnpm@npm:11.7.0"
+  dependencies:
+    node-gyp: "npm:latest"
+  bin:
+    pn: bin/pnpm.mjs
+    pnpm: bin/pnpm.mjs
+    pnpx: bin/pnpx.mjs
+    pnx: bin/pnpx.mjs
+  checksum: 10c0/fdc13140f280771191b210385c7cffe288870ba14c6a5e7a212e90703a4327d8903fdcee6409daff9a3f8fba5cc2b323344ed59effeac66df0bdc2235a01cce0
   languageName: node
   linkType: hard
 

@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { UpdateRequest } from './update-checker.ts'
 
 /** Electron platforms supported by the DSH Desktop native adapter. */
 export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
@@ -53,6 +54,42 @@ export interface DesktopTrayItemRegistration {
   dispose(): void
 }
 
+/** Native notification shown by a desktop-owned Host plugin. */
+export interface DesktopNotification {
+  /** Notification heading. */
+  title: string
+  /** Concise user-facing status. */
+  body: string
+  /** Trusted URL opened when the notification is selected. */
+  openUrl?: string
+}
+
+/** Electron capabilities used by the headless update plugin. */
+export interface DesktopUpdateAdapter {
+  /** Whether the running executable came from an Electron package. */
+  readonly isPackaged: boolean
+  /** Installed desktop product version. */
+  readonly currentVersion: string
+  /** Private file used for conditional request and notification state. */
+  readonly statePath: string
+  /** Request adapter backed by Electron's authenticated network session. */
+  readonly request: UpdateRequest
+  /** Open one validated release page in the default browser. */
+  openRelease(url: string): Promise<void>
+  /** Present a native status notification without blocking the Host tree. */
+  notify(notification: DesktopNotification): void
+}
+
+/** Profile identity needed to open the packaged DSH command environment. */
+export interface DesktopTerminalSpec {
+  /** DSH profile selected by the desktop launcher. */
+  profileName: string
+  /** Absolute directory containing the profile manifest and dependencies. */
+  profileDir: string
+  /** Active DSH home shared with the desktop launcher. */
+  homeDir: string
+}
+
 /** Values the desktop-shell plugin hands to the Electron adapter. */
 export interface DesktopShellSpec extends DesktopWindowConfig {
   /** Unmodified Web root served by the active DSH profile. */
@@ -76,6 +113,9 @@ export interface DesktopRuntime {
   /** Current Electron platform. */
   readonly platform: DesktopPlatform
 
+  /** Native network, notification, and release-page adapter. */
+  readonly updates: DesktopUpdateAdapter
+
   /**
    * Register one shell generation while the Cordis profile is activating.
    * @param spec - native shell inputs resolved from active Host services.
@@ -98,6 +138,9 @@ export interface DesktopRuntime {
    * @returns a refreshable, idempotent registration handle.
    */
   registerTrayItem(item: DesktopTrayItem): DesktopTrayItemRegistration
+
+  /** Open a native terminal containing packaged DSH command shims. */
+  openTerminal(): void
 
   /** Request orderly Cordis teardown followed by an Electron relaunch. */
   requestRestart(): Promise<void>

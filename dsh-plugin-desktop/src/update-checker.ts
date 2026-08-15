@@ -136,6 +136,34 @@ export function parseSemVer(input: string): ParsedSemVer | null {
 }
 
 /**
+ * Validate a stable release tag and its exact fixed-repository page.
+ * @param tagName - Git tag with optional lowercase `v` SemVer prefix.
+ * @param htmlUrl - exact GitHub release page for `tagName`.
+ * @returns normalized stable release, or null for an invalid, prerelease, or foreign URL.
+ */
+export function parseStableRelease(tagName: string, htmlUrl: string): StableRelease | null {
+  const version = parseSemVer(tagName)
+  if (version === null || version.prerelease.length > 0) return null
+  const expectedUrl =
+    `https://github.com/anywhere-labs/deepseek-harness-desktop/releases/tag/${encodeURIComponent(tagName)}`
+  if (htmlUrl !== expectedUrl) return null
+  return { tagName, version: version.version, htmlUrl }
+}
+
+/**
+ * Compare two strict SemVer strings without numeric overflow.
+ * @param left - first strict SemVer value.
+ * @param right - second strict SemVer value.
+ * @returns negative, zero, or positive precedence, or null when either value is invalid.
+ */
+export function compareSemVerVersions(left: string, right: string): number | null {
+  const leftVersion = parseSemVer(left)
+  const rightVersion = parseSemVer(right)
+  if (leftVersion === null || rightVersion === null) return null
+  return compareParsedSemVer(leftVersion, rightVersion)
+}
+
+/**
  * Check the fixed DSH Desktop GitHub endpoint for a newer stable release.
  * @param options - installed version, trigger, cache token, and caller-owned signal.
  * @returns cache status or the validated stable release comparison.
@@ -204,9 +232,9 @@ export async function checkForStableUpdate(options: UpdateCheckOptions): Promise
     )
   }
 
-  const release = parseStableRelease(body, options.trigger)
+  const release = parseLatestReleaseResponse(body, options.trigger)
   const latest = parseSemVer(release.tagName)!
-  const status = compareSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date'
+  const status = compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date'
   const result = {
     status,
     currentVersion: current.version,
@@ -250,7 +278,7 @@ async function readLimitedBody(response: Response, trigger: UpdateCheckTrigger):
   }
 }
 
-function parseStableRelease(body: string, trigger: UpdateCheckTrigger): StableRelease {
+function parseLatestReleaseResponse(body: string, trigger: UpdateCheckTrigger): StableRelease {
   let value: unknown
   try {
     value = JSON.parse(body)
@@ -298,9 +326,8 @@ function parseStableRelease(body: string, trigger: UpdateCheckTrigger): StableRe
     )
   }
 
-  const expectedUrl =
-    `https://github.com/anywhere-labs/deepseek-harness-desktop/releases/tag/${encodeURIComponent(value.tag_name)}`
-  if (value.html_url !== expectedUrl) {
+  const release = parseStableRelease(value.tag_name, value.html_url)
+  if (release === null) {
     throw new UpdateCheckError(
       'invalid-response',
       trigger,
@@ -308,14 +335,10 @@ function parseStableRelease(body: string, trigger: UpdateCheckTrigger): StableRe
     )
   }
 
-  return {
-    tagName: value.tag_name,
-    version: version.version,
-    htmlUrl: value.html_url,
-  }
+  return release
 }
 
-function compareSemVer(left: ParsedSemVer, right: ParsedSemVer): number {
+function compareParsedSemVer(left: ParsedSemVer, right: ParsedSemVer): number {
   for (const key of ['major', 'minor', 'patch'] as const) {
     const comparison = compareNumeric(left[key], right[key])
     if (comparison !== 0) return comparison

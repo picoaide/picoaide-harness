@@ -6,7 +6,7 @@
 
 ## 架构
 
-Electron 可执行文件只包含最小启动代码。它获取单实例锁、准备持久化 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过 Cordis effect 拥有 `BrowserWindow`、托盘、导航策略、settings namespace，以及关闭与退出生命周期。
+Electron 可执行文件只包含最小启动代码。它获取单实例锁、准备持久化 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过 Cordis effect 拥有 `BrowserWindow`、导航策略、settings namespace，以及关闭与退出生命周期。原生 runtime 拥有实体托盘；`desktop-shell`、`desktop-terminal` 与 `desktop-updates` 则通过有序 item registry 提供 effect-scoped 命令。
 
 两种呈现模式都复用现有 loopback Web carrier。profile 挂载普通 `dsh-base` 与 `dsh-web-app` bundle；Host 把 HTTP 与 WebSocket surface 绑定到 `127.0.0.1` 的临时端口；Electron 在沙箱 renderer 中加载该同源页面。Electron 不维护自有插件 roster，不使用 preload bridge，renderer 也不会获得原始 Electron API。
 
@@ -88,6 +88,7 @@ node lib/bin.js --version
 ```sh
 dsh plugin --profile desktop add third-party-plugin
 dsh plugin --profile desktop remove third-party-plugin
+dsh plugin --profile desktop update
 ```
 
 随后可以通过 npm 启动该包：
@@ -98,13 +99,19 @@ npx dsh-plugin-desktop
 
 第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。上游 Web 客户端模块图会在两种模式下发现它；Electron 不要求单独的客户端构建，也不引入 desktop 专用注册 API。高级模式 contribution 必须面向该显式组合中存在的 service 与 slot，不能假设官方 layout 或 sidebar occupant 拥有它们。
 
+## 桌面操作
+
+打包后的应用会在启动 60 秒后检查固定 DSH Desktop GitHub 仓库中的最新 stable release，并在每次检查完成六小时后再次检查。每次请求的期限为 15 秒，自动检查与手工检查共用一个 in-flight operation，并使用私有的条件请求缓存。开发运行与其他未打包启动不会调度网络请求，但托盘始终提供 **Check for Updates…**，手工检查也会通过原生通知报告结果。发现经过校验的较新 stable 版本后，该命令会变为 release 链接；后台发现对每个版本最多自动通知一次。DSH Desktop 只发现 release，并在默认浏览器中打开其准确的 GitHub 页面；它不会下载、安装、替换或重启应用。
+
+在 macOS 与 Windows 上，**Open DSH Terminal** 会打开以持久化 `desktop` profile 为工作目录的系统终端。欢迎信息会显示应用版本、profile、profile 目录与 DSH home，并列出配置与插件管理命令。在该终端内，裸 `dsh`、`dsh --dump-config`，以及没有选择 profile 的 plugin 子命令都会默认使用 `desktop`；显式 `--profile` 与上游 `web` alias 会保留原有含义。上文带有显式 profile 的示例仍然有效。DSH Desktop 会在自身 user-data 目录下生成私有 `dsh`、`pnpm` 与 `node` shim，设置 `DSH_HOME`，使用 profile 作为工作目录，并且只在该终端的 `PATH` 前置 shim 目录。它不会修改全局环境或 shell 启动文件。macOS launcher 会先保留用户的交互式 zsh 或 bash 设置，再恢复 desktop 自有变量；Windows 会依次选择 PowerShell 7、Windows PowerShell 或命令提示符。Linux 不组合该终端命令。
+
 ## 原生生命周期
 
-关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口、通过标准 settings namespace 更改模式，或请求显式退出。原生退出、`SIGINT` 与 `SIGTERM` 都会先请求 dispose Cordis 树，再退出 Electron；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
+关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口、打开隔离的 DSH 终端、检查 stable release、通过标准 settings namespace 更改模式，或请求显式退出。原生退出、`SIGINT` 与 `SIGTERM` 都会先请求 dispose Cordis 树，再退出 Electron；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
 
 ## 打包
 
-`yarn package:dir` 为当前宿主平台创建未封装目录。`build/app-icon.png` 是 macOS、Windows 与 Linux 共用且未经修改的 iOS Default 应用图标。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。签名安装包、公证、打包后依赖闭包验证与目标平台 CI 仍属于独立的发布工作。
+`yarn package:dir` 为当前宿主平台创建未封装目录。如果应用归档缺少 desktop 更新与终端模块、DSH CLI bootstrap 或内置 pnpm 入口，packaged-runtime gate 会拒绝该产物。Electron Builder 会把完整依赖树输出到 `app.asar.unpacked`；CLI bootstrap 会进入这棵物理依赖树，因此 DSH profile fallback 的符号链接不会指向虚拟 ASAR 目录。`build/app-icon.png` 是 macOS、Windows 与 Linux 共用且未经修改的 iOS Default 应用图标。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。签名安装包、公证与目标平台 CI 仍属于独立的发布工作。
 
 ## 模型体验
 
@@ -119,7 +126,8 @@ npx dsh-plugin-desktop
 - 添加或删除 profile bundle 后必须重启 DSH Desktop；Launcher 不监听 profile manifest。
 - 切换 compatibility/advanced 模式按设计必然重启应用；存活的 generation 不会热切换 Loader row、slot 所有权或原生材质。
 - Linux 不支持高级模式。Linux 继续使用兼容呈现。
-- 上游 `dsh plugin` 命令会把参数转发给 pnpm，因此目前仍需另外安装 `dsh` CLI 与 pnpm。该运行时要求与 DSH Desktop 自身使用 Yarn workspace 相互独立。安装器必须先暴露或内置该管理路径，只有安装器的用户才能添加 package。
+- 内置 `dsh`、`pnpm` 与 `node` 命令只在从 macOS 或 Windows 托盘打开的终端中提供。安装器不会把它们加入系统 `PATH`，Linux 目前也没有 desktop 终端命令。
+- Release 检查只发现并提示 stable 版本，不会下载或应用更新。用户仍需在经过校验的 GitHub release 页面上显式执行安装。
 - 共享 carrier 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换它需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
 - 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。
-- `package:dir` 是用于 smoke 的未封装产物，而非可分发安装包。源码安装中的组合运行时闭包已经过 headless 验证；打包后闭包、签名、公证、Windows Authenticode、安装行为，以及每台目标机器上的原生材质外观仍未验证。
+- `package:dir` 是用于 smoke 的未封装产物，而非可分发安装包。源码依赖图与打包归档中的必需入口已经过 headless 验证；签名、公证、Windows Authenticode、安装行为、原生通知与终端，以及每台目标机器上的原生材质外观仍属于目标平台验证边界。

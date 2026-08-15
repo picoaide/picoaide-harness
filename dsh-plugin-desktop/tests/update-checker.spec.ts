@@ -4,7 +4,9 @@ import {
   STABLE_RELEASE_ENDPOINT,
   UpdateCheckError,
   checkForStableUpdate,
+  compareSemVerVersions,
   parseSemVer,
+  parseStableRelease,
   type UpdateRequest,
 } from '../src/update-checker.ts'
 
@@ -65,6 +67,19 @@ describe('strict SemVer parsing', () => {
     ' 1.2.3',
   ])('rejects invalid SemVer %s', version => {
     expect(parseSemVer(version)).toBeNull()
+  })
+
+  it('shares strict precedence and stable release URL validation with cache consumers', () => {
+    expect(compareSemVerVersions('2.1.0', '2.0.9')).toBeGreaterThan(0)
+    expect(compareSemVerVersions('2.0.0-rc.1', '2.0.0')).toBeLessThan(0)
+    expect(compareSemVerVersions('2.0', '2.0.0')).toBeNull()
+    expect(parseStableRelease('v2.1.0', releaseUrl('v2.1.0'))).toEqual({
+      tagName: 'v2.1.0',
+      version: '2.1.0',
+      htmlUrl: releaseUrl('v2.1.0'),
+    })
+    expect(parseStableRelease('v2.1.0-rc.1', releaseUrl('v2.1.0-rc.1'))).toBeNull()
+    expect(parseStableRelease('v2.1.0', 'https://example.com/releases/v2.1.0')).toBeNull()
   })
 })
 

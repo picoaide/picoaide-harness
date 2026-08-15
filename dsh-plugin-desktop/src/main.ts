@@ -79,6 +79,11 @@ async function start(): Promise<void> {
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
     const prepared = prepareDesktopProfile()
+    runtime.configureTerminal({
+      profileName: 'desktop',
+      profileDir: prepared.profile.dir,
+      homeDir: prepared.homeDir,
+    })
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
     const ctx = await boot(
       BIN_NAME,

@@ -1,10 +1,15 @@
-# Compatibility mode adds only the native Host shell. The existing Web bundle
-# keeps ownership of the browser carrier, client roster, and rendered UI.
+# Desktop Host operations compose around the existing Web bundle. Compatibility
+# mode keeps upstream ownership of the browser carrier and rendered UI.
 - insert:
     - id: desktop-shell
       name: dsh-plugin-desktop
       config:
         mode: compatibility
+    - id: desktop-terminal
+      name: dsh-plugin-desktop/terminal
+      disabled: !!js process.platform === 'linux'
+    - id: desktop-updates
+      name: dsh-plugin-desktop/updates
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime

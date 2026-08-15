@@ -38,6 +38,14 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const restart = vi.fn(async () => {})
   const runtime: DesktopRuntime = {
     platform,
+    updates: {
+      isPackaged: false,
+      currentVersion: '2.0.0',
+      statePath: '/tmp/dsh-desktop-update-state.json',
+      request: async () => new Response(null, { status: 304 }),
+      openRelease: async () => {},
+      notify: () => {},
+    },
     schedule: (spec) => {
       shell = spec
       return async () => {}
@@ -45,6 +53,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     mountScheduled: async () => {},
     show: () => {},
     registerTrayItem: () => ({ refresh: () => {}, dispose: () => {} }),
+    openTerminal: () => {},
     requestRestart: restart,
     prepareToQuit: () => {},
   }

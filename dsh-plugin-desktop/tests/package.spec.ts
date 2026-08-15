@@ -17,6 +17,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
   build?: {
     productName?: unknown
     appId?: unknown
+    asarUnpack?: unknown
     afterPack?: unknown
     electronFuses?: unknown
     files?: unknown
@@ -49,7 +50,18 @@ describe('published package surface', () => {
       types: './lib/types/windows-pwsh-sandbox.d.ts',
       default: './lib/windows-pwsh-sandbox.js',
     })
+    expect(manifest.exports).toHaveProperty('./terminal', {
+      types: './lib/types/terminal.d.ts',
+      default: './lib/terminal.js',
+    })
+    expect(manifest.exports).toHaveProperty('./updates', {
+      types: './lib/types/updates.d.ts',
+      default: './lib/updates.js',
+    })
     expect(manifest.exports).not.toHaveProperty('./windows-acl-runner')
+    expect(manifest.exports).not.toHaveProperty('./desktop-cli')
+    expect(manifest.exports).not.toHaveProperty('./desktop-terminal')
+    expect(manifest.exports).not.toHaveProperty('./update-checker')
     expect(manifest.exports).toHaveProperty('./package.json')
     expect(manifest.dsh?.bundle).toEqual({ patch: './cordis.patch.yml' })
     expect(manifest.dsh?.client).toEqual({
@@ -60,19 +72,26 @@ describe('published package surface', () => {
       ],
     })
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/terminal')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
   })
 
-  it('builds the public Windows executor and its private runner trampoline', () => {
+  it('builds public Host plugins and their private native bootstraps', () => {
     const config = readFileSync(new URL('tsdown.config.ts', packageRoot), 'utf8')
 
     expect(config).toContain("'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts'")
     expect(config).toContain("'windows-acl-runner': 'src/windows-acl-runner.ts'")
+    expect(config).toContain("'desktop-cli': 'src/desktop-cli.ts'")
+    expect(config).toContain("'desktop-terminal': 'src/desktop-terminal.ts'")
+    expect(config).toContain("terminal: 'src/terminal.ts'")
+    expect(config).toContain("updates: 'src/updates.ts'")
   })
 
   it('fixes the installed application identity', () => {
     expect(manifest.version).toBe(workspaceManifest.version)
     expect(manifest.build?.productName).toBe('DSH Desktop')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
+    expect(manifest.build?.asarUnpack).toEqual(['node_modules/**'])
     expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
@@ -98,6 +117,8 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['package:dir']).toBe('yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
     expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
+    expect(manifest.scripts?.['verify:cli']).toBe('node scripts/verify-cli-runtime.mjs')
+    expect(manifest.scripts?.check).toContain('yarn run verify:cli')
     expect(workspaceManifest.scripts?.['dist:mac']).toBe('yarn workspace dsh-plugin-desktop dist:mac')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
     expect(manifest.build?.mac).toEqual(expect.objectContaining({
@@ -137,6 +158,7 @@ describe('published package surface', () => {
     expect(manifest.dependencies).not.toHaveProperty('electron')
     expect(manifest.peerDependencies?.electron).toBe('43.4.0')
     expect(manifest.devDependencies?.electron).toBe('43.4.0')
+    expect(manifest.dependencies?.pnpm).toBe('11.7.0')
   })
 
   it('resolves electron-builder through the pinned app-builder-lib keychain patch', () => {

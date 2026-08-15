@@ -6,7 +6,7 @@ English | [中文](README.zh.md)
 
 ## Architecture
 
-The Electron executable is minimal bootstrap code. It acquires the single-instance lock, prepares the persistent `desktop` profile, provides the native runtime capability, and boots the Host Cordis root in the Electron main process. The `desktop-shell` Host plugin owns the `BrowserWindow`, tray, navigation policy, settings namespace, and close-versus-quit lifecycle through Cordis effects.
+The Electron executable is minimal bootstrap code. It acquires the single-instance lock, prepares the persistent `desktop` profile, provides the native runtime capability, and boots the Host Cordis root in the Electron main process. The `desktop-shell` Host plugin owns the `BrowserWindow`, navigation policy, settings namespace, and close-versus-quit lifecycle through Cordis effects. The native runtime owns the physical tray, while `desktop-shell`, `desktop-terminal`, and `desktop-updates` contribute effect-scoped commands through its ordered item registry.
 
 Both presentation modes reuse the existing loopback Web carrier. The profile mounts the ordinary `dsh-base` and `dsh-web-app` bundles, the Host binds its HTTP and WebSocket surface to `127.0.0.1` on an ephemeral port, and Electron loads that same-origin page in a sandboxed renderer. There is no Electron-owned plugin roster, preload bridge, or raw Electron API in the renderer.
 
@@ -88,6 +88,7 @@ Manage the persistent profile with the ordinary DSH command:
 ```sh
 dsh plugin --profile desktop add third-party-plugin
 dsh plugin --profile desktop remove third-party-plugin
+dsh plugin --profile desktop update
 ```
 
 The package can then be launched from npm with:
@@ -98,13 +99,19 @@ npx dsh-plugin-desktop
 
 A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin with browser UI also publishes the normal `dsh.client` metadata with `platform: "web"` and an exported `./client` artifact. The upstream Web client module graph discovers it in both modes; Electron does not require a separate client build or a desktop-specific registration API. Advanced-mode contributions must target services and slots that exist in that explicit composition rather than assuming the official layout or sidebar occupant owns them.
 
+## Desktop operations
+
+Packaged applications check the fixed DSH Desktop GitHub repository for its latest stable release 60 seconds after startup and every six hours after a completed check. Each request has a 15-second deadline, shares one in-flight operation with manual checks, and uses a private conditional-request cache. Development and other unpackaged launches do not schedule network requests, but the tray always offers **Check for Updates…**, and a manual check reports its result through a native notification. A newer validated stable version changes that command into a release link; background discovery automatically notifies at most once per version. DSH Desktop only discovers the release and opens its exact GitHub page in the default browser; it does not download, install, replace, or restart the application.
+
+On macOS and Windows, **Open DSH Terminal** opens a system terminal rooted at the persistent `desktop` profile. Its welcome text identifies the application version, profile, profile directory, and DSH home, then lists configuration and plugin-management commands. Inside this terminal, bare `dsh`, `dsh --dump-config`, and plugin subcommands without a profile selection default to `desktop`; an explicit `--profile` and the upstream `web` alias keep their original meaning. The explicit profile examples above remain valid. DSH Desktop generates private `dsh`, `pnpm`, and `node` shims under its user-data directory, sets `DSH_HOME`, uses the profile as the working directory, and prepends the shim directory only to that terminal's `PATH`. It does not edit the global environment or shell startup files. The macOS launcher preserves the user's interactive zsh or bash setup before restoring the desktop-owned values; Windows selects PowerShell 7, Windows PowerShell, or Command Prompt in that order. Linux does not compose the terminal command.
+
 ## Native lifecycle
 
-Closing the window hides it while the Host Cordis tree continues running. The tray reopens the window, changes mode through the standard settings namespace, or requests an explicit quit. Native quit, `SIGINT`, and `SIGTERM` all request Cordis disposal before Electron exits; a five-second deadline or a repeated request forces the final exit. Navigation and redirects remain on the exact loopback origin; external HTTP, HTTPS, and mail links open in the operating system, while the renderer uses `contextIsolation`, the Chromium sandbox, and no Node integration.
+Closing the window hides it while the Host Cordis tree continues running. The tray reopens the window, opens the isolated DSH terminal, checks for a stable release, changes mode through the standard settings namespace, or requests an explicit quit. Native quit, `SIGINT`, and `SIGTERM` all request Cordis disposal before Electron exits; a five-second deadline or a repeated request forces the final exit. Navigation and redirects remain on the exact loopback origin; external HTTP, HTTPS, and mail links open in the operating system, while the renderer uses `contextIsolation`, the Chromium sandbox, and no Node integration.
 
 ## Packaging
 
-`yarn package:dir` creates an unpacked directory for the current host platform. `build/app-icon.png` is the unmodified iOS Default application icon on macOS, Windows, and Linux. `build/tray-icon.svg` is the brand-blue tray source: the build derives a macOS template image that the system colors automatically and fixed brand-blue Windows and Linux tray images. Signed installers, notarization, packaged dependency-closure verification, and target-platform CI remain separate release work.
+`yarn package:dir` creates an unpacked directory for the current host platform. The packaged-runtime gate rejects an application archive that omits the desktop update and terminal modules, the DSH CLI bootstrap, or the bundled pnpm entry. Electron Builder emits the complete dependency tree under `app.asar.unpacked`, and the CLI bootstrap enters that physical tree so DSH profile-fallback symlinks never target a virtual ASAR directory. `build/app-icon.png` is the unmodified iOS Default application icon on macOS, Windows, and Linux. `build/tray-icon.svg` is the brand-blue tray source: the build derives a macOS template image that the system colors automatically and fixed brand-blue Windows and Linux tray images. Signed installers, notarization, and target-platform CI remain separate release work.
 
 ## Model Experience
 
@@ -119,7 +126,8 @@ None. The same DSH Host and client feature plugins assemble model requests.
 - Adding or removing a profile bundle requires restarting DSH Desktop; the launcher does not watch the profile manifest.
 - Switching compatibility/advanced mode always restarts the application by design; a live generation never hot-swaps Loader rows, slot ownership, or native materials.
 - Advanced mode is unavailable on Linux. Linux continues to use the compatibility presentation.
-- The upstream `dsh plugin` command is a pnpm forwarder and currently requires a separately installed `dsh` CLI and pnpm. This runtime requirement is independent of DSH Desktop using Yarn for its own workspace. An installer must expose or bundle that management path before installer-only users can add packages.
+- The bundled `dsh`, `pnpm`, and `node` commands are exposed only inside the terminal opened from the macOS or Windows tray. The installer does not add them to the system `PATH`, and Linux currently has no desktop terminal command.
+- Release checks discover and announce stable versions but do not download or apply them. Installing a discovered release remains an explicit user action on the validated GitHub release page.
 - The shared carrier is loopback HTTP and WebSocket, not Electron IPC. Replacing it requires transport extension points in upstream DSH and is outside this standalone package.
 - This project currently pins the published DSH `0.1.0-rc.6` family, while the sibling `deepseek-harness/` source checkout predates that release. Tests therefore validate the published package interfaces rather than unpublished upstream sources.
-- `package:dir` is an unpacked smoke artifact, not a distributable installer. The source installation's assembled runtime closure is verified headlessly; packaged closure, signing, notarization, Windows Authenticode, installation behavior, and native-material appearance on every target machine remain unverified.
+- `package:dir` is an unpacked smoke artifact, not a distributable installer. The source dependency graph and required packaged archive entries are verified headlessly; signing, notarization, Windows Authenticode, installation behavior, native notifications and terminals, and native-material appearance on every target machine remain target-platform verification boundaries.
