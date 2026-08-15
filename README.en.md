@@ -93,6 +93,8 @@ We also thank [Cordis](https://github.com/cordiverse/cordis) for the plugin foun
 
 We are also grateful to the [Koishi.js](https://koishi.chat/) project and community for their long-standing work on plugin practices, tooling, and shared knowledge, and to everyone who contributes discussions, testing, feedback, and plugins.
 
+Also, and you.
+
 <a id="run-from-source"></a>
 
 ## Development
