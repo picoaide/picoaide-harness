@@ -5,6 +5,6 @@
     "noEmit": true,
     "emitDeclarationOnly": false
   },
-  "include": ["src/*.ts", "tests/**/*.ts", "tests/**/*.tsx"],
+  "include": ["scripts/**/*.ts", "src/*.ts", "tests/**/*.ts", "tests/**/*.tsx"],
   "exclude": ["tests/client-environment.spec.ts"]
 }

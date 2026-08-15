@@ -11,6 +11,9 @@
   "workspaces": [
     "dsh-plugin-desktop"
   ],
+  "resolutions": {
+    "app-builder-lib@npm:26.15.3": "patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch"
+  },
   "dependenciesMeta": {
     "@deepseek-ai/dsh-subprocess-local": {
       "built": true
@@ -46,6 +49,7 @@
     "dev": "yarn workspace dsh-plugin-desktop dev",
     "start": "yarn workspace dsh-plugin-desktop start",
     "package:dir": "yarn workspace dsh-plugin-desktop package:dir",
+    "dist:mac": "yarn workspace dsh-plugin-desktop dist:mac",
     "upstream:version": "cd deepseek-harness && corepack pnpm --version",
     "upstream:install": "cd deepseek-harness && corepack pnpm install --frozen-lockfile",
     "upstream:build": "cd deepseek-harness && corepack pnpm run build"

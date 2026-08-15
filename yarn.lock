@@ -5825,6 +5825,58 @@ __metadata:
   languageName: node
   linkType: hard
 
+"app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 26.15.3
+  resolution: "app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch::version=26.15.3&hash=17e0f0&locator=deepseek-harness-desktop%40workspace%3A."
+  dependencies:
+    "@electron/asar": "npm:3.4.1"
+    "@electron/fuses": "npm:^1.8.0"
+    "@electron/get": "npm:^3.0.0"
+    "@electron/notarize": "npm:2.5.0"
+    "@electron/osx-sign": "npm:1.3.3"
+    "@electron/rebuild": "npm:^4.0.4"
+    "@electron/universal": "npm:2.0.3"
+    "@malept/flatpak-bundler": "npm:^0.4.0"
+    "@noble/hashes": "npm:^2.2.0"
+    "@peculiar/webcrypto": "npm:^1.7.1"
+    "@types/fs-extra": "npm:9.0.13"
+    ajv: "npm:^8.18.0"
+    asn1js: "npm:^3.0.10"
+    async-exit-hook: "npm:^2.0.1"
+    builder-util: "npm:26.15.3"
+    builder-util-runtime: "npm:9.7.0"
+    chromium-pickle-js: "npm:^0.2.0"
+    ci-info: "npm:4.3.1"
+    debug: "npm:^4.3.4"
+    dotenv: "npm:^16.4.5"
+    dotenv-expand: "npm:^11.0.6"
+    ejs: "npm:^3.1.8"
+    electron-publish: "npm:26.15.3"
+    fs-extra: "npm:^10.1.0"
+    hosted-git-info: "npm:^4.1.0"
+    isbinaryfile: "npm:^5.0.0"
+    jiti: "npm:^2.4.2"
+    js-yaml: "npm:^4.1.0"
+    json5: "npm:^2.2.3"
+    lazy-val: "npm:^1.0.5"
+    minimatch: "npm:^10.2.5"
+    pkijs: "npm:^3.4.0"
+    plist: "npm:3.1.0"
+    proper-lockfile: "npm:^4.1.2"
+    resedit: "npm:^1.7.0"
+    semver: "npm:~7.7.3"
+    tar: "npm:^7.5.7"
+    temp-file: "npm:^3.4.0"
+    tiny-async-pool: "npm:1.3.0"
+    unzipper: "npm:^0.12.3"
+    which: "npm:^5.0.0"
+  peerDependencies:
+    dmg-builder: 26.15.3
+    electron-builder-squirrel-windows: 26.15.3
+  checksum: 10c0/8ed043377c5f703c506e7a2b10ad7bd71da232b81b7c91495d1f827c89b382799bfb24151b0268df37a804e369534916c2793f5a56e04319fe76bbb05fa52b1d
+  languageName: node
+  linkType: hard
+
 "argparse@npm:^2.0.1":
   version: 2.0.1
   resolution: "argparse@npm:2.0.1"
@@ -6673,6 +6725,7 @@ __metadata:
     "@deepseek-ai/dsh-web-app": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-workflow": "npm:0.1.0-rc.6"
     "@deepseek-ai/schemastery": "npm:^3.18.1"
+    "@electron/asar": "npm:3.4.1"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"

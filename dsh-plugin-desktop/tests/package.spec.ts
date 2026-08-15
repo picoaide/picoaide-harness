@@ -1,26 +1,37 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const packageRoot = new URL('../', import.meta.url)
+const workspaceRoot = new URL('../', packageRoot)
 const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), 'utf8')) as {
   name?: unknown
+  version?: unknown
   bin?: Record<string, unknown>
   exports?: Record<string, unknown>
   files?: unknown
+  scripts?: Record<string, unknown>
   dsh?: { bundle?: { patch?: unknown }; client?: unknown }
   build?: {
     productName?: unknown
     appId?: unknown
+    afterPack?: unknown
     electronFuses?: unknown
     files?: unknown
-    mac?: { icon?: unknown }
+    mac?: { hardenedRuntime?: unknown; icon?: unknown; notarize?: unknown; target?: unknown }
     win?: { icon?: unknown }
     linux?: { icon?: unknown }
   }
   dependencies?: Record<string, unknown>
   devDependencies?: Record<string, unknown>
   peerDependencies?: Record<string, unknown>
+}
+const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', workspaceRoot), 'utf8')) as {
+  version?: unknown
+  resolutions?: Record<string, unknown>
+  scripts?: Record<string, unknown>
 }
 
 describe('published package surface', () => {
@@ -59,6 +70,7 @@ describe('published package surface', () => {
   })
 
   it('fixes the installed application identity', () => {
+    expect(manifest.version).toBe(workspaceManifest.version)
     expect(manifest.build?.productName).toBe('DSH Desktop')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
     expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
@@ -78,6 +90,22 @@ describe('published package surface', () => {
     expect(manifest.build?.mac?.icon).toBe('build/app-icon.png')
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
+  })
+
+  it('separates unsigned smoke packaging from the signed macOS release', () => {
+    const packageDir = readFileSync(new URL('scripts/package-dir.mjs', packageRoot), 'utf8')
+
+    expect(manifest.scripts?.['package:dir']).toBe('yarn run build && node scripts/package-dir.mjs')
+    expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
+    expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
+    expect(workspaceManifest.scripts?.['dist:mac']).toBe('yarn workspace dsh-plugin-desktop dist:mac')
+    expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
+    expect(manifest.build?.mac).toEqual(expect.objectContaining({
+      hardenedRuntime: true,
+      notarize: true,
+      target: ['dir'],
+    }))
+    expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 
   it('keeps one fixed brand-blue tray source for generated native assets', () => {
@@ -109,5 +137,25 @@ describe('published package surface', () => {
     expect(manifest.dependencies).not.toHaveProperty('electron')
     expect(manifest.peerDependencies?.electron).toBe('43.4.0')
     expect(manifest.devDependencies?.electron).toBe('43.4.0')
+  })
+
+  it('resolves electron-builder through the pinned app-builder-lib keychain patch', () => {
+    const patchResolution = 'patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch'
+    const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
+    const patch = readFileSync(new URL('patches/app-builder-lib@26.15.3.patch', workspaceRoot), 'utf8')
+    const workspaceRequire = createRequire(new URL('package.json', packageRoot))
+    const electronBuilderManifest = workspaceRequire.resolve('electron-builder/package.json')
+    const electronBuilderRequire = createRequire(electronBuilderManifest)
+    const appBuilderManifest = electronBuilderRequire.resolve('app-builder-lib/package.json')
+    const installedCodeSign = readFileSync(join(dirname(appBuilderManifest), 'out/codeSign/macCodeSign.js'), 'utf8')
+
+    expect(workspaceManifest.resolutions).toEqual({
+      'app-builder-lib@npm:26.15.3': patchResolution,
+    })
+    expect(lockfile).toContain('app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch')
+    expect(patch).toContain('importCerts(keychainFile, certPaths, cscPasswords, keychainPassword)')
+    expect(patch).toContain('"-k", keychainPassword, keychainFile')
+    expect(installedCodeSign).toContain('importCerts(keychainFile, certPaths, cscPasswords, keychainPassword)')
+    expect(installedCodeSign).toContain('"-k", keychainPassword, keychainFile')
   })
 })

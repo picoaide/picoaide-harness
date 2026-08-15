@@ -71,7 +71,8 @@
     "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile",
     "start": "node lib/bin.js",
     "dev": "yarn run build && node lib/bin.js",
-    "package:dir": "yarn run build && electron-builder --dir",
+    "package:dir": "yarn run build && node scripts/package-dir.mjs",
+    "dist:mac": "node scripts/release-mac.ts",
     "prepack": "yarn run check"
   },
   "dependencies": {
@@ -185,6 +186,7 @@
     "electron": "43.4.0"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
@@ -199,6 +201,7 @@
     "appId": "ai.deepseek.dsh.desktop",
     "productName": "DSH Desktop",
     "asar": true,
+    "afterPack": "./scripts/verify-packaged-runtime.ts",
     "electronFuses": {
       "runAsNode": true
     },
@@ -219,7 +222,9 @@
         "dir"
       ],
       "category": "public.app-category.developer-tools",
-      "icon": "build/app-icon.png"
+      "hardenedRuntime": true,
+      "icon": "build/app-icon.png",
+      "notarize": true
     },
     "win": {
       "target": [
