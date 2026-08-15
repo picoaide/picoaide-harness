@@ -22,6 +22,17 @@
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
 </p>
 
+## Documentation
+
+| Goal | Entry point |
+| --- | --- |
+| Understand why the project exists | [Why DSH Desktop](docs/why-desktop.en.md) |
+| Install and use the application | [User guide](docs/user-guide.en.md) |
+| Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
+| Understand Electron, Host, profiles, and packaging | [Architecture](docs/architecture.en.md) |
+| See the full documentation and README map | [Documentation index](docs/README.en.md) |
+| Read package-level build and release details | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
+
 ## Features
 
 <table>
@@ -49,11 +60,11 @@
 
 ## Plugin Ecosystem
 
-DeepSeek Harness is built on [Cordis](https://github.com/cordiverse/cordis) and follows an “everything is a plugin” architecture. Core capabilities such as model adapters, the tool registry, the session log, and the Agent Loop participate in the runtime as plugins, so they can be composed or replaced through configuration. External plugins can also join a runtime through profiles and bundles. See the official [architecture overview](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) and [plugin management documentation](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md#plugin-management).
+DeepSeek Harness is built on [Cordis](https://github.com/cordiverse/cordis) and follows an “everything is a plugin” architecture. Model adapters, the tool registry, session logs, and the Agent Loop participate as plugins that can be composed or replaced through profiles and bundles. Desktop follows the same boundary: it owns the window, tray, profile management, and packaged runtime while preserving upstream DSH semantics for agents, models, tools, sessions, and the Web UI.
 
-We want Desktop to become more than a standalone desktop wrapper: it should serve as a desktop entry point into the DeepSeek Harness plugin ecosystem. We plan to reorganize the desktop capabilities around the official plugin model so service management, system integrations, and the plugin marketplace can follow the same composition model as Harness.
+`dsh-plugin-desktop` is now shipped as the Desktop plugin package. It provides two supported Host services: `desktopProfiles` for reading and switching the active profile, and `desktopPnpm` for managed plugin operations in that profile. Compatibility mode keeps the upstream client; advanced mode installs the Desktop-owned layout and native materials. The plugin marketplace, mobile remote control, and Channels remain separate roadmap items.
 
-> **Coming soon:** Desktop is not currently distributed as a DeepSeek Harness plugin. This plugin integration is still in development.
+See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
 
 ## Relationship to the Official Project
 
@@ -73,18 +84,15 @@ If you prefer to run Harness from the command line or contribute to its core fun
 
 ## Development
 
-The desktop application is located in:
-
-```text
-apps/desktop
-```
-
-Install the dependencies and start the desktop application:
+Desktop source lives in `dsh-plugin-desktop/`. The outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
 
 ```sh
-pnpm install
-pnpm run dev:desktop
+git submodule update --init --recursive
+corepack yarn install --immutable
+corepack yarn dev
 ```
+
+Use `corepack yarn check` for the headless gate. The [architecture](docs/architecture.en.md) and package [`README`](dsh-plugin-desktop/README.md) describe the full build, test, and release boundaries.
 
 ## Community
 

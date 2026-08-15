@@ -22,6 +22,17 @@
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop 界面预览" width="100%">
 </p>
 
+## 文档
+
+| 目标 | 入口 |
+| --- | --- |
+| 了解项目为什么存在 | [为什么做 DSH Desktop](docs/why-desktop.md) |
+| 安装和日常使用 | [用户指南](docs/user-guide.md) |
+| 编写普通或 Desktop 插件 | [插件开发](docs/plugin-development.md) |
+| 理解 Electron、Host、profile 和打包 | [架构说明](docs/architecture.md) |
+| 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
+| 查阅包级构建与发布细节 | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
+
 ## 主要功能
 
 <table>
@@ -49,11 +60,11 @@
 
 ## 插件生态
 
-DeepSeek Harness 基于 [Cordis](https://github.com/cordiverse/cordis) 构建，并采用“一切皆插件”的架构。模型适配器、工具注册表、会话日志和 Agent Loop 等核心能力都以插件参与运行，可以通过配置自由组合或替换；外部插件也可以通过 profile 与 bundle 接入现有运行时。详见官方的[架构说明](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)和[插件管理文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md#plugin-management)。
+DeepSeek Harness 基于 [Cordis](https://github.com/cordiverse/cordis) 构建，并采用“一切皆插件”的架构。模型适配器、工具注册表、会话日志和 Agent Loop 等核心能力都以插件参与运行，可以通过 profile 与 bundle 自由组合或替换。Desktop 也遵循这个边界：它把窗口、托盘、profile 管理和打包环境作为桌面宿主能力，同时保留官方 DSH 的 agent、模型、工具、会话和 Web UI 语义。
 
-我们希望 Desktop 不只是一个独立的桌面封装，而是 DeepSeek Harness 插件生态中的桌面入口。后续计划将桌面能力按官方插件机制重新组织，让服务管理、系统集成和插件市场可以沿用 Harness 的组合方式接入。
+当前 `dsh-plugin-desktop` 已经作为桌面插件包交付，并提供两个受支持的 Host service：`desktopProfiles` 用于读取和切换当前 profile，`desktopPnpm` 用于在当前 profile 中执行受管的插件操作。兼容模式保持上游默认客户端；高级模式才安装 Desktop 自有的布局和原生材质。插件市场、手机远程和 Channels 仍是独立的 roadmap 项目。
 
-> **即将推出：** Desktop 目前还不是以 DeepSeek Harness 插件形式交付，上述插件化能力仍在开发中。
+为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
 
 ## 与官方项目的关系
 
@@ -73,18 +84,15 @@ DeepSeek Harness 的核心能力、插件系统和 Web UI 来自官方项目。�
 
 ## 开发
 
-桌面端代码位于：
-
-```text
-apps/desktop
-```
-
-安装依赖并启动桌面应用：
+桌面端代码位于 `dsh-plugin-desktop/`，外层仓库使用 Yarn，固定的 `deepseek-harness/` 子模块继续使用自己的 pnpm workspace。从仓库根目录执行：
 
 ```sh
-pnpm install
-pnpm run dev:desktop
+git submodule update --init --recursive
+corepack yarn install --immutable
+corepack yarn dev
 ```
+
+headless 检查使用 `corepack yarn check`；完整的构建、测试和发布边界见[架构说明](docs/architecture.md)和包级 [`README`](dsh-plugin-desktop/README.md)。
 
 ## 社区交流
 
