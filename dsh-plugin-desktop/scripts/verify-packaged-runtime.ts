@@ -67,6 +67,15 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
 
+/** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
+export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
+  'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
+  'node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node',
+  'node_modules/node-pty/prebuilds/win32-x64/pty.node',
+  'node_modules/node-pty/prebuilds/win32-x64/winpty-agent.exe',
+  'node_modules/node-pty/prebuilds/win32-x64/winpty.dll',
+] as const
+
 /** Package exports that profile fallback links must resolve from the physical application tree. */
 export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
   'dsh-plugin-desktop',
@@ -209,7 +218,10 @@ export function verifyPackagedRuntime(
 ): void {
   verifyPackagedAsar(resolvePackagedAsarPath(context), list)
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
-  const missing = REQUIRED_UNPACKED_RUNTIME_ENTRIES.filter(entry => !exists(join(unpackedRoot, entry)))
+  const requiredPhysicalEntries = context.electronPlatformName === 'win32'
+    ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES]
+    : REQUIRED_UNPACKED_RUNTIME_ENTRIES
+  const missing = requiredPhysicalEntries.filter(entry => !exists(join(unpackedRoot, entry)))
   if (missing.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing required physical entries: ${missing.join(', ')}`,

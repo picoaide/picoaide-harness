@@ -4,6 +4,7 @@ import {
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_UNPACKED_PACKAGE_SPECIFIERS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
+  REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
   resolvePackagedAsarPath,
   resolvePackagedUnpackedRoot,
   verifyPackagedRuntime,
@@ -52,7 +53,10 @@ describe('packaged desktop runtime verification', () => {
     expect(list).toHaveBeenCalledOnce()
     expect(list).toHaveBeenCalledWith(expectedPath, { isPack: false })
     expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(unpackedRoot)
-    expect(exists).toHaveBeenCalledTimes(REQUIRED_UNPACKED_RUNTIME_ENTRIES.length)
+    expect(exists).toHaveBeenCalledTimes(
+      REQUIRED_UNPACKED_RUNTIME_ENTRIES.length
+        + (platform === 'win32' ? REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES.length : 0),
+    )
     expect(resolvePackage.mock.calls.map(([specifier]) => specifier))
       .toEqual(REQUIRED_UNPACKED_PACKAGE_SPECIFIERS)
   })
@@ -80,6 +84,7 @@ describe('packaged desktop runtime verification', () => {
     'lib/terminal.js',
     'node_modules/@deepseek-ai/dsh/lib/bin.js',
     'node_modules/pnpm/bin/pnpm.mjs',
+    'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
   ])('fails loud when physical runtime entry %s is absent from app.asar.unpacked', (missing) => {
     const runtimeContext = context('/build', 'win32')
     const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)

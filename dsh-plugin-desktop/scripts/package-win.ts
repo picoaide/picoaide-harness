@@ -144,6 +144,7 @@ export function packageWindowsInstaller(
       '--publish',
       'never',
       '--config.win.signExecutable=false',
+      '--config.npmRebuild=false',
     ],
     options.desktopRoot,
     {

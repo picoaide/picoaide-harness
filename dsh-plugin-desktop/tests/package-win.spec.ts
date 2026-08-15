@@ -66,6 +66,7 @@ describe('Windows x64 installer packaging', () => {
         '--publish',
         'never',
         '--config.win.signExecutable=false',
+        '--config.npmRebuild=false',
       ],
       cwd: 'C:\\repo\\dsh-plugin-desktop',
       env: {
