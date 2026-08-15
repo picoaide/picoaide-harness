@@ -53,38 +53,17 @@ DeepSeek Harness 基于 [Cordis](https://github.com/cordiverse/cordis) 构建，
 
 我们希望 Desktop 不只是一个独立的桌面封装，而是 DeepSeek Harness 插件生态中的桌面入口。后续计划将桌面能力按官方插件机制重新组织，让服务管理、系统集成和插件市场可以沿用 Harness 的组合方式接入。
 
-> **即将推出：** Desktop 目前还不是以 DeepSeek Harness 插件形式交付，上述插件化能力仍在开发中。
+
 
 ## 与官方项目的关系
 
 本项目基于 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 构建。
 
-DeepSeek Harness 的核心能力、插件系统和 Web UI 来自官方项目。本项目主要负责：
-
-- 桌面应用封装
-- 本地服务生命周期管理
-- 桌面窗口和系统托盘集成
-- macOS、Windows 安装包构建与发布
-- 桌面环境下的界面适配
+本项目是基于 DeepSeek Harness 和 Cordis 插件思想的实现，旨在成为 DSH 桌面体验的基础设施。
 
 如果你希望通过命令行运行 Harness，或者参与核心功能开发，请优先查看官方仓库。
 
 <a id="run-from-source"></a>
-
-## 开发
-
-桌面端代码位于：
-
-```text
-apps/desktop
-```
-
-安装依赖并启动桌面应用：
-
-```sh
-pnpm install
-pnpm run dev:desktop
-```
 
 ## 社区交流
 
