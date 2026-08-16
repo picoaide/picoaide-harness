@@ -6743,6 +6743,7 @@ __metadata:
     "@types/react": "npm:^18"
     electron: "npm:43.4.0"
     electron-builder: "npm:26.15.3"
+    koffi: "npm:3.1.4"
     node-addon-require-builtin: "npm:^0.1.4"
     pnpm: "npm:11.7.0"
     react: "npm:18.3.1"
@@ -7911,7 +7912,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"koffi@npm:^3.1.0":
+"koffi@npm:3.1.4, koffi@npm:^3.1.0":
   version: 3.1.4
   resolution: "koffi@npm:3.1.4"
   dependencies:

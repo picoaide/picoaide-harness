@@ -34,6 +34,11 @@ import {
   installShutdownRequests,
   type DesktopShutdown,
 } from './shutdown.ts'
+import {
+  diagnoseWindowsVolumes,
+  formatWindowsVolumeConcern,
+  type WindowsVolumeConcern,
+} from './windows-volume-diagnostics.ts'
 
 const BIN_NAME = 'dsh-plugin-desktop'
 const PRODUCT_NAME = 'DSH Desktop'
@@ -65,6 +70,31 @@ function notifySkippedOptionalEntries(
   } catch (cause) {
     process.stderr.write(
       `${BIN_NAME}: failed to show skipped plugin notification: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+    )
+  }
+}
+
+/** Surface path/volume risks that otherwise become obscure sandbox or pnpm failures later. */
+function warnWindowsVolumeConcerns(concerns: readonly WindowsVolumeConcern[]): void {
+  for (const concern of concerns) {
+    process.stderr.write(`${BIN_NAME}: Windows volume warning: ${formatWindowsVolumeConcern(concern)}\n`)
+  }
+}
+
+/** Notify once after the UI is ready; stderr carries the exact paths. */
+function notifyWindowsVolumeConcerns(
+  runtime: ElectronDesktopRuntime,
+  concerns: readonly WindowsVolumeConcern[],
+): void {
+  if (concerns.length === 0) return
+  try {
+    runtime.updates.notify({
+      title: 'Storage May Be Unsupported',
+      body: `${concerns[0]?.label ?? 'A configured path'} is on a volume that may break sandboxed commands or plugin installs.`,
+    })
+  } catch (cause) {
+    process.stderr.write(
+      `${BIN_NAME}: failed to show Windows volume warning: ${cause instanceof Error ? cause.message : String(cause)}\n`,
     )
   }
 }
@@ -129,6 +159,13 @@ async function start(): Promise<void> {
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('ai.deepseek.dsh.desktop')
   if (app.isPackaged && process.cwd() === '/') process.chdir(app.getPath('home'))
+  const homeDir = resolveDshHome()
+  const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
+    { label: 'application install', path: process.execPath },
+    { label: 'desktop user data', path: app.getPath('userData') },
+    { label: 'DSH home', path: homeDir },
+  ])
+  warnWindowsVolumeConcerns(windowsVolumeConcerns)
 
   const failLoudProcess: FailLoudProcess = {
     on: (event, handler) => process.on(event, handler),
@@ -161,7 +198,6 @@ async function start(): Promise<void> {
     })
     const releasePnpmRuntime = (): void => { pnpmRuntime.dispose() }
     disposePnpmRuntime = releasePnpmRuntime
-    const homeDir = resolveDshHome()
     const selectionStatePath = join(app.getPath('userData'), 'profile-selection', 'state.json')
     profileStatePath = selectionStatePath
     profileStartup = beginDesktopProfileStartup(selectionStatePath, homeDir)
@@ -229,6 +265,7 @@ async function start(): Promise<void> {
     })
     await runtime.mountScheduled()
     notifySkippedOptionalEntries(runtime, prepared.skippedOptionalEntries)
+    notifyWindowsVolumeConcerns(runtime, windowsVolumeConcerns)
     if (profileStartup.rolledBackFrom !== undefined) {
       notifyProfileRecovery(
         runtime,
