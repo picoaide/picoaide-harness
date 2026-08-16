@@ -99,16 +99,18 @@ Web extensions add another important lesson: `main` and `browser` entrypoints ar
 What Fabric should borrow:
 
 1. static contribution metadata plus runtime binding by stable ID;
-2. lazy activation based on declared interests;
-3. typed product-owned UI surfaces before custom rich UI;
-4. a sandboxed rich-view escape hatch with message passing, themes, accessibility, and resource policy;
-5. separate Host and Client/Worker entrypoints rather than one bundle that assumes every environment.
+2. typed product-owned UI surfaces before custom rich UI;
+3. a sandboxed rich-view escape hatch with message passing, themes, accessibility, and resource policy;
+4. separate Host and Client/Worker entrypoints rather than one bundle that assumes every environment.
+
+Fabric deliberately does not adopt VS Code's demand-activation policy in v0.1. A Host activates every selected and authorized plugin while assembling a runtime generation. Contributions remain discovery metadata, and subscriptions control event delivery; neither becomes an implicit first-use activation trigger.
 
 What Fabric should not copy literally:
 
 - VS Code's workbench layout or editor-specific object model;
 - arbitrary HTML as the default way to add every UI feature;
 - one product's `when`-clause vocabulary as a cross-Host standard.
+- demand activation before Fabric has a proven need and deterministic cross-Host semantics.
 
 ## 3. Combined design decisions for Fabric
 
@@ -202,4 +204,4 @@ Fabric should keep v0.1 small, but its architecture must leave the right seams:
 6. make activation scopes and automatic cleanup non-negotiable;
 7. never expose the upstream Cordis Context or internal DSH objects as the compatibility API.
 
-The [DSH plugin-needs study](dsh-plugin-needs.md) tests these conclusions against real community plugins.
+The dedicated [VS Code extension-model study](vscode-extension-model.md) expands its contribution, Provider, UI, placement, lifecycle, and arbitration patterns from official documentation and samples. The [DSH plugin-needs study](dsh-plugin-needs.md) then tests the combined conclusions against real community plugins.

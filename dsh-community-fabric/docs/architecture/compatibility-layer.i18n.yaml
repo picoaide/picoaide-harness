@@ -1,4 +1,4 @@
 # Bilingual-pair consistency record. Both languages carry equal authority.
 # Update both files and record their normalized Git blob hashes after editing either side.
-compatibility-layer.md: e7f875e9b5496c717a62902dbee70af70a2b4099
-compatibility-layer.zh.md: 3dddb46a75c243a5ed899d19886237a209291d7b
+compatibility-layer.md: 6d1e4c0319cf0ad033650f93971b06cd6d1a94a4
+compatibility-layer.zh.md: 94a8f37e008782ae8fe84b09de4371303e268579

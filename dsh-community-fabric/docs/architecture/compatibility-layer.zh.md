@@ -95,7 +95,7 @@ Fabric 不追求“一开始覆盖一切”。它应该先覆盖插件最常见�
 
 实验性 v0.1 的精确范围会刻意保持很小。`host.info`、`log` 和生命周期取消信号是每次 activation 都具备的基础 context；首批需要协商的 capability 只有 `storage.local`、`commands` 和一个不可修改的 `messages.observe` 事件。下表中的其他项目都是规划候选，在独立 contract 与 fixtures 落地前不属于 v0.1。
 
-这个范围不是凭空列出的 API 愿望清单，而是来自两份源码调研：[成熟插件框架模式](../research/mature-plugin-frameworks.zh.md)和[十二个代表性 DSH 插件](../research/dsh-plugin-needs.zh.md)。这些调研也规定了 v0.1 必须为后续 Host/Client face、强类型 renderer、跨 face 消息、拦截器、上下文贡献和受控系统访问保留哪些接缝。
+这个范围不是凭空列出的 API 愿望清单，而是来自三份源码调研：[成熟插件框架模式](../research/mature-plugin-frameworks.zh.md)、详细的 [VS Code 扩展模型](../research/vscode-extension-model.zh.md)和[十二个代表性 DSH 插件](../research/dsh-plugin-needs.zh.md)。这些调研也规定了 v0.1 必须为后续 Host/Client face、强类型 renderer、跨 face 消息、拦截器、上下文贡献和受控系统访问保留哪些接缝。
 
 ### 4.1 Portable Core：所有兼容 Host 都应理解
 

@@ -152,6 +152,8 @@ The final schema must also define:
 
 Before freezing the schema, the working group must decide whether to separate four declaration classes: `requires` for Host feature dependencies, `permissions` for user grants, `contributes` for declarative extensions, and `subscriptions` for event interests. Sharing one manifest does not make them the same security object.
 
+Following the VS Code Contribution Point pattern, `contributes` describes metadata that a Host can discover before plugin code runs; it is not a capability, grant, runtime implementation, or activation trigger. After activation, plugin code may bind handlers or Providers only to IDs declared in the manifest. Tooling and conformance tests should report both declared-but-unbound and bound-but-undeclared entries.
+
 The standard does not mandate a particular loader or source transformer. A Host locates entrypoints from the manifest and activates them through its native mechanism following the standard lifecycle. Fabric-managed plugins use this path; other Host extension paths are labeled non-standard.
 
 A conforming Fabric entrypoint has no runtime dependency on DSH, Cordis, Desktop, or Adapter packages. Package inspection, dependency rules, and conformance fixtures enforce this supported boundary against accidental coupling; trusted in-process mode still cannot turn it into a malicious-code sandbox.
@@ -208,6 +210,8 @@ A capability is a versioned Host service contract. Candidate v0.1 namespaces are
 
 Each capability defines methods, schemas, errors, cancellation, lifecycle, privacy, resource limits, and tests. Private extensions use organization namespaces such as `x-org.example.tui.keymap`.
 
+Every contribution and Provider contract also defines cardinality, selector, priority, merge / first-result / pipeline / user-choice behavior, equal-priority tie-breaking, error isolation, timeout, duplicate registration, and hot replacement. Load order cannot become an undocumented conflict-resolution rule.
+
 The “one standard method” rule applies inside the Fabric contract. It does not claim to stop trusted in-process code from importing Node.js APIs directly.
 
 Declarative contributions never imply runtime access or a grant. Manifest command metadata is authoritative; a command contribution also requests `commands`, and plugin code only binds its handler by ID. Required APIs are present after negotiation. Optional APIs remain optional until an explicit capability check narrows them.
@@ -226,6 +230,8 @@ While a Host is ready, each activation instance independently moves through:
 discover → validate → negotiate → authorize
 → activating → active → deactivating → disposed
 ```
+
+Experimental v0.1 does not use demand activation. After discovery, negotiation, and authorization, a Host activates every selected plugin while assembling a runtime generation. Contributions describe discoverable features and subscriptions control event delivery; invoking a command, requesting a Provider, or matching a subscription never activates an inactive plugin. Future interceptors still need independent grants, ordering, and failure contracts.
 
 A Host guarantees ordering for a normal activation and best-effort deactivation during normal shutdown, but cannot guarantee deactivation after a crash, power loss, or forced termination. Plugin cleanup is idempotent and recovery-aware. A plugin may activate and dispose repeatedly while the Host remains ready, including during HMR or profile recomposition.
 
@@ -321,14 +327,18 @@ Its exact runtime surface is: baseline `host.info`, `log`, and lifecycle cancell
 
 - one immutable `messages.observe` event;
 - `storage.local`;
-- `commands` as the minimal declarative contribution and runtime binding;
-- failure, timeout, cancellation, and shutdown fixtures.
+- `commands` as the minimal declarative contribution and same-ID runtime binding;
+- activation-scoped Disposable / AsyncDisposable, bounded drain, and repeated activation;
+- failure, duplicate-ID, undeclared/unbound contribution, timeout, cancellation, and shutdown fixtures.
 - after the complete v0.1 surface exists, interoperability evidence from at least two different Host products or integrations; they may share the same versioned DSH Adapter.
 
 ### Separate later RFCs
 
 - mutable `before-*` events;
-- a minimal cross-Host UI IR;
+- Runtime Faces and the cross-face bridge;
+- UI Contribution, Provider, Renderer, Rich View, conditions, and a minimal cross-Host UI IR;
+- Project/Profile Trust and experimental-capability graduation;
+- multi-scope storage and Secret capabilities;
 - filesystem, network, and session-write permissions;
 - isolated execution and mediated IPC;
 - market compatibility labels and test-result interchange.
@@ -345,7 +355,7 @@ Experimental v0.1 separates evidence into four classes:
 
 1. **Schema validation:** public Manifest and Host Descriptor Schemas, complete SemVer rules, and valid/invalid fixtures.
 2. **Host conformance:** required/optional negotiation, unknown versions, denied grants, activation order, best-effort shutdown, standard callback errors, and truthful execution mode.
-3. **Plugin validation:** manifest/entrypoint consistency, declared-capability use, optional degradation, releasable resources, and understandable errors.
+3. **Plugin validation:** manifest/entrypoint consistency, declared-capability use, matching contribution declarations/bindings without ID conflicts, optional degradation, releasable synchronous/asynchronous resources after repeated activation, and understandable errors.
 4. **Interop evidence:** two independent Host products or integrations and three example plugins complete the same scenarios as the standard-graduation evidence for v0.1. The Hosts may share a DSH Adapter, but their integration and descriptor evidence remain independent.
 
 Because Events are in both the RFC title and v0.1 scope, at least one immutable observation event has a payload schema, privacy redaction, ordering within its scope, backpressure/timeout, error handling, shutdown semantics, and headless contract tests.

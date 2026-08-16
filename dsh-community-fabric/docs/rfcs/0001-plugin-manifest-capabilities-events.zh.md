@@ -152,6 +152,8 @@ v0.1 选择静态 JSON，不支持运行 JavaScript 动态生成。正式实现�
 
 在 schema 冻结前，还需要决定是否把四类声明拆开：`requires` 表示 Host 功能依赖，`permissions` 表示用户授权范围，`contributes` 表示声明式扩展，`subscriptions` 表示事件订阅。它们不能仅因为都写在 manifest 中就被当成同一种安全对象。
 
+借鉴 VS Code 的 Contribution Point 模型，`contributes` 只描述 Host 在插件运行前即可发现的元数据，不等同于 capability、授权、运行时实现或 activation 触发器。插件激活后只能为 manifest 已声明的 ID 绑定 handler / Provider；“声明但未绑定”和“绑定但未声明”都应由开发工具和一致性测试报告。
+
 标准不规定某一种 loader 或源码转换实现。Host 通过 manifest 找到 entrypoint，再用自己的原生机制按标准生命周期激活。Fabric-managed 插件必须走这条入口；Host 的其他扩展路径必须明确标为非标准。
 
 符合标准的 Fabric entrypoint 运行时不依赖 DSH、Cordis、Desktop 或 Adapter package。Package inspection、依赖规则和 conformance fixtures 会阻止意外耦合；trusted in-process 模式仍不能把这条受支持边界变成恶意代码沙箱。
@@ -208,6 +210,8 @@ Capability 是带版本的 Host service contract。v0.1 候选命名空间包括
 
 每项 capability 都必须单独规定方法、输入输出 schema、错误、取消、生命周期、隐私、资源限制和测试。私有扩展使用组织命名空间，例如 `x-org.example.tui.keymap`，不能使用容易冲突的短名称。
 
+每项 contribution / Provider contract 还必须明确 cardinality、selector、priority、merge / first-result / pipeline / user-choice、同优先级 tie-break、错误隔离、timeout、重复注册和热替换。加载顺序不能成为未写明的冲突解决规则。
+
 “标准接口唯一”只约束 Fabric contract：标准插件不能为同一项标准能力发明旁路。它不声称能够阻止 trusted in-process 代码直接使用 Node.js API。
 
 声明式 contribution 不会隐含运行时访问或授权。Manifest 中的命令元数据是权威来源；命令 contribution 还要申请 `commands`，插件代码只按 ID 绑定 handler。Required API 在协商后一定存在；optional API 必须先经过显式 capability 检查与类型收窄。
@@ -226,6 +230,8 @@ Host ready 后，每个 activation instance 独立经历：
 discover → validate → negotiate → authorize
 → activating → active → deactivating → disposed
 ```
+
+实验性 v0.1 不采用按需激活。完成 discover、negotiate 与 authorize 后，Host 在组装一次 runtime generation 时激活所有已选中的插件。Contribution 负责描述可发现功能，subscription 只控制事件投递；执行 command、请求 Provider 或匹配 subscription 都不能激活 inactive 插件。未来 interceptor 仍需要独立授权、顺序和失败 contract。
 
 Host 必须为正常 activation 保证顺序，并在正常关闭时 best-effort deactivate，但不能在进程崩溃、断电或强制终止时保证 `deactivate` 送达。Plugin 必须把清理设计为可重复，并假设下一次启动可能需要恢复残留状态。Host 保持 ready 时，同一插件也可能因 HMR 或 profile 重新组合而重复 activate/dispose。
 
@@ -334,14 +340,18 @@ Fabric 不能通过重新发明 loader 来解决 loader 割裂。参考 adapter 
 
 - 一个不可修改的 `messages.observe` 事件；
 - `storage.local`；
-- `commands` 作为最小声明式 contribution 与 runtime binding；
-- 故障插件、timeout、取消和关闭 fixtures。
+- `commands` 作为最小声明式 contribution 与同 ID runtime binding；
+- activation-scoped Disposable / AsyncDisposable、有界 drain 与重复 activation；
+- 故障插件、重复 ID、未声明/未绑定 contribution、timeout、取消和关闭 fixtures。
 - 完整 v0.1 能力存在后，由至少两个不同 Host product 或 integration 提供互操作证据；它们可以共享同一个版本化 DSH Adapter。
 
 ### 后续独立 RFC
 
 - 可修改的 `before-*` 事件；
-- 最小跨 Host UI IR；
+- Runtime Faces 与跨 face bridge；
+- UI Contribution、Provider、Renderer、Rich View、条件系统与最小跨 Host UI IR；
+- Project/Profile Trust 与 experimental capability 晋级流程；
+- 多 scope storage 与 Secret capability；
 - 文件、网络与会话写入权限；
 - 隔离执行与受控 IPC；
 - 市场兼容标签与一致性结果交换格式。
@@ -366,7 +376,7 @@ Fabric 不能通过重新发明 loader 来解决 loader 割裂。参考 adapter 
 
 1. **Schema validation**：公开 Manifest / Host Descriptor Schema、完整 SemVer 规则，以及合法/非法 fixtures。
 2. **Host conformance**：required / optional 协商、未知版本、授权拒绝、activation 顺序、best-effort 关闭、标准 callback 异常和真实执行档位。
-3. **Plugin validation**：manifest 与 entrypoint 一致、只使用已声明 capability、optional 降级路径、资源可释放、错误可理解。
+3. **Plugin validation**：manifest 与 entrypoint 一致、只使用已声明 capability、contribution 声明/绑定一致且 ID 无冲突、optional 降级路径、重复 activation 后同步/异步资源可释放、错误可理解。
 4. **Interop evidence**：两个独立 Host product 或 integration 与三个示例插件完成同一组场景，作为 v0.1 从 Draft 晋级的标准证据。两个 Host 可以共享 DSH Adapter，但 integration 与 descriptor 证据必须独立。
 
 由于 Events 属于 RFC 标题与 v0.1 范围，至少一个不可变观察事件必须拥有 payload schema、隐私裁剪、scope 内顺序、回压/timeout、异常处理、关闭语义和 headless contract tests。

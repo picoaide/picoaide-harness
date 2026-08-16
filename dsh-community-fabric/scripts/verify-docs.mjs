@@ -28,6 +28,9 @@ const publicFiles = [
   'docs/research/mature-plugin-frameworks.i18n.yaml',
   'docs/research/mature-plugin-frameworks.md',
   'docs/research/mature-plugin-frameworks.zh.md',
+  'docs/research/vscode-extension-model.i18n.yaml',
+  'docs/research/vscode-extension-model.md',
+  'docs/research/vscode-extension-model.zh.md',
   'docs/rfcs/0001-plugin-manifest-capabilities-events.i18n.yaml',
   'docs/rfcs/0001-plugin-manifest-capabilities-events.md',
   'docs/rfcs/0001-plugin-manifest-capabilities-events.zh.md',
@@ -54,6 +57,10 @@ const pairs = [
   [
     'docs/research/mature-plugin-frameworks.i18n.yaml',
     ['docs/research/mature-plugin-frameworks.md', 'docs/research/mature-plugin-frameworks.zh.md'],
+  ],
+  [
+    'docs/research/vscode-extension-model.i18n.yaml',
+    ['docs/research/vscode-extension-model.md', 'docs/research/vscode-extension-model.zh.md'],
   ],
   [
     'docs/rfcs/0001-plugin-manifest-capabilities-events.i18n.yaml',

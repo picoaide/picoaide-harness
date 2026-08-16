@@ -99,16 +99,18 @@ Web 扩展还有一个重要经验：`main` 和 `browser` 是不同运行 face�
 Fabric 应直接吸收：
 
 1. 静态贡献元数据 + 按稳定 ID 绑定运行时实现；
-2. 根据声明的兴趣延迟激活；
-3. 优先使用宿主拥有的强类型 UI，再开放自定义富 UI；
-4. 富 UI 使用隔离视图、消息通信、主题、无障碍和资源策略；
-5. Host 与 Client/Worker 分开入口，而不是一个 bundle 假设所有环境都一样。
+2. 优先使用宿主拥有的强类型 UI，再开放自定义富 UI；
+3. 富 UI 使用隔离视图、消息通信、主题、无障碍和资源策略；
+4. Host 与 Client/Worker 分开入口，而不是一个 bundle 假设所有环境都一样。
+
+Fabric 明确不在 v0.1 采用 VS Code 的按需激活策略。Host 在组装一次 runtime generation 时激活所有已选中、已授权的插件；contribution 只负责静态发现，subscription 只控制事件投递，两者都不会成为首次使用时的隐式激活触发器。
 
 Fabric 不应照抄：
 
 - VS Code 的 Workbench 布局和编辑器对象模型；
 - 把任意 HTML 当作所有 UI 功能的默认答案；
 - 把某个产品的 `when` 条件词汇直接当成跨宿主标准。
+- 在没有真实需求和确定跨 Host 语义前引入按需激活。
 
 ## 3. Fabric 的组合设计结论
 
@@ -201,4 +203,4 @@ Fabric 仍应保持 v0.1 很小，但架构必须预留正确接缝：
 6. 激活范围和自动清理是不可让步的基础；
 7. 永远不把上游 Cordis Context 或 DSH 内部对象作为兼容 API 暴露。
 
-[DSH 插件需求调研](dsh-plugin-needs.zh.md)会用真实社区插件检验这些结论。
+独立的 [VS Code 扩展模型调研](vscode-extension-model.zh.md)会根据官方文档与样例，进一步展开 contribution、Provider、UI、运行位置、生命周期和仲裁模式；[DSH 插件需求调研](dsh-plugin-needs.zh.md)再用真实社区插件检验汇总后的结论。

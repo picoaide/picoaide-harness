@@ -95,7 +95,7 @@ Fabric should not cover everything at once. It starts with the most common and s
 
 The exact experimental v0.1 surface is deliberately small. `host.info`, `log`, and lifecycle cancellation are baseline context available to every activation. The first negotiated capabilities are `storage.local`, `commands`, and one immutable `messages.observe` event. Everything else in the tables below is a planned candidate, not part of v0.1 until its own contract and fixtures land.
 
-This scope is informed by two source studies rather than an invented API wishlist: [mature plugin framework patterns](../research/mature-plugin-frameworks.md) and [twelve representative DSH plugins](../research/dsh-plugin-needs.md). Those studies also define the seams that v0.1 must preserve for later Host/Client faces, typed renderers, cross-face messaging, interceptors, context contributions, and mediated system access.
+This scope is informed by three source studies rather than an invented API wishlist: [mature plugin framework patterns](../research/mature-plugin-frameworks.md), the detailed [VS Code extension model](../research/vscode-extension-model.md), and [twelve representative DSH plugins](../research/dsh-plugin-needs.md). Those studies also define the seams that v0.1 must preserve for later Host/Client faces, typed renderers, cross-face messaging, interceptors, context contributions, and mediated system access.
 
 ### 4.1 Portable Core
 
