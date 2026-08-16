@@ -11,3 +11,16 @@ node_modules/
 
 dsh-plugin-desktop/dist/
 dsh-plugin-desktop/lib/
+plugins/dsh-enterprise/lib/
+
+# server (Go)
+server/bin/
+server/data/
+server/*.db
+server/*.db-wal
+server/*.db-shm
+server/webadmin/node_modules/
+server/webadmin/dist/*
+!server/webadmin/dist/index.html
+server/webadmin/tsconfig.tsbuildinfo
+*.log
