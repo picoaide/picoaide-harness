@@ -22,6 +22,7 @@ Ordinary users can start with the [user guide](user-guide.en.md) and never need 
 | --- | --- |
 | [Plugin ecosystem manifesto](plugin-ecosystem.en.md) | The vision of an open, composable, sustainable plugin ecosystem and its three principles |
 | [Plugin development](plugin-development.en.md) | Ordinary DSH plugins, Desktop services, compatibility, and lifecycle |
+| [Community Fabric Draft](../dsh-community-fabric/README.md) | A community interoperability proposal for manifests, capabilities, Host Descriptors, and events |
 | [Architecture](architecture.en.md) | Electron, Host, loopback Web, profiles, and packaging |
 | [Desktop service reference](../dsh-plugin-desktop/docs/plugin-services.md) | Stable `desktopProfiles` and `desktopPnpm` contracts with TypeScript examples |
 | [Package reference](../dsh-plugin-desktop/README.md) | Detailed build, runtime, release, and limitation notes |

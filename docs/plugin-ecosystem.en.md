@@ -30,8 +30,15 @@ This manifesto is not a unilateral rulebook. It is a **living document**: it fol
 
 Once the plugin marketplace ships, plugins that follow this manifesto will be easier to discover, install, and trust. We want convention-driven development to be the beneficial choice for every author, not an extra burden.
 
+## From a manifesto to a testable contract
+
+[DSH Community Fabric](../dsh-community-fabric/README.md) is turning this vision into a public Draft for manifests, capabilities, Host Descriptors, and events. It currently contains documentation only, not a released standard or runtime; plugins still use existing DSH and Cordis APIs today.
+
+Fabric capabilities begin as compatibility, consent, and audit declarations. They do not present in-process JavaScript as a security sandbox. Only a Host with evidence of real isolation may claim technical permission enforcement.
+
 ## How to participate
 
 - Learn how plugins are written in [plugin development](plugin-development.en.md).
+- Read and comment on [Community Fabric RFC 0001](../dsh-community-fabric/docs/rfcs/0001-plugin-manifest-capabilities-events.md).
 - Learn how to install and manage plugins in the [user guide](user-guide.en.md).
 - Share your thoughts on this manifesto through issues and discussions.
