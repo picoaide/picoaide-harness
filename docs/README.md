@@ -6,14 +6,23 @@
 
 ## 按目标阅读
 
-| 读者 | 文档 | 你会得到什么 |
-| --- | --- | --- |
-| 第一次使用 | [用户指南](user-guide.md) | 安装、profile、模式、终端、插件命令和更新 |
-| 想了解项目 | [为什么做 Desktop](why-desktop.md) | Desktop 与官方 Harness 的边界，以及为什么坚持插件化 |
-| 插件作者 | [插件开发](plugin-development.md) | 普通 DSH 插件、Desktop 服务、兼容模式和生命周期 |
-| 架构/维护者 | [架构说明](architecture.md) | Electron、Host、loopback Web、profile 和打包之间的关系 |
-| Desktop service 参考 | [`dsh-plugin-desktop/docs/plugin-services.md`](../dsh-plugin-desktop/docs/plugin-services.md) | `desktopProfiles`、`desktopPnpm` 的稳定 contract 和 TypeScript 示例 |
-| 包级参考 | [`dsh-plugin-desktop/README.md`](../dsh-plugin-desktop/README.md) | 完整的构建、运行、发布和已知限制 |
+普通用户从[用户指南](user-guide.md)开始即可，不需要阅读开发者文档。
+
+### 用户文档
+
+| 文档 | 你会得到什么 |
+| --- | --- |
+| [用户指南](user-guide.md) | 安装、profile、模式、终端、插件命令和更新 |
+| [为什么做 Desktop](why-desktop.md) | Desktop 与官方 Harness 的边界，以及为什么坚持插件化 |
+
+### 开发者与维护者文档
+
+| 文档 | 你会得到什么 |
+| --- | --- |
+| [插件开发](plugin-development.md) | 普通 DSH 插件、Desktop 服务、兼容模式和生命周期 |
+| [架构说明](architecture.md) | Electron、Host、loopback Web、profile 和打包之间的关系 |
+| [Desktop service 参考](../dsh-plugin-desktop/docs/plugin-services.md) | `desktopProfiles`、`desktopPnpm` 的稳定 contract 和 TypeScript 示例 |
+| [包级参考](../dsh-plugin-desktop/README.md) | 完整的构建、运行、发布和已知限制 |
 
 ## README 文件怎么分工
 

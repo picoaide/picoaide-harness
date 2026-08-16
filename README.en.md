@@ -24,14 +24,23 @@
 
 ## Documentation
 
+Ordinary users can start with the [user guide](docs/user-guide.en.md); the developer documentation is only needed when extending or maintaining the application.
+
+### User documentation
+
 | Goal | Entry point |
 | --- | --- |
-| Understand why the project exists | [Why DSH Desktop](docs/why-desktop.en.md) |
 | Install and use the application | [User guide](docs/user-guide.en.md) |
+| Understand why the project exists | [Why DSH Desktop](docs/why-desktop.en.md) |
+| See the full documentation and README map | [Documentation index](docs/README.en.md) |
+
+### Developer and maintainer documentation
+
+| Goal | Entry point |
+| --- | --- |
 | Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
 | See what Desktop plugins can use | [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) |
 | Understand how the desktop works | [Architecture](docs/architecture.en.md) |
-| See the full documentation and README map | [Documentation index](docs/README.en.md) |
 | Read package-level build and release details | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
 
 ## Features

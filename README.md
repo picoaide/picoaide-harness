@@ -24,14 +24,23 @@
 
 ## 文档
 
+普通用户从[用户指南](docs/user-guide.md)开始即可；开发者文档只在需要扩展或维护时才需要阅读。
+
+### 用户文档
+
 | 目标 | 入口 |
 | --- | --- |
-| 了解项目为什么存在 | [为什么做 DSH Desktop](docs/why-desktop.md) |
 | 安装和日常使用 | [用户指南](docs/user-guide.md) |
+| 了解项目为什么存在 | [为什么做 DSH Desktop](docs/why-desktop.md) |
+| 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
+
+### 开发者与维护者文档
+
+| 目标 | 入口 |
+| --- | --- |
 | 编写普通或 Desktop 插件 | [插件开发](docs/plugin-development.md) |
 | 了解桌面插件可以使用的能力 | [桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md) |
 | 了解桌面应用如何工作 | [架构说明](docs/architecture.md) |
-| 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
 | 查阅包级构建与发布细节 | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
 
 ## 主要功能
