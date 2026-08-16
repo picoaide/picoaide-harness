@@ -97,6 +97,7 @@ export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
   '@picoaide/dsh-enterprise/auth-gate',
   '@picoaide/dsh-enterprise/gateway-model',
   '@picoaide/dsh-enterprise/bootstrap',
+  '@picoaide/dsh-enterprise/client',
   '@picoaide/dsh-enterprise/package.json',
 ] as const
 
