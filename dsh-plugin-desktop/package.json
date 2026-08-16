@@ -3,6 +3,9 @@
   "version": "2.0.0",
   "description": "DSH Desktop: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/anywhere-labs/deepseek-harness-desktop.git",
