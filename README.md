@@ -22,7 +22,7 @@
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop 界面预览" width="100%">
 </p>
 
-DSH Desktop 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 装进了 macOS 和 Windows 的原生桌面应用。官方 Harness 以固定版本原样运行；桌面壳本身——窗口、托盘、终端、更新、工作配置——就是一个合法的 [DSH 插件](docs/user-guide.md#插件管理)，与官方、第三方插件走同一条组合路径。模型、工具、界面和工作流都可以用插件扩展；我们希望和所有插件作者一起，构建一个开放、可组合、可持续的 DSH 插件生态，让每个插件都能与其他插件共同进步：[DSH 插件生态倡议书](docs/plugin-ecosystem.md)。
+DSH Desktop 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 装进了 macOS 和 Windows 的原生桌面应用。官方 Harness 以固定版本原样运行；桌面壳本身——窗口、托盘、终端、更新、工作配置——就是一个合法的 [DSH 插件](docs/user-guide.md#插件管理)。我们希望和所有插件作者一起，构建一个开放、可组合、可持续的 DSH 插件生态，让每个插件都能与其他插件共同进步：[DSH 插件生态倡议书](docs/plugin-ecosystem.md)。
 
 ## 文档
 
