@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,27 @@ function temporaryHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-'))
   homes.push(home)
   return home
+}
+
+function installWebClient(
+  home: string,
+  packageName: string,
+  manifest: Record<string, unknown> = {},
+): string {
+  const webDir = join(home, 'profiles', 'web')
+  const bundles = PROFILE_TEMPLATES.web
+  if (bundles === undefined) throw new Error('test requires the shipped Web template')
+  initProfile(webDir, bundles)
+  const packageDir = join(webDir, 'node_modules', ...packageName.split('/'))
+  mkdirSync(packageDir, { recursive: true })
+  writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
+    name: packageName,
+    type: 'module',
+    dsh: { client: { platform: 'web' } },
+    ...manifest,
+  }) + '\n')
+  writeFileSync(join(packageDir, 'index.js'), 'export default {}\n')
+  return webDir
 }
 
 afterEach(() => {
@@ -267,6 +288,98 @@ describe('desktop profile composition', () => {
       disabled: { __jsExpr: "process.platform !== 'win32'" },
       config: { cwd: 'C:\\workspace' },
     }))
+  })
+
+  it('keeps a Web Client in its owning profile and omits it from desktop', () => {
+    const home = temporaryHome()
+    const packageName = '@linxin666/dsh-client-ui-skin-whale-song'
+    installWebClient(home, packageName, { exports: { '.': { import: './index.js' } } })
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: missing-skin',
+      `      name: '${packageName}'`,
+      '    - id: third-party-host',
+      "      name: 'third-party-host-plugin'",
+      '',
+    ].join('\n'))
+
+    const desktop = prepareDesktopProfile(undefined, home, 'darwin')
+    const desktopRows = composeEntries([desktop.patches])
+
+    expect(desktopRows.map(row => row.id)).not.toContain('missing-skin')
+    expect(desktopRows).toContainEqual({
+      id: 'third-party-host',
+      name: 'third-party-host-plugin',
+    })
+    expect(desktop.skippedOptionalEntries).toEqual([{
+      id: 'missing-skin',
+      name: packageName,
+    }])
+
+    const web = prepareDesktopProfile(undefined, home, 'darwin', 'web')
+    const webRows = composeEntries([web.patches])
+    expect(webRows).toContainEqual({ id: 'missing-skin', name: packageName })
+    expect(web.skippedOptionalEntries).toEqual([])
+  })
+
+  it('identifies optional Web Clients from package metadata instead of their name', () => {
+    const home = temporaryHome()
+    const packageName = '@example/whale-song-theme'
+    installWebClient(home, packageName, { exports: { '.': './index.js' } })
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: optional-theme',
+      `      name: '${packageName}'`,
+      '',
+    ].join('\n'))
+
+    const desktop = prepareDesktopProfile(undefined, home, 'darwin')
+    expect(composeEntries([desktop.patches]).map(row => row.id)).not.toContain('optional-theme')
+    expect(desktop.skippedOptionalEntries).toEqual([{ id: 'optional-theme', name: packageName }])
+
+    const web = prepareDesktopProfile(undefined, home, 'darwin', 'web')
+    expect(composeEntries([web.patches])).toContainEqual({ id: 'optional-theme', name: packageName })
+    expect(web.skippedOptionalEntries).toEqual([])
+  })
+
+  it('does not treat ordinary array config as nested Loader entries', () => {
+    const home = temporaryHome()
+    const packageName = '@example/whale-song-theme'
+    installWebClient(home, packageName)
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: config-holder',
+      "      name: 'third-party-host-plugin'",
+      '      config:',
+      `        - name: '${packageName}'`,
+      '          enabled: true',
+      '',
+    ].join('\n'))
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    expect(composeEntries([prepared.patches])).toContainEqual({
+      id: 'config-holder',
+      name: 'third-party-host-plugin',
+      config: [{ name: packageName, enabled: true }],
+    })
+    expect(prepared.skippedOptionalEntries).toEqual([])
+  })
+
+  it('leaves non-package Loader specifiers unchanged', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: builtin-plugin',
+      "      name: 'cordis:example'",
+      '',
+    ].join('\n'))
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    expect(composeEntries([prepared.patches])).toContainEqual({
+      id: 'builtin-plugin',
+      name: 'cordis:example',
+    })
+    expect(prepared.skippedOptionalEntries).toEqual([])
   })
 
   it('preserves an explicitly disabled upstream pwsh provider and a third-party replacement', () => {

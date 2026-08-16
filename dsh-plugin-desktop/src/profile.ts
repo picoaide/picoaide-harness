@@ -1,7 +1,7 @@
 /** Compatibility profile composition over the official Web bundle and user plugins. */
 
-import { createRequire } from 'node:module'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createRequire, findPackageJSON } from 'node:module'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
@@ -135,8 +135,18 @@ export interface PreparedDesktopProfile {
   bareModuleBaseUrl: string
   /** Complete ordered patch list for this desktop generation. */
   patches: PatchOptions[]
+  /** Optional Client UI entries skipped because this profile cannot resolve them. */
+  skippedOptionalEntries: SkippedOptionalEntry[]
   /** Persisted shell mode applied after every user-owned patch. */
   mode: DesktopShellMode
+}
+
+/** User patch entry skipped to keep a profile bootable. */
+export interface SkippedOptionalEntry {
+  /** Loader row id from the skipped entry. */
+  id?: string
+  /** Package name from the skipped entry. */
+  name: string
 }
 
 /**
@@ -212,6 +222,82 @@ function rowDisabledOnPlatform(row: EntryOptions, platform: NodeJS.Platform): bo
   return Boolean(evaluate({ process: scopedProcess }, row.disabled.__jsExpr))
 }
 
+/** Find one package manifest using the selected profile's dependency graph. */
+function packageManifestFromProfile(name: string, profilePackageUrl: string): string | undefined {
+  try {
+    return findPackageJSON(name, profilePackageUrl)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') return undefined
+    throw cause
+  }
+}
+
+/** Return whether a Loader specifier names an npm package. */
+function isBarePackageSpecifier(name: string): boolean {
+  return !name.startsWith('.')
+    && !name.startsWith('/')
+    && !name.startsWith('#')
+    && !URL.canParse(name)
+}
+
+/** Return whether another profile owns this unavailable Web Client package. */
+function isWebClientPackageInAnotherProfile(
+  name: string,
+  home: string,
+  activeProfilePackageUrl: string,
+): boolean {
+  const profilesDir = join(home, 'profiles')
+  for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === 'node_modules') continue
+    const profilePackageUrl = pathToFileURL(join(profilesDir, entry.name, 'package.json')).href
+    if (profilePackageUrl === activeProfilePackageUrl) continue
+    const manifestPath = packageManifestFromProfile(name, profilePackageUrl)
+    if (manifestPath === undefined) continue
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      dsh?: { client?: { platform?: unknown } }
+    }
+    if (manifest.dsh?.client?.platform === 'web') return true
+  }
+  return false
+}
+
+/** Drop unresolved optional Client UI rows from the machine-wide patch only. */
+function omitUnresolvedOptionalEntries(
+  patches: PatchOptions[],
+  profilePackageUrl: string,
+  home: string,
+): { patches: PatchOptions[], skipped: SkippedOptionalEntry[] } {
+  const skipped: SkippedOptionalEntry[] = []
+
+  const filterRows = (rows: EntryOptions[]): EntryOptions[] => {
+    const filtered: EntryOptions[] = []
+    for (const row of rows) {
+      if (typeof row.name === 'string'
+        && isBarePackageSpecifier(row.name)
+        && packageManifestFromProfile(row.name, profilePackageUrl) === undefined
+        && isWebClientPackageInAnotherProfile(row.name, home, profilePackageUrl)) {
+        skipped.push({
+          ...(typeof row.id === 'string' ? { id: row.id } : {}),
+          name: row.name,
+        })
+        continue
+      }
+      const config = row.group === true && Array.isArray(row.config) ? filterRows(row.config) : undefined
+      filtered.push(config === undefined ? row : { ...row, config })
+    }
+    return filtered
+  }
+
+  return {
+    patches: patches.flatMap((patch) => {
+      if (!Array.isArray(patch.insert)) return [patch]
+      const insert = filterRows(patch.insert)
+      return [{ ...patch, insert }]
+    }),
+    skipped,
+  }
+}
+
 /**
  * Load and compose one desktop profile generation.
  * @param telemetryDisabled - inherited DSH telemetry opt-out value.
@@ -248,7 +334,12 @@ export function prepareDesktopProfile(
     throw new Error(`${BIN_NAME}: desktop profile is missing @deepseek-ai/dsh-web-app`)
   }
 
-  const homePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
+  const loadedHomePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
+  const { patches: homePatches, skipped: skippedOptionalEntries } = omitUnresolvedOptionalEntries(
+    loadedHomePatches,
+    bareModuleBaseUrl,
+    home,
+  )
   const patches: PatchOptions[] = [
     ...bundlePatches,
     ...profile.patches,
@@ -372,6 +463,7 @@ export function prepareDesktopProfile(
     rootConfig,
     bareModuleBaseUrl,
     patches: structuredClone(patches),
+    skippedOptionalEntries,
     mode,
   }
 }
