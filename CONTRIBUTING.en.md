@@ -49,4 +49,4 @@ If you would like to join our technical team, contact us at [t4wefan@qq.com](mai
 
 ## Code of conduct
 
-Be kind and respectful, and stick to the topic. We want a community that welcomes newcomers.
+Be kind and respectful, and stick to the topic. We want a community that welcomes newcomers. The [Contributor Covenant](CODE_OF_CONDUCT.en.md) applies to all project spaces.
