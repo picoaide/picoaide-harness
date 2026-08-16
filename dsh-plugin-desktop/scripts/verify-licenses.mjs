@@ -35,14 +35,14 @@ const ALLOWED_LICENSES = new Set([
 
 /**
  * Licenses that permit redistribution only when their notice obligations are
- * honored. Currently only the sharp libvips N-API bindings
- * (@img/sharp-libvips-*) use LGPL-3.0-or-later: the binding is a separate
- * native binary, its license text ships inside node_modules in the installer,
- * and the standard sharp deployment treats this as acceptable. Keep this list
- * minimal and review any addition.
+ * honored. Sharp ships libvips as a separate @img/sharp-libvips-* package on
+ * macOS and inside the @img/sharp-win32-* package on Windows. Their license
+ * texts ship inside node_modules in the installer. Keep this list minimal and
+ * review any addition.
  */
 const NOTICE_LICENSES = new Set([
   'LGPL-3.0-or-later',
+  'Apache-2.0 AND LGPL-3.0-or-later',
 ])
 
 /**
