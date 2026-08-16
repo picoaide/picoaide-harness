@@ -125,6 +125,23 @@ The package can then be launched from npm with:
 npx dsh-plugin-desktop
 ```
 
+## Launching from the command line
+
+The package installs two equivalent commands, `dsh-desktop` and `dsh-plugin-desktop`. Both launch the packaged Electron launcher (`lib/main.js`) when invoked without arguments.
+
+- **Global install** — `npm install -g dsh-plugin-desktop` installs the `electron` peer automatically, and `dsh-desktop` then starts the application against the default DSH home:
+  ```sh
+  dsh-desktop
+  ```
+- **Inside a profile** — after `dsh plugin --profile <name> add dsh-plugin-desktop`, the command lives in the profile's `node_modules/.bin`. pnpm does not install the `electron` peer automatically; add it when you want the command to launch:
+  ```sh
+  dsh plugin --profile <name> add electron
+  ```
+  Native build approvals (node-pty, koffi, electron, and others) follow pnpm's usual `allowBuilds` rules.
+- **Electron missing** — the command prints a short installation guide instead of failing with a module error.
+
+Booting a profile that is composed with the desktop shell under an ordinary `dsh` invocation (without the launcher's `desktopRuntime` service) prints a reminder telling you to start it with `dsh-desktop` or from the packaged application; the shell registers nothing in that case.
+
 A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin with browser UI also publishes the normal `dsh.client` metadata with `platform: "web"` and an exported `./client` artifact. The upstream Web client module graph discovers it in both modes; Electron does not require a separate client build or a desktop-specific registration API. Advanced-mode contributions must target services and slots that exist in that explicit composition rather than assuming the official layout or sidebar occupant owns them.
 
 ## Desktop operations

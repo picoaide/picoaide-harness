@@ -102,7 +102,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     },
     settings,
     logger: { warn: vi.fn(), error: vi.fn() },
-    get: vi.fn(() => () => {}),
+    get: vi.fn((key: unknown) => String(key) === 'desktopRuntime' ? runtime : () => {}),
     effect: vi.fn((register: () => unknown) => register()),
     on: vi.fn((event: string, listener: (namespace: unknown, next: unknown) => void) => {
       if (event === 'settings/updated') settingsUpdated = listener
@@ -133,6 +133,31 @@ describe('desktop Host plugin', () => {
     expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility' })
     expect(() => Config({ mode: 'custom' } as never)).toThrow()
     expect(String(DESKTOP_SETTINGS_NAMESPACE)).toBe('dsh-desktop')
+  })
+
+  it('prints a launcher reminder and registers nothing without desktopRuntime', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const registerRoute = vi.fn()
+    const ctx = {
+      webServer: { host: '127.0.0.1', port: 43120, register: registerRoute },
+      settings: {
+        register: vi.fn(),
+        get: vi.fn(() => undefined),
+        watch: vi.fn(() => () => {}),
+        update: vi.fn(async () => {}),
+      },
+      logger: { warn: vi.fn(), error: vi.fn() },
+      get: vi.fn(() => undefined),
+      effect: vi.fn((register: () => unknown) => register()),
+      on: vi.fn(() => () => {}),
+    } as unknown as Context
+
+    apply(ctx, config)
+
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('desktop launcher'))
+    expect(registerRoute).not.toHaveBeenCalled()
+    expect(vi.mocked(ctx.settings.register)).not.toHaveBeenCalled()
+    stderr.mockRestore()
   })
 
   it('builds the loopback root with validated renderer mode and platform markers', () => {
