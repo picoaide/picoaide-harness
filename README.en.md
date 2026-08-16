@@ -22,7 +22,7 @@
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
 </p>
 
-DSH Desktop brings [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to native macOS and Windows applications. Official Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate [DSH plugin](docs/user-guide.en.md#plugin-management) on the same composition path as official and third-party plugins. Models, tools, interfaces, and workflows can all be extended through plugins, which follow the same [conventions](docs/plugin-development.en.md) and work together when installed side by side.
+DSH Desktop brings [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to native macOS and Windows applications. Official Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate [DSH plugin](docs/user-guide.en.md#plugin-management) on the same composition path as official and third-party plugins. Models, tools, interfaces, and workflows can all be extended through plugins; together with every plugin author, we want to build an open, composable, and sustainable DSH plugin ecosystem where plugins grow alongside each other. Read the [DSH plugin ecosystem manifesto](docs/plugin-ecosystem.en.md).
 
 ## Documentation
 
@@ -40,6 +40,7 @@ Ordinary users can start with the [user guide](docs/user-guide.en.md); the devel
 
 | Goal | Entry point |
 | --- | --- |
+| Read the plugin ecosystem manifesto | [Plugin ecosystem manifesto](docs/plugin-ecosystem.en.md) |
 | Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
 | See what Desktop plugins can use | [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) |
 | Understand how the desktop works | [Architecture](docs/architecture.en.md) |

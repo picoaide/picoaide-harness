@@ -117,4 +117,4 @@ To that end we are starting a development-conventions initiative and hope it bec
 - **Declare clearly**: state the services and slots you depend on; do not rely on runtime coincidences.
 - **Compatibility first**: keep upgrades backward compatible and never break existing compositions.
 
-The conventions are a living document that follows ecosystem practice and accepts community discussion and revisions. Once the plugin marketplace ships, compliant plugins will be easier to discover, install, and trust, making convention-driven development the beneficial choice for every author.
+The conventions are a living document that follows ecosystem practice and accepts community discussion and revisions. Once the plugin marketplace ships, compliant plugins will be easier to discover, install, and trust, making convention-driven development the beneficial choice for every author. See the [DSH plugin ecosystem manifesto](plugin-ecosystem.en.md) for the full vision, principles, and how to participate.
