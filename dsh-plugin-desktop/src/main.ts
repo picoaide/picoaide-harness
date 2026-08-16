@@ -19,6 +19,7 @@ import {
 } from './desktop-runtime-environment.ts'
 import { ElectronDesktopRuntime } from './electron-runtime.ts'
 import { FileExporter } from './file-exporter.ts'
+import { DESKTOP_SETTINGS_NAMESPACE, type DesktopSettings } from './index.ts'
 import { LogFileSink } from './log-files.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
@@ -119,6 +120,7 @@ async function start(): Promise<void> {
   let removeShutdownRequests: (() => void) | undefined
   let disposeDshRuntime: (() => void) | undefined
   let disposePnpmRuntime: (() => void) | undefined
+  let fileExporter: FileExporter | undefined
   let runtime!: ElectronDesktopRuntime
   const nativeExit = createDesktopExitCoordinator(
     {
@@ -271,7 +273,8 @@ async function start(): Promise<void> {
           maxDirectoryBytes: 200 * 1024 * 1024,
         })
         logSink.enforceDirectoryCap()
-        hostCtx.logger.exporter(new FileExporter(logSink))
+        fileExporter = new FileExporter(logSink)
+        hostCtx.logger.exporter(fileExporter)
         await hostCtx.plugin(DesktopProfileService, {
           current: {
             name: activeProfileName,
@@ -292,6 +295,11 @@ async function start(): Promise<void> {
       throw cause
     })
     current = ctx
+    fileExporter?.setThreshold((ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopSettings | undefined)?.logLevel ?? 'info')
+    ctx.on('settings/updated', (namespace, next) => {
+      if (namespace !== DESKTOP_SETTINGS_NAMESPACE) return
+      fileExporter?.setThreshold((next as DesktopSettings).logLevel)
+    })
     runtime.configureTerminal({
       profileName: activeProfileName,
       profileDir: prepared.profile.dir,
