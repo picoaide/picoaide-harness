@@ -18,17 +18,19 @@ The first usable version should make a small, understandable journey possible:
 
 The market is a shell around existing DSH capabilities. It does not invent a second plugin format, package manager, profile store, or privileged installer.
 
-## Catalog source
+## Catalog sources
 
-The initial catalog adapter is planned around the public registry published by [DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins). That project maintains its own discovery, validation, website, API, and the separately published `dsh-1024store` plugin. DSH Community Market is an independent Desktop-specific shell; it is not a fork, repackaging, or official client of that plugin, and does not represent its maintainers, DeepSeek, or the listed plugin authors.
+The market has no default catalog. People choose which sources to enable, may change their order, and may add a source that implements the published catalog contract. Each source is isolated behind an adapter, and the market UI sees only the same validated, normalized data model.
 
-Catalog data is remote, replaceable, and untrusted. A listing means that a project matched the catalog's metadata rules; it does **not** mean that Anywhere Labs reviewed, recommends, or guarantees the plugin.
+[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the catalog providers currently cooperating with this project. We plan to ship a reviewed adapter for its public API, but the cooperation does not make it enabled by default, preferred in sorting, a fallback when no source is selected, or an endorsement of its listings. That project independently maintains its discovery, validation, website, API, and the separately published `dsh-1024store` plugin. DSH Community Market is not a fork, repackaging, or official client of that plugin.
+
+All catalog data is remote and untrusted. A listing means only that a provider supplied metadata; it does **not** mean that Anywhere Labs reviewed, recommends, or guarantees the plugin.
 
 ## Safety promise
 
 - Background browsing never installs a package or executes repository code.
 - Installation starts only after an explicit user action and confirmation.
-- The market will derive an install target from a validated repository identity; it will never execute a command string returned by a catalog.
+- The market will independently resolve and pin an install target from a validated package or repository identity; it will never execute a command string returned by a catalog.
 - The confirmation will show the exact source and active profile.
 - Plugin changes will use the existing Desktop-managed DSH plugin service and run one operation at a time.
 - The first release will not include accounts, telemetry, silent installs, automatic plugin updates, or a catalog backend.
@@ -38,6 +40,7 @@ Plugins run as local code with the user's permissions and may run package lifecy
 ## Documentation
 
 - [Market shell design](docs/market-shell.md): product boundary, architecture, profiles, failure behavior, and delivery phases.
+- [Catalog provider contract](docs/catalog-provider-contract.md): source manifests, query parameters, wire and normalized JSON, multi-source behavior, and the implementation handoff.
 - [Security](SECURITY.md): trust model, reporting, and non-negotiable installation rules.
 - [Desktop plugin services](../dsh-plugin-desktop/docs/plugin-services.md): the existing `desktopProfiles` and `desktopPnpm` contracts the future implementation will consume.
 - [DSH plugin development](../docs/plugin-development.en.md): the shared plugin model used by ordinary DSH and Desktop.
@@ -45,9 +48,9 @@ Plugins run as local code with the user's permissions and may run package lifecy
 ## Delivery plan
 
 - **Phase 0 — current:** package ownership, documentation, trust boundary, and headless checks.
-- **Phase 1:** read-only catalog provider, search, categories, plugin details, loading/empty/error states.
+- **Phase 1:** source selection, user-added conforming sources, multi-source read-only browsing, search, categories, plugin details, and complete loading/empty/error states.
 - **Phase 2:** explicit installation into the active profile through the managed Desktop service.
-- **Later:** uninstall, update, recovery, richer verification signals, and multiple catalog providers.
+- **Later:** uninstall, update, recovery, and richer verification signals.
 
 Catalog collection, submission review, accounts, rankings, and hosting remain the responsibility of catalog providers rather than this package.
 
