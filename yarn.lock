@@ -4766,8 +4766,12 @@ __metadata:
   resolution: "@picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-brand": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-credentials": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-invariants": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-settings": "npm:0.1.0-rc.6"
+    "@deepseek-ai/schemastery": "npm:^3.18.1"
     "@types/node": "npm:^22.20.0"
     electron: "npm:43.4.0"
     tsdown: "npm:0.22.2"
