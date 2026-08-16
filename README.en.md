@@ -22,6 +22,8 @@
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
 </p>
 
+DSH Desktop brings DeepSeek Harness to native macOS and Windows applications. Official Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate DSH plugin on the same composition path as official and third-party plugins. Models, tools, interfaces, and workflows can all be extended through plugins, which follow the same conventions and work together when installed side by side.
+
 ## Documentation
 
 Ordinary users can start with the [user guide](docs/user-guide.en.md); the developer documentation is only needed when extending or maintaining the application.
