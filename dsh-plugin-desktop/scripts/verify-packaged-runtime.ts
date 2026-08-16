@@ -93,6 +93,11 @@ export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
   'dsh-plugin-desktop/package.json',
   '@deepseek-ai/dsh-base/package.json',
   '@deepseek-ai/dsh-web-app/package.json',
+  '@picoaide/dsh-enterprise/session-service',
+  '@picoaide/dsh-enterprise/auth-gate',
+  '@picoaide/dsh-enterprise/gateway-model',
+  '@picoaide/dsh-enterprise/bootstrap',
+  '@picoaide/dsh-enterprise/package.json',
 ] as const
 
 /** Injectable archive listing seam used by focused tests. */
