@@ -40,6 +40,7 @@ corepack yarn dev     # launch the application when a graphical session is avail
 
 - Use conventional commit messages (for example `fix(desktop): ...`, `docs: ...`).
 - Run `yarn check` and keep it green before committing.
+- After changing production dependencies, run `yarn workspace dsh-plugin-desktop verify:notices` to refresh the third-party notices and commit the updated `dsh-plugin-desktop/THIRD_PARTY_NOTICES.md`.
 - Documentation changes should stay bilingual and update the `README.i18n.yaml` hash record.
 - Describe the change, its motivation, and how it was verified in the PR; merge after CI passes.
 

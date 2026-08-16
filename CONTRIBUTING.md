@@ -40,6 +40,7 @@ corepack yarn dev     # 有图形环境时启动应用
 
 - 提交信息使用 conventional commits 风格（例如 `fix(desktop): ...`、`docs: ...`）。
 - 提交前运行 `yarn check` 并保证全绿。
+- 变更生产依赖后，运行 `yarn workspace dsh-plugin-desktop verify:notices` 刷新第三方许可清单，并提交更新后的 `dsh-plugin-desktop/THIRD_PARTY_NOTICES.md`。
 - 文档改动请中英同步，并更新 `README.i18n.yaml` 的双语 hash 记录。
 - PR 描述说明改动内容、动机和验证方式；CI 通过后再合并。
 
