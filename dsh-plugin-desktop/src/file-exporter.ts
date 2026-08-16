@@ -12,6 +12,9 @@ function localTimestamp(ts: number): string {
 export class FileExporter implements Exporter {
   formatters = {}
   maxLength = 10240
+  // Cordis filters by `levels` before calling `export` (default INFO=1 would drop warn=2
+  // and debug=3). Pass everything through and let `shouldEmit` own the threshold.
+  levels = { default: 3 }
 
   constructor(
     private readonly sink: LogFileSink,
