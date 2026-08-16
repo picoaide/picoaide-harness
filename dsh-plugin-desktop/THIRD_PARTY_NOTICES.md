@@ -234,7 +234,7 @@ the package names, versions, and licenses for transparency.
 | @img/sharp-darwin-arm64 | 0.35.3 | Apache-2.0 |
 | @img/sharp-libvips-darwin-arm64 | 1.3.2 | LGPL-3.0-or-later |
 | @joplin/turndown-plugin-gfm | 1.0.67 | MIT |
-| @koromix/koffi-darwin-arm64 | 3.1.4 | MIT |
+| @koromix/koffi-darwin-arm64 | 3.1.5 | MIT |
 | @mistralai/mistralai | 2.2.6 | Apache-2.0 |
 | @mixmark-io/domino | 2.2.0 | BSD-2-Clause |
 | @modelcontextprotocol/sdk | 1.30.0 | MIT |
@@ -385,7 +385,7 @@ the package names, versions, and licenses for transparency.
 | jwa | 2.0.1 | MIT |
 | jws | 4.0.1 | MIT |
 | katex | 0.16.47 | MIT |
-| koffi | 3.1.4 | MIT |
+| koffi | 3.1.5 | MIT |
 | long | 5.3.2 | Apache-2.0 |
 | longest-streak | 3.1.0 | MIT |
 | loose-envify | 1.4.0 | MIT |

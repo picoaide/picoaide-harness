@@ -275,6 +275,19 @@ describe('published package surface', () => {
     expect(manifest.dependencies?.pnpm).toBe('11.7.0')
   })
 
+  it('packages the native-compiled Koffi Windows runtime', () => {
+    const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
+
+    expect(manifest.dependencies?.koffi).toBe('3.1.5')
+    expect(workspaceManifest.resolutions).toMatchObject({
+      'koffi@npm:^3.1.0': '3.1.5',
+    })
+    expect(lockfile).toContain('"koffi@npm:3.1.5":')
+    expect(lockfile).toContain('@koromix/koffi-win32-x64@npm:3.1.5')
+    expect(lockfile).not.toContain('"koffi@npm:3.1.4":')
+    expect(lockfile).not.toContain('@koromix/koffi-win32-x64@npm:3.1.4')
+  })
+
   it('resolves electron-builder through the pinned app-builder-lib keychain patch', () => {
     const patchResolution = 'patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch'
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
