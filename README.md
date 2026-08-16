@@ -85,7 +85,7 @@ DSH Desktop 没有魔改上游源码，也不是一个固定写死的外壳。�
 
 ### 给开发者
 
-Desktop 的插件能力已经可以使用。开发者可以通过两个公开接口扩展桌面端：`desktopProfiles` 用来查看和切换工作配置，`desktopPnpm` 用来在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
+Desktop 的插件能力已经可以使用。我们提供了 Desktop 服务，让插件开发者能够把插件与桌面能力集成起来：例如查看和切换工作配置，或在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
 
 ## 与官方项目的关系
 
@@ -111,7 +111,7 @@ Desktop 的插件能力已经可以使用。开发者可以通过两个公开接
 
 也感谢 [Koishi.js](https://koishi.chat/) 项目和社区长期积累的插件化实践、工具与经验，以及所有参与讨论、测试、反馈和插件开发的社区成员。
 
-And you.
+以及每一个使用、支持和参与共建的你。
 
 <a id="run-from-source"></a>
 
