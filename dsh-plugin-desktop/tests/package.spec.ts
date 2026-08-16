@@ -117,19 +117,24 @@ describe('published package surface', () => {
     expect(config).toContain("updates: 'src/updates.ts'")
   })
 
-  it('installs the private pnpm PATH after the launch snapshot and before profile boot', () => {
+  it('installs Host command PATHs after the launch snapshot and before profile boot', () => {
     const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
     const snapshot = main.indexOf('const environment = loadLayeredEnv')
     const install = main.indexOf('const pnpmRuntime = installDesktopPnpmRuntime')
     const prepare = main.indexOf('const prepared = prepareDesktopProfile')
+    const installDsh = main.indexOf('const dshRuntime = process.platform === \'win32\'')
     const boot = main.indexOf('const ctx = await boot')
 
     expect(snapshot).toBeGreaterThanOrEqual(0)
     expect(install).toBeGreaterThan(snapshot)
     expect(prepare).toBeGreaterThan(install)
+    expect(installDsh).toBeGreaterThan(prepare)
     expect(boot).toBeGreaterThan(prepare)
+    expect(boot).toBeGreaterThan(installDsh)
     expect(main).toContain("'dsh-plugin-desktop: packaged pnpm runtime PATH'")
+    expect(main).toContain("'dsh-plugin-desktop: packaged dsh runtime PATH'")
     expect(main).toContain('disposePnpmRuntime?.()')
+    expect(main).toContain('disposeDshRuntime?.()')
   })
 
   it('fixes the installed application identity', () => {

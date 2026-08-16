@@ -13,7 +13,10 @@ import {
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
-import { installDesktopPnpmRuntime } from './desktop-runtime-environment.ts'
+import {
+  installDesktopDshRuntime,
+  installDesktopPnpmRuntime,
+} from './desktop-runtime-environment.ts'
 import { ElectronDesktopRuntime } from './electron-runtime.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
@@ -112,6 +115,7 @@ async function start(): Promise<void> {
   let profileStatePath: string | undefined
   let shutdown: DesktopShutdown | undefined
   let removeShutdownRequests: (() => void) | undefined
+  let disposeDshRuntime: (() => void) | undefined
   let disposePnpmRuntime: (() => void) | undefined
   let runtime!: ElectronDesktopRuntime
   const nativeExit = createDesktopExitCoordinator(
@@ -147,6 +151,7 @@ async function start(): Promise<void> {
       try {
         await current?.fiber.dispose()
       } finally {
+        disposeDshRuntime?.()
         disposePnpmRuntime?.()
       }
     },
@@ -177,6 +182,7 @@ async function start(): Promise<void> {
     try {
       await current?.fiber.dispose()
     } finally {
+      disposeDshRuntime?.()
       disposePnpmRuntime?.()
     }
   })
@@ -208,6 +214,20 @@ async function start(): Promise<void> {
       process.platform,
       activeProfileName,
     )
+    const dshBootstrapPath = fileURLToPath(new URL('./desktop-cli.js', import.meta.url))
+    const dshRuntime = process.platform === 'win32'
+      ? installDesktopDshRuntime({
+          platform: process.platform,
+          appExecutable: process.execPath,
+          dshBootstrapPath,
+          profileName: activeProfileName,
+          homeDir,
+          stateDir: join(app.getPath('userData'), 'host-commands', activeProfileName),
+          environment: process.env,
+        })
+      : undefined
+    const releaseDshRuntime = (): void => { dshRuntime?.dispose() }
+    disposeDshRuntime = releaseDshRuntime
     const desktopPnpmBootstrap: DesktopPnpmBootstrap = {
       activeProfileName,
       activeProfileDir: prepared.profile.dir,
@@ -218,7 +238,7 @@ async function start(): Promise<void> {
       nodeBinDir: pnpmRuntime.nodeBinDir,
       nodeShimPath: pnpmRuntime.nodeShimPath,
       clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
-      dshBootstrapPath: fileURLToPath(new URL('./desktop-cli.js', import.meta.url)),
+      dshBootstrapPath,
     }
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
     const ctx = await boot(
@@ -230,6 +250,12 @@ async function start(): Promise<void> {
           () => releasePnpmRuntime,
           'dsh-plugin-desktop: packaged pnpm runtime PATH',
         )
+        if (dshRuntime !== undefined) {
+          hostCtx.effect(
+            () => releaseDshRuntime,
+            'dsh-plugin-desktop: packaged dsh runtime PATH',
+          )
+        }
         current = hostCtx
         hostCtx.effect(
           () => releasePackageResolver,

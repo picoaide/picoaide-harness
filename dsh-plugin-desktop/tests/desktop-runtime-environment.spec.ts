@@ -14,6 +14,7 @@ import { delimiter as pathDelimiter, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  installDesktopDshRuntime,
   installDesktopPnpmRuntime,
   type DesktopPnpmRuntimeOptions,
 } from '../src/desktop-runtime-environment.ts'
@@ -317,5 +318,61 @@ describe('desktop Host pnpm runtime', () => {
       ...options(join(root, 'newline-runtime'), 'linux', { PATH: '/usr/bin' }),
       electronVersion: '43.4.0\nmalicious',
     })).toThrow('must not contain NUL or newlines')
+  })
+})
+
+describe('desktop Host dsh runtime', () => {
+  it.runIf(process.platform === 'win32')('makes the active profile available to Host plugin child processes', () => {
+    const root = temporaryDirectory()
+    const stateDir = join(root, 'runtime')
+    const captureEntry = join(root, 'capture.mjs')
+    const captureOutput = join(root, 'capture.json')
+    const homeDir = join(root, 'Harness home')
+    writeFileSync(captureEntry, [
+      "import { writeFileSync } from 'node:fs'",
+      'writeFileSync(process.argv[2], JSON.stringify({',
+      '  args: process.argv.slice(3),',
+      '  defaultProfile: process.env.DSH_DESKTOP_DEFAULT_PROFILE,',
+      '  home: process.env.DSH_HOME,',
+      '}))',
+      '',
+    ].join('\n'))
+    const environment: NodeJS.ProcessEnv = { Path: process.env.PATH }
+    const original = { ...environment }
+
+    const installation = installDesktopDshRuntime({
+      platform: 'win32',
+      appExecutable: process.execPath,
+      dshBootstrapPath: captureEntry,
+      profileName: 'web',
+      homeDir,
+      stateDir,
+      environment,
+    })
+    const result = spawnSync(process.env.ComSpec ?? 'cmd.exe', [
+      '/d',
+      '/s',
+      '/c',
+      `dsh "${captureOutput}" --probe`,
+    ], {
+      encoding: 'utf8',
+      env: environment,
+      shell: false,
+      windowsVerbatimArguments: true,
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+    expect(readdirSync(installation.pathDir)).toEqual(['dsh.cmd'])
+    expect(JSON.parse(readFileSync(captureOutput, 'utf8'))).toEqual({
+      args: ['--probe'],
+      defaultProfile: 'web',
+      home: homeDir,
+    })
+    expect(environment.Path).toBe(`${installation.pathDir};${original.Path ?? ''}`)
+
+    installation.dispose()
+    installation.dispose()
+    expect(environment).toEqual(original)
   })
 })
