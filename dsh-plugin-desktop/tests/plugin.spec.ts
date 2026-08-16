@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ThemePreference } from '@deepseek-ai/dsh-client-ui-theme'
@@ -188,13 +189,11 @@ describe('desktop Host plugin', () => {
       url: 'http://127.0.0.1:43120/?dsh-desktop-mode=compatibility&dsh-desktop-platform=darwin',
       productName: 'DSH Desktop',
       windowTitle: 'DeepSeek Harness Desktop',
-      iconPath: expect.stringMatching(/\/build\/app-icon-mac\.png$/u),
-      trayIcons: {
-        templatePath: expect.stringMatching(/\/build\/tray-iconTemplate\.png$/u),
-        bluePath: expect.stringMatching(/\/build\/tray-icon-blue\.png$/u),
-      },
       readThemeSource: expect.any(Function),
     }))
+    expect(harness.shell()?.iconPath.endsWith(join('build', 'app-icon-mac.png'))).toBe(true)
+    expect(harness.shell()?.trayIcons.templatePath.endsWith(join('build', 'tray-iconTemplate.png'))).toBe(true)
+    expect(harness.shell()?.trayIcons.bluePath.endsWith(join('build', 'tray-icon-blue.png'))).toBe(true)
     expect(harness.shell()?.readThemeSource()).toBe('system')
     harness.notifyTheme('dark')
     expect(harness.setThemeSource).not.toHaveBeenCalled()
@@ -235,7 +234,7 @@ describe('desktop Host plugin', () => {
 
       apply(harness.ctx, config)
 
-      expect(harness.shell()?.iconPath).toMatch(/\/build\/app-icon\.png$/u)
+      expect(harness.shell()?.iconPath.endsWith(join('build', 'app-icon.png'))).toBe(true)
     },
   )
 
