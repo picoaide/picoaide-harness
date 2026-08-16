@@ -4761,6 +4761,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@picoaide/dsh-enterprise@workspace:*, @picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-host-webserver": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-invariants": "npm:0.1.0-rc.6"
+    "@types/node": "npm:^22.20.0"
+    electron: "npm:43.4.0"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  peerDependencies:
+    "@deepseek-ai/dsh": 0.1.0-rc.6
+  languageName: unknown
+  linkType: soft
+
 "@protobufjs/aspromise@npm:^1.1.1, @protobufjs/aspromise@npm:^1.1.2":
   version: 1.1.2
   resolution: "@protobufjs/aspromise@npm:1.1.2"
@@ -6738,6 +6755,7 @@ __metadata:
     "@deepseek-ai/dsh-workflow": "npm:0.1.0-rc.6"
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     "@electron/asar": "npm:3.4.1"
+    "@picoaide/dsh-enterprise": "workspace:*"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"

@@ -14,6 +14,7 @@ const fail = message => { throw new Error(`verify-layout: ${message}`) }
 const workspace = readJson('package.json')
 const upstream = readJson('upstream.json')
 const plugin = readJson('dsh-plugin-desktop/package.json')
+const enterprise = readJson('plugins/dsh-enterprise/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
@@ -23,8 +24,8 @@ const noteRecordPath = `${noteDirectory}/${noteName}.i18n.yaml`
 if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
-if (JSON.stringify(workspace.workspaces) !== JSON.stringify(['dsh-plugin-desktop'])) {
-  fail('the root Yarn workspace must contain only dsh-plugin-desktop')
+if (JSON.stringify(workspace.workspaces) !== JSON.stringify(['dsh-plugin-desktop', 'plugins/dsh-enterprise'])) {
+  fail('the root Yarn workspace must contain only dsh-plugin-desktop and plugins/dsh-enterprise')
 }
 if (plugin.packageManager !== undefined) {
   fail('dsh-plugin-desktop must inherit the root Yarn release')
@@ -51,11 +52,11 @@ if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packa
   fail('the upstream checkout must retain its pnpm package manager')
 }
 
-for (const [owner, manifest] of [['root', workspace], ['plugin', plugin]]) {
+for (const [owner, manifest] of [['root', workspace], ['plugin', plugin], ['enterprise', enterprise]]) {
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'resolutions']) {
     for (const [name, range] of Object.entries(manifest[field] ?? {})) {
       if (typeof range !== 'string') continue
-      if (/^(?:workspace|portal|link):/u.test(range)
+      if (/^(?:portal|link):/u.test(range)
         || (range.startsWith('file:') && range.includes('deepseek-harness'))) {
         fail(`${owner} ${field}.${name} bypasses the published DSH package boundary`)
       }
@@ -80,9 +81,12 @@ if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.reposi
 if (upstreamPackage.version !== upstream.sourceVersion) {
   fail('deepseek-harness package version differs from upstream.json')
 }
-for (const name of Object.keys(plugin.dependencies).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
-  if (plugin.dependencies[name] !== upstream.runtimePackageVersion) {
-    fail(`${name} must use the recorded DSH runtime package family`)
+for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise]]) {
+  const deps = { ...(manifest.dependencies ?? {}), ...(manifest.peerDependencies ?? {}) }
+  for (const name of Object.keys(deps).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
+    if (deps[name] !== upstream.runtimePackageVersion) {
+      fail(`${owner} ${name} must use the recorded DSH runtime package family`)
+    }
   }
 }
 
