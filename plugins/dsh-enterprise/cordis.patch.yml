@@ -1,7 +1,10 @@
-# Enterprise Host rows: the session service provides `picoSession`, then the
-# gateway-model and bootstrap listeners react to its changes, and the auth-gate
-# serves the login surface. All consume the ordinary DSH services.
+# Enterprise Host rows: the bare entry carries the package's client bundle
+# declaration (skill center + account surfaces), the session service provides
+# `picoSession`, then the gateway-model and bootstrap listeners react to its
+# changes, and the auth-gate owns the login gate and skill-store proxy.
 - insert:
+    - id: picoaide-enterprise
+      name: '@picoaide/dsh-enterprise'
     - id: picoaide-session
       name: '@picoaide/dsh-enterprise/session-service'
     - id: picoaide-gateway-model

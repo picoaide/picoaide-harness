@@ -199,6 +199,13 @@ try {
   if (profileMenu?.submenu?.()[0]?.label() !== 'desktop') {
     throw new Error('assembled desktop profile is missing the active profile tray submenu')
   }
+  // The enterprise login gate serves its own page at the Web root while logged
+  // out, so authenticate before verifying the assembled Web app root.
+  ctx.picoSession.setSession({
+    serverURL: 'http://127.0.0.1:1',
+    username: 'profile-smoke',
+    token: 'profile-smoke-token',
+  })
   const response = await fetch(expectedUrl)
   const html = await response.text()
   if (response.status !== 200) {
