@@ -2,9 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { login } from './server-connector/auth.ts'
-import { loadElectronModule } from './server-connector/electron.ts'
-import { SESSION_CHANGED_EVENT } from './session-service.ts'
+import { fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
 
 const LOGIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -51,11 +49,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (res.ok) {
-        err.style.color = '#4ade80'
-        err.textContent = '登录成功'
-        return
-      }
+      if (res.ok) { location.replace('/'); return }
       const data = await res.json().catch(() => ({}))
       err.textContent = data.error?.message || data.error || ('登录失败 (' + res.status + ')')
     } catch (e2) {
@@ -79,15 +73,11 @@ export const Config: z<Config> = z.object({
 export const name = 'auth-gate'
 export const inject = ['webServer', 'picoSession']
 
-interface LoginWindow {
-  isDestroyed(): boolean
-  close(): void
-}
-
 /**
- * Client-owned login surface: a dedicated native window serves the login form,
- * the user submits server address plus credentials, and the client calls the
- * gateway API. The main Web window is never replaced by a login page.
+ * Client-owned login surface served as the main window's first page when no
+ * session exists. The user fills the server address and logs in through the
+ * client's local API, which calls the gateway; on success the page reloads
+ * into the DSH Web app in the same window.
  */
 export function apply(ctx: Context, config: Config): void {
   const loginHTML = LOGIN_HTML.replaceAll('__DEFAULT_SERVER__', config.defaultServer ?? '')
@@ -97,50 +87,20 @@ export function apply(ctx: Context, config: Config): void {
     res.end(JSON.stringify(body))
   }
 
-  let loginWindow: LoginWindow | undefined
+  const session = (): { serverURL: string; token: string } | null => ctx.picoSession.getSession()
 
-  const openLoginWindow = async (): Promise<void> => {
-    if (loginWindow !== undefined) return
-    const mod = await loadElectronModule()
-    if (loginWindow !== undefined) return
-    if (ctx.picoSession.isLoggedIn()) return
-    const BrowserWindow = mod.BrowserWindow
-    if (typeof BrowserWindow !== 'function') return
-    const win = new BrowserWindow({
-      width: 440,
-      height: 620,
-      title: 'PicoAide 登录',
-      resizable: false,
-      minimizable: false,
-      maximizable: false,
-      fullscreenable: false,
-      autoHideMenuBar: true,
-      show: false,
-    })
-    win.once('ready-to-show', () => { win.show() })
-    win.on('closed', () => { if (loginWindow === win) loginWindow = undefined })
-    loginWindow = win
-    void win.loadURL(`http://127.0.0.1:${String(ctx.webServer.port)}/login`)
+  const gatewayError = (res: ServerResponse, cause: unknown): void => {
+    const message = cause instanceof Error ? cause.message : String(cause)
+    json(res, 502, { error: `gateway error: ${message}` })
   }
-
-  const closeLoginWindow = (): void => {
-    const win = loginWindow
-    loginWindow = undefined
-    if (win !== undefined && !win.isDestroyed()) win.close()
-  }
-
-  ctx.effect(() => () => { closeLoginWindow() }, 'pico login window')
-
-  // The session restore is asynchronous, so the initial state may settle
-  // before or after this apply: check it now and follow every change.
-  ctx.on(SESSION_CHANGED_EVENT, (session) => {
-    if (session === null) void openLoginWindow()
-    else closeLoginWindow()
-  })
-  if (!ctx.picoSession.isLoggedIn()) void openLoginWindow()
 
   ctx.effect(() => {
     const disposers = [
+      // The main window's first page: the login form while logged out, the
+      // DSH Web app once a session exists. Server-side replacement (not a
+      // client redirect) keeps the initial loadURL from being aborted.
+      ctx.webServer.tapIndex((html) => (ctx.picoSession.isLoggedIn() ? html : loginHTML)),
+
       ctx.webServer.register({
         kind: 'exact', path: '/login',
         handler: (_req: IncomingMessage, res: ServerResponse) => {
@@ -177,12 +137,52 @@ export function apply(ctx: Context, config: Config): void {
 
       ctx.webServer.register({
         kind: 'exact', path: '/api/pico/auth/state',
-        handler: (_req: IncomingMessage, res: ServerResponse) => json(res, 200, { loggedIn: ctx.picoSession.isLoggedIn() }),
+        handler: (_req: IncomingMessage, res: ServerResponse) => {
+          const s = session()
+          json(res, 200, s === null
+            ? { loggedIn: false }
+            : { loggedIn: true, username: ctx.picoSession.getSession()?.username, serverURL: s.serverURL })
+        },
       }),
 
       ctx.webServer.register({
         kind: 'exact', path: '/api/pico/auth/logout',
         handler: (_req: IncomingMessage, res: ServerResponse) => { ctx.picoSession.clear(); json(res, 200, { ok: true }) },
+      }),
+
+      // Skill store proxy: /api/pico/skills (catalog) and
+      // /api/pico/skills/<name>/archive (download), forwarded to the gateway.
+      ctx.webServer.register({
+        kind: 'prefix', path: '/api/pico/skills',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          const s = session()
+          if (s === null) return json(res, 401, { error: 'not logged in' })
+          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          if (pathname === '/api/pico/skills') {
+            try {
+              const data = await fetchJSON(s.serverURL, '/api/marketplace/skills', { token: s.token })
+              json(res, 200, data)
+            } catch (cause) { gatewayError(res, cause) }
+            return
+          }
+          const match = /^\/api\/pico\/skills\/([^/]+)\/archive$/u.exec(pathname)
+          if (match === null) return json(res, 404, { error: 'not found' })
+          const name = decodeURIComponent(match[1]!)
+          try {
+            const upstream = await gatewayFetch(
+              `${s.serverURL}/api/marketplace/skills/${encodeURIComponent(name)}/archive`,
+              { headers: { Authorization: `Bearer ${s.token}` } },
+            )
+            if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+            const content = Buffer.from(await upstream.arrayBuffer())
+            res.writeHead(200, {
+              'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+              'Content-Length': String(content.length),
+              'Content-Disposition': `attachment; filename="${name}.tar.gz"`,
+            })
+            res.end(content)
+          } catch (cause) { gatewayError(res, cause) }
+        },
       }),
     ]
     return () => { for (const dispose of disposers) dispose() }
