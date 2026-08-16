@@ -98,7 +98,7 @@ for (const notePath of notePaths) {
   // differ per host, while HEAD:<path> is identical everywhere.
   const expected = run('git', ['rev-parse', `HEAD:${notePath}`])
   const recordLine = `${basename(notePath)}: ${expected}`
-  if (!noteRecord.split('\n').includes(recordLine)) {
+  if (!noteRecord.split(/\r?\n/u).includes(recordLine)) {
     fail(`${noteRecordPath} is stale for ${notePath}`)
   }
 }
