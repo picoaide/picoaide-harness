@@ -1,28 +1,43 @@
+<h1 align="center">DeepSeek Harness Desktop (DSH Desktop)</h1>
+
+<p align="center">
+  <strong>An open-source DeepSeek Harness desktop client for Windows and macOS.</strong><br>
+  Electron, Node.js, pnpm, and pinned DSH dependencies are included, so you can install and launch without setting up a command-line environment.
+</p>
+
+<p align="center"><sub>Community maintained and not an official DeepSeek product. <a href="README.md">中文</a> · English</sub></p>
+
 <p align="center">
   <img src="assets/desktop-hero-en.jpg" alt="DeepSeek Harness Desktop" width="100%">
 </p>
 
 <p align="center">
+  <a href="https://github.com/anywhere-labs/deepseek-harness-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/anywhere-labs/deepseek-harness-desktop?style=flat&amp;label=release&amp;color=4D6BFE" alt="Latest release"></a>
+  <a href="https://github.com/anywhere-labs/deepseek-harness-desktop/releases"><img src="https://img.shields.io/github/downloads/anywhere-labs/deepseek-harness-desktop/total?style=flat&amp;label=downloads&amp;color=4D6BFE" alt="Total downloads"></a>
   <a href="https://github.com/anywhere-labs/deepseek-harness-desktop"><img src="https://img.shields.io/github/stars/anywhere-labs/deepseek-harness-desktop?style=flat&amp;label=%E2%98%85&amp;color=08C" alt="GitHub stars"></a>
-  <img src="https://img.shields.io/badge/Desktop-App-47848F?style=flat" alt="Desktop application">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
   <a href="https://discord.gg/TJeGqKRNM"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat&amp;logo=discord&amp;logoColor=white" alt="Join Discord"></a>
   <img src="https://img.shields.io/badge/macOS%20%7C%20Windows-4493F8?style=flat-square" alt="Supported platforms: macOS and Windows">
 </p>
 
-<p align="center"><sub><a href="README.md">中文</a> · English</sub></p>
-
-<h3 align="center">A modern desktop experience for the DeepSeek Harness ecosystem (<a href="#plugin-ecosystem">Plugin</a>)</h3>
-
-<a id="run"></a>
-
-<h3 align="center"><a href="https://www.dshdesktop.cn"><ins>Download Desktop</ins></a></h3>
-
 <p align="center">
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
 </p>
 
-DSH Desktop brings [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to native macOS and Windows applications. Official Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate [DSH plugin](docs/user-guide.en.md#plugin-management).
+DSH Desktop packages the local Web UI, Host service, and plugin system from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) into a native desktop application. Official Harness runs unchanged at a pinned version; Desktop provides the window, tray, terminal, updates, and work profiles through the official plugin composition.
+
+<a id="run"></a>
+
+## Download and install
+
+Current release installers support Windows x64 and Apple Silicon macOS. Ordinary users do not need to install Node.js, pnpm, or DSH separately.
+
+| Platform | Download | Installation |
+| --- | --- | --- |
+| Windows x64 | [Download installer](https://www.dshdesktop.cn/api/downloads/windows) | Run the NSIS installer and follow its prompts |
+| macOS Apple Silicon | [Download DMG](https://www.dshdesktop.cn/api/downloads/mac) | Open the DMG and drag DSH Desktop into Applications |
+
+Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/anywhere-labs/deepseek-harness-desktop/releases/latest). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [user guide](docs/user-guide.en.md) and [FAQ](docs/faq.en.md) for plugin commands, platform details, and troubleshooting.
 
 Together with every plugin author, we want to build an open, composable, and sustainable DSH plugin ecosystem where plugins grow alongside each other. Read the [DSH plugin ecosystem manifesto](docs/plugin-ecosystem.en.md).
 
@@ -35,6 +50,7 @@ Ordinary users can start with the [user guide](docs/user-guide.en.md); the devel
 | Goal | Entry point |
 | --- | --- |
 | Install and use the application | [User guide](docs/user-guide.en.md) |
+| Check platforms, prerequisites, and product boundaries | [FAQ](docs/faq.en.md) |
 | Understand why the project exists | [Why DSH Desktop](docs/why-desktop.en.md) |
 | See the full documentation and README map | [Documentation index](docs/README.en.md) |
 

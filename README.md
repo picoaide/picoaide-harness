@@ -1,28 +1,43 @@
+<h1 align="center">DeepSeek Harness Desktop（DSH Desktop）</h1>
+
+<p align="center">
+  <strong>面向 Windows 和 macOS 的开源 DeepSeek Harness 桌面客户端。</strong><br>
+  内置 Electron、Node.js、pnpm 和固定版本的 DSH 依赖，无需配置命令行环境，下载安装即可使用。
+</p>
+
+<p align="center"><sub>社区维护的开源项目，并非 DeepSeek 官方产品。中文 · <a href="README.en.md">English</a></sub></p>
+
 <p align="center">
   <img src="assets/desktop-hero-zh.jpg" alt="DeepSeek Harness 桌面端" width="100%">
 </p>
 
 <p align="center">
+  <a href="https://github.com/anywhere-labs/deepseek-harness-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/anywhere-labs/deepseek-harness-desktop?style=flat&amp;label=release&amp;color=4D6BFE" alt="Latest release"></a>
+  <a href="https://github.com/anywhere-labs/deepseek-harness-desktop/releases"><img src="https://img.shields.io/github/downloads/anywhere-labs/deepseek-harness-desktop/total?style=flat&amp;label=downloads&amp;color=4D6BFE" alt="Total downloads"></a>
   <a href="https://github.com/anywhere-labs/deepseek-harness-desktop"><img src="https://img.shields.io/github/stars/anywhere-labs/deepseek-harness-desktop?style=flat&amp;label=%E2%98%85&amp;color=08C" alt="GitHub stars"></a>
-  <img src="https://img.shields.io/badge/Desktop-App-47848F?style=flat" alt="Desktop application">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
   <a href="https://discord.gg/TJeGqKRNM"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat&amp;logo=discord&amp;logoColor=white" alt="Join Discord"></a>
   <img src="https://img.shields.io/badge/macOS%20%7C%20Windows-4493F8?style=flat-square" alt="Supported platforms: macOS and Windows">
 </p>
 
-<p align="center"><sub>中文 · <a href="README.en.md">English</a></sub></p>
-
-<h3 align="center">为DeepSeek Harness生态打造的现代化桌面端体验（<a href="#插件生态">插件</a>）</h3>
-
-<a id="run"></a>
-
-<h3 align="center"><a href="https://www.dshdesktop.cn"><ins>立刻下载 MacOS/Windows</ins></a></h3>
-
 <p align="center">
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop 界面预览" width="100%">
 </p>
 
-DSH Desktop 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 装进了 macOS 和 Windows 的原生桌面应用。官方 Harness 以固定版本原样运行；桌面壳本身——窗口、托盘、终端、更新、工作配置——就是一个合法的 [DSH 插件](docs/user-guide.md#插件管理)。
+DSH Desktop 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的本地 Web UI、Host 服务和插件系统装进原生桌面应用。官方 Harness 以固定版本原样运行；Desktop 负责窗口、托盘、终端、更新和工作配置，并通过官方插件机制与 Harness 组合。
+
+<a id="run"></a>
+
+## 下载与安装
+
+当前正式安装包支持 Windows x64 和搭载 Apple 芯片的 macOS。普通用户不需要单独安装 Node.js、pnpm 或 DSH。
+
+| 平台 | 下载 | 安装方式 |
+| --- | --- | --- |
+| Windows x64 | [下载安装程序](https://www.dshdesktop.cn/api/downloads/windows) | 运行 NSIS 安装程序并按提示完成安装 |
+| macOS Apple Silicon | [下载 DMG](https://www.dshdesktop.cn/api/downloads/mac) | 打开 DMG，将 DSH Desktop 拖入 Applications |
+
+也可以从 [GitHub Releases](https://github.com/anywhere-labs/deepseek-harness-desktop/releases/latest) 获取安装包和 SHA-256 摘要。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
 
 我们希望和所有插件作者一起，构建一个开放、可组合、可持续的 DSH 插件生态，让每个插件都能与其他插件共同进步：[DSH 插件生态倡议书](docs/plugin-ecosystem.md)。
 
@@ -35,6 +50,7 @@ DSH Desktop 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 | 目标 | 入口 |
 | --- | --- |
 | 安装和日常使用 | [用户指南](docs/user-guide.md) |
+| 快速确认平台、环境和使用边界 | [常见问题](docs/faq.md) |
 | 了解项目为什么存在 | [为什么做 DSH Desktop](docs/why-desktop.md) |
 | 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
 
