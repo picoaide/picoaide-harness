@@ -26,7 +26,7 @@ import {
   type DesktopProfileStartup,
 } from './profile-manager.ts'
 import { DesktopProfileService } from './profile-service.ts'
-import { prepareDesktopProfile } from './profile.ts'
+import { prepareDesktopProfile, type SkippedOptionalEntry } from './profile.ts'
 import type { DesktopPnpmBootstrap } from './pnpm.ts'
 import {
   createDesktopExitCoordinator,
@@ -45,6 +45,26 @@ function notifyProfileRecovery(runtime: ElectronDesktopRuntime, body: string): v
   } catch (cause) {
     process.stderr.write(
       `${BIN_NAME}: failed to show profile recovery notification: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+    )
+  }
+}
+
+/** Report optional user UI plugins skipped to keep startup recoverable. */
+function notifySkippedOptionalEntries(
+  runtime: ElectronDesktopRuntime,
+  entries: readonly SkippedOptionalEntry[],
+): void {
+  if (entries.length === 0) return
+  const names = entries.map(entry => entry.name)
+  const suffix = names.length > 1 ? ` and ${names.length - 1} more` : ''
+  try {
+    runtime.updates.notify({
+      title: 'Skipped Unavailable UI Plugin',
+      body: `${names[0]} is not installed in this profile${suffix}.`,
+    })
+  } catch (cause) {
+    process.stderr.write(
+      `${BIN_NAME}: failed to show skipped plugin notification: ${cause instanceof Error ? cause.message : String(cause)}\n`,
     )
   }
 }
@@ -201,6 +221,7 @@ async function start(): Promise<void> {
     await runtime.mountScheduled(() => {
       markDesktopProfileHealthy(selectionStatePath, activeProfileName)
     })
+    notifySkippedOptionalEntries(runtime, prepared.skippedOptionalEntries)
     if (profileStartup.rolledBackFrom !== undefined) {
       notifyProfileRecovery(
         runtime,
