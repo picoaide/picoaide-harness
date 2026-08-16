@@ -103,4 +103,13 @@ for (const notePath of notePaths) {
   }
 }
 
+const readmeRecord = readFileSync(resolve(root, 'README.i18n.yaml'), 'utf8')
+for (const readmeName of ['README.md', 'README.en.md']) {
+  const expected = run('git', ['rev-parse', `HEAD:${readmeName}`])
+  const recordLine = `${readmeName}: ${expected}`
+  if (!readmeRecord.split(/\r?\n/u).includes(recordLine)) {
+    fail(`README.i18n.yaml is stale for ${readmeName}`)
+  }
+}
+
 process.stdout.write(`verify-layout: Yarn workspace and upstream ${upstream.commit.slice(0, 10)} are consistent\n`)
