@@ -40,13 +40,9 @@ jobs:
           path: server/bin/picoaide-server
           if-no-files-found: error
 
-  desktop:
-    name: Desktop (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+  desktop-linux:
+    name: Desktop (Linux)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,11 +52,48 @@ jobs:
           node-version: 22.23.2
       - run: corepack enable
       - run: yarn install --immutable
-      - if: runner.os == 'Linux'
-        run: yarn check
+      - run: yarn check
       - run: yarn workspace dsh-plugin-desktop package:dir
       - uses: actions/upload-artifact@v7
         with:
-          name: desktop-${{ runner.os }}
+          name: desktop-Linux
+          path: dsh-plugin-desktop/dist/
+          if-no-files-found: error
+
+  desktop-windows:
+    name: Desktop (Windows installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn workspace dsh-plugin-desktop dist:win
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-Windows-installer
+          path: dsh-plugin-desktop/dist/*Setup*.exe
+          if-no-files-found: error
+
+  desktop-macos:
+    name: Desktop (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn workspace dsh-plugin-desktop package:dir
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macOS
           path: dsh-plugin-desktop/dist/
           if-no-files-found: error
