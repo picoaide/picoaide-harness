@@ -81,11 +81,9 @@ DSH Desktop 没有魔改上游源码，也不是一个固定写死的外壳。�
 
 我们希望插件生态像手机应用一样：每个插件按同一套规则开发，装在一起也能一起工作、互不干扰。
 
-兼容模式尽量保持官方默认体验；高级模式则提供更完整的桌面布局和系统效果。插件市场、手机远程和 Channels 仍是后续规划，不代表当前安装包已经提供这些入口。
-
 ### 给开发者
 
-Desktop 的插件能力已经可以使用。我们提供了 Desktop 服务，让插件开发者能够把插件与桌面能力集成起来：例如查看和切换工作配置，或在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
+这个项目本身就是一个 DSH [插件](docs/plugin-development.md)：桌面壳与第三方插件走同一条官方组合路径。Desktop 的插件能力已经可以使用。我们提供了 Desktop 服务，让插件开发者能够把插件与桌面能力集成起来：例如查看和切换工作配置，或在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
 
 ## 与官方项目的关系
 

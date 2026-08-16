@@ -81,11 +81,9 @@ DSH Desktop does not fork or modify upstream source, and it is not a fixed, hard
 
 We want the plugin ecosystem to work like a phone app store: every plugin is built against the same set of rules, so plugins can be installed together and work together without interfering with each other.
 
-Compatibility mode stays close to the official default experience; advanced mode adds a fuller desktop layout and system effects. The plugin marketplace, mobile remote control, and Channels remain future plans and are not part of the current installer.
-
 ### For developers
 
-Desktop plugin capabilities are now available. We provide Desktop services so plugin developers can integrate their plugins with desktop capabilities: for example, viewing and switching work profiles, or installing, updating, and removing plugins in the active profile. See the [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) for complete usage details. See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
+This project itself is a DSH [plugin](docs/plugin-development.en.md): the desktop shell composes through the same official path as third-party plugins. Desktop plugin capabilities are now available. We provide Desktop services so plugin developers can integrate their plugins with desktop capabilities: for example, viewing and switching work profiles, or installing, updating, and removing plugins in the active profile. See the [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) for complete usage details. See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
 
 ## Relationship to the Official Project
 
