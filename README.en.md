@@ -22,7 +22,9 @@
   <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
 </p>
 
-DSH Desktop brings [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to native macOS and Windows applications. Official Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate [DSH plugin](docs/user-guide.en.md#plugin-management). Together with every plugin author, we want to build an open, composable, and sustainable DSH plugin ecosystem where plugins grow alongside each other. Read the [DSH plugin ecosystem manifesto](docs/plugin-ecosystem.en.md).
+DSH Desktop brings [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to native macOS and Windows applications. Official Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate [DSH plugin](docs/user-guide.en.md#plugin-management).
+
+Together with every plugin author, we want to build an open, composable, and sustainable DSH plugin ecosystem where plugins grow alongside each other. Read the [DSH plugin ecosystem manifesto](docs/plugin-ecosystem.en.md).
 
 ## Documentation
 
@@ -55,18 +57,18 @@ Ordinary users can start with the [user guide](docs/user-guide.en.md); the devel
       <p>Bring the official DeepSeek Harness local Web UI to a native desktop application. The app starts and manages the local Harness service, integrates the system tray and desktop window, and requires no Node.js installation or command-line setup.</p>
     </td>
     <td width="50%" valign="top">
-      <h3>Mobile Remote Control <img src="https://img.shields.io/badge/COMING_SOON-F59E0B?style=flat-square" alt="Coming Soon"></h3>
+      <h3>Mobile <a href="https://github.com/anywhere-labs/Agents-Anywhere">Remote Control</a> <img src="https://img.shields.io/badge/COMING_SOON-F59E0B?style=flat-square" alt="Coming Soon"></h3>
       <p>Connect to Desktop from iOS and Android to start tasks, monitor Agent progress, and send follow-ups from your phone.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>Plugin Marketplace <img src="https://img.shields.io/badge/COMING_SOON-F59E0B?style=flat-square" alt="Coming Soon"></h3>
+      <h3><a href="docs/plugin-ecosystem.en.md">Plugin Marketplace</a> <img src="https://img.shields.io/badge/COMING_SOON-F59E0B?style=flat-square" alt="Coming Soon"></h3>
       <p>Harness follows an “everything is a plugin” architecture. The desktop marketplace will make it easy to discover, install, update, and manage plugins for models, tools, interfaces, and workflows.</p>
     </td>
     <td width="50%" valign="top">
-      <h3>Channels <img src="https://img.shields.io/badge/COMING_SOON-F59E0B?style=flat-square" alt="Coming Soon"></h3>
-      <p>Connect WeChat, Feishu, Discord, WhatsApp, and other IM channels to start tasks, receive progress updates, and continue conversations from the apps you already use.</p>
+      <h3>Co-build the Plugin Ecosystem</h3>
+      <p>The DSH plugin ecosystem is built by the community. Official, desktop, and third-party plugins follow the same conventions, so they can be installed together and work together without interfering with each other. Join us — read the <a href="docs/plugin-ecosystem.en.md">DSH plugin ecosystem manifesto</a>.</p>
     </td>
   </tr>
 </table>
