@@ -1,0 +1,22 @@
+import { defineConfig } from 'tsdown'
+
+const PACKAGE_NAME = '@picoaide/dsh-enterprise'
+
+export default defineConfig({
+  name: PACKAGE_NAME,
+  entry: {
+    index: 'src/index.ts',
+    'auth-gate': 'src/auth-gate.ts',
+    'gateway-model': 'src/gateway-model.ts',
+    bootstrap: 'src/bootstrap.ts',
+  },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  clean: true,
+  sourcemap: true,
+  external: ['@deepseek-ai/cordis', '@deepseek-ai/dsh-host-webserver', 'electron'],
+})
