@@ -97,6 +97,8 @@ The exact experimental v0.1 surface is deliberately small. `host.info`, `log`, a
 
 This scope is informed by three source studies rather than an invented API wishlist: [mature plugin framework patterns](../research/mature-plugin-frameworks.md), the detailed [VS Code extension model](../research/vscode-extension-model.md), and [twelve representative DSH plugins](../research/dsh-plugin-needs.md). Those studies also define the seams that v0.1 must preserve for later Host/Client faces, typed renderers, cross-face messaging, interceptors, context contributions, and mediated system access.
 
+[Community Issue #23](https://github.com/omdsh-dev/community/issues/23) supplied concrete counterexamples after this architecture was drafted. The [disposition record](../research/community-issue-23-review.md) explains each decision. Follow-up Drafts now isolate [Runtime/Presentation invocation](../rfcs/0002-runtime-presentation-invocation-transport.md), [service composition](../rfcs/0003-service-providers-and-composition.md), and [provenance plus effect ownership](../rfcs/0004-provenance-validation-and-diagnostics.md) so none of them silently expands the experimental v0.1 contract.
+
 ### 4.1 Portable Core
 
 | Capability | Operations | Constraints |

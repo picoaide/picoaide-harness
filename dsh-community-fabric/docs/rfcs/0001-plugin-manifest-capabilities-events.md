@@ -8,7 +8,7 @@ English | [中文](0001-plugin-manifest-capabilities-events.zh.md)
 | Target | Experimental v0.1 |
 | Scope | Interoperability contract between plugins and Hosts |
 | Reference implementation | DSH Community Fabric (not implemented) |
-| Discussion | Issues, discussions, and pull requests editing this document |
+| Discussion | [Community Issue #23](https://github.com/omdsh-dev/community/issues/23), related discussions, and pull requests editing this document |
 
 ## 0. Summary
 
@@ -23,6 +23,8 @@ This is a community discussion draft, not an official DeepSeek or DSH standard a
 Existing DSH plugins continue to use current package metadata, Cordis services, slots, and patches. Fabric begins as an interoperability layer assembled by Host integrations over a versioned DSH Adapter. It neither requires immediate upstream changes nor requires a Host to remove built-in or legacy extensions.
 
 The words MUST, SHOULD, and MAY describe the strength of proposals. They do not create a stable compatibility promise until the RFC is accepted, schemas are published, and conformance tests exist.
+
+The filename, topology, composition, and provenance refinements in this revision respond to counterexamples collected in [community Issue #23](https://github.com/omdsh-dev/community/issues/23). They are decisions of this draft, not a claim that the community discussion has already reached formal consensus.
 
 ## 2. Motivation
 
@@ -91,13 +93,23 @@ Breaking standard changes require a new incompatible API range. During `0.x`, ex
 - **Host-side runtime face:** the Node.js environment inside a Host product that executes a v0.1 plugin entrypoint.
 - **Activation instance:** one bounded activation of one plugin entrypoint; lifecycle and resource ownership are scoped to it.
 - **Adapter:** the implementation mapping Fabric capabilities to a concrete DSH/Cordis version.
+- **Runtime:** the execution placement plus trust and resource boundary in which plugin code runs.
+- **Presentation:** the user-facing capabilities attached to one interaction, such as a GUI window, browser, TUI, or headless caller.
+- **Control:** the authority that selects plugins, applies policy, routes an invocation, and owns cancellation.
+- **Transport:** the mechanism carrying contract messages between those parties, such as in-process calls, IPC, WebSocket, or SSH forwarding.
 
 v0.1 specifies only a Host-side Node.js entrypoint and its activation instance. Browser Client, native UI, isolated Worker, and other executable faces plus their communication protocols are later RFCs. TUI is a Host product in this document, not a runtime-face name.
+
+### 6.2 Runtime topology is not a Host type
+
+Runtime, Presentation, Control, and Transport are independent axes. They MUST NOT be collapsed into fields such as `hostType: "gui"` or `isRemote: true`: a plugin can execute on a remote Node.js Runtime, be controlled by a server-side session, present through a local GUI, and cross SSH plus WebSocket transports in one invocation. Transport never proves where code executes, which surface is present, or who may authorize an action.
+
+A Host Descriptor may advertise the presentation kinds it can potentially route, but that is not a grant and not evidence that a surface exists for a particular call. Any future presentation capability is **invocation-scoped**: the Control plane supplies a versioned, immutable invocation snapshot describing the currently attached surface and grants, and plugin code must not cache that offer as activation-global state. [RFC 0002](0002-runtime-presentation-invocation-transport.md) proposes identities, routing, authentication, cancellation, reconnect, replay, and failure boundaries without enlarging v0.1. Experimental v0.1 exposes no generic presentation channel.
 
 ## 7. Core model
 
 ```text
-Manifest (plugin identity and requests)
+Manifest (plugin identity, requirements, exports, and contributions)
     ↓
 Host Descriptor (Host support and execution mode)
     ↓
@@ -110,10 +122,13 @@ Capability-scoped Host API
 
 ### 7.1 Manifest
 
-v0.1 uses static JSON and rejects dynamically generated JavaScript manifests. A real implementation requires a published JSON Schema, fixed location, path rules, and valid/invalid fixtures. This example is only a discussion shape:
+v0.1 freezes the manifest as static JSON at **`dsh-plugin.json` in the package root** and rejects dynamically generated JavaScript manifests. The distinct name is deliberate: the [Agent Plugins Specification](https://agent-plugins.org/specification) Working Draft already reserves root `plugin.json` for its own manifest contract. A package may support both ecosystems with both files, but neither file overrides or silently extends the other.
+
+The Phase 0 schema MUST require a top-level `$schema` canonical identifier. A Host selects a locally supported, bundled schema from that identifier and MUST NOT retrieve a schema or other validation policy over the network while loading a plugin. The canonical identifier becomes immutable when the schema is published. `$schema` selects manifest parsing and validation; if `manifestVersion` remains in the final shape, it MUST match the schema version selected by `$schema` rather than create another negotiation axis. The separate `apiVersion` remains the plugin's requested runtime Host API range. The placeholder below is therefore a discussion marker, not a published identifier or valid fixture.
 
 ```json
 {
+  "$schema": "<canonical v0.1 dsh-plugin.json schema identifier>",
   "manifestVersion": "0.1.0",
   "id": "com.example.message-memory",
   "name": "Message Memory",
@@ -132,6 +147,9 @@ v0.1 uses static JSON and rejects dynamically generated JavaScript manifests. A 
       "ui.panel.basic": ">=0.1.0 <0.2.0"
     }
   },
+  "subscriptions": [
+    { "event": "messages.observe", "version": ">=0.1.0 <0.2.0" }
+  ],
   "contributes": {
     "commands": [
       { "id": "com.example.message-memory.show-last", "title": "Show Last Message" }
@@ -150,7 +168,21 @@ The final schema must also define:
 - contribution ID namespaces and conflicts;
 - the authority of fields duplicated in npm package metadata.
 
-Before freezing the schema, the working group must decide whether to separate four declaration classes: `requires` for Host feature dependencies, `permissions` for user grants, `contributes` for declarative extensions, and `subscriptions` for event interests. Sharing one manifest does not make them the same security object.
+The schema and tooling MUST keep five declaration classes semantically separate, even if their final JSON nesting is refined with fixtures:
+
+| Declaration | Meaning |
+| --- | --- |
+| `requires` | Versioned Host capabilities or service contracts needed by the plugin, including required and optional dependencies. |
+| `permissions` | User- or policy-granted sensitive scopes; support alone does not grant them. |
+| `provides` | Versioned service or Provider contracts exported for other plugins or the Host to consume. |
+| `contributes` | Declarative product metadata discoverable before code executes. |
+| `subscriptions` | Event interests that control delivery after eager activation, not activation triggers. |
+
+These five names reserve distinct semantics for the standard roadmap; they do not make every class executable in v0.1. The v0.1 schema MUST reject `provides` and `requires.services` until the service-composition contract and a versioned schema revision are accepted. A Host must not preserve an unsupported field inertly and present it as functional. The initial schema accepts only the requirement, permission, subscription, and contribution forms whose concrete v0.1 contracts exist.
+
+Sharing one manifest does not make these the same compatibility or security object. A consumer depends on a `provides` contract ID and version, never on the concrete package chosen to satisfy it. v0.1 reserves this declaration class but exposes no general plugin-provided service runtime; [RFC 0003](0003-service-providers-and-composition.md) proposes cardinality, multiple instances, user selection, replacement, and dependency cycles for a later runtime.
+
+In the discussion example, `capabilities.required` / `optional` is the provisional v0.1 encoding of Host capability requirements, while `subscriptions` separately requests event delivery. The final schema may nest the former under `requires`; it must not merge either declaration with permissions, exports, or contributions.
 
 Following the VS Code Contribution Point pattern, `contributes` describes metadata that a Host can discover before plugin code runs; it is not a capability, grant, runtime implementation, or activation trigger. After activation, plugin code may bind handlers or Providers only to IDs declared in the manifest. Tooling and conformance tests should report both declared-but-unbound and bound-but-undeclared entries.
 
@@ -183,6 +215,8 @@ Every compatible Host publishes a machine-readable descriptor. This is also only
 
 Compatibility is primarily derived from API and capabilities, not ambiguous names such as `gui>=2.0`. Exceptional Host constraints use stable organization-namespaced IDs.
 
+The descriptor reports the Runtime and trust mode it actually supplies. It MUST NOT use `hostType` or `isRemote` as a shortcut for Runtime, Presentation, Control, or Transport, and a statically advertised presentation kind does not become an activation-wide capability.
+
 Markets distinguish at least:
 
 - **declared compatible:** static negotiation passed;
@@ -210,11 +244,17 @@ A capability is a versioned Host service contract. Candidate v0.1 namespaces are
 
 Each capability defines methods, schemas, errors, cancellation, lifecycle, privacy, resource limits, and tests. Private extensions use organization namespaces such as `x-org.example.tui.keymap`.
 
+The standard publishes a versioned, machine-readable Capability Registry rather than asking implementations to scrape this RFC. Every entry contains at least its canonical ID and version, status, owning RFC, input/output/error schema identifiers and immutable hashes, sensitivity and grant class, lifecycle scope, and deprecation or replacement metadata. A Host Descriptor advertises exact registry entries it implements; private entries remain explicitly namespaced and cannot masquerade as standard capabilities.
+
 Every contribution and Provider contract also defines cardinality, selector, priority, merge / first-result / pipeline / user-choice behavior, equal-priority tie-breaking, error isolation, timeout, duplicate registration, and hot replacement. Load order cannot become an undocumented conflict-resolution rule.
 
 The “one standard method” rule applies inside the Fabric contract. It does not claim to stop trusted in-process code from importing Node.js APIs directly.
 
 Declarative contributions never imply runtime access or a grant. Manifest command metadata is authoritative; a command contribution also requests `commands`, and plugin code only binds its handler by ID. Required APIs are present after negotiation. Optional APIs remain optional until an explicit capability check narrows them.
+
+The v0.1 `commands` contract is deliberately limited to **flat action leaves**: one globally namespaced command ID maps to one declared action and one activation-owned handler. A Host chooses whether that action appears in a palette, menu, button, or TUI without changing its identity. Nested command trees, subcommands, CLI-style option parsing, interactive prompts, streaming output, and background command sessions are outside v0.1.
+
+Device codes, temporary URLs, QR codes, confirmations, and similar short-lived interaction MUST NOT be smuggled into persistent session messages. [RFC 0002](0002-runtime-presentation-invocation-transport.md) proposes expiring, sensitivity-labelled presentation items and delivery acknowledgements for a later protocol. Until then, a v0.1 command cannot require such a channel.
 
 ### 7.4 Lifecycle and events
 
@@ -237,7 +277,18 @@ A Host guarantees ordering for a normal activation and best-effort deactivation 
 
 Activation and deactivation are Host-invoked activation-instance hooks, not ordinary business events a plugin subscribes to itself. The same v0.1 Host-side entrypoint may activate repeatedly; the final lifecycle contract defines repeated activation, HMR, and provider replacement. Client or isolated-Worker scopes and cross-face communication belong to later RFCs.
 
-v0.1 standardizes lifecycle plus one immutable `messages.observe` event. That event needs a payload schema, sensitive-field rules, ordering within a scope, concurrency, backpressure, error isolation, cancellation signals, and shutdown behavior.
+v0.1 standardizes lifecycle plus one immutable `messages.observe` event. It uses a versioned envelope with at least:
+
+- `envelopeVersion`, `eventType`, and `eventVersion`;
+- a unique `eventId`, source `runtimeId`, and `occurredAt` time;
+- `scopeType`, `scopeId`, and a monotonically increasing `scopeSequence` for ordering within that scope;
+- optional `correlationId` and `causationId` for one operation chain;
+- `privacyClass` and an explicit `redactions` summary;
+- a canonical `payloadSchema` identifier plus the immutable `payload`.
+
+The payload contract still needs to freeze message fields, sensitive-field rules, concurrency, backpressure, error isolation, cancellation signals, and shutdown behavior. Cross-scope global order is not implied by timestamps or delivery order.
+
+The standard also publishes a machine-readable Event Registry. Each entry binds the canonical event ID and version to its envelope and payload schema identifiers plus immutable hashes, scope and ordering rules, privacy/redaction class, delivery/backpressure contract, error policy, status, owning RFC, and deprecation metadata. `subscriptions` and Host Descriptors refer to these registry entries; implementations do not invent equivalent event names from prose.
 
 Mutable or cancellable `before-*` events are deferred. A later RFC must define plugin order, priorities, merge behavior, cancellation continuation, timeout, errors, rollback, reentrancy, per-session ordering, cross-session concurrency, and privacy.
 
@@ -268,6 +319,19 @@ The context exposes only negotiated and granted standard capabilities. A missing
 
 In trusted in-process mode, this remains a supported contract facade rather than a JavaScript security boundary.
 
+### 7.6 Broker ownership and effect ledger
+
+Every standard registration crosses the Host API Broker, which assigns it to the current activation instance. From v0.1 onward, the Broker MUST maintain a machine-readable effect ledger so diagnostics and cleanup can answer which plugin created, replaced, or failed to release a resource. The minimum record contains:
+
+- `ledgerVersion`, `recordId`, a monotonic `sequence`, and `recordedAt`;
+- owner `pluginId`, `pluginVersion` or `manifestDigest`, `activationId`, and `runtimeId`;
+- `effectId`, `effectKind`, canonical contract ID/version, and `resourceId` when one exists;
+- `operation` and resulting `state`, covering at least `create`, `bind`, `replace`, `release`, and `cleanup-failed`;
+- optional `correlationId`, previous/new owner or related effect IDs for replacement, and a non-sensitive `outcome` or canonical `errorCode`;
+- `sensitivityClass` and the applied redaction policy.
+
+Command handlers, subscriptions, Providers, UI contributions, and other activation-owned registrations use the same ownership rule when those contracts exist. The Broker coordinates disposal with the native Host lifecycle and records the outcome. Ledger records MUST NOT include message bodies, secrets, command arguments, or arbitrary plugin payloads by default. The ledger improves provenance and diagnosis; trusted in-process code can still bypass it, so it is not proof of sandbox enforcement.
+
 ## 8. Host obligations
 
 A compatible Host should:
@@ -278,7 +342,9 @@ A compatible Host should:
 4. explain missing required capabilities in user language and make optional degradation deterministic;
 5. preserve normal lifecycle ordering and catch ordinary errors crossing standard callback/Promise boundaries; trusted in-process code cannot isolate `process.exit`, native crashes, or infinite loops;
 6. publish its execution mode and never describe trusted in-process code as sandboxed;
-7. run versioned conformance tests and publish the environment and result.
+7. resolve standard capabilities and events through the published machine-readable registries rather than product-local aliases;
+8. assign every standard registration to a plugin and activation, maintain the minimum effect ledger, and attempt bounded cleanup on disposal;
+9. run versioned conformance tests and publish the environment and result.
 
 ## 9. Relationship to DSH and Cordis
 
@@ -290,7 +356,7 @@ Fabric must not answer loader fragmentation by inventing another loader. A refer
 - a capability without an equivalent mapping is reported unsupported rather than approximated through private APIs;
 - existing plugins may gain manifests through migration tools but do not become invalid merely because Fabric exists.
 
-This proposal rejects source modification, monkey patching, and private-function hooks. Existing `cordis.patch.yml` files are DSH's official declarative profile-composition layers, not source patches; the Fabric adapter itself may enter a profile through a standard bundle patch.
+The portable v0.1 contract rejects source modification, monkey patching, and private-function hooks as plugin APIs. Existing `cordis.patch.yml` files are DSH's official declarative profile-composition layers, not source patches; the Fabric Adapter itself may enter a profile through a standard bundle patch. A separately labelled, version-pinned Adapter experiment may study a reviewed private compatibility bridge, but it cannot expose patch targets to ordinary plugins, advertise them as portable capabilities, or pass portable conformance on that basis.
 
 The current `desktopProfiles` and `desktopPnpm` services in this repository are Desktop-specific Host contracts, not automatic cross-Host standards. Standardizing one of their use cases requires a separate capability RFC and evidence from multiple Hosts.
 
@@ -311,8 +377,9 @@ Its exact runtime surface is: baseline `host.info`, `log`, and lifecycle cancell
 ### Phase 0: standard foundations
 
 - RFC 0000 for governance and status transitions;
-- Manifest JSON Schema;
+- package-root `dsh-plugin.json` Manifest Schema with a required canonical `$schema` identifier;
 - Host Descriptor Schema;
+- machine-readable Capability and Event Registries with immutable schema hashes;
 - valid and invalid fixtures;
 - a pure capability negotiator;
 - a headless conformance harness skeleton.
@@ -322,12 +389,13 @@ Its exact runtime surface is: baseline `host.info`, `log`, and lifecycle cancell
 - one explicit Node.js Host execution environment;
 - discover, validate, negotiate, activate, and deactivate;
 - only low-risk, non-mutating initial capabilities; sensitive read access still requires grants and redaction;
+- Broker-assigned plugin/activation ownership and the minimum effect ledger;
 
 ### Phase 2: events and a minimal contribution
 
-- one immutable `messages.observe` event;
+- one immutable `messages.observe` event with the minimum versioned envelope;
 - `storage.local`;
-- `commands` as the minimal declarative contribution and same-ID runtime binding;
+- `commands` as flat action leaves with same-ID runtime binding, without command trees or interactive presentation;
 - activation-scoped Disposable / AsyncDisposable, bounded drain, and repeated activation;
 - failure, duplicate-ID, undeclared/unbound contribution, timeout, cancellation, and shutdown fixtures.
 - after the complete v0.1 surface exists, interoperability evidence from at least two different Host products or integrations; they may share the same versioned DSH Adapter.
@@ -335,12 +403,14 @@ Its exact runtime surface is: baseline `host.info`, `log`, and lifecycle cancell
 ### Separate later RFCs
 
 - mutable `before-*` events;
-- Runtime Faces and the cross-face bridge;
+- [Runtime / Presentation / Control / Transport identities, invocation routing, command trees, and ephemeral presentation](0002-runtime-presentation-invocation-transport.md);
+- [Service Provider contracts, `provides` composition, cardinality, selection, and dependency cycles](0003-service-providers-and-composition.md);
 - UI Contribution, Provider, Renderer, Rich View, conditions, and a minimal cross-Host UI IR;
 - Project/Profile Trust and experimental-capability graduation;
 - multi-scope storage and Secret capabilities;
 - filesystem, network, and session-write permissions;
 - isolated execution and mediated IPC;
+- [install impact previews plus full provenance, validation, and diagnostic exchange beyond the minimum effect ledger](0004-provenance-validation-and-diagnostics.md);
 - market compatibility labels and test-result interchange.
 
 ## 12. Governance requirements
@@ -353,23 +423,23 @@ The reference implementation cannot define the standard by accident. Behavior be
 
 Experimental v0.1 separates evidence into four classes:
 
-1. **Schema validation:** public Manifest and Host Descriptor Schemas, complete SemVer rules, and valid/invalid fixtures.
-2. **Host conformance:** required/optional negotiation, unknown versions, denied grants, activation order, best-effort shutdown, standard callback errors, and truthful execution mode.
+1. **Schema validation:** public `dsh-plugin.json` and Host Descriptor Schemas, required recognized `$schema`, complete SemVer rules, registries, and valid/invalid fixtures.
+2. **Host conformance:** required/optional negotiation, unknown versions, denied grants, activation order, best-effort shutdown, standard callback errors, truthful Runtime/trust descriptions, and plugin/activation effect ownership.
 3. **Plugin validation:** manifest/entrypoint consistency, declared-capability use, matching contribution declarations/bindings without ID conflicts, optional degradation, releasable synchronous/asynchronous resources after repeated activation, and understandable errors.
 4. **Interop evidence:** two independent Host products or integrations and three example plugins complete the same scenarios as the standard-graduation evidence for v0.1. The Hosts may share a DSH Adapter, but their integration and descriptor evidence remain independent.
 
-Because Events are in both the RFC title and v0.1 scope, at least one immutable observation event has a payload schema, privacy redaction, ordering within its scope, backpressure/timeout, error handling, shutdown semantics, and headless contract tests.
+Because Events are in both the RFC title and v0.1 scope, at least one immutable observation event has the minimum versioned envelope, a payload schema, privacy redaction, ordering within its scope, backpressure/timeout, error handling, shutdown semantics, and headless contract tests.
 
 A Host may claim only that it passes the v0.1 Host conformance suite; a plugin may claim only that it passes v0.1 plugin validation. Neither claim means “safe plugin” or “officially certified.”
 
 ## 14. Open questions
 
-1. What is the fixed manifest filename, and should it live beside or inside `package.json`?
+1. Who owns and publishes canonical `$schema` identifiers and offline compatibility mappings?
 2. How are publisher namespaces proven, transferred, and disputed?
 3. Which Node.js version, module format, and entrypoint-loading boundary should v0.1 support?
-4. Which fields, scopes, and redaction policy belong in the v0.1 `messages.observe` payload?
+4. Which message content fields and redaction rules belong inside the now-defined v0.1 `messages.observe` envelope?
 5. Do capability versions use independent SemVer or follow `apiVersion` during v0?
-6. What evidence proves that `commands` behaves consistently across GUI, Web UI, and TUI Hosts?
+6. What evidence proves that flat `commands` actions behave consistently across GUI, Web UI, and TUI Hosts?
 7. Who publishes, stores, and revokes Host conformance results?
 8. How should RFC review, merge rights, and dispute resolution be governed by the community?
 

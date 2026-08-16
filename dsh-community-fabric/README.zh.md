@@ -38,10 +38,16 @@ Capability 声明有助于兼容判断、用户确认和审计，但它**不会�
 
 可修改的 `before-*` 事件、文件与网络等敏感权限、复杂的跨端 UI、市场认证和隔离执行，都需要独立提案与实际证据。
 
+社区审查还指出了几类不能硬塞进首个里程碑的重要问题：远程执行位置与当前调用界面需要独立身份；插件提供的共享 service 需要确定性组合；用户需要知道插件实际修改了什么、停用后是否清理完整。现在这些议题都拆成独立 Draft RFC，可以分别审查和验证，不会因此暗中扩大 v0.1。
+
 ## 阅读与参与
 
 - [兼容层与开发框架设计](docs/architecture/compatibility-layer.zh.md)
 - [RFC 0001：Plugin Manifest、Capability 与事件模型](docs/rfcs/0001-plugin-manifest-capabilities-events.zh.md)
+- [RFC 0002：Runtime、Presentation、Control、Transport 与 Invocation](docs/rfcs/0002-runtime-presentation-invocation-transport.zh.md)
+- [RFC 0003：Service Provider 与确定性组合](docs/rfcs/0003-service-providers-and-composition.zh.md)
+- [RFC 0004：溯源、验证、诊断与 Effect Ledger](docs/rfcs/0004-provenance-validation-and-diagnostics.zh.md)
+- [社区 Issue #23 意见审查与逐条处置](docs/research/community-issue-23-review.zh.md)
 - [调研：Koishi、Chrome 与 VS Code 的成熟模式](docs/research/mature-plugin-frameworks.zh.md)
 - [调研：VS Code 扩展模型及其对 RFC 的价值](docs/research/vscode-extension-model.zh.md)
 - [调研：真实 DSH 插件需要什么](docs/research/dsh-plugin-needs.zh.md)

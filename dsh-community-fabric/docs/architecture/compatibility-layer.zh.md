@@ -97,6 +97,8 @@ Fabric 不追求“一开始覆盖一切”。它应该先覆盖插件最常见�
 
 这个范围不是凭空列出的 API 愿望清单，而是来自三份源码调研：[成熟插件框架模式](../research/mature-plugin-frameworks.zh.md)、详细的 [VS Code 扩展模型](../research/vscode-extension-model.zh.md)和[十二个代表性 DSH 插件](../research/dsh-plugin-needs.zh.md)。这些调研也规定了 v0.1 必须为后续 Host/Client face、强类型 renderer、跨 face 消息、拦截器、上下文贡献和受控系统访问保留哪些接缝。
 
+这份架构成稿后，[社区 Issue #23](https://github.com/omdsh-dev/community/issues/23) 又提供了具体反例。[意见处置记录](../research/community-issue-23-review.zh.md)解释了每项决定；后续 Draft 分别讨论 [Runtime/Presentation invocation](../rfcs/0002-runtime-presentation-invocation-transport.zh.md)、[service composition](../rfcs/0003-service-providers-and-composition.zh.md)和[溯源与 effect ownership](../rfcs/0004-provenance-validation-and-diagnostics.zh.md)，避免其中任何一项暗中扩大实验性 v0.1 contract。
+
 ### 4.1 Portable Core：所有兼容 Host 都应理解
 
 | Capability | 支持的操作 | 约束 |

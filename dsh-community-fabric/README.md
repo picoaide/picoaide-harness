@@ -38,10 +38,16 @@ The first experimental milestone is intentionally small:
 
 Mutable `before-*` events, sensitive filesystem/network permissions, rich cross-host UI, marketplace certification, and isolated execution require separate proposals and evidence.
 
+Community review also exposed several important problems that should not be forced into the first milestone. Remote execution and the interface currently calling it need separate identities; plugins that provide shared services need deterministic composition; and users need to know what a plugin changed and whether it cleaned up. These topics now have focused Draft RFCs so they can be reviewed and tested independently without expanding v0.1 by implication.
+
 ## Read and participate
 
 - [Compatibility layer and developer framework](docs/architecture/compatibility-layer.md)
 - [RFC 0001: Plugin Manifest, Capabilities, and Events](docs/rfcs/0001-plugin-manifest-capabilities-events.md)
+- [RFC 0002: Runtime, Presentation, Control, Transport, and Invocation](docs/rfcs/0002-runtime-presentation-invocation-transport.md)
+- [RFC 0003: Service Providers and Deterministic Composition](docs/rfcs/0003-service-providers-and-composition.md)
+- [RFC 0004: Provenance, Validation, Diagnostics, and the Effect Ledger](docs/rfcs/0004-provenance-validation-and-diagnostics.md)
+- [Review of Community Issue #23 and the disposition of each proposal](docs/research/community-issue-23-review.md)
 - [Research: lessons from Koishi, Chrome, and VS Code](docs/research/mature-plugin-frameworks.md)
 - [Research: the VS Code extension model and its RFC implications](docs/research/vscode-extension-model.md)
 - [Research: what real DSH plugins need](docs/research/dsh-plugin-needs.md)
