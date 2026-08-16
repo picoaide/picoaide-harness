@@ -101,6 +101,15 @@ async function start(): Promise<void> {
     restartRequested = true
     nativeExit.requestRelaunch()
     await shutdown.request(0)
+  }, (report) => {
+    if (profileStartup === undefined || profileStatePath === undefined) {
+      throw new Error('dsh-plugin-desktop: renderer boot health arrived before profile startup')
+    }
+    if (report.status === 'healthy') {
+      markDesktopProfileHealthy(profileStatePath, profileStartup.profileName)
+    } else {
+      markDesktopProfileFailed(profileStatePath, profileStartup.profileName)
+    }
   })
   const finalExit = (code: number): void => { nativeExit.finish(code) }
   shutdown = createDesktopShutdown(
@@ -218,9 +227,7 @@ async function start(): Promise<void> {
       profileDir: prepared.profile.dir,
       homeDir: prepared.homeDir,
     })
-    await runtime.mountScheduled(() => {
-      markDesktopProfileHealthy(selectionStatePath, activeProfileName)
-    })
+    await runtime.mountScheduled()
     notifySkippedOptionalEntries(runtime, prepared.skippedOptionalEntries)
     if (profileStartup.rolledBackFrom !== undefined) {
       notifyProfileRecovery(

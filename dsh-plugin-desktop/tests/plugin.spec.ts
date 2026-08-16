@@ -1,4 +1,6 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ThemePreference } from '@deepseek-ai/dsh-client-ui-theme'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -13,6 +15,7 @@ import {
   type DesktopSettings,
 } from '../src/index.ts'
 import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
+import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
 
 const config: DesktopConfig = {
   mode: 'compatibility',
@@ -31,6 +34,8 @@ interface PluginHarness {
   update: ReturnType<typeof vi.fn<(patch: object) => Promise<void>>>
   restart: ReturnType<typeof vi.fn<() => Promise<void>>>
   setThemeSource: ReturnType<typeof vi.fn<(source: ThemePreference) => void>>
+  rendererBoot: ReturnType<typeof vi.fn<(report: RendererBootReport) => void>>
+  rendererRoute(): WebRoute | undefined
   notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
   notifyTheme(preference: ThemePreference): void
 }
@@ -41,6 +46,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const update = vi.fn(async (_patch: object) => {})
   const restart = vi.fn(async () => {})
   const setThemeSource = vi.fn<(source: ThemePreference) => void>()
+  const rendererBoot = vi.fn<(report: RendererBootReport) => void>()
+  let rendererRoute: WebRoute | undefined
   let settingsUpdated: ((namespace: unknown, next: unknown) => void) | undefined
   let themePreference: ThemePreference = 'system'
   const runtime: DesktopRuntime = {
@@ -64,6 +71,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     show: () => {},
     registerTrayItem: () => ({ refresh: () => {}, dispose: () => {} }),
     openTerminal: () => {},
+    reportRendererBoot: rendererBoot,
     setThemeSource,
     requestRestart: restart,
     prepareToQuit: () => {},
@@ -87,6 +95,10 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     webServer: {
       host: '127.0.0.1',
       port: 43120,
+      register: vi.fn((route: WebRoute) => {
+        rendererRoute = route
+        return () => { if (rendererRoute === route) rendererRoute = undefined }
+      }),
     },
     settings,
     logger: { warn: vi.fn(), error: vi.fn() },
@@ -104,6 +116,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     update,
     restart,
     setThemeSource,
+    rendererBoot,
+    rendererRoute: () => rendererRoute,
     notify: async (next, prev) => { await watcher?.(next, prev) },
     notifyTheme: (preference) => {
       themePreference = preference
@@ -162,6 +176,31 @@ describe('desktop Host plugin', () => {
 
     await harness.shell()?.requestModeChange('advanced')
     expect(harness.update).toHaveBeenCalledWith({ mode: 'advanced' })
+  })
+
+  it('forwards same-origin renderer boot reports through the Host route', async () => {
+    const harness = createHarness()
+    apply(harness.ctx, config)
+    const route = harness.rendererRoute()
+    expect(route).toEqual(expect.objectContaining({
+      kind: 'exact',
+      path: RENDERER_BOOT_REPORT_PATH,
+    }))
+    const report = { status: 'failed', plugins: ['dsh-vision-router'], error: 'slot conflict' } as const
+    const req = {
+      method: 'POST',
+      headers: {
+        origin: 'http://127.0.0.1:43120',
+        'content-type': 'application/json',
+      },
+      async * [Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(report)) },
+    } as unknown as IncomingMessage
+    const res = { statusCode: 200, end: vi.fn() } as unknown as ServerResponse
+
+    await route?.handler(req, res)
+
+    expect(harness.rendererBoot).toHaveBeenCalledWith(report)
+    expect(res.statusCode).toBe(204)
   })
 
   it.each(['win32', 'linux'] as const)(

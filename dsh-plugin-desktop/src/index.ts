@@ -10,6 +10,10 @@ import {
   type ThemeSettings,
 } from '@deepseek-ai/dsh-client-ui-theme'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import {
+  handleRendererBootRequest,
+  RENDERER_BOOT_REPORT_PATH,
+} from './renderer-boot.ts'
 import type { DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
@@ -108,6 +112,20 @@ export function apply(ctx: Context, config: Config): void {
         }
       },
     },
+  )
+  const rendererOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: RENDERER_BOOT_REPORT_PATH,
+      handler: (req, res) => handleRendererBootRequest(
+        req,
+        res,
+        rendererOrigin,
+        report => { ctx.desktopRuntime.reportRendererBoot(report) },
+      ),
+    }),
+    'dsh-plugin-desktop: renderer boot report route',
   )
   ctx.effect(() => {
     let pending: ReturnType<typeof setImmediate> | undefined

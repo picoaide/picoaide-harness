@@ -528,6 +528,86 @@ describe('Electron compatibility runtime', () => {
     }
   })
 
+  it('shows native recovery when the renderer Loader reports a failed plugin', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 2, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const onRendererBoot = vi.fn()
+    const runtime = new ElectronDesktopRuntime(async () => {}, onRendererBoot)
+    const report = {
+      status: 'failed' as const,
+      plugins: ['dsh-vision-router'],
+      error: 'keyed slot "tool.call.toolview" already has an entry for key "vision_crop" at priority 0',
+    }
+
+    runtime.reportRendererBoot(report)
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce() })
+    runtime.reportRendererBoot({ status: 'healthy' })
+
+    expect(onRendererBoot).toHaveBeenCalledWith(report)
+    expect(onRendererBoot).toHaveBeenCalledOnce()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      title: 'Plugin Recovery',
+      message: 'DSH Desktop could not load all plugins.',
+      detail: expect.stringContaining('dsh-vision-router'),
+      buttons: ['Open DSH Terminal', 'Restart DSH Desktop', 'Dismiss'],
+    }))
+    const recoveryCalls = electron.dialog.showMessageBox.mock.calls as unknown as Array<[{ detail?: string }]>
+    expect(recoveryCalls[0]?.[0].detail).toContain('vision_crop')
+  })
+
+  it('commits a healthy renderer without showing recovery', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const onRendererBoot = vi.fn()
+    const runtime = new ElectronDesktopRuntime(async () => {}, onRendererBoot)
+
+    runtime.reportRendererBoot({ status: 'healthy' })
+
+    expect(onRendererBoot).toHaveBeenCalledWith({ status: 'healthy' })
+    expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('opens the active profile terminal from plugin recovery', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    Object.defineProperty(process.versions, 'electron', {
+      configurable: true,
+      value: '43.4.0',
+    })
+    try {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.configureTerminal({
+        profileName: 'desktop',
+        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
+        homeDir: 'C:\\Users\\Example\\.dsh',
+      })
+
+      runtime.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
+      await vi.waitFor(() => { expect(terminal.open).toHaveBeenCalledOnce() })
+
+      expect(terminal.open).toHaveBeenCalledWith(expect.objectContaining({
+        profileName: 'desktop',
+        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
+      }))
+    } finally {
+      delete (process.versions as { electron?: string }).electron
+    }
+  })
+
+  it('requests an orderly restart from plugin recovery', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    runtime.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() })
+  })
+
   it('uses Electron networking and confirmation-gated macOS update handoff', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const response = Response.json({ version: '2.1.0' })

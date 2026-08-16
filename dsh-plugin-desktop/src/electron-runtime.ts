@@ -30,6 +30,7 @@ import type {
   DesktopTrayItemRegistration,
   DesktopUpdateAdapter,
 } from './runtime.ts'
+import type { RendererBootReport } from './renderer-boot-contract.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
@@ -85,8 +86,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private quitting = false
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
   private terminalSpec: DesktopTerminalSpec | undefined
+  private rendererBootReported = false
 
-  constructor(private readonly restart: () => Promise<void>) {
+  constructor(
+    private readonly restart: () => Promise<void>,
+    private readonly onRendererBoot: (report: RendererBootReport) => void = () => {},
+  ) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: unsupported Electron platform ${process.platform}`)
     }
@@ -201,6 +206,22 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  reportRendererBoot(report: RendererBootReport): void {
+    if (this.rendererBootReported) return
+    this.rendererBootReported = true
+    try {
+      this.onRendererBoot(report)
+    } catch (cause) {
+      process.stderr.write(`dsh-plugin-desktop: failed to persist renderer boot health: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+    }
+    if (report.status === 'failed') {
+      void this.showRendererBootRecovery(report).catch((cause: unknown) => {
+        process.stderr.write(`dsh-plugin-desktop: failed to show plugin recovery: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+      })
+    }
+  }
+
+  /** @inheritdoc */
   setThemeSource(source: DesktopThemeSource): void {
     if (this.scheduled?.mode === 'advanced' && this.window !== undefined) {
       nativeTheme.themeSource = source
@@ -215,6 +236,25 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** @inheritdoc */
   prepareToQuit(): void {
     this.quitting = true
+  }
+
+  private async showRendererBootRecovery(report: Extract<RendererBootReport, { status: 'failed' }>): Promise<void> {
+    const plugins = report.plugins.length === 0
+      ? 'Unknown client plugin'
+      : report.plugins.map(plugin => `- ${plugin}`).join('\n')
+    const error = report.error === undefined ? 'The client Loader did not provide an error message.' : report.error
+    const result = await dialog.showMessageBox({
+      type: 'error',
+      title: 'Plugin Recovery',
+      message: 'DSH Desktop could not load all plugins.',
+      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nOpen DSH Terminal to update or remove the failing third-party plugin, then restart DSH Desktop.`,
+      buttons: ['Open DSH Terminal', 'Restart DSH Desktop', 'Dismiss'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    })
+    if (result.response === 0) this.openTerminal()
+    else if (result.response === 1) await this.requestRestart()
   }
 
   private contributedTrayItems(group: DesktopTrayItemGroup): Electron.MenuItemConstructorOptions[] {

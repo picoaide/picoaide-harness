@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { RendererBootReport } from './renderer-boot-contract.ts'
 import type { UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 
 /** Electron platforms supported by the DSH Desktop native adapter. */
@@ -168,6 +169,9 @@ export interface DesktopRuntime {
 
   /** Open a native terminal containing packaged DSH command shims. */
   openTerminal(): void
+
+  /** Accept the terminal client Loader outcome for the mounted generation. */
+  reportRendererBoot(report: RendererBootReport): void
 
   /** Apply a built-in theme preference to Electron's native appearance. */
   setThemeSource(source: DesktopThemeSource): void
