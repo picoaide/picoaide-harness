@@ -74,11 +74,13 @@
 
 DSH Desktop 没有魔改上游源码，也不是一个固定写死的外壳。官方 DeepSeek Harness 以固定版本原样运行；桌面壳本身——窗口、托盘、终端、更新、工作配置——就是一个合法的 DSH 插件，通过官方插件机制与官方能力组合进同一个运行时。从核心 agent 到桌面外壳，整个产品遵守同一条"一切皆插件"的规则：官方生态里的插件可以直接用，桌面能力也按插件的方式组合、替换和演进。
 
-Desktop 的插件能力已经可以使用。开发者可以通过两个公开接口扩展桌面端：`desktopProfiles` 用来查看和切换工作配置，`desktopPnpm` 用来在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。
+我们希望插件生态像手机应用一样：每个插件按同一套规则开发，装在一起也能一起工作、互不干扰。
 
 兼容模式尽量保持官方默认体验；高级模式则提供更完整的桌面布局和系统效果。插件市场、手机远程和 Channels 仍是后续规划，不代表当前安装包已经提供这些入口。
 
-为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
+### 给开发者
+
+Desktop 的插件能力已经可以使用。开发者可以通过两个公开接口扩展桌面端：`desktopProfiles` 用来查看和切换工作配置，`desktopPnpm` 用来在当前配置中安装、更新和移除插件。完整用法见[桌面插件接口说明](dsh-plugin-desktop/docs/plugin-services.zh.md)。为什么选择这样的边界、哪些能力不会暴露给第三方插件，见[为什么做 DSH Desktop](docs/why-desktop.md)和[插件开发指南](docs/plugin-development.md)。
 
 ## 与官方项目的关系
 

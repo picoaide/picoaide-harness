@@ -23,7 +23,7 @@ Changing mode restarts the application; it does not hot-swap root slots or nativ
 
 ## Plugin management
 
-Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. DSH Desktop uses the same plugin system as official Harness, so official plugins install and work directly.
+Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. DSH Desktop uses the same plugin system as official Harness, so official plugins install and work directly; multiple plugins follow the same conventions and can be installed and used together.
 
 Ordinary DSH plugins use the upstream CLI semantics:
 

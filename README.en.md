@@ -74,11 +74,13 @@ Plugins are extensions that add capabilities to DSH — models, tools, interface
 
 DSH Desktop does not fork or modify upstream source, and it is not a fixed, hardcoded shell. Official DeepSeek Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate DSH plugin, composed into the same runtime through the official plugin mechanism. From the core agent to the desktop shell, the whole product follows the same "everything is a plugin" rule: plugins from the official ecosystem work directly, and desktop capabilities are combined, replaced, and evolve the same way.
 
-Desktop plugin capabilities are now available. Developers can extend the app through two public interfaces: `desktopProfiles` to view and switch work profiles, and `desktopPnpm` to install, update, and remove plugins in the active profile. See the [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) for complete usage details.
+We want the plugin ecosystem to work like a phone app store: every plugin is built against the same set of rules, so plugins can be installed together and work together without interfering with each other.
 
 Compatibility mode stays close to the official default experience; advanced mode adds a fuller desktop layout and system effects. The plugin marketplace, mobile remote control, and Channels remain future plans and are not part of the current installer.
 
-See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
+### For developers
+
+Desktop plugin capabilities are now available. Developers can extend the app through two public interfaces: `desktopProfiles` to view and switch work profiles, and `desktopPnpm` to install, update, and remove plugins in the active profile. See the [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) for complete usage details. See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
 
 ## Relationship to the Official Project
 

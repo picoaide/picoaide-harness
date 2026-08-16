@@ -104,3 +104,17 @@ At minimum, a plugin should cover:
 - Restarting after a plugin change and seeing the bundle in the next Loader composition.
 
 Read the [architecture](architecture.en.md) next, then use the package-level [service contract](../dsh-plugin-desktop/docs/plugin-services.md) as the API reference.
+
+## Ecosystem vision: keep the plugin ecosystem composable
+
+The DSH plugin ecosystem is growing quickly. The more plugins there are, the more their ability to work together matters — if every plugin assumes or overrides another plugin's internals, installing a few plugins starts to conflict and the ecosystem fragments.
+
+We advocate a browser-plugin style of development: everyone extends the same platform against the same conventions, instead of each maintaining a modified runtime of their own. DSH Desktop is the first practitioner of this approach — the desktop shell itself is an ordinary plugin on the same composition path as official and third-party plugins, with no special privileges.
+
+To that end we are starting a development-conventions initiative and hope it becomes a de facto standard through community adoption:
+
+- **Composition first**: compose capabilities through official slots, services, and patches; do not assume or override other plugins' internals.
+- **Declare clearly**: state the services and slots you depend on; do not rely on runtime coincidences.
+- **Compatibility first**: keep upgrades backward compatible and never break existing compositions.
+
+The conventions are a living document that follows ecosystem practice and accepts community discussion and revisions. Once the plugin marketplace ships, compliant plugins will be easier to discover, install, and trust, making convention-driven development the beneficial choice for every author.
