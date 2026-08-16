@@ -156,8 +156,8 @@ Ecosystem projects and developer tools around DeepSeek Harness.
 
 | Project | About | Link |
 | --- | --- | --- |
+| ModLens | Adds OCR, layout, and semantic vision capabilities to DeepSeek Harness and text-only coding agents. | [GitHub](https://github.com/liustack/modlens) · [Website](https://liustack.dev) |
 | DeepSeek Harness Orange Book | Community field manual for DeepSeek Harness. | [GitHub](https://github.com/alchaincyf/deepseek-harness-orange-book) |
-| Awesome DSH Plugin | Curated list of DeepSeek Harness community plugins. | [GitHub](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) · [Website](https://awesome-dsh-plugin.com) |
 | dsh-web-ui | DeepSeek Harness Web UI plugins and themes. | [GitHub](https://github.com/zhu1090093659/dsh-web-ui) · [Gallery](https://gallery.dsh-market.com) |
 | dsh-TUI | Full-screen interactive terminal interface for DeepSeek Harness. | [GitHub](https://github.com/ccch1mneyyy/dsh-TUI) |
 | Agents-Anywhere | Remote-control your desktop coding agent from your phone. | [GitHub](https://github.com/anywhere-labs/Agents-Anywhere) |
