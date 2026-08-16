@@ -1,28 +1,40 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import type { Session } from './server-connector/config.ts'
-import { SESSION_CHANGED_EVENT, type SessionEvents } from './session-service.ts'
 
+/** Credential reference under which the gateway token is stored and resolved. */
 export const TOKEN_ENV = 'PICOAI_GATEWAY_TOKEN'
-const SETTINGS_NS = 'llm-deepseek'
 
-interface SettingsLike { update(ns: string, patch: Record<string, unknown>): Promise<unknown> }
-
+/** Stable Cordis plugin name. */
 export const name = 'gateway-model'
-export const inject = ['settings']
 
+/** Services consumed: settings writes and the credential store the adapter resolves against. */
+export const inject = ['settings', 'credentials', 'picoSession']
+
+const LLM_DEEPSEEK_NS = settingsNamespace('llm-deepseek')
+
+/**
+ * Point the `llm-deepseek` adapter at the enterprise gateway: store the session
+ * token in the credential store and set the adapter's base URL plus credential
+ * reference. Clearing the session removes the credential and resets the section.
+ */
 export function apply(ctx: Context): void {
-  const settings = ctx.get('settings') as SettingsLike
-  const events = ctx as unknown as SessionEvents
-  events.on(SESSION_CHANGED_EVENT, (session: Session | null) => {
-    if (!session) {
-      process.env[TOKEN_ENV] = ''
-      void settings.update(SETTINGS_NS, { baseURL: '', apiKeyEnv: '' })
+  const ref = credentialRef(TOKEN_ENV)
+
+  const sync = async (session: Session | null): Promise<void> => {
+    if (session === null) {
+      await ctx.credentials.unset(ref)
+      await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
       return
     }
-    process.env[TOKEN_ENV] = session.token
-    void settings.update(SETTINGS_NS, {
+    await ctx.credentials.set(ref, session.token)
+    await ctx.settings.update(LLM_DEEPSEEK_NS, {
       baseURL: `${session.serverURL.replace(/\/+$/, '')}/v1`,
       apiKeyEnv: TOKEN_ENV,
     })
-  })
+  }
+
+  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
 }

@@ -9,6 +9,7 @@ export default defineConfig({
     'auth-gate': 'src/auth-gate.ts',
     'gateway-model': 'src/gateway-model.ts',
     bootstrap: 'src/bootstrap.ts',
+    'session-service': 'src/session-service.ts',
   },
   outDir: 'lib',
   format: 'esm',
@@ -18,5 +19,12 @@ export default defineConfig({
   dts: false,
   clean: true,
   sourcemap: true,
-  external: ['@deepseek-ai/cordis', '@deepseek-ai/dsh-host-webserver', 'electron'],
+  external: [
+    '@deepseek-ai/cordis',
+    '@deepseek-ai/dsh-host-webserver',
+    '@deepseek-ai/dsh-settings',
+    '@deepseek-ai/dsh-credentials',
+    '@deepseek-ai/dsh-agent-default-model',
+    'electron',
+  ],
 })

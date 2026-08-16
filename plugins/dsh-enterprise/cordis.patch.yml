@@ -1,9 +1,12 @@
-# Enterprise Host rows: session bootstrap first, then the gateway-model and
-# login gate. All three consume the ordinary DSH settings/webServer services.
+# Enterprise Host rows: the session service provides `picoSession`, then the
+# gateway-model and bootstrap listeners react to its changes, and the auth-gate
+# serves the login surface. All consume the ordinary DSH services.
 - insert:
-    - id: picoaide-bootstrap
-      name: '@picoaide/dsh-enterprise/bootstrap'
+    - id: picoaide-session
+      name: '@picoaide/dsh-enterprise/session-service'
     - id: picoaide-gateway-model
       name: '@picoaide/dsh-enterprise/gateway-model'
+    - id: picoaide-bootstrap
+      name: '@picoaide/dsh-enterprise/bootstrap'
     - id: picoaide-auth-gate
       name: '@picoaide/dsh-enterprise/auth-gate'

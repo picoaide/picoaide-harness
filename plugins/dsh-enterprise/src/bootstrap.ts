@@ -1,83 +1,48 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
-import { loadElectronModule } from './server-connector/electron.ts'
-import { SESSION_CHANGED_EVENT, SESSION_SERVICE, type SessionEvents, type SessionService } from './session-service.ts'
 import type { Session } from './server-connector/config.ts'
 
-export interface Config {
-  tokenFile: string
-}
-
-interface SettingsLike { update(ns: string, patch: Record<string, unknown>): Promise<unknown> }
-
+/** Stable Cordis plugin name. */
 export const name = 'bootstrap'
-export const inject = ['settings']
 
-export function apply(ctx: Context, config: Config): void {
-  const tokenFile = config?.tokenFile || join(process.env.DSH_HOME ?? '', 'session.json')
-  const settings = ctx.get('settings') as SettingsLike
-  const events = ctx as unknown as SessionEvents
+/** Services consumed: settings writes and the session being synced. */
+export const inject = ['settings', 'picoSession']
 
-  let session: Session | null = null
-  const service: SessionService = {
-    isLoggedIn: () => session !== null,
-    getSession: () => session,
-    setSession: (s: Session) => {
-      session = s
-      void persist(tokenFile, s)
-      events.emit(SESSION_CHANGED_EVENT, s)
-      void sync(s)
-    },
-    clear: () => {
-      session = null
-      try { unlinkSync(tokenFile) } catch { /* absent is fine */ }
-      events.emit(SESSION_CHANGED_EVENT, null)
-    },
-  }
-  ctx.provide(SESSION_SERVICE, service)
+const LLM_DEEPSEEK_NS = settingsNamespace('llm-deepseek')
+const AGENT_DEFAULT_MODEL_NS = settingsNamespace('agent-default-model')
 
-  void loadPersisted(tokenFile).then((s) => {
-    if (!s || session) return
-    session = s
-    events.emit(SESSION_CHANGED_EVENT, s)
-    void sync(s)
-  })
+/** The provider route the `llm-deepseek` adapter registers (gateway repoints its base URL). */
+const DEEPSEEK_PROVIDER = 'deepseek-official'
 
-  async function sync(s: Session): Promise<void> {
+/**
+ * Project a gateway session onto the DSH model settings: the gateway model
+ * catalog drives the `llm-deepseek` models list, and the gateway default model
+ * becomes the Agent default. Clearing the session resets both to composition
+ * defaults.
+ */
+export function apply(ctx: Context): void {
+  const sync = async (session: Session | null): Promise<void> => {
+    if (session === null) {
+      await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {})
+      await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
+      return
+    }
     try {
-      const { config: cfg } = await getBootstrap(s)
-      await settings.update('llm-deepseek', { models: cfg.models.map(m => ({ id: m.id, name: m.display_name })) })
-      await settings.update('agent-default-model', { model: cfg.default_model })
-    } catch (err) {
-      console.error('[pico] bootstrap failed:', err)
+      const { config: cfg } = await getBootstrap(session)
+      await ctx.settings.update(LLM_DEEPSEEK_NS, {
+        models: cfg.models.map((m) => ({ id: m.id, name: m.display_name })),
+      })
+      await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {
+        provider: DEEPSEEK_PROVIDER,
+        model: cfg.default_model,
+      })
+    } catch (cause) {
+      ctx.logger.error('pico bootstrap sync failed')
+      ctx.logger.error(cause)
     }
   }
-}
 
-async function loadPersisted(tokenFile: string): Promise<Session | null> {
-  try {
-    const mod = await loadElectronModule()
-    const ss = mod?.safeStorage
-    if (!ss || !ss.isEncryptionAvailable()) return null
-    if (isBasicTextBackend(ss)) return null
-    if (!existsSync(tokenFile)) return null
-    return JSON.parse(ss.decryptString(readFileSync(tokenFile)).toString('utf8')) as Session
-  } catch { return null }
-}
-
-function isBasicTextBackend(ss: { getSelectedStorageBackend?: () => string }): boolean {
-  return typeof ss.getSelectedStorageBackend === 'function' && ss.getSelectedStorageBackend() === 'basic_text'
-}
-
-async function persist(tokenFile: string, s: Session): Promise<void> {
-  const mod = await loadElectronModule()
-  const ss = mod?.safeStorage
-  if (!ss || !ss.isEncryptionAvailable()) return
-  if (isBasicTextBackend(ss)) {
-    console.warn('[pico] token not persisted: safeStorage backend is basic_text (plaintext)')
-    return
-  }
-  writeFileSync(tokenFile, ss.encryptString(JSON.stringify(s)))
+  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
 }
