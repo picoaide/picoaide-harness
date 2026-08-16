@@ -1,0 +1,54 @@
+# PicoAide 服务端 Docker Compose 部署
+# 镜像:ghcr.io/picoaide/picoaide-server(amd64)+ Caddy HTTPS 反代
+#
+# 快速开始:
+#   1. 编辑 Caddyfile,把 picoaide.example.com 换成你的真实域名
+#   2. 启动:docker compose up -d(自动创建超管账号 admin,幂等)
+#   3. 浏览器打开 https://<你的域名>/admin/ 用超管账号登录管理
+#   4. webadmin 网关页填写"对外访问地址"= https://<你的域名>
+#
+# 说明:
+#   - HTTPS 由 Caddy 提供(默认自签名,部署后可在 webadmin 网关页信任);
+#     有公网域名时删掉 Caddyfile 里 `tls internal`,自动换 Let's Encrypt 正式证书
+#   - 数据(数据库/密钥/知识库)落在当前目录 ./picoaide-data,升级镜像不丢数据
+#   - 员工客户端填 https://<你的域名> 登录
+#   - 首次使用前请修改下方 PICOAI_ADMIN_PASSWORD 为强密码
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: picoaide-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - server
+
+  server:
+    image: ghcr.io/picoaide/picoaide-server:latest
+    container_name: picoaide-server
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      # 初始管理员密码(每次启动都会 EnsureBootstrapAdmin,幂等,已存在则跳过)
+      # ⚠ 部署前请改为强密码
+      PICOAI_ADMIN_PASSWORD: change-me-to-a-strong-password
+    volumes:
+      - ./picoaide-data:/data
+    command: ["--bootstrap-admin", "admin"]
+    healthcheck:
+      # /healthz 无需认证返回 200;wget 退出码 0=healthy(连接失败/非200=unhealthy)
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  caddy-data:
+  caddy-config:
