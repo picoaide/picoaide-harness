@@ -228,6 +228,9 @@ try {
   for (const id of [
     '@deepseek-ai/dsh-client-ui-layout',
     '@deepseek-ai/dsh-client-ui-directory-picker-native',
+    // Enterprise model governance: custom model providers are disabled from
+    // the composition; models come from the gateway after login only.
+    '@deepseek-ai/dsh-client-ui-settings-models',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
   }
