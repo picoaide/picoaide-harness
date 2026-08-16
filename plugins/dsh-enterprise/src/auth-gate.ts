@@ -49,7 +49,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (res.ok) { location.replace('/'); return }
+      if (res.ok) { location.replace('/' + location.search); return }
       const data = await res.json().catch(() => ({}))
       err.textContent = data.error?.message || data.error || ('登录失败 (' + res.status + ')')
     } catch (e2) {
