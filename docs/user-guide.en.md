@@ -10,7 +10,7 @@ On first launch, the application prepares the default profile and starts the off
 
 A profile is a composition of DSH bundles, dependencies, and patches. The tray **Profile** menu lists existing profiles and the lazy `desktop` and `web` defaults.
 
-Selecting a profile performs an orderly restart. The new profile becomes the last-known-good choice only after the Host and window start successfully; a failed startup returns to the previous working choice. Official profiles normally use the same DSH home, so sessions, settings, and storage do not need to be migrated. A custom patch can deliberately redirect a persistence root, in which case that profile's configuration wins.
+Selecting a profile performs an orderly restart. The new profile becomes the last-known-good choice only after the Host, window, and browser client all start successfully; a failed startup returns to the previous working choice. Official profiles normally use the same DSH home, so sessions, settings, and storage do not need to be migrated. A custom patch can deliberately redirect a persistence root, in which case that profile's configuration wins.
 
 Switching profiles does not silently copy plugins from the old profile into the new one. Use an explicit profile in the terminal when preparing another profile, or use the default commands after switching.
 
