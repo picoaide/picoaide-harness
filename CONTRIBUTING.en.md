@@ -43,6 +43,10 @@ corepack yarn dev     # launch the application when a graphical session is avail
 - Documentation changes should stay bilingual and update the `README.i18n.yaml` hash record.
 - Describe the change, its motivation, and how it was verified in the PR; merge after CI passes.
 
+## Join the technical team
+
+If you would like to join our technical team, contact us at [t4wefan@qq.com](mailto:t4wefan@qq.com).
+
 ## Code of conduct
 
 Be kind and respectful, and stick to the topic. We want a community that welcomes newcomers.
