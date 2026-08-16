@@ -131,7 +131,7 @@ describe('desktop Host plugin', () => {
   it('defaults to compatibility mode and validates both schemas', () => {
     expect(Config({} as DesktopConfig)).toEqual(config)
     expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual({ ...config, mode: 'advanced' })
-    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility' })
+    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility', logLevel: 'info' })
     expect(() => Config({ mode: 'custom' } as never)).toThrow()
     expect(String(DESKTOP_SETTINGS_NAMESPACE)).toBe('dsh-desktop')
   })
@@ -243,11 +243,11 @@ describe('desktop Host plugin', () => {
     const harness = createHarness()
     apply(harness.ctx, config)
 
-    await harness.notify({ mode: 'compatibility' }, { mode: 'compatibility' })
+    await harness.notify({ mode: 'compatibility', logLevel: 'info' }, { mode: 'compatibility', logLevel: 'info' })
     expect(harness.restart).not.toHaveBeenCalled()
 
     harness.restart.mockImplementation(() => new Promise<void>(() => {}))
-    await harness.notify({ mode: 'advanced' }, { mode: 'compatibility' })
+    await harness.notify({ mode: 'advanced', logLevel: 'info' }, { mode: 'compatibility', logLevel: 'info' })
     await vi.runAllTimersAsync()
     expect(harness.restart).toHaveBeenCalledOnce()
   })

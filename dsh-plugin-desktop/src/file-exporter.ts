@@ -34,7 +34,7 @@ export class FileExporter implements Exporter {
   }
 
   private render(message: Message): string {
-    const level = message.type[0].toUpperCase()
+    const level = message.type.charAt(0).toUpperCase()
     const body = Logger.format(this, message)
     return `${localTimestamp(message.ts)} [${level}] [${message.name}] ${body}`
   }

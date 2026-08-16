@@ -18,6 +18,8 @@ import {
   installDesktopPnpmRuntime,
 } from './desktop-runtime-environment.ts'
 import { ElectronDesktopRuntime } from './electron-runtime.ts'
+import { FileExporter } from './file-exporter.ts'
+import { LogFileSink } from './log-files.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import {
@@ -264,6 +266,12 @@ async function start(): Promise<void> {
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
         hostCtx.provide('desktopPnpmBootstrap', desktopPnpmBootstrap)
+        const logSink = new LogFileSink(join(app.getPath('userData'), 'logs'), {
+          maxFileBytes: 10 * 1024 * 1024,
+          maxDirectoryBytes: 200 * 1024 * 1024,
+        })
+        logSink.enforceDirectoryCap()
+        hostCtx.logger.exporter(new FileExporter(logSink))
         await hostCtx.plugin(DesktopProfileService, {
           current: {
             name: activeProfileName,
