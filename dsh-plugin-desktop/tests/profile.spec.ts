@@ -322,10 +322,9 @@ describe('desktop profile composition', () => {
     expect(web.skippedOptionalEntries).toEqual([])
   })
 
-  it('identifies optional Web Clients from package metadata instead of their name', () => {
+  it('keeps unresolved non-UI package entries fail-loud', () => {
     const home = temporaryHome()
     const packageName = '@example/whale-song-theme'
-    installWebClient(home, packageName, { exports: { '.': './index.js' } })
     writeFileSync(join(home, 'cordis.patch.yml'), [
       '- insert:',
       '    - id: optional-theme',
@@ -334,12 +333,8 @@ describe('desktop profile composition', () => {
     ].join('\n'))
 
     const desktop = prepareDesktopProfile(undefined, home, 'darwin')
-    expect(composeEntries([desktop.patches]).map(row => row.id)).not.toContain('optional-theme')
-    expect(desktop.skippedOptionalEntries).toEqual([{ id: 'optional-theme', name: packageName }])
-
-    const web = prepareDesktopProfile(undefined, home, 'darwin', 'web')
-    expect(composeEntries([web.patches])).toContainEqual({ id: 'optional-theme', name: packageName })
-    expect(web.skippedOptionalEntries).toEqual([])
+    expect(composeEntries([desktop.patches])).toContainEqual({ id: 'optional-theme', name: packageName })
+    expect(desktop.skippedOptionalEntries).toEqual([])
   })
 
   it('does not treat ordinary array config as nested Loader entries', () => {

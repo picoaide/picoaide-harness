@@ -1,7 +1,7 @@
 /** Compatibility profile composition over the official Web bundle and user plugins. */
 
 import { createRequire, findPackageJSON } from 'node:module'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
@@ -240,32 +240,15 @@ function isBarePackageSpecifier(name: string): boolean {
     && !URL.canParse(name)
 }
 
-/** Return whether another profile owns this unavailable Web Client package. */
-function isWebClientPackageInAnotherProfile(
-  name: string,
-  home: string,
-  activeProfilePackageUrl: string,
-): boolean {
-  const profilesDir = join(home, 'profiles')
-  for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === 'node_modules') continue
-    const profilePackageUrl = pathToFileURL(join(profilesDir, entry.name, 'package.json')).href
-    if (profilePackageUrl === activeProfilePackageUrl) continue
-    const manifestPath = packageManifestFromProfile(name, profilePackageUrl)
-    if (manifestPath === undefined) continue
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-      dsh?: { client?: { platform?: unknown } }
-    }
-    if (manifest.dsh?.client?.platform === 'web') return true
-  }
-  return false
+/** Return whether a package is a user-facing Client UI extension, not a Host provider. */
+function isOptionalClientPackage(name: string): boolean {
+  return /^(@[^/]+\/)?dsh-client-ui-/u.test(name)
 }
 
 /** Drop unresolved optional Client UI rows from the machine-wide patch only. */
 function omitUnresolvedOptionalEntries(
   patches: PatchOptions[],
   profilePackageUrl: string,
-  home: string,
 ): { patches: PatchOptions[], skipped: SkippedOptionalEntry[] } {
   const skipped: SkippedOptionalEntry[] = []
 
@@ -274,8 +257,8 @@ function omitUnresolvedOptionalEntries(
     for (const row of rows) {
       if (typeof row.name === 'string'
         && isBarePackageSpecifier(row.name)
-        && packageManifestFromProfile(row.name, profilePackageUrl) === undefined
-        && isWebClientPackageInAnotherProfile(row.name, home, profilePackageUrl)) {
+        && isOptionalClientPackage(row.name)
+        && packageManifestFromProfile(row.name, profilePackageUrl) === undefined) {
         skipped.push({
           ...(typeof row.id === 'string' ? { id: row.id } : {}),
           name: row.name,
@@ -338,7 +321,6 @@ export function prepareDesktopProfile(
   const { patches: homePatches, skipped: skippedOptionalEntries } = omitUnresolvedOptionalEntries(
     loadedHomePatches,
     bareModuleBaseUrl,
-    home,
   )
   const patches: PatchOptions[] = [
     ...bundlePatches,
