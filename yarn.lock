@@ -6637,6 +6637,12 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"dsh-community-market@workspace:dsh-community-market":
+  version: 0.0.0-use.local
+  resolution: "dsh-community-market@workspace:dsh-community-market"
+  languageName: unknown
+  linkType: soft
+
 "dsh-plugin-desktop@workspace:dsh-plugin-desktop":
   version: 0.0.0-use.local
   resolution: "dsh-plugin-desktop@workspace:dsh-plugin-desktop"
