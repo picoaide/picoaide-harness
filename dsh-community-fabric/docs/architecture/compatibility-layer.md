@@ -95,6 +95,8 @@ Fabric should not cover everything at once. It starts with the most common and s
 
 The exact experimental v0.1 surface is deliberately small. `host.info`, `log`, and lifecycle cancellation are baseline context available to every activation. The first negotiated capabilities are `storage.local`, `commands`, and one immutable `messages.observe` event. Everything else in the tables below is a planned candidate, not part of v0.1 until its own contract and fixtures land.
 
+This scope is informed by two source studies rather than an invented API wishlist: [mature plugin framework patterns](../research/mature-plugin-frameworks.md) and [twelve representative DSH plugins](../research/dsh-plugin-needs.md). Those studies also define the seams that v0.1 must preserve for later Host/Client faces, typed renderers, cross-face messaging, interceptors, context contributions, and mediated system access.
+
 ### 4.1 Portable Core
 
 | Capability | Operations | Constraints |
@@ -124,24 +126,38 @@ The exact experimental v0.1 surface is deliberately small. `host.info`, `log`, a
 
 Read-only session data can still be highly sensitive. It needs explicit grants, scopes, and redaction rather than being labeled low-risk merely because it does not mutate state.
 
-### 4.3 Declarative UI
+### 4.3 UI extension layers
 
-| Capability | Planned operation | Portability |
-| --- | --- | --- |
-| `ui.notification` | Short notification and user action. | High, with Host-specific presentation. |
-| `ui.status` | One-line status, icon token, tooltip. | Medium. |
-| `ui.form.basic` | Small forms with text, select, toggle, confirmation. | Medium; needs accessibility and i18n rules. |
-| `ui.panel.basic` | A tiny common layout/component subset. | Low to medium; separate RFC and prototype. |
+UI is not one universal renderer. Fabric separates four layers:
 
-Fabric does not expose raw DOM, React components, Electron BrowserWindow, or TUI screen handles. Rich UI uses explicit extensions such as `x-org.example.web.panel`, visibly marked Host-specific by markets.
+1. **Declarative contributions** for commands, settings schemas, menus, status, notifications, theme tokens, and small forms. The Host owns presentation, localization, accessibility, ordering, and conflicts.
+2. **Typed providers and named renderers** for tool results, message content, composer accessories, file viewers, session trees, and similar domain surfaces. Each extension point defines input DTOs, cardinality, priority, fallback, and lifecycle.
+3. **Sandboxed rich views** for GenUI, dashboards, editors, visualizations, or complete workbenches. They use a separate Client/Worker face, a versioned message bridge, approved resources, theme tokens, and explicit Host placement.
+4. **Host extensions** for raw DOM, Electron, native widgets, terminal protocols, and other behavior without portable semantics.
 
-### 4.4 Sensitive mediated capabilities
+High-portability candidates include `ui.notification`, `ui.status`, settings schemas, command metadata, and small forms. A common `ui.panel.basic` remains a later prototype, not proof that arbitrary GUI UI can run unchanged in a TUI.
+
+Fabric does not expose raw DOM, React components, Electron BrowserWindow, or TUI screen handles in its portable API. Rich views and Host extensions need separate specifications and honest compatibility labels.
+
+### 4.4 Business behavior protocols
+
+Fabric does not use one stringly typed event bus for every operation:
+
+- **immutable observation streams** report canonical message, session, tool, or job facts without changing the source operation;
+- **commands and actions** are authorized request/result operations with cancellation, idempotency, stable errors, and audit identity;
+- **ordered interceptor pipelines** may allow, deny, or narrowly rewrite an operation only after ordering, timeout, failure, conflict, privacy, and reentrancy semantics are specified;
+- **context-contribution pipelines** collect bounded, attributable, budgeted memory or instruction fragments and freeze the result before execution;
+- **durable jobs** define identity, progress, checkpoint, cancellation, retry, ownership, and restart behavior.
+
+Only immutable `messages.observe` belongs to v0.1. Interceptors, context contributions, and jobs require independent RFCs and conformance fixtures.
+
+### 4.5 Sensitive mediated capabilities
 
 `net.fetch`, `workspace.read/write`, clipboard, secrets, process, terminal, and package management are mediated operations: scoped input, bounded output, cancellation, audit, and renewed consent when permissions expand.
 
 In trusted in-process mode, those grants still are not a hard sandbox. Real enforcement requires isolated execution. Raw shell, unrestricted process spawning, raw Electron, and unrestricted filesystem access do not belong to Portable Core.
 
-### 4.5 Host extensions
+### 4.6 Host extensions
 
 Behavior without cross-Host semantics uses organization namespaces:
 
@@ -307,12 +323,16 @@ Existing `cordis.patch.yml` is official declarative composition rather than a so
 - additional immutable observation events;
 - user-triggered session actions;
 - tool registration;
+- typed Host/Client bridge and static-resource transport;
+- mediated files/artifacts, network, and secret references;
 
 ### Stage D: UI and sensitive capabilities
 
-- small declarative UI IR;
+- declarative contributions and typed renderer prototypes;
+- one sandboxed rich-view prototype;
+- context-contribution and ordered-interceptor RFCs;
+- process/PTY/job and transactional package-management contracts;
 - permissions UX;
-- scoped network/workspace APIs;
 - an isolated-runner prototype.
 
 Each stage is independently useful and testable. Early demos never expose raw upstream context to tell a more complete story.

@@ -42,6 +42,8 @@ Capability 声明有助于兼容判断、用户确认和审计，但它**不会�
 
 - [兼容层与开发框架设计](docs/architecture/compatibility-layer.zh.md)
 - [RFC 0001：Plugin Manifest、Capability 与事件模型](docs/rfcs/0001-plugin-manifest-capabilities-events.zh.md)
+- [调研：Koishi、Chrome 与 VS Code 的成熟模式](docs/research/mature-plugin-frameworks.zh.md)
+- [调研：真实 DSH 插件需要什么](docs/research/dsh-plugin-needs.zh.md)
 - [当前可用的 DSH 插件开发方式](../docs/plugin-development.md)
 - [DSH 插件生态倡议书](../docs/plugin-ecosystem.md)
 

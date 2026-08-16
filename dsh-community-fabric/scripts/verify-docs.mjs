@@ -22,6 +22,12 @@ const publicFiles = [
   'docs/architecture/compatibility-layer.i18n.yaml',
   'docs/architecture/compatibility-layer.md',
   'docs/architecture/compatibility-layer.zh.md',
+  'docs/research/dsh-plugin-needs.i18n.yaml',
+  'docs/research/dsh-plugin-needs.md',
+  'docs/research/dsh-plugin-needs.zh.md',
+  'docs/research/mature-plugin-frameworks.i18n.yaml',
+  'docs/research/mature-plugin-frameworks.md',
+  'docs/research/mature-plugin-frameworks.zh.md',
   'docs/rfcs/0001-plugin-manifest-capabilities-events.i18n.yaml',
   'docs/rfcs/0001-plugin-manifest-capabilities-events.md',
   'docs/rfcs/0001-plugin-manifest-capabilities-events.zh.md',
@@ -40,6 +46,14 @@ const pairs = [
   [
     'docs/architecture/compatibility-layer.i18n.yaml',
     ['docs/architecture/compatibility-layer.md', 'docs/architecture/compatibility-layer.zh.md'],
+  ],
+  [
+    'docs/research/dsh-plugin-needs.i18n.yaml',
+    ['docs/research/dsh-plugin-needs.md', 'docs/research/dsh-plugin-needs.zh.md'],
+  ],
+  [
+    'docs/research/mature-plugin-frameworks.i18n.yaml',
+    ['docs/research/mature-plugin-frameworks.md', 'docs/research/mature-plugin-frameworks.zh.md'],
   ],
   [
     'docs/rfcs/0001-plugin-manifest-capabilities-events.i18n.yaml',
@@ -76,4 +90,4 @@ for (const path of markdownFiles) {
   }
 }
 
-process.stdout.write(`verify-fabric-docs: ${markdownFiles.length} Markdown files and 3 bilingual pairs are consistent\n`)
+process.stdout.write(`verify-fabric-docs: ${markdownFiles.length} Markdown files and ${pairs.length} bilingual pairs are consistent\n`)

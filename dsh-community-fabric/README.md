@@ -42,6 +42,8 @@ Mutable `before-*` events, sensitive filesystem/network permissions, rich cross-
 
 - [Compatibility layer and developer framework](docs/architecture/compatibility-layer.md)
 - [RFC 0001: Plugin Manifest, Capabilities, and Events](docs/rfcs/0001-plugin-manifest-capabilities-events.md)
+- [Research: lessons from Koishi, Chrome, and VS Code](docs/research/mature-plugin-frameworks.md)
+- [Research: what real DSH plugins need](docs/research/dsh-plugin-needs.md)
 - [Existing DSH plugin development](../docs/plugin-development.en.md)
 - [Community plugin ecosystem manifesto](../docs/plugin-ecosystem.en.md)
 

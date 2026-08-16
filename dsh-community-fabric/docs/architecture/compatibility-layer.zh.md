@@ -95,6 +95,8 @@ Fabric 不追求“一开始覆盖一切”。它应该先覆盖插件最常见�
 
 实验性 v0.1 的精确范围会刻意保持很小。`host.info`、`log` 和生命周期取消信号是每次 activation 都具备的基础 context；首批需要协商的 capability 只有 `storage.local`、`commands` 和一个不可修改的 `messages.observe` 事件。下表中的其他项目都是规划候选，在独立 contract 与 fixtures 落地前不属于 v0.1。
 
+这个范围不是凭空列出的 API 愿望清单，而是来自两份源码调研：[成熟插件框架模式](../research/mature-plugin-frameworks.zh.md)和[十二个代表性 DSH 插件](../research/dsh-plugin-needs.zh.md)。这些调研也规定了 v0.1 必须为后续 Host/Client face、强类型 renderer、跨 face 消息、拦截器、上下文贡献和受控系统访问保留哪些接缝。
+
 ### 4.1 Portable Core：所有兼容 Host 都应理解
 
 | Capability | 支持的操作 | 约束 |
@@ -124,24 +126,38 @@ Fabric 不追求“一开始覆盖一切”。它应该先覆盖插件最常见�
 
 Session 读取即使“只读”也可能高度敏感，仍需明确授权、scope 和裁剪，不能因为不修改数据就标为低风险。
 
-### 4.3 Declarative UI：先小后大
+### 4.3 UI 扩展分层
 
-| Capability | 计划操作 | 可移植性 |
-| --- | --- | --- |
-| `ui.notification` | 简短通知和用户触发 action。 | 高，但 Host 呈现不同。 |
-| `ui.status` | 一行状态、图标 token、tooltip。 | 中。 |
-| `ui.form.basic` | 文本、选择、开关、确认等小型表单 IR。 | 中，需要无障碍与国际化规范。 |
-| `ui.panel.basic` | 极小的布局和组件公共子集。 | 低到中，必须单独 RFC 和原型。 |
+UI 不是一个万能 renderer。Fabric 把它分为四层：
 
-Fabric 不提供 raw DOM、React component、Electron BrowserWindow 或 TUI screen handle。复杂 UI 使用明确 extension，例如 `x-org.example.web.panel`，市场会显示“仅限某 Host”。
+1. **声明式贡献**：命令、设置 schema、菜单、状态、通知、主题 token 和小型表单。宿主拥有呈现、国际化、无障碍、顺序和冲突处理。
+2. **强类型 Provider 与命名 Renderer**：工具结果、消息内容、输入框附件、文件查看器、会话树等有明确业务含义的界面。每个扩展点定义输入 DTO、数量、优先级、fallback 和生命周期。
+3. **隔离富视图**：GenUI、看板、编辑器、可视化和完整工作台。它们运行在独立 Client/Worker face，通过版本化消息桥和被批准的资源工作，并由宿主决定位置和主题。
+4. **宿主扩展**：raw DOM、Electron、原生控件、终端协议和其他无法保持跨宿主语义的能力。
 
-### 4.4 Sensitive mediated capabilities
+高可移植性候选包括 `ui.notification`、`ui.status`、设置 schema、命令元数据和小型表单。公共 `ui.panel.basic` 仍是以后需要验证的原型，不能用来证明任意 GUI 都能原样运行在 TUI。
+
+Fabric 的 portable API 不提供 raw DOM、React component、Electron BrowserWindow 或 TUI screen handle。富视图和宿主扩展需要独立规范和诚实的兼容标签。
+
+### 4.4 业务行为协议
+
+Fabric 不会用一个只有字符串和 unknown payload 的事件总线承载所有操作：
+
+- **不可变观察流**只报告标准 message、session、tool 或 job 事实，不能改变原操作；
+- **命令与动作**是有授权、取消、幂等、稳定错误和审计身份的 request/result 操作；
+- **有序拦截器流程**只有在顺序、超时、失败、冲突、隐私和重入语义都明确后，才允许 allow、deny 或有限 rewrite；
+- **上下文贡献流程**收集有界、有来源、有预算的记忆或指令片段，并在执行前冻结结果；
+- **持久任务**定义身份、进度、checkpoint、取消、重试、所有者和重启行为。
+
+v0.1 只包含不可变 `messages.observe`。拦截器、上下文贡献和持久任务必须有独立 RFC 与 conformance fixture。
+
+### 4.5 Sensitive mediated capabilities
 
 `net.fetch`、`workspace.read/write`、clipboard、secret、process、terminal 和 package management 必须是受管操作：输入有 scope、输出有界、支持取消、产生审计，并在权限新增时重新确认。
 
 在 trusted in-process 模式中，这些授权仍不是强沙箱。真正的权限强制需要 isolated execution。`process.spawn`、任意 shell、原始 Electron 和无范围文件系统不进入 portable core。
 
-### 4.5 Host extensions
+### 4.6 Host extensions
 
 无法跨 Host 保持语义的能力使用组织命名空间：
 
@@ -315,12 +331,16 @@ Adapter 维护显式 compatibility matrix：
 - 更多不可修改的观察事件；
 - 用户触发的 session action；
 - tool registration；
+- 强类型 Host/Client bridge 与静态资源 transport；
+- 受控 files/artifacts、network 和 secret reference；
 
 ### Stage D：UI 与敏感能力
 
-- 小型声明式 UI IR；
+- 声明式贡献与强类型 renderer 原型；
+- 一个隔离富视图原型；
+- 上下文贡献与有序拦截器 RFC；
+- process/PTY/job 与事务化包管理 contract；
 - permissions UX；
-- scope 化 network/workspace API；
 - isolated runner 原型。
 
 每个 Stage 可以独立使用和验证。不能为了演示完整故事，在早期阶段偷偷暴露 raw upstream context。
