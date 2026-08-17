@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "接入晨星全球与中国基金数据，通过自然语言实现基金查询、筛选、分析与深度研究，以及组合穿透分析",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.morningstar.cn/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.morningstar.cn/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

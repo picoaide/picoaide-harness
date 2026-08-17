@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "通过自然语言查询的金融投研 MCP 工具套件，依托东方财富数据源，提供A股、港股、美股、基金、债券、指数板块、宏观数据查询，具备多条件资产筛选、券商研报检索、全市场公告解析、金融资讯检索能力。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mxapi.eastmoney.com/mxds/v2/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mxapi.eastmoney.com/mxds/v2/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

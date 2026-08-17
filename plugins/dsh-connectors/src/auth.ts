@@ -100,26 +100,75 @@ interface OAuthServerMetadata {
   scopes_supported?: string[]
 }
 
-/** Discover the OAuth endpoints for an MCP server (RFC 8414 metadata). */
-async function discoverMcpOAuth(discoveryUrl: string): Promise<OAuthServerMetadata & { scopes?: string }> {
-  const response = await fetch(discoveryUrl, {
-    headers: { Accept: 'application/json' },
+/** MCP OAuth discovery result (spec 2025-06-18): public endpoint or the resolved OAuth endpoints. */
+interface McpOAuthDiscovery {
+  publicMcp?: boolean
+  authorizationEndpoint?: string
+  tokenEndpoint?: string
+  registrationEndpoint?: string
+  scopes?: string
+  /** RFC 8707 resource indicator: the MCP server canonical URI. */
+  resource?: string
+}
+
+/**
+ * MCP OAuth discovery (spec 2025-06-18): probe the MCP endpoint; a 2xx means
+ * public. On 401, resolve the authorization server through RFC 9728
+ * protected-resource metadata (URL from the WWW-Authenticate header, fallback
+ * `/.well-known/oauth-protected-resource`), then RFC 8414 metadata at the
+ * authorization server.
+ */
+async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
+  const mcp = new URL(mcpUrl)
+  const resource = mcp.origin + mcp.pathname.replace(/\/+$/, '')
+
+  const probe = await fetch(mcpUrl, {
+    headers: { Accept: 'text/event-stream', 'MCP-Protocol-Version': '2025-06-18' },
   })
-  if (!response.ok) throw new Error(`MCP OAuth 元数据获取失败: HTTP ${response.status}`)
-  const meta = (await response.json()) as OAuthServerMetadata
-  if (!meta.authorization_endpoint || !meta.token_endpoint) {
-    throw new Error('MCP OAuth 元数据缺少 authorization_endpoint/token_endpoint')
+  if (probe.status >= 200 && probe.status < 300) return { publicMcp: true, resource }
+  if (probe.status !== 401 && probe.status !== 403) {
+    throw new Error(`MCP 端点响应异常: HTTP ${probe.status}`)
   }
-  const scopes = meta.scopes_supported?.includes('offline_access')
-    ? 'offline_access'
-    : meta.scopes_supported?.[0]
-  return { ...meta, ...(scopes ? { scopes } : {}) }
+
+  const authHeader = probe.headers.get('www-authenticate') ?? ''
+  const metadataMatch = /resource_metadata="([^"]+)"/.exec(authHeader)
+  const resourceMetadataCandidates = [
+    metadataMatch?.[1],
+    `${mcp.origin}/.well-known/oauth-protected-resource`,
+  ].filter((url): url is string => Boolean(url))
+
+  for (const metadataUrl of [...new Set(resourceMetadataCandidates)]) {
+    const metadataResponse = await fetch(metadataUrl, { headers: { Accept: 'application/json' } })
+    if (!metadataResponse.ok) continue
+    const resourceMetadata = (await metadataResponse.json()) as { authorization_servers?: string[] }
+    const authorizationServer = resourceMetadata.authorization_servers?.[0]
+    if (!authorizationServer) continue
+
+    const asUrl = new URL(authorizationServer)
+    asUrl.pathname = `${asUrl.pathname.replace(/\/+$/, '')}/.well-known/oauth-authorization-server`
+    const metadataResponse2 = await fetch(asUrl, { headers: { Accept: 'application/json' } })
+    if (!metadataResponse2.ok) continue
+    const meta = (await metadataResponse2.json()) as OAuthServerMetadata
+    if (!meta.authorization_endpoint || !meta.token_endpoint) continue
+    const scopes = meta.scopes_supported?.includes('offline_access')
+      ? 'offline_access'
+      : meta.scopes_supported?.[0]
+    return {
+      authorizationEndpoint: meta.authorization_endpoint,
+      tokenEndpoint: meta.token_endpoint,
+      ...(meta.registration_endpoint ? { registrationEndpoint: meta.registration_endpoint } : {}),
+      ...(scopes ? { scopes } : {}),
+      resource,
+    }
+  }
+  throw new Error('MCP OAuth 发现失败: 服务器要求授权但未找到 OAuth 元数据')
 }
 
 /** Run an oauth2 authorization-code flow with PKCE and a loopback callback. */
 async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   const auth = def.auth as OAuthAuthConfig
   const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl) : undefined
+  if (discovered?.publicMcp) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
   const callbackHost = options.callbackHost ?? '127.0.0.1'
   const { verifier, challenge } = pkce()
   const port = await new Promise<number>((resolve, reject) => {
@@ -132,7 +181,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     server.on('error', reject)
   })
   const redirectUri = `http://${callbackHost}:${port}/callback`
-  const registrationEndpoint = discovered?.registration_endpoint ?? auth.registrationEndpoint
+  const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
   const clientId = registrationEndpoint
     ? await registerClient(auth, redirectUri, registrationEndpoint)
     : auth.clientId || ''
@@ -156,7 +205,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     callbackServer.on('error', reject)
   })
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined
-  const authorizeUrl = new URL(discovered?.authorization_endpoint ?? auth.authorizeUrl)
+  const authorizeUrl = new URL(discovered?.authorizationEndpoint ?? auth.authorizeUrl)
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('client_id', clientId)
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
@@ -166,17 +215,20 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     authorizeUrl.searchParams.set('code_challenge', challenge)
     authorizeUrl.searchParams.set('code_challenge_method', codeChallengeMethod ?? 'S256')
   }
+  // RFC 8707: the token must be bound to the MCP server resource.
+  if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
   options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
   const code = await codePromise
 
   throwIfAborted(options.signal)
-  const tokenUrl = options.tokenUrlOverride ?? discovered?.token_endpoint ?? auth.tokenUrl
+  const tokenUrl = options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
     client_id: clientId,
   })
+  if (discovered?.resource) body.set('resource', discovered.resource)
   if (auth.pkce) body.set('code_verifier', verifier)
   const response = await fetch(tokenUrl, {
     method: 'POST',

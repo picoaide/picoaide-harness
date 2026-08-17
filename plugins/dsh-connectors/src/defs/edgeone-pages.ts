@@ -7,7 +7,6 @@ export const def: ConnectorDef = {
   "description": "将项目部署到 EdgeOne Makers 并返回线上访问地址，支持全栈、云函数、AI Agent 等开发场景。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "undefined/.well-known/oauth-authorization-server",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

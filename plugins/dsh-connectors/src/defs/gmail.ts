@@ -7,7 +7,6 @@ export const def: ConnectorDef = {
   "description": "",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "undefined/.well-known/oauth-authorization-server",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

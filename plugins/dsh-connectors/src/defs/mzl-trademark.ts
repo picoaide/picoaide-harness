@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "用自然语言检索商标：按名称、申请人、申请号、注册号、尼斯类别、法律状态、日期范围查询，覆盖中国及 110+ 海外国家/地区商标局；并支持以图搜图的图形近似检索。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://www.mozlen.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://www.mozlen.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

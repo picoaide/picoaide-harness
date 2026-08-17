@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "查询、整理和分析 A 股、期货、期权、港美股、基金、宏观经济及量化因子等金融数据，支持统计比较与趋势归纳。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://pandadatamcp.pandaaiquant.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://pandadatamcp.pandaaiquant.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

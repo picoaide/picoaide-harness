@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "法研·法律法规检索，支持自然语言获取精准、现行有效的法规条文，将高质量、海量的法规知识库，无缝接入各类AI应用与工作流中。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://api.cjbdi.com:8443/354347/mcp_law_service/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://api.cjbdi.com:8443/354347/mcp_law_service",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

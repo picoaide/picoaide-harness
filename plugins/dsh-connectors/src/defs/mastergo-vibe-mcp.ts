@@ -7,7 +7,6 @@ export const def: ConnectorDef = {
   "description": "连接 MasterGo 画布，让 AI 进行设计、修改、同步和获取 D2C 代码。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "undefined/.well-known/oauth-authorization-server",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

@@ -141,4 +141,139 @@ describe('connector auth', () => {
     expect(requests[0]?.userCode).toBe('CCBP-BNLQ')
     expect(patch.updatedAt).toBeTruthy()
   })
+
+  it('connects a public MCP endpoint without OAuth', async () => {
+    const calls: string[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      calls.push(String(input))
+      return new Response('event: message\ndata: {"jsonrpc":"2.0","method":"notifications/initialized"}', { status: 200 })
+    }) as typeof fetch
+    try {
+      const def: ConnectorDef = {
+        id: 'public-mcp',
+        name: 'Public',
+        description: 'x',
+        authMode: 'oauth',
+        auth: {
+          discoveryUrl: 'https://mcp.example/mcp',
+          clientId: '',
+          authorizeUrl: '',
+          tokenUrl: '',
+          redirectUri: '',
+          pkce: true,
+          publicClient: true,
+        },
+        mcp: [{ serverName: 'pub', transport: 'streamable-http', url: 'https://mcp.example/mcp' }],
+      }
+      const patch = await runAuth(def, {
+        onRequest: () => {},
+        signal: new AbortController().signal,
+      })
+      expect(patch.updatedAt).toBeTruthy()
+      expect(calls).toEqual(['https://mcp.example/mcp'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('resolves the authorization server through RFC 9728 + RFC 8414 metadata', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input)
+      // Let loopback callback requests reach the real callback server.
+      if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
+        return originalFetch(input, init)
+      }
+      const json = (body: object, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url === 'https://mcp.example/mcp') {
+        return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"' } })
+      }
+      if (url === 'https://mcp.example/.well-known/oauth-protected-resource') {
+        return json({ authorization_servers: ['https://auth.example'] })
+      }
+      if (url === 'https://auth.example/.well-known/oauth-authorization-server') {
+        return json({ authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token', registration_endpoint: 'https://auth.example/register', scopes_supported: ['offline_access', 'calendar.read'] })
+      }
+      if (url === 'https://auth.example/register') {
+        return json({ client_id: 'dyn-1' })
+      }
+      if (url === 'https://auth.example/authorize') return json({})
+      if (url === 'https://auth.example/token') {
+        return json({ access_token: 'at-1', refresh_token: 'rt-1' })
+      }
+      return new Response('unexpected ' + url, { status: 500 })
+    }) as typeof fetch
+    try {
+      const def: ConnectorDef = {
+        id: 'protected-mcp',
+        name: 'Protected',
+        description: 'x',
+        authMode: 'oauth',
+        auth: {
+          discoveryUrl: 'https://mcp.example/mcp',
+          clientId: '',
+          authorizeUrl: '',
+          tokenUrl: '',
+          redirectUri: '',
+          pkce: true,
+          publicClient: true,
+        },
+        mcp: [{ serverName: 'prot', transport: 'streamable-http', url: 'https://mcp.example/mcp' }],
+      }
+      const requests: Array<{ authorizeUrl?: string }> = []
+      const signal = new AbortController().signal
+      const runPromise = runAuth(def, {
+        onRequest: (request) => {
+          if (request.authorizeUrl) requests.push({ authorizeUrl: request.authorizeUrl })
+        },
+        signal,
+        tokenUrlOverride: 'https://auth.example/token',
+      })
+      const deadline = Date.now() + 3000
+      while (requests.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      const redirectUri = new URL(requests[0]?.authorizeUrl ?? '').searchParams.get('redirect_uri')
+      expect(redirectUri).toBeTruthy()
+      await fetch(`${String(redirectUri)}?code=test-code`)
+      const patch = await runPromise
+      const authorize = new URL(requests[0]?.authorizeUrl ?? '')
+      expect(authorize.searchParams.get('resource')).toBe('https://mcp.example/mcp')
+      expect(patch.accessToken).toBe('at-1')
+      expect(patch.clientId).toBe('dyn-1')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('fails with a clear error when the protected resource has no metadata', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+      const url = String(input)
+      if (url === 'https://mcp.example/mcp') return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="mcp"' } })
+      return new Response('not found', { status: 404 })
+    }) as typeof fetch
+    try {
+      const def: ConnectorDef = {
+        id: 'no-metadata',
+        name: 'No Metadata',
+        description: 'x',
+        authMode: 'oauth',
+        auth: {
+          discoveryUrl: 'https://mcp.example/mcp',
+          clientId: '',
+          authorizeUrl: '',
+          tokenUrl: '',
+          redirectUri: '',
+          pkce: true,
+          publicClient: true,
+        },
+        mcp: [],
+      }
+      await expect(runAuth(def, { onRequest: () => {}, signal: new AbortController().signal })).rejects.toThrow('MCP OAuth 发现失败')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })

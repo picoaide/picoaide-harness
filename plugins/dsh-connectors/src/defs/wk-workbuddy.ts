@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "威科先行依托全面、准确、及时更新的法规、案例等法律数据研发的MCP服务，支持语义检索、关键词检索等场景。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.wkinfo.com.cn/mcp-servers/integrated//.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.wkinfo.com.cn/mcp-servers/integrated/",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

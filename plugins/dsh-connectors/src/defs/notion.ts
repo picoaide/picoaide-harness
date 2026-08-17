@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "创建、搜索和管理 Notion 工作区。用自然语言读取页面、查询数据库、更新内容、整理知识库。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.notion.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.notion.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

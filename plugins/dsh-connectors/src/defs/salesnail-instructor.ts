@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "通过自然语言自助开通讲师试用、维护商业 Profile、生成客户方案，完成游戏创作、课程配置、实时带教，以及团队、学员、班级和商机的证据化分析与复盘。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://sn.long-arena.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://sn.long-arena.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

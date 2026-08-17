@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "用自然语言查客户、推商机、盘线索、领公海、写跟进，一句话打通销售工作闭环。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.xiaoshouyi.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.xiaoshouyi.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",
