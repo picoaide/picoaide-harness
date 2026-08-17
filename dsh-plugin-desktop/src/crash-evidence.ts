@@ -1,6 +1,38 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+/** Minimal Electron crash reporter surface used before the app is ready. */
+export interface DesktopCrashReporter {
+  start(options: {
+    readonly productName: string
+    readonly uploadToServer: false
+    readonly globalExtra: Record<string, string>
+  }): void
+}
+
+export interface DesktopCrashMetadata {
+  readonly productName: string
+  readonly version: string
+  readonly platform: string
+  readonly arch: string
+}
+
+/** Start local-only Crashpad collection for native main and child process failures. */
+export function startDesktopCrashReporting(
+  reporter: DesktopCrashReporter,
+  metadata: DesktopCrashMetadata,
+): void {
+  reporter.start({
+    productName: metadata.productName,
+    uploadToServer: false,
+    globalExtra: {
+      appVersion: metadata.version,
+      platform: metadata.platform,
+      arch: metadata.arch,
+    },
+  })
+}
+
 /** Identity persisted while one desktop process is active. */
 export interface DesktopRunRecord {
   readonly startedAt: string

@@ -1,10 +1,31 @@
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { beginDesktopRun } from '../src/crash-evidence.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { beginDesktopRun, startDesktopCrashReporting } from '../src/crash-evidence.ts'
 
 describe('desktop crash evidence', () => {
+  it('starts Electron crash reporting without uploading dumps', () => {
+    const reporter = { start: vi.fn() }
+
+    startDesktopCrashReporting(reporter, {
+      productName: 'DSH Desktop',
+      version: '2.0.1',
+      platform: 'win32',
+      arch: 'x64',
+    })
+
+    expect(reporter.start).toHaveBeenCalledWith({
+      productName: 'DSH Desktop',
+      uploadToServer: false,
+      globalExtra: {
+        appVersion: '2.0.1',
+        platform: 'win32',
+        arch: 'x64',
+      },
+    })
+  })
+
   it('reports the previous run when it did not shut down cleanly', () => {
     const statePath = join(mkdtempSync(join(tmpdir(), 'dsh-run-')), 'active-run.json')
     beginDesktopRun(statePath, {

@@ -32,7 +32,7 @@ import type {
   DesktopUpdateAdapter,
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
-import type { DesktopLogger } from './desktop-logger.ts'
+import { formatDesktopExitCode, type DesktopLogger } from './desktop-logger.ts'
 import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import {
@@ -593,7 +593,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     window.webContents.on('will-frame-navigate', navigate)
     window.webContents.on('will-redirect', navigate)
     window.webContents.on('render-process-gone', (_event, details) => {
-      this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${details.exitCode})`)
+      this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${formatDesktopExitCode(details.exitCode)})`)
     })
     window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
       this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)

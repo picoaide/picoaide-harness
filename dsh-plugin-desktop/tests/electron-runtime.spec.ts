@@ -315,6 +315,25 @@ describe('Electron compatibility runtime', () => {
     expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
   })
 
+  it('logs renderer crashes with the Windows exception code', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const logger = { error: vi.fn(), errorCause: vi.fn() }
+    const runtime = new ElectronDesktopRuntime(async () => {}, undefined, logger)
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    const gone = electron.browserWindows[0]?.webContents.on.mock.calls
+      .find(([event]) => event === 'render-process-gone')?.[1]
+    expect(gone).toEqual(expect.any(Function))
+    gone({}, { reason: 'crashed', exitCode: -1073741819 })
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: -1073741819 / 0xc0000005)',
+    )
+    await release()
+  })
+
   it('starts from the saved locale and rebuilds native tray commands when it changes', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
