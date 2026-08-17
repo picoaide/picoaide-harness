@@ -1,8 +1,12 @@
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { ElectronStderrLogger } from '../src/desktop-logger.ts'
+import {
+  ElectronStderrLogger,
+  installDesktopUncaughtExceptionLogging,
+} from '../src/desktop-logger.ts'
 import { LogFileSink } from '../src/log-files.ts'
 
 function todaySuffix(): string {
@@ -42,5 +46,69 @@ describe('ElectronStderrLogger', () => {
     logger.errorCause(new Error('crash here'))
     const day = todaySuffix()
     expect(readFileSync(join(dir, `dsh-${day}.log`), 'utf8')).toContain('crash here')
+  })
+
+  it('masks secrets in the file and stderr outputs', () => {
+    const { s, dir } = sink()
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const logger = new ElectronStderrLogger(s)
+
+    logger.error('request failed with Bearer abc.def.secret')
+
+    const day = todaySuffix()
+    const text = readFileSync(join(dir, `dsh-${day}.log`), 'utf8')
+    expect(text).toContain('Bearer ****')
+    expect(text).not.toContain('abc.def.secret')
+    expect(stderrSpy).toHaveBeenCalledWith('request failed with Bearer ****\n')
+    stderrSpy.mockRestore()
+  })
+
+  it('accepts fail-loud stderr chunks without adding a second newline', () => {
+    const { s, dir } = sink()
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const logger = new ElectronStderrLogger(s)
+
+    logger.write('dsh-plugin-desktop: fatal load failure: Bearer abc.def.secret\n')
+
+    const day = todaySuffix()
+    const text = readFileSync(join(dir, `dsh-${day}.log`), 'utf8')
+    expect(text).toContain('fatal load failure: Bearer ****\n')
+    expect(text).not.toContain('abc.def.secret')
+    expect(stderrSpy).toHaveBeenCalledWith('dsh-plugin-desktop: fatal load failure: Bearer ****\n')
+    stderrSpy.mockRestore()
+  })
+
+  it('logs the first uncaught exception and requests a fatal exit', () => {
+    const { s, dir } = sink()
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const logger = new ElectronStderrLogger(s)
+    const proc = new EventEmitter()
+    const exit = vi.fn()
+
+    const remove = installDesktopUncaughtExceptionLogging(proc, logger, exit)
+    proc.emit('uncaughtException', new Error('fatal Bearer abc.def.secret'))
+    proc.emit('uncaughtException', new Error('second failure'))
+
+    const day = todaySuffix()
+    const text = readFileSync(join(dir, `dsh-${day}.log`), 'utf8')
+    expect(text).toContain('fatal Bearer ****')
+    expect(text).not.toContain('abc.def.secret')
+    expect(text).not.toContain('second failure')
+    expect(exit).toHaveBeenCalledOnce()
+    expect(exit).toHaveBeenCalledWith(1)
+    expect(proc.listenerCount('uncaughtException')).toBe(0)
+    remove()
+    stderrSpy.mockRestore()
+  })
+
+  it('falls back to masked stderr when the file sink fails', () => {
+    const { s } = sink()
+    vi.spyOn(s, 'write').mockImplementation(() => { throw new Error('disk full') })
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const logger = new ElectronStderrLogger(s)
+
+    expect(() => { logger.error('failed with Bearer abc.def.secret') }).not.toThrow()
+    expect(stderrSpy).toHaveBeenCalledWith('failed with Bearer ****\n')
+    stderrSpy.mockRestore()
   })
 })

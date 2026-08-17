@@ -4,6 +4,7 @@ import {
 import { join } from 'node:path'
 import type { LogType } from './log-level.ts'
 import { isErrorType } from './log-level.ts'
+import { maskSecrets } from './mask-secrets.ts'
 
 /** Sink configuration with its size ceilings. */
 export interface LogFileSinkOptions {
@@ -46,8 +47,9 @@ export class LogFileSink {
   write(type: LogType, line: string): void {
     const suffix = localDateSuffix(new Date())
     if (suffix !== this.currentDate) this.rollDate(suffix)
-    this.append('all', line)
-    if (isErrorType(type)) this.append('error', line)
+    const masked = maskSecrets(line)
+    this.append('all', masked)
+    if (isErrorType(type)) this.append('error', masked)
   }
 
   /** Write a startup header line to the current full-log file (before ordinary lines). */

@@ -67,4 +67,15 @@ describe('LogFileSink', () => {
     expect(text.split('\n')[0]).toBe('--- dsh 2.0.0 darwin run 123 ---')
     expect(text).toContain('after header')
   })
+
+  it('masks secrets at the file boundary', () => {
+    const { s, dir } = sink()
+
+    s.write('error', 'Authorization: Bearer abc.def.secret')
+
+    const day = todaySuffix()
+    const text = readFileSync(join(dir, `dsh-${day}.log`), 'utf8')
+    expect(text).toContain('Bearer ****')
+    expect(text).not.toContain('abc.def.secret')
+  })
 })

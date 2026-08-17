@@ -1,7 +1,6 @@
 import { Logger, type Exporter, type Message } from '@deepseek-ai/cordis'
 import { shouldEmit, type LogLevel } from './log-level.ts'
 import { LogFileSink } from './log-files.ts'
-import { maskSecrets } from './mask-secrets.ts'
 
 function localTimestamp(ts: number): string {
   const d = new Date(ts)
@@ -40,6 +39,6 @@ export class FileExporter implements Exporter {
   private render(message: Message): string {
     const level = message.type.charAt(0).toUpperCase()
     const body = Logger.format(this, message)
-    return maskSecrets(`${localTimestamp(message.ts)} [${level}] [${message.name}] ${body}`)
+    return `${localTimestamp(message.ts)} [${level}] [${message.name}] ${body}`
   }
 }
