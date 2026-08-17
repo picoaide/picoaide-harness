@@ -226,7 +226,7 @@
   },
   "build": {
     "appId": "ai.deepseek.dsh.desktop",
-    "productName": "DSH Desktop",
+    "productName": "PicoAide Harness",
     "asar": true,
     "asarUnpack": [
       "package.json",
@@ -279,8 +279,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "DSH Desktop",
-      "artifactName": "DSH-Desktop-${version}-${arch}-Setup.${ext}"
+      "shortcutName": "PicoAide Harness",
+      "artifactName": "PicoAide-Harness-${version}-${arch}-Setup.${ext}"
     },
     "linux": {
       "target": [

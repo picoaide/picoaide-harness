@@ -19,3 +19,10 @@
 # llm-deepseek and clears it on logout.
 - id: ui-settings-models
   disabled: true
+# Enterprise brand: product name and window title for the native shell (the
+# desktop Config schema defaults stay upstream-compatible).
+- id: desktop-shell
+  config:
+    mode: compatibility
+    productName: 'PicoAide Harness'
+    windowTitle: 'PicoAide Harness'

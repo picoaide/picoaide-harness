@@ -39,6 +39,10 @@ export const DesktopSettingsSchema: z<DesktopSettings> = z.object({
 export interface Config {
   /** Native presentation mode selected before BrowserWindow construction. */
   mode: DesktopShellMode
+  /** Product name shown in the tray, menus, and update notifications. */
+  productName: string
+  /** BrowserWindow title shown while the Web surface is connected. */
+  windowTitle: string
   /** Initial window width in CSS pixels. */
   width: number
   /** Initial window height in CSS pixels. */
@@ -52,6 +56,8 @@ export interface Config {
 /** Validated native window configuration. */
 export const Config: z<Config> = z.object({
   mode: z.union(['compatibility', 'advanced'] as const).default('compatibility'),
+  productName: z.string().default('DSH Desktop'),
+  windowTitle: z.string().default('DeepSeek Harness Desktop'),
   width: z.number().step(1).min(800).default(1280),
   height: z.number().step(1).min(600).default(840),
   minWidth: z.number().step(1).min(640).default(900),
@@ -140,8 +146,8 @@ export function apply(ctx: Context, config: Config): void {
     () => ctx.desktopRuntime.schedule({
       ...config,
       url: desktopRendererUrl(ctx.webServer.port, config.mode, ctx.desktopRuntime.platform),
-      productName: 'DSH Desktop',
-      windowTitle: 'DeepSeek Harness Desktop',
+      productName: config.productName,
+      windowTitle: config.windowTitle,
       iconPath,
       trayIcons,
       readThemeSource: () => {

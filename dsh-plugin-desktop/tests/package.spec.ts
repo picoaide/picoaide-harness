@@ -134,7 +134,7 @@ describe('published package surface', () => {
 
   it('fixes the installed application identity', () => {
     expect(manifest.version).toBe(workspaceManifest.version)
-    expect(manifest.build?.productName).toBe('DSH Desktop')
+    expect(manifest.build?.productName).toBe('PicoAide Harness')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
     expect(manifest.build?.asarUnpack).toEqual([
       'package.json',
@@ -173,8 +173,8 @@ describe('published package surface', () => {
       allowToChangeInstallationDirectory: true,
       createDesktopShortcut: true,
       createStartMenuShortcut: true,
-      shortcutName: 'DSH Desktop',
-      artifactName: 'DSH-Desktop-${version}-${arch}-Setup.${ext}',
+      shortcutName: 'PicoAide Harness',
+      artifactName: 'PicoAide-Harness-${version}-${arch}-Setup.${ext}',
     })
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
   })
@@ -230,7 +230,7 @@ describe('published package surface', () => {
       .update(readFileSync(new URL('build/app-icon.png', packageRoot)))
       .digest('hex')
 
-    expect(digest).toBe('315fbc6e57ff1f34894f21f66fb7f9f26deccf78333c71fad21a6cec64e7de80')
+    expect(digest).toBe('554ed369078e04d9a022b2a1c856a222a9d1d3f5af326750f6e1a1a3b0d51f5e')
   })
 
   it('generates a centered macOS icon with a 100-pixel visual inset', async () => {

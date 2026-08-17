@@ -85,7 +85,7 @@ describe('desktop update installer download', () => {
       request,
     })
 
-    expect(result).toBe(join(userDataPath, 'updates', '2.1.0', 'DSH-Desktop-2.1.0-mac.dmg'))
+    expect(result).toBe(join(userDataPath, 'updates', '2.1.0', 'PicoAide-Harness-2.1.0-mac.dmg'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     expect(calls).toHaveLength(1)
     expect(calls[0]?.url).toBe(DESKTOP_DOWNLOAD_URLS.darwin)
@@ -106,7 +106,7 @@ describe('desktop update installer download', () => {
       },
     })
 
-    expect(result).toBe(join(userDataPath, 'updates', '2.2.0', 'DSH-Desktop-2.2.0-windows.exe'))
+    expect(result).toBe(join(userDataPath, 'updates', '2.2.0', 'PicoAide-Harness-2.2.0-windows.exe'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     await expectNoPartialFiles(userDataPath, '2.2.0')
   })
@@ -124,7 +124,7 @@ describe('desktop update installer download', () => {
       userDataPath,
       'updates',
       '2.8.0+build',
-      'DSH-Desktop-2.8.0+build-mac.dmg',
+      'PicoAide-Harness-2.8.0+build-mac.dmg',
     ))
   })
 
