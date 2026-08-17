@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+
 
 /**
  * Connectors settings section: list registered connectors with their
@@ -37,15 +37,15 @@ const CARD: React.CSSProperties = {
   flexDirection: 'column',
   gap: 8,
   padding: '12px 14px',
-  border: '1px solid #333',
+  border: '1px solid var(--dsw-alias-border-l2)',
   borderRadius: 8,
 }
 
 const HEAD: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }
 
-const TITLE: React.CSSProperties = { fontSize: 15, margin: 0, fontWeight: 600 }
+const TITLE: React.CSSProperties = { fontSize: 15, margin: 0, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
 
-const DESC: React.CSSProperties = { fontSize: 13, margin: 0, color: '#c9ccd3' }
+const DESC: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-secondary)' }
 
 const STATUS: React.CSSProperties = { fontSize: 12, margin: 0 }
 
@@ -62,13 +62,13 @@ const BUTTON: React.CSSProperties = {
 const INPUT: React.CSSProperties = {
   padding: '6px 10px',
   borderRadius: 6,
-  border: '1px solid #444',
-  background: '#1a1d24',
-  color: '#e6e6e6',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-primary)',
   fontSize: 13,
 }
 
-const LABEL: React.CSSProperties = { fontSize: 12, margin: 0, color: '#c9ccd3' }
+const LABEL: React.CSSProperties = { fontSize: 12, margin: 0, color: 'var(--dsw-alias-label-caption)' }
 
 const statusText: Record<string, string> = {
   disconnected: '未连接',
@@ -217,7 +217,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   )
 }
 
-export function ConnectorsSection(_props: PropsRuntime<'settings.section'>) {
+export function ConnectorsList() {
   const [connectors, setConnectors] = useState<ConnectorEntry[] | null>(null)
 
   const refresh = useCallback((): void => {
