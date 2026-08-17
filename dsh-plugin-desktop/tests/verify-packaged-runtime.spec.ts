@@ -38,6 +38,15 @@ function completePackageResolver(unpackedRoot: string): PackageResolver {
 }
 
 describe('packaged desktop runtime verification', () => {
+  it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
+    expect(REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES).toEqual([
+      'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
+      'node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node',
+      'node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe',
+      'node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll',
+    ])
+  })
+
   it.each([
     [
       'darwin',

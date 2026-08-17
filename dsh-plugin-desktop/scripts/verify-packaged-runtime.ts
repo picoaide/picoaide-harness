@@ -84,9 +84,8 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
 export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
   'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
   'node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node',
-  'node_modules/node-pty/prebuilds/win32-x64/pty.node',
-  'node_modules/node-pty/prebuilds/win32-x64/winpty-agent.exe',
-  'node_modules/node-pty/prebuilds/win32-x64/winpty.dll',
+  'node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe',
+  'node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll',
 ] as const
 
 /** CPU-specific runtime assets that must coexist in a universal macOS application. */
