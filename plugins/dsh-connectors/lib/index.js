@@ -352,6 +352,7 @@ function apply(ctx, options = {}) {
 				args: server.args ?? [],
 				env: {
 					...server.env ?? {},
+					...process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {},
 					...credential?.accessToken ? { PICOAIDE_CONNECTOR_ACCESS_TOKEN: credential.accessToken } : {},
 					...credential?.refreshToken ? { PICOAIDE_CONNECTOR_REFRESH_TOKEN: credential.refreshToken } : {},
 					...credential?.fields ?? {}
@@ -360,9 +361,13 @@ function apply(ctx, options = {}) {
 				toolCallTimeoutMs: 12e4,
 				failOnStartupError: false
 			};
-			const dispose = await ctx.plugin(applyMcpClient, config);
+			const fiber = await ctx.plugin({
+				inject: ["tools"],
+				apply: applyMcpClient,
+				name: "mcp-client"
+			}, config);
 			mcpDisposers.set(server.serverName, () => {
-				dispose?.dispose();
+				fiber?.dispose?.();
 			});
 		}
 	};
