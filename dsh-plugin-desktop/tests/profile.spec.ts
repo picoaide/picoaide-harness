@@ -133,6 +133,34 @@ describe('desktop profile composition', {
     expect(repaired.custom.preserved).toBe(true)
   })
 
+  it('migrates the obsolete Desktop bundle before loading a historical profile', () => {
+    const home = temporaryHome()
+    const dir = ensureDesktopProfile(home)
+    const path = join(dir, 'package.json')
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    writeFileSync(path, JSON.stringify({
+      ...manifest,
+      dsh: {
+        profile: {
+          bundles: [
+            '@deepseek-ai/dsh-base',
+            '@deepseek-ai/dsh-web-app',
+            '@deepseek-ai/dsh-desktop-app',
+          ],
+        },
+      },
+    }, undefined, 2) + '\n')
+
+    expect(() => prepareDesktopProfile(undefined, home, 'win32')).not.toThrow()
+    const repaired = JSON.parse(readFileSync(path, 'utf8')) as {
+      dsh: { profile: { bundles: string[] } }
+    }
+    expect(repaired.dsh.profile.bundles).toEqual([
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+    ])
+  })
+
   it('rejects malformed persistent bundle metadata', () => {
     const home = temporaryHome()
     const dir = ensureDesktopProfile(home)

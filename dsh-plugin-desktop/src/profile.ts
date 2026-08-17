@@ -42,6 +42,7 @@ export const DESKTOP_PROFILE_ROOT = 'cordis.yml'
 const BIN_NAME = DESKTOP_PACKAGE_NAME
 const REQUIRED_BUNDLES = requiredWebBundles()
 const REQUIRED_BUNDLE_SET = new Set(REQUIRED_BUNDLES)
+const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
 const INSTALL_ANCHOR = unpackedAsarPath(fileURLToPath(new URL('../package.json', import.meta.url)))
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
@@ -159,7 +160,9 @@ export interface SkippedOptionalEntry {
  * @returns base, Web carrier, then every third-party bundle in prior order.
  */
 export function desktopBundleList(current: readonly string[]): string[] {
-  const thirdParty = current.filter(name => !REQUIRED_BUNDLE_SET.has(name) && name !== DESKTOP_PACKAGE_NAME)
+  const thirdParty = current.filter(name => !REQUIRED_BUNDLE_SET.has(name)
+    && name !== DESKTOP_PACKAGE_NAME
+    && !OBSOLETE_DESKTOP_BUNDLE_SET.has(name))
   return [...REQUIRED_BUNDLES, ...thirdParty]
 }
 
