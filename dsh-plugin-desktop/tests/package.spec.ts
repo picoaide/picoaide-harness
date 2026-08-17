@@ -77,6 +77,10 @@ describe('published package surface', () => {
       types: './lib/types/profiles.d.ts',
       default: './lib/profiles.js',
     })
+    expect(manifest.exports).toHaveProperty('./diagnostics', {
+      types: './lib/types/diagnostics.d.ts',
+      default: './lib/diagnostics.js',
+    })
     expect(manifest.exports).toHaveProperty('./updates', {
       types: './lib/types/updates.d.ts',
       default: './lib/updates.js',
@@ -101,6 +105,7 @@ describe('published package surface', () => {
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/terminal')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/pnpm')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/profiles')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/diagnostics')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
   })
 
@@ -121,6 +126,7 @@ describe('published package surface', () => {
     expect(config).toContain("'profile-service': 'src/profile-service.ts'")
     expect(config).toContain("pnpm: 'src/pnpm.ts'")
     expect(config).toContain("profiles: 'src/profiles.ts'")
+    expect(config).toContain("diagnostics: 'src/diagnostics.ts'")
     expect(config).toContain("terminal: 'src/terminal.ts'")
     expect(config).toContain("'update-download': 'src/update-download.ts'")
     expect(config).toContain("updates: 'src/updates.ts'")

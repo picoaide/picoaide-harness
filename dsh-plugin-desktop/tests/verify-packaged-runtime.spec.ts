@@ -119,6 +119,7 @@ describe('packaged desktop runtime verification', () => {
     'lib/client.js',
     'lib/desktop-runtime-environment.js',
     'lib/profile-service.js',
+    'lib/diagnostics.js',
     'lib/pnpm.js',
     'lib/update-download.js',
   ])('fails loud when required runtime entry %s is absent', (missing) => {
@@ -133,6 +134,7 @@ describe('packaged desktop runtime verification', () => {
     'build/app-icon-mac.png',
     'build/tray-iconTemplate.png',
     'lib/terminal.js',
+    'lib/diagnostics.js',
     'lib/update-download.js',
     'node_modules/@deepseek-ai/dsh/lib/bin.js',
     'node_modules/pnpm/bin/pnpm.mjs',
