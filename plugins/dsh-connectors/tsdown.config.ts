@@ -8,6 +8,7 @@ export default defineConfig([
     entry: {
       index: 'src/index.ts',
       'sales-easy': 'src/sales-easy.ts',
+      dingtalk: 'src/dingtalk.ts',
     },
     outDir: 'lib',
     format: 'esm',

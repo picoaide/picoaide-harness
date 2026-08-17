@@ -218,7 +218,7 @@ function createProbe(def: ConnectorDef, _options: AuthRunOptions): AuthProbe {
   if (def.authMode === 'cli') {
     const auth = def.auth as CliAuthConfig
     return {
-      isConnected: () => runProbeCommand(auth.statusCommand, auth.statusArgs, auth.env),
+      isConnected: () => runProbeCommand(auth.statusCommand ?? '', auth.statusArgs ?? [], auth.env),
     }
   }
   // Default: nothing to probe (device connectors that need a real endpoint
@@ -261,19 +261,74 @@ async function runToken(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   return { updatedAt: Date.now() } as Partial<ConnectorCredential>
 }
 
-/** CLI flow: run the login command, then poll the status command (clawId-style). */
+/**
+ * CLI flow (mirrors WorkBuddy's CliExecutor.runAuth): spawn the login
+ * command, scan stdout/stderr for the device-flow verification URL and user
+ * code (pushed to the UI through onRequest), then keep the process running
+ * until it exits naturally (exit 0 = authorized). Falls back to the login +
+ * status-poll sequence when no deviceFlow is configured.
+ */
 async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   const auth = def.auth as CliAuthConfig
-  const login = spawn(auth.command, auth.args, {
-    env: { ...process.env, ...auth.env },
-    stdio: 'inherit',
+  const signal = options.signal
+  const deviceFlow = auth.deviceFlow
+  const waitForExit = auth.authWaitForExit ?? deviceFlow !== undefined
+  const timeoutMs = auth.timeoutMs ?? (waitForExit ? 300_000 : 10_000)
+
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const child = spawn(auth.command, auth.args, {
+      env: { ...process.env, ...auth.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    let codeReported = false
+
+    const extract = (text: string, source: string): void => {
+      if (!deviceFlow || codeReported) return
+      let uri: string | undefined
+      try {
+        const match = text.match(new RegExp(deviceFlow.uriPattern))
+        uri = (match?.[1] ?? match?.[0])?.trim()
+      } catch { /* invalid pattern */ }
+      if (!uri) return
+      let code: string | undefined
+      if (deviceFlow.codePattern) {
+        try {
+          const match = text.match(new RegExp(deviceFlow.codePattern))
+          code = (match?.[1] ?? match?.[0])?.trim()
+        } catch { /* invalid pattern */ }
+      }
+      codeReported = true
+      void source
+      options.onRequest({ connectorId: def.id, verificationUrl: uri, ...(code !== undefined ? { userCode: code } : {}) })
+    }
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+      extract(stdout, 'stdout')
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+      extract(stderr, 'stderr')
+    })
+    child.on('error', (error) => { reject(error) })
+    child.on('exit', (code) => resolve(code))
+
+    const timer = setTimeout(() => {
+      try { child.kill() } catch { /* already gone */ }
+      reject(new Error(`登录命令超时（${Math.round(timeoutMs / 1000)}s）`))
+    }, timeoutMs)
+    child.on('exit', () => { clearTimeout(timer) })
+    signal.addEventListener('abort', () => {
+      try { child.kill() } catch { /* already gone */ }
+    }, { once: true })
   })
-  const exitCode = await new Promise<number | null>((resolve) => {
-    login.on('exit', (code) => resolve(code))
-    login.on('error', () => resolve(null))
-  })
+
+  throwIfAborted(signal)
   if (exitCode !== 0) throw new Error(`登录命令退出码 ${exitCode ?? 'error'}`)
-  return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs, auth.pollTimeoutMs, options.signal)
+  if (waitForExit) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
+  return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, signal)
 }
 
 /** Server-side flow: fetch the managed token through the injected callback. */

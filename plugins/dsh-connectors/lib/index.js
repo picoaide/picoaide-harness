@@ -1,9 +1,10 @@
 import { salesEasyDef } from "./sales-easy.js";
+import { dingTalkDef } from "./dingtalk.js";
+import { spawn } from "node:child_process";
 import { promises } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 //#region src/store.ts
 /**
@@ -206,7 +207,7 @@ async function runDevice(def, options) {
 function createProbe(def, _options) {
 	if (def.authMode === "cli") {
 		const auth = def.auth;
-		return { isConnected: () => runProbeCommand(auth.statusCommand, auth.statusArgs, auth.env) };
+		return { isConnected: () => runProbeCommand(auth.statusCommand ?? "", auth.statusArgs ?? [], auth.env) };
 	}
 	return { isConnected: async () => true };
 }
@@ -241,22 +242,85 @@ async function runToken(def, options) {
 	});
 	return { updatedAt: Date.now() };
 }
-/** CLI flow: run the login command, then poll the status command (clawId-style). */
+/**
+* CLI flow (mirrors WorkBuddy's CliExecutor.runAuth): spawn the login
+* command, scan stdout/stderr for the device-flow verification URL and user
+* code (pushed to the UI through onRequest), then keep the process running
+* until it exits naturally (exit 0 = authorized). Falls back to the login +
+* status-poll sequence when no deviceFlow is configured.
+*/
 async function runCli(def, options) {
 	const auth = def.auth;
-	const login = spawn(auth.command, auth.args, {
-		env: {
-			...process.env,
-			...auth.env
-		},
-		stdio: "inherit"
+	const signal = options.signal;
+	const deviceFlow = auth.deviceFlow;
+	const waitForExit = auth.authWaitForExit ?? deviceFlow !== void 0;
+	const timeoutMs = auth.timeoutMs ?? (waitForExit ? 3e5 : 1e4);
+	const exitCode = await new Promise((resolve, reject) => {
+		const child = spawn(auth.command, auth.args, {
+			env: {
+				...process.env,
+				...auth.env
+			},
+			stdio: [
+				"ignore",
+				"pipe",
+				"pipe"
+			]
+		});
+		let stdout = "";
+		let stderr = "";
+		let codeReported = false;
+		const extract = (text, source) => {
+			if (!deviceFlow || codeReported) return;
+			let uri;
+			try {
+				const match = text.match(new RegExp(deviceFlow.uriPattern));
+				uri = (match?.[1] ?? match?.[0])?.trim();
+			} catch {}
+			if (!uri) return;
+			let code;
+			if (deviceFlow.codePattern) try {
+				const match = text.match(new RegExp(deviceFlow.codePattern));
+				code = (match?.[1] ?? match?.[0])?.trim();
+			} catch {}
+			codeReported = true;
+			options.onRequest({
+				connectorId: def.id,
+				verificationUrl: uri,
+				...code !== void 0 ? { userCode: code } : {}
+			});
+		};
+		child.stdout?.on("data", (chunk) => {
+			stdout += chunk.toString();
+			extract(stdout, "stdout");
+		});
+		child.stderr?.on("data", (chunk) => {
+			stderr += chunk.toString();
+			extract(stderr, "stderr");
+		});
+		child.on("error", (error) => {
+			reject(error);
+		});
+		child.on("exit", (code) => resolve(code));
+		const timer = setTimeout(() => {
+			try {
+				child.kill();
+			} catch {}
+			reject(/* @__PURE__ */ new Error(`登录命令超时（${Math.round(timeoutMs / 1e3)}s）`));
+		}, timeoutMs);
+		child.on("exit", () => {
+			clearTimeout(timer);
+		});
+		signal.addEventListener("abort", () => {
+			try {
+				child.kill();
+			} catch {}
+		}, { once: true });
 	});
-	const exitCode = await new Promise((resolve) => {
-		login.on("exit", (code) => resolve(code));
-		login.on("error", () => resolve(null));
-	});
+	throwIfAborted(signal);
 	if (exitCode !== 0) throw new Error(`登录命令退出码 ${exitCode ?? "error"}`);
-	return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs, auth.pollTimeoutMs, options.signal);
+	if (waitForExit) return { updatedAt: Date.now() };
+	return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, signal);
 }
 /** Server-side flow: fetch the managed token through the injected callback. */
 async function runServerSide(def, options) {
@@ -314,7 +378,11 @@ function exact(handler) {
 	};
 }
 function apply(ctx, options = {}) {
-	const defs = [salesEasyDef, ...options.connectors ?? []];
+	const defs = [
+		salesEasyDef,
+		dingTalkDef,
+		...options.connectors ?? []
+	];
 	const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {});
 	const states = /* @__PURE__ */ new Map();
 	const pendingRequests = /* @__PURE__ */ new Map();
@@ -333,6 +401,42 @@ function apply(ctx, options = {}) {
 	const emitRequest = (request) => {
 		pendingRequests.set(request.connectorId, request);
 	};
+	/** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
+	const resolveUrlCommand = async (args) => {
+		const [command, ...rest] = args;
+		if (command === void 0) throw new Error("urlCommand is empty");
+		return new Promise((resolve, reject) => {
+			const child = spawn(command, rest, {
+				env: { ...process.env },
+				stdio: [
+					"ignore",
+					"pipe",
+					"pipe"
+				]
+			});
+			let stdout = "";
+			let stderr = "";
+			child.stdout.on("data", (chunk) => {
+				stdout += chunk.toString();
+			});
+			child.stderr.on("data", (chunk) => {
+				stderr += chunk.toString();
+			});
+			child.on("error", (error) => reject(error));
+			child.on("exit", (code) => {
+				if (code !== 0) {
+					reject(new Error(stderr.trim() || `命令退出码 ${String(code)}`));
+					return;
+				}
+				const match = /https?:\/\/[^\s"'<>]+/u.exec(stdout);
+				if (!match) {
+					reject(/* @__PURE__ */ new Error(`无法从命令输出中解析 URL: ${stdout.trim().slice(0, 200)}`));
+					return;
+				}
+				resolve(match[0]);
+			});
+		});
+	};
 	/** Register the connector's MCP servers through the mcp-client plugin. */
 	const registerMcp = async (def) => {
 		const credential = await store.readCredential(def.id);
@@ -341,7 +445,7 @@ function apply(ctx, options = {}) {
 			const config = server.transport === "streamable-http" ? {
 				transport: "streamable-http",
 				serverName: server.serverName,
-				url: server.url ?? "",
+				url: server.urlCommand ? await resolveUrlCommand(server.urlCommand) : server.url ?? "",
 				headers: credential?.accessToken ? { Authorization: `Bearer ${credential.accessToken}` } : {},
 				toolCallTimeoutMs: 12e4,
 				failOnStartupError: false
