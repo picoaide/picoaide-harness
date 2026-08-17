@@ -1,7 +1,7 @@
 import dns from 'node:dns'
-import { isIP } from 'node:net'
+import { BlockList, isIP } from 'node:net'
 import https from 'node:https'
-import type { IncomingMessage } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http'
 import type { CatalogHttpClient, CatalogHttpResponse } from '../contracts/types.js'
 
 const MAX_REDIRECTS = 3
@@ -17,25 +17,29 @@ export class CatalogNetworkError extends Error {
   }
 }
 
-function isBlockedIpv4(address: string): boolean {
-  const parts = address.split('.').map(Number)
-  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true
-  const [a, b] = parts as [number, number, number, number]
-  return a === 0 || a === 10 || a === 127 || a >= 224
-    || (a === 100 && b >= 64 && b <= 127)
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && (b === 0 || b === 168))
-    || (a === 198 && b >= 18 && b <= 19)
+const blockedAddresses = new BlockList()
+for (const [network, prefix] of [
+  ['0.0.0.0', 8],
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['127.0.0.0', 8],
+  ['169.254.0.0', 16],
+  ['172.16.0.0', 12],
+  ['192.0.0.0', 24],
+  ['192.168.0.0', 16],
+  ['198.18.0.0', 15],
+  ['224.0.0.0', 3],
+] as const) {
+  blockedAddresses.addSubnet(network, prefix, 'ipv4')
 }
-
-function isBlockedIpv6(address: string): boolean {
-  const normalized = address.toLowerCase().split('%', 1)[0] ?? address.toLowerCase()
-  if (normalized === '::' || normalized === '::1' || normalized.startsWith('ff')) return true
-  if (normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe8')
-    || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return true
-  const mapped = normalized.match(/^(?:0:){5}ffff:(\d+\.\d+\.\d+\.\d+)$/u)
-  return mapped !== null && isBlockedIpv4(mapped[1]!)
+for (const [network, prefix] of [
+  ['::', 128],
+  ['::1', 128],
+  ['fc00::', 7],
+  ['fe80::', 10],
+  ['ff00::', 8],
+] as const) {
+  blockedAddresses.addSubnet(network, prefix, 'ipv6')
 }
 
 interface PinnedAddress {
@@ -43,9 +47,26 @@ interface PinnedAddress {
   readonly family: 4 | 6
 }
 
+interface RestrictedHttpResponse {
+  readonly statusCode: number
+  readonly headers: IncomingHttpHeaders
+  readonly body: Buffer
+}
+
+export interface RestrictedHttpClientOptions {
+  readonly resolveAddress?: (hostname: string) => Promise<PinnedAddress>
+  readonly request?: (
+    url: URL,
+    signal: AbortSignal,
+    pinned: PinnedAddress,
+  ) => Promise<RestrictedHttpResponse>
+  readonly totalTimeoutMs?: number
+}
+
 function assertSafeAddress(address: string): 4 | 6 {
-  const family = isIP(address)
-  if (family === 4 ? isBlockedIpv4(address) : family === 6 ? isBlockedIpv6(address) : true) {
+  const normalized = address.replace(/^\[|\]$/gu, '').split('%', 1)[0]!
+  const family = isIP(normalized)
+  if (family === 0 || blockedAddresses.check(normalized, family === 4 ? 'ipv4' : 'ipv6')) {
     throw new CatalogNetworkError('blocked-address')
   }
   return family as 4 | 6
@@ -87,7 +108,8 @@ function readBody(response: IncomingMessage): Promise<Buffer> {
 }
 
 async function resolvePinnedAddress(hostname: string): Promise<PinnedAddress> {
-  if (isIP(hostname)) return { address: hostname, family: assertSafeAddress(hostname) }
+  const literal = hostname.replace(/^\[|\]$/gu, '')
+  if (isIP(literal)) return { address: literal, family: assertSafeAddress(literal) }
   const addresses = await dns.promises.lookup(hostname, { all: true, verbatim: true })
   if (addresses.length === 0) throw new CatalogNetworkError('blocked-address')
   for (const entry of addresses) assertSafeAddress(entry.address)
@@ -95,7 +117,7 @@ async function resolvePinnedAddress(hostname: string): Promise<PinnedAddress> {
   return { address: first.address, family: assertSafeAddress(first.address) }
 }
 
-function requestOnce(url: URL, signal: AbortSignal, pinned: PinnedAddress): Promise<{ response: IncomingMessage; body: Buffer }> {
+function requestOnce(url: URL, signal: AbortSignal, pinned: PinnedAddress): Promise<RestrictedHttpResponse> {
   return new Promise((resolve, reject) => {
     let settled = false
     let firstByteTimer: NodeJS.Timeout | undefined
@@ -125,7 +147,11 @@ function requestOnce(url: URL, signal: AbortSignal, pinned: PinnedAddress): Prom
         request.destroy(new CatalogNetworkError('timeout'))
       }, FIRST_BYTE_TIMEOUT_MS)
       void readBody(response).then(
-        body => finish(() => resolve({ response, body })),
+        body => finish(() => resolve({
+          statusCode: response.statusCode ?? 0,
+          headers: response.headers,
+          body,
+        })),
         cause => finish(() => reject(cause)),
       )
     })
@@ -135,43 +161,75 @@ function requestOnce(url: URL, signal: AbortSignal, pinned: PinnedAddress): Prom
   })
 }
 
-async function fetchJson(start: string, signal: AbortSignal, redirectCount = 0): Promise<CatalogHttpResponse> {
+async function fetchJson(
+  start: string,
+  signal: AbortSignal,
+  resolveAddress: (hostname: string) => Promise<PinnedAddress>,
+  request: (url: URL, signal: AbortSignal, pinned: PinnedAddress) => Promise<RestrictedHttpResponse>,
+  redirectCount = 0,
+): Promise<CatalogHttpResponse> {
   if (signal.aborted) throw new CatalogNetworkError('timeout')
   const url = validateUrl(start)
   if (redirectCount > MAX_REDIRECTS) throw new CatalogNetworkError('redirect')
-  const pinned = await resolvePinnedAddress(url.hostname)
-  const totalController = new AbortController()
-  const onAbort = () => totalController.abort(signal.reason)
-  signal.addEventListener('abort', onAbort, { once: true })
-  const totalTimer = setTimeout(() => totalController.abort(), TOTAL_TIMEOUT_MS)
+  const pinned = await resolveAddress(url.hostname)
+  const response = await request(url, signal, pinned)
+  const status = response.statusCode
+  if (status >= 300 && status < 400) {
+    const location = response.headers.location
+    if (location === undefined) throw new CatalogNetworkError('redirect')
+    return await fetchJson(
+      new URL(location, url).href,
+      signal,
+      resolveAddress,
+      request,
+      redirectCount + 1,
+    )
+  }
+  if (status < 200 || status >= 300) throw new CatalogNetworkError('http')
+  const contentType = response.headers['content-type'] ?? ''
+  const encoding = response.headers['content-encoding']
+  if (!/^(?:application\/json|application\/[^;]+\+json)(?:;|$)/iu.test(contentType)
+    || encoding !== undefined && encoding !== 'identity') {
+    throw new CatalogNetworkError('response')
+  }
+  let value: unknown
   try {
-    const { response, body } = await requestOnce(url, totalController.signal, pinned)
-    const status = response.statusCode ?? 0
-    if (status >= 300 && status < 400) {
-      const location = response.headers.location
-      if (location === undefined) throw new CatalogNetworkError('redirect')
-      return await fetchJson(new URL(location, url).href, signal, redirectCount + 1)
-    }
-    if (status < 200 || status >= 300) throw new CatalogNetworkError('http')
-    const contentType = response.headers['content-type'] ?? ''
-    const encoding = response.headers['content-encoding']
-    if (!/^(?:application\/json|application\/[^;]+\+json)(?:;|$)/iu.test(contentType)
-      || encoding !== undefined && encoding !== 'identity') {
-      throw new CatalogNetworkError('response')
-    }
-    let value: unknown
-    try {
-      value = JSON.parse(body.toString('utf8')) as unknown
-    } catch {
-      throw new CatalogNetworkError('response')
-    }
-    return { value, finalUrl: url.href }
-  } finally {
-    clearTimeout(totalTimer)
-    signal.removeEventListener('abort', onAbort)
+    value = JSON.parse(response.body.toString('utf8')) as unknown
+  } catch {
+    throw new CatalogNetworkError('response')
+  }
+  return { value, finalUrl: url.href }
+}
+
+export function createRestrictedHttpClient(
+  options: RestrictedHttpClientOptions = {},
+): CatalogHttpClient {
+  const resolveAddress = options.resolveAddress ?? resolvePinnedAddress
+  const request = options.request ?? requestOnce
+  const totalTimeoutMs = options.totalTimeoutMs ?? TOTAL_TIMEOUT_MS
+
+  return {
+    async getJson(start, signal) {
+      if (signal.aborted) throw new CatalogNetworkError('timeout')
+      const totalController = new AbortController()
+      let timedOut = false
+      const onAbort = () => totalController.abort(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+      const totalTimer = setTimeout(() => {
+        timedOut = true
+        totalController.abort()
+      }, totalTimeoutMs)
+      try {
+        return await fetchJson(start, totalController.signal, resolveAddress, request)
+      } catch (cause) {
+        if (timedOut) throw new CatalogNetworkError('timeout')
+        throw cause
+      } finally {
+        clearTimeout(totalTimer)
+        signal.removeEventListener('abort', onAbort)
+      }
+    },
   }
 }
 
-export const restrictedHttpClient: CatalogHttpClient = {
-  getJson: (url, signal) => fetchJson(url, signal),
-}
+export const restrictedHttpClient: CatalogHttpClient = createRestrictedHttpClient()

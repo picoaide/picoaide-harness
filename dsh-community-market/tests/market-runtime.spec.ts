@@ -3,7 +3,12 @@ import { dsh1024StoreAdapter, DSH_1024STORE_ADAPTER_ID, DSH_1024STORE_KEY, DSH_1
 import { DefaultCatalogService } from '../src/catalog/service.js'
 import { MemoryCatalogSourceStore } from '../src/catalog/source-store.js'
 import type { CatalogHttpClient, LocalSourceRecord } from '../src/contracts/index.js'
-import { pinnedLookupResult, restrictedHttpClient } from '../src/network/restricted-http.js'
+import {
+  CatalogNetworkError,
+  createRestrictedHttpClient,
+  pinnedLookupResult,
+  restrictedHttpClient,
+} from '../src/network/restricted-http.js'
 
 const source = (overrides: Partial<LocalSourceRecord> = {}): LocalSourceRecord => ({
   sourceRecordId: '018f1f77-a5c4-7b73-a9ae-0242ac120002',
@@ -96,6 +101,62 @@ describe('catalog aggregation', () => {
 })
 
 describe('restricted HTTP boundary', () => {
+  it('keeps one total deadline across redirects', async () => {
+    vi.useFakeTimers()
+    try {
+      const request = vi.fn((url: URL, signal: AbortSignal) => {
+        if (url.hostname === 'catalog.example') {
+          return new Promise<{ body: Buffer; headers: { location: string }; statusCode: number }>((resolve) => {
+            setTimeout(() => resolve({
+              body: Buffer.alloc(0),
+              headers: { location: 'https://redirect.example/catalog.json' },
+              statusCode: 302,
+            }), 20)
+          })
+        }
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      })
+      const client = createRestrictedHttpClient({
+        request,
+        resolveAddress: async () => ({ address: '104.21.87.154', family: 4 }),
+        totalTimeoutMs: 30,
+      })
+
+      const result = expect(client.getJson(
+        'https://catalog.example/catalog.json',
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: 'timeout' })
+      await vi.advanceTimersByTimeAsync(20)
+      expect(request).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(10)
+      await result
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('revalidates every redirect target before the next request', async () => {
+    const resolveAddress = vi.fn(async (hostname: string) => {
+      if (hostname === 'private.example') throw new CatalogNetworkError('blocked-address')
+      return { address: '104.21.87.154', family: 4 as const }
+    })
+    const request = vi.fn(async () => ({
+      body: Buffer.alloc(0),
+      headers: { location: 'https://private.example/catalog.json' },
+      statusCode: 302,
+    }))
+    const client = createRestrictedHttpClient({ request, resolveAddress })
+
+    await expect(client.getJson(
+      'https://catalog.example/catalog.json',
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: 'blocked-address' })
+    expect(resolveAddress).toHaveBeenCalledTimes(2)
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
   it('returns an address list when Node requests an all-address lookup', () => {
     const pinned = { address: '104.21.87.154', family: 4 as const }
     expect(pinnedLookupResult({ all: true }, pinned)).toEqual([pinned])
@@ -104,5 +165,14 @@ describe('restricted HTTP boundary', () => {
 
   it.each(['http://example.com/catalog.json', 'https://127.0.0.1/catalog.json', 'https://169.254.169.254/latest'])('rejects unsafe URL %s before requesting it', async (url) => {
     await expect(restrictedHttpClient.getJson(url, new AbortController().signal)).rejects.toThrow(/catalog request failed/u)
+  })
+
+  it.each([
+    'https://[::ffff:7f00:1]/catalog.json',
+    'https://[::ffff:a9fe:a9fe]/latest',
+  ])('rejects IPv4-mapped IPv6 URL %s before connecting', async (url) => {
+    await expect(restrictedHttpClient.getJson(url, AbortSignal.timeout(250))).rejects.toMatchObject({
+      code: 'blocked-address',
+    })
   })
 })
