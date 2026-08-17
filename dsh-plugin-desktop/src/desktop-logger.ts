@@ -35,7 +35,7 @@ export function installDesktopUncaughtExceptionLogging(
 
 /** DesktopLogger that writes to the shared sink and mirrors to process.stderr. */
 export class ElectronStderrLogger implements DesktopLogger {
-  constructor(private readonly sink: LogFileSink) {}
+  constructor(private readonly sink: LogFileSink | undefined) {}
 
   /** Accept one fail-loud stderr diagnostic through the persistent logger. */
   write(chunk: string): boolean {
@@ -46,7 +46,7 @@ export class ElectronStderrLogger implements DesktopLogger {
   error(message: string): void {
     const masked = maskSecrets(message)
     try {
-      this.sink.write('error', masked)
+      this.sink?.write('error', masked)
     } catch {
       // Persistent diagnostics are best-effort; stderr must remain available.
     }

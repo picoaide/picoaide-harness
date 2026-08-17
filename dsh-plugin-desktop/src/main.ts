@@ -26,6 +26,7 @@ import {
 import { FileExporter } from './file-exporter.ts'
 import { DESKTOP_SETTINGS_NAMESPACE, type DesktopSettings } from './index.ts'
 import { LogFileSink } from './log-files.ts'
+import { maskSecrets } from './mask-secrets.ts'
 import { resolveDesktopShellEnvironment } from './shell-environment.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
@@ -125,13 +126,20 @@ async function start(): Promise<void> {
   let disposePnpmRuntime: (() => void) | undefined
   let fileExporter: FileExporter | undefined
   let runtime!: ElectronDesktopRuntime
-  const logSink = new LogFileSink(join(app.getPath('userData'), 'logs'), {
-    maxFileBytes: 10 * 1024 * 1024,
-    maxDirectoryBytes: 200 * 1024 * 1024,
-  })
-  logSink.enforceDirectoryCap()
-  logSink.purgeOlderThan(7)
-  logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} run ${Date.now()} ---`)
+  let logSink: LogFileSink | undefined
+  try {
+    logSink = new LogFileSink(join(app.getPath('userData'), 'logs'), {
+      maxFileBytes: 10 * 1024 * 1024,
+      maxDirectoryBytes: 200 * 1024 * 1024,
+    })
+    logSink.enforceDirectoryCap()
+    logSink.purgeOlderThan(7)
+    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} run ${Date.now()} ---`)
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    process.stderr.write(`${BIN_NAME}: file logging unavailable: ${maskSecrets(detail)}\n`)
+    logSink = undefined
+  }
   const electronLogger = new ElectronStderrLogger(logSink)
   const nativeExit = createDesktopExitCoordinator(
     {
@@ -294,8 +302,10 @@ async function start(): Promise<void> {
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
         hostCtx.provide('desktopPnpmBootstrap', desktopPnpmBootstrap)
-        fileExporter = new FileExporter(logSink)
-        hostCtx.logger.exporter(fileExporter)
+        if (logSink !== undefined) {
+          fileExporter = new FileExporter(logSink)
+          hostCtx.logger.exporter(fileExporter)
+        }
         await hostCtx.plugin(DesktopProfileService, {
           current: {
             name: activeProfileName,
