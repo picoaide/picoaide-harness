@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { BlockList, isIP } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
@@ -78,15 +79,30 @@ function readJson(req: IncomingMessage): Promise<unknown> {
   })
 }
 
-function isLoopback(address: string | undefined): boolean {
-  return address === undefined || address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+const loopbackAddresses = new BlockList()
+loopbackAddresses.addSubnet('127.0.0.0', 8, 'ipv4')
+loopbackAddresses.addSubnet('::1', 128, 'ipv6')
+
+export interface MarketMutationContext {
+  readonly remoteAddress: string | undefined
+  readonly origin: string | undefined
+  readonly host: string | undefined
+}
+
+export function marketMutationAllowed(context: MarketMutationContext): boolean {
+  if (context.remoteAddress === undefined || context.origin === undefined || context.host === undefined) return false
+  const address = context.remoteAddress.replace(/^\[|\]$/gu, '').split('%', 1)[0]!
+  const family = isIP(address)
+  if (family === 0 || !loopbackAddresses.check(address, family === 4 ? 'ipv4' : 'ipv6')) return false
+  return context.origin === `http://${context.host}`
 }
 
 function mutationAllowed(req: IncomingMessage): boolean {
-  if (!isLoopback(req.socket.remoteAddress)) return false
-  const origin = req.headers.origin
-  const host = req.headers.host
-  return origin === undefined || host === undefined || origin === `http://${host}`
+  return marketMutationAllowed({
+    remoteAddress: req.socket.remoteAddress,
+    origin: req.headers.origin,
+    host: req.headers.host,
+  })
 }
 
 function asMutation(value: unknown): MarketSourceMutation {

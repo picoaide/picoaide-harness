@@ -3,6 +3,7 @@ import { dsh1024StoreAdapter, DSH_1024STORE_ADAPTER_ID, DSH_1024STORE_KEY, DSH_1
 import { DefaultCatalogService } from '../src/catalog/service.js'
 import { MemoryCatalogSourceStore } from '../src/catalog/source-store.js'
 import type { CatalogHttpClient, LocalSourceRecord } from '../src/contracts/index.js'
+import { marketMutationAllowed } from '../src/host/routes.js'
 import {
   CatalogNetworkError,
   createRestrictedHttpClient,
@@ -97,6 +98,25 @@ describe('catalog aggregation', () => {
     const [result] = await service.fetch({}, new AbortController().signal)
     expect(result).toMatchObject({ stale: true, error: 'source unavailable' })
     expect(result?.snapshot?.items).toHaveLength(1)
+  })
+})
+
+describe('source mutation boundary', () => {
+  it.each([
+    ['127.0.0.1', 'http://127.0.0.1:43120', '127.0.0.1:43120'],
+    ['::1', 'http://localhost:43120', 'localhost:43120'],
+    ['::ffff:7f00:1', 'http://localhost:43120', 'localhost:43120'],
+  ])('allows loopback address %s only with a matching origin', (remoteAddress, origin, host) => {
+    expect(marketMutationAllowed({ remoteAddress, origin, host })).toBe(true)
+  })
+
+  it.each([
+    [undefined, 'http://localhost:43120', 'localhost:43120'],
+    ['127.0.0.1', undefined, 'localhost:43120'],
+    ['127.0.0.1', 'http://attacker.example', 'localhost:43120'],
+    ['104.21.87.154', 'http://localhost:43120', 'localhost:43120'],
+  ])('rejects incomplete or non-local mutation context', (remoteAddress, origin, host) => {
+    expect(marketMutationAllowed({ remoteAddress, origin, host })).toBe(false)
   })
 })
 
