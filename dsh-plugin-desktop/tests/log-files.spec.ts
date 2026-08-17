@@ -56,4 +56,15 @@ describe('LogFileSink', () => {
     const day = todaySuffix()
     expect(readFileSync(join(dir, `dsh-${day}.log`), 'utf8')).toBe('second\n')
   })
+
+  it('writeHeader writes a marker line before ordinary lines', () => {
+    const { s, dir } = sink()
+    s.writeHeader('--- dsh 2.0.0 darwin run 123 ---')
+    s.write('info', 'after header')
+    s.close()
+    const day = todaySuffix()
+    const text = readFileSync(join(dir, `dsh-${day}.log`), 'utf8')
+    expect(text.split('\n')[0]).toBe('--- dsh 2.0.0 darwin run 123 ---')
+    expect(text).toContain('after header')
+  })
 })

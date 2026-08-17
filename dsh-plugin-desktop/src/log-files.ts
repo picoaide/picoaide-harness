@@ -50,6 +50,22 @@ export class LogFileSink {
     if (isErrorType(type)) this.append('error', line)
   }
 
+  /** Write a startup header line to the current full-log file (before ordinary lines). */
+  writeHeader(line: string): void {
+    const suffix = localDateSuffix(new Date())
+    if (suffix !== this.currentDate) this.rollDate(suffix)
+    this.append('all', line)
+  }
+
+  /** Delete log files modified more than `days` days ago. */
+  purgeOlderThan(days: number): void {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+    for (const name of readdirSync(this.directory)) {
+      const path = join(this.directory, name)
+      if (statSync(path).mtimeMs < cutoff) unlinkSync(path)
+    }
+  }
+
   /** Delete every file in the directory and reset the rotation state. */
   clear(): void {
     for (const name of readdirSync(this.directory)) unlinkSync(join(this.directory, name))
