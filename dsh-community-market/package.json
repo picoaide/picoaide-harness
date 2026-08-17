@@ -66,7 +66,8 @@
     "typecheck": "node scripts/generate-contract-types.mjs --check && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run",
     "verify:contracts": "node scripts/generate-contract-types.mjs --check",
-    "check": "node scripts/verify-docs.mjs && yarn run build && node scripts/verify-package-exports.mjs && yarn run typecheck && yarn run test",
+    "verify:loader": "node scripts/verify-client-loader.mjs",
+    "check": "node scripts/verify-docs.mjs && yarn run build && node scripts/verify-package-exports.mjs && yarn run verify:loader && yarn run typecheck && yarn run test",
     "prepack": "yarn run check"
   },
   "dependencies": {
