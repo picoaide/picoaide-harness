@@ -200,9 +200,11 @@ export function ensureDesktopProfile(home: string = resolveDshHome()): string {
 }
 
 /** Resolve the agent presets shipped by the matching dsh CLI dependency. */
-function shippedPresetRoot(): string {
-  const require = createRequire(import.meta.url)
-  return join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
+export function shippedPresetRoot(moduleUrl: string = import.meta.url): string {
+  const require = createRequire(moduleUrl)
+  return unpackedAsarPath(
+    join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets'),
+  )
 }
 
 /** Read a row's object config without trusting arbitrary YAML values. */
