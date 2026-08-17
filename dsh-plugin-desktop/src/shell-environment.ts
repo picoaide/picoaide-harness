@@ -1,30 +1,92 @@
-/** Resolve the login-shell PATH used by a packaged Unix desktop launch. */
+/** Recover selected login-shell exports for packaged Unix desktop launches. */
 
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { userInfo } from 'node:os'
+import { basename, isAbsolute } from 'node:path'
+import {
+  DSH_ENV_PREFIX,
+  SENSITIVE_ENV_PATTERN,
+  scrubbedParentEnv,
+} from '@deepseek-ai/dsh-subprocess'
 
 const DEFAULT_CAPTURE_TIMEOUT_MS = 2_000
 const MAX_CAPTURE_BYTES = 1024 * 1024
 
-/** Result of resolving the PATH inherited by the desktop Host. */
-export interface DesktopShellPathResolution {
-  /** PATH value to use; `undefined` only when no inherited PATH exists. */
-  readonly path: string | undefined
-  /** Whether a login shell contributed the PATH. */
+const SUPPORTED_SHELL_ARGUMENTS = new Map<string, readonly string[]>([
+  ['bash', ['-ilc']],
+  ['fish', ['--login', '--interactive', '--command']],
+  ['zsh', ['-ilc']],
+])
+
+/**
+ * Exported rc variables that Desktop may recover in addition to PATH.
+ *
+ * Keep this list deliberately narrow: shell startup files are trusted user
+ * code, but their complete exported environment is not an appropriate ambient
+ * API for Electron or model-facing subprocesses.
+ */
+export const DESKTOP_SHELL_ENVIRONMENT_KEYS: ReadonlySet<string> = new Set([
+  'ANDROID_HOME',
+  'ANDROID_SDK_ROOT',
+  'ASDF_DATA_DIR',
+  'ASDF_DIR',
+  'BUN_INSTALL',
+  'CARGO_HOME',
+  'CONDA_DEFAULT_ENV',
+  'CONDA_PREFIX',
+  'DENO_INSTALL',
+  'DOTNET_ROOT',
+  'FLUTTER_ROOT',
+  'GEM_HOME',
+  'GEM_PATH',
+  'GOBIN',
+  'GOMODCACHE',
+  'GOPATH',
+  'GOROOT',
+  'HOMEBREW_CELLAR',
+  'HOMEBREW_PREFIX',
+  'HOMEBREW_REPOSITORY',
+  'JAVA_HOME',
+  'LANG',
+  'LANGUAGE',
+  'MISE_CACHE_DIR',
+  'MISE_CONFIG_DIR',
+  'MISE_DATA_DIR',
+  'MISE_STATE_DIR',
+  'NVM_BIN',
+  'NVM_DIR',
+  'NVM_INC',
+  'PNPM_HOME',
+  'PYENV_ROOT',
+  'RBENV_ROOT',
+  'RUSTUP_HOME',
+  'SDKMAN_DIR',
+  'SDKROOT',
+  'TZ',
+  'VIRTUAL_ENV',
+  'VOLTA_HOME',
+])
+
+/** Environment updates recovered for the desktop Host. */
+export interface DesktopShellEnvironmentResolution {
+  /** Selected entries to merge into `process.env`; inherited entries are omitted. */
+  readonly updates: Readonly<Record<string, string>>
+  /** Whether a login shell contributed any updates. */
   readonly source: 'process' | 'login-shell'
-  /** Stable diagnostic reason when the inherited process PATH was retained. */
+  /** Stable diagnostic reason when the inherited process environment was retained. */
   readonly fallbackReason?:
     | 'not-packaged'
     | 'windows'
     | 'unsupported-platform'
     | 'missing-shell'
+    | 'unsupported-shell'
     | 'capture-failed'
     | 'missing-path'
 }
 
-/** Inputs for {@link resolveDesktopShellPath}. */
-export interface ResolveDesktopShellPathOptions {
+/** Inputs for {@link resolveDesktopShellEnvironment}. */
+export interface ResolveDesktopShellEnvironmentOptions {
   readonly environment: NodeJS.ProcessEnv
   readonly home: string
   readonly isPackaged: boolean
@@ -32,6 +94,8 @@ export interface ResolveDesktopShellPathOptions {
   readonly shell?: string
   readonly timeoutMs?: number
   readonly capture?: (shell: string, home: string, environment: NodeJS.ProcessEnv, timeoutMs: number) => Promise<NodeJS.ProcessEnv>
+  /** Test seam for the official parent-environment scrub. */
+  readonly scrubParent?: () => Readonly<Record<string, string>>
 }
 
 /**
@@ -62,10 +126,11 @@ export function parseShellEnvironment(payload: Buffer, startMarker: string, endM
 }
 
 /**
- * Capture one login shell's environment without accepting its ordinary stdout or stderr.
- * @param shell - Absolute or PATH-resolved shell executable.
+ * Capture one interactive login shell's exported environment without accepting
+ * startup-file stdout or stderr as environment records.
+ * @param shell - Absolute zsh, bash, or fish executable.
  * @param home - Working directory for shell startup.
- * @param environment - Environment inherited by the shell.
+ * @param environment - Already-scrubbed environment inherited by the shell.
  * @param timeoutMs - Hard deadline before the shell is killed.
  * @returns Environment printed after the shell startup files finish.
  */
@@ -75,30 +140,35 @@ export async function captureLoginShellEnvironment(
   environment: NodeJS.ProcessEnv,
   timeoutMs: number = DEFAULT_CAPTURE_TIMEOUT_MS,
 ): Promise<NodeJS.ProcessEnv> {
+  if (!isAbsolute(shell)) throw new Error('desktop shell environment requires an absolute shell path')
+  const shellArguments = SUPPORTED_SHELL_ARGUMENTS.get(basename(shell).toLowerCase())
+  if (shellArguments === undefined) throw new Error('desktop shell environment does not support this shell')
+
   const nonce = randomBytes(16).toString('hex')
   const startMarker = `dsh-shell-env-start-${nonce}`
   const endMarker = `dsh-shell-env-end-${nonce}`
-  const command = `printf '%s\\0' '${startMarker}' >&3; /usr/bin/env -0 >&3; printf '%s\\0' '${endMarker}' >&3`
-  const shellName = shell.split('/').at(-1)?.toLowerCase()
-  const args = shellName === 'nu' || shellName === 'nushell'
-    ? ['--login', '--interactive', '--commands', command]
-    : ['-ilc', command]
-  const child = spawn(shell, args, {
+  const command = `/usr/bin/printf '%s\\0' '${startMarker}'; /usr/bin/env -0; /usr/bin/printf '%s\\0' '${endMarker}'`
+  const child = spawn(shell, [...shellArguments, command], {
     cwd: home,
     detached: true,
     env: environment,
-    stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'ignore'],
   })
   const killShellTree = (): void => {
     try {
       if (child.pid === undefined) child.kill('SIGKILL')
       else process.kill(-child.pid, 'SIGKILL')
     } catch {
-      // A spawn failure or an already-exited process needs no further cleanup.
+      // If the process group is not visible yet, still terminate its leader.
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // A spawn failure or an already-exited process needs no further cleanup.
+      }
     }
   }
-  const output = child.stdio[3]
-  if (output === null || output === undefined) {
+  const output = child.stdout
+  if (output === null) {
     const closed = new Promise<void>((resolve) => {
       child.once('error', () => {})
       child.once('close', () => { resolve() })
@@ -161,45 +231,88 @@ export async function captureLoginShellEnvironment(
   })
 }
 
-function inheritedPath(
-  environment: NodeJS.ProcessEnv,
-  fallbackReason: NonNullable<DesktopShellPathResolution['fallbackReason']>,
-): DesktopShellPathResolution {
-  return { path: environment.PATH, source: 'process', fallbackReason }
+function inheritedEnvironment(
+  fallbackReason: NonNullable<DesktopShellEnvironmentResolution['fallbackReason']>,
+): DesktopShellEnvironmentResolution {
+  return { updates: {}, source: 'process', fallbackReason }
+}
+
+function isOfficiallyScrubbedName(name: string): boolean {
+  return !SENSITIVE_ENV_PATTERN.test(name) && !name.toUpperCase().startsWith(DSH_ENV_PREFIX)
+}
+
+function isSelectedShellEnvironmentName(name: string): boolean {
+  return name === 'PATH' || name.startsWith('LC_') || DESKTOP_SHELL_ENVIRONMENT_KEYS.has(name)
 }
 
 /**
- * Resolve the PATH for a desktop Host launch.
- * @param options - Platform, launch environment and optional capture seam.
- * @returns A login-shell PATH on packaged Unix desktops, otherwise the inherited PATH.
+ * Select safe, useful login-shell exports without overriding an explicit app
+ * launch environment. PATH is the sole exception: its login-shell value wins.
  */
-export async function resolveDesktopShellPath(options: ResolveDesktopShellPathOptions): Promise<DesktopShellPathResolution> {
-  if (!options.isPackaged) return inheritedPath(options.environment, 'not-packaged')
-  if (options.platform === 'win32') return inheritedPath(options.environment, 'windows')
+export function selectDesktopShellEnvironment(
+  captured: Readonly<NodeJS.ProcessEnv>,
+  inherited: Readonly<NodeJS.ProcessEnv>,
+): Readonly<Record<string, string>> {
+  const updates: Record<string, string> = {}
+  for (const [name, value] of Object.entries(captured)) {
+    if (
+      value === undefined
+      || !isOfficiallyScrubbedName(name)
+      || !isSelectedShellEnvironmentName(name)
+    ) continue
+    if (name === 'PATH') {
+      if (value !== '') updates.PATH = value
+      continue
+    }
+    if (inherited[name] === undefined) updates[name] = value
+  }
+  return updates
+}
+
+function resolveUserShell(options: ResolveDesktopShellEnvironmentOptions): string | undefined {
+  if (options.shell !== undefined) return options.shell
+  try {
+    const accountShell = userInfo().shell
+    if (accountShell !== '' && accountShell !== null) return accountShell
+  } catch {
+    // The inherited SHELL remains a safe compatibility fallback.
+  }
+  return options.environment.SHELL
+}
+
+/**
+ * Resolve selected login-shell exports for a desktop Host launch.
+ * @param options - Platform, launch environment and optional capture seams.
+ * @returns Updates for packaged Unix desktops, otherwise an empty update set.
+ */
+export async function resolveDesktopShellEnvironment(
+  options: ResolveDesktopShellEnvironmentOptions,
+): Promise<DesktopShellEnvironmentResolution> {
+  if (!options.isPackaged) return inheritedEnvironment('not-packaged')
+  if (options.platform === 'win32') return inheritedEnvironment('windows')
   if (options.platform !== 'darwin' && options.platform !== 'linux') {
-    return inheritedPath(options.environment, 'unsupported-platform')
+    return inheritedEnvironment('unsupported-platform')
   }
 
-  let shell = options.shell ?? options.environment.SHELL
-  if (shell === undefined || shell === '') {
-    try {
-      shell = userInfo().shell ?? undefined
-    } catch {
-      return inheritedPath(options.environment, 'missing-shell')
-    }
+  const shell = resolveUserShell(options)
+  if (shell === undefined || shell === '') return inheritedEnvironment('missing-shell')
+  if (!isAbsolute(shell) || !SUPPORTED_SHELL_ARGUMENTS.has(basename(shell).toLowerCase())) {
+    return inheritedEnvironment('unsupported-shell')
   }
-  if (shell === '') return inheritedPath(options.environment, 'missing-shell')
-  if (shell === undefined) return inheritedPath(options.environment, 'missing-shell')
 
   try {
-    const capture = options.capture ?? captureLoginShellEnvironment
-    const captured = await capture(shell, options.home, options.environment, options.timeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS)
-    const capturedPath = captured.PATH
-    if (capturedPath !== undefined && capturedPath !== '') {
-      return { path: capturedPath, source: 'login-shell' }
+    const scrubParent = options.scrubParent ?? scrubbedParentEnv
+    const captureEnvironment: NodeJS.ProcessEnv = {
+      ...scrubParent(),
+      HOME: options.home,
+      SHELL: shell,
     }
-    return inheritedPath(options.environment, 'missing-path')
+    const capture = options.capture ?? captureLoginShellEnvironment
+    const captured = await capture(shell, options.home, captureEnvironment, options.timeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS)
+    const updates = selectDesktopShellEnvironment(captured, options.environment)
+    if (updates.PATH === undefined) return inheritedEnvironment('missing-path')
+    return { updates, source: 'login-shell' }
   } catch {
-    return inheritedPath(options.environment, 'capture-failed')
+    return inheritedEnvironment('capture-failed')
   }
 }

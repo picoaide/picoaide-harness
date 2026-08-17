@@ -128,13 +128,17 @@ describe('published package surface', () => {
 
   it('installs Host command PATHs after the launch snapshot and before profile boot', () => {
     const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
+    const recover = main.indexOf('await resolveDesktopShellEnvironment')
+    const applyRecovered = main.indexOf('Object.entries(shellEnvironmentResolution.updates)')
     const snapshot = main.indexOf('const environment = loadLayeredEnv')
     const install = main.indexOf('const pnpmRuntime = installDesktopPnpmRuntime')
     const prepare = main.indexOf('const prepared = prepareDesktopProfile')
     const installDsh = main.indexOf('const dshRuntime = process.platform === \'win32\'')
     const boot = main.indexOf('const ctx = await boot')
 
-    expect(snapshot).toBeGreaterThanOrEqual(0)
+    expect(recover).toBeGreaterThanOrEqual(0)
+    expect(applyRecovered).toBeGreaterThan(recover)
+    expect(snapshot).toBeGreaterThan(applyRecovered)
     expect(install).toBeGreaterThan(snapshot)
     expect(prepare).toBeGreaterThan(install)
     expect(installDsh).toBeGreaterThan(prepare)
@@ -144,6 +148,15 @@ describe('published package surface', () => {
     expect(main).toContain("'dsh-plugin-desktop: packaged dsh runtime PATH'")
     expect(main).toContain('disposePnpmRuntime?.()')
     expect(main).toContain('disposeDshRuntime?.()')
+  })
+
+  it('uses the upstream child-environment scrub around login-shell recovery', () => {
+    const shellEnvironment = readFileSync(new URL('src/shell-environment.ts', packageRoot), 'utf8')
+
+    expect(shellEnvironment).toContain('scrubbedParentEnv')
+    expect(shellEnvironment).toContain('SENSITIVE_ENV_PATTERN')
+    expect(shellEnvironment).toContain('DSH_ENV_PREFIX')
+    expect(shellEnvironment).toContain('DESKTOP_SHELL_ENVIRONMENT_KEYS')
   })
 
   it('fixes the installed application identity', () => {
