@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>An open-source DeepSeek Harness desktop client for Windows and macOS.</strong><br>
-  Electron, Node.js, pnpm, and pinned DSH dependencies are included, so you can install and launch without setting up a command-line environment.
+  One-click download, ready to use out of the box.
 </p>
 
 <p align="center"><sub>Community maintained and not an official DeepSeek product. <a href="README.md">中文</a> · English</sub></p>
