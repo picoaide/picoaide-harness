@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { ConnectorsList } from '@picoaide/dsh-connectors/client'
 
 interface Skill {
   name: string
@@ -105,39 +104,12 @@ const BUTTON: React.CSSProperties = {
 
 const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-caption)', textAlign: 'center', padding: 24 }
 
-const TABS: React.CSSProperties = {
-  flex: 'none',
-  display: 'flex',
-  gap: 8,
-  padding: '0 24px',
-}
-
-const TAB: React.CSSProperties = {
-  padding: '6px 14px',
-  borderRadius: 8,
-  border: 'none',
-  background: 'transparent',
-  color: 'var(--dsw-alias-label-caption)',
-  fontSize: 13,
-  cursor: 'pointer',
-}
-
-const TAB_ACTIVE: React.CSSProperties = {
-  ...TAB,
-  background: 'var(--dsw-alias-interactive-bg-hover)',
-  color: 'var(--dsw-alias-label-primary)',
-}
-
-type TabId = 'skills' | 'connectors'
-
 /**
  * Skill center modal: the gateway's skill store catalog with an archive
- * download action per skill, plus the connectors surface (registered
- * connectors with their auth flows), fetched through the host's local proxy.
+ * download action per skill, fetched through the host's local proxy.
  * @param props.onClose - close the modal.
  */
 export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<TabId>('skills')
   const [skills, setSkills] = useState<Skill[] | null>(null)
   const [error, setError] = useState('')
 
@@ -197,11 +169,7 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
           <h2 style={TITLE}>技能中心</h2>
           <button type="button" style={CLOSE} onClick={onClose}>关闭</button>
         </div>
-        <div style={TABS}>
-          <button type="button" style={tab === 'skills' ? TAB_ACTIVE : TAB} onClick={() => { setTab('skills') }}>技能</button>
-          <button type="button" style={tab === 'connectors' ? TAB_ACTIVE : TAB} onClick={() => { setTab('connectors') }}>连接器</button>
-        </div>
-        <div style={BODY}>{tab === 'skills' ? content : <ConnectorsList />}</div>
+        <div style={BODY}>{content}</div>
       </div>
     </div>
   )
