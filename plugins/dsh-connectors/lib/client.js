@@ -7,22 +7,23 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region src/client/ConnectorsSection.tsx
-		const ROW = {
-			display: "flex",
-			flexDirection: "column",
+		const GRID = {
+			display: "grid",
+			gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
 			gap: 12
 		};
 		const CARD = {
 			display: "flex",
 			flexDirection: "column",
 			gap: 8,
-			padding: "12px 14px",
+			padding: "14px 16px",
 			border: "1px solid var(--dsw-alias-border-l2)",
-			borderRadius: 8
+			borderRadius: 12,
+			minWidth: 0
 		};
 		const HEAD = {
 			display: "flex",
-			alignItems: "center",
+			alignItems: "flex-start",
 			justifyContent: "space-between",
 			gap: 8
 		};
@@ -30,16 +31,26 @@ window.__ModuleLoader__.load({
 			fontSize: 15,
 			margin: 0,
 			fontWeight: 600,
-			color: "var(--dsw-alias-label-primary)"
+			color: "var(--dsw-alias-label-primary)",
+			overflow: "hidden",
+			textOverflow: "ellipsis",
+			whiteSpace: "nowrap"
 		};
 		const DESC = {
 			fontSize: 13,
 			margin: 0,
-			color: "var(--dsw-alias-label-secondary)"
+			color: "var(--dsw-alias-label-secondary)",
+			display: "-webkit-box",
+			WebkitLineClamp: 2,
+			WebkitBoxOrient: "vertical",
+			overflow: "hidden",
+			minHeight: 36
 		};
 		const STATUS = {
 			fontSize: 12,
-			margin: 0
+			margin: 0,
+			flex: "none",
+			paddingTop: 2
 		};
 		const BUTTON = {
 			padding: "6px 12px",
@@ -62,6 +73,26 @@ window.__ModuleLoader__.load({
 			fontSize: 12,
 			margin: 0,
 			color: "var(--dsw-alias-label-caption)"
+		};
+		const TOOLBAR = {
+			display: "flex",
+			alignItems: "center",
+			gap: 8,
+			marginBottom: 16
+		};
+		const FILTER_BUTTON = {
+			padding: "5px 10px",
+			borderRadius: 6,
+			border: "1px solid var(--dsw-alias-border-l2)",
+			background: "transparent",
+			color: "var(--dsw-alias-label-secondary)",
+			fontSize: 12,
+			cursor: "pointer"
+		};
+		const FILTER_ACTIVE = {
+			...FILTER_BUTTON,
+			background: "var(--dsw-alias-bg-layer-3)",
+			color: "var(--dsw-alias-label-primary)"
 		};
 		const statusText = {
 			disconnected: "未连接",
@@ -139,20 +170,10 @@ window.__ModuleLoader__.load({
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						style: HEAD,
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							style: {
-								display: "flex",
-								flexDirection: "column",
-								gap: 4,
-								minWidth: 0
-							},
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-								style: TITLE,
-								children: entry.name
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-								style: DESC,
-								children: entry.description
-							})]
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+							style: TITLE,
+							title: entry.name,
+							children: entry.name
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 							style: {
 								...STATUS,
@@ -160,6 +181,10 @@ window.__ModuleLoader__.load({
 							},
 							children: statusText[entry.status] ?? entry.status
 						})]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						style: DESC,
+						children: entry.description
 					}),
 					entry.request?.verificationUrl && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						style: {
@@ -170,14 +195,14 @@ window.__ModuleLoader__.load({
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								style: LABEL,
-								children: "请在浏览器中打开以下地址并登录授权："
+								children: "请打开以下地址并登录授权："
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("a", {
 								href: entry.request.verificationUrl,
 								target: "_blank",
 								rel: "noreferrer",
 								style: {
-									fontSize: 13,
+									fontSize: 12,
 									color: "#60a5fa",
 									wordBreak: "break-all"
 								},
@@ -203,7 +228,7 @@ window.__ModuleLoader__.load({
 							target: "_blank",
 							rel: "noreferrer",
 							style: {
-								fontSize: 13,
+								fontSize: 12,
 								color: "#60a5fa",
 								wordBreak: "break-all"
 							},
@@ -263,30 +288,38 @@ window.__ModuleLoader__.load({
 						},
 						children: error
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: isConnected ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						style: {
-							...BUTTON,
-							background: "#dc2626"
+							marginTop: "auto",
+							paddingTop: 4
 						},
-						onClick: () => {
-							disconnect();
-						},
-						children: "断开"
-					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						style: BUTTON,
-						disabled: entry.status === "connecting",
-						onClick: () => {
-							connect();
-						},
-						children: entry.status === "connecting" ? "连接中…" : "连接"
-					}) })
+						children: isConnected ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: {
+								...BUTTON,
+								background: "#dc2626"
+							},
+							onClick: () => {
+								disconnect();
+							},
+							children: "断开"
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: BUTTON,
+							disabled: entry.status === "connecting",
+							onClick: () => {
+								connect();
+							},
+							children: entry.status === "connecting" ? "连接中…" : "连接"
+						})
+					})
 				]
 			});
 		}
 		function ConnectorsList() {
 			const [connectors, setConnectors] = (0, react.useState)(null);
+			const [query, setQuery] = (0, react.useState)("");
+			const [statusFilter, setStatusFilter] = (0, react.useState)("all");
 			const refresh = (0, react.useCallback)(() => {
 				fetchJson("/api/pico/connectors").then((data) => setConnectors(data.connectors)).catch(() => setConnectors([]));
 			}, []);
@@ -297,17 +330,80 @@ window.__ModuleLoader__.load({
 				}, 2e3);
 				return () => clearInterval(timer);
 			}, [refresh]);
+			const visible = (0, react.useMemo)(() => {
+				if (!connectors) return [];
+				const q = query.trim().toLowerCase();
+				return connectors.filter((c) => {
+					if (statusFilter === "connected" && c.status !== "connected") return false;
+					if (statusFilter === "disconnected" && c.status === "connected") return false;
+					if (!q) return true;
+					return c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q);
+				});
+			}, [
+				connectors,
+				query,
+				statusFilter
+			]);
+			const connectedCount = (0, react.useMemo)(() => (connectors ?? []).filter((c) => c.status === "connected").length, [connectors]);
 			if (connectors === null) return null;
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				style: ROW,
-				children: [connectors.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					style: TOOLBAR,
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+							style: {
+								...INPUT,
+								flex: 1,
+								minWidth: 0
+							},
+							placeholder: "搜索连接器…",
+							value: query,
+							onChange: (e) => setQuery(e.target.value)
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: statusFilter === "all" ? FILTER_ACTIVE : FILTER_BUTTON,
+							onClick: () => setStatusFilter("all"),
+							children: "全部"
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: statusFilter === "connected" ? FILTER_ACTIVE : FILTER_BUTTON,
+							onClick: () => setStatusFilter("connected"),
+							children: "已连接"
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: statusFilter === "disconnected" ? FILTER_ACTIVE : FILTER_BUTTON,
+							onClick: () => setStatusFilter("disconnected"),
+							children: "未连接"
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							style: {
+								...LABEL,
+								flex: "none"
+							},
+							children: [
+								connectedCount,
+								"/",
+								connectors.length,
+								" 已连接"
+							]
+						})
+					]
+				}),
+				visible.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 					style: DESC,
-					children: "暂无连接器"
-				}), connectors.map((entry) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ConnectorCard, {
-					entry,
-					onChanged: refresh
-				}, entry.id))]
-			});
+					children: "暂无匹配的连接器"
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					style: GRID,
+					children: visible.map((entry) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ConnectorCard, {
+						entry,
+						onChanged: refresh
+					}, entry.id))
+				})
+			] });
 		}
 		//#endregion
 		//#region src/client/index.ts
