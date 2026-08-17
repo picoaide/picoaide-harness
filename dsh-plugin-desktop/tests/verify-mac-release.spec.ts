@@ -12,7 +12,7 @@ function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const value: MacReleaseVerificationOptions = {
     distDir: '/release/dist',
     productName: 'DSH Desktop',
-    listDmgs: () => ['/release/dist/DSH Desktop-2.0.0-arm64.dmg'],
+    listDmgs: () => ['/release/dist/DSH Desktop-2.0.0-universal.dmg'],
     makeMountPoint: () => '/private/tmp/dsh-desktop-dmg-test',
     run: (command, args) => { calls.push({ command, args: [...args] }) },
     removeMountPoint,
@@ -28,14 +28,14 @@ describe('macOS release artifact verification', () => {
 
     expect(verifyMacRelease(harness.value)).toEqual({
       appPath,
-      dmgPath: '/release/dist/DSH Desktop-2.0.0-arm64.dmg',
+      dmgPath: '/release/dist/DSH Desktop-2.0.0-universal.dmg',
     })
 
     expect(harness.calls).toEqual([
       {
         command: 'hdiutil',
         args: [
-          'attach', '/release/dist/DSH Desktop-2.0.0-arm64.dmg',
+          'attach', '/release/dist/DSH Desktop-2.0.0-universal.dmg',
           '-mountpoint', '/private/tmp/dsh-desktop-dmg-test', '-nobrowse', '-readonly',
         ],
       },

@@ -41,7 +41,9 @@ function run(command: string, args: readonly string[]): void {
 function defaultOptions(): MacReleaseVerificationOptions {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   return {
-    distDir: join(packageRoot, 'dist'),
+    distDir: process.argv[2] === undefined
+      ? join(packageRoot, 'dist', 'mac-release')
+      : resolve(process.argv[2]),
     productName: 'DSH Desktop',
     listDmgs,
     makeMountPoint: () => mkdtempSync(join(tmpdir(), 'dsh-desktop-dmg-')),

@@ -1,6 +1,7 @@
 /** Build a signed and notarized macOS DMG from validated release credentials. */
 
 import { spawnSync } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -18,6 +19,10 @@ export interface MacReleaseOptions {
   readonly platform: NodeJS.Platform
   /** Desktop package root containing package.json. */
   readonly desktopRoot: string
+  /** Dedicated signed-release output directory, isolated from historical artifacts. */
+  readonly outputDir: string
+  /** Remove only the dedicated generated release output before packaging. */
+  readonly resetOutput: () => void
   /** Read code-signing identities with a credential-free environment. */
   readonly listCodeSigningIdentities: (env: NodeJS.ProcessEnv) => string
   /** Execute one release command. */
@@ -55,10 +60,13 @@ function run(command: string, args: readonly string[], cwd: string, env: NodeJS.
 
 function defaultReleaseOptions(): MacReleaseOptions {
   const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const outputDir = resolve(desktopRoot, 'dist', 'mac-release')
   return {
     env: process.env,
     platform: process.platform,
     desktopRoot,
+    outputDir,
+    resetOutput: () => rmSync(outputDir, { recursive: true, force: true }),
     listCodeSigningIdentities,
     run,
     log: message => console.log(message),
@@ -85,12 +93,20 @@ export function releaseMac(options: MacReleaseOptions = defaultReleaseOptions())
   // The workspace check includes the package build and repository-layout gate. Signing
   // material is withheld from every build, test, Loader smoke, and layout subprocess.
   options.run('yarn', ['run', 'check'], resolve(options.desktopRoot, '..'), buildEnvironment)
+  options.resetOutput()
   options.prepareRuntime()
   options.run('yarn', [
     'exec', 'electron-builder', '--mac', 'dmg', '--universal',
     '--config.forceCodeSigning=true', '--config.mac.notarize=true',
+    '--config.npmRebuild=false',
+    `--config.directories.output=${options.outputDir}`,
   ], options.desktopRoot, releaseEnvironment)
-  options.run(process.execPath, ['scripts/verify-mac-release.ts'], options.desktopRoot, buildEnvironment)
+  options.run(
+    process.execPath,
+    ['scripts/verify-mac-release.ts', options.outputDir],
+    options.desktopRoot,
+    buildEnvironment,
+  )
 }
 
 const invokedPath = process.argv[1]
