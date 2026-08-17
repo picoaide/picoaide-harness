@@ -2229,7 +2229,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-mcp-client@npm:^0.1.0-rc.6":
+"@deepseek-ai/dsh-mcp-client@npm:0.1.0-rc.6, @deepseek-ai/dsh-mcp-client@npm:^0.1.0-rc.6":
   version: 0.1.0-rc.6
   resolution: "@deepseek-ai/dsh-mcp-client@npm:0.1.0-rc.6"
   dependencies:
@@ -4761,6 +4761,40 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@picoaide/dsh-connectors@workspace:*, @picoaide/dsh-connectors@workspace:plugins/dsh-connectors":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-connectors@workspace:plugins/dsh-connectors"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-code-runtime": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-cordis-host-runner": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-host-plugin-inventory": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-host-webserver": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-invariants": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-mcp-client": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-scope": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-session": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-subprocess": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-system-prompt": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-timeout": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-tools": "npm:0.1.0-rc.6"
+    "@deepseek-ai/schemastery": "npm:^3.18.1"
+    "@modelcontextprotocol/sdk": "npm:^1.12.0"
+    "@types/node": "npm:^22.20.0"
+    "@types/react": "npm:^18"
+    react: "npm:18.3.1"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+    zod: "npm:^4.4.3"
+  peerDependencies:
+    "@deepseek-ai/dsh": 0.1.0-rc.6
+  languageName: unknown
+  linkType: soft
+
 "@picoaide/dsh-enterprise@workspace:*, @picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise":
   version: 0.0.0-use.local
   resolution: "@picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise"
@@ -6768,6 +6802,7 @@ __metadata:
     "@deepseek-ai/dsh-workflow": "npm:0.1.0-rc.6"
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     "@electron/asar": "npm:3.4.1"
+    "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-enterprise": "workspace:*"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/node": "npm:^22.20.0"

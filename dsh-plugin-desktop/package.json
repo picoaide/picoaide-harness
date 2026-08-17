@@ -203,6 +203,7 @@
     "@deepseek-ai/dsh-web-app": "0.1.0-rc.6",
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
     "node-addon-require-builtin": "^0.1.4",
     "pnpm": "11.7.0",
