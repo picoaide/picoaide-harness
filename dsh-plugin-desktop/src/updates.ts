@@ -221,8 +221,8 @@ export function apply(ctx: Context, config: Config): void {
       label: () => downloadingVersion === undefined
         ? availableVersion === undefined
           ? checking ? 'Checking for Updates…' : 'Check for Updates…'
-          : `DSH Desktop ${availableVersion} Available`
-        : `Downloading DSH Desktop ${downloadingVersion}…`,
+          : `PicoAide Harness ${availableVersion} Available`
+        : `Downloading PicoAide Harness ${downloadingVersion}…`,
       invoke: runManualCheck,
     })
     refreshTray = registration.refresh

@@ -86,6 +86,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
   private terminalSpec: DesktopTerminalSpec | undefined
 
+  /** Product name for native menus, trays, and update notifications (falls back while unscheduled). */
+  private productName(): string {
+    return this.scheduled?.productName ?? 'DSH Desktop'
+  }
+
   constructor(private readonly restart: () => Promise<void>) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: unsupported Electron platform ${process.platform}`)
@@ -267,8 +272,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private async confirmUpdateDownload(version: string): Promise<boolean> {
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: 'DSH Desktop Update Available',
-      message: `DSH Desktop ${version} is available.`,
+      title: `${this.productName()} Update Available`,
+      message: `${this.productName()} ${version} is available.`,
       detail: 'Download this update now?',
       buttons: ['Download', 'Later'],
       defaultId: 1,
@@ -284,7 +289,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       await dialog.showMessageBox({
         type: 'warning',
         title: 'Unable to Check for Updates',
-        message: 'DSH Desktop could not check for updates.',
+        message: `${this.productName()} could not check for updates.`,
         detail: 'Please try again later.',
         buttons: ['OK'],
         defaultId: 0,
@@ -296,8 +301,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (result.status === 'up-to-date') {
       await dialog.showMessageBox({
         type: 'info',
-        title: 'DSH Desktop Is Up to Date',
-        message: 'No newer version of DSH Desktop is available.',
+        title: `${this.productName()} Is Up to Date`,
+        message: `No newer version of ${this.productName()} is available.`,
         detail: `Installed version: ${result.currentVersion}`,
         buttons: ['OK'],
         defaultId: 0,
@@ -308,8 +313,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     await dialog.showMessageBox({
       type: 'info',
-      title: 'DSH Desktop Update Available',
-      message: `DSH Desktop ${result.latestVersion} is available.`,
+      title: `${this.productName()} Update Available`,
+      message: `${this.productName()} ${result.latestVersion} is available.`,
       detail: 'Installer downloads are unavailable in this build.',
       buttons: ['OK'],
       defaultId: 0,
@@ -337,9 +342,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       signal.throwIfAborted()
       await dialog.showMessageBox({
         type: 'info',
-        title: 'DSH Desktop Update Downloaded',
-        message: `DSH Desktop ${version} is ready to install.`,
-        detail: 'The disk image has opened. Replace DSH Desktop in Applications, then reopen it.',
+        title: `${this.productName()} Update Downloaded`,
+        message: `${this.productName()} ${version} is ready to install.`,
+        detail: `The disk image has opened. Replace ${this.productName()} in Applications, then reopen it.`,
         buttons: ['OK'],
         defaultId: 0,
         noLink: true,
@@ -349,9 +354,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: 'DSH Desktop Update Downloaded',
-      message: `DSH Desktop ${version} is ready to install.`,
-      detail: 'Restart DSH Desktop and run the installer now?',
+      title: `${this.productName()} Update Downloaded`,
+      message: `${this.productName()} ${version} is ready to install.`,
+      detail: `Restart ${this.productName()} and run the installer now?`,
       buttons: ['Restart and Install', 'Later'],
       defaultId: 1,
       cancelId: 1,

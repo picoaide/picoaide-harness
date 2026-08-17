@@ -185,7 +185,7 @@ async function prepareDownloadPaths(
 
   const extension = platform === 'darwin' ? 'dmg' : 'exe'
   const platformName = platform === 'darwin' ? 'mac' : 'windows'
-  const filename = `DSH-Desktop-${version}-${platformName}.${extension}`
+  const filename = `PicoAide-Harness-${version}-${platformName}.${extension}`
   const completed = join(directory, filename)
   const completedStat = await lstatOptional(completed)
   if (completedStat !== undefined) {

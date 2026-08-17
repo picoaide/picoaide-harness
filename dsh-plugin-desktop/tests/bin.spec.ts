@@ -20,7 +20,7 @@ describe('desktop npm launcher', () => {
   })
 
   it('names the installed product and selected profile behavior', () => {
-    expect(DESKTOP_CLI_HELP).toContain('DSH Desktop')
+    expect(DESKTOP_CLI_HELP).toContain('PicoAide Harness')
     expect(DESKTOP_CLI_HELP).toContain('selected Web-capable profile')
   })
 })
