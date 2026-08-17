@@ -11,12 +11,28 @@ const LOGIN_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PicoAide 登录</title>
 <style>
-  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0f1115; color: #e6e6e6; }
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1d24;
+    --input-bg: #ffffff;
+    --border: #d0d5dd;
+    --err: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --fg: #e6e6e6;
+      --input-bg: #1a1d24;
+      --border: #333333;
+      --err: #f87171;
+    }
+  }
+  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: var(--bg); color: var(--fg); }
   form { display: flex; flex-direction: column; gap: 12px; width: 320px; }
-  input { padding: 10px 12px; border-radius: 8px; border: 1px solid #333; background: #1a1d24; color: #e6e6e6; font-size: 14px; }
+  input { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--input-bg); color: var(--fg); font-size: 14px; }
   button { padding: 10px; border-radius: 8px; border: none; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
   button:disabled { opacity: 0.6; cursor: default; }
-  .err { color: #f87171; font-size: 13px; min-height: 16px; }
+  .err { color: var(--err); font-size: 13px; min-height: 16px; }
   h1 { font-size: 20px; margin: 0 0 8px; }
 </style>
 </head>
@@ -36,7 +52,6 @@ const LOGIN_HTML = `<!DOCTYPE html>
   f.addEventListener('submit', async (e) => {
     e.preventDefault()
     err.textContent = ''
-    err.style.color = '#f87171'
     const body = {
       server: document.getElementById('server').value.trim(),
       username: document.getElementById('username').value.trim(),
