@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "通过自然语言使用云帐房 AI 开票能力，完成开票信息识别，并前往电子税局开票。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://super-ai-app.yunzhangfang.com/api/mcp/invoice/stream/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://super-ai-app.yunzhangfang.com/api/mcp/invoice/stream",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

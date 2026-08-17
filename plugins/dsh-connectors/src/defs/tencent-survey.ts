@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "创建、管理和分析腾讯问卷。用自然语言快速生成问卷、查看回收数据、设置题目逻辑。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://wj.qq.com/api/v2/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://wj.qq.com/api/v2/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

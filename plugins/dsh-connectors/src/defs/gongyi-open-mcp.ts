@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "腾讯公益机构服务平台连接器：用自然语言查询当前登录机构的用户与机构信息、项目、进展、财务披露等机构侧业务数据。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://ssl.gongyi.qq.com/gygw-web/api/open/tob/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://ssl.gongyi.qq.com/gygw-web/api/open/tob/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

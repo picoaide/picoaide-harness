@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "上传 Excel 或 CSV 表格，一键生成原生的可视化数据分析报告、仪表板、图表。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://work.jiushuyun.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://work.jiushuyun.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

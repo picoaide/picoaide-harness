@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "用自然语言管理 EzyJoin 智慧会议：预约会议室、创建/取消会议、查询会议日程与 AI 纪要。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://www.ezyjoin.cn/api/mcp/message/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://www.ezyjoin.cn/api/mcp/message",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

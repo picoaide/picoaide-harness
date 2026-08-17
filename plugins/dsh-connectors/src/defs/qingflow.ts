@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "轻流无代码平台连接器。通过自然语言创建应用、管理表单数据、处理审批流程、查询和导出数据，一站式连接轻流全部能力。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.qingflow.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.qingflow.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

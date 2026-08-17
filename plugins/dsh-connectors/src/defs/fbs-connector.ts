@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "福帮手人机协同连接器：面向 WorkBuddy 的身份识别、场景包查询、首值与继续使用记录、乐包状态确认和超级合伙人交接。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://api2.u3w.com/fbs-mcp/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://api2.u3w.com/fbs-mcp/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

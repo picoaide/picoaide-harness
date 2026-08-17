@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "面向出海广告投放和增长团队的 AI 能力集合。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://tec-chi-external-skill-mcp.tec-do.cn/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://tec-chi-external-skill-mcp.tec-do.cn/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

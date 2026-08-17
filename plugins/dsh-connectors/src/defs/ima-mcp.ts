@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "引用知识库资料及文件，浏览知识库详情。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://ima.qq.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://ima.qq.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

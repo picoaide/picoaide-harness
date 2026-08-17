@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "通过用友银企联、税企联、商旅云等财务服务产品，为企业提供财务税务与银行资金数据服务，并提供企业商旅运营服务和行程服务。用自然语言完成企业的资金、税务、商旅的全面运营管理。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp-gateway.yql.net/mcp//.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp-gateway.yql.net/mcp/",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

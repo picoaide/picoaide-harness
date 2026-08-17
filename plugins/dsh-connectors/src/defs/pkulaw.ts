@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "检索 + 核验一体：语义（自然语言描述）与关键词双模式检索法规、法条与司法案例；并可把文本中的法条引用与案号回北大法宝库逐条比对、对齐标准名称，输出带 pkulaw.com 原文链接的可溯源结果，专治法律幻觉。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://apim-gateway.pkulaw.com/mcp-law-agg/1.0.0/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://apim-gateway.pkulaw.com/mcp-law-agg/1.0.0/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",
