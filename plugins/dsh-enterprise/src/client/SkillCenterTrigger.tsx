@@ -47,6 +47,7 @@ export function SkillCenterTrigger(props: PropsRuntime<'sidebar.footer.action'>)
     <>
       <button
         type="button"
+        className="pico-skill-trigger"
         style={props.wide ? TRIGGER_WIDE : TRIGGER_RAIL}
         aria-expanded={open}
         onClick={() => { setOpen(true) }}
