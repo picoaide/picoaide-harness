@@ -1,6 +1,8 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  afterPack,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
   REQUIRED_UNPACKED_PACKAGE_SPECIFIERS,
@@ -8,11 +10,13 @@ import {
   REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
   resolvePackagedAsarPath,
   resolvePackagedUnpackedRoot,
+  smokePackagedDiagnosticWorker,
   verifyPackagedRuntime,
   type ArchiveLister,
   type FileProbe,
   type PackageResolver,
   type PackagedRuntimeContext,
+  type PackagedDiagnosticWorkerLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
 import { FORBIDDEN_MACOS_UNIVERSAL_ENTRIES } from '../scripts/mac-universal.ts'
 
@@ -38,6 +42,45 @@ function completePackageResolver(unpackedRoot: string): PackageResolver {
 }
 
 describe('packaged desktop runtime verification', () => {
+  it.each(['darwin', 'win32'])(
+    'targets the physical diagnostic Worker in the %s unpacked layout and removes smoke files',
+    async (platform) => {
+      const unpackedRoot = resolvePackagedUnpackedRoot(context('/build', platform))
+      let smokeRoot: string | undefined
+      const launch = vi.fn<PackagedDiagnosticWorkerLauncher>(async (workerPath, workerData) => {
+        smokeRoot = join(workerData.logsDir, '..')
+        expect(workerPath).toBe(join(unpackedRoot, 'lib', 'diagnostic-export-worker.js'))
+        expect(readFileSync(join(workerData.logsDir, 'dsh-2000-01-01.log'), 'utf8'))
+          .toBe('packaged worker smoke\n')
+        expect(workerData.maxLogBytes).toBe(1024)
+        const outDir = join(workerData.userDataDir, 'diagnostics')
+        mkdirSync(outDir)
+        const output = join(outDir, 'diagnostics-smoke.zip')
+        writeFileSync(output, 'zip')
+        return output
+      })
+
+      await smokePackagedDiagnosticWorker(unpackedRoot, launch)
+
+      expect(launch).toHaveBeenCalledOnce()
+      expect(smokeRoot).toBeDefined()
+      expect(existsSync(smokeRoot as string)).toBe(false)
+    },
+  )
+
+  it('runs the static package gate before the diagnostic Worker smoke', async () => {
+    const runtimeContext = context('/build', 'win32')
+    const calls: string[] = []
+
+    await afterPack(
+      runtimeContext,
+      () => { calls.push('static') },
+      async (unpackedRoot) => { calls.push(unpackedRoot) },
+    )
+
+    expect(calls).toEqual(['static', resolvePackagedUnpackedRoot(runtimeContext)])
+  })
+
   it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
     expect(REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES).toEqual([
       'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
