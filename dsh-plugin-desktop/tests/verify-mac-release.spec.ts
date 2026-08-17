@@ -9,8 +9,8 @@ function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const removeMountPoint = vi.fn()
   const value: MacReleaseVerificationOptions = {
     distDir: '/release/dist',
-    productName: 'DSH Desktop',
-    listDmgs: () => ['/release/dist/DSH Desktop-2.0.0-arm64.dmg'],
+    productName: 'PicoAide Harness',
+    listDmgs: () => ['/release/dist/PicoAide Harness-2.0.0-arm64.dmg'],
     makeMountPoint: () => '/private/tmp/dsh-desktop-dmg-test',
     run: (command, args) => { calls.push({ command, args: [...args] }) },
     removeMountPoint,
@@ -24,29 +24,29 @@ describe('macOS release artifact verification', () => {
     const harness = options()
 
     expect(verifyMacRelease(harness.value)).toEqual({
-      appPath: '/private/tmp/dsh-desktop-dmg-test/DSH Desktop.app',
-      dmgPath: '/release/dist/DSH Desktop-2.0.0-arm64.dmg',
+      appPath: '/private/tmp/dsh-desktop-dmg-test/PicoAide Harness.app',
+      dmgPath: '/release/dist/PicoAide Harness-2.0.0-arm64.dmg',
     })
 
     expect(harness.calls).toEqual([
       {
         command: 'hdiutil',
         args: [
-          'attach', '/release/dist/DSH Desktop-2.0.0-arm64.dmg',
+          'attach', '/release/dist/PicoAide Harness-2.0.0-arm64.dmg',
           '-mountpoint', '/private/tmp/dsh-desktop-dmg-test', '-nobrowse', '-readonly',
         ],
       },
       {
         command: 'codesign',
-        args: ['--verify', '--deep', '--strict', '--verbose=2', '/private/tmp/dsh-desktop-dmg-test/DSH Desktop.app'],
+        args: ['--verify', '--deep', '--strict', '--verbose=2', '/private/tmp/dsh-desktop-dmg-test/PicoAide Harness.app'],
       },
       {
         command: 'spctl',
-        args: ['--assess', '--type', 'execute', '--verbose=4', '/private/tmp/dsh-desktop-dmg-test/DSH Desktop.app'],
+        args: ['--assess', '--type', 'execute', '--verbose=4', '/private/tmp/dsh-desktop-dmg-test/PicoAide Harness.app'],
       },
       {
         command: 'xcrun',
-        args: ['stapler', 'validate', '/private/tmp/dsh-desktop-dmg-test/DSH Desktop.app'],
+        args: ['stapler', 'validate', '/private/tmp/dsh-desktop-dmg-test/PicoAide Harness.app'],
       },
       {
         command: 'hdiutil',

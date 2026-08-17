@@ -188,8 +188,8 @@ const spec: DesktopShellSpec = {
   minWidth: 900,
   minHeight: 640,
   url: 'http://127.0.0.1:43120/',
-  productName: 'DSH Desktop',
-  windowTitle: 'DeepSeek Harness Desktop',
+  productName: 'PicoAide Harness',
+  windowTitle: 'PicoAide Harness',
   iconPath: '/tmp/app-icon.png',
   trayIcons: {
     templatePath: '/tmp/tray-iconTemplate.png',
@@ -260,7 +260,7 @@ describe('Electron compatibility runtime', () => {
     ]) {
       expect(options).not.toHaveProperty(option)
     }
-    expect(electron.browserWindows[0]?.accessibleTitle).toBe('DeepSeek Harness Desktop')
+    expect(electron.browserWindows[0]?.accessibleTitle).toBe('PicoAide Harness')
     expect(spec.readThemeSource).not.toHaveBeenCalled()
     expect(electron.nativeTheme.themeSource).toBe('system')
     expect(electron.browserWindows[0]?.removeMenu).not.toHaveBeenCalled()
@@ -291,10 +291,10 @@ describe('Electron compatibility runtime', () => {
     await runtime.mountScheduled()
 
     expect(electron.browserWindowOptions[0]).toEqual(expect.objectContaining({
-      title: 'DeepSeek Harness Desktop',
+      title: 'PicoAide Harness',
       autoHideMenuBar: true,
     }))
-    expect(electron.browserWindows[0]?.accessibleTitle).toBe('DeepSeek Harness Desktop')
+    expect(electron.browserWindows[0]?.accessibleTitle).toBe('PicoAide Harness')
     expect(electron.browserWindows[0]?.removeMenu).toHaveBeenCalledOnce()
     expect(electron.app.dock.setIcon).not.toHaveBeenCalled()
     expect(electron.trays[0]?.image).toBe(electron.blueIcon)
@@ -389,7 +389,7 @@ describe('Electron compatibility runtime', () => {
 
     const labels = (electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label)
     expect(labels).toEqual([
-      'Open DSH Desktop', undefined,
+      'Open PicoAide Harness', undefined,
       'Earlier Tool', 'Later Tool', undefined,
       'Check for Updates…', undefined,
       'Switch to Advanced Mode', undefined,

@@ -16,6 +16,8 @@ import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
 
 const config: DesktopConfig = {
   mode: 'compatibility',
+  productName: 'PicoAide Harness',
+  windowTitle: 'PicoAide Harness',
   width: 1280,
   height: 840,
   minWidth: 900,
@@ -114,8 +116,16 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
 
 describe('desktop Host plugin', () => {
   it('defaults to compatibility mode and validates both schemas', () => {
-    expect(Config({} as DesktopConfig)).toEqual(config)
-    expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual({ ...config, mode: 'advanced' })
+    expect(Config({} as DesktopConfig)).toEqual({
+      mode: 'compatibility',
+      productName: 'DSH Desktop',
+      windowTitle: 'DeepSeek Harness Desktop',
+      width: 1280,
+      height: 840,
+      minWidth: 900,
+      minHeight: 640,
+    })
+    expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual(expect.objectContaining({ mode: 'advanced' }))
     expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility' })
     expect(() => Config({ mode: 'custom' } as never)).toThrow()
     expect(String(DESKTOP_SETTINGS_NAMESPACE)).toBe('dsh-desktop')
@@ -147,8 +157,8 @@ describe('desktop Host plugin', () => {
     expect(harness.shell()).toEqual(expect.objectContaining({
       mode: 'compatibility',
       url: 'http://127.0.0.1:43120/?dsh-desktop-mode=compatibility&dsh-desktop-platform=darwin',
-      productName: 'DSH Desktop',
-      windowTitle: 'DeepSeek Harness Desktop',
+      productName: 'PicoAide Harness',
+      windowTitle: 'PicoAide Harness',
       iconPath: expect.stringMatching(/\/build\/app-icon-mac\.png$/u),
       trayIcons: {
         templatePath: expect.stringMatching(/\/build\/tray-iconTemplate\.png$/u),

@@ -4768,6 +4768,7 @@ __metadata:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-brand": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-layout": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-cordis-host-runner": "npm:0.1.0-rc.6"
