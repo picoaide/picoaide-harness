@@ -69,7 +69,6 @@
   "devDependencies": {
     "@deepseek-ai/dsh-brand": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.6",
     "@deepseek-ai/dsh-cordis-host-runner": "0.1.0-rc.6",
