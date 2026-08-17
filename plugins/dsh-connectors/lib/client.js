@@ -312,14 +312,76 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/index.ts
 		/**
-		* Connectors client half: exports the connector list surface for the skill
-		* center (rendered by the enterprise skill-center panel), mirroring
-		* WorkBuddy's connector center. No slots of its own — the skill center owns
-		* placement.
+		* Connectors client half: exports the connector list surface for the
+		* connector center (rendered by the enterprise sidebar panel), and registers
+		* one slash command per CONNECTED connector (`/<connector-id>`) so the `/`
+		* menu only shows connectors you can act on. Picking an example prompt sends
+		* it to the session — the model then calls the connector's injected MCP tools.
 		*/
 		const name = "pico-connectors-client";
-		const inject = [];
-		function apply(_ctx) {}
+		const inject = ["commandUi", "sessions"];
+		const POLL_INTERVAL_MS = 3e3;
+		function apply(ctx) {
+			const commandUi = ctx.get("commandUi");
+			const sessions = ctx.get("sessions");
+			const commandDisposers = /* @__PURE__ */ new Map();
+			const syncCommands = (connectors) => {
+				const connected = new Set(connectors.filter((c) => c.status === "connected").map((c) => c.id));
+				for (const [id, dispose] of commandDisposers) if (!connected.has(id)) {
+					dispose();
+					commandDisposers.delete(id);
+				}
+				for (const connector of connectors) {
+					if (connector.status !== "connected" || commandDisposers.has(connector.id)) continue;
+					commandDisposers.set(connector.id, commandUi.register({
+						name: connector.id,
+						description: `${connector.name}（已连接）`,
+						available: () => true,
+						ui: {
+							kind: "popupSelect",
+							options: async () => {
+								return [...(connector.examples ?? []).map((example, index) => ({
+									id: `example-${index}`,
+									label: example
+								})), {
+									id: "info",
+									label: "查看连接器信息"
+								}];
+							},
+							onSelect: async (option, session) => {
+								const live = sessions.binding(session.sessionId)?.session;
+								if (live === void 0) return;
+								const text = option.id === "info" ? `${connector.name}（已连接）。模型可直接调用其注入工具（mcp__*），例如：${(connector.examples ?? []).join("、")}` : option.label;
+								await live.prompt([{
+									type: "text",
+									text
+								}], "queue");
+							}
+						}
+					}));
+				}
+			};
+			ctx.effect(() => {
+				let cancelled = false;
+				const poll = async () => {
+					try {
+						const res = await fetch("/api/pico/connectors");
+						if (!res.ok) return;
+						const data = await res.json();
+						if (!cancelled) syncCommands(data.connectors ?? []);
+					} catch {}
+				};
+				poll();
+				const timer = setInterval(() => {
+					poll();
+				}, POLL_INTERVAL_MS);
+				return () => {
+					cancelled = true;
+					clearInterval(timer);
+					for (const dispose of commandDisposers.values()) dispose();
+				};
+			}, "pico-connectors-client: per-connector slash commands");
+		}
 		//#endregion
 		exports.ConnectorsList = ConnectorsList;
 		exports.apply = apply;
