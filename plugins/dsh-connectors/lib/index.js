@@ -96,22 +96,54 @@ async function registerClient(auth, redirectUri, registrationEndpoint) {
 	if (!data.client_id) throw new Error("OAuth 客户端注册响应缺少 client_id");
 	return data.client_id;
 }
-/** Discover the OAuth endpoints for an MCP server (RFC 8414 metadata). */
-async function discoverMcpOAuth(discoveryUrl) {
-	const response = await fetch(discoveryUrl, { headers: { Accept: "application/json" } });
-	if (!response.ok) throw new Error(`MCP OAuth 元数据获取失败: HTTP ${response.status}`);
-	const meta = await response.json();
-	if (!meta.authorization_endpoint || !meta.token_endpoint) throw new Error("MCP OAuth 元数据缺少 authorization_endpoint/token_endpoint");
-	const scopes = meta.scopes_supported?.includes("offline_access") ? "offline_access" : meta.scopes_supported?.[0];
-	return {
-		...meta,
-		...scopes ? { scopes } : {}
+/**
+* MCP OAuth discovery (spec 2025-06-18): probe the MCP endpoint; a 2xx means
+* public. On 401, resolve the authorization server through RFC 9728
+* protected-resource metadata (URL from the WWW-Authenticate header, fallback
+* `/.well-known/oauth-protected-resource`), then RFC 8414 metadata at the
+* authorization server.
+*/
+async function discoverMcpOAuth(mcpUrl) {
+	const mcp = new URL(mcpUrl);
+	const resource = mcp.origin + mcp.pathname.replace(/\/+$/, "");
+	const probe = await fetch(mcpUrl, { headers: {
+		Accept: "text/event-stream",
+		"MCP-Protocol-Version": "2025-06-18"
+	} });
+	if (probe.status >= 200 && probe.status < 300) return {
+		publicMcp: true,
+		resource
 	};
+	if (probe.status !== 401 && probe.status !== 403) throw new Error(`MCP 端点响应异常: HTTP ${probe.status}`);
+	const authHeader = probe.headers.get("www-authenticate") ?? "";
+	const resourceMetadataCandidates = [/resource_metadata="([^"]+)"/.exec(authHeader)?.[1], `${mcp.origin}/.well-known/oauth-protected-resource`].filter((url) => Boolean(url));
+	for (const metadataUrl of [...new Set(resourceMetadataCandidates)]) {
+		const metadataResponse = await fetch(metadataUrl, { headers: { Accept: "application/json" } });
+		if (!metadataResponse.ok) continue;
+		const authorizationServer = (await metadataResponse.json()).authorization_servers?.[0];
+		if (!authorizationServer) continue;
+		const asUrl = new URL(authorizationServer);
+		asUrl.pathname = `${asUrl.pathname.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
+		const metadataResponse2 = await fetch(asUrl, { headers: { Accept: "application/json" } });
+		if (!metadataResponse2.ok) continue;
+		const meta = await metadataResponse2.json();
+		if (!meta.authorization_endpoint || !meta.token_endpoint) continue;
+		const scopes = meta.scopes_supported?.includes("offline_access") ? "offline_access" : meta.scopes_supported?.[0];
+		return {
+			authorizationEndpoint: meta.authorization_endpoint,
+			tokenEndpoint: meta.token_endpoint,
+			...meta.registration_endpoint ? { registrationEndpoint: meta.registration_endpoint } : {},
+			...scopes ? { scopes } : {},
+			resource
+		};
+	}
+	throw new Error("MCP OAuth 发现失败: 服务器要求授权但未找到 OAuth 元数据");
 }
 /** Run an oauth2 authorization-code flow with PKCE and a loopback callback. */
 async function runOAuth(def, options) {
 	const auth = def.auth;
 	const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl) : void 0;
+	if (discovered?.publicMcp) return { updatedAt: Date.now() };
 	const callbackHost = options.callbackHost ?? "127.0.0.1";
 	const { verifier, challenge } = pkce();
 	const port = await new Promise((resolve, reject) => {
@@ -124,7 +156,7 @@ async function runOAuth(def, options) {
 		server.on("error", reject);
 	});
 	const redirectUri = `http://${callbackHost}:${port}/callback`;
-	const registrationEndpoint = discovered?.registration_endpoint ?? auth.registrationEndpoint;
+	const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint;
 	const clientId = registrationEndpoint ? await registerClient(auth, redirectUri, registrationEndpoint) : auth.clientId || "";
 	if (!clientId) throw new Error("OAuth 服务器不支持动态客户端注册，且未配置固定 clientId");
 	const codePromise = new Promise((resolve, reject) => {
@@ -146,7 +178,7 @@ async function runOAuth(def, options) {
 		callbackServer.on("error", reject);
 	});
 	const codeChallengeMethod = auth.pkce ? "S256" : void 0;
-	const authorizeUrl = new URL(discovered?.authorization_endpoint ?? auth.authorizeUrl);
+	const authorizeUrl = new URL(discovered?.authorizationEndpoint ?? auth.authorizeUrl);
 	authorizeUrl.searchParams.set("response_type", "code");
 	authorizeUrl.searchParams.set("client_id", clientId);
 	authorizeUrl.searchParams.set("redirect_uri", redirectUri);
@@ -156,19 +188,21 @@ async function runOAuth(def, options) {
 		authorizeUrl.searchParams.set("code_challenge", challenge);
 		authorizeUrl.searchParams.set("code_challenge_method", codeChallengeMethod ?? "S256");
 	}
+	if (discovered?.resource) authorizeUrl.searchParams.set("resource", discovered.resource);
 	options.onRequest({
 		connectorId: def.id,
 		authorizeUrl: authorizeUrl.toString()
 	});
 	const code = await codePromise;
 	throwIfAborted(options.signal);
-	const tokenUrl = options.tokenUrlOverride ?? discovered?.token_endpoint ?? auth.tokenUrl;
+	const tokenUrl = options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl;
 	const body = new URLSearchParams({
 		grant_type: "authorization_code",
 		code,
 		redirect_uri: redirectUri,
 		client_id: clientId
 	});
+	if (discovered?.resource) body.set("resource", discovered.resource);
 	if (auth.pkce) body.set("code_verifier", verifier);
 	const response = await fetch(tokenUrl, {
 		method: "POST",
@@ -1292,7 +1326,7 @@ const marketplaceDefs = [
 		"description": "AgentKey 是 AI 助手获取可信工具和实时数据的能力市场。支持网页搜索、URL抓取、新闻、社交媒体、股票市场价格、电商产品数据、企业/公司数据、天气、地图和地理位置、旅行（航班/酒店）、实时信息或任何第三方API。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://api.agentkey.app/workbuddy/v1/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://api.agentkey.app/workbuddy/v1/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1313,7 +1347,7 @@ const marketplaceDefs = [
 		"description": "全周期管理平台机构端 AI 智能体的 MCP 连接器。基于原有全周期管理平台，通过引入对话式 AI 智能体，实现理解管理者意图，调度平台原有能力模块完成患者数据查询管理等操作",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://bingli.tengmed.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://bingli.tengmed.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1334,7 +1368,7 @@ const marketplaceDefs = [
 		"description": "用自然语言驱动八爪鱼云采集：搜索模板、启动任务、查询进度、导出结构化数据，并管理已有任务。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.bazhuayu.com?includeTools=search_templates,execute_task,get_task_status,export_data,search_tasks,start_or_stop_task/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.bazhuayu.com?includeTools=search_templates,execute_task,get_task_status,export_data,search_tasks,start_or_stop_task",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1355,7 +1389,7 @@ const marketplaceDefs = [
 		"description": "无缝调用Canva可画的设计能力。一句话生成海报、演示文稿、小红书封面等设计，通过文字描述调整尺寸、填充品牌模板及检索已有内容",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.canva.cn/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.canva.cn/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1376,7 +1410,7 @@ const marketplaceDefs = [
 		"description": "无缝调用Canva可画的设计能力。一句话生成海报、演示文稿、小红书封面等设计，通过文字描述调整尺寸、填充品牌模板及检索已有内容",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.canva.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.canva.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1397,7 +1431,7 @@ const marketplaceDefs = [
 		"description": "基于实时 TikTok Shop 数据完成选品、竞品分析、达人筛选与带货内容创作，并管理社媒账号、发布内容、运营评论和私信。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.gateway.chuhaijiang.com/mcp/oauth/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.gateway.chuhaijiang.com/mcp/oauth",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1418,7 +1452,7 @@ const marketplaceDefs = [
 		"description": "深知可信工作台面向政策、法律、标准和公共服务场景，提供可信问答、权威检索、深度研究和材料整理能力。它可以帮助用户查询政策原文、办事条件、申报材料、补贴资质、法律法规和行业标准，梳理多地区、多时间范围的信息，并基于可追溯的权威来源形成清晰、可核验的结果。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.dknowc.cn/s6/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.dknowc.cn/s6/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1439,7 +1473,6 @@ const marketplaceDefs = [
 		"description": "将项目部署到 EdgeOne Makers 并返回线上访问地址，支持全栈、云函数、AI Agent 等开发场景。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "undefined/.well-known/oauth-authorization-server",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1465,7 +1498,7 @@ const marketplaceDefs = [
 		"description": "用自然语言管理 EzyJoin 智慧会议：预约会议室、创建/取消会议、查询会议日程与 AI 纪要。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://www.ezyjoin.cn/api/mcp/message/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://www.ezyjoin.cn/api/mcp/message",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1486,7 +1519,7 @@ const marketplaceDefs = [
 		"description": "福帮手人机协同连接器：面向 WorkBuddy 的身份识别、场景包查询、首值与继续使用记录、乐包状态确认和超级合伙人交接。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://api2.u3w.com/fbs-mcp/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://api2.u3w.com/fbs-mcp/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1507,7 +1540,7 @@ const marketplaceDefs = [
 		"description": "法研·法律法规检索，支持自然语言获取精准、现行有效的法规条文，将高质量、海量的法规知识库，无缝接入各类AI应用与工作流中。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://api.cjbdi.com:8443/354347/mcp_law_service/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://api.cjbdi.com:8443/354347/mcp_law_service",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1528,7 +1561,7 @@ const marketplaceDefs = [
 		"description": "",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://api.githubcopilot.com/mcp//.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://api.githubcopilot.com/mcp/",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1550,7 +1583,6 @@ const marketplaceDefs = [
 		"description": "",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "undefined/.well-known/oauth-authorization-server",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1577,7 +1609,7 @@ const marketplaceDefs = [
 		"description": "腾讯公益机构服务平台连接器：用自然语言查询当前登录机构的用户与机构信息、项目、进展、财务披露等机构侧业务数据。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://ssl.gongyi.qq.com/gygw-web/api/open/tob/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://ssl.gongyi.qq.com/gygw-web/api/open/tob/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1598,7 +1630,7 @@ const marketplaceDefs = [
 		"description": "引用知识库资料及文件，浏览知识库详情。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://ima.qq.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://ima.qq.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1619,7 +1651,6 @@ const marketplaceDefs = [
 		"description": "",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "undefined/.well-known/oauth-authorization-server",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1646,7 +1677,7 @@ const marketplaceDefs = [
 		"description": "上传 Excel 或 CSV 表格，一键生成原生的可视化数据分析报告、仪表板、图表。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://work.jiushuyun.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://work.jiushuyun.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1667,7 +1698,7 @@ const marketplaceDefs = [
 		"description": "用可灵MCP打造独属于你的 AI 创作工作流。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://klingai.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://klingai.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1688,7 +1719,7 @@ const marketplaceDefs = [
 		"description": "搜索、创建和管理乐享知识库中的文档。支持导入 Markdown、按标签整理内容、追踪团队文档的更新动态。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.lexiang-app.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.lexiang-app.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1709,7 +1740,6 @@ const marketplaceDefs = [
 		"description": "连接 MasterGo 画布，让 AI 进行设计、修改、同步和获取 D2C 代码。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "undefined/.well-known/oauth-authorization-server",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1736,7 +1766,7 @@ const marketplaceDefs = [
 		"description": "招聘和人事一体的 AI 同事，把查询与执行收进一个对话。人才推荐、招聘动态、考勤绩效、审批待办，一句话问清；智能寻聘、面试分析与面试官评估，一句话发起。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.mokahr.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.mokahr.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1757,7 +1787,7 @@ const marketplaceDefs = [
 		"description": "接入晨星全球与中国基金数据，通过自然语言实现基金查询、筛选、分析与深度研究，以及组合穿透分析",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.morningstar.cn/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.morningstar.cn/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1778,7 +1808,7 @@ const marketplaceDefs = [
 		"description": "通过自然语言查询的金融投研 MCP 工具套件，依托东方财富数据源，提供A股、港股、美股、基金、债券、指数板块、宏观数据查询，具备多条件资产筛选、券商研报检索、全市场公告解析、金融资讯检索能力。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mxapi.eastmoney.com/mxds/v2/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mxapi.eastmoney.com/mxds/v2/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1799,7 +1829,7 @@ const marketplaceDefs = [
 		"description": "用自然语言检索商标：按名称、申请人、申请号、注册号、尼斯类别、法律状态、日期范围查询，覆盖中国及 110+ 海外国家/地区商标局；并支持以图搜图的图形近似检索。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://www.mozlen.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://www.mozlen.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1820,7 +1850,7 @@ const marketplaceDefs = [
 		"description": "用自然语言查客户、推商机、盘线索、领公海、写跟进，一句话打通销售工作闭环。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.xiaoshouyi.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.xiaoshouyi.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1841,7 +1871,7 @@ const marketplaceDefs = [
 		"description": "创建、搜索和管理 Notion 工作区。用自然语言读取页面、查询数据库、更新内容、整理知识库。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.notion.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.notion.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1862,7 +1892,7 @@ const marketplaceDefs = [
 		"description": "查询、整理和分析 A 股、期货、期权、港美股、基金、宏观经济及量化因子等金融数据，支持统计比较与趋势归纳。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://pandadatamcp.pandaaiquant.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://pandadatamcp.pandaaiquant.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1883,7 +1913,7 @@ const marketplaceDefs = [
 		"description": "检索 + 核验一体：语义（自然语言描述）与关键词双模式检索法规、法条与司法案例；并可把文本中的法条引用与案号回北大法宝库逐条比对、对齐标准名称，输出带 pkulaw.com 原文链接的可溯源结果，专治法律幻觉。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://apim-gateway.pkulaw.com/mcp-law-agg/1.0.0/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://apim-gateway.pkulaw.com/mcp-law-agg/1.0.0/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1904,7 +1934,7 @@ const marketplaceDefs = [
 		"description": "查询和核实企业工商登记信息。支持股东结构、实际控制人、受益所有人、高管团队、对外投资、财务数据、年报及上市信息查询，用自然语言快速完成企业身份核验与背景调查。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://agent.qcc.com/mcp/company/stream/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://agent.qcc.com/mcp/company/stream",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1925,7 +1955,7 @@ const marketplaceDefs = [
 		"description": "检索与核验中国法律法规和司法案例。覆盖全量现行法律、行政法规、司法解释——法规级到法条级逐字正文，标注时效性与效力级别；海量裁判文书及 2.5 万+ 权威案例（最高法/最高检指导性案例、公报案例、典型案例）；并对文本中的法条与案号引用逐条回库核验、标注时效、生成可溯源超链。用自然语言完成法条依据查找、类案检索、原文调取与法律引用核验，从源头消除法条与案号幻觉。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://agent.qcc.com/mcp/legal/stream/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://agent.qcc.com/mcp/legal/stream",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1946,7 +1976,7 @@ const marketplaceDefs = [
 		"description": "轻流无代码平台连接器。通过自然语言创建应用、管理表单数据、处理审批流程、查询和导出数据，一站式连接轻流全部能力。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.qingflow.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.qingflow.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1967,7 +1997,7 @@ const marketplaceDefs = [
 		"description": "通过启信慧眼 MCP 接入企业全景数据能力，支持用户用自然语言完成企业搜索、工商画像、风险识别、经营动态、知识产权等商业情报分析。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.qixin.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.qixin.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -1988,7 +2018,7 @@ const marketplaceDefs = [
 		"description": "收发、搜索和整理 QQ 邮件。用自然语言读取邮件内容、汇总邮件线程、管理文件夹。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://api.mail.qq.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://api.mail.qq.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2009,7 +2039,7 @@ const marketplaceDefs = [
 		"description": "通过自然语言自助开通讲师试用、维护商业 Profile、生成客户方案，完成游戏创作、课程配置、实时带教，以及团队、学员、班级和商机的证据化分析与复盘。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://sn.long-arena.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://sn.long-arena.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2030,7 +2060,7 @@ const marketplaceDefs = [
 		"description": "通过自然语言连接 SalesTouch，完成组织资料、部门、角色权限、员工邀请、下属管理范围与销售流程配置，并处理销售执行、非销售工作、绩效、内部调研和经营汇总。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://touch.long-arena.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://touch.long-arena.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2051,7 +2081,7 @@ const marketplaceDefs = [
 		"description": "通过用友银企联、税企联、商旅云等财务服务产品，为企业提供财务税务与银行资金数据服务，并提供企业商旅运营服务和行程服务。用自然语言完成企业的资金、税务、商旅的全面运营管理。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp-gateway.yql.net/mcp//.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp-gateway.yql.net/mcp/",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2072,7 +2102,7 @@ const marketplaceDefs = [
 		"description": "用自然语言查询客户、推进商机、写跟进记录、处理审批、建图表等，轻松搞定销售全链路工作。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://open.fxiaoke.com/mcp/connector?id=workbuddy/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://open.fxiaoke.com/mcp/connector?id=workbuddy",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2093,7 +2123,7 @@ const marketplaceDefs = [
 		"description": "",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.supabase.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.supabase.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2114,7 +2144,7 @@ const marketplaceDefs = [
 		"description": "管理需求、缺陷、任务和迭代。查询项目进度、拆分需求、流转状态、填写工时，覆盖需求到发布的研发全生命周期。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://websocket.tapd.cn/mcp/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://websocket.tapd.cn/mcp/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2135,7 +2165,7 @@ const marketplaceDefs = [
 		"description": "面向出海广告投放和增长团队的 AI 能力集合。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://tec-chi-external-skill-mcp.tec-do.cn/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://tec-chi-external-skill-mcp.tec-do.cn/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2156,7 +2186,7 @@ const marketplaceDefs = [
 		"description": "创建、编辑和协作腾讯文档。用自然语言管理在线表格、文档和幻灯片，轻松完成内容查询、数据整理和团队协同。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://docs.qq.com/openapi/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://docs.qq.com/openapi/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2177,7 +2207,7 @@ const marketplaceDefs = [
 		"description": "腾讯健康NGES MCP服务，支持智能问数和合规审核等功能",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://test.nges.qq.com/mcp/aggregate/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://test.nges.qq.com/mcp/aggregate",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2198,7 +2228,7 @@ const marketplaceDefs = [
 		"description": "创建、管理和分析腾讯问卷。用自然语言快速生成问卷、查看回收数据、设置题目逻辑。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://wj.qq.com/api/v2/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://wj.qq.com/api/v2/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2219,7 +2249,7 @@ const marketplaceDefs = [
 		"description": "腾讯云数据仓库 TCHouse-C 智能运维与分析助手，用自然语言完成集群健康诊断、慢 SQL 分析、规格选型推荐、表结构设计与 NL2SQL 查询。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://tcmcpserver.cloud.tencent.com/tchousec/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://tcmcpserver.cloud.tencent.com/tchousec/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2240,7 +2270,7 @@ const marketplaceDefs = [
 		"description": "查看、下载、删除微云文件，并且提供上传文件到微云、生成分享链接能力，帮你管理微云文件",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://www.weiyun.com/api/v3/mcpserver/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://www.weiyun.com/api/v3/mcpserver",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2261,7 +2291,7 @@ const marketplaceDefs = [
 		"description": "连接公开行情、研报检索、行业图谱与同舟投研材料，为股市研究提供可复核证据。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp-gateway.textmind-gz.com/mcp/tongzhou-research/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp-gateway.textmind-gz.com/mcp/tongzhou-research",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2282,7 +2312,7 @@ const marketplaceDefs = [
 		"description": "通过天眼查 MCP 查询多维度企业数据。支持工商登记、股东结构、司法风险、知识产权、董监高、经营数据等 160+ 项企业数据能力，用自然语言完成企业尽调与商业情报分析。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.tianyancha.com/v1/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.tianyancha.com/v1",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2303,7 +2333,7 @@ const marketplaceDefs = [
 		"description": "直连腾讯自选股，实时掌握毫秒级行情与资金动态，用自然语言分析自选数据、设置股价提醒、管理模拟交易，轻松搞定盯盘与投资决策。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://stockbuddy.qq.com/cgi/cgi-bin/openai/mcp/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://stockbuddy.qq.com/cgi/cgi-bin/openai/mcp/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2324,7 +2354,7 @@ const marketplaceDefs = [
 		"description": "威科先行依托全面、准确、及时更新的法规、案例等法律数据研发的MCP服务，支持语义检索、关键词检索等场景。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://mcp.wkinfo.com.cn/mcp-servers/integrated//.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://mcp.wkinfo.com.cn/mcp-servers/integrated/",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2345,7 +2375,7 @@ const marketplaceDefs = [
 		"description": "用自然语言管理小鹅通店铺：查询课程与学员，创建和编辑课程，查看订单，并查找或上传图片、音频、电子书和文档素材。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://agent.xiaoe-tech.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://agent.xiaoe-tech.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2366,7 +2396,7 @@ const marketplaceDefs = [
 		"description": "华宇元典法律数据为智能体提供法律法规、案例文书、企业信息 MCP 工具能力。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://open.chineselaw.com/mcp/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://open.chineselaw.com/mcp",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",
@@ -2387,7 +2417,7 @@ const marketplaceDefs = [
 		"description": "通过自然语言使用云帐房 AI 开票能力，完成开票信息识别，并前往电子税局开票。",
 		"authMode": "oauth",
 		"auth": {
-			"discoveryUrl": "https://super-ai-app.yunzhangfang.com/api/mcp/invoice/stream/.well-known/oauth-authorization-server",
+			"discoveryUrl": "https://super-ai-app.yunzhangfang.com/api/mcp/invoice/stream",
 			"clientId": "",
 			"authorizeUrl": "",
 			"tokenUrl": "",

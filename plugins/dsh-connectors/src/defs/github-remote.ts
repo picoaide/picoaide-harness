@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://api.githubcopilot.com/mcp//.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://api.githubcopilot.com/mcp/",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

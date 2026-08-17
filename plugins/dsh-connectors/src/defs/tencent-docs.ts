@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "创建、编辑和协作腾讯文档。用自然语言管理在线表格、文档和幻灯片，轻松完成内容查询、数据整理和团队协同。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://docs.qq.com/openapi/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://docs.qq.com/openapi/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

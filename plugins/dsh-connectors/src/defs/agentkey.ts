@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "AgentKey 是 AI 助手获取可信工具和实时数据的能力市场。支持网页搜索、URL抓取、新闻、社交媒体、股票市场价格、电商产品数据、企业/公司数据、天气、地图和地理位置、旅行（航班/酒店）、实时信息或任何第三方API。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://api.agentkey.app/workbuddy/v1/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://api.agentkey.app/workbuddy/v1/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "用可灵MCP打造独属于你的 AI 创作工作流。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://klingai.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://klingai.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

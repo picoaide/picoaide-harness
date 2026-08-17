@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "基于实时 TikTok Shop 数据完成选品、竞品分析、达人筛选与带货内容创作，并管理社媒账号、发布内容、运营评论和私信。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.gateway.chuhaijiang.com/mcp/oauth/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.gateway.chuhaijiang.com/mcp/oauth",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

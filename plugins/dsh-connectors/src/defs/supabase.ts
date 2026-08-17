@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.supabase.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.supabase.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "华宇元典法律数据为智能体提供法律法规、案例文书、企业信息 MCP 工具能力。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://open.chineselaw.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://open.chineselaw.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",
