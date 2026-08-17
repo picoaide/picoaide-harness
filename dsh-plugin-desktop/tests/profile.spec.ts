@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -80,7 +80,7 @@ describe('desktop profile composition', () => {
     const moduleUrl = pathToFileURL(join(resources, 'app.asar', 'lib', 'profile.js')).href
     const resolvedRoot = shippedPresetRoot(moduleUrl)
 
-    expect(resolvedRoot).toBe(physicalPresetRoot)
+    expect(resolvedRoot).toBe(realpathSync(physicalPresetRoot))
     expect(readFileSync(join(
       resolvedRoot,
       'cordis',
