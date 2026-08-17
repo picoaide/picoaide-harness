@@ -42,8 +42,9 @@ const HEADER: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
-  padding: '18px 24px',
-  borderBottom: '1px solid var(--dsw-alias-border-l2)',
+  height: 54,
+  boxSizing: 'border-box',
+  padding: '14px 18px',
 }
 
 const TITLE: React.CSSProperties = { margin: 0, fontSize: 16, lineHeight: 24, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }

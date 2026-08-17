@@ -18,21 +18,80 @@ export const name = 'picoaide-enterprise-client'
 export const inject = ['slots']
 
 /**
- * Enterprise brand CSS: swap the upstream DeepSeek marks for the product name
- * in place, keeping the upstream layout geometry (headline grid, sizes, ink).
- * CSS-module classes match by suffix; `:has()` scopes the headline grid fix to
- * the hero headline (the only one containing a headlineText child).
+ * Enterprise brand CSS: swap the upstream DeepSeek marks for the PicoAide
+ * brand in place, keeping the upstream layout geometry (headline grid, sizes,
+ * ink). CSS-module classes match by suffix; `:has()` scopes the headline grid
+ * fix to the hero headline (the only one containing a headlineText child).
+ * The sidebar foot action container is a flex row, so it is pinned to column
+ * to let stacked actions (skill center, cordis panel) sit one per row above
+ * Settings instead of overflowing side by side.
  */
 const BRAND_CSS = `
+/* Sidebar foot actions stack vertically above Settings (upstream container is a row). */
+[class$="_footerActions"] { flex-direction: column; align-items: stretch; }
+
+/* Hero: brand mark replaces the whale, headline text is replaced in place,
+   and the preview pill becomes the enterprise badge. */
+[class$="_fishHitbox"] svg { display: none; }
+[class$="_fishHitbox"]::before {
+  content: "P";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #4D6BFE;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+}
 [class$="_headlineText"] { font-size: 0; }
 [class$="_headlineText"]::after { content: "PicoAide Harness"; font-size: 26px; line-height: 32px; font-weight: 500; }
-[class$="_previewBadge"] { display: none; }
-[class$="_fishHitbox"] { display: none; }
-[class$="_headline"]:has([class$="_headlineText"]) { grid-template-columns: auto; }
-[class*="_brand"] { font-size: 0; }
+[class$="_previewBadge"] { font-size: 0; }
+[class$="_previewBadge"]::after { content: "企业版"; font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
+
+/* Sidebar brand: P mark + product name replace the DeepSeek wordmark. */
+[class*="_brand"] { font-size: 0; gap: 8px; }
 [class*="_brand"] svg { display: none; }
-[class*="_brand"]::before { content: "PicoAide"; font-size: 20px; font-weight: 700; letter-spacing: 0.3px; }
+[class*="_brand"]::before {
+  content: "P";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: #4D6BFE;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+[class*="_brand"]::after { content: "PicoAide"; font-size: 20px; font-weight: 700; letter-spacing: 0.3px; }
+
+/* Collapsed rail: the P mark replaces the whale (hover yields to the panel icon). */
 [class$="_railFish"] { display: none; }
+[class*="_collapsed"] [class$="_toggle"]::before {
+  content: "P";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: #4D6BFE;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+[class*="_collapsed"] [class$="_toggle"]:hover::before { display: none; }
+
+/* Skill center trigger hover feedback, matching the Settings trigger. */
+.pico-skill-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }
 `
 
 /**
