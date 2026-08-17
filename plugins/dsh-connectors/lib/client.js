@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({
 			flexDirection: "column",
 			gap: 8,
 			padding: "12px 14px",
-			border: "1px solid #333",
+			border: "1px solid var(--dsw-alias-border-l2)",
 			borderRadius: 8
 		};
 		const HEAD = {
@@ -29,12 +29,13 @@ window.__ModuleLoader__.load({
 		const TITLE = {
 			fontSize: 15,
 			margin: 0,
-			fontWeight: 600
+			fontWeight: 600,
+			color: "var(--dsw-alias-label-primary)"
 		};
 		const DESC = {
 			fontSize: 13,
 			margin: 0,
-			color: "#c9ccd3"
+			color: "var(--dsw-alias-label-secondary)"
 		};
 		const STATUS = {
 			fontSize: 12,
@@ -52,15 +53,15 @@ window.__ModuleLoader__.load({
 		const INPUT = {
 			padding: "6px 10px",
 			borderRadius: 6,
-			border: "1px solid #444",
-			background: "#1a1d24",
-			color: "#e6e6e6",
+			border: "1px solid var(--dsw-alias-border-l2)",
+			background: "var(--dsw-alias-bg-layer-2)",
+			color: "var(--dsw-alias-label-primary)",
 			fontSize: 13
 		};
 		const LABEL = {
 			fontSize: 12,
 			margin: 0,
-			color: "#c9ccd3"
+			color: "var(--dsw-alias-label-caption)"
 		};
 		const statusText = {
 			disconnected: "未连接",
@@ -284,7 +285,7 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		function ConnectorsSection(_props) {
+		function ConnectorsList() {
 			const [connectors, setConnectors] = (0, react.useState)(null);
 			const refresh = (0, react.useCallback)(() => {
 				fetchJson("/api/pico/connectors").then((data) => setConnectors(data.connectors)).catch(() => setConnectors([]));
@@ -310,25 +311,17 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/index.ts
-		/** Stable Cordis plugin name for the connectors client half. */
-		const name = "pico-connectors-client";
-		/** Services required: the slot registry for settings pages. */
-		const inject = ["slots"];
 		/**
-		* Register the connectors settings section (mirrors WorkBuddy's connector
-		* center): a per-connector card list with connect/disconnect and the auth
-		* request surfaces (OAuth redirect, device code, token form).
-		* @param ctx - browser Cordis context.
+		* Connectors client half: exports the connector list surface for the skill
+		* center (rendered by the enterprise skill-center panel), mirroring
+		* WorkBuddy's connector center. No slots of its own — the skill center owns
+		* placement.
 		*/
-		function apply(ctx) {
-			ctx.effect(() => ctx.slots.register({
-				name: "settings.section",
-				id: "connectors",
-				order: 500,
-				label: "连接器"
-			}, ConnectorsSection), "connectors: settings section");
-		}
+		const name = "pico-connectors-client";
+		const inject = [];
+		function apply(_ctx) {}
 		//#endregion
+		exports.ConnectorsList = ConnectorsList;
 		exports.apply = apply;
 		exports.inject = inject;
 		exports.name = name;

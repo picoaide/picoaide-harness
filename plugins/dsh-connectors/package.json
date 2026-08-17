@@ -29,7 +29,8 @@
       "inject": [
         "@deepseek-ai/dsh-client-runtime"
       ],
-      "platform": "web"
+      "platform": "web",
+      "immediately": true
     }
   },
   "files": [
