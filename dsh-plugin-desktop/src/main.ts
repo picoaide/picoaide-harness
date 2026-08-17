@@ -17,7 +17,11 @@ import {
   installDesktopDshRuntime,
   installDesktopPnpmRuntime,
 } from './desktop-runtime-environment.ts'
-import { ElectronDesktopRuntime } from './electron-runtime.ts'
+import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
+import { ElectronStderrLogger } from './desktop-logger.ts'
+import { FileExporter } from './file-exporter.ts'
+import { DESKTOP_SETTINGS_NAMESPACE, type DesktopSettings } from './index.ts'
+import { LogFileSink } from './log-files.ts'
 import { resolveDesktopShellEnvironment } from './shell-environment.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
@@ -118,7 +122,20 @@ async function start(): Promise<void> {
   let removeShutdownRequests: (() => void) | undefined
   let disposeDshRuntime: (() => void) | undefined
   let disposePnpmRuntime: (() => void) | undefined
+  let fileExporter: FileExporter | undefined
   let runtime!: ElectronDesktopRuntime
+  const logSink = new LogFileSink(join(app.getPath('userData'), 'logs'), {
+    maxFileBytes: 10 * 1024 * 1024,
+    maxDirectoryBytes: 200 * 1024 * 1024,
+  })
+  logSink.enforceDirectoryCap()
+  logSink.purgeOlderThan(7)
+  logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} run ${Date.now()} ---`)
+  const electronLogger = new ElectronStderrLogger(logSink)
+  process.on('uncaughtException', (error) => { electronLogger.errorCause(error) })
+  process.on('unhandledRejection', (reason) => {
+    electronLogger.error(`dsh-plugin-desktop: unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`)
+  })
   const nativeExit = createDesktopExitCoordinator(
     {
       prepareToQuit: () => { runtime.prepareToQuit() },
@@ -145,7 +162,7 @@ async function start(): Promise<void> {
     } else {
       markDesktopProfileFailed(profileStatePath, profileStartup.profileName)
     }
-  })
+  }, electronLogger)
   const finalExit = (code: number): void => { nativeExit.finish(code) }
   shutdown = createDesktopShutdown(
     async () => {
@@ -272,6 +289,8 @@ async function start(): Promise<void> {
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
         hostCtx.provide('desktopPnpmBootstrap', desktopPnpmBootstrap)
+        fileExporter = new FileExporter(logSink)
+        hostCtx.logger.exporter(fileExporter)
         await hostCtx.plugin(DesktopProfileService, {
           current: {
             name: activeProfileName,
@@ -292,6 +311,11 @@ async function start(): Promise<void> {
       throw cause
     })
     current = ctx
+    fileExporter?.setThreshold((ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopSettings | undefined)?.logLevel ?? 'info')
+    ctx.on('settings/updated', (namespace, next) => {
+      if (namespace !== DESKTOP_SETTINGS_NAMESPACE) return
+      fileExporter?.setThreshold((next as DesktopSettings).logLevel)
+    })
     runtime.configureTerminal({
       profileName: activeProfileName,
       profileDir: prepared.profile.dir,

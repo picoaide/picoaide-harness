@@ -31,6 +31,8 @@ import type {
   DesktopUpdateAdapter,
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
+import type { DesktopLogger } from './desktop-logger.ts'
+import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
@@ -91,11 +93,18 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   constructor(
     private readonly restart: () => Promise<void>,
     private readonly onRendererBoot: (report: RendererBootReport) => void = () => {},
+    private readonly logger: DesktopLogger | undefined = undefined,
   ) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: unsupported Electron platform ${process.platform}`)
     }
     this.platform = process.platform
+  }
+
+  /** Log an Electron-scope error to the sink, falling back to stderr without a logger. */
+  private logError(message: string): void {
+    if (this.logger !== undefined) this.logger.error(message)
+    else process.stderr.write(`${message}\n`)
   }
 
   /** @inheritdoc */
@@ -206,17 +215,29 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  exportDiagnostics(): Promise<void> {
+    return exportDiagnosticsZip(
+      join(app.getPath('userData'), 'logs'),
+      app.getPath('userData'),
+    ).then((path) => {
+      shell.showItemInFolder(path)
+    }).catch((cause: unknown) => {
+      this.logError(`dsh-plugin-desktop: failed to export diagnostics: ${cause instanceof Error ? cause.message : String(cause)}`)
+    })
+  }
+
+  /** @inheritdoc */
   reportRendererBoot(report: RendererBootReport): void {
     if (this.rendererBootReported) return
     this.rendererBootReported = true
     try {
       this.onRendererBoot(report)
     } catch (cause) {
-      process.stderr.write(`dsh-plugin-desktop: failed to persist renderer boot health: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+      this.logError(`dsh-plugin-desktop: failed to persist renderer boot health: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
     if (report.status === 'failed') {
       void this.showRendererBootRecovery(report).catch((cause: unknown) => {
-        process.stderr.write(`dsh-plugin-desktop: failed to show plugin recovery: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+        this.logError(`dsh-plugin-desktop: failed to show plugin recovery: ${cause instanceof Error ? cause.message : String(cause)}`)
       })
     }
   }
@@ -289,7 +310,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private trayCommand(invoke: () => void | Promise<void>): () => void {
     return () => {
       void Promise.resolve().then(invoke).catch((cause: unknown) => {
-        process.stderr.write(`dsh-plugin-desktop: tray command failed: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+        this.logError(`dsh-plugin-desktop: tray command failed: ${cause instanceof Error ? cause.message : String(cause)}`)
       })
     }
   }
@@ -427,7 +448,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       child.once('spawn', () => {
         child.off('error', fail)
         child.once('error', cause => {
-          process.stderr.write(`dsh-plugin-desktop: update installer failed after launch: ${cause.message}\n`)
+          this.logError(`dsh-plugin-desktop: update installer failed after launch: ${cause.message}`)
         })
         child.unref()
         resolve()
@@ -438,11 +459,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** Keep native-terminal launch failures visible in a packaged GUI process. */
   private reportTerminalLaunchError(cause: unknown): void {
     const error = cause instanceof Error ? cause : new Error(String(cause))
-    process.stderr.write(`dsh-plugin-desktop: failed to open terminal: ${error.message}\n`)
+    this.logError(`dsh-plugin-desktop: failed to open terminal: ${error.message}`)
     try {
       dialog.showErrorBox('Unable to Open DSH Terminal', error.message)
     } catch (dialogCause) {
-      process.stderr.write(`dsh-plugin-desktop: failed to show terminal error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}\n`)
+      this.logError(`dsh-plugin-desktop: failed to show terminal error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}`)
     }
   }
 
@@ -468,7 +489,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         enabled: this.platform !== 'linux',
         click: () => {
           void spec.requestModeChange(nextDesktopShellMode(spec.mode)).catch((cause: unknown) => {
-            process.stderr.write(`dsh-plugin-desktop: failed to change shell mode: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+            this.logError(`dsh-plugin-desktop: failed to change shell mode: ${cause instanceof Error ? cause.message : String(cause)}`)
           })
         },
       },
@@ -516,12 +537,18 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     window.on('page-title-updated', preserveBlankTitle)
     window.webContents.on('will-frame-navigate', navigate)
     window.webContents.on('will-redirect', navigate)
+    window.webContents.on('render-process-gone', (_event, details) => {
+      this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${details.exitCode})`)
+    })
+    window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+      this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)
+    })
     window.webContents.setWindowOpenHandler(({ url }) => {
       try {
         const target = new URL(url)
         if (target.protocol === 'https:' || target.protocol === 'http:' || target.protocol === 'mailto:') {
           void shell.openExternal(target.href).catch((cause: unknown) => {
-            process.stderr.write(`dsh-plugin-desktop: failed to open external link: ${cause instanceof Error ? cause.message : String(cause)}\n`)
+            this.logError(`dsh-plugin-desktop: failed to open external link: ${cause instanceof Error ? cause.message : String(cause)}`)
           })
         }
       } catch {

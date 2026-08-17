@@ -33,11 +33,14 @@ const UI_THEME_SETTINGS_NAMESPACE = settingsNamespace(THEME_SETTINGS_NAMESPACE)
 export interface DesktopSettings {
   /** Native presentation selected for the next application generation. */
   mode: DesktopShellMode
+  /** Log verbosity threshold applied to the file logger. */
+  logLevel: 'debug' | 'info' | 'warn' | 'error'
 }
 
 /** Schema registered with the standard settings service. */
 export const DesktopSettingsSchema: z<DesktopSettings> = z.object({
   mode: z.union(['compatibility', 'advanced'] as const).default('compatibility'),
+  logLevel: z.union(['debug', 'info', 'warn', 'error'] as const).default('info'),
 })
 
 /** Native window configuration. */
