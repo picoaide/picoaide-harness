@@ -2,9 +2,18 @@
 
 const MASK = '****'
 const COOKIE_HEADER = /\b(Set-Cookie|Cookie)\s*:[^\r\n]*/giu
+const AUTHORIZATION_HEADER = /\bAuthorization\s*:\s*([^\r\n]*)/giu
 const WEB_URL = /https?:\/\/[^\s<>"']+/giu
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
-const NAMED_SECRET = /\b(api[_-]?key|auth|client[_-]?secret|credential|password|passwd|refresh[_-]?token|secret|session(?:id)?|signature|token)\b(\s*[:=]\s*)[^\s,;&]+/giu
+const SECRET_FIELD_NAME = String.raw`access[_-]?token|(?:x[_-])?api[_-]?key|authorization|auth|client[_-]?secret|code|credential|id[_-]?token|password|passwd|private[_-]?key|refresh[_-]?token|secret|session(?:id)?|signature|token`
+const QUOTED_NAMED_SECRET = new RegExp(
+  String.raw`(["'])(${SECRET_FIELD_NAME})\1(\s*:\s*)(["'])(?:\\.|(?!\4)[^\\])*\4`,
+  'giu',
+)
+const NAMED_SECRET = new RegExp(
+  String.raw`\b(${SECRET_FIELD_NAME})\b(\s*[:=]\s*)(?!(?:Bearer|Basic)\b)[^\s,;&]+`,
+  'giu',
+)
 
 /** Secret-shaped patterns applied in order to a rendered log line. */
 const SECRET_PATTERNS: readonly RegExp[] = [
@@ -35,6 +44,12 @@ export function maskSecrets(text: string): string {
   let out = text
     .replace(COOKIE_HEADER, (_match, name: string) => `${name}: ${MASK}`)
     .replace(WEB_URL, maskUrl)
+    .replace(QUOTED_NAMED_SECRET, (_match, keyQuote: string, name: string, separator: string, valueQuote: string) =>
+      `${keyQuote}${name}${keyQuote}${separator}${valueQuote}${MASK}${valueQuote}`)
+    .replace(AUTHORIZATION_HEADER, (_match, value: string) => {
+      const scheme = /^(Bearer|Basic)\b/iu.exec(value)?.[1]
+      return `Authorization: ${scheme === undefined ? '' : `${scheme} `}${MASK}`
+    })
     .replace(NAMED_SECRET, (_match, name: string, separator: string) => `${name}${separator}${MASK}`)
   for (const pattern of SECRET_PATTERNS) {
     out = out.replace(pattern, (match) => {
