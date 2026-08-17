@@ -70,6 +70,20 @@ export function desktopProductVersion(moduleUrl: string = import.meta.url): stri
 }
 
 const PRODUCT_VERSION = desktopProductVersion()
+const MIN_ZOOM_LEVEL = -4
+const MAX_ZOOM_LEVEL = 4
+
+function clampedZoomLevel(level: number): number {
+  return Math.min(MAX_ZOOM_LEVEL, Math.max(MIN_ZOOM_LEVEL, level))
+}
+
+function isZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | undefined {
+  if (input.type !== 'keyDown' || input.alt || (!input.control && !input.meta)) return undefined
+  if (input.key === '+' || input.key === '=') return 'in'
+  if (input.key === '-' || input.key === '_') return 'out'
+  if (input.key === '0') return 'reset'
+  return undefined
+}
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
@@ -577,6 +591,17 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       window.hide()
     }
     const preserveBlankTitle = (event: Electron.Event): void => { event.preventDefault() }
+    const handleZoomShortcut = (event: Electron.Event, input: Electron.Input): void => {
+      const action = isZoomShortcut(input)
+      if (action === undefined) return
+      event.preventDefault()
+      if (action === 'reset') {
+        window.webContents.setZoomLevel(0)
+        return
+      }
+      const step = action === 'in' ? 1 : -1
+      window.webContents.setZoomLevel(clampedZoomLevel(window.webContents.getZoomLevel() + step))
+    }
     const navigate = (event: Electron.Event<{ url: string }>): void => {
       let targetOrigin: string | undefined
       try {
@@ -590,6 +615,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     app.on('activate', show)
     window.on('close', close)
     window.on('page-title-updated', preserveBlankTitle)
+    window.webContents.on('before-input-event', handleZoomShortcut)
     window.webContents.on('will-frame-navigate', navigate)
     window.webContents.on('will-redirect', navigate)
     window.webContents.on('render-process-gone', (_event, details) => {
@@ -625,6 +651,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     } catch (cause) {
       app.off('activate', show)
       window.off('page-title-updated', preserveBlankTitle)
+      window.webContents.off('before-input-event', handleZoomShortcut)
       tray?.off('click', show)
       tray?.destroy()
       window.destroy()
@@ -645,6 +672,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       app.off('activate', show)
       window.off('close', close)
       window.off('page-title-updated', preserveBlankTitle)
+      window.webContents.off('before-input-event', handleZoomShortcut)
       window.webContents.off('will-frame-navigate', navigate)
       window.webContents.off('will-redirect', navigate)
       mountedTray.off('click', show)

@@ -55,6 +55,7 @@ const electron = vi.hoisted(() => {
   const loadURL = vi.fn(async (_url: string) => {})
   const menuTemplates: unknown[][] = []
   const notifications: Notification[] = []
+  let zoomLevel = 0
   const dialog = {
     showErrorBox: vi.fn(),
     showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
@@ -72,8 +73,10 @@ const electron = vi.hoisted(() => {
     setTemplateImage: vi.fn(),
   }
   const webContents = {
+    getZoomLevel: vi.fn(() => zoomLevel),
     on: vi.fn(),
     off: vi.fn(),
+    setZoomLevel: vi.fn((level: number) => { zoomLevel = level }),
     setWindowOpenHandler: vi.fn(),
   }
   const nativeTheme = { themeSource: 'system' }
@@ -165,6 +168,7 @@ const electron = vi.hoisted(() => {
     net: { fetch: vi.fn() },
     Notification,
     notifications,
+    resetZoomLevel: () => { zoomLevel = 0 },
     shell: {
       openExternal: vi.fn(async () => {}),
       openPath: vi.fn(async () => ''),
@@ -173,6 +177,7 @@ const electron = vi.hoisted(() => {
     templateIcon,
     Tray,
     trays,
+    webContents,
   }
 })
 
@@ -227,6 +232,7 @@ describe('Electron compatibility runtime', () => {
     electron.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false })
     electron.shell.openPath.mockResolvedValue('')
     electron.nativeTheme.themeSource = 'system'
+    electron.resetZoomLevel()
   })
 
   afterEach(() => {
@@ -352,6 +358,46 @@ describe('Electron compatibility runtime', () => {
       ]))
 
     await release()
+  })
+
+  it('handles desktop zoom shortcuts without relying on the native menu', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+
+    await runtime.mountScheduled()
+
+    const zoomListener = electron.webContents.on.mock.calls
+      .find(([event]) => event === 'before-input-event')?.[1]
+    expect(zoomListener).toEqual(expect.any(Function))
+
+    const zoomIn = { preventDefault: vi.fn() }
+    zoomListener(zoomIn, { type: 'keyDown', control: true, key: '=' })
+    expect(zoomIn.preventDefault).toHaveBeenCalledOnce()
+    expect(electron.webContents.setZoomLevel).toHaveBeenLastCalledWith(1)
+
+    const zoomInRelease = { preventDefault: vi.fn() }
+    zoomListener(zoomInRelease, { type: 'keyUp', control: true, key: '=' })
+    expect(zoomInRelease.preventDefault).not.toHaveBeenCalled()
+    expect(electron.webContents.setZoomLevel).toHaveBeenCalledTimes(1)
+
+    const zoomOut = { preventDefault: vi.fn() }
+    zoomListener(zoomOut, { type: 'keyDown', control: true, key: '-' })
+    expect(zoomOut.preventDefault).toHaveBeenCalledOnce()
+    expect(electron.webContents.setZoomLevel).toHaveBeenLastCalledWith(0)
+
+    const zoomReset = { preventDefault: vi.fn() }
+    zoomListener(zoomReset, { type: 'keyDown', control: true, key: '0' })
+    expect(zoomReset.preventDefault).toHaveBeenCalledOnce()
+    expect(electron.webContents.setZoomLevel).toHaveBeenLastCalledWith(0)
+
+    const plainPlus = { preventDefault: vi.fn() }
+    zoomListener(plainPlus, { type: 'keyDown', key: '=' })
+    expect(plainPlus.preventDefault).not.toHaveBeenCalled()
+
+    await release()
+    expect(electron.webContents.off).toHaveBeenCalledWith('before-input-event', zoomListener)
   })
 
   it('does not mount a registration disposed before Host boot settles', async () => {
