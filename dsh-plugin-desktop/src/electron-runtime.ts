@@ -20,6 +20,7 @@ import { desktopTerminalStateDirectory, openDesktopTerminal } from './desktop-te
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import type {
   DesktopNotification,
+  DesktopLocale,
   DesktopPlatform,
   DesktopRuntime,
   DesktopShellSpec,
@@ -34,6 +35,7 @@ import type { RendererBootReport } from './renderer-boot-contract.ts'
 import type { DesktopLogger } from './desktop-logger.ts'
 import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
+import { desktopLocaleFromLanguageTag, desktopTrayLabel } from './tray-locale.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
@@ -44,10 +46,10 @@ export function nextDesktopShellMode(mode: DesktopShellSpec['mode']): DesktopShe
 }
 
 /** Return the tray command describing the mode that will be activated. */
-export function modeToggleLabel(mode: DesktopShellSpec['mode']): string {
+export function modeToggleLabel(mode: DesktopShellSpec['mode'], locale: DesktopLocale = 'en'): string {
   return mode === 'compatibility'
-    ? 'Switch to Advanced Mode'
-    : 'Switch to Compatibility Mode'
+    ? desktopTrayLabel(locale, 'switchToAdvanced')
+    : desktopTrayLabel(locale, 'switchToCompatibility')
 }
 
 /**
@@ -81,6 +83,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   private window: BrowserWindow | undefined
+  private currentLocale: DesktopLocale = 'en'
   private tray: Tray | undefined
   private scheduled: DesktopShellSpec | undefined
   private mountTask: Promise<void> | undefined
@@ -106,6 +109,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private logError(message: string): void {
     if (this.logger !== undefined) this.logger.error(message)
     else process.stderr.write(`${message}\n`)
+  }
+
+  /** @inheritdoc */
+  get locale(): DesktopLocale {
+    return this.currentLocale
   }
 
   /** @inheritdoc */
@@ -250,6 +258,14 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         this.logError(`dsh-plugin-desktop: failed to show plugin recovery: ${cause instanceof Error ? cause.message : String(cause)}`)
       })
     }
+  }
+
+  /** @inheritdoc */
+  setLocalePreference(preference: DesktopLocale | undefined): void {
+    const locale = preference ?? desktopLocaleFromLanguageTag(app.getLocale())
+    if (locale === this.currentLocale) return
+    this.currentLocale = locale
+    this.rebuildTrayMenu()
   }
 
   /** @inheritdoc */
@@ -498,7 +514,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const profiles = this.contributedTrayItems('profiles')
     const status = this.contributedTrayItems('status')
     const template: Electron.MenuItemConstructorOptions[] = [
-      { label: `Open ${spec.productName}`, click: show },
+      { label: desktopTrayLabel(this.locale, 'openDesktop', spec.productName), click: show },
     ]
     if (tools.length > 0) template.push({ type: 'separator' }, ...tools)
     if (profiles.length > 0) template.push({ type: 'separator' }, ...profiles)
@@ -506,7 +522,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     template.push(
       { type: 'separator' },
       {
-        label: modeToggleLabel(spec.mode),
+        label: modeToggleLabel(spec.mode, this.locale),
         enabled: this.platform !== 'linux',
         click: () => {
           void spec.requestModeChange(nextDesktopShellMode(spec.mode)).catch((cause: unknown) => {
@@ -515,7 +531,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         },
       },
       { type: 'separator' },
-      { label: 'Quit', click: () => { spec.requestQuit(0) } },
+      { label: desktopTrayLabel(this.locale, 'quit'), click: () => { spec.requestQuit(0) } },
     )
     tray.setContextMenu(Menu.buildFromTemplate(template))
   }
@@ -524,6 +540,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     spec: DesktopShellSpec,
     beforeInteractive: (() => void) | undefined,
   ): Promise<() => Promise<void>> {
+    this.setLocalePreference(spec.readLocalePreference())
     const icon = nativeImage.createFromPath(spec.iconPath)
     if (icon.isEmpty()) {
       throw new Error(`dsh-plugin-desktop: failed to load application icon ${spec.iconPath}`)
