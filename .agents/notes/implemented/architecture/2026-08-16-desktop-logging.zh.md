@@ -32,4 +32,10 @@ Status: implemented
 
 日志持久化到桌面用户数据目录，打包运行后也能排查。verbosity 阈值走标准设置服务配置，同时作用于全量文件与错误文件。`logLevel` 字段在启动时与 `settings/updated` 时读取，改动无需重启即生效。
 
-桌面 bootstrap 自身的 `process.stderr.write` 错误消息、以及带手动清空的设置页日志查看器，尚未路由进 sink，作为后续项。
+每天日志以一条启动 header（app 版本、平台、Node 版本、运行时间戳）开头，并在启动时清理 7 天前的文件，配合 200MB 目录上限。
+
+绕过 Cordis `ctx.logger` 的 Electron 主进程级错误通过 `DesktopLogger` 接口记录：`ElectronStderrLogger` 写入 sink 并镜像到 `process.stderr`（开发时可终端可见）。它被注入 `ElectronDesktopRuntime`，后者把原先的 `process.stderr.write` 调用、`launchWindowsUpdateInstaller` 的子进程错误、以及 `render-process-gone` / `did-fail-load` 渲染器事件都路由过去。`main.ts` 注册的 `uncaughtException` 与 `unhandledRejection` 处理器也写入 sink。
+
+渲染后的日志行经过脱敏层，屏蔽 `sk-` 风格 key、长 hex/base64 token 与 bearer token。`desktopRuntime.exportDiagnostics()` 把日志目录与系统信息摘要打包成 `userData/diagnostics/` 下的 zip，并在系统文件管理器中打开。
+
+带手动清空的设置页日志查看器尚未构建，作为后续项。

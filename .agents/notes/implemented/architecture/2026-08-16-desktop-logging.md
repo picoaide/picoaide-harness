@@ -32,4 +32,10 @@ The `dsh-desktop.logLevel` settings field (`debug | info | warn | error`, defaul
 
 Logs persist under the desktop user-data directory and can be inspected after a packaged run. The verbosity threshold is configurable per the standard settings service and applies to both the full and error files. The `logLevel` field is read at startup and on `settings/updated`, so a change applies without a restart.
 
-The desktop bootstrap's own `process.stderr.write` error messages and a settings-page log viewer with manual clear are not yet routed through the sink; they are separate follow-ups.
+A startup header line (app version, platform, Node version, run timestamp) opens each day's log, and files older than seven days are purged at launch alongside the 200MB directory cap.
+
+Electron-main-scope failures bypass Cordis `ctx.logger` through a `DesktopLogger` interface: the `ElectronStderrLogger` writes to the sink and mirrors to `process.stderr` for dev visibility. It is injected into `ElectronDesktopRuntime`, which routes its former `process.stderr.write` calls, the `launchWindowsUpdateInstaller` child-process errors, and the `render-process-gone` / `did-fail-load` renderer events through it. `main.ts` registers `uncaughtException` and `unhandledRejection` handlers that write to the sink.
+
+Rendered log lines pass through a secret-masking layer that masks `sk-`-style keys, long hex/base64 tokens, and bearer tokens. A `desktopRuntime.exportDiagnostics()` method bundles the logs directory and a system-info summary into a zip under `userData/diagnostics/` and reveals it in the system file manager.
+
+A settings-page log viewer with manual clear is not yet built; it is a separate follow-up.
