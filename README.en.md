@@ -195,3 +195,7 @@ This project is licensed under the [MIT License](LICENSE).
 > This is a community desktop edition built on DeepSeek Harness. It is not an official DeepSeek product.
 
 > DeepSeek is a trademark of DeepSeek AI. DSH Desktop is an independent community project, not affiliated with or endorsed by DeepSeek.
+
+## Star History
+
+[Star History](https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left)
