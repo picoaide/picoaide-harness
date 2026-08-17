@@ -54,7 +54,10 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
-  const defs = [salesEasyDef, ...(options.connectors ?? [])]
+  const defs = [
+    salesEasyDef,
+    ...(options.connectors ?? []),
+  ]
   const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {})
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
@@ -94,6 +97,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             args: server.args ?? [],
             env: {
               ...(server.env ?? {}),
+              ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
               ...(credential?.accessToken ? { PICOAIDE_CONNECTOR_ACCESS_TOKEN: credential.accessToken } : {}),
               ...(credential?.refreshToken ? { PICOAIDE_CONNECTOR_REFRESH_TOKEN: credential.refreshToken } : {}),
               ...(credential?.fields ?? {}),
@@ -102,8 +106,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
-      const dispose = await ctx.plugin(applyMcpClient, config)
-      mcpDisposers.set(server.serverName, () => { void dispose?.dispose() })
+      const fiber = await ctx.plugin(
+        { inject: ['tools'], apply: applyMcpClient, name: 'mcp-client' },
+        config,
+      )
+      mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
     }
   }
 
