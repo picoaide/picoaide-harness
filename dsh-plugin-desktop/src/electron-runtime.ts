@@ -88,6 +88,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private quitting = false
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
   private terminalSpec: DesktopTerminalSpec | undefined
+  private diagnosticExport: Promise<void> | undefined
   private rendererBootReported = false
 
   constructor(
@@ -216,13 +217,22 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   /** @inheritdoc */
   exportDiagnostics(): Promise<void> {
+    if (this.diagnosticExport !== undefined) return this.diagnosticExport
+    const operation = this.performDiagnosticExport().finally(() => {
+      if (this.diagnosticExport === operation) this.diagnosticExport = undefined
+    })
+    this.diagnosticExport = operation
+    return operation
+  }
+
+  private performDiagnosticExport(): Promise<void> {
     return exportDiagnosticsZip(
       join(app.getPath('userData'), 'logs'),
       app.getPath('userData'),
     ).then((path) => {
       shell.showItemInFolder(path)
     }).catch((cause: unknown) => {
-      this.logError(`dsh-plugin-desktop: failed to export diagnostics: ${cause instanceof Error ? cause.message : String(cause)}`)
+      this.reportDiagnosticExportError(cause)
     })
   }
 
@@ -464,6 +474,17 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       dialog.showErrorBox('Unable to Open DSH Terminal', error.message)
     } catch (dialogCause) {
       this.logError(`dsh-plugin-desktop: failed to show terminal error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}`)
+    }
+  }
+
+  /** Keep diagnostic export failures visible in a packaged GUI process. */
+  private reportDiagnosticExportError(cause: unknown): void {
+    const error = cause instanceof Error ? cause : new Error(String(cause))
+    this.logError(`dsh-plugin-desktop: failed to export diagnostics: ${error.message}`)
+    try {
+      dialog.showErrorBox('Unable to Export Diagnostics', error.message)
+    } catch (dialogCause) {
+      this.logError(`dsh-plugin-desktop: failed to show diagnostics error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}`)
     }
   }
 
