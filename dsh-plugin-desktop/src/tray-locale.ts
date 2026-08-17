@@ -47,6 +47,31 @@ const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string) 
   },
 }
 
+export interface DesktopDiagnosticsPrivacyCopy {
+  readonly title: string
+  readonly message: string
+  readonly detail: string
+  readonly confirm: string
+  readonly cancel: string
+}
+
+const diagnosticsPrivacyCopy: Record<DesktopLocale, DesktopDiagnosticsPrivacyCopy> = {
+  en: {
+    title: 'Export Diagnostics',
+    message: 'Review the diagnostic archive before sharing it.',
+    detail: 'The archive contains recent application logs and system information. Logs may contain local paths, workspace IDs, and session IDs. Authentication credentials are masked when recognized, but you should still review the archive before uploading it publicly.',
+    confirm: 'Export',
+    cancel: 'Cancel',
+  },
+  zh: {
+    title: '导出诊断信息',
+    message: '分享诊断包前请先检查其中的内容。',
+    detail: '诊断包包含最近的应用日志和系统信息。日志可能包含本地路径、工作区 ID 和会话 ID。系统会对可识别的认证凭据进行脱敏，但公开上传前仍应检查诊断包。',
+    confirm: '导出',
+    cancel: '取消',
+  },
+}
+
 /** Resolve DSH's zh/en locale from an Electron or browser language tag. */
 export function desktopLocaleFromLanguageTag(languageTag: string): DesktopLocale {
   return /^zh(?:[-_]|$)/i.test(languageTag) ? 'zh' : 'en'
@@ -59,4 +84,9 @@ export function desktopTrayLabel(
   value = '',
 ): string {
   return labels[locale][key](value)
+}
+
+/** Resolve the native privacy confirmation shown before diagnostics export. */
+export function desktopDiagnosticsPrivacyCopy(locale: DesktopLocale): DesktopDiagnosticsPrivacyCopy {
+  return diagnosticsPrivacyCopy[locale]
 }

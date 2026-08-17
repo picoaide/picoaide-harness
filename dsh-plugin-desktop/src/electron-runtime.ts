@@ -35,7 +35,11 @@ import type { RendererBootReport } from './renderer-boot-contract.ts'
 import type { DesktopLogger } from './desktop-logger.ts'
 import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
-import { desktopLocaleFromLanguageTag, desktopTrayLabel } from './tray-locale.ts'
+import {
+  desktopDiagnosticsPrivacyCopy,
+  desktopLocaleFromLanguageTag,
+  desktopTrayLabel,
+} from './tray-locale.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
@@ -233,15 +237,28 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     return operation
   }
 
-  private performDiagnosticExport(): Promise<void> {
-    return exportDiagnosticsZip(
-      join(app.getPath('userData'), 'logs'),
-      app.getPath('userData'),
-    ).then((path) => {
+  private async performDiagnosticExport(): Promise<void> {
+    const copy = desktopDiagnosticsPrivacyCopy(this.locale)
+    try {
+      const confirmation = await dialog.showMessageBox({
+        type: 'warning',
+        title: copy.title,
+        message: copy.message,
+        detail: copy.detail,
+        buttons: [copy.confirm, copy.cancel],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      })
+      if (confirmation.response !== 0) return
+      const path = await exportDiagnosticsZip(
+        join(app.getPath('userData'), 'logs'),
+        app.getPath('userData'),
+      )
       shell.showItemInFolder(path)
-    }).catch((cause: unknown) => {
+    } catch (cause) {
       this.reportDiagnosticExportError(cause)
-    })
+    }
   }
 
   /** @inheritdoc */

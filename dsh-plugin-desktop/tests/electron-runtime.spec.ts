@@ -559,6 +559,38 @@ describe('Electron compatibility runtime', () => {
     expect(electron.shell.showItemInFolder).toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics.zip')
   })
 
+  it('does not export diagnostics when the privacy confirmation is cancelled', async () => {
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+
+    await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
+
+    expect(diagnostics.export).not.toHaveBeenCalled()
+    expect(electron.shell.showItemInFolder).not.toHaveBeenCalled()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'warning',
+      cancelId: 1,
+      defaultId: 1,
+      buttons: ['Export', 'Cancel'],
+      detail: expect.stringContaining('local paths, workspace IDs, and session IDs'),
+    }))
+  })
+
+  it('localizes the diagnostics privacy confirmation', async () => {
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    runtime.setLocalePreference('zh')
+
+    await runtime.exportDiagnostics()
+
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      buttons: ['导出', '取消'],
+      detail: expect.stringContaining('本地路径、工作区 ID 和会话 ID'),
+    }))
+  })
+
   it('shows a native error when diagnostic export fails', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')

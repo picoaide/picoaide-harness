@@ -36,8 +36,8 @@ Status: implemented
 
 绕过 Cordis `ctx.logger` 的 Electron 主进程级错误通过 `DesktopLogger` 接口记录：`ElectronStderrLogger` 写入 sink 并镜像到 `process.stderr`（开发时可终端可见）。它被注入 `ElectronDesktopRuntime`，后者把原先的 `process.stderr.write` 调用、`launchWindowsUpdateInstaller` 的子进程错误、以及 `render-process-gone` / `did-fail-load` 渲染器事件都路由过去。`main.ts` 安装共享的 fail-loud rejection 路径和一个专用 `uncaughtException` 处理器；后者记录第一个致命错误后请求受控退出。sink 失败会退化到 stderr，不会覆盖原始错误。
 
-所有进入文件边界的日志行都经过脱敏层，覆盖 `sk-` 风格 key、长 hex/base64 token、bearer/basic authorization、cookie header、具名敏感字段，以及 HTTP URL 中的凭据或敏感 query 值。
+所有进入文件边界的日志行都经过脱敏层，覆盖 `sk-` 风格 key、长 hex/base64 token、bearer/basic authorization、cookie header、带引号或不带引号的具名敏感字段（包括渲染后的 JSON），以及 HTTP URL 中的凭据或敏感 query 值。
 
-默认 profile 加载 `dsh-plugin-desktop/diagnostics`，在 macOS 与 Windows 的原生托盘中提供 **Export Diagnostics…** 命令。`desktopRuntime.exportDiagnostics()` 只把自有普通日志与系统信息摘要打包成原子发布的 `userData/diagnostics/` zip；它拒绝链接形式的输入/输出目录、合并并发请求、只保留最新三份归档，成功后在系统文件管理器中定位文件，失败时显示原生错误对话框。
+默认 profile 加载 `dsh-plugin-desktop/diagnostics`，在 macOS 与 Windows 的原生托盘中提供 **Export Diagnostics…** 命令。创建归档前，`desktopRuntime.exportDiagnostics()` 会显示本地化隐私确认，说明日志可能包含本地路径与工作区/会话标识。确认后的导出在短生命周期 Node worker 中运行，避免文件读取与压缩阻塞 Electron 主线程。Worker 最多纳入最近 50MB 的自有普通日志与系统信息摘要，记录被省略的文件数量，把 zip 原子发布到 `userData/diagnostics/`，拒绝链接形式的输入/输出目录，容忍文件消失或被锁，并只保留最新三份归档。Runtime 会合并并发请求，成功后在系统文件管理器中定位文件，失败时显示原生错误对话框。
 
 带手动清空的设置页日志查看器尚未构建，作为后续项。
