@@ -164,6 +164,7 @@ describe('published package surface', () => {
       'cordis.patch.yml',
       'lib/**',
       'package.json',
+      '!node_modules/node-pty/build/**',
     ])
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
@@ -194,6 +195,7 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['package:dir']).toBe('yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
     expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
+    expect(manifest.scripts?.['dist:mac-smoke']).toBe('node scripts/package-mac.ts')
     expect(manifest.scripts?.['dist:win']).toBe('node scripts/package-win.ts')
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run build')
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run typecheck')
@@ -205,6 +207,8 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['verify:cli']).toBe('node scripts/verify-cli-runtime.mjs')
     expect(manifest.scripts?.check).toContain('yarn run verify:cli')
     expect(workspaceManifest.scripts?.['dist:mac']).toBe('yarn workspace dsh-plugin-desktop dist:mac')
+    expect(workspaceManifest.scripts?.['dist:mac-smoke'])
+      .toBe('yarn workspace dsh-plugin-desktop dist:mac-smoke')
     expect(workspaceManifest.scripts?.['dist:win'])
       .toBe('yarn workspace dsh-plugin-desktop dist:win')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
@@ -212,7 +216,10 @@ describe('published package surface', () => {
       hardenedRuntime: true,
       notarize: true,
       target: ['dir'],
+      singleArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
+      x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))
+    expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 

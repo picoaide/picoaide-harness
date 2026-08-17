@@ -4,6 +4,7 @@ import {
   verifyMacRelease,
   type MacReleaseVerificationOptions,
 } from '../scripts/verify-mac-release.ts'
+import { MACOS_UNIVERSAL_NATIVE_ENTRIES } from '../scripts/mac-universal.ts'
 
 function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const calls: Array<{ command: string; args: readonly string[] }> = []
@@ -38,6 +39,21 @@ describe('macOS release artifact verification', () => {
           '-mountpoint', '/private/tmp/dsh-desktop-dmg-test', '-nobrowse', '-readonly',
         ],
       },
+      {
+        command: 'lipo',
+        args: [join(appPath, 'Contents', 'MacOS', 'DSH Desktop'), '-verify_arch', 'x86_64'],
+      },
+      {
+        command: 'lipo',
+        args: [join(appPath, 'Contents', 'MacOS', 'DSH Desktop'), '-verify_arch', 'arm64'],
+      },
+      ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => ({
+        command: 'lipo',
+        args: [
+          join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', entry.path),
+          '-verify_arch', entry.arch,
+        ],
+      })),
       {
         command: 'codesign',
         args: ['--verify', '--deep', '--strict', '--verbose=2', appPath],

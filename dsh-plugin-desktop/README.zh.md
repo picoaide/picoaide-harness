@@ -178,6 +178,10 @@ corepack.cmd yarn dist:win
 
 该本地命令会主动移除 Windows 证书变量，并设置 `signExecutable=false`。产物可以安装测试，但没有 Authenticode publisher，因此 Windows 可能显示 Unknown publisher 或 SmartScreen 警告。签名后的 Windows release、证书校验、安装器升级与卸载测试，以及原生 UI 和 sandbox smoke 仍是独立的发布 gate。
 
+### macOS DMG 冒烟构建
+
+`yarn dist:mac-smoke` 会在原生 macOS 宿主机上构建一个未签名的 universal DMG，同一个安装包可以在 Intel 和 Apple Silicon Mac 上原生运行。该命令拒绝非 macOS 宿主，先执行一组 macOS 可运行的 gate（build、全部 TypeScript compiler face、打包与 macOS 聚焦测试、runtime-closure verifier），再在不接触任何签名材料的情况下打包。它会挂载 DMG，检查属性列表、主程序执行权限、`x86_64` 与 `arm64` 两个架构切片，以及 `app.asar`。该命令与 `dist:win` 的密钥纪律一致：剥离 Electron Builder 能识别的全部 macOS 签名与公证变量、设置 `CSC_IDENTITY_AUTO_DISCOVERY=false`、关闭 notarization，且从不发布。产物没有 Developer ID 签名，因此 Gatekeeper 会在其他机器上拦截它；它的存在是为了让打包回归在人工发布之前就在 CI 中失败。签名并公证的 universal 正式发布仍是在持有凭证的 macOS 机器上执行 `yarn dist:mac`。
+
 ## 模型体验
 
 无。desktop package 只改变应用组合与原生呈现，不增加任何模型可见的指令、工具、事件或请求字段。

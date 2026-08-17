@@ -32,6 +32,7 @@ function baseOptions(
       calls.push({ command, args: [...args], cwd, env: { ...commandEnv } })
     },
     log: message => logs.push(message),
+    prepareRuntime: () => undefined,
   }
 }
 
@@ -61,7 +62,7 @@ describe('macOS release command boundary', () => {
     expect(calls[1]).toEqual({
       command: 'yarn',
       args: [
-        'exec', 'electron-builder', '--mac', 'dmg',
+        'exec', 'electron-builder', '--mac', 'dmg', '--universal',
         '--config.forceCodeSigning=true', '--config.mac.notarize=true',
       ],
       cwd: '/repo/dsh-plugin-desktop',
