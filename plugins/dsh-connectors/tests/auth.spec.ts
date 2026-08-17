@@ -111,4 +111,34 @@ describe('connector auth', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('parses the dingtalk device flow from the CLI output and surfaces it', async () => {
+    const def: ConnectorDef = {
+      id: 'dingtalk',
+      name: 'DingTalk',
+      description: 'x',
+      authMode: 'cli',
+      auth: {
+        command: process.execPath,
+        args: [join(import.meta.dirname, 'fixtures', 'device-flow-cli.mjs')],
+        deviceFlow: {
+          uriPattern: 'https://login\\.dingtalk\\.com/oauth2/device/verify\\.htm[^\\s\\n\\r"\'<>]*',
+          codePattern: '(?:授权码|user_code=|user_code：)\\s*:?\\s*([A-Z0-9][A-Z0-9-]*)',
+        },
+        authWaitForExit: true,
+      },
+      mcp: [],
+    }
+    const requests: Array<{ verificationUrl?: string; userCode?: string }> = []
+    const patch = await runAuth(def, {
+      onRequest: (request) => {
+        if (request.verificationUrl) requests.push({ verificationUrl: request.verificationUrl, userCode: request.userCode })
+      },
+      signal: new AbortController().signal,
+    })
+    expect(requests.length).toBe(1)
+    expect(requests[0]?.verificationUrl).toBe('https://login.dingtalk.com/oauth2/device/verify.htm')
+    expect(requests[0]?.userCode).toBe('CCBP-BNLQ')
+    expect(patch.updatedAt).toBeTruthy()
+  })
 })
