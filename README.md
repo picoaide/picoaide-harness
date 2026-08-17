@@ -200,4 +200,4 @@ Discord：[加入 DeepSeek Harness Desktop 社区](https://discord.gg/TJeGqKRNM)
 
 ## Star History
 
-[Star History](https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=anywhere-labs/deepseek-harness-desktop&type=Date)](https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left)

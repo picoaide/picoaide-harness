@@ -198,4 +198,4 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Star History
 
-[Star History](https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=anywhere-labs/deepseek-harness-desktop&type=Date)](https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left)
