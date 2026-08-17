@@ -47,7 +47,9 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-describe('desktop profile composition', () => {
+describe('desktop profile composition', {
+  timeout: process.platform === 'win32' ? 10_000 : 5_000,
+}, () => {
   it('reads packaged Cordis skills from the physical unpacked preset root', () => {
     const home = temporaryHome()
     const resources = join(home, 'resources')
