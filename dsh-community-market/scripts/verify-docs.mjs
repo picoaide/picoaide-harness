@@ -18,9 +18,18 @@ const readJson = path => {
 const manifest = JSON.parse(read('package.json'))
 
 if (manifest.name !== 'dsh-community-market') fail('package name must remain dsh-community-market')
-if (manifest.private !== true) fail('the documentation scaffold must stay private until a runtime exists')
-for (const field of ['main', 'module', 'types', 'exports', 'bin', 'dsh', 'dependencies', 'optionalDependencies']) {
-  if (manifest[field] !== undefined) fail(`documentation scaffold must not declare ${field}`)
+if (manifest.private !== true) fail('the market must stay private until the release gate is approved')
+if (manifest.main !== 'lib/index.js' || manifest.types !== 'lib/index.d.ts') {
+  fail('runtime package must expose the reviewed Host entry and declarations')
+}
+if (manifest.exports?.['./client']?.default !== './lib/client.js') {
+  fail('runtime package must expose the reviewed Client entry')
+}
+if (manifest.dsh?.client?.platform !== 'web' || !Array.isArray(manifest.dsh?.client?.inject)) {
+  fail('runtime package must declare its Web Client dependency graph')
+}
+for (const field of ['module', 'bin', 'optionalDependencies']) {
+  if (manifest[field] !== undefined) fail(`runtime package must not declare ${field}`)
 }
 
 const publicFiles = [
@@ -52,6 +61,7 @@ for (const path of [...publicFiles, 'scripts/verify-docs.mjs']) {
 
 const expectedFiles = [
   'docs/**',
+  'lib/**',
   'LICENSE',
   'README.md',
   'README.zh.md',
@@ -61,7 +71,7 @@ const expectedFiles = [
   'SECURITY.i18n.yaml',
 ]
 if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) {
-  fail('package files must contain only the reviewed documentation surface')
+  fail('package files must contain only the reviewed contract runtime and documentation surface')
 }
 
 const pairs = [
