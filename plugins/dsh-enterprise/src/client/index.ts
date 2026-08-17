@@ -2,9 +2,14 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: pulls the settings slot contract (settings.section) and the
 // slot runtime props into this compilation face.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: merges the layout-owned `sidebar` row into SlotMap (the sidebar
+// contract types resolve through it).
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+// Type-only: declares the sidebar foot action slot (`sidebar.footer.action`).
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { AccountSection } from './AccountSection.tsx'
-import { SkillCenterSection } from './SkillCenterSection.tsx'
+import { SkillCenterTrigger } from './SkillCenterTrigger.tsx'
 
 /** Stable Cordis plugin name for the enterprise client half. */
 export const name = 'picoaide-enterprise-client'
@@ -31,20 +36,19 @@ const BRAND_CSS = `
 `
 
 /**
- * Register the enterprise settings surfaces: the skill center page above the
- * General section and the account page (username + logout) at the bottom, plus
- * the branded document title and in-place brand CSS.
+ * Register the enterprise surfaces: the skill center foot action above the
+ * sidebar Settings trigger, the account page (username + logout) at the
+ * bottom of settings, and the branded document title and in-place brand CSS.
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(
-    () => ctx.slots.register({
-      name: 'settings.section',
+    () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+      name: 'sidebar.footer.action',
       id: 'skill-center',
       order: -1,
-      label: '技能中心',
-    }, SkillCenterSection),
-    'enterprise: skill center section',
+    }, SkillCenterTrigger)),
+    'enterprise: skill center foot action',
   )
 
   ctx.effect(
