@@ -24,6 +24,13 @@ export interface OAuthAuthConfig {
     pkce?: boolean;
     /** Public client (no client secret at the token endpoint). */
     publicClient?: boolean;
+    /**
+     * MCP OAuth discovery (RFC 8414): fetch the authorization-server metadata
+     * from this URL at connect time and derive authorize/token/registration
+     * endpoints from it. Takes precedence over authorizeUrl/tokenUrl/clientId.
+     * Typical value: `${mcpUrl}/.well-known/oauth-authorization-server`.
+     */
+    discoveryUrl?: string;
 }
 /** Device-code (clawId-style) flow: show a verification URL + user code, poll. */
 export interface DeviceAuthConfig {
@@ -50,6 +57,8 @@ export interface CliAuthConfig {
     args: string[];
     /** Env for the login command. */
     env?: Record<string, string>;
+    /** Shown in the failure message when the command is not installed (e.g. `npm install -g <pkg>`). */
+    installCommand?: string;
     /**
      * Device-flow parsing (mirrors WorkBuddy's cli.json authDeviceFlow): the
      * login command prints a verification URL and a user code, then keeps
@@ -97,6 +106,12 @@ export interface ConnectorMcp {
     urlCommand?: string[];
     /** Extra env merged on top of the child env (stdio). */
     env?: Record<string, string>;
+    /**
+     * Static request headers (streamable-http). Values containing `${FIELD}`
+     * are rendered from the stored credential fields; an empty `Authorization`
+     * is filled with the stored access token as `Bearer <token>`.
+     */
+    headers?: Record<string, string>;
 }
 export interface ConnectorDef {
     /** Stable unique id, e.g. 'sales-easy'. */

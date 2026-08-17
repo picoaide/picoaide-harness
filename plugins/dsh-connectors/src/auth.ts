@@ -92,9 +92,34 @@ async function registerClient(
   return data.client_id
 }
 
+/** RFC 8414 authorization-server metadata. */
+interface OAuthServerMetadata {
+  authorization_endpoint?: string
+  token_endpoint?: string
+  registration_endpoint?: string
+  scopes_supported?: string[]
+}
+
+/** Discover the OAuth endpoints for an MCP server (RFC 8414 metadata). */
+async function discoverMcpOAuth(discoveryUrl: string): Promise<OAuthServerMetadata & { scopes?: string }> {
+  const response = await fetch(discoveryUrl, {
+    headers: { Accept: 'application/json' },
+  })
+  if (!response.ok) throw new Error(`MCP OAuth 元数据获取失败: HTTP ${response.status}`)
+  const meta = (await response.json()) as OAuthServerMetadata
+  if (!meta.authorization_endpoint || !meta.token_endpoint) {
+    throw new Error('MCP OAuth 元数据缺少 authorization_endpoint/token_endpoint')
+  }
+  const scopes = meta.scopes_supported?.includes('offline_access')
+    ? 'offline_access'
+    : meta.scopes_supported?.[0]
+  return { ...meta, ...(scopes ? { scopes } : {}) }
+}
+
 /** Run an oauth2 authorization-code flow with PKCE and a loopback callback. */
 async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   const auth = def.auth as OAuthAuthConfig
+  const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl) : undefined
   const callbackHost = options.callbackHost ?? '127.0.0.1'
   const { verifier, challenge } = pkce()
   const port = await new Promise<number>((resolve, reject) => {
@@ -107,9 +132,11 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     server.on('error', reject)
   })
   const redirectUri = `http://${callbackHost}:${port}/callback`
-  const clientId = auth.registrationEndpoint
-    ? await registerClient(auth, redirectUri, auth.registrationEndpoint)
-    : auth.clientId
+  const registrationEndpoint = discovered?.registration_endpoint ?? auth.registrationEndpoint
+  const clientId = registrationEndpoint
+    ? await registerClient(auth, redirectUri, registrationEndpoint)
+    : auth.clientId || ''
+  if (!clientId) throw new Error('OAuth 服务器不支持动态客户端注册，且未配置固定 clientId')
   const codePromise = new Promise<string>((resolve, reject) => {
     const callbackServer = createServer((req, res) => {
       const url = new URL(req.url ?? '/', `http://${callbackHost}:${port}`)
@@ -129,11 +156,12 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     callbackServer.on('error', reject)
   })
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined
-  const authorizeUrl = new URL(auth.authorizeUrl)
+  const authorizeUrl = new URL(discovered?.authorization_endpoint ?? auth.authorizeUrl)
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('client_id', clientId)
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
-  if (auth.scopes) authorizeUrl.searchParams.set('scope', auth.scopes)
+  const scopes = discovered?.scopes ?? auth.scopes
+  if (scopes) authorizeUrl.searchParams.set('scope', scopes)
   if (auth.pkce) {
     authorizeUrl.searchParams.set('code_challenge', challenge)
     authorizeUrl.searchParams.set('code_challenge_method', codeChallengeMethod ?? 'S256')
@@ -142,7 +170,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   const code = await codePromise
 
   throwIfAborted(options.signal)
-  const tokenUrl = options.tokenUrlOverride ?? auth.tokenUrl
+  const tokenUrl = options.tokenUrlOverride ?? discovered?.token_endpoint ?? auth.tokenUrl
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
@@ -312,7 +340,13 @@ async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Parti
       stderr += chunk.toString()
       extract(stderr, 'stderr')
     })
-    child.on('error', (error) => { reject(error) })
+    child.on('error', (error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && auth.installCommand) {
+        reject(new Error(`未找到命令 ${auth.command}，请先安装：${auth.installCommand}`))
+        return
+      }
+      reject(error)
+    })
     child.on('exit', (code) => resolve(code))
 
     const timer = setTimeout(() => {
