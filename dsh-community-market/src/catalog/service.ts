@@ -59,13 +59,24 @@ export interface CatalogService {
   fetch(query: unknown, signal: AbortSignal): Promise<readonly MarketCatalogSourceResult[]>
 }
 
+export interface CatalogServiceOptions {
+  readonly cacheTtlMs?: number
+  readonly now?: () => number
+}
+
 export class DefaultCatalogService implements CatalogService {
   private readonly cache = new Map<string, { snapshot: CatalogSnapshot; savedAt: number }>()
+  private readonly cacheTtlMs: number
+  private readonly now: () => number
 
   constructor(
     private readonly store: { load(): Promise<readonly LocalSourceRecord[]> },
     private readonly http: CatalogHttpClient,
-  ) {}
+    options: CatalogServiceOptions = {},
+  ) {
+    this.cacheTtlMs = options.cacheTtlMs ?? 24 * 60 * 60 * 1000
+    this.now = options.now ?? Date.now
+  }
 
   async listSources(): Promise<readonly MarketSourceView[]> {
     const records = await this.store.load()
@@ -81,13 +92,14 @@ export class DefaultCatalogService implements CatalogService {
       if (adapter === undefined) return { source: sourceView(source), stale: false, error: 'adapter unavailable' }
       try {
         const snapshot = parseCatalogSnapshot(await adapter.fetch(query, { signal, source, http: this.http }))
-        this.cache.set(key, { snapshot, savedAt: Date.now() })
+        this.cache.set(key, { snapshot, savedAt: this.now() })
         return { source: sourceView(source), snapshot, stale: false }
       } catch (cause) {
         const cached = this.cache.get(key)
-        if (cached !== undefined && Date.now() - cached.savedAt < 24 * 60 * 60 * 1000) {
+        if (cached !== undefined && this.now() - cached.savedAt < this.cacheTtlMs) {
           return { source: sourceView(source), snapshot: cached.snapshot, stale: true, error: safeError(cause) }
         }
+        this.cache.delete(key)
         return { source: sourceView(source), stale: false, error: safeError(cause) }
       }
     }))

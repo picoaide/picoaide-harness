@@ -99,6 +99,25 @@ describe('catalog aggregation', () => {
     expect(result).toMatchObject({ stale: true, error: 'source unavailable' })
     expect(result?.snapshot?.items).toHaveLength(1)
   })
+
+  it('does not serve a last-good snapshot after its cache TTL expires', async () => {
+    const store = new MemoryCatalogSourceStore()
+    await store.save([source()])
+    const getJson = vi.fn()
+      .mockResolvedValueOnce({ value: rawPage, finalUrl: 'https://api.deepseek1024.com/v1/plugins/search?q=plugin' })
+      .mockRejectedValueOnce(new Error('offline'))
+    let now = 1_000
+    const service = new DefaultCatalogService(store, { getJson }, {
+      cacheTtlMs: 60_000,
+      now: () => now,
+    })
+
+    await service.fetch({}, new AbortController().signal)
+    now += 60_001
+    const [result] = await service.fetch({}, new AbortController().signal)
+    expect(result).toMatchObject({ stale: false, error: 'source unavailable' })
+    expect(result?.snapshot).toBeUndefined()
+  })
 })
 
 describe('source mutation boundary', () => {
