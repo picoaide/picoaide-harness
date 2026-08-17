@@ -6,7 +6,9 @@ import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { salesEasyDef } from './sales-easy.ts'
 import { dingTalkDef } from './dingtalk.ts'
-import type { ConnectorAuthRequest, ConnectorDef, ConnectorState } from './types.ts'
+import { marketplaceDefs } from './defs/index.ts'
+import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorState } from './types.ts'
+import type { ConnectorCredential } from './store.ts'
 
 /**
  * Connector framework (mirrors WorkBuddy's connector service):
@@ -56,11 +58,7 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
-  const defs = [
-    salesEasyDef,
-    dingTalkDef,
-    ...(options.connectors ?? []),
-  ]
+  const defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef, dingTalkDef])
   const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {})
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
@@ -106,6 +104,26 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     })
   }
 
+  /** Render static headers: `${FIELD}` templates from credential fields, empty Authorization -> Bearer token. */
+  const renderHeaders = (server: ConnectorMcp, credential: ConnectorCredential | null): Record<string, string> => {
+    const headers: Record<string, string> = {}
+    for (const [name, value] of Object.entries(server.headers ?? {})) {
+      if (value === '') {
+        if (credential?.accessToken) headers[name] = `Bearer ${credential.accessToken}`
+        continue
+      }
+      headers[name] = value.replace(/\$\{([^}]+)\}/g, (_, key: string) => credential?.fields?.[key] ?? '')
+    }
+    return headers
+  }
+
+
+/** Merge connector definitions, keeping the hand-written ones when ids collide with generated defs. */
+function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): ConnectorDef[] {
+  const ids = new Set(handWritten.map((def) => def.id))
+  return [...handWritten, ...generated.filter((def) => !ids.has(def.id))]
+}
+
   /** Register the connector's MCP servers through the mcp-client plugin. */
   const registerMcp = async (def: ConnectorDef): Promise<void> => {
     const credential = await store.readCredential(def.id)
@@ -118,9 +136,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             url: server.urlCommand
               ? await resolveUrlCommand(server.urlCommand)
               : (server.url ?? ''),
-            headers: credential?.accessToken
-              ? { Authorization: `Bearer ${credential.accessToken}` }
-              : {},
+            headers: renderHeaders(server, credential),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
