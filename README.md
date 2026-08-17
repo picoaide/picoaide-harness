@@ -2,7 +2,8 @@
 
 <p align="center">
   <strong>面向 Windows 和 macOS 的开源 DeepSeek Harness 桌面客户端。</strong><br>
-  一键下载，开箱即用。
+  一键下载，开箱即用。<br>
+  万物皆「插件」，桌面本身也是「插件」。
 </p>
 
 <p align="center"><sub>社区维护的开源项目，并非 DeepSeek 官方产品。中文 · <a href="README.en.md">English</a></sub></p>
