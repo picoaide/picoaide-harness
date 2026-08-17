@@ -147,6 +147,10 @@ describe('desktop profile composition', () => {
       id: 'sandbox',
       name: '@deepseek-ai/dsh-sandbox-local',
     })
+    expect(rows.find(row => row.id === 'agent-presets')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-agent-presets',
+    }))
+    expect(rows.map(row => row.id)).not.toContain('desktop-windows-agent-presets')
     expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-pwsh-sandbox',
     }))
@@ -278,6 +282,13 @@ describe('desktop profile composition', () => {
       id: 'sandbox',
       name: '@deepseek-ai/dsh-sandbox-local',
     })
+    expect(rows.find(row => row.id === 'agent-presets')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-agent-presets',
+      disabled: true,
+    }))
+    expect(rows.find(row => row.id === 'desktop-windows-agent-presets')).toEqual(expect.objectContaining({
+      name: 'dsh-plugin-desktop/windows-agent-presets',
+    }))
     expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-pwsh-sandbox',
       disabled: true,
