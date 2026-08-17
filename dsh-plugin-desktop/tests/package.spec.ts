@@ -230,7 +230,7 @@ describe('published package surface', () => {
       .update(readFileSync(new URL('build/app-icon.png', packageRoot)))
       .digest('hex')
 
-    expect(digest).toBe('74a8c693d9165369819e612d5bc4f654c0a1d0def81824816ad021b490d83b91')
+    expect(digest).toBe('ee0b1c199f8403b38ed2721425b021418edda629c843b4baf74e9770c0d5a1d8')
   })
 
   it('generates a centered macOS icon with a 100-pixel visual inset', async () => {

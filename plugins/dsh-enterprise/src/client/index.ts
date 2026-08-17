@@ -18,6 +18,13 @@ export const name = 'picoaide-enterprise-client'
 export const inject = ['slots']
 
 /**
+ * White brace mark (matches the app/tray icon): transparent-background SVG
+ * data URI of the two braces, connector and nodes, rendered via background
+ * image at the upstream mark slots (hero, sidebar wordmark, collapsed rail).
+ */
+const BRACE_MARK_URI = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="83 320 1087 617"><path d="M334 409 C300 409 273 431 273 466 V548 C273 582 254 607 220 620 C254 633 273 658 273 692 V775 C273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M920 409 C954 409 981 431 981 466 V548 C981 582 1000 607 1034 620 C1000 633 981 658 981 692 V775 C981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></svg>`)
+
+/**
  * Enterprise brand CSS: swap the upstream DeepSeek marks for the PicoAide
  * brand in place, keeping the upstream layout geometry (headline grid, sizes,
  * ink). CSS-module classes match by suffix; `:has()` scopes the headline grid
@@ -30,57 +37,51 @@ const BRAND_CSS = `
 /* Sidebar foot actions stack vertically above Settings (upstream container is a row). */
 [class$="_footerActions"] { flex-direction: column; align-items: stretch; }
 
-/* Hero: brand mark replaces the whale, headline text is replaced in place,
+/* Hero: brace mark replaces the whale, headline text is replaced in place,
    and the preview pill becomes the enterprise badge. */
 [class$="_fishHitbox"] svg { display: none; }
 [class$="_fishHitbox"]::before {
-  content: "P";
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  color: #000;
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1;
+  content: "";
+  display: inline-block;
+  width: 30px;
+  height: 30px;
+  background-image: url("${BRACE_MARK_URI}");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 [class$="_headlineText"] { font-size: 0; }
 [class$="_headlineText"]::after { content: "PicoAide Harness"; font-size: 26px; line-height: 32px; font-weight: 500; }
 [class$="_previewBadge"] { font-size: 0; }
 [class$="_previewBadge"]::after { content: "企业版"; font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
 
-/* Sidebar brand: P mark + product name replace the DeepSeek wordmark. */
+/* Sidebar brand: brace mark + product name replace the DeepSeek wordmark. */
 [class*="_brand"] { font-size: 0; gap: 8px; }
 [class*="_brand"] svg { display: none; }
 [class*="_brand"]::before {
-  content: "P";
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  content: "";
+  display: inline-block;
   flex: none;
   width: 20px;
   height: 20px;
-  color: #000;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1;
+  background-image: url("${BRACE_MARK_URI}");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 [class*="_brand"]::after { content: "PicoAide"; font-size: 20px; font-weight: 700; letter-spacing: 0.3px; }
 
-/* Collapsed rail: the P mark replaces the whale (hover yields to the panel icon). */
+/* Collapsed rail: the brace mark replaces the whale (hover yields to the panel icon). */
 [class$="_railFish"] { display: none; }
 [class*="_collapsed"] [class$="_toggle"]::before {
-  content: "P";
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  content: "";
+  display: inline-block;
   width: 20px;
   height: 20px;
-  color: #000;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1;
+  background-image: url("${BRACE_MARK_URI}");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 [class*="_collapsed"] [class$="_toggle"]:hover::before { display: none; }
 
