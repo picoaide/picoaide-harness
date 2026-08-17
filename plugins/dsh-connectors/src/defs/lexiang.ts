@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "搜索、创建和管理乐享知识库中的文档。支持导入 Markdown、按标签整理内容、追踪团队文档的更新动态。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.lexiang-app.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.lexiang-app.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

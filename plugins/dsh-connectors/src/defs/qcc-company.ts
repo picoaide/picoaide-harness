@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "查询和核实企业工商登记信息。支持股东结构、实际控制人、受益所有人、高管团队、对外投资、财务数据、年报及上市信息查询，用自然语言快速完成企业身份核验与背景调查。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://agent.qcc.com/mcp/company/stream/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://agent.qcc.com/mcp/company/stream",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

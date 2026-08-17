@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "腾讯健康NGES MCP服务，支持智能问数和合规审核等功能",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://test.nges.qq.com/mcp/aggregate/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://test.nges.qq.com/mcp/aggregate",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

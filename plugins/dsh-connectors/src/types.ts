@@ -27,10 +27,11 @@ export interface OAuthAuthConfig {
   /** Public client (no client secret at the token endpoint). */
   publicClient?: boolean
   /**
-   * MCP OAuth discovery (RFC 8414): fetch the authorization-server metadata
-   * from this URL at connect time and derive authorize/token/registration
-   * endpoints from it. Takes precedence over authorizeUrl/tokenUrl/clientId.
-   * Typical value: `${mcpUrl}/.well-known/oauth-authorization-server`.
+   * MCP OAuth discovery (spec 2025-06-18): the MCP endpoint URL itself. At
+   * connect time the framework probes it — a 2xx means the server is public
+   * (connected without credentials); a 401 triggers RFC 8414 metadata
+   * discovery at `{url}/.well-known/oauth-authorization-server` (fallback:
+   * host root) to derive authorize/token/registration endpoints.
    */
   discoveryUrl?: string
 }
