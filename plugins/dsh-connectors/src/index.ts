@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-commands'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { salesEasyDef } from './sales-easy.ts'
@@ -22,7 +23,7 @@ import type { ConnectorAuthRequest, ConnectorDef, ConnectorState } from './types
  */
 
 export const name = 'pico-connectors'
-export const inject = ['webServer']
+export const inject = ['webServer', 'commands']
 
 export interface ConnectorsOptions {
   /** Extra connector definitions to register. */
@@ -187,6 +188,29 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingRequests.delete(id)
   }
 
+  const stateOf = (id: string): ConnectorState =>
+    states.get(id) ?? { status: 'disconnected' as const, everConnected: false }
+
+  const statusText = (state: ConnectorState): string => {
+    const base = { disconnected: '未连接', connecting: '连接中', connected: '已连接', unauthorized: '需要授权', error: '连接失败' }[state.status]
+    return state.error ? `${base}（${state.error}）` : base
+  }
+
+  const listText = (): string =>
+    defs.map((def) => `- ${def.id}（${def.name}）: ${statusText(stateOf(def.id))}`).join('\n')
+
+  /** Wait for the auth request (authorize URL / device code) the connect flow produces. */
+  const waitForAuthRequest = async (id: string, timeoutMs: number): Promise<ConnectorAuthRequest | null> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const request = pendingRequests.get(id)
+      if (request && (request.authorizeUrl || request.verificationUrl)) return request
+      if (stateOf(id).status === 'connected' || stateOf(id).status === 'error') return null
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+    return null
+  }
+
   ctx.effect(() => {
     for (const def of defs) {
       void (async () => {
@@ -205,6 +229,56 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       for (const dispose of mcpDisposers.values()) dispose()
     }
   }, 'pico connectors: restore + cleanup')
+
+  ctx.effect(() => {
+    const disposers = [
+      ctx.commands.register({
+        name: 'connector',
+        description: '列出已注册的连接器及其连接状态',
+        handler: async () => {
+          return { kind: 'success' as const, text: `已注册连接器:\n${listText()}` }
+        },
+      }),
+      ctx.commands.register({
+        name: 'connector-connect',
+        description: '连接一个连接器，如 /connector-connect sales-easy',
+        input: { hint: 'sales-easy' },
+        handler: async ({ rawInput }) => {
+          const id = rawInput.trim().split(/\s+/u)[0] ?? ''
+          const def = getDef(id)
+          if (!def) return { kind: 'error' as const, text: `未知连接器: ${id}。可用: ${defs.map((d) => d.id).join(', ')}` }
+          if (stateOf(id).status === 'connected') return { kind: 'success' as const, text: `${def.name} 已连接` }
+          void startConnect(id).catch(() => { /* state carries the error */ })
+          const request = await waitForAuthRequest(id, 15_000)
+          const current = stateOf(id)
+          if (current.status === 'connected') return { kind: 'success' as const, text: `${def.name} 连接成功` }
+          if (current.status === 'error' || current.status === 'unauthorized') {
+            return { kind: 'error' as const, text: `${def.name} 连接失败: ${current.error ?? '需要授权'}` }
+          }
+          if (request?.authorizeUrl) {
+            return { kind: 'success' as const, text: `正在连接 ${def.name}，请打开授权页完成登录:\n${request.authorizeUrl}` }
+          }
+          if (request?.verificationUrl) {
+            return { kind: 'success' as const, text: `正在连接 ${def.name}，请在浏览器打开:\n${request.verificationUrl}${request.userCode ? `\n授权码: ${request.userCode}` : ''}` }
+          }
+          return { kind: 'success' as const, text: `正在连接 ${def.name}…（token 型连接器请在连接器面板填写配置）` }
+        },
+      }),
+      ctx.commands.register({
+        name: 'connector-disconnect',
+        description: '断开一个连接器，如 /connector-disconnect sales-easy',
+        input: { hint: 'sales-easy' },
+        handler: async ({ rawInput }) => {
+          const id = rawInput.trim().split(/\s+/u)[0] ?? ''
+          const def = getDef(id)
+          if (!def) return { kind: 'error' as const, text: `未知连接器: ${id}。可用: ${defs.map((d) => d.id).join(', ')}` }
+          await disconnect(id)
+          return { kind: 'success' as const, text: `${def.name} 已断开` }
+        },
+      }),
+    ]
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'pico connectors: slash commands')
 
   ctx.effect(() => {
     const list: JsonHandler = (_req, res) => {
