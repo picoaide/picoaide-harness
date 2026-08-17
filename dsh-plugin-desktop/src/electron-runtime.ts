@@ -32,6 +32,7 @@ import type {
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
 import type { DesktopLogger } from './desktop-logger.ts'
+import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
@@ -211,6 +212,18 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     } catch (cause) {
       this.reportTerminalLaunchError(cause)
     }
+  }
+
+  /** @inheritdoc */
+  exportDiagnostics(): Promise<void> {
+    return exportDiagnosticsZip(
+      join(app.getPath('userData'), 'logs'),
+      app.getPath('userData'),
+    ).then((path) => {
+      shell.showItemInFolder(path)
+    }).catch((cause: unknown) => {
+      this.logError(`dsh-plugin-desktop: failed to export diagnostics: ${cause instanceof Error ? cause.message : String(cause)}`)
+    })
   }
 
   /** @inheritdoc */
