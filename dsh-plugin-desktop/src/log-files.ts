@@ -8,6 +8,11 @@ import { maskSecrets } from './mask-secrets.ts'
 
 const OWNED_LOG_FILE = /^dsh-\d{4}-\d{2}-\d{2}(?:\.error)?(?:\.\d+)?\.log$/u
 
+/** Return whether a leaf name belongs to the desktop diagnostic log set. */
+export function isDesktopLogFileName(name: string): boolean {
+  return OWNED_LOG_FILE.test(name)
+}
+
 interface OwnedLogFile {
   readonly name: string
   readonly path: string
@@ -224,7 +229,7 @@ export class LogFileSink {
   private ownedFiles(): OwnedLogFile[] {
     const entries: OwnedLogFile[] = []
     for (const name of readdirSync(this.directory)) {
-      if (!OWNED_LOG_FILE.test(name)) continue
+      if (!isDesktopLogFileName(name)) continue
       const path = join(this.directory, name)
       try {
         const stats = lstatSync(path)
