@@ -22,7 +22,15 @@ export const inject = ['slots']
  * data URI of the two braces, connector and nodes, rendered via background
  * image at the upstream mark slots (hero, sidebar wordmark, collapsed rail).
  */
-const BRACE_MARK_URI = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="83 320 1087 617"><path d="M334 409 C300 409 273 431 273 466 V548 C273 582 254 607 220 620 C254 633 273 658 273 692 V775 C273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M920 409 C954 409 981 431 981 466 V548 C981 582 1000 607 1034 620 C1000 633 981 658 981 692 V775 C981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></svg>`)
+/**
+ * Brace mark (matches the app/tray icon) in both theme variants:
+ * white braces for the light theme's black tile, black braces for the dark
+ * theme's white tile. Transparent-background SVG data URIs rendered via
+ * background image at the upstream mark slots (hero, sidebar wordmark,
+ * collapsed rail); the tile color flips on `body[data-ds-dark-theme]`.
+ */
+const BRACE_WHITE_URI = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="83 320 1087 617"><path d="M334 409 C300 409 273 431 273 466 V548 C273 582 254 607 220 620 C254 633 273 658 273 692 V775 C273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M920 409 C954 409 981 431 981 466 V548 C981 582 1000 607 1034 620 C1000 633 981 658 981 692 V775 C981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></svg>`)
+const BRACE_BLACK_URI = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="83 320 1087 617"><path d="M334 409 C300 409 273 431 273 466 V548 C273 582 254 607 220 620 C254 633 273 658 273 692 V775 C273 810 300 843 334 843" fill="none" stroke="#000000" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M920 409 C954 409 981 431 981 466 V548 C981 582 1000 607 1034 620 C1000 633 981 658 981 692 V775 C981 810 954 843 920 843" fill="none" stroke="#000000" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#000000" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#000000"/><circle cx="817" cy="627" r="65" fill="#000000"/></svg>`)
 
 /**
  * Enterprise brand CSS: swap the upstream DeepSeek marks for the PicoAide
@@ -37,18 +45,25 @@ const BRAND_CSS = `
 /* Sidebar foot actions stack vertically above Settings (upstream container is a row). */
 [class$="_footerActions"] { flex-direction: column; align-items: stretch; }
 
-/* Hero: brace mark replaces the whale, headline text is replaced in place,
-   and the preview pill becomes the enterprise badge. */
+/* Hero: brace mark (black tile, white braces) replaces the whale, headline
+   text is replaced in place, and the preview pill becomes the enterprise
+   badge. Dark theme flips the tile to white with black braces. */
 [class$="_fishHitbox"] svg { display: none; }
 [class$="_fishHitbox"]::before {
   content: "";
   display: inline-block;
   width: 30px;
   height: 30px;
-  background-image: url("${BRACE_MARK_URI}");
+  border-radius: 7px;
+  background-color: #000000;
+  background-image: url("${BRACE_WHITE_URI}");
   background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
+}
+body[data-ds-dark-theme] [class$="_fishHitbox"]::before {
+  background-color: #ffffff;
+  background-image: url("${BRACE_BLACK_URI}");
 }
 [class$="_headlineText"] { font-size: 0; }
 [class$="_headlineText"]::after { content: "PicoAide Harness"; font-size: 26px; line-height: 32px; font-weight: 500; }
@@ -64,10 +79,16 @@ const BRAND_CSS = `
   flex: none;
   width: 20px;
   height: 20px;
-  background-image: url("${BRACE_MARK_URI}");
+  border-radius: 5px;
+  background-color: #000000;
+  background-image: url("${BRACE_WHITE_URI}");
   background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
+}
+body[data-ds-dark-theme] [class*="_brand"]::before {
+  background-color: #ffffff;
+  background-image: url("${BRACE_BLACK_URI}");
 }
 [class*="_brand"]::after { content: "PicoAide"; font-size: 20px; font-weight: 700; letter-spacing: 0.3px; }
 
@@ -78,10 +99,16 @@ const BRAND_CSS = `
   display: inline-block;
   width: 20px;
   height: 20px;
-  background-image: url("${BRACE_MARK_URI}");
+  border-radius: 5px;
+  background-color: #000000;
+  background-image: url("${BRACE_WHITE_URI}");
   background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
+}
+body[data-ds-dark-theme] [class*="_collapsed"] [class$="_toggle"]::before {
+  background-color: #ffffff;
+  background-image: url("${BRACE_BLACK_URI}");
 }
 [class*="_collapsed"] [class$="_toggle"]:hover::before { display: none; }
 
