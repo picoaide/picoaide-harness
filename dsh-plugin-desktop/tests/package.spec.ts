@@ -162,6 +162,25 @@ describe('published package surface', () => {
     expect(main).toContain('disposeDshRuntime?.()')
   })
 
+  it('wires local crash evidence before Electron becomes ready', () => {
+    const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
+    const startCrashReporter = main.indexOf('startDesktopCrashReporting(crashReporter')
+    const beginRun = main.indexOf('beginDesktopRun(')
+    const childLogging = main.indexOf('installDesktopChildProcessLogging(app')
+    const exitCoordinator = main.indexOf('createDesktopExitCoordinator(')
+    const ready = main.indexOf('await app.whenReady()')
+    const markClean = main.indexOf('desktopRun?.markClean()')
+    const nativeExit = main.indexOf('app.exit(code)')
+
+    expect(startCrashReporter).toBeGreaterThanOrEqual(0)
+    expect(beginRun).toBeGreaterThan(startCrashReporter)
+    expect(childLogging).toBeGreaterThan(beginRun)
+    expect(exitCoordinator).toBeGreaterThan(childLogging)
+    expect(nativeExit).toBeGreaterThan(exitCoordinator)
+    expect(markClean).toBeGreaterThan(nativeExit)
+    expect(ready).toBeGreaterThan(markClean)
+  })
+
   it('uses the upstream child-environment scrub around login-shell recovery', () => {
     const shellEnvironment = readFileSync(new URL('src/shell-environment.ts', packageRoot), 'utf8')
 
