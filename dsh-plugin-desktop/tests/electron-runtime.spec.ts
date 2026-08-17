@@ -140,7 +140,9 @@ const electron = vi.hoisted(() => {
     app: {
       dock: { setIcon: vi.fn() },
       getLocale: vi.fn(() => 'en-US'),
-      getPath: vi.fn(() => '/tmp/dsh-desktop-user-data'),
+      getPath: vi.fn((name: string) => name === 'crashDumps'
+        ? '/tmp/dsh-desktop-user-data/Crashpad'
+        : '/tmp/dsh-desktop-user-data'),
       getVersion: vi.fn(() => '43.4.0'),
       isPackaged: false,
       on: vi.fn(),
@@ -620,6 +622,11 @@ describe('Electron compatibility runtime', () => {
     await Promise.all([first, second])
 
     expect(diagnostics.export).toHaveBeenCalledOnce()
+    expect(diagnostics.export).toHaveBeenCalledWith(
+      join('/tmp/dsh-desktop-user-data', 'logs'),
+      '/tmp/dsh-desktop-user-data',
+      { crashDumpsDir: '/tmp/dsh-desktop-user-data/Crashpad' },
+    )
     expect(electron.shell.showItemInFolder).toHaveBeenCalledOnce()
     expect(electron.shell.showItemInFolder).toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics.zip')
   })
@@ -640,6 +647,9 @@ describe('Electron compatibility runtime', () => {
       buttons: ['Export', 'Cancel'],
       detail: expect.stringContaining('local paths, workspace IDs, and session IDs'),
     }))
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.stringContaining('process memory'),
+    }))
   })
 
   it('localizes the diagnostics privacy confirmation', async () => {
@@ -653,6 +663,9 @@ describe('Electron compatibility runtime', () => {
     expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
       buttons: ['导出', '取消'],
       detail: expect.stringContaining('本地路径、工作区 ID 和会话 ID'),
+    }))
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.stringContaining('进程内存'),
     }))
   })
 
