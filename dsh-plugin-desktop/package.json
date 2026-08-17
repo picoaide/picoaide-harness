@@ -51,6 +51,10 @@
       "types": "./lib/types/profiles.d.ts",
       "default": "./lib/profiles.js"
     },
+    "./diagnostics": {
+      "types": "./lib/types/diagnostics.d.ts",
+      "default": "./lib/diagnostics.js"
+    },
     "./updates": {
       "types": "./lib/types/updates.d.ts",
       "default": "./lib/updates.js"
@@ -211,6 +215,7 @@
     "@deepseek-ai/dsh-web-app": "0.1.0-rc.6",
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "adm-zip": "^0.6.0",
     "dsh-community-market": "0.1.0-dev.0",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.4",

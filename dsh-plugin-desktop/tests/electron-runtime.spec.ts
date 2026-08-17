@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
 
 const terminal = vi.hoisted(() => ({ open: vi.fn() }))
+const diagnostics = vi.hoisted(() => ({ export: vi.fn() }))
 const updater = vi.hoisted(() => ({ download: vi.fn() }))
 const childProcess = vi.hoisted(() => {
   type Listener = (...args: unknown[]) => void
@@ -33,6 +34,10 @@ const childProcess = vi.hoisted(() => {
 vi.mock('../src/desktop-terminal.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/desktop-terminal.ts')>(),
   openDesktopTerminal: terminal.open,
+}))
+
+vi.mock('../src/diagnostic-export.ts', () => ({
+  exportDiagnosticsZip: diagnostics.export,
 }))
 
 vi.mock('../src/update-download.ts', () => ({
@@ -163,6 +168,7 @@ const electron = vi.hoisted(() => {
     shell: {
       openExternal: vi.fn(async () => {}),
       openPath: vi.fn(async () => ''),
+      showItemInFolder: vi.fn(),
     },
     templateIcon,
     Tray,
@@ -215,6 +221,7 @@ describe('Electron compatibility runtime', () => {
     childProcess.reset()
     vi.clearAllMocks()
     updater.download.mockReset()
+    diagnostics.export.mockReset()
     electron.loadURL.mockReset()
     electron.loadURL.mockResolvedValue(undefined)
     electron.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false })
@@ -534,6 +541,37 @@ describe('Electron compatibility runtime', () => {
     } finally {
       delete (process.versions as { electron?: string }).electron
     }
+  })
+
+  it('coalesces concurrent diagnostic exports and reveals the completed archive', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    let finishExport: ((path: string) => void) | undefined
+    diagnostics.export.mockReturnValue(new Promise(resolve => { finishExport = resolve }))
+
+    const first = runtime.exportDiagnostics()
+    const second = runtime.exportDiagnostics()
+    finishExport?.('C:\\Users\\Example\\diagnostics.zip')
+    await Promise.all([first, second])
+
+    expect(diagnostics.export).toHaveBeenCalledOnce()
+    expect(electron.shell.showItemInFolder).toHaveBeenCalledOnce()
+    expect(electron.shell.showItemInFolder).toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics.zip')
+  })
+
+  it('shows a native error when diagnostic export fails', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    diagnostics.export.mockRejectedValueOnce(new Error('disk is full'))
+
+    await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Unable to Export Diagnostics',
+      'disk is full',
+    )
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to export diagnostics: disk is full'))
   })
 
   it('shows native errors for synchronous and asynchronous terminal launch failures', async () => {
