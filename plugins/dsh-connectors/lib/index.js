@@ -293,7 +293,7 @@ async function runAuth(def, options) {
 *   POST /api/pico/connectors/:id/disconnect -> stop and forget
 */
 const name = "pico-connectors";
-const inject = ["webServer", "commands"];
+const inject = ["webServer"];
 function json(res, status, body) {
 	res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
 	res.end(JSON.stringify(body));
@@ -464,32 +464,6 @@ function apply(ctx, options = {}) {
 		});
 		pendingRequests.delete(id);
 	};
-	const stateOf = (id) => states.get(id) ?? {
-		status: "disconnected",
-		everConnected: false
-	};
-	const statusText = (state) => {
-		const base = {
-			disconnected: "未连接",
-			connecting: "连接中",
-			connected: "已连接",
-			unauthorized: "需要授权",
-			error: "连接失败"
-		}[state.status];
-		return state.error ? `${base}（${state.error}）` : base;
-	};
-	const listText = () => defs.map((def) => `- ${def.id}（${def.name}）: ${statusText(stateOf(def.id))}`).join("\n");
-	/** Wait for the auth request (authorize URL / device code) the connect flow produces. */
-	const waitForAuthRequest = async (id, timeoutMs) => {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			const request = pendingRequests.get(id);
-			if (request && (request.authorizeUrl || request.verificationUrl)) return request;
-			if (stateOf(id).status === "connected" || stateOf(id).status === "error") return null;
-			await new Promise((resolve) => setTimeout(resolve, 300));
-		}
-		return null;
-	};
 	ctx.effect(() => {
 		for (const def of defs) (async () => {
 			const credential = await store.readCredential(def.id);
@@ -507,81 +481,6 @@ function apply(ctx, options = {}) {
 			for (const dispose of mcpDisposers.values()) dispose();
 		};
 	}, "pico connectors: restore + cleanup");
-	ctx.effect(() => {
-		const disposers = [
-			ctx.commands.register({
-				name: "connector",
-				description: "列出已注册的连接器及其连接状态",
-				handler: async () => {
-					return {
-						kind: "success",
-						text: `已注册连接器:\n${listText()}`
-					};
-				}
-			}),
-			ctx.commands.register({
-				name: "connector-connect",
-				description: "连接一个连接器，如 /connector-connect sales-easy",
-				input: { hint: "sales-easy" },
-				handler: async ({ rawInput }) => {
-					const id = rawInput.trim().split(/\s+/u)[0] ?? "";
-					const def = getDef(id);
-					if (!def) return {
-						kind: "error",
-						text: `未知连接器: ${id}。可用: ${defs.map((d) => d.id).join(", ")}`
-					};
-					if (stateOf(id).status === "connected") return {
-						kind: "success",
-						text: `${def.name} 已连接`
-					};
-					startConnect(id).catch(() => {});
-					const request = await waitForAuthRequest(id, 15e3);
-					const current = stateOf(id);
-					if (current.status === "connected") return {
-						kind: "success",
-						text: `${def.name} 连接成功`
-					};
-					if (current.status === "error" || current.status === "unauthorized") return {
-						kind: "error",
-						text: `${def.name} 连接失败: ${current.error ?? "需要授权"}`
-					};
-					if (request?.authorizeUrl) return {
-						kind: "success",
-						text: `正在连接 ${def.name}，请打开授权页完成登录:\n${request.authorizeUrl}`
-					};
-					if (request?.verificationUrl) return {
-						kind: "success",
-						text: `正在连接 ${def.name}，请在浏览器打开:\n${request.verificationUrl}${request.userCode ? `\n授权码: ${request.userCode}` : ""}`
-					};
-					return {
-						kind: "success",
-						text: `正在连接 ${def.name}…（token 型连接器请在连接器面板填写配置）`
-					};
-				}
-			}),
-			ctx.commands.register({
-				name: "connector-disconnect",
-				description: "断开一个连接器，如 /connector-disconnect sales-easy",
-				input: { hint: "sales-easy" },
-				handler: async ({ rawInput }) => {
-					const id = rawInput.trim().split(/\s+/u)[0] ?? "";
-					const def = getDef(id);
-					if (!def) return {
-						kind: "error",
-						text: `未知连接器: ${id}。可用: ${defs.map((d) => d.id).join(", ")}`
-					};
-					await disconnect(id);
-					return {
-						kind: "success",
-						text: `${def.name} 已断开`
-					};
-				}
-			})
-		];
-		return () => {
-			for (const dispose of disposers) dispose();
-		};
-	}, "pico connectors: slash commands");
 	ctx.effect(() => {
 		const list = (_req, res) => {
 			json(res, 200, { connectors: defs.map((def) => {
