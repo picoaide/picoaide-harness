@@ -2,14 +2,14 @@
 
 [中文](catalog-provider-contract.zh.md)
 
-Status: **Draft / implementation handoff**. This document and the linked schemas describe a proposed contract. No runtime, source registry, adapter, or compatibility guarantee is implemented yet.
+Status: **Draft / implementation handoff**. Generated types, validation, source persistence, constrained network access, standard and DSH 1024Store adapters, and loadable Host/Client entries are implemented for integration testing. This remains a private draft without a compatibility guarantee.
 
 ## Decision summary
 
 - DSH Community Market has **no default, preferred, or fallback catalog source**.
 - Users explicitly add or choose sources, decide which sources are enabled, and control their display order.
 - A user may add any source that implements this contract. Adding a source does not install a plugin and does not grant that source execution access.
-- DSH 1024Store is one of the catalog providers currently cooperating with this project. A reviewed built-in adapter is planned for it; that adapter will not enable, prioritize, or fall back to 1024Store automatically.
+- DSH 1024Store is one of the catalog providers currently cooperating with this project. A reviewed built-in adapter is included; it does not enable, prioritize, or fall back to 1024Store automatically.
 - A source being bundled as a choice or supported by an adapter does not mean that Anywhere Labs has recommended, audited, or endorsed the source or the plugins it lists.
 - Every provider is converted into one normalized model before data reaches the market UI or installation boundary.
 
@@ -193,7 +193,7 @@ If grouped variants disagree, the UI reports the disagreement and asks the user 
 
 ## DSH 1024Store cooperation
 
-[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the providers currently cooperating with DSH Community Market. Its existing registry API does not need to change to this draft contract. The planned integration is a reviewed built-in provider adapter that:
+[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the providers currently cooperating with DSH Community Market. Its existing registry API does not need to change to this draft contract. The integration is a reviewed built-in provider adapter that:
 
 - requests the provider's documented public API under the same Host network limits;
 - maps its categories and plugin metadata into the normalized snapshot;

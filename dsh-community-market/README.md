@@ -2,9 +2,9 @@
 
 [中文说明](README.zh.md)
 
-DSH Community Market is the planned plugin-market shell for [DSH Desktop](../README.en.md). It will help people discover community plugins, understand what they do, and install them into the active work profile through one clear, confirmed action.
+DSH Community Market is the plugin-market shell for [DSH Desktop](../README.en.md). It helps people discover community plugins and understand what they do. Installation remains a later, separately reviewed phase.
 
-> **Current status: documentation-first scaffold.** This workspace does not yet contain a market page, catalog client, or installer. It is private in the monorepo until the first usable implementation is ready. Do not add it to a DSH profile yet.
+> **Current status: read-only market MVP development.** The package now has loadable Host and Client entries, persisted user-owned source records, a constrained HTTPS client, standard and DSH 1024Store adapters, and a standalone market workspace opened from the sidebar. It remains private and has no installer.
 
 ## What we are building
 
@@ -22,7 +22,7 @@ The market is a shell around existing DSH capabilities. It does not invent a sec
 
 The market has no default catalog. People choose which sources to enable, may change their order, and may add a source that implements the published catalog contract. Each source is isolated behind an adapter, and the market UI sees only the same validated, normalized data model.
 
-[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the catalog providers currently cooperating with this project. We plan to ship a reviewed adapter for its public API, but the cooperation does not make it enabled by default, preferred in sorting, a fallback when no source is selected, or an endorsement of its listings. That project independently maintains its discovery, validation, website, API, and the separately published `dsh-1024store` plugin. DSH Community Market is not a fork, repackaging, or official client of that plugin.
+[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the catalog providers currently cooperating with this project. The market ships a reviewed local adapter for its public API, but the cooperation does not make it enabled by default, preferred in sorting, a fallback when no source is selected, or an endorsement of its listings. That project independently maintains its discovery, validation, website, API, and the separately published `dsh-1024store` plugin. DSH Community Market is not a fork, repackaging, or official client of that plugin.
 
 All catalog data is remote and untrusted. A listing means only that a provider supplied metadata; it does **not** mean that Anywhere Labs reviewed, recommends, or guarantees the plugin.
 
@@ -47,8 +47,8 @@ Plugins run as local code with the user's permissions and may run package lifecy
 
 ## Delivery plan
 
-- **Phase 0 — current:** package ownership, documentation, trust boundary, and headless checks.
-- **Phase 1:** source selection, user-added conforming sources, multi-source read-only browsing, search, categories, plugin details, and complete loading/empty/error states.
+- **Phase 0 — complete:** package ownership, documentation, trust boundary, and headless checks.
+- **Phase 1 — in development:** source selection, user-added conforming sources, multi-source read-only browsing, search, plugin details, and loading/empty/error states.
 - **Phase 2:** explicit installation into the active profile through the managed Desktop service.
 - **Later:** uninstall, update, recovery, and richer verification signals.
 

@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-`dsh-community-market` 目前是 monorepo 内私有、且只有文档的初始化工程。它没有运行时入口、网络请求、用户界面或安装器，也没有可加入 DSH profile 的功能版本。
+`dsh-community-market` 仍在 monorepo 内保持 private。只读 Host/Client runtime 会校验并规范化目录数据、持久化用户拥有的来源选择，并且只在来源被明确启用后执行受限 HTTPS 请求。它没有安装器，也不能访问 package manager。
 
 ## 信任模型
 

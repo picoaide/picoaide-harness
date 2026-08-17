@@ -2,14 +2,14 @@
 
 [English](catalog-provider-contract.md)
 
-状态：**Draft / 实现交接稿**。本文和所链接的 schema 描述的是拟议契约；目录运行时、来源 registry、adapter 和兼容性承诺目前都还没有实现。
+状态：**Draft / 实现交接稿**。生成类型、校验、来源持久化、受限网络访问、标准与 DSH 1024Store adapter，以及可加载 Host/Client 入口已实现并进入集成测试。它仍是 private draft，不提供兼容性承诺。
 
 ## 决策摘要
 
 - DSH Community Market **没有默认、优先或兜底目录来源**。
 - 用户明确添加或选择来源，决定启用哪些来源，并控制它们的展示顺序。
 - 用户可以添加任何符合本契约的来源。添加来源不会安装插件，也不会给该来源任何执行能力。
-- DSH 1024Store 是当前与本项目合作的目录提供方之一。我们计划为它提供经过审核的内置 adapter；这个 adapter 不会自动启用 1024Store，不会把它排在前面，也不会在其他来源失败时用它兜底。
+- DSH 1024Store 是当前与本项目合作的目录提供方之一。市场已包含经过审核的内置 adapter；这个 adapter 不会自动启用 1024Store，不会把它排在前面，也不会在其他来源失败时用它兜底。
 - 某个来源出现在内置选项中或受到 adapter 支持，不代表 Anywhere Labs 推荐、审核或背书该来源及其收录的插件。
 - 所有 provider 必须先转换成同一个标准化模型，数据才能到达市场界面或安装边界。
 
@@ -193,7 +193,7 @@ Cursor 只属于一个来源和一个有效 query。聚合器不能把一个来�
 
 ## 与 DSH 1024Store 的合作
 
-[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) 是当前与 DSH Community Market 合作的提供方之一。它现有的 registry API 不需要为了本草案而修改。规划中的接入方式是一份经过审核的内置 provider adapter，它会：
+[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) 是当前与 DSH Community Market 合作的提供方之一。它现有的 registry API 不需要为了本草案而修改。接入方式是一份经过审核的内置 provider adapter，它会：
 
 - 在相同 Host 网络限制下请求该 provider 公开文档中的 API；
 - 把其分类和插件元数据映射成标准化快照；

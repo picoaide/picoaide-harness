@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-DSH Community Market 是为 [DSH Desktop](../README.md) 规划的插件市场壳。它将帮助用户发现社区插件、了解插件用途，并通过一次清晰的确认操作，把插件安装到当前正在使用的工作配置中。
+DSH Community Market 是 [DSH Desktop](../README.md) 的插件市场壳，用于发现社区插件并了解插件用途。安装属于后续独立开发和安全评审阶段。
 
-> **当前状态：文档优先的初始化工程。** 这个 workspace 还没有市场页面、目录客户端或安装器，在首个可用实现完成前保持 monorepo 私有。现在不要把它加入 DSH profile。
+> **当前状态：只读市场 MVP 开发阶段。** Package 现在已有可加载的 Host/Client 入口、用户拥有的来源持久化、受限 HTTPS client、标准与 DSH 1024Store adapter，以及从侧边栏打开的独立市场工作区。它继续保持 private，且尚无安装器。
 
 ## 我们要做什么
 
@@ -22,7 +22,7 @@ DSH Community Market 是为 [DSH Desktop](../README.md) 规划的插件市场壳
 
 市场不设默认目录。用户可以选择要启用的来源、调整它们的顺序，也可以添加符合公开目录合同的来源。每个来源都在适配器之后独立运行，市场界面只能看到同一套经过校验和标准化的数据。
 
-[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) 是目前与本项目合作的目录提供方之一。我们计划为它的公开 API 提供经过审查的适配器，但合作关系不代表默认启用、排序优先、未选择来源时的兜底，也不代表对其收录内容的推荐。该项目独立维护插件发现、校验、网站、API 和另行发布的 `dsh-1024store` 插件。DSH Community Market 不是该插件的 fork、重新打包版本或官方客户端。
+[DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) 是目前与本项目合作的目录提供方之一。市场随包提供一份针对其公开 API、经过审查的本地 adapter，但合作关系不代表默认启用、排序优先、未选择来源时的兜底，也不代表对其收录内容的推荐。该项目独立维护插件发现、校验、网站、API 和另行发布的 `dsh-1024store` 插件。DSH Community Market 不是该插件的 fork、重新打包版本或官方客户端。
 
 所有目录数据都是远程、且不可信的输入。项目被收录只表示提供方返回了相关元数据；这**不表示** Anywhere Labs 已经审核、推荐或保证该插件。
 
@@ -47,8 +47,8 @@ DSH Community Market 是为 [DSH Desktop](../README.md) 规划的插件市场壳
 
 ## 交付计划
 
-- **Phase 0 — 当前：** 确认包归属，写清产品与信任边界，建立 headless 检查。
-- **Phase 1：** 来源选择、用户添加符合规范的来源、多来源只读浏览、搜索、分类、插件详情，以及完整的加载、空白和错误状态。
+- **Phase 0 — 已完成：** 确认包归属，写清产品与信任边界，建立 headless 检查。
+- **Phase 1 — 开发中：** 来源选择、用户添加符合规范的来源、多来源只读浏览、搜索、插件详情，以及加载、空白和错误状态。
 - **Phase 2：** 通过 Desktop 受管服务，明确安装到当前 profile。
 - **后续：** 卸载、更新、失败恢复和更丰富的验证信号。
 

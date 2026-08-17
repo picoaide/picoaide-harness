@@ -4,7 +4,7 @@
 
 ## Current status
 
-`dsh-community-market` is currently a private, documentation-only scaffold. It has no runtime entry, network request, user interface, or installer. There is no released functional version to add to a DSH profile.
+`dsh-community-market` remains private. Its read-only Host/Client runtime validates and normalizes catalog data, persists user-owned source choices, and performs constrained HTTPS requests only after a source is explicitly enabled. It has no installer or package-manager access.
 
 ## Trust model
 
