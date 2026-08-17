@@ -2,6 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from './runtime.ts'
+import { desktopTrayLabel } from './tray-locale.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-diagnostics'
@@ -15,7 +16,7 @@ export function apply(ctx: Context): void {
     const registration = ctx.desktopRuntime.registerTrayItem({
       group: 'tools',
       order: 20,
-      label: () => 'Export Diagnostics…',
+      label: () => desktopTrayLabel(ctx.desktopRuntime.locale, 'exportDiagnostics'),
       invoke: () => ctx.desktopRuntime.exportDiagnostics(),
     })
     return () => { registration.dispose() }

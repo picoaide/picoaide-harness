@@ -10,6 +10,7 @@ describe('desktop diagnostics Host plugin', () => {
     const exportDiagnostics = vi.fn(async () => {})
     const disposeRegistration = vi.fn()
     const runtime = {
+      locale: 'en',
       exportDiagnostics,
       registerTrayItem: (item: DesktopTrayItem) => {
         trayItem = item
@@ -35,5 +36,25 @@ describe('desktop diagnostics Host plugin', () => {
 
     disposeEffect?.()
     expect(disposeRegistration).toHaveBeenCalledOnce()
+  })
+
+  it('uses the active desktop locale for its tray label', () => {
+    let trayItem: DesktopTrayItem | undefined
+    const runtime = {
+      locale: 'zh',
+      exportDiagnostics: vi.fn(async () => {}),
+      registerTrayItem: (item: DesktopTrayItem) => {
+        trayItem = item
+        return { refresh: () => {}, dispose: () => {} }
+      },
+    } as unknown as DesktopRuntime
+    const ctx = {
+      desktopRuntime: runtime,
+      effect: (register: () => (() => void)) => register(),
+    } as unknown as Context
+
+    apply(ctx)
+
+    expect(trayItem?.label()).toBe('导出诊断信息…')
   })
 })
