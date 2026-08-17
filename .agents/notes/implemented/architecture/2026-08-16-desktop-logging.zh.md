@@ -15,7 +15,7 @@ Status: implemented
 三个模块实现它：
 
 - `log-level.ts` —— 纯 verbosity 辅助：`LogType`、`LogLevel`、`shouldEmit(type, threshold)`、`isErrorType(type)`。
-- `log-files.ts` —— 同步追加式 sink（`appendFileSync`），写 `dsh-YYYY-MM-DD.log`（全部级别）与 `dsh-YYYY-MM-DD.error.log`（warn 与 error）；单文件超过 10MB 滚到 `.1`、`.2` …；本地日期变化时切换文件；目录超过 200MB 时删最旧文件。
+- `log-files.ts` —— 同步追加式 sink（`appendFileSync`），写 `dsh-YYYY-MM-DD.log`（全部级别）与 `dsh-YYYY-MM-DD.error.log`（warn 与 error）；单文件超过 10MB 滚到 `.1`、`.2` …；本地日期变化时切换文件；重启后从磁盘恢复当前分段；目录超过 200MB 时删除最旧的自有文件。
 - `file-exporter.ts` —— `FileExporter implements Exporter`，把每条 `Message` 渲染成 `<本地时间戳> [LEVEL] [name] <body>`（经 `Logger.format`），按阈值过滤后路由到 sink。
 
 `dsh-desktop.logLevel` 设置字段（`debug | info | warn | error`，默认 `info`）扩展已有的 `dsh-desktop` 命名空间。bootstrap 在 `boot()` 后读一次，并订阅 `settings/updated` 就地更新 exporter 阈值。
@@ -32,10 +32,12 @@ Status: implemented
 
 日志持久化到桌面用户数据目录，打包运行后也能排查。verbosity 阈值走标准设置服务配置，同时作用于全量文件与错误文件。`logLevel` 字段在启动时与 `settings/updated` 时读取，改动无需重启即生效。
 
-每天日志以一条启动 header（app 版本、平台、Node 版本、运行时间戳）开头，并在启动时清理 7 天前的文件，配合 200MB 目录上限。
+每天日志以一条启动 header（app 版本、平台、Node 版本、运行时间戳）开头，并在启动时清理 7 天前的文件，配合 200MB 目录上限。写入过程中会持续执行容量上限，大小按 UTF-8 字节计算，过大的单条记录会在 Unicode code point 边界截断。清理只管理 `dsh-*.log` 命名，并容忍文件消失或被 Windows 临时锁定。日志目录如果是链接会被拒绝，链接或非文件占位项会被跳过；日志初始化失败时退化到脱敏后的 stderr，不阻断应用启动。
 
-绕过 Cordis `ctx.logger` 的 Electron 主进程级错误通过 `DesktopLogger` 接口记录：`ElectronStderrLogger` 写入 sink 并镜像到 `process.stderr`（开发时可终端可见）。它被注入 `ElectronDesktopRuntime`，后者把原先的 `process.stderr.write` 调用、`launchWindowsUpdateInstaller` 的子进程错误、以及 `render-process-gone` / `did-fail-load` 渲染器事件都路由过去。`main.ts` 注册的 `uncaughtException` 与 `unhandledRejection` 处理器也写入 sink。
+绕过 Cordis `ctx.logger` 的 Electron 主进程级错误通过 `DesktopLogger` 接口记录：`ElectronStderrLogger` 写入 sink 并镜像到 `process.stderr`（开发时可终端可见）。它被注入 `ElectronDesktopRuntime`，后者把原先的 `process.stderr.write` 调用、`launchWindowsUpdateInstaller` 的子进程错误、以及 `render-process-gone` / `did-fail-load` 渲染器事件都路由过去。`main.ts` 安装共享的 fail-loud rejection 路径和一个专用 `uncaughtException` 处理器；后者记录第一个致命错误后请求受控退出。sink 失败会退化到 stderr，不会覆盖原始错误。
 
-渲染后的日志行经过脱敏层，屏蔽 `sk-` 风格 key、长 hex/base64 token 与 bearer token。`desktopRuntime.exportDiagnostics()` 把日志目录与系统信息摘要打包成 `userData/diagnostics/` 下的 zip，并在系统文件管理器中打开。
+所有进入文件边界的日志行都经过脱敏层，覆盖 `sk-` 风格 key、长 hex/base64 token、bearer/basic authorization、cookie header、具名敏感字段，以及 HTTP URL 中的凭据或敏感 query 值。
+
+默认 profile 加载 `dsh-plugin-desktop/diagnostics`，在 macOS 与 Windows 的原生托盘中提供 **Export Diagnostics…** 命令。`desktopRuntime.exportDiagnostics()` 只把自有普通日志与系统信息摘要打包成原子发布的 `userData/diagnostics/` zip；它拒绝链接形式的输入/输出目录、合并并发请求、只保留最新三份归档，成功后在系统文件管理器中定位文件，失败时显示原生错误对话框。
 
 带手动清空的设置页日志查看器尚未构建，作为后续项。
