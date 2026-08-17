@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 
 /**
- * Connectors settings section: list registered connectors with their
- * connection state, and drive the auth flow (OAuth redirect / device-code /
- * token form) against the loopback HTTP API, mirroring WorkBuddy's
+ * Connectors settings section: registered connectors as a card grid with
+ * search + status filter, driving the auth flow (OAuth redirect / device-code
+ * / token form) against the loopback HTTP API, mirroring WorkBuddy's
  * connector settings experience.
  */
 
@@ -26,9 +26,9 @@ interface ConnectorEntry {
   } | null
 }
 
-const ROW: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
+const GRID: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
   gap: 12,
 }
 
@@ -36,18 +36,28 @@ const CARD: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: 8,
-  padding: '12px 14px',
+  padding: '14px 16px',
   border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 8,
+  borderRadius: 12,
+  minWidth: 0,
 }
 
-const HEAD: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }
+const HEAD: React.CSSProperties = { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }
 
-const TITLE: React.CSSProperties = { fontSize: 15, margin: 0, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
+const TITLE: React.CSSProperties = { fontSize: 15, margin: 0, fontWeight: 600, color: 'var(--dsw-alias-label-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
 
-const DESC: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-secondary)' }
+const DESC: React.CSSProperties = {
+  fontSize: 13,
+  margin: 0,
+  color: 'var(--dsw-alias-label-secondary)',
+  display: '-webkit-box',
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+  minHeight: 36,
+}
 
-const STATUS: React.CSSProperties = { fontSize: 12, margin: 0 }
+const STATUS: React.CSSProperties = { fontSize: 12, margin: 0, flex: 'none', paddingTop: 2 }
 
 const BUTTON: React.CSSProperties = {
   padding: '6px 12px',
@@ -69,6 +79,20 @@ const INPUT: React.CSSProperties = {
 }
 
 const LABEL: React.CSSProperties = { fontSize: 12, margin: 0, color: 'var(--dsw-alias-label-caption)' }
+
+const TOOLBAR: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }
+
+const FILTER_BUTTON: React.CSSProperties = {
+  padding: '5px 10px',
+  borderRadius: 6,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 12,
+  cursor: 'pointer',
+}
+
+const FILTER_ACTIVE: React.CSSProperties = { ...FILTER_BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)' }
 
 const statusText: Record<string, string> = {
   disconnected: '未连接',
@@ -154,17 +178,15 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   return (
     <div style={CARD}>
       <div style={HEAD}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
-          <p style={TITLE}>{entry.name}</p>
-          <p style={DESC}>{entry.description}</p>
-        </div>
+        <p style={TITLE} title={entry.name}>{entry.name}</p>
         <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusText[entry.status] ?? entry.status}</p>
       </div>
+      <p style={DESC}>{entry.description}</p>
 
       {entry.request?.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <p style={LABEL}>请在浏览器中打开以下地址并登录授权：</p>
-          <a href={entry.request.verificationUrl} target="_blank" rel="noreferrer" style={{ fontSize: 13, color: '#60a5fa', wordBreak: 'break-all' }}>
+          <p style={LABEL}>请打开以下地址并登录授权：</p>
+          <a href={entry.request.verificationUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#60a5fa', wordBreak: 'break-all' }}>
             {entry.request.verificationUrl}
           </a>
           {entry.request.userCode && (
@@ -176,7 +198,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       {entry.request?.authorizeUrl && !entry.request.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <p style={LABEL}>授权页已在浏览器中打开；若未弹出请点击：</p>
-          <a href={entry.request.authorizeUrl} target="_blank" rel="noreferrer" style={{ fontSize: 13, color: '#60a5fa', wordBreak: 'break-all' }}>
+          <a href={entry.request.authorizeUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#60a5fa', wordBreak: 'break-all' }}>
             {entry.request.authorizeUrl}
           </a>
         </div>
@@ -204,7 +226,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{entry.error}</p>}
       {error && <p style={{ ...STATUS, color: statusColor.error }}>{error}</p>}
 
-      <div>
+      <div style={{ marginTop: 'auto', paddingTop: 4 }}>
         {isConnected ? (
           <button type="button" style={{ ...BUTTON, background: '#dc2626' }} onClick={() => { void disconnect() }}>断开</button>
         ) : (
@@ -217,8 +239,12 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   )
 }
 
+type StatusFilter = 'all' | 'connected' | 'disconnected'
+
 export function ConnectorsList() {
   const [connectors, setConnectors] = useState<ConnectorEntry[] | null>(null)
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
   const refresh = useCallback((): void => {
     fetchJson<{ connectors: ConnectorEntry[] }>('/api/pico/connectors')
@@ -232,14 +258,41 @@ export function ConnectorsList() {
     return () => clearInterval(timer)
   }, [refresh])
 
+  const visible = useMemo(() => {
+    if (!connectors) return []
+    const q = query.trim().toLowerCase()
+    return connectors.filter((c) => {
+      if (statusFilter === 'connected' && c.status !== 'connected') return false
+      if (statusFilter === 'disconnected' && c.status === 'connected') return false
+      if (!q) return true
+      return c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)
+    })
+  }, [connectors, query, statusFilter])
+
+  const connectedCount = useMemo(() => (connectors ?? []).filter((c) => c.status === 'connected').length, [connectors])
+
   if (connectors === null) return null
 
   return (
-    <div style={ROW}>
-      {connectors.length === 0 && <p style={DESC}>暂无连接器</p>}
-      {connectors.map((entry) => (
-        <ConnectorCard key={entry.id} entry={entry} onChanged={refresh} />
-      ))}
+    <div>
+      <div style={TOOLBAR}>
+        <input
+          style={{ ...INPUT, flex: 1, minWidth: 0 }}
+          placeholder="搜索连接器…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button type="button" style={statusFilter === 'all' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('all')}>全部</button>
+        <button type="button" style={statusFilter === 'connected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('connected')}>已连接</button>
+        <button type="button" style={statusFilter === 'disconnected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('disconnected')}>未连接</button>
+        <span style={{ ...LABEL, flex: 'none' }}>{connectedCount}/{connectors.length} 已连接</span>
+      </div>
+      {visible.length === 0 && <p style={DESC}>暂无匹配的连接器</p>}
+      <div style={GRID}>
+        {visible.map((entry) => (
+          <ConnectorCard key={entry.id} entry={entry} onChanged={refresh} />
+        ))}
+      </div>
     </div>
   )
 }
