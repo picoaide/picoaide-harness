@@ -99,6 +99,9 @@ export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
   '@picoaide/dsh-enterprise/bootstrap',
   '@picoaide/dsh-enterprise/client',
   '@picoaide/dsh-enterprise/package.json',
+  '@picoaide/dsh-connectors/sales-easy',
+  '@picoaide/dsh-connectors/client',
+  '@picoaide/dsh-connectors/package.json',
 ] as const
 
 /** Injectable archive listing seam used by focused tests. */

@@ -15,6 +15,7 @@ const workspace = readJson('package.json')
 const upstream = readJson('upstream.json')
 const plugin = readJson('dsh-plugin-desktop/package.json')
 const enterprise = readJson('plugins/dsh-enterprise/package.json')
+const connectors = readJson('plugins/dsh-connectors/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
@@ -24,8 +25,8 @@ const noteRecordPath = `${noteDirectory}/${noteName}.i18n.yaml`
 if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
-if (JSON.stringify(workspace.workspaces) !== JSON.stringify(['dsh-plugin-desktop', 'plugins/dsh-enterprise'])) {
-  fail('the root Yarn workspace must contain only dsh-plugin-desktop and plugins/dsh-enterprise')
+if (JSON.stringify(workspace.workspaces) !== JSON.stringify(['dsh-plugin-desktop', 'plugins/dsh-enterprise', 'plugins/dsh-connectors'])) {
+  fail('the root Yarn workspace must contain only dsh-plugin-desktop, plugins/dsh-enterprise and plugins/dsh-connectors')
 }
 if (plugin.packageManager !== undefined) {
   fail('dsh-plugin-desktop must inherit the root Yarn release')
@@ -81,7 +82,7 @@ if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.reposi
 if (upstreamPackage.version !== upstream.sourceVersion) {
   fail('deepseek-harness package version differs from upstream.json')
 }
-for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise]]) {
+for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise], ['connectors', connectors]]) {
   const deps = { ...(manifest.dependencies ?? {}), ...(manifest.peerDependencies ?? {}) }
   for (const name of Object.keys(deps).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
     if (deps[name] !== upstream.runtimePackageVersion) {
