@@ -84,4 +84,28 @@ describe('exportDiagnosticsZip', () => {
     expect(archives).toHaveLength(3)
     expect(archives).not.toContain('diagnostics-1.zip')
   })
+
+  it('includes only the newest logs that fit within the archive byte limit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-limit-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    const oldest = join(logs, 'dsh-2026-08-14.log')
+    const middle = join(logs, 'dsh-2026-08-15.log')
+    const newest = join(logs, 'dsh-2026-08-16.log')
+    writeFileSync(oldest, 'oldest')
+    writeFileSync(middle, 'middle')
+    writeFileSync(newest, 'newest')
+    utimesSync(oldest, new Date('2026-08-14T00:00:00Z'), new Date('2026-08-14T00:00:00Z'))
+    utimesSync(middle, new Date('2026-08-15T00:00:00Z'), new Date('2026-08-15T00:00:00Z'))
+    utimesSync(newest, new Date('2026-08-16T00:00:00Z'), new Date('2026-08-16T00:00:00Z'))
+
+    const out = await exportDiagnosticsZip(logs, root, { maxLogBytes: 11 })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName).sort()
+    expect(names).toContain('dsh-2026-08-16.log')
+    expect(names).not.toContain('dsh-2026-08-15.log')
+    expect(names).not.toContain('dsh-2026-08-14.log')
+    expect(zip.readAsText('system-info.txt')).toContain('omitted-log-files: 2')
+  })
 })

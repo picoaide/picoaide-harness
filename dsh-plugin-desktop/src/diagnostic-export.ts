@@ -1,75 +1,54 @@
-/** Bundle the log directory and a system-info summary into a single zip. */
+/** Bundle recent logs and system information without blocking Electron's main thread. */
 
-import { randomUUID } from 'node:crypto'
-import {
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  unlinkSync,
-} from 'node:fs'
-import { join } from 'node:path'
-import AdmZip from 'adm-zip'
-import { isDesktopLogFileName } from './log-files.ts'
+import { Worker } from 'node:worker_threads'
+import type { DiagnosticExportWorkerResult } from './diagnostic-export-worker.ts'
 
-const DIAGNOSTIC_ARCHIVE = /^diagnostics-\d+(?:-[0-9a-f-]+)?\.zip$/u
-const MAX_DIAGNOSTIC_ARCHIVES = 3
+/** Bound both worker memory and the amount of potentially sensitive log history exported. */
+export const MAX_DIAGNOSTIC_LOG_BYTES = 50 * 1024 * 1024
 
-/** Write a zip of the logs directory plus a system-info line to `userData/diagnostics/`. */
-export async function exportDiagnosticsZip(logsDir: string, userDataDir: string): Promise<string> {
-  const logsStats = lstatSync(logsDir)
-  if (logsStats.isSymbolicLink() || !logsStats.isDirectory()) {
-    throw new Error('dsh-plugin-desktop: refusing linked log directory')
-  }
-  const outDir = join(userDataDir, 'diagnostics')
-  mkdirSync(outDir, { recursive: true })
-  const outputStats = lstatSync(outDir)
-  if (outputStats.isSymbolicLink() || !outputStats.isDirectory()) {
-    throw new Error('dsh-plugin-desktop: refusing linked diagnostics directory')
-  }
-  const zip = new AdmZip()
-  for (const name of readdirSync(logsDir)) {
-    if (!isDesktopLogFileName(name)) continue
-    const path = join(logsDir, name)
-    if (!lstatSync(path).isFile()) continue
-    zip.addFile(name, readFileSync(path))
-  }
-  const info = [
-    'app: dsh-plugin-desktop',
-    `platform: ${process.platform}`,
-    `arch: ${process.arch}`,
-    `node: ${process.version}`,
-    `electron: ${process.versions.electron ?? 'unknown'}`,
-    `exported: ${new Date().toISOString()}`,
-  ].join('\n')
-  zip.addFile('system-info.txt', Buffer.from(`${info}\n`, 'utf8'))
-  const outPath = join(outDir, `diagnostics-${Date.now()}-${randomUUID()}.zip`)
-  const temporaryPath = `${outPath}.tmp`
-  try {
-    await zip.writeZipPromise(temporaryPath)
-    renameSync(temporaryPath, outPath)
-  } catch (cause) {
-    try {
-      unlinkSync(temporaryPath)
-    } catch {
-      // The write may have failed before creating its temporary archive.
-    }
-    throw cause
+export interface DiagnosticExportOptions {
+  /** Override used by focused tests; production exports use the 50 MB cap. */
+  readonly maxLogBytes?: number
+}
+
+function workerEntryUrl(): URL {
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js'
+  return new URL(`./diagnostic-export-worker.${extension}`, import.meta.url)
+}
+
+/** Write a diagnostics zip in a short-lived worker and return its published path. */
+export function exportDiagnosticsZip(
+  logsDir: string,
+  userDataDir: string,
+  options: DiagnosticExportOptions = {},
+): Promise<string> {
+  const maxLogBytes = options.maxLogBytes ?? MAX_DIAGNOSTIC_LOG_BYTES
+  if (!Number.isSafeInteger(maxLogBytes) || maxLogBytes <= 0) {
+    return Promise.reject(new Error('dsh-plugin-desktop: diagnostic log byte limit must be a positive integer'))
   }
 
-  const archives = readdirSync(outDir).flatMap((name) => {
-    if (!DIAGNOSTIC_ARCHIVE.test(name)) return []
-    const path = join(outDir, name)
-    const stats = lstatSync(path)
-    return stats.isFile() ? [{ path, modifiedAt: stats.mtimeMs }] : []
-  }).sort((a, b) => b.modifiedAt - a.modifiedAt)
-  for (const archive of archives.slice(MAX_DIAGNOSTIC_ARCHIVES)) {
-    try {
-      unlinkSync(archive.path)
-    } catch {
-      // A file manager or support upload may temporarily hold an older archive.
-    }
-  }
-  return outPath
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerEntryUrl(), {
+      name: 'dsh-diagnostic-export',
+      workerData: { logsDir, userDataDir, maxLogBytes },
+      resourceLimits: { maxOldGenerationSizeMb: 256 },
+    })
+    let settled = false
+    worker.once('message', (result: DiagnosticExportWorkerResult) => {
+      settled = true
+      void worker.terminate()
+      if (result.ok) resolve(result.path)
+      else reject(new Error(result.error))
+    })
+    worker.once('error', (cause) => {
+      if (settled) return
+      settled = true
+      reject(cause)
+    })
+    worker.once('exit', (code) => {
+      if (settled) return
+      settled = true
+      reject(new Error(`dsh-plugin-desktop: diagnostic export worker exited with code ${String(code)}`))
+    })
+  })
 }
