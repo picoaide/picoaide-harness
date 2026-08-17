@@ -9,6 +9,11 @@ export interface MarketBuiltInProvider {
   readonly providerId: string
   readonly adapterId: string
   readonly endpoint: string
+  readonly attribution: {
+    readonly name: string
+    readonly url: string
+    readonly notice?: string
+  }
   readonly partnership: boolean
 }
 
@@ -16,6 +21,12 @@ export interface MarketSourceView extends LocalSourceRecord {
   readonly name: string
   readonly description?: string
   readonly endpoint: string
+  readonly homepage?: string
+  readonly attribution?: {
+    readonly name: string
+    readonly url: string
+    readonly notice?: string
+  }
   readonly partnership: boolean
 }
 
@@ -45,4 +56,5 @@ export type MarketSourceMutation =
   | { readonly action: 'add-builtin'; readonly key: string }
   | { readonly action: 'add-standard'; readonly manifestUrl: string }
   | { readonly action: 'set-enabled'; readonly sourceRecordId: string; readonly enabled: boolean }
+  | { readonly action: 'move'; readonly sourceRecordId: string; readonly direction: 'up' | 'down' }
   | { readonly action: 'remove'; readonly sourceRecordId: string }

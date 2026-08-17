@@ -20,6 +20,7 @@ export type Item = Item1 & {
   repository?: Repository
   package?: Package
   publisher?: Publisher
+  media?: Media
   capabilities?: Capabilities
   compatibility?: Compatibility
   updatedAt?: string
@@ -37,6 +38,7 @@ export type Identifier = string
 export type PlainText = string
 export type HttpsUri = string
 export type CategoryId = string
+export type MediaAlt = PlainText
 /**
  * @maxItems 64
  */
@@ -66,6 +68,19 @@ export interface Package {
 export interface Publisher {
   name: PlainText
   url?: HttpsUri
+}
+/**
+ * Optional provider-declared plugin media. In draft v1, only a direct plugin icon is standardized.
+ */
+export interface Media {
+  icon: RemoteIconCandidate
+}
+/**
+ * A provider-declared remote plugin-icon candidate. The URL must share the final provider-page response origin. The Host resolves and validates it before it can enter a normalized snapshot; the Renderer never receives this URL.
+ */
+export interface RemoteIconCandidate {
+  url: HttpsUri
+  alt?: MediaAlt
 }
 export interface Capabilities {
   required?: CapabilityList

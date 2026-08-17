@@ -20,7 +20,7 @@ export interface CatalogSourceManifest {
   transport: {
     kind: 'https-json'
     /**
-     * Absolute HTTPS endpoint with no query or fragment. The standard endpoint path ends in /v1/plugins.
+     * Absolute HTTPS endpoint on standard port 443 with no query or fragment. It must share the user-approved manifest origin, and the standard endpoint path ends in /v1/plugins.
      */
     endpoint: string
     method: 'GET'

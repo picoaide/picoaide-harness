@@ -42,6 +42,8 @@ It does not define catalog governance, plugin review, account systems, payments,
 | Provider adapter | A reviewed built-in adapter for a cooperating provider with a different existing API. |
 | Provider page | The untrusted wire response returned by a standard source before Host provenance is added. |
 | Normalized snapshot | The only catalog data shape the aggregator, UI, and installation candidate resolver may consume. |
+| Remote icon candidate | An optional provider-declared HTTPS image in `media.icon`. It is untrusted input for the Host media resolver, never a Renderer URL. |
+| Asset reference | An opaque Host-managed token in a normalized `media.icon`. The Renderer may consume the token through the Host asset boundary but cannot turn it into an arbitrary network request or filesystem path. |
 | Local source settings | User-owned enabled state and ordering. These values never come from a remote manifest. |
 
 ## Source selection is explicit
@@ -70,13 +72,14 @@ interface LocalSourceRecord {
   adapterId: string
   providerId: string // provider claim, never local authority
   manifestUrl?: string // user-added only
+  manifest?: CatalogSourceManifest // validated registration-time disclosure, user-added only
   builtInProviderKey?: string // built-in only
   enabled: boolean
   order: number
 }
 ```
 
-Exactly one of `manifestUrl` or `builtInProviderKey` is present. A newly added record starts with `enabled: false`; enabling it is a separate user confirmation.
+Exactly one of `manifestUrl` or `builtInProviderKey` is present. A user-added record also retains the validated registration-time manifest so the UI can show its name, attribution, endpoint, and adapter type before enablement; the standard adapter still refetches and revalidates the remote manifest for every catalog read. A newly added record starts with `enabled: false`; enabling it is a separate user confirmation.
 
 ## Three contract layers
 
@@ -105,7 +108,9 @@ A standard source publishes a static manifest validated by [`catalog-source.sche
 
 The manifest describes provider capability; it does not control local policy. Draft v1 is public and anonymous: it has no bearer token, cookies, request headers, secret fields, executable mapping, or dynamic JavaScript.
 
-The source manifest URL and catalog endpoint are distinct. Adding the manifest URL is an explicit user action. The Host generates a fresh `sourceRecordId`, validates and stores the manifest with that local user-added record, and leaves it disabled until the user enables it.
+The source manifest URL and catalog endpoint are distinct. Adding the manifest URL is an explicit user action. The Host generates a fresh `sourceRecordId`, validates and stores a registration-time copy of the manifest with that local user-added record, exposes its disclosure fields in source management, and leaves it disabled until the user enables it.
+
+Registration also pins the provider claim and network origin. On every fetch, the manifest `providerId` must still equal the value saved in the local source record. The user-approved manifest URL, the manifest request's final URL, `transport.endpoint`, and the provider-page request's final URL must all remain on the same credential-free HTTPS origin. Draft v1 network URLs and manifests use only standard HTTPS port 443; custom ports are not part of the standard-source contract. Same-origin redirects are allowed; crossing to another origin is rejected even when both origins use HTTPS. A deployment that requires a separate API origin or port must use a reviewed provider adapter until a future contract version defines that relationship explicitly.
 
 ### Layer 2: adapter
 
@@ -118,9 +123,9 @@ interface CatalogAdapter {
 }
 ```
 
-`CatalogFetchContext` should expose an `AbortSignal`, a constrained HTTP client, the validated source identity, and configured limits. It must not expose Electron globals, arbitrary filesystem access, a shell, ambient credentials, or package-manager execution.
+`CatalogFetchContext` should expose an `AbortSignal`, a constrained HTTP client, the validated source identity, configured limits, and a narrow Host media registrar that accepts reviewed candidates and returns opaque asset references. It must not expose Electron globals, arbitrary filesystem access, a shell, ambient credentials, or package-manager execution.
 
-The standard adapter maps the query contract below to the standard endpoint, validates the wire response against [`catalog-provider-page.schema.json`](schemas/catalog-provider-page.schema.json), and only then creates a normalized snapshot. Provider adapters may translate names, pagination, categories, or legacy response fields, but must return the same normalized model and preserve provider attribution. Provider adapters are compiled and reviewed with the market package; a manifest or response can never download or supply adapter code.
+The standard adapter maps the query contract below to the standard endpoint, validates the wire response against [`catalog-provider-page.schema.json`](schemas/catalog-provider-page.schema.json), and only then creates a normalized snapshot. Provider adapters may translate names, pagination, categories, media candidates, or legacy response fields, but must return the same normalized model and preserve provider attribution. Provider adapters are compiled and reviewed with the market package; a manifest or response can never download or supply adapter code.
 
 Provider input never supplies Host provenance. After a response succeeds, the adapter injects the local `sourceRecordId`, locally registered `adapterId` and registration kind, Host-observed `fetchedAt`, and the validated final response URL. Provider generation time and revision remain explicitly labeled provider claims.
 
@@ -136,11 +141,30 @@ A draft v1 normalized snapshot contains:
 - normalized plugin items;
 - pagination metadata with an optional opaque next cursor and total.
 
-Each item has stable source-local identity, display text, and explicit Host-injected provenance. It may identify an npm package, a canonical repository plus optional subdirectory, or both. It may also contain bounded descriptive metadata, categories, capabilities, compatibility claims, and update time. It never contains an install command, shell fragment, HTML, script, or executable callback.
+Each item has stable source-local identity, display text, and explicit Host-injected provenance. It may identify an npm package, a canonical repository plus optional subdirectory, or both. It may also contain bounded descriptive metadata, categories, capabilities, compatibility claims, update time, and Host-resolved media. It never contains an install command, shell fragment, HTML, script, executable callback, remote media URL, or filesystem path.
 
 Within one provider page, every item `id` must be unique. The adapter rejects duplicate IDs before provenance is injected. In the normalized snapshot, every `provenance.itemId` must exactly equal its containing item `id`.
 
 The Host must verify that the snapshot and every item provenance carry the local record's `sourceRecordId` and provider claim. A provider cannot supply those Host fields, impersonate a built-in registration, or collide with another registration's cache and cursor by choosing the same `providerId`.
+
+### Media and icon resolution
+
+Media has two deliberately different representations:
+
+- A standard provider page may optionally declare `media.icon: { url, alt? }`. The URL is an untrusted HTTPS candidate for a plugin-owned icon. It is not display-ready data.
+- A normalized snapshot may optionally contain `media.icon: { assetRef, role, alt? }`. `assetRef` is an opaque Host-managed token; it is neither a remote URL nor a filesystem path. Current Host tokens match `mktimg_` plus 32 URL-safe characters; providers never generate or return this token. `role` is either `plugin-icon` or `publisher-avatar`.
+
+Before emitting a normalized snapshot, the Host validates and registers a remote candidate with a dedicated media boundary and replaces it with a new `assetRef`. The image bytes are fetched lazily only when the Renderer requests that reference. For a standard source, the candidate must share the final provider-page response origin and every redirect must remain on a Host-approved exact hostname; a provider that uses a separate image CDN must serve or proxy its standard v1 icons from the catalog origin. The asset service applies the same destination and redirect protections as catalog requests, enforces image media types and byte/pixel budgets, decodes the image, and returns only a safe local representation. A failed or invalid image makes that reference unavailable without failing an otherwise valid catalog item, and the Renderer uses its local placeholder. The Renderer never receives or requests the provider URL directly.
+
+Host catalog caches, registered media references, decoded-image caches, and concurrent image work are bounded. Disabling or removing a source cancels its in-flight catalog work, drops its last-good catalog entries, and revokes all of its media references only after the local source change has been persisted.
+
+Within one source variant, the presentation order is deterministic:
+
+1. a valid direct provider `media.icon`, normalized with `role: "plugin-icon"`;
+2. a reviewed provider-adapter fallback, normalized with its truthful role, such as `role: "publisher-avatar"`;
+3. a local placeholder generated by the client when the normalized item has no media.
+
+An adapter must not label an owner or organization avatar as a plugin icon. This priority is applied when the Host chooses which candidate to register; a later retrieval failure falls back to the local placeholder rather than contacting a second remote candidate. Direct provider media does not override another source variant during aggregation; provenance and conflicts remain visible as described below.
 
 ## Standard HTTP source
 
@@ -168,6 +192,8 @@ The Host first builds and validates a [`CatalogQuery`](schemas/catalog-query.sch
 The normalized Host query default and the provider default are separate. When a source supports `limit`, the Host sends the requested value or its normalized default of 20, reduced to `maxLimit` when needed. When a source does not support `limit`, the Host omits it and the source's `defaultLimit` describes the page size it will return. A manifest must keep `defaultLimit` less than or equal to `maxLimit`.
 
 A cursor is scoped to one source and one effective query. The aggregator never sends a cursor from one source to another, and changing filters, sort, or source order invalidates the existing aggregate pagination session.
+
+The current Desktop product path reads only the first page from each enabled source. The schemas and standard adapter preserve `page.nextCursor` in returned snapshots, but the current Host route does not accept a source-scoped cursor and the Client does not yet provide cross-source **Load more**. A provider may return `nextCursor` now for forward compatibility, but the current UI will not follow it. A complete per-source cursor session remains a follow-up and must obey the isolation rules above; one source's cursor must never be broadcast to every enabled source.
 
 Only a successful JSON response that passes the provider-page schema is accepted from a standard source. The adapter then injects Host provenance and validates the normalized snapshot schema. A timeout, non-200 response, wrong content type, oversized body, parse error, unsupported schema version, or either validation error fails that source request without affecting application startup. A standard response containing more items than the effective `limit` is rejected.
 
@@ -197,6 +223,8 @@ If grouped variants disagree, the UI reports the disagreement and asks the user 
 
 - requests the provider's documented public API under the same Host network limits;
 - maps its categories and plugin metadata into the normalized snapshot;
+- treats the provider item `id` only as source-local identity and derives canonical GitHub repository and publisher identity from the validated repository URL, so repository renames or transfers do not silently point at the old name;
+- because the current 1024Store dataset has no direct plugin icon, derives a GitHub owner/avatar candidate only as a reviewed fallback, resolves it through the Host media boundary, and labels the result `role: "publisher-avatar"`;
 - injects and validates DSH 1024Store provenance and attribution;
 - never treats remote command text or install hints as executable input;
 - fails independently when the provider is unavailable or returns invalid data.
@@ -227,14 +255,24 @@ Supporting a source means its metadata can be browsed. It does not grant that so
 - Do not attach ambient cookies, authorization headers, client certificates, or provider-supplied custom headers. Draft v1 sources are public and anonymous.
 - Apply connect, first-byte, and total deadlines plus `AbortSignal` cancellation.
 - Limit compressed and decoded response sizes, item count, pagination depth, string lengths, arrays, and URL lengths. Limits must be constants covered by tests; schema maxima remain authoritative for data fields.
-- Require a JSON media type, decode once, validate before caching, and never follow URLs found inside a snapshot as part of loading the catalog.
+- Require a JSON media type for catalog responses, decode once, and validate before caching. The catalog loader never follows discovered URLs; only the explicit Host media resolver may process a validated provider-page `media.icon.url` under its separate image limits.
+
+The current draft v1 runtime budgets are part of the provider contract, not implementation hints:
+
+| Boundary | Body and redirect budget | Deadlines | Additional rules |
+| --- | --- | --- | --- |
+| Standard source manifest and provider page | At most 2 MiB per JSON response and at most 3 redirects | 8 s connect, 12 s first-byte, 30 s total | These limits apply independently to the manifest request and each catalog request. |
+| DSH 1024Store built-in adapter | At most 16 MiB for its full-registry JSON response and at most 3 redirects | 8 s connect, 12 s first-byte, 30 s total | The larger body budget is a compiled-in exception for this reviewed adapter; it does not relax the 2 MiB standard-source limit. |
+| Icon asset service | At most 2 MiB per image response and at most 2 redirects | 8 s connect, 12 s first-byte, 30 s total | Input must be a single-frame PNG, JPEG, or WebP image with at most `16 * 1024 * 1024` decoded pixels. The Host emits a metadata-free 128 × 128 PNG. |
+
+The current Host schedules at most four enabled catalog sources at once. The icon asset service performs at most two network-and-decode jobs at once. Both limits are global to one Market plugin generation.
 
 ### Data and renderer boundary
 
 - Use strict schemas with unknown object properties rejected. Unknown major versions fail closed.
 - Treat names, descriptions, publisher claims, notices, and all other remote strings as untrusted plain text. Never inject them as HTML or Markdown with raw HTML enabled.
 - Canonicalize package and repository identity before grouping or installation. Reject ambiguous, credential-bearing, or unsupported repository URLs.
-- Do not load remote scripts, adapter definitions, stylesheets, icons, iframes, or executable mappings from a source manifest or snapshot.
+- Do not load remote scripts, adapter definitions, stylesheets, iframes, or executable mappings from a source manifest or snapshot. Remote icon candidates are fetched only by the Host media resolver; a normalized snapshot contains only opaque `assetRef` values.
 - Reject or visibly neutralize control characters and bidirectional text controls in display and confirmation fields. Open external HTTPS links only after a user gesture.
 - Keep raw bodies, local paths, environment variables, credentials, and command internals out of user-facing errors and telemetry.
 - Record source attribution and validation outcome separately from plugin trust. Schema validity proves shape only, not safety or authorship.
@@ -335,10 +373,12 @@ These are required acceptance tests for the later implementation, not claims abo
 | Schema | Valid manifest, query, provider-page, and snapshot fixtures | Accepted and round-trip without losing defined data |
 | Schema | Unknown property or unsupported major version | Affected manifest/request/snapshot rejected |
 | Schema | Provider page attempts to supply Host provenance | Strict wire schema rejects the response |
+| Schema | Provider page contains a valid HTTPS `media.icon`; normalized snapshot contains a safe `assetRef` and valid role | Both fixtures pass, and the normalized item contains no remote URL |
+| Schema | Icon URL uses HTTP/credentials, or a normalized icon contains a URL/path/unknown role instead of an opaque `assetRef` | Strict schema rejects the affected response |
 | Schema | Snapshot source record or item provenance differs from the local record | Source result rejected as identity spoofing |
 | Schema | Item lacks both npm package and repository identity | Item/snapshot rejected |
 | Schema | Provider page repeats an item `id`, or normalized `provenance.itemId` differs from its item `id` | Entire source response rejected |
-| Normalization | 1024Store fixture uses its existing provider format | Adapter emits a valid normalized snapshot with 1024Store attribution |
+| Normalization | 1024Store fixture uses its existing provider format without an icon | Adapter resolves its GitHub owner avatar as `publisher-avatar`; a direct provider icon, when available, takes precedence |
 | Aggregation | One of three enabled sources times out | Two sources remain visible; failed source gets an independent retry state |
 | Aggregation | Two sources list the same canonical package with different claims | One presentation group with two intact variants; no silent merge |
 | Aggregation | Two items only have similar names | They remain distinct `{sourceRecordId, itemId}` records |
@@ -346,6 +386,7 @@ These are required acceptance tests for the later implementation, not claims abo
 | Security | URL targets HTTP, URL credentials, loopback/private/link-local/metadata, or a redirect to one | Request rejected before protected resources are contacted |
 | Security | DNS answer changes to a prohibited address | Connection blocked; source-specific safe error shown |
 | Security | Body is oversized, deeply invalid, non-JSON, slow, or contains unknown fields | Request aborted/rejected; no cache or renderer update |
+| Security | Icon redirects to a prohibited host, exceeds image limits, has a false media type, or fails decoding | Asset request becomes unavailable and Renderer uses its local placeholder; Renderer never contacts the remote host and the valid catalog item remains usable |
 | Security | Remote text contains HTML/script/Markdown injection | Displayed as inert text; no code or navigation executes |
 | Security | Display text contains controls/Bidi spoofing, or an external link appears without a gesture | Unsafe text is rejected/neutralized; no link opens automatically |
 | Security | Source attempts to use cookies, auth, custom headers, or remote adapter code | Capability unavailable and input rejected |

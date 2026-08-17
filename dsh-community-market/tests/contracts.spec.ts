@@ -27,6 +27,26 @@ const queryFixture = () => readJson('../docs/examples/catalog-query.example.json
 const providerFixture = () => readJson('../docs/examples/catalog-provider-page.example.json')
 const snapshotFixture = () => readJson('../docs/examples/catalog-snapshot.example.json')
 
+describe('package integration contract', () => {
+  it('loads the Client through the official settings, sidebar, and shell features', () => {
+    const manifest = readJson('../package.json') as {
+      dsh?: { client?: { inject?: string[] } }
+      peerDependencies?: Record<string, string>
+    }
+
+    expect(manifest.dsh?.client?.inject).toEqual([
+      '@deepseek-ai/dsh-client-runtime',
+      '@deepseek-ai/dsh-client-locale',
+      '@deepseek-ai/dsh-client-ui-layout',
+      '@deepseek-ai/dsh-client-ui-settings',
+      '@deepseek-ai/dsh-client-ui-sidebar',
+    ])
+    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-layout', '0.1.0-rc.7')
+    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-settings', '0.1.0-rc.7')
+    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-sidebar', '0.1.0-rc.7')
+  })
+})
+
 describe('catalog schemas and semantics', () => {
   it('accepts all four reviewed positive fixtures', () => {
     for (const [fixture, parsed] of [
@@ -170,11 +190,25 @@ describe('catalog identity and local source records', () => {
       adapterId: 'market.standard-v1',
       providerId: 'org.example.catalog',
       manifestUrl: 'https://plugins.example.org/catalog-source.json',
+      manifest: {
+        ...(sourceFixture() as CatalogSourceManifest),
+        providerId: 'org.example.catalog',
+      },
       enabled: false,
       order: 0,
     }
 
     expect(() => validateLocalSourceRecords([record])).not.toThrow()
+    const withoutManifest = { ...record }
+    delete withoutManifest.manifest
+    expect(() => validateLocalSourceRecords([withoutManifest])).toThrow(/manifest is required/u)
+    expect(() => validateLocalSourceRecords([{
+      ...record,
+      manifest: {
+        ...record.manifest!,
+        transport: { kind: 'https-json', endpoint: 'https://other.example/v1/plugins', method: 'GET' },
+      },
+    }])).toThrow(/registered manifest origin/u)
     expect(() => validateLocalSourceRecords([record, { ...record }])).toThrow(/duplicates/u)
     expect(() => validateLocalSourceRecords([{
       ...record,

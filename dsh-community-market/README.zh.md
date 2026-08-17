@@ -4,7 +4,7 @@
 
 DSH Community Market 是 [DSH Desktop](../README.md) 的插件市场壳，用于发现社区插件并了解插件用途。安装属于后续独立开发和安全评审阶段。
 
-> **当前状态：只读市场 MVP 开发阶段。** Package 现在已有可加载的 Host/Client 入口、用户拥有的来源持久化、受限 HTTPS client、标准与 DSH 1024Store adapter，以及从侧边栏打开的独立市场工作区。它继续保持 private，且尚无安装器。
+> **当前状态：只读市场 MVP 开发阶段。** Package 现在已有可加载的 Host/Client 入口、用户拥有的来源持久化、受限 HTTPS client、标准与 DSH 1024Store adapter，并在**设置 > 插件**中提供官方的**插件市场**标签页；侧边栏入口会打开同一市场界面。Package 继续保持 private，且尚无安装器。
 
 ## 我们要做什么
 
@@ -21,6 +21,8 @@ DSH Community Market 是 [DSH Desktop](../README.md) 的插件市场壳，用于
 ## 目录来源
 
 市场不设默认目录。用户可以选择要启用的来源、调整它们的顺序，也可以添加符合公开目录合同的来源。每个来源都在适配器之后独立运行，市场界面只能看到同一套经过校验和标准化的数据。
+
+符合规范的数据源需要发布一份 [`catalog-source` manifest](docs/schemas/catalog-source.schema.json)，其 `/v1/plugins` 接口返回符合 [`catalog-provider-page` Schema](docs/schemas/catalog-provider-page.schema.json) 的数据。来源可以提供 `media.icon`，Desktop 会先校验并代理图片再显示；没有图标的来源仍然合法，界面会使用本地 fallback。符合标准的数据源不需要为 Market 编写自定义代码。
 
 [DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) 是目前与本项目合作的目录提供方之一。市场随包提供一份针对其公开 API、经过审查的本地 adapter，但合作关系不代表默认启用、排序优先、未选择来源时的兜底，也不代表对其收录内容的推荐。该项目独立维护插件发现、校验、网站、API 和另行发布的 `dsh-1024store` 插件。DSH Community Market 不是该插件的 fork、重新打包版本或官方客户端。
 

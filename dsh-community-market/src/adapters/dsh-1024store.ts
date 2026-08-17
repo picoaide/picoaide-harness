@@ -5,7 +5,8 @@ import { parseCatalogSnapshot } from '../contracts/validate.js'
 import { normalizeRepositoryIdentity } from '../contracts/identity.js'
 
 export const DSH_1024STORE_KEY = 'dsh-1024store'
-export const DSH_1024STORE_ENDPOINT = 'https://api.deepseek1024.com/v1/plugins/search'
+export const DSH_1024STORE_ENDPOINT = 'https://deepseek1024.com/api/v1/plugins'
+export const DSH_1024STORE_HOSTNAME = 'deepseek1024.com'
 export const DSH_1024STORE_PROVIDER_ID = 'com.deepseek1024.catalog'
 export const DSH_1024STORE_ADAPTER_ID = 'market.dsh-1024store-v1'
 
@@ -17,7 +18,40 @@ export interface Dsh1024StoreRawItem {
   readonly category?: unknown
   readonly description?: unknown
   readonly pushedAt?: unknown
+  readonly added?: unknown
+  readonly stars?: unknown
+  readonly installCount?: unknown
+  readonly media?: unknown
 }
+
+interface Dsh1024StoreMeta {
+  readonly updated?: unknown
+  readonly generatedAt?: unknown
+  readonly revision?: unknown
+}
+
+interface Dsh1024StoreCatalog {
+  readonly packages?: unknown
+  readonly meta?: unknown
+}
+
+interface RegistryCandidate {
+  readonly item: CatalogSnapshot['items'][number]
+  readonly mediaCandidates: readonly MediaCandidate[]
+  readonly stars: number
+  readonly downloads: number
+  readonly updatedAt: number
+}
+
+interface MediaCandidate {
+  readonly remoteUrl: string
+  readonly role: 'plugin-icon' | 'publisher-avatar'
+  readonly alt?: string
+  readonly allowedHostnames: readonly string[]
+}
+
+const GITHUB_OWNER_PATTERN = /^[a-z0-9][a-z0-9-]{0,99}$/iu
+const GITHUB_REPOSITORY_PATTERN = /^[a-z0-9._-]{1,100}$/iu
 
 function plainText(value: unknown, max: number, fallback: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max
@@ -26,49 +60,148 @@ function plainText(value: unknown, max: number, fallback: string): string {
 }
 
 function repositoryFromItem(item: Dsh1024StoreRawItem): { url: string; subdirectory?: string } | undefined {
-  if (typeof item.url !== 'string' || !/^https:\/\/github\.com\//iu.test(item.url)) return undefined
-  const parts = typeof item.id === 'string' ? item.id.split('/').filter(Boolean) : []
-  if (parts.length < 2) return undefined
   try {
+    if (typeof item.url !== 'string') return undefined
+    const suppliedUrl = new URL(item.url)
+    const suppliedPath = suppliedUrl.pathname.split('/').filter(Boolean)
+    if (
+      suppliedUrl.protocol !== 'https:'
+      || suppliedUrl.hostname.toLowerCase() !== 'github.com'
+      || suppliedUrl.username
+      || suppliedUrl.password
+      || suppliedUrl.search
+      || suppliedUrl.hash
+      || suppliedPath.length !== 2
+    ) return undefined
+    const owner = suppliedPath[0]!
+    const repository = suppliedPath[1]!.replace(/\.git$/iu, '')
+    if (!GITHUB_OWNER_PATTERN.test(owner) || !GITHUB_REPOSITORY_PATTERN.test(repository)) return undefined
+    const parts = typeof item.id === 'string' ? item.id.split('/').filter(Boolean) : []
+    const idMatchesRepository = parts.length >= 2
+      && parts[0]!.toLowerCase() === owner.toLowerCase()
+      && parts[1]!.replace(/\.git$/iu, '').toLowerCase() === repository.toLowerCase()
     return normalizeRepositoryIdentity({
-      url: `https://github.com/${parts[0]}/${parts[1]}`,
-      ...(parts.length > 2 ? { subdirectory: parts.slice(2).join('/') } : {}),
+      // The provider item ID is source-local identity, not repository identity.
+      // Repository renames and transfers make the canonical URL authoritative.
+      url: `https://github.com/${owner}/${repository}`,
+      ...(idMatchesRepository && parts.length > 2 ? { subdirectory: parts.slice(2).join('/') } : {}),
     })
   } catch {
     return undefined
   }
 }
 
-function buildSnapshot(value: unknown, source: CatalogFetchContext['source'], finalUrl: string, query: CatalogQuery): CatalogSnapshot {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('1024Store response is not an object')
-  const raw = value as Record<string, unknown>
-  if (!Array.isArray(raw.results) || raw.results.length > Math.min(query.limit ?? 20, 100)) {
-    throw new Error('1024Store response exceeds the requested limit')
+function githubOwner(repositoryUrl: string): string | undefined {
+  try {
+    const url = new URL(repositoryUrl)
+    const owner = url.pathname.split('/').filter(Boolean)[0]
+    return owner !== undefined && GITHUB_OWNER_PATTERN.test(owner)
+      ? owner.toLowerCase()
+      : undefined
+  } catch {
+    return undefined
   }
-  const page = typeof raw.page === 'number' && Number.isInteger(raw.page) ? raw.page : 1
-  const totalPages = typeof raw.totalPages === 'number' && Number.isInteger(raw.totalPages) ? raw.totalPages : page
-  const total = typeof raw.total === 'number' && Number.isInteger(raw.total) && raw.total >= 0 ? raw.total : undefined
-  const items = raw.results.map((entry, index) => {
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`1024Store item ${index} is invalid`)
+}
+
+function explicitIcon(item: Dsh1024StoreRawItem): Omit<MediaCandidate, 'role'> | undefined {
+  if (item.media === null || typeof item.media !== 'object' || Array.isArray(item.media)) return undefined
+  const icon = (item.media as Record<string, unknown>).icon
+  if (icon === null || typeof icon !== 'object' || Array.isArray(icon)) return undefined
+  const candidate = icon as Record<string, unknown>
+  if (typeof candidate.url !== 'string') return undefined
+  try {
+    const url = new URL(candidate.url)
+    const hostname = url.hostname.toLowerCase()
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash
+      || ![DSH_1024STORE_HOSTNAME, 'github.com', 'avatars.githubusercontent.com'].includes(hostname)) return undefined
+    const alt = plainText(candidate.alt, 240, '')
+    return {
+      remoteUrl: url.href,
+      ...(alt ? { alt } : {}),
+      allowedHostnames: hostname === 'github.com'
+        ? ['github.com', 'avatars.githubusercontent.com']
+        : [hostname],
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function mediaCandidates(
+  item: Dsh1024StoreRawItem,
+  repositoryUrl: string,
+): readonly MediaCandidate[] {
+  const explicit = explicitIcon(item)
+  const owner = githubOwner(repositoryUrl)
+  return [
+    ...(explicit === undefined ? [] : [{ ...explicit, role: 'plugin-icon' as const }]),
+    ...(owner === undefined ? [] : [{
+      remoteUrl: `https://github.com/${owner}.png?size=96`,
+      role: 'publisher-avatar' as const,
+      alt: owner,
+      allowedHostnames: ['github.com', 'avatars.githubusercontent.com'],
+    }]),
+  ]
+}
+
+function resolvedMedia(
+  candidates: readonly MediaCandidate[],
+  itemId: string,
+  context: CatalogFetchContext,
+): CatalogSnapshot['items'][number]['media'] | undefined {
+  for (const candidate of candidates) {
+    try {
+      const assetRef = context.media.register({
+        ...candidate,
+        sourceRecordId: context.source.sourceRecordId,
+        itemId,
+      })
+      return { icon: { assetRef, role: candidate.role, ...(candidate.alt === undefined ? {} : { alt: candidate.alt }) } }
+    } catch {
+      // A bad optional image must not make an otherwise valid catalog item disappear.
+    }
+  }
+  return undefined
+}
+
+function normalizedItem(
+  entry: unknown,
+  context: CatalogFetchContext,
+  locale: string | undefined,
+): RegistryCandidate | undefined {
+  try {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return undefined
     const item = entry as Dsh1024StoreRawItem
     const id = plainText(item.id, 160, '')
-    const name = plainText(item.name, 160, '')
-    if (!id || !name) throw new Error(`1024Store item ${index} has no identity`)
+    const name = plainText(item.name, 120, '')
+    if (!id || !name || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/u.test(id)) return undefined
     const repository = repositoryFromItem(item)
-    if (repository === undefined) throw new Error(`1024Store item ${index} has no supported repository`)
+    if (repository === undefined) return undefined
     const descriptionValue = item.description
     const description = descriptionValue !== null && typeof descriptionValue === 'object'
       ? (descriptionValue as Record<string, unknown>)
       : {}
-    const summary = plainText(description.zh ?? description.en, 1000, name)
+    const prefersChinese = locale?.toLowerCase().startsWith('zh') ?? false
+    const summary = plainText(
+      prefersChinese ? description.zh ?? description.en : description.en ?? description.zh,
+      1000,
+      name,
+    )
     const category = typeof item.category === 'string' && /^[a-z0-9][a-z0-9._:-]*$/u.test(item.category)
       ? item.category
       : undefined
-    const owner = plainText(item.owner, 120, 'Unknown publisher')
+    const repositoryOwner = githubOwner(repository.url)
+    const suppliedOwner = plainText(item.owner, 120, '')
+    const owner = repositoryOwner !== undefined && suppliedOwner.toLowerCase() === repositoryOwner
+      ? suppliedOwner
+      : repositoryOwner
     const pushedAt = typeof item.pushedAt === 'string' && !Number.isNaN(Date.parse(item.pushedAt))
       ? new Date(item.pushedAt).toISOString()
       : undefined
-    return {
+    const addedAt = typeof item.added === 'string' && !Number.isNaN(Date.parse(item.added))
+      ? Date.parse(item.added)
+      : 0
+    const normalized: CatalogSnapshot['items'][number] = {
       id,
       name,
       displayName: name,
@@ -76,41 +209,101 @@ function buildSnapshot(value: unknown, source: CatalogFetchContext['source'], fi
       ...(descriptionValue === undefined ? {} : { description: summary }),
       ...(category === undefined ? {} : { categories: [category] }),
       repository,
-      publisher: { name: owner, url: `https://github.com/${owner}` },
+      ...(owner === undefined ? {} : { publisher: { name: owner, url: `https://github.com/${owner}` } }),
       ...(pushedAt === undefined ? {} : { updatedAt: pushedAt }),
       provenance: {
-        sourceRecordId: source.sourceRecordId,
-        providerId: source.providerId,
+        sourceRecordId: context.source.sourceRecordId,
+        providerId: context.source.providerId,
         itemId: id,
       },
     }
-  })
+    return {
+      item: normalized,
+      mediaCandidates: mediaCandidates(item, repository.url),
+      stars: typeof item.stars === 'number' && Number.isFinite(item.stars) ? item.stars : 0,
+      downloads: typeof item.installCount === 'number' && Number.isFinite(item.installCount) ? item.installCount : 0,
+      updatedAt: pushedAt === undefined ? addedAt : Date.parse(pushedAt),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function compareCandidates(left: RegistryCandidate, right: RegistryCandidate, query: CatalogQuery): number {
+  if (query.sort === 'name') return left.item.displayName.localeCompare(right.item.displayName, 'en', { sensitivity: 'base' })
+  if (query.sort === 'updated') return right.updatedAt - left.updatedAt || right.stars - left.stars
+  if (query.sort === 'downloads') return right.downloads - left.downloads || right.stars - left.stars
+  return right.stars - left.stars || left.item.displayName.localeCompare(right.item.displayName, 'en', { sensitivity: 'base' })
+}
+
+function buildSnapshot(value: unknown, context: CatalogFetchContext, finalUrl: string, query: CatalogQuery): CatalogSnapshot {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('1024Store response is not an object')
+  const raw = value as Dsh1024StoreCatalog
+  if (!Array.isArray(raw.packages) || raw.packages.length > 10_000) throw new Error('1024Store catalog is invalid')
+  if (query.cursor !== undefined && !/^\d+$/u.test(query.cursor)) throw new Error('1024Store cursor is invalid')
+  const requestedCategories = new Set(query.category ?? [])
+  const search = query.q?.toLocaleLowerCase('en-US')
+  const candidates = raw.packages
+    .map(entry => normalizedItem(entry, context, query.locale))
+    .filter((candidate): candidate is RegistryCandidate => candidate !== undefined)
+    .filter(candidate => requestedCategories.size === 0
+      || candidate.item.categories?.some(category => requestedCategories.has(category)) === true)
+    .filter(() => query.capability === undefined || query.capability.length === 0)
+    .filter(candidate => search === undefined || [
+      candidate.item.id,
+      candidate.item.displayName,
+      candidate.item.publisher?.name ?? '',
+      candidate.item.summary,
+    ].some(value => value.toLocaleLowerCase('en-US').includes(search)))
+    .sort((left, right) => compareCandidates(left, right, query))
+  const offset = Number(query.cursor ?? 0)
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > candidates.length) throw new Error('1024Store cursor is invalid')
+  const limit = Math.min(query.limit ?? 20, 100)
+  const end = Math.min(offset + limit, candidates.length)
+  const meta = raw.meta !== null && typeof raw.meta === 'object' && !Array.isArray(raw.meta)
+    ? raw.meta as Dsh1024StoreMeta
+    : {}
+  const generatedAt = typeof meta.generatedAt === 'string' ? meta.generatedAt : meta.updated
+  const providerGeneratedAt = typeof generatedAt === 'string' && !Number.isNaN(Date.parse(generatedAt))
+    ? new Date(generatedAt).toISOString()
+    : undefined
+  const providerRevision = plainText(meta.revision, 160, '') || undefined
   return parseCatalogSnapshot({
     schemaVersion: '1.0.0',
     source: {
-      sourceRecordId: source.sourceRecordId,
-      providerId: source.providerId,
-      adapterId: source.adapterId,
-      registrationKind: source.registrationKind,
+      sourceRecordId: context.source.sourceRecordId,
+      providerId: context.source.providerId,
+      adapterId: context.source.adapterId,
+      registrationKind: context.source.registrationKind,
       fetchedAt: new Date().toISOString(),
       finalUrl,
+      ...(providerGeneratedAt === undefined ? {} : { providerGeneratedAt }),
+      ...(providerRevision === undefined ? {} : { providerRevision }),
     },
-    items,
-    page: page < totalPages ? { nextCursor: String(page + 1), ...(total === undefined ? {} : { total }) } : { ...(total === undefined ? {} : { total }) },
+    items: candidates.slice(offset, end).map(candidate => {
+      const media = resolvedMedia(candidate.mediaCandidates, candidate.item.id, context)
+      return media === undefined ? candidate.item : { ...candidate.item, media }
+    }),
+    page: end < candidates.length
+      ? { nextCursor: String(end), total: candidates.length }
+      : { total: candidates.length },
   })
 }
 
 export const dsh1024StoreAdapter: CatalogAdapter = {
   adapterId: DSH_1024STORE_ADAPTER_ID,
   async fetch(queryValue, context) {
-    const query = { ...queryValue, q: queryValue.q ?? 'plugin', limit: Math.min(queryValue.limit ?? 20, 20) }
-    const url = new URL(DSH_1024STORE_ENDPOINT)
-    url.searchParams.set('q', query.q)
-    url.searchParams.set('limit', String(query.limit))
-    if (query.cursor !== undefined && /^\d+$/u.test(query.cursor)) url.searchParams.set('page', query.cursor)
-    if (query.category?.[0] !== undefined) url.searchParams.set('category', query.category[0])
-    url.searchParams.set('sortBy', query.sort === 'updated' ? 'recent' : 'stars')
-    const response = await context.http.getJson(url.href, context.signal)
-    return buildSnapshot(response.value, context.source, response.finalUrl, query)
+    const query = { ...queryValue, limit: Math.min(queryValue.limit ?? 20, 100) }
+    const expectedOrigin = new URL(DSH_1024STORE_ENDPOINT).origin
+    const response = await context.http.getJson(
+      DSH_1024STORE_ENDPOINT,
+      context.signal,
+      { allowedOrigin: expectedOrigin },
+    )
+    let finalOrigin: string
+    try { finalOrigin = new URL(response.finalUrl).origin }
+    catch { throw new Error('1024Store final URL is invalid') }
+    if (finalOrigin !== expectedOrigin) throw new Error('1024Store response changed the reviewed provider origin')
+    return buildSnapshot(response.value, context, response.finalUrl, query)
   },
 }

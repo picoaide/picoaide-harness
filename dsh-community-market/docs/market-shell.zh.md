@@ -41,6 +41,8 @@ flowchart LR
 
 renderer 只通过普通 DSH route 或 RPC 接收标准化纯数据，不会获得 Electron、文件系统、进程、`desktopRuntime` 或包管理器访问。Host 负责目录 I/O、校验、安装编排、取消和操作串行化。
 
+Client 会贡献一个名为**插件市场**的 `settings.plugins.tab`，同时提供一个侧边栏按钮，用 shell overlay 打开同一套 Market 界面。设置页仍然是规范的管理入口；侧边栏只是便捷入口，不是第二份实现，也不是独立 workspace。只有任一 Market 界面真正挂载后才会开始目录请求，两处界面共用相同的 Host routes 与标准化数据合同。
+
 ## 目录来源与适配器
 
 市场不设默认目录。首次使用时由用户选择不启用来源、启用一个或启用多个，并决定展示顺序。没有选择来源时要展示明确的空状态，不能悄悄退回到某个合作方。

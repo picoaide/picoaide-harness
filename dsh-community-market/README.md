@@ -4,7 +4,7 @@
 
 DSH Community Market is the plugin-market shell for [DSH Desktop](../README.en.md). It helps people discover community plugins and understand what they do. Installation remains a later, separately reviewed phase.
 
-> **Current status: read-only market MVP development.** The package now has loadable Host and Client entries, persisted user-owned source records, a constrained HTTPS client, standard and DSH 1024Store adapters, and a standalone market workspace opened from the sidebar. It remains private and has no installer.
+> **Current status: read-only market MVP development.** The package now has loadable Host and Client entries, persisted user-owned source records, a constrained HTTPS client, standard and DSH 1024Store adapters, an official **Plugin market** tab under **Settings > Plugins**, and a sidebar launcher that opens the same market surface. The package remains private and has no installer.
 
 ## What we are building
 
@@ -21,6 +21,8 @@ The market is a shell around existing DSH capabilities. It does not invent a sec
 ## Catalog sources
 
 The market has no default catalog. People choose which sources to enable, may change their order, and may add a source that implements the published catalog contract. Each source is isolated behind an adapter, and the market UI sees only the same validated, normalized data model.
+
+A conforming source publishes a [`catalog-source` manifest](docs/schemas/catalog-source.schema.json), and its `/v1/plugins` endpoint returns the [`catalog-provider-page` schema](docs/schemas/catalog-provider-page.schema.json). A source may provide `media.icon`; Desktop validates and proxies it before display. Sources without an icon remain valid and receive a local fallback. A conforming standard source needs no custom Market code.
 
 [DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the catalog providers currently cooperating with this project. The market ships a reviewed local adapter for its public API, but the cooperation does not make it enabled by default, preferred in sorting, a fallback when no source is selected, or an endorsement of its listings. That project independently maintains its discovery, validation, website, API, and the separately published `dsh-1024store` plugin. DSH Community Market is not a fork, repackaging, or official client of that plugin.
 

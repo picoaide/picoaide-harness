@@ -41,6 +41,8 @@ flowchart LR
 
 The renderer receives normalized plain data through an ordinary DSH route or RPC. It does not receive Electron, filesystem, process, `desktopRuntime`, or package-manager access. The Host owns catalog I/O, validation, installation orchestration, cancellation, and operation serialization.
 
+The Client contributes a `settings.plugins.tab` entry named **Plugin market** and a sidebar action that opens the same Market surface in a shell overlay. The settings entry remains the canonical management location; the sidebar is only a convenient launcher, not a second implementation or a separate workspace. Catalog requests begin only when either Market surface mounts, and both surfaces share the same Host routes and normalized data contract.
+
 ## Catalog sources and adapters
 
 There is no default catalog. A first-run source chooser lets the user enable no source, one source, or several sources and choose their presentation order. Having no selected source produces an explicit empty state; it never silently falls back to a partner.
