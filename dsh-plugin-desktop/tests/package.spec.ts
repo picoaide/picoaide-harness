@@ -208,10 +208,10 @@ describe('published package surface', () => {
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 
-  it('keeps one fixed brand-blue tray source for generated native assets', () => {
+  it('keeps one fixed brand-black tray source for generated native assets', () => {
     const source = readFileSync(new URL('build/tray-icon.svg', packageRoot), 'utf8')
 
-    expect(source.match(/#4D6BFE/gu)).toHaveLength(1)
+    expect(source.match(/#000000/gu)).toHaveLength(1)
     expect(source).not.toMatch(/<style\b|prefers-color-scheme/iu)
     for (const filename of [
       'tray-iconTemplate.png',
@@ -230,7 +230,7 @@ describe('published package surface', () => {
       .update(readFileSync(new URL('build/app-icon.png', packageRoot)))
       .digest('hex')
 
-    expect(digest).toBe('554ed369078e04d9a022b2a1c856a222a9d1d3f5af326750f6e1a1a3b0d51f5e')
+    expect(digest).toBe('74a8c693d9165369819e612d5bc4f654c0a1d0def81824816ad021b490d83b91')
   })
 
   it('generates a centered macOS icon with a 100-pixel visual inset', async () => {
