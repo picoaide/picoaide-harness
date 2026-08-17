@@ -44,6 +44,7 @@ const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', worksp
   resolutions?: Record<string, unknown>
   scripts?: Record<string, unknown>
 }
+const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoot), 'utf8')
 
 describe('published package surface', () => {
   it('registers both npm launcher names', () => {
@@ -231,6 +232,24 @@ describe('published package surface', () => {
     }))
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
+  })
+
+  it('runs the full gate on Windows and packages through root scripts on native runners', () => {
+    const windowsJob = ciWorkflow.slice(
+      ciWorkflow.indexOf('  desktop-windows:'),
+      ciWorkflow.indexOf('  desktop-macos:'),
+    )
+    const macosJob = ciWorkflow.slice(
+      ciWorkflow.indexOf('  desktop-macos:'),
+      ciWorkflow.indexOf('  upstream-command-windows:'),
+    )
+
+    expect(windowsJob).toContain('- run: yarn check')
+    expect(windowsJob).toContain('- run: yarn dist:win')
+    expect(windowsJob).not.toContain('yarn workspace dsh-plugin-desktop dist:win')
+    expect(macosJob).toContain('- run: yarn workspace dsh-community-market check')
+    expect(macosJob).toContain('- run: yarn dist:mac-smoke')
+    expect(macosJob).not.toContain('yarn workspace dsh-plugin-desktop dist:mac-smoke')
   })
 
   it('keeps one fixed brand-blue tray source for generated native assets', () => {
