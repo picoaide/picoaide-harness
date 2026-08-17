@@ -198,4 +198,10 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=anywhere-labs/deepseek-harness-desktop&type=Date)](https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left)
+<a href="https://www.star-history.com/?repos=anywhere-labs%2Fdeepseek-harness-desktop&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=anywhere-labs/deepseek-harness-desktop&type=date&theme=dark&legend=top-left&sealed_token=n5q9IF1nly6l8t_rt00MPcfS4U7nm9zZws1Tzt0BSDuZbO2qBP5eyNdT3VJq3Sb6CkjzBg0_Nq3SAB2OMgs6Y5gluuqzeiAtfvtLOT3L0gVgK1Eka7TNRYdaeEG7RFCVcuIeddj-GgdxOkGQRdVCI7IyPiRbddxi9yQVSdoEqkFhR835wfOE2f0dyqOw" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=anywhere-labs/deepseek-harness-desktop&type=date&legend=top-left&sealed_token=n5q9IF1nly6l8t_rt00MPcfS4U7nm9zZws1Tzt0BSDuZbO2qBP5eyNdT3VJq3Sb6CkjzBg0_Nq3SAB2OMgs6Y5gluuqzeiAtfvtLOT3L0gVgK1Eka7TNRYdaeEG7RFCVcuIeddj-GgdxOkGQRdVCI7IyPiRbddxi9yQVSdoEqkFhR835wfOE2f0dyqOw" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=anywhere-labs/deepseek-harness-desktop&type=date&legend=top-left&sealed_token=n5q9IF1nly6l8t_rt00MPcfS4U7nm9zZws1Tzt0BSDuZbO2qBP5eyNdT3VJq3Sb6CkjzBg0_Nq3SAB2OMgs6Y5gluuqzeiAtfvtLOT3L0gVgK1Eka7TNRYdaeEG7RFCVcuIeddj-GgdxOkGQRdVCI7IyPiRbddxi9yQVSdoEqkFhR835wfOE2f0dyqOw" />
+ </picture>
+</a>
