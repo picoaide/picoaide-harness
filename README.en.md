@@ -174,6 +174,7 @@ Ecosystem projects and developer tools around DeepSeek Harness.
 | Project | About | Link |
 | --- | --- | --- |
 | dshfind | The learning & sharing community for DeepSeek Harness (DSH). | [GitHub](https://github.com/hikariming/dshfind) |
+| DSH 1024Store | A community plugin directory for the DeepSeek Harness (DSH) ecosystem, listing 4,120 plugins (via PR submissions and automatic discovery of the GitHub dsh-plugin topic; directory data updated 2026-08-17).<br><br>But this repository is more than an awesome list. All the infrastructure needed to maintain this directory is open-sourced here: an online plugin marketplace, a plugin that installs the marketplace into dsh itself, a scheduled pipeline that automatically collects and format-validates the directory, and a free public query API. MIT licensed — fork it to deploy your own plugin marketplace. | [GitHub](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) |
 | ModLens | Adds OCR, layout, and semantic vision capabilities to DeepSeek Harness and text-only coding agents. | [GitHub](https://github.com/liustack/modlens) · [Website](https://liustack.dev) |
 | DeepSeek Harness Orange Book | Community field manual for DeepSeek Harness. | [GitHub](https://github.com/alchaincyf/deepseek-harness-orange-book) |
 | dsh-web-ui | DeepSeek Harness Web UI plugins and themes. | [GitHub](https://github.com/zhu1090093659/dsh-web-ui) · [Gallery](https://gallery.dsh-market.com) |

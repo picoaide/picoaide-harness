@@ -174,6 +174,7 @@ Discord：[加入 DeepSeek Harness Desktop 社区](https://discord.gg/TJeGqKRNM)
 | 项目 | 简介 | 链接 |
 | --- | --- | --- |
 | dshfind | DeepSeek Harness（DSH）学习与分享社区。 | [GitHub](https://github.com/hikariming/dshfind) |
+| DSH 1024Store | 面向 DeepSeek Harness（dsh）生态的社区插件目录，共收录 4120 个插件（含 PR 收录与 GitHub dsh-plugin topic 自动发现），目录数据更新于 2026-08-17。<br><br>但这个仓库不只是一份 awesome list。维护这份目录所需要的全部基建都在这里开源：一个在线插件市场、一个把市场装进 dsh 本体的插件、一条定时自动收集并做格式校验的目录流水线，以及一套免费的公开查询 API。代码采用 MIT 协议，fork 之后就能部署成你自己的插件市场。 | [GitHub](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) |
 | ModLens | 为 DeepSeek Harness 和纯文本 Coding Agent 提供 OCR、版面与语义识别能力。 | [GitHub](https://github.com/liustack/modlens) · [官网](https://liustack.dev) |
 | DeepSeek Harness 橙皮书 | DeepSeek Harness 社区实测手册。 | [GitHub](https://github.com/alchaincyf/deepseek-harness-orange-book) |
 | dsh-web-ui | DeepSeek Harness Web UI 插件与皮肤合集。 | [GitHub](https://github.com/zhu1090093659/dsh-web-ui) · [展示站](https://gallery.dsh-market.com) |
