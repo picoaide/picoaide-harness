@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "查看、下载、删除微云文件，并且提供上传文件到微云、生成分享链接能力，帮你管理微云文件",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://www.weiyun.com/api/v3/mcpserver/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://www.weiyun.com/api/v3/mcpserver",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

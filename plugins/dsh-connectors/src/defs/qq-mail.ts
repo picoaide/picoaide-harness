@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "收发、搜索和整理 QQ 邮件。用自然语言读取邮件内容、汇总邮件线程、管理文件夹。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://api.mail.qq.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://api.mail.qq.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

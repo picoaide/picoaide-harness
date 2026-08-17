@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "全周期管理平台机构端 AI 智能体的 MCP 连接器。基于原有全周期管理平台，通过引入对话式 AI 智能体，实现理解管理者意图，调度平台原有能力模块完成患者数据查询管理等操作",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://bingli.tengmed.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://bingli.tengmed.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

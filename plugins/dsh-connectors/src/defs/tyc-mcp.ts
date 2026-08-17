@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "通过天眼查 MCP 查询多维度企业数据。支持工商登记、股东结构、司法风险、知识产权、董监高、经营数据等 160+ 项企业数据能力，用自然语言完成企业尽调与商业情报分析。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.tianyancha.com/v1/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.tianyancha.com/v1",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

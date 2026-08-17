@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "连接公开行情、研报检索、行业图谱与同舟投研材料，为股市研究提供可复核证据。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp-gateway.textmind-gz.com/mcp/tongzhou-research/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp-gateway.textmind-gz.com/mcp/tongzhou-research",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

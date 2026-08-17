@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "通过启信慧眼 MCP 接入企业全景数据能力，支持用户用自然语言完成企业搜索、工商画像、风险识别、经营动态、知识产权等商业情报分析。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://mcp.qixin.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://mcp.qixin.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

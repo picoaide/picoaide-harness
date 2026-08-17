@@ -7,7 +7,7 @@ export const def: ConnectorDef = {
   "description": "用自然语言管理小鹅通店铺：查询课程与学员，创建和编辑课程，查看订单，并查找或上传图片、音频、电子书和文档素材。",
   "authMode": "oauth",
   "auth": {
-    "discoveryUrl": "https://agent.xiaoe-tech.com/mcp/.well-known/oauth-authorization-server",
+    "discoveryUrl": "https://agent.xiaoe-tech.com/mcp",
     "clientId": "",
     "authorizeUrl": "",
     "tokenUrl": "",

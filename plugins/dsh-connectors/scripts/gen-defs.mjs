@@ -133,7 +133,7 @@ function defForOAuth(id, name, c, warnings) {
     return null
   }
   const first = servers[0]
-  const discoveryUrl = `${first.url}/.well-known/oauth-authorization-server`
+  const discoveryUrl = first.url
   return {
     id,
     name,
