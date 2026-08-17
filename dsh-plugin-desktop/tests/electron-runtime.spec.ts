@@ -595,10 +595,16 @@ describe('Electron compatibility runtime', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
-    diagnostics.export.mockRejectedValueOnce(new Error('disk is full'))
+    diagnostics.export
+      .mockRejectedValueOnce(new Error('disk is full'))
+      .mockResolvedValueOnce('C:\\Users\\Example\\diagnostics-retry.zip')
 
     await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
+    await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
 
+    expect(diagnostics.export).toHaveBeenCalledTimes(2)
+    expect(electron.shell.showItemInFolder)
+      .toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics-retry.zip')
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
       'Unable to Export Diagnostics',
       'disk is full',

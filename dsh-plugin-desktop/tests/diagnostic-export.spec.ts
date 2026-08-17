@@ -1,3 +1,4 @@
+import { once } from 'node:events'
 import {
   existsSync,
   mkdirSync,
@@ -9,11 +10,28 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Worker } from 'node:worker_threads'
 import { describe, expect, it } from 'vitest'
 import AdmZip from 'adm-zip'
-import { exportDiagnosticsZip } from '../src/diagnostic-export.ts'
+import {
+  exportDiagnosticsZip,
+  waitForDiagnosticExportWorker,
+} from '../src/diagnostic-export.ts'
 
 describe('exportDiagnosticsZip', () => {
+  it('terminates a diagnostic Worker that does not respond before its deadline', async () => {
+    const worker = new Worker('setInterval(() => {}, 1_000)', { eval: true })
+    const exited = once(worker, 'exit')
+
+    try {
+      await expect(waitForDiagnosticExportWorker(worker, 25))
+        .rejects.toThrow('diagnostic export worker timed out after 25ms')
+      await expect(exited).resolves.toEqual(expect.any(Array))
+    } finally {
+      await worker.terminate()
+    }
+  })
+
   it('produces a zip containing the log files and system info', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-dx-'))
     writeFileSync(join(dir, 'dsh-2026-08-16.log'), 'hello\n')
