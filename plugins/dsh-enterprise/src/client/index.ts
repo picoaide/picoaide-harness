@@ -40,10 +40,8 @@ const BRAND_CSS = `
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  background: #4D6BFE;
-  color: #fff;
-  font-size: 17px;
+  color: #000;
+  font-size: 22px;
   font-weight: 700;
   line-height: 1;
 }
@@ -63,10 +61,8 @@ const BRAND_CSS = `
   flex: none;
   width: 20px;
   height: 20px;
-  border-radius: 6px;
-  background: #4D6BFE;
-  color: #fff;
-  font-size: 13px;
+  color: #000;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1;
 }
@@ -81,10 +77,8 @@ const BRAND_CSS = `
   justify-content: center;
   width: 20px;
   height: 20px;
-  border-radius: 6px;
-  background: #4D6BFE;
-  color: #fff;
-  font-size: 13px;
+  color: #000;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1;
 }
