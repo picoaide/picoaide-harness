@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { spawn } from 'node:child_process'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { salesEasyDef } from './sales-easy.ts'
+import { dingTalkDef } from './dingtalk.ts'
 import type { ConnectorAuthRequest, ConnectorDef, ConnectorState } from './types.ts'
 
 /**
@@ -56,6 +58,7 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const defs = [
     salesEasyDef,
+    dingTalkDef,
     ...(options.connectors ?? []),
   ]
   const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {})
@@ -74,6 +77,35 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingRequests.set(request.connectorId, request)
   }
 
+  /** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
+  const resolveUrlCommand = async (args: string[]): Promise<string> => {
+    const [command, ...rest] = args
+    if (command === undefined) throw new Error('urlCommand is empty')
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, rest, {
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      child.on('error', (error) => reject(error))
+      child.on('exit', (code) => {
+        if (code !== 0) {
+          reject(new Error(stderr.trim() || `命令退出码 ${String(code)}`))
+          return
+        }
+        const match = /https?:\/\/[^\s"'<>]+/u.exec(stdout)
+        if (!match) {
+          reject(new Error(`无法从命令输出中解析 URL: ${stdout.trim().slice(0, 200)}`))
+          return
+        }
+        resolve(match[0])
+      })
+    })
+  }
+
   /** Register the connector's MCP servers through the mcp-client plugin. */
   const registerMcp = async (def: ConnectorDef): Promise<void> => {
     const credential = await store.readCredential(def.id)
@@ -83,7 +115,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         ? {
             transport: 'streamable-http' as const,
             serverName: server.serverName,
-            url: server.url ?? '',
+            url: server.urlCommand
+              ? await resolveUrlCommand(server.urlCommand)
+              : (server.url ?? ''),
             headers: credential?.accessToken
               ? { Authorization: `Bearer ${credential.accessToken}` }
               : {},

@@ -50,19 +50,34 @@ export interface TokenField {
 
 /** CLI flow: run a command that performs interactive auth (login), then poll a status command. */
 export interface CliAuthConfig {
-  /** Login command, spawned with these args; e.g. ['auth:login', '--client-id', ...]. */
+  /** Login command executable (e.g. 'dws', 'neocrm'). */
   command: string
   args: string[]
   /** Env for the login command. */
   env?: Record<string, string>
   /**
-   * Status check. `command` run with these args should exit 0 when connected
-   * and non-zero while the user is still authorizing. Polled at pollIntervalMs.
+   * Device-flow parsing (mirrors WorkBuddy's cli.json authDeviceFlow): the
+   * login command prints a verification URL and a user code, then keeps
+   * polling until the user authorizes and exits (exit 0 = success). The
+   * parsed URL/code are pushed to the UI through onRequest.
    */
-  statusCommand: string
-  statusArgs: string[]
-  pollIntervalMs: number
-  pollTimeoutMs: number
+  deviceFlow?: {
+    /** Regex extracting the verification URL (first capture group, else the whole match). */
+    uriPattern: string
+    /** Regex extracting the user code (first capture group, else the whole match). */
+    codePattern?: string
+  }
+  /** Keep the login process running until it exits naturally (device flow); default true when deviceFlow is set. */
+  authWaitForExit?: boolean
+  /** Do not auto-open the verification URL (the UI shows it). */
+  suppressBrowser?: boolean
+  /** Timeout for the whole auth process (ms). */
+  timeoutMs?: number
+  /** Status check. `command` run with these args should exit 0 when connected and non-zero while the user is still authorizing. */
+  statusCommand?: string
+  statusArgs?: string[]
+  pollIntervalMs?: number
+  pollTimeoutMs?: number
 }
 
 /** Server-side flow: a fetch callback yields the token (managed by the backend). */
@@ -82,6 +97,11 @@ export interface ConnectorMcp {
   args?: string[]
   /** Streamable HTTP endpoint URL. */
   url?: string
+  /**
+   * Dynamic URL: command run after auth completes whose stdout yields the
+   * endpoint URL (e.g. `dws mcp url get <mcpId>`). Takes precedence over `url`.
+   */
+  urlCommand?: string[]
   /** Extra env merged on top of the child env (stdio). */
   env?: Record<string, string>
 }
