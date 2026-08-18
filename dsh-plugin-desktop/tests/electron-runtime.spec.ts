@@ -376,7 +376,7 @@ describe('Electron compatibility runtime', () => {
     expect(runtime.locale).toBe('zh')
     expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
       .toEqual(expect.arrayContaining([
-        '打开 DSH Desktop',
+        '打开 PicoAide Harness',
         '切换到高级模式',
         '退出',
       ]))
@@ -385,7 +385,7 @@ describe('Electron compatibility runtime', () => {
     expect(runtime.locale).toBe('en')
     expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
       .toEqual(expect.arrayContaining([
-        'Open DSH Desktop',
+        'Open PicoAide Harness',
         'Switch to Advanced Mode',
         'Quit',
       ]))
@@ -395,7 +395,7 @@ describe('Electron compatibility runtime', () => {
     expect(runtime.locale).toBe('zh')
     expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
       .toEqual(expect.arrayContaining([
-        '打开 DSH Desktop',
+        '打开 PicoAide Harness',
         '切换到高级模式',
         '退出',
       ]))

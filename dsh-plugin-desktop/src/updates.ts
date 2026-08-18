@@ -221,9 +221,9 @@ export function apply(ctx: Context, config: Config): void {
       order: 10,
       label: () => downloadingVersion === undefined
         ? availableVersion === undefined
-          ? checking ? 'Checking for Updates…' : 'Check for Updates…'
-          : `PicoAide Harness ${availableVersion} Available`
-        : `Downloading PicoAide Harness ${downloadingVersion}…`,
+          ? desktopTrayLabel(ctx.desktopRuntime.locale, checking ? 'checkingForUpdates' : 'checkForUpdates')
+          : desktopTrayLabel(ctx.desktopRuntime.locale, 'updateAvailable', availableVersion)
+        : desktopTrayLabel(ctx.desktopRuntime.locale, 'downloadingUpdate', downloadingVersion),
       invoke: runManualCheck,
     })
     refreshTray = registration.refresh
