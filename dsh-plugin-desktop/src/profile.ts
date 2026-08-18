@@ -269,6 +269,22 @@ function rowDisabledOnPlatform(row: EntryOptions, platform: NodeJS.Platform): bo
   return Boolean(evaluate({ process: scopedProcess }, row.disabled.__jsExpr))
 }
 
+/** Reject duplicate entries before the Loader turns them into a startup crash. */
+function assertUniqueEntryIds(rows: readonly EntryOptions[]): void {
+  const seen = new Set<string>()
+  for (const row of rows) {
+    if (typeof row.id === 'string') {
+      if (seen.has(row.id)) {
+        throw new Error(`${BIN_NAME}: duplicate loader entry id "${row.id}" in the composed profile`)
+      }
+      seen.add(row.id)
+    }
+    if (row.group === true && Array.isArray(row.config)) {
+      assertUniqueEntryIds(row.config)
+    }
+  }
+}
+
 /** Find one package manifest using the selected profile's dependency graph. */
 function packageManifestFromProfile(name: string, profilePackageUrl: string): string | undefined {
   try {
@@ -379,8 +395,10 @@ export function prepareDesktopProfile(
     ...profile.patches,
     ...homePatches,
   ]
+  const composedRows = composeEntries([patches])
+  assertUniqueEntryIds(composedRows)
   const rows = new Map<string, EntryOptions>()
-  for (const row of composeEntries([patches])) {
+  for (const row of composedRows) {
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
   const settings = rows.get('settings')
