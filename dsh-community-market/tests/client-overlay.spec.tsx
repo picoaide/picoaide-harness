@@ -283,4 +283,27 @@ describe('community market overlay', () => {
     resolveCatalog(response(catalogWithItem))
     expect(await screen.findByText('Better Sidebar')).toBeTruthy()
   })
+
+  it('toggles a source and stops catalog requests when it becomes disabled', async () => {
+    const disabledSource = { ...source, enabled: false }
+    const request = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/state')) return response(stateWithSource)
+      if (url.includes('/catalog')) return response(catalogWithItem)
+      expect(init?.method).toBe('POST')
+      return response({ sources: [disabledSource] })
+    })
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+    fireEvent.click(screen.getByRole('button', { name: 'sources' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'disable' }))
+    expect(await screen.findByText('disabled')).toBeTruthy()
+    expect(request).toHaveBeenCalledTimes(3)
+    expect(request.mock.calls[2]?.[1]).toMatchObject({ method: 'POST' })
+  })
 })
