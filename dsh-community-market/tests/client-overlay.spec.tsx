@@ -248,4 +248,22 @@ describe('community market overlay', () => {
     expect(screen.getByText('partialFailure')).toBeTruthy()
     expect(screen.getByText('Adds a configurable sidebar panel.')).toBeTruthy()
   })
+
+  it('marks cards backed by a stale catalog snapshot', async () => {
+    const staleCatalog: MarketCatalogResponse = {
+      ...catalogWithItem,
+      results: catalogWithItem.results.map(result => ({ ...result, stale: true })),
+    }
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : response(staleCatalog)
+    ))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+
+    expect(await screen.findByText('Better Sidebar')).toBeTruthy()
+    expect(screen.getByText('stale')).toBeTruthy()
+  })
 })
