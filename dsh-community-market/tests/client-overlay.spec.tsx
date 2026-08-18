@@ -330,12 +330,15 @@ describe('community market overlay', () => {
 
   it('adds a trimmed standard source and closes the dialog on success', async () => {
     const addedSource: MarketSourceView = {
-      ...source,
       sourceRecordId: '018f1f77-a5c4-7b73-a9ae-0242ac120003',
       registrationKind: 'user-added',
-      builtInProviderKey: undefined,
+      adapterId: 'market.standard-http-v1',
+      providerId: 'com.example.catalog',
+      enabled: false,
+      order: 1,
       name: 'Example Catalog',
       endpoint: 'https://plugins.example.org/catalog-source.json',
+      partnership: false,
     }
     const request = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input)
