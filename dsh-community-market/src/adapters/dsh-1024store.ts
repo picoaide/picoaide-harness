@@ -21,7 +21,18 @@ export interface Dsh1024StoreRawItem {
   readonly added?: unknown
   readonly stars?: unknown
   readonly installCount?: unknown
+  readonly installMethods?: unknown
   readonly media?: unknown
+}
+
+interface Dsh1024StoreInstallMethod {
+  readonly kind?: unknown
+  readonly spec?: unknown
+  readonly command?: unknown
+  readonly verification?: unknown
+  readonly code?: unknown
+  readonly requiresBuildAllowance?: unknown
+  readonly revision?: unknown
 }
 
 interface Dsh1024StoreMeta {
@@ -52,11 +63,39 @@ interface MediaCandidate {
 
 const GITHUB_OWNER_PATTERN = /^[a-z0-9][a-z0-9-]{0,99}$/iu
 const GITHUB_REPOSITORY_PATTERN = /^[a-z0-9._-]{1,100}$/iu
+const NPM_PACKAGE_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
+const STABLE_SEMVER_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u
 
 function plainText(value: unknown, max: number, fallback: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max
     || /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)) return fallback
   return value
+}
+
+/**
+ * Convert only one provider-reviewed npm target into non-executable catalog
+ * identity. The Host still revalidates the exact version against the npm
+ * registry before it can create an install intent.
+ */
+function reviewedNpmTarget(item: Dsh1024StoreRawItem): { name: string; version: string } | undefined {
+  if (!Array.isArray(item.installMethods)) return undefined
+  const targets = new Map<string, { name: string; version: string }>()
+  for (const value of item.installMethods) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+    const method = value as Dsh1024StoreInstallMethod
+    if (
+      method.kind !== 'npm'
+      || method.verification !== 'verified'
+      || method.code !== 'repository_backlink'
+      || method.requiresBuildAllowance !== false
+      || typeof method.spec !== 'string'
+      || typeof method.revision !== 'string'
+      || !NPM_PACKAGE_PATTERN.test(method.spec)
+      || !STABLE_SEMVER_PATTERN.test(method.revision)
+    ) continue
+    targets.set(`${method.spec}@${method.revision}`, { name: method.spec, version: method.revision })
+  }
+  return targets.size === 1 ? targets.values().next().value : undefined
 }
 
 function repositoryFromItem(item: Dsh1024StoreRawItem): { url: string; subdirectory?: string } | undefined {
@@ -198,6 +237,7 @@ function normalizedItem(
     const pushedAt = typeof item.pushedAt === 'string' && !Number.isNaN(Date.parse(item.pushedAt))
       ? new Date(item.pushedAt).toISOString()
       : undefined
+    const npmTarget = reviewedNpmTarget(item)
     const addedAt = typeof item.added === 'string' && !Number.isNaN(Date.parse(item.added))
       ? Date.parse(item.added)
       : 0
@@ -209,6 +249,10 @@ function normalizedItem(
       ...(descriptionValue === undefined ? {} : { description: summary }),
       ...(category === undefined ? {} : { categories: [category] }),
       repository,
+      ...(npmTarget === undefined ? {} : {
+        latestVersion: npmTarget.version,
+        package: { registry: 'npm' as const, name: npmTarget.name },
+      }),
       ...(owner === undefined ? {} : { publisher: { name: owner, url: `https://github.com/${owner}` } }),
       ...(pushedAt === undefined ? {} : { updatedAt: pushedAt }),
       provenance: {
