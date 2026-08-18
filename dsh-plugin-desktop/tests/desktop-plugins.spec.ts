@@ -137,7 +137,6 @@ describe('desktop direct bundle management', () => {
       expect.objectContaining({ status: 'active', mutable: false }),
     )
     expect(desktopPluginBundleMutable('dsh-plugin-desktop')).toBe(false)
-    expect(desktopPluginBundleMutable('dsh-community-market')).toBe(false)
     expect(desktopPluginBundleMutable('../third-party-plugin')).toBe(false)
     expect(desktopPluginBundleMutable('Third-Party-Plugin')).toBe(false)
     await harness.dispose()
