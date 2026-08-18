@@ -339,4 +339,33 @@ describe('community market Host routes', () => {
       await server.close()
     }
   })
+
+  it('aborts an active catalog request when its client disconnects', async () => {
+    let releaseRequest!: () => void
+    const requestStarted = new Promise<void>((resolve) => { releaseRequest = resolve })
+    let externalSignal: AbortSignal | undefined
+    vi.spyOn(restrictedHttpClient, 'getJson').mockImplementation(async (_url, signal) => {
+      externalSignal = signal
+      releaseRequest()
+      return await new Promise<never>((_resolve, reject) => {
+        signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+      })
+    })
+    const server = await startMarketServer([builtInSource({ enabled: true })])
+    const controller = new AbortController()
+    try {
+      const request = fetch(`${server.baseUrl}${marketRoutes.catalog}?q=plugin`, {
+        signal: controller.signal,
+      }).catch((cause: unknown) => cause)
+      await requestStarted
+
+      controller.abort()
+      await request
+
+      await vi.waitFor(() => { expect(externalSignal?.aborted).toBe(true) })
+    } finally {
+      controller.abort()
+      await server.close()
+    }
+  })
 })
