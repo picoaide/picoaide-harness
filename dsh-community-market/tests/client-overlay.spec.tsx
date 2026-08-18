@@ -327,4 +327,39 @@ describe('community market overlay', () => {
     await waitFor(() => { expect(screen.queryByText(source.name)).toBeNull() })
     expect(request).toHaveBeenCalledTimes(3)
   })
+
+  it('adds a trimmed standard source and closes the dialog on success', async () => {
+    const addedSource: MarketSourceView = {
+      ...source,
+      sourceRecordId: '018f1f77-a5c4-7b73-a9ae-0242ac120003',
+      registrationKind: 'user-added',
+      builtInProviderKey: undefined,
+      name: 'Example Catalog',
+      endpoint: 'https://plugins.example.org/catalog-source.json',
+    }
+    const request = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/state')) return response(stateWithSource)
+      if (url.includes('/catalog')) return response(catalogWithItem)
+      expect(init?.method).toBe('POST')
+      return response({ sources: [source, addedSource] })
+    })
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+    fireEvent.click(screen.getByRole('button', { name: 'sources' }))
+    fireEvent.click(screen.getByRole('button', { name: 'addStandard' }))
+    fireEvent.change(screen.getByLabelText('standardSource'), { target: { value: '  https://plugins.example.org/catalog-source.json  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAdd' }))
+
+    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
+    expect(request.mock.calls[2]?.[1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ action: 'add-standard', manifestUrl: 'https://plugins.example.org/catalog-source.json' }),
+    })
+    expect(screen.getByText('Example Catalog')).toBeTruthy()
+  })
 })
