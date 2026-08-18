@@ -411,6 +411,15 @@ describe('MarketSettingsTab', () => {
     expect(screen.getByText(receipt.packageName)).toBeTruthy()
     expect(screen.getByText(receipt.version)).toBeTruthy()
     expect(screen.getByText('web')).toBeTruthy()
+    expect(screen.getByText(en.operationWarning)).toBeTruthy()
+    const support = screen.getByRole('link', { name: en.contactUs }) as HTMLAnchorElement
+    expect(support.parentElement?.textContent).toBe(
+      `${en.operationRiskBeforeContact}${en.contactUs}${en.operationRiskAfterContact}`,
+    )
+    expect(support.href).toBe('https://github.com/anywhere-labs/deepseek-harness-desktop/issues')
+    expect(support.target).toBe('_blank')
+    expect(support.rel).toContain('noopener')
+    expect(screen.getByText(en.restartAfterOperation)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: en.confirmInstall }))
     await waitFor(() => {
@@ -424,6 +433,27 @@ describe('MarketSettingsTab', () => {
       expect(readMarketState).toHaveBeenCalledTimes(1)
       expect(readMarketCatalog).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('links failed install verification to the standard-plugin requirements', async () => {
+    const item = makeInstallableItem(firstSource)
+    vi.mocked(readMarketState).mockResolvedValue(enabledState)
+    vi.mocked(readMarketCatalog).mockResolvedValue(catalogForSource(firstSource, [item]))
+    vi.mocked(readMarketInstallable).mockResolvedValue(installableResponse([item]))
+    vi.mocked(previewMarketOperation).mockRejectedValue(new Error('not a standard plugin'))
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('button', { name: /Installable Plugin/u })
+    fireEvent.click(screen.getByRole('button', { name: en.installable }))
+    fireEvent.click(await screen.findByRole('button', { name: `${en.install}: ${item.displayName}` }))
+
+    expect(await screen.findByText(en.previewError)).toBeTruthy()
+    const details = screen.getByRole('link', { name: en.verificationDetails }) as HTMLAnchorElement
+    expect(details.href).toBe(
+      'https://github.com/anywhere-labs/deepseek-harness-desktop/blob/6226e3730d/dsh-community-market/docs/install-and-uninstall.md',
+    )
+    expect(details.target).toBe('_blank')
+    expect(details.rel).toContain('noopener')
   })
 
   it('uninstalls only from the current profile receipt and executes the Host preview id', async () => {

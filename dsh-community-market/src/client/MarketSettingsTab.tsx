@@ -49,6 +49,15 @@ import {
 type MarketItem = CatalogSnapshot['items'][number]
 type MarketView = 'discover' | 'installable' | 'installed' | 'sources'
 const INSTALLABLE_PAGE_SIZE = 50
+const INSTALL_REQUIREMENTS_DOCS = {
+  en: 'https://github.com/anywhere-labs/deepseek-harness-desktop/blob/6226e3730d/dsh-community-market/docs/install-and-uninstall.md',
+  zh: 'https://github.com/anywhere-labs/deepseek-harness-desktop/blob/6226e3730d/dsh-community-market/docs/install-and-uninstall.zh.md',
+} as const
+const DSH_DESKTOP_ISSUES_URL = 'https://github.com/anywhere-labs/deepseek-harness-desktop/issues'
+
+function installRequirementsUrl(locale: string): string {
+  return locale.toLowerCase().startsWith('zh') ? INSTALL_REQUIREMENTS_DOCS.zh : INSTALL_REQUIREMENTS_DOCS.en
+}
 
 interface VisibleItem {
   readonly item: MarketItem
@@ -534,7 +543,7 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
         setInstallationsError(t('desktopUnavailable'))
         setOperationError(t('desktopUnavailable'))
       } else {
-        setOperationError(t('previewError'))
+        setOperationError(t(requestValue.action === 'install' ? 'previewError' : 'uninstallPreviewError'))
       }
     } finally {
       if (operationRequest.current === request) {
@@ -649,6 +658,11 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
             loading={installableLoading}
             unavailable={installableUnavailable}
             error={installableError ?? operationError}
+            verificationHelpHref={
+              installableError === undefined && operationError === t('previewError')
+                ? installRequirementsUrl(readLocale())
+                : undefined
+            }
             operationPending={operationPending}
             onQuery={setInstallableQuery}
             onSearch={() => {
@@ -891,6 +905,7 @@ function InstallableView(props: {
   loading: boolean
   unavailable: boolean
   error?: string | undefined
+  verificationHelpHref?: string | undefined
   operationPending: boolean
   onQuery: (value: string) => void
   onSearch: () => void
@@ -983,7 +998,17 @@ function InstallableView(props: {
           ))}
         </div>
       )}
-      {props.error !== undefined && <div className="dshMarketBanner" role="alert"><StateDot state="error" />{props.error}</div>}
+      {props.error !== undefined && (
+        <div className="dshMarketBanner" role="alert">
+          <StateDot state="error" />
+          <span>{props.error}</span>
+          {props.verificationHelpHref !== undefined && (
+            <a href={props.verificationHelpHref} target="_blank" rel="noopener noreferrer">
+              {props.t('verificationDetails')} <IconRightUpOutline16 size={14} />
+            </a>
+          )}
+        </div>
+      )}
       {props.items.length === 0 && (
         <div className="dshMarketEmpty"><h2>{props.t('noInstallable')}</h2><p>{props.t('noInstallableBody')}</p></div>
       )}
@@ -1349,6 +1374,16 @@ function OperationConfirmModal({ preview, pending, error, onCancel, onConfirm, t
       <div className="dshMarketOperationReview">
         <OperationFacts operation={preview} t={t} />
         <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('operationWarning')}</span></div>
+        {installing && (
+          <div className="dshMarketOperationWarning">
+            <StateDot state="warning" size={12} />
+            <span>
+              {t('operationRiskBeforeContact')}
+              <a href={DSH_DESKTOP_ISSUES_URL} target="_blank" rel="noopener noreferrer">{t('contactUs')}</a>
+              {t('operationRiskAfterContact')}
+            </span>
+          </div>
+        )}
         <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('restartAfterOperation')}</span></div>
         {pending && <div className="dshMarketOperationProgress" role="status"><StateDot state="ongoing" size={12} />{installing ? t('installing') : t('uninstalling')}</div>}
         {error !== undefined && <div className="dshMarketError" role="alert">{error}</div>}
