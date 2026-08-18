@@ -1131,7 +1131,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-directory-picker-browse@npm:0.1.0-rc.7, @deepseek-ai/dsh-client-ui-directory-picker-browse@npm:^0.1.0-rc.7":
+"@deepseek-ai/dsh-client-ui-directory-picker-browse@npm:0.1.0-rc.7":
   version: 0.1.0-rc.7
   resolution: "@deepseek-ai/dsh-client-ui-directory-picker-browse@npm:0.1.0-rc.7"
   dependencies:
@@ -1146,6 +1146,24 @@ __metadata:
     "@deepseek-ai/dsh-invariants": ^0.1.0-rc.7
     react: ^18.2.0
   checksum: 10c0/331ab6d9646d6432c1df9c5bd8142aec5c67f7698b779443e0941f01747b5f77d726174724c91390b6965a7b32f20f5efbe531c76938f465fd42f33bae36fa75
+  languageName: node
+  linkType: hard
+
+"@deepseek-ai/dsh-client-ui-directory-picker-browse@patch:@deepseek-ai/dsh-client-ui-directory-picker-browse@npm%3A0.1.0-rc.7#./patches/dsh-client-ui-directory-picker-browse@0.1.0-rc.7.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 0.1.0-rc.7
+  resolution: "@deepseek-ai/dsh-client-ui-directory-picker-browse@patch:@deepseek-ai/dsh-client-ui-directory-picker-browse@npm%3A0.1.0-rc.7#./patches/dsh-client-ui-directory-picker-browse@0.1.0-rc.7.patch::version=0.1.0-rc.7&hash=8f4c64&locator=deepseek-harness-desktop%40workspace%3A."
+  dependencies:
+    clsx: "npm:^2.0.0"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.1
+    "@deepseek-ai/dsh-client-locale": ^0.1.0-rc.7
+    "@deepseek-ai/dsh-client-runtime": ^0.1.0-rc.7
+    "@deepseek-ai/dsh-client-ui-primitives": ^0.1.0-rc.7
+    "@deepseek-ai/dsh-client-ui-slots": ^0.1.0-rc.7
+    "@deepseek-ai/dsh-client-ui-workspace": ^0.1.0-rc.7
+    "@deepseek-ai/dsh-invariants": ^0.1.0-rc.7
+    react: ^18.2.0
+  checksum: 10c0/cd5b06cee91d6b16210ca75a6d25a53fc8c60bbdfd0ec20176f02f444aeb3d9b9eab71f4dd16381363f52ae2d6f618a79cf831713fc91d2a4299846891318e13
   languageName: node
   linkType: hard
 
