@@ -301,4 +301,23 @@ describe('community market Host routes', () => {
       await server.close()
     }
   })
+
+  it('rejects a cross-origin source mutation without changing settings', async () => {
+    const server = await startMarketServer([])
+    try {
+      const response = await mutateSource(server, {
+        action: 'add-builtin',
+        key: DSH_1024STORE_KEY,
+      }, 'http://attacker.example')
+
+      expect(response.status).toBe(405)
+      await expect(response.json()).resolves.toEqual({
+        error: 'source changes require a local same-origin POST',
+      })
+      const state = await fetch(`${server.baseUrl}${marketRoutes.state}`)
+      await expect(state.json()).resolves.toMatchObject({ sources: [] })
+    } finally {
+      await server.close()
+    }
+  })
 })
