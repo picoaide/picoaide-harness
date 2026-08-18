@@ -1,0 +1,96 @@
+// @vitest-environment jsdom
+
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { MarketStateResponse } from '../src/api-types.js'
+import type {} from '../src/client/index.js'
+import { MarketController } from '../src/client/controller.js'
+import { MarketOverlay, type MarketOverlayProps } from '../src/client/MarketOverlay.js'
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => {
+  const passthrough = ({ children }: { children?: ReactNode }) => <>{children}</>
+  const Button = ({
+    children,
+    icon,
+    type = 'button',
+    ...props
+  }: { children?: ReactNode; icon?: ReactNode; type?: 'button' | 'submit'; [key: string]: unknown }) => (
+    <button type={type} {...props}>{icon}{children}</button>
+  )
+  const Input = ({ icon: _icon, ...props }: { icon?: ReactNode; [key: string]: unknown }) => <input {...props} />
+  const Modal = ({
+    open,
+    title,
+    children,
+    footer,
+  }: { open: boolean; title: string; children?: ReactNode; footer?: ReactNode }) => open
+    ? <div role="dialog"><h2>{title}</h2>{children}{footer}</div>
+    : null
+  const icon = () => null
+  return {
+    Button,
+    Input,
+    Modal,
+    Tooltip: passthrough,
+    IconCheckOutline16: icon,
+    IconCloseOutline16: icon,
+    IconCordisPluginOutline14: icon,
+    IconDataOutline16: icon,
+    IconGlobeOutline14: icon,
+    IconLoadingOutline16: icon,
+    IconPlusOutline16: icon,
+    IconRefreshOutline16: icon,
+    IconRightUpOutline16: icon,
+    IconSearchOutline16: icon,
+    IconSettingsOutline16: icon,
+    IconTrashOutline16: icon,
+    IconWarningOutline16: icon,
+  }
+})
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+const t = ((key: string) => key) as PropsLocale<'community-market'>['t']
+
+function props(controller: MarketController): MarketOverlayProps {
+  return {
+    controller,
+    readLocale: () => 'en',
+    t,
+    useSessions: (() => undefined) as MarketOverlayProps['useSessions'],
+    useWorkspaces: (() => undefined) as MarketOverlayProps['useWorkspaces'],
+  }
+}
+
+function response(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+describe('community market overlay', () => {
+  it('shows the empty source state without requesting a catalog', async () => {
+    const state: MarketStateResponse = { sources: [], builtIns: [] }
+    const request = vi.fn<typeof fetch>(async () => response(state))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+
+    expect(await screen.findByRole('heading', { name: 'emptyTitle' })).toBeTruthy()
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(String(request.mock.calls[0]?.[0])).toContain('/api/community-market/state')
+    expect(screen.getByText('emptyBody')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'chooseSources' }))
+    await waitFor(() => { expect(screen.getByRole('heading', { name: 'sources' })).toBeTruthy() })
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+})
