@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsScope } from '@deepseek-ai/dsh-settings'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DSH_1024STORE_ADAPTER_ID,
   DSH_1024STORE_ENDPOINT,
@@ -12,6 +12,7 @@ import {
 import type { MarketSettingsDocument } from '../src/catalog/source-store.js'
 import type { LocalSourceRecord } from '../src/contracts/index.js'
 import { marketRoutes, registerMarketRoutes } from '../src/host/routes.js'
+import { restrictedHttpClient } from '../src/network/restricted-http.js'
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
 
@@ -83,6 +84,8 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 describe('community market Host routes', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
   it('returns settings-backed source state with built-in provider metadata', async () => {
     const server = await startMarketServer([builtInSource()])
     try {
@@ -104,6 +107,64 @@ describe('community market Host routes', () => {
           providerId: DSH_1024STORE_PROVIDER_ID,
           partnership: true,
         }],
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('normalizes catalog query parameters and returns aggregated source results', async () => {
+    const getJson = vi.spyOn(restrictedHttpClient, 'getJson').mockResolvedValue({
+      value: {
+        page: 1,
+        total: 1,
+        totalPages: 1,
+        results: [{
+          id: 'example/dsh-plugin-sidebar',
+          name: 'dsh-plugin-sidebar',
+          owner: 'example',
+          url: 'https://github.com/example/dsh-plugin-sidebar',
+          category: 'interface',
+          description: { zh: 'sidebar plugin' },
+          pushedAt: '2026-08-17T05:45:19Z',
+        }],
+      },
+      finalUrl: 'https://api.deepseek1024.com/v1/plugins/search?q=sidebar&limit=15&category=interface&sortBy=recent',
+    })
+    const server = await startMarketServer([builtInSource({ enabled: true })])
+    try {
+      const response = await fetch(
+        `${server.baseUrl}${marketRoutes.catalog}?q=%20sidebar%20&category=interface&limit=15&sort=updated&locale=zh-CN`,
+      )
+
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body).toMatchObject({
+        query: {
+          q: 'sidebar',
+          category: ['interface'],
+          limit: 15,
+          sort: 'updated',
+          locale: 'zh-CN',
+        },
+        results: [{
+          source: { sourceRecordId: builtInSource().sourceRecordId },
+          stale: false,
+          snapshot: {
+            items: [{
+              id: 'example/dsh-plugin-sidebar',
+              provenance: { sourceRecordId: builtInSource().sourceRecordId },
+            }],
+          },
+        }],
+      })
+      expect(body.fetchedAt).toEqual(expect.any(String))
+      const requestUrl = new URL(getJson.mock.calls[0]![0])
+      expect(Object.fromEntries(requestUrl.searchParams)).toEqual({
+        q: 'sidebar',
+        limit: '15',
+        category: 'interface',
+        sortBy: 'recent',
       })
     } finally {
       await server.close()
