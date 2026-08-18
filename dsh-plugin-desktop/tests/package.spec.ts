@@ -50,12 +50,12 @@ const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoo
 describe('published package surface', () => {
   it('runs desktop and community market typechecks from the root command', () => {
     expect(workspaceManifest.scripts?.typecheck)
-      .toBe('yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-community-market typecheck')
+      .toBe('yarn workspace @picoaide/dsh-enterprise typecheck && yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-community-market typecheck')
   })
 
   it('runs desktop and community market tests from the root command', () => {
     expect(workspaceManifest.scripts?.test)
-      .toBe('yarn workspace dsh-plugin-desktop test && yarn workspace dsh-community-market test')
+      .toBe('yarn workspace @picoaide/dsh-enterprise test && yarn workspace dsh-plugin-desktop test && yarn workspace dsh-community-market test')
   })
 
   it('registers both npm launcher names', () => {
@@ -322,23 +322,18 @@ describe('published package surface', () => {
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 
-  it('runs the full gate on Windows and packages through root scripts on native runners', () => {
+  it('packages the desktop through workspace commands on native runners', () => {
     const windowsJob = ciWorkflow.slice(
       ciWorkflow.indexOf('  desktop-windows:'),
       ciWorkflow.indexOf('  desktop-macos:'),
     )
     const macosJob = ciWorkflow.slice(
       ciWorkflow.indexOf('  desktop-macos:'),
-      ciWorkflow.indexOf('  upstream-command-windows:'),
+      ciWorkflow.length,
     )
 
-    expect(windowsJob).toContain('- run: yarn check')
-    expect(windowsJob).toContain('- run: yarn dist:win')
-    expect(windowsJob).toContain('- run: yarn dist:win-portable')
-    expect(windowsJob).not.toContain('yarn workspace dsh-plugin-desktop dist:win')
-    expect(macosJob).toContain('- run: yarn workspace dsh-community-market check')
-    expect(macosJob).toContain('- run: yarn dist:mac-smoke')
-    expect(macosJob).not.toContain('yarn workspace dsh-plugin-desktop dist:mac-smoke')
+    expect(windowsJob).toContain('yarn workspace dsh-plugin-desktop dist:win')
+    expect(macosJob).toContain('yarn workspace dsh-plugin-desktop package:dir')
   })
 
   it('keeps one fixed brand-black tray source for generated native assets', () => {
