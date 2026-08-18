@@ -21,12 +21,14 @@
 
 ## 安装插件
 
-1. 选择一个目录来源，然后打开**可安装**。
-2. 选择一个条目。它出现在这里，只表示通过了 Host 本地、fail-closed 的结构候选规则；此时 Host 尚未针对该 package 请求 npm。目录给出的版本或命令始终没有执行授权。
-3. Preview 此时才针对这一个候选访问官方 npm registry，检查 package/仓库身份、deprecated 状态、lifecycle script、runtime、integrity、tarball、DSH bundle 证据和当前 profile 可安装性。只有成功后，确认框才会展示目录显示名、验证过的精确 `packageName@version`、当前 profile 和过期时间。
+1. 选择一个目录来源，再点击**发现**或**可安装**中的卡片；统一操作弹窗会立即打开。
+2. Host 会判断这个精确的标准化来源/条目能否使用受管安装。出现在**可安装**中，只表示它通过了本地、fail-closed 的结构候选规则；此时 Host 尚未针对该 package 请求 npm。目录给出的版本或命令始终没有执行授权。
+3. 受管 preview 此时才针对这一个候选访问官方 npm registry，检查 package/仓库身份、deprecated 状态、lifecycle script、runtime、integrity、tarball、DSH bundle 证据和当前 profile 可安装性。只有成功后，同一个弹窗才会切换成确认框，并展示目录显示名、验证过的精确 `packageName@version`、当前 profile 和过期时间。
 4. 阅读“本地代码”提示并确认。确认是一次性且短时有效的；如果当前 profile 或 Host 候选发生变化，或者确认过期、已被使用，就需要重新预览。
 5. Desktop 在当前 profile 中执行受管 package 操作。Host 会在真正修改 profile 前再次检查 package，随后验证安装后的 DSH bundle 并保存 receipt。
-6. 重启 DSH Desktop。安装成功会修改磁盘上的 profile，但当前运行的进程不会自动加载新插件。
+6. 选择**立即重启**或**稍后重启**。安装成功会修改磁盘上的 profile，但当前运行的进程不会自动加载新插件。立即重启会消费一份短时、一次性重启许可，系统不会静默重启。
+
+如果受管 preview 不可用，弹窗会保留为详情。对于精确稳定的 npm 身份，Host 可以展示一条根据规范化身份重建的、有界且只用于展示的命令。它可能与仓库中描述的命令不同，不是 provider 返回的原始命令，也没有通过受管安装器的全部验证。**打开 DSH 终端**不会提交命令、路径或 profile，只负责打开 Desktop 已配置的终端；用户需要先检查源码，再自行决定是否复制并运行文本。手动安装不会生成 Market receipt，因此也不会授予 Market 卸载权限。
 
 **可安装**只表示“这个条目是当前 profile 的本地结构候选”。它不表示已经联系 npm、兼容性已经证明，或代码已经获批、安全。Preview 仍可能拒绝它；即使 preview 成功，如果 registry、目录或 profile 状态发生变化，也不承诺执行一定成功。
 
@@ -92,11 +94,11 @@ flowchart LR
 - 安装 preview 只接受 `sourceRecordId` 和 `itemId`。Host 从自己此前观察到的候选中选择目标，针对该 package 完整执行官方 registry、runtime、lifecycle、integrity、仓库、DSH bundle 和当前 profile 复核，只有成功后才返回不透明 `previewId` 与精确确认摘要。
 - 执行阶段只接受该 `previewId`。一次性 token 会绑定候选、registry 证据、当前 profile 和过期时间；Host 需要重新校验所有可变状态。
 - 已安装状态读取只返回当前 profile 的 receipt。卸载预览只接受 `receiptId`，执行阶段同样只接受不透明 `previewId`。
-- renderer 不会获得文件系统、进程、环境变量或 package manager 权限。package 修改通过 `desktopPnpm.runPlugin()` 完成，参数由 Host 固定构造，并使用当前 profile 的绝对目录。
+- renderer 不会获得文件系统、进程、环境变量或 package manager 权限。package 修改通过 `desktopPnpm.runPlugin()` 完成，参数由 Host 固定构造，并使用当前 profile 的绝对目录。它唯一可以收到的命令形文本是有界、只展示的手动提示；终端操作不能接收或执行该文本。
 
 Receipt 会记录 profile、精确 npm 身份、integrity、DSH bundle patch、目录 provenance、展示名称和安装时间。它只是“本 Market 已完成并验证一次受管安装”的本地证据，不是 provider 凭据，也不能依赖来源继续存在。
 
-如果 Desktop package 能力不可用，目录浏览仍然可以工作，而安装与卸载会返回不可用状态。系统不会退回 ambient `pnpm`、shell、猜测的 executable、repository 命令或未激活 profile。
+如果 Desktop package 能力不可用，目录浏览仍然可以工作，而受管安装与卸载会返回不可用状态。受管路径不会退回 ambient `pnpm`、shell、猜测的 executable、repository 命令或未激活 profile。打开 DSH 终端是另一项明确的用户操作，本身绝不会启动 package 操作。
 
 ## 失败与恢复
 

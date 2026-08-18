@@ -21,12 +21,14 @@ Optional catalog metadata reports `scannedAt`, cache `expiresAt`, optional `prov
 
 ## Install a plugin
 
-1. Select a catalog source and open **Installable**.
-2. Choose an item. Its presence means only that it passed the Host's local, fail-closed structural candidate rules; the Host has not yet queried npm for that package. The catalog's version or command is never execution authority.
-3. Preview now verifies this one candidate against the official npm registry, including package/repository identity, deprecation, lifecycle scripts, runtime, integrity, tarball, DSH bundle evidence, and current-profile availability. Only success opens a confirmation with the catalog display name, verified exact `packageName@version`, active profile, and expiry.
+1. Select a catalog source and choose a card in **Discover** or **Installable**. The shared action dialog opens immediately.
+2. The Host checks whether that exact normalized source/item is eligible for managed installation. Presence in **Installable** means only that it passed local, fail-closed structural candidate rules; the Host has not yet queried npm for that package. The catalog's version or command is never execution authority.
+3. Managed preview verifies this one candidate against the official npm registry, including package/repository identity, deprecation, lifecycle scripts, runtime, integrity, tarball, DSH bundle evidence, and current-profile availability. Only success turns the same dialog into a confirmation with the catalog display name, verified exact `packageName@version`, active profile, and expiry.
 4. Read the local-code warning and confirm. The confirmation is one-shot and short-lived. If the active profile or Host candidate changes, or the confirmation expires or is reused, a new preview is required.
 5. Desktop runs the managed package operation in the active profile. The Host checks the package again before it changes the profile, then verifies the installed DSH bundle and saves a receipt.
-6. Restart DSH Desktop. A successful install changes the profile on disk, but the running process does not load the new plugin automatically.
+6. Choose **Restart now** or **Restart later**. A successful install changes the profile on disk, but the running process does not load the new plugin automatically. The immediate action consumes a short-lived one-shot restart grant and never restarts silently.
+
+If managed preview is unavailable, the dialog remains a details view. For an exact stable npm identity, the Host may show a bounded display-only command reconstructed from normalized identity. It may differ from the command described in the repository, is not the provider's original command, and has not passed the managed installer's complete verification. **Open DSH Terminal** sends no command, path, or profile: it only opens Desktop's configured terminal so the user can inspect the source and decide whether to copy and run the text. A manual install creates no Market receipt and therefore grants no Market uninstall authority.
 
 The **Installable** label means only “this listing is a local structural candidate for the current profile.” It does not mean npm has been contacted, compatibility is proven, or the code is approved or safe. Preview may still reject it, and a successful preview is not a promise that execution will succeed if registry, catalog, or profile state changes.
 
@@ -92,11 +94,11 @@ Keep those states separate:
 - Install preview accepts only `sourceRecordId` and `itemId`. The Host selects its previously observed candidate, performs the full official-registry, runtime, lifecycle, integrity, repository, DSH bundle, and active-profile verification for that package, and returns an opaque `previewId` plus the exact confirmation summary only on success.
 - Execute accepts only that `previewId`. The one-shot token binds the candidate, registry evidence, active profile, and expiry; the Host revalidates all mutable state.
 - Installed-state reads return receipts scoped to the active profile. Uninstall preview accepts only `receiptId`, and execution again accepts only an opaque `previewId`.
-- The renderer never receives filesystem, process, environment, or package-manager authority. Package changes go through `desktopPnpm.runPlugin()` with fixed argument construction and the active profile's absolute directory.
+- The renderer never receives filesystem, process, environment, or package-manager authority. Package changes go through `desktopPnpm.runPlugin()` with fixed argument construction and the active profile's absolute directory. The only command-shaped value it may receive is a bounded display-only manual hint; the terminal action cannot receive or execute it.
 
 The receipt records the profile, exact npm identity, integrity, DSH bundle patch, catalog provenance, display name, and installation time. It is local evidence that this Market completed and verified a managed install; it is not a provider credential and must not depend on the source remaining registered.
 
-If Desktop package capabilities are unavailable, browsing still works while install and uninstall return an unavailable state. There is no fallback to an ambient `pnpm`, shell, guessed executable, repository command, or inactive profile.
+If Desktop package capabilities are unavailable, browsing still works while managed install and uninstall return an unavailable state. The managed path never falls back to an ambient `pnpm`, shell, guessed executable, repository command, or inactive profile. Opening DSH Terminal is a separate explicit user action and never starts a package operation by itself.
 
 ## Failure and recovery
 

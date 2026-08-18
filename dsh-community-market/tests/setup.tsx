@@ -38,18 +38,20 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
     props.onClick === undefined ? <span>{children}</span> : <button {...props}>{children}</button>
   ),
   StateDot: ({ state }: { state: string }) => <span data-state={state} />,
-  Modal: ({ children, closeLabel: _closeLabel, description, footer, open, title }: {
+  Modal: ({ children, className, closeLabel: _closeLabel, contentClassName, description, footer, open, title }: {
     children?: ReactNode
+    className?: string
     closeLabel?: string
+    contentClassName?: string
     description?: ReactNode
     footer?: ReactNode
     open: boolean
     title: ReactNode
   }) => open ? (
-    <div role="dialog" aria-label={typeof title === 'string' ? title : undefined}>
+    <div role="dialog" className={className} aria-label={typeof title === 'string' ? title : undefined}>
       <h2>{title}</h2>
       {description === undefined ? null : <p>{description}</p>}
-      {children}
+      <div className={contentClassName}>{children}</div>
       {footer}
     </div>
   ) : null,

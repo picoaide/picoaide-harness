@@ -17,24 +17,28 @@ import { createMarketViewStore } from '../src/client/market-view-store.js'
 import {
   executeMarketOperation,
   mutateMarketSource,
+  openMarketTerminal,
   previewMarketOperation,
   readMarketCatalog,
   readMarketInstallable,
   readMarketInstallations,
   readMarketState,
   readMoreMarketCatalog,
+  requestMarketRestart,
 } from '../src/client/api.js'
 import { en, type MarketLocaleKey } from '../src/client/locales.js'
 
 vi.mock('../src/client/api.js', () => ({
   executeMarketOperation: vi.fn(),
   mutateMarketSource: vi.fn(),
+  openMarketTerminal: vi.fn(),
   previewMarketOperation: vi.fn(),
   readMarketCatalog: vi.fn(),
   readMarketInstallable: vi.fn(),
   readMarketInstallations: vi.fn(),
   readMoreMarketCatalog: vi.fn(),
   readMarketState: vi.fn(),
+  requestMarketRestart: vi.fn(),
 }))
 
 afterEach(() => {
@@ -44,7 +48,8 @@ afterEach(() => {
 
 const t = ((key: MarketLocaleKey): string => en[key]) as MarketSettingsTabProps['t']
 const props = { t, readLocale: () => 'en' } as MarketSettingsTabProps
-const emptyState: MarketStateResponse = { sources: [], builtIns: [] }
+const desktopActions = { openTerminal: true, requestRestart: true } as const
+const emptyState: MarketStateResponse = { sources: [], builtIns: [], desktopActions }
 
 const firstSource: MarketSourceView = {
   sourceRecordId: '018f1f77-a5c4-7b73-a9ae-0242ac120002',
@@ -82,9 +87,10 @@ function makeSecondSource(enabled = false): MarketSourceView {
   }
 }
 
-const enabledState: MarketStateResponse = { sources: [firstSource], builtIns: [] }
+const enabledState: MarketStateResponse = { sources: [firstSource], builtIns: [], desktopActions }
 const availableState: MarketStateResponse = {
   sources: [],
+  desktopActions,
   builtIns: [{
     key: 'fixture',
     adapterId: 'fixture',
@@ -181,6 +187,7 @@ function installableResponse(
   return {
     source,
     items: [...items],
+    manualInstall: [],
     metadata: {
       scannedAt: '2026-08-18T01:00:00.000Z',
       expiresAt: '2026-08-18T01:05:00.000Z',
@@ -199,6 +206,7 @@ function catalogForSource(
   return {
     query: {},
     categories: [...new Set(items.flatMap(item => item.categories ?? []))],
+    manualInstall: [],
     fetchedAt: '2026-08-17T00:00:00Z',
     results: [{
       source,
@@ -297,6 +305,42 @@ describe('MarketSettingsTab', () => {
     expect(plugin.querySelector('[aria-hidden="true"]')).not.toBeNull()
   })
 
+  it('falls back in the same dialog to a Host-derived manual command and opens DSH Terminal', async () => {
+    const item = makeItem(firstSource, 'manual-github-plugin', 'Manual GitHub Plugin', ['tools'])
+    const manualCatalog: MarketCatalogResponse = {
+      ...catalogForSource(firstSource, [item]),
+      manualInstall: [{
+        sourceRecordId: firstSource.sourceRecordId,
+        providerId: firstSource.providerId,
+        itemId: item.id,
+        kind: 'github',
+        mutable: true,
+        desktopVerification: 'not-verified',
+        displayCommand: 'dsh plugin add github:example/manual-github-plugin',
+      }],
+    }
+    vi.mocked(readMarketState).mockResolvedValue(enabledState)
+    vi.mocked(readMarketCatalog).mockResolvedValue(manualCatalog)
+    vi.mocked(previewMarketOperation).mockRejectedValue(new Error('managed install unavailable'))
+    vi.mocked(openMarketTerminal).mockResolvedValue({ ok: true })
+    render(<MarketSettingsTab {...props} />)
+
+    const card = await screen.findByRole('button', { name: /Manual GitHub Plugin/u })
+    expect(card.getAttribute('aria-haspopup')).toBe('dialog')
+    fireEvent.click(card)
+
+    expect(await screen.findByText('dsh plugin add github:example/manual-github-plugin')).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: item.displayName }).classList.contains('dshMarketWideModal')).toBe(true)
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.getByText(en.manualNotVerified)).toBeTruthy()
+    expect(screen.getByText(en.mutableGithubWarning)).toBeTruthy()
+    expect(screen.getByText(en.operationWarning)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.openTerminal }))
+    await waitFor(() => {
+      expect(openMarketTerminal).toHaveBeenCalledWith(expect.any(AbortSignal))
+    })
+  })
+
   it('uses a complete verified index with local OR filters, local pages of 50, metadata, and explicit rescans', async () => {
     const availableItem = makeInstallableItem(
       firstSource,
@@ -385,7 +429,7 @@ describe('MarketSettingsTab', () => {
     vi.mocked(readMarketState).mockResolvedValue(enabledState)
     vi.mocked(readMarketCatalog).mockResolvedValue(installCatalog)
     vi.mocked(readMarketInstallable).mockResolvedValue(installableResponse([item]))
-    vi.mocked(previewMarketOperation).mockResolvedValue({
+    const preview = {
       action: 'install',
       profileName: 'web',
       packageName: receipt.packageName,
@@ -393,13 +437,23 @@ describe('MarketSettingsTab', () => {
       displayName: receipt.displayName,
       expiresAt: '2026-08-18T00:05:00.000Z',
       previewId: 'opaque-install-preview',
+    } as const
+    let resolvePreview: ((value: typeof preview) => void) | undefined
+    vi.mocked(previewMarketOperation).mockReturnValue(new Promise(resolve => { resolvePreview = resolve }))
+    vi.mocked(executeMarketOperation).mockResolvedValue({
+      action: 'install',
+      receipt,
+      restartToken: 'opaque-install-restart',
     })
-    vi.mocked(executeMarketOperation).mockResolvedValue({ action: 'install', receipt })
+    vi.mocked(requestMarketRestart).mockResolvedValue({ ok: true })
     render(<MarketSettingsTab {...props} />)
 
     await screen.findByRole('button', { name: /Installable Plugin/u })
     fireEvent.click(screen.getByRole('button', { name: en.installable }))
     fireEvent.click(await screen.findByRole('button', { name: `${en.install}: ${item.displayName}` }))
+    expect(screen.getByRole('dialog', { name: item.displayName })).toBeTruthy()
+    expect(screen.getByText(en.checkingInstallMethod)).toBeTruthy()
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
     await waitFor(() => {
       expect(previewMarketOperation).toHaveBeenCalledWith({
         action: 'install',
@@ -407,7 +461,9 @@ describe('MarketSettingsTab', () => {
         itemId: item.id,
       }, expect.any(AbortSignal))
     })
-    expect(await screen.findByRole('dialog', { name: en.confirmInstallTitle })).toBeTruthy()
+    await act(async () => { resolvePreview?.(preview) })
+    expect((await screen.findByRole('dialog', { name: en.confirmInstallTitle })).classList.contains('dshMarketConfirmModal')).toBe(true)
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
     expect(screen.getByText(receipt.packageName)).toBeTruthy()
     expect(screen.getByText(receipt.version)).toBeTruthy()
     expect(screen.getByText('web')).toBeTruthy()
@@ -427,6 +483,11 @@ describe('MarketSettingsTab', () => {
     })
     expect(await screen.findByRole('dialog', { name: en.installComplete })).toBeTruthy()
     expect(screen.getByText(en.restartRequiredBody)).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.restartLater })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.restartNow }))
+    await waitFor(() => {
+      expect(requestMarketRestart).toHaveBeenCalledWith('opaque-install-restart', expect.any(AbortSignal))
+    })
     await waitFor(() => {
       expect(readMarketInstallable).toHaveBeenCalledTimes(2)
       expect(readMarketInstallations).not.toHaveBeenCalled()
@@ -450,7 +511,7 @@ describe('MarketSettingsTab', () => {
     expect(await screen.findByText(en.previewError)).toBeTruthy()
     const details = screen.getByRole('link', { name: en.verificationDetails }) as HTMLAnchorElement
     expect(details.href).toBe(
-      'https://github.com/anywhere-labs/deepseek-harness-desktop/blob/6226e3730d/dsh-community-market/docs/install-and-uninstall.md',
+      'https://github.com/anywhere-labs/deepseek-harness-desktop/blob/master/dsh-community-market/docs/install-and-uninstall.md',
     )
     expect(details.target).toBe('_blank')
     expect(details.rel).toContain('noopener')
@@ -475,6 +536,7 @@ describe('MarketSettingsTab', () => {
       action: 'uninstall',
       receiptId: receipt.receiptId,
       packageName: receipt.packageName,
+      restartToken: 'opaque-uninstall-restart',
     })
     render(<MarketSettingsTab {...props} />)
 
@@ -487,7 +549,7 @@ describe('MarketSettingsTab', () => {
         expect.any(AbortSignal),
       )
     })
-    expect(await screen.findByRole('dialog', { name: en.confirmUninstallTitle })).toBeTruthy()
+    expect((await screen.findByRole('dialog', { name: en.confirmUninstallTitle })).classList.contains('dshMarketConfirmModal')).toBe(true)
     expect(screen.getByText(receipt.version)).toBeTruthy()
     expect(screen.getByText(receipt.profileName)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: en.confirmUninstall }))
@@ -555,6 +617,7 @@ describe('MarketSettingsTab', () => {
         },
       }],
       builtIns: [],
+      desktopActions,
     } as MarketStateResponse
     vi.mocked(readMarketState).mockResolvedValue(unsafe)
     render(<MarketSettingsTab {...props} />)
@@ -566,10 +629,30 @@ describe('MarketSettingsTab', () => {
     expect(screen.getByText('This notice remains visible.')).toBeTruthy()
   })
 
+  it('links source teams to the partnership contact and catalog adapter guide', async () => {
+    vi.mocked(readMarketState).mockResolvedValue(enabledState)
+    vi.mocked(readMarketCatalog).mockResolvedValue(catalog)
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('button', { name: /Fixture Plugin/u })
+    fireEvent.click(screen.getByRole('button', { name: en.sources }))
+
+    const contact = screen.getByRole('link', { name: en.sourcePartnershipContact }) as HTMLAnchorElement
+    expect(contact.href).toBe('https://github.com/anywhere-labs/deepseek-harness-desktop/issues')
+    expect(contact.target).toBe('_blank')
+    expect(contact.rel).toContain('noopener')
+    const guide = screen.getByRole('link', { name: en.sourcePartnershipGuide }) as HTMLAnchorElement
+    expect(guide.href).toBe(
+      'https://github.com/anywhere-labs/deepseek-harness-desktop/blob/master/dsh-community-market/docs/catalog-adapter-guide.md',
+    )
+    expect(guide.target).toBe('_blank')
+    expect(guide.rel).toContain('noopener')
+  })
+
   it('moves sources in either direction and disables controls at the list boundaries', async () => {
     const first = { ...firstSource, enabled: false, order: 0, name: 'First catalog' }
     const second = { ...makeSecondSource(false), order: 1 }
-    const initial = { sources: [first, second], builtIns: [] } as MarketStateResponse
+    const initial = { sources: [first, second], builtIns: [], desktopActions } as MarketStateResponse
     const movedUp = [{ ...second, order: 0 }, { ...first, order: 1 }]
     vi.mocked(readMarketState).mockResolvedValue(initial)
     vi.mocked(mutateMarketSource)
@@ -613,10 +696,11 @@ describe('MarketSettingsTab', () => {
 
   it('selects exactly one source and clears the previous source while the new catalog loads', async () => {
     const second = makeSecondSource(false)
-    const initial = { sources: [firstSource, second], builtIns: [] } as MarketStateResponse
+    const initial = { sources: [firstSource, second], builtIns: [], desktopActions } as MarketStateResponse
     const selected = {
       sources: [{ ...firstSource, enabled: false }, { ...second, enabled: true }],
       builtIns: [],
+      desktopActions,
     } as MarketStateResponse
     let resolveSecond: ((value: MarketCatalogResponse) => void) | undefined
     const pendingSecond = new Promise<MarketCatalogResponse>(resolve => { resolveSecond = resolve })
@@ -671,7 +755,7 @@ describe('MarketSettingsTab', () => {
   it('resets a submitted search before fetching a newly selected source', async () => {
     const second = makeSecondSource(false)
     const selectedSources = [{ ...firstSource, enabled: false }, { ...second, enabled: true }]
-    vi.mocked(readMarketState).mockResolvedValue({ sources: [firstSource, second], builtIns: [] })
+    vi.mocked(readMarketState).mockResolvedValue({ sources: [firstSource, second], builtIns: [], desktopActions })
     vi.mocked(readMarketCatalog)
       .mockResolvedValueOnce(catalog)
       .mockResolvedValueOnce(catalogForSource(firstSource, [makeItem(firstSource, 'matched-plugin', 'Matched Plugin')]))
@@ -918,7 +1002,7 @@ describe('MarketSettingsTab', () => {
 
   it('does not let reads interrupt a pending source selection and aborts it on unmount', async () => {
     const second = makeSecondSource(false)
-    vi.mocked(readMarketState).mockResolvedValue({ sources: [firstSource, second], builtIns: [] })
+    vi.mocked(readMarketState).mockResolvedValue({ sources: [firstSource, second], builtIns: [], desktopActions })
     vi.mocked(readMarketCatalog).mockResolvedValue(catalog)
     let signal: AbortSignal | undefined
     vi.mocked(mutateMarketSource).mockImplementation((_mutation, nextSignal) => {

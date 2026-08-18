@@ -11,6 +11,7 @@ import type { MarketSettingsDocument } from '../catalog/source-store.js'
 import { normalizeRepositoryIdentity } from '../contracts/identity.js'
 import type { CatalogHttpClient, NormalizedRepositoryIdentity } from '../contracts/types.js'
 import type { CatalogSnapshot } from '../contracts/index.js'
+import { manualInstallHints } from './manual.js'
 
 const NPM_REGISTRY_ORIGIN = 'https://registry.npmjs.org'
 const NPM_REGISTRY = `${NPM_REGISTRY_ORIGIN}/`
@@ -86,8 +87,8 @@ export interface MarketUninstallResult {
 }
 
 export type MarketOperationResult =
-  | ({ readonly action: 'install' } & MarketInstallResult)
-  | ({ readonly action: 'uninstall' } & MarketUninstallResult)
+  | ({ readonly action: 'install'; readonly restartToken: string } & MarketInstallResult)
+  | ({ readonly action: 'uninstall'; readonly restartToken: string } & MarketUninstallResult)
 
 export type MarketInstallErrorCode =
   | 'invalid-request'
@@ -134,6 +135,11 @@ interface UninstallIntent {
 }
 
 type MarketIntent = InstallIntent | UninstallIntent
+
+interface RestartIntent {
+  readonly profile: MarketDesktopProfile
+  readonly expiresAt: number
+}
 
 export interface MarketNpmPackageVerifier {
   verify(
@@ -536,6 +542,7 @@ function validReceipt(value: unknown): value is MarketInstallReceipt {
 export class MarketInstallService {
   private readonly candidates = new Map<string, InstallCandidate>()
   private readonly intents = new Map<string, MarketIntent>()
+  private readonly restartIntents = new Map<string, RestartIntent>()
   private readonly now: () => number
   private readonly intentTtlMs: number
   private readonly candidateTtlMs: number
@@ -661,6 +668,7 @@ export class MarketInstallService {
     return {
       source: index.source,
       items,
+      manualInstall: manualInstallHints(items),
       metadata: {
         scannedAt: index.scannedAt,
         expiresAt: index.expiresAt,
@@ -799,9 +807,22 @@ export class MarketInstallService {
     if (intent === undefined) {
       throw new MarketInstallError('intent-expired', 'The confirmation expired or was already used. Preview the operation again.')
     }
-    return intent.kind === 'install'
-      ? { action: 'install', ...await this.executeInstall(token, signal) }
-      : { action: 'uninstall', ...await this.executeUninstall(token, signal) }
+    const result: MarketOperationResult = intent.kind === 'install'
+      ? { action: 'install', ...await this.executeInstall(token, signal), restartToken: this.issueRestartToken() }
+      : { action: 'uninstall', ...await this.executeUninstall(token, signal), restartToken: this.issueRestartToken() }
+    return result
+  }
+
+  /** Consume one short-lived restart grant issued only after a completed mutation. */
+  consumeRestartToken(token: string): void {
+    this.assertOpen()
+    this.purge()
+    const intent = this.restartIntents.get(token)
+    if (intent === undefined) {
+      throw new MarketInstallError('intent-expired', 'The restart confirmation expired or was already used.')
+    }
+    this.restartIntents.delete(token)
+    this.sameProfile(intent.profile)
   }
 
   async previewUninstall(receiptId: string, signal: AbortSignal): Promise<MarketUninstallPreview> {
@@ -867,6 +888,7 @@ export class MarketInstallService {
     this.generation.abort(new DOMException('Market install service was disposed', 'AbortError'))
     this.candidates.clear()
     this.intents.clear()
+    this.restartIntents.clear()
   }
 
   private profile(): MarketDesktopProfile {
@@ -919,6 +941,19 @@ export class MarketInstallService {
     return token
   }
 
+  private issueRestartToken(): string {
+    this.assertOpen()
+    this.purge()
+    let token = opaqueToken()
+    while (this.restartIntents.has(token)) token = opaqueToken()
+    this.restartIntents.set(token, {
+      profile: this.profile(),
+      expiresAt: this.now() + this.intentTtlMs,
+    })
+    this.trim(this.restartIntents, this.maxIntents)
+    return token
+  }
+
   private consumeIntent<K extends MarketIntent['kind']>(token: string, kind: K): Extract<MarketIntent, { kind: K }> {
     this.purge()
     const intent = this.intents.get(token)
@@ -938,6 +973,9 @@ export class MarketInstallService {
     }
     for (const [token, intent] of this.intents) {
       if (now >= intent.expiresAt) this.intents.delete(token)
+    }
+    for (const [token, intent] of this.restartIntents) {
+      if (now >= intent.expiresAt) this.restartIntents.delete(token)
     }
   }
 

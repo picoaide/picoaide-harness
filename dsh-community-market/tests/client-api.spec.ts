@@ -3,11 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   executeMarketOperation,
   MarketApiError,
+  openMarketTerminal,
   previewMarketOperation,
   readMarketCatalog,
   readMarketInstallable,
   readMarketInstallations,
   readMoreMarketCatalog,
+  requestMarketRestart,
 } from '../src/client/api.js'
 
 afterEach(() => {
@@ -82,7 +84,12 @@ describe('community market client API', () => {
             previewId: 'preview-1',
           }
         }
-        return { action: 'uninstall', receiptId: 'receipt-1', packageName: 'dsh-plugin-safe' }
+        return {
+          action: 'uninstall',
+          receiptId: 'receipt-1',
+          packageName: 'dsh-plugin-safe',
+          restartToken: 'restart-token-1',
+        }
       },
       status: 200,
       ...(init === undefined ? {} : { requestInit: init }),
@@ -130,6 +137,25 @@ describe('community market client API', () => {
     expect(cachedUrl.searchParams.get('locale')).toBe('zh-CN')
     expect(cachedUrl.searchParams.has('refresh')).toBe(false)
     expect(refreshedUrl.searchParams.get('refresh')).toBe('1')
+  })
+
+  it('opens the terminal without a command and sends only the one-shot token when restarting', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => (
+      { ok: true, json: async () => ({ ok: true }) } as Response
+    ))
+    vi.stubGlobal('fetch', fetch)
+
+    await openMarketTerminal()
+    await requestMarketRestart('opaque-restart-token')
+
+    expect(fetch.mock.calls[0]).toEqual([
+      '/api/community-market/desktop/open-terminal',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({}) }),
+    ])
+    expect(fetch.mock.calls[1]).toEqual([
+      '/api/community-market/desktop/request-restart',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ restartToken: 'opaque-restart-token' }) }),
+    ])
   })
 
   it('preserves an unavailable status so the Client can explain the Desktop-only capability', async () => {

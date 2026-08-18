@@ -1,5 +1,6 @@
 import type {
   MarketCatalogResponse,
+  MarketDesktopActionResponse,
   MarketInstallableResponse,
   MarketInstallationsResponse,
   MarketOperationExecuteResponse,
@@ -135,6 +136,27 @@ export async function executeMarketOperation(
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ previewId }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+}
+
+export async function openMarketTerminal(signal?: AbortSignal): Promise<MarketDesktopActionResponse> {
+  return await readJson(await fetch('/api/community-market/desktop/open-terminal', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+}
+
+export async function requestMarketRestart(
+  restartToken: string,
+  signal?: AbortSignal,
+): Promise<MarketDesktopActionResponse> {
+  return await readJson(await fetch('/api/community-market/desktop/request-restart', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ restartToken }),
     ...(signal === undefined ? {} : { signal }),
   }))
 }

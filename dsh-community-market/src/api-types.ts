@@ -33,6 +33,22 @@ export interface MarketSourceView extends LocalSourceRecord {
 export interface MarketStateResponse {
   readonly sources: readonly MarketSourceView[]
   readonly builtIns: readonly MarketBuiltInProvider[]
+  readonly desktopActions: {
+    readonly openTerminal: boolean
+    readonly requestRestart: boolean
+  }
+}
+
+/** Display-only instruction reconstructed by the Host from normalized identity. */
+export interface MarketManualInstallHint {
+  readonly sourceRecordId: string
+  readonly providerId: string
+  readonly itemId: string
+  readonly kind: 'npm' | 'github'
+  /** GitHub instructions resolve a moving repository HEAD; exact npm targets do not. */
+  readonly mutable: boolean
+  readonly desktopVerification: 'not-verified'
+  readonly displayCommand: string
 }
 
 export interface MarketCatalogSourceResult {
@@ -47,6 +63,8 @@ export interface MarketCatalogResponse {
   readonly results: readonly MarketCatalogSourceResult[]
   /** Categories derived from the complete active-source index, not only this page. */
   readonly categories: readonly string[]
+  /** Display-only hints for items in this response page; never executable targets. */
+  readonly manualInstall: readonly MarketManualInstallHint[]
   readonly metadata?: MarketCatalogMetadata
   readonly fetchedAt: string
 }
@@ -92,6 +110,7 @@ export interface MarketInstallationsResponse {
 export interface MarketInstallableResponse {
   readonly source: MarketSourceView
   readonly items: CatalogSnapshot['items']
+  readonly manualInstall: readonly MarketManualInstallHint[]
   readonly metadata: MarketCatalogMetadata
 }
 
@@ -122,9 +141,15 @@ export type MarketOperationExecuteResponse =
   | {
       readonly action: 'install'
       readonly receipt: MarketInstallReceipt
+      readonly restartToken: string
     }
   | {
       readonly action: 'uninstall'
       readonly receiptId: string
       readonly packageName: string
+      readonly restartToken: string
     }
+
+export interface MarketDesktopActionResponse {
+  readonly ok: true
+}

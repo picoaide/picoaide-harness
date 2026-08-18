@@ -107,6 +107,14 @@ const css = `
   line-height: 20px;
 }
 
+.dshMarketSourceGuide {
+  align-items: flex-start;
+}
+
+.dshMarketSourceGuide > span {
+  min-width: 0;
+}
+
 .dshMarketGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -454,6 +462,65 @@ const css = `
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
   line-height: 19px;
+}
+
+.dshMarketManualInstall {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dshMarketWideModal {
+  width: min(800px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+}
+
+.dshMarketConfirmModal {
+  width: min(600px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+}
+
+.dshMarketWideModalContent {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.dshMarketManualInstall h3 {
+  margin: 0 0 3px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.dshMarketManualInstall p {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.dshMarketCommand {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dshMarketCommand > span {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dshMarketCommand code {
+  display: block;
+  overflow-x: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family-code, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-size: 12px;
+  line-height: 19px;
+  white-space: pre;
 }
 
 .dshMarketOperationReview {

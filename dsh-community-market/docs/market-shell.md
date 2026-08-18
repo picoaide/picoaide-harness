@@ -70,12 +70,12 @@ Search, sorting, multi-category OR filtering, category enumeration, and paginati
 
 A completed index is cached for a bounded lifetime, currently five minutes by default. Optional response metadata may expose `scannedAt` (when the scan completed), `expiresAt` (its cache deadline), optional `providerRevision` (one revision observed consistently across all chunks), and `cacheStatus` (`fresh` for a completed scan or `cached` for a reused index). Explicit refresh invalidates the previous index and bypasses the underlying catalog HTTP cache before rebuilding it. Selecting another source cancels the old scan and starts a separate index.
 
-## Four views and read-only discovery
+## Four views and plugin actions
 
 The Market surface has four views:
 
-- **Discover** pages over every normalized item in the selected source's complete local index and keeps details and repository links read-only.
-- **Installable** is derived locally and fail-closed. It requires reviewed provider verification with `repository_backlink`, an exact stable npm target, and a canonical repository, and excludes blocked packages plus packages already present in the active profile or its Market receipts. This structural candidacy is not an npm verification, code review, or endorsement.
+- **Discover** pages over every normalized item in the selected source's complete local index. Clicking a card opens the shared action dialog immediately; the Host either advances an eligible item into managed preview or keeps the dialog as details.
+- **Installable** is derived locally and fail-closed. It requires reviewed provider verification with `repository_backlink`, an exact stable npm target, and a canonical repository, and excludes blocked packages plus packages already present in the active profile or its Market receipts. Its cards use the same dialog. Structural candidacy is not an npm verification, code review, or endorsement.
 - **Installed** reads valid Market receipts for the active profile. It never infers installed state from the catalog.
 - **Sources** manages saved sources and the one current selection.
 
@@ -96,7 +96,7 @@ Loading the catalog never invokes a package manager, resolves a local executable
 
 ## Installation boundary
 
-Installation starts only from a user gesture in **Installable**. The Host, not the renderer, derives the structural candidate subset from the complete normalized index using fail-closed local rules. The renderer receives only Host-returned candidate identities and cannot promote another **Discover** item. Clicking one candidate starts the first authoritative verification of that package against the official npm registry and the active profile. Only a successful preview produces a confirmation showing:
+Clicking a card is an explicit request to inspect that item. The dialog opens synchronously, while the Host checks whether the exact normalized source/item is eligible for managed preview. The Host, not the renderer, owns candidate identity and performs the first authoritative verification against the official npm registry and active profile. Only a successful preview turns that same dialog into a confirmation showing:
 
 - plugin name;
 - exact npm package name and stable version resolved by the Host;
@@ -104,26 +104,26 @@ Installation starts only from a user gesture in **Installable**. The Host, not t
 - the short-lived confirmation expiry; and
 - a warning that plugins run locally with the user's permissions and that this verification is not a code audit.
 
-Catalog `install` fields, documentation snippets, provider commands, and arbitrary strings are never executed. The current MVP accepts only exact stable npm packages. It rejects GitHub and other repository install targets, ranges, tags, prereleases, deprecated versions, a target manifest containing `preinstall`, `install`, `postinstall`, or `prepare`, packages incompatible with the bundled DSH `0.1.0-rc.7`/Cordis/Node.js runtime, repository mismatches, and packages without official npm SHA-512/tarball and valid DSH bundle evidence.
+Catalog `install` fields, documentation snippets, provider commands, and arbitrary strings are discarded as execution authority and are never executed. When a normalized item carries an exact stable npm identity, the Host may separately reconstruct a bounded display-only command. That text may differ from repository documentation, is explicitly marked as not fully verified, and is never sent to a package manager or Desktop action. The current managed MVP rejects GitHub and other repository install targets, ranges, tags, prereleases, deprecated versions, a target manifest containing `preinstall`, `install`, `postinstall`, or `prepare`, packages incompatible with the bundled DSH `0.1.0-rc.7`/Cordis/Node.js runtime, repository mismatches, and packages without official npm SHA-512/tarball and valid DSH bundle evidence.
 
-Preview performs the full npm registry, canonical-repository, deprecation, lifecycle-script, runtime, integrity, tarball, DSH bundle, and active-profile checks for that one package. The resulting one-shot opaque preview binds the verified facts. Immediately before the confirmed mutation, execution re-fetches or rechecks mutable registry, candidate, and profile evidence and refuses the operation if the candidate, active profile, tarball, integrity, or bundle path changed. The renderer never submits a package-manager spec or command.
+Preview performs the full npm registry, canonical-repository, deprecation, lifecycle-script, runtime, integrity, tarball, DSH bundle, and active-profile checks for that one package. The resulting one-shot opaque preview binds the verified facts. Immediately before the confirmed mutation, execution re-fetches or rechecks mutable registry, candidate, and profile evidence and refuses the operation if the candidate, active profile, tarball, integrity, or bundle path changed. For managed operations the renderer submits only opaque identities, never a package-manager spec or command.
 
 On Desktop, the Market Host uses the public services already owned by `dsh-plugin-desktop`:
 
 1. Read the active identity from `desktopProfiles.current`.
 2. Invoke `desktopPnpm.runPlugin()` with fixed `add --save-exact` arguments, the official npm registry, an explicit absolute profile directory, and an `AbortSignal`.
-3. Keep stdout, stderr, environment variables, local paths, and command internals out of the renderer.
+3. Keep stdout, stderr, environment variables, local paths, and command internals out of the renderer; the only command text it may receive is the bounded display-only instruction described above.
 4. Permit one mutation at a time and reject a changed profile.
 5. Verify the installed profile dependency and contained DSH bundle before saving a receipt; roll back an invalid or unrecordable install when possible.
-6. Tell the user that Desktop must restart before the new plugin is loaded.
+6. After success, issue a short-lived one-shot restart grant so the user can choose **Restart now** or **Restart later**; never restart silently.
 
-When Desktop services are unavailable, browsing stays available while package operations explain that they require DSH Desktop. The Market does not fall back to ambient `pnpm`, a shell command, a guessed `dsh` executable, or an inactive profile.
+When Desktop services are unavailable, browsing stays available while package operations explain that they require DSH Desktop. Managed installation never falls back to ambient `pnpm`, a shell command, a guessed `dsh` executable, or an inactive profile. **Open DSH Terminal** is a separate user-controlled escape hatch: its request contains no command, path, or profile and only opens the terminal; the user decides whether to copy and run displayed text.
 
 ## Uninstall boundary
 
 The **Installed** view is built only from valid local receipts scoped to the active profile. It does not depend on the selected source, so a Market-installed plugin remains removable after its source is disabled, deleted, or offline.
 
-Uninstall preview accepts only a `receiptId`. The Host confirms that the receipt still exists and the active profile still contains the exact package version and DSH bundle recorded by that receipt. Execution accepts only the resulting one-shot opaque preview, invokes the managed `remove` operation, verifies removal, and then deletes the receipt. A package installed elsewhere, a receipt in another profile, or a package changed after installation is not removed by this MVP. The UI gives restart guidance after the profile change.
+Uninstall preview accepts only a `receiptId`. The Host confirms that the receipt still exists and the active profile still contains the exact package version and DSH bundle recorded by that receipt. Execution accepts only the resulting one-shot opaque preview, invokes the managed `remove` operation, verifies removal, and then deletes the receipt. A package installed elsewhere, a receipt in another profile, or a package changed after installation is not removed by this MVP. After success the same **Restart now** / **Restart later** choice is shown.
 
 ## Profile behavior
 

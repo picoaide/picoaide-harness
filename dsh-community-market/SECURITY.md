@@ -14,11 +14,13 @@ Installing a plugin is a higher-risk action than browsing because the installed 
 
 - installation starts only after an explicit user gesture and confirmation;
 - the exact Host-verified npm package/version and active profile are visible before execution;
-- no command string, script, or HTML from a catalog response is executed;
+- no command string, script, or HTML from a catalog response is executed; provider commands are discarded, while any Host-reconstructed manual command is bounded, display-only, and never sent to a Desktop action;
 - Desktop installation goes through the managed `desktopPnpm.runPlugin()` capability;
 - only an exact stable npm target that passes independent registry, repository, integrity, bundle, deprecation, lifecycle-script, DSH rc.7, and bundled Node.js checks may proceed;
 - previews and reads are cancellable; after confirmation is accepted, the serialized mutation is Host-owned and a UI disconnect only drops the response; a changed active profile or one-shot preview is rejected;
 - uninstall owns only a valid Market receipt whose exact package and bundle still match in the active profile; it does not depend on the catalog source remaining available;
+- opening DSH Terminal is an exact empty-body action that carries no command, path, or profile; it never pastes or executes the displayed manual hint;
+- a successful mutation may issue a short-lived, one-shot restart grant; restarting remains a separate explicit user choice and is never silent;
 - credentials, environment variables, raw response bodies, and local paths are not exposed to the UI or logs;
 - a catalog failure never blocks DSH or Desktop startup.
 

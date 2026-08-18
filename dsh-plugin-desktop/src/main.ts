@@ -46,6 +46,7 @@ import {
   type DesktopProfileStartup,
 } from './profile-manager.ts'
 import { DesktopProfileService } from './profile-service.ts'
+import { DesktopActionsService } from './desktop-actions.ts'
 import { prepareDesktopProfile, type SkippedOptionalEntry } from './profile.ts'
 import type { DesktopPnpmBootstrap } from './pnpm.ts'
 import {
@@ -345,6 +346,10 @@ async function start(): Promise<void> {
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
         hostCtx.provide('desktopPnpmBootstrap', desktopPnpmBootstrap)
+        await hostCtx.plugin(DesktopActionsService, {
+          openTerminal: () => { runtime.openTerminal() },
+          requestRestart: () => runtime.requestRestart(),
+        })
         if (logSink !== undefined) {
           fileExporter = new FileExporter(logSink)
           hostCtx.logger.exporter(fileExporter)

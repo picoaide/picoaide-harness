@@ -18,6 +18,7 @@ import {
   type MarketInstallReceipt,
 } from '../src/install/service.js'
 import { marketRoutes, registerMarketRoutes } from '../src/host/routes.js'
+import { manualInstallHint } from '../src/install/manual.js'
 
 const packageName = 'dsh-plugin-safe'
 const version = '1.2.3'
@@ -288,15 +289,38 @@ describe('npm registry verification', () => {
   })
 })
 
+describe('manual install display instructions', () => {
+  it('reconstructs only safe exact npm commands and never guesses from a repository', () => {
+    const npm = manualInstallHint(snapshot().items[0]!)
+    expect(npm).toMatchObject({
+      kind: 'npm',
+      mutable: false,
+      desktopVerification: 'not-verified',
+      displayCommand: `dsh plugin add --save-exact ${packageName}@${version}`,
+    })
+
+    const githubItem = structuredClone(snapshot().items[0]!) as Record<string, unknown>
+    delete githubItem.package
+    delete githubItem.latestVersion
+    githubItem.repository = {
+      url: 'https://github.com/tianxia--/safe-repo',
+      subdirectory: 'packages/plugin',
+    }
+    githubItem.command = 'dsh plugin add attacker; rm -rf /'
+    expect(manualInstallHint(githubItem as CatalogSnapshot['items'][number])).toBeUndefined()
+  })
+})
+
 describe('market install service', () => {
   it('uses one-shot opaque intents, fixed argv, verified bundle state, and profile receipts', async () => {
     const profileDir = await createProfile()
     const calls: Array<{ args: readonly string[]; dir: string; signal?: AbortSignal }> = []
     const settings = memoryScope()
     const verify = vi.fn(async () => verification)
+    let profileName = 'web'
     const service = new MarketInstallService(
       settings.scope,
-      () => ({ name: 'web', dir: profileDir }),
+      () => ({ name: profileName, dir: profileDir }),
       runner(profileDir, calls),
       { verify },
     )
@@ -305,22 +329,30 @@ describe('market install service', () => {
     const preview = await service.previewInstall('source-1', 'example/dsh-plugin-safe', new AbortController().signal)
     expect(preview.intent).not.toContain(packageName)
     expect(preview.intent).not.toContain(version)
-    const installed = await service.executeInstall(preview.intent, new AbortController().signal)
+    const installedResult = await service.executePreview(preview.intent, new AbortController().signal)
+    if (installedResult.action !== 'install') throw new Error('expected install result')
+    const installed = installedResult
     expect(calls[0]).toMatchObject({
       args: ['add', '--save-exact', '--registry=https://registry.npmjs.org/', `${packageName}@${version}`],
       dir: profileDir,
     })
     expect(verify).toHaveBeenCalledTimes(2)
     expect(installed.receipt.integrity).toBe(integrity)
+    expect(installed.restartToken).not.toContain(packageName)
     expect(settings.receipts()).toEqual([installed.receipt])
-    await expect(service.executeInstall(preview.intent, new AbortController().signal)).rejects.toMatchObject({
+    await expect(service.executePreview(preview.intent, new AbortController().signal)).rejects.toMatchObject({
       code: 'intent-expired',
     })
+    service.consumeRestartToken(installed.restartToken)
+    expect(() => service.consumeRestartToken(installed.restartToken)).toThrow(/already used/u)
 
     const uninstall = await service.previewUninstall(installed.receipt.receiptId, new AbortController().signal)
-    const removed = await service.executeUninstall(uninstall.intent, new AbortController().signal)
+    const removed = await service.executePreview(uninstall.intent, new AbortController().signal)
+    if (removed.action !== 'uninstall') throw new Error('expected uninstall result')
     expect(calls[1]).toMatchObject({ args: ['remove', packageName], dir: profileDir })
     expect(removed.receiptId).toBe(installed.receipt.receiptId)
+    profileName = 'other'
+    expect(() => service.consumeRestartToken(removed.restartToken)).toThrow(/active desktop profile changed/u)
     expect(settings.receipts()).toEqual([])
   })
 
@@ -859,6 +891,7 @@ describe('market install Host routes', () => {
     type Handler = (req: any, res: any) => Promise<void>
     const handlers = new Map<string, Handler>()
     const ctx = {
+      logger: { error: vi.fn() },
       webServer: {
         port: 43_120,
         register: vi.fn((route: { path: string; handler: Handler }) => {
@@ -882,15 +915,28 @@ describe('market install Host routes', () => {
       listInstallable: vi.fn(),
       previewInstall,
       previewUninstall: vi.fn(),
-      executePreview: vi.fn(async () => ({ action: 'install', receipt: { receiptId: 'receipt' } })),
+      executePreview: vi.fn(async () => ({ action: 'install', receipt: { receiptId: 'receipt' }, restartToken: 'restart-token' })),
+      consumeRestartToken: vi.fn(),
       observeCatalog: vi.fn(),
       invalidateSource: vi.fn(),
     } as unknown as MarketInstallService
-    const dispose = registerMarketRoutes(ctx as never, settings.scope, { get: () => install })
+    const desktopEvents: string[] = []
+    const actions = {
+      openTerminal: vi.fn(),
+      requestRestart: vi.fn(async () => { desktopEvents.push('restart') }),
+    }
+    const dispose = registerMarketRoutes(
+      ctx as never,
+      settings.scope,
+      { get: () => install },
+      { get: () => actions },
+    )
     expect(handlers.has(marketRoutes.installations)).toBe(true)
     expect(handlers.has(marketRoutes.installable)).toBe(true)
     expect(handlers.has(marketRoutes.operationPreview)).toBe(true)
     expect(handlers.has(marketRoutes.operationExecute)).toBe(true)
+    expect(handlers.has(marketRoutes.openTerminal)).toBe(true)
+    expect(handlers.has(marketRoutes.requestRestart)).toBe(true)
 
     const request = async (path: string, method: string, body?: unknown) => {
       const req = Object.assign(new EventEmitter(), {
@@ -912,6 +958,7 @@ describe('market install Host routes', () => {
         setHeader: vi.fn(),
         removeHeader: vi.fn(),
         end: vi.fn((value?: string) => {
+          desktopEvents.push('response')
           responseBody = value ?? ''
           res.writableEnded = true
         }),
@@ -952,6 +999,19 @@ describe('market install Host routes', () => {
     const executed = await request(marketRoutes.operationExecute, 'POST', { previewId: 'opaque-preview-id' })
     expect(executed.status).toBe(200)
     expect(install.executePreview).toHaveBeenCalledWith('opaque-preview-id', expect.any(AbortSignal))
+
+    await expect(request(marketRoutes.openTerminal, 'POST', {})).resolves.toEqual({ status: 200, body: { ok: true } })
+    expect(actions.openTerminal).toHaveBeenCalledWith()
+    const invalidTerminal = await request(marketRoutes.openTerminal, 'POST', { command: 'must not run' })
+    expect(invalidTerminal).toMatchObject({ status: 400, body: { code: 'invalid-request' } })
+    expect(actions.openTerminal).toHaveBeenCalledOnce()
+
+    desktopEvents.length = 0
+    await expect(request(marketRoutes.requestRestart, 'POST', { restartToken: 'restart-token' }))
+      .resolves.toEqual({ status: 200, body: { ok: true } })
+    expect(install.consumeRestartToken).toHaveBeenCalledWith('restart-token')
+    expect(actions.requestRestart).toHaveBeenCalledWith()
+    expect(desktopEvents).toEqual(['response', 'restart'])
 
     const installations = await request(marketRoutes.installations, 'GET')
     expect(installations).toEqual({ status: 200, body: { installations: [] } })

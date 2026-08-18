@@ -17,6 +17,11 @@ interface DesktopProfilesCapability {
   readonly current: MarketDesktopProfile
 }
 
+interface DesktopActionsCapability {
+  openTerminal(): void
+  requestRestart(): Promise<void>
+}
+
 const npmRegistryHttp = createRestrictedHttpClient({
   // This is a compiled-in official registry hostname, never provider input.
   syntheticProxyHostnames: ['registry.npmjs.org'],
@@ -25,8 +30,22 @@ const npmRegistryHttp = createRestrictedHttpClient({
 export function apply(ctx: Context): void {
   const scope = registerMarketSettings(ctx)
   let installService: MarketInstallService | undefined
+  let desktopActions: DesktopActionsCapability | undefined
   const installProvider = { get: () => installService }
-  ctx.effect(() => registerMarketRoutes(ctx, scope, installProvider), 'community-market: routes')
+  const desktopActionsProvider = { get: () => desktopActions }
+  ctx.effect(
+    () => registerMarketRoutes(ctx, scope, installProvider, desktopActionsProvider),
+    'community-market: routes',
+  )
+  ctx.inject(['desktopActions'], (desktopCtx) => {
+    const actions = desktopCtx.get('desktopActions') as DesktopActionsCapability
+    desktopCtx.effect(() => {
+      desktopActions = actions
+      return () => {
+        if (desktopActions === actions) desktopActions = undefined
+      }
+    }, 'community-market: optional desktop actions')
+  })
   // Browsing remains portable. Desktop-only package operations appear whenever
   // the narrow profile and package-manager capabilities are live.
   ctx.inject(['desktopProfiles', 'desktopPnpm'], (desktopCtx) => {

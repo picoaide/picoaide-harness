@@ -70,12 +70,12 @@ Host 会先针对已选来源和当前 locale 完成一次全量标准化扫描�
 
 完成的索引会在有界时间内复用，当前默认五分钟。可选 response metadata 可以提供：`scannedAt`（扫描完成时间）、`expiresAt`（cache 截止时间）、可选 `providerRevision`（所有分块中一致观察到的 revision），以及 `cacheStatus`（完成新扫描时为 `fresh`，复用索引时为 `cached`）。明确刷新会使旧索引失效，并绕过底层目录 HTTP cache 后重新建立。选择另一个来源会取消旧扫描并建立独立索引。
 
-## 四个视图与只读发现
+## 四个视图与插件操作
 
 Market 界面包含四个视图：
 
-- **发现**对当前已选来源完整本地索引中的全部标准化条目进行分页，详情和仓库链接保持只读。
-- **可安装**在本地以 fail-closed 方式生成。条目必须具有经过审核的 provider 验证与 `repository_backlink`、精确稳定的 npm 目标和规范仓库，同时排除被阻止的 package，以及当前 profile 或 Market receipt 中已经存在的 package。这种结构候选身份不等于 npm 复核、代码审核或推荐。
+- **发现**对当前已选来源完整本地索引中的全部标准化条目进行分页。点击卡片会立即打开统一操作弹窗；Host 会让合格条目进入受管 preview，否则弹窗保持为详情。
+- **可安装**在本地以 fail-closed 方式生成。条目必须具有经过审核的 provider 验证与 `repository_backlink`、精确稳定的 npm 目标和规范仓库，同时排除被阻止的 package，以及当前 profile 或 Market receipt 中已经存在的 package。这里的卡片使用同一个弹窗。结构候选身份不等于 npm 复核、代码审核或推荐。
 - **已安装**读取当前 profile 的合法 Market receipt，绝不会根据目录猜测安装状态。
 - **来源**管理已保存来源和唯一的当前选择。
 
@@ -96,7 +96,7 @@ Market 界面包含四个视图：
 
 ## 安装边界
 
-安装只能由用户在**可安装**视图中明确操作后开始。由 Host 而不是 renderer 使用 fail-closed 本地规则，从完整标准化索引中推导结构候选集合。Renderer 只接收 Host 返回的候选标识，不能把其他**发现**条目自行提升为可安装。点击某个候选后，Host 才会首次针对该 package 访问官方 npm registry，并结合当前 profile 做权威复核。只有 preview 成功后，确认框才会展示：
+点击卡片表示用户明确要求检查该条目。弹窗会同步打开，同时由 Host 判断这个精确的标准化来源/条目能否进入受管 preview。候选身份由 Host 而不是 renderer 掌握；Host 会首次针对该 package 访问官方 npm registry，并结合当前 profile 做权威复核。只有 preview 成功后，同一个弹窗才会切换成确认框并展示：
 
 - 插件名称；
 - Host 解析出的精确 npm package 名与稳定版本；
@@ -104,26 +104,26 @@ Market 界面包含四个视图：
 - 短时确认的过期时间；以及
 - 插件会以用户权限作为本地代码运行、而且该复核不等于代码审计的提示。
 
-目录中的 `install` 字段、文档命令、provider 命令和任意字符串都不会被执行。当前 MVP 只接受精确、稳定的 npm package。GitHub 与其他仓库安装目标、range、tag、prerelease、deprecated 版本、目标 manifest 中包含 `preinstall`、`install`、`postinstall` 或 `prepare` 的 package、与内置 DSH `0.1.0-rc.7`/Cordis/Node.js runtime 不兼容的 package、仓库身份不匹配的 package，以及缺少官方 npm SHA-512/tarball 或有效 DSH bundle 证据的 package，都会被拒绝。
+目录中的 `install` 字段、文档命令、provider 命令和任意字符串都会失去执行授权，并且绝不会被执行。当标准化条目具有精确稳定的 npm 身份时，Host 可以另行重建一条有界、只用于展示的命令。该文本可能与仓库文档中的命令不同，会明确标为未完成全部验证，而且绝不会发送给 package manager 或 Desktop action。当前受管 MVP 会拒绝 GitHub 与其他仓库安装目标、range、tag、prerelease、deprecated 版本、目标 manifest 中包含 `preinstall`、`install`、`postinstall` 或 `prepare` 的 package、与内置 DSH `0.1.0-rc.7`/Cordis/Node.js runtime 不兼容的 package、仓库身份不匹配的 package，以及缺少官方 npm SHA-512/tarball 或有效 DSH bundle 证据的 package。
 
-Preview 会针对这一个 package 完整检查 npm registry、规范仓库、deprecated 状态、lifecycle script、runtime、integrity、tarball、DSH bundle 和当前 profile，并用一次性不透明 preview 绑定已验证事实。用户确认后、真正修改前，执行阶段会立即重新获取或检查可变的 registry、候选和 profile 证据；候选、当前 profile、tarball、integrity 或 bundle 路径发生变化时会拒绝执行。Renderer 绝不会提交 package-manager spec 或命令。
+Preview 会针对这一个 package 完整检查 npm registry、规范仓库、deprecated 状态、lifecycle script、runtime、integrity、tarball、DSH bundle 和当前 profile，并用一次性不透明 preview 绑定已验证事实。用户确认后、真正修改前，执行阶段会立即重新获取或检查可变的 registry、候选和 profile 证据；候选、当前 profile、tarball、integrity 或 bundle 路径发生变化时会拒绝执行。受管操作中，renderer 只提交不透明身份，绝不会提交 package-manager spec 或命令。
 
 在 Desktop 中，Market Host 使用 `dsh-plugin-desktop` 已提供的公开服务：
 
 1. 从 `desktopProfiles.current` 读取当前身份。
 2. 调用 `desktopPnpm.runPlugin()`，使用固定构造的 `add --save-exact` 参数、官方 npm registry、明确的绝对 profile 目录和 `AbortSignal`。
-3. 不把 stdout、stderr、环境变量、本地路径或命令内部细节交给 renderer。
+3. 不把 stdout、stderr、环境变量、本地路径或命令内部细节交给 renderer；唯一允许交付的命令文本，是上面定义的有界、只展示指引。
 4. 同一时间只允许一个修改操作，并拒绝已变化的 profile。
 5. 保存 receipt 前验证 profile dependency 和没有越出 package 的 DSH bundle；安装结果非法或无法记录时，会在可行范围内回滚。
-6. 成功后明确提示用户：重启 Desktop 后新插件才会加载。
+6. 成功后签发短时、一次性重启许可，让用户选择**立即重启**或**稍后重启**；绝不静默重启。
 
-没有 Desktop 服务时，目录浏览仍可使用，package 操作则会说明需要 DSH Desktop。Market 不会退回 ambient `pnpm`、shell 命令、猜测的 `dsh` executable 或未激活 profile。
+没有 Desktop 服务时，目录浏览仍可使用，package 操作则会说明需要 DSH Desktop。受管安装不会退回 ambient `pnpm`、shell 命令、猜测的 `dsh` executable 或未激活 profile。**打开 DSH 终端**是独立的用户控制入口：请求不携带命令、路径或 profile，只负责打开终端；是否复制并运行展示文本完全由用户决定。
 
 ## 卸载边界
 
 **已安装**视图只来自当前 profile 的合法本地 receipt，不依赖已选来源。因此，即使安装来源后来被禁用、删除或离线，通过 Market 安装的插件仍然可以卸载。
 
-卸载预览只接受 `receiptId`。Host 会确认 receipt 仍然存在，并且当前 profile 仍包含 receipt 记录的精确 package 版本和 DSH bundle。执行阶段只接受由此生成的不透明一次性 preview，调用受管 `remove` 操作，确认 package 已移除后再删除 receipt。通过其他方式安装的 package、其他 profile 的 receipt，或安装后已经发生变化的 package，当前 MVP 都不会移除。profile 修改完成后，UI 会提示重启。
+卸载预览只接受 `receiptId`。Host 会确认 receipt 仍然存在，并且当前 profile 仍包含 receipt 记录的精确 package 版本和 DSH bundle。执行阶段只接受由此生成的不透明一次性 preview，调用受管 `remove` 操作，确认 package 已移除后再删除 receipt。通过其他方式安装的 package、其他 profile 的 receipt，或安装后已经发生变化的 package，当前 MVP 都不会移除。成功后同样显示**立即重启**与**稍后重启**。
 
 ## Profile 行为
 
