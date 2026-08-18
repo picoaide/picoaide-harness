@@ -43,6 +43,17 @@ const builtInSource = (overrides: Partial<LocalSourceRecord> = {}): LocalSourceR
   ...overrides,
 })
 
+const standardSource = (overrides: Partial<LocalSourceRecord> = {}): LocalSourceRecord => ({
+  sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+  registrationKind: 'user-added',
+  adapterId: 'market.standard-http-v1',
+  providerId: 'org.example.community-catalog',
+  manifestUrl: 'https://plugins.example.org/catalog-source.json',
+  enabled: false,
+  order: 1,
+  ...overrides,
+})
+
 async function startMarketServer(initialSources: readonly LocalSourceRecord[]): Promise<MarketServer> {
   const routes = new Map<string, RouteHandler>()
   let document: MarketSettingsDocument = { sources: initialSources }
@@ -224,6 +235,32 @@ describe('community market Host routes', () => {
       const state = await fetch(`${server.baseUrl}${marketRoutes.state}`)
       await expect(state.json()).resolves.toMatchObject({
         sources: [{ sourceRecordId: existing.sourceRecordId, enabled: true }],
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('removes a source and compacts the remaining source order', async () => {
+    const removed = builtInSource()
+    const remaining = standardSource()
+    const server = await startMarketServer([removed, remaining])
+    try {
+      const response = await mutateSource(server, {
+        action: 'remove',
+        sourceRecordId: removed.sourceRecordId,
+      })
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        sources: [{ sourceRecordId: remaining.sourceRecordId, order: 0 }],
+      })
+      const state = await fetch(`${server.baseUrl}${marketRoutes.state}`)
+      const body = await state.json()
+      expect(body.sources).toHaveLength(1)
+      expect(body.sources[0]).toMatchObject({
+        sourceRecordId: remaining.sourceRecordId,
+        order: 0,
       })
     } finally {
       await server.close()
