@@ -266,4 +266,21 @@ describe('community market overlay', () => {
     expect(await screen.findByText('Better Sidebar')).toBeTruthy()
     expect(screen.getByText('stale')).toBeTruthy()
   })
+
+  it('shows a loading state while the catalog request is pending', async () => {
+    let resolveCatalog!: (value: Response) => void
+    const pendingCatalog = new Promise<Response>(resolve => { resolveCatalog = resolve })
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : pendingCatalog
+    ))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+
+    expect(await screen.findByText('loading')).toBeTruthy()
+    resolveCatalog(response(catalogWithItem))
+    expect(await screen.findByText('Better Sidebar')).toBeTruthy()
+  })
 })
