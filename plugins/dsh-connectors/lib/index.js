@@ -229,7 +229,14 @@ async function refreshOAuthToken(def, credential, options = {}) {
 		refresh_token: credential.refreshToken,
 		client_id: credential.clientId ?? auth.clientId
 	});
-	const response = await fetch(options.tokenUrlOverride ?? auth.tokenUrl, {
+	if (auth.discoveryUrl) {
+		const mcp = new URL(auth.discoveryUrl);
+		body.set("resource", mcp.origin + mcp.pathname.replace(/\/+$/, ""));
+	}
+	let tokenUrl = options.tokenUrlOverride ?? auth.tokenUrl;
+	if (!tokenUrl && auth.discoveryUrl) tokenUrl = (await discoverMcpOAuth(auth.discoveryUrl)).tokenEndpoint ?? "";
+	if (!tokenUrl) return null;
+	const response = await fetch(tokenUrl, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body
@@ -319,25 +326,28 @@ async function runCli(def, options) {
 		});
 		let stdout = "";
 		let stderr = "";
-		let codeReported = false;
-		const extract = (text, source) => {
-			if (!deviceFlow || codeReported) return;
+		let reportedUri;
+		let reportedCode;
+		const extract = (text, _source) => {
+			if (!deviceFlow) return;
 			let uri;
 			try {
 				const match = text.match(new RegExp(deviceFlow.uriPattern));
 				uri = (match?.[1] ?? match?.[0])?.trim();
 			} catch {}
-			if (!uri) return;
 			let code;
 			if (deviceFlow.codePattern) try {
 				const match = text.match(new RegExp(deviceFlow.codePattern));
 				code = (match?.[1] ?? match?.[0])?.trim();
 			} catch {}
-			codeReported = true;
+			if (!uri && !code) return;
+			if (uri === reportedUri && code === reportedCode) return;
+			reportedUri = uri ?? reportedUri;
+			reportedCode = code ?? reportedCode;
 			options.onRequest({
 				connectorId: def.id,
-				verificationUrl: uri,
-				...code !== void 0 ? { userCode: code } : {}
+				...reportedUri !== void 0 ? { verificationUrl: reportedUri } : {},
+				...reportedCode !== void 0 ? { userCode: reportedCode } : {}
 			});
 		};
 		child.stdout?.on("data", (chunk) => {
@@ -575,7 +585,7 @@ function apply(ctx, options = {}) {
 			});
 		});
 	};
-	/** Render static headers: `${FIELD}` templates from credential fields, empty Authorization -> Bearer token. */
+	/** Render request headers: static `${FIELD}` templates from credential fields, empty Authorization -> Bearer token, and the default Bearer injection for OAuth/token credentials. */
 	const renderHeaders = (server, credential) => {
 		const headers = {};
 		for (const [name, value] of Object.entries(server.headers ?? {})) {
@@ -585,6 +595,7 @@ function apply(ctx, options = {}) {
 			}
 			headers[name] = value.replace(/\$\{([^}]+)\}/g, (_, key) => credential?.fields?.[key] ?? "");
 		}
+		if (Object.keys(headers).length === 0 && credential?.accessToken) headers.Authorization = `Bearer ${credential.accessToken}`;
 		return headers;
 	};
 	/** Merge connector definitions, keeping the hand-written ones when ids collide with generated defs. */

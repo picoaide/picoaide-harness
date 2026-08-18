@@ -260,7 +260,18 @@ export async function refreshOAuthToken(
     refresh_token: credential.refreshToken,
     client_id: credential.clientId ?? auth.clientId,
   })
-  const response = await fetch(options.tokenUrlOverride ?? auth.tokenUrl, {
+  // RFC 8707: refresh tokens are bound to the MCP resource too.
+  if (auth.discoveryUrl) {
+    const mcp = new URL(auth.discoveryUrl)
+    body.set('resource', mcp.origin + mcp.pathname.replace(/\/+$/, ''))
+  }
+  let tokenUrl = options.tokenUrlOverride ?? auth.tokenUrl
+  if (!tokenUrl && auth.discoveryUrl) {
+    const discovered = await discoverMcpOAuth(auth.discoveryUrl)
+    tokenUrl = discovered.tokenEndpoint ?? ''
+  }
+  if (!tokenUrl) return null
+  const response = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
@@ -362,16 +373,16 @@ async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Parti
     })
     let stdout = ''
     let stderr = ''
-    let codeReported = false
+    let reportedUri: string | undefined
+    let reportedCode: string | undefined
 
-    const extract = (text: string, source: string): void => {
-      if (!deviceFlow || codeReported) return
+    const extract = (text: string, _source: string): void => {
+      if (!deviceFlow) return
       let uri: string | undefined
       try {
         const match = text.match(new RegExp(deviceFlow.uriPattern))
         uri = (match?.[1] ?? match?.[0])?.trim()
       } catch { /* invalid pattern */ }
-      if (!uri) return
       let code: string | undefined
       if (deviceFlow.codePattern) {
         try {
@@ -379,9 +390,13 @@ async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Parti
           code = (match?.[1] ?? match?.[0])?.trim()
         } catch { /* invalid pattern */ }
       }
-      codeReported = true
-      void source
-      options.onRequest({ connectorId: def.id, verificationUrl: uri, ...(code !== undefined ? { userCode: code } : {}) })
+      if (!uri && !code) return
+      // The URL and the code may land in different output chunks; keep
+      // reporting until both are known.
+      if (uri === reportedUri && code === reportedCode) return
+      reportedUri = uri ?? reportedUri
+      reportedCode = code ?? reportedCode
+      options.onRequest({ connectorId: def.id, ...(reportedUri !== undefined ? { verificationUrl: reportedUri } : {}), ...(reportedCode !== undefined ? { userCode: reportedCode } : {}) })
     }
 
     child.stdout?.on('data', (chunk: Buffer) => {
