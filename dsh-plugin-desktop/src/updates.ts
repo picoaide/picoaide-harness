@@ -5,6 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type {} from './runtime.ts'
+import { desktopTrayLabel } from './tray-locale.ts'
 import {
   checkForStableUpdate,
   parseSemVer,

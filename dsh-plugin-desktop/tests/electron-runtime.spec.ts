@@ -1,7 +1,9 @@
+import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
 
 const terminal = vi.hoisted(() => ({ open: vi.fn() }))
+const diagnostics = vi.hoisted(() => ({ export: vi.fn() }))
 const updater = vi.hoisted(() => ({ download: vi.fn() }))
 const childProcess = vi.hoisted(() => {
   type Listener = (...args: unknown[]) => void
@@ -34,6 +36,10 @@ vi.mock('../src/desktop-terminal.ts', async (importOriginal) => ({
   openDesktopTerminal: terminal.open,
 }))
 
+vi.mock('../src/diagnostic-export.ts', () => ({
+  exportDesktopDiagnostics: diagnostics.export,
+}))
+
 vi.mock('../src/update-download.ts', () => ({
   downloadDesktopUpdate: updater.download,
 }))
@@ -49,8 +55,10 @@ const electron = vi.hoisted(() => {
   const loadURL = vi.fn(async (_url: string) => {})
   const menuTemplates: unknown[][] = []
   const notifications: Notification[] = []
+  let zoomLevel = 0
   const dialog = {
     showErrorBox: vi.fn(),
+    showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })),
     showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
   }
   const appIcon = {
@@ -66,8 +74,10 @@ const electron = vi.hoisted(() => {
     setTemplateImage: vi.fn(),
   }
   const webContents = {
+    getZoomLevel: vi.fn(() => zoomLevel),
     on: vi.fn(),
     off: vi.fn(),
+    setZoomLevel: vi.fn((level: number) => { zoomLevel = level }),
     setWindowOpenHandler: vi.fn(),
   }
   const nativeTheme = { themeSource: 'system' }
@@ -130,7 +140,10 @@ const electron = vi.hoisted(() => {
   return {
     app: {
       dock: { setIcon: vi.fn() },
-      getPath: vi.fn(() => '/tmp/dsh-desktop-user-data'),
+      getLocale: vi.fn(() => 'en-US'),
+      getPath: vi.fn((name: string) => name === 'crashDumps'
+        ? '/tmp/dsh-desktop-user-data/Crashpad'
+        : '/tmp/dsh-desktop-user-data'),
       getVersion: vi.fn(() => '43.4.0'),
       isPackaged: false,
       on: vi.fn(),
@@ -158,13 +171,16 @@ const electron = vi.hoisted(() => {
     net: { fetch: vi.fn() },
     Notification,
     notifications,
+    resetZoomLevel: () => { zoomLevel = 0 },
     shell: {
       openExternal: vi.fn(async () => {}),
       openPath: vi.fn(async () => ''),
+      showItemInFolder: vi.fn(),
     },
     templateIcon,
     Tray,
     trays,
+    webContents,
   }
 })
 
@@ -195,6 +211,7 @@ const spec: DesktopShellSpec = {
     templatePath: '/tmp/tray-iconTemplate.png',
     bluePath: '/tmp/tray-icon-blue.png',
   },
+  readLocalePreference: vi.fn(() => undefined),
   readThemeSource: vi.fn(() => 'system' as const),
   requestQuit: () => {},
   requestModeChange: vi.fn(async () => {}),
@@ -211,11 +228,15 @@ describe('Electron compatibility runtime', () => {
     electron.notifications.length = 0
     childProcess.reset()
     vi.clearAllMocks()
+    updater.download.mockReset()
+    diagnostics.export.mockReset()
     electron.loadURL.mockReset()
     electron.loadURL.mockResolvedValue(undefined)
     electron.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false })
+    electron.dialog.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] })
     electron.shell.openPath.mockResolvedValue('')
     electron.nativeTheme.themeSource = 'system'
+    electron.resetZoomLevel()
   })
 
   afterEach(() => {
@@ -302,6 +323,124 @@ describe('Electron compatibility runtime', () => {
 
     await release()
     expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
+  })
+
+  it('opens one parented Windows folder chooser and returns its selected path', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: ['C:\\Work'] })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    await expect(runtime.pickDirectory()).resolves.toBe('C:\\Work')
+    expect(electron.dialog.showOpenDialog).toHaveBeenCalledWith(
+      electron.browserWindows[0],
+      {
+        title: 'Select Workspace Directory',
+        properties: ['openDirectory', 'dontAddToRecent'],
+      },
+    )
+
+    await release()
+  })
+
+  it('logs renderer crashes with the Windows exception code', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const logger = { error: vi.fn(), errorCause: vi.fn() }
+    const runtime = new ElectronDesktopRuntime(async () => {}, undefined, logger)
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    const gone = electron.browserWindows[0]?.webContents.on.mock.calls
+      .find(([event]) => event === 'render-process-gone')?.[1]
+    expect(gone).toEqual(expect.any(Function))
+    gone({}, { reason: 'crashed', exitCode: -1073741819 })
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: -1073741819 / 0xc0000005)',
+    )
+    await release()
+  })
+
+  it('starts from the saved locale and rebuilds native tray commands when it changes', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const readLocalePreference = vi.fn(() => 'zh' as const)
+    const release = runtime.schedule({ ...spec, readLocalePreference })
+
+    await runtime.mountScheduled()
+    expect(readLocalePreference).toHaveBeenCalledOnce()
+    expect(runtime.locale).toBe('zh')
+    expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
+      .toEqual(expect.arrayContaining([
+        '打开 DSH Desktop',
+        '切换到高级模式',
+        '退出',
+      ]))
+
+    runtime.setLocalePreference('en')
+    expect(runtime.locale).toBe('en')
+    expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
+      .toEqual(expect.arrayContaining([
+        'Open DSH Desktop',
+        'Switch to Advanced Mode',
+        'Quit',
+      ]))
+
+    electron.app.getLocale.mockReturnValueOnce('zh-CN')
+    runtime.setLocalePreference(undefined)
+    expect(runtime.locale).toBe('zh')
+    expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
+      .toEqual(expect.arrayContaining([
+        '打开 DSH Desktop',
+        '切换到高级模式',
+        '退出',
+      ]))
+
+    await release()
+  })
+
+  it('handles desktop zoom shortcuts without relying on the native menu', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+
+    await runtime.mountScheduled()
+
+    const zoomListener = electron.webContents.on.mock.calls
+      .find(([event]) => event === 'before-input-event')?.[1]
+    expect(zoomListener).toEqual(expect.any(Function))
+
+    const zoomIn = { preventDefault: vi.fn() }
+    zoomListener(zoomIn, { type: 'keyDown', control: true, key: '=' })
+    expect(zoomIn.preventDefault).toHaveBeenCalledOnce()
+    expect(electron.webContents.setZoomLevel).toHaveBeenLastCalledWith(1)
+
+    const zoomInRelease = { preventDefault: vi.fn() }
+    zoomListener(zoomInRelease, { type: 'keyUp', control: true, key: '=' })
+    expect(zoomInRelease.preventDefault).not.toHaveBeenCalled()
+    expect(electron.webContents.setZoomLevel).toHaveBeenCalledTimes(1)
+
+    const zoomOut = { preventDefault: vi.fn() }
+    zoomListener(zoomOut, { type: 'keyDown', control: true, key: '-' })
+    expect(zoomOut.preventDefault).toHaveBeenCalledOnce()
+    expect(electron.webContents.setZoomLevel).toHaveBeenLastCalledWith(0)
+
+    const zoomReset = { preventDefault: vi.fn() }
+    zoomListener(zoomReset, { type: 'keyDown', control: true, key: '0' })
+    expect(zoomReset.preventDefault).toHaveBeenCalledOnce()
+    expect(electron.webContents.setZoomLevel).toHaveBeenLastCalledWith(0)
+
+    const plainPlus = { preventDefault: vi.fn() }
+    zoomListener(plainPlus, { type: 'keyDown', key: '=' })
+    expect(plainPlus.preventDefault).not.toHaveBeenCalled()
+
+    await release()
+    expect(electron.webContents.off).toHaveBeenCalledWith('before-input-event', zoomListener)
   })
 
   it('does not mount a registration disposed before Host boot settles', async () => {
@@ -470,17 +609,19 @@ describe('Electron compatibility runtime', () => {
       expect(terminal.open).toHaveBeenCalledWith(expect.objectContaining({
         platform: 'darwin',
         appExecutable: process.execPath,
-        dshBootstrapPath: expect.stringMatching(/\/src\/desktop-cli\.js$/u),
-        pnpmBinPath: expect.stringMatching(/\/node_modules\/pnpm\/bin\/pnpm\.mjs$/u),
         electronVersion: '43.4.0',
         profileName: 'desktop',
-        productVersion: '2.0.0',
+        productVersion: '2.0.1',
         profileDir: '/tmp/dsh-home/profiles/desktop',
         homeDir: '/tmp/dsh-home',
-        stateDir: expect.stringMatching(/^\/tmp\/dsh-desktop-user-data\/cli\/[a-f0-9]{64}$/u),
         spawn: expect.any(Function),
         onLaunchError: expect.any(Function),
       }))
+      const terminalOptions = terminal.open.mock.calls[0]?.[0]
+      expect(terminalOptions.dshBootstrapPath.endsWith(join('src', 'desktop-cli.js'))).toBe(true)
+      expect(terminalOptions.pnpmBinPath.endsWith(join('node_modules', 'pnpm', 'bin', 'pnpm.mjs'))).toBe(true)
+      expect(dirname(terminalOptions.stateDir)).toBe(join('/tmp/dsh-desktop-user-data', 'cli'))
+      expect(basename(terminalOptions.stateDir)).toMatch(/^[a-f0-9]{64}$/u)
       expect(() => runtime.configureTerminal({
         profileName: 'desktop',
         profileDir: '/other',
@@ -489,6 +630,88 @@ describe('Electron compatibility runtime', () => {
     } finally {
       delete (process.versions as { electron?: string }).electron
     }
+  })
+
+  it('coalesces concurrent diagnostic exports and reveals the completed archive', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    let finishExport: ((path: string) => void) | undefined
+    diagnostics.export.mockReturnValue(new Promise(resolve => { finishExport = resolve }))
+
+    const first = runtime.exportDiagnostics()
+    const second = runtime.exportDiagnostics()
+    finishExport?.('C:\\Users\\Example\\diagnostics.zip')
+    await Promise.all([first, second])
+
+    expect(diagnostics.export).toHaveBeenCalledOnce()
+    expect(diagnostics.export).toHaveBeenCalledWith(
+      '/tmp/dsh-desktop-user-data',
+      {
+        appVersion: '2.0.1',
+        crashDumpsDir: '/tmp/dsh-desktop-user-data/Crashpad',
+      },
+    )
+    expect(electron.shell.showItemInFolder).toHaveBeenCalledOnce()
+    expect(electron.shell.showItemInFolder).toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics.zip')
+  })
+
+  it('does not export diagnostics when the privacy confirmation is cancelled', async () => {
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+
+    await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
+
+    expect(diagnostics.export).not.toHaveBeenCalled()
+    expect(electron.shell.showItemInFolder).not.toHaveBeenCalled()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'warning',
+      cancelId: 1,
+      defaultId: 1,
+      buttons: ['Export', 'Cancel'],
+      detail: expect.stringContaining('local paths, workspace IDs, and session IDs'),
+    }))
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.stringContaining('process memory'),
+    }))
+  })
+
+  it('localizes the diagnostics privacy confirmation', async () => {
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    runtime.setLocalePreference('zh')
+
+    await runtime.exportDiagnostics()
+
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      buttons: ['导出', '取消'],
+      detail: expect.stringContaining('本地路径、工作区 ID 和会话 ID'),
+    }))
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.stringContaining('进程内存'),
+    }))
+  })
+
+  it('shows a native error when diagnostic export fails', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    diagnostics.export
+      .mockRejectedValueOnce(new Error('disk is full'))
+      .mockResolvedValueOnce('C:\\Users\\Example\\diagnostics-retry.zip')
+
+    await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
+    await expect(runtime.exportDiagnostics()).resolves.toBeUndefined()
+
+    expect(diagnostics.export).toHaveBeenCalledTimes(2)
+    expect(electron.shell.showItemInFolder)
+      .toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics-retry.zip')
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Unable to Export Diagnostics',
+      'disk is full',
+    )
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to export diagnostics: disk is full'))
   })
 
   it('shows native errors for synchronous and asynchronous terminal launch failures', async () => {
@@ -528,6 +751,86 @@ describe('Electron compatibility runtime', () => {
     }
   })
 
+  it('shows native recovery when the renderer Loader reports a failed plugin', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 2, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const onRendererBoot = vi.fn()
+    const runtime = new ElectronDesktopRuntime(async () => {}, onRendererBoot)
+    const report = {
+      status: 'failed' as const,
+      plugins: ['dsh-vision-router'],
+      error: 'keyed slot "tool.call.toolview" already has an entry for key "vision_crop" at priority 0',
+    }
+
+    runtime.reportRendererBoot(report)
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce() })
+    runtime.reportRendererBoot({ status: 'healthy' })
+
+    expect(onRendererBoot).toHaveBeenCalledWith(report)
+    expect(onRendererBoot).toHaveBeenCalledOnce()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      title: 'Plugin Recovery',
+      message: 'DSH Desktop could not load all plugins.',
+      detail: expect.stringContaining('dsh-vision-router'),
+      buttons: ['Open DSH Terminal', 'Restart DSH Desktop', 'Dismiss'],
+    }))
+    const recoveryCalls = electron.dialog.showMessageBox.mock.calls as unknown as Array<[{ detail?: string }]>
+    expect(recoveryCalls[0]?.[0].detail).toContain('vision_crop')
+  })
+
+  it('commits a healthy renderer without showing recovery', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const onRendererBoot = vi.fn()
+    const runtime = new ElectronDesktopRuntime(async () => {}, onRendererBoot)
+
+    runtime.reportRendererBoot({ status: 'healthy' })
+
+    expect(onRendererBoot).toHaveBeenCalledWith({ status: 'healthy' })
+    expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('opens the active profile terminal from plugin recovery', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    Object.defineProperty(process.versions, 'electron', {
+      configurable: true,
+      value: '43.4.0',
+    })
+    try {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.configureTerminal({
+        profileName: 'desktop',
+        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
+        homeDir: 'C:\\Users\\Example\\.dsh',
+      })
+
+      runtime.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
+      await vi.waitFor(() => { expect(terminal.open).toHaveBeenCalledOnce() })
+
+      expect(terminal.open).toHaveBeenCalledWith(expect.objectContaining({
+        profileName: 'desktop',
+        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
+      }))
+    } finally {
+      delete (process.versions as { electron?: string }).electron
+    }
+  })
+
+  it('requests an orderly restart from plugin recovery', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    runtime.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() })
+  })
+
   it('uses Electron networking and confirmation-gated macOS update handoff', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const response = Response.json({ version: '2.1.0' })
@@ -541,8 +844,8 @@ describe('Electron compatibility runtime', () => {
     expect(runtime.updates).toMatchObject({
       isPackaged: false,
       canDownload: false,
-      currentVersion: '2.0.0',
-      statePath: '/tmp/dsh-desktop-user-data/updates/state.json',
+      currentVersion: '2.0.1',
+      statePath: join('/tmp/dsh-desktop-user-data', 'updates', 'state.json'),
     })
     electron.app.isPackaged = true
     expect(runtime.updates).toMatchObject({ isPackaged: true, canDownload: true })
