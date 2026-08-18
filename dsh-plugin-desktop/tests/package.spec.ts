@@ -47,6 +47,11 @@ const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', worksp
 const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoot), 'utf8')
 
 describe('published package surface', () => {
+  it('runs desktop and community market typechecks from the root command', () => {
+    expect(workspaceManifest.scripts?.typecheck)
+      .toBe('yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-community-market typecheck')
+  })
+
   it('registers both npm launcher names', () => {
     expect(manifest.name).toBe('dsh-plugin-desktop')
     expect(manifest.bin).toEqual({
@@ -182,6 +187,8 @@ describe('published package surface', () => {
     expect(boot).toBeGreaterThan(installDsh)
     expect(main).toContain("'dsh-plugin-desktop: packaged pnpm runtime PATH'")
     expect(main).toContain("'dsh-plugin-desktop: packaged dsh runtime PATH'")
+    expect(main).toContain("args: ['--host', '127.0.0.1', '--port', String(prepared.port)]")
+    expect(main).not.toContain("'--port', '0'")
     expect(main).toContain('disposePnpmRuntime?.()')
     expect(main).toContain('disposeDshRuntime?.()')
   })
