@@ -409,4 +409,24 @@ describe('community market overlay', () => {
     expect(screen.queryByRole('complementary', { name: 'details' })).toBeNull()
     open.mockRestore()
   })
+
+  it('keeps details open on Escape and closes the overlay after details close', async () => {
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : response(catalogWithItem)
+    ))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+    fireEvent.click(screen.getByText('Better Sidebar').closest('button')!)
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.getByRole('complementary', { name: 'details' })).toBeTruthy()
+    fireEvent.click(screen.getAllByRole('button', { name: 'close' })[1]!)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('region', { name: 'title' })).toBeNull()
+    expect(controller.getSnapshot()).toBe(false)
+  })
 })
