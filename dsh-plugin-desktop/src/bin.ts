@@ -2,11 +2,13 @@
 
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { posix, resolve, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 
 /** Parsed launcher action. */
-export type DesktopCliAction = 'help' | 'version' | 'launch'
+export type DesktopCliAction = 'export-diagnostics' | 'help' | 'version' | 'launch'
 
 /** Human-readable launcher help. */
 export const DESKTOP_CLI_HELP = `Usage: dsh-plugin-desktop [options]
@@ -14,8 +16,9 @@ export const DESKTOP_CLI_HELP = `Usage: dsh-plugin-desktop [options]
 Launch PicoAide Harness with the selected Web-capable profile.
 
 Options:
-  -h, --help     display help
-  -V, --version  display version
+  --export-diagnostics  export logs and crash evidence without launching the app
+  -h, --help            display help
+  -V, --version         display version
 `
 
 /**
@@ -25,6 +28,7 @@ Options:
  */
 export function parseDesktopCli(argv: readonly string[]): DesktopCliAction {
   if (argv.length === 0) return 'launch'
+  if (argv.length === 1 && argv[0] === '--export-diagnostics') return 'export-diagnostics'
   if (argv.length === 1 && (argv[0] === '--help' || argv[0] === '-h')) return 'help'
   if (argv.length === 1 && (argv[0] === '--version' || argv[0] === '-V')) return 'version'
   throw new Error(`unknown arguments: ${argv.join(' ')}`)
@@ -37,11 +41,51 @@ function packageVersion(): string {
   return manifest.version
 }
 
+/** Resolve the Electron user-data location without importing Electron. */
+export function defaultDesktopUserDataDirectory(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+  homeDirectory: string = homedir(),
+): string {
+  const path = platform === 'win32' ? win32 : posix
+  if (platform === 'win32') {
+    const appData = environment.APPDATA
+    if (appData === undefined || appData.length === 0) {
+      throw new Error('APPDATA is unavailable; cannot locate DSH Desktop diagnostics')
+    }
+    return path.join(appData, 'DSH Desktop')
+  }
+  if (platform === 'darwin') return path.join(homeDirectory, 'Library', 'Application Support', 'DSH Desktop')
+  const config = environment.XDG_CONFIG_HOME
+  return path.join(config === undefined || config.length === 0 ? path.join(homeDirectory, '.config') : config, 'DSH Desktop')
+}
+
+export interface DesktopCliOptions {
+  /** Override used by focused tests and recovery tooling with a non-default data root. */
+  readonly userDataDir?: string
+}
+
 /** Launch Electron and mirror its terminal exit status. */
 async function launchElectron(): Promise<number> {
-  const imported = await import('electron')
-  const electronPath = imported.default
-  if (typeof electronPath !== 'string') throw new Error('electron package did not provide its executable path')
+  let electronPath: string
+  try {
+    const imported = await import('electron') as { default?: unknown }
+    const candidate = imported.default
+    if (typeof candidate !== 'string') {
+      throw new Error('electron package did not provide its executable path')
+    }
+    electronPath = candidate
+  } catch {
+    process.stderr.write(
+      'dsh-plugin-desktop: electron is not available in this installation.\n'
+      + 'Install the desktop launcher globally (npm installs the electron peer automatically):\n'
+      + '  npm install -g dsh-plugin-desktop\n'
+      + 'Or add electron to the profile before launching:\n'
+      + '  dsh plugin --profile <name> add electron\n'
+      + 'Or use the packaged DSH Desktop application.\n',
+    )
+    return 1
+  }
   const mainPath = fileURLToPath(new URL('./main.js', import.meta.url))
   return new Promise<number>((resolveExit, reject) => {
     const child = spawn(electronPath, [mainPath], { stdio: 'inherit', env: process.env })
@@ -57,7 +101,10 @@ async function launchElectron(): Promise<number> {
  * @param argv - arguments after the executable and script path.
  * @returns process exit code.
  */
-export async function runDesktopCli(argv: readonly string[]): Promise<number> {
+export async function runDesktopCli(
+  argv: readonly string[],
+  options: DesktopCliOptions = {},
+): Promise<number> {
   let action: DesktopCliAction
   try {
     action = parseDesktopCli(argv)
@@ -72,6 +119,14 @@ export async function runDesktopCli(argv: readonly string[]): Promise<number> {
   }
   if (action === 'version') {
     process.stdout.write(`${packageVersion()}\n`)
+    return 0
+  }
+  if (action === 'export-diagnostics') {
+    const path = await exportDesktopDiagnostics(
+      options.userDataDir ?? defaultDesktopUserDataDirectory(),
+      { appVersion: packageVersion() },
+    )
+    process.stdout.write(`${path}\n`)
     return 0
   }
   return launchElectron()
