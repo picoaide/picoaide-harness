@@ -306,4 +306,25 @@ describe('community market overlay', () => {
     expect(request).toHaveBeenCalledTimes(3)
     expect(request.mock.calls[2]?.[1]).toMatchObject({ method: 'POST' })
   })
+
+  it('removes a source from the source list', async () => {
+    const request = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/state')) return response(stateWithSource)
+      if (url.includes('/catalog')) return response(catalogWithItem)
+      expect(init?.method).toBe('POST')
+      return response({ sources: [] })
+    })
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+    fireEvent.click(screen.getByRole('button', { name: 'sources' }))
+    fireEvent.click(screen.getByRole('button', { name: 'remove' }))
+
+    await waitFor(() => { expect(screen.queryByText(source.name)).toBeNull() })
+    expect(request).toHaveBeenCalledTimes(3)
+  })
 })
