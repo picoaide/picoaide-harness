@@ -58,6 +58,7 @@ const electron = vi.hoisted(() => {
   let zoomLevel = 0
   const dialog = {
     showErrorBox: vi.fn(),
+    showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })),
     showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
   }
   const appIcon = {
@@ -232,6 +233,7 @@ describe('Electron compatibility runtime', () => {
     electron.loadURL.mockReset()
     electron.loadURL.mockResolvedValue(undefined)
     electron.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false })
+    electron.dialog.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] })
     electron.shell.openPath.mockResolvedValue('')
     electron.nativeTheme.themeSource = 'system'
     electron.resetZoomLevel()
@@ -321,6 +323,26 @@ describe('Electron compatibility runtime', () => {
 
     await release()
     expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
+  })
+
+  it('opens one parented Windows folder chooser and returns its selected path', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: ['C:\\Work'] })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    await expect(runtime.pickDirectory()).resolves.toBe('C:\\Work')
+    expect(electron.dialog.showOpenDialog).toHaveBeenCalledWith(
+      electron.browserWindows[0],
+      {
+        title: 'Select Workspace Directory',
+        properties: ['openDirectory', 'dontAddToRecent'],
+      },
+    )
+
+    await release()
   })
 
   it('logs renderer crashes with the Windows exception code', async () => {

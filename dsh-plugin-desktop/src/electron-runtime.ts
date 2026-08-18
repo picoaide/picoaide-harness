@@ -110,6 +110,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
   private terminalSpec: DesktopTerminalSpec | undefined
   private diagnosticExport: Promise<void> | undefined
+  private directoryPickTask: Promise<string | null> | undefined
   private rendererBootReported = false
 
   constructor(
@@ -179,6 +180,33 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
+  }
+
+  /** @inheritdoc */
+  async pickDirectory(): Promise<string | null> {
+    if (this.platform !== 'win32') {
+      throw new Error(`dsh-plugin-desktop: native workspace picker is unavailable on ${this.platform}`)
+    }
+    if (this.directoryPickTask !== undefined) return await this.directoryPickTask
+    const task = this.showDirectoryPicker()
+    this.directoryPickTask = task
+    try {
+      return await task
+    } finally {
+      if (this.directoryPickTask === task) this.directoryPickTask = undefined
+    }
+  }
+
+  private async showDirectoryPicker(): Promise<string | null> {
+    const options: Electron.OpenDialogOptions = {
+      title: this.currentLocale === 'zh' ? '选择工作区目录' : 'Select Workspace Directory',
+      properties: ['openDirectory', 'dontAddToRecent'],
+    }
+    const window = this.window
+    const result = window === undefined || window.isDestroyed()
+      ? await dialog.showOpenDialog(options)
+      : await dialog.showOpenDialog(window, options)
+    return result.canceled ? null : result.filePaths[0] ?? null
   }
 
   /** @inheritdoc */
