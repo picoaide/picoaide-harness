@@ -206,4 +206,27 @@ describe('community market Host routes', () => {
       await server.close()
     }
   })
+
+  it('persists an enabled state change for an existing source', async () => {
+    const existing = builtInSource()
+    const server = await startMarketServer([existing])
+    try {
+      const response = await mutateSource(server, {
+        action: 'set-enabled',
+        sourceRecordId: existing.sourceRecordId,
+        enabled: true,
+      })
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        sources: [{ sourceRecordId: existing.sourceRecordId, enabled: true }],
+      })
+      const state = await fetch(`${server.baseUrl}${marketRoutes.state}`)
+      await expect(state.json()).resolves.toMatchObject({
+        sources: [{ sourceRecordId: existing.sourceRecordId, enabled: true }],
+      })
+    } finally {
+      await server.close()
+    }
+  })
 })
