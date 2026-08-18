@@ -276,4 +276,52 @@ describe('connector auth', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('refreshes a discovery-mode token through the discovered endpoint with the resource parameter', async () => {
+    const originalFetch = globalThis.fetch
+    let tokenBody: string | null = null
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input)
+      const json = (body: object, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url === 'https://mcp.example/mcp') {
+        return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"' } })
+      }
+      if (url === 'https://mcp.example/.well-known/oauth-protected-resource') {
+        return json({ authorization_servers: ['https://auth.example'] })
+      }
+      if (url === 'https://auth.example/.well-known/oauth-authorization-server') {
+        return json({ authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token', scopes_supported: ['offline_access'] })
+      }
+      if (url === 'https://auth.example/token') {
+        tokenBody = init?.body != null ? String(init.body) : null
+        return json({ access_token: 'at-2', refresh_token: 'rt-2' })
+      }
+      return new Response('unexpected ' + url, { status: 500 })
+    }) as typeof fetch
+    try {
+      const def: ConnectorDef = {
+        id: 'refresh-mcp',
+        name: 'Refresh',
+        description: 'x',
+        authMode: 'oauth',
+        auth: {
+          discoveryUrl: 'https://mcp.example/mcp',
+          clientId: '',
+          authorizeUrl: '',
+          tokenUrl: '',
+          redirectUri: '',
+          pkce: true,
+          publicClient: true,
+        },
+        mcp: [],
+      }
+      const refreshed = await refreshOAuthToken(def, { accessToken: 'old', refreshToken: 'rt-1', clientId: 'dyn-1', updatedAt: 0 })
+      expect(refreshed?.accessToken).toBe('at-2')
+      expect(tokenBody).toContain('grant_type=refresh_token')
+      expect(tokenBody).toContain('resource=https%3A%2F%2Fmcp.example%2Fmcp')
+      expect(tokenBody).toContain('client_id=dyn-1')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
