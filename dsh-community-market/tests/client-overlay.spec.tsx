@@ -182,4 +182,25 @@ describe('community market overlay', () => {
     expect(catalogUrl.searchParams.get('q')).toBe('sidebar')
     expect(catalogUrl.searchParams.get('locale')).toBe('en')
   })
+
+  it('refreshes state and catalog with the current query', async () => {
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : response(catalogWithItem)
+    ))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+
+    fireEvent.change(screen.getByPlaceholderText('search'), { target: { value: 'sidebar' } })
+    fireEvent.click(screen.getByRole('button', { name: 'refresh' }))
+
+    await waitFor(() => { expect(request).toHaveBeenCalledTimes(4) })
+    expect(String(request.mock.calls[2]?.[0])).toContain('/api/community-market/state')
+    const catalogUrl = new URL(String(request.mock.calls[3]?.[0]))
+    expect(catalogUrl.searchParams.get('q')).toBe('sidebar')
+    expect(catalogUrl.searchParams.get('locale')).toBe('en')
+  })
 })
