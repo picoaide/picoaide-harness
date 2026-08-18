@@ -21,6 +21,17 @@ interface MarketServer {
   readonly close: () => Promise<void>
 }
 
+async function mutateSource(server: MarketServer, mutation: unknown, origin = server.baseUrl): Promise<Response> {
+  return await fetch(`${server.baseUrl}${marketRoutes.sources}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      origin,
+    },
+    body: JSON.stringify(mutation),
+  })
+}
+
 const builtInSource = (overrides: Partial<LocalSourceRecord> = {}): LocalSourceRecord => ({
   sourceRecordId: '018f1f77-a5c4-7b73-a9ae-0242ac120002',
   registrationKind: 'built-in',
@@ -165,6 +176,31 @@ describe('community market Host routes', () => {
         limit: '15',
         category: 'interface',
         sortBy: 'recent',
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('adds the reviewed built-in provider as a disabled source', async () => {
+    const server = await startMarketServer([])
+    try {
+      const response = await mutateSource(server, {
+        action: 'add-builtin',
+        key: DSH_1024STORE_KEY,
+      })
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        sources: [{
+          registrationKind: 'built-in',
+          adapterId: DSH_1024STORE_ADAPTER_ID,
+          providerId: DSH_1024STORE_PROVIDER_ID,
+          builtInProviderKey: DSH_1024STORE_KEY,
+          enabled: false,
+          order: 0,
+          name: 'DSH 1024Store',
+        }],
       })
     } finally {
       await server.close()
