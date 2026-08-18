@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MarketStateResponse } from '../src/api-types.js'
+import type { MarketCatalogResponse, MarketSourceView } from '../src/api-types.js'
 import type {} from '../src/client/index.js'
 import { MarketController } from '../src/client/controller.js'
 import { MarketOverlay, type MarketOverlayProps } from '../src/client/MarketOverlay.js'
@@ -74,6 +75,57 @@ function response(value: unknown, status = 200): Response {
   })
 }
 
+const source: MarketSourceView = {
+  sourceRecordId: '018f1f77-a5c4-7b73-a9ae-0242ac120002',
+  registrationKind: 'built-in',
+  adapterId: 'market.dsh-1024store-v1',
+  providerId: 'com.deepseek1024.catalog',
+  builtInProviderKey: 'dsh-1024store',
+  enabled: true,
+  order: 0,
+  name: 'DSH 1024Store',
+  endpoint: 'https://api.deepseek1024.com/v1/plugins/search',
+  partnership: true,
+}
+
+const stateWithSource: MarketStateResponse = {
+  sources: [source],
+  builtIns: [],
+}
+
+const catalogWithItem: MarketCatalogResponse = {
+  query: {},
+  fetchedAt: '2026-08-18T04:00:00.000Z',
+  results: [{
+    source,
+    stale: false,
+    snapshot: {
+      schemaVersion: '1.0.0',
+      source: {
+        sourceRecordId: source.sourceRecordId,
+        providerId: source.providerId,
+        adapterId: source.adapterId,
+        registrationKind: source.registrationKind,
+        fetchedAt: '2026-08-18T04:00:00.000Z',
+        finalUrl: source.endpoint,
+      },
+      items: [{
+        id: 'example/better-sidebar',
+        name: 'dsh-plugin-better-sidebar',
+        displayName: 'Better Sidebar',
+        summary: 'Adds a configurable sidebar panel.',
+        repository: { url: 'https://github.com/example/better-sidebar' },
+        provenance: {
+          sourceRecordId: source.sourceRecordId,
+          providerId: source.providerId,
+          itemId: 'example/better-sidebar',
+        },
+      }],
+      page: { total: 1 },
+    },
+  }],
+}
+
 describe('community market overlay', () => {
   it('shows the empty source state without requesting a catalog', async () => {
     const state: MarketStateResponse = { sources: [], builtIns: [] }
@@ -92,5 +144,22 @@ describe('community market overlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'chooseSources' }))
     await waitFor(() => { expect(screen.getByRole('heading', { name: 'sources' })).toBeTruthy() })
     expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('loads and renders plugin cards when a source is enabled', async () => {
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : response(catalogWithItem)
+    ))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+
+    expect(await screen.findByText('Better Sidebar')).toBeTruthy()
+    expect(screen.getByText('Adds a configurable sidebar panel.')).toBeTruthy()
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(String(request.mock.calls[0]?.[0])).toContain('/api/community-market/state')
+    expect(String(request.mock.calls[1]?.[0])).toContain('/api/community-market/catalog')
   })
 })
