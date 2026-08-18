@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,6 +16,10 @@ import { marketRoutes, registerMarketRoutes } from '../src/host/routes.js'
 import { restrictedHttpClient } from '../src/network/restricted-http.js'
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+
+function fixture(path: string): unknown {
+  return JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')) as unknown
+}
 
 interface MarketServer {
   readonly baseUrl: string
@@ -262,6 +267,36 @@ describe('community market Host routes', () => {
         sourceRecordId: remaining.sourceRecordId,
         order: 0,
       })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('adds a disabled standard source after validating its HTTPS manifest', async () => {
+    const manifestUrl = 'https://plugins.example.org/catalog-source.json'
+    const getJson = vi.spyOn(restrictedHttpClient, 'getJson').mockResolvedValue({
+      value: fixture('../docs/examples/catalog-source.example.json'),
+      finalUrl: manifestUrl,
+    })
+    const server = await startMarketServer([])
+    try {
+      const response = await mutateSource(server, {
+        action: 'add-standard',
+        manifestUrl,
+      })
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        sources: [{
+          registrationKind: 'user-added',
+          adapterId: 'market.standard-http-v1',
+          providerId: 'org.example.community-catalog',
+          manifestUrl,
+          enabled: false,
+          order: 0,
+        }],
+      })
+      expect(getJson).toHaveBeenCalledWith(manifestUrl, expect.any(AbortSignal))
     } finally {
       await server.close()
     }
