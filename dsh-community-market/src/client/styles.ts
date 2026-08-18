@@ -60,6 +60,7 @@ const css = `
 .dshMarketViewSwitch {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -137,6 +138,12 @@ const css = `
 .dshMarketCard:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 2px;
+}
+
+.dshMarketCard:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+  box-shadow: none;
 }
 
 .dshMarketCardTop {
@@ -271,6 +278,17 @@ const css = `
   margin-bottom: 16px;
 }
 
+.dshMarketIndexMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: -6px 0 14px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .dshMarketSources {
   display: flex;
   flex-direction: column;
@@ -355,6 +373,56 @@ const css = `
   gap: 7px;
 }
 
+.dshMarketReceipts {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.dshMarketReceipt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+.dshMarketReceiptMain {
+  min-width: 0;
+}
+
+.dshMarketReceiptTitle,
+.dshMarketReceiptMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dshMarketReceiptTitle {
+  gap: 7px;
+}
+
+.dshMarketReceiptTitle h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.dshMarketReceiptMeta {
+  gap: 5px 12px;
+  margin-top: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dshMarketReceiptMeta span {
+  overflow-wrap: anywhere;
+}
+
 .dshMarketDetails {
   display: flex;
   flex-direction: column;
@@ -386,6 +454,60 @@ const css = `
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
   line-height: 19px;
+}
+
+.dshMarketOperationReview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dshMarketOperationFacts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.dshMarketOperationFacts > div {
+  display: grid;
+  grid-template-columns: minmax(105px, 0.36fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.dshMarketOperationFacts dt,
+.dshMarketOperationFacts dd {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dshMarketOperationFacts dt {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dshMarketOperationFacts dd {
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+
+.dshMarketOperationWarning,
+.dshMarketOperationSuccess,
+.dshMarketOperationProgress {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.dshMarketOperationSuccess {
+  color: var(--dsw-alias-label-primary);
 }
 
 .dshMarketModalField {
@@ -511,8 +633,14 @@ const css = `
   }
 
   .dshMarketGrid,
-  .dshMarketSource {
+  .dshMarketSource,
+  .dshMarketReceipt {
     grid-template-columns: 1fr;
+  }
+
+  .dshMarketOperationFacts > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 
   .dshMarketSourceActions {

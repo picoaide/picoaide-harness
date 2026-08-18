@@ -1,11 +1,38 @@
-import type { MarketCatalogResponse, MarketSourceMutation, MarketStateResponse } from '../api-types.js'
+import type {
+  MarketCatalogResponse,
+  MarketInstallableResponse,
+  MarketInstallationsResponse,
+  MarketOperationExecuteResponse,
+  MarketOperationPreviewRequest,
+  MarketOperationPreviewResponse,
+  MarketSourceMutation,
+  MarketStateResponse,
+} from '../api-types.js'
 
 const CATALOG_PAGE_LIMIT = 50
 
 async function readJson<T>(response: Response): Promise<T> {
-  const value = await response.json() as T & { error?: unknown }
-  if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `request failed: ${response.status}`)
+  const value = await response.json() as T & { error?: unknown; code?: unknown }
+  if (!response.ok) {
+    throw new MarketApiError(
+      typeof value.error === 'string' ? value.error : `request failed: ${response.status}`,
+      response.status,
+      typeof value.code === 'string' ? value.code : undefined,
+    )
+  }
   return value
+}
+
+/** HTTP facts used to localize safe Client-facing Market failures. */
+export class MarketApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message)
+    this.name = 'MarketApiError'
+  }
 }
 
 export async function readMarketState(signal?: AbortSignal): Promise<MarketStateResponse> {
@@ -31,8 +58,10 @@ export async function readMarketCatalog(
   locale: string,
   categories: readonly string[],
   signal?: AbortSignal,
+  refresh = false,
 ): Promise<MarketCatalogResponse> {
   const url = marketCatalogUrl(sourceRecordId, q, locale, categories)
+  if (refresh) url.searchParams.set('refresh', '1')
   return await readJson(await fetch(url, {
     cache: 'no-store',
     ...(signal === undefined ? {} : { signal }),
@@ -63,4 +92,49 @@ export async function mutateMarketSource(mutation: MarketSourceMutation, signal?
     ...(signal === undefined ? {} : { signal }),
   }))
   return response.sources
+}
+
+export async function readMarketInstallations(signal?: AbortSignal): Promise<MarketInstallationsResponse> {
+  return await readJson(await fetch('/api/community-market/installations', {
+    cache: 'no-store',
+    ...(signal === undefined ? {} : { signal }),
+  }))
+}
+
+export async function readMarketInstallable(
+  locale: string,
+  refresh = false,
+  signal?: AbortSignal,
+): Promise<MarketInstallableResponse> {
+  const url = new URL('/api/community-market/installable', window.location.origin)
+  url.searchParams.set('locale', locale)
+  if (refresh) url.searchParams.set('refresh', '1')
+  return await readJson(await fetch(url, {
+    cache: 'no-store',
+    ...(signal === undefined ? {} : { signal }),
+  }))
+}
+
+export async function previewMarketOperation(
+  request: MarketOperationPreviewRequest,
+  signal?: AbortSignal,
+): Promise<MarketOperationPreviewResponse> {
+  return await readJson(await fetch('/api/community-market/operations/preview', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(request),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+}
+
+export async function executeMarketOperation(
+  previewId: string,
+  signal?: AbortSignal,
+): Promise<MarketOperationExecuteResponse> {
+  return await readJson(await fetch('/api/community-market/operations/execute', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ previewId }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
 }

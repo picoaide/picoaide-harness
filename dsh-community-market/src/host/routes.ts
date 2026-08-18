@@ -7,7 +7,13 @@ import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings
 import type { CatalogSourceManifest } from '../contracts/index.js'
 import { parseCatalogSource, validateLocalSourceRecords } from '../contracts/validate.js'
 import type { CatalogHttpClient } from '../contracts/types.js'
-import type { MarketBuiltInProvider, MarketCatalogResponse, MarketSourceMutation, MarketStateResponse } from '../api-types.js'
+import type {
+  MarketBuiltInProvider,
+  MarketCatalogMetadata,
+  MarketCatalogResponse,
+  MarketSourceMutation,
+  MarketStateResponse,
+} from '../api-types.js'
 import {
   createCachedCatalogHttpClient,
   createRestrictedHttpClient,
@@ -20,11 +26,12 @@ import {
   DSH_1024STORE_PROVIDER_ID,
 } from '../adapters/dsh-1024store.js'
 import { assertStandardSourceTrustRoot } from '../adapters/standard-http.js'
-import { BUILT_IN_PROVIDERS, DefaultCatalogService, type CatalogFetchScope } from '../catalog/service.js'
+import { BUILT_IN_PROVIDERS, DefaultCatalogService, type CatalogFetchScope, type CatalogFullIndex } from '../catalog/service.js'
 import { SettingsCatalogSourceStore, type MarketSettingsDocument } from '../catalog/source-store.js'
 import { MARKET_MEDIA_ASSET_REF_PATTERN } from '../media/ref.js'
 import { createRestrictedImageFetcher } from '../media/restricted-image.js'
 import { createMarketMediaService } from '../media/service.js'
+import { MarketInstallError, type MarketInstallService } from '../install/service.js'
 
 export const MARKET_SETTINGS_NAMESPACE = settingsNamespace('dsh-community-market')
 const SOURCE_SCHEMA = z.object({
@@ -40,12 +47,29 @@ const SOURCE_SCHEMA = z.object({
 })
 const SETTINGS_SCHEMA = z.object({
   sources: z.array(SOURCE_SCHEMA).default([]),
+  installReceipts: z.array(z.object({
+    receiptId: z.string().required(),
+    profileName: z.string().required(),
+    packageName: z.string().required(),
+    version: z.string().required(),
+    integrity: z.string().required(),
+    bundlePatch: z.string().required(),
+    sourceRecordId: z.string().required(),
+    providerId: z.string().required(),
+    itemId: z.string().required(),
+    displayName: z.string().required(),
+    installedAt: z.string().required(),
+  })).default([]),
 }) as unknown as z<MarketSettingsDocument>
 
 const ROUTE_STATE = '/api/community-market/state'
 const ROUTE_SOURCES = '/api/community-market/sources'
 const ROUTE_CATALOG = '/api/community-market/catalog'
+const ROUTE_INSTALLABLE = '/api/community-market/installable'
 const ROUTE_ASSETS = '/api/community-market/assets'
+const ROUTE_INSTALLATIONS = '/api/community-market/installations'
+const ROUTE_OPERATION_PREVIEW = '/api/community-market/operations/preview'
+const ROUTE_OPERATION_EXECUTE = '/api/community-market/operations/execute'
 const MAX_BODY_BYTES = 16 * 1024
 // The full registry was already about 6.7 MiB in August 2026. Keep bounded
 // headroom without relaxing the 2 MiB default used by user-added sources.
@@ -65,6 +89,35 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.setHeader('cache-control', 'no-store')
   res.setHeader('x-content-type-options', 'nosniff')
   res.end(body)
+}
+
+function sendInstallError(res: ServerResponse, cause: unknown): void {
+  if (!(cause instanceof MarketInstallError)) {
+    sendJson(res, 500, { error: 'market package operation failed', code: 'operation-failed' })
+    return
+  }
+  const status = cause.code === 'invalid-request' ? 400
+    : cause.code === 'not-available' ? 404
+      : cause.code === 'conflict' ? 409
+        : cause.code === 'intent-expired' ? 410
+          : cause.code === 'verification-failed' ? 422
+            : cause.code === 'operation-failed' ? 502
+              : 500
+  sendJson(res, status, { error: cause.message, code: cause.code })
+}
+
+function catalogMetadata(index: CatalogFullIndex): MarketCatalogMetadata {
+  return {
+    scannedAt: index.scannedAt,
+    expiresAt: index.expiresAt,
+    ...(index.providerRevision === undefined ? {} : { providerRevision: index.providerRevision }),
+    cacheStatus: index.cacheStatus,
+  }
+}
+
+function catalogCategories(index: CatalogFullIndex): readonly string[] {
+  return [...new Set(index.snapshots.flatMap(snapshot => snapshot.items.flatMap(item => item.categories ?? [])))]
+    .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }))
 }
 
 function abortOnDisconnect(req: IncomingMessage, res: ServerResponse, controller: AbortController): () => void {
@@ -219,6 +272,62 @@ function asMutation(value: unknown): MarketSourceMutation {
   throw new Error('unsupported mutation')
 }
 
+type MarketOperationPreviewRequest =
+  | { readonly action: 'install'; readonly sourceRecordId: string; readonly itemId: string }
+  | { readonly action: 'uninstall'; readonly receiptId: string }
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort()
+  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index])
+}
+
+function boundedIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 1 && value.length <= 240 && !value.includes('\0')
+}
+
+function asOperationPreview(value: unknown): MarketOperationPreviewRequest {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new MarketInstallError('invalid-request', 'Invalid package operation preview request.')
+  }
+  const request = value as Record<string, unknown>
+  if (
+    request.action === 'install'
+    && exactKeys(request, ['action', 'sourceRecordId', 'itemId'])
+    && boundedIdentifier(request.sourceRecordId)
+    && boundedIdentifier(request.itemId)
+  ) return { action: 'install', sourceRecordId: request.sourceRecordId, itemId: request.itemId }
+  if (
+    request.action === 'uninstall'
+    && exactKeys(request, ['action', 'receiptId'])
+    && boundedIdentifier(request.receiptId)
+  ) return { action: 'uninstall', receiptId: request.receiptId }
+  throw new MarketInstallError('invalid-request', 'Invalid package operation preview request.')
+}
+
+function asOperationExecute(value: unknown): string {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new MarketInstallError('invalid-request', 'Invalid package operation execution request.')
+  }
+  const request = value as Record<string, unknown>
+  if (!exactKeys(request, ['previewId']) || !boundedIdentifier(request.previewId)) {
+    throw new MarketInstallError('invalid-request', 'Invalid package operation execution request.')
+  }
+  return request.previewId
+}
+
+async function readOperationJson(req: IncomingMessage, signal: AbortSignal): Promise<unknown> {
+  try {
+    return await readJson(req, signal)
+  } catch (cause) {
+    if (signal.aborted) throw cause
+    throw new MarketInstallError('invalid-request', 'The package operation request body was invalid.')
+  }
+}
+
+export interface MarketInstallServiceProvider {
+  get(): MarketInstallService | undefined
+}
+
 function viewBuiltIns(): readonly MarketBuiltInProvider[] {
   return BUILT_IN_PROVIDERS.map(provider => ({ ...provider }))
 }
@@ -331,7 +440,11 @@ export function createMarketSourceMutator(
   }
 }
 
-export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSettingsDocument>): () => void {
+export function registerMarketRoutes(
+  ctx: Context,
+  scope: SettingsScope<MarketSettingsDocument>,
+  installProvider?: MarketInstallServiceProvider,
+): () => void {
   const expectedPort = ctx.webServer.port
   const generationController = new AbortController()
   const store = new SettingsCatalogSourceStore(scope)
@@ -344,8 +457,12 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
   const service = new DefaultCatalogService(store, restrictedHttpClient, {
     adapterHttpClients: new Map([[DSH_1024STORE_ADAPTER_ID, dsh1024StoreHttpClient]]),
     media,
+    observeSnapshot: snapshot => installProvider?.get()?.observeCatalog(snapshot),
   })
-  const mutateSource = createMarketSourceMutator(scope, sourceRecordId => service.invalidateSource(sourceRecordId))
+  const mutateSource = createMarketSourceMutator(scope, sourceRecordId => {
+    service.invalidateSource(sourceRecordId)
+    installProvider?.get()?.invalidateSource(sourceRecordId)
+  })
   const routes = [
     ctx.webServer.register({ kind: 'exact', path: ROUTE_STATE, handler: async (_req, res) => {
       if (generationController.signal.aborted) return
@@ -365,6 +482,10 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
         sendJson(res, 403, { error: 'market request authority rejected' })
         return
       }
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'market catalog requires GET' })
+        return
+      }
       const controller = new AbortController()
       const signal = AbortSignal.any([controller.signal, generationController.signal])
       const stopWatching = abortOnDisconnect(req, res, controller)
@@ -381,6 +502,11 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
         if (sort) query.sort = sort
         const locale = requestUrl.searchParams.get('locale')
         if (locale) query.locale = locale
+        const refreshValues = requestUrl.searchParams.getAll('refresh')
+        if (refreshValues.length > 1 || refreshValues.length === 1 && refreshValues[0] !== '1') {
+          throw new Error('invalid catalog refresh flag')
+        }
+        const force = refreshValues.length === 1
 
         const sourceRecordIds = requestUrl.searchParams.getAll('sourceRecordId')
         const cursors = requestUrl.searchParams.getAll('cursor')
@@ -393,7 +519,12 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
               sourceRecordId: sourceRecordIds[0]!,
               ...(cursors.length === 0 ? {} : { cursor: cursors[0]! }),
             }
-        const results = await service.fetch(query, signal, scope)
+        const index = await service.scanCatalog(signal, {
+          force,
+          ...(locale === null || locale === '' ? {} : { locale }),
+        })
+        signal.throwIfAborted()
+        const results = index === undefined ? [] : service.queryCatalog(index, query, scope)
         const responseQuery = scope === undefined
           ? query
           : {
@@ -401,7 +532,13 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
               sourceRecordId: scope.sourceRecordId,
               ...(scope.cursor === undefined ? {} : { cursor: scope.cursor }),
             }
-        const response: MarketCatalogResponse = { query: responseQuery, results, fetchedAt: new Date().toISOString() }
+        const response: MarketCatalogResponse = {
+          query: responseQuery,
+          results,
+          categories: index === undefined ? [] : catalogCategories(index),
+          ...(index === undefined ? {} : { metadata: catalogMetadata(index) }),
+          fetchedAt: new Date().toISOString(),
+        }
         if (!signal.aborted && !res.destroyed) sendJson(res, 200, response)
       } catch {
         if (!signal.aborted && !res.destroyed) sendJson(res, 400, { error: 'invalid catalog query' })
@@ -479,6 +616,117 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
       }
     }}),
   ]
+  if (installProvider !== undefined) {
+    routes.push(
+      ctx.webServer.register({ kind: 'exact', path: ROUTE_INSTALLABLE, handler: async (req, res) => {
+        if (req.method !== 'GET' || !requestAllowed(req, expectedPort)) {
+          sendJson(res, 405, { error: 'market installable catalog requires a local GET' })
+          return
+        }
+        const install = installProvider.get()
+        if (install === undefined) {
+          sendJson(res, 503, { error: 'market package operations are unavailable' })
+          return
+        }
+        const controller = new AbortController()
+        const signal = AbortSignal.any([controller.signal, generationController.signal])
+        const stopWatching = abortOnDisconnect(req, res, controller)
+        try {
+          const requestUrl = new URL(req.url ?? '/', 'http://localhost')
+          const localeValues = requestUrl.searchParams.getAll('locale')
+          const refreshValues = requestUrl.searchParams.getAll('refresh')
+          if (
+            localeValues.length > 1
+            || refreshValues.length > 1
+            || refreshValues.length === 1 && refreshValues[0] !== '1'
+          ) throw new MarketInstallError('invalid-request', 'The installable catalog query was invalid.')
+          const force = refreshValues.length === 1
+          const index = await service.scanCatalog(signal, {
+            force,
+            ...(localeValues[0] === undefined || localeValues[0] === '' ? {} : { locale: localeValues[0] }),
+          })
+          if (index === undefined) {
+            throw new MarketInstallError('not-available', 'No catalog source is active.')
+          }
+          const response = await install.listInstallable(index, signal)
+          if (!signal.aborted && !res.destroyed) sendJson(res, 200, response)
+        } catch (cause) {
+          if (!signal.aborted && !res.destroyed) sendInstallError(res, cause)
+        } finally {
+          stopWatching()
+        }
+      }}),
+      ctx.webServer.register({ kind: 'exact', path: ROUTE_INSTALLATIONS, handler: async (req, res) => {
+        if (req.method !== 'GET' || !requestAllowed(req, expectedPort)) {
+          sendJson(res, 405, { error: 'market installations require a local GET' })
+          return
+        }
+        const install = installProvider.get()
+        if (install === undefined) {
+          sendJson(res, 503, { error: 'market package operations are unavailable' })
+          return
+        }
+        try {
+          const installations = await install.listReceipts()
+          if (!generationController.signal.aborted && !res.destroyed) sendJson(res, 200, { installations })
+        } catch (cause) {
+          if (!generationController.signal.aborted && !res.destroyed) sendInstallError(res, cause)
+        }
+      }}),
+      ctx.webServer.register({ kind: 'exact', path: ROUTE_OPERATION_PREVIEW, handler: async (req, res) => {
+        if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+          sendJson(res, 405, { error: 'market package previews require a local same-origin POST' })
+          return
+        }
+        const install = installProvider.get()
+        if (install === undefined) {
+          sendJson(res, 503, { error: 'market package operations are unavailable' })
+          return
+        }
+        const controller = new AbortController()
+        const signal = AbortSignal.any([controller.signal, generationController.signal])
+        const stopWatching = abortOnDisconnect(req, res, controller)
+        try {
+          const request = asOperationPreview(await readOperationJson(req, signal))
+          const preview = request.action === 'install'
+            ? await install.previewInstall(request.sourceRecordId, request.itemId, signal)
+            : await install.previewUninstall(request.receiptId, signal)
+          const { intent, ...summary } = preview
+          if (!signal.aborted && !res.destroyed) sendJson(res, 200, { ...summary, previewId: intent })
+        } catch (cause) {
+          if (!signal.aborted && !res.destroyed) sendInstallError(res, cause)
+        } finally {
+          stopWatching()
+        }
+      }}),
+      ctx.webServer.register({ kind: 'exact', path: ROUTE_OPERATION_EXECUTE, handler: async (req, res) => {
+        if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+          sendJson(res, 405, { error: 'market package execution requires a local same-origin POST' })
+          return
+        }
+        const install = installProvider.get()
+        if (install === undefined) {
+          sendJson(res, 503, { error: 'market package operations are unavailable' })
+          return
+        }
+        const controller = new AbortController()
+        const signal = AbortSignal.any([controller.signal, generationController.signal])
+        const stopWatching = abortOnDisconnect(req, res, controller)
+        try {
+          const previewId = asOperationExecute(await readOperationJson(req, signal))
+          // Once the Host accepts a confirmed mutation it owns the transaction.
+          // Closing the Market surface may stop the HTTP response, but must not
+          // interrupt profile writes between pnpm, post-checks, and the receipt.
+          const result = await install.executePreview(previewId, generationController.signal)
+          if (!signal.aborted && !res.destroyed) sendJson(res, 200, result)
+        } catch (cause) {
+          if (!signal.aborted && !res.destroyed) sendInstallError(res, cause)
+        } finally {
+          stopWatching()
+        }
+      }}),
+    )
+  }
   let disposed = false
   return () => {
     if (disposed) return
@@ -493,4 +741,13 @@ export function registerMarketSettings(ctx: Context): SettingsScope<MarketSettin
   return ctx.settings.register(MARKET_SETTINGS_NAMESPACE, SETTINGS_SCHEMA, { applies: 'live' })
 }
 
-export const marketRoutes = { state: ROUTE_STATE, sources: ROUTE_SOURCES, catalog: ROUTE_CATALOG, assets: ROUTE_ASSETS }
+export const marketRoutes = {
+  state: ROUTE_STATE,
+  sources: ROUTE_SOURCES,
+  catalog: ROUTE_CATALOG,
+  installable: ROUTE_INSTALLABLE,
+  assets: ROUTE_ASSETS,
+  installations: ROUTE_INSTALLATIONS,
+  operationPreview: ROUTE_OPERATION_PREVIEW,
+  operationExecute: ROUTE_OPERATION_EXECUTE,
+}

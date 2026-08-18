@@ -182,15 +182,15 @@ Host 先构造并校验 [`CatalogQuery`](schemas/catalog-query.schema.json)，�
 
 `category` 和 `capability` 序列化为重复 query 参数，其余字段都是单值。Query 文本和值必须由平台 URL builder 作为数据进行 URL encode，不能直接拼接进 URL、header 或命令。
 
-重复 `category` 是多选 OR 过滤：条目属于任一已选分类即算匹配。只有来源 manifest 在 `query.supported` 中声明支持 `category` 时，标准 adapter 才会发送该字段；否则会针对这个来源省略该字段，不擅自创造本地 provider 语义。
+对发送 provider 侧 filter 的 consumer 来说，重复 `category` 是多选 OR 过滤：条目属于任一已选分类即算匹配。只有来源 manifest 在 `query.supported` 中声明支持 `category` 时，标准 adapter 才会发送该字段；否则会省略该字段，不擅自创造 provider 语义。
 
-Host 标准化 query 默认值和 provider 默认值是两个概念。来源支持 `limit` 时，当前 UI 默认发送 50；其他合法 consumer 可以请求不超过 100 的值，Host 会在需要时收窄到 manifest 的 `maxLimit`。Response 条目数不能超过这个有效请求值。来源不支持 `limit` 时，Host 省略该参数，并接受不超过来源声明 `defaultLimit` 的条目。Manifest 必须保证 `defaultLimit` 小于或等于 `maxLimit`，且两者都不能超过 100。
+Host 标准化 query 默认值和 provider 默认值是两个概念。合法 consumer 可以请求不超过 100 的值，Host 会在需要时收窄到 manifest 的 `maxLimit`。Response 条目数不能超过这个有效请求值。来源不支持 `limit` 时，Host 省略该参数，并接受不超过来源声明 `defaultLimit` 的条目。Manifest 必须保证 `defaultLimit` 小于或等于 `maxLimit`，且两者都不能超过 100。
 
-Cursor 只属于一个已选来源和一个有效 query。Host 绝不能把一个来源的 cursor 发送给另一个来源；修改搜索、分类、sort、locale 或已选来源后，当前分页会话失效。
+Provider cursor 只属于一个已选来源和一个有效 wire query。Host 绝不能把一个来源的 cursor 发送给另一个来源，也不能在 wire query 改变后复用。
 
-对于已选标准来源，来源支持 `limit` 时，当前 UI 会先默认请求 50 个条目；页面返回 `page.nextCursor` 后，**加载更多**继续遵守同一来源的分页规则。较小的 `maxLimit` 会收窄请求；来源没有在 `query.supported` 中声明 `limit` 时，page size 由 `defaultLimit` 控制，可以高于或低于 50。请求和 cursor 都不会广播给其他已保存来源。经过审核的 1024Store adapter 另行把本地 page size 固定为 50，并通过本地 cursor 继续。
+当前 Desktop 产品会先完整扫描已选来源。对于标准来源，Host 只发送 `cursor`、`limit` 和 locale 偏好等来源支持的扫描字段，跟随 `page.nextCursor` 直到结束，并使用来源的有效 page limit，而不是把 50 当成网络上限。扫描不会把用户搜索文本或已选分类发给 provider。经过审核的 1024Store adapter 则通过一次请求下载完整 registry，并输出每块最多 100 条的标准化分块。
 
-市场中的分类选项来自当前 query session 已累计加载的条目。它不是 provider 全量 facet response，也不承诺列出只存在于用户尚未加载页面中的分类。
+搜索、排序、多分类 OR 筛选、分类枚举和分页随后都在完整本地索引上运行。目录 response 中的分类选项覆盖索引中存在的全部分类，每个 UI 可见页面最多包含 50 条匹配结果。**加载更多**只推进 Host 拥有的本地 cursor，不会再次发送带筛选的 provider 请求。
 
 标准来源只有返回通过 provider-page schema 的成功 JSON response 才能接受。Adapter 随后注入 Host provenance，再校验标准化 snapshot schema。超时、非 200、错误 content type、响应过大、解析失败、不支持的 schema version 或任一校验错误只会让该来源请求失败，不影响应用启动。标准 response 条目数超过有效 `limit` 时也必须拒绝。
 
@@ -199,11 +199,12 @@ Cursor 只属于一个已选来源和一个有效 query。Host 绝不能把一�
 已保存来源彼此隔离，但产品只读取当前已选来源：
 
 - 同一时间最多只有一条已保存来源记录被选择，并且只有该来源会收到目录请求。
-- 已选来源拥有自己的 timeout、cancellation、cache entry、cursor、loading state 和 error state。
-- 标准来源 page 遵守有效请求值或声明的 `defaultLimit`，Schema 安全上限为 100；当前 UI 的请求默认值是 50。
-- 1024Store adapter 对已下载 registry 固定使用 50 条本地 page。
+- 已选来源拥有自己的 timeout、cancellation、完整索引 cache、本地 cursor、loading state 和 error state。
+- 标准来源网络 page 遵守有效请求值或声明的 `defaultLimit`，Schema 安全上限为 100；本地可见页面最多包含 50 条。
+- 1024Store adapter 用一次请求取得 registry，把完整结果标准化成有界分块，再提供相同的本地 50 条 UI page。
+- 可选目录 metadata 会报告完整扫描完成时间（`scannedAt`）、cache 截止时间（`expiresAt`）、可选且整次扫描一致的来源 revision（`providerRevision`），以及索引是新扫描还是复用（`cacheStatus`）。
 - 失败只归属于已选来源，并提供重试；Host 绝不退回或暗中请求另一个已保存来源。
-- 切换或删除已选来源会取消 in-flight 工作并清空浏览会话，不需要重启 DSH。
+- 明确刷新会使当前索引失效，并绕过目录 HTTP cache 后重新建立。切换或删除已选来源会取消 in-flight 工作并清空浏览会话，不需要重启 DSH。
 - 每个 card、详情、搜索结果和安装确认都保留当前已选来源的可见声明。
 
 条目的规范身份是 `{ sourceRecordId, itemId }`。即使属于同一 provider，两条注册也保持独立，并且完全可以对同一个插件给出不同描述。当前单一来源 UI 不会跨已保存来源分组或合并记录。切换来源会替换整个浏览会话，任何来源都不能静默覆盖另一个来源的 cache 或身份。仅名称、repository 名称或描述相似绝不足以在当前来源内去重。
@@ -216,7 +217,7 @@ Cursor 只属于一个已选来源和一个有效 query。Host 绝不能把一�
 - 把其分类和插件元数据映射成标准化快照；
 - 只把 provider item `id` 当作来源内部身份，并从经过校验的 repository URL 推导规范 GitHub 仓库与 publisher 身份，避免仓库改名或转移后继续指向旧名称；
 - 由于当前 1024Store 数据集没有直接插件图标，仅把 GitHub owner/avatar 候选作为经过审核的 fallback，通过 Host 媒体边界解析，并将结果标为 `role: "publisher-avatar"`；
-- 把已下载 registry 固定按 50 条在本地分页，并通过 `nextCursor` 和**加载更多**提供后续结果；
+- 把完整下载的 registry 标准化为每块最多 100 条的 Schema 有界分块，再由 Host 通过自己的 cursor 和**加载更多**提供每页最多 50 条的本地结果；
 - 注入并校验 DSH 1024Store 的 provenance 和来源声明；
 - 永远不把远程 command 文本或安装提示当作可执行输入；
 - Provider 不可用或数据非法时，把当前已选来源报告为不可用，绝不退回另一个已保存来源。
@@ -295,17 +296,16 @@ Host 只为当前已选来源执行目录 I/O。图标 asset service 同时最�
 
 实现必须拒绝不支持的 major version。所有契约修改都需要连同 schema fixture 和兼容性测试一起评审；不允许在某个 provider adapter 中临时放宽校验。
 
-## 规划生命周期
+## 当前 Desktop 生命周期
 
 1. 加载本地来源设置，不联系任何 provider。
 2. 解析内置 adapter 记录，并校验保存的标准 manifest。
 3. 等待 UI 或 Host consumer 请求目录数据，不进行阻塞启动的 fetch。
-4. 解析唯一已选来源，并只推导它支持的 query 字段。
-5. 请求、校验、标准化并缓存该来源的一页；后续页面只能通过它自己的 cursor 追加。
-6. 在整个会话中保持当前来源与条目 provenance 可见。
-7. Query 或已选来源变化、清空选择、plugin generation 被 dispose 或 DSH 关闭时，取消自己拥有的请求并重置会话。
-
-第一版实现可以选择 cache duration，但必须保持本文定义的单一选择、取消、无默认来源和无兜底行为。
+4. 解析唯一已选来源，扫描其全部目录 page，校验并标准化每个分块，再为当前 locale 缓存一份完整本地索引。
+5. 在本地推导搜索结果、完整索引分类集合、多分类 OR filter 和每次 50 条的可见页面。
+6. 从同一完整索引推导 fail-closed 的本地**可安装**结构候选；只有用户预览某个候选时才执行官方 registry 权威复核，并在执行前重新检查可变证据。在整个流程中保持来源与条目 provenance 可见。
+7. 在有界有效期内复用完成的索引；明确刷新会使其失效，并绕过目录 HTTP cache 后重新扫描。
+8. 已选来源变化、清空选择、plugin generation 被 dispose 或 DSH 关闭时，取消自己拥有的请求并重置会话。
 
 ## 实现交接清单
 
@@ -329,9 +329,9 @@ Host 只为当前已选来源执行目录 I/O。图标 asset service 同时最�
 - [ ] 实现一个由标准 adapter 和内置 provider adapter 共用的受限 HTTP client。
 - [ ] 实现标准 GET `/v1/plugins` adapter 和精确 query 序列化。
 - [ ] 把经审核的 DSH 1024Store adapter 实现为一个可选来源。
-- [ ] 增加已选来源的 abort/timeout/cache/pagination；标准来源按有效请求值或默认值执行限制，Schema 上限 100，同时保持 1024Store adapter 的 50 条本地 page size。
+- [ ] 增加已选来源的 abort/timeout/完整索引 cache 和强制刷新；标准来源网络 page 按有效请求值或默认值执行限制，Schema 上限 100，可见结果使用每页最多 50 条的本地分页。
 - [ ] 适用时先校验 provider 原始数据，再做 normalization；之后对每个标准化 snapshot 再次校验。
-- [ ] 在搜索、分组、分页、缓存、详情和安装确认中始终保留 provenance。
+- [ ] 在完整扫描、本地搜索、分组、分页、缓存、详情和安装确认中始终保留 provenance。
 
 ### 安装交接
 
@@ -365,7 +365,10 @@ Host 只为当前已选来源执行目录 I/O。图标 asset service 同时最�
 | Query | Cursor 用于另一个来源或 filter 已改变 | 本地拒绝 cursor，不发送请求 |
 | Query | 标准 response 超过有效请求值，或来源不支持 `limit` 时超过声明的 `defaultLimit` | 在更新 cache 或 UI 前拒绝 response |
 | Query | 标准来源在有效 manifest limit 内合法返回 51–100 个条目 | 接受 response；50 只是当前 UI 默认值，不是全局 contract 上限 |
-| 分页 | 1024Store 本地匹配条目超过 50 个 | 第一页本地返回 50 个；**加载更多**通过 `nextCursor` 继续，不请求另一个来源 |
+| 完整索引 | 标准来源返回多个 cursor page | 每个 page 只校验一次；本地搜索与多分类 OR 筛选可以找到首个网络 page 之后的条目 |
+| 完整索引 | 1024Store 有超过 100 个合法条目 | 一次 registry 请求被标准化为每块最多 100 条的分块；query 交互不会重新请求 |
+| 分页 | 完整本地索引有超过 50 个匹配条目 | 首个可见 page 包含 50 条；**加载更多**通过 Host 自有本地 cursor 继续，不发送带筛选的 provider 请求 |
+| 刷新 | 完整索引已被 cache，随后用户明确刷新 | Cache read 报告复用；刷新绕过目录 HTTP cache 并替换完整索引 |
 | Schema | 合法 manifest、query、provider-page 和 snapshot fixture | 接受并 round-trip，不丢失已定义数据 |
 | Schema | 包含未知字段或不支持的 major version | 拒绝对应 manifest/request/snapshot |
 | Schema | Provider page 尝试提供 Host provenance | Strict wire schema 拒绝响应 |

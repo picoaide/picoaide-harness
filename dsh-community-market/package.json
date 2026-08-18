@@ -2,7 +2,7 @@
   "name": "dsh-community-market",
   "version": "0.1.0-dev.0",
   "private": true,
-  "description": "Read-only multi-source community plugin market for DeepSeek Harness",
+  "description": "Community plugin discovery and managed package operations for DeepSeek Harness Desktop",
   "license": "MIT",
   "publishConfig": {
     "access": "public",
@@ -74,7 +74,9 @@
   "dependencies": {
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "sharp": "0.35.3"
+    "semver": "^7.7.3",
+    "sharp": "0.35.3",
+    "yaml": "^2.9.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
@@ -209,6 +211,7 @@
     "@types/node": "^22.20.0",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/semver": "^7.7.1",
     "jsdom": "29.1.1",
     "json-schema-to-typescript": "^15.0.4",
     "react": "18.3.1",

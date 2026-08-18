@@ -59,6 +59,8 @@ export interface CatalogHttpClient {
 export interface CatalogHttpRequestPolicy {
   /** Reject a cross-origin redirect before the destination is contacted. */
   readonly allowedOrigin?: string
+  /** Bypass and replace any completed or in-flight catalog response cache entry. */
+  readonly cacheMode?: 'default' | 'reload'
 }
 
 export interface CatalogHttpResponse {
@@ -69,6 +71,11 @@ export interface CatalogHttpResponse {
 export interface CatalogAdapter {
   readonly adapterId: string
   fetch(query: CatalogQuery, context: CatalogFetchContext): Promise<CatalogSnapshot>
+  /**
+   * Optionally scan the adapter's complete normalized catalog independently
+   * of the discovery query and page cursor.
+   */
+  scanCatalog?(query: CatalogQuery, context: CatalogFetchContext): Promise<readonly CatalogSnapshot[]>
 }
 
 export interface ScopedCatalogCursor {

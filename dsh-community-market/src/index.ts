@@ -2,13 +2,50 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-settings'
 import { registerMarketRoutes, registerMarketSettings } from './host/routes.js'
+import { createRestrictedHttpClient } from './network/restricted-http.js'
+import {
+  createNpmRegistryVerifier,
+  MarketInstallService,
+  type MarketDesktopPnpm,
+  type MarketDesktopProfile,
+} from './install/service.js'
 
 export const name = 'community-market'
 export const inject = ['webServer', 'settings']
 
+interface DesktopProfilesCapability {
+  readonly current: MarketDesktopProfile
+}
+
+const npmRegistryHttp = createRestrictedHttpClient({
+  // This is a compiled-in official registry hostname, never provider input.
+  syntheticProxyHostnames: ['registry.npmjs.org'],
+})
+
 export function apply(ctx: Context): void {
   const scope = registerMarketSettings(ctx)
-  ctx.effect(() => registerMarketRoutes(ctx, scope), 'community-market: routes')
+  let installService: MarketInstallService | undefined
+  const installProvider = { get: () => installService }
+  ctx.effect(() => registerMarketRoutes(ctx, scope, installProvider), 'community-market: routes')
+  // Browsing remains portable. Desktop-only package operations appear whenever
+  // the narrow profile and package-manager capabilities are live.
+  ctx.inject(['desktopProfiles', 'desktopPnpm'], (desktopCtx) => {
+    const profiles = desktopCtx.get('desktopProfiles') as DesktopProfilesCapability
+    const pnpm = desktopCtx.get('desktopPnpm') as MarketDesktopPnpm
+    desktopCtx.effect(() => {
+      const service = new MarketInstallService(
+        scope,
+        () => profiles.current,
+        pnpm,
+        createNpmRegistryVerifier(npmRegistryHttp),
+      )
+      installService = service
+      return () => {
+        if (installService === service) installService = undefined
+        service.dispose()
+      }
+    }, 'community-market: desktop package operations')
+  })
 }
 
 export { marketRoutes } from './host/routes.js'

@@ -334,6 +334,97 @@ function buildSnapshot(value: unknown, context: CatalogFetchContext, finalUrl: s
   })
 }
 
+function buildCatalogScanSnapshots(
+  value: unknown,
+  context: CatalogFetchContext,
+  finalUrl: string,
+  locale: string | undefined,
+): readonly CatalogSnapshot[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('1024Store response is not an object')
+  }
+  const raw = value as Dsh1024StoreCatalog
+  if (!Array.isArray(raw.packages) || raw.packages.length > 10_000) {
+    throw new Error('1024Store catalog is invalid')
+  }
+  context.signal.throwIfAborted()
+
+  const items: CatalogSnapshot['items'][number][] = []
+  const seen = new Set<string>()
+  for (const entry of raw.packages) {
+    const candidate = normalizedItem(entry, context, locale)
+    if (candidate === undefined) continue
+    if (seen.has(candidate.item.id)) throw new Error('1024Store catalog contains duplicate item IDs')
+    seen.add(candidate.item.id)
+    if (
+      candidate.item.package?.registry === 'npm'
+      && candidate.item.latestVersion !== undefined
+      && candidate.item.repository !== undefined
+    ) {
+      // Registration creates only an opaque Host reference. It does not fetch
+      // remote image bytes during the catalog scan. Browse-only items do not
+      // consume media references.
+      const media = resolvedMedia(candidate.mediaCandidates, candidate.item.id, context)
+      const item: CatalogSnapshot['items'][number] = {
+        ...candidate.item,
+        repository: candidate.item.repository,
+        latestVersion: candidate.item.latestVersion,
+        package: candidate.item.package,
+        ...(media === undefined ? {} : { media }),
+      }
+      items.push(item)
+    } else {
+      items.push(candidate.item)
+    }
+  }
+
+  const meta = raw.meta !== null && typeof raw.meta === 'object' && !Array.isArray(raw.meta)
+    ? raw.meta as Dsh1024StoreMeta
+    : {}
+  const generatedAt = typeof meta.generatedAt === 'string' ? meta.generatedAt : meta.updated
+  const providerGeneratedAt = typeof generatedAt === 'string' && !Number.isNaN(Date.parse(generatedAt))
+    ? new Date(generatedAt).toISOString()
+    : undefined
+  const providerRevision = plainText(meta.revision, 160, '') || undefined
+  const fetchedAt = new Date().toISOString()
+  const snapshots: CatalogSnapshot[] = []
+  for (let offset = 0; offset < items.length; offset += 100) {
+    snapshots.push(parseCatalogSnapshot({
+      schemaVersion: '1.0.0',
+      source: {
+        sourceRecordId: context.source.sourceRecordId,
+        providerId: context.source.providerId,
+        adapterId: context.source.adapterId,
+        registrationKind: context.source.registrationKind,
+        fetchedAt,
+        finalUrl,
+        ...(providerGeneratedAt === undefined ? {} : { providerGeneratedAt }),
+        ...(providerRevision === undefined ? {} : { providerRevision }),
+      },
+      items: items.slice(offset, offset + 100),
+      page: { total: items.length },
+    }))
+  }
+  if (snapshots.length === 0) {
+    snapshots.push(parseCatalogSnapshot({
+      schemaVersion: '1.0.0',
+      source: {
+        sourceRecordId: context.source.sourceRecordId,
+        providerId: context.source.providerId,
+        adapterId: context.source.adapterId,
+        registrationKind: context.source.registrationKind,
+        fetchedAt,
+        finalUrl,
+        ...(providerGeneratedAt === undefined ? {} : { providerGeneratedAt }),
+        ...(providerRevision === undefined ? {} : { providerRevision }),
+      },
+      items: [],
+      page: { total: 0 },
+    }))
+  }
+  return snapshots
+}
+
 export const dsh1024StoreAdapter: CatalogAdapter = {
   adapterId: DSH_1024STORE_ADAPTER_ID,
   async fetch(queryValue, context) {
@@ -349,5 +440,19 @@ export const dsh1024StoreAdapter: CatalogAdapter = {
     catch { throw new Error('1024Store final URL is invalid') }
     if (finalOrigin !== expectedOrigin) throw new Error('1024Store response changed the reviewed provider origin')
     return buildSnapshot(response.value, context, response.finalUrl, query)
+  },
+  async scanCatalog(query, context) {
+    const expectedOrigin = new URL(DSH_1024STORE_ENDPOINT).origin
+    const response = await context.http.getJson(
+      DSH_1024STORE_ENDPOINT,
+      context.signal,
+      { allowedOrigin: expectedOrigin },
+    )
+    context.signal.throwIfAborted()
+    let finalOrigin: string
+    try { finalOrigin = new URL(response.finalUrl).origin }
+    catch { throw new Error('1024Store final URL is invalid') }
+    if (finalOrigin !== expectedOrigin) throw new Error('1024Store response changed the reviewed provider origin')
+    return buildCatalogScanSnapshots(response.value, context, response.finalUrl, query.locale)
   },
 }

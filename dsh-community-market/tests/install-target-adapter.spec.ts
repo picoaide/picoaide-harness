@@ -108,4 +108,105 @@ describe('1024Store install target normalization', () => {
     expect(snapshot.items[0]).not.toHaveProperty('package')
     expect(snapshot.items[0]).not.toHaveProperty('latestVersion')
   })
+
+  it('scans the full normalized catalog beyond discovery page one with one registry read', async () => {
+    const packages = Array.from({ length: 205 }, (_, index) => {
+      const suffix = String(index).padStart(3, '0')
+      return {
+        ...baseItem,
+        id: `example/plugin-${suffix}`,
+        name: `Plugin ${suffix}`,
+        owner: 'example',
+        url: `https://github.com/example/plugin-${suffix}`,
+        category: index % 2 === 0 ? 'tools' : 'ui',
+        description: { en: `Plugin ${suffix} summary.`, zh: `插件 ${suffix} 摘要。` },
+        stars: 205 - index,
+        installMethods: index % 4 === 0
+          ? []
+          : [{
+              kind: 'npm',
+              spec: `dsh-plugin-${suffix}`,
+              command: `ignored provider command ${suffix}`,
+              verification: 'verified',
+              code: 'repository_backlink',
+              requiresBuildAllowance: false,
+              revision: `1.0.${index}`,
+            }],
+      }
+    })
+    const response = {
+      value: {
+        meta: { generatedAt: '2026-08-18T00:00:00.000Z', revision: 'sha256:scan-fixture' },
+        packages,
+      },
+      finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+    }
+    const discoveryHttp: CatalogHttpClient = { getJson: vi.fn(async () => response) }
+    const discovery = await dsh1024StoreAdapter.fetch({ limit: 100 }, {
+      source,
+      signal: new AbortController().signal,
+      http: discoveryHttp,
+      media: { register: () => 'mktimg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+    })
+    expect(discovery.items).toHaveLength(50)
+    expect(discovery.items.map(item => item.id)).not.toContain('example/plugin-150')
+
+    const getJson = vi.fn(async () => response)
+    const register = vi.fn(() => 'mktimg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+    const snapshots = await dsh1024StoreAdapter.scanCatalog!({ limit: 100, locale: 'zh-CN' }, {
+      source,
+      signal: new AbortController().signal,
+      http: { getJson },
+      media: { register },
+    })
+    const items = snapshots.flatMap(snapshot => snapshot.items)
+
+    expect(getJson).toHaveBeenCalledOnce()
+    expect(getJson).toHaveBeenCalledWith(
+      'https://deepseek1024.com/api/v1/plugins',
+      expect.any(AbortSignal),
+      { allowedOrigin: 'https://deepseek1024.com' },
+    )
+    expect(snapshots.map(snapshot => snapshot.items.length)).toEqual([100, 100, 5])
+    expect(snapshots.every(snapshot => snapshot.page.total === 205)).toBe(true)
+    expect(items).toHaveLength(205)
+    expect([...new Set(items.flatMap(item => item.categories ?? []))].sort()).toEqual(['tools', 'ui'])
+    expect(items[150]).toMatchObject({
+      id: 'example/plugin-150',
+      summary: '插件 150 摘要。',
+      categories: ['tools'],
+      repository: { url: 'https://github.com/example/plugin-150' },
+      latestVersion: '1.0.150',
+      package: { registry: 'npm', name: 'dsh-plugin-150' },
+      media: {
+        icon: {
+          assetRef: 'mktimg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+          role: 'publisher-avatar',
+          alt: 'example',
+        },
+      },
+      provenance: {
+        sourceRecordId: source.sourceRecordId,
+        providerId: source.providerId,
+        itemId: 'example/plugin-150',
+      },
+    })
+    expect(items[152]).toMatchObject({
+      id: 'example/plugin-152',
+      summary: '插件 152 摘要。',
+      categories: ['tools'],
+      repository: { url: 'https://github.com/example/plugin-152' },
+    })
+    expect(items[152]).not.toHaveProperty('package')
+    expect(items[152]).not.toHaveProperty('latestVersion')
+    expect(items[152]).not.toHaveProperty('media')
+    expect(JSON.stringify(items)).not.toContain('ignored provider command')
+    expect(register).toHaveBeenCalledTimes(153)
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({
+      remoteUrl: 'https://github.com/example.png?size=96',
+      role: 'publisher-avatar',
+      sourceRecordId: source.sourceRecordId,
+      allowedHostnames: ['github.com', 'avatars.githubusercontent.com'],
+    }))
+  })
 })

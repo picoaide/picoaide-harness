@@ -348,7 +348,7 @@ export function createCachedCatalogHttpClient(
       }
       const key = `${policy.allowedOrigin ?? ''}\0${url}`
       let entry = cache.get(key)
-      if (entry === undefined) {
+      if (entry === undefined || policy.cacheMode === 'reload') {
         entry = { waiters: 0 }
         cache.set(key, entry)
       }

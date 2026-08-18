@@ -2,18 +2,37 @@
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { MarketCatalogResponse, MarketSourceView, MarketStateResponse } from '../src/api-types.js'
+import type {
+  MarketCatalogResponse,
+  MarketInstallReceipt,
+  MarketInstallableResponse,
+  MarketSourceView,
+  MarketStateResponse,
+} from '../src/api-types.js'
 import type { CatalogSnapshot } from '../src/contracts/generated/catalog-snapshot.js'
 import { MarketSettingsTab, type MarketSettingsTabProps } from '../src/client/MarketSettingsTab.js'
 import { MarketLauncher, type MarketLauncherProps } from '../src/client/MarketLauncher.js'
 import { MarketOverlay, type MarketOverlayProps } from '../src/client/MarketOverlay.js'
 import { createMarketViewStore } from '../src/client/market-view-store.js'
-import { mutateMarketSource, readMarketCatalog, readMarketState, readMoreMarketCatalog } from '../src/client/api.js'
+import {
+  executeMarketOperation,
+  mutateMarketSource,
+  previewMarketOperation,
+  readMarketCatalog,
+  readMarketInstallable,
+  readMarketInstallations,
+  readMarketState,
+  readMoreMarketCatalog,
+} from '../src/client/api.js'
 import { en, type MarketLocaleKey } from '../src/client/locales.js'
 
 vi.mock('../src/client/api.js', () => ({
+  executeMarketOperation: vi.fn(),
   mutateMarketSource: vi.fn(),
+  previewMarketOperation: vi.fn(),
   readMarketCatalog: vi.fn(),
+  readMarketInstallable: vi.fn(),
+  readMarketInstallations: vi.fn(),
   readMoreMarketCatalog: vi.fn(),
   readMarketState: vi.fn(),
 }))
@@ -115,6 +134,63 @@ function makeItem(
   }
 }
 
+function makeInstallableItem(
+  source: MarketSourceView,
+  id = 'installable-plugin',
+  displayName = 'Installable Plugin',
+  packageName = 'dsh-plugin-installable',
+  version = '1.2.3',
+  categories: readonly string[] = ['tools'],
+): CatalogSnapshot['items'][number] {
+  const {
+    repository,
+    package: _package,
+    latestVersion: _latestVersion,
+    ...item
+  } = makeItem(source, id, displayName, categories)
+  return {
+    ...item,
+    ...(repository === undefined ? {} : { repository }),
+    latestVersion: version,
+    package: { registry: 'npm', name: packageName },
+  }
+}
+
+function makeReceipt(overrides: Partial<MarketInstallReceipt> = {}): MarketInstallReceipt {
+  return {
+    receiptId: '018f1f77-a5c4-7b73-a9ae-0242ac120099',
+    profileName: 'web',
+    packageName: 'dsh-plugin-installed',
+    version: '2.3.4',
+    integrity: 'sha512-fixture',
+    bundlePatch: 'dist/index.js',
+    sourceRecordId: firstSource.sourceRecordId,
+    providerId: firstSource.providerId,
+    itemId: 'installed-plugin',
+    displayName: 'Installed Plugin',
+    installedAt: '2026-08-18T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function installableResponse(
+  items: readonly CatalogSnapshot['items'][number][],
+  source: MarketSourceView = firstSource,
+  overrides: Partial<MarketInstallableResponse['metadata']> = {},
+): MarketInstallableResponse {
+  return {
+    source,
+    items: [...items],
+    metadata: {
+      scannedAt: '2026-08-18T01:00:00.000Z',
+      expiresAt: '2026-08-18T01:05:00.000Z',
+      providerRevision: 'fixture-revision-7',
+      cacheStatus: 'cached',
+      ...overrides,
+    },
+  }
+}
+
 function catalogForSource(
   source: MarketSourceView,
   items: readonly CatalogSnapshot['items'][number][] = [makeItem(source)],
@@ -122,6 +198,7 @@ function catalogForSource(
 ): MarketCatalogResponse {
   return {
     query: {},
+    categories: [...new Set(items.flatMap(item => item.categories ?? []))],
     fetchedAt: '2026-08-17T00:00:00Z',
     results: [{
       source,
@@ -159,14 +236,27 @@ describe('MarketSettingsTab', () => {
     expect(screen.getByRole('heading', { name: en.sources })).toBeTruthy()
   })
 
-  it('renders normalized catalog data and opens details in the official modal', async () => {
+  it('renders catalog metadata, forces an explicit refresh, and opens details in the official modal', async () => {
+    const catalogWithMetadata: MarketCatalogResponse = {
+      ...catalog,
+      metadata: {
+        scannedAt: '2026-08-18T03:00:00.000Z',
+        expiresAt: '2026-08-18T03:05:00.000Z',
+        providerRevision: 'discover-revision-9',
+        cacheStatus: 'cached',
+      },
+    }
     vi.mocked(readMarketState).mockResolvedValue(enabledState)
-    vi.mocked(readMarketCatalog).mockResolvedValue(catalog)
+    vi.mocked(readMarketCatalog).mockResolvedValue(catalogWithMetadata)
     render(<MarketSettingsTab {...props} />)
 
     const plugin = await screen.findByRole('button', { name: /Fixture Plugin/u })
     expect(screen.getByText(`${en.currentSource}: ${firstSource.name}`)).toBeTruthy()
     expect(screen.getByText(`${en.source}: Fixture catalog · Fixture provider`)).toBeTruthy()
+    expect(screen.getByText(`${en.scannedAt}: ${catalogWithMetadata.metadata!.scannedAt}`)).toBeTruthy()
+    expect(screen.getByText(`${en.cacheExpiresAt}: ${catalogWithMetadata.metadata!.expiresAt}`)).toBeTruthy()
+    expect(screen.getByText(`${en.providerRevision}: ${catalogWithMetadata.metadata!.providerRevision}`)).toBeTruthy()
+    expect(screen.getByText(en.cachedScan)).toBeTruthy()
     expect(plugin.querySelector('img')?.getAttribute('src')).toBe('/api/community-market/assets?ref=mktimg_0123456789abcdefghijklmnopqrstuv')
     expect(readMarketCatalog).toHaveBeenCalledWith(
       firstSource.sourceRecordId,
@@ -175,6 +265,18 @@ describe('MarketSettingsTab', () => {
       [],
       expect.any(AbortSignal),
     )
+    fireEvent.click(screen.getByRole('button', { name: en.refresh }))
+    await waitFor(() => {
+      expect(readMarketCatalog).toHaveBeenNthCalledWith(
+        2,
+        firstSource.sourceRecordId,
+        '',
+        'en',
+        [],
+        expect.any(AbortSignal),
+        true,
+      )
+    })
     fireEvent.click(plugin)
     expect(screen.getByRole('dialog')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Fixture Plugin' })).toBeTruthy()
@@ -193,6 +295,205 @@ describe('MarketSettingsTab', () => {
     fireEvent.error(image!)
     expect(plugin.querySelector('img')).toBeNull()
     expect(plugin.querySelector('[aria-hidden="true"]')).not.toBeNull()
+  })
+
+  it('uses a complete verified index with local OR filters, local pages of 50, metadata, and explicit rescans', async () => {
+    const availableItem = makeInstallableItem(
+      firstSource,
+      'available-plugin',
+      'Available Plugin',
+      'dsh-plugin-available',
+      '1.4.0',
+      ['tools'],
+    )
+    const filler = Array.from({ length: 49 }, (_, index) => makeInstallableItem(
+      firstSource,
+      `filler-${index}`,
+      `Filler ${index}`,
+      `dsh-plugin-filler-${index}`,
+      '1.0.0',
+      ['utility'],
+    ))
+    const secondInstallable = makeInstallableItem(
+      firstSource,
+      'second-installable',
+      'Second Installable',
+      'dsh-plugin-second',
+      '3.0.0',
+      ['interface'],
+    )
+    const initialIndex = installableResponse([availableItem, ...filler, secondInstallable])
+    const freshIndex = installableResponse(initialIndex.items, firstSource, {
+      scannedAt: '2026-08-18T02:00:00.000Z',
+      cacheStatus: 'fresh',
+    })
+    vi.mocked(readMarketState).mockResolvedValue(enabledState)
+    vi.mocked(readMarketCatalog).mockResolvedValue(catalogForSource(firstSource, [
+      makeItem(firstSource, 'browse-only', 'Browse Only', ['interface']),
+    ]))
+    vi.mocked(readMarketInstallable)
+      .mockResolvedValueOnce(initialIndex)
+      .mockResolvedValue(freshIndex)
+    render(<MarketSettingsTab {...props} />)
+
+    expect(await screen.findByRole('button', { name: /Browse Only/u })).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.discover })).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.installable })).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.installed })).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.sources })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: en.installable }))
+    expect(await screen.findByRole('button', { name: `${en.install}: Available Plugin` })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: `${en.install}: Second Installable` })).toBeNull()
+    expect(screen.getByText(`${en.scannedAt}: ${initialIndex.metadata.scannedAt}`)).toBeTruthy()
+    expect(screen.getByText(`${en.providerRevision}: ${initialIndex.metadata.providerRevision}`)).toBeTruthy()
+    expect(screen.getByText(en.cachedScan)).toBeTruthy()
+    expect(readMarketInstallable).toHaveBeenCalledWith('en', false, expect.any(AbortSignal))
+    expect(readMarketInstallations).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: en.loadMore }))
+    expect(screen.getByRole('button', { name: `${en.install}: Second Installable` })).toBeTruthy()
+    expect(readMoreMarketCatalog).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'tools' }))
+    expect(screen.getByRole('button', { name: `${en.install}: Available Plugin` })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: `${en.install}: Second Installable` })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'interface' }))
+    expect(screen.getByRole('button', { name: `${en.install}: Available Plugin` })).toBeTruthy()
+    expect(screen.getByRole('button', { name: `${en.install}: Second Installable` })).toBeTruthy()
+
+    fireEvent.change(screen.getByPlaceholderText(en.search), { target: { value: 'Second' } })
+    fireEvent.click(screen.getByRole('button', { name: en.searchAction }))
+    expect(screen.queryByRole('button', { name: `${en.install}: Available Plugin` })).toBeNull()
+    expect(screen.getByRole('button', { name: `${en.install}: Second Installable` })).toBeTruthy()
+    expect(readMarketInstallable).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: en.rescanInstallable }))
+    expect(await screen.findByText(en.freshScan)).toBeTruthy()
+    expect(readMarketInstallable).toHaveBeenNthCalledWith(2, 'en', true, expect.any(AbortSignal))
+  })
+
+  it('previews an exact package and profile before install, executes only its preview id, and prompts for restart', async () => {
+    const item = makeInstallableItem(firstSource)
+    const installCatalog = catalogForSource(firstSource, [item])
+    const receipt = makeReceipt({
+      packageName: item.package!.name,
+      version: item.latestVersion!,
+      itemId: item.id,
+      displayName: item.displayName,
+    })
+    vi.mocked(readMarketState).mockResolvedValue(enabledState)
+    vi.mocked(readMarketCatalog).mockResolvedValue(installCatalog)
+    vi.mocked(readMarketInstallable).mockResolvedValue(installableResponse([item]))
+    vi.mocked(previewMarketOperation).mockResolvedValue({
+      action: 'install',
+      profileName: 'web',
+      packageName: receipt.packageName,
+      version: receipt.version,
+      displayName: receipt.displayName,
+      expiresAt: '2026-08-18T00:05:00.000Z',
+      previewId: 'opaque-install-preview',
+    })
+    vi.mocked(executeMarketOperation).mockResolvedValue({ action: 'install', receipt })
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('button', { name: /Installable Plugin/u })
+    fireEvent.click(screen.getByRole('button', { name: en.installable }))
+    fireEvent.click(await screen.findByRole('button', { name: `${en.install}: ${item.displayName}` }))
+    await waitFor(() => {
+      expect(previewMarketOperation).toHaveBeenCalledWith({
+        action: 'install',
+        sourceRecordId: firstSource.sourceRecordId,
+        itemId: item.id,
+      }, expect.any(AbortSignal))
+    })
+    expect(await screen.findByRole('dialog', { name: en.confirmInstallTitle })).toBeTruthy()
+    expect(screen.getByText(receipt.packageName)).toBeTruthy()
+    expect(screen.getByText(receipt.version)).toBeTruthy()
+    expect(screen.getByText('web')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: en.confirmInstall }))
+    await waitFor(() => {
+      expect(executeMarketOperation).toHaveBeenCalledWith('opaque-install-preview', expect.any(AbortSignal))
+    })
+    expect(await screen.findByRole('dialog', { name: en.installComplete })).toBeTruthy()
+    expect(screen.getByText(en.restartRequiredBody)).toBeTruthy()
+    await waitFor(() => {
+      expect(readMarketInstallable).toHaveBeenCalledTimes(2)
+      expect(readMarketInstallations).not.toHaveBeenCalled()
+      expect(readMarketState).toHaveBeenCalledTimes(1)
+      expect(readMarketCatalog).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('uninstalls only from the current profile receipt and executes the Host preview id', async () => {
+    const receipt = makeReceipt()
+    vi.mocked(readMarketState).mockResolvedValue(emptyState)
+    vi.mocked(readMarketInstallations)
+      .mockResolvedValueOnce({ installations: [receipt] })
+      .mockResolvedValue({ installations: [] })
+    vi.mocked(previewMarketOperation).mockResolvedValue({
+      action: 'uninstall',
+      profileName: receipt.profileName,
+      packageName: receipt.packageName,
+      version: receipt.version,
+      displayName: receipt.displayName,
+      expiresAt: '2026-08-18T00:05:00.000Z',
+      previewId: 'opaque-uninstall-preview',
+    })
+    vi.mocked(executeMarketOperation).mockResolvedValue({
+      action: 'uninstall',
+      receiptId: receipt.receiptId,
+      packageName: receipt.packageName,
+    })
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('heading', { name: en.emptyTitle })
+    fireEvent.click(screen.getByRole('button', { name: en.installed }))
+    fireEvent.click(await screen.findByRole('button', { name: `${en.uninstall}: ${receipt.displayName}` }))
+    await waitFor(() => {
+      expect(previewMarketOperation).toHaveBeenCalledWith(
+        { action: 'uninstall', receiptId: receipt.receiptId },
+        expect.any(AbortSignal),
+      )
+    })
+    expect(await screen.findByRole('dialog', { name: en.confirmUninstallTitle })).toBeTruthy()
+    expect(screen.getByText(receipt.version)).toBeTruthy()
+    expect(screen.getByText(receipt.profileName)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.confirmUninstall }))
+    await waitFor(() => {
+      expect(executeMarketOperation).toHaveBeenCalledWith('opaque-uninstall-preview', expect.any(AbortSignal))
+    })
+    expect(await screen.findByRole('dialog', { name: en.uninstallComplete })).toBeTruthy()
+    expect(screen.getByText(en.restartRequiredBody)).toBeTruthy()
+    expect(readMarketCatalog).not.toHaveBeenCalled()
+  })
+
+  it('explains that package operations require Desktop when the optional Host capability returns 503', async () => {
+    vi.mocked(readMarketState).mockResolvedValue(emptyState)
+    vi.mocked(readMarketInstallations).mockRejectedValue(Object.assign(new Error('unavailable'), { status: 503 }))
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('heading', { name: en.emptyTitle })
+    fireEvent.click(screen.getByRole('button', { name: en.installed }))
+    expect(await screen.findByRole('heading', { name: en.desktopRequiredTitle })).toBeTruthy()
+    expect(screen.getByText(en.desktopUnavailable)).toBeTruthy()
+    expect(screen.queryByText('unavailable')).toBeNull()
+  })
+
+  it('fails closed without offering locally guessed candidates when Host validation fails', async () => {
+    const item = makeInstallableItem(firstSource)
+    vi.mocked(readMarketState).mockResolvedValue(enabledState)
+    vi.mocked(readMarketCatalog).mockResolvedValue(catalogForSource(firstSource, [item]))
+    vi.mocked(readMarketInstallable).mockRejectedValue(new Error('private index failure'))
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('button', { name: /Installable Plugin/u })
+    fireEvent.click(screen.getByRole('button', { name: en.installable }))
+    expect(await screen.findByRole('heading', { name: en.installableError })).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.retry })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: `${en.install}: ${item.displayName}` })).toBeNull()
+    expect(screen.queryByText('private index failure')).toBeNull()
   })
 
   it('shows source attribution, endpoint, adapter type, and last result', async () => {
@@ -494,8 +795,14 @@ describe('MarketSettingsTab', () => {
 
   it('uses multi-select category filters with OR query semantics and resets the current page', async () => {
     const initial = catalogForSource(firstSource, [makeItem(firstSource, 'fixture-plugin', 'Fixture Plugin', ['interface', 'tools'])], 'unfiltered-next')
-    const interfaceOnly = catalogForSource(firstSource, [makeItem(firstSource, 'interface-plugin', 'Interface Plugin', ['interface'])], 'interface-next')
-    const both = catalogForSource(firstSource, [makeItem(firstSource, 'both-plugin', 'Both Categories Plugin', ['tools'])], 'both-next')
+    const interfaceOnly = {
+      ...catalogForSource(firstSource, [makeItem(firstSource, 'interface-plugin', 'Interface Plugin', ['interface'])], 'interface-next'),
+      categories: ['interface', 'tools'],
+    }
+    const both = {
+      ...catalogForSource(firstSource, [makeItem(firstSource, 'both-plugin', 'Both Categories Plugin', ['tools'])], 'both-next'),
+      categories: ['interface', 'tools'],
+    }
     vi.mocked(readMarketState).mockResolvedValue(enabledState)
     vi.mocked(readMarketCatalog)
       .mockResolvedValueOnce(initial)

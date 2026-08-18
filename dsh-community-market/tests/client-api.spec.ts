@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readMarketCatalog, readMoreMarketCatalog } from '../src/client/api.js'
+import {
+  executeMarketOperation,
+  MarketApiError,
+  previewMarketOperation,
+  readMarketCatalog,
+  readMarketInstallable,
+  readMarketInstallations,
+  readMoreMarketCatalog,
+} from '../src/client/api.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -24,6 +32,21 @@ describe('community market client API', () => {
     expect(url.searchParams.get('locale')).toBe('zh-CN')
     expect(url.searchParams.getAll('category')).toEqual(['tools', 'interface'])
     expect(url.searchParams.has('cursor')).toBe(false)
+    expect(url.searchParams.has('refresh')).toBe(false)
+  })
+
+  it('marks only an explicit catalog refresh as a forced index rescan', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () => ({ query: {}, results: [], categories: [], fetchedAt: '2026-08-18T00:00:00Z' }),
+    } as Response))
+    vi.stubGlobal('fetch', fetch)
+
+    await readMarketCatalog('source-record-1', '', 'en', [], undefined, true)
+
+    const url = fetch.mock.calls[0]?.[0] as URL
+    expect(url.pathname).toBe('/api/community-market/catalog')
+    expect(url.searchParams.get('refresh')).toBe('1')
   })
 
   it('binds a later page to the same source and its opaque cursor', async () => {
@@ -40,5 +63,86 @@ describe('community market client API', () => {
     expect(url.searchParams.get('cursor')).toBe('opaque cursor/2')
     expect(url.searchParams.get('limit')).toBe('50')
     expect(url.searchParams.getAll('category')).toEqual(['tools'])
+  })
+
+  it('uses the exact installations, preview, and execute routes without forwarding package commands', async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => ({
+      ok: true,
+      json: async () => {
+        const url = String(input)
+        if (url.endsWith('/installations')) return { installations: [] }
+        if (url.endsWith('/preview')) {
+          return {
+            action: 'install',
+            profileName: 'web',
+            packageName: 'dsh-plugin-safe',
+            version: '1.2.3',
+            displayName: 'Safe Plugin',
+            expiresAt: '2026-08-18T00:05:00.000Z',
+            previewId: 'preview-1',
+          }
+        }
+        return { action: 'uninstall', receiptId: 'receipt-1', packageName: 'dsh-plugin-safe' }
+      },
+      status: 200,
+      ...(init === undefined ? {} : { requestInit: init }),
+    } as Response))
+    vi.stubGlobal('fetch', fetch)
+
+    await readMarketInstallations()
+    await previewMarketOperation({ action: 'install', sourceRecordId: 'source-1', itemId: 'item-1' })
+    await executeMarketOperation('preview-1')
+
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/community-market/installations')
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/community-market/operations/preview')
+    expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ action: 'install', sourceRecordId: 'source-1', itemId: 'item-1' }),
+    })
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/community-market/operations/execute')
+    expect(fetch.mock.calls[2]?.[1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ previewId: 'preview-1' }),
+    })
+  })
+
+  it('reads the independent verified index and sends refresh only for an explicit rescan', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () => ({
+        source: {},
+        items: [],
+        metadata: {
+          scannedAt: '2026-08-18T00:00:00.000Z',
+          expiresAt: '2026-08-18T00:05:00.000Z',
+          cacheStatus: 'fresh',
+        },
+      }),
+    } as Response))
+    vi.stubGlobal('fetch', fetch)
+
+    await readMarketInstallable('zh-CN')
+    await readMarketInstallable('zh-CN', true)
+
+    const cachedUrl = fetch.mock.calls[0]?.[0] as URL
+    const refreshedUrl = fetch.mock.calls[1]?.[0] as URL
+    expect(cachedUrl.pathname).toBe('/api/community-market/installable')
+    expect(cachedUrl.searchParams.get('locale')).toBe('zh-CN')
+    expect(cachedUrl.searchParams.has('refresh')).toBe(false)
+    expect(refreshedUrl.searchParams.get('refresh')).toBe('1')
+  })
+
+  it('preserves an unavailable status so the Client can explain the Desktop-only capability', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'private Host detail' }),
+    } as Response)))
+
+    await expect(readMarketInstallations()).rejects.toMatchObject({
+      name: 'MarketApiError',
+      status: 503,
+    })
+    await expect(readMarketInstallations()).rejects.toBeInstanceOf(MarketApiError)
   })
 })

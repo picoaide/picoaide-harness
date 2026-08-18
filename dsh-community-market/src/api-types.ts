@@ -45,7 +45,17 @@ export interface MarketCatalogSourceResult {
 export interface MarketCatalogResponse {
   readonly query: Record<string, unknown>
   readonly results: readonly MarketCatalogSourceResult[]
+  /** Categories derived from the complete active-source index, not only this page. */
+  readonly categories: readonly string[]
+  readonly metadata?: MarketCatalogMetadata
   readonly fetchedAt: string
+}
+
+export interface MarketCatalogMetadata {
+  readonly scannedAt: string
+  readonly expiresAt: string
+  readonly providerRevision?: string
+  readonly cacheStatus: 'fresh' | 'cached'
 }
 
 export interface MarketSourceManifestResponse {
@@ -58,3 +68,63 @@ export type MarketSourceMutation =
   | { readonly action: 'select'; readonly sourceRecordId: string }
   | { readonly action: 'move'; readonly sourceRecordId: string; readonly direction: 'up' | 'down' }
   | { readonly action: 'remove'; readonly sourceRecordId: string }
+
+/** Durable proof that the Market installed one exact npm package into one profile. */
+export interface MarketInstallReceipt {
+  readonly receiptId: string
+  readonly profileName: string
+  readonly packageName: string
+  readonly version: string
+  readonly integrity: string
+  readonly bundlePatch: string
+  readonly sourceRecordId: string
+  readonly providerId: string
+  readonly itemId: string
+  readonly displayName: string
+  readonly installedAt: string
+}
+
+export interface MarketInstallationsResponse {
+  readonly installations: readonly MarketInstallReceipt[]
+}
+
+/** Complete Host-preverified subset for the active catalog source. */
+export interface MarketInstallableResponse {
+  readonly source: MarketSourceView
+  readonly items: CatalogSnapshot['items']
+  readonly metadata: MarketCatalogMetadata
+}
+
+/** Renderer input for the non-mutating verification stage. */
+export type MarketOperationPreviewRequest =
+  | {
+      readonly action: 'install'
+      readonly sourceRecordId: string
+      readonly itemId: string
+    }
+  | {
+      readonly action: 'uninstall'
+      readonly receiptId: string
+    }
+
+/** Host-verified facts shown before the user confirms a package mutation. */
+export interface MarketOperationPreviewResponse {
+  readonly action: 'install' | 'uninstall'
+  readonly profileName: string
+  readonly packageName: string
+  readonly version: string
+  readonly displayName: string
+  readonly expiresAt: string
+  readonly previewId: string
+}
+
+export type MarketOperationExecuteResponse =
+  | {
+      readonly action: 'install'
+      readonly receipt: MarketInstallReceipt
+    }
+  | {
+      readonly action: 'uninstall'
+      readonly receiptId: string
+      readonly packageName: string
+    }

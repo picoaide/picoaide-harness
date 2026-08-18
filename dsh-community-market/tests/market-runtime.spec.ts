@@ -4,7 +4,7 @@ import https from 'node:https'
 import { describe, expect, it, vi } from 'vitest'
 import { dsh1024StoreAdapter, DSH_1024STORE_ADAPTER_ID, DSH_1024STORE_KEY, DSH_1024STORE_PROVIDER_ID } from '../src/adapters/dsh-1024store.js'
 import { standardHttpAdapter } from '../src/adapters/standard-http.js'
-import { DefaultCatalogService } from '../src/catalog/service.js'
+import { DefaultCatalogService, type CatalogFullIndex } from '../src/catalog/service.js'
 import { MemoryCatalogSourceStore, SettingsCatalogSourceStore } from '../src/catalog/source-store.js'
 import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import type {
@@ -67,6 +67,24 @@ const rawCatalog = {
   }],
 }
 
+function catalogIndex(record: LocalSourceRecord = source()): CatalogFullIndex {
+  return {
+    source: {
+      ...record,
+      name: 'DSH 1024Store',
+      endpoint: 'https://deepseek1024.com/api/v1/plugins',
+      partnership: true,
+    },
+    snapshots: [],
+    scannedAt: '2026-08-18T00:00:00.000Z',
+    expiresAt: '2026-08-18T00:05:00.000Z',
+    providerRevision: 'sha256:fixture',
+    cacheStatus: 'fresh',
+    scanKey: 'fixture-scan',
+    sourceGeneration: 0,
+  }
+}
+
 function contractFixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(`../docs/examples/${name}.json`, import.meta.url), 'utf8')) as unknown
 }
@@ -127,6 +145,23 @@ async function requestMarketCatalog(
 }
 
 describe('1024Store adapter', () => {
+  it('represents a valid empty catalog with one explicit empty snapshot', async () => {
+    const snapshots = await dsh1024StoreAdapter.scanCatalog!({}, {
+      source: source(),
+      signal: new AbortController().signal,
+      http: {
+        getJson: vi.fn(async () => ({
+          value: { ...rawCatalog, meta: { ...rawCatalog.meta, total: 0 }, packages: [] },
+          finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+        })),
+      },
+      media: { register: vi.fn() },
+    })
+
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots[0]).toMatchObject({ items: [], page: { total: 0 } })
+  })
+
   it('projects reviewed fields and never forwards remote install strings', async () => {
     const http: CatalogHttpClient = { getJson: vi.fn(async () => ({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })) }
     const register = vi.fn(() => publisherAssetRef)
@@ -595,7 +630,9 @@ describe('standard source registration trust boundary', () => {
 
 describe('catalog Host route pagination boundary', () => {
   it('uses the Host limit of 50 and preserves repeated category parameters', async () => {
-    const fetch = vi.spyOn(DefaultCatalogService.prototype, 'fetch').mockResolvedValue([])
+    const index = catalogIndex()
+    const scanCatalog = vi.spyOn(DefaultCatalogService.prototype, 'scanCatalog').mockResolvedValue(index)
+    const queryCatalog = vi.spyOn(DefaultCatalogService.prototype, 'queryCatalog').mockReturnValue([])
     try {
       const response = await requestMarketCatalog(
         [],
@@ -604,33 +641,42 @@ describe('catalog Host route pagination boundary', () => {
 
       expect(response.statusCode).toBe(200)
       expect(response.body.query).toEqual({ category: ['dev', 'tools'], limit: 50 })
-      expect(fetch).toHaveBeenCalledWith(
+      expect(scanCatalog).toHaveBeenCalledWith(expect.any(AbortSignal), { force: false })
+      expect(queryCatalog).toHaveBeenCalledWith(
+        index,
         { category: ['dev', 'tools'], limit: 50 },
-        expect.any(AbortSignal),
         undefined,
       )
+      expect(response.body).toMatchObject({
+        categories: [],
+        metadata: { cacheStatus: 'fresh', providerRevision: 'sha256:fixture' },
+      })
     } finally {
-      fetch.mockRestore()
+      scanCatalog.mockRestore()
+      queryCatalog.mockRestore()
     }
   })
 
   it('allows an initial request to bind itself to the current active source', async () => {
-    const fetch = vi.spyOn(DefaultCatalogService.prototype, 'fetch').mockResolvedValue([])
+    const active = source()
+    const index = catalogIndex(active)
+    const scanCatalog = vi.spyOn(DefaultCatalogService.prototype, 'scanCatalog').mockResolvedValue(index)
+    const queryCatalog = vi.spyOn(DefaultCatalogService.prototype, 'queryCatalog').mockReturnValue([])
     try {
-      const active = source()
       const response = await requestMarketCatalog(
         [active],
         `${marketRoutes.catalog}?sourceRecordId=${active.sourceRecordId}`,
       )
 
       expect(response.statusCode).toBe(200)
-      expect(fetch).toHaveBeenCalledWith(
+      expect(queryCatalog).toHaveBeenCalledWith(
+        index,
         { limit: 50 },
-        expect.any(AbortSignal),
         { sourceRecordId: active.sourceRecordId },
       )
     } finally {
-      fetch.mockRestore()
+      scanCatalog.mockRestore()
+      queryCatalog.mockRestore()
     }
   })
 
@@ -707,7 +753,7 @@ describe('catalog active-source reads', () => {
       { sourceRecordId: first.sourceRecordId, cursor: token! },
     )
 
-    expect(getJson).toHaveBeenCalledTimes(2)
+    expect(getJson).toHaveBeenCalledOnce()
     expect(results).toHaveLength(1)
     expect(results[0]?.source.sourceRecordId).toBe(first.sourceRecordId)
     expect(results[0]?.snapshot?.items).toHaveLength(1)
@@ -777,7 +823,7 @@ describe('catalog active-source reads', () => {
       new AbortController().signal,
       { sourceRecordId: second.sourceRecordId, cursor: token! },
     )).rejects.toThrow(/does not belong/u)
-    expect(getJson).toHaveBeenCalledOnce()
+    expect(getJson).toHaveBeenCalledTimes(2)
   })
 
   it('rejects unknown and expired Host cursor tokens before provider I/O', async () => {
@@ -833,7 +879,7 @@ describe('catalog active-source reads', () => {
     expect(getJson).not.toHaveBeenCalled()
   })
 
-  it('globally bounds overlapping reads of the active source', async () => {
+  it('globally bounds overlapping locale-index builds for the active source', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([
       source(),
@@ -852,8 +898,8 @@ describe('catalog active-source reads', () => {
     })
     const service = new DefaultCatalogService(store, { getJson }, { maxConcurrentSources: 2 })
 
-    const first = service.fetch({}, new AbortController().signal)
-    const second = service.fetch({}, new AbortController().signal)
+    const first = service.fetch({ locale: 'en-US' }, new AbortController().signal)
+    const second = service.fetch({ locale: 'zh-CN' }, new AbortController().signal)
     await vi.waitFor(() => { expect(getJson).toHaveBeenCalledTimes(2) })
     expect(peak).toBe(2)
     releases.splice(0).forEach(release => release())
@@ -900,25 +946,55 @@ describe('catalog active-source reads', () => {
     expect(results[0]?.snapshot?.items).toHaveLength(1)
   })
 
-  it('marks a last-good cache as stale after a later failure', async () => {
+  it('reuses only an unexpired complete index and reports explicit cache status', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([source()])
     const getJson = vi.fn()
       .mockResolvedValueOnce({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
-      .mockRejectedValueOnce(new Error('offline'))
     const service = new DefaultCatalogService(store, { getJson })
 
-    await service.fetch({}, new AbortController().signal)
-    const [result] = await service.fetch({}, new AbortController().signal)
-    expect(result).toMatchObject({ stale: true, error: 'source unavailable' })
-    expect(result?.snapshot?.items).toHaveLength(1)
+    const first = await service.scanCatalog(new AbortController().signal)
+    const second = await service.scanCatalog(new AbortController().signal)
+
+    expect(first).toMatchObject({ cacheStatus: 'fresh', providerRevision: 'sha256:fixture' })
+    expect(second).toMatchObject({ cacheStatus: 'cached', scanKey: first?.scanKey })
+    expect(getJson).toHaveBeenCalledOnce()
   })
 
-  it('does not serve a last-good snapshot after its cache TTL expires', async () => {
+  it('coalesces concurrent first scans for the same source and locale', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([source()])
+    let release: ((value: { value: typeof rawCatalog; finalUrl: string }) => void) | undefined
+    const getJson = vi.fn(() => new Promise<{ value: typeof rawCatalog; finalUrl: string }>(resolve => {
+      release = resolve
+    }))
+    const service = new DefaultCatalogService(store, { getJson })
+
+    const firstPending = service.scanCatalog(new AbortController().signal, { locale: 'zh-CN' })
+    const secondPending = service.scanCatalog(new AbortController().signal, { locale: 'zh-CN' })
+    await vi.waitFor(() => expect(getJson).toHaveBeenCalledOnce())
+    release?.({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
+    const [first, second] = await Promise.all([firstPending, secondPending])
+
+    expect(getJson).toHaveBeenCalledOnce()
+    expect(first).toMatchObject({ cacheStatus: 'fresh', locale: 'zh-CN' })
+    expect(second).toMatchObject({ cacheStatus: 'cached', locale: 'zh-CN', scanKey: first?.scanKey })
+  })
+
+  it('fails closed and revokes old cursors before rebuilding an expired complete index', async () => {
+    const store = new MemoryCatalogSourceStore()
+    await store.save([source()])
+    const secondItem = {
+      ...rawCatalog.packages[0]!,
+      id: 'anywhere-labs/second-plugin',
+      name: 'second-plugin',
+      url: 'https://github.com/anywhere-labs/second-plugin',
+    }
     const getJson = vi.fn()
-      .mockResolvedValueOnce({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
+      .mockResolvedValueOnce({
+        value: { ...rawCatalog, packages: [...rawCatalog.packages, secondItem] },
+        finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+      })
       .mockRejectedValueOnce(new Error('offline'))
     let now = 1_000
     const service = new DefaultCatalogService(store, { getJson }, {
@@ -926,14 +1002,24 @@ describe('catalog active-source reads', () => {
       now: () => now,
     })
 
-    await service.fetch({}, new AbortController().signal)
+    const firstIndex = (await service.scanCatalog(new AbortController().signal))!
+    const [page] = service.queryCatalog(
+      firstIndex,
+      { limit: 1 },
+      { sourceRecordId: source().sourceRecordId },
+    )
+    const cursor = page?.snapshot?.page.nextCursor
     now += 60_001
-    const [result] = await service.fetch({}, new AbortController().signal)
-    expect(result).toMatchObject({ stale: false, error: 'source unavailable' })
-    expect(result?.snapshot).toBeUndefined()
+    await expect(service.scanCatalog(new AbortController().signal)).rejects.toThrow('offline')
+    expect(getJson).toHaveBeenCalledTimes(2)
+    expect(() => service.queryCatalog(
+      firstIndex,
+      { limit: 1 },
+      { sourceRecordId: source().sourceRecordId, cursor: cursor! },
+    )).toThrow(/unknown or expired/u)
   })
 
-  it('revokes media and stale catalog data when a source is invalidated', async () => {
+  it('revokes media and the complete index when a source is invalidated', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([source()])
     const getJson = vi.fn()
@@ -944,16 +1030,11 @@ describe('catalog active-source reads', () => {
       media: { register: () => publisherAssetRef, unregisterSource },
     })
 
-    await expect(service.fetch({}, new AbortController().signal)).resolves.toMatchObject([{
-      stale: false,
-      snapshot: { items: [{ media: { icon: { assetRef: publisherAssetRef } } }] },
-    }])
+    await expect(service.fetch({}, new AbortController().signal)).resolves.toHaveLength(1)
     service.invalidateSource(source().sourceRecordId)
-    const [result] = await service.fetch({}, new AbortController().signal)
 
     expect(unregisterSource).toHaveBeenCalledWith(source().sourceRecordId)
-    expect(result).toMatchObject({ stale: false, error: 'source unavailable' })
-    expect(result?.snapshot).toBeUndefined()
+    await expect(service.fetch({}, new AbortController().signal)).rejects.toThrow('offline')
   })
 
   it('aborts an in-flight catalog request when its source is invalidated', async () => {
@@ -972,7 +1053,7 @@ describe('catalog active-source reads', () => {
     await vi.waitFor(() => { expect(getJson).toHaveBeenCalledOnce() })
     service.invalidateSource(source().sourceRecordId)
 
-    await expect(pending).resolves.toEqual([])
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
     expect(observedSignal?.aborted).toBe(true)
   })
 
@@ -987,7 +1068,7 @@ describe('catalog active-source reads', () => {
     service.invalidateSource(source().sourceRecordId)
     releaseLoad?.([source()])
 
-    await expect(pending).resolves.toEqual([])
+    await expect(pending).rejects.toThrow(/changed during scan setup/u)
     expect(getJson).not.toHaveBeenCalled()
   })
 
@@ -1007,25 +1088,42 @@ describe('catalog active-source reads', () => {
     expect(results[0]?.source.sourceRecordId).toBe(first.sourceRecordId)
   })
 
-  it('bounds the last-good catalog cache', async () => {
+  it('force reloads the complete index and revokes old local pagination cursors', async () => {
     const first = source()
-    const second = source({ sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003' })
     const store = new MemoryCatalogSourceStore()
     await store.save([first])
+    const secondItem = {
+      ...rawCatalog.packages[0]!,
+      id: 'anywhere-labs/second-plugin',
+      name: 'second-plugin',
+      url: 'https://github.com/anywhere-labs/second-plugin',
+    }
+    const completeCatalog = { ...rawCatalog, packages: [...rawCatalog.packages, secondItem] }
     const getJson = vi.fn()
-      .mockResolvedValueOnce({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
-      .mockResolvedValueOnce({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
-      .mockRejectedValueOnce(new Error('offline'))
-    const service = new DefaultCatalogService(store, { getJson }, { maxCacheEntries: 1 })
+      .mockResolvedValueOnce({ value: completeCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
+      .mockResolvedValueOnce({ value: completeCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
+    const service = new DefaultCatalogService(store, { getJson })
 
-    await service.fetch({}, new AbortController().signal)
-    await store.save([second])
-    await service.fetch({}, new AbortController().signal)
-    await store.save([first])
-    const [result] = await service.fetch({}, new AbortController().signal)
+    const firstIndex = (await service.scanCatalog(new AbortController().signal))!
+    const [page] = service.queryCatalog(
+      firstIndex,
+      { limit: 1 },
+      { sourceRecordId: first.sourceRecordId },
+    )
+    const cursor = page?.snapshot?.page.nextCursor
+    const cached = await service.scanCatalog(new AbortController().signal)
+    const refreshed = (await service.scanCatalog(new AbortController().signal, { force: true }))!
 
-    expect(result).toMatchObject({ stale: false, error: 'source unavailable' })
-    expect(result?.snapshot).toBeUndefined()
+    expect(cached).toMatchObject({ cacheStatus: 'cached', scanKey: firstIndex.scanKey })
+    expect(refreshed).toMatchObject({ cacheStatus: 'fresh' })
+    expect(refreshed.scanKey).not.toBe(firstIndex.scanKey)
+    expect(getJson).toHaveBeenCalledTimes(2)
+    expect(getJson.mock.calls[1]?.[2]).toMatchObject({ cacheMode: 'reload' })
+    expect(() => service.queryCatalog(
+      refreshed,
+      { limit: 1 },
+      { sourceRecordId: first.sourceRecordId, cursor: cursor! },
+    )).toThrow(/unknown or expired/u)
   })
 })
 
