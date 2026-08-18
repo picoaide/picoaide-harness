@@ -203,4 +203,27 @@ describe('community market overlay', () => {
     expect(catalogUrl.searchParams.get('q')).toBe('sidebar')
     expect(catalogUrl.searchParams.get('locale')).toBe('en')
   })
+
+  it('shows a catalog error and retries the failed request', async () => {
+    let catalogCalls = 0
+    const request = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes('/state')) return response(stateWithSource)
+      catalogCalls += 1
+      return catalogCalls === 1
+        ? response({ error: 'market offline' }, 503)
+        : response(catalogWithItem)
+    })
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+
+    expect(await screen.findByRole('heading', { name: 'catalogError' })).toBeTruthy()
+    expect(screen.getByText('market offline')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'retry' }))
+
+    expect(await screen.findByText('Better Sidebar')).toBeTruthy()
+    expect(request).toHaveBeenCalledTimes(4)
+  })
 })
