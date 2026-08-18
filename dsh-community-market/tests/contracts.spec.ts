@@ -91,6 +91,28 @@ describe('catalog schemas and semantics', () => {
     }, 1)).toThrow(/effective query limit/u)
   })
 
+  it('rejects provider and normalized pages above the 100-item safety cap', () => {
+    const provider = providerFixture() as CatalogProviderPage
+    const providerItems = Array.from({ length: 101 }, (_, index) => ({
+      ...provider.items[0]!,
+      id: `provider-plugin-${index}`,
+    }))
+    expect(() => parseCatalogProviderPage({ ...provider, items: providerItems }))
+      .toThrow(CatalogContractError)
+
+    const snapshot = snapshotFixture() as ReturnType<typeof parseCatalogSnapshot>
+    const snapshotItems = Array.from({ length: 101 }, (_, index) => ({
+      ...snapshot.items[0]!,
+      id: `snapshot-plugin-${index}`,
+      provenance: {
+        ...snapshot.items[0]!.provenance,
+        itemId: `snapshot-plugin-${index}`,
+      },
+    }))
+    expect(() => parseCatalogSnapshot({ ...snapshot, items: snapshotItems }))
+      .toThrow(CatalogContractError)
+  })
+
   it('enforces source limit and sort relationships beyond JSON Schema', () => {
     const source = sourceFixture() as CatalogSourceManifest
     expect(() => parseCatalogSource({
@@ -109,11 +131,11 @@ describe('catalog query boundary', () => {
     const input = { q: '  sidebar  ', category: ['interface'] }
     const normalized = normalizeCatalogQuery(input)
 
-    expect(normalized).toEqual({ q: 'sidebar', category: ['interface'], limit: 20 })
+    expect(normalized).toEqual({ q: 'sidebar', category: ['interface'], limit: 50 })
     expect(input.q).toBe('  sidebar  ')
   })
 
-  it('serializes only declared fields and repeats multi-value parameters', () => {
+  it('serializes the minimal declared fields and omits undeclared extensions', () => {
     const source = parseCatalogSource(sourceFixture())
     const url = serializeCatalogQuery(source, normalizeCatalogQuery({
       q: 'side bar',
@@ -127,9 +149,10 @@ describe('catalog query boundary', () => {
     expect(url.origin + url.pathname).toBe('https://plugins.example.org/v1/plugins')
     expect(url.searchParams.get('q')).toBe('side bar')
     expect(url.searchParams.getAll('category')).toEqual(['interface', 'tools'])
-    expect(url.searchParams.getAll('capability')).toEqual(['ui.panel', 'storage.local'])
-    expect(url.searchParams.get('limit')).toBe('100')
-    expect(url.searchParams.get('sort')).toBe('updated')
+    expect(url.searchParams.get('limit')).toBe('50')
+    expect(url.searchParams.has('capability')).toBe(false)
+    expect(url.searchParams.has('sort')).toBe(false)
+    expect(url.searchParams.has('locale')).toBe(false)
   })
 
   it('omits unsupported fields and narrows a supported limit', () => {

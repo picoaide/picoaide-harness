@@ -258,7 +258,7 @@ function buildSnapshot(value: unknown, context: CatalogFetchContext, finalUrl: s
     .sort((left, right) => compareCandidates(left, right, query))
   const offset = Number(query.cursor ?? 0)
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > candidates.length) throw new Error('1024Store cursor is invalid')
-  const limit = Math.min(query.limit ?? 20, 100)
+  const limit = Math.min(query.limit ?? 50, 50)
   const end = Math.min(offset + limit, candidates.length)
   const meta = raw.meta !== null && typeof raw.meta === 'object' && !Array.isArray(raw.meta)
     ? raw.meta as Dsh1024StoreMeta
@@ -293,7 +293,7 @@ function buildSnapshot(value: unknown, context: CatalogFetchContext, finalUrl: s
 export const dsh1024StoreAdapter: CatalogAdapter = {
   adapterId: DSH_1024STORE_ADAPTER_ID,
   async fetch(queryValue, context) {
-    const query = { ...queryValue, limit: Math.min(queryValue.limit ?? 20, 100) }
+    const query = { ...queryValue, limit: Math.min(queryValue.limit ?? 50, 50) }
     const expectedOrigin = new URL(DSH_1024STORE_ENDPOINT).origin
     const response = await context.http.getJson(
       DSH_1024STORE_ENDPOINT,

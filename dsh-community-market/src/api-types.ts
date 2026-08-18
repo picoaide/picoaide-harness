@@ -55,6 +55,6 @@ export interface MarketSourceManifestResponse {
 export type MarketSourceMutation =
   | { readonly action: 'add-builtin'; readonly key: string }
   | { readonly action: 'add-standard'; readonly manifestUrl: string }
-  | { readonly action: 'set-enabled'; readonly sourceRecordId: string; readonly enabled: boolean }
+  | { readonly action: 'select'; readonly sourceRecordId: string }
   | { readonly action: 'move'; readonly sourceRecordId: string; readonly direction: 'up' | 'down' }
   | { readonly action: 'remove'; readonly sourceRecordId: string }

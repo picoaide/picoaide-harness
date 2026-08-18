@@ -124,7 +124,7 @@ export const standardHttpAdapter: CatalogAdapter = {
     const response = await context.http.getJson(url.href, context.signal, { allowedOrigin: sourceOrigin })
     requireOrigin(response.finalUrl, sourceOrigin, 'standard source provider page final URL')
     const effectiveLimit = manifest.query.supported.includes('limit')
-      ? Math.min(query.limit ?? 20, manifest.query.maxLimit)
+      ? Math.min(query.limit ?? 50, manifest.query.maxLimit)
       : manifest.query.defaultLimit
     const page = parseCatalogProviderPage(response.value, effectiveLimit)
     return snapshotFromPage(page, context, response.finalUrl)

@@ -12,7 +12,7 @@ This document defines the first implementation boundary for `dsh-community-marke
 - Keep catalog browsing read-only until a user explicitly chooses an action.
 - Install only into the active profile, with the plugin source and profile visible before confirmation.
 - Reuse existing DSH plugin and Desktop profile behavior instead of creating parallel state.
-- Let people explicitly choose, order, and add catalog sources without coupling the interface to one service.
+- Let people save and add catalog sources, then explicitly browse one selected source at a time without coupling the interface to one service.
 - Keep the package useful without Electron-specific access. Desktop integrations are optional capabilities, not renderer globals.
 
 ## Non-goals for the first release
@@ -28,7 +28,7 @@ This document defines the first implementation boundary for `dsh-community-marke
 
 ```mermaid
 flowchart LR
-    Selection["User source selection<br/>none, one, or many"] --> Registry["Source registry"]
+    Selection["User source selection<br/>none or exactly one current source"] --> Registry["Saved source registry"]
     Partner["Reviewed partner adapters"] --> Registry
     Standard["User-added standard sources"] --> Registry
     Registry --> Host["Market Host plugin<br/>fetch, isolate, validate, normalize"]
@@ -45,7 +45,7 @@ The Client contributes a `settings.plugins.tab` entry named **Plugin market** an
 
 ## Catalog sources and adapters
 
-There is no default catalog. A first-run source chooser lets the user enable no source, one source, or several sources and choose their presentation order. Having no selected source produces an explicit empty state; it never silently falls back to a partner.
+There is no default catalog. People may save several source registrations, but the browsing session has either no selection or exactly one selected source. Having no selected source produces an explicit empty state and no catalog request; it never silently falls back to a partner. Selecting another source cancels the old request and resets the visible list, search, category selection, and pagination before the new source is read.
 
 The Host supports two source paths:
 
@@ -53,6 +53,8 @@ The Host supports two source paths:
 2. A partner with a different API is integrated through a reviewed adapter shipped with the Market code.
 
 A remote manifest can describe data, but cannot supply adapter code, credentials, commands, enablement, or priority. Every adapter converts its private response into the same normalized page before the renderer receives it. Source-specific fields must never become UI assumptions.
+
+The standard adapter serializes only fields declared in the source manifest's `query.supported` list. In particular, it omits `category` for a source that does not advertise category support; unsupported fields are not emulated or broadcast to that source.
 
 [DSH 1024Store](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) is one of the providers currently cooperating with the project, and the market includes a reviewed built-in adapter for its public API. It is not a default, preferred source, or fallback, and the cooperation does not mean that its listings were reviewed or endorsed. Its endpoint and schema remain owned by that independent project.
 
@@ -62,11 +64,14 @@ The normative draft for the implementation team is the [catalog provider contrac
 
 Phase 1 provides:
 
-- a source chooser, source ordering, and addition of a conforming source;
-- isolated multi-source queries where one failed source does not hide successful results from others;
+- a source chooser, saved source management, and addition of a conforming source;
+- one selected source per browsing session, with no hidden request or fallback to another saved source;
+- standard-source requests that default to 50 items when `limit` is supported, while respecting the manifest's effective `maxLimit` or, when `limit` is unsupported, its `defaultLimit` (both bounded by the Schema maximum of 100);
+- a bottom **Load more** action that follows the selected standard source's cursor under the same declared paging rules; the reviewed 1024Store adapter instead exposes fixed local pages of 50;
 - loading, empty, offline, invalid-response, and retry states;
 - search over normalized names and descriptions;
-- category filtering;
+- multi-select category filtering with OR semantics: an item may match any selected category;
+- category choices accumulated from currently loaded items in the selected-source session, not a provider-wide or guaranteed-complete facet list;
 - a details view with the source repository and catalog attribution;
 - an unavailable state when installation capability is absent.
 
@@ -132,7 +137,7 @@ Raw response bodies, filesystem paths, tokens, environment variables, and comman
 
 - Host and Client plugin entries.
 - User-owned source selection, standard sources, reviewed partner adapters, and strict normalization.
-- Isolated multi-source queries with provenance and partial-failure handling.
+- One-source-at-a-time browsing with source-scoped pagination, provenance, and explicit failure handling without fallback.
 - Search, categories, details, and resilient state handling.
 - Headless unit tests and Loader smoke; no installer.
 

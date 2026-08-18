@@ -72,6 +72,21 @@ const css = `
   margin-bottom: 16px;
 }
 
+.dshMarketCategories {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -4px 0 16px;
+}
+
+.dshMarketCategories > span:first-child {
+  margin-right: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .dshMarketSearch {
   min-width: 220px;
   flex: 1;
@@ -207,6 +222,21 @@ const css = `
   overflow: hidden;
 }
 
+.dshMarketPagination {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 0 4px;
+}
+
+.dshMarketPaginationError {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
 .dshMarketEmpty {
   display: flex;
   flex-direction: column;
@@ -245,6 +275,10 @@ const css = `
   display: flex;
   flex-direction: column;
   gap: 9px;
+}
+
+.dshMarketAvailableSources {
+  margin-top: 9px;
 }
 
 .dshMarketSource {

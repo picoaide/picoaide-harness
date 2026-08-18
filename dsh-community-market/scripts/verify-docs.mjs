@@ -40,11 +40,15 @@ const publicFiles = [
   'SECURITY.i18n.yaml',
   'SECURITY.md',
   'SECURITY.zh.md',
+  'docs/catalog-adapter-guide.i18n.yaml',
+  'docs/catalog-adapter-guide.md',
+  'docs/catalog-adapter-guide.zh.md',
   'docs/catalog-provider-contract.i18n.yaml',
   'docs/catalog-provider-contract.md',
   'docs/catalog-provider-contract.zh.md',
   'docs/examples/catalog-query.example.json',
   'docs/examples/catalog-provider-page.example.json',
+  'docs/examples/catalog-provider-page.minimal.example.json',
   'docs/examples/catalog-snapshot.example.json',
   'docs/examples/catalog-source.example.json',
   'docs/market-shell.i18n.yaml',
@@ -77,6 +81,7 @@ if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) {
 const pairs = [
   ['README.i18n.yaml', ['README.md', 'README.zh.md']],
   ['SECURITY.i18n.yaml', ['SECURITY.md', 'SECURITY.zh.md']],
+  ['docs/catalog-adapter-guide.i18n.yaml', ['docs/catalog-adapter-guide.md', 'docs/catalog-adapter-guide.zh.md']],
   ['docs/catalog-provider-contract.i18n.yaml', ['docs/catalog-provider-contract.md', 'docs/catalog-provider-contract.zh.md']],
   ['docs/market-shell.i18n.yaml', ['docs/market-shell.md', 'docs/market-shell.zh.md']],
 ]
@@ -263,7 +268,17 @@ const allowedSorts = querySchema.properties.sort.enum
 if (!Number.isInteger(queryExample.limit) || queryExample.limit < 1 || queryExample.limit > 100) {
   fail('catalog query example limit must be an integer from 1 through 100')
 }
-if (!allowedSorts.includes(queryExample.sort)) fail('catalog query example uses an unsupported sort')
+if (queryExample.sort !== undefined && !allowedSorts.includes(queryExample.sort)) {
+  fail('catalog query example uses an unsupported sort')
+}
+
+const minimalProviderPageExample = validateFixture(
+  'docs/schemas/catalog-provider-page.schema.json',
+  'docs/examples/catalog-provider-page.minimal.example.json',
+)
+if (minimalProviderPageExample.items.length > 50) {
+  fail('minimal catalog provider page example must stay within its recommended 50-item fixture limit')
+}
 
 const providerPageExample = validateFixture(
   'docs/schemas/catalog-provider-page.schema.json',

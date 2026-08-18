@@ -30,7 +30,7 @@ import type {
   MarketStateResponse,
 } from '../api-types.js'
 import { marketMediaAssetUrl } from '../media/ref.js'
-import { mutateMarketSource, readMarketCatalog, readMarketState } from './api.js'
+import { mutateMarketSource, readMarketCatalog, readMarketState, readMoreMarketCatalog } from './api.js'
 
 type MarketItem = CatalogSnapshot['items'][number]
 type MarketView = 'discover' | 'sources'
@@ -75,15 +75,54 @@ function retainEnabledCatalog(
   sources: readonly MarketSourceView[],
 ): MarketCatalogResponse | undefined {
   if (catalog === undefined) return undefined
-  const retained = new Map(catalog.results.map(result => [result.source.sourceRecordId, result]))
-  const results = [...sources]
+  const selected = [...sources]
     .filter(source => source.enabled)
     .sort((left, right) => left.order - right.order)
-    .flatMap(source => {
-      const result = retained.get(source.sourceRecordId)
-      return result === undefined ? [] : [{ ...result, source }]
+    .at(0)
+  if (selected === undefined) return undefined
+  const result = catalog.results.find(value => value.source.sourceRecordId === selected.sourceRecordId)
+  return result === undefined ? undefined : { ...catalog, results: [{ ...result, source: selected }] }
+}
+
+function selectedSource(sources: readonly MarketSourceView[]): MarketSourceView | undefined {
+  return [...sources]
+    .filter(source => source.enabled)
+    .sort((left, right) => left.order - right.order)
+    .at(0)
+}
+
+function categoriesFromCatalog(catalog: MarketCatalogResponse): readonly string[] {
+  const categories = new Set<string>()
+  for (const result of catalog.results) {
+    for (const item of result.snapshot?.items ?? []) {
+      for (const category of item.categories ?? []) categories.add(category)
+    }
+  }
+  return [...categories]
+}
+
+function mergeCatalogPages(
+  catalog: MarketCatalogResponse | undefined,
+  pages: readonly MarketCatalogSourceResult[],
+): MarketCatalogResponse | undefined {
+  if (catalog === undefined || pages.length === 0) return catalog
+  const updates = new Map(pages.map(page => [page.source.sourceRecordId, page]))
+  const results = catalog.results.map(current => {
+    const next = updates.get(current.source.sourceRecordId)
+    if (current.snapshot === undefined || next?.snapshot === undefined) return current
+    const seen = new Set<string>()
+    const items = [...current.snapshot.items, ...next.snapshot.items].filter(item => {
+      if (seen.has(item.id)) return false
+      seen.add(item.id)
+      return true
     })
-  return results.length === 0 ? undefined : { ...catalog, results }
+    return {
+      ...next,
+      source: current.source,
+      snapshot: { ...next.snapshot, items, page: next.snapshot.page },
+    }
+  })
+  return { ...catalog, results, fetchedAt: new Date().toISOString() }
 }
 
 export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfaceProps) {
@@ -91,32 +130,70 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
   const [state, setState] = useState<MarketStateResponse>()
   const [catalog, setCatalog] = useState<MarketCatalogResponse>()
   const [query, setQuery] = useState('')
+  const [appliedQuery, setAppliedQuery] = useState('')
+  const [categoryOptions, setCategoryOptions] = useState<readonly string[]>([])
+  const [selectedCategories, setSelectedCategories] = useState<readonly string[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string>()
+  const [loadMoreError, setLoadMoreError] = useState<string>()
   const [selected, setSelected] = useState<VisibleItem>()
   const [addOpen, setAddOpen] = useState(false)
   const [manifestUrl, setManifestUrl] = useState('')
   const [mutationError, setMutationError] = useState<string>()
   const [mutationPending, setMutationPending] = useState(false)
   const readRequest = useRef<AbortController>()
+  const pageRequest = useRef<AbortController>()
   const mutationRequest = useRef<AbortController>()
 
-  const loadCatalog = useCallback(async (nextState: MarketStateResponse, q: string) => {
+  const rememberCategories = useCallback((next: MarketCatalogResponse) => {
+    const discovered = categoriesFromCatalog(next)
+    if (discovered.length === 0) return
+    setCategoryOptions(current => [...new Set([...current, ...discovered])]
+      .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })))
+  }, [])
+
+  const loadCatalog = useCallback(async (
+    nextState: MarketStateResponse,
+    q: string,
+    categories: readonly string[],
+  ) => {
     readRequest.current?.abort()
-    if (!nextState.sources.some(source => source.enabled)) {
+    pageRequest.current?.abort()
+    pageRequest.current = undefined
+    setLoadingMore(false)
+    setLoadMoreError(undefined)
+    const selected = selectedSource(nextState.sources)
+    if (selected === undefined) {
       readRequest.current = undefined
       setCatalog(undefined)
+      setQuery('')
+      setAppliedQuery('')
+      setCategoryOptions([])
+      setSelectedCategories([])
       setError(undefined)
       setLoading(false)
       return
     }
+    const effectiveQuery = q.trim()
     const request = new AbortController()
     readRequest.current = request
     setLoading(true)
     setError(undefined)
     try {
-      const next = await readMarketCatalog(q, readLocale(), request.signal)
-      if (!request.signal.aborted && readRequest.current === request) setCatalog(next)
+      const next = await readMarketCatalog(selected.sourceRecordId, effectiveQuery, readLocale(), categories, request.signal)
+      if (!request.signal.aborted && readRequest.current === request) {
+        const retained = retainEnabledCatalog(next, nextState.sources)
+        const result = retained?.results[0]
+        if (retained === undefined || result?.snapshot === undefined) {
+          setError(t('catalogError'))
+          return
+        }
+        rememberCategories(retained)
+        setAppliedQuery(effectiveQuery)
+        setSelectedCategories([...categories])
+        setCatalog(retained)
+      }
     } catch {
       if (!request.signal.aborted && readRequest.current === request) setError(t('catalogError'))
     } finally {
@@ -125,11 +202,15 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
         setLoading(false)
       }
     }
-  }, [readLocale, t])
+  }, [readLocale, rememberCategories, t])
 
-  const loadState = useCallback(async (q: string) => {
+  const loadState = useCallback(async (q: string, categories: readonly string[]) => {
     if (mutationRequest.current !== undefined) return
     readRequest.current?.abort()
+    pageRequest.current?.abort()
+    pageRequest.current = undefined
+    setLoadingMore(false)
+    setLoadMoreError(undefined)
     const request = new AbortController()
     readRequest.current = request
     setLoading(true)
@@ -140,7 +221,7 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
       setState(next)
       setCatalog(current => retainEnabledCatalog(current, next.sources))
       readRequest.current = undefined
-      await loadCatalog(next, q)
+      await loadCatalog(next, q, categories)
     } catch {
       if (!request.signal.aborted && readRequest.current === request) setError(t('catalogError'))
     } finally {
@@ -153,25 +234,35 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
 
   useEffect(() => {
     setQuery('')
-    void loadState('')
+    void loadState('', [])
     return () => {
       readRequest.current?.abort()
+      pageRequest.current?.abort()
       mutationRequest.current?.abort()
       readRequest.current = undefined
+      pageRequest.current = undefined
       mutationRequest.current = undefined
     }
   }, [loadState])
 
   const items = useMemo(() => catalog?.results.flatMap(result =>
     (result.snapshot?.items ?? []).map(item => ({ item, source: result.source, stale: result.stale }))) ?? [], [catalog])
+  const pageTarget = useMemo(() => catalog?.results.flatMap(result => {
+    const cursor = result.snapshot?.page?.nextCursor
+    return cursor === undefined ? [] : [{ sourceRecordId: result.source.sourceRecordId, cursor }]
+  }).at(0), [catalog])
   const partialFailure = catalog?.results.some(result => result.error !== undefined) ?? false
-  const enabledCount = state?.sources.filter(source => source.enabled).length ?? 0
+  const currentSource = state === undefined ? undefined : selectedSource(state.sources)
 
   const mutate = async (mutation: MarketSourceMutation): Promise<boolean> => {
     if (mutationRequest.current !== undefined) return false
     readRequest.current?.abort()
+    pageRequest.current?.abort()
     readRequest.current = undefined
+    pageRequest.current = undefined
     setLoading(false)
+    setLoadingMore(false)
+    setLoadMoreError(undefined)
     const request = new AbortController()
     mutationRequest.current = request
     setMutationPending(true)
@@ -180,11 +271,22 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
       const sources = await mutateMarketSource(mutation, request.signal)
       if (request.signal.aborted || mutationRequest.current !== request) return false
       const next = { sources, builtIns: state?.builtIns ?? [] }
+      const sourceChanged = selectedSource(state?.sources ?? [])?.sourceRecordId
+        !== selectedSource(sources)?.sourceRecordId
       setState(next)
-      setCatalog(current => retainEnabledCatalog(current, sources))
+      if (sourceChanged) {
+        setCatalog(undefined)
+        setQuery('')
+        setAppliedQuery('')
+        setCategoryOptions([])
+        setSelectedCategories([])
+        setSelected(undefined)
+      } else {
+        setCatalog(current => retainEnabledCatalog(current, sources))
+      }
       mutationRequest.current = undefined
       setMutationPending(false)
-      await loadCatalog(next, query)
+      await loadCatalog(next, sourceChanged ? '' : appliedQuery, sourceChanged ? [] : selectedCategories)
       return true
     } catch {
       if (!request.signal.aborted && mutationRequest.current === request) setMutationError(t('sourceError'))
@@ -197,8 +299,50 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
     }
   }
 
+  const toggleCategory = (category: string) => {
+    if (state === undefined) return
+    const categories = selectedCategories.includes(category)
+      ? selectedCategories.filter(value => value !== category)
+      : [...selectedCategories, category]
+    setSelected(undefined)
+    void loadCatalog(state, appliedQuery, categories)
+  }
+
+  const loadMore = async () => {
+    if (pageRequest.current !== undefined || pageTarget === undefined) return
+    const request = new AbortController()
+    pageRequest.current = request
+    setLoadingMore(true)
+    setLoadMoreError(undefined)
+    try {
+      const next = await readMoreMarketCatalog(
+        pageTarget.sourceRecordId,
+        pageTarget.cursor,
+        appliedQuery,
+        readLocale(),
+        selectedCategories,
+        request.signal,
+      )
+      if (request.signal.aborted || pageRequest.current !== request) return
+      const page = next.results.find(value => value.source.sourceRecordId === pageTarget.sourceRecordId)
+      if (page?.snapshot === undefined || page.error !== undefined) {
+        setLoadMoreError(t('loadMoreError'))
+        return
+      }
+      rememberCategories(next)
+      setCatalog(current => mergeCatalogPages(current, [page]))
+    } catch {
+      if (!request.signal.aborted && pageRequest.current === request) setLoadMoreError(t('loadMoreError'))
+    } finally {
+      if (pageRequest.current === request) {
+        pageRequest.current = undefined
+        setLoadingMore(false)
+      }
+    }
+  }
+
   return (
-    <section className="dshMarketRoot" aria-label={t('title')} aria-busy={loading || mutationPending}>
+    <section className="dshMarketRoot" aria-label={t('title')} aria-busy={loading || loadingMore || mutationPending}>
       {showHeader && (
         <header className="dshMarketHeader">
           <div className="dshMarketHeaderTitle">
@@ -216,7 +360,7 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
             <IconSettingsOutline16 size={14} /><span>{t('sources')}</span>
           </Pill>
         </div>
-        <Pill>{enabledCount} {t('sources')}</Pill>
+        <Pill>{currentSource === undefined ? t('noSourceSelected') : `${t('currentSource')}: ${currentSource.name}`}</Pill>
       </div>
       <main className="dshMarketMain">
         {view === 'discover' ? (
@@ -224,13 +368,20 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
             state={state}
             items={items}
             query={query}
+            categoryOptions={categoryOptions}
+            selectedCategories={selectedCategories}
             loading={loading}
+            loadingMore={loadingMore}
             mutationPending={mutationPending}
             error={error}
+            loadMoreError={loadMoreError}
             partialFailure={partialFailure}
             onQuery={setQuery}
-            onSearch={() => state !== undefined && void loadCatalog(state, query)}
-            onRefresh={() => void loadState(query)}
+            onSearch={() => state !== undefined && void loadCatalog(state, query, selectedCategories)}
+            onRefresh={() => void loadState(appliedQuery, selectedCategories)}
+            onToggleCategory={toggleCategory}
+            onLoadMore={() => { void loadMore() }}
+            hasMore={pageTarget !== undefined}
             onSources={() => setView('sources')}
             onSelect={setSelected}
             t={t}
@@ -294,13 +445,20 @@ function DiscoverView(props: {
   state?: MarketStateResponse | undefined
   items: readonly VisibleItem[]
   query: string
+  categoryOptions: readonly string[]
+  selectedCategories: readonly string[]
   loading: boolean
+  loadingMore: boolean
   mutationPending: boolean
   error?: string | undefined
+  loadMoreError?: string | undefined
   partialFailure: boolean
+  hasMore: boolean
   onQuery: (value: string) => void
   onSearch: () => void
   onRefresh: () => void
+  onToggleCategory: (category: string) => void
+  onLoadMore: () => void
   onSources: () => void
   onSelect: (value: VisibleItem) => void
   t: MarketSettingsTabProps['t']
@@ -332,13 +490,27 @@ function DiscoverView(props: {
             size="sm"
             variant="toolbar"
             aria-label={props.t('refresh')}
-            disabled={props.loading || props.mutationPending}
+            disabled={props.loading || props.loadingMore || props.mutationPending}
             icon={<IconRefreshOutline16 />}
             onClick={props.onRefresh}
           />
         </Tooltip>
         <Pill>{props.items.length}</Pill>
       </form>
+      {props.categoryOptions.length > 0 && (
+        <div className="dshMarketCategories" role="group" aria-label={props.t('categories')}>
+          <span>{props.t('categories')}</span>
+          {props.categoryOptions.map(category => (
+            <Pill
+              key={category}
+              active={props.selectedCategories.includes(category)}
+              aria-pressed={props.selectedCategories.includes(category)}
+              disabled={props.mutationPending}
+              onClick={() => props.onToggleCategory(category)}
+            >{category}</Pill>
+          ))}
+        </div>
+      )}
       {props.partialFailure && <div className="dshMarketBanner" role="status"><StateDot state="warning" />{props.t('partialFailure')}</div>}
       {props.error !== undefined && (
         <div className="dshMarketEmpty" role="alert">
@@ -356,6 +528,19 @@ function DiscoverView(props: {
       <div className="dshMarketGrid">
         {props.items.map(value => <PluginCard key={`${value.source.sourceRecordId}:${value.item.id}`} value={value} onClick={() => props.onSelect(value)} t={props.t} />)}
       </div>
+      {(props.hasMore || props.loadMoreError !== undefined) && (
+        <div className="dshMarketPagination">
+          {props.loadMoreError !== undefined && <div className="dshMarketPaginationError" role="status">{props.loadMoreError}</div>}
+          {props.hasMore && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={props.loading || props.loadingMore || props.mutationPending}
+              onClick={props.onLoadMore}
+            >{props.loadingMore ? props.t('loadingMore') : props.t('loadMore')}</Button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -424,7 +609,7 @@ function SourcesView({ state, catalog, error, pending, onMutation, onAddStandard
         <Button variant="outline" disabled={pending} icon={<IconPlusOutline16 />} onClick={onAddStandard}>{t('addStandard')}</Button>
       </div>
       {error !== undefined && <div className="dshMarketBanner" role="alert"><StateDot state="error" />{error}</div>}
-      <div className="dshMarketSources">
+      <div className="dshMarketSources" role="radiogroup" aria-label={t('sourceSelection')}>
         {state?.sources.map((source, index, sources) => (
           <SourceRow
             key={source.sourceRecordId}
@@ -435,11 +620,15 @@ function SourcesView({ state, catalog, error, pending, onMutation, onAddStandard
             canMoveDown={index < sources.length - 1}
             onMoveUp={() => onMutation({ action: 'move', sourceRecordId: source.sourceRecordId, direction: 'up' })}
             onMoveDown={() => onMutation({ action: 'move', sourceRecordId: source.sourceRecordId, direction: 'down' })}
-            onToggle={() => onMutation({ action: 'set-enabled', sourceRecordId: source.sourceRecordId, enabled: !source.enabled })}
+            onSelect={() => {
+              if (!source.enabled) onMutation({ action: 'select', sourceRecordId: source.sourceRecordId })
+            }}
             onRemove={() => onMutation({ action: 'remove', sourceRecordId: source.sourceRecordId })}
             t={t}
           />
         ))}
+      </div>
+      {available.length > 0 && <div className="dshMarketSources dshMarketAvailableSources">
         {available.map(provider => (
           <AvailableSource
             key={provider.key}
@@ -449,12 +638,12 @@ function SourcesView({ state, catalog, error, pending, onMutation, onAddStandard
             t={t}
           />
         ))}
-      </div>
+      </div>}
     </div>
   )
 }
 
-function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, onMoveDown, onToggle, onRemove, t }: {
+function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, onMoveDown, onSelect, onRemove, t }: {
   source: MarketSourceView
   result?: MarketCatalogSourceResult | undefined
   pending: boolean
@@ -462,7 +651,7 @@ function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, 
   canMoveDown: boolean
   onMoveUp: () => void
   onMoveDown: () => void
-  onToggle: () => void
+  onSelect: () => void
   onRemove: () => void
   t: MarketSettingsTabProps['t']
 }) {
@@ -520,14 +709,15 @@ function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, 
             onClick={onMoveDown}
           />
         </Tooltip>
-        <Pill active={source.enabled}>{source.enabled ? t('enabled') : t('disabled')}</Pill>
         <Button
           variant="outline"
           size="sm"
+          role="radio"
+          aria-checked={source.enabled}
           disabled={pending}
           icon={source.enabled ? <IconCheckOutline16 /> : undefined}
-          onClick={onToggle}
-        >{source.enabled ? t('disable') : t('enable')}</Button>
+          onClick={onSelect}
+        >{source.enabled ? t('selectedSource') : t('selectSource')}</Button>
         <Tooltip label={t('remove')}>
           <Button
             type="button"

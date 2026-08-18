@@ -20,7 +20,7 @@ import {
   DSH_1024STORE_PROVIDER_ID,
 } from '../adapters/dsh-1024store.js'
 import { assertStandardSourceTrustRoot } from '../adapters/standard-http.js'
-import { BUILT_IN_PROVIDERS, DefaultCatalogService } from '../catalog/service.js'
+import { BUILT_IN_PROVIDERS, DefaultCatalogService, type CatalogFetchScope } from '../catalog/service.js'
 import { SettingsCatalogSourceStore, type MarketSettingsDocument } from '../catalog/source-store.js'
 import { MARKET_MEDIA_ASSET_REF_PATTERN } from '../media/ref.js'
 import { createRestrictedImageFetcher } from '../media/restricted-image.js'
@@ -205,8 +205,8 @@ function asMutation(value: unknown): MarketSourceMutation {
   const mutation = value as Record<string, unknown>
   if (mutation.action === 'add-builtin' && mutation.key === DSH_1024STORE_KEY) return { action: 'add-builtin', key: DSH_1024STORE_KEY }
   if (mutation.action === 'add-standard' && typeof mutation.manifestUrl === 'string') return { action: 'add-standard', manifestUrl: mutation.manifestUrl }
-  if (mutation.action === 'set-enabled' && typeof mutation.sourceRecordId === 'string' && typeof mutation.enabled === 'boolean') {
-    return { action: 'set-enabled', sourceRecordId: mutation.sourceRecordId, enabled: mutation.enabled }
+  if (mutation.action === 'select' && typeof mutation.sourceRecordId === 'string') {
+    return { action: 'select', sourceRecordId: mutation.sourceRecordId }
   }
   if (
     mutation.action === 'move'
@@ -251,8 +251,8 @@ async function mutateSources(
   signal.throwIfAborted()
   const store = new SettingsCatalogSourceStore(scope)
   const records = [...await store.load()]
-  let removedSourceRecordId: string | undefined
-  let disabledSourceRecordId: string | undefined
+  const unavailableSourceRecordIds = new Set<string>()
+  const nextOrder = records.reduce((maximum, record) => Math.max(maximum, record.order), -1) + 1
   if (mutation.action === 'add-builtin') {
     if (records.some(record => record.builtInProviderKey === mutation.key)) throw new Error('source already added')
     records.push({
@@ -262,7 +262,7 @@ async function mutateSources(
       providerId: DSH_1024STORE_PROVIDER_ID,
       builtInProviderKey: mutation.key,
       enabled: false,
-      order: records.length,
+      order: nextOrder,
     })
   } else if (mutation.action === 'add-standard') {
     const manifest = await readManifest(mutation.manifestUrl, signal)
@@ -276,19 +276,22 @@ async function mutateSources(
       manifestUrl: mutation.manifestUrl,
       manifest,
       enabled: false,
-      order: records.length,
+      order: nextOrder,
     })
-  } else if (mutation.action === 'set-enabled' || mutation.action === 'remove') {
+  } else if (mutation.action === 'select' || mutation.action === 'remove') {
     const index = records.findIndex(record => record.sourceRecordId === mutation.sourceRecordId)
     if (index < 0) throw new Error('source not found')
     if (mutation.action === 'remove') {
-      removedSourceRecordId = records[index]!.sourceRecordId
+      unavailableSourceRecordIds.add(records[index]!.sourceRecordId)
       records.splice(index, 1)
       records.sort((left, right) => left.order - right.order)
       records.forEach((record, order) => { records[order] = { ...record, order } })
     } else {
-      records[index] = { ...records[index]!, enabled: mutation.enabled }
-      if (!mutation.enabled) disabledSourceRecordId = records[index]!.sourceRecordId
+      for (const [recordIndex, record] of records.entries()) {
+        const enabled = record.sourceRecordId === mutation.sourceRecordId
+        if (record.enabled && !enabled) unavailableSourceRecordIds.add(record.sourceRecordId)
+        records[recordIndex] = { ...record, enabled }
+      }
     }
   } else {
     const ordered = [...records].sort((left, right) => left.order - right.order)
@@ -306,8 +309,7 @@ async function mutateSources(
   validateLocalSourceRecords(records)
   signal.throwIfAborted()
   await store.save(records)
-  if (removedSourceRecordId !== undefined) onUnavailable?.(removedSourceRecordId)
-  if (disabledSourceRecordId !== undefined) onUnavailable?.(disabledSourceRecordId)
+  for (const sourceRecordId of unavailableSourceRecordIds) onUnavailable?.(sourceRecordId)
 }
 
 export function createMarketSourceMutator(
@@ -363,24 +365,43 @@ export function registerMarketRoutes(ctx: Context, scope: SettingsScope<MarketSe
         sendJson(res, 403, { error: 'market request authority rejected' })
         return
       }
-      const requestUrl = new URL(req.url ?? '/', 'http://localhost')
-      const query: Record<string, unknown> = {}
-      const q = requestUrl.searchParams.get('q')?.trim()
-      if (q) query.q = q
-      const categories = requestUrl.searchParams.getAll('category')
-      if (categories.length) query.category = categories
-      const limit = Number(requestUrl.searchParams.get('limit') ?? 20)
-      if (Number.isInteger(limit)) query.limit = limit
-      const sort = requestUrl.searchParams.get('sort')
-      if (sort) query.sort = sort
-      const locale = requestUrl.searchParams.get('locale')
-      if (locale) query.locale = locale
       const controller = new AbortController()
       const signal = AbortSignal.any([controller.signal, generationController.signal])
       const stopWatching = abortOnDisconnect(req, res, controller)
       try {
-        const results = await service.fetch(query, signal)
-        const response: MarketCatalogResponse = { query, results, fetchedAt: new Date().toISOString() }
+        const requestUrl = new URL(req.url ?? '/', 'http://localhost')
+        const query: Record<string, unknown> = {}
+        const q = requestUrl.searchParams.get('q')?.trim()
+        if (q) query.q = q
+        const categories = requestUrl.searchParams.getAll('category')
+        if (categories.length) query.category = categories
+        const limit = Number(requestUrl.searchParams.get('limit') ?? 50)
+        if (Number.isInteger(limit)) query.limit = limit
+        const sort = requestUrl.searchParams.get('sort')
+        if (sort) query.sort = sort
+        const locale = requestUrl.searchParams.get('locale')
+        if (locale) query.locale = locale
+
+        const sourceRecordIds = requestUrl.searchParams.getAll('sourceRecordId')
+        const cursors = requestUrl.searchParams.getAll('cursor')
+        if (sourceRecordIds.length > 1 || cursors.length > 1 || cursors.length > sourceRecordIds.length) {
+          throw new Error('catalog cursor requires exactly one source record')
+        }
+        const scope: CatalogFetchScope | undefined = sourceRecordIds.length === 0
+          ? undefined
+          : {
+              sourceRecordId: sourceRecordIds[0]!,
+              ...(cursors.length === 0 ? {} : { cursor: cursors[0]! }),
+            }
+        const results = await service.fetch(query, signal, scope)
+        const responseQuery = scope === undefined
+          ? query
+          : {
+              ...query,
+              sourceRecordId: scope.sourceRecordId,
+              ...(scope.cursor === undefined ? {} : { cursor: scope.cursor }),
+            }
+        const response: MarketCatalogResponse = { query: responseQuery, results, fetchedAt: new Date().toISOString() }
         if (!signal.aborted && !res.destroyed) sendJson(res, 200, response)
       } catch {
         if (!signal.aborted && !res.destroyed) sendJson(res, 400, { error: 'invalid catalog query' })

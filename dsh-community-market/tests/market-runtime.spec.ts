@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { dsh1024StoreAdapter, DSH_1024STORE_ADAPTER_ID, DSH_1024STORE_KEY, DSH_1024STORE_PROVIDER_ID } from '../src/adapters/dsh-1024store.js'
 import { standardHttpAdapter } from '../src/adapters/standard-http.js'
 import { DefaultCatalogService } from '../src/catalog/service.js'
-import { MemoryCatalogSourceStore } from '../src/catalog/source-store.js'
+import { MemoryCatalogSourceStore, SettingsCatalogSourceStore } from '../src/catalog/source-store.js'
 import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import type {
   CatalogHttpClient,
@@ -69,6 +69,61 @@ const rawCatalog = {
 
 function contractFixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(`../docs/examples/${name}.json`, import.meta.url), 'utf8')) as unknown
+}
+
+type MarketRouteHandler = (
+  req: EventEmitter & Record<string, any>,
+  res: EventEmitter & Record<string, any>,
+) => Promise<void>
+
+async function requestMarketCatalog(
+  records: readonly LocalSourceRecord[],
+  url: string,
+): Promise<{ readonly statusCode: number; readonly body: Record<string, any> }> {
+  const handlers = new Map<string, MarketRouteHandler>()
+  const ctx = {
+    webServer: {
+      port: 43_120,
+      register: vi.fn((route: { path: string; handler: MarketRouteHandler }) => {
+        handlers.set(route.path, route.handler)
+        return vi.fn()
+      }),
+    },
+  }
+  const scope = {
+    get: () => ({ sources: records }),
+    update: vi.fn(),
+  } as unknown as SettingsScope<MarketSettingsDocument>
+  const dispose = registerMarketRoutes(ctx as never, scope)
+  const request = Object.assign(new EventEmitter(), {
+    method: 'GET',
+    url,
+    headers: { host: '127.0.0.1:43120' },
+    socket: { remoteAddress: '127.0.0.1' },
+  })
+  let bodyText: string | undefined
+  const response = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    statusCode: 0,
+    setHeader: vi.fn(),
+    removeHeader: vi.fn(),
+    end: vi.fn((body?: string) => {
+      bodyText = body
+      response.writableEnded = true
+    }),
+  })
+
+  try {
+    await handlers.get(marketRoutes.catalog)!(request, response)
+  } finally {
+    dispose()
+  }
+  if (bodyText === undefined) throw new Error('catalog route did not return a JSON body')
+  return {
+    statusCode: response.statusCode,
+    body: JSON.parse(bodyText) as Record<string, any>,
+  }
 }
 
 describe('1024Store adapter', () => {
@@ -260,6 +315,29 @@ describe('1024Store adapter', () => {
     expect(second.items.map(item => item.id)).toEqual(['example/low-plugin'])
     expect(second.page).toEqual({ total: 2 })
   })
+
+  it('keeps the reviewed 1024Store adapter page size fixed at 50', async () => {
+    const packages = Array.from({ length: 51 }, (_, index) => ({
+      ...rawCatalog.packages[0]!,
+      id: `anywhere-labs/plugin-${index}`,
+      name: `plugin-${index}`,
+      url: `https://github.com/anywhere-labs/plugin-${index}`,
+    }))
+    const http: CatalogHttpClient = {
+      getJson: vi.fn(async () => ({
+        value: { ...rawCatalog, packages },
+        finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+      })),
+    }
+
+    const snapshot = await dsh1024StoreAdapter.fetch(
+      { limit: 100 },
+      { source: source(), signal: new AbortController().signal, http, media: { register: () => fixtureAssetRef } },
+    )
+
+    expect(snapshot.items).toHaveLength(50)
+    expect(snapshot.page).toEqual({ nextCursor: '50', total: 51 })
+  })
 })
 
 describe('standard catalog adapter media boundary', () => {
@@ -374,6 +452,61 @@ describe('standard catalog adapter media boundary', () => {
     expect(getJson.mock.calls[1]?.[0]).toBe('https://plugins.example.org/v1/plugins')
   })
 
+  it('allows a standard source to use its declared limit up to the shared safety cap', async () => {
+    const manifest = contractFixture('catalog-source.example') as CatalogSourceManifest
+    manifest.query.defaultLimit = 100
+    manifest.query.maxLimit = 100
+    const page = contractFixture('catalog-provider-page.example') as CatalogProviderPage
+    page.items = Array.from({ length: 51 }, (_, index) => {
+      const item = structuredClone(page.items[0]!)
+      item.id = `standard-plugin-${index}`
+      item.name = `standard-plugin-${index}`
+      item.displayName = `Standard Plugin ${index}`
+      return item
+    })
+    const getJson = vi.fn()
+      .mockResolvedValueOnce({ value: manifest, finalUrl: standardSource().manifestUrl! })
+      .mockResolvedValueOnce({ value: page, finalUrl: 'https://plugins.example.org/v1/plugins?limit=100' })
+
+    const snapshot = await standardHttpAdapter.fetch({ limit: 100 }, {
+      source: standardSource(),
+      signal: new AbortController().signal,
+      http: { getJson },
+      media: { register: () => standardAssetRef },
+    })
+
+    expect(snapshot.items).toHaveLength(51)
+    expect(new URL(getJson.mock.calls[1]?.[0] as string).searchParams.get('limit')).toBe('100')
+  })
+
+  it('respects a standard source default above 50 when it does not support limit', async () => {
+    const manifest = contractFixture('catalog-source.example') as CatalogSourceManifest
+    manifest.query.supported = manifest.query.supported.filter(field => field !== 'limit')
+    manifest.query.defaultLimit = 60
+    manifest.query.maxLimit = 100
+    const page = contractFixture('catalog-provider-page.example') as CatalogProviderPage
+    page.items = Array.from({ length: 51 }, (_, index) => {
+      const item = structuredClone(page.items[0]!)
+      item.id = `default-plugin-${index}`
+      item.name = `default-plugin-${index}`
+      item.displayName = `Default Plugin ${index}`
+      return item
+    })
+    const getJson = vi.fn()
+      .mockResolvedValueOnce({ value: manifest, finalUrl: standardSource().manifestUrl! })
+      .mockResolvedValueOnce({ value: page, finalUrl: 'https://plugins.example.org/v1/plugins' })
+
+    const snapshot = await standardHttpAdapter.fetch({ limit: 50 }, {
+      source: standardSource(),
+      signal: new AbortController().signal,
+      http: { getJson },
+      media: { register: () => standardAssetRef },
+    })
+
+    expect(snapshot.items).toHaveLength(51)
+    expect(getJson.mock.calls[1]?.[0]).toBe('https://plugins.example.org/v1/plugins')
+  })
+
   it('rejects a manifest whose provider identity drifts after registration', async () => {
     const manifest = contractFixture('catalog-source.example') as CatalogSourceManifest
     manifest.providerId = 'org.example.changed-catalog'
@@ -460,8 +593,247 @@ describe('standard source registration trust boundary', () => {
   })
 })
 
-describe('catalog aggregation', () => {
-  it('globally bounds concurrent source reads across overlapping catalog requests', async () => {
+describe('catalog Host route pagination boundary', () => {
+  it('uses the Host limit of 50 and preserves repeated category parameters', async () => {
+    const fetch = vi.spyOn(DefaultCatalogService.prototype, 'fetch').mockResolvedValue([])
+    try {
+      const response = await requestMarketCatalog(
+        [],
+        `${marketRoutes.catalog}?category=dev&category=tools`,
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.query).toEqual({ category: ['dev', 'tools'], limit: 50 })
+      expect(fetch).toHaveBeenCalledWith(
+        { category: ['dev', 'tools'], limit: 50 },
+        expect.any(AbortSignal),
+        undefined,
+      )
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  it('allows an initial request to bind itself to the current active source', async () => {
+    const fetch = vi.spyOn(DefaultCatalogService.prototype, 'fetch').mockResolvedValue([])
+    try {
+      const active = source()
+      const response = await requestMarketCatalog(
+        [active],
+        `${marketRoutes.catalog}?sourceRecordId=${active.sourceRecordId}`,
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(fetch).toHaveBeenCalledWith(
+        { limit: 50 },
+        expect.any(AbortSignal),
+        { sourceRecordId: active.sourceRecordId },
+      )
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  it('accepts an explicit page size up to the shared 100-item safety cap', async () => {
+    const response = await requestMarketCatalog([], `${marketRoutes.catalog}?limit=100`)
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body.query).toEqual({ limit: 100 })
+  })
+
+  it.each([
+    `${marketRoutes.catalog}?cursor=page-2`,
+    `${marketRoutes.catalog}?sourceRecordId=${source().sourceRecordId}&sourceRecordId=${source().sourceRecordId}&cursor=page-2&cursor=page-2`,
+  ])('rejects unpaired or ambiguous source cursor parameters: %s', async (url) => {
+    const response = await requestMarketCatalog([], url)
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid catalog query' })
+  })
+
+  const active = source()
+  const inactive = source({
+    sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+    enabled: false,
+    order: 1,
+  })
+  it.each([
+    ['unknown', [active], '038f1f77-a5c4-7b73-a9ae-0242ac120004'],
+    ['inactive', [active, inactive], inactive.sourceRecordId],
+  ] as const)('rejects a cursor scoped to an %s source before fetching', async (_label, records, sourceRecordId) => {
+    const response = await requestMarketCatalog(
+      records,
+      `${marketRoutes.catalog}?sourceRecordId=${sourceRecordId}&cursor=page-2`,
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid catalog query' })
+  })
+})
+
+describe('catalog active-source reads', () => {
+  it('exchanges a Host cursor token only for its original active source and query', async () => {
+    const first = source()
+    const second = source({
+      sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+      order: 1,
+    })
+    const store = new MemoryCatalogSourceStore()
+    await store.save([first, second])
+    const secondItem = {
+      ...rawCatalog.packages[0]!,
+      id: 'anywhere-labs/second-plugin',
+      name: 'second-plugin',
+      url: 'https://github.com/anywhere-labs/second-plugin',
+    }
+    const getJson = vi.fn(async () => ({
+      value: { ...rawCatalog, packages: [...rawCatalog.packages, secondItem] },
+      finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+    }))
+    const service = new DefaultCatalogService(store, { getJson })
+
+    const firstPage = await service.fetch(
+      { category: ['dev', 'tools'], limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: first.sourceRecordId },
+    )
+    const token = firstPage[0]?.snapshot?.page.nextCursor
+    expect(token).toEqual(expect.any(String))
+    expect(token).not.toBe('1')
+
+    const results = await service.fetch(
+      { category: ['dev', 'tools'], limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: first.sourceRecordId, cursor: token! },
+    )
+
+    expect(getJson).toHaveBeenCalledTimes(2)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.source.sourceRecordId).toBe(first.sourceRecordId)
+    expect(results[0]?.snapshot?.items).toHaveLength(1)
+    expect(results[0]?.snapshot?.page.nextCursor).toBeUndefined()
+  })
+
+  it('rejects a cursor token replayed with a different effective query', async () => {
+    const record = source()
+    const store = new MemoryCatalogSourceStore()
+    await store.save([record])
+    const secondItem = {
+      ...rawCatalog.packages[0]!,
+      id: 'anywhere-labs/second-plugin',
+      name: 'second-plugin',
+      url: 'https://github.com/anywhere-labs/second-plugin',
+    }
+    const getJson = vi.fn(async () => ({
+      value: { ...rawCatalog, packages: [...rawCatalog.packages, secondItem] },
+      finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+    }))
+    const service = new DefaultCatalogService(store, { getJson })
+    const [firstPage] = await service.fetch(
+      { category: ['dev'], limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: record.sourceRecordId },
+    )
+    const token = firstPage?.snapshot?.page.nextCursor
+
+    await expect(service.fetch(
+      { category: ['tools'], limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: record.sourceRecordId, cursor: token! },
+    )).rejects.toThrow(/does not belong/u)
+    expect(getJson).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a cursor token replayed against a different selected source', async () => {
+    const first = source()
+    const second = source({
+      sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+      enabled: false,
+      order: 1,
+    })
+    const store = new MemoryCatalogSourceStore()
+    await store.save([first, second])
+    const secondItem = {
+      ...rawCatalog.packages[0]!,
+      id: 'anywhere-labs/second-plugin',
+      name: 'second-plugin',
+      url: 'https://github.com/anywhere-labs/second-plugin',
+    }
+    const getJson = vi.fn(async () => ({
+      value: { ...rawCatalog, packages: [...rawCatalog.packages, secondItem] },
+      finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+    }))
+    const service = new DefaultCatalogService(store, { getJson })
+    const [firstPage] = await service.fetch(
+      { limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: first.sourceRecordId },
+    )
+    const token = firstPage?.snapshot?.page.nextCursor
+    await store.save([{ ...first, enabled: false }, { ...second, enabled: true }])
+
+    await expect(service.fetch(
+      { limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: second.sourceRecordId, cursor: token! },
+    )).rejects.toThrow(/does not belong/u)
+    expect(getJson).toHaveBeenCalledOnce()
+  })
+
+  it('rejects unknown and expired Host cursor tokens before provider I/O', async () => {
+    const record = source()
+    const store = new MemoryCatalogSourceStore()
+    await store.save([record])
+    const secondItem = {
+      ...rawCatalog.packages[0]!,
+      id: 'anywhere-labs/second-plugin',
+      name: 'second-plugin',
+      url: 'https://github.com/anywhere-labs/second-plugin',
+    }
+    const getJson = vi.fn(async () => ({
+      value: { ...rawCatalog, packages: [...rawCatalog.packages, secondItem] },
+      finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+    }))
+    let now = 1_000
+    const service = new DefaultCatalogService(store, { getJson }, {
+      cursorTtlMs: 60_000,
+      now: () => now,
+    })
+    const [firstPage] = await service.fetch(
+      { limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: record.sourceRecordId },
+    )
+    const token = firstPage?.snapshot?.page.nextCursor
+
+    await expect(service.fetch(
+      { limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: record.sourceRecordId, cursor: 'unknown-token' },
+    )).rejects.toThrow(/unknown or expired/u)
+    now += 60_000
+    await expect(service.fetch(
+      { limit: 1 },
+      new AbortController().signal,
+      { sourceRecordId: record.sourceRecordId, cursor: token! },
+    )).rejects.toThrow(/unknown or expired/u)
+    expect(getJson).toHaveBeenCalledOnce()
+  })
+
+  it('rejects an unscoped cursor instead of broadcasting it', async () => {
+    const store = new MemoryCatalogSourceStore()
+    await store.save([source()])
+    const getJson = vi.fn()
+    const service = new DefaultCatalogService(store, { getJson })
+
+    await expect(service.fetch(
+      { cursor: 'page-2' },
+      new AbortController().signal,
+    )).rejects.toThrow(/explicit source scope/u)
+    expect(getJson).not.toHaveBeenCalled()
+  })
+
+  it('globally bounds overlapping reads of the active source', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([
       source(),
@@ -484,10 +856,6 @@ describe('catalog aggregation', () => {
     const second = service.fetch({}, new AbortController().signal)
     await vi.waitFor(() => { expect(getJson).toHaveBeenCalledTimes(2) })
     expect(peak).toBe(2)
-    for (let expectedCalls = 3; expectedCalls <= 6; expectedCalls += 1) {
-      releases.shift()?.()
-      await vi.waitFor(() => { expect(getJson).toHaveBeenCalledTimes(expectedCalls) })
-    }
     releases.splice(0).forEach(release => release())
     await expect(Promise.all([first, second])).resolves.toEqual([
       expect.any(Array),
@@ -496,7 +864,17 @@ describe('catalog aggregation', () => {
     expect(peak).toBe(2)
   })
 
-  it('performs zero network requests with no enabled sources', async () => {
+  it('performs zero network requests with no configured sources', async () => {
+    const store = new MemoryCatalogSourceStore()
+    await store.save([])
+    const http: CatalogHttpClient = { getJson: vi.fn() }
+    const service = new DefaultCatalogService(store, http)
+
+    await expect(service.fetch({}, new AbortController().signal)).resolves.toEqual([])
+    expect(http.getJson).not.toHaveBeenCalled()
+  })
+
+  it('performs zero network requests when configured sources have no explicit selection', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([{ ...source(), enabled: false }])
     const http: CatalogHttpClient = { getJson: vi.fn() }
@@ -506,7 +884,7 @@ describe('catalog aggregation', () => {
     expect(http.getJson).not.toHaveBeenCalled()
   })
 
-  it('keeps successful source results when another source fails', async () => {
+  it('queries only the selected source when several sources are configured', async () => {
     const store = new MemoryCatalogSourceStore()
     await store.save([
       source(),
@@ -514,13 +892,12 @@ describe('catalog aggregation', () => {
     ])
     const getJson = vi.fn()
       .mockResolvedValueOnce({ value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' })
-      .mockRejectedValueOnce(new Error('offline'))
     const service = new DefaultCatalogService(store, { getJson })
     const results = await service.fetch({}, new AbortController().signal)
 
-    expect(results).toHaveLength(2)
+    expect(getJson).toHaveBeenCalledOnce()
+    expect(results).toHaveLength(1)
     expect(results[0]?.snapshot?.items).toHaveLength(1)
-    expect(results[1]?.error).toBe('source unavailable')
   })
 
   it('marks a last-good cache as stale after a later failure', async () => {
@@ -614,27 +991,20 @@ describe('catalog aggregation', () => {
     expect(getJson).not.toHaveBeenCalled()
   })
 
-  it('drops a completed source result if it is invalidated while another source is pending', async () => {
+  it('chooses the first source by order from legacy multi-enabled records', async () => {
     const first = source()
     const second = source({ sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003', order: 1 })
-    const store = new MemoryCatalogSourceStore()
-    await store.save([first, second])
-    let releaseSecond: (() => void) | undefined
-    const secondGate = new Promise<void>(resolve => { releaseSecond = resolve })
-    const getJson = vi.fn(async () => {
-      if (getJson.mock.calls.length === 2) await secondGate
-      return { value: rawCatalog, finalUrl: 'https://deepseek1024.com/api/v1/plugins' }
-    })
-    const service = new DefaultCatalogService(store, { getJson })
+    const getJson = vi.fn(async () => ({
+      value: rawCatalog,
+      finalUrl: 'https://deepseek1024.com/api/v1/plugins',
+    }))
+    const service = new DefaultCatalogService({ load: async () => [second, first] }, { getJson })
 
-    const pending = service.fetch({}, new AbortController().signal)
-    await vi.waitFor(() => { expect(getJson).toHaveBeenCalledTimes(2) })
-    service.invalidateSource(first.sourceRecordId)
-    releaseSecond?.()
+    const results = await service.fetch({}, new AbortController().signal)
 
-    const results = await pending
+    expect(getJson).toHaveBeenCalledOnce()
     expect(results).toHaveLength(1)
-    expect(results[0]?.source.sourceRecordId).toBe(second.sourceRecordId)
+    expect(results[0]?.source.sourceRecordId).toBe(first.sourceRecordId)
   })
 
   it('bounds the last-good catalog cache', async () => {
@@ -660,7 +1030,46 @@ describe('catalog aggregation', () => {
 })
 
 describe('source mutation boundary', () => {
-  it('retains and exposes a standard source manifest disclosure before enablement', async () => {
+  it('normalizes legacy multi-enabled settings to the first source by order', async () => {
+    const first = source()
+    const second = source({
+      sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+      order: 1,
+    })
+    const scope = {
+      get: () => ({ sources: [second, first] }),
+      update: vi.fn(),
+    } as unknown as SettingsScope<MarketSettingsDocument>
+
+    const records = await new SettingsCatalogSourceStore(scope).load()
+
+    expect(records.map(record => [record.sourceRecordId, record.enabled])).toEqual([
+      [first.sourceRecordId, true],
+      [second.sourceRecordId, false],
+    ])
+  })
+
+  it('preserves an explicit no-selection state in legacy settings', async () => {
+    const first = { ...source(), enabled: false }
+    const second = source({
+      sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+      enabled: false,
+      order: 1,
+    })
+    const scope = {
+      get: () => ({ sources: [second, first] }),
+      update: vi.fn(),
+    } as unknown as SettingsScope<MarketSettingsDocument>
+
+    const records = await new SettingsCatalogSourceStore(scope).load()
+
+    expect(records.map(record => [record.sourceRecordId, record.enabled])).toEqual([
+      [first.sourceRecordId, false],
+      [second.sourceRecordId, false],
+    ])
+  })
+
+  it('retains source disclosure without implicitly selecting the first configured source', async () => {
     const manifest = contractFixture('catalog-source.example') as CatalogSourceManifest
     let document: MarketSettingsDocument = { sources: [] }
     const scope = {
@@ -684,7 +1093,6 @@ describe('source mutation boundary', () => {
     await expect(service.listSources()).resolves.toEqual([
       expect.objectContaining({
         name: manifest.name,
-        description: manifest.description,
         endpoint: manifest.transport.endpoint,
         attribution: manifest.attribution,
         partnership: false,
@@ -721,14 +1129,14 @@ describe('source mutation boundary', () => {
     } as unknown as SettingsScope<MarketSettingsDocument>
     const mutate = createMarketSourceMutator(scope)
 
-    const one = mutate({ action: 'set-enabled', sourceRecordId: first.sourceRecordId, enabled: true }, new AbortController().signal)
-    const two = mutate({ action: 'set-enabled', sourceRecordId: second.sourceRecordId, enabled: true }, new AbortController().signal)
+    const one = mutate({ action: 'select', sourceRecordId: first.sourceRecordId }, new AbortController().signal)
+    const two = mutate({ action: 'select', sourceRecordId: second.sourceRecordId }, new AbortController().signal)
     await vi.waitFor(() => { expect(update).toHaveBeenCalledTimes(1) })
     releaseFirst?.()
     await Promise.all([one, two])
 
     expect(update).toHaveBeenCalledTimes(2)
-    expect(document.sources.map(record => record.enabled)).toEqual([true, true])
+    expect(document.sources.map(record => record.enabled)).toEqual([false, true])
   })
 
   it('preserves a user-defined source order when another source is removed', async () => {
@@ -785,9 +1193,9 @@ describe('source mutation boundary', () => {
       new AbortController().signal,
     )
 
-    expect(document.sources.map(record => [record.providerId, record.order])).toEqual([
-      ['fixture.third', 0],
-      ['fixture.second', 1],
+    expect(document.sources.map(record => [record.providerId, record.order, record.enabled])).toEqual([
+      ['fixture.third', 0, false],
+      ['fixture.second', 1, false],
     ])
   })
 
@@ -802,10 +1210,10 @@ describe('source mutation boundary', () => {
     })
     const scope = { get: () => document, update } as unknown as SettingsScope<MarketSettingsDocument>
     const mutate = createMarketSourceMutator(scope)
-    const first = mutate({ action: 'set-enabled', sourceRecordId: record.sourceRecordId, enabled: true }, new AbortController().signal)
+    const first = mutate({ action: 'select', sourceRecordId: record.sourceRecordId }, new AbortController().signal)
     await vi.waitFor(() => { expect(update).toHaveBeenCalledOnce() })
     const queued = new AbortController()
-    const second = mutate({ action: 'set-enabled', sourceRecordId: record.sourceRecordId, enabled: false }, queued.signal)
+    const second = mutate({ action: 'select', sourceRecordId: record.sourceRecordId }, queued.signal)
     queued.abort()
     releaseFirst?.()
 
@@ -815,12 +1223,14 @@ describe('source mutation boundary', () => {
     expect(document.sources[0]?.enabled).toBe(true)
   })
 
-  it.each([
-    { action: 'remove' as const },
-    { action: 'set-enabled' as const, enabled: false },
-  ])('invalidates Host data only after a source $action is persisted', async (mutation) => {
-    const record = source()
-    let document: MarketSettingsDocument = { sources: [record] }
+  it('selects one source atomically and revokes the previous active source after persistence', async () => {
+    const current = source()
+    const replacement = source({
+      sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+      enabled: false,
+      order: 1,
+    })
+    let document: MarketSettingsDocument = { sources: [current, replacement] }
     const events: string[] = []
     const scope = {
       get: () => document,
@@ -832,12 +1242,32 @@ describe('source mutation boundary', () => {
     const onUnavailable = vi.fn((sourceRecordId: string) => { events.push(`revoked:${sourceRecordId}`) })
     const mutate = createMarketSourceMutator(scope, onUnavailable)
 
-    await mutate({ ...mutation, sourceRecordId: record.sourceRecordId }, new AbortController().signal)
+    await mutate({ action: 'select', sourceRecordId: replacement.sourceRecordId }, new AbortController().signal)
 
-    if (mutation.action === 'remove') expect(document.sources).toEqual([])
-    else expect(document.sources).toEqual([{ ...record, enabled: false }])
-    expect(onUnavailable).toHaveBeenCalledWith(record.sourceRecordId)
-    expect(events).toEqual(['saved', `revoked:${record.sourceRecordId}`])
+    expect(document.sources.map(record => record.enabled)).toEqual([false, true])
+    expect(onUnavailable).toHaveBeenCalledWith(current.sourceRecordId)
+    expect(events).toEqual(['saved', `revoked:${current.sourceRecordId}`])
+  })
+
+  it('keeps no selection when the active source is removed', async () => {
+    const current = source()
+    const replacement = source({
+      sourceRecordId: '028f1f77-a5c4-7b73-a9ae-0242ac120003',
+      enabled: false,
+      order: 1,
+    })
+    let document: MarketSettingsDocument = { sources: [current, replacement] }
+    const onUnavailable = vi.fn()
+    const scope = {
+      get: () => document,
+      update: async (patch: { sources: readonly LocalSourceRecord[] }) => { document = { sources: patch.sources } },
+    } as unknown as SettingsScope<MarketSettingsDocument>
+    const mutate = createMarketSourceMutator(scope, onUnavailable)
+
+    await mutate({ action: 'remove', sourceRecordId: current.sourceRecordId }, new AbortController().signal)
+
+    expect(document.sources).toEqual([{ ...replacement, enabled: false, order: 0 }])
+    expect(onUnavailable).toHaveBeenCalledWith(current.sourceRecordId)
   })
 
   it('aborts an in-flight source mutation when the plugin generation is disposed', async () => {
