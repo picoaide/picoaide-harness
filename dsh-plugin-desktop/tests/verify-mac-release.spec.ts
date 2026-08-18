@@ -24,7 +24,7 @@ function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
 describe('macOS release artifact verification', () => {
   it('mounts one DMG and verifies signature, Gatekeeper, and the stapled ticket', () => {
     const harness = options()
-    const appPath = join('/private/tmp/dsh-desktop-dmg-test', 'DSH Desktop.app')
+    const appPath = join('/private/tmp/dsh-desktop-dmg-test', 'PicoAide Harness.app')
 
     expect(verifyMacRelease(harness.value)).toEqual({
       appPath: '/private/tmp/dsh-desktop-dmg-test/PicoAide Harness.app',
@@ -41,11 +41,11 @@ describe('macOS release artifact verification', () => {
       },
       {
         command: 'lipo',
-        args: [join(appPath, 'Contents', 'MacOS', 'DSH Desktop'), '-verify_arch', 'x86_64'],
+        args: [join(appPath, 'Contents', 'MacOS', 'PicoAide Harness'), '-verify_arch', 'x86_64'],
       },
       {
         command: 'lipo',
-        args: [join(appPath, 'Contents', 'MacOS', 'DSH Desktop'), '-verify_arch', 'arm64'],
+        args: [join(appPath, 'Contents', 'MacOS', 'PicoAide Harness'), '-verify_arch', 'arm64'],
       },
       ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => ({
         command: 'lipo',
