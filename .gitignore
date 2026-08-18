@@ -12,6 +12,7 @@ node_modules/
 dsh-plugin-desktop/dist/
 dsh-plugin-desktop/lib/
 plugins/dsh-enterprise/lib/
+dsh-community-market/lib/
 
 # server (Go)
 server/bin/

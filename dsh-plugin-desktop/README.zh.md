@@ -20,7 +20,11 @@ Launcher 会在 Loader entry 挂载前注册作用于当前 generation 的 `ctx.
 
 Cordis 的裸插件导入从持久化 profile 解析。一个范围受限的 Node resolve hook 只处理由 `@deepseek-ai/cordis-plugin-loader` 发起的导入，因此即使打包后的 Electron 不暴露 Node 内部 ESM Loader，profile 本地第三方包与修复后的 launcher fallback 仍使用同一条解析路径。
 
-在 profile 准备与 Cordis boot 之前，Launcher 会把只包含固定版本内置 `pnpm` 命令的私有命令目录前置到当前 Electron main 进程的 `PATH`。因此 Host 与第三方插件从启动开始即可发现该 package manager，也可以通过普通 DSH subprocess provider 使用它，而无需系统安装 Node.js。该 ambient path 是兼容 surface，不是正式的插件管理 contract。
+在 profile 准备与 Cordis boot 之前，打包后的 macOS 或 Linux 启动会以交互式 login 模式运行用户账户配置的 shell，并恢复其导出的 `PATH`。这样可补全 Finder、LaunchServices 等图形启动方式通常传入的精简 `PATH`。除 `PATH` 外，只会从固定 allowlist 补充当前启动环境尚未定义的 locale、工具链、package manager 与虚拟环境变量；只有 `PATH` 始终采用 shell 值。该流程只支持绝对路径的 `zsh`、`bash` 与 `fish`。Bash 遵循标准 login 行为，只有 login profile 主动 source `.bashrc` 时，该文件才会参与。Windows 以及未打包或开发运行会跳过恢复；shell 不存在或不受支持、捕获超时或失败、没有可用 `PATH` 时，会静默保留原有进程环境。
+
+捕获过程以 `@deepseek-ai/dsh-subprocess` 的 `scrubbedParentEnv()` 作为输入；捕获到的变量名还必须通过同一套 `SENSITIVE_ENV_PATTERN` 与 `DSH_ENV_PREFIX` 检查，之后才进入固定 allowlist。因此，只在 shell rc 中出现的凭据、`DSH_*` 值、代理与 SSH agent 设置，以及进程启动 hook 都不会被导入 Electron。该恢复流程不会删除 Electron 显式启动环境中已经存在的值。普通 DSH subprocess 会再次应用官方 scrub；显式 child environment 仍可有意补回某项值。
+
+Login-shell 恢复完成后，Launcher 才创建 layered launch-environment snapshot。随后，它会把只包含固定版本内置 `pnpm` 命令的私有命令目录前置到当前 Electron main 进程的 `PATH`。因此 Host 与第三方插件从启动开始即可发现该 package manager，也可以通过普通 DSH subprocess provider 使用它，而无需系统安装 Node.js。该 ambient path 是兼容 surface，不是正式的插件管理 contract。
 
 `desktop-pnpm` Host row 会提供 `ctx.desktopPnpm`，用于针对不可变激活 profile 执行受管 package operation。`run(args, signal?)` 会在激活 profile 目录中直接执行内置 pnpm；它是低层 operation，不承诺 DSH profile 初始化、调用方相对 source 锚定或 bundle reconcile。`runPlugin(args, invokingDir, signal?)` 则会从调用方绝对目录启动内置的 `dsh plugin --profile <active>`。插件安装、卸载、更新与依赖修复必须使用 `runPlugin()`，使上游 CLI 继续拥有相对 `file:` 与 `link:` spec、pnpm profile working directory、首次初始化，以及成功后 `dsh.profile.bundles` reconcile 的权威语义。
 
@@ -51,7 +55,7 @@ desktop Client module 会校验模式与平台 marker，随后在兼容模式下
 
 Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在 `app-boot` 完成并审计整个 profile 后创建窗口，因此首个 renderer manifest 会包含所有已激活的官方、desktop 与第三方 client plugin，同时插件自身不会在 Loader entry 内等待整棵 Loader tree。
 
-在 Windows 上，Launcher 会固定使用现有 browse 目录选择 backend 与 client surface，而不使用自适应 native chooser。因此 workspace 选择始终在 Web UI 内完成，也不会在 Electron main 进程中加载原生 N-API 对话框 worker。macOS 与 Linux 仍使用上游自适应 chooser。
+在 Windows 上，Launcher 会固定使用 browse 目录选择 backend，并保留完整的应用内目录面板。桌面构建通过补丁在该面板中加入一个小型系统文件夹图标；图标经同源路由调用 Electron 的 `dialog.showOpenDialog`，选中的路径继续进入面板原有的 workspace 接纳流程，取消后面板保持打开。普通浏览器与远程启动不会获得这个桌面桥接。macOS 与 Linux 仍使用上游自适应 chooser。
 
 在两种呈现模式下，Windows PowerShell 都会保留上游 `pwsh-sandbox` 行为与 Windows ACL confinement。Launcher generation 只会把该 Host provider 替换为同一 package 中的 `dsh-plugin-desktop/windows-pwsh-sandbox` 子路径。对于与上游 ACL runner 完全匹配的 argv，adapter 会让打包后的 Electron executable 通过私有 trampoline 以 Node 模式启动，在创建受限 PowerShell 进程前移除 Node-mode 环境变量，然后把全部 policy 与失败处理重新委托给上游 runner。Desktop deploy root 还会固定一个 Yarn patch，在两条原生受限进程路径上把 `STARTF_USESHOWWINDOW`、现有的 `STARTF_USESTDHANDLES` 与 `SW_HIDE` 组合起来。这会保留已捕获的 stdio 而不抑制 console 分配，并在 Windows 为 GUI Host 启动的 PowerShell 进程创建首个 console 窗口时，请求使用隐藏的初始显示状态。它不会使用与上游实现不兼容的 `CREATE_NO_WINDOW` 或 `CREATE_NEW_CONSOLE` flag。直接使用 `danger-full-access` 的 PowerShell、macOS 与 Linux 执行路径保持不变；Windows confinement 失败时不会自动回退到不受限执行。
 
@@ -125,6 +129,23 @@ Required injection、可选 Desktop 适配、TypeScript 示例、cancellation �
 npx dsh-plugin-desktop
 ```
 
+## 命令行启动
+
+该包安装两个等价命令 `dsh-desktop` 与 `dsh-plugin-desktop`。无参数调用时，两者都会启动打包的 Electron launcher（`lib/main.js`）。
+
+- **全局安装** —— `npm install -g dsh-plugin-desktop` 会自动安装 `electron` peer，之后直接执行 `dsh-desktop` 即可基于默认 DSH home 启动应用：
+  ```sh
+  dsh-desktop
+  ```
+- **在 profile 内** —— `dsh plugin --profile <name> add dsh-plugin-desktop` 后，命令位于该 profile 的 `node_modules/.bin`。pnpm 不会自动安装 `electron` peer；需要命令行启动时，请手动添加：
+  ```sh
+  dsh plugin --profile <name> add electron
+  ```
+  原生构建许可（node-pty、koffi、electron 等）遵循 pnpm 常规的 `allowBuilds` 规则。
+- **缺少 electron** —— 命令会打印简短的安装指引，而不是抛出模块错误。
+
+如果用普通 `dsh` 命令直接启动一个组合了桌面壳的 profile（缺少 launcher 的 `desktopRuntime` service），会打印提示，告诉你用 `dsh-desktop` 或打包版应用启动；此时桌面壳不会注册任何功能。
+
 第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。上游 Web 客户端模块图会在两种模式下发现它；Electron 不要求单独的客户端构建，也不引入 desktop 专用注册 API。高级模式 contribution 必须面向该显式组合中存在的 service 与 slot，不能假设官方 layout 或 sidebar occupant 拥有它们。
 
 ## 桌面操作
@@ -137,6 +158,12 @@ Release operator 必须先发布两个平台产物，再让版本可被发现。
 
 在 macOS 与 Windows 上，**Open DSH Terminal** 会打开以当前激活 profile 为工作目录的系统终端。欢迎信息会显示应用版本、当前 profile、profile 目录与 DSH home，并列出配置与插件管理命令。在该终端内，裸 `dsh`、`dsh --dump-config`，以及没有选择 profile 的 plugin 子命令都会默认使用当前激活 profile；显式 `--profile` 与上游 `web` alias 会保留原有含义。DSH Desktop 会在自身 user-data 目录下按 profile 生成私有 `dsh`、`pnpm` 与 `node` shim，设置 `DSH_HOME`，使用当前 profile 作为工作目录，并且只在该终端的 `PATH` 前置 shim 目录；之后切换 profile 不会改变已经打开的终端命令。它不会修改全局环境或 shell 启动文件。macOS launcher 会先保留用户的交互式 zsh 或 bash 设置，再恢复 desktop 自有变量。Windows 会依次选择 PowerShell 7、Windows PowerShell 或命令提示符，并在新的 Windows Terminal 窗口中打开；如果 `wt.exe` 不可用，则由私有 `cmd start` broker 创建可见控制台。同步启动失败与 broker 非正常退出会显示在原生错误对话框中。Linux 不组合该终端命令。
 
+## 日志与诊断
+
+DSH Desktop 将 UTF-8 日志写入 Electron 用户数据目录：Windows 位于 `%APPDATA%\DSH Desktop\logs`，macOS 位于 `~/Library/Application Support/DSH Desktop/logs`。完整日志使用 `dsh-YYYY-MM-DD.log`，warning 与 error 还会写入 `dsh-YYYY-MM-DD.error.log`。单文件达到 10 MiB 后轮转，启动时删除七天前的文件，整个目录保持在 200 MiB 以下。`dsh-desktop.logLevel` 设置控制详细程度，默认为 `info`。
+
+在 macOS 与 Windows 上，从托盘选择 **导出诊断信息…**，应用会在相邻的 `diagnostics` 目录创建 ZIP，并在系统文件管理器中定位它。导出在 Electron 主线程之外执行，最多包含最近 50 MiB 的自有日志和一个 `system-info.txt`，只保留最新三份 ZIP。创建任何文件前，确认对话框会说明隐私边界。系统会脱敏可识别的凭据，但日志仍可能包含本地路径、工作区 ID、会话 ID、提示词、工具输出或第三方插件消息。分享诊断包前应先检查内容，公开上传时尤其如此。
+
 ## 原生生命周期
 
 关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口、选择激活 profile、打开隔离的 DSH 终端、检查 stable release、通过标准 settings namespace 更改模式，或请求显式退出。Profile 与模式切换都会先 dispose 当前 Cordis 树，再让 Electron relaunch。原生退出、`SIGINT` 与 `SIGTERM` 也会在退出前请求 dispose；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
@@ -144,6 +171,21 @@ Release operator 必须先发布两个平台产物，再让版本可被发现。
 ## 打包
 
 `yarn package:dir` 为当前宿主平台创建未封装目录。如果应用归档缺少 desktop 更新与终端模块、DSH CLI bootstrap、内置 pnpm 入口或物理 deployment package，packaged-runtime gate 会拒绝该产物。Electron Builder 会把根 manifest、desktop runtime 与完整依赖树输出到 `app.asar.unpacked`；Host profile boot 与 CLI bootstrap 都会使用这棵物理树，因此 DSH profile fallback 的符号链接不会指向虚拟 ASAR 目录。`build/app-icon.png` 保持为未经修改的 iOS Default 源图，并继续作为 Windows 与 Linux 应用图标。构建过程会运行 `scripts/generate-mac-app-icon.mjs`，把该图缩放为 824 × 824 像素并居中放入透明的 1024 × 1024 画布；macOS 打包与运行中的 Dock 都使用生成的 `build/app-icon-mac.png`。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。
+
+### WSL Linux 无界面检查
+
+在 Windows 工作站上，WSL2 适合覆盖 Linux 无界面的 build、typecheck 和 unit test。请使用 WSL 内部安装的 Linux Node.js，不要使用 WSL 通过挂载的 Windows `PATH` 继承到的 Windows Node.js 或 Corepack shim。使用 `nvm` 时，每个 shell 先执行 `source ~/.nvm/nvm.sh`，再运行 Corepack 命令：
+
+```bash
+source ~/.nvm/nvm.sh
+git submodule update --init --recursive
+corepack yarn install --immutable
+corepack yarn workspace dsh-plugin-desktop typecheck
+corepack yarn workspace dsh-plugin-desktop test
+corepack yarn build
+```
+
+从 `/mnt/<drive>` 运行命令是有效的，但会比放在 WSL 原生 ext4 文件系统中的 checkout 更慢。WSL 不能替代真实 Linux 桌面会话来验证托盘、窗口管理器、`.desktop` 集成或安装后 smoke test。
 
 ### Windows x64 本地安装包
 
@@ -157,9 +199,23 @@ corepack.cmd yarn dist:win
 
 该流程不要求 Python 或 Visual Studio C++ Build Tools。Windows 命令会直接使用 `node-pty` 内置的 x64 Node-API 二进制，而不会让 Electron Builder 从源码重新编译；如果安装包 staging tree 缺少这些二进制，packaged-runtime gate 会直接拒绝产物。
 
-`dist:win` 会拒绝非 Windows 或非 x64 宿主，先执行一组 Windows 可运行的 gate，其中包括 build、全部 TypeScript compiler face、打包与原生 shell 聚焦测试，以及 runtime-closure verifier；随后再构建 NSIS 安装向导，并校验生成的两个 PE 文件。完整跨平台 suite 仍由 CI 持有，因为其中部分 POSIX 执行测试不是 Windows 程序。安装向导支持当前用户安装或提升权限后的所有用户安装，可更改安装目录，会创建开始菜单与桌面快捷方式，并且卸载应用时保留 DSH 用户数据。版本 `2.0.0` 会输出到 `dsh-plugin-desktop\dist\DSH-Desktop-2.0.0-x64-Setup.exe`；用于 smoke 测试的未封装程序仍位于 `dsh-plugin-desktop\dist\win-unpacked\DSH Desktop.exe`。
+`dist:win` 会拒绝非 Windows 或非 x64 宿主，先执行一组 Windows 可运行的 gate，其中包括 build、全部 TypeScript compiler face、打包与原生 shell 聚焦测试，以及 runtime-closure verifier；随后再构建 NSIS 安装向导，并校验生成的两个 PE 文件。完整跨平台 suite 仍由 CI 持有，因为其中部分 POSIX 执行测试不是 Windows 程序。安装向导支持当前用户安装或提升权限后的所有用户安装，可更改安装目录，会创建开始菜单与桌面快捷方式，并且卸载应用时保留 DSH 用户数据。版本 `2.0.1` 会输出到 `dsh-plugin-desktop\dist\DSH-Desktop-2.0.1-x64-Setup.exe`；用于 smoke 测试的未封装程序仍位于 `dsh-plugin-desktop\dist\win-unpacked\DSH Desktop.exe`。
 
 该本地命令会主动移除 Windows 证书变量，并设置 `signExecutable=false`。产物可以安装测试，但没有 Authenticode publisher，因此 Windows 可能显示 Unknown publisher 或 SmartScreen 警告。签名后的 Windows release、证书校验、安装器升级与卸载测试，以及原生 UI 和 sandbox smoke 仍是独立的发布 gate。
+
+### Windows x64 绿色 ZIP 版
+
+在原生 Windows x64 电脑上执行 `yarn dist:win-portable`，生成未签名的单文件绿色版：
+
+```powershell
+corepack.cmd yarn dist:win-portable
+```
+
+产物为 `dsh-plugin-desktop\\dist\\DSH-Desktop-2.0.1-x64-Portable.zip`。用户解压到任意可写目录后运行其中的 `DSH Desktop.exe`，不需要安装器、管理员权限、开始菜单注册或卸载步骤。它仍会把 profile、日志和缓存写入 Windows 默认用户数据目录，因此这是便携分发方式，不是把数据完全封装在 exe 旁边的自包含沙箱。绿色 ZIP 不会交给 NSIS 自动更新流程，新版本需要手动替换并重新解压。本地构建没有签名，Windows 可能显示 Unknown publisher 或 SmartScreen 警告；签名后的绿色版仍属于正式发布 gate。
+
+### macOS DMG 冒烟构建
+
+`yarn dist:mac-smoke` 会在原生 macOS 宿主机上构建一个未签名的 universal DMG，同一个安装包可以在 Intel 和 Apple Silicon Mac 上原生运行。该命令拒绝非 macOS 宿主，并在打包前运行完整产品 gate：仓库布局与社区契约检查、Market 的 build 与 check，然后再运行 Desktop build、全部 TypeScript compiler face、完整 unit-test suite、runtime-closure 验证、CLI/Loader/profile headless smoke 与 license audit；其中包括对 macOS runner 上已安装的每种受支持 shell 执行真实 login-shell 测试。随后它会在不接触任何签名材料的情况下打包，挂载 DMG，并检查属性列表、主程序执行权限、`x86_64` 与 `arm64` 两个架构切片，以及 `app.asar`。该命令与 `dist:win` 的密钥纪律一致：剥离 Electron Builder 能识别的全部 macOS 签名与公证变量、设置 `CSC_IDENTITY_AUTO_DISCOVERY=false`、关闭 notarization，且从不发布。产物没有 Developer ID 签名，因此 Gatekeeper 会在其他机器上拦截它；它的存在是为了让打包回归在人工发布之前就在 CI 中失败。签名并公证的 universal 正式发布仍是在持有凭证的 macOS 机器上执行 `yarn dist:mac`，产物写入 `dsh-plugin-desktop/dist/mac-release/`。
 
 ## 模型体验
 
@@ -179,5 +235,5 @@ corepack.cmd yarn dist:win
 - `dshmarket@1.2.3` 仍是用户可选安装的第三方 package，而不是内置 marketplace。只有重新审计的版本同时消费可选 Desktop service、保留普通 DSH fallback，并包含再分发所需的完整 license notice 后，才会重新评估预装。
 - 更新交接只验证下载容器，不验证 publisher 身份。macOS 仍要求用户从已打开的 DMG 替换应用；Windows 会运行已下载的 NSIS 安装器，但本地 `dist:win` 产物没有签名。签名产物、Authenticode/publisher 校验、SmartScreen 信誉与原生升级测试仍是发布 gate。
 - 共享 carrier 使用 loopback HTTP 与 WebSocket，而不是 Electron IPC。替换它需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
-- 该项目目前固定使用已发布的 DSH `0.1.0-rc.6` family，而相邻的 `deepseek-harness/` 源码 checkout 早于该版本。因此，测试验证的是已发布包接口，而非上游未发布源码。
+- 该项目同时固定到已发布的 DSH `0.1.0-rc.7` family 及其对应的官方 `deepseek-harness/` release 源码。产品构建仍解析已发布包接口，不会直接链接源码 checkout。
 - `package:dir` 是用于 smoke 的未封装产物。`dist:win` 会额外生成未签名的 NSIS 测试安装包，但不会建立 Authenticode 身份或 SmartScreen 信誉。安装与升级行为、原生通知与终端、Windows ACL sandbox，以及每台目标机器上的原生材质外观仍属于目标平台验证边界。
