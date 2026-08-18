@@ -9,6 +9,7 @@ import {
   IconDownloadOutline16,
   IconGlobeOutline14,
   IconPlusOutline16,
+  IconPauseOutline16,
   IconRefreshOutline16,
   IconRightUpOutline16,
   IconSearchOutline16,
@@ -26,7 +27,7 @@ import type {
   MarketBuiltInProvider,
   MarketCatalogResponse,
   MarketCatalogSourceResult,
-  MarketInstallReceipt,
+  MarketInstallationView,
   MarketInstallableResponse,
   MarketOperationPreviewRequest,
   MarketOperationPreviewResponse,
@@ -207,7 +208,7 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
   const [manifestUrl, setManifestUrl] = useState('')
   const [mutationError, setMutationError] = useState<string>()
   const [mutationPending, setMutationPending] = useState(false)
-  const [installations, setInstallations] = useState<readonly MarketInstallReceipt[]>([])
+  const [installations, setInstallations] = useState<readonly MarketInstallationView[]>([])
   const [installableIndex, setInstallableIndex] = useState<MarketInstallableResponse>()
   const [installableQuery, setInstallableQuery] = useState('')
   const [appliedInstallableQuery, setAppliedInstallableQuery] = useState('')
@@ -585,7 +586,9 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
         setInstallationsError(t('desktopUnavailable'))
         setOperationError(t('desktopUnavailable'))
       } else {
-        setOperationError(t(requestValue.action === 'install' ? 'previewError' : 'uninstallPreviewError'))
+        setOperationError(t(requestValue.action === 'install'
+          ? 'previewError'
+          : requestValue.action === 'uninstall' ? 'uninstallPreviewError' : 'disablePreviewError'))
       }
     } finally {
       if (operationRequest.current === request) {
@@ -635,14 +638,28 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
       if (request.signal.aborted || operationRequest.current !== request) return
       if (result.action !== preview.action) throw new Error('operation response action mismatch')
       setInstallations(current => result.action === 'install'
-        ? [...current.filter(receipt => receipt.receiptId !== result.receipt.receiptId), result.receipt]
-        : current.filter(receipt => receipt.receiptId !== result.receiptId))
+        ? current
+        : result.action === 'uninstall'
+          ? current.filter(installation => installation.kind !== 'managed'
+            || installation.receipt.receiptId !== result.receiptId)
+          : current.map(installation => installation.kind === 'external'
+              && installation.action === 'disable'
+              && installation.packageName === result.packageName
+            ? {
+                kind: 'external' as const,
+                status: 'disabled' as const,
+                action: 'none' as const,
+                packageName: installation.packageName,
+              }
+            : installation))
       setInstallationsLoaded(true)
       setOperationPreview(undefined)
       setSelected(undefined)
       setOperationSuccess({ preview, restartToken: result.restartToken })
       if (result.action === 'install' && viewRef.current === 'installable') void loadInstallable()
-      if (result.action === 'uninstall' && viewRef.current === 'installed') void loadInstallations()
+      if ((result.action === 'uninstall' || result.action === 'disable') && viewRef.current === 'installed') {
+        void loadInstallations()
+      }
     } catch (cause) {
       if (request.signal.aborted || operationRequest.current !== request) return
       if (isDesktopUnavailable(cause)) {
@@ -782,6 +799,9 @@ export function MarketSurface({ readLocale, t, showHeader = true }: MarketSurfac
             onRetry={() => { void loadInstallations() }}
             onUninstall={receipt => {
               void beginOperationPreview({ action: 'uninstall', receiptId: receipt.receiptId })
+            }}
+            onDisable={bundleId => {
+              void beginOperationPreview({ action: 'disable', bundleId })
             }}
             t={t}
           />
@@ -1137,14 +1157,15 @@ function InstallableView(props: {
 }
 
 function InstalledView(props: {
-  installations: readonly MarketInstallReceipt[]
+  installations: readonly MarketInstallationView[]
   loaded: boolean
   loading: boolean
   unavailable: boolean
   error?: string | undefined
   operationPending: boolean
   onRetry: () => void
-  onUninstall: (receipt: MarketInstallReceipt) => void
+  onUninstall: (receipt: Extract<MarketInstallationView, { kind: 'managed' }>['receipt']) => void
+  onDisable: (bundleId: string) => void
   t: MarketSettingsTabProps['t']
 }) {
   if (props.unavailable) return (
@@ -1181,26 +1202,50 @@ function InstalledView(props: {
         <div className="dshMarketEmpty"><h2>{props.t('noInstalled')}</h2><p>{props.t('noInstalledBody')}</p></div>
       ) : (
         <div className="dshMarketReceipts">
-          {props.installations.map(receipt => (
-            <article className="dshMarketReceipt" key={receipt.receiptId}>
+          {props.installations.map((installation, index) => {
+            const receipt = installation.kind === 'managed' ? installation.receipt : undefined
+            const packageName = installation.kind === 'managed'
+              ? installation.receipt.packageName
+              : installation.packageName
+            const displayName = receipt?.displayName ?? packageName
+            const ownerLabel = installation.kind === 'managed'
+              ? props.t('managedPlugin')
+              : installation.kind === 'external' ? props.t('externalPlugin') : props.t('immutablePlugin')
+            return (
+            <article className="dshMarketReceipt" key={receipt?.receiptId ?? `${installation.kind}:${packageName}:${index}`}>
               <div className="dshMarketReceiptMain">
-                <div className="dshMarketReceiptTitle"><StateDot state="done" size={10} /><h3>{receipt.displayName}</h3></div>
+                <div className="dshMarketReceiptTitle">
+                  <StateDot state={installation.status === 'disabled' ? 'warning' : 'done'} size={10} />
+                  <h3>{displayName}</h3>
+                  <Pill>{ownerLabel}</Pill>
+                  <Pill>{props.t(installation.status === 'disabled' ? 'disabledPlugin' : 'activePlugin')}</Pill>
+                </div>
                 <div className="dshMarketReceiptMeta">
-                  <span>{receipt.packageName}@{receipt.version}</span>
-                  <span>{props.t('profile')}: {receipt.profileName}</span>
-                  <span>{props.t('installedAt')}: {receipt.installedAt}</span>
+                  <span>{packageName}{receipt === undefined ? '' : `@${receipt.version}`}</span>
+                  {receipt !== undefined && <span>{props.t('profile')}: {receipt.profileName}</span>}
+                  {receipt !== undefined && <span>{props.t('installedAt')}: {receipt.installedAt}</span>}
+                  {installation.status === 'disabled' && <span>{props.t('disabledRestartRequired')}</span>}
                 </div>
               </div>
-              <Button
+              {installation.action === 'uninstall' && <Button
                 variant="outline"
                 size="sm"
-                aria-label={`${props.t('uninstall')}: ${receipt.displayName}`}
+                aria-label={`${props.t('uninstall')}: ${displayName}`}
                 disabled={props.operationPending}
                 icon={<IconTrashOutline16 />}
-                onClick={() => props.onUninstall(receipt)}
-              >{props.t('uninstall')}</Button>
+                onClick={() => props.onUninstall(installation.receipt)}
+              >{props.t('uninstall')}</Button>}
+              {installation.action === 'disable' && <Button
+                variant="outline"
+                size="sm"
+                aria-label={`${props.t('disable')}: ${displayName}`}
+                disabled={props.operationPending}
+                icon={<IconPauseOutline16 />}
+                onClick={() => props.onDisable(installation.bundleId)}
+              >{props.t('disable')}</Button>}
             </article>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
@@ -1447,7 +1492,7 @@ function OperationFacts({ operation, showExpiry = true, t }: {
     <dl className="dshMarketOperationFacts">
       <div><dt>{t('plugin')}</dt><dd>{operation.displayName}</dd></div>
       <div><dt>{t('package')}</dt><dd>{operation.packageName}</dd></div>
-      <div><dt>{t('exactVersion')}</dt><dd>{operation.version}</dd></div>
+      {operation.version !== undefined && <div><dt>{t('exactVersion')}</dt><dd>{operation.version}</dd></div>}
       <div><dt>{t('profile')}</dt><dd>{operation.profileName}</dd></div>
       {showExpiry && <div><dt>{t('previewExpires')}</dt><dd>{operation.expiresAt}</dd></div>}
     </dl>
@@ -1463,6 +1508,12 @@ function OperationConfirmModal({ preview, pending, error, onCancel, onConfirm, t
   t: MarketSettingsTabProps['t']
 }) {
   const installing = preview.action === 'install'
+  const uninstalling = preview.action === 'uninstall'
+  const title = installing ? t('confirmInstallTitle') : uninstalling ? t('confirmUninstallTitle') : t('confirmDisableTitle')
+  const description = installing ? t('confirmInstallBody') : uninstalling ? t('confirmUninstallBody') : t('confirmDisableBody')
+  const confirmLabel = pending
+    ? installing ? t('installing') : uninstalling ? t('uninstalling') : t('disabling')
+    : installing ? t('confirmInstall') : uninstalling ? t('confirmUninstall') : t('confirmDisable')
   return (
     <Modal
       open
@@ -1470,16 +1521,16 @@ function OperationConfirmModal({ preview, pending, error, onCancel, onConfirm, t
       contentClassName="dshMarketWideModalContent"
       onClose={onCancel}
       closeLabel={t('cancel')}
-      title={installing ? t('confirmInstallTitle') : t('confirmUninstallTitle')}
-      description={installing ? t('confirmInstallBody') : t('confirmUninstallBody')}
+      title={title}
+      description={description}
       footer={<>
         <Button variant="ghost" disabled={pending} onClick={onCancel}>{t('cancel')}</Button>
         <Button
           variant="primary"
           disabled={pending}
-          icon={installing ? <IconDownloadOutline16 /> : <IconTrashOutline16 />}
+          icon={installing ? <IconDownloadOutline16 /> : uninstalling ? <IconTrashOutline16 /> : <IconPauseOutline16 />}
           onClick={onConfirm}
-        >{pending ? (installing ? t('installing') : t('uninstalling')) : (installing ? t('confirmInstall') : t('confirmUninstall'))}</Button>
+        >{confirmLabel}</Button>
       </>}
     >
       <div className="dshMarketOperationReview">
@@ -1495,8 +1546,12 @@ function OperationConfirmModal({ preview, pending, error, onCancel, onConfirm, t
             </span>
           </div>
         )}
+        {!installing && !uninstalling && <>
+          <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('disableWarning')}</span></div>
+          <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('disableRecoveryWarning')}</span></div>
+        </>}
         <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('restartAfterOperation')}</span></div>
-        {pending && <div className="dshMarketOperationProgress" role="status"><StateDot state="ongoing" size={12} />{installing ? t('installing') : t('uninstalling')}</div>}
+        {pending && <div className="dshMarketOperationProgress" role="status"><StateDot state="ongoing" size={12} />{confirmLabel}</div>}
         {error !== undefined && <div className="dshMarketError" role="alert">{error}</div>}
       </div>
     </Modal>
@@ -1512,13 +1567,15 @@ function OperationSuccessModal({ operation, canRestart, pending, error, onClose,
   onRestart: () => void
   t: MarketSettingsTabProps['t']
 }) {
-  const installed = operation.preview.action === 'install'
+  const title = operation.preview.action === 'install'
+    ? t('installComplete')
+    : operation.preview.action === 'uninstall' ? t('uninstallComplete') : t('disableComplete')
   return (
     <Modal
       open
       onClose={() => { if (!pending) onClose() }}
       closeLabel={t('close')}
-      title={installed ? t('installComplete') : t('uninstallComplete')}
+      title={title}
       description={t('restartRequiredTitle')}
       footer={<>
         <Button variant="ghost" disabled={pending} onClick={onClose}>{t('restartLater')}</Button>

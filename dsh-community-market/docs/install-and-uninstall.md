@@ -12,10 +12,10 @@ This guide explains what users see and the boundary developers must preserve. Th
 | --- | --- | --- |
 | **Discover** | Every normalized item in the selected source's complete local index, shown 50 at a time | A listing is not install approval, compatibility evidence, or endorsement |
 | **Installable** | A fail-closed local structural subset requiring reviewed provider verification with `repository_backlink`, an exact stable npm target, and a canonical repository, while excluding blocked, installed, or receipted packages | Presence is not npm verification, compatibility proof, a code review, or endorsement |
-| **Installed** | Valid Market install receipts for the active profile | It does not infer state from the current catalog or list plugins installed by another tool |
+| **Installed** | Host-reconciled direct bundles for the active profile | A valid matching Market receipt grants uninstall; other mutable bundles are external and grant disable only |
 | **Sources** | Saved source records and the one currently selected source | Changing source does not change the active profile or remove receipts |
 
-Exactly one catalog source is browsed at a time. The Host completes and caches one full index for that source and locale; search, multi-category OR filtering, complete category choices, and 50-item pagination are local views over that index. Switching source resets the index view, search, categories, and cursor. The **Installed** view is different: it is profile- and receipt-backed, so it remains available when the original source is disabled, deleted, or offline.
+Exactly one catalog source is browsed at a time. The Host completes and caches one full index for that source and locale; search, multi-category OR filtering, complete category choices, and 50-item pagination are local views over that index. Switching source resets the index view, search, categories, and cursor. The **Installed** view instead follows the active profile's direct-bundle inventory and locally verified receipts.
 
 Optional catalog metadata reports `scannedAt`, cache `expiresAt`, optional `providerRevision`, and whether `cacheStatus` is `fresh` or `cached`. Explicit refresh replaces the complete index and bypasses the catalog HTTP cache before rescanning; it does not merely reload the visible page.
 
@@ -68,6 +68,12 @@ A GitHub repository link may still appear as inert provenance and may be used to
 5. Restart DSH Desktop so the running process no longer uses the removed plugin.
 
 Uninstall does not need the provider to remain online and does not refetch the original listing. If a plugin has no Market receipt, belongs to another profile, or was changed after installation, this MVP refuses to remove it. That conservative behavior avoids claiming ownership of packages managed elsewhere.
+
+## Disable an externally installed plugin
+
+An active mutable direct bundle without a valid matching Market receipt is externally owned. **Disable** sends only Desktop's generation-scoped opaque `bundleId`. Desktop mints a short-lived preview and revalidates the profile, exact bundle, mutability, and receipt boundary before persisting the disable. It does not uninstall the package or sandbox its code. Restart after success. If a broken bundle patch already prevents the current startup, this control cannot recover that failed startup.
+
+Desktop stores this versioned, profile-scoped choice in `<Desktop user data>/plugin-management/state.json`. It does not edit the profile's `package.json`, lockfile, dependency tree, or `dsh.profile.bundles` list.
 
 ## What these checks do not prove
 

@@ -4,7 +4,7 @@
 
 DSH Community Market is the plugin-market shell for [DSH Desktop](../README.en.md). It helps people discover community plugins and, on Desktop, install or remove the small set of npm packages that pass the Market Host's checks.
 
-> **Current status: private integration-testing MVP.** The package has loadable Host and Client entries, persisted user-owned source records, a constrained HTTPS client, standard and DSH 1024Store adapters, an official **Plugin market** tab under **Settings > Plugins**, a sidebar launcher, and Host-managed install and receipt-backed uninstall flows. This is not a claim that listed or installable plugin code is safe.
+> **Current status: private integration-testing MVP.** The package has loadable Host and Client entries, persisted user-owned source records, a constrained HTTPS client, standard and DSH 1024Store adapters, an official **Plugin market** tab under **Settings > Plugins**, a sidebar launcher, Host-managed install and receipt-backed uninstall, plus fail-closed disable controls for external direct bundles. This is not a claim that listed or installable plugin code is safe.
 
 ## What we are building
 
@@ -12,7 +12,7 @@ The current interface has four views:
 
 1. **Discover** shows all normalized listings loaded from the selected source. Clicking any card immediately opens the same action dialog, where Desktop checks for a managed installation before falling back to details or a safe, display-only manual hint.
 2. **Installable** is a fail-closed local candidate list derived from the complete index. It requires reviewed provider verification with a `repository_backlink`, an exact stable npm version, and a canonical repository, and excludes blocked packages plus packages already present in the active profile or its Market receipts. Building this list does not query npm for every package; its cards use the same action dialog as Discover.
-3. **Installed** shows only receipts created by this Market for the active profile. It does not infer installation from the catalog.
+3. **Installed** reconciles valid Market receipts with Desktop's active-profile direct-bundle inventory. Receipt-owned bundles can be uninstalled; other mutable bundles can only be disabled.
 4. **Sources** selects and manages catalog sources. Exactly one source is browsed at a time.
 
 Clicking a plugin card opens the dialog synchronously and asks the Host whether that exact source/item can use managed installation. A successful preview verifies it against the official npm registry, including identity, repository, integrity, runtime, lifecycle scripts, DSH bundle evidence, and the active profile, then turns the same dialog into an exact confirmation. The Host repeats mutable checks immediately before execution. If managed preview is unavailable, the dialog remains a details view and may show a display-only exact npm command reconstructed by the Host from normalized identity. It never uses a provider command, never sends that command to a Desktop action, and never executes it: opening DSH Terminal only opens the terminal so the user can review, copy, and run the command themselves. After a successful managed profile change, the user can restart immediately with a one-time Desktop action or choose to restart later. The market is a shell around existing DSH capabilities; it does not invent a second plugin format, package manager, profile store, or privileged installer.
@@ -40,7 +40,7 @@ All catalog data is remote and untrusted. A listing means only that a provider s
 - Provider-supplied command strings, install snippets, and repository install instructions are discarded and never executed. A separate manual hint, when available, is an exact npm command reconstructed by the Host from normalized identity, marked as not fully verified, and displayed for the user to run at their own discretion.
 - The renderer submits only source/item or receipt identifiers for managed operations. The **Open DSH Terminal** action submits an empty request and never receives, copies, or executes the displayed manual command.
 - The confirmation shows the exact npm package and version plus the active profile. Plugin changes use the existing Desktop-managed DSH plugin service and run one operation at a time; success offers **Restart later** and **Restart now**.
-- Uninstall is available only for a valid Market receipt in the active profile. Because the receipt is local, a plugin remains removable if its catalog source is later disabled, deleted, or offline.
+- Uninstall is available only when a valid Market receipt still matches a direct bundle in the active profile. Other mutable direct bundles are externally owned and can only have their bundle configuration layer disabled; this neither removes the package nor sandboxes its code.
 - The first release will not include accounts, telemetry, silent installs, automatic plugin updates, or a catalog backend.
 
 These checks establish package identity and a narrow compatibility boundary; they do **not** review the plugin or its dependency tree for malicious or unsafe behavior. Installed plugins run as local code with the user's permissions. Read [Install and uninstall](docs/install-and-uninstall.md) and [Security](SECURITY.md) before testing or reviewing package operations.

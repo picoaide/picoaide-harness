@@ -102,8 +102,37 @@ export interface MarketInstallReceipt {
   readonly installedAt: string
 }
 
+export type MarketInstallationView =
+  | {
+      readonly kind: 'managed'
+      readonly status: 'active' | 'disabled'
+      readonly action: 'uninstall'
+      readonly receipt: MarketInstallReceipt
+    }
+  | {
+      readonly kind: 'external'
+      readonly status: 'active'
+      readonly action: 'disable'
+      /** Generation-scoped Host capability; never a path or package argument. */
+      readonly bundleId: string
+      readonly packageName: string
+    }
+  | {
+      readonly kind: 'external'
+      readonly status: 'disabled'
+      readonly action: 'none'
+      readonly packageName: string
+    }
+  | {
+      readonly kind: 'immutable'
+      readonly status: 'active' | 'disabled'
+      readonly action: 'none'
+      readonly packageName: string
+    }
+
 export interface MarketInstallationsResponse {
-  readonly installations: readonly MarketInstallReceipt[]
+  /** Host-reconciled direct bundles for the active profile. */
+  readonly installations: readonly MarketInstallationView[]
 }
 
 /** Complete Host-preverified subset for the active catalog source. */
@@ -125,13 +154,18 @@ export type MarketOperationPreviewRequest =
       readonly action: 'uninstall'
       readonly receiptId: string
     }
+  | {
+      readonly action: 'disable'
+      /** Opaque exact target obtained from the current Host inventory. */
+      readonly bundleId: string
+    }
 
 /** Host-verified facts shown before the user confirms a package mutation. */
 export interface MarketOperationPreviewResponse {
-  readonly action: 'install' | 'uninstall'
+  readonly action: 'install' | 'uninstall' | 'disable'
   readonly profileName: string
   readonly packageName: string
-  readonly version: string
+  readonly version?: string
   readonly displayName: string
   readonly expiresAt: string
   readonly previewId: string
@@ -146,6 +180,11 @@ export type MarketOperationExecuteResponse =
   | {
       readonly action: 'uninstall'
       readonly receiptId: string
+      readonly packageName: string
+      readonly restartToken: string
+    }
+  | {
+      readonly action: 'disable'
       readonly packageName: string
       readonly restartToken: string
     }

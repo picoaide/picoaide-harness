@@ -910,8 +910,10 @@ describe('market install Host routes', () => {
       displayName: 'Safe Plugin',
       expiresAt: '2026-08-18T00:05:00.000Z',
     }))
+    const listVerifiedReceipts = vi.fn(async (): Promise<readonly MarketInstallReceipt[]> => [])
     const install = {
       listReceipts: vi.fn(async () => []),
+      listVerifiedReceipts,
       listInstallable: vi.fn(),
       previewInstall,
       previewUninstall: vi.fn(),
@@ -925,11 +927,30 @@ describe('market install Host routes', () => {
       openTerminal: vi.fn(),
       requestRestart: vi.fn(async () => { desktopEvents.push('restart') }),
     }
+    const bundle = {
+      bundleId: 'bundle_opaque_external',
+      packageName: 'dsh-plugin-external',
+      status: 'active' as const,
+      mutable: true,
+    }
+    const desktopPlugins = {
+      list: vi.fn(() => [bundle]),
+      isDisabled: vi.fn(() => false),
+      disabledPackageNames: vi.fn(() => []),
+      previewDisable: vi.fn(() => ({
+        previewId: 'disable_opaque_preview',
+        profileName: 'web',
+        packageName: bundle.packageName,
+        expiresAt: '2099-08-18T00:05:00.000Z',
+      })),
+      executeDisable: vi.fn(async () => ({ packageName: bundle.packageName })),
+    }
     const dispose = registerMarketRoutes(
       ctx as never,
       settings.scope,
       { get: () => install },
       { get: () => actions },
+      { get: () => desktopPlugins },
     )
     expect(handlers.has(marketRoutes.installations)).toBe(true)
     expect(handlers.has(marketRoutes.installable)).toBe(true)
@@ -996,9 +1017,63 @@ describe('market install Host routes', () => {
     expect(invalid).toMatchObject({ status: 400, body: { code: 'invalid-request' } })
     expect(previewInstall).toHaveBeenCalledTimes(1)
 
+    const disablePreview = await request(marketRoutes.operationPreview, 'POST', {
+      action: 'disable',
+      bundleId: bundle.bundleId,
+    })
+    expect(disablePreview).toMatchObject({
+      status: 200,
+      body: {
+        action: 'disable',
+        packageName: bundle.packageName,
+        previewId: 'disable_opaque_preview',
+      },
+    })
+    expect(desktopPlugins.previewDisable).toHaveBeenCalledWith(bundle.bundleId)
+    const invalidDisable = await request(marketRoutes.operationPreview, 'POST', {
+      action: 'disable',
+      bundleId: bundle.bundleId,
+      packageName: bundle.packageName,
+    })
+    expect(invalidDisable).toMatchObject({ status: 400, body: { code: 'invalid-request' } })
+
+    const receiptRace: MarketInstallReceipt = {
+      receiptId: 'receipt-race-0001',
+      profileName: 'web',
+      packageName: bundle.packageName,
+      version,
+      integrity,
+      bundlePatch: './cordis.patch.yml',
+      sourceRecordId: 'source-1',
+      providerId: 'provider-1',
+      itemId: 'external-plugin',
+      displayName: 'External Plugin',
+      installedAt: '2026-08-18T00:00:00.000Z',
+    }
+    listVerifiedReceipts.mockResolvedValueOnce([receiptRace])
+    const receiptOwned = await request(
+      marketRoutes.operationExecute,
+      'POST',
+      { previewId: 'disable_opaque_preview' },
+    )
+    expect(receiptOwned).toMatchObject({ status: 409, body: { code: 'conflict' } })
+    expect(desktopPlugins.executeDisable).not.toHaveBeenCalled()
+
+    await expect(request(marketRoutes.operationPreview, 'POST', {
+      action: 'disable',
+      bundleId: bundle.bundleId,
+    })).resolves.toMatchObject({ status: 200, body: { previewId: 'disable_opaque_preview' } })
+
     const executed = await request(marketRoutes.operationExecute, 'POST', { previewId: 'opaque-preview-id' })
     expect(executed.status).toBe(200)
     expect(install.executePreview).toHaveBeenCalledWith('opaque-preview-id', expect.any(AbortSignal))
+
+    const disabled = await request(marketRoutes.operationExecute, 'POST', { previewId: 'disable_opaque_preview' })
+    expect(disabled).toMatchObject({
+      status: 200,
+      body: { action: 'disable', packageName: bundle.packageName },
+    })
+    expect(desktopPlugins.executeDisable).toHaveBeenCalledWith('disable_opaque_preview')
 
     await expect(request(marketRoutes.openTerminal, 'POST', {})).resolves.toEqual({ status: 200, body: { ok: true } })
     expect(actions.openTerminal).toHaveBeenCalledWith()
@@ -1013,13 +1088,32 @@ describe('market install Host routes', () => {
     expect(actions.requestRestart).toHaveBeenCalledWith()
     expect(desktopEvents).toEqual(['response', 'restart'])
 
+    const disableRestartToken = disabled.body.restartToken as string
+    desktopEvents.length = 0
+    await expect(request(marketRoutes.requestRestart, 'POST', { restartToken: disableRestartToken }))
+      .resolves.toEqual({ status: 200, body: { ok: true } })
+    expect(install.consumeRestartToken).toHaveBeenCalledTimes(1)
+    expect(actions.requestRestart).toHaveBeenCalledTimes(2)
+    expect(desktopEvents).toEqual(['response', 'restart'])
+
     const installations = await request(marketRoutes.installations, 'GET')
-    expect(installations).toEqual({ status: 200, body: { installations: [] } })
+    expect(installations).toEqual({
+      status: 200,
+      body: {
+        installations: [{
+          kind: 'external',
+          status: 'active',
+          action: 'disable',
+          bundleId: bundle.bundleId,
+          packageName: bundle.packageName,
+        }],
+      },
+    })
     expect(install.listInstallable).not.toHaveBeenCalled()
     dispose()
   })
 
-  it('keeps the installations route receipt-only without starting catalog verification', async () => {
+  it('reconciles verified receipts with direct bundles without starting catalog verification', async () => {
     type Handler = (req: any, res: any) => Promise<void>
     const handlers = new Map<string, Handler>()
     const ctx = {
@@ -1034,6 +1128,7 @@ describe('market install Host routes', () => {
     const listInstallable = vi.fn()
     const install = {
       listReceipts: vi.fn(async () => []),
+      listVerifiedReceipts: vi.fn(async () => []),
       listInstallable,
       previewInstall: vi.fn(),
       previewUninstall: vi.fn(),
@@ -1041,7 +1136,20 @@ describe('market install Host routes', () => {
       observeCatalog: vi.fn(),
       invalidateSource: vi.fn(),
     } as unknown as MarketInstallService
-    const dispose = registerMarketRoutes(ctx as never, memoryScope().scope, { get: () => install })
+    const desktopPlugins = {
+      list: vi.fn(() => []),
+      isDisabled: vi.fn(() => false),
+      disabledPackageNames: vi.fn(() => []),
+      previewDisable: vi.fn(),
+      executeDisable: vi.fn(),
+    }
+    const dispose = registerMarketRoutes(
+      ctx as never,
+      memoryScope().scope,
+      { get: () => install },
+      undefined,
+      { get: () => desktopPlugins },
+    )
     const req = Object.assign(new EventEmitter(), {
       method: 'GET',
       url: marketRoutes.installations,
@@ -1063,6 +1171,8 @@ describe('market install Host routes', () => {
     })
     await handlers.get(marketRoutes.installations)!(req, res)
     expect(listInstallable).not.toHaveBeenCalled()
+    expect(install.listVerifiedReceipts).toHaveBeenCalledOnce()
+    expect(desktopPlugins.list).toHaveBeenCalledOnce()
     expect(res.end).toHaveBeenCalledOnce()
     dispose()
   })

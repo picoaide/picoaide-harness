@@ -160,6 +160,8 @@ export interface MarketInstallServiceOptions {
   readonly candidateTtlMs?: number
   readonly maxIntents?: number
   readonly maxCandidates?: number
+  /** Host-owned policy state; Renderer values must never reach this callback. */
+  readonly disabledPackageNames?: () => readonly string[]
 }
 
 function stableExactVersion(value: unknown): value is string {
@@ -444,18 +446,22 @@ function lockEntry(recordValue: UnknownRecord, keys: readonly string[]): Unknown
   return undefined
 }
 
-async function assertProfileLock(
-  profile: MarketDesktopProfile,
-  packageName: string,
-  version: string,
-  expectedIntegrity: string,
-): Promise<void> {
+async function readProfileLock(profile: MarketDesktopProfile): Promise<UnknownRecord> {
   const body = await readFile(join(profile.dir, 'pnpm-lock.yaml'))
   if (body.byteLength > MAX_LOCKFILE_BYTES) throw new Error('lockfile too large')
   const lockfile = record(parseYaml(body.toString('utf8')))
   if (lockfile === undefined || !supportedLockfileVersion(lockfile.lockfileVersion)) {
     throw new Error('unsupported lockfile')
   }
+  return lockfile
+}
+
+function assertProfileLockRecord(
+  lockfile: UnknownRecord,
+  packageName: string,
+  version: string,
+  expectedIntegrity: string,
+): void {
   const importer = record(record(lockfile.importers)?.['.'])
   const dependencies = record(importer?.dependencies)
   const dependency = dependencies !== undefined && own(dependencies, packageName)
@@ -477,21 +483,35 @@ async function assertProfileLock(
   if (snapshot === undefined) throw new Error('lockfile snapshot missing')
 }
 
-async function assertInstalledBundle(
-  profile: MarketDesktopProfile,
+interface InstalledProfileSnapshot {
+  readonly manifest: JsonManifest
+  readonly lockfile: UnknownRecord
+  readonly nodeModules: string
+  readonly resolvedNodeModules: string
+}
+
+async function loadInstalledProfileSnapshot(profile: MarketDesktopProfile): Promise<InstalledProfileSnapshot> {
+  const nodeModules = resolve(profile.dir, 'node_modules')
+  const [manifest, lockfile, resolvedNodeModules] = await Promise.all([
+    readManifest(join(profile.dir, 'package.json')),
+    readProfileLock(profile),
+    realpath(nodeModules),
+  ])
+  return { manifest, lockfile, nodeModules, resolvedNodeModules }
+}
+
+async function assertInstalledBundleFromSnapshot(
+  snapshot: InstalledProfileSnapshot,
   packageName: string,
   version: string,
   expectedPatch: string,
   expectedIntegrity: string,
 ): Promise<void> {
-  const profileManifest = await readManifest(join(profile.dir, 'package.json'))
-  if (profileDependency(profileManifest, packageName) !== version) throw new Error('dependency mismatch')
-  if (!profileBundles(profileManifest).includes(packageName)) throw new Error('bundle missing')
-  const nodeModules = resolve(profile.dir, 'node_modules')
-  const packageDir = join(nodeModules, ...packageSegments(packageName))
+  if (profileDependency(snapshot.manifest, packageName) !== version) throw new Error('dependency mismatch')
+  if (!profileBundles(snapshot.manifest).includes(packageName)) throw new Error('bundle missing')
+  const packageDir = join(snapshot.nodeModules, ...packageSegments(packageName))
   const resolvedPackageDir = await realpath(packageDir)
-  const resolvedNodeModules = await realpath(nodeModules)
-  if (!containedPath(resolvedNodeModules, resolvedPackageDir)) throw new Error('package escaped profile')
+  if (!containedPath(snapshot.resolvedNodeModules, resolvedPackageDir)) throw new Error('package escaped profile')
   const manifest = await readManifest(join(resolvedPackageDir, 'package.json'))
   if (manifest.name !== packageName || manifest.version !== version) throw new Error('installed package mismatch')
   const patch = bundlePatch(manifest)
@@ -504,7 +524,23 @@ async function assertInstalledBundle(
   if (!containedPath(resolvedPackageDir, resolvedPatchPath) || !(await stat(resolvedPatchPath)).isFile()) {
     throw new Error('bundle patch invalid')
   }
-  await assertProfileLock(profile, packageName, version, expectedIntegrity)
+  assertProfileLockRecord(snapshot.lockfile, packageName, version, expectedIntegrity)
+}
+
+async function assertInstalledBundle(
+  profile: MarketDesktopProfile,
+  packageName: string,
+  version: string,
+  expectedPatch: string,
+  expectedIntegrity: string,
+): Promise<void> {
+  await assertInstalledBundleFromSnapshot(
+    await loadInstalledProfileSnapshot(profile),
+    packageName,
+    version,
+    expectedPatch,
+    expectedIntegrity,
+  )
 }
 
 async function assertNotInstalled(profile: MarketDesktopProfile, packageName: string): Promise<void> {
@@ -548,6 +584,7 @@ export class MarketInstallService {
   private readonly candidateTtlMs: number
   private readonly maxIntents: number
   private readonly maxCandidates: number
+  private readonly disabledPackageNames: () => readonly string[]
   private readonly generation = new AbortController()
   private operationActive = false
   private closed = false
@@ -564,6 +601,7 @@ export class MarketInstallService {
     this.candidateTtlMs = options.candidateTtlMs ?? CANDIDATE_TTL_MS
     this.maxIntents = options.maxIntents ?? MAX_INTENTS
     this.maxCandidates = options.maxCandidates ?? MAX_CANDIDATES
+    this.disabledPackageNames = options.disabledPackageNames ?? (() => [])
     for (const [label, value] of [
       ['intent TTL', this.intentTtlMs],
       ['candidate TTL', this.candidateTtlMs],
@@ -630,6 +668,37 @@ export class MarketInstallService {
     return this.receipts().filter(receipt => receipt.profileName === profile.name)
   }
 
+  /** Receipts that still prove one exact installed bundle in the active profile. */
+  async listVerifiedReceipts(signal: AbortSignal = this.generation.signal): Promise<readonly MarketInstallReceipt[]> {
+    const operationSignal = this.operationSignal(signal)
+    const profile = this.profile()
+    const receipts = this.receipts().filter(receipt => receipt.profileName === profile.name)
+    if (receipts.length === 0) return []
+    let snapshot: InstalledProfileSnapshot
+    try { snapshot = await loadInstalledProfileSnapshot(profile) }
+    catch {
+      operationSignal.throwIfAborted()
+      throw new MarketInstallError('operation-failed', 'The active desktop profile could not be verified.')
+    }
+    const verified: MarketInstallReceipt[] = []
+    for (const receipt of receipts) {
+      try {
+        await assertInstalledBundleFromSnapshot(
+          snapshot,
+          receipt.packageName,
+          receipt.version,
+          receipt.bundlePatch,
+          receipt.integrity,
+        )
+        operationSignal.throwIfAborted()
+        verified.push(receipt)
+      } catch {
+        operationSignal.throwIfAborted()
+      }
+    }
+    return verified
+  }
+
   async listInstallable(
     index: CatalogFullIndex,
     signal: AbortSignal,
@@ -658,10 +727,12 @@ export class MarketInstallService {
         .filter(receipt => receipt.profileName === profile.name)
         .map(receipt => receipt.packageName),
     )
+    const disabledPackages = this.disabledPackages()
     const items = index.snapshots.flatMap(snapshot => snapshot.items).filter(item => {
       const candidate = this.candidates.get(candidateKey(index.source.sourceRecordId, item.id))
       return candidate !== undefined
         && candidate.providerId === item.provenance.providerId
+        && !disabledPackages.has(candidate.packageName)
         && !receiptPackages.has(candidate.packageName)
         && !profileReferencesPlugin(profileManifest, candidate.packageName)
     })
@@ -689,6 +760,9 @@ export class MarketInstallService {
     const candidate = this.candidates.get(key)
     if (candidate === undefined) {
       throw new MarketInstallError('not-available', 'This catalog item has no verified install target. Refresh the active source and try again.')
+    }
+    if (this.disabledPackages().has(candidate.packageName)) {
+      throw new MarketInstallError('conflict', 'This plugin is disabled in the active desktop profile.')
     }
     const profile = this.profile()
     this.assertNoReceipt(profile, candidate.packageName)
@@ -728,6 +802,10 @@ export class MarketInstallService {
       const intent = this.consumeIntent(token, 'install')
       const profile = this.sameProfile(intent.profile)
       const candidate = intent.candidate
+      const disabledPackages = this.disabledPackages()
+      if (disabledPackages.has(candidate.packageName)) {
+        throw new MarketInstallError('conflict', 'This plugin is disabled in the active desktop profile.')
+      }
       if (this.candidates.get(candidate.key) !== candidate) {
         throw new MarketInstallError('not-available', 'The verified catalog item is no longer available.')
       }
@@ -750,6 +828,9 @@ export class MarketInstallService {
       await assertNotInstalled(profile, candidate.packageName)
       if (this.candidates.get(candidate.key) !== candidate) {
         throw new MarketInstallError('not-available', 'The catalog source changed before installation.')
+      }
+      if (disabledPackages.has(candidate.packageName)) {
+        throw new MarketInstallError('conflict', 'This plugin is disabled in the active desktop profile.')
       }
       try {
         await this.runPlugin(this.installArgs(candidate.packageName, candidate.version), profile, operationSignal)
@@ -924,6 +1005,19 @@ export class MarketInstallService {
     if (this.receipts().some(receipt => receipt.profileName === profile.name && receipt.packageName === packageName)) {
       throw new MarketInstallError('conflict', 'This plugin already has a market install receipt in the active profile.')
     }
+  }
+
+  private disabledPackages(): ReadonlySet<string> {
+    let names: readonly string[]
+    try { names = this.disabledPackageNames() }
+    catch (cause) {
+      if (cause instanceof MarketInstallError) throw cause
+      throw new MarketInstallError('operation-failed', 'Desktop plugin policy state is unavailable.')
+    }
+    if (!Array.isArray(names) || names.length > 10_000 || !names.every(safePackageName)) {
+      throw new MarketInstallError('operation-failed', 'Desktop plugin policy state is invalid.')
+    }
+    return new Set(names)
   }
 
   private async saveReceipts(receipts: readonly MarketInstallReceipt[]): Promise<void> {

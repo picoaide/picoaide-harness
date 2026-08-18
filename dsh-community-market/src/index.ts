@@ -1,7 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-settings'
-import { registerMarketRoutes, registerMarketSettings } from './host/routes.js'
+import {
+  registerMarketRoutes,
+  registerMarketSettings,
+  type MarketDesktopPlugins,
+} from './host/routes.js'
 import { createRestrictedHttpClient } from './network/restricted-http.js'
 import {
   createNpmRegistryVerifier,
@@ -31,10 +35,12 @@ export function apply(ctx: Context): void {
   const scope = registerMarketSettings(ctx)
   let installService: MarketInstallService | undefined
   let desktopActions: DesktopActionsCapability | undefined
+  let desktopPlugins: MarketDesktopPlugins | undefined
   const installProvider = { get: () => installService }
   const desktopActionsProvider = { get: () => desktopActions }
+  const desktopPluginsProvider = { get: () => desktopPlugins }
   ctx.effect(
-    () => registerMarketRoutes(ctx, scope, installProvider, desktopActionsProvider),
+    () => registerMarketRoutes(ctx, scope, installProvider, desktopActionsProvider, desktopPluginsProvider),
     'community-market: routes',
   )
   ctx.inject(['desktopActions'], (desktopCtx) => {
@@ -45,6 +51,15 @@ export function apply(ctx: Context): void {
         if (desktopActions === actions) desktopActions = undefined
       }
     }, 'community-market: optional desktop actions')
+  })
+  ctx.inject(['desktopPlugins'], (desktopCtx) => {
+    const plugins = desktopCtx.get('desktopPlugins') as MarketDesktopPlugins
+    desktopCtx.effect(() => {
+      desktopPlugins = plugins
+      return () => {
+        if (desktopPlugins === plugins) desktopPlugins = undefined
+      }
+    }, 'community-market: optional desktop plugin management')
   })
   // Browsing remains portable. Desktop-only package operations appear whenever
   // the narrow profile and package-manager capabilities are live.
@@ -57,6 +72,15 @@ export function apply(ctx: Context): void {
         () => profiles.current,
         pnpm,
         createNpmRegistryVerifier(npmRegistryHttp),
+        {
+          disabledPackageNames: () => {
+            const plugins = desktopPlugins
+            if (plugins === undefined) {
+              throw new Error('desktop plugin policy unavailable')
+            }
+            return plugins.disabledPackageNames()
+          },
+        },
       )
       installService = service
       return () => {

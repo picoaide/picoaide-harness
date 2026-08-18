@@ -521,7 +521,9 @@ describe('MarketSettingsTab', () => {
     const receipt = makeReceipt()
     vi.mocked(readMarketState).mockResolvedValue(emptyState)
     vi.mocked(readMarketInstallations)
-      .mockResolvedValueOnce({ installations: [receipt] })
+      .mockResolvedValueOnce({
+        installations: [{ kind: 'managed', status: 'active', action: 'uninstall', receipt }],
+      })
       .mockResolvedValue({ installations: [] })
     vi.mocked(previewMarketOperation).mockResolvedValue({
       action: 'uninstall',
@@ -559,6 +561,83 @@ describe('MarketSettingsTab', () => {
     expect(await screen.findByRole('dialog', { name: en.uninstallComplete })).toBeTruthy()
     expect(screen.getByText(en.restartRequiredBody)).toBeTruthy()
     expect(readMarketCatalog).not.toHaveBeenCalled()
+  })
+
+  it('disables an external bundle through an exact Host preview without offering uninstall', async () => {
+    const external = {
+      kind: 'external' as const,
+      status: 'active' as const,
+      action: 'disable' as const,
+      bundleId: 'opaque-bundle-id',
+      packageName: 'dsh-plugin-external',
+    }
+    vi.mocked(readMarketState).mockResolvedValue(emptyState)
+    vi.mocked(readMarketInstallations)
+      .mockResolvedValueOnce({ installations: [external] })
+      .mockResolvedValue({
+        installations: [{
+          kind: 'external',
+          status: 'disabled',
+          action: 'none',
+          packageName: external.packageName,
+        }],
+      })
+    vi.mocked(previewMarketOperation).mockResolvedValue({
+      action: 'disable',
+      profileName: 'web',
+      packageName: external.packageName,
+      displayName: external.packageName,
+      expiresAt: '2026-08-18T00:05:00.000Z',
+      previewId: 'opaque-disable-preview',
+    })
+    vi.mocked(executeMarketOperation).mockResolvedValue({
+      action: 'disable',
+      packageName: external.packageName,
+      restartToken: 'opaque-disable-restart',
+    })
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('heading', { name: en.emptyTitle })
+    fireEvent.click(screen.getByRole('button', { name: en.installed }))
+    const disable = await screen.findByRole('button', { name: `${en.disable}: ${external.packageName}` })
+    expect(screen.queryByRole('button', { name: `${en.uninstall}: ${external.packageName}` })).toBeNull()
+    fireEvent.click(disable)
+    await waitFor(() => {
+      expect(previewMarketOperation).toHaveBeenCalledWith(
+        { action: 'disable', bundleId: external.bundleId },
+        expect.any(AbortSignal),
+      )
+    })
+    expect(await screen.findByRole('dialog', { name: en.confirmDisableTitle })).toBeTruthy()
+    expect(screen.getByText(en.disableWarning)).toBeTruthy()
+    expect(screen.getByText(en.disableRecoveryWarning)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.confirmDisable }))
+    await waitFor(() => {
+      expect(executeMarketOperation).toHaveBeenCalledWith('opaque-disable-preview', expect.any(AbortSignal))
+    })
+    expect(await screen.findByRole('dialog', { name: en.disableComplete })).toBeTruthy()
+    expect(screen.getByText(en.restartRequiredBody)).toBeTruthy()
+  })
+
+  it('keeps disabled external and immutable bundles read-only while a disabled receipt remains uninstallable', async () => {
+    const receipt = makeReceipt({ displayName: 'Disabled managed plugin' })
+    vi.mocked(readMarketState).mockResolvedValue(emptyState)
+    vi.mocked(readMarketInstallations).mockResolvedValue({
+      installations: [
+        { kind: 'managed', status: 'disabled', action: 'uninstall', receipt },
+        { kind: 'external', status: 'disabled', action: 'none', packageName: 'dsh-plugin-disabled-external' },
+        { kind: 'immutable', status: 'active', action: 'none', packageName: 'dsh-plugin-desktop' },
+      ],
+    })
+    render(<MarketSettingsTab {...props} />)
+
+    await screen.findByRole('heading', { name: en.emptyTitle })
+    fireEvent.click(screen.getByRole('button', { name: en.installed }))
+    expect(await screen.findByRole('button', { name: `${en.uninstall}: ${receipt.displayName}` })).toBeTruthy()
+    expect(screen.getAllByText(en.disabledPlugin).length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText(en.immutablePlugin)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: new RegExp(`^${en.disable}:`, 'u') })).toBeNull()
+    expect(screen.queryByRole('button', { name: new RegExp(`^${en.uninstall}: dsh-plugin`, 'u') })).toBeNull()
   })
 
   it('explains that package operations require Desktop when the optional Host capability returns 503', async () => {

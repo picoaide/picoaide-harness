@@ -12,10 +12,10 @@
 | --- | --- | --- |
 | **发现** | 当前已选来源完整本地索引中的全部标准化条目，每次展示 50 条 | 被收录不等于允许安装、兼容性证据或推荐 |
 | **可安装** | 本地 fail-closed 结构子集：要求经过审核的 provider 验证与 `repository_backlink`、精确稳定的 npm 目标和规范仓库，同时排除被阻止、已经安装或已有 receipt 的 package | 出现在这里不等于 npm 已复核、兼容性证据、代码审核或推荐 |
-| **已安装** | Market 为当前 profile 保存的合法安装 receipt | 不根据当前目录猜测状态，也不展示由其他工具安装的插件 |
+| **已安装** | Host 核对后的当前 profile direct bundle | 有效且匹配的 Market receipt 授予卸载；其他可变 bundle 属于外部安装，只授予禁用 |
 | **来源** | 已保存的来源记录，以及当前唯一选中的来源 | 切换来源不会切换当前 profile，也不会删除 receipt |
 
-同一时间只浏览一个目录来源。Host 会针对该来源和 locale 完成并 cache 一份完整索引；搜索、多分类 OR 筛选、完整分类选项和每页 50 条分页都是该索引上的本地视图。切换来源会重置索引视图、搜索、分类和 cursor。**已安装**视图不同：它由 profile 和 receipt 支撑，因此即使原来源被禁用、删除或离线，仍然可以使用。
+同一时间只浏览一个目录来源。Host 会针对该来源和 locale 完成并 cache 一份完整索引；搜索、多分类 OR 筛选、完整分类选项和每页 50 条分页都是该索引上的本地视图。切换来源会重置索引视图、搜索、分类和 cursor。**已安装**视图则依据当前 profile 的 direct bundle 清单和本地复核后的 receipt。
 
 可选目录 metadata 会报告 `scannedAt`、cache `expiresAt`、可选 `providerRevision`，以及 `cacheStatus` 是 `fresh` 还是 `cached`。明确刷新会替换完整索引，并绕过目录 HTTP cache 后重新扫描，而不只是重新加载可见页面。
 
@@ -68,6 +68,12 @@ GitHub 仓库链接仍可作为不可执行的来源信息显示，也可以用�
 5. 重启 DSH Desktop，让当前运行的进程不再使用已移除插件。
 
 卸载不需要 provider 保持在线，也不会重新请求原目录条目。没有 Market receipt、属于其他 profile，或安装后已被修改的插件，当前 MVP 都会拒绝移除。这种保守行为可以避免 Market 错误接管由其他工具维护的 package。
+
+## 禁用外部安装的插件
+
+没有合法匹配 Market receipt 的 active、可变 direct bundle 属于外部所有。点击**禁用**时，UI 只提交 Desktop 清单中的 generation-scoped 不透明 `bundleId`。Desktop 会签发短期 preview，并在持久化前再次核对 profile、精确 bundle、可变性和 receipt 边界。这个操作不会卸载 package，也不是安全沙箱；成功后需要重启。如果损坏的 bundle patch 已经导致当前启动失败，此功能无法救援这次失败的启动。
+
+Desktop 会把这个带版本、按 profile 隔离的选择保存在 `<Desktop user data>/plugin-management/state.json`，不会修改 profile 的 `package.json`、lockfile、依赖树或 `dsh.profile.bundles` 清单。
 
 ## 这些检查不能证明什么
 
