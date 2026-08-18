@@ -2,7 +2,7 @@
 
 [English](faq.en.md)
 
-本页回答当前正式版本最常见的安装、平台、运行环境和插件问题。功能范围以[最新 GitHub Release](https://github.com/anywhere-labs/deepseek-harness-desktop/releases/latest)和[用户指南](user-guide.md)为准。
+本页回答当前正式版本最常见的安装、平台、运行环境和插件问题。功能范围以[最新 GitHub Release](https://github.com/picoaide/picoaide-harness/releases/latest)和[用户指南](user-guide.md)为准。
 
 ## DSH Desktop 是什么？
 
@@ -46,4 +46,4 @@ Desktop Host、profile 和 DSH home 位于本机。是否向外部服务发送�
 
 ## 在哪里下载和报告问题？
 
-从[项目下载页](https://www.dshdesktop.cn/)或[最新 GitHub Release](https://github.com/anywhere-labs/deepseek-harness-desktop/releases/latest)下载安装包。遇到问题时先查看[用户指南的排查部分](user-guide.md#排查)，仍无法解决再提交 [GitHub Issue](https://github.com/anywhere-labs/deepseek-harness-desktop/issues/new/choose)，并附上操作系统、应用版本、复现步骤和错误信息。
+从[项目下载页](https://www.dshdesktop.cn/)或[最新 GitHub Release](https://github.com/picoaide/picoaide-harness/releases/latest)下载安装包。遇到问题时先查看[用户指南的排查部分](user-guide.md#排查)，仍无法解决再提交 [GitHub Issue](https://github.com/picoaide/picoaide-harness/issues/new/choose)，并附上操作系统、应用版本、复现步骤和错误信息。
