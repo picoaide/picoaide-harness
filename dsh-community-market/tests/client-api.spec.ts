@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readMarketState } from '../src/client/api.js'
+import { readMarketCatalog, readMarketState } from '../src/client/api.js'
 
 afterEach(() => { vi.unstubAllGlobals() })
 
@@ -30,5 +30,25 @@ describe('community market client API', () => {
     })))
 
     await expect(readMarketState()).rejects.toThrow('market state unavailable')
+  })
+
+  it('builds a normalized catalog query with the active locale', async () => {
+    const body = { query: {}, results: [], fetchedAt: '2026-08-18T04:00:00.000Z' }
+    const request = vi.fn(async () => new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', request)
+    const controller = new AbortController()
+
+    await expect(readMarketCatalog('  sidebar  ', 'zh-CN', controller.signal)).resolves.toEqual(body)
+    const [url, init] = request.mock.calls[0]!
+    expect(url).toBeInstanceOf(URL)
+    expect((url as URL).pathname).toBe('/api/community-market/catalog')
+    expect(Object.fromEntries((url as URL).searchParams)).toEqual({
+      q: 'sidebar',
+      limit: '20',
+      locale: 'zh-CN',
+    })
+    expect(init).toEqual({ cache: 'no-store', signal: controller.signal })
   })
 })
