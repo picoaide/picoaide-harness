@@ -53,4 +53,42 @@ describe('standard HTTP catalog adapter', () => {
       locale: 'zh-CN',
     })
   })
+
+  it('projects provider metadata and binds every item to its local source', async () => {
+    const finalUrl = 'https://cdn.plugins.example.org/catalog/page-1.json'
+    const getJson = vi.fn<CatalogHttpClient['getJson']>()
+      .mockResolvedValueOnce({
+        value: fixture('../docs/examples/catalog-source.example.json'),
+        finalUrl: source.manifestUrl!,
+      })
+      .mockResolvedValueOnce({
+        value: fixture('../docs/examples/catalog-provider-page.example.json'),
+        finalUrl,
+      })
+
+    const snapshot = await standardHttpAdapter.fetch({}, {
+      source,
+      signal: new AbortController().signal,
+      http: { getJson },
+    })
+
+    expect(snapshot.source).toMatchObject({
+      sourceRecordId: source.sourceRecordId,
+      providerId: source.providerId,
+      adapterId: standardHttpAdapter.adapterId,
+      registrationKind: 'user-added',
+      finalUrl,
+      providerGeneratedAt: '2026-08-17T08:00:00Z',
+      providerRevision: '2026-08-17T08:00:00Z',
+    })
+    expect(snapshot.items[0]).toMatchObject({
+      id: 'better-sidebar',
+      provenance: {
+        sourceRecordId: source.sourceRecordId,
+        providerId: source.providerId,
+        itemId: 'better-sidebar',
+      },
+    })
+    expect(snapshot.page).toEqual({ nextCursor: 'page_2', total: 42 })
+  })
 })
