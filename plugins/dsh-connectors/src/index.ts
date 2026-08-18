@@ -104,7 +104,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     })
   }
 
-  /** Render static headers: `${FIELD}` templates from credential fields, empty Authorization -> Bearer token. */
+  /** Render request headers: static `${FIELD}` templates from credential fields, empty Authorization -> Bearer token, and the default Bearer injection for OAuth/token credentials. */
   const renderHeaders = (server: ConnectorMcp, credential: ConnectorCredential | null): Record<string, string> => {
     const headers: Record<string, string> = {}
     for (const [name, value] of Object.entries(server.headers ?? {})) {
@@ -113,6 +113,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         continue
       }
       headers[name] = value.replace(/\$\{([^}]+)\}/g, (_, key: string) => credential?.fields?.[key] ?? '')
+    }
+    // OAuth/token connectors without static headers still authenticate with
+    // the stored access token.
+    if (Object.keys(headers).length === 0 && credential?.accessToken) {
+      headers.Authorization = `Bearer ${credential.accessToken}`
     }
     return headers
   }
