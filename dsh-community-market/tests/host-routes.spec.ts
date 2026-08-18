@@ -320,4 +320,23 @@ describe('community market Host routes', () => {
       await server.close()
     }
   })
+
+  it('rejects an unsafe standard manifest URL before making a network request', async () => {
+    const getJson = vi.spyOn(restrictedHttpClient, 'getJson')
+    const server = await startMarketServer([])
+    try {
+      const response = await mutateSource(server, {
+        action: 'add-standard',
+        manifestUrl: 'https://plugins.example.org/catalog-source.json?token=secret',
+      })
+
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toEqual({
+        error: 'manifest URL must be credential-free HTTPS',
+      })
+      expect(getJson).not.toHaveBeenCalled()
+    } finally {
+      await server.close()
+    }
+  })
 })
