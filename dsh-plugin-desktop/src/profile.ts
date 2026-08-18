@@ -29,6 +29,10 @@ import FileSettingsProvider, {
 import { parseDocument } from 'yaml'
 import { unpackedAsarPath } from './packaged-runtime-path.ts'
 import type { DesktopShellMode } from './runtime.ts'
+import {
+  activeDesktopProfileLayers,
+  readDesktopDisabledBundles,
+} from './desktop-plugins.ts'
 
 /** Persistent profile managed by the desktop launcher and the ordinary dsh plugin command. */
 export const DESKTOP_PROFILE_NAME = 'desktop'
@@ -330,6 +334,7 @@ function omitUnresolvedOptionalEntries(
  * @param home - Harness home containing profiles and the machine-wide patch.
  * @param platform - native platform selecting launcher-owned safety overlays.
  * @param profileName - existing or lazily available Web profile to compose.
+ * @param pluginStatePath - optional Desktop-private disabled-bundle state.
  * @returns root config, profile metadata, and ordered patches.
  */
 export function prepareDesktopProfile(
@@ -337,12 +342,16 @@ export function prepareDesktopProfile(
   home: string = resolveDshHome(),
   platform: NodeJS.Platform = process.platform,
   profileName: string = DESKTOP_PROFILE_NAME,
+  pluginStatePath?: string,
 ): PreparedDesktopProfile {
   const profileDir = profileName === DESKTOP_PROFILE_NAME
     ? ensureDesktopProfile(home)
     : resolveProfileDir(profileName, home)
   healProfilesModuleFallback(INSTALL_ANCHOR, home)
   const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
+  const disabledBundles = pluginStatePath === undefined
+    ? new Set<string>()
+    : readDesktopDisabledBundles(pluginStatePath, profileName)
   const rootConfig = join(profileDir, DESKTOP_PROFILE_ROOT)
   const bareModuleBaseUrl = pathToFileURL(join(profile.dir, 'package.json')).href
   writeFileSync(rootConfig, '[]\n')
@@ -350,7 +359,7 @@ export function prepareDesktopProfile(
   const desktopPatches = loadOverlayPatches(BIN_NAME, DESKTOP_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
   let desktopLayerInserted = false
-  for (const layer of profile.layers) {
+  for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
     bundlePatches.push(...layer.patches)
     if (layer.packageName !== '@deepseek-ai/dsh-web-app') continue
     bundlePatches.push(...desktopPatches)

@@ -47,7 +47,12 @@ import {
 } from './profile-manager.ts'
 import { DesktopProfileService } from './profile-service.ts'
 import { DesktopActionsService } from './desktop-actions.ts'
-import { prepareDesktopProfile, type SkippedOptionalEntry } from './profile.ts'
+import { DesktopPluginsService } from './desktop-plugins.ts'
+import {
+  desktopInstallAnchor,
+  prepareDesktopProfile,
+  type SkippedOptionalEntry,
+} from './profile.ts'
 import type { DesktopPnpmBootstrap } from './pnpm.ts'
 import {
   createDesktopExitCoordinator,
@@ -287,6 +292,7 @@ async function start(): Promise<void> {
     const releasePnpmRuntime = (): void => { pnpmRuntime.dispose() }
     disposePnpmRuntime = releasePnpmRuntime
     const selectionStatePath = join(app.getPath('userData'), 'profile-selection', 'state.json')
+    const pluginManagementStatePath = join(app.getPath('userData'), 'plugin-management', 'state.json')
     profileStatePath = selectionStatePath
     profileStartup = beginDesktopProfileStartup(selectionStatePath, homeDir)
     const activeProfileName = profileStartup.profileName
@@ -295,6 +301,7 @@ async function start(): Promise<void> {
       homeDir,
       process.platform,
       activeProfileName,
+      pluginManagementStatePath,
     )
     const dshBootstrapPath = fileURLToPath(new URL('./desktop-cli.js', import.meta.url))
     const dshRuntime = process.platform === 'win32'
@@ -349,6 +356,12 @@ async function start(): Promise<void> {
         await hostCtx.plugin(DesktopActionsService, {
           openTerminal: () => { runtime.openTerminal() },
           requestRestart: () => runtime.requestRestart(),
+        })
+        await hostCtx.plugin(DesktopPluginsService, {
+          profileName: activeProfileName,
+          homeDir,
+          statePath: pluginManagementStatePath,
+          installAnchor: desktopInstallAnchor(),
         })
         if (logSink !== undefined) {
           fileExporter = new FileExporter(logSink)
