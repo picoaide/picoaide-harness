@@ -386,4 +386,27 @@ describe('community market overlay', () => {
     expect(screen.getByRole('dialog')).toBeTruthy()
     expect(input).toHaveProperty('value', 'https://plugins.example.org/broken.json')
   })
+
+  it('opens plugin details and forwards the repository link safely', async () => {
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : response(catalogWithItem)
+    ))
+    vi.stubGlobal('fetch', request)
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+    fireEvent.click(screen.getByText('Better Sidebar').closest('button')!)
+
+    expect(screen.getByRole('complementary', { name: 'details' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'repository' }))
+    expect(open).toHaveBeenCalledWith('https://github.com/example/better-sidebar', '_blank', 'noopener,noreferrer')
+
+    const closeButtons = screen.getAllByRole('button', { name: 'close' })
+    fireEvent.click(closeButtons[1]!)
+    expect(screen.queryByRole('complementary', { name: 'details' })).toBeNull()
+    open.mockRestore()
+  })
 })
