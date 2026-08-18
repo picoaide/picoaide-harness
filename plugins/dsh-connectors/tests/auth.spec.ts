@@ -136,9 +136,12 @@ describe('connector auth', () => {
       },
       signal: new AbortController().signal,
     })
-    expect(requests.length).toBe(1)
-    expect(requests[0]?.verificationUrl).toBe('https://login.dingtalk.com/oauth2/device/verify.htm')
-    expect(requests[0]?.userCode).toBe('CCBP-BNLQ')
+    // The URL and the code may arrive in separate stdout chunks, each
+    // triggering a request event; the last one carries the complete pair.
+    expect(requests.length).toBeGreaterThanOrEqual(1)
+    const last = requests[requests.length - 1]
+    expect(last?.verificationUrl).toBe('https://login.dingtalk.com/oauth2/device/verify.htm')
+    expect(last?.userCode).toBe('CCBP-BNLQ')
     expect(patch.updatedAt).toBeTruthy()
   })
 
