@@ -226,4 +226,26 @@ describe('community market overlay', () => {
     expect(await screen.findByText('Better Sidebar')).toBeTruthy()
     expect(request).toHaveBeenCalledTimes(4)
   })
+
+  it('keeps successful cards visible when one catalog source fails', async () => {
+    const partialCatalog: MarketCatalogResponse = {
+      ...catalogWithItem,
+      results: [
+        ...catalogWithItem.results,
+        { source, stale: false, error: 'source unavailable' },
+      ],
+    }
+    const request = vi.fn<typeof fetch>(async (input) => (
+      String(input).includes('/state') ? response(stateWithSource) : response(partialCatalog)
+    ))
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+
+    expect(await screen.findByText('Better Sidebar')).toBeTruthy()
+    expect(screen.getByText('partialFailure')).toBeTruthy()
+    expect(screen.getByText('Adds a configurable sidebar panel.')).toBeTruthy()
+  })
 })
