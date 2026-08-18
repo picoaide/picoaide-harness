@@ -665,24 +665,31 @@ export function registerMarketRoutes(
         if (sourceRecordIds.length > 1 || cursors.length > 1 || cursors.length > sourceRecordIds.length) {
           throw new Error('catalog cursor requires exactly one source record')
         }
-        const scope: CatalogFetchScope | undefined = sourceRecordIds.length === 0
+        const catalogScope: CatalogFetchScope | undefined = sourceRecordIds.length === 0
           ? undefined
           : {
               sourceRecordId: sourceRecordIds[0]!,
               ...(cursors.length === 0 ? {} : { cursor: cursors[0]! }),
             }
+        // Reject cursors scoped to an unknown or inactive source before any
+        // network scan: the scope must name one of the currently enabled sources.
+        if (catalogScope !== undefined && !scope.get().sources.some(source =>
+          source.sourceRecordId === catalogScope!.sourceRecordId && source.enabled !== false,
+        )) {
+          throw new Error('catalog source is not active')
+        }
         const index = await service.scanCatalog(signal, {
           force,
           ...(locale === null || locale === '' ? {} : { locale }),
         })
         signal.throwIfAborted()
-        const results = index === undefined ? [] : service.queryCatalog(index, query, scope)
-        const responseQuery = scope === undefined
+        const results = index === undefined ? [] : service.queryCatalog(index, query, catalogScope)
+        const responseQuery = catalogScope === undefined
           ? query
           : {
               ...query,
-              sourceRecordId: scope.sourceRecordId,
-              ...(scope.cursor === undefined ? {} : { cursor: scope.cursor }),
+              sourceRecordId: catalogScope.sourceRecordId,
+              ...(catalogScope.cursor === undefined ? {} : { cursor: catalogScope.cursor }),
             }
         const response: MarketCatalogResponse = {
           query: responseQuery,
