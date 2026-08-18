@@ -362,4 +362,28 @@ describe('community market overlay', () => {
     })
     expect(screen.getByText('Example Catalog')).toBeTruthy()
   })
+
+  it('keeps the standard source dialog open when adding fails', async () => {
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes('/state')) return response(stateWithSource)
+      if (url.includes('/catalog')) return response(catalogWithItem)
+      return response({ error: 'source offline' }, 400)
+    })
+    vi.stubGlobal('fetch', request)
+    const controller = new MarketController()
+
+    render(<MarketOverlay {...props(controller)} />)
+    controller.open()
+    await screen.findByText('Better Sidebar')
+    fireEvent.click(screen.getByRole('button', { name: 'sources' }))
+    fireEvent.click(screen.getByRole('button', { name: 'addStandard' }))
+    const input = screen.getByLabelText('standardSource')
+    fireEvent.change(input, { target: { value: 'https://plugins.example.org/broken.json' } })
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAdd' }))
+
+    expect((await screen.findAllByText('source offline')).length).toBe(2)
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(input).toHaveProperty('value', 'https://plugins.example.org/broken.json')
+  })
 })
