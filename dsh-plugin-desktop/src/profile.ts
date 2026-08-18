@@ -1,6 +1,6 @@
 /** Compatibility profile composition over the official Web bundle and user plugins. */
 
-import { createRequire } from 'node:module'
+import { createRequire, findPackageJSON } from 'node:module'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -29,6 +29,10 @@ import FileSettingsProvider, {
 import { parseDocument } from 'yaml'
 import { unpackedAsarPath } from './packaged-runtime-path.ts'
 import type { DesktopShellMode } from './runtime.ts'
+import {
+  activeDesktopProfileLayers,
+  readDesktopDisabledBundles,
+} from './desktop-plugins.ts'
 
 /** Persistent profile managed by the desktop launcher and the ordinary dsh plugin command. */
 export const DESKTOP_PROFILE_NAME = 'desktop'
@@ -42,6 +46,7 @@ export const DESKTOP_PROFILE_ROOT = 'cordis.yml'
 const BIN_NAME = DESKTOP_PACKAGE_NAME
 const REQUIRED_BUNDLES = requiredWebBundles()
 const REQUIRED_BUNDLE_SET = new Set(REQUIRED_BUNDLES)
+const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
 const INSTALL_ANCHOR = unpackedAsarPath(fileURLToPath(new URL('../package.json', import.meta.url)))
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
@@ -54,7 +59,12 @@ const PWSH_SANDBOX_ROW_ID = 'pwsh-sandbox'
 const UPSTREAM_PWSH_SANDBOX_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = 'dsh-plugin-desktop/windows-pwsh-sandbox'
+const AGENT_PRESETS_ROW_ID = 'agent-presets'
+const UPSTREAM_AGENT_PRESETS_PACKAGE = '@deepseek-ai/dsh-agent-presets'
+const DESKTOP_WINDOWS_AGENT_PRESETS_ROW_ID = 'desktop-windows-agent-presets'
+const DESKTOP_WINDOWS_AGENT_PRESETS_PACKAGE = 'dsh-plugin-desktop/windows-agent-presets'
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
+const DEFAULT_DESKTOP_PORT = 0
 const SETTINGS_FILE_PACKAGE = '@deepseek-ai/dsh-settings-file'
 const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
 const UI_LAYOUT_PACKAGE = '@deepseek-ai/dsh-client-ui-layout'
@@ -72,35 +82,61 @@ export function parseDesktopShellMode(value: unknown): DesktopShellMode {
   throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.mode must be "compatibility" or "advanced"`)
 }
 
+/** Parse the requested loopback Web port and reject values Node cannot listen on. */
+export function parseDesktopPort(value: unknown): number {
+  if (value === undefined) return DEFAULT_DESKTOP_PORT
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 65_535) return value
+  throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.port must be an integer from 0 through 65535`)
+}
+
+/** Startup settings projected into the Loader graph before the settings plugin boots. */
+export interface DesktopStartupSettings {
+  mode: DesktopShellMode
+  port: number
+}
+
 /**
- * Read a desktop mode from one parsed settings document.
+ * Read Desktop startup settings from one parsed settings document.
  * @param document - untrusted settings document root.
- * @returns the selected mode, defaulting to compatibility when absent.
+ * @returns validated mode and port defaults for the next generation.
  */
-export function desktopShellModeFromSettings(document: unknown): DesktopShellMode {
+export function desktopStartupSettingsFromSettings(document: unknown): DesktopStartupSettings {
   if (typeof document !== 'object' || document === null || Array.isArray(document)) {
     throw new Error(`${BIN_NAME}: settings document must be a map of namespace sections`)
   }
   const section = (document as Record<string, unknown>)[DESKTOP_SETTINGS_NAMESPACE]
-  if (section === undefined) return DEFAULT_DESKTOP_SHELL_MODE
+  if (section === undefined) {
+    return { mode: DEFAULT_DESKTOP_SHELL_MODE, port: DEFAULT_DESKTOP_PORT }
+  }
   if (typeof section !== 'object' || section === null || Array.isArray(section)) {
     throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE} settings must be a map`)
   }
-  return parseDesktopShellMode((section as Record<string, unknown>).mode)
+  const values = section as Record<string, unknown>
+  return {
+    mode: parseDesktopShellMode(values.mode),
+    port: parseDesktopPort(values.port),
+  }
+}
+
+/** Read only the shell mode from one parsed settings document. */
+export function desktopShellModeFromSettings(document: unknown): DesktopShellMode {
+  return desktopStartupSettingsFromSettings(document).mode
 }
 
 /**
- * Read startup mode from the same file resolved by the settings provider.
+ * Read startup settings from the same file resolved by the settings provider.
  * @param config - validated settings-file row config.
- * @returns the mode projected into the startup Loader graph.
+ * @returns the values projected into the startup Loader graph.
  */
-export function readDesktopShellMode(config: SettingsFileConfig): DesktopShellMode {
+export function readDesktopStartupSettings(config: SettingsFileConfig): DesktopStartupSettings {
   const spec = resolveSettingsFileSpec(config)
   let text: string
   try {
     text = readFileSync(spec.filename, 'utf8')
   } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_DESKTOP_SHELL_MODE
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { mode: DEFAULT_DESKTOP_SHELL_MODE, port: DEFAULT_DESKTOP_PORT }
+    }
     throw cause
   }
   let document: unknown
@@ -113,7 +149,12 @@ export function readDesktopShellMode(config: SettingsFileConfig): DesktopShellMo
   } else {
     document = text.trim().length === 0 ? {} : JSON.parse(text)
   }
-  return desktopShellModeFromSettings(document)
+  return desktopStartupSettingsFromSettings(document)
+}
+
+/** Read only the shell mode from the settings provider's resolved file. */
+export function readDesktopShellMode(config: SettingsFileConfig): DesktopShellMode {
+  return readDesktopStartupSettings(config).mode
 }
 
 /** Resolve the public Web template once and reject an incompatible DSH release. */
@@ -137,8 +178,20 @@ export interface PreparedDesktopProfile {
   bareModuleBaseUrl: string
   /** Complete ordered patch list for this desktop generation. */
   patches: PatchOptions[]
+  /** Optional Client UI entries skipped because this profile cannot resolve them. */
+  skippedOptionalEntries: SkippedOptionalEntry[]
   /** Persisted shell mode applied after every user-owned patch. */
   mode: DesktopShellMode
+  /** Persisted loopback Web port applied to every startup consumer. */
+  port: number
+}
+
+/** User patch entry skipped to keep a profile bootable. */
+export interface SkippedOptionalEntry {
+  /** Loader row id from the skipped entry. */
+  id?: string
+  /** Package name from the skipped entry. */
+  name: string
 }
 
 /**
@@ -147,7 +200,9 @@ export interface PreparedDesktopProfile {
  * @returns base, Web carrier, then every third-party bundle in prior order.
  */
 export function desktopBundleList(current: readonly string[]): string[] {
-  const thirdParty = current.filter(name => !REQUIRED_BUNDLE_SET.has(name) && name !== DESKTOP_PACKAGE_NAME)
+  const thirdParty = current.filter(name => !REQUIRED_BUNDLE_SET.has(name)
+    && name !== DESKTOP_PACKAGE_NAME
+    && !OBSOLETE_DESKTOP_BUNDLE_SET.has(name))
   return [...REQUIRED_BUNDLES, ...thirdParty]
 }
 
@@ -188,9 +243,11 @@ export function ensureDesktopProfile(home: string = resolveDshHome()): string {
 }
 
 /** Resolve the agent presets shipped by the matching dsh CLI dependency. */
-function shippedPresetRoot(): string {
-  const require = createRequire(import.meta.url)
-  return join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
+export function shippedPresetRoot(moduleUrl: string = import.meta.url): string {
+  const require = createRequire(moduleUrl)
+  return unpackedAsarPath(
+    join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets'),
+  )
 }
 
 /** Read a row's object config without trusting arbitrary YAML values. */
@@ -214,12 +271,88 @@ function rowDisabledOnPlatform(row: EntryOptions, platform: NodeJS.Platform): bo
   return Boolean(evaluate({ process: scopedProcess }, row.disabled.__jsExpr))
 }
 
+/** Reject duplicate entries before the Loader turns them into a startup crash. */
+function assertUniqueEntryIds(rows: readonly EntryOptions[]): void {
+  const seen = new Set<string>()
+  for (const row of rows) {
+    if (typeof row.id === 'string') {
+      if (seen.has(row.id)) {
+        throw new Error(`${BIN_NAME}: duplicate loader entry id "${row.id}" in the composed profile`)
+      }
+      seen.add(row.id)
+    }
+    if (row.group === true && Array.isArray(row.config)) {
+      assertUniqueEntryIds(row.config)
+    }
+  }
+}
+
+/** Find one package manifest using the selected profile's dependency graph. */
+function packageManifestFromProfile(name: string, profilePackageUrl: string): string | undefined {
+  try {
+    return findPackageJSON(name, profilePackageUrl)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') return undefined
+    throw cause
+  }
+}
+
+/** Return whether a Loader specifier names an npm package. */
+function isBarePackageSpecifier(name: string): boolean {
+  return !name.startsWith('.')
+    && !name.startsWith('/')
+    && !name.startsWith('#')
+    && !URL.canParse(name)
+}
+
+/** Return whether a package is a user-facing Client UI extension, not a Host provider. */
+function isOptionalClientPackage(name: string): boolean {
+  return /^(@[^/]+\/)?dsh-client-ui-/u.test(name)
+}
+
+/** Drop unresolved optional Client UI rows from the machine-wide patch only. */
+function omitUnresolvedOptionalEntries(
+  patches: PatchOptions[],
+  profilePackageUrl: string,
+): { patches: PatchOptions[], skipped: SkippedOptionalEntry[] } {
+  const skipped: SkippedOptionalEntry[] = []
+
+  const filterRows = (rows: EntryOptions[]): EntryOptions[] => {
+    const filtered: EntryOptions[] = []
+    for (const row of rows) {
+      if (typeof row.name === 'string'
+        && isBarePackageSpecifier(row.name)
+        && isOptionalClientPackage(row.name)
+        && packageManifestFromProfile(row.name, profilePackageUrl) === undefined) {
+        skipped.push({
+          ...(typeof row.id === 'string' ? { id: row.id } : {}),
+          name: row.name,
+        })
+        continue
+      }
+      const config = row.group === true && Array.isArray(row.config) ? filterRows(row.config) : undefined
+      filtered.push(config === undefined ? row : { ...row, config })
+    }
+    return filtered
+  }
+
+  return {
+    patches: patches.flatMap((patch) => {
+      if (!Array.isArray(patch.insert)) return [patch]
+      const insert = filterRows(patch.insert)
+      return [{ ...patch, insert }]
+    }),
+    skipped,
+  }
+}
+
 /**
  * Load and compose one desktop profile generation.
  * @param telemetryDisabled - inherited DSH telemetry opt-out value.
  * @param home - Harness home containing profiles and the machine-wide patch.
  * @param platform - native platform selecting launcher-owned safety overlays.
  * @param profileName - existing or lazily available Web profile to compose.
+ * @param pluginStatePath - optional Desktop-private disabled-bundle state.
  * @returns root config, profile metadata, and ordered patches.
  */
 export function prepareDesktopProfile(
@@ -227,12 +360,16 @@ export function prepareDesktopProfile(
   home: string = resolveDshHome(),
   platform: NodeJS.Platform = process.platform,
   profileName: string = DESKTOP_PROFILE_NAME,
+  pluginStatePath?: string,
 ): PreparedDesktopProfile {
   const profileDir = profileName === DESKTOP_PROFILE_NAME
     ? ensureDesktopProfile(home)
     : resolveProfileDir(profileName, home)
   healProfilesModuleFallback(INSTALL_ANCHOR, home)
   const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
+  const disabledBundles = pluginStatePath === undefined
+    ? new Set<string>()
+    : readDesktopDisabledBundles(pluginStatePath, profileName)
   const rootConfig = join(profileDir, DESKTOP_PROFILE_ROOT)
   const bareModuleBaseUrl = pathToFileURL(join(profile.dir, 'package.json')).href
   writeFileSync(rootConfig, '[]\n')
@@ -242,7 +379,7 @@ export function prepareDesktopProfile(
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
   let desktopLayerInserted = false
-  for (const layer of profile.layers) {
+  for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
     bundlePatches.push(...layer.patches)
     if (layer.packageName !== '@deepseek-ai/dsh-web-app') continue
     bundlePatches.push(...desktopPatches)
@@ -254,14 +391,20 @@ export function prepareDesktopProfile(
     throw new Error(`${BIN_NAME}: desktop profile is missing @deepseek-ai/dsh-web-app`)
   }
 
-  const homePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
+  const loadedHomePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
+  const { patches: homePatches, skipped: skippedOptionalEntries } = omitUnresolvedOptionalEntries(
+    loadedHomePatches,
+    bareModuleBaseUrl,
+  )
   const patches: PatchOptions[] = [
     ...bundlePatches,
     ...profile.patches,
     ...homePatches,
   ]
+  const composedRows = composeEntries([patches])
+  assertUniqueEntryIds(composedRows)
   const rows = new Map<string, EntryOptions>()
-  for (const row of composeEntries([patches])) {
+  for (const row of composedRows) {
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
   const settings = rows.get('settings')
@@ -272,7 +415,7 @@ export function prepareDesktopProfile(
     dshHome: home,
     ...rowConfig(settings),
   } as SettingsFileConfig)
-  const mode = readDesktopShellMode(settingsConfig)
+  const { mode, port } = readDesktopStartupSettings(settingsConfig)
   patches.push({
     id: 'settings',
     config: settingsConfig,
@@ -293,15 +436,32 @@ export function prepareDesktopProfile(
       { id: 'ui-conversation', disabled: false },
     )
   }
-  const presets = rows.get('agent-presets')
+  const presets = rows.get(AGENT_PRESETS_ROW_ID)
   if (presets !== undefined) {
-    patches.push({
-      id: 'agent-presets',
-      config: {
-        ...rowConfig(presets),
-        roots: [{ path: shippedPresetRoot(), trust: 'system' }],
-      },
-    })
+    const config = {
+      ...rowConfig(presets),
+      roots: [{ path: shippedPresetRoot(), trust: 'system' }],
+    }
+    if (platform === 'win32'
+      && presets.name === UPSTREAM_AGENT_PRESETS_PACKAGE
+      && !rowDisabledOnPlatform(presets, platform)) {
+      patches.push(
+        {
+          id: AGENT_PRESETS_ROW_ID,
+          name: UPSTREAM_AGENT_PRESETS_PACKAGE,
+          disabled: true,
+        },
+        {
+          insert: [{
+            id: DESKTOP_WINDOWS_AGENT_PRESETS_ROW_ID,
+            name: DESKTOP_WINDOWS_AGENT_PRESETS_PACKAGE,
+            config,
+          }],
+        },
+      )
+    } else {
+      patches.push({ id: AGENT_PRESETS_ROW_ID, config })
+    }
   }
   if (!rows.has('webserver')) {
     throw new Error(`${BIN_NAME}: desktop profile has no webserver row`)
@@ -355,7 +515,7 @@ export function prepareDesktopProfile(
   patches.push({
     id: 'webserver',
     disabled: false,
-    config: { host: '127.0.0.1', port: 0 },
+    config: { host: '127.0.0.1', port },
   })
   if ((telemetryDisabled ?? '') !== '' && rows.has('session-telemetry-otel')) {
     patches.push({ id: 'session-telemetry-otel', disabled: true })
@@ -370,6 +530,7 @@ export function prepareDesktopProfile(
     config: {
       ...rowConfig(desktopShell),
       mode,
+      port,
     },
   })
   return {
@@ -378,7 +539,9 @@ export function prepareDesktopProfile(
     rootConfig,
     bareModuleBaseUrl,
     patches: structuredClone(patches),
+    skippedOptionalEntries,
     mode,
+    port,
   }
 }
 

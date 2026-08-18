@@ -16,6 +16,8 @@ const upstream = readJson('upstream.json')
 const plugin = readJson('dsh-plugin-desktop/package.json')
 const enterprise = readJson('plugins/dsh-enterprise/package.json')
 const connectors = readJson('plugins/dsh-connectors/package.json')
+const fabric = readJson('dsh-community-fabric/package.json')
+const market = readJson('dsh-community-market/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
@@ -25,14 +27,32 @@ const noteRecordPath = `${noteDirectory}/${noteName}.i18n.yaml`
 if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
-if (JSON.stringify(workspace.workspaces) !== JSON.stringify(['dsh-plugin-desktop', 'plugins/dsh-enterprise', 'plugins/dsh-connectors'])) {
-  fail('the root Yarn workspace must contain only dsh-plugin-desktop, plugins/dsh-enterprise and plugins/dsh-connectors')
+if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
+  'dsh-plugin-desktop',
+  'plugins/dsh-enterprise',
+  'plugins/dsh-connectors',
+  'dsh-community-fabric',
+  'dsh-community-market',
+])) {
+  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, community-fabric, and community-market packages')
 }
-if (plugin.packageManager !== undefined) {
-  fail('dsh-plugin-desktop must inherit the root Yarn release')
+for (const [name, manifest] of [
+  ['dsh-plugin-desktop', plugin],
+  ['dsh-community-fabric', fabric],
+  ['dsh-community-market', market],
+]) {
+  if (manifest.packageManager !== undefined) fail(`${name} must inherit the root Yarn release`)
 }
+if (fabric.name !== 'dsh-community-fabric') fail('the Fabric workspace must own dsh-community-fabric')
+if (market.name !== 'dsh-community-market') fail('the market workspace must own dsh-community-market')
 const claudePath = resolve(root, 'CLAUDE.md')
-if (!lstatSync(claudePath).isSymbolicLink() || readlinkSync(claudePath) !== 'AGENTS.md') {
+const claudeStat = lstatSync(claudePath)
+// Windows checkouts materialize the symlink as a regular file holding the
+// target name; accept both forms so the pointer stays verified on every host.
+const claudeTarget = claudeStat.isSymbolicLink()
+  ? readlinkSync(claudePath)
+  : readFileSync(claudePath, 'utf8').trim()
+if (claudeTarget !== 'AGENTS.md') {
   fail('CLAUDE.md must link to the outer repository AGENTS.md')
 }
 for (const legacyFile of [
@@ -40,6 +60,10 @@ for (const legacyFile of [
   'pnpm-workspace.yaml',
   'dsh-plugin-desktop/pnpm-lock.yaml',
   'dsh-plugin-desktop/pnpm-workspace.yaml',
+  'dsh-community-fabric/pnpm-lock.yaml',
+  'dsh-community-fabric/pnpm-workspace.yaml',
+  'dsh-community-market/pnpm-lock.yaml',
+  'dsh-community-market/pnpm-workspace.yaml',
 ]) {
   if (existsSync(resolve(root, legacyFile))) fail(`${legacyFile} must not exist`)
 }
@@ -53,7 +77,14 @@ if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packa
   fail('the upstream checkout must retain its pnpm package manager')
 }
 
-for (const [owner, manifest] of [['root', workspace], ['plugin', plugin], ['enterprise', enterprise]]) {
+for (const [owner, manifest] of [
+  ['root', workspace],
+  ['desktop', plugin],
+  ['enterprise', enterprise],
+  ['connectors', connectors],
+  ['fabric', fabric],
+  ['market', market],
+]) {
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'resolutions']) {
     for (const [name, range] of Object.entries(manifest[field] ?? {})) {
       if (typeof range !== 'string') continue
@@ -82,7 +113,7 @@ if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.reposi
 if (upstreamPackage.version !== upstream.sourceVersion) {
   fail('deepseek-harness package version differs from upstream.json')
 }
-for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise], ['connectors', connectors]]) {
+for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise], ['connectors', connectors], ['market', market]]) {
   const deps = { ...(manifest.dependencies ?? {}), ...(manifest.peerDependencies ?? {}) }
   for (const name of Object.keys(deps).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
     if (deps[name] !== upstream.runtimePackageVersion) {
@@ -93,10 +124,21 @@ for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise],
 
 const noteRecord = readFileSync(resolve(root, noteRecordPath), 'utf8')
 for (const notePath of notePaths) {
-  const expected = run('git', ['hash-object', '--', notePath])
+  // Hash the committed blob, not the working tree: checkout line endings
+  // differ per host, while HEAD:<path> is identical everywhere.
+  const expected = run('git', ['rev-parse', `HEAD:${notePath}`])
   const recordLine = `${basename(notePath)}: ${expected}`
-  if (!noteRecord.split('\n').includes(recordLine)) {
+  if (!noteRecord.split(/\r?\n/u).includes(recordLine)) {
     fail(`${noteRecordPath} is stale for ${notePath}`)
+  }
+}
+
+const readmeRecord = readFileSync(resolve(root, 'README.i18n.yaml'), 'utf8')
+for (const readmeName of ['README.md', 'README.en.md']) {
+  const expected = run('git', ['rev-parse', `HEAD:${readmeName}`])
+  const recordLine = `${readmeName}: ${expected}`
+  if (!readmeRecord.split(/\r?\n/u).includes(recordLine)) {
+    fail(`README.i18n.yaml is stale for ${readmeName}`)
   }
 }
 
