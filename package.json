@@ -12,6 +12,7 @@
     "dsh-plugin-desktop",
     "plugins/dsh-enterprise",
     "plugins/dsh-connectors",
+    "plugins/dsh-memory-evolve",
     "dsh-community-fabric",
     "dsh-community-market"
   ],
