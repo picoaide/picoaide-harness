@@ -1,19 +1,21 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
-import { ConnectorsList } from './ConnectorsSection.tsx'
+import { ConnectorTrigger } from './ConnectorTrigger.tsx'
 
 /**
- * Connectors client half: exports the connector list surface for the
- * connector center (rendered by the enterprise sidebar panel), and registers
- * one slash command per CONNECTED connector (`/<connector-id>`) so the `/`
- * menu only shows connectors you can act on. Picking an example prompt sends
- * it to the session — the model then calls the connector's injected MCP tools.
+ * Connectors client half: registers the connector center foot action in the
+ * sidebar (its modal renders the connector list and drives the auth flows),
+ * and registers one slash command per CONNECTED connector (`/<connector-id>`)
+ * so the `/` menu only shows connectors you can act on. Picking an example
+ * prompt sends it to the session — the model then calls the connector's
+ * injected MCP tools.
  */
 export const name = 'pico-connectors-client'
 
-export const inject = ['commandUi', 'sessions']
+export const inject = ['commandUi', 'sessions', 'slots']
 
 interface ConnectorEntry {
   id: string
@@ -25,6 +27,15 @@ interface ConnectorEntry {
 const POLL_INTERVAL_MS = 3000
 
 export function apply(ctx: ClientContext): void {
+  ctx.effect(
+    () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+      name: 'sidebar.footer.action',
+      id: 'connector-center',
+      order: 0,
+    }, ConnectorTrigger)),
+    'connectors: connector center foot action',
+  )
+
   const commandUi = ctx.get('commandUi') as CommandUiContract
   const sessions = ctx.get('sessions') as { binding(sessionId: string): { session?: { prompt(content: Array<{ type: 'text'; text: string }>, mode: 'queue'): Promise<unknown> } } | undefined }
   const commandDisposers = new Map<string, () => void>()
@@ -86,5 +97,3 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'pico-connectors-client: per-connector slash commands')
 }
-
-export { ConnectorsList }

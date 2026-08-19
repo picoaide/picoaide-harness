@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({
 			justifyContent: "space-between",
 			gap: 8
 		};
-		const TITLE = {
+		const TITLE$1 = {
 			fontSize: 15,
 			margin: 0,
 			fontWeight: 600,
@@ -69,7 +69,7 @@ window.__ModuleLoader__.load({
 			color: "var(--dsw-alias-label-primary)",
 			fontSize: 13
 		};
-		const LABEL = {
+		const LABEL$1 = {
 			fontSize: 12,
 			margin: 0,
 			color: "var(--dsw-alias-label-caption)"
@@ -171,7 +171,7 @@ window.__ModuleLoader__.load({
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						style: HEAD,
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							style: TITLE,
+							style: TITLE$1,
 							title: entry.name,
 							children: entry.name
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
@@ -194,7 +194,7 @@ window.__ModuleLoader__.load({
 						},
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-								style: LABEL,
+								style: LABEL$1,
 								children: "请打开以下地址并登录授权："
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("a", {
@@ -209,7 +209,7 @@ window.__ModuleLoader__.load({
 								children: entry.request.verificationUrl
 							}),
 							entry.request.userCode && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
-								style: LABEL,
+								style: LABEL$1,
 								children: ["授权码：", entry.request.userCode]
 							})
 						]
@@ -221,7 +221,7 @@ window.__ModuleLoader__.load({
 							gap: 4
 						},
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							style: LABEL,
+							style: LABEL$1,
 							children: "授权页已在浏览器中打开；若未弹出请点击："
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("a", {
 							href: entry.request.authorizeUrl,
@@ -248,7 +248,7 @@ window.__ModuleLoader__.load({
 								gap: 4
 							},
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
-								style: LABEL,
+								style: LABEL$1,
 								htmlFor: `${entry.id}-${field.key}`,
 								children: [field.label, field.required ? " *" : ""]
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
@@ -271,7 +271,7 @@ window.__ModuleLoader__.load({
 						})]
 					}),
 					polling && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						style: LABEL,
+						style: LABEL$1,
 						children: "等待授权完成…"
 					}),
 					entry.error && !isConnected && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
@@ -380,7 +380,7 @@ window.__ModuleLoader__.load({
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 							style: {
-								...LABEL,
+								...LABEL$1,
 								flex: "none"
 							},
 							children: [
@@ -406,18 +406,203 @@ window.__ModuleLoader__.load({
 			] });
 		}
 		//#endregion
+		//#region src/client/ConnectorPanel.tsx
+		const OVERLAY = {
+			position: "fixed",
+			inset: 0,
+			zIndex: 1e3,
+			display: "flex",
+			alignItems: "center",
+			justifyContent: "center"
+		};
+		const MASK = {
+			position: "absolute",
+			inset: 0,
+			background: "var(--dsw-alias-bg-mask-1)",
+			backdropFilter: "var(--dsw-mask-blur)"
+		};
+		const PANEL = {
+			position: "relative",
+			zIndex: 1,
+			display: "flex",
+			flexDirection: "column",
+			width: 900,
+			maxWidth: "calc(100vw - 48px)",
+			height: "min(680px, calc(100vh - 48px))",
+			borderRadius: 24,
+			overflow: "hidden",
+			background: "var(--dsw-alias-bg-layer-2)",
+			boxShadow: "var(--dsw-shadow-lv3)"
+		};
+		const HEADER = {
+			flex: "none",
+			display: "flex",
+			alignItems: "center",
+			justifyContent: "space-between",
+			height: 54,
+			boxSizing: "border-box",
+			padding: "14px 18px"
+		};
+		const TITLE = {
+			margin: 0,
+			fontSize: 16,
+			lineHeight: 24,
+			fontWeight: 500,
+			color: "var(--dsw-alias-label-primary)"
+		};
+		const CLOSE = {
+			border: "none",
+			background: "transparent",
+			cursor: "pointer",
+			color: "var(--dsw-alias-label-caption)",
+			fontSize: 13,
+			padding: "4px 8px",
+			borderRadius: 6
+		};
+		const BODY = {
+			flex: 1,
+			minHeight: 0,
+			overflowY: "auto",
+			padding: 24
+		};
+		/**
+		* Connector center modal: the registered connectors with their auth flows
+		* (the connectors plugin's client half renders the list).
+		* @param props.onClose - close the modal.
+		*/
+		function ConnectorPanel({ onClose }) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				style: OVERLAY,
+				role: "presentation",
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					style: MASK,
+					"aria-hidden": "true",
+					onClick: onClose
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					style: PANEL,
+					role: "dialog",
+					"aria-modal": "true",
+					"aria-label": "连接器",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						style: HEADER,
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
+							style: TITLE,
+							children: "连接器"
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: CLOSE,
+							onClick: onClose,
+							children: "关闭"
+						})]
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						style: BODY,
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ConnectorsList, {})
+					})]
+				})]
+			});
+		}
+		//#endregion
+		//#region src/client/ConnectorTrigger.tsx
+		const TRIGGER_WIDE = {
+			flex: "none",
+			display: "flex",
+			alignItems: "center",
+			gap: 8,
+			width: "calc(100% + 8px)",
+			height: 34,
+			margin: "4px -4px 4px",
+			padding: "6px 2px 6px 10px",
+			boxSizing: "border-box",
+			border: "none",
+			borderRadius: 12,
+			background: "transparent",
+			cursor: "pointer",
+			overflow: "hidden",
+			color: "var(--dsw-alias-label-primary)",
+			fontFamily: "inherit",
+			fontSize: 14,
+			lineHeight: 22
+		};
+		const TRIGGER_RAIL = {
+			...TRIGGER_WIDE,
+			width: 36,
+			height: 36,
+			margin: "8px 0 10px",
+			justifyContent: "center",
+			gap: 0,
+			padding: 0,
+			borderRadius: "50%"
+		};
+		const LABEL = {
+			overflow: "hidden",
+			whiteSpace: "nowrap"
+		};
+		/**
+		* Sidebar foot action opening the connector center modal, stacked above the
+		* Skill center and Settings triggers (registered into `sidebar.footer.action`).
+		* @param props - sidebar column state from the foot slot owner.
+		*/
+		function ConnectorTrigger(props) {
+			const [open, setOpen] = (0, react.useState)(false);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+				type: "button",
+				className: "pico-connector-trigger",
+				style: props.wide ? TRIGGER_WIDE : TRIGGER_RAIL,
+				"aria-expanded": open,
+				onClick: () => {
+					setOpen(true);
+				},
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
+					width: props.wide ? 16 : 18,
+					height: props.wide ? 16 : 18,
+					viewBox: "0 0 16 16",
+					fill: "none",
+					"aria-hidden": "true",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
+						x: "2.5",
+						y: "6.5",
+						width: "8",
+						height: "8",
+						rx: "1.5",
+						stroke: "currentColor",
+						strokeWidth: "1.3"
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
+						d: "M6 6.5V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5M6 10.5h2",
+						stroke: "currentColor",
+						strokeWidth: "1.3",
+						strokeLinecap: "round"
+					})]
+				}), props.wide && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					style: LABEL,
+					children: "连接器"
+				})]
+			}), open && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ConnectorPanel, { onClose: () => {
+				setOpen(false);
+			} })] });
+		}
+		//#endregion
 		//#region src/client/index.ts
 		/**
-		* Connectors client half: exports the connector list surface for the
-		* connector center (rendered by the enterprise sidebar panel), and registers
-		* one slash command per CONNECTED connector (`/<connector-id>`) so the `/`
-		* menu only shows connectors you can act on. Picking an example prompt sends
-		* it to the session — the model then calls the connector's injected MCP tools.
+		* Connectors client half: registers the connector center foot action in the
+		* sidebar (its modal renders the connector list and drives the auth flows),
+		* and registers one slash command per CONNECTED connector (`/<connector-id>`)
+		* so the `/` menu only shows connectors you can act on. Picking an example
+		* prompt sends it to the session — the model then calls the connector's
+		* injected MCP tools.
 		*/
 		const name = "pico-connectors-client";
-		const inject = ["commandUi", "sessions"];
+		const inject = [
+			"commandUi",
+			"sessions",
+			"slots"
+		];
 		const POLL_INTERVAL_MS = 3e3;
 		function apply(ctx) {
+			ctx.effect(() => ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
+				name: "sidebar.footer.action",
+				id: "connector-center",
+				order: 0
+			}, ConnectorTrigger)), "connectors: connector center foot action");
 			const commandUi = ctx.get("commandUi");
 			const sessions = ctx.get("sessions");
 			const commandDisposers = /* @__PURE__ */ new Map();
@@ -479,7 +664,6 @@ window.__ModuleLoader__.load({
 			}, "pico-connectors-client: per-connector slash commands");
 		}
 		//#endregion
-		exports.ConnectorsList = ConnectorsList;
 		exports.apply = apply;
 		exports.inject = inject;
 		exports.name = name;
