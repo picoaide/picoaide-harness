@@ -31,10 +31,11 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-plugin-desktop',
   'plugins/dsh-enterprise',
   'plugins/dsh-connectors',
+  'plugins/dsh-memory-evolve',
   'dsh-community-fabric',
   'dsh-community-market',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, community-fabric, and community-market packages')
+  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, memory-evolve, community-fabric, and community-market packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', plugin],
