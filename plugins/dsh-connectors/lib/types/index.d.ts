@@ -23,5 +23,4 @@ export interface ConnectorsOptions {
     storeBaseDir?: string;
 }
 export declare function apply(ctx: Context, options?: ConnectorsOptions): void;
-export { ConnectorStore } from './store.ts';
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts';

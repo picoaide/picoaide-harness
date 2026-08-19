@@ -49,13 +49,14 @@ describe('connector auth', () => {
 
     try {
       // Capture the authorize URL the flow emits, then hit its callback
-      // (the loopback server) with a code.
+      // (the loopback server) with a code and the flow's state.
       const flow = runAuth(def, {
         onRequest: (request) => {
           authorizeUrl = request.authorizeUrl ?? ''
           if (authorizeUrl) {
             const callback = new URL(authorizeUrl).searchParams.get('redirect_uri') ?? ''
-            void fetch(callback + '?code=auth-code-1')
+            const state = new URL(authorizeUrl).searchParams.get('state') ?? ''
+            void fetch(`${callback}?code=auth-code-1&state=${encodeURIComponent(state)}`)
           }
         },
         signal: new AbortController().signal,
@@ -107,6 +108,21 @@ describe('connector auth', () => {
       expect(read?.fields?.clientId).toBe('c1')
       await store.clearCredential('sales-easy')
       expect(await store.readCredential('sales-easy')).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects path-escaping connector ids and writes private files', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'connectors-'))
+    try {
+      const store = new ConnectorStore({ baseDir: dir })
+      for (const bad of ['../escape', 'a/b', '..', '.', '', 'x'.repeat(128)]) {
+        await expect(store.updateCredential(bad, { accessToken: 'at', updatedAt: 0 })).rejects.toThrow()
+      }
+      await store.updateCredential('sales-easy', { accessToken: 'at', updatedAt: 0 })
+      const stats = await import('node:fs').then((fs) => fs.promises.stat(join(dir, 'sales-easy.json')))
+      expect(stats.mode & 0o777).toBe(0o600)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -239,10 +255,12 @@ describe('connector auth', () => {
       }
       const redirectUri = new URL(requests[0]?.authorizeUrl ?? '').searchParams.get('redirect_uri')
       expect(redirectUri).toBeTruthy()
-      await fetch(`${String(redirectUri)}?code=test-code`)
+      const state = new URL(requests[0]?.authorizeUrl ?? '').searchParams.get('state') ?? ''
+      await fetch(`${String(redirectUri)}?code=test-code&state=${encodeURIComponent(state)}`)
       const patch = await runPromise
       const authorize = new URL(requests[0]?.authorizeUrl ?? '')
       expect(authorize.searchParams.get('resource')).toBe('https://mcp.example/mcp')
+      expect(authorize.searchParams.get('state')).toBeTruthy()
       expect(patch.accessToken).toBe('at-1')
       expect(patch.clientId).toBe('dyn-1')
     } finally {

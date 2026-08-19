@@ -1,3 +1,4 @@
+/** Per-user connector credential store under the config dir. */
 export interface ConnectorCredential {
     /** OAuth access token. */
     accessToken?: string;

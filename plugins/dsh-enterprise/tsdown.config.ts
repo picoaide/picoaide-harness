@@ -7,6 +7,7 @@ export default defineConfig([
     name: PACKAGE_NAME,
     entry: {
       index: 'src/index.ts',
+      invariant: 'src/invariant.ts',
       'auth-gate': 'src/auth-gate.ts',
       'gateway-model': 'src/gateway-model.ts',
       bootstrap: 'src/bootstrap.ts',
@@ -43,11 +44,18 @@ export default defineConfig([
     external: [
       'react',
       'react/jsx-runtime',
+      'react-dom',
+      'react-dom/client',
       '@deepseek-ai/cordis',
       '@deepseek-ai/dsh-client-runtime/client',
       '@deepseek-ai/dsh-client-ui-slots',
+      '@deepseek-ai/dsh-client-web-react',
+      '@deepseek-ai/dsh-client-ui-primitives',
+      '@deepseek-ai/dsh-client-ui-attachment',
+      '@deepseek-ai/dsh-client-schema-form',
       '@deepseek-ai/dsh-client-ui-settings/client',
-      '@picoaide/dsh-connectors/client',
+      '@deepseek-ai/dsh-client-ui-layout/client',
+      '@deepseek-ai/dsh-client-ui-sidebar/client',
     ],
     outputOptions: {
       entryFileNames: 'client.js',

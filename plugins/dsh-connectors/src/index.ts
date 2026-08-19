@@ -37,6 +37,9 @@ export interface ConnectorsOptions {
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
 
+/** Cap on connector API request bodies (settings forms are small). */
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(body))
@@ -44,10 +47,25 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(chunk as Buffer)
+  let received = 0
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer
+    received += buffer.byteLength
+    if (received > MAX_REQUEST_BODY_BYTES) return null
+    chunks.push(buffer)
+  }
   if (chunks.length === 0) return {}
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** Decode one path segment, rejecting malformed escapes instead of throwing. */
+function decodeSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment)
   } catch {
     return null
   }
@@ -280,7 +298,9 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     }
 
     const connect: JsonHandler = (req, res) => {
-      const id = decodeURIComponent(req.url?.split('/')[4] ?? '')
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
       const request: ConnectorAuthRequest = { connectorId: id }
@@ -295,7 +315,9 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     }
 
     const authSubmit: JsonHandler = async (req, res) => {
-      const id = decodeURIComponent(req.url?.split('/')[4] ?? '')
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
       const raw = await readJson(req)
       if (!raw || typeof raw !== 'object' || typeof (raw as { fields?: unknown }).fields !== 'object') {
         return json(res, 400, { error: 'missing fields' })
@@ -310,7 +332,9 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     }
 
     const state: JsonHandler = (req, res) => {
-      const id = decodeURIComponent(req.url?.split('/')[4] ?? '')
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
       const current = states.get(id) ?? { status: 'disconnected' as const, everConnected: false }
@@ -318,7 +342,9 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     }
 
     const disconnectHandler: JsonHandler = async (req, res) => {
-      const id = decodeURIComponent(req.url?.split('/')[4] ?? '')
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
       if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` })
       await disconnect(id)
       json(res, 200, { ok: true })
@@ -344,5 +370,4 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
   }, 'pico connectors: http routes')
 }
 
-export { ConnectorStore } from './store.ts'
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts'
