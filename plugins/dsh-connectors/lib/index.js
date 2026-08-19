@@ -1,59 +1,14 @@
+import { ConnectorStore } from "./store.js";
 import { salesEasyDef } from "./sales-easy.js";
 import { dingTalkDef } from "./dingtalk.js";
 import { spawn } from "node:child_process";
-import { promises } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-//#region src/store.ts
-/**
-* Token/state persistence for connectors (mirrors WorkBuddy's ConnectorOAuthStore:
-* per-user files under the config dir). Tokens live in `~/.picoaide/connectors/`.
-*/
-const CONNECTORS_DIR = join(homedir(), ".picoaide", "connectors");
-var ConnectorStore = class {
-	dir;
-	constructor(options = {}) {
-		this.dir = options.baseDir ?? CONNECTORS_DIR;
-	}
-	path(id) {
-		return join(this.dir, `${id}.json`);
-	}
-	async readCredential(id) {
-		try {
-			return JSON.parse(await promises.readFile(this.path(id), "utf-8"));
-		} catch {
-			return null;
-		}
-	}
-	async writeCredential(id, credential) {
-		await promises.mkdir(this.dir, { recursive: true });
-		await promises.writeFile(this.path(id), JSON.stringify(credential, null, 2), "utf-8");
-	}
-	async updateCredential(id, patch) {
-		const next = {
-			...await this.readCredential(id) ?? { updatedAt: 0 },
-			...patch,
-			updatedAt: Date.now()
-		};
-		await this.writeCredential(id, next);
-		return next;
-	}
-	async clearCredential(id) {
-		try {
-			await promises.unlink(this.path(id));
-		} catch {}
-	}
-	async hasCredential(id) {
-		return await this.readCredential(id) !== null;
-	}
-};
-//#endregion
 //#region src/auth.ts
 const deviceProbes = /* @__PURE__ */ new Map();
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 const DEFAULT_POLL_TIMEOUT_MS = 3e5;
+const TOKEN_REQUEST_TIMEOUT_MS = 6e4;
 async function sleep(ms, signal) {
 	await new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
@@ -159,9 +114,15 @@ async function runOAuth(def, options) {
 	const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint;
 	const clientId = registrationEndpoint ? await registerClient(auth, redirectUri, registrationEndpoint) : auth.clientId || "";
 	if (!clientId) throw new Error("OAuth 服务器不支持动态客户端注册，且未配置固定 clientId");
+	const state = randomBytes(24).toString("base64url");
 	const codePromise = new Promise((resolve, reject) => {
 		const callbackServer = createServer((req, res) => {
 			const url = new URL(req.url ?? "/", `http://${callbackHost}:${port}`);
+			if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) {
+				res.writeHead(404);
+				res.end("not found");
+				return;
+			}
 			const codeParam = url.searchParams.get("code");
 			const errorParam = url.searchParams.get("error");
 			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -182,6 +143,7 @@ async function runOAuth(def, options) {
 	authorizeUrl.searchParams.set("response_type", "code");
 	authorizeUrl.searchParams.set("client_id", clientId);
 	authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+	authorizeUrl.searchParams.set("state", state);
 	const scopes = discovered?.scopes ?? auth.scopes;
 	if (scopes) authorizeUrl.searchParams.set("scope", scopes);
 	if (auth.pkce) {
@@ -208,7 +170,7 @@ async function runOAuth(def, options) {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body,
-		signal: options.signal
+		signal: AbortSignal.any([options.signal, AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS)])
 	});
 	if (!response.ok) throw new Error(`OAuth token 换取失败: HTTP ${response.status}`);
 	const data = await response.json();
@@ -239,7 +201,8 @@ async function refreshOAuthToken(def, credential, options = {}) {
 	const response = await fetch(tokenUrl, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body
+		body,
+		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS)
 	});
 	if (!response.ok) return null;
 	const data = await response.json();
@@ -510,16 +473,32 @@ const marketplaceDefs = [
 */
 const name = "pico-connectors";
 const inject = ["webServer"];
+/** Cap on connector API request bodies (settings forms are small). */
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 function json(res, status, body) {
 	res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
 	res.end(JSON.stringify(body));
 }
 async function readJson(req) {
 	const chunks = [];
-	for await (const chunk of req) chunks.push(chunk);
+	let received = 0;
+	for await (const chunk of req) {
+		const buffer = chunk;
+		received += buffer.byteLength;
+		if (received > MAX_REQUEST_BODY_BYTES) return null;
+		chunks.push(buffer);
+	}
 	if (chunks.length === 0) return {};
 	try {
 		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	} catch {
+		return null;
+	}
+}
+/** Decode one path segment, rejecting malformed escapes instead of throwing. */
+function decodeSegment(segment) {
+	try {
+		return decodeURIComponent(segment);
 	} catch {
 		return null;
 	}
@@ -771,7 +750,9 @@ function apply(ctx, options = {}) {
 			}) });
 		};
 		const connect = (req, res) => {
-			const id = decodeURIComponent(req.url?.split("/")[4] ?? "");
+			const rawId = decodeSegment(req.url?.split("/")[4] ?? "");
+			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
+			const id = rawId;
 			if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` });
 			const request = { connectorId: id };
 			emitRequest(request);
@@ -788,7 +769,9 @@ function apply(ctx, options = {}) {
 			});
 		};
 		const authSubmit = async (req, res) => {
-			const id = decodeURIComponent(req.url?.split("/")[4] ?? "");
+			const rawId = decodeSegment(req.url?.split("/")[4] ?? "");
+			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
+			const id = rawId;
 			const raw = await readJson(req);
 			if (!raw || typeof raw !== "object" || typeof raw.fields !== "object") return json(res, 400, { error: "missing fields" });
 			try {
@@ -799,7 +782,9 @@ function apply(ctx, options = {}) {
 			}
 		};
 		const state = (req, res) => {
-			const id = decodeURIComponent(req.url?.split("/")[4] ?? "");
+			const rawId = decodeSegment(req.url?.split("/")[4] ?? "");
+			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
+			const id = rawId;
 			if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` });
 			json(res, 200, {
 				...states.get(id) ?? {
@@ -810,7 +795,9 @@ function apply(ctx, options = {}) {
 			});
 		};
 		const disconnectHandler = async (req, res) => {
-			const id = decodeURIComponent(req.url?.split("/")[4] ?? "");
+			const rawId = decodeSegment(req.url?.split("/")[4] ?? "");
+			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
+			const id = rawId;
 			if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` });
 			await disconnect(id);
 			json(res, 200, { ok: true });
@@ -841,6 +828,6 @@ function apply(ctx, options = {}) {
 	}, "pico connectors: http routes");
 }
 //#endregion
-export { ConnectorStore, apply, inject, name };
+export { apply, inject, name };
 
 //# sourceMappingURL=index.js.map
