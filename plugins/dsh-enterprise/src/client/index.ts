@@ -10,7 +10,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { AccountSection } from './AccountSection.tsx'
 import { SkillCenterTrigger } from './SkillCenterTrigger.tsx'
-import { ConnectorTrigger } from './ConnectorTrigger.tsx'
 
 /** Stable Cordis plugin name for the enterprise client half. */
 export const name = 'picoaide-enterprise-client'
@@ -134,21 +133,12 @@ export function apply(ctx: ClientContext): void {
   )
 
   ctx.effect(
-    () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-      name: 'sidebar.footer.action',
-      id: 'connector-center',
-      order: 0,
-    }, ConnectorTrigger)),
-    'enterprise: connector center foot action',
-  )
-
-  ctx.effect(
-    () => ctx.slots.register({
+    () => ctx.slots.inject('settings.section', () => ctx.slots.register({
       name: 'settings.section',
       id: 'account',
       order: 999,
       label: '账号',
-    }, AccountSection),
+    }, AccountSection)),
     'enterprise: account section',
   )
 

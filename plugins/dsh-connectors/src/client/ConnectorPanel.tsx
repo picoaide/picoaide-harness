@@ -1,4 +1,4 @@
-import { ConnectorsList } from '@picoaide/dsh-connectors/client'
+import { ConnectorsList } from './ConnectorsSection.tsx'
 
 const OVERLAY: React.CSSProperties = {
   position: 'fixed',
