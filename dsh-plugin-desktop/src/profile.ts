@@ -51,6 +51,7 @@ const INSTALL_ANCHOR = unpackedAsarPath(fileURLToPath(new URL('../package.json',
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
+const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
 const BROWSE_PICKER_BACKEND = '@deepseek-ai/dsh-host-directory-picker-browse'
@@ -377,6 +378,7 @@ export function prepareDesktopProfile(
   const desktopPatches = loadOverlayPatches(BIN_NAME, DESKTOP_PATCH_PATH)
   const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
+  const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
   let desktopLayerInserted = false
   for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
@@ -385,6 +387,7 @@ export function prepareDesktopProfile(
     bundlePatches.push(...desktopPatches)
     bundlePatches.push(...enterprisePatches)
     bundlePatches.push(...connectorsPatches)
+    bundlePatches.push(...memoryPatches)
     desktopLayerInserted = true
   }
   if (!desktopLayerInserted) {
