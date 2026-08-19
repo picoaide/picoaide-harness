@@ -1,0 +1,108 @@
+/**
+ * dsh-memory-evolve — DSH UI 设置模块样式（ui- 前缀，独立注入）。
+ *
+ * 全部使用 DSH 设计 token（--dsw-alias-*），深浅色主题自动适配；后续
+ * 主题功能（CSS 变量覆盖）可直接接管本文件。
+ */
+
+/* ── 会话筛选：仅显示进行中的会话 ───────────────────────────────
+ *
+ * 过滤规则作用域挂在 <html data-dsh-ui-filter="on">（session-filter.ts
+ * 控制，localStorage 记忆偏好，默认开启）。
+ *
+ * 选择器依据（调研文档 docs-local/DSH-UI设置模块-调研-20260809.md）：
+ * - 会话行 = div[role="treeitem"][aria-selected]（工作区分组行有
+ *   aria-expanded 无 aria-selected；搜索结果行是 <button>——div 天然排除，
+ *   搜索模式下筛选不生效）；
+ * - 纯 idle 会话行没有任何 data-state 状态点；活跃（ongoing/warning/error）
+ *   与 completed（done）都有状态点 → 只隐藏完全无状态点的行；
+ * - :has() 需 Chrome 105+（2022-08 起，现代浏览器无问题）。
+ *
+ * React 重渲染后选择器实时生效：会话从 idle 变 running 时状态点出现、
+ * 行自动恢复显示，无需 JS 轮询会话状态。
+ */
+html[data-dsh-ui-filter="on"] [role="tree"] div[role="treeitem"][aria-selected]:not(:has([data-state])) {
+  display: none;
+}
+
+/* ── 对话区加宽（wide-chat.ts 控制 html[data-dsh-ui-wide-chat]）─────────
+ *
+ * DSH 对话区宽度由 CSS 变量 --dsh-chat-content-width 控制
+ * （ConversationRoot.module.css：748px；输入框 = +32px 派生，全部自动
+ * 跟随）。在对话区根元素（[data-phase] 是 ConversationRoot 根 div 的稳定
+ * 锚点）上覆盖为 95%（相对右侧区域宽，与上方 Tabs 导航条宽度对齐）；
+ * 本选择器 specificity（html+attr+attr = 0,2,1）高于原 .root（0,1,0），
+ * 稳胜原声明。 */
+html[data-dsh-ui-wide-chat="on"] [data-phase] {
+  --dsh-chat-content-width: 95%;
+}
+
+/* ── 消息气泡加宽（wide-chat.ts 控制 html[data-dsh-ui-wide-bubble]）─────
+ *
+ * 痛点（用户反馈 2026-08-09）：用户提交后的消息框默认 max-width:
+ * min(525px, 82%)（MessageItem.module.css .bubble）——对话区加宽后
+ * 气泡仍被 525px 上限卡住、相对更显小。开启后让气泡占中间内容框约 80%。
+ *
+ * 锚点（源码依据）：用户消息行 userRow 有恒定 `data-time-hover-root`
+ * 属性（MessageItem.tsx）；bubble 恒为其**第一个 div 子元素**（steering
+ * 标记是 span、MessageIconActions 是第二个 div）→ `div:first-of-type`
+ * 唯一命中 bubble，不误伤 actions。原规则 .bubble（0,1,0），本选择器
+ * specificity 更高，稳胜。 */
+html[data-dsh-ui-wide-bubble="on"] [data-time-hover-root] > div:first-of-type {
+  max-width: 80%;
+}
+
+/* ── 会话列表顶部筛选条（session-filter.ts 注入的 DOM）────────── */
+.dsh-ui-filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l, rgba(128, 128, 128, 0.25));
+  /* 跟随列表区背景（token 兜底），不设固定底色以免深浅主题突兀 */
+  background: transparent;
+}
+
+/* 分段按钮：非激活态弱化、激活态品牌强调（对齐 DSH tool-bar 按钮风格）。 */
+.dsh-ui-filter-btn {
+  flex: 1;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--dsw-alias-button-tool-bar-fill, transparent);
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dsh-ui-filter-btn:hover {
+  background: var(--dsw-alias-button-tool-bar-hover, rgba(128, 128, 128, 0.14));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+
+.dsh-ui-filter-btn-active,
+.dsh-ui-filter-btn-active:hover {
+  background: var(--dsw-alias-button-tool-bar-fill-invisible, rgba(128, 128, 128, 0.18));
+  border-color: var(--dsw-alias-border-l, rgba(128, 128, 128, 0.3));
+  color: var(--dsw-alias-brand-primary, inherit);
+  font-weight: 600;
+}
+
+/* ── 折叠工作区行的运行徽标（session-filter.ts 注入的 DOM）────────────
+ * 折叠的分组行上看不到会话运行状态，徽标「● N 运行中」补上这个信息；
+ * 行是 flex 布局，徽标追加在行尾自然靠右。状态色用业务主色 token
+ * （--dsw-alias-state-business-primary，深浅主题自动适配）。 */
+.dsh-ui-ws-run-badge {
+  align-self: center;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-business-secondary, rgba(64, 128, 255, 0.16));
+  color: var(--dsw-alias-state-business-primary, #3b82f6);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  flex: none;
+}
