@@ -1,0 +1,69 @@
+/**
+ * dsh-memory-evolve — Mermaid 图表渲染样式。
+ *
+ * .me-mermaid-wrap 是替换 .md-code-block 正文（pre）后包 SVG 的滚动容器：
+ * - max-width:100% + overflow-x:auto：大图（几十节点）在窄屏（手机）与
+ *   窄消息栏上横向滚动，而不是被压缩变形；
+ * - svg max-width:none：禁止 svg 被容器压缩（svg 有固定 viewBox 尺寸）；
+ * - margin:0 auto：小图居中；
+ * - 背景透明（引擎初始化已设 themeVariables.background=transparent），
+ *   深浅主题下都融入消息气泡，不留白/黑方块。
+ */
+
+.me-mermaid-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 10px 4px;
+}
+
+.me-mermaid-wrap svg {
+  display: block;
+  margin: 0 auto;
+  max-width: none;
+  height: auto;
+}
+
+/* 渲染永久失败（语法错误等）时的提示行：插在 banner 与代码之间，琥珀色
+   小字 + 半透明底，深浅主题下都可见；代码原样保留、可复制修正。 */
+.me-mermaid-error {
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b45309;
+  background: rgba(180, 83, 9, 0.08);
+  border-bottom: 1px solid rgba(180, 83, 9, 0.25);
+}
+
+/* 「下载」按钮：插在 DSH 复制按钮旁（.action 容器），观感与复制按钮
+   近似（小字、透明底、hover 加深）；颜色/字体继承当前主题。 */
+.me-mermaid-download {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.me-mermaid-download:hover {
+  opacity: 1;
+  background: rgba(128, 128, 128, 0.25);
+}
+
+/* 兜底位置：若块结构变化导致找不到操作区，按钮落在 wrap 右上角
+   （ensureDownloadButton 的 fallback），半透明小按钮悬于图上方。 */
+.me-mermaid-wrap {
+  position: relative;
+}
+
+.me-mermaid-wrap > .me-mermaid-download {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+}

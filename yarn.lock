@@ -4947,9 +4947,9 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-commands": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-input-trigger": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.7"
+    "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-code-runtime": "npm:0.1.0-rc.7"
-    "@deepseek-ai/dsh-commands": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-cordis-host-runner": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-host-plugin-inventory": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.0-rc.7"
@@ -4957,21 +4957,15 @@ __metadata:
     "@deepseek-ai/dsh-mcp-client": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-scope": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-session": "npm:0.1.0-rc.7"
-    "@deepseek-ai/dsh-subprocess": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-system-prompt": "npm:0.1.0-rc.7"
-    "@deepseek-ai/dsh-timeout": "npm:0.1.0-rc.7"
-    "@deepseek-ai/dsh-tools": "npm:0.1.0-rc.7"
-    "@deepseek-ai/schemastery": "npm:^3.18.1"
-    "@modelcontextprotocol/sdk": "npm:^1.12.0"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     react: "npm:18.3.1"
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
-    zod: "npm:^4.4.3"
   peerDependencies:
-    "@deepseek-ai/dsh": 0.1.0-rc.7
+    "@deepseek-ai/cordis": 4.0.1
   languageName: unknown
   linkType: soft
 
@@ -5002,7 +4996,7 @@ __metadata:
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
   peerDependencies:
-    "@deepseek-ai/dsh": 0.1.0-rc.7
+    "@deepseek-ai/cordis": 4.0.1
   languageName: unknown
   linkType: soft
 
@@ -7151,6 +7145,12 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"dsh-memory-evolve@workspace:*, dsh-memory-evolve@workspace:plugins/dsh-memory-evolve":
+  version: 0.0.0-use.local
+  resolution: "dsh-memory-evolve@workspace:plugins/dsh-memory-evolve"
+  languageName: unknown
+  linkType: soft
+
 "dsh-plugin-desktop@workspace:dsh-plugin-desktop":
   version: 0.0.0-use.local
   resolution: "dsh-plugin-desktop@workspace:dsh-plugin-desktop"
@@ -7264,6 +7264,7 @@ __metadata:
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     adm-zip: "npm:^0.6.0"
+    dsh-memory-evolve: "workspace:*"
     electron: "npm:43.4.0"
     electron-builder: "npm:26.15.3"
     koffi: "npm:3.1.5"
