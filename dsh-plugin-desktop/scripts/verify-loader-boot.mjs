@@ -23,6 +23,12 @@ const RUNNER_ENVIRONMENT_NAMES = new Set([
   'NPM_CONFIG_DISTURL',
 ])
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-loader-'))
+// Isolate the product home for the whole boot: profile files live in the
+// temporary home, and plugins resolve their data dir through `$DSH_HOME`
+// (`dshHome()`), so without this override the smoke would initialize real
+// plugin storage under the user's actual home.
+const previousDshHome = process.env.DSH_HOME
+process.env.DSH_HOME = home
 let ctx
 let mounted
 let mountedSpec
@@ -162,6 +168,8 @@ try {
           }
         }
         for (const [key, value] of runnerEnvironment) process.env[key] = value
+        if (previousDshHome === undefined) delete process.env.DSH_HOME
+        else process.env.DSH_HOME = previousDshHome
         rmSync(home, { recursive: true, force: true })
       }
     }
