@@ -4,16 +4,20 @@
  * API consumed by the client browser panel.
  *
  * HTTP API (loopback, mirroring the connectors plugin):
- *   GET  /api/pico/browser/state          -> tabs + panel + control + ops
- *   POST /api/pico/browser/panel          -> { visible, bounds? }
+ *   GET  /api/pico/browser/state          -> tabs + window + control + ops
  *   POST /api/pico/browser/open           -> { url? }
  *   POST /api/pico/browser/navigate       -> { tab, url }
  *   POST /api/pico/browser/reload|back|forward -> { tab? }
+ *   POST /api/pico/browser/switch-tab     -> { tab }
  *   POST /api/pico/browser/close-tab      -> { tab }
  *   POST /api/pico/browser/close-all
+ *   POST /api/pico/browser/show           -> wake the browser window
+ *   POST /api/pico/browser/hide           -> hide the window (keep tabs)
  *   POST /api/pico/browser/takeover       -> { active }
  *   POST /api/pico/browser/clear-data
  *   GET  /api/pico/browser/ops            -> recent op log
+ *   GET  /browser-shell                   -> the browser window control page
+ *   GET  /browser-mask                    -> the AI-control mask page
  * @module @picoaide/dsh-browser
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -50,4 +54,4 @@ export declare const Config: z<Config>;
  */
 export declare function apply(ctx: Context, config?: Config): void;
 export type { BrowserRuntime } from './runtime.ts';
-export type { BrowserOpLogEntry, BrowserPanelState, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions } from './types.ts';
+export type { BrowserOpLogEntry, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions, BrowserWindowState } from './types.ts';
