@@ -61,3 +61,37 @@ describe('session-service', () => {
     expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, SAMPLE_SESSION)
   })
 })
+
+describe('defaultTokenFile', () => {
+  it('uses $DSH_HOME when set', async () => {
+    const { defaultTokenFile } = await import('../src/session-service.ts')
+    expect(defaultTokenFile({ DSH_HOME: '/custom/home' })).toBe('/custom/home/session.json')
+  })
+
+  it('falls back to the product home when DSH_HOME is unset or blank', async () => {
+    const { defaultTokenFile } = await import('../src/session-service.ts')
+    const home = expect(defaultTokenFile({})).toContain('.picoaide-harness')
+    expect(home).toBeTruthy()
+    expect(defaultTokenFile({ DSH_HOME: '   ' })).toContain('.picoaide-harness')
+  })
+})
+
+describe('authErrorMessage', () => {
+  it('maps every auth failure kind to user-facing Chinese copy', async () => {
+    const { authErrorMessage } = await import('../src/server-connector/auth.ts')
+    expect(authErrorMessage('invalid_credentials')).toContain('账号')
+    expect(authErrorMessage('auth_expired')).toContain('登录已过期')
+    expect(authErrorMessage('network')).toContain('网络')
+    expect(authErrorMessage('server_error')).toContain('服务端')
+  })
+})
+
+describe('maxOutputFromDefaultParams', () => {
+  it('extracts max_output from the server default_params JSON', async () => {
+    const { maxOutputFromDefaultParams } = await import('../src/bootstrap.ts')
+    expect(maxOutputFromDefaultParams('{"context_length":1048576,"max_output":393216}')).toBe(393216)
+    expect(maxOutputFromDefaultParams('{"max_output":0}')).toBeUndefined()
+    expect(maxOutputFromDefaultParams('not-json')).toBeUndefined()
+    expect(maxOutputFromDefaultParams(undefined)).toBeUndefined()
+  })
+})

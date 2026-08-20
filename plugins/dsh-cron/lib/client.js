@@ -740,11 +740,18 @@ window.__ModuleLoader__.load({
 			"job.workspaceCurrent": "当前项目（默认）",
 			"job.taskId": "任务",
 			"job.taskSelect": "选择任务…",
+			"job.nameRequired": "请填写任务名称",
+			"job.taskIdRequired": "请选择要执行的任务",
+			"job.sessionIdRequired": "请填写会话 ID",
+			"job.promptTextRequired": "请填写消息内容",
 			"job.sessionId": "会话 ID",
 			"job.promptText": "消息内容",
 			"job.save": "保存",
 			"job.cancel": "取消",
 			"job.history": "触发历史",
+			"job.deleteConfirm": "确定删除该定时任务吗？",
+			"job.showHistory": "展开触发历史",
+			"job.hideHistory": "收起触发历史",
 			"job.execution.succeeded": "成功",
 			"job.execution.failed": "失败",
 			"job.execution.cancelled": "已取消",
@@ -789,6 +796,13 @@ window.__ModuleLoader__.load({
 			"job.save": "Save",
 			"job.cancel": "Cancel",
 			"job.history": "Trigger history",
+			"job.nameRequired": "Please enter a name",
+			"job.taskIdRequired": "Please select a task to run",
+			"job.sessionIdRequired": "Please enter a session ID",
+			"job.promptTextRequired": "Please enter the message",
+			"job.deleteConfirm": "Delete this scheduled job?",
+			"job.showHistory": "Expand trigger history",
+			"job.hideHistory": "Collapse trigger history",
 			"job.execution.succeeded": "Succeeded",
 			"job.execution.failed": "Failed",
 			"job.execution.cancelled": "Cancelled",
@@ -906,7 +920,7 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				if (name.trim() === "") {
-					setError(t("job.name"));
+					setError(t("job.nameRequired"));
 					return;
 				}
 				const action = actionKind === "task" ? {
@@ -918,7 +932,9 @@ window.__ModuleLoader__.load({
 					text
 				};
 				if (!isCronJobAction(action)) {
-					setError(actionKind === "task" ? t("job.taskId") : t("job.sessionId"));
+					if (actionKind === "task") setError(t("job.taskIdRequired"));
+					else if (sessionId.trim() === "") setError(t("job.sessionIdRequired"));
+					else setError(t("job.promptTextRequired"));
 					return;
 				}
 				if (job === void 0) {
@@ -1300,6 +1316,7 @@ window.__ModuleLoader__.load({
 									},
 									disabled: pending,
 									onClick: () => {
+										if (!window.confirm(t("job.deleteConfirm"))) return;
 										controller.remove(job.id);
 									},
 									children: t("job.delete")
@@ -1307,6 +1324,8 @@ window.__ModuleLoader__.load({
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 									type: "button",
 									style: styles.button,
+									"aria-expanded": open,
+									"aria-label": open ? t("job.hideHistory") : t("job.showHistory"),
 									onClick: () => {
 										setOpen(!open);
 									},

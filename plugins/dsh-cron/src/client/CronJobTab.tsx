@@ -95,10 +95,27 @@ function JobRow({ job, pending, controller, onEdit }: {
             {t('job.run')}
           </button>
           <button type="button" style={{ ...styles.button, ...(pending ? styles.buttonDisabled : {}) }} disabled={pending} onClick={() => { onEdit(job) }}>…</button>
-          <button type="button" style={{ ...styles.button, ...(pending ? styles.buttonDisabled : {}) }} disabled={pending} onClick={() => { controller.remove(job.id) }}>
+          <button
+            type="button"
+            style={{ ...styles.button, ...(pending ? styles.buttonDisabled : {}) }}
+            disabled={pending}
+            onClick={() => {
+              // P3-2: destructive actions need a confirmation step.
+              if (!window.confirm(t('job.deleteConfirm'))) return
+              controller.remove(job.id)
+            }}
+          >
             {t('job.delete')}
           </button>
-          <button type="button" style={styles.button} onClick={() => { setOpen(!open) }}>{open ? '−' : '+'}</button>
+          <button
+            type="button"
+            style={styles.button}
+            aria-expanded={open}
+            aria-label={open ? t('job.hideHistory') : t('job.showHistory')}
+            onClick={() => { setOpen(!open) }}
+          >
+            {open ? '−' : '+'}
+          </button>
         </div>
       </div>
       {open && (

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConnectorPanel } from './ConnectorPanel.tsx'
 
@@ -41,8 +41,34 @@ const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
  * Skill center and Settings triggers (registered into `sidebar.footer.action`).
  * @param props - sidebar column state from the foot slot owner.
  */
+/** Cross-plugin panel activation event (shared with cron/task/enterprise/browser). */
+const ACTIVATE_EVENT = 'dsh-panel-activate'
+const PANEL_NAME = 'connector-center'
+
+/**
+ * Sidebar foot action opening the connector center modal, stacked above the
+ * Skill center and Settings triggers (registered into `sidebar.footer.action`).
+ * Opening this panel evicts sibling panels via the shared activation event;
+ * a sibling activation closes this panel.
+ * @param props - sidebar column state from the foot slot owner.
+ */
 export function ConnectorTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
   const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    const onOtherActivate = (event: Event): void => {
+      if ((event as CustomEvent).detail !== PANEL_NAME) setOpen(false)
+    }
+    document.addEventListener(ACTIVATE_EVENT, onOtherActivate)
+    return () => { document.removeEventListener(ACTIVATE_EVENT, onOtherActivate) }
+  }, [])
+
+  const openPanel = (): void => {
+    if (open) return
+    setOpen(true)
+    document.dispatchEvent(new CustomEvent(ACTIVATE_EVENT, { detail: PANEL_NAME }))
+  }
+
   return (
     <>
       <button
@@ -50,7 +76,7 @@ export function ConnectorTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
         className="pico-connector-trigger"
         style={props.wide ? TRIGGER_WIDE : TRIGGER_RAIL}
         aria-expanded={open}
-        onClick={() => { setOpen(true) }}
+        onClick={openPanel}
       >
         <svg width={props.wide ? 16 : 18} height={props.wide ? 16 : 18} viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <rect x="2.5" y="6.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
