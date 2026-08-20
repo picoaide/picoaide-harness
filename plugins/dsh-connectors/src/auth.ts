@@ -172,11 +172,42 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   if (discovered?.publicMcp) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
   const callbackHost = options.callbackHost ?? '127.0.0.1'
   const { verifier, challenge } = pkce()
+  // RFC 6749 §10.12: bind the loopback callback to this flow. A callback
+  // without the matching state is rejected (and the flow keeps waiting for
+  // the genuine redirect) instead of being accepted as a login.
+  const state = randomBytes(24).toString('base64url')
+  // P3-4: the probe listen IS the callback listen — a single listen(0) with
+  // the real handler avoids the probe-close-relisten TOCTOU window in which
+  // a local process could seize the port and capture the authorization code.
+  let resolveCode!: (code: string) => void
+  let rejectCode!: (error: Error) => void
+  const codePromise = new Promise<string>((resolve, reject) => {
+    resolveCode = resolve
+    rejectCode = reject
+  })
   const port = await new Promise<number>((resolve, reject) => {
-    const server = createServer()
+    const server = createServer((req, res) => {
+      const address = server.address() as AddressInfo
+      const url = new URL(req.url ?? '/', `http://${callbackHost}:${address.port}`)
+      if (url.pathname !== '/callback' || url.searchParams.get('state') !== state) {
+        res.writeHead(404)
+        res.end('not found')
+        return
+      }
+      const codeParam = url.searchParams.get('code')
+      const errorParam = url.searchParams.get('error')
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end('<html><body><p>授权完成，可以关闭此窗口。</p></body></html>')
+      server.close()
+      if (errorParam) {
+        rejectCode(new Error(`OAuth 授权失败: ${errorParam}`))
+        return
+      }
+      if (codeParam) resolveCode(codeParam)
+      else rejectCode(new Error('OAuth 回调缺少 code'))
+    })
     server.listen(0, callbackHost, () => {
       const address = server.address() as AddressInfo
-      server.close()
       resolve(address.port)
     })
     server.on('error', reject)
@@ -187,33 +218,6 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     ? await registerClient(auth, redirectUri, registrationEndpoint)
     : auth.clientId || ''
   if (!clientId) throw new Error('OAuth 服务器不支持动态客户端注册，且未配置固定 clientId')
-  // RFC 6749 §10.12: bind the loopback callback to this flow. A callback
-  // without the matching state is rejected (and the flow keeps waiting for
-  // the genuine redirect) instead of being accepted as a login.
-  const state = randomBytes(24).toString('base64url')
-  const codePromise = new Promise<string>((resolve, reject) => {
-    const callbackServer = createServer((req, res) => {
-      const url = new URL(req.url ?? '/', `http://${callbackHost}:${port}`)
-      if (url.pathname !== '/callback' || url.searchParams.get('state') !== state) {
-        res.writeHead(404)
-        res.end('not found')
-        return
-      }
-      const codeParam = url.searchParams.get('code')
-      const errorParam = url.searchParams.get('error')
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end('<html><body><p>授权完成，可以关闭此窗口。</p></body></html>')
-      callbackServer.close()
-      if (errorParam) {
-        reject(new Error(`OAuth 授权失败: ${errorParam}`))
-        return
-      }
-      if (codeParam) resolve(codeParam)
-      else reject(new Error('OAuth 回调缺少 code'))
-    })
-    callbackServer.listen(port, callbackHost)
-    callbackServer.on('error', reject)
-  })
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined
   const authorizeUrl = new URL(discovered?.authorizationEndpoint ?? auth.authorizeUrl)
   authorizeUrl.searchParams.set('response_type', 'code')

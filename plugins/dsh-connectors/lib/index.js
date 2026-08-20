@@ -4,6 +4,60 @@ import { dingTalkDef } from "./dingtalk.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
+//#region src/loopback.ts
+/** IPv4 127/8 predicate (four decimal octets, first == 127). */
+function isIPv4Loopback(v4) {
+	const parts = v4.split(".");
+	return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+/** Whether a socket remote address names the loopback range (127/8, ::1, IPv4-mapped). */
+function isLoopbackAddress(address) {
+	if (address === void 0) return false;
+	const normalized = address.toLowerCase();
+	if (normalized === "::1") return true;
+	if (normalized.startsWith("::ffff:")) return isIPv4Loopback(normalized.slice(7));
+	return isIPv4Loopback(normalized);
+}
+/** Whether a normalized URL hostname names the loopback authority (localhost, [::1], 127/8). */
+function isLoopbackHostname(hostname) {
+	if (hostname === "localhost" || hostname === "[::1]") return true;
+	return isIPv4Loopback(hostname);
+}
+/**
+* Request-level trust fence: a loopback socket address AND a loopback Host
+* header, plus browser same-origin markers. A bare curl from the same host
+* passes the socket/Host checks; a cross-site browser request is refused.
+*/
+function isLoopbackRequest(request) {
+	if (!isLoopbackAddress(request.socket.remoteAddress)) return false;
+	const host = request.headers.host;
+	if (typeof host !== "string") return false;
+	let hostUrl;
+	try {
+		hostUrl = new URL("http://" + host);
+	} catch {
+		return false;
+	}
+	if (!isLoopbackHostname(hostUrl.hostname)) return false;
+	if (request.headers["sec-fetch-site"] === "cross-site") return false;
+	const origin = request.headers.origin;
+	if (origin === void 0) return true;
+	try {
+		return new URL(origin).host === hostUrl.host;
+	} catch {
+		return false;
+	}
+}
+/**
+* Browser-signal tripwire, NOT an authority check: a bare curl sends neither
+* header and is refused, but a curl with a forged Origin passes this too.
+* The real boundary is the loopback socket + Host + origin-equality checks
+* in isLoopbackRequest; do not rely on this marker alone.
+*/
+function browserSameOriginMarker(req) {
+	return req.headers["sec-fetch-site"] === "same-origin" || typeof req.headers.origin === "string";
+}
+//#endregion
 //#region src/auth.ts
 const deviceProbes = /* @__PURE__ */ new Map();
 const DEFAULT_POLL_INTERVAL_MS = 1500;
@@ -101,23 +155,17 @@ async function runOAuth(def, options) {
 	if (discovered?.publicMcp) return { updatedAt: Date.now() };
 	const callbackHost = options.callbackHost ?? "127.0.0.1";
 	const { verifier, challenge } = pkce();
-	const port = await new Promise((resolve, reject) => {
-		const server = createServer();
-		server.listen(0, callbackHost, () => {
-			const address = server.address();
-			server.close();
-			resolve(address.port);
-		});
-		server.on("error", reject);
-	});
-	const redirectUri = `http://${callbackHost}:${port}/callback`;
-	const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint;
-	const clientId = registrationEndpoint ? await registerClient(auth, redirectUri, registrationEndpoint) : auth.clientId || "";
-	if (!clientId) throw new Error("OAuth 服务器不支持动态客户端注册，且未配置固定 clientId");
 	const state = randomBytes(24).toString("base64url");
+	let resolveCode;
+	let rejectCode;
 	const codePromise = new Promise((resolve, reject) => {
-		const callbackServer = createServer((req, res) => {
-			const url = new URL(req.url ?? "/", `http://${callbackHost}:${port}`);
+		resolveCode = resolve;
+		rejectCode = reject;
+	});
+	const redirectUri = `http://${callbackHost}:${await new Promise((resolve, reject) => {
+		const server = createServer((req, res) => {
+			const address = server.address();
+			const url = new URL(req.url ?? "/", `http://${callbackHost}:${address.port}`);
 			if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) {
 				res.writeHead(404);
 				res.end("not found");
@@ -127,17 +175,22 @@ async function runOAuth(def, options) {
 			const errorParam = url.searchParams.get("error");
 			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 			res.end("<html><body><p>授权完成，可以关闭此窗口。</p></body></html>");
-			callbackServer.close();
+			server.close();
 			if (errorParam) {
-				reject(/* @__PURE__ */ new Error(`OAuth 授权失败: ${errorParam}`));
+				rejectCode(/* @__PURE__ */ new Error(`OAuth 授权失败: ${errorParam}`));
 				return;
 			}
-			if (codeParam) resolve(codeParam);
-			else reject(/* @__PURE__ */ new Error("OAuth 回调缺少 code"));
+			if (codeParam) resolveCode(codeParam);
+			else rejectCode(/* @__PURE__ */ new Error("OAuth 回调缺少 code"));
 		});
-		callbackServer.listen(port, callbackHost);
-		callbackServer.on("error", reject);
-	});
+		server.listen(0, callbackHost, () => {
+			resolve(server.address().port);
+		});
+		server.on("error", reject);
+	})}/callback`;
+	const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint;
+	const clientId = registrationEndpoint ? await registerClient(auth, redirectUri, registrationEndpoint) : auth.clientId || "";
+	if (!clientId) throw new Error("OAuth 服务器不支持动态客户端注册，且未配置固定 clientId");
 	const codeChallengeMethod = auth.pkce ? "S256" : void 0;
 	const authorizeUrl = new URL(discovered?.authorizationEndpoint ?? auth.authorizeUrl);
 	authorizeUrl.searchParams.set("response_type", "code");
@@ -560,7 +613,23 @@ function apply(ctx, options = {}) {
 					reject(/* @__PURE__ */ new Error(`无法从命令输出中解析 URL: ${stdout.trim().slice(0, 200)}`));
 					return;
 				}
-				resolve(match[0]);
+				const url = match[0];
+				try {
+					const parsed = new URL(url);
+					if (parsed.protocol !== "https:") {
+						reject(/* @__PURE__ */ new Error(`MCP URL 必须是 https: ${url.slice(0, 80)}`));
+						return;
+					}
+					const host = parsed.hostname.toLowerCase();
+					if (host === "localhost" || host === "::1" || /^127\./.test(host) || /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)) {
+						reject(/* @__PURE__ */ new Error(`MCP URL 指向本地/私网地址，已拒绝: ${url.slice(0, 80)}`));
+						return;
+					}
+				} catch {
+					reject(/* @__PURE__ */ new Error(`MCP URL 无效: ${url.slice(0, 80)}`));
+					return;
+				}
+				resolve(url);
 			});
 		});
 	};
@@ -802,10 +871,19 @@ function apply(ctx, options = {}) {
 			await disconnect(id);
 			json(res, 200, { ok: true });
 		};
+		const guard = (req, res) => {
+			if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true;
+			json(res, 403, { error: "forbidden" });
+			return false;
+		};
 		const disposers = [ctx.webServer.register({
 			kind: "exact",
 			path: "/api/pico/connectors",
-			handler: list
+			handler: (req, res) => {
+				if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
+				if (!guard(req, res)) return;
+				list(req, res);
+			}
 		}), ctx.webServer.register({
 			kind: "prefix",
 			path: "/api/pico/connectors",
@@ -817,6 +895,15 @@ function apply(ctx, options = {}) {
 					state: exact(state),
 					disconnect: exact(disconnectHandler)
 				};
+				if (!guard(req, res)) return;
+				const method = req.method ?? "GET";
+				const expected = action ? {
+					connect: "POST",
+					"auth-submit": "POST",
+					state: "GET",
+					disconnect: "POST"
+				}[action] : void 0;
+				if (expected !== void 0 && method !== expected) return json(res, 405, { error: "method not allowed" });
 				const handler = action ? handlers[action] : void 0;
 				if (handler) handler(req, res);
 				else json(res, 404, { error: "not found" });

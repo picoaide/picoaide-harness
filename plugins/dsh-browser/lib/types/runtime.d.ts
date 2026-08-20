@@ -141,4 +141,7 @@ export declare class BrowserRuntime {
     /** Dispose everything (plugin teardown). */
     dispose(): void;
 }
+/** Redact credential-shaped parts of a browser op-log summary (URLs and
+ * query parameters). Mirrors the desktop logger's mask-secrets semantics. */
+export declare function maskBrowserSummary(summary: string): string;
 export {};

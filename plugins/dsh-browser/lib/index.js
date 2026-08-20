@@ -891,6 +891,60 @@ function createRealElectronAdapter() {
 	};
 }
 //#endregion
+//#region src/loopback.ts
+/** IPv4 127/8 predicate (four decimal octets, first == 127). */
+function isIPv4Loopback(v4) {
+	const parts = v4.split(".");
+	return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+/** Whether a socket remote address names the loopback range (127/8, ::1, IPv4-mapped). */
+function isLoopbackAddress(address) {
+	if (address === void 0) return false;
+	const normalized = address.toLowerCase();
+	if (normalized === "::1") return true;
+	if (normalized.startsWith("::ffff:")) return isIPv4Loopback(normalized.slice(7));
+	return isIPv4Loopback(normalized);
+}
+/** Whether a normalized URL hostname names the loopback authority (localhost, [::1], 127/8). */
+function isLoopbackHostname(hostname) {
+	if (hostname === "localhost" || hostname === "[::1]") return true;
+	return isIPv4Loopback(hostname);
+}
+/**
+* Request-level trust fence: a loopback socket address AND a loopback Host
+* header, plus browser same-origin markers. A bare curl from the same host
+* passes the socket/Host checks; a cross-site browser request is refused.
+*/
+function isLoopbackRequest(request) {
+	if (!isLoopbackAddress(request.socket.remoteAddress)) return false;
+	const host = request.headers.host;
+	if (typeof host !== "string") return false;
+	let hostUrl;
+	try {
+		hostUrl = new URL("http://" + host);
+	} catch {
+		return false;
+	}
+	if (!isLoopbackHostname(hostUrl.hostname)) return false;
+	if (request.headers["sec-fetch-site"] === "cross-site") return false;
+	const origin = request.headers.origin;
+	if (origin === void 0) return true;
+	try {
+		return new URL(origin).host === hostUrl.host;
+	} catch {
+		return false;
+	}
+}
+/**
+* Browser-signal tripwire, NOT an authority check: a bare curl sends neither
+* header and is refused, but a curl with a forged Origin passes this too.
+* The real boundary is the loopback socket + Host + origin-equality checks
+* in isLoopbackRequest; do not rely on this marker alone.
+*/
+function browserSameOriginMarker(req) {
+	return req.headers["sec-fetch-site"] === "same-origin" || typeof req.headers.origin === "string";
+}
+//#endregion
 //#region src/cdp.ts
 /** One established CDP session over a transport. */
 var CdpSession = class {
@@ -1005,9 +1059,20 @@ var BrowserGuard = class {
 	*/
 	installDownloadGuard(session, onDownload) {
 		const listener = (_event, item) => {
-			const total = item.getTotalBytes();
 			const filename = item.getFilename() || "download";
-			if (total > 104857600) {
+			let received = 0;
+			let rejected = false;
+			const onUpdated = () => {
+				received = item.getReceivedBytes();
+				if (received > 104857600 && !rejected) {
+					rejected = true;
+					item.cancel();
+					onDownload(`download rejected (>100MB): ${filename}`);
+				}
+			};
+			item.on?.("updated", onUpdated);
+			if (item.getReceivedBytes() > 104857600) {
+				rejected = true;
 				item.cancel();
 				onDownload(`download rejected (>100MB): ${filename}`);
 				return;
@@ -1326,7 +1391,7 @@ var BrowserRuntime = class {
 			time: Date.now(),
 			tool,
 			tab,
-			summary,
+			summary: maskBrowserSummary(summary),
 			failed
 		});
 		if (this.ops.length > OP_LOG_LIMIT) this.ops.shift();
@@ -1808,6 +1873,25 @@ const KEY_VK = {
 	PageDown: 34,
 	" ": 32
 };
+const MASK = "****";
+const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu;
+/** Redact credential-shaped parts of a browser op-log summary (URLs and
+* query parameters). Mirrors the desktop logger's mask-secrets semantics. */
+function maskBrowserSummary(summary) {
+	return summary.replace(/https?:\/\/[^\s<>"']+/giu, (raw) => {
+		const trailing = /[),.;]+$/u.exec(raw)?.[0] ?? "";
+		const value = trailing === "" ? raw : raw.slice(0, -trailing.length);
+		try {
+			const url = new URL(value);
+			if (url.username !== "") url.username = MASK;
+			if (url.password !== "") url.password = MASK;
+			for (const name of url.searchParams.keys()) if (SENSITIVE_QUERY_KEY.test(name)) url.searchParams.set(name, MASK);
+			return `${url.href}${trailing}`;
+		} catch {
+			return raw;
+		}
+	});
+}
 //#endregion
 //#region src/tools.ts
 /** Cooperative tool-call timeout budget for every browser tool (ms). */
@@ -2825,6 +2909,11 @@ function apply(ctx, config = {}) {
 	const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver);
 	applyBrowserTools(ctx, runtime);
 	ctx.effect(() => {
+		const guard = (req, res) => {
+			if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true;
+			json(res, 403, { error: "forbidden" });
+			return false;
+		};
 		const action = (req, res) => {
 			const rawAction = decodeSegment(req.url?.split("/")[4]?.split("?")[0]);
 			handleAction(rawAction, req, res).catch((error) => {
@@ -2832,6 +2921,8 @@ function apply(ctx, config = {}) {
 			});
 		};
 		const handleAction = async (action, req, res) => {
+			if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+			if (!guard(req, res)) return;
 			const raw = await readJson(req);
 			const body = raw !== null && typeof raw === "object" ? raw : {};
 			switch (action) {
@@ -2875,6 +2966,13 @@ function apply(ctx, config = {}) {
 					await runtime.goForward(tabOf(runtime, body));
 					json(res, 200, { ok: true });
 					return;
+				case "switch-tab": {
+					const tab = numberOr(body.tab, 0);
+					if (tab <= 0) return json(res, 400, { error: "tab is required" });
+					await runtime.switchTab(tab);
+					json(res, 200, { ok: true });
+					return;
+				}
 				case "close-tab": {
 					const tab = numberOr(body.tab, 0);
 					if (tab <= 0) return json(res, 400, { error: "tab is required" });
@@ -2897,14 +2995,18 @@ function apply(ctx, config = {}) {
 				default: json(res, 404, { error: "not found" });
 			}
 		};
-		const state = (_req, res) => {
+		const state = (req, res) => {
+			if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
+			if (!guard(req, res)) return;
 			json(res, 200, {
 				tabs: runtime.listTabs(),
 				panel: runtime.panelState,
 				controlled: runtime.controlled
 			});
 		};
-		const ops = (_req, res) => {
+		const ops = (req, res) => {
+			if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
+			if (!guard(req, res)) return;
 			json(res, 200, { ops: runtime.opLog });
 		};
 		const disposers = [
