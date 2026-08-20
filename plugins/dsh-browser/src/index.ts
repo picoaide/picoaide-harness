@@ -26,6 +26,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 // Type-only: makes `ctx.webServer` resolve to the host webserver contract.
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { createRealElectronAdapter } from './electron-adapter.ts'
+import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
 import { applyBrowserTools } from './tools.ts'
 import type { BrowserGuard } from './guard.ts'
@@ -156,6 +157,15 @@ export function apply(ctx: Context, config: Config = {}): void {
   applyBrowserTools(ctx, runtime)
 
   ctx.effect(() => {
+    // Trust fence for every browser route: loopback socket + Host +
+    // same-origin markers. All actions below are state-changing and
+    // therefore require POST (P1-1: a cross-site GET must not trigger them).
+    const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
+      if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
+      json(res, 403, { error: 'forbidden' })
+      return false
+    }
+
     const action = (req: IncomingMessage, res: ServerResponse): void => {
       const rawAction = decodeSegment(req.url?.split('/')[4]?.split('?')[0])
       void handleAction(rawAction, req, res).catch((error: unknown) => {
@@ -165,6 +175,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
 
     const handleAction = async (action: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
       const raw = await readJson(req)
       const body = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
 
@@ -217,6 +229,13 @@ export function apply(ctx: Context, config: Config = {}): void {
           json(res, 200, { ok: true })
           return
         }
+        case 'switch-tab': {
+          const tab = numberOr(body.tab, 0)
+          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
+          await runtime.switchTab(tab)
+          json(res, 200, { ok: true })
+          return
+        }
         case 'close-tab': {
           const tab = numberOr(body.tab, 0)
           if (tab <= 0) return json(res, 400, { error: 'tab is required' })
@@ -244,7 +263,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
 
-    const state: JsonHandler = (_req, res) => {
+    const state: JsonHandler = (req, res) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
       json(res, 200, {
         tabs: runtime.listTabs(),
         panel: runtime.panelState,
@@ -252,7 +273,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
     }
 
-    const ops: JsonHandler = (_req, res) => {
+    const ops: JsonHandler = (req, res) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
       json(res, 200, { ops: runtime.opLog })
     }
 

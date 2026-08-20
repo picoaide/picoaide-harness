@@ -107,9 +107,23 @@ export class BrowserGuard {
    */
   installDownloadGuard(session: NativeSession, onDownload: (summary: string) => void): () => void {
     const listener = (_event: unknown, item: NativeDownloadItem): void => {
-      const total = item.getTotalBytes()
       const filename = item.getFilename() || 'download'
-      if (total > MAX_DOWNLOAD_BYTES) {
+      // P3-8: getTotalBytes() is -1 for unknown-size downloads, which used to
+      // bypass the cap. Count received bytes on 'updated' instead and cancel
+      // once the limit is exceeded; a zero-sized file is allowed through.
+      let received = 0
+      let rejected = false
+      const onUpdated = (): void => {
+        received = item.getReceivedBytes()
+        if (received > MAX_DOWNLOAD_BYTES && !rejected) {
+          rejected = true
+          item.cancel()
+          onDownload(`download rejected (>100MB): ${filename}`)
+        }
+      }
+      item.on?.('updated', onUpdated)
+      if (item.getReceivedBytes() > MAX_DOWNLOAD_BYTES) {
+        rejected = true
         item.cancel()
         onDownload(`download rejected (>100MB): ${filename}`)
         return

@@ -74,9 +74,11 @@ export interface NativeDownloadItem {
   getURL(): string
   getFilename(): string
   getTotalBytes(): number
+  /** Bytes received so far (-1 until the first progress event). */
+  getReceivedBytes(): number
   setSavePath(path: string): void
   cancel(): void
-  on(event: 'done', listener: (event: unknown, state: string) => void): void
+  on(event: 'done' | 'updated', listener: (event: unknown, state?: string) => void): void
 }
 
 /** The native main window. */
