@@ -37,6 +37,9 @@ export declare const zh: {
     readonly 'detail.workspace': "工作区";
     readonly 'detail.mode': "Agent 预设";
     readonly 'detail.permission': "权限";
+    readonly 'detail.status': "状态";
+    readonly 'detail.statusMove': "移动到此状态";
+    readonly 'detail.deleteConfirm': "确定删除该任务吗？删除后不可恢复。";
     readonly 'permission.none': "默认（当前会话权限）";
     readonly 'permission.read-only': "只读（read-only）";
     readonly 'permission.workspace-write': "工作区读写（workspace-write，需授权）";

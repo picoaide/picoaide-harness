@@ -5705,6 +5705,7 @@ __metadata:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-agent": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-attachment": "npm:0.1.0-rc.7"
+    "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-schema-form": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-commands": "npm:0.1.0-rc.7"
@@ -5742,6 +5743,7 @@ __metadata:
   resolution: "@picoaide/dsh-connectors@workspace:plugins/dsh-connectors"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-commands": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-input-trigger": "npm:0.1.0-rc.7"
@@ -5816,6 +5818,7 @@ __metadata:
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-brand": "npm:0.1.0-rc.7"
+    "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-layout": "npm:0.1.0-rc.7"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.7"

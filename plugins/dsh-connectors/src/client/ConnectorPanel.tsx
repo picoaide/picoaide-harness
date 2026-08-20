@@ -1,4 +1,6 @@
+import { useEffect, useRef } from 'react'
 import { ConnectorsList } from './ConnectorsSection.tsx'
+import { t } from './locales.ts'
 
 const OVERLAY: React.CSSProperties = {
   position: 'fixed',
@@ -65,13 +67,25 @@ const BODY: React.CSSProperties = {
  * @param props.onClose - close the modal.
  */
 export function ConnectorPanel({ onClose }: { onClose: () => void }) {
+  const panelRef = useRef<HTMLDivElement | null>(null)
+
+  // Esc closes; initial focus lands on the panel so keyboard users can act.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    panelRef.current?.focus()
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [onClose])
+
   return (
     <div style={OVERLAY} role="presentation">
       <div style={MASK} aria-hidden="true" onClick={onClose} />
-      <div style={PANEL} role="dialog" aria-modal="true" aria-label="连接器">
+      <div style={PANEL} role="dialog" aria-modal="true" aria-label={t('panel.title')} tabIndex={-1} ref={panelRef}>
         <div style={HEADER}>
-          <h2 style={TITLE}>连接器</h2>
-          <button type="button" style={CLOSE} onClick={onClose}>关闭</button>
+          <h2 style={TITLE}>{t('panel.title')}</h2>
+          <button type="button" style={CLOSE} onClick={onClose}>{t('panel.close')}</button>
         </div>
         <div style={BODY}><ConnectorsList /></div>
       </div>

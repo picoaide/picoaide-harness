@@ -4,11 +4,12 @@
  * schedule is a cron job with action {kind:'task', taskId}).
  */
 import { useEffect, useState } from 'react'
+import type { TaskStatus } from '../tasks.ts'
 import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import type { TaskRecord } from '../tasks.ts'
 import type { TaskController } from './controller.ts'
 import { styles } from './styles.ts'
-import { t } from './locales.ts'
+import { t, type TaskKey } from './locales.ts'
 import { WorkspacePicker } from './WorkspacePicker.tsx'
 import { PermissionPicker } from './PermissionPicker.tsx'
 
@@ -81,6 +82,8 @@ export function TaskDetail({ controller, task, cron, workspaces }: {
     cron.unregisterJob(linkedJob.id)
   }
 
+  const STATUS_OPTIONS: TaskStatus[] = ['todo', 'doing', 'done', 'failed']
+
   const running = task.executions.some(execution => execution.endedAt === undefined)
   const latest = task.executions[task.executions.length - 1]
   const history = [...task.executions].reverse()
@@ -152,6 +155,32 @@ export function TaskDetail({ controller, task, cron, workspaces }: {
                 <span style={styles.value}>{task.mode}</span>
               </div>
             )}
+            {/* P1: manual status transitions — the Host `move` action and
+                controller.move() were wired but had no UI trigger. */}
+            <div style={styles.field}>
+              <span style={styles.label}>{t('detail.status')}</span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {STATUS_OPTIONS.map(status => {
+                  const active = task.status === status
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      style={{
+                        ...styles.button,
+                        ...(active ? styles.buttonPrimary : {}),
+                        ...(running && status !== task.status ? styles.buttonDisabled : {}),
+                      }}
+                      disabled={running && status !== task.status}
+                      title={t('detail.statusMove')}
+                      onClick={() => { if (!active) controller.move(task.id, status) }}
+                    >
+                      {t(`board.column.${status}` as TaskKey)}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
           </>
         )}
 
@@ -203,6 +232,8 @@ export function TaskDetail({ controller, task, cron, workspaces }: {
               // orphan job would keep firing into a nonexistent task.
               // Disabled while running: the Host refuses the delete anyway
               // (a running task must not lose its schedule silently).
+              // P3-2: destructive actions need a confirmation step.
+              if (!window.confirm(t('detail.deleteConfirm'))) return
               detachSchedule()
               controller.remove(task.id)
             }}

@@ -276,6 +276,7 @@ window.__ModuleLoader__.load({
 				flexDirection: "column",
 				height: "100%",
 				minWidth: 640,
+				position: "relative",
 				fontSize: 13,
 				color: "var(--dsw-alias-label-primary)",
 				background: "transparent"
@@ -581,6 +582,9 @@ window.__ModuleLoader__.load({
 			"detail.workspace": "工作区",
 			"detail.mode": "Agent 预设",
 			"detail.permission": "权限",
+			"detail.status": "状态",
+			"detail.statusMove": "移动到此状态",
+			"detail.deleteConfirm": "确定删除该任务吗？删除后不可恢复。",
 			"permission.none": "默认（当前会话权限）",
 			"permission.read-only": "只读（read-only）",
 			"permission.workspace-write": "工作区读写（workspace-write，需授权）",
@@ -645,6 +649,9 @@ window.__ModuleLoader__.load({
 			"detail.workspace": "Workspace",
 			"detail.mode": "Agent preset",
 			"detail.permission": "Permission",
+			"detail.status": "Status",
+			"detail.statusMove": "Move to status",
+			"detail.deleteConfirm": "Delete this task? This cannot be undone.",
 			"permission.none": "Default (current session permission)",
 			"permission.read-only": "Read-only",
 			"permission.workspace-write": "Workspace write (asks approval)",
@@ -846,6 +853,12 @@ window.__ModuleLoader__.load({
 				if (cron === void 0 || linkedJob === void 0) return;
 				cron.unregisterJob(linkedJob.id);
 			};
+			const STATUS_OPTIONS = [
+				"todo",
+				"doing",
+				"done",
+				"failed"
+			];
 			const running = task.executions.some((execution) => execution.endedAt === void 0);
 			const latest = task.executions[task.executions.length - 1];
 			const history = [...task.executions].reverse();
@@ -1014,6 +1027,36 @@ window.__ModuleLoader__.load({
 									style: styles.value,
 									children: task.mode
 								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: styles.field,
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									style: styles.label,
+									children: t("detail.status")
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+									style: {
+										display: "flex",
+										gap: 6,
+										flexWrap: "wrap"
+									},
+									children: STATUS_OPTIONS.map((status) => {
+										const active = task.status === status;
+										return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											style: {
+												...styles.button,
+												...active ? styles.buttonPrimary : {},
+												...running && status !== task.status ? styles.buttonDisabled : {}
+											},
+											disabled: running && status !== task.status,
+											title: t("detail.statusMove"),
+											onClick: () => {
+												if (!active) controller.move(task.id, status);
+											},
+											children: t(`board.column.${status}`)
+										}, status);
+									})
+								})]
 							})
 						] }),
 						cron !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -1087,6 +1130,7 @@ window.__ModuleLoader__.load({
 								},
 								disabled: running,
 								onClick: () => {
+									if (!window.confirm(t("detail.deleteConfirm"))) return;
 									detachSchedule();
 									controller.remove(task.id);
 								},

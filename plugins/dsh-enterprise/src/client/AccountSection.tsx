@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { t } from './locales.ts'
 
 interface AuthState {
   loggedIn: boolean
@@ -13,7 +14,8 @@ const ROW: React.CSSProperties = {
   gap: 8,
 }
 
-const LABEL: React.CSSProperties = { fontSize: 13, margin: 0, color: '#c9ccd3' }
+// Design-token colors: adapt automatically to the light and dark themes.
+const LABEL: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-caption)' }
 
 const VALUE: React.CSSProperties = { fontSize: 15, margin: 0, fontWeight: 600 }
 
@@ -21,20 +23,29 @@ const BUTTON: React.CSSProperties = {
   marginTop: 8,
   padding: '8px 14px',
   borderRadius: 6,
-  border: '1px solid #dc2626',
+  border: '1px solid var(--dsw-alias-state-error-primary)',
   background: 'transparent',
-  color: '#f87171',
+  color: 'var(--dsw-alias-state-error-primary)',
   fontSize: 13,
   cursor: 'pointer',
   alignSelf: 'flex-start',
 }
 
+const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 'default' }
+
+/** Unknown-state text while the auth state is still loading (kept short to
+ * avoid layout shift when the settings section first mounts). */
+const LOADING_LABEL: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-caption)' }
+
 /**
  * Account page: the logged-in username and server, with a logout action that
- * returns the main window to the login page.
+ * revokes the gateway token server-side (via the local API) and returns the
+ * main window to the login page.
  */
 export function AccountSection(_props: PropsRuntime<'settings.section'>) {
   const [state, setState] = useState<AuthState | null>(null)
+  const [failed, setFailed] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -44,13 +55,24 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
         const data = (await res.json()) as AuthState
         if (!cancelled) setState(data)
       })
-      .catch(() => { if (!cancelled) setState({ loggedIn: false }) })
+      .catch(() => {
+        // Distinguish "not logged in" from "could not reach the local API":
+        // showing 未登录 for a network hiccup would mislead a logged-in user.
+        if (!cancelled) {
+          setState({ loggedIn: false })
+          setFailed(true)
+        }
+      })
     return () => { cancelled = true }
   }, [])
 
-  if (state === null) return null
+  if (state === null) {
+    return <p style={LOADING_LABEL}>{t('account.loading')}</p>
+  }
 
   const logout = async (): Promise<void> => {
+    if (loggingOut) return
+    setLoggingOut(true)
     try {
       await fetch('/api/pico/auth/logout', { method: 'POST' })
     } finally {
@@ -59,21 +81,26 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
   }
 
   if (!state.loggedIn) {
-    return <p style={LABEL}>未登录</p>
+    return <p style={LABEL}>{failed ? t('account.stateFailed') : t('account.notLoggedIn')}</p>
   }
 
   return (
     <div style={ROW}>
       <div>
-        <p style={LABEL}>当前账号</p>
-        <p style={VALUE}>{state.username ?? '未知'}</p>
+        <p style={LABEL}>{t('account.current')}</p>
+        <p style={VALUE}>{state.username ?? t('account.unknown')}</p>
       </div>
       <div>
-        <p style={LABEL}>服务端地址</p>
-        <p style={VALUE}>{state.serverURL ?? '未知'}</p>
+        <p style={LABEL}>{t('account.server')}</p>
+        <p style={VALUE}>{state.serverURL ?? t('account.unknown')}</p>
       </div>
-      <button type="button" style={BUTTON} onClick={() => { void logout() }}>
-        退出登录
+      <button
+        type="button"
+        style={loggingOut ? BUTTON_DISABLED : BUTTON}
+        disabled={loggingOut}
+        onClick={() => { void logout() }}
+      >
+        {loggingOut ? t('account.loggingOut') : t('account.logout')}
       </button>
     </div>
   )
