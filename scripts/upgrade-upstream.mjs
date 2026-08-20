@@ -121,6 +121,51 @@ function spawn(cmd, cwd = root, env = {}) {
   }
 }
 
+/**
+ * Re-extract the platform module table from the checked-out upstream and
+ * rewrite scripts/platform-modules.mjs if it drifted. Returns whether the
+ * file changed.
+ */
+function syncPlatformModules() {
+  const src = join(upstreamDir, 'packages/client/web/src/platform.ts')
+  const source = readFileSync(src, 'utf8')
+  const table = source.match(/export const PLATFORM_MODULES = \[([\s\S]*?)\] as const/)
+  const preload = source.match(/export const PRELOADED_CLIENT_EXTERNALS = \[([\s\S]*?)\] as const/)
+  if (!table || !preload) fail(`cannot parse ${src}: PLATFORM_MODULES/PRELOADED_CLIENT_EXTERNALS not found`)
+  const fmt = (body) => body.split('\n')
+    .map(l => l.trim())
+    .filter(l => /^'[^']*',$/u.test(l))
+    .map(l => `  ${l}`)
+    .join('\n')
+  const generated = `/**
+ * Single source of truth for the upstream platform module table.
+ *
+ * Mirrors \`PLATFORM_MODULES\` / \`PRELOADED_CLIENT_EXTERNALS\` from the pinned
+ * upstream checkout (\`deepseek-harness/packages/client/web/src/platform.ts\`).
+ * Every desktop-owned client bundle keeps these specifiers external (the
+ * shell's frozen module table resolves them at runtime), so the table must
+ * never drift from upstream: \`scripts/upgrade-upstream.mjs\` re-extracts this
+ * file from the new pin on every upgrade and fails the gate if it differs.
+ */
+
+/** The module specifiers the shell shares into the frozen module table. */
+export const PLATFORM_MODULES = [
+${fmt(table[1])}
+]
+
+/** Client-bundle specifiers whose factories the parser preloads before the shell starts. */
+export const PRELOADED_CLIENT_EXTERNALS = [
+${fmt(preload[1])}
+]
+`
+  const target = join(root, 'scripts/platform-modules.mjs')
+  if (readFileSync(target, 'utf8') !== generated) {
+    writeFileSync(target, generated)
+    return true
+  }
+  return false
+}
+
 async function main() {
   const upstream = readJson('upstream.json')
   const workspace = readJson('package.json')
@@ -161,6 +206,11 @@ async function main() {
       runtimePackageVersion: to,
     }, null, 2) + '\n')
     log('upstream.json updated, submodule checked out')
+  }
+
+  // 3b. Re-extract the platform module table (client externals single source).
+  if (!dryRun && syncPlatformModules()) {
+    log('scripts/platform-modules.mjs re-extracted from the new pin')
   }
 
   // 4. Bump manifests.
