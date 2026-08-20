@@ -1,12 +1,24 @@
 import { loadElectronModule } from './electron.ts'
 import type { Session } from './config.ts'
 
+export type AuthErrorKind = 'invalid_credentials' | 'auth_expired' | 'network' | 'server_error'
+
+/** User-facing message per auth failure kind (shown by the login page). */
+export function authErrorMessage(kind: AuthErrorKind): string {
+  switch (kind) {
+    case 'invalid_credentials': return '账号或密码错误'
+    case 'auth_expired': return '登录已过期，请重新登录'
+    case 'network': return '网络错误，请检查网络连接'
+    case 'server_error': return '服务端错误，请稍后重试'
+  }
+}
+
 export class AuthError extends Error {
   constructor(
-    public kind: 'invalid_credentials' | 'auth_expired' | 'network' | 'server_error',
+    public kind: AuthErrorKind,
     message?: string,
   ) {
-    super(message ?? kind)
+    super(message ?? authErrorMessage(kind))
     this.name = 'AuthError'
   }
 }
@@ -34,10 +46,29 @@ export async function gatewayFetch(input: string | URL | Request, init?: Request
   return fetch(input, init)
 }
 
+/**
+ * Re-check that a server URL is allowed on every use (not only at login):
+ * https, or http restricted to loopback hosts. Prevents a persisted session
+ * from steering credentials or tokens at an arbitrary http:// target later.
+ */
+export function assertServerURLAllowed(serverURL: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(serverURL)
+  } catch {
+    throw new AuthError('server_error', 'invalid server url')
+  }
+  const loopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]'
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    throw new AuthError('server_error', 'server must use https (http only for localhost)')
+  }
+}
+
 export async function login(serverURL: string, username: string, password: string): Promise<Session> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
+    assertServerURLAllowed(serverURL)
     const res = await gatewayFetch(`${serverURL}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -67,6 +98,7 @@ export async function fetchJSON(
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15000)
   let res: Response
   try {
+    assertServerURLAllowed(serverURL)
     res = await gatewayFetch(`${serverURL}${path}`, {
       method: opts.method ?? 'GET',
       headers: {
@@ -77,6 +109,7 @@ export async function fetchJSON(
       signal: controller.signal,
     })
   } catch (e) {
+    if (e instanceof AuthError) throw e
     if (controller.signal.aborted) throw new AuthError('network', 'timeout')
     throw new AuthError('network', e instanceof Error ? e.message : 'network error')
   } finally {

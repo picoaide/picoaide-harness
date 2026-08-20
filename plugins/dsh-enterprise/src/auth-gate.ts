@@ -2,7 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
+import { AuthError, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
+import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 
 const LOGIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -104,17 +105,50 @@ export function apply(ctx: Context, config: Config): void {
 
   const session = (): { serverURL: string; token: string } | null => ctx.picoSession.getSession()
 
+  /**
+   * Trust fence for every local route: loopback socket + Host + same-origin
+   * markers. Refuses cross-site browser pages (CSRF / DNS-rebinding) and
+   * non-loopback callers alike.
+   */
+  const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
+    if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
+    json(res, 403, { error: 'forbidden' })
+    return false
+  }
+
   const gatewayError = (res: ServerResponse, cause: unknown): void => {
     const message = cause instanceof Error ? cause.message : String(cause)
     json(res, 502, { error: `gateway error: ${message}` })
   }
+
+  /**
+   * Session-lost tripwire injected into the DSH app page: polls the local
+   * auth state and reloads into the login page when the session is cleared
+   * server-side (token revoked/expired/disabled). 5s cadence keeps the
+   * window short without long-lived connections.
+   */
+  const SESSION_LOST_SCRIPT = `<script>
+(function () {
+  var known = true
+  setInterval(function () {
+    fetch('/api/pico/auth/state').then(function (r) { return r.json() }).then(function (d) {
+      if (known && d.loggedIn === false) location.reload()
+      known = d.loggedIn === true
+    }).catch(function () {})
+  }, 5000)
+})()
+<\/script>`
 
   ctx.effect(() => {
     const disposers = [
       // The main window's first page: the login form while logged out, the
       // DSH Web app once a session exists. Server-side replacement (not a
       // client redirect) keeps the initial loadURL from being aborted.
-      ctx.webServer.tapIndex((html) => (ctx.picoSession.isLoggedIn() ? html : loginHTML)),
+      // While logged in, inject the session-lost tripwire into the app page.
+      ctx.webServer.tapIndex((html) => {
+        if (!ctx.picoSession.isLoggedIn()) return loginHTML
+        return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
+      }),
 
       ctx.webServer.register({
         kind: 'exact', path: '/login',
@@ -128,6 +162,7 @@ export function apply(ctx: Context, config: Config): void {
         kind: 'exact', path: '/api/pico/auth/login',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
           const chunks: Buffer[] = []
           for await (const chunk of req) chunks.push(chunk as Buffer)
           let body: { server?: unknown; username?: unknown; password?: unknown }
@@ -135,24 +170,22 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof body.server !== 'string' || typeof body.username !== 'string' || typeof body.password !== 'string') {
             return json(res, 400, { error: 'missing fields' })
           }
-          let parsed: URL
-          try { parsed = new URL(body.server) } catch { return json(res, 400, { error: 'invalid server url' }) }
-          const localhost = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
-          if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && localhost)) {
-            return json(res, 400, { error: 'server must use https (http only for localhost)' })
-          }
           try {
             ctx.picoSession.setSession(await login(body.server, body.username, body.password))
             json(res, 200, { ok: true })
           } catch (err) {
-            json(res, 401, { error: err instanceof Error ? err.message : 'login failed' })
+            // AuthError carries a user-facing message (账号或密码错误 etc.).
+            const status = err instanceof AuthError && err.kind === 'network' ? 502 : 401
+            json(res, status, { error: err instanceof Error ? err.message : 'login failed' })
           }
         },
       }),
 
       ctx.webServer.register({
         kind: 'exact', path: '/api/pico/auth/state',
-        handler: (_req: IncomingMessage, res: ServerResponse) => {
+        handler: (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
           const s = session()
           json(res, 200, s === null
             ? { loggedIn: false }
@@ -162,7 +195,23 @@ export function apply(ctx: Context, config: Config): void {
 
       ctx.webServer.register({
         kind: 'exact', path: '/api/pico/auth/logout',
-        handler: (_req: IncomingMessage, res: ServerResponse) => { ctx.picoSession.clear(); json(res, 200, { ok: true }) },
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
+          // Revoke the gateway token server-side before clearing locally
+          // (M1): the server token must not outlive the local session.
+          const s = session()
+          if (s !== null) {
+            try {
+              await fetchJSON(s.serverURL, '/api/auth/logout', { token: s.token, method: 'POST' })
+            } catch {
+              // The local session is still cleared even if the server is
+              // unreachable; the token expires via its own TTL.
+            }
+          }
+          ctx.picoSession.clear()
+          json(res, 200, { ok: true })
+        },
       }),
 
       // Skill store proxy: /api/pico/skills (catalog) and
@@ -170,6 +219,8 @@ export function apply(ctx: Context, config: Config): void {
       ctx.webServer.register({
         kind: 'prefix', path: '/api/pico/skills',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
@@ -177,7 +228,15 @@ export function apply(ctx: Context, config: Config): void {
             try {
               const data = await fetchJSON(s.serverURL, '/api/marketplace/skills', { token: s.token })
               json(res, 200, data)
-            } catch (cause) { gatewayError(res, cause) }
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                // The session is no longer valid: clear it so the injected
+                // tripwire reloads into the login page (M2).
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              gatewayError(res, cause)
+            }
             return
           }
           const match = /^\/api\/pico\/skills\/([^/]+)\/archive$/u.exec(pathname)
@@ -189,14 +248,28 @@ export function apply(ctx: Context, config: Config): void {
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+            // Pass through the upstream integrity headers (M3): the server
+            // signs archives with X-Skill-Checksum / X-Skill-Version.
             const content = Buffer.from(await upstream.arrayBuffer())
-            res.writeHead(200, {
+            const headers: Record<string, string> = {
               'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
               'Content-Length': String(content.length),
-              'Content-Disposition': `attachment; filename="${name}.tar.gz"`,
-            })
+            }
+            const disposition = upstream.headers.get('content-disposition')
+            headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.tar.gz"`
+            for (const key of ['x-skill-checksum', 'x-skill-version']) {
+              const value = upstream.headers.get(key)
+              if (value !== null) headers[key] = value
+            }
+            res.writeHead(200, headers)
             res.end(content)
-          } catch (cause) { gatewayError(res, cause) }
+          } catch (cause) {
+            if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+              ctx.picoSession.clear()
+              return json(res, 401, { error: 'auth expired' })
+            }
+            gatewayError(res, cause)
+          }
         },
       }),
     ]

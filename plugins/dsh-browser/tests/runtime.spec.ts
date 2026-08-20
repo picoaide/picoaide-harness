@@ -423,6 +423,7 @@ describe('BrowserRuntime', () => {
       getURL: () => 'https://example.com/big.bin',
       getFilename: () => 'big.bin',
       getTotalBytes: () => 200 * 1024 * 1024,
+      getReceivedBytes: () => 200 * 1024 * 1024,
       setSavePath: vi.fn(),
       cancel: vi.fn(),
       on: vi.fn(),

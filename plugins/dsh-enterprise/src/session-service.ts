@@ -1,9 +1,24 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Session } from './server-connector/config.ts'
 import { loadElectronModule } from './server-connector/electron.ts'
+
+/** Session token file permissions: owner read/write only. */
+const TOKEN_FILE_MODE = 0o600
+
+/**
+ * Resolve the session token file: `$DSH_HOME/session.json`, falling back to
+ * the product home when DSH_HOME is unset (never the process cwd — a token
+ * dropped there could be world-readable and bypasses the home's 0700).
+ */
+export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.DSH_HOME?.trim()
+  if (home !== undefined && home.length > 0) return join(home, 'session.json')
+  return join(homedir(), '.picoaide-harness', 'session.json')
+}
 
 /** Cordis event emitted whenever the session is set, restored, or cleared. */
 export const SESSION_CHANGED_EVENT = 'pico/session-changed'
@@ -38,7 +53,7 @@ export default class SessionService extends Service {
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'picoSession')
-    this.tokenFile = config.tokenFile ?? join(process.env.DSH_HOME ?? '', 'session.json')
+    this.tokenFile = config.tokenFile ?? defaultTokenFile()
     void this.restore()
   }
 
@@ -93,5 +108,7 @@ async function persist(tokenFile: string, s: Session): Promise<void> {
     console.warn('[pico] token not persisted: safeStorage backend is basic_text (plaintext)')
     return
   }
-  writeFileSync(tokenFile, ss.encryptString(JSON.stringify(s)))
+  // Owner-only mode: the encrypted token must not be readable by other
+  // local users even if the home directory permissions are loose.
+  writeFileSync(tokenFile, ss.encryptString(JSON.stringify(s)), { mode: TOKEN_FILE_MODE })
 }

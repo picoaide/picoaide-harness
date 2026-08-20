@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { salesEasyDef } from './sales-easy.ts'
@@ -117,7 +118,29 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           reject(new Error(`无法从命令输出中解析 URL: ${stdout.trim().slice(0, 200)}`))
           return
         }
-        resolve(match[0])
+        const url = match[0]
+        // P3-5: never send stored credentials to an arbitrary host. The CLI
+        // output must be https and must not point at a loopback/private
+        // address (SSRF-style token exfiltration guard).
+        try {
+          const parsed = new URL(url)
+          if (parsed.protocol !== 'https:') {
+            reject(new Error(`MCP URL 必须是 https: ${url.slice(0, 80)}`))
+            return
+          }
+          const host = parsed.hostname.toLowerCase()
+          const isPrivate = host === 'localhost' || host === '::1'
+            || /^127\./.test(host)
+            || /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)
+          if (isPrivate) {
+            reject(new Error(`MCP URL 指向本地/私网地址，已拒绝: ${url.slice(0, 80)}`))
+            return
+          }
+        } catch {
+          reject(new Error(`MCP URL 无效: ${url.slice(0, 80)}`))
+          return
+        }
+        resolve(url)
       })
     })
   }
@@ -350,8 +373,20 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       json(res, 200, { ok: true })
     }
 
+    // Trust fence for every connector route: loopback socket + Host +
+    // same-origin markers. State-changing endpoints below also enforce POST.
+    const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
+      if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
+      json(res, 403, { error: 'forbidden' })
+      return false
+    }
+
     const disposers = [
-      ctx.webServer.register({ kind: 'exact', path: '/api/pico/connectors', handler: list }),
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/connectors', handler: (req, res) => {
+        if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+        if (!guard(req, res)) return
+        list(req, res)
+      } }),
       ctx.webServer.register({ kind: 'prefix', path: '/api/pico/connectors', handler: (req, res) => {
         const segments = req.url?.split('/') ?? []
         const action = segments[5]?.split('?')[0]
@@ -360,6 +395,18 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
           'auth-submit': exact(authSubmit),
           state: exact(state),
           disconnect: exact(disconnectHandler),
+        }
+        if (!guard(req, res)) return
+        const method = req.method ?? 'GET'
+        const allowedMethods: Record<string, string> = {
+          connect: 'POST',
+          'auth-submit': 'POST',
+          state: 'GET',
+          disconnect: 'POST',
+        }
+        const expected = action ? allowedMethods[action] : undefined
+        if (expected !== undefined && method !== expected) {
+          return json(res, 405, { error: 'method not allowed' })
         }
         const handler = action ? handlers[action] : undefined
         if (handler) handler(req, res)

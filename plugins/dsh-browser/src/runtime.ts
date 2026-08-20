@@ -181,7 +181,9 @@ export class BrowserRuntime {
   }
 
   private record(tool: string, tab: number, summary: string, failed = false): void {
-    this.ops.push({ seq: ++this.opSeq, time: Date.now(), tool, tab, summary, failed })
+    // P2-1: redact credential-shaped material from the op log — the summary
+    // can carry full URLs whose query may embed tokens/codes.
+    this.ops.push({ seq: ++this.opSeq, time: Date.now(), tool, tab, summary: maskBrowserSummary(summary), failed })
     if (this.ops.length > OP_LOG_LIMIT) this.ops.shift()
   }
 
@@ -711,4 +713,27 @@ const KEY_VK: Record<string, number> = {
   PageUp: 33,
   PageDown: 34,
   ' ': 32,
+}
+
+const MASK = '****'
+const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
+
+/** Redact credential-shaped parts of a browser op-log summary (URLs and
+ * query parameters). Mirrors the desktop logger's mask-secrets semantics. */
+export function maskBrowserSummary(summary: string): string {
+  return summary.replace(/https?:\/\/[^\s<>"']+/giu, (raw) => {
+    const trailing = /[),.;]+$/u.exec(raw)?.[0] ?? ''
+    const value = trailing === '' ? raw : raw.slice(0, -trailing.length)
+    try {
+      const url = new URL(value)
+      if (url.username !== '') url.username = MASK
+      if (url.password !== '') url.password = MASK
+      for (const name of url.searchParams.keys()) {
+        if (SENSITIVE_QUERY_KEY.test(name)) url.searchParams.set(name, MASK)
+      }
+      return `${url.href}${trailing}`
+    } catch {
+      return raw
+    }
+  })
 }
