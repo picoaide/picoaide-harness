@@ -109,10 +109,11 @@ const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label
 
 const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'center', padding: 12 }
 
-/** Per-skill download feedback: which skill is downloading and the outcome. */
+/** Per-skill install feedback: which skill is installing and the outcome. */
 interface DownloadState {
   name: string
   kind: 'downloading' | 'done' | 'failed'
+  error?: string | undefined
 }
 
 /**
@@ -149,22 +150,18 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
     return () => { window.removeEventListener('keydown', onKey) }
   }, [onClose])
 
-  const download = async (name: string): Promise<void> => {
+  const install = async (name: string): Promise<void> => {
     if (downloadState !== null && downloadState.kind === 'downloading') return
     setDownloadState({ name, kind: 'downloading' })
     try {
-      const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/archive`)
-      if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `${name}.tar.gz`
-      anchor.click()
-      URL.revokeObjectURL(url)
+      const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/install`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
+      }
       setDownloadState({ name, kind: 'done' })
-    } catch {
-      setDownloadState({ name, kind: 'failed' })
+    } catch (cause) {
+      setDownloadState({ name, kind: 'failed', error: cause instanceof Error ? cause.message : undefined })
     }
   }
 
@@ -186,9 +183,9 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
               type="button"
               style={busy ? BUTTON_DISABLED : BUTTON}
               disabled={busy}
-              onClick={() => { void download(skill.name) }}
+              onClick={() => { void install(skill.name) }}
             >
-              {busy ? t('skill.fetching') : t('skill.fetch')}
+              {busy ? t('skill.installing') : t('skill.install')}
             </button>
           </div>
           <p style={META}>v{skill.version}{skill.author !== '' ? ` · ${skill.author}` : ''}</p>
@@ -209,7 +206,11 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
         <div style={BODY}>{content}</div>
         {downloadState !== null && downloadState.kind !== 'downloading' && (
           <p style={{ ...NOTICE, color: downloadState.kind === 'done' ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)' }}>
-            {downloadState.kind === 'done' ? t('skill.downloaded', { name: downloadState.name }) : t('skill.failed')}
+            {downloadState.kind === 'done'
+              ? t('skill.installed', { name: downloadState.name })
+              : downloadState.error !== undefined && downloadState.error !== ''
+                ? `${t('skill.failed')}：${downloadState.error}`
+                : t('skill.failed')}
           </p>
         )}
       </div>
