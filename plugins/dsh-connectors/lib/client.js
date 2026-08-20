@@ -539,7 +539,7 @@ window.__ModuleLoader__.load({
 		const TITLE = {
 			margin: 0,
 			fontSize: 16,
-			lineHeight: 24,
+			lineHeight: "24px",
 			fontWeight: 500,
 			color: "var(--dsw-alias-label-primary)"
 		};
@@ -627,7 +627,7 @@ window.__ModuleLoader__.load({
 			color: "var(--dsw-alias-label-primary)",
 			fontFamily: "inherit",
 			fontSize: 14,
-			lineHeight: 22
+			lineHeight: "22px"
 		};
 		const TRIGGER_RAIL = {
 			...TRIGGER_WIDE,
