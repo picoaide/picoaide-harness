@@ -8,14 +8,26 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: declares the sidebar foot action slot (`sidebar.footer.action`).
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { AccountSection } from './AccountSection.tsx'
 import { SkillCenterTrigger } from './SkillCenterTrigger.tsx'
+import { en, type EnterpriseKey, zh } from './locales.ts'
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Enterprise client surface copy. */
+    enterprise: EnterpriseKey
+  }
+}
 
 /** Stable Cordis plugin name for the enterprise client half. */
 export const name = 'picoaide-enterprise-client'
 
+/** Locale namespace owning the enterprise client copy. */
+const LOCALE_NS = 'enterprise'
+
 /** Services required: the slot registry for settings pages. */
-export const inject = ['slots']
+export const inject = ['slots', 'locale']
 
 /**
  * White brace mark (matches the app/tray icon): transparent-background SVG
@@ -123,6 +135,12 @@ body[data-ds-dark-theme] [class*="_collapsed"] [class$="_toggle"]::before {
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
+  // Enterprise client dictionaries (zh key source, en mirror).
+  ctx.effect(() => {
+    const off = ctx.locale.register(LOCALE_NS, { zh, en })
+    return () => { off() }
+  }, 'enterprise: client dictionaries')
+
   ctx.effect(
     () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
       name: 'sidebar.footer.action',

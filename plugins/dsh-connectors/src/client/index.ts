@@ -1,9 +1,11 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
 import { ConnectorTrigger } from './ConnectorTrigger.tsx'
+import { en, type ConnectorsKey, zh } from './locales.ts'
 
 /**
  * Connectors client half: registers the connector center foot action in the
@@ -15,7 +17,16 @@ import { ConnectorTrigger } from './ConnectorTrigger.tsx'
  */
 export const name = 'pico-connectors-client'
 
-export const inject = ['commandUi', 'sessions', 'slots']
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Connectors client surface copy. */
+    connectors: ConnectorsKey
+  }
+}
+
+const LOCALE_NS = 'connectors'
+
+export const inject = ['commandUi', 'sessions', 'slots', 'locale']
 
 interface ConnectorEntry {
   id: string
@@ -27,6 +38,20 @@ interface ConnectorEntry {
 const POLL_INTERVAL_MS = 3000
 
 export function apply(ctx: ClientContext): void {
+  // Connectors client dictionaries (zh key source, en mirror).
+  ctx.effect(() => {
+    const off = ctx.locale.register(LOCALE_NS, { zh, en })
+    return () => { off() }
+  }, 'connectors: client dictionaries')
+
+  // Hover feedback matching the skill center trigger (P3-11).
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.textContent = '.pico-connector-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }'
+    document.head.appendChild(style)
+    return () => { style.remove() }
+  }, 'connectors: trigger hover style')
+
   ctx.effect(
     () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
       name: 'sidebar.footer.action',
