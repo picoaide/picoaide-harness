@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
+import { CliRuntime } from './cli-runtime.ts'
 import { salesEasyDef } from './sales-easy.ts'
 import { dingTalkDef } from './dingtalk.ts'
 import { marketplaceDefs } from './defs/index.ts'
@@ -34,6 +35,8 @@ export interface ConnectorsOptions {
   connectors?: ConnectorDef[]
   /** Override the token store directory (tests). */
   storeBaseDir?: string
+  /** Override the CLI download cache directory (tests). */
+  cliCacheDir?: string
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -79,6 +82,7 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef, dingTalkDef])
   const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {})
+  const cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : undefined)
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   const mcpDisposers = new Map<string, () => void>()
@@ -98,10 +102,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const resolveUrlCommand = async (args: string[]): Promise<string> => {
     const [command, ...rest] = args
     if (command === undefined) throw new Error('urlCommand is empty')
+    const resolved = await cliRuntime.resolve(command, rest)
+    const spawnCommand = resolved?.command ?? command
+    const spawnArgs = resolved?.args ?? rest
     return new Promise((resolve, reject) => {
-      const child = spawn(command, rest, {
+      const child = spawn(spawnCommand, spawnArgs, {
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],
+        shell: resolved?.shell,
       })
       let stdout = ''
       let stderr = ''
@@ -242,6 +250,7 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       const patch = await runAuth(def, {
         onRequest: emitRequest,
         signal: controller.signal,
+        cli: cliRuntime,
         ...(existing?.fields ? { fields: existing.fields } : {}),
       })
       // Token-form flows finish on auth-submit; runAuth only emitted the fields.

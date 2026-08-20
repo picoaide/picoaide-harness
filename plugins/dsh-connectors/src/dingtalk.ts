@@ -12,6 +12,12 @@ import type { ConnectorDef } from './types.ts'
  * package `dingtalk-workspace-cli` (bin `dws`; note the bare `dws` npm
  * package is an unrelated legacy GIS wrapper and must not be suggested).
  *
+ * The CLI is normally provided by the download-on-demand runtime
+ * (cli-runtime.ts): if `dws` is not on PATH, the first connect fetches the
+ * pinned platform binary from the npm registry, verifies it against the
+ * pinned sha256 and caches it under the connector store dir. `installCommand`
+ * remains only as a manual fallback hint when that download cannot run.
+ *
  * Tools come from DingTalk's hosted Streamable HTTP MCP services; each
  * `dws mcp url get <mcpId>` call returns the user-scoped endpoint URL for one
  * service (calendar, chat, doc, todo, contact...), registered through

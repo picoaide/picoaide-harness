@@ -21,6 +21,8 @@ export interface ConnectorsOptions {
     connectors?: ConnectorDef[];
     /** Override the token store directory (tests). */
     storeBaseDir?: string;
+    /** Override the CLI download cache directory (tests). */
+    cliCacheDir?: string;
 }
 export declare function apply(ctx: Context, options?: ConnectorsOptions): void;
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts';
