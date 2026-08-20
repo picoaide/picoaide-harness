@@ -16,6 +16,7 @@ const upstream = readJson('upstream.json')
 const plugin = readJson('dsh-plugin-desktop/package.json')
 const enterprise = readJson('plugins/dsh-enterprise/package.json')
 const connectors = readJson('plugins/dsh-connectors/package.json')
+const browser = readJson('plugins/dsh-browser/package.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
@@ -31,6 +32,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-plugin-desktop',
   'plugins/dsh-enterprise',
   'plugins/dsh-connectors',
+  'plugins/dsh-browser',
   'plugins/dsh-memory-evolve',
   'plugins/dsh-cron',
   'plugins/dsh-task',
@@ -38,7 +40,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-community-market',
   'plugins/dsh-better-sidebar',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, memory-evolve, cron, task, community-fabric, community-market, and better-sidebar packages')
+  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, browser, memory-evolve, cron, task, community-fabric, community-market, and better-sidebar packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', plugin],
@@ -86,6 +88,7 @@ for (const [owner, manifest] of [
   ['desktop', plugin],
   ['enterprise', enterprise],
   ['connectors', connectors],
+  ['browser', browser],
   ['fabric', fabric],
   ['market', market],
 ]) {
@@ -117,7 +120,7 @@ if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.reposi
 if (upstreamPackage.version !== upstream.sourceVersion) {
   fail('deepseek-harness package version differs from upstream.json')
 }
-for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise], ['connectors', connectors], ['market', market]]) {
+for (const [owner, manifest] of [['plugin', plugin], ['enterprise', enterprise], ['connectors', connectors], ['browser', browser], ['market', market]]) {
   const deps = { ...(manifest.dependencies ?? {}), ...(manifest.peerDependencies ?? {}) }
   for (const name of Object.keys(deps).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
     if (deps[name] !== upstream.runtimePackageVersion) {
