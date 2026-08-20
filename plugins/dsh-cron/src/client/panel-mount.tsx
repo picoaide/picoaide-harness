@@ -11,6 +11,7 @@
  */
 import { createRoot, type Root } from 'react-dom/client'
 import { createElement } from 'react'
+import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import type { CronController } from './controller.ts'
 import { CronJobTab } from './CronJobTab.tsx'
 import { CRON_ACTIVE_ATTR } from './CronTrigger.tsx'
@@ -61,7 +62,7 @@ function visibilityStyle(): HTMLStyleElement {
  * visibility to the html activation attribute.
  * @returns disposer unmounting the tree and restoring the column.
  */
-export function mountCronPanel(controller: CronController): () => void {
+export function mountCronPanel(controller: CronController, workspaces?: IWorkspaces): () => void {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
@@ -79,7 +80,7 @@ export function mountCronPanel(controller: CronController): () => void {
     // stylesheet rule (an inline style would defeat the show rule).
     column.appendChild(container)
     root = createRoot(container)
-    root.render(createElement(CronCenterView, { controller }))
+    root.render(createElement(CronCenterView, { controller, ...(workspaces === undefined ? {} : { workspaces }) }))
   }
 
   // The frame mounts after boot settlement; watch for the column's arrival.
@@ -114,7 +115,7 @@ export function mountCronPanel(controller: CronController): () => void {
 }
 
 /** Center view: a back-to-chat header plus the job center body. */
-function CronCenterView({ controller }: { controller: CronController }): JSX.Element {
+function CronCenterView({ controller, workspaces }: { controller: CronController; workspaces?: IWorkspaces }): JSX.Element {
   const back = (): void => { closeCronPanel() }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 420 }}>
@@ -125,7 +126,7 @@ function CronCenterView({ controller }: { controller: CronController }): JSX.Ele
         </button>
       </div>
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        <CronJobTab controller={controller} />
+        <CronJobTab controller={controller} {...(workspaces === undefined ? {} : { workspaces })} />
       </div>
     </div>
   )

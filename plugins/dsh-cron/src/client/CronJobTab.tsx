@@ -3,6 +3,7 @@
  * run-now, edit, delete, and per-job trigger history.
  */
 import { useEffect, useState } from 'react'
+import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import type { JobRecord } from '../jobs.ts'
 import type { CronController, CronViewSnapshot } from './controller.ts'
 import { styles } from './styles.ts'
@@ -19,7 +20,10 @@ function executionLabel(result: JobRecord['executions'][number]): { text: string
   }
 }
 
-export function CronJobTab({ controller }: { controller: CronController }): JSX.Element {
+export function CronJobTab({ controller, workspaces }: {
+  controller: CronController
+  workspaces?: IWorkspaces
+}): JSX.Element {
   const [snapshot, setSnapshot] = useState<CronViewSnapshot>(controller.getSnapshot())
   const [editing, setEditing] = useState<JobRecord | undefined>()
   const [creating, setCreating] = useState(false)
@@ -50,8 +54,8 @@ export function CronJobTab({ controller }: { controller: CronController }): JSX.
           <JobRow key={job.id} job={job} pending={snapshot.pendingJobIds.includes(job.id)} controller={controller} onEdit={setEditing} />
         ))}
       </div>
-      {creating && <JobEditor controller={controller} onClose={() => { setCreating(false) }} />}
-      {editing !== undefined && <JobEditor controller={controller} job={editing} onClose={() => { setEditing(undefined) }} />}
+      {creating && <JobEditor controller={controller} {...(workspaces === undefined ? {} : { workspaces })} onClose={() => { setCreating(false) }} />}
+      {editing !== undefined && <JobEditor controller={controller} job={editing} {...(workspaces === undefined ? {} : { workspaces })} onClose={() => { setEditing(undefined) }} />}
     </div>
   )
 }

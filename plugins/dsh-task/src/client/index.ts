@@ -70,6 +70,7 @@ export function apply(ctx: ClientContext): void {
 
   // Sidebar foot entry (global, above the connector center and Settings).
   const sessions = ctx.get('sessions') as { open(id: string): void } | undefined
+  const workspacesService = ctx.get('workspaces') as IWorkspaces | undefined
   const controller = new TaskController({ transport: new HttpTaskTransport() })
   if (sessions !== undefined) controller.openSession = id => sessions.open(id as never)
   ctx.effect(() => {
@@ -81,13 +82,12 @@ export function apply(ctx: ClientContext): void {
     id: 'pico-task',
     order: -5,
   }, TaskTrigger))
-  ctx.effect(() => mountTaskBoard(controller), 'dsh-task: main-area board')
+  ctx.effect(() => mountTaskBoard(controller, workspacesService), 'dsh-task: main-area board')
 
   // Board tab in the better-sidebar (soft dependency, child fiber).
   ctx.inject(['betterSidebar'], (childCtx: Context) => {
     const service = childCtx.get('betterSidebar') as BetterSidebarService | undefined
     if (service === undefined) return
-    const workspacesService = ctx.get('workspaces') as IWorkspaces | undefined
     const disposeTab = service.registerTab({
       id: 'pico:task-board',
       title: () => zh['entry.label'],

@@ -327,7 +327,7 @@ window.__ModuleLoader__.load({
 				height: "100%",
 				minWidth: 280,
 				fontSize: 13,
-				color: "var(--dsw-text, #d5d7e0)",
+				color: "var(--dsw-alias-label-primary)",
 				background: "transparent"
 			},
 			header: {
@@ -335,7 +335,7 @@ window.__ModuleLoader__.load({
 				alignItems: "center",
 				gap: 8,
 				padding: "10px 12px",
-				borderBottom: "1px solid var(--dsw-border, rgba(128,128,128,0.25))"
+				borderBottom: "1px solid var(--dsw-alias-border-l2)"
 			},
 			title: {
 				flex: 1,
@@ -362,10 +362,10 @@ window.__ModuleLoader__.load({
 				opacity: .6
 			},
 			job: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.25))",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				borderRadius: 8,
 				padding: "8px 10px",
-				background: "var(--dsw-surface, rgba(30,32,42,0.85))"
+				background: "var(--dsw-alias-bg-layer-2)"
 			},
 			jobRow: {
 				display: "flex",
@@ -394,7 +394,7 @@ window.__ModuleLoader__.load({
 				alignItems: "center"
 			},
 			button: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.3))",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				borderRadius: 6,
 				background: "transparent",
 				color: "inherit",
@@ -409,8 +409,8 @@ window.__ModuleLoader__.load({
 				cursor: "default"
 			},
 			buttonPrimary: {
-				borderColor: "var(--dsw-accent, #4d6bfe)",
-				color: "var(--dsw-accent, #4d6bfe)"
+				borderColor: "var(--dsw-alias-state-business-primary)",
+				color: "var(--dsw-alias-state-business-primary)"
 			},
 			switch: {
 				display: "inline-flex",
@@ -422,7 +422,7 @@ window.__ModuleLoader__.load({
 			history: {
 				marginTop: 6,
 				paddingTop: 6,
-				borderTop: "1px dashed var(--dsw-border, rgba(128,128,128,0.2))",
+				borderTop: "1px dashed var(--dsw-alias-border-l1)",
 				fontSize: 11,
 				opacity: .75
 			},
@@ -432,14 +432,15 @@ window.__ModuleLoader__.load({
 				padding: "1px 0"
 			},
 			historyTime: { opacity: .7 },
-			resultOk: { color: "var(--dsw-success, #4caf7d)" },
-			resultFail: { color: "var(--dsw-danger, #e06666)" },
+			resultOk: { color: "var(--dsw-alias-state-success-primary)" },
+			resultFail: { color: "var(--dsw-alias-state-error-primary)" },
 			resultCancel: { opacity: .7 },
-			resultPending: { color: "var(--dsw-warning, #d9a441)" },
+			resultPending: { color: "var(--dsw-alias-state-warn-primary)" },
 			overlay: {
 				position: "fixed",
 				inset: 0,
-				background: "rgba(0,0,0,0.45)",
+				background: "var(--dsw-alias-bg-mask-1)",
+				backdropFilter: "var(--dsw-mask-blur)",
 				display: "flex",
 				alignItems: "center",
 				justifyContent: "center",
@@ -449,14 +450,15 @@ window.__ModuleLoader__.load({
 				width: "min(480px, 92vw)",
 				maxHeight: "86vh",
 				overflowY: "auto",
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.35))",
-				borderRadius: 10,
-				background: "var(--dsw-surface, #1e202a)",
+				border: "1px solid var(--dsw-alias-border-l3)",
+				borderRadius: 12,
+				background: "var(--dsw-alias-bg-layer-2)",
+				boxShadow: "var(--dsw-shadow-lv3)",
 				padding: "14px 16px",
 				display: "flex",
 				flexDirection: "column",
 				gap: 10,
-				color: "var(--dsw-text, #d5d7e0)",
+				color: "var(--dsw-alias-label-primary)",
 				fontSize: 13
 			},
 			field: {
@@ -469,9 +471,9 @@ window.__ModuleLoader__.load({
 				opacity: .8
 			},
 			input: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.35))",
+				border: "1px solid var(--dsw-alias-border-l3)",
 				borderRadius: 6,
-				background: "var(--dsw-input, rgba(0,0,0,0.25))",
+				background: "var(--dsw-alias-bg-layer-3)",
 				color: "inherit",
 				fontSize: 13,
 				padding: "5px 8px",
@@ -486,14 +488,14 @@ window.__ModuleLoader__.load({
 				fontSize: 11,
 				padding: "2px 8px",
 				borderRadius: 999,
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.3))",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				background: "transparent",
 				color: "inherit",
 				cursor: "pointer",
 				fontFamily: "inherit"
 			},
 			error: {
-				color: "var(--dsw-danger, #e06666)",
+				color: "var(--dsw-alias-state-error-primary)",
 				fontSize: 12
 			},
 			editorActions: {
@@ -734,7 +736,10 @@ window.__ModuleLoader__.load({
 			"job.run": "立即执行",
 			"job.actionTask": "执行任务",
 			"job.actionPrompt": "发送消息",
-			"job.taskId": "任务 ID",
+			"job.workspace": "项目",
+			"job.workspaceCurrent": "当前项目（默认）",
+			"job.taskId": "任务",
+			"job.taskSelect": "选择任务…",
 			"job.sessionId": "会话 ID",
 			"job.promptText": "消息内容",
 			"job.save": "保存",
@@ -775,7 +780,10 @@ window.__ModuleLoader__.load({
 			"job.run": "Run now",
 			"job.actionTask": "Run a task",
 			"job.actionPrompt": "Send a message",
-			"job.taskId": "Task ID",
+			"job.workspace": "Project",
+			"job.workspaceCurrent": "Current project (default)",
+			"job.taskId": "Task",
+			"job.taskSelect": "Select a task…",
 			"job.sessionId": "Session ID",
 			"job.promptText": "Message text",
 			"job.save": "Save",
@@ -798,10 +806,42 @@ window.__ModuleLoader__.load({
 			return text;
 		}
 		//#endregion
+		//#region src/client/workspace-select.ts
+		/**
+		* Project (workspace) options for the cron job editor. Reads the client
+		* workspaces feed (the same list the shell sidebar shows) — implemented
+		* locally because cross-package client imports are forbidden; the sibling
+		* dsh-task plugin owns its own copy.
+		*/
+		/** Extract the workspace option list from the client feed. */
+		function workspaceOptionsFrom(workspaces) {
+			if (workspaces === void 0) return [];
+			return workspaces.list.getSnapshot().items.map((item) => ({
+				workspaceId: String(item.workspaceId),
+				title: item.title !== "" ? item.title : String(item.path)
+			}));
+		}
+		/** Subscribe to the workspaces feed; returns the latest option list. */
+		function useWorkspaceOptions(workspaces) {
+			const [options, setOptions] = (0, react.useState)(() => workspaceOptionsFrom(workspaces));
+			(0, react.useEffect)(() => {
+				if (workspaces === void 0) return;
+				const update = () => {
+					setOptions(workspaceOptionsFrom(workspaces));
+				};
+				update();
+				return workspaces.list.subscribe(update);
+			}, [workspaces]);
+			return options;
+		}
+		//#endregion
 		//#region src/client/JobEditor.tsx
 		/**
 		* Job editor dialog: name, cron expression (with presets + live validation),
-		* and the action (run a dsh-task task, or send a message to a session).
+		* project (workspace) picker, and the action (run a dsh-task task, or send a
+		* message to a session). Task actions select the target task from the chosen
+		* project's board (fetched through the dsh-task loopback API); prompt actions
+		* name a session id directly.
 		*/
 		const PRESETS = [
 			{
@@ -821,7 +861,21 @@ window.__ModuleLoader__.load({
 				key: "preset.weeklyMon9"
 			}
 		];
-		function JobEditor({ controller, job, onClose }) {
+		/** Fetch the dsh-task board tasks through its loopback API (soft dependency). */
+		async function fetchTaskOptions() {
+			try {
+				const response = await fetch("/api/task/state", { headers: { accept: "application/json" } });
+				if (!response.ok) return [];
+				return ((await response.json()).tasks ?? []).map((task) => ({
+					id: task.id,
+					title: task.title,
+					...task.workspaceId !== void 0 ? { workspaceId: task.workspaceId } : {}
+				}));
+			} catch {
+				return [];
+			}
+		}
+		function JobEditor({ controller, job, workspaces, onClose }) {
 			const [name, setName] = (0, react.useState)(job?.name ?? "");
 			const [cron, setCron] = (0, react.useState)(job?.cron ?? "0 9 * * *");
 			const [actionKind, setActionKind] = (0, react.useState)(job?.action.kind ?? "task");
@@ -829,8 +883,23 @@ window.__ModuleLoader__.load({
 			const [sessionId, setSessionId] = (0, react.useState)(job?.action.kind === "prompt" ? job.action.sessionId : "");
 			const [text, setText] = (0, react.useState)(job?.action.kind === "prompt" ? job.action.text : "");
 			const [error, setError] = (0, react.useState)();
+			const workspaceOptions = useWorkspaceOptions(workspaces);
+			const [workspaceId, setWorkspaceId] = (0, react.useState)("");
+			const [taskOptions, setTaskOptions] = (0, react.useState)([]);
+			(0, react.useEffect)(() => {
+				if (actionKind !== "task") return;
+				let alive = true;
+				fetchTaskOptions().then((options) => {
+					if (!alive) return;
+					setTaskOptions(options);
+				});
+				return () => {
+					alive = false;
+				};
+			}, [actionKind, workspaceId]);
 			const cronValid = isValidCron(cron);
 			const nextRun = cronValid ? nextRunAtMs(cron, Date.now()) : void 0;
+			const visibleTasks = workspaceId === "" ? taskOptions.filter((task) => task.workspaceId === void 0) : taskOptions.filter((task) => task.workspaceId === workspaceId);
 			const save = () => {
 				if (!cronValid) {
 					setError(t("job.cronInvalid"));
@@ -938,6 +1007,26 @@ window.__ModuleLoader__.load({
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: styles.label,
+								children: t("job.workspace")
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+								style: styles.input,
+								value: workspaceId,
+								onChange: (event) => {
+									setWorkspaceId(event.target.value);
+								},
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+									value: "",
+									children: t("job.workspaceCurrent")
+								}), workspaceOptions.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+									value: option.workspaceId,
+									children: option.title
+								}, option.workspaceId))]
+							})]
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							style: styles.field,
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 								style: styles.label,
 								children: [
@@ -965,13 +1054,19 @@ window.__ModuleLoader__.load({
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								style: styles.label,
 								children: t("job.taskId")
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
 								style: styles.input,
 								value: taskId,
 								onChange: (event) => {
 									setTaskId(event.target.value);
 								},
-								placeholder: "task-…"
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+									value: "",
+									children: t("job.taskSelect")
+								}), visibleTasks.map((task) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+									value: task.id,
+									children: task.title || task.id
+								}, task.id))]
 							})]
 						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,
@@ -1055,7 +1150,7 @@ window.__ModuleLoader__.load({
 				};
 			}
 		}
-		function CronJobTab({ controller }) {
+		function CronJobTab({ controller, workspaces }) {
 			const [snapshot, setSnapshot] = (0, react.useState)(controller.getSnapshot());
 			const [editing, setEditing] = (0, react.useState)();
 			const [creating, setCreating] = (0, react.useState)(false);
@@ -1121,6 +1216,7 @@ window.__ModuleLoader__.load({
 					}),
 					creating && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(JobEditor, {
 						controller,
+						...workspaces === void 0 ? {} : { workspaces },
 						onClose: () => {
 							setCreating(false);
 						}
@@ -1128,6 +1224,7 @@ window.__ModuleLoader__.load({
 					editing !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(JobEditor, {
 						controller,
 						job: editing,
+						...workspaces === void 0 ? {} : { workspaces },
 						onClose: () => {
 							setEditing(void 0);
 						}
@@ -1467,7 +1564,7 @@ window.__ModuleLoader__.load({
 		* visibility to the html activation attribute.
 		* @returns disposer unmounting the tree and restoring the column.
 		*/
-		function mountCronPanel(controller) {
+		function mountCronPanel(controller, workspaces) {
 			let root;
 			let container;
 			const style = visibilityStyle();
@@ -1481,7 +1578,10 @@ window.__ModuleLoader__.load({
 				container.dataset.dshPlugin = "cron";
 				column.appendChild(container);
 				root = (0, react_dom_client.createRoot)(container);
-				root.render((0, react.createElement)(CronCenterView, { controller }));
+				root.render((0, react.createElement)(CronCenterView, {
+					controller,
+					...workspaces === void 0 ? {} : { workspaces }
+				}));
 			};
 			const waitObserver = new MutationObserver(() => {
 				ensure();
@@ -1515,7 +1615,7 @@ window.__ModuleLoader__.load({
 			};
 		}
 		/** Center view: a back-to-chat header plus the job center body. */
-		function CronCenterView({ controller }) {
+		function CronCenterView({ controller, workspaces }) {
 			const back = () => {
 				closeCronPanel();
 			};
@@ -1548,7 +1648,10 @@ window.__ModuleLoader__.load({
 						flex: 1,
 						overflow: "hidden"
 					},
-					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CronJobTab, { controller })
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CronJobTab, {
+						controller,
+						...workspaces === void 0 ? {} : { workspaces }
+					})
 				})]
 			});
 		}
@@ -1581,7 +1684,8 @@ window.__ModuleLoader__.load({
 		const inject = [
 			"slots",
 			"settingsScope",
-			"locale"
+			"locale",
+			"workspaces"
 		];
 		/** Settings namespace this card edits (the Host half registers it). */
 		const CRON_NS = "cron";
@@ -1620,12 +1724,13 @@ window.__ModuleLoader__.load({
 				controller.start();
 				return () => controller.dispose();
 			}, "controller lifecycle");
+			const workspacesService = ctx.get("workspaces");
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
 				name: "sidebar.footer.action",
 				id: "pico-cron",
 				order: -10
 			}, CronTrigger));
-			ctx.effect(() => mountCronPanel(controller), "dsh-cron: main-area center");
+			ctx.effect(() => mountCronPanel(controller, workspacesService), "dsh-cron: main-area center");
 			ctx.inject(["betterSidebar"], (childCtx) => {
 				const service = childCtx.get("betterSidebar");
 				if (service === void 0) return;
@@ -1633,7 +1738,10 @@ window.__ModuleLoader__.load({
 					id: "pico:cron",
 					title: () => zh["job.listTitle"],
 					order: 30,
-					component: () => (0, react.createElement)(CronJobTab, { controller })
+					component: () => (0, react.createElement)(CronJobTab, {
+						controller,
+						...workspacesService === void 0 ? {} : { workspaces: workspacesService }
+					})
 				});
 				childCtx.effect(() => () => {
 					disposeTab();

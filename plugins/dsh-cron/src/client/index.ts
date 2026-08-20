@@ -11,7 +11,7 @@
  */
 import { createElement } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ClientContext, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, IWorkspaces, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the sidebar shell's footer slot declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -38,7 +38,7 @@ import { mountCronPanel } from './panel-mount.tsx'
 import { en, zh } from './locales.ts'
 import type { BetterSidebarService } from './sidebar-face.ts'
 
-export const inject = ['slots', 'settingsScope', 'locale']
+export const inject = ['slots', 'settingsScope', 'locale', 'workspaces']
 
 /** Settings namespace this card edits (the Host half registers it). */
 const CRON_NS = 'cron'
@@ -94,12 +94,13 @@ export function apply(ctx: ClientContext): void {
     controller.start()
     return () => controller.dispose()
   }, 'controller lifecycle')
+  const workspacesService = ctx.get('workspaces') as IWorkspaces | undefined
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'pico-cron',
     order: -10,
   }, CronTrigger))
-  ctx.effect(() => mountCronPanel(controller), 'dsh-cron: main-area center')
+  ctx.effect(() => mountCronPanel(controller, workspacesService), 'dsh-cron: main-area center')
   // Scheduled-job center tab in the better-sidebar: a child fiber that lives
   // exactly as long as the service. The tab shares the same controller as
   // the sidebar entry, so both surfaces stay in sync.
@@ -110,7 +111,7 @@ export function apply(ctx: ClientContext): void {
       id: 'pico:cron',
       title: () => zh['job.listTitle'],
       order: 30,
-      component: () => createElement(CronJobTab, { controller }),
+      component: () => createElement(CronJobTab, { controller, ...(workspacesService === undefined ? {} : { workspaces: workspacesService }) }),
     })
     childCtx.effect(() => () => { disposeTab() }, 'dsh-cron: better-sidebar tab')
   })
