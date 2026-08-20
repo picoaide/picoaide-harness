@@ -1,4 +1,11 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import { type BrowserKey } from './locales.ts';
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+    interface LocaleNamespaceMap {
+        /** Browser client surface copy. */
+        browser: BrowserKey;
+    }
+}
 /**
  * Browser client half: registers the embedded-browser panel as a sidebar foot
  * action. The panel drives the native WebContentsView through the loopback

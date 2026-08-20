@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { t } from './locales.ts'
 
 interface Skill {
   name: string
@@ -102,16 +103,29 @@ const BUTTON: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
+const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 'default' }
+
 const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-caption)', textAlign: 'center', padding: 24 }
+
+const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'center', padding: 12 }
+
+/** Per-skill download feedback: which skill is downloading and the outcome. */
+interface DownloadState {
+  name: string
+  kind: 'downloading' | 'done' | 'failed'
+}
 
 /**
  * Skill center modal: the gateway's skill store catalog with an archive
  * download action per skill, fetched through the host's local proxy.
+ * Esc closes the modal; focus moves into the panel on open.
  * @param props.onClose - close the modal.
  */
 export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
   const [skills, setSkills] = useState<Skill[] | null>(null)
   const [error, setError] = useState('')
+  const [downloadState, setDownloadState] = useState<DownloadState | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -121,14 +135,26 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
         const data = (await res.json()) as { skills?: Skill[] }
         if (!cancelled) setSkills(data.skills ?? [])
       })
-      .catch(() => { if (!cancelled) setError('技能列表加载失败') })
+      .catch(() => { if (!cancelled) setError(t('skill.loadError')) })
     return () => { cancelled = true }
   }, [])
 
+  // Esc closes; initial focus lands on the panel so keyboard users can act.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    panelRef.current?.focus()
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [onClose])
+
   const download = async (name: string): Promise<void> => {
+    if (downloadState !== null && downloadState.kind === 'downloading') return
+    setDownloadState({ name, kind: 'downloading' })
     try {
       const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/archive`)
-      if (!res.ok) return
+      if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
@@ -136,40 +162,56 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
       anchor.download = `${name}.tar.gz`
       anchor.click()
       URL.revokeObjectURL(url)
-    } catch { /* download failed; stay on the page */ }
+      setDownloadState({ name, kind: 'done' })
+    } catch {
+      setDownloadState({ name, kind: 'failed' })
+    }
   }
 
   let content: React.ReactNode
   if (error !== '') {
     content = <p style={EMPTY}>{error}</p>
   } else if (skills === null) {
-    content = <p style={EMPTY}>加载中…</p>
+    content = <p style={EMPTY}>{t('skill.loading')}</p>
   } else if (skills.length === 0) {
-    content = <p style={EMPTY}>暂无可用技能</p>
+    content = <p style={EMPTY}>{t('skill.empty')}</p>
   } else {
-    content = skills.map(skill => (
-      <div key={skill.name} style={CARD}>
-        <div style={TITLE_ROW}>
-          <p style={NAME}>{skill.name}</p>
-          <button type="button" style={BUTTON} onClick={() => { void download(skill.name) }}>
-            获取
-          </button>
+    content = skills.map(skill => {
+      const busy = downloadState?.name === skill.name && downloadState.kind === 'downloading'
+      return (
+        <div key={skill.name} style={CARD}>
+          <div style={TITLE_ROW}>
+            <p style={NAME}>{skill.name}</p>
+            <button
+              type="button"
+              style={busy ? BUTTON_DISABLED : BUTTON}
+              disabled={busy}
+              onClick={() => { void download(skill.name) }}
+            >
+              {busy ? t('skill.fetching') : t('skill.fetch')}
+            </button>
+          </div>
+          <p style={META}>v{skill.version}{skill.author !== '' ? ` · ${skill.author}` : ''}</p>
+          {skill.description !== '' && <p style={DESC}>{skill.description}</p>}
         </div>
-        <p style={META}>v{skill.version}{skill.author !== '' ? ` · ${skill.author}` : ''}</p>
-        {skill.description !== '' && <p style={DESC}>{skill.description}</p>}
-      </div>
-    ))
+      )
+    })
   }
 
   return (
     <div style={OVERLAY} role="presentation">
       <div style={MASK} aria-hidden="true" onClick={onClose} />
-      <div style={PANEL} role="dialog" aria-modal="true" aria-label="技能中心">
+      <div style={PANEL} role="dialog" aria-modal="true" aria-label={t('skill.title')} tabIndex={-1} ref={panelRef}>
         <div style={HEADER}>
-          <h2 style={TITLE}>技能中心</h2>
-          <button type="button" style={CLOSE} onClick={onClose}>关闭</button>
+          <h2 style={TITLE}>{t('skill.title')}</h2>
+          <button type="button" style={CLOSE} onClick={onClose}>{t('skill.close')}</button>
         </div>
         <div style={BODY}>{content}</div>
+        {downloadState !== null && downloadState.kind !== 'downloading' && (
+          <p style={{ ...NOTICE, color: downloadState.kind === 'done' ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)' }}>
+            {downloadState.kind === 'done' ? t('skill.downloaded', { name: downloadState.name }) : t('skill.failed')}
+          </p>
+        )}
       </div>
     </div>
   )

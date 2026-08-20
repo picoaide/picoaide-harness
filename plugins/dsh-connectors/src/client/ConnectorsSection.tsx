@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { friendlyConnectorError, t } from './locales.ts'
 
 
 /**
@@ -95,19 +96,20 @@ const FILTER_BUTTON: React.CSSProperties = {
 const FILTER_ACTIVE: React.CSSProperties = { ...FILTER_BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)' }
 
 const statusText: Record<string, string> = {
-  disconnected: '未连接',
-  connecting: '连接中…',
-  connected: '已连接',
-  unauthorized: '需要授权',
-  error: '连接失败',
+  disconnected: t('status.disconnected'),
+  connecting: t('status.connecting'),
+  connected: t('status.connected'),
+  unauthorized: t('status.unauthorized'),
+  error: t('status.error'),
 }
 
+// Design-token colors: adapt automatically to the light and dark themes.
 const statusColor: Record<string, string> = {
-  disconnected: '#c9ccd3',
-  connecting: '#eab308',
-  connected: '#22c55e',
-  unauthorized: '#f59e0b',
-  error: '#f87171',
+  disconnected: 'var(--dsw-alias-label-caption)',
+  connecting: 'var(--dsw-alias-state-warn-primary)',
+  connected: 'var(--dsw-alias-state-success-primary)',
+  unauthorized: 'var(--dsw-alias-state-warn-primary)',
+  error: 'var(--dsw-alias-state-error-primary)',
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -122,6 +124,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged: () => void }) {
   const [formValues, setFormValues] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'connect' | 'submit' | 'disconnect' | null>(null)
   const openedUrl = useRef<string | null>(null)
 
   // The authorize URL is produced asynchronously by the flow; open it once
@@ -134,7 +137,9 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   }, [entry.request?.authorizeUrl])
 
   const connect = useCallback(async (): Promise<void> => {
+    if (busy !== null) return
     setError(null)
+    setBusy('connect')
     try {
       await fetchJson<{ ok: boolean }>(
         `/api/pico/connectors/${encodeURIComponent(entry.id)}/connect`,
@@ -143,12 +148,16 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       if (entry.request?.fields && entry.request.fields.length > 0) setFormValues({})
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+    } finally {
+      setBusy(null)
     }
-  }, [entry.id, onChanged])
+  }, [busy, entry.id, entry.request?.fields, onChanged])
 
   const submitForm = useCallback(async (): Promise<void> => {
+    if (busy !== null) return
     setError(null)
+    setBusy('submit')
     try {
       await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/auth-submit`, {
         method: 'POST',
@@ -157,19 +166,25 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       })
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+    } finally {
+      setBusy(null)
     }
-  }, [entry.id, formValues, onChanged])
+  }, [busy, entry.id, formValues, onChanged])
 
   const disconnect = useCallback(async (): Promise<void> => {
+    if (busy !== null) return
     setError(null)
+    setBusy('disconnect')
     try {
       await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/disconnect`, { method: 'POST' })
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+    } finally {
+      setBusy(null)
     }
-  }, [entry.id, onChanged])
+  }, [busy, entry.id, onChanged])
 
   const polling = entry.status === 'connecting' && (entry.request?.authorizeUrl || entry.request?.verificationUrl)
   const needsForm = entry.status === 'connecting' && Boolean(entry.request?.fields?.length)
@@ -185,19 +200,19 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
 
       {entry.request?.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <p style={LABEL}>请打开以下地址并登录授权：</p>
+          <p style={LABEL}>{t('auth.verificationHint')}</p>
           <a href={entry.request.verificationUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#60a5fa', wordBreak: 'break-all' }}>
             {entry.request.verificationUrl}
           </a>
           {entry.request.userCode && (
-            <p style={LABEL}>授权码：{entry.request.userCode}</p>
+            <p style={LABEL}>{t('auth.code', { code: entry.request.userCode })}</p>
           )}
         </div>
       )}
 
       {entry.request?.authorizeUrl && !entry.request.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <p style={LABEL}>授权页已在浏览器中打开；若未弹出请点击：</p>
+          <p style={LABEL}>{t('auth.authorizeOpened')}</p>
           <a href={entry.request.authorizeUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#60a5fa', wordBreak: 'break-all' }}>
             {entry.request.authorizeUrl}
           </a>
@@ -218,20 +233,24 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
               />
             </div>
           ))}
-          <button type="button" style={BUTTON} onClick={() => { void submitForm() }}>提交</button>
+          <button type="button" style={BUTTON} disabled={busy === 'submit'} onClick={() => { void submitForm() }}>
+            {busy === 'submit' ? t('action.connecting') : t('action.submit')}
+          </button>
         </div>
       )}
 
-      {polling && <p style={LABEL}>等待授权完成…</p>}
-      {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{entry.error}</p>}
+      {polling && <p style={LABEL}>{t('auth.waiting')}</p>}
+      {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error)}</p>}
       {error && <p style={{ ...STATUS, color: statusColor.error }}>{error}</p>}
 
       <div style={{ marginTop: 'auto', paddingTop: 4 }}>
         {isConnected ? (
-          <button type="button" style={{ ...BUTTON, background: '#dc2626' }} onClick={() => { void disconnect() }}>断开</button>
+          <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }}>
+            {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}
+          </button>
         ) : (
-          <button type="button" style={BUTTON} disabled={entry.status === 'connecting'} onClick={() => { void connect() }}>
-            {entry.status === 'connecting' ? '连接中…' : '连接'}
+          <button type="button" style={BUTTON} disabled={entry.status === 'connecting' || busy === 'connect'} onClick={() => { void connect() }}>
+            {entry.status === 'connecting' || busy === 'connect' ? t('action.connecting') : t('action.connect')}
           </button>
         )}
       </div>
@@ -271,23 +290,23 @@ export function ConnectorsList() {
 
   const connectedCount = useMemo(() => (connectors ?? []).filter((c) => c.status === 'connected').length, [connectors])
 
-  if (connectors === null) return null
+  if (connectors === null) return <p style={DESC}>{t('status.connecting')}</p>
 
   return (
     <div>
       <div style={TOOLBAR}>
         <input
           style={{ ...INPUT, flex: 1, minWidth: 0 }}
-          placeholder="搜索连接器…"
+          placeholder={t('search.placeholder')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <button type="button" style={statusFilter === 'all' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('all')}>全部</button>
-        <button type="button" style={statusFilter === 'connected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('connected')}>已连接</button>
-        <button type="button" style={statusFilter === 'disconnected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('disconnected')}>未连接</button>
-        <span style={{ ...LABEL, flex: 'none' }}>{connectedCount}/{connectors.length} 已连接</span>
+        <button type="button" style={statusFilter === 'all' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('all')}>{t('filter.all')}</button>
+        <button type="button" style={statusFilter === 'connected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('connected')}>{t('filter.connected')}</button>
+        <button type="button" style={statusFilter === 'disconnected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('disconnected')}>{t('filter.disconnected')}</button>
+        <span style={{ ...LABEL, flex: 'none' }}>{t('filter.count', { connected: String(connectedCount), total: String(connectors.length) })}</span>
       </div>
-      {visible.length === 0 && <p style={DESC}>暂无匹配的连接器</p>}
+      {visible.length === 0 && <p style={DESC}>{t('empty.noMatch')}</p>}
       <div style={GRID}>
         {visible.map((entry) => (
           <ConnectorCard key={entry.id} entry={entry} onChanged={refresh} />
