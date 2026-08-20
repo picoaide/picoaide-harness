@@ -1,13 +1,18 @@
 /**
  * Job editor dialog: name, cron expression (with presets + live validation),
- * and the action (run a dsh-task task, or send a message to a session).
+ * project (workspace) picker, and the action (run a dsh-task task, or send a
+ * message to a session). Task actions select the target task from the chosen
+ * project's board (fetched through the dsh-task loopback API); prompt actions
+ * name a session id directly.
  */
 import { useEffect, useState } from 'react'
+import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import { isValidCron, nextRunAtMs } from '../cron.ts'
 import { isCronJobAction, type JobRecord, type NewJobInput } from '../jobs.ts'
 import type { CronController } from './controller.ts'
 import { styles } from './styles.ts'
 import { t } from './locales.ts'
+import { useWorkspaceOptions } from './workspace-select.ts'
 
 const PRESETS: ReadonlyArray<{ cron: string; key: 'preset.daily9' | 'preset.hourly' | 'preset.tenMin' | 'preset.weeklyMon9' }> = [
   { cron: '0 9 * * *', key: 'preset.daily9' },
@@ -16,9 +21,34 @@ const PRESETS: ReadonlyArray<{ cron: string; key: 'preset.daily9' | 'preset.hour
   { cron: '0 9 * * 1', key: 'preset.weeklyMon9' },
 ]
 
-export function JobEditor({ controller, job, onClose }: {
+/** One task option fetched from the dsh-task board. */
+interface TaskOption {
+  id: string
+  title: string
+  /** Pinned workspace; absent = current workspace. */
+  workspaceId?: string
+}
+
+/** Fetch the dsh-task board tasks through its loopback API (soft dependency). */
+async function fetchTaskOptions(): Promise<TaskOption[]> {
+  try {
+    const response = await fetch('/api/task/state', { headers: { accept: 'application/json' } })
+    if (!response.ok) return []
+    const snapshot = await response.json() as { tasks?: Array<{ id: string; title: string; workspaceId?: string }> }
+    return (snapshot.tasks ?? []).map(task => ({
+      id: task.id,
+      title: task.title,
+      ...task.workspaceId !== undefined ? { workspaceId: task.workspaceId } : {},
+    }))
+  } catch {
+    return []
+  }
+}
+
+export function JobEditor({ controller, job, workspaces, onClose }: {
   controller: CronController
   job?: JobRecord
+  workspaces?: IWorkspaces
   onClose: () => void
 }): JSX.Element {
   const [name, setName] = useState(job?.name ?? '')
@@ -29,8 +59,28 @@ export function JobEditor({ controller, job, onClose }: {
   const [text, setText] = useState(job?.action.kind === 'prompt' ? job.action.text : '')
   const [error, setError] = useState<string | undefined>()
 
+  // Project picker: '' = current project (default), matching the board.
+  const workspaceOptions = useWorkspaceOptions(workspaces)
+  const [workspaceId, setWorkspaceId] = useState('')
+
+  // Task options for the chosen project ('' = tasks pinned to no project).
+  const [taskOptions, setTaskOptions] = useState<TaskOption[]>([])
+  useEffect(() => {
+    if (actionKind !== 'task') return
+    let alive = true
+    void fetchTaskOptions().then(options => {
+      if (!alive) return
+      setTaskOptions(options)
+    })
+    return () => { alive = false }
+  }, [actionKind, workspaceId])
+
   const cronValid = isValidCron(cron)
   const nextRun = cronValid ? nextRunAtMs(cron, Date.now()) : undefined
+
+  const visibleTasks = workspaceId === ''
+    ? taskOptions.filter(task => task.workspaceId === undefined)
+    : taskOptions.filter(task => task.workspaceId === workspaceId)
 
   const save = (): void => {
     if (!cronValid) {
@@ -90,6 +140,19 @@ export function JobEditor({ controller, job, onClose }: {
           )}
         </div>
         <div style={styles.field}>
+          <span style={styles.label}>{t('job.workspace')}</span>
+          <select
+            style={styles.input}
+            value={workspaceId}
+            onChange={(event) => { setWorkspaceId(event.target.value) }}
+          >
+            <option value="">{t('job.workspaceCurrent')}</option>
+            {workspaceOptions.map(option => (
+              <option key={option.workspaceId} value={option.workspaceId}>{option.title}</option>
+            ))}
+          </select>
+        </div>
+        <div style={styles.field}>
           <span style={styles.label}>{t('job.actionTask')} / {t('job.actionPrompt')}</span>
           <select
             style={styles.input}
@@ -103,7 +166,16 @@ export function JobEditor({ controller, job, onClose }: {
         {actionKind === 'task' ? (
           <div style={styles.field}>
             <span style={styles.label}>{t('job.taskId')}</span>
-            <input style={styles.input} value={taskId} onChange={(event) => { setTaskId(event.target.value) }} placeholder="task-…" />
+            <select
+              style={styles.input}
+              value={taskId}
+              onChange={(event) => { setTaskId(event.target.value) }}
+            >
+              <option value="">{t('job.taskSelect')}</option>
+              {visibleTasks.map(task => (
+                <option key={task.id} value={task.id}>{task.title || task.id}</option>
+              ))}
+            </select>
           </div>
         ) : (
           <>

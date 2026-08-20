@@ -26,7 +26,10 @@ export declare const zh: {
     readonly 'job.run': "立即执行";
     readonly 'job.actionTask': "执行任务";
     readonly 'job.actionPrompt': "发送消息";
-    readonly 'job.taskId': "任务 ID";
+    readonly 'job.workspace': "项目";
+    readonly 'job.workspaceCurrent': "当前项目（默认）";
+    readonly 'job.taskId': "任务";
+    readonly 'job.taskSelect': "选择任务…";
     readonly 'job.sessionId': "会话 ID";
     readonly 'job.promptText': "消息内容";
     readonly 'job.save': "保存";
