@@ -163,4 +163,6 @@ export interface ConnectorAuthRequest {
   authorizeUrl?: string
   /** Token flow: the fields to render. */
   fields?: TokenField[]
+  /** Transient progress text (e.g. "正在下载命令行工具…") while connecting. */
+  message?: string
 }

@@ -25,6 +25,7 @@ export const zh = {
   'auth.code': '授权码：{code}',
   'auth.authorizeOpened': '授权页已在浏览器中打开；若未弹出请点击：',
   'auth.waiting': '等待授权完成…',
+  'auth.downloading': '正在下载命令行工具（仅首次连接需要），请稍候…',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -50,6 +51,7 @@ export const en: Record<keyof typeof zh, string> = {
   'auth.code': 'Authorization code: {code}',
   'auth.authorizeOpened': 'The authorization page was opened; if not, click here:',
   'auth.waiting': 'Waiting for authorization…',
+  'auth.downloading': 'Downloading the CLI tool (first connect only), please wait…',
 }
 
 export type ConnectorsKey = keyof typeof zh
@@ -71,6 +73,8 @@ export function friendlyConnectorError(raw: string): string {
   // The node side names the missing binary and its install command; show it
   // verbatim so the user knows what to install (e.g. npm install -g beisen-cli).
   if (raw.includes('未找到命令')) return raw
+  // Download-on-demand errors carry specific detail; surface them verbatim.
+  if (raw.includes('下载')) return raw
   if (raw.includes('ENOENT')) return '未找到登录命令：请先安装对应命令行工具'
   if (raw.includes('token') || raw.includes('授权') || raw.includes('登录')) return raw
   return `连接失败：${raw}`
