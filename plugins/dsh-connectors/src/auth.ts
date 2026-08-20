@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { CliAuthConfig, ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig, TokenField } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
+import type { CliRuntime } from './cli-runtime.ts'
 
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
@@ -23,6 +24,8 @@ export interface AuthRunOptions {
   callbackHost?: string
   /** Pre-connect settings already collected from the user. */
   fields?: Record<string, string>
+  /** Download-on-demand CLI resolver (dws / beisen-cli). */
+  cli?: CliRuntime
 }
 
 /**
@@ -321,11 +324,11 @@ export interface AuthProbe {
   isConnected: () => Promise<boolean>
 }
 
-function createProbe(def: ConnectorDef, _options: AuthRunOptions): AuthProbe {
+function createProbe(def: ConnectorDef, options: AuthRunOptions): AuthProbe {
   if (def.authMode === 'cli') {
     const auth = def.auth as CliAuthConfig
     return {
-      isConnected: () => runProbeCommand(auth.statusCommand ?? '', auth.statusArgs ?? [], auth.env),
+      isConnected: () => runProbeCommand(auth.statusCommand ?? '', auth.statusArgs ?? [], auth.env, options.cli),
     }
   }
   // Default: nothing to probe (device connectors that need a real endpoint
@@ -333,11 +336,14 @@ function createProbe(def: ConnectorDef, _options: AuthRunOptions): AuthProbe {
   return { isConnected: async () => true }
 }
 
-async function runProbeCommand(command: string, args: string[], env?: Record<string, string>): Promise<boolean> {
+async function runProbeCommand(command: string, args: string[], env?: Record<string, string>, cli?: CliRuntime): Promise<boolean> {
+  // The status command may also need the downloaded binary.
+  const resolved = cli ? await cli.resolve(command, args) : null
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
+    const child = spawn(resolved?.command ?? command, resolved?.args ?? args, {
       env: { ...process.env, ...env },
       stdio: 'ignore',
+      shell: resolved?.shell,
     })
     child.on('error', () => resolve(false))
     child.on('exit', (code) => resolve(code === 0))
@@ -382,10 +388,22 @@ async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Parti
   const waitForExit = auth.authWaitForExit ?? deviceFlow !== undefined
   const timeoutMs = auth.timeoutMs ?? (waitForExit ? 300_000 : 10_000)
 
+  // Download-on-demand: when the CLI is not installed, the runtime fetches
+  // the pinned native binary and reports progress through the pending
+  // request so the UI can show "正在下载…" instead of a bare ENOENT.
+  const resolved = options.cli
+    ? await options.cli.resolve(auth.command, auth.args, (message) => {
+        options.onRequest({ connectorId: def.id, message })
+      })
+    : null
+  const spawnCommand = resolved?.command ?? auth.command
+  const spawnArgs = resolved?.args ?? auth.args
+
   const exitCode = await new Promise<number | null>((resolve, reject) => {
-    const child = spawn(auth.command, auth.args, {
+    const child = spawn(spawnCommand, spawnArgs, {
       env: { ...process.env, ...auth.env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: resolved?.shell,
     })
     let stdout = ''
     let stderr = ''

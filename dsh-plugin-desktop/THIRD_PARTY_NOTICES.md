@@ -303,6 +303,7 @@ the package names, versions, and licenses for transparency.
 | async-function | 1.0.0 | MIT |
 | async-generator-function | 1.0.0 | MIT |
 | base64-js | 1.5.1 | MIT |
+| beisen-cli | 1.0.5 | UNLICENSED (see note below) |
 | bignumber.js | 9.3.1 | MIT |
 | body-parser | 2.3.0 | MIT |
 | bowser | 2.14.1 | MIT |
@@ -332,6 +333,7 @@ the package names, versions, and licenses for transparency.
 | detect-libc | 2.1.2 | Apache-2.0 |
 | devlop | 1.1.0 | MIT |
 | diff | 9.0.0 | BSD-3-Clause |
+| dingtalk-workspace-cli | 1.0.59 | Apache-2.0 (binary; see note below) |
 | dsh-community-market | 0.1.0-dev.0 | MIT |
 | dsh-better-sidebar | 0.13.1 | MIT |
 | dsh-memory-evolve | 0.1.0 | MIT |
@@ -533,3 +535,24 @@ the package names, versions, and licenses for transparency.
 | zustand | 4.4.7 | MIT |
 | zwitch | 2.0.4 | MIT |
 > Notice-required licenses in use: LGPL-3.0-or-later. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.
+
+### Runtime-downloaded connector CLI binaries
+
+The connectors feature (dsh-connectors) does not ship third-party binaries in
+the installers. When a CLI connector (钉钉 / 北森AI · HR专家) is first
+connected and its command is not already installed on the system, the desktop
+app downloads the official platform binary at runtime, verifies it against a
+pinned sha256 published in this repository, caches it under the per-user
+connector store directory and spawns it. The same notice applies to those
+binaries as if they shipped with the product:
+
+- **dingtalk-workspace-cli** 1.0.59 — Apache-2.0. Native `dws` binary from the
+  npm package assets, fetched from the npm registry (default mirror
+  `registry.npmmirror.com`, fallback `registry.npmjs.org`; override with
+  `PICOAIDE_CONNECTORS_NPM_MIRROR`). Checksums pinned from the package's
+  `assets/checksums.txt`. License text ships inside the platform archive.
+- **beisen-cli** 1.0.5 — **UNLICENSED**. The npm package declares no open
+  source license; the native binary is fetched from the vendor CDN
+  (`https://senclaw-cdn.italent.cn/cli`), checksums pinned from the package's
+  `checksums.txt`. Redistribution follows the enterprise agreement with the
+  vendor (Beisen); do not distribute this binary outside that agreement.
