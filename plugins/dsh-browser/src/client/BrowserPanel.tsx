@@ -84,7 +84,7 @@ const HEADER: React.CSSProperties = {
   justifyContent: 'space-between',
 }
 
-const TITLE: React.CSSProperties = { margin: 0, fontSize: 16, lineHeight: 24, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }
+const TITLE: React.CSSProperties = { margin: 0, fontSize: 16, lineHeight: '24px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }
 
 const CLOSE: React.CSSProperties = {
   border: 'none',
@@ -121,6 +121,10 @@ export function BrowserPanel({ onClose }: { onClose: () => void }): React.JSX.El
   const [state, setState] = useState<BrowserState>({ tabs: [], controlled: false })
   const [ops, setOps] = useState<OpEntry[]>([])
   const [address, setAddress] = useState('')
+  // Once the user edits the address bar, stop overwriting it with the
+  // visible tab's URL until it is submitted (UX: the bar normally mirrors
+  // the current page; typing hands it over to the user).
+  const addressDirtyRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const viewRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -163,6 +167,10 @@ export function BrowserPanel({ onClose }: { onClose: () => void }): React.JSX.El
         const next = await fetchJson<BrowserState>('/api/pico/browser/state')
         if (!alive) return
         setState(next)
+        // Mirror the visible tab's URL into the address bar unless the user
+        // is typing (UX: the bar reflects where the browser actually is).
+        const visible = next.tabs.find((t) => t.visible)
+        if (!addressDirtyRef.current) setAddress(visible?.url ?? '')
         const log = await fetchJson<{ ops: OpEntry[] }>('/api/pico/browser/ops')
         if (!alive) return
         setOps(log.ops.slice(0, 20))
@@ -270,8 +278,8 @@ export function BrowserPanel({ onClose }: { onClose: () => void }): React.JSX.El
           <input
             style={inputStyle}
             value={address}
-            onChange={(e) => { setAddress(e.target.value) }}
-            onKeyDown={(e) => { if (e.key === 'Enter') openAddress() }}
+            onChange={(e) => { addressDirtyRef.current = true; setAddress(e.target.value) }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { addressDirtyRef.current = false; openAddress() } }}
             placeholder={t('panel.addressPlaceholder')}
             aria-label={t('panel.addressPlaceholder')}
           />
@@ -279,7 +287,7 @@ export function BrowserPanel({ onClose }: { onClose: () => void }): React.JSX.El
           <button
             style={{
               ...toolbarButton,
-              background: state.controlled ? '#e5484d' : undefined,
+              background: state.controlled ? 'var(--dsw-alias-state-error-primary)' : undefined,
               color: state.controlled ? 'white' : undefined,
             }}
             onClick={() => { void post('takeover', { active: !state.controlled }) }}

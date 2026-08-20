@@ -102,7 +102,7 @@ window.__ModuleLoader__.load({
 		const TITLE = {
 			margin: 0,
 			fontSize: 16,
-			lineHeight: 24,
+			lineHeight: "24px",
 			fontWeight: 500,
 			color: "var(--dsw-alias-label-primary)"
 		};
@@ -141,6 +141,7 @@ window.__ModuleLoader__.load({
 			});
 			const [ops, setOps] = (0, react.useState)([]);
 			const [address, setAddress] = (0, react.useState)("");
+			const addressDirtyRef = (0, react.useRef)(false);
 			const [error, setError] = (0, react.useState)(null);
 			const viewRef = (0, react.useRef)(null);
 			const panelRef = (0, react.useRef)(null);
@@ -184,6 +185,8 @@ window.__ModuleLoader__.load({
 						const next = await fetchJson("/api/pico/browser/state");
 						if (!alive) return;
 						setState(next);
+						const visible = next.tabs.find((t) => t.visible);
+						if (!addressDirtyRef.current) setAddress(visible?.url ?? "");
 						const log = await fetchJson("/api/pico/browser/ops");
 						if (!alive) return;
 						setOps(log.ops.slice(0, 20));
@@ -363,10 +366,14 @@ window.__ModuleLoader__.load({
 									style: inputStyle,
 									value: address,
 									onChange: (e) => {
+										addressDirtyRef.current = true;
 										setAddress(e.target.value);
 									},
 									onKeyDown: (e) => {
-										if (e.key === "Enter") openAddress();
+										if (e.key === "Enter") {
+											addressDirtyRef.current = false;
+											openAddress();
+										}
 									},
 									placeholder: t("panel.addressPlaceholder"),
 									"aria-label": t("panel.addressPlaceholder")
@@ -380,7 +387,7 @@ window.__ModuleLoader__.load({
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 									style: {
 										...toolbarButton,
-										background: state.controlled ? "#e5484d" : void 0,
+										background: state.controlled ? "var(--dsw-alias-state-error-primary)" : void 0,
 										color: state.controlled ? "white" : void 0
 									},
 									onClick: () => {
@@ -470,7 +477,7 @@ window.__ModuleLoader__.load({
 			color: "var(--dsw-alias-label-primary)",
 			fontFamily: "inherit",
 			fontSize: 14,
-			lineHeight: 22
+			lineHeight: "22px"
 		};
 		const TRIGGER_RAIL = {
 			...TRIGGER_STYLE,
