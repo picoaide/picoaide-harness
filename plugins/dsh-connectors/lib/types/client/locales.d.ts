@@ -25,6 +25,7 @@ export declare const zh: {
     'auth.code': string;
     'auth.authorizeOpened': string;
     'auth.waiting': string;
+    'auth.downloading': string;
 };
 export declare const en: Record<keyof typeof zh, string>;
 export type ConnectorsKey = keyof typeof zh;

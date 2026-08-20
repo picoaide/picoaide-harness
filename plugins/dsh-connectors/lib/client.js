@@ -33,7 +33,8 @@ window.__ModuleLoader__.load({
 			"auth.verificationHint": "请打开以下地址并登录授权：",
 			"auth.code": "授权码：{code}",
 			"auth.authorizeOpened": "授权页已在浏览器中打开；若未弹出请点击：",
-			"auth.waiting": "等待授权完成…"
+			"auth.waiting": "等待授权完成…",
+			"auth.downloading": "正在下载命令行工具（仅首次连接需要），请稍候…"
 		};
 		const en = {
 			"panel.title": "Connectors",
@@ -57,7 +58,8 @@ window.__ModuleLoader__.load({
 			"auth.verificationHint": "Open the following address to authorize:",
 			"auth.code": "Authorization code: {code}",
 			"auth.authorizeOpened": "The authorization page was opened; if not, click here:",
-			"auth.waiting": "Waiting for authorization…"
+			"auth.waiting": "Waiting for authorization…",
+			"auth.downloading": "Downloading the CLI tool (first connect only), please wait…"
 		};
 		/** Translate a key (zh key source; en mirrors the full key set). */
 		function t(key, params) {
@@ -69,6 +71,7 @@ window.__ModuleLoader__.load({
 		function friendlyConnectorError(raw) {
 			if (raw.includes("退出码")) return "登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试";
 			if (raw.includes("未找到命令")) return raw;
+			if (raw.includes("下载")) return raw;
 			if (raw.includes("ENOENT")) return "未找到登录命令：请先安装对应命令行工具";
 			if (raw.includes("token") || raw.includes("授权") || raw.includes("登录")) return raw;
 			return `连接失败：${raw}`;
@@ -256,6 +259,7 @@ window.__ModuleLoader__.load({
 			const polling = entry.status === "connecting" && (entry.request?.authorizeUrl || entry.request?.verificationUrl);
 			const needsForm = entry.status === "connecting" && Boolean(entry.request?.fields?.length);
 			const isConnected = entry.status === "connected";
+			const downloading = entry.status === "connecting" && Boolean(entry.request?.message);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				style: CARD,
 				children: [
@@ -361,6 +365,10 @@ window.__ModuleLoader__.load({
 							},
 							children: busy === "submit" ? t("action.connecting") : t("action.submit")
 						})]
+					}),
+					downloading && entry.request?.message && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						style: LABEL$1,
+						children: entry.request.message
 					}),
 					polling && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						style: LABEL$1,
