@@ -3285,7 +3285,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-skill-filesystem@npm:^0.1.0-rc.8":
+"@deepseek-ai/dsh-skill-filesystem@npm:0.1.0-rc.8, @deepseek-ai/dsh-skill-filesystem@npm:^0.1.0-rc.8":
   version: 0.1.0-rc.8
   resolution: "@deepseek-ai/dsh-skill-filesystem@npm:0.1.0-rc.8"
   dependencies:
@@ -3827,7 +3827,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-tool-skill@npm:^0.1.0-rc.8":
+"@deepseek-ai/dsh-tool-skill@npm:0.1.0-rc.8, @deepseek-ai/dsh-tool-skill@npm:^0.1.0-rc.8":
   version: 0.1.0-rc.8
   resolution: "@deepseek-ai/dsh-tool-skill@npm:0.1.0-rc.8"
   dependencies:
@@ -5799,15 +5799,20 @@ __metadata:
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-invariants": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-settings": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-skill": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-skill-filesystem": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-tool-skill": "npm:0.1.0-rc.8"
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     "@picoaide/dsh-connectors": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     electron: "npm:43.4.0"
     react: "npm:18.3.1"
+    tar: "npm:^7.5.0"
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
+    yaml: "npm:^2.9.0"
   peerDependencies:
     "@deepseek-ai/cordis": 4.0.1
   languageName: unknown
@@ -13731,7 +13736,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"tar@npm:^7.5.4, tar@npm:^7.5.7":
+"tar@npm:^7.5.0, tar@npm:^7.5.4, tar@npm:^7.5.7":
   version: 7.5.22
   resolution: "tar@npm:7.5.22"
   dependencies:

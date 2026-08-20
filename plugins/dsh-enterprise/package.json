@@ -64,7 +64,12 @@
   "dependencies": {
     "@deepseek-ai/dsh-credentials": "0.1.0-rc.8",
     "@deepseek-ai/dsh-settings": "0.1.0-rc.8",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/dsh-skill": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-skill-filesystem": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-tool-skill": "0.1.0-rc.8",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "tar": "^7.5.0",
+    "yaml": "^2.9.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1"
