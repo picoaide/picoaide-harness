@@ -334,7 +334,6 @@ the package names, versions, and licenses for transparency.
 | devlop | 1.1.0 | MIT |
 | diff | 9.0.0 | BSD-3-Clause |
 | dingtalk-workspace-cli | 1.0.59 | Apache-2.0 (binary; see note below) |
-| dsh-community-market | 0.1.0-dev.0 | MIT |
 | dsh-better-sidebar | 0.13.1 | MIT |
 | dsh-memory-evolve | 0.1.0 | MIT |
 | dunder-proto | 1.0.1 | MIT |

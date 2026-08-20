@@ -58,9 +58,7 @@ export default defineConfig([
       '@deepseek-ai/dsh-client-runtime/client',
       '@deepseek-ai/dsh-client-ui-slots',
       '@deepseek-ai/dsh-client-ui-settings/client',
-      '@deepseek-ai/dsh-client-web-react',
       '@deepseek-ai/dsh-client-ui-primitives',
-      '@deepseek-ai/dsh-client-schema-form',
     ],
     outputOptions: {
       entryFileNames: 'client.js',
