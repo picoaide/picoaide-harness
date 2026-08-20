@@ -32,10 +32,13 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'plugins/dsh-enterprise',
   'plugins/dsh-connectors',
   'plugins/dsh-memory-evolve',
+  'plugins/dsh-cron',
+  'plugins/dsh-task',
   'dsh-community-fabric',
   'dsh-community-market',
+  'plugins/dsh-better-sidebar',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, memory-evolve, community-fabric, and community-market packages')
+  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, memory-evolve, cron, task, community-fabric, community-market, and better-sidebar packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', plugin],
