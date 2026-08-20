@@ -23,6 +23,7 @@ interface ConnectorEntry {
     authorizeUrl?: string
     verificationUrl?: string
     userCode?: string
+    message?: string
     fields?: { key: string; label: string; type: string; required?: boolean }[]
   } | null
 }
@@ -189,6 +190,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   const polling = entry.status === 'connecting' && (entry.request?.authorizeUrl || entry.request?.verificationUrl)
   const needsForm = entry.status === 'connecting' && Boolean(entry.request?.fields?.length)
   const isConnected = entry.status === 'connected'
+  const downloading = entry.status === 'connecting' && Boolean(entry.request?.message)
 
   return (
     <div style={CARD}>
@@ -239,6 +241,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
         </div>
       )}
 
+      {downloading && entry.request?.message && <p style={LABEL}>{entry.request.message}</p>}
       {polling && <p style={LABEL}>{t('auth.waiting')}</p>}
       {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error)}</p>}
       {error && <p style={{ ...STATUS, color: statusColor.error }}>{error}</p>}
