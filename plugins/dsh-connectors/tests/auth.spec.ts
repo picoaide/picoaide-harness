@@ -161,6 +161,39 @@ describe('connector auth', () => {
     expect(patch.updatedAt).toBeTruthy()
   })
 
+  it('surfaces the install command when the CLI binary is missing (ENOENT)', async () => {
+    const def: ConnectorDef = {
+      id: 'missing-cli',
+      name: 'Missing CLI',
+      description: 'x',
+      authMode: 'cli',
+      auth: {
+        command: 'definitely-not-a-real-binary-xyz',
+        args: ['auth', 'login'],
+        installCommand: 'npm install -g beisen-cli',
+      },
+      mcp: [],
+    }
+    await expect(runAuth(def, { onRequest: () => {}, signal: new AbortController().signal }))
+      .rejects.toThrow('未找到命令 definitely-not-a-real-binary-xyz，请先安装：npm install -g beisen-cli')
+  })
+
+  it('names the missing command even without an installCommand', async () => {
+    const def: ConnectorDef = {
+      id: 'missing-cli-no-hint',
+      name: 'Missing CLI',
+      description: 'x',
+      authMode: 'cli',
+      auth: {
+        command: 'definitely-not-a-real-binary-xyz',
+        args: ['auth', 'login'],
+      },
+      mcp: [],
+    }
+    await expect(runAuth(def, { onRequest: () => {}, signal: new AbortController().signal }))
+      .rejects.toThrow('未找到命令 definitely-not-a-real-binary-xyz，请确认已安装该命令行工具并加入 PATH')
+  })
+
   it('connects a public MCP endpoint without OAuth', async () => {
     const calls: string[] = []
     const originalFetch = globalThis.fetch
