@@ -24,6 +24,8 @@ import type {
 
 /** Default cooperative tool-call budget (ms). */
 export const DEFAULT_TIMEOUT_MS = 30_000
+/** Default cap on waiting for Electron's loadURL promise (ms). */
+export const DEFAULT_LOAD_TIMEOUT_MS = 20_000
 /** Maximum simultaneous tabs. */
 export const DEFAULT_MAX_TABS = 8
 /** Op-log ring size. */
@@ -108,6 +110,7 @@ export class BrowserRuntime {
     this.options = {
       maxTabs: options.maxTabs ?? DEFAULT_MAX_TABS,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      loadTimeoutMs: options.loadTimeoutMs ?? DEFAULT_LOAD_TIMEOUT_MS,
       evalEnabled: options.evalEnabled ?? true,
       snapshotLimit: options.snapshotLimit ?? 200,
       textLimit: options.textLimit ?? 32 * 1024,
@@ -272,7 +275,18 @@ export class BrowserRuntime {
     })
   }
 
-  /** Navigate the tab to `url`, waiting per `waitUntil`. */
+  /**
+   * Navigate the tab to `url`, waiting per `waitUntil`.
+   *
+   * Electron's `loadURL` promise settles on `did-finish-load`, which pages
+   * with long-lived connections (polls, SSE, analytics) can delay well past
+   * the page being interactive. Racing it against `loadTimeoutMs` keeps the
+   * tool call from dying on the cooperative 30s budget while the page is
+   * already usable; once the load promise settles (or the race times out),
+   * `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
+   * strictly after dom-ready) and only `networkidle` needs an extra quiet
+   * tick.
+   */
   async navigate(id: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded'): Promise<void> {
     if (!this.guard.allowNavigation(url)) {
       throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`)
@@ -280,16 +294,24 @@ export class BrowserRuntime {
     const tab = this.tab(id)
     const wc = tab.view.webContents
     const started = Date.now()
-    const wait = this.waitForLoad(wc, waitUntil)
-    try {
-      await wc.loadURL(url)
-    } catch (error) {
-      // loadURL rejects on failure; still wait briefly for the state update.
-      this.updateTabState(tab)
-      throw new Error(`browser: navigation failed — ${error instanceof Error ? error.message : String(error)}`)
+    const outcome = await Promise.race([
+      wc.loadURL(url).then(
+        () => 'loaded' as const,
+        () => 'failed' as const,
+      ),
+      sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
+    ])
+    if (outcome === 'failed') {
+      // A failed load may still leave a usable page (partial render); only
+      // report it when the webContents shows nothing loaded at all.
+      if (!wc.isLoading() && wc.getURL() === '') {
+        throw new Error('browser: navigation failed to load')
+      }
     }
-    const remaining = this.options.timeoutMs - (Date.now() - started)
-    await wait(remaining)
+    if (waitUntil === 'networkidle') {
+      const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
+      await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
+    }
     this.updateTabState(tab)
   }
 
@@ -633,6 +655,17 @@ export class BrowserRuntime {
     this.windowGoneDisposer()
     void this.closeAll()
   }
+}
+
+/** Extra quiet tick approximating network idle for `networkidle` waits. */
+const NETWORK_IDLE_TICK_MS = 800
+
+/** Resolve after `ms` milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, ms))
+    timer.unref?.()
+  })
 }
 
 /** Safe JSON rendering with a hard cap (never throws). */
