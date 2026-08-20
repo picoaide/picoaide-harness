@@ -21,7 +21,7 @@ import {
   type Profile,
   type ProfileManifest,
 } from '@deepseek-ai/dsh-app-boot'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { resolveDshHome } from './desktop-home.ts'
 import FileSettingsProvider, {
   resolveSpec as resolveSettingsFileSpec,
   type Config as SettingsFileConfig,
@@ -52,6 +52,9 @@ const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.m
 const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
 const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
+const CRON_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-cron/package.json')), 'cordis.patch.yml')
+const TASK_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-task/package.json')), 'cordis.patch.yml')
+const BETTER_SIDEBAR_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-better-sidebar/package.json')), 'cordis.patch.yml')
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
 const BROWSE_PICKER_BACKEND = '@deepseek-ai/dsh-host-directory-picker-browse'
@@ -379,6 +382,9 @@ export function prepareDesktopProfile(
   const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
   const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
+  const cronPatches = loadOverlayPatches(BIN_NAME, CRON_PATCH_PATH)
+  const taskPatches = loadOverlayPatches(BIN_NAME, TASK_PATCH_PATH)
+  const betterSidebarPatches = loadOverlayPatches(BIN_NAME, BETTER_SIDEBAR_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
   let desktopLayerInserted = false
   for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
@@ -388,6 +394,13 @@ export function prepareDesktopProfile(
     bundlePatches.push(...enterprisePatches)
     bundlePatches.push(...connectorsPatches)
     bundlePatches.push(...memoryPatches)
+    // Workbench family: cron first (its service gates nothing here; patch
+    // order is informational, activation follows service injection), then
+    // the task board, then the right-panel sidebar. The sidebar's own
+    // cordis.patch.yml carries the aggregate double-mount guard.
+    bundlePatches.push(...cronPatches)
+    bundlePatches.push(...taskPatches)
+    bundlePatches.push(...betterSidebarPatches)
     desktopLayerInserted = true
   }
   if (!desktopLayerInserted) {

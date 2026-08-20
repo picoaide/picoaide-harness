@@ -13,8 +13,11 @@
     "plugins/dsh-enterprise",
     "plugins/dsh-connectors",
     "plugins/dsh-memory-evolve",
+    "plugins/dsh-cron",
+    "plugins/dsh-task",
     "dsh-community-fabric",
-    "dsh-community-market"
+    "dsh-community-market",
+    "plugins/dsh-better-sidebar"
   ],
   "resolutions": {
     "app-builder-lib@npm:26.15.3": "patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch",
@@ -56,7 +59,7 @@
     "typecheck": "yarn workspace @picoaide/dsh-enterprise typecheck && yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-community-market typecheck",
     "test": "yarn workspace @picoaide/dsh-enterprise test && yarn workspace dsh-plugin-desktop test && yarn workspace dsh-community-market test",
     "check:layout": "node scripts/verify-layout.mjs",
-    "check": "yarn check:layout && yarn workspace @picoaide/dsh-connectors check && yarn workspace @picoaide/dsh-enterprise check && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace dsh-plugin-desktop check",
+    "check": "yarn check:layout && yarn workspace @picoaide/dsh-connectors check && yarn workspace @picoaide/dsh-enterprise check && yarn workspace @picoaide/dsh-cron check && yarn workspace @picoaide/dsh-task check && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace dsh-plugin-desktop check",
     "dev": "yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop dev",
     "start": "yarn workspace dsh-plugin-desktop start",
     "package:dir": "yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop package:dir",
