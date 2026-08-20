@@ -277,7 +277,7 @@ window.__ModuleLoader__.load({
 				height: "100%",
 				minWidth: 640,
 				fontSize: 13,
-				color: "var(--dsw-text, #d5d7e0)",
+				color: "var(--dsw-alias-label-primary)",
 				background: "transparent"
 			},
 			header: {
@@ -285,7 +285,7 @@ window.__ModuleLoader__.load({
 				alignItems: "center",
 				gap: 10,
 				padding: "10px 14px",
-				borderBottom: "1px solid var(--dsw-border, rgba(128,128,128,0.25))"
+				borderBottom: "1px solid var(--dsw-alias-border-l2)"
 			},
 			title: {
 				flex: 1,
@@ -299,9 +299,9 @@ window.__ModuleLoader__.load({
 				whiteSpace: "nowrap"
 			},
 			search: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.35))",
+				border: "1px solid var(--dsw-alias-border-l3)",
 				borderRadius: 6,
-				background: "var(--dsw-input, rgba(0,0,0,0.25))",
+				background: "var(--dsw-alias-bg-layer-3)",
 				color: "inherit",
 				fontSize: 12,
 				padding: "4px 8px",
@@ -309,7 +309,7 @@ window.__ModuleLoader__.load({
 				width: 160
 			},
 			button: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.3))",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				borderRadius: 6,
 				background: "transparent",
 				color: "inherit",
@@ -319,15 +319,15 @@ window.__ModuleLoader__.load({
 				fontFamily: "inherit"
 			},
 			buttonPrimary: {
-				borderColor: "var(--dsw-accent, #4d6bfe)",
-				color: "var(--dsw-accent, #4d6bfe)"
+				borderColor: "var(--dsw-alias-state-business-primary)",
+				color: "var(--dsw-alias-state-business-primary)"
 			},
 			buttonDisabled: {
 				opacity: .45,
 				cursor: "default"
 			},
 			error: {
-				color: "var(--dsw-danger, #e06666)",
+				color: "var(--dsw-alias-state-error-primary)",
 				fontSize: 12,
 				padding: "4px 14px"
 			},
@@ -345,16 +345,16 @@ window.__ModuleLoader__.load({
 				display: "flex",
 				flexDirection: "column",
 				maxHeight: "100%",
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.2))",
+				border: "1px solid var(--dsw-alias-border-l1)",
 				borderRadius: 10,
-				background: "var(--dsw-surface, rgba(30,32,42,0.5))"
+				background: "var(--dsw-alias-bg-layer-2)"
 			},
 			columnHeader: {
 				display: "flex",
 				alignItems: "center",
 				gap: 6,
 				padding: "8px 10px",
-				borderBottom: "1px solid var(--dsw-border, rgba(128,128,128,0.15))"
+				borderBottom: "1px solid var(--dsw-alias-border-l1)"
 			},
 			columnTitle: {
 				flex: 1,
@@ -365,7 +365,7 @@ window.__ModuleLoader__.load({
 			columnCount: {
 				fontSize: 11,
 				opacity: .7,
-				background: "var(--dsw-border, rgba(128,128,128,0.2))",
+				background: "var(--dsw-alias-border-l1)",
 				borderRadius: 999,
 				padding: "1px 7px"
 			},
@@ -384,10 +384,10 @@ window.__ModuleLoader__.load({
 				gap: 8
 			},
 			card: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.25))",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				borderRadius: 8,
 				padding: "8px 10px",
-				background: "var(--dsw-surface, rgba(30,32,42,0.85))",
+				background: "var(--dsw-alias-bg-layer-2)",
 				cursor: "pointer",
 				display: "flex",
 				flexDirection: "column",
@@ -424,8 +424,8 @@ window.__ModuleLoader__.load({
 				top: 0,
 				bottom: 0,
 				width: "min(420px, 40vw)",
-				borderLeft: "1px solid var(--dsw-border, rgba(128,128,128,0.3))",
-				background: "var(--dsw-surface, #1e202a)",
+				borderLeft: "1px solid var(--dsw-alias-border-l2)",
+				background: "var(--dsw-alias-bg-layer-2)",
 				display: "flex",
 				flexDirection: "column",
 				zIndex: 10
@@ -435,7 +435,7 @@ window.__ModuleLoader__.load({
 				alignItems: "center",
 				gap: 8,
 				padding: "10px 12px",
-				borderBottom: "1px solid var(--dsw-border, rgba(128,128,128,0.25))"
+				borderBottom: "1px solid var(--dsw-alias-border-l2)"
 			},
 			detailBody: {
 				flex: 1,
@@ -459,9 +459,9 @@ window.__ModuleLoader__.load({
 				whiteSpace: "pre-wrap"
 			},
 			input: {
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.35))",
+				border: "1px solid var(--dsw-alias-border-l3)",
 				borderRadius: 6,
-				background: "var(--dsw-input, rgba(0,0,0,0.25))",
+				background: "var(--dsw-alias-bg-layer-3)",
 				color: "inherit",
 				fontSize: 13,
 				padding: "5px 8px",
@@ -495,14 +495,15 @@ window.__ModuleLoader__.load({
 				fontSize: 12,
 				opacity: .7
 			},
-			resultOk: { color: "var(--dsw-success, #4caf7d)" },
-			resultFail: { color: "var(--dsw-danger, #e06666)" },
+			resultOk: { color: "var(--dsw-alias-state-success-primary)" },
+			resultFail: { color: "var(--dsw-alias-state-error-primary)" },
 			resultCancel: { opacity: .7 },
-			resultPending: { color: "var(--dsw-warning, #d9a441)" },
+			resultPending: { color: "var(--dsw-alias-state-warn-primary)" },
 			overlay: {
 				position: "fixed",
 				inset: 0,
-				background: "rgba(0,0,0,0.45)",
+				background: "var(--dsw-alias-bg-mask-1)",
+				backdropFilter: "var(--dsw-mask-blur)",
 				display: "flex",
 				alignItems: "center",
 				justifyContent: "center",
@@ -512,14 +513,15 @@ window.__ModuleLoader__.load({
 				width: "min(520px, 92vw)",
 				maxHeight: "88vh",
 				overflowY: "auto",
-				border: "1px solid var(--dsw-border, rgba(128,128,128,0.35))",
-				borderRadius: 10,
-				background: "var(--dsw-surface, #1e202a)",
+				border: "1px solid var(--dsw-alias-border-l3)",
+				borderRadius: 12,
+				background: "var(--dsw-alias-bg-layer-2)",
+				boxShadow: "var(--dsw-shadow-lv3)",
 				padding: "14px 16px",
 				display: "flex",
 				flexDirection: "column",
 				gap: 10,
-				color: "var(--dsw-text, #d5d7e0)",
+				color: "var(--dsw-alias-label-primary)",
 				fontSize: 13
 			},
 			editorActions: {
@@ -529,7 +531,7 @@ window.__ModuleLoader__.load({
 				marginTop: 4
 			},
 			schedule: {
-				border: "1px dashed var(--dsw-border, rgba(128,128,128,0.3))",
+				border: "1px dashed var(--dsw-alias-border-l2)",
 				borderRadius: 8,
 				padding: "8px 10px",
 				display: "flex",
@@ -1783,6 +1785,7 @@ window.__ModuleLoader__.load({
 			}
 			const cron = ctx.get("picoCronService");
 			const sessions = ctx.get("sessions");
+			const workspacesService = ctx.get("workspaces");
 			const controller = new TaskController({ transport: new HttpTaskTransport() });
 			if (sessions !== void 0) controller.openSession = (id) => sessions.open(id);
 			ctx.effect(() => {
@@ -1794,11 +1797,10 @@ window.__ModuleLoader__.load({
 				id: "pico-task",
 				order: -5
 			}, TaskTrigger));
-			ctx.effect(() => mountTaskBoard(controller), "dsh-task: main-area board");
+			ctx.effect(() => mountTaskBoard(controller, workspacesService), "dsh-task: main-area board");
 			ctx.inject(["betterSidebar"], (childCtx) => {
 				const service = childCtx.get("betterSidebar");
 				if (service === void 0) return;
-				const workspacesService = ctx.get("workspaces");
 				const disposeTab = service.registerTab({
 					id: "pico:task-board",
 					title: () => zh["entry.label"],
