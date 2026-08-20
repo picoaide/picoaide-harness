@@ -4,6 +4,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { AuthError, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
+import {
+  installSkillArchive,
+  MAX_ARCHIVE_BYTES,
+  resolveSkillsDir,
+  validateSkillName,
+} from './skill-install.ts'
 
 const LOGIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -214,17 +220,18 @@ export function apply(ctx: Context, config: Config): void {
         },
       }),
 
-      // Skill store proxy: /api/pico/skills (catalog) and
-      // /api/pico/skills/<name>/archive (download), forwarded to the gateway.
+      // Skill store proxy: /api/pico/skills (catalog), /archive (download),
+      // and /install (verify + unpack into the user skill root), all
+      // forwarded to the gateway. Method dispatch lives inside one handler:
+      // the route table has no per-method matching.
       ctx.webServer.register({
         kind: 'prefix', path: '/api/pico/skills',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
-          if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
-          if (pathname === '/api/pico/skills') {
+          if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
               const data = await fetchJSON(s.serverURL, '/api/marketplace/skills', { token: s.token })
               json(res, 200, data)
@@ -239,9 +246,55 @@ export function apply(ctx: Context, config: Config): void {
             }
             return
           }
-          const match = /^\/api\/pico\/skills\/([^/]+)\/archive$/u.exec(pathname)
-          if (match === null) return json(res, 404, { error: 'not found' })
-          const name = decodeURIComponent(match[1]!)
+          const installMatch = req.method === 'POST'
+            ? /^\/api\/pico\/skills\/([^/]+)\/install$/u.exec(pathname)
+            : null
+          if (installMatch !== null) {
+            const name = decodeURIComponent(installMatch[1]!)
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              const upstream = await gatewayFetch(
+                `${s.serverURL}/api/marketplace/skills/${encodeURIComponent(name)}/archive`,
+                { headers: { Authorization: `Bearer ${s.token}` } },
+              )
+              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              const length = Number(upstream.headers.get('content-length') ?? '0')
+              if (length > MAX_ARCHIVE_BYTES) {
+                return json(res, 413, { error: 'archive too large' })
+              }
+              const archive = Buffer.from(await upstream.arrayBuffer())
+              const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
+              const version = upstream.headers.get('x-skill-version') ?? undefined
+              const result = await installSkillArchive({
+                name,
+                archive,
+                checksum,
+                version,
+                skillsDir: resolveSkillsDir(),
+              })
+              json(res, 200, { ok: true, name: result.name, version: result.version })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              // Install refusals (checksum, unsafe archive, no SKILL.md) are
+              // client errors; gateway/IO failures are upstream errors.
+              const message = cause instanceof Error ? cause.message : String(cause)
+              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
+              json(res, isRefusal ? 422 : 502, { error: message })
+            }
+            return
+          }
+          const archiveMatch = req.method === 'GET'
+            ? /^\/api\/pico\/skills\/([^/]+)\/archive$/u.exec(pathname)
+            : null
+          if (archiveMatch === null) return json(res, 404, { error: 'not found' })
+          const name = decodeURIComponent(archiveMatch[1]!)
           try {
             const upstream = await gatewayFetch(
               `${s.serverURL}/api/marketplace/skills/${encodeURIComponent(name)}/archive`,

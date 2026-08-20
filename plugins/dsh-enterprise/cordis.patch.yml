@@ -19,6 +19,18 @@
 # llm-deepseek and clears it on logout.
 - id: ui-settings-models
   disabled: true
+# Local skill discovery: the web-app bundle disables the host skill
+# provider rows (presets own local discovery), but the desktop has no
+# presets. Mount the filesystem provider (scans `<dshHome>/skills`, which
+# the skill center installs into) and the model-facing catalog/loader so
+# installed skills are visible to the agent. The `skill` registry row is
+# already live in the web-app bundle. Fresh ids avoid colliding with the
+# disabled placeholder rows in the web-app bundle.
+- insert:
+    - id: pico-skill-filesystem
+      name: '@deepseek-ai/dsh-skill-filesystem'
+    - id: pico-tool-skill
+      name: '@deepseek-ai/dsh-tool-skill'
 # Enterprise brand: product name and window title for the native shell (the
 # desktop Config schema defaults stay upstream-compatible).
 - id: desktop-shell
