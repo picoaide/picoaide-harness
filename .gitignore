@@ -28,3 +28,4 @@ server/webadmin/tsconfig.tsbuildinfo
 .yarn/cache
 .research/
 .yarn-cache/
+.yarn-home/
