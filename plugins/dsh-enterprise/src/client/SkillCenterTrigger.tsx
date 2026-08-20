@@ -21,7 +21,7 @@ const TRIGGER_WIDE: React.CSSProperties = {
   color: 'var(--dsw-alias-label-primary)',
   fontFamily: 'inherit',
   fontSize: 14,
-  lineHeight: 22,
+  lineHeight: '22px',
 }
 
 const TRIGGER_RAIL: React.CSSProperties = {
