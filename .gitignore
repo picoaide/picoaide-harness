@@ -25,3 +25,6 @@ server/webadmin/dist/*
 !server/webadmin/dist/index.html
 server/webadmin/tsconfig.tsbuildinfo
 *.log
+.yarn/cache
+.research/
+.yarn-cache/
