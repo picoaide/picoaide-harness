@@ -205,6 +205,35 @@ describe('BrowserRuntime', () => {
     runtime.dispose()
   })
 
+  it('does not hang when loadURL never settles (long-lived page connections)', async () => {
+    const { runtime, views } = runtimeOf({ loadTimeoutMs: 50 })
+    await runtime.open(undefined)
+    // Simulate a page whose did-finish-load never fires (polls/SSE/analytics).
+    views[0]!.loadURL = vi.fn(() => new Promise<void>(() => {}))
+    const started = Date.now()
+    await runtime.navigate(1, 'https://example.com/slow')
+    expect(Date.now() - started).toBeLessThan(1000)
+    runtime.dispose()
+  })
+
+  it('reports a navigation that failed with nothing loaded', async () => {
+    const { runtime, views } = runtimeOf({ loadTimeoutMs: 50 })
+    await runtime.open(undefined)
+    views[0]!.loadURL = vi.fn(async () => { throw new Error('ERR_ABORTED') })
+    views[0]!.url = ''
+    await expect(runtime.navigate(1, 'https://example.com/bad')).rejects.toThrow(/failed/)
+    runtime.dispose()
+  })
+
+  it('tolerates a failed load that still left a usable page', async () => {
+    const { runtime, views } = runtimeOf({ loadTimeoutMs: 50 })
+    await runtime.open(undefined)
+    views[0]!.loadURL = vi.fn(async () => { throw new Error('ERR_ABORTED') })
+    views[0]!.url = 'https://example.com/partial'
+    await expect(runtime.navigate(1, 'https://example.com/bad')).resolves.toBeUndefined()
+    runtime.dispose()
+  })
+
   it('respects the tab limit', async () => {
     const { runtime } = runtimeOf({ maxTabs: 2 })
     await runtime.open(undefined)

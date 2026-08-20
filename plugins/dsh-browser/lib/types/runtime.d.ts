@@ -12,6 +12,8 @@ import { BrowserGuard } from './guard.ts';
 import type { BrowserOpLogEntry, BrowserPanelState, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions, BrowserWaitUntil, CredentialResolver } from './types.ts';
 /** Default cooperative tool-call budget (ms). */
 export declare const DEFAULT_TIMEOUT_MS = 30000;
+/** Default cap on waiting for Electron's loadURL promise (ms). */
+export declare const DEFAULT_LOAD_TIMEOUT_MS = 20000;
 /** Maximum simultaneous tabs. */
 export declare const DEFAULT_MAX_TABS = 8;
 interface BrowserTab {
@@ -70,7 +72,18 @@ export declare class BrowserRuntime {
     private tabStateInternal;
     /** Run one agent operation under the control mutex. */
     withControl<T>(_tool: string, tabId: number, work: (tab: BrowserTab) => Promise<T>): Promise<T>;
-    /** Navigate the tab to `url`, waiting per `waitUntil`. */
+    /**
+     * Navigate the tab to `url`, waiting per `waitUntil`.
+     *
+     * Electron's `loadURL` promise settles on `did-finish-load`, which pages
+     * with long-lived connections (polls, SSE, analytics) can delay well past
+     * the page being interactive. Racing it against `loadTimeoutMs` keeps the
+     * tool call from dying on the cooperative 30s budget while the page is
+     * already usable; once the load promise settles (or the race times out),
+     * `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
+     * strictly after dom-ready) and only `networkidle` needs an extra quiet
+     * tick.
+     */
     navigate(id: number, url: string, waitUntil?: BrowserWaitUntil): Promise<void>;
     /** Cooperative wait for the page load milestone; never rejects on timeout. */
     private waitForLoad;
