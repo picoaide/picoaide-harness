@@ -375,8 +375,9 @@ async function runCli(def, options) {
 			extract(stderr, "stderr");
 		});
 		child.on("error", (error) => {
-			if (error.code === "ENOENT" && auth.installCommand) {
-				reject(/* @__PURE__ */ new Error(`未找到命令 ${auth.command}，请先安装：${auth.installCommand}`));
+			if (error.code === "ENOENT") {
+				const hint = auth.installCommand ? `，请先安装：${auth.installCommand}` : "，请确认已安装该命令行工具并加入 PATH";
+				reject(/* @__PURE__ */ new Error(`未找到命令 ${auth.command}${hint}`));
 				return;
 			}
 			reject(error);
