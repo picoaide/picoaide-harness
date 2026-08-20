@@ -51,6 +51,7 @@ const INSTALL_ANCHOR = unpackedAsarPath(fileURLToPath(new URL('../package.json',
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
+const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
 const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
 const CRON_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-cron/package.json')), 'cordis.patch.yml')
 const TASK_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-task/package.json')), 'cordis.patch.yml')
@@ -381,6 +382,7 @@ export function prepareDesktopProfile(
   const desktopPatches = loadOverlayPatches(BIN_NAME, DESKTOP_PATCH_PATH)
   const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
+  const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
   const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
   const cronPatches = loadOverlayPatches(BIN_NAME, CRON_PATCH_PATH)
   const taskPatches = loadOverlayPatches(BIN_NAME, TASK_PATCH_PATH)
@@ -393,6 +395,7 @@ export function prepareDesktopProfile(
     bundlePatches.push(...desktopPatches)
     bundlePatches.push(...enterprisePatches)
     bundlePatches.push(...connectorsPatches)
+    bundlePatches.push(...browserPatches)
     bundlePatches.push(...memoryPatches)
     // Workbench family: cron first (its service gates nothing here; patch
     // order is informational, activation follows service injection), then

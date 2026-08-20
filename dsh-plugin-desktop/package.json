@@ -228,6 +228,7 @@
     "@deepseek-ai/dsh-web-app": "0.1.0-rc.7",
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.7",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@picoaide/dsh-browser": "workspace:*",
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
