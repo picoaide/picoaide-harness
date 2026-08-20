@@ -11,8 +11,8 @@ import {
   type FailLoudProcess,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import { DSH_HOME_ENV, resolveDshHome } from './desktop-home.ts'
 import {
   installDesktopDshRuntime,
   installDesktopPnpmRuntime,
@@ -251,7 +251,11 @@ async function start(): Promise<void> {
     platform: process.platform,
   })
   for (const [name, value] of Object.entries(shellEnvironmentResolution.updates)) process.env[name] = value
+  // Product-owned home: `~/.picoaide-harness` unless DSH_HOME is explicitly
+  // set. Writing it back makes every downstream consumer (child processes,
+  // sibling plugins resolving DSH_HOME) agree on the same location.
   const homeDir = resolveDshHome()
+  process.env[DSH_HOME_ENV] = homeDir
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
     { label: 'application install', path: process.execPath },
     { label: 'desktop user data', path: app.getPath('userData') },
