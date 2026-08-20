@@ -1488,7 +1488,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.0-rc.8":
+"@deepseek-ai/dsh-client-ui-brand-official@npm:0.1.0-rc.8":
   version: 0.1.0-rc.8
   resolution: "@deepseek-ai/dsh-client-ui-brand-official@npm:0.1.0-rc.8"
   peerDependencies:
@@ -1498,6 +1498,19 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-sidebar": ^0.1.0-rc.8
     "@deepseek-ai/dsh-invariants": ^0.1.0-rc.8
   checksum: 10c0/66f1be804a55f11270a02e95cb5f08a846e4d91f8620361c4e7f565170c4884563b0fdeb3149ac4c904ee8f7cba6b01ea7176e9b22535ec72a25f6d7acdb3abd
+  languageName: node
+  linkType: hard
+
+"@deepseek-ai/dsh-client-ui-brand-official@patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.0-rc.8#./patches/dsh-client-ui-brand-official@0.1.0-rc.8.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 0.1.0-rc.8
+  resolution: "@deepseek-ai/dsh-client-ui-brand-official@patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.0-rc.8#./patches/dsh-client-ui-brand-official@0.1.0-rc.8.patch::version=0.1.0-rc.8&hash=32abc8&locator=deepseek-harness-desktop%40workspace%3A."
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.1
+    "@deepseek-ai/dsh-client-runtime": ^0.1.0-rc.8
+    "@deepseek-ai/dsh-client-ui-conversation": ^0.1.0-rc.8
+    "@deepseek-ai/dsh-client-ui-sidebar": ^0.1.0-rc.8
+    "@deepseek-ai/dsh-invariants": ^0.1.0-rc.8
+  checksum: 10c0/536e876540c9a981b678109f92fa125fa3e6099445bc895d7331197be47dbfa74fbde5af6753c4a0cb2871d53b5a7ccbc8fd4bc8bce81e9cc9cafef70dce0927
   languageName: node
   linkType: hard
 
@@ -5775,6 +5788,7 @@ __metadata:
     "@deepseek-ai/dsh-brand": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-client-ui-conversation": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-client-ui-layout": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.8"
     "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.0-rc.8"
