@@ -424,8 +424,14 @@ async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Parti
       extract(stderr, 'stderr')
     })
     child.on('error', (error) => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && auth.installCommand) {
-        reject(new Error(`未找到命令 ${auth.command}，请先安装：${auth.installCommand}`))
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        // The CLI binary is missing: always name the command and, when the
+        // def knows the install method, surface it so the UI can show an
+        // actionable hint instead of a bare ENOENT.
+        const hint = auth.installCommand
+          ? `，请先安装：${auth.installCommand}`
+          : '，请确认已安装该命令行工具并加入 PATH'
+        reject(new Error(`未找到命令 ${auth.command}${hint}`))
         return
       }
       reject(error)

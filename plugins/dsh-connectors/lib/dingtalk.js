@@ -10,6 +10,7 @@ const dingTalkDef = {
 			"login",
 			"--device"
 		],
+		installCommand: "npm install -g dingtalk-workspace-cli",
 		deviceFlow: {
 			uriPattern: "https://login\\.dingtalk\\.com/oauth2/device/verify\\.htm[^\\s\\n\\r\"'<>]*",
 			codePattern: "(?:授权码|user_code=|user_code：)\\s*:?\\s*([A-Z0-9][A-Z0-9-]*)"

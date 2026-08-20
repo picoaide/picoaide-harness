@@ -68,6 +68,9 @@ export function t(key: ConnectorsKey, params?: Record<string, string>): string {
 /** Map raw connector/CLI errors to user-facing copy (P3-6). */
 export function friendlyConnectorError(raw: string): string {
   if (raw.includes('退出码')) return '登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试'
+  // The node side names the missing binary and its install command; show it
+  // verbatim so the user knows what to install (e.g. npm install -g beisen-cli).
+  if (raw.includes('未找到命令')) return raw
   if (raw.includes('ENOENT')) return '未找到登录命令：请先安装对应命令行工具'
   if (raw.includes('token') || raw.includes('授权') || raw.includes('登录')) return raw
   return `连接失败：${raw}`
