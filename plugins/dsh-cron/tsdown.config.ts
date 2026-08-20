@@ -1,3 +1,4 @@
+import { PLATFORM_MODULES, PRELOADED_CLIENT_EXTERNALS } from '../../scripts/platform-modules.mjs'
 import { defineConfig } from 'tsdown'
 
 const PACKAGE_NAME = '@picoaide/dsh-cron'
@@ -52,15 +53,9 @@ export default defineConfig([
     // client module this bundle imports. Anything else would be inlined and
     // split the runtime identity of the framework instance.
     external: [
-      'react',
-      'react/jsx-runtime',
-      'react-dom',
-      'react-dom/client',
-      '@deepseek-ai/cordis',
-      '@deepseek-ai/dsh-client-runtime/client',
-      '@deepseek-ai/dsh-client-ui-slots',
+      ...PLATFORM_MODULES,
+      ...PRELOADED_CLIENT_EXTERNALS,
       '@deepseek-ai/dsh-client-ui-settings/client',
-      '@deepseek-ai/dsh-client-ui-primitives',
     ],
     outputOptions: {
       entryFileNames: 'client.js',

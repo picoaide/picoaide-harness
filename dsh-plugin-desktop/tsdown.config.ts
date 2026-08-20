@@ -1,3 +1,4 @@
+import { PLATFORM_MODULES, PRELOADED_CLIENT_EXTERNALS } from '../scripts/platform-modules.mjs'
 import { defineConfig } from 'tsdown'
 
 const PACKAGE_NAME = 'dsh-plugin-desktop'
@@ -68,14 +69,8 @@ export default defineConfig([
     clean: false,
     sourcemap: true,
     external: [
-      'react',
-      'react/jsx-runtime',
-      'react-dom',
-      'react-dom/client',
-      '@deepseek-ai/cordis',
-      '@deepseek-ai/dsh-client-runtime/client',
-      '@deepseek-ai/dsh-client-ui-slots',
-      '@deepseek-ai/dsh-client-ui-primitives',
+      ...PLATFORM_MODULES,
+      ...PRELOADED_CLIENT_EXTERNALS,
     ],
     noExternal: (id: string) => id.startsWith('@deepseek-ai/') ? undefined : true,
     outputOptions: {

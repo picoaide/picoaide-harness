@@ -27,23 +27,31 @@ const noteRecordPath = `${noteDirectory}/${noteName}.i18n.yaml`
 if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
-if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
-  'dsh-plugin-desktop',
-  'plugins/dsh-enterprise',
-  'plugins/dsh-connectors',
-  'plugins/dsh-browser',
-  'plugins/dsh-memory-evolve',
-  'plugins/dsh-cron',
-  'plugins/dsh-task',
-  'dsh-community-fabric',
-  'plugins/dsh-better-sidebar',
-])) {
-  fail('the root Yarn workspace must contain the desktop, enterprise, connectors, browser, memory-evolve, cron, task, community-fabric, and better-sidebar packages')
+
+// Workspace topology is self-describing: the root workspaces list is the
+// single source of truth. Every member must exist, be a valid package, and
+// carry a name whose final segment matches its directory basename (this
+// admits both flat members like `dsh-community-fabric` and scoped members
+// like `plugins/dsh-enterprise` -> `@picoaide/dsh-enterprise`).
+if (!Array.isArray(workspace.workspaces) || workspace.workspaces.length === 0) {
+  fail('the root Yarn workspace must declare a non-empty workspaces list')
 }
-for (const [name, manifest] of [
-  ['dsh-plugin-desktop', plugin],
-  ['dsh-community-fabric', fabric],
-]) {
+const workspaceDirs = [...new Set(workspace.workspaces)]
+if (workspaceDirs.length !== workspace.workspaces.length) {
+  fail('the root Yarn workspace list contains duplicates')
+}
+const workspaceManifests = new Map()
+for (const dir of workspaceDirs) {
+  const manifestPath = resolve(root, dir, 'package.json')
+  if (!existsSync(manifestPath)) fail(`workspace member ${dir} has no package.json`)
+  const manifest = readJson(`${dir}/package.json`)
+  const nameTail = typeof manifest.name === 'string' ? manifest.name.split('/').at(-1) : undefined
+  if (nameTail !== basename(dir)) {
+    fail(`workspace member ${dir} must own a package named *${basename(dir)} (got ${manifest.name ?? 'missing'})`)
+  }
+  workspaceManifests.set(manifest.name, manifest)
+}
+for (const [name, manifest] of workspaceManifests) {
   if (manifest.packageManager !== undefined) fail(`${name} must inherit the root Yarn release`)
 }
 if (fabric.name !== 'dsh-community-fabric') fail('the Fabric workspace must own dsh-community-fabric')
@@ -64,8 +72,6 @@ for (const legacyFile of [
   'dsh-plugin-desktop/pnpm-workspace.yaml',
   'dsh-community-fabric/pnpm-lock.yaml',
   'dsh-community-fabric/pnpm-workspace.yaml',
-  'dsh-community-market/pnpm-lock.yaml',
-  'dsh-community-market/pnpm-workspace.yaml',
 ]) {
   if (existsSync(resolve(root, legacyFile))) fail(`${legacyFile} must not exist`)
 }

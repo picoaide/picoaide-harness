@@ -1,3 +1,4 @@
+import { PLATFORM_MODULES, PRELOADED_CLIENT_EXTERNALS } from '../../scripts/platform-modules.mjs'
 import { defineConfig } from 'tsdown'
 
 const PACKAGE_NAME = '@picoaide/dsh-task'
@@ -50,15 +51,9 @@ export default defineConfig([
     // Platform module table (loader seed entries) plus every cross-package
     // client module this bundle imports.
     external: [
-      'react',
-      'react/jsx-runtime',
-      'react-dom',
-      'react-dom/client',
-      '@deepseek-ai/cordis',
-      '@deepseek-ai/dsh-client-runtime/client',
-      '@deepseek-ai/dsh-client-ui-slots',
+      ...PLATFORM_MODULES,
+      ...PRELOADED_CLIENT_EXTERNALS,
       '@deepseek-ai/dsh-client-ui-settings/client',
-      '@deepseek-ai/dsh-client-ui-primitives',
     ],
     outputOptions: {
       entryFileNames: 'client.js',
