@@ -63,7 +63,6 @@ Ordinary users can start with the [user guide](docs/user-guide.en.md); the devel
 | Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
 | Join the unified plugin-contract discussion | [DSH Community Fabric Draft](dsh-community-fabric/README.md) |
 | See the research behind the unified plugin framework | [Framework and real-plugin research](dsh-community-fabric/docs/research/mature-plugin-frameworks.md) |
-| Read the plugin market product and safety design | [DSH Community Market](dsh-community-market/README.md) |
 | See what Desktop plugins can use | [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) |
 | Understand how the desktop works | [Architecture](docs/architecture.en.md) |
 | Read package-level build and release details | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
@@ -82,10 +81,6 @@ Ordinary users can start with the [user guide](docs/user-guide.en.md); the devel
     </td>
   </tr>
   <tr>
-    <td width="50%" valign="top">
-      <h3><a href="dsh-community-market/README.md">Plugin Marketplace</a> <img src="https://img.shields.io/badge/IN_DESIGN-F59E0B?style=flat-square" alt="In design"></h3>
-      <p>We are using DSH Community Market to design plugin discovery, details, and confirmed installation. It currently contains product and safety documentation, not a usable market page.</p>
-    </td>
     <td width="50%" valign="top">
       <h3>Co-build the Plugin Ecosystem</h3>
       <p>The DSH plugin ecosystem is built by the community. Official, desktop, and third-party plugins follow the same conventions, so they can be installed together and work together without interfering with each other. Join us — read the <a href="docs/plugin-ecosystem.en.md">DSH plugin ecosystem manifesto</a>.</p>
