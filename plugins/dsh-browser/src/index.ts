@@ -4,16 +4,20 @@
  * API consumed by the client browser panel.
  *
  * HTTP API (loopback, mirroring the connectors plugin):
- *   GET  /api/pico/browser/state          -> tabs + panel + control + ops
- *   POST /api/pico/browser/panel          -> { visible, bounds? }
+ *   GET  /api/pico/browser/state          -> tabs + window + control + ops
  *   POST /api/pico/browser/open           -> { url? }
  *   POST /api/pico/browser/navigate       -> { tab, url }
  *   POST /api/pico/browser/reload|back|forward -> { tab? }
+ *   POST /api/pico/browser/switch-tab     -> { tab }
  *   POST /api/pico/browser/close-tab      -> { tab }
  *   POST /api/pico/browser/close-all
+ *   POST /api/pico/browser/show           -> wake the browser window
+ *   POST /api/pico/browser/hide           -> hide the window (keep tabs)
  *   POST /api/pico/browser/takeover       -> { active }
  *   POST /api/pico/browser/clear-data
  *   GET  /api/pico/browser/ops            -> recent op log
+ *   GET  /browser-shell                   -> the browser window control page
+ *   GET  /browser-mask                    -> the AI-control mask page
  * @module @picoaide/dsh-browser
  */
 
@@ -29,6 +33,7 @@ import { createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
 import { applyBrowserTools } from './tools.ts'
+import { BROWSER_MASK_HTML, BROWSER_SHELL_HTML } from './shell-pages.ts'
 import type { BrowserGuard } from './guard.ts'
 import type { CredentialResolver } from './types.ts'
 
@@ -151,6 +156,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   })()
 
   const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver)
+  // The shell/mask pages live on the plugin's own loopback server; the
+  // dedicated window loads them by absolute URL.
+  runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
 
   // Tool registrations are fiber-scoped: the tools/systemPrompt registries
   // clean them up on plugin dispose, so no manual disposer is needed here.
@@ -181,22 +189,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       const body = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
 
       switch (action) {
-        case 'panel': {
-          const visible = body.visible === true
-          const b = body.bounds as Record<string, unknown> | null | undefined
-          runtime.setPanel({
-            visible,
-            ...(visible && b !== null && typeof b === 'object'
-              ? {
-                  bounds: {
-                    x: numberOr(b.x, 0),
-                    y: numberOr(b.y, 0),
-                    width: Math.max(0, numberOr(b.width, 0)),
-                    height: Math.max(0, numberOr(b.height, 0)),
-                  },
-                }
-              : {}),
-          })
+        case 'show': {
+          runtime.showWindow()
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'hide': {
+          runtime.hideWindow()
           json(res, 200, { ok: true })
           return
         }
@@ -268,7 +267,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (!guard(req, res)) return
       json(res, 200, {
         tabs: runtime.listTabs(),
-        panel: runtime.panelState,
+        window: runtime.windowState,
         controlled: runtime.controlled,
       })
     }
@@ -279,10 +278,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       json(res, 200, { ops: runtime.opLog })
     }
 
+    const html = (content: string): JsonHandler => (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(content)
+    }
+
     const disposers = [
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/state', handler: state }),
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/ops', handler: ops }),
       ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser', handler: action }),
+      // Local pages for the dedicated browser window (served by the same
+      // loopback server; the window navigates to these absolute paths).
+      ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: html(BROWSER_SHELL_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-mask', handler: html(BROWSER_MASK_HTML) }),
     ]
     return () => {
       for (const dispose of disposers) dispose()
@@ -311,4 +319,4 @@ function tabOf(runtime: BrowserRuntime, body: Record<string, unknown>): number {
 }
 
 export type { BrowserRuntime } from './runtime.ts'
-export type { BrowserOpLogEntry, BrowserPanelState, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions } from './types.ts'
+export type { BrowserOpLogEntry, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions, BrowserWindowState } from './types.ts'

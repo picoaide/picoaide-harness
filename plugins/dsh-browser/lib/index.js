@@ -799,93 +799,153 @@ defineMethod("transform", [
 * isolated from the main application's cookies/storage.
 */
 const BROWSER_PARTITION = "persist:agent-browser";
+/** Default browser window size (DIP). */
+const BROWSER_WINDOW_DEFAULT = {
+	width: 1100,
+	height: 780
+};
 /** Lazy real adapter over Electron (imported only on first browser start). */
 function createRealElectronAdapter() {
 	const { WebContentsView, BrowserWindow, dialog } = __require("electron");
-	const mainWindowGone = /* @__PURE__ */ new Set();
-	const watched = /* @__PURE__ */ new Set();
-	const watchMainWindow = (win) => {
-		if (watched.has(win)) return;
-		watched.add(win);
-		win.on("closed", () => {
-			for (const listener of [...mainWindowGone]) try {
-				listener();
-			} catch {}
-		});
-	};
-	const resolveMainWindow = () => {
-		const main = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed());
-		if (main !== void 0) watchMainWindow(main);
-		return main;
+	const createView = () => {
+		const view = new WebContentsView({ webPreferences: {
+			partition: BROWSER_PARTITION,
+			contextIsolation: true,
+			nodeIntegration: false,
+			sandbox: true
+		} });
+		const wc = view.webContents;
+		wc.setWindowOpenHandler(() => ({ action: "deny" }));
+		return {
+			partition: BROWSER_PARTITION,
+			attach(win, bounds) {
+				win.contentView.addChildView(view);
+				view.setBounds(bounds);
+			},
+			setBounds(bounds) {
+				view.setBounds(bounds);
+			},
+			setVisible(visible) {
+				view.setVisible(visible);
+			},
+			detach() {},
+			webContents: {
+				cdp: wc.debugger,
+				loadURL: (url) => wc.loadURL(url),
+				goBack: () => wc.goBack(),
+				goForward: () => wc.goForward(),
+				reload: () => wc.reload(),
+				capturePage: (rect) => wc.capturePage(rect),
+				getURL: () => wc.getURL(),
+				getTitle: () => wc.getTitle(),
+				isLoading: () => wc.isLoading(),
+				on: (event, listener) => {
+					wc.on(event, listener);
+				},
+				removeListener: (event, listener) => {
+					wc.removeListener(event, listener);
+				},
+				session: wc.session,
+				setWindowOpenHandler: (handler) => {
+					wc.setWindowOpenHandler((details) => handler(details));
+				},
+				close: () => wc.close(),
+				isDestroyed: () => wc.isDestroyed()
+			},
+			destroy() {
+				if (!view.webContents.isDestroyed()) view.webContents.close();
+			}
+		};
 	};
 	return {
-		createView() {
-			const view = new WebContentsView({ webPreferences: {
-				partition: BROWSER_PARTITION,
-				contextIsolation: true,
-				nodeIntegration: false,
-				sandbox: true
-			} });
-			const wc = view.webContents;
-			wc.setWindowOpenHandler(() => ({ action: "deny" }));
+		createView,
+		createMaskView: createView,
+		createBrowserWindow() {
+			let allowClose = false;
+			const win = new BrowserWindow({
+				width: BROWSER_WINDOW_DEFAULT.width,
+				height: BROWSER_WINDOW_DEFAULT.height,
+				title: "PicoAide 浏览器",
+				show: true,
+				backgroundColor: "#f2f3f5",
+				webPreferences: {
+					contextIsolation: true,
+					nodeIntegration: false,
+					sandbox: true
+				}
+			});
+			win.setMenuBarVisibility(false);
+			win.on("close", (event) => {
+				if (!allowClose) {
+					event.preventDefault();
+					win.hide();
+				}
+			});
+			const resizeListeners = /* @__PURE__ */ new Set();
+			win.on("resize", () => {
+				for (const listener of resizeListeners) try {
+					listener();
+				} catch {}
+			});
+			const closedListeners = /* @__PURE__ */ new Set();
+			win.on("closed", () => {
+				for (const listener of closedListeners) try {
+					listener();
+				} catch {}
+			});
 			return {
-				partition: BROWSER_PARTITION,
-				attach(win, bounds) {
-					win.contentView.addChildView(view);
-					view.setBounds(bounds);
+				loadURL: (url) => win.loadURL(url),
+				show: () => {
+					if (win.isDestroyed()) return;
+					win.show();
+					win.focus();
 				},
-				setBounds(bounds) {
-					view.setBounds(bounds);
+				hide: () => {
+					if (win.isDestroyed()) return;
+					win.hide();
 				},
-				setVisible(visible) {
-					view.setVisible(visible);
+				focus: () => {
+					if (win.isDestroyed()) return;
+					win.focus();
 				},
-				detach() {
-					const win = resolveMainWindow();
-					if (win !== void 0 && !win.isDestroyed()) win.contentView.removeChildView(view);
+				isVisible: () => !win.isDestroyed() && win.isVisible(),
+				isDestroyed: () => win.isDestroyed(),
+				close: () => {
+					if (win.isDestroyed()) return;
+					allowClose = true;
+					win.close();
 				},
-				webContents: {
-					cdp: wc.debugger,
-					loadURL: (url) => wc.loadURL(url),
-					goBack: () => wc.goBack(),
-					goForward: () => wc.goForward(),
-					reload: () => wc.reload(),
-					capturePage: (rect) => wc.capturePage(rect),
-					getURL: () => wc.getURL(),
-					getTitle: () => wc.getTitle(),
-					isLoading: () => wc.isLoading(),
-					on: (event, listener) => {
-						wc.on(event, listener);
-					},
-					removeListener: (event, listener) => {
-						wc.removeListener(event, listener);
-					},
-					session: wc.session,
-					setWindowOpenHandler: (handler) => {
-						wc.setWindowOpenHandler((details) => handler(details));
-					},
-					close: () => wc.close(),
-					isDestroyed: () => wc.isDestroyed()
+				setTitle: (title) => {
+					if (win.isDestroyed()) return;
+					win.setTitle(title);
 				},
-				destroy() {
-					if (!view.webContents.isDestroyed()) view.webContents.close();
+				getContentSize: () => {
+					const [width, height] = win.getContentSize();
+					return {
+						width: width ?? 0,
+						height: height ?? 0
+					};
+				},
+				contentView: win.contentView,
+				onResize(listener) {
+					resizeListeners.add(listener);
+					return () => {
+						resizeListeners.delete(listener);
+					};
+				},
+				onClosed(listener) {
+					closedListeners.add(listener);
+					return () => {
+						closedListeners.delete(listener);
+					};
 				}
 			};
-		},
-		getMainWindow() {
-			return resolveMainWindow();
 		},
 		showSaveDialog: async (options) => {
 			const result = await dialog.showSaveDialog(options);
 			return {
 				canceled: result.canceled,
 				filePath: result.filePath
-			};
-		},
-		onMainWindowGone(listener) {
-			mainWindowGone.add(listener);
-			return () => {
-				mainWindowGone.delete(listener);
 			};
 		}
 	};
@@ -1270,18 +1330,31 @@ const OP_LOG_LIMIT = 200;
 var ControlMutex = class {
 	tail = Promise.resolve();
 	taken = false;
-	/** Run `work` while holding the browser control; rejects under takeover. */
-	async run(work) {
-		if (this.taken) throw new Error("browser: the user is currently controlling the browser; ask them to release it");
+	/** Resolved when the current takeover ends (recreated on each take). */
+	released = Promise.resolve();
+	releaseTaken;
+	/**
+	* Run `work` while holding the browser control. When the user takes over,
+	* the call PAUSES (the whole agent loop blocks on this promise) until the
+	* takeover is released; `signal` (the agent step's abort signal) exits the
+	* wait when the agent is stopped or a tool deadline fires.
+	*/
+	async run(work, signal) {
 		const prev = this.tail;
 		let release;
 		this.tail = new Promise((resolve) => {
 			release = resolve;
 		});
 		await prev;
-		if (this.taken) {
-			release();
-			throw new Error("browser: the user took over the browser");
+		while (this.taken) {
+			if (signal !== void 0 && signal.aborted) {
+				release();
+				throw new Error("browser: agent was stopped while the user controlled the browser");
+			}
+			await Promise.race([this.released, signal === void 0 ? new Promise(() => {}) : new Promise((resolveAbort) => {
+				if (signal.aborted) return resolveAbort();
+				signal.addEventListener("abort", () => resolveAbort(), { once: true });
+			})]);
 		}
 		try {
 			return await work();
@@ -1292,9 +1365,14 @@ var ControlMutex = class {
 	/** User takeover: block agent operations until released. */
 	take() {
 		this.taken = true;
+		this.released = new Promise((resolve) => {
+			this.releaseTaken = resolve;
+		});
 	}
 	release() {
+		if (!this.taken) return;
 		this.taken = false;
+		this.releaseTaken();
 	}
 	get controlled() {
 		return this.taken;
@@ -1311,13 +1389,17 @@ var BrowserRuntime = class {
 	nextTabId = 1;
 	visibleTabId;
 	mutex = new ControlMutex();
+	/** Loopback origin serving the shell/mask pages (set by the plugin). */
+	shellOrigin;
 	ops = [];
 	opSeq = 0;
-	panel = { visible: false };
+	window = null;
+	mask = null;
 	guard;
 	permissionsDisposers = [];
 	downloadDisposers = [];
-	windowGoneDisposer;
+	windowResizeDisposer = null;
+	windowClosedDisposer = null;
 	disposed = false;
 	constructor(adapter, options = {}, askApproval, credentials) {
 		this.adapter = adapter;
@@ -1333,15 +1415,14 @@ var BrowserRuntime = class {
 			screenshotQuality: options.screenshotQuality ?? 70
 		};
 		this.guard = new BrowserGuard(adapter, askApproval);
-		this.windowGoneDisposer = adapter.onMainWindowGone(() => {
-			for (const tab of this.tabs.values()) tab.view.detach();
-			this.panel = { visible: false };
-		});
 	}
 	options;
-	/** Current panel visibility + placement (set by the client panel). */
-	get panelState() {
-		return this.panel;
+	/** Current browser window state (created + visible). */
+	get windowState() {
+		return {
+			created: this.window !== null && !this.window.isDestroyed(),
+			visible: this.window !== null && !this.window.isDestroyed() && this.window.isVisible()
+		};
 	}
 	/** Recent audit op log (newest first). */
 	get opLog() {
@@ -1372,18 +1453,86 @@ var BrowserRuntime = class {
 	async requireApproval(request) {
 		return await this.guard.requireApproval(request);
 	}
-	/** Update the panel placement and re-layout the visible view. */
-	setPanel(state) {
-		this.panel = state;
-		if (!state.visible) {
-			for (const tab of this.tabs.values()) tab.view.setVisible(false);
-			return;
+	/** Content-area bounds below the shell toolbar (DIP). */
+	contentBounds() {
+		const size = this.window?.getContentSize() ?? {
+			width: 0,
+			height: 0
+		};
+		return {
+			x: 0,
+			y: 84,
+			width: Math.max(0, size.width),
+			height: Math.max(0, size.height - 84)
+		};
+	}
+	/** Re-layout every tab view + the mask over the window content area. */
+	relayout() {
+		const bounds = this.contentBounds();
+		for (const tab of this.tabs.values()) {
+			tab.view.setBounds(bounds);
+			tab.view.setVisible(tab.id === this.visibleTabId);
 		}
-		const visible = this.visibleTab();
-		if (visible !== void 0 && state.bounds !== void 0) {
-			visible.view.setVisible(true);
-			visible.view.setBounds(state.bounds);
+		if (this.mask !== null) {
+			this.mask.setBounds(bounds);
+			this.mask.setVisible(!this.mutex.controlled);
 		}
+	}
+	/**
+	* Ensure the dedicated browser window exists and is shown. Creating the
+	* window also loads the control-shell page and mounts the AI-control mask.
+	* @param origin - the loopback webServer origin (e.g. `http://127.0.0.1:33407`)
+	*   the shell/mask pages are served from; without it the window cannot load
+	*   them (Electron needs absolute URLs).
+	*/
+	async ensureWindow(origin) {
+		if (this.window !== null && !this.window.isDestroyed()) {
+			this.window.show();
+			return this.window;
+		}
+		const win = this.adapter.createBrowserWindow();
+		this.window = win;
+		const mask = this.adapter.createMaskView();
+		this.mask = mask;
+		mask.attach(win, this.contentBounds());
+		mask.setVisible(true);
+		if (origin !== void 0) {
+			mask.webContents.loadURL(`${origin}/browser-mask`);
+			win.loadURL(`${origin}/browser-shell`);
+		}
+		this.windowResizeDisposer = win.onResize(() => {
+			this.relayout();
+		});
+		this.windowClosedDisposer = win.onClosed(() => {
+			for (const tab of this.tabs.values()) try {
+				tab.cdp.detach();
+				tab.view.destroy();
+			} catch {}
+			this.tabs.clear();
+			this.visibleTabId = void 0;
+			this.mask = null;
+			this.windowResizeDisposer?.();
+			this.windowClosedDisposer?.();
+			this.windowResizeDisposer = null;
+			this.windowClosedDisposer = null;
+			this.window = null;
+		});
+		return win;
+	}
+	/** Set the loopback origin the shell/mask pages are served from. */
+	setShellOrigin(origin) {
+		this.shellOrigin = origin;
+	}
+	/** Show the browser window (wake from a user close; the sidebar trigger). */
+	showWindow() {
+		if (this.window === null || this.window.isDestroyed()) return;
+		this.window.show();
+		this.relayout();
+	}
+	/** Hide the browser window without destroying tabs (user close semantics). */
+	hideWindow() {
+		if (this.window === null || this.window.isDestroyed()) return;
+		this.window.hide();
 	}
 	record(tool, tab, summary, failed = false) {
 		this.ops.push({
@@ -1395,9 +1544,6 @@ var BrowserRuntime = class {
 			failed
 		});
 		if (this.ops.length > OP_LOG_LIMIT) this.ops.shift();
-	}
-	visibleTab() {
-		return this.visibleTabId === void 0 ? void 0 : this.tabs.get(this.visibleTabId);
 	}
 	/** Resolve a tab by id; throws with a model-facing message. */
 	tab(id) {
@@ -1431,21 +1577,12 @@ var BrowserRuntime = class {
 			loading: false
 		};
 		this.tabs.set(id, tab);
-		const win = this.adapter.getMainWindow();
-		if (win === void 0) throw new Error("browser: no main window (the browser needs the desktop shell)");
-		if (this.panel.visible && this.panel.bounds !== void 0) {
-			view.attach(win, this.panel.bounds);
-			view.setVisible(true);
-		} else {
-			view.attach(win, {
-				x: 0,
-				y: 0,
-				width: 0,
-				height: 0
-			});
-			view.setVisible(false);
-		}
+		const win = await this.ensureWindow(this.shellOrigin);
+		const bounds = this.contentBounds();
+		view.attach(win, bounds);
+		view.setVisible(true);
 		this.visibleTabId = id;
+		this.relayout();
 		view.webContents.on("did-start-loading", () => {
 			tab.loading = true;
 		});
@@ -1475,14 +1612,16 @@ var BrowserRuntime = class {
 			visible: tab.id === this.visibleTabId
 		};
 	}
-	/** Run one agent operation under the control mutex. */
-	async withControl(_tool, tabId, work) {
+	/** Run one agent operation under the control mutex. Passes the agent's
+	* abort signal so a takeover pauses the loop until release (or the agent
+	* stops). */
+	async withControl(_tool, tabId, work, signal) {
 		return await this.mutex.run(async () => {
 			const tab = this.tab(tabId);
 			const result = await work(tab);
 			this.updateTabState(tab);
 			return result;
-		});
+		}, signal);
 	}
 	/**
 	* Navigate the tab to `url`, waiting per `waitUntil`.
@@ -1496,19 +1635,21 @@ var BrowserRuntime = class {
 	* strictly after dom-ready) and only `networkidle` needs an extra quiet
 	* tick.
 	*/
-	async navigate(id, url, waitUntil = "domcontentloaded") {
-		if (!this.guard.allowNavigation(url)) throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`);
-		const tab = this.tab(id);
-		const wc = tab.view.webContents;
-		const started = Date.now();
-		if (await Promise.race([wc.loadURL(url).then(() => "loaded", () => "failed"), sleep(this.options.loadTimeoutMs).then(() => "pending")]) === "failed") {
-			if (!wc.isLoading() && wc.getURL() === "") throw new Error("browser: navigation failed to load");
-		}
-		if (waitUntil === "networkidle") {
-			const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started));
-			await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget));
-		}
-		this.updateTabState(tab);
+	async navigate(id, url, waitUntil = "domcontentloaded", signal) {
+		await this.mutex.run(async () => {
+			if (!this.guard.allowNavigation(url)) throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`);
+			const tab = this.tab(id);
+			const wc = tab.view.webContents;
+			const started = Date.now();
+			if (await Promise.race([wc.loadURL(url).then(() => "loaded", () => "failed"), sleep(this.options.loadTimeoutMs).then(() => "pending")]) === "failed") {
+				if (!wc.isLoading() && wc.getURL() === "") throw new Error("browser: navigation failed to load");
+			}
+			if (waitUntil === "networkidle") {
+				const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started));
+				await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget));
+			}
+			this.updateTabState(tab);
+		}, signal);
 	}
 	/** Cooperative wait for the page load milestone; never rejects on timeout. */
 	waitForLoad(wc, waitUntil) {
@@ -1544,16 +1685,16 @@ var BrowserRuntime = class {
 		};
 	}
 	/** Extract the interactable-element snapshot of one tab. */
-	async snapshot(id) {
-		return await this.withControl("browser_get_snapshot", id, (tab) => extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit));
+	async snapshot(id, signal) {
+		return await this.withControl("browser_get_snapshot", id, (tab) => extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit), signal);
 	}
 	/** Extract page text (optionally scoped by selector). */
-	async text(id, selector) {
-		return await this.withControl("browser_get_text", id, (tab) => extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit));
+	async text(id, selector, signal) {
+		return await this.withControl("browser_get_text", id, (tab) => extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit), signal);
 	}
 	/** Capture a JPEG screenshot of one tab. */
-	async screenshot(id) {
-		return await this.withControl("browser_screenshot", id, (tab) => captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality));
+	async screenshot(id, signal) {
+		return await this.withControl("browser_screenshot", id, (tab) => captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal);
 	}
 	/** Navigate history. */
 	async goBack(id) {
@@ -1588,7 +1729,7 @@ var BrowserRuntime = class {
 		const tab = this.tab(id);
 		for (const other of this.tabs.values()) other.view.setVisible(other.id === id);
 		this.visibleTabId = id;
-		if (this.panel.visible && this.panel.bounds !== void 0) tab.view.setBounds(this.panel.bounds);
+		tab.view.setBounds(this.contentBounds());
 		this.record("browser_switch_tab", id, `switch to tab ${id}`);
 	}
 	/** Close a tab and destroy its view/CDP. */
@@ -1605,7 +1746,12 @@ var BrowserRuntime = class {
 		}
 		this.record("browser_close_tab", id, `close tab ${id}`);
 	}
-	/** Close the whole browser (all tabs). */
+	/**
+	* Close the whole browser (all tabs). The dedicated window stays alive
+	* (hidden) so the user can wake it from the sidebar — only plugin teardown
+	* truly destroys it. Tabs are dropped; the next `browser_open` recreates
+	* them.
+	*/
 	async closeAll() {
 		for (const id of [...this.tabs.keys()]) {
 			const tab = this.tabs.get(id);
@@ -1621,11 +1767,19 @@ var BrowserRuntime = class {
 		this.permissionsDisposers.length = 0;
 		this.downloadDisposers.length = 0;
 		this.record("browser_close", 0, "close browser");
+		this.hideWindow();
 	}
-	/** User takeover / release. */
+	/** User takeover / release: hides/shows the AI-control mask and pauses /
+	* resumes the agent loop (in-flight tool calls wait on the mutex). */
 	setUserControl(active) {
-		if (active) this.mutex.take();
-		else this.mutex.release();
+		if (active) {
+			this.mutex.take();
+			this.record("browser_takeover", 0, "user took over the browser");
+		} else {
+			this.mutex.release();
+			this.record("browser_release", 0, "user released browser control");
+		}
+		if (this.mask !== null) this.mask.setVisible(!active);
 	}
 	/** Clear the persistent partition data (cookies, storage, cache). */
 	async clearData() {
@@ -1640,7 +1794,7 @@ var BrowserRuntime = class {
 		this.record("browser_clear_data", 0, "clear browsing data");
 	}
 	/** Evaluate page JS (eval-enabled deployments only). */
-	async eval(id, expression) {
+	async eval(id, expression, signal) {
 		if (!this.options.evalEnabled) throw new Error("browser: browser_eval is disabled in this deployment");
 		if (typeof expression !== "string" || expression.length === 0 || expression.length > 64 * 1024) throw new Error("browser: eval expression must be a non-empty string ≤ 64KB");
 		return await this.withControl("browser_eval", id, async (tab) => {
@@ -1653,10 +1807,10 @@ var BrowserRuntime = class {
 			if (result.exceptionDetails !== void 0) throw new Error("browser: page script failed");
 			const value = result.result?.value;
 			return (typeof value === "string" ? value : safeJson(value)).slice(0, this.options.textLimit);
-		});
+		}, signal);
 	}
 	/** Locate an element and return its viewport-center point for CDP input. */
-	async locateElement(id, selector) {
+	async locateElement(id, selector, signal) {
 		return await this.withControl("browser_locate", id, async (tab) => {
 			const value = (await tab.cdp.send("Runtime.evaluate", {
 				expression: `
@@ -1680,10 +1834,10 @@ var BrowserRuntime = class {
 				x: value.x,
 				y: value.y
 			};
-		});
+		}, signal);
 	}
 	/** Dispatch a left-click at a viewport point. */
-	async clickAt(id, point) {
+	async clickAt(id, point, signal) {
 		await this.withControl("browser_click", id, async (tab) => {
 			await tab.cdp.send("Input.dispatchMouseEvent", {
 				type: "mousePressed",
@@ -1699,10 +1853,10 @@ var BrowserRuntime = class {
 				button: "left",
 				clickCount: 1
 			});
-		});
+		}, signal);
 	}
 	/** Focus an element and insert text (Unicode-safe); clears first when requested. */
-	async typeInto(id, selector, text, clear = true) {
+	async typeInto(id, selector, text, clear = true, signal) {
 		await this.withControl("browser_type", id, async (tab) => {
 			await tab.cdp.send("Runtime.evaluate", {
 				expression: `
@@ -1717,10 +1871,10 @@ var BrowserRuntime = class {
 				returnByValue: true
 			});
 			await tab.cdp.send("Input.insertText", { text });
-		});
+		}, signal);
 	}
 	/** Dispatch one keyboard key. */
-	async pressKey(id, key) {
+	async pressKey(id, key, signal) {
 		await this.withControl("browser_press", id, async (tab) => {
 			const code = KEY_CODES[key] ?? key;
 			const vk = KEY_VK[key] ?? 0;
@@ -1738,10 +1892,10 @@ var BrowserRuntime = class {
 				windowsVirtualKeyCode: vk,
 				nativeVirtualKeyCode: vk
 			});
-		});
+		}, signal);
 	}
 	/** Set a select's value and fire change/input. */
-	async selectOption(id, selector, value) {
+	async selectOption(id, selector, value, signal) {
 		await this.withControl("browser_select", id, async (tab) => {
 			const result = await tab.cdp.send("Runtime.evaluate", {
 				expression: `
@@ -1758,7 +1912,7 @@ var BrowserRuntime = class {
 				returnByValue: true
 			});
 			if (result.result?.value !== void 0 && result.result.value.error !== void 0) throw new Error(`browser: select failed — ${result.result.value.error}`);
-		});
+		}, signal);
 	}
 	/**
 	* Fill the login form with stored connector credentials. The resolver looks
@@ -1767,7 +1921,7 @@ var BrowserRuntime = class {
 	* password. Callers must route this through approval (credentials are
 	* sensitive).
 	*/
-	async fillCredentials(id, connectorId) {
+	async fillCredentials(id, connectorId, signal) {
 		if (this.credentials === void 0) throw new Error("browser: credential injection is not available in this deployment");
 		const credential = await this.credentials(connectorId);
 		if (credential === null) throw new Error(`browser: no stored credentials for connector ${JSON.stringify(connectorId)}`);
@@ -1803,24 +1957,33 @@ var BrowserRuntime = class {
 				username: value.username === true,
 				password: value.password === true
 			};
-		});
+		}, signal);
 	}
 	/** Scroll the page by a delta (or the element into view). */
-	async scroll(id, deltaY, selector) {
+	async scroll(id, deltaY, selector, signal) {
 		await this.withControl("browser_scroll", id, async (tab) => {
 			const expression = selector === void 0 || selector === "" ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'` : `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`;
 			await tab.cdp.send("Runtime.evaluate", {
 				expression,
 				returnByValue: true
 			});
-		});
+		}, signal);
 	}
-	/** Dispose everything (plugin teardown). */
+	/** Dispose everything (plugin teardown): destroy the window for real. */
 	dispose() {
 		if (this.disposed) return;
 		this.disposed = true;
-		this.windowGoneDisposer();
-		this.closeAll();
+		for (const tab of this.tabs.values()) try {
+			tab.cdp.detach();
+			tab.view.destroy();
+		} catch {}
+		this.tabs.clear();
+		this.visibleTabId = void 0;
+		this.windowResizeDisposer?.();
+		this.windowClosedDisposer?.();
+		if (this.window !== null && !this.window.isDestroyed()) this.window.close();
+		this.window = null;
+		this.mask = null;
 	}
 };
 /** Extra quiet tick approximating network idle for `networkidle` waits. */
@@ -1915,13 +2078,13 @@ const BROWSER_GUIDANCE = `You have an embedded browser. Drive it like a human us
 9. Do not navigate away from a page you were asked to inspect without saying so first.
 10. Close tabs you no longer need with browser_close_tab.`;
 /** Resolve `target` (snapshot number or CSS selector) to a selector. */
-async function resolveTarget(runtime, tabId, target) {
+async function resolveTarget(runtime, tabId, target, signal) {
 	if (typeof target === "string") {
 		if (target.trim() === "") throw new Error("target selector must not be empty");
 		return target.trim();
 	}
 	if (!Number.isInteger(target) || target < 1) throw new Error("target number must be a positive integer");
-	const snapshot = await runtime.snapshot(tabId);
+	const snapshot = await runtime.snapshot(tabId, signal);
 	const entry = snapshot.find((item) => item.index === target);
 	if (entry === void 0) throw new Error(`browser: no snapshot element ${target} — call browser_get_snapshot first (${snapshot.length} elements)`);
 	return entry.selector;
@@ -2075,7 +2238,7 @@ function applyBrowserTools(ctx, runtime) {
 			const { tab, url, waitUntil } = args;
 			if (typeof url !== "string" || url.trim() === "") throw new Error("url must be a non-empty string");
 			const tabId = await tabOf(tab);
-			await runtime.navigate(tabId, url.trim(), waitUntil ?? "domcontentloaded");
+			await runtime.navigate(tabId, url.trim(), waitUntil ?? "domcontentloaded", exec.signal);
 			exec.signal.throwIfAborted();
 			const state = runtime.tabState(tabId);
 			return {
@@ -2819,6 +2982,168 @@ function formatEval(value) {
 	return v.result === void 0 ? "(no result)" : String(v.result);
 }
 //#endregion
+//#region src/shell-pages.ts
+/**
+* Local pages for the dedicated browser window: the control shell (toolbar +
+* tab strip) and the AI-control mask (translucent overlay with the takeover
+* button). Both are plain HTML served by the plugin's own loopback webServer
+* routes and drive the browser through the same fenced API as the client UI.
+*
+* The mask is a full-content-area overlay shown while the agent controls the
+* browser: it blocks direct interaction with the page and offers the single
+* 「接管」 action. Taking over hides the mask and lets the user drive the
+* page; releasing (from the shell toolbar) restores the mask and the agent
+* resumes.
+* @module @picoaide/dsh-browser
+*/
+/** The control-shell page: toolbar with tabs, address bar, and control
+* buttons. Polls /api/pico/browser/state to stay in sync with the runtime. */
+const BROWSER_SHELL_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PicoAide 浏览器</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px system-ui, sans-serif; background: #f2f3f5; color: #1a1d24; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #181a1f; color: #e6e6e6; }
+    input { background: #23252b; color: #e6e6e6; border-color: #3a3d45; }
+    .tab { background: #23252b; }
+    .tab.active { background: #2e3138; }
+  }
+  #bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.25); }
+  #tabs { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
+  .tab { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; max-width: 140px; overflow: hidden; background: #e6e7ea; }
+  .tab.active { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+  .tab .x { margin-left: 4px; opacity: .6; cursor: pointer; padding: 0 2px; }
+  .tab .x:hover { opacity: 1; }
+  button { padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; cursor: pointer; font: inherit; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  button.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+  #hint { font-size: 12px; color: #6b7280; margin-left: auto; }
+  #notice { padding: 4px 10px; font-size: 12px; background: rgba(220,38,38,.12); color: #dc2626; display: none; }
+  #notice.show { display: block; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <div id="tabs"></div>
+    <button id="newtab" title="新建标签页">+</button>
+    <button id="back" title="后退">←</button>
+    <button id="forward" title="前进">→</button>
+    <button id="reload" title="刷新">⟳</button>
+    <span id="hint"></span>
+    <button id="takeover" title="接管/释放浏览器控制">接管</button>
+    <button id="clear" title="清除浏览数据并关闭全部标签">清除</button>
+    <button id="hide" title="隐藏窗口（不关闭）">隐藏</button>
+  </div>
+  <div id="notice">用户接管中：AI 浏览器操作已暂停，释放后继续。</div>
+<script>
+  const $ = (id) => document.getElementById(id)
+  let state = { tabs: [], controlled: false }
+  const post = (action, body) =>
+    fetch('/api/pico/browser/' + action, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) })
+      .then((r) => r.json()).catch(() => ({ ok: false }))
+  const render = () => {
+    const tabs = $('tabs')
+    tabs.textContent = ''
+    for (const tab of state.tabs) {
+      const el = document.createElement('div')
+      el.className = 'tab' + (tab.visible ? ' active' : '')
+      el.title = tab.url
+      el.textContent = (tab.title || tab.url || ('标签 ' + tab.id)).slice(0, 24) + (tab.loading ? '…' : '')
+      el.addEventListener('click', () => post('switch-tab', { tab: tab.id }))
+      const x = document.createElement('span')
+      x.className = 'x'
+      x.textContent = '×'
+      x.addEventListener('click', (e) => { e.stopPropagation(); post('close-tab', { tab: tab.id }) })
+      el.appendChild(x)
+      tabs.appendChild(el)
+    }
+    const visible = state.tabs.find((t) => t.visible)
+    $('back').disabled = !visible
+    $('forward').disabled = !visible
+    $('reload').disabled = !visible
+    $('hint').textContent = visible ? (visible.title || visible.url || '') : ''
+    const to = $('takeover')
+    if (state.controlled) {
+      to.textContent = '释放接管'
+      to.className = 'danger'
+      $('notice').classList.add('show')
+    } else {
+      to.textContent = '接管'
+      to.className = ''
+      $('notice').classList.remove('show')
+    }
+  }
+  const poll = () =>
+    fetch('/api/pico/browser/state').then((r) => r.json()).then((next) => {
+      state = next
+      render()
+    }).catch(() => {})
+  $('newtab').addEventListener('click', () => post('open'))
+  $('back').addEventListener('click', () => post('back'))
+  $('forward').addEventListener('click', () => post('forward'))
+  $('reload').addEventListener('click', () => post('reload'))
+  $('takeover').addEventListener('click', () => post('takeover', { active: !state.controlled }))
+  $('clear').addEventListener('click', () => post('clear-data').then(() => post('close-all')))
+  $('hide').addEventListener('click', () => post('hide'))
+  poll()
+  setInterval(poll, 1000)
+<\/script>
+</body>
+</html>`;
+/** The AI-control mask: translucent overlay + the takeover button. */
+const BROWSER_MASK_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(128, 128, 128, 0.28);
+    font: 14px system-ui, sans-serif; color: #3a3f4a;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: rgba(0, 0, 0, 0.38); color: #cfd3da; }
+  }
+  #card {
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: 26px 34px; border-radius: 16px;
+    background: rgba(255, 255, 255, 0.85); box-shadow: 0 8px 30px rgba(0,0,0,.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    #card { background: rgba(30, 32, 38, 0.88); }
+  }
+  #hint { margin: 0; font-weight: 500; }
+  button {
+    padding: 9px 22px; border-radius: 8px; border: none;
+    background: #2563eb; color: #fff; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #1d4ed8; }
+</style>
+</head>
+<body>
+  <div id="card">
+    <p id="hint">AI 正在控制浏览器</p>
+    <button id="take">接管控制</button>
+  </div>
+<script>
+  document.getElementById('take').addEventListener('click', () => {
+    fetch('/api/pico/browser/takeover', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ active: true }),
+    })
+  })
+<\/script>
+</body>
+</html>`;
+//#endregion
 //#region src/index.ts
 /** Cordis plugin name used by loader diagnostics. */
 const name = "pico-browser";
@@ -2907,6 +3232,7 @@ function apply(ctx, config = {}) {
 		}
 	})();
 	const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver);
+	runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`);
 	applyBrowserTools(ctx, runtime);
 	ctx.effect(() => {
 		const guard = (req, res) => {
@@ -2926,21 +3252,14 @@ function apply(ctx, config = {}) {
 			const raw = await readJson(req);
 			const body = raw !== null && typeof raw === "object" ? raw : {};
 			switch (action) {
-				case "panel": {
-					const visible = body.visible === true;
-					const b = body.bounds;
-					runtime.setPanel({
-						visible,
-						...visible && b !== null && typeof b === "object" ? { bounds: {
-							x: numberOr(b.x, 0),
-							y: numberOr(b.y, 0),
-							width: Math.max(0, numberOr(b.width, 0)),
-							height: Math.max(0, numberOr(b.height, 0))
-						} } : {}
-					});
+				case "show":
+					runtime.showWindow();
 					json(res, 200, { ok: true });
 					return;
-				}
+				case "hide":
+					runtime.hideWindow();
+					json(res, 200, { ok: true });
+					return;
 				case "open": {
 					const url = typeof body.url === "string" ? body.url : void 0;
 					json(res, 200, { tab: await runtime.open(url) });
@@ -3000,7 +3319,7 @@ function apply(ctx, config = {}) {
 			if (!guard(req, res)) return;
 			json(res, 200, {
 				tabs: runtime.listTabs(),
-				panel: runtime.panelState,
+				window: runtime.windowState,
 				controlled: runtime.controlled
 			});
 		};
@@ -3008,6 +3327,13 @@ function apply(ctx, config = {}) {
 			if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
 			if (!guard(req, res)) return;
 			json(res, 200, { ops: runtime.opLog });
+		};
+		const html = (content) => (_req, res) => {
+			res.writeHead(200, {
+				"Content-Type": "text/html; charset=utf-8",
+				"Cache-Control": "no-store"
+			});
+			res.end(content);
 		};
 		const disposers = [
 			ctx.webServer.register({
@@ -3024,6 +3350,16 @@ function apply(ctx, config = {}) {
 				kind: "prefix",
 				path: "/api/pico/browser",
 				handler: action
+			}),
+			ctx.webServer.register({
+				kind: "exact",
+				path: "/browser-shell",
+				handler: html(BROWSER_SHELL_HTML)
+			}),
+			ctx.webServer.register({
+				kind: "exact",
+				path: "/browser-mask",
+				handler: html(BROWSER_MASK_HTML)
 			})
 		];
 		return () => {
