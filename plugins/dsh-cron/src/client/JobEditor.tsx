@@ -88,14 +88,18 @@ export function JobEditor({ controller, job, workspaces, onClose }: {
       return
     }
     if (name.trim() === '') {
-      setError(t('job.name'))
+      setError(t('job.nameRequired'))
       return
     }
     const action = actionKind === 'task'
       ? { kind: 'task' as const, taskId: taskId.trim() }
       : { kind: 'prompt' as const, sessionId: sessionId.trim(), text }
     if (!isCronJobAction(action)) {
-      setError(actionKind === 'task' ? t('job.taskId') : t('job.sessionId'))
+      // Distinguish the two prompt-mode fields so the error names the
+      // missing input (P2-3): empty session ID vs empty message text.
+      if (actionKind === 'task') setError(t('job.taskIdRequired'))
+      else if (sessionId.trim() === '') setError(t('job.sessionIdRequired'))
+      else setError(t('job.promptTextRequired'))
       return
     }
     if (job === undefined) {

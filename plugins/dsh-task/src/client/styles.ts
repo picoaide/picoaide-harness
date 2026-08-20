@@ -11,6 +11,10 @@ export const styles: Record<string, CSSProperties> = {
     flexDirection: 'column',
     height: '100%',
     minWidth: 640,
+    // Positioning ancestor for the absolutely-positioned detail panel:
+    // without this the panel anchored to the window frame instead of the
+    // board container (P2-5).
+    position: 'relative',
     fontSize: 13,
     color: 'var(--dsw-alias-label-primary)',
     background: 'transparent',

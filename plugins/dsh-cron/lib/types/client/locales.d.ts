@@ -30,11 +30,18 @@ export declare const zh: {
     readonly 'job.workspaceCurrent': "当前项目（默认）";
     readonly 'job.taskId': "任务";
     readonly 'job.taskSelect': "选择任务…";
+    readonly 'job.nameRequired': "请填写任务名称";
+    readonly 'job.taskIdRequired': "请选择要执行的任务";
+    readonly 'job.sessionIdRequired': "请填写会话 ID";
+    readonly 'job.promptTextRequired': "请填写消息内容";
     readonly 'job.sessionId': "会话 ID";
     readonly 'job.promptText': "消息内容";
     readonly 'job.save': "保存";
     readonly 'job.cancel': "取消";
     readonly 'job.history': "触发历史";
+    readonly 'job.deleteConfirm': "确定删除该定时任务吗？";
+    readonly 'job.showHistory': "展开触发历史";
+    readonly 'job.hideHistory': "收起触发历史";
     readonly 'job.execution.succeeded': "成功";
     readonly 'job.execution.failed': "失败";
     readonly 'job.execution.cancelled': "已取消";
