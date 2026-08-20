@@ -69,6 +69,14 @@ export interface BrowserToolOptions {
     maxTabs?: number;
     /** Cooperative tool-call timeout budget ms (default 30000). */
     timeoutMs?: number;
+    /**
+     * Cap on how long one navigation waits for Electron's loadURL promise
+     * (default 20000). loadURL settles on did-finish-load, which pages with
+     * long-lived connections (polls, SSE, analytics) can delay well past the
+     * page being interactive; racing it keeps the tool call from dying on the
+     * cooperative timeout while the page is already usable.
+     */
+    loadTimeoutMs?: number;
     /** Whether `browser_eval` is enabled (default true; enterprise can disable). */
     evalEnabled?: boolean;
     /** Cap on snapshot entries per call (default 200). */
