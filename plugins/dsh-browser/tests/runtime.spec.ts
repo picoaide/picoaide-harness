@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import type {
   ElectronAdapter,
   NativeBounds,
+  NativeBrowserWindow,
   NativeDownloadItem,
   NativeImage,
   NativeSession,
   NativeView,
   NativeWebContents,
-  NativeWindow,
 } from '../src/electron-adapter.ts'
 import type { CdpTransport } from '../src/cdp.ts'
 import { BrowserRuntime } from '../src/runtime.ts'
@@ -86,7 +86,7 @@ class MockView implements NativeView {
   capturePage = vi.fn(async () => new MockImage(1920, 1080))
   setWindowOpenHandler = vi.fn()
 
-  attach(_win: NativeWindow, bounds: NativeBounds): void {
+  attach(_win: NativeBrowserWindow, bounds: NativeBounds): void {
     this.attached = true
     this.bounds = bounds
   }
@@ -130,31 +130,63 @@ class MockView implements NativeView {
   }
 }
 
-function makeAdapter(): { adapter: ElectronAdapter; views: MockView[] } {
+function makeAdapter(): { adapter: ElectronAdapter; views: MockView[]; windows: MockBrowserWindow[] } {
   const views: MockView[] = []
-  const window: NativeWindow = {
-    contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
-    on: vi.fn(),
-    removeListener: vi.fn(),
-    getBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
-  }
+  const windows: MockBrowserWindow[] = []
   const adapter: ElectronAdapter = {
     createView: () => {
       const view = new MockView()
       views.push(view)
       return view
     },
-    getMainWindow: () => window,
+    createMaskView: () => {
+      const view = new MockView()
+      views.push(view)
+      return view
+    },
+    createBrowserWindow: () => {
+      const win = new MockBrowserWindow()
+      windows.push(win)
+      return win
+    },
     showSaveDialog: vi.fn(async () => ({ canceled: true })),
-    onMainWindowGone: () => () => {},
   }
-  return { adapter, views }
+  return { adapter, views, windows }
 }
 
-function runtimeOf(options = {}): { runtime: BrowserRuntime; adapter: ElectronAdapter; views: MockView[] } {
-  const { adapter, views } = makeAdapter()
+class MockBrowserWindow implements NativeBrowserWindow {
+  visible = true
+  destroyed = false
+  title = ''
+  readonly contentView = { addChildView: vi.fn(), removeChildView: vi.fn() }
+  private readonly resizeListeners = new Set<() => void>()
+  private readonly closedListeners = new Set<() => void>()
+  size = { width: 1100, height: 780 }
+  loadURL = vi.fn(async () => {})
+  show = vi.fn(() => { this.visible = true })
+  hide = vi.fn(() => { this.visible = false })
+  focus = vi.fn()
+  isVisible = () => this.visible
+  isDestroyed = () => this.destroyed
+  close = vi.fn(() => { this.destroyed = true; this.visible = false })
+  setTitle = vi.fn((title: string) => { this.title = title })
+  getContentSize = () => this.size
+  onResize(listener: () => void): () => void {
+    this.resizeListeners.add(listener)
+    return () => { this.resizeListeners.delete(listener) }
+  }
+  onClosed(listener: () => void): () => void {
+    this.closedListeners.add(listener)
+    return () => { this.closedListeners.delete(listener) }
+  }
+  emitResize(): void { for (const l of [...this.resizeListeners]) l() }
+  emitClosed(): void { for (const l of [...this.closedListeners]) l() }
+}
+
+function runtimeOf(options = {}): { runtime: BrowserRuntime; adapter: ElectronAdapter; views: MockView[]; windows: MockBrowserWindow[] } {
+  const { adapter, views, windows } = makeAdapter()
   const runtime = new BrowserRuntime(adapter, options)
-  return { runtime, adapter, views }
+  return { runtime, adapter, views, windows }
 }
 
 const snapshotElements = [
@@ -163,29 +195,64 @@ const snapshotElements = [
 ]
 
 describe('BrowserRuntime', () => {
-  it('opens a tab and reports state', async () => {
-    const { runtime, views } = runtimeOf()
+  it('opens a tab in the dedicated window and reports state', async () => {
+    const { runtime, views, windows } = runtimeOf()
     const tab = await runtime.open('https://example.com')
     expect(tab.id).toBe(1)
     expect(tab.url).toBe('https://example.com')
     expect(tab.title).toContain('example.com')
     expect(views[0]?.attached).toBe(true)
-    // The view stays hidden until the panel is shown (the user decides when
-    // to watch; the agent still drives the page and returns screenshots).
-    expect(views[0]?.visible).toBe(false)
+    // The tab view is visible in the dedicated window immediately (the
+    // window itself is the surface; no separate panel to wait for).
+    expect(views[0]?.visible).toBe(true)
+    expect(windows).toHaveLength(1)
+    expect(runtime.windowState.created).toBe(true)
+    expect(runtime.windowState.visible).toBe(true)
     expect(runtime.listTabs()).toHaveLength(1)
     expect(runtime.currentTabId()).toBe(1)
     runtime.dispose()
   })
 
-  it('shows the view once the panel is visible', async () => {
+  it('hides the window without destroying tabs (user close)', async () => {
+    const { runtime, windows } = runtimeOf()
+    await runtime.open('https://example.com')
+    runtime.hideWindow()
+    expect(windows[0]?.isVisible()).toBe(false)
+    // Tabs survive a user close: the window can be woken again.
+    expect(runtime.listTabs()).toHaveLength(1)
+    runtime.showWindow()
+    expect(windows[0]?.isVisible()).toBe(true)
+    runtime.dispose()
+  })
+
+  it('shows the AI-control mask while the agent drives; hides it on takeover', async () => {
     const { runtime, views } = runtimeOf()
-    runtime.setPanel({ visible: true, bounds: { x: 10, y: 20, width: 800, height: 600 } })
-    await runtime.open(undefined)
-    expect(views[0]?.visible).toBe(true)
-    expect(views[0]?.bounds).toEqual({ x: 10, y: 20, width: 800, height: 600 })
-    runtime.setPanel({ visible: false })
-    expect(views[0]?.visible).toBe(false)
+    await runtime.open('https://example.com')
+    // The mask is the second created view, attached on top of tabs.
+    const mask = views[1]
+    expect(mask).toBeDefined()
+    expect(mask!.visible).toBe(true)
+    runtime.setUserControl(true)
+    expect(runtime.controlled).toBe(true)
+    expect(mask!.visible).toBe(false)
+    runtime.setUserControl(false)
+    expect(runtime.controlled).toBe(false)
+    expect(mask!.visible).toBe(true)
+    runtime.dispose()
+  })
+
+  it('pauses agent operations while the user controls the browser', async () => {
+    const { runtime, windows } = runtimeOf()
+    await runtime.open('https://example.com')
+    runtime.setUserControl(true)
+    let settled = false
+    const op = runtime.reload(1).then(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // The operation is paused, not rejected: the loop waits for release.
+    expect(settled).toBe(false)
+    runtime.setUserControl(false)
+    await op
+    expect(settled).toBe(true)
     runtime.dispose()
   })
 
@@ -242,26 +309,30 @@ describe('BrowserRuntime', () => {
     runtime.dispose()
   })
 
-  it('user takeover blocks agent operations', async () => {
+  it('user takeover pauses agent operations until release', async () => {
     const { runtime } = runtimeOf()
     await runtime.open(undefined)
     runtime.setUserControl(true)
     expect(runtime.controlled).toBe(true)
-    await expect(runtime.snapshot(1)).rejects.toThrow(/user/)
+    let settled = false
+    const op = runtime.snapshot(1).then(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(settled).toBe(false)
     runtime.setUserControl(false)
-    await expect(runtime.snapshot(1)).resolves.toEqual([])
+    await op
+    expect(settled).toBe(true)
     runtime.dispose()
   })
 
   it('switches and closes tabs', async () => {
-    const { runtime, views } = runtimeOf()
+    const { runtime, views, windows } = runtimeOf()
     await runtime.open('https://a.example')
     await runtime.open('https://b.example')
     expect(runtime.currentTabId()).toBe(2)
     await runtime.switchTab(1)
     expect(runtime.currentTabId()).toBe(1)
     expect(views[0]?.visible).toBe(true)
-    expect(views[1]?.visible).toBe(false)
+    expect(views[2]?.visible).toBe(false)
     await runtime.closeTab(1)
     expect(runtime.listTabs()).toHaveLength(1)
     expect(runtime.currentTabId()).toBe(2)
@@ -379,7 +450,8 @@ describe('BrowserRuntime', () => {
     await runtime.open(undefined)
     await runtime.clearData()
     expect(views[0]?.session.clearStorageData).toHaveBeenCalled()
-    expect(views[1]?.session.clearStorageData).toHaveBeenCalled()
+    // views[1] is the mask (no session); the second tab is views[2].
+    expect(views[2]?.session.clearStorageData).toHaveBeenCalled()
     runtime.dispose()
   })
 

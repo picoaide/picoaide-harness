@@ -37,13 +37,13 @@ const BROWSER_GUIDANCE = `You have an embedded browser. Drive it like a human us
 10. Close tabs you no longer need with browser_close_tab.`
 
 /** Resolve `target` (snapshot number or CSS selector) to a selector. */
-async function resolveTarget(runtime: BrowserRuntime, tabId: number, target: number | string): Promise<string> {
+async function resolveTarget(runtime: BrowserRuntime, tabId: number, target: number | string, signal?: AbortSignal): Promise<string> {
   if (typeof target === 'string') {
     if (target.trim() === '') throw new Error('target selector must not be empty')
     return target.trim()
   }
   if (!Number.isInteger(target) || target < 1) throw new Error('target number must be a positive integer')
-  const snapshot = await runtime.snapshot(tabId)
+  const snapshot = await runtime.snapshot(tabId, signal)
   const entry = snapshot.find((item) => item.index === target)
   if (entry === undefined) {
     throw new Error(`browser: no snapshot element ${target} — call browser_get_snapshot first (${snapshot.length} elements)`)
@@ -159,7 +159,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
       const { tab, url, waitUntil } = args as { tab?: number; url: string; waitUntil?: BrowserWaitUntil }
       if (typeof url !== 'string' || url.trim() === '') throw new Error('url must be a non-empty string')
       const tabId = await tabOf(tab)
-      await runtime.navigate(tabId, url.trim(), waitUntil ?? 'domcontentloaded')
+      await runtime.navigate(tabId, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
       return { url: state.url, title: state.title, loading: state.loading }
