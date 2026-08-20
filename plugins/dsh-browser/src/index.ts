@@ -43,6 +43,8 @@ export interface Config {
   maxTabs?: number
   /** Cooperative tool-call timeout budget ms (default 30000). */
   timeoutMs?: number
+  /** Cap on waiting for Electron's loadURL promise ms (default 20000). */
+  loadTimeoutMs?: number
   /** Whether `browser_eval` is enabled (default true). */
   evalEnabled?: boolean
   /** Cap on snapshot entries per call (default 200). */
@@ -58,6 +60,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   maxTabs: z.number(),
   timeoutMs: z.number(),
+  loadTimeoutMs: z.number(),
   evalEnabled: z.boolean(),
   snapshotLimit: z.number(),
   textLimit: z.number(),

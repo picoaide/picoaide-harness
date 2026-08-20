@@ -1260,6 +1260,7 @@ var BrowserRuntime = class {
 		this.options = {
 			maxTabs: options.maxTabs ?? 8,
 			timeoutMs: options.timeoutMs ?? 3e4,
+			loadTimeoutMs: options.loadTimeoutMs ?? 2e4,
 			evalEnabled: options.evalEnabled ?? true,
 			snapshotLimit: options.snapshotLimit ?? 200,
 			textLimit: options.textLimit ?? 32 * 1024,
@@ -1418,20 +1419,30 @@ var BrowserRuntime = class {
 			return result;
 		});
 	}
-	/** Navigate the tab to `url`, waiting per `waitUntil`. */
+	/**
+	* Navigate the tab to `url`, waiting per `waitUntil`.
+	*
+	* Electron's `loadURL` promise settles on `did-finish-load`, which pages
+	* with long-lived connections (polls, SSE, analytics) can delay well past
+	* the page being interactive. Racing it against `loadTimeoutMs` keeps the
+	* tool call from dying on the cooperative 30s budget while the page is
+	* already usable; once the load promise settles (or the race times out),
+	* `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
+	* strictly after dom-ready) and only `networkidle` needs an extra quiet
+	* tick.
+	*/
 	async navigate(id, url, waitUntil = "domcontentloaded") {
 		if (!this.guard.allowNavigation(url)) throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`);
 		const tab = this.tab(id);
 		const wc = tab.view.webContents;
 		const started = Date.now();
-		const wait = this.waitForLoad(wc, waitUntil);
-		try {
-			await wc.loadURL(url);
-		} catch (error) {
-			this.updateTabState(tab);
-			throw new Error(`browser: navigation failed — ${error instanceof Error ? error.message : String(error)}`);
+		if (await Promise.race([wc.loadURL(url).then(() => "loaded", () => "failed"), sleep(this.options.loadTimeoutMs).then(() => "pending")]) === "failed") {
+			if (!wc.isLoading() && wc.getURL() === "") throw new Error("browser: navigation failed to load");
 		}
-		await wait(this.options.timeoutMs - (Date.now() - started));
+		if (waitUntil === "networkidle") {
+			const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started));
+			await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget));
+		}
 		this.updateTabState(tab);
 	}
 	/** Cooperative wait for the page load milestone; never rejects on timeout. */
@@ -1747,6 +1758,14 @@ var BrowserRuntime = class {
 		this.closeAll();
 	}
 };
+/** Extra quiet tick approximating network idle for `networkidle` waits. */
+const NETWORK_IDLE_TICK_MS = 800;
+/** Resolve after `ms` milliseconds. */
+function sleep(ms) {
+	return new Promise((resolve) => {
+		setTimeout(resolve, Math.max(0, ms)).unref?.();
+	});
+}
 /** Safe JSON rendering with a hard cap (never throws). */
 function safeJson(value) {
 	try {
@@ -2729,6 +2748,7 @@ const inject = [
 const Config = Schema.object({
 	maxTabs: Schema.number(),
 	timeoutMs: Schema.number(),
+	loadTimeoutMs: Schema.number(),
 	evalEnabled: Schema.boolean(),
 	snapshotLimit: Schema.number(),
 	textLimit: Schema.number(),
