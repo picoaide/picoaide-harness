@@ -48,7 +48,7 @@ const HEADER: React.CSSProperties = {
   padding: '14px 18px',
 }
 
-const TITLE: React.CSSProperties = { margin: 0, fontSize: 16, lineHeight: 24, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }
+const TITLE: React.CSSProperties = { margin: 0, fontSize: 16, lineHeight: '24px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }
 
 const CLOSE: React.CSSProperties = {
   border: 'none',
