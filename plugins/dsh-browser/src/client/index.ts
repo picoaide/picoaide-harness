@@ -13,10 +13,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 /**
- * Browser client half: registers the embedded-browser panel as a sidebar foot
- * action. The panel drives the native WebContentsView through the loopback
- * browser API; the view itself is layered over the panel's placeholder by the
- * host plugin.
+ * Browser client half: registers the sidebar foot action that wakes the
+ * dedicated browser window. The window (created by the host plugin on first
+ * agent open) carries its own tab strip and controls; the sidebar button
+ * shows it again after a user close.
  */
 export const name = 'pico-browser-client'
 
@@ -45,6 +45,6 @@ export function apply(ctx: ClientContext): void {
       id: 'browser-center',
       order: 1,
     }, BrowserTrigger)),
-    'browser: sidebar browser panel action',
+    'browser: sidebar browser wake action',
   )
 }

@@ -17,20 +17,12 @@ export interface BrowserTabState {
   readonly visible: boolean
 }
 
-/** Screen-space placement of the native browser view over the main window. */
-export interface BrowserViewBounds {
-  readonly x: number
-  readonly y: number
-  readonly width: number
-  readonly height: number
-}
-
-/** Panel visibility + placement reported by the client browser panel. */
-export interface BrowserPanelState {
-  /** Whether the panel (and its native view) is shown. */
+/** Window visibility of the dedicated browser window. */
+export interface BrowserWindowState {
+  /** Whether the browser window currently exists (created at first open). */
+  readonly created: boolean
+  /** Whether the window is currently shown (hidden after user close). */
   readonly visible: boolean
-  /** Placement when visible. */
-  readonly bounds?: BrowserViewBounds
 }
 
 /** One recorded agent browser operation (audit log, screenshots never persisted). */
