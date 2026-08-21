@@ -218,9 +218,15 @@ func isUniqueViolation(err error) bool {
 
 const sqlTimeFormat = "2006-01-02 15:04:05"
 
+// parseSQLTime parses a SQLite DATETIME value. The schema writes
+// datetime('now','localtime') — wall-clock strings with no zone — so bare
+// strings must be interpreted in the local timezone: time.Parse would treat
+// them as UTC, making time.Since() negative in non-UTC environments and
+// breaking age-based logic such as the KB queue orphan sweep. RFC3339 values
+// carry their own offset and are unaffected by the location argument.
 func parseSQLTime(s string) time.Time {
 	for _, f := range []string{sqlTimeFormat, time.RFC3339} {
-		if t, err := time.Parse(f, s); err == nil {
+		if t, err := time.ParseInLocation(f, s, time.Local); err == nil {
 			return t
 		}
 	}

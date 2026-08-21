@@ -6,11 +6,11 @@
 package main
 
 import (
-	"math"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,12 +50,12 @@ func main() {
 			switch {
 			case strings.Contains(last, "TOOLCALL:file_write"):
 				scriptedTool = &map[string]any{
-					"name": "file_write",
+					"name":      "file_write",
 					"arguments": `{"path":"test.txt","content":"hello e2e ` + strconv.FormatInt(time.Now().UnixMilli(), 10) + `"}`,
 				}
 			case strings.Contains(last, "TOOLCALL:file_delete"):
 				scriptedTool = &map[string]any{
-					"name": "file_delete",
+					"name":      "file_delete",
 					"arguments": `{"path":"delete-me.txt"}`,
 				}
 			case strings.Contains(last, "TOOLCALL:command_exec"):
