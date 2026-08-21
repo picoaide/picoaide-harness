@@ -284,7 +284,7 @@ describe('published package surface', () => {
 
     expect(manifest.scripts?.build).toContain('node scripts/generate-mac-app-icon.mjs')
     expect(manifest.scripts?.['package:dir'])
-      .toBe('yarn workspace @picoaide/dsh-enterprise build && yarn run build && node scripts/package-dir.mjs')
+      .toBe('yarn workspace @picoaide/dsh-enterprise build && yarn workspace @picoaide/dsh-account-card build && yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
     expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
     expect(manifest.scripts?.['dist:mac-smoke']).toBe('node scripts/package-mac.ts')
