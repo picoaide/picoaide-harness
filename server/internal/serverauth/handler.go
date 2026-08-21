@@ -112,6 +112,12 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
+	// P2: bound credential lengths — a multi-MB "username" would otherwise
+	// reach the password provider (LDAP query / hash compare) as-is.
+	if len(req.Username) > 128 || len(req.Password) > 1024 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名或密码过长")
+		return
+	}
 	if !a.loginAllowed(c, req.Username) {
 		return
 	}

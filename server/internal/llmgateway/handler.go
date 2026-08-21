@@ -133,6 +133,14 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 				body = raw2
 			}
 		}
+		// P1-1 (metering): every streaming request must ask the upstream for
+		// usage in the final SSE chunk, otherwise the pending usage row can
+		// never be backfilled and metering is silently bypassed.
+		if req.Stream {
+			if raw2, err := applyStreamUsageRequest(body); err == nil {
+				body = raw2
+			}
+		}
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
 		if err == nil {
 			break
@@ -195,6 +203,38 @@ func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
 		return raw, nil
 	}
 	body["max_tokens"] = v
+	return json.Marshal(body)
+}
+
+// applyStreamUsageRequest injects stream_options.include_usage=true into a
+// streaming chat request (P1-1, metering gap). Without it, upstreams omit the
+// final usage chunk in SSE responses by default, so the streaming path could
+// never backfill tokens — quota/budget enforcement was silently bypassed for
+// every streamed conversation. Only adds the option when the caller did not
+// already set it (a client-supplied stream_options is preserved).
+func applyStreamUsageRequest(raw []byte) ([]byte, error) {
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return raw, err
+	}
+	stream, _ := body["stream"].(bool)
+	if !stream {
+		return raw, nil
+	}
+	if opts, ok := body["stream_options"]; ok {
+		// Already present: merge include_usage=true unless it is explicitly
+		// disabled by the client (respect an explicit false).
+		if m, isMap := opts.(map[string]any); isMap {
+			if v, has := m["include_usage"]; has {
+				if b, isBool := v.(bool); isBool && !b {
+					return raw, nil
+				}
+			}
+			m["include_usage"] = true
+			return json.Marshal(body)
+		}
+	}
+	body["stream_options"] = map[string]any{"include_usage": true}
 	return json.Marshal(body)
 }
 

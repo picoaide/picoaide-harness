@@ -13,6 +13,11 @@ export interface ApplyResult {
         task: TaskRecord;
         execution: ExecutionRecord;
     };
+    /**
+     * Set when the action cancelled open executions: the session ids (if any
+     * were recorded) that should be asked to stop.
+     */
+    cancelled?: string[];
 }
 export declare class HostTaskLedger {
     private current;
@@ -38,6 +43,10 @@ export declare class HostTaskLedger {
      * interrupted before the session was recorded (no sessionId, no endedAt)
      * is settled as cancelled so the task is not pinned in 'doing' forever and
      * reruns are allowed again. Never re-fires the interrupted start.
+     * P0-3: an execution WITH a sessionId whose session never produced a
+     * turn/end (crash before the first turn completed) would otherwise stay
+     * 'pending' forever and block every edit/delete/rerun (hasOpenExecution).
+     * Age it out: anything older than STALE_EXECUTION_MS settles as cancelled.
      */
     private reconcileInterruptedStarts;
     summary(): {

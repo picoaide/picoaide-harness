@@ -1513,11 +1513,19 @@ var BrowserRuntime = class {
 		const mask = this.adapter.createMaskView();
 		this.mask = mask;
 		mask.attach(win, this.contentBounds());
-		mask.setVisible(true);
 		if (origin !== void 0) {
-			mask.webContents.loadURL(`${origin}/browser-mask`);
-			win.loadURL(`${origin}/browser-shell`);
+			mask.webContents.loadURL(`${origin}/browser-mask`).catch((cause) => {
+				mask.webContents.loadURL(`${origin}/browser-mask`).catch(() => {
+					console.error("[dsh-browser] mask page failed to load", cause);
+				});
+			});
+			win.loadURL(`${origin}/browser-shell`).catch((cause) => {
+				win.loadURL(`${origin}/browser-shell`).catch(() => {
+					console.error("[dsh-browser] shell page failed to load", cause);
+				});
+			});
 		}
+		mask.setVisible(this.mutex.controlled);
 		this.windowResizeDisposer = win.onResize(() => {
 			this.relayout();
 		});
@@ -1548,6 +1556,7 @@ var BrowserRuntime = class {
 	async showWindow() {
 		if (this.window === null || this.window.isDestroyed()) {
 			await this.ensureWindow(this.shellOrigin);
+			this.relayout();
 			return;
 		}
 		this.window.show();
@@ -1595,7 +1604,14 @@ var BrowserRuntime = class {
 			const id = this.nextTabId++;
 			const view = this.adapter.createView();
 			const cdp = new CdpSession(view.webContents.cdp);
-			await cdp.attach();
+			try {
+				await cdp.attach();
+			} catch (cause) {
+				try {
+					view.destroy();
+				} catch {}
+				throw cause;
+			}
 			const tab = {
 				id,
 				view,
@@ -1625,7 +1641,17 @@ var BrowserRuntime = class {
 			this.downloadDisposers.push(this.guard.installDownloadGuard(session, (summary) => {
 				this.record("browser_download", id, summary);
 			}));
-			if (url !== void 0 && url !== "") await this.navigateInternal(id, url, "domcontentloaded");
+			if (url !== void 0 && url !== "") try {
+				await this.navigateInternal(id, url, "domcontentloaded");
+			} catch (cause) {
+				try {
+					cdp.detach();
+					view.destroy();
+				} catch {}
+				this.tabs.delete(id);
+				if (this.visibleTabId === id) this.visibleTabId = void 0;
+				throw cause;
+			}
 			this.updateTabState(tab);
 			this.record("browser_open", id, url === void 0 || url === "" ? "new tab" : url);
 			return this.tabState(id);
@@ -1977,6 +2003,12 @@ var BrowserRuntime = class {
 	* password. Callers must route this through approval (credentials are
 	* sensitive).
 	*/
+	/** Current URL of a tab ('' when unknown) — used in approval prompts. */
+	currentUrlOf(id) {
+		const tab = this.tabs.get(id);
+		if (tab === void 0) return "";
+		return tab.url;
+	}
 	async fillCredentials(id, connectorId, signal) {
 		if (this.credentials === void 0) throw new Error("browser: credential injection is not available in this deployment");
 		const credential = await this.credentials(connectorId);
@@ -2978,11 +3010,12 @@ function applyBrowserTools(ctx, runtime) {
 			const { tab, connectorId } = args;
 			if (typeof connectorId !== "string" || connectorId.trim() === "") throw new Error("connectorId must be a non-empty string");
 			const tabId = await tabOf(tab);
+			const pageUrl = runtime.currentUrlOf(tabId);
 			if (!await runtime.requireApproval({
 				agent: exec.agent,
 				toolName: "browser_fill_credentials",
 				callId: exec.callId,
-				reason: `向登录表单注入连接器凭据: ${connectorId}`,
+				reason: `向登录表单注入连接器凭据 (${connectorId})，目标页面: ${pageUrl === "" ? "（未知）" : pageUrl}`,
 				signal: exec.signal
 			})) throw new Error("browser: credential injection was not approved by the user");
 			const filled = await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal);

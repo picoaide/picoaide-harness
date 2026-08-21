@@ -99,7 +99,10 @@ const LOGOUT: React.CSSProperties = {
   borderRadius: 6,
   fontSize: 12,
   cursor: 'pointer',
-  color: 'var(--dsw-alias-label-secondary)',
+  // UX-1: danger actions are consistently red-encoded (matches the settings
+  // account page) — a grey logout looked like a disabled control and left
+  // the destructive semantics unclear.
+  color: 'var(--dsw-alias-state-error-primary)',
 }
 
 const LOGOUT_HOVER: React.CSSProperties = {

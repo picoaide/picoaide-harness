@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request } from '../api'
 import { fmtTokens, fmtMoney, usageRate, moneyRate } from '../lib/format'
 import { deptTreeOptions } from '../lib/utils'
@@ -47,7 +47,15 @@ interface ApiToken {
 }
 
 function fmtTime(s: string): string {
-  return s ? s.slice(0, 16).replace('T', ' ') : '—'
+  // P1-5: slice(0,16) dropped the timezone offset, so UTC-backed values
+  // (e.g. "2026-08-21T06:00:00Z") rendered 8h behind local time and
+  // inconsistently with the audit page's toLocaleString. Parse as an
+  // absolute instant and render in the viewer's local timezone.
+  if (!s) return '—'
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return s.slice(0, 16).replace('T', ' ')
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // quotaLabel renders the effective monthly quota for a user row.
@@ -97,8 +105,12 @@ export default function Users() {
   const [deptSelect, setDeptSelect] = useState('0')
   const [quotaUser, setQuotaUser] = useState<User | null>(null)
   const [quotaInput, setQuotaInput] = useState('')
+  // P1-8: 请求序号防乱序——快速翻页/搜索/删除重拉时只有最新请求的响应能更新 state
+  const loadSeq = useRef(0)
+  const tokensSeq = useRef(0)
 
   const load = useCallback(async (p: number, search: string) => {
+    const current = ++loadSeq.current
     try {
       const params = new URLSearchParams({ page: String(p), size: '20' })
       if (search) params.set('q', search)
@@ -106,12 +118,14 @@ export default function Users() {
         request(`/api/admin/users?${params}`),
         request('/api/admin/departments'),
       ])
+      if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setUsers(u.users)
       setTotal(u.total)
       setDepts(d.departments ?? [])
       setPage(p)
       setError('') // 成功后清空页面级错误(中3)
     } catch (err: any) {
+      if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
     }
   }, [])
@@ -174,17 +188,20 @@ export default function Users() {
   }
 
   async function openTokens(u: User) {
+    const current = ++tokensSeq.current // P1-8: 快速切换用户时只认最新响应
     setTokensUser(u)
     setTokens([])          // 中5:打开即清空,避免跨用户残留上一用户令牌
     setTokenErr('')
     setTokensLoading(true)
     try {
       const data = await request(`/api/admin/users/${u.id}/tokens`)
+      if (current !== tokensSeq.current) return // P1-8: 过期响应丢弃
       setTokens(data.tokens)
     } catch (err: any) {
+      if (current !== tokensSeq.current) return // P1-8: 过期响应不写错误
       setTokenErr(err.message) // 中5:错误显示在对话框内,不再误报「暂无令牌」
     } finally {
-      setTokensLoading(false)
+      if (current === tokensSeq.current) setTokensLoading(false)
     }
   }
 

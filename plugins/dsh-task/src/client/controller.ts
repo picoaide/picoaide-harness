@@ -100,6 +100,11 @@ export class TaskController {
     void this.submit({ kind: 'rerun', taskId })
   }
 
+  /** P0-3: cancel a running task (settles open executions as cancelled). */
+  cancel(taskId: string): void {
+    void this.submit({ kind: 'cancel', taskId })
+  }
+
   openTask(taskId: string): void {
     this.snapshot = { ...this.snapshot, selectedTaskId: taskId }
     this.notify()

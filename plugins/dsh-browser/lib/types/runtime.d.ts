@@ -168,6 +168,8 @@ export declare class BrowserRuntime {
      * password. Callers must route this through approval (credentials are
      * sensitive).
      */
+    /** Current URL of a tab ('' when unknown) — used in approval prompts. */
+    currentUrlOf(id: number): string;
     fillCredentials(id: number, connectorId: string, signal?: AbortSignal): Promise<{
         username: boolean;
         password: boolean;

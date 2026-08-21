@@ -21,6 +21,8 @@ export declare const zh: {
     'action.submit': string;
     'action.connecting': string;
     'action.disconnecting': string;
+    'action.cancel': string;
+    'action.cancelling': string;
     'auth.verificationHint': string;
     'auth.code': string;
     'auth.authorizeOpened': string;

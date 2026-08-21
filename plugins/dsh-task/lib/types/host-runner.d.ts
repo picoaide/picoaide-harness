@@ -42,6 +42,12 @@ export declare class HostExecutionRunner {
         known: false;
     }>;
     /**
+     * P0-3: ask the running session to stop. Best-effort — the ledger already
+     * settles the execution as cancelled; if the session is gone or the stop
+     * command fails, the settlement poll converges the state anyway.
+     */
+    cancelSession(sessionId: string): Promise<void>;
+    /**
      * Resolve one execution's outcome from the shared session list (one list
      * RPC per poll tick, not 1 + E).
      */

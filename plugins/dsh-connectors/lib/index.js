@@ -162,10 +162,21 @@ async function runOAuth(def, options) {
 	const state = randomBytes(24).toString("base64url");
 	let resolveCode;
 	let rejectCode;
+	let callbackServer = null;
 	const codePromise = new Promise((resolve, reject) => {
 		resolveCode = resolve;
 		rejectCode = reject;
 	});
+	const OAuthFlowTimeoutMs = 3e5;
+	const abortFlow = (reason) => {
+		callbackServer?.close();
+		callbackServer?.closeIdleConnections?.();
+		callbackServer = null;
+		rejectCode(/* @__PURE__ */ new Error(`OAuth 授权已取消: ${reason}`));
+	};
+	const onAbort = () => abortFlow(options.signal.reason instanceof Error ? options.signal.reason.message : String(options.signal.reason ?? "用户取消"));
+	options.signal.addEventListener("abort", onAbort, { once: true });
+	const flowTimer = setTimeout(() => abortFlow("等待授权超时（5 分钟）"), OAuthFlowTimeoutMs);
 	const port = await new Promise((resolve, reject) => {
 		const server = createServer((req, res) => {
 			const url = new URL(req.url ?? "/", `http://${callbackHost}:${port}`);
@@ -183,6 +194,7 @@ async function runOAuth(def, options) {
 			res.end("<html><body><p>授权完成，可以关闭此窗口。</p></body></html>");
 			server.close();
 			server.closeIdleConnections();
+			callbackServer = null;
 			if (errorParam) {
 				rejectCode(/* @__PURE__ */ new Error(`OAuth 授权失败: ${errorParam}`));
 				return;
@@ -194,6 +206,7 @@ async function runOAuth(def, options) {
 			resolve(server.address().port);
 		});
 		server.on("error", reject);
+		callbackServer = server;
 	});
 	const redirectUri = `http://${callbackHost}:${port}/callback`;
 	const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint;
@@ -217,6 +230,9 @@ async function runOAuth(def, options) {
 		authorizeUrl: authorizeUrl.toString()
 	});
 	const code = await codePromise;
+	options.signal.removeEventListener("abort", onAbort);
+	clearTimeout(flowTimer);
+	callbackServer = null;
 	throwIfAborted(options.signal);
 	const tokenUrl = options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl;
 	const body = new URLSearchParams({
@@ -1148,6 +1164,8 @@ function apply(ctx, options = {}) {
 	const states = /* @__PURE__ */ new Map();
 	const pendingRequests = /* @__PURE__ */ new Map();
 	const mcpDisposers = /* @__PURE__ */ new Map();
+	/** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
+	const pendingFlows = /* @__PURE__ */ new Map();
 	const setState = (id, patch) => {
 		const current = states.get(id) ?? {
 			status: "disconnected",
@@ -1287,6 +1305,7 @@ function apply(ctx, options = {}) {
 	const startConnect = async (id) => {
 		const def = getDef(id);
 		if (!def) throw new Error(`unknown connector: ${id}`);
+		if (pendingFlows.has(id)) return;
 		const existing = await store.readCredential(id);
 		setState(id, {
 			status: "connecting",
@@ -1302,8 +1321,9 @@ function apply(ctx, options = {}) {
 			}
 		}
 		pendingRequests.delete(id);
+		const controller = new AbortController();
+		pendingFlows.set(id, controller);
 		try {
-			const controller = new AbortController();
 			const patch = await runAuth(def, {
 				onRequest: emitRequest,
 				signal: controller.signal,
@@ -1329,10 +1349,17 @@ function apply(ctx, options = {}) {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const unauthorized = message.includes("授权") || message.includes("token") || message.includes("登录");
-			setState(id, {
+			if (controller.signal.aborted) setState(id, {
+				status: "disconnected",
+				everConnected: Boolean(states.get(id)?.everConnected),
+				error: void 0
+			});
+			else setState(id, {
 				status: unauthorized ? "unauthorized" : "error",
 				error: message
 			});
+		} finally {
+			pendingFlows.delete(id);
 		}
 	};
 	const submitAuth = async (id, fields) => {
@@ -1359,6 +1386,8 @@ function apply(ctx, options = {}) {
 	const disconnect = async (id) => {
 		const def = getDef(id);
 		if (def) await unregisterMcp(def);
+		const flow = pendingFlows.get(id);
+		if (flow) flow.abort(/* @__PURE__ */ new Error("用户在连接过程中断开了连接"));
 		await store.clearCredential(id);
 		setState(id, {
 			status: "disconnected",
@@ -1392,6 +1421,8 @@ function apply(ctx, options = {}) {
 		})();
 		return () => {
 			for (const dispose of mcpDisposers.values()) dispose();
+			for (const flow of pendingFlows.values()) flow.abort(/* @__PURE__ */ new Error("插件卸载，连接流程中止"));
+			pendingFlows.clear();
 		};
 	}, "pico connectors: restore + cleanup");
 	ctx.effect(() => {
@@ -1418,6 +1449,13 @@ function apply(ctx, options = {}) {
 			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
 			const id = rawId;
 			if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` });
+			if (pendingFlows.has(id)) {
+				json(res, 200, {
+					ok: true,
+					request: pendingRequests.get(id) ?? { connectorId: id }
+				});
+				return;
+			}
 			const request = { connectorId: id };
 			emitRequest(request);
 			startConnect(id).catch((error) => {
@@ -1432,14 +1470,37 @@ function apply(ctx, options = {}) {
 				request
 			});
 		};
+		const cancel = (req, res) => {
+			const rawId = decodeSegment(req.url?.split("/")[4] ?? "");
+			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
+			const id = rawId;
+			if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` });
+			const flow = pendingFlows.get(id);
+			if (flow) flow.abort(/* @__PURE__ */ new Error("用户取消了连接"));
+			setState(id, {
+				status: "disconnected",
+				everConnected: Boolean(states.get(id)?.everConnected),
+				error: void 0
+			});
+			pendingRequests.delete(id);
+			json(res, 200, { ok: true });
+		};
 		const authSubmit = async (req, res) => {
 			const rawId = decodeSegment(req.url?.split("/")[4] ?? "");
 			if (rawId === null) return json(res, 400, { error: "malformed connector id" });
 			const id = rawId;
 			const raw = await readJson(req);
 			if (!raw || typeof raw !== "object" || typeof raw.fields !== "object") return json(res, 400, { error: "missing fields" });
+			const fields = raw.fields;
+			for (const [key, value] of Object.entries(fields)) if (typeof value !== "string") return json(res, 400, { error: `field '${key}' must be a string` });
 			try {
-				await submitAuth(id, raw.fields);
+				submitAuth(id, fields).catch((error) => {
+					const message = error instanceof Error ? error.message : String(error);
+					setState(id, {
+						status: "error",
+						error: message
+					});
+				});
 				json(res, 200, { ok: true });
 			} catch (error) {
 				json(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -1486,6 +1547,7 @@ function apply(ctx, options = {}) {
 				const action = (req.url?.split("/") ?? [])[5]?.split("?")[0];
 				const handlers = {
 					connect: exact(connect),
+					cancel: exact(cancel),
 					"auth-submit": exact(authSubmit),
 					state: exact(state),
 					disconnect: exact(disconnectHandler)
@@ -1494,6 +1556,7 @@ function apply(ctx, options = {}) {
 				const method = req.method ?? "GET";
 				const expected = action ? {
 					connect: "POST",
+					cancel: "POST",
 					"auth-submit": "POST",
 					state: "GET",
 					disconnect: "POST"

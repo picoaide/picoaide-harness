@@ -187,6 +187,24 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
     }
   }, [busy, entry.id, onChanged])
 
+  // P0-1: explicit cancel of an in-flight authorization flow. The host aborts
+  // the flow (closes the callback server, rejects the code promise) and the
+  // connector row returns to 'disconnected' — the user is never stuck on
+  // "连接中…" with no way out.
+  const cancel = useCallback(async (): Promise<void> => {
+    if (busy !== null) return
+    setError(null)
+    setBusy('disconnect')
+    try {
+      await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: 'POST' })
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }, [busy, entry.id, onChanged])
+
   const polling = entry.status === 'connecting' && (entry.request?.authorizeUrl || entry.request?.verificationUrl)
   const needsForm = entry.status === 'connecting' && Boolean(entry.request?.fields?.length)
   const isConnected = entry.status === 'connected'
@@ -251,9 +269,15 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
           <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }}>
             {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}
           </button>
+        ) : entry.status === 'connecting' ? (
+          // P0-1: while an authorization flow is in flight the user must be
+          // able to abort it — a "取消" button instead of a disabled "连接".
+          <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-warn-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void cancel() }}>
+            {busy === 'disconnect' ? t('action.cancelling') : t('action.cancel')}
+          </button>
         ) : (
-          <button type="button" style={BUTTON} disabled={entry.status === 'connecting' || busy === 'connect'} onClick={() => { void connect() }}>
-            {entry.status === 'connecting' || busy === 'connect' ? t('action.connecting') : t('action.connect')}
+          <button type="button" style={BUTTON} disabled={busy === 'connect'} onClick={() => { void connect() }}>
+            {busy === 'connect' ? t('action.connecting') : t('action.connect')}
           </button>
         )}
       </div>

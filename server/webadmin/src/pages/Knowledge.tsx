@@ -77,6 +77,8 @@ export default function Knowledge() {
   const [searchBusy, setSearchBusy] = useState(false)
   const [searchFolder, setSearchFolder] = useState(0)
   const [error, setError] = useState('')
+  // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
+  const [busy, setBusy] = useState<string | null>(null)
 
   const [folderDialog, setFolderDialog] = useState(false)
   const [folderName, setFolderName] = useState('')
@@ -150,6 +152,8 @@ export default function Knowledge() {
   }, [])
 
   async function saveEmbedModel() {
+    if (busy) return // P1-6: 双击守卫
+    setBusy('save-embed')
     try {
       await request('/api/admin/kb/embedding-model', {
         method: 'PUT',
@@ -158,15 +162,21 @@ export default function Knowledge() {
       setError('')
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function reindexEmbeddings() {
+    if (busy) return // P1-6: 双击守卫
     if (!window.confirm('重建向量索引?现有向量将清空并在后台重新生成。')) return
+    setBusy('reindex')
     try {
       await request('/api/admin/kb/embedding-reindex', { method: 'POST' })
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -212,12 +222,16 @@ export default function Knowledge() {
   }
 
   async function retryDoc(id: number) {
+    if (busy) return // P1-6: 双击守卫
+    setBusy(`retry-${id}`)
     try {
       await request(`/api/admin/kb/documents/${id}/retry`, { method: 'POST' })
       loadImportStatus()
       loadDocs(docPage, selected)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -243,7 +257,9 @@ export default function Knowledge() {
   }
 
   async function deleteFolder(id: number, name: string) {
+    if (busy) return // P1-6: 双击守卫
     if (!window.confirm(`确定删除文件夹「${name}」?有文档或授权时将无法删除。`)) return
+    setBusy(`del-folder-${id}`)
     try {
       await request(`/api/admin/kb/folders/${id}`, { method: 'DELETE' })
       // L10: setSelected 是异步的,直接按删除后的语义加载根目录,避免
@@ -253,10 +269,14 @@ export default function Knowledge() {
       loadDocs(1, selected === id ? 0 : selected)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function createFolder() {
+    if (busy) return // P1-6: 双击守卫
+    setBusy('create-folder')
     try {
       await request('/api/admin/kb/folders', { method: 'POST', body: JSON.stringify({ name: folderName }) })
       setFolderDialog(false)
@@ -264,6 +284,8 @@ export default function Knowledge() {
       loadFolders()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -292,13 +314,17 @@ export default function Knowledge() {
   }
 
   async function deleteDoc(id: number, docTitle: string) {
+    if (busy) return // P1-6: 双击守卫
     if (!window.confirm(`删除文档「${docTitle}」?`)) return
+    setBusy(`del-doc-${id}`)
     try {
       await request(`/api/admin/kb/documents/${id}`, { method: 'DELETE' })
       if (searching) doSearch()
       loadDocs(docPage, selected)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -319,7 +345,7 @@ export default function Knowledge() {
 
   // 保存部门多选(整组替换,原子)
   async function saveDeptGrants() {
-    if (!grantFolder) return
+    if (savingGrants || !grantFolder) return // P1-6: 双击守卫
     setSavingGrants(true)
     try {
       await request(`/api/admin/kb/folders/${grantFolder.id}/grants`, {
@@ -339,8 +365,9 @@ export default function Knowledge() {
   }
 
   async function revoke(target: string, isGroup: boolean) {
-    if (!grantFolder) return
+    if (busy || !grantFolder) return // P1-6: 双击守卫
     if (!window.confirm(`撤销「${target}」对「${grantFolder.name}」的授权?`)) return
+    setBusy(`revoke-${target}`)
     try {
       await request(`/api/admin/kb/folders/${grantFolder.id}/grant`, {
         method: 'DELETE',
@@ -349,12 +376,15 @@ export default function Knowledge() {
       loadGrants(grantFolder.id)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function grant() {
-    if (!grantFolder || !grantTarget.trim()) return
+    if (busy || !grantFolder || !grantTarget.trim()) return // P1-6: 双击守卫
     const isGroup = grantTarget.trim().startsWith('@')
+    setBusy('grant')
     try {
       await request(`/api/admin/kb/folders/${grantFolder.id}/grant`, {
         method: 'PUT',
@@ -364,6 +394,8 @@ export default function Knowledge() {
       loadGrants(grantFolder.id)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -380,7 +412,8 @@ export default function Knowledge() {
   }
 
   async function saveEdit() {
-    if (!editTitle.trim()) return
+    if (busy || !editTitle.trim()) return // P1-6: 双击守卫
+    setBusy('save-edit')
     try {
       await request(`/api/admin/kb/documents/${editId}`, {
         method: 'PUT',
@@ -391,6 +424,8 @@ export default function Knowledge() {
       loadDocs(docPage, selected)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -447,9 +482,10 @@ export default function Knowledge() {
                         variant="ghost"
                         className="h-6 px-2 text-destructive"
                         title="删除文件夹(需先清空文档与授权)"
+                        disabled={busy !== null}
                         onClick={() => deleteFolder(f.id, f.name)}
                       >
-                        删除
+                        {busy === `del-folder-${f.id}` ? '删除中…' : '删除'}
                       </Button>
                     </>
                   )}
@@ -498,7 +534,7 @@ export default function Knowledge() {
                     {importErrors.map((e) => (
                       <div key={e.id} className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 px-2 py-1">
                         <span className="truncate">「{e.title}」: {e.error}</span>
-                        <Button size="sm" variant="outline" className="h-6 shrink-0" onClick={() => retryDoc(e.id)}>重试</Button>
+                        <Button size="sm" variant="outline" className="h-6 shrink-0" disabled={busy !== null} onClick={() => retryDoc(e.id)}>{busy === `retry-${e.id}` ? '重试中…' : '重试'}</Button>
                       </div>
                     ))}
                   </div>
@@ -543,7 +579,7 @@ export default function Knowledge() {
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
                           <Button size="sm" variant="outline" onClick={() => openEdit(h.doc_id, h.title)}>编辑</Button>
-                          <Button size="sm" variant="destructive" onClick={() => deleteDoc(h.doc_id, h.title)}>删除</Button>
+                          <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => deleteDoc(h.doc_id, h.title)}>{busy === `del-doc-${h.doc_id}` ? '删除中…' : '删除'}</Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -564,9 +600,9 @@ export default function Knowledge() {
                       <TableCell>{d.created_by}</TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
-                          {d.status === 'error' && <Button size="sm" variant="outline" onClick={() => retryDoc(d.id)}>重试</Button>}
+                          {d.status === 'error' && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => retryDoc(d.id)}>{busy === `retry-${d.id}` ? '重试中…' : '重试'}</Button>}
                           <Button size="sm" variant="outline" disabled={d.status === 'pending' || d.status === 'processing'} title={d.status === 'pending' || d.status === 'processing' ? '处理中,暂不可编辑' : undefined} onClick={() => openEdit(d.id, d.title)}>编辑</Button>
-                          <Button size="sm" variant="destructive" onClick={() => deleteDoc(d.id, d.title)}>删除</Button>
+                          <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => deleteDoc(d.id, d.title)}>{busy === `del-doc-${d.id}` ? '删除中…' : '删除'}</Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -609,8 +645,8 @@ export default function Knowledge() {
               onChange={(e) => setEmbedModel(e.target.value)}
             />
           </div>
-          <Button size="sm" variant="outline" onClick={saveEmbedModel}>保存</Button>
-          <Button size="sm" variant="ghost" disabled={!embedModel.trim()} title={embedModel.trim() ? undefined : '请先配置向量模型'} onClick={reindexEmbeddings}>重建向量索引</Button>
+          <Button size="sm" variant="outline" disabled={busy !== null} onClick={saveEmbedModel}>{busy === 'save-embed' ? '处理中…' : '保存'}</Button>
+          <Button size="sm" variant="ghost" disabled={!embedModel.trim() || busy !== null} title={embedModel.trim() ? undefined : '请先配置向量模型'} onClick={reindexEmbeddings}>{busy === 'reindex' ? '重建中…' : '重建向量索引'}</Button>
           <span className="text-xs text-muted-foreground">
             模型名须已存在于网关模型列表中;保存后后台自动为文档分块生成向量,搜索自动切换为混合检索
           </span>
@@ -625,7 +661,7 @@ export default function Knowledge() {
               <Label>名称</Label>
               <Input value={folderName} onChange={(e) => setFolderName(e.target.value)} />
             </div>
-            <Button className="w-full" onClick={createFolder}>创建</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={createFolder}>{busy === 'create-folder' ? '处理中…' : '创建'}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -692,13 +728,13 @@ export default function Knowledge() {
                 {grantUsers.map((u) => (
                   <div key={`u${u}`} className="flex items-center justify-between text-sm">
                     <Badge variant="secondary">{u}</Badge>
-                    <Button size="sm" variant="ghost" onClick={() => revoke(u, false)}>撤销</Button>
+                    <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => revoke(u, false)}>{busy === `revoke-${u}` ? '撤销中…' : '撤销'}</Button>
                   </div>
                 ))}
                 {grantGroups.map((g) => (
                   <div key={`g${g}`} className="flex items-center justify-between text-sm">
                     <Badge variant="secondary">@{g}</Badge>
-                    <Button size="sm" variant="ghost" onClick={() => revoke(g, true)}>撤销</Button>
+                    <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => revoke(g, true)}>{busy === `revoke-${g}` ? '撤销中…' : '撤销'}</Button>
                   </div>
                 ))}
               </div>
@@ -717,13 +753,13 @@ export default function Knowledge() {
                   </label>
                 ))}
               </div>
-              <Button size="sm" variant="outline" className="mt-1 w-full" disabled={savingGrants} onClick={saveDeptGrants}>{savingGrants ? '保存中…' : '保存部门授权'}</Button>
+              <Button size="sm" variant="outline" className="mt-1 w-full" disabled={savingGrants || busy !== null} onClick={saveDeptGrants}>{savingGrants ? '保存中…' : '保存部门授权'}</Button>
             </div>
             <div className="space-y-1">
               <Label>用户名(单个,可选)</Label>
               <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
             </div>
-            <Button className="w-full" disabled={!grantTarget.trim() || savingGrants} onClick={grant}>添加用户授权</Button>
+            <Button className="w-full" disabled={!grantTarget.trim() || savingGrants || busy !== null} onClick={grant}>{busy === 'grant' ? '处理中…' : '添加用户授权'}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -740,7 +776,7 @@ export default function Knowledge() {
               <Label>内容</Label>
               <Textarea className="min-h-56" value={editContent} onChange={(e) => setEditContent(e.target.value)} />
             </div>
-            <Button className="w-full" disabled={!editTitle.trim()} onClick={saveEdit}>保存</Button>
+            <Button className="w-full" disabled={!editTitle.trim() || busy !== null} onClick={saveEdit}>{busy === 'save-edit' ? '处理中…' : '保存'}</Button>
           </div>
         </DialogContent>
       </Dialog>
