@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -33,6 +34,19 @@ func newTestAPI(t *testing.T) (*gin.Engine, *sql.DB, func()) {
 func tempPath(t *testing.T, name string) string {
 	t.Helper()
 	return fmt.Sprintf("%s/%s", t.TempDir(), name)
+}
+
+func loginToken(t *testing.T, r *gin.Engine, username, password string) string {
+	t.Helper()
+	w, out := doJSON(t, r, "POST", "/api/auth/login", fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login %s: %d %s", username, w.Code, w.Body.String())
+	}
+	tok, _ := out["token"].(string)
+	if tok == "" {
+		t.Fatal("empty token")
+	}
+	return tok
 }
 
 func createUser(t *testing.T, db *sql.DB, username, password string, admin bool) {
@@ -265,5 +279,134 @@ func TestBootstrapAdmin(t *testing.T) {
 	// idempotent: existing admin -> no error, no change
 	if err := EnsureBootstrapAdmin(db, "boss"); err != nil {
 		t.Fatalf("second EnsureBootstrapAdmin: %v", err)
+	}
+}
+
+// TestUsageSummaryEndpoint: GET /api/auth/usage 返回配额/余额/统计字段。
+func TestUsageSummaryEndpoint(t *testing.T) {
+	r, db, cleanup := newTestAPI(t)
+	defer cleanup()
+	createUser(t, db, "alice", "Alice@123", false)
+	uid := mustUID(t, db, "alice")
+
+	// 有定价模型,造今日/昨日/历史用量
+	pid, err := serverstore.AddGatewayProvider(db, &serverstore.GatewayProvider{Name: "prov", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out2 := 2.0, 8.0
+	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "m1", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := serverstore.RecordUsage(db, uid, "m1", 1_000_000, 0)
+	setUsageAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00") // 今日 cost 2
+	id2, _ := serverstore.RecordUsage(db, uid, "m1", 500_000, 0)
+	setUsageAt(t, db, id2, time.Now().AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00") // 昨日 cost 1
+
+	// 个人配额:token 100000、金额 100
+	q := int64(100000)
+	m := 100.0
+	u, err := serverstore.GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.QuotaTokens = &q
+	u.QuotaMoney = &m
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+
+	token := loginToken(t, r, "alice", "Alice@123")
+	w, out := doJSON(t, r, "GET", "/api/auth/usage", "", map[string]string{"Authorization": "Bearer " + token})
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage status = %d body=%s", w.Code, w.Body.String())
+	}
+	if out["is_admin"] != false {
+		t.Fatalf("is_admin = %v", out["is_admin"])
+	}
+	if out["quota_tokens"].(float64) != 100000 || out["quota_money"].(float64) != 100 {
+		t.Fatalf("quota = %v/%v", out["quota_tokens"], out["quota_money"])
+	}
+	// 本月已用 150 万 token / 3 元 → 剩余 985000 / 97
+	if out["monthly_usage"].(float64) != 1_500_000 {
+		t.Fatalf("monthly_usage = %v", out["monthly_usage"])
+	}
+	// 剩余 = 配额 - 本月已用 = 100000 - 1500000 = -1400000(超额为负)
+	if out["remaining_tokens"].(float64) != -1_400_000 {
+		t.Fatalf("remaining_tokens = %v", out["remaining_tokens"])
+	}
+	if out["monthly_cost"].(float64) != 3.0 {
+		t.Fatalf("monthly_cost = %v", out["monthly_cost"])
+	}
+	if out["remaining_money"].(float64) != 97.0 {
+		t.Fatalf("remaining_money = %v", out["remaining_money"])
+	}
+	if out["today_usage"].(float64) != 1_000_000 || out["today_cost"].(float64) != 2.0 {
+		t.Fatalf("today = %v/%v", out["today_usage"], out["today_cost"])
+	}
+	if out["yesterday_usage"].(float64) != 500_000 || out["yesterday_cost"].(float64) != 1.0 {
+		t.Fatalf("yesterday = %v/%v", out["yesterday_usage"], out["yesterday_cost"])
+	}
+	if out["total_usage"].(float64) != 1_500_000 || out["total_cost"].(float64) != 3.0 {
+		t.Fatalf("total = %v/%v", out["total_usage"], out["total_cost"])
+	}
+	if _, ok := out["dept_budgets"]; !ok {
+		t.Fatal("dept_budgets missing (want [])")
+	}
+
+	// 未登录 → 401
+	w, _ = doJSON(t, r, "GET", "/api/auth/usage", "", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("no token status = %d, want 401", w.Code)
+	}
+}
+
+// TestUsageSummaryUnlimitedAndAdmin: 无限配额 → remaining null;admin → 豁免。
+func TestUsageSummaryUnlimitedAndAdmin(t *testing.T) {
+	r, db, cleanup := newTestAPI(t)
+	defer cleanup()
+	createUser(t, db, "alice", "Alice@123", false)
+	createUser(t, db, "boss", "Boss@123", true)
+
+	token := loginToken(t, r, "alice", "Alice@123")
+	w, out := doJSON(t, r, "GET", "/api/auth/usage", "", map[string]string{"Authorization": "Bearer " + token})
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage status = %d", w.Code)
+	}
+	// 无配额配置 → remaining null
+	if v, present := out["remaining_tokens"]; !present || v != nil {
+		t.Fatalf("unlimited remaining_tokens = %v (present=%v), want null", v, present)
+	}
+	if v, present := out["remaining_money"]; !present || v != nil {
+		t.Fatalf("unlimited remaining_money = %v (present=%v), want null", v, present)
+	}
+
+	// admin:is_admin=true 且配额 0(豁免)
+	token2 := loginToken(t, r, "boss", "Boss@123")
+	w, out = doJSON(t, r, "GET", "/api/auth/usage", "", map[string]string{"Authorization": "Bearer " + token2})
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin usage status = %d", w.Code)
+	}
+	if out["is_admin"] != true {
+		t.Fatalf("admin is_admin = %v", out["is_admin"])
+	}
+	if v := out["remaining_tokens"]; v != nil {
+		t.Fatalf("admin remaining_tokens = %v, want null(豁免)", v)
+	}
+}
+
+func mustUID(t *testing.T, db *sql.DB, username string) int64 {
+	t.Helper()
+	u, err := serverstore.GetUserByUsername(db, username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.ID
+}
+
+func setUsageAt(t *testing.T, db *sql.DB, id int64, ts string) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", ts, id); err != nil {
+		t.Fatal(err)
 	}
 }

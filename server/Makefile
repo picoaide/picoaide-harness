@@ -4,11 +4,9 @@ BIN := bin/picoaide-server
 IMAGE ?= ghcr.io/picoaide/picoaide-server
 TAG ?= latest
 
-.PHONY: test test-server build-server webadmin docker-image check dev-env
-
-dev-env:
-	bash scripts/dev-env.sh
-	go test ./... -count=1
+# 客户端已下线(2026-08):仓库只保留服务端接口 + webadmin 管理端。
+# 测试/构建入口收敛为:test-server / webadmin / build-server / docker-image / check。
+.PHONY: test test-server build-server webadmin docker-image check
 
 test:
 	go test ./... -count=1
@@ -31,4 +29,5 @@ docker-image:
 check:
 	gofmt -l cmd internal | grep -v '^$$' && exit 1 || true
 	go vet ./cmd/... ./internal/...
-	$(MAKE) test
+	$(MAKE) test-server
+	cd webadmin && npm test && npm run build

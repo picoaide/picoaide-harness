@@ -280,6 +280,52 @@ func TestDeleteUserCleansKBFolderGrants(t *testing.T) {
 	}
 }
 
+// 0017: quota_tokens tri-state — nil (follow global) / 0 (unlimited) / >0 (cap).
+func TestUserQuotaTriState(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	i64p := func(n int64) *int64 { return &n }
+
+	id, err := CreateUser(db, &User{Username: "quota-tri", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := GetUserByID(db, id)
+	if u.QuotaTokens != nil {
+		t.Fatalf("default quota_tokens = %d, want nil (follow global)", *u.QuotaTokens)
+	}
+
+	u.QuotaTokens = i64p(0) // explicit unlimited
+	if err := UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	u2, _ := GetUserByID(db, id)
+	if u2.QuotaTokens == nil || *u2.QuotaTokens != 0 {
+		t.Fatalf("unlimited quota_tokens = %v, want 0", u2.QuotaTokens)
+	}
+
+	u2.QuotaTokens = i64p(5000) // explicit cap
+	if err := UpdateUser(db, u2); err != nil {
+		t.Fatal(err)
+	}
+	u3, _ := GetUserByID(db, id)
+	if u3.QuotaTokens == nil || *u3.QuotaTokens != 5000 {
+		t.Fatalf("capped quota_tokens = %v, want 5000", u3.QuotaTokens)
+	}
+
+	u3.QuotaTokens = nil // back to follow-global
+	if err := UpdateUser(db, u3); err != nil {
+		t.Fatal(err)
+	}
+	u4, _ := GetUserByID(db, id)
+	if u4.QuotaTokens != nil {
+		t.Fatalf("nil quota_tokens read back as %d, want nil", *u4.QuotaTokens)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -310,5 +356,76 @@ func TestSettings(t *testing.T) {
 	}
 	if all["a"] != "2" || all["b"] != "x" || len(all) != 2 {
 		t.Fatalf("all: %v", all)
+	}
+}
+
+// 删除担任部门主管的用户:groups.leader_id 必须清零(审计 M1),
+// 否则残留悬空主管 → 该部门后续任何 UpdateDepartment 都报「主管不存在」。
+func TestDeleteUserClearsDeptLeadership(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	leadID, err := CreateUserWithPassword(db, "lead", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deptID, err := CreateDepartment(db, "研发部", 0, leadID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 删除主管
+	if err := DeleteUser(db, leadID); err != nil {
+		t.Fatalf("delete leader user: %v", err)
+	}
+	var leaderID int64
+	if err := db.QueryRow("SELECT leader_id FROM groups WHERE id = ?", deptID).Scan(&leaderID); err != nil {
+		t.Fatal(err)
+	}
+	if leaderID != 0 {
+		t.Fatalf("groups.leader_id = %d after leader delete, want 0", leaderID)
+	}
+	// 部门仍可正常更新(不再被悬空主管卡死)
+	if err := UpdateDepartment(db, deptID, "技术中心", 0, 0, ""); err != nil {
+		t.Fatalf("update dept after leader delete: %v", err)
+	}
+}
+
+// 用户名搜索必须转义 LIKE 通配符(审计 L5):搜 "%"/"_" 不得匹配全部/任意单字符
+func TestListUsersEscapesLikeWildcards(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alice_1", "bob1", "100%", "carol"} {
+		if _, err := CreateUserWithPassword(db, name, "pw123456"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 搜 "%" → 只应命中含字面 % 的 "100%"
+	users, total, err := ListUsers(db, 0, 20, "%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(users) != 1 || users[0].Username != "100%" {
+		t.Fatalf("search '%%' total=%d users=%+v, want only 100%%", total, users)
+	}
+	// 搜 "_" → 不应命中任意单字符(alice_1 含字面下划线,可命中)
+	users, total, err = ListUsers(db, 0, 20, "_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || users[0].Username != "alice_1" {
+		t.Fatalf("search '_' total=%d users=%+v, want only alice_1", total, users)
+	}
+	// 搜 "1" 正常子串仍命中(alice_1/bob1/100% 都含 '1')
+	users, total, err = ListUsers(db, 0, 20, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("search '1' total=%d, want 3 (alice_1, bob1, 100%%)", total)
 	}
 }

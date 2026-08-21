@@ -3,6 +3,7 @@ package knowledge
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // contentScoreWindow caps the content window used for lexical scoring: a
@@ -82,6 +83,15 @@ func newLexicalSim(query string) *lexicalSim {
 	return &lexicalSim{uni: u, bi: b}
 }
 
+// unigrams returns the query unigram keys (for content-window anchoring).
+func (l *lexicalSim) unigrams() []string {
+	out := make([]string, 0, len(l.uni))
+	for k := range l.uni {
+		out = append(out, k)
+	}
+	return out
+}
+
 // similarity returns query-vs-document relevance in [0,1]: content window
 // 60% + title 40% (title weighting), 0 when nothing matches. The content
 // window is anchored at the first query-term occurrence so hits deep in a
@@ -106,10 +116,14 @@ func contentWindow(content string, l *lexicalSim) string {
 		return content
 	}
 	first := -1
-	for i, r := range runes {
-		if l.uni[string(r)] {
-			first = i
-			break
+	// 拉丁查询词的 unigram 是整词("reimbursement"),单 rune 比对永远不命中
+	// (审计2026-S26):按 unigram 子串首次出现定位锚点(CJK 单 rune unigram 语义不变)
+	for _, u := range l.unigrams() {
+		if idx := strings.Index(content, u); idx >= 0 {
+			pos := utf8.RuneCountInString(content[:idx])
+			if first < 0 || pos < first {
+				first = pos
+			}
 		}
 	}
 	if first < 0 {

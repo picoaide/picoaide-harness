@@ -63,7 +63,8 @@ func HTTPFetch(ctx context.Context, url, apiKey string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New("upstream status " + resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	// 模型列表响应有上限:恶意/异常上游不得把无限响应体灌进服务端内存
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 type oaiModelsResponse struct {

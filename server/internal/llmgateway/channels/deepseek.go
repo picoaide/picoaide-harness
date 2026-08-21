@@ -1,6 +1,9 @@
 package channels
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // DeepSeek 渠道:官方 OpenAI 兼容 API。
 type DeepSeek struct{}
@@ -25,7 +28,12 @@ func (d DeepSeek) FetchModels(ctx context.Context, apiKey string, fetchFn func(u
 }
 
 // RequestOverrides:强制思考模式 max;思考模式不支持 4 个采样参数,删除。
+// 模型感知:reasoner 系列不接受 reasoning_effort(上游 400),对其返回 no-op;
+// 自定义 baseURL 的兼容模型可经任意其它渠道名接入,deepseek 渠道只覆盖官方模型。
 func (d DeepSeek) RequestOverrides(modelID string) (map[string]any, []string) {
+	if strings.Contains(strings.ToLower(modelID), "reasoner") {
+		return nil, nil
+	}
 	return map[string]any{
 		"thinking":         map[string]any{"type": "enabled"},
 		"reasoning_effort": "max",
