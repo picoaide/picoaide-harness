@@ -166,10 +166,9 @@ async function runOAuth(def, options) {
 		resolveCode = resolve;
 		rejectCode = reject;
 	});
-	const redirectUri = `http://${callbackHost}:${await new Promise((resolve, reject) => {
+	const port = await new Promise((resolve, reject) => {
 		const server = createServer((req, res) => {
-			const address = server.address();
-			const url = new URL(req.url ?? "/", `http://${callbackHost}:${address.port}`);
+			const url = new URL(req.url ?? "/", `http://${callbackHost}:${port}`);
 			if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) {
 				res.writeHead(404);
 				res.end("not found");
@@ -177,9 +176,13 @@ async function runOAuth(def, options) {
 			}
 			const codeParam = url.searchParams.get("code");
 			const errorParam = url.searchParams.get("error");
-			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+			res.writeHead(200, {
+				"Content-Type": "text/html; charset=utf-8",
+				Connection: "close"
+			});
 			res.end("<html><body><p>授权完成，可以关闭此窗口。</p></body></html>");
 			server.close();
+			server.closeIdleConnections();
 			if (errorParam) {
 				rejectCode(/* @__PURE__ */ new Error(`OAuth 授权失败: ${errorParam}`));
 				return;
@@ -191,7 +194,8 @@ async function runOAuth(def, options) {
 			resolve(server.address().port);
 		});
 		server.on("error", reject);
-	})}/callback`;
+	});
+	const redirectUri = `http://${callbackHost}:${port}/callback`;
 	const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint;
 	const clientId = registrationEndpoint ? await registerClient(auth, redirectUri, registrationEndpoint) : auth.clientId || "";
 	if (!clientId) throw new Error("OAuth 服务器不支持动态客户端注册，且未配置固定 clientId");
@@ -1366,14 +1370,23 @@ function apply(ctx, options = {}) {
 	};
 	ctx.effect(() => {
 		for (const def of defs) (async () => {
-			const credential = await store.readCredential(def.id);
-			if (!credential) return;
-			const refreshed = await refreshOAuthToken(def, credential);
-			if ((refreshed ? await store.updateCredential(def.id, refreshed) : credential).accessToken) {
-				await registerMcp(def);
+			try {
+				const credential = await store.readCredential(def.id);
+				if (!credential) return;
+				const refreshed = await refreshOAuthToken(def, credential);
+				if ((refreshed ? await store.updateCredential(def.id, refreshed) : credential).accessToken) {
+					await registerMcp(def);
+					setState(def.id, {
+						status: "connected",
+						everConnected: true
+					});
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`);
 				setState(def.id, {
-					status: "connected",
-					everConnected: true
+					status: "error",
+					error: message
 				});
 			}
 		})();
