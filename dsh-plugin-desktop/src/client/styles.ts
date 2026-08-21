@@ -41,6 +41,25 @@ html:has([aria-modal="true"]) .dshDesktopWindowsCaptionRow::before,
 html:has([aria-modal="true"]) .dshDesktopMacCaptionRow::before,
 html:has([aria-modal="true"]) .dshDesktopSidebarSurface,
 html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-region: no-drag !important; }
+/* Windows Window-Controls-Overlay coexistence: the advanced window draws the
+   native caption controls (minimize/maximize/close) at the top-right corner
+   OVER the web content (titleBarOverlay, height WINDOWS_TITLEBAR_HEIGHT).
+   Viewport-pinned third-party surfaces that claim the top-right corner (the
+   better-sidebar toggle cluster, and its right panel's tab strip while open)
+   would land under those controls, so in advanced Windows mode we drop them
+   below the caption band. Selectors follow the better-sidebar skinning
+   contract: scope to [data-dsh-better-sidebar] and match its CSS-module
+   hashed classes by stable local-name substring; the :not() list excludes
+   the panel body, drag handle, collapsed and bottom-panel surfaces. The
+   strip height composes with the plugin's own --dsh-title-bar-strip
+   variable (title-bar compat pref): the effective band is at least the
+   native overlay height, more if the user reserved a taller strip. */
+body[data-dsh-desktop-mode="advanced"][data-dsh-desktop-platform="win32"] [data-dsh-better-sidebar] [class*='toggleCluster'] {
+  top: calc(max(var(--dsh-title-bar-strip, 0px), ${WINDOWS_TITLEBAR_HEIGHT}px) + 3px);
+}
+body[data-dsh-desktop-mode="advanced"][data-dsh-desktop-platform="win32"] [data-dsh-better-sidebar] [class*='panel']:not([class*='panelHidden']):not([class*='panelBody']):not([class*='panelResize']):not([class*='bottomPanel']) {
+  padding-top: max(var(--dsh-title-bar-strip, 0px), ${WINDOWS_TITLEBAR_HEIGHT}px);
+}
 @media (prefers-reduced-motion: reduce) { .dshDesktopFrame { transition: none !important; } }
 `
 
