@@ -28,6 +28,13 @@ export interface NativeView {
   setVisible(visible: boolean): void
   /** Remove the view from the window. */
   detach(): void
+  /**
+   * Raise this view to the TOP of the window's child stack. Electron's
+   * WebContentsView z-order follows attach order; re-attaching (remove+add)
+   * is the reliable way to bring a view forward, and the adapter must pass
+   * the NATIVE view (not this wrapper) to contentView.
+   */
+  moveToTop(win: NativeBrowserWindow): void
   /** The webContents driving this view (loading, capture, CDP). */
   readonly webContents: NativeWebContents
   /** Destroy the underlying view. */
@@ -177,6 +184,16 @@ export function createRealElectronAdapter(): ElectronAdapter {
       detach() {
         // WebContentsView removes itself from its parent on close; nothing
         // to do here beyond releasing the reference (the window owns it).
+      },
+      moveToTop(win) {
+        // Re-attach the NATIVE view so it lands on top of every sibling.
+        try {
+          win.contentView.removeChildView(view)
+        } catch {
+          // A never-attached view cannot be removed; adding it again is
+          // harmless either way.
+        }
+        win.contentView.addChildView(view)
       },
       webContents: {
         cdp: wc.debugger,

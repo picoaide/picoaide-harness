@@ -66,7 +66,11 @@ const LOGIN_HTML = `<!DOCTYPE html>
       username: document.getElementById('username').value.trim(),
       password: document.getElementById('password').value,
     }
+    // Loading state: disable the button and show progress so repeated
+    // clicks are impossible and the user sees the request is in flight.
     btn.disabled = true
+    const btnLabel = btn.textContent
+    btn.textContent = '登录中…'
     try {
       const res = await fetch('/api/pico/auth/login', {
         method: 'POST',
@@ -75,13 +79,30 @@ const LOGIN_HTML = `<!DOCTYPE html>
       })
       if (res.ok) { location.replace('/' + location.search); return }
       const data = await res.json().catch(() => ({}))
-      err.textContent = data.error?.message || data.error || ('登录失败 (' + res.status + ')')
+      // Localize raw gateway error codes; keep the server message when the
+      // gateway already shipped a human-readable one.
+      const raw = String(data.error?.message || data.error || '')
+      err.textContent = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
     } catch (e2) {
-      err.textContent = '网络错误'
+      err.textContent = '网络错误，请检查服务端地址后重试'
     } finally {
       btn.disabled = false
+      btn.textContent = btnLabel
     }
   })
+  // Friendly message for common raw gateway error codes (server sends
+  // machine-readable codes; the login page must not show them verbatim).
+  // NOTE: this runs inside an inline <script> — plain JS only, no TS syntax.
+  const friendlyLoginError = (raw) => {
+    const code = raw.toLowerCase()
+    if (code.includes('invalid_credentials') || code.includes('invalid credentials') || code.includes('unauthorized')) {
+      return '账号或密码错误'
+    }
+    if (code.includes('rate') || code.includes('too many')) return '登录尝试过于频繁，请稍后再试'
+    if (code.includes('network') || code.includes('timeout') || code.includes('econnrefused')) return '无法连接服务端，请检查地址与网络'
+    if (code.includes('disabled') || code.includes('inactive')) return '账号已被禁用，请联系管理员'
+    return raw
+  }
 </script>
 </body>
 </html>`
