@@ -429,3 +429,37 @@ func TestListUsersEscapesLikeWildcards(t *testing.T) {
 		t.Fatalf("search '1' total=%d, want 3 (alice_1, bob1, 100%%)", total)
 	}
 }
+
+func TestParseSQLTimeLocalZone(t *testing.T) {
+	// 数据库写 datetime('now','localtime') 无时区串;解析必须按本地时区,
+	// 否则 CST(+08:00) 下 time.Since 为负,孤儿文档回收等按年龄的逻辑失效。
+	orig := time.Local
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Skipf("no Asia/Shanghai tzdata: %v", err)
+	}
+	time.Local = loc
+	defer func() { time.Local = orig }()
+
+	now := time.Now()
+	got := parseSQLTime(now.Format(sqlTimeFormat))
+	if got.Location() != loc {
+		t.Fatalf("parseSQLTime location = %v, want %v", got.Location(), loc)
+	}
+	if d := now.Sub(got); d > 2*time.Second || d < -2*time.Second {
+		t.Fatalf("parseSQLTime(%q) = %v, now.Sub = %v, want ~0", now.Format(sqlTimeFormat), got, d)
+	}
+	if !got.Equal(now) && !got.After(now.Add(-2*time.Second)) {
+		t.Fatalf("parseSQLTime(%q) = %v, want near %v", now.Format(sqlTimeFormat), got, now)
+	}
+
+	// RFC3339 带时区串不受 local 影响
+	rfc, err := time.Parse(time.RFC3339, "2026-08-01T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRFC := parseSQLTime(rfc.Format(time.RFC3339))
+	if !gotRFC.Equal(rfc) {
+		t.Fatalf("parseSQLTime RFC3339 = %v, want %v", gotRFC, rfc)
+	}
+}
