@@ -295,14 +295,23 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
   ctx.effect(() => {
     for (const def of defs) {
       void (async () => {
-        const credential = await store.readCredential(def.id)
-        if (!credential) return
-        // Refresh OAuth tokens before restoring, then register the MCP servers.
-        const refreshed = await refreshOAuthToken(def, credential)
-        const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
-        if (effective.accessToken) {
-          await registerMcp(def)
-          setState(def.id, { status: 'connected', everConnected: true })
+        try {
+          const credential = await store.readCredential(def.id)
+          if (!credential) return
+          // Refresh OAuth tokens before restoring, then register the MCP servers.
+          const refreshed = await refreshOAuthToken(def, credential)
+          const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
+          if (effective.accessToken) {
+            await registerMcp(def)
+            setState(def.id, { status: 'connected', everConnected: true })
+          }
+        } catch (error) {
+          // A restore failure (network, missing dependency, MCP connect) must
+          // not become an unhandled rejection: the host treats those as fatal
+          // and exits the whole app. Surface it on the connector row instead.
+          const message = error instanceof Error ? error.message : String(error)
+          ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`)
+          setState(def.id, { status: 'error', error: message })
         }
       })()
     }
