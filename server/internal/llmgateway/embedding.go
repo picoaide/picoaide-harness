@@ -187,6 +187,10 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
 		return
 	}
+	if blocked, msg := a.quotaBlocked(user); blocked {
+		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
+		return
+	}
 	ups, err := MatchModels(a.DB, req.Model)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
@@ -201,7 +205,7 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用")
 		return
 	}
-	if _, err := serverstore.RecordUsage(a.DB, user.ID, req.Model, tokens, 0); err != nil {
+	if _, err := serverstore.RecordUsageKind(a.DB, user.ID, req.Model, tokens, 0, "embedding"); err != nil {
 		log.Printf("gateway: record embed usage: %v", err)
 	}
 	c.JSON(http.StatusOK, gin.H{

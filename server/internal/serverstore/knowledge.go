@@ -134,6 +134,46 @@ func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
 	return &d, nil
 }
 
+// ListPendingKBDocuments returns every pending row (oldest first) so the
+// upload queue can detect orphans (missing raw files) and claim by id
+// without letting one bad row block the head forever (审计 H2).
+func ListPendingKBDocuments(db *sql.DB) ([]KBDocument, error) {
+	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents WHERE status = 'pending' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KBDocument
+	for rows.Next() {
+		var d KBDocument
+		var created string
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error); err != nil {
+			return nil, err
+		}
+		d.CreatedAt = parseSQLTime(created)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ClaimPendingKBDocumentByID claims one specific pending row (CAS), the
+// per-row variant of ClaimPendingKBDocument: the queue first verifies the
+// raw file exists, then claims by id so a stale list entry (already claimed
+// by another worker) fails with ErrNotFound instead of being stolen.
+func ClaimPendingKBDocumentByID(db *sql.DB, id int64) (*KBDocument, error) {
+	claimMu.Lock()
+	defer claimMu.Unlock()
+	res, err := db.Exec("UPDATE kb_documents SET status = 'processing' WHERE id = ? AND status = 'pending'", id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return GetKBDocument(db, id)
+}
+
 // ReleaseClaim returns a claimed-but-unprocessable row to the queue
 // (pending) so another worker can pick it up; no-op when the row was
 // already completed by its owner.
@@ -181,7 +221,9 @@ func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
 
 // RetryKBDocument re-queues a failed upload for extraction.
 func RetryKBDocument(db *sql.DB, id int64) error {
-	res, err := db.Exec("UPDATE kb_documents SET status = 'pending', error = '' WHERE id = ?", id)
+	// 状态守卫(审计2026-L10):仅 error/pending 可重排;processing 行由 worker
+	// 独占声明(CAS),重排会破坏排他性导致双重提取/文件竞态删除
+	res, err := db.Exec("UPDATE kb_documents SET status = 'pending', error = '' WHERE id = ? AND status IN ('error', 'pending')", id)
 	if err != nil {
 		return err
 	}
@@ -231,8 +273,9 @@ func GrantFolderUser(db *sql.DB, folderID int64, username string) error {
 }
 
 // GrantFolderGroup grants folder access to a group by name (idempotent).
+// 组必须已存在(不自动创建):拼错的部门名不得静默建幽灵部门/永不生效
 func GrantFolderGroup(db *sql.DB, folderID int64, groupName string) error {
-	gid, err := GetOrCreateGroup(db, groupName)
+	gid, err := GroupByName(db, groupName)
 	if err != nil {
 		return err
 	}
@@ -248,8 +291,9 @@ func RevokeFolderUser(db *sql.DB, folderID int64, username string) error {
 }
 
 // RevokeFolderGroup removes a group grant by name (idempotent).
+// 组名匹配 NOCASE:与授权解析口径一致,大小写变体的 revoke 不得静默失效
 func RevokeFolderGroup(db *sql.DB, folderID int64, groupName string) error {
-	_, err := db.Exec("DELETE FROM kb_folder_groups WHERE folder_id = ? AND group_id = (SELECT id FROM groups WHERE name = ?)", folderID, groupName)
+	_, err := db.Exec("DELETE FROM kb_folder_groups WHERE folder_id = ? AND group_id = (SELECT id FROM groups WHERE name = ? COLLATE NOCASE)", folderID, groupName)
 	return err
 }
 
@@ -456,6 +500,79 @@ func ListKBDocumentsPaged(db *sql.DB, folderID int64, offset, limit int) ([]KBDo
 		}
 		d.CreatedAt = parseSQLTime(createdAt)
 		out = append(out, d)
+	}
+	return out, total, rows.Err()
+}
+
+// ListAllKBDocumentsPaged returns one page of documents across every folder
+// (folder_id=-1 admin view, 审计 M4), newest first.
+func ListAllKBDocumentsPaged(db *sql.DB, offset, limit int) ([]KBDocument, int64, error) {
+	var total int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents").Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []KBDocument
+	for rows.Next() {
+		var d KBDocument
+		var createdAt string
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &createdAt, &d.Status, &d.Error); err != nil {
+			return nil, 0, err
+		}
+		d.CreatedAt = parseSQLTime(createdAt)
+		out = append(out, d)
+	}
+	return out, total, rows.Err()
+}
+
+// ListAuditLogsPagedFiltered returns one page of audit entries (newest
+// first) optionally filtered by action/username (审计 M8), plus the total
+// for the filtered set.
+func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username string) ([]KBAuditLog, int64, error) {
+	where := ""
+	args := []any{}
+	if action != "" {
+		where += " AND action = ?"
+		args = append(args, action)
+	}
+	if username != "" {
+		where += " AND username = ?"
+		args = append(args, username)
+	}
+	where = strings.TrimPrefix(where, " AND ")
+	var total int64
+	countQ := "SELECT COUNT(*) FROM kb_audit_logs"
+	if where != "" {
+		countQ += " WHERE " + where
+	}
+	if err := db.QueryRow(countQ, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	q := "SELECT id, username, action, detail, created_at FROM kb_audit_logs"
+	if where != "" {
+		q += " WHERE " + where
+	}
+	q += " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []KBAuditLog
+	for rows.Next() {
+		var l KBAuditLog
+		var created string
+		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &created); err != nil {
+			return nil, 0, err
+		}
+		l.CreatedAt = parseSQLTime(created)
+		out = append(out, l)
 	}
 	return out, total, rows.Err()
 }

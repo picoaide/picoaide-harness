@@ -207,6 +207,47 @@ func UpdateKBDocumentWithChunks(db *sql.DB, id int64, title, content, contentTyp
 	return tx.Commit()
 }
 
+// AdoptKBDocumentEdit overwrites title/content (replacing chunks) and
+// transitions a pending/error document to ready in one transaction — "edit
+// takes over". After an adopt the row is ready, so the async queue can
+// never clobber the edited content with the stale raw-file extraction; the
+// caller removes the raw file accordingly (审计 H3).
+func AdoptKBDocumentEdit(db *sql.DB, id int64, title, content, contentType string, chunks []KBChunk) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE kb_documents SET title = ?, content = ?, content_type = ?, size = ?,
+		status = 'ready', error = '' WHERE id = ? AND status IN ('pending', 'processing', 'error')`,
+		title, content, contentType, len(content), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// already ready: same write without the status transition
+		if _, err := tx.Exec(`UPDATE kb_documents SET title = ?, content = ?, content_type = ?, size = ?
+			WHERE id = ?`, title, content, contentType, len(content), id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM kb_chunks WHERE doc_id = ?", id); err != nil {
+		return err
+	}
+	for _, c := range chunks {
+		c.DocID = id
+		if _, err := tx.Exec(`INSERT INTO kb_chunks (doc_id, seq, title_path, content, char_start, char_end)
+			VALUES (?, ?, ?, ?, ?, ?)`, c.DocID, c.Seq, c.TitlePath, c.Content, c.CharStart, c.CharEnd); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // CompleteKBDocumentWithChunks finishes an async upload with its chunks in
 // one transaction; semantics match CompleteKBDocument (CAS on the claimed
 // processing state).

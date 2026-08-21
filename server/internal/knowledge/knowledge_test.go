@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -276,6 +278,50 @@ func TestProcessPendingSkipsMissingFile(t *testing.T) {
 	}
 	if doc.Status != "pending" || doc.Error != "" {
 		t.Fatalf("doc = %+v, want pending with no error (skipped)", doc)
+	}
+}
+
+// H2: an orphaned pending row (raw file missing beyond the grace period,
+// e.g. crash mid-save + startup temp sweep) is marked error so it can never
+// block the queue head; healthy docs behind it still drain.
+func TestProcessPendingOrphanMarkedError(t *testing.T) {
+	db := kbDB(t)
+	dir := t.TempDir()
+	id, err := serverstore.CreatePendingKBDocument(db, 0, "孤儿文档", "text", 5, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id, err)
+	}
+	// age the row beyond the grace period (INSERT→Rename window is ~instant)
+	if _, err := db.Exec("UPDATE kb_documents SET created_at = datetime('now','localtime','-1 hour') WHERE id = ?", id); err != nil {
+		t.Fatal(err)
+	}
+	if !processNextPending(db, dir) {
+		t.Fatal("processNextPending should report work for an orphaned row")
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Status != "error" || !strings.Contains(doc.Error, "原始文件") {
+		t.Fatalf("doc = %+v, want error (orphan, missing raw file)", doc)
+	}
+	// a healthy doc behind the orphan still drains in the next call
+	id2, err := serverstore.CreatePendingKBDocument(db, 0, "健康文档", "text", 5, "upload", "admin")
+	if err != nil || id2 == 0 {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, strconv.FormatInt(id2, 10)), []byte("健康内容"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !processNextPending(db, dir) {
+		t.Fatal("healthy doc should be processed")
+	}
+	d2, err := serverstore.GetKBDocument(db, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d2.Status != "ready" {
+		t.Fatalf("healthy doc = %+v, want ready", d2)
 	}
 }
 

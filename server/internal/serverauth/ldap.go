@@ -106,8 +106,14 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 	if err := conn.Bind(entry.DN, password); err != nil {
 		return UserInfo{}, errors.New("invalid credentials")
 	}
+	// 用户名取目录条目的 uid 属性(规范化大小写):LDAP 绑定大小写不敏感,
+	// 用户手输 "Alice"/"alice" 必须落到同一本地账号,否则授权/token 分裂
+	canonical := entry.GetAttributeValue("uid")
+	if canonical == "" {
+		canonical = username
+	}
 	ui := UserInfo{
-		Username:    username,
+		Username:    canonical,
 		DisplayName: entry.GetAttributeValue("cn"),
 		Email:       entry.GetAttributeValue("mail"),
 		Source:      "external",

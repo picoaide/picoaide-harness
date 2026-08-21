@@ -49,6 +49,10 @@ func Search(db *sql.DB, username string, groups []string, query string, page, pa
 	if err != nil {
 		return nil, 0, err
 	}
+	if len(folders) == 0 {
+		// 零可访问文件夹:空集早退(审计2026-L1,不依赖驱动的空 IN () 宽容)
+		return []SearchResult{}, 0, nil
+	}
 	return searchInFolders(db, folders, query, page, pageSize)
 }
 

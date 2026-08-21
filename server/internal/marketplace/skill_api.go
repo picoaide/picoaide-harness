@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,7 @@ func NewAPI(db *sql.DB, cacheDir string) *API {
 func (a *API) RegisterRoutes(r *gin.Engine) {
 	g := r.Group("/api/marketplace", serverauth.BearerAuth(a.DB))
 	g.GET("/skills", a.listSkills)
+	g.GET("/skills/updates", a.skillUpdates)
 	g.GET("/skills/:name", a.getSkill)
 	g.GET("/skills/:name/archive", a.downloadArchive)
 	g.GET("/mcp", a.listMCP)
@@ -68,7 +70,8 @@ func (a *API) viewer(c *gin.Context) (u *serverstore.User, groups []string, ok b
 	if u == nil {
 		return nil, nil, false
 	}
-	groups, err := serverstore.UserGroups(a.DB, u.ID)
+	// 有效组(部门树继承)
+	groups, err := serverstore.UserEffectiveGroups(a.DB, u.ID)
 	if err != nil {
 		return nil, nil, false
 	}
@@ -141,6 +144,71 @@ func (a *API) listSkills(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"skills": skills})
 }
 
+// parseInstalled parses the `installed` query param: "name:version" pairs
+// separated by commas (URL-encoded). Bounds: ≤100 items, safe names.
+func parseInstalled(v string) (map[string]string, error) {
+	out := map[string]string{}
+	if v == "" {
+		return out, nil
+	}
+	items := strings.Split(v, ",")
+	if len(items) > 100 {
+		return nil, fmt.Errorf("installed 超过 100 项")
+	}
+	for _, it := range items {
+		name, ver, ok := strings.Cut(it, ":")
+		if !ok || name == "" || strings.TrimSpace(ver) == "" {
+			return nil, fmt.Errorf("installed 格式错误(应为 name:version,逗号分隔)")
+		}
+		if !util.SafePathSegment(name) {
+			return nil, fmt.Errorf("技能名不合法")
+		}
+		out[name] = strings.TrimSpace(ver)
+	}
+	return out, nil
+}
+
+// skillUpdates returns skills that have a newer version than the client's
+// installed set (auto-upgrade detection for connecting clients). Permission
+// model matches the catalog: admins see all enabled skills, everyone else
+// only granted skills; disabled skills never appear.
+func (a *API) skillUpdates(c *gin.Context) {
+	u, groups, ok := a.viewer(c)
+	if !ok {
+		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
+	installed, err := parseInstalled(c.Query("installed"))
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+	if len(installed) == 0 {
+		c.JSON(http.StatusOK, gin.H{"updates": []gin.H{}, "count": 0})
+		return
+	}
+	list, err := a.accessibleSkills(u, groups)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能列表读取失败")
+		return
+	}
+	updates := make([]gin.H, 0)
+	for _, s := range list {
+		clientVer, present := installed[s.Name]
+		if !present || s.Version == clientVer {
+			continue
+		}
+		updates = append(updates, gin.H{
+			"name":        s.Name,
+			"version":     s.Version,
+			"description": s.Description,
+			"author":      s.Author,
+			"archive_url": "/api/marketplace/skills/" + s.Name + "/archive",
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"updates": updates, "count": len(updates)})
+}
+
 func (a *API) getSkill(c *gin.Context) {
 	u, groups, ok := a.viewer(c)
 	if !ok {
@@ -156,11 +224,8 @@ func (a *API) getSkill(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
-	if s.Enabled != 1 {
-		// 与 downloadArchive 一致:下架即不可读,不泄露元数据
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
-		return
-	}
+	// 授权检查先于下架检查(审计2026-L13):未授权用户对"存在但下架"与"不存在"
+	// 必须得到同一 404,不得用消息区分资源状态
 	if !u.IsAdmin {
 		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
 		if err != nil || !containsName(names, s.Name) {
@@ -168,6 +233,11 @@ func (a *API) getSkill(c *gin.Context) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
 		}
+	}
+	if s.Enabled != 1 {
+		// 与 downloadArchive 一致:下架即不可读,不泄露元数据
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }
@@ -196,11 +266,7 @@ func (a *API) downloadArchive(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
-	if s.Enabled != 1 {
-		// C-10: 下架即不可下载,与不存在同响应(与 MCP 插件一致)
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
-		return
-	}
+	// 授权先于下架(审计2026-L13)
 	if !u.IsAdmin {
 		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
 		if err != nil || !containsName(names, s.Name) {
@@ -208,6 +274,11 @@ func (a *API) downloadArchive(c *gin.Context) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
 		}
+	}
+	if s.Enabled != 1 {
+		// C-10: 下架即不可下载,与不存在同响应(与 MCP 插件一致)
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
+		return
 	}
 	if !util.SafePathSegment(s.Name) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
@@ -321,9 +392,11 @@ func (a *API) getMCPConfig(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件已下架")
 		return
 	}
-	// 严格授权:未授权用户与不存在同响应,不泄露存在性
+	// 严格授权:未授权用户与不存在同响应,不泄露存在性。
+	// 组解析必须用 effective groups(祖先链 + 主管子树 + 隐式全员),
+	// 与列表/bootstrap 同口径——否则子部门成员看得到插件却拉不到配置。
 	if !u.IsAdmin {
-		groups, gerr := serverstore.UserGroups(a.DB, u.ID)
+		groups, gerr := serverstore.UserEffectiveGroups(a.DB, u.ID)
 		if gerr != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "插件读取失败")
 			return
@@ -396,13 +469,33 @@ func mcpJSON(m serverstore.MCPServer, env, headers map[string]string) gin.H {
 		"url":         m.URL,
 		"env":         env,
 		"headers":     headers,
+		// 审计 A5-H1: 前端用 enabled 渲染上架/已下架徽标与下架/重新上架按钮,
+		// 缺失该字段曾导致管理页所有插件恒显「已下架」且无法下架。
+		"enabled": m.Enabled == 1,
 	}
 }
 
+// maskValues masks every env/headers value ("***"). Used by the client-facing
+// suggestion list: clients must not see any configured value.
 func maskValues(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k := range m {
 		out[k] = "***"
+	}
+	return out
+}
+
+// maskSensitiveValues masks only values under sensitive keys (credentials);
+// non-sensitive values (TIMEOUT, URL, …) stay readable for admins, so the
+// webadmin edit form can prefill them without re-typing secrets.
+func maskSensitiveValues(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if sensitiveEnvKey(k) {
+			out[k] = "***"
+		} else {
+			out[k] = v
+		}
 	}
 	return out
 }

@@ -201,6 +201,9 @@ func TestAdminKBRevokeGrant(t *testing.T) {
 	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := serverstore.CreateDepartment(db, "devs", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("grant: %d", w.Code)
 	}
@@ -505,5 +508,227 @@ func TestAdminKBPagedDocsAndAudit(t *testing.T) {
 	logs := out["logs"].([]any)
 	if len(logs) != 3 || logs[0].(map[string]any)["action"] != "kb_upload" {
 		t.Fatalf("logs = %v", logs)
+	}
+}
+
+// 文件夹删除:空文件夹可删;有文档/授权 → 拒绝
+func TestAdminDeleteFolder(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	w, out := kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"空文件夹"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: %d", w.Code)
+	}
+	fid := int64(out["folder"].(map[string]any)["id"].(float64))
+	// 空 → 可删
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid), "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("delete empty: %d %s", w.Code, w.Body.String())
+	}
+	// 有文档 → 拒绝
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"有文档"}`, hdr)
+	fid2 := int64(out["folder"].(map[string]any)["id"].(float64))
+	if _, err := IndexDocument(db, fid2, "x", "y", "text", "upload", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid2), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with docs = %d, want 400", w.Code)
+	}
+	// 有授权 → 拒绝
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"有授权"}`, hdr)
+	fid3 := int64(out["folder"].(map[string]any)["id"].(float64))
+	if _, err := serverstore.CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", fid3), `{"group":"研发部"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("grant: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid3), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with grants = %d, want 400", w.Code)
+	}
+	// 有子文件夹 → 拒绝(删除父目录不得把子文件夹悬挂为孤儿)
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"父目录"}`, hdr)
+	parentID := int64(out["folder"].(map[string]any)["id"].(float64))
+	if w, _ := kbReq(t, r, "POST", "/api/admin/kb/folders", fmt.Sprintf(`{"name":"子目录","parent_id":%d}`, parentID), hdr); w.Code != http.StatusOK {
+		t.Fatalf("create child: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", parentID), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with children = %d, want 400", w.Code)
+	}
+	// JSON 上传不存在的 folder_id → 400(与 multipart 同口径)
+	if w, _ := kbReq(t, r, "POST", "/api/admin/kb/upload", `{"title":"x","content":"y","folder_id":99999}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("json upload unknown folder_id = %d, want 400", w.Code)
+	}
+	// 不存在 → 404
+	if w, _ := kbReq(t, r, "DELETE", "/api/admin/kb/folders/99999", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing = %d, want 404", w.Code)
+	}
+}
+
+// H3: editing a pending/processing document must be rejected — the async
+// worker would later overwrite the edit with the raw file extraction.
+func TestUpdateDocRejectsPending(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	id, err := serverstore.CreatePendingKBDocument(db, 0, "处理中", "text", 5, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatal(err)
+	}
+	w, out := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", id),
+		`{"title":"改标题","content":"改内容"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("edit pending = %d %s, want 400", w.Code, w.Body.String())
+	}
+	if code := out["error"].(map[string]any)["code"]; code != "VALIDATION" {
+		t.Fatalf("error code = %v, want VALIDATION", code)
+	}
+}
+
+// H3: editing an error document adopts it — the edit takes over, the row
+// becomes ready, and the raw file is removed so a later retry can never
+// clobber the edited content.
+func TestUpdateDocAdoptsError(t *testing.T) {
+	r, db, hdr, uploadsDir := kbAdminSetup(t)
+	defer db.Close()
+	id, err := serverstore.CreatePendingKBDocument(db, 0, "坏文档", "text", 5, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE kb_documents SET status='error', error='提取失败' WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadsDir, fmt.Sprint(id)), []byte("原始内容"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", id),
+		`{"title":"修复后标题","content":"修复后内容"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("edit error doc = %d %s, want 200", w.Code, w.Body.String())
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Status != "ready" || doc.Error != "" || doc.Content != "修复后内容" || doc.Title != "修复后标题" {
+		t.Fatalf("doc after adopt = %+v", doc)
+	}
+	if _, err := os.Stat(filepath.Join(uploadsDir, fmt.Sprint(id))); !os.IsNotExist(err) {
+		t.Fatalf("raw file must be removed after edit adopts the doc")
+	}
+	// a retry after the edit is a no-op (already ready) — the edit survives
+	if w, _ := kbReq(t, r, "POST", fmt.Sprintf("/api/admin/kb/documents/%d/retry", id), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("retry after adopt = %d, want 400 (already ready)", w.Code)
+	}
+}
+
+// M2: search supports an optional folder_id filter (0/-1/absent = all).
+func TestAdminKBSearchFolderFilter(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	w, out := kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"A部"}`, hdr)
+	fa := int64(out["folder"].(map[string]any)["id"].(float64))
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"B部"}`, hdr)
+	fb := int64(out["folder"].(map[string]any)["id"].(float64))
+	if w.Code != http.StatusOK {
+		t.Fatalf("create folder: %d", w.Code)
+	}
+	if _, out = kbReq(t, r, "POST", "/api/admin/kb/upload",
+		fmt.Sprintf(`{"title":"共同主题A","content":"项目进展 汇报","content_type":"text","folder_id":%d}`, fa), hdr); w.Code != http.StatusOK {
+		t.Fatalf("upload A: %d %s", w.Code, out)
+	}
+	if _, out = kbReq(t, r, "POST", "/api/admin/kb/upload",
+		fmt.Sprintf(`{"title":"共同主题B","content":"项目进展 汇报","content_type":"text","folder_id":%d}`, fb), hdr); w.Code != http.StatusOK {
+		t.Fatalf("upload B: %d %s", w.Code, out)
+	}
+	// unfiltered → 2
+	w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=项目进展", "", hdr)
+	if w.Code != http.StatusOK || int64(out["total"].(float64)) != 2 {
+		t.Fatalf("unfiltered total = %v (%d), want 2", out["total"], w.Code)
+	}
+	// filtered by fa → 1
+	w, out = kbReq(t, r, "GET", fmt.Sprintf("/api/admin/kb/search?q=项目进展&folder_id=%d", fa), "", hdr)
+	if w.Code != http.StatusOK || int64(out["total"].(float64)) != 1 {
+		t.Fatalf("filtered total = %v (%d), want 1", out["total"], w.Code)
+	}
+	if r0 := out["results"].([]any)[0].(map[string]any); int64(r0["folder_id"].(float64)) != fa {
+		t.Fatalf("result folder = %v, want %d", r0["folder_id"], fa)
+	}
+}
+
+// M4: folder_id=-1 lists documents across every folder.
+func TestAdminKBListAllDocuments(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	_, out := kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"A部"}`, hdr)
+	fa := int64(out["folder"].(map[string]any)["id"].(float64))
+	_, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"B部"}`, hdr)
+	fb := int64(out["folder"].(map[string]any)["id"].(float64))
+	kbReq(t, r, "POST", "/api/admin/kb/upload", fmt.Sprintf(`{"title":"a文档","content":"x","content_type":"text","folder_id":%d}`, fa), hdr)
+	kbReq(t, r, "POST", "/api/admin/kb/upload", fmt.Sprintf(`{"title":"b文档","content":"y","content_type":"text","folder_id":%d}`, fb), hdr)
+	w, out := kbReq(t, r, "GET", fmt.Sprintf("/api/admin/kb/documents?folder_id=%d&page=1&size=20", fa), "", hdr)
+	if int64(out["total"].(float64)) != 1 {
+		t.Fatalf("folder A total = %v, want 1", out["total"])
+	}
+	w, out = kbReq(t, r, "GET", "/api/admin/kb/documents?folder_id=-1&page=1&size=20", "", hdr)
+	if w.Code != http.StatusOK || int64(out["total"].(float64)) != 2 {
+		t.Fatalf("all total = %v (%d), want 2", out["total"], w.Code)
+	}
+}
+
+// M6: embedding model must exist in the gateway models list (when any
+// model is known); empty model clears the config (pure lexical).
+func TestSetEmbeddingModelValidates(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	// models table empty → cannot validate, allow
+	if w, _ := kbReq(t, r, "PUT", "/api/admin/kb/embedding-model", `{"model":"bge-m3"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set with empty models table = %d, want 200", w.Code)
+	}
+	if _, err := db.Exec("INSERT INTO gateway_providers (name, base_url, api_key_enc) VALUES ('p1', 'http://x', 'enc')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO models (name, provider_id) VALUES ('bge-m3', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := kbReq(t, r, "PUT", "/api/admin/kb/embedding-model", `{"model":"bge-m3"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set existing model = %d, want 200", w.Code)
+	}
+	if w, out := kbReq(t, r, "PUT", "/api/admin/kb/embedding-model", `{"model":"不存在的模型"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("set unknown model = %d %s, want 400", w.Code, w.Body.String())
+	} else if code := out["error"].(map[string]any)["code"]; code != "VALIDATION" {
+		t.Fatalf("code = %v, want VALIDATION", code)
+	}
+	// clearing is always allowed
+	if w, _ := kbReq(t, r, "PUT", "/api/admin/kb/embedding-model", `{"model":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear model = %d, want 200", w.Code)
+	}
+}
+
+// M9: revoke/list grants on a missing folder → 404 (consistent with grant).
+func TestGrantEndpointsMissingFolder(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	if w, _ := kbReq(t, r, "DELETE", "/api/admin/kb/folders/99999/grant", `{"group":"研发"}`, hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("revoke missing folder = %d, want 404", w.Code)
+	}
+	if w, _ := kbReq(t, r, "GET", "/api/admin/kb/folders/99999/grants", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("list grants missing folder = %d, want 404", w.Code)
+	}
+}
+
+// M8: audit list supports action filtering.
+func TestAuditFilter(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	kbReq(t, r, "POST", "/api/admin/kb/upload", `{"title":"t","content":"x","content_type":"text","folder_id":0}`, hdr)
+	w, out := kbReq(t, r, "GET", "/api/admin/kb/audit?action=kb_upload", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("audit filtered: %d", w.Code)
+	}
+	if int64(out["total"].(float64)) != 1 {
+		t.Fatalf("filtered total = %v, want 1", out["total"])
+	}
+	w, out = kbReq(t, r, "GET", "/api/admin/kb/audit?action=kb_delete", "", hdr)
+	if int64(out["total"].(float64)) != 0 {
+		t.Fatalf("delete-filtered total = %v, want 0", out["total"])
 	}
 }

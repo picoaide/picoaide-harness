@@ -1,6 +1,7 @@
 package llmgateway
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/llmgateway/channels"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
@@ -67,6 +69,63 @@ func seedProvider(t *testing.T, db *sql.DB, name, baseURL, models string) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES (?, ?, 'k', ?)`, name, baseURL, models); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func seedProviderChannel(t *testing.T, db *sql.DB, name, baseURL, models, channel string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, channel) VALUES (?, ?, 'k', ?, ?)`, name, baseURL, models, channel); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// failoverTestChannel 注入 thinking/test_marker 并剥离 temperature,
+// 用于验证 failover 时渠道 override 不得污染后续候选的请求体。
+type failoverTestChannel struct{}
+
+func (failoverTestChannel) Name() string    { return "failover-test" }
+func (failoverTestChannel) BaseURL() string { return "" }
+func (failoverTestChannel) FetchModels(ctx context.Context, apiKey string, fetchFn func(url string) ([]byte, error)) ([]channels.ModelInfo, error) {
+	return nil, nil
+}
+func (failoverTestChannel) RequestOverrides(modelID string) (map[string]any, []string) {
+	return map[string]any{"thinking": map[string]any{"type": "enabled"}, "test_marker": 1}, []string{"temperature"}
+}
+func (failoverTestChannel) DefaultModelCaps() (int64, int64) { return 0, 0 }
+
+func TestProxyFailoverRecomputesChannelOverridesPerCandidate(t *testing.T) {
+	channels.Register(failoverTestChannel{})
+	var firstAttempts atomic.Int64
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstAttempts.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(bad.Close)
+	good := newFakeUpstream(t)
+	r, db, token := newGateway(t, nil)
+	seedProviderChannel(t, db, "bad", bad.URL, `["m"]`, "failover-test")
+	seedProvider(t, db, "good", good.baseURL, `["m"]`)
+
+	body := `{"model":"m","messages":[],"temperature":0.5}`
+	w := doPost(t, r, "/v1/chat/completions", body, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if n := firstAttempts.Load(); n != 1 {
+		t.Fatalf("first provider calls = %d, want 1", n)
+	}
+	got := good.gotBody.Load().(string)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("second provider body not json: %q", got)
+	}
+	for _, k := range []string{"thinking", "test_marker"} {
+		if _, ok := parsed[k]; ok {
+			t.Fatalf("second provider received channel-injected key %q: %s", k, got)
+		}
+	}
+	if _, ok := parsed["temperature"]; !ok {
+		t.Fatalf("second provider lost temperature (first provider's removeKeys leaked): %s", got)
 	}
 }
 
@@ -220,7 +279,7 @@ func TestProxyStreamIdleTimeout(t *testing.T) {
 	if !strings.Contains(got, `"content":"hi"`) {
 		t.Fatalf("first chunk missing: %q", got)
 	}
-	if !strings.Contains(got, "UPSTREAM_IDLE_TIMEOUT") {
+	if !strings.Contains(got, `"code":"UPSTREAM"`) || !strings.Contains(got, "空闲超时") {
 		t.Fatalf("no idle timeout error sent to client: %q", got)
 	}
 	if strings.Contains(got, "[DONE]") {

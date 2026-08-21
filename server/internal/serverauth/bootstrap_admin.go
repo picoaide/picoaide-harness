@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // EnsureBootstrapAdmin creates the first admin from --bootstrap-admin and
@@ -36,14 +37,14 @@ func EnsureBootstrapAdmin(db *sql.DB, username string) error {
 	if err == nil {
 		return errors.New("bootstrap admin username already exists but is not an admin")
 	}
-	id, err := serverstore.CreateUserWithPassword(db, username, password)
+	// 单步创建(含 is_admin):创建与提权之间的崩溃窗口不再留下
+	// "同名非管理员用户阻塞下次启动"的残局(审计2026-L15)
+	hash, err := util.HashPassword(password)
 	if err != nil {
 		return err
 	}
-	u, err := serverstore.GetUserByID(db, id)
-	if err != nil {
+	if _, err := serverstore.CreateUser(db, &serverstore.User{Username: username, PasswordHash: hash, Source: "local", Status: 1, IsAdmin: true}); err != nil {
 		return err
 	}
-	u.IsAdmin = true
-	return serverstore.UpdateUser(db, u)
+	return nil
 }
