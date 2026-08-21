@@ -30,6 +30,8 @@ window.__ModuleLoader__.load({
 			"action.submit": "提交",
 			"action.connecting": "连接中…",
 			"action.disconnecting": "断开中…",
+			"action.cancel": "取消连接",
+			"action.cancelling": "取消中…",
 			"auth.verificationHint": "请打开以下地址并登录授权：",
 			"auth.code": "授权码：{code}",
 			"auth.authorizeOpened": "授权页已在浏览器中打开；若未弹出请点击：",
@@ -56,6 +58,8 @@ window.__ModuleLoader__.load({
 			"action.submit": "Submit",
 			"action.connecting": "Connecting…",
 			"action.disconnecting": "Disconnecting…",
+			"action.cancel": "Cancel connection",
+			"action.cancelling": "Cancelling…",
 			"auth.verificationHint": "Open the following address to authorize:",
 			"auth.code": "Authorization code: {code}",
 			"auth.authorizeOpened": "The authorization page was opened; if not, click here:",
@@ -258,6 +262,23 @@ window.__ModuleLoader__.load({
 				entry.id,
 				onChanged
 			]);
+			const cancel = (0, react.useCallback)(async () => {
+				if (busy !== null) return;
+				setError(null);
+				setBusy("disconnect");
+				try {
+					await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: "POST" });
+					onChanged();
+				} catch (e) {
+					setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e));
+				} finally {
+					setBusy(null);
+				}
+			}, [
+				busy,
+				entry.id,
+				onChanged
+			]);
 			const polling = entry.status === "connecting" && (entry.request?.authorizeUrl || entry.request?.verificationUrl);
 			const needsForm = entry.status === "connecting" && Boolean(entry.request?.fields?.length);
 			const isConnected = entry.status === "connected";
@@ -406,14 +427,25 @@ window.__ModuleLoader__.load({
 								disconnect();
 							},
 							children: busy === "disconnect" ? t("action.disconnecting") : t("action.disconnect")
+						}) : entry.status === "connecting" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: {
+								...BUTTON,
+								background: "var(--dsw-alias-state-warn-primary)"
+							},
+							disabled: busy === "disconnect",
+							onClick: () => {
+								cancel();
+							},
+							children: busy === "disconnect" ? t("action.cancelling") : t("action.cancel")
 						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
 							style: BUTTON,
-							disabled: entry.status === "connecting" || busy === "connect",
+							disabled: busy === "connect",
 							onClick: () => {
 								connect();
 							},
-							children: entry.status === "connecting" || busy === "connect" ? t("action.connecting") : t("action.connect")
+							children: busy === "connect" ? t("action.connecting") : t("action.connect")
 						})
 					})
 				]

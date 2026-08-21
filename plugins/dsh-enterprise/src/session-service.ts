@@ -50,15 +50,26 @@ export default class SessionService extends Service {
 
   private session: Session | null = null
   private readonly tokenFile: string
+  private restoreDone = false
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'picoSession')
     this.tokenFile = config.tokenFile ?? defaultTokenFile()
-    void this.restore()
+    void this.restore().finally(() => { this.restoreDone = true })
   }
 
   isLoggedIn(): boolean {
     return this.session !== null
+  }
+
+  /**
+   * True once the persisted session has been restored (or found absent).
+   * P1-11: the auth gate must not render the login page while restoration
+   * is still in flight — a valid persisted session would flash a login
+   * form and invite a duplicate log-in.
+   */
+  isRestored(): boolean {
+    return this.restoreDone
   }
 
   getSession(): Session | null {
@@ -89,10 +100,19 @@ async function loadPersisted(tokenFile: string): Promise<Session | null> {
   try {
     const mod = await loadElectronModule()
     const ss = mod?.safeStorage
-    if (!ss || !ss.isEncryptionAvailable()) return null
-    if (isBasicTextBackend(ss)) return null
+    if (!ss) return null
     if (!existsSync(tokenFile)) return null
-    return JSON.parse(ss.decryptString(readFileSync(tokenFile)).toString('utf8')) as Session
+    // P1-10: on Linux without a keyring (basic_text backend) safeStorage is
+    // effectively plaintext, so it is not a security improvement over our own
+    // 0600 file — but refusing to persist at all forces a re-login on every
+    // launch. Fall back to the 0600 file (TOKEN_FILE_MODE keeps it owner-only)
+    // so a headless/minimal desktop still remembers the session.
+    if (ss.isEncryptionAvailable() && !isBasicTextBackend(ss)) {
+      return JSON.parse(ss.decryptString(readFileSync(tokenFile)).toString('utf8')) as Session
+    }
+    // loadLegacyEncrypted handles pre-fallback files; a raw JSON read is the
+    // fallback format written by persist() when basic_text.
+    return JSON.parse(readFileSync(tokenFile, 'utf8')) as Session
   } catch { return null }
 }
 
@@ -103,9 +123,13 @@ function isBasicTextBackend(ss: { getSelectedStorageBackend?: () => string }): b
 async function persist(tokenFile: string, s: Session): Promise<void> {
   const mod = await loadElectronModule()
   const ss = mod?.safeStorage
-  if (!ss || !ss.isEncryptionAvailable()) return
-  if (isBasicTextBackend(ss)) {
-    console.warn('[pico] token not persisted: safeStorage backend is basic_text (plaintext)')
+  if (!ss || !ss.isEncryptionAvailable() || isBasicTextBackend(ss)) {
+    // P1-10 fallback: owner-only plaintext. The token is an opaque bearer
+    // credential with its own server-side TTL; 0600 on the file is the best
+    // guard available without a keyring. Warn once so the operator knows
+    // the dependency (gnome-keyring/kwallet) would harden this.
+    console.warn('[pico] token persisted as 0600 plaintext: no safeStorage keyring available')
+    writeFileSync(tokenFile, JSON.stringify(s), { mode: TOKEN_FILE_MODE })
     return
   }
   // Owner-only mode: the encrypted token must not be readable by other

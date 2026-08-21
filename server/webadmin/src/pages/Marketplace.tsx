@@ -95,6 +95,8 @@ export default function Marketplace() {
 
   // 弹窗内操作错误(审计 A5-L4):靠近操作点展示,页面级错误只留给加载失败
   const [dialogError, setDialogError] = useState('')
+  // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
+  const [busy, setBusy] = useState<string | null>(null)
 
   const loadSkills = useCallback(async () => {
     setSkillsLoading(true)
@@ -150,9 +152,11 @@ export default function Marketplace() {
 
   // ---- 技能 ----
   async function saveSkill() {
+    if (busy) return // P1-6: 双击守卫
     setDialogError('')
     if (!skillForm.name.trim()) { setDialogError('名称必填'); return }
     if (!skillForm.git_url.trim()) { setDialogError('Git 地址必填'); return }
+    setBusy('save-skill')
     try {
       if (skillEdit) {
         await request(`/api/admin/skills/${encodeURIComponent(skillEdit.name)}`, {
@@ -168,6 +172,8 @@ export default function Marketplace() {
       loadSkills()
     } catch (err: any) {
       setDialogError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -186,21 +192,29 @@ export default function Marketplace() {
   }
 
   async function disableSkill(name: string) {
+    if (busy) return // P1-6: 双击守卫
     if (!window.confirm(`下架技能 ${name}?员工建议清单将不再展示(可重新上架)。`)) return
+    setBusy(`disable-skill-${name}`)
     try {
       await request(`/api/admin/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
       loadSkills()
     } catch (err: any) {
       setSkillsError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function enableSkill(name: string) {
+    if (busy) return // P1-6: 双击守卫
+    setBusy(`enable-skill-${name}`)
     try {
       await request(`/api/admin/skills/${encodeURIComponent(name)}/enable`, { method: 'POST' })
       loadSkills()
     } catch (err: any) {
       setSkillsError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -247,11 +261,13 @@ export default function Marketplace() {
   }
 
   async function saveMcp() {
+    if (busy) return // P1-6: 双击守卫
     setDialogError('')
     if (!mcpForm.name.trim()) { setDialogError('名称必填'); return }
     if (mcpForm.transport === 'http' && !mcpForm.url.trim()) { setDialogError('HTTP 传输方式必须填写 URL'); return }
     const parsed = parseMcpForm()
     if (typeof parsed === 'string') { setDialogError(parsed); return }
+    setBusy('save-mcp')
     try {
       const body = JSON.stringify({
         name: mcpForm.name,
@@ -274,6 +290,8 @@ export default function Marketplace() {
       loadMcps()
     } catch (err: any) {
       setDialogError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -292,21 +310,29 @@ export default function Marketplace() {
   }
 
   async function disableMcp(id: number) {
+    if (busy) return // P1-6: 双击守卫
     if (!window.confirm(`下架 MCP 插件 #${id}?已安装客户端不再获得新凭证(可重新上架)。`)) return
+    setBusy(`disable-mcp-${id}`)
     try {
       await request(`/api/admin/mcp/${id}`, { method: 'DELETE' })
       loadMcps()
     } catch (err: any) {
       setMcpsError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function enableMcp(id: number) {
+    if (busy) return // P1-6: 双击守卫
+    setBusy(`enable-mcp-${id}`)
     try {
       await request(`/api/admin/mcp/${id}/enable`, { method: 'POST' })
       loadMcps()
     } catch (err: any) {
       setMcpsError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -335,7 +361,7 @@ export default function Marketplace() {
   // 保存部门多选 = 整组替换(原子;用户授权保留)。审计 A5-M6:
   // 覆盖语义必须确认 + 明示,避免取消勾选一个部门就把其它部门授权静默清掉。
   async function saveDeptGrants() {
-    if (!grantDialog) return
+    if (grantSaving || !grantDialog) return // P1-6: 双击守卫
     if (!window.confirm('保存部门授权将覆盖该资源的全部部门授权(用户授权不受影响)。确定保存?')) return
     setGrantSaving(true)
     setDialogError('')
@@ -359,9 +385,10 @@ export default function Marketplace() {
   }
 
   async function doGrant() {
-    if (!grantDialog || !grantTarget.trim()) return
+    if (busy || !grantDialog || !grantTarget.trim()) return // P1-6: 双击守卫
     const isGroup = grantTarget.trim().startsWith('@')
     setDialogError('')
+    setBusy('grant')
     try {
       await request(grantPath(grantDialog), {
         method: 'PUT',
@@ -371,13 +398,16 @@ export default function Marketplace() {
       openGrants(grantDialog)
     } catch (err: any) {
       setDialogError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function revokeGrant(g: Grant) {
-    if (!grantDialog) return
+    if (busy || !grantDialog) return // P1-6: 双击守卫
     if (!window.confirm(`撤销「${g.grantee}」的授权?`)) return
     setDialogError('')
+    setBusy(`revoke-${g.grantee_type}-${g.grantee}`)
     try {
       await request(grantPath(grantDialog), {
         method: 'DELETE',
@@ -386,6 +416,8 @@ export default function Marketplace() {
       openGrants(grantDialog)
     } catch (err: any) {
       setDialogError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -450,8 +482,8 @@ export default function Marketplace() {
                         <Button size="sm" variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
                         <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
                         {s.enabled
-                          ? <Button size="sm" variant="destructive" onClick={() => disableSkill(s.name)}>下架</Button>
-                          : <Button size="sm" variant="outline" onClick={() => enableSkill(s.name)}>重新上架</Button>}
+                          ? <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
+                          : <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -510,8 +542,8 @@ export default function Marketplace() {
                         <Button size="sm" variant="outline" onClick={() => openEditMcp(m)}>编辑</Button>
                         <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'mcp', name: m.name, id: m.id })}>授权</Button>
                         {m.enabled
-                          ? <Button size="sm" variant="destructive" onClick={() => disableMcp(m.id)}>下架</Button>
-                          : <Button size="sm" variant="outline" onClick={() => enableMcp(m.id)}>重新上架</Button>}
+                          ? <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => disableMcp(m.id)}>{busy === `disable-mcp-${m.id}` ? '下架中…' : '下架'}</Button>
+                          : <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => enableMcp(m.id)}>{busy === `enable-mcp-${m.id}` ? '上架中…' : '重新上架'}</Button>}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -610,7 +642,7 @@ export default function Marketplace() {
               <Input id="skill-desc" value={skillForm.description} onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })} />
             </div>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
-            <Button className="w-full" onClick={saveSkill}>{skillEdit ? '保存修改' : '上架'}</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={saveSkill}>{busy === 'save-skill' ? '处理中…' : (skillEdit ? '保存修改' : '上架')}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -665,7 +697,7 @@ export default function Marketplace() {
               <Input id="mcp-headers" placeholder='{"Authorization":"Bearer x"}' value={mcpForm.headers} onChange={(e) => setMcpForm({ ...mcpForm, headers: e.target.value })} />
             </div>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
-            <Button className="w-full" onClick={saveMcp}>{mcpEdit ? '保存修改' : '上架'}</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={saveMcp}>{busy === 'save-mcp' ? '处理中…' : (mcpEdit ? '保存修改' : '上架')}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -683,7 +715,7 @@ export default function Marketplace() {
                     <Badge variant={g.grantee_type === 'group' ? 'outline' : 'secondary'}>
                       {g.grantee_type === 'group' ? `@${g.grantee}` : g.grantee}
                     </Badge>
-                    <Button size="sm" variant="ghost" onClick={() => revokeGrant(g)}>撤销</Button>
+                    <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => revokeGrant(g)}>{busy === `revoke-${g.grantee_type}-${g.grantee}` ? '撤销中…' : '撤销'}</Button>
                   </div>
                 ))}
               </div>
@@ -706,14 +738,14 @@ export default function Marketplace() {
                 {deptOptions.length === 0 && <div className="text-xs text-muted-foreground">暂无部门</div>}
               </div>
               <p className="text-xs text-muted-foreground">「保存部门授权」将覆盖该资源的全部部门授权(用户授权不受影响)</p>
-              <Button size="sm" variant="outline" className="mt-1 w-full" disabled={grantSaving} onClick={saveDeptGrants}>保存部门授权</Button>
+              <Button size="sm" variant="outline" className="mt-1 w-full" disabled={grantSaving || busy !== null} onClick={saveDeptGrants}>{grantSaving ? '保存中…' : '保存部门授权'}</Button>
             </div>
             <div className="space-y-1">
               <Label htmlFor="grant-user">用户名(单个,可选)</Label>
               <Input id="grant-user" placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
             </div>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
-            <Button className="w-full" disabled={!grantTarget.trim() || grantSaving} onClick={doGrant}>添加用户授权</Button>
+            <Button className="w-full" disabled={!grantTarget.trim() || grantSaving || busy !== null} onClick={doGrant}>{busy === 'grant' ? '处理中…' : '添加用户授权'}</Button>
           </div>
         </DialogContent>
       </Dialog>

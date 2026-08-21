@@ -149,21 +149,37 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
   const [installed, setInstalled] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState('')
   const [action, setAction] = useState<ActionState | null>(null)
+  const [loading, setLoading] = useState(true)
+  // fetch sequence guard: only the newest load may write state (retry can
+  // race the initial load).
+  const loadSeqRef = useRef(0)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  // UX-3: load errors must be retryable — a transient failure previously
+  // left the panel stuck on an error line with no way back but reopen.
+  const loadSkills = (): void => {
+    const seq = ++loadSeqRef.current
+    setLoading(true)
+    setError('')
     fetch('/api/pico/skills')
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
+        if (seq !== loadSeqRef.current) return
         const data = (await res.json()) as { skills?: Skill[]; installed?: string[] }
-        if (!cancelled) {
-          setSkills(data.skills ?? [])
-          setInstalled(new Set(data.installed ?? []))
-        }
+        setSkills(data.skills ?? [])
+        setInstalled(new Set(data.installed ?? []))
+        setLoading(false)
       })
-      .catch(() => { if (!cancelled) setError(t('skill.loadError')) })
-    return () => { cancelled = true }
+      .catch(() => {
+        if (seq !== loadSeqRef.current) return
+        setError(t('skill.loadError'))
+        setLoading(false)
+      })
+  }
+
+  useEffect(() => {
+    loadSkills()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Esc closes; initial focus lands on the panel so keyboard users can act.
@@ -194,6 +210,9 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
 
   const uninstall = async (name: string): Promise<void> => {
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling')) return
+    // UX-3: an uninstall is one-click destructive today; confirm first so a
+    // misclick does not remove a skill silently.
+    if (!window.confirm(t('skill.uninstallConfirm', { name }))) return
     setAction({ name, kind: 'uninstalling' })
     try {
       const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/uninstall`, { method: 'POST' })
@@ -214,8 +233,15 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
 
   let content: React.ReactNode
   if (error !== '') {
-    content = <p style={EMPTY}>{error}</p>
-  } else if (skills === null) {
+    content = (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24 }}>
+        <p style={EMPTY}>{error}</p>
+        <button type="button" style={BUTTON_SECONDARY} onClick={() => { loadSkills() }}>
+          {t('skill.retry')}
+        </button>
+      </div>
+    )
+  } else if (loading || skills === null) {
     content = <p style={EMPTY}>{t('skill.loading')}</p>
   } else if (skills.length === 0) {
     content = <p style={EMPTY}>{t('skill.empty')}</p>

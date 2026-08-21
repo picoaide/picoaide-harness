@@ -93,6 +93,26 @@ var HostExecutionRunner = class {
 		}
 	}
 	/**
+	* P0-3: ask the running session to stop. Best-effort — the ledger already
+	* settles the execution as cancelled; if the session is gone or the stop
+	* command fails, the settlement poll converges the state anyway.
+	*/
+	async cancelSession(sessionId) {
+		try {
+			const response = await this.api.sessions.prompt(request({
+				sessionId,
+				mode: "queue",
+				content: [{
+					type: "text",
+					text: "/stop"
+				}]
+			}));
+			if (!response.result.ok) return;
+			const accepted = response.result.value.command;
+			if (accepted !== void 0 && accepted.kind !== "success") {}
+		} catch {}
+	}
+	/**
 	* Resolve one execution's outcome from the shared session list (one list
 	* RPC per poll tick, not 1 + E).
 	*/

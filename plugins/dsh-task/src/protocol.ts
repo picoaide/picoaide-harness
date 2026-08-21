@@ -32,6 +32,7 @@ export type TaskAction =
   | { kind: 'restore'; taskId: string }
   | { kind: 'run'; taskId: string }
   | { kind: 'rerun'; taskId: string }
+  | { kind: 'cancel'; taskId: string }
 
 export interface TaskActionEnvelope {
   requestId: string
@@ -98,6 +99,7 @@ export function parseActionEnvelope(value: unknown): TaskActionEnvelope | undefi
     case 'restore':
     case 'run':
     case 'rerun':
+    case 'cancel':
       if (!exactKeys(action, ['kind', 'taskId'])) return undefined
       return taskId === undefined ? undefined : { requestId: envelope.requestId, action: action as TaskAction }
     default:

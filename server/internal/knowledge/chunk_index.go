@@ -241,7 +241,9 @@ func searchChunksInFolders(db *sql.DB, folders []int64, query string, page, page
 func pageChunkResults(all []ChunkResult, page, pageSize int) ([]ChunkResult, int64, error) {
 	total := int64(len(all))
 	start := (page - 1) * pageSize
-	if start >= len(all) {
+	// P2 (integer overflow): a huge page from a malicious client can make
+	// (page-1)*pageSize wrap negative, and all[start:end] would panic.
+	if start < 0 || start >= len(all) {
 		return []ChunkResult{}, total, nil
 	}
 	end := start + pageSize
@@ -399,7 +401,7 @@ func lexicalCandidates(db *sql.DB, folders []int64, words []string) ([]ChunkResu
 
 	rows, err := db.Query(`SELECT c.id, c.doc_id, c.seq, c.title_path, c.content, c.char_start, d.folder_id, d.title
 		FROM kb_chunks c JOIN kb_documents d ON d.id = c.doc_id
-		WHERE `+where+` ORDER BY c.id`, args...)
+		WHERE `+where+` ORDER BY c.id LIMIT ?`, append(args, maxSearchCandidates)...)
 	if err != nil {
 		return nil, err
 	}

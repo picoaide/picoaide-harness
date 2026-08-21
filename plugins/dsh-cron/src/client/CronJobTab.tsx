@@ -42,6 +42,15 @@ export function CronJobTab({ controller, workspaces }: {
           + {t('job.new')}
         </button>
       </header>
+      {/* P1-13: a corrupt ledger reset must be loudly visible — the scheduler
+          error field carries "ledger was corrupt and reset"; the user needs
+          to know the restore path (.corrupt-* file) instead of a silent
+          empty list. */}
+      {snapshot.scheduler.error !== undefined && (
+        <div style={styles.error}>
+          {t('settings.ledgerCorrupt', { error: snapshot.scheduler.error })}
+        </div>
+      )}
       {snapshot.transportError !== undefined && (
         <div style={styles.error}>
           {snapshot.transportError}{' '}

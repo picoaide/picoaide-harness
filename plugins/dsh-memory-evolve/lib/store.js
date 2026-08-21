@@ -25,7 +25,7 @@
 
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { extractEntryId, genEntryId, legacyIdFor, stripEntryId } from './sync/entryid.js'
 
@@ -381,7 +381,7 @@ export function isStaleLock(lockPath) {
 export function withLock(dir, fn) {
   if (heldLocks.has(dir)) return fn()
   const lockPath = join(dir, '.memory.lock')
-  mkdirSync(dir, { recursive: true })
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
   const deadline = Date.now() + LOCK_TIMEOUT_MS
   for (;;) {
     let acquired = false
@@ -769,7 +769,7 @@ export class MemoryStore {
     if (text === '' && size > 0) return { kind: 'read-failed' }
     if (!isCanonical(text)) {
       const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
-      writeFileSync(backup, text)
+      writeFileSync(backup, text, { mode: 0o600 })
       return { kind: 'drift', backup }
     }
     return { kind: 'ok', entries: parseEntries(text) }
@@ -779,7 +779,17 @@ export class MemoryStore {
   write(target, entries, agent) {
     const path = this.pathOf(target, agent)
     const tmp = `${path}.tmp.${process.pid}`
-    writeFileSync(tmp, serializeEntries(entries))
+    // P0-2 (2026-08-21): memory contents may carry enterprise-internal facts;
+    // match the connectors store discipline (0600 file / 0700 dir) instead of
+    // the process default 0644. fsync before rename keeps the atomic swap
+    // durable against sudden power loss.
+    const fd = openSync(tmp, 'w', 0o600)
+    try {
+      writeFileSync(fd, serializeEntries(entries))
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
     renameSync(tmp, path)
   }
 
@@ -1301,9 +1311,16 @@ export class SuggestionQueue {
 
   /** Atomically write the full suggestion list. */
   write(entries) {
-    mkdirSync(dirname(this.file), { recursive: true })
+    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })
     const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length > 0 ? '\n' : ''))
+    // P0-2: suggestions may carry enterprise-internal facts; 0600 + fsync.
+    const fd = openSync(tmp, 'w', 0o600)
+    try {
+      writeFileSync(fd, entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length > 0 ? '\n' : ''))
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
     renameSync(tmp, this.file)
   }
 
@@ -1392,8 +1409,15 @@ export class ArchiveStore {
       entries.push(content)
       const path = this.fileOf(target, cwd)
       const tmp = `${path}.tmp.${process.pid}`
-      mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(tmp, serializeEntries(entries))
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+      // P0-2: archive content may carry enterprise-internal facts; 0600 + fsync.
+      const fd = openSync(tmp, 'w', 0o600)
+      try {
+        writeFileSync(fd, serializeEntries(entries))
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
       renameSync(tmp, path)
       return { ok: true, total: entries.length }
     })
@@ -1412,7 +1436,13 @@ export class ArchiveStore {
       const next = entries.filter((entry) => !entry.includes(match))
       const path = this.fileOf(target, cwd)
       const tmp = `${path}.tmp.${process.pid}`
-      writeFileSync(tmp, serializeEntries(next))
+      const fd = openSync(tmp, 'w', 0o600)
+      try {
+        writeFileSync(fd, serializeEntries(next))
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
       renameSync(tmp, path)
       return { ok: true, removed: matches[0] }
     })
@@ -1430,7 +1460,13 @@ export class ArchiveStore {
       next.splice(index, 1)
       const path = this.fileOf(target, cwd)
       const tmp = `${path}.tmp.${process.pid}`
-      writeFileSync(tmp, serializeEntries(next))
+      const fd = openSync(tmp, 'w', 0o600)
+      try {
+        writeFileSync(fd, serializeEntries(next))
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
       renameSync(tmp, path)
       return { ok: true, removed: content }
     })

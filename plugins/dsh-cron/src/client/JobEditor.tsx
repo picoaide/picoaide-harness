@@ -144,7 +144,14 @@ export function JobEditor({ controller, job, workspaces, onClose }: {
           <input style={styles.input} value={cron} onChange={(event) => { setCron(event.target.value) }} spellCheck={false} />
           <div style={styles.presets}>
             {PRESETS.map(preset => (
-              <button key={preset.key} type="button" style={styles.preset} onClick={() => { setCron(preset.cron) }}>
+              <button
+                key={preset.key}
+                type="button"
+                // UX-2: highlight the chip whose value matches the current
+                // expression (also when the user types it by hand).
+                style={cron.trim() === preset.cron ? { ...styles.preset, ...styles.presetActive } : styles.preset}
+                onClick={() => { setCron(preset.cron) }}
+              >
                 {t(preset.key)}
               </button>
             ))}

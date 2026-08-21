@@ -130,6 +130,13 @@ export const styles: Record<string, CSSProperties> = {
     cursor: 'pointer',
     fontFamily: 'inherit',
   },
+  // UX-2: selected preset chip — the user must see which quick option is in
+  // effect (previously every chip looked identical after clicking).
+  presetActive: {
+    borderColor: 'var(--dsw-alias-state-business-primary)',
+    color: 'var(--dsw-alias-state-business-primary)',
+    background: 'var(--dsw-alias-interactive-bg-active, color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent))',
+  },
   error: { color: 'var(--dsw-alias-state-error-primary)', fontSize: 12 },
   editorActions: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
   card: { display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 },

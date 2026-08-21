@@ -95,6 +95,7 @@ function parseActionEnvelope(value) {
 		case "restore":
 		case "run":
 		case "rerun":
+		case "cancel":
 			if (!exactKeys(action, ["kind", "taskId"])) return void 0;
 			return taskId === void 0 ? void 0 : {
 				requestId: envelope.requestId,

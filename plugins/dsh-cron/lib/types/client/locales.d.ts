@@ -10,6 +10,7 @@ export declare const zh: {
     readonly 'settings.catchUp': "补跑错过的触发";
     readonly 'settings.catchUpDesc': "应用重启或系统休眠恢复后，为每个到期任务补跑最近一次错过的触发（默认跳过）。";
     readonly 'settings.hostMeta': "Host 时区 {timeZone} · 修订 {revision}";
+    readonly 'settings.ledgerCorrupt': "⚠️ 定时任务数据文件损坏，已重置为空（原文件改名保留为 .corrupt-* 可手工恢复）：{error}";
     readonly 'job.listTitle': "定时任务";
     readonly 'job.empty': "暂无定时任务";
     readonly 'job.new': "新建任务";

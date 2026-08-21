@@ -43,12 +43,24 @@ export interface ApplyResult {
   state: LedgerState
   /** Set when the action opened a new execution that must be launched. */
   run?: { task: TaskRecord; execution: ExecutionRecord }
+  /**
+   * Set when the action cancelled open executions: the session ids (if any
+   * were recorded) that should be asked to stop.
+   */
+  cancelled?: string[]
 }
 
 const MAX_REQUEST_CACHE = 256
 
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45_000
+
+/**
+ * P0-3: an execution left open long enough without any settlement (crash
+ * before the first turn completed, or a vanished session) is stale. On Host
+ * restart it is settled as cancelled so the task never pins 'doing' forever.
+ */
+const STALE_EXECUTION_MS = 6 * 60 * 60 * 1000 // 6 hours
 
 interface CachedRequest {
   fingerprint: string
@@ -213,13 +225,24 @@ export class HostTaskLedger {
    * interrupted before the session was recorded (no sessionId, no endedAt)
    * is settled as cancelled so the task is not pinned in 'doing' forever and
    * reruns are allowed again. Never re-fires the interrupted start.
+   * P0-3: an execution WITH a sessionId whose session never produced a
+   * turn/end (crash before the first turn completed) would otherwise stay
+   * 'pending' forever and block every edit/delete/rerun (hasOpenExecution).
+   * Age it out: anything older than STALE_EXECUTION_MS settles as cancelled.
    */
   private reconcileInterruptedStarts(state: LedgerState): void {
     const now = this.now()
     state.tasks = state.tasks.map(task => {
-      const pending = task.executions.find(execution => execution.endedAt === undefined && execution.sessionId === undefined)
-      if (pending === undefined) return task
-      return settleExecution(task, pending.id, 'cancelled', now, 'host restarted before the execution session was recorded')
+      const open = task.executions.filter(execution => execution.endedAt === undefined)
+      let next = task
+      for (const execution of open) {
+        if (execution.sessionId === undefined) {
+          next = settleExecution(next, execution.id, 'cancelled', now, 'host restarted before the execution session was recorded')
+        } else if (execution.startedAt > 0 && now - execution.startedAt > STALE_EXECUTION_MS) {
+          next = settleExecution(next, execution.id, 'cancelled', now, '执行超时未完成（可能已损坏），已自动取消')
+        }
+      }
+      return next
     })
   }
 
@@ -257,6 +280,7 @@ export class HostTaskLedger {
     this.cache.set(requestId, { fingerprint })
 
     let opened: { task: TaskRecord; execution: ExecutionRecord } | undefined
+    let cancelled: string[] | undefined
 
     this.mutate((state) => {
       switch (action.kind) {
@@ -322,6 +346,26 @@ export class HostTaskLedger {
           opened = result
           return true
         }
+        case 'cancel': {
+          // P0-3: a running task must be cancelable. Settle every open
+          // execution as cancelled (the task returns to 'todo' so it can run
+          // again); the host service aborts the guest session separately.
+          const index = state.tasks.findIndex(task => task.id === action.taskId)
+          if (index < 0) return false
+          const task = state.tasks[index]!
+          const open = task.executions.filter(execution => execution.endedAt === undefined)
+          if (open.length === 0) return false
+          const now = this.now()
+          let next = task
+          const cancelledSessions: string[] = []
+          for (const execution of open) {
+            if (execution.sessionId !== undefined) cancelledSessions.push(execution.sessionId)
+            next = settleExecution(next, execution.id, 'cancelled', now, '用户取消了任务')
+          }
+          state.tasks[index] = next
+          cancelled = cancelledSessions
+          return true
+        }
         default:
           return false
       }
@@ -330,6 +374,7 @@ export class HostTaskLedger {
     return {
       state: this.state(),
       ...(opened === undefined ? {} : { run: opened }),
+      ...(cancelled === undefined || cancelled.length === 0 ? {} : { cancelled }),
     }
   }
 

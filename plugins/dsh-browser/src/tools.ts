@@ -645,11 +645,16 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
         throw new Error('connectorId must be a non-empty string')
       }
       const tabId = await tabOf(tab)
+      // P1-15: the approval prompt must show the target page URL/domain so a
+      // prompt-injected or mis-navigated session does not silently fill
+      // stored credentials into an attacker page (an approval without the
+      // URL gives the user no way to judge).
+      const pageUrl = runtime.currentUrlOf(tabId)
       const allowed = await runtime.requireApproval({
         agent: exec.agent,
         toolName: 'browser_fill_credentials',
         callId: exec.callId,
-        reason: `向登录表单注入连接器凭据: ${connectorId}`,
+        reason: `向登录表单注入连接器凭据 (${connectorId})，目标页面: ${pageUrl === '' ? '（未知）' : pageUrl}`,
         signal: exec.signal,
       })
       if (!allowed) throw new Error('browser: credential injection was not approved by the user')
