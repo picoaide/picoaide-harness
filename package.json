@@ -13,6 +13,7 @@
     "plugins/dsh-enterprise",
     "plugins/dsh-connectors",
     "plugins/dsh-browser",
+    "plugins/dsh-account-card",
     "plugins/dsh-memory-evolve",
     "plugins/dsh-cron",
     "plugins/dsh-task",

@@ -27,6 +27,18 @@
       "types": "./lib/types/session-service.d.ts",
       "default": "./lib/session-service.js"
     },
+    "./server-connector/auth": {
+      "types": "./lib/types/server-connector/auth.d.ts",
+      "default": "./lib/server-connector/auth.js"
+    },
+    "./loopback": {
+      "types": "./lib/types/loopback.d.ts",
+      "default": "./lib/loopback.js"
+    },
+    "./server-connector/config": {
+      "types": "./lib/types/server-connector/config.d.ts",
+      "default": "./lib/server-connector/config.js"
+    },
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
