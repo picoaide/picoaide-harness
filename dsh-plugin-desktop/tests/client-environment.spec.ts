@@ -89,6 +89,13 @@ describe('advanced desktop layout', () => {
       expect(css).toMatch(/\.dshDesktopWindowsCaptionRow \{[^}]*grid-column: 2 \/ -1;[^}]*grid-row: 1;/)
       expect(css).toMatch(new RegExp(`\\.dshDesktopWindowsCaptionRow::before \\{[^}]*inset: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH}px 0 0;[^}]*-webkit-app-region: drag;`))
       expect(css).not.toMatch(/data-desktop-platform="win32"[^{}]*header[^{}]*\{[^}]*padding-right/)
+      expect(css).toMatch(new RegExp(
+        `data-dsh-desktop-platform="win32"\\] \\[data-dsh-better-sidebar\\] \\[class\\*='toggleCluster'\\] \\{[^}]*top: calc\\(max\\(var\\(--dsh-title-bar-strip, 0px\\), ${WINDOWS_TITLEBAR_HEIGHT}px\\) \\+ 3px\\);`,
+      ))
+      expect(css).toMatch(new RegExp(
+        `data-dsh-desktop-platform="win32"\\] \\[data-dsh-better-sidebar\\] \\[class\\*='panel'\\]:not\\(\\[class\\*='panelHidden'\\]\\):not\\(\\[class\\*='panelBody'\\]\\):not\\(\\[class\\*='panelResize'\\]\\):not\\(\\[class\\*='bottomPanel'\\]\\) \\{[^}]*padding-top: max\\(var\\(--dsh-title-bar-strip, 0px\\), ${WINDOWS_TITLEBAR_HEIGHT}px\\);`,
+      ))
+      expect(css).not.toMatch(/data-desktop-platform="darwin"\] \[data-dsh-better-sidebar\]/)
       expect(appendChild).toHaveBeenCalledWith(style)
       dispose()
       expect(remove).toHaveBeenCalledOnce()
