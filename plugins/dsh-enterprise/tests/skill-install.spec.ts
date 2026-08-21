@@ -6,10 +6,12 @@ import { join } from 'node:path'
 import * as tar from 'tar'
 import {
   installSkillArchive,
+  listInstalledSkills,
   MAX_ARCHIVE_BYTES,
   resolveSkillsDir,
   SKILL_NAME_PATTERN,
   synthesizeSkillFrontmatter,
+  uninstallSkill,
   validateSkillName,
 } from '../src/skill-install.ts'
 
@@ -225,6 +227,69 @@ describe('synthesizeSkillFrontmatter', () => {
       expect(out).toMatch(/^---\nname: code-review\ndescription: 代码审查\n---\n/)
     } finally {
       await rm(skillsDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('listInstalledSkills', () => {
+  it('lists skill directories carrying SKILL.md, sorted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-skill-root-'))
+    try {
+      await mkdir(join(root, 'alpha'), { recursive: true })
+      await writeFile(join(root, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: demo\n---\n# a\n')
+      // No SKILL.md — not an installed skill.
+      await mkdir(join(root, 'beta'), { recursive: true })
+      // A loose markdown file at the root — not an installed skill either.
+      await writeFile(join(root, 'note.md'), 'x')
+      await mkdir(join(root, 'gamma'), { recursive: true })
+      await writeFile(join(root, 'gamma', 'SKILL.md'), '---\nname: gamma\ndescription: demo\n---\n# g\n')
+      expect(await listInstalledSkills(root)).toEqual(['alpha', 'gamma'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('returns an empty list for a missing or unreadable root', async () => {
+    expect(await listInstalledSkills(join(tmpdir(), 'no-such-pico-skills-dir'))).toEqual([])
+  })
+})
+
+describe('uninstallSkill', () => {
+  it('removes an installed skill directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-skill-root-'))
+    try {
+      await mkdir(join(root, 'alpha'), { recursive: true })
+      await writeFile(join(root, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: demo\n---\n# a\n')
+      await expect(uninstallSkill(root, 'alpha')).resolves.toBe(join(root, 'alpha'))
+      await expect(readFile(join(root, 'alpha', 'SKILL.md'), 'utf8')).rejects.toThrow()
+      expect(await listInstalledSkills(root)).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to uninstall a skill that is not installed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-skill-root-'))
+    try {
+      await expect(uninstallSkill(root, 'missing')).rejects.toThrow(/not installed/)
+      // A directory without SKILL.md is not an installed skill.
+      await mkdir(join(root, 'notes'), { recursive: true })
+      await writeFile(join(root, 'notes', 'scratch.txt'), 'x')
+      await expect(uninstallSkill(root, 'notes')).rejects.toThrow(/not installed/)
+      // The non-skill directory must survive the refusal.
+      await expect(readFile(join(root, 'notes', 'scratch.txt'), 'utf8')).resolves.toBe('x')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses invalid names', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-skill-root-'))
+    try {
+      await expect(uninstallSkill(root, '../evil')).rejects.toThrow(/invalid skill name/)
+      await expect(uninstallSkill(root, '')).rejects.toThrow(/invalid skill name/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 })

@@ -6,8 +6,10 @@ import { AuthError, fetchJSON, gatewayFetch, login } from './server-connector/au
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   installSkillArchive,
+  listInstalledSkills,
   MAX_ARCHIVE_BYTES,
   resolveSkillsDir,
+  uninstallSkill,
   validateSkillName,
 } from './skill-install.ts'
 
@@ -234,7 +236,10 @@ export function apply(ctx: Context, config: Config): void {
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
               const data = await fetchJSON(s.serverURL, '/api/marketplace/skills', { token: s.token })
-              json(res, 200, data)
+              // Augment the gateway catalog with the locally installed skill
+              // names so the panel can render per-skill install state.
+              const installed = await listInstalledSkills(resolveSkillsDir())
+              json(res, 200, { ...data, installed })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 // The session is no longer valid: clear it so the injected
@@ -287,6 +292,26 @@ export function apply(ctx: Context, config: Config): void {
               const message = cause instanceof Error ? cause.message : String(cause)
               const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
               json(res, isRefusal ? 422 : 502, { error: message })
+            }
+            return
+          }
+          const uninstallMatch = req.method === 'POST'
+            ? /^\/api\/pico\/skills\/([^/]+)\/uninstall$/u.exec(pathname)
+            : null
+          if (uninstallMatch !== null) {
+            const name = decodeURIComponent(uninstallMatch[1]!)
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              // Purely local operation — no gateway round-trip needed.
+              await uninstallSkill(resolveSkillsDir(), name)
+              json(res, 200, { ok: true, name })
+            } catch (cause) {
+              const message = cause instanceof Error ? cause.message : String(cause)
+              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
             }
             return
           }
