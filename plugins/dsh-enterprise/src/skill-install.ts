@@ -16,7 +16,7 @@
  *   after the new tree is fully verified.
  */
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
@@ -215,6 +215,56 @@ export function resolveSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.DSH_HOME?.trim()
   if (home !== undefined && home.length > 0) return join(home, 'skills')
   return join(process.env.HOME ?? tmpdir(), '.picoaide-harness', 'skills')
+}
+
+/**
+ * List installed skills: directories under the skill root that carry a
+ * SKILL.md — the exact layout `installSkillArchive` produces and the
+ * upstream `@deepseek-ai/dsh-skill-filesystem` provider discovers. A missing
+ * or unreadable root yields an empty list.
+ * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @returns installed skill directory names, sorted.
+ */
+export async function listInstalledSkills(skillsDir: string): Promise<string[]> {
+  let entries
+  try {
+    entries = await readdir(skillsDir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const result: string[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (!SKILL_NAME_PATTERN.test(entry.name)) continue
+    try {
+      await stat(join(skillsDir, entry.name, 'SKILL.md'))
+      result.push(entry.name)
+    } catch {
+      // Directory without a SKILL.md — not a skill (or mid-write); skip.
+    }
+  }
+  return result.sort((a, b) => a.localeCompare(b))
+}
+
+/**
+ * Uninstall one skill: remove `<skillsDir>/<name>` after verifying it really
+ * is an installed skill (valid name + SKILL.md present). Everything else is
+ * refused, so this API can never delete an arbitrary directory.
+ * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @param name - the skill directory name (single safe segment).
+ * @returns the removed directory path.
+ * @throws Error when the name is invalid or the skill is not installed.
+ */
+export async function uninstallSkill(skillsDir: string, name: string): Promise<string> {
+  validateSkillName(name)
+  const target = join(skillsDir, name)
+  try {
+    await stat(join(target, 'SKILL.md'))
+  } catch {
+    throw new Error(`skill "${name}" is not installed`)
+  }
+  await rm(target, { recursive: true, force: true })
+  return target
 }
 
 /** Sanity helper used by tests: does a directory contain a SKILL.md? */
