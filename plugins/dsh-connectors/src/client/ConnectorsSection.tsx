@@ -203,8 +203,8 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       {entry.request?.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <p style={LABEL}>{t('auth.verificationHint')}</p>
-          <a href={entry.request.verificationUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#60a5fa', wordBreak: 'break-all' }}>
-            {entry.request.verificationUrl}
+          <a href={entry.request.verificationUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: 'var(--dsw-alias-state-business-primary)', wordBreak: 'break-all' }}>
+            {t('auth.authorizeLink')}
           </a>
           {entry.request.userCode && (
             <p style={LABEL}>{t('auth.code', { code: entry.request.userCode })}</p>
@@ -215,8 +215,8 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       {entry.request?.authorizeUrl && !entry.request.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <p style={LABEL}>{t('auth.authorizeOpened')}</p>
-          <a href={entry.request.authorizeUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#60a5fa', wordBreak: 'break-all' }}>
-            {entry.request.authorizeUrl}
+          <a href={entry.request.authorizeUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: 'var(--dsw-alias-state-business-primary)', wordBreak: 'break-all' }}>
+            {t('auth.authorizeLink')}
           </a>
         </div>
       )}

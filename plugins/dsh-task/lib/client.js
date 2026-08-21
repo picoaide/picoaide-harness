@@ -1226,6 +1226,16 @@ window.__ModuleLoader__.load({
 			const [workspaceId, setWorkspaceId] = (0, react.useState)("");
 			const [permission, setPermission] = (0, react.useState)("");
 			(0, react.useEffect)(() => {
+				document.dispatchEvent(new CustomEvent("dsh-modal-open", { detail: "task-new" }));
+				const onOtherModal = (event) => {
+					if (event.detail !== "task-new") onClose();
+				};
+				document.addEventListener("dsh-modal-open", onOtherModal);
+				return () => {
+					document.removeEventListener("dsh-modal-open", onOtherModal);
+				};
+			}, [onClose]);
+			(0, react.useEffect)(() => {
 				const onKey = (event) => {
 					if (event.key === "Escape") onClose();
 				};
