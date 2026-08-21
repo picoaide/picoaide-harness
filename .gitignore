@@ -35,3 +35,6 @@ server/webadmin/tsconfig.tsbuildinfo
 .go-cache/
 .go-path/
 .npm-cache/
+
+# account-card plugin build output (same convention as dsh-enterprise)
+plugins/dsh-account-card/lib/

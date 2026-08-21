@@ -5664,6 +5664,32 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@picoaide/dsh-account-card@workspace:*, @picoaide/dsh-account-card@workspace:plugins/dsh-account-card":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-account-card@workspace:plugins/dsh-account-card"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-agent": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-client-ui-primitives": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-host-webserver": "npm:0.1.0-rc.8"
+    "@deepseek-ai/dsh-invariants": "npm:0.1.0-rc.8"
+    "@picoaide/dsh-enterprise": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    "@types/react": "npm:^18"
+    "@types/react-dom": "npm:^18.3.5"
+    react: "npm:18.3.1"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  peerDependencies:
+    "@deepseek-ai/cordis": 4.0.1
+  languageName: unknown
+  linkType: soft
+
 "@picoaide/dsh-browser@workspace:*, @picoaide/dsh-browser@workspace:plugins/dsh-browser":
   version: 0.0.0-use.local
   resolution: "@picoaide/dsh-browser@workspace:plugins/dsh-browser"
@@ -9451,6 +9477,7 @@ __metadata:
     "@deepseek-ai/dsh-workflow": "npm:0.1.0-rc.8"
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     "@electron/asar": "npm:3.4.1"
+    "@picoaide/dsh-account-card": "workspace:*"
     "@picoaide/dsh-browser": "workspace:*"
     "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-cron": "workspace:*"
