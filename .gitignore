@@ -29,3 +29,9 @@ server/webadmin/tsconfig.tsbuildinfo
 .research/
 .yarn-cache/
 .yarn-home/
+
+# local tooling artifacts
+.audit/
+.go-cache/
+.go-path/
+.npm-cache/
