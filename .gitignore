@@ -38,3 +38,9 @@ server/webadmin/tsconfig.tsbuildinfo
 
 # account-card plugin build output (same convention as dsh-enterprise)
 plugins/dsh-account-card/lib/
+
+# branding plugin build output (same convention as dsh-enterprise)
+plugins/dsh-branding/lib/
+
+# local writable DSH home mirror (this sandbox root fs is read-only)
+.dsh-home/
