@@ -52,6 +52,8 @@ export declare class TaskController {
     restore(taskId: string): void;
     run(taskId: string): void;
     rerun(taskId: string): void;
+    /** P0-3: cancel a running task (settles open executions as cancelled). */
+    cancel(taskId: string): void;
     openTask(taskId: string): void;
     closeTask(): void;
     toggleArchiveView(): void;

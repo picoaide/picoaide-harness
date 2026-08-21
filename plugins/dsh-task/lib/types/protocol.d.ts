@@ -44,6 +44,9 @@ export type TaskAction = {
 } | {
     kind: 'rerun';
     taskId: string;
+} | {
+    kind: 'cancel';
+    taskId: string;
 };
 export interface TaskActionEnvelope {
     requestId: string;

@@ -99,6 +99,8 @@ export default function Gateway() {
   const [okMsg, setOkMsg] = useState('')
   const [syncMsg, setSyncMsg] = useState('')
   const [loading, setLoading] = useState(true) // 审计修复 L2
+  // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
+  const [busy, setBusy] = useState<string | null>(null)
 
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
@@ -137,6 +139,7 @@ export default function Gateway() {
   }
 
   async function saveGateway() {
+    if (busy) return // P1-6: 双击守卫
     // 前端校验(审计修复 L3):限流/配额数值、URL 格式
     const rl = Number(cfg.rate_limit)
     if (!Number.isInteger(rl) || rl <= 0 || rl > 100000) {
@@ -157,6 +160,7 @@ export default function Gateway() {
       setError('高峰时段每行的开始时间必须早于结束时间')
       return
     }
+    setBusy('save-gateway')
     try {
       // 高峰时段由结构化列表序列化;空列表 = 清空(无峰谷价,审计修复 H1/M4)
       const body = { ...cfg, peak_windows: peakList.length ? JSON.stringify(peakList) : '' }
@@ -165,14 +169,18 @@ export default function Gateway() {
       flash('已保存')
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function createProvider() {
+    if (busy) return // P1-6: 双击守卫
     // 前端校验(审计修复 L3/L4):名称/URL 必填、渠道型 key 必填
     if (!provForm.name.trim()) { setError('请填写上游名称'); return }
     if (!isHttpUrl(provForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
     if (provForm.channel && !provForm.api_key) { setError('渠道型上游必须填写 API Key'); return }
+    setBusy('create-provider')
     try {
       const r = await request('/api/admin/providers', {
         method: 'POST',
@@ -201,11 +209,13 @@ export default function Gateway() {
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function saveProviderEdit() {
-    if (!editProv) return
+    if (busy || !editProv) return // P1-6: 双击守卫
     if (!editProvForm.name.trim()) { setError('请填写上游名称'); return }
     if (!isHttpUrl(editProvForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
     // 编辑时 API Key 留空 = 不更换;仅当上游原本无 key 且选了渠道时才强制
@@ -213,6 +223,7 @@ export default function Gateway() {
       setError('渠道型上游必须填写 API Key')
       return
     }
+    setBusy('save-provider-edit')
     try {
       const body: Record<string, any> = {
         name: editProvForm.name.trim(),
@@ -232,15 +243,19 @@ export default function Gateway() {
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function createModel() {
+    if (busy) return // P1-6: 双击守卫
     // 未选上游直接提示(审计2026-W10),不把 provider_id=0 提交给服务端
     if (!modelForm.provider_id) {
       setError('请选择所属上游')
       return
     }
+    setBusy('create-model')
     try {
       const body: Record<string, any> = {
         name: modelForm.name,
@@ -262,32 +277,42 @@ export default function Gateway() {
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function deleteProvider(id: number) {
+    if (busy) return // P1-6: 双击守卫
     if (!window.confirm('删除该上游?其模型将一并删除')) return
+    setBusy(`del-provider-${id}`)
     try {
       await request(`/api/admin/providers/${id}`, { method: 'DELETE' })
       setError('')
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function deleteModel(m: Model) {
+    if (busy) return // P1-6: 双击守卫
     // 审计修复 H2:渠道同步模型删除后不会随同步复活(服务端记入排除名单)
     const hint = m.provider_channel
       ? '该模型由上游同步;删除后同步不会自动恢复,如需恢复请重新添加。'
       : '客户端建议清单将移除。'
     if (!window.confirm(`删除该模型?${hint}`)) return
+    setBusy(`del-model-${m.id}`)
     try {
       await request(`/api/admin/models/${m.id}`, { method: 'DELETE' })
       setError('')
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -303,7 +328,8 @@ export default function Gateway() {
     })
   }
   async function saveModelPricing() {
-    if (!editModel) return
+    if (busy || !editModel) return // P1-6: 双击守卫
+    setBusy('save-model-pricing')
     try {
       const body: Record<string, any> = { name: editModel.name }
       // 留空 = 保持现值(服务端对缺省字段不覆盖);输入 0 = 定价 0(计费为 0)
@@ -316,10 +342,14 @@ export default function Gateway() {
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
   async function syncAll() {
+    if (busy) return // P1-6: 双击守卫
+    setBusy('sync-all')
     try {
       const r = await request('/api/admin/providers/sync-all', { method: 'POST' })
       const results: { provider: string; added: number; removed: number; skipped?: boolean; error?: string }[] = r.results ?? []
@@ -338,6 +368,8 @@ export default function Gateway() {
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -354,12 +386,16 @@ export default function Gateway() {
   }
 
   async function toggleProviderEnabled(p: Provider, enabled: boolean) {
+    if (busy) return // P1-6: 双击守卫(Switch 无按钮态,handler 层防连点)
+    setBusy(`toggle-${p.id}`)
     try {
       await request(`/api/admin/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ enabled }) })
       setError('')
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -472,7 +508,7 @@ export default function Gateway() {
               客户端登录与员工访问入口(经 Caddy HTTPS 反代后的地址);填写后管理页顶部展示;清空保存可移除
             </p>
           </div>
-          <Button onClick={saveGateway}>保存</Button>
+          <Button onClick={saveGateway} disabled={busy !== null}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
         </CardContent>
       </Card>
 
@@ -516,7 +552,7 @@ export default function Gateway() {
                   </TableCell>
                   <TableCell className="text-right space-x-2">
                     <Button size="sm" variant="outline" onClick={() => openProviderEdit(p)}>编辑</Button>
-                    <Button size="sm" variant="destructive" onClick={() => deleteProvider(p.id)}>删除</Button>
+                    <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => deleteProvider(p.id)}>{busy === `del-provider-${p.id}` ? '删除中…' : '删除'}</Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -530,7 +566,7 @@ export default function Gateway() {
           <CardTitle>模型管理</CardTitle>
           <CardDescription>对客户端可见的模型列表(含已停用上游的模型,停用后客户端不可见)</CardDescription>
           <div className="flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={syncAll}>立即同步</Button>
+            <Button size="sm" variant="outline" disabled={busy !== null} onClick={syncAll}>{busy === 'sync-all' ? '同步中…' : '立即同步'}</Button>
             <Button size="sm" onClick={() => setModelDialog(true)}>新增模型</Button>
           </div>
         </CardHeader>
@@ -577,7 +613,7 @@ export default function Gateway() {
                     </TableCell>
                     <TableCell className="text-right space-x-2">
                       <Button size="sm" variant="outline" onClick={() => openModelPricing(m)}>价格</Button>
-                      <Button size="sm" variant="destructive" onClick={() => deleteModel(m)}>删除</Button>
+                      <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => deleteModel(m)}>{busy === `del-model-${m.id}` ? '删除中…' : '删除'}</Button>
                     </TableCell>
                   </TableRow>
                 )
@@ -643,7 +679,7 @@ export default function Gateway() {
                 onChange={(e) => setProvForm({ ...provForm, models: e.target.value })}
               />
             </div>
-            <Button className="w-full" onClick={createProvider}>添加</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={createProvider}>{busy === 'create-provider' ? '处理中…' : '添加'}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -705,7 +741,7 @@ export default function Gateway() {
               <Switch checked={editProvForm.enabled} onCheckedChange={(v) => setEditProvForm({ ...editProvForm, enabled: v })} />
               <Label>启用该上游(停用后不参与模型路由,但模型仍可在本页管理)</Label>
             </div>
-            <Button className="w-full" onClick={saveProviderEdit}>保存</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={saveProviderEdit}>{busy === 'save-provider-edit' ? '处理中…' : '保存'}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -785,7 +821,7 @@ export default function Gateway() {
               低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。
               DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
             </p>
-            <Button className="w-full" onClick={createModel}>新增</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={createModel}>{busy === 'create-model' ? '处理中…' : '新增'}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -839,7 +875,7 @@ export default function Gateway() {
               低谷折扣 = 高峰窗口外(空闲时段)费用 × 折扣率;需先在「全局设置」配置高峰时段。
               DeepSeek 官方:高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
             </p>
-            <Button className="w-full" onClick={saveModelPricing}>保存</Button>
+            <Button className="w-full" disabled={busy !== null} onClick={saveModelPricing}>{busy === 'save-model-pricing' ? '处理中…' : '保存'}</Button>
           </div>
         </DialogContent>
       </Dialog>

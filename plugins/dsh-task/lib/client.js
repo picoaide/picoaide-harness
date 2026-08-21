@@ -101,6 +101,13 @@ window.__ModuleLoader__.load({
 					taskId
 				});
 			}
+			/** P0-3: cancel a running task (settles open executions as cancelled). */
+			cancel(taskId) {
+				this.submit({
+					kind: "cancel",
+					taskId
+				});
+			}
 			openTask(taskId) {
 				this.snapshot = {
 					...this.snapshot,
@@ -286,7 +293,9 @@ window.__ModuleLoader__.load({
 				alignItems: "center",
 				gap: 10,
 				padding: "10px 14px",
-				borderBottom: "1px solid var(--dsw-alias-border-l2)"
+				borderBottom: "1px solid var(--dsw-alias-border-l2)",
+				flexShrink: 0,
+				minHeight: 44
 			},
 			title: {
 				flex: 1,
@@ -567,6 +576,8 @@ window.__ModuleLoader__.load({
 			"detail.title": "任务详情",
 			"detail.run": "执行",
 			"detail.rerun": "重试",
+			"detail.cancel": "取消执行",
+			"detail.cancelConfirm": "确定取消这个正在执行的任务吗？任务将回到待办列，可重新执行。",
 			"detail.openSession": "查看执行会话",
 			"detail.edit": "编辑",
 			"detail.delete": "删除",
@@ -607,6 +618,7 @@ window.__ModuleLoader__.load({
 			"new.description": "描述",
 			"new.save": "创建",
 			"new.cancel": "取消",
+			"new.titleRequired": "标题不能为空",
 			"settings.title": "任务看板",
 			"settings.enabled": "启用任务看板",
 			"settings.enabledDesc": "关闭后看板隐藏，任务与执行历史保留。",
@@ -634,6 +646,8 @@ window.__ModuleLoader__.load({
 			"detail.title": "Task detail",
 			"detail.run": "Run",
 			"detail.rerun": "Retry",
+			"detail.cancel": "Cancel run",
+			"detail.cancelConfirm": "Cancel this running task? It returns to the todo column and can be run again.",
 			"detail.openSession": "Open execution session",
 			"detail.edit": "Edit",
 			"detail.delete": "Delete",
@@ -674,6 +688,7 @@ window.__ModuleLoader__.load({
 			"new.description": "Description",
 			"new.save": "Create",
 			"new.cancel": "Cancel",
+			"new.titleRequired": "Title is required",
 			"settings.title": "Task board",
 			"settings.enabled": "Enable task board",
 			"settings.enabledDesc": "Disabling hides the board; tasks and history are kept.",
@@ -895,6 +910,17 @@ window.__ModuleLoader__.load({
 								controller.run(task.id);
 							},
 							children: latest === void 0 ? t("detail.run") : t("detail.rerun")
+						}),
+						running && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							style: {
+								...styles.button,
+								...styles.buttonDanger
+							},
+							onClick: () => {
+								if (window.confirm(t("detail.cancelConfirm"))) controller.cancel(task.id);
+							},
+							children: t("detail.cancel")
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
@@ -1225,6 +1251,7 @@ window.__ModuleLoader__.load({
 			const [prompt, setPrompt] = (0, react.useState)("");
 			const [workspaceId, setWorkspaceId] = (0, react.useState)("");
 			const [permission, setPermission] = (0, react.useState)("");
+			const [error, setError] = (0, react.useState)("");
 			(0, react.useEffect)(() => {
 				document.dispatchEvent(new CustomEvent("dsh-modal-open", { detail: "task-new" }));
 				const onOtherModal = (event) => {
@@ -1243,7 +1270,11 @@ window.__ModuleLoader__.load({
 				return () => window.removeEventListener("keydown", onKey);
 			}, [onClose]);
 			const save = () => {
-				if (title.trim() === "") return;
+				if (title.trim() === "") {
+					setError(t("new.titleRequired"));
+					return;
+				}
+				setError("");
 				controller.create({
 					title: title.trim(),
 					description,
@@ -1266,17 +1297,25 @@ window.__ModuleLoader__.load({
 					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								style: styles.label,
-								children: t("new.name")
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
-								style: styles.input,
-								value: title,
-								onChange: (event) => {
-									setTitle(event.target.value);
-								},
-								autoFocus: true
-							})]
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									style: styles.label,
+									children: t("new.name")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+									style: styles.input,
+									value: title,
+									onChange: (event) => {
+										setTitle(event.target.value);
+										if (error !== "") setError("");
+									},
+									autoFocus: true
+								}),
+								error !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									style: styles.error,
+									children: error
+								})
+							]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,

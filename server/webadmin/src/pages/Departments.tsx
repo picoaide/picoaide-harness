@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -36,17 +36,22 @@ export default function Departments() {
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
   const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '', budget_money: '' })
+  // P1-8: 请求序号防乱序——保存/删除后重拉与手动刷新竞态时只认最新响应
+  const loadSeq = useRef(0)
 
   const load = useCallback(async () => {
+    const current = ++loadSeq.current
     try {
       const [d, u] = await Promise.all([
         request('/api/admin/departments'),
         request('/api/admin/users?size=200'),
       ])
+      if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setDepts(d.departments ?? [])
       setUsers(u.users ?? [])
       setError('') // 成功后清空错误(中3 同口径)
     } catch (err: any) {
+      if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
     }
   }, [])
@@ -198,7 +203,7 @@ export default function Departments() {
                 </TableCell>
                 <TableCell className="text-right space-x-2">
                   <Button size="sm" variant="outline" onClick={() => openDeptEdit(d)}>编辑</Button>
-                  <Button size="sm" variant="destructive" onClick={() => removeDept(d)}>删除</Button>
+                  <Button size="sm" variant="destructive" disabled={busy} onClick={() => removeDept(d)}>删除</Button>
                 </TableCell>
               </TableRow>
             )
@@ -273,7 +278,7 @@ export default function Departments() {
                 子部门成员同时受其上级部门预算约束。
               </p>
             </div>
-            <Button className="w-full" disabled={!deptForm.name.trim()} onClick={saveDeptForm}>保存</Button>
+            <Button className="w-full" disabled={!deptForm.name.trim() || busy} onClick={saveDeptForm}>{busy ? '处理中…' : '保存'}</Button>
           </div>
         </DialogContent>
       </Dialog>

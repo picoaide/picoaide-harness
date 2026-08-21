@@ -184,10 +184,30 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   // a local process could seize the port and capture the authorization code.
   let resolveCode!: (code: string) => void
   let rejectCode!: (error: Error) => void
+  let callbackServer: ReturnType<typeof createServer> | null = null
   const codePromise = new Promise<string>((resolve, reject) => {
     resolveCode = resolve
     rejectCode = reject
   })
+  // P0-1: the whole authorization flow must have a deadline and must be
+  // cancelable. Without it, a user who clicked "connect" can never abort:
+  // the callback server stays up and the panel hangs on "连接中…" until the
+  // browser is closed. Abort (user cancel / disconnect / overall timeout)
+  // closes the callback server and rejects the code promise so runAuth
+  // unwinds in bounded time.
+  const OAuthFlowTimeoutMs = 300_000 // 5 minutes
+  const abortFlow = (reason: string): void => {
+    // Guard against double-settlement: rejectCode fires only once, but the
+    // callback path may race an abort — an already-settled promise is a
+    // no-op, so just close the server and reject idempotently.
+    callbackServer?.close()
+    callbackServer?.closeIdleConnections?.()
+    callbackServer = null
+    rejectCode(new Error(`OAuth 授权已取消: ${reason}`))
+  }
+  const onAbort = (): void => abortFlow(options.signal.reason instanceof Error ? options.signal.reason.message : String(options.signal.reason ?? '用户取消'))
+  options.signal.addEventListener('abort', onAbort, { once: true })
+  const flowTimer = setTimeout(() => abortFlow('等待授权超时（5 分钟）'), OAuthFlowTimeoutMs)
   const port = await new Promise<number>((resolve, reject) => {
     const server = createServer((req, res) => {
       // The loopback port is fixed before any request can arrive (the listen
@@ -210,6 +230,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
       res.end('<html><body><p>授权完成，可以关闭此窗口。</p></body></html>')
       server.close()
       server.closeIdleConnections()
+      callbackServer = null
       if (errorParam) {
         rejectCode(new Error(`OAuth 授权失败: ${errorParam}`))
         return
@@ -222,6 +243,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
       resolve(address.port)
     })
     server.on('error', reject)
+    callbackServer = server
   })
   const redirectUri = `http://${callbackHost}:${port}/callback`
   const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
@@ -245,6 +267,13 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
   options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
   const code = await codePromise
+
+  // The flow settled (code received, error, or abort): stop watching for
+  // further aborts and stop the timeout so the token exchange below is not
+  // racing a cancelled flow.
+  options.signal.removeEventListener('abort', onAbort)
+  clearTimeout(flowTimer)
+  callbackServer = null
 
   throwIfAborted(options.signal)
   const tokenUrl = options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl
