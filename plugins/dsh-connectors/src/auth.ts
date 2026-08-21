@@ -190,8 +190,15 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   })
   const port = await new Promise<number>((resolve, reject) => {
     const server = createServer((req, res) => {
-      const address = server.address() as AddressInfo
-      const url = new URL(req.url ?? '/', `http://${callbackHost}:${address.port}`)
+      // The loopback port is fixed before any request can arrive (the listen
+      // callback resolves `port` first), so the captured value is used
+      // instead of server.address(): after server.close() that call returns
+      // null and `address.port` throws inside this request handler — an
+      // uncaught exception that kills the whole host when a late keep-alive
+      // request lands (e.g. the browser's /favicon.ico right after the
+      // callback page). Connection: close + closeIdleConnections additionally
+      // prevent the browser from reusing the callback socket.
+      const url = new URL(req.url ?? '/', `http://${callbackHost}:${port}`)
       if (url.pathname !== '/callback' || url.searchParams.get('state') !== state) {
         res.writeHead(404)
         res.end('not found')
@@ -199,9 +206,10 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
       }
       const codeParam = url.searchParams.get('code')
       const errorParam = url.searchParams.get('error')
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', Connection: 'close' })
       res.end('<html><body><p>授权完成，可以关闭此窗口。</p></body></html>')
       server.close()
+      server.closeIdleConnections()
       if (errorParam) {
         rejectCode(new Error(`OAuth 授权失败: ${errorParam}`))
         return

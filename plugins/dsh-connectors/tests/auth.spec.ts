@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { connect } from 'node:net'
 import { ConnectorStore } from '../src/store.ts'
 import { runAuth, refreshOAuthToken } from '../src/auth.ts'
 import type { ConnectorDef } from '../src/types.ts'
@@ -75,6 +76,66 @@ describe('connector auth', () => {
       expect(tokenBody).toContain('grant_type=authorization_code')
       expect(tokenBody).toContain('code_verifier=')
       expect(tokenBody).toContain('code=auth-code-1')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('survives a keep-alive second request after the oauth callback (browser favicon race)', async () => {
+    const def = oauthDef()
+    let authorizeUrl = ''
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('http://127.0.0.1')) return originalFetch(input, init)
+      if (url.includes('/register')) {
+        return new Response(JSON.stringify({ client_id: 'dyn-client-2' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/token')) {
+        return new Response(JSON.stringify({ access_token: 'at-2' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response('{}', { status: 404 })
+    }) as typeof fetch
+
+    try {
+      const flow = runAuth(def, {
+        onRequest: (request) => {
+          authorizeUrl = request.authorizeUrl ?? ''
+        },
+        signal: new AbortController().signal,
+      })
+      const deadline = Date.now() + 3000
+      while (authorizeUrl === '' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      const callback = new URL(authorizeUrl).searchParams.get('redirect_uri') ?? ''
+      const state = new URL(authorizeUrl).searchParams.get('state') ?? ''
+      const callbackUrl = new URL(callback)
+      const callbackPort = Number(callbackUrl.port)
+
+      // Mimic the browser: the callback navigation followed by /favicon.ico on
+      // the same keep-alive socket. The handler closes the server after the
+      // first response, so this second request used to hit the handler with
+      // server.address() === null and throw an uncaught exception (killing the
+      // whole host). The flow must still resolve with the token.
+      const socket = connect(callbackPort, callbackUrl.hostname)
+      let responseHead = ''
+      socket.on('data', (chunk: Buffer) => { responseHead += chunk.toString() })
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', resolve)
+        socket.once('error', reject)
+      })
+      const send = (raw: string): Promise<void> => new Promise((resolve) => {
+        socket.write(raw)
+        setTimeout(resolve, 250)
+      })
+      await send(`GET /callback?code=keep-alive-code&state=${encodeURIComponent(state)} HTTP/1.1\r\nHost: 127.0.0.1:${callbackPort}\r\nConnection: keep-alive\r\n\r\n`)
+      await send(`GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:${callbackPort}\r\nConnection: close\r\n\r\n`)
+      socket.destroy()
+
+      const patch = await flow
+      expect(responseHead).toContain('200 OK')
+      expect(patch.accessToken).toBe('at-2')
     } finally {
       globalThis.fetch = originalFetch
     }
