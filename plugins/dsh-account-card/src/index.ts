@@ -72,12 +72,11 @@ export function apply(ctx: Context): void {
       const s = session()
       if (s === null) return json(res, 401, { error: 'not logged in' })
       // `?refresh=1` forces an immediate gateway round-trip (manual button);
-      // a plain GET serves the cached snapshot (client polling).
+      // a plain GET serves the cached snapshot only (client polling must not
+      // hit the gateway every 10s — P1-9).
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (url.searchParams.has('refresh')) {
         await service.refreshNow(s)
-      } else {
-        service.refresh(s)
       }
       const snapshot = service.get()
       json(res, 200, {

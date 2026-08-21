@@ -250,11 +250,26 @@ export class BrowserRuntime {
     const mask = this.adapter.createMaskView()
     this.mask = mask
     mask.attach(win, this.contentBounds())
-    mask.setVisible(true)
     if (origin !== undefined) {
-      void mask.webContents.loadURL(`${origin}/browser-mask`)
-      void win.loadURL(`${origin}/browser-shell`)
+      // P1-14: never leave an unhandled rejection when the shell/mask page
+      // fails to load (loopback port quirk, navigation abort) — a swallowed
+      // failure would leave a blank window with no hint.
+      void mask.webContents.loadURL(`${origin}/browser-mask`).catch((cause: unknown) => {
+        void mask.webContents.loadURL(`${origin}/browser-mask`).catch(() => {
+          console.error('[dsh-browser] mask page failed to load', cause)
+        })
+      })
+      void win.loadURL(`${origin}/browser-shell`).catch((cause: unknown) => {
+        void win.loadURL(`${origin}/browser-shell`).catch(() => {
+          console.error('[dsh-browser] shell page failed to load', cause)
+        })
+      })
     }
+    // P1-14: the mask must reflect the real control state on first render,
+    // not unconditionally "AI is controlling" — a user opening the window
+    // from the sidebar while the agent is idle must see the content, not a
+    // takeover overlay that requires clicking 接管 then 释放 to dismiss.
+    mask.setVisible(this.mutex.controlled)
     this.windowResizeDisposer = win.onResize(() => { this.relayout() })
     this.windowClosedDisposer = win.onClosed(() => {
       // The window is truly gone (agent close or app quit): drop all tabs.
@@ -289,7 +304,11 @@ export class BrowserRuntime {
    * 「+」 button starts the first tab. */
   async showWindow(): Promise<void> {
     if (this.window === null || this.window.isDestroyed()) {
+      // P1-14: the cold path must lay out the view stack (mask on/off, tabs)
+      // — otherwise the mask stays at its initial state and the content
+      // area is mis-sized.
       await this.ensureWindow(this.shellOrigin)
+      this.relayout()
       return
     }
     this.window.show()
@@ -339,7 +358,15 @@ export class BrowserRuntime {
       const id = this.nextTabId++
       const view = this.adapter.createView()
       const cdp = new CdpSession(view.webContents.cdp)
-      await cdp.attach()
+      // P1-14: if CDP attach fails (debugger already occupied, teardown
+      // race), the freshly created view must be destroyed — otherwise a
+      // repeated failure leaks WebContentsViews and starves the tab pool.
+      try {
+        await cdp.attach()
+      } catch (cause) {
+        try { view.destroy() } catch { /* teardown never throws */ }
+        throw cause
+      }
       const tab: BrowserTab = { id, view, cdp, url: '', title: '', loading: false }
       this.tabs.set(id, tab)
 
@@ -366,7 +393,19 @@ export class BrowserRuntime {
       }))
 
       if (url !== undefined && url !== '') {
-        await this.navigateInternal(id, url, 'domcontentloaded')
+        try {
+          await this.navigateInternal(id, url, 'domcontentloaded')
+        } catch (cause) {
+          // P1-14: a navigation failure must not leave a half-baked tab in
+          // the pool (it would consume a slot and confuse the tab strip).
+          try {
+            cdp.detach()
+            view.destroy()
+          } catch { /* teardown never throws */ }
+          this.tabs.delete(id)
+          if (this.visibleTabId === id) this.visibleTabId = undefined
+          throw cause
+        }
       }
       this.updateTabState(tab)
       this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url)
@@ -765,6 +804,13 @@ export class BrowserRuntime {
    * password. Callers must route this through approval (credentials are
    * sensitive).
    */
+  /** Current URL of a tab ('' when unknown) — used in approval prompts. */
+  currentUrlOf(id: number): string {
+    const tab = this.tabs.get(id)
+    if (tab === undefined) return ''
+    return tab.url
+  }
+
   async fillCredentials(id: number, connectorId: string, signal?: AbortSignal): Promise<{ username: boolean; password: boolean }> {
     if (this.credentials === undefined) {
       throw new Error('browser: credential injection is not available in this deployment')

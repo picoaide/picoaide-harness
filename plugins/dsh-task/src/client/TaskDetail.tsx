@@ -101,6 +101,18 @@ export function TaskDetail({ controller, task, cron, workspaces }: {
         >
           {latest === undefined ? t('detail.run') : t('detail.rerun')}
         </button>
+        {running && (
+          <button
+            type="button"
+            style={{ ...styles.button, ...styles.buttonDanger }}
+            onClick={() => {
+              // P0-3: cancel must not be a misclick — confirm first.
+              if (window.confirm(t('detail.cancelConfirm'))) controller.cancel(task.id)
+            }}
+          >
+            {t('detail.cancel')}
+          </button>
+        )}
         <button type="button" style={styles.button} onClick={() => { setEditing(!editing) }}>
           {editing ? '✓' : t('detail.edit')}
         </button>

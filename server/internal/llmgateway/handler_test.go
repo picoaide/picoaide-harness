@@ -178,6 +178,56 @@ func TestApplyMaxTokensDefault(t *testing.T) {
 	}
 }
 
+func TestApplyStreamUsageRequest(t *testing.T) {
+	// streaming body without stream_options -> inject include_usage=true
+	body := []byte(`{"model":"m","stream":true}`)
+	out, err := applyStreamUsageRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	opts, ok := m["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing: %s", out)
+	}
+	if opts["include_usage"] != true {
+		t.Fatalf("include_usage = %v, want true", opts["include_usage"])
+	}
+
+	// non-stream body -> untouched (stream_options must not leak into JSON mode)
+	nonStream := []byte(`{"model":"m","messages":[]}`)
+	out2, err := applyStreamUsageRequest(nonStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out2) != string(nonStream) {
+		t.Fatalf("non-stream body mutated: %s", out2)
+	}
+
+	// client already set include_usage=false -> respected (no injection)
+	explicitFalse := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":false}}`)
+	out3, err := applyStreamUsageRequest(explicitFalse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out3) != string(explicitFalse) {
+		t.Fatalf("explicit include_usage=false was overridden: %s", out3)
+	}
+
+	// client set include_usage=true already -> merged without duplication
+	explicitTrue := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true}}`)
+	out4, err := applyStreamUsageRequest(explicitTrue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal(out4, &m)
+	opts4 := m["stream_options"].(map[string]any)
+	if opts4["include_usage"] != true {
+		t.Fatalf("include_usage = %v, want true", opts4["include_usage"])
+	}
+}
+
 func TestProxyNonStream(t *testing.T) {
 	f := newFakeUpstream(t)
 	r, _, token := newGateway(t, f)
@@ -212,6 +262,17 @@ func TestProxyStream(t *testing.T) {
 	}
 	if got := w.Body.String(); got != f.streamResp {
 		t.Fatalf("stream not passthrough:\ngot:  %q\nwant: %q", got, f.streamResp)
+	}
+	// P1-1: the upstream must have been asked to include usage in the final
+	// SSE chunk, otherwise the pending usage row can never be backfilled.
+	forwarded := f.gotBody.Load().(string)
+	var forwardedBody map[string]any
+	if err := json.Unmarshal([]byte(forwarded), &forwardedBody); err != nil {
+		t.Fatalf("forwarded body not JSON: %v", err)
+	}
+	opts, ok := forwardedBody["stream_options"].(map[string]any)
+	if !ok || opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage not injected: %s", forwarded)
 	}
 
 	// pending row inserted then backfilled with tokens from final chunk

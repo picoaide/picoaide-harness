@@ -25,6 +25,10 @@ export const styles: Record<string, CSSProperties> = {
     gap: 10,
     padding: '10px 14px',
     borderBottom: '1px solid var(--dsw-alias-border-l2)',
+    // P0-4: under a narrow window the header could flex-shrink to zero and
+    // collapse the back-to-chat button; keep the row at its content height.
+    flexShrink: 0,
+    minHeight: 44,
   },
   title: { flex: 1, margin: 0, fontSize: 14, fontWeight: 600 },
   meta: { fontSize: 11, opacity: 0.65, whiteSpace: 'nowrap' },

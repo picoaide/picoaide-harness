@@ -24,6 +24,16 @@ type SearchResult struct {
 	Score       float64 `json:"score"` // lexical relevance in [0,1]
 }
 
+// P1-2 (DoS bounds): a single-word query like "的" matches every chunk in
+// the library; without caps the whole candidate set is loaded into memory
+// for scoring. maxSearchWords caps distinct query words; maxSearchQueryRunes
+// caps the total query length; maxSearchCandidates caps rows fetched from SQL.
+const (
+	maxSearchWords       = 10
+	maxSearchQueryRunes  = 200
+	maxSearchCandidates  = 1000
+)
+
 // sanitizeWord strips FTS5 syntax characters and control chars so a raw
 // query word can never break out of a quoted phrase or alter the query.
 func sanitizeWord(w string) string {
@@ -81,6 +91,15 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 		pageSize = 100
 	}
 
+	// P1-2 (DoS bound): a short query word (e.g. "的") hits every chunk in
+	// the library and the whole candidate set is loaded into memory for
+	// scoring. Cap the number of distinct words and the total query length;
+	// a query beyond the cap is truncated rather than refused.
+	if utf8.RuneCountInString(query) > maxSearchQueryRunes {
+		runes := []rune(query)
+		query = string(runes[:maxSearchQueryRunes])
+	}
+
 	var words []string
 	for _, w := range strings.Fields(query) {
 		if w = sanitizeWord(w); w != "" {
@@ -89,6 +108,9 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 	}
 	if len(words) == 0 {
 		return []SearchResult{}, 0, nil
+	}
+	if len(words) > maxSearchWords {
+		words = words[:maxSearchWords]
 	}
 
 	// Dispatch by rune length: >= 3 runes can ride the trigram index;
@@ -141,9 +163,10 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 
 	// Candidate generation is SQL; ranking is Go. Fetch every matching doc
 	// (a few thousand at most), score, sort, page in memory — one pass, no
-	// separate COUNT, ordering and totals always agree.
+	// separate COUNT, ordering and totals always agree. P1-2: the LIMIT
+	// bounds memory even when a broad query matches the whole library.
 	rows, err := db.Query(`SELECT d.id, d.folder_id, d.title, d.content, d.content_type, d.size, d.source, d.created_by
-		FROM kb_documents d WHERE `+where+` ORDER BY d.id`, args...)
+		FROM kb_documents d WHERE `+where+` ORDER BY d.id LIMIT ?`, append(args, maxSearchCandidates)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -176,7 +199,10 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 
 	total := int64(len(all))
 	start := (page - 1) * pageSize
-	if start >= len(all) {
+	// P2 (integer overflow): a huge page from a malicious client can make
+	// (page-1)*pageSize wrap negative, and all[start:] would panic. Clamp
+	// the offset before slicing.
+	if start < 0 || start >= len(all) {
 		return []SearchResult{}, total, nil
 	}
 	end := start + pageSize

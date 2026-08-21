@@ -115,6 +115,28 @@ export const Config: z<Config> = z.object({
   defaultServer: z.string(),
 })
 
+// P1-11: transient page shown while the persisted session is still being
+// restored; it re-requests the index (which now resolves to the app or the
+// login form) without a user-visible login-form flash.
+const RESTORING_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PicoAide</title>
+<style>
+  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #fff; color: #616267; }
+</style>
+</head>
+<body>
+<p>正在恢复登录状态…</p>
+<script>
+  // Once the restoration completes, the next index request serves the app
+  // (or the login form). Poll briefly, then reload for good measure.
+  setTimeout(function () { location.reload() }, 1200)
+<\/script>
+</body>
+</html>`
+
 export const name = 'auth-gate'
 export const inject = ['webServer', 'picoSession']
 
@@ -175,8 +197,12 @@ export function apply(ctx: Context, config: Config): void {
       // client redirect) keeps the initial loadURL from being aborted.
       // While logged in, inject the session-lost tripwire into the app page.
       ctx.webServer.tapIndex((html) => {
-        if (!ctx.picoSession.isLoggedIn()) return loginHTML
-        return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
+      // P1-11: while the persisted session is still restoring, serve a
+      // lightweight "loading" page that re-requests the index once ready —
+      // never flash the login form over an existing valid session.
+      if (!ctx.picoSession.isRestored()) return RESTORING_HTML
+      if (!ctx.picoSession.isLoggedIn()) return loginHTML
+      return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
       }),
 
       ctx.webServer.register({
@@ -347,9 +373,18 @@ export function apply(ctx: Context, config: Config): void {
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+            // P1-12: bound the download like the install path — a huge or
+            // anomalous archive must not be buffered into memory wholesale.
+            const declared = upstream.headers.get('content-length')
+            if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
+              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+            }
+            const content = Buffer.from(await upstream.arrayBuffer())
+            if (content.length > MAX_ARCHIVE_BYTES) {
+              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+            }
             // Pass through the upstream integrity headers (M3): the server
             // signs archives with X-Skill-Checksum / X-Skill-Version.
-            const content = Buffer.from(await upstream.arrayBuffer())
             const headers: Record<string, string> = {
               'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
               'Content-Length': String(content.length),

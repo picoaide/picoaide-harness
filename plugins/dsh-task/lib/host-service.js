@@ -1,4 +1,4 @@
-import { t as HostTaskLedger } from "./host-ledger-DvbOEp6y.js";
+import { t as HostTaskLedger } from "./host-ledger-DTX-3KpF.js";
 import { HostExecutionRunner, SessionLaunchError } from "./host-runner.js";
 //#region src/host-service.ts
 const SESSION_POLL_MS = 5e3;
@@ -58,6 +58,7 @@ var HostTaskService = class {
 		if (!this.active) throw new Error("task board is disabled");
 		const result = this.ledger.applyRequest(requestId, action);
 		if (result.run !== void 0) this.scheduleLaunch(result.run.task, result.run.execution.id);
+		if (result.cancelled !== void 0) for (const sessionId of result.cancelled) this.runner.cancelSession(sessionId).catch(() => {});
 		return this.snapshot();
 	}
 	async runTask(taskId) {

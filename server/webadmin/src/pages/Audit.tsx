@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
@@ -71,17 +71,22 @@ export default function Audit() {
   const [filterUser, setFilterUser] = useState('')
   const [appliedAction, setAppliedAction] = useState('')
   const [appliedUser, setAppliedUser] = useState('')
+  // P1-8: 请求序号防乱序——快速翻页/切筛选时只有最新请求的响应能更新 state
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (p: number, action: string, username: string) => {
+    const current = ++loadSeq.current
     try {
       const params = new URLSearchParams({ page: String(p), size: '50' })
       if (action) params.set('action', action)
       if (username) params.set('username', username)
       const data = await request(`/api/admin/kb/audit?${params.toString()}`)
+      if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setLogs(data.logs)
       setTotal(data.total)
       setPage(p)
     } catch (err: any) {
+      if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
     }
   }, [])

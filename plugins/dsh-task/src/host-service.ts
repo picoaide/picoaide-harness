@@ -73,6 +73,13 @@ export class HostTaskService implements PicoTaskService {
     if (!this.active) throw new Error('task board is disabled')
     const result = this.ledger.applyRequest(requestId, action)
     if (result.run !== undefined) this.scheduleLaunch(result.run.task, result.run.execution.id)
+    // P0-3: a cancel must also ask the guest session to stop (best effort —
+    // the ledger already settled the execution; the poll converges anyway).
+    if (result.cancelled !== undefined) {
+      for (const sessionId of result.cancelled) {
+        void this.runner.cancelSession(sessionId).catch(() => { /* best effort */ })
+      }
+    }
     return this.snapshot()
   }
 
