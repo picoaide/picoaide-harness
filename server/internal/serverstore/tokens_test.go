@@ -206,8 +206,15 @@ func TestTouchTokenLastUsedThrottle(t *testing.T) {
 	if err := db.QueryRow("SELECT last_used_at FROM api_tokens WHERE id = ?", id).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got != future {
-		t.Fatalf("throttled touch rewrote the row: %q != %q", got, future)
+	// 驱动在 _timezone=Local 下以本地时区表示同一时刻(如 "…+08:00"),
+	// 字符串格式不再等于写入时的 UTC RFC3339,须按绝对时刻比较。
+	wantT, err := time.Parse(time.RFC3339, future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotT, err := time.Parse(time.RFC3339, got)
+	if err != nil || !gotT.Equal(wantT) {
+		t.Fatalf("throttled touch rewrote the row: %q (parsed %v) != %q (%v)", got, gotT, future, wantT)
 	}
 	// outside the window the touch writes again
 	old := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
