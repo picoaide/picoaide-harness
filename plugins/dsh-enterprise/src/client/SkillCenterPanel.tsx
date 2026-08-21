@@ -107,25 +107,48 @@ const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 
 
 const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-caption)', textAlign: 'center', padding: 24 }
 
+const BUTTON_SECONDARY: React.CSSProperties = {
+  ...BUTTON,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-secondary)',
+}
+
+const INSTALLED_CHIP: React.CSSProperties = {
+  marginLeft: 8,
+  padding: '1px 8px',
+  borderRadius: 999,
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-state-success-primary)',
+  border: '1px solid var(--dsw-alias-state-success-primary)',
+  whiteSpace: 'nowrap',
+}
+
 const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'center', padding: 12 }
 
-/** Per-skill install feedback: which skill is installing and the outcome. */
-interface DownloadState {
+/** Per-skill action feedback: which skill is busy and the outcome. */
+interface ActionState {
   name: string
-  kind: 'downloading' | 'done' | 'failed'
+  kind: 'installing' | 'uninstalling' | 'done-install' | 'done-uninstall' | 'failed'
+  /** Which action failed (for the failure notice copy). */
+  failedKind?: 'install' | 'uninstall' | undefined
   error?: string | undefined
 }
 
 /**
- * Skill center modal: the gateway's skill store catalog with an archive
- * download action per skill, fetched through the host's local proxy.
+ * Skill center modal: the gateway's skill store catalog with an install /
+ * uninstall action per skill, fetched through the host's local proxy.
+ * Installed state comes from the host (`installed` names in the catalog
+ * response) and is kept in sync locally after each action.
  * Esc closes the modal; focus moves into the panel on open.
  * @param props.onClose - close the modal.
  */
 export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
   const [skills, setSkills] = useState<Skill[] | null>(null)
+  const [installed, setInstalled] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState('')
-  const [downloadState, setDownloadState] = useState<DownloadState | null>(null)
+  const [action, setAction] = useState<ActionState | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -133,8 +156,11 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
     fetch('/api/pico/skills')
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
-        const data = (await res.json()) as { skills?: Skill[] }
-        if (!cancelled) setSkills(data.skills ?? [])
+        const data = (await res.json()) as { skills?: Skill[]; installed?: string[] }
+        if (!cancelled) {
+          setSkills(data.skills ?? [])
+          setInstalled(new Set(data.installed ?? []))
+        }
       })
       .catch(() => { if (!cancelled) setError(t('skill.loadError')) })
     return () => { cancelled = true }
@@ -151,17 +177,38 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
   }, [onClose])
 
   const install = async (name: string): Promise<void> => {
-    if (downloadState !== null && downloadState.kind === 'downloading') return
-    setDownloadState({ name, kind: 'downloading' })
+    if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling')) return
+    setAction({ name, kind: 'installing' })
     try {
       const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/install`, { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
       }
-      setDownloadState({ name, kind: 'done' })
+      setInstalled(prev => new Set(prev).add(name))
+      setAction({ name, kind: 'done-install' })
     } catch (cause) {
-      setDownloadState({ name, kind: 'failed', error: cause instanceof Error ? cause.message : undefined })
+      setAction({ name, kind: 'failed', failedKind: 'install', error: cause instanceof Error ? cause.message : undefined })
+    }
+  }
+
+  const uninstall = async (name: string): Promise<void> => {
+    if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling')) return
+    setAction({ name, kind: 'uninstalling' })
+    try {
+      const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/uninstall`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
+      }
+      setInstalled(prev => {
+        const next = new Set(prev)
+        next.delete(name)
+        return next
+      })
+      setAction({ name, kind: 'done-uninstall' })
+    } catch (cause) {
+      setAction({ name, kind: 'failed', failedKind: 'uninstall', error: cause instanceof Error ? cause.message : undefined })
     }
   }
 
@@ -174,19 +221,34 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
     content = <p style={EMPTY}>{t('skill.empty')}</p>
   } else {
     content = skills.map(skill => {
-      const busy = downloadState?.name === skill.name && downloadState.kind === 'downloading'
+      const busy = action?.name === skill.name && (action.kind === 'installing' || action.kind === 'uninstalling')
+      const isInstalled = installed.has(skill.name)
       return (
         <div key={skill.name} style={CARD}>
           <div style={TITLE_ROW}>
-            <p style={NAME}>{skill.name}</p>
-            <button
-              type="button"
-              style={busy ? BUTTON_DISABLED : BUTTON}
-              disabled={busy}
-              onClick={() => { void install(skill.name) }}
-            >
-              {busy ? t('skill.installing') : t('skill.install')}
-            </button>
+            <p style={NAME}>
+              {skill.name}
+              {isInstalled && <span style={INSTALLED_CHIP}>{t('skill.installedBadge')}</span>}
+            </p>
+            {isInstalled ? (
+              <button
+                type="button"
+                style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY}
+                disabled={busy}
+                onClick={() => { void uninstall(skill.name) }}
+              >
+                {busy && action?.kind === 'uninstalling' ? t('skill.uninstalling') : t('skill.uninstall')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                style={busy ? BUTTON_DISABLED : BUTTON}
+                disabled={busy}
+                onClick={() => { void install(skill.name) }}
+              >
+                {busy ? t('skill.installing') : t('skill.install')}
+              </button>
+            )}
           </div>
           <p style={META}>v{skill.version}{skill.author !== '' ? ` · ${skill.author}` : ''}</p>
           {skill.description !== '' && <p style={DESC}>{skill.description}</p>}
@@ -204,13 +266,19 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
           <button type="button" style={CLOSE} onClick={onClose}>{t('skill.close')}</button>
         </div>
         <div style={BODY}>{content}</div>
-        {downloadState !== null && downloadState.kind !== 'downloading' && (
-          <p style={{ ...NOTICE, color: downloadState.kind === 'done' ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)' }}>
-            {downloadState.kind === 'done'
-              ? t('skill.installed', { name: downloadState.name })
-              : downloadState.error !== undefined && downloadState.error !== ''
-                ? `${t('skill.failed')}：${downloadState.error}`
-                : t('skill.failed')}
+        {action !== null && action.kind !== 'installing' && action.kind !== 'uninstalling' && (
+          <p style={{ ...NOTICE, color: action.kind === 'failed' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)' }}>
+            {action.kind === 'done-install'
+              ? t('skill.installed', { name: action.name })
+              : action.kind === 'done-uninstall'
+                ? t('skill.uninstalled', { name: action.name })
+                : action.failedKind === 'install'
+                  ? action.error !== undefined && action.error !== ''
+                    ? `${t('skill.failed')}：${action.error}`
+                    : t('skill.failed')
+                  : action.error !== undefined && action.error !== ''
+                    ? `${t('skill.uninstallFailed')}：${action.error}`
+                    : t('skill.uninstallFailed')}
           </p>
         )}
       </div>
