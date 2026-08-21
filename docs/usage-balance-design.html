@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>余额消费卡片 — 设计稿</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --fg: #1a1d24;
+    --fg-2: #5c6470;
+    --border: #e3e6ea;
+    --accent: #2563eb;
+    --danger: #dc2626;
+    --ok: #16a34a;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--fg); padding: 32px 24px 60px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: var(--fg-2); font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 15px; margin: 32px 0 12px; display: flex; align-items: center; gap: 8px; }
+  h2 .tag { font-size: 11px; background: var(--accent); color: #fff; border-radius: 4px; padding: 2px 8px; font-weight: 500; }
+  h2 .tag.alt { background: #6b7280; }
+  .stage { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  /* ===== 模拟 DSH 侧边栏底部区域 ===== */
+  .sidebar {
+    width: 232px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 8px; display: flex; flex-direction: column;
+    gap: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  .side-label { font-size: 11px; color: var(--fg-2); text-align: center; padding: 6px 0 2px; border-bottom: 1px dashed var(--border); margin-bottom: 4px; }
+  .foot-area { border-top: 1px solid var(--border); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .action-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px; font-size: 13px; color: var(--fg); background: transparent; border: none; width: 100%; text-align: left; cursor: pointer; }
+  .action-row:hover { background: #f0f2f5; }
+  .action-row .ic { width: 16px; height: 16px; border-radius: 4px; background: #e8edf7; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: var(--accent); }
+  .settings-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px; font-size: 13px; }
+  .settings-row .ic { width: 16px; height: 16px; border-radius: 4px; background: #f0f2f5; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; }
+  .spacer { color: var(--fg-2); font-size: 12px; }
+  /* ===== 余额卡片（方案 A） ===== */
+  .balance-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+    background: #fafbfc; display: flex; flex-direction: column; gap: 8px;
+  }
+  .bc-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+  .bc-user { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+  .bc-avatar { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
+  .bc-logout { font-size: 12px; color: var(--fg-2); background: none; border: none; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
+  .bc-logout:hover { color: var(--danger); background: #fdecec; }
+  .bc-bal { display: flex; align-items: baseline; gap: 6px; }
+  .bc-bal .amt { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bc-bal .unit { font-size: 12px; color: var(--fg-2); }
+  .bc-bar { height: 5px; border-radius: 3px; background: #e8ebef; overflow: hidden; }
+  .bc-bar > i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), #60a5fa); }
+  .bc-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--fg-2); }
+  .bc-refresh { font-size: 11px; color: var(--accent); background: none; border: none; cursor: pointer; padding: 0; }
+  .bc-refresh:hover { text-decoration: underline; }
+  /* ===== 方案 B：紧凑单行 ===== */
+  .compact-card {
+    display: flex; align-items: center; justify-content: space-between;
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; background: #fafbfc; font-size: 13px;
+  }
+  .cc-left { display: flex; align-items: center; gap: 8px; }
+  .cc-amt { font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .cc-actions { display: flex; align-items: center; gap: 2px; }
+  .cc-actions button { font-size: 12px; border: none; background: none; cursor: pointer; padding: 3px 7px; border-radius: 5px; color: var(--fg-2); }
+  .cc-actions button:hover { background: #f0f2f5; }
+  .cc-actions .out { color: var(--danger); }
+  /* ===== 方案 C：纯数字浮标 ===== */
+  .pill-card {
+    display: flex; align-items: center; justify-content: space-between;
+    border: 1px dashed var(--border); border-radius: 10px; padding: 7px 12px; font-size: 12px; color: var(--fg-2);
+  }
+  .pill-amt { font-weight: 700; color: var(--fg); font-size: 13px; font-variant-numeric: tabular-nums; }
+  /* 图例 */
+  .legend { margin-top: 24px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--fg-2); }
+  .legend b { color: var(--fg); }
+  .legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+  .flow { margin-top: 20px; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; font-size: 13px; line-height: 1.9; }
+  .flow code { background: #f0f2f5; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+  .flow .arrow { color: var(--accent); font-weight: 700; }
+  .states { display: flex; gap: 10px; margin-top: 8px; }
+  .state { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 12px; background: #fafbfc; }
+  .state b { display: block; margin-bottom: 4px; font-size: 13px; }
+  .state.ok { border-color: #bbe3c8; }
+  .state.warn { border-color: #f3d08a; }
+  .state.bad { border-color: #f1b5b5; }
+</style>
+</head>
+<body>
+
+<h1>余额消费卡片 · 设计稿</h1>
+<div class="sub">位置：侧边栏右下角 · 设置按钮下方 · 数据源 <code>/api/auth/usage</code> · 刷新时机：agent loop 完成（idle）后 + 手动刷新</div>
+
+<h2><span class="tag">方案 A · 推荐</span>信息卡片（用户名 + 余额 + 进度 + 退出）</h2>
+<div class="stage">
+  <div class="sidebar">
+    <div class="side-label">现有区域（上方）</div>
+    <div class="action-row"><span class="ic">⚡</span>技能中心</div>
+    <div class="settings-row"><span class="ic">⚙</span>设置 <span class="spacer">…</span></div>
+    <div class="foot-area">
+      <div class="side-label">新：余额卡片（设置下方）</div>
+      <div class="balance-card">
+        <div class="bc-head">
+          <span class="bc-user"><span class="bc-avatar">A</span>admin</span>
+          <button class="bc-logout">退出登录</button>
+        </div>
+        <div class="bc-bal"><span class="amt">¥ 910.80</span><span class="unit">/ 本月预算 ¥1000</span></div>
+        <div class="bc-bar"><i style="width: 9%"></i></div>
+        <div class="bc-meta">
+          <span>本月已用 ¥89.20 · 今日 ¥3.50</span>
+          <button class="bc-refresh">↻ 刷新</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <div><b>展示内容</b>（按可用性降级）</div>
+    <div><span class="dot" style="background:#2563eb"></span>余额：优先金额 <code>remaining_money</code>；为 null 时回退 token 数 <code>remaining_tokens</code></div>
+    <div><span class="dot" style="background:#6b7280"></span>两者皆 null（不限）→ 显示「本月已用 ¥xx · 今日 ¥xx」不显示进度条</div>
+    <div><span class="dot" style="background:#dc2626"></span>admin 豁免 → 显示「管理员 · 不限」</div>
+    <div><span class="dot" style="background:#16a34a"></span>配额 <b>剩余 ≤ 20%</b> 时进度条变橙色，≤5% 变红色 + 「余额不足」提示</div>
+    <div><b>点击「退出登录」</b>：走现有 <code>/api/pico/auth/logout</code>（服务端吊销 token）后回登录页</div>
+    <div><b>点击「↻ 刷新」</b>：立即拉取一次</div>
+  </div>
+</div>
+
+<h2><span class="tag alt">方案 B</span>紧凑双行（省高度）</h2>
+<div class="stage">
+  <div class="sidebar">
+    <div class="side-label">现有区域（上方）</div>
+    <div class="action-row"><span class="ic">⚡</span>技能中心</div>
+    <div class="settings-row"><span class="ic">⚙</span>设置 <span class="spacer">…</span></div>
+    <div class="foot-area">
+      <div class="side-label">新：紧凑卡片（设置下方）</div>
+      <div class="compact-card">
+        <div class="cc-left"><span class="bc-avatar" style="width:20px;height:20px;font-size:10px">A</span><span>admin</span><span class="cc-amt">¥910.8</span></div>
+        <div class="cc-actions">
+          <button>↻</button>
+          <button class="out">退出</button>
+        </div>
+      </div>
+      <div class="bc-meta" style="padding: 0 6px;">本月已用 ¥89.20 · 今日 ¥3.50</div>
+    </div>
+  </div>
+  <div class="legend">
+    <div>仅两行：第一行 头像+用户名+余额+操作，第二行 本月/今日消耗</div>
+    <div>优点：占高最小；缺点：无进度条、余额不足不易感知</div>
+  </div>
+</div>
+
+<h2><span class="tag alt">方案 C</span>极简浮标（最省空间）</h2>
+<div class="stage">
+  <div class="sidebar">
+    <div class="side-label">现有区域（上方）</div>
+    <div class="action-row"><span class="ic">⚡</span>技能中心</div>
+    <div class="settings-row"><span class="ic">⚙</span>设置 <span class="spacer">…</span></div>
+    <div class="foot-area">
+      <div class="side-label">新：余额浮标（设置下方）</div>
+      <div class="pill-card">
+        <span>余额 <span class="pill-amt">¥910.8</span></span>
+        <span style="display:flex;gap:2px"><button style="border:none;background:none;cursor:pointer;font-size:12px;color:var(--fg-2)">↻</button><button style="border:none;background:none;cursor:pointer;font-size:12px;color:var(--danger)">退出</button></span>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <div>单行浮标；用户名放哪？→ hover 浮出 tooltip，或省略（登录页已见）</div>
+    <div>用户明确要求显示用户名，故本方案默认不采用，仅列作备选</div>
+  </div>
+</div>
+
+<h2>刷新链路（数据流）</h2>
+<div class="flow">
+  <b>每次 agent loop 完成后自动刷新：</b><br>
+  node 侧（dsh-enterprise）<code>ctx.on('agent/status', …)</code> 收到 <code>status === 'idle'</code>（running→idle 转变 = 本轮 loop 结束）
+  <span class="arrow">→</span> 单飞行（in-flight 去重 + 300ms 防抖）拉取 <code>{serverURL}/api/auth/usage</code>（Bearer token）
+  <span class="arrow">→</span> 写入 node 内存缓存 <code>{data, fetchedAt}</code>，并更新本地路由 <code>/api/pico/usage</code><br><br>
+  client 侧（React 组件）：挂载时拉取 + <b>每 10s 轮询</b>本地路由（零网络、零成本）<span class="arrow">→</span> 余额实时更新；<code>fetchedAt</code> 超过 60s 显示「—」防误导
+  <br><br>
+  <b>其他刷新触发：</b>登录成功 / 会话恢复时立即拉取一次；手动「↻ 刷新」按钮；token 失效（401）→ 清会话回登录页（复用现有 auth-expired 逻辑）
+</div>
+
+<h2>边界状态</h2>
+<div class="states">
+  <div class="state ok"><b>✓ 正常</b>显示余额 + 进度 + 用户名</div>
+  <div class="state warn"><b>⚠ 无配额（不限）</b>显示本月/今日消耗，无进度条</div>
+  <div class="state warn"><b>⚠ 低余额 ≤20%</b>进度条橙色 + 「余额不足」文字</div>
+  <div class="state bad"><b>✗ 拉取失败</b>显示「—」+ 保留上次值，不闪错误</div>
+  <div class="state bad"><b>✗ 401</b>清会话 → 自动回登录页（现有 tripwire）</div>
+</div>
+
+</body>
+</html>
