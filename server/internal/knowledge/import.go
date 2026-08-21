@@ -29,8 +29,15 @@ const (
 // thousands of documents). Entry names are sanitized to basenames (no path
 // traversal); unsupported files are skipped with a reason.
 func importZip(c *gin.Context, db *sql.DB, uploadsDir string) {
+	// M7: cap the request body before gin buffers the multipart; a zip over
+	// maxZipBytes is rejected as soon as the reader hits the cap.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxZipBytes+64<<10)
 	fh, err := c.FormFile("file")
 	if err != nil {
+		if errors.As(err, new(*http.MaxBytesError)) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "zip 超过 64MB 上限")
+			return
+		}
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少 file 文件字段")
 		return
 	}
@@ -74,11 +81,6 @@ func importZip(c *gin.Context, db *sql.DB, uploadsDir string) {
 		if e.FileInfo().IsDir() {
 			continue
 		}
-		if totalSize+e.UncompressedSize64 > maxZipUncompressed {
-			skipped = append(skipped, gin.H{"name": e.Name, "reason": "解压总量超过 512MB 上限"})
-			continue
-		}
-		totalSize += e.UncompressedSize64
 		title := filepath.Base(filepath.Clean(e.Name)) // no traversal, no dirs
 		if title == "." || title == "/" || strings.HasPrefix(title, ".") {
 			continue
@@ -86,10 +88,6 @@ func importZip(c *gin.Context, db *sql.DB, uploadsDir string) {
 		contentType, cerr := classifyFile(title)
 		if cerr != nil {
 			skipped = append(skipped, gin.H{"name": e.Name, "reason": cerr.Error()})
-			continue
-		}
-		if e.UncompressedSize64 > maxUploadBytes {
-			skipped = append(skipped, gin.H{"name": e.Name, "reason": "超过 16MB 上限"})
 			continue
 		}
 		rc, err := e.Open()
@@ -103,14 +101,24 @@ func importZip(c *gin.Context, db *sql.DB, uploadsDir string) {
 			skipped = append(skipped, gin.H{"name": e.Name, "reason": err.Error()})
 			continue
 		}
+		// L1: 按实际解压字节累计(zip 中央目录的声明尺寸不可信),超限即丢弃
+		if totalSize+uint64(size) > maxZipUncompressed {
+			os.Remove(tmp)
+			skipped = append(skipped, gin.H{"name": e.Name, "reason": "解压总量超过 512MB 上限"})
+			continue
+		}
+		totalSize += uint64(size)
 		id, err := serverstore.CreatePendingKBDocument(db, folderID, title, contentType, size, "import", username)
 		if err != nil {
 			os.Remove(tmp)
+			// L7: 入库失败也计入 skipped,不再静默丢弃
+			skipped = append(skipped, gin.H{"name": e.Name, "reason": "入库失败"})
 			continue
 		}
 		if err := os.Rename(tmp, filepath.Join(uploadsDir, strconv.FormatInt(id, 10))); err != nil {
 			os.Remove(tmp)
 			serverstore.DeleteKBDocument(db, id)
+			skipped = append(skipped, gin.H{"name": e.Name, "reason": "保存失败"})
 			continue
 		}
 		accepted++
@@ -132,10 +140,12 @@ func importStatus(c *gin.Context, db *sql.DB) {
 		return
 	}
 	status := gin.H{}
-	for _, s := range []string{"pending", "ready", "error"} {
+	// H1: enumerate processing too — the front-end poll stops when nothing
+	// is pending or in flight, so a mid-extraction row must be visible.
+	for _, s := range []string{"pending", "processing", "ready", "error"} {
 		status[s] = counts[s] // int64, 0 when absent
 	}
-	total := status["pending"].(int64) + status["ready"].(int64) + status["error"].(int64)
+	total := status["pending"].(int64) + status["processing"].(int64) + status["ready"].(int64) + status["error"].(int64)
 	status["total"] = total
 	missing, err := serverstore.CountChunksMissingEmbeddings(db)
 	if err != nil {

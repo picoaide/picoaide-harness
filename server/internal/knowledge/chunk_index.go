@@ -76,6 +76,10 @@ func SearchChunks(db *sql.DB, username string, groups []string, query string, pa
 	if err != nil {
 		return nil, 0, err
 	}
+	if len(folders) == 0 {
+		// 空集早退(审计2026-L1)
+		return []ChunkResult{}, 0, nil
+	}
 	return searchChunksInFolders(db, folders, query, page, pageSize)
 }
 
@@ -91,6 +95,12 @@ func SearchChunksAll(db *sql.DB, query string, page, pageSize int) ([]ChunkResul
 		ids = append(ids, f.ID)
 	}
 	return searchChunksInFolders(db, ids, query, page, pageSize)
+}
+
+// SearchChunksInFolder searches one folder (admin hit-test narrowed to a
+// single folder, 审计 M2).
+func SearchChunksInFolder(db *sql.DB, folderID int64, query string, page, pageSize int) ([]ChunkResult, int64, error) {
+	return searchChunksInFolders(db, []int64{folderID}, query, page, pageSize)
 }
 
 // SearchMode reports whether the vector path is currently active ("hybrid")

@@ -21,10 +21,12 @@ func TestMCPServers(t *testing.T) {
 	if err != nil || id == 0 {
 		t.Fatalf("AddMCPServer: id=%d err=%v", id, err)
 	}
-	// no unique constraint on name
-	id2, err := AddMCPServer(db, &MCPServer{Name: "files", Transport: "stdio", Enabled: 0})
-	if err != nil || id2 == 0 {
-		t.Fatalf("AddMCPServer#2: id=%d err=%v", id2, err)
+	// 审计 A5-M9(0026): name 唯一约束,同名插入返回 ErrDuplicate
+	if _, err := AddMCPServer(db, &MCPServer{Name: "files", Transport: "stdio", Enabled: 0}); err != ErrDuplicate {
+		t.Fatalf("duplicate name err = %v, want ErrDuplicate", err)
+	}
+	if _, err := AddMCPServer(db, &MCPServer{Name: "hidden", Transport: "stdio", Enabled: 0}); err != nil {
+		t.Fatalf("distinct name insert: %v", err)
 	}
 
 	m, err := GetMCPServer(db, id)

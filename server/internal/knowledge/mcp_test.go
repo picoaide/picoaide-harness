@@ -292,3 +292,37 @@ func itoa(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+// admin 用户经 MCP 工具必须全量可见(不依赖授权表,与 marketplace 语义一致)
+func TestMCPKBAdminSeesAll(t *testing.T) {
+	r, db, token, _ := mcpSetup(t)
+	// admin 提升 boss
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	u.IsAdmin = true
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	folder, err := serverstore.CreateKBFolder(db, "研发部", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 无任何授权:admin 也能搜到 folder 0 与授权外的文件夹
+	if _, err := IndexDocument(db, 0, "根文档", "报销政策说明内容", "text", "upload", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IndexDocument(db, folder, "研发文档", "差旅管理制度内容", "text", "upload", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	reply := callTool(t, r, token, "kb_search", `{"query":"报销"}`)
+	if reply.Result == nil || reply.Result.IsError {
+		t.Fatalf("admin kb_search: %+v", reply)
+	}
+	text := reply.Result.Content[0].Text
+	if !strings.Contains(text, "total 1") {
+		t.Fatalf("admin search = %q, want the root doc", text)
+	}
+	reply = callTool(t, r, token, "kb_search", `{"query":"差旅管理"}`)
+	if !strings.Contains(reply.Result.Content[0].Text, "研发文档") {
+		t.Fatalf("admin must see unauthorized folder: %q", reply.Result.Content[0].Text)
+	}
+}

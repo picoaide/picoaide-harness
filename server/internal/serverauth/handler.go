@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -72,7 +73,8 @@ func BearerAuth(db *sql.DB) gin.HandlerFunc {
 
 func bearerToken(c *gin.Context) string {
 	h := c.GetHeader("Authorization")
-	if len(h) > 7 && h[:7] == "Bearer " {
+	// RFC 6750:scheme 大小写不敏感(审计2026-L5)
+	if len(h) > 7 && strings.EqualFold(h[:7], "bearer ") {
 		return h[7:]
 	}
 	return ""
@@ -94,6 +96,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	g.POST("/login", a.handleLogin)
 	g.POST("/logout", BearerAuth(a.DB), a.handleLogout)
 	g.GET("/me", BearerAuth(a.DB), a.handleMe)
+	g.GET("/usage", BearerAuth(a.DB), a.handleUsageSummary)
 	if a.oidc != nil {
 		g.GET("/oidc/login", a.handleOIDCLogin)
 		g.GET("/oidc/callback", a.handleOIDCCallback)
@@ -176,9 +179,17 @@ func (a *API) authenticate(username, password string) (UserInfo, error) {
 // username collides with an existing local account is rejected — it must never
 // adopt the local row (which would inherit is_admin/status/credentials).
 func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
-	u, err := serverstore.GetUserByUsername(a.DB, ui.Username)
+	return provisionUser(a.DB, ui)
+}
+
+// provisionUser creates a local users row for an external (ldap/oidc) identity
+// on first login, and syncs group membership. An external identity whose
+// username collides with an existing local account is rejected — it must never
+// adopt the local row (which would inherit is_admin/status/credentials).
+func provisionUser(db *sql.DB, ui UserInfo) (*serverstore.User, error) {
+	u, err := serverstore.GetUserByUsername(db, ui.Username)
 	if errors.Is(err, serverstore.ErrNotFound) {
-		id, err := serverstore.CreateUser(a.DB, &serverstore.User{
+		id, err := serverstore.CreateUser(db, &serverstore.User{
 			Username:    ui.Username,
 			DisplayName: ui.DisplayName,
 			Email:       ui.Email,
@@ -191,12 +202,12 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 			}
 			// C-13: a concurrent first login inserted the row between our
 			// lookup and INSERT; re-fetch it instead of failing with a 500.
-			u, err = serverstore.GetUserByUsername(a.DB, ui.Username)
+			u, err = serverstore.GetUserByUsername(db, ui.Username)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			u, err = serverstore.GetUserByID(a.DB, id)
+			u, err = serverstore.GetUserByID(db, id)
 			if err != nil {
 				return nil, err
 			}
@@ -205,6 +216,10 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 	if err != nil && !errors.Is(err, serverstore.ErrNotFound) {
 		return nil, err
 	}
+	// 竞态兜底:行在 re-fetch 前被删,绝不空指针解引用(审计2026-L1)
+	if u == nil {
+		return nil, errors.New("user row disappeared during provisioning")
+	}
 	// 防提权:外部身份不得接管本地账号行
 	if ui.Source == "external" && u.Source != "external" {
 		return nil, errors.New("username belongs to a local account")
@@ -212,7 +227,7 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 	// 同步组:外部(LDAP)身份每次登录全量对齐——组被移除或清空后,
 	// user_groups 必须同步回收,否则 skill/mcp/kb 组授权永久生效
 	if ui.Source == "external" {
-		if err := serverstore.SyncUserGroups(a.DB, u.ID, ui.Groups); err != nil {
+		if err := serverstore.SyncUserGroups(db, u.ID, ui.Groups); err != nil {
 			return nil, err
 		}
 	}
@@ -236,11 +251,88 @@ func (a *API) handleMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 
+// handleUsageSummary 返回员工用量概览(客户端余额/统计展示):
+// 有效配额(个人覆盖→全局默认)、剩余(配额-本月已用,0/不限→null)、
+// 今日/昨日/本月/历史总 tokens 与费用、部门预算链、admin 豁免。
+func (a *API) handleUsageSummary(c *gin.Context) {
+	u := CurrentUser(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
+	s, err := serverstore.UserUsageSummary(a.DB, u.ID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
+		return
+	}
+	// 有效配额(admin 恒 0 = 豁免/不限)
+	quotaTokens, err := serverstore.EffectiveQuota(a.DB, u)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "配额查询失败")
+		return
+	}
+	quotaMoney, err := serverstore.EffectiveMoneyQuota(a.DB, u)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "配额查询失败")
+		return
+	}
+	// 剩余:配额-本月已用;0/不限 → null(前端显示「不限」)
+	var remainingTokens any
+	if quotaTokens > 0 {
+		remainingTokens = quotaTokens - s.MonthlyUsage
+	}
+	var remainingMoney any
+	if quotaMoney > 0 {
+		remainingMoney = quotaMoney - s.MonthlyCost
+	}
+	// 部门预算链(归属部门+祖先,含预算与树费用)
+	budgets, err := serverstore.EffectiveDeptBudget(a.DB, u.ID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "部门预算查询失败")
+		return
+	}
+	deptBudgets := make([]gin.H, 0, len(budgets))
+	for _, b := range budgets {
+		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "部门预算查询失败")
+			return
+		}
+		deptBudgets = append(deptBudgets, gin.H{"name": b.Name, "budget": b.Budget, "used": used})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"is_admin":         u.IsAdmin,
+		"quota_tokens":     quotaTokens,
+		"quota_money":      quotaMoney,
+		"monthly_usage":    s.MonthlyUsage,
+		"monthly_cost":     s.MonthlyCost,
+		"remaining_tokens": remainingTokens,
+		"remaining_money":  remainingMoney,
+		"today_usage":      s.TodayUsage,
+		"today_cost":       s.TodayCost,
+		"yesterday_usage":  s.YesterdayUsage,
+		"yesterday_cost":   s.YesterdayCost,
+		"total_usage":      s.TotalUsage,
+		"total_cost":       s.TotalCost,
+		"dept_budgets":     deptBudgets,
+	})
+}
+
 func userJSON(u *serverstore.User) gin.H {
+	var quota any
+	if u.QuotaTokens != nil {
+		quota = *u.QuotaTokens
+	}
+	var quotaMoney any
+	if u.QuotaMoney != nil {
+		quotaMoney = *u.QuotaMoney
+	}
 	return gin.H{
-		"id":       u.ID,
-		"username": u.Username,
-		"is_admin": u.IsAdmin,
-		"status":   u.Status,
+		"id":           u.ID,
+		"username":     u.Username,
+		"is_admin":     u.IsAdmin,
+		"status":       u.Status,
+		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
+		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
 	}
 }

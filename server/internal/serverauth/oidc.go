@@ -58,7 +58,11 @@ func (p *OIDCProvider) Configure(cfg map[string]string) error {
 	if issuer == "" || clientID == "" || redirect == "" {
 		return errors.New("oidc: issuer, client_id and redirect_url are required")
 	}
-	provider, err := oidc.NewProvider(context.Background(), issuer)
+	// discovery 必须限时:不可达/挂起的 IdP 不得阻塞服务启动(审计2026-M4);
+	// 失败视为 OIDC 未配置(降级,不阻断启动)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return err
 	}
@@ -168,6 +172,12 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 	}, nil
 }
 
+// oidcStateCookieName binds the OIDC login flow to the initiating browser:
+// the state is written into a SameSite=Lax cookie at /oidc/login and must be
+// echoed by the /oidc/callback request (login CSRF 防护:第三方页面不能在受害者
+// 浏览器里发起登录流程并把自己的身份塞给受害者)。
+const oidcStateCookieName = "picoaide_oidc_state"
+
 // handleOIDCLogin redirects the browser to the IdP authorization URL.
 func (a *API) handleOIDCLogin(c *gin.Context) {
 	state, err := randomHex(16)
@@ -180,6 +190,14 @@ func (a *API) handleOIDCLogin(c *gin.Context) {
 		writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
 		return
 	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     oidcStateCookieName,
+		Value:    state,
+		Path:     "/api/auth/oidc",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(oidcFlowTTL.Seconds()),
+	})
 	c.Redirect(http.StatusFound, authURL)
 }
 
@@ -191,6 +209,14 @@ func (a *API) handleOIDCCallback(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "缺少 code 或 state")
 		return
 	}
+	// login CSRF 绑定:回调必须回显 login 时签发的 state cookie
+	stateCookie, err := c.Cookie(oidcStateCookieName)
+	if err != nil || stateCookie == "" || subtle.ConstantTimeCompare([]byte(stateCookie), []byte(state)) != 1 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "state 与登录浏览器不匹配")
+		return
+	}
+	// 消费 cookie:流程单次有效
+	http.SetCookie(c.Writer, &http.Cookie{Name: oidcStateCookieName, Value: "", Path: "/api/auth/oidc", MaxAge: -1})
 	ui, err := a.oidc.HandleCallback(code, state)
 	if errors.Is(err, errOIDCState) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
