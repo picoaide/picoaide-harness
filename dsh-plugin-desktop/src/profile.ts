@@ -50,6 +50,7 @@ const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
 const INSTALL_ANCHOR = unpackedAsarPath(fileURLToPath(new URL('../package.json', import.meta.url)))
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
+const ACCOUNT_CARD_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-account-card/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
 const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
 const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
@@ -381,6 +382,7 @@ export function prepareDesktopProfile(
 
   const desktopPatches = loadOverlayPatches(BIN_NAME, DESKTOP_PATCH_PATH)
   const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
+  const accountCardPatches = loadOverlayPatches(BIN_NAME, ACCOUNT_CARD_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
   const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
   const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
@@ -394,6 +396,9 @@ export function prepareDesktopProfile(
     if (layer.packageName !== '@deepseek-ai/dsh-web-app') continue
     bundlePatches.push(...desktopPatches)
     bundlePatches.push(...enterprisePatches)
+    // Account card right after the enterprise rows: it injects the
+    // `picoSession` service and the enterprise shared gateway helpers.
+    bundlePatches.push(...accountCardPatches)
     bundlePatches.push(...connectorsPatches)
     bundlePatches.push(...browserPatches)
     bundlePatches.push(...memoryPatches)
