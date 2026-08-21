@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -52,6 +54,56 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 // maxMCPBody caps the JSON-RPC request body (kb_search/read/list are tiny;
 // kb_upload content is separately capped in IndexDocument).
 const maxMCPBody = 4 << 20
+
+// P1-2 (DoS bound): kb_search scans and scores candidates in memory, so a
+// single authenticated user must not be able to hammer it (each query can
+// cost real CPU on a large library). This per-user token bucket bounds the
+// rate; kb_read/kb_list stay unlimited (cheap, indexed).
+type searchRateLimiter struct {
+	mu      sync.Mutex
+	buckets map[int64]*rateBucket
+}
+
+type rateBucket struct {
+	tokens   float64
+	lastSeen time.Time
+}
+
+const (
+	searchRateLimit   = 10.0 // tokens per second
+	searchRateBurst   = 20.0 // burst capacity per user
+	searchRateSweep   = 5 * time.Minute
+)
+
+var kbSearchLimiter = &searchRateLimiter{buckets: map[int64]*rateBucket{}}
+
+func (l *searchRateLimiter) allow(userID int64, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.buckets[userID]
+	if !ok {
+		b = &rateBucket{tokens: searchRateBurst}
+		l.buckets[userID] = b
+	}
+	elapsed := now.Sub(b.lastSeen).Seconds()
+	if elapsed > 0 {
+		b.tokens = min(searchRateBurst, b.tokens+elapsed*searchRateLimit)
+	}
+	b.lastSeen = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens -= 1
+	// Opportunistic sweep so the map does not grow unbounded with users.
+	if len(l.buckets) > 4096 && now.UnixNano()%int64(searchRateSweep) == 0 {
+		for id, bucket := range l.buckets {
+			if now.Sub(bucket.lastSeen) > searchRateSweep {
+				delete(l.buckets, id)
+			}
+		}
+	}
+	return true
+}
 
 func handleMessage(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -105,6 +157,11 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	}
 	switch p.Name {
 	case "kb_search":
+		// P1-2: bound per-user search rate — a broad query scans and scores
+		// candidates in memory; one user must not be able to hammer it.
+		if !kbSearchLimiter.allow(u.ID, time.Now()) {
+			return textResponse(id, "搜索过于频繁，请稍后再试", true)
+		}
 		return toolKBSearch(db, id, p.Arguments, u.Username, groups, u.IsAdmin)
 	case "kb_read":
 		return toolKBRead(db, id, p.Arguments, accessible)

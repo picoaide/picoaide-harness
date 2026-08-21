@@ -86,6 +86,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   const mcpDisposers = new Map<string, () => void>()
+  /** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
+  const pendingFlows = new Map<string, AbortController>()
 
   const setState = (id: string, patch: Partial<ConnectorState>): void => {
     const current = states.get(id) ?? { status: 'disconnected', everConnected: false }
@@ -232,6 +234,10 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
   const startConnect = async (id: string): Promise<void> => {
     const def = getDef(id)
     if (!def) throw new Error(`unknown connector: ${id}`)
+    // P0-1: re-entrancy guard — a second connect on the same connector while
+    // a flow is in flight must not start a duplicate authorization flow
+    // (two callback ports, two browser windows, credential writeback race).
+    if (pendingFlows.has(id)) return
     const existing = await store.readCredential(id)
     setState(id, { status: 'connecting', everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected) })
 
@@ -245,8 +251,9 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       }
     }
     pendingRequests.delete(id)
+    const controller = new AbortController()
+    pendingFlows.set(id, controller)
     try {
-      const controller = new AbortController()
       const patch = await runAuth(def, {
         onRequest: emitRequest,
         signal: controller.signal,
@@ -265,7 +272,15 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const unauthorized = message.includes('授权') || message.includes('token') || message.includes('登录')
-      setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message })
+      // A user-initiated abort maps to the neutral 'disconnected' state, not
+      // an error (the cancel button must not leave a scary red row behind).
+      if (controller.signal.aborted) {
+        setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
+      } else {
+        setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message })
+      }
+    } finally {
+      pendingFlows.delete(id)
     }
   }
 
@@ -287,6 +302,13 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
   const disconnect = async (id: string): Promise<void> => {
     const def = getDef(id)
     if (def) await unregisterMcp(def)
+    // P0-1: a disconnect must also abort any in-flight authorization flow —
+    // otherwise the completed OAuth/device flow would "resurrect" the
+    // connector and write back credentials after the user disconnected.
+    const flow = pendingFlows.get(id)
+    if (flow) flow.abort(
+      new Error('用户在连接过程中断开了连接'),
+    )
     await store.clearCredential(id)
     setState(id, { status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined })
     pendingRequests.delete(id)
@@ -317,6 +339,11 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     }
     return () => {
       for (const dispose of mcpDisposers.values()) dispose()
+      // P0-1: teardown must abort any in-flight authorization flow — a
+      // lingering OAuth/device flow would keep the callback server up and
+      // (on a later disconnect) could write back credentials after teardown.
+      for (const flow of pendingFlows.values()) flow.abort(new Error('插件卸载，连接流程中止'))
+      pendingFlows.clear()
     }
   }, 'pico connectors: restore + cleanup')
 
@@ -344,6 +371,13 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       const id = rawId
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
+      // P0-1: an in-flight flow must not be double-started by a fast double
+      // click (two OAuth windows, credential writeback race). The client is
+      // already polling the state endpoint; report ok without a new flow.
+      if (pendingFlows.has(id)) {
+        json(res, 200, { ok: true, request: pendingRequests.get(id) ?? { connectorId: id } })
+        return
+      }
       const request: ConnectorAuthRequest = { connectorId: id }
       emitRequest(request)
       void startConnect(id).catch((error: unknown) => {
@@ -355,6 +389,21 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       json(res, 200, { ok: true, request })
     }
 
+    const cancel: JsonHandler = (req, res) => {
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
+      if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` })
+      // P0-1: explicit user cancel of an in-flight authorization flow. The
+      // flow's abort listener closes the callback server and rejects the
+      // code promise; startConnect's catch maps the abort to 'disconnected'.
+      const flow = pendingFlows.get(id)
+      if (flow) flow.abort(new Error('用户取消了连接'))
+      setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
+      pendingRequests.delete(id)
+      json(res, 200, { ok: true })
+    }
+
     const authSubmit: JsonHandler = async (req, res) => {
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
@@ -363,8 +412,21 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       if (!raw || typeof raw !== 'object' || typeof (raw as { fields?: unknown }).fields !== 'object') {
         return json(res, 400, { error: 'missing fields' })
       }
+      // P0-1/P2-17: only string values are meaningful for auth headers; a
+      // number/object/array would crash renderHeaders on the MCP registration
+      // path with an obscure TypeError.
+      const fields = (raw as { fields: Record<string, unknown> }).fields
+      for (const [key, value] of Object.entries(fields)) {
+        if (typeof value !== 'string') return json(res, 400, { error: `field '${key}' must be a string` })
+      }
       try {
-        await submitAuth(id, (raw as { fields: Record<string, string> }).fields)
+        void submitAuth(id, fields as Record<string, string>).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          setState(id, { status: 'error', error: message })
+        })
+        // Return immediately: token form flows complete fast, but OAuth/device
+        // flows can run for minutes — the fetch must not hang the panel's
+        // busy state on "提交中…" for the whole authorization.
         json(res, 200, { ok: true })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -410,6 +472,7 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
         const action = segments[5]?.split('?')[0]
         const handlers: Record<string, JsonHandler> = {
           connect: exact(connect),
+          cancel: exact(cancel),
           'auth-submit': exact(authSubmit),
           state: exact(state),
           disconnect: exact(disconnectHandler),
@@ -418,6 +481,7 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
         const method = req.method ?? 'GET'
         const allowedMethods: Record<string, string> = {
           connect: 'POST',
+          cancel: 'POST',
           'auth-submit': 'POST',
           state: 'GET',
           disconnect: 'POST',

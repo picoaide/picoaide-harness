@@ -236,6 +236,12 @@ function buildApi(
       // Relative paths are git-derived (status/diff report repo-root-relative
       // names; the untracked diff view reads the file through this route).
       const path = await resolveGitPath(cwd, requireString(payload, 'path'))
+      // P1-16: the resolved path must stay inside the session workspace even
+      // after git-root resolution (symlinks/.. can escape) — the media/html
+      // routes already enforce this; fs.read must not be a wider hole.
+      if (!isWithin(cwd, path)) {
+        throw new SidebarError('fs-error', `path escapes the workspace: ${path}`, 400)
+      }
       const { content, truncated, binary, size, head } = await readText(path, resolved.readLimit)
       if (binary) return { kind: 'binary', size, truncated, head }
       return { kind: 'text', content, truncated }
@@ -243,8 +249,14 @@ function buildApi(
     'fs.write': async (payload) => {
       const { cwd } = cwdOf(payload)
       const path = requireAbsolute(requireString(payload, 'path'))
+      // P1-16: the target must stay inside the session workspace (the editor
+      // UI is trusted, but a compromised/naive caller must not write anywhere).
+      if (!isWithin(cwd, path)) {
+        throw new SidebarError('fs-error', `path escapes the workspace: ${path}`, 400)
+      }
       const content = requireString(payload, 'content')
-      const tmp = `${path}.dsh-sidebar-tmp-${process.pid}`
+      // P2-29: a fixed tmp name races concurrent writes to the same path.
+      const tmp = `${path}.dsh-sidebar-tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       try {
         await mkdir(dirname(path), { recursive: true })
         await writeFile(tmp, content, 'utf8')
@@ -425,11 +437,30 @@ function buildApi(
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 8000)
       try {
-        let response = await fetch(parsed, { method: 'HEAD', redirect: 'follow', signal: controller.signal })
+        // P1-16 (SSRF): a redirect can bounce the probe back to loopback/private
+        // addresses (cloud metadata 169.254.169.254, 127.0.0.1 services) even
+        // though the original URL was public. Follow redirects manually and
+        // re-validate every hop; disallow loopback/private targets.
+        let response = await fetch(parsed, { method: 'HEAD', redirect: 'manual', signal: controller.signal })
+        let hops = 0
+        while (response.status >= 300 && response.status < 400 && hops < 5) {
+          const location = response.headers.get('location')
+          if (location === null) break
+          const next = new URL(location, parsed)
+          if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+            return { reachable: false, url: response.url, status: response.status }
+          }
+          if (isLoopbackHostname(next.hostname) || isPrivateHostname(next.hostname)) {
+            return { reachable: false, url: next.toString(), status: response.status }
+          }
+          parsed = next
+          response = await fetch(parsed, { method: 'HEAD', redirect: 'manual', signal: controller.signal })
+          hops += 1
+        }
         // Some servers answer HEAD with 405/501; retry once as GET (the
         // body is discarded — only the headers matter).
         if (response.status === 405 || response.status === 501) {
-          response = await fetch(parsed, { method: 'GET', redirect: 'follow', signal: controller.signal })
+          response = await fetch(parsed, { method: 'GET', redirect: 'manual', signal: controller.signal })
         }
         const csp = response.headers.get('content-security-policy')
         const frameAncestors = extractFrameAncestors(csp)
@@ -979,4 +1010,27 @@ function pumpAgentTerminal(
     // frame, or plugin teardown kills it. A reconnecting view reattaches the
     // same shell and gets the full transcript replayed.
   })
+}
+
+/**
+ * P1-16 (SSRF): whether a hostname names a private/routable-to-local network
+ * (RFC 1918 + link-local + cloud metadata 169.254.x.x). Used by browser.probe
+ * to refuse redirect hops toward such targets, which could otherwise turn a
+ * public URL probe into an internal service scanner.
+ */
+function isPrivateHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (host === 'localhost' || host === '::1') return true
+  const parts = host.split('.')
+  if (parts.length !== 4) return false
+  const nums = parts.map(part => Number(part))
+  if (nums.some(n => !/^\d{1,3}$/.test(String(n)) || n > 255)) return false
+  const [a, b] = [nums[0]!, nums[1]!]
+  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+  if (a === 10) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  // 169.254.0.0/16 (link-local incl. cloud metadata)
+  if (a === 169 && b === 254) return true
+  return false
 }

@@ -20,6 +20,7 @@ export function NewTaskModal({ controller, workspaces, onClose }: {
   const [prompt, setPrompt] = useState('')
   const [workspaceId, setWorkspaceId] = useState('')
   const [permission, setPermission] = useState('')
+  const [error, setError] = useState('')
 
   // Modal mutex: announce this modal and close when another modal opens.
   // Cross-package coordination rides the existing dsh-panel-activate event
@@ -45,7 +46,13 @@ export function NewTaskModal({ controller, workspaces, onClose }: {
   }, [onClose])
 
   const save = (): void => {
-    if (title.trim() === '') return
+    // UX-4: an empty title must not be a silent no-op — the user clicked
+    // 保存 and nothing happened, which reads as a bug.
+    if (title.trim() === '') {
+      setError(t('new.titleRequired'))
+      return
+    }
+    setError('')
     controller.create({
       title: title.trim(),
       description,
@@ -61,7 +68,8 @@ export function NewTaskModal({ controller, workspaces, onClose }: {
       <div style={styles.editor} role="dialog" aria-label={t('new.title')}>
         <div style={styles.field}>
           <span style={styles.label}>{t('new.name')}</span>
-          <input style={styles.input} value={title} onChange={(event) => { setTitle(event.target.value) }} autoFocus />
+          <input style={styles.input} value={title} onChange={(event) => { setTitle(event.target.value); if (error !== '') setError('') }} autoFocus />
+          {error !== '' && <span style={styles.error}>{error}</span>}
         </div>
         <div style={styles.field}>
           <span style={styles.label}>{t('new.description')}</span>

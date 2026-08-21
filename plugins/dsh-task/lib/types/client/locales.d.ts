@@ -22,6 +22,8 @@ export declare const zh: {
     readonly 'detail.title': "任务详情";
     readonly 'detail.run': "执行";
     readonly 'detail.rerun': "重试";
+    readonly 'detail.cancel': "取消执行";
+    readonly 'detail.cancelConfirm': "确定取消这个正在执行的任务吗？任务将回到待办列，可重新执行。";
     readonly 'detail.openSession': "查看执行会话";
     readonly 'detail.edit': "编辑";
     readonly 'detail.delete': "删除";
@@ -62,6 +64,7 @@ export declare const zh: {
     readonly 'new.description': "描述";
     readonly 'new.save': "创建";
     readonly 'new.cancel': "取消";
+    readonly 'new.titleRequired': "标题不能为空";
     readonly 'settings.title': "任务看板";
     readonly 'settings.enabled': "启用任务看板";
     readonly 'settings.enabledDesc': "关闭后看板隐藏，任务与执行历史保留。";

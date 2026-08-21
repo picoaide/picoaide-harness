@@ -494,6 +494,11 @@ window.__ModuleLoader__.load({
 				cursor: "pointer",
 				fontFamily: "inherit"
 			},
+			presetActive: {
+				borderColor: "var(--dsw-alias-state-business-primary)",
+				color: "var(--dsw-alias-state-business-primary)",
+				background: "var(--dsw-alias-interactive-bg-active, color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent))"
+			},
 			error: {
 				color: "var(--dsw-alias-state-error-primary)",
 				fontSize: 12
@@ -720,6 +725,7 @@ window.__ModuleLoader__.load({
 			"settings.catchUp": "补跑错过的触发",
 			"settings.catchUpDesc": "应用重启或系统休眠恢复后，为每个到期任务补跑最近一次错过的触发（默认跳过）。",
 			"settings.hostMeta": "Host 时区 {timeZone} · 修订 {revision}",
+			"settings.ledgerCorrupt": "⚠️ 定时任务数据文件损坏，已重置为空（原文件改名保留为 .corrupt-* 可手工恢复）：{error}",
 			"job.listTitle": "定时任务",
 			"job.empty": "暂无定时任务",
 			"job.new": "新建任务",
@@ -771,6 +777,7 @@ window.__ModuleLoader__.load({
 			"settings.catchUp": "Catch up missed triggers",
 			"settings.catchUpDesc": "After a restart or resume, fire the single most recent missed trigger per due job (default: skip).",
 			"settings.hostMeta": "Host timezone {timeZone} · revision {revision}",
+			"settings.ledgerCorrupt": "⚠️ The job data file is corrupt and was reset (the original was kept as .corrupt-* for manual recovery): {error}",
 			"job.listTitle": "Scheduled jobs",
 			"job.empty": "No scheduled jobs",
 			"job.new": "New job",
@@ -1014,7 +1021,10 @@ window.__ModuleLoader__.load({
 									style: styles.presets,
 									children: PRESETS.map((preset) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 										type: "button",
-										style: styles.preset,
+										style: cron.trim() === preset.cron ? {
+											...styles.preset,
+											...styles.presetActive
+										} : styles.preset,
 										onClick: () => {
 											setCron(preset.cron);
 										},
@@ -1212,6 +1222,10 @@ window.__ModuleLoader__.load({
 								children: ["+ ", t("job.new")]
 							})
 						]
+					}),
+					snapshot.scheduler.error !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						style: styles.error,
+						children: t("settings.ledgerCorrupt", { error: snapshot.scheduler.error })
 					}),
 					snapshot.transportError !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						style: styles.error,

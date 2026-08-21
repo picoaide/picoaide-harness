@@ -613,6 +613,46 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const origin = new URL(spec.url).origin
     if (spec.mode === 'advanced') nativeTheme.themeSource = spec.readThemeSource()
     const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
+    // P1-4: deny every renderer permission request by default. Electron
+    // auto-grants camera/mic/geolocation etc. when no handler is set, which
+    // an untrusted web surface must never receive. The embedded browser
+    // (dsh-browser) manages its own partition and permission policy.
+    window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
+      callback(false)
+    })
+    window.webContents.session.setPermissionCheckHandler(() => false)
+    // P1-4: a Content-Security-Policy for the app surface. The DSH web bundle
+    // is fully local (no CDN/external scripts); the strict policy keeps any
+    // injected content from reaching out. The embedded browser partition is
+    // separate and unaffected.
+    const cspOnHeaders = (
+      details: Electron.OnHeadersReceivedListenerDetails,
+      callback: (response: { responseHeaders?: Record<string, string[]> }) => void,
+    ): void => {
+      const url = details.url
+      try {
+        const parsed = new URL(url)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'file:') {
+          callback({})
+          return
+        }
+      } catch {
+        callback({})
+        return
+      }
+      const csp = [
+        "default-src 'self' data: blob: ws:",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "font-src 'self' data:",
+        "connect-src 'self' ws: wss: http: https:",
+      ].join('; ')
+      const headers = { ...details.responseHeaders }
+      headers['Content-Security-Policy'] = [csp]
+      callback({ responseHeaders: headers })
+    }
+    window.webContents.session.webRequest.onHeadersReceived(cspOnHeaders)
     window.accessibleTitle = spec.windowTitle
     if (this.platform === 'win32') window.removeMenu()
     this.window = window
@@ -653,9 +693,18 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     window.webContents.on('will-redirect', navigate)
     window.webContents.on('render-process-gone', (_event, details) => {
       this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${formatDesktopExitCode(details.exitCode)})`)
+      // P1-3: a crashed renderer must not leave a dead white window. Retry
+      // the load once; if the reload also fails, show a native error surface
+      // with a manual reload entry instead of silently logging.
+      if (details.reason !== 'clean-exit' && details.reason !== 'killed') {
+        void reloadOrShowCrashFallback({ log: (message) => this.logError(message) }, window)
+      }
     })
     window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+      // P1-3: a failed navigation (not abort) offers a recovery UI.
+      if (errorCode === -3 /* ABORTED - expected during navigation */) return
       this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)
+      void reloadOrShowCrashFallback({ log: (message) => this.logError(message) }, window)
     })
     window.webContents.setWindowOpenHandler(({ url }) => {
       try {
@@ -714,5 +763,40 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       if (this.tray === mountedTray) this.tray = undefined
       if (this.window === window) this.window = undefined
     }
+  }
+}
+
+/**
+ * P1-3: renderer crash / load-failure fallback. Reload once; if the reload
+ * also fails (or the process is gone a second time), show an in-window
+ * error page with a manual reload button so the user is never stuck on a
+ * dead white window. A per-window retry flag prevents reload loops.
+ */
+const crashRetried = new WeakMap<BrowserWindow, boolean>()
+
+async function reloadOrShowCrashFallback(runtime: { log(message: string): void }, window: BrowserWindow): Promise<void> {
+  if (window.isDestroyed()) return
+  const retried = crashRetried.get(window) ?? false
+  if (!retried) {
+    crashRetried.set(window, true)
+    try {
+      await window.loadURL(window.webContents.getURL())
+      return
+    } catch {
+      // fall through to the error page
+    }
+  }
+  try {
+    const current = window.webContents.getURL()
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>PicoAide Harness</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button onclick="location.reload()">重新加载</button></div></body></html>`)}`
+    await window.loadURL(errorPage)
+    window.webContents.once('did-finish-load', () => {
+      if (current.startsWith('http')) {
+        // A reload button on the error page re-enters the app URL.
+        void window.loadURL(current).catch(() => { /* keep the error page */ })
+      }
+    })
+  } catch {
+    runtime.log('dsh-plugin-desktop: crash fallback page failed to load')
   }
 }

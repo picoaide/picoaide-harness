@@ -64,6 +64,12 @@ function dshHome() {
 const MAX_REQUEST_CACHE = 256;
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45e3;
+/**
+* P0-3: an execution left open long enough without any settlement (crash
+* before the first turn completed, or a vanished session) is stale. On Host
+* restart it is settled as cancelled so the task never pins 'doing' forever.
+*/
+const STALE_EXECUTION_MS = 360 * 60 * 1e3;
 function cloneTasks(tasks) {
 	return JSON.parse(JSON.stringify(tasks));
 }
@@ -201,13 +207,19 @@ var HostTaskLedger = class {
 	* interrupted before the session was recorded (no sessionId, no endedAt)
 	* is settled as cancelled so the task is not pinned in 'doing' forever and
 	* reruns are allowed again. Never re-fires the interrupted start.
+	* P0-3: an execution WITH a sessionId whose session never produced a
+	* turn/end (crash before the first turn completed) would otherwise stay
+	* 'pending' forever and block every edit/delete/rerun (hasOpenExecution).
+	* Age it out: anything older than STALE_EXECUTION_MS settles as cancelled.
 	*/
 	reconcileInterruptedStarts(state) {
 		const now = this.now();
 		state.tasks = state.tasks.map((task) => {
-			const pending = task.executions.find((execution) => execution.endedAt === void 0 && execution.sessionId === void 0);
-			if (pending === void 0) return task;
-			return settleExecution(task, pending.id, "cancelled", now, "host restarted before the execution session was recorded");
+			const open = task.executions.filter((execution) => execution.endedAt === void 0);
+			let next = task;
+			for (const execution of open) if (execution.sessionId === void 0) next = settleExecution(next, execution.id, "cancelled", now, "host restarted before the execution session was recorded");
+			else if (execution.startedAt > 0 && now - execution.startedAt > STALE_EXECUTION_MS) next = settleExecution(next, execution.id, "cancelled", now, "执行超时未完成（可能已损坏），已自动取消");
+			return next;
 		});
 	}
 	summary() {
@@ -237,6 +249,7 @@ var HostTaskLedger = class {
 		}
 		this.cache.set(requestId, { fingerprint });
 		let opened;
+		let cancelled;
 		this.mutate((state) => {
 			switch (action.kind) {
 				case "create":
@@ -293,12 +306,30 @@ var HostTaskLedger = class {
 					opened = result;
 					return true;
 				}
+				case "cancel": {
+					const index = state.tasks.findIndex((task) => task.id === action.taskId);
+					if (index < 0) return false;
+					const task = state.tasks[index];
+					const open = task.executions.filter((execution) => execution.endedAt === void 0);
+					if (open.length === 0) return false;
+					const now = this.now();
+					let next = task;
+					const cancelledSessions = [];
+					for (const execution of open) {
+						if (execution.sessionId !== void 0) cancelledSessions.push(execution.sessionId);
+						next = settleExecution(next, execution.id, "cancelled", now, "用户取消了任务");
+					}
+					state.tasks[index] = next;
+					cancelled = cancelledSessions;
+					return true;
+				}
 				default: return false;
 			}
 		});
 		return {
 			state: this.state(),
-			...opened === void 0 ? {} : { run: opened }
+			...opened === void 0 ? {} : { run: opened },
+			...cancelled === void 0 || cancelled.length === 0 ? {} : { cancelled }
 		};
 	}
 	/** Runner-owned: attach the created session id to an execution. */
@@ -337,4 +368,4 @@ var HostTaskLedger = class {
 //#endregion
 export { HostTaskLedger as t };
 
-//# sourceMappingURL=host-ledger-DvbOEp6y.js.map
+//# sourceMappingURL=host-ledger-DTX-3KpF.js.map
