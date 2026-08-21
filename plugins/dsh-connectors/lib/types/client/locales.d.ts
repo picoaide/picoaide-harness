@@ -24,6 +24,7 @@ export declare const zh: {
     'auth.verificationHint': string;
     'auth.code': string;
     'auth.authorizeOpened': string;
+    'auth.authorizeLink': string;
     'auth.waiting': string;
     'auth.downloading': string;
 };

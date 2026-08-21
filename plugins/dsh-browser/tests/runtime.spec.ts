@@ -80,19 +80,26 @@ class MockView implements NativeView {
     this.title = `Title of ${url}`
     this.emit('did-stop-loading')
   })
-  goBack = vi.fn(() => { this.url = 'about:blank'; this.title = '' })
-  goForward = vi.fn()
-  reload = vi.fn(() => { this.emit('did-stop-loading') })
+  goBack = vi.fn(() => { this.url = 'about:blank'; this.title = ''; this.emit('did-finish-load') })
+  goForward = vi.fn(() => { this.emit('did-finish-load') })
+  reload = vi.fn(() => { this.emit('did-finish-load') })
   capturePage = vi.fn(async () => new MockImage(1920, 1080))
   setWindowOpenHandler = vi.fn()
 
-  attach(_win: NativeBrowserWindow, bounds: NativeBounds): void {
+  attach(win: NativeBrowserWindow, bounds: NativeBounds): void {
     this.attached = true
     this.bounds = bounds
+    // Mirror the real adapter: attaching adds the view to the window content.
+    win.contentView.addChildView(this)
   }
   setBounds(bounds: NativeBounds): void { this.bounds = bounds }
   setVisible(visible: boolean): void { this.visible = visible }
   detach(): void { this.attached = false }
+  moveToTop(win: NativeBrowserWindow): void {
+    // Mirror the real adapter: remove + add raises this view to the top.
+    win.contentView.removeChildView(this)
+    win.contentView.addChildView(this)
+  }
   destroy(): void { this.destroyed = true }
   close = vi.fn(() => { this.destroyed = true })
 
@@ -158,7 +165,20 @@ class MockBrowserWindow implements NativeBrowserWindow {
   visible = true
   destroyed = false
   title = ''
-  readonly contentView = { addChildView: vi.fn(), removeChildView: vi.fn() }
+  /** Child-view z-order: later entries render on top. */
+  readonly childViews: NativeView[] = []
+  readonly contentView = {
+    addChildView: vi.fn((view: NativeView) => {
+      // Remove first (add semantics re-raise), then push to the top.
+      const idx = this.childViews.indexOf(view)
+      if (idx >= 0) this.childViews.splice(idx, 1)
+      this.childViews.push(view)
+    }),
+    removeChildView: vi.fn((view: NativeView) => {
+      const idx = this.childViews.indexOf(view)
+      if (idx >= 0) this.childViews.splice(idx, 1)
+    }),
+  }
   private readonly resizeListeners = new Set<() => void>()
   private readonly closedListeners = new Set<() => void>()
   size = { width: 1100, height: 780 }
@@ -238,6 +258,84 @@ describe('BrowserRuntime', () => {
     runtime.setUserControl(false)
     expect(runtime.controlled).toBe(false)
     expect(mask!.visible).toBe(true)
+    runtime.dispose()
+  })
+
+  it('keeps the mask ABOVE every tab view (z-order), incl. after navigation', async () => {
+    const { runtime, views, windows } = runtimeOf()
+    await runtime.open('https://a.example')
+    await runtime.open('https://b.example')
+    const win = windows[0]!
+    const mask = views[1]!
+    const tab1 = views[0]!
+    const tab2 = views[2]!
+    // relayout() re-raises the mask: it must be the LAST child (topmost).
+    expect(win.childViews.at(-1)).toBe(mask)
+    // After a navigation the mask stays on top (loadURL does not re-stack,
+    // but relayout is called after every state change).
+    await runtime.navigate(2, 'https://b.example/next')
+    expect(win.childViews.at(-1)).toBe(mask)
+    // Tab visibility is unaffected.
+    expect(tab1.visible).toBe(false)
+    expect(tab2.visible).toBe(true)
+    runtime.dispose()
+  })
+
+  it('sidebar show creates the window when it never existed (first click)', async () => {
+    const { runtime, windows } = runtimeOf()
+    // No window yet: showWindow must create one instead of no-op'ing.
+    expect(runtime.windowState.created).toBe(false)
+    await runtime.showWindow()
+    expect(runtime.windowState.created).toBe(true)
+    expect(windows).toHaveLength(1)
+    // Waking an existing window keeps the same window.
+    await runtime.showWindow()
+    expect(windows).toHaveLength(1)
+    runtime.dispose()
+  })
+
+  it('user shell actions bypass the takeover mutex', async () => {
+    const { runtime } = runtimeOf()
+    await runtime.open(undefined)
+    runtime.setUserControl(true)
+    // User toolbar actions must complete even while the agent is paused.
+    await runtime.reload(1, undefined, true)
+    await runtime.goBack(1, undefined, true)
+    await runtime.goForward(1, undefined, true)
+    await runtime.switchTab(1, true)
+    await runtime.closeTab(1, true)
+    // A new user tab also bypasses the mutex.
+    const tab = await runtime.open(undefined, undefined, true)
+    expect(tab.id).toBe(2)
+    runtime.setUserControl(false)
+    runtime.dispose()
+  })
+
+  it('agent operation paused by takeover honors the abort signal', async () => {
+    const { runtime } = runtimeOf()
+    await runtime.open(undefined)
+    runtime.setUserControl(true)
+    const ac = new AbortController()
+    let settled = false
+    const op = runtime.reload(1, ac.signal).catch(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(settled).toBe(false)
+    ac.abort()
+    await op
+    expect(settled).toBe(true)
+    runtime.setUserControl(false)
+    runtime.dispose()
+  })
+
+  it('close-tab switch re-enters no mutex (no nested deadlock)', async () => {
+    const { runtime } = runtimeOf()
+    await runtime.open(undefined)
+    await runtime.open(undefined)
+    // Closing the visible tab 2 switches to tab 1 internally; the switch must
+    // not acquire the mutex again (would deadlock).
+    await runtime.closeTab(2)
+    expect(runtime.currentTabId()).toBe(1)
+    expect(runtime.listTabs()).toHaveLength(1)
     runtime.dispose()
   })
 

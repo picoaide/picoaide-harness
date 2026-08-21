@@ -190,7 +190,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
       switch (action) {
         case 'show': {
-          runtime.showWindow()
+          await runtime.showWindow()
           json(res, 200, { ok: true })
           return
         }
@@ -201,7 +201,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         case 'open': {
           const url = typeof body.url === 'string' ? body.url : undefined
-          const tab = await runtime.open(url)
+          // Shell `+` button: the USER's surface — bypass the takeover mutex.
+          const tab = await runtime.open(url, undefined, true)
           json(res, 200, { tab })
           return
         }
@@ -209,41 +210,45 @@ export function apply(ctx: Context, config: Config = {}): void {
           const tab = numberOr(body.tab, 0)
           const url = typeof body.url === 'string' ? body.url : ''
           if (tab <= 0) return json(res, 400, { error: 'tab is required' })
-          await runtime.navigate(tab, url)
+          // Address bar: the USER's surface — bypass the takeover mutex.
+          await runtime.navigate(tab, url, 'domcontentloaded', undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'reload': {
-          await runtime.reload(tabOf(runtime, body))
+          // The shell toolbar is the USER's surface: its actions must not be
+          // blocked by an agent takeover (user==true bypasses the mutex).
+          await runtime.reload(tabOf(runtime, body), undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'back': {
-          await runtime.goBack(tabOf(runtime, body))
+          await runtime.goBack(tabOf(runtime, body), undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'forward': {
-          await runtime.goForward(tabOf(runtime, body))
+          await runtime.goForward(tabOf(runtime, body), undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'switch-tab': {
           const tab = numberOr(body.tab, 0)
           if (tab <= 0) return json(res, 400, { error: 'tab is required' })
-          await runtime.switchTab(tab)
+          await runtime.switchTab(tab, true)
           json(res, 200, { ok: true })
           return
         }
         case 'close-tab': {
           const tab = numberOr(body.tab, 0)
           if (tab <= 0) return json(res, 400, { error: 'tab is required' })
-          await runtime.closeTab(tab)
+          await runtime.closeTab(tab, true)
           json(res, 200, { ok: true })
           return
         }
         case 'close-all': {
-          await runtime.closeAll()
+          // Shell 清除: the USER's surface — bypass the takeover mutex.
+          await runtime.closeAll(undefined, true)
           json(res, 200, { ok: true })
           return
         }

@@ -21,6 +21,21 @@ export function NewTaskModal({ controller, workspaces, onClose }: {
   const [workspaceId, setWorkspaceId] = useState('')
   const [permission, setPermission] = useState('')
 
+  // Modal mutex: announce this modal and close when another modal opens.
+  // Cross-package coordination rides the existing dsh-panel-activate event
+  // family via a dedicated event so every overlay is mutually exclusive
+  // (task board ↔ cron ↔ connectors ↔ skill center ↔ context popup).
+  useEffect(() => {
+    document.dispatchEvent(new CustomEvent('dsh-modal-open', { detail: 'task-new' }))
+    const onOtherModal = (event: Event): void => {
+      if ((event as CustomEvent).detail !== 'task-new') onClose()
+    }
+    document.addEventListener('dsh-modal-open', onOtherModal)
+    return () => {
+      document.removeEventListener('dsh-modal-open', onOtherModal)
+    }
+  }, [onClose])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()

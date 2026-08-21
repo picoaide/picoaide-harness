@@ -24,6 +24,7 @@ export const zh = {
   'auth.verificationHint': '请打开以下地址并登录授权：',
   'auth.code': '授权码：{code}',
   'auth.authorizeOpened': '授权页已在浏览器中打开；若未弹出请点击：',
+  'auth.authorizeLink': '点击打开授权页',
   'auth.waiting': '等待授权完成…',
   'auth.downloading': '正在下载命令行工具（仅首次连接需要），请稍候…',
 }
@@ -50,6 +51,7 @@ export const en: Record<keyof typeof zh, string> = {
   'auth.verificationHint': 'Open the following address to authorize:',
   'auth.code': 'Authorization code: {code}',
   'auth.authorizeOpened': 'The authorization page was opened; if not, click here:',
+  'auth.authorizeLink': 'Click to open the authorization page',
   'auth.waiting': 'Waiting for authorization…',
   'auth.downloading': 'Downloading the CLI tool (first connect only), please wait…',
 }

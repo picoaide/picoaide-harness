@@ -112,6 +112,18 @@ export function JobEditor({ controller, job, workspaces, onClose }: {
     onClose()
   }
 
+  // Modal mutex: announce this modal and close when another modal opens.
+  useEffect(() => {
+    document.dispatchEvent(new CustomEvent('dsh-modal-open', { detail: 'cron-job' }))
+    const onOtherModal = (event: Event): void => {
+      if ((event as CustomEvent).detail !== 'cron-job') onClose()
+    }
+    document.addEventListener('dsh-modal-open', onOtherModal)
+    return () => {
+      document.removeEventListener('dsh-modal-open', onOtherModal)
+    }
+  }, [onClose])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()
