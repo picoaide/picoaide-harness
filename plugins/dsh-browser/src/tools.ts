@@ -103,7 +103,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Open browser'),
     async execute(args, exec) {
       const { url } = args as { url?: string }
-      const tab = await runtime.open(url ?? undefined)
+      const tab = await runtime.open(url ?? undefined, exec.signal)
       exec.signal.throwIfAborted()
       return { tab: tab.id, url: tab.url, title: tab.title }
     },
@@ -129,7 +129,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('New browser tab'),
     async execute(args, exec) {
       const { url } = args as { url?: string }
-      const tab = await runtime.open(url ?? undefined)
+      const tab = await runtime.open(url ?? undefined, exec.signal)
       exec.signal.throwIfAborted()
       return { tab: tab.id, url: tab.url, title: tab.title }
     },
@@ -181,7 +181,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Reload page'),
     async execute(args, exec) {
       const tabId = await tabOf((args as { tab?: number }).tab)
-      await runtime.reload(tabId)
+      await runtime.reload(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -200,7 +200,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Go back'),
     async execute(args, exec) {
       const tabId = await tabOf((args as { tab?: number }).tab)
-      await runtime.goBack(tabId)
+      await runtime.goBack(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -219,7 +219,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Go forward'),
     async execute(args, exec) {
       const tabId = await tabOf((args as { tab?: number }).tab)
-      await runtime.goForward(tabId)
+      await runtime.goForward(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -243,7 +243,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     async execute(args, exec) {
       const { tab, target, submit } = args as { tab?: number; target: number | string; submit?: boolean }
       const tabId = await tabOf(tab)
-      const snapshot = await runtime.snapshot(tabId)
+      const snapshot = await runtime.snapshot(tabId, exec.signal)
       const entry = typeof target === 'number' ? snapshot.find((item) => item.index === target) : undefined
       const selector = await resolveTarget(runtime, tabId, target)
       if (submit === true || (entry !== undefined && isSubmitTarget(entry.kind, entry.text, entry.selector))) {
@@ -256,8 +256,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
         })
         if (!allowed) throw new Error('browser: form submission was not approved by the user')
       }
-      const point = await runtime.locateElement(tabId, selector)
-      await runtime.clickAt(tabId, point)
+      const point = await runtime.locateElement(tabId, selector, exec.signal)
+      await runtime.clickAt(tabId, point, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -294,7 +294,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
         })
         if (!allowed) throw new Error('browser: password entry was not approved by the user')
       }
-      await runtime.typeInto(tabId, selector, text, clear !== false)
+      await runtime.typeInto(tabId, selector, text, clear !== false, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -318,7 +318,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
       const { tab, key } = args as { tab?: number; key: string }
       if (typeof key !== 'string' || key.length === 0) throw new Error('key must be a non-empty string')
       const tabId = await tabOf(tab)
-      await runtime.pressKey(tabId, key)
+      await runtime.pressKey(tabId, key, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -343,7 +343,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
       const { tab, target, value } = args as { tab?: number; target: number | string; value: string }
       const tabId = await tabOf(tab)
       const selector = await resolveTarget(runtime, tabId, target)
-      await runtime.selectOption(tabId, selector, value)
+      await runtime.selectOption(tabId, selector, value, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -368,7 +368,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
       const { tab, deltaY, target } = args as { tab?: number; deltaY?: number; target?: number | string }
       const tabId = await tabOf(tab)
       const selector = target === undefined ? undefined : await resolveTarget(runtime, tabId, target)
-      await runtime.scroll(tabId, deltaY ?? 0, selector)
+      await runtime.scroll(tabId, deltaY ?? 0, selector, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -411,7 +411,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Screenshot'),
     async execute(args, exec) {
       const tabId = await tabOf((args as { tab?: number }).tab)
-      const dataUrl = await runtime.screenshot(tabId)
+      const dataUrl = await runtime.screenshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
       const data = Buffer.from(base64, 'base64')
@@ -463,7 +463,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Page snapshot'),
     async execute(args, exec) {
       const tabId = await tabOf((args as { tab?: number }).tab)
-      const elements = await runtime.snapshot(tabId)
+      const elements = await runtime.snapshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { elements, url: runtime.tabState(tabId).url }
     },
@@ -487,7 +487,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     async execute(args, exec) {
       const { tab, selector } = args as { tab?: number; selector?: string }
       const tabId = await tabOf(tab)
-      const text = await runtime.text(tabId, selector)
+      const text = await runtime.text(tabId, selector, exec.signal)
       exec.signal.throwIfAborted()
       return { text, truncated: text.length >= runtime.options.textLimit }
     },
@@ -543,7 +543,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     presentCall: present('Switch tab'),
     async execute(args, exec) {
       const tabId = (args as { tab: number }).tab
-      await runtime.switchTab(tabId)
+      await runtime.switchTab(tabId, false, exec.signal)
       exec.signal.throwIfAborted()
       return { tab: tabId, url: runtime.tabState(tabId).url }
     },
@@ -561,7 +561,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     isConcurrencySafe: () => false,
     presentCall: present('Close tab'),
     async execute(args, exec) {
-      await runtime.closeTab((args as { tab: number }).tab)
+      await runtime.closeTab((args as { tab: number }).tab, false, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -579,7 +579,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     isConcurrencySafe: () => false,
     presentCall: present('Close browser'),
     async execute(_, exec) {
-      await runtime.closeAll()
+      await runtime.closeAll(exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -611,7 +611,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
         signal: exec.signal,
       })
       if (!allowed) throw new Error('browser: eval was not approved by the user')
-      const result = await runtime.eval(tabId, expression)
+      const result = await runtime.eval(tabId, expression, exec.signal)
       exec.signal.throwIfAborted()
       return { result: String(result) }
     },
@@ -653,7 +653,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
         signal: exec.signal,
       })
       if (!allowed) throw new Error('browser: credential injection was not approved by the user')
-      const filled = await runtime.fillCredentials(tabId, connectorId.trim())
+      const filled = await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal)
       exec.signal.throwIfAborted()
       return filled
     },

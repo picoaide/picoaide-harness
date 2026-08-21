@@ -26,6 +26,13 @@ export interface NativeView {
     setVisible(visible: boolean): void;
     /** Remove the view from the window. */
     detach(): void;
+    /**
+     * Raise this view to the TOP of the window's child stack. Electron's
+     * WebContentsView z-order follows attach order; re-attaching (remove+add)
+     * is the reliable way to bring a view forward, and the adapter must pass
+     * the NATIVE view (not this wrapper) to contentView.
+     */
+    moveToTop(win: NativeBrowserWindow): void;
     /** The webContents driving this view (loading, capture, CDP). */
     readonly webContents: NativeWebContents;
     /** Destroy the underlying view. */

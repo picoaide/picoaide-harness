@@ -955,6 +955,16 @@ window.__ModuleLoader__.load({
 				onClose();
 			};
 			(0, react.useEffect)(() => {
+				document.dispatchEvent(new CustomEvent("dsh-modal-open", { detail: "cron-job" }));
+				const onOtherModal = (event) => {
+					if (event.detail !== "cron-job") onClose();
+				};
+				document.addEventListener("dsh-modal-open", onOtherModal);
+				return () => {
+					document.removeEventListener("dsh-modal-open", onOtherModal);
+				};
+			}, [onClose]);
+			(0, react.useEffect)(() => {
 				const onKey = (event) => {
 					if (event.key === "Escape") onClose();
 				};

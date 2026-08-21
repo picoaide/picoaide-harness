@@ -76,8 +76,11 @@ export declare class BrowserRuntime {
     ensureWindow(origin?: string): Promise<NativeBrowserWindow>;
     /** Set the loopback origin the shell/mask pages are served from. */
     setShellOrigin(origin: string): void;
-    /** Show the browser window (wake from a user close; the sidebar trigger). */
-    showWindow(): void;
+    /** Show the browser window (wake from a user close; the sidebar trigger).
+     * When the window has never been created (sidebar clicked before any agent
+     * open), create it now — the shell loads with an empty tab strip and the
+     * 「+」 button starts the first tab. */
+    showWindow(): Promise<void>;
     /** Hide the browser window without destroying tabs (user close semantics). */
     hideWindow(): void;
     private record;
@@ -86,8 +89,11 @@ export declare class BrowserRuntime {
     private updateTabState;
     /**
      * Create a tab and optionally navigate it. The first tab becomes visible.
+     * Runs under the control mutex so a user takeover also pauses tab opening
+     * (and the agent's abort signal can cancel it while paused); the shell
+     * toolbar's own `+` button passes `user=true` and bypasses the mutex.
      */
-    open(url: string | undefined): Promise<BrowserTabState>;
+    open(url: string | undefined, signal?: AbortSignal, user?: boolean): Promise<BrowserTabState>;
     private tabStateInternal;
     /** Run one agent operation under the control mutex. Passes the agent's
      * abort signal so a takeover pauses the loop until release (or the agent
@@ -103,9 +109,11 @@ export declare class BrowserRuntime {
      * already usable; once the load promise settles (or the race times out),
      * `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
      * strictly after dom-ready) and only `networkidle` needs an extra quiet
-     * tick.
+     * tick. `user=true` (address bar) bypasses the takeover mutex.
      */
-    navigate(id: number, url: string, waitUntil?: BrowserWaitUntil, signal?: AbortSignal): Promise<void>;
+    navigate(id: number, url: string, waitUntil?: BrowserWaitUntil, signal?: AbortSignal, user?: boolean): Promise<void>;
+    /** Navigation body without mutex acquisition (used by open and navigate). */
+    private navigateInternal;
     /** Cooperative wait for the page load milestone; never rejects on timeout. */
     private waitForLoad;
     /** Extract the interactable-element snapshot of one tab. */
@@ -114,21 +122,22 @@ export declare class BrowserRuntime {
     text(id: number, selector: string | undefined, signal?: AbortSignal): Promise<string>;
     /** Capture a JPEG screenshot of one tab. */
     screenshot(id: number, signal?: AbortSignal): Promise<string>;
-    /** Navigate history. */
-    goBack(id: number): Promise<void>;
-    goForward(id: number): Promise<void>;
-    reload(id: number): Promise<void>;
-    /** Switch the visible tab. */
-    switchTab(id: number): Promise<void>;
-    /** Close a tab and destroy its view/CDP. */
-    closeTab(id: number): Promise<void>;
+    /** Navigate history (agent path: honors the control mutex + abort signal;
+     * user path (shell toolbar): runs immediately, never blocked by takeover). */
+    goBack(id: number, signal?: AbortSignal, user?: boolean): Promise<void>;
+    goForward(id: number, signal?: AbortSignal, user?: boolean): Promise<void>;
+    reload(id: number, signal?: AbortSignal, user?: boolean): Promise<void>;
+    /** Switch the visible tab (user path: immediate; agent path: mutex). */
+    switchTab(id: number, user?: boolean, signal?: AbortSignal): Promise<void>;
+    /** Close a tab and destroy its view/CDP (user path: immediate; agent path: mutex). */
+    closeTab(id: number, user?: boolean, signal?: AbortSignal): Promise<void>;
     /**
      * Close the whole browser (all tabs). The dedicated window stays alive
      * (hidden) so the user can wake it from the sidebar — only plugin teardown
      * truly destroys it. Tabs are dropped; the next `browser_open` recreates
-     * them.
+     * them. `user=true` (shell 清除) bypasses the takeover mutex.
      */
-    closeAll(): Promise<void>;
+    closeAll(signal?: AbortSignal, user?: boolean): Promise<void>;
     /** User takeover / release: hides/shows the AI-control mask and pauses /
      * resumes the agent loop (in-flight tool calls wait on the mutex). */
     setUserControl(active: boolean): void;

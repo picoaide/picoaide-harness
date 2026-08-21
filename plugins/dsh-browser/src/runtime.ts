@@ -71,15 +71,23 @@ class ControlMutex {
         release()
         throw new Error('browser: agent was stopped while the user controlled the browser')
       }
-      await Promise.race([
-        this.released,
-        signal === undefined
-          ? new Promise<void>(() => {})
-          : new Promise<void>((resolveAbort) => {
-              if (signal.aborted) return resolveAbort()
-              signal.addEventListener('abort', () => resolveAbort(), { once: true })
-            }),
-      ])
+      // Wait for release or abort; the abort listener is removed after the
+      // race so repeated takeover/release cycles do not leak listeners.
+      await new Promise<void>((resolveWait) => {
+        let done = false
+        const settle = (): void => {
+          if (done) return
+          done = true
+          if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+          resolveWait()
+        }
+        const onAbort = (): void => settle()
+        if (signal !== undefined) {
+          if (signal.aborted) return settle()
+          signal.addEventListener('abort', onAbort, { once: true })
+        }
+        void this.released.then(settle)
+      })
     }
     try {
       return await work()
@@ -211,7 +219,14 @@ export class BrowserRuntime {
     }
     if (this.mask !== null) {
       this.mask.setBounds(bounds)
-      // The mask is on top of every tab view (added last).
+      // The mask must always sit on TOP of every tab view. Electron's
+      // WebContentsView z-order follows attach order, but `loadURL`/reload
+      // and re-layouts can re-stack child views; re-attaching the mask
+      // (remove + add) is the only reliable way to keep it above the tabs.
+      // setVisible alone does NOT change z-order (verified 2026-08-21).
+      if (this.window !== null && !this.window.isDestroyed()) {
+        this.mask.moveToTop(this.window)
+      }
       this.mask.setVisible(!this.mutex.controlled)
     }
   }
@@ -268,9 +283,15 @@ export class BrowserRuntime {
     this.shellOrigin = origin
   }
 
-  /** Show the browser window (wake from a user close; the sidebar trigger). */
-  showWindow(): void {
-    if (this.window === null || this.window.isDestroyed()) return
+  /** Show the browser window (wake from a user close; the sidebar trigger).
+   * When the window has never been created (sidebar clicked before any agent
+   * open), create it now — the shell loads with an empty tab strip and the
+   * 「+」 button starts the first tab. */
+  async showWindow(): Promise<void> {
+    if (this.window === null || this.window.isDestroyed()) {
+      await this.ensureWindow(this.shellOrigin)
+      return
+    }
     this.window.show()
     this.relayout()
   }
@@ -305,47 +326,54 @@ export class BrowserRuntime {
 
   /**
    * Create a tab and optionally navigate it. The first tab becomes visible.
+   * Runs under the control mutex so a user takeover also pauses tab opening
+   * (and the agent's abort signal can cancel it while paused); the shell
+   * toolbar's own `+` button passes `user=true` and bypasses the mutex.
    */
-  async open(url: string | undefined): Promise<BrowserTabState> {
-    if (this.disposed) throw new Error('browser: runtime disposed')
-    if (this.tabs.size >= this.options.maxTabs) {
-      throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`)
-    }
-    const id = this.nextTabId++
-    const view = this.adapter.createView()
-    const cdp = new CdpSession(view.webContents.cdp)
-    await cdp.attach()
-    const tab: BrowserTab = { id, view, cdp, url: '', title: '', loading: false }
-    this.tabs.set(id, tab)
+  async open(url: string | undefined, signal?: AbortSignal, user = false): Promise<BrowserTabState> {
+    const body = async (): Promise<BrowserTabState> => {
+      if (this.disposed) throw new Error('browser: runtime disposed')
+      if (this.tabs.size >= this.options.maxTabs) {
+        throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`)
+      }
+      const id = this.nextTabId++
+      const view = this.adapter.createView()
+      const cdp = new CdpSession(view.webContents.cdp)
+      await cdp.attach()
+      const tab: BrowserTab = { id, view, cdp, url: '', title: '', loading: false }
+      this.tabs.set(id, tab)
 
-    // The dedicated browser window is created (and shown) on first open.
-    const win = await this.ensureWindow(this.shellOrigin)
-    const bounds = this.contentBounds()
-    view.attach(win, bounds)
-    view.setVisible(true)
-    this.visibleTabId = id
-    this.relayout()
+      // The dedicated browser window is created (and shown) on first open.
+      const win = await this.ensureWindow(this.shellOrigin)
+      const bounds = this.contentBounds()
+      view.attach(win, bounds)
+      view.setVisible(true)
+      this.visibleTabId = id
+      this.relayout()
 
-    view.webContents.on('did-start-loading', () => { tab.loading = true })
-    view.webContents.on('did-stop-loading', () => {
-      tab.loading = false
+      view.webContents.on('did-start-loading', () => { tab.loading = true })
+      view.webContents.on('did-stop-loading', () => {
+        tab.loading = false
+        this.updateTabState(tab)
+      })
+      view.webContents.on('did-navigate', () => this.updateTabState(tab))
+      view.webContents.on('page-title-updated', () => this.updateTabState(tab))
+
+      const session = view.webContents.session
+      this.permissionsDisposers.push(installPermissionGuard(session))
+      this.downloadDisposers.push(this.guard.installDownloadGuard(session, (summary) => {
+        this.record('browser_download', id, summary)
+      }))
+
+      if (url !== undefined && url !== '') {
+        await this.navigateInternal(id, url, 'domcontentloaded')
+      }
       this.updateTabState(tab)
-    })
-    view.webContents.on('did-navigate', () => this.updateTabState(tab))
-    view.webContents.on('page-title-updated', () => this.updateTabState(tab))
-
-    const session = view.webContents.session
-    this.permissionsDisposers.push(installPermissionGuard(session))
-    this.downloadDisposers.push(this.guard.installDownloadGuard(session, (summary) => {
-      this.record('browser_download', id, summary)
-    }))
-
-    if (url !== undefined && url !== '') {
-      await this.navigate(id, url, 'domcontentloaded')
+      this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url)
+      return this.tabState(id)
     }
-    this.updateTabState(tab)
-    this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url)
-    return this.tabState(id)
+    if (user) return await body()
+    return await this.mutex.run(body, signal)
   }
 
   private tabStateInternal(id: number): BrowserTabState {
@@ -381,37 +409,44 @@ export class BrowserRuntime {
    * already usable; once the load promise settles (or the race times out),
    * `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
    * strictly after dom-ready) and only `networkidle` needs an extra quiet
-   * tick.
+   * tick. `user=true` (address bar) bypasses the takeover mutex.
    */
-  async navigate(id: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded', signal?: AbortSignal): Promise<void> {
+  async navigate(id: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded', signal?: AbortSignal, user = false): Promise<void> {
+    const body = async (): Promise<void> => {
+      await this.navigateInternal(id, url, waitUntil)
+    }
+    if (user) return await body()
     // Pause the agent loop while the user controls the browser.
-    await this.mutex.run(async () => {
-      if (!this.guard.allowNavigation(url)) {
-        throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`)
+    await this.mutex.run(body, signal)
+  }
+
+  /** Navigation body without mutex acquisition (used by open and navigate). */
+  private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil): Promise<void> {
+    if (!this.guard.allowNavigation(url)) {
+      throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`)
+    }
+    const tab = this.tab(id)
+    const wc = tab.view.webContents
+    const started = Date.now()
+    const outcome = await Promise.race([
+      wc.loadURL(url).then(
+        () => 'loaded' as const,
+        () => 'failed' as const,
+      ),
+      sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
+    ])
+    if (outcome === 'failed') {
+      // A failed load may still leave a usable page (partial render); only
+      // report it when the webContents shows nothing loaded at all.
+      if (!wc.isLoading() && wc.getURL() === '') {
+        throw new Error('browser: navigation failed to load')
       }
-      const tab = this.tab(id)
-      const wc = tab.view.webContents
-      const started = Date.now()
-      const outcome = await Promise.race([
-        wc.loadURL(url).then(
-          () => 'loaded' as const,
-          () => 'failed' as const,
-        ),
-        sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
-      ])
-      if (outcome === 'failed') {
-        // A failed load may still leave a usable page (partial render); only
-        // report it when the webContents shows nothing loaded at all.
-        if (!wc.isLoading() && wc.getURL() === '') {
-          throw new Error('browser: navigation failed to load')
-        }
-      }
-      if (waitUntil === 'networkidle') {
-        const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
-        await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
-      }
-      this.updateTabState(tab)
-    }, signal)
+    }
+    if (waitUntil === 'networkidle') {
+      const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
+      await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
+    }
+    this.updateTabState(tab)
   }
 
   /** Cooperative wait for the page load milestone; never rejects on timeout. */
@@ -448,7 +483,10 @@ export class BrowserRuntime {
         const timer = setTimeout(settle, Math.max(0, deadline - Date.now()))
         timer.unref?.()
         if (waitUntil !== 'domcontentloaded' && !wc.isLoading()) settle()
-        if (waitUntil === 'domcontentloaded' && wc.isLoading() === false && wc.getURL() !== '') settle()
+        // An idle, empty (about:blank-style) page never emits dom-ready after
+        // a reload; treat it as loaded so `reload`/`goBack` on a blank tab do
+        // not burn the full timeout budget.
+        if (waitUntil === 'domcontentloaded' && wc.isLoading() === false) settle()
       })
     }
   }
@@ -471,83 +509,102 @@ export class BrowserRuntime {
       captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal)
   }
 
-  /** Navigate history. */
-  async goBack(id: number): Promise<void> {
-    await this.withControl('browser_go_back', id, async (tab) => {
+  /** Navigate history (agent path: honors the control mutex + abort signal;
+   * user path (shell toolbar): runs immediately, never blocked by takeover). */
+  async goBack(id: number, signal?: AbortSignal, user = false): Promise<void> {
+    const body = async (tab: BrowserTab): Promise<void> => {
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
       wc.goBack()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
-    })
+    }
+    if (user) return await body(this.tab(id))
+    return await this.withControl('browser_go_back', id, body, signal)
   }
 
-  async goForward(id: number): Promise<void> {
-    await this.withControl('browser_go_forward', id, async (tab) => {
+  async goForward(id: number, signal?: AbortSignal, user = false): Promise<void> {
+    const body = async (tab: BrowserTab): Promise<void> => {
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
       wc.goForward()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
-    })
+    }
+    if (user) return await body(this.tab(id))
+    return await this.withControl('browser_go_forward', id, body, signal)
   }
 
-  async reload(id: number): Promise<void> {
-    await this.withControl('browser_reload', id, async (tab) => {
+  async reload(id: number, signal?: AbortSignal, user = false): Promise<void> {
+    const body = async (tab: BrowserTab): Promise<void> => {
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
       wc.reload()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
-    })
-  }
-
-  /** Switch the visible tab. */
-  async switchTab(id: number): Promise<void> {
-    const tab = this.tab(id)
-    for (const other of this.tabs.values()) other.view.setVisible(other.id === id)
-    this.visibleTabId = id
-    tab.view.setBounds(this.contentBounds())
-    this.record('browser_switch_tab', id, `switch to tab ${id}`)
-  }
-
-  /** Close a tab and destroy its view/CDP. */
-  async closeTab(id: number): Promise<void> {
-    const tab = this.tabs.get(id)
-    if (tab === undefined) return
-    tab.cdp.detach()
-    tab.view.detach()
-    tab.view.destroy()
-    this.tabs.delete(id)
-    if (this.visibleTabId === id) {
-      this.visibleTabId = [...this.tabs.keys()].at(-1)
-      if (this.visibleTabId !== undefined) await this.switchTab(this.visibleTabId)
     }
-    this.record('browser_close_tab', id, `close tab ${id}`)
+    if (user) return await body(this.tab(id))
+    return await this.withControl('browser_reload', id, body, signal)
+  }
+
+  /** Switch the visible tab (user path: immediate; agent path: mutex). */
+  async switchTab(id: number, user = false, signal?: AbortSignal): Promise<void> {
+    const body = async (): Promise<void> => {
+      const tab = this.tab(id)
+      for (const other of this.tabs.values()) other.view.setVisible(other.id === id)
+      this.visibleTabId = id
+      tab.view.setBounds(this.contentBounds())
+      this.record('browser_switch_tab', id, `switch to tab ${id}`)
+    }
+    if (user) return await body()
+    return await this.mutex.run(body, signal)
+  }
+
+  /** Close a tab and destroy its view/CDP (user path: immediate; agent path: mutex). */
+  async closeTab(id: number, user = false, signal?: AbortSignal): Promise<void> {
+    const body = async (): Promise<void> => {
+      const tab = this.tabs.get(id)
+      if (tab === undefined) return
+      tab.cdp.detach()
+      tab.view.detach()
+      tab.view.destroy()
+      this.tabs.delete(id)
+      if (this.visibleTabId === id) {
+        this.visibleTabId = [...this.tabs.keys()].at(-1)
+        if (this.visibleTabId !== undefined) await this.switchTab(this.visibleTabId, true)
+      }
+      this.record('browser_close_tab', id, `close tab ${id}`)
+    }
+    if (user) return await body()
+    return await this.mutex.run(body, signal)
   }
 
   /**
    * Close the whole browser (all tabs). The dedicated window stays alive
    * (hidden) so the user can wake it from the sidebar — only plugin teardown
    * truly destroys it. Tabs are dropped; the next `browser_open` recreates
-   * them.
+   * them. `user=true` (shell 清除) bypasses the takeover mutex.
    */
-  async closeAll(): Promise<void> {
-    for (const id of [...this.tabs.keys()]) {
-      const tab = this.tabs.get(id)
-      if (tab === undefined) continue
-      tab.cdp.detach()
-      tab.view.detach()
-      tab.view.destroy()
-      this.tabs.delete(id)
+  async closeAll(signal?: AbortSignal, user = false): Promise<void> {
+    const body = async (): Promise<void> => {
+      for (const id of [...this.tabs.keys()]) {
+        const tab = this.tabs.get(id)
+        if (tab === undefined) continue
+        tab.cdp.detach()
+        tab.view.detach()
+        tab.view.destroy()
+        this.tabs.delete(id)
+      }
+      this.visibleTabId = undefined
+      for (const dispose of this.permissionsDisposers) dispose()
+      for (const dispose of this.downloadDisposers) dispose()
+      this.permissionsDisposers.length = 0
+      this.downloadDisposers.length = 0
+      this.record('browser_close', 0, 'close browser')
+      this.hideWindow()
     }
-    this.visibleTabId = undefined
-    for (const dispose of this.permissionsDisposers) dispose()
-    for (const dispose of this.downloadDisposers) dispose()
-    this.permissionsDisposers.length = 0
-    this.downloadDisposers.length = 0
-    this.record('browser_close', 0, 'close browser')
-    this.hideWindow()
+    if (user) return await body()
+    return await this.mutex.run(body, signal)
   }
 
   /** User takeover / release: hides/shows the AI-control mask and pauses /
@@ -560,7 +617,10 @@ export class BrowserRuntime {
       this.mutex.release()
       this.record('browser_release', 0, 'user released browser control')
     }
-    if (this.mask !== null) this.mask.setVisible(!active)
+    // relayout() re-stacks the mask above every tab view AND applies its
+    // visibility — a direct setVisible would leave the mask buried under
+    // tabs (z-order follows attach order in Electron, not visibility).
+    this.relayout()
   }
 
   /** Clear the persistent partition data (cookies, storage, cache). */

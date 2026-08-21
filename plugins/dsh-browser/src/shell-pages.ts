@@ -30,6 +30,12 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     .tab.active { background: #2e3138; }
   }
   #bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.25); }
+  #addrbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid rgba(128,128,128,.25); }
+  #addr {
+    flex: 1; min-width: 0; padding: 6px 10px; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,.4); background: #fff; color: inherit; font: inherit;
+  }
+  #addr:focus { outline: 2px solid #2563eb; outline-offset: -1px; }
   #tabs { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
   .tab { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; max-width: 140px; overflow: hidden; background: #e6e7ea; }
   .tab.active { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
@@ -55,6 +61,10 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     <button id="takeover" title="接管/释放浏览器控制">接管</button>
     <button id="clear" title="清除浏览数据并关闭全部标签">清除</button>
     <button id="hide" title="隐藏窗口（不关闭）">隐藏</button>
+  </div>
+  <div id="addrbar">
+    <input id="addr" type="text" placeholder="输入网址，回车访问（例如 https://example.com）" aria-label="地址栏" spellcheck="false" />
+    <button id="go" title="访问地址">访问</button>
   </div>
   <div id="notice">用户接管中：AI 浏览器操作已暂停，释放后继续。</div>
 <script>
@@ -84,6 +94,13 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     $('forward').disabled = !visible
     $('reload').disabled = !visible
     $('hint').textContent = visible ? (visible.title || visible.url || '') : ''
+    // Address bar mirrors the visible tab (only when it is not focused, so
+    // typing is never overwritten by the 1s poll).
+    const addr = $('addr')
+    if (document.activeElement !== addr) {
+      addr.value = visible ? (visible.url || '') : ''
+      addr.placeholder = visible ? '' : '输入网址，回车访问（例如 https://example.com）'
+    }
     const to = $('takeover')
     if (state.controlled) {
       to.textContent = '释放接管'
@@ -104,7 +121,31 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   $('back').addEventListener('click', () => post('back'))
   $('forward').addEventListener('click', () => post('forward'))
   $('reload').addEventListener('click', () => post('reload'))
-  $('takeover').addEventListener('click', () => post('takeover', { active: !state.controlled }))
+  // Address bar: navigate the VISIBLE tab. The user's own surface — the
+  // runtime navigates immediately (the shell route passes user=true).
+  const go = () => {
+    const value = $('addr').value.trim()
+    if (value === '') return
+    const visible = state.tabs.find((t) => t.visible)
+    if (visible === undefined) {
+      // No tab yet: open one at the URL.
+      post('open', { url: value }).then(() => poll())
+    } else {
+      post('navigate', { tab: visible.id, url: value }).then(() => poll())
+    }
+  }
+  $('addr').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); go() }
+  })
+  $('go').addEventListener('click', go)
+  // Explicit target state (not a toggle): the poll lags up to 1s, so a
+  // toggle based on stale state can repeat the same action forever
+  // (e.g. clicking 接管 twice keeps active:true; clicking 释放接管 when the
+  // poll still shows controlled:true sends active:true again).
+  $('takeover').addEventListener('click', () => {
+    const active = state.controlled === false
+    post('takeover', { active }).then(() => poll())
+  })
   $('clear').addEventListener('click', () => post('clear-data').then(() => post('close-all')))
   $('hide').addEventListener('click', () => post('hide'))
   poll()
@@ -155,7 +196,9 @@ export const BROWSER_MASK_HTML = `<!DOCTYPE html>
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ active: true }),
-    })
+    }).then(() => {
+      // The takeover hides the mask immediately; nothing else to refresh.
+    }).catch(() => {})
   })
 </script>
 </body>

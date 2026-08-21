@@ -829,6 +829,12 @@ function createRealElectronAdapter() {
 				view.setVisible(visible);
 			},
 			detach() {},
+			moveToTop(win) {
+				try {
+					win.contentView.removeChildView(view);
+				} catch {}
+				win.contentView.addChildView(view);
+			},
 			webContents: {
 				cdp: wc.debugger,
 				loadURL: (url) => wc.loadURL(url),
@@ -1351,10 +1357,21 @@ var ControlMutex = class {
 				release();
 				throw new Error("browser: agent was stopped while the user controlled the browser");
 			}
-			await Promise.race([this.released, signal === void 0 ? new Promise(() => {}) : new Promise((resolveAbort) => {
-				if (signal.aborted) return resolveAbort();
-				signal.addEventListener("abort", () => resolveAbort(), { once: true });
-			})]);
+			await new Promise((resolveWait) => {
+				let done = false;
+				const settle = () => {
+					if (done) return;
+					done = true;
+					if (signal !== void 0) signal.removeEventListener("abort", onAbort);
+					resolveWait();
+				};
+				const onAbort = () => settle();
+				if (signal !== void 0) {
+					if (signal.aborted) return settle();
+					signal.addEventListener("abort", onAbort, { once: true });
+				}
+				this.released.then(settle);
+			});
 		}
 		try {
 			return await work();
@@ -1475,6 +1492,7 @@ var BrowserRuntime = class {
 		}
 		if (this.mask !== null) {
 			this.mask.setBounds(bounds);
+			if (this.window !== null && !this.window.isDestroyed()) this.mask.moveToTop(this.window);
 			this.mask.setVisible(!this.mutex.controlled);
 		}
 	}
@@ -1523,9 +1541,15 @@ var BrowserRuntime = class {
 	setShellOrigin(origin) {
 		this.shellOrigin = origin;
 	}
-	/** Show the browser window (wake from a user close; the sidebar trigger). */
-	showWindow() {
-		if (this.window === null || this.window.isDestroyed()) return;
+	/** Show the browser window (wake from a user close; the sidebar trigger).
+	* When the window has never been created (sidebar clicked before any agent
+	* open), create it now — the shell loads with an empty tab strip and the
+	* 「+」 button starts the first tab. */
+	async showWindow() {
+		if (this.window === null || this.window.isDestroyed()) {
+			await this.ensureWindow(this.shellOrigin);
+			return;
+		}
 		this.window.show();
 		this.relayout();
 	}
@@ -1560,47 +1584,54 @@ var BrowserRuntime = class {
 	}
 	/**
 	* Create a tab and optionally navigate it. The first tab becomes visible.
+	* Runs under the control mutex so a user takeover also pauses tab opening
+	* (and the agent's abort signal can cancel it while paused); the shell
+	* toolbar's own `+` button passes `user=true` and bypasses the mutex.
 	*/
-	async open(url) {
-		if (this.disposed) throw new Error("browser: runtime disposed");
-		if (this.tabs.size >= this.options.maxTabs) throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`);
-		const id = this.nextTabId++;
-		const view = this.adapter.createView();
-		const cdp = new CdpSession(view.webContents.cdp);
-		await cdp.attach();
-		const tab = {
-			id,
-			view,
-			cdp,
-			url: "",
-			title: "",
-			loading: false
-		};
-		this.tabs.set(id, tab);
-		const win = await this.ensureWindow(this.shellOrigin);
-		const bounds = this.contentBounds();
-		view.attach(win, bounds);
-		view.setVisible(true);
-		this.visibleTabId = id;
-		this.relayout();
-		view.webContents.on("did-start-loading", () => {
-			tab.loading = true;
-		});
-		view.webContents.on("did-stop-loading", () => {
-			tab.loading = false;
+	async open(url, signal, user = false) {
+		const body = async () => {
+			if (this.disposed) throw new Error("browser: runtime disposed");
+			if (this.tabs.size >= this.options.maxTabs) throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`);
+			const id = this.nextTabId++;
+			const view = this.adapter.createView();
+			const cdp = new CdpSession(view.webContents.cdp);
+			await cdp.attach();
+			const tab = {
+				id,
+				view,
+				cdp,
+				url: "",
+				title: "",
+				loading: false
+			};
+			this.tabs.set(id, tab);
+			const win = await this.ensureWindow(this.shellOrigin);
+			const bounds = this.contentBounds();
+			view.attach(win, bounds);
+			view.setVisible(true);
+			this.visibleTabId = id;
+			this.relayout();
+			view.webContents.on("did-start-loading", () => {
+				tab.loading = true;
+			});
+			view.webContents.on("did-stop-loading", () => {
+				tab.loading = false;
+				this.updateTabState(tab);
+			});
+			view.webContents.on("did-navigate", () => this.updateTabState(tab));
+			view.webContents.on("page-title-updated", () => this.updateTabState(tab));
+			const session = view.webContents.session;
+			this.permissionsDisposers.push(installPermissionGuard(session));
+			this.downloadDisposers.push(this.guard.installDownloadGuard(session, (summary) => {
+				this.record("browser_download", id, summary);
+			}));
+			if (url !== void 0 && url !== "") await this.navigateInternal(id, url, "domcontentloaded");
 			this.updateTabState(tab);
-		});
-		view.webContents.on("did-navigate", () => this.updateTabState(tab));
-		view.webContents.on("page-title-updated", () => this.updateTabState(tab));
-		const session = view.webContents.session;
-		this.permissionsDisposers.push(installPermissionGuard(session));
-		this.downloadDisposers.push(this.guard.installDownloadGuard(session, (summary) => {
-			this.record("browser_download", id, summary);
-		}));
-		if (url !== void 0 && url !== "") await this.navigate(id, url, "domcontentloaded");
-		this.updateTabState(tab);
-		this.record("browser_open", id, url === void 0 || url === "" ? "new tab" : url);
-		return this.tabState(id);
+			this.record("browser_open", id, url === void 0 || url === "" ? "new tab" : url);
+			return this.tabState(id);
+		};
+		if (user) return await body();
+		return await this.mutex.run(body, signal);
 	}
 	tabStateInternal(id) {
 		const tab = this.tab(id);
@@ -1633,23 +1664,29 @@ var BrowserRuntime = class {
 	* already usable; once the load promise settles (or the race times out),
 	* `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
 	* strictly after dom-ready) and only `networkidle` needs an extra quiet
-	* tick.
+	* tick. `user=true` (address bar) bypasses the takeover mutex.
 	*/
-	async navigate(id, url, waitUntil = "domcontentloaded", signal) {
-		await this.mutex.run(async () => {
-			if (!this.guard.allowNavigation(url)) throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`);
-			const tab = this.tab(id);
-			const wc = tab.view.webContents;
-			const started = Date.now();
-			if (await Promise.race([wc.loadURL(url).then(() => "loaded", () => "failed"), sleep(this.options.loadTimeoutMs).then(() => "pending")]) === "failed") {
-				if (!wc.isLoading() && wc.getURL() === "") throw new Error("browser: navigation failed to load");
-			}
-			if (waitUntil === "networkidle") {
-				const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started));
-				await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget));
-			}
-			this.updateTabState(tab);
-		}, signal);
+	async navigate(id, url, waitUntil = "domcontentloaded", signal, user = false) {
+		const body = async () => {
+			await this.navigateInternal(id, url, waitUntil);
+		};
+		if (user) return await body();
+		await this.mutex.run(body, signal);
+	}
+	/** Navigation body without mutex acquisition (used by open and navigate). */
+	async navigateInternal(id, url, waitUntil) {
+		if (!this.guard.allowNavigation(url)) throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`);
+		const tab = this.tab(id);
+		const wc = tab.view.webContents;
+		const started = Date.now();
+		if (await Promise.race([wc.loadURL(url).then(() => "loaded", () => "failed"), sleep(this.options.loadTimeoutMs).then(() => "pending")]) === "failed") {
+			if (!wc.isLoading() && wc.getURL() === "") throw new Error("browser: navigation failed to load");
+		}
+		if (waitUntil === "networkidle") {
+			const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started));
+			await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget));
+		}
+		this.updateTabState(tab);
 	}
 	/** Cooperative wait for the page load milestone; never rejects on timeout. */
 	waitForLoad(wc, waitUntil) {
@@ -1680,7 +1717,7 @@ var BrowserRuntime = class {
 				const timer = setTimeout(settle, Math.max(0, deadline - Date.now()));
 				timer.unref?.();
 				if (waitUntil !== "domcontentloaded" && !wc.isLoading()) settle();
-				if (waitUntil === "domcontentloaded" && wc.isLoading() === false && wc.getURL() !== "") settle();
+				if (waitUntil === "domcontentloaded" && wc.isLoading() === false) settle();
 			});
 		};
 	}
@@ -1696,78 +1733,97 @@ var BrowserRuntime = class {
 	async screenshot(id, signal) {
 		return await this.withControl("browser_screenshot", id, (tab) => captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal);
 	}
-	/** Navigate history. */
-	async goBack(id) {
-		await this.withControl("browser_go_back", id, async (tab) => {
+	/** Navigate history (agent path: honors the control mutex + abort signal;
+	* user path (shell toolbar): runs immediately, never blocked by takeover). */
+	async goBack(id, signal, user = false) {
+		const body = async (tab) => {
 			const wc = tab.view.webContents;
 			if (wc.isDestroyed()) return;
 			wc.goBack();
 			await this.waitForLoad(wc, "domcontentloaded")(this.options.timeoutMs);
 			this.updateTabState(tab);
-		});
+		};
+		if (user) return await body(this.tab(id));
+		return await this.withControl("browser_go_back", id, body, signal);
 	}
-	async goForward(id) {
-		await this.withControl("browser_go_forward", id, async (tab) => {
+	async goForward(id, signal, user = false) {
+		const body = async (tab) => {
 			const wc = tab.view.webContents;
 			if (wc.isDestroyed()) return;
 			wc.goForward();
 			await this.waitForLoad(wc, "domcontentloaded")(this.options.timeoutMs);
 			this.updateTabState(tab);
-		});
+		};
+		if (user) return await body(this.tab(id));
+		return await this.withControl("browser_go_forward", id, body, signal);
 	}
-	async reload(id) {
-		await this.withControl("browser_reload", id, async (tab) => {
+	async reload(id, signal, user = false) {
+		const body = async (tab) => {
 			const wc = tab.view.webContents;
 			if (wc.isDestroyed()) return;
 			wc.reload();
 			await this.waitForLoad(wc, "domcontentloaded")(this.options.timeoutMs);
 			this.updateTabState(tab);
-		});
+		};
+		if (user) return await body(this.tab(id));
+		return await this.withControl("browser_reload", id, body, signal);
 	}
-	/** Switch the visible tab. */
-	async switchTab(id) {
-		const tab = this.tab(id);
-		for (const other of this.tabs.values()) other.view.setVisible(other.id === id);
-		this.visibleTabId = id;
-		tab.view.setBounds(this.contentBounds());
-		this.record("browser_switch_tab", id, `switch to tab ${id}`);
+	/** Switch the visible tab (user path: immediate; agent path: mutex). */
+	async switchTab(id, user = false, signal) {
+		const body = async () => {
+			const tab = this.tab(id);
+			for (const other of this.tabs.values()) other.view.setVisible(other.id === id);
+			this.visibleTabId = id;
+			tab.view.setBounds(this.contentBounds());
+			this.record("browser_switch_tab", id, `switch to tab ${id}`);
+		};
+		if (user) return await body();
+		return await this.mutex.run(body, signal);
 	}
-	/** Close a tab and destroy its view/CDP. */
-	async closeTab(id) {
-		const tab = this.tabs.get(id);
-		if (tab === void 0) return;
-		tab.cdp.detach();
-		tab.view.detach();
-		tab.view.destroy();
-		this.tabs.delete(id);
-		if (this.visibleTabId === id) {
-			this.visibleTabId = [...this.tabs.keys()].at(-1);
-			if (this.visibleTabId !== void 0) await this.switchTab(this.visibleTabId);
-		}
-		this.record("browser_close_tab", id, `close tab ${id}`);
+	/** Close a tab and destroy its view/CDP (user path: immediate; agent path: mutex). */
+	async closeTab(id, user = false, signal) {
+		const body = async () => {
+			const tab = this.tabs.get(id);
+			if (tab === void 0) return;
+			tab.cdp.detach();
+			tab.view.detach();
+			tab.view.destroy();
+			this.tabs.delete(id);
+			if (this.visibleTabId === id) {
+				this.visibleTabId = [...this.tabs.keys()].at(-1);
+				if (this.visibleTabId !== void 0) await this.switchTab(this.visibleTabId, true);
+			}
+			this.record("browser_close_tab", id, `close tab ${id}`);
+		};
+		if (user) return await body();
+		return await this.mutex.run(body, signal);
 	}
 	/**
 	* Close the whole browser (all tabs). The dedicated window stays alive
 	* (hidden) so the user can wake it from the sidebar — only plugin teardown
 	* truly destroys it. Tabs are dropped; the next `browser_open` recreates
-	* them.
+	* them. `user=true` (shell 清除) bypasses the takeover mutex.
 	*/
-	async closeAll() {
-		for (const id of [...this.tabs.keys()]) {
-			const tab = this.tabs.get(id);
-			if (tab === void 0) continue;
-			tab.cdp.detach();
-			tab.view.detach();
-			tab.view.destroy();
-			this.tabs.delete(id);
-		}
-		this.visibleTabId = void 0;
-		for (const dispose of this.permissionsDisposers) dispose();
-		for (const dispose of this.downloadDisposers) dispose();
-		this.permissionsDisposers.length = 0;
-		this.downloadDisposers.length = 0;
-		this.record("browser_close", 0, "close browser");
-		this.hideWindow();
+	async closeAll(signal, user = false) {
+		const body = async () => {
+			for (const id of [...this.tabs.keys()]) {
+				const tab = this.tabs.get(id);
+				if (tab === void 0) continue;
+				tab.cdp.detach();
+				tab.view.detach();
+				tab.view.destroy();
+				this.tabs.delete(id);
+			}
+			this.visibleTabId = void 0;
+			for (const dispose of this.permissionsDisposers) dispose();
+			for (const dispose of this.downloadDisposers) dispose();
+			this.permissionsDisposers.length = 0;
+			this.downloadDisposers.length = 0;
+			this.record("browser_close", 0, "close browser");
+			this.hideWindow();
+		};
+		if (user) return await body();
+		return await this.mutex.run(body, signal);
 	}
 	/** User takeover / release: hides/shows the AI-control mask and pauses /
 	* resumes the agent loop (in-flight tool calls wait on the mutex). */
@@ -1779,7 +1835,7 @@ var BrowserRuntime = class {
 			this.mutex.release();
 			this.record("browser_release", 0, "user released browser control");
 		}
-		if (this.mask !== null) this.mask.setVisible(!active);
+		this.relayout();
 	}
 	/** Clear the persistent partition data (cookies, storage, cache). */
 	async clearData() {
@@ -2150,7 +2206,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Open browser"),
 		async execute(args, exec) {
 			const { url } = args;
-			const tab = await runtime.open(url ?? void 0);
+			const tab = await runtime.open(url ?? void 0, exec.signal);
 			exec.signal.throwIfAborted();
 			return {
 				tab: tab.id,
@@ -2187,7 +2243,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("New browser tab"),
 		async execute(args, exec) {
 			const { url } = args;
-			const tab = await runtime.open(url ?? void 0);
+			const tab = await runtime.open(url ?? void 0, exec.signal);
 			exec.signal.throwIfAborted();
 			return {
 				tab: tab.id,
@@ -2271,7 +2327,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Reload page"),
 		async execute(args, exec) {
 			const tabId = await tabOf(args.tab);
-			await runtime.reload(tabId);
+			await runtime.reload(tabId, exec.signal);
 			exec.signal.throwIfAborted();
 			return { url: runtime.tabState(tabId).url };
 		}
@@ -2299,7 +2355,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Go back"),
 		async execute(args, exec) {
 			const tabId = await tabOf(args.tab);
-			await runtime.goBack(tabId);
+			await runtime.goBack(tabId, exec.signal);
 			exec.signal.throwIfAborted();
 			return { url: runtime.tabState(tabId).url };
 		}
@@ -2327,7 +2383,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Go forward"),
 		async execute(args, exec) {
 			const tabId = await tabOf(args.tab);
-			await runtime.goForward(tabId);
+			await runtime.goForward(tabId, exec.signal);
 			exec.signal.throwIfAborted();
 			return { url: runtime.tabState(tabId).url };
 		}
@@ -2367,7 +2423,7 @@ function applyBrowserTools(ctx, runtime) {
 		async execute(args, exec) {
 			const { tab, target, submit } = args;
 			const tabId = await tabOf(tab);
-			const snapshot = await runtime.snapshot(tabId);
+			const snapshot = await runtime.snapshot(tabId, exec.signal);
 			const entry = typeof target === "number" ? snapshot.find((item) => item.index === target) : void 0;
 			const selector = await resolveTarget(runtime, tabId, target);
 			if (submit === true || entry !== void 0 && isSubmitTarget(entry.kind, entry.text, entry.selector)) {
@@ -2379,8 +2435,8 @@ function applyBrowserTools(ctx, runtime) {
 					signal: exec.signal
 				})) throw new Error("browser: form submission was not approved by the user");
 			}
-			const point = await runtime.locateElement(tabId, selector);
-			await runtime.clickAt(tabId, point);
+			const point = await runtime.locateElement(tabId, selector, exec.signal);
+			await runtime.clickAt(tabId, point, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2436,7 +2492,7 @@ function applyBrowserTools(ctx, runtime) {
 					signal: exec.signal
 				})) throw new Error("browser: password entry was not approved by the user");
 			}
-			await runtime.typeInto(tabId, selector, text, clear !== false);
+			await runtime.typeInto(tabId, selector, text, clear !== false, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2473,7 +2529,7 @@ function applyBrowserTools(ctx, runtime) {
 			const { tab, key } = args;
 			if (typeof key !== "string" || key.length === 0) throw new Error("key must be a non-empty string");
 			const tabId = await tabOf(tab);
-			await runtime.pressKey(tabId, key);
+			await runtime.pressKey(tabId, key, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2515,7 +2571,7 @@ function applyBrowserTools(ctx, runtime) {
 			const { tab, target, value } = args;
 			const tabId = await tabOf(tab);
 			const selector = await resolveTarget(runtime, tabId, target);
-			await runtime.selectOption(tabId, selector, value);
+			await runtime.selectOption(tabId, selector, value, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2555,7 +2611,7 @@ function applyBrowserTools(ctx, runtime) {
 			const { tab, deltaY, target } = args;
 			const tabId = await tabOf(tab);
 			const selector = target === void 0 ? void 0 : await resolveTarget(runtime, tabId, target);
-			await runtime.scroll(tabId, deltaY ?? 0, selector);
+			await runtime.scroll(tabId, deltaY ?? 0, selector, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2615,7 +2671,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Screenshot"),
 		async execute(args, exec) {
 			const tabId = await tabOf(args.tab);
-			const dataUrl = await runtime.screenshot(tabId);
+			const dataUrl = await runtime.screenshot(tabId, exec.signal);
 			exec.signal.throwIfAborted();
 			const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
 			const data = Buffer.from(base64, "base64");
@@ -2669,7 +2725,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Page snapshot"),
 		async execute(args, exec) {
 			const tabId = await tabOf(args.tab);
-			const elements = await runtime.snapshot(tabId);
+			const elements = await runtime.snapshot(tabId, exec.signal);
 			exec.signal.throwIfAborted();
 			return {
 				elements,
@@ -2711,7 +2767,7 @@ function applyBrowserTools(ctx, runtime) {
 		async execute(args, exec) {
 			const { tab, selector } = args;
 			const tabId = await tabOf(tab);
-			const text = await runtime.text(tabId, selector);
+			const text = await runtime.text(tabId, selector, exec.signal);
 			exec.signal.throwIfAborted();
 			return {
 				text,
@@ -2782,7 +2838,7 @@ function applyBrowserTools(ctx, runtime) {
 		presentCall: present("Switch tab"),
 		async execute(args, exec) {
 			const tabId = args.tab;
-			await runtime.switchTab(tabId);
+			await runtime.switchTab(tabId, false, exec.signal);
 			exec.signal.throwIfAborted();
 			return {
 				tab: tabId,
@@ -2813,7 +2869,7 @@ function applyBrowserTools(ctx, runtime) {
 		isConcurrencySafe: () => false,
 		presentCall: present("Close tab"),
 		async execute(args, exec) {
-			await runtime.closeTab(args.tab);
+			await runtime.closeTab(args.tab, false, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2837,7 +2893,7 @@ function applyBrowserTools(ctx, runtime) {
 		isConcurrencySafe: () => false,
 		presentCall: present("Close browser"),
 		async execute(_, exec) {
-			await runtime.closeAll();
+			await runtime.closeAll(exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
 		}
@@ -2881,7 +2937,7 @@ function applyBrowserTools(ctx, runtime) {
 				reason: `在页面中执行 JavaScript: ${expression.slice(0, 120)}`,
 				signal: exec.signal
 			})) throw new Error("browser: eval was not approved by the user");
-			const result = await runtime.eval(tabId, expression);
+			const result = await runtime.eval(tabId, expression, exec.signal);
 			exec.signal.throwIfAborted();
 			return { result: String(result) };
 		}
@@ -2929,7 +2985,7 @@ function applyBrowserTools(ctx, runtime) {
 				reason: `向登录表单注入连接器凭据: ${connectorId}`,
 				signal: exec.signal
 			})) throw new Error("browser: credential injection was not approved by the user");
-			const filled = await runtime.fillCredentials(tabId, connectorId.trim());
+			const filled = await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal);
 			exec.signal.throwIfAborted();
 			return filled;
 		}
@@ -3014,6 +3070,12 @@ const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     .tab.active { background: #2e3138; }
   }
   #bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.25); }
+  #addrbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid rgba(128,128,128,.25); }
+  #addr {
+    flex: 1; min-width: 0; padding: 6px 10px; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,.4); background: #fff; color: inherit; font: inherit;
+  }
+  #addr:focus { outline: 2px solid #2563eb; outline-offset: -1px; }
   #tabs { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
   .tab { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; max-width: 140px; overflow: hidden; background: #e6e7ea; }
   .tab.active { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
@@ -3039,6 +3101,10 @@ const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     <button id="takeover" title="接管/释放浏览器控制">接管</button>
     <button id="clear" title="清除浏览数据并关闭全部标签">清除</button>
     <button id="hide" title="隐藏窗口（不关闭）">隐藏</button>
+  </div>
+  <div id="addrbar">
+    <input id="addr" type="text" placeholder="输入网址，回车访问（例如 https://example.com）" aria-label="地址栏" spellcheck="false" />
+    <button id="go" title="访问地址">访问</button>
   </div>
   <div id="notice">用户接管中：AI 浏览器操作已暂停，释放后继续。</div>
 <script>
@@ -3068,6 +3134,13 @@ const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     $('forward').disabled = !visible
     $('reload').disabled = !visible
     $('hint').textContent = visible ? (visible.title || visible.url || '') : ''
+    // Address bar mirrors the visible tab (only when it is not focused, so
+    // typing is never overwritten by the 1s poll).
+    const addr = $('addr')
+    if (document.activeElement !== addr) {
+      addr.value = visible ? (visible.url || '') : ''
+      addr.placeholder = visible ? '' : '输入网址，回车访问（例如 https://example.com）'
+    }
     const to = $('takeover')
     if (state.controlled) {
       to.textContent = '释放接管'
@@ -3088,7 +3161,31 @@ const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   $('back').addEventListener('click', () => post('back'))
   $('forward').addEventListener('click', () => post('forward'))
   $('reload').addEventListener('click', () => post('reload'))
-  $('takeover').addEventListener('click', () => post('takeover', { active: !state.controlled }))
+  // Address bar: navigate the VISIBLE tab. The user's own surface — the
+  // runtime navigates immediately (the shell route passes user=true).
+  const go = () => {
+    const value = $('addr').value.trim()
+    if (value === '') return
+    const visible = state.tabs.find((t) => t.visible)
+    if (visible === undefined) {
+      // No tab yet: open one at the URL.
+      post('open', { url: value }).then(() => poll())
+    } else {
+      post('navigate', { tab: visible.id, url: value }).then(() => poll())
+    }
+  }
+  $('addr').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); go() }
+  })
+  $('go').addEventListener('click', go)
+  // Explicit target state (not a toggle): the poll lags up to 1s, so a
+  // toggle based on stale state can repeat the same action forever
+  // (e.g. clicking 接管 twice keeps active:true; clicking 释放接管 when the
+  // poll still shows controlled:true sends active:true again).
+  $('takeover').addEventListener('click', () => {
+    const active = state.controlled === false
+    post('takeover', { active }).then(() => poll())
+  })
   $('clear').addEventListener('click', () => post('clear-data').then(() => post('close-all')))
   $('hide').addEventListener('click', () => post('hide'))
   poll()
@@ -3138,7 +3235,9 @@ const BROWSER_MASK_HTML = `<!DOCTYPE html>
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ active: true }),
-    })
+    }).then(() => {
+      // The takeover hides the mask immediately; nothing else to refresh.
+    }).catch(() => {})
   })
 <\/script>
 </body>
@@ -3253,7 +3352,7 @@ function apply(ctx, config = {}) {
 			const body = raw !== null && typeof raw === "object" ? raw : {};
 			switch (action) {
 				case "show":
-					runtime.showWindow();
+					await runtime.showWindow();
 					json(res, 200, { ok: true });
 					return;
 				case "hide":
@@ -3262,45 +3361,45 @@ function apply(ctx, config = {}) {
 					return;
 				case "open": {
 					const url = typeof body.url === "string" ? body.url : void 0;
-					json(res, 200, { tab: await runtime.open(url) });
+					json(res, 200, { tab: await runtime.open(url, void 0, true) });
 					return;
 				}
 				case "navigate": {
 					const tab = numberOr(body.tab, 0);
 					const url = typeof body.url === "string" ? body.url : "";
 					if (tab <= 0) return json(res, 400, { error: "tab is required" });
-					await runtime.navigate(tab, url);
+					await runtime.navigate(tab, url, "domcontentloaded", void 0, true);
 					json(res, 200, { ok: true });
 					return;
 				}
 				case "reload":
-					await runtime.reload(tabOf(runtime, body));
+					await runtime.reload(tabOf(runtime, body), void 0, true);
 					json(res, 200, { ok: true });
 					return;
 				case "back":
-					await runtime.goBack(tabOf(runtime, body));
+					await runtime.goBack(tabOf(runtime, body), void 0, true);
 					json(res, 200, { ok: true });
 					return;
 				case "forward":
-					await runtime.goForward(tabOf(runtime, body));
+					await runtime.goForward(tabOf(runtime, body), void 0, true);
 					json(res, 200, { ok: true });
 					return;
 				case "switch-tab": {
 					const tab = numberOr(body.tab, 0);
 					if (tab <= 0) return json(res, 400, { error: "tab is required" });
-					await runtime.switchTab(tab);
+					await runtime.switchTab(tab, true);
 					json(res, 200, { ok: true });
 					return;
 				}
 				case "close-tab": {
 					const tab = numberOr(body.tab, 0);
 					if (tab <= 0) return json(res, 400, { error: "tab is required" });
-					await runtime.closeTab(tab);
+					await runtime.closeTab(tab, true);
 					json(res, 200, { ok: true });
 					return;
 				}
 				case "close-all":
-					await runtime.closeAll();
+					await runtime.closeAll(void 0, true);
 					json(res, 200, { ok: true });
 					return;
 				case "takeover":
