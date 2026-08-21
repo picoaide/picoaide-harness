@@ -60,8 +60,14 @@ func main() {
 				}
 			case strings.Contains(last, "TOOLCALL:command_exec"):
 				scriptedTool = &map[string]any{
-					"name": "command_exec",
+					"name":      "command_exec",
 					"arguments": `{"command":"echo e2e-cmd-ok"}`,
+				}
+			case strings.Contains(last, "TOOLCALL:kb_search"):
+				// 知识库检索:引擎调用真实 kb_search 工具(本地 dev-env 有 seed 数据)
+				scriptedTool = &map[string]any{
+					"name":      "kb_search",
+					"arguments": `{"query":"报销"}`,
 				}
 			}
 		}

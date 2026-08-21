@@ -12,3 +12,7 @@ var (
 	// (rolls back; see DeleteUser).
 	ErrLastAdmin = errors.New("cannot delete the last admin")
 )
+
+// ErrDepartmentInUse guards department deletion when members, children or
+// grant references still exist.
+var ErrDepartmentInUse = errors.New("department in use")

@@ -85,6 +85,10 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
 		return
 	}
+	if blocked, msg := a.quotaBlocked(user); blocked {
+		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
+		return
+	}
 
 	ups, err := MatchModels(a.DB, req.Model)
 	if err != nil {
@@ -96,22 +100,8 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	// 渠道参数注入:思考模式等;注入失败不阻塞请求(原样转发)
-	if ups[0].Channel != "" {
-		if ch, ok := channels.Get(ups[0].Channel); ok {
-			ov, rm := ch.RequestOverrides(req.Model)
-			if raw2, err := applyChannelOverrides(raw, ov, rm); err == nil {
-				raw = raw2
-			}
-		}
-	}
-
-	// max_tokens 默认注入(客户端未传时用模型 default_params.max_output)
-	if params, err := serverstore.ModelDefaultParams(a.DB, req.Model); err == nil && params != "" {
-		if raw2, err := applyMaxTokensDefault(raw, params); err == nil {
-			raw = raw2
-		}
-	}
+	// max_tokens 默认值注入依据(模型维度,与候选无关,提前读取)
+	defaultParams, _ := serverstore.ModelDefaultParams(a.DB, req.Model)
 
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
@@ -125,9 +115,25 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 
 	// 故障转移:按序尝试每个 provider(连接失败/5xx/首字节超时 → 下一个)。
 	// 单 provider 失败即返回,不重试(避免重复计费);4xx 由 forward 原样返回。
+	// 渠道 override 与 max_tokens 注入按候选独立计算(从原始 body 出发):
+	// failover 时第二个 provider 不得收到首个 provider 的渠道参数污染。
 	var resp *http.Response
 	for i := range ups {
-		resp, err = a.forward(c, &ups[i], raw, req.Stream)
+		body := raw
+		if ups[i].Channel != "" {
+			if ch, ok := channels.Get(ups[i].Channel); ok {
+				ov, rm := ch.RequestOverrides(req.Model)
+				if raw2, err := applyChannelOverrides(body, ov, rm); err == nil {
+					body = raw2
+				}
+			}
+		}
+		if defaultParams != "" {
+			if raw2, err := applyMaxTokensDefault(body, defaultParams); err == nil {
+				body = raw2
+			}
+		}
+		resp, err = a.forward(c, &ups[i], body, req.Stream)
 		if err == nil {
 			break
 		}
@@ -171,13 +177,17 @@ func maxOutputFromDefaultParams(params string) (int64, bool, error) {
 }
 
 // applyMaxTokensDefault:客户端未传 max_tokens 时,从模型 default_params.max_output 注入。
-// 无 default_params/解析失败时原样返回。
+// 无 default_params/解析失败时原样返回。支持 max_completion_tokens 模型的同语义双键
+// (审计2026-L17:注入 max_tokens 与既有 max_completion_tokens 冲突)。
 func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return raw, err
 	}
 	if _, ok := body["max_tokens"]; ok {
+		return raw, nil
+	}
+	if _, ok := body["max_completion_tokens"]; ok {
 		return raw, nil
 	}
 	v, ok, err := maxOutputFromDefaultParams(defaultParams)
@@ -264,10 +274,41 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 	return resp, nil
 }
 
+// nonStreamBodyTimeout bounds reading a non-stream upstream body once headers
+// arrived (审计2026-M11:全量 client.Timeout 会截断长报告生成;这里只限 body 读)
+var nonStreamBodyTimeout = 10 * time.Minute
+
+// passHeaders 是透传给客户端的上游响应头白名单:其余头(Set-Cookie/Server/
+// hop-by-hop 等)一律丢弃(审计2026-L10)
+var passHeaders = map[string]bool{
+	"Content-Type":          true,
+	"Retry-After":           true,
+	"X-Request-Id":          true,
+	"X-RateLimit-Limit":     true,
+	"X-RateLimit-Remaining": true,
+}
+
 // serveJSON passes a non-stream upstream response through and records usage.
 func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string) {
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxUpstreamBody)+1))
+	type readResult struct {
+		body []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		b, e := io.ReadAll(io.LimitReader(resp.Body, int64(maxUpstreamBody)+1))
+		ch <- readResult{b, e}
+	}()
+	var body []byte
+	var err error
+	select {
+	case r := <-ch:
+		body, err = r.body, r.err
+	case <-time.After(nonStreamBodyTimeout):
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游响应超时")
+		return
+	}
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "读取上游响应失败")
 		return
@@ -284,6 +325,9 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 	}
 	c.Status(resp.StatusCode)
 	for k, vv := range resp.Header {
+		if !passHeaders[k] {
+			continue
+		}
 		for _, v := range vv {
 			c.Writer.Header().Add(k, v)
 		}
@@ -306,6 +350,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		}
 		c.Status(resp.StatusCode)
 		for k, vv := range resp.Header {
+			if !passHeaders[k] {
+				continue
+			}
 			for _, v := range vv {
 				c.Writer.Header().Add(k, v)
 			}
@@ -319,6 +366,8 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
+	idleTimedOut := false
+	backfilled := false // usage row received real tokens (must not be dropped)
 	for {
 		// 5#9/5#10: stop pumping once the client context is gone
 		if c.Request.Context().Err() != nil {
@@ -333,6 +382,8 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 				} else if ok && usageID > 0 {
 					if uerr := serverstore.UpdateUsageTokens(a.DB, usageID, pt, ct); uerr != nil {
 						log.Printf("gateway: backfill usage: %v", uerr)
+					} else if pt+ct > 0 {
+						backfilled = true
 					}
 				}
 			}
@@ -346,8 +397,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		}
 		if err != nil { // EOF, client disconnect, or idle timeout
 			if errors.Is(err, errStreamIdleTimeout) {
+				idleTimedOut = true
 				log.Printf("gateway: stream idle timeout after %v, terminating", streamIdleTimeout)
-				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM_IDLE_TIMEOUT","message":"上游响应空闲超时"}}`)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
 				if fl != nil {
 					fl.Flush()
 				}
@@ -355,7 +407,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 			break
 		}
 	}
-	if clientGone && usageID > 0 {
+	// idle 超时与客户端断开时,从未回填的 pending 行必须清除(否则计量虚增
+	// 一小时);已回填真实 token 的行不得删除,否则真实用量从统计中丢失。
+	if (clientGone || idleTimedOut) && usageID > 0 && !backfilled {
 		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 			log.Printf("gateway: delete pending usage: %v", err)
 		}
@@ -423,6 +477,87 @@ func (a *API) rateLimitPerMinute() int {
 	return n
 }
 
+// quotaBlocked reports whether the user has exhausted their calendar-month
+// token, money, or department budget quota (429 QUOTA_EXCEEDED at the caller).
+// Admins are always exempt; 0 quota means unlimited. Lookup failures degrade
+// open (fail-open), matching the rate-limiter's fail-open behaviour.
+func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
+	if blocked, msg := a.deptBudgetBlocked(user); blocked {
+		return true, msg
+	}
+	if blocked, msg := a.moneyQuotaBlocked(user); blocked {
+		return true, msg
+	}
+	quota, err := serverstore.EffectiveQuota(a.DB, user)
+	if err != nil {
+		log.Printf("gateway: quota lookup: %v", err)
+		return false, ""
+	}
+	if quota <= 0 {
+		return false, ""
+	}
+	used, err := serverstore.UserMonthlyUsage(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: usage lookup: %v", err)
+		return false, ""
+	}
+	if used >= quota {
+		return true, "本月流量配额已用尽"
+	}
+	return false, ""
+}
+
+// deptBudgetBlocked reports whether any department budget on the user's
+// inheritance chain (归属部门 + 祖先链) has been exhausted. A department
+// budget caps the whole subtree's monthly cost, so every member of the tree
+// is blocked once it is exceeded. Admins are exempt. Fail-open on errors.
+func (a *API) deptBudgetBlocked(user *serverstore.User) (bool, string) {
+	if user.IsAdmin {
+		return false, ""
+	}
+	budgets, err := serverstore.EffectiveDeptBudget(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: dept budget lookup: %v", err)
+		return false, ""
+	}
+	if len(budgets) == 0 {
+		return false, ""
+	}
+	for _, b := range budgets {
+		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
+		if err != nil {
+			log.Printf("gateway: dept cost lookup: %v", err)
+			return false, ""
+		}
+		if used >= b.Budget {
+			return true, "部门「" + b.Name + "」本月费用预算已用尽"
+		}
+	}
+	return false, ""
+}
+
+// moneyQuotaBlocked reports whether the user has exhausted their
+// calendar-month money quota (yuan, 0022). Fail-open on lookup errors.
+func (a *API) moneyQuotaBlocked(user *serverstore.User) (bool, string) {
+	quota, err := serverstore.EffectiveMoneyQuota(a.DB, user)
+	if err != nil {
+		log.Printf("gateway: money quota lookup: %v", err)
+		return false, ""
+	}
+	if quota <= 0 {
+		return false, ""
+	}
+	used, err := serverstore.UserMonthlyCost(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: money usage lookup: %v", err)
+		return false, ""
+	}
+	if used >= quota {
+		return true, "本月费用配额已用尽"
+	}
+	return false, ""
+}
+
 // rateLimiter is a per-user token bucket with bounded map and lazy cleanup.
 type rateLimiter struct {
 	mu      sync.Mutex
@@ -454,7 +589,19 @@ func (l *rateLimiter) allow(userID int64, rate int) bool {
 	b, ok := l.buckets[userID]
 	if !ok {
 		if len(l.buckets) >= l.max {
-			return false
+			// 满员驱逐最旧条目(与登录限流器一致,审计2026-L19):
+			// 大量活跃用户时新用户不被硬拒,过期桶优先让位
+			var victimID int64
+			var oldest time.Time
+			for id, b := range l.buckets {
+				if victimID == 0 || b.last.Before(oldest) {
+					victimID, oldest = id, b.last
+				}
+			}
+			if victimID == 0 {
+				return false
+			}
+			delete(l.buckets, victimID)
 		}
 		b = &bucket{tokens: float64(rate), last: now}
 		l.buckets[userID] = b

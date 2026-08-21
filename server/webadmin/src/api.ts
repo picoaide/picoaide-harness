@@ -8,10 +8,31 @@ export class ApiError extends Error {
   }
 }
 
+// 管理页挂载基路径(与服务端路由与 BrowserRouter basename 一致;
+// 审计2026-W7:不得在请求层硬编码 /admin/)
+export const ADMIN_BASE = '/admin'
+
 let csrfToken = ''
+
+// 全局 401 回调(审计 A5-M3):会话过期时由 App 原地切换登录态,取代
+// window.location.assign 整页刷新(会丢当前页未保存状态;并行 401 重复跳转)。
+let unauthorizedHandler: (() => void) | null = null
 
 export function setCsrf(token: string) {
   csrfToken = token
+}
+
+export function setOnUnauthorized(fn: (() => void) | null) {
+  unauthorizedHandler = fn
+}
+
+// 非 JSON 错误体的中文兜底(审计 A5-L6):反代 502/HTML 错误页时
+// statusText(英文)对管理用户无意义。
+function fallbackMessage(status: number): string {
+  if (status >= 500) return '服务暂时不可用,请稍后再试'
+  if (status === 403) return '没有权限执行该操作'
+  if (status === 404) return '请求的资源不存在'
+  return `请求失败(${status})`
 }
 
 export async function request<T = any>(path: string, init: RequestInit = {}): Promise<T> {
@@ -25,18 +46,18 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
   const res = await fetch(path, { ...init, headers })
   if (!res.ok) {
     let code = 'INTERNAL'
-    let message = res.statusText
+    let message = fallbackMessage(res.status)
     try {
       const body = await res.json()
       code = body?.error?.code ?? code
       message = body?.error?.message ?? message
     } catch {
-      /* keep defaults */
+      /* keep the Chinese fallback */
     }
-    if (res.status === 401 && window.location.pathname !== '/admin/') {
-      // 会话过期/失效:任何页面请求收到 401 都回到登录页(App 挂载时
-      // 的 me() 检查会渲染 Login),而不是停留在已失效的界面
-      window.location.assign('/admin/')
+    if (res.status === 401) {
+      // 审计 A5-L5: 任何页面(含 /admin/)收到 401 都走同一回调回登录态,
+      // 不再区分 pathname —— 行为一致,由 App 决定如何呈现
+      unauthorizedHandler?.()
     }
     throw new ApiError(res.status, code, message)
   }

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // seedEmbeddingModel reuses the fake upstream for model "bge-m3" so the
@@ -71,6 +73,42 @@ func TestEmbeddingsRouteUnknownModel(t *testing.T) {
 	w := doPost(t, r, "/v1/embeddings", `{"model":"nope","input":"x"}`, token, nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestEmbeddingsQuotaBlocked(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.nonStream = `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"bge-m3","usage":{"prompt_tokens":4,"total_tokens":4}}`
+	r, db, token := newGateway(t, f)
+	defer db.Close()
+	seedEmbeddingModel(t, db, f)
+
+	u, err := serverstore.GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := int64(10)
+	u.QuotaTokens = &q
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecordUsage(db, 1, "bge-m3", 10, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doPost(t, r, "/v1/embeddings", `{"model":"bge-m3","input":"报销政策"}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
+		t.Fatalf("code = %v", code)
+	}
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
 	}
 }
 

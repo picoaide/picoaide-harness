@@ -3,14 +3,17 @@ package llmgateway
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// DecryptSecret decrypts an upstream API key. Identity default; the AES-GCM
-// master-key wiring is installed by the orchestrator (task 1.12).
-var DecryptSecret = func(s string) (string, error) { return s, nil }
+// DecryptSecret decrypts an upstream API key. 默认报错(未接线即失败,
+// 审计2026-L14):AES-GCM master-key wiring 由 cmd/server/main.go 安装。
+var DecryptSecret = func(s string) (string, error) {
+	return "", errors.New("master key not wired")
+}
 
 // Upstream is an enabled OpenAI-compatible provider.
 type Upstream struct {

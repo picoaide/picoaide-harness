@@ -43,7 +43,9 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 		defer cancel()
 		if err := db.PingContext(ctx); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "db unavailable"})
+			// 健康探针保持 {ok:false} 语义(docker HEALTHCHECK 只认状态码),
+			// 但 error 字段与错误信封同构(审计2026-F1.2)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": gin.H{"code": "INTERNAL", "message": "db unavailable"}})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -71,7 +73,8 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	groups, err := serverstore.UserGroups(db, user.ID)
+	// 有效组(部门树继承:祖先链 + 主管子树)
+	groups, err := serverstore.UserEffectiveGroups(db, user.ID)
 	if err != nil {
 		return nil, err
 	}
