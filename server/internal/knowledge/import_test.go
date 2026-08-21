@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // buildZip creates an in-memory zip with the given files (name → content).
@@ -148,6 +150,34 @@ func TestImportStatus(t *testing.T) {
 	status = out["status"].(map[string]any)
 	if int64(status["ready"].(float64)) != 2 || int64(status["pending"].(float64)) != 0 {
 		t.Fatalf("after drain: %v", status)
+	}
+}
+
+// H1: import-status must enumerate the processing state and count it in the
+// total, so the front-end poll condition (pending==0) can never freeze while
+// a worker is mid-extraction.
+func TestImportStatusIncludesProcessing(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	zipData := buildZip(t, map[string]string{"a.txt": "甲文档内容", "b.md": "乙文档内容"})
+	postZip(t, r, hdr, "/api/admin/kb/import-zip", "two.zip", zipData)
+	// claim one row (pending → processing), simulating a busy worker
+	if _, err := serverstore.ClaimPendingKBDocument(db); err != nil {
+		t.Fatal(err)
+	}
+	w, out := kbReq(t, r, "GET", "/api/admin/kb/import-status", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("import-status: %d %s", w.Code, w.Body.String())
+	}
+	status := out["status"].(map[string]any)
+	if int64(status["processing"].(float64)) != 1 {
+		t.Fatalf("processing = %v, want 1", status["processing"])
+	}
+	if int64(status["pending"].(float64)) != 1 {
+		t.Fatalf("pending = %v, want 1", status["pending"])
+	}
+	if int64(status["total"].(float64)) != 2 {
+		t.Fatalf("total = %v, want 2 (must include processing)", status["total"])
 	}
 }
 

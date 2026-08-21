@@ -23,6 +23,34 @@ func sensitiveEnvKey(k string) bool {
 	return false
 }
 
+// MaskPlaceholder marks a masked credential value in admin responses. The
+// webadmin edit form sends it back unchanged for values the admin did not
+// retype; the server treats it as "keep the stored value".
+const MaskPlaceholder = "***"
+
+// mergeEnvValues merges incoming (possibly masked) env/headers into the
+// stored values (审计 A5-H2 更新契约):
+//
+//   - incoming 为 nil  → 返回空 map(调用方应跳过,整体不变);
+//   - 值为 MaskPlaceholder 或 enc:v1: 前缀 → 保持 stored 中该 key 的现有值
+//     (key 不存在则忽略,防止伪造密文注入);
+//   - 其它值 → 覆盖该 key(调用方随后按敏感度加密);
+//   - 请求 map 中未出现的 key → 从结果中移除(整 map 语义 = 期望的完整 key 集合,
+//     编辑表单回传完整 key 集即可实现删除)。
+func mergeEnvValues(stored, incoming map[string]string) map[string]string {
+	out := make(map[string]string, len(incoming))
+	for k, v := range incoming {
+		if v == MaskPlaceholder || strings.HasPrefix(v, util.EncPrefix) {
+			if cur, ok := stored[k]; ok {
+				out[k] = cur
+			}
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // EncryptEnv encrypts sensitive values with the master key; values already
 // carrying the "enc:v1:" prefix pass through unchanged.
 func EncryptEnv(key []byte, env map[string]string) map[string]string {

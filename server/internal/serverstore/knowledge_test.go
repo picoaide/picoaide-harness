@@ -58,6 +58,9 @@ func TestKBPermissions(t *testing.T) {
 	f1, _ := CreateKBFolder(db, "team-a", 0)
 	f2, _ := CreateKBFolder(db, "team-b", 0)
 	f3, _ := CreateKBFolder(db, "ops", 0)
+	if _, err := CreateDepartment(db, "devs", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := GrantFolderUser(db, f1, "alice"); err != nil {
 		t.Fatalf("GrantFolderUser: %v", err)
@@ -113,6 +116,9 @@ func TestKBRevoke(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "devs", 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	fid, err := CreateKBFolder(db, "team", 0)
@@ -485,5 +491,41 @@ func TestPurgeOldAuditLogs(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("audit logs left = %d, want 1 (only the recent one)", n)
+	}
+}
+
+// H2: pending rows are listable (queue detects orphans) and claimable by id
+// with a CAS guard so the queue can skip orphans without blocking the head.
+func TestListAndClaimPendingByID(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	id1, err := CreatePendingKBDocument(db, 0, "a", "text", 5, "upload", "admin")
+	if err != nil || id1 == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id1, err)
+	}
+	id2, err := CreatePendingKBDocument(db, 0, "b", "text", 5, "upload", "admin")
+	if err != nil || id2 == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id2, err)
+	}
+	docs, err := ListPendingKBDocuments(db)
+	if err != nil || len(docs) != 2 {
+		t.Fatalf("ListPendingKBDocuments: %d rows, %v", len(docs), err)
+	}
+	if docs[0].ID != id1 || docs[1].ID != id2 {
+		t.Fatalf("pending order = [%d %d], want [%d %d]", docs[0].ID, docs[1].ID, id1, id2)
+	}
+	d, err := ClaimPendingKBDocumentByID(db, id1)
+	if err != nil || d.ID != id1 {
+		t.Fatalf("ClaimPendingKBDocumentByID: %v %+v", err, d)
+	}
+	if _, err := ClaimPendingKBDocumentByID(db, id1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("double claim must fail, got %v", err)
+	}
+	docs, _ = ListPendingKBDocuments(db)
+	if len(docs) != 1 || docs[0].ID != id2 {
+		t.Fatalf("pending after claim = %v, want only id2", docs)
 	}
 }

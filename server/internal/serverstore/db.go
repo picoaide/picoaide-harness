@@ -9,16 +9,14 @@ import (
 
 // Open opens (or creates) the SQLite database at path with WAL journal mode.
 func Open(path string) (*sql.DB, error) {
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	// _pragma 参数在 modernc 驱动中对每个新建连接生效:foreign_keys 是 per-connection
+	// pragma,仅在池中单连接上 Exec 会导致并发打开的其他连接 FK 静默关闭(审计2026-M7)
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
 		return nil, err
 	}

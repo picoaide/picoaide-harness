@@ -50,3 +50,32 @@ func TestLoginLimiterNoEvictionBelowCapacity(t *testing.T) {
 		t.Fatal("over-budget attempt allowed")
 	}
 }
+
+// 过期条目由每分钟清扫清理:窗口结束后再次尝试,旧条目不得累积计入预算
+func TestLoginLimiterSweepsExpiredEntries(t *testing.T) {
+	l := &loginLimiter{
+		attempts:    map[string][]time.Time{},
+		maxEntries:  10,
+		maxAttempts: 3,
+		window:      time.Minute,
+	}
+	for i := 0; i < 3; i++ {
+		if !l.allow("K") {
+			t.Fatalf("attempt %d refused", i)
+		}
+	}
+	if l.allow("K") {
+		t.Fatal("over-budget attempt allowed")
+	}
+	// 窗口已过:下一次调用触发全局清扫,旧尝试作废
+	l.mu.Lock()
+	for k, ts := range l.attempts {
+		for i := range ts {
+			l.attempts[k][i] = ts[i].Add(-2 * time.Minute)
+		}
+	}
+	l.mu.Unlock()
+	if !l.allow("K") {
+		t.Fatal("fresh window attempt refused after expiry sweep")
+	}
+}

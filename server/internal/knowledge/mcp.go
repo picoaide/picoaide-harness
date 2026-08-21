@@ -91,11 +91,12 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	if u == nil {
 		return rpcErrorResponse(id, -32602, "no authenticated user")
 	}
-	groups, err := serverstore.UserGroups(db, u.ID)
+	// 有效组(部门树继承:祖先链 + 主管子树),权限解析统一入口
+	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
 	if err != nil {
 		return textResponse(id, "failed to load user groups: "+err.Error(), true)
 	}
-	accessible, err := accessibleFolders(db, u.Username, groups)
+	accessible, err := accessibleFolders(db, u.Username, groups, u.IsAdmin)
 	if err != nil {
 		return textResponse(id, "failed to load folder grants: "+err.Error(), true)
 	}
@@ -104,7 +105,7 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	}
 	switch p.Name {
 	case "kb_search":
-		return toolKBSearch(db, id, p.Arguments, u.Username, groups)
+		return toolKBSearch(db, id, p.Arguments, u.Username, groups, u.IsAdmin)
 	case "kb_read":
 		return toolKBRead(db, id, p.Arguments, accessible)
 	case "kb_list":
@@ -116,7 +117,7 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	}
 }
 
-func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username string, groups []string) rpcResponse {
+func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username string, groups []string, isAdmin bool) rpcResponse {
 	var a struct {
 		Query    string `json:"query"`
 		Page     int    `json:"page"`
@@ -128,16 +129,31 @@ func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username
 	if a.Query == "" {
 		return textResponse(id, "query is required", true)
 	}
-	res, total, err := SearchChunks(db, username, groups, a.Query, a.Page, a.PageSize)
+	var res []ChunkResult
+	var total int64
+	var err error
+	if isAdmin {
+		res, total, err = SearchChunksAll(db, a.Query, a.Page, a.PageSize)
+	} else {
+		res, total, err = SearchChunks(db, username, groups, a.Query, a.Page, a.PageSize)
+	}
 	if err != nil {
 		return textResponse(id, "search failed: "+err.Error(), true)
 	}
 	if total == 0 {
 		// migration window: docs without chunks (pre-0014, not yet
-		// backfilled) fall back to doc-level search
-		docRes, docTotal, derr := Search(db, username, groups, a.Query, a.Page, a.PageSize)
-		if derr == nil && docTotal > 0 {
-			return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+		// backfilled) fall back to doc-level search。
+		// admin 用 SearchAll(管理员本应全量可见,不走个人授权过滤;审计2026-M6)
+		if isAdmin {
+			docRes, docTotal, derr := SearchAll(db, a.Query, a.Page, a.PageSize)
+			if derr == nil && docTotal > 0 {
+				return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+			}
+		} else {
+			docRes, docTotal, derr := Search(db, username, groups, a.Query, a.Page, a.PageSize)
+			if derr == nil && docTotal > 0 {
+				return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+			}
 		}
 	}
 	return textResponse(id, fmt.Sprintf("total %d\n%s", total, formatChunkResults(res)), false)
@@ -160,7 +176,11 @@ func toolKBRead(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible
 	}
 	// chunk_ids: passage-level read, returns only the requested chunks —
 	// the LLM picks them from kb_search results instead of pulling the
-	// whole document into context.
+	// whole document into context。上限 100(审计2026-L3):无界数组会击穿
+	// SQLite 变量数上限(32766)且放大上下文。
+	if len(a.ChunkIDs) > 100 {
+		return textResponse(id, "chunk_ids 最多 100 个", true)
+	}
 	if len(a.ChunkIDs) > 0 {
 		chunks, err := serverstore.GetChunksByIDs(db, a.ChunkIDs)
 		if err != nil {
@@ -204,7 +224,12 @@ func toolKBList(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible
 		if !accessible[f.ID] {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("#%d %s (parent %d)", f.ID, f.Name, f.ParentID))
+		// 父目录 id 仅当也在可访问集合内才展示(审计2026-L6:不泄露无权文件夹的存在)
+		parent := ""
+		if f.ParentID != 0 && accessible[f.ParentID] {
+			parent = fmt.Sprintf(" (parent %d)", f.ParentID)
+		}
+		lines = append(lines, fmt.Sprintf("#%d %s%s", f.ID, f.Name, parent))
 		// include_docs: enumerate documents in accessible folders so the LLM
 		// can pick a document by title before searching (A3).
 		if a.IncludeDocs {
@@ -235,6 +260,10 @@ func toolKBUpload(db *sql.DB, id json.RawMessage, args json.RawMessage, accessib
 	if a.Title == "" || a.Content == "" {
 		return textResponse(id, "title and content are required", true)
 	}
+	// 标题上限(审计2026-L5):4MB 级 MCP 请求体里的巨型标题不得落库/进摘要
+	if len([]rune(a.Title)) > 200 {
+		return textResponse(id, "title too long (max 200 runes)", true)
+	}
 	// folder 0(根目录)不再隐式可写:与可读性一致,必须显式授权后才可
 	// 上传(严格授权制);无授权返回拒绝
 	if !accessible[a.FolderID] {
@@ -250,7 +279,18 @@ func toolKBUpload(db *sql.DB, id json.RawMessage, args json.RawMessage, accessib
 	return textResponse(id, fmt.Sprintf("uploaded document id=%d folder=%d", docID, a.FolderID), false)
 }
 
-func accessibleFolders(db *sql.DB, username string, groups []string) (map[int64]bool, error) {
+func accessibleFolders(db *sql.DB, username string, groups []string, isAdmin bool) (map[int64]bool, error) {
+	if isAdmin {
+		ids, err := serverstore.ListKBFolders(db)
+		if err != nil {
+			return nil, err
+		}
+		m := map[int64]bool{0: true}
+		for _, f := range ids {
+			m[f.ID] = true
+		}
+		return m, nil
+	}
 	ids, err := serverstore.GetAccessibleFolderIDs(db, username, groups)
 	if err != nil {
 		return nil, err
@@ -267,14 +307,20 @@ func accessibleFolders(db *sql.DB, username string, groups []string) (map[int64]
 func formatDocResults(res []SearchResult) string {
 	lines := make([]string, 0, len(res))
 	for _, r := range res {
-		content := r.Content
-		if len(content) > 400 {
-			content = content[:400] + "…"
-		}
+		content := runeTruncate(r.Content, 400)
 		lines = append(lines, fmt.Sprintf("#doc:%d [folder %d] %s score %.2f: %s",
 			r.ID, r.FolderID, r.Title, r.Score, content))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// runeTruncate 按 rune 截断(审计2026-L2:字节截断会切开多字节字符)
+func runeTruncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // formatChunkResults renders passage-level hits compactly (content truncated
@@ -283,10 +329,7 @@ func formatDocResults(res []SearchResult) string {
 func formatChunkResults(res []ChunkResult) string {
 	lines := make([]string, 0, len(res))
 	for _, r := range res {
-		content := r.Content
-		if len(content) > 400 {
-			content = content[:400] + "…"
-		}
+		content := runeTruncate(r.Content, 400)
 		path := r.TitlePath
 		if path == "" {
 			path = "-"

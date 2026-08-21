@@ -306,6 +306,16 @@ func TestOIDCRoutes(t *testing.T) {
 		t.Fatalf("login status = %d body=%s", w.Code, w.Body.String())
 	}
 	authURL := w.Header().Get("Location")
+	stateCookie := w.Result().Cookies()
+	var stateCookieVal string
+	for _, c := range stateCookie {
+		if c.Name == "picoaide_oidc_state" {
+			stateCookieVal = c.Value
+		}
+	}
+	if stateCookieVal == "" {
+		t.Fatal("login response lacks oidc state cookie (login-CSRF binding)")
+	}
 	q := urlParse(t, authURL).Query()
 	if q.Get("code_challenge") == "" {
 		t.Fatal("no pkce challenge in login redirect")
@@ -328,11 +338,21 @@ func TestOIDCRoutes(t *testing.T) {
 		t.Fatalf("missing params status = %d", w.Code)
 	}
 
+	// 无 state cookie 的回调(第三方发起的 login CSRF)→ 400
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET",
+		"/api/auth/oidc/callback?code=x&state="+url.QueryEscape(state), nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("callback without state cookie = %d, want 400", w.Code)
+	}
+
 	// full flow -> 302 picoaide://auth?token=...
 	code := authorize(t, idp, authURL)
 	w = httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET",
-		"/api/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil))
+	req := httptest.NewRequest("GET",
+		"/api/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state", Value: stateCookieVal})
+	r.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {
 		t.Fatalf("callback status = %d body=%s", w.Code, w.Body.String())
 	}

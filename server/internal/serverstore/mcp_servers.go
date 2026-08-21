@@ -42,12 +42,16 @@ func scanMCPServer(row interface{ Scan(...any) error }) (*MCPServer, error) {
 const mcpColumns = "id, name, description, transport, command, args, url, env, headers, enabled, created_at, updated_at"
 
 // AddMCPServer inserts a plugin row and returns its id.
+// 审计 A5-M9(0026): name 唯一约束冲突映射为 ErrDuplicate(与 AddSkill 一致)。
 func AddMCPServer(db *sql.DB, m *MCPServer) (int64, error) {
 	res, err := db.Exec(`INSERT INTO mcp_servers (name, description, transport, command, args, url, env, headers, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Name, m.Description, m.Transport, m.Command, marshalJSON(m.Args),
 		m.URL, marshalJSON(m.Env), marshalJSON(m.Headers), m.Enabled)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, ErrDuplicate
+		}
 		return 0, err
 	}
 	m.ID, _ = res.LastInsertId()

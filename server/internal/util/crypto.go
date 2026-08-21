@@ -41,7 +41,23 @@ func EnsureMasterKey(dataDir string) ([]byte, error) {
 	if err := os.Chmod(dataDir, 0700); err != nil { // enforce perms on existing dirs
 		return nil, err
 	}
-	if err := os.WriteFile(path, key, 0600); err != nil {
+	// O_EXCL 独占创建:并发首启(多进程)只能有一方写成功,失败方重读
+	// (审计2026-L3:read-then-write 竞态会让后写方持有无法恢复的密钥)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			if b, rerr := os.ReadFile(path); rerr == nil {
+				masterKeyFile = path
+				return parseKey(string(b))
+			}
+		}
+		return nil, err
+	}
+	if _, err := f.Write(key); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
 		return nil, err
 	}
 	masterKeyFile = path
