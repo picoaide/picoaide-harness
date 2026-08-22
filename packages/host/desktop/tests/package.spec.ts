@@ -294,6 +294,7 @@ describe('published package surface', () => {
     expect(manifest.scripts?.check).not.toContain('yarn run verify:cli')
     expect(manifest.scripts?.check).toContain('yarn run verify:loader')
     expect(manifest.scripts?.check).toContain('yarn run verify:profile')
+    expect(manifest.scripts?.check).toContain('yarn run verify:licenses')
     expect(workspaceManifest.scripts?.['dist:mac'])
       .toBe('yarn workspace dsh-plugin-desktop dist:mac')
     expect(workspaceManifest.scripts?.['dist:mac-smoke'])
