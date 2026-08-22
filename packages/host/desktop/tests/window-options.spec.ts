@@ -71,11 +71,22 @@ describe('advanced BrowserWindow options', () => {
     }))
   })
 
-  it('rejects unsupported platforms', () => {
-    expect(() => advancedWindowOptions(
-      spec,
-      {} as NativeImage,
-      'linux',
-    )).toThrow('supported on macOS and Windows')
+  it('falls back to an ordinary system window frame on Linux', () => {
+    const options = advancedWindowOptions(spec, {} as NativeImage, 'linux')
+
+    expect(options).toEqual(expect.objectContaining({
+      title: '',
+      width: 1280,
+      height: 840,
+      show: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+      },
+    }))
+    expect(options).not.toHaveProperty('titleBarStyle')
+    expect(options).not.toHaveProperty('backgroundMaterial')
   })
 })
