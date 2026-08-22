@@ -134,6 +134,11 @@ export default function Users() {
 
   async function create() {
     if (busy) return // 双击守卫(审计2026-W9)
+    setCreateErr('')
+    // 前端必填校验(UX 改进):不在服务端报错后才提示
+    if (!username.trim()) { setCreateErr('请填写用户名'); return }
+    if (!password) { setCreateErr('请填写密码'); return }
+    if (password.length < 10) { setCreateErr('密码至少 10 位'); return }
     setBusy(true)
     try {
       await request('/api/admin/users', {
@@ -174,6 +179,8 @@ export default function Users() {
   async function remove(u: User) {
     if (busy) return // 双击守卫(审计2026-W9)
     if (!window.confirm(`确定删除用户 ${u.username}?`)) return
+    // 删除前再提示后果:服务端级联清理其令牌/用量/组归属,不可恢复
+    if (!window.confirm(`再确认:删除 ${u.username} 将同时清除其全部 API 令牌、用量记录与组归属,此操作不可恢复。确定继续?`)) return
     setBusy(true)
     try {
       await request(`/api/admin/users/${u.id}`, { method: 'DELETE' })
@@ -401,11 +408,13 @@ export default function Users() {
           <div className="space-y-4">
             <div className="space-y-1">
               <Label htmlFor="create-username">用户名</Label>
-              <Input id="create-username" value={username} onChange={(e) => setUsername(e.target.value)} />
+              <Input id="create-username" value={username} onChange={(e) => setUsername(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && create()} autoFocus />
             </div>
             <div className="space-y-1">
               <Label htmlFor="create-password">密码</Label>
-              <Input id="create-password" type="password" placeholder="至少 10 位" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <Input id="create-password" type="password" placeholder="至少 10 位" value={password} onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && create()} />
             </div>
             <div className="flex items-center gap-2">
               <Switch checked={isAdmin} onCheckedChange={setIsAdmin} />

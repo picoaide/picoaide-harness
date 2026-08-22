@@ -104,6 +104,11 @@ export default function Gateway() {
 
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
+  // 对话框内联错误(UX 改进):操作失败信息必须显示在用户操作处,而非页面顶部
+  const [provErr, setProvErr] = useState('')
+  const [editProvErr, setEditProvErr] = useState('')
+  const [modelErr, setModelErr] = useState('')
+  const [priceErr, setPriceErr] = useState('')
   const [modelDialog, setModelDialog] = useState(false)
   const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
   // 上游编辑(审计修复 M3):复用创建字段 + enabled 开关
@@ -176,10 +181,11 @@ export default function Gateway() {
 
   async function createProvider() {
     if (busy) return // P1-6: 双击守卫
+    setProvErr('')
     // 前端校验(审计修复 L3/L4):名称/URL 必填、渠道型 key 必填
-    if (!provForm.name.trim()) { setError('请填写上游名称'); return }
-    if (!isHttpUrl(provForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
-    if (provForm.channel && !provForm.api_key) { setError('渠道型上游必须填写 API Key'); return }
+    if (!provForm.name.trim()) { setProvErr('请填写上游名称'); return }
+    if (!isHttpUrl(provForm.base_url)) { setProvErr('Base URL 必须是 http(s) URL'); return }
+    if (provForm.channel && !provForm.api_key) { setProvErr('渠道型上游必须填写 API Key'); return }
     setBusy('create-provider')
     try {
       const r = await request('/api/admin/providers', {
@@ -208,7 +214,7 @@ export default function Gateway() {
       setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '' })
       load()
     } catch (err: any) {
-      setError(err.message)
+      setProvErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -216,11 +222,12 @@ export default function Gateway() {
 
   async function saveProviderEdit() {
     if (busy || !editProv) return // P1-6: 双击守卫
-    if (!editProvForm.name.trim()) { setError('请填写上游名称'); return }
-    if (!isHttpUrl(editProvForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
+    setEditProvErr('')
+    if (!editProvForm.name.trim()) { setEditProvErr('请填写上游名称'); return }
+    if (!isHttpUrl(editProvForm.base_url)) { setEditProvErr('Base URL 必须是 http(s) URL'); return }
     // 编辑时 API Key 留空 = 不更换;仅当上游原本无 key 且选了渠道时才强制
     if (editProvForm.channel && editProvForm.api_key.trim() === '' && (!editProv.api_key || editProv.api_key === '')) {
-      setError('渠道型上游必须填写 API Key')
+      setEditProvErr('渠道型上游必须填写 API Key')
       return
     }
     setBusy('save-provider-edit')
@@ -242,7 +249,7 @@ export default function Gateway() {
       flash('已保存')
       load()
     } catch (err: any) {
-      setError(err.message)
+      setEditProvErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -250,9 +257,10 @@ export default function Gateway() {
 
   async function createModel() {
     if (busy) return // P1-6: 双击守卫
+    setModelErr('')
     // 未选上游直接提示(审计2026-W10),不把 provider_id=0 提交给服务端
     if (!modelForm.provider_id) {
-      setError('请选择所属上游')
+      setModelErr('请选择所属上游')
       return
     }
     setBusy('create-model')
@@ -276,7 +284,7 @@ export default function Gateway() {
       setError('')
       load()
     } catch (err: any) {
-      setError(err.message)
+      setModelErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -329,6 +337,7 @@ export default function Gateway() {
   }
   async function saveModelPricing() {
     if (busy || !editModel) return // P1-6: 双击守卫
+    setPriceErr('')
     setBusy('save-model-pricing')
     try {
       const body: Record<string, any> = { name: editModel.name }
@@ -341,7 +350,7 @@ export default function Gateway() {
       setError('')
       load()
     } catch (err: any) {
-      setError(err.message)
+      setPriceErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -623,10 +632,11 @@ export default function Gateway() {
         </CardContent>
       </Card>
 
-      <Dialog open={provDialog} onOpenChange={setProvDialog}>
+      <Dialog open={provDialog} onOpenChange={(v) => { setProvDialog(v); if (!v) setProvErr('') }}>
         <DialogContent>
           <DialogHeader><DialogTitle>添加上游</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {provErr && <div className="text-sm text-destructive">{provErr}</div>}
             <div className="space-y-1">
               <Label>渠道</Label>
               <Select
@@ -689,6 +699,7 @@ export default function Gateway() {
         <DialogContent>
           <DialogHeader><DialogTitle>编辑上游 · {editProv?.name}</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {editProvErr && <div className="text-sm text-destructive">{editProvErr}</div>}
             <div className="space-y-1">
               <Label>渠道</Label>
               <Select
@@ -746,10 +757,11 @@ export default function Gateway() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={modelDialog} onOpenChange={setModelDialog}>
+      <Dialog open={modelDialog} onOpenChange={(v) => { setModelDialog(v); if (!v) setModelErr('') }}>
         <DialogContent>
           <DialogHeader><DialogTitle>新增模型</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {modelErr && <div className="text-sm text-destructive">{modelErr}</div>}
             <div className="space-y-1">
               <Label>模型名(如 deepseek-chat)</Label>
               <Input value={modelForm.name} onChange={(e) => setModelForm({ ...modelForm, name: e.target.value })} />
@@ -831,6 +843,7 @@ export default function Gateway() {
         <DialogContent>
           <DialogHeader><DialogTitle>模型价格 · {editModel?.name}</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {priceErr && <div className="text-sm text-destructive">{priceErr}</div>}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label htmlFor="edit-price-in">输入价格(元/百万 token)</Label>
