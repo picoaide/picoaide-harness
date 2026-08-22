@@ -120,6 +120,17 @@ export class HostCronService implements PicoCronService {
     return this.ledger.state().jobs
   }
 
+  /**
+   * Jobs visible to the current account (owner filter applied), for the
+   * model-facing tools. Unlike {@link listJobs} (raw ledger state), this
+   * applies the same `jobVisibleTo` read filter as {@link snapshot}, so a
+   * `cron_list`/`cron_run` tool call cannot enumerate another account's
+   * scheduled jobs (multi-user session isolation).
+   */
+  listVisibleJobs(): JobRecord[] {
+    return this.ledger.state().jobs.filter(job => jobVisibleTo(job, this.username))
+  }
+
   getSnapshot(): CronSnapshot {
     return this.snapshot()
   }
