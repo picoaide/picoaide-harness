@@ -248,13 +248,20 @@
   "build": {
     "appId": "ai.deepseek.dsh.desktop",
     "productName": "PicoAide Harness",
-    "asar": true,
+    "asar": {
+      "smartUnpack": false
+    },
     "asarUnpack": [
-      "package.json",
-      "cordis.patch.yml",
-      "build/**",
-      "lib/**",
-      "node_modules/**"
+      "**/*.node",
+      "**/*.dll",
+      "**/*.exe",
+      "**/*.so*",
+      "**/*.dylib",
+      "**/bin/rg",
+      "**/bin/rg.exe",
+      "**/prebuilds/**/spawn-helper",
+      "**/prebuilds/**/OpenConsole.exe",
+      "**/prebuilds/**/*.conpty_console_list*"
     ],
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "extraResources": [
@@ -280,8 +287,7 @@
       "build/tray-icon*.png",
       "cordis.patch.yml",
       "lib/**",
-      "package.json",
-      "!node_modules/node-pty/build/**"
+      "package.json"
     ],
     "mac": {
       "target": [
