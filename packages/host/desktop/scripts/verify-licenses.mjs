@@ -28,6 +28,7 @@ const ALLOWED_LICENSES = new Set([
   '0BSD',
   'Unlicense',
   'MPL-2.0',
+  'BlueOak-1.0.0',
   'CC0-1.0',
   'Zlib',
   'Python-2.0',
@@ -95,14 +96,43 @@ for (let index = 0; index < queue.length; index += 1) {
     const hasLicenseFile = existsSync(join(dirname(current.manifestPath), 'LICENSE'))
       || existsSync(join(dirname(current.manifestPath), 'LICENSE.md'))
       || existsSync(join(dirname(current.manifestPath), 'LICENSE.txt'))
-    if (license === undefined && !hasLicenseFile) {
+    // Compound SPDX expressions (OR/AND) are acceptable when every subterm
+    // is on the allowlist (e.g. dompurify's "(MPL-2.0 OR Apache-2.0)").
+    const subterms = license === undefined
+      ? []
+      : license.replaceAll('(', '').replaceAll(')', '').split(/\s+(?:OR|AND)\s+/u)
+    const everySubtermAllowed = license !== undefined
+      && subterms.length > 0
+      && subterms.every(subterm => ALLOWED_LICENSES.has(subterm.trim()) || NOTICE_LICENSES.has(subterm.trim()))
+    // A lowercase `license` file is the same notice as LICENSE on case-sensitive
+    // filesystems (khroma ships `license`, MIT).
+    const hasLicenseText = hasLicenseFile
+      || existsSync(join(dirname(current.manifestPath), 'license'))
+      || existsSync(join(dirname(current.manifestPath), 'license.md'))
+      || existsSync(join(dirname(current.manifestPath), 'license.txt'))
+    if (license === undefined && !hasLicenseText) {
       failures.push(`${current.name}: no license field and no LICENSE file`)
+    } else if (everySubtermAllowed) {
+      // all subterms allowed
     } else if (license !== undefined && license.startsWith('SEE LICENSE IN ')) {
       if (!hasLicenseFile) {
         failures.push(`${current.name}: license refers to ${JSON.stringify(license)} but no LICENSE file is shipped`)
       }
     } else if (license !== undefined && !ALLOWED_LICENSES.has(license) && !NOTICE_LICENSES.has(license)) {
       failures.push(`${current.name}: license ${JSON.stringify(license)} is not on the redistribution allowlist`)
+    }
+    // A lowercase `license`/`license.md` MIT-equivalent file without a license
+    // field is accepted as redistribution-safe (khroma).
+    if (license === undefined && hasLicenseText) {
+      const noticePath = existsSync(join(dirname(current.manifestPath), 'license'))
+        ? join(dirname(current.manifestPath), 'license')
+        : existsSync(join(dirname(current.manifestPath), 'license.md'))
+          ? join(dirname(current.manifestPath), 'license.md')
+          : join(dirname(current.manifestPath), 'license.txt')
+      const notice = readFileSync(noticePath, 'utf8').slice(0, 500)
+      if (!/MIT|ISC|BSD|Apache|BlueOak|Unlicense|0BSD|CC0/i.test(notice)) {
+        failures.push(`${current.name}: license file ${JSON.stringify(noticePath)} is not a recognized permissive license`)
+      }
     }
     manifests.push({ name: current.name, version: manifest.version, license: license ?? 'SEE LICENSE FILE' })
   }
