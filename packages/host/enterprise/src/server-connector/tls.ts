@@ -92,9 +92,13 @@ export async function installCertificateVerification(storePath: string, opts: In
       opts.onMismatchFingerprint?.(hostKey, fingerprint)
       callback(-2)
     } else {
-      saveFingerprint(storePath, hostKey, fingerprint)
+      // P1-3 fix: an UNKNOWN fingerprint is no longer auto-trusted (TOFU by
+      // quiet acceptance let a MITM's certificate be pinned on first connect).
+      // Reject the verification and surface the fingerprint to the caller so
+      // a human can explicitly approve it (then save + reconnect). Until an
+      // approval flow exists, unknown servers simply fail closed.
       opts.onUnknownFingerprint?.(hostKey, fingerprint)
-      callback(0)
+      callback(-2)
     }
   })
 }
