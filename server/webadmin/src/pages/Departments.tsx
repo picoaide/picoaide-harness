@@ -36,6 +36,8 @@ export default function Departments() {
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
   const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '', budget_money: '' })
+  // 对话框内联错误(UX 改进):保存失败信息显示在对话框内,而非页面顶部
+  const [deptErr, setDeptErr] = useState('')
   // P1-8: 请求序号防乱序——保存/删除后重拉与手动刷新竞态时只认最新响应
   const loadSeq = useRef(0)
 
@@ -76,6 +78,7 @@ export default function Departments() {
   }
 
   function openDeptEdit(d?: Department) {
+    setDeptErr('')
     setDeptForm({
       id: d?.id ?? 0,
       name: d?.name ?? '',
@@ -89,6 +92,8 @@ export default function Departments() {
 
   async function saveDeptForm() {
     if (busy) return // L10:双击守卫
+    setDeptErr('')
+    if (!deptForm.name.trim()) { setDeptErr('请填写部门名称'); return }
     const payload: Record<string, any> = {
       name: deptForm.name,
       parent_id: Number(deptForm.parent_id),
@@ -108,7 +113,7 @@ export default function Departments() {
       setDeptDialog(false)
       load()
     } catch (err: any) {
-      setError(err.message)
+      setDeptErr(err.message)
     } finally {
       setBusy(false)
     }
@@ -214,13 +219,14 @@ export default function Departments() {
         </TableBody>
       </Table>
 
-      <Dialog open={deptDialog} onOpenChange={setDeptDialog}>
+      <Dialog open={deptDialog} onOpenChange={(v) => { setDeptDialog(v); if (!v) setDeptErr('') }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{deptForm.id > 0 ? '编辑部门' : '新建部门'}</DialogTitle>
             <DialogDescription>上级部门为空 = 顶层部门;主管可为空,后续补任</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {deptErr && <div className="text-sm text-destructive">{deptErr}</div>}
             <div className="space-y-1">
               <Label htmlFor="dept-name">部门名称</Label>
               <Input id="dept-name" placeholder="如 研发部" value={deptForm.name} onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })} />

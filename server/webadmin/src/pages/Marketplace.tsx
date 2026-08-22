@@ -42,6 +42,8 @@ export default function Marketplace() {
 
   const [skillsLoading, setSkillsLoading] = useState(true)
   const [skillsError, setSkillsError] = useState('')
+  // 操作失败(下架/上架等)独立错误态:不与「技能加载失败」混淆(UX 改进)
+  const [opError, setOpError] = useState('')
 
   // 技能:新增/编辑共用一个表单(审计 A5-M2)
   const [skillDialog, setSkillDialog] = useState(false)
@@ -128,12 +130,13 @@ export default function Marketplace() {
   async function disableSkill(name: string) {
     if (busy) return // P1-6: 双击守卫
     if (!window.confirm(`下架技能 ${name}?员工建议清单将不再展示(可重新上架)。`)) return
+    setOpError('')
     setBusy(`disable-skill-${name}`)
     try {
       await request(`/api/admin/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
       loadSkills()
     } catch (err: any) {
-      setSkillsError(err.message)
+      setOpError(`下架失败:${err.message}`)
     } finally {
       setBusy(null)
     }
@@ -141,12 +144,13 @@ export default function Marketplace() {
 
   async function enableSkill(name: string) {
     if (busy) return // P1-6: 双击守卫
+    setOpError('')
     setBusy(`enable-skill-${name}`)
     try {
       await request(`/api/admin/skills/${encodeURIComponent(name)}/enable`, { method: 'POST' })
       loadSkills()
     } catch (err: any) {
-      setSkillsError(err.message)
+      setOpError(`上架失败:${err.message}`)
     } finally {
       setBusy(null)
     }
@@ -244,6 +248,7 @@ export default function Marketplace() {
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-bold">商城管理</h1>
+      {opError && <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{opError}</div>}
 
       <Card>
         <CardHeader>
