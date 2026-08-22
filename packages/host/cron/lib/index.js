@@ -290,6 +290,16 @@ var HostCronService = class {
 	listJobs() {
 		return this.ledger.state().jobs;
 	}
+	/**
+	* Jobs visible to the current account (owner filter applied), for the
+	* model-facing tools. Unlike {@link listJobs} (raw ledger state), this
+	* applies the same `jobVisibleTo` read filter as {@link snapshot}, so a
+	* `cron_list`/`cron_run` tool call cannot enumerate another account's
+	* scheduled jobs (multi-user session isolation).
+	*/
+	listVisibleJobs() {
+		return this.ledger.state().jobs.filter((job) => jobVisibleTo(job, this.username));
+	}
 	getSnapshot() {
 		return this.snapshot();
 	}
@@ -388,7 +398,7 @@ function registerCronTools(ctx, service) {
 			}]
 		},
 		async execute(args) {
-			return service.listJobs().filter((job) => args.enabledOnly !== true || job.enabled).map((job) => ({
+			return service.listVisibleJobs().filter((job) => args.enabledOnly !== true || job.enabled).map((job) => ({
 				id: job.id,
 				name: job.name,
 				cron: job.cron,
@@ -450,7 +460,7 @@ function registerCronTools(ctx, service) {
 			}]
 		},
 		async execute(args) {
-			const before = service.listJobs().find((job) => job.id === args.jobId);
+			const before = service.listVisibleJobs().find((job) => job.id === args.jobId);
 			if (before === void 0) throw new Error(`定时任务不存在: ${args.jobId}`);
 			if (before.executions.some((execution) => execution.endedAt === void 0)) throw new Error(`定时任务 ${args.jobId} 已在运行`);
 			service.apply(`tool-${crypto.randomUUID()}`, {

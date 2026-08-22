@@ -42,6 +42,14 @@ export declare class HostCronService implements PicoCronService {
     registerJob(registration: CronJobRegistration): void;
     unregisterJob(id: string): void;
     listJobs(): JobRecord[];
+    /**
+     * Jobs visible to the current account (owner filter applied), for the
+     * model-facing tools. Unlike {@link listJobs} (raw ledger state), this
+     * applies the same `jobVisibleTo` read filter as {@link snapshot}, so a
+     * `cron_list`/`cron_run` tool call cannot enumerate another account's
+     * scheduled jobs (multi-user session isolation).
+     */
+    listVisibleJobs(): JobRecord[];
     getSnapshot(): CronSnapshot;
     private emit;
     dispose(): void;
