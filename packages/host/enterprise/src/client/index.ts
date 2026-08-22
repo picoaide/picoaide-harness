@@ -57,6 +57,19 @@ const BRAND_CSS = `
 
 /* Skill center trigger hover feedback, matching the Settings trigger. */
 .pico-skill-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* Skill center card grid: hover lift + focus ring (inline-styled card, CSS-only affordances). */
+.pico-skill-card {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.pico-skill-card:hover {
+  border-color: var(--dsw-alias-brand-primary) !important;
+  box-shadow: 0 2px 8px var(--dsw-shadow-lv1, rgba(0, 0, 0, 0.08));
+}
+.pico-skill-card:focus-within {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+}
 `
 
 /**
