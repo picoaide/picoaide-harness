@@ -17,7 +17,7 @@ import { CronJobTab } from './CronJobTab.tsx'
 import { CRON_ACTIVE_ATTR } from './CronTrigger.tsx'
 import { t } from './locales.ts'
 
-const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"]'
+const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"], [class*="ConversationSurface"], [class*="dshDesktopConversationSurface"]'
 /** Cross-plugin activation event; detail is the activating panel name. */
 const ACTIVATE_EVENT = 'dsh-panel-activate'
 const PANEL_NAME = 'cron'
