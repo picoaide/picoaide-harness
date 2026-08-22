@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -560,6 +560,52 @@ test('skills-manager: stale disables migrate to frontmatter on boot (issue #6)',
       // UI disabled 显示仍来自 state 列表
       const list = await sm.request('GET', '/skills-manager/api/skills')
       assert.equal(list.data.skills.find((s) => s.name === 'alpha').disabled, true)
+    } finally {
+      await sm.close()
+      sm.cleanup()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── 安全补丁（2026-08-22）：本地信任栅栏 ──────────────────────────────
+// skills-manager 读写技能根目录，必须只放行 loopback + 同源请求；跨站
+// 请求（Sec-Fetch-Site: cross-site / 外部 Origin）一律 403。
+test('skills-manager: rejects cross-site and foreign-origin requests (trust fence)', async () => {
+  const dir = tempDir()
+  try {
+    const stateFile = join(dir, 'skills-state.json')
+    const sm = await bootSkillsManager({ stateFile })
+    try {
+      // 1) 跨站信号（浏览器场景）
+      const crossSite = await fetch(sm.base + '/skills-manager/api/skills', {
+        headers: { 'sec-fetch-site': 'cross-site' },
+      })
+      assert.equal(crossSite.status, 403)
+
+      // 2) 外部 Origin（恶意网页 fetch）
+      const evil = await fetch(sm.base + '/skills-manager/api/skills', {
+        headers: { origin: 'http://evil.example.com' },
+      })
+      assert.equal(evil.status, 403)
+
+      // 3) 非 loopback Host 头（伪造直连；node fetch 禁止自定义 Host，
+      //    用原生 http.request 才能发任意 Host）
+      const badHost = await new Promise((resolve, reject) => {
+        const u = new URL(sm.base)
+        const req = httpRequest({
+          hostname: u.hostname, port: u.port, path: '/skills-manager/api/skills',
+          method: 'GET', headers: { host: 'evil.example.com' },
+        }, (res) => resolve(res.statusCode))
+        req.on('error', reject)
+        req.end()
+      })
+      assert.equal(badHost, 403)
+
+      // 4) 正常同源请求仍可读（回归）
+      const ok = await sm.request('GET', '/skills-manager/api/skills')
+      assert.equal(ok.status, 200)
     } finally {
       await sm.close()
       sm.cleanup()
