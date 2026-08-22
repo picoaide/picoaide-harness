@@ -111,9 +111,6 @@ func TestDepartmentRenameCascadesGrants(t *testing.T) {
 	if err := GrantSkill(db, "data-extract", "研发部", GranteeGroup); err != nil {
 		t.Fatal(err)
 	}
-	if err := GrantMCP(db, 1, "研发部", GranteeGroup); err != nil {
-		t.Fatal(err)
-	}
 	if err := UpdateDepartment(db, devID, "技术中心", 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -123,13 +120,6 @@ func TestDepartmentRenameCascadesGrants(t *testing.T) {
 	}
 	if len(names) != 1 || names[0] != "data-extract" {
 		t.Fatalf("skill grant lost after rename: %v", names)
-	}
-	set, err := AccessibleMCPSet(db, "alice", []string{"技术中心"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !set[1] {
-		t.Fatalf("mcp grant lost after rename")
 	}
 }
 
@@ -363,9 +353,6 @@ func TestRenameCascadeCaseInsensitive(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES ('code-review', 'group', '研发部')"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (1, 'group', '研发部')"); err != nil {
-		t.Fatal(err)
-	}
 	// 改名:级联(NOCASE)必须覆盖大小写变体授权
 	if err := UpdateDepartment(db, devID, "技术中心", 0, 0, ""); err != nil {
 		t.Fatal(err)
@@ -373,10 +360,6 @@ func TestRenameCascadeCaseInsensitive(t *testing.T) {
 	names, _ := AccessibleSkillNames(db, "alice", []string{"技术中心"})
 	if len(names) != 2 {
 		t.Fatalf("cascade lost case variant grants: %v", names)
-	}
-	set, _ := AccessibleMCPSet(db, "alice", []string{"技术中心"})
-	if !set[1] {
-		t.Fatalf("mcp case variant lost")
 	}
 }
 
@@ -508,33 +491,5 @@ func TestUpdateDepartmentWithBudgetAtomic(t *testing.T) {
 	}
 	if g, _ := GroupByID(db, devID); g.Name != "技术中心" {
 		t.Fatalf("name changed despite rejected budget: %q", g.Name)
-	}
-}
-
-// RevokeFolderGroup 大小写不敏感(与授权解析一致)
-func TestRevokeFolderGroupCaseInsensitive(t *testing.T) {
-	db := openTestDB(t)
-	defer db.Close()
-	if err := ApplyMigrations(db); err != nil {
-		t.Fatal(err)
-	}
-	gid, _ := CreateDepartment(db, "Sales", 0, 0, "")
-	fid, err := CreateKBFolder(db, "f", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := GrantFolderGroup(db, fid, "Sales"); err != nil {
-		t.Fatal(err)
-	}
-	_ = gid
-	if err := RevokeFolderGroup(db, fid, "sales"); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folder_groups WHERE folder_id = ?", fid).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Fatalf("folder group grants after case-variant revoke = %d, want 0", n)
 	}
 }

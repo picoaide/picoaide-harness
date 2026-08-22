@@ -12,7 +12,7 @@ test:
 	go test ./... -count=1
 
 test-server:
-	go test ./internal/serverauth/... ./internal/llmgateway/... ./internal/marketplace/... ./internal/knowledge/... ./internal/serverstore/... -count=1
+	go test ./internal/serverauth/... ./internal/llmgateway/... ./internal/marketplace/... ./internal/serverstore/... -count=1
 
 # webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
 build-server: webadmin

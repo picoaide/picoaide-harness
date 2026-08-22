@@ -8,7 +8,6 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/go-ldap/ldap/v3 v3.4.14
 	github.com/goccy/go-yaml v1.19.2
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/crypto v0.54.0
 	golang.org/x/oauth2 v0.36.0
 	modernc.org/sqlite v1.55.0

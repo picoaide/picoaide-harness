@@ -7,7 +7,6 @@ import { Badge } from '../components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
 import { deptTreeOptions } from '../lib/utils'
@@ -23,26 +22,6 @@ interface Skill {
   enabled: boolean
 }
 
-interface Mcp {
-  id: number
-  name: string
-  description: string
-  transport: string
-  command: string
-  args?: string[]
-  url: string
-  env: Record<string, string>
-  headers: Record<string, string>
-  enabled: boolean
-}
-
-interface Download {
-  id: number
-  username: string
-  mcp_name: string
-  created_at: string
-}
-
 interface Grant {
   grantee_type: string
   grantee: string
@@ -56,38 +35,21 @@ interface Dept {
 
 // ---- 表单状态 ----
 const EMPTY_SKILL_FORM = { name: '', git_url: '', version: '', description: '', author: '' }
-const EMPTY_MCP_FORM = { name: '', description: '', transport: 'stdio', command: '', args: '', url: '', env: '', headers: '' }
-
-const DOWNLOAD_PAGE_SIZE = 20
 
 export default function Marketplace() {
   const [skills, setSkills] = useState<Skill[]>([])
-  const [mcps, setMcps] = useState<Mcp[]>([])
-  const [downloads, setDownloads] = useState<Download[]>([])
-  const [downloadTotal, setDownloadTotal] = useState(0)
-  const [downloadPage, setDownloadPage] = useState(1)
   const [departments, setDepartments] = useState<Dept[]>([])
 
-  // 独立加载态与错误(审计 A5-M4):四块数据互不拖累,loading/error/empty 各自呈现
   const [skillsLoading, setSkillsLoading] = useState(true)
-  const [mcpsLoading, setMcpsLoading] = useState(true)
-  const [downloadsLoading, setDownloadsLoading] = useState(true)
   const [skillsError, setSkillsError] = useState('')
-  const [mcpsError, setMcpsError] = useState('')
-  const [downloadsError, setDownloadsError] = useState('')
 
   // 技能:新增/编辑共用一个表单(审计 A5-M2)
   const [skillDialog, setSkillDialog] = useState(false)
   const [skillEdit, setSkillEdit] = useState<Skill | null>(null)
   const [skillForm, setSkillForm] = useState(EMPTY_SKILL_FORM)
 
-  // MCP:新增/编辑共用一个表单
-  const [mcpDialog, setMcpDialog] = useState(false)
-  const [mcpEdit, setMcpEdit] = useState<Mcp | null>(null)
-  const [mcpForm, setMcpForm] = useState(EMPTY_MCP_FORM)
-
   // 授权
-  const [grantDialog, setGrantDialog] = useState<{ kind: 'skill' | 'mcp'; name: string; id: number } | null>(null)
+  const [grantDialog, setGrantDialog] = useState<{ kind: 'skill'; name: string; id: number } | null>(null)
   const [grants, setGrants] = useState<Grant[]>([])
   const [grantTarget, setGrantTarget] = useState('')
   const [grantGroups, setGrantGroups] = useState<string[]>([])
@@ -111,34 +73,6 @@ export default function Marketplace() {
     }
   }, [])
 
-  const loadMcps = useCallback(async () => {
-    setMcpsLoading(true)
-    setMcpsError('')
-    try {
-      const m = await request('/api/admin/mcp')
-      setMcps(m.mcp ?? [])
-    } catch (err: any) {
-      setMcpsError(err.message)
-    } finally {
-      setMcpsLoading(false)
-    }
-  }, [])
-
-  const loadDownloads = useCallback(async (page: number) => {
-    setDownloadsLoading(true)
-    setDownloadsError('')
-    try {
-      const d = await request(`/api/admin/mcp-downloads?page=${page}&size=${DOWNLOAD_PAGE_SIZE}`)
-      setDownloads(d.downloads ?? [])
-      setDownloadTotal(d.total ?? 0)
-      setDownloadPage(page)
-    } catch (err: any) {
-      setDownloadsError(err.message)
-    } finally {
-      setDownloadsLoading(false)
-    }
-  }, [])
-
   const loadDepartments = useCallback(async () => {
     try {
       const dep = await request('/api/admin/departments')
@@ -148,7 +82,7 @@ export default function Marketplace() {
     }
   }, [])
 
-  useEffect(() => { loadSkills(); loadMcps(); loadDownloads(1); loadDepartments() }, [loadSkills, loadMcps, loadDownloads, loadDepartments])
+  useEffect(() => { loadSkills(); loadDepartments() }, [loadSkills, loadDepartments])
 
   // ---- 技能 ----
   async function saveSkill() {
@@ -218,134 +152,16 @@ export default function Marketplace() {
     }
   }
 
-  // ---- MCP ----
-  // args/env/headers 输入都是文本,解析成 JSON 传输
-  function parseMcpForm(): { args: string[]; env: Record<string, string>; headers: Record<string, string> } | string {
-    let args: string[] = []
-    let env: Record<string, string> = {}
-    let headers: Record<string, string> = {}
-    try {
-      args = JSON.parse(mcpForm.args || '[]')
-      if (!Array.isArray(args)) throw new Error()
-    } catch {
-      args = mcpForm.args.split(',').map((s) => s.trim()).filter(Boolean)
-    }
-    try {
-      env = JSON.parse(mcpForm.env || '{}')
-      if (typeof env !== 'object' || env === null || Array.isArray(env)) throw new Error()
-    } catch {
-      return 'env 必须是合法 JSON 对象'
-    }
-    try {
-      headers = JSON.parse(mcpForm.headers || '{}')
-      if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) throw new Error()
-    } catch {
-      return 'headers 必须是合法 JSON 对象'
-    }
-    return { args, env, headers }
-  }
-
-  // 编辑回填:args 数组转文本;env/headers 敏感值已是 "***"(服务端掩码),
-  // 原样回传即表示保持(审计 A5-H2 契约),非敏感值明文便于直接修改
-  function mcpFormFrom(m: Mcp) {
-    return {
-      name: m.name,
-      description: m.description,
-      transport: m.transport,
-      command: m.command,
-      args: Array.isArray(m.args) ? JSON.stringify(m.args) : '',
-      url: m.url,
-      env: JSON.stringify(m.env ?? {}, null, 2),
-      headers: JSON.stringify(m.headers ?? {}, null, 2),
-    }
-  }
-
-  async function saveMcp() {
-    if (busy) return // P1-6: 双击守卫
-    setDialogError('')
-    if (!mcpForm.name.trim()) { setDialogError('名称必填'); return }
-    if (mcpForm.transport === 'http' && !mcpForm.url.trim()) { setDialogError('HTTP 传输方式必须填写 URL'); return }
-    const parsed = parseMcpForm()
-    if (typeof parsed === 'string') { setDialogError(parsed); return }
-    setBusy('save-mcp')
-    try {
-      const body = JSON.stringify({
-        name: mcpForm.name,
-        description: mcpForm.description,
-        transport: mcpForm.transport,
-        command: mcpForm.command,
-        args: parsed.args,
-        url: mcpForm.url,
-        env: parsed.env,
-        headers: parsed.headers,
-      })
-      if (mcpEdit) {
-        await request(`/api/admin/mcp/${mcpEdit.id}`, { method: 'PUT', body })
-      } else {
-        await request('/api/admin/mcp', { method: 'POST', body })
-      }
-      setMcpDialog(false)
-      setMcpEdit(null)
-      setMcpForm(EMPTY_MCP_FORM)
-      loadMcps()
-    } catch (err: any) {
-      setDialogError(err.message)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  function openCreateMcp() {
-    setDialogError('')
-    setMcpEdit(null)
-    setMcpForm(EMPTY_MCP_FORM)
-    setMcpDialog(true)
-  }
-
-  function openEditMcp(m: Mcp) {
-    setDialogError('')
-    setMcpEdit(m)
-    setMcpForm(mcpFormFrom(m))
-    setMcpDialog(true)
-  }
-
-  async function disableMcp(id: number) {
-    if (busy) return // P1-6: 双击守卫
-    if (!window.confirm(`下架 MCP 插件 #${id}?已安装客户端不再获得新凭证(可重新上架)。`)) return
-    setBusy(`disable-mcp-${id}`)
-    try {
-      await request(`/api/admin/mcp/${id}`, { method: 'DELETE' })
-      loadMcps()
-    } catch (err: any) {
-      setMcpsError(err.message)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function enableMcp(id: number) {
-    if (busy) return // P1-6: 双击守卫
-    setBusy(`enable-mcp-${id}`)
-    try {
-      await request(`/api/admin/mcp/${id}/enable`, { method: 'POST' })
-      loadMcps()
-    } catch (err: any) {
-      setMcpsError(err.message)
-    } finally {
-      setBusy(null)
-    }
-  }
-
   // ---- 授权 ----
-  function grantPath(d: { kind: 'skill' | 'mcp'; name: string; id: number }): string {
-    return d.kind === 'skill' ? `/api/admin/skills/${encodeURIComponent(d.name)}/grant` : `/api/admin/mcp/${d.id}/grant`
+  function grantPath(d: { kind: 'skill'; name: string; id: number }): string {
+    return `/api/admin/skills/${encodeURIComponent(d.name)}/grant`
   }
 
-  function grantsPath(d: { kind: 'skill' | 'mcp'; name: string; id: number }): string {
-    return d.kind === 'skill' ? `/api/admin/skills/${encodeURIComponent(d.name)}/grants` : `/api/admin/mcp/${d.id}/grants`
+  function grantsPath(d: { kind: 'skill'; name: string; id: number }): string {
+    return `/api/admin/skills/${encodeURIComponent(d.name)}/grants`
   }
 
-  async function openGrants(d: { kind: 'skill' | 'mcp'; name: string; id: number }) {
+  async function openGrants(d: { kind: 'skill'; name: string; id: number }) {
     setDialogError('')
     try {
       const data = await request(grantsPath(d))
@@ -372,7 +188,6 @@ export default function Marketplace() {
       })
       setGrantDialog(null)
       loadSkills()
-      loadMcps()
     } catch (err: any) {
       setDialogError(err.message)
     } finally {
@@ -421,19 +236,10 @@ export default function Marketplace() {
     }
   }
 
-  // ---- 展示辅助 ----
-  // 审计 A5-L8:时间本地化展示,不再原样输出 UTC RFC3339
-  function fmtTime(iso: string): string {
-    const d = new Date(iso)
-    return isNaN(d.getTime()) ? iso : d.toLocaleString()
-  }
-
   const deptOptions = useMemo(() => {
     const nameById = new Map(departments.map((d) => [d.id, d.name]))
     return deptTreeOptions(departments).map((o) => ({ ...o, name: nameById.get(o.id) ?? '' }))
   }, [departments])
-
-  const downloadPages = Math.max(1, Math.ceil(downloadTotal / DOWNLOAD_PAGE_SIZE))
 
   return (
     <div className="space-y-6">
@@ -497,122 +303,6 @@ export default function Marketplace() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>MCP 插件</CardTitle>
-          <CardDescription>管理员上架/授权,员工按授权使用;凭证加密存储,拉取限流+审计</CardDescription>
-          <div className="flex justify-end">
-            <Button size="sm" onClick={openCreateMcp}>上架插件</Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {mcpsError ? (
-            <div className="flex items-center justify-between rounded-md border border-destructive/40 p-3 text-sm text-destructive">
-              <span>插件加载失败:{mcpsError}</span>
-              <Button size="sm" variant="outline" onClick={loadMcps}>重试</Button>
-            </div>
-          ) : mcpsLoading ? (
-            <div className="space-y-2">
-              {[0, 1, 2].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>ID</TableHead>
-                  <TableHead>名称</TableHead>
-                  <TableHead>描述</TableHead>
-                  <TableHead>传输</TableHead>
-                  <TableHead>命令/URL</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {mcps.map((m) => (
-                  <TableRow key={m.id}>
-                    <TableCell>{m.id}</TableCell>
-                    <TableCell>{m.name}</TableCell>
-                    <TableCell>{m.description}</TableCell>
-                    <TableCell>{m.transport}</TableCell>
-                    <TableCell className="max-w-56 truncate font-mono text-xs">{m.transport === 'stdio' ? `${m.command} ${m.args?.join(' ')}` : m.url}</TableCell>
-                    <TableCell>{m.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="secondary">已下架</Badge>}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" onClick={() => openEditMcp(m)}>编辑</Button>
-                        <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'mcp', name: m.name, id: m.id })}>授权</Button>
-                        {m.enabled
-                          ? <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => disableMcp(m.id)}>{busy === `disable-mcp-${m.id}` ? '下架中…' : '下架'}</Button>
-                          : <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => enableMcp(m.id)}>{busy === `enable-mcp-${m.id}` ? '上架中…' : '重新上架'}</Button>}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {mcps.length === 0 && (
-                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无插件,点击「上架插件」添加</TableCell></TableRow>
-                )}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>凭证下载审计</CardTitle>
-          <CardDescription>插件凭证拉取记录(per-user 限流 + 审计,防批量导出)</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {downloadsError ? (
-            <div className="flex items-center justify-between rounded-md border border-destructive/40 p-3 text-sm text-destructive">
-              <span>下载记录加载失败:{downloadsError}</span>
-              <Button size="sm" variant="outline" onClick={() => loadDownloads(downloadPage)}>重试</Button>
-            </div>
-          ) : downloadsLoading ? (
-            <div className="space-y-2">
-              {[0, 1, 2].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
-            </div>
-          ) : (
-            <>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>ID</TableHead>
-                    <TableHead>用户</TableHead>
-                    <TableHead>插件</TableHead>
-                    <TableHead>时间</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {downloads.map((d) => (
-                    <TableRow key={d.id}>
-                      <TableCell>{d.id}</TableCell>
-                      <TableCell>{d.username}</TableCell>
-                      <TableCell>{d.mcp_name}</TableCell>
-                      <TableCell>{fmtTime(d.created_at)}</TableCell>
-                    </TableRow>
-                  ))}
-                  {downloads.length === 0 && (
-                    <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground">暂无记录</TableCell></TableRow>
-                  )}
-                </TableBody>
-              </Table>
-              {/* 审计 A5-M5:分页(总数 + 上一页/下一页),不再固定只看最近 20 条 */}
-              {downloadTotal > DOWNLOAD_PAGE_SIZE && (
-                <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
-                  <span>共 {downloadTotal} 条</span>
-                  <div className="flex items-center gap-2">
-                    <Button size="sm" variant="outline" disabled={downloadPage <= 1} onClick={() => loadDownloads(downloadPage - 1)}>上一页</Button>
-                    <span>{downloadPage} / {downloadPages}</span>
-                    <Button size="sm" variant="outline" disabled={downloadPage >= downloadPages} onClick={() => loadDownloads(downloadPage + 1)}>下一页</Button>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </CardContent>
-      </Card>
-
       <Dialog open={skillDialog} onOpenChange={(v) => { setSkillDialog(v); if (!v) { setSkillEdit(null); setSkillForm(EMPTY_SKILL_FORM) } }}>
         <DialogContent>
           <DialogHeader><DialogTitle>{skillEdit ? `编辑技能 ${skillEdit.name}` : '上架技能'}</DialogTitle></DialogHeader>
@@ -643,61 +333,6 @@ export default function Marketplace() {
             </div>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
             <Button className="w-full" disabled={busy !== null} onClick={saveSkill}>{busy === 'save-skill' ? '处理中…' : (skillEdit ? '保存修改' : '上架')}</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={mcpDialog} onOpenChange={(v) => { setMcpDialog(v); if (!v) { setMcpEdit(null); setMcpForm(EMPTY_MCP_FORM) } }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{mcpEdit ? `编辑插件 ${mcpEdit.name}` : '上架 MCP 插件'}</DialogTitle></DialogHeader>
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label htmlFor="mcp-name">名称</Label>
-                <Input id="mcp-name" value={mcpForm.name} onChange={(e) => setMcpForm({ ...mcpForm, name: e.target.value })} />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="mcp-transport">传输方式</Label>
-                <Select value={mcpForm.transport} onValueChange={(v) => setMcpForm({ ...mcpForm, transport: v })}>
-                  <SelectTrigger id="mcp-transport"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="stdio">stdio</SelectItem>
-                    <SelectItem value="http">http</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="mcp-desc">描述</Label>
-              <Input id="mcp-desc" value={mcpForm.description} onChange={(e) => setMcpForm({ ...mcpForm, description: e.target.value })} />
-            </div>
-            {mcpForm.transport === 'stdio' ? (
-              <>
-                <div className="space-y-1">
-                  <Label htmlFor="mcp-command">命令</Label>
-                  <Input id="mcp-command" placeholder="npx" value={mcpForm.command} onChange={(e) => setMcpForm({ ...mcpForm, command: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="mcp-args">参数(JSON 数组或逗号分隔)</Label>
-                  <Input id="mcp-args" placeholder='["-y","mcp-server-x"]' value={mcpForm.args} onChange={(e) => setMcpForm({ ...mcpForm, args: e.target.value })} />
-                </div>
-              </>
-            ) : (
-              <div className="space-y-1">
-                <Label htmlFor="mcp-url">URL</Label>
-                <Input id="mcp-url" placeholder="http://127.0.0.1:3000/mcp" value={mcpForm.url} onChange={(e) => setMcpForm({ ...mcpForm, url: e.target.value })} />
-              </div>
-            )}
-            <div className="space-y-1">
-              <Label htmlFor="mcp-env">环境变量(JSON,敏感值自动加密;编辑时 *** 表示保持原值)</Label>
-              <Input id="mcp-env" placeholder='{"APP_ID":"x","APP_SECRET":"y"}' value={mcpForm.env} onChange={(e) => setMcpForm({ ...mcpForm, env: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="mcp-headers">请求头(JSON,编辑时 *** 表示保持原值)</Label>
-              <Input id="mcp-headers" placeholder='{"Authorization":"Bearer x"}' value={mcpForm.headers} onChange={(e) => setMcpForm({ ...mcpForm, headers: e.target.value })} />
-            </div>
-            {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
-            <Button className="w-full" disabled={busy !== null} onClick={saveMcp}>{busy === 'save-mcp' ? '处理中…' : (mcpEdit ? '保存修改' : '上架')}</Button>
           </div>
         </DialogContent>
       </Dialog>

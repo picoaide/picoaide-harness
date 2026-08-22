@@ -5,14 +5,14 @@
 ```
 cmd/server/            # 服务端入口(--bootstrap-admin/-addr/-data + webadmin 静态内嵌)
 internal/              # serverauth(认证/管理端)/ llmgateway(网关)/ marketplace(商城)/
-                       # knowledge(知识库)/ serverstore(DAO+迁移)/ util(crypto 等)/ bootstrap/webadmin(embed)
+                       # serverstore(DAO+迁移)/ util(crypto 等)/ bootstrap/webadmin(embed)
 desktop/
   src/main/            # index.ts(工具注册表)/ ipc.ts / cdp_server.ts / plugin_ipc.ts / ws.d.ts
                        # agent/(engine/modes/continue/events/artifacts/provider)
                        # tools/(filesystem/terminal/sandbox/screen/ocr/clipboard/web/browser/paths)
-                       # mcp/(adapter/installer/integration/runner)  skill/(loader/installer/integration)
+                       # skill/(loader/installer/integration)
                        # store/(db/migrations/conversations/messages/artifacts/settings)
-                       # gateway/(auth/bootstrap/config/health/marketplace/remote_mcp/tls)
+                       # gateway/(auth/bootstrap/config/health/marketplace/tls)
   src/preload/         # contextBridge 白名单 API
   src/renderer/        # api/ components/(ui=shadcn + 业务) pages/(Login/Main/Settings) stores/ lib/
   tests/               # E2E/冒烟预留
@@ -62,7 +62,7 @@ bash scripts/mock-upstream.go    # 假上游(无外网验证网关)
 
 - 客户端单测内嵌源文件旁(`*.test.ts`,vitest);`tests/` 为 E2E 预留。
 - 引擎测试覆盖:审批门控(超时/队列/cancel/allow_dir)、三模式、恢复截断、`PICOAI_TEST_AUTO_APPROVE` 钩子、事件流。
-- 服务端测试覆盖:认证(token 生命周期/限流/admin CSRF)、网关代理(流式/错误映射/限流)、商城(凭证加密/拉取限流/审计)、知识库(权限/搜索)、迁移。
+- 服务端测试覆盖:认证(token 生命周期/限流/admin CSRF)、网关代理(流式/错误映射/限流)、商城(授权/审计)、迁移。
 
 ## 6. CI
 
@@ -72,7 +72,7 @@ bash scripts/mock-upstream.go    # 假上游(无外网验证网关)
 
 - 事件协议:`agent:event` 全 snake_case(text_delta/reasoning_delta/tool_start/tool_end/tool_error/confirm_required/artifact/done/canceled/error)——见 01-architecture.md §4。
 - REST 错误信封:`{"error":{"code","message"}}`;code 见 03-api-reference.md §1。
-- bootstrap:`{default_model, models, skills, mcp, web}` 服务端 ↔ 客户端 `BootstrapConfig` 严格对齐。
+- bootstrap:`{default_model, models, skills, web}` 服务端 ↔ 客户端 `BootstrapConfig` 严格对齐。
 - CDP 桥:固定 `127.0.0.1:54321`,JSON-RPC(`browser.tabInfo/getContent/click/type/navigate/scroll/executeScript`)。
 - 审批签名:`confirm(requestId, ok)`;`needsApprovalFor(command, allowedDirs)`;`isAllowed(absPath, allowedDirs)`。
 - DB:客户端 4 表 + schema_migrations;服务端 17 表(迁移 0001-0009,0007 废弃)——见 06-database.md。
@@ -82,5 +82,5 @@ bash scripts/mock-upstream.go    # 假上游(无外网验证网关)
 | 键 | 说明 |
 |----|------|
 | `allowed_dirs` | 可访问目录列表(安全边界,JSON 数组) |
-| 建议安装 | 已装 skill/mcp 记录(installer 模块) |
+| 建议安装 | 已装 skill 记录(installer 模块) |
 | 其余 | 内部缓存,不向员工开放配置入口 |

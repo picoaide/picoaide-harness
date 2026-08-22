@@ -8,7 +8,7 @@
 - **本地工具**:文件读写(编码自动检测/.docx)/ 终端命令 / 受限沙盒 / 屏幕截图+OCR / 剪贴板 / 网页抓取与搜索
 - **浏览器操作**:Chrome/Edge 插件直连本地 `127.0.0.1:54321`,零配置
 - **高危操作人确认**:删除/截屏/剪贴板读/命令/浏览器操作等引擎层审批门控(60s 超时拒绝)
-- **企业能力**:LDAP/OIDC 登录、AI 网关代理与用量计量、Skill/MCP 插件商城(建议安装制)、知识库(FTS5 搜索 + 远程 MCP)
+- **企业能力**:LDAP/OIDC 登录、AI 网关代理与用量计量、技能商城(建议安装制)
 - **密钥不出服务端**:LLM 上游密钥 AES-GCM 加密只存服务端,客户端只持登录 token
 - **消息即状态**:任务中断可随时从最后一条消息恢复,会话/历史本地 SQLite
 
@@ -43,7 +43,7 @@ PICOAI_ADMIN_PASSWORD=admin123 bin/picoaide-server -addr :8080 -data ./data --bo
 ```
 
 - `--bootstrap-admin` + `PICOAI_ADMIN_PASSWORD` 首次创建超管;`PICOAI_MASTER_KEY` 可显式指定加密主密钥(不设则自动生成于 data 目录,请备份)。
-- 管理页:`http://localhost:8080/admin/`(用户/网关/用量/商城/知识库)。
+- 管理页:`http://localhost:8080/admin/`(用户/网关/用量/商城)。
 - 无外网环境可 `bash scripts/mock-upstream.go` 起假上游联调网关。
 
 ### 2. 客户端(Electron)
@@ -76,7 +76,7 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/models
 | [docs/04-auth.md](docs/04-auth.md) | 认证体系(local/LDAP/OIDC/token/管理端 CSRF) |
 | [docs/05-agent-system.md](docs/05-agent-system.md) | Agent 引擎/工具注册表/审批门控/沙盒 |
 | [docs/06-database.md](docs/06-database.md) | 服务端 17 表 + 客户端 4 表 |
-| [docs/07-marketplace.md](docs/07-marketplace.md) | Skill/MCP 商城/凭证加密/插件运行时 |
+| [docs/07-marketplace.md](docs/07-marketplace.md) | 技能商城/授权/插件运行时 |
 | [docs/08-development.md](docs/08-development.md) | 开发指南/TDD/契约 |
 
 ## 截图
