@@ -49,3 +49,5 @@ server/webadmin/tsconfig.tsbuildinfo
 # Client E2E runtime artifacts
 packages/host/desktop/.e2e-report.md
 packages/host/desktop/.e2e-shots/
+packages/host/desktop/.real-env-report.md
+packages/host/desktop/.real-env-shots/
