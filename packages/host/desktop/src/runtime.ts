@@ -5,8 +5,12 @@ import type { UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 /** Electron platforms supported by the DSH Desktop native adapter. */
 export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
 
-/** Native presentation modes selected by the desktop-shell Cordis row. */
-export type DesktopShellMode = 'compatibility' | 'advanced'
+/**
+ * Native presentation mode. The desktop shell is fixed to the advanced
+ * platform-native presentation; the union is retained for compatibility
+ * with persisted schema values.
+ */
+export type DesktopShellMode = 'advanced'
 
 /** Electron appearance source used by native frame and material rendering. */
 export type DesktopThemeSource = 'system' | 'light' | 'dark'
@@ -16,8 +20,6 @@ export type DesktopLocale = 'zh' | 'en'
 
 /** Window values resolved from the desktop-shell Cordis row. */
 export interface DesktopWindowConfig {
-  /** Native presentation mode selected before BrowserWindow construction. */
-  mode: DesktopShellMode
   /** Initial window width in CSS pixels. */
   width: number
   /** Initial window height in CSS pixels. */
@@ -107,16 +109,6 @@ export interface DesktopUpdateAdapter {
   notify(notification: DesktopNotification): void
 }
 
-/** Profile identity needed to open the packaged DSH command environment. */
-export interface DesktopTerminalSpec {
-  /** DSH profile selected by the desktop launcher. */
-  profileName: string
-  /** Absolute directory containing the profile manifest and dependencies. */
-  profileDir: string
-  /** Active DSH home shared with the desktop launcher. */
-  homeDir: string
-}
-
 /** Values the desktop-shell plugin hands to the Electron adapter. */
 export interface DesktopShellSpec extends DesktopWindowConfig {
   /** Unmodified Web root served by the active DSH profile. */
@@ -135,8 +127,6 @@ export interface DesktopShellSpec extends DesktopWindowConfig {
   readThemeSource(): DesktopThemeSource
   /** Request Cordis teardown followed by native application exit. */
   requestQuit(code: number): void
-  /** Persist another mode through the registered desktop settings scope. */
-  requestModeChange(mode: DesktopShellMode): Promise<void>
 }
 
 /** Electron bootstrap capability supplied before the profile tree mounts. */
@@ -174,9 +164,6 @@ export interface DesktopRuntime {
    * @returns a refreshable, idempotent registration handle.
    */
   registerTrayItem(item: DesktopTrayItem): DesktopTrayItemRegistration
-
-  /** Open a native terminal containing packaged DSH command shims. */
-  openTerminal(): void
 
   /** Export a diagnostics zip and reveal it in the system file manager. */
   exportDiagnostics(): Promise<void>

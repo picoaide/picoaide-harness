@@ -191,11 +191,9 @@ describe('packaged desktop runtime verification', () => {
 
   it.each([
     'lib/client.js',
-    'lib/desktop-runtime-environment.js',
-    'lib/profile-service.js',
+    'lib/profile.js',
     'lib/diagnostics.js',
     'lib/diagnostic-export-worker.js',
-    'lib/pnpm.js',
     'lib/update-download.js',
     'lib/windows-agent-presets.js',
   ])('fails loud when required runtime entry %s is absent', (missing) => {
@@ -209,13 +207,11 @@ describe('packaged desktop runtime verification', () => {
     'package.json',
     'build/app-icon-mac.png',
     'build/tray-iconTemplate.png',
-    'lib/terminal.js',
     'lib/diagnostics.js',
     'lib/diagnostic-export-worker.js',
     'lib/update-download.js',
     'lib/windows-agent-presets.js',
     'node_modules/@deepseek-ai/dsh/lib/bin.js',
-    'node_modules/pnpm/bin/pnpm.mjs',
     'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
   ])('fails loud when physical runtime entry %s is absent from app.asar.unpacked', (missing) => {
     const runtimeContext = context('/build', 'win32')
@@ -253,7 +249,7 @@ describe('packaged desktop runtime verification', () => {
     const runtimeContext = context('/build', 'win32')
     const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
     const resolvePackage = vi.fn<PackageResolver>((specifier) => {
-      if (specifier === 'dsh-plugin-desktop/profiles') {
+      if (specifier === 'dsh-plugin-desktop/diagnostics') {
         throw new Error('missing export')
       }
       return completePackageResolver(unpackedRoot)(specifier)
@@ -265,7 +261,7 @@ describe('packaged desktop runtime verification', () => {
       () => true,
       resolvePackage,
     )).toThrow(
-      `packaged runtime at ${unpackedRoot} cannot resolve required package export dsh-plugin-desktop/profiles`,
+      `packaged runtime at ${unpackedRoot} cannot resolve required package export dsh-plugin-desktop/diagnostics`,
     )
   })
 

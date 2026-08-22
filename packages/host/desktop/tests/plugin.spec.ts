@@ -21,7 +21,6 @@ import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
 import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
 
 const config: DesktopConfig = {
-  mode: 'compatibility',
   productName: 'PicoAide Harness',
   windowTitle: 'PicoAide Harness',
   port: 0,
@@ -83,7 +82,6 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     mountScheduled: async () => {},
     show: () => {},
     registerTrayItem: () => ({ refresh: () => {}, dispose: () => {} }),
-    openTerminal: () => {},
     exportDiagnostics: async () => {},
     pickDirectory,
     reportRendererBoot: rendererBoot,
@@ -99,7 +97,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       return undefined
     }),
     register: vi.fn(() => ({
-      get: () => ({ mode: config.mode }),
+      get: () => ({ port: config.port, logLevel: 'info' }),
       watch: (callback: typeof watcher) => {
         watcher = callback
         return () => { watcher = undefined }
@@ -151,9 +149,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
 }
 
 describe('desktop Host plugin', () => {
-  it('defaults to compatibility mode and validates both schemas', () => {
+  it('validates schemas without a presentation mode knob', () => {
     expect(Config({} as DesktopConfig)).toEqual({
-      mode: 'compatibility',
       productName: 'DSH Desktop',
       windowTitle: 'DeepSeek Harness Desktop',
       port: 0,
@@ -162,12 +159,10 @@ describe('desktop Host plugin', () => {
       minWidth: 900,
       minHeight: 640,
     })
-    expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual(expect.objectContaining({ mode: 'advanced' }))
-    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility', port: 0, logLevel: 'info' })
+    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ port: 0, logLevel: 'info' })
     expect(() => DesktopSettingsSchema({ port: -1 } as DesktopSettings)).toThrow()
     expect(() => DesktopSettingsSchema({ port: 1.5 } as DesktopSettings)).toThrow()
     expect(() => DesktopSettingsSchema({ port: 65_536 } as DesktopSettings)).toThrow()
-    expect(() => Config({ mode: 'custom' } as never)).toThrow()
     expect(String(DESKTOP_SETTINGS_NAMESPACE)).toBe('dsh-desktop')
   })
 
@@ -220,8 +215,7 @@ describe('desktop Host plugin', () => {
     expect(register.mock.calls[0]?.[2]).not.toHaveProperty('base')
     expect(loaderAwait).not.toHaveBeenCalled()
     expect(harness.shell()).toEqual(expect.objectContaining({
-      mode: 'compatibility',
-      url: 'http://127.0.0.1:43120/?dsh-desktop-mode=compatibility&dsh-desktop-platform=darwin',
+      url: 'http://127.0.0.1:43120/?dsh-desktop-mode=advanced&dsh-desktop-platform=darwin',
       productName: 'PicoAide Harness',
       windowTitle: 'PicoAide Harness',
       iconPath: expect.stringMatching(/\/build\/app-icon-mac\.png$/u),
@@ -236,10 +230,7 @@ describe('desktop Host plugin', () => {
     expect(harness.shell()?.trayIcons.bluePath.endsWith(join('build', 'tray-icon-blue.png'))).toBe(true)
     expect(harness.shell()?.readThemeSource()).toBe('system')
     harness.notifyTheme('dark')
-    expect(harness.setThemeSource).not.toHaveBeenCalled()
-
-    await harness.shell()?.requestModeChange('advanced')
-    expect(harness.update).toHaveBeenCalledWith({ mode: 'advanced' })
+    expect(harness.setThemeSource).toHaveBeenCalledWith('dark')
   })
 
   it('forwards same-origin renderer boot reports through the Host route', async () => {
@@ -305,49 +296,29 @@ describe('desktop Host plugin', () => {
     },
   )
 
-  it('requests one orderly restart after the settings scope commits another mode', async () => {
-    vi.useFakeTimers()
-    const harness = createHarness()
-    apply(harness.ctx, config)
-
-    await harness.notify(
-      { mode: 'compatibility', port: 0, logLevel: 'info' },
-      { mode: 'compatibility', port: 0, logLevel: 'info' },
-    )
-    expect(harness.restart).not.toHaveBeenCalled()
-
-    harness.restart.mockImplementation(() => new Promise<void>(() => {}))
-    await harness.notify(
-      { mode: 'advanced', port: 0, logLevel: 'info' },
-      { mode: 'compatibility', port: 0, logLevel: 'info' },
-    )
-    await vi.runAllTimersAsync()
-    expect(harness.restart).toHaveBeenCalledOnce()
-  })
-
   it('requests one orderly restart after the configured Web port changes', async () => {
     vi.useFakeTimers()
     const harness = createHarness()
     apply(harness.ctx, config)
 
     await harness.notify(
-      { mode: 'compatibility', port: 0, logLevel: 'debug' },
-      { mode: 'compatibility', port: 0, logLevel: 'info' },
+      { port: 0, logLevel: 'debug' },
+      { port: 0, logLevel: 'info' },
     )
     expect(harness.restart).not.toHaveBeenCalled()
 
     harness.restart.mockImplementation(() => new Promise<void>(() => {}))
     await harness.notify(
-      { mode: 'compatibility', port: 43_189, logLevel: 'debug' },
-      { mode: 'compatibility', port: 0, logLevel: 'debug' },
+      { port: 43_189, logLevel: 'debug' },
+      { port: 0, logLevel: 'debug' },
     )
     await vi.runAllTimersAsync()
     expect(harness.restart).toHaveBeenCalledOnce()
   })
 
-  it('projects live built-in theme changes into an advanced native material', () => {
+  it('projects live built-in theme changes into the advanced native material', () => {
     const harness = createHarness()
-    apply(harness.ctx, { ...config, mode: 'advanced' })
+    apply(harness.ctx, config)
 
     expect(harness.shell()?.readThemeSource()).toBe('system')
     harness.notifyTheme('dark')
@@ -374,17 +345,5 @@ describe('desktop Host plugin', () => {
     Object.assign(harness.ctx.webServer, { host: '0.0.0.0' })
 
     expect(() => apply(harness.ctx, config)).toThrow('requires a loopback Web server')
-  })
-
-  it('refuses advanced settings on Linux before persistence', () => {
-    const harness = createHarness('linux')
-    apply(harness.ctx, config)
-    const register = vi.mocked(harness.ctx.settings.register)
-    const options = register.mock.calls[0]?.[2]
-
-    expect(() => options?.validate?.({ mode: 'advanced' })).toThrow(
-      'supported on macOS and Windows',
-    )
-    expect(() => options?.validate?.({ mode: 'compatibility' })).not.toThrow()
   })
 })

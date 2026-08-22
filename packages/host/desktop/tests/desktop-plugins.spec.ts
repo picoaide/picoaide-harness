@@ -194,7 +194,7 @@ describe('desktop direct bundle management', () => {
     const preview = harness.service.previewDisable(target.bundleId)
     await harness.service.executeDisable(preview.previewId)
 
-    const prepared = prepareDesktopProfile(undefined, options.homeDir, 'darwin', 'desktop', options.statePath)
+    const prepared = prepareDesktopProfile(undefined, options.homeDir, 'darwin', options.statePath)
     const inserted = prepared.patches.flatMap(patch => Array.isArray(patch.insert) ? patch.insert : [])
     expect(inserted.filter(row => row.id === 'external-marker')).toHaveLength(0)
 
@@ -369,7 +369,6 @@ describe('desktop direct bundle management', () => {
       undefined,
       options.homeDir,
       'darwin',
-      'desktop',
       options.statePath,
     )).toThrow('must be a top-level YAML array')
     await harness.dispose()

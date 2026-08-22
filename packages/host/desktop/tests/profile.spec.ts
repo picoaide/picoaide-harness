@@ -181,7 +181,7 @@ describe('desktop profile composition', {
     expect(() => ensureDesktopProfile(home)).toThrow('dsh.profile.bundles must be an array')
   })
 
-  it('assembles the Host shell without replacing the upstream client shell', () => {
+  it('assembles the Host shell with the fixed advanced client shell', () => {
     const home = temporaryHome()
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const patches = prepared.patches as Array<Record<string, unknown>>
@@ -191,7 +191,7 @@ describe('desktop profile composition', {
     })
     expect(inserted).toContainEqual(expect.objectContaining({
       name: DESKTOP_PACKAGE_NAME,
-      config: { mode: 'compatibility' },
+      config: { mode: 'advanced' },
     }))
     expect(patches).toContainEqual(expect.objectContaining({
       id: 'webserver',
@@ -204,7 +204,7 @@ describe('desktop profile composition', {
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(prepared.homeDir).toBe(home)
     expect(fileURLToPath(prepared.bareModuleBaseUrl)).toBe(join(prepared.profile.dir, 'package.json'))
-    expect(prepared.mode).toBe('compatibility')
+    expect(prepared.mode).toBe('advanced')
 
     const rows = composeEntries([prepared.patches])
     for (const [id, name] of [
@@ -215,7 +215,8 @@ describe('desktop profile composition', {
       const matching = rows.filter(row => row.id === id)
       expect(matching).toHaveLength(1)
       expect(matching[0]).toEqual(expect.objectContaining({ name }))
-      expect(matching[0]?.disabled).toBeFalsy()
+      if (id === 'ui-layout') expect(matching[0]?.disabled).toBe(true)
+      else expect(matching[0]?.disabled).not.toBe(true)
     }
     expect(rows.find(row => row.id === 'directory-picker')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-host-directory-picker-auto',
@@ -239,28 +240,21 @@ describe('desktop profile composition', {
       name: '@deepseek-ai/dsh-pwsh-sandbox',
     }))
     expect(rows.map(row => row.id)).not.toContain('desktop-windows-pwsh-sandbox')
-    expect(rows.find(row => row.id === 'desktop-terminal')).toEqual(expect.objectContaining({
-      name: 'dsh-plugin-desktop/terminal',
-      disabled: { __jsExpr: "process.platform === 'linux'" },
-    }))
-    expect(rows.find(row => row.id === 'desktop-pnpm')).toEqual(expect.objectContaining({
-      name: 'dsh-plugin-desktop/pnpm',
-    }))
     expect(rows.find(row => row.id === 'desktop-updates')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/updates',
     }))
-    expect(rows.find(row => row.id === 'desktop-profiles')).toEqual(expect.objectContaining({
-      name: 'dsh-plugin-desktop/profiles',
-    }))
+    expect(rows.map(row => row.id)).not.toContain('desktop-terminal')
+    expect(rows.map(row => row.id)).not.toContain('desktop-pnpm')
+    expect(rows.map(row => row.id)).not.toContain('desktop-profiles')
   })
 
-  it('boots a selected Web profile without overriding its compatibility UI rows', () => {
+  it('boots the fixed desktop profile with advanced shell rows', () => {
     const home = temporaryHome()
-    const webDir = join(home, 'profiles', 'web')
+    const desktopDir = ensureDesktopProfile(home)
     const bundles = PROFILE_TEMPLATES.web
     if (bundles === undefined) throw new Error('test requires the shipped Web template')
-    initProfile(webDir, bundles)
-    writeFileSync(join(webDir, 'cordis.patch.yml'), [
+    void bundles
+    writeFileSync(join(desktopDir, 'cordis.patch.yml'), [
       '- id: ui-layout',
       "  name: '@deepseek-ai/dsh-client-ui-layout'",
       '  disabled: true',
@@ -270,10 +264,11 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const prepared = prepareDesktopProfile(undefined, home, 'darwin', 'web')
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const rows = composeEntries([prepared.patches])
 
-    expect(prepared.profile.name).toBe('web')
+    expect(prepared.profile.name).toBe('desktop')
+    expect(prepared.mode).toBe('advanced')
     expect(rows.find(row => row.id === 'ui-layout')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-client-ui-layout',
       disabled: true,
@@ -284,7 +279,7 @@ describe('desktop profile composition', {
     })
     expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop',
-      config: expect.objectContaining({ mode: 'compatibility' }),
+      config: expect.objectContaining({ mode: 'advanced' }),
     }))
   })
 
@@ -312,7 +307,7 @@ describe('desktop profile composition', {
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
   })
 
-  it('reads JSON settings and defaults an absent desktop namespace to compatibility', () => {
+  it('reads JSON settings and defaults an absent desktop namespace to advanced', () => {
     const home = temporaryHome()
     const path = join(home, 'desktop-settings.json')
     writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
@@ -326,7 +321,7 @@ describe('desktop profile composition', {
       mode: 'advanced',
       port: 0,
     })
-    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('compatibility')
+    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('advanced')
   })
 
   it('rejects invalid settings roots, sections, modes, and YAML', () => {
@@ -456,11 +451,6 @@ describe('desktop profile composition', {
       id: 'missing-skin',
       name: packageName,
     }])
-
-    const web = prepareDesktopProfile(undefined, home, 'darwin', 'web')
-    const webRows = composeEntries([web.patches])
-    expect(webRows).toContainEqual({ id: 'missing-skin', name: packageName })
-    expect(web.skippedOptionalEntries).toEqual([])
   })
 
   it('keeps unresolved non-UI package entries fail-loud', () => {
