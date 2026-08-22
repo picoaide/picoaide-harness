@@ -7,12 +7,14 @@ import (
 )
 
 // AuditLogEntry is one audit log row (sensitive admin operations).
+// json tag 必须是小写字段名:webadmin Audit.tsx 的 LogRow 读取
+// id/username/action/detail/created_at,缺 tag 会输出大写字段名导致前端全空。
 type AuditLogEntry struct {
-	ID        int64
-	Username  string
-	Action    string
-	Detail    string
-	CreatedAt time.Time
+	ID        int64     `json:"id"`
+	Username  string    `json:"username"`
+	Action    string    `json:"action"`
+	Detail    string    `json:"detail"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // AuditLog appends an audit entry (用户/部门/技能/令牌等敏感操作).
