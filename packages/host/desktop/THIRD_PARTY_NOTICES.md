@@ -554,4 +554,15 @@ binaries as if they shipped with the product:
   source license; the native binary is fetched from the vendor CDN
   (`https://senclaw-cdn.italent.cn/cli`), checksums pinned from the package's
   `checksums.txt`. Redistribution follows the enterprise agreement with the
-  vendor (Beisen); do not distribute this binary outside that agreement.
+  vendor (Beisen); do not distribute this binary outside that agreement.- **@larksuite/cli** 1.0.89 (lark-cli binary) — MIT. Native `lark-cli` binary
+  from the Larksuite GitHub release, fetched via the CN-friendly mirror
+  `registry.npmmirror.com/-/binary/lark-cli/v1.0.89` (override with
+  `PICOAIDE_LARK_MIRROR_URL`). Checksums pinned from the package's
+  `checksums.txt`; the product prefetches it at build time and ships it under
+  the app resources (no runtime download needed).
+- **@wecom/cli** 1.1.0 (wecom-cli binary) — UNLICENSED. Native binary per
+  platform published as `@wecom/cli-<platform>-<arch>`; the product fetches
+  the platform tarball from `registry.npmmirror.com` (override with
+  `PICOAIDE_CONNECTORS_NPM_MIRROR`), verifies the pinned sha256 and extracts
+  `package/bin/wecom-cli`. Build-time prefetch ships it under the app
+  resources. Redistribution follows the WeCom enterprise contract.
