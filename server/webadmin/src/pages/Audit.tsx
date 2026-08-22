@@ -89,7 +89,10 @@ export default function Audit() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">审计日志</h1>
-        <span className="text-sm text-muted-foreground">敏感操作记录(用户/部门/技能等)</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground">敏感操作记录(用户/部门/技能等)</span>
+          <Button size="sm" variant="outline" onClick={() => load(page, appliedAction, appliedUser)}>刷新</Button>
+        </div>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
       {/* M8: 筛选条 */}
