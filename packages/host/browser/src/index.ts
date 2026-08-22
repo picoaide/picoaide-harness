@@ -29,13 +29,22 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-user-approval'
 // Type-only: makes `ctx.webServer` resolve to the host webserver contract.
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { createRealElectronAdapter } from './electron-adapter.ts'
+import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
 import { applyBrowserTools } from './tools.ts'
 import { BROWSER_MASK_HTML, BROWSER_SHELL_HTML } from './shell-pages.ts'
 import type { BrowserGuard } from './guard.ts'
 import type { CredentialResolver } from './types.ts'
+
+// Type-only: declare the enterprise session event so `ctx.on` resolves it.
+// The enterprise package owns the runtime event (SessionService emits it);
+// this declaration lets plugins type-check without a runtime dependency.
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+  }
+}
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'pico-browser'
@@ -131,15 +140,27 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
   }
 
+  // Current user (enterprise session, may be absent in minimal compositions).
+  const currentUser = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { username?: string } | null } | undefined
+      return pico?.getSession?.()?.username ?? null
+    } catch {
+      return null
+    }
+  }
+
   // Credential injection resolves through the connectors store (per-user
-  // private files); the lookup is defensive and never logs values.
+  // private files); the lookup is defensive and never logs values. Each
+  // resolution builds a store for the CURRENT user, so a session switch never
+  // injects another account's credentials (no cached store to rebuild).
   const credentialResolver: CredentialResolver | undefined = (() => {
     try {
       // Lazy require: the connectors package must be present in the profile.
       const require = createRequire(import.meta.url)
       const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
-      const store = new ConnectorStore()
       return async (connectorId) => {
+        const store = new ConnectorStore({ username: currentUser() })
         const credential = await store.readCredential(connectorId)
         if (credential === null) return null
         const fields = credential.fields ?? {}
@@ -155,10 +176,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   })()
 
-  const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver)
+  const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver, browserPartitionFor(currentUser()))
   // The shell/mask pages live on the plugin's own loopback server; the
   // dedicated window loads them by absolute URL.
   runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
+
+  // User switch: close every tab (old user's pages/login state), then point
+  // new tabs at the new user's partition. The partition dataset stays on disk
+  // per user; it is simply no longer mounted for another account.
+  ctx.on('pico/session-changed', (next) => {
+    const username = (next as { username?: string } | null)?.username ?? null
+    void (async () => {
+      await runtime.closeAll(undefined, true)
+      runtime.setPartition(browserPartitionFor(username))
+    })().catch((cause: unknown) => {
+      ctx.logger?.error('pico-browser: session change handling failed', cause)
+    })
+  })
 
   // Tool registrations are fiber-scoped: the tools/systemPrompt registries
   // clean them up on plugin dispose, so no manual disposer is needed here.

@@ -19,6 +19,13 @@ import { HostCronService } from './host-service.ts'
 import { makeCronRoutes } from './host-routes.ts'
 import { registerCronTools } from './tools.ts'
 
+// Type-only: declare the enterprise session event so `ctx.on` resolves it.
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+  }
+}
+
 /** Order of the announcement section within the tool-guidance band. */
 const SECTION_ORDER = 200
 
@@ -62,6 +69,21 @@ export function apply(ctx: Context, config: Config): void {
   })
   host.setConfiguration(config.enabled ?? true, config.catchUpMissed ?? false)
   host.start()
+
+  // Current account: stamp new jobs and scope reads. The enterprise session
+  // drives it; without the plugin the cron board stays legacy-visible.
+  const currentUser = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { username?: string } | null } | undefined
+      return pico?.getSession?.()?.username ?? null
+    } catch {
+      return null
+    }
+  }
+  host.setUsername(currentUser())
+  ctx.on('pico/session-changed', (next: unknown) => {
+    host.setUsername((next as { username?: string } | null)?.username ?? null)
+  })
 
   // The picoCronService surface sibling plugins (dsh-task) inject.
   const serviceDisposer = ctx.provide('picoCronService', host)

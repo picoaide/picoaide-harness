@@ -5,7 +5,7 @@
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy';
 import { HostTaskLedger } from './host-ledger.ts';
 import { HostExecutionRunner } from './host-runner.ts';
-import type { TaskRecord } from './tasks.ts';
+import { type TaskRecord } from './tasks.ts';
 import type { TaskSnapshot, TaskAction } from './protocol.ts';
 import type { PicoTaskService } from './service.ts';
 export interface HostTaskServiceOptions {
@@ -22,7 +22,11 @@ export declare class HostTaskService implements PicoTaskService {
     private pollInFlight;
     private active;
     private disposed;
+    /** Current account (gateway username); null when logged out. */
+    private username;
     constructor(api: ApiProxy, options?: HostTaskServiceOptions);
+    /** Set the current account (gateway username); null when logged out. */
+    setUsername(username: string | null): void;
     start(): void;
     setActive(active: boolean): void;
     snapshot(): TaskSnapshot;

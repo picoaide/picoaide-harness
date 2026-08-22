@@ -23,6 +23,9 @@ export interface CronSchedulerOptions {
   now?: () => number
   /** When true, fire the most recent missed occurrence after a long gap. */
   catchUpMissed?: boolean
+  /** Executability filter: owner-scoped jobs only run while their creating
+   * account is the logged-in session (a logged-out board never fires them). */
+  visible?: (job: JobRecord) => boolean
 }
 
 export class HostCronScheduler {
@@ -34,6 +37,7 @@ export class HostCronScheduler {
   private lastTickAt: number | undefined
   private tickInFlight = false
   private disposed = false
+  private readonly visible: (job: JobRecord) => boolean
 
   constructor(
     private readonly ledger: HostCronLedger,
@@ -43,6 +47,7 @@ export class HostCronScheduler {
     this.tickMs = options.tickMs ?? DEFAULT_TICK_MS
     this.now = options.now ?? Date.now
     this.catchUpMissed = options.catchUpMissed ?? false
+    this.visible = options.visible ?? (() => true)
   }
 
   start(): void {
@@ -81,6 +86,7 @@ export class HostCronScheduler {
         return
       }
       for (const job of this.ledger.state().jobs) {
+        if (!this.visible(job)) continue
         if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
         const opened = this.ledger.openScheduled(job.id, `sched-${crypto.randomUUID()}`, now)
         if (opened !== undefined) void this.fire(opened.job, opened.execution)
@@ -107,6 +113,7 @@ export class HostCronScheduler {
   private catchUp(now: number): void {
     const lastTick = this.lastTickAt ?? now
     for (const job of this.ledger.state().jobs) {
+      if (!this.visible(job)) continue
       if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
       const lastMatch = this.lastMatchAt(job, lastTick, now)
       if (lastMatch === undefined) continue

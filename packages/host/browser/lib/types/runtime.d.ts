@@ -47,7 +47,12 @@ export declare class BrowserRuntime {
     private windowResizeDisposer;
     private windowClosedDisposer;
     private disposed;
-    constructor(adapter: ElectronAdapter, options?: BrowserToolOptions, askApproval?: BrowserGuard['askApproval'], credentials?: CredentialResolver | undefined);
+    /** Partition name used for newly created tab views (per-user). */
+    private partition;
+    constructor(adapter: ElectronAdapter, options?: BrowserToolOptions, askApproval?: BrowserGuard['askApproval'], credentials?: CredentialResolver | undefined, partition?: string);
+    /** Swap the partition used by NEW tab views (user switch). Existing tabs
+     * keep their partition; callers close all tabs first. */
+    setPartition(partition: string): void;
     readonly options: Required<BrowserToolOptions>;
     /** Current browser window state (created + visible). */
     get windowState(): BrowserWindowState;

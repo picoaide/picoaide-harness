@@ -21,10 +21,10 @@
 
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
-import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { CLI_MANIFESTS, cliPlatformKey, type CliBinaryManifest, type CliPlatform } from './cli-manifest.ts'
 import { extractArchive, findEntry, readArchiveEntries } from './archive.ts'
+import { userScopePath } from './user-scope.ts'
 
 export interface ResolvedCommand {
   /** Executable to spawn (absolute path, or the original name). */
@@ -38,7 +38,7 @@ export interface ResolvedCommand {
 export type CliProgress = (message: string) => void
 
 export interface CliRuntimeOptions {
-  /** Cache root; defaults to `<store dir>/cli` (mirrors ConnectorStore). */
+  /** Cache root; defaults to `<user scope>/cli` (mirrors ConnectorStore). */
   cacheDir?: string
   /** Manifests override (tests). */
   manifests?: ReadonlyMap<string, CliBinaryManifest>
@@ -53,10 +53,9 @@ export interface CliRuntimeOptions {
    * Layout: `<bundledDir>/<command>/<version>/<binaryName>`.
    */
   bundledDir?: string
+  /** The logged-in username; per-user scoping when omitted/missing. */
+  username?: string | null
 }
-
-/** Same per-user base as ConnectorStore (`~/.picoaide/connectors`). */
-const DEFAULT_CACHE_DIR = join(homedir(), '.picoaide', 'connectors', 'cli')
 
 /**
  * Default bundled-binary directory. In a packaged Electron app the
@@ -84,13 +83,13 @@ export class CliRuntime {
   private readonly inflight = new Map<string, Promise<string | null>>()
 
   constructor(options: CliRuntimeOptions = {}) {
-    this.cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR
+    // Per-user cache root: `<dshHome>/users/<encoded-user>/connectors/cli`.
+    this.cacheDir = options.cacheDir ?? join(userScopePath(options.username), 'connectors', 'cli')
     this.bundledDir = options.bundledDir ?? DEFAULT_BUNDLED_DIR
     this.manifests = options.manifests ?? CLI_MANIFESTS
     this.fetchImpl = options.fetchImpl ?? fetch
     this.downloadTimeoutMs = options.downloadTimeoutMs ?? 120_000
   }
-
   /**
    * Resolve a CLI command to an executable, downloading the pinned binary
    * when the command is not installed. Returns null when the runtime does not

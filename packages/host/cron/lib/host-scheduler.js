@@ -25,12 +25,14 @@ var HostCronScheduler = class {
 	lastTickAt;
 	tickInFlight = false;
 	disposed = false;
+	visible;
 	constructor(ledger, executor, options = {}) {
 		this.ledger = ledger;
 		this.executor = executor;
 		this.tickMs = options.tickMs ?? DEFAULT_TICK_MS;
 		this.now = options.now ?? Date.now;
 		this.catchUpMissed = options.catchUpMissed ?? false;
+		this.visible = options.visible ?? (() => true);
 	}
 	start() {
 		if (this.disposed || this.timer !== void 0) return;
@@ -66,6 +68,7 @@ var HostCronScheduler = class {
 				return;
 			}
 			for (const job of this.ledger.state().jobs) {
+				if (!this.visible(job)) continue;
 				if (!job.enabled || job.nextRunAt === void 0 || job.nextRunAt > now) continue;
 				const opened = this.ledger.openScheduled(job.id, `sched-${crypto.randomUUID()}`, now);
 				if (opened !== void 0) this.fire(opened.job, opened.execution);
@@ -87,6 +90,7 @@ var HostCronScheduler = class {
 	catchUp(now) {
 		const lastTick = this.lastTickAt ?? now;
 		for (const job of this.ledger.state().jobs) {
+			if (!this.visible(job)) continue;
 			if (!job.enabled || job.nextRunAt === void 0 || job.nextRunAt > now) continue;
 			const lastMatch = this.lastMatchAt(job, lastTick, now);
 			if (lastMatch === void 0) continue;

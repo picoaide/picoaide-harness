@@ -364,6 +364,17 @@ function apply(ctx, config) {
 	const host = new HostTaskService(ctx.apiProxy);
 	host.setActive(config.enabled ?? true);
 	host.start();
+	const currentUser = () => {
+		try {
+			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
+		} catch {
+			return null;
+		}
+	};
+	host.setUsername(currentUser());
+	ctx.on("pico/session-changed", (next) => {
+		host.setUsername(next?.username ?? null);
+	});
 	const serviceDisposer = ctx.provide("picoTaskService", host);
 	ctx.effect(() => {
 		const disposers = [serviceDisposer];
