@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
@@ -126,7 +126,11 @@ export type PackagedDiagnosticWorkerLauncher = (
 ) => Promise<string>
 
 /** Injectable smoke seam used to verify afterPack ordering. */
-export type PackagedDiagnosticWorkerSmoke = (unpackedRoot: string) => Promise<void>
+export type PackagedDiagnosticWorkerSmoke = (
+  unpackedRoot: string,
+  launch?: PackagedDiagnosticWorkerLauncher | undefined,
+  asarPath?: string | undefined,
+) => Promise<void>
 
 /** Result posted by the bundled diagnostics Worker. */
 type PackagedDiagnosticWorkerResult =
@@ -209,7 +213,7 @@ export async function smokePackagedDiagnosticWorker(
     // surface into the temp dir so ESM resolution works.
     const libDir = join(root, 'lib')
     mkdirSync(libDir, { recursive: true })
-    const entries = listPackage(archivePath)
+    const entries = listPackage(archivePath, { isPack: false })
     for (const entry of entries) {
       if (!entry.startsWith('/lib/') || !entry.endsWith('.js')) continue
       const name = entry.slice('/lib/'.length)
@@ -376,7 +380,7 @@ export function verifyUnpackedPackageResolution(
   archivePath: string,
   asarEntries?: ReadonlySet<string>,
 ): void {
-  const entries = asarEntries ?? new Set(listPackage(archivePath).map(normalizeArchiveEntry))
+  const entries = asarEntries ?? new Set(listPackage(archivePath, { isPack: false }).map(normalizeArchiveEntry))
   for (const required of REQUIRED_ASAR_EXPORTS) {
     if (!entries.has(required.archivePath)) {
       throw new Error(
@@ -452,7 +456,7 @@ const NATIVE_UNPACKED_PACKAGE_PREFIXES = [
 function listUnpackedUnsafeJs(unpackedRoot: string): string[] {
   const found: string[] = []
   const walk = (dir: string, relativeDir: string): void => {
-    let entries: string[]
+    let entries: Array<{ name: string; isDirectory(): boolean }>
     try {
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
