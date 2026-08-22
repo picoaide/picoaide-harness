@@ -36,6 +36,57 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, isAbsolute, sep, dirname } from 'node:path'
 
+/**
+ * 本地信任栅栏（2026-08-22 安全补丁）：skills-manager 是读写本机技能目录的
+ * API，必须只接受 loopback socket + loopback Host ± 同源 Origin 的请求。
+ * 与兄弟插件（connectors/browser/cron/task）的 guard() 保持同一语义：
+ *   1. socket 远端必须是 127/8 或 ::1（IPv4-mapped 也兼容）；
+ *   2. Host 头必须是 loopback hostname；
+ *   3. Sec-Fetch-Site: cross-site 直接拒绝；
+ *   4. 有 Origin 时其 host 必须与 Host 一致（同源浏览器 fetch）。
+ * 注意：X-Forwarded-For 永不信任（本文件不解析转发头）。
+ */
+function skillsManagerTrustFence(req) {
+  const remote = req.socket?.remoteAddress ?? ''
+  const remoteLower = String(remote).toLowerCase()
+  const loopbackRemote = remoteLower === '::1'
+    || remoteLower.startsWith('::ffff:') && isIPv4Loopback(remoteLower.slice('::ffff:'.length))
+    || isIPv4Loopback(remoteLower)
+  if (!loopbackRemote) return false
+  const host = req.headers?.host
+  if (typeof host !== 'string' || host === '') return false
+  let hostHostname = ''
+  try {
+    hostHostname = new URL('http://' + host).hostname
+  } catch {
+    return false
+  }
+  if (!isLoopbackHostname(hostHostname)) return false
+  if (req.headers?.['sec-fetch-site'] === 'cross-site') return false
+  const origin = req.headers?.origin
+  if (origin === undefined || origin === '') return true
+  try {
+    return new URL(origin).host === new URL('http://' + host).host
+  } catch {
+    return false
+  }
+}
+
+/** 127/8 IPv4 谓词（四个十进制八位组，首字节 127）。 */
+function isIPv4Loopback(value) {
+  const parts = String(value).split('.')
+  return parts.length === 4
+    && parts[0] === '127'
+    && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
+/** 规范化 URL hostname 是否回环（localhost / [::1] / 127/8）。 */
+function isLoopbackHostname(hostname) {
+  const h = String(hostname).toLowerCase()
+  if (h === 'localhost' || h === '[::1]') return true
+  return isIPv4Loopback(h)
+}
+
 /** Cap on a single readable text file (bytes). */
 const MAX_READ_BYTES = 512 * 1024
 
@@ -846,6 +897,14 @@ export function installSkillsManager(ctx, options = {}) {
 
     skillCtx.inject(['webServer', 'workspaceRegistry'], (webCtx) => {
       const handler = async (req, res) => {
+        // ── 本地信任栅栏（2026-08-22 安全补丁，与 connectors/browser/cron
+        //    的 guard() 一致）：本 API 读写技能根目录与文件，必须只接受
+        //    本机回环 + 同源浏览器请求；跨站网页（Sec-Fetch-Site:
+        //    cross-site）与外部地址一律 403。
+        if (!skillsManagerTrustFence(req)) {
+          sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
         const url = new URL(req.url ?? '/', 'http://localhost')
         const pathname = url.pathname
         const query = url.searchParams
