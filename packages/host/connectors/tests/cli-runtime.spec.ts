@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, promises as fs } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { deflateRawSync, gzipSync } from 'node:zlib'
 import { extractArchive, findEntry, readArchiveEntries, readTarEntries, readZipEntries } from '../src/archive.ts'
 import { CliRuntime, findOnPath } from '../src/cli-runtime.ts'
@@ -270,6 +270,25 @@ describe('cli-runtime download-on-demand', () => {
     })
     const resolved = await runtime.resolve('dws', ['auth', 'login'])
     expect(resolved?.command).toBe(join(binDir, 'dws'))
+    expect(hits()).toBe(0)
+  })
+
+  it('serves a build-prefetched binary from bundledDir without downloading', async () => {
+    const { port, hits } = await serve(tgz([]))
+    const cacheDir = tmpDir()
+    const bundledDir = tmpDir()
+    // Prefetched layout: <bundledDir>/<command>/<version>/<binaryName>.
+    const bundledBinary = join(bundledDir, 'dws', '1.0.0', 'dws')
+    await fs.mkdir(dirname(bundledBinary), { recursive: true })
+    await fs.writeFile(bundledBinary, '#!/bin/sh\necho bundled-dws\n', { mode: 0o755 })
+    process.env.PATH = tmpDir()
+    const runtime = new CliRuntime({
+      cacheDir,
+      bundledDir,
+      manifests: new Map([['dws', await npmManifest(port)]]),
+    })
+    const resolved = await runtime.resolve('dws', ['auth', 'login'])
+    expect(resolved?.command).toBe(bundledBinary)
     expect(hits()).toBe(0)
   })
 

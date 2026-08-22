@@ -45,16 +45,39 @@ export interface CliRuntimeOptions {
   /** Fetch implementation override (tests). */
   fetchImpl?: typeof fetch
   downloadTimeoutMs?: number
+  /**
+   * Prefetched binaries shipped inside the application (build-time download,
+   * see `dsh-plugin-desktop/scripts/prefetch-cli.mjs`). When set and the
+   * bundled copy for the current platform exists, `resolve` uses it directly
+   * — first connect needs no network and no download wait.
+   * Layout: `<bundledDir>/<command>/<version>/<binaryName>`.
+   */
+  bundledDir?: string
 }
 
 /** Same per-user base as ConnectorStore (`~/.picoaide/connectors`). */
 const DEFAULT_CACHE_DIR = join(homedir(), '.picoaide', 'connectors', 'cli')
+
+/**
+ * Default bundled-binary directory. In a packaged Electron app the
+ * prefetched CLI binaries ship under `<resourcesPath>/cli` (see the desktop
+ * prefetch script and electron-builder extraResources); outside a packaged
+ * app (dev, tests) no bundled dir exists and every connect downloads on
+ * demand.
+ */
+const DEFAULT_BUNDLED_DIR = (() => {
+  const resourcesPath = (globalThis as { process?: { resourcesPath?: string } }).process?.resourcesPath
+  return typeof resourcesPath === 'string' && resourcesPath.length > 0
+    ? join(resourcesPath, 'cli')
+    : null
+})()
 
 const DIRECT_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024
 const NPM_TARBALL_MAX_BYTES = 120 * 1024 * 1024
 
 export class CliRuntime {
   private readonly cacheDir: string
+  private readonly bundledDir: string | null
   private readonly manifests: ReadonlyMap<string, CliBinaryManifest>
   private readonly fetchImpl: typeof fetch
   private readonly downloadTimeoutMs: number
@@ -62,6 +85,7 @@ export class CliRuntime {
 
   constructor(options: CliRuntimeOptions = {}) {
     this.cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR
+    this.bundledDir = options.bundledDir ?? DEFAULT_BUNDLED_DIR
     this.manifests = options.manifests ?? CLI_MANIFESTS
     this.fetchImpl = options.fetchImpl ?? fetch
     this.downloadTimeoutMs = options.downloadTimeoutMs ?? 120_000
@@ -77,9 +101,26 @@ export class CliRuntime {
     if (onPath) return { command: onPath.path, args, shell: onPath.shell }
     const manifest = this.manifests.get(command)
     if (!manifest) return null
+    // Prefetched binaries shipped in the app win over a first-connect
+    // download (zero network, no wait). The bundled copy is per platform:
+    // the build prefetches every platform but only the current one runs.
+    const bundled = await this.bundledBinary(manifest)
+    if (bundled) return { command: bundled, args }
     const binary = await this.ensureBinary(manifest, onProgress)
     if (!binary) return null
     return { command: binary, args }
+  }
+
+  /** Locate a prefetched binary in the bundled directory, if any. */
+  private async bundledBinary(manifest: CliBinaryManifest): Promise<string | null> {
+    if (!this.bundledDir) return null
+    const binaryName = `${manifest.binaryName}${process.platform === 'win32' ? '.exe' : ''}`
+    const candidate = join(this.bundledDir, manifest.command, manifest.version, binaryName)
+    const stat = await fs.stat(candidate).catch(() => null)
+    if (stat?.isFile() && (process.platform === 'win32' || (stat.mode & 0o111) !== 0)) {
+      return candidate
+    }
+    return null
   }
 
   /**
