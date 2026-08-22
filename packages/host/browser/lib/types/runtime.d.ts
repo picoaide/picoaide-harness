@@ -167,7 +167,11 @@ export declare class BrowserRuntime {
      * Close the whole browser (all tabs). The dedicated window stays alive
      * (hidden) so the user can wake it from the sidebar — only plugin teardown
      * truly destroys it. Tabs are dropped; the next `browser_open` recreates
-     * them. `user=true` (shell 清除) bypasses the takeover mutex.
+     * them. `user=true` (shell 清除 / session switch) still bypasses the
+     * mutex of the *queued* agents but takes the control lock first so an
+     * in-flight agent operation (navigate/click/type on a tab being
+     * destroyed) is paused until teardown finishes — no concurrent use of a
+     * discarded tab (2026-08-22, multi-user isolation race).
      */
     closeAll(signal?: AbortSignal, user?: boolean): Promise<void>;
     /** User takeover / release: hides/shows the AI-control mask and pauses /
