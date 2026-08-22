@@ -11,7 +11,7 @@ import {
   type Profile,
 } from '@deepseek-ai/dsh-app-boot'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import { assertDesktopProfileName } from './profile-manager.ts'
+import { resolveProfileDir } from '@deepseek-ai/dsh-app-boot'
 
 const BIN_NAME = 'dsh-plugin-desktop'
 const STATE_VERSION = 1
@@ -30,6 +30,14 @@ const IMMUTABLE_BUNDLES = new Set([
   '@deepseek-ai/dsh-desktop-app',
   'dsh-plugin-desktop',
 ])
+
+/** Reject profile names that cannot safely cross the persisted state boundary. */
+export function assertDesktopProfileName(name: string): void {
+  resolveProfileDir(name, '/')
+  if (name.length > 255 || /[\0-\x1f\x7f]/.test(name)) {
+    throw new Error(`${BIN_NAME}: invalid desktop profile name ${JSON.stringify(name)}`)
+  }
+}
 
 /** One direct bundle declared by the active profile. */
 export interface DesktopPluginBundle {

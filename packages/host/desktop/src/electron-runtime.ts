@@ -15,16 +15,12 @@ import {
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { desktopTerminalStateDirectory, openDesktopTerminal } from './desktop-terminal.ts'
-import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import type {
   DesktopNotification,
   DesktopLocale,
   DesktopPlatform,
   DesktopRuntime,
   DesktopShellSpec,
-  DesktopTerminalSpec,
   DesktopThemeSource,
   DesktopTrayItem,
   DesktopTrayItemGroup,
@@ -44,20 +40,7 @@ import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
 
-/** Return the presentation mode opposite the active generation. */
-export function nextDesktopShellMode(mode: DesktopShellSpec['mode']): DesktopShellSpec['mode'] {
-  return mode === 'compatibility' ? 'advanced' : 'compatibility'
-}
-
-/** Return the tray command describing the mode that will be activated. */
-export function modeToggleLabel(mode: DesktopShellSpec['mode'], locale: DesktopLocale = 'en'): string {
-  return mode === 'compatibility'
-    ? desktopTrayLabel(locale, 'switchToAdvanced')
-    : desktopTrayLabel(locale, 'switchToCompatibility')
-}
-
-/**
- * Read the desktop package version instead of Electron's development-app version.
+/** Read the desktop package version instead of Electron's development-app version.
  * @param moduleUrl - module below the package's `src` or `lib` directory.
  * @returns validated desktop product version.
  */
@@ -108,7 +91,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private release: (() => Promise<void>) | undefined
   private quitting = false
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
-  private terminalSpec: DesktopTerminalSpec | undefined
   private diagnosticExport: Promise<void> | undefined
   private directoryPickTask: Promise<string | null> | undefined
   private rendererBootReported = false
@@ -145,7 +127,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (this.scheduled !== undefined || this.mountTask !== undefined) {
       throw new Error('dsh-plugin-desktop: a native shell generation is already registered')
     }
-    const previousThemeSource = nativeTheme.themeSource
     this.scheduled = spec
     let disposed = false
     return async () => {
@@ -160,7 +141,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
           this.release = undefined
           this.mountTask = undefined
           if (this.scheduled === spec) {
-            if (spec.mode === 'advanced') nativeTheme.themeSource = previousThemeSource
             this.scheduled = undefined
           }
         }
@@ -233,47 +213,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
   }
 
-  /**
-   * Fix the profile identity before Cordis plugins can contribute terminal commands.
-   * @param spec - launcher-resolved desktop profile and Harness home.
-   */
-  configureTerminal(spec: DesktopTerminalSpec): void {
-    if (this.terminalSpec !== undefined) {
-      throw new Error('dsh-plugin-desktop: terminal profile is already configured')
-    }
-    this.terminalSpec = { ...spec }
-  }
-
-  /** @inheritdoc */
-  openTerminal(): void {
-    try {
-      const spec = this.terminalSpec
-      if (spec === undefined) {
-        throw new Error('dsh-plugin-desktop: terminal profile is not configured')
-      }
-      const electronVersion = process.versions.electron
-      if (electronVersion === undefined) {
-        throw new Error('dsh-plugin-desktop: terminal requires the Electron runtime version')
-      }
-      openDesktopTerminal({
-        platform: this.platform,
-        appExecutable: process.execPath,
-        dshBootstrapPath: fileURLToPath(new URL('./desktop-cli.js', import.meta.url)),
-        pnpmBinPath: packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs'),
-        electronVersion,
-        profileName: spec.profileName,
-        productVersion: PRODUCT_VERSION,
-        profileDir: spec.profileDir,
-        homeDir: spec.homeDir,
-        stateDir: desktopTerminalStateDirectory(app.getPath('userData'), spec.profileName),
-        spawn,
-        onLaunchError: cause => { this.reportTerminalLaunchError(cause) },
-      })
-    } catch (cause) {
-      this.reportTerminalLaunchError(cause)
-    }
-  }
-
   /** @inheritdoc */
   exportDiagnostics(): Promise<void> {
     if (this.diagnosticExport !== undefined) return this.diagnosticExport
@@ -334,7 +273,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   /** @inheritdoc */
   setThemeSource(source: DesktopThemeSource): void {
-    if (this.scheduled?.mode === 'advanced' && this.window !== undefined) {
+    if (this.window !== undefined) {
       nativeTheme.themeSource = source
     }
   }
@@ -358,14 +297,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       type: 'error',
       title: 'Plugin Recovery',
       message: 'DSH Desktop could not load all plugins.',
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nOpen DSH Terminal to update or remove the failing third-party plugin, then restart DSH Desktop.`,
-      buttons: ['Open DSH Terminal', 'Restart DSH Desktop', 'Dismiss'],
+      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart DSH Desktop after resolving the failing plugin.`,
+      buttons: ['Restart DSH Desktop', 'Dismiss'],
       defaultId: 0,
-      cancelId: 2,
+      cancelId: 1,
       noLink: true,
     })
-    if (result.response === 0) this.openTerminal()
-    else if (result.response === 1) await this.requestRestart()
+    if (result.response === 0) await this.requestRestart()
   }
 
   private contributedTrayItems(group: DesktopTrayItemGroup): Electron.MenuItemConstructorOptions[] {
@@ -546,17 +484,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     })
   }
 
-  /** Keep native-terminal launch failures visible in a packaged GUI process. */
-  private reportTerminalLaunchError(cause: unknown): void {
-    const error = cause instanceof Error ? cause : new Error(String(cause))
-    this.logError(`dsh-plugin-desktop: failed to open terminal: ${error.message}`)
-    try {
-      dialog.showErrorBox('Unable to Open DSH Terminal', error.message)
-    } catch (dialogCause) {
-      this.logError(`dsh-plugin-desktop: failed to show terminal error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}`)
-    }
-  }
-
   /** Keep diagnostic export failures visible in a packaged GUI process. */
   private reportDiagnosticExportError(cause: unknown): void {
     const error = cause instanceof Error ? cause : new Error(String(cause))
@@ -585,16 +512,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (status.length > 0) template.push({ type: 'separator' }, ...status)
     template.push(
       { type: 'separator' },
-      {
-        label: modeToggleLabel(spec.mode, this.locale),
-        enabled: this.platform !== 'linux',
-        click: () => {
-          void spec.requestModeChange(nextDesktopShellMode(spec.mode)).catch((cause: unknown) => {
-            this.logError(`dsh-plugin-desktop: failed to change shell mode: ${cause instanceof Error ? cause.message : String(cause)}`)
-          })
-        },
-      },
-      { type: 'separator' },
       { label: desktopTrayLabel(this.locale, 'quit'), click: () => { spec.requestQuit(0) } },
     )
     tray.setContextMenu(Menu.buildFromTemplate(template))
@@ -611,7 +528,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     if (this.platform === 'darwin') app.dock?.setIcon(icon)
     const origin = new URL(spec.url).origin
-    if (spec.mode === 'advanced') nativeTheme.themeSource = spec.readThemeSource()
+    nativeTheme.themeSource = spec.readThemeSource()
     const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
     // P1-4: deny every renderer permission request by default. Electron
     // auto-grants camera/mic/geolocation etc. when no handler is set, which

@@ -3,13 +3,11 @@ import { describe, expect, it } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
 import {
   advancedWindowOptions,
-  compatibilityWindowOptions,
   desktopWindowOptions,
 } from '../src/window-options.ts'
 import { WINDOWS_TITLEBAR_HEIGHT } from '../src/window-chrome.ts'
 
 const spec: DesktopShellSpec = {
-  mode: 'compatibility',
   width: 1280,
   height: 840,
   minWidth: 900,
@@ -25,13 +23,11 @@ const spec: DesktopShellSpec = {
   readLocalePreference: () => undefined,
   readThemeSource: () => 'system',
   requestQuit: () => {},
-  requestModeChange: async () => {},
 }
 
-describe('compatibility BrowserWindow options', () => {
-  it('preserves the native frame and enables renderer isolation', () => {
-    const icon = {} as NativeImage
-    const options = compatibilityWindowOptions(spec, icon, 'darwin')
+describe('advanced BrowserWindow options', () => {
+  it('uses hidden-inset transparent vibrancy on macOS', () => {
+    const options = advancedWindowOptions(spec, {} as NativeImage, 'darwin')
 
     expect(options).toEqual(expect.objectContaining({
       title: '',
@@ -40,50 +36,12 @@ describe('compatibility BrowserWindow options', () => {
       minWidth: 900,
       minHeight: 640,
       show: false,
-      icon,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
       },
-    }))
-    for (const option of [
-      'frame',
-      'titleBarStyle',
-      'titleBarOverlay',
-      'trafficLightPosition',
-      'transparent',
-      'vibrancy',
-      'visualEffectState',
-      'backgroundMaterial',
-      'roundedCorners',
-      'thickFrame',
-    ]) {
-      expect(options).not.toHaveProperty(option)
-    }
-  })
-
-  it('uses the native Windows caption while hiding the application menu', () => {
-    const options = compatibilityWindowOptions(spec, {} as NativeImage, 'win32')
-
-    expect(options.title).toBe('DeepSeek Harness Desktop')
-    expect(options.autoHideMenuBar).toBe(true)
-  })
-
-  it('rejects an advanced spec before BrowserWindow construction', () => {
-    expect(() => compatibilityWindowOptions(
-      { ...spec, mode: 'advanced' },
-      {} as NativeImage,
-      'darwin',
-    )).toThrow('unsupported compatibility window mode advanced')
-  })
-
-  it('uses hidden-inset transparent vibrancy on macOS advanced windows', () => {
-    const advanced = { ...spec, mode: 'advanced' as const }
-    const options = advancedWindowOptions(advanced, {} as NativeImage, 'darwin')
-
-    expect(options).toEqual(expect.objectContaining({
       titleBarStyle: 'hiddenInset',
       trafficLightPosition: { x: 16, y: 16 },
       transparent: true,
@@ -91,17 +49,15 @@ describe('compatibility BrowserWindow options', () => {
       vibrancy: 'sidebar',
       visualEffectState: 'followWindow',
     }))
-    expect(desktopWindowOptions(advanced, {} as NativeImage, 'darwin')).toEqual(options)
+    expect(desktopWindowOptions(spec, {} as NativeImage, 'darwin')).toEqual(options)
   })
 
-  it('uses native Windows controls, Mica, shadow, and rounded corners in advanced mode', () => {
-    const options = advancedWindowOptions(
-      { ...spec, mode: 'advanced' },
-      {} as NativeImage,
-      'win32',
-    )
+  it('uses native Windows controls, Mica, shadow, and rounded corners', () => {
+    const options = advancedWindowOptions(spec, {} as NativeImage, 'win32')
 
     expect(options).toEqual(expect.objectContaining({
+      title: 'DeepSeek Harness Desktop',
+      autoHideMenuBar: true,
       titleBarStyle: 'hidden',
       titleBarOverlay: {
         color: '#00000000',
@@ -115,9 +71,9 @@ describe('compatibility BrowserWindow options', () => {
     }))
   })
 
-  it('rejects advanced mode on Linux', () => {
+  it('rejects unsupported platforms', () => {
     expect(() => advancedWindowOptions(
-      { ...spec, mode: 'advanced' },
+      spec,
       {} as NativeImage,
       'linux',
     )).toThrow('supported on macOS and Windows')

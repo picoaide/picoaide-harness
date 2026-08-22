@@ -2,20 +2,13 @@
 
 export const name = 'desktop-host-services-smoke-plugin'
 
-/** Both Desktop services must exist before Loader may activate this entry. */
-export const inject = ['desktopProfiles', 'desktopPnpm']
+/** The desktop runtime must exist before Loader may activate this entry. */
+export const inject = ['desktopRuntime']
 
-/** Read the supported contracts and publish an assertion-friendly result. */
+/** Read the supported contract and publish an assertion-friendly result. */
 export function apply(ctx) {
-  const current = ctx.desktopProfiles.current
-  const pnpm = ctx.desktopPnpm
   ctx.provide('desktopHostServiceProbe', Object.freeze({
-    current: Object.freeze({ name: current.name, dir: current.dir }),
-    pnpm: Object.freeze({
-      serviceName: pnpm.name,
-      lookupRun: typeof ctx.get('desktopPnpm')?.run,
-      run: typeof pnpm.run,
-      runPlugin: typeof pnpm.runPlugin,
-    }),
+    runtimePlatform: ctx.desktopRuntime.platform,
+    hasRegisterTrayItem: typeof ctx.desktopRuntime.registerTrayItem === 'function',
   }))
 }

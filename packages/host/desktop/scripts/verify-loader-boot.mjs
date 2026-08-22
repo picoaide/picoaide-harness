@@ -10,18 +10,11 @@ import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
-import { installDesktopPnpmRuntime } from '../lib/desktop-runtime-environment.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-loader-smoke'
 const THIRD_PARTY_NAME = 'dsh-desktop-loader-smoke-plugin'
-const RUNNER_ENVIRONMENT_NAMES = new Set([
-  'ELECTRON_RUN_AS_NODE',
-  'NPM_CONFIG_RUNTIME',
-  'NPM_CONFIG_TARGET',
-  'NPM_CONFIG_DISTURL',
-])
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-loader-'))
 // Isolate the product home for the whole boot: profile files live in the
 // temporary home, and plugins resolve their data dir through `$DSH_HOME`
@@ -33,28 +26,12 @@ let ctx
 let mounted
 let mountedSpec
 let releasePackageResolver
-let pnpmRuntime
-const runnerEnvironment = Object.entries(process.env)
-  .filter(([key]) => RUNNER_ENVIRONMENT_NAMES.has(key.toUpperCase()))
 
 try {
-  for (const [key] of runnerEnvironment) delete process.env[key]
   const launchEnvironment = createLaunchEnvironmentSnapshot([{
     source: 'process',
     values: { ...process.env },
   }])
-  const launchPath = launchEnvironment.get('PATH')?.value
-  const packageRoot = new URL('../', import.meta.url)
-  const pnpmBinPath = fileURLToPath(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
-  const electronVersion = JSON.parse(readFileSync(new URL('node_modules/electron/package.json', packageRoot), 'utf8')).version
-  pnpmRuntime = installDesktopPnpmRuntime({
-    platform: process.platform,
-    appExecutable: process.execPath,
-    pnpmBinPath,
-    electronVersion,
-    stateDir: join(home, 'runtime-commands'),
-    environment: process.env,
-  })
   const prepared = prepareDesktopProfile(undefined, home)
   const thirdPartyDir = join(prepared.profile.dir, 'node_modules', THIRD_PARTY_NAME)
   mkdirSync(thirdPartyDir, { recursive: true })
@@ -65,16 +42,9 @@ try {
     exports: './index.js',
   }) + '\n')
   writeFileSync(join(thirdPartyDir, 'index.js'), [
-    "import { delimiter } from 'node:path'",
-    'export function apply(ctx) {',
-    `  const expected = ${JSON.stringify(pnpmRuntime.pathDir)}`,
-    '  const actual = (process.env.PATH ?? \'\').split(delimiter)[0]',
-    '  if (actual !== expected) throw new Error(`third-party plugin received ${actual} instead of packaged pnpm PATH ${expected}`)',
+    "export function apply(ctx) {",
     "  const launchPath = ctx.launchEnvironment?.get('PATH')?.value",
-    `  if (launchPath !== ${JSON.stringify(launchPath)}) throw new Error('third-party plugin received a mutated launch-environment PATH snapshot')`,
-    `  const runnerNames = new Set(${JSON.stringify([...RUNNER_ENVIRONMENT_NAMES])})`,
-    "  const leaked = Object.keys(process.env).filter(key => runnerNames.has(key.toUpperCase()))",
-    "  if (leaked.length > 0) throw new Error(`third-party plugin received runner-only environment: ${leaked.join(', ')}`)",
+    `  if (launchPath !== ${JSON.stringify(launchEnvironment.get('PATH')?.value)}) throw new Error('third-party plugin received a mutated launch-environment PATH snapshot')`,
     '}',
     '',
   ].join('\n'))
@@ -126,7 +96,7 @@ try {
       host.provide('settings', {
         register() {
           return {
-            get: () => ({ mode: 'compatibility' }),
+            get: () => ({ mode: 'advanced' }),
             watch: () => () => {},
             update: async () => {},
             replace: async () => {},
@@ -146,10 +116,7 @@ try {
   if (thirdPartyEntry?.options.name !== THIRD_PARTY_NAME) {
     throw new Error('profile-local third-party plugin did not activate')
   }
-  if (mountedSpec?.mode !== 'compatibility') {
-    throw new Error(`desktop plugin produced an unexpected shell mode: ${String(mountedSpec?.mode)}`)
-  }
-  if (mountedSpec?.url !== 'http://127.0.0.1:43120/?dsh-desktop-mode=compatibility&dsh-desktop-platform=darwin') {
+  if (mountedSpec?.url !== 'http://127.0.0.1:43120/?dsh-desktop-mode=advanced&dsh-desktop-platform=darwin') {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
 } finally {
@@ -159,19 +126,9 @@ try {
     try {
       releasePackageResolver?.()
     } finally {
-      try {
-        pnpmRuntime?.dispose()
-      } finally {
-        for (const key of Object.keys(process.env)) {
-          if (RUNNER_ENVIRONMENT_NAMES.has(key.toUpperCase())) {
-            delete process.env[key]
-          }
-        }
-        for (const [key, value] of runnerEnvironment) process.env[key] = value
-        if (previousDshHome === undefined) delete process.env.DSH_HOME
-        else process.env.DSH_HOME = previousDshHome
-        rmSync(home, { recursive: true, force: true })
-      }
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
+      rmSync(home, { recursive: true, force: true })
     }
   }
 }

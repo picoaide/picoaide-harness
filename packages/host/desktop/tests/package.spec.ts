@@ -76,21 +76,13 @@ describe('published package surface', () => {
       types: './lib/types/windows-agent-presets.d.ts',
       default: './lib/windows-agent-presets.js',
     })
-    expect(manifest.exports).toHaveProperty('./terminal', {
-      types: './lib/types/terminal.d.ts',
-      default: './lib/terminal.js',
+    expect(manifest.exports).toHaveProperty('./desktop-plugins', {
+      types: './lib/types/desktop-plugins.d.ts',
+      default: './lib/desktop-plugins.js',
     })
-    expect(manifest.exports).toHaveProperty('./pnpm', {
-      types: './lib/types/pnpm.d.ts',
-      default: './lib/pnpm.js',
-    })
-    expect(manifest.exports).toHaveProperty('./profile-service', {
-      types: './lib/types/profile-service.d.ts',
-      default: './lib/profile-service.js',
-    })
-    expect(manifest.exports).toHaveProperty('./profiles', {
-      types: './lib/types/profiles.d.ts',
-      default: './lib/profiles.js',
+    expect(manifest.exports).toHaveProperty('./desktop-home', {
+      types: './lib/types/desktop-home.d.ts',
+      default: './lib/desktop-home.js',
     })
     expect(manifest.exports).toHaveProperty('./diagnostics', {
       types: './lib/types/diagnostics.d.ts',
@@ -101,6 +93,10 @@ describe('published package surface', () => {
       default: './lib/updates.js',
     })
     expect(manifest.exports).not.toHaveProperty('./windows-acl-runner')
+    expect(manifest.exports).not.toHaveProperty('./terminal')
+    expect(manifest.exports).not.toHaveProperty('./pnpm')
+    expect(manifest.exports).not.toHaveProperty('./profile-service')
+    expect(manifest.exports).not.toHaveProperty('./profiles')
     expect(manifest.exports).not.toHaveProperty('./desktop-cli')
     expect(manifest.exports).not.toHaveProperty('./desktop-runtime-environment')
     expect(manifest.exports).not.toHaveProperty('./desktop-terminal')
@@ -116,9 +112,9 @@ describe('published package surface', () => {
       ],
     })
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop')
-    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/terminal')
-    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/pnpm')
-    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/profiles')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).not.toContain('name: dsh-plugin-desktop/terminal')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).not.toContain('name: dsh-plugin-desktop/pnpm')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).not.toContain('name: dsh-plugin-desktop/profiles')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/diagnostics')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
   })
@@ -158,16 +154,16 @@ describe('published package surface', () => {
     expect(config).toContain("'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts'")
     expect(config).toContain("'windows-agent-presets': 'src/windows-agent-presets.ts'")
     expect(config).toContain("'windows-acl-runner': 'src/windows-acl-runner.ts'")
-    expect(config).toContain("'desktop-cli': 'src/desktop-cli.ts'")
-    expect(config).toContain("'desktop-runtime-environment': 'src/desktop-runtime-environment.ts'")
-    expect(config).toContain("'desktop-terminal': 'src/desktop-terminal.ts'")
-    expect(config).toContain("'profile-manager': 'src/profile-manager.ts'")
-    expect(config).toContain("'profile-service': 'src/profile-service.ts'")
-    expect(config).toContain("pnpm: 'src/pnpm.ts'")
-    expect(config).toContain("profiles: 'src/profiles.ts'")
+    expect(config).not.toContain("'desktop-cli': 'src/desktop-cli.ts'")
+    expect(config).not.toContain("'desktop-runtime-environment': 'src/desktop-runtime-environment.ts'")
+    expect(config).not.toContain("'desktop-terminal': 'src/desktop-terminal.ts'")
+    expect(config).not.toContain("'profile-manager': 'src/profile-manager.ts'")
+    expect(config).not.toContain("'profile-service': 'src/profile-service.ts'")
+    expect(config).not.toContain("pnpm: 'src/pnpm.ts'")
+    expect(config).not.toContain("profiles: 'src/profiles.ts'")
     expect(config).toContain("diagnostics: 'src/diagnostics.ts'")
     expect(config).toContain("'diagnostic-export-worker': 'src/diagnostic-export-worker.ts'")
-    expect(config).toContain("terminal: 'src/terminal.ts'")
+    expect(config).not.toContain("terminal: 'src/terminal.ts'")
     expect(config).toContain("'update-download': 'src/update-download.ts'")
     expect(config).toContain("updates: 'src/updates.ts'")
   })
@@ -177,25 +173,20 @@ describe('published package surface', () => {
     const recover = main.indexOf('await resolveDesktopShellEnvironment')
     const applyRecovered = main.indexOf('Object.entries(shellEnvironmentResolution.updates)')
     const snapshot = main.indexOf('const environment = loadLayeredEnv')
-    const install = main.indexOf('const pnpmRuntime = installDesktopPnpmRuntime')
     const prepare = main.indexOf('const prepared = prepareDesktopProfile')
-    const installDsh = main.indexOf('const dshRuntime = process.platform === \'win32\'')
     const boot = main.indexOf('const ctx = await boot')
 
     expect(recover).toBeGreaterThanOrEqual(0)
     expect(applyRecovered).toBeGreaterThan(recover)
     expect(snapshot).toBeGreaterThan(applyRecovered)
-    expect(install).toBeGreaterThan(snapshot)
-    expect(prepare).toBeGreaterThan(install)
-    expect(installDsh).toBeGreaterThan(prepare)
+    expect(prepare).toBeGreaterThan(snapshot)
     expect(boot).toBeGreaterThan(prepare)
-    expect(boot).toBeGreaterThan(installDsh)
-    expect(main).toContain("'dsh-plugin-desktop: packaged pnpm runtime PATH'")
-    expect(main).toContain("'dsh-plugin-desktop: packaged dsh runtime PATH'")
     expect(main).toContain("args: ['--host', '127.0.0.1', '--port', String(prepared.port)]")
     expect(main).not.toContain("'--port', '0'")
-    expect(main).toContain('disposePnpmRuntime?.()')
-    expect(main).toContain('disposeDshRuntime?.()')
+    expect(main).not.toContain('installDesktopPnpmRuntime')
+    expect(main).not.toContain('installDesktopDshRuntime')
+    expect(main).not.toContain('disposePnpmRuntime')
+    expect(main).not.toContain('disposeDshRuntime')
   })
 
   it('wires local crash evidence before Electron becomes ready', () => {
@@ -299,8 +290,10 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['check:win-package']).toContain('tests/windows-volume-diagnostics.spec.ts')
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run verify:closure')
     expect(manifest.scripts?.['check:mac-package']).toBe('yarn run -T check')
-    expect(manifest.scripts?.['verify:cli']).toBe('node scripts/verify-cli-runtime.mjs')
-    expect(manifest.scripts?.check).toContain('yarn run verify:cli')
+    expect(manifest.scripts?.['verify:cli']).toBeUndefined()
+    expect(manifest.scripts?.check).not.toContain('yarn run verify:cli')
+    expect(manifest.scripts?.check).toContain('yarn run verify:loader')
+    expect(manifest.scripts?.check).toContain('yarn run verify:profile')
     expect(workspaceManifest.scripts?.['dist:mac'])
       .toBe('yarn workspace dsh-plugin-desktop dist:mac')
     expect(workspaceManifest.scripts?.['dist:mac-smoke'])
@@ -391,7 +384,7 @@ describe('published package surface', () => {
     expect(manifest.dependencies).not.toHaveProperty('electron')
     expect(manifest.peerDependencies?.electron).toBe('43.4.0')
     expect(manifest.devDependencies?.electron).toBe('43.4.0')
-    expect(manifest.dependencies?.pnpm).toBe('11.7.0')
+    expect(manifest.dependencies).not.toHaveProperty('pnpm')
   })
 
   it('packages the native-compiled Koffi Windows runtime', () => {

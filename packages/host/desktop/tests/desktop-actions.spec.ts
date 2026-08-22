@@ -14,15 +14,12 @@ async function mount(bootstrap: DesktopActionsBootstrap): Promise<{
 }
 
 describe('desktop actions Host service', () => {
-  it('exposes only no-argument terminal and restart operations', async () => {
-    const openTerminal = vi.fn<() => void>()
+  it('exposes only no-argument restart operation', async () => {
     const requestRestart = vi.fn<() => Promise<void>>(async () => {})
-    const mounted = await mount({ openTerminal, requestRestart })
+    const mounted = await mount({ requestRestart })
 
-    mounted.service.openTerminal()
     await expect(mounted.service.requestRestart()).resolves.toBeUndefined()
 
-    expect(openTerminal).toHaveBeenCalledWith()
     expect(requestRestart).toHaveBeenCalledWith()
     expect(Object.keys(mounted.service).sort()).not.toContain('runCommand')
   })
@@ -30,14 +27,13 @@ describe('desktop actions Host service', () => {
   it('coalesces a restart request and rejects retained references after disposal', async () => {
     let finishRestart!: () => void
     const requestRestart = vi.fn(() => new Promise<void>(resolve => { finishRestart = resolve }))
-    const mounted = await mount({ openTerminal: vi.fn(), requestRestart })
+    const mounted = await mount({ requestRestart })
 
     const first = mounted.service.requestRestart()
     const second = mounted.service.requestRestart()
     expect(second).toBe(first)
     expect(requestRestart).toHaveBeenCalledOnce()
     await mounted.dispose()
-    expect(() => mounted.service.openTerminal()).toThrow(/service disposed/u)
     await expect(mounted.service.requestRestart()).rejects.toThrow(/service disposed/u)
 
     finishRestart()
