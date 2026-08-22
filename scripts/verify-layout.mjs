@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
@@ -13,11 +13,11 @@ const fail = message => { throw new Error(`verify-layout: ${message}`) }
 
 const workspace = readJson('package.json')
 const upstream = readJson('upstream.json')
-const plugin = readJson('dsh-plugin-desktop/package.json')
-const enterprise = readJson('plugins/dsh-enterprise/package.json')
-const connectors = readJson('plugins/dsh-connectors/package.json')
-const browser = readJson('plugins/dsh-browser/package.json')
-const fabric = readJson('dsh-community-fabric/package.json')
+const plugin = readJson('packages/host/desktop/package.json')
+const enterprise = readJson('packages/host/enterprise/package.json')
+const connectors = readJson('packages/host/connectors/package.json')
+const browser = readJson('packages/host/browser/package.json')
+const fabric = readJson('community/fabric/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
@@ -32,29 +32,86 @@ if (workspace.packageManager !== 'yarn@4.18.0') {
 // single source of truth. Every member must exist, be a valid package, and
 // carry a name whose final segment matches its directory basename (this
 // admits both flat members like `dsh-community-fabric` and scoped members
-// like `plugins/dsh-enterprise` -> `@picoaide/dsh-enterprise`).
+// like `plugins/dsh-enterprise` -> `@picoaide/dsh-enterprise`). The glob
+// patterns `packages/*/*` and `community/*` enumerate the same members that
+// the workspace glob yields, so the manifest check stays directory-driven.
 if (!Array.isArray(workspace.workspaces) || workspace.workspaces.length === 0) {
   fail('the root Yarn workspace must declare a non-empty workspaces list')
 }
-const workspaceDirs = [...new Set(workspace.workspaces)]
-if (workspaceDirs.length !== workspace.workspaces.length) {
-  fail('the root Yarn workspace list contains duplicates')
+const packageGlob = 'packages/*/*'
+const communityGlob = 'community/*'
+if (!workspace.workspaces.includes(packageGlob) || !workspace.workspaces.includes(communityGlob)) {
+  fail('the root Yarn workspace must declare both packages/*/* and community/*')
 }
+// Package naming keeps the published npm name stable while the workspace
+// directory is organized by role. This directory-to-name table is the single
+// authoritative mapping: every workspace member directory must appear here
+// with exactly the package name it owns. Member directories are allowed to
+// drop the `dsh-` prefix or rename the role segment (e.g. `desktop` owns
+// `dsh-plugin-desktop`), so the old "name tail equals directory basename"
+// check is replaced by table membership.
+const packageNameTable = new Map([
+  ['packages/host/desktop', 'dsh-plugin-desktop'],
+  ['packages/host/enterprise', '@picoaide/dsh-enterprise'],
+  ['packages/host/connectors', '@picoaide/dsh-connectors'],
+  ['packages/host/browser', '@picoaide/dsh-browser'],
+  ['packages/host/cron', '@picoaide/dsh-cron'],
+  ['packages/host/task', '@picoaide/dsh-task'],
+  ['packages/client/account-card', '@picoaide/dsh-account-card'],
+  ['packages/client/branding', '@picoaide/dsh-branding'],
+  ['packages/client/better-sidebar', 'dsh-better-sidebar'],
+  ['packages/vendor/memory-evolve', 'dsh-memory-evolve'],
+  ['community/fabric', 'dsh-community-fabric'],
+])
+const nameForPath = dir => packageNameTable.get(dir)
+const workspaceDirs = []
 const workspaceManifests = new Map()
-for (const dir of workspaceDirs) {
-  const manifestPath = resolve(root, dir, 'package.json')
-  if (!existsSync(manifestPath)) fail(`workspace member ${dir} has no package.json`)
-  const manifest = readJson(`${dir}/package.json`)
-  const nameTail = typeof manifest.name === 'string' ? manifest.name.split('/').at(-1) : undefined
-  if (nameTail !== basename(dir)) {
-    fail(`workspace member ${dir} must own a package named *${basename(dir)} (got ${manifest.name ?? 'missing'})`)
+const collectWorkspaceMembers = (tree, depth, prefix = '') => {
+  const scanRoot = resolve(root, prefix || tree)
+  if (!existsSync(scanRoot)) fail(`workspace glob root ${tree} is missing`)
+  let names
+  try {
+    names = readdirSync(scanRoot)
+  } catch {
+    fail(`workspace glob root ${tree} is unreadable`)
   }
-  workspaceManifests.set(manifest.name, manifest)
+  for (const name of names) {
+    const dir = prefix ? `${prefix}/${name}` : `${tree}/${name}`
+    const full = resolve(root, dir)
+    if (!lstatSync(full).isDirectory()) continue
+    if (depth === 1) {
+      if (existsSync(resolve(full, 'package.json'))) {
+        const manifest = readJson(`${dir}/package.json`)
+        const expected = nameForPath(dir)
+        if (expected !== manifest.name) {
+          fail(`workspace member ${dir} must own ${expected ?? '<declared in packageNameTable>'} (got ${manifest.name ?? 'missing'})`)
+        }
+        workspaceManifests.set(manifest.name, manifest)
+        workspaceDirs.push(dir)
+      } else {
+        collectWorkspaceMembers(tree, 2, dir)
+      }
+    } else {
+      const manifestPath = resolve(root, dir, 'package.json')
+      if (!existsSync(manifestPath)) continue
+      const manifest = readJson(`${dir}/package.json`)
+      const expected = nameForPath(dir)
+      if (expected !== manifest.name) {
+        fail(`workspace member ${dir} must own ${expected ?? '<declared in packageNameTable>'} (got ${manifest.name ?? 'missing'})`)
+      }
+      workspaceManifests.set(manifest.name, manifest)
+      workspaceDirs.push(dir)
+    }
+  }
+}
+collectWorkspaceMembers('packages', 1)
+collectWorkspaceMembers('community', 1)
+if (workspaceDirs.length === 0) {
+  fail('the workspace tree must contain at least one package')
 }
 for (const [name, manifest] of workspaceManifests) {
   if (manifest.packageManager !== undefined) fail(`${name} must inherit the root Yarn release`)
 }
-if (fabric.name !== 'dsh-community-fabric') fail('the Fabric workspace must own dsh-community-fabric')
 const claudePath = resolve(root, 'CLAUDE.md')
 const claudeStat = lstatSync(claudePath)
 // Windows checkouts materialize the symlink as a regular file holding the
@@ -68,10 +125,10 @@ if (claudeTarget !== 'AGENTS.md') {
 for (const legacyFile of [
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
-  'dsh-plugin-desktop/pnpm-lock.yaml',
-  'dsh-plugin-desktop/pnpm-workspace.yaml',
-  'dsh-community-fabric/pnpm-lock.yaml',
-  'dsh-community-fabric/pnpm-workspace.yaml',
+  'packages/host/desktop/pnpm-lock.yaml',
+  'packages/host/desktop/pnpm-workspace.yaml',
+  'community/fabric/pnpm-lock.yaml',
+  'community/fabric/pnpm-workspace.yaml',
 ]) {
   if (existsSync(resolve(root, legacyFile))) fail(`${legacyFile} must not exist`)
 }

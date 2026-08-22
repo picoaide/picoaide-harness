@@ -1,6 +1,6 @@
 # DSH Desktop Plugin Development
 
-> **Do not confuse current APIs with a Draft:** this guide describes working DSH/Cordis and Desktop services. The manifest, capability, and unified event model in `dsh-community-fabric` remains a [community RFC Draft](../dsh-community-fabric/README.md) and cannot yet be used as a dependency or release target.
+> **Do not confuse current APIs with a Draft:** this guide describes working DSH/Cordis and Desktop services. The manifest, capability, and unified event model in `dsh-community-fabric` remains a [community RFC Draft](../community/fabric/README.md) and cannot yet be used as a dependency or release target.
 
 ## Understand the two plugin layers
 
@@ -13,7 +13,7 @@ Desktop adds two public Host services:
 
 These services live in the Host Cordis generation in Electron's main process. The renderer cannot read them directly; a plugin with browser UI should continue to use ordinary DSH Web routes, RPC, client metadata, services, and slots.
 
-The complete types, lifecycle, and failure semantics are in [`dsh-plugin-desktop/docs/plugin-services.md`](../dsh-plugin-desktop/docs/plugin-services.md). This page focuses on selection and the minimum safe patterns.
+The complete types, lifecycle, and failure semantics are in [`dsh-plugin-desktop/docs/plugin-services.md`](../packages/host/desktop/docs/plugin-services.md). This page focuses on selection and the minimum safe patterns.
 
 ## Desktop-only plugins
 
@@ -105,7 +105,7 @@ At minimum, a plugin should cover:
 - Cancellation, non-zero exit, spawn failure, and generation teardown for package operations.
 - Restarting after a plugin change and seeing the bundle in the next Loader composition.
 
-Read the [architecture](architecture.en.md) next, then use the package-level [service contract](../dsh-plugin-desktop/docs/plugin-services.md) as the API reference.
+Read the [architecture](architecture.en.md) next, then use the package-level [service contract](../packages/host/desktop/docs/plugin-services.md) as the API reference.
 
 ## Ecosystem vision: keep the plugin ecosystem composable
 
@@ -119,4 +119,4 @@ To that end we are starting a development-conventions initiative and hope it bec
 - **Declare clearly**: state the services and slots you depend on; do not rely on runtime coincidences.
 - **Compatibility first**: keep upgrades backward compatible and never break existing compositions.
 
-The manifesto is a living document that follows ecosystem practice and accepts community discussion and revisions. Once the plugin marketplace ships, plugins following shared conventions will be easier to discover, install, and evaluate for compatibility, making convention-driven development the beneficial choice for every author. See the [DSH plugin ecosystem manifesto](plugin-ecosystem.en.md) for the vision and [DSH Community Fabric](../dsh-community-fabric/README.md) for the proposed future interoperability contract.
+The manifesto is a living document that follows ecosystem practice and accepts community discussion and revisions. Once the plugin marketplace ships, plugins following shared conventions will be easier to discover, install, and evaluate for compatibility, making convention-driven development the beneficial choice for every author. See the [DSH plugin ecosystem manifesto](plugin-ecosystem.en.md) for the vision and [DSH Community Fabric](../community/fabric/README.md) for the proposed future interoperability contract.

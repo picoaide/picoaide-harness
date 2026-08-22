@@ -9,17 +9,8 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "workspaces": [
-    "dsh-plugin-desktop",
-    "plugins/dsh-enterprise",
-    "plugins/dsh-connectors",
-    "plugins/dsh-browser",
-    "plugins/dsh-account-card",
-    "plugins/dsh-branding",
-    "plugins/dsh-memory-evolve",
-    "plugins/dsh-cron",
-    "plugins/dsh-task",
-    "dsh-community-fabric",
-    "plugins/dsh-better-sidebar"
+    "packages/*/*",
+    "community/*"
   ],
   "resolutions": {
     "app-builder-lib@npm:26.15.3": "patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch",

@@ -9,7 +9,7 @@
 
 现状缺口：上游 `@deepseek-ai/dsh-client-ui-settings-models` 在设置页注册「模型」入口
 （`settings.section` slot，order 10），用户可添加自定义 provider/模型；而登录后
-`plugins/dsh-enterprise/src/bootstrap.ts` 已把网关 `/api/config/bootstrap` 下发的模型
+`packages/host/enterprise/src/bootstrap.ts` 已把网关 `/api/config/bootstrap` 下发的模型
 catalog 同步进 `llm-deepseek` 设置（models 列表 + `agent-default-model`），登出时清空。
 
 目标：模型设置入口完全消失；模型仅来自登录后的网关下发。模型下发闭环已存在，本次
@@ -17,7 +17,7 @@ catalog 同步进 `llm-deepseek` 设置（models 列表 + `agent-default-model`�
 
 ## 方案
 
-组合层禁用：在 `plugins/dsh-enterprise/cordis.patch.yml` 追加一条 patch，按 id 定位
+组合层禁用：在 `packages/host/enterprise/cordis.patch.yml` 追加一条 patch，按 id 定位
 上游 web-app bundle 的 `ui-settings-models` 行并置 `disabled: true`。
 
 - 企业 patch 由 `prepareDesktopProfile`（dsh-plugin-desktop/src/profile.ts）在 web-app
@@ -29,7 +29,7 @@ catalog 同步进 `llm-deepseek` 设置（models 列表 + `agent-default-model`�
 
 ## 改动清单
 
-### plugins/dsh-enterprise/cordis.patch.yml（功能改动）
+### packages/host/enterprise/cordis.patch.yml（功能改动）
 
 追加：
 
