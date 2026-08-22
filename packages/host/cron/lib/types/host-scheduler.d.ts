@@ -6,6 +6,9 @@ export interface CronSchedulerOptions {
     now?: () => number;
     /** When true, fire the most recent missed occurrence after a long gap. */
     catchUpMissed?: boolean;
+    /** Executability filter: owner-scoped jobs only run while their creating
+     * account is the logged-in session (a logged-out board never fires them). */
+    visible?: (job: JobRecord) => boolean;
 }
 export declare class HostCronScheduler {
     private readonly ledger;
@@ -18,6 +21,7 @@ export declare class HostCronScheduler {
     private lastTickAt;
     private tickInFlight;
     private disposed;
+    private readonly visible;
     constructor(ledger: HostCronLedger, executor: HostCronExecutor, options?: CronSchedulerOptions);
     start(): void;
     /**

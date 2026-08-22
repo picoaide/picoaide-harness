@@ -796,9 +796,26 @@ defineMethod("transform", [
 //#region src/electron-adapter.ts
 /**
 * Persistent browser partition: login sessions survive app restarts and stay
-* isolated from the main application's cookies/storage.
+* isolated from the main application's cookies/storage. The partition name is
+* per-user (`persist:agent-browser-<encoded-user>`), so a user switch never
+* exposes A's website logins to B. The username is hex-encoded with the same
+* scheme as the connectors user scope (no separators, no dots).
 */
-const BROWSER_PARTITION = "persist:agent-browser";
+function encodePartitionSegment(segment) {
+	let out = "";
+	for (const char of segment) {
+		const code = char.codePointAt(0);
+		if (code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122 || char === "-" || char === "_") out += char;
+		else out += `~${code.toString(16).toUpperCase()}~`;
+	}
+	return out.length === 0 ? "anonymous" : out;
+}
+/** Partition name for a logged-in (or anonymous) user. */
+function browserPartitionFor(username) {
+	return `persist:agent-browser-${encodePartitionSegment(username !== void 0 && username !== null && username.length > 0 ? username : "anonymous")}`;
+}
+/** Legacy fixed partition name (pre-user-scope); kept for tests/back-compat. */
+const BROWSER_PARTITION = browserPartitionFor(null);
 /** Default browser window size (DIP). */
 const BROWSER_WINDOW_DEFAULT = {
 	width: 1100,
@@ -807,9 +824,9 @@ const BROWSER_WINDOW_DEFAULT = {
 /** Lazy real adapter over Electron (imported only on first browser start). */
 function createRealElectronAdapter() {
 	const { WebContentsView, BrowserWindow, dialog } = __require("electron");
-	const createView = () => {
+	const createView = (partition = BROWSER_PARTITION) => {
 		const view = new WebContentsView({ webPreferences: {
-			partition: BROWSER_PARTITION,
+			partition,
 			contextIsolation: true,
 			nodeIntegration: false,
 			sandbox: true
@@ -817,7 +834,7 @@ function createRealElectronAdapter() {
 		const wc = view.webContents;
 		wc.setWindowOpenHandler(() => ({ action: "deny" }));
 		return {
-			partition: BROWSER_PARTITION,
+			partition,
 			attach(win, bounds) {
 				win.contentView.addChildView(view);
 				view.setBounds(bounds);
@@ -1418,7 +1435,9 @@ var BrowserRuntime = class {
 	windowResizeDisposer = null;
 	windowClosedDisposer = null;
 	disposed = false;
-	constructor(adapter, options = {}, askApproval, credentials) {
+	/** Partition name used for newly created tab views (per-user). */
+	partition;
+	constructor(adapter, options = {}, askApproval, credentials, partition) {
 		this.adapter = adapter;
 		this.credentials = credentials;
 		this.options = {
@@ -1432,6 +1451,12 @@ var BrowserRuntime = class {
 			screenshotQuality: options.screenshotQuality ?? 70
 		};
 		this.guard = new BrowserGuard(adapter, askApproval);
+		this.partition = partition ?? BROWSER_PARTITION;
+	}
+	/** Swap the partition used by NEW tab views (user switch). Existing tabs
+	* keep their partition; callers close all tabs first. */
+	setPartition(partition) {
+		this.partition = partition;
 	}
 	options;
 	/** Current browser window state (created + visible). */
@@ -1602,7 +1627,7 @@ var BrowserRuntime = class {
 			if (this.disposed) throw new Error("browser: runtime disposed");
 			if (this.tabs.size >= this.options.maxTabs) throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`);
 			const id = this.nextTabId++;
-			const view = this.adapter.createView();
+			const view = this.adapter.createView(this.partition);
 			const cdp = new CdpSession(view.webContents.cdp);
 			try {
 				await cdp.attach();
@@ -3344,12 +3369,18 @@ function apply(ctx, config = {}) {
 			...request.signal !== void 0 ? { signal: request.signal } : {}
 		});
 	};
+	const currentUser = () => {
+		try {
+			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
+		} catch {
+			return null;
+		}
+	};
 	const credentialResolver = (() => {
 		try {
 			const { ConnectorStore } = createRequire(import.meta.url)("@picoaide/dsh-connectors/store");
-			const store = new ConnectorStore();
 			return async (connectorId) => {
-				const credential = await store.readCredential(connectorId);
+				const credential = await new ConnectorStore({ username: currentUser() }).readCredential(connectorId);
 				if (credential === null) return null;
 				const fields = credential.fields ?? {};
 				const username = typeof fields.username === "string" ? fields.username : void 0;
@@ -3363,8 +3394,17 @@ function apply(ctx, config = {}) {
 			return;
 		}
 	})();
-	const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver);
+	const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver, browserPartitionFor(currentUser()));
 	runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`);
+	ctx.on("pico/session-changed", (next) => {
+		const username = next?.username ?? null;
+		(async () => {
+			await runtime.closeAll(void 0, true);
+			runtime.setPartition(browserPartitionFor(username));
+		})().catch((cause) => {
+			ctx.logger?.error("pico-browser: session change handling failed", cause);
+		});
+	});
 	applyBrowserTools(ctx, runtime);
 	ctx.effect(() => {
 		const guard = (req, res) => {

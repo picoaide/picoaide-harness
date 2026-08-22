@@ -69,6 +69,13 @@ export interface TaskRecord {
   archivedAt?: number
   createdAt: number
   updatedAt: number
+  /**
+   * Display name of the account that created this task (gateway username).
+   * Absent on records persisted before the owner field existed: legacy
+   * records keep pre-upgrade semantics (visible to every session). Tasks
+   * created after the upgrade are owner-scoped.
+   */
+  owner?: string
 }
 
 /** Input for a new task. */
@@ -97,7 +104,7 @@ export function isArchived(task: TaskRecord): boolean {
 }
 
 /** Create a new task record. */
-export function createTask(id: string, input: NewTaskInput, now: number): TaskRecord {
+export function createTask(id: string, input: NewTaskInput, now: number, owner?: string): TaskRecord {
   return {
     id,
     title: input.title,
@@ -107,10 +114,19 @@ export function createTask(id: string, input: NewTaskInput, now: number): TaskRe
     executions: [],
     createdAt: now,
     updatedAt: now,
+    ...(owner === undefined || owner.length === 0 ? {} : { owner }),
     ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
     ...(input.mode === undefined ? {} : { mode: input.mode }),
     ...(input.permission === undefined ? {} : { permission: input.permission }),
   }
+}
+
+/** Whether a task is visible to (and executable by) the given account. */
+export function taskVisibleTo(task: TaskRecord, username: string | null | undefined): boolean {
+  // Legacy records (no owner) stay visible to every session; owner-scoped
+  // records are visible only to their creating account.
+  if (task.owner === undefined) return true
+  return username !== undefined && username !== null && username.length > 0 && task.owner === username
 }
 
 /** Apply a validated patch (immutable update). */

@@ -42,9 +42,12 @@ export declare class HostCronLedger {
     private readonly filePath;
     private lockFd;
     private disposed;
+    /** Current account (gateway username); null when logged out. */
+    private readonly owner;
     constructor(options?: {
         dshHomeDir?: string;
         now?: () => number;
+        owner?: () => string | null;
     });
     private readonly now;
     private acquireLock;

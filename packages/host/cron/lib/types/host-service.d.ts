@@ -7,7 +7,7 @@ import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy';
 import { HostCronLedger } from './host-ledger.ts';
 import { HostCronExecutor } from './host-executor.ts';
 import { HostCronScheduler } from './host-scheduler.ts';
-import type { JobRecord } from './jobs.ts';
+import { type JobRecord } from './jobs.ts';
 import type { CronEventPayload, CronSnapshot, CronAction } from './protocol.ts';
 import type { CronJobRegistration, PicoCronService, PicoTaskService } from './service.ts';
 export interface HostCronServiceOptions {
@@ -25,7 +25,13 @@ export declare class HostCronService implements PicoCronService {
     private active;
     private lastEventJson;
     private readonly now;
+    /** Current account (gateway username); set by the plugin on session change. */
+    private username;
     constructor(api: ApiProxy, options?: HostCronServiceOptions);
+    /** Set the current account (gateway username); null when logged out. */
+    setUsername(username: string | null): void;
+    /** Current account (gateway username). */
+    currentUsername(): string | null;
     start(): void;
     setConfiguration(active: boolean, catchUpMissed: boolean): void;
     snapshot(): CronSnapshot;

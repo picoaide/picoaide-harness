@@ -1,5 +1,6 @@
-import { t as HostCronLedger } from "./host-ledger-nNisVdxm.js";
+import { t as HostCronLedger } from "./host-ledger-Bi3N4tgX.js";
 import { isValidCron, nextRunAtMs } from "./cron.js";
+import { jobVisibleTo } from "./jobs.js";
 import { HostCronExecutor } from "./host-executor.js";
 import { HostCronScheduler } from "./host-scheduler.js";
 import { t as makeCronRoutes } from "./host-routes-DXjUhAFq.js";
@@ -211,15 +212,29 @@ var HostCronService = class {
 	active = true;
 	lastEventJson = "";
 	now;
+	/** Current account (gateway username); set by the plugin on session change. */
+	username = null;
 	constructor(api, options = {}) {
-		this.ledger = options.ledger ?? new HostCronLedger();
+		this.ledger = options.ledger ?? new HostCronLedger({ owner: () => this.username });
 		this.now = options.now ?? Date.now;
 		const executor = options.executor ?? new HostCronExecutor({
 			api,
 			taskService: options.taskService ?? (() => void 0)
 		});
-		this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, { now: this.now });
+		this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, {
+			now: this.now,
+			visible: (job) => jobVisibleTo(job, this.username)
+		});
 		this.ledger.subscribe(() => this.emit());
+	}
+	/** Set the current account (gateway username); null when logged out. */
+	setUsername(username) {
+		this.username = username;
+		this.emit();
+	}
+	/** Current account (gateway username). */
+	currentUsername() {
+		return this.username;
 	}
 	start() {
 		this.scheduler.start();
@@ -237,7 +252,7 @@ var HostCronService = class {
 		return {
 			schemaVersion: 1,
 			revision: state.revision,
-			jobs: state.jobs,
+			jobs: state.jobs.filter((job) => jobVisibleTo(job, this.username)),
 			scheduler: state.scheduler
 		};
 	}
@@ -479,6 +494,17 @@ function apply(ctx, config) {
 	const host = new HostCronService(ctx.apiProxy, { taskService: () => ctx.get("picoTaskService") });
 	host.setConfiguration(config.enabled ?? true, config.catchUpMissed ?? false);
 	host.start();
+	const currentUser = () => {
+		try {
+			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
+		} catch {
+			return null;
+		}
+	};
+	host.setUsername(currentUser());
+	ctx.on("pico/session-changed", (next) => {
+		host.setUsername(next?.username ?? null);
+	});
 	const serviceDisposer = ctx.provide("picoCronService", host);
 	ctx.effect(() => {
 		const disposers = [serviceDisposer];
