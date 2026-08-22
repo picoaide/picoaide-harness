@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import Marketplace from './Marketplace'
 import { request } from '../api'
 
@@ -10,18 +10,12 @@ const SKILLS = [
   { id: 1, name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', git_url: 'https://x/data-extract', git_ref: 'main', enabled: true },
   { id: 2, name: 'legacy', version: '0.9.0', description: '旧版', author: 'seed', git_url: 'https://x/legacy', git_ref: 'main', enabled: false },
 ]
-const MCPS = [
-  { id: 1, name: 'time-now', description: '时间', transport: 'stdio', command: 'date', args: [], url: '', env: { API_KEY: '***', TIMEOUT: '30' }, headers: {}, enabled: true },
-  { id: 2, name: 'old-plugin', description: '旧插件', transport: 'stdio', command: 'date', args: [], url: '', env: {}, headers: {}, enabled: false },
-]
 const DEPTS = [{ id: 1, name: '研发部', parent_id: 0 }, { id: 2, name: '人事部', parent_id: 0 }]
 
 function defaultMock() {
   mockRequest.mockImplementation(async (path: string) => {
     if (path === '/api/admin/departments') return { departments: DEPTS }
     if (path === '/api/admin/skills') return { skills: SKILLS }
-    if (path === '/api/admin/mcp') return { mcp: MCPS }
-    if (path.startsWith('/api/admin/mcp-downloads')) return { downloads: [], total: 0 }
     if (path === '/api/admin/skills/data-extract/grants') return { grants: [{ grantee_type: 'group', grantee: '研发部' }] }
     return {}
   })
@@ -34,13 +28,13 @@ beforeEach(() => {
 })
 
 describe('Marketplace 商城页', () => {
-  it('渲染技能与 MCP 表格,状态徽标按 enabled 展示', async () => {
+  it('渲染技能表格,状态徽标按 enabled 展示', async () => {
     render(<Marketplace />)
     expect(await screen.findByText('data-extract')).toBeInTheDocument()
-    expect(await screen.findByText('time-now')).toBeInTheDocument()
     // H1: enabled=true → 上架;enabled=false → 已下架
     expect(screen.getByText('data-extract').closest('tr')!.textContent).toContain('上架')
     expect(screen.getByText('legacy').closest('tr')!.textContent).toContain('已下架')
+    expect(screen.queryByText('MCP 插件')).not.toBeInTheDocument()
   })
 
   it('技能授权对话框:展示已有组授权并可撤销', async () => {
@@ -62,8 +56,6 @@ describe('Marketplace 商城页', () => {
       if (path === '/api/admin/skills/data-extract/grants' && init?.method === 'PUT') return { ok: true }
       if (path === '/api/admin/departments') return { departments: DEPTS }
       if (path === '/api/admin/skills') return { skills: SKILLS }
-      if (path === '/api/admin/mcp') return { mcp: MCPS }
-      if (path.startsWith('/api/admin/mcp-downloads')) return { downloads: [], total: 0 }
       if (path === '/api/admin/skills/data-extract/grants') return { grants: [] }
       return {}
     })
@@ -98,17 +90,8 @@ describe('Marketplace 商城页', () => {
   it('M1: 已下架技能显示「重新上架」并调用 enable 端点', async () => {
     render(<Marketplace />)
     await screen.findByText('legacy')
-    // 技能表在 MCP 表之前,第一个「重新上架」属于技能行
     fireEvent.click(screen.getAllByRole('button', { name: '重新上架' })[0])
     expect(mockRequest).toHaveBeenCalledWith('/api/admin/skills/legacy/enable', { method: 'POST' })
-  })
-
-  it('M1: 已下架 MCP 显示「重新上架」并调用 enable 端点', async () => {
-    render(<Marketplace />)
-    await screen.findByText('old-plugin')
-    // 第二个「重新上架」属于 MCP 行(技能表在前)
-    fireEvent.click(screen.getAllByRole('button', { name: '重新上架' })[1])
-    expect(mockRequest).toHaveBeenCalledWith('/api/admin/mcp/2/enable', { method: 'POST' })
   })
 
   it('M2: 编辑技能对话框回填并提交 PUT', async () => {
@@ -130,50 +113,14 @@ describe('Marketplace 商城页', () => {
     )
   })
 
-  it('M2+H2: 编辑 MCP 回填掩码凭证,保存时 *** 原样回传(服务端保持原值)', async () => {
-    render(<Marketplace />)
-    await screen.findByText('time-now')
-    fireEvent.click(within(screen.getByText('time-now').closest('tr')!).getByRole('button', { name: '编辑' }))
-    const dialog = within(await screen.findByRole('dialog'))
-    const envInput = dialog.getByLabelText(/环境变量/) as HTMLInputElement
-    expect(envInput.value).toContain('***')
-    expect(envInput.value).toContain('TIMEOUT')
-    fireEvent.click(dialog.getByRole('button', { name: '保存修改' }))
-    await waitFor(() => {
-      const putCall = mockRequest.mock.calls.find(([p, i]) => p === '/api/admin/mcp/1' && i?.method === 'PUT')
-      expect(putCall).toBeTruthy()
-      const body = JSON.parse((putCall![1] as RequestInit).body as string)
-      expect(body.env.API_KEY).toBe('***')
-      expect(body.env.TIMEOUT).toBe('30')
-    })
-  })
-
-  it('M5: 下载记录超过一页时显示总数与下一页', async () => {
-    const items = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, username: `u${i}`, mcp_name: 'time-now', created_at: '2026-01-01T00:00:00Z' }))
-    mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/departments') return { departments: DEPTS }
-      if (path === '/api/admin/skills') return { skills: SKILLS }
-      if (path === '/api/admin/mcp') return { mcp: MCPS }
-      if (path.startsWith('/api/admin/mcp-downloads')) return { downloads: items, total: 25 }
-      return {}
-    })
-    render(<Marketplace />)
-    expect(await screen.findByText('共 25 条')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
-    expect(mockRequest).toHaveBeenCalledWith('/api/admin/mcp-downloads?page=2&size=20')
-  })
-
   it('L3: 空列表显示空态文案', async () => {
     mockRequest.mockImplementation(async (path: string) => {
       if (path === '/api/admin/departments') return { departments: DEPTS }
       if (path === '/api/admin/skills') return { skills: [] }
-      if (path === '/api/admin/mcp') return { mcp: [] }
-      if (path.startsWith('/api/admin/mcp-downloads')) return { downloads: [], total: 0 }
       return {}
     })
     render(<Marketplace />)
     expect(await screen.findByText(/暂无技能/)).toBeInTheDocument()
-    expect(await screen.findByText(/暂无插件/)).toBeInTheDocument()
   })
 
   it('M4: 技能加载失败显示错误与重试,重试成功恢复列表', async () => {
@@ -184,14 +131,10 @@ describe('Marketplace 商城页', () => {
         if (fail) throw new Error('skills 加载失败')
         return { skills: SKILLS }
       }
-      if (path === '/api/admin/mcp') return { mcp: MCPS }
-      if (path.startsWith('/api/admin/mcp-downloads')) return { downloads: [], total: 0 }
       return {}
     })
     render(<Marketplace />)
     expect(await screen.findByText(/技能加载失败/)).toBeInTheDocument()
-    // MCP 卡片不受技能失败影响(独立加载)
-    expect(await screen.findByText('time-now')).toBeInTheDocument()
     fail = false
     fireEvent.click(screen.getByRole('button', { name: '重试' }))
     expect(await screen.findByText('data-extract')).toBeInTheDocument()

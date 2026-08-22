@@ -68,4 +68,4 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 
 ## 5. 管理页访问
 
-`http(s)://<server>/admin/`(webadmin SPA;未构建时返回 "webadmin 未构建")。管理员登录后管理用户/网关/用量/商城/知识库。
+`http(s)://<server>/admin/`(webadmin SPA;未构建时返回 "webadmin 未构建")。管理员登录后管理用户/网关/用量/商城。

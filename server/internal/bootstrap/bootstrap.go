@@ -1,5 +1,5 @@
 // Package bootstrap aggregates the startup configuration for clients
-// (GET /api/config/bootstrap): models + default model + skill/mcp suggestions.
+// (GET /api/config/bootstrap): models + default model + skill suggestions.
 package bootstrap
 
 import (
@@ -13,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -27,11 +26,10 @@ type WebConfig struct {
 // Response is the bootstrap payload. Field names are FIXED: the desktop
 // client BootstrapConfig must align exactly.
 type Response struct {
-	DefaultModel string                `json:"default_model"`
-	Models       []llmgateway.Model    `json:"models"`
-	Skills       []SkillItem           `json:"skills"`
-	MCP          []marketplace.MCPItem `json:"mcp"`
-	Web          WebConfig             `json:"web"`
+	DefaultModel string             `json:"default_model"`
+	Models       []llmgateway.Model `json:"models"`
+	Skills       []SkillItem        `json:"skills"`
+	Web          WebConfig          `json:"web"`
 }
 
 // RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
@@ -66,7 +64,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 }
 
 // Build assembles the bootstrap payload for a specific user: models are
-// global, skill/mcp suggestions are filtered by the caller's grants
+// global, skill suggestions are filtered by the caller's grants
 // (admins see everything; everyone else only granted resources — 部门隔离).
 func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	models, err := llmgateway.ListModels(db)
@@ -100,10 +98,6 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 		}
 		skillItems = append(skillItems, SkillItem{Name: sk.Name, Version: sk.Version, Description: sk.Description})
 	}
-	mcp, err := marketplace.SuggestedMCPForUser(db, user.Username, groups, user.IsAdmin)
-	if err != nil {
-		return nil, err
-	}
 	settings, err := serverstore.GetAllSettings(db)
 	if err != nil {
 		return nil, err
@@ -127,7 +121,6 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 		DefaultModel: defaultModel,
 		Models:       models,
 		Skills:       skillItems,
-		MCP:          mcp,
 		Web:          web,
 	}, nil
 }

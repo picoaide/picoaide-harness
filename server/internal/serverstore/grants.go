@@ -105,89 +105,10 @@ func AccessibleSkillNames(db *sql.DB, username string, groups []string) ([]strin
 	return out, rows.Err()
 }
 
-// ---- mcp ----
-
-// GrantMCP gives a user or group access to an MCP server (idempotent).
-func GrantMCP(db queryer, mcpID int64, grantee string, t GranteeType) error {
-	g, ok := validGrantee(grantee)
-	if !ok {
-		return ErrValidation
-	}
-	_, err := db.Exec("INSERT OR IGNORE INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, ?, ?)", mcpID, t, g)
-	return err
-}
-
-// RevokeMCP removes a grant (idempotent).
-func RevokeMCP(db queryer, mcpID int64, grantee string, t GranteeType) error {
-	g, ok := validGrantee(grantee)
-	if !ok {
-		return ErrValidation
-	}
-	_, err := db.Exec("DELETE FROM mcp_grants WHERE mcp_id = ? AND grantee_type = ? AND grantee = ?", mcpID, t, g)
-	return err
-}
-
-// ListMCPGrants returns every grant on an MCP server.
-func ListMCPGrants(db *sql.DB, mcpID int64) ([]Grant, error) {
-	rows, err := db.Query("SELECT grantee_type, grantee FROM mcp_grants WHERE mcp_id = ? ORDER BY grantee_type, grantee", mcpID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Grant
-	for rows.Next() {
-		var g Grant
-		if err := rows.Scan(&g.GranteeType, &g.Grantee); err != nil {
-			return nil, err
-		}
-		out = append(out, g)
-	}
-	return out, rows.Err()
-}
-
-// AccessibleMCPSet returns the mcp ids granted to a user directly or
-// through their groups (strict default: empty set = nothing visible).
-func AccessibleMCPSet(db *sql.DB, username string, groups []string) (map[int64]bool, error) {
-	var sb strings.Builder
-	sb.WriteString("SELECT DISTINCT mcp_id FROM mcp_grants WHERE (grantee_type = 'user' AND grantee = ?)")
-	args := []any{username}
-	if len(groups) > 0 {
-		sb.WriteString(" OR (grantee_type = 'group' AND (")
-		for i, g := range groups {
-			if i > 0 {
-				sb.WriteString(" OR ")
-			}
-			sb.WriteString("grantee = ? COLLATE NOCASE")
-			args = append(args, g)
-		}
-		sb.WriteString("))")
-	}
-	rows, err := db.Query(sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make(map[int64]bool)
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = true
-	}
-	return out, rows.Err()
-}
-
 // DeleteSkillGrants removes all grants of a skill (resource deletion
 // cascades; old grants must never resurrect a re-created resource).
 func DeleteSkillGrants(db queryer, skillName string) error {
 	_, err := db.Exec("DELETE FROM skill_grants WHERE skill_name = ?", skillName)
-	return err
-}
-
-// DeleteMCPGrants removes all grants of an MCP server.
-func DeleteMCPGrants(db queryer, mcpID int64) error {
-	_, err := db.Exec("DELETE FROM mcp_grants WHERE mcp_id = ?", mcpID)
 	return err
 }
 
@@ -237,32 +158,6 @@ func ReplaceSkillGroupGrants(db *sql.DB, skillName string, groups []string) erro
 		"DELETE FROM skill_grants WHERE skill_name = ? AND grantee_type = 'group'", []any{skillName},
 		func(tx *sql.Tx, name string) error {
 			_, err := tx.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, 'group', ?)", skillName, name)
-			return err
-		},
-		groups)
-}
-
-// ReplaceMCPGroupGrants sets the full department-grant set of an MCP.
-func ReplaceMCPGroupGrants(db *sql.DB, mcpID int64, groups []string) error {
-	return replaceGroupGrants(db,
-		"DELETE FROM mcp_grants WHERE mcp_id = ? AND grantee_type = 'group'", []any{mcpID},
-		func(tx *sql.Tx, name string) error {
-			_, err := tx.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, 'group', ?)", mcpID, name)
-			return err
-		},
-		groups)
-}
-
-// ReplaceFolderGroupGrants sets the full department-grant set of a folder.
-func ReplaceFolderGroupGrants(db *sql.DB, folderID int64, groups []string) error {
-	return replaceGroupGrants(db,
-		"DELETE FROM kb_folder_groups WHERE folder_id = ?", []any{folderID},
-		func(tx *sql.Tx, name string) error {
-			gid, err := GetOrCreateGroup(tx, name)
-			if err != nil {
-				return err
-			}
-			_, err = tx.Exec("INSERT OR IGNORE INTO kb_folder_groups (folder_id, group_id) VALUES (?, ?)", folderID, gid)
 			return err
 		},
 		groups)
