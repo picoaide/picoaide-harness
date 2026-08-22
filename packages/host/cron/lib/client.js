@@ -1573,7 +1573,7 @@ window.__ModuleLoader__.load({
 		* attribute hides the conversation content while the center is active. The
 		* conversation subtree underneath stays mounted and stateful.
 		*/
-		const CONVERSATION_COLUMN_SELECTOR = "[data-pane=\"conversation\"], [class*=\"centerCol\"]";
+		const CONVERSATION_COLUMN_SELECTOR = "[data-pane=\"conversation\"], [class*=\"centerCol\"], [class*=\"ConversationSurface\"], [class*=\"dshDesktopConversationSurface\"]";
 		/** Cross-plugin activation event; detail is the activating panel name. */
 		const ACTIVATE_EVENT = "dsh-panel-activate";
 		const PANEL_NAME = "cron";
