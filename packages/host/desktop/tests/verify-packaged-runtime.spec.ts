@@ -177,8 +177,10 @@ describe('packaged desktop runtime verification', () => {
     )).toThrow('has no native unpacked entries')
     // 至少一个原生条目 + 无 JS 泄漏 -> 通过
     const exists = vi.fn<FileProbe>(filename => {
-      // REQUIRED_MACOS_UNIVERSAL_ENTRIES 是 string[]（.node/.dylib 等绝对路径映射）
-      return REQUIRED_MACOS_UNIVERSAL_ENTRIES.some(path => filename.endsWith(path))
+      // REQUIRED_MACOS_UNIVERSAL_ENTRIES 是 string[]（.node/.dylib 等绝对路径映射）。
+      // 分隔符无关：Windows 上 join 用反斜杠，条目路径用正斜杠——统一后比较。
+      const normalized = filename.replaceAll('\\', '/')
+      return REQUIRED_MACOS_UNIVERSAL_ENTRIES.some(path => normalized.endsWith(path))
     })
     expect(() => verifyPackagedRuntime(
       runtimeContext,
