@@ -1,5 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ConnectorDef } from './types.ts';
+declare module '@deepseek-ai/cordis' {
+    interface Events {
+        'pico/session-changed'(session: {
+            username?: string;
+            token?: string;
+            serverURL?: string;
+        } | null): void;
+    }
+}
 /**
  * Connector framework (mirrors WorkBuddy's connector service):
  * a registry of connector definitions, per-connector auth orchestration

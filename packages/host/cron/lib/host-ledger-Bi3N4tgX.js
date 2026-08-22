@@ -1,5 +1,5 @@
 import { isValidCron } from "./cron.js";
-import { createJob, rollNextRun, settleExecution, startExecution, updateJob } from "./jobs.js";
+import { createJob, jobVisibleTo, rollNextRun, settleExecution, startExecution, updateJob } from "./jobs.js";
 import "./protocol.js";
 import { createHash } from "node:crypto";
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -126,6 +126,8 @@ var HostCronLedger = class {
 	filePath;
 	lockFd;
 	disposed = false;
+	/** Current account (gateway username); null when logged out. */
+	owner;
 	constructor(options = {}) {
 		const dir = join(options.dshHomeDir ?? dshHome(), "cron");
 		mkdirSync(dir, {
@@ -135,6 +137,7 @@ var HostCronLedger = class {
 		this.filePath = join(dir, "ledger.json");
 		this.lockPath = join(dir, "ledger.lock");
 		this.now = options.now ?? Date.now;
+		this.owner = options.owner ?? (() => null);
 		this.acquireLock();
 		this.current = this.load();
 	}
@@ -315,13 +318,18 @@ var HostCronLedger = class {
 			return { state: this.state() };
 		}
 		this.cache.set(requestId, { fingerprint });
+		const targetAction = action.kind === "update" || action.kind === "delete" || action.kind === "enable" || action.kind === "disable" || action.kind === "run" || action.kind === "rerun" ? action : void 0;
+		if (targetAction !== void 0) {
+			const target = this.current.jobs.find((job) => job.id === targetAction.jobId);
+			if (target !== void 0 && !jobVisibleTo(target, this.owner())) throw new Error(`dsh-cron: job ${targetAction.jobId} belongs to another account`);
+		}
 		let opened;
 		let rerun;
 		this.mutate((state) => {
 			switch (action.kind) {
 				case "create": {
 					if (state.jobs.find((job) => job.id === action.id) !== void 0) return false;
-					const job = createJob(action.id, action.input, this.now());
+					const job = createJob(action.id, action.input, this.now(), this.owner() ?? void 0);
 					if (job.enabled) {
 						const seeded = rollNextRun(job, this.now());
 						if (seeded !== void 0) job.nextRunAt = seeded;
@@ -490,6 +498,7 @@ var HostCronLedger = class {
 	* the job just became enabled.
 	*/
 	upsertJob(registration) {
+		const owner = this.owner();
 		this.mutate((state) => {
 			const index = state.jobs.findIndex((job) => job.id === registration.id);
 			const now = this.now();
@@ -499,7 +508,7 @@ var HostCronLedger = class {
 					cron: registration.cron,
 					action: registration.action,
 					...registration.enabled === void 0 ? {} : { enabled: registration.enabled }
-				}, now);
+				}, now, owner ?? void 0);
 				if (job.enabled) {
 					const seeded = rollNextRun(job, now);
 					if (seeded !== void 0) job.nextRunAt = seeded;
@@ -548,4 +557,4 @@ function validateCron(expr) {
 //#endregion
 export { openScheduledRun as n, validateCron as r, HostCronLedger as t };
 
-//# sourceMappingURL=host-ledger-nNisVdxm.js.map
+//# sourceMappingURL=host-ledger-Bi3N4tgX.js.map

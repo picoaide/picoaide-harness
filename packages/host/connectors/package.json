@@ -23,6 +23,10 @@
       "types": "./lib/types/store.d.ts",
       "default": "./lib/store.js"
     },
+    "./user-scope": {
+      "types": "./lib/types/user-scope.d.ts",
+      "default": "./lib/user-scope.js"
+    },
     "./invariant": {
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"

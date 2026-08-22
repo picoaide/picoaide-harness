@@ -1,13 +1,14 @@
+import { userScopePath } from "./user-scope.js";
 import { ConnectorStore } from "./store.js";
 import { CLI_MANIFESTS, cliPlatformKey } from "./cli-manifest.js";
 import { extractArchive, findEntry, readArchiveEntries } from "./archive.js";
 import { salesEasyDef } from "./sales-easy.js";
 import { dingTalkDef } from "./dingtalk.js";
 import { spawn } from "node:child_process";
-import { promises } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, promises, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 //#region src/loopback.ts
 /** IPv4 127/8 predicate (four decimal octets, first == 127). */
@@ -479,8 +480,6 @@ async function runAuth(def, options) {
 * binary size) is missing or mismatched. Downloads are deduplicated across
 * concurrent connects.
 */
-/** Same per-user base as ConnectorStore (`~/.picoaide/connectors`). */
-const DEFAULT_CACHE_DIR = join(homedir(), ".picoaide", "connectors", "cli");
 /**
 * Default bundled-binary directory. In a packaged Electron app the
 * prefetched CLI binaries ship under `<resourcesPath>/cli` (see the desktop
@@ -502,7 +501,7 @@ var CliRuntime = class {
 	downloadTimeoutMs;
 	inflight = /* @__PURE__ */ new Map();
 	constructor(options = {}) {
-		this.cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR;
+		this.cacheDir = options.cacheDir ?? join(userScopePath(options.username), "connectors", "cli");
 		this.bundledDir = options.bundledDir ?? DEFAULT_BUNDLED_DIR;
 		this.manifests = options.manifests ?? CLI_MANIFESTS;
 		this.fetchImpl = options.fetchImpl ?? fetch;
@@ -890,13 +889,47 @@ function exact(handler) {
 }
 function apply(ctx, options = {}) {
 	const defs = dedupeById([...marketplaceDefs, ...options.connectors ?? []], [salesEasyDef, dingTalkDef]);
-	const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {});
-	const cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : void 0);
+	const currentUser = () => {
+		try {
+			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
+		} catch {
+			return null;
+		}
+	};
+	let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() });
+	let cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : { username: currentUser() });
 	const states = /* @__PURE__ */ new Map();
 	const pendingRequests = /* @__PURE__ */ new Map();
 	const mcpDisposers = /* @__PURE__ */ new Map();
 	/** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
 	const pendingFlows = /* @__PURE__ */ new Map();
+	/** Drop all MCP registrations and reset in-memory state (user switch). */
+	const teardownAll = async () => {
+		for (const dispose of mcpDisposers.values()) try {
+			dispose();
+		} catch {}
+		mcpDisposers.clear();
+		for (const flow of pendingFlows.values()) flow.abort(/* @__PURE__ */ new Error("用户已切换，连接流程中止"));
+		pendingFlows.clear();
+		pendingRequests.clear();
+		states.clear();
+	};
+	/** Rebuild per-user store/runtime after a login/logout/switch. */
+	const reconfigureUser = () => {
+		const username = currentUser();
+		migrateLegacyStore(username);
+		if (!options.storeBaseDir) store = new ConnectorStore({ username });
+		if (!options.cliCacheDir) cliRuntime = new CliRuntime({ username });
+	};
+	ctx.on("pico/session-changed", (next) => {
+		(async () => {
+			await teardownAll();
+			reconfigureUser();
+			if (next !== null) await restoreAll();
+		})().catch((cause) => {
+			ctx.logger?.error("pico-connectors: session change handling failed", cause);
+		});
+	});
 	const setState = (id, patch) => {
 		const current = states.get(id) ?? {
 			status: "disconnected",
@@ -1128,28 +1161,29 @@ function apply(ctx, options = {}) {
 		});
 		pendingRequests.delete(id);
 	};
-	ctx.effect(() => {
-		for (const def of defs) (async () => {
-			try {
-				const credential = await store.readCredential(def.id);
-				if (!credential) return;
-				const refreshed = await refreshOAuthToken(def, credential);
-				if ((refreshed ? await store.updateCredential(def.id, refreshed) : credential).accessToken) {
-					await registerMcp(def);
-					setState(def.id, {
-						status: "connected",
-						everConnected: true
-					});
-				}
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`);
+	/** Restore all connector MCP registrations for the CURRENT user. */
+	const restoreAll = async () => {
+		for (const def of defs) try {
+			const credential = await store.readCredential(def.id);
+			if (!credential) continue;
+			const refreshed = await refreshOAuthToken(def, credential);
+			if ((refreshed ? await store.updateCredential(def.id, refreshed) : credential).accessToken) {
+				await registerMcp(def);
 				setState(def.id, {
-					status: "error",
-					error: message
+					status: "connected",
+					everConnected: true
 				});
 			}
-		})();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`);
+			setState(def.id, {
+				status: "error",
+				error: message
+			});
+		}
+	};
+	ctx.effect(() => {
 		return () => {
 			for (const dispose of mcpDisposers.values()) dispose();
 			for (const flow of pendingFlows.values()) flow.abort(/* @__PURE__ */ new Error("插件卸载，连接流程中止"));
@@ -1301,6 +1335,31 @@ function apply(ctx, options = {}) {
 			for (const dispose of disposers) dispose();
 		};
 	}, "pico connectors: http routes");
+	restoreAll().catch((cause) => {
+		ctx.logger?.error("pico-connectors: initial restore failed", cause);
+	});
+}
+/**
+* One-time migration of the pre-2026-08 legacy store dir `~/.picoaide/connectors`
+* into the per-user scope. Runs on every session change but only acts when a
+* real user is logged in, the legacy dir exists, and the target dir does not.
+* Best-effort: a failure leaves the legacy dir in place (the next login
+* retries) and never blocks the app. Anonymous (logged-out) sessions never
+* absorb the legacy data — it is claimed by the first account that logs in.
+*/
+function migrateLegacyStore(username) {
+	if (username === null || username.length === 0) return;
+	try {
+		const legacy = join(homedir(), ".picoaide", "connectors");
+		if (!existsSync(legacy)) return;
+		const target = join(userScopePath(username), "connectors");
+		if (existsSync(target)) return;
+		mkdirSync(join(userScopePath(username)), {
+			recursive: true,
+			mode: 448
+		});
+		renameSync(legacy, target);
+	} catch {}
 }
 //#endregion
 export { apply, inject, name };

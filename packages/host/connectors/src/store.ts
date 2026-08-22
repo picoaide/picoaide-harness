@@ -1,16 +1,10 @@
-/** Per-user connector credential store under the config dir. */
+/** Per-user connector credential store under the product home. */
 
 import { promises as fs } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { userScopePath } from './user-scope.ts'
 
-/**
- * Per-user files under the config dir. Tokens live in
- * `~/.picoaide/connectors/` with private permissions (0700/0600, atomic
- * replace, symlink rejection — mirroring the desktop launcher's state files).
- */
-const CONNECTORS_DIR = join(homedir(), '.picoaide', 'connectors')
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
 const MAX_CREDENTIAL_BYTES = 64 * 1024
@@ -38,6 +32,8 @@ export interface ConnectorCredential {
 export interface ConnectorStoreOptions {
   /** Override the base directory (tests). */
   baseDir?: string
+  /** The logged-in username; per-user scoping when omitted/missing. */
+  username?: string | null
 }
 
 function assertConnectorId(id: string): string {
@@ -61,7 +57,10 @@ export class ConnectorStore {
   private readonly dir: string
 
   constructor(options: ConnectorStoreOptions = {}) {
-    this.dir = options.baseDir ?? CONNECTORS_DIR
+    // Default root: `<dshHome>/users/<encoded-user>/connectors`; a real user
+    // (enterprise session) scopes credentials per account. `anonymous` is the
+    // fallback so unauthenticated state never collides with a user's dir.
+    this.dir = options.baseDir ?? join(userScopePath(options.username), 'connectors')
   }
 
   private path(id: string): string {

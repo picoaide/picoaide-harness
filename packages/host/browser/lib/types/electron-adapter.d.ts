@@ -138,9 +138,9 @@ export interface NativeBrowserWindow {
  * persistent browser partition, and creates the dedicated browser window.
  */
 export interface ElectronAdapter {
-    createView(): NativeView;
+    createView(partition?: string): NativeView;
     /** The AI-control mask view (local translucent page with the takeover button). */
-    createMaskView(): NativeView;
+    createMaskView(partition?: string): NativeView;
     createBrowserWindow(): NativeBrowserWindow;
     showSaveDialog(options: {
         title: string;
@@ -152,9 +152,16 @@ export interface ElectronAdapter {
 }
 /**
  * Persistent browser partition: login sessions survive app restarts and stay
- * isolated from the main application's cookies/storage.
+ * isolated from the main application's cookies/storage. The partition name is
+ * per-user (`persist:agent-browser-<encoded-user>`), so a user switch never
+ * exposes A's website logins to B. The username is hex-encoded with the same
+ * scheme as the connectors user scope (no separators, no dots).
  */
-export declare const BROWSER_PARTITION = "persist:agent-browser";
+export declare function encodePartitionSegment(segment: string): string;
+/** Partition name for a logged-in (or anonymous) user. */
+export declare function browserPartitionFor(username: string | null | undefined): string;
+/** Legacy fixed partition name (pre-user-scope); kept for tests/back-compat. */
+export declare const BROWSER_PARTITION: string;
 /** Height (DIP) of the control-shell toolbar area overlaid by tab views. */
 export declare const BROWSER_SHELL_TOOLBAR_HEIGHT = 84;
 /** Default browser window size (DIP). */

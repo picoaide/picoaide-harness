@@ -29,7 +29,7 @@ export interface ResolvedCommand {
 /** Progress callback surfaced to the connect UI (e.g. "正在下载…"). */
 export type CliProgress = (message: string) => void;
 export interface CliRuntimeOptions {
-    /** Cache root; defaults to `<store dir>/cli` (mirrors ConnectorStore). */
+    /** Cache root; defaults to `<user scope>/cli` (mirrors ConnectorStore). */
     cacheDir?: string;
     /** Manifests override (tests). */
     manifests?: ReadonlyMap<string, CliBinaryManifest>;
@@ -44,6 +44,8 @@ export interface CliRuntimeOptions {
      * Layout: `<bundledDir>/<command>/<version>/<binaryName>`.
      */
     bundledDir?: string;
+    /** The logged-in username; per-user scoping when omitted/missing. */
+    username?: string | null;
 }
 export declare class CliRuntime {
     private readonly cacheDir;

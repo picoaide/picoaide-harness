@@ -35,6 +35,14 @@ export interface JobRecord {
     cron: string;
     action: CronJobAction;
     enabled: boolean;
+    /**
+     * Display name of the account that created this job (gateway username).
+     * Absent on records persisted before the owner field existed: those keep
+     * their pre-upgrade semantics (executable by whoever is logged in) and are
+     * returned to every session for visibility. Jobs created after the upgrade
+     * are owner-scoped: only the same account can see/execute them.
+     */
+    owner?: string;
     /** Next matching instant (Host local time), rolled by the scheduler. */
     nextRunAt?: number;
     /** Last successful trigger time (ms epoch). */
@@ -64,7 +72,9 @@ export declare function startExecution(id: string, now: number): ExecutionRecord
 /** Settle a pending execution with a result and optional error. */
 export declare function settleExecution(execution: ExecutionRecord, result: ExecutionResult, now: number, error?: string): ExecutionRecord;
 /** Build a new job record from validated input. */
-export declare function createJob(id: string, input: NewJobInput, now: number): JobRecord;
+export declare function createJob(id: string, input: NewJobInput, now: number, owner?: string): JobRecord;
+/** Whether a job is visible to (and executable by) the given account. */
+export declare function jobVisibleTo(job: JobRecord, username: string | null | undefined): boolean;
 /** Apply a validated patch to an existing job record (immutable update). */
 export declare function updateJob(job: JobRecord, patch: JobUpdatePatch, now: number): JobRecord;
 /**

@@ -10,6 +10,15 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+declare module '@deepseek-ai/cordis' {
+    interface Events {
+        'pico/session-changed'(session: {
+            username?: string;
+            token?: string;
+            serverURL?: string;
+        } | null): void;
+    }
+}
 export declare const name = "pico-cron";
 /** Required Host services (cordis inject waiting). */
 export declare const inject: string[];

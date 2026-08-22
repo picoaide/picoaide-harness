@@ -85,6 +85,15 @@ export class UsageService {
     }, this.debounceMs)
   }
 
+  /** Drop the cached snapshot immediately (logout/user switch). */
+  clear(): void {
+    if (this.debounceTimer !== null) {
+      clearTimeout(this.debounceTimer)
+      this.debounceTimer = null
+    }
+    this.snapshot = EMPTY_SNAPSHOT
+  }
+
   /**
    * Immediate single-flight refresh. Manual refresh buttons call this; the
    * returned promise resolves to the post-refresh snapshot.

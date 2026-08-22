@@ -1,15 +1,9 @@
+import { userScopePath } from "./user-scope.js";
 import { promises } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 //#region src/store.ts
-/** Per-user connector credential store under the config dir. */
-/**
-* Per-user files under the config dir. Tokens live in
-* `~/.picoaide/connectors/` with private permissions (0700/0600, atomic
-* replace, symlink rejection — mirroring the desktop launcher's state files).
-*/
-const CONNECTORS_DIR = join(homedir(), ".picoaide", "connectors");
+/** Per-user connector credential store under the product home. */
 const DIRECTORY_MODE = 448;
 const FILE_MODE = 384;
 const MAX_CREDENTIAL_BYTES = 64 * 1024;
@@ -36,7 +30,7 @@ async function ensurePrivateDirectory(dir) {
 var ConnectorStore = class {
 	dir;
 	constructor(options = {}) {
-		this.dir = options.baseDir ?? CONNECTORS_DIR;
+		this.dir = options.baseDir ?? join(userScopePath(options.username), "connectors");
 	}
 	path(id) {
 		const safe = assertConnectorId(id);

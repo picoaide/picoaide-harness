@@ -45,17 +45,23 @@ function settleExecution(execution, result, now, error) {
 	};
 }
 /** Build a new job record from validated input. */
-function createJob(id, input, now) {
+function createJob(id, input, now, owner) {
 	return {
 		id,
 		name: input.name,
 		cron: input.cron,
 		action: input.action,
 		enabled: input.enabled ?? false,
+		...owner === void 0 || owner.length === 0 ? {} : { owner },
 		executions: [],
 		createdAt: now,
 		updatedAt: now
 	};
+}
+/** Whether a job is visible to (and executable by) the given account. */
+function jobVisibleTo(job, username) {
+	if (job.owner === void 0) return true;
+	return username !== void 0 && username !== null && username.length > 0 && job.owner === username;
 }
 /** Apply a validated patch to an existing job record (immutable update). */
 function updateJob(job, patch, now) {
@@ -77,6 +83,6 @@ function rollNextRun(job, fromMs) {
 	return nextRunAtMs(job.cron, base);
 }
 //#endregion
-export { createJob, isCronJobAction, isExecutionResult, rollNextRun, settleExecution, startExecution, updateJob };
+export { createJob, isCronJobAction, isExecutionResult, jobVisibleTo, rollNextRun, settleExecution, startExecution, updateJob };
 
 //# sourceMappingURL=jobs.js.map

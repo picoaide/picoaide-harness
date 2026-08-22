@@ -14,6 +14,7 @@ export default defineConfig([
       dingtalk: 'src/dingtalk.ts',
       'cli-manifest': 'src/cli-manifest.ts',
       archive: 'src/archive.ts',
+      'user-scope': 'src/user-scope.ts',
     },
     outDir: 'lib',
     format: 'esm',

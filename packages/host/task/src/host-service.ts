@@ -5,7 +5,7 @@
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { HostTaskLedger } from './host-ledger.ts'
 import { HostExecutionRunner, SessionLaunchError, type SessionSummary } from './host-runner.ts'
-import type { TaskRecord } from './tasks.ts'
+import { taskVisibleTo, type TaskRecord } from './tasks.ts'
 import type { TaskSnapshot, TaskAction } from './protocol.ts'
 import type { PicoTaskService } from './service.ts'
 
@@ -26,12 +26,23 @@ export class HostTaskService implements PicoTaskService {
   private pollInFlight = false
   private active = true
   private disposed = false
+  /** Current account (gateway username); null when logged out. */
+  private username: string | null = null
 
   constructor(api: ApiProxy, options: HostTaskServiceOptions = {}) {
-    this.ledger = options.ledger ?? new HostTaskLedger()
+    // The ledger stamps new tasks with and enforces target actions against
+    // the current account (`owner()`), read through the service so a session
+    // change takes effect immediately.
+    this.ledger = options.ledger ?? new HostTaskLedger({ owner: () => this.username })
     this.runner = options.runner ?? new HostExecutionRunner(api)
     this.pollMs = options.pollMs ?? SESSION_POLL_MS
     this.ledger.subscribe(() => this.emit())
+  }
+
+  /** Set the current account (gateway username); null when logged out. */
+  setUsername(username: string | null): void {
+    this.username = username
+    this.emit()
   }
 
   start(): void {
@@ -53,7 +64,11 @@ export class HostTaskService implements PicoTaskService {
 
   snapshot(): TaskSnapshot {
     const state = this.ledger.state()
-    return { schemaVersion: 1, revision: state.revision, tasks: state.tasks }
+    return {
+      schemaVersion: 1,
+      revision: state.revision,
+      tasks: state.tasks.filter(task => taskVisibleTo(task, this.username)),
+    }
   }
 
   getSnapshot(): TaskSnapshot {
@@ -61,7 +76,7 @@ export class HostTaskService implements PicoTaskService {
   }
 
   getTask(taskId: string): TaskRecord | undefined {
-    return this.ledger.state().tasks.find(task => task.id === taskId)
+    return this.ledger.state().tasks.find(task => task.id === taskId && taskVisibleTo(task, this.username))
   }
 
   subscribe(listener: () => void): () => void {

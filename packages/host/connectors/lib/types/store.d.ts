@@ -1,4 +1,4 @@
-/** Per-user connector credential store under the config dir. */
+/** Per-user connector credential store under the product home. */
 export interface ConnectorCredential {
     /** OAuth access token. */
     accessToken?: string;
@@ -14,6 +14,8 @@ export interface ConnectorCredential {
 export interface ConnectorStoreOptions {
     /** Override the base directory (tests). */
     baseDir?: string;
+    /** The logged-in username; per-user scoping when omitted/missing. */
+    username?: string | null;
 }
 export declare class ConnectorStore {
     private readonly dir;

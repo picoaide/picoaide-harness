@@ -22,6 +22,15 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+declare module '@deepseek-ai/cordis' {
+    interface Events {
+        'pico/session-changed'(session: {
+            username?: string;
+            token?: string;
+            serverURL?: string;
+        } | null): void;
+    }
+}
 /** Cordis plugin name used by loader diagnostics. */
 export declare const name = "pico-browser";
 /** Services required by the embedded browser. */
