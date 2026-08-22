@@ -695,7 +695,11 @@ export class BrowserRuntime {
    * Close the whole browser (all tabs). The dedicated window stays alive
    * (hidden) so the user can wake it from the sidebar — only plugin teardown
    * truly destroys it. Tabs are dropped; the next `browser_open` recreates
-   * them. `user=true` (shell 清除) bypasses the takeover mutex.
+   * them. `user=true` (shell 清除 / session switch) still bypasses the
+   * mutex of the *queued* agents but takes the control lock first so an
+   * in-flight agent operation (navigate/click/type on a tab being
+   * destroyed) is paused until teardown finishes — no concurrent use of a
+   * discarded tab (2026-08-22, multi-user isolation race).
    */
   async closeAll(signal?: AbortSignal, user = false): Promise<void> {
     const body = async (): Promise<void> => {
@@ -715,7 +719,14 @@ export class BrowserRuntime {
       this.record('browser_close', 0, 'close browser')
       this.hideWindow()
     }
-    if (user) return await body()
+    if (user) {
+      this.mutex.take()
+      try {
+        return await body()
+      } finally {
+        this.mutex.release()
+      }
+    }
     return await this.agentRun('browser_close', body, signal)
   }
 
