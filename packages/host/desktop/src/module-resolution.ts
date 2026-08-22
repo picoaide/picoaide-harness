@@ -12,11 +12,19 @@ function isBareSpecifier(specifier: string): boolean {
 }
 
 /**
- * Resolve Cordis Loader bare imports from the selected persistent profile.
+ * Resolve Cordis Loader bare imports from the selected persistent profile,
+ * falling back to the desktop application tree (physical in dev, inside
+ * app.asar when packaged — Electron's resolver understands asar paths).
+ *
+ * Profile-local packages resolve through Node's own parent-walk from the
+ * profile directory (the profile's node_modules). When that fails (an
+ * in-box package present only in the application tree), the desktop anchor
+ * is tried via `import.meta.resolve`, which is asar-aware inside Electron.
  * @param profileBaseUrl - file URL inside the profile that owns plugin dependencies.
  * @returns an idempotent hook disposer.
  */
 export function installProfilePackageResolver(profileBaseUrl: string): () => void {
+  const desktopAnchor = new URL('../', import.meta.url).href
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
       const fromLoader = context.parentURL === LOADER_ENTRY_URL
@@ -26,7 +34,25 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
       if (!fromLoader || !isBareSpecifier(specifier)) {
         return nextResolve(specifier, context)
       }
-      return nextResolve(specifier, { ...context, parentURL: profileBaseUrl })
+      // 1. Profile-local packages: Node walks from the profile directory.
+      try {
+        const fromProfile = nextResolve(specifier, { ...context, parentURL: profileBaseUrl })
+        if (fromProfile !== undefined) {
+          return fromProfile
+        }
+      } catch {
+        // fall through to the desktop tree
+      }
+      // 2. Desktop application tree (physical or asar virtual path).
+      try {
+        const fromDesktop = import.meta.resolve(specifier, desktopAnchor)
+        if (fromDesktop !== undefined) {
+          return { shortCircuit: true, url: fromDesktop }
+        }
+      } catch {
+        // preserve the original resolution error below
+      }
+      return nextResolve(specifier, context)
     },
   })
   let active = true
