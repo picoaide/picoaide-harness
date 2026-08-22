@@ -20,7 +20,7 @@ import type { TaskController } from './controller.ts'
 import { TaskBoard } from './TaskBoard.tsx'
 import { TASK_ACTIVE_ATTR } from './TaskTrigger.tsx'
 
-const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"]'
+const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"], [class*="ConversationSurface"], [class*="dshDesktopConversationSurface"]'
 /** Cross-plugin activation event; detail is the activating panel name. */
 const ACTIVATE_EVENT = 'dsh-panel-activate'
 const PANEL_NAME = 'task'
