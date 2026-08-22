@@ -1,8 +1,7 @@
-import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { join } from 'node:path'
 import type { DesktopShellSpec } from '../src/runtime.ts'
 
-const terminal = vi.hoisted(() => ({ open: vi.fn() }))
 const diagnostics = vi.hoisted(() => ({ export: vi.fn() }))
 const updater = vi.hoisted(() => ({ download: vi.fn() }))
 const childProcess = vi.hoisted(() => {
@@ -30,11 +29,6 @@ const childProcess = vi.hoisted(() => {
     spawn: vi.fn(() => child),
   }
 })
-
-vi.mock('../src/desktop-terminal.ts', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/desktop-terminal.ts')>(),
-  openDesktopTerminal: terminal.open,
-}))
 
 vi.mock('../src/diagnostic-export.ts', () => ({
   exportDesktopDiagnostics: diagnostics.export,
@@ -205,7 +199,6 @@ vi.mock('electron', () => ({
 }))
 
 const spec: DesktopShellSpec = {
-  mode: 'compatibility',
   width: 1280,
   height: 840,
   minWidth: 900,
@@ -221,7 +214,6 @@ const spec: DesktopShellSpec = {
   readLocalePreference: vi.fn(() => undefined),
   readThemeSource: vi.fn(() => 'system' as const),
   requestQuit: () => {},
-  requestModeChange: vi.fn(async () => {}),
 }
 
 describe('Electron compatibility runtime', () => {
@@ -250,8 +242,9 @@ describe('Electron compatibility runtime', () => {
     vi.restoreAllMocks()
   })
 
-  it('uses the native macOS frame, Dock icon, and template tray image', async () => {
+  it('uses the native macOS advanced frame, Dock icon, and template tray image', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    electron.nativeTheme.themeSource = 'system'
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
     const release = runtime.schedule(spec)
@@ -272,32 +265,21 @@ describe('Electron compatibility runtime', () => {
         sandbox: true,
         webSecurity: true,
       },
+      titleBarStyle: 'hiddenInset',
+      transparent: true,
+      vibrancy: 'sidebar',
     }))
     expect(options).not.toHaveProperty('autoHideMenuBar')
-    for (const option of [
-      'frame',
-      'titleBarStyle',
-      'titleBarOverlay',
-      'trafficLightPosition',
-      'transparent',
-      'vibrancy',
-      'visualEffectState',
-      'backgroundMaterial',
-      'roundedCorners',
-      'thickFrame',
-    ]) {
-      expect(options).not.toHaveProperty(option)
-    }
     expect(electron.browserWindows[0]?.accessibleTitle).toBe('PicoAide Harness')
-    expect(spec.readThemeSource).not.toHaveBeenCalled()
+    expect(spec.readThemeSource).toHaveBeenCalled()
     expect(electron.nativeTheme.themeSource).toBe('system')
     expect(electron.browserWindows[0]?.removeMenu).not.toHaveBeenCalled()
     expect(electron.app.dock.setIcon).toHaveBeenCalledWith(electron.appIcon)
     expect(electron.templateIcon.setTemplateImage).toHaveBeenCalledWith(true)
     expect(electron.trays[0]?.image).toBe(electron.templateIcon)
-    expect(electron.menuTemplates[0]).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'Switch to Advanced Mode', enabled: true }),
-    ]))
+    expect(electron.menuTemplates.some(template => template.some(
+      item => (item as { label?: string }).label === 'Switch to Advanced Mode',
+    ))).toBe(false)
 
     const titleListener = electron.browserWindowOn.mock.calls.find(([event]) => event === 'page-title-updated')?.[1]
     expect(titleListener).toEqual(expect.any(Function))
@@ -384,7 +366,6 @@ describe('Electron compatibility runtime', () => {
     expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
       .toEqual(expect.arrayContaining([
         '打开 PicoAide Harness',
-        '切换到高级模式',
         '退出',
       ]))
 
@@ -393,7 +374,6 @@ describe('Electron compatibility runtime', () => {
     expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
       .toEqual(expect.arrayContaining([
         'Open PicoAide Harness',
-        'Switch to Advanced Mode',
         'Quit',
       ]))
 
@@ -403,7 +383,6 @@ describe('Electron compatibility runtime', () => {
     expect((electron.menuTemplates.at(-1) as Array<{ label?: string }>).map(item => item.label))
       .toEqual(expect.arrayContaining([
         '打开 PicoAide Harness',
-        '切换到高级模式',
         '退出',
       ]))
 
@@ -488,23 +467,6 @@ describe('Electron compatibility runtime', () => {
     await release()
   })
 
-  it('persists the opposite mode when its tray command is clicked', async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
-    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-    const requestModeChange = vi.fn(async () => {})
-    const runtime = new ElectronDesktopRuntime(async () => {})
-    const release = runtime.schedule({ ...spec, requestModeChange })
-
-    await runtime.mountScheduled()
-    const item = (electron.menuTemplates[0] as Array<{ label?: string, click?: () => void }>)
-      .find(candidate => candidate.label === 'Switch to Advanced Mode')
-    expect(item).toBeDefined()
-    item?.click?.()
-    await vi.waitFor(() => { expect(requestModeChange).toHaveBeenCalledWith('advanced') })
-
-    await release()
-  })
-
   it('rebuilds ordered effect-scoped tray contributions without replacing native commands', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
@@ -538,7 +500,6 @@ describe('Electron compatibility runtime', () => {
       'Open PicoAide Harness', undefined,
       'Earlier Tool', 'Later Tool', undefined,
       'Check for Updates…', undefined,
-      'Switch to Advanced Mode', undefined,
       'Quit',
     ])
     expect(electron.menuTemplates.at(-1)).toEqual(expect.arrayContaining([
@@ -594,49 +555,6 @@ describe('Electron compatibility runtime', () => {
     await vi.waitFor(() => { expect(invoke).toHaveBeenCalledOnce() })
 
     await release()
-  })
-
-  it('opens the active profile through the packaged terminal adapter', async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
-    Object.defineProperty(process.versions, 'electron', {
-      configurable: true,
-      value: '43.4.0',
-    })
-    try {
-      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-      const runtime = new ElectronDesktopRuntime(async () => {})
-      runtime.configureTerminal({
-        profileName: 'desktop',
-        profileDir: '/tmp/dsh-home/profiles/desktop',
-        homeDir: '/tmp/dsh-home',
-      })
-
-      runtime.openTerminal()
-
-      expect(terminal.open).toHaveBeenCalledWith(expect.objectContaining({
-        platform: 'darwin',
-        appExecutable: process.execPath,
-        electronVersion: '43.4.0',
-        profileName: 'desktop',
-        productVersion: '2.0.1',
-        profileDir: '/tmp/dsh-home/profiles/desktop',
-        homeDir: '/tmp/dsh-home',
-        spawn: expect.any(Function),
-        onLaunchError: expect.any(Function),
-      }))
-      const terminalOptions = terminal.open.mock.calls[0]?.[0]
-      expect(terminalOptions.dshBootstrapPath.endsWith(join('src', 'desktop-cli.js'))).toBe(true)
-      expect(terminalOptions.pnpmBinPath.endsWith(join('node_modules', 'pnpm', 'bin', 'pnpm.mjs'))).toBe(true)
-      expect(dirname(terminalOptions.stateDir)).toBe(join('/tmp/dsh-desktop-user-data', 'cli'))
-      expect(basename(terminalOptions.stateDir)).toMatch(/^[a-f0-9]{64}$/u)
-      expect(() => runtime.configureTerminal({
-        profileName: 'desktop',
-        profileDir: '/other',
-        homeDir: '/other',
-      })).toThrow('already configured')
-    } finally {
-      delete (process.versions as { electron?: string }).electron
-    }
   })
 
   it('coalesces concurrent diagnostic exports and reveals the completed archive', async () => {
@@ -721,46 +639,9 @@ describe('Electron compatibility runtime', () => {
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to export diagnostics: disk is full'))
   })
 
-  it('shows native errors for synchronous and asynchronous terminal launch failures', async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
-    Object.defineProperty(process.versions, 'electron', {
-      configurable: true,
-      value: '43.4.0',
-    })
-    try {
-      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-      const runtime = new ElectronDesktopRuntime(async () => {})
-      runtime.configureTerminal({
-        profileName: 'desktop',
-        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
-        homeDir: 'C:\\Users\\Example\\.dsh',
-      })
-      terminal.open.mockImplementationOnce(() => { throw new Error('cannot create launcher') })
-
-      expect(() => { runtime.openTerminal() }).not.toThrow()
-      expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
-        'Unable to Open DSH Terminal',
-        'cannot create launcher',
-      )
-
-      terminal.open.mockImplementationOnce((options: { onLaunchError: (cause: Error) => void }) => {
-        options.onLaunchError(new Error('launcher exited with code 1'))
-      })
-      runtime.openTerminal()
-      expect(electron.dialog.showErrorBox).toHaveBeenLastCalledWith(
-        'Unable to Open DSH Terminal',
-        'launcher exited with code 1',
-      )
-      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to open terminal'))
-    } finally {
-      delete (process.versions as { electron?: string }).electron
-    }
-  })
-
   it('shows native recovery when the renderer Loader reports a failed plugin', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
-    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 2, checkboxChecked: false })
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const onRendererBoot = vi.fn()
     const runtime = new ElectronDesktopRuntime(async () => {}, onRendererBoot)
@@ -782,7 +663,7 @@ describe('Electron compatibility runtime', () => {
       title: 'Plugin Recovery',
       message: 'DSH Desktop could not load all plugins.',
       detail: expect.stringContaining('dsh-vision-router'),
-      buttons: ['Open DSH Terminal', 'Restart DSH Desktop', 'Dismiss'],
+      buttons: ['Restart DSH Desktop', 'Dismiss'],
     }))
     const recoveryCalls = electron.dialog.showMessageBox.mock.calls as unknown as Array<[{ detail?: string }]>
     expect(recoveryCalls[0]?.[0].detail).toContain('vision_crop')
@@ -800,36 +681,9 @@ describe('Electron compatibility runtime', () => {
     expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
   })
 
-  it('opens the active profile terminal from plugin recovery', async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
-    Object.defineProperty(process.versions, 'electron', {
-      configurable: true,
-      value: '43.4.0',
-    })
-    try {
-      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-      const runtime = new ElectronDesktopRuntime(async () => {})
-      runtime.configureTerminal({
-        profileName: 'desktop',
-        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
-        homeDir: 'C:\\Users\\Example\\.dsh',
-      })
-
-      runtime.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
-      await vi.waitFor(() => { expect(terminal.open).toHaveBeenCalledOnce() })
-
-      expect(terminal.open).toHaveBeenCalledWith(expect.objectContaining({
-        profileName: 'desktop',
-        profileDir: 'C:\\Users\\Example\\.dsh\\profiles\\desktop',
-      }))
-    } finally {
-      delete (process.versions as { electron?: string }).electron
-    }
-  })
-
   it('requests an orderly restart from plugin recovery', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
-    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 0, checkboxChecked: false })
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const restart = vi.fn(async () => {})
     const runtime = new ElectronDesktopRuntime(restart)
@@ -997,13 +851,13 @@ describe('Electron compatibility runtime', () => {
     expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
   })
 
-  it('uses advanced macOS material options and offers compatibility mode', async () => {
+  it('uses advanced macOS material options with the fixed shell presentation', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     electron.nativeTheme.themeSource = 'light'
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
     const readThemeSource = vi.fn(() => 'dark' as const)
-    const release = runtime.schedule({ ...spec, mode: 'advanced', readThemeSource })
+    const release = runtime.schedule({ ...spec, readThemeSource })
 
     runtime.setThemeSource('system')
     expect(electron.nativeTheme.themeSource).toBe('light')
@@ -1017,33 +871,15 @@ describe('Electron compatibility runtime', () => {
       transparent: true,
       vibrancy: 'sidebar',
     }))
-    expect(electron.menuTemplates[0]).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'Switch to Compatibility Mode', enabled: true }),
-    ]))
+    expect(electron.menuTemplates.some(template => template.some(
+      item => (item as { label?: string }).label === 'Switch to Compatibility Mode',
+    ))).toBe(false)
 
     runtime.setThemeSource('system')
     expect(electron.nativeTheme.themeSource).toBe('system')
     await release()
-    expect(electron.nativeTheme.themeSource).toBe('light')
+    expect(electron.nativeTheme.themeSource).toBe('system')
     runtime.setThemeSource('dark')
-    expect(electron.nativeTheme.themeSource).toBe('light')
-  })
-
-  it('restores the preceding native appearance when advanced loading fails', async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
-    electron.nativeTheme.themeSource = 'light'
-    electron.loadURL.mockRejectedValueOnce(new Error('renderer unavailable'))
-    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
-    const runtime = new ElectronDesktopRuntime(async () => {})
-    const release = runtime.schedule({
-      ...spec,
-      mode: 'advanced',
-      readThemeSource: () => 'dark',
-    })
-
-    await expect(runtime.mountScheduled()).rejects.toThrow('renderer unavailable')
-    expect(electron.nativeTheme.themeSource).toBe('dark')
-    await expect(release()).rejects.toThrow('renderer unavailable')
-    expect(electron.nativeTheme.themeSource).toBe('light')
+    expect(electron.nativeTheme.themeSource).toBe('system')
   })
 })
