@@ -214,22 +214,26 @@ export async function smokePackagedDiagnosticWorker(
     const libDir = join(root, 'lib')
     mkdirSync(libDir, { recursive: true })
     const entries = listPackage(archivePath, { isPack: false })
-    for (const entry of entries) {
-      if (!entry.startsWith('/lib/') || !entry.endsWith('.js')) continue
-      const name = entry.slice('/lib/'.length)
-      writeFileSync(join(libDir, name), extractFile(archivePath, `lib/${name}`))
+    for (const rawEntry of entries) {
+      const entry = normalizeArchiveEntry(rawEntry)
+      if (!entry.startsWith('lib/') || !entry.endsWith('.js')) continue
+      const name = entry.slice('lib/'.length)
+      // extractFile re-joins with the platform separator, so pass the exact
+      // archive-relative spelling (rawEntry minus its leading separator) —
+      // re-synthesizing with '/' would mismatch on Windows (`\lib\...`).
+      writeFileSync(join(libDir, name), extractFile(archivePath, rawEntry.replace(/^[/\\]+/u, '')))
     }
     // The worker imports the third-party adm-zip package; extract its files too.
-    for (const entry of entries) {
-      if (!entry.startsWith('/node_modules/adm-zip/')) continue
+    for (const rawEntry of entries) {
+      const entry = normalizeArchiveEntry(rawEntry)
+      if (!entry.startsWith('node_modules/adm-zip/')) continue
       // listPackage yields directory entries too; skip extensionless paths
       // (extractFile fails on dirs).
       const baseName = entry.slice(entry.lastIndexOf('/') + 1)
       if (!baseName.includes('.')) continue
-      const rel = entry.slice(1) // drop leading slash
-      const dest = join(root, rel)
+      const dest = join(root, entry)
       mkdirSync(dirname(dest), { recursive: true })
-      writeFileSync(dest, extractFile(archivePath, rel))
+      writeFileSync(dest, extractFile(archivePath, rawEntry.replace(/^[/\\]+/u, '')))
     }
     writeFileSync(workerTmp, extractFile(archivePath, 'lib/diagnostic-export-worker.js'))
   } catch (cause) {
