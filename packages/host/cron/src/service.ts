@@ -43,6 +43,8 @@ export interface PicoCronService {
   unregisterJob(id: string): void
   /** List all jobs (deep copy). */
   listJobs(): JobRecord[]
+  /** List jobs visible to the current account (owner-filtered read). */
+  listVisibleJobs(): JobRecord[]
   /** Current full snapshot (revision, jobs, scheduler). */
   getSnapshot(): CronSnapshot
   /** Subscribe to snapshot changes; returns an unsubscribe function. */
