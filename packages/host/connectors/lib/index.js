@@ -5,7 +5,7 @@ import { extractArchive, findEntry, readArchiveEntries } from "./archive.js";
 import { salesEasyDef } from "./sales-easy.js";
 import { dingTalkDef } from "./dingtalk.js";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, promises, renameSync } from "node:fs";
+import { existsSync, mkdirSync, promises, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -1346,6 +1346,13 @@ function apply(ctx, options = {}) {
 * Best-effort: a failure leaves the legacy dir in place (the next login
 * retries) and never blocks the app. Anonymous (logged-out) sessions never
 * absorb the legacy data — it is claimed by the first account that logs in.
+*
+* TOCTOU hardening (2026-08-22): outside the `existsSync(target)` check the
+* claim is serialized through an atomic marker file created with `wx`
+* (O_EXCL). Whichever session/process creates the marker first wins the
+* legacy data; a loser finds the marker already present and returns quietly:
+* no double-rename, no lost update. The marker is removed after the rename so
+* a later real user can retry if the first claim found an empty store.
 */
 function migrateLegacyStore(username) {
 	if (username === null || username.length === 0) return;
@@ -1358,7 +1365,20 @@ function migrateLegacyStore(username) {
 			recursive: true,
 			mode: 448
 		});
-		renameSync(legacy, target);
+		const claim = join(userScopePath(username), ".legacy-claim");
+		try {
+			writeFileSync(claim, `${username}\n`, {
+				mode: 384,
+				flag: "wx"
+			});
+		} catch {
+			return;
+		}
+		try {
+			renameSync(legacy, target);
+		} finally {
+			rmSync(claim, { force: true });
+		}
 	} catch {}
 }
 //#endregion

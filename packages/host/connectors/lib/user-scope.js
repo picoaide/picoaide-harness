@@ -54,6 +54,13 @@ function dshHome() {
 * resolves inside the users root even for hostile (or non-ASCII) account
 * names. The `~` escape introducer is unambiguous because `~` itself is
 * encoded (`~7E~`), so the output is injective (no two inputs collide).
+*
+* CROSS-PACKAGE CONSTRAINT (2026-08-22): `@picoaide/dsh-browser`
+* `encodePartitionSegment` (electron-adapter.ts) mirrors this encoding
+* byte-for-byte (kept separate because cross-package runtime imports are
+* forbidden). Never diverge; the empty-string fallback differs on purpose
+* (`~<uuid>~` here, `anonymous` there) and cannot collide because a
+* directory segment with `~` is never equal to the literal `anonymous`.
 */
 function encodeSegment(segment) {
 	let out = "";
