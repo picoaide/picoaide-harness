@@ -136,6 +136,10 @@ export class BrowserRuntime {
   private disposed = false
   /** Partition name used for newly created tab views (per-user). */
   private partition: string
+  /** Whether an agent browser operation is currently in flight (mask status). */
+  private busy = false
+  /** The agent tool currently executing ('' when idle). */
+  private busyTool = ''
 
   constructor(
     private readonly adapter: ElectronAdapter,
@@ -194,6 +198,21 @@ export class BrowserRuntime {
     return this.mutex.controlled
   }
 
+  /** Whether an agent browser operation is running right now. */
+  get isBusy(): boolean {
+    return this.busy
+  }
+
+  /** The agent tool currently executing ('' when idle). */
+  get busyToolName(): string {
+    return this.busyTool
+  }
+
+  /** Latest completed agent operation (mask "recent activity" line). */
+  get latestOp(): BrowserOpLogEntry | undefined {
+    return this.ops.at(-1)
+  }
+
   /** Id of the visible tab, or undefined when none is open. */
   currentTabId(): number | undefined {
     return this.visibleTabId
@@ -237,8 +256,21 @@ export class BrowserRuntime {
       if (this.window !== null && !this.window.isDestroyed()) {
         this.mask.moveToTop(this.window)
       }
-      this.mask.setVisible(!this.mutex.controlled)
+      this.applyMaskVisibility()
     }
+  }
+
+  /**
+   * Mask visibility policy: the AI-control overlay stays over the content
+   * area whenever the agent holds control (i.e. the user has NOT taken
+   * over). It is TRANSLUCENT (the mask view is created with `transparent:
+   * true`, see electron-adapter.ts) so the user can see exactly what the AI
+   * is doing, and it displays the in-flight tool + recent operations. When
+   * the user takes over the overlay hides; releasing restores it.
+   */
+  private applyMaskVisibility(): void {
+    if (this.mask === null) return
+    this.mask.setVisible(!this.mutex.controlled)
   }
 
   /**
@@ -275,11 +307,13 @@ export class BrowserRuntime {
         })
       })
     }
-    // P1-14: the mask must reflect the real control state on first render,
-    // not unconditionally "AI is controlling" — a user opening the window
-    // from the sidebar while the agent is idle must see the content, not a
-    // takeover overlay that requires clicking 接管 then 释放 to dismiss.
-    mask.setVisible(this.mutex.controlled)
+    // P1-14: the mask must reflect the real control state on first render.
+    // The overlay follows the takeover state: while the agent holds control
+    // it is shown (translucent, so the page below stays visible — verified
+    // 2026-08-22), and it hides the moment the user takes over so the page
+    // is fully interactive. A user opening the window from the sidebar while
+    // the agent is idle sees the live page through the translucent scrim.
+    this.applyMaskVisibility()
     this.windowResizeDisposer = win.onResize(() => { this.relayout() })
     this.windowClosedDisposer = win.onClosed(() => {
       // The window is truly gone (agent close or app quit): drop all tabs.
@@ -422,7 +456,7 @@ export class BrowserRuntime {
       return this.tabState(id)
     }
     if (user) return await body()
-    return await this.mutex.run(body, signal)
+    return await this.agentRun('browser_open', body, signal)
   }
 
   private tabStateInternal(id: number): BrowserTabState {
@@ -438,14 +472,33 @@ export class BrowserRuntime {
 
   /** Run one agent operation under the control mutex. Passes the agent's
    * abort signal so a takeover pauses the loop until release (or the agent
-   * stops). */
-  async withControl<T>(_tool: string, tabId: number, work: (tab: BrowserTab) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return await this.mutex.run(async () => {
+   * stops). While the operation is in flight, `isBusy`/`busyToolName` expose
+   * it to the mask overlay ("AI is currently doing X").
+   *
+   * `summary` (when given) is recorded in the op log on success so the
+   * overlay's "recent activity" line shows what the agent actually did. */
+  async withControl<T>(tool: string, tabId: number, work: (tab: BrowserTab) => Promise<T>, signal?: AbortSignal, summary?: string): Promise<T> {
+    return await this.agentRun(tool, async () => {
       const tab = this.tab(tabId)
       const result = await work(tab)
       this.updateTabState(tab)
+      if (summary !== undefined) this.record(tool, tabId, summary)
       return result
     }, signal)
+  }
+
+  /** Run `body` under the control mutex while flagging the in-flight agent
+   * tool (mask status). The flag covers the whole wait incl. a user
+   * takeover pause; it clears only when the operation truly finishes. */
+  private async agentRun<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    this.busy = true
+    this.busyTool = tool
+    try {
+      return await this.mutex.run(body, signal)
+    } finally {
+      this.busy = false
+      this.busyTool = ''
+    }
   }
 
   /**
@@ -466,7 +519,7 @@ export class BrowserRuntime {
     }
     if (user) return await body()
     // Pause the agent loop while the user controls the browser.
-    await this.mutex.run(body, signal)
+    await this.agentRun('browser_navigate', body, signal)
   }
 
   /** Navigation body without mutex acquisition (used by open and navigate). */
@@ -496,6 +549,7 @@ export class BrowserRuntime {
       await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
     }
     this.updateTabState(tab)
+    this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`)
   }
 
   /** Cooperative wait for the page load milestone; never rejects on timeout. */
@@ -542,20 +596,26 @@ export class BrowserRuntime {
 
   /** Extract the interactable-element snapshot of one tab. */
   async snapshot(id: number, signal?: AbortSignal): Promise<BrowserSnapshotElement[]> {
-    return await this.withControl('browser_get_snapshot', id, (tab) =>
+    const elements = await this.withControl('browser_get_snapshot', id, (tab) =>
       extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit), signal)
+    this.record('browser_get_snapshot', id, `snapshot: ${elements.length} elements`)
+    return elements
   }
 
   /** Extract page text (optionally scoped by selector). */
   async text(id: number, selector: string | undefined, signal?: AbortSignal): Promise<string> {
-    return await this.withControl('browser_get_text', id, (tab) =>
+    const text = await this.withControl('browser_get_text', id, (tab) =>
       extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit), signal)
+    this.record('browser_get_text', id, selector === undefined ? `page text: ${text.length} chars` : `element text: ${text.length} chars`)
+    return text
   }
 
   /** Capture a JPEG screenshot of one tab. */
   async screenshot(id: number, signal?: AbortSignal): Promise<string> {
-    return await this.withControl('browser_screenshot', id, (tab) =>
+    const data = await this.withControl('browser_screenshot', id, (tab) =>
       captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal)
+    this.record('browser_screenshot', id, 'screenshot captured')
+    return data
   }
 
   /** Navigate history (agent path: honors the control mutex + abort signal;
@@ -569,7 +629,8 @@ export class BrowserRuntime {
       this.updateTabState(tab)
     }
     if (user) return await body(this.tab(id))
-    return await this.withControl('browser_go_back', id, body, signal)
+    await this.withControl('browser_go_back', id, body, signal)
+    this.record('browser_go_back', id, 'history back')
   }
 
   async goForward(id: number, signal?: AbortSignal, user = false): Promise<void> {
@@ -581,7 +642,8 @@ export class BrowserRuntime {
       this.updateTabState(tab)
     }
     if (user) return await body(this.tab(id))
-    return await this.withControl('browser_go_forward', id, body, signal)
+    await this.withControl('browser_go_forward', id, body, signal)
+    this.record('browser_go_forward', id, 'history forward')
   }
 
   async reload(id: number, signal?: AbortSignal, user = false): Promise<void> {
@@ -593,7 +655,8 @@ export class BrowserRuntime {
       this.updateTabState(tab)
     }
     if (user) return await body(this.tab(id))
-    return await this.withControl('browser_reload', id, body, signal)
+    await this.withControl('browser_reload', id, body, signal)
+    this.record('browser_reload', id, 'page reloaded')
   }
 
   /** Switch the visible tab (user path: immediate; agent path: mutex). */
@@ -606,7 +669,7 @@ export class BrowserRuntime {
       this.record('browser_switch_tab', id, `switch to tab ${id}`)
     }
     if (user) return await body()
-    return await this.mutex.run(body, signal)
+    return await this.agentRun('browser_switch_tab', body, signal)
   }
 
   /** Close a tab and destroy its view/CDP (user path: immediate; agent path: mutex). */
@@ -625,7 +688,7 @@ export class BrowserRuntime {
       this.record('browser_close_tab', id, `close tab ${id}`)
     }
     if (user) return await body()
-    return await this.mutex.run(body, signal)
+    return await this.agentRun('browser_close_tab', body, signal)
   }
 
   /**
@@ -653,7 +716,7 @@ export class BrowserRuntime {
       this.hideWindow()
     }
     if (user) return await body()
-    return await this.mutex.run(body, signal)
+    return await this.agentRun('browser_close', body, signal)
   }
 
   /** User takeover / release: hides/shows the AI-control mask and pauses /
@@ -693,7 +756,7 @@ export class BrowserRuntime {
     if (typeof expression !== 'string' || expression.length === 0 || expression.length > 64 * 1024) {
       throw new Error('browser: eval expression must be a non-empty string ≤ 64KB')
     }
-    return await this.withControl('browser_eval', id, async (tab) => {
+    const result = await this.withControl('browser_eval', id, async (tab) => {
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression,
         returnByValue: true,
@@ -706,7 +769,8 @@ export class BrowserRuntime {
       const value = result.result?.value
       const text = typeof value === 'string' ? value : safeJson(value)
       return text.slice(0, this.options.textLimit)
-    }, signal)
+    }, signal, `eval: ${expression.slice(0, 60)}`)
+    return result
   }
 
   /** Locate an element and return its viewport-center point for CDP input. */
@@ -748,7 +812,7 @@ export class BrowserRuntime {
       await tab.cdp.send('Input.dispatchMouseEvent', {
         type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
       })
-    }, signal)
+    }, signal, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
   }
 
   /** Focus an element and insert text (Unicode-safe); clears first when requested. */
@@ -767,7 +831,7 @@ export class BrowserRuntime {
         returnByValue: true,
       })
       await tab.cdp.send('Input.insertText', { text })
-    }, signal)
+    }, signal, `type into ${selector}`)
   }
 
   /** Dispatch one keyboard key. */
@@ -781,7 +845,7 @@ export class BrowserRuntime {
       await tab.cdp.send('Input.dispatchKeyEvent', {
         type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
       })
-    }, signal)
+    }, signal, `press ${key}`)
   }
 
   /** Set a select's value and fire change/input. */
@@ -804,7 +868,7 @@ export class BrowserRuntime {
       if (result.result?.value !== undefined && (result.result.value as { error?: string }).error !== undefined) {
         throw new Error(`browser: select failed — ${(result.result.value as { error: string }).error}`)
       }
-    }, signal)
+    }, signal, `select ${selector} = ${value.slice(0, 80)}`)
   }
 
   /**
@@ -861,7 +925,7 @@ export class BrowserRuntime {
         throw new Error('browser: no matching login form found on this page')
       }
       return { username: value.username === true, password: value.password === true }
-    }, signal)
+    }, signal, `fill credentials for ${connectorId}`)
   }
 
   /** Scroll the page by a delta (or the element into view). */
@@ -871,7 +935,7 @@ export class BrowserRuntime {
         ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'`
         : `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`
       await tab.cdp.send('Runtime.evaluate', { expression, returnByValue: true })
-    }, signal)
+    }, signal, selector === undefined || selector === '' ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`)
   }
 
   /** Dispose everything (plugin teardown): destroy the window for real. */

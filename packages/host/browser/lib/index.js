@@ -882,7 +882,63 @@ function createRealElectronAdapter() {
 	};
 	return {
 		createView,
-		createMaskView: createView,
+		createMaskView(partition = BROWSER_PARTITION) {
+			const view = new WebContentsView({ webPreferences: {
+				partition,
+				contextIsolation: true,
+				nodeIntegration: false,
+				sandbox: true,
+				transparent: true
+			} });
+			const wc = view.webContents;
+			wc.setWindowOpenHandler(() => ({ action: "deny" }));
+			return {
+				partition,
+				attach(win, bounds) {
+					win.contentView.addChildView(view);
+					view.setBounds(bounds);
+				},
+				setBounds(bounds) {
+					view.setBounds(bounds);
+				},
+				setVisible(visible) {
+					view.setVisible(visible);
+				},
+				detach() {},
+				moveToTop(win) {
+					try {
+						win.contentView.removeChildView(view);
+					} catch {}
+					win.contentView.addChildView(view);
+				},
+				webContents: {
+					cdp: wc.debugger,
+					loadURL: (url) => wc.loadURL(url),
+					goBack: () => wc.goBack(),
+					goForward: () => wc.goForward(),
+					reload: () => wc.reload(),
+					capturePage: (rect) => wc.capturePage(rect),
+					getURL: () => wc.getURL(),
+					getTitle: () => wc.getTitle(),
+					isLoading: () => wc.isLoading(),
+					on: (event, listener) => {
+						wc.on(event, listener);
+					},
+					removeListener: (event, listener) => {
+						wc.removeListener(event, listener);
+					},
+					session: wc.session,
+					setWindowOpenHandler: (handler) => {
+						wc.setWindowOpenHandler((details) => handler(details));
+					},
+					close: () => wc.close(),
+					isDestroyed: () => wc.isDestroyed()
+				},
+				destroy() {
+					if (!view.webContents.isDestroyed()) view.webContents.close();
+				}
+			};
+		},
 		createBrowserWindow() {
 			let allowClose = false;
 			const win = new BrowserWindow({
@@ -1437,6 +1493,10 @@ var BrowserRuntime = class {
 	disposed = false;
 	/** Partition name used for newly created tab views (per-user). */
 	partition;
+	/** Whether an agent browser operation is currently in flight (mask status). */
+	busy = false;
+	/** The agent tool currently executing ('' when idle). */
+	busyTool = "";
 	constructor(adapter, options = {}, askApproval, credentials, partition) {
 		this.adapter = adapter;
 		this.credentials = credentials;
@@ -1483,6 +1543,18 @@ var BrowserRuntime = class {
 	get controlled() {
 		return this.mutex.controlled;
 	}
+	/** Whether an agent browser operation is running right now. */
+	get isBusy() {
+		return this.busy;
+	}
+	/** The agent tool currently executing ('' when idle). */
+	get busyToolName() {
+		return this.busyTool;
+	}
+	/** Latest completed agent operation (mask "recent activity" line). */
+	get latestOp() {
+		return this.ops.at(-1);
+	}
 	/** Id of the visible tab, or undefined when none is open. */
 	currentTabId() {
 		return this.visibleTabId;
@@ -1518,8 +1590,20 @@ var BrowserRuntime = class {
 		if (this.mask !== null) {
 			this.mask.setBounds(bounds);
 			if (this.window !== null && !this.window.isDestroyed()) this.mask.moveToTop(this.window);
-			this.mask.setVisible(!this.mutex.controlled);
+			this.applyMaskVisibility();
 		}
+	}
+	/**
+	* Mask visibility policy: the AI-control overlay stays over the content
+	* area whenever the agent holds control (i.e. the user has NOT taken
+	* over). It is TRANSLUCENT (the mask view is created with `transparent:
+	* true`, see electron-adapter.ts) so the user can see exactly what the AI
+	* is doing, and it displays the in-flight tool + recent operations. When
+	* the user takes over the overlay hides; releasing restores it.
+	*/
+	applyMaskVisibility() {
+		if (this.mask === null) return;
+		this.mask.setVisible(!this.mutex.controlled);
 	}
 	/**
 	* Ensure the dedicated browser window exists and is shown. Creating the
@@ -1550,7 +1634,7 @@ var BrowserRuntime = class {
 				});
 			});
 		}
-		mask.setVisible(this.mutex.controlled);
+		this.applyMaskVisibility();
 		this.windowResizeDisposer = win.onResize(() => {
 			this.relayout();
 		});
@@ -1682,7 +1766,7 @@ var BrowserRuntime = class {
 			return this.tabState(id);
 		};
 		if (user) return await body();
-		return await this.mutex.run(body, signal);
+		return await this.agentRun("browser_open", body, signal);
 	}
 	tabStateInternal(id) {
 		const tab = this.tab(id);
@@ -1696,14 +1780,32 @@ var BrowserRuntime = class {
 	}
 	/** Run one agent operation under the control mutex. Passes the agent's
 	* abort signal so a takeover pauses the loop until release (or the agent
-	* stops). */
-	async withControl(_tool, tabId, work, signal) {
-		return await this.mutex.run(async () => {
+	* stops). While the operation is in flight, `isBusy`/`busyToolName` expose
+	* it to the mask overlay ("AI is currently doing X").
+	*
+	* `summary` (when given) is recorded in the op log on success so the
+	* overlay's "recent activity" line shows what the agent actually did. */
+	async withControl(tool, tabId, work, signal, summary) {
+		return await this.agentRun(tool, async () => {
 			const tab = this.tab(tabId);
 			const result = await work(tab);
 			this.updateTabState(tab);
+			if (summary !== void 0) this.record(tool, tabId, summary);
 			return result;
 		}, signal);
+	}
+	/** Run `body` under the control mutex while flagging the in-flight agent
+	* tool (mask status). The flag covers the whole wait incl. a user
+	* takeover pause; it clears only when the operation truly finishes. */
+	async agentRun(tool, body, signal) {
+		this.busy = true;
+		this.busyTool = tool;
+		try {
+			return await this.mutex.run(body, signal);
+		} finally {
+			this.busy = false;
+			this.busyTool = "";
+		}
 	}
 	/**
 	* Navigate the tab to `url`, waiting per `waitUntil`.
@@ -1722,7 +1824,7 @@ var BrowserRuntime = class {
 			await this.navigateInternal(id, url, waitUntil);
 		};
 		if (user) return await body();
-		await this.mutex.run(body, signal);
+		await this.agentRun("browser_navigate", body, signal);
 	}
 	/** Navigation body without mutex acquisition (used by open and navigate). */
 	async navigateInternal(id, url, waitUntil) {
@@ -1738,6 +1840,7 @@ var BrowserRuntime = class {
 			await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget));
 		}
 		this.updateTabState(tab);
+		this.record("browser_navigate", id, `navigate: ${url.slice(0, 200)}`);
 	}
 	/** Cooperative wait for the page load milestone; never rejects on timeout. */
 	waitForLoad(wc, waitUntil) {
@@ -1774,15 +1877,21 @@ var BrowserRuntime = class {
 	}
 	/** Extract the interactable-element snapshot of one tab. */
 	async snapshot(id, signal) {
-		return await this.withControl("browser_get_snapshot", id, (tab) => extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit), signal);
+		const elements = await this.withControl("browser_get_snapshot", id, (tab) => extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit), signal);
+		this.record("browser_get_snapshot", id, `snapshot: ${elements.length} elements`);
+		return elements;
 	}
 	/** Extract page text (optionally scoped by selector). */
 	async text(id, selector, signal) {
-		return await this.withControl("browser_get_text", id, (tab) => extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit), signal);
+		const text = await this.withControl("browser_get_text", id, (tab) => extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit), signal);
+		this.record("browser_get_text", id, selector === void 0 ? `page text: ${text.length} chars` : `element text: ${text.length} chars`);
+		return text;
 	}
 	/** Capture a JPEG screenshot of one tab. */
 	async screenshot(id, signal) {
-		return await this.withControl("browser_screenshot", id, (tab) => captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal);
+		const data = await this.withControl("browser_screenshot", id, (tab) => captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal);
+		this.record("browser_screenshot", id, "screenshot captured");
+		return data;
 	}
 	/** Navigate history (agent path: honors the control mutex + abort signal;
 	* user path (shell toolbar): runs immediately, never blocked by takeover). */
@@ -1795,7 +1904,8 @@ var BrowserRuntime = class {
 			this.updateTabState(tab);
 		};
 		if (user) return await body(this.tab(id));
-		return await this.withControl("browser_go_back", id, body, signal);
+		await this.withControl("browser_go_back", id, body, signal);
+		this.record("browser_go_back", id, "history back");
 	}
 	async goForward(id, signal, user = false) {
 		const body = async (tab) => {
@@ -1806,7 +1916,8 @@ var BrowserRuntime = class {
 			this.updateTabState(tab);
 		};
 		if (user) return await body(this.tab(id));
-		return await this.withControl("browser_go_forward", id, body, signal);
+		await this.withControl("browser_go_forward", id, body, signal);
+		this.record("browser_go_forward", id, "history forward");
 	}
 	async reload(id, signal, user = false) {
 		const body = async (tab) => {
@@ -1817,7 +1928,8 @@ var BrowserRuntime = class {
 			this.updateTabState(tab);
 		};
 		if (user) return await body(this.tab(id));
-		return await this.withControl("browser_reload", id, body, signal);
+		await this.withControl("browser_reload", id, body, signal);
+		this.record("browser_reload", id, "page reloaded");
 	}
 	/** Switch the visible tab (user path: immediate; agent path: mutex). */
 	async switchTab(id, user = false, signal) {
@@ -1829,7 +1941,7 @@ var BrowserRuntime = class {
 			this.record("browser_switch_tab", id, `switch to tab ${id}`);
 		};
 		if (user) return await body();
-		return await this.mutex.run(body, signal);
+		return await this.agentRun("browser_switch_tab", body, signal);
 	}
 	/** Close a tab and destroy its view/CDP (user path: immediate; agent path: mutex). */
 	async closeTab(id, user = false, signal) {
@@ -1847,7 +1959,7 @@ var BrowserRuntime = class {
 			this.record("browser_close_tab", id, `close tab ${id}`);
 		};
 		if (user) return await body();
-		return await this.mutex.run(body, signal);
+		return await this.agentRun("browser_close_tab", body, signal);
 	}
 	/**
 	* Close the whole browser (all tabs). The dedicated window stays alive
@@ -1874,7 +1986,7 @@ var BrowserRuntime = class {
 			this.hideWindow();
 		};
 		if (user) return await body();
-		return await this.mutex.run(body, signal);
+		return await this.agentRun("browser_close", body, signal);
 	}
 	/** User takeover / release: hides/shows the AI-control mask and pauses /
 	* resumes the agent loop (in-flight tool calls wait on the mutex). */
@@ -1914,7 +2026,7 @@ var BrowserRuntime = class {
 			if (result.exceptionDetails !== void 0) throw new Error("browser: page script failed");
 			const value = result.result?.value;
 			return (typeof value === "string" ? value : safeJson(value)).slice(0, this.options.textLimit);
-		}, signal);
+		}, signal, `eval: ${expression.slice(0, 60)}`);
 	}
 	/** Locate an element and return its viewport-center point for CDP input. */
 	async locateElement(id, selector, signal) {
@@ -1960,7 +2072,7 @@ var BrowserRuntime = class {
 				button: "left",
 				clickCount: 1
 			});
-		}, signal);
+		}, signal, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`);
 	}
 	/** Focus an element and insert text (Unicode-safe); clears first when requested. */
 	async typeInto(id, selector, text, clear = true, signal) {
@@ -1978,7 +2090,7 @@ var BrowserRuntime = class {
 				returnByValue: true
 			});
 			await tab.cdp.send("Input.insertText", { text });
-		}, signal);
+		}, signal, `type into ${selector}`);
 	}
 	/** Dispatch one keyboard key. */
 	async pressKey(id, key, signal) {
@@ -1999,7 +2111,7 @@ var BrowserRuntime = class {
 				windowsVirtualKeyCode: vk,
 				nativeVirtualKeyCode: vk
 			});
-		}, signal);
+		}, signal, `press ${key}`);
 	}
 	/** Set a select's value and fire change/input. */
 	async selectOption(id, selector, value, signal) {
@@ -2019,7 +2131,7 @@ var BrowserRuntime = class {
 				returnByValue: true
 			});
 			if (result.result?.value !== void 0 && result.result.value.error !== void 0) throw new Error(`browser: select failed — ${result.result.value.error}`);
-		}, signal);
+		}, signal, `select ${selector} = ${value.slice(0, 80)}`);
 	}
 	/**
 	* Fill the login form with stored connector credentials. The resolver looks
@@ -2070,7 +2182,7 @@ var BrowserRuntime = class {
 				username: value.username === true,
 				password: value.password === true
 			};
-		}, signal);
+		}, signal, `fill credentials for ${connectorId}`);
 	}
 	/** Scroll the page by a delta (or the element into view). */
 	async scroll(id, deltaY, selector, signal) {
@@ -2080,7 +2192,7 @@ var BrowserRuntime = class {
 				expression,
 				returnByValue: true
 			});
-		}, signal);
+		}, signal, selector === void 0 || selector === "" ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`);
 	}
 	/** Dispose everything (plugin teardown): destroy the window for real. */
 	dispose() {
@@ -3251,7 +3363,14 @@ const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 <\/script>
 </body>
 </html>`;
-/** The AI-control mask: translucent overlay + the takeover button. */
+/** The AI-control mask: translucent overlay + the takeover button.
+*
+* The mask is served as its own WebContentsView whose page paints a
+* translucent scrim; the view itself is created with `webPreferences.transparent:
+* true` (see electron-adapter.ts) so the rgba scrim blends with the TAB page
+* beneath it instead of the view's opaque white canvas. It polls the loopback
+* state to show what the agent is doing right now (in-flight tool + recent
+* operations), so the user knows when to take over. */
 const BROWSER_MASK_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3259,7 +3378,11 @@ const BROWSER_MASK_HTML = `<!DOCTYPE html>
 <style>
   html, body { margin: 0; height: 100%; }
   body {
-    display: flex; align-items: center; justify-content: center;
+    /* The scrim overlays the whole page; the status card sits at the BOTTOM
+     * CENTER (not the middle) so the page content the AI is driving stays
+     * visible behind the translucent overlay. */
+    display: flex; align-items: flex-end; justify-content: center;
+    padding: 0 0 18px 0;
     background: rgba(128, 128, 128, 0.28);
     font: 14px system-ui, sans-serif; color: #3a3f4a;
   }
@@ -3267,28 +3390,145 @@ const BROWSER_MASK_HTML = `<!DOCTYPE html>
     body { background: rgba(0, 0, 0, 0.38); color: #cfd3da; }
   }
   #card {
-    display: flex; flex-direction: column; align-items: center; gap: 14px;
-    padding: 26px 34px; border-radius: 16px;
-    background: rgba(255, 255, 255, 0.85); box-shadow: 0 8px 30px rgba(0,0,0,.18);
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 22px 30px; border-radius: 16px; max-width: 520px; min-width: 320px;
+    background: rgba(255, 255, 255, 0.9); box-shadow: 0 8px 30px rgba(0,0,0,.18);
   }
   @media (prefers-color-scheme: dark) {
-    #card { background: rgba(30, 32, 38, 0.88); }
+    #card { background: rgba(30, 32, 38, 0.92); }
   }
   #hint { margin: 0; font-weight: 500; }
+  #status { margin: 0; font-size: 13px; color: #4b5563; min-height: 1.4em; }
+  @media (prefers-color-scheme: dark) {
+    #status { color: #aeb4bd; }
+  }
+  #status .busy { color: #1d4ed8; font-weight: 600; }
+  #ops .busy { color: #1d4ed8; font-weight: 500; }
+  @media (prefers-color-scheme: dark) {
+    #status .busy, #ops .busy { color: #7ba7ff; }
+  }
+  #ops { list-style: none; margin: 0; padding: 0; width: 100%; max-height: 132px; overflow-y: auto; }
+  #ops li { display: flex; gap: 8px; font-size: 12px; color: #6b7280; align-items: baseline; }
+  @media (prefers-color-scheme: dark) {
+    #ops li { color: #9aa1ab; }
+  }
+  #ops .time { flex: none; font-variant-numeric: tabular-nums; }
+  #ops .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button {
     padding: 9px 22px; border-radius: 8px; border: none;
     background: #2563eb; color: #fff; font-size: 14px; cursor: pointer;
   }
   button:hover { background: #1d4ed8; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+    border: 2px solid #93c5fd; border-top-color: #2563eb; border-radius: 50%;
+    vertical-align: -1px; animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
   <div id="card">
     <p id="hint">AI 正在控制浏览器</p>
+    <p id="status">正在获取状态…</p>
+    <ul id="ops"></ul>
     <button id="take">接管控制</button>
   </div>
 <script>
-  document.getElementById('take').addEventListener('click', () => {
+  // Browser tool -> human label. Pure JS (no TS annotations): this inline
+  // script is a string in TS source and is served verbatim to the page.
+  const TOOL_LABELS = {
+    'browser_open': '打开浏览器',
+    'browser_new_tab': '新建标签页',
+    'browser_navigate': '打开网页',
+    'browser_reload': '刷新页面',
+    'browser_go_back': '后退',
+    'browser_go_forward': '前进',
+    'browser_click': '点击',
+    'browser_type': '输入文字',
+    'browser_press': '按键',
+    'browser_select': '选择下拉项',
+    'browser_scroll': '滚动页面',
+    'browser_screenshot': '截图',
+    'browser_get_snapshot': '读取页面元素',
+    'browser_get_text': '读取页面文字',
+    'browser_list_tabs': '查看标签页',
+    'browser_switch_tab': '切换标签页',
+    'browser_close_tab': '关闭标签页',
+    'browser_close': '关闭浏览器',
+    'browser_eval': '执行脚本',
+    'browser_fill_credentials': '填写登录表单',
+    'browser_takeover': '接管',
+    'browser_release': '释放接管',
+    'browser_download': '下载文件',
+    'browser_clear_data': '清除数据',
+  }
+  const label = (tool) => TOOL_LABELS[tool] || tool || '操作'
+  const fmt = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false })
+  const $ = (id) => document.getElementById(id)
+  // Build the status line with DOM APIs only: op summaries can carry
+  // model-provided URLs (never trust string concatenation into markup).
+  const statusLine = (parts) => {
+    const status = $('status')
+    status.textContent = ''
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        status.appendChild(document.createTextNode(part))
+      } else {
+        const span = document.createElement('span')
+        span.className = part.className || ''
+        span.textContent = part.text
+        status.appendChild(span)
+      }
+    }
+  }
+  const state = { busy: false, busyTool: '', latestOp: null, ops: [] }
+  const render = () => {
+    if (state.busy) {
+      statusLine([
+        { className: 'spinner', text: '' },
+        '正在执行：',
+        { className: 'busy', text: label(state.busyTool) },
+      ])
+    } else if (state.latestOp) {
+      statusLine(['已空闲——最近操作：', { className: 'busy', text: label(state.latestOp.tool) }, ' ' + state.latestOp.summary])
+    } else {
+      statusLine(['等待 AI 开始操作…'])
+    }
+    const ops = $('ops')
+    ops.textContent = ''
+    for (const op of state.ops.slice(0, 3)) {
+      const li = document.createElement('li')
+      const t = document.createElement('span')
+      t.className = 'time'
+      t.textContent = fmt(op.time)
+      const w = document.createElement('span')
+      w.className = 'what'
+      const tag = document.createElement('span')
+      tag.className = 'busy'
+      tag.textContent = label(op.tool)
+      w.appendChild(tag)
+      w.appendChild(document.createTextNode(' ' + op.summary))
+      li.appendChild(t)
+      li.appendChild(w)
+      ops.appendChild(li)
+    }
+  }
+  const poll = () => {
+    Promise.all([
+      fetch('/api/pico/browser/state').then((r) => r.json()).catch(() => null),
+      fetch('/api/pico/browser/ops').then((r) => r.json()).catch(() => ({ ops: [] })),
+    ]).then(([s, o]) => {
+      if (s !== null) {
+        state.busy = s.busy === true
+        state.busyTool = s.busyTool || ''
+        state.latestOp = s.latestOp || null
+      }
+      state.ops = Array.isArray(o && o.ops) ? o.ops : []
+      render()
+    }).catch(() => {})
+  }
+  $('take').addEventListener('click', () => {
     fetch('/api/pico/browser/takeover', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -3297,6 +3537,8 @@ const BROWSER_MASK_HTML = `<!DOCTYPE html>
       // The takeover hides the mask immediately; nothing else to refresh.
     }).catch(() => {})
   })
+  poll()
+  setInterval(poll, 700)
 <\/script>
 </body>
 </html>`;
@@ -3492,7 +3734,10 @@ function apply(ctx, config = {}) {
 			json(res, 200, {
 				tabs: runtime.listTabs(),
 				window: runtime.windowState,
-				controlled: runtime.controlled
+				controlled: runtime.controlled,
+				busy: runtime.isBusy,
+				busyTool: runtime.busyToolName,
+				latestOp: runtime.latestOp ?? null
 			});
 		};
 		const ops = (req, res) => {

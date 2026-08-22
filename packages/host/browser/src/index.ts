@@ -308,6 +308,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         tabs: runtime.listTabs(),
         window: runtime.windowState,
         controlled: runtime.controlled,
+        // AI-control overlay status: what the agent is doing right now and
+        // the last completed operation (so the user knows when to step in).
+        busy: runtime.isBusy,
+        busyTool: runtime.busyToolName,
+        latestOp: runtime.latestOp ?? null,
       })
     }
 

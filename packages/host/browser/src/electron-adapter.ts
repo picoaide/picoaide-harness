@@ -252,7 +252,82 @@ export function createRealElectronAdapter(): ElectronAdapter {
 
   return {
     createView,
-    createMaskView: createView,
+    createMaskView(partition: string = BROWSER_PARTITION): NativeView {
+      // The AI-control mask must COMPOSITE over the tab views beneath it:
+      // the mask page paints a translucent scrim (`rgba(...)`) whose alpha
+      // must blend with the live page, not with this view's own canvas.
+      // A WebContentsView is opaque by default, so a translucent page color
+      // blends against opaque white and the page below is invisible
+      // (verified on Electron 43, 2026-08-22: sampled pixels showed a flat
+      // gray over a red page). `webPreferences.transparent: true` makes the
+      // guest page's own background transparent, so rgba() blends through it
+      // onto the tabs underneath. The window itself stays opaque; only the
+      // mask view carries alpha.
+      const view = new WebContentsView({
+        webPreferences: {
+          partition,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          transparent: true,
+        },
+      })
+      const wc = view.webContents
+      wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+      return {
+        partition,
+        attach(win, bounds) {
+          win.contentView.addChildView(view)
+          view.setBounds(bounds)
+        },
+        setBounds(bounds) {
+          view.setBounds(bounds)
+        },
+        setVisible(visible) {
+          view.setVisible(visible)
+        },
+        detach() {
+          // WebContentsView removes itself from its parent on close; nothing
+          // to do here beyond releasing the reference (the window owns it).
+        },
+        moveToTop(win) {
+          // Re-attach the NATIVE view so it lands on top of every sibling.
+          try {
+            win.contentView.removeChildView(view)
+          } catch {
+            // A never-attached view cannot be removed; adding it again is
+            // harmless either way.
+          }
+          win.contentView.addChildView(view)
+        },
+        webContents: {
+          cdp: wc.debugger,
+          loadURL: (url) => wc.loadURL(url),
+          goBack: () => wc.goBack(),
+          goForward: () => wc.goForward(),
+          reload: () => wc.reload(),
+          capturePage: (rect) => wc.capturePage(rect),
+          getURL: () => wc.getURL(),
+          getTitle: () => wc.getTitle(),
+          isLoading: () => wc.isLoading(),
+          on: (event, listener) => {
+            wc.on(event as never, listener as never)
+          },
+          removeListener: (event, listener) => {
+            wc.removeListener(event as never, listener as never)
+          },
+          session: wc.session,
+          setWindowOpenHandler: (handler) => {
+            wc.setWindowOpenHandler((details) => handler(details))
+          },
+          close: () => wc.close(),
+          isDestroyed: () => wc.isDestroyed(),
+        },
+        destroy() {
+          if (!view.webContents.isDestroyed()) view.webContents.close()
+        },
+      }
+    },
     createBrowserWindow(): NativeBrowserWindow {
       let allowClose = false
       const win = new BrowserWindow({

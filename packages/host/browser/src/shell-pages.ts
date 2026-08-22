@@ -154,7 +154,14 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 </body>
 </html>`
 
-/** The AI-control mask: translucent overlay + the takeover button. */
+/** The AI-control mask: translucent overlay + the takeover button.
+ *
+ * The mask is served as its own WebContentsView whose page paints a
+ * translucent scrim; the view itself is created with `webPreferences.transparent:
+ * true` (see electron-adapter.ts) so the rgba scrim blends with the TAB page
+ * beneath it instead of the view's opaque white canvas. It polls the loopback
+ * state to show what the agent is doing right now (in-flight tool + recent
+ * operations), so the user knows when to take over. */
 export const BROWSER_MASK_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -162,7 +169,11 @@ export const BROWSER_MASK_HTML = `<!DOCTYPE html>
 <style>
   html, body { margin: 0; height: 100%; }
   body {
-    display: flex; align-items: center; justify-content: center;
+    /* The scrim overlays the whole page; the status card sits at the BOTTOM
+     * CENTER (not the middle) so the page content the AI is driving stays
+     * visible behind the translucent overlay. */
+    display: flex; align-items: flex-end; justify-content: center;
+    padding: 0 0 18px 0;
     background: rgba(128, 128, 128, 0.28);
     font: 14px system-ui, sans-serif; color: #3a3f4a;
   }
@@ -170,28 +181,145 @@ export const BROWSER_MASK_HTML = `<!DOCTYPE html>
     body { background: rgba(0, 0, 0, 0.38); color: #cfd3da; }
   }
   #card {
-    display: flex; flex-direction: column; align-items: center; gap: 14px;
-    padding: 26px 34px; border-radius: 16px;
-    background: rgba(255, 255, 255, 0.85); box-shadow: 0 8px 30px rgba(0,0,0,.18);
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 22px 30px; border-radius: 16px; max-width: 520px; min-width: 320px;
+    background: rgba(255, 255, 255, 0.9); box-shadow: 0 8px 30px rgba(0,0,0,.18);
   }
   @media (prefers-color-scheme: dark) {
-    #card { background: rgba(30, 32, 38, 0.88); }
+    #card { background: rgba(30, 32, 38, 0.92); }
   }
   #hint { margin: 0; font-weight: 500; }
+  #status { margin: 0; font-size: 13px; color: #4b5563; min-height: 1.4em; }
+  @media (prefers-color-scheme: dark) {
+    #status { color: #aeb4bd; }
+  }
+  #status .busy { color: #1d4ed8; font-weight: 600; }
+  #ops .busy { color: #1d4ed8; font-weight: 500; }
+  @media (prefers-color-scheme: dark) {
+    #status .busy, #ops .busy { color: #7ba7ff; }
+  }
+  #ops { list-style: none; margin: 0; padding: 0; width: 100%; max-height: 132px; overflow-y: auto; }
+  #ops li { display: flex; gap: 8px; font-size: 12px; color: #6b7280; align-items: baseline; }
+  @media (prefers-color-scheme: dark) {
+    #ops li { color: #9aa1ab; }
+  }
+  #ops .time { flex: none; font-variant-numeric: tabular-nums; }
+  #ops .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button {
     padding: 9px 22px; border-radius: 8px; border: none;
     background: #2563eb; color: #fff; font-size: 14px; cursor: pointer;
   }
   button:hover { background: #1d4ed8; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+    border: 2px solid #93c5fd; border-top-color: #2563eb; border-radius: 50%;
+    vertical-align: -1px; animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
   <div id="card">
     <p id="hint">AI 正在控制浏览器</p>
+    <p id="status">正在获取状态…</p>
+    <ul id="ops"></ul>
     <button id="take">接管控制</button>
   </div>
 <script>
-  document.getElementById('take').addEventListener('click', () => {
+  // Browser tool -> human label. Pure JS (no TS annotations): this inline
+  // script is a string in TS source and is served verbatim to the page.
+  const TOOL_LABELS = {
+    'browser_open': '打开浏览器',
+    'browser_new_tab': '新建标签页',
+    'browser_navigate': '打开网页',
+    'browser_reload': '刷新页面',
+    'browser_go_back': '后退',
+    'browser_go_forward': '前进',
+    'browser_click': '点击',
+    'browser_type': '输入文字',
+    'browser_press': '按键',
+    'browser_select': '选择下拉项',
+    'browser_scroll': '滚动页面',
+    'browser_screenshot': '截图',
+    'browser_get_snapshot': '读取页面元素',
+    'browser_get_text': '读取页面文字',
+    'browser_list_tabs': '查看标签页',
+    'browser_switch_tab': '切换标签页',
+    'browser_close_tab': '关闭标签页',
+    'browser_close': '关闭浏览器',
+    'browser_eval': '执行脚本',
+    'browser_fill_credentials': '填写登录表单',
+    'browser_takeover': '接管',
+    'browser_release': '释放接管',
+    'browser_download': '下载文件',
+    'browser_clear_data': '清除数据',
+  }
+  const label = (tool) => TOOL_LABELS[tool] || tool || '操作'
+  const fmt = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false })
+  const $ = (id) => document.getElementById(id)
+  // Build the status line with DOM APIs only: op summaries can carry
+  // model-provided URLs (never trust string concatenation into markup).
+  const statusLine = (parts) => {
+    const status = $('status')
+    status.textContent = ''
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        status.appendChild(document.createTextNode(part))
+      } else {
+        const span = document.createElement('span')
+        span.className = part.className || ''
+        span.textContent = part.text
+        status.appendChild(span)
+      }
+    }
+  }
+  const state = { busy: false, busyTool: '', latestOp: null, ops: [] }
+  const render = () => {
+    if (state.busy) {
+      statusLine([
+        { className: 'spinner', text: '' },
+        '正在执行：',
+        { className: 'busy', text: label(state.busyTool) },
+      ])
+    } else if (state.latestOp) {
+      statusLine(['已空闲——最近操作：', { className: 'busy', text: label(state.latestOp.tool) }, ' ' + state.latestOp.summary])
+    } else {
+      statusLine(['等待 AI 开始操作…'])
+    }
+    const ops = $('ops')
+    ops.textContent = ''
+    for (const op of state.ops.slice(0, 3)) {
+      const li = document.createElement('li')
+      const t = document.createElement('span')
+      t.className = 'time'
+      t.textContent = fmt(op.time)
+      const w = document.createElement('span')
+      w.className = 'what'
+      const tag = document.createElement('span')
+      tag.className = 'busy'
+      tag.textContent = label(op.tool)
+      w.appendChild(tag)
+      w.appendChild(document.createTextNode(' ' + op.summary))
+      li.appendChild(t)
+      li.appendChild(w)
+      ops.appendChild(li)
+    }
+  }
+  const poll = () => {
+    Promise.all([
+      fetch('/api/pico/browser/state').then((r) => r.json()).catch(() => null),
+      fetch('/api/pico/browser/ops').then((r) => r.json()).catch(() => ({ ops: [] })),
+    ]).then(([s, o]) => {
+      if (s !== null) {
+        state.busy = s.busy === true
+        state.busyTool = s.busyTool || ''
+        state.latestOp = s.latestOp || null
+      }
+      state.ops = Array.isArray(o && o.ops) ? o.ops : []
+      render()
+    }).catch(() => {})
+  }
+  $('take').addEventListener('click', () => {
     fetch('/api/pico/browser/takeover', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -200,6 +328,8 @@ export const BROWSER_MASK_HTML = `<!DOCTYPE html>
       // The takeover hides the mask immediately; nothing else to refresh.
     }).catch(() => {})
   })
+  poll()
+  setInterval(poll, 700)
 </script>
 </body>
 </html>`
