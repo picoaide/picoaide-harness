@@ -299,6 +299,21 @@ export interface SidebarSessionsService {
 }
 
 /**
+ * The client module system face (structural mirror of
+ * `@deepseek-ai/dsh-client-modules`'s `ClientModuleSystem` — only the
+ * `import` slice the sidebar's lazy chunk loader needs). The system is a
+ * Cordis service (`ctx.modules`); this plugin passes it to
+ * `setModuleSystem` in the chunk loader because the module system is NOT
+ * exposed on `window.__DSH_MODULES__` in the current DSH pin (see
+ * modules/src/client/index.ts: `ctx.reflect.provide('modules', ...)`).
+ */
+export interface SidebarModulesService {
+  /** Resolve a module specifier through the client module graph (seed word,
+   *  materialized factory, or boot-graph row); rejects when unresolvable. */
+  import(specifier: string): Promise<unknown>
+}
+
+/**
  * The client locale service face (mirror of @deepseek-ai/dsh-client-locale's
  * LocaleRuntime — only the slices the sidebar touches). The sidebar follows
  * the DSH i18n system: the active locale is the Host-backed preference
@@ -428,6 +443,11 @@ declare module 'cordis' {
      * dictionaries under the `betterSidebar` namespace. Client side only.
      */
     locale: SidebarLocaleService
+    /**
+     * The client module system (`@deepseek-ai/dsh-client-modules`): resolves
+     * platform externals for the lazy chunk loader. Client side only.
+     */
+    modules: SidebarModulesService
     /**
      * The host background-job registry (`ctx.get('jobs')`; optional — the
      * sidebar routes degrade to a 503 when the deployment lacks it).

@@ -1,7 +1,10 @@
 import type { Context } from '../context-types.ts';
 import './layout.css';
 /** Services required before mounting (provided by the client runtime; the
- *  locale service backs the sidebar's copy — see locales.ts). */
+ *  locale service backs the sidebar's copy — see locales.ts). `modules` is
+ *  read OPTIONALLY via ctx.get (it is provided by dsh-client-modules in the
+ *  official DSH shell; a third-party host may not have it — the lazy chunk
+ *  loader then falls back to its window-global probe). */
 export declare const inject: string[];
 /**
  * Error boundary over the sidebar tree (root scope): a render error in the
