@@ -59,7 +59,12 @@ export function advancedWindowOptions(
       thickFrame: true,
     }
   }
-  throw new Error('dsh-plugin-desktop: advanced shell mode is supported on macOS and Windows')
+  if (platform === 'linux') {
+    // Linux has no platform-native Mica or hidden-inset chrome; the fixed
+    // shell uses an ordinary system window frame.
+    return options
+  }
+  throw new Error('dsh-plugin-desktop: unsupported Electron platform')
 }
 
 /**
