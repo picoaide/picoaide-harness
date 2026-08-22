@@ -2489,7 +2489,9 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 		},
 		"fs.read": async (payload) => {
 			const { cwd } = cwdOf(payload);
-			const { content, truncated, binary, size, head } = await readText(await resolveGitPath(cwd, requireString(payload, "path")), resolved.readLimit);
+			const path = await resolveGitPath(cwd, requireString(payload, "path"));
+			if (!isWithin(cwd, path)) throw new SidebarError("fs-error", `path escapes the workspace: ${path}`, 400);
+			const { content, truncated, binary, size, head } = await readText(path, resolved.readLimit);
 			if (binary) return {
 				kind: "binary",
 				size,
@@ -2505,8 +2507,9 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 		"fs.write": async (payload) => {
 			const { cwd } = cwdOf(payload);
 			const path = requireAbsolute(requireString(payload, "path"));
+			if (!isWithin(cwd, path)) throw new SidebarError("fs-error", `path escapes the workspace: ${path}`, 400);
 			const content = requireString(payload, "content");
-			const tmp = `${path}.dsh-sidebar-tmp-${process.pid}`;
+			const tmp = `${path}.dsh-sidebar-tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 			try {
 				await mkdir(dirname(path), { recursive: true });
 				await writeFile(tmp, content, "utf8");
@@ -2637,12 +2640,35 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 			try {
 				let response = await fetch(parsed, {
 					method: "HEAD",
-					redirect: "follow",
+					redirect: "manual",
 					signal: controller.signal
 				});
+				let hops = 0;
+				while (response.status >= 300 && response.status < 400 && hops < 5) {
+					const location = response.headers.get("location");
+					if (location === null) break;
+					const next = new URL(location, parsed);
+					if (next.protocol !== "http:" && next.protocol !== "https:") return {
+						reachable: false,
+						url: response.url,
+						status: response.status
+					};
+					if (isLoopbackHostname(next.hostname) || isPrivateHostname(next.hostname)) return {
+						reachable: false,
+						url: next.toString(),
+						status: response.status
+					};
+					parsed = next;
+					response = await fetch(parsed, {
+						method: "HEAD",
+						redirect: "manual",
+						signal: controller.signal
+					});
+					hops += 1;
+				}
 				if (response.status === 405 || response.status === 501) response = await fetch(parsed, {
 					method: "GET",
-					redirect: "follow",
+					redirect: "manual",
 					signal: controller.signal
 				});
 				const frameAncestors = extractFrameAncestors(response.headers.get("content-security-policy"));
@@ -3017,6 +3043,26 @@ function pumpAgentTerminal(registry, handle, ws) {
 		dataSub.dispose();
 		exitSub.dispose();
 	});
+}
+/**
+* P1-16 (SSRF): whether a hostname names a private/routable-to-local network
+* (RFC 1918 + link-local + cloud metadata 169.254.x.x). Used by browser.probe
+* to refuse redirect hops toward such targets, which could otherwise turn a
+* public URL probe into an internal service scanner.
+*/
+function isPrivateHostname(hostname) {
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	if (host === "localhost" || host === "::1") return true;
+	const parts = host.split(".");
+	if (parts.length !== 4) return false;
+	const nums = parts.map((part) => Number(part));
+	if (nums.some((n) => !/^\d{1,3}$/.test(String(n)) || n > 255)) return false;
+	const [a, b] = [nums[0], nums[1]];
+	if (a === 10) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	if (a === 192 && b === 168) return true;
+	if (a === 169 && b === 254) return true;
+	return false;
 }
 //#endregion
 export { Config, apply, inject, mediaTypeForPath, name };

@@ -77,9 +77,29 @@ interface ChunkModuleSystem {
   import(specifier: string): Promise<unknown>
 }
 
+/**
+ * The module system resolved once per page. In the current DSH pin (rc.8)
+ * the client module system exists ONLY as the `ctx.modules` Cordis service —
+ * `window.__DSH_MODULES__` is never set (upstream registers it through
+ * `ctx.reflect.provide('modules', ...)`, see modules/src/client/index.ts).
+ * The chunk loader therefore takes it from the plugin's `apply(ctx)` via
+ * {@link setModuleSystem}, and keeps the window global only as a fallback
+ * for a future DSH that does expose it.
+ */
+let injectedModuleSystem: ChunkModuleSystem | undefined
+
+/** Inject the client module system (call once from the plugin apply, before
+ *  any lazy chunk opens). A test/dev harness may pass a stub. */
+export function setModuleSystem(modules: ChunkModuleSystem | undefined): void {
+  injectedModuleSystem = modules
+  // A fresh module system invalidates the memoized externals require (it was
+  // built against a previous instance).
+  externalsRequire = undefined
+}
+
 /** Resolve the shell-installed module system (set before any plugin activates). */
 function moduleSystem(): ChunkModuleSystem | undefined {
-  return (globalThis as { __DSH_MODULES__?: ChunkModuleSystem }).__DSH_MODULES__
+  return injectedModuleSystem ?? (globalThis as { __DSH_MODULES__?: ChunkModuleSystem }).__DSH_MODULES__
 }
 
 /** The plugin-owned chunk factory registry the chunk scripts populate. */

@@ -54,6 +54,13 @@ export type ChunkExports = Record<string, unknown>;
  * require only answers what the chunk actually asks for.
  */
 export declare const CHUNK_EXTERNALS: readonly string[];
+/** The client module system surface this loader needs (window.__DSH_MODULES__). */
+interface ChunkModuleSystem {
+    import(specifier: string): Promise<unknown>;
+}
+/** Inject the client module system (call once from the plugin apply, before
+ *  any lazy chunk opens). A test/dev harness may pass a stub. */
+export declare function setModuleSystem(modules: ChunkModuleSystem | undefined): void;
 /** Script-load hook; tests replace it with a stub (the default needs a real DOM + network). */
 export type ChunkScriptLoader = (src: string) => Promise<void>;
 /** Test hook: replace the chunk-script loader (pass null to restore the default). */
@@ -74,3 +81,4 @@ export declare function loadChunk(name: ChunkName): Promise<ChunkExports>;
  * are overwritten by the re-execution — no cleanup needed).
  */
 export declare function resetChunks(): void;
+export {};
