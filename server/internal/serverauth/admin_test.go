@@ -605,6 +605,18 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad dept = %d, want 400", w.Code)
 	}
+	// 未知字段(误传 department_id)必须被拒 —— 不得静默清空用户组归属
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", aliceID), `{"department_id":1}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field = %d, want 400 (must not silently clear groups)", w.Code)
+	}
+	// 拒绝后组归属保持原样(研发部仍在)
+	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), "", hdr)
+	if w.Code == http.StatusOK {
+		if gs := out["groups"].([]any); len(gs) != 1 || gs[0] != "研发部" {
+			t.Fatalf("groups after rejected unknown-field put = %v, want 研发部 intact", gs)
+		}
+	}
 	// 不存在用户 → 404
 	w, _ = doAdmin(t, r, "PUT", "/api/admin/users/99999/department", fmt.Sprintf(`{"group_id":%d}`, devID), hdr)
 	if w.Code != http.StatusNotFound {
