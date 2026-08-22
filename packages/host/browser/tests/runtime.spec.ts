@@ -261,6 +261,39 @@ describe('BrowserRuntime', () => {
     runtime.dispose()
   })
 
+  it('exposes the in-flight agent tool and latest op for the overlay', async () => {
+    const { runtime } = runtimeOf()
+    await runtime.open('https://example.com')
+    expect(runtime.latestOp?.tool).toBe('browser_open')
+    const op = runtime.reload(1)
+    expect(runtime.isBusy).toBe(true)
+    expect(runtime.busyToolName).toBe('browser_reload')
+    await op
+    expect(runtime.isBusy).toBe(false)
+    expect(runtime.busyToolName).toBe('')
+    expect(runtime.latestOp?.tool).toBe('browser_reload')
+    runtime.dispose()
+  })
+
+  it('records interaction ops (click/type/navigate) in the audit log', async () => {
+    const { runtime, views } = runtimeOf()
+    await runtime.open('https://example.com')
+    await runtime.navigate(1, 'https://example.com/page2')
+    expect(runtime.opLog[0]?.tool).toBe('browser_navigate')
+    expect(runtime.opLog[0]?.summary).toContain('page2')
+    views[0]!.transport.handler = () => ({})
+    await runtime.clickAt(1, { x: 10, y: 20 })
+    await runtime.typeInto(1, 'input#q', 'hello')
+    await runtime.pressKey(1, 'Enter')
+    await runtime.scroll(1, 100, undefined)
+    const tools = runtime.opLog.map((e) => e.tool)
+    expect(tools).toContain('browser_click')
+    expect(tools).toContain('browser_type')
+    expect(tools).toContain('browser_press')
+    expect(tools).toContain('browser_scroll')
+    runtime.dispose()
+  })
+
   it('keeps the mask ABOVE every tab view (z-order), incl. after navigation', async () => {
     const { runtime, views, windows } = runtimeOf()
     await runtime.open('https://a.example')
