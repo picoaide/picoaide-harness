@@ -45,3 +45,7 @@ server/webadmin/tsconfig.tsbuildinfo
 
 # local writable DSH home mirror (this sandbox root fs is read-only)
 .dsh-home/
+
+# Client E2E runtime artifacts
+packages/host/desktop/.e2e-report.md
+packages/host/desktop/.e2e-shots/
