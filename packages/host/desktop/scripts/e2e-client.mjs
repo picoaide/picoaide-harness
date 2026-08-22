@@ -202,6 +202,18 @@ async function main() {
   reportStep('登录成功（mock gateway）', title === 'DeepSeek Harness', `title=${title}`)
   await screenshot(cdp, '01-login-main')
 
+  // 4.5 Boot graph completeness: the host composes window.__DSH_BOOT__ from
+  // every dsh.client package. Zero entries means the client UI can never
+  // mount (the renderer sits at the parser-preload queue), even though the
+  // login page itself passes — packaged asar layouts regress exactly here.
+  const boot = await evalSafe(cdp, `(() => {
+    const b = window.__DSH_BOOT__
+    if (!b || !Array.isArray(b.entries)) return { entries: -1, ids: [] }
+    return { entries: b.entries.length, ids: b.entries.map(e => e.id) }
+  })()`)
+  reportStep('客户端插件图已装载（__DSH_BOOT__ 非空）', (boot?.entries ?? 0) > 0,
+    `entries=${boot?.entries} ids=${(boot?.ids ?? []).slice(0, 6).join(',')}`)
+
   // 5. Main surface assertions.
   const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
   const hasSidebar = ['定时任务', '任务看板', '技能中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
@@ -236,14 +248,17 @@ async function main() {
   const cronOk = await waitFor(cdp, `!!document.querySelector('[data-dsh-cron-view]')`)
   reportStep('定时任务中心面板挂载', cronOk)
   await screenshot(cdp, '06-cron')
-  await clickLabel(cdp, '返回聊天', 2000).catch(() => {})
-  await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天')); if (b) b.click(); return 1 })()`).catch(() => {})
-  await wait(1500)
+  // Leave the cron board: its "返回聊天" header button removes the activation attr.
+  await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
+  await wait(1200)
 
   await clickLabel(cdp, '任务看板', 3500)
   const taskOk = await waitFor(cdp, `!!document.querySelector('[data-dsh-task-view]')`)
   reportStep('任务看板面板挂载', taskOk)
   await screenshot(cdp, '07-task')
+  // Leave the task board before the chat assertions so 08-chat shows the conversation.
+  await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
+  await wait(1200)
 
   // 8. Chat input availability.
   const chatOk = await evalSafe(cdp, `!!document.querySelector('textarea, [contenteditable=true]')`)
