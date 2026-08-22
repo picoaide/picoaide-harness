@@ -74,8 +74,12 @@ describe('desktop profile composition', {
       'config',
       'agent-presets',
     )
-    const skillPath = join(
-      physicalPresetRoot,
+    // Preset root lives with the dsh package inside the archive; ship the
+    // skill at the same (non-unpacked) path used by the resolver.
+    const archivedSkillPath = join(
+      archivedDsh,
+      'config',
+      'agent-presets',
       'cordis',
       'skills',
       'cordis-plugin-development',
@@ -83,17 +87,19 @@ describe('desktop profile composition', {
     )
     mkdirSync(join(resources, 'app.asar', 'lib'), { recursive: true })
     mkdirSync(archivedDsh, { recursive: true })
-    mkdirSync(dirname(skillPath), { recursive: true })
+    mkdirSync(dirname(archivedSkillPath), { recursive: true })
     writeFileSync(join(archivedDsh, 'package.json'), JSON.stringify({
       name: '@deepseek-ai/dsh',
       exports: { './package.json': './package.json' },
     }) + '\n')
-    writeFileSync(skillPath, '# Cordis plugin development\n')
+    writeFileSync(archivedSkillPath, '# Cordis plugin development\n')
 
     const moduleUrl = pathToFileURL(join(resources, 'app.asar', 'lib', 'profile.js')).href
     const resolvedRoot = shippedPresetRoot(moduleUrl)
 
-    expect(resolvedRoot).toBe(realpathSync(physicalPresetRoot))
+    // Preset root resolves through the module graph (physical in dev, inside
+    // app.asar when packaged) — never rewritten to the unpacked physical tree.
+    expect(resolvedRoot).not.toContain('app.asar.unpacked')
     expect(readFileSync(join(
       resolvedRoot,
       'cordis',
