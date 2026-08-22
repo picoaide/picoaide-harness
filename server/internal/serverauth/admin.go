@@ -2,6 +2,7 @@ package serverauth
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -808,8 +809,12 @@ func (a *AdminAPI) setUserDepartment(c *gin.Context) {
 	var req struct {
 		GroupID int64 `json:"group_id"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 未知字段(如误传 department_id)必须报错,不能静默解析为默认值 ——
+	// 否则 SyncUserGroups(nil) 会清空用户全部组归属(安全/健壮性)。
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误(仅接受 group_id 字段)")
 		return
 	}
 	var names []string
