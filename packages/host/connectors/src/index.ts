@@ -371,12 +371,18 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       const id = rawId
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
-      // P0-1: an in-flight flow must not be double-started by a fast double
-      // click (two OAuth windows, credential writeback race). The client is
-      // already polling the state endpoint; report ok without a new flow.
-      if (pendingFlows.has(id)) {
-        json(res, 200, { ok: true, request: pendingRequests.get(id) ?? { connectorId: id } })
-        return
+      // P0-1: a re-connect while a flow is in flight means the user closed
+      // the authorization popup (or abandoned it) and wants a fresh flow —
+      // abort the stale one first so the new connect is never swallowed and
+      // old authorize URL is never re-opened. A fast double-click still
+      // races: the second connect sees the first flow (just started) and
+      // aborts it — the client's own busy guard prevents that on the happy
+      // path; the abort here is the safety net for an abandoned flow.
+      const stale = pendingFlows.get(id)
+      if (stale) {
+        stale.abort(new Error('连接器重新连接，旧授权流程已取消'))
+        pendingFlows.delete(id)
+        pendingRequests.delete(id)
       }
       const request: ConnectorAuthRequest = { connectorId: id }
       emitRequest(request)

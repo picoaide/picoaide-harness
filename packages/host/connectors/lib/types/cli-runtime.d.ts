@@ -36,9 +36,18 @@ export interface CliRuntimeOptions {
     /** Fetch implementation override (tests). */
     fetchImpl?: typeof fetch;
     downloadTimeoutMs?: number;
+    /**
+     * Prefetched binaries shipped inside the application (build-time download,
+     * see `dsh-plugin-desktop/scripts/prefetch-cli.mjs`). When set and the
+     * bundled copy for the current platform exists, `resolve` uses it directly
+     * — first connect needs no network and no download wait.
+     * Layout: `<bundledDir>/<command>/<version>/<binaryName>`.
+     */
+    bundledDir?: string;
 }
 export declare class CliRuntime {
     private readonly cacheDir;
+    private readonly bundledDir;
     private readonly manifests;
     private readonly fetchImpl;
     private readonly downloadTimeoutMs;
@@ -50,6 +59,8 @@ export declare class CliRuntime {
      * provide this command (caller falls back to the raw name).
      */
     resolve(command: string, args: string[], onProgress?: CliProgress): Promise<ResolvedCommand | null>;
+    /** Locate a prefetched binary in the bundled directory, if any. */
+    private bundledBinary;
     /**
      * Ensure the pinned native binary for `manifest` exists in the cache,
      * downloading and extracting it when needed. Returns null on platforms the
