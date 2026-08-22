@@ -49,6 +49,10 @@ export declare class BrowserRuntime {
     private disposed;
     /** Partition name used for newly created tab views (per-user). */
     private partition;
+    /** Whether an agent browser operation is currently in flight (mask status). */
+    private busy;
+    /** The agent tool currently executing ('' when idle). */
+    private busyTool;
     constructor(adapter: ElectronAdapter, options?: BrowserToolOptions, askApproval?: BrowserGuard['askApproval'], credentials?: CredentialResolver | undefined, partition?: string);
     /** Swap the partition used by NEW tab views (user switch). Existing tabs
      * keep their partition; callers close all tabs first. */
@@ -61,6 +65,12 @@ export declare class BrowserRuntime {
     /** Snapshot of all tabs. */
     listTabs(): BrowserTabState[];
     get controlled(): boolean;
+    /** Whether an agent browser operation is running right now. */
+    get isBusy(): boolean;
+    /** The agent tool currently executing ('' when idle). */
+    get busyToolName(): string;
+    /** Latest completed agent operation (mask "recent activity" line). */
+    get latestOp(): BrowserOpLogEntry | undefined;
     /** Id of the visible tab, or undefined when none is open. */
     currentTabId(): number | undefined;
     /** Public tab state (throws for unknown ids). */
@@ -71,6 +81,15 @@ export declare class BrowserRuntime {
     private contentBounds;
     /** Re-layout every tab view + the mask over the window content area. */
     private relayout;
+    /**
+     * Mask visibility policy: the AI-control overlay stays over the content
+     * area whenever the agent holds control (i.e. the user has NOT taken
+     * over). It is TRANSLUCENT (the mask view is created with `transparent:
+     * true`, see electron-adapter.ts) so the user can see exactly what the AI
+     * is doing, and it displays the in-flight tool + recent operations. When
+     * the user takes over the overlay hides; releasing restores it.
+     */
+    private applyMaskVisibility;
     /**
      * Ensure the dedicated browser window exists and is shown. Creating the
      * window also loads the control-shell page and mounts the AI-control mask.
@@ -102,8 +121,16 @@ export declare class BrowserRuntime {
     private tabStateInternal;
     /** Run one agent operation under the control mutex. Passes the agent's
      * abort signal so a takeover pauses the loop until release (or the agent
-     * stops). */
-    withControl<T>(_tool: string, tabId: number, work: (tab: BrowserTab) => Promise<T>, signal?: AbortSignal): Promise<T>;
+     * stops). While the operation is in flight, `isBusy`/`busyToolName` expose
+     * it to the mask overlay ("AI is currently doing X").
+     *
+     * `summary` (when given) is recorded in the op log on success so the
+     * overlay's "recent activity" line shows what the agent actually did. */
+    withControl<T>(tool: string, tabId: number, work: (tab: BrowserTab) => Promise<T>, signal?: AbortSignal, summary?: string): Promise<T>;
+    /** Run `body` under the control mutex while flagging the in-flight agent
+     * tool (mask status). The flag covers the whole wait incl. a user
+     * takeover pause; it clears only when the operation truly finishes. */
+    private agentRun;
     /**
      * Navigate the tab to `url`, waiting per `waitUntil`.
      *
