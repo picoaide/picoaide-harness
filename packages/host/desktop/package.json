@@ -108,7 +108,8 @@
     "dist:win": "node scripts/package-win.ts",
     "dist:win-portable": "node scripts/package-win-portable.ts",
     "prepack": "yarn run check",
-    "e2e:client": "node scripts/e2e-client.mjs"
+    "e2e:client": "node scripts/e2e-client.mjs",
+    "e2e:real": "node scripts/real-env-verify.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
