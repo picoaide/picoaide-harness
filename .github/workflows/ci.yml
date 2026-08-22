@@ -57,7 +57,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
-          path: dsh-plugin-desktop/dist/
+          path: packages/host/desktop/dist/
           if-no-files-found: error
 
   desktop-windows:
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Windows-installer
-          path: dsh-plugin-desktop/dist/*Setup*.exe
+          path: packages/host/desktop/dist/*Setup*.exe
           if-no-files-found: error
 
   desktop-macos:
@@ -95,5 +95,5 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-macOS
-          path: dsh-plugin-desktop/dist/
+          path: packages/host/desktop/dist/
           if-no-files-found: error

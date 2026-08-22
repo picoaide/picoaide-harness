@@ -51,12 +51,12 @@ Launcher 私有的 `desktopRuntime`、`desktopPnpmBootstrap`、Electron executab
 
 发布包使用 Electron Builder 和 `app.asar`，但需要物理 unpack 的依赖（例如 pnpm、node-pty、Windows ACL/native 文件）会放在 `app.asar.unpacked`。Packaged runtime gate 会检查 ASAR 入口和物理运行时入口，profile fallback 不能把符号链接指向无法被 Node 解析的虚拟 ASAR 路径。
 
-根 workspace 使用 Yarn；固定的 `deepseek-harness/` 子模块保持上游自己的 pnpm workspace。桌面代码、测试、打包配置和发布脚本属于 `dsh-plugin-desktop/`，不修改上游子模块。
+根 workspace 使用 Yarn；固定的 `deepseek-harness/` 子模块保持上游自己的 pnpm workspace。桌面代码、测试、打包配置和发布脚本属于 `packages/host/desktop/`，不修改上游子模块。
 
 ## 维护者深入阅读
 
-- [Desktop service contract](../dsh-plugin-desktop/docs/plugin-services.md)
-- [Package README](../dsh-plugin-desktop/README.md)
+- [Desktop service contract](../packages/host/desktop/docs/plugin-services.md)
+- [Package README](../packages/host/desktop/README.md)
 - [Pinned upstream and isolated Yarn workspace](../.agents/notes/implemented/process/2026-08-15-pinned-upstream-and-isolated-yarn-workspace.md)
 - [Profile and pnpm services decision](../.agents/notes/implemented/architecture/2026-08-15-desktop-profile-and-pnpm-services.md)
 - [Advanced shell decision](../.agents/notes/implemented/architecture/2026-08-15-desktop-advanced-shell.md)

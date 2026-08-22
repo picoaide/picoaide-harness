@@ -61,11 +61,11 @@ Ordinary users can start with the [user guide](docs/user-guide.en.md); the devel
 | --- | --- |
 | Read the plugin ecosystem manifesto | [Plugin ecosystem manifesto](docs/plugin-ecosystem.en.md) |
 | Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
-| Join the unified plugin-contract discussion | [DSH Community Fabric Draft](dsh-community-fabric/README.md) |
-| See the research behind the unified plugin framework | [Framework and real-plugin research](dsh-community-fabric/docs/research/mature-plugin-frameworks.md) |
-| See what Desktop plugins can use | [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) |
+| Join the unified plugin-contract discussion | [DSH Community Fabric Draft](community/fabric/README.md) |
+| See the research behind the unified plugin framework | [Framework and real-plugin research](community/fabric/docs/research/mature-plugin-frameworks.md) |
+| See what Desktop plugins can use | [Desktop plugin API](packages/host/desktop/docs/plugin-services.md) |
 | Understand how the desktop works | [Architecture](docs/architecture.en.md) |
-| Read package-level build and release details | [`dsh-plugin-desktop/README.md`](dsh-plugin-desktop/README.md) |
+| Read package-level build and release details | [`dsh-plugin-desktop/README.md`](packages/host/desktop/README.md) |
 
 ## Features
 
@@ -98,7 +98,7 @@ We want the plugin ecosystem to work like a phone app store: every plugin is bui
 
 ### For developers
 
-Unlike many other projects, this project itself is a DSH [plugin](docs/plugin-development.en.md): the desktop shell composes through the same official path as third-party plugins. Desktop plugin capabilities are now available. We provide Desktop services so plugin developers can integrate their plugins with desktop capabilities: for example, viewing and switching work profiles, or installing, updating, and removing plugins in the active profile. See the [Desktop plugin API](dsh-plugin-desktop/docs/plugin-services.md) for complete usage details. See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
+Unlike many other projects, this project itself is a DSH [plugin](docs/plugin-development.en.md): the desktop shell composes through the same official path as third-party plugins. Desktop plugin capabilities are now available. We provide Desktop services so plugin developers can integrate their plugins with desktop capabilities: for example, viewing and switching work profiles, or installing, updating, and removing plugins in the active profile. See the [Desktop plugin API](packages/host/desktop/docs/plugin-services.md) for complete usage details. See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
 
 ## Relationship to the Official Project
 
@@ -130,7 +130,7 @@ Also, and you.
 
 ## Development
 
-Desktop source lives in `dsh-plugin-desktop/`. The outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
+Desktop source lives in `packages/host/desktop/`. The outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
 
 ```sh
 git submodule update --init --recursive
@@ -138,7 +138,7 @@ corepack yarn install --immutable
 corepack yarn dev
 ```
 
-Use `corepack yarn check` for the headless gate. The [architecture](docs/architecture.en.md) and package [`README`](dsh-plugin-desktop/README.md) describe the full build, test, and release boundaries. See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) for how to contribute.
+Use `corepack yarn check` for the headless gate. The [architecture](docs/architecture.en.md) and package [`README`](packages/host/desktop/README.md) describe the full build, test, and release boundaries. See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) for how to contribute.
 
 ## Community
 

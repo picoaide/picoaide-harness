@@ -5664,9 +5664,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@picoaide/dsh-account-card@workspace:*, @picoaide/dsh-account-card@workspace:plugins/dsh-account-card":
+"@picoaide/dsh-account-card@workspace:*, @picoaide/dsh-account-card@workspace:packages/client/account-card":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-account-card@workspace:plugins/dsh-account-card"
+  resolution: "@picoaide/dsh-account-card@workspace:packages/client/account-card"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-agent": "npm:0.1.0-rc.8"
@@ -5690,9 +5690,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-branding@workspace:plugins/dsh-branding":
+"@picoaide/dsh-branding@workspace:packages/client/branding":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-branding@workspace:plugins/dsh-branding"
+  resolution: "@picoaide/dsh-branding@workspace:packages/client/branding"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.8"
@@ -5713,9 +5713,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-browser@workspace:*, @picoaide/dsh-browser@workspace:plugins/dsh-browser":
+"@picoaide/dsh-browser@workspace:*, @picoaide/dsh-browser@workspace:packages/host/browser":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-browser@workspace:plugins/dsh-browser"
+  resolution: "@picoaide/dsh-browser@workspace:packages/host/browser"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-agent": "npm:0.1.0-rc.8"
@@ -5754,9 +5754,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-connectors@workspace:*, @picoaide/dsh-connectors@workspace:plugins/dsh-connectors":
+"@picoaide/dsh-connectors@workspace:*, @picoaide/dsh-connectors@workspace:packages/host/connectors":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-connectors@workspace:plugins/dsh-connectors"
+  resolution: "@picoaide/dsh-connectors@workspace:packages/host/connectors"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-client-locale": "npm:0.1.0-rc.8"
@@ -5787,9 +5787,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-cron@workspace:*, @picoaide/dsh-cron@workspace:plugins/dsh-cron":
+"@picoaide/dsh-cron@workspace:*, @picoaide/dsh-cron@workspace:packages/host/cron":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-cron@workspace:plugins/dsh-cron"
+  resolution: "@picoaide/dsh-cron@workspace:packages/host/cron"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-api-remotes": "npm:0.1.0-rc.8"
@@ -5829,9 +5829,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-enterprise@workspace:*, @picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise":
+"@picoaide/dsh-enterprise@workspace:*, @picoaide/dsh-enterprise@workspace:packages/host/enterprise":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-enterprise@workspace:plugins/dsh-enterprise"
+  resolution: "@picoaide/dsh-enterprise@workspace:packages/host/enterprise"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-brand": "npm:0.1.0-rc.8"
@@ -5867,9 +5867,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-task@workspace:*, @picoaide/dsh-task@workspace:plugins/dsh-task":
+"@picoaide/dsh-task@workspace:*, @picoaide/dsh-task@workspace:packages/host/task":
   version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-task@workspace:plugins/dsh-task"
+  resolution: "@picoaide/dsh-task@workspace:packages/host/task"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/dsh-api-remotes": "npm:0.1.0-rc.8"
@@ -9247,9 +9247,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"dsh-better-sidebar@workspace:*, dsh-better-sidebar@workspace:plugins/dsh-better-sidebar":
+"dsh-better-sidebar@workspace:*, dsh-better-sidebar@workspace:packages/client/better-sidebar":
   version: 0.0.0-use.local
-  resolution: "dsh-better-sidebar@workspace:plugins/dsh-better-sidebar"
+  resolution: "dsh-better-sidebar@workspace:packages/client/better-sidebar"
   dependencies:
     "@codemirror/commands": "npm:^6.10.4"
     "@codemirror/lang-cpp": "npm:^6.0.3"
@@ -9379,21 +9379,21 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"dsh-community-fabric@workspace:dsh-community-fabric":
+"dsh-community-fabric@workspace:community/fabric":
   version: 0.0.0-use.local
-  resolution: "dsh-community-fabric@workspace:dsh-community-fabric"
+  resolution: "dsh-community-fabric@workspace:community/fabric"
   languageName: unknown
   linkType: soft
 
-"dsh-memory-evolve@workspace:*, dsh-memory-evolve@workspace:plugins/dsh-memory-evolve":
+"dsh-memory-evolve@workspace:*, dsh-memory-evolve@workspace:packages/vendor/memory-evolve":
   version: 0.0.0-use.local
-  resolution: "dsh-memory-evolve@workspace:plugins/dsh-memory-evolve"
+  resolution: "dsh-memory-evolve@workspace:packages/vendor/memory-evolve"
   languageName: unknown
   linkType: soft
 
-"dsh-plugin-desktop@workspace:*, dsh-plugin-desktop@workspace:dsh-plugin-desktop":
+"dsh-plugin-desktop@workspace:*, dsh-plugin-desktop@workspace:packages/host/desktop":
   version: 0.0.0-use.local
-  resolution: "dsh-plugin-desktop@workspace:dsh-plugin-desktop"
+  resolution: "dsh-plugin-desktop@workspace:packages/host/desktop"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.1"
     "@deepseek-ai/cordis-plugin-group": "npm:1.0.1"
