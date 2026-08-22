@@ -264,11 +264,10 @@ func nilIfNilFloat64(v *float64) any {
 }
 
 // DeleteUser removes a user and all their FK-referenced rows
-// (api_tokens, usage, admin_sessions, mcp_config_downloads, user_groups,
-// kb_folder_users) in a single transaction so deletion never trips the FK
-// constraint. Deleting the last remaining admin rolls back with ErrLastAdmin
-// (C-17: the guard runs inside the transaction, closing the count-then-delete
-// TOCTOU; 审计 S1: kb_folder_users rows keyed by username are cleaned too).
+// (api_tokens, usage, admin_sessions, user_groups) in a single transaction
+// so deletion never trips the FK constraint. Deleting the last remaining
+// admin rolls back with ErrLastAdmin (C-17: the guard runs inside the
+// transaction, closing the count-then-delete TOCTOU).
 //
 // 权衡(审计 L4):usage 为计费原始记录,删除用户会物理删除其全部用量/费用,
 // 历史统计与部门预算成本随之减少、不可追溯。当前采用硬删以保证 FK 完整与
@@ -288,26 +287,19 @@ func DeleteUser(db *sql.DB, id int64) error {
 		}
 		return err
 	}
-	// cascade stmts keyed by user id; the kb grant is keyed by username
+	// cascade stmts keyed by user id
 	for _, stmt := range []string{
 		"DELETE FROM api_tokens WHERE user_id = ?",
 		"DELETE FROM usage WHERE user_id = ?",
 		"DELETE FROM admin_sessions WHERE user_id = ?",
-		"DELETE FROM mcp_config_downloads WHERE user_id = ?",
 		"DELETE FROM user_groups WHERE user_id = ?",
 	} {
 		if _, err := tx.Exec(stmt, id); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec("DELETE FROM kb_folder_users WHERE username = ?", username); err != nil {
-		return err
-	}
 	// 同名用户重建不得继承旧授权(权限体系:用户级授权随用户删除级联)
 	if _, err := tx.Exec("DELETE FROM skill_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
-		return err
-	}
-	if _, err := tx.Exec("DELETE FROM mcp_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
 		return err
 	}
 	// 删除担任部门主管的用户:清空其主管身份(审计 M1),否则悬空

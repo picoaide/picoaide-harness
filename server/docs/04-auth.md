@@ -69,9 +69,8 @@ PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -data ./data --bootstrap-admin admin
 | 登录 `POST /api/auth/login` | 内存计数器(按 IP+用户名,失败累计,成功/时间窗重置) | - |
 | 管理登录 `POST /api/admin/login` | 同上(独立计数器) | - |
 | 网关 `/v1/chat/completions` | per-user 令牌桶(`gateway.rate_limit`,settings 可调,桶上限 10000) | 60/min |
-| 商城凭证 `GET /api/marketplace/mcp/:id/config` | per-user 计数窗口(商城包内实现) | 30/h |
 
-超限返回 `429 RATE_LIMITED`。限流是"建议安装制"的兜底:凭证可被任意登录员工拉取,靠限流 + `mcp_config_downloads` 审计追责。
+超限返回 `429 RATE_LIMITED`。
 
 ## 7. 用户模型
 

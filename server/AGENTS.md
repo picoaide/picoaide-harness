@@ -6,12 +6,12 @@
 
 ## 1. 项目是什么(一句话)
 
-**企业内网 AI 办公智能体的服务端与管理系统**:Go 服务端提供认证、LLM 网关(密钥不出服务端、按用户计量计费)、商城、知识库与全部管理接口;webadmin 管理端(shadcn SPA,内嵌进服务端二进制)负责用户/网关/用量/商城/知识库/部门预算等全部配置。
+**企业内网 AI 办公智能体的服务端与管理系统**:Go 服务端提供认证、LLM 网关(密钥不出服务端、按用户计量计费)、技能商城与全部管理接口;webadmin 管理端(shadcn SPA,内嵌进服务端二进制)负责用户/网关/用量/商城/部门预算等全部配置。
 
 ## 2. 第一性原理(设计为什么是这样,改设计前先过一遍)
 
-1. **服务端是唯一控制面**——密钥只存服务端(AES-GCM + master key 文件);所有功能配置(模型/上游密钥/技能/MCP/凭证/知识库权限/配额/价格)由管理员在 webadmin 完成;登录后 `GET /api/config/bootstrap` 统一下发(默认模型+建议清单)。
-2. **严格默认拒绝**——商城与知识库资源上架/创建后**未授权用户一律不可见不可用**(404 不泄露存在性);授权对象 = 用户或部门组(@组名约定,组名大小写不敏感);admin 恒全量不落表;授权变更必审计(kb_audit_logs);改密/降权/禁用自动吊销全部 API token。
+1. **服务端是唯一控制面**——密钥只存服务端(AES-GCM + master key 文件);所有功能配置(模型/上游密钥/技能/凭证/配额/价格)由管理员在 webadmin 完成;登录后 `GET /api/config/bootstrap` 统一下发(默认模型+建议清单)。
+2. **严格默认拒绝**——商城资源上架后**未授权用户一律不可见不可用**(404 不泄露存在性);授权对象 = 用户或部门组(@组名约定,组名大小写不敏感);admin 恒全量不落表;授权变更必审计(audit_logs);改密/降权/禁用自动吊销全部 API token。
 3. **部门(组)即金字塔组织架构**(迁移 0017)——`groups` 含 parent_id/leader_id:部门树任意层级、部门主管、员工**单部门归属**(`PUT /api/admin/users/:id/department`);权限继承:`UserEffectiveGroups` = 归属部门+祖先链(授权给部门覆盖子部门成员)+ 主管部门子树(主管向上继承)+ 隐式「全员」组(全员为保留名,禁建/删/改名);部门改名级联授权表(NOCASE)、删除须无成员/子部门/授权引用;LDAP 登录全量同步组(空组即回收)。
 4. **计量即金钱**——usage 表记录每次 LLM 调用的 token 与费用(`cost`,记录时按模型定价与峰谷窗口折算,0022/0023);配额体系三层:员工 token 配额、员工金额配额、部门预算(0024,归属链全部生效);任一超限网关 429 `QUOTA_EXCEEDED`(admin 豁免)。价格/峰谷窗口管理员可配置,改价只影响之后产生的费用。
 5. **无状态优先**——服务端接口保持无状态(Bearer token / 管理端 session);历史遗留的客户端引擎概念(审批门控/CDP/本地沙盒)随客户端下线,不再演进。
@@ -32,9 +32,9 @@
   ├─ 认证:local/LDAP/OIDC + api_tokens(90天过期)+ /api/auth/me|usage
   ├─ AI 网关:/v1/chat/completions|embeddings|models + per-user 限流 + usage 计量(费用/峰谷)
   ├─ bootstrap:/api/config/bootstrap(默认模型+建议清单)
-  ├─ 商城:/api/marketplace/*(skills 建议清单 + mcp_servers 凭证 AES-GCM)
-  ├─ 知识库:/api/kb/*(FTS5 检索 + 权限校验)
-  └─ 管理端 webadmin(go:embed 内嵌,/admin/):用户/网关/用量/商城/知识库/部门 —— 全部配置入口
+  ├─ 商城:/api/marketplace/*(skills 建议清单 + 授权制)
+  ├─ 审计:/api/admin/audit(用户/部门/技能等敏感操作留痕)
+  └─ 管理端 webadmin(go:embed 内嵌,/admin/):用户/网关/用量/商城/部门 —— 全部配置入口
 ```
 
 ## 5. 技术栈
@@ -46,7 +46,7 @@
 
 ```
 cmd/server/            # 服务端入口(--bootstrap-admin 等)
-internal/              # serverauth/llmgateway/marketplace/knowledge/serverstore/util/bootstrap
+internal/              # serverauth/llmgateway/marketplace/serverstore/util/bootstrap
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/superpowers/      # 架构设计 + 实施计划(权威文档)
 scripts/               # install-server.sh(生产一键部署)+ mock-upstream.go(假上游)
@@ -56,10 +56,10 @@ data/                  # 服务端运行时数据(0700,gitignore)
 ## 7. 关键契约(两端必须一致)
 
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
-- **bootstrap**:`{default_model, models, skills, mcp, web}`(接入方对 skills/mcp/web 缺省值兜底)
+- **bootstrap**:`{default_model, models, skills, web}`(接入方对 skills/web 缺省值兜底)
 - **员工用量接口**:`GET /api/auth/usage` → `{quota_tokens, quota_money, remaining_tokens/money(不限=null), today/yesterday/monthly/total usage+cost, dept_budgets[]}`(余额与统计展示数据源)
-- **DB**:服务端 20+ 表(迁移 0001-0024,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings、0016 skill_grants/mcp_grants、0017 departments、0018 全员 seed、0019 groups NOCASE 唯一、0020 usage.kind、0021 users.quota_tokens、0022 金额配额 users.quota_money + models 价格列 + usage.cost、0023 models.offpeak_discount 峰谷折扣 + settings usage.peak_windows(北京高峰窗口)、0024 groups.budget_money 部门预算)
-- **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取(chunk_ids ≤100);长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title);所有 folder(含根目录)须显式授权(`GetAccessibleFolderIDs` 严格模式)
+- **DB**:服务端 20+ 表(迁移 0001-0027,0007 废弃;0016 skill_grants、0017 departments、0018 全员 seed、0019 groups NOCASE 唯一、0020 usage.kind、0021 users.quota_tokens、0022 金额配额 users.quota_money + models 价格列 + usage.cost、0023 models.offpeak_discount 峰谷折扣 + settings usage.peak_windows(北京高峰窗口)、0024 groups.budget_money 部门预算、0028 知识库/MCP 下线清理 + audit_logs 独立)
+- **审计契约**:`GET /api/admin/audit?page=&size=&action=&username=`(用户/部门/技能/令牌等敏感操作留痕,90 天保留)
 - **费用/配额口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6,高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;配额链 = 员工 token → 员工金额 → 部门预算(归属+祖先,树内 SUM(cost));剩余 = 配额 − 本月已用(不限=null)
 
 ## 8. 常用命令

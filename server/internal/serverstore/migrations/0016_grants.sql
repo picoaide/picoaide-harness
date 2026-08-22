@@ -1,4 +1,4 @@
--- 0016: skill/mcp grants (admin-authorized usage, strict default).
+-- 0016: skill grants (admin-authorized usage, strict default).
 -- Subjects are usernames or group names (grantee_type disambiguates);
 -- groups are resolved via the groups/user_groups tables at query time,
 -- so revoking a grant (or LDAP group membership) takes effect immediately.
@@ -8,10 +8,4 @@ CREATE TABLE skill_grants (
   grantee_type TEXT NOT NULL CHECK (grantee_type IN ('user','group')),
   grantee TEXT NOT NULL,
   PRIMARY KEY(skill_name, grantee_type, grantee)
-);
-CREATE TABLE mcp_grants (
-  mcp_id INTEGER NOT NULL,
-  grantee_type TEXT NOT NULL CHECK (grantee_type IN ('user','group')),
-  grantee TEXT NOT NULL,
-  PRIMARY KEY(mcp_id, grantee_type, grantee)
 );

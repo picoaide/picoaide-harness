@@ -47,11 +47,8 @@
 | `clipboard_read` / `clipboard_write` | 剪贴板读写 | 读 **高危** |
 | `web_fetch` | 抓网页转纯文本(拒绝内网地址,`web.allow_private` 可放开) | - |
 | `web_search` | 搜索(管理员配置的 `web.search_endpoint`) | - |
-| `kb_search` / `kb_read` / `kb_list` | 企业知识库查询(经服务端远程 MCP) | - |
-| `kb_upload` | 上传文本到知识库(数据外发) | **高危** |
 | `browser_tab_info` / `browser_get_content` | 浏览器读取(当前页 URL/标题/文本,直通) | - |
 | `browser_click` / `browser_type` / `browser_navigate` / `browser_scroll` / `browser_execute_js` | 浏览器操作(经 CDP 桥) | **高危** |
-| MCP 插件工具 | `<plugin>_<tool>` 动态注册 | 启发式判定(见 07-marketplace.md) |
 | `allow_dir` | 越界访问时的目录授权(引擎内置,非模型可调) | 引擎直接触发 |
 
 ## 5. 审批门控(engine.ts)

@@ -231,7 +231,7 @@ func provisionUser(db *sql.DB, ui UserInfo) (*serverstore.User, error) {
 		return nil, errors.New("username belongs to a local account")
 	}
 	// 同步组:外部(LDAP)身份每次登录全量对齐——组被移除或清空后,
-	// user_groups 必须同步回收,否则 skill/mcp/kb 组授权永久生效
+	// user_groups 必须同步回收,否则 skill 组授权永久生效
 	if ui.Source == "external" {
 		if err := serverstore.SyncUserGroups(db, u.ID, ui.Groups); err != nil {
 			return nil, err

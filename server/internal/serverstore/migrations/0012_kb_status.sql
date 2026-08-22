@@ -1,2 +1,0 @@
-ALTER TABLE kb_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'ready';
-ALTER TABLE kb_documents ADD COLUMN error TEXT NOT NULL DEFAULT '';
