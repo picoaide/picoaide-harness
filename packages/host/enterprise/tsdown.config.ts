@@ -51,7 +51,6 @@ export default defineConfig([
     external: [
       ...PLATFORM_MODULES,
       ...PRELOADED_CLIENT_EXTERNALS,
-      '@deepseek-ai/dsh-client-ui-attachment',
       '@deepseek-ai/dsh-client-ui-settings/client',
       '@deepseek-ai/dsh-client-ui-layout/client',
       '@deepseek-ai/dsh-client-ui-sidebar/client',

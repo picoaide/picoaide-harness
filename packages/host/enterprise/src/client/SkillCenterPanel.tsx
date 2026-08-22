@@ -231,6 +231,8 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('')
   const [action, setAction] = useState<ActionState | null>(null)
   const [loading, setLoading] = useState(true)
+  /** 待确认卸载的技能名（面板内确认条，替代原生 window.confirm）。 */
+  const [confirmName, setConfirmName] = useState<string | null>(null)
   // fetch sequence guard: only the newest load may write state (retry can
   // race the initial load).
   const loadSeqRef = useRef(0)
@@ -291,9 +293,15 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
 
   const uninstall = async (name: string): Promise<void> => {
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling')) return
-    // UX-3: an uninstall is one-click destructive today; confirm first so a
-    // misclick does not remove a skill silently.
-    if (!window.confirm(t('skill.uninstallConfirm', { name }))) return
+    // UX-3: an uninstall is one-click destructive — confirm inline (replacing
+    // the blocking window.confirm) so a misclick does not remove a skill
+    // silently and the panel stays keyboard/assistive-friendly.
+    const target = confirmName === name ? name : null
+    if (target === null) {
+      setConfirmName(name)
+      return
+    }
+    setConfirmName(null)
     setAction({ name, kind: 'uninstalling' })
     try {
       const res = await fetch(`/api/pico/skills/${encodeURIComponent(name)}/uninstall`, { method: 'POST' })
@@ -351,14 +359,35 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
           {skill.description !== '' && <p style={DESC}>{skill.description}</p>}
           <div style={CARD_FOOT}>
             {isInstalled ? (
-              <button
-                type="button"
-                style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY}
-                disabled={busy}
-                onClick={() => { void uninstall(skill.name) }}
-              >
-                {busy && action?.kind === 'uninstalling' ? t('skill.uninstalling') : t('skill.uninstall')}
-              </button>
+              confirmName === skill.name ? (
+                <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+                  <button
+                    type="button"
+                    style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-label-inverted, #fff)' }}
+                    disabled={busy}
+                    onClick={() => { void uninstall(skill.name) }}
+                  >
+                    {busy && action?.kind === 'uninstalling' ? t('skill.uninstalling') : t('skill.confirmUninstall')}
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...BUTTON_SECONDARY, flex: 1 }}
+                    disabled={busy}
+                    onClick={() => { setConfirmName(null) }}
+                  >
+                    {t('skill.cancel')}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY}
+                  disabled={busy}
+                  onClick={() => { void uninstall(skill.name) }}
+                >
+                  {busy && action?.kind === 'uninstalling' ? t('skill.uninstalling') : t('skill.uninstall')}
+                </button>
+              )
             ) : (
               <button
                 type="button"
