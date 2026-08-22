@@ -1,4 +1,4 @@
-/** Headless smoke for the complete published DSH Web profile and renderer manifest. */
+/** Headless smoke for the complete published DSH Desktop profile and renderer manifest. */
 
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,10 +11,8 @@ import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
 import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
-import { installDesktopPnpmRuntime } from '../lib/desktop-runtime-environment.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
-import { DesktopProfileService } from '../lib/profile-service.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-profile-smoke'
 const HOST_SERVICE_PLUGIN_NAME = 'dsh-desktop-host-services-smoke-plugin'
@@ -28,7 +26,6 @@ const previousDshHome = process.env.DSH_HOME
 process.env.DSH_HOME = home
 let ctx
 let releasePackageResolver
-let pnpmRuntime
 let mountedSpec
 let nativeThemeSource = 'system'
 const trayItems = []
@@ -54,8 +51,6 @@ try {
     { recursive: true, force: false, errorOnExist: true },
   )
   const patches = [
-    // Deliberately compose the consumer before the desktop-pnpm provider row.
-    // Its required injection must keep it pending until that service mounts.
     {
       insert: [{
         id: 'desktop-host-services-smoke-plugin',
@@ -64,19 +59,6 @@ try {
     },
     ...prepared.patches,
   ]
-  const packageRoot = new URL('../', import.meta.url)
-  const pnpmBinPath = fileURLToPath(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
-  const electronVersion = JSON.parse(
-    readFileSync(new URL('node_modules/electron/package.json', packageRoot), 'utf8'),
-  ).version
-  pnpmRuntime = installDesktopPnpmRuntime({
-    platform: process.platform,
-    appExecutable: process.execPath,
-    pnpmBinPath,
-    electronVersion,
-    stateDir: join(home, 'runtime-commands'),
-    environment: process.env,
-  })
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const runtime = {
     platform: 'win32',
@@ -112,7 +94,6 @@ try {
         },
       }
     },
-    openTerminal() {},
     setLocalePreference(preference) { runtime.locale = preference ?? 'en' },
     setThemeSource(source) { nativeThemeSource = source },
     async requestRestart() {},
@@ -125,33 +106,6 @@ try {
     async (host) => {
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopRuntime', runtime)
-      host.provide('desktopPnpmBootstrap', {
-        activeProfileName: 'desktop',
-        activeProfileDir: prepared.profile.dir,
-        homeDir: prepared.homeDir,
-        appExecutable: process.execPath,
-        pnpmBinPath,
-        electronVersion,
-        nodeBinDir: pnpmRuntime.nodeBinDir,
-        nodeShimPath: pnpmRuntime.nodeShimPath,
-        clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
-        dshBootstrapPath: fileURLToPath(new URL('../lib/desktop-cli.js', import.meta.url)),
-      })
-      await host.plugin(DesktopProfileService, {
-        current: {
-          name: 'desktop',
-          dir: prepared.profile.dir,
-        },
-        list: () => [{
-          name: 'desktop',
-          dir: prepared.profile.dir,
-          exists: true,
-          bundles: prepared.profile.layers.map(layer => layer.packageName),
-          webCapable: true,
-        }],
-        persistSelection: () => {},
-        requestRestart: () => {},
-      })
       provideCmdline(host, {
         args: ['--host', '127.0.0.1', '--port', '0'],
         exit: () => {},
@@ -161,13 +115,6 @@ try {
   )
   await runtime.mountScheduled()
 
-  if (ctx.get('desktopPnpm') === undefined) {
-    throw new Error('assembled desktop profile is missing the desktop pnpm Host capability')
-  }
-  if (ctx.desktopProfiles.current.name !== 'desktop'
-    || ctx.desktopProfiles.current.dir !== prepared.profile.dir) {
-    throw new Error('assembled desktop profile service has the wrong active identity')
-  }
   const agentPresets = ctx.get('agentPresets')
   if (agentPresets === undefined) {
     throw new Error('assembled Windows profile is missing the agent preset roster')
@@ -182,17 +129,6 @@ try {
   const legacyPreset = await agentPresets.resolve('minimal')
   if (legacyPreset.id !== 'minimal') {
     throw new Error(`assembled Windows profile remapped legacy preset to ${legacyPreset.id}`)
-  }
-  const hostServiceProbe = ctx.get(HOST_SERVICE_PROBE_KEY)
-  if (hostServiceProbe?.current?.name !== 'desktop'
-    || hostServiceProbe.current.dir !== prepared.profile.dir
-    || hostServiceProbe.pnpm?.serviceName !== 'desktopPnpm'
-    || hostServiceProbe.pnpm.lookupRun !== 'function'
-    || hostServiceProbe.pnpm.run !== 'function'
-    || hostServiceProbe.pnpm.runPlugin !== 'function') {
-    throw new Error(
-      `profile-local Host service plugin produced an unexpected probe: ${JSON.stringify(hostServiceProbe)}`,
-    )
   }
 
   const picker = ctx.directoryPicker.capability()
@@ -221,13 +157,11 @@ try {
   if (!trayItems.some(item => item.label() === 'Check for Updates…')) {
     throw new Error('assembled desktop profile is missing the update tray command')
   }
-  if (process.platform !== 'linux'
-    && !trayItems.some(item => item.label() === 'Open DSH Terminal')) {
-    throw new Error('assembled desktop profile is missing the terminal tray command')
+  if (trayItems.some(item => item.label().startsWith('Profile:'))) {
+    throw new Error('assembled desktop profile unexpectedly includes the profile tray submenu')
   }
-  const profileMenu = trayItems.find(item => item.label() === 'Profile: desktop')
-  if (profileMenu?.submenu?.()[0]?.label() !== 'desktop') {
-    throw new Error('assembled desktop profile is missing the active profile tray submenu')
+  if (trayItems.some(item => item.label() === 'Open DSH Terminal')) {
+    throw new Error('assembled desktop profile unexpectedly includes the terminal tray command')
   }
   // The enterprise login gate serves its own page at the Web root while logged
   // out, so authenticate before verifying the assembled Web app root.
@@ -267,7 +201,6 @@ try {
 } finally {
   await ctx?.fiber.dispose()
   releasePackageResolver?.()
-  pnpmRuntime?.dispose()
   rmSync(home, { recursive: true, force: true })
   if (previousDshHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = previousDshHome

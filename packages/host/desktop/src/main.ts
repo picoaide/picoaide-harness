@@ -3,7 +3,6 @@
 import { app, crashReporter } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import {
   boot,
   installFailLoud,
@@ -13,10 +12,6 @@ import {
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { DSH_HOME_ENV, resolveDshHome } from './desktop-home.ts'
-import {
-  installDesktopDshRuntime,
-  installDesktopPnpmRuntime,
-} from './desktop-runtime-environment.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import {
   ElectronStderrLogger,
@@ -36,24 +31,13 @@ import { LogFileSink } from './log-files.ts'
 import { maskSecrets } from './mask-secrets.ts'
 import { resolveDesktopShellEnvironment } from './shell-environment.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
-import { packagedDependencyPath } from './packaged-runtime-path.ts'
-import {
-  beginDesktopProfileStartup,
-  listDesktopProfiles,
-  markDesktopProfileFailed,
-  markDesktopProfileHealthy,
-  selectDesktopProfile,
-  type DesktopProfileStartup,
-} from './profile-manager.ts'
-import { DesktopProfileService } from './profile-service.ts'
-import { DesktopActionsService } from './desktop-actions.ts'
 import { DesktopPluginsService } from './desktop-plugins.ts'
 import {
+  DESKTOP_PROFILE_NAME,
   desktopInstallAnchor,
   prepareDesktopProfile,
   type SkippedOptionalEntry,
 } from './profile.ts'
-import type { DesktopPnpmBootstrap } from './pnpm.ts'
 import {
   createDesktopExitCoordinator,
   createDesktopShutdown,
@@ -68,15 +52,6 @@ import {
 
 const BIN_NAME = 'dsh-plugin-desktop'
 const PRODUCT_NAME = 'PicoAide Harness'
-
-/** Report profile recovery without changing startup or rollback outcomes. */
-function notifyProfileRecovery(runtime: ElectronDesktopRuntime, logger: DesktopLogger, body: string): void {
-  try {
-    runtime.updates.notify({ title: 'Unable to Open Profile', body })
-  } catch (cause) {
-    logger.error(`${BIN_NAME}: failed to show profile recovery notification: ${cause instanceof Error ? cause.message : String(cause)}`)
-  }
-}
 
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
@@ -129,14 +104,10 @@ async function start(): Promise<void> {
   }
 
   let current: Context | undefined
-  let profileStartup: DesktopProfileStartup | undefined
-  let profileStatePath: string | undefined
   let shutdown: DesktopShutdown | undefined
   let removeShutdownRequests: (() => void) | undefined
   let removeUncaughtExceptionLogging: (() => void) | undefined
   let removeChildProcessLogging: (() => void) | undefined
-  let disposeDshRuntime: (() => void) | undefined
-  let disposePnpmRuntime: (() => void) | undefined
   let fileExporter: FileExporter | undefined
   let runtime!: ElectronDesktopRuntime
   let logSink: LogFileSink | undefined
@@ -210,25 +181,11 @@ async function start(): Promise<void> {
     restartRequested = true
     nativeExit.requestRelaunch()
     await shutdown.request(0)
-  }, (report) => {
-    if (profileStartup === undefined || profileStatePath === undefined) {
-      throw new Error('dsh-plugin-desktop: renderer boot health arrived before profile startup')
-    }
-    if (report.status === 'healthy') {
-      markDesktopProfileHealthy(profileStatePath, profileStartup.profileName)
-    } else {
-      markDesktopProfileFailed(profileStatePath, profileStartup.profileName)
-    }
-  }, electronLogger)
+  }, () => {}, electronLogger)
   const finalExit = (code: number): void => { nativeExit.finish(code) }
   shutdown = createDesktopShutdown(
     async () => {
-      try {
-        await current?.fiber.dispose()
-      } finally {
-        disposeDshRuntime?.()
-        disposePnpmRuntime?.()
-      }
+      await current?.fiber.dispose()
     },
     finalExit,
   )
@@ -270,85 +227,25 @@ async function start(): Promise<void> {
     exit: finalExit,
   }
   installFailLoud(BIN_NAME, failLoudProcess, async () => {
-    try {
-      await current?.fiber.dispose()
-    } finally {
-      disposeDshRuntime?.()
-      disposePnpmRuntime?.()
-    }
+    await current?.fiber.dispose()
   })
 
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
-    const electronVersion = process.versions.electron
-    if (electronVersion === undefined) {
-      throw new Error(`${BIN_NAME}: plugin runtime requires the Electron runtime version`)
-    }
-    const pnpmBinPath = packagedDependencyPath(import.meta.url, 'pnpm/bin/pnpm.mjs')
-    const pnpmRuntime = installDesktopPnpmRuntime({
-      platform: process.platform,
-      appExecutable: process.execPath,
-      pnpmBinPath,
-      electronVersion,
-      stateDir: join(app.getPath('userData'), 'runtime-commands'),
-      environment: process.env,
-    })
-    const releasePnpmRuntime = (): void => { pnpmRuntime.dispose() }
-    disposePnpmRuntime = releasePnpmRuntime
-    const selectionStatePath = join(app.getPath('userData'), 'profile-selection', 'state.json')
     const pluginManagementStatePath = join(app.getPath('userData'), 'plugin-management', 'state.json')
-    profileStatePath = selectionStatePath
-    profileStartup = beginDesktopProfileStartup(selectionStatePath, homeDir)
-    const activeProfileName = profileStartup.profileName
+    const activeProfileName = DESKTOP_PROFILE_NAME
     const prepared = prepareDesktopProfile(
       process.env.DSH_TELEMETRY_DISABLED,
       homeDir,
       process.platform,
-      activeProfileName,
       pluginManagementStatePath,
     )
-    const dshBootstrapPath = fileURLToPath(new URL('./desktop-cli.js', import.meta.url))
-    const dshRuntime = process.platform === 'win32'
-      ? installDesktopDshRuntime({
-          platform: process.platform,
-          appExecutable: process.execPath,
-          dshBootstrapPath,
-          profileName: activeProfileName,
-          homeDir,
-          stateDir: join(app.getPath('userData'), 'host-commands', activeProfileName),
-          environment: process.env,
-        })
-      : undefined
-    const releaseDshRuntime = (): void => { dshRuntime?.dispose() }
-    disposeDshRuntime = releaseDshRuntime
-    const desktopPnpmBootstrap: DesktopPnpmBootstrap = {
-      activeProfileName,
-      activeProfileDir: prepared.profile.dir,
-      homeDir,
-      appExecutable: process.execPath,
-      pnpmBinPath,
-      electronVersion,
-      nodeBinDir: pnpmRuntime.nodeBinDir,
-      nodeShimPath: pnpmRuntime.nodeShimPath,
-      clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
-      dshBootstrapPath,
-    }
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
     const ctx = await boot(
       BIN_NAME,
       prepared.rootConfig,
       prepared.patches,
       async (hostCtx) => {
-        hostCtx.effect(
-          () => releasePnpmRuntime,
-          'dsh-plugin-desktop: packaged pnpm runtime PATH',
-        )
-        if (dshRuntime !== undefined) {
-          hostCtx.effect(
-            () => releaseDshRuntime,
-            'dsh-plugin-desktop: packaged dsh runtime PATH',
-          )
-        }
         current = hostCtx
         hostCtx.effect(
           () => releasePackageResolver,
@@ -356,11 +253,6 @@ async function start(): Promise<void> {
         )
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
-        hostCtx.provide('desktopPnpmBootstrap', desktopPnpmBootstrap)
-        await hostCtx.plugin(DesktopActionsService, {
-          openTerminal: () => { runtime.openTerminal() },
-          requestRestart: () => runtime.requestRestart(),
-        })
         await hostCtx.plugin(DesktopPluginsService, {
           profileName: activeProfileName,
           homeDir,
@@ -371,15 +263,6 @@ async function start(): Promise<void> {
           fileExporter = new FileExporter(logSink)
           hostCtx.logger.exporter(fileExporter)
         }
-        await hostCtx.plugin(DesktopProfileService, {
-          current: {
-            name: activeProfileName,
-            dir: prepared.profile.dir,
-          },
-          list: () => listDesktopProfiles(homeDir),
-          persistSelection: name => { selectDesktopProfile(selectionStatePath, homeDir, name) },
-          requestRestart: () => runtime.requestRestart(),
-        })
         provideCmdline(hostCtx, {
           args: ['--host', '127.0.0.1', '--port', String(prepared.port)],
           exit: requestQuit,
@@ -396,42 +279,12 @@ async function start(): Promise<void> {
       if (namespace !== DESKTOP_SETTINGS_NAMESPACE) return
       fileExporter?.setThreshold((next as DesktopSettings).logLevel)
     })
-    runtime.configureTerminal({
-      profileName: activeProfileName,
-      profileDir: prepared.profile.dir,
-      homeDir: prepared.homeDir,
-    })
     await runtime.mountScheduled()
     notifySkippedOptionalEntries(runtime, electronLogger, prepared.skippedOptionalEntries)
     notifyWindowsVolumeConcerns(runtime, electronLogger, windowsVolumeConcerns)
-    if (profileStartup.rolledBackFrom !== undefined) {
-      notifyProfileRecovery(
-        runtime,
-        electronLogger,
-        `Reopened last-known-good profile ${activeProfileName}.`,
-      )
-    }
   } catch (cause) {
     electronLogger.errorCause(cause)
-    let exitCode = 1
-    if (profileStartup !== undefined && profileStatePath !== undefined) {
-      const retryLastKnownGood = profileStartup.profileName !== profileStartup.state.lastKnownGood
-      try {
-        markDesktopProfileFailed(profileStatePath, profileStartup.profileName)
-        if (retryLastKnownGood) {
-          nativeExit.requestRelaunch()
-          exitCode = 0
-          notifyProfileRecovery(
-            runtime,
-            electronLogger,
-            `Reopening last-known-good profile ${profileStartup.state.lastKnownGood}.`,
-          )
-        }
-      } catch (stateCause) {
-        electronLogger.error(`dsh-plugin-desktop: failed to roll back desktop profile state: ${stateCause instanceof Error ? stateCause.message : String(stateCause)}`)
-      }
-    }
-    await shutdown.request(exitCode)
+    await shutdown.request(1)
   }
 }
 

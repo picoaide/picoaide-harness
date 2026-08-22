@@ -34,16 +34,8 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/main.js',
   'lib/client.js',
   'lib/profile.js',
-  'lib/profile-manager.js',
-  'lib/profile-service.js',
-  'lib/pnpm.js',
-  'lib/profiles.js',
   'lib/diagnostics.js',
   'lib/diagnostic-export-worker.js',
-  'lib/desktop-cli.js',
-  'lib/desktop-runtime-environment.js',
-  'lib/desktop-terminal.js',
-  'lib/terminal.js',
   'lib/update-checker.js',
   'lib/update-download.js',
   'lib/updates.js',
@@ -52,7 +44,6 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-  'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
 
 /** Physical entries required because profile fallback symlinks cannot target ASAR paths. */
@@ -67,13 +58,8 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   'lib/client.js',
   'lib/index.js',
   'lib/profile.js',
-  'lib/profile-manager.js',
-  'lib/profile-service.js',
-  'lib/pnpm.js',
-  'lib/profiles.js',
   'lib/diagnostics.js',
   'lib/diagnostic-export-worker.js',
-  'lib/terminal.js',
   'lib/update-download.js',
   'lib/updates.js',
   'lib/windows-agent-presets.js',
@@ -85,7 +71,6 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
-  'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
 
 /** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
@@ -106,10 +91,6 @@ export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
   'dsh-plugin-desktop',
   'dsh-plugin-desktop/profile',
   'dsh-plugin-desktop/client',
-  'dsh-plugin-desktop/terminal',
-  'dsh-plugin-desktop/pnpm',
-  'dsh-plugin-desktop/profile-service',
-  'dsh-plugin-desktop/profiles',
   'dsh-plugin-desktop/diagnostics',
   'dsh-plugin-desktop/updates',
   'dsh-plugin-desktop/windows-agent-presets',
