@@ -146,6 +146,14 @@ export interface ElectronAdapter {
  * per-user (`persist:agent-browser-<encoded-user>`), so a user switch never
  * exposes A's website logins to B. The username is hex-encoded with the same
  * scheme as the connectors user scope (no separators, no dots).
+ *
+ * CROSS-PACKAGE CONSTRAINT (2026-08-22): this encoding intentionally mirrors
+ * `@picoaide/dsh-connectors` `encodeSegment` (user-scope.ts) byte-for-byte —
+ * the two are implemented separately because cross-package runtime imports
+ * are forbidden, but they must NEVER diverge (a divergence would let the
+ * browser partition name collide with, or shadow, a connectors user dir, or
+ * break the injective property). Keep the charset: A-Za-z0-9_- literal, all
+ * else `~<HEX>~`. `tests/partition.spec.ts` locks the examples.
  */
 export function encodePartitionSegment(segment: string): string {
   let out = ''

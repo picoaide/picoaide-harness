@@ -800,6 +800,14 @@ defineMethod("transform", [
 * per-user (`persist:agent-browser-<encoded-user>`), so a user switch never
 * exposes A's website logins to B. The username is hex-encoded with the same
 * scheme as the connectors user scope (no separators, no dots).
+*
+* CROSS-PACKAGE CONSTRAINT (2026-08-22): this encoding intentionally mirrors
+* `@picoaide/dsh-connectors` `encodeSegment` (user-scope.ts) byte-for-byte —
+* the two are implemented separately because cross-package runtime imports
+* are forbidden, but they must NEVER diverge (a divergence would let the
+* browser partition name collide with, or shadow, a connectors user dir, or
+* break the injective property). Keep the charset: A-Za-z0-9_- literal, all
+* else `~<HEX>~`. `tests/partition.spec.ts` locks the examples.
 */
 function encodePartitionSegment(segment) {
 	let out = "";
@@ -1965,7 +1973,11 @@ var BrowserRuntime = class {
 	* Close the whole browser (all tabs). The dedicated window stays alive
 	* (hidden) so the user can wake it from the sidebar — only plugin teardown
 	* truly destroys it. Tabs are dropped; the next `browser_open` recreates
-	* them. `user=true` (shell 清除) bypasses the takeover mutex.
+	* them. `user=true` (shell 清除 / session switch) still bypasses the
+	* mutex of the *queued* agents but takes the control lock first so an
+	* in-flight agent operation (navigate/click/type on a tab being
+	* destroyed) is paused until teardown finishes — no concurrent use of a
+	* discarded tab (2026-08-22, multi-user isolation race).
 	*/
 	async closeAll(signal, user = false) {
 		const body = async () => {
@@ -1985,7 +1997,14 @@ var BrowserRuntime = class {
 			this.record("browser_close", 0, "close browser");
 			this.hideWindow();
 		};
-		if (user) return await body();
+		if (user) {
+			this.mutex.take();
+			try {
+				return await body();
+			} finally {
+				this.mutex.release();
+			}
+		}
 		return await this.agentRun("browser_close", body, signal);
 	}
 	/** User takeover / release: hides/shows the AI-control mask and pauses /
