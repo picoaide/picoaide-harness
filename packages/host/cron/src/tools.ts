@@ -66,7 +66,9 @@ export function registerCronTools(ctx: Context, service: HostCronService): () =>
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args) {
-      return service.listJobs()
+      // Owner filter (multi-user isolation): only the current account's jobs
+      // may be enumerated via the model-facing tool.
+      return service.listVisibleJobs()
         .filter(job => args.enabledOnly !== true || job.enabled)
         .map(job => ({
           id: job.id,
@@ -110,7 +112,9 @@ export function registerCronTools(ctx: Context, service: HostCronService): () =>
       render: (_args, value) => [{ type: 'text', text: (value as { started: boolean }).started ? '定时任务已触发' : '定时任务未能触发' }],
     },
     async execute(args) {
-      const before = service.listJobs().find(job => job.id === args.jobId)
+      // Owner filter: the run target must be visible to the current account
+      // (a cross-account jobId is treated as "does not exist", not a leak).
+      const before = service.listVisibleJobs().find(job => job.id === args.jobId)
       if (before === undefined) throw new Error(`定时任务不存在: ${args.jobId}`)
       if (before.executions.some(execution => execution.endedAt === undefined)) {
         throw new Error(`定时任务 ${args.jobId} 已在运行`)

@@ -33,6 +33,7 @@ describe('cron tools surface', () => {
   it('routes through the Host service', () => {
     expect(source).toContain('service.registerJob(')
     expect(source).toContain('service.apply(')
-    expect(source).toContain('service.listJobs()')
+    // Reads go through the owner-filtered surface (multi-user isolation).
+    expect(source).toContain('service.listVisibleJobs()')
   })
 })
