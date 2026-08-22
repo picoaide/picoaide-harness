@@ -32,6 +32,8 @@ window.__ModuleLoader__.load({
 			"action.disconnecting": "断开中…",
 			"action.cancel": "取消连接",
 			"action.cancelling": "取消中…",
+			"action.stop": "停止连接",
+			"action.cancelHint": "连接进行中：点击停止并结束本次授权",
 			"auth.verificationHint": "请打开以下地址并登录授权：",
 			"auth.code": "授权码：{code}",
 			"auth.authorizeOpened": "授权页已在浏览器中打开；若未弹出请点击：",
@@ -60,6 +62,8 @@ window.__ModuleLoader__.load({
 			"action.disconnecting": "Disconnecting…",
 			"action.cancel": "Cancel connection",
 			"action.cancelling": "Cancelling…",
+			"action.stop": "Stop connection",
+			"action.cancelHint": "Connection in progress: click to stop and cancel this authorization",
 			"auth.verificationHint": "Open the following address to authorize:",
 			"auth.code": "Authorization code: {code}",
 			"auth.authorizeOpened": "The authorization page was opened; if not, click here:",
@@ -198,12 +202,28 @@ window.__ModuleLoader__.load({
 			const [error, setError] = (0, react.useState)(null);
 			const [busy, setBusy] = (0, react.useState)(null);
 			const openedUrl = (0, react.useRef)(null);
+			const activePopup = (0, react.useRef)(null);
 			(0, react.useEffect)(() => {
 				if (entry.request?.authorizeUrl && openedUrl.current !== entry.request.authorizeUrl) {
 					openedUrl.current = entry.request.authorizeUrl;
-					window.open(entry.request.authorizeUrl, "_blank");
+					const popup = window.open(entry.request.authorizeUrl, "_blank");
+					activePopup.current = popup;
+					if (popup) {
+						const timer = window.setInterval(() => {
+							if (popup.closed) {
+								window.clearInterval(timer);
+								activePopup.current = null;
+								fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: "POST" }).then(() => onChanged()).catch(() => {});
+							}
+						}, 500);
+						window.setTimeout(() => window.clearInterval(timer), 31e4);
+					}
 				}
-			}, [entry.request?.authorizeUrl]);
+			}, [
+				entry.request?.authorizeUrl,
+				entry.id,
+				onChanged
+			]);
 			const connect = (0, react.useCallback)(async () => {
 				if (busy !== null) return;
 				setError(null);
@@ -437,7 +457,8 @@ window.__ModuleLoader__.load({
 							onClick: () => {
 								cancel();
 							},
-							children: busy === "disconnect" ? t("action.cancelling") : t("action.cancel")
+							title: t("action.cancelHint"),
+							children: busy === "disconnect" ? t("action.cancelling") : t("action.stop")
 						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
 							style: BUTTON,

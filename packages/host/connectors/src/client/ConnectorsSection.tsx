@@ -127,15 +127,36 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'connect' | 'submit' | 'disconnect' | null>(null)
   const openedUrl = useRef<string | null>(null)
+  const activePopup = useRef<Window | null>(null)
 
   // The authorize URL is produced asynchronously by the flow; open it once
   // when it appears (popup blockers tolerate a click-adjacent open).
+  // P0-1: when the user closes the authorization popup, the in-flight flow
+  // must be aborted immediately — otherwise the host keeps its callback
+  // server open and the panel stays on "连接中…" until the 5-minute timeout,
+  // and a later reconnect is swallowed by the re-entrancy guard. Popup close
+  // is detected by polling `popup.closed` (the popup is an external site, so
+  // no script can be injected to signal closure); the close calls the same
+  // cancel endpoint the cancel button uses, which aborts the host flow.
   useEffect(() => {
     if (entry.request?.authorizeUrl && openedUrl.current !== entry.request.authorizeUrl) {
       openedUrl.current = entry.request.authorizeUrl
-      window.open(entry.request.authorizeUrl, '_blank')
+      const popup = window.open(entry.request.authorizeUrl, '_blank')
+      activePopup.current = popup
+      if (popup) {
+        const timer = window.setInterval(() => {
+          if (popup.closed) {
+            window.clearInterval(timer)
+            activePopup.current = null
+            void fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: 'POST' })
+              .then(() => onChanged())
+              .catch(() => {})
+          }
+        }, 500)
+        window.setTimeout(() => window.clearInterval(timer), 5 * 60 * 1000 + 10_000)
+      }
     }
-  }, [entry.request?.authorizeUrl])
+  }, [entry.request?.authorizeUrl, entry.id, onChanged])
 
   const connect = useCallback(async (): Promise<void> => {
     if (busy !== null) return
@@ -271,9 +292,17 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
           </button>
         ) : entry.status === 'connecting' ? (
           // P0-1: while an authorization flow is in flight the user must be
-          // able to abort it — a "取消" button instead of a disabled "连接".
-          <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-warn-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void cancel() }}>
-            {busy === 'disconnect' ? t('action.cancelling') : t('action.cancel')}
+          // able to abort it — a "停止" button instead of a disabled "连接".
+          // The button is always visible (not hover-gated) so a user who
+          // closed the authorization popup is never stuck on "连接中…".
+          <button
+            type="button"
+            style={{ ...BUTTON, background: 'var(--dsw-alias-state-warn-primary)' }}
+            disabled={busy === 'disconnect'}
+            onClick={() => { void cancel() }}
+            title={t('action.cancelHint')}
+          >
+            {busy === 'disconnect' ? t('action.cancelling') : t('action.stop')}
           </button>
         ) : (
           <button type="button" style={BUTTON} disabled={busy === 'connect'} onClick={() => { void connect() }}>
