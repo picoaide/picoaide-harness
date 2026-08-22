@@ -1,4 +1,4 @@
-import { attachSession, createTask, hasOpenExecution, setArchived, settleExecution, startExecution, updateTask, withStatus } from "./tasks.js";
+import { attachSession, createTask, hasOpenExecution, setArchived, settleExecution, startExecution, taskVisibleTo, updateTask, withStatus } from "./tasks.js";
 import { t as buildTaskPrompt } from "./task-prompt-B98YMf_9.js";
 import "./protocol.js";
 import { createHash } from "node:crypto";
@@ -87,6 +87,8 @@ var HostTaskLedger = class {
 	filePath;
 	lockFd;
 	disposed = false;
+	/** Current account (gateway username); null when logged out. */
+	owner;
 	constructor(options = {}) {
 		const dir = join(options.dshHomeDir ?? dshHome(), "task");
 		mkdirSync(dir, {
@@ -96,6 +98,7 @@ var HostTaskLedger = class {
 		this.filePath = join(dir, "ledger.json");
 		this.lockPath = join(dir, "ledger.lock");
 		this.now = options.now ?? Date.now;
+		this.owner = options.owner ?? (() => null);
 		this.acquireLock();
 		this.current = this.load();
 	}
@@ -248,13 +251,18 @@ var HostTaskLedger = class {
 			return { state: this.state() };
 		}
 		this.cache.set(requestId, { fingerprint });
+		const targetAction = action.kind === "update" || action.kind === "delete" || action.kind === "move" || action.kind === "archive" || action.kind === "restore" || action.kind === "run" || action.kind === "rerun" || action.kind === "cancel" ? action : void 0;
+		if (targetAction !== void 0) {
+			const target = this.current.tasks.find((task) => task.id === targetAction.taskId);
+			if (target !== void 0 && !taskVisibleTo(target, this.owner())) throw new Error(`dsh-task: task ${targetAction.taskId} belongs to another account`);
+		}
 		let opened;
 		let cancelled;
 		this.mutate((state) => {
 			switch (action.kind) {
 				case "create":
 					if (state.tasks.find((task) => task.id === action.id) !== void 0) return false;
-					state.tasks.push(createTask(action.id, action.input, this.now()));
+					state.tasks.push(createTask(action.id, action.input, this.now(), this.owner() ?? void 0));
 					return true;
 				case "update": {
 					const index = state.tasks.findIndex((task) => task.id === action.taskId);
@@ -368,4 +376,4 @@ var HostTaskLedger = class {
 //#endregion
 export { HostTaskLedger as t };
 
-//# sourceMappingURL=host-ledger-CXhP942P.js.map
+//# sourceMappingURL=host-ledger-HMWwc9ga.js.map

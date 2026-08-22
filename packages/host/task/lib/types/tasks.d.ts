@@ -58,6 +58,13 @@ export interface TaskRecord {
     archivedAt?: number;
     createdAt: number;
     updatedAt: number;
+    /**
+     * Display name of the account that created this task (gateway username).
+     * Absent on records persisted before the owner field existed: legacy
+     * records keep pre-upgrade semantics (visible to every session). Tasks
+     * created after the upgrade are owner-scoped.
+     */
+    owner?: string;
 }
 /** Input for a new task. */
 export interface NewTaskInput {
@@ -80,7 +87,9 @@ export interface TaskUpdatePatch {
 /** Whether a task is archived. */
 export declare function isArchived(task: TaskRecord): boolean;
 /** Create a new task record. */
-export declare function createTask(id: string, input: NewTaskInput, now: number): TaskRecord;
+export declare function createTask(id: string, input: NewTaskInput, now: number, owner?: string): TaskRecord;
+/** Whether a task is visible to (and executable by) the given account. */
+export declare function taskVisibleTo(task: TaskRecord, username: string | null | undefined): boolean;
 /** Apply a validated patch (immutable update). */
 export declare function updateTask(task: TaskRecord, patch: TaskUpdatePatch, now: number): TaskRecord;
 /** Open a run: append a pending execution and flip the task to 'doing'. */

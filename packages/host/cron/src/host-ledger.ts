@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron } from './cron.ts'
 import {
-  createJob, settleExecution, startExecution, updateJob, rollNextRun,
+  createJob, jobVisibleTo, settleExecution, startExecution, updateJob, rollNextRun,
   type ExecutionRecord, type JobRecord,
 } from './jobs.ts'
 import { CRON_SCHEMA_VERSION, type CronAction, type CronSchedulerSnapshot } from './protocol.ts'
@@ -127,14 +127,17 @@ export class HostCronLedger {
   private readonly filePath: string
   private lockFd: number | undefined
   private disposed = false
+  /** Current account (gateway username); null when logged out. */
+  private readonly owner: () => string | null
 
-  constructor(options: { dshHomeDir?: string; now?: () => number } = {}) {
+  constructor(options: { dshHomeDir?: string; now?: () => number; owner?: () => string | null } = {}) {
     const home = options.dshHomeDir ?? dshHome()
     const dir = join(home, 'cron')
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     this.filePath = join(dir, 'ledger.json')
     this.lockPath = join(dir, 'ledger.lock')
     this.now = options.now ?? Date.now
+    this.owner = options.owner ?? (() => null)
     this.acquireLock()
     this.current = this.load()
   }
@@ -354,6 +357,19 @@ export class HostCronLedger {
     }
     this.cache.set(requestId, { fingerprint })
 
+    // Owner enforcement for target actions: an owner-scoped job may only be
+    // mutated by its creating account. Legacy (owner-less) jobs stay
+    // reachable by everyone — the pre-upgrade behavior.
+    const targetAction = action.kind === 'update' || action.kind === 'delete' || action.kind === 'enable'
+      || action.kind === 'disable' || action.kind === 'run' || action.kind === 'rerun'
+      ? action : undefined
+    if (targetAction !== undefined) {
+      const target = this.current.jobs.find(job => job.id === targetAction.jobId)
+      if (target !== undefined && !jobVisibleTo(target, this.owner())) {
+        throw new Error(`dsh-cron: job ${targetAction.jobId} belongs to another account`)
+      }
+    }
+
     let opened: { job: JobRecord; execution: ExecutionRecord } | undefined
     let rerun: { job: JobRecord; execution: ExecutionRecord } | undefined
 
@@ -362,7 +378,7 @@ export class HostCronLedger {
         case 'create': {
           const existing = state.jobs.find(job => job.id === action.id)
           if (existing !== undefined) return false
-          const job = createJob(action.id, action.input, this.now())
+          const job = createJob(action.id, action.input, this.now(), this.owner() ?? undefined)
           if (job.enabled) {
             const seeded = rollNextRun(job, this.now())
             if (seeded !== undefined) job.nextRunAt = seeded
@@ -536,6 +552,7 @@ export class HostCronLedger {
    * the job just became enabled.
    */
   upsertJob(registration: { id: string; name: string; cron: string; action: JobRecord['action']; enabled?: boolean }): void {
+    const owner = this.owner()
     this.mutate((state) => {
       const index = state.jobs.findIndex(job => job.id === registration.id)
       const now = this.now()
@@ -545,7 +562,7 @@ export class HostCronLedger {
           cron: registration.cron,
           action: registration.action,
           ...(registration.enabled === undefined ? {} : { enabled: registration.enabled }),
-        }, now)
+        }, now, owner ?? undefined)
         if (job.enabled) {
           const seeded = rollNextRun(job, now)
           if (seeded !== undefined) job.nextRunAt = seeded
