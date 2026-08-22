@@ -24,6 +24,7 @@ INSERT OR IGNORE INTO audit_logs (id, username, action, detail, created_at)
   SELECT id, username, action, detail, created_at FROM kb_audit_logs;
 
 DROP TABLE IF EXISTS kb_chunk_embeddings;
+DROP TABLE IF EXISTS kb_chunks_fts;
 DROP TABLE IF EXISTS kb_chunks;
 DROP TABLE IF EXISTS kb_documents;
 DROP TABLE IF EXISTS kb_folder_users;
