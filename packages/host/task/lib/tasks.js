@@ -47,7 +47,7 @@ function isArchived(task) {
 	return task.archivedAt !== void 0;
 }
 /** Create a new task record. */
-function createTask(id, input, now) {
+function createTask(id, input, now, owner) {
 	return {
 		id,
 		title: input.title,
@@ -57,10 +57,16 @@ function createTask(id, input, now) {
 		executions: [],
 		createdAt: now,
 		updatedAt: now,
+		...owner === void 0 || owner.length === 0 ? {} : { owner },
 		...input.workspaceId === void 0 ? {} : { workspaceId: input.workspaceId },
 		...input.mode === void 0 ? {} : { mode: input.mode },
 		...input.permission === void 0 ? {} : { permission: input.permission }
 	};
+}
+/** Whether a task is visible to (and executable by) the given account. */
+function taskVisibleTo(task, username) {
+	if (task.owner === void 0) return true;
+	return username !== void 0 && username !== null && username.length > 0 && task.owner === username;
 }
 /** Apply a validated patch (immutable update). */
 function updateTask(task, patch, now) {
@@ -135,6 +141,6 @@ function hasOpenExecution(task) {
 	return task.executions.some((execution) => execution.endedAt === void 0);
 }
 //#endregion
-export { COLUMNS, TASK_PERMISSIONS, attachSession, canMoveManually, createTask, hasOpenExecution, isArchived, isTaskPermission, isTaskStatus, setArchived, settleExecution, startExecution, updateTask, withStatus };
+export { COLUMNS, TASK_PERMISSIONS, attachSession, canMoveManually, createTask, hasOpenExecution, isArchived, isTaskPermission, isTaskStatus, setArchived, settleExecution, startExecution, taskVisibleTo, updateTask, withStatus };
 
 //# sourceMappingURL=tasks.js.map

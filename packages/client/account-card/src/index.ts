@@ -52,8 +52,12 @@ export function apply(ctx: Context): void {
   const session = (): Session | null => ctx.picoSession.getSession()
 
   // Login/logout and startup restore: refresh immediately after login so the
-  // card never shows a stale balance.
-  ctx.on('pico/session-changed', (next) => { service.refresh(next) })
+  // card never shows a stale balance; logout clears the cached snapshot so a
+  // later login never flashes the previous account's usage.
+  ctx.on('pico/session-changed', (next) => {
+    if (next === null) service.clear()
+    else service.refresh(next)
+  })
   if (session() !== null) service.refresh(session())
 
   // Refresh after every completed agent loop. `agent/status` transitions to

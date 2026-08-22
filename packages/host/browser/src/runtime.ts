@@ -8,7 +8,7 @@
  */
 
 import { CdpSession } from './cdp.ts'
-import { BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
+import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot } from './shots.ts'
@@ -134,12 +134,15 @@ export class BrowserRuntime {
   private windowResizeDisposer: (() => void) | null = null
   private windowClosedDisposer: (() => void) | null = null
   private disposed = false
+  /** Partition name used for newly created tab views (per-user). */
+  private partition: string
 
   constructor(
     private readonly adapter: ElectronAdapter,
     options: BrowserToolOptions = {},
     askApproval?: BrowserGuard['askApproval'],
     private readonly credentials?: CredentialResolver,
+    partition?: string,
   ) {
     this.options = {
       maxTabs: options.maxTabs ?? DEFAULT_MAX_TABS,
@@ -152,6 +155,13 @@ export class BrowserRuntime {
       screenshotQuality: options.screenshotQuality ?? 70,
     }
     this.guard = new BrowserGuard(adapter, askApproval)
+    this.partition = partition ?? BROWSER_PARTITION
+  }
+
+  /** Swap the partition used by NEW tab views (user switch). Existing tabs
+   * keep their partition; callers close all tabs first. */
+  setPartition(partition: string): void {
+    this.partition = partition
   }
 
   readonly options: Required<BrowserToolOptions>
@@ -356,7 +366,7 @@ export class BrowserRuntime {
         throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`)
       }
       const id = this.nextTabId++
-      const view = this.adapter.createView()
+      const view = this.adapter.createView(this.partition)
       const cdp = new CdpSession(view.webContents.cdp)
       // P1-14: if CDP attach fails (debugger already occupied, teardown
       // race), the freshly created view must be destroyed — otherwise a

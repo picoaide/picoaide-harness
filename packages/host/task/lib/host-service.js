@@ -1,4 +1,5 @@
-import { t as HostTaskLedger } from "./host-ledger-CXhP942P.js";
+import { t as HostTaskLedger } from "./host-ledger-HMWwc9ga.js";
+import { taskVisibleTo } from "./tasks.js";
 import { HostExecutionRunner, SessionLaunchError } from "./host-runner.js";
 //#region src/host-service.ts
 const SESSION_POLL_MS = 5e3;
@@ -11,11 +12,18 @@ var HostTaskService = class {
 	pollInFlight = false;
 	active = true;
 	disposed = false;
+	/** Current account (gateway username); null when logged out. */
+	username = null;
 	constructor(api, options = {}) {
-		this.ledger = options.ledger ?? new HostTaskLedger();
+		this.ledger = options.ledger ?? new HostTaskLedger({ owner: () => this.username });
 		this.runner = options.runner ?? new HostExecutionRunner(api);
 		this.pollMs = options.pollMs ?? SESSION_POLL_MS;
 		this.ledger.subscribe(() => this.emit());
+	}
+	/** Set the current account (gateway username); null when logged out. */
+	setUsername(username) {
+		this.username = username;
+		this.emit();
 	}
 	start() {
 		if (this.disposed || this.timer !== void 0) return;
@@ -39,14 +47,14 @@ var HostTaskService = class {
 		return {
 			schemaVersion: 1,
 			revision: state.revision,
-			tasks: state.tasks
+			tasks: state.tasks.filter((task) => taskVisibleTo(task, this.username))
 		};
 	}
 	getSnapshot() {
 		return this.snapshot();
 	}
 	getTask(taskId) {
-		return this.ledger.state().tasks.find((task) => task.id === taskId);
+		return this.ledger.state().tasks.find((task) => task.id === taskId && taskVisibleTo(task, this.username));
 	}
 	subscribe(listener) {
 		this.listeners.add(listener);

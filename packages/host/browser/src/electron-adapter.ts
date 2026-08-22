@@ -133,18 +133,44 @@ export interface NativeBrowserWindow {
  * persistent browser partition, and creates the dedicated browser window.
  */
 export interface ElectronAdapter {
-  createView(): NativeView
+  createView(partition?: string): NativeView
   /** The AI-control mask view (local translucent page with the takeover button). */
-  createMaskView(): NativeView
+  createMaskView(partition?: string): NativeView
   createBrowserWindow(): NativeBrowserWindow
   showSaveDialog(options: { title: string; defaultPath: string }): Promise<{ canceled: boolean; filePath?: string }>
 }
 
 /**
  * Persistent browser partition: login sessions survive app restarts and stay
- * isolated from the main application's cookies/storage.
+ * isolated from the main application's cookies/storage. The partition name is
+ * per-user (`persist:agent-browser-<encoded-user>`), so a user switch never
+ * exposes A's website logins to B. The username is hex-encoded with the same
+ * scheme as the connectors user scope (no separators, no dots).
  */
-export const BROWSER_PARTITION = 'persist:agent-browser'
+export function encodePartitionSegment(segment: string): string {
+  let out = ''
+  for (const char of segment) {
+    const code = char.codePointAt(0)!
+    if ((code >= 0x30 && code <= 0x39)
+      || (code >= 0x41 && code <= 0x5a)
+      || (code >= 0x61 && code <= 0x7a)
+      || char === '-' || char === '_') {
+      out += char
+    } else {
+      out += `~${code.toString(16).toUpperCase()}~`
+    }
+  }
+  return out.length === 0 ? 'anonymous' : out
+}
+
+/** Partition name for a logged-in (or anonymous) user. */
+export function browserPartitionFor(username: string | null | undefined): string {
+  const key = username !== undefined && username !== null && username.length > 0 ? username : 'anonymous'
+  return `persist:agent-browser-${encodePartitionSegment(key)}`
+}
+
+/** Legacy fixed partition name (pre-user-scope); kept for tests/back-compat. */
+export const BROWSER_PARTITION = browserPartitionFor(null)
 
 /** Height (DIP) of the control-shell toolbar area overlaid by tab views. */
 export const BROWSER_SHELL_TOOLBAR_HEIGHT = 84
@@ -158,10 +184,10 @@ export function createRealElectronAdapter(): ElectronAdapter {
   const electron = require('electron') as typeof import('electron')
   const { WebContentsView, BrowserWindow, dialog } = electron
 
-  const createView = (): NativeView => {
+  const createView = (partition: string = BROWSER_PARTITION): NativeView => {
     const view = new WebContentsView({
       webPreferences: {
-        partition: BROWSER_PARTITION,
+        partition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -170,7 +196,7 @@ export function createRealElectronAdapter(): ElectronAdapter {
     const wc = view.webContents
     wc.setWindowOpenHandler(() => ({ action: 'deny' }))
     return {
-      partition: BROWSER_PARTITION,
+      partition,
       attach(win, bounds) {
         win.contentView.addChildView(view)
         view.setBounds(bounds)

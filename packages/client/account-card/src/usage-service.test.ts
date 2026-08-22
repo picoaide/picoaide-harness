@@ -114,4 +114,18 @@ describe('UsageService', () => {
     await new Promise(resolve => setTimeout(resolve, 120))
     expect(calls()).toBe(0)
   })
+
+  it('clear drops the cached snapshot and cancels a pending refresh', async () => {
+    const { fn } = makeFetcher()
+    const service = new UsageService({ debounceMs: 50, fetchFn: fn })
+    await service.refreshNow(SESSION)
+    expect(service.get().data).not.toBeNull()
+    service.refresh(SESSION)
+    service.clear()
+    expect(service.get().data).toBeNull()
+    expect(service.get().state).toBe('idle')
+    // The debounced fetch fired by refresh() was cancelled by clear().
+    await new Promise(resolve => setTimeout(resolve, 120))
+    expect(service.get().data).toBeNull()
+  })
 })

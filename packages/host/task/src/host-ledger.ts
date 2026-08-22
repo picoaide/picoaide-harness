@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import {
   attachSession, createTask, hasOpenExecution, setArchived, settleExecution,
-  startExecution, updateTask, withStatus,
+  startExecution, taskVisibleTo, updateTask, withStatus,
   type ExecutionRecord, type TaskRecord,
 } from './tasks.ts'
 import { buildTaskPrompt } from './task-prompt.ts'
@@ -82,14 +82,17 @@ export class HostTaskLedger {
   private readonly filePath: string
   private lockFd: number | undefined
   private disposed = false
+  /** Current account (gateway username); null when logged out. */
+  private readonly owner: () => string | null
 
-  constructor(options: { dshHomeDir?: string; now?: () => number } = {}) {
+  constructor(options: { dshHomeDir?: string; now?: () => number; owner?: () => string | null } = {}) {
     const home = options.dshHomeDir ?? dshHome()
     const dir = join(home, 'task')
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     this.filePath = join(dir, 'ledger.json')
     this.lockPath = join(dir, 'ledger.lock')
     this.now = options.now ?? Date.now
+    this.owner = options.owner ?? (() => null)
     this.acquireLock()
     this.current = this.load()
   }
@@ -279,6 +282,20 @@ export class HostTaskLedger {
     }
     this.cache.set(requestId, { fingerprint })
 
+    // Owner enforcement for target actions: an owner-scoped task may only be
+    // mutated by its creating account. Legacy (owner-less) tasks stay
+    // reachable by everyone — the pre-upgrade behavior.
+    const targetAction = action.kind === 'update' || action.kind === 'delete' || action.kind === 'move'
+      || action.kind === 'archive' || action.kind === 'restore' || action.kind === 'run'
+      || action.kind === 'rerun' || action.kind === 'cancel'
+      ? action : undefined
+    if (targetAction !== undefined) {
+      const target = this.current.tasks.find(task => task.id === targetAction.taskId)
+      if (target !== undefined && !taskVisibleTo(target, this.owner())) {
+        throw new Error(`dsh-task: task ${targetAction.taskId} belongs to another account`)
+      }
+    }
+
     let opened: { task: TaskRecord; execution: ExecutionRecord } | undefined
     let cancelled: string[] | undefined
 
@@ -287,7 +304,7 @@ export class HostTaskLedger {
         case 'create': {
           const existing = state.tasks.find(task => task.id === action.id)
           if (existing !== undefined) return false
-          state.tasks.push(createTask(action.id, action.input, this.now()))
+          state.tasks.push(createTask(action.id, action.input, this.now(), this.owner() ?? undefined))
           return true
         }
         case 'update': {

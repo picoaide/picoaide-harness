@@ -1,16 +1,29 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { CliRuntime } from './cli-runtime.ts'
+import { userScopePath } from './user-scope.ts'
 import { salesEasyDef } from './sales-easy.ts'
 import { dingTalkDef } from './dingtalk.ts'
 import { marketplaceDefs } from './defs/index.ts'
 import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorState } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
+
+// Type-only: declare the enterprise session event so `ctx.on` resolves it.
+// The enterprise package owns the runtime event (SessionService emits it);
+// this declaration lets plugins type-check without a runtime dependency.
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+  }
+}
 
 /**
  * Connector framework (mirrors WorkBuddy's connector service):
@@ -81,13 +94,63 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef, dingTalkDef])
-  const store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : {})
-  const cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : undefined)
+
+  // Current user scope: resolved from the enterprise session when present.
+  // `getSession()` is a service read guarded by type-only import, so this
+  // plugin also loads in compositions without the enterprise plugin.
+  const currentUser = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { username?: string } | null } | undefined
+      return pico?.getSession?.()?.username ?? null
+    } catch {
+      return null
+    }
+  }
+
+  // Per-user store + CLI runtime. Rebuilt when the session changes; the old
+  // user's MCP registrations are disconnected first (server-side tokens stay
+  // on disk per user, never shared across accounts).
+  let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
+  let cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : { username: currentUser() })
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   const mcpDisposers = new Map<string, () => void>()
   /** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
   const pendingFlows = new Map<string, AbortController>()
+
+  /** Drop all MCP registrations and reset in-memory state (user switch). */
+  const teardownAll = async (): Promise<void> => {
+    for (const dispose of mcpDisposers.values()) {
+      try { dispose() } catch { /* teardown never throws */ }
+    }
+    mcpDisposers.clear()
+    for (const flow of pendingFlows.values()) flow.abort(new Error('用户已切换，连接流程中止'))
+    pendingFlows.clear()
+    pendingRequests.clear()
+    states.clear()
+  }
+
+  /** Rebuild per-user store/runtime after a login/logout/switch. */
+  const reconfigureUser = (): void => {
+    const username = currentUser()
+    // Migrate legacy `~/.picoaide/connectors` once (first login after
+    // upgrade): A's pre-upgrade credentials must not be lost silently.
+    migrateLegacyStore(username)
+    if (!options.storeBaseDir) store = new ConnectorStore({ username })
+    if (!options.cliCacheDir) cliRuntime = new CliRuntime({ username })
+  }
+
+  // Session lifecycle: disconnect registrations for the previous user, then
+  // re-read credentials for the new one (restore fresh MCP servers).
+  ctx.on('pico/session-changed', (next: unknown) => {
+    void (async () => {
+      await teardownAll()
+      reconfigureUser()
+      if (next !== null) await restoreAll()
+    })().catch((cause: unknown) => {
+      ctx.logger?.error('pico-connectors: session change handling failed', cause)
+    })
+  })
 
   const setState = (id: string, patch: Partial<ConnectorState>): void => {
     const current = states.get(id) ?? { status: 'disconnected', everConnected: false }
@@ -314,29 +377,31 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     pendingRequests.delete(id)
   }
 
-  ctx.effect(() => {
+  /** Restore all connector MCP registrations for the CURRENT user. */
+  const restoreAll = async (): Promise<void> => {
     for (const def of defs) {
-      void (async () => {
-        try {
-          const credential = await store.readCredential(def.id)
-          if (!credential) return
-          // Refresh OAuth tokens before restoring, then register the MCP servers.
-          const refreshed = await refreshOAuthToken(def, credential)
-          const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
-          if (effective.accessToken) {
-            await registerMcp(def)
-            setState(def.id, { status: 'connected', everConnected: true })
-          }
-        } catch (error) {
-          // A restore failure (network, missing dependency, MCP connect) must
-          // not become an unhandled rejection: the host treats those as fatal
-          // and exits the whole app. Surface it on the connector row instead.
-          const message = error instanceof Error ? error.message : String(error)
-          ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`)
-          setState(def.id, { status: 'error', error: message })
+      try {
+        const credential = await store.readCredential(def.id)
+        if (!credential) continue
+        // Refresh OAuth tokens before restoring, then register the MCP servers.
+        const refreshed = await refreshOAuthToken(def, credential)
+        const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
+        if (effective.accessToken) {
+          await registerMcp(def)
+          setState(def.id, { status: 'connected', everConnected: true })
         }
-      })()
+      } catch (error) {
+        // A restore failure (network, missing dependency, MCP connect) must
+        // not become an unhandled rejection: the host treats those as fatal
+        // and exits the whole app. Surface it on the connector row instead.
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`)
+        setState(def.id, { status: 'error', error: message })
+      }
     }
+  }
+
+  ctx.effect(() => {
     return () => {
       for (const dispose of mcpDisposers.values()) dispose()
       // P0-1: teardown must abort any in-flight authorization flow — a
@@ -503,6 +568,34 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     ]
     return () => { for (const dispose of disposers) dispose() }
   }, 'pico connectors: http routes')
+
+  // Initial restore: fire-and-forget after the routes are up (the session
+  // listener above handles later changes; this covers the startup path).
+  void restoreAll().catch((cause: unknown) => {
+    ctx.logger?.error('pico-connectors: initial restore failed', cause)
+  })
 }
 
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts'
+
+/**
+ * One-time migration of the pre-2026-08 legacy store dir `~/.picoaide/connectors`
+ * into the per-user scope. Runs on every session change but only acts when a
+ * real user is logged in, the legacy dir exists, and the target dir does not.
+ * Best-effort: a failure leaves the legacy dir in place (the next login
+ * retries) and never blocks the app. Anonymous (logged-out) sessions never
+ * absorb the legacy data — it is claimed by the first account that logs in.
+ */
+function migrateLegacyStore(username: string | null): void {
+  if (username === null || username.length === 0) return
+  try {
+    const legacy = join(homedir(), '.picoaide', 'connectors')
+    if (!existsSync(legacy)) return
+    const target = join(userScopePath(username), 'connectors')
+    if (existsSync(target)) return
+    mkdirSync(join(userScopePath(username)), { recursive: true, mode: 0o700 })
+    renameSync(legacy, target)
+  } catch {
+    // Best effort: never let a migration failure break connector startup.
+  }
+}

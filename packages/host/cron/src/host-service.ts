@@ -7,7 +7,7 @@ import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { HostCronLedger } from './host-ledger.ts'
 import { HostCronExecutor } from './host-executor.ts'
 import { HostCronScheduler } from './host-scheduler.ts'
-import type { JobRecord } from './jobs.ts'
+import { jobVisibleTo, type JobRecord } from './jobs.ts'
 import type { CronEventPayload, CronSnapshot, CronAction } from './protocol.ts'
 import type { CronJobRegistration, PicoCronService, PicoTaskService } from './service.ts'
 
@@ -27,16 +27,35 @@ export class HostCronService implements PicoCronService {
   private active = true
   private lastEventJson = ''
   private readonly now: () => number
+  /** Current account (gateway username); set by the plugin on session change. */
+  private username: string | null = null
 
   constructor(api: ApiProxy, options: HostCronServiceOptions = {}) {
-    this.ledger = options.ledger ?? new HostCronLedger()
+    // The ledger stamps new jobs with and enforces target actions against the
+    // current account (`owner()`), read through the service so a session
+    // change (setUsername) takes effect immediately.
+    this.ledger = options.ledger ?? new HostCronLedger({ owner: () => this.username })
     this.now = options.now ?? Date.now
     const executor = options.executor ?? new HostCronExecutor({
       api,
       taskService: options.taskService ?? (() => undefined),
     })
-    this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, { now: this.now })
+    this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, {
+      now: this.now,
+      visible: (job) => jobVisibleTo(job, this.username),
+    })
     this.ledger.subscribe(() => this.emit())
+  }
+
+  /** Set the current account (gateway username); null when logged out. */
+  setUsername(username: string | null): void {
+    this.username = username
+    this.emit()
+  }
+
+  /** Current account (gateway username). */
+  currentUsername(): string | null {
+    return this.username
   }
 
   start(): void {
@@ -57,7 +76,9 @@ export class HostCronService implements PicoCronService {
     return {
       schemaVersion: 1,
       revision: state.revision,
-      jobs: state.jobs,
+      // Owner filter applied on read: a logged-out session sees only legacy
+      // records; a logged-in session sees legacy + its own.
+      jobs: state.jobs.filter(job => jobVisibleTo(job, this.username)),
       scheduler: state.scheduler,
     }
   }
