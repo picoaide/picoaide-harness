@@ -145,7 +145,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		if err == nil {
 			break
 		}
-		log.Printf("gateway: model %s provider %s failed: %v", req.Model, ups[i].Name, err)
+		log.Printf("gateway: model %s provider %s failed: %v", strconv.Quote(req.Model), strconv.Quote(ups[i].Name), err)
 	}
 	if resp == nil {
 		// C-9: no provider succeeded; the pending usage row can never be
