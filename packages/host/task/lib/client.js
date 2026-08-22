@@ -1748,7 +1748,7 @@ window.__ModuleLoader__.load({
 		* stateful); the `!important` is required because the dsh shell wraps the
 		* conversation view in a node with an inline `display: contents`.
 		*/
-		const CONVERSATION_COLUMN_SELECTOR = "[data-pane=\"conversation\"], [class*=\"centerCol\"]";
+		const CONVERSATION_COLUMN_SELECTOR = "[data-pane=\"conversation\"], [class*=\"centerCol\"], [class*=\"ConversationSurface\"], [class*=\"dshDesktopConversationSurface\"]";
 		/** Cross-plugin activation event; detail is the activating panel name. */
 		const ACTIVATE_EVENT = "dsh-panel-activate";
 		const PANEL_NAME = "task";
