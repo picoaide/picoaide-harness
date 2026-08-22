@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -40,27 +39,12 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// mcp (one enabled with secret env, one disabled)
-	_, err = serverstore.AddMCPServer(db, &serverstore.MCPServer{
-		Name: "xhs", Description: "小红书", Transport: "http", URL: "http://127.0.0.1:3000/mcp",
-		Env: map[string]string{"APP_SECRET": "s3cr3t"}, Enabled: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = serverstore.AddMCPServer(db, &serverstore.MCPServer{Name: "gone", Enabled: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
 	// user + token
 	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456"); err != nil {
 		t.Fatal(err)
 	}
-	// 严格授权:alice 可见被授权的技能/MCP;未授权的不可见
+	// 严格授权:alice 可见被授权的技能;未授权的不可见
 	if err := serverstore.GrantSkill(db, "ppt-gen", "alice", serverstore.GranteeUser); err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.GrantMCP(db, 1, "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,15 +86,6 @@ func TestBootstrap(t *testing.T) {
 	skills := out["skills"].([]any)
 	if len(skills) != 1 {
 		t.Fatalf("skills = %v (disabled must be excluded)", skills)
-	}
-	mcp := out["mcp"].([]any)
-	if len(mcp) != 1 {
-		t.Fatalf("mcp = %v (disabled must be excluded)", mcp)
-	}
-	// masked: no secret leak
-	body := w.Body.String()
-	if strings.Contains(body, "s3cr3t") {
-		t.Fatal("secret leaked in bootstrap")
 	}
 	web := out["web"].(map[string]any)
 	if web["allow_private"] != false {
@@ -176,7 +151,7 @@ func TestHealthzNoAuth(t *testing.T) {
 	}
 }
 
-// 严格授权:未授权用户 bootstrap 的技能/MCP 建议清单为空(部门隔离)
+// 严格授权:未授权用户 bootstrap 的技能建议清单为空(部门隔离)
 func TestBootstrapStrictDefault(t *testing.T) {
 	r, db := setup(t)
 	if _, err := serverstore.CreateUserWithPassword(db, "nobody", "pw123456"); err != nil {
@@ -192,10 +167,6 @@ func TestBootstrapStrictDefault(t *testing.T) {
 	skills := out["skills"].([]any)
 	if len(skills) != 0 {
 		t.Fatalf("nobody skills = %v, want empty", skills)
-	}
-	mcp := out["mcp"].([]any)
-	if len(mcp) != 0 {
-		t.Fatalf("nobody mcp = %v, want empty", mcp)
 	}
 	// models remain visible to everyone
 	models := out["models"].([]any)

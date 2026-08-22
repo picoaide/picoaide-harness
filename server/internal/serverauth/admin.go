@@ -71,6 +71,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
 	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
 	g.GET("/usage", AdminAuth(db), a.usage)
+	// 敏感操作审计日志(用户/部门/技能/令牌等)
+	g.GET("/audit", AdminAuth(db), a.listAuditLogs)
 }
 
 // AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
@@ -617,6 +619,29 @@ func (a *AdminAPI) usage(c *gin.Context) {
 		truncated = true
 	}
 	c.JSON(http.StatusOK, gin.H{"rows": rows, "group": group, "truncated": truncated})
+}
+
+// listAuditLogs 返回分页审计日志(新→旧),支持 action / username 过滤
+// (审计 M8),总数一并返回用于分页。
+func (a *AdminAPI) listAuditLogs(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "50"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 500 {
+		size = 50
+	}
+	logs, total, err := serverstore.ListAuditLogsPagedFiltered(a.DB, (page-1)*size, size,
+		c.Query("action"), c.Query("username"))
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if logs == nil {
+		logs = []serverstore.AuditLogEntry{}
+	}
+	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
 }
 
 func currentAdmin(c *gin.Context) *serverstore.User {
