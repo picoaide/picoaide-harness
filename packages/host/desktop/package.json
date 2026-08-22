@@ -39,18 +39,6 @@
       "types": "./lib/types/windows-agent-presets.d.ts",
       "default": "./lib/windows-agent-presets.js"
     },
-    "./terminal": {
-      "types": "./lib/types/terminal.d.ts",
-      "default": "./lib/terminal.js"
-    },
-    "./pnpm": {
-      "types": "./lib/types/pnpm.d.ts",
-      "default": "./lib/pnpm.js"
-    },
-    "./profile-service": {
-      "types": "./lib/types/profile-service.d.ts",
-      "default": "./lib/profile-service.js"
-    },
     "./desktop-plugins": {
       "types": "./lib/types/desktop-plugins.d.ts",
       "default": "./lib/desktop-plugins.js"
@@ -58,10 +46,6 @@
     "./desktop-home": {
       "types": "./lib/types/desktop-home.d.ts",
       "default": "./lib/desktop-home.js"
-    },
-    "./profiles": {
-      "types": "./lib/types/profiles.d.ts",
-      "default": "./lib/profiles.js"
     },
     "./diagnostics": {
       "types": "./lib/types/diagnostics.d.ts",
@@ -109,12 +93,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
-    "verify:cli": "node scripts/verify-cli-runtime.mjs",
     "verify:loader": "node scripts/verify-loader-boot.mjs",
     "verify:profile": "node scripts/verify-profile-boot.mjs",
     "verify:licenses": "node scripts/verify-licenses.mjs",
     "verify:notices": "node scripts/verify-licenses.mjs --notices THIRD_PARTY_NOTICES.md",
-    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:cli && yarn run verify:loader && yarn run verify:profile",
+    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile",
     "check:win-package": "yarn workspace @picoaide/dsh-enterprise build && yarn workspace @picoaide/dsh-account-card build && yarn run build && yarn run typecheck && vitest run tests/package.spec.ts tests/package-win.spec.ts tests/update-checker.spec.ts tests/update-download.spec.ts tests/verify-win-installer.spec.ts tests/verify-win-portable.spec.ts tests/verify-packaged-runtime.spec.ts tests/windows-agent-presets.spec.ts tests/windows-pwsh-sandbox.spec.ts tests/windows-volume-diagnostics.spec.ts tests/window-options.spec.ts && yarn run verify:closure",
     "check:mac-package": "yarn run -T check",
     "start": "node lib/bin.js",
@@ -242,7 +225,6 @@
     "dsh-memory-evolve": "workspace:*",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.4",
-    "pnpm": "11.7.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "yaml": "^2.9.0"

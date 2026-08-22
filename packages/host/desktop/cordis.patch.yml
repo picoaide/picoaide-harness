@@ -1,19 +1,12 @@
-# Desktop Host operations compose around the existing Web bundle. Compatibility
-# mode keeps upstream ownership of the browser carrier and rendered UI.
+# Desktop Host operations compose around the existing Web bundle. The shell
+# presentation is fixed to the platform-native advanced mode.
 - insert:
     - id: desktop-shell
       name: dsh-plugin-desktop
       config:
-        mode: compatibility
-    - id: desktop-terminal
-      name: dsh-plugin-desktop/terminal
-      disabled: !!js process.platform === 'linux'
+        mode: advanced
     - id: desktop-diagnostics
       name: dsh-plugin-desktop/diagnostics
-    - id: desktop-pnpm
-      name: dsh-plugin-desktop/pnpm
-    - id: desktop-profiles
-      name: dsh-plugin-desktop/profiles
     - id: desktop-updates
       name: dsh-plugin-desktop/updates
 

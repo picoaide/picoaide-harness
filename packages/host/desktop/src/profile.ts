@@ -69,22 +69,25 @@ const AGENT_PRESETS_ROW_ID = 'agent-presets'
 const UPSTREAM_AGENT_PRESETS_PACKAGE = '@deepseek-ai/dsh-agent-presets'
 const DESKTOP_WINDOWS_AGENT_PRESETS_ROW_ID = 'desktop-windows-agent-presets'
 const DESKTOP_WINDOWS_AGENT_PRESETS_PACKAGE = 'dsh-plugin-desktop/windows-agent-presets'
-const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
+const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
 const DEFAULT_DESKTOP_PORT = 0
 const SETTINGS_FILE_PACKAGE = '@deepseek-ai/dsh-settings-file'
 const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
 const UI_LAYOUT_PACKAGE = '@deepseek-ai/dsh-client-ui-layout'
 const UI_SIDEBAR_PACKAGE = '@deepseek-ai/dsh-client-ui-sidebar'
 const UI_CONVERSATION_PACKAGE = '@deepseek-ai/dsh-client-ui-conversation'
+const ADVANCED_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
 
 /**
  * Parse desktop presentation state and reject corrupted values.
  * @param value - untrusted settings value.
  * @returns a supported desktop shell mode.
+ * @deprecated The desktop shell is fixed to advanced mode; this API is kept
+ * for backward compatibility and always returns 'advanced'.
  */
 export function parseDesktopShellMode(value: unknown): DesktopShellMode {
   if (value === undefined) return DEFAULT_DESKTOP_SHELL_MODE
-  if (value === 'compatibility' || value === 'advanced') return value
+  if (value === 'advanced' || value === 'compatibility') return 'advanced'
   throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.mode must be "compatibility" or "advanced"`)
 }
 
@@ -353,11 +356,10 @@ function omitUnresolvedOptionalEntries(
 }
 
 /**
- * Load and compose one desktop profile generation.
+ * Load and compose the fixed desktop profile generation.
  * @param telemetryDisabled - inherited DSH telemetry opt-out value.
  * @param home - Harness home containing profiles and the machine-wide patch.
  * @param platform - native platform selecting launcher-owned safety overlays.
- * @param profileName - existing or lazily available Web profile to compose.
  * @param pluginStatePath - optional Desktop-private disabled-bundle state.
  * @returns root config, profile metadata, and ordered patches.
  */
@@ -365,12 +367,10 @@ export function prepareDesktopProfile(
   telemetryDisabled: string | undefined = process.env.DSH_TELEMETRY_DISABLED,
   home: string = resolveDshHome(),
   platform: NodeJS.Platform = process.platform,
-  profileName: string = DESKTOP_PROFILE_NAME,
   pluginStatePath?: string,
 ): PreparedDesktopProfile {
-  const profileDir = profileName === DESKTOP_PROFILE_NAME
-    ? ensureDesktopProfile(home)
-    : resolveProfileDir(profileName, home)
+  const profileName = DESKTOP_PROFILE_NAME
+  const profileDir = ensureDesktopProfile(home)
   healProfilesModuleFallback(INSTALL_ANCHOR, home)
   const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
   const disabledBundles = pluginStatePath === undefined
@@ -439,12 +439,13 @@ export function prepareDesktopProfile(
     dshHome: home,
     ...rowConfig(settings),
   } as SettingsFileConfig)
-  const { mode, port } = readDesktopStartupSettings(settingsConfig)
+  const { port } = readDesktopStartupSettings(settingsConfig)
   patches.push({
     id: 'settings',
     config: settingsConfig,
   })
-  if (mode === 'advanced') {
+  const mode: DesktopShellMode = ADVANCED_DESKTOP_SHELL_MODE
+  {
     for (const [id, packageName] of [
       ['ui-layout', UI_LAYOUT_PACKAGE],
       ['ui-sidebar', UI_SIDEBAR_PACKAGE],
