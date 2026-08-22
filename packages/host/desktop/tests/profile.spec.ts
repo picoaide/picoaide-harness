@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -65,15 +65,6 @@ describe('desktop profile composition', {
     const home = temporaryHome()
     const resources = join(home, 'resources')
     const archivedDsh = join(resources, 'app.asar', 'node_modules', '@deepseek-ai', 'dsh')
-    const physicalPresetRoot = join(
-      resources,
-      'app.asar.unpacked',
-      'node_modules',
-      '@deepseek-ai',
-      'dsh',
-      'config',
-      'agent-presets',
-    )
     // Preset root lives with the dsh package inside the archive; ship the
     // skill at the same (non-unpacked) path used by the resolver.
     const archivedSkillPath = join(
