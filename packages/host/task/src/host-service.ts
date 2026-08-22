@@ -136,6 +136,12 @@ export class HostTaskService implements PicoTaskService {
   }
 
   private async reconcileExecutions(sessions: readonly SessionSummary[]): Promise<void> {
+    // Deliberately NOT owner-filtered: settlement is a host-global duty.
+    // An execution launched under account A must still be settled (or hung)
+    // even after A logs out and B becomes the active account — filtering by
+    // the *current* username would leave A's executions pending forever.
+    // This path writes ledger state only; it never exposes another account's
+    // task content to the UI (snapshot()/getTask() remain owner-filtered).
     for (const task of this.ledger.state().tasks) {
       for (const execution of task.executions) {
         if (execution.sessionId === undefined || execution.endedAt !== undefined) continue
