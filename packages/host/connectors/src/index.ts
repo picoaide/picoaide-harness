@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -585,6 +585,13 @@ export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types
  * Best-effort: a failure leaves the legacy dir in place (the next login
  * retries) and never blocks the app. Anonymous (logged-out) sessions never
  * absorb the legacy data — it is claimed by the first account that logs in.
+ *
+ * TOCTOU hardening (2026-08-22): outside the `existsSync(target)` check the
+ * claim is serialized through an atomic marker file created with `wx`
+ * (O_EXCL). Whichever session/process creates the marker first wins the
+ * legacy data; a loser finds the marker already present and returns quietly:
+ * no double-rename, no lost update. The marker is removed after the rename so
+ * a later real user can retry if the first claim found an empty store.
  */
 function migrateLegacyStore(username: string | null): void {
   if (username === null || username.length === 0) return
@@ -594,7 +601,18 @@ function migrateLegacyStore(username: string | null): void {
     const target = join(userScopePath(username), 'connectors')
     if (existsSync(target)) return
     mkdirSync(join(userScopePath(username)), { recursive: true, mode: 0o700 })
-    renameSync(legacy, target)
+    // Atomic claim: only the first O_EXCL winner proceeds to the rename.
+    const claim = join(userScopePath(username), '.legacy-claim')
+    try {
+      writeFileSync(claim, `${username}\n`, { mode: 0o600, flag: 'wx' })
+    } catch {
+      return // another session/process claimed first
+    }
+    try {
+      renameSync(legacy, target)
+    } finally {
+      rmSync(claim, { force: true })
+    }
   } catch {
     // Best effort: never let a migration failure break connector startup.
   }
