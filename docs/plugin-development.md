@@ -1,6 +1,6 @@
 # DSH Desktop 插件开发
 
-> **当前接口与 Draft 请勿混淆：** 本文介绍现在可用的 DSH/Cordis 与 Desktop service。`dsh-community-fabric` 中的 manifest、capability 和统一事件模型仍处于[社区 RFC Draft](../dsh-community-fabric/README.zh.md)，尚不能作为依赖或发布目标。
+> **当前接口与 Draft 请勿混淆：** 本文介绍现在可用的 DSH/Cordis 与 Desktop service。`dsh-community-fabric` 中的 manifest、capability 和统一事件模型仍处于[社区 RFC Draft](../community/fabric/README.zh.md)，尚不能作为依赖或发布目标。
 
 ## 先理解两层插件
 
@@ -13,7 +13,7 @@ Desktop 另外提供两个公开的 Host service：
 
 它们属于 Electron main 进程中的 Host Cordis generation。Renderer 不能直接读取它们；有浏览器界面的插件仍应使用普通 DSH Web routes、RPC、client metadata、service 和 slot。
 
-完整类型、生命周期和失败语义见 [`dsh-plugin-desktop/docs/plugin-services.md`](../dsh-plugin-desktop/docs/plugin-services.md)。下面只给出选择方式和最小原则。
+完整类型、生命周期和失败语义见 [`dsh-plugin-desktop/docs/plugin-services.md`](../packages/host/desktop/docs/plugin-services.md)。下面只给出选择方式和最小原则。
 
 ## Desktop 专用插件
 
@@ -105,7 +105,7 @@ desktopPnpm.runPlugin(['install', '--no-frozen-lockfile'], invokingDir, signal)
 - package operation 的取消、非零退出、spawn failure 和 generation teardown。
 - 插件变更后重新启动，bundle 能进入下一次 Loader 组合。
 
-开发者可以先阅读 [架构说明](architecture.md)，再使用包级 [service contract](../dsh-plugin-desktop/docs/plugin-services.md)。
+开发者可以先阅读 [架构说明](architecture.md)，再使用包级 [service contract](../packages/host/desktop/docs/plugin-services.md)。
 
 ## 生态愿景：保持插件生态可组合
 
@@ -119,4 +119,4 @@ DSH 的插件生态正在快速增长。插件越多，它们能否协同工作�
 - **声明清晰**：明确声明依赖的 service 和 slot，不依赖运行时巧合。
 - **兼容优先**：升级保持向后兼容，不破坏已有组合。
 
-倡议是活文档，随生态实践更新，接受社区讨论和修订。插件市场上线后，遵循共同约定的插件将更容易被发现、安装和判断兼容性，让"按规范开发"成为对每个作者都有利的选择。完整愿景见 [DSH 插件生态倡议书](plugin-ecosystem.md)；未来互操作 contract 的讨论见 [DSH Community Fabric](../dsh-community-fabric/README.zh.md)。
+倡议是活文档，随生态实践更新，接受社区讨论和修订。插件市场上线后，遵循共同约定的插件将更容易被发现、安装和判断兼容性，让"按规范开发"成为对每个作者都有利的选择。完整愿景见 [DSH 插件生态倡议书](plugin-ecosystem.md)；未来互操作 contract 的讨论见 [DSH Community Fabric](../community/fabric/README.zh.md)。
