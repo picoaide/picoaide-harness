@@ -27,6 +27,14 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
+    "./cli-manifest": {
+      "types": "./lib/types/cli-manifest.d.ts",
+      "default": "./lib/cli-manifest.js"
+    },
+    "./archive": {
+      "types": "./lib/types/archive.d.ts",
+      "default": "./lib/archive.js"
+    },
     "./package.json": "./package.json",
     "./dingtalk": {
       "types": "./lib/types/dingtalk.d.ts",

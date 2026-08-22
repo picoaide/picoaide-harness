@@ -12,6 +12,8 @@ export default defineConfig([
       invariant: 'src/invariant.ts',
       'sales-easy': 'src/sales-easy.ts',
       dingtalk: 'src/dingtalk.ts',
+      'cli-manifest': 'src/cli-manifest.ts',
+      archive: 'src/archive.ts',
     },
     outDir: 'lib',
     format: 'esm',

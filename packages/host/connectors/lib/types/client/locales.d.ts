@@ -23,6 +23,8 @@ export declare const zh: {
     'action.disconnecting': string;
     'action.cancel': string;
     'action.cancelling': string;
+    'action.stop': string;
+    'action.cancelHint': string;
     'auth.verificationHint': string;
     'auth.code': string;
     'auth.authorizeOpened': string;

@@ -157,8 +157,98 @@ const BEISEN_MANIFEST: CliBinaryManifest = {
   },
 }
 
+/**
+ * lark-cli (飞书 CLI) ships native binaries as GitHub release assets mirrored
+ * at `registry.npmmirror.com/-/binary/lark-cli/v<version>/<archive>`. The npm
+ * package (@larksuite/cli) is only a JS wrapper whose postinstall downloads
+ * the same binary — the connector runtime fetches the archive directly,
+ * pinned to the vendor's published checksums, from the CN-friendly npmmirror
+ * binary endpoint (GitHub release as fallback).
+ */
+const LARK_CHECKSUMS: Record<string, string> = {
+  'lark-cli-1.0.89-darwin-amd64.tar.gz': '1991736631266a2fa852664562260a2c2665bc9b1cbee35fadb4f6e40958656f',
+  'lark-cli-1.0.89-darwin-arm64.tar.gz': '62417d641a2a15fddec9bac0c70f939570d5e2f3fa1410703b93f3284d02d044',
+  'lark-cli-1.0.89-linux-amd64.tar.gz': 'a07a603d29ed58e8b5b0d7395cae10dfabed2b860be31b7134f8bf39705e7cff',
+  'lark-cli-1.0.89-linux-arm64.tar.gz': '9bff1d415e761e431aa12e01b1609c6ab8f84f1d30824fe5182c2c702e8b456b',
+  'lark-cli-1.0.89-windows-amd64.zip': 'c9587545f0d0f140d0f04b0ae51ad660e7557ef324a4061eddaf2b5159b3e3ec',
+  'lark-cli-1.0.89-windows-arm64.zip': '52026a520a7292b4469e7d8ec1b89662b4fc847de1463ddf254d93074dbdbfdb',
+}
+const LARK_PLATFORM_ASSET: Record<CliPlatform, string> = {
+  'darwin-x64': 'lark-cli-1.0.89-darwin-amd64.tar.gz',
+  'darwin-arm64': 'lark-cli-1.0.89-darwin-arm64.tar.gz',
+  'linux-x64': 'lark-cli-1.0.89-linux-amd64.tar.gz',
+  'linux-arm64': 'lark-cli-1.0.89-linux-arm64.tar.gz',
+  'win32-x64': 'lark-cli-1.0.89-windows-amd64.zip',
+  'win32-arm64': 'lark-cli-1.0.89-windows-arm64.zip',
+}
+const LARK_MIRROR_BASE = 'https://registry.npmmirror.com/-/binary/lark-cli/v1.0.89'
+const LARK_MANIFEST: CliBinaryManifest = {
+  command: 'lark-cli',
+  version: '1.0.89',
+  binaryName: 'lark-cli',
+  displayName: '飞书 lark-cli（Lark CLI）',
+  license: 'MIT',
+  source: {
+    kind: 'direct',
+    url: (platform) => {
+      const asset = LARK_PLATFORM_ASSET[platform] ?? null
+      if (!asset) return null
+      // CN-friendly mirror first — GitHub reaches at CDN speeds inside CN
+      // enterprise networks; the mirror carries the exact same release asset.
+      return `${process.env.PICOAIDE_LARK_MIRROR_URL?.trim() || LARK_MIRROR_BASE}/${asset}`
+    },
+    checksums: LARK_CHECKSUMS,
+  },
+}
+
+/**
+ * wecom-cli (企业微信 CLI) ships one native binary per platform as a package:
+ * `@wecom/cli-<platform>-<arch>` — the tarball is a bare platform package
+ * holding `package/bin/wecom-cli` (or `.exe` on win32). Because the package
+ * name differs per platform, the connector runtime fetches each platform
+ * tarball directly from the CN-friendly npmmirror (tarball URL pattern
+ * `@wecom/cli-<platform>/-/cli-<platform>-1.1.0.tgz`), pinned to the
+ * published sha256, and extracts the bare binary from `package/bin/`.
+ * Windows arm64 has no published package (win32-x64 only); that platform
+ * falls back to the npm-install hint until a binary is published.
+ */
+const WECOM_PLATFORM_TARBALL: Record<CliPlatform, string> = {
+  'darwin-x64': '@wecom/cli-darwin-x64/-/cli-darwin-x64-1.1.0.tgz',
+  'darwin-arm64': '@wecom/cli-darwin-arm64/-/cli-darwin-arm64-1.1.0.tgz',
+  'linux-x64': '@wecom/cli-linux-x64/-/cli-linux-x64-1.1.0.tgz',
+  'linux-arm64': '@wecom/cli-linux-arm64/-/cli-linux-arm64-1.1.0.tgz',
+  'win32-x64': '@wecom/cli-win32-x64/-/cli-win32-x64-1.1.0.tgz',
+  'win32-arm64': '',
+}
+const WECOM_CHECKSUMS: Record<string, string> = {
+  'cli-darwin-arm64-1.1.0.tgz': 'abaa9734561b6c45459bdc831afff29f2b3011d1d63045ea88253848e1320aee',
+  'cli-darwin-x64-1.1.0.tgz': 'bfb65abaed9d30531e098c2bcac99128fd6fd2dc11fb3aa3c88124bc4e0bf9b9',
+  'cli-linux-arm64-1.1.0.tgz': 'af0c82da430f25dde50398113eec032241152af1acc7e3178d385c2930ee3519',
+  'cli-linux-x64-1.1.0.tgz': '8da74fecd9b89a92876e72d663dad5e436c771c91bb051d99b2eb63a1d889516',
+  'cli-win32-x64-1.1.0.tgz': '1e7f24cccdc9d61706a717f8765e114663b3911e11b1e22814dea855ae77d313',
+}
+const WECOM_MIRROR_BASE = process.env.PICOAIDE_CONNECTORS_NPM_MIRROR?.trim() || 'https://registry.npmmirror.com'
+const WECOM_MANIFEST: CliBinaryManifest = {
+  command: 'wecom-cli',
+  version: '1.1.0',
+  binaryName: 'wecom-cli',
+  displayName: '企业微信 wecom-cli（WeCom CLI）',
+  license: 'UNLICENSED',
+  source: {
+    kind: 'direct',
+    url: (platform) => {
+      const tarball = WECOM_PLATFORM_TARBALL[platform]
+      if (!tarball) return null
+      return `${WECOM_MIRROR_BASE}/${tarball}`
+    },
+    checksums: WECOM_CHECKSUMS,
+  },
+}
+
 /** Built-in manifests keyed by command name. */
 export const CLI_MANIFESTS: ReadonlyMap<string, CliBinaryManifest> = new Map([
   [DWS_MANIFEST.command, DWS_MANIFEST],
   [BEISEN_MANIFEST.command, BEISEN_MANIFEST],
+  [LARK_MANIFEST.command, LARK_MANIFEST],
+  [WECOM_MANIFEST.command, WECOM_MANIFEST],
 ])
