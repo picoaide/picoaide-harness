@@ -7,7 +7,6 @@ import {
   afterPack,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
-  REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
   resolvePackagedAsarPath,
   resolvePackagedUnpackedRoot,
@@ -81,7 +80,7 @@ describe('packaged desktop runtime verification', () => {
 
   it.each(['darwin', 'win32'])(
     'targets the physical diagnostic Worker in the %s unpacked layout and removes smoke files',
-    async (platform) => {
+    async () => {
       const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
       const unpackedRoot = join(root, 'resources', 'app.asar.unpacked')
       mkdirSync(join(unpackedRoot, 'lib'), { recursive: true })
@@ -146,19 +145,9 @@ describe('packaged desktop runtime verification', () => {
       join('/build', 'resources', 'app.asar'),
     ],
   ])('inspects the %s app.asar path and keeps the unpacked tree native-only', (platform, expectedPath) => {
-    const list = vi.fn<ArchiveLister>(() => completeArchiveEntries(platform === 'win32' ? '\\' : '/'))
-    const exists = vi.fn<FileProbe>(() => true)
-    const unpackedRoot = `${expectedPath}.unpacked`
-
-    // 新契约：unpacked 只允许原生二进制；无 .js/.map/.json（除 package.json）。
-    // 用真实临时目录模拟 readdir 无 JS 的情形，exists 探针命中一个原生条目。
-    const temp = mkdtempSync(join(tmpdir(), 'verify-packaged-runtime-'))
-    mkdirSync(join(temp, 'node_modules', 'node-pty', 'prebuilds', 'linux-x64'), { recursive: true })
-    writeFileSync(join(temp, 'node_modules', 'node-pty', 'prebuilds', 'linux-x64', 'pty.node'), Buffer.from(''))
-    const realPackagedAsar = resolvePackagedAsarPath(context('/build', platform))
+    const list = vi.fn<ArchiveLister>(() => completeArchiveEntries())
     const realExists = vi.fn<FileProbe>(filename => {
-      // Build a probe against the temp unpacked root mirroring pty.node presence.
-      return filename.endsWith('pty.node') || false
+      return filename.endsWith('pty.node')
     })
 
     // 直接验证 verifyPackagedRuntime 的主路径：list 完整 + exists 命中至少一个原生条目
@@ -168,10 +157,9 @@ describe('packaged desktop runtime verification', () => {
       realExists,
     )).not.toThrow()
 
-    expect(resolvePackagedAsarPath(context('/build', platform))).toBe(expectedPath)
     expect(list).toHaveBeenCalledOnce()
     expect(list).toHaveBeenCalledWith(expectedPath, { isPack: false })
-    expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(unpackedRoot)
+    expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(`${expectedPath}.unpacked`)
   })
 
   it('rejects an unsupported platform instead of guessing an archive layout', () => {
@@ -229,7 +217,6 @@ describe('packaged desktop runtime verification', () => {
 
   it('keeps the unpacked tree native-only: JS/JSON leaks are rejected', () => {
     const runtimeContext = context('/build', 'win32')
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
     // 干扰：unpacked 混入 JS 与 JSON
     const leakFilter = (filename: string): boolean => {
       // 模拟 unpacked 含 js/map/json（除 package.json）
@@ -252,7 +239,7 @@ describe('packaged desktop runtime verification', () => {
     const runtimeContext = context('/build', 'win32')
     // 完整 asar 由 REQUIRED_PACKAGED_RUNTIME_ENTRIES 构造；specifiers 各自映射的
     // archive 路径若缺失，会拒绝。这里模拟缺少 enterprise session-service。
-    const joined = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(
+    const joined = ([...REQUIRED_PACKAGED_RUNTIME_ENTRIES] as string[]).filter(
       entry => entry !== 'node_modules/@picoaide/dsh-enterprise/lib/session-service.js',
     )
     const entries = joined.map(entry => `/${entry.replaceAll('/', '/')}`)

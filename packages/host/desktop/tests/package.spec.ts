@@ -19,6 +19,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
     productName?: unknown
     appId?: unknown
     asarUnpack?: unknown
+    asar?: { smartUnpack?: unknown } | boolean
     afterPack?: unknown
     electronFuses?: unknown
     files?: unknown
@@ -222,12 +223,18 @@ describe('published package surface', () => {
     expect(manifest.build?.productName).toBe('PicoAide Harness')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
     expect(manifest.build?.asarUnpack).toEqual([
-      'package.json',
-      'cordis.patch.yml',
-      'build/**',
-      'lib/**',
-      'node_modules/**',
+      '**/*.node',
+      '**/*.dll',
+      '**/*.exe',
+      '**/*.so*',
+      '**/*.dylib',
+      '**/bin/rg',
+      '**/bin/rg.exe',
+      '**/prebuilds/**/spawn-helper',
+      '**/prebuilds/**/OpenConsole.exe',
+      '**/prebuilds/**/*.conpty_console_list*',
     ])
+    expect(manifest.build?.asar).toEqual({ smartUnpack: false })
     expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
@@ -244,7 +251,6 @@ describe('published package surface', () => {
       'cordis.patch.yml',
       'lib/**',
       'package.json',
-      '!node_modules/node-pty/build/**',
     ])
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.mac?.mergeASARs).toBe(false)
@@ -311,7 +317,6 @@ describe('published package surface', () => {
       target: ['dir'],
       x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))
-    expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 
