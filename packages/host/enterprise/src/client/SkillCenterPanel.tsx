@@ -60,44 +60,115 @@ const CLOSE: React.CSSProperties = {
   borderRadius: 6,
 }
 
+/**
+ * 技能卡片网格：面板已升级为卡片网格（auto-fill + minmax），单列卡片
+ * 信息密度过低（一屏只见 6 条）。网格下卡片变窄，操作按钮改为底部全宽，
+ * 避免名称行与按钮争抢宽度；颜色一律走 DSH 设计 token（含
+ * --dsw-alias-button-primary-fill / --dsw-alias-label-inverted 兜底）。
+ */
 const BODY: React.CSSProperties = {
   flex: 1,
   minHeight: 0,
   overflowY: 'auto',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 10,
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
+  // 行高下限保证卡片等高（描述长短不一仍对齐），上限 auto 允许长描述撑高。
+  gridAutoRows: 'minmax(150px, auto)',
+  gap: 12,
   padding: 24,
+  alignContent: 'start',
 }
 
 const CARD: React.CSSProperties = {
   border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 8,
-  padding: '12px 14px',
+  borderRadius: 10,
+  padding: 14,
   display: 'flex',
   flexDirection: 'column',
-  gap: 6,
+  gap: 8,
+  background: 'var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-layer-2))',
 }
 
+/** 名称行：字母头像 + 名称/徽标一列，按钮下沉到卡片底部（信息密度优先）。 */
 const TITLE_ROW: React.CSSProperties = {
   display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
+  alignItems: 'flex-start',
   gap: 8,
+  minWidth: 0,
 }
 
-const NAME: React.CSSProperties = { fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary)' }
+const NAME: React.CSSProperties = { fontSize: 14, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary)', lineHeight: '20px' }
 
-const META: React.CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-caption)', margin: 0 }
+const META: React.CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-caption)', margin: 0, lineHeight: '16px' }
 
-const DESC: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-secondary)' }
+const DESC: React.CSSProperties = {
+  fontSize: 12,
+  lineHeight: '18px',
+  margin: 0,
+  color: 'var(--dsw-alias-label-secondary)',
+  display: '-webkit-box',
+  WebkitLineClamp: 3,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+}
+
+/** 字母头像：从静态色板按名称哈希取色，色浅底 + 同色文字（深/浅主题均可读）。 */
+const AVATAR_COLORS = [
+  'var(--dsw-static-deepseek-5, var(--dsw-alias-brand-primary))',
+  'var(--dsw-static-green-5, var(--dsw-alias-state-success-primary))',
+  'var(--dsw-static-amber-5, var(--dsw-alias-state-warn-label))',
+  'var(--dsw-static-neutral-5, var(--dsw-alias-label-tertiary))',
+]
+
+/** 按技能名确定头像颜色（稳定：同名恒同色；导出供单测）。 */
+export function avatarColor(name: string): string {
+  if (name === '') return AVATAR_COLORS[0] ?? 'var(--dsw-alias-brand-primary)'
+  let hash = 0
+  for (let i = 0; i < name.length; i += 1) hash = (hash * 31 + name.charCodeAt(i)) >>> 0
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length] ?? AVATAR_COLORS[0]!
+}
+
+const AVATAR: React.CSSProperties = {
+  flex: 'none',
+  width: 34,
+  height: 34,
+  borderRadius: 10,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontSize: 14,
+  fontWeight: 600,
+  lineHeight: 1,
+  textTransform: 'uppercase',
+}
+
+/** 名称右侧纵向列：名称 + 已安装徽标（同名行内的徽标不再与按钮争宽）。 */
+const NAME_COL: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }
+
+const NAME_WRAP: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  minWidth: 0,
+}
+
+const NAME_TEXT: React.CSSProperties = {
+  minWidth: 0,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+}
 
 const BUTTON: React.CSSProperties = {
-  padding: '5px 12px',
+  width: '100%',
+  height: 30,
+  padding: '0 12px',
   borderRadius: 6,
-  border: '1px solid #2563eb',
-  background: '#2563eb',
-  color: '#fff',
+  border: '1px solid transparent',
+  // 企业版历史主色 #2563eb 作为主题 token 缺省时的兜底（本产品未配置品牌
+  // token 时按钮仍保持品牌蓝；主题定义了 token 时自动采用主题色）。
+  background: 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #2563eb))',
+  color: 'var(--dsw-alias-label-inverted, #fff)',
   fontSize: 12,
   cursor: 'pointer',
   whiteSpace: 'nowrap',
@@ -105,7 +176,7 @@ const BUTTON: React.CSSProperties = {
 
 const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 'default' }
 
-const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-caption)', textAlign: 'center', padding: 24 }
+const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-caption)', textAlign: 'center', padding: 24, gridColumn: '1 / -1' }
 
 const BUTTON_SECONDARY: React.CSSProperties = {
   ...BUTTON,
@@ -115,7 +186,7 @@ const BUTTON_SECONDARY: React.CSSProperties = {
 }
 
 const INSTALLED_CHIP: React.CSSProperties = {
-  marginLeft: 8,
+  flex: 'none',
   padding: '1px 8px',
   borderRadius: 999,
   fontSize: 11,
@@ -123,6 +194,16 @@ const INSTALLED_CHIP: React.CSSProperties = {
   color: 'var(--dsw-alias-state-success-primary)',
   border: '1px solid var(--dsw-alias-state-success-primary)',
   whiteSpace: 'nowrap',
+}
+
+/** 卡片底部操作区：分隔线 + 按钮（版本/作者信息并入描述下方，不再单独占用一行）。 */
+const CARD_FOOT: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  marginTop: 'auto',
+  paddingTop: 10,
+  borderTop: '1px solid var(--dsw-alias-border-l)',
 }
 
 const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'center', padding: 12 }
@@ -234,7 +315,7 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
   let content: React.ReactNode
   if (error !== '') {
     content = (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24, gridColumn: '1 / -1' }}>
         <p style={EMPTY}>{error}</p>
         <button type="button" style={BUTTON_SECONDARY} onClick={() => { loadSkills() }}>
           {t('skill.retry')}
@@ -242,7 +323,11 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
       </div>
     )
   } else if (loading || skills === null) {
-    content = <p style={EMPTY}>{t('skill.loading')}</p>
+    content = (
+      <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'center', padding: 48 }}>
+        <p style={EMPTY}>{t('skill.loading')}</p>
+      </div>
+    )
   } else if (skills.length === 0) {
     content = <p style={EMPTY}>{t('skill.empty')}</p>
   } else {
@@ -250,12 +335,21 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
       const busy = action?.name === skill.name && (action.kind === 'installing' || action.kind === 'uninstalling')
       const isInstalled = installed.has(skill.name)
       return (
-        <div key={skill.name} style={CARD}>
+        <div key={skill.name} className="pico-skill-card" style={CARD}>
           <div style={TITLE_ROW}>
-            <p style={NAME}>
-              {skill.name}
-              {isInstalled && <span style={INSTALLED_CHIP}>{t('skill.installedBadge')}</span>}
-            </p>
+            <span style={{ ...AVATAR, color: avatarColor(skill.name), background: `color-mix(in srgb, ${avatarColor(skill.name)} 14%, transparent)` }} aria-hidden="true">
+              {skill.name.charAt(0)}
+            </span>
+            <div style={NAME_COL}>
+              <div style={NAME_WRAP}>
+                <p style={{ ...NAME, ...NAME_TEXT }} title={skill.name}>{skill.name}</p>
+                {isInstalled && <span style={INSTALLED_CHIP}>{t('skill.installedBadge')}</span>}
+              </div>
+              <p style={META}>v{skill.version}{skill.author !== '' ? ` · ${skill.author}` : ''}</p>
+            </div>
+          </div>
+          {skill.description !== '' && <p style={DESC}>{skill.description}</p>}
+          <div style={CARD_FOOT}>
             {isInstalled ? (
               <button
                 type="button"
@@ -276,8 +370,6 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
               </button>
             )}
           </div>
-          <p style={META}>v{skill.version}{skill.author !== '' ? ` · ${skill.author}` : ''}</p>
-          {skill.description !== '' && <p style={DESC}>{skill.description}</p>}
         </div>
       )
     })
