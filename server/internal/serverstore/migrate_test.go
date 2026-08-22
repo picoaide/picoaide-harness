@@ -109,7 +109,7 @@ func TestMigration0028AuditCleanupFresh(t *testing.T) {
 	if hasAudit != 1 {
 		t.Fatal("audit_logs table missing after migration")
 	}
-	for _, name := range []string{"kb_audit_logs", "kb_documents", "kb_chunks", "kb_folders", "kb_folder_groups", "kb_fts_trigram", "kb_fts", "kb_fts_data", "mcp_servers", "mcp_grants", "mcp_config_downloads"} {
+	for _, name := range []string{"kb_audit_logs", "kb_documents", "kb_chunks", "kb_chunks_fts", "kb_folders", "kb_folder_groups", "kb_fts_trigram", "kb_fts", "kb_fts_data", "mcp_servers", "mcp_grants", "mcp_config_downloads"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n); err != nil {
 			t.Fatal(err)
