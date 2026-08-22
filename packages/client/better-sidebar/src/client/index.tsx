@@ -10,10 +10,10 @@
  */
 import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import type { Context } from '../context-types.ts'
+import type { Context, SidebarModulesService } from '../context-types.ts'
 import { allLeaves, createSidebarStore, isAgentTabId } from './state.ts'
 import { createBetterSidebarService, matchUrlTarget } from './service.ts'
-import { resetChunks } from './chunk-loader.ts'
+import { resetChunks, setModuleSystem } from './chunk-loader.ts'
 import { registerBuiltins } from './builtins/index.ts'
 import { Sidebar } from './Sidebar.tsx'
 import { RenderBoundary } from './RenderBoundary.tsx'
@@ -29,7 +29,10 @@ import css from './sidebar.module.css'
 import './layout.css'
 
 /** Services required before mounting (provided by the client runtime; the
- *  locale service backs the sidebar's copy — see locales.ts). */
+ *  locale service backs the sidebar's copy — see locales.ts). `modules` is
+ *  read OPTIONALLY via ctx.get (it is provided by dsh-client-modules in the
+ *  official DSH shell; a third-party host may not have it — the lazy chunk
+ *  loader then falls back to its window-global probe). */
 export const inject = ['slots', 'sessions', 'connection', 'workspaces', 'locale']
 
 /**
@@ -44,6 +47,14 @@ export const inject = ['slots', 'sessions', 'connection', 'workspaces', 'locale'
  * @param ctx - the client cordis context (slots, sessions).
  */
 export function apply(ctx: Context): void {
+  // The lazy chunk loader resolves platform externals through the client
+  // module system. It is NOT a window global in the current DSH pin (the
+  // module system is only the `ctx.modules` service — see chunk-loader.ts),
+  // so hand it over before any lazy chunk (terminal/editor/mermaid) opens.
+  // Optional read (`ctx.get`): in a host without dsh-client-modules the
+  // loader keeps its window-global fallback and still functions.
+  const modules = ctx.get('modules') as SidebarModulesService | undefined
+  if (modules !== undefined) setModuleSystem(modules)
   // The sidebar follows the DSH i18n system: attach the locale service so
   // the module-level t()/isZh() resolve the Host-backed language preference
   // (and switch live — the Sidebar root subscribes to it), and register the
