@@ -9,10 +9,16 @@ node_modules/
 *.tsbuildinfo
 .build/
 
-dsh-plugin-desktop/dist/
-dsh-plugin-desktop/lib/
-plugins/dsh-enterprise/lib/
-dsh-community-market/lib/
+# DSH plugin packages: build output is never committed for workspace members
+# that compile to lib/ (desktop, enterprise, account-card, branding) unless a
+# member intentionally ships it (dsh-browser, dsh-connectors, dsh-cron,
+# dsh-task and dsh-memory-evolve track lib/ for the packaged runtime).
+packages/host/desktop/dist/
+packages/host/desktop/lib/
+packages/host/enterprise/lib/
+packages/client/account-card/lib/
+packages/client/branding/lib/
+community/market/lib/
 
 # server (Go)
 server/bin/
@@ -36,12 +42,6 @@ server/webadmin/tsconfig.tsbuildinfo
 .go-path/
 .npm-cache/
 .smoke/
-
-# account-card plugin build output (same convention as dsh-enterprise)
-plugins/dsh-account-card/lib/
-
-# branding plugin build output (same convention as dsh-enterprise)
-plugins/dsh-branding/lib/
 
 # local writable DSH home mirror (this sandbox root fs is read-only)
 .dsh-home/

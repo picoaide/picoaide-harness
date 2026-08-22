@@ -1,7 +1,7 @@
 # 未使用的用户 API 清单（2026-08-21 盘点）
 
 > 盘点范围：`server/`（PicoAide-Next Go 服务端）注册的全部**用户侧 API**（Bearer token / 登录态，
-> 不含 `/api/admin/*` 管理端接口），对照实际客户端（`plugins/dsh-enterprise` 企业客户端插件 +
+> 不含 `/api/admin/*` 管理端接口），对照实际客户端（`packages/host/enterprise` 企业客户端插件 +
 > DSH `llm-deepseek` 适配器）与 `server/webadmin` 的调用点。
 
 ## 结论速览
@@ -21,7 +21,7 @@
 | GET | `/api/marketplace/skills/:name/archive` | `plugins/dsh-enterprise/src/auth-gate.ts:266,325` |
 | POST | `/v1/chat/completions` | `gateway-model.ts` 配置 baseURL=`{server}/v1`，`deepseek-harness/packages/llm/llm-deepseek/src/adapter.ts:341` |
 
-> **2026-08-21 更新**：`GET /api/auth/usage` 已由新插件 `plugins/dsh-account-card` 消费
+> **2026-08-21 更新**：`GET /api/auth/usage` 已由新插件 `packages/client/account-card` 消费
 > （底部账号卡片余额展示：agent loop 完成后刷新 + 10s 轮询 + 手动刷新），不再是未使用 API。
 
 ## 客户端未使用的 API（11 个）
