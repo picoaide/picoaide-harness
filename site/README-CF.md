@@ -1,6 +1,6 @@
 # Cloudflare Pages 部署指南
 
-本站（`site/`）构建产物为纯静态文件（`site/dist/`），使用 **Cloudflare Pages** 托管，采用 **Git 直连集成**，不依赖 GitHub Actions。
+本站（`site/`）是**独立的 Yarn 项目**（有自己的 `package.json`、`yarn.lock`、`packageManager: yarn@4.18.0`），采用 **Cloudflare Pages** 托管、**Git 直连集成**，不依赖 GitHub Actions。
 
 ## 一、前置条件
 
@@ -18,15 +18,15 @@
 | Project name | `picoaide`（或你喜欢的名字，如 `picoaide-harness-site`） |
 | Production branch | `master` |
 | **Root directory** | **`site`** |
-| **Build command** | `npm run build` |
+| **Build command** | `yarn build` |
 | **Build output directory** | `dist` |
 
-> **关键**：Root directory 必须填 `site`。`site/` 是独立的 npm 项目（有自己 `package.json` + `package-lock.json`），Cloudflare 会在该目录内执行 `npm install`/`npm ci`，只安装官网依赖，不会触碰仓库根的 yarn monorepo（也不会编译 node-pty 等桌面端原生模块）。
+> **为什么是 yarn**：Cloudflare Pages 的构建环境检测到 `site/package.json` 的 `packageManager: yarn@4.18.0` 会自动激活 Yarn 4（且 `site/` 内有自己的 `yarn.lock` 作为独立项目边界，不会吸附仓库根的 yarn workspace）。构建命令用 `yarn build`（与 `astro build` 等价）。
 
-4. 点击 **Save and Deploy**，首次构建会在 Cloudflare 的构建容器里运行（都在 `site/` 内）：
-   - 自动运行 `npm install`（或 `npm ci`，仅安装 astro/starlight 等官网依赖）
-   - 运行 `npm run build`（`astro build` 静态构建）
-   - 部署 `site/dist/` 到 `*.pages.dev` 预览地址
+4. 点击 **Save and Deploy**，Cloudflare 会在 `site/` 内自动执行：
+   - `yarn install`（仅安装 astro/starlight/rss 等官网依赖，不会触碰仓库根的 monorepo，也不会编译 node-pty 等桌面端原生模块）
+   - `yarn build`（`astro build` 静态构建）
+   - 部署 `dist/` 到 `*.pages.dev` 预览地址
 
 ## 三、绑定自定义域名
 
@@ -43,7 +43,6 @@
   ```
   NODE_VERSION = 22
   ```
-- **构建命令**：`npm --prefix site run build`（已含 `astro build`）
 - **无需 secrets**：本站纯静态、无后端环境变量
 
 ## 五、发布/预览流程
@@ -63,9 +62,9 @@
 
 ## 七、常见问题
 
-### 构建失败：找不到 `site/package.json`
+### 构建失败：`doesn't seem to be part of the project declared in /opt/buildhome/repo`
 
-说明 CF 的构建命令没进到 `site/`。检查 Build command 是否为 `npm --prefix site run build`，Root directory 是否为 `/`。
+这说明 `site/yarn.lock` 缺失（Yarn 4 向上吸附到了仓库根的 yarn 项目）。确保 `site/yarn.lock` 已提交到 git。
 
 ### 本地可以构建，Pages 失败
 
@@ -73,6 +72,6 @@
 
 ```bash
 cd site
-npm install
-npm run build
+corepack yarn install
+corepack yarn build
 ```
