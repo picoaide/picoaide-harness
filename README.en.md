@@ -132,6 +132,12 @@ Special thanks to the DeepSeek Harness repository and the DeepSeek AI team. This
 
 Thanks also to Cordis for the plugin foundation, and to the Koishi.js project and community for years of plugin practices, tooling, and experience.
 
+Thanks to the following community plugins for their contributions to the product experience:
+
+- dsh-better-sidebar (DSH sidebar workbench): VSCode-style explorer, editor, terminal, Git, and browser views
+- dsh-memory-evolve (layered memory and self-evolution): global, user, project, branch, and daily memory, plus skill and todo management for DSH
+- Connector, task, scheduled-task, and browser capability providers across the DeepSeek Harness plugin ecosystem
+
 And to everyone who uses, supports, and helps build this.
 
 <a id="run-from-source"></a>
