@@ -1,0 +1,6 @@
+# PicoAide brand row for the web profile: the brace mark occupies the
+# sidebar/hero brand slots (single/root, empty in the web composition) and
+# the client replaces the browser favicon.
+- insert:
+    - id: picoaide-branding
+      name: '@picoaide/dsh-branding'
