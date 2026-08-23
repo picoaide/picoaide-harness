@@ -34,7 +34,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
     win?: { icon?: unknown; target?: unknown; artifactName?: unknown }
     nsis?: Record<string, unknown>
     portable?: Record<string, unknown>
-    linux?: { icon?: unknown }
+    linux?: { icon?: unknown; target?: unknown }
   }
   dependencies?: Record<string, unknown>
   optionalDependencies?: Record<string, unknown>
@@ -274,6 +274,13 @@ describe('published package surface', () => {
       artifactName: 'PicoAide-Harness-${version}-${arch}-Setup.${ext}',
     })
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
+    expect(manifest.build?.linux?.target).toEqual([{
+      target: 'AppImage',
+      arch: ['x64'],
+    }, {
+      target: 'deb',
+      arch: ['x64'],
+    }])
   })
 
   it('separates unsigned smoke packaging from the signed macOS release', () => {
@@ -314,7 +321,8 @@ describe('published package surface', () => {
       hardenedRuntime: true,
       mergeASARs: false,
       notarize: true,
-      target: ['dir'],
+      target: [{ target: 'dmg', arch: ['universal'] }],
+      artifactName: 'PicoAide-Harness-${version}-mac.${ext}',
       x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
@@ -331,7 +339,8 @@ describe('published package surface', () => {
     )
 
     expect(windowsJob).toContain('yarn workspace dsh-plugin-desktop dist:win')
-    expect(macosJob).toContain('yarn workspace dsh-plugin-desktop package:dir')
+    expect(macosJob).toContain('yarn workspace dsh-plugin-desktop dist:mac-smoke')
+    expect(macosJob).toContain('dist/mac-smoke/*.dmg')
   })
 
   it('keeps one fixed brand-black tray source for generated native assets', () => {
