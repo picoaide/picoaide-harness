@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "npm@10.9.2",
   "description": "PicoAide Harness official website, blog, and wiki",
   "scripts": {
     "dev": "astro dev",
