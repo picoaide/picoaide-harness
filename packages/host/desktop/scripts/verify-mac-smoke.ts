@@ -1,7 +1,7 @@
 /** Verify the unsigned application structure sealed inside one macOS smoke DMG. */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,11 +48,18 @@ function run(command: string, args: readonly string[]): void {
 
 function defaultOptions(): MacSmokeVerificationOptions {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
+    readonly build?: { readonly productName?: unknown }
+  }
+  const productName = manifest.build?.productName
+  if (typeof productName !== 'string' || productName.length === 0) {
+    throw new Error('package.json build.productName must be a non-empty string')
+  }
   return {
     distDir: process.argv[2] === undefined
       ? join(packageRoot, 'dist', 'mac-smoke')
       : resolve(process.argv[2]),
-    productName: 'DSH Desktop',
+    productName,
     listDmgs,
     makeMountPoint: () => mkdtempSync(join(tmpdir(), 'dsh-desktop-dmg-smoke-')),
     run,
