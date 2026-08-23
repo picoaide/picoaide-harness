@@ -31,7 +31,7 @@ import (
 // and a marketplace router; returns router, db, token, api.
 func newTestRouter(t *testing.T) (*gin.Engine, *sql.DB, string, *API) {
 	t.Helper()
-	db, err := serverstore.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := serverstore.Open(serverstore.DBConfig{Path: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestSkillAPI(t *testing.T) {
 // download rebuilds from the new source instead of serving a stale archive
 // (or failing the version check forever with 502).
 func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
-	db, err := serverstore.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := serverstore.Open(serverstore.DBConfig{Path: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
 		t.Fatal(err)
 	}

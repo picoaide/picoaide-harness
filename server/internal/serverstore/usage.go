@@ -178,12 +178,12 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
 	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
-	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	id, err := InsertID(db, `INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // UpdateUsageTokens backfills token counts on an existing usage row (pending
@@ -457,15 +457,15 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	}
 	switch group {
 	case "day":
-		selectExpr, groupExpr = "date(usage.created_at)", "date(usage.created_at)"
+		selectExpr, groupExpr = DateDayExpr("usage.created_at"), DateDayExpr("usage.created_at")
 		fill = dayFill
 	case "week":
 		// 按周一日期分桶:date(created_at,'weekday 0','-6 days') 与
 		// weekMonday 严格对齐,免疫 ISO/%W 跨年差异(审计2026-E2)
-		selectExpr, groupExpr = "date(usage.created_at, 'weekday 0', '-6 days')", "date(usage.created_at, 'weekday 0', '-6 days')"
+		selectExpr, groupExpr = DateWeekExpr("usage.created_at"), DateWeekExpr("usage.created_at")
 		fill = weekFill
 	case "month":
-		selectExpr, groupExpr = "strftime('%Y-%m', usage.created_at)", "strftime('%Y-%m', usage.created_at)"
+		selectExpr, groupExpr = DateMonthExpr("usage.created_at"), DateMonthExpr("usage.created_at")
 		fill = monthFill
 	case "model":
 		selectExpr, groupExpr = "usage.model", "usage.model"
@@ -482,13 +482,13 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		FROM usage` + join + ` WHERE 1=1`
 	var args []any
 	if !from.IsZero() {
-		qstr += " AND usage.created_at >= ?"
+		qstr += " AND " + DateCompareExpr("usage.created_at") + " >= ?"
 		args = append(args, from.Format("2006-01-02"))
 	}
 	if !to.IsZero() {
 		// AddDate(0,0,1) 日历下一天,避免 Add(24h) 在 DST 切换日跳到后天
 		// (审计2026-E3 P1-3)
-		qstr += " AND usage.created_at < ?"
+		qstr += " AND " + DateCompareExpr("usage.created_at") + " < ?"
 		args = append(args, to.AddDate(0, 0, 1).Format("2006-01-02"))
 	}
 	if q.Username != "" {

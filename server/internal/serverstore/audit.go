@@ -47,7 +47,7 @@ func ListAuditLogsPaged(db *sql.DB, offset, limit int) ([]AuditLogEntry, int64, 
 	var out []AuditLogEntry
 	for rows.Next() {
 		var l AuditLogEntry
-		var created string
+		var created any
 		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &created); err != nil {
 			return nil, 0, err
 		}
@@ -94,7 +94,7 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 	var out []AuditLogEntry
 	for rows.Next() {
 		var l AuditLogEntry
-		var created string
+		var created any
 		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &created); err != nil {
 			return nil, 0, err
 		}

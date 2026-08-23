@@ -16,30 +16,34 @@ func TokenHash(raw string) string {
 
 // CreateToken stores a hashed token with expiresAt (UTC) and returns its id.
 func CreateToken(db *sql.DB, userID int64, raw string, expiresAt time.Time) (int64, error) {
-	res, err := db.Exec(`INSERT INTO api_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)`,
+	id, err := InsertID(db, `INSERT INTO api_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)`,
 		userID, TokenHash(raw), expiresAt.UTC().Format(time.RFC3339))
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // GetTokenByHash returns the token row by hashed value.
 func GetTokenByHash(db *sql.DB, hash string) (*Token, error) {
 	var t Token
-	var expiresAt, lastUsed sql.NullString
+	var expiresAt, lastUsed sql.NullTime
+	var createdAny any
 	err := db.QueryRow(`SELECT id, user_id, token_hash, name, created_at, expires_at, last_used_at, revoked
 		FROM api_tokens WHERE token_hash = ?`, hash).
-		Scan(&t.ID, &t.UserID, &t.TokenHash, &t.Name, &t.CreatedAt, &expiresAt, &lastUsed, &t.Revoked)
+		Scan(&t.ID, &t.UserID, &t.TokenHash, &t.Name, &createdAny, &expiresAt, &lastUsed, &t.Revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	t.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt.String)
+	t.CreatedAt = formatTimeString(createdAny)
+	if expiresAt.Valid {
+		t.ExpiresAt = expiresAt.Time
+	}
 	if lastUsed.Valid {
-		t.LastUsedAt, _ = time.Parse(time.RFC3339, lastUsed.String)
+		t.LastUsedAt = lastUsed.Time
 	}
 	return &t, nil
 }
@@ -85,7 +89,7 @@ const tokenTouchInterval = time.Minute
 // TouchTokenLastUsed records the last successful verification time, at most
 // once per tokenTouchInterval per token.
 func TouchTokenLastUsed(db *sql.DB, tokenID int64) error {
-	var lastUsed sql.NullString
+	var lastUsed sql.NullTime
 	if err := db.QueryRow("SELECT last_used_at FROM api_tokens WHERE id = ?", tokenID).Scan(&lastUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -93,7 +97,7 @@ func TouchTokenLastUsed(db *sql.DB, tokenID int64) error {
 		return err
 	}
 	if lastUsed.Valid {
-		if t, err := time.Parse(time.RFC3339, lastUsed.String); err == nil && time.Since(t) < tokenTouchInterval {
+		if time.Since(lastUsed.Time) < tokenTouchInterval {
 			return nil // throttled
 		}
 	}
@@ -114,13 +118,17 @@ func ListTokensByUser(db *sql.DB, userID int64) ([]Token, error) {
 	var out []Token
 	for rows.Next() {
 		var t Token
-		var expiresAt, lastUsed sql.NullString
-		if err := rows.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.Name, &t.CreatedAt, &expiresAt, &lastUsed, &t.Revoked); err != nil {
+		var expiresAt, lastUsed sql.NullTime
+		var createdAny any
+		if err := rows.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.Name, &createdAny, &expiresAt, &lastUsed, &t.Revoked); err != nil {
 			return nil, err
 		}
-		t.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt.String)
+		t.CreatedAt = formatTimeString(createdAny)
+		if expiresAt.Valid {
+			t.ExpiresAt = expiresAt.Time
+		}
 		if lastUsed.Valid {
-			t.LastUsedAt, _ = time.Parse(time.RFC3339, lastUsed.String)
+			t.LastUsedAt = lastUsed.Time
 		}
 		t.TokenHash = "" // never expose the hash in listings
 		out = append(out, t)
