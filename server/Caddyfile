@@ -1,13 +1,22 @@
-# PicoAide 服务端 HTTPS 反代(Caddy 自动管理证书)
-# 部署时把 picoaide.example.com 替换为你的真实域名。
+# ============================================================
+# PicoAide 服务端 Caddyfile(默认模板:内部自签证书)
+# ============================================================
+# 证书模式:INTERNAL(自签,内网开箱即用)
+# 适用场景:纯内网/无公网域名/测试环境;客户端首次连接需信任 Caddy 本地 CA
+# 证书模式三选一:
+#   - Caddyfile.autocert → 自动证书(Let's Encrypt,需公网域名直连)
+#   - Caddyfile.manual   → 手动证书(部署者提供 PEM,先自签占位)
+#   - 本文件              → 内部自签(tls internal,Caddy 本地 CA)
+# 切换:cp Caddyfile.<模式> Caddyfile && docker compose restart caddy
 #
-# 证书策略:
-#   - 默认 tls internal:Caddy 生成自签名证书(内网/测试用,客户端首次连接弹 TOFU 信任)
-#   - 有公网域名时删掉 `tls internal`,Caddy 自动申请 Let's Encrypt 正式证书
+# 部署时把 picoaide.example.com 替换为你的真实域名(或 IP)。
+# ============================================================
 picoaide.example.com {
+	# INTERNAL 模式:Caddy 用本地 CA 生成自签名证书(域名/IP 均可)
 	tls internal
 
-	# 反代到后端 picoaide-server(compose 服务名),保留原始 Host 与真实来源 IP
+	# 反代到后端 picoaide-server(compose 私有网段固定 IP 172.28.0.3 或服务名解析),
+	# 保留原始 Host 与真实来源 IP;WebSocket 由 Caddy 自动支持
 	reverse_proxy server:8080 {
 		header_up Host {host}
 		header_up X-Forwarded-Proto {scheme}

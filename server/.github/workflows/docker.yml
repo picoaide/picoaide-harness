@@ -1,9 +1,23 @@
 name: Docker image
 
+# 发布链路:
+#   发版: git tag v0.4.0 && git push origin v0.4.0
+#   → 本 workflow 构建多平台镜像并推送 ghcr.io/picoaide/picoaide-server
+#   → 标签: v0.4.0(精确) + v0.4(minor 浮动) + latest(仅默认分支 v*+latest 规则)
+# 手动重发(补发 tag / 修复构建): 仓库 Actions → Docker image → Run workflow → 填 tag
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要构建的版本(不含 v 前缀,如 0.4.0;留空=最新 tag)'
+        required: false
+        type: string
+
+env:
+  IMAGE: ghcr.io/picoaide/picoaide-server
 
 jobs:
   build:
@@ -14,31 +28,55 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "v=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/picoaide/picoaide-server
+          images: ${{ env.IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push (amd64)
+      - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          # 多平台:amd64 + arm64(SERVER 交叉编译由 Dockerfile TARGETOS/TARGETARCH 承接)
+          platforms: linux/amd64,linux/arm64
           push: true
+          # 把版本注入镜像内 --version(与 git tag 强一致)
+          build-args: |
+            VERSION=${{ steps.version.outputs.v }}
+          # 构建缓存(GHA 层缓存,加速下次构建)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 供应链元数据:SBOM + 构建证明(推送时附注)
+          sbom: true
+          provenance: mode=max
+
+      - name: Inspect multi-arch manifest
+        # 发布验证:确认 amd64+arm64 manifest 都在(发版必须过)
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.version.outputs.v }} | grep -E "linux/amd64|linux/arm64" || \
+            (echo "::error::multi-arch manifest missing" && exit 1)
