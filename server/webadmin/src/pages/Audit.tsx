@@ -41,6 +41,14 @@ const ACTION_LABEL: Record<string, string> = {
 // M8: 筛选下拉的可选动作
 const FILTER_ACTIONS = Object.keys(ACTION_LABEL).sort()
 
+// 操作 → 徽章语义色:创建=蓝 / 删除=红 / 更新=琥珀 / 授权=绿
+function actionBadgeVariant(action: string): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' {
+  if (/create|enable|grant/.test(action)) return 'success'
+  if (/delete|disable|revoke/.test(action)) return 'destructive'
+  if (/update|dept/.test(action)) return 'secondary'
+  return 'outline'
+}
+
 function fmtTime(iso: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -141,12 +149,19 @@ export default function Audit() {
         <TableBody>
           {logs.map((l) => (
             <TableRow key={l.id}>
-              <TableCell>{l.id}</TableCell>
-              <TableCell><Badge variant="secondary">{ACTION_LABEL[l.action] ?? l.action}</Badge></TableCell>
-              <TableCell>{l.username}</TableCell>
+              <TableCell className="font-mono text-xs text-slate-400">{l.id}</TableCell>
+              <TableCell><Badge variant={actionBadgeVariant(l.action)}>{ACTION_LABEL[l.action] ?? l.action}</Badge></TableCell>
+              <TableCell>
+                <span className="inline-flex items-center gap-1.5 font-medium">
+                  <span className="flex h-5 w-5 items-center justify-center rounded bg-slate-100 text-[9px] font-bold text-slate-500">
+                    {l.username.slice(0, 1).toUpperCase()}
+                  </span>
+                  {l.username}
+                </span>
+              </TableCell>
               {/* M8: 详情悬停可查看全文 */}
-              <TableCell className="max-w-96 truncate font-mono text-xs" title={l.detail}>{l.detail}</TableCell>
-              <TableCell className="text-muted-foreground">{fmtTime(l.created_at)}</TableCell>
+              <TableCell className="max-w-96 truncate font-mono text-xs text-slate-500" title={l.detail}>{l.detail}</TableCell>
+              <TableCell className="font-mono text-xs text-muted-foreground">{fmtTime(l.created_at)}</TableCell>
             </TableRow>
           ))}
           {logs.length === 0 && (
