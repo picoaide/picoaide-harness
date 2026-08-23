@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
-import { Lock } from 'lucide-react'
+import { Lock, Eye, EyeOff } from 'lucide-react'
 import { isModelPriced } from '../lib/format'
 
 interface Provider {
@@ -90,6 +90,29 @@ function isHttpUrl(v: string): boolean {
   } catch {
     return false
   }
+}
+
+// 密码/密钥输入(审计修复 P3-4):显隐切换按钮,复用 Input 样式;密码管理工具与粘贴不受影响
+function SecretInput(props: React.ComponentProps<'input'>) {
+  const [show, setShow] = React.useState(false)
+  return (
+    <div className="relative">
+      <Input
+        {...props}
+        type={show ? 'text' : 'password'}
+        className={`pr-9 ${props.className ?? ''}`}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={show ? '隐藏' : '显示'}
+        onClick={() => setShow((s) => !s)}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+      >
+        {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  )
 }
 
 export default function Gateway() {
@@ -552,6 +575,7 @@ export default function Gateway() {
                   <Input
                     type="time"
                     aria-label={`高峰开始 ${i + 1}`}
+                    className="w-40 shrink-0"
                     value={w.start}
                     onChange={(e) => updatePeak(i, 'start', e.target.value)}
                   />
@@ -559,10 +583,11 @@ export default function Gateway() {
                   <Input
                     type="time"
                     aria-label={`高峰结束 ${i + 1}`}
+                    className="w-40 shrink-0"
                     value={w.end}
                     onChange={(e) => updatePeak(i, 'end', e.target.value)}
                   />
-                  <Button size="sm" variant="outline" type="button" onClick={() => removePeak(i)}>移除</Button>
+                  <Button size="sm" variant="outline" type="button" className="ml-2 shrink-0" onClick={() => removePeak(i)}>移除</Button>
                 </div>
               ))}
               <div className="flex flex-wrap gap-2">
@@ -573,13 +598,14 @@ export default function Gateway() {
                 )}
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              高峰时段按北京时间判定,半开区间 [start,end)。高峰窗口外(空闲时段)且模型配置了低谷折扣率时,
-              费用按折扣率打折。清空 = 无峰谷价(全天标准价)。DeepSeek 官方当前政策(2026-08-16 生效):
-              高峰 = 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%;历史 16:30-00:30 错峰政策已废弃。
-            </p>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              <li>按北京时间判定,半开区间 [start,end)。</li>
+              <li>高峰窗口外(空闲时段)且模型配置了低谷折扣率时,费用按折扣率打折。</li>
+              <li>清空 = 无峰谷价(全天标准价)。</li>
+              <li>DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%;历史 16:30-00:30 错峰政策已废弃。</li>
+            </ul>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 items-start gap-4">
             <div className="flex items-center gap-2">
               <Switch checked={cfg.allow_private} onCheckedChange={(v) => setCfg({ ...cfg, allow_private: v })} />
               <Label>允许 web_fetch 访问私有网段</Label>
@@ -753,9 +779,10 @@ export default function Gateway() {
                 <SelectItem value="oidc">OIDC(浏览器登录)</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground">
-              ldap/both 模式需填写 LDAP 服务器;oidc 模式需填写 OIDC 配置。密码类字段留空 = 保持现值。
-            </p>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              <li>ldap/both 模式需填写 LDAP 服务器;oidc 模式需填写 OIDC 配置。</li>
+              <li>密码类字段留空 = 保持现值。</li>
+            </ul>
           </div>
 
           {(authForm.mode === 'ldap' || authForm.mode === 'both') && (
@@ -774,7 +801,7 @@ export default function Gateway() {
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor="ldap-bind-pw">Bind 密码(未改=保持现值;清空=清除密码)</Label>
-                  <Input id="ldap-bind-pw" type="password" value={authForm.ldap_bind_password}
+                  <SecretInput id="ldap-bind-pw" value={authForm.ldap_bind_password}
                     onChange={(e) => setAuthForm({ ...authForm, ldap_bind_password: e.target.value })} />
                 </div>
                 <div className="space-y-1">
@@ -817,7 +844,7 @@ export default function Gateway() {
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor="oidc-secret">Client Secret(未改=保持现值;清空=清除密钥)</Label>
-                  <Input id="oidc-secret" type="password" value={authForm.oidc_client_secret}
+                  <SecretInput id="oidc-secret" value={authForm.oidc_client_secret}
                     onChange={(e) => setAuthForm({ ...authForm, oidc_client_secret: e.target.value })} />
                 </div>
                 <div className="space-y-1">
@@ -879,7 +906,7 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>API Key{provForm.channel ? '(必填)' : ''}</Label>
-              <Input type="password" placeholder="sk-..." value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
+              <SecretInput placeholder="sk-..." value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
@@ -938,7 +965,7 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>API Key(留空 = 不更换)</Label>
-              <Input type="password" placeholder="sk-..." value={editProvForm.api_key} onChange={(e) => setEditProvForm({ ...editProvForm, api_key: e.target.value })} />
+              <SecretInput placeholder="sk-..." value={editProvForm.api_key} onChange={(e) => setEditProvForm({ ...editProvForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
@@ -1022,31 +1049,31 @@ export default function Gateway() {
                   type="number"
                   min={0}
                   step="0.01"
-                  placeholder="留空 = 未配置(按输入价计费);DeepSeek 缓存价≈输入价×50%"
+                  placeholder="留空 = 未配置(按输入价计费)"
                   value={modelForm.cache_input_price_per_1m}
                   onChange={(e) => setModelForm({ ...modelForm, cache_input_price_per_1m: e.target.value })}
                 />
-                <p className="text-xs text-muted-foreground">缓存命中按此单价计费?仅作定价展示;命中 token 仍按输入价计费。</p>
+                <p className="text-xs text-muted-foreground">仅作定价展示;命中 token 仍按输入价计费。</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="model-offpeak">低谷折扣率(0-1,留空 = 无峰谷价)</Label>
+                <Input
+                  id="model-offpeak"
+                  type="number"
+                  min={0}
+                  max={1}
+                  step="0.05"
+                  placeholder="DeepSeek 官方错峰五折 = 0.5"
+                  value={modelForm.offpeak_discount}
+                  onChange={(e) => setModelForm({ ...modelForm, offpeak_discount: e.target.value })}
+                />
               </div>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="model-offpeak">低谷折扣率(0-1,留空 = 无峰谷价)</Label>
-              <Input
-                id="model-offpeak"
-                type="number"
-                min={0}
-                max={1}
-                step="0.05"
-                placeholder="DeepSeek 官方错峰五折 = 0.5"
-                value={modelForm.offpeak_discount}
-                onChange={(e) => setModelForm({ ...modelForm, offpeak_discount: e.target.value })}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。
-              低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。
-              DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
-            </p>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              <li>配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。</li>
+              <li>低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。</li>
+              <li>DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。</li>
+            </ul>
             <Button className="w-full" disabled={busy !== null} onClick={createModel}>{busy === 'create-model' ? '处理中…' : '新增'}</Button>
           </div>
         </DialogContent>

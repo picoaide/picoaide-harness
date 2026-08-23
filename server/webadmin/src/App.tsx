@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight } from 'lucide-react'
+import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -50,9 +50,17 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
 // 审计 A5-L7: 未知路径给出 404 提示,不再静默跳回 /users(排障困难)
 function NotFound() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 p-6">
-      <div className="text-lg font-semibold">404 页面不存在</div>
-      <div className="text-sm text-muted-foreground">请从左侧导航进入对应功能</div>
+    <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-blue-50 text-[#1E40AF]">
+        <SearchX className="h-7 w-7" />
+      </div>
+      <div className="space-y-1">
+        <div className="text-lg font-semibold">404 页面不存在</div>
+        <div className="text-sm text-muted-foreground">请从左侧导航进入对应功能</div>
+      </div>
+      <Link to="/users">
+        <Button>返回用户管理</Button>
+      </Link>
     </div>
   )
 }
@@ -135,7 +143,7 @@ export default function App() {
           )}
 
           <nav className="flex-1 space-y-0.5 px-3">
-            <div className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-slate-600">Management</div>
+            <div className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500">Management</div>
             {nav.map((n) => (
               <NavLink
                 key={n.to}
@@ -193,7 +201,7 @@ export default function App() {
         {/* 主内容区 */}
         <main className="flex min-w-0 flex-1 flex-col overflow-auto">
           {/* 顶部品牌渐变细条(3px,蓝→青) */}
-          <div className="sticky top-0 z-20 h-0.5 shrink-0 bg-gradient-to-r from-[#1E40AF] via-[#3B82F6] to-[#D97706]" />
+          <div className="sticky top-0 z-20 h-1 shrink-0 bg-gradient-to-r from-[#1E40AF] via-[#3B82F6] to-[#D97706]" />
           <div className="mx-auto w-full max-w-[1440px] flex-1 p-6 lg:p-7">
             <ErrorBoundary>
               <Routes>

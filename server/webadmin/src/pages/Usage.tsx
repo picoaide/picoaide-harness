@@ -484,25 +484,27 @@ export default function Usage() {
       {/* 汇总统计卡:总费用为第一指标(企业面板 stat-card 模式) */}
       <div data-testid="stat-cards" className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         {statCards.map((c) => (
-          <Card key={c.title}>
-            <CardContent className="pt-5">
-              <div className="flex items-center gap-2">
+          <Card key={c.title} className="h-full">
+            <CardContent className="flex h-full flex-col pt-5">
+              <div className="flex shrink-0 items-center gap-2">
                 <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${c.money ? 'bg-[#1E40AF]/10 text-[#1E40AF]' : 'bg-slate-100 text-slate-500'}`}>
                   <c.icon className="h-3.5 w-3.5" />
                 </div>
-                <span className="text-[13px] text-muted-foreground">{c.title}</span>
+                <span className="whitespace-nowrap text-[13px] leading-tight text-muted-foreground">{c.title}</span>
               </div>
-              {loading ? (
-                <Skeleton className="mt-3 h-7 w-24" />
-              ) : (
-                <div
-                  className="mt-2.5 font-mono text-[22px] font-bold leading-tight tabular-nums tracking-tight text-slate-800"
-                  title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
-                >
-                  {c.money ? `¥${fmtMoney(c.value)}` : c.int ? c.value.toLocaleString() : fmtTokens(c.value)}
-                </div>
-              )}
-              <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">{c.desc}</div>
+              <div className="mt-2.5 flex h-8 shrink-0 items-center">
+                {loading ? (
+                  <Skeleton className="h-7 w-24" />
+                ) : (
+                  <div
+                    className="font-mono text-[22px] font-bold leading-tight tabular-nums tracking-tight text-slate-800"
+                    title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
+                  >
+                    {c.money ? `¥${fmtMoney(c.value)}` : c.int ? c.value.toLocaleString() : fmtTokens(c.value)}
+                  </div>
+                )}
+              </div>
+              <div className="mt-1.5 flex-1 text-[11px] leading-relaxed text-muted-foreground">{c.desc}</div>
             </CardContent>
           </Card>
         ))}
@@ -742,6 +744,15 @@ export default function Usage() {
                     key={r.label}
                     className={group === 'user' ? 'cursor-pointer hover:bg-accent' : undefined}
                     onClick={group === 'user' ? () => openDrill(r.label) : undefined}
+                    tabIndex={group === 'user' ? 0 : undefined}
+                    role={group === 'user' ? 'button' : undefined}
+                    aria-label={group === 'user' ? `查看 ${r.label} 明细` : undefined}
+                    onKeyDown={group === 'user' ? (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        openDrill(r.label)
+                      }
+                    } : undefined}
                   >
                     <TableCell>{r.label}</TableCell>
                     <TableCell className="text-right tabular-nums">{r.requests}</TableCell>

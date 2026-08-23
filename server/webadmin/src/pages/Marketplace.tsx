@@ -270,7 +270,7 @@ export default function Marketplace() {
               <Button size="sm" variant="outline" onClick={loadSkills}>重试</Button>
             </div>
           ) : skillsLoading ? (
-            <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
               {[0, 1, 2].map((i) => <Skeleton key={i} className="h-40 w-full" />)}
             </div>
           ) : (
@@ -287,22 +287,22 @@ export default function Marketplace() {
                       </div>
                       <div className="min-w-0">
                         <div className="truncate text-sm font-semibold">{s.name}</div>
-                        <div className="text-[11px] text-muted-foreground">v{s.version}</div>
+                        <div className="text-[11px] text-muted-foreground">{s.version ? `v${s.version}` : '—'}</div>
                       </div>
                     </div>
-                    {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="secondary">已下架</Badge>}
+                    {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
                   </div>
                   <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500">{s.description || '暂无描述'}</p>
-                  <div className="mt-3 flex items-center gap-1.5 truncate text-[10px] text-slate-400">
+                  <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
                     <GitBranch className="h-3 w-3 shrink-0" />
                     <span className="truncate font-mono">{s.git_url}</span>
                   </div>
                   <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
-                    <Button size="sm" variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
-                    <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
+                    <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
+                    <Button variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
                     {s.enabled
-                      ? <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
-                      : <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
+                      ? <Button variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
+                      : <Button variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
                   </div>
                 </div>
               ))}
@@ -355,7 +355,7 @@ export default function Marketplace() {
       </Dialog>
 
       <Dialog open={grantDialog !== null} onOpenChange={(v) => !v && setGrantDialog(null)}>
-        <DialogContent>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>授权「{grantDialog?.name}」</DialogTitle>
           </DialogHeader>
@@ -363,7 +363,7 @@ export default function Marketplace() {
             {grants.length > 0 && (
               <div className="space-y-2 rounded-md border p-3">
                 {grants.map((g) => (
-                  <div key={`${g.grantee_type}:${g.grantee}`} className="flex items-center justify-between text-sm">
+                  <div key={`${g.grantee_type}:${g.grantee}`} className="flex flex-wrap items-center gap-2 text-sm">
                     <Badge variant={g.grantee_type === 'group' ? 'outline' : 'secondary'}>
                       {g.grantee_type === 'group' ? `@${g.grantee}` : g.grantee}
                     </Badge>

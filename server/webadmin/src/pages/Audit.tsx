@@ -36,13 +36,27 @@ const ACTION_LABEL: Record<string, string> = {
   dept_create: '新建部门',
   dept_update: '更新部门',
   dept_delete: '删除部门',
+  // MCP 与知识库(MCP/KB)动作——生产环境写入,原名未映射时显示原始 id
+  mcp_create: '新建MCP',
+  mcp_update: 'MCP更新',
+  mcp_delete: '删除MCP',
+  mcp_grant: 'MCP授权',
+  mcp_revoke: 'MCP撤销授权',
+  kb_create: '新建知识库',
+  kb_update: '更新知识库',
+  kb_delete: '删除知识库',
+  kb_import: '知识库导入',
+  kb_grant: '知识库授权',
+  kb_revoke: '知识库撤销授权',
 }
 
 // M8: 筛选下拉的可选动作
 const FILTER_ACTIONS = Object.keys(ACTION_LABEL).sort()
 
-// 操作 → 徽章语义色:创建=蓝 / 删除=红 / 更新=琥珀 / 授权=绿
+// 操作 → 徽章语义色:创建=绿 / 删除=红 / 更新=琥珀 / 授权=绿
+// 未收录进 ACTION_LABEL 的动作统一中性 outline,避免误撞成实心蓝(default)。
 function actionBadgeVariant(action: string): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' {
+  if (!(action in ACTION_LABEL)) return 'outline'
   if (/create|enable|grant/.test(action)) return 'success'
   if (/delete|disable|revoke/.test(action)) return 'destructive'
   if (/update|dept/.test(action)) return 'secondary'
@@ -159,8 +173,15 @@ export default function Audit() {
                   {l.username}
                 </span>
               </TableCell>
-              {/* M8: 详情悬停可查看全文 */}
-              <TableCell className="max-w-96 truncate font-mono text-xs text-slate-500" title={l.detail}>{l.detail}</TableCell>
+              {/* M8: 详情悬停可查看全文;截断单元可聚焦,键盘/触屏用户经 aria-label 读全文 */}
+              <TableCell
+                className="max-w-96 truncate font-mono text-xs text-slate-500 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                title={l.detail}
+                tabIndex={0}
+                aria-label={l.detail}
+              >
+                {l.detail}
+              </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">{fmtTime(l.created_at)}</TableCell>
             </TableRow>
           ))}
