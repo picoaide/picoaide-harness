@@ -6,6 +6,10 @@ import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Card } from '../components/ui/card'
+import { PageHeader } from '../components/page-header'
+import { EmptyState } from '../components/empty-state'
+import { Network } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { deptSubtreeIds, deptTreeOptions } from '../lib/utils'
 import { fmtMoney, fmtMoneyFull, moneyPercent, moneyOver } from '../lib/format'
@@ -135,14 +139,13 @@ export default function Departments() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="page-title">部门管理</h1>
-        <Button onClick={() => openDeptEdit()}>新建部门</Button>
-      </div>
+      <PageHeader
+        title="部门管理"
+        desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门"
+        actions={<Button onClick={() => openDeptEdit()}>新建部门</Button>}
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
-      <p className="text-sm text-muted-foreground">
-        金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门
-      </p>
+      <Card>
       <Table>
         <TableHeader>
           <TableRow>
@@ -214,10 +217,19 @@ export default function Departments() {
             )
           })}
           {depts.length === 0 && (
-            <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无部门,点击「新建部门」开始搭建组织架构</TableCell></TableRow>
+            <TableRow>
+              <TableCell colSpan={7} className="border-0 p-0">
+                <EmptyState
+                  icon={<Network className="h-5 w-5 text-muted-foreground" />}
+                  title="暂无部门"
+                  desc="点击「新建部门」开始搭建组织架构"
+                />
+              </TableCell>
+            </TableRow>
           )}
         </TableBody>
       </Table>
+      </Card>
 
       <Dialog open={deptDialog} onOpenChange={(v) => { setDeptDialog(v); if (!v) setDeptErr('') }}>
         <DialogContent>
