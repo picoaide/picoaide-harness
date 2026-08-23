@@ -17,15 +17,15 @@
 | --- | --- |
 | Project name | `picoaide`（或你喜欢的名字，如 `picoaide-harness-site`） |
 | Production branch | `master` |
-| **Build command** | `npm --prefix site run build` |
-| **Build output directory** | `site/dist` |
-| Root directory | 留空（仓库根） |
+| **Root directory** | **`site`** |
+| **Build command** | `npm run build` |
+| **Build output directory** | `dist` |
 
-> 注意：因为站点源码在 `site/` 子目录，必须用 `npm --prefix site run build` 构建，输出目录写 `site/dist`。如果 CF 界面要求填写 **Root directory**，请填 `/`（仓库根）。
+> **关键**：Root directory 必须填 `site`。`site/` 是独立的 npm 项目（有自己 `package.json` + `package-lock.json`），Cloudflare 会在该目录内执行 `npm install`/`npm ci`，只安装官网依赖，不会触碰仓库根的 yarn monorepo（也不会编译 node-pty 等桌面端原生模块）。
 
-4. 点击 **Save and Deploy**，首次构建会在 Cloudflare 的构建容器里运行：
-   - 自动运行 `npm install`（在 `site/` 下）
-   - 运行 `npm run build`（Astro 静态构建）
+4. 点击 **Save and Deploy**，首次构建会在 Cloudflare 的构建容器里运行（都在 `site/` 内）：
+   - 自动运行 `npm install`（或 `npm ci`，仅安装 astro/starlight 等官网依赖）
+   - 运行 `npm run build`（`astro build` 静态构建）
    - 部署 `site/dist/` 到 `*.pages.dev` 预览地址
 
 ## 三、绑定自定义域名
