@@ -136,6 +136,17 @@ h1, h2, h3, h4 {
   box-shadow: var(--shadow);
 }
 
+/* 统一截图展示比例（桌面 1280x813 与后台 1440x900 原图比例不同，用固定比例裁切对齐） */
+.gallery figure img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  object-position: top;
+  border-radius: 0;
+  background: var(--line);
+}
+
 .gallery figcaption {
   padding: 10px 14px;
   font-size: 0.9rem;
