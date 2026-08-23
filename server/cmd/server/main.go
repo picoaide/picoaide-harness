@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/knowledge"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/serverauth"
@@ -93,26 +91,11 @@ func main() {
 	llmgateway.RegisterAdminRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	marketplace.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
-	knowledge.RegisterRoutes(r, db)
-	uploadsDir := filepath.Join(*dataDir, "kb_uploads")
-	// 独占 claim 模式:崩溃残留的 processing 行启动时回到队列
-	if err := serverstore.ResetProcessingClaims(db); err != nil {
-		log.Printf("kb reset processing claims: %v", err)
-	}
-	knowledge.StartUploadQueue(db, uploadsDir, 2)
-	// 0014 迁移窗口:为存量 ready 文档补分块(幂等,后台执行)
-	go func() {
-		if err := knowledge.BackfillChunks(db); err != nil {
-			log.Printf("kb backfill chunks: %v", err)
-		}
-	}()
-	// 向量检索(B2):网关 embedder + 后台向量化循环;模型未配置时纯词法
-	embedder := llmgateway.NewEmbedder(db)
-	knowledge.SetEmbedder(embedder)
-	go func() { knowledge.BackfillEmbeddings(db, embedder) }()
-	knowledge.StartEmbeddingLoop(db, embedder, time.Second)
-	knowledge.RegisterAdminRoutes(r, db, uploadsDir)
 	bootstrap.RegisterRoutes(r, db)
+	// 审计日志保留策略(90 天):启动时清理过期条目
+	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-90*24*time.Hour)); err != nil {
+		log.Printf("audit log purge: %v", err)
+	}
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
 	// 并顺带清理过期的 pending usage 行 — 审计 C-9)
 	go llmgateway.SyncLoop(db, time.Hour, nil)
