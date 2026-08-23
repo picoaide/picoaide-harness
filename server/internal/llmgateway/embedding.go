@@ -57,8 +57,8 @@ type embedResponse struct {
 }
 
 // Embedder embeds texts through the same model routing as chat
-// completions (per-channel failover), for in-process consumers like the
-// knowledge base indexer. One Embedder per server; cheap to construct.
+// completions (per-channel failover), for in-process consumers. One
+// Embedder per server; cheap to construct.
 type Embedder struct {
 	db     *sql.DB
 	client *http.Client

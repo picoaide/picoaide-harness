@@ -26,7 +26,7 @@ type DepartmentInfo struct {
 	Description string `json:"description"`
 	MemberCount int64  `json:"member_count"`
 	ChildCount  int64  `json:"child_count"`
-	// GrantedCount counts grant references (kb/skill/mcp) — deletion guard.
+	// GrantedCount counts grant references (skill) — deletion guard.
 	GrantedCount int64 `json:"granted_count"`
 	// BudgetMoney 部门月度金额预算(元,0024);nil = 未配置(不限)。
 	BudgetMoney *float64 `json:"budget_money"`
@@ -40,9 +40,7 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 		COALESCE(u.username, ''),
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM kb_folder_groups kfg WHERE kfg.group_id = g.id)
-		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
-		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name COLLATE NOCASE),
+		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE),
 		g.budget_money
 		FROM groups g LEFT JOIN users u ON u.id = g.leader_id
 		ORDER BY g.id`)
@@ -186,9 +184,6 @@ func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ? COLLATE NOCASE", name, g.Name); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("UPDATE mcp_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ? COLLATE NOCASE", name, g.Name); err != nil {
-			return err
-		}
 	}
 	_, err = tx.Exec(`UPDATE groups SET name = ?, parent_id = ?, leader_id = ?, description = ? WHERE id = ?`,
 		name, parentID, leaderID, description, id)
@@ -232,9 +227,7 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	if err := tx.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM kb_folder_groups kfg WHERE kfg.group_id = g.id)
-		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
-		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name COLLATE NOCASE)
+		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
 		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound

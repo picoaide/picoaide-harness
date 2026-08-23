@@ -114,7 +114,7 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 一个登录用户必然持有:api_token、usage、admin_session、mcp_config_downloads、user_groups
+	// 一个登录用户必然持有:api_token、usage、admin_session、user_groups
 	if _, err := CreateToken(db, id, "raw-token", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -124,13 +124,6 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 	adminSessID := "session-" + time.Now().Format("150405")
 	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at) VALUES (?, ?, ?, ?)`,
 		adminSessID, id, "csrf", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
-		t.Fatal(err)
-	}
-	mcpID, err := AddMCPServer(db, &MCPServer{Name: "mcp1", Transport: "stdio"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := RecordDownload(db, id, mcpID); err != nil {
 		t.Fatal(err)
 	}
 	if err := SyncUserGroups(db, id, []string{"g1"}); err != nil {
@@ -153,9 +146,6 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("sessions left: %d err=%v", n, err)
-	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM mcp_config_downloads WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("downloads left: %d err=%v", n, err)
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("user_groups left: %d err=%v", n, err)
@@ -246,37 +236,6 @@ func TestDeleteUserLastAdminConcurrent(t *testing.T) {
 	}
 	if admins != 1 {
 		t.Fatalf("admins left = %d, want 1", admins)
-	}
-}
-
-// 审计 6-S1: deleting a user also removes their kb_folder_users grants
-// (the table is keyed by username, so the delete must be explicit).
-func TestDeleteUserCleansKBFolderGrants(t *testing.T) {
-	db := openTestDB(t)
-	defer db.Close()
-	if err := ApplyMigrations(db); err != nil {
-		t.Fatal(err)
-	}
-	uid, err := CreateUserWithPassword(db, "grantee", "pw123456")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fid, err := CreateKBFolder(db, "folder", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := GrantFolderUser(db, fid, "grantee"); err != nil {
-		t.Fatal(err)
-	}
-	if err := DeleteUser(db, uid); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folder_users WHERE username = 'grantee'").Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Fatalf("kb_folder_users rows left after user delete: %d", n)
 	}
 }
 
