@@ -334,8 +334,8 @@ func userJSON(u *serverstore.User) gin.H {
 		quotaMoney = *u.QuotaMoney
 	}
 	return gin.H{
-		"id":           u.ID,
-		"username":     u.Username,
+		"id":       u.ID,
+		"username": u.Username,
 		// 显示名/邮箱此前缺失:更新显示名后响应不含新值,webadmin 回显丢失
 		// (管理页编辑后看不到生效结果)。补全字段与 users 表列一一对应。
 		"display_name": u.DisplayName,
