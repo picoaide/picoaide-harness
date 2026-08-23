@@ -1,0 +1,87 @@
+---
+import { getCollection, render } from 'astro:content'
+import Layout from '../../layouts/Layout.astro'
+import Header from '../../components/Header.astro'
+import Footer from '../../components/Footer.astro'
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft)
+  return posts.map(post => ({
+    params: { slug: post.id },
+    props: { post },
+  }))
+}
+
+const { post } = Astro.props
+const { Content } = await render(post)
+---
+
+<Layout title={`${post.data.title} - PicoAide Harness`} description={post.data.description}>
+  <Header />
+
+  <article class="container post-page">
+    <header class="post-page__header">
+      <h1>{post.data.title}</h1>
+      <p class="post-page__meta">
+        <time datetime={post.data.pubDate.toISOString()}>
+          {post.data.pubDate.toLocaleDateString('zh-CN')}
+        </time>
+        {post.data.author && <span> · {post.data.author}</span>}
+      </p>
+    </header>
+    <div class="post-page__body prose">
+      <Content />
+    </div>
+  </article>
+
+  <Footer />
+
+  <style>
+    .post-page {
+      padding: 56px 24px 96px;
+      max-width: 780px;
+    }
+
+    .post-page__header h1 {
+      margin: 0 0 10px;
+      font-size: 2rem;
+    }
+
+    .post-page__meta {
+      color: var(--ink-faint);
+      font-size: 0.9rem;
+      margin: 0 0 28px;
+    }
+
+    .prose {
+      color: var(--ink);
+      line-height: 1.8;
+      font-size: 1.05rem;
+    }
+
+    .prose :global(h2) {
+      margin-top: 2rem;
+      font-size: 1.5rem;
+    }
+
+    .prose :global(h3) {
+      margin-top: 1.6rem;
+      font-size: 1.2rem;
+    }
+
+    .prose :global(code) {
+      background: var(--bg-soft);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+
+    .prose :global(pre) {
+      background: var(--bg-deep);
+      color: #e2e8f0;
+      border-radius: var(--radius-sm);
+      padding: 16px;
+      overflow-x: auto;
+    }
+  </style>
+</Layout>

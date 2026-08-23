@@ -1,0 +1,108 @@
+---
+import { getCollection } from 'astro:content'
+import Layout from '../../layouts/Layout.astro'
+import Header from '../../components/Header.astro'
+import Footer from '../../components/Footer.astro'
+
+const posts = (await getCollection('blog', ({ data }) => !data.draft))
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
+---
+
+<Layout title="博客 - PicoAide Harness" description="PicoAide Harness 产品动态、技术文章与最佳实践。">
+  <Header />
+
+  <main class="container blog-page">
+    <h1>博客</h1>
+    <p class="blog-page__sub">产品动态、技术文章与最佳实践。</p>
+
+    <div class="posts">
+      {posts.map(post => (
+        <article class="post">
+          <a href={`/blog/${post.id}/`} class="post__link">
+            <h2 class="post__title">{post.data.title}</h2>
+          </a>
+          <p class="post__meta">
+            <time datetime={post.data.pubDate.toISOString()}>
+              {post.data.pubDate.toLocaleDateString('zh-CN')}
+            </time>
+            {post.data.author && <span> · {post.data.author}</span>}
+          </p>
+          {post.data.description && <p class="post__desc">{post.data.description}</p>}
+          {post.data.tags.length > 0 && (
+            <div class="post__tags">
+              {post.data.tags.map(tag => <span class="tag">{tag}</span>)}
+            </div>
+          )}
+        </article>
+      ))}
+    </div>
+
+    {posts.length === 0 && <p class="blog-page__empty">暂无文章。</p>}
+  </main>
+
+  <Footer />
+
+  <style>
+    .blog-page {
+      padding: 56px 24px 96px;
+      max-width: 780px;
+    }
+
+    .blog-page h1 {
+      margin-bottom: 8px;
+    }
+
+    .blog-page__sub {
+      color: var(--ink-soft);
+      margin-top: 0;
+    }
+
+    .post {
+      padding: 28px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .post__link {
+      text-decoration: none;
+    }
+
+    .post__title {
+      margin: 0 0 8px;
+      font-size: 1.4rem;
+      color: var(--ink);
+    }
+
+    .post__link:hover .post__title {
+      color: var(--brand);
+    }
+
+    .post__meta {
+      color: var(--ink-faint);
+      font-size: 0.88rem;
+      margin: 0 0 10px;
+    }
+
+    .post__desc {
+      color: var(--ink-soft);
+      margin: 0 0 12px;
+    }
+
+    .post__tags {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tag {
+      background: var(--brand-light);
+      color: var(--brand);
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+    }
+
+    .blog-page__empty {
+      color: var(--ink-faint);
+    }
+  </style>
+</Layout>

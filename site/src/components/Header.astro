@@ -1,0 +1,77 @@
+---
+import logo from '../assets/logo.svg'
+
+const items = [
+  { label: '首页', href: '/' },
+  { label: '产品', href: '/#features' },
+  { label: '截图', href: '/#screenshots' },
+  { label: '博客', href: '/blog/' },
+  { label: 'Wiki', href: '/docs/' },
+]
+---
+
+<header class="nav">
+  <div class="container nav__inner">
+    <a href="/" class="nav__brand">
+      <img src={logo.src} alt="PicoAide Harness" width="26" height="26" />
+      <span>PicoAide Harness</span>
+    </a>
+    <nav class="nav__links">
+      {items.map(item => (
+        <a href={item.href} class="nav__link">{item.label}</a>
+      ))}
+    </nav>
+  </div>
+</header>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .nav__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+  }
+
+  .nav__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    font-size: 1.08rem;
+    color: var(--ink);
+  }
+
+  .nav__brand:hover {
+    color: var(--brand);
+  }
+
+  .nav__links {
+    display: flex;
+    gap: 26px;
+  }
+
+  .nav__link {
+    color: var(--ink-soft);
+    font-weight: 500;
+    font-size: 0.96rem;
+  }
+
+  .nav__link:hover {
+    color: var(--brand);
+  }
+
+  @media (max-width: 640px) {
+    .nav__links {
+      gap: 14px;
+    }
+  }
+</style>
