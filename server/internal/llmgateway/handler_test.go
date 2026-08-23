@@ -76,7 +76,7 @@ func newGateway(t *testing.T, f *fakeUpstream) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
 	// 测试环境未接 master key:身份解密(测试密钥明文存储)
 	DecryptSecret = func(s string) (string, error) { return s, nil }
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/gw.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/gw.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestProxyRateLimited(t *testing.T) {
 
 func TestProxyInjectsChannelOverrides(t *testing.T) {
 	f := newFakeUpstream(t)
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/inject.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/inject.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestProxyInjectsChannelOverrides(t *testing.T) {
 
 func TestProxyInjectsMaxTokensFromModelDefaultParams(t *testing.T) {
 	f := newFakeUpstream(t)
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/maxout.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/maxout.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +592,7 @@ func TestProxyInvalidBody(t *testing.T) {
 }
 
 func TestDecryptSecretHookUsedByLoadUpstreams(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/hook.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/hook.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,7 +613,7 @@ func TestDecryptSecretHookUsedByLoadUpstreams(t *testing.T) {
 }
 
 func TestMatchModel(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/match.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/match.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +793,7 @@ func TestQuotaGlobalDefault(t *testing.T) {
 // 审计修复:流式响应的 usage 已回填后客户端才断连,真实计量必须保留
 // (回退前无条件 DeleteUsage 会把已回填的真实用量删掉 → 统计丢失)。
 func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/backfill.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/backfill.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

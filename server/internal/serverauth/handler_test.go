@@ -19,7 +19,7 @@ import (
 
 func newTestAPI(t *testing.T) (*gin.Engine, *sql.DB, func()) {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(tempPath(t, "auth.db"))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "auth.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestLoginRateLimitXFFSpoof(t *testing.T) {
 // C-13: concurrent first logins for the same new external user must not 500
 // (one goroutine's INSERT wins, the rest re-fetch the row).
 func TestProvisionUserConcurrentCreate(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(tempPath(t, "race.db"))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "race.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestProvisionUserConcurrentCreate(t *testing.T) {
 }
 
 func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(tempPath(t, "takeover.db"))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "takeover.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
 }
 
 func TestBootstrapAdmin(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(tempPath(t, "boot.db"))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "boot.db")})
 	if err != nil {
 		t.Fatal(err)
 	}

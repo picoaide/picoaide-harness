@@ -16,7 +16,7 @@ import (
 
 func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/boot.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/boot.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

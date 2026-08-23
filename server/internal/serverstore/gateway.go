@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 )
 
 type GatewayProvider struct {
@@ -144,15 +143,15 @@ func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
 // AddGatewayProvider inserts a provider; name conflicts return ErrDuplicate.
 func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 	modelsJSON, _ := json.Marshal(p.Models)
-	res, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel)
+	id, err := InsertID(db, `INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel)
 		VALUES (?, ?, ?, ?, ?, ?)`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
 		}
 		return 0, err
 	}
-	p.ID, _ = res.LastInsertId()
+	p.ID = id
 	return p.ID, nil
 }
 
@@ -162,7 +161,7 @@ func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
 	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?
 		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.ID)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueViolation(err) {
 			return ErrDuplicate
 		}
 		return err
@@ -398,16 +397,16 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {
 		m.DefaultParams = "{}"
 	}
-	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
+	id, err := InsertID(db, `INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount))
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
 		}
 		return 0, err
 	}
-	m.ID, _ = res.LastInsertId()
+	m.ID = id
 	return m.ID, nil
 }
 
@@ -417,7 +416,7 @@ func UpdateModel(db *sql.DB, m *Model) error {
 		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueViolation(err) {
 			return ErrDuplicate
 		}
 		return err
