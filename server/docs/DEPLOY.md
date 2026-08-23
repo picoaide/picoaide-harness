@@ -18,12 +18,13 @@
 │ server           │   固定 IP 172.28.0.3
 └──────┬───────────┘
        ▼
-   ./picoaide-data/   SQLite picoaide.db + master.key(0700,卷持久化,升级不丢)
+   ./picoaide-data/   SQLite picoaide.db + master.key(0700,目录 bind mount,升级不丢)
 ```
 
 - 私有网段:自定义 bridge `picoaide-net`,默认子网 `172.28.0.0/24`(`.env` 的 `NETWORK_SUBNET` 可改)。
 - 固定 IP:容器 `ipv4_address` 锁定,`docker compose up -d` 重建/升级后 IP 不变,Caddyfile 的 `reverse_proxy server:8080` 恒可达。
 - server 不映射宿主机端口,外部流量只能经 Caddy 进入(内网隔离 + 攻击面收敛)。
+- **所有持久化数据均用 `./` 当前目录 bind mount,不使用命名卷**:`picoaide-data/`(数据库+主密钥)、`caddy-data/`(Caddy 自动证书库)、`caddy-config/`(Caddy 配置)+ `certs/`(手动证书)。备份 = 直接拷走部署目录或 `deploy.sh backup`。
 
 ## 1. 镜像来源与发布(编译 → 验证 → 推送)
 
@@ -144,11 +145,11 @@ cd server
 | 子命令 | 说明 |
 |---|---|
 | `install` | 首次部署:命令检查 → 网段/端口预检 → DNS/CDN 校验(auto)→ 证书准备(manual 自签)→ 生成 .env/Caddyfile → 拉镜像启动 → 等就绪 → 打印账号密码与替换证书指引 |
-| `update` | 拉新镜像 → 重建重启(数据卷不变,零停机升级) |
+| `update` | 拉新镜像 → 重建重启(数据目录不变,零停机升级) |
 | `status` | 容器状态 + 健康检查 + 固定 IP 一览 |
 | `logs [-t]` | 查看日志(--tail=200;`-t` 跟踪) |
-| `backup` | 打包 `picoaide-data`(含 master.key)+ auto 模式 Caddy 证书到 `deploy-backup/` |
-| `uninstall [--volumes]` | 停容器;`--volumes` 连数据卷删除(需确认,交互或 `UNINSTALL_VOLUMES=yes`) |
+| `backup` | 打包 `picoaide-data`(含 master.key)+ auto 模式 `caddy-data` 到 `deploy-backup/` |
+| `uninstall [--volumes]` | 停容器;`--volumes` 连数据目录一并删除(需确认,交互或 `UNINSTALL_VOLUMES=yes`) |
 
 ### 4.2 环境变量(非交互)
 
@@ -185,7 +186,7 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 ### 6.1 升级
 
 ```bash
-./scripts/deploy.sh update          # 拉新镜像重建;数据卷不变
+./scripts/deploy.sh update          # 拉新镜像重建;数据目录不变
 # 或手动: docker compose pull && docker compose up -d
 ```
 
@@ -196,7 +197,7 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 ```bash
 ./scripts/deploy.sh backup
 # 产物: deploy-backup/picoaide-data-<时间>.tar.gz(含 picoaide.db + master.key)
-#      部署脚本自动含 master.key 与 Caddy 自动证书
+#      deploy-backup/caddy-data-<时间>.tar.gz(auto 模式 Caddy 证书库)
 ```
 
 **master.key 丢失 = 已加密的上游密钥/商城凭证不可解密(永久失效)**。离线备份:直接 `cp -a picoaide-data/ 备份目录`(SQLite 单文件 + key,先 `docker compose stop server` 或直接冷备)。
@@ -206,14 +207,16 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 ```bash
 docker compose stop server            # 先停服
 tar xzf deploy-backup/picoaide-data-<时间>.tar.gz -C picoaide-data/   # 解包覆盖(注意路径)
+# auto 模式还恢复 Caddy 证书库:
+tar xzf deploy-backup/caddy-data-<时间>.tar.gz -C .                    # 解包出 caddy-data/
 docker compose up -d
 ```
 
 ### 6.4 卸载
 
 ```bash
-./scripts/deploy.sh uninstall              # 停容器,保留数据卷与 picoaide-data/
-./scripts/deploy.sh uninstall --volumes    # 连 caddy 数据卷删除(需确认)
+./scripts/deploy.sh uninstall              # 停容器,保留数据目录(picoaide-data/ caddy-data/ caddy-config/)
+./scripts/deploy.sh uninstall --volumes    # 停容器并删除以上数据目录(需确认)
 ```
 
 ## 7. 安全清单
