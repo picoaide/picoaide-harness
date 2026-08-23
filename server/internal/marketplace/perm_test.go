@@ -51,8 +51,8 @@ func createSkillRepo(t *testing.T, dir, name string) string {
 	return repo
 }
 
-// marketUserSetup seeds one normal user, one skill and one MCP; returns the
-// router, db, the user's bearer token and user id.
+// marketUserSetup seeds one normal user and one skill; returns the router,
+// db, the user's bearer token and user id.
 func marketUserSetup(t *testing.T) (http.Handler, *sql.DB, string, int64, string) {
 	t.Helper()
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
@@ -73,11 +73,6 @@ func marketUserSetup(t *testing.T) (http.Handler, *sql.DB, string, int64, string
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "data-extract", Version: "1.0.0", Description: "数据提取",
 		Author: "test", GitURL: "file://" + repo, GitRef: "master", Enabled: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := serverstore.AddMCPServer(db, &serverstore.MCPServer{
-		Name: "time-now", Description: "时间", Transport: "stdio", Command: "date", Enabled: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -115,16 +110,6 @@ func TestMarketplaceStrictDefault(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("archive = %d, want 404", w.Code)
 	}
-	// mcp list: empty
-	w = bearerGet(t, r, "/api/marketplace/mcp", token)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"mcp":[]`) {
-		t.Fatalf("mcp list = %d %s, want empty", w.Code, w.Body.String())
-	}
-	// mcp config: 404
-	w = bearerGet(t, r, "/api/marketplace/mcp/1/config", token)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("mcp config = %d, want 404", w.Code)
-	}
 	_ = db
 	_ = uid
 }
@@ -133,9 +118,6 @@ func TestMarketplaceStrictDefault(t *testing.T) {
 func TestMarketplaceUserGrant(t *testing.T) {
 	r, db, token, _, _ := marketUserSetup(t)
 	if err := serverstore.GrantSkill(db, "data-extract", "alice", serverstore.GranteeUser); err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.GrantMCP(db, 1, "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
 	w := bearerGet(t, r, "/api/marketplace/skills", token)
@@ -150,28 +132,13 @@ func TestMarketplaceUserGrant(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
-	w = bearerGet(t, r, "/api/marketplace/mcp", token)
-	if !strings.Contains(w.Body.String(), "time-now") {
-		t.Fatalf("mcp list missing granted mcp: %s", w.Body.String())
-	}
-	w = bearerGet(t, r, "/api/marketplace/mcp/1/config", token)
-	if w.Code != http.StatusOK {
-		t.Fatalf("mcp config = %d, want 200", w.Code)
-	}
 	// revoke takes effect immediately
 	if err := serverstore.RevokeSkill(db, "data-extract", "alice", serverstore.GranteeUser); err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.RevokeMCP(db, 1, "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
 	w = bearerGet(t, r, "/api/marketplace/skills", token)
 	if !strings.Contains(w.Body.String(), `"skills":[]`) {
 		t.Fatalf("after revoke list = %s, want empty", w.Body.String())
-	}
-	w = bearerGet(t, r, "/api/marketplace/mcp/1/config", token)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("after revoke config = %d, want 404", w.Code)
 	}
 }
 
@@ -198,51 +165,6 @@ func TestMarketplaceGroupGrant(t *testing.T) {
 	}
 }
 
-// getMCPConfig 必须用 effective groups:子部门成员 / 主管 / 全员授权均可拉取配置
-func TestMCPConfigUsesEffectiveGroups(t *testing.T) {
-	r, db, token, uid, _ := marketUserSetup(t)
-	devID, _ := serverstore.CreateDepartment(db, "研发部", 0, 0, "")
-	frontID, _ := serverstore.CreateDepartment(db, "前端组", devID, 0, "")
-	// 授权给祖先部门;用户只属于子部门
-	if err := serverstore.SyncUserGroups(db, uid, []string{"前端组"}); err != nil {
-		t.Fatal(err)
-	}
-	var mcpID int64
-	if err := db.QueryRow("SELECT id FROM mcp_servers WHERE name = 'time-now'").Scan(&mcpID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, 'group', '研发部')", mcpID); err != nil {
-		t.Fatal(err)
-	}
-	w := bearerGet(t, r, fmt.Sprintf("/api/marketplace/mcp/%d/config", mcpID), token)
-	if w.Code != http.StatusOK {
-		t.Fatalf("child-department user config pull = %d %s", w.Code, w.Body.String())
-	}
-
-	// 主管(无成员行)授权同:改成主管后仍可拉取
-	uid2, _ := serverstore.CreateUserWithPassword(db, "carol", "pw123456")
-	token2, _ := serverauth.IssueToken(db, uid2)
-	if err := serverstore.UpdateDepartment(db, devID, "研发部", 0, uid2, ""); err != nil {
-		t.Fatal(err)
-	}
-	w = bearerGet(t, r, fmt.Sprintf("/api/marketplace/mcp/%d/config", mcpID), token2)
-	if w.Code != http.StatusOK {
-		t.Fatalf("leader config pull = %d %s", w.Code, w.Body.String())
-	}
-
-	// 全员授权(迁移 seed):任何用户均可拉取
-	if _, err := db.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, 'group', '全员')", mcpID); err != nil {
-		t.Fatal(err)
-	}
-	uid3, _ := serverstore.CreateUserWithPassword(db, "dave", "pw123456")
-	token3, _ := serverauth.IssueToken(db, uid3)
-	w = bearerGet(t, r, fmt.Sprintf("/api/marketplace/mcp/%d/config", mcpID), token3)
-	if w.Code != http.StatusOK {
-		t.Fatalf("everyone config pull = %d %s", w.Code, w.Body.String())
-	}
-	_ = frontID
-}
-
 // admin (IsAdmin) sees everything without grants
 func TestMarketplaceAdminSeesAll(t *testing.T) {
 	r, db, _, _, _ := marketUserSetup(t)
@@ -263,10 +185,6 @@ func TestMarketplaceAdminSeesAll(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "data-extract") {
 		t.Fatalf("admin skill list = %s", w.Body.String())
 	}
-	w = bearerGet(t, r, "/api/marketplace/mcp", token)
-	if !strings.Contains(w.Body.String(), "time-now") {
-		t.Fatalf("admin mcp list = %s", w.Body.String())
-	}
 }
 
 // admin grant API: grant / list / revoke with audit trail
@@ -275,13 +193,10 @@ func TestAdminGrantAPI(t *testing.T) {
 	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456"); err != nil {
 		t.Fatal(err)
 	}
-	// seed a skill + mcp
+	// seed a skill
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "data-extract", Version: "1.0.0", GitURL: "https://x/data-extract", Enabled: 1,
 	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := serverstore.AddMCPServer(db, &serverstore.MCPServer{Name: "time-now", Transport: "stdio", Command: "date", Enabled: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := serverstore.CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
@@ -294,10 +209,6 @@ func TestAdminGrantAPI(t *testing.T) {
 	}
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"group":"研发部"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("grant group: %d %s", w.Code, w.Body.String())
-	}
-	// grant on mcp
-	if w, _ := mreq(t, r, "PUT", "/api/admin/mcp/1/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("mcp grant: %d %s", w.Code, w.Body.String())
 	}
 	// list
 	w, out := mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
@@ -329,7 +240,7 @@ func TestAdminGrantAPI(t *testing.T) {
 	for _, l := range logs {
 		actions[l.Action] = true
 	}
-	for _, want := range []string{"skill_grant", "skill_revoke", "mcp_grant"} {
+	for _, want := range []string{"skill_grant", "skill_revoke"} {
 		if !actions[want] {
 			t.Fatalf("audit missing %s: %v", want, actions)
 		}
@@ -345,9 +256,6 @@ func TestAdminGrantAPI(t *testing.T) {
 	// grants to a non-existent group → 400(拼错的部门名不得静默落库)
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"group":"no-such-dept"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown group grant = %d, want 400", w.Code)
-	}
-	if w, _ := mreq(t, r, "PUT", "/api/admin/mcp/1/grant", `{"group":"no-such-dept"}`, hdr); w.Code != http.StatusBadRequest {
-		t.Fatalf("unknown group mcp grant = %d, want 400", w.Code)
 	}
 }
 
@@ -368,9 +276,6 @@ func TestAdminReplaceGrantsAPI(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.AddMCPServer(db, &serverstore.MCPServer{Name: "time-now", Transport: "stdio", Command: "date", Enabled: 1}); err != nil {
-		t.Fatal(err)
-	}
 	// 一次提交两个部门(共享)
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":["研发部","人事部"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("replace skill grants: %d %s", w.Code, w.Body.String())
@@ -380,14 +285,6 @@ func TestAdminReplaceGrantsAPI(t *testing.T) {
 	if len(grants) != 2 {
 		t.Fatalf("skill grants = %v, want 2 departments", grants)
 	}
-	if w, _ := mreq(t, r, "PUT", "/api/admin/mcp/1/grants", `{"groups":["研发部","人事部"]}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("replace mcp grants: %d %s", w.Code, w.Body.String())
-	}
-	w2, out2 := mreq(t, r, "GET", "/api/admin/mcp/1/grants", "", hdr)
-	if len(out2["grants"].([]any)) != 2 {
-		t.Fatalf("mcp grants = %v, want 2 departments", out2["grants"])
-	}
-	_ = w2
 	// 空列表清空
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":[]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("clear grants: %d", w.Code)

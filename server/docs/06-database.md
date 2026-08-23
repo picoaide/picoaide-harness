@@ -2,7 +2,7 @@
 
 ## 1. 服务端(modernc.org/sqlite,`data/picoaide.db`)
 
-迁移在 `internal/serverstore/migrations/`(0001–0021,**0007 已废弃**,文件不存在)。
+迁移在 `internal/serverstore/migrations/`(0001–0027,**0007 已废弃**;0028 下线知识库/MCP 表并独立审计表 audit_logs)。
 
 ### users(0001)
 | 列 | 说明 |
@@ -19,7 +19,7 @@
 | created_at / updated_at | datetime,localtime |
 
 ### groups + user_groups(0001)
-`groups(id, name 唯一, created_at)`;`user_groups(user_id, group_id, PK 复合)`。组用于知识库授权(本地账号无组映射,以用户级授权兜底)。
+`groups(id, name 唯一, created_at)`;`user_groups(user_id, group_id, PK 复合)`。组用于技能授权(本地账号无组映射,以用户级授权兜底)。
 - 0024 新增 `budget_money REAL`(部门月度金额预算,元):约束该部门树(含全部子部门)成员当月费用合计;员工生效预算 = 归属部门 + 祖先链(链上全部预算都约束,父部门 = 子树封顶);任一超限网关 429。费用聚合 `DeptMonthlyCost`/`DeptMonthlyCostBatch`(部门树 SUM(cost))。
 
 ### settings(0001)
@@ -42,23 +42,11 @@
 ### skills(0005)
 `id, name 唯一, version, description, author, git_url, git_ref(默认 main), checksum, enabled(0/1,下架置 0 不删行), created_at, updated_at`。bootstrap 建议清单只返回 enabled=1。
 
-### mcp_servers + mcp_config_downloads(0006)
-- `mcp_servers(id, name, description, transport('stdio'|'http'), command, args JSON '[]', url, env JSON '{}'(敏感值 AES-GCM 加密), headers JSON '{}', enabled, created_at, updated_at)`。
-- `mcp_config_downloads(id, user_id, mcp_id, created_at)`——凭证拉取审计(防批量导出);索引 `idx_downloads_user`。
-- **无 mcp_server_grants 表**:建议安装制,不建授权表。
-
-### 知识库(0008,kb_ 前缀 6 表 + 1 FTS 虚拟表)
-| 表 | 列 |
-|----|----|
-| kb_folders | id, name, parent_id(默认 0=根), created_at |
-| kb_documents | id, folder_id(默认 0), title, content, content_type(默认 text), size, source(默认 upload), created_by, created_at |
-| kb_folder_users | folder_id, username(PK 复合)——用户授权 |
-| kb_folder_groups | folder_id, group_id(PK 复合)——组授权 |
-| kb_audit_logs | id, username, action, detail, created_at |
-| kb_fts | FTS5 虚拟表(title, content, content='kb_documents', content_rowid='id', tokenize='unicode61 remove_diacritics 2')——外内容表 + 增删改触发器(kb_ai/kb_ad/kb_au)同步索引 |
-
 ### admin_sessions(0009)
 `id(PK, 随机), user_id, csrf_key, expires_at`。管理端 24h 会话 + CSRF 校验(见 04-auth.md §4)。
+
+### audit_logs(0028)
+`id, username, action, detail, created_at`——用户/部门/技能/令牌等敏感操作审计(90 天保留,启动时清理)。由 0008 的 `kb_audit_logs` 迁入数据后清除旧表。
 
 ## 2. 客户端(better-sqlite3,`desktop/src/main/store/migrations.ts`)
 

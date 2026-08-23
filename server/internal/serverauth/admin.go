@@ -2,6 +2,7 @@ package serverauth
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -71,6 +72,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
 	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
 	g.GET("/usage", AdminAuth(db), a.usage)
+	// 敏感操作审计日志(用户/部门/技能/令牌等)
+	g.GET("/audit", AdminAuth(db), a.listAuditLogs)
 }
 
 // AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
@@ -619,6 +622,29 @@ func (a *AdminAPI) usage(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"rows": rows, "group": group, "truncated": truncated})
 }
 
+// listAuditLogs 返回分页审计日志(新→旧),支持 action / username 过滤
+// (审计 M8),总数一并返回用于分页。
+func (a *AdminAPI) listAuditLogs(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "50"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 500 {
+		size = 50
+	}
+	logs, total, err := serverstore.ListAuditLogsPagedFiltered(a.DB, (page-1)*size, size,
+		c.Query("action"), c.Query("username"))
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if logs == nil {
+		logs = []serverstore.AuditLogEntry{}
+	}
+	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
+}
+
 func currentAdmin(c *gin.Context) *serverstore.User {
 	v, _ := c.Get("admin_user")
 	u, _ := v.(*serverstore.User)
@@ -783,8 +809,12 @@ func (a *AdminAPI) setUserDepartment(c *gin.Context) {
 	var req struct {
 		GroupID int64 `json:"group_id"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 未知字段(如误传 department_id)必须报错,不能静默解析为默认值 ——
+	// 否则 SyncUserGroups(nil) 会清空用户全部组归属(安全/健壮性)。
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误(仅接受 group_id 字段)")
 		return
 	}
 	var names []string
