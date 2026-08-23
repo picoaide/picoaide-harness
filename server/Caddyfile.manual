@@ -1,0 +1,32 @@
+# ============================================================
+# PicoAide 服务端 Caddyfile — 手动证书模式 (MANUAL)
+# ============================================================
+# 用途:部署者使用正式 PEM 证书(企业 CA / 购买证书 / 已有中间证书),或先自签占位
+# 证书文件位置(compose 已挂载 ./certs → /certs):
+#   /certs/server.crt  (证书链,可含中间证书)
+#   /certs/server.key  (私钥)
+# 首次部署若没有正式证书:
+#   1. 执行部署脚本 install 会自动生成自签占位(openssl)
+#   2. 或手动生成:
+#      mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+#        -keyout certs/server.key -out certs/server.crt \
+#        -subj "/CN=<域名>" -addext "subjectAltName=DNS:<域名>"
+#      (域名为 IP 时 subjectAltName=IP:<IP>)
+# 替换正式证书:
+#   1. 用新证书覆盖 certs/server.crt 与 certs/server.key(权限 0600)
+#   2. docker compose restart caddy
+# 启用:cp Caddyfile.manual Caddyfile && docker compose restart caddy
+# ============================================================
+picoaide.example.com {
+	# MANUAL 模式:显式指定证书文件(改动后必须 restart caddy 生效)
+	tls /certs/server.crt /certs/server.key
+
+	# 反代到后端 picoaide-server(compose 私有网段),保留原始 Host 与真实来源 IP
+	reverse_proxy server:8080 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# 静态资源与 SPA 由后端提供,这里不重复托管
+}
