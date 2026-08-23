@@ -74,6 +74,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.GET("/usage", AdminAuth(db), a.usage)
 	// 敏感操作审计日志(用户/部门/技能/令牌等)
 	g.GET("/audit", AdminAuth(db), a.listAuditLogs)
+	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换
+	g.GET("/auth", AdminAuth(db), a.getAuthConfig)
+	g.PUT("/auth", AdminAuth(db), a.setAuthConfig)
 }
 
 // AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
@@ -644,6 +647,97 @@ func (a *AdminAPI) listAuditLogs(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
 }
+
+// getAuthConfig 返回认证配置(脱敏):auth.mode / ldap.* / oidc.*。
+// 敏感值(bind_password / client_secret)以 "***" 掩码返回,write 时留空=不更换。
+func (a *AdminAPI) getAuthConfig(c *gin.Context) {
+	s, err := serverstore.GetAllSettings(a.DB)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	mask := func(v string) string { if v == "" { return "" }; return "***" }
+	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
+		"mode": s["auth.mode"],
+		"ldap": gin.H{
+			"server_url":    s["ldap.server_url"],
+			"bind_dn":       s["ldap.bind_dn"],
+			"bind_password": mask(s["ldap.bind_password"]),
+			"base_dn":       s["ldap.base_dn"],
+			"user_filter":   s["ldap.user_filter"],
+			"group_filter":  s["ldap.group_filter"],
+			"group_attr":    s["ldap.group_attr"],
+		},
+		"oidc": gin.H{
+			"issuer":        s["oidc.issuer"],
+			"client_id":     s["oidc.client_id"],
+			"client_secret": mask(s["oidc.client_secret"]),
+			"redirect_url":  s["oidc.redirect_url"],
+		},
+	}})
+}
+
+// setAuthConfig 保存认证配置。契约:mode 必填(local|ldap|both|oidc);
+// 密码类字段(ldap.bind_password / oidc.client_secret)写入 "***" 或空 = 保持现值,
+// 只有新值才覆盖;其余字段空 = 清空。
+func (a *AdminAPI) setAuthConfig(c *gin.Context) {
+	var req struct {
+		Mode string `json:"mode"`
+		LDAP struct {
+			ServerURL    string `json:"server_url"`
+			BindDN       string `json:"bind_dn"`
+			BindPassword string `json:"bind_password"`
+			BaseDN       string `json:"base_dn"`
+			UserFilter   string `json:"user_filter"`
+			GroupFilter  string `json:"group_filter"`
+			GroupAttr    string `json:"group_attr"`
+		} `json:"ldap"`
+		OIDC struct {
+			Issuer       string `json:"issuer"`
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+			RedirectURL  string `json:"redirect_url"`
+		} `json:"oidc"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = "local"
+	}
+	switch mode {
+	case "local", "ldap", "both", "oidc":
+	default:
+		writeError(c, http.StatusBadRequest, "VALIDATION", "auth.mode 必须是 local|ldap|both|oidc")
+		return
+	}
+	upsert := func(key, val string) error { return serverstore.SetSetting(a.DB, key, val) }
+	_ = upsert("auth.mode", mode)
+	// LDAP
+	_ = upsert("ldap.server_url", req.LDAP.ServerURL)
+	_ = upsert("ldap.bind_dn", req.LDAP.BindDN)
+	if req.LDAP.BindPassword != "" && req.LDAP.BindPassword != MaskSecret {
+		_ = upsert("ldap.bind_password", req.LDAP.BindPassword)
+	}
+	_ = upsert("ldap.base_dn", req.LDAP.BaseDN)
+	_ = upsert("ldap.user_filter", req.LDAP.UserFilter)
+	_ = upsert("ldap.group_filter", req.LDAP.GroupFilter)
+	_ = upsert("ldap.group_attr", req.LDAP.GroupAttr)
+	// OIDC
+	_ = upsert("oidc.issuer", req.OIDC.Issuer)
+	_ = upsert("oidc.client_id", req.OIDC.ClientID)
+	if req.OIDC.ClientSecret != "" && req.OIDC.ClientSecret != MaskSecret {
+		_ = upsert("oidc.client_secret", req.OIDC.ClientSecret)
+	}
+	_ = upsert("oidc.redirect_url", req.OIDC.RedirectURL)
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "mode:"+mode)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// MaskSecret 是 webadmin 回传敏感字段时的占位符("***"):服务端遇此值保持现值。
+const MaskSecret = "***"
 
 func currentAdmin(c *gin.Context) *serverstore.User {
 	v, _ := c.Get("admin_user")
