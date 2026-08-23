@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    needs: [webadmin]              # go build ./... 需 webadmin/dist 完整产物(go:embed)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+      - uses: actions/download-artifact@v8
+        with:
+          name: webadmin-dist
+          path: webadmin/dist/    # artifact 顶层即 webadmin/dist 内容(go:embed dist)
+      - run: make test-server
+      - run: go build ./...
+      - name: cross-compile server binaries
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o /tmp/picoaide-amd64 ./cmd/server
+          GOOS=linux GOARCH=arm64 go build -o /tmp/picoaide-arm64 ./cmd/server
+
+  # 客户端已下线(2026-08):仅保留服务端 + webadmin,不再构建桌面包。
+
+  webadmin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: webadmin build
+        run: |
+          if [ -d webadmin ] && [ -f webadmin/package.json ]; then
+            cd webadmin && npm ci && npm run build
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: webadmin-dist
+          path: webadmin/dist/
+          if-no-files-found: ignore

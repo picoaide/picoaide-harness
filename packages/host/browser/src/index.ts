@@ -1,0 +1,366 @@
+/**
+ * Embedded agent-driven browser for DSH Desktop: owns the WebContentsView tab
+ * pool, the CDP sessions, the `browser_*` tool suite, and the loopback panel
+ * API consumed by the client browser panel.
+ *
+ * HTTP API (loopback, mirroring the connectors plugin):
+ *   GET  /api/pico/browser/state          -> tabs + window + control + ops
+ *   POST /api/pico/browser/open           -> { url? }
+ *   POST /api/pico/browser/navigate       -> { tab, url }
+ *   POST /api/pico/browser/reload|back|forward -> { tab? }
+ *   POST /api/pico/browser/switch-tab     -> { tab }
+ *   POST /api/pico/browser/close-tab      -> { tab }
+ *   POST /api/pico/browser/close-all
+ *   POST /api/pico/browser/show           -> wake the browser window
+ *   POST /api/pico/browser/hide           -> hide the window (keep tabs)
+ *   POST /api/pico/browser/takeover       -> { active }
+ *   POST /api/pico/browser/clear-data
+ *   GET  /api/pico/browser/ops            -> recent op log
+ *   GET  /browser-shell                   -> the browser window control page
+ *   GET  /browser-mask                    -> the AI-control mask page
+ * @module @picoaide/dsh-browser
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { createRequire } from 'node:module'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+// Type-only: makes `ctx.get('approval')` resolve to the ApprovalService type.
+import type {} from '@deepseek-ai/dsh-user-approval'
+// Type-only: makes `ctx.webServer` resolve to the host webserver contract.
+import type {} from '@deepseek-ai/dsh-host-webserver'
+import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
+import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
+import { BrowserRuntime } from './runtime.ts'
+import { applyBrowserTools } from './tools.ts'
+import { BROWSER_MASK_HTML, BROWSER_SHELL_HTML } from './shell-pages.ts'
+import type { BrowserGuard } from './guard.ts'
+import type { CredentialResolver } from './types.ts'
+
+// Type-only: declare the enterprise session event so `ctx.on` resolves it.
+// The enterprise package owns the runtime event (SessionService emits it);
+// this declaration lets plugins type-check without a runtime dependency.
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+  }
+}
+
+/** Cordis plugin name used by loader diagnostics. */
+export const name = 'pico-browser'
+
+/** Services required by the embedded browser. */
+export const inject = ['webServer', 'tools', 'systemPrompt', 'attachments']
+
+/** Plugin config: runtime caps and enablement. */
+export interface Config {
+  /** Maximum simultaneous tabs (default 8). */
+  maxTabs?: number
+  /** Cooperative tool-call timeout budget ms (default 30000). */
+  timeoutMs?: number
+  /** Cap on waiting for Electron's loadURL promise ms (default 20000). */
+  loadTimeoutMs?: number
+  /** Whether `browser_eval` is enabled (default true). */
+  evalEnabled?: boolean
+  /** Cap on snapshot entries per call (default 200). */
+  snapshotLimit?: number
+  /** Cap on extracted text characters per call (default 32768). */
+  textLimit?: number
+  /** Screenshot max width in CSS pixels (default 1280). */
+  screenshotMaxWidth?: number
+  /** Screenshot JPEG quality 0-100 (default 70). */
+  screenshotQuality?: number
+}
+
+export const Config: z<Config> = z.object({
+  maxTabs: z.number(),
+  timeoutMs: z.number(),
+  loadTimeoutMs: z.number(),
+  evalEnabled: z.boolean(),
+  snapshotLimit: z.number(),
+  textLimit: z.number(),
+  screenshotMaxWidth: z.number(),
+  screenshotQuality: z.number(),
+})
+
+/** Cap on browser API request bodies. */
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
+type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
+
+function json(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(body))
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let received = 0
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer
+    received += buffer.byteLength
+    if (received > MAX_REQUEST_BODY_BYTES) return null
+    chunks.push(buffer)
+  }
+  if (chunks.length === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+function decodeSegment(segment: string | undefined): string | null {
+  if (segment === undefined) return null
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Register the embedded browser plugin.
+ * @param ctx - Cordis context carrying the webServer, tools, systemPrompt and
+ *   attachments services.
+ * @param config - runtime caps and enablement.
+ */
+export function apply(ctx: Context, config: Config = {}): void {
+  // Fail closed: without the approval service every sensitive action is
+  // rejected (the desktop profile always composes it; tests inject their own).
+  const askApproval: BrowserGuard['askApproval'] = async (request) => {
+    const approval = ctx.get('approval')
+    if (approval === undefined) return 'rejected'
+    return await approval.request({
+      agent: request.agent as never,
+      toolName: request.toolName,
+      ...request.callId !== undefined ? { callId: request.callId as import('@deepseek-ai/dsh-llm/brand').CallId } : {},
+      reason: request.reason,
+      ...request.signal !== undefined ? { signal: request.signal } : {},
+    })
+  }
+
+  // Current user (enterprise session, may be absent in minimal compositions).
+  const currentUser = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { username?: string } | null } | undefined
+      return pico?.getSession?.()?.username ?? null
+    } catch {
+      return null
+    }
+  }
+
+  // Credential injection resolves through the connectors store (per-user
+  // private files); the lookup is defensive and never logs values. Each
+  // resolution builds a store for the CURRENT user, so a session switch never
+  // injects another account's credentials (no cached store to rebuild).
+  const credentialResolver: CredentialResolver | undefined = (() => {
+    try {
+      // Lazy require: the connectors package must be present in the profile.
+      const require = createRequire(import.meta.url)
+      const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
+      return async (connectorId) => {
+        const store = new ConnectorStore({ username: currentUser() })
+        const credential = await store.readCredential(connectorId)
+        if (credential === null) return null
+        const fields = credential.fields ?? {}
+        const username = typeof fields.username === 'string' ? fields.username : undefined
+        const password = typeof fields.password === 'string' ? fields.password : undefined
+        return {
+          ...username !== undefined ? { username } : {},
+          ...password !== undefined ? { password } : {},
+        }
+      }
+    } catch {
+      return undefined
+    }
+  })()
+
+  const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver, browserPartitionFor(currentUser()))
+  // The shell/mask pages live on the plugin's own loopback server; the
+  // dedicated window loads them by absolute URL.
+  runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
+
+  // User switch: close every tab (old user's pages/login state), then point
+  // new tabs at the new user's partition. The partition dataset stays on disk
+  // per user; it is simply no longer mounted for another account.
+  ctx.on('pico/session-changed', (next) => {
+    const username = (next as { username?: string } | null)?.username ?? null
+    void (async () => {
+      await runtime.closeAll(undefined, true)
+      runtime.setPartition(browserPartitionFor(username))
+    })().catch((cause: unknown) => {
+      ctx.logger?.error('pico-browser: session change handling failed', cause)
+    })
+  })
+
+  // Tool registrations are fiber-scoped: the tools/systemPrompt registries
+  // clean them up on plugin dispose, so no manual disposer is needed here.
+  applyBrowserTools(ctx, runtime)
+
+  ctx.effect(() => {
+    // Trust fence for every browser route: loopback socket + Host +
+    // same-origin markers. All actions below are state-changing and
+    // therefore require POST (P1-1: a cross-site GET must not trigger them).
+    const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
+      if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
+      json(res, 403, { error: 'forbidden' })
+      return false
+    }
+
+    const action = (req: IncomingMessage, res: ServerResponse): void => {
+      const rawAction = decodeSegment(req.url?.split('/')[4]?.split('?')[0])
+      void handleAction(rawAction, req, res).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        json(res, 400, { error: message })
+      })
+    }
+
+    const handleAction = async (action: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
+      const raw = await readJson(req)
+      const body = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+
+      switch (action) {
+        case 'show': {
+          await runtime.showWindow()
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'hide': {
+          runtime.hideWindow()
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'open': {
+          const url = typeof body.url === 'string' ? body.url : undefined
+          // Shell `+` button: the USER's surface — bypass the takeover mutex.
+          const tab = await runtime.open(url, undefined, true)
+          json(res, 200, { tab })
+          return
+        }
+        case 'navigate': {
+          const tab = numberOr(body.tab, 0)
+          const url = typeof body.url === 'string' ? body.url : ''
+          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
+          // Address bar: the USER's surface — bypass the takeover mutex.
+          await runtime.navigate(tab, url, 'domcontentloaded', undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'reload': {
+          // The shell toolbar is the USER's surface: its actions must not be
+          // blocked by an agent takeover (user==true bypasses the mutex).
+          await runtime.reload(tabOf(runtime, body), undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'back': {
+          await runtime.goBack(tabOf(runtime, body), undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'forward': {
+          await runtime.goForward(tabOf(runtime, body), undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'switch-tab': {
+          const tab = numberOr(body.tab, 0)
+          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
+          await runtime.switchTab(tab, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'close-tab': {
+          const tab = numberOr(body.tab, 0)
+          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
+          await runtime.closeTab(tab, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'close-all': {
+          // Shell 清除: the USER's surface — bypass the takeover mutex.
+          await runtime.closeAll(undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'takeover': {
+          runtime.setUserControl(body.active === true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'clear-data': {
+          await runtime.clearData()
+          json(res, 200, { ok: true })
+          return
+        }
+        default:
+          json(res, 404, { error: 'not found' })
+      }
+    }
+
+    const state: JsonHandler = (req, res) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
+      json(res, 200, {
+        tabs: runtime.listTabs(),
+        window: runtime.windowState,
+        controlled: runtime.controlled,
+        // AI-control overlay status: what the agent is doing right now and
+        // the last completed operation (so the user knows when to step in).
+        busy: runtime.isBusy,
+        busyTool: runtime.busyToolName,
+        latestOp: runtime.latestOp ?? null,
+      })
+    }
+
+    const ops: JsonHandler = (req, res) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
+      json(res, 200, { ops: runtime.opLog })
+    }
+
+    const html = (content: string): JsonHandler => (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(content)
+    }
+
+    const disposers = [
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/state', handler: state }),
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/ops', handler: ops }),
+      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser', handler: action }),
+      // Local pages for the dedicated browser window (served by the same
+      // loopback server; the window navigates to these absolute paths).
+      ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: html(BROWSER_SHELL_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-mask', handler: html(BROWSER_MASK_HTML) }),
+    ]
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  }, 'pico browser: panel api')
+
+  ctx.effect(() => {
+    return () => {
+      runtime.dispose()
+    }
+  }, 'pico browser: teardown')
+}
+
+/** Read a number from a JSON field with a fallback. */
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/** Resolve the tab id from a body, defaulting to the visible tab. */
+function tabOf(runtime: BrowserRuntime, body: Record<string, unknown>): number {
+  const explicit = numberOr(body.tab, 0)
+  if (explicit > 0) return explicit
+  const current = runtime.currentTabId()
+  if (current === undefined) throw new Error('browser: no tab open')
+  return current
+}
+
+export type { BrowserRuntime } from './runtime.ts'
+export type { BrowserOpLogEntry, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions, BrowserWindowState } from './types.ts'

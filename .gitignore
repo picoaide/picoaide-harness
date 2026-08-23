@@ -9,5 +9,47 @@ node_modules/
 *.tsbuildinfo
 .build/
 
-dsh-plugin-desktop/dist/
-dsh-plugin-desktop/lib/
+# DSH plugin packages: build output is never committed for workspace members
+# that compile to lib/ (desktop, enterprise, account-card, branding) unless a
+# member intentionally ships it (dsh-browser, dsh-connectors, dsh-cron,
+# dsh-task and dsh-memory-evolve track lib/ for the packaged runtime).
+packages/host/desktop/dist/
+packages/host/desktop/lib/
+packages/host/enterprise/lib/
+packages/client/account-card/lib/
+packages/client/branding/lib/
+community/market/lib/
+
+# server (Go)
+server/bin/
+server/data/
+server/*.db
+server/*.db-wal
+server/*.db-shm
+server/webadmin/node_modules/
+server/webadmin/dist/*
+!server/webadmin/dist/index.html
+server/webadmin/tsconfig.tsbuildinfo
+*.log
+.yarn/cache
+.research/
+.yarn-cache/
+.yarn-home/
+
+# local tooling artifacts
+.audit/
+.go-cache/
+.go-path/
+.npm-cache/
+.smoke/
+
+# local writable DSH home mirror (this sandbox root fs is read-only)
+.dsh-home/
+
+# Client E2E runtime artifacts
+packages/host/desktop/.e2e-report.md
+packages/host/desktop/.e2e-shots/
+packages/host/desktop/.real-env-report.md
+packages/host/desktop/.real-env-shots/
+# better-sidebar 构建 sourcemap（历史零入库；lib/*.js 本体入库）
+packages/client/better-sidebar/lib/*.map

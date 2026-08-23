@@ -1,0 +1,40 @@
+# Enterprise Host rows: the bare entry carries the package's client bundle
+# declaration (skill center + account surfaces), the session service provides
+# `picoSession`, then the gateway-model and bootstrap listeners react to its
+# changes, and the auth-gate owns the login gate and skill-store proxy.
+- insert:
+    - id: picoaide-enterprise
+      name: '@picoaide/dsh-enterprise'
+    - id: picoaide-session
+      name: '@picoaide/dsh-enterprise/session-service'
+    - id: picoaide-gateway-model
+      name: '@picoaide/dsh-enterprise/gateway-model'
+    - id: picoaide-bootstrap
+      name: '@picoaide/dsh-enterprise/bootstrap'
+    - id: picoaide-auth-gate
+      name: '@picoaide/dsh-enterprise/auth-gate'
+# Enterprise model governance: models come from the gateway after login only.
+# The upstream models settings page lets users define custom providers, so it
+# is disabled from the composition. bootstrap.ts keeps the gateway catalog in
+# llm-deepseek and clears it on logout.
+- id: ui-settings-models
+  disabled: true
+# Local skill discovery: the web-app bundle disables the host skill
+# provider rows (presets own local discovery), but the desktop has no
+# presets. Mount the filesystem provider (scans `<dshHome>/skills`, which
+# the skill center installs into) and the model-facing catalog/loader so
+# installed skills are visible to the agent. The `skill` registry row is
+# already live in the web-app bundle. Fresh ids avoid colliding with the
+# disabled placeholder rows in the web-app bundle.
+- insert:
+    - id: pico-skill-filesystem
+      name: '@deepseek-ai/dsh-skill-filesystem'
+    - id: pico-tool-skill
+      name: '@deepseek-ai/dsh-tool-skill'
+# Enterprise brand: product name and window title for the native shell (the
+# desktop Config schema defaults stay upstream-compatible).
+- id: desktop-shell
+  config:
+    mode: compatibility
+    productName: 'PicoAide Harness'
+    windowTitle: 'PicoAide Harness'
