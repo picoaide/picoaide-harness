@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "private": true,
   "description": "DSH Desktop product workspace",
   "license": "MIT",
@@ -67,6 +67,7 @@
     "upstream:build": "cd deepseek-harness && corepack pnpm run build",
     "build:connectors": "yarn workspace @picoaide/dsh-connectors build",
     "typecheck:connectors": "yarn workspace @picoaide/dsh-connectors typecheck",
-    "test:connectors": "yarn workspace @picoaide/dsh-connectors test"
+    "test:connectors": "yarn workspace @picoaide/dsh-connectors test",
+    "dist:linux": "yarn workspace dsh-plugin-desktop dist:linux"
   }
 }

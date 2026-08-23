@@ -8,8 +8,8 @@ import {
   type UpdateRequest,
 } from '../src/update-checker.ts'
 
-function versionResponse(version: unknown, init: ResponseInit = {}): Response {
-  return Response.json({ version }, init)
+function releaseResponse(tagName: unknown, init: ResponseInit = {}): Response {
+  return Response.json({ tag_name: tagName, draft: false, prerelease: false }, init)
 }
 
 describe('strict SemVer parsing', () => {
@@ -52,12 +52,12 @@ describe('strict SemVer parsing', () => {
 })
 
 describe('public Desktop version check', () => {
-  it('uses only the fixed no-cache version endpoint and reports a newer stable version', async () => {
+  it('uses only the fixed GitHub Releases endpoint and reports a newer stable version', async () => {
     const controller = new AbortController()
     const calls: Array<{ url: string, init: RequestInit }> = []
     const request: UpdateRequest = async (url, init) => {
       calls.push({ url, init })
-      return versionResponse('2.10.0')
+      return releaseResponse('v2.10.0')
     }
 
     await expect(checkForStableUpdate({
@@ -92,7 +92,7 @@ describe('public Desktop version check', () => {
   ])('reports no update for installed %s and service %s', async (currentVersion, latestVersion) => {
     await expect(checkForStableUpdate({
       currentVersion,
-      request: async () => versionResponse(latestVersion),
+      request: async () => releaseResponse(`v${latestVersion}`),
     })).resolves.toEqual({
       status: 'up-to-date',
       currentVersion,
@@ -103,22 +103,28 @@ describe('public Desktop version check', () => {
   it('compares service versions without overflowing JavaScript numbers', async () => {
     await expect(checkForStableUpdate({
       currentVersion: '9007199254740992.0.0',
-      request: async () => versionResponse('10000000000000000.0.0'),
+      request: async () => releaseResponse('v10000000000000000.0.0'),
     })).resolves.toMatchObject({ status: 'update-available' })
   })
 
   it.each([
-    ['leading v', { version: 'v2.1.0' }],
-    ['prerelease', { version: '2.1.0-rc.1' }],
-    ['invalid SemVer', { version: '2.01.0' }],
-    ['missing version', {}],
-    ['non-string version', { version: 2 }],
+    ['prerelease tag', { tag_name: 'v2.1.0-rc.1' }],
+    ['invalid SemVer tag', { tag_name: 'v2.01.0' }],
+    ['missing tag_name', {}],
+    ['non-string tag_name', { tag_name: 2 }],
     ['array response', ['2.1.0']],
-  ])('silently ignores a service response with %s', async (_case, value) => {
+  ])('silently ignores a release response with %s', async (_case, value) => {
     await expect(checkForStableUpdate({
       currentVersion: '2.0.0',
       request: async () => Response.json(value),
     })).resolves.toBeNull()
+  })
+
+  it('accepts a v-prefixed stable tag as the latest version', async () => {
+    await expect(checkForStableUpdate({
+      currentVersion: '2.0.0',
+      request: async () => releaseResponse('v2.1.0'),
+    })).resolves.toMatchObject({ status: 'update-available', latestVersion: '2.1.0' })
   })
 
   it('silently ignores malformed JSON and non-200 statuses', async () => {
@@ -165,7 +171,7 @@ describe('public Desktop version check', () => {
   })
 
   it.each(['2.0', 'v2.0.0', '2.0.0-rc.1'])('skips invalid installed version %s before requesting', async currentVersion => {
-    const request = vi.fn(async () => versionResponse('2.1.0'))
+    const request = vi.fn(async () => releaseResponse('v2.1.0'))
 
     await expect(checkForStableUpdate({ currentVersion, request })).resolves.toBeNull()
     expect(request).not.toHaveBeenCalled()

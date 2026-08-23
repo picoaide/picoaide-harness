@@ -572,7 +572,7 @@ describe('Electron compatibility runtime', () => {
     expect(diagnostics.export).toHaveBeenCalledWith(
       '/tmp/dsh-desktop-user-data',
       {
-        appVersion: '2.0.1',
+        appVersion: '2.1.0',
         crashDumpsDir: '/tmp/dsh-desktop-user-data/Crashpad',
       },
     )
@@ -700,12 +700,12 @@ describe('Electron compatibility runtime', () => {
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
 
-    await expect(runtime.updates.request('https://www.dshdesktop.cn/api/desktop/version', { method: 'GET' }))
+    await expect(runtime.updates.request('https://api.github.com/repos/picoaide/picoaide-harness/releases/latest', { method: 'GET' }))
       .resolves.toBe(response)
     expect(runtime.updates).toMatchObject({
       isPackaged: false,
       canDownload: false,
-      currentVersion: '2.0.1',
+      currentVersion: '2.1.0',
       statePath: join('/tmp/dsh-desktop-user-data', 'updates', 'state.json'),
     })
     electron.app.isPackaged = true

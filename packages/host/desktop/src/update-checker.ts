@@ -1,10 +1,14 @@
-/** Headless version checks against the public DSH Desktop release service. */
+/** Headless version checks against the public GitHub Releases API. */
 
-/** Public endpoint returning the latest stable DSH Desktop version. */
-export const DESKTOP_VERSION_ENDPOINT = 'https://www.dshdesktop.cn/api/desktop/version'
+/** GitHub repository owning public client releases. */
+export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
 
-/** Maximum response body bytes accepted from the version service. */
-export const MAX_VERSION_RESPONSE_BYTES = 4 * 1024
+/** Public endpoint returning the latest stable DSH Desktop release. */
+export const DESKTOP_VERSION_ENDPOINT =
+  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
+
+/** Maximum response body bytes accepted from the release service. */
+export const MAX_VERSION_RESPONSE_BYTES = 256 * 1024
 
 /** Strictly parsed SemVer components. Numeric components remain strings to avoid overflow. */
 export interface ParsedSemVer {
@@ -85,7 +89,7 @@ export function compareSemVerVersions(left: string, right: string): number | nul
 }
 
 /**
- * Check the fixed DSH Desktop version endpoint for a newer stable release.
+ * Check the fixed GitHub Releases endpoint for a newer stable release.
  * @param options - installed version, caller-owned signal, and optional request adapter.
  * @returns a successful comparison, or null when any request or validation step fails.
  */
@@ -169,8 +173,11 @@ function parseVersionResponse(body: string): ParsedSemVer | null {
   } catch {
     return null
   }
-  if (!isRecord(value) || typeof value.version !== 'string') return null
-  return parseCanonicalStableVersion(value.version)
+  // GitHub's release payload exposes the canonical version as a `v`-prefixed
+  // tag while drafts and prereleases are strictly excluded by the latest
+  // endpoint. The tag prefix is stripped before strict SemVer validation.
+  if (!isRecord(value) || typeof value.tag_name !== 'string') return null
+  return parseCanonicalStableVersion(value.tag_name.replace(/^v/u, ''))
 }
 
 function parseCanonicalStableVersion(input: string): ParsedSemVer | null {
