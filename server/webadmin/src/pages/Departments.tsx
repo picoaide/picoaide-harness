@@ -136,7 +136,7 @@ export default function Departments() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">部门管理</h1>
+        <h1 className="page-title">部门管理</h1>
         <Button onClick={() => openDeptEdit()}>新建部门</Button>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}

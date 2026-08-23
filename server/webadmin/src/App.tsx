@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -83,6 +83,7 @@ async function fetchBaseURL(): Promise<string> {
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [baseURL, setBaseURL] = useState('')
+  const [adminName, setAdminName] = useState('')
 
   useEffect(() => {
     // 审计 A5-M3: 会话过期由全局回调原地切回登录态(取代整页跳转)
@@ -92,7 +93,7 @@ export default function App() {
 
   useEffect(() => {
     me().then(
-      () => setAuthed(true),
+      (body) => { setAuthed(true); setAdminName(body?.user?.display_name || body?.user?.username || '管理员') },
       () => setAuthed(false)
     )
   }, [])
@@ -110,36 +111,65 @@ export default function App() {
 
   return (
     <BrowserRouter basename="/admin">
-      <div className="flex h-screen">
-        <aside className="flex w-48 flex-col border-r bg-muted/30">
-          <div className="px-4 py-4 text-lg font-bold">PicoAide 管理</div>
+      <div className="flex h-screen bg-background">
+        {/* 品牌暗色侧边栏 */}
+        <aside className="flex w-56 flex-col bg-slate-900 text-slate-300">
+          <div className="flex items-center gap-3 px-5 py-5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 shadow-md">
+              <svg viewBox="0 0 32 32" className="h-5 w-5" fill="none" aria-hidden="true">
+                <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(255,255,255,0.15)" stroke="white" strokeWidth="2" />
+                <path d="M12 12 L20 16 L12 20 Z" fill="white" />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-[15px] font-bold text-white">PicoAide</div>
+              <div className="text-[11px] text-slate-400">企业 AI 管理后台</div>
+            </div>
+          </div>
+
           {baseURL && (
-            <div className="flex items-center gap-1.5 px-4 pb-3 text-xs text-muted-foreground">
+            <div className="mx-3 mb-4 flex items-center gap-1.5 rounded-lg bg-white/5 px-3 py-2 text-[11px] text-slate-400">
               <Globe className="h-3 w-3 shrink-0" />
-              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate hover:text-foreground" title={baseURL}>
-                {baseURL}
-              </a>
+              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate hover:text-slate-200" title={baseURL}>{baseURL}</a>
             </div>
           )}
-          <nav className="flex-1 space-y-1 px-2">
+
+          <nav className="flex-1 space-y-1 px-3">
+            <div className="px-3 pb-2 text-[11px] font-medium uppercase tracking-wider text-slate-500">管理中心</div>
             {nav.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 className={({ isActive }) =>
-                  cn('flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent', isActive && 'bg-accent')
+                  cn(
+                    'group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all',
+                    isActive
+                      ? 'bg-gradient-to-r from-blue-600/90 to-cyan-600/70 font-medium text-white shadow-md'
+                      : 'text-slate-400 hover:bg-white/5 hover:text-slate-100',
+                  )
                 }
               >
-                <n.icon className="h-4 w-4" />
-                {n.label}
+                <n.icon className="h-4.5 w-4.5 h-[18px] w-[18px] shrink-0" />
+                <span className="flex-1">{n.label}</span>
+                <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-60" />
               </NavLink>
             ))}
           </nav>
-          <div className="p-2">
+
+          <div className="border-t border-white/10 p-3">
+            <div className="mb-2 flex items-center gap-2.5 rounded-lg bg-white/5 px-3 py-2.5">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-600 to-slate-700 text-xs font-semibold text-white">
+                {adminName.slice(0, 1).toUpperCase()}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium text-slate-200">{adminName}</div>
+                <div className="flex items-center gap-1 text-[10px] text-slate-500"><ShieldCheck className="h-3 w-3" />超级管理员</div>
+              </div>
+            </div>
             <Button
               variant="ghost"
               size="sm"
-              className="w-full justify-start text-destructive"
+              className="w-full justify-center text-slate-400 hover:bg-white/5 hover:text-red-400"
               onClick={async () => {
                 try {
                   await logout()
@@ -149,23 +179,29 @@ export default function App() {
                 }
               }}
             >
-              <LogOut className="h-4 w-4" /> 登出
+              <LogOut className="h-4 w-4" /> 退出登录
             </Button>
           </div>
         </aside>
-        <main className="flex-1 overflow-auto p-6">
-          <ErrorBoundary>
-            <Routes>
-              <Route path="/" element={<Navigate to="/users" />} />
-              <Route path="/users" element={<UsersPage />} />
-              <Route path="/departments" element={<Departments />} />
-              <Route path="/gateway" element={<Gateway />} />
-              <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
-              <Route path="/marketplace" element={<Marketplace />} />
-              <Route path="/audit" element={<Audit />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </ErrorBoundary>
+
+        {/* 主内容区 */}
+        <main className="flex-1 overflow-auto">
+          {/* 顶部细条(品牌点缀) */}
+          <div className="sticky top-0 z-10 h-1 w-full bg-gradient-to-r from-blue-600 via-cyan-500 to-blue-600" />
+          <div className="mx-auto max-w-7xl p-6 lg:p-8">
+            <ErrorBoundary>
+              <Routes>
+                <Route path="/" element={<Navigate to="/users" />} />
+                <Route path="/users" element={<UsersPage />} />
+                <Route path="/departments" element={<Departments />} />
+                <Route path="/gateway" element={<Gateway />} />
+                <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
+                <Route path="/marketplace" element={<Marketplace />} />
+                <Route path="/audit" element={<Audit />} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </ErrorBoundary>
+          </div>
         </main>
       </div>
     </BrowserRouter>

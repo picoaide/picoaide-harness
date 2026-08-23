@@ -423,7 +423,7 @@ export default function Usage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">用量统计</h1>
+        <h1 className="page-title">用量统计</h1>
         <span className="text-sm text-muted-foreground">费用与配额对照(金额/token 双维度,管理员豁免)</span>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
