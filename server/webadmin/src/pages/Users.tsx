@@ -311,9 +311,12 @@ export default function Users() {
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">用户管理</h1>
+        <div>
+          <h1 className="page-title">用户管理</h1>
+          <p className="page-desc mt-1">企业成员账号、部门归属、流量配额与登录令牌</p>
+        </div>
         <div className="flex items-center gap-2">
           <Input
             className="w-56"

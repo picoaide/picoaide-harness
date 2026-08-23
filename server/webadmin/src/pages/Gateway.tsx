@@ -495,7 +495,7 @@ export default function Gateway() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold">网关配置</h1>
+      <h1 className="page-title">网关配置</h1>
       {error && <div className="text-sm text-destructive">{error}</div>}
       {okMsg && <div className="text-sm text-green-600">{okMsg}</div>}
       {syncMsg && <div className="text-sm text-green-600">{syncMsg}</div>}
