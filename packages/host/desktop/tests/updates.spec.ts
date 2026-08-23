@@ -19,7 +19,7 @@ const testConfig: UpdateConfig = {
 }
 
 function versionResponse(version: unknown): Response {
-  return Response.json({ version })
+  return Response.json({ tag_name: version, draft: false, prerelease: false })
 }
 
 interface Harness {
@@ -272,7 +272,7 @@ describe('desktop update Host plugin', () => {
     ['older version', async () => versionResponse('1.9.9'), {
       status: 'up-to-date', currentVersion: '2.0.0', latestVersion: '1.9.9',
     }],
-    ['invalid version', async () => versionResponse('v2.1.0'), null],
+    ['invalid version', async () => new Response('{"tag_name":"2.01.0"}'), null],
     ['service unavailable', async () => new Response('unavailable', { status: 503 }), null],
     ['network failure', async () => { throw new TypeError('offline') }, null],
   ] as const)('reports a manual %s result without prompting or downloading', async (_case, request, expected) => {

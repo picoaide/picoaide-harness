@@ -53,11 +53,13 @@ jobs:
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn check
-      - run: yarn workspace dsh-plugin-desktop package:dir
+      - run: yarn workspace dsh-plugin-desktop dist:linux
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
-          path: packages/host/desktop/dist/
+          path: |
+            packages/host/desktop/dist/*.AppImage
+            packages/host/desktop/dist/*.deb
           if-no-files-found: error
 
   desktop-windows:
@@ -91,9 +93,39 @@ jobs:
           node-version: 24
       - run: corepack enable
       - run: yarn install --immutable
-      - run: yarn workspace dsh-plugin-desktop package:dir
+      - run: yarn workspace dsh-plugin-desktop dist:mac-smoke
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-macOS
-          path: packages/host/desktop/dist/
+          path: packages/host/desktop/dist/mac-smoke/*.dmg
           if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, desktop-linux, desktop-windows, desktop-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@v7
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - name: Compute SHA-256 digests
+        run: |
+          cd release-artifacts
+          sha256sum *.AppImage *.exe *.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create GitHub Release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo picoaide/picoaide-harness \
+            --title "PicoAide Harness ${GITHUB_REF_NAME}" \
+            --notes "DSH Desktop release ${GITHUB_REF_NAME}" \
+            release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}

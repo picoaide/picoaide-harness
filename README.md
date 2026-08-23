@@ -31,12 +31,13 @@ DSH Desktop 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 
 ## 下载与安装
 
-当前正式安装包支持 Windows x64 和搭载 Apple 芯片的 macOS。普通用户不需要单独安装 Node.js、pnpm 或 DSH。
+当前正式安装包支持 Windows x64、搭载 Apple 芯片的 macOS 和 Linux x64。普通用户不需要单独安装 Node.js、pnpm 或 DSH。
 
 | 平台 | 下载 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [下载安装程序](https://www.dshdesktop.cn/api/downloads/windows) | 运行 NSIS 安装程序并按提示完成安装 |
-| macOS Apple Silicon | [下载 DMG](https://www.dshdesktop.cn/api/downloads/mac) | 打开 DMG，将 DSH Desktop 拖入 Applications |
+| Windows x64 | [下载安装程序](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-x64-Setup.exe) | 运行 NSIS 安装程序并按提示完成安装 |
+| macOS Apple Silicon | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-mac.dmg) | 打开 DMG，将 DSH Desktop 拖入 Applications |
+| Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-x64.AppImage) | 授予执行权限后运行 |
 
 也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
 
