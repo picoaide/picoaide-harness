@@ -40,8 +40,10 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      # 全部数据走当前目录 bind mount(不用命名卷):证书/配置/自动证书库/数据都在部署目录内,
+      # 备份 = 直接拷走整个部署目录;容器重建不丢任何状态
+      - ./caddy-data:/data
+      - ./caddy-config:/config
     networks:
       picoaide-net:
         ipv4_address: ${CADDY_IP:-172.28.0.2}
@@ -102,7 +104,4 @@ networks:
       config:
         # 只指定子网;gateway 由 docker 自动取子网第一个可用 IP,避免手工不一致
         - subnet: ${NETWORK_SUBNET:-172.28.0.0/24}
-
-volumes:
-  caddy-data:
-  caddy-config:
+# 所有持久化数据均使用 ./ 当前目录 bind mount(caddy-data/ caddy-config/ picoaide-data/),不定义命名卷
