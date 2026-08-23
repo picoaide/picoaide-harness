@@ -1,0 +1,57 @@
+---
+import Layout from '../layouts/Layout.astro'
+import Header from '../components/Header.astro'
+import Footer from '../components/Footer.astro'
+---
+
+<Layout title="关于我们 - PicoAide Harness">
+  <Header />
+
+  <main class="container about">
+    <h1>关于我们</h1>
+    <p class="about__lead">
+      PicoAide 团队致力于为企业打造可控、可扩展的 AI 工作底座。
+    </p>
+    <div class="about__body">
+      <section>
+        <h2>愿景</h2>
+        <p>
+          让每位员工都能拥有自己的 AI 操作助手，让 AI 能力在企业内网安全地落地。
+        </p>
+      </section>
+      <section>
+        <h2>产品</h2>
+        <p>
+          PicoAide Harness 基于 DeepSeek Harness 构建，将桌面客户端、本地智能体引擎与管理后台整合为一个可私有化部署的平台。
+        </p>
+      </section>
+      <section>
+        <h2>社区</h2>
+        <p>
+          项目完全开源免费，欢迎前往 GitHub 仓库参与共建：<a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a>。
+        </p>
+      </section>
+    </div>
+  </main>
+
+  <Footer />
+
+  <style>
+    .about {
+      padding: 56px 24px 96px;
+      max-width: 720px;
+    }
+    .about h1 { margin-bottom: 8px; }
+    .about__lead {
+      color: var(--ink-soft);
+      font-size: 1.1rem;
+    }
+    .about__body h2 {
+      font-size: 1.3rem;
+      margin-top: 36px;
+    }
+    .about__body p {
+      color: var(--ink-soft);
+    }
+  </style>
+</Layout>
