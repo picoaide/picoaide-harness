@@ -359,7 +359,7 @@ type modelReq struct {
 	OutputPricePer1M optionalFloat `json:"output_price_per_1m"`
 	// CacheInputPricePer1M 缓存命中输入价(0029):nil/未传 = 不覆盖;0 = 清空(未配置)。
 	CacheInputPricePer1M optionalFloat `json:"cache_input_price_per_1m"`
-	OffpeakDiscount       optionalFloat `json:"offpeak_discount"` // 0023:0<d<=1 低谷折扣;nil/1 = 无峰谷
+	OffpeakDiscount      optionalFloat `json:"offpeak_discount"` // 0023:0<d<=1 低谷折扣;nil/1 = 无峰谷
 }
 
 // optionalFloat 记录 JSON 字段是否出现(Set)与解析出的值(Value,nil = null)。

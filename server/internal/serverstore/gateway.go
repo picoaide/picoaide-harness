@@ -382,6 +382,17 @@ func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak floa
 	return inputPer1M, outputPer1M, offpeak
 }
 
+// ModelCachePrice returns the cache-hit input price (yuan per 1M tokens,
+// 0029). 0 = 未配置缓存价(命中按输入价计费)。
+func ModelCachePrice(db *sql.DB, name string) float64 {
+	var cache sql.NullFloat64
+	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ?`, name).Scan(&cache)
+	if err != nil || !cache.Valid {
+		return 0
+	}
+	return cache.Float64
+}
+
 // AddModel inserts a model row.
 func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {

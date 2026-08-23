@@ -73,6 +73,24 @@ func main() {
 		}
 		content := fmt.Sprintf("mock upstream echo: %q (model=%s)", last, req.Model)
 
+		// CACHEHIT:<n> 标记:请求内容含 "CACHEHIT:100" 时,usage 报告 100 个
+		// 缓存命中输入 token(prompt_cache_hit_tokens)——用于验证缓存计费。
+		cacheHit := 0
+		if idx := strings.Index(last, "CACHEHIT:"); idx >= 0 {
+			rest := strings.TrimSpace(last[idx+len("CACHEHIT:"):])
+			num := ""
+			for _, c := range rest {
+				if c >= '0' && c <= '9' {
+					num += string(c)
+				} else {
+					break
+				}
+			}
+			if n, err := strconv.Atoi(num); err == nil && n > 0 {
+				cacheHit = n
+			}
+		}
+
 		if req.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
@@ -119,7 +137,12 @@ func main() {
 			usage := map[string]any{
 				"id": "mock-1", "object": "chat.completion.chunk", "model": req.Model,
 				"choices": []any{},
-				"usage":   map[string]int{"prompt_tokens": 11, "completion_tokens": len(content), "total_tokens": 11 + len(content)},
+				"usage": map[string]int{
+					"prompt_tokens": 11 + cacheHit, "completion_tokens": len(content),
+					"total_tokens": 11 + cacheHit + len(content),
+					// DeepSeek 兼容:缓存命中输入 token 数
+					"prompt_cache_hit_tokens": cacheHit,
+				},
 			}
 			b, _ := json.Marshal(usage)
 			fmt.Fprintf(w, "data: %s\n\n", b)
@@ -134,7 +157,12 @@ func main() {
 				"message":       map[string]string{"role": "assistant", "content": content},
 				"finish_reason": "stop",
 			}},
-			"usage": map[string]int{"prompt_tokens": 11, "completion_tokens": len(content), "total_tokens": 11 + len(content)},
+			"usage": map[string]int{
+				"prompt_tokens": 11 + cacheHit, "completion_tokens": len(content),
+				"total_tokens": 11 + cacheHit + len(content),
+				// DeepSeek 兼容:缓存命中输入 token 数
+				"prompt_cache_hit_tokens": cacheHit,
+			},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
