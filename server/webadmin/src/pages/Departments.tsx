@@ -165,16 +165,19 @@ export default function Departments() {
               <TableRow key={d.id}>
                 <TableCell>
                   <div className="flex items-center gap-2">
-                    {d.parent_id !== 0 && <span className="text-muted-foreground">↳</span>}
-                    {d.name}
+                    {d.parent_id !== 0 && <span className="text-slate-300">└</span>}
+                    <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${d.parent_id === 0 ? 'bg-blue-600/10 text-[#1E40AF]' : 'bg-slate-100 text-slate-400'}`}>
+                      <Network className="h-3 w-3" />
+                    </span>
+                    <span className="font-medium">{d.name}</span>
                     {d.granted_count > 0 && <Badge variant="outline">已授权</Badge>}
                   </div>
-                  {d.description && <div className="text-xs text-muted-foreground">{d.description}</div>}
+                  {d.description && <div className="pl-7 text-xs text-muted-foreground">{d.description}</div>}
                 </TableCell>
                 <TableCell>{parent?.name ?? '—'}</TableCell>
                 <TableCell>{d.leader_name || '—'}</TableCell>
-                <TableCell>{d.member_count}</TableCell>
-                <TableCell>{d.child_count}</TableCell>
+                <TableCell className="font-mono text-xs">{d.member_count}</TableCell>
+                <TableCell className="font-mono text-xs">{d.child_count}</TableCell>
                 <TableCell>
                   {d.budget_money === null || d.budget_money === undefined || d.budget_money <= 0 ? (
                     // 中6:本部门无预算 ≠ 不限——祖先部门预算仍约束其成员

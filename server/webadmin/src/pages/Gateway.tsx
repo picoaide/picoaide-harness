@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
+import { Lock } from 'lucide-react'
 import { isModelPriced } from '../lib/format'
 
 interface Provider {
@@ -629,10 +630,27 @@ export default function Gateway() {
                 <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
               ) : providers.map((p) => (
                 <TableRow key={p.id}>
-                  <TableCell>{p.name}</TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${p.enabled ? 'bg-green-500' : 'bg-slate-300'}`} />
+                      <span className="font-medium">{p.name}</span>
+                    </div>
+                  </TableCell>
                   <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
-                  <TableCell className="font-mono text-xs">{p.base_url}</TableCell>
-                  <TableCell>{p.api_key ? (p.api_key === '***' ? '已设置(隐藏)' : p.api_key) : '(未设置)'}</TableCell>
+                  <TableCell className="max-w-56 truncate font-mono text-xs">{p.base_url}</TableCell>
+                  <TableCell>
+                    {p.api_key ? (
+                      p.api_key === '***' ? (
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                          <Lock className="h-3 w-3" />••••••••••{(p.channel ? ' (AES)' : '')}
+                        </span>
+                      ) : (
+                        <span className="font-mono text-xs">{p.api_key}</span>
+                      )
+                    ) : (
+                      <span className="text-xs text-amber-600">未设置</span>
+                    )}
+                  </TableCell>
                   <TableCell>
                     {p.channel ? <span className="text-xs text-muted-foreground">自动同步</span> : p.models.join(', ')}
                   </TableCell>
