@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, FolderOpen, LogOut, Globe, ScrollText, Network } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -9,7 +9,6 @@ import UsersPage from './pages/Users'
 import Departments from './pages/Departments'
 import Gateway from './pages/Gateway'
 import Marketplace from './pages/Marketplace'
-import Knowledge from './pages/Knowledge'
 import Audit from './pages/Audit'
 
 // Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
@@ -20,7 +19,6 @@ const nav = [
   { to: '/departments', label: '部门', icon: Network },
   { to: '/gateway', label: '网关', icon: Settings2 },
   { to: '/usage', label: '用量', icon: BarChart3 },
-  { to: '/knowledge', label: '知识库', icon: FolderOpen },
   { to: '/marketplace', label: '商城', icon: Store },
   { to: '/audit', label: '审计', icon: ScrollText },
 ]
@@ -163,7 +161,6 @@ export default function App() {
               <Route path="/departments" element={<Departments />} />
               <Route path="/gateway" element={<Gateway />} />
               <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
-              <Route path="/knowledge" element={<Knowledge />} />
               <Route path="/marketplace" element={<Marketplace />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="*" element={<NotFound />} />

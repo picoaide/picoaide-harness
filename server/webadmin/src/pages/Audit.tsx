@@ -14,32 +14,15 @@ interface LogRow {
   created_at: string
 }
 
-// M3: 与服务端实际写入的 audit action 全集对齐(缺 8 项补齐;user_groups
-// 服务端从不产生,移除;skill_disable 由 marketplace 侧后续补审计,标签保留)
+// M3: 与服务端实际写入的 audit action 全集对齐(用户/部门/技能/令牌等敏感操作)
 const ACTION_LABEL: Record<string, string> = {
-  kb_upload: '上传文档',
-  kb_delete: '删除文档',
-  kb_update: '更新文档',
-  kb_retry: '重试文档',
-  kb_import: '批量导入',
-  kb_grant: '知识库授权',
-  kb_revoke: '知识库撤销授权',
-  kb_grants_replace: '知识库部门授权替换',
-  kb_folder_delete: '删除文件夹',
-  kb_embedding_model: '修改向量模型',
-  kb_embedding_reindex: '重建向量索引',
   skill_create: '上架技能',
   skill_update: '更新技能',
   skill_disable: '下架技能',
+  skill_enable: '重新上架技能',
   skill_grant: '技能授权',
   skill_revoke: '技能撤销授权',
   skill_grants_replace: '技能部门授权替换',
-  mcp_create: '上架 MCP',
-  mcp_update: '更新 MCP',
-  mcp_disable: '下架 MCP',
-  mcp_grant: 'MCP 授权',
-  mcp_revoke: 'MCP 撤销授权',
-  mcp_grants_replace: 'MCP 部门授权替换',
   user_create: '创建用户',
   user_update: '更新用户',
   user_delete: '删除用户',
@@ -80,7 +63,7 @@ export default function Audit() {
       const params = new URLSearchParams({ page: String(p), size: '50' })
       if (action) params.set('action', action)
       if (username) params.set('username', username)
-      const data = await request(`/api/admin/kb/audit?${params.toString()}`)
+      const data = await request(`/api/admin/audit?${params.toString()}`)
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setLogs(data.logs)
       setTotal(data.total)
@@ -106,7 +89,7 @@ export default function Audit() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">审计日志</h1>
-        <span className="text-sm text-muted-foreground">知识库与敏感操作记录(凭证下载见商城页)</span>
+        <span className="text-sm text-muted-foreground">敏感操作记录(用户/部门/技能等)</span>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
       {/* M8: 筛选条 */}
