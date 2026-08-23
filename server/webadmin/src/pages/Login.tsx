@@ -43,7 +43,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
       <div className="relative z-10 w-[420px] rounded-xl border border-slate-700/60 bg-white p-8 shadow-[0_25px_60px_rgba(0,0,0,0.35)]">
         <div className="mb-7 text-center">
-          <div className="mx-auto mb-4 flex h-13 w-13 h-14 w-14 items-center justify-center rounded-lg border border-blue-200 bg-blue-50">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-blue-200 bg-blue-50">
             <svg viewBox="0 0 32 32" className="h-8 w-8" fill="none" aria-hidden="true">
               <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(30,64,175,0.06)" stroke="#1E40AF" strokeWidth="2" />
               <path d="M12 12 L20 16 L12 20 Z" fill="#1E40AF" />

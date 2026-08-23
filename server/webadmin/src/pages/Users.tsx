@@ -347,8 +347,8 @@ export default function Users() {
               <TableHead>部门</TableHead>
               <TableHead>角色</TableHead>
               <TableHead>状态</TableHead>
-              <TableHead>本月流量</TableHead>
-              <TableHead className="text-right">操作</TableHead>
+              <TableHead className="min-w-0">本月流量</TableHead>
+              <TableHead className="w-1 text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -382,27 +382,35 @@ export default function Users() {
                       <div className="text-[11px] text-muted-foreground">
                         ¥{fmtMoney(u.monthly_cost ?? 0)} / {moneyQuotaLabel(u.quota_money, u.effective_quota_money)}
                       </div>
-                      {/* 中7:使用率基于生效配额(跟随默认也可见超限预警) */}
-                      {((u.effective_quota_tokens && u.effective_quota_tokens > 0) || (u.effective_quota_money && u.effective_quota_money > 0)) && (
-                        <Badge
-                          variant={Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money)) >= 90 ? 'destructive' : 'secondary'}
-                          className="h-4 px-1.5 text-[10px]"
-                        >
-                          {Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money))}%
-                        </Badge>
-                      )}
+                      {/* 中7:使用率基于生效配额(跟随默认也可见超限预警)。
+                          仅在配额限定时展示(0/跟随默认(不限)无意义);badge 定高 h-5 避免 % 被裁剪 */}
+                      {(() => {
+                        const rate = Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money))
+                        const hasLimit = (u.effective_quota_tokens && u.effective_quota_tokens > 0) || (u.effective_quota_money && u.effective_quota_money > 0)
+                        if (!hasLimit) return null
+                        return (
+                          <Badge
+                            variant={rate >= 90 ? 'destructive' : 'secondary'}
+                            className="h-5 px-1.5 text-[10px] leading-none"
+                          >
+                            {rate}%
+                          </Badge>
+                        )
+                      })()}
                     </div>
                   )}
                 </TableCell>
-              <TableCell className="text-right space-x-2">
-                <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
-                <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
-                {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
-                <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
-                <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
-                  {u.status === 1 ? '禁用' : '启用'}
-                </Button>
-                <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
+              <TableCell className="text-right">
+                <div className="flex justify-end gap-2 whitespace-nowrap">
+                  <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
+                  <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
+                  {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
+                  <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
+                  <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
+                    {u.status === 1 ? '禁用' : '启用'}
+                  </Button>
+                  <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
+                </div>
               </TableCell>
             </TableRow>
           ))}
@@ -444,7 +452,7 @@ export default function Users() {
                 onKeyDown={(e) => e.key === 'Enter' && create()} />
             </div>
             <div className="flex items-center gap-2">
-              <Switch checked={isAdmin} onCheckedChange={setIsAdmin} />
+              <Switch id="create-admin" checked={isAdmin} onCheckedChange={setIsAdmin} />
               <Label htmlFor="create-admin">管理员</Label>
             </div>
             {createErr && <div className="text-sm text-destructive">{createErr}</div>}
