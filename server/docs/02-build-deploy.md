@@ -45,6 +45,42 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 - 服务端放在企业内网,前置 HTTPS(反向代理终结 TLS);登录页拒绝非 HTTPS 远程地址。
 - 迁移/备份:单文件 SQLite,直接备份 `data/picoaide.db` + master key 文件。
 - 假上游联调:无外网/无 key 环境 `bash scripts/mock-upstream.go` 起 mock 上游,验证网关链路。
+- **容器化部署(推荐)**:见 [docs/DEPLOY.md](DEPLOY.md)(compose 私有网段+固定 IP、Caddy 双证书模式、deploy.sh 自动化、升级/备份/恢复)。
+
+## 3. Docker 镜像构建与发布
+
+### 3.1 镜像结构(server/Dockerfile,多阶段)
+
+- Stage1 `node:24-alpine` 构建 webadmin dist(go:embed 需要);
+- Stage2 `golang:1.26-alpine` 交叉编译:`CGO_ENABLED=0`,ldflags 注入 `-X main.version=$VERSION`(VERSION 默认 `dev`,CI 传 git tag 去 v 前缀);
+- Stage3 `alpine:3.21` 运行:非 root uid 10001(picoaide),`su-exec` 降权入口,`VOLUME /data`,`HEALTHCHECK` 与 compose 同源。
+
+### 3.2 构建命令
+
+```bash
+make docker-image                 # 本地单平台(版本=VERSION,默认 git describe)
+make docker-image TAG=v0.4.0      # 指定版本
+make release-export TAG=v0.4.0    # 离线导出 tar(内网 docker load)
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-server:v0.4.0 --push .
+```
+
+### 3.3 发布(CI 自动,Workflow: .github/workflows/docker.yml)
+
+- 触发:`push tag v*` 或手动 `workflow_dispatch`(填版本号);
+- 多平台 `linux/amd64,linux/arm64`;注入 VERSION;推送标签 `vX.Y.Z` / `vX.Y` / `latest`;
+- 附加 `type=gha` 构建缓存、`sbom=true`、`provenance=mode=max`;`imagetools inspect` 校验双架构 manifest;
+- 镜像地址 `ghcr.io/picoaide/picoaide-server`(部署 .env `SERVER_IMAGE` 可换私有 registry)。
+
+### 3.4 镜像验证清单
+
+| 检查 | 命令 | 预期 |
+|---|---|---|
+| 版本注入 | `docker run --rm <image> --version` | 构建时注入版本(非 `dev`) |
+| 非 root | `docker run --rm --entrypoint id <image>` | `uid=10001(picoaide)` |
+| 健康端点 | 起容器后 `curl /healthz` | 200 `{"ok":true}` |
+| 多架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | amd64+arm64 均在 |
+| 持久化 | 写数据→重启→数据在 | 卷挂载有效 |
 
 ## 3. 接入方(客户端)接入说明
 
