@@ -28,6 +28,9 @@ type Model struct {
 	// 费用按 0 计,页面标注「未定价」。embedding 复用 input 价。
 	InputPricePer1M  *float64 `json:"input_price_per_1m"`
 	OutputPricePer1M *float64 `json:"output_price_per_1m"`
+	// CacheInputPricePer1M 缓存命中输入价(0029,元/百万 token);nil = 未配置
+	// (计费按 input_price_per_1m,DeepSeek 官方缓存命中为输入价的 50% 左右)。
+	CacheInputPricePer1M *float64 `json:"cache_input_price_per_1m"`
 	// OffpeakDiscount 低谷折扣率(0023):nil/0/1 = 无峰谷价;0<d<1 = 空闲时段
 	// (高峰窗口外;窗口配置见 settings usage.peak_windows,北京时间)费用 × d。
 	OffpeakDiscount *float64 `json:"offpeak_discount"`
@@ -313,10 +316,10 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
-	var in, out, off sql.NullFloat64
+	var in, out, cache, off sql.NullFloat64
 	var pEnabled int
 	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams,
-		&in, &out, &off, &m.ProviderName, &m.ProviderChannel, &pEnabled); err != nil {
+		&in, &out, &cache, &off, &m.ProviderName, &m.ProviderChannel, &pEnabled); err != nil {
 		return nil, err
 	}
 	m.ProviderEnabled = pEnabled == 1
@@ -325,6 +328,9 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	}
 	if out.Valid {
 		m.OutputPricePer1M = &out.Float64
+	}
+	if cache.Valid {
+		m.CacheInputPricePer1M = &cache.Float64
 	}
 	if off.Valid {
 		m.OffpeakDiscount = &off.Float64
@@ -335,7 +341,7 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 // GetModel loads a model by id.
 func GetModel(db *sql.DB, id int64) (*Model, error) {
 	row := db.QueryRow(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
-		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.offpeak_discount,
+		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
 		p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`, id)
 	m, err := scanModel(row)
@@ -381,9 +387,9 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {
 		m.DefaultParams = "{}"
 	}
-	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, offpeak_discount)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
-		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount))
+	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
+		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return 0, ErrDuplicate
@@ -396,9 +402,9 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 
 // UpdateModel updates a model row.
 func UpdateModel(db *sql.DB, m *Model) error {
-	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_price_per_1m=?, output_price_per_1m=?, offpeak_discount=?
+	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_price_per_1m=?, output_price_per_1m=?, cache_input_price_per_1m=?, offpeak_discount=?
 		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
-		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
+		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return ErrDuplicate
@@ -472,7 +478,7 @@ func clearDefaultModelIf(tx *sql.Tx, name string) error {
 // 客户端可见性由 ListModels 的 WHERE p.enabled = 1 单独控制。
 func ListAdminModels(db *sql.DB) ([]Model, error) {
 	rows, err := db.Query(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
-		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.offpeak_discount,
+		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
 		p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
 		ORDER BY m.id`)

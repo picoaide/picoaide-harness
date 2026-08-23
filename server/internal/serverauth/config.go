@@ -38,6 +38,10 @@ func ConfigureProviders(db *sql.DB) ([]PasswordProvider, BrowserProvider) {
 		if p := ldapFromSettings(settings); p != nil {
 			pwds = append(pwds, p)
 		}
+	case "oidc":
+		// OIDC 纯浏览器登录:保留本地密码 provider 作为回退(管理员/断网场景),
+		// 浏览器 OIDC flow 由 RegisterOIDC 单独启用。
+		pwds = append(pwds, NewLocalProvider(db))
 	}
 	var browser BrowserProvider
 	if p := oidcFromSettings(settings); p != nil {
