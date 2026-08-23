@@ -1,31 +1,44 @@
-<h1 align="center">DeepSeek Harness Desktop (DSH Desktop)</h1>
+<h1 align="center">PicoAide Harness</h1>
 
 <p align="center">
-  <strong>An open-source DeepSeek Harness desktop client for Windows and macOS.</strong><br>
-  One-click download, ready to use out of the box.<br>
-  Everything is a plugin — the desktop itself is a plugin.
-</p>
-
-<p align="center"><sub>Community maintained and not an official DeepSeek product. <a href="README.md">中文</a> · English</sub></p>
-
-<p align="center">
-  <img src="assets/desktop-hero-en.jpg" alt="DeepSeek Harness Desktop" width="100%">
+  <strong>Enterprise-grade DeepSeek Harness platform.</strong><br>
+  Desktop client + local agent engine + admin console, ready out of the box.<br>
+  Everything is a plugin, and the desktop shell itself is a plugin.
 </p>
 
 <p align="center">
   <a href="https://github.com/picoaide/picoaide-harness/releases/latest"><img src="https://img.shields.io/github/v/release/picoaide/picoaide-harness?style=flat&amp;label=release&amp;color=4D6BFE" alt="Latest release"></a>
   <a href="https://github.com/picoaide/picoaide-harness/releases"><img src="https://img.shields.io/github/downloads/picoaide/picoaide-harness/total?style=flat&amp;label=downloads&amp;color=4D6BFE" alt="Total downloads"></a>
-  <a href="https://github.com/picoaide/picoaide-harness"><img src="https://img.shields.io/github/stars/picoaide/picoaide-harness?style=flat&amp;label=%E2%98%85&amp;color=08C" alt="GitHub stars"></a>
+  <a href="https://github.com/picoaide/picoaide-harness"><img src="https://img.shields.io/github/stars/picoaide/picoaide-harness?style=flat&amp;label=stars&amp;color=08C" alt="GitHub stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
-  <a href="https://discord.gg/TJeGqKRNM"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat&amp;logo=discord&amp;logoColor=white" alt="Join Discord"></a>
-  <img src="https://img.shields.io/badge/macOS%20%7C%20Windows-4493F8?style=flat-square" alt="Supported platforms: macOS and Windows">
 </p>
 
-<p align="center">
-  <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
-</p>
+PicoAide Harness packages [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) local agents, the Host service, its plugin system, and enterprise-grade administration into one platform:
 
-DSH Desktop packages the local Web UI, Host service, and plugin system from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) into a native desktop application. Official Harness runs unchanged at a pinned version; Desktop provides the window, tray, terminal, updates, and work profiles through the official plugin composition.
+- **Desktop client**: native windows, system tray, terminal, automatic updates, no Node.js or command-line setup required;
+- **Local service**: automatically starts, stops, and restores the local Harness service while keeping data on your machine;
+- **Admin console**: a web-based console covering users, departments, gateway, usage, marketplace, and audit;
+- **Plugin ecosystem**: the official DeepSeek Harness runs unchanged at a pinned version; the desktop shell and business plugins compose through the official mechanism.
+
+<a id="screenshots"></a>
+
+## Screenshots
+
+### Desktop client
+
+| Main window | Chat & memory | Connector hub |
+| --- | --- | --- |
+| <img src="assets/screenshots/desktop-main.png" alt="Desktop main window" width="100%"> | <img src="assets/screenshots/desktop-chat.png" alt="Chat and memory" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="Connector hub" width="100%"> |
+
+| Skill center | Scheduled tasks | Task board |
+| --- | --- | --- |
+| <img src="assets/screenshots/desktop-skills.png" alt="Skill center" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="Scheduled tasks" width="100%"> | <img src="assets/screenshots/desktop-taskboard.png" alt="Task board" width="100%"> |
+
+### Admin console
+
+| Users | Gateway | Usage | Audit |
+| --- | --- | --- | --- |
+| <img src="assets/screenshots/admin-users.png" alt="User management" width="100%"> | <img src="assets/screenshots/admin-gateway.png" alt="Gateway configuration" width="100%"> | <img src="assets/screenshots/admin-usage.png" alt="Usage statistics" width="100%"> | <img src="assets/screenshots/admin-audit.png" alt="Audit log" width="100%"> |
 
 <a id="run"></a>
 
@@ -36,102 +49,96 @@ Current release installers support Windows x64, Apple Silicon macOS, and Linux x
 | Platform | Download | Installation |
 | --- | --- | --- |
 | Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-x64-Setup.exe) | Run the NSIS installer and follow its prompts |
-| macOS Apple Silicon | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-mac.dmg) | Open the DMG and drag DSH Desktop into Applications |
+| macOS Apple Silicon | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
 | Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-x86_64.AppImage) | Grant execute permission and run |
 
 Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [user guide](docs/user-guide.en.md) and [FAQ](docs/faq.en.md) for plugin commands, platform details, and troubleshooting.
 
-Together with every plugin author, we want to build an open, composable, and sustainable DSH plugin ecosystem where plugins grow alongside each other. Read the [DSH plugin ecosystem manifesto](docs/plugin-ecosystem.en.md).
+## Core advantages
+
+### Enterprise-grade, all in one
+
+- **Desktop + service + console**: the client handles interaction, the local service runs agents, and the admin console manages accounts, quotas, and audit;
+- **Multi-user isolation**: connector credentials, browser sessions, scheduled tasks, and the task board are isolated per account; logout tears down every session;
+- **Usage and quotas**: per-user, per-model billing, limits, and exemptions with peak-hour tiered pricing.
+
+### Production-ready productivity tools
+
+- **Connector hub**: SaleEasy, DingTalk, Beisen, Feishu, Moka, WeCom connectors with OAuth and locally encrypted credential storage;
+- **Skill center**: one-click install of code-review, competitor-analysis, contract-review, data-extract, and more;
+- **Scheduled tasks and task board**: scheduled execution, execution history, and a four-state board driven by the Host scheduler;
+- **Embedded browser**: the agent can take over the browser to act, with multi-tab, snapshots, permission approval, and download control;
+- **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and branch.
+
+### Security and compliance
+
+- Credentials written atomically with 0600/0700 permissions, plus symlink, path-escape, and oversized-read defenses;
+- OAuth state validation and timeouts; login/logout reloads to sever old sessions;
+- Admin operations are auditable, covering users, departments, quotas, gateway, and marketplace;
+- Upstream DeepSeek Harness runs at a pinned version; the shell and plugins stay one-way dependent without forking upstream code.
+
+### Plugin-first architecture
+
+- Everything is a plugin: the core agents, Web UI, desktop shell, connectors, tasks, browser, and memory all compose through the official Cordis plugin mechanism;
+- The desktop shell itself is a legitimate DSH plugin; third-party plugins and desktop abilities share the same composition path;
+- Upstream is pinned, and future sync follows versions only without breaking local extensions.
 
 ## Documentation
 
-Ordinary users can start with the [user guide](docs/user-guide.en.md); the developer documentation is only needed when extending or maintaining the application.
+Ordinary users can start with the [user guide](docs/user-guide.en.md); developer docs are only needed for extension or maintenance.
 
 ### User documentation
 
-| Goal | Entry point |
+| Goal | Entry |
 | --- | --- |
-| Install and use the application | [User guide](docs/user-guide.en.md) |
-| Check platforms, prerequisites, and product boundaries | [FAQ](docs/faq.en.md) |
-| Understand why the project exists | [Why DSH Desktop](docs/why-desktop.en.md) |
-| See the full documentation and README map | [Documentation index](docs/README.en.md) |
+| Installation and daily use | [User guide](docs/user-guide.en.md) |
+| Platform, environment, and usage boundaries | [FAQ](docs/faq.en.md) |
+| Why this project exists | [Why PicoAide Harness](docs/why-desktop.en.md) |
+| Full documentation index | [Docs index](docs/README.md) |
 
 ### Developer and maintainer documentation
 
-| Goal | Entry point |
+| Goal | Entry |
 | --- | --- |
-| Read the plugin ecosystem manifesto | [Plugin ecosystem manifesto](docs/plugin-ecosystem.en.md) |
-| Build ordinary or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
-| Join the unified plugin-contract discussion | [DSH Community Fabric Draft](community/fabric/README.md) |
-| See the research behind the unified plugin framework | [Framework and real-plugin research](community/fabric/docs/research/mature-plugin-frameworks.md) |
-| See what Desktop plugins can use | [Desktop plugin API](packages/host/desktop/docs/plugin-services.md) |
-| Understand how the desktop works | [Architecture](docs/architecture.en.md) |
-| Read package-level build and release details | [`dsh-plugin-desktop/README.md`](packages/host/desktop/README.md) |
+| Write plain or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
+| Unified plugin contract discussion | [DSH Community Fabric Draft](community/fabric/README.md) |
+| Desktop plugin capabilities | [Desktop plugin services](packages/host/desktop/docs/plugin-services.zh.md) |
+| How the desktop application works | [Architecture](docs/architecture.en.md) |
+| Package-level build and release details | [`dsh-plugin-desktop/README.md`](packages/host/desktop/README.md) |
 
-## Features
+## Plugin ecosystem
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <h3>Desktop</h3>
-      <p>Bring the official DeepSeek Harness local Web UI to a native desktop application. The app starts and manages the local Harness service, integrates the system tray and desktop window, and requires no Node.js installation or command-line setup.</p>
-    </td>
-    <td width="50%" valign="top">
-      <h3>Mobile Remote Control <img src="https://img.shields.io/badge/COMING_SOON-F59E0B?style=flat-square" alt="Coming Soon"></h3>
-      <p>Connect to Desktop from iOS and Android to start tasks, monitor Agent progress, and send follow-ups from your phone.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <h3>Co-build the Plugin Ecosystem</h3>
-      <p>The DSH plugin ecosystem is built by the community. Official, desktop, and third-party plugins follow the same conventions, so they can be installed together and work together without interfering with each other. Join us — read the <a href="docs/plugin-ecosystem.en.md">DSH plugin ecosystem manifesto</a>.</p>
-    </td>
-  </tr>
-</table>
+Plugins are extension packages that add abilities to DSH — models, tools, interfaces, and workflows can all be plugins, composed like building blocks.
 
-## Plugin Ecosystem
+PicoAide Harness does not fork upstream source or hard-code a fixed shell. The official DeepSeek Harness runs unchanged at a pinned version; the desktop shell — windows, tray, terminal, updates, workspaces — is itself a legitimate DSH plugin composed into the same runtime through the official plugin mechanism. From the core agent to the desktop shell, the whole product follows one rule: "everything is a plugin". Official ecosystem plugins work as-is, and desktop abilities are composed, replaced, and evolved the same way.
 
-Plugins are extensions that add capabilities to DSH — models, tools, interfaces, and workflows can all be plugins, combined like building blocks.
-
-DSH Desktop does not fork or modify upstream source, and it is not a fixed, hardcoded shell. Official DeepSeek Harness runs unchanged at a pinned version; the desktop shell itself — the window, tray, terminal, updates, and work profiles — is a legitimate DSH plugin, composed into the same runtime through the official plugin mechanism. From the core agent to the desktop shell, the whole product follows the same "everything is a plugin" rule: plugins from the official ecosystem work directly, and desktop capabilities are combined, replaced, and evolve the same way.
-
-We want the plugin ecosystem to work like a phone app store: every plugin is built against the same set of rules, so plugins can be installed together and work together without interfering with each other.
-
-### For developers
-
-Unlike many other projects, this project itself is a DSH [plugin](docs/plugin-development.en.md): the desktop shell composes through the same official path as third-party plugins. Desktop plugin capabilities are now available. We provide Desktop services so plugin developers can integrate their plugins with desktop capabilities: for example, viewing and switching work profiles, or installing, updating, and removing plugins in the active profile. See the [Desktop plugin API](packages/host/desktop/docs/plugin-services.md) for complete usage details. See [Why DSH Desktop](docs/why-desktop.en.md) and [Plugin development](docs/plugin-development.en.md) for the reasoning and the third-party boundary.
-
-## Relationship to the Official Project
+## Relationship with the official project
 
 This project is built on [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness).
 
-This project is an implementation built on DeepSeek Harness and the Cordis plugin model, intended to provide the foundation for the DSH desktop experience.
+The official project provides the core agent abilities, plugin system, and Web UI. This project is responsible for:
 
-The official project provides the core agent capabilities, plugin system, and Web UI. This project primarily provides:
+- Desktop application packaging (windows, tray, terminal, updates, workspaces)
+- Local service start, stop, and recovery
+- Enterprise admin console (users, departments, gateway, usage, marketplace, audit)
+- macOS, Windows, and Linux installer builds and releases
+- Interface experience better suited to desktop and team use
 
-- Desktop application packaging
-- Starting, stopping, and recovering the local service
-- Desktop window and system tray integration
-- macOS and Windows installer builds and releases
-- An interface designed for desktop use
+If you want to run Harness from the command line or work on core features, prefer the official repository.
 
-If you prefer to run Harness from the command line or contribute to its core functionality, refer to the official repository first.
+## Special thanks
 
-## Special Thanks
+Special thanks to the [DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) and the DeepSeek AI team. This project is built on a pinned upstream version, and the core agents, models, tools, sessions, Web UI, and plugin ecosystem all come from that project.
 
-Special thanks to the [original DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) and the DeepSeek AI team. DSH Desktop is built from a pinned upstream checkout, and its core agents, models, tools, sessions, Web UI, and plugin ecosystem come from that project.
+Thanks also to [Cordis](https://github.com/cordiverse/cordis) for the plugin foundation, and to the [Koishi.js](https://koishi.chat/) project and community for years of plugin practices, tooling, and experience.
 
-We also thank [Cordis](https://github.com/cordiverse/cordis) for the plugin foundation that makes this composition possible. DSH Desktop would not exist without these open-source projects.
-
-We are also grateful to the [Koishi.js](https://koishi.chat/) project and community for their long-standing work on plugin practices, tooling, and shared knowledge, and to everyone who contributes discussions, testing, feedback, and plugins.
-
-Also, and you.
+And to everyone who uses, supports, and helps build this.
 
 <a id="run-from-source"></a>
 
 ## Development
 
-Desktop source lives in `packages/host/desktop/`. The outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
+Desktop code lives in `packages/host/desktop/`; the outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
 
 ```sh
 git submodule update --init --recursive
@@ -139,65 +146,30 @@ corepack yarn install --immutable
 corepack yarn dev
 ```
 
-Use `corepack yarn check` for the headless gate. The [architecture](docs/architecture.en.md) and package [`README`](packages/host/desktop/README.md) describe the full build, test, and release boundaries. See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) for how to contribute.
+Headless checks use `corepack yarn check`; full build, test, and release boundaries are described in the [architecture docs](docs/architecture.md) and the package-level [`README`](packages/host/desktop/README.md). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.
 
 ## Community
 
-Choose whichever platform you prefer to discuss usage, plugin development, and project updates.
+Discord: [Join the PicoAide Harness community](https://discord.gg/TJeGqKRNM)
 
-<table>
-  <thead>
-    <tr>
-      <th align="center">WeChat Group</th>
-      <th align="center">QQ Group</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center"><img src="assets/community-wechat-group.png" alt="DeepSeek Harness Desktop WeChat group QR code" width="180" height="180"></td>
-      <td align="center"><img src="assets/community-qq-group.jpg" alt="DeepSeek Harness Desktop QQ group QR code" width="180" height="180"></td>
-    </tr>
-  </tbody>
-</table>
-
-Discord: [Join the DeepSeek Harness Desktop community](https://discord.gg/TJeGqKRNM)
-
-If you would like to join our technical team, contact us at [t4wefan@qq.com](mailto:t4wefan@qq.com).
-
-## Related Links
-
-Ecosystem projects and developer tools around DeepSeek Harness.
-
-| Project | About | Link |
-| --- | --- | --- |
-| dshfind | The learning & sharing community for DeepSeek Harness (DSH). | [GitHub](https://github.com/hikariming/dshfind) |
-| DSH 1024Store | A community plugin directory for the DeepSeek Harness (DSH) ecosystem (4,120 plugins), open-sourcing an online marketplace, a collection pipeline, and a public query API — fork it to deploy your own marketplace. | [GitHub](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) |
-| ModLens | Adds OCR, layout, and semantic vision capabilities to DeepSeek Harness and text-only coding agents. | [GitHub](https://github.com/liustack/modlens) · [Website](https://liustack.dev) |
-| DeepSeek Harness Orange Book | Community field manual for DeepSeek Harness. | [GitHub](https://github.com/alchaincyf/deepseek-harness-orange-book) |
-| dsh-web-ui | DeepSeek Harness Web UI plugins and themes. | [GitHub](https://github.com/zhu1090093659/dsh-web-ui) · [Gallery](https://gallery.dsh-market.com) |
-| dsh-TUI | Full-screen interactive terminal interface for DeepSeek Harness. | [GitHub](https://github.com/ccch1mneyyy/dsh-TUI) |
-| dsh-tianshu-tui | Minimalist interactive terminal UI plugin for the DSH web client with a self-developed ANSI rendering core for silky-smooth output; adds TDD, evidence gates, and vision/image module workflows on top of the official UI. | [GitHub](https://github.com/huiliyi37/dsh-tianshu-tui) |
-| Agents-Anywhere | Remote-control your desktop coding agent from your phone. | [GitHub](https://github.com/picoaide/picoaide-harness) |
-| DSH-better-sidebar | Sidebar workbench for DeepSeek Harness with files, terminal, Git, and subagents. | [GitHub](https://github.com/omdsh-dev/DSH-better-sidebar) |
-| Awesome DeepSeek Harness | Curated list of DeepSeek Harness plugins, tools, and infrastructure. | [GitHub](https://github.com/0xsline/awesome-deepseek-harness) · [Website](https://deepseekdocs.com/) |
-| MkSaaS · TanStarter (Sponsor) | Commercial SaaS starter templates for indie developers. MkSaaS is built on Next.js; TanStarter on TanStack Start and Cloudflare, with AI, auth, payments, and admin baked in. | [MkSaaS](https://mksaas.com) · [TanStarter](https://tanstarter.dev) |
-
-<sub>To list your project, join the WeChat group and message @王博升Benson, or contact t4wefan@qq.com, or <a href="https://github.com/picoaide/picoaide-harness/issues">open an issue</a>.</sub>
+If you would like to join our technical team, reach us at [t4wefan@qq.com](mailto:t4wefan@qq.com).
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
 
-> This is a community desktop edition built on DeepSeek Harness. It is not an official DeepSeek product.
+> This project is a community build based on DeepSeek Harness and is not an official DeepSeek product.
 
-> DeepSeek is a trademark of DeepSeek AI. DSH Desktop is an independent community project, not affiliated with or endorsed by DeepSeek.
+> This project is completely open source and free. If anyone tries to sell this software to you in any form, please refuse the transaction.
+
+> DeepSeek is a trademark of DeepSeek AI. PicoAide Harness is an independent community project with no affiliation to or endorsement from DeepSeek.
 
 ## Star History
 
 <a href="https://www.star-history.com/?repos=picoaide%2Fpicoaide-harness&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=picoaide/picoaide-harness&type=date&theme=dark&legend=top-left&sealed_token=BRTkOyC4czCEkIyFb5-QxrsC-kaDotBJ8tsjxrWs-UGfmBqfRCXSwieZPlVTCYOjJVEZ29uLvmBjAPREB524J5dPN1jk-UA7ajFdLdrbjumJqoOBeGWmig" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=picoaide/picoaide-harness&type=date&legend=top-left&sealed_token=BRTkOyC4czCEkIyFb5-QxrsC-kaDotBJ8tsjxrWs-UGfmBqfRCXSwieZPlVTCYOjJVEZ29uLvmBjAPREB524J5dPN1jk-UA7ajFdLdrbjumJqoOBeGWmig" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=picoaide/picoaide-harness&type=date&legend=top-left&sealed_token=BRTkOyC4czCEkIyFb5-QxrsC-kaDotBJ8tsjxrWs-UGfmBqfRCXSwieZPlVTCYOjJVEZ29uLvmBjAPREB524J5dPN1jk-UA7ajFdLdrbjumJqoOBeGWmig" />
- </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=picoaide/picoaide-harness&type=date&theme=dark&legend=top-left&sealed_token=BRTkOyC4czCEkIyFb5-QxrsC-kaDotBJ8tsjxrWs-UGfmBqfRCXSwieZPlVTCYOjJVEZ29uLvmBjAPREB524J5dPN1jk-UA7ajFdLdrbjumJqoOBeGWmig" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=picoaide/picoaide-harness&type=date&legend=top-left&sealed_token=BRTkOyC4czCEkIyFb5-QxrsC-kaDotBJ8tsjxrWs-UGfmBqfRCXSwieZPlVTCYOjJVEZ29uLvmBjAPREB524J5dPN1jk-UA7ajFdLdrbjumJqoOBeGWmig" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=picoaide/picoaide-harness&type=date&legend=top-left&sealed_token=BRTkOyC4czCEkIyFb5-QxrsC-kaDotBJ8tsjxrWs-UGfmBqfRCXSwieZPlVTCYOjJVEZ29uLvmBjAPREB524J5dPN1jk-UA7ajFdLdrbjumJqoOBeGWmig" />
+  </picture>
 </a>
