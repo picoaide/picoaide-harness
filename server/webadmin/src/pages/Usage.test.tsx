@@ -190,9 +190,9 @@ describe('Usage 用量统计页', () => {
     expect(bytes[1]).toBe(0xbb)
     expect(bytes[2]).toBe(0xbf)
     const text = new TextDecoder().decode(bytes)
-    expect(text).toContain('label,requests,prompt_tokens,completion_tokens,embed_tokens,total_tokens,cost')
+    expect(text).toContain('label,requests,prompt_tokens,completion_tokens,cache_tokens,embed_tokens,total_tokens,cost')
     // total_tokens 为 chat 口径(不含 embedding):第三行 3000+1000-500=3500
-    expect(text).toContain('2026-08-12,30,3000,1000,500,3500,2.4000')
+    expect(text).toContain('2026-08-12,30,3000,1000,0,500,3500,2.4000')
   })
 
   it('导出 CSV:label 含逗号/引号时转义,以 = 开头时防公式注入', async () => {

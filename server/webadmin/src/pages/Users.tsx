@@ -8,8 +8,12 @@ import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Card } from '../components/ui/card'
 import { Switch } from '../components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { PageHeader } from '../components/page-header'
+import { EmptyState } from '../components/empty-state'
+import { Search, Users as UsersIcon } from 'lucide-react'
 
 interface User {
   id: number
@@ -134,6 +138,11 @@ export default function Users() {
 
   async function create() {
     if (busy) return // 双击守卫(审计2026-W9)
+    setCreateErr('')
+    // 前端必填校验(UX 改进):不在服务端报错后才提示
+    if (!username.trim()) { setCreateErr('请填写用户名'); return }
+    if (!password) { setCreateErr('请填写密码'); return }
+    if (password.length < 10) { setCreateErr('密码至少 10 位'); return }
     setBusy(true)
     try {
       await request('/api/admin/users', {
@@ -174,6 +183,8 @@ export default function Users() {
   async function remove(u: User) {
     if (busy) return // 双击守卫(审计2026-W9)
     if (!window.confirm(`确定删除用户 ${u.username}?`)) return
+    // 删除前再提示后果:服务端级联清理其令牌/用量/组归属,不可恢复
+    if (!window.confirm(`再确认:删除 ${u.username} 将同时清除其全部 API 令牌、用量记录与组归属,此操作不可恢复。确定继续?`)) return
     setBusy(true)
     try {
       await request(`/api/admin/users/${u.id}`, { method: 'DELETE' })
@@ -304,88 +315,119 @@ export default function Users() {
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">用户管理</h1>
-        <div className="flex items-center gap-2">
-          <Input
-            className="w-56"
-            placeholder="按用户名搜索…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && load(1, q)}
-          />
-          <Button variant="outline" onClick={() => load(1, q)}>搜索</Button>
-          <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
-        </div>
-      </div>
+    <div className="space-y-5">
+      <PageHeader
+        title="用户管理"
+        desc="企业成员账号、部门归属、流量配额与登录令牌"
+        actions={
+          <>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="w-56 pl-8"
+                placeholder="按用户名搜索…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && load(1, q)}
+              />
+            </div>
+            <Button variant="outline" onClick={() => load(1, q)}>搜索</Button>
+            <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
+          </>
+        }
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>ID</TableHead>
-            <TableHead>用户名</TableHead>
-            <TableHead>部门</TableHead>
-            <TableHead>角色</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>本月流量</TableHead>
-            <TableHead className="text-right">操作</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {users.map((u) => (
-            <TableRow key={u.id}>
-              <TableCell>{u.id}</TableCell>
-              <TableCell>{u.username}</TableCell>
-              <TableCell>
-                {(u.groups ?? []).length > 0
-                  ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
-                  : <span className="text-xs text-muted-foreground">—</span>}
-              </TableCell>
-              <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
-              <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
-              <TableCell>
-                {u.is_admin ? (
-                  <span className="text-xs text-muted-foreground">豁免</span>
-                ) : (
-                  <div className="space-y-0.5">
-                    <div className="text-xs">
-                      <span className="font-medium">{fmtTokens(u.monthly_usage ?? 0)}</span>
-                      <span className="text-muted-foreground"> / {quotaLabel(u.quota_tokens, u.effective_quota_tokens)}</span>
+      <Card>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>ID</TableHead>
+              <TableHead>用户名</TableHead>
+              <TableHead>部门</TableHead>
+              <TableHead>角色</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead className="min-w-0">本月流量</TableHead>
+              <TableHead className="w-1 text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {users.map((u) => (
+              <TableRow key={u.id}>
+                <TableCell className="font-mono text-xs text-slate-400">{u.id}</TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-bold ${u.is_admin ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                      {u.username.slice(0, 1).toUpperCase()}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      ¥{fmtMoney(u.monthly_cost ?? 0)} / {moneyQuotaLabel(u.quota_money, u.effective_quota_money)}
-                    </div>
-                    {/* 中7:使用率基于生效配额(跟随默认也可见超限预警) */}
-                    {((u.effective_quota_tokens && u.effective_quota_tokens > 0) || (u.effective_quota_money && u.effective_quota_money > 0)) && (
-                      <Badge
-                        variant={Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money)) >= 90 ? 'destructive' : 'secondary'}
-                        className="h-4 px-1.5 text-[10px]"
-                      >
-                        {Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money))}%
-                      </Badge>
-                    )}
+                    <span className="font-medium">{u.username}</span>
                   </div>
-                )}
-              </TableCell>
-              <TableCell className="text-right space-x-2">
-                <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
-                <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
-                {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
-                <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
-                <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
-                  {u.status === 1 ? '禁用' : '启用'}
-                </Button>
-                <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
+                </TableCell>
+                <TableCell>
+                  {(u.groups ?? []).length > 0
+                    ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
+                    : <span className="text-xs text-muted-foreground">—</span>}
+                </TableCell>
+                <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
+                <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {u.is_admin ? (
+                    <span className="text-muted-foreground">豁免</span>
+                  ) : (
+                    <div className="space-y-0.5">
+                      <div>
+                        <span className="font-semibold text-slate-800">{fmtTokens(u.monthly_usage ?? 0)}</span>
+                        <span className="text-muted-foreground"> / {quotaLabel(u.quota_tokens, u.effective_quota_tokens)}</span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        ¥{fmtMoney(u.monthly_cost ?? 0)} / {moneyQuotaLabel(u.quota_money, u.effective_quota_money)}
+                      </div>
+                      {/* 中7:使用率基于生效配额(跟随默认也可见超限预警)。
+                          仅在配额限定时展示(0/跟随默认(不限)无意义);badge 定高 h-5 避免 % 被裁剪 */}
+                      {(() => {
+                        const rate = Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money))
+                        const hasLimit = (u.effective_quota_tokens && u.effective_quota_tokens > 0) || (u.effective_quota_money && u.effective_quota_money > 0)
+                        if (!hasLimit) return null
+                        return (
+                          <Badge
+                            variant={rate >= 90 ? 'destructive' : 'secondary'}
+                            className="h-5 px-1.5 text-[10px] leading-none"
+                          >
+                            {rate}%
+                          </Badge>
+                        )
+                      })()}
+                    </div>
+                  )}
+                </TableCell>
+              <TableCell className="text-right">
+                <div className="flex justify-end gap-2 whitespace-nowrap">
+                  <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
+                  <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
+                  {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
+                  <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
+                  <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
+                    {u.status === 1 ? '禁用' : '启用'}
+                  </Button>
+                  <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
+                </div>
               </TableCell>
             </TableRow>
           ))}
           {users.length === 0 && (
-            <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无匹配用户,调整搜索条件或点击「新建用户」</TableCell></TableRow>
+            <TableRow>
+              <TableCell colSpan={7} className="border-0 p-0">
+                <EmptyState
+                  icon={<UsersIcon className="h-5 w-5 text-muted-foreground" />}
+                  title="暂无匹配用户"
+                  desc="调整搜索条件或点击「新建用户」创建成员账号"
+                />
+              </TableCell>
+            </TableRow>
           )}
         </TableBody>
       </Table>
+      </Card>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1, q)}>上一页</Button>
         <span className="text-sm text-muted-foreground">第 {page}/{pages} 页 · 共 {total} 人</span>
@@ -401,14 +443,16 @@ export default function Users() {
           <div className="space-y-4">
             <div className="space-y-1">
               <Label htmlFor="create-username">用户名</Label>
-              <Input id="create-username" value={username} onChange={(e) => setUsername(e.target.value)} />
+              <Input id="create-username" value={username} onChange={(e) => setUsername(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && create()} autoFocus />
             </div>
             <div className="space-y-1">
               <Label htmlFor="create-password">密码</Label>
-              <Input id="create-password" type="password" placeholder="至少 10 位" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <Input id="create-password" type="password" placeholder="至少 10 位" value={password} onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && create()} />
             </div>
             <div className="flex items-center gap-2">
-              <Switch checked={isAdmin} onCheckedChange={setIsAdmin} />
+              <Switch id="create-admin" checked={isAdmin} onCheckedChange={setIsAdmin} />
               <Label htmlFor="create-admin">管理员</Label>
             </div>
             {createErr && <div className="text-sm text-destructive">{createErr}</div>}
