@@ -57,9 +57,35 @@ function workspaceNames(workspace) {
   ].filter(Boolean)
 }
 
+/**
+ * Expand a workspace glob with single `*` segments into concrete package
+ * dirs (only simple star segments; no `**` or character classes).
+ */
+function expandWorkspacePattern(pattern) {
+  if (!pattern.includes('*')) return [pattern]
+  const segments = pattern.split('/')
+  const seeds = ['']
+  for (const segment of segments) {
+    const next = []
+    for (const seed of seeds) {
+      if (segment === '*') {
+        const base = resolve(root, seed || '.')
+        if (!existsSync(base)) continue
+        for (const entry of readdirSync(base, { withFileTypes: true })) {
+          if (entry.isDirectory()) next.push(seed ? `${seed}/${entry.name}` : entry.name)
+        }
+      } else {
+        next.push(seed ? `${seed}/${segment}` : segment)
+      }
+    }
+    seeds.splice(0, seeds.length, ...next)
+  }
+  return seeds.filter(Boolean)
+}
+
 /** Collect every manifest under the root workspaces (skip node_modules etc). */
 function manifests(workspace) {
-  const paths = ['package.json', ...(workspace.workspaces ?? []).map(p => `${p}/package.json`)]
+  const paths = ['package.json', ...(workspace.workspaces ?? []).flatMap(expandWorkspacePattern).map(p => `${p}/package.json`)]
   return paths.filter(p => existsSync(resolve(root, p))).map(p => ({ path: p, json: readJson(p) }))
 }
 
@@ -76,11 +102,22 @@ function bumpManifest(manifest, from, to) {
     const deps = manifest.json[field]
     if (!deps || typeof deps !== 'object') continue
     for (const [name, range] of Object.entries(deps)) {
-      const next = bumpRange(range, from, to)
+      let next = bumpRange(range, from, to)
+      // Patch resolutions embed the version twice: the URL-encoded npm
+      // descriptor and the patch file name (`dsh-x@VERSION.patch`).
+      if (field === 'resolutions' && typeof range === 'string' && name.startsWith('@deepseek-ai/dsh-')) {
+        const patched = range
+          .replaceAll(`npm%3A${from}`, `npm%3A${to}`)
+          .replaceAll(`@${from}.patch`, `@${to}.patch`)
+        if (patched !== range) next = patched
+      }
       if (next !== range) { deps[name] = next; changed += 1 }
-      // Patch resolutions carry the version in the key too.
+      // Patch resolutions carry the version in the key too (`@npm:V`,
+      // possibly caret-prefixed, e.g. `@npm:^0.1.0-rc.8`).
       if (field === 'resolutions' && name.includes(`@npm:${from}`)) {
-        const nextKey = name.replace(`@npm:${from}`, `@npm:${to}`)
+        const nextKey = name
+          .replace(`@npm:^${from}`, `@npm:^${to}`)
+          .replace(`@npm:${from}`, `@npm:${to}`)
         if (nextKey !== name) {
           deps[nextKey] = deps[name]
           delete deps[name]
@@ -112,7 +149,10 @@ function migratePatchFiles(from, to) {
 /** Run a command, returning { status, stdout } without throwing. */
 function spawn(cmd, cwd = root, env = {}) {
   try {
-    const out = execFileSync('bash', ['-lc', cmd], {
+    // Use a plain (non-login) shell: a login shell re-derives PATH from the
+    // profile, which drops the nvm bin dir once HOME is overridden by
+    // yarnEnv(). Inheriting process.env.PATH keeps corepack/yarn resolvable.
+    const out = execFileSync('bash', ['-c', cmd], {
       cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env },
     })
     return { status: 0, out }
