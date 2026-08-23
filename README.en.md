@@ -150,9 +150,7 @@ Headless checks use `corepack yarn check`; full build, test, and release boundar
 
 ## Community
 
-Discord: [Join the PicoAide Harness community](https://discord.gg/TJeGqKRNM)
-
-If you would like to join our technical team, reach us at [t4wefan@qq.com](mailto:t4wefan@qq.com).
+For issues or support, please [submit an issue](https://github.com/picoaide/picoaide-harness/issues).
 
 ## License
 
