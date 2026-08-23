@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
+import { PageHeader } from '../components/page-header'
 import { isModelPriced } from '../lib/format'
 
 interface Provider {
@@ -495,7 +496,10 @@ export default function Gateway() {
 
   return (
     <div className="space-y-6">
-      <h1 className="page-title">网关配置</h1>
+      <PageHeader
+        title="网关配置"
+        desc="模型与上游接入、限流配额、峰谷计费与认证方式"
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {okMsg && <div className="text-sm text-green-600">{okMsg}</div>}
       {syncMsg && <div className="text-sm text-green-600">{syncMsg}</div>}

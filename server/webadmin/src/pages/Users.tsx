@@ -8,8 +8,12 @@ import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Card } from '../components/ui/card'
 import { Switch } from '../components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { PageHeader } from '../components/page-header'
+import { EmptyState } from '../components/empty-state'
+import { Search, Users as UsersIcon } from 'lucide-react'
 
 interface User {
   id: number
@@ -312,47 +316,51 @@ export default function Users() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="page-title">用户管理</h1>
-          <p className="page-desc mt-1">企业成员账号、部门归属、流量配额与登录令牌</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Input
-            className="w-56"
-            placeholder="按用户名搜索…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && load(1, q)}
-          />
-          <Button variant="outline" onClick={() => load(1, q)}>搜索</Button>
-          <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
-        </div>
-      </div>
+      <PageHeader
+        title="用户管理"
+        desc="企业成员账号、部门归属、流量配额与登录令牌"
+        actions={
+          <>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="w-56 pl-8"
+                placeholder="按用户名搜索…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && load(1, q)}
+              />
+            </div>
+            <Button variant="outline" onClick={() => load(1, q)}>搜索</Button>
+            <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
+          </>
+        }
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>ID</TableHead>
-            <TableHead>用户名</TableHead>
-            <TableHead>部门</TableHead>
-            <TableHead>角色</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>本月流量</TableHead>
-            <TableHead className="text-right">操作</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {users.map((u) => (
-            <TableRow key={u.id}>
-              <TableCell>{u.id}</TableCell>
-              <TableCell>{u.username}</TableCell>
-              <TableCell>
-                {(u.groups ?? []).length > 0
-                  ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
-                  : <span className="text-xs text-muted-foreground">—</span>}
-              </TableCell>
+      <Card>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>ID</TableHead>
+              <TableHead>用户名</TableHead>
+              <TableHead>部门</TableHead>
+              <TableHead>角色</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>本月流量</TableHead>
+              <TableHead className="text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {users.map((u) => (
+              <TableRow key={u.id}>
+                <TableCell>{u.id}</TableCell>
+                <TableCell>{u.username}</TableCell>
+                <TableCell>
+                  {(u.groups ?? []).length > 0
+                    ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
+                    : <span className="text-xs text-muted-foreground">—</span>}
+                </TableCell>
               <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
               <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
               <TableCell>
@@ -392,10 +400,19 @@ export default function Users() {
             </TableRow>
           ))}
           {users.length === 0 && (
-            <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无匹配用户,调整搜索条件或点击「新建用户」</TableCell></TableRow>
+            <TableRow>
+              <TableCell colSpan={7} className="border-0 p-0">
+                <EmptyState
+                  icon={<UsersIcon className="h-5 w-5 text-muted-foreground" />}
+                  title="暂无匹配用户"
+                  desc="调整搜索条件或点击「新建用户」创建成员账号"
+                />
+              </TableCell>
+            </TableRow>
           )}
         </TableBody>
       </Table>
+      </Card>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1, q)}>上一页</Button>
         <span className="text-sm text-muted-foreground">第 {page}/{pages} 页 · 共 {total} 人</span>
