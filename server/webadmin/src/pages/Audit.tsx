@@ -28,6 +28,7 @@ const ACTION_LABEL: Record<string, string> = {
   user_delete: '删除用户',
   user_dept: '用户部门变更',
   user_tokens_revoked: '吊销令牌',
+  auth_config: '修改认证配置',
   dept_create: '新建部门',
   dept_update: '更新部门',
   dept_delete: '删除部门',

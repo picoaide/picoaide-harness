@@ -357,7 +357,9 @@ type modelReq struct {
 	// 定价后无法回退到未定价。
 	InputPricePer1M  optionalFloat `json:"input_price_per_1m"`
 	OutputPricePer1M optionalFloat `json:"output_price_per_1m"`
-	OffpeakDiscount  optionalFloat `json:"offpeak_discount"` // 0023:0<d<=1 低谷折扣;nil/1 = 无峰谷
+	// CacheInputPricePer1M 缓存命中输入价(0029):nil/未传 = 不覆盖;0 = 清空(未配置)。
+	CacheInputPricePer1M optionalFloat `json:"cache_input_price_per_1m"`
+	OffpeakDiscount       optionalFloat `json:"offpeak_discount"` // 0023:0<d<=1 低谷折扣;nil/1 = 无峰谷
 }
 
 // optionalFloat 记录 JSON 字段是否出现(Set)与解析出的值(Value,nil = null)。
@@ -382,13 +384,17 @@ func (o *optionalFloat) UnmarshalJSON(b []byte) error {
 
 // validateModelPrices rejects negative prices (nil = 未定价,允许) and
 // out-of-range off-peak discounts (must satisfy 0 < d <= 1; nil/1 = none).
-func validateModelPrices(c *gin.Context, in, out, offpeak *float64) bool {
+func validateModelPrices(c *gin.Context, in, out, cache, offpeak *float64) bool {
 	if in != nil && *in < 0 {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "input_price_per_1m 不能为负数")
 		return false
 	}
 	if out != nil && *out < 0 {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "output_price_per_1m 不能为负数")
+		return false
+	}
+	if cache != nil && *cache < 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "cache_input_price_per_1m 不能为负数")
 		return false
 	}
 	if offpeak != nil && (*offpeak <= 0 || *offpeak > 1) {
@@ -415,7 +421,7 @@ func createModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名和 provider 必填")
 		return
 	}
-	if !validateModelPrices(c, req.InputPricePer1M.Value, req.OutputPricePer1M.Value, req.OffpeakDiscount.Value) {
+	if !validateModelPrices(c, req.InputPricePer1M.Value, req.OutputPricePer1M.Value, req.CacheInputPricePer1M.Value, req.OffpeakDiscount.Value) {
 		return
 	}
 	// provider 必须存在:FK 冲突此前落 500,掩盖参数错误(审计修复 M2)
@@ -426,7 +432,8 @@ func createModel(c *gin.Context, db *sql.DB) {
 	m := &serverstore.Model{
 		Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName,
 		DefaultParams: req.DefaultParams, InputPricePer1M: req.InputPricePer1M.Value,
-		OutputPricePer1M: req.OutputPricePer1M.Value, OffpeakDiscount: req.OffpeakDiscount.Value,
+		OutputPricePer1M: req.OutputPricePer1M.Value, CacheInputPricePer1M: req.CacheInputPricePer1M.Value,
+		OffpeakDiscount: req.OffpeakDiscount.Value,
 	}
 	if _, err := serverstore.AddModel(db, m); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -459,7 +466,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	if !validateModelPrices(c, req.InputPricePer1M.Value, req.OutputPricePer1M.Value, req.OffpeakDiscount.Value) {
+	if !validateModelPrices(c, req.InputPricePer1M.Value, req.OutputPricePer1M.Value, req.CacheInputPricePer1M.Value, req.OffpeakDiscount.Value) {
 		return
 	}
 	// 改名防护(审计修复 M7):模型名承担路由键/记账键/默认模型键多重身份,
@@ -496,6 +503,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	}
 	if req.OutputPricePer1M.Set {
 		m.OutputPricePer1M = req.OutputPricePer1M.Value
+	}
+	if req.CacheInputPricePer1M.Set {
+		m.CacheInputPricePer1M = req.CacheInputPricePer1M.Value
 	}
 	if req.OffpeakDiscount.Set {
 		m.OffpeakDiscount = req.OffpeakDiscount.Value
