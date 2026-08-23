@@ -1,7 +1,19 @@
 ---
+import { Image } from 'astro:assets'
 import Layout from '../layouts/Layout.astro'
 import Header from '../components/Header.astro'
 import Footer from '../components/Footer.astro'
+import logo from '../assets/logo.svg'
+import chatShot from '../assets/screenshots/desktop-chat.png'
+import connectorsShot from '../assets/screenshots/desktop-connectors.png'
+import skillsShot from '../assets/screenshots/desktop-skills.png'
+import cronShot from '../assets/screenshots/desktop-cron.png'
+import taskboardShot from '../assets/screenshots/desktop-taskboard.png'
+import adminUsersShot from '../assets/screenshots/admin-users.png'
+import adminGatewayShot from '../assets/screenshots/admin-gateway.png'
+import adminUsageShot from '../assets/screenshots/admin-usage.png'
+import adminAuditShot from '../assets/screenshots/admin-audit.png'
+import desktopMainShot from '../assets/screenshots/desktop-main.png'
 ---
 
 <Layout title="PicoAide Harness - 企业级 AI 一体化平台" description="PicoAide Harness：桌面客户端、本地智能体引擎与管理后台，支持私有化部署的企业级 DeepSeek Harness 平台。">
@@ -10,7 +22,10 @@ import Footer from '../components/Footer.astro'
   <!-- Hero -->
   <section class="hero">
     <div class="container hero__inner">
-      <span class="hero__badge">支持私有化部署</span>
+      <div class="hero__brand">
+        <Image src={logo} alt="PicoAide Harness" width={56} height={56} class="hero__logo" />
+        <span class="hero__brandname">PicoAide Harness</span>
+      </div>
       <h1 class="hero__title">让每位员工拥有<br />自己的 AI 操作助手</h1>
       <p class="hero__sub">
         PicoAide Harness 将桌面客户端、本地智能体引擎与管理后台整合为一个平台。
@@ -20,7 +35,7 @@ import Footer from '../components/Footer.astro'
         <a class="btn btn--primary" href="#features">了解产品</a>
         <a class="btn btn--ghost" href="#screenshots">查看截图</a>
       </div>
-      <img class="hero__shot" src="/screenshots/desktop-main.png" alt="PicoAide Harness 桌面主界面" width="1120" height="711" />
+      <Image class="hero__shot" src={desktopMainShot} alt="PicoAide Harness 桌面主界面" width={1120} height={711} format="webp" quality={80} />
     </div>
   </section>
 
@@ -56,23 +71,23 @@ import Footer from '../components/Footer.astro'
       <h3 class="gallery__group">桌面客户端</h3>
       <div class="gallery">
         <figure>
-          <img src="/screenshots/desktop-chat.png" alt="对话与记忆" loading="lazy" />
+          <Image src={chatShot} alt="对话与记忆" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>对话与五轨记忆</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/desktop-connectors.png" alt="连接器中心" loading="lazy" />
+          <Image src={connectorsShot} alt="连接器中心" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>连接器中心：销售易、钉钉、北森、飞书、Moka、企业微信</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/desktop-skills.png" alt="技能中心" loading="lazy" />
+          <Image src={skillsShot} alt="技能中心" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>技能中心：一键安装 code-review 等技能</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/desktop-cron.png" alt="定时任务" loading="lazy" />
+          <Image src={cronShot} alt="定时任务" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>定时任务：计划与执行记录</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/desktop-taskboard.png" alt="任务看板" loading="lazy" />
+          <Image src={taskboardShot} alt="任务看板" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>任务看板：待办、进行中、已完成、已失败</figcaption>
         </figure>
       </div>
@@ -80,19 +95,19 @@ import Footer from '../components/Footer.astro'
       <h3 class="gallery__group">管理后台</h3>
       <div class="gallery">
         <figure>
-          <img src="/screenshots/admin-users.png" alt="用户管理" loading="lazy" />
+          <Image src={adminUsersShot} alt="用户管理" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>用户管理：账号、部门、角色与状态</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/admin-gateway.png" alt="网关配置" loading="lazy" />
+          <Image src={adminGatewayShot} alt="网关配置" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>网关配置：模型、限流、配额与高峰时段</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/admin-usage.png" alt="用量统计" loading="lazy" />
+          <Image src={adminUsageShot} alt="用量统计" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>用量统计：费用、请求数与 Token 明细</figcaption>
         </figure>
         <figure>
-          <img src="/screenshots/admin-audit.png" alt="审计日志" loading="lazy" />
+          <Image src={adminAuditShot} alt="审计日志" width={640} loading="lazy" format="webp" quality={75} />
           <figcaption>审计日志：关键操作全程留痕</figcaption>
         </figure>
       </div>
@@ -184,15 +199,25 @@ import Footer from '../components/Footer.astro'
       background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
     }
 
-    .hero__badge {
-      display: inline-block;
-      padding: 6px 14px;
-      border-radius: 999px;
-      background: var(--brand-light);
-      color: var(--brand);
-      font-size: 0.86rem;
-      font-weight: 600;
-      margin-bottom: 20px;
+    .hero__brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .hero__logo {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero__brandname {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      color: var(--ink);
     }
 
     .hero__title {
