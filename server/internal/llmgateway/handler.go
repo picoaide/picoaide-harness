@@ -358,8 +358,8 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游响应过大")
 		return
 	}
-	if pt, ct, ok, _ := parseUsage(body); ok {
-		if _, err := serverstore.RecordUsage(a.DB, userID, model, pt, ct); err != nil {
+	if pt, ct, cch, ok, _ := parseUsage(body); ok {
+		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cch, "chat"); err != nil {
 			log.Printf("gateway: record usage: %v", err)
 		}
 	}
@@ -417,10 +417,10 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		line, err := readLineWithIdle(br, streamIdleTimeout)
 		if len(line) > 0 {
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
-				if pt, ct, ok, perr := parseUsage([]byte(s)); perr != nil {
+				if pt, ct, cch, ok, perr := parseUsage([]byte(s)); perr != nil {
 					log.Printf("gateway: parse usage line: %v", perr)
 				} else if ok && usageID > 0 {
-					if uerr := serverstore.UpdateUsageTokens(a.DB, usageID, pt, ct); uerr != nil {
+					if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cch); uerr != nil {
 						log.Printf("gateway: backfill usage: %v", uerr)
 					} else if pt+ct > 0 {
 						backfilled = true
@@ -484,24 +484,36 @@ func readLineWithIdle(br *bufio.Reader, idle time.Duration) (string, error) {
 
 // parseUsage extracts token counts from a chat completion response: a full
 // JSON body (non-stream) or an SSE "data:" line carrying usage.
-func parseUsage(raw []byte) (pt, ct int64, ok bool, err error) {
+// 返回 cacheHit 为缓存命中的输入 token(DeepSeek prompt_cache_hit_tokens,
+// 0029/0030 缓存计费);0 = 未报告/未命中。
+func parseUsage(raw []byte) (pt, ct, cacheHit int64, ok bool, err error) {
 	data := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("data:")))
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-		return 0, 0, false, nil
+		return 0, 0, 0, false, nil
 	}
 	var chunk struct {
 		Usage *struct {
 			PromptTokens     int64 `json:"prompt_tokens"`
 			CompletionTokens int64 `json:"completion_tokens"`
+			PromptCacheHit   int64 `json:"prompt_cache_hit_tokens"`
+			PromptCacheMiss  int64 `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &chunk); err != nil {
-		return 0, 0, false, err
+		return 0, 0, 0, false, err
 	}
 	if chunk.Usage == nil {
-		return 0, 0, false, nil
+		return 0, 0, 0, false, nil
 	}
-	return chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, true, nil
+	// 兼容两种上游:优先 prompt_cache_hit_tokens;仅有 miss 时用 prompt-miss 推算。
+	cacheHit = chunk.Usage.PromptCacheHit
+	if cacheHit <= 0 && chunk.Usage.PromptCacheMiss > 0 {
+		cacheHit = chunk.Usage.PromptTokens - chunk.Usage.PromptCacheMiss
+		if cacheHit < 0 {
+			cacheHit = 0
+		}
+	}
+	return chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, cacheHit, true, nil
 }
 
 // rateLimitPerMinute reads the configurable per-user limit from settings.
