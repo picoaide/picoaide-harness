@@ -132,6 +132,12 @@ PicoAide Harness 没有魔改上游源码，也不是一个固定写死的外壳
 
 同时感谢 Cordis 项目提供的插件化基础，以及 Koishi.js 项目和社区长期积累的插件化实践、工具与经验。
 
+感谢以下社区插件为产品体验做出的贡献：
+
+- dsh-better-sidebar（DSH 侧边栏工作台）：提供 VSCode 风格的资源管理器、编辑器、终端、Git 与浏览器视图
+- dsh-memory-evolve（分层记忆与自我进化）：为 DSH 带来全局、用户、项目、分支与每日分层记忆，以及技能与待办管理
+- DeepSeek Harness 插件生态中的连接器、任务、定时任务与浏览器等能力提供者
+
 以及每一个使用、支持和参与共建的你。
 
 <a id="run-from-source"></a>
