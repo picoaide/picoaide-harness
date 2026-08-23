@@ -1,5 +1,6 @@
 ---
 import { Image } from 'astro:assets'
+import { getCollection } from 'astro:content'
 import Layout from '../layouts/Layout.astro'
 import Header from '../components/Header.astro'
 import Footer from '../components/Footer.astro'
@@ -14,6 +15,11 @@ import adminGatewayShot from '../assets/screenshots/admin-gateway.png'
 import adminUsageShot from '../assets/screenshots/admin-usage.png'
 import adminAuditShot from '../assets/screenshots/admin-audit.png'
 import desktopMainShot from '../assets/screenshots/desktop-main.png'
+
+// 更新说明：取最新 3 篇博客
+const updates = (await getCollection('blog', ({ data }) => !data.draft))
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
+  .slice(0, 3)
 ---
 
 <Layout title="PicoAide Harness - 企业级 AI 一体化平台" description="PicoAide Harness：桌面客户端、本地智能体引擎与管理后台，支持私有化部署的企业级 DeepSeek Harness 平台。">
@@ -71,23 +77,23 @@ import desktopMainShot from '../assets/screenshots/desktop-main.png'
       <h3 class="gallery__group">桌面客户端</h3>
       <div class="gallery">
         <figure>
-          <Image src={chatShot} alt="对话与记忆" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={chatShot} alt="对话与记忆" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>对话与五轨记忆</figcaption>
         </figure>
         <figure>
-          <Image src={connectorsShot} alt="连接器中心" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={connectorsShot} alt="连接器中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>连接器中心：销售易、钉钉、北森、飞书、Moka、企业微信</figcaption>
         </figure>
         <figure>
-          <Image src={skillsShot} alt="技能中心" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={skillsShot} alt="技能中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>技能中心：一键安装 code-review 等技能</figcaption>
         </figure>
         <figure>
-          <Image src={cronShot} alt="定时任务" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={cronShot} alt="定时任务" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>定时任务：计划与执行记录</figcaption>
         </figure>
         <figure>
-          <Image src={taskboardShot} alt="任务看板" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={taskboardShot} alt="任务看板" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>任务看板：待办、进行中、已完成、已失败</figcaption>
         </figure>
       </div>
@@ -95,19 +101,19 @@ import desktopMainShot from '../assets/screenshots/desktop-main.png'
       <h3 class="gallery__group">管理后台</h3>
       <div class="gallery">
         <figure>
-          <Image src={adminUsersShot} alt="用户管理" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={adminUsersShot} alt="用户管理" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>用户管理：账号、部门、角色与状态</figcaption>
         </figure>
         <figure>
-          <Image src={adminGatewayShot} alt="网关配置" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={adminGatewayShot} alt="网关配置" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>网关配置：模型、限流、配额与高峰时段</figcaption>
         </figure>
         <figure>
-          <Image src={adminUsageShot} alt="用量统计" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={adminUsageShot} alt="用量统计" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>用量统计：费用、请求数与 Token 明细</figcaption>
         </figure>
         <figure>
-          <Image src={adminAuditShot} alt="审计日志" width={640} loading="lazy" format="webp" quality={75} />
+          <Image src={adminAuditShot} alt="审计日志" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>审计日志：关键操作全程留痕</figcaption>
         </figure>
       </div>
@@ -163,6 +169,33 @@ import desktopMainShot from '../assets/screenshots/desktop-main.png'
         </div>
       </div>
       <p class="deployment__note">如需获取企业版部署方案，请前往 GitHub 仓库 <a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a> 提交 Issue。</p>
+    </div>
+  </section>
+
+  <!-- 更新说明 -->
+  <section class="section" id="updates">
+    <div class="container container--narrow">
+      <h2 class="section__title">更新说明</h2>
+      <p class="section__sub">了解最新版本的功能与改进。</p>
+
+      <div class="updates">
+        {updates.map((update, index) => (
+          <a href={`/blog/${update.id}/`} class="update">
+            <div class="update__meta">
+              <span class="update__badge">v{update.data.version ?? ''}</span>
+              <time class="update__time" datetime={update.data.pubDate.toISOString()}>
+                {update.data.pubDate.toLocaleDateString('zh-CN')}
+              </time>
+            </div>
+            <h3 class="update__title">{update.data.title}</h3>
+            {update.data.description && <p class="update__desc">{update.data.description}</p>}
+          </a>
+        ))}
+      </div>
+
+      <p class="updates__more">
+        查看全部更新 <a href="/blog/">前往博客</a>
+      </p>
     </div>
   </section>
 
@@ -329,6 +362,68 @@ import desktopMainShot from '../assets/screenshots/desktop-main.png'
 
     .container--narrow {
       max-width: 760px;
+    }
+
+    .updates {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .update {
+      display: block;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #fff;
+      padding: 20px 24px;
+      color: var(--ink);
+      text-decoration: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .update:hover {
+      border-color: var(--brand);
+      box-shadow: var(--shadow);
+    }
+
+    .update__meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .update__badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--brand);
+      color: #fff;
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .update__time {
+      color: var(--ink-faint);
+      font-size: 0.88rem;
+    }
+
+    .update__title {
+      margin: 0 0 6px;
+      font-size: 1.1rem;
+    }
+
+    .update__desc {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.95rem;
+    }
+
+    .updates__more {
+      text-align: center;
+      color: var(--ink-soft);
+      margin-top: 28px;
+      font-size: 0.95rem;
     }
 
     .faq {

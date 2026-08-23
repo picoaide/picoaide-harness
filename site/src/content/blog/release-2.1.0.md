@@ -2,6 +2,7 @@
 title: PicoAide Harness 2.1.0 发布
 description: 桌面客户端升级源切换至 GitHub Releases，新增 Linux 支持与自动化发布流水线。
 pubDate: 2026-08-23
+version: 2.1.0
 author: PicoAide Team
 tags:
   - 发布
