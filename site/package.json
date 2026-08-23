@@ -1,0 +1,22 @@
+{
+  "name": "picoaide-site",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PicoAide Harness official website, blog, and wiki",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.34.0",
+    "@astrojs/sitemap": "^3.4.0",
+    "astro": "^5.12.0"
+  },
+  "devDependencies": {
+    "@astrojs/rss": "^4.0.11",
+    "typescript": "^5.8.0"
+  }
+}
