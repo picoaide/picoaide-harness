@@ -56,6 +56,16 @@
   .font-mono {
     font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
   }
+  /* 统一隐藏 number 输入原生 spinner(data-dense 契约:表单控件风格一致) */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
 }
 
 @layer components {
