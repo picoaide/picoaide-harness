@@ -1,0 +1,62 @@
+---
+import '../styles/global.css'
+import logo from '../assets/logo.svg'
+
+interface Props {
+  title: string
+  description?: string
+  ogImage?: string
+}
+
+const {
+  title,
+  description = 'PicoAide Harness 企业级 AI 一体化平台：桌面客户端、本地智能体引擎与管理后台，支持私有化部署。',
+  ogImage = '/og-default.png',
+} = Astro.props
+
+const siteName = 'PicoAide Harness'
+const canonical = new URL(Astro.url.pathname, Astro.site)
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href={logo.src} />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={siteName} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL(ogImage, Astro.site)} />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={new URL(ogImage, Astro.site)} />
+
+    <!-- JSON-LD -->
+    <script type="application/ld+json">
+      {JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareApplication',
+        name: siteName,
+        description,
+        applicationCategory: 'BusinessApplication',
+        operatingSystem: 'Windows, macOS, Linux',
+        url: Astro.site,
+      })}
+    </script>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

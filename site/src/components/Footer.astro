@@ -1,0 +1,94 @@
+---
+const year = new Date().getFullYear()
+---
+
+<footer class="footer">
+  <div class="container footer__grid">
+    <div class="footer__col">
+      <strong>PicoAide Harness</strong>
+      <p>企业级 DeepSeek Harness 一体化平台，支持私有化部署。</p>
+    </div>
+    <div class="footer__col">
+      <strong>产品</strong>
+      <a href="/#features">核心特性</a>
+      <a href="/#screenshots">界面截图</a>
+      <a href="/#deployment">私有化部署</a>
+    </div>
+    <div class="footer__col">
+      <strong>资源</strong>
+      <a href="/blog/">博客</a>
+      <a href="/docs/">Wiki 文档</a>
+      <a href="/about/">关于我们</a>
+    </div>
+    <div class="footer__col">
+      <strong>社区</strong>
+      <a href="https://github.com/picoaide/picoaide-harness">GitHub</a>
+      <a href="https://github.com/picoaide/picoaide-harness/issues" target="_blank" rel="noopener">提交 Issue</a>
+    </div>
+  </div>
+  <div class="container footer__bottom">
+    <span>© {year} PicoAide. All rights reserved.</span>
+    <span>基于 DeepSeek Harness 构建。</span>
+  </div>
+</footer>
+
+<style>
+  .footer {
+    background: var(--bg-deep);
+    color: #cbd5e1;
+    padding: 56px 0 28px;
+  }
+
+  .footer__grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 32px;
+    margin-bottom: 40px;
+  }
+
+  .footer__col {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .footer__col strong {
+    color: #fff;
+    font-size: 1rem;
+  }
+
+  .footer__col p {
+    margin: 0;
+    color: #94a3b8;
+    font-size: 0.92rem;
+  }
+
+  .footer__col a {
+    color: #cbd5e1;
+    font-size: 0.92rem;
+  }
+
+  .footer__col a:hover {
+    color: #fff;
+  }
+
+  .footer__bottom {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 20px;
+    color: #64748b;
+    font-size: 0.88rem;
+  }
+
+  @media (max-width: 768px) {
+    .footer__grid {
+      grid-template-columns: 1fr 1fr;
+    }
+    .footer__bottom {
+      flex-direction: column;
+      text-align: center;
+    }
+  }
+</style>

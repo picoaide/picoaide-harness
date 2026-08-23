@@ -1,0 +1,336 @@
+---
+import Layout from '../layouts/Layout.astro'
+import Header from '../components/Header.astro'
+import Footer from '../components/Footer.astro'
+---
+
+<Layout title="PicoAide Harness - 企业级 AI 一体化平台" description="PicoAide Harness：桌面客户端、本地智能体引擎与管理后台，支持私有化部署的企业级 DeepSeek Harness 平台。">
+  <Header />
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container hero__inner">
+      <span class="hero__badge">支持私有化部署</span>
+      <h1 class="hero__title">让每位员工拥有<br />自己的 AI 操作助手</h1>
+      <p class="hero__sub">
+        PicoAide Harness 将桌面客户端、本地智能体引擎与管理后台整合为一个平台。
+        开箱即用，数据留在本机，适合企业内部署的 AI 工作底座。
+      </p>
+      <div class="hero__actions">
+        <a class="btn btn--primary" href="#features">了解产品</a>
+        <a class="btn btn--ghost" href="#screenshots">查看截图</a>
+      </div>
+      <img class="hero__shot" src="/screenshots/desktop-main.png" alt="PicoAide Harness 桌面主界面" width="1120" height="711" />
+    </div>
+  </section>
+
+  <!-- 特性 -->
+  <section class="section section--soft" id="features">
+    <div class="container">
+      <h2 class="section__title">企业级 AI 一体化平台</h2>
+      <p class="section__sub">桌面客户端、本地服务与管理后台三层协同，开箱即用。</p>
+
+      <div class="features">
+        <div class="feature">
+          <h3>桌面客户端</h3>
+          <p>原生窗口、系统托盘、终端与自动更新。对话、记忆、连接器、技能、定时任务与任务看板一站式完成，无需安装 Node.js。</p>
+        </div>
+        <div class="feature">
+          <h3>本地智能体引擎</h3>
+          <p>自动启动、停止与恢复本地 Harness 服务，数据留在本机。上游 DeepSeek Harness 以固定版本原样运行，不魔改源码。</p>
+        </div>
+        <div class="feature">
+          <h3>管理后台</h3>
+          <p>Web 化管理台覆盖用户、部门、网关、用量、商城与审计。按用户按模型计费、限额与豁免，高峰时段自动分级计价。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 截图墙 -->
+  <section class="section" id="screenshots">
+    <div class="container">
+      <h2 class="section__title">界面预览</h2>
+      <p class="section__sub">以下为产品真实界面截图。</p>
+
+      <h3 class="gallery__group">桌面客户端</h3>
+      <div class="gallery">
+        <figure>
+          <img src="/screenshots/desktop-chat.png" alt="对话与记忆" loading="lazy" />
+          <figcaption>对话与五轨记忆</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/desktop-connectors.png" alt="连接器中心" loading="lazy" />
+          <figcaption>连接器中心：销售易、钉钉、北森、飞书、Moka、企业微信</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/desktop-skills.png" alt="技能中心" loading="lazy" />
+          <figcaption>技能中心：一键安装 code-review 等技能</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/desktop-cron.png" alt="定时任务" loading="lazy" />
+          <figcaption>定时任务：计划与执行记录</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/desktop-taskboard.png" alt="任务看板" loading="lazy" />
+          <figcaption>任务看板：待办、进行中、已完成、已失败</figcaption>
+        </figure>
+      </div>
+
+      <h3 class="gallery__group">管理后台</h3>
+      <div class="gallery">
+        <figure>
+          <img src="/screenshots/admin-users.png" alt="用户管理" loading="lazy" />
+          <figcaption>用户管理：账号、部门、角色与状态</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/admin-gateway.png" alt="网关配置" loading="lazy" />
+          <figcaption>网关配置：模型、限流、配额与高峰时段</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/admin-usage.png" alt="用量统计" loading="lazy" />
+          <figcaption>用量统计：费用、请求数与 Token 明细</figcaption>
+        </figure>
+        <figure>
+          <img src="/screenshots/admin-audit.png" alt="审计日志" loading="lazy" />
+          <figcaption>审计日志：关键操作全程留痕</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- 为什么选择 -->
+  <section class="section section--soft" id="why">
+    <div class="container">
+      <h2 class="section__title">为什么选择 PicoAide Harness</h2>
+      <p class="section__sub">安全、可扩展、完全可控。</p>
+      <div class="features features--4">
+        <div class="feature">
+          <h3>安全合规</h3>
+          <p>凭据以 0600/0700 权限原子写入，防符号链接与路径逃逸；OAuth state 校验；操作审计全程留痕。</p>
+        </div>
+        <div class="feature">
+          <h3>多用户隔离</h3>
+          <p>连接器凭据、浏览器会话、定时任务与任务看板按账号隔离，退出登录即解除所有会话。</p>
+        </div>
+        <div class="feature">
+          <h3>一切皆插件</h3>
+          <p>核心智能体、Web UI、桌面外壳、连接器、任务与记忆全部通过官方 Cordis 插件机制组合，可替换、可演进。</p>
+        </div>
+        <div class="feature">
+          <h3>私有化部署</h3>
+          <p>数据留在本机，企业内网部署，不依赖外部云服务，完全掌控自己的 AI 底座。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 私有化部署 -->
+  <section class="section" id="deployment">
+    <div class="container">
+      <h2 class="section__title">私有化部署</h2>
+      <p class="section__sub">PicoAide Harness 面向企业内网部署，开箱即用。</p>
+      <div class="steps">
+        <div class="step">
+          <span class="step__num">1</span>
+          <h3>准备环境</h3>
+          <p>安装桌面客户端，或在内网服务器部署本地服务。</p>
+        </div>
+        <div class="step">
+          <span class="step__num">2</span>
+          <h3>配置网关</h3>
+          <p>配置模型网关、限流、配额与高峰时段策略。</p>
+        </div>
+        <div class="step">
+          <span class="step__num">3</span>
+          <h3>接入全员</h3>
+          <p>创建用户与部门，分配角色与配额，员工开箱即用。</p>
+        </div>
+      </div>
+      <p class="deployment__note">如需获取企业版部署方案，请前往 GitHub 仓库 <a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a> 提交 Issue。</p>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section section--soft" id="faq">
+    <div class="container container--narrow">
+      <h2 class="section__title">常见问题</h2>
+
+      <details class="faq">
+        <summary>PicoAide Harness 与 DeepSeek Harness 的关系？</summary>
+        <p>上游 DeepSeek Harness 提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务与管理后台，基于固定版本构建，不魔改上游源码。</p>
+      </details>
+      <details class="faq">
+        <summary>是否支持私有化部署？</summary>
+        <p>支持。数据留在本机，可部署于企业内网，不依赖外部云服务。企业版部署方案请通过 GitHub Issue 联系。</p>
+      </details>
+      <details class="faq">
+        <summary>是否开源？</summary>
+        <p>本项目遵循 MIT License，完全开源免费。</p>
+      </details>
+      <details class="faq">
+        <summary>支持哪些平台？</summary>
+        <p>支持 Windows x64、macOS Apple Silicon 与 Linux x64。</p>
+      </details>
+    </div>
+  </section>
+
+  <Footer />
+
+  <style>
+    .hero {
+      padding: 72px 0 0;
+      text-align: center;
+      background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+    }
+
+    .hero__badge {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: var(--brand-light);
+      color: var(--brand);
+      font-size: 0.86rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+
+    .hero__title {
+      font-size: clamp(2.2rem, 6vw, 3.6rem);
+      margin: 0 0 18px;
+      font-weight: 800;
+    }
+
+    .hero__sub {
+      color: var(--ink-soft);
+      max-width: 620px;
+      margin: 0 auto 32px;
+      font-size: 1.12rem;
+    }
+
+    .hero__actions {
+      display: flex;
+      justify-content: center;
+      gap: 14px;
+      margin-bottom: 56px;
+    }
+
+    .hero__shot {
+      width: 100%;
+      max-width: 1040px;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      border: 1px solid var(--line);
+      margin-bottom: -1px;
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    .features--4 {
+      grid-template-columns: repeat(4, 1fr);
+    }
+
+    .feature {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 28px 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .feature h3 {
+      margin: 0 0 10px;
+      font-size: 1.12rem;
+    }
+
+    .feature p {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.96rem;
+    }
+
+    .gallery__group {
+      margin: 40px 0 16px;
+      font-size: 1.2rem;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    .step {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 28px 24px;
+      text-align: center;
+    }
+
+    .step__num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--brand);
+      color: #fff;
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    .step h3 {
+      margin: 0 0 8px;
+      font-size: 1.05rem;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.94rem;
+    }
+
+    .deployment__note {
+      text-align: center;
+      color: var(--ink-soft);
+      margin-top: 36px;
+    }
+
+    .container--narrow {
+      max-width: 760px;
+    }
+
+    .faq {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #fff;
+      padding: 16px 20px;
+      margin-bottom: 12px;
+    }
+
+    .faq summary {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 1.02rem;
+    }
+
+    .faq p {
+      margin: 12px 0 0;
+      color: var(--ink-soft);
+    }
+
+    @media (max-width: 860px) {
+      .features,
+      .features--4,
+      .steps {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</Layout>
