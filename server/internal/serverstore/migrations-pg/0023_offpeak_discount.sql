@@ -1,0 +1,11 @@
+-- 0023: per-model off-peak (谷时) discount for time-based pricing.
+--
+-- DeepSeek 官方错峰优惠:每日北京时间 16:30-00:30(即 UTC 08:30-16:30)
+-- 按标准价的 50% 计费。为通用支持时段计价,模型级折扣率:
+--   offpeak_discount REAL:
+--     NULL = 无峰谷价(全天按标准价)
+--     0 < d < 1 = 低谷窗口内费用 × d(DeepSeek 官方 = 0.5)
+--     1 = 显式无折扣(等价 NULL,便于 UI 显式表达)
+-- 费用在记录时按「请求时刻是否处于低谷窗口」折算并落库(0022 的 cost),
+-- 窗口内请求用折扣价,窗口外用标准价;改折扣只影响之后产生的费用。
+ALTER TABLE models ADD COLUMN offpeak_discount DOUBLE PRECISION;

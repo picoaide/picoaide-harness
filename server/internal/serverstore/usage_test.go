@@ -9,7 +9,7 @@ import (
 
 func newUsageDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
-	db, err := EnsureMigrated(fmt.Sprintf("%s/usage.db", t.TempDir()))
+	db, err := EnsureMigrated(DBConfig{Path: fmt.Sprintf("%s/usage.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

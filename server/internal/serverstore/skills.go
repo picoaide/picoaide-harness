@@ -23,7 +23,7 @@ type Skill struct {
 
 func scanSkill(row interface{ Scan(...any) error }) (*Skill, error) {
 	var s Skill
-	var createdAt, updatedAt string
+	var createdAt, updatedAt any
 	if err := row.Scan(&s.ID, &s.Name, &s.Version, &s.Description, &s.Author,
 		&s.GitURL, &s.GitRef, &s.Checksum, &s.Enabled, &createdAt, &updatedAt); err != nil {
 		return nil, err
@@ -37,7 +37,7 @@ const skillColumns = "id, name, version, description, author, git_url, git_ref, 
 
 // AddSkill inserts a skill row; returns ErrDuplicate for an existing name.
 func AddSkill(db *sql.DB, s *Skill) (int64, error) {
-	res, err := db.Exec(`INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
+	id, err := InsertID(db, `INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.Name, s.Version, s.Description, s.Author, s.GitURL, s.GitRef, s.Checksum, s.Enabled)
 	if err != nil {
@@ -46,7 +46,7 @@ func AddSkill(db *sql.DB, s *Skill) (int64, error) {
 		}
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // GetSkill returns the skill by unique name or ErrNotFound.
@@ -60,7 +60,7 @@ func GetSkill(db *sql.DB, name string) (*Skill, error) {
 
 // UpdateSkill updates all mutable fields by id; returns ErrNotFound.
 func UpdateSkill(db *sql.DB, s *Skill) error {
-	res, err := db.Exec(`UPDATE skills SET version=?, description=?, author=?, git_url=?, git_ref=?, checksum=?, enabled=?, updated_at=datetime('now','localtime')
+	res, err := db.Exec(`UPDATE skills SET version=?, description=?, author=?, git_url=?, git_ref=?, checksum=?, enabled=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		s.Version, s.Description, s.Author, s.GitURL, s.GitRef, s.Checksum, s.Enabled, s.ID)
 	if err != nil {
@@ -77,7 +77,7 @@ func UpdateSkill(db *sql.DB, s *Skill) error {
 // Returns the skill id or ErrNotFound.
 func SetSkillEnabled(db *sql.DB, name string, enabled bool) (int64, error) {
 	var id int64
-	err := db.QueryRow(`UPDATE skills SET enabled=?, updated_at=datetime('now','localtime') WHERE name=? RETURNING id`,
+	err := db.QueryRow(`UPDATE skills SET enabled=?, updated_at=`+NowExpr()+` WHERE name=? RETURNING id`,
 		boolInt(enabled), name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound

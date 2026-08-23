@@ -8,7 +8,7 @@ import (
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := Open(DBConfig{Path: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -26,8 +26,8 @@ func TestApplyMigrations(t *testing.T) {
 	if err := db.QueryRow("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").Scan(&version); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if version != latestMigration {
-		t.Fatalf("version = %d, want %d", version, latestMigration)
+	if version != latestMigration() {
+		t.Fatalf("version = %d, want %d", version, latestMigration())
 	}
 
 	// idempotent
@@ -38,8 +38,8 @@ func TestApplyMigrations(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if n != len(migrations) {
-		t.Fatalf("migration rows = %d, want %d", n, len(migrations))
+	if n != len(migrationsFor()) {
+		t.Fatalf("migration rows = %d, want %d", n, len(migrationsFor()))
 	}
 }
 
@@ -70,8 +70,11 @@ func TestApplyMigrationsFailure(t *testing.T) {
 		t.Fatalf("ApplyMigrations: %v", err)
 	}
 	// Re-apply with a broken migration appended should fail, not panic.
-	migrations = append(migrations, migration{version: 999, name: "broken", sql: "THIS IS NOT SQL"})
-	defer func() { migrations = migrations[:len(migrations)-1] }()
+	base := migrationsFor()
+	testMigrationHook = func() []migration {
+		return append(base, migration{version: 999, name: "broken", sql: "THIS IS NOT SQL"})
+	}
+	defer func() { testMigrationHook = nil }()
 	if err := ApplyMigrations(db); err == nil {
 		t.Fatal("expected error for broken migration, got nil")
 	}
@@ -124,16 +127,16 @@ func TestMigration0028AuditCleanupFresh(t *testing.T) {
 func TestMigration0028AuditCleanupOldDB(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
-	keep := migrations
-	defer func() { migrations = keep }()
-	filtered := make([]migration, 0, len(migrations))
-	for _, m := range migrations {
+	keep := migrationsFor()
+	filtered := make([]migration, 0, len(keep))
+	for _, m := range keep {
 		if m.version == 28 {
 			continue
 		}
 		filtered = append(filtered, m)
 	}
-	migrations = filtered
+	testMigrationHook = func() []migration { return filtered }
+	defer func() { testMigrationHook = nil }()
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("pre-0028 apply: %v", err)
 	}
@@ -153,7 +156,7 @@ func TestMigration0028AuditCleanupOldDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 应用 0028
-	migrations = keep
+	testMigrationHook = func() []migration { return keep }
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("apply 0028: %v", err)
 	}
