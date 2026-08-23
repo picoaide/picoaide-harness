@@ -20,4 +20,7 @@ webadmin/node_modules
 .env
 certs/
 deploy-backup/
+caddy-data/
+caddy-config/
+picoaide-data/
 *.tar.gz

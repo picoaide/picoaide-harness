@@ -7,8 +7,8 @@
 #   ./scripts/deploy.sh update           # 升级镜像并重启(数据不丢)
 #   ./scripts/deploy.sh status           # 查看容器状态 + 健康检查 + 固定 IP
 #   ./scripts/deploy.sh logs [-t]        # 查看日志(--tail=200;-t/--follow 跟踪)
-#   ./scripts/deploy.sh backup           # 备份数据(picoaide-data + caddy 自动证书)
-#   ./scripts/deploy.sh uninstall        # 卸载(停容器;--volumes 删除卷,需确认)
+#   ./scripts/deploy.sh backup           # 备份数据(picoaide-data + caddy-data 证书库)
+#   ./scripts/deploy.sh uninstall        # 卸载(停容器;--volumes 全删数据目录,需确认)
 #
 # 环境变量(全部可选,均有默认值):
 #   DEPLOY_DIR        部署目录(含 docker-compose.yml;默认 = 当前目录,install-server.sh 会传入)
@@ -22,7 +22,7 @@
 #   CONFIRM_CDN       auto 模式:域名解析不直连本机(疑似 CDN/代理)时,
 #                     交互确认;无人值守设 CONFIRM_CDN=yes 直接继续
 #   REINSTALL=yes     .env 已存在时清除旧部署重装(默认安全退出)
-#   UNINSTALL_VOLUMES=yes  uninstall --volumes 无人值守确认
+#   UNINSTALL_VOLUMES=yes  uninstall --volumes 无人值守确认(删除数据目录)
 set -euo pipefail
 
 # ---- 路径与参数 ----
@@ -392,14 +392,15 @@ cmd_backup() {
     [ -d picoaide-data ] && tar czf "$outdir/picoaide-data-$ts.tar.gz" -C . picoaide-data \
       && log "  ✓ 数据备份(离线): $outdir/picoaide-data-$ts.tar.gz" || warn "数据备份失败(容器未运行且数据目录为空?)"
   fi
-  # auto 模式:Caddy 自动证书备份(caddy-data 卷)
+  # auto 模式:Caddy 自动证书库在 ./caddy-data(当前目录 bind mount,不用命名卷)
+  # 备份方式:直接拷当前目录文件(容器跑没跑都能备)
   if [ "${TLS_MODE:-manual}" = "auto" ] || grep -q '^TLS_MODE=auto' .env 2>/dev/null; then
-    if docker ps --format '{{.Names}}' | grep -qx "$CADDY_CONTAINER"; then
-      docker exec "$CADDY_CONTAINER" sh -c 'tar czf - -C /data caddy 2>/dev/null || tar czf - -C /data .' > "$outdir/caddy-certs-$ts.tar.gz" \
-        && log "  ✓ Caddy 证书备份: $outdir/caddy-certs-$ts.tar.gz" || warn "Caddy 证书备份失败"
+    if [ -d caddy-data ] && [ -n "$(ls -A caddy-data 2>/dev/null)" ]; then
+      tar czf "$outdir/caddy-data-$ts.tar.gz" -C . caddy-data \
+        && log "  ✓ Caddy 数据备份: $outdir/caddy-data-$ts.tar.gz" || warn "Caddy 数据备份失败"
     fi
   fi
-  log "恢复方式: 停服(picoaide-server 容器)后解包覆盖 picoaide-data/,再 docker compose up -d"
+  log "恢复方式: 停服(picoaide-server 容器)后解包覆盖 picoaide-data/、caddy-data/,再 docker compose up -d"
 }
 
 cmd_uninstall() {
@@ -407,14 +408,15 @@ cmd_uninstall() {
   [ -f "$COMPOSE_FILE" ] || fail "未发现 $COMPOSE_FILE"
   if [ "${1:-}" = "--volumes" ]; then
     if [ "$UNINSTALL_VOLUMES" != "yes" ]; then
-      read -r -p "(交互)确认删除 caddy-data/caddy-config 数据卷? [y/N] " ans < /dev/tty || ans=n
+      read -r -p "(交互)确认删除当前目录全部数据(picoaide-data/ caddy-data/ caddy-config/ certs/)? [y/N] " ans < /dev/tty || ans=n
       case "$ans" in y|Y|yes|YES) ;; *) fail "已取消" ;; esac
     fi
-    $COMPOSE down --volumes --remove-orphans
-    log "  ✓ 已停止并删除数据卷(数据目录 picoaide-data/ 仍在磁盘,如需删除手动执行)"
+    $COMPOSE down --remove-orphans
+    rm -rf picoaide-data caddy-data caddy-config
+    log "  ✓ 已停止容器并删除数据目录(picoaide-data/ caddy-data/ caddy-config/;配置文件 .env/Caddyfile 保留)"
   else
     $COMPOSE down --remove-orphans
-    log "  ✓ 已停止容器(数据卷与 picoaide-data/ 保留)"
+    log "  ✓ 已停止容器(数据目录保留: picoaide-data/ caddy-data/ caddy-config/)"
   fi
 }
 
