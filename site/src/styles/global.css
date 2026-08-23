@@ -1,8 +1,9 @@
-/* PicoAide Harness 官网全局样式 */
+/* PicoAide Harness 官网全局样式 —— 与产品黑色 logo / 灰阶品牌一致 */
 :root {
-  --brand: #2b5cff;
-  --brand-dark: #1e46cc;
-  --brand-light: #eef2ff;
+  /* 品牌：黑（产品 logo 黑底白纹）+ 灰阶，deep slate 为页面基色 */
+  --brand: #0f172a;
+  --brand-dark: #020617;
+  --brand-light: #f1f5f9;
   --ink: #0f172a;
   --ink-soft: #475569;
   --ink-faint: #94a3b8;

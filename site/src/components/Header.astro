@@ -1,4 +1,5 @@
 ---
+import { Image } from 'astro:assets'
 import logo from '../assets/logo.svg'
 
 const items = [
@@ -6,14 +7,14 @@ const items = [
   { label: '产品', href: '/#features' },
   { label: '截图', href: '/#screenshots' },
   { label: '博客', href: '/blog/' },
-  { label: 'Wiki', href: '/docs/' },
+  { label: 'Wiki', href: '/welcome/' },
 ]
 ---
 
 <header class="nav">
   <div class="container nav__inner">
     <a href="/" class="nav__brand">
-      <img src={logo.src} alt="PicoAide Harness" width="26" height="26" />
+      <Image src={logo} alt="PicoAide Harness" width={26} height={26} />
       <span>PicoAide Harness</span>
     </a>
     <nav class="nav__links">
@@ -70,8 +71,19 @@ const items = [
   }
 
   @media (max-width: 640px) {
+    .nav__inner {
+      height: auto;
+      padding-top: 10px;
+      padding-bottom: 10px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
     .nav__links {
-      gap: 14px;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .nav__brand span {
+      font-size: 0.95rem;
     }
   }
 </style>
