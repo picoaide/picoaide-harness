@@ -15,6 +15,7 @@ import { Skeleton } from '../components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
+import { PageHeader } from '../components/page-header'
 import {
   fmtTokens, fmtFull, fmtMoney, fmtMoneyFull, usageRate, quotaPercent, quotaOver,
   moneyRate, moneyPercent, moneyOver, rangePreset, monthRange, ymd, isModelPriced,
@@ -422,10 +423,10 @@ export default function Usage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="page-title">用量统计</h1>
-        <span className="text-sm text-muted-foreground">费用与配额对照(金额/token 双维度,管理员豁免)</span>
-      </div>
+      <PageHeader
+        title="用量统计"
+        desc="费用与配额对照(金额/token 双维度,管理员豁免)"
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {hasUnpricedModels && (
         <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -485,15 +486,17 @@ export default function Usage() {
         {statCards.map((c) => (
           <Card key={c.title}>
             <CardContent className="pt-6">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <c.icon className="h-4 w-4" />
-                {c.title}
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600/10 to-cyan-500/10 text-blue-700">
+                  <c.icon className="h-4 w-4" />
+                </div>
+                <span className="text-sm text-muted-foreground">{c.title}</span>
               </div>
               {loading ? (
                 <Skeleton className="mt-2 h-8 w-24" />
               ) : (
                 <div
-                  className="mt-1 text-2xl font-bold tabular-nums tracking-tight"
+                  className="mt-2 text-2xl font-bold tabular-nums tracking-tight text-foreground"
                   title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
                 >
                   {c.money ? `¥${fmtMoney(c.value)}` : c.int ? c.value.toLocaleString() : fmtTokens(c.value)}

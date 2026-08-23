@@ -5,6 +5,10 @@ import { Badge } from '../components/ui/badge'
 import { Input } from '../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { PageHeader } from '../components/page-header'
+import { EmptyState } from '../components/empty-state'
+import { Card } from '../components/ui/card'
+import { ScrollText, RefreshCw } from 'lucide-react'
 
 interface LogRow {
   id: number
@@ -88,13 +92,15 @@ export default function Audit() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="page-title">审计日志</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-muted-foreground">敏感操作记录(用户/部门/技能等)</span>
-          <Button size="sm" variant="outline" onClick={() => load(page, appliedAction, appliedUser)}>刷新</Button>
-        </div>
-      </div>
+      <PageHeader
+        title="审计日志"
+        desc="敏感操作记录(用户/部门/技能等)"
+        actions={
+          <Button size="sm" variant="outline" onClick={() => load(page, appliedAction, appliedUser)}>
+            <RefreshCw className="h-3.5 w-3.5" /> 刷新
+          </Button>
+        }
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {/* M8: 筛选条 */}
       <div className="flex flex-wrap items-center gap-2">
@@ -121,6 +127,7 @@ export default function Audit() {
           <Button size="sm" variant="ghost" onClick={() => { setFilterAction(''); setFilterUser(''); setAppliedAction(''); setAppliedUser('') }}>清除筛选</Button>
         )}
       </div>
+      <Card>
       <Table>
         <TableHeader>
           <TableRow>
@@ -143,10 +150,19 @@ export default function Audit() {
             </TableRow>
           ))}
           {logs.length === 0 && (
-            <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">暂无记录</TableCell></TableRow>
+            <TableRow>
+              <TableCell colSpan={5} className="border-0 p-0">
+                <EmptyState
+                  icon={<ScrollText className="h-5 w-5 text-muted-foreground" />}
+                  title="暂无审计记录"
+                  desc="敏感操作(用户/部门/技能/令牌)会在此留痕"
+                />
+              </TableCell>
+            </TableRow>
           )}
         </TableBody>
       </Table>
+      </Card>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1, appliedAction, appliedUser)}>上一页</Button>
         <span className="text-sm text-muted-foreground">第 {page}/{pages} 页 · 共 {total} 条</span>
