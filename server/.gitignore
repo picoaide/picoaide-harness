@@ -16,3 +16,8 @@ picoaide-data/
 .worktrees/
 dev-data
 webadmin/node_modules
+# 部署运行时文件(证书/凭据/数据,不进 git)
+.env
+certs/
+deploy-backup/
+*.tar.gz

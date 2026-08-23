@@ -1,46 +1,84 @@
-# PicoAide 服务端 Docker Compose 部署
-# 镜像:ghcr.io/picoaide/picoaide-server(amd64)+ Caddy HTTPS 反代
+# ============================================================
+# PicoAide 服务端 Docker Compose 部署(私有网段 + 容器固定 IP)
+# ============================================================
+# 镜像:ghcr.io/picoaide/picoaide-server(amd64+arm64 多平台)+ Caddy HTTPS 反代
 #
-# 快速开始:
-#   1. 编辑 Caddyfile,把 picoaide.example.com 换成你的真实域名
-#   2. 启动:docker compose up -d(自动创建超管账号 admin,幂等)
-#   3. 浏览器打开 https://<你的域名>/admin/ 用超管账号登录管理
-#   4. webadmin 网关页填写"对外访问地址"= https://<你的域名>
+# 快速开始(手动部署):
+#   1. cp .env.example .env 并填写 DOMAIN / PICOAI_ADMIN_PASSWORD(必改)
+#   2. cp Caddyfile.<模式> Caddyfile   # autocert=自动证书 / manual=手动证书
+#   3. docker compose up -d
+#   4. 浏览器打开 https://<你的域名>/admin/ 用超管账号登录管理
+#   5. webadmin 网关页填写"对外访问地址" = https://<你的域名>
 #
-# 说明:
-#   - HTTPS 由 Caddy 提供(默认自签名,部署后可在 webadmin 网关页信任);
-#     有公网域名时删掉 Caddyfile 里 `tls internal`,自动换 Let's Encrypt 正式证书
-#   - 数据(数据库/密钥/知识库)落在当前目录 ./picoaide-data,升级镜像不丢数据
-#   - 员工客户端填 https://<你的域名> 登录
-#   - 首次使用前请修改下方 PICOAI_ADMIN_PASSWORD 为强密码
+# 证书模式说明(详见 docs/DEPLOY.md):
+#   - auto(自动证书):Caddy 自动申请 Let's Encrypt,需公网域名且 80/443 对外开放
+#   - manual(手动证书):certs/server.crt + server.key(缺省由部署脚本生成自签占位),
+#     正式证书替换方式:覆盖 certs/ 下两文件 → docker compose restart caddy
+#   - 默认使用 Caddyfile(仓库模板 = internal 自签,开箱即用;部署脚本按 TLS_MODE 生成)
+#
+# 私有网段与固定 IP(全部经 .env 可调):
+#   - 自定义 bridge 网络 picoaide-net,默认子网 172.28.0.0/24
+#   - caddy 固定 172.28.0.2,server 固定 172.28.0.3 —— 容器重建 IP 不变,
+#     升级/重启后 Caddyfile 的 reverse_proxy server:8080 始终可达
+#   - server 仅 expose 8080(不发布到宿主机),外部只能经 Caddy 进入
+#
+# 数据与安全:
+#   - 数据(数据库/主密钥)落在 ./picoaide-data(0700),升级镜像不丢数据
+#   - server 以非 root(uid 10001 picoaide)运行;首次使用前必须改强密码
+#   - 日志:json-file + 轮转(50MB×3),避免磁盘被日志打满
+# ============================================================
+
 services:
   caddy:
     image: caddy:2-alpine
     container_name: picoaide-caddy
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    # 手动证书模式需要挂载 certs/ 目录(auto 模式无 certs/ 时挂载空目录无害)
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
       - caddy-data:/data
       - caddy-config:/config
+    networks:
+      picoaide-net:
+        ipv4_address: ${CADDY_IP:-172.28.0.2}
     depends_on:
-      - server
+      server:
+        condition: service_healthy
+    # 加固:Caddy 仅需网卡能力;日志轮转
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   server:
-    image: ghcr.io/picoaide/picoaide-server:latest
+    image: ${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-server:latest}
     container_name: picoaide-server
     restart: unless-stopped
+    # 仅内网可达(经 Caddy),不发布宿主机端口
     expose:
       - "8080"
     environment:
-      # 初始管理员密码(每次启动都会 EnsureBootstrapAdmin,幂等,已存在则跳过)
-      # ⚠ 部署前请改为强密码
-      PICOAI_ADMIN_PASSWORD: change-me-to-a-strong-password
+      # 初始管理员密码(已有 admin 时 EnsureBootstrapAdmin 幂等跳过,可置空以清除明文凭据)
+      # ⚠ 首次启动必填,部署前改为强密码;可用部署脚本随机生成
+      PICOAI_ADMIN_PASSWORD: ${PICOAI_ADMIN_PASSWORD:-}
+      # 主密钥:留空则由服务端首次启动自动生成于 data/master.key(请备份)
+      PICOAI_MASTER_KEY: ${PICOAI_MASTER_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./picoaide-data:/data
-    command: ["--bootstrap-admin", "admin"]
+    command: ["--bootstrap-admin", "${ADMIN_USER:-admin}"]
+    networks:
+      picoaide-net:
+        ipv4_address: ${SERVER_IP:-172.28.0.3}
     healthcheck:
       # /healthz 无需认证返回 200;wget 退出码 0=healthy(连接失败/非200=unhealthy)
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
@@ -48,6 +86,22 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+networks:
+  picoaide-net:
+    name: picoaide-net
+    driver: bridge
+    # 私有网段:默认 172.28.0.0/24;与宿主机/其他 docker 网段冲突时改 .env 后
+    # docker compose down && docker compose up -d(网络重建)
+    ipam:
+      config:
+        # 只指定子网;gateway 由 docker 自动取子网第一个可用 IP,避免手工不一致
+        - subnet: ${NETWORK_SUBNET:-172.28.0.0/24}
 
 volumes:
   caddy-data:
