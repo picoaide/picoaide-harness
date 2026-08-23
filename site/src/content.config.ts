@@ -12,6 +12,7 @@ const blog = defineCollection({
     updatedDate: z.coerce.date().optional(),
     tags: z.array(z.string()).default([]),
     author: z.string().default('PicoAide Team'),
+    version: z.string().optional(),
     cover: z.string().optional(),
     draft: z.boolean().default(false),
   }),
