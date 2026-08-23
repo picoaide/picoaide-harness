@@ -5,13 +5,12 @@ import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
-import { Store } from 'lucide-react'
+import { Store, GitBranch } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
@@ -271,53 +270,52 @@ export default function Marketplace() {
               <Button size="sm" variant="outline" onClick={loadSkills}>重试</Button>
             </div>
           ) : skillsLoading ? (
-            <div className="space-y-2">
-              {[0, 1, 2].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+              {[0, 1, 2].map((i) => <Skeleton key={i} className="h-40 w-full" />)}
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead>版本</TableHead>
-                  <TableHead>描述</TableHead>
-                  <TableHead>Git 源</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {skills.map((s) => (
-                  <TableRow key={s.name}>
-                    <TableCell>{s.name}</TableCell>
-                    <TableCell>{s.version}</TableCell>
-                    <TableCell>{s.description}</TableCell>
-                    <TableCell className="max-w-56 truncate font-mono text-xs">{s.git_url}</TableCell>
-                    <TableCell>{s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="secondary">已下架</Badge>}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
-                        <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
-                        {s.enabled
-                          ? <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
-                          : <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {skills.map((s) => (
+                <div
+                  key={s.name}
+                  className="group flex flex-col rounded-lg border bg-card p-4 transition-all duration-200 hover:border-[#1E40AF]/40 hover:shadow-md"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[#1E40AF]">
+                        <Store className="h-4 w-4" />
                       </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {skills.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={6} className="border-0 p-0">
-                      <EmptyState
-                        icon={<Store className="h-5 w-5 text-muted-foreground" />}
-                        title="暂无技能"
-                        desc="点击「上架技能」从 Git 源接入第一个技能"
-                      />
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">{s.name}</div>
+                        <div className="text-[11px] text-muted-foreground">v{s.version}</div>
+                      </div>
+                    </div>
+                    {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="secondary">已下架</Badge>}
+                  </div>
+                  <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500">{s.description || '暂无描述'}</p>
+                  <div className="mt-3 flex items-center gap-1.5 truncate text-[10px] text-slate-400">
+                    <GitBranch className="h-3 w-3 shrink-0" />
+                    <span className="truncate font-mono">{s.git_url}</span>
+                  </div>
+                  <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
+                    <Button size="sm" variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
+                    <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
+                    {s.enabled
+                      ? <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
+                      : <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
+                  </div>
+                </div>
+              ))}
+              {skills.length === 0 && (
+                <div className="col-span-full">
+                  <EmptyState
+                    icon={<Store className="h-5 w-5 text-muted-foreground" />}
+                    title="暂无技能"
+                    desc="点击「上架技能」从 Git 源接入第一个技能"
+                  />
+                </div>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>

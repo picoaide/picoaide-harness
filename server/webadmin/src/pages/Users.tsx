@@ -354,39 +354,46 @@ export default function Users() {
           <TableBody>
             {users.map((u) => (
               <TableRow key={u.id}>
-                <TableCell>{u.id}</TableCell>
-                <TableCell>{u.username}</TableCell>
+                <TableCell className="font-mono text-xs text-slate-400">{u.id}</TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-bold ${u.is_admin ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                      {u.username.slice(0, 1).toUpperCase()}
+                    </div>
+                    <span className="font-medium">{u.username}</span>
+                  </div>
+                </TableCell>
                 <TableCell>
                   {(u.groups ?? []).length > 0
                     ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
                     : <span className="text-xs text-muted-foreground">—</span>}
                 </TableCell>
-              <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
-              <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
-              <TableCell>
-                {u.is_admin ? (
-                  <span className="text-xs text-muted-foreground">豁免</span>
-                ) : (
-                  <div className="space-y-0.5">
-                    <div className="text-xs">
-                      <span className="font-medium">{fmtTokens(u.monthly_usage ?? 0)}</span>
-                      <span className="text-muted-foreground"> / {quotaLabel(u.quota_tokens, u.effective_quota_tokens)}</span>
+                <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
+                <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {u.is_admin ? (
+                    <span className="text-muted-foreground">豁免</span>
+                  ) : (
+                    <div className="space-y-0.5">
+                      <div>
+                        <span className="font-semibold text-slate-800">{fmtTokens(u.monthly_usage ?? 0)}</span>
+                        <span className="text-muted-foreground"> / {quotaLabel(u.quota_tokens, u.effective_quota_tokens)}</span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        ¥{fmtMoney(u.monthly_cost ?? 0)} / {moneyQuotaLabel(u.quota_money, u.effective_quota_money)}
+                      </div>
+                      {/* 中7:使用率基于生效配额(跟随默认也可见超限预警) */}
+                      {((u.effective_quota_tokens && u.effective_quota_tokens > 0) || (u.effective_quota_money && u.effective_quota_money > 0)) && (
+                        <Badge
+                          variant={Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money)) >= 90 ? 'destructive' : 'secondary'}
+                          className="h-4 px-1.5 text-[10px]"
+                        >
+                          {Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money))}%
+                        </Badge>
+                      )}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      ¥{fmtMoney(u.monthly_cost ?? 0)} / {moneyQuotaLabel(u.quota_money, u.effective_quota_money)}
-                    </div>
-                    {/* 中7:使用率基于生效配额(跟随默认也可见超限预警) */}
-                    {((u.effective_quota_tokens && u.effective_quota_tokens > 0) || (u.effective_quota_money && u.effective_quota_money > 0)) && (
-                      <Badge
-                        variant={Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money)) >= 90 ? 'destructive' : 'secondary'}
-                        className="h-4 px-1.5 text-[10px]"
-                      >
-                        {Math.max(usageRate(u.monthly_usage ?? 0, u.effective_quota_tokens), moneyRate(u.monthly_cost ?? 0, u.effective_quota_money))}%
-                      </Badge>
-                    )}
-                  </div>
-                )}
-              </TableCell>
+                  )}
+                </TableCell>
               <TableCell className="text-right space-x-2">
                 <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
                 <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>

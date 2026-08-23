@@ -112,58 +112,64 @@ export default function App() {
   return (
     <BrowserRouter basename="/admin">
       <div className="flex h-screen bg-background">
-        {/* 品牌暗色侧边栏 */}
-        <aside className="flex w-56 flex-col bg-slate-900 text-slate-300">
-          <div className="flex items-center gap-3 px-5 py-5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 shadow-md">
+        {/* 品牌深海军蓝侧边栏(#0F172A 契约色) */}
+        <aside className="flex w-56 shrink-0 flex-col border-r border-slate-800 bg-[#0F172A] text-slate-300">
+          <div className="flex items-center gap-3 px-5 pb-5 pt-6">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-blue-400/40 bg-blue-500/15">
               <svg viewBox="0 0 32 32" className="h-5 w-5" fill="none" aria-hidden="true">
-                <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(255,255,255,0.15)" stroke="white" strokeWidth="2" />
-                <path d="M12 12 L20 16 L12 20 Z" fill="white" />
+                <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(59,130,246,0.18)" stroke="#60A5FA" strokeWidth="2" />
+                <path d="M12 12 L20 16 L12 20 Z" fill="#93C5FD" />
               </svg>
             </div>
             <div className="min-w-0">
-              <div className="truncate text-[15px] font-bold text-white">PicoAide</div>
-              <div className="text-[11px] text-slate-400">企业 AI 管理后台</div>
+              <div className="truncate text-[14px] font-bold tracking-tight text-white">PicoAide</div>
+              <div className="text-[10px] font-medium uppercase tracking-widest text-slate-500">Admin Console</div>
             </div>
           </div>
 
           {baseURL && (
-            <div className="mx-3 mb-4 flex items-center gap-1.5 rounded-lg bg-white/5 px-3 py-2 text-[11px] text-slate-400">
-              <Globe className="h-3 w-3 shrink-0" />
-              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate hover:text-slate-200" title={baseURL}>{baseURL}</a>
+            <div className="mx-4 mb-4 flex items-center gap-1.5 rounded-md border border-slate-700/60 bg-slate-800/50 px-2.5 py-1.5 text-[10px] text-slate-400">
+              <Globe className="h-3 w-3 shrink-0 text-slate-500" />
+              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate font-mono hover:text-slate-200" title={baseURL}>{baseURL}</a>
             </div>
           )}
 
-          <nav className="flex-1 space-y-1 px-3">
-            <div className="px-3 pb-2 text-[11px] font-medium uppercase tracking-wider text-slate-500">管理中心</div>
+          <nav className="flex-1 space-y-0.5 px-3">
+            <div className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-slate-600">Management</div>
             {nav.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 className={({ isActive }) =>
                   cn(
-                    'group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all',
+                    'group relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150',
                     isActive
-                      ? 'bg-gradient-to-r from-blue-600/90 to-cyan-600/70 font-medium text-white shadow-md'
-                      : 'text-slate-400 hover:bg-white/5 hover:text-slate-100',
+                      ? 'bg-blue-500/15 font-medium text-white'
+                      : 'text-slate-400 hover:bg-white/5 hover:text-slate-200',
                   )
                 }
               >
-                <n.icon className="h-4.5 w-4.5 h-[18px] w-[18px] shrink-0" />
-                <span className="flex-1">{n.label}</span>
-                <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-60" />
+                {({ isActive }) => (
+                  <>
+                    {/* 激活左侧蓝条(swiss 垂直线) */}
+                    {isActive && <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-blue-400" />}
+                    <n.icon className="h-4 w-4 shrink-0" />
+                    <span className="flex-1">{n.label}</span>
+                    <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-50" />
+                  </>
+                )}
               </NavLink>
             ))}
           </nav>
 
-          <div className="border-t border-white/10 p-3">
-            <div className="mb-2 flex items-center gap-2.5 rounded-lg bg-white/5 px-3 py-2.5">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-600 to-slate-700 text-xs font-semibold text-white">
+          <div className="border-t border-slate-800 p-3">
+            <div className="mb-2 flex items-center gap-2.5 rounded-md bg-slate-800/40 px-2.5 py-2">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-500/20 text-[11px] font-semibold text-blue-200">
                 {adminName.slice(0, 1).toUpperCase()}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-medium text-slate-200">{adminName}</div>
-                <div className="flex items-center gap-1 text-[10px] text-slate-500"><ShieldCheck className="h-3 w-3" />超级管理员</div>
+                <div className="truncate text-[11px] font-medium text-slate-200">{adminName}</div>
+                <div className="flex items-center gap-1 text-[9px] text-slate-500"><ShieldCheck className="h-2.5 w-2.5" />SUPER ADMIN</div>
               </div>
             </div>
             <Button
@@ -185,10 +191,10 @@ export default function App() {
         </aside>
 
         {/* 主内容区 */}
-        <main className="flex-1 overflow-auto">
-          {/* 顶部细条(品牌点缀) */}
-          <div className="sticky top-0 z-10 h-1 w-full bg-gradient-to-r from-blue-600 via-cyan-500 to-blue-600" />
-          <div className="mx-auto max-w-7xl p-6 lg:p-8">
+        <main className="flex min-w-0 flex-1 flex-col overflow-auto">
+          {/* 顶部品牌渐变细条(3px,蓝→青) */}
+          <div className="sticky top-0 z-20 h-0.5 shrink-0 bg-gradient-to-r from-[#1E40AF] via-[#3B82F6] to-[#D97706]" />
+          <div className="mx-auto w-full max-w-[1440px] flex-1 p-6 lg:p-7">
             <ErrorBoundary>
               <Routes>
                 <Route path="/" element={<Navigate to="/users" />} />
