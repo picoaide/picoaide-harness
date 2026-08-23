@@ -6,6 +6,10 @@ import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Card } from '../components/ui/card'
+import { PageHeader } from '../components/page-header'
+import { EmptyState } from '../components/empty-state'
+import { Network } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { deptSubtreeIds, deptTreeOptions } from '../lib/utils'
 import { fmtMoney, fmtMoneyFull, moneyPercent, moneyOver } from '../lib/format'
@@ -36,6 +40,8 @@ export default function Departments() {
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
   const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '', budget_money: '' })
+  // 对话框内联错误(UX 改进):保存失败信息显示在对话框内,而非页面顶部
+  const [deptErr, setDeptErr] = useState('')
   // P1-8: 请求序号防乱序——保存/删除后重拉与手动刷新竞态时只认最新响应
   const loadSeq = useRef(0)
 
@@ -76,6 +82,7 @@ export default function Departments() {
   }
 
   function openDeptEdit(d?: Department) {
+    setDeptErr('')
     setDeptForm({
       id: d?.id ?? 0,
       name: d?.name ?? '',
@@ -89,6 +96,8 @@ export default function Departments() {
 
   async function saveDeptForm() {
     if (busy) return // L10:双击守卫
+    setDeptErr('')
+    if (!deptForm.name.trim()) { setDeptErr('请填写部门名称'); return }
     const payload: Record<string, any> = {
       name: deptForm.name,
       parent_id: Number(deptForm.parent_id),
@@ -108,7 +117,7 @@ export default function Departments() {
       setDeptDialog(false)
       load()
     } catch (err: any) {
-      setError(err.message)
+      setDeptErr(err.message)
     } finally {
       setBusy(false)
     }
@@ -130,14 +139,13 @@ export default function Departments() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">部门管理</h1>
-        <Button onClick={() => openDeptEdit()}>新建部门</Button>
-      </div>
+      <PageHeader
+        title="部门管理"
+        desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门"
+        actions={<Button onClick={() => openDeptEdit()}>新建部门</Button>}
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
-      <p className="text-sm text-muted-foreground">
-        金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门
-      </p>
+      <Card>
       <Table>
         <TableHeader>
           <TableRow>
@@ -146,7 +154,7 @@ export default function Departments() {
             <TableHead>部门主管</TableHead>
             <TableHead>成员</TableHead>
             <TableHead>子部门</TableHead>
-            <TableHead>月度金额预算</TableHead>
+            <TableHead className="w-44 whitespace-nowrap">月度金额预算</TableHead>
             <TableHead className="text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
@@ -157,16 +165,19 @@ export default function Departments() {
               <TableRow key={d.id}>
                 <TableCell>
                   <div className="flex items-center gap-2">
-                    {d.parent_id !== 0 && <span className="text-muted-foreground">↳</span>}
-                    {d.name}
+                    {d.parent_id !== 0 && <span className="self-center text-xs leading-none text-slate-300">└</span>}
+                    <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${d.parent_id === 0 ? 'bg-blue-600/10 text-[#1E40AF]' : 'bg-slate-100 text-slate-400'}`}>
+                      <Network className="h-3 w-3" />
+                    </span>
+                    <span className="font-medium">{d.name}</span>
                     {d.granted_count > 0 && <Badge variant="outline">已授权</Badge>}
                   </div>
-                  {d.description && <div className="text-xs text-muted-foreground">{d.description}</div>}
+                  {d.description && <div className="pl-7 text-xs text-muted-foreground">{d.description}</div>}
                 </TableCell>
                 <TableCell>{parent?.name ?? '—'}</TableCell>
                 <TableCell>{d.leader_name || '—'}</TableCell>
-                <TableCell>{d.member_count}</TableCell>
-                <TableCell>{d.child_count}</TableCell>
+                <TableCell className="font-mono text-xs">{d.member_count}</TableCell>
+                <TableCell className="font-mono text-xs">{d.child_count}</TableCell>
                 <TableCell>
                   {d.budget_money === null || d.budget_money === undefined || d.budget_money <= 0 ? (
                     // 中6:本部门无预算 ≠ 不限——祖先部门预算仍约束其成员
@@ -209,26 +220,36 @@ export default function Departments() {
             )
           })}
           {depts.length === 0 && (
-            <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无部门,点击「新建部门」开始搭建组织架构</TableCell></TableRow>
+            <TableRow>
+              <TableCell colSpan={7} className="border-0 p-0">
+                <EmptyState
+                  icon={<Network className="h-5 w-5 text-muted-foreground" />}
+                  title="暂无部门"
+                  desc="点击「新建部门」开始搭建组织架构"
+                />
+              </TableCell>
+            </TableRow>
           )}
         </TableBody>
       </Table>
+      </Card>
 
-      <Dialog open={deptDialog} onOpenChange={setDeptDialog}>
+      <Dialog open={deptDialog} onOpenChange={(v) => { setDeptDialog(v); if (!v) setDeptErr('') }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{deptForm.id > 0 ? '编辑部门' : '新建部门'}</DialogTitle>
             <DialogDescription>上级部门为空 = 顶层部门;主管可为空,后续补任</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {deptErr && <div className="text-sm text-destructive">{deptErr}</div>}
             <div className="space-y-1">
               <Label htmlFor="dept-name">部门名称</Label>
               <Input id="dept-name" placeholder="如 研发部" value={deptForm.name} onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>上级部门</Label>
+              <Label htmlFor="dept-parent">上级部门</Label>
               <Select value={deptForm.parent_id} onValueChange={(v) => setDeptForm({ ...deptForm, parent_id: v })}>
-                <SelectTrigger aria-label="上级部门"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="上级部门" id="dept-parent"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="0">无(顶层部门)</SelectItem>
                   {deptTreeOptions(
