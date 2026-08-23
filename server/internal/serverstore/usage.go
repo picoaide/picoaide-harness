@@ -122,15 +122,30 @@ func offpeakFactor(now time.Time, discount float64, windows []PeakWindow) float6
 // costOfAt computes the yuan cost for a usage row at time now from model
 // pricing (yuan per 1M tokens), applying the off-peak discount in non-peak
 // windows (0023). Unpriced models (0,0) yield 0 cost.
-func costOfAt(now time.Time, promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64, windows []PeakWindow) float64 {
-	base := float64(promptTokens)/1e6*inputPer1M + float64(completionTokens)/1e6*outputPer1M
+// 缓存计费(0029/0030):cacheTokens(命中的输入 token)按 cacheInputPer1M 计费
+// (未配置则回退输入价),其余输入按 inputPer1M,输出按 outputPer1M。
+func costOfAt(now time.Time, promptTokens, completionTokens, cacheTokens int64, inputPer1M, outputPer1M, cacheInputPer1M, offpeak float64, windows []PeakWindow) float64 {
+	if cacheTokens < 0 {
+		cacheTokens = 0
+	}
+	if cacheTokens > promptTokens {
+		cacheTokens = promptTokens // 防御:命中数不超过总输入
+	}
+	cachePrice := cacheInputPer1M
+	if cachePrice <= 0 {
+		cachePrice = inputPer1M // 未配置缓存价:命中按输入价计
+	}
+	missTokens := promptTokens - cacheTokens
+	base := float64(missTokens)/1e6*inputPer1M +
+		float64(cacheTokens)/1e6*cachePrice +
+		float64(completionTokens)/1e6*outputPer1M
 	return base * offpeakFactor(now, offpeak, windows)
 }
 
 // costOf computes the cost for a usage row right now (no peak windows —
 // used only by callers that resolve windows themselves).
 func costOf(promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64) float64 {
-	return costOfAt(time.Now(), promptTokens, completionTokens, inputPer1M, outputPer1M, offpeak, nil)
+	return costOfAt(time.Now(), promptTokens, completionTokens, 0, inputPer1M, outputPer1M, 0, offpeak, nil)
 }
 
 // RecordUsage inserts a chat usage row and returns its id.
@@ -147,12 +162,24 @@ func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, compl
 	return recordUsageKindAt(db, userID, model, promptTokens, completionTokens, kind, time.Now())
 }
 
+// RecordUsageKindCached 与 RecordUsageKind 相同,额外携带缓存命中输入 token
+// 数(DeepSeek 缓存计费,0029/0030):命中部分按 cache_input_price_per_1m 计费。
+func RecordUsageKindCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string) (int64, error) {
+	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, cacheTokens, kind, time.Now())
+}
+
 // recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
 func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, now time.Time) (int64, error) {
+	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, 0, kind, now)
+}
+
+// recordUsageKindAtCached 带缓存命中数的记录(时间注入)。
+func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, now time.Time) (int64, error) {
 	in, out, off := ModelPrices(db, model)
-	cost := costOfAt(now, promptTokens, completionTokens, in, out, off, loadPeakWindows(db))
-	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, model, promptTokens, completionTokens, kind, cost)
+	cacheIn := ModelCachePrice(db, model)
+	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
+	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost)
 	if err != nil {
 		return 0, err
 	}
@@ -165,16 +192,27 @@ func UpdateUsageTokens(db *sql.DB, id, promptTokens, completionTokens int64) err
 	return updateUsageTokensAt(db, id, promptTokens, completionTokens, time.Now())
 }
 
+// UpdateUsageTokensCached 带缓存命中数的回填版本(0030)。
+func UpdateUsageTokensCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64) error {
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, time.Now())
+}
+
 // updateUsageTokensAt 是 UpdateUsageTokens 的时间注入版本(测试固定时刻)。
 func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, now time.Time) error {
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, now)
+}
+
+// updateUsageTokensAtCached 带缓存命中数的回填(时间注入)。
+func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, now time.Time) error {
 	var model string
 	if err := db.QueryRow("SELECT model FROM usage WHERE id = ?", id).Scan(&model); err != nil {
 		return err
 	}
 	in, out, off := ModelPrices(db, model)
-	cost := costOfAt(now, promptTokens, completionTokens, in, out, off, loadPeakWindows(db))
-	_, err := db.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cost = ? WHERE id = ?",
-		promptTokens, completionTokens, cost, id)
+	cacheIn := ModelCachePrice(db, model)
+	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
+	_, err := db.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ? WHERE id = ?",
+		promptTokens, completionTokens, cacheTokens, cost, id)
 	return err
 }
 
@@ -338,6 +376,8 @@ type UsageAggregateRow struct {
 	// 单独统计便于前端区分 chat/embedding 用量;chat = Requests - EmbedRequests。
 	EmbedRequests int64 `json:"embed_requests"`
 	EmbedTokens   int64 `json:"embed_tokens"`
+	// CacheTokens 缓存命中的输入 token(0030,DeepSeek 缓存计费)。
+	CacheTokens int64 `json:"cache_tokens"`
 	// Cost 该桶费用合计(元,0022):SUM(usage.cost),未定价模型贡献 0。
 	Cost float64 `json:"cost"`
 }
@@ -437,6 +477,7 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		SUM(usage.prompt_tokens) AS pt, SUM(usage.completion_tokens) AS ct, COUNT(*) AS req,
 		SUM(CASE WHEN usage.kind = 'embedding' THEN 1 ELSE 0 END) AS ereq,
 		SUM(CASE WHEN usage.kind = 'embedding' THEN usage.prompt_tokens ELSE 0 END) AS etok,
+		SUM(usage.cache_prompt_tokens) AS ctk,
 		SUM(usage.cost) AS cost
 		FROM usage` + join + ` WHERE 1=1`
 	var args []any
@@ -463,7 +504,7 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	out := []UsageAggregateRow{}
 	for rows.Next() {
 		var r UsageAggregateRow
-		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests, &r.EmbedRequests, &r.EmbedTokens, &r.Cost); err != nil {
+		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests, &r.EmbedRequests, &r.EmbedTokens, &r.CacheTokens, &r.Cost); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
