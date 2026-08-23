@@ -1,0 +1,112 @@
+{
+  "name": "@picoaide/dsh-enterprise",
+  "version": "0.1.0",
+  "description": "Enterprise login + server-side LLM gateway for DSH Desktop",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./auth-gate": {
+      "types": "./lib/types/auth-gate.d.ts",
+      "default": "./lib/auth-gate.js"
+    },
+    "./gateway-model": {
+      "types": "./lib/types/gateway-model.d.ts",
+      "default": "./lib/gateway-model.js"
+    },
+    "./bootstrap": {
+      "types": "./lib/types/bootstrap.d.ts",
+      "default": "./lib/bootstrap.js"
+    },
+    "./session-service": {
+      "types": "./lib/types/session-service.d.ts",
+      "default": "./lib/session-service.js"
+    },
+    "./server-connector/auth": {
+      "types": "./lib/types/server-connector/auth.d.ts",
+      "default": "./lib/server-connector/auth.js"
+    },
+    "./loopback": {
+      "types": "./lib/types/loopback.d.ts",
+      "default": "./lib/loopback.js"
+    },
+    "./server-connector/config": {
+      "types": "./lib/types/server-connector/config.d.ts",
+      "default": "./lib/server-connector/config.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "cordis.patch.yml",
+    "lib/**/*.js",
+    "lib/**/*.map",
+    "lib/types/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "vitest run",
+    "check": "yarn run build && yarn run typecheck && yarn run test"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-credentials": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-settings": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-skill": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-skill-filesystem": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-tool-skill": "0.1.0-rc.8",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "tar": "^7.5.0",
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-brand": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-locale": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-cordis-host-runner": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-plugin-inventory": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.8",
+    "@picoaide/dsh-connectors": "workspace:*",
+    "@types/node": "^22.20.0",
+    "@types/react": "^18",
+    "electron": "43.4.0",
+    "react": "18.3.1",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

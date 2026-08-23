@@ -21,7 +21,7 @@ Harness follows an “everything is a plugin” model. Desktop keeps the same pr
 2. **Desktop behavior stays extensible.** Profile management and the packaged package-manager environment can be exposed as explicit Host services instead of making every plugin guess at Electron internals.
 3. **Ownership stays clear.** Upstream DSH owns agent semantics, Desktop owns native integration, and third-party plugins depend only on the contracts they need.
 
-The plugin boundary also tells us what not to expose. Third-party plugins can use the public `desktopProfiles` and `desktopPnpm` services, but they cannot directly control `BrowserWindow`, the tray, Electron IPC, installers, or launcher-private paths. A stable contract is easier to upgrade and debug than an unrestricted private API.
+The plugin boundary also tells us what not to expose. Third-party plugins can only use clearly published interfaces; they cannot directly control the window, tray, installers, or other internal implementation. A stable boundary is easier to upgrade and debug than an unrestricted private API. See [plugin development](plugin-development.en.md) for the published interface details.
 
 ## What Desktop provides
 
@@ -31,7 +31,7 @@ The current Desktop product provides:
 - Compatibility and advanced presentation modes. Compatibility preserves the upstream client; advanced adds Desktop-owned layout, native materials, and drag regions.
 - Multiple profile selection. Desktop exposes the active profile identity for the current generation, and switching takes effect through an orderly restart.
 - A bundled terminal and pinned pnpm environment. They apply only to processes created by Desktop and do not modify the user's global PATH.
-- Public `desktopProfiles` and `desktopPnpm` Host services for plugins.
+- A controlled set of extension interfaces for plugin developers (see [plugin development](plugin-development.en.md)).
 - Version discovery and confirmation-gated installer downloads, handing off to a macOS DMG or Windows NSIS installer.
 
 ## What we deliberately do not do
@@ -45,5 +45,5 @@ The current Desktop product provides:
 ## Who should read this
 
 - Users who want to install and use Harness: start with the [user guide](user-guide.en.md).
-- Users installing or building DSH plugins: read [plugin development](plugin-development.en.md), then the [Desktop service contract](../dsh-plugin-desktop/docs/plugin-services.md).
-- Maintainers working on startup, profiles, or packaging: read the [architecture](architecture.en.md) and the package [README](../dsh-plugin-desktop/README.md).
+- Users installing or building DSH plugins: read [plugin development](plugin-development.en.md), then the [Desktop service contract](../packages/host/desktop/docs/plugin-services.md).
+- Maintainers working on startup, profiles, or packaging: read the [architecture](architecture.en.md) and the package [README](../packages/host/desktop/README.md).

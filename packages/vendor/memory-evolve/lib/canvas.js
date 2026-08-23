@@ -1,0 +1,1146 @@
+/**
+ * dsh-memory-evolve — 无限画板（canvas）**独立子模块**（后端一期）。
+ *
+ * 用户拍板（2026-08-13）：本地路径引用、单板+视角筛选、AI 双向拉取式
+ * 不注入快照、AI 只加/查/改内容不碰摆放、AI 产物默认便签（写会话板
+ * 中央区）、写入免确认（只加会话便签）、安全从简（AI 只读已上板节点）。
+ *
+ * 职责：
+ *   1. 独立开关 canvasEnabled（默认关，在「Memory Evolve 设置」Tab 的
+ *      「配置」里切换，applyRuntimePatch sync 链即时安装/卸载）；
+ *   2. 宿主端存储：<memoryDir>/canvas/boards.json —— **单板**模型，
+ *      所有节点带 scope（session/project/global）+ sessionId/projectId
+ *      归属键，前端按视角筛选；整板原子写 + rev 乐观锁（防多会话并发
+ *      整文件覆盖丢便签——Grok 评审指出，已采纳）；
+ *   3. HTTP API（/memory-evolve/api/canvas/*）：状态探测 / 整板读写 /
+ *      已上板路径文件代理（预览/缩略图，仅允许读**已在画板上的节点**，
+ *      不做任意路径读取）/ 真实本地搜索上板（复用 search-docs 的
+ *      provider 实现，未启用搜索模块时走内置 walk 兜底）；
+ *   4. de_canvas 工具：list / get / add_note —— AI 只能查画板、按稳定
+ *      id 读内容、往**当前会话板中央区**放便签；不能改已有节点、不能
+ *      写项目/全局、不能加路径节点、不碰摆放（视觉操作留人）。
+ *
+ * 零运行时依赖（只 import node 内置模块）。
+ * @module dsh-memory-evolve/canvas
+ */
+
+import {
+  createReadStream, existsSync, mkdirSync, readFileSync, realpathSync,
+  renameSync, statSync, writeFileSync,
+} from 'node:fs'
+import { spawn as spawnProcess } from 'node:child_process'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { basename, dirname, extname, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
+
+// ---------------------------------------------------------------------------
+// 常量与路径
+// ---------------------------------------------------------------------------
+
+/**
+ * 系统打开命令执行器（openNodeFile / openNodeFolder 用）。
+ *
+ * 默认真实 spawn 系统默认应用/文件管理器；测试可用 setOpenSpawner 注入 fake，
+ * 避免在桌面环境真实弹窗——canvas.test.js 的「真实打开」测试曾因此在
+ * Linux + GNOME 下每次跑测试都弹出 Nautilus 窗口打开 /tmp/canvas-test-XXX 下
+ * 的 sub 临时目录（目录无 cleanup 残留、/tmp 被清后窗口报「文件夹不存在」）。
+ */
+let openSpawner = spawnProcess
+
+/** 替换系统打开执行器（测试注入点）。传 undefined 恢复真实 spawn。 */
+export function setOpenSpawner(fn) {
+  openSpawner = fn === undefined ? spawnProcess : fn
+}
+
+/** 画板文件路径（<memoryDir>/canvas/boards.json）。 */
+export function canvasPath(config) {
+  return join(config.memoryDir, 'canvas', 'boards.json')
+}
+
+/** 画板数据目录（<memoryDir>/canvas/）。 */
+export function canvasDir(config) {
+  return join(config.memoryDir, 'canvas')
+}
+
+/** 单板节点上限（防无限膨胀；一期够用）。 */
+export const CANVAS_NODES_MAX = 500
+
+/** 便签单条内容上限（128 KiB，画板是轻量陈列，不承载大文档）。 */
+export const CANVAS_NOTE_MAX_BYTES = 128 * 1024
+
+/** AI 便签条数软上限（防 AI 一轮写爆；超出拒绝并提示）。 */
+export const CANVAS_AI_NOTES_MAX = 50
+
+/** 文件代理读取上限（预览用，超过只给元信息不给内容）。 */
+export const CANVAS_FILE_PROXY_MAX_BYTES = 32 * 1024 * 1024
+
+/** 文本预览上限（文本类内容截断用）。 */
+export const CANVAS_TEXT_PREVIEW_MAX = 256 * 1024
+
+/** AI 便签落点（会话板中央区固定坐标，与前端 AI_ZONE 对齐）。 */
+export const CANVAS_AI_ZONE = Object.freeze({ x: 0, y: 0, width: 560, height: 220 })
+
+/** 文件代理允许的 MIME 白名单（图片/音视频/文本/PDF；其他一律拒绝内容，只给元信息）。 */
+export const CANVAS_MIME_ALLOW = Object.freeze({
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.pdf': 'application/pdf',
+  '.md': 'text/markdown; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.yml': 'text/yaml; charset=utf-8',
+})
+
+/** 拒绝代理的敏感路径片段（安全从简但保留基础边界：私钥/凭据/配置不进浏览器）。 */
+export const CANVAS_PATH_DENY = Object.freeze([
+  '/.ssh/', '/.gnupg/', '/.aws/', '/.config/', '/.git/', '/node_modules/',
+  '/Library/Keychains/', '/AppData/', '/.env', '/.pem', '/.key', '/.p12',
+])
+
+// ---------------------------------------------------------------------------
+// 存储（单板 + rev 乐观锁）
+// ---------------------------------------------------------------------------
+
+/**
+ * 生成节点 id（前缀 canvas_ + 随机）。
+ * @returns {string}
+ */
+export function createCanvasId() {
+  return `canvas_${randomBytes(6).toString('hex')}`
+}
+
+/**
+ * 从路径推断节点类型（与前端 inferTypeFromPath 对齐；无法确认降级 file）。
+ * @param {string} path
+ * @returns {'folder'|'markdown'|'plainText'|'image'|'media'|'file'}
+ */
+export function inferNodeTypeFromPath(path) {
+  const lower = String(path).trim().toLowerCase()
+  if (lower.endsWith('/') || lower.endsWith('\\')) return 'folder'
+  if (/\.md(?:own)?$/.test(lower)) return 'markdown'
+  if (/\.(?:txt|log|csv|json|ya?ml)$/.test(lower)) return 'plainText'
+  if (/\.(?:png|jpe?g|gif|webp|svg|bmp|avif)$/.test(lower)) return 'image'
+  if (/\.(?:mp3|wav|m4a|aac|ogg|mp4|mov|mkv|webm)$/.test(lower)) return 'media'
+  return 'file'
+}
+
+/**
+ * 读取画板整板状态；文件不存在返回空板。任何损坏都回退空板
+ * （不抛——前端有种子兜底，后端空板是合法初始态）。
+ * @param {object} config - resolved plugin config。
+ * @returns {{ version: number, nodes: any[], rev: number, viewport: object|null, viewMode: string }}
+ */
+export function readCanvas(config) {
+  const file = canvasPath(config)
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    if (raw && typeof raw === 'object' && Array.isArray(raw.nodes)) {
+      return {
+        version: 1,
+        nodes: raw.nodes,
+        rev: Number.isFinite(Number(raw.rev)) ? Number(raw.rev) : 0,
+        viewport: raw.viewport ?? null,
+        viewMode: typeof raw.viewMode === 'string' ? raw.viewMode : 'session',
+        lastAiNodeId: typeof raw.lastAiNodeId === 'string' ? raw.lastAiNodeId : null,
+      }
+    }
+  } catch {
+    // 文件缺失或损坏 → 空板
+  }
+  return { version: 1, nodes: [], rev: 0, viewport: null, viewMode: 'session', lastAiNodeId: null }
+}
+
+/**
+ * 原子写整板（先写 tmp 再 rename）；返回新 rev。
+ * @param {object} config
+ * @param {{ nodes: any[], viewport?: object|null, viewMode?: string }} patch
+ * @param {number} rev - 乐观锁：期望的当前 rev（不匹配则抛 ConflictError）。
+ * @returns {number} 新 rev
+ */
+export function writeCanvas(config, patch, rev) {
+  const current = readCanvas(config)
+  if (current.rev !== rev) {
+    const error = new Error(`画板已被其他会话修改（当前 rev=${current.rev}，期望 ${rev}），请刷新后重试`)
+    error.code = 'CANVAS_CONFLICT'
+    throw error
+  }
+  if (!Array.isArray(patch.nodes) || patch.nodes.length > CANVAS_NODES_MAX) {
+    throw new Error(`节点数量超出上限（${CANVAS_NODES_MAX}）`)
+  }
+  // 整板保存的节点做形状归一：前端可能携带 meta 等附加字段（localStorage
+  // 时代遗留），统一剥成后端契约字段，保证 boards.json 结构稳定
+  // （与 normalizeNode 产出对齐；未知字段丢弃，缺省字段补默认）。
+  const nodes = patch.nodes.map((n) => {
+    if (!n || typeof n !== 'object') throw new Error('节点必须是对象')
+    const TYPES = ['folder', 'markdown', 'plainText', 'image', 'media', 'file']
+    const SCOPES = ['session', 'project', 'global']
+    const p = n.placement ?? {}
+    return {
+      id: typeof n.id === 'string' && n.id.startsWith('canvas_') ? n.id : createCanvasId(),
+      type: TYPES.includes(n.type) ? n.type : 'file',
+      title: String(n.title ?? '').slice(0, 200) || '未命名素材',
+      scope: SCOPES.includes(n.scope) ? n.scope : 'session',
+      scopeLabel: String(n.scopeLabel ?? ''),
+      sessionId: typeof n.sessionId === 'string' ? n.sessionId : undefined,
+      projectId: typeof n.projectId === 'string' ? n.projectId : undefined,
+      path: typeof n.path === 'string' && n.path !== '' ? n.path.slice(0, 1024) : undefined,
+      content: typeof n.content === 'string' ? n.content.slice(0, CANVAS_NOTE_MAX_BYTES) : undefined,
+      placement: {
+        x: Number.isFinite(Number(p.x)) ? Number(p.x) : 0,
+        y: Number.isFinite(Number(p.y)) ? Number(p.y) : 0,
+        width: Number.isFinite(Number(p.width)) ? Number(p.width) : 320,
+        height: Number.isFinite(Number(p.height)) ? Number(p.height) : 240,
+        zIndex: Number.isFinite(Number(p.zIndex)) ? Number(p.zIndex) : 1,
+      },
+      aiPlaced: n.aiPlaced === true,
+      unverified: Boolean(n.path) && !existsSync(n.path),
+      createdAt: Number.isFinite(Number(n.createdAt)) ? Number(n.createdAt) : Date.now(),
+    }
+  })
+  const next = {
+    version: 1,
+    nodes,
+    rev: rev + 1,
+    viewport: patch.viewport ?? current.viewport,
+    viewMode: patch.viewMode ?? current.viewMode,
+    lastAiNodeId: patch.lastAiNodeId === undefined ? current.lastAiNodeId : patch.lastAiNodeId,
+  }
+  const dir = canvasDir(config)
+  mkdirSync(dir, { recursive: true })
+  const tmp = join(dir, `boards.json.tmp.${process.pid}`)
+  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n')
+  renameSync(tmp, canvasPath(config))
+  return next.rev
+}
+
+/**
+ * 按 id 找节点。
+ * @param {any[]} nodes
+ * @param {string} id
+ * @returns {any|undefined}
+ */
+export function findNode(nodes, id) {
+  return nodes.find((n) => n && n.id === id)
+}
+
+/**
+ * 校验节点字段（新建/更新共用）：返回规范化节点；非法抛错。
+ * @param {object} input - { type, title, scope, sessionId, projectId, path?, content?, placement?, aiPlaced? }
+ * @param {{ sessionId: string, projectId: string, projectLabel: string, sessionLabel: string }} owner - 当前会话归属上下文
+ * @returns {object}
+ */
+export function normalizeNode(input, owner) {
+  const TYPES = ['folder', 'markdown', 'plainText', 'image', 'media', 'file']
+  const SCOPES = ['session', 'project', 'global']
+  const type = TYPES.includes(input?.type) ? input.type : 'file'
+  const scope = SCOPES.includes(input?.scope) ? input.scope : 'session'
+  const title = String(input?.title ?? '').trim().slice(0, 200) || '未命名素材'
+  // 归属键：global 无归属；project 挂 projectId；session 挂 sessionId+projectId。
+  const sessionId = scope === 'session' ? String(input?.sessionId ?? owner.sessionId) : undefined
+  const projectId = scope === 'project' || scope === 'session'
+    ? String(input?.projectId ?? owner.projectId)
+    : undefined
+  const scopeLabel = scope === 'global' ? '全局'
+    : scope === 'project' ? (input?.projectLabel ?? owner.projectLabel)
+      : (input?.sessionLabel ?? owner.sessionLabel)
+  const path = typeof input?.path === 'string' && input.path.trim() !== '' ? input.path.trim().slice(0, 1024) : undefined
+  const content = typeof input?.content === 'string'
+    ? input.content.slice(0, CANVAS_NOTE_MAX_BYTES)
+    : undefined
+  const placement = input?.placement && typeof input.placement === 'object'
+    ? {
+        x: Number.isFinite(Number(input.placement.x)) ? Number(input.placement.x) : 0,
+        y: Number.isFinite(Number(input.placement.y)) ? Number(input.placement.y) : 0,
+        width: Number.isFinite(Number(input.placement.width)) ? Number(input.placement.width) : 320,
+        height: Number.isFinite(Number(input.placement.height)) ? Number(input.placement.height) : 240,
+        zIndex: Number.isFinite(Number(input.placement.zIndex)) ? Number(input.placement.zIndex) : 1,
+      }
+    : { x: 0, y: 0, width: 320, height: 240, zIndex: 1 }
+  return {
+    id: createCanvasId(),
+    type,
+    title,
+    scope,
+    scopeLabel,
+    sessionId,
+    projectId,
+    path,
+    content,
+    placement,
+    aiPlaced: input?.aiPlaced === true,
+    unverified: Boolean(path) && !existsSync(path),
+    createdAt: Date.now(),
+  }
+}
+
+/**
+ * 迁移节点归属（2026-08-14 用户拍板：改归属只能用户手动触发；目标
+ * 会话 = 当前打开画板的会话——前端传 sessionId，后端按它解析项目）。
+ * 只改归属键（scope/sessionId/projectId/scopeLabel），其余字段（内容、
+ * 位置、aiPlaced、path 等）原样保留；rev 乐观锁与整板写入同一机制。
+ * @param {object} config
+ * @param {string} nodeId - 目标节点
+ * @param {'session'|'project'|'global'} scope - 目标层级
+ * @param {{ sessionId: string, projectId: string, projectLabel: string }} owner
+ *   - 当前会话归属上下文（sessionId 由前端传，projectId 按会话解析）
+ * @param {number} rev - 期望的当前 rev（乐观锁；不匹配抛 CANVAS_CONFLICT）
+ * @returns {{ node: object, rev: number }}
+ */
+export function migrateNode(config, nodeId, scope, owner, rev) {
+  const SCOPES = ['session', 'project', 'global']
+  const target = SCOPES.includes(scope) ? scope : 'session'
+  const board = readCanvas(config)
+  const node = findNode(board.nodes, nodeId)
+  if (!node) throw new Error('节点不存在或已被移除')
+  // 目标归属键（与 normalizeNode 同规则）：
+  //   session → sessionId=当前会话 + projectId=当前项目
+  //   project → 无 sessionId + projectId=当前项目
+  //   global  → 均无（所有视角可见）
+  const sessionId = target === 'session' ? String(owner.sessionId ?? '') : undefined
+  const projectId = target === 'project' || target === 'session'
+    ? String(owner.projectId ?? 'project:local')
+    : undefined
+  const scopeLabel = target === 'global' ? '全局'
+    : target === 'project' ? (owner.projectLabel ?? '当前项目')
+      : '当前会话'
+  const next = {
+    ...node,
+    scope: target,
+    scopeLabel,
+    sessionId,
+    projectId,
+  }
+  const nodes = board.nodes.map((n) => (n.id === nodeId ? next : n))
+  const nextRev = writeCanvas(config, { nodes }, rev)
+  return { node: next, rev: nextRev }
+}
+
+/**
+ * 计算 AI 便签落点（会话板中央区：AI_ZONE 内按已有 AI 便签数错位摆放，
+ * 与前端 aiSlot 对齐；不参与自由摆放区）。
+ * @param {any[]} nodes - 当前全部节点（含 AI 便签）
+ * @returns {{ x: number, y: number, width: number, height: number, zIndex: number }}
+ */
+export function aiSlotPlacement(nodes) {
+  const aiCount = nodes.filter((n) => n && n.aiPlaced).length
+  const col = aiCount % 2
+  const row = Math.floor(aiCount / 2) % 2
+  return {
+    x: CANVAS_AI_ZONE.x + 20 + col * 300,
+    y: CANVAS_AI_ZONE.y + 36 + row * 160,
+    // 默认宽高放大（曾 260×100 内容挤成一团看不清，用户反馈 2026-08-13）；
+    // 用户仍可用卡片右下角手柄继续调整。
+    width: 420,
+    height: 260,
+    zIndex: 1,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 文件代理（只读已上板节点路径；安全从简但保留基础边界）
+// ---------------------------------------------------------------------------
+
+/**
+ * 解析已上板节点的真实路径；做 realpath + 敏感路径拒绝 + 存在性校验。
+ * @param {object} config
+ * @param {string} nodeId
+ * @returns {{ path: string, size: number, mtime: number, ext: string, denied: boolean } | { error: string }}
+ */
+export function resolveNodeFile(config, nodeId) {
+  const board = readCanvas(config)
+  const node = findNode(board.nodes, nodeId)
+  if (!node || typeof node.path !== 'string' || node.path === '') {
+    return { error: '节点不存在或没有路径引用' }
+  }
+  // 敏感路径检查**先于** realpath：即使文件已不存在，敏感目录路径也要
+  // 报「已拒绝」而非误导性的「不存在」（防止用户把 .ssh 等显式上板后
+  // 因文件不存在而误以为可以代理）。
+  for (const denied of CANVAS_PATH_DENY) {
+    if (node.path.includes(denied)) return { error: `路径含敏感目录片段（${denied}），已拒绝代理` }
+  }
+  // 只允许读**已上板节点**的路径——这是本模块的核心安全边界：
+  // 没有"按任意路径读取"的 API（Grok 评审 §4.1 建议 2，用户拍板安全从简）。
+  try {
+    const real = realpathSync(node.path)
+    const stat = statSync(real)
+    if (!stat.isFile()) return { error: '不是常规文件' }
+    return {
+      path: real,
+      size: stat.size,
+      mtime: stat.mtimeMs,
+      ext: extname(real).toLowerCase(),
+      denied: false,
+    }
+  } catch (error) {
+    return { error: `文件不可访问：${error.code === 'ENOENT' ? '路径不存在（源文件可能已被移动/删除）' : error.message}` }
+  }
+}
+
+/**
+ * 用系统注册的默认应用打开已上板节点路径（2026-08-14 用户要求：
+ * 路径上板/搜索上板的本地文件便签都要能一键打开）。
+ * 安全边界与 resolveNodeFile 一致：只允许**已上板节点**的路径、
+ * 敏感路径拒绝、realpath 解析（不提供"任意路径打开"入口）。
+ * @param {object} config
+ * @param {string} nodeId
+ * @returns {{ ok: true } | { error: string }}
+ */
+export function openNodeFile(config, nodeId) {
+  return openNodePath(config, nodeId, 'file')
+}
+
+/**
+ * 在系统文件管理器（macOS Finder / Windows 资源管理器 / Linux 文件
+ * 管理器）中打开节点路径所在的**文件夹**（2026-08-14 用户要求：
+ * 文件类型便签要能一键直达其所在目录，方便上下文浏览/批量操作）。
+ * - 节点指向常规文件 → 打开其父目录（dirname）；
+ * - 节点本身就是目录 → 打开该目录自身。
+ * 安全边界与 openNodeFile 完全一致：已上板节点、敏感路径拒绝、
+ * realpath 解析、spawn 分离进程不阻塞宿主。
+ * @param {object} config
+ * @param {string} nodeId
+ * @returns {{ ok: true } | { error: string }}
+ */
+export function openNodeFolder(config, nodeId) {
+  return openNodePath(config, nodeId, 'folder')
+}
+
+/**
+ * openNodeFile / openNodeFolder 的公共实现。
+ * @param {object} config
+ * @param {string} nodeId
+ * @param {'file'|'folder'} target - file=打开路径本身；folder=文件打开
+ *   其父目录、目录打开自身（2026-08-14 新增）
+ * @returns {{ ok: true } | { error: string }}
+ */
+function openNodePath(config, nodeId, target) {
+  const board = readCanvas(config)
+  const node = findNode(board.nodes, nodeId)
+  if (!node || typeof node.path !== 'string' || node.path === '') {
+    return { error: '节点不存在或没有路径引用' }
+  }
+  // 敏感路径检查先于 realpath（与 resolveNodeFile 同款）。
+  for (const denied of CANVAS_PATH_DENY) {
+    if (node.path.includes(denied)) return { error: `路径含敏感目录片段（${denied}），已拒绝打开` }
+  }
+  let real
+  try {
+    real = realpathSync(node.path)
+    statSync(real) // 存在性校验（目录也允许：文件夹用 Finder/资源管理器打开）
+  } catch (error) {
+    return { error: `文件不可访问：${error.code === 'ENOENT' ? '路径不存在（源文件可能已被移动/删除）' : error.message}` }
+  }
+  // 「打开所在文件夹」：常规文件取其父目录；目录节点打开自身。
+  // 这样对「文件便签」和「目录便签」两种上板形态语义都正确。
+  let openPath = real
+  if (target === 'folder') {
+    openPath = statSync(real).isDirectory() ? real : dirname(real)
+  }
+  // 平台差异：macOS `open` / Windows `start` / Linux `xdg-open`。
+  // spawn 分离进程 + 忽略 stdio + unref：打开后立即返回，不阻塞宿主。
+  try {
+    if (process.platform === 'darwin') {
+      openSpawner('open', [openPath], { detached: true, stdio: 'ignore' }).unref()
+    } else if (process.platform === 'win32') {
+      openSpawner('cmd', ['/c', 'start', '', openPath], { detached: true, stdio: 'ignore' }).unref()
+    } else {
+      openSpawner('xdg-open', [openPath], { detached: true, stdio: 'ignore' }).unref()
+    }
+    return { ok: true }
+  } catch (error) {
+    return { error: `打开失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 真实本地搜索（复用 search-docs 的 provider 能力）
+// ---------------------------------------------------------------------------
+
+/**
+ * 真实本地文件搜索（上板入口之一）。优先复用 search-docs 的 provider
+ * 注册表（mdfind/es/rg/walk）；模块未启用时用内置 walk 兜底（限目录、
+ * 限数量，避免全盘慢扫）。
+ * @param {object} config - resolved plugin config
+ * @param {string} query - 文件名关键字
+ * @param {object} [opts] - { dir?: string, scope?: 'local'|'project', limit?: number }
+ * @returns {Promise<{ items: Array<{ title: string, path: string, type: string, size: string }>, provider: string }>}
+ */
+export async function searchLocalFiles(config, query, opts = {}) {
+  const keyword = String(query ?? '').trim()
+  const limit = Math.min(Number(opts.limit) || 20, 50)
+  if (keyword === '') return { items: [], provider: 'none' }
+
+  // 优先复用 search-docs 的 provider 注册表（lib/search-docs.js 导出）。
+  // ⚠️ 2026-08-14 修复（画板搜索从未真正工作的根因）：
+  // 1. 必须用 resolveProviders(config) 实例化——getSearchProviders()
+  //    返回的是**工厂 Map**（值=工厂函数），直接调 provider.search 会
+  //    TypeError 被 catch 吞掉，一直静默降级到内置 walk；
+  // 2. provider.search() 返回的是**直接数组**（{name,path,mtime,size}），
+  //    不是 {items:[]} 对象——旧代码检查 result.items 永远为空；
+  // 3. 跳过 walk provider：它全盘扫描无深度限制，慢到卡死宿主（用户
+  //    反馈"搜索转圈卡住"）；canvas 用自己的 walkFiles 兜底（深度 4、
+  //    逐根预算，毫秒级）。
+  try {
+    const { resolveProviders } = await import('./search-docs.js')
+    const chain = resolveProviders(config).filter((p) => p.name !== 'walk')
+    const params = { query: keyword, allTypes: true, exts: ['*'], dir: opts.dir ?? null, limit }
+    for (const provider of chain) {
+      try {
+        const results = await provider.search(params, { config })
+        if (Array.isArray(results) && results.length > 0) {
+          return {
+            provider: provider.name,
+            items: results.slice(0, limit).map((item) => ({
+              title: item.name ?? basename(item.path ?? ''),
+              path: item.path ?? '',
+              type: item.path ? inferNodeTypeFromPath(item.path) : 'file',
+              size: formatBytes(item.size ?? 0),
+            })),
+          }
+        }
+      } catch {
+        // provider 失败（如 es 未安装/权限）→ 换下一个
+      }
+    }
+  } catch {
+    // search-docs 不可用 → 走内置 walk
+  }
+
+  // 内置 walk 兜底（2026-08-14 强化）：
+  // - opts.dir 指定 → 只扫该目录；
+  // - 否则全盘逐根扫描（home + macOS 外置卷 /Volumes/*），每根独立
+  //   预算——单根预算被 home 大目录耗尽后外置卷仍有扫描机会（用户
+  //   反馈：记忆.png 在 /Volumes/data 上，mdfind 因卷未建 Spotlight
+  //   索引搜不到，walk 必须覆盖外置卷）。
+  const items = await walkFiles(opts.dir ?? null, keyword, limit)
+  return { provider: 'walk', items }
+}
+
+/** 简单文件大小格式化。 */
+export function formatBytes(bytes) {
+  const n = Number(bytes) || 0
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 内置 walk 搜索（仅文件名匹配；目录深度 4 层、每根数量上限，防慢）。
+ * 2026-08-14 强化：dir 为空时**逐根扫描**——home + macOS 外置卷
+ * （/Volumes/*），每根独立预算（避免 home 大目录耗尽总预算后外置卷
+ * 失去扫描机会；用户反馈记忆.png 在 /Volumes/data 上搜不到）。
+ * @param {string|null} dir - 指定目录；null = 全盘逐根（home + /Volumes/*）
+ * @param {string} keyword - 文件名关键字（大小写不敏感子串）
+ * @param {number} limit
+ * @returns {Promise<Array<{ title: string, path: string, type: string, size: number }>>}
+ */
+async function walkFiles(dir, keyword, limit) {
+  const { readdir } = await import('node:fs/promises')
+  // 指定目录：只扫它；全盘：home + 每个外置卷根（逐根独立预算）。
+  const roots = dir && existsSync(dir)
+    ? [dir]
+    : (() => {
+      const list = [homedir()]
+      try {
+        if (process.platform === 'darwin') {
+          for (const name of readdirSync('/Volumes')) {
+            if (!name.startsWith('.')) list.push(join('/Volumes', name))
+          }
+        }
+      } catch { /* 卷目录不可读：跳过 */ }
+      return list
+    })()
+  const results = []
+  const kw = keyword.toLowerCase()
+  // 每根独立预算：100 万条太慢，50000 与 search-docs walk 同量级；
+  // 命中 limit 条即整体提前返回。
+  for (const root of roots) {
+    if (results.length >= limit) break
+    const stack = [{ path: root, depth: 0 }]
+    let scanned = 0
+    while (stack.length > 0 && results.length < limit && scanned < 50000) {
+      const { path, depth } = stack.pop()
+      let entries
+      try {
+        entries = await readdir(path, { withFileTypes: true })
+      } catch {
+        continue // 权限/不存在：跳过
+      }
+      for (const entry of entries) {
+        scanned += 1
+        const full = join(path, entry.name)
+        if (entry.isDirectory()) {
+          if (depth < 4) stack.push({ path: full, depth: depth + 1 })
+          continue
+        }
+        if (entry.name.toLowerCase().includes(kw)) {
+          try {
+            const stat = statSync(full)
+            results.push({ title: entry.name, path: full, type: inferNodeTypeFromPath(full), size: stat.size })
+          } catch {
+            // 无法 stat 的跳过
+          }
+          if (results.length >= limit) break
+        }
+      }
+    }
+  }
+  return results
+}
+
+// ---------------------------------------------------------------------------
+// de_canvas 工具（AI 双向拉取式：list / get / add_note）
+// ---------------------------------------------------------------------------
+
+/**
+ * 构建 de_canvas 工具定义。AI 能力边界（用户拍板）：
+ *   - list：查画板（按视角返回 id/标题/类型/归属）
+ *   - get：按稳定 id 读节点（文本内容；路径节点只给路径与元信息，
+ *     内容经文件代理文本预览返回，图片给"可预览"提示）
+ *   - add_note：往**当前会话板**新增便签（落中央区，aiPlaced 标记）；
+ *     不能改已有节点、不能写项目/全局、不能加路径节点、不碰摆放。
+ * @param {object} config - resolved plugin config
+ * @param {(sessionId: string) => string | null} resolveCwd - 会话 → 工作目录
+ * @returns {object} ToolDefinition-shaped object
+ */
+export function canvasToolDefinition(config, resolveCwd) {
+  return {
+    name: 'de_canvas',
+    description: '无限画板（素材集中台）：AI 与用户共享的画板工作台。list=查画板节点清单（按视角）；get=按节点 id 读内容；add_note=往当前会话画板放一张便签（落在画板中央固定区，用户可自行拖动）。画板内容不注入上下文，需要时主动查询。',
+    // ⚠️ parameters 必须是标准 JSON Schema 包装（{type:'object',
+    // properties, required}），与 DSH 原生 tools.register 契约一致——
+    // 扁平 DSL 格式（{action:{...}, title:{...}}）会把 title/content 等
+    // 键当成 JSON Schema 关键字解析，导致 LLM API 拒绝整个函数 schema：
+    // 「Invalid schema for function 'de_canvas'」且所有会话工具面崩溃
+    // （2026-08-14 用户反馈，插件整体禁用才能启动）。
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'get', 'add_note'],
+          description: '操作：list=列节点；get=读节点内容；add_note=放便签',
+        },
+        view: {
+          type: 'string',
+          enum: ['session', 'project', 'global'],
+          description: 'list 用：视角（session=当前会话+当前项目+全局；project=该项目全部会话+全局；global=全部）',
+        },
+        id: {
+          type: 'string',
+          description: 'get 用：节点 id（list 返回的 id，形如 canvas_xxxx）',
+        },
+        title: {
+          type: 'string',
+          description: 'add_note 用：便签标题',
+        },
+        content: {
+          type: 'string',
+          description: 'add_note 用：便签正文（Markdown/纯文本）',
+        },
+      },
+      required: ['action'],
+    },
+    // output schema 与 execute 返回严格一致（插件纪律：JSON Schema 硬约束、
+    // 工具 output schema 一致——plugin.test.js 会校验每个注册工具的
+    // output.schema 存在且合法；缺定义会导致 schema 校验测试失败）。
+    // ⚠️ DSH tools.register 硬性校验（packages/core/tools/src/index.ts
+    // register()）：output 必须是 { schema, render } 且 render 必须为函数，
+    // 否则直接 throw TypeError——缺失 render 会导致工具静默注册失败
+    // （症状：画板 Tab/API 正常，但 de_canvas 不出现在任何会话的工具
+    // 清单里，2026-08-14 用户反馈「其他会话不会用」的根因）。
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', description: '操作是否成功' },
+          error: { type: 'string', description: '失败原因（ok=false 时）' },
+          // list 返回
+          view: { type: 'string', description: 'list：实际使用的视角' },
+          total: { type: 'integer', description: 'list：当前视角下节点总数' },
+          nodes: {
+            type: 'array',
+            description: 'list：节点清单（id/标题/类型/归属）',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                title: { type: 'string' },
+                type: { type: 'string' },
+                scope: { type: 'string' },
+                scopeLabel: { type: 'string' },
+                aiPlaced: { type: 'boolean' },
+              },
+            },
+          },
+          hint: { type: 'string', description: 'list：使用提示（用 id 引用勿用标题）' },
+          // get 返回
+          id: { type: 'string', description: 'get/add_note：节点 id' },
+          title: { type: 'string', description: 'get/add_note：节点标题' },
+          type: { type: 'string', description: 'get：节点类型' },
+          content: { type: 'string', description: 'get：文本内容（文本类节点）' },
+          path: { type: 'string', description: 'get：路径节点的本地路径' },
+          size: { type: 'string', description: 'get：路径节点大小（格式化）' },
+          note: { type: 'string', description: 'get/add_note：补充说明' },
+          // add_note 返回
+          scope: { type: 'string', description: 'add_note：归属层级（session）' },
+          placement: {
+            type: 'object',
+            description: 'add_note：落点坐标（画板中央区）',
+            additionalProperties: false,
+            properties: {
+              x: { type: 'number' },
+              y: { type: 'number' },
+              width: { type: 'number' },
+              height: { type: 'number' },
+              zIndex: { type: 'number' },
+            },
+          },
+        },
+      },
+      // DSH 要求 output.render 必填（缺失会导致 register 抛 TypeError、
+      // 工具静默不注册——2026-08-14 修复）。把结构化结果渲染成
+      // 模型可见的文本块：错误优先，成功时按操作折叠可读摘要。
+      render(_args, value) {
+        return renderCanvasResult(value)
+      },
+    },
+    async execute(args, exec) {
+      const action = String(args?.action ?? '')
+      const agent = exec?.agent
+      const sessionId = String(agent?.session?.id ?? '')
+      const cwd = resolveCwd?.(sessionId) ?? agent?.session?.header?.cwd ?? null
+      const projectId = cwd ?? 'project:local'
+      const projectLabel = cwd ? basename(cwd) : '当前项目'
+      const board = readCanvas(config)
+
+      if (action === 'list') {
+        const view = ['project', 'global'].includes(args?.view) ? args.view : 'session'
+        const nodes = board.nodes
+          .filter((n) => n && n.scope === 'global'
+            || (view === 'global')
+            || (view === 'project' && n.scope !== 'session')
+            || (n.scope === 'session' && n.sessionId === sessionId)
+            || (n.scope === 'project' && n.projectId === projectId))
+          .map((n) => ({
+            id: n.id,
+            title: n.title,
+            type: n.type,
+            scope: n.scope,
+            scopeLabel: n.scopeLabel,
+            aiPlaced: n.aiPlaced === true,
+          }))
+        return {
+          ok: true,
+          view,
+          total: nodes.length,
+          nodes,
+          hint: '用 get 按 id 读取节点内容；标题可能重复，务必用 id 引用',
+        }
+      }
+
+      if (action === 'get') {
+        const id = String(args?.id ?? '').trim()
+        if (id === '') return { ok: false, error: '缺少 id（用 list 查询节点 id）' }
+        const node = findNode(board.nodes, id)
+        if (!node) return { ok: false, error: `画板上没有节点 ${id}（可能已被移除）` }
+        // 文本类：直接给正文；路径节点：给路径/元信息 + 文本预览（可读时）
+        if (typeof node.content === 'string' && node.content !== '') {
+          return { ok: true, id: node.id, title: node.title, type: node.type, content: node.content.slice(0, CANVAS_TEXT_PREVIEW_MAX) }
+        }
+        if (typeof node.path === 'string' && node.path !== '') {
+          const file = resolveNodeFile(config, node.id)
+          if (file.error) return { ok: true, id: node.id, title: node.title, type: node.type, path: node.path, note: file.error }
+          const ext = file.ext
+          if (['.md', '.txt', '.log', '.json', '.csv', '.yaml', '.yml'].includes(ext) && file.size <= CANVAS_TEXT_PREVIEW_MAX) {
+            try {
+              const text = readFileSync(file.path, 'utf8')
+              return { ok: true, id: node.id, title: node.title, type: node.type, path: file.path, content: text }
+            } catch {
+              // 读失败（编码等）→ 降级返回元信息
+            }
+          }
+          return {
+            ok: true, id: node.id, title: node.title, type: node.type, path: file.path,
+            size: formatBytes(file.size),
+            note: ext === '.png' || ext === '.jpg' || ext === '.jpeg' || ext === '.gif' || ext === '.webp'
+              ? '图片节点：内容需在画板 GUI 中查看（模型侧无图像通道）'
+              : '非文本文件：模型侧不读取内容，可在画板 GUI 预览',
+          }
+        }
+        return { ok: true, id: node.id, title: node.title, type: node.type, note: '便签内容为空' }
+      }
+
+      if (action === 'add_note') {
+        // AI 只能往当前会话板加便签（用户拍板收窄；免确认仅对此成立）。
+        const title = String(args?.title ?? '').trim().slice(0, 100) || 'AI 便签'
+        const content = String(args?.content ?? '').trim().slice(0, CANVAS_NOTE_MAX_BYTES)
+        if (content === '') return { ok: false, error: '便签内容不能为空' }
+        const aiCount = board.nodes.filter((n) => n && n.aiPlaced).length
+        if (aiCount >= CANVAS_AI_NOTES_MAX) {
+          return { ok: false, error: `AI 便签已达上限（${CANVAS_AI_NOTES_MAX} 张），请用户整理画板后再放` }
+        }
+        const node = normalizeNode(
+          { type: 'markdown', title, scope: 'session', content, aiPlaced: true },
+          { sessionId, projectId, projectLabel, sessionLabel: '当前会话' },
+        )
+        node.placement = aiSlotPlacement(board.nodes)
+        const nodes = [...board.nodes, node]
+        let rev
+        try {
+          rev = writeCanvas(config, { nodes }, board.rev)
+        } catch (error) {
+          return { ok: false, error: error.message }
+        }
+        return {
+          ok: true,
+          id: node.id,
+          title: node.title,
+          scope: 'session',
+          placement: node.placement,
+          note: `已放入当前会话画板中央区（rev=${rev}）；用户可在画板中拖动调整位置`,
+        }
+      }
+
+      return { ok: false, error: `未知操作：${action}` }
+    },
+  }
+}
+
+/**
+ * de_canvas 结果渲染：把结构化 JSON 结果折叠成模型可读的文本块
+ * （DSH output.render 契约，2026-08-14 补——缺失 render 会让
+ * tools.register 抛 TypeError 导致工具静默不注册）。
+ * 按操作折叠：错误优先展示；list 给节点清单表；get 给内容/路径；
+ * add_note 给落点确认。
+ * @param {object} value - execute 的返回值（与 output.schema 严格一致）。
+ * @returns {Array<{type: 'text', text: string}>} DSH 渲染块。
+ */
+function renderCanvasResult(value) {
+  if (!value || value.ok === false) {
+    return [{ type: 'text', text: `画板操作失败：${value?.error ?? '未知错误'}` }]
+  }
+  const lines = []
+  if (value.total !== undefined && Array.isArray(value.nodes)) {
+    // list 折叠：视角 + 总数 + 清单（id 稳定引用，标题可重复）
+    lines.push(`📋 画板节点（视角=${value.view}，共 ${value.total} 个）`)
+    if (value.nodes.length === 0) {
+      lines.push('（当前视角下没有节点）')
+    }
+    for (const n of value.nodes) {
+      const tag = n.aiPlaced ? ' 🤖AI' : ''
+      lines.push(`- [${n.id}] ${n.title}（${n.type}，${n.scopeLabel ?? n.scope}${tag}）`)
+    }
+    if (value.hint) lines.push(`💡 ${value.hint}`)
+  } else if (value.id !== undefined) {
+    // get / add_note 折叠：标题 + 内容/路径/落点
+    lines.push(`📌 ${value.title ?? '（无标题）'} [${value.id}]（${value.type ?? ''}${value.scope ? `，${value.scope}` : ''}）`)
+    if (typeof value.content === 'string' && value.content !== '') {
+      lines.push('---')
+      lines.push(value.content)
+    } else if (typeof value.path === 'string' && value.path !== '') {
+      lines.push(`路径：${value.path}${value.size ? `（${value.size}）` : ''}`)
+    }
+    if (value.placement) {
+      lines.push(`落点：x=${value.placement.x}, y=${value.placement.y}（宽 ${value.placement.width}×高 ${value.placement.height}）`)
+    }
+    if (value.note) lines.push(`💡 ${value.note}`)
+  } else {
+    lines.push(JSON.stringify(value))
+  }
+  return [{ type: 'text', text: lines.join('\n') }]
+}
+
+/**
+ * 安装 canvas 子模块：HTTP API + de_canvas 工具注册。
+ * @param {object} ctx - cordis ctx（tools/agents 已由主插件声明式注入）。
+ * @param {object} config - resolved plugin config。
+ * @param {(sessionId: string) => string | null} resolveCwd - 会话 → 工作目录。
+ * @returns {{ dispose: () => void, store: { read: () => object } }}
+ */
+export function installCanvas(ctx, config, resolveCwd, resolveSessionName) {
+  const base = '/memory-evolve/api/canvas'
+  const disposers = []
+
+  // 工具注册（与 memory/todo 工具同一路径：apply 已声明 inject:['tools']，
+  // ctx.tools 在调用 installCanvas 时已就绪，直接 register 即可）。
+  // ⚠️ 2026-08-14 修复（PR #8）：原先的 ctx.inject(['tools'], cb) 是
+  // ctx.plugin({inject, apply}) 的简写——创建子 fiber 等待 'tools' 在
+  // cordis 服务注册表中解析；但 DSH 的 ctx.tools 不是 cordis registry
+  // 服务（核心 tools 包无 ctx.provide('tools')，靠插件声明式 inject +
+  // Context.intercept 挂载），子 fiber 永远 PENDING、回调永不触发，
+  // 导致 de_canvas 从未注册（症状：画板 Tab/HTTP API 正常，但工具不出
+  // 现在任何会话清单里，2026-08-14 用户反馈「其他会话不会用」的根因）。
+  // 与 session-orch.js 2026-08-09 教训同源（ctx.inject 动态注入不可靠）。
+  // ctx.effect 返回的 disposer 同时纳入 dispose()：开关关闭时立即注销
+  // 工具（否则工具残留到插件重载，违反「关闭时 Tab 与工具完全不可见」
+  // 纪律）；插件卸载时 fiber 兜底再清一次（disposer 手动调用幂等）。
+  const toolDispose = ctx.effect(() => ctx.tools.register(
+    canvasToolDefinition(config, resolveCwd),
+  ), 'dsh-memory-evolve: de_canvas tool')
+
+  // HTTP API（web-only；TUI 上自动待机无副作用）。
+  ctx.inject(['webServer'], (webCtx) => {
+    const cancel = webCtx.effect(() => webCtx.webServer.register({
+      kind: 'prefix',
+      path: base,
+      handler: async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const path = url.pathname
+        try {
+          // 状态探测：客户端决定是否挂画板 Tab。
+          if (req.method === 'GET' && path === `${base}/state`) {
+            sendJson(res, 200, { enabled: true })
+            return
+          }
+
+          // 整板读取：GET ?sessionId=
+          if (req.method === 'GET' && path === base) {
+            const board = readCanvas(config)
+            // 当前会话的项目归属（前端视角筛选与新增节点归属用）：
+            // 前端拿不到自己的 projectId（conversation.view props 只有
+            // sessionId），由后端按会话工作目录解析后下发——曾用模拟值
+            // 'proj-demo' 导致「本会话/本项目」视角筛选错乱
+            // （2026-08-14 用户反馈：记忆.png 标当前会话却本会话视角
+            // 看不到，只有项目/所有项目视角可见）。
+            const querySessionId = url.searchParams.get('sessionId') ?? ''
+            const cwd = resolveCwd?.(querySessionId) ?? null
+            const currentProjectId = cwd ?? 'project:local'
+            const currentProjectLabel = cwd ? basename(cwd) : '当前项目'
+            // 前端只消费节点与视图状态；内部字段不外发。
+            sendJson(res, 200, {
+              // 展示层归属修正（2026-08-14）：历史脏数据可能带模拟值
+              // 'proj-demo'/'sess-demo-current'，读板时按当前会话归属
+              // 修正下发（不落盘），保证「本会话/本项目」视角立即可见；
+              // 持久化修正由 POST 回写时完成。
+              nodes: board.nodes.map((n) => ({
+                id: n.id, type: n.type, title: n.title, scope: n.scope,
+                scopeLabel: n.scopeLabel,
+                sessionId: n.sessionId === 'sess-demo-current' && querySessionId !== ''
+                  ? querySessionId : n.sessionId,
+                projectId: n.projectId === 'proj-demo' ? currentProjectId : n.projectId,
+                // 会话显示名（2026-08-14 用户要求：徽标显示会话名称而非
+                // 长 sessionId）。仅展示层下发，不落盘；解析失败=undefined，
+                // 前端兜底短 ID。
+                sessionName: n.sessionId && n.sessionId !== 'sess-demo-current'
+                  ? (resolveSessionName?.(n.sessionId) ?? undefined)
+                  : undefined,
+                path: n.path, content: n.content, placement: n.placement,
+                aiPlaced: n.aiPlaced === true, unverified: n.unverified === true,
+                createdAt: n.createdAt,
+              })),
+              rev: board.rev,
+              viewport: board.viewport,
+              viewMode: board.viewMode,
+              lastAiNodeId: board.lastAiNodeId,
+              currentProjectId,
+              currentProjectLabel,
+            })
+            return
+          }
+
+          // 整板写入：POST body { nodes, rev, viewport?, viewMode?, lastAiNodeId? }（前端防抖批量保存）
+          if (req.method === 'POST' && path === base) {
+            const body = await readBody(req)
+            const rev = Number.isFinite(Number(body?.rev)) ? Number(body.rev) : 0
+            if (!Array.isArray(body?.nodes)) throw new Error('nodes 必须是数组')
+            // 归属模拟值修正（2026-08-14）：前端一期曾用模拟常量
+            // 'proj-demo'/'sess-demo-current' 写节点归属，导致「本会话/
+            // 本项目」视角筛选错乱。POST 是整板回写，这里把仍带模拟值
+            // 的节点统一修正为当前会话真实归属（按 body.sessionId 解析
+            // 工作目录）——存量脏数据在任意一次保存后自愈。
+            const postSessionId = String(body?.sessionId ?? '')
+            const postCwd = resolveCwd?.(postSessionId) ?? null
+            const postProjectId = postCwd ?? 'project:local'
+            const fixedNodes = body.nodes.map((n) => {
+              if (!n || typeof n !== 'object') return n
+              const fixed = { ...n }
+              if (typeof fixed.projectId === 'string' && fixed.projectId === 'proj-demo') {
+                fixed.projectId = postProjectId
+              }
+              if (typeof fixed.sessionId === 'string' && fixed.sessionId === 'sess-demo-current' && postSessionId !== '') {
+                fixed.sessionId = postSessionId
+              }
+              return fixed
+            })
+            let nextRev
+            try {
+              nextRev = writeCanvas(config, {
+                nodes: fixedNodes,
+                viewport: body.viewport ?? null,
+                viewMode: body.viewMode,
+                lastAiNodeId: typeof body.lastAiNodeId === 'string' ? body.lastAiNodeId : undefined,
+              }, rev)
+            } catch (error) {
+              if (error.code === 'CANVAS_CONFLICT') {
+                sendJson(res, 409, { ok: false, error: error.message })
+                return
+              }
+              throw error
+            }
+            sendJson(res, 200, { ok: true, rev: nextRev })
+            return
+          }
+
+          // 文件代理：GET /file?nodeId=（只读已上板节点路径；MIME 白名单）
+          if (req.method === 'GET' && path === `${base}/file`) {
+            const nodeId = url.searchParams.get('nodeId') ?? ''
+            const file = resolveNodeFile(config, nodeId)
+            if (file.error) { sendJson(res, 404, { error: file.error }); return }
+            const mime = CANVAS_MIME_ALLOW[file.ext]
+            if (!mime) {
+              sendJson(res, 415, { error: `不支持预览的文件类型（${file.ext || '未知'}），请在画板中使用「打开」` })
+              return
+            }
+            if (file.size > CANVAS_FILE_PROXY_MAX_BYTES) {
+              sendJson(res, 413, { error: `文件过大（${formatBytes(file.size)}），超过预览上限` })
+              return
+            }
+            // 流式响应（视频 Range 支持由 DSH 侧 HTTP 层处理；此处直接读流）。
+            res.writeHead(200, {
+              'content-type': mime,
+              'content-length': file.size,
+              'cache-control': 'private, max-age=60',
+              'x-canvas-node': nodeId,
+            })
+            const stream = createReadStream(file.path)
+            stream.on('error', () => { res.destroy() })
+            stream.pipe(res)
+            return
+          }
+
+          // 系统默认应用打开：POST /open body { nodeId }（2026-08-14 用户
+          // 要求：上板文件一键打开。安全边界同 /file：只允许已上板节点）。
+          if (req.method === 'POST' && path === `${base}/open`) {
+            const body = await readBody(req)
+            const nodeId = String(body?.nodeId ?? '')
+            const opened = openNodeFile(config, nodeId)
+            if (opened.error) { sendJson(res, 404, { error: opened.error }); return }
+            sendJson(res, 200, { ok: true })
+            return
+          }
+
+          // 在系统文件管理器中打开**所在文件夹**：POST /open-dir body
+          // { nodeId }（2026-08-14 用户要求：文件类型便签一键直达其所在
+          // 目录，方便上下文浏览/批量操作。安全边界同 /open）。
+          if (req.method === 'POST' && path === `${base}/open-dir`) {
+            const body = await readBody(req)
+            const nodeId = String(body?.nodeId ?? '')
+            const opened = openNodeFolder(config, nodeId)
+            if (opened.error) { sendJson(res, 404, { error: opened.error }); return }
+            sendJson(res, 200, { ok: true })
+            return
+          }
+
+          // 迁移节点归属：POST /migrate body { nodeId, scope, sessionId, rev }
+          // （2026-08-14 用户拍板：改归属只能用户手动触发；目标会话=当前
+          //  打开画板的会话——sessionId 由前端传，项目按它解析）。
+          if (req.method === 'POST' && path === `${base}/migrate`) {
+            const body = await readBody(req)
+            const nodeId = String(body?.nodeId ?? '')
+            const scope = String(body?.scope ?? '')
+            const rev = Number.isFinite(Number(body?.rev)) ? Number(body.rev) : 0
+            const sessionId = String(body?.sessionId ?? '')
+            const cwd = resolveCwd?.(sessionId) ?? null
+            let migrated
+            try {
+              migrated = migrateNode(config, nodeId, scope, {
+                sessionId,
+                projectId: cwd ?? 'project:local',
+                projectLabel: cwd ? basename(cwd) : '当前项目',
+              }, rev)
+            } catch (error) {
+              if (error.code === 'CANVAS_CONFLICT') {
+                sendJson(res, 409, { ok: false, error: error.message })
+                return
+              }
+              sendJson(res, 404, { ok: false, error: error.message })
+              return
+            }
+            sendJson(res, 200, { ok: true, node: migrated.node, rev: migrated.rev })
+            return
+          }
+
+          // 真实本地搜索：GET /search?q=&dir=&sessionId=&scope=&limit=
+          // （复用 search-docs provider / walk 兜底）
+          if (req.method === 'GET' && path === `${base}/search`) {
+            const q = url.searchParams.get('q') ?? ''
+            let dir = url.searchParams.get('dir') ?? null
+            // 搜索范围（2026-08-14 用户反馈：提示说"搜本机文件"却只能搜
+            // 项目目录）：
+            //   scope=local（缺省）→ 全盘搜索（mdfind Spotlight 毫秒级，
+            //     walk 兜底从主目录起）——与 memory_evolve_search_local_files
+            //     同源 provider 能力一致；
+            //   scope=project → 当前会话工作目录（快速定位项目内文件）。
+            // dir 显式传入时优先（前端自定义目录）。
+            if (dir === null || dir === '') {
+              const scope = url.searchParams.get('scope') ?? 'local'
+              if (scope === 'project') {
+                const sessionId = url.searchParams.get('sessionId') ?? ''
+                dir = resolveCwd?.(sessionId) ?? null
+              }
+              // scope=local：dir 保持 null → provider 全盘搜索
+            }
+            const result = await searchLocalFiles(config, q, { dir, limit: Number(url.searchParams.get('limit')) || 20 })
+            sendJson(res, 200, result)
+            return
+          }
+
+          sendJson(res, 404, { error: 'not found' })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const status = /必须|不能|上限|缺少|无效|不存在|超出|invalid|too large/i.test(message) ? 400 : 500
+          sendJson(res, status, { error: message })
+        }
+      },
+    }), 'dsh-memory-evolve: canvas route')
+    disposers.push(cancel)
+  })
+
+  return {
+    store: { read: () => readCanvas(config) },
+    dispose() {
+      toolDispose?.() // 工具注销（幂等；插件卸载时 fiber 兜底再清）
+      for (const cancel of disposers.splice(0)) cancel?.()
+    },
+  }
+}
+
+/** 发送 JSON 响应。 */
+function sendJson(res, status, body) {
+  const text = JSON.stringify(body)
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(text)
+}
+
+/** 读取 JSON 请求体（上限 256KiB，画板整板保存够用）。 */
+async function readBody(req, maxBytes = 256 * 1024) {
+  const chunks = []
+  let total = 0
+  for await (const chunk of req) {
+    total += chunk.length
+    if (total > maxBytes) throw new Error('body too large')
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    throw new Error('invalid JSON body')
+  }
+}

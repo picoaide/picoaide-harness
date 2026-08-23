@@ -1,0 +1,6 @@
+# Task board Host rows: the bare entry carries the package's client bundle
+# declaration (board + settings card) and provides the `picoTaskService`
+# Host service consumed by dsh-cron for scheduled task runs.
+- insert:
+    - id: pico-task
+      name: '@picoaide/dsh-task'
