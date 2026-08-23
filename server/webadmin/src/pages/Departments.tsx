@@ -154,7 +154,7 @@ export default function Departments() {
             <TableHead>部门主管</TableHead>
             <TableHead>成员</TableHead>
             <TableHead>子部门</TableHead>
-            <TableHead>月度金额预算</TableHead>
+            <TableHead className="w-44 whitespace-nowrap">月度金额预算</TableHead>
             <TableHead className="text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
@@ -165,7 +165,7 @@ export default function Departments() {
               <TableRow key={d.id}>
                 <TableCell>
                   <div className="flex items-center gap-2">
-                    {d.parent_id !== 0 && <span className="text-slate-300">└</span>}
+                    {d.parent_id !== 0 && <span className="self-center text-xs leading-none text-slate-300">└</span>}
                     <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${d.parent_id === 0 ? 'bg-blue-600/10 text-[#1E40AF]' : 'bg-slate-100 text-slate-400'}`}>
                       <Network className="h-3 w-3" />
                     </span>
@@ -247,9 +247,9 @@ export default function Departments() {
               <Input id="dept-name" placeholder="如 研发部" value={deptForm.name} onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>上级部门</Label>
+              <Label htmlFor="dept-parent">上级部门</Label>
               <Select value={deptForm.parent_id} onValueChange={(v) => setDeptForm({ ...deptForm, parent_id: v })}>
-                <SelectTrigger aria-label="上级部门"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="上级部门" id="dept-parent"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="0">无(顶层部门)</SelectItem>
                   {deptTreeOptions(
