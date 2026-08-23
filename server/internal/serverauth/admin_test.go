@@ -1334,3 +1334,89 @@ func TestAdminDeptBudget(t *testing.T) {
 		}
 	}
 }
+
+// auth 配置审计:mode 切换语义 + 密码掩码保持/清空 + 未启用模式字段清理。
+func TestAdminAuthConfig(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	loginBody := `{"username":"boss","password":"pw123456"}`
+	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	csrf := out["csrf_token"].(string)
+	sess := ""
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+
+	// 1. 保存 ldap 模式(带密码)
+	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"s3cret","base_dn":"dc=x","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save ldap: %d %s", w.Code, w.Body.String())
+	}
+	get := func() map[string]any {
+		_, o := doJSON(t, r, "GET", "/api/admin/auth", "", hdr)
+		return o["auth"].(map[string]any)
+	}
+	a := get()
+	if a["mode"].(string) != "ldap" {
+		t.Fatalf("mode = %v", a["mode"])
+	}
+	ld := a["ldap"].(map[string]any)
+	if ld["server_url"].(string) != "ldap://x:389" || ld["bind_password"].(string) != MaskSecret {
+		t.Fatalf("ldap = %v (password must be masked)", ld)
+	}
+
+	// 2. 掩码回传 = 保持密码;改 base_dn 后密码不变
+	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y"},"oidc":{}}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update ldap: %d", w.Code)
+	}
+	a = get()
+	ld = a["ldap"].(map[string]any)
+	if ld["base_dn"].(string) != "dc=y" || ld["bind_password"].(string) != MaskSecret {
+		t.Fatalf("after masked update: base_dn=%v pw=%v", ld["base_dn"], ld["bind_password"])
+	}
+
+	// 3. 显式清空密码(空串覆盖)→ 回读无掩码(未配置)
+	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"","base_dn":"dc=y"},"oidc":{}}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear ldap pw: %d", w.Code)
+	}
+	a = get()
+	ld = a["ldap"].(map[string]any)
+	if ld["bind_password"].(string) != "" {
+		t.Fatalf("bind_password should be cleared, got %q", ld["bind_password"])
+	}
+
+	// 4. 切回 local → ldap/oidc 全部清空
+	w, _ = doJSON(t, r, "PUT", "/api/admin/auth", `{"mode":"local"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("switch local: %d", w.Code)
+	}
+	a = get()
+	if a["mode"].(string) != "local" {
+		t.Fatalf("mode = %v", a["mode"])
+	}
+	ld = a["ldap"].(map[string]any)
+	od := a["oidc"].(map[string]any)
+	if ld["server_url"].(string) != "" || ld["bind_password"].(string) != "" || od["issuer"].(string) != "" {
+		t.Fatalf("ldap/oidc should be cleared after local: ldap=%v oidc=%v", ld, od)
+	}
+
+	// 5. 非法 mode 拒绝
+	w, _ = doJSON(t, r, "PUT", "/api/admin/auth", `{"mode":"nonsense"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid mode = %d, want 400", w.Code)
+	}
+}

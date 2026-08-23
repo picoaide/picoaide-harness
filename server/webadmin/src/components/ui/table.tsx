@@ -11,7 +11,17 @@ const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableE
 Table.displayName = 'Table'
 
 const TableHeader = React.forwardRef<HTMLTableSectionElement, React.HTMLAttributes<HTMLTableSectionElement>>(
-  ({ className, ...props }, ref) => <thead ref={ref} className={cn('[&_tr]:border-b', className)} {...props} />
+  ({ className, ...props }, ref) => (
+    <thead
+      ref={ref}
+      className={cn(
+        // sticky 表头(数据面板规范):滚动时列名保持可见
+        'sticky top-0 z-10 [&_tr]:border-b [&_tr]:bg-muted/60 [&_tr]:backdrop-blur-sm',
+        className,
+      )}
+      {...props}
+    />
+  )
 )
 TableHeader.displayName = 'TableHeader'
 
@@ -26,7 +36,11 @@ const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTML
   ({ className, ...props }, ref) => (
     <tr
       ref={ref}
-      className={cn('border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted', className)}
+      className={cn(
+        // data-dense:36px 行高 + hover 浅蓝高亮(200ms 过渡)
+        'h-9 border-b transition-colors duration-200 hover:bg-accent/50 data-[state=selected]:bg-accent/60',
+        className,
+      )}
       {...props}
     />
   )
@@ -37,7 +51,11 @@ const TableHead = React.forwardRef<HTMLTableCellElement, React.ThHTMLAttributes<
   ({ className, ...props }, ref) => (
     <th
       ref={ref}
-      className={cn('h-10 px-2 text-left align-middle font-medium text-muted-foreground', className)}
+      className={cn(
+        // 企业级表头:12px 大写 + Fira Code 数字列 + 浅蓝底
+        'h-9 px-3 text-left align-middle text-[11px] font-semibold uppercase tracking-wider text-slate-500',
+        className,
+      )}
       {...props}
     />
   )
@@ -46,7 +64,7 @@ TableHead.displayName = 'TableHead'
 
 const TableCell = React.forwardRef<HTMLTableCellElement, React.TdHTMLAttributes<HTMLTableCellElement>>(
   ({ className, ...props }, ref) => (
-    <td ref={ref} className={cn('p-2 align-middle', className)} {...props} />
+    <td ref={ref} className={cn('px-3 py-2 text-sm align-middle', className)} {...props} />
   )
 )
 TableCell.displayName = 'TableCell'

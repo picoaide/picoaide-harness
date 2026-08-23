@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network } from 'lucide-react'
+import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -50,9 +50,17 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
 // 审计 A5-L7: 未知路径给出 404 提示,不再静默跳回 /users(排障困难)
 function NotFound() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 p-6">
-      <div className="text-lg font-semibold">404 页面不存在</div>
-      <div className="text-sm text-muted-foreground">请从左侧导航进入对应功能</div>
+    <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-blue-50 text-[#1E40AF]">
+        <SearchX className="h-7 w-7" />
+      </div>
+      <div className="space-y-1">
+        <div className="text-lg font-semibold">404 页面不存在</div>
+        <div className="text-sm text-muted-foreground">请从左侧导航进入对应功能</div>
+      </div>
+      <Link to="/users">
+        <Button>返回用户管理</Button>
+      </Link>
     </div>
   )
 }
@@ -83,6 +91,7 @@ async function fetchBaseURL(): Promise<string> {
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [baseURL, setBaseURL] = useState('')
+  const [adminName, setAdminName] = useState('')
 
   useEffect(() => {
     // 审计 A5-M3: 会话过期由全局回调原地切回登录态(取代整页跳转)
@@ -92,7 +101,7 @@ export default function App() {
 
   useEffect(() => {
     me().then(
-      () => setAuthed(true),
+      (body) => { setAuthed(true); setAdminName(body?.user?.display_name || body?.user?.username || '管理员') },
       () => setAuthed(false)
     )
   }, [])
@@ -110,36 +119,71 @@ export default function App() {
 
   return (
     <BrowserRouter basename="/admin">
-      <div className="flex h-screen">
-        <aside className="flex w-48 flex-col border-r bg-muted/30">
-          <div className="px-4 py-4 text-lg font-bold">PicoAide 管理</div>
+      <div className="flex h-screen bg-background">
+        {/* 品牌深海军蓝侧边栏(#0F172A 契约色) */}
+        <aside className="flex w-56 shrink-0 flex-col border-r border-slate-800 bg-[#0F172A] text-slate-300">
+          <div className="flex items-center gap-3 px-5 pb-5 pt-6">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-blue-400/40 bg-blue-500/15">
+              <svg viewBox="0 0 32 32" className="h-5 w-5" fill="none" aria-hidden="true">
+                <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(59,130,246,0.18)" stroke="#60A5FA" strokeWidth="2" />
+                <path d="M12 12 L20 16 L12 20 Z" fill="#93C5FD" />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-[14px] font-bold tracking-tight text-white">PicoAide</div>
+              <div className="text-[10px] font-medium uppercase tracking-widest text-slate-500">Admin Console</div>
+            </div>
+          </div>
+
           {baseURL && (
-            <div className="flex items-center gap-1.5 px-4 pb-3 text-xs text-muted-foreground">
-              <Globe className="h-3 w-3 shrink-0" />
-              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate hover:text-foreground" title={baseURL}>
-                {baseURL}
-              </a>
+            <div className="mx-4 mb-4 flex items-center gap-1.5 rounded-md border border-slate-700/60 bg-slate-800/50 px-2.5 py-1.5 text-[10px] text-slate-400">
+              <Globe className="h-3 w-3 shrink-0 text-slate-500" />
+              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate font-mono hover:text-slate-200" title={baseURL}>{baseURL}</a>
             </div>
           )}
-          <nav className="flex-1 space-y-1 px-2">
+
+          <nav className="flex-1 space-y-0.5 px-3">
+            <div className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500">Management</div>
             {nav.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 className={({ isActive }) =>
-                  cn('flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent', isActive && 'bg-accent')
+                  cn(
+                    'group relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150',
+                    isActive
+                      ? 'bg-blue-500/15 font-medium text-white'
+                      : 'text-slate-400 hover:bg-white/5 hover:text-slate-200',
+                  )
                 }
               >
-                <n.icon className="h-4 w-4" />
-                {n.label}
+                {({ isActive }) => (
+                  <>
+                    {/* 激活左侧蓝条(swiss 垂直线) */}
+                    {isActive && <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-blue-400" />}
+                    <n.icon className="h-4 w-4 shrink-0" />
+                    <span className="flex-1">{n.label}</span>
+                    <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-50" />
+                  </>
+                )}
               </NavLink>
             ))}
           </nav>
-          <div className="p-2">
+
+          <div className="border-t border-slate-800 p-3">
+            <div className="mb-2 flex items-center gap-2.5 rounded-md bg-slate-800/40 px-2.5 py-2">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-500/20 text-[11px] font-semibold text-blue-200">
+                {adminName.slice(0, 1).toUpperCase()}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[11px] font-medium text-slate-200">{adminName}</div>
+                <div className="flex items-center gap-1 text-[9px] text-slate-500"><ShieldCheck className="h-2.5 w-2.5" />SUPER ADMIN</div>
+              </div>
+            </div>
             <Button
               variant="ghost"
               size="sm"
-              className="w-full justify-start text-destructive"
+              className="w-full justify-center text-slate-400 hover:bg-white/5 hover:text-red-400"
               onClick={async () => {
                 try {
                   await logout()
@@ -149,23 +193,29 @@ export default function App() {
                 }
               }}
             >
-              <LogOut className="h-4 w-4" /> 登出
+              <LogOut className="h-4 w-4" /> 退出登录
             </Button>
           </div>
         </aside>
-        <main className="flex-1 overflow-auto p-6">
-          <ErrorBoundary>
-            <Routes>
-              <Route path="/" element={<Navigate to="/users" />} />
-              <Route path="/users" element={<UsersPage />} />
-              <Route path="/departments" element={<Departments />} />
-              <Route path="/gateway" element={<Gateway />} />
-              <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
-              <Route path="/marketplace" element={<Marketplace />} />
-              <Route path="/audit" element={<Audit />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </ErrorBoundary>
+
+        {/* 主内容区 */}
+        <main className="flex min-w-0 flex-1 flex-col overflow-auto">
+          {/* 顶部品牌渐变细条(3px,蓝→青) */}
+          <div className="sticky top-0 z-20 h-1 shrink-0 bg-gradient-to-r from-[#1E40AF] via-[#3B82F6] to-[#D97706]" />
+          <div className="mx-auto w-full max-w-[1440px] flex-1 p-6 lg:p-7">
+            <ErrorBoundary>
+              <Routes>
+                <Route path="/" element={<Navigate to="/users" />} />
+                <Route path="/users" element={<UsersPage />} />
+                <Route path="/departments" element={<Departments />} />
+                <Route path="/gateway" element={<Gateway />} />
+                <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
+                <Route path="/marketplace" element={<Marketplace />} />
+                <Route path="/audit" element={<Audit />} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </ErrorBoundary>
+          </div>
         </main>
       </div>
     </BrowserRouter>
