@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -10,6 +10,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
+import { PageHeader } from '../components/page-header'
+import { Lock, Eye, EyeOff } from 'lucide-react'
 import { isModelPriced } from '../lib/format'
 
 interface Provider {
@@ -34,6 +36,7 @@ interface Model {
   default_params: string
   input_price_per_1m?: number | null // 0022:元/百万 token,nil = 未定价
   output_price_per_1m?: number | null
+  cache_input_price_per_1m?: number | null // 0029:缓存命中输入价(元/百万 token),nil = 未配置
   offpeak_discount?: number | null // 0023:0<d<1 低谷折扣;nil/1 = 无峰谷价
   provider_name?: string // 审计修复 M3:上游名(管理端展示全部模型)
   provider_channel?: string
@@ -89,6 +92,29 @@ function isHttpUrl(v: string): boolean {
   }
 }
 
+// 密码/密钥输入(审计修复 P3-4):显隐切换按钮,复用 Input 样式;密码管理工具与粘贴不受影响
+function SecretInput(props: React.ComponentProps<'input'>) {
+  const [show, setShow] = React.useState(false)
+  return (
+    <div className="relative">
+      <Input
+        {...props}
+        type={show ? 'text' : 'password'}
+        className={`pr-9 ${props.className ?? ''}`}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={show ? '隐藏' : '显示'}
+        onClick={() => setShow((s) => !s)}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+      >
+        {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  )
+}
+
 export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
@@ -104,25 +130,54 @@ export default function Gateway() {
 
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
+  // 对话框内联错误(UX 改进):操作失败信息必须显示在用户操作处,而非页面顶部
+  const [provErr, setProvErr] = useState('')
+  const [editProvErr, setEditProvErr] = useState('')
+  const [modelErr, setModelErr] = useState('')
+  const [priceErr, setPriceErr] = useState('')
   const [modelDialog, setModelDialog] = useState(false)
-  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
+  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
   // 上游编辑(审计修复 M3):复用创建字段 + enabled 开关
   const [editProv, setEditProv] = useState<Provider | null>(null)
   const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true })
 
+  // ---- 认证配置(LDAP/OIDC) ----
+  const [authForm, setAuthForm] = useState({
+    mode: 'local',
+    ldap_server_url: '', ldap_bind_dn: '', ldap_bind_password: '', ldap_base_dn: '',
+    ldap_user_filter: '', ldap_group_filter: '', ldap_group_attr: '',
+    oidc_issuer: '', oidc_client_id: '', oidc_client_secret: '', oidc_redirect_url: '',
+  })
+  const [authErr, setAuthErr] = useState('')
+  const [authMsg, setAuthMsg] = useState('')
+
   const load = useCallback(async () => {
     try {
-      const [p, m, g, ch] = await Promise.all([
+      const [p, m, g, ch, au] = await Promise.all([
         request('/api/admin/providers'),
         request('/api/admin/models'),
         request('/api/admin/gateway'),
         request('/api/admin/channels'),
+        request('/api/admin/auth'),
       ])
       setProviders(p.providers ?? [])
       setModels(m.models ?? [])
       setCfg(g)
       setPeakList(parsePeakWindows(g.peak_windows ?? ''))
       setChannels(ch.channels ?? [])
+      // 认证配置回填(密码类为 "***" 掩码,保存时留空 = 不更换)
+      const a = au.auth ?? {}
+      const ldap = a.ldap ?? {}
+      const oidc = a.oidc ?? {}
+      setAuthForm({
+        mode: a.mode || 'local',
+        ldap_server_url: ldap.server_url ?? '', ldap_bind_dn: ldap.bind_dn ?? '',
+        ldap_bind_password: ldap.bind_password ?? '', ldap_base_dn: ldap.base_dn ?? '',
+        ldap_user_filter: ldap.user_filter ?? '', ldap_group_filter: ldap.group_filter ?? '',
+        ldap_group_attr: ldap.group_attr ?? '',
+        oidc_issuer: oidc.issuer ?? '', oidc_client_id: oidc.client_id ?? '',
+        oidc_client_secret: oidc.client_secret ?? '', oidc_redirect_url: oidc.redirect_url ?? '',
+      })
       setError('')
     } catch (err: any) {
       setError(err.message)
@@ -132,6 +187,53 @@ export default function Gateway() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // 保存认证配置:*** / 空 = 保持现值(密码类字段留在掩码态)
+  async function saveAuth() {
+    if (busy) return
+    setAuthErr('')
+    if (authForm.mode === 'ldap' || authForm.mode === 'both') {
+      if (!authForm.ldap_server_url.trim() || !authForm.ldap_base_dn.trim()) {
+        setAuthErr('LDAP 模式必须填写服务器地址与 Base DN'); return
+      }
+    }
+    if (authForm.mode === 'oidc') {
+      if (!authForm.oidc_issuer.trim() || !authForm.oidc_client_id.trim() || !authForm.oidc_redirect_url.trim()) {
+        setAuthErr('OIDC 模式必须填写 Issuer、Client ID 与 Redirect URL'); return
+      }
+    }
+    setBusy('save-auth')
+    try {
+      await request('/api/admin/auth', {
+        method: 'PUT',
+        body: JSON.stringify({
+          mode: authForm.mode,
+          ldap: {
+            server_url: authForm.ldap_server_url,
+            bind_dn: authForm.ldap_bind_dn,
+            bind_password: authForm.ldap_bind_password,
+            base_dn: authForm.ldap_base_dn,
+            user_filter: authForm.ldap_user_filter,
+            group_filter: authForm.ldap_group_filter,
+            group_attr: authForm.ldap_group_attr,
+          },
+          oidc: {
+            issuer: authForm.oidc_issuer,
+            client_id: authForm.oidc_client_id,
+            client_secret: authForm.oidc_client_secret,
+            redirect_url: authForm.oidc_redirect_url,
+          },
+        }),
+      })
+      setAuthMsg('认证配置已保存(重启服务端后生效)')
+      setTimeout(() => setAuthMsg(''), 4000)
+      load()
+    } catch (err: any) {
+      setAuthErr(err.message)
+    } finally {
+      setBusy(null)
+    }
+  }
 
   function flash(msg: string) {
     setOkMsg(msg)
@@ -176,10 +278,11 @@ export default function Gateway() {
 
   async function createProvider() {
     if (busy) return // P1-6: 双击守卫
+    setProvErr('')
     // 前端校验(审计修复 L3/L4):名称/URL 必填、渠道型 key 必填
-    if (!provForm.name.trim()) { setError('请填写上游名称'); return }
-    if (!isHttpUrl(provForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
-    if (provForm.channel && !provForm.api_key) { setError('渠道型上游必须填写 API Key'); return }
+    if (!provForm.name.trim()) { setProvErr('请填写上游名称'); return }
+    if (!isHttpUrl(provForm.base_url)) { setProvErr('Base URL 必须是 http(s) URL'); return }
+    if (provForm.channel && !provForm.api_key) { setProvErr('渠道型上游必须填写 API Key'); return }
     setBusy('create-provider')
     try {
       const r = await request('/api/admin/providers', {
@@ -208,7 +311,7 @@ export default function Gateway() {
       setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '' })
       load()
     } catch (err: any) {
-      setError(err.message)
+      setProvErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -216,11 +319,12 @@ export default function Gateway() {
 
   async function saveProviderEdit() {
     if (busy || !editProv) return // P1-6: 双击守卫
-    if (!editProvForm.name.trim()) { setError('请填写上游名称'); return }
-    if (!isHttpUrl(editProvForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
+    setEditProvErr('')
+    if (!editProvForm.name.trim()) { setEditProvErr('请填写上游名称'); return }
+    if (!isHttpUrl(editProvForm.base_url)) { setEditProvErr('Base URL 必须是 http(s) URL'); return }
     // 编辑时 API Key 留空 = 不更换;仅当上游原本无 key 且选了渠道时才强制
     if (editProvForm.channel && editProvForm.api_key.trim() === '' && (!editProv.api_key || editProv.api_key === '')) {
-      setError('渠道型上游必须填写 API Key')
+      setEditProvErr('渠道型上游必须填写 API Key')
       return
     }
     setBusy('save-provider-edit')
@@ -242,7 +346,7 @@ export default function Gateway() {
       flash('已保存')
       load()
     } catch (err: any) {
-      setError(err.message)
+      setEditProvErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -250,9 +354,10 @@ export default function Gateway() {
 
   async function createModel() {
     if (busy) return // P1-6: 双击守卫
+    setModelErr('')
     // 未选上游直接提示(审计2026-W10),不把 provider_id=0 提交给服务端
     if (!modelForm.provider_id) {
-      setError('请选择所属上游')
+      setModelErr('请选择所属上游')
       return
     }
     setBusy('create-model')
@@ -265,6 +370,8 @@ export default function Gateway() {
       // 价格留空 = 未定价(NULL);输入 0 = 定价 0(等价未定价);正数 = 元/百万 token
       if (modelForm.input_price_per_1m.trim() !== '') body.input_price_per_1m = Number(modelForm.input_price_per_1m)
       if (modelForm.output_price_per_1m.trim() !== '') body.output_price_per_1m = Number(modelForm.output_price_per_1m)
+      // 缓存命中输入价(0029):留空 = 未配置;输入 0 = 清空(未配置)
+      if (modelForm.cache_input_price_per_1m.trim() !== '') body.cache_input_price_per_1m = Number(modelForm.cache_input_price_per_1m)
       // 低谷折扣(0023):留空 = 无峰谷价;0<d<1 = 低谷窗口内 ×d
       if (modelForm.offpeak_discount.trim() !== '') body.offpeak_discount = Number(modelForm.offpeak_discount)
       await request('/api/admin/models', {
@@ -272,11 +379,11 @@ export default function Gateway() {
         body: JSON.stringify(body),
       })
       setModelDialog(false)
-      setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
+      setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
       setError('')
       load()
     } catch (err: any) {
-      setError(err.message)
+      setModelErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -318,30 +425,33 @@ export default function Gateway() {
 
   // 模型编辑:价格补录/修改(0022 金额计费前提 + 0023 峰谷折扣);其余字段留空不覆盖
   const [editModel, setEditModel] = useState<Model | null>(null)
-  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '', offpeak: '' })
+  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '', cache: '', offpeak: '' })
   function openModelPricing(m: Model) {
     setEditModel(m)
     setEditPriceForm({
       input: m.input_price_per_1m === null || m.input_price_per_1m === undefined ? '' : String(m.input_price_per_1m),
       output: m.output_price_per_1m === null || m.output_price_per_1m === undefined ? '' : String(m.output_price_per_1m),
+      cache: m.cache_input_price_per_1m === null || m.cache_input_price_per_1m === undefined ? '' : String(m.cache_input_price_per_1m),
       offpeak: m.offpeak_discount === null || m.offpeak_discount === undefined ? '' : String(m.offpeak_discount),
     })
   }
   async function saveModelPricing() {
     if (busy || !editModel) return // P1-6: 双击守卫
+    setPriceErr('')
     setBusy('save-model-pricing')
     try {
       const body: Record<string, any> = { name: editModel.name }
       // 留空 = 保持现值(服务端对缺省字段不覆盖);输入 0 = 定价 0(计费为 0)
       if (editPriceForm.input.trim() !== '') body.input_price_per_1m = Number(editPriceForm.input)
       if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
+      if (editPriceForm.cache.trim() !== '') body.cache_input_price_per_1m = Number(editPriceForm.cache)
       if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
       await request(`/api/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
       setError('')
       load()
     } catch (err: any) {
-      setError(err.message)
+      setPriceErr(err.message)
     } finally {
       setBusy(null)
     }
@@ -410,7 +520,10 @@ export default function Gateway() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold">网关配置</h1>
+      <PageHeader
+        title="网关配置"
+        desc="模型与上游接入、限流配额、峰谷计费与认证方式"
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {okMsg && <div className="text-sm text-green-600">{okMsg}</div>}
       {syncMsg && <div className="text-sm text-green-600">{syncMsg}</div>}
@@ -462,6 +575,7 @@ export default function Gateway() {
                   <Input
                     type="time"
                     aria-label={`高峰开始 ${i + 1}`}
+                    className="w-40 shrink-0"
                     value={w.start}
                     onChange={(e) => updatePeak(i, 'start', e.target.value)}
                   />
@@ -469,10 +583,11 @@ export default function Gateway() {
                   <Input
                     type="time"
                     aria-label={`高峰结束 ${i + 1}`}
+                    className="w-40 shrink-0"
                     value={w.end}
                     onChange={(e) => updatePeak(i, 'end', e.target.value)}
                   />
-                  <Button size="sm" variant="outline" type="button" onClick={() => removePeak(i)}>移除</Button>
+                  <Button size="sm" variant="outline" type="button" className="ml-2 shrink-0" onClick={() => removePeak(i)}>移除</Button>
                 </div>
               ))}
               <div className="flex flex-wrap gap-2">
@@ -483,13 +598,14 @@ export default function Gateway() {
                 )}
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              高峰时段按北京时间判定,半开区间 [start,end)。高峰窗口外(空闲时段)且模型配置了低谷折扣率时,
-              费用按折扣率打折。清空 = 无峰谷价(全天标准价)。DeepSeek 官方当前政策(2026-08-16 生效):
-              高峰 = 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%;历史 16:30-00:30 错峰政策已废弃。
-            </p>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              <li>按北京时间判定,半开区间 [start,end)。</li>
+              <li>高峰窗口外(空闲时段)且模型配置了低谷折扣率时,费用按折扣率打折。</li>
+              <li>清空 = 无峰谷价(全天标准价)。</li>
+              <li>DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%;历史 16:30-00:30 错峰政策已废弃。</li>
+            </ul>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 items-start gap-4">
             <div className="flex items-center gap-2">
               <Switch checked={cfg.allow_private} onCheckedChange={(v) => setCfg({ ...cfg, allow_private: v })} />
               <Label>允许 web_fetch 访问私有网段</Label>
@@ -540,10 +656,27 @@ export default function Gateway() {
                 <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
               ) : providers.map((p) => (
                 <TableRow key={p.id}>
-                  <TableCell>{p.name}</TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${p.enabled ? 'bg-green-500' : 'bg-slate-300'}`} />
+                      <span className="font-medium">{p.name}</span>
+                    </div>
+                  </TableCell>
                   <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
-                  <TableCell className="font-mono text-xs">{p.base_url}</TableCell>
-                  <TableCell>{p.api_key ? (p.api_key === '***' ? '已设置(隐藏)' : p.api_key) : '(未设置)'}</TableCell>
+                  <TableCell className="max-w-56 truncate font-mono text-xs">{p.base_url}</TableCell>
+                  <TableCell>
+                    {p.api_key ? (
+                      p.api_key === '***' ? (
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                          <Lock className="h-3 w-3" />••••••••••{(p.channel ? ' (AES)' : '')}
+                        </span>
+                      ) : (
+                        <span className="font-mono text-xs">{p.api_key}</span>
+                      )
+                    ) : (
+                      <span className="text-xs text-amber-600">未设置</span>
+                    )}
+                  </TableCell>
                   <TableCell>
                     {p.channel ? <span className="text-xs text-muted-foreground">自动同步</span> : p.models.join(', ')}
                   </TableCell>
@@ -605,6 +738,9 @@ export default function Gateway() {
                       {priced ? (
                         <span className="font-mono text-xs">
                           入 {m.input_price_per_1m} / 出 {m.output_price_per_1m}
+                          {m.cache_input_price_per_1m !== null && m.cache_input_price_per_1m !== undefined && m.cache_input_price_per_1m > 0 && (
+                            <span className="text-emerald-600"> · 缓存 {m.cache_input_price_per_1m}</span>
+                          )}
                           {offpeak && <span className="text-amber-600"> · 谷 {Number(m.offpeak_discount) * 10}折</span>}
                         </span>
                       ) : (
@@ -623,10 +759,112 @@ export default function Gateway() {
         </CardContent>
       </Card>
 
-      <Dialog open={provDialog} onOpenChange={setProvDialog}>
+      {/* 认证配置(LDAP/OIDC):webadmin 配置入口,服务端启动时注册对应 provider */}
+      <Card>
+        <CardHeader>
+          <CardTitle>认证配置</CardTitle>
+          <CardDescription>员工登录方式:本地账号 / LDAP / OIDC;修改后重启服务端生效(下拉框提示)</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {authErr && <div className="text-sm text-destructive">{authErr}</div>}
+          {authMsg && <div className="text-sm text-green-600">{authMsg}</div>}
+          <div className="space-y-1">
+            <Label>登录模式</Label>
+            <Select value={authForm.mode} onValueChange={(v) => setAuthForm({ ...authForm, mode: v })}>
+              <SelectTrigger aria-label="登录模式"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="local">仅本地账号</SelectItem>
+                <SelectItem value="ldap">仅 LDAP</SelectItem>
+                <SelectItem value="both">本地 + LDAP</SelectItem>
+                <SelectItem value="oidc">OIDC(浏览器登录)</SelectItem>
+              </SelectContent>
+            </Select>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              <li>ldap/both 模式需填写 LDAP 服务器;oidc 模式需填写 OIDC 配置。</li>
+              <li>密码类字段留空 = 保持现值。</li>
+            </ul>
+          </div>
+
+          {(authForm.mode === 'ldap' || authForm.mode === 'both') && (
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="text-sm font-medium">LDAP 配置</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-url">服务器地址(ldap://ldap.example.com:389)</Label>
+                  <Input id="ldap-url" value={authForm.ldap_server_url} placeholder="ldap://ldap.example.com:389"
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_server_url: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-bind-dn">Bind DN</Label>
+                  <Input id="ldap-bind-dn" value={authForm.ldap_bind_dn} placeholder="cn=admin,dc=example,dc=com"
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_bind_dn: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-bind-pw">Bind 密码(未改=保持现值;清空=清除密码)</Label>
+                  <SecretInput id="ldap-bind-pw" value={authForm.ldap_bind_password}
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_bind_password: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-base-dn">Base DN</Label>
+                  <Input id="ldap-base-dn" value={authForm.ldap_base_dn} placeholder="dc=example,dc=com"
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_base_dn: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-user-filter">用户过滤器(默认 (uid=%s))</Label>
+                  <Input id="ldap-user-filter" value={authForm.ldap_user_filter} placeholder="(uid=%s)"
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_user_filter: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-group-filter">组过滤器(可选)</Label>
+                  <Input id="ldap-group-filter" value={authForm.ldap_group_filter} placeholder="(memberOf=cn=%s)"
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_group_filter: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ldap-group-attr">组属性(默认 cn)</Label>
+                  <Input id="ldap-group-attr" value={authForm.ldap_group_attr}
+                    onChange={(e) => setAuthForm({ ...authForm, ldap_group_attr: e.target.value })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {authForm.mode === 'oidc' && (
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="text-sm font-medium">OIDC 配置</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="oidc-issuer">Issuer(如 https://idp.example.com)</Label>
+                  <Input id="oidc-issuer" value={authForm.oidc_issuer} placeholder="https://idp.example.com"
+                    onChange={(e) => setAuthForm({ ...authForm, oidc_issuer: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="oidc-client-id">Client ID</Label>
+                  <Input id="oidc-client-id" value={authForm.oidc_client_id}
+                    onChange={(e) => setAuthForm({ ...authForm, oidc_client_id: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="oidc-secret">Client Secret(未改=保持现值;清空=清除密钥)</Label>
+                  <SecretInput id="oidc-secret" value={authForm.oidc_client_secret}
+                    onChange={(e) => setAuthForm({ ...authForm, oidc_client_secret: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="oidc-redirect">Redirect URL</Label>
+                  <Input id="oidc-redirect" value={authForm.oidc_redirect_url} placeholder="https://picoaide.example.com/api/auth/oidc/callback"
+                    onChange={(e) => setAuthForm({ ...authForm, oidc_redirect_url: e.target.value })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          <Button onClick={saveAuth} disabled={busy !== null}>{busy === 'save-auth' ? '保存中…' : '保存认证配置'}</Button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={provDialog} onOpenChange={(v) => { setProvDialog(v); if (!v) setProvErr('') }}>
         <DialogContent>
           <DialogHeader><DialogTitle>添加上游</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {provErr && <div className="text-sm text-destructive">{provErr}</div>}
             <div className="space-y-1">
               <Label>渠道</Label>
               <Select
@@ -668,7 +906,7 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>API Key{provForm.channel ? '(必填)' : ''}</Label>
-              <Input type="password" placeholder="sk-..." value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
+              <SecretInput placeholder="sk-..." value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
@@ -689,6 +927,7 @@ export default function Gateway() {
         <DialogContent>
           <DialogHeader><DialogTitle>编辑上游 · {editProv?.name}</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {editProvErr && <div className="text-sm text-destructive">{editProvErr}</div>}
             <div className="space-y-1">
               <Label>渠道</Label>
               <Select
@@ -726,7 +965,7 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>API Key(留空 = 不更换)</Label>
-              <Input type="password" placeholder="sk-..." value={editProvForm.api_key} onChange={(e) => setEditProvForm({ ...editProvForm, api_key: e.target.value })} />
+              <SecretInput placeholder="sk-..." value={editProvForm.api_key} onChange={(e) => setEditProvForm({ ...editProvForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
@@ -746,10 +985,11 @@ export default function Gateway() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={modelDialog} onOpenChange={setModelDialog}>
+      <Dialog open={modelDialog} onOpenChange={(v) => { setModelDialog(v); if (!v) setModelErr('') }}>
         <DialogContent>
           <DialogHeader><DialogTitle>新增模型</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {modelErr && <div className="text-sm text-destructive">{modelErr}</div>}
             <div className="space-y-1">
               <Label>模型名(如 deepseek-chat)</Label>
               <Input value={modelForm.name} onChange={(e) => setModelForm({ ...modelForm, name: e.target.value })} />
@@ -802,25 +1042,38 @@ export default function Gateway() {
                   onChange={(e) => setModelForm({ ...modelForm, output_price_per_1m: e.target.value })}
                 />
               </div>
+              <div className="space-y-1">
+                <Label htmlFor="model-price-cache">缓存命中输入价(元/百万 token)</Label>
+                <Input
+                  id="model-price-cache"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  placeholder="留空 = 未配置(按输入价计费)"
+                  value={modelForm.cache_input_price_per_1m}
+                  onChange={(e) => setModelForm({ ...modelForm, cache_input_price_per_1m: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">仅作定价展示;命中 token 仍按输入价计费。</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="model-offpeak">低谷折扣率(0-1,留空 = 无峰谷价)</Label>
+                <Input
+                  id="model-offpeak"
+                  type="number"
+                  min={0}
+                  max={1}
+                  step="0.05"
+                  placeholder="DeepSeek 官方错峰五折 = 0.5"
+                  value={modelForm.offpeak_discount}
+                  onChange={(e) => setModelForm({ ...modelForm, offpeak_discount: e.target.value })}
+                />
+              </div>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="model-offpeak">低谷折扣率(0-1,留空 = 无峰谷价)</Label>
-              <Input
-                id="model-offpeak"
-                type="number"
-                min={0}
-                max={1}
-                step="0.05"
-                placeholder="DeepSeek 官方错峰五折 = 0.5"
-                value={modelForm.offpeak_discount}
-                onChange={(e) => setModelForm({ ...modelForm, offpeak_discount: e.target.value })}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。
-              低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。
-              DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
-            </p>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              <li>配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。</li>
+              <li>低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。</li>
+              <li>DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。</li>
+            </ul>
             <Button className="w-full" disabled={busy !== null} onClick={createModel}>{busy === 'create-model' ? '处理中…' : '新增'}</Button>
           </div>
         </DialogContent>
@@ -831,6 +1084,7 @@ export default function Gateway() {
         <DialogContent>
           <DialogHeader><DialogTitle>模型价格 · {editModel?.name}</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {priceErr && <div className="text-sm text-destructive">{priceErr}</div>}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label htmlFor="edit-price-in">输入价格(元/百万 token)</Label>
@@ -854,6 +1108,18 @@ export default function Gateway() {
                   placeholder="留空 = 保持现值"
                   value={editPriceForm.output}
                   onChange={(e) => setEditPriceForm({ ...editPriceForm, output: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-price-cache">缓存命中输入价(元/百万 token)</Label>
+                <Input
+                  id="edit-price-cache"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  placeholder="留空 = 保持现值"
+                  value={editPriceForm.cache}
+                  onChange={(e) => setEditPriceForm({ ...editPriceForm, cache: e.target.value })}
                 />
               </div>
             </div>

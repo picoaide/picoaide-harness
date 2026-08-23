@@ -15,6 +15,7 @@ import { Skeleton } from '../components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
+import { PageHeader } from '../components/page-header'
 import {
   fmtTokens, fmtFull, fmtMoney, fmtMoneyFull, usageRate, quotaPercent, quotaOver,
   moneyRate, moneyPercent, moneyOver, rangePreset, monthRange, ymd, isModelPriced,
@@ -27,6 +28,7 @@ interface UsageRow {
   requests: number
   embed_requests?: number
   embed_tokens?: number
+  cache_tokens?: number // 0030:缓存命中的输入 token
   cost?: number // 0022:该桶费用合计(元),未定价模型贡献 0
 }
 
@@ -404,9 +406,9 @@ export default function Usage() {
   function exportCsv() {
     const source = filteredRows
     if (source.length === 0) return
-    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'embed_tokens', 'total_tokens', 'cost']
+    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'cache_tokens', 'embed_tokens', 'total_tokens', 'cost']
     const lines = source.map((r) => [
-      csvCell(r.label), r.requests, r.prompt_tokens, r.completion_tokens, r.embed_tokens ?? 0,
+      csvCell(r.label), r.requests, r.prompt_tokens, r.completion_tokens, r.cache_tokens ?? 0, r.embed_tokens ?? 0,
       chatTokens(r), (r.cost ?? 0).toFixed(4),
     ].join(','))
     const csv = '\uFEFF' + [head.join(','), ...lines].join('\n')
@@ -421,10 +423,10 @@ export default function Usage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">用量统计</h1>
-        <span className="text-sm text-muted-foreground">费用与配额对照(金额/token 双维度,管理员豁免)</span>
-      </div>
+      <PageHeader
+        title="用量统计"
+        desc="费用与配额对照(金额/token 双维度,管理员豁免)"
+      />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {hasUnpricedModels && (
         <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -482,23 +484,27 @@ export default function Usage() {
       {/* 汇总统计卡:总费用为第一指标(企业面板 stat-card 模式) */}
       <div data-testid="stat-cards" className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         {statCards.map((c) => (
-          <Card key={c.title}>
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <c.icon className="h-4 w-4" />
-                {c.title}
-              </div>
-              {loading ? (
-                <Skeleton className="mt-2 h-8 w-24" />
-              ) : (
-                <div
-                  className="mt-1 text-2xl font-bold tabular-nums tracking-tight"
-                  title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
-                >
-                  {c.money ? `¥${fmtMoney(c.value)}` : c.int ? c.value.toLocaleString() : fmtTokens(c.value)}
+          <Card key={c.title} className="h-full">
+            <CardContent className="flex h-full flex-col pt-5">
+              <div className="flex shrink-0 items-center gap-2">
+                <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${c.money ? 'bg-[#1E40AF]/10 text-[#1E40AF]' : 'bg-slate-100 text-slate-500'}`}>
+                  <c.icon className="h-3.5 w-3.5" />
                 </div>
-              )}
-              <div className="mt-1 text-xs text-muted-foreground">{c.desc}</div>
+                <span className="whitespace-nowrap text-[13px] leading-tight text-muted-foreground">{c.title}</span>
+              </div>
+              <div className="mt-2.5 flex h-8 shrink-0 items-center">
+                {loading ? (
+                  <Skeleton className="h-7 w-24" />
+                ) : (
+                  <div
+                    className="font-mono text-[22px] font-bold leading-tight tabular-nums tracking-tight text-slate-800"
+                    title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
+                  >
+                    {c.money ? `¥${fmtMoney(c.value)}` : c.int ? c.value.toLocaleString() : fmtTokens(c.value)}
+                  </div>
+                )}
+              </div>
+              <div className="mt-1.5 flex-1 text-[11px] leading-relaxed text-muted-foreground">{c.desc}</div>
             </CardContent>
           </Card>
         ))}
@@ -726,6 +732,7 @@ export default function Usage() {
                   <TableHead className="text-right">请求数</TableHead>
                   <TableHead className="text-right">输入 tokens</TableHead>
                   <TableHead className="text-right">输出 tokens</TableHead>
+                  <TableHead className="text-right">缓存命中</TableHead>
                   <TableHead className="text-right">embedding tokens</TableHead>
                   <TableHead className={`text-right ${metric === 'tokens' ? 'font-bold' : ''}`}>合计 tokens(chat)</TableHead>
                   <TableHead className={`text-right ${metric === 'money' ? 'font-bold' : ''}`}>费用(¥)</TableHead>
@@ -737,11 +744,21 @@ export default function Usage() {
                     key={r.label}
                     className={group === 'user' ? 'cursor-pointer hover:bg-accent' : undefined}
                     onClick={group === 'user' ? () => openDrill(r.label) : undefined}
+                    tabIndex={group === 'user' ? 0 : undefined}
+                    role={group === 'user' ? 'button' : undefined}
+                    aria-label={group === 'user' ? `查看 ${r.label} 明细` : undefined}
+                    onKeyDown={group === 'user' ? (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        openDrill(r.label)
+                      }
+                    } : undefined}
                   >
                     <TableCell>{r.label}</TableCell>
                     <TableCell className="text-right tabular-nums">{r.requests}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.completion_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(r.cache_tokens ?? 0)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.embed_tokens ?? 0)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(chatTokens(r))}</TableCell>
                     <TableCell className="text-right tabular-nums" title={fmtMoneyFull(r.cost ?? 0)}>¥{fmtMoney(r.cost ?? 0)}</TableCell>
@@ -753,13 +770,14 @@ export default function Usage() {
                     <TableCell className="text-right tabular-nums">{filteredRows.reduce((s, r) => s + r.requests, 0)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens, 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.completion_tokens, 0))}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + (r.cache_tokens ?? 0), 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + (r.embed_tokens ?? 0), 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + chatTokens(r), 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">¥{fmtMoney(filteredRows.reduce((s, r) => s + (r.cost ?? 0), 0))}</TableCell>
                   </TableRow>
                 )}
                 {filteredRows.length === 0 && (
-                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>

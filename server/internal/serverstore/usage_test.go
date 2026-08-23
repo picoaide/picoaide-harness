@@ -1117,3 +1117,92 @@ func TestUserUsageSummary(t *testing.T) {
 		t.Fatalf("monthly=%d/%v vs total=%d/%v(同日应一致)", s.MonthlyUsage, s.MonthlyCost, s.TotalUsage, s.TotalCost)
 	}
 }
+
+// 缓存计费(0029/0030):命中 token 按缓存价,未命中按输入价,未配置缓存价回退输入价。
+func TestRecordUsageCacheCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	// 输入 2 元/1M,输出 8 元/1M,缓存 1 元/1M
+	cachePtr := 1.0
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "prov-cache", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddModel(db, &Model{Name: "cache-model", ProviderID: pid, InputPricePer1M: ptrFloat(2.0), OutputPricePer1M: ptrFloat(8.0), CacheInputPricePer1M: &cachePtr}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1M 输入全命中:100 万命中 → 1 元
+	id, err := RecordUsageKindCached(db, uid, "cache-model", 1_000_000, 0, 1_000_000, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 1.0 {
+		t.Fatalf("full-cache cost = %v, want 1.0", cost)
+	}
+
+	// 混合:50 万命中 + 50 万未命中 + 25 万输出 = 0.5*1 + 0.5*2 + 0.25*8 = 3.5
+	id2, err := RecordUsageKindCached(db, uid, "cache-model", 1_000_000, 250_000, 500_000, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id2).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3.5 {
+		t.Fatalf("mixed cost = %v, want 3.5", cost)
+	}
+}
+
+// 未配置缓存价时回退输入价:用 input=2 的模型,全命中应按 2 元计。
+func TestRecordUsageCacheFallsBackToInput(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "no-cache-model", 2.0, 8.0) // 无 CacheInputPricePer1M
+	id, err := RecordUsageKindCached(db, uid, "no-cache-model", 1_000_000, 0, 1_000_000, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 2.0 {
+		t.Fatalf("fallback cost = %v, want 2.0 (输入价)", cost)
+	}
+}
+
+// 命中数超过总输入:防御钳制,按总输入计费。
+func TestRecordUsageCacheClamp(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	cachePtr := 1.0
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "prov-clamp", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddModel(db, &Model{Name: "clamp-model", ProviderID: pid, InputPricePer1M: ptrFloat(2.0), OutputPricePer1M: ptrFloat(8.0), CacheInputPricePer1M: &cachePtr}); err != nil {
+		t.Fatal(err)
+	}
+	// 输入 10 万,命中 100 万(异常)→ 钳制为 10 万命中,费用 = 0.1*1 = 0.1
+	id, err := RecordUsageKindCached(db, uid, "clamp-model", 100_000, 0, 1_000_000, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 0.1 {
+		t.Fatalf("clamp cost = %v, want 0.1", cost)
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }

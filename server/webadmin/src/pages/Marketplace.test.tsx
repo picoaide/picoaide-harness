@@ -28,12 +28,14 @@ beforeEach(() => {
 })
 
 describe('Marketplace 商城页', () => {
-  it('渲染技能表格,状态徽标按 enabled 展示', async () => {
+  it('渲染技能卡片,状态徽标按 enabled 展示', async () => {
     render(<Marketplace />)
     expect(await screen.findByText('data-extract')).toBeInTheDocument()
     // H1: enabled=true → 上架;enabled=false → 已下架
-    expect(screen.getByText('data-extract').closest('tr')!.textContent).toContain('上架')
-    expect(screen.getByText('legacy').closest('tr')!.textContent).toContain('已下架')
+    const extractCard = screen.getByText('data-extract').closest('[class*="group"]')!
+    expect(extractCard.textContent).toContain('上架')
+    const legacyCard = screen.getByText('legacy').closest('[class*="group"]')!
+    expect(legacyCard.textContent).toContain('已下架')
     expect(screen.queryByText('MCP 插件')).not.toBeInTheDocument()
   })
 
