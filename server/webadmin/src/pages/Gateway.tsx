@@ -420,10 +420,6 @@ export default function Gateway() {
       if (editPriceForm.input.trim() !== '') body.input_price_per_1m = Number(editPriceForm.input)
       if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
       if (editPriceForm.cache.trim() !== '') body.cache_input_price_per_1m = Number(editPriceForm.cache)
-      else if (editModel.cache_input_price_per_1m !== null && editModel.cache_input_price_per_1m !== undefined) {
-        // 显式清空缓存价(输入框清空但原值存在 → 传 null 清空)
-        body.cache_input_price_per_1m = null
-      }
       if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
       await request(`/api/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
@@ -755,7 +751,7 @@ export default function Gateway() {
                     onChange={(e) => setAuthForm({ ...authForm, ldap_bind_dn: e.target.value })} />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="ldap-bind-pw">Bind 密码(留空=保持现值)</Label>
+                  <Label htmlFor="ldap-bind-pw">Bind 密码(未改=保持现值;清空=清除密码)</Label>
                   <Input id="ldap-bind-pw" type="password" value={authForm.ldap_bind_password}
                     onChange={(e) => setAuthForm({ ...authForm, ldap_bind_password: e.target.value })} />
                 </div>
@@ -798,7 +794,7 @@ export default function Gateway() {
                     onChange={(e) => setAuthForm({ ...authForm, oidc_client_id: e.target.value })} />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="oidc-secret">Client Secret(留空=保持现值)</Label>
+                  <Label htmlFor="oidc-secret">Client Secret(未改=保持现值;清空=清除密钥)</Label>
                   <Input id="oidc-secret" type="password" value={authForm.oidc_client_secret}
                     onChange={(e) => setAuthForm({ ...authForm, oidc_client_secret: e.target.value })} />
                 </div>
@@ -1066,13 +1062,13 @@ export default function Gateway() {
                 />
               </div>
               <div className="space-y-1">
-                <Label htmlFor="edit-price-cache">缓存命中输入价(元/百万 token,留空 = 清空)</Label>
+                <Label htmlFor="edit-price-cache">缓存命中输入价(元/百万 token)</Label>
                 <Input
                   id="edit-price-cache"
                   type="number"
                   min={0}
                   step="0.01"
-                  placeholder="清空并保存 = 未配置(按输入价计费)"
+                  placeholder="留空 = 保持现值"
                   value={editPriceForm.cache}
                   onChange={(e) => setEditPriceForm({ ...editPriceForm, cache: e.target.value })}
                 />

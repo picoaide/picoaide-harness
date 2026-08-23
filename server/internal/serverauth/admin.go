@@ -656,7 +656,12 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	mask := func(v string) string { if v == "" { return "" }; return "***" }
+	mask := func(v string) string {
+		if v == "" {
+			return ""
+		}
+		return "***"
+	}
 	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
 		"mode": s["auth.mode"],
 		"ldap": gin.H{
@@ -678,8 +683,8 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 }
 
 // setAuthConfig 保存认证配置。契约:mode 必填(local|ldap|both|oidc);
-// 密码类字段(ldap.bind_password / oidc.client_secret)写入 "***" 或空 = 保持现值,
-// 只有新值才覆盖;其余字段空 = 清空。
+// 密码类字段(ldap.bind_password / oidc.client_secret)写入 "***" = 保持现值,
+// 其余值(含空串)= 覆盖/清空;非密码字段左右 trim 后写入。
 func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	var req struct {
 		Mode string `json:"mode"`
@@ -715,23 +720,45 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	}
 	upsert := func(key, val string) error { return serverstore.SetSetting(a.DB, key, val) }
 	_ = upsert("auth.mode", mode)
-	// LDAP
-	_ = upsert("ldap.server_url", req.LDAP.ServerURL)
-	_ = upsert("ldap.bind_dn", req.LDAP.BindDN)
-	if req.LDAP.BindPassword != "" && req.LDAP.BindPassword != MaskSecret {
-		_ = upsert("ldap.bind_password", req.LDAP.BindPassword)
+	// 只保存当前 mode 相关的配置;其余(未启用模式的字段)清空,避免残留污染:
+	// 用户切回 local 后 ldap.*/oidc.* 不应继续存在(重启时不再被误解析)。
+	// 密码字段 "***" = 保持现值;其余(含空)= 覆盖/清空。
+	switch mode {
+	case "ldap", "both":
+		_ = upsert("ldap.server_url", strings.TrimSpace(req.LDAP.ServerURL))
+		_ = upsert("ldap.bind_dn", strings.TrimSpace(req.LDAP.BindDN))
+		if req.LDAP.BindPassword != MaskSecret {
+			_ = upsert("ldap.bind_password", req.LDAP.BindPassword)
+		}
+		_ = upsert("ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN))
+		_ = upsert("ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter))
+		_ = upsert("ldap.group_filter", strings.TrimSpace(req.LDAP.GroupFilter))
+		_ = upsert("ldap.group_attr", strings.TrimSpace(req.LDAP.GroupAttr))
+		_ = upsert("oidc.issuer", "")
+		_ = upsert("oidc.client_id", "")
+		_ = upsert("oidc.client_secret", "")
+		_ = upsert("oidc.redirect_url", "")
+	case "oidc":
+		_ = upsert("oidc.issuer", strings.TrimSpace(req.OIDC.Issuer))
+		_ = upsert("oidc.client_id", strings.TrimSpace(req.OIDC.ClientID))
+		if req.OIDC.ClientSecret != MaskSecret {
+			_ = upsert("oidc.client_secret", req.OIDC.ClientSecret)
+		}
+		_ = upsert("oidc.redirect_url", strings.TrimSpace(req.OIDC.RedirectURL))
+		_ = upsert("ldap.server_url", "")
+		_ = upsert("ldap.bind_dn", "")
+		_ = upsert("ldap.bind_password", "")
+		_ = upsert("ldap.base_dn", "")
+		_ = upsert("ldap.user_filter", "")
+		_ = upsert("ldap.group_filter", "")
+		_ = upsert("ldap.group_attr", "")
+	default: // local:清空全部外部认证配置
+		for _, k := range []string{"ldap.server_url", "ldap.bind_dn", "ldap.bind_password", "ldap.base_dn",
+			"ldap.user_filter", "ldap.group_filter", "ldap.group_attr",
+			"oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.redirect_url"} {
+			_ = upsert(k, "")
+		}
 	}
-	_ = upsert("ldap.base_dn", req.LDAP.BaseDN)
-	_ = upsert("ldap.user_filter", req.LDAP.UserFilter)
-	_ = upsert("ldap.group_filter", req.LDAP.GroupFilter)
-	_ = upsert("ldap.group_attr", req.LDAP.GroupAttr)
-	// OIDC
-	_ = upsert("oidc.issuer", req.OIDC.Issuer)
-	_ = upsert("oidc.client_id", req.OIDC.ClientID)
-	if req.OIDC.ClientSecret != "" && req.OIDC.ClientSecret != MaskSecret {
-		_ = upsert("oidc.client_secret", req.OIDC.ClientSecret)
-	}
-	_ = upsert("oidc.redirect_url", req.OIDC.RedirectURL)
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "mode:"+mode)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
