@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  server:
+    name: Go server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/webadmin/package-lock.json
+      - run: npm ci
+        working-directory: server/webadmin
+      - run: go vet ./...
+      - run: go test ./... -count=1
+      - run: make build-server
+      - uses: actions/upload-artifact@v7
+        with:
+          name: picoaide-server-linux-amd64
+          path: server/bin/picoaide-server
+          if-no-files-found: error
+
+  desktop-linux:
+    name: Desktop (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn check
+      - run: yarn workspace dsh-plugin-desktop package:dir
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-Linux
+          path: packages/host/desktop/dist/
+          if-no-files-found: error
+
+  desktop-windows:
+    name: Desktop (Windows installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn workspace dsh-plugin-desktop dist:win
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-Windows-installer
+          path: packages/host/desktop/dist/*Setup*.exe
+          if-no-files-found: error
+
+  desktop-macos:
+    name: Desktop (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn workspace dsh-plugin-desktop package:dir
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macOS
+          path: packages/host/desktop/dist/
+          if-no-files-found: error

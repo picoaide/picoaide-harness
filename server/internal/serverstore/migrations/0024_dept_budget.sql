@@ -1,0 +1,11 @@
+-- 0024: department-level monthly money budget (部门月度金额预算,元)。
+--
+-- groups.budget_money REAL:
+--   NULL = 无部门预算(不限)
+--   >0   = 该部门树(含全部子部门)成员当月费用合计上限
+--
+-- 语义:员工预算链 = 归属部门 + 祖先链(不含主管子树 —— 主管向上兼容是
+-- 授权/知识库语义,预算只约束归属链,否则部门预算可被主管绕过)。
+-- 任一预算部门当月累计费用超限 → 该部门成员请求被网关 429 拦截。
+-- 与 usage.cost(0022 记录时定价)同一口径:按部门聚合 SUM(cost)。
+ALTER TABLE groups ADD COLUMN budget_money REAL;

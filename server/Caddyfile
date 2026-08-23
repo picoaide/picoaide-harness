@@ -1,0 +1,18 @@
+# PicoAide 服务端 HTTPS 反代(Caddy 自动管理证书)
+# 部署时把 picoaide.example.com 替换为你的真实域名。
+#
+# 证书策略:
+#   - 默认 tls internal:Caddy 生成自签名证书(内网/测试用,客户端首次连接弹 TOFU 信任)
+#   - 有公网域名时删掉 `tls internal`,Caddy 自动申请 Let's Encrypt 正式证书
+picoaide.example.com {
+	tls internal
+
+	# 反代到后端 picoaide-server(compose 服务名),保留原始 Host 与真实来源 IP
+	reverse_proxy server:8080 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# 静态资源与 SPA 由后端提供,这里不重复托管
+}

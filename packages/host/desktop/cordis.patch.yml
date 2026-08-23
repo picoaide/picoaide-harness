@@ -1,0 +1,18 @@
+# Desktop Host operations compose around the existing Web bundle. The shell
+# presentation is fixed to the platform-native advanced mode.
+- insert:
+    - id: desktop-shell
+      name: dsh-plugin-desktop
+      config:
+        mode: advanced
+    - id: desktop-diagnostics
+      name: dsh-plugin-desktop/diagnostics
+    - id: desktop-updates
+      name: dsh-plugin-desktop/updates
+
+# A desktop launch has no terminal operator waiting for the Web readiness line.
+- id: web-runtime
+  config:
+    printUrl: false
+    surfaceContext: true
+    trustedHosts: []

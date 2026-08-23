@@ -1,0 +1,11 @@
+# 服务端镜像仅需 go 源码 + webadmin 源码;桌面端/构建产物/缓存/数据不入上下文
+.git
+bin
+build
+node_modules
+data
+*.db
+*.db-wal
+*.db-shm
+*.log
+.DS_Store
