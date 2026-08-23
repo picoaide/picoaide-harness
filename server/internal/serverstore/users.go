@@ -76,7 +76,7 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var displayName, email, passwordHash sql.NullString
 	var quota sql.NullInt64
 	var quotaMoney sql.NullFloat64
-	var createdAt, updatedAt string
+	var createdAt, updatedAt any
 	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &status, &createdAt, &updatedAt, &quota, &quotaMoney); err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 
 // CreateUser inserts a user row and returns its id.
 func CreateUser(db *sql.DB, u *User) (int64, error) {
-	res, err := db.Exec(`INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status, quota_tokens, quota_money)
+	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status, quota_tokens, quota_money)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.Username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
 		u.Source, boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney))
@@ -108,7 +108,7 @@ func CreateUser(db *sql.DB, u *User) (int64, error) {
 		}
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // GetUserByUsername returns the user or ErrNotFound.
@@ -134,7 +134,7 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 
 // UpdateUser updates display_name/email/password_hash/is_admin/status.
 func UpdateUser(db *sql.DB, u *User) error {
-	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=datetime('now','localtime')
+	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
 		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
@@ -156,7 +156,7 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=datetime('now','localtime')
+	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
 		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
@@ -213,21 +213,60 @@ func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 }
 
 func isUniqueViolation(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "unique constraint"))
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// PG: ERROR: duplicate key value violates unique constraint "x" (SQLSTATE 23505)
+	// SQLite: UNIQUE constraint failed: users.username
+	if strings.Contains(msg, "SQLSTATE 23505") || strings.Contains(msg, "23505") {
+		return true
+	}
+	return strings.Contains(msg, "UNIQUE") || strings.Contains(msg, "unique constraint") || strings.Contains(msg, "duplicate key")
 }
 
 const sqlTimeFormat = "2006-01-02 15:04:05"
 
-// parseSQLTime parses a SQLite DATETIME value. The schema writes
-// datetime('now','localtime') — wall-clock strings with no zone — so bare
-// strings must be interpreted in the local timezone: time.Parse would treat
-// them as UTC, making time.Since() negative in non-UTC environments and
-// breaking age-based logic such as the KB queue orphan sweep. RFC3339 values
-// carry their own offset and are unaffected by the location argument.
-func parseSQLTime(s string) time.Time {
-	for _, f := range []string{sqlTimeFormat, time.RFC3339} {
-		if t, err := time.ParseInLocation(f, s, time.Local); err == nil {
-			return t
+// formatTimeString normalizes a scanned timestamp value into the SQLite
+// wall-clock string format ("2006-01-02 15:04:05", local time). PG scans
+// TIMESTAMPTZ as time.Time; SQLite returns / the driver yields the stored
+// string. Used to back the Token.CreatedAt string field (API contract).
+func formatTimeString(v any) string {
+	switch x := v.(type) {
+	case time.Time:
+		return x.In(time.Local).Format(sqlTimeFormat)
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	}
+	return ""
+}
+
+// parseSQLTime parses a SQLite DATETIME / PG TIMESTAMPTZ value into a local
+// time.Time. SQLite writes datetime('now','localtime') — wall-clock strings
+// with no zone — so bare strings must be interpreted in the local timezone:
+// time.Parse would treat them as UTC, making time.Since() negative in non-UTC
+// environments and breaking age-based logic such as the KB queue orphan
+// sweep. RFC3339 values carry their own offset and are unaffected by the
+// location argument. PG scans TIMESTAMPTZ directly as a time.Time (already
+// UTC), so passthrough-and-In(Local) keeps the local-time semantics.
+func parseSQLTime(s any) time.Time {
+	switch v := s.(type) {
+	case time.Time:
+		return v.In(time.Local)
+	case string:
+		for _, f := range []string{sqlTimeFormat, time.RFC3339} {
+			if t, err := time.ParseInLocation(f, v, time.Local); err == nil {
+				return t
+			}
+		}
+	case []byte:
+		str := string(v)
+		for _, f := range []string{sqlTimeFormat, time.RFC3339} {
+			if t, err := time.ParseInLocation(f, str, time.Local); err == nil {
+				return t
+			}
 		}
 	}
 	return time.Time{}
