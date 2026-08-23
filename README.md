@@ -13,7 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
 </p>
 
-PicoAide Harness 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的本地智能体、Host 服务、插件系统与企业级管理能力装进一个平台：
+PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件系统与企业级管理能力装进一个平台：
 
 - **桌面客户端**：原生窗口、系统托盘、终端、自动更新，无需安装 Node.js 或执行命令；
 - **本地服务**：自动启动、停止与恢复本地 Harness 服务，数据留在本机；
@@ -114,7 +114,7 @@ PicoAide Harness 没有魔改上游源码，也不是一个固定写死的外壳
 
 ## 与官方项目的关系
 
-本项目基于 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 构建。
+本项目基于 deepseek-ai/deepseek-harness 构建。
 
 官方项目提供核心的智能体能力、插件系统和 Web UI。本项目主要负责：
 
@@ -128,9 +128,9 @@ PicoAide Harness 没有魔改上游源码，也不是一个固定写死的外壳
 
 ## 特别感谢
 
-特别感谢 [DeepSeek Harness 原始仓库](https://github.com/deepseek-ai/deepseek-harness) 和 DeepSeek AI 团队。本项目基于固定版本的上游源码构建，核心的智能体、模型、工具、会话、Web UI 和插件生态都来自这个项目。
+特别感谢 DeepSeek Harness 原始仓库和 DeepSeek AI 团队。本项目基于固定版本的上游源码构建，核心的智能体、模型、工具、会话、Web UI 和插件生态都来自这个项目。
 
-同时感谢 [Cordis](https://github.com/cordiverse/cordis) 项目提供的插件化基础，以及 [Koishi.js](https://koishi.chat/) 项目和社区长期积累的插件化实践、工具与经验。
+同时感谢 Cordis 项目提供的插件化基础，以及 Koishi.js 项目和社区长期积累的插件化实践、工具与经验。
 
 以及每一个使用、支持和参与共建的你。
 

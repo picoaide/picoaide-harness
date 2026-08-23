@@ -13,7 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
 </p>
 
-PicoAide Harness packages [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) local agents, the Host service, its plugin system, and enterprise-grade administration into one platform:
+PicoAide Harness packages DeepSeek Harness local agents, the Host service, its plugin system, and enterprise-grade administration into one platform:
 
 - **Desktop client**: native windows, system tray, terminal, automatic updates, no Node.js or command-line setup required;
 - **Local service**: automatically starts, stops, and restores the local Harness service while keeping data on your machine;
@@ -114,7 +114,7 @@ PicoAide Harness does not fork upstream source or hard-code a fixed shell. The o
 
 ## Relationship with the official project
 
-This project is built on [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness).
+This project is built on deepseek-ai/deepseek-harness.
 
 The official project provides the core agent abilities, plugin system, and Web UI. This project is responsible for:
 
@@ -128,9 +128,9 @@ If you want to run Harness from the command line or work on core features, prefe
 
 ## Special thanks
 
-Special thanks to the [DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) and the DeepSeek AI team. This project is built on a pinned upstream version, and the core agents, models, tools, sessions, Web UI, and plugin ecosystem all come from that project.
+Special thanks to the DeepSeek Harness repository and the DeepSeek AI team. This project is built on a pinned upstream version, and the core agents, models, tools, sessions, Web UI, and plugin ecosystem all come from that project.
 
-Thanks also to [Cordis](https://github.com/cordiverse/cordis) for the plugin foundation, and to the [Koishi.js](https://koishi.chat/) project and community for years of plugin practices, tooling, and experience.
+Thanks also to Cordis for the plugin foundation, and to the Koishi.js project and community for years of plugin practices, tooling, and experience.
 
 And to everyone who uses, supports, and helps build this.
 
