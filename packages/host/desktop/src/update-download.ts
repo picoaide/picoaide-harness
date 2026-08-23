@@ -1,30 +1,43 @@
-/** Headless, confirmation-gated downloads for DSH Desktop installers. */
+/** Headless, confirmation-gated downloads for DSH Desktop GitHub release installers. */
 
-import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { parseSemVer } from './update-checker.ts'
 
-/** Desktop platforms with a fixed installer download endpoint. */
+/** Desktop platforms with a fixed GitHub release asset convention. */
 export type DesktopDownloadPlatform = 'darwin' | 'win32'
 
-/** Fixed download endpoints that record one user-confirmed installer download. */
-export const DESKTOP_DOWNLOAD_URLS: Readonly<Record<DesktopDownloadPlatform, string>> = {
-  darwin: 'https://www.dshdesktop.cn/api/downloads/mac',
-  win32: 'https://www.dshdesktop.cn/api/downloads/windows',
-}
+/** GitHub repository owning public client releases. */
+export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
+
+/** Public endpoint returning the latest stable DSH Desktop release metadata. */
+export const DESKTOP_RELEASE_API_URL =
+  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
+
+/** Release asset carrying SHA-256 digests for every installer artifact. */
+export const RELEASE_CHECKSUM_ASSET_NAME = 'SHA256SUMS.txt'
 
 /** Maximum accepted installer size, in bytes. */
 export const MAX_UPDATE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 
+/** Maximum accepted release metadata response bytes. */
+export const MAX_RELEASE_METADATA_BYTES = 256 * 1024
+
+/** Maximum accepted checksum manifest bytes. */
+export const MAX_CHECKSUM_MANIFEST_BYTES = 64 * 1024
+
 /** Failure categories exposed to the update coordinator. */
 export type UpdateDownloadErrorCode =
   | 'aborted'
+  | 'checksum-mismatch'
+  | 'checksum-missing'
   | 'empty-body'
   | 'http-status'
   | 'invalid-artifact'
   | 'invalid-options'
   | 'network'
+  | 'release-missing'
   | 'response-too-large'
 
 /** Fetch-compatible request boundary supplied by the Electron adapter or a test. */
@@ -32,9 +45,9 @@ export type UpdateArtifactRequest = (url: string, init: RequestInit) => Promise<
 
 /** Inputs for one user-confirmed installer download. */
 export interface DownloadDesktopUpdateOptions {
-  /** Host platform selecting the fixed endpoint and installer validation. */
+  /** Host platform selecting the fixed asset convention. */
   readonly platform: DesktopDownloadPlatform
-  /** Stable release version used as one private directory segment. */
+  /** Stable release version matched against the release tag and asset name. */
   readonly version: string
   /** Absolute Electron user-data directory that owns update artifacts. */
   readonly userDataPath: string
@@ -72,11 +85,17 @@ export class UpdateDownloadError extends Error {
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
 const DECIMAL_BYTES = /^(0|[1-9][0-9]*)$/u
+const SHA256_PATTERN = /^[0-9a-f]{64}[ \t]+[^\r\n]+$/u
 const DMG_TRAILER_BYTES = 512
 const DMG_TRAILER_MAGIC = Buffer.from('koly', 'ascii')
 const DOS_HEADER_BYTES = 64
 const PE_OFFSET_POSITION = 0x3c
 const PE_MAGIC = Buffer.from([0x50, 0x45, 0x00, 0x00])
+
+interface ReleaseAsset {
+  readonly name: string
+  readonly browser_download_url: string
+}
 
 interface DownloadPaths {
   readonly directory: string
@@ -84,11 +103,25 @@ interface DownloadPaths {
   readonly temporary: string
 }
 
+interface DownloadManifest {
+  readonly assetName: string
+  readonly downloadUrl: string
+  readonly checksum: string
+  readonly extension: string
+  readonly completedFilename: string
+}
+
 /**
  * Download one installer after its caller has obtained user confirmation.
+ *
+ * The release metadata endpoint is queried first to locate the platform
+ * installer asset and its SHA-256 digest from the companion checksum asset.
+ * The artifact is then streamed, verified against the digest, validated for
+ * the platform, and atomically renamed into place.
  * @param options - Fixed platform, release version, private storage, request, and cancellation inputs.
  * @returns Absolute path to the completely written and validated installer.
- * @throws {UpdateDownloadError} For invalid inputs, transport failures, rejected responses, cancellation, and invalid installers.
+ * @throws {UpdateDownloadError} For invalid inputs, transport failures, rejected responses,
+ *   missing releases, missing digests, digest mismatches, cancellation, and invalid installers.
  */
 export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOptions): Promise<string> {
   const platform = validatedPlatform(options.platform)
@@ -97,9 +130,12 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   const paths = await prepareDownloadPaths(userDataPath, platform, version)
   throwIfAborted(options.signal)
 
+  const manifest = await resolveDownloadManifest(platform, version, options.request, options.signal)
+  throwIfAborted(options.signal)
+
   let response: Response
   try {
-    response = await options.request(DESKTOP_DOWNLOAD_URLS[platform], {
+    response = await options.request(manifest.downloadUrl, {
       method: 'GET',
       cache: 'no-store',
       redirect: 'follow',
@@ -124,7 +160,7 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
 
   let failure: unknown
   try {
-    await writeResponseBody(paths.temporary, response.body, options.signal)
+    await writeResponseBody(paths.temporary, response.body, options.signal, manifest.checksum)
     throwIfAborted(options.signal)
     await validateArtifact(paths.temporary, platform)
     throwIfAborted(options.signal)
@@ -198,7 +234,7 @@ async function prepareDownloadPaths(
   return {
     directory,
     completed,
-    temporary: join(directory, `.${filename}.${process.pid}.${randomUUID()}.partial`),
+    temporary: join(directory, `.${filename}.${process.pid}.${randomId()}.partial`),
   }
 }
 
@@ -220,6 +256,185 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
   }
 }
 
+/**
+ * Fetch release metadata, locate the platform asset, and resolve its digest.
+ * @param platform - selected installer family.
+ * @param version - release version the asset name must embed.
+ * @param request - network boundary.
+ * @param signal - caller-owned cancellation.
+ * @returns resolved download manifest for the matched artifact.
+ */
+async function resolveDownloadManifest(
+  platform: DesktopDownloadPlatform,
+  version: string,
+  request: UpdateArtifactRequest,
+  signal: AbortSignal | undefined,
+): Promise<DownloadManifest> {
+  const metadata = await fetchJson<ReleaseMetadata>(request, DESKTOP_RELEASE_API_URL, signal)
+  if (metadata === null) {
+    throw new UpdateDownloadError('network', 'The latest release metadata could not be fetched.')
+  }
+  if (!isRecord(metadata) || !Array.isArray(metadata.assets)) {
+    throw new UpdateDownloadError('release-missing', 'The latest release has no asset manifest.')
+  }
+  const normalizedVersion = version.replace(/^v/u, '')
+  const expectedName = platform === 'darwin'
+    ? `PicoAide-Harness-${normalizedVersion}-mac.dmg`
+    : `PicoAide-Harness-${normalizedVersion}-x64-Setup.exe`
+  const asset = metadata.assets.find(
+    (entry: unknown): entry is ReleaseAsset =>
+      isRecord(entry)
+      && typeof entry.name === 'string'
+      && typeof entry.browser_download_url === 'string'
+      && entry.name === expectedName,
+  )
+  if (asset === undefined) {
+    throw new UpdateDownloadError(
+      'release-missing',
+      `The latest release has no ${expectedName} asset.`,
+    )
+  }
+
+  const checksum = await resolveChecksum(request, expectedName, signal)
+  const extension = platform === 'darwin' ? 'dmg' : 'exe'
+  return {
+    assetName: expectedName,
+    downloadUrl: asset.browser_download_url,
+    checksum,
+    extension,
+    completedFilename: `PicoAide-Harness-${normalizedVersion}-${platform === 'darwin' ? 'mac' : 'windows'}.${extension}`,
+  }
+}
+
+/**
+ * Fetch the companion checksum manifest and extract the digest for one asset.
+ * @param request - network boundary.
+ * @param assetName - expected asset name inside the manifest.
+ * @param signal - caller-owned cancellation.
+ * @returns lowercase hexadecimal SHA-256 digest.
+ * @throws {UpdateDownloadError} When the manifest or entry is missing or malformed.
+ */
+async function resolveChecksum(
+  request: UpdateArtifactRequest,
+  assetName: string,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const metadata = await fetchJson<ReleaseMetadata>(request, DESKTOP_RELEASE_API_URL, signal)
+  const assets = isRecord(metadata) && Array.isArray(metadata.assets) ? metadata.assets : []
+  const checksumAsset = assets.find(
+    (entry: unknown): entry is ReleaseAsset =>
+      isRecord(entry)
+      && typeof entry.name === 'string'
+      && typeof entry.browser_download_url === 'string'
+      && entry.name === RELEASE_CHECKSUM_ASSET_NAME,
+  )
+  if (checksumAsset === undefined) {
+    throw new UpdateDownloadError('checksum-missing', 'The latest release has no checksum manifest.')
+  }
+
+  let response: Response
+  try {
+    response = await request(checksumAsset.browser_download_url, {
+      method: 'GET',
+      cache: 'no-store',
+      redirect: 'follow',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  } catch (cause) {
+    if (signal?.aborted === true || isAbortFailure(cause)) throw aborted(cause)
+    throw new UpdateDownloadError('network', 'The checksum manifest could not be downloaded.', { cause })
+  }
+  if (response.status !== 200) {
+    throw new UpdateDownloadError(
+      'http-status',
+      `The checksum service returned HTTP ${String(response.status)}.`,
+      { status: response.status },
+    )
+  }
+
+  let text: string
+  try {
+    text = await readLimitedBody(response, MAX_CHECKSUM_MANIFEST_BYTES)
+  } catch (cause) {
+    if (cause instanceof UpdateDownloadError) throw cause
+    throw new UpdateDownloadError('response-too-large', 'The checksum manifest is too large.', { cause })
+  }
+
+  for (const line of text.split(/\r?\n/u)) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    const match = SHA256_PATTERN.exec(trimmed)
+    if (match === null) continue
+    const digest = trimmed.slice(0, 64).toLowerCase()
+    const entryName = trimmed.slice(64).trim()
+    if (entryName === assetName) return digest
+  }
+  throw new UpdateDownloadError('checksum-missing', `The checksum manifest has no digest for ${assetName}.`)
+}
+
+/** Fetch one bounded JSON release document from the fixed API endpoint. */
+async function fetchJson<T>(
+  request: UpdateArtifactRequest,
+  url: string,
+  signal: AbortSignal | undefined,
+): Promise<T | null> {
+  let response: Response
+  try {
+    response = await request(url, {
+      method: 'GET',
+      headers: { Accept: 'application/vnd.github+json' },
+      cache: 'no-store',
+      redirect: 'error',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  } catch (cause) {
+    if (signal?.aborted === true || isAbortFailure(cause)) throw aborted(cause)
+    return null
+  }
+  if (response.status !== 200) return null
+  let text: string
+  try {
+    text = await readLimitedBody(response, MAX_RELEASE_METADATA_BYTES)
+  } catch {
+    return null
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return null
+  }
+}
+
+async function readLimitedBody(response: Response, limit: number): Promise<string> {
+  const declaredLength = response.headers.get('content-length')
+  if (declaredLength !== null
+    && /^[0-9]+$/u.test(declaredLength)
+    && BigInt(declaredLength) > BigInt(limit)) {
+    throw new UpdateDownloadError('response-too-large', 'The response body is too large.')
+  }
+
+  if (response.body === null) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let bytesRead = 0
+  let body = ''
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      bytesRead += chunk.value.byteLength
+      if (bytesRead > limit) {
+        await reader.cancel().catch(() => undefined)
+        throw new UpdateDownloadError('response-too-large', 'The response body is too large.')
+      }
+      body += decoder.decode(chunk.value, { stream: true })
+    }
+    return body + decoder.decode()
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 function assertDeclaredSize(response: Response): void {
   const declared = response.headers.get('content-length')
   if (declared === null || !DECIMAL_BYTES.test(declared)) return
@@ -235,9 +450,11 @@ async function writeResponseBody(
   filename: string,
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
+  expectedDigest: string,
 ): Promise<void> {
   const handle = await open(filename, 'wx', PRIVATE_FILE_MODE)
   const reader = body.getReader()
+  const digestStream = createHash('sha256')
   let bytesWritten = 0
   try {
     while (true) {
@@ -252,6 +469,7 @@ async function writeResponseBody(
         )
       }
       await writeAll(handle, chunk.value)
+      digestStream.update(chunk.value)
       bytesWritten += chunk.value.byteLength
     }
     if (bytesWritten === 0) {
@@ -264,6 +482,14 @@ async function writeResponseBody(
   } finally {
     reader.releaseLock()
     await handle.close()
+  }
+
+  const actualDigest = digestStream.digest('hex')
+  if (actualDigest !== expectedDigest.toLowerCase()) {
+    throw new UpdateDownloadError(
+      'checksum-mismatch',
+      'The downloaded installer does not match the published SHA-256 digest.',
+    )
   }
 }
 
@@ -347,4 +573,16 @@ async function unlinkIfPresent(filename: string): Promise<void> {
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+interface ReleaseMetadata {
+  readonly assets?: readonly unknown[]
+}
+
+function randomId(): string {
+  return Math.random().toString(36).slice(2, 10)
 }
