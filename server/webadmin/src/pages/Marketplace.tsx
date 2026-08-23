@@ -247,7 +247,7 @@ export default function Marketplace() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold">商城管理</h1>
+      <h1 className="page-title">商城管理</h1>
       {opError && <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{opError}</div>}
 
       <Card>
