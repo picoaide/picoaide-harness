@@ -150,9 +150,7 @@ headless 检查使用 `corepack yarn check`；完整的构建、测试和发布�
 
 ## 社区交流
 
-Discord：[加入 PicoAide Harness 社区](https://discord.gg/TJeGqKRNM)
-
-如果您希望加入我们的技术团队，也欢迎通过 [t4wefan@qq.com](mailto:t4wefan@qq.com) 联系我们。
+遇到问题或需要支持，请前往 [提交 Issue](https://github.com/picoaide/picoaide-harness/issues)。
 
 ## License
 
