@@ -9,6 +9,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
+import { PageHeader } from '../components/page-header'
+import { EmptyState } from '../components/empty-state'
+import { Store } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
@@ -247,7 +250,10 @@ export default function Marketplace() {
 
   return (
     <div className="space-y-6">
-      <h1 className="page-title">商城管理</h1>
+      <PageHeader
+        title="商城管理"
+        desc="技能资源上架与授权分发:未授权用户不可见不可安装"
+      />
       {opError && <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{opError}</div>}
 
       <Card>
@@ -300,7 +306,15 @@ export default function Marketplace() {
                   </TableRow>
                 ))}
                 {skills.length === 0 && (
-                  <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无技能,点击「上架技能」添加</TableCell></TableRow>
+                  <TableRow>
+                    <TableCell colSpan={6} className="border-0 p-0">
+                      <EmptyState
+                        icon={<Store className="h-5 w-5 text-muted-foreground" />}
+                        title="暂无技能"
+                        desc="点击「上架技能」从 Git 源接入第一个技能"
+                      />
+                    </TableCell>
+                  </TableRow>
                 )}
               </TableBody>
             </Table>
