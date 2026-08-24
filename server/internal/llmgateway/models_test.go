@@ -15,7 +15,7 @@ import (
 
 func modelsRouter(t *testing.T) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/models.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/models.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestMaxOutputFromModelDefaultParams(t *testing.T) {
 }
 
 func TestModelsEmptyReturnsArray(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/empty.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/empty.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

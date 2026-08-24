@@ -14,25 +14,33 @@
 
 ## 快速开始
 
-### 0. 服务端一键安装(Ubuntu,推荐)
+### 0. 服务端一键安装(oh-my-zsh 式,单命令)
 
-一条命令自动完成:检查并安装依赖(docker/compose/curl/jq,缺失自动装)、生成自签名证书、配置 Caddy HTTPS、生成 docker-compose.yml、启动服务。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | sudo bash
-```
-
-运行时会交互询问**域名**;也可非交互指定:
+一条命令自动完成:检查并安装依赖(docker/compose/curl/jq/openssl/dns 工具,缺失按发行版自动装)、生成自签名证书、配置 Caddy HTTPS、生成 docker-compose.yml、启动服务。
 
 ```bash
-# 指定域名 + 自定义管理员密码
-curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 ```
 
-脚本会展示:管理后台/员工登录地址、管理员账号与**随机生成的密码**(记住它)、数据目录、证书类型与**替换证书的路径/方法**。
+运行时会**交互询问域名**(也可回车跳过,生产前必须设置);也可非交互指定(需 root/sudo):
+
+```bash
+# 指定域名 + 自定义管理员密码(SQLite 默认后端)
+curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
+  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
+
+# 使用 PostgreSQL 内置容器(替代 SQLite)
+curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
+  sudo DOMAIN=picoaide.example.com DB_MODE=pg bash
+```
+
+脚本会展示:管理后台/员工登录地址、管理员账号与**随机生成的密码**(记住它)、数据目录、数据库后端、证书类型与**替换证书的路径/方法**。
 
 - 证书为**自签名**(Caddy 生成);替换正式证书:编辑 `<部署目录>/Caddyfile`,删除 `tls internal` 行(自动申请 Let's Encrypt)或改用 `tls /path/your-cert.pem /path/your-key.pem`,然后 `docker compose restart caddy`。
-- 部署目录默认 `/data/picoaide-next`(可用 `INSTALL_DIR` 覆盖)。
+- 部署目录默认 `/data/picoaide/deploy`(可用 `INSTALL_DIR` 覆盖;兼容旧版 `DEPLOY_DIR`)。
+- 数据库后端 `DB_MODE`: `sqlite`(默认,单机零运维) | `pg`(内置 postgres:16-alpine 容器) | `pg-external`(已有 PostgreSQL 实例,需 `PG_DSN`)。
+- 依赖自动安装可用 `SKIP_DEPS=1` 跳过;Docker 安装可用 `DOCKER_MIRROR` 指定镜像源(如清华源)。
+- 已有部署时提示改用 `./deploy.sh update`(升级)或 `REINSTALL=yes`(清除重装)。
 - 目录已存在且有文件时,脚本会提示是否重新安装(停止容器、检查 80/443 端口、清空目录)。
 
 ### 1. 服务端(Go 1.24+)
@@ -77,6 +85,7 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/models
 | [docs/05-agent-system.md](docs/05-agent-system.md) | Agent 引擎/工具注册表/审批门控/沙盒 |
 | [docs/06-database.md](docs/06-database.md) | 服务端 17 表 + 客户端 4 表 |
 | [docs/07-marketplace.md](docs/07-marketplace.md) | 技能商城/授权/插件运行时 |
+| [docs/08-agent-share.md](docs/08-agent-share.md) | 共享 Agent(创造模式上传/审核/全员共享) |
 | [docs/08-development.md](docs/08-development.md) | 开发指南/TDD/契约 |
 
 ## 截图

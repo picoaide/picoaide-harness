@@ -8,7 +8,7 @@ import (
 )
 
 func TestOpen(t *testing.T) {
-	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := Open(DBConfig{Path: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

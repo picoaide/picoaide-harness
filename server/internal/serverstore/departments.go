@@ -3,8 +3,19 @@ package serverstore
 import (
 	"database/sql"
 	"errors"
-	"strings"
 )
+
+// ciColumnCmp returns a case-insensitive equality comparison between two
+// columns (not a bound parameter). Unlike CaseInsensitiveCmp, both sides are
+// column references (e.g. sg.grantee = g.name inside a correlated subquery),
+// so there is no `?` placeholder. SQLite uses COLLATE NOCASE; PG folds both
+// sides with LOWER.
+func ciColumnCmp(colA, colB string) string {
+	if currentDriver == DriverPG {
+		return "LOWER(" + colA + ") = LOWER(" + colB + ")"
+	}
+	return colA + " = " + colB + " COLLATE NOCASE"
+}
 
 // Group is an organization unit: a department with optional parent
 // (pyramid) and leader (department head).
@@ -40,7 +51,7 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 		COALESCE(u.username, ''),
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE),
+		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND ` + ciColumnCmp("sg.grantee", "g.name") + `),
 		g.budget_money
 		FROM groups g LEFT JOIN users u ON u.id = g.leader_id
 		ORDER BY g.id`)
@@ -110,15 +121,15 @@ func CreateDepartment(db *sql.DB, name string, parentID, leaderID int64, descrip
 			return 0, err
 		}
 	}
-	res, err := db.Exec(`INSERT INTO groups (name, parent_id, leader_id, description) VALUES (?, ?, ?, ?)`,
+	id, err := InsertID(db, `INSERT INTO groups (name, parent_id, leader_id, description) VALUES (?, ?, ?, ?)`,
 		name, parentID, leaderID, description)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
 		}
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // UpdateDepartment renames/reparents/re-leads a department.
@@ -181,14 +192,14 @@ func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 	}
 	if name != "" && name != g.Name {
 		// COLLATE NOCASE 与授权解析一致:授权存储大小写异于组名的(手输/LDAP)改名后不失效
-		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ? COLLATE NOCASE", name, g.Name); err != nil {
+		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND "+CaseInsensitiveCmp("grantee"), name, g.Name); err != nil {
 			return err
 		}
 	}
 	_, err = tx.Exec(`UPDATE groups SET name = ?, parent_id = ?, leader_id = ?, description = ? WHERE id = ?`,
 		name, parentID, leaderID, description, id)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueViolation(err) {
 			return ErrDuplicate
 		}
 		return err
@@ -227,7 +238,7 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	if err := tx.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
+		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND `+ciColumnCmp("sg.grantee", "g.name")+`)
 		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound

@@ -15,7 +15,7 @@ type queryer interface {
 // GroupByName returns a group id by name (COLLATE NOCASE) or ErrNotFound.
 func GroupByName(db queryer, name string) (int64, error) {
 	var id int64
-	err := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id)
+	err := db.QueryRow("SELECT id FROM groups WHERE "+CaseInsensitiveCmp("name"), name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -32,22 +32,33 @@ func GetOrCreateGroup(db queryer, name string) (int64, error) {
 		return 0, ErrValidation
 	}
 	var id int64
-	err := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id)
+	err := db.QueryRow("SELECT id FROM groups WHERE "+CaseInsensitiveCmp("name"), name).Scan(&id)
 	if err == nil {
 		return id, nil
 	}
 	if err != sql.ErrNoRows {
 		return 0, err
 	}
-	res, err := db.Exec("INSERT INTO groups (name) VALUES (?)", name)
-	if err != nil {
+	// insert-or-return-id (backend-specific: PG has no LastInsertId, so use
+	// RETURNING id via QueryRow; SQLite uses Exec + LastInsertId).
+	var insErr error
+	if currentDriver == DriverPG {
+		insErr = db.QueryRow("INSERT INTO groups (name) VALUES (?) RETURNING id", name).Scan(&id)
+	} else {
+		var res sql.Result
+		res, insErr = db.Exec("INSERT INTO groups (name) VALUES (?)", name)
+		if insErr == nil {
+			id, insErr = res.LastInsertId()
+		}
+	}
+	if insErr != nil {
 		// concurrent insert or a historical casing variant; re-read nocase
-		if err2 := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id); err2 == nil {
+		if err2 := db.QueryRow("SELECT id FROM groups WHERE "+CaseInsensitiveCmp("name"), name).Scan(&id); err2 == nil {
 			return id, nil
 		}
-		return 0, err
+		return 0, insErr
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // UserGroups returns the group names for a user.
@@ -116,7 +127,11 @@ func SyncUserGroups(db *sql.DB, userID int64, names []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec("INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)", userID, gid); err != nil {
+		stmt := "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)"
+		if currentDriver == DriverPG {
+			stmt = "INSERT INTO user_groups (user_id, group_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+		}
+		if _, err := tx.Exec(stmt, userID, gid); err != nil {
 			return err
 		}
 	}
@@ -129,6 +144,10 @@ func AddUserGroup(db *sql.DB, userID, groupID int64) error {
 	if _, err := GroupByID(db, groupID); err != nil {
 		return err
 	}
-	_, err := db.Exec("INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)", userID, groupID)
+	stmt := "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)"
+	if currentDriver == DriverPG {
+		stmt = "INSERT INTO user_groups (user_id, group_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+	}
+	_, err := db.Exec(stmt, userID, groupID)
 	return err
 }

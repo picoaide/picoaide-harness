@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -31,6 +32,8 @@ var version = "dev"
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dataDir := flag.String("data", "./data", "data directory")
+	dbDriver := flag.String("db-driver", "sqlite", "database backend: sqlite (default) or pg")
+	pgDSN := flag.String("pg-dsn", "", "PostgreSQL connection string (required when -db-driver=pg, e.g. postgres://user:pass@host:5432/db)")
 	bootstrapAdmin := flag.String("bootstrap-admin", "", "username of the initial admin (password from PICOAI_ADMIN_PASSWORD)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -40,10 +43,24 @@ func main() {
 		return
 	}
 
-	if err := os.MkdirAll(*dataDir, 0700); err != nil {
-		log.Fatalf("create data dir: %v", err)
+	if *dbDriver != "sqlite" && *dbDriver != "pg" {
+		log.Fatalf("unsupported -db-driver %q (want sqlite or pg)", *dbDriver)
 	}
-	db, err := serverstore.EnsureMigrated(*dataDir + "/picoaide.db")
+	if *dbDriver == "pg" && *pgDSN == "" {
+		log.Fatal("-pg-dsn is required when -db-driver=pg")
+	}
+
+	if *dbDriver == "sqlite" {
+		if err := os.MkdirAll(*dataDir, 0700); err != nil {
+			log.Fatalf("create data dir: %v", err)
+		}
+	}
+	cfg := serverstore.DBConfig{
+		Driver: serverstore.DriverName(*dbDriver),
+		Path:   *dataDir + "/picoaide.db",
+		DSN:    *pgDSN,
+	}
+	db, err := serverstore.EnsureMigrated(cfg)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
@@ -91,6 +108,8 @@ func main() {
 	llmgateway.RegisterAdminRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	marketplace.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
+	agentshare.RegisterRoutes(r, db, *dataDir+"/agent-presets-cache")
+	agentshare.RegisterAdminRoutes(r, db, *dataDir+"/agent-presets-cache")
 	bootstrap.RegisterRoutes(r, db)
 	// 审计日志保留策略(90 天):启动时清理过期条目
 	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-90*24*time.Hour)); err != nil {

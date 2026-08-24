@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations/*.sql migrations-pg/*.sql
 var migrationFS embed.FS
 
 type migration struct {
@@ -18,17 +18,26 @@ type migration struct {
 	sql     string
 }
 
-// migrations is populated in init() from embedded SQL files sorted by name.
-var migrations []migration
+// testMigrationHook, when non-nil (tests only), overrides the migration set
+// so failure paths can be exercised without a real broken embed.
+var testMigrationHook func() []migration
 
-// latestMigration is the highest applied version.
-var latestMigration int64
-
-func init() {
-	entries, err := migrationFS.ReadDir("migrations")
+// migrationsFor returns the embedded migration set for the current driver.
+// SQLite uses migrations/, PostgreSQL uses migrations-pg/ (same version
+// numbers, backend-appropriate DDL). Sorted by version ascending.
+func migrationsFor() []migration {
+	if testMigrationHook != nil {
+		return testMigrationHook()
+	}
+	dir := "migrations"
+	if currentDriver == DriverPG {
+		dir = "migrations-pg"
+	}
+	entries, err := migrationFS.ReadDir(dir)
 	if err != nil {
 		panic(err)
 	}
+	var out []migration
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
@@ -39,15 +48,32 @@ func init() {
 		if err != nil {
 			continue
 		}
-		content, err := migrationFS.ReadFile("migrations/" + e.Name())
+		content, err := migrationFS.ReadFile(dir + "/" + e.Name())
 		if err != nil {
 			panic(err)
 		}
-		migrations = append(migrations, migration{version: v, name: e.Name(), sql: string(content)})
+		out = append(out, migration{version: v, name: e.Name(), sql: string(content)})
 	}
-	sort.Slice(migrations, func(i, j int) bool { return migrations[i].version < migrations[j].version })
-	if len(migrations) > 0 {
-		latestMigration = int64(migrations[len(migrations)-1].version)
+	sort.Slice(out, func(i, j int) bool { return out[i].version < out[j].version })
+	return out
+}
+
+// latestMigration returns the highest migration version for the current driver.
+func latestMigration() int64 {
+	ms := migrationsFor()
+	if len(ms) == 0 {
+		return 0
+	}
+	return int64(ms[len(ms)-1].version)
+}
+
+// init embedded FS is validated at package init: both migration dirs must
+// exist and parse.
+func init() {
+	for _, dir := range []string{"migrations", "migrations-pg"} {
+		if _, err := migrationFS.ReadDir(dir); err != nil {
+			panic(fmt.Sprintf("migrations dir %s: %v", dir, err))
+		}
 	}
 }
 
@@ -56,7 +82,7 @@ func init() {
 func ApplyMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
-		applied_at DATETIME DEFAULT (datetime('now','localtime'))
+		applied_at ` + TimestampType() + ` DEFAULT (` + NowExpr() + `)
 	)`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
@@ -75,7 +101,7 @@ func ApplyMigrations(db *sql.DB) error {
 	}
 	rows.Close()
 
-	for _, m := range migrations {
+	for _, m := range migrationsFor() {
 		if applied[int64(m.version)] {
 			continue
 		}
@@ -98,9 +124,9 @@ func ApplyMigrations(db *sql.DB) error {
 	return nil
 }
 
-// EnsureMigrated opens the DB at path and applies migrations.
-func EnsureMigrated(path string) (*sql.DB, error) {
-	db, err := Open(path)
+// EnsureMigrated opens the DB with the given config and applies migrations.
+func EnsureMigrated(cfg DBConfig) (*sql.DB, error) {
+	db, err := Open(cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,21 @@
+# ============================================================
+# PicoAide 服务端 PostgreSQL 后端(外部实例模式)override
+# ============================================================
+# 用途:DB_MODE=pg-external(已有 PG 实例,如企业统一数据库)时由 deploy.sh
+#   通过 COMPOSE_FILE 叠加本文件:
+#   docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml up -d
+# 效果:
+#   - 不新增任何容器(直接使用 .env 的 PG_DSN 连接外部 PostgreSQL)
+#   - server 以 -db-driver pg -pg-dsn <PG_DSN> 启动
+# 环境变量(见 .env):
+#   DB_MODE=pg-external  PG_DSN(必填,如
+#     postgres://picoaide:secret@pg.example.com:5432/picoaide?sslmode=disable)
+# 注意:
+#   - 外部库需服务端可网络可达,且该账号有建表权限(首次启动自动迁移 schema)
+#   - 数据备份由外部 PG 的运维策略负责(本部署不接管 pg-data)
+# ============================================================
+
+services:
+  server:
+    # compose 对 command 是整组替换,必须写全(含主 compose 的 bootstrap-admin)
+    command: ["--bootstrap-admin", "${ADMIN_USER:-admin}", "-db-driver", "pg", "-pg-dsn", "${PG_DSN:?PG_DSN must be set in .env}"]

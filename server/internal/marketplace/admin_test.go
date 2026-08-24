@@ -22,7 +22,7 @@ func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	// 单例在整个测试二进制生命周期内保持该配置)。
 	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "1000")
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/mkt.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/mkt.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
