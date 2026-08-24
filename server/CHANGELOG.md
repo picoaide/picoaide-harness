@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### 部署
+- `install-server.sh` 升级为 oh-my-zsh 式一键安装器:自动提权、按发行版(apt/dnf/yum/apk/zypper)自动安装缺失依赖(docker/compose/curl/jq/openssl/dns 工具,支持 `DOCKER_MIRROR` 镜像源)、tty 交互或环境变量配置、复用 `deploy.sh install` 完成部署
+- 部署支持 PostgreSQL 后端(`DB_MODE=sqlite|pg|pg-external`):新增 `docker-compose.pg.yml`(内置 postgres 容器,固定 IP .4 + `./pg-data`)与 `docker-compose.pg-ext.yml`(外部实例),`deploy.sh` 全部子命令按 `.env` 的 `DB_MODE` 自动叠加 override
+- 新增 `deploy.sh migrate [--dry-run]`:SQLite→PostgreSQL 数据迁移(复用 `cmd/migrate-sqlite-pg`,守护流程:预览→停服→清空目标表→迁移→切换 .env→重启);备份(backup)在 pg 模式产出 `pg_dump`,卸载 --volumes 含 `pg-data/`
+- Docker 镜像同时打包 `migrate-sqlite-pg`;`migrate-sqlite-pg` 目标库为空时自动应用 `migrations-pg` schema(EnsureMigrated,幂等)
+
 ### 修复
 - 客户端渲染层启用 `@tailwindcss/vite` 插件:此前 CSS 未编译、界面无样式
 - 所有服务端 HTTP 统一走 `session.defaultSession.fetch`(TOFU 生效):LLM 网关请求与 MCP HTTP 传输此前绕过证书校验
