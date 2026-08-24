@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
@@ -151,26 +151,23 @@ describe('installPresetArchive', () => {
 
   it('refuses a traversal entry', async () => {
     const dir = await newPresetsDir()
+    // Pack a file from OUTSIDE the cwd: tar.c records the entry path as the
+    // archive's relative path — a `../escape` entry is what the installer's
+    // pass-1 scan must refuse.
+    const outside = await mkdtemp(join(tmpdir(), 'pico-preset-outside-'))
+    await writeFile(join(outside, 'escape.txt'), 'x')
+    const archive: Buffer = await new Promise((resolveP, rejectP) => {
+      const chunks: Buffer[] = []
+      const stream = tar.c({ gzip: true, portable: true }, [join(outside, 'escape.txt')])
+      stream.on('data', (c: Buffer) => chunks.push(c))
+      stream.on('error', rejectP)
+      stream.on('end', () => resolveP(Buffer.concat(chunks)))
+    })
     try {
-      const archive = await makeArchive({ 'agent.cordis.yml': COMPOSITION })
-      // Patch the tar: add a `../evil` entry via a custom stream is complex;
-      // instead validate the entry scan rejects it via a hand-built archive dir.
-      const src = await mkdtemp(join(tmpdir(), 'pico-preset-src-'))
-      const evilDir = await mkdtemp(join(tmpdir(), 'pico-preset-evil-'))
-      try {
-        await writeFile(join(src, 'agent.cordis.yml'), COMPOSITION)
-        // Pack with an outside path using a file path trick: create a symlink refused instead.
-        await symlink('/etc/passwd', join(src, 'bad-link'))
-        await expect(packPreset(src, 'x')).rejects.toThrow() // symlink in source pack fails
-      } finally {
-        await rm(src, { recursive: true, force: true })
-        await rm(evilDir, { recursive: true, force: true })
-      }
-      // The install scan path itself: hand-built archive with traversal name.
-      const evilArchive = await makeArchive({ 'agent.cordis.yml': COMPOSITION })
-      void evilArchive
-      await expect(installPresetArchive({ name: 'traversal', archive, presetsDir: dir })).resolves.toBeDefined()
+      await expect(installPresetArchive({ name: 'traversal', archive, presetsDir: dir }))
+        .rejects.toThrow()
     } finally {
+      await rm(outside, { recursive: true, force: true })
       await rm(dir, { recursive: true, force: true })
     }
   })
