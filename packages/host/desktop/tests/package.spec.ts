@@ -230,6 +230,7 @@ describe('published package surface', () => {
       '**/*.dylib',
       '**/bin/rg',
       '**/bin/rg.exe',
+      '**/node_modules/@deepseek-ai/node-addon-landlock-run-*/bin/landlock-run',
       '**/prebuilds/**/spawn-helper',
       '**/prebuilds/**/OpenConsole.exe',
       '**/prebuilds/**/*.conpty_console_list*',
