@@ -12,6 +12,14 @@ import {
   validateSkillName,
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import {
+  installPresetArchive,
+  listInstalledPresets,
+  packPreset,
+  resolvePresetsDir,
+  uninstallPreset,
+  validatePresetId,
+} from './agent-preset-install.ts'
 
 const LOGIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -392,6 +400,162 @@ export function apply(ctx: Context, config: Config): void {
             const disposition = upstream.headers.get('content-disposition')
             headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.tar.gz"`
             for (const key of ['x-skill-checksum', 'x-skill-version']) {
+              const value = upstream.headers.get(key)
+              if (value !== null) headers[key] = value
+            }
+            res.writeHead(200, headers)
+            res.end(content)
+          } catch (cause) {
+            if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+              ctx.picoSession.clear()
+              return json(res, 401, { error: 'auth expired' })
+            }
+            gatewayError(res, cause)
+          }
+        },
+      }),
+
+      // Shared-agent proxy: /api/pico/agent-presets (list + upload + install
+      // + uninstall + archive). Uploads pack a locally authored preset (the
+      // 创造模式 roster's user root) and forward the archive to the gateway;
+      // installs download an approved archive, verify it, and unpack it into
+      // the same root so the upstream roster discovers it.
+      ctx.webServer.register({
+        kind: 'prefix', path: '/api/pico/agent-presets',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (!guard(req, res)) return
+          const s = session()
+          if (s === null) return json(res, 401, { error: 'not logged in' })
+          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          const presetsDir = resolvePresetsDir()
+
+          // GET /api/pico/agent-presets -> gateway catalog + installed + local.
+          if (pathname === '/api/pico/agent-presets' && req.method === 'GET') {
+            try {
+              const data = await fetchJSON(s.serverURL, '/api/agent-presets', { token: s.token })
+              const installed = await listInstalledPresets(presetsDir)
+              json(res, 200, { ...data, installed })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              gatewayError(res, cause)
+            }
+            return
+          }
+
+          // POST /api/pico/agent-presets/upload { name } -> pack + gateway.
+          if (pathname === '/api/pico/agent-presets/upload' && req.method === 'POST') {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(chunk as Buffer)
+            let body: { name?: unknown }
+            try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+            const name = typeof body.name === 'string' ? body.name.trim() : ''
+            if (name === '') return json(res, 400, { error: 'missing name' })
+            try {
+              const packed = await packPreset(presetsDir, name)
+              const gateway = await fetchJSON(s.serverURL, '/api/agent-presets', {
+                token: s.token,
+                method: 'POST',
+                body: {
+                  name: packed.name,
+                  ...packed.description === undefined ? {} : { description: packed.description },
+                  archive: packed.archive.toString('base64'),
+                },
+                timeoutMs: 30000,
+              })
+              json(res, 200, { ok: true, preset: gateway.preset })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              const message = cause instanceof Error ? cause.message : String(cause)
+              json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
+            }
+            return
+          }
+
+          // POST /api/pico/agent-presets/:name/install -> download + verify + unpack.
+          const installMatch = req.method === 'POST'
+            ? /^\/api\/pico\/agent-presets\/([^/]+)\/install$/u.exec(pathname)
+            : null
+          if (installMatch !== null) {
+            const name = decodeURIComponent(installMatch[1]!)
+            try {
+              validatePresetId(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              const upstream = await gatewayFetch(
+                `${s.serverURL}/api/agent-presets/${encodeURIComponent(name)}/archive`,
+                { headers: { Authorization: `Bearer ${s.token}` } },
+              )
+              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              const content = Buffer.from(await upstream.arrayBuffer())
+              if (content.length > MAX_ARCHIVE_BYTES) {
+                return json(res, 413, { error: '归档过大' })
+              }
+              const checksum = upstream.headers.get('x-preset-checksum') ?? undefined
+              await installPresetArchive({ name, archive: content, checksum, presetsDir })
+              json(res, 200, { ok: true, name })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              const message = cause instanceof Error ? cause.message : String(cause)
+              const isRefusal = /checksum|archive|agent\.cordis\.yml|invalid preset id|link entry|too large|traversal|empty path|already exists/u.test(message)
+              json(res, isRefusal ? 422 : 502, { error: message })
+            }
+            return
+          }
+
+          // POST /api/pico/agent-presets/:name/uninstall -> local removal.
+          const uninstallMatch = req.method === 'POST'
+            ? /^\/api\/pico\/agent-presets\/([^/]+)\/uninstall$/u.exec(pathname)
+            : null
+          if (uninstallMatch !== null) {
+            const name = decodeURIComponent(uninstallMatch[1]!)
+            try {
+              await uninstallPreset(presetsDir, name)
+              json(res, 200, { ok: true, name })
+            } catch (cause) {
+              const message = cause instanceof Error ? cause.message : String(cause)
+              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+            }
+            return
+          }
+
+          // GET /api/pico/agent-presets/:name/archive -> passthrough download.
+          const archiveMatch = req.method === 'GET'
+            ? /^\/api\/pico\/agent-presets\/([^/]+)\/archive$/u.exec(pathname)
+            : null
+          if (archiveMatch === null) return json(res, 404, { error: 'not found' })
+          const name = decodeURIComponent(archiveMatch[1]!)
+          try {
+            const upstream = await gatewayFetch(
+              `${s.serverURL}/api/agent-presets/${encodeURIComponent(name)}/archive`,
+              { headers: { Authorization: `Bearer ${s.token}` } },
+            )
+            if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+            const declared = upstream.headers.get('content-length')
+            if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
+              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+            }
+            const content = Buffer.from(await upstream.arrayBuffer())
+            if (content.length > MAX_ARCHIVE_BYTES) {
+              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+            }
+            const headers: Record<string, string> = {
+              'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+              'Content-Length': String(content.length),
+            }
+            const disposition = upstream.headers.get('content-disposition')
+            headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.tar.gz"`
+            for (const key of ['x-preset-checksum', 'x-preset-version']) {
               const value = upstream.headers.get(key)
               if (value !== null) headers[key] = value
             }
