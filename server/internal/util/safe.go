@@ -14,3 +14,7 @@ func SafePathSegment(s string) bool {
 	}
 	return true
 }
+
+// PresetIDPattern matches an agent preset id: the lower-case id used as the
+// preset directory name, mirroring the upstream dsh-agent-presets PRESET_ID.
+const PresetIDPattern = `^[a-z0-9][a-z0-9-]*$`
