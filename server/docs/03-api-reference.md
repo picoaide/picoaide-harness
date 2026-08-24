@@ -86,7 +86,27 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 | GET/POST | `/api/admin/skills` | 列表/上架技能(`{name, version, description, author, git_url, git_ref}`) |
 | PUT/DELETE | `/api/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
 
-## 8. Bootstrap
+## 8. 共享 Agent(客户端用,Bearer)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/agent-presets` | 可见清单:approved(全员)+ 自己上传的全部状态;返回 `{presets:[{name, display_name, description, version, author, status, created_at}]}` |
+| POST | `/api/agent-presets` | 上传:body `{name, description?, archive(base64 tar.gz)}` → 201 `{preset:{name, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;同名 pending/approved → 409;rejected 可重提(重置 pending);每用户待审上限 10 → 429 |
+| GET | `/api/agent-presets/:name/archive` | 下载归档(仅 approved;其余与不存在同 404);附 `X-Preset-Checksum` / `X-Preset-Version` |
+
+### 管理端(Admin)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/admin/agent-presets?status=` | 全部清单(可选 status 过滤) |
+| GET | `/api/admin/agent-presets/:name/archive` | 管理员下载归档核查 |
+| POST | `/api/admin/agent-presets/:name/approve` | 通过(全员可见可安装) |
+| POST | `/api/admin/agent-presets/:name/reject` | 拒绝(仅上传者可见可重提) |
+| DELETE | `/api/admin/agent-presets/:name` | 删除记录与归档 |
+
+## 9. Bootstrap
+
+
 
 ### GET `/api/config/bootstrap`(Bearer)
 
@@ -103,14 +123,14 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 
 客户端 `BootstrapConfig` 与之严格对齐;`default_model` 不在启用模型时自动回退到第一个可用模型。
 
-## 9. 其他
+## 10. 其他
 
 | 路径 | 说明 |
 |------|------|
 | `/admin/` | webadmin SPA(未构建返回 "webadmin 未构建") |
 | 其他 | 404 "not found" |
 
-## 10. 客户端 IPC(renderer ↔ main)
+## 11. 客户端 IPC(renderer ↔ main)
 
 | 通道 | 方向 | 说明 |
 |------|------|------|
@@ -122,6 +142,6 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 | `picoaide:version` / `picoaide:rendererReady` | invoke | 版本/就绪握手 |
 | `workspace:setAllowedDirs` 等 | invoke | 设置页:可访问目录(安全边界)+ 建议安装管理 + 刷新 |
 
-## 11. 浏览器插件桥(CDP,JSON-RPC over WebSocket)
+## 12. 浏览器插件桥(CDP,JSON-RPC over WebSocket)
 
 固定 `ws://127.0.0.1:54321`,方法:`browser.tabInfo` / `getContent` / `click` / `type` / `navigate` / `scroll` / `executeScript`。无 method 的消息 = 插件回执,原样透传给请求方;未知方法返回 `-32601`。

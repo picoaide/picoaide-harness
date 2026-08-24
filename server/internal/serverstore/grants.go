@@ -38,7 +38,11 @@ func GrantSkill(db queryer, skillName, grantee string, t GranteeType) error {
 	if !ok {
 		return ErrValidation
 	}
-	_, err := db.Exec("INSERT OR IGNORE INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, ?, ?)", skillName, t, g)
+	stmt := "INSERT OR IGNORE INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, ?, ?)"
+	if currentDriver == DriverPG {
+		stmt = "INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+	}
+	_, err := db.Exec(stmt, skillName, t, g)
 	return err
 }
 
@@ -84,7 +88,7 @@ func AccessibleSkillNames(db *sql.DB, username string, groups []string) ([]strin
 			if i > 0 {
 				sb.WriteString(" OR ")
 			}
-			sb.WriteString("grantee = ? COLLATE NOCASE")
+			sb.WriteString(CaseInsensitiveCmp("grantee"))
 			args = append(args, g)
 		}
 		sb.WriteString("))")
@@ -134,7 +138,7 @@ func replaceGroupGrants(db *sql.DB, deleteSQL string, deleteArgs []any, insert f
 		}
 		seen[g] = true
 		var n int
-		if err := tx.QueryRow("SELECT COUNT(*) FROM groups WHERE name = ? COLLATE NOCASE", g).Scan(&n); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM groups WHERE "+CaseInsensitiveCmp("name"), g).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {

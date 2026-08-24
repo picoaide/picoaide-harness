@@ -23,4 +23,8 @@ deploy-backup/
 caddy-data/
 caddy-config/
 picoaide-data/
+pg-data/
 *.tar.gz
+# Go 编译产物(误放进 server/ 根时排除)
+/server
+/server-pgtest

@@ -20,7 +20,17 @@
 #   - 自定义 bridge 网络 picoaide-net,默认子网 172.28.0.0/24
 #   - caddy 固定 172.28.0.2,server 固定 172.28.0.3 —— 容器重建 IP 不变,
 #     升级/重启后 Caddyfile 的 reverse_proxy server:8080 始终可达
+#   - pg 模式(postgres 容器)固定 172.28.0.4(PG_IP)
 #   - server 仅 expose 8080(不发布到宿主机),外部只能经 Caddy 进入
+#
+# 数据库后端(两种,由 .env 的 DB_MODE 选择,默认 sqlite):
+#   - sqlite(默认):数据落 ./picoaide-data/picoaide.db,单机零运维
+#   - pg:内置 postgres:16-alpine 容器,叠加 docker-compose.pg.yml
+#     (docker compose -f docker-compose.yml -f docker-compose.pg.yml up -d)
+#   - pg-external:使用已有 PostgreSQL 实例,叠加 docker-compose.pg-ext.yml
+#     (docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml up -d)
+#   - 两种 pg 模式均需要含 -db-driver 支持的服务端镜像(0.5.0+/本地构建);
+#     部署脚本 install 会自动校验。sqlite→pg 数据迁移: ./deploy.sh migrate
 #
 # 数据与安全:
 #   - 数据(数据库/主密钥)落在 ./picoaide-data(0700),升级镜像不丢数据

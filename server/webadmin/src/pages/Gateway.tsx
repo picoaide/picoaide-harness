@@ -47,10 +47,18 @@ interface Model {
 const MANUAL_CHANNEL = '__manual__'
 
 // 高峰时段结构化编辑(审计修复 M4):时间段行列表替代手填 JSON
+// weekdays: 适用星期(1=周一…7=周日);空 = 每天(兼容旧数据)。
 interface PeakWindowRow {
   start: string
   end: string
+  weekdays: number[]
 }
+
+// WEEKDAY_LABELS:星期选择器的显示标签(周一…周日)。
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日']
+
+// ALL_WEEKDAYS:全部 7 天(旧数据缺省 = 每天)。
+const ALL_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
 
 function parsePeakWindows(s: string): PeakWindowRow[] {
   try {
@@ -58,7 +66,13 @@ function parsePeakWindows(s: string): PeakWindowRow[] {
     if (!Array.isArray(arr)) return []
     return arr
       .filter((w: any) => w && typeof w.start === 'string' && typeof w.end === 'string')
-      .map((w: any) => ({ start: w.start, end: w.end }))
+      .map((w: any) => ({
+        start: w.start,
+        end: w.end,
+        weekdays: Array.isArray(w.weekdays) && w.weekdays.length > 0
+          ? w.weekdays.filter((d: any) => Number.isInteger(d) && d >= 1 && d <= 7)
+          : ALL_WEEKDAYS,
+      }))
   } catch {
     return []
   }
@@ -509,14 +523,21 @@ export default function Gateway() {
     }
   }
 
-  const addPeak = () => setPeakList((l) => [...l, { start: '09:00', end: '12:00' }])
+  const addPeak = () => setPeakList((l) => [...l, { start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
   const removePeak = (i: number) => setPeakList((l) => l.filter((_, idx) => idx !== i))
+  // DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间周一至周五 09:00-12:00、14:00-18:00。
   const presetPeak = () => setPeakList([
-    { start: '09:00', end: '12:00' },
-    { start: '14:00', end: '18:00' },
+    { start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
+    { start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
   ])
   const updatePeak = (i: number, field: 'start' | 'end', v: string) =>
     setPeakList((l) => l.map((w, idx) => (idx === i ? { ...w, [field]: v } : w)))
+  const togglePeakDay = (i: number, d: number) =>
+    setPeakList((l) => l.map((w, idx) => (
+      idx === i
+        ? { ...w, weekdays: w.weekdays.includes(d) ? w.weekdays.filter((x) => x !== d) : [...w.weekdays, d].sort() }
+        : w
+    )))
 
   return (
     <div className="space-y-6">
@@ -566,12 +587,12 @@ export default function Gateway() {
               </p>
             </div>
           </div>
-          {/* 高峰时段结构化编辑(审计修复 M4):时间段行列表,替代手填 JSON */}
+          {/* 高峰时段结构化编辑(审计修复 M4):时间段行列表,替代手填 JSON;weekdays 按天配置 */}
           <div className="space-y-1">
             <Label>高峰时段(北京时间)</Label>
             <div className="space-y-2">
               {peakList.map((w, i) => (
-                <div key={i} className="flex items-center gap-2">
+                <div key={i} className="flex flex-wrap items-center gap-2">
                   <Input
                     type="time"
                     aria-label={`高峰开始 ${i + 1}`}
@@ -587,22 +608,43 @@ export default function Gateway() {
                     value={w.end}
                     onChange={(e) => updatePeak(i, 'end', e.target.value)}
                   />
+                  {/* 星期多选:1=周一…7=周日;空 = 每天 */}
+                  <div className="flex items-center gap-0.5" aria-label={`星期选择 ${i + 1}`}>
+                    {WEEKDAY_LABELS.map((lbl, idx) => {
+                      const d = idx + 1
+                      const on = w.weekdays.includes(d)
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          aria-pressed={on}
+                          aria-label={`周${lbl}`}
+                          onClick={() => togglePeakDay(i, d)}
+                          className={`flex h-7 w-7 items-center justify-center rounded text-[11px] transition-colors ${on
+                            ? 'bg-blue-600 font-semibold text-white'
+                            : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                        >
+                          {lbl}
+                        </button>
+                      )
+                    })}
+                  </div>
                   <Button size="sm" variant="outline" type="button" className="ml-2 shrink-0" onClick={() => removePeak(i)}>移除</Button>
                 </div>
               ))}
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" type="button" onClick={addPeak}>添加时段</Button>
-                <Button size="sm" variant="outline" type="button" onClick={presetPeak}>DeepSeek 当前政策</Button>
+                <Button size="sm" variant="outline" type="button" onClick={presetPeak}>DeepSeek 当前政策(工作日)</Button>
                 {peakList.length > 0 && (
                   <Button size="sm" variant="ghost" type="button" onClick={() => setPeakList([])}>清空(无峰谷价)</Button>
                 )}
               </div>
             </div>
             <ul className="space-y-1 text-xs text-muted-foreground">
-              <li>按北京时间判定,半开区间 [start,end)。</li>
+              <li>按北京时间判定,半开区间 [start,end);时段可勾选适用星期(周一…周日),未勾选 = 该天无峰谷。</li>
               <li>高峰窗口外(空闲时段)且模型配置了低谷折扣率时,费用按折扣率打折。</li>
               <li>清空 = 无峰谷价(全天标准价)。</li>
-              <li>DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%;历史 16:30-00:30 错峰政策已废弃。</li>
+              <li>DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间<strong>周一至周五</strong> 09:00-12:00、14:00-18:00(其余为空闲,含周末),空闲价 = 高峰价 × 50%。</li>
             </ul>
           </div>
           <div className="grid grid-cols-2 items-start gap-4">
@@ -1072,7 +1114,7 @@ export default function Gateway() {
             <ul className="space-y-1 text-xs text-muted-foreground">
               <li>配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。</li>
               <li>低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。</li>
-              <li>DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。</li>
+              <li>DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京**周一至周五** 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。</li>
             </ul>
             <Button className="w-full" disabled={busy !== null} onClick={createModel}>{busy === 'create-model' ? '处理中…' : '新增'}</Button>
           </div>

@@ -483,7 +483,7 @@ func TestDeleteLastAdminRollsBack(t *testing.T) {
 
 func mustDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(tempPath(t, "admin.db"))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "admin.db")})
 	if err != nil {
 		t.Fatal(err)
 	}

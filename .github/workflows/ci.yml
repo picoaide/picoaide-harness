@@ -34,6 +34,17 @@ jobs:
       - run: go vet ./...
       - run: go test ./... -count=1
       - run: make build-server
+      - name: Deploy script syntax checks
+        # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
+        # 否则实际变为 server/server/scripts/...(文件不存在, exit 127)。
+        run: |
+          bash -n scripts/install-server.sh scripts/deploy.sh
+          if command -v docker >/dev/null 2>&1; then
+            PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@postgres:5432/picoaide \
+              docker compose -f docker-compose.yml -f docker-compose.pg.yml config -q
+            PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
+              docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml config -q
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: picoaide-server-linux-amd64
