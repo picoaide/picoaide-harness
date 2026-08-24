@@ -96,12 +96,16 @@ export interface PresetPackResult {
 }
 
 /**
- * Pack a locally authored preset into a gzipped tar carrying only the two
- * files that define it: `agent.cordis.yml` (the Cordis composition) and
- * `preset.yml` (optional display metadata; omitted when the preset has
- * none). Sibling assets (skills/, attachments) are intentionally NOT
- * shipped — the shared preset is the composition, and every employee
- * installs the same two-file bundle.
+ * Pack a locally authored preset's WHOLE directory into a gzipped tar whose
+ * entries are the directory's contents (the archive root IS the preset
+ * directory).
+ *
+ * A preset is its directory, not one file: the shipped 创造模式 preset
+ * references `skills/` inside its own directory
+ * (`new URL('skills/', baseUrl)`), and a copy of it carries that directory —
+ * a composition-only pack would install a preset whose skill root is absent.
+ * Symlinks are packed as entries and then refused by the safety scan below,
+ * so an archive can never smuggle a reference to a file outside the preset.
  * @param presetsDir - the preset root (`<dshHome>/.agent-presets`).
  * @param name - the preset id.
  * @returns the archive plus metadata, or throws with a user-facing message.
@@ -109,19 +113,16 @@ export interface PresetPackResult {
 export async function packPreset(presetsDir: string, name: string): Promise<PresetPackResult> {
   validatePresetId(name)
   const dir = join(presetsDir, name)
+  // The composition is what makes a directory a preset; refuse early with a
+  // readable message rather than uploading an archive the gateway rejects.
+  await stat(join(dir, COMPOSITION_FILE)).catch(() => {
+    throw new Error(`preset "${name}" has no ${COMPOSITION_FILE}`)
+  })
   const meta = await readPresetMeta(dir)
 
-  // Two-file pack: only the composition and the optional metadata file.
-  const files = [COMPOSITION_FILE]
-  try {
-    await stat(join(dir, METADATA_FILE))
-    files.push(METADATA_FILE)
-  } catch {
-    // No metadata file — the preset publishes nothing; files stays composition-only.
-  }
   const chunks: Buffer[] = []
   await new Promise<void>((resolveP, rejectP) => {
-    const stream = tar.c({ gzip: true, cwd: dir, portable: true }, files)
+    const stream = tar.c({ gzip: true, cwd: dir, portable: true, follow: false }, ['.'])
     stream.on('data', (c: Buffer) => chunks.push(c))
     stream.on('error', rejectP)
     stream.on('end', () => resolveP())
@@ -130,6 +131,10 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
     throw new Error(`preset archive too large (${archive.byteLength} bytes)`)
   }
+  // Same rules the installer applies, enforced here too: a symlink or an
+  // escaping path in the source directory must fail on the UPLOADING machine,
+  // not on every machine that installs the shared preset.
+  await assertArchiveSafe(archive)
   const checksum = createHash('sha256').update(archive).digest('hex')
   return {
     name,
@@ -137,6 +142,50 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
     ...meta.description === undefined ? {} : { description: meta.description },
     checksum,
     archive,
+  }
+}
+
+/**
+ * Refuse an archive whose entries are unsafe: absolute paths, `..` traversal,
+ * empty paths, symbolic/hard links, or an unpacked tree over the bound. The
+ * archive is written to a temp file because node-tar's listing reader needs a
+ * file handle.
+ * @param archive - the gzipped tar bytes.
+ * @throws Error naming the first violation.
+ */
+export async function assertArchiveSafe(archive: Buffer): Promise<void> {
+  const staging = await mkdtemp(join(tmpdir(), 'pico-preset-scan-'))
+  const archiveFile = join(staging, 'archive.tar.gz')
+  try {
+    await writeFile(archiveFile, archive, { mode: 0o600 })
+    let total = 0
+    let violation: string | null = null
+    await tar.t({
+      file: archiveFile,
+      onentry: (entry) => {
+        if (violation !== null) return
+        try {
+          if (entry.type === 'Directory') {
+            assertSafeEntryPath(entry.path)
+            return
+          }
+          const safePath = assertSafeEntryPath(entry.path)
+          if (safePath === '') throw new Error(`empty path in archive: ${entry.path}`)
+          if (LINK_TYPES.has(entry.type)) {
+            throw new Error(`link entry refused in archive: ${safePath}`)
+          }
+          total += entry.size ?? 0
+          if (total > MAX_UNPACKED_BYTES) {
+            throw new Error(`unpacked archive too large (${total} bytes)`)
+          }
+        } catch (cause) {
+          violation = cause instanceof Error ? cause.message : String(cause)
+        }
+      },
+    })
+    if (violation !== null) throw new Error(violation)
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -196,34 +245,9 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
     const archiveFile = join(staging, 'archive.tar.gz')
     await writeFile(archiveFile, archive, { mode: 0o600 })
 
-    // Pass 1: list entries without extracting; reject unsafe entries and
-    // bound the unpacked size.
-    let total = 0
-    let violation: string | null = null
-    await tar.t({
-      file: archiveFile,
-      onentry: (entry) => {
-        if (violation !== null) return
-        try {
-          if (entry.type === 'Directory') {
-            assertSafeEntryPath(entry.path)
-            return
-          }
-          const safePath = assertSafeEntryPath(entry.path)
-          if (safePath === '') throw new Error(`empty path in archive: ${entry.path}`)
-          if (LINK_TYPES.has(entry.type)) {
-            throw new Error(`link entry refused in archive: ${safePath}`)
-          }
-          total += entry.size ?? 0
-          if (total > MAX_UNPACKED_BYTES) {
-            throw new Error(`unpacked archive too large (${total} bytes)`)
-          }
-        } catch (cause) {
-          violation = cause instanceof Error ? cause.message : String(cause)
-        }
-      },
-    })
-    if (violation !== null) throw new Error(violation)
+    // Pass 1: reject unsafe entries and bound the unpacked size before any
+    // extraction (the same scan the packer runs on the uploading machine).
+    await assertArchiveSafe(archive)
 
     // Pass 2: extract into the staging subdir.
     const unpackRoot = join(staging, 'unpacked')
