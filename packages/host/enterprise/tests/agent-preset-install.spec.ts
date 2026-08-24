@@ -6,6 +6,7 @@ import * as tar from 'tar'
 import {
   installPresetArchive,
   listInstalledPresets,
+  mapLocalPresets,
   packPreset,
   uninstallPreset,
   validatePresetId,
@@ -208,6 +209,30 @@ describe('uninstallPreset', () => {
       await installPresetArchive({ name: 'gone', archive, presetsDir: dir })
       expect(await uninstallPreset(dir, 'gone')).toBe(join(dir, 'gone'))
       await expect(uninstallPreset(dir, 'gone')).rejects.toThrow(/not installed/u)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('mapLocalPresets', () => {
+  it('merges local disk presets with gateway upload state', async () => {
+    const dir = await newPresetsDir()
+    try {
+      const a = join(dir, 'fruit-new-arrival')
+      const b = join(dir, 'local-only')
+      await mkdir(a, { recursive: true })
+      await mkdir(b, { recursive: true })
+      await writeFile(join(a, 'agent.cordis.yml'), COMPOSITION)
+      await writeFile(join(a, 'preset.yml'), 'name: 水果新到\n')
+      await writeFile(join(b, 'agent.cordis.yml'), COMPOSITION)
+      const map = await mapLocalPresets(dir, [
+        { name: 'fruit-new-arrival', status: 'pending' },
+      ])
+      expect(map['fruit-new-arrival']).toMatchObject({ name: 'fruit-new-arrival', displayName: '水果新到', status: 'pending' })
+      expect(map['local-only']).toMatchObject({ name: 'local-only' })
+      expect(map['local-only'].status).toBeUndefined()
+      expect(Object.keys(map).length).toBe(2)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
