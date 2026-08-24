@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
@@ -90,7 +90,7 @@ describe('packPreset', () => {
     }
   })
 
-  it('packs only agent.cordis.yml and preset.yml (no sibling assets)', async () => {
+  it('packs the whole preset directory (skills/ and assets travel with it)', async () => {
     const dir = await newPresetsDir()
     try {
       const presetDir = join(dir, 'ppt-gen')
@@ -99,19 +99,44 @@ describe('packPreset', () => {
       await writeFile(join(presetDir, 'agent.cordis.yml'), COMPOSITION)
       await writeFile(join(presetDir, 'preset.yml'), 'name: PPT 生成\n')
       await writeFile(join(presetDir, 'skills', 'demo', 'SKILL.md'), '# demo\n')
-      await writeFile(join(presetDir, 'assets', 'big.bin'), 'x'.repeat(4096))
+      await writeFile(join(presetDir, 'assets', 'note.txt'), 'hello')
       const result = await packPreset(dir, 'ppt-gen')
-      // Round-trip through the installer: only the two files may be present.
+      // Round-trip through the installer: the whole tree must be reproduced,
+      // because a preset may reference its own skills/ root.
       const scratch = await newPresetsDir()
       try {
         await installPresetArchive({ name: 'ppt-gen', archive: result.archive, presetsDir: scratch })
         const installed = await readdir(join(scratch, 'ppt-gen'))
-        expect(installed.sort()).toEqual(['agent.cordis.yml', 'preset.yml'])
-        // Sibling assets were NOT shipped: reading them fails with ENOENT.
-        await expect(stat(join(scratch, 'ppt-gen', 'assets'))).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(installed.sort()).toEqual(['agent.cordis.yml', 'assets', 'preset.yml', 'skills'])
+        expect((await readFile(join(scratch, 'ppt-gen', 'skills', 'demo', 'SKILL.md'), 'utf8')).trim()).toBe('# demo')
+        expect(await readFile(join(scratch, 'ppt-gen', 'assets', 'note.txt'), 'utf8')).toBe('hello')
       } finally {
         await rm(scratch, { recursive: true, force: true })
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a preset whose directory carries a symlink', async () => {
+    const dir = await newPresetsDir()
+    try {
+      const presetDir = join(dir, 'linky')
+      await mkdir(presetDir, { recursive: true })
+      await writeFile(join(presetDir, 'agent.cordis.yml'), COMPOSITION)
+      await symlink('/etc/passwd', join(presetDir, 'secret'))
+      await expect(packPreset(dir, 'linky')).rejects.toThrow(/link entry refused/u)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a preset directory without a composition', async () => {
+    const dir = await newPresetsDir()
+    try {
+      await mkdir(join(dir, 'no-comp'), { recursive: true })
+      await writeFile(join(dir, 'no-comp', 'preset.yml'), 'name: x\n')
+      await expect(packPreset(dir, 'no-comp')).rejects.toThrow(/agent\.cordis\.yml/u)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -15,7 +15,8 @@
 
 ## 2. 模型
 
-- **preset = 目录**:`agent.cordis.yml`(Cordis 组合,必填)+ `preset.yml`(可选 name/description);目录名 = preset id,规则 `^[a-z0-9][a-z0-9-]*$`(上游 PRESET_ID)。
+- **preset = 目录**:`agent.cordis.yml`(Cordis 组合,必填)+ `preset.yml`(可选 name/description)+ 可选自带资源(如 `skills/`);目录名 = preset id,规则 `^[a-z0-9][a-z0-9-]*$`(上游 PRESET_ID)。
+- **打包 = 整目录**:上游「创造模式」(cordis preset)自身就带 `skills/`,且其 composition 用 `new URL('skills/', baseUrl)` 引用该目录;复制它派生的 preset 同样带 `skills/`。因此上传打包整个 preset 目录(不是只打两个文件),否则安装后 skill root 缺失、能力静默丢失。
 - **状态机**:`pending → approved | rejected`;rejected 同名重提 = 重置 pending(更新描述/checksum)。
 - **可见性**:员工(GET /api/agent-presets)= approved 全部 + 自己上传的全部状态;他人 pending/rejected 与不存在同 404(不泄露)。
 - **无 grants 表**(与技能商城授权制不同,用户明确要求审核通过后全员共享)。
@@ -29,7 +30,7 @@
 ## 4. 归档安全(服务端 + 客户端双侧校验)
 
 - 大小上限:原始归档 ≤16MB、解包后 ≤64MB、条目 ≤10000。
-- 拒绝:绝对路径、`..` 越界、空路径、symlink/hardlink;必须含顶层 `agent.cordis.yml`。
+- 拒绝:绝对路径、`..` 越界、空路径、symlink/hardlink;必须含顶层 `agent.cordis.yml`。**上传端与安装端跑同一套校验**(`assertArchiveSafe`):源目录里有 symlink 时在上传机就报错,不会传播给每台安装机。
 - 服务端存 sha256(checksum);下载响应带 `X-Preset-Checksum`,客户端安装前校验。
 - 安装不覆盖本地同名 preset(冲突明确报错,由用户先卸载/改名)。
 
