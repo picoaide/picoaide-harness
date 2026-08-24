@@ -696,10 +696,10 @@ func TestUsageAggregateCost(t *testing.T) {
 
 // ---- 峰谷价格(0023) ----
 
-// deepseekPeakWindows 为 DeepSeek 当前官方政策(2026-08-16 生效):
-// 高峰 = 北京时间 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
+// deepseekPeakWindows 为 DeepSeek 当前官方政策(2026-08 起):
+// 高峰 = 北京时间**周一至周五** 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
 // 测试固定此配置(设置键 usage.peak_windows)。
-var deepseekPeakWindows = `[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]`
+var deepseekPeakWindows = `[{"start":"09:00","end":"12:00","weekdays":[1,2,3,4,5]},{"start":"14:00","end":"18:00","weekdays":[1,2,3,4,5]}]`
 
 // mustOffpeakModel 创建带价格与低谷折扣的模型。
 func mustOffpeakModel(t *testing.T, db *sql.DB, name string, in, out, offpeak float64) {
@@ -716,6 +716,12 @@ func mustOffpeakModel(t *testing.T, db *sql.DB, name string, in, out, offpeak fl
 
 func utc(h, m int) time.Time {
 	return time.Date(2026, 8, 19, h, m, 0, 0, time.UTC)
+}
+
+// utcOn returns a UTC time on a specific date (used to test weekday logic).
+// 2026-08-19 = 周三;16(周日)/17(周一)/22(周六)。
+func utcOn(day, h, m int) time.Time {
+	return time.Date(2026, 8, day, h, m, 0, 0, time.UTC)
 }
 
 // TestParsePeakWindows:合法 JSON 解析;非法/空 → nil(无峰谷)。
@@ -756,6 +762,11 @@ func TestOffpeakFactor(t *testing.T) {
 		{"高峰起 06:00 UTC(北京 14:00)含", utc(6, 0), 0.5, 1},
 		{"高峰止 10:00 UTC(北京 18:00)不含", utc(10, 0), 0.5, 0.5},
 		{"空闲 15:00 UTC(北京 23:00)", utc(15, 0), 0.5, 0.5},
+		// 工作日判定(weekdays=[1-5]):周六/周日即使 10:00 高峰时段也空闲;周一/周五按高峰。
+		{"周六 10:00 UTC(北京 18:00,周末空闲)", utcOn(22, 10, 0), 0.5, 0.5},
+		{"周日 01:00 UTC(北京 09:00,周末空闲)", utcOn(16, 1, 0), 0.5, 0.5},
+		{"周一 01:00 UTC(北京 09:00,工作日高峰)", utcOn(17, 1, 0), 0.5, 1},
+		{"周五 06:00 UTC(北京 14:00,工作日高峰)", utcOn(21, 6, 0), 0.5, 1},
 		{"无折扣 0", utc(10, 0), 0, 1},
 		{"无折扣 -1", utc(10, 0), -1, 1},
 		{"无折扣 1(显式无峰谷)", utc(10, 0), 1, 1},
