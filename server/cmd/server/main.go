@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -107,6 +108,8 @@ func main() {
 	llmgateway.RegisterAdminRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	marketplace.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
+	agentshare.RegisterRoutes(r, db, *dataDir+"/agent-presets-cache")
+	agentshare.RegisterAdminRoutes(r, db, *dataDir+"/agent-presets-cache")
 	bootstrap.RegisterRoutes(r, db)
 	// 审计日志保留策略(90 天):启动时清理过期条目
 	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-90*24*time.Hour)); err != nil {
