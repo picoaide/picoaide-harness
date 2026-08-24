@@ -96,8 +96,12 @@ export interface PresetPackResult {
 }
 
 /**
- * Pack a locally authored preset directory into a gzipped tar whose entries
- * are the directory's contents (the archive root IS the preset directory).
+ * Pack a locally authored preset into a gzipped tar carrying only the two
+ * files that define it: `agent.cordis.yml` (the Cordis composition) and
+ * `preset.yml` (optional display metadata; omitted when the preset has
+ * none). Sibling assets (skills/, attachments) are intentionally NOT
+ * shipped — the shared preset is the composition, and every employee
+ * installs the same two-file bundle.
  * @param presetsDir - the preset root (`<dshHome>/.agent-presets`).
  * @param name - the preset id.
  * @returns the archive plus metadata, or throws with a user-facing message.
@@ -106,11 +110,18 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
   validatePresetId(name)
   const dir = join(presetsDir, name)
   const meta = await readPresetMeta(dir)
-  const checksum = createHash('sha256').update(name + '\n' + JSON.stringify(meta)).digest('hex')
 
+  // Two-file pack: only the composition and the optional metadata file.
+  const files = [COMPOSITION_FILE]
+  try {
+    await stat(join(dir, METADATA_FILE))
+    files.push(METADATA_FILE)
+  } catch {
+    // No metadata file — the preset publishes nothing; files stays composition-only.
+  }
   const chunks: Buffer[] = []
   await new Promise<void>((resolveP, rejectP) => {
-    const stream = tar.c({ gzip: true, cwd: dir, portable: true }, ['.'])
+    const stream = tar.c({ gzip: true, cwd: dir, portable: true }, files)
     stream.on('data', (c: Buffer) => chunks.push(c))
     stream.on('error', rejectP)
     stream.on('end', () => resolveP())
@@ -119,6 +130,7 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
     throw new Error(`preset archive too large (${archive.byteLength} bytes)`)
   }
+  const checksum = createHash('sha256').update(archive).digest('hex')
   return {
     name,
     ...meta.name === undefined ? {} : { displayName: meta.name },
