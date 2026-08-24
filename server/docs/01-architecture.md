@@ -59,6 +59,6 @@ cmd/server/            # 服务端入口(--bootstrap-admin 等)
 internal/              # serverauth/llmgateway/marketplace/knowledge/serverstore/util/bootstrap
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/superpowers/      # 架构设计 + 实施计划(权威文档)
-scripts/               # install-server.sh(生产一键部署)+ mock-upstream.go(假上游)
+scripts/               # install-server.sh(oh-my-zsh 式一键部署)+ deploy.sh(容器化部署生命周期)+ mock-upstream.go(假上游)
 data/                  # 服务端运行时数据(0700,gitignore)
 ```
