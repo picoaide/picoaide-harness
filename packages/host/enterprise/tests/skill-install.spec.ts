@@ -7,13 +7,13 @@ import * as tar from 'tar'
 import {
   installSkillArchive,
   listInstalledSkills,
-  MAX_ARCHIVE_BYTES,
   resolveSkillsDir,
   SKILL_NAME_PATTERN,
   synthesizeSkillFrontmatter,
   uninstallSkill,
   validateSkillName,
 } from '../src/skill-install.ts'
+import { MAX_ARCHIVE_BYTES } from '../src/archive-util.ts'
 
 /** Pack a directory into a gzipped tar buffer (relative paths, portable). */
 async function packDir(dir: string): Promise<Buffer> {
