@@ -1,10 +1,10 @@
 package agentshare
 
 import (
-	"crypto/rand"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
