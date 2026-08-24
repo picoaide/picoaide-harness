@@ -222,7 +222,7 @@ describe('Gateway 网关配置页', () => {
   it('高峰时段:结构化编辑器预设 DeepSeek 政策并序列化保存', async () => {
     render(<Gateway />)
     await screen.findByText('全局设置')
-    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策' }))
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
     expect((screen.getByLabelText('高峰开始 1') as HTMLInputElement).value).toBe('09:00')
     expect((screen.getByLabelText('高峰结束 2') as HTMLInputElement).value).toBe('18:00')
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -232,7 +232,7 @@ describe('Gateway 网关配置页', () => {
     )
     expect(call).toBeTruthy()
     const sent = JSON.parse(call![1]!.body as string)
-    expect(sent.peak_windows).toBe('[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]')
+    expect(sent.peak_windows).toBe('[{"start":"09:00","end":"12:00","weekdays":[1,2,3,4,5]},{"start":"14:00","end":"18:00","weekdays":[1,2,3,4,5]}]')
   })
 
   it('高峰时段:清空保存 = 无峰谷价(留空语义成立)', async () => {
