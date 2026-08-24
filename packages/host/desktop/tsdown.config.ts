@@ -9,6 +9,9 @@ export default defineConfig([
     entry: {
       index: 'src/index.ts',
       'module-resolution': 'src/module-resolution.ts',
+      'asar-spawn': 'src/asar-spawn.ts',
+      'asar-file-system': 'src/asar-file-system.ts',
+      'asar-guidance': 'src/asar-guidance.ts',
       'desktop-home': 'src/desktop-home.ts',
       profile: 'src/profile.ts',
       'desktop-plugins': 'src/desktop-plugins.ts',
