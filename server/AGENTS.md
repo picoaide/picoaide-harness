@@ -73,7 +73,9 @@ make docker-image      # 服务端 Docker 镜像
 make check             # gofmt + go vet + test-server + webadmin 测试与构建
 PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
 bash scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证网关
-bash scripts/install-server.sh         # 生产一键部署(域名/账号/密码,见 docs/02-build-deploy.md)
+bash scripts/install-server.sh         # 生产一键部署(oh-my-zsh 式单命令,自动装依赖;域名/账号/密码,见 docs/02-build-deploy.md)
+# 数据库后端: -db-driver sqlite|pg -pg-dsn <DSN>(pg 迁移 DDL 见 internal/serverstore/migrations-pg/);
+#   sqlite→pg 数据迁移: ./deploy.sh migrate(容器化)或 go run ./cmd/migrate-sqlite-pg ...
 ```
 
 ## 9. 文档与实施

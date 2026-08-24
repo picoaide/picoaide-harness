@@ -1,9 +1,11 @@
 // migrate-sqlite-pg migrates all data from an existing SQLite database into a
-// PostgreSQL database whose schema is already applied (migrations-pg).
+// PostgreSQL database. The target schema is applied automatically (idempotent
+// migrations-pg); the target tables should be empty first (TRUNCATE ... CASCADE
+// to re-run), since the tool only INSERTs, in FK dependency order.
 //
 // Usage:
 //
-//	-sqlite /data/picoaide-next/picoaide.db
+//	-sqlite /data/picoaide/picoaide.db
 //	-pg-dsn postgres://user:pass@host:5432/db?sslmode=disable
 //	-dry-run  print row counts, write nothing
 //
@@ -55,7 +57,9 @@ func main() {
 	}
 
 	// PG opened through serverstore so the `?` -> `$N` rewrite layer applies.
-	dst, err := serverstore.Open(serverstore.DBConfig{Driver: serverstore.DriverPG, DSN: *pgDSN})
+	// EnsureMigrated auto-applies migrations-pg schema (idempotent): an empty
+	// target database gets the schema; an already-migrated one is untouched.
+	dst, err := serverstore.EnsureMigrated(serverstore.DBConfig{Driver: serverstore.DriverPG, DSN: *pgDSN})
 	if err != nil {
 		log.Fatalf("open pg: %v", err)
 	}
