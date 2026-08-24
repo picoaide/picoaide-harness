@@ -35,6 +35,14 @@
       "types": "./lib/types/windows-pwsh-sandbox.d.ts",
       "default": "./lib/windows-pwsh-sandbox.js"
     },
+    "./asar-file-system": {
+      "types": "./lib/types/asar-file-system.d.ts",
+      "default": "./lib/asar-file-system.js"
+    },
+    "./asar-guidance": {
+      "types": "./lib/types/asar-guidance.d.ts",
+      "default": "./lib/asar-guidance.js"
+    },
     "./windows-agent-presets": {
       "types": "./lib/types/windows-agent-presets.d.ts",
       "default": "./lib/windows-agent-presets.js"
@@ -262,6 +270,7 @@
       "**/*.dylib",
       "**/bin/rg",
       "**/bin/rg.exe",
+      "**/node_modules/@deepseek-ai/node-addon-landlock-run-*/bin/landlock-run",
       "**/prebuilds/**/spawn-helper",
       "**/prebuilds/**/OpenConsole.exe",
       "**/prebuilds/**/*.conpty_console_list*"
