@@ -21,18 +21,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-
-/** Upper bound on a skill archive download (bytes). */
-export const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
-
-/** Upper bound on the unpacked skill tree (bytes). */
-export const MAX_UNPACKED_BYTES = 64 * 1024 * 1024
+import { assertSafeEntryPath, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
 
 /** Skill names must be a single safe directory segment. */
 export const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u
-
-/** Tar entry types we refuse: symbolic links and hard links. */
-const LINK_TYPES = new Set(['SymbolicLink', 'Link'])
 
 /** Validate a skill name for use as a single directory segment. */
 export function validateSkillName(name: string): string {
@@ -40,26 +32,6 @@ export function validateSkillName(name: string): string {
     throw new Error(`invalid skill name ${JSON.stringify(name)}`)
   }
   return name
-}
-
-/** Normalize a tar entry path to a safe relative path or throw. */
-function assertSafeEntryPath(rawPath: string): string {
-  const normalized = posixNormalize(rawPath)
-  if (normalized === '') return ''
-  if (normalized.startsWith('/')) throw new Error(`absolute path in archive: ${rawPath}`)
-  if (normalized.split('/').includes('..')) throw new Error(`parent traversal in archive: ${rawPath}`)
-  return normalized
-}
-
-/** Posix-style normalize (tar paths are always posix). */
-function posixNormalize(raw: string): string {
-  const parts: string[] = []
-  for (const segment of raw.replace(/\\/gu, '/').split('/')) {
-    if (segment === '' || segment === '.') continue
-    if (segment === '..') parts.push('..')
-    else parts.push(segment)
-  }
-  return parts.join('/')
 }
 
 /** Result of a successful install. */

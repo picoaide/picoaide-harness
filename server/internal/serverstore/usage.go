@@ -20,20 +20,23 @@ const MonthlyMoneyQuotaSetting = "usage.monthly_quota_money"
 
 // PeakWindowsSetting 高峰时段配置(settings 键,JSON 字符串):
 //
-//	[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]
+//	[{"start":"09:00","end":"12:00","weekdays":[1,2,3,4,5]},
+//	 {"start":"14:00","end":"18:00","weekdays":[1,2,3,4,5]}]
 //
 // 语义:时段按北京时间(UTC+8,无 DST)判定,半开区间 [start, end);
+// weekdays 为适用星期(1=周一…7=周日,省略 = 每天)。
 // 高峰窗口内费用按标准价,窗口外(空闲时段)按模型 offpeak_discount 打折。
 // 空串 / 缺省 / 非法 = 无峰谷价(全天标准价)。
-// DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 北京时间 09:00-12:00、
-// 14:00-18:00,空闲价 = 高峰价 × 50%(含缓存命中价)。历史政策(2025,
-// deepseek-chat/reasoner,北京 16:30-00:30 错峰)已废弃,如需可自行配置。
+// DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间**周一至周五**
+// 09:00-12:00、14:00-18:00(其余 = 空闲,含周末),空闲价 = 高峰价 × 50%。
 const PeakWindowsSetting = "usage.peak_windows"
 
 // PeakWindow 一个高峰时段(北京时间 "HH:MM",半开 [start,end))。
+// Weekdays: 适用星期(1=周一…7=周日);空/缺省 = 每天。
 type PeakWindow struct {
-	Start string `json:"start"`
-	End   string `json:"end"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Weekdays []int  `json:"weekdays,omitempty"`
 	// 内部解析后的分钟数(自午夜 0 点起)
 	StartMin int `json:"-"`
 	EndMin   int `json:"-"`
@@ -63,8 +66,9 @@ func ParsePeakWindows(v string) []PeakWindow {
 		return nil
 	}
 	var raw []struct {
-		Start string `json:"start"`
-		End   string `json:"end"`
+		Start    string `json:"start"`
+		End      string `json:"end"`
+		Weekdays []int  `json:"weekdays"`
 	}
 	if err := json.Unmarshal([]byte(v), &raw); err != nil {
 		return nil
@@ -76,7 +80,18 @@ func ParsePeakWindows(v string) []PeakWindow {
 		if !sok || !eok || sm >= em {
 			return nil // 整体非法即视为未配置,避免部分生效导致计费口径混乱
 		}
-		out = append(out, PeakWindow{Start: r.Start, End: r.End, StartMin: sm, EndMin: em})
+		w := PeakWindow{Start: r.Start, End: r.End, StartMin: sm, EndMin: em}
+		// weekdays 校验:仅保留 1-7 的整数,去重;空/非法 = 每天(兼容旧数据)。
+		if len(r.Weekdays) > 0 {
+			seen := map[int]bool{}
+			for _, d := range r.Weekdays {
+				if d >= 1 && d <= 7 && !seen[d] {
+					w.Weekdays = append(w.Weekdays, d)
+					seen[d] = true
+				}
+			}
+		}
+		out = append(out, w)
 	}
 	return out
 }
@@ -96,11 +111,28 @@ func beijingMinutes(now time.Time) int {
 	return bj.Hour()*60 + bj.Minute()
 }
 
+// beijingWeekday 返回 now 的北京时间星期编号(1=周一…7=周日)。
+// Go time.Weekday 为 Sunday=0..Saturday=6,映射为 1..7。
+func beijingWeekday(now time.Time) int {
+	return (int(now.UTC().Add(8*time.Hour).Weekday())+6)%7 + 1
+}
+
 // inPeakWindow 判断 now(任意时区)是否处于任一高峰窗口(按北京时间)。
+// 窗口的 weekdays 为空(缺省)或包含当前北京星期时匹配;否则不匹配(如周末空闲)。
 func inPeakWindow(now time.Time, windows []PeakWindow) bool {
 	mins := beijingMinutes(now)
+	wd := beijingWeekday(now)
 	for _, w := range windows {
-		if mins >= w.StartMin && mins < w.EndMin {
+		if mins >= w.StartMin && mins < w.EndMin && (len(w.Weekdays) == 0 || containsDay(w.Weekdays, wd)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDay(days []int, d int) bool {
+	for _, x := range days {
+		if x == d {
 			return true
 		}
 	}
@@ -178,12 +210,12 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
 	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
-	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	id, err := InsertID(db, `INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // UpdateUsageTokens backfills token counts on an existing usage row (pending
@@ -457,15 +489,15 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	}
 	switch group {
 	case "day":
-		selectExpr, groupExpr = "date(usage.created_at)", "date(usage.created_at)"
+		selectExpr, groupExpr = DateDayExpr("usage.created_at"), DateDayExpr("usage.created_at")
 		fill = dayFill
 	case "week":
 		// 按周一日期分桶:date(created_at,'weekday 0','-6 days') 与
 		// weekMonday 严格对齐,免疫 ISO/%W 跨年差异(审计2026-E2)
-		selectExpr, groupExpr = "date(usage.created_at, 'weekday 0', '-6 days')", "date(usage.created_at, 'weekday 0', '-6 days')"
+		selectExpr, groupExpr = DateWeekExpr("usage.created_at"), DateWeekExpr("usage.created_at")
 		fill = weekFill
 	case "month":
-		selectExpr, groupExpr = "strftime('%Y-%m', usage.created_at)", "strftime('%Y-%m', usage.created_at)"
+		selectExpr, groupExpr = DateMonthExpr("usage.created_at"), DateMonthExpr("usage.created_at")
 		fill = monthFill
 	case "model":
 		selectExpr, groupExpr = "usage.model", "usage.model"
@@ -482,13 +514,13 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		FROM usage` + join + ` WHERE 1=1`
 	var args []any
 	if !from.IsZero() {
-		qstr += " AND usage.created_at >= ?"
+		qstr += " AND " + DateCompareExpr("usage.created_at") + " >= ?"
 		args = append(args, from.Format("2006-01-02"))
 	}
 	if !to.IsZero() {
 		// AddDate(0,0,1) 日历下一天,避免 Add(24h) 在 DST 切换日跳到后天
 		// (审计2026-E3 P1-3)
-		qstr += " AND usage.created_at < ?"
+		qstr += " AND " + DateCompareExpr("usage.created_at") + " < ?"
 		args = append(args, to.AddDate(0, 0, 1).Format("2006-01-02"))
 	}
 	if q.Username != "" {

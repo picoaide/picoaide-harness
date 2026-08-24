@@ -36,23 +36,37 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 |------|------|
 | `-addr` | 监听地址,默认 `:8080` |
 | `-data` | 数据目录(0700),默认 `./data`;内含 `picoaide.db`(SQLite)、master key 文件、`skills-cache/` |
+| `-db-driver` | 数据库后端:`sqlite`(默认)或 `pg`;pg 时需 `-pg-dsn` |
+| `-pg-dsn` | PostgreSQL 连接串(如 `postgres://user:pass@host:5432/db?sslmode=disable`);pg 模式必填 |
 | `--bootstrap-admin` | 初始超管用户名;首次启动时用 `PICOAI_ADMIN_PASSWORD` 创建(已存在则校验其为管理员);**首次启动后不可重复创建** |
 | `PICOAI_ADMIN_PASSWORD` | 初始超管密码(**必须**与 `--bootstrap-admin` 同时提供,否则启动失败) |
 | `PICOAI_MASTER_KEY` | 可选;不设置时首次启动自动生成随机 master key 写入 `data/` 下(0700)。**备份该文件**,丢失后已加密的网关/商城凭证无法解密 |
 
+### 运行参数(PostgreSQL 后端)
+
+```bash
+PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
+  -addr :8080 -data ./data \
+  -db-driver pg -pg-dsn 'postgres://picoaide:pass@127.0.0.1:5432/picoaide?sslmode=disable' \
+  --bootstrap-admin admin
+```
+
+pg 模式首次启动自动应用 `migrations-pg`(幂等);`-data` 仍用于 master.key 与 skills-cache(请备份)。SQLite→PG 数据迁移:`./deploy.sh migrate`(容器化)或 `go run ./cmd/migrate-sqlite-pg -sqlite data/picoaide.db -pg-dsn <dsn> -dry-run`(本地,先预览)。
+
 ### 生产建议
 
 - 服务端放在企业内网,前置 HTTPS(反向代理终结 TLS);登录页拒绝非 HTTPS 远程地址。
-- 迁移/备份:单文件 SQLite,直接备份 `data/picoaide.db` + master key 文件。
+- 迁移/备份:单文件 SQLite,直接备份 `data/picoaide.db` + master key 文件;
+  PostgreSQL 后端用 `deploy.sh backup`(pg_dump)或外部 PG 运维策略。
 - 假上游联调:无外网/无 key 环境 `bash scripts/mock-upstream.go` 起 mock 上游,验证网关链路。
-- **容器化部署(推荐)**:见 [docs/DEPLOY.md](DEPLOY.md)(compose 私有网段+固定 IP、Caddy 双证书模式、deploy.sh 自动化、升级/备份/恢复)。
+- **容器化部署(推荐)**:见 [docs/DEPLOY.md](DEPLOY.md)(compose 私有网段+固定 IP、Caddy 双证书模式、deploy.sh 自动化、SQLite/PG 双后端、升级/备份/恢复/迁移)。
 
 ## 3. Docker 镜像构建与发布
 
 ### 3.1 镜像结构(server/Dockerfile,多阶段)
 
 - Stage1 `node:24-alpine` 构建 webadmin dist(go:embed 需要);
-- Stage2 `golang:1.26-alpine` 交叉编译:`CGO_ENABLED=0`,ldflags 注入 `-X main.version=$VERSION`(VERSION 默认 `dev`,CI 传 git tag 去 v 前缀);
+- Stage2 `golang:1.26-alpine` 交叉编译:`CGO_ENABLED=0`,ldflags 注入 `-X main.version=$VERSION`(VERSION 默认 `dev`,CI 传 git tag 去 v 前缀);同阶段构建 `migrate-sqlite-pg`(SQLite→PG 迁移工具,随镜像分发);
 - Stage3 `alpine:3.21` 运行:非 root uid 10001(picoaide),`su-exec` 降权入口,`VOLUME /data`,`HEALTHCHECK` 与 compose 同源。
 
 ### 3.2 构建命令

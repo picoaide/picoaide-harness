@@ -64,7 +64,17 @@ export default defineConfig([
       ...PLATFORM_MODULES,
       ...PRELOADED_CLIENT_EXTERNALS,
     ],
-    noExternal: (id: string) => id.startsWith('@deepseek-ai/') ? undefined : true,
+    // tsdown external matching is a specifier prefix; the platform table
+    // entries ('react', 'react-dom', 'react/jsx-runtime') are exact strings,
+    // so match the same prefixes tsdown would. Non-platform values inline.
+    noExternal: (id: string) => id.startsWith('@deepseek-ai/') || id === 'react' || id.startsWith('react/') || id === 'react-dom' || id.startsWith('react-dom/') ? undefined : true,
+    // Inlined libraries (react/react-dom read process.env.NODE_ENV in their
+    // dev branches) need the substitution at build time, exactly like the
+    // upstream clientBundle preset — otherwise the browser bundle throws
+    // "process is not defined" at factory execution.
+    define: {
+      'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+    },
     outputOptions: {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_NAME)}, factory: (require) => {`,

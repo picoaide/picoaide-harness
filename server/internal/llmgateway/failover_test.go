@@ -288,7 +288,7 @@ func TestProxyStreamIdleTimeout(t *testing.T) {
 }
 
 func TestMatchModelsReturnsAllCandidates(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/multi.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/multi.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

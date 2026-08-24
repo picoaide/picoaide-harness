@@ -24,7 +24,7 @@ func adminTestSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	// 用例增多后触发限流 → login 429 → csrf 为空(flaky)。按该 env 设计用途放宽。
 	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "10000")
 	DecryptSecret = func(s string) (string, error) { return s, nil }
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/admin.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/admin.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

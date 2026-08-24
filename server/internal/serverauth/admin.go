@@ -72,6 +72,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
 	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
 	g.GET("/usage", AdminAuth(db), a.usage)
+	// 服务器信息面板(系统 + 数据库统计)
+	g.GET("/server-info", AdminAuth(db), a.handleServerInfo)
 	// 敏感操作审计日志(用户/部门/技能/令牌等)
 	g.GET("/audit", AdminAuth(db), a.listAuditLogs)
 	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换

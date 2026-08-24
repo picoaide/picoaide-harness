@@ -7,10 +7,15 @@
  * shell's frozen module table resolves them at runtime), so the table must
  * never drift from upstream: `scripts/upgrade-upstream.mjs` re-extracts this
  * file from the new pin on every upgrade and fails the gate if it differs.
+ *
+ * The list includes react/react-dom: the shell seeds them into the module
+ * table, and a bundle that inlines its own React instance would break hook
+ * dispatcher sharing ("Cannot read properties of null (reading 'useCallback')").
  */
 
 /** The module specifiers the shell shares into the frozen module table. */
 export const PLATFORM_MODULES = [
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
 ]

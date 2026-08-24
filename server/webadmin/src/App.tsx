@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Share2 } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -10,6 +10,8 @@ import Departments from './pages/Departments'
 import Gateway from './pages/Gateway'
 import Marketplace from './pages/Marketplace'
 import Audit from './pages/Audit'
+import ServerInfo from './pages/ServerInfo'
+import AgentPresets from './pages/AgentPresets'
 
 // Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
 const Usage = lazy(() => import('./pages/Usage'))
@@ -20,7 +22,9 @@ const nav = [
   { to: '/gateway', label: '网关', icon: Settings2 },
   { to: '/usage', label: '用量', icon: BarChart3 },
   { to: '/marketplace', label: '商城', icon: Store },
+  { to: '/agent-presets', label: '共享Agent', icon: Share2 },
   { to: '/audit', label: '审计', icon: ScrollText },
+  { to: '/server-info', label: '服务器信息', icon: Server },
 ]
 
 // 审计 A5-L7: 页面运行时异常不再白屏整树卸载,展示错误与重载入口
@@ -211,7 +215,9 @@ export default function App() {
                 <Route path="/gateway" element={<Gateway />} />
                 <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
                 <Route path="/marketplace" element={<Marketplace />} />
+                <Route path="/agent-presets" element={<AgentPresets />} />
                 <Route path="/audit" element={<Audit />} />
+                <Route path="/server-info" element={<ServerInfo />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </ErrorBoundary>
