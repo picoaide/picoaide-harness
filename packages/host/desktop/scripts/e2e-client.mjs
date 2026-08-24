@@ -190,7 +190,12 @@ async function main() {
 
   const cdp = await connectMain(cdpPort)
 
-  // 4. Log in against the mock gateway.
+  // 4. Log in against the mock gateway. The auth-gate serves a transient
+  // "restoring session" page first (it re-requests the index after 1.2s), so
+  // wait until the real login form (with a #f submit form) is present before
+  // filling it — filling the restoring page would be wiped by its reload.
+  const formReady = await waitFor(cdp, `!!document.getElementById('f') && !!document.getElementById('server')`, 15000, 300)
+  if (!formReady) throw new Error('login form did not appear within 15s')
   const login = await evalSafe(cdp, `(() => {
     const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
     const ok = set('server', 'http://127.0.0.1:${GATEWAY_PORT}') && set('username', 'admin') && set('password', 'admin')
