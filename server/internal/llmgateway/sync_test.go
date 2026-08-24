@@ -18,7 +18,7 @@ func syncTestDB(t *testing.T) *sql.DB {
 	prev := DecryptSecret
 	DecryptSecret = func(s string) (string, error) { return s, nil }
 	t.Cleanup(func() { DecryptSecret = prev })
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/sync.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/sync.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func syncTestDB(t *testing.T) *sql.DB {
 // 无渠道(手动型)provider 不该被自动同步,但 sync-all 必须给出明确原因
 // 而不是静默跳过——否则管理员点"立即同步"不知道发生了什么。
 func TestSyncOnceReportsUnchanneled(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/sync.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/sync.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestSyncExcludedModelNotResurrected(t *testing.T) {
 
 // 审计修复 L8:手动型上游在 sync-all 中标记 Skipped 而非伪装成错误噪音。
 func TestSyncOnceManualProviderSkipped(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/sync.db", t.TempDir()))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/sync.db", t.TempDir())})
 	if err != nil {
 		t.Fatal(err)
 	}

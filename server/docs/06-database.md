@@ -42,7 +42,10 @@
 ### skills(0005)
 `id, name 唯一, version, description, author, git_url, git_ref(默认 main), checksum, enabled(0/1,下架置 0 不删行), created_at, updated_at`。bootstrap 建议清单只返回 enabled=1。
 
-### admin_sessions(0009)
+### agent_presets(0032)
+`id, name UNIQUE(preset 目录名,上游 PRESET_ID 规则), display_name, description, version(默认 1.0.0), author(上传者 username), checksum(归档 sha256), status('pending'|'approved'|'rejected'), created_at, updated_at`;索引 `idx_agent_presets_status`。共享 Agent 状态机:员工(创造模式)上传 → pending;admin approve → approved(全员可见可下载,无 grants);reject → 仅作者可见,同名可重提(重置 pending)。归档存 `data/agent-presets-cache/<name>-1.0.0.tar.gz`。
+
+
 `id(PK, 随机), user_id, csrf_key, expires_at`。管理端 24h 会话 + CSRF 校验(见 04-auth.md §4)。
 
 ### audit_logs(0028)

@@ -7,8 +7,15 @@
 #   ./scripts/deploy.sh update           # 升级镜像并重启(数据不丢)
 #   ./scripts/deploy.sh status           # 查看容器状态 + 健康检查 + 固定 IP
 #   ./scripts/deploy.sh logs [-t]        # 查看日志(--tail=200;-t/--follow 跟踪)
-#   ./scripts/deploy.sh backup           # 备份数据(picoaide-data + caddy-data 证书库)
+#   ./scripts/deploy.sh backup           # 备份数据(picoaide-data + caddy-data 证书库;pg 模式含 pg_dump)
+#   ./scripts/deploy.sh migrate [--dry-run]   # 把已有 sqlite 数据迁移到 PostgreSQL(见 cmd_migrate)
 #   ./scripts/deploy.sh uninstall        # 卸载(停容器;--volumes 全删数据目录,需确认)
+#
+# 数据库后端(DB_MODE):
+#   sqlite(默认) | pg(内置 postgres 容器,叠加 docker-compose.pg.yml) |
+#   pg-external(已有 PostgreSQL 实例,叠加 docker-compose.pg-ext.yml)
+#   pg 两种模式需含 -db-driver 支持的服务端镜像(发布 0.5.0+ 或 make docker-image 本地构建);
+#   sqlite→pg 数据迁移: ./deploy.sh migrate(migrate 子命令要求 .env 已配 DB_MODE=pg* + PG_DSN)
 #
 # 环境变量(全部可选,均有默认值):
 #   DEPLOY_DIR        部署目录(含 docker-compose.yml;默认 = 当前目录,install-server.sh 会传入)
@@ -19,10 +26,18 @@
 #   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-server:latest)
 #   NETWORK_SUBNET    私有网段(默认 172.28.0.0/24)
 #   CADDY_IP / SERVER_IP  容器固定 IP(默认 172.28.0.2 / 172.28.0.3)
+#   DB_MODE           sqlite(默认) | pg | pg-external
+#   PG_PASSWORD       pg 模式:内置 postgres 容器密码(缺省随机生成并写入 .env)
+#   PG_DSN            pg-external 必填;pg 模式由脚本生成(postgres://picoaide:<pw>@postgres:5432/picoaide)
+#   PG_IMAGE          pg 模式内置镜像(默认 postgres:16-alpine)
+#   PG_IP             pg 容器固定 IP(默认 172.28.0.4)
+#   MIGRATE=yes       migrate 子命令无人值守确认(跳过交互确认)
 #   CONFIRM_CDN       auto 模式:域名解析不直连本机(疑似 CDN/代理)时,
 #                     交互确认;无人值守设 CONFIRM_CDN=yes 直接继续
 #   REINSTALL=yes     .env 已存在时清除旧部署重装(默认安全退出)
 #   UNINSTALL_VOLUMES=yes  uninstall --volumes 无人值守确认(删除数据目录)
+# 注意:依赖(docker/compose/curl/jq/openssl/dns 工具)自动安装由 install-server.sh 负责;
+#   直接运行本脚本需先自行安装 REQUIRED_CMDS 中的命令,缺失即报错退出(绝不带病执行)。
 set -euo pipefail
 
 # ---- 路径与参数 ----
@@ -50,6 +65,14 @@ SERVER_IP="${SERVER_IP:-}"
 CONFIRM_CDN="${CONFIRM_CDN:-}"
 REINSTALL="${REINSTALL:-}"
 UNINSTALL_VOLUMES="${UNINSTALL_VOLUMES:-}"
+DB_MODE="${DB_MODE:-}"
+PG_PASSWORD="${PG_PASSWORD:-}"
+PG_DSN="${PG_DSN:-}"
+PG_IMAGE="${PG_IMAGE:-}"
+PG_IP="${PG_IP:-}"
+MIGRATE="${MIGRATE:-}"
+CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-}"
+CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-}"
 TZ="${TZ:-}"
 
 # 优先级:环境变量 > 已存在 .env > 内置默认(下面赋值)
@@ -57,7 +80,7 @@ TZ="${TZ:-}"
 if [ -f "$DEPLOY_DIR/.env" ]; then
   while IFS='=' read -r key val; do
     case "$key" in
-      TLS_MODE|DOMAIN|ADMIN_USER|SERVER_IMAGE|NETWORK_SUBNET|CADDY_IP|SERVER_IP|TZ)
+      TLS_MODE|DOMAIN|ADMIN_USER|SERVER_IMAGE|NETWORK_SUBNET|CADDY_IP|SERVER_IP|TZ|DB_MODE|PG_PASSWORD|PG_DSN|PG_IMAGE|PG_IP|MIGRATE|CADDY_HTTP_PORT|CADDY_HTTPS_PORT)
         : "${!key:=$val}" ;;   # 环境变量已设置则保留,否则用 .env 值
     esac
   done < <(grep -E '^[A-Z_]+=' "$DEPLOY_DIR/.env" 2>/dev/null || true)
@@ -70,14 +93,29 @@ SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-server:latest}"
 NETWORK_SUBNET="${NETWORK_SUBNET:-172.28.0.0/24}"
 CADDY_IP="${CADDY_IP:-172.28.0.2}"
 SERVER_IP="${SERVER_IP:-172.28.0.3}"
+DB_MODE="${DB_MODE:-sqlite}"
+PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
+PG_IP="${PG_IP:-172.28.0.4}"
 TZ="${TZ:-Asia/Shanghai}"
+CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-80}"
+CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-443}"
 CADDY_CONTAINER="picoaide-caddy"
 SERVER_CONTAINER="picoaide-server"
+PG_CONTAINER="picoaide-postgres"
 NETWORK_NAME="picoaide-net"
 
 log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
 warn() { log "警告: $*"; }
 fail() { log "错误: $*"; exit 1; }
+
+# 数据库后端 → compose override 文件(COMPOSE_FILE 叠加,全部子命令自动生效)
+case "$DB_MODE" in
+  sqlite) : ;;
+  pg) COMPOSE_FILE="${COMPOSE_FILE}:$(dirname "$COMPOSE_FILE")/docker-compose.pg.yml" ;;
+  pg-external) COMPOSE_FILE="${COMPOSE_FILE}:$(dirname "$COMPOSE_FILE")/docker-compose.pg-ext.yml" ;;
+  *) fail "DB_MODE 仅支持 sqlite/pg/pg-external,当前: $DB_MODE" ;;
+esac
+export COMPOSE_FILE
 
 # ============================================================
 # 命令存在性检查:缺失即提示安装包并退出,绝不带病执行
@@ -150,12 +188,12 @@ check_network_conflict() {
 check_ports() {
   local busy=""
   if command -v ss >/dev/null 2>&1; then
-    busy="$(ss -tln 2>/dev/null | awk '{print $4}' | grep -E ':(80|443)$' || true)"
+    busy="$(ss -tln 2>/dev/null | awk '{print $4}' | grep -E ":($CADDY_HTTP_PORT|$CADDY_HTTPS_PORT)$" || true)"
   elif command -v lsof >/dev/null 2>&1; then
-    busy="$(lsof -iTCP:80 -iTCP:443 -sTCP:LISTEN 2>/dev/null || true)"
+    busy="$(lsof -iTCP:$CADDY_HTTP_PORT -iTCP:$CADDY_HTTPS_PORT -sTCP:LISTEN 2>/dev/null || true)"
   fi
-  [ -n "$busy" ] && fail "端口 80/443 已被占用:"$'\n'"$busy"$'\n'"请先释放端口,或修改 compose 中 CADDY_HTTP_PORT/CADDY_HTTPS_PORT 并调整 Caddyfile。"
-  log "  ✓ 端口 80/443 空闲"
+  [ -n "$busy" ] && fail "端口 $CADDY_HTTP_PORT/$CADDY_HTTPS_PORT 已被占用:"$'\n'"$busy"$'\n'"请先释放端口,或修改 .env 的 CADDY_HTTP_PORT/CADDY_HTTPS_PORT 并调整 Caddyfile。"
+  log "  ✓ 端口 $CADDY_HTTP_PORT/$CADDY_HTTPS_PORT 空闲"
   return 0
 }
 
@@ -248,9 +286,28 @@ write_env() {
       log "  已随机生成管理员密码(部署完成后打印)"
     fi
   fi
+  # ---- PG 后端字段 ----
+  if [ "$DB_MODE" = "pg" ]; then
+    if [ -z "$PG_PASSWORD" ]; then
+      if [ -f .env ] && grep -q '^PG_PASSWORD=.\+' .env 2>/dev/null; then
+        : # 复用旧 .env 里的 PG 密码
+      else
+        PG_PASSWORD="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)"
+        log "  已随机生成 PostgreSQL 密码(部署完成后写入 .env)"
+      fi
+    fi
+    [ -z "$PG_DSN" ] && PG_DSN="postgres://picoaide:${PG_PASSWORD}@postgres:5432/picoaide"
+  elif [ "$DB_MODE" = "pg-external" ]; then
+    [ -n "$PG_DSN" ] || fail "DB_MODE=pg-external 必须提供 PG_DSN(如 postgres://user:pass@host:5432/db)"
+    case "$PG_DSN" in
+      postgres://*|postgresql://*|*host=*|*hostaddr=*) : ;;
+      *) fail "PG_DSN 格式不合法(需 postgres:// 或 keyword 形式)" ;;
+    esac
+  fi
   cat > .env <<ENV
 # PicoAide 部署配置(由 deploy.sh 生成;手工修改后 docker compose up -d 生效)
 # 证书模式: manual(自签占位+提示替换,默认) | auto(Caddy 自动申请 Let's Encrypt)
+# 数据库后端: sqlite(默认) | pg(内置 postgres 容器) | pg-external(已有 PostgreSQL 实例)
 TLS_MODE=$TLS_MODE
 DOMAIN=$DOMAIN
 ADMIN_USER=$ADMIN_USER
@@ -259,7 +316,14 @@ SERVER_IMAGE=$SERVER_IMAGE
 NETWORK_SUBNET=$NETWORK_SUBNET
 CADDY_IP=$CADDY_IP
 SERVER_IP=$SERVER_IP
+CADDY_HTTP_PORT=$CADDY_HTTP_PORT
+CADDY_HTTPS_PORT=$CADDY_HTTPS_PORT
 TZ=${TZ:-Asia/Shanghai}
+DB_MODE=$DB_MODE
+PG_PASSWORD=$PG_PASSWORD
+PG_DSN=$PG_DSN
+PG_IMAGE=$PG_IMAGE
+PG_IP=$PG_IP
 ENV
   chmod 600 .env
   log "  ✓ 已生成 .env(权限 600)"
@@ -279,14 +343,16 @@ write_caddyfile() {
 }
 
 # ---- 健康等待 ----
-# 域名用 --resolve 打到 127.0.0.1(本机验证);IP 直连即可
+# 域名用 --resolve 打到 127.0.0.1(本机验证);IP 直连即可;端口用 .env 的可配置端口
 curl_health() {
+  local code
   if is_ip "$DOMAIN"; then
-    curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$DOMAIN/healthz" 2>/dev/null || true
+    code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$DOMAIN:$CADDY_HTTPS_PORT/healthz" 2>/dev/null || true)"
   else
-    curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
-      --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/healthz" 2>/dev/null || true
+    code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+      --resolve "$DOMAIN:$CADDY_HTTPS_PORT:127.0.0.1" "https://$DOMAIN:$CADDY_HTTPS_PORT/healthz" 2>/dev/null || true)"
   fi
+  echo "${code:-000}"
 }
 
 wait_ready() {
@@ -324,8 +390,9 @@ cmd_install() {
   $COMPOSE up -d
   wait_ready
   log "========== 部署完成 =========="
-  log "管理后台: https://$DOMAIN/admin/"
-  log "员工登录: https://$DOMAIN"
+  BASE_URL="https://$DOMAIN"; [ "$CADDY_HTTPS_PORT" != "443" ] && BASE_URL="$BASE_URL:$CADDY_HTTPS_PORT"
+  log "管理后台: $BASE_URL/admin/"
+  log "员工登录: $BASE_URL"
   log "管理员账号: $ADMIN_USER"
   log "管理员密码: ${PICOAI_ADMIN_PASSWORD:-<已从 .env 读取,已有 admin 后可清空>}"
   log "数据目录: $DEPLOY_DIR/picoaide-data"
@@ -335,7 +402,17 @@ cmd_install() {
     auto)   log "  Caddy 将自动签发/续期 Let's Encrypt 证书" ;;
   esac
   log "固定 IP: caddy=$CADDY_IP, server=$SERVER_IP(网段 $NETWORK_SUBNET)"
-  log "提示: 登录后在 webadmin 网关页填写\"对外访问地址\" = https://$DOMAIN"
+  case "$DB_MODE" in
+    sqlite) log "数据库: SQLite($DEPLOY_DIR/picoaide-data/picoaide.db;备份 $DEPLOY_DIR/picoaide-data)" ;;
+    pg)
+      log "数据库: PostgreSQL(内置容器 $PG_CONTAINER,IP $PG_IP,数据 $DEPLOY_DIR/pg-data)"
+      log "  DSN: postgres://picoaide:***@postgres:5432/picoaide"
+      log "  备份: ./deploy.sh backup(pg_dump)或停服后拷 pg-data/;镜像需含 -db-driver 支持" ;;
+    pg-external)
+      log "数据库: PostgreSQL(外部实例;数据备份由外部 PG 运维策略负责)"
+      log "  DSN: ${PG_DSN%%@*@}@<host>/<db>(密码已掩码)" ;;
+  esac
+  log "提示: 登录后在 webadmin 网关页填写\"对外访问地址\" = $BASE_URL"
 }
 
 cmd_update() {
@@ -351,7 +428,7 @@ cmd_update() {
 }
 
 cmd_status() {
-  [ -f "$COMPOSE_FILE" ] || fail "未发现 $COMPOSE_FILE,请 cd 到部署目录"
+  [ -f "$DEPLOY_DIR/docker-compose.yml" ] || fail "未发现 $DEPLOY_DIR/docker-compose.yml,请 cd 到部署目录"
   $COMPOSE ps 2>&1 || true
   echo
   log "容器固定 IP:"
@@ -363,16 +440,17 @@ cmd_status() {
     local code domain
     domain="$(grep -E '^DOMAIN=' .env 2>/dev/null | cut -d= -f2- || echo picoaide.example.com)"
     if is_ip "$domain"; then
-      code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$domain/healthz" 2>/dev/null || echo 000)"
+      code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$domain:$CADDY_HTTPS_PORT/healthz" 2>/dev/null || true)"
     else
-      code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$domain:443:127.0.0.1" "https://$domain/healthz" 2>/dev/null || echo 000)"
+      code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$domain:$CADDY_HTTPS_PORT:127.0.0.1" "https://$domain:$CADDY_HTTPS_PORT/healthz" 2>/dev/null || true)"
     fi
-    log "健康检查(https://$domain/healthz): HTTP $code"
+    [ -z "$code" ] && code="000"
+    log "健康检查(https://$domain:$CADDY_HTTPS_PORT/healthz): HTTP $code"
   fi
 }
 
 cmd_logs() {
-  [ -f "$COMPOSE_FILE" ] || fail "未发现 $COMPOSE_FILE,请 cd 到部署目录"
+  [ -f "$DEPLOY_DIR/docker-compose.yml" ] || fail "未发现 $DEPLOY_DIR/docker-compose.yml,请 cd 到部署目录"
   if [ "${1:-}" = "-t" ] || [ "${1:-}" = "--follow" ]; then
     $COMPOSE logs -f --tail=200
   else
@@ -392,6 +470,20 @@ cmd_backup() {
     [ -d picoaide-data ] && tar czf "$outdir/picoaide-data-$ts.tar.gz" -C . picoaide-data \
       && log "  ✓ 数据备份(离线): $outdir/picoaide-data-$ts.tar.gz" || warn "数据备份失败(容器未运行且数据目录为空?)"
   fi
+  # PostgreSQL 模式:pg_dump 自定义格式(运行中安全,含 schema+数据)
+  if [ "$DB_MODE" = "pg" ] && docker ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
+    if docker exec "$PG_CONTAINER" sh -c 'command -v pg_dump >/dev/null 2>&1'; then
+      docker exec "$PG_CONTAINER" pg_dump -U picoaide -Fc picoaide > "$outdir/pg-data-$ts.dump" \
+        && log "  ✓ PostgreSQL 备份(pg_dump): $outdir/pg-data-$ts.dump" \
+        && log "    恢复: docker exec -i $PG_CONTAINER pg_restore -U picoaide -d picoaide < $outdir/pg-data-$ts.dump" \
+        || warn "pg_dump 备份失败"
+    else
+      warn "容器内无 pg_dump,跳过线上备份;可停服后拷贝 pg-data/ 目录冷备"
+    fi
+  elif [ "$DB_MODE" = "pg" ]; then
+    [ -d pg-data ] && tar czf "$outdir/pg-data-$ts.tar.gz" -C . pg-data \
+      && log "  ✓ PostgreSQL 数据备份(离线): $outdir/pg-data-$ts.tar.gz" || warn "pg 数据备份失败(容器未运行且目录为空?)"
+  fi
   # auto 模式:Caddy 自动证书库在 ./caddy-data(当前目录 bind mount,不用命名卷)
   # 备份方式:直接拷当前目录文件(容器跑没跑都能备)
   if [ "${TLS_MODE:-manual}" = "auto" ] || grep -q '^TLS_MODE=auto' .env 2>/dev/null; then
@@ -401,22 +493,132 @@ cmd_backup() {
     fi
   fi
   log "恢复方式: 停服(picoaide-server 容器)后解包覆盖 picoaide-data/、caddy-data/,再 docker compose up -d"
+  [ "$DB_MODE" = "pg" ] && log "  PostgreSQL 数据恢复: 用上条 pg_restore 命令(或停服后恢复 pg-data/ 冷备)"
+}
+
+# ---- sqlite → PostgreSQL 数据迁移 ----
+# 前提:.env 的 DB_MODE=pg(内置容器)或 pg-external(已有实例,需 PG_DSN);
+#   也可 DB_MODE=pg ./deploy.sh migrate(环境变量优先,迁移后写入 .env)。
+# 流程: --dry-run 行数预览 → 交互确认/MIGRATE=yes → 起 postgres → 停 server
+#       → 清空目标表(pg 容器 psql / 外部 psql) → 迁移镜像执行
+#       → .env 的 DB_MODE 改为 pg → up -d → 健康等待。
+# 迁移后原 sqlite 文件保留(回滚点):恢复 = .env 改回 DB_MODE=sqlite 并 up -d。
+cmd_migrate() {
+  local dry_run=0
+  if [ "${1:-}" = "--dry-run" ]; then dry_run=1; shift; fi
+  log "========== SQLite → PostgreSQL 迁移(migrate)=========="
+  [ "$DB_MODE" = "pg" ] || [ "$DB_MODE" = "pg-external" ] || fail "migrate 需要 DB_MODE=pg 或 pg-external(.env 配置后重试,或 DB_MODE=pg ./deploy.sh migrate)"
+  [ -f picoaide-data/picoaide.db ] || fail "未找到 picoaide-data/picoaide.db(没有可迁移的 SQLite 数据)"
+  command -v docker >/dev/null 2>&1 || fail "缺少 docker"
+  docker inspect "$SERVER_IMAGE" >/dev/null 2>&1 || docker pull "$SERVER_IMAGE" >/dev/null 2>&1 || fail "无法获取镜像 $SERVER_IMAGE(须含 migrate-sqlite-pg 工具 / -db-driver 支持,0.5.0+ 或本地构建)"
+
+  # ---- 目标模式参数(内置容器:缺省生成 PG_PASSWORD/PG_DSN 并写入 .env) ----
+  if [ "$DB_MODE" = "pg-external" ]; then
+    [ -n "$PG_DSN" ] || fail "DB_MODE=pg-external 需要 PG_DSN(如 postgres://user:pass@host:5432/db)"
+  else
+    [ -n "$PG_PASSWORD" ] || PG_PASSWORD="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)"
+    [ -n "$PG_DSN" ] || PG_DSN="postgres://picoaide:${PG_PASSWORD}@postgres:5432/picoaide"
+    # 把生成的密码/DSN 补进 .env(幂等:已有则不重复追加;供后续 compose up 读取)
+    ensure_env_key() { # key value —— 不存在才追加
+      local k="$1" v="$2"
+      grep -q "^$k=" .env && sed -i "s|^$k=.*|$k=$v|" .env || printf '%s=%s\n' "$k" "$v" >> .env
+    }
+    ensure_env_key PG_PASSWORD "$PG_PASSWORD"
+    ensure_env_key PG_DSN "$PG_DSN"
+    ensure_env_key PG_IMAGE "$PG_IMAGE"
+    ensure_env_key PG_IP "$PG_IP"
+    chmod 600 .env
+  fi
+  # 迁移后的 compose 必须叠加 pg override(脚本顶部按 sqlite 算的 COMPOSE_FILE 在此覆盖)
+  COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml:$DEPLOY_DIR/docker-compose.pg.yml"
+  [ "$DB_MODE" = "pg-external" ] && COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml:$DEPLOY_DIR/docker-compose.pg-ext.yml"
+  export COMPOSE_FILE
+
+  log "源: picoaide-data/picoaide.db"
+  log "目标: ${PG_DSN%%@*@}@<host>/<db>(密码已掩码);模式: $DB_MODE"
+
+  local run_mig=()
+  run_mig=(docker run --rm --entrypoint /app/migrate-sqlite-pg)
+  run_mig+=(-v "$DEPLOY_DIR/picoaide-data:/src:ro")
+  # 内置容器模式:必须加入 picoaide-net,才能用服务名 postgres 解析到 PG 容器;
+  # 外部模式:默认网络 + PG_DSN 主机名(用户给的公网/内网地址)
+  [ "$DB_MODE" = "pg" ] && run_mig+=(--network "$NETWORK_NAME")
+  run_mig+=("$SERVER_IMAGE" -sqlite /src/picoaide.db -pg-dsn "$PG_DSN")
+
+  # 内置容器模式:先拉起 postgres(dry-run/迁移工具都需要它可达);等 healthy
+  if [ "$DB_MODE" = "pg" ]; then
+    log "▶ 启动 postgres 容器($PG_IMAGE)..."
+    $COMPOSE up -d postgres
+    log "  等待 postgres 就绪(最多 60s)..."
+    for _ in $(seq 1 20); do
+      if [ "$($COMPOSE ps -q postgres 2>/dev/null)" != "" ] && docker inspect -f '{{.State.Health.Status}}' "$PG_CONTAINER" 2>/dev/null | grep -q healthy; then
+        log "  ✓ postgres 就绪"
+        break
+      fi
+      sleep 3
+    done
+  fi
+
+  if [ "$dry_run" = 1 ]; then
+    log "▶ 预览(dry-run:只统计行数,不写入)..."
+    "${run_mig[@]}" -dry-run || fail "dry-run 失败(检查 PG_DSN/网络/镜像是否含迁移工具)"
+    log "  ✓ 以上为各表行数;确认后执行: ./deploy.sh migrate(建议先 ./deploy.sh backup)"
+    return 0
+  fi
+
+  if [ "$MIGRATE" != "yes" ]; then
+    read -r -p "(交互)确认迁移? 目标库将被清空;建议先 ./deploy.sh backup [y/N] " ans < /dev/tty || ans=n
+    case "$ans" in y|Y|yes|YES) ;; *) fail "已取消" ;; esac
+  fi
+
+  log "▶ 停止 server(保证 SQLite 一致性)..."
+  $COMPOSE stop "$SERVER_CONTAINER" >/dev/null 2>&1 || true
+
+  log "▶ 清空目标库表(TRUNCATE ... CASCADE;新库无表时忽略错误)..."
+  local tables="users, groups, gateway_providers, models, settings, skills, skill_grants, user_groups, usage, api_tokens, audit_logs, admin_sessions"
+  local trunc="TRUNCATE TABLE $tables CASCADE"
+  if [ "$DB_MODE" = "pg" ]; then
+    docker exec "$PG_CONTAINER" psql -U picoaide -d picoaide -c "$trunc" >/dev/null 2>&1 \
+      && log "  ✓ 已清空目标库表(内置容器)" || log "  · 目标库为空/表不存在(忽略,继续)"
+  else
+    docker run --rm --network host --entrypoint psql "$PG_IMAGE" "$PG_DSN" -c "$trunc" >/dev/null 2>&1 \
+      && log "  ✓ 已清空目标库表(外部实例)" || log "  · 目标库为空/无权限(忽略,继续;若已有数据将被跳过可能导致迁移失败)"
+  fi
+
+  log "▶ 执行迁移(写入 PostgreSQL)..."
+  "${run_mig[@]}" || fail "迁移失败(可重试:目标表保持空闲后重新执行;SQLite 数据未动)"
+
+  log "▶ 写入 .env: DB_MODE → $DB_MODE ..."
+  local tmp
+  tmp="$(mktemp)"
+  awk -v m="$DB_MODE" '/^DB_MODE=/{print "DB_MODE=" m; next} {print}' .env > "$tmp" && mv "$tmp" .env
+  grep -q '^DB_MODE=' .env || printf 'DB_MODE=%s\n' "$DB_MODE" >> .env
+  chmod 600 .env
+
+  log "▶ 以 PostgreSQL 后端重启..."
+  $COMPOSE up -d
+  wait_ready
+  log "========== 迁移完成 =========="
+  log "数据已迁移到 PostgreSQL;原 SQLite 文件保留(picoaide-data/picoaide.db,回滚点)"
+  log "回滚: .env 改回 DB_MODE=sqlite → docker compose up -d(数据仍在 sqlite 中)"
+  log "注意: master.key 不变(在 ./picoaide-data/master.key,加密凭证仍可解密)"
+  return 0
 }
 
 cmd_uninstall() {
   log "========== 卸载(uninstall)=========="
-  [ -f "$COMPOSE_FILE" ] || fail "未发现 $COMPOSE_FILE"
+  [ -f "$DEPLOY_DIR/docker-compose.yml" ] || fail "未发现 $DEPLOY_DIR/docker-compose.yml"
   if [ "${1:-}" = "--volumes" ]; then
     if [ "$UNINSTALL_VOLUMES" != "yes" ]; then
-      read -r -p "(交互)确认删除当前目录全部数据(picoaide-data/ caddy-data/ caddy-config/ certs/)? [y/N] " ans < /dev/tty || ans=n
+      read -r -p "(交互)确认删除当前目录全部数据(picoaide-data/ caddy-data/ caddy-config/ certs/ pg-data/)? [y/N] " ans < /dev/tty || ans=n
       case "$ans" in y|Y|yes|YES) ;; *) fail "已取消" ;; esac
     fi
     $COMPOSE down --remove-orphans
-    rm -rf picoaide-data caddy-data caddy-config
-    log "  ✓ 已停止容器并删除数据目录(picoaide-data/ caddy-data/ caddy-config/;配置文件 .env/Caddyfile 保留)"
+    rm -rf picoaide-data caddy-data caddy-config pg-data
+    log "  ✓ 已停止容器并删除数据目录(picoaide-data/ caddy-data/ caddy-config/ pg-data/;配置文件 .env/Caddyfile 保留)"
   else
     $COMPOSE down --remove-orphans
-    log "  ✓ 已停止容器(数据目录保留: picoaide-data/ caddy-data/ caddy-config/)"
+    log "  ✓ 已停止容器(数据目录保留: picoaide-data/ caddy-data/ caddy-config/ pg-data/)"
   fi
 }
 
@@ -431,19 +633,21 @@ case "$CMD" in
   status)    cmd_status ;;
   logs)      cmd_logs "$@" ;;
   backup)    cmd_backup ;;
+  migrate)   cmd_migrate "$@" ;;
   uninstall) cmd_uninstall "$@" ;;
   *)
     cat >&2 <<EOF
-用法: $(basename "$0") <install|update|status|logs|backup|uninstall> [参数]
+用法: $(basename "$0") <install|update|status|logs|backup|migrate|uninstall> [参数]
 
   install        首次部署(自动: 命令检查→网段/端口检查→证书→.env→启动)
   update         升级镜像并重启(数据不丢)
   status         容器状态 + 健康检查 + 固定 IP
   logs [-t]      查看日志(--tail=200;-t=跟踪)
-  backup         备份数据 + auto 模式 Caddy 证书
+  backup         备份数据 + auto 模式 Caddy 证书(+ pg 模式 pg_dump)
+  migrate [--dry-run]  SQLite→PostgreSQL 数据迁移(需 DB_MODE=pg|pg-external;--dry-run 只统计)
   uninstall [--volumes]  卸载(--volumes 连同数据卷删除,需确认)
 
-环境变量见脚本头部注释(如 DOMAIN/TLS_MODE/PICOAI_ADMIN_PASSWORD/CONFIRM_CDN)。
+环境变量见脚本头部注释(如 DOMAIN/TLS_MODE/DB_MODE/PG_DSN/PICOAI_ADMIN_PASSWORD/CONFIRM_CDN)。
 EOF
     exit 1 ;;
 esac

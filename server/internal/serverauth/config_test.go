@@ -9,7 +9,7 @@ import (
 
 func newStoreDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(tempPath(t, "cfg.db"))
+	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "cfg.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
