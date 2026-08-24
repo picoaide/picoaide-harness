@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
@@ -81,6 +81,33 @@ describe('packPreset', () => {
       try {
         await installPresetArchive({ name: 'ppt-gen', archive: result.archive, presetsDir: scratch })
         expect(await listInstalledPresets(scratch)).toEqual(['ppt-gen'])
+      } finally {
+        await rm(scratch, { recursive: true, force: true })
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('packs only agent.cordis.yml and preset.yml (no sibling assets)', async () => {
+    const dir = await newPresetsDir()
+    try {
+      const presetDir = join(dir, 'ppt-gen')
+      await mkdir(join(presetDir, 'skills', 'demo'), { recursive: true })
+      await mkdir(join(presetDir, 'assets'), { recursive: true })
+      await writeFile(join(presetDir, 'agent.cordis.yml'), COMPOSITION)
+      await writeFile(join(presetDir, 'preset.yml'), 'name: PPT 生成\n')
+      await writeFile(join(presetDir, 'skills', 'demo', 'SKILL.md'), '# demo\n')
+      await writeFile(join(presetDir, 'assets', 'big.bin'), 'x'.repeat(4096))
+      const result = await packPreset(dir, 'ppt-gen')
+      // Round-trip through the installer: only the two files may be present.
+      const scratch = await newPresetsDir()
+      try {
+        await installPresetArchive({ name: 'ppt-gen', archive: result.archive, presetsDir: scratch })
+        const installed = await readdir(join(scratch, 'ppt-gen'))
+        expect(installed.sort()).toEqual(['agent.cordis.yml', 'preset.yml'])
+        // Sibling assets were NOT shipped: reading them fails with ENOENT.
+        await expect(stat(join(scratch, 'ppt-gen', 'assets'))).rejects.toMatchObject({ code: 'ENOENT' })
       } finally {
         await rm(scratch, { recursive: true, force: true })
       }

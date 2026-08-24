@@ -52,6 +52,13 @@ export default defineConfig([
       '@deepseek-ai/dsh-client-ui-input-trigger/client',
       '@deepseek-ai/dsh-client-ui-sidebar/client',
     ],
+    // Inlined libraries (react/react-dom read process.env.NODE_ENV in their
+    // dev branches) need the build-time substitution, like the upstream
+    // clientBundle preset — otherwise the browser bundle throws
+    // "process is not defined" at factory execution.
+    define: {
+      'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+    },
     outputOptions: {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_NAME)}, factory: (require) => {`,
