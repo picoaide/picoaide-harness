@@ -7,11 +7,11 @@ import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   installSkillArchive,
   listInstalledSkills,
-  MAX_ARCHIVE_BYTES,
   resolveSkillsDir,
   uninstallSkill,
   validateSkillName,
 } from './skill-install.ts'
+import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 
 const LOGIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
