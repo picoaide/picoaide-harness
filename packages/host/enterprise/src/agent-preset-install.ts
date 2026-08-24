@@ -266,6 +266,62 @@ export async function listInstalledPresets(presetsDir: string): Promise<string[]
   return result.sort((a, b) => a.localeCompare(b))
 }
 
+/** One local preset row (name + optional display metadata) for the panel. */
+export interface LocalPresetRow {
+  name: string
+  displayName?: string | undefined
+  description?: string | undefined
+}
+
+/**
+ * Enumerate locally authored presets with their display metadata: what the
+ * 创造模式 roster finds (<dshHome>/.agent-presets/<id>/agent.cordis.yml).
+ * @param presetsDir - the local preset root.
+ * @returns rows sorted by id, metadata best-effort (unreadable preset.yml
+ * degrades to the id — presentation, not capability).
+ */
+export async function listLocalPresets(presetsDir: string): Promise<LocalPresetRow[]> {
+  const names = await listInstalledPresets(presetsDir)
+  const rows: LocalPresetRow[] = []
+  for (const name of names) {
+    const meta = await readPresetMeta(join(presetsDir, name))
+    rows.push({
+      name,
+      ...meta.name === undefined ? {} : { displayName: meta.name },
+      ...meta.description === undefined ? {} : { description: meta.description },
+    })
+  }
+  return rows
+}
+
+/**
+ * Map local presets against the gateway catalog: each local row carries an
+ * optional upper-state (pending/approved/rejected from the caller's own
+ * uploads, or none = not uploaded yet).
+ * @param presetsDir - the local preset root.
+ * @param gatewayRows - the gateway's visible rows (approved + own).
+ * @returns rows sorted by id, status best-effort.
+ */
+export async function mapLocalPresets(
+  presetsDir: string,
+  gatewayRows: readonly { name: string; status: string }[] = [],
+): Promise<Record<string, { name: string; displayName?: string; description?: string; status?: string }>> {
+  const local = await listLocalPresets(presetsDir)
+  const out: Record<string, { name: string; displayName?: string; description?: string; status?: string }> = {}
+  for (const row of local) {
+    const gateway = gatewayRows.find(g => g.name === row.name)
+    out[row.name] = gateway === undefined
+      ? { name: row.name, ...row.displayName === undefined ? {} : { displayName: row.displayName }, ...row.description === undefined ? {} : { description: row.description } }
+      : {
+        name: row.name,
+        ...row.displayName === undefined ? {} : { displayName: row.displayName },
+        ...row.description === undefined ? {} : { description: row.description },
+        status: gateway.status,
+      }
+  }
+  return out
+}
+
 /**
  * Uninstall one preset: remove `<presetsDir>/<name>` after verifying it is
  * an installed preset (valid id + composition present).

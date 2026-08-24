@@ -7,13 +7,15 @@ interface CatalogPreset {
   description: string
   version: string
   author: string
-  status: 'pending' | 'approved' | 'rejected'
+  status: 'pending' | 'approved' | 'rejected' | 'local'
   created_at: string
 }
 
 interface Catalog {
   presets?: CatalogPreset[]
   installed?: string[]
+  /** Locally authored presets (创造模式 roster) keyed by id; status when uploaded. */
+  local?: Record<string, { name: string; displayName?: string; description?: string; status?: 'pending' | 'approved' | 'rejected' }>
 }
 
 const OVERLAY: React.CSSProperties = {
@@ -173,7 +175,7 @@ const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'cente
 /** Per-item action feedback: which preset is busy and the outcome. */
 interface ActionState {
   name: string
-  kind: 'uploading' | 'installing' | 'uninstalling' | 'done' | 'failed'
+  kind: 'uploading' | 'installing' | 'uninstalling' | 'done-upload' | 'done-install' | 'done-uninstall' | 'failed'
   error?: string | undefined
 }
 
@@ -258,7 +260,7 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({ name }),
       })
       if (res.ok) {
-        setAction({ name, kind: 'done' })
+        setAction({ name, kind: 'done-upload' })
       } else {
         const data = await res.json().catch(() => ({}))
         setAction({ name, kind: 'failed', error: (data as { error?: string }).error ?? `HTTP ${String(res.status)}` })
@@ -275,7 +277,7 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
     const result = await post(`/api/pico/agent-presets/${encodeURIComponent(name)}/install`)
     if (result.ok) {
       setInstalled(prev => new Set(prev).add(name))
-      setAction({ name, kind: 'done' })
+      setAction({ name, kind: 'done-install' })
     } else {
       setAction({ name, kind: 'failed', error: result.error })
     }
@@ -298,7 +300,7 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
         next.delete(name)
         return next
       })
-      setAction({ name, kind: 'done' })
+      setAction({ name, kind: 'done-uninstall' })
     } else {
       setAction({ name, kind: 'failed', error: result.error })
     }
@@ -306,7 +308,11 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
   }
 
   const presets = catalog?.presets ?? []
-  const { own, shared } = splitCatalog(presets)
+  const { shared } = splitCatalog(presets)
+  // Local rows: disk presets keyed by id, each with the gateway upload state
+  // (undefined = not uploaded yet; pending/approved/rejected otherwise).
+  const localRows = Object.entries(catalog?.local ?? {}).map(([id, row]) => ({ id, ...row }))
+  localRows.sort((a, b) => a.id.localeCompare(b.id))
   const busy = action !== null && (action.kind === 'uploading' || action.kind === 'installing' || action.kind === 'uninstalling')
 
   const renderCard = (p: CatalogPreset, mode: 'own' | 'shared'): React.ReactNode => {
@@ -332,7 +338,9 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
               ? <button type="button" style={action?.name === p.name && action.kind === 'uploading' ? BUTTON_DISABLED : BUTTON_SECONDARY} disabled={busy} onClick={() => { void upload(p.name) }}>{t('agent.reupload')}</button>
               : p.status === 'approved'
                 ? <span style={CHIP}>{t('agent.approved')}</span>
-                : <span style={CHIP_PENDING}>{t('agent.pending')}</span>
+                : p.status === 'pending'
+                  ? <span style={CHIP_PENDING}>{t('agent.pending')}</span>
+                  : <button type="button" style={action?.name === p.name && action.kind === 'uploading' ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void upload(p.name) }}>{t('agent.upload')}</button>
           ) : isInstalled ? (
             confirmName === p.name ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
@@ -372,9 +380,17 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
       <>
         <div>
           <h3 style={SECTION_HEAD}>{t('agent.localSection')}</h3>
-          {own.length === 0
+          {localRows.length === 0
             ? <p style={EMPTY}>{t('agent.emptyLocal')}</p>
-            : <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{own.map(p => renderCard(p, 'own'))}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{localRows.map(p => renderCard({
+              name: p.id,
+              display_name: p.displayName ?? '',
+              description: p.description ?? '',
+              version: '1.0.0',
+              author: '',
+              status: p.status === undefined ? 'local' : p.status,
+              created_at: '',
+            }, 'own'))}</div>}
         </div>
         <div>
           <h3 style={SECTION_HEAD}>{t('agent.librarySection')}</h3>
@@ -395,9 +411,11 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
           <button type="button" style={CLOSE} onClick={onClose}>{t('agent.close')}</button>
         </div>
         <div style={BODY}>{body}</div>
-        {action !== null && action.kind === 'done' && (
+        {action !== null && (action.kind === 'done-upload' || action.kind === 'done-install' || action.kind === 'done-uninstall') && (
           <p style={{ ...NOTICE, color: 'var(--dsw-alias-state-success-primary)' }}>
-            {t('agent.installed', { name: action.name })}
+            {action.kind === 'done-upload' ? t('agent.uploaded', { name: action.name })
+              : action.kind === 'done-install' ? t('agent.installDone', { name: action.name })
+                : t('agent.uninstalled', { name: action.name })}
           </p>
         )}
         {action !== null && action.kind === 'failed' && (

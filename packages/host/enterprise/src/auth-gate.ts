@@ -15,6 +15,7 @@ import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import {
   installPresetArchive,
   listInstalledPresets,
+  mapLocalPresets,
   packPreset,
   resolvePresetsDir,
   uninstallPreset,
@@ -434,7 +435,8 @@ export function apply(ctx: Context, config: Config): void {
             try {
               const data = await fetchJSON(s.serverURL, '/api/agent-presets', { token: s.token })
               const installed = await listInstalledPresets(presetsDir)
-              json(res, 200, { ...data, installed })
+              const local = await mapLocalPresets(presetsDir, data.presets ?? [])
+              json(res, 200, { ...data, installed, local })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 ctx.picoSession.clear()
