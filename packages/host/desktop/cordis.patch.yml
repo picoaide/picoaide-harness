@@ -9,6 +9,15 @@
       name: dsh-plugin-desktop/diagnostics
     - id: desktop-updates
       name: dsh-plugin-desktop/updates
+    - id: desktop-asar-fs
+      name: dsh-plugin-desktop/asar-file-system
+    - id: desktop-asar-guidance
+      name: dsh-plugin-desktop/asar-guidance
+
+# The desktop filesystem backend replaces upstream `fs-sandbox`: it inherits
+# the sandbox fence and adds asar-link unwinding for packaged in-box reads.
+- id: fs-sandbox
+  disabled: true
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime
