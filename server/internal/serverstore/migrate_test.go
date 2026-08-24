@@ -130,7 +130,9 @@ func TestMigration0028AuditCleanupOldDB(t *testing.T) {
 	keep := migrationsFor()
 	filtered := make([]migration, 0, len(keep))
 	for _, m := range keep {
-		if m.version == 28 {
+		// 模拟 0028 之前的旧库:跳过 0028(审计表更名/清理)以及依赖其
+		// audit_logs 表的后续迁移(0031 索引会在 audit_logs 上建索引)。
+		if m.version >= 28 {
 			continue
 		}
 		filtered = append(filtered, m)
