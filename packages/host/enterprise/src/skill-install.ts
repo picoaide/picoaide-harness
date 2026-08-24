@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { assertSafeEntryPath, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES, posixNormalize } from './archive-util.ts'
+import { assertSafeEntryPath, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
 
 /** Skill names must be a single safe directory segment. */
 export const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u
