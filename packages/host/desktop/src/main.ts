@@ -31,6 +31,7 @@ import { LogFileSink } from './log-files.ts'
 import { maskSecrets } from './mask-secrets.ts'
 import { resolveDesktopShellEnvironment } from './shell-environment.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
+import { installAsarSpawnRewrite } from './asar-spawn.ts'
 import { DesktopPluginsService } from './desktop-plugins.ts'
 import {
   DESKTOP_PROFILE_NAME,
@@ -241,6 +242,12 @@ async function start(): Promise<void> {
       pluginManagementStatePath,
     )
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
+    // Electron does not patch `child_process.spawn`/`spawnSync` for asar paths
+    // (only `execFile`), while the harness process seam and the sandbox probe
+    // spawn packaged binaries through `spawn`. Rewrite virtual `app.asar`
+    // executables to their physical `app.asar.unpacked` twins before any
+    // plugin module loads its `node:child_process` binding.
+    const removeAsarSpawnRewrite = installAsarSpawnRewrite()
     const ctx = await boot(
       BIN_NAME,
       prepared.rootConfig,
@@ -250,6 +257,10 @@ async function start(): Promise<void> {
         hostCtx.effect(
           () => releasePackageResolver,
           'dsh-plugin-desktop: profile package resolution',
+        )
+        hostCtx.effect(
+          () => removeAsarSpawnRewrite,
+          'dsh-plugin-desktop: asar spawn path rewrite',
         )
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)

@@ -66,6 +66,11 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   'node_modules/@koromix/koffi-linux-x64/build/koffi-linux-x64.node',
   'node_modules/node-addon-require-builtin-linux-x64-gnu/build/Release/addon.node',
   'node_modules/@vscode/ripgrep-linux-x64/bin/rg',
+  // The landlock-run launcher is spawned (never dlopen'd) by the process
+  // sandbox. Electron cannot spawn a virtual asar path (only execFile is
+  // patched), so it must stay physical — the desktop asar-spawn rewrite
+  // resolves the virtual path to this twin at spawn time.
+  'node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64/bin/landlock-run',
 ] as const
 
 /** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
