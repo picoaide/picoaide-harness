@@ -34,6 +34,15 @@ jobs:
       - run: go vet ./...
       - run: go test ./... -count=1
       - run: make build-server
+      - name: Deploy script syntax checks
+        run: |
+          bash -n server/scripts/install-server.sh server/scripts/deploy.sh
+          if command -v docker >/dev/null 2>&1; then
+            PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@postgres:5432/picoaide \
+              docker compose -f server/docker-compose.yml -f server/docker-compose.pg.yml config -q
+            PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
+              docker compose -f server/docker-compose.yml -f server/docker-compose.pg-ext.yml config -q
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: picoaide-server-linux-amd64
