@@ -85,6 +85,7 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/models
 | [docs/05-agent-system.md](docs/05-agent-system.md) | Agent 引擎/工具注册表/审批门控/沙盒 |
 | [docs/06-database.md](docs/06-database.md) | 服务端 17 表 + 客户端 4 表 |
 | [docs/07-marketplace.md](docs/07-marketplace.md) | 技能商城/授权/插件运行时 |
+| [docs/08-agent-share.md](docs/08-agent-share.md) | 共享 Agent(创造模式上传/审核/全员共享) |
 | [docs/08-development.md](docs/08-development.md) | 开发指南/TDD/契约 |
 
 ## 截图
