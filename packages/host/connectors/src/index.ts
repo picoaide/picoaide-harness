@@ -174,7 +174,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   /** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
   const URL_COMMAND_TIMEOUT_MS = 15_000
-  const resolveUrlCommand = async (args: string[]): Promise<string> => {
+  const resolveUrlCommand = async (args: string[], extraEnv?: Record<string, string>): Promise<string> => {
     const [command, ...rest] = args
     if (command === undefined) throw new Error('urlCommand is empty')
     const resolved = await cliRuntime.resolve(command, rest)
@@ -182,7 +182,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const spawnArgs = resolved?.args ?? rest
     return new Promise((resolve, reject) => {
       const child = spawn(spawnCommand, spawnArgs, {
-        env: { ...process.env },
+        env: { ...process.env, ...(extraEnv ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: resolved?.shell,
       })
@@ -274,7 +274,7 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
             transport: 'streamable-http' as const,
             serverName: server.serverName,
             url: server.urlCommand
-              ? await resolveUrlCommand(server.urlCommand)
+              ? await resolveUrlCommand(server.urlCommand, server.env)
               : (server.url ?? ''),
             headers: renderHeaders(server, credential),
             toolCallTimeoutMs: 120_000,
