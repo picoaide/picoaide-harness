@@ -42,8 +42,11 @@
 ### skills(0005)
 `id, name 唯一, version, description, author, git_url, git_ref(默认 main), checksum, enabled(0/1,下架置 0 不删行), created_at, updated_at`。bootstrap 建议清单只返回 enabled=1。
 
-### agent_presets(0032)
-`id, name UNIQUE(preset 目录名,上游 PRESET_ID 规则), display_name, description, version(默认 1.0.0), author(上传者 username), checksum(归档 sha256), status('pending'|'approved'|'rejected'), created_at, updated_at`;索引 `idx_agent_presets_status`。共享 Agent 状态机:员工(创造模式)上传 → pending;admin approve → approved(全员可见可下载,无 grants);reject → 仅作者可见,同名可重提(重置 pending)。归档存 `data/agent-presets-cache/<name>-1.0.0.tar.gz`。
+### agent_presets(0032, 0033, 0035 + agent_preset_grants 0036)
+`id, name, display_name, version(0035 起多版本), description, author, checksum, status('pending'|'approved'|'rejected'), reason, created_at, updated_at`;0035 改 `UNIQUE(name, version)`(重建表,旧行 version='1.0.0');0036 新增 `agent_preset_grants(name, grantee_type user|group, grantee)`。状态机:上传 → pending;admin approve → approved(**授权后才可见可装**,作者可见自己的);reject(必填 reason)→ 仅作者可见可重提。归档存 `data/agent-presets-cache/<name>-<version>.tar.gz`。
+
+### shared_skills(0034 + shared_skill_grants 0036)
+`id, name, display_name, version, description, author, checksum, status('pending'|'approved'|'rejected'), reason, created_at, updated_at`,`UNIQUE(name, version)` 多版本并存;0036 新增 `shared_skill_grants(skill_name, grantee_type, grantee)`。状态机同 agent_presets(上传 → 审核 → **授权后可见可装**);同名不同版本独立审核。归档存 `data/shared-skills-cache/<name>-<version>.tar.gz`。
 
 
 `id(PK, 随机), user_id, csrf_key, expires_at`。管理端 24h 会话 + CSRF 校验(见 04-auth.md §4)。
