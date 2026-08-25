@@ -24,8 +24,9 @@
 ## 3. 端点
 
 - 员工(Bearer):`GET /api/agent-presets`、`POST /api/agent-presets`(归档 base64 + display_name/description ≤500 字)、`GET /api/agent-presets/:name/archive`(仅 approved)。
-- 管理端(Admin):`/api/admin/agent-presets`(列表/approve/reject(body reason)/delete/archive 核查/`preview`(composition + 文件清单))。
+- 管理端(Admin):`/api/admin/agent-presets`(列表/approve/reject(body reason)/delete/archive 核查/`preview`(composition + 文件清单));0037 起 `PUT /:name/:version/quality`(官方/精选质量标记,仅 approved 行,互斥,审计 `agent_preset_qualify`)。
 - 客户端本地代理:`/api/pico/agent-presets`(+upload/install/uninstall/archive),loopback guard + session 校验。
+- 统一聚合(Bearer):`GET /api/capabilities?source=org`(与共享技能合并返回,见 06-database.md §capabilities)。
 
 ## 4. 归档安全(服务端 + 客户端双侧校验)
 

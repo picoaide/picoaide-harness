@@ -48,7 +48,10 @@ type SharedSkill struct {
 	Checksum    string
 	Status      SharedSkillStatus
 	// Reason is the admin's rejection reason; empty unless rejected.
-	Reason    string
+	Reason string
+	// Quality 是组织库质量标记(0037):''|'official'|'featured' 互斥,
+	// 仅对 approved 行有展示语义;与市场「免费/专业」分级词表隔离。
+	Quality   string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -57,7 +60,7 @@ func scanSharedSkill(row interface{ Scan(...any) error }) (*SharedSkill, error) 
 	var s SharedSkill
 	var createdAt, updatedAt any
 	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description,
-		&s.Author, &s.Checksum, &s.Status, &s.Reason, &createdAt, &updatedAt); err != nil {
+		&s.Author, &s.Checksum, &s.Status, &s.Reason, &s.Quality, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	s.CreatedAt = parseSQLTime(createdAt)
@@ -65,7 +68,7 @@ func scanSharedSkill(row interface{ Scan(...any) error }) (*SharedSkill, error) 
 	return &s, nil
 }
 
-const sharedSkillColumns = "id, name, display_name, version, description, author, checksum, status, reason, created_at, updated_at"
+const sharedSkillColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, created_at, updated_at"
 
 // CreateSharedSkill inserts a pending row (unique name+version); returns
 // ErrDuplicate when that exact version already exists in any status.
@@ -182,8 +185,15 @@ func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]Sha
 
 // SetSharedSkillStatus transitions the row (approve/reject/resubmit) and
 // stores/clears the rejection reason in one atomic UPDATE.
+// 语义(0037):approve 保留 admin 预置的 quality;reject 与重提(pending)清空
+// quality——质量标记只属于 approved 内容,被拒/重提后不再携带。
 func SetSharedSkillStatus(db *sql.DB, name, version string, status SharedSkillStatus, reason string) error {
-	_, err := db.Exec(`UPDATE shared_skills SET status=?, reason=?, updated_at=`+NowExpr()+`
+	if status == SharedSkillApproved {
+		_, err := db.Exec(`UPDATE shared_skills SET status=?, reason=?, updated_at=`+NowExpr()+`
+			WHERE name=? AND version=?`, status, reason, name, version)
+		return err
+	}
+	_, err := db.Exec(`UPDATE shared_skills SET status=?, reason=?, quality='', updated_at=`+NowExpr()+`
 		WHERE name=? AND version=?`, status, reason, name, version)
 	return err
 }
@@ -224,4 +234,28 @@ func SharedSkillPendingCount(db *sql.DB, author string) (int, error) {
 	var n int
 	err := db.QueryRow(`SELECT COUNT(*) FROM shared_skills WHERE author=? AND status=?`, author, SharedSkillPending).Scan(&n)
 	return n, err
+}
+
+// ValidSharedQuality reports whether q is a legal quality tag (0037).
+func ValidSharedQuality(q string) bool {
+	return q == "" || q == "official" || q == "featured"
+}
+
+// SetSharedSkillQuality sets the quality tag (”|'official'|'featured') on one
+// name+version row. Only approved rows may carry a tag; returns ErrNotFound
+// when the version is absent or not approved.
+func SetSharedSkillQuality(db *sql.DB, name, version, quality string) error {
+	if !ValidSharedQuality(quality) {
+		return ErrValidation
+	}
+	res, err := db.Exec(`UPDATE shared_skills SET quality=?, updated_at=`+NowExpr()+`
+		WHERE name=? AND version=? AND status=?`, quality, name, version, SharedSkillApproved)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

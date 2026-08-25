@@ -33,7 +33,10 @@ type AgentPreset struct {
 	Status      AgentPresetStatus
 	// Reason is the admin's rejection reason; empty unless the row is
 	// rejected. Visible only to the author (and admins).
-	Reason    string
+	Reason string
+	// Quality 是组织库质量标记(0037):''|'official'|'featured' 互斥,
+	// 仅对 approved 行有展示语义;与市场「免费/专业」分级词表隔离。
+	Quality   string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -42,7 +45,7 @@ func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) 
 	var p AgentPreset
 	var createdAt, updatedAt any
 	if err := row.Scan(&p.ID, &p.Name, &p.DisplayName, &p.Description, &p.Version,
-		&p.Author, &p.Checksum, &p.Status, &p.Reason, &createdAt, &updatedAt); err != nil {
+		&p.Author, &p.Checksum, &p.Status, &p.Reason, &p.Quality, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	p.CreatedAt = parseSQLTime(createdAt)
@@ -50,7 +53,7 @@ func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) 
 	return &p, nil
 }
 
-const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, reason, created_at, updated_at"
+const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, reason, quality, created_at, updated_at"
 
 // CreateAgentPreset inserts a pending row; returns ErrDuplicate for an
 // existing name+version (any status).
@@ -207,8 +210,14 @@ func SetAgentPresetStatus(db *sql.DB, name string, status AgentPresetStatus, rea
 }
 
 // SetAgentPresetStatusByVersion transitions one name+version row.
+// 语义(0037):approve 保留 quality;reject/pending 清空 quality。
 func SetAgentPresetStatusByVersion(db *sql.DB, name, version string, status AgentPresetStatus, reason string) error {
-	_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, updated_at=`+NowExpr()+` WHERE name=? AND version=?`,
+	if status == AgentPresetApproved {
+		_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, updated_at=`+NowExpr()+` WHERE name=? AND version=?`,
+			status, reason, name, version)
+		return err
+	}
+	_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, quality='', updated_at=`+NowExpr()+` WHERE name=? AND version=?`,
 		status, reason, name, version)
 	return err
 }
@@ -260,6 +269,30 @@ func DeleteAgentPreset(db *sql.DB, name string) error {
 // ErrNotFound when absent.
 func DeleteAgentPresetByVersion(db *sql.DB, name, version string) error {
 	res, err := db.Exec(`DELETE FROM agent_presets WHERE name=? AND version=?`, name, version)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ValidAgentQuality reports whether q is a legal quality tag (0037).
+func ValidAgentQuality(q string) bool {
+	return q == "" || q == "official" || q == "featured"
+}
+
+// SetAgentPresetQuality sets the quality tag (”|'official'|'featured') on one
+// name+version row. Only approved rows may carry a tag; returns ErrNotFound
+// when the version is absent or not approved.
+func SetAgentPresetQuality(db *sql.DB, name, version, quality string) error {
+	if !ValidAgentQuality(quality) {
+		return ErrValidation
+	}
+	res, err := db.Exec(`UPDATE agent_presets SET quality=?, updated_at=`+NowExpr()+`
+		WHERE name=? AND version=? AND status=?`, quality, name, version, AgentPresetApproved)
 	if err != nil {
 		return err
 	}

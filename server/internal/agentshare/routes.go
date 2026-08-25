@@ -117,6 +117,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.POST("/:name/:version/approve", decideVersioned(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
 	g.POST("/:name/:version/reject", decideVersioned(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
 	g.DELETE("/:name/:version", removeVersioned(db, cacheDir))
+	// 质量标记(0037):仅 approved 行可设置/清除(official/featured,互斥)。
+	g.PUT("/:name/:version/quality", setPresetQuality(db))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
 	g.GET("/:name/grants", listPresetGrants(db))
 	g.PUT("/:name/grants", replacePresetGrants(db))
@@ -135,6 +137,7 @@ func presetJSON(p serverstore.AgentPreset) gin.H {
 		// Rejection reason: exposed only for the author's own rows (the
 		// employee list endpoint serves approved rows too, where it is "").
 		"reason":     p.Reason,
+		"quality":    p.Quality, // 0037 组织库质量标记(official/featured)
 		"created_at": p.CreatedAt,
 		"updated_at": p.UpdatedAt,
 	}
@@ -542,6 +545,40 @@ func replacePresetGrants(db *sql.DB) gin.HandlerFunc {
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_grant", name)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// setPresetQuality sets/clears the quality tag of one approved shared agent
+// (”|official|featured). Only approved rows may carry a tag; audit as
+// agent_preset_qualify.
+func setPresetQuality(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		var req struct {
+			Quality string `json:"quality"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+			return
+		}
+		if !serverstore.ValidAgentQuality(req.Quality) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "质量标记不合法(空/official/featured)")
+			return
+		}
+		if err := serverstore.SetAgentPresetQuality(db, name, version, req.Quality); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在或未通过审核")
+				return
+			}
+			if errors.Is(err, serverstore.ErrValidation) {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "质量标记不合法")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_qualify", name+"@"+version+"="+req.Quality)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "quality": req.Quality})
 	}
 }
 

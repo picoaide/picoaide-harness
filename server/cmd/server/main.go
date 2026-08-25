@@ -18,6 +18,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/bootstrap"
+	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/serverauth"
@@ -123,6 +124,8 @@ func main() {
 	agentshare.RegisterAdminRoutes(r, db, *dataDir+"/agent-presets-cache")
 	sharedskills.RegisterRoutes(r, db, *dataDir+"/shared-skills-cache")
 	sharedskills.RegisterAdminRoutes(r, db, *dataDir+"/shared-skills-cache")
+	capabilities.RegisterRoutes(r, db, *dataDir+"/skills-cache")
+	capabilities.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
 	bootstrap.RegisterRoutes(r, db)
 	// 审计日志保留策略(90 天):启动时清理过期条目
 	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-90*24*time.Hour)); err != nil {

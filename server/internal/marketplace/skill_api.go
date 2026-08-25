@@ -60,6 +60,12 @@ func (a *API) viewer(c *gin.Context) (u *serverstore.User, groups []string, ok b
 
 // accessibleSkills returns enabled skills the caller may use (admin: all).
 func (a *API) accessibleSkills(u *serverstore.User, groups []string) ([]serverstore.Skill, error) {
+	return a.AccessibleSkills(u, groups)
+}
+
+// AccessibleSkills returns enabled skills the caller may use (admin: all).
+// Exported for the capabilities aggregation facade (同一可见性语义,复用不复制)。
+func (a *API) AccessibleSkills(u *serverstore.User, groups []string) ([]serverstore.Skill, error) {
 	list, err := serverstore.ListSkills(a.DB, true)
 	if err != nil {
 		return nil, err
