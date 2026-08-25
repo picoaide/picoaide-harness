@@ -443,8 +443,6 @@ export function apply(ctx: Context, config: Config): void {
             if (content === null) {
               return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
             }
-              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
-            }
             // Pass through the upstream integrity headers (M3): the server
             // signs archives with X-Skill-Checksum / X-Skill-Version.
             const headers: Record<string, string> = {
@@ -569,8 +567,6 @@ export function apply(ctx: Context, config: Config): void {
               if (content === null) {
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
-                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
-              }
               const checksum = upstream.headers.get('x-preset-checksum') ?? undefined
               await installPresetArchive({ name, archive: content, checksum, presetsDir })
               json(res, 200, { ok: true, name })
@@ -620,8 +616,6 @@ export function apply(ctx: Context, config: Config): void {
             }
             const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
             if (content === null) {
-              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
-            }
               return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
             }
             const headers: Record<string, string> = {
@@ -740,8 +734,6 @@ export function apply(ctx: Context, config: Config): void {
               }
               const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
               if (content === null) {
-                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
-              }
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
