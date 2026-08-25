@@ -158,9 +158,30 @@ func TestListCapabilitiesVisibility(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	// alice 只看到自己的 pending (tests@1.0.0),bob 的 approved 未授权不可见。
-	if len(resp.Items) != 1 || resp.Items[0].Name != "tests" || resp.Items[0].Version != "1.0.0" || resp.Items[0].Status != "pending" {
-		t.Fatalf("items=%+v", resp.Items)
+	// 组织分区仅 approved(决策 2026-08-25):alice 的 own pending 不进 org
+	// 分区(由「我的」上传状态展示);bob 的 approved 未授权不可见 → 空。
+	if len(resp.Items) != 0 {
+		t.Fatalf("items=%+v, want empty (org only approved + granted)", resp.Items)
+	}
+}
+
+func TestListCapabilitiesAuthorOwnApproved(t *testing.T) {
+	r, db, _, userTokens := setupRouter(t)
+	defer db.Close()
+	// alice 上传并已 approved 的技能:作者自己可见(作者恒可见自己),org 应返回。
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "mine", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillApproved}); err != nil {
+		t.Fatal(err)
+	}
+	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
+	w := doGet(t, r, "/api/capabilities", aliceHdr)
+	var resp struct {
+		Items []CapabilityItem `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].Name != "mine" || resp.Items[0].Status != "approved" {
+		t.Fatalf("items=%+v, want own approved visible", resp.Items)
 	}
 }
 
