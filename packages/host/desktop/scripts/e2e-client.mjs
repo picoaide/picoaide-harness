@@ -228,6 +228,7 @@ async function main() {
   const panelChecks = [
     { label: '连接器', marker: '连接', shot: '03-connectors' },
     { label: '技能中心', marker: '技能中心', shot: '04-skills' },
+    { label: '共享 Agent', marker: '共享 Agent 库', shot: '04b-agent-share' },
     { label: '设置', marker: '关闭', shot: '05-settings' },
   ]
   for (const item of panelChecks) {

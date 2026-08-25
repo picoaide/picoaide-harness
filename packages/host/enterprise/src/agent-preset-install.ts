@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { parse as parseYaml } from 'yaml'
-import { assertSafeEntryPath, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
+import { assertArchiveSafe, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 
 /** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
 export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
@@ -30,6 +30,9 @@ export const COMPOSITION_FILE = 'agent.cordis.yml'
 
 /** Optional display-metadata file beside the composition (upstream constant). */
 export const METADATA_FILE = 'preset.yml'
+
+/** Bound on display metadata: the gateway refuses descriptions over 500 chars. */
+export const MAX_PRESET_META_LEN = 500
 
 /** Display metadata read from `preset.yml` (name/description only). */
 export interface PresetMeta {
@@ -138,56 +141,15 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
   const checksum = createHash('sha256').update(archive).digest('hex')
   return {
     name,
-    ...meta.name === undefined ? {} : { displayName: meta.name },
-    ...meta.description === undefined ? {} : { description: meta.description },
+    ...meta.name === undefined ? {} : { displayName: meta.name.slice(0, MAX_PRESET_META_LEN) },
+    ...meta.description === undefined ? {} : { description: meta.description.slice(0, MAX_PRESET_META_LEN) },
     checksum,
     archive,
   }
 }
 
-/**
- * Refuse an archive whose entries are unsafe: absolute paths, `..` traversal,
- * empty paths, symbolic/hard links, or an unpacked tree over the bound. The
- * archive is written to a temp file because node-tar's listing reader needs a
- * file handle.
- * @param archive - the gzipped tar bytes.
- * @throws Error naming the first violation.
- */
-export async function assertArchiveSafe(archive: Buffer): Promise<void> {
-  const staging = await mkdtemp(join(tmpdir(), 'pico-preset-scan-'))
-  const archiveFile = join(staging, 'archive.tar.gz')
-  try {
-    await writeFile(archiveFile, archive, { mode: 0o600 })
-    let total = 0
-    let violation: string | null = null
-    await tar.t({
-      file: archiveFile,
-      onentry: (entry) => {
-        if (violation !== null) return
-        try {
-          if (entry.type === 'Directory') {
-            assertSafeEntryPath(entry.path)
-            return
-          }
-          const safePath = assertSafeEntryPath(entry.path)
-          if (safePath === '') throw new Error(`empty path in archive: ${entry.path}`)
-          if (LINK_TYPES.has(entry.type)) {
-            throw new Error(`link entry refused in archive: ${safePath}`)
-          }
-          total += entry.size ?? 0
-          if (total > MAX_UNPACKED_BYTES) {
-            throw new Error(`unpacked archive too large (${total} bytes)`)
-          }
-        } catch (cause) {
-          violation = cause instanceof Error ? cause.message : String(cause)
-        }
-      },
-    })
-    if (violation !== null) throw new Error(violation)
-  } finally {
-    await rm(staging, { recursive: true, force: true }).catch(() => {})
-  }
-}
+/** Re-exported from archive-util for backward compat. */
+export { assertArchiveSafe } from './archive-util.ts'
 
 /** Result of a successful install. */
 export interface PresetInstallResult {
@@ -321,17 +283,17 @@ export async function listLocalPresets(presetsDir: string): Promise<LocalPresetR
 /**
  * Map local presets against the gateway catalog: each local row carries an
  * optional upper-state (pending/approved/rejected from the caller's own
- * uploads, or none = not uploaded yet).
+ * uploads, or none = not uploaded yet) and the rejection reason.
  * @param presetsDir - the local preset root.
  * @param gatewayRows - the gateway's visible rows (approved + own).
- * @returns rows sorted by id, status best-effort.
+ * @returns rows sorted by id, status best-effort, reason when rejected.
  */
 export async function mapLocalPresets(
   presetsDir: string,
-  gatewayRows: readonly { name: string; status: string }[] = [],
-): Promise<Record<string, { name: string; displayName?: string; description?: string; status?: string }>> {
+  gatewayRows: readonly { name: string; status: string; reason?: string }[] = [],
+): Promise<Record<string, { name: string; displayName?: string; description?: string; status?: string; reason?: string }>> {
   const local = await listLocalPresets(presetsDir)
-  const out: Record<string, { name: string; displayName?: string; description?: string; status?: string }> = {}
+  const out: Record<string, { name: string; displayName?: string; description?: string; status?: string; reason?: string }> = {}
   for (const row of local) {
     const gateway = gatewayRows.find(g => g.name === row.name)
     out[row.name] = gateway === undefined
@@ -341,6 +303,7 @@ export async function mapLocalPresets(
         ...row.displayName === undefined ? {} : { displayName: row.displayName },
         ...row.description === undefined ? {} : { description: row.description },
         status: gateway.status,
+        ...gateway.reason === undefined || gateway.reason === '' ? {} : { reason: gateway.reason },
       }
   }
   return out
