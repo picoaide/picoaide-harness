@@ -234,14 +234,13 @@ async function main() {
 
   // 5. Main surface assertions.
   const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '任务看板', '技能中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
+  const hasSidebar = ['定时任务', '任务看板', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
   reportStep('主界面侧边栏导航完整', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 14).join(',')}`)
 
   // 6. Feature panels (open, assert content, screenshot, close).
   const panelChecks = [
     { label: '连接器', marker: '连接', shot: '03-connectors' },
-    { label: '技能中心', marker: '技能中心', shot: '04-skills' },
-    { label: '共享 Agent', marker: '共享 Agent 库', shot: '04b-agent-share' },
+    { label: '能力中心', marker: '能力中心', shot: '04-capability' },
     { label: '设置', marker: '关闭', shot: '05-settings' },
   ]
   for (const item of panelChecks) {
