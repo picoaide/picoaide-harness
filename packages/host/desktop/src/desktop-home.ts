@@ -79,6 +79,12 @@ export function isSafeDshHome(resolved: string): boolean {
   if (normalized === '/') return false
   for (const prefix of FORBIDDEN_HOME_PREFIXES) {
     if (normalized === prefix || normalized.startsWith(`${prefix}/`) || normalized.startsWith(`${prefix}\\`)) {
+      // macOS 例外:os.tmpdir() 返回 /var/folders/<random>/T/(与 Linux /tmp
+      // 等价——同用户权限隔离的临时目录;e2e/profile 冒烟/沙箱用它作
+      // DSH_HOME,拒绝会破坏这些场景,也与「/tmp 允许」的威胁模型一致)。
+      if (prefix === '/var' && normalized.startsWith('/var/folders/') && normalized.includes('/T/')) {
+        continue
+      }
       return false
     }
   }
