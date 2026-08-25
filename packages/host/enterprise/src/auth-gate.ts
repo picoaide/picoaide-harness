@@ -15,7 +15,9 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 
-/** 上传 body 上限(审计 2026-08-25 P2-2):archive≤16MB,base64 膨胀 ~4/3,取 24MB 与服务端 MaxBodyBytes 一致。 */
+/** 上传 body 上限(审计 2026-08-25 P2-2):本地 upload body 实际只含元数据
+ * (archive 由 pack 后经 fetchJSON 出站);24MB 与服务端 MaxBodyBytes 对齐,
+ * 未来若改为经本地 body 转发归档亦兼容 —— 非 base64 膨胀的实际需求。 */
 const UPLOAD_BODY_BYTES = 24 * 1024 * 1024
 import {
   installPresetArchive,
@@ -504,9 +506,7 @@ export function apply(ctx: Context, config: Config): void {
 
           // POST /api/pico/agent-presets/upload { name } -> pack + gateway.
           if (pathname === '/api/pico/agent-presets/upload' && req.method === 'POST') {
-            // 审计 2026-08-25 P2-2:body 上限 = archive 的 base64 膨胀上限
-            // (与服务端 MaxBodyBytes 一致,24MB ≈ 16MB×4/3);修正 64KB 过小
-            // 会把 >48KB 归档的上传全部 413 的回归。
+            // 审计 2026-08-25 P2-2:body 上限(本地 body 仅元数据,24MB 兼容上限)。
             const raw = await collectBody(req, UPLOAD_BODY_BYTES).catch(() => null)
             if (raw === null) return json(res, 413, { error: 'body too large' })
             let body: { name?: unknown }
@@ -677,7 +677,7 @@ export function apply(ctx: Context, config: Config): void {
           }
 
           if (pathname === '/api/pico/shared-skills/upload' && req.method === 'POST') {
-            // 审计 2026-08-25 P2-2:body 上限 = base64 膨胀上限(同 agent-presets)。
+            // 审计 2026-08-25 P2-2:body 上限(本地 body 仅元数据,24MB 兼容上限)。
             const raw = await collectBody(req, UPLOAD_BODY_BYTES).catch(() => null)
             if (raw === null) return json(res, 413, { error: 'body too large' })
             let body: { name?: unknown; version?: unknown }

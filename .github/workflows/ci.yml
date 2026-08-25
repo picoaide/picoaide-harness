@@ -149,6 +149,11 @@ jobs:
         with:
           path: release-artifacts
           merge-multiple: true
+      # 审计 2026-08-25 复查【7】:release job 需要显式 node(ubuntu 镜像自带
+      # 版本非保证),tag 校验的 node -p 才有确定性环境。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       # 审计 2026-08-25 D-2:发布前强制校验 tag == 两处 package.json version
       # (update-checker 剥 v 后匹配资产名;版本号只改一处 = 发布成功但用户
       # 升级源永久失效)。不一致直接 fail-loud。
@@ -165,7 +170,11 @@ jobs:
       - name: Compute SHA-256 digests
         run: |
           cd release-artifacts
-          # 审计 D-4:显式清单防 glob 吞入残留产物(无空格名,sha256sum 输出安全)
+          # 审计 D-4:显式清单防 glob 吞入残留产物;空目录时 xargs 报错,先保护。
+          if ! find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) | grep -q .; then
+            echo "::error::no release artifacts found";
+            exit 1
+          fi
           find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -print0 \
             | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
