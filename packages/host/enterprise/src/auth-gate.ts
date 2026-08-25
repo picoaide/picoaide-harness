@@ -2,11 +2,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { AuthError, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
+import { ApiError, AuthError, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   installSkillArchive,
   listInstalledSkills,
+  listLocalSkills,
+  packSkill,
   resolveSkillsDir,
   uninstallSkill,
   validateSkillName,
@@ -462,6 +464,10 @@ export function apply(ctx: Context, config: Config): void {
                 method: 'POST',
                 body: {
                   name: packed.name,
+                  // Display title travels with the archive so the review
+                  // board and the shared library show the friendly name
+                  // (not the directory id).
+                  ...packed.displayName === undefined ? {} : { display_name: packed.displayName },
                   ...packed.description === undefined ? {} : { description: packed.description },
                   archive: packed.archive.toString('base64'),
                 },
@@ -472,6 +478,13 @@ export function apply(ctx: Context, config: Config): void {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
+              }
+              if (cause instanceof ApiError) {
+                // Gateway envelope: surface its human-readable message with
+                // the code-appropriate status (NAME_TAKEN→409, PENDING_LIMIT→429).
+                const code = cause.code as string
+                const status = code === 'PENDING_LIMIT' ? 429 : code === 'NAME_TAKEN' ? 409 : 422
+                return json(res, status, { error: cause.message })
               }
               const message = cause instanceof Error ? cause.message : String(cause)
               json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
@@ -496,9 +509,13 @@ export function apply(ctx: Context, config: Config): void {
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              const declared = upstream.headers.get('content-length')
+              if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
+                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              }
               const content = Buffer.from(await upstream.arrayBuffer())
               if (content.length > MAX_ARCHIVE_BYTES) {
-                return json(res, 413, { error: '归档过大' })
+                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
               const checksum = upstream.headers.get('x-preset-checksum') ?? undefined
               await installPresetArchive({ name, archive: content, checksum, presetsDir })
@@ -570,6 +587,137 @@ export function apply(ctx: Context, config: Config): void {
             }
             gatewayError(res, cause)
           }
+        },
+      }),
+
+      // Shared-skill proxy: /api/pico/shared-skills (list + upload + install
+      // + uninstall). Lists the gateway's shared store (approved versions),
+      // the local skill root (disk), and the installed set; uploads pack a
+      // locally authored skill directory and forward it; installs download an
+      // approved archive, verify it, and unpack it into the user skill root.
+      ctx.webServer.register({
+        kind: 'prefix', path: '/api/pico/shared-skills',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (!guard(req, res)) return
+          const s = session()
+          if (s === null) return json(res, 401, { error: 'not logged in' })
+          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          const skillsDir = resolveSkillsDir()
+
+          if (pathname === '/api/pico/shared-skills' && req.method === 'GET') {
+            try {
+              const data = await fetchJSON(s.serverURL, '/api/shared-skills', { token: s.token })
+              const installed = await listInstalledSkills(skillsDir)
+              const local = await listLocalSkills(skillsDir)
+              json(res, 200, { ...data, installed, local })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              gatewayError(res, cause)
+            }
+            return
+          }
+
+          if (pathname === '/api/pico/shared-skills/upload' && req.method === 'POST') {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(chunk as Buffer)
+            let body: { name?: unknown; version?: unknown }
+            try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+            const name = typeof body.name === 'string' ? body.name.trim() : ''
+            const version = typeof body.version === 'string' && body.version.trim() !== '' ? body.version.trim() : '1.0.0'
+            if (name === '') return json(res, 400, { error: 'missing name' })
+            try {
+              const packed = await packSkill(skillsDir, name, version)
+              const gateway = await fetchJSON(s.serverURL, '/api/shared-skills', {
+                token: s.token,
+                method: 'POST',
+                body: {
+                  name: packed.name,
+                  ...packed.displayName === undefined ? {} : { display_name: packed.displayName },
+                  version: packed.version,
+                  ...packed.description === undefined ? {} : { description: packed.description },
+                  archive: packed.archive.toString('base64'),
+                },
+                timeoutMs: 30000,
+              })
+              json(res, 200, { ok: true, skill: gateway.skill })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              if (cause instanceof ApiError) {
+                const code = cause.code as string
+                const status = code === 'PENDING_LIMIT' ? 429 : code === 'NAME_TAKEN' ? 409 : 422
+                return json(res, status, { error: cause.message })
+              }
+              const message = cause instanceof Error ? cause.message : String(cause)
+              json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
+            }
+            return
+          }
+
+          // POST /api/pico/shared-skills/:name/:version/install -> download + verify + unpack.
+          const installMatch = req.method === 'POST'
+            ? /^\/api\/pico\/shared-skills\/([^/]+)\/([^/]+)\/install$/u.exec(pathname)
+            : null
+          if (installMatch !== null) {
+            const name = decodeURIComponent(installMatch[1]!)
+            const version = decodeURIComponent(installMatch[2]!)
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              const upstream = await gatewayFetch(
+                `${s.serverURL}/api/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/archive`,
+                { headers: { Authorization: `Bearer ${s.token}` } },
+              )
+              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              const declared = upstream.headers.get('content-length')
+              if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
+                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              }
+              const content = Buffer.from(await upstream.arrayBuffer())
+              if (content.length > MAX_ARCHIVE_BYTES) {
+                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              }
+              const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
+              const ver = upstream.headers.get('x-skill-version') ?? version
+              await installSkillArchive({ name, archive: content, checksum, skillsDir, version: ver })
+              json(res, 200, { ok: true, name, version: ver })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              const message = cause instanceof Error ? cause.message : String(cause)
+              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
+              json(res, isRefusal ? 422 : 502, { error: message })
+            }
+            return
+          }
+
+          // POST /api/pico/shared-skills/:name/:version/uninstall -> local removal.
+          const uninstallMatch = req.method === 'POST'
+            ? /^\/api\/pico\/shared-skills\/([^/]+)\/([^/]+)\/uninstall$/u.exec(pathname)
+            : null
+          if (uninstallMatch !== null) {
+            const name = decodeURIComponent(uninstallMatch[1]!)
+            try {
+              await uninstallSkill(skillsDir, name)
+              json(res, 200, { ok: true, name })
+            } catch (cause) {
+              const message = cause instanceof Error ? cause.message : String(cause)
+              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+            }
+            return
+          }
+
+          return json(res, 404, { error: 'not found' })
         },
       }),
     ]

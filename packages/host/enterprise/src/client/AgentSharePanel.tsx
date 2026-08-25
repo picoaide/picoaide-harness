@@ -8,6 +8,7 @@ interface CatalogPreset {
   version: string
   author: string
   status: 'pending' | 'approved' | 'rejected' | 'local'
+  reason?: string | undefined
   created_at: string
 }
 
@@ -15,7 +16,7 @@ interface Catalog {
   presets?: CatalogPreset[]
   installed?: string[]
   /** Locally authored presets (创造模式 roster) keyed by id; status when uploaded. */
-  local?: Record<string, { name: string; displayName?: string; description?: string; status?: 'pending' | 'approved' | 'rejected' }>
+  local?: Record<string, { name: string; displayName?: string; description?: string; status?: 'pending' | 'approved' | 'rejected'; reason?: string }>
 }
 
 const OVERLAY: React.CSSProperties = {
@@ -187,6 +188,14 @@ export function splitCatalog(presets: readonly CatalogPreset[]): { own: CatalogP
   }
 }
 
+/** Highest approved version of a shared preset name (undefined when none). */
+export function latestApprovedPreset(rows: readonly CatalogPreset[], name: string): string | undefined {
+  const versions = rows.filter(p => p.name === name && p.status === 'approved')
+  if (versions.length === 0) return undefined
+  versions.sort((a, b) => (a.version.localeCompare(b.version, undefined, { numeric: true })))
+  return versions[versions.length - 1]!.version
+}
+
 /**
  * Shared-agent modal: the gateway's shared preset store (approved presets)
  * plus the user's own local presets (uploadable from 创造模式). Installed
@@ -230,12 +239,47 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') { onClose(); return }
+      // Focus trap: keep Tab cycling inside the dialog (a11y; Escape above).
+      if (e.key !== 'Tab' || panelRef.current === null) return
+      const focusables = panelRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]!
+      const last = focusables[focusables.length - 1]!
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     panelRef.current?.focus()
     return () => { window.removeEventListener('keydown', onKey) }
   }, [onClose])
+
+  // Silent poll while the panel is open: the review state of own uploads
+  // (pending → approved/rejected) changes server-side; refresh without
+  // clobbering the user's in-flight action. 30s cadence.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const seq = loadSeqRef.current
+      fetch('/api/pico/agent-presets')
+        .then(async (res) => {
+          if (!res.ok) return
+          const data = (await res.json()) as Catalog
+          // A fresh load() (seq bumped) wins over the stale poll.
+          if (seq !== loadSeqRef.current) return
+          setCatalog(prev => prev === null ? data : { ...prev, ...data })
+          setInstalled(new Set(data.installed ?? []))
+        })
+        .catch(() => {})
+    }, 30000)
+    return () => { clearInterval(timer) }
+  }, [])
 
   const post = async (path: string): Promise<{ ok: boolean; error?: string }> => {
     try {
@@ -318,6 +362,9 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
   const renderCard = (p: CatalogPreset, mode: 'own' | 'shared'): React.ReactNode => {
     const isInstalled = installed.has(p.name)
     const title = p.display_name || p.name
+    // Update hint: an installed shared preset with a newer approved version.
+    const latest = mode === 'shared' ? latestApprovedPreset(presets, p.name) : undefined
+    const hasNewer = isInstalled && latest !== undefined && latest !== p.version
     return (
       <div key={p.name} style={CARD}>
         <div style={TITLE_ROW}>
@@ -332,6 +379,11 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         {p.description !== '' && <p style={DESC}>{p.description}</p>}
+        {mode === 'own' && p.status === 'rejected' && p.reason !== undefined && p.reason !== '' && (
+          <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>
+            {t('agent.rejectReason', { reason: p.reason })}
+          </p>
+        )}
         <div style={CARD_FOOT}>
           {mode === 'own' ? (
             p.status === 'rejected'
@@ -342,7 +394,11 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
                   ? <span style={CHIP_PENDING}>{t('agent.pending')}</span>
                   : <button type="button" style={action?.name === p.name && action.kind === 'uploading' ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void upload(p.name) }}>{t('agent.upload')}</button>
           ) : isInstalled ? (
-            confirmName === p.name ? (
+            hasNewer ? (
+              <button type="button" style={action?.name === p.name && action.kind === 'installing' ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void install(p.name) }}>
+                {t('agent.update', { version: latest ?? '' })}
+              </button>
+            ) : confirmName === p.name ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
                 <button
                   type="button"
@@ -389,6 +445,7 @@ export function AgentSharePanel({ onClose }: { onClose: () => void }) {
               version: '1.0.0',
               author: '',
               status: p.status === undefined ? 'local' : p.status,
+              reason: p.reason,
               created_at: '',
             }, 'own'))}</div>}
         </div>
