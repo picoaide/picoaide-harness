@@ -66,8 +66,14 @@ function releaseMetadata(
   })
 }
 
-function checksumResponse(entries: ReadonlyArray<{ readonly name: string; readonly digest: string }>): Response {
-  return new Response(entries.map(entry => `${entry.digest}  ${entry.name}`).join('\n') + '\n')
+function checksumResponse(
+  entries: ReadonlyArray<{ readonly name: string; readonly digest: string; readonly prefixed?: boolean }>,
+): Response {
+  // prefixed: true 模拟 `find … | xargs sha256sum` 生成的 `./name` 条目
+  // (v2.2.0 起 CI 即此格式);false 模拟旧版 `sha256sum *` 的裸文件名。
+  return new Response(
+    entries.map(entry => `${entry.digest}  ${entry.prefixed === true ? `./${entry.name}` : entry.name}`).join('\n') + '\n',
+  )
 }
 
 async function expectFailure(
@@ -108,7 +114,7 @@ describe('desktop update installer download', () => {
         ])
       }
       if (url === 'https://artifacts.test/SHA256SUMS.txt') {
-        return checksumResponse([{ name: 'PicoAide-Harness-2.1.0-mac.dmg', digest }])
+        return checksumResponse([{ name: 'PicoAide-Harness-2.1.0-mac.dmg', digest, prefixed: true }])
       }
       if (url === 'https://artifacts.test/mac.dmg') {
         return chunkedResponse([artifact.subarray(0, 333), artifact.subarray(333)])
