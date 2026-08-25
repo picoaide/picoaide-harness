@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ApiError, AuthError, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
@@ -808,7 +810,14 @@ export function apply(ctx: Context, config: Config): void {
             const installedPresets = new Set(await listInstalledPresets(presetsDir))
             const localSkills = await listLocalSkills(skillsDir)
             const localPresets = await listLocalPresets(presetsDir)
-            const localSkillVersions = new Map(localSkills.map(r => [r.name, r.version]))
+            // installedVersion:优先读安装器写的 .install-version 标记
+            // (可靠);否则退回 SKILL.md frontmatter 的 version(best-effort)。
+            const localSkillVersions = new Map<string, string | undefined>()
+            for (const r of localSkills) {
+              const marker = join(skillsDir, r.name, '.install-version')
+              const mv = await readFile(marker, 'utf8').then(s => s.trim()).catch(() => undefined)
+              localSkillVersions.set(r.name, mv ?? r.version)
+            }
 
             // 本地创作行(我的分区):磁盘上存在的技能/预设,带上传状态(若在
             // 服务端 catalog 里存在同名同 kind 的行,则取其 status——本机

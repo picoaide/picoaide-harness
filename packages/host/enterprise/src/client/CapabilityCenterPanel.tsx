@@ -466,7 +466,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     return () => { clearInterval(timer) }
   }, [])
 
-  const install = async (item: CapabilityItem, opts?: { force?: boolean }): Promise<void> => {
+  const install = async (item: CapabilityItem, opts?: { force?: boolean; version?: string }): Promise<void> => {
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')) return
     const key = `${item.kind}:${item.name}`
     // 同名冲突确认（磁盘/installed 已有同名目录且非覆盖安装）。
@@ -477,8 +477,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     setConfirmKey(null)
     setAction({ key, kind: 'installing' })
     try {
+      const targetVersion = opts?.version ?? item.version
       const base = item.kind === 'skill'
-        ? `/api/pico/shared-skills/${encodeURIComponent(item.name)}/${encodeURIComponent(item.version)}/install`
+        ? `/api/pico/shared-skills/${encodeURIComponent(item.name)}/${encodeURIComponent(targetVersion)}/install`
         : `/api/pico/agent-presets/${encodeURIComponent(item.name)}/install`
       const url = opts?.force ? `${base}?force=1` : base
       const res = await fetch(url, { method: 'POST' })
@@ -486,7 +487,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         const data = await res.json().catch(() => ({}))
         throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
       }
-      setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name ? { ...i, installed: true, installedVersion: item.version } : i)))
+      setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name ? { ...i, installed: true, installedVersion: targetVersion } : i)))
       setAction({ key, kind: 'done-install', name: item.name })
     } catch (cause) {
       setAction({ key, kind: 'failed', error: cause instanceof Error ? cause.message : undefined, name: item.name })
@@ -627,13 +628,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
             style={{ ...BUTTON_SECONDARY, height: 24, fontSize: 11, width: '100%' }}
             onClick={() => { setExpandedVersions(prev => ({ ...prev, [key]: !prev[key] })) }}
           >
-            {expanded ? t('capability.viewVersions', { count: String(item.versions.length) }).replace('{expand}', '▾') : t('capability.viewVersions', { count: String(item.versions.length) })}
+            {expanded ? t('capability.viewVersions', { count: String(item.versions.length) }) + ' ▾' : t('capability.viewVersions', { count: String(item.versions.length) }) + ' ▸'}
           </button>
         )}
         {expanded && item.versions.length > 1 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {item.versions.map(v => (
-              <button key={v} type="button" style={{ ...BUTTON_SECONDARY, height: 24, fontSize: 11, width: 'auto', padding: '0 8px' }} onClick={() => { void install(item, { force: true }) }} disabled={busy}>
+              <button key={v} type="button" style={{ ...BUTTON_SECONDARY, height: 24, fontSize: 11, width: 'auto', padding: '0 8px' }} onClick={() => { void install(item, { force: true, version: v }) }} disabled={busy}>
                 v{v}
               </button>
             ))}
