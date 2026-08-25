@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { VChart } from '@visactor/react-vchart'
 import type { ISpec } from '@visactor/vchart'
+import { ChartLazy } from '../components/chart-lazy'
 import {
   Activity, Coins, ArrowDownToLine, ArrowUpFromLine, WalletCards, Download, CircleDollarSign, TriangleAlert,
 } from 'lucide-react'
@@ -536,20 +536,20 @@ export default function Usage() {
               <div className="flex h-72 items-center justify-center text-muted-foreground">暂无数据</div>
             ) : (
               <>
-                {/* 懒挂载:仅激活 tab 渲染对应 VChart,避免 display:none 容器内初始化(审计低4) */}
+                {/* 懒挂载:仅激活 tab 渲染对应图表,避免 display:none 容器内初始化(审计低4) */}
                 <TabsContent value="trend" className="h-72">
-                  {chartTab === 'trend' && <VChart spec={trendSpec} />}
+                  {chartTab === 'trend' && <ChartLazy spec={trendSpec} />}
                 </TabsContent>
                 <TabsContent value="proportion" className="h-72">
                   {chartTab === 'proportion' && (
-                    <VChart
+                    <ChartLazy
                       spec={pieSpec}
                       onClick={(e: any) => setFilterName(e?.datum?.name ?? '')}
                     />
                   )}
                 </TabsContent>
                 <TabsContent value="rank" className="h-72">
-                  {chartTab === 'rank' && <VChart spec={rankSpec} />}
+                  {chartTab === 'rank' && <ChartLazy spec={rankSpec} />}
                 </TabsContent>
               </>
             )}
@@ -805,7 +805,7 @@ export default function Usage() {
             <div className="flex h-72 items-center justify-center text-muted-foreground">该用户区间内暂无数据</div>
           ) : (
             <div className="h-72">
-              <VChart spec={drillSpec} />
+              <ChartLazy spec={drillSpec} />
             </div>
           )}
         </DialogContent>
