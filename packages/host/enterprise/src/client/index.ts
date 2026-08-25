@@ -14,8 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { AccountSection } from './AccountSection.tsx'
 import { BraceMark, BrandName } from './Brand.tsx'
-import { SkillCenterTrigger } from './SkillCenterTrigger.tsx'
-import { AgentShareTrigger } from './AgentShareTrigger.tsx'
+import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
 import { en, type EnterpriseKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -113,19 +112,10 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(
     () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
       name: 'sidebar.footer.action',
-      id: 'skill-center',
+      id: 'capability-center',
       order: -1,
-    }, SkillCenterTrigger)),
-    'enterprise: skill center foot action',
-  )
-
-  ctx.effect(
-    () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-      name: 'sidebar.footer.action',
-      id: 'agent-share',
-      order: 0,
-    }, AgentShareTrigger)),
-    'enterprise: agent share foot action',
+    }, CapabilityCenterTrigger)),
+    'enterprise: capability center foot action',
   )
 
   ctx.effect(
