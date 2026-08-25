@@ -9,7 +9,17 @@ const server = createServer((req, res) => {
     return
   }
   if (url.pathname === '/api/auth/me' || url.pathname === '/api/auth/session' || url.pathname === '/api/auth/usage') {
-    res.end(JSON.stringify({ username: 'admin', id: 1, department: 'dev', token: 'mock-token-123' }))
+    res.end(JSON.stringify({
+      username: 'admin', id: 1, department: 'dev', token: 'mock-token-123',
+      // Usage envelope expected by the account card (`/api/pico/account/usage`
+      // passes it through): data.remaining_money/monthly_cost/today_cost must
+      // be numbers or formatMoney crashes and the sidebar slot fails.
+      data: {
+        quota_tokens: null, quota_money: null,
+        remaining_tokens: null, remaining_money: 100,
+        today_cost: 0.5, monthly_cost: 12.3, total_cost: 25.6,
+      },
+    }))
     return
   }
   if (url.pathname === '/api/config/bootstrap') {
@@ -55,6 +65,26 @@ const server = createServer((req, res) => {
   }
   if (url.pathname === '/api/tasks' || url.pathname.startsWith('/api/tasks/')) {
     res.end(JSON.stringify({ tasks: [] }))
+    return
+  }
+  if (url.pathname === '/api/agent-presets' || url.pathname.startsWith('/api/agent-presets/')) {
+    res.end(JSON.stringify({
+      presets: [
+        { name: 'shared-demo', display_name: '共享演示', description: '演示预设', version: '1.0.0', author: 'admin', status: 'approved', reason: '', created_at: '2026-08-01T10:00:00+08:00' },
+      ],
+      installed: [],
+      local: {},
+    }))
+    return
+  }
+  if (url.pathname === '/api/shared-skills' || url.pathname.startsWith('/api/shared-skills/')) {
+    res.end(JSON.stringify({
+      skills: [
+        { name: 'codeql-demo', display_name: '代码审计演示', version: '1.0.0', description: '演示技能', author: 'admin', status: 'approved', reason: '', created_at: '2026-08-01T10:00:00+08:00' },
+      ],
+      installed: [],
+      local: [],
+    }))
     return
   }
   if (url.pathname.startsWith('/api/admin') || url.pathname.startsWith('/api/pico')) {
