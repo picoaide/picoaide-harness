@@ -116,6 +116,121 @@ func DeleteSkillGrants(db queryer, skillName string) error {
 	return err
 }
 
+// ---------------------------------------------------------------------------
+// 共享技能/Agent 授权(0036):与 skill_grants 同模型,资源按 name 授权。
+// 表名/资源列是编译期常量(grantTable),无用户输入拼接。
+// ---------------------------------------------------------------------------
+
+// SharedGrantableTable names one shared-resource grant table.
+type SharedGrantableTable struct {
+	Table string // "shared_skill_grants" or "agent_preset_grants"
+	Col   string // resource name column ("skill_name" or "preset_name")
+}
+
+var (
+	// SharedSkillGrantTable: 共享技能授权表。
+	SharedSkillGrantTable = SharedGrantableTable{Table: "shared_skill_grants", Col: "skill_name"}
+	// SharedPresetGrantTable: 共享 Agent 授权表。
+	SharedPresetGrantTable = SharedGrantableTable{Table: "agent_preset_grants", Col: "preset_name"}
+)
+
+// GrantSharedResource gives a user or group access to a shared skill/preset
+// (idempotent). The table must be one of the compile-time constants above.
+func GrantSharedResource(db queryer, table SharedGrantableTable, resourceName, grantee string, t GranteeType) error {
+	g, ok := validGrantee(grantee)
+	if !ok {
+		return ErrValidation
+	}
+	stmt := "INSERT OR IGNORE INTO " + table.Table + " (" + table.Col + ", grantee_type, grantee) VALUES (?, ?, ?)"
+	if currentDriver == DriverPG {
+		stmt = "INSERT INTO " + table.Table + " (" + table.Col + ", grantee_type, grantee) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+	}
+	_, err := db.Exec(stmt, resourceName, t, g)
+	return err
+}
+
+// RevokeSharedResource removes a grant (idempotent).
+func RevokeSharedResource(db queryer, table SharedGrantableTable, resourceName, grantee string, t GranteeType) error {
+	g, ok := validGrantee(grantee)
+	if !ok {
+		return ErrValidation
+	}
+	_, err := db.Exec("DELETE FROM "+table.Table+" WHERE "+table.Col+" = ? AND grantee_type = ? AND grantee = ?", resourceName, t, g)
+	return err
+}
+
+// ListSharedResourceGrants returns every grant on a shared skill/preset.
+func ListSharedResourceGrants(db *sql.DB, table SharedGrantableTable, resourceName string) ([]Grant, error) {
+	rows, err := db.Query("SELECT grantee_type, grantee FROM "+table.Table+" WHERE "+table.Col+" = ? ORDER BY grantee_type, grantee", resourceName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Grant
+	for rows.Next() {
+		var g Grant
+		if err := rows.Scan(&g.GranteeType, &g.Grantee); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSharedResourceGrants removes all grants of a resource (delete
+// cascades; old grants must never resurrect a re-created resource).
+func DeleteSharedResourceGrants(db queryer, table SharedGrantableTable, resourceName string) error {
+	_, err := db.Exec("DELETE FROM "+table.Table+" WHERE "+table.Col+" = ?", resourceName)
+	return err
+}
+
+// ReplaceSharedGroups sets the full group-grant set of a shared resource in
+// one transaction (existing group grants dropped; user grants untouched).
+// Every name must reference an existing department.
+func ReplaceSharedGroups(db *sql.DB, table SharedGrantableTable, resourceName string, groups []string) error {
+	return replaceGroupGrants(db,
+		"DELETE FROM "+table.Table+" WHERE "+table.Col+" = ? AND grantee_type = 'group'",
+		[]any{resourceName},
+		func(tx *sql.Tx, name string) error {
+			_, err := tx.Exec("INSERT INTO "+table.Table+" ("+table.Col+", grantee_type, grantee) VALUES (?, 'group', ?)", resourceName, name)
+			return err
+		},
+		groups)
+}
+
+// AccessibleSharedResourceNames returns the shared skill/preset names granted
+// to a user directly or through any of their groups (strict default).
+func AccessibleSharedResourceNames(db *sql.DB, table SharedGrantableTable, username string, groups []string) ([]string, error) {
+	var sb strings.Builder
+	sb.WriteString("SELECT DISTINCT " + table.Col + " FROM " + table.Table + " WHERE (grantee_type = 'user' AND grantee = ?)")
+	args := []any{username}
+	if len(groups) > 0 {
+		sb.WriteString(" OR (grantee_type = 'group' AND (")
+		for i, g := range groups {
+			if i > 0 {
+				sb.WriteString(" OR ")
+			}
+			sb.WriteString(CaseInsensitiveCmp("grantee"))
+			args = append(args, g)
+		}
+		sb.WriteString("))")
+	}
+	rows, err := db.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 // ---- 整组替换(多部门批量授权,原子) ----
 
 // replaceGroupGrants replaces all group grants of a resource in one

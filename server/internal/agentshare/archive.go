@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -35,10 +36,6 @@ var (
 	// ErrEntryLimit: too many entries in the archive.
 	ErrEntryLimit = errors.New("archive has too many entries")
 )
-
-// ErrTooManyPending is returned when the author already holds the per-user
-// pending submission cap.
-var ErrTooManyPending = errors.New("too many pending submissions")
 
 // linkTypes are tar entry types refused from an uploaded preset. A preset is
 // composition text plus optional sibling assets; links would let an archive
@@ -133,6 +130,61 @@ func ValidatePresetArchive(data []byte) (string, error) {
 		return "", ErrNoComposition
 	}
 	return hexSum, nil
+}
+
+// ListArchiveContents lists every non-directory entry path (sorted, unique)
+// and returns the top-level agent.cordis.yml content for admin review.
+// @param data - a previously validated archive; the caller owns the bytes.
+func ListArchiveContents(data []byte) ([]string, string, error) {
+	zr, err := gzip.NewReader(strings.NewReader(string(data)))
+	if err != nil {
+		return nil, "", ErrUnsafeArchive
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	set := map[string]bool{}
+	var composition string
+	var order []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", ErrUnsafeArchive
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			continue
+		}
+		name, err := posixNormalize(hdr.Name)
+		if err != nil {
+			return nil, "", ErrUnsafeArchive
+		}
+		if name == "" || linkTypes[hdr.Typeflag] {
+			continue
+		}
+		if name == "agent.cordis.yml" && composition == "" {
+			buf := make([]byte, hdr.Size)
+			if hdr.Size > 1<<20 { // cap composition preview at 1MB
+				continue
+			}
+			if _, err := io.ReadFull(tr, buf); err != nil {
+				return nil, "", ErrUnsafeArchive
+			}
+			composition = string(buf)
+		}
+		if !set[name] {
+			set[name] = true
+			order = append(order, name)
+		}
+	}
+	sort.Strings(order)
+	// Ensure the composition is always present in the file list.
+	if _, ok := set["agent.cordis.yml"]; !ok {
+		order = append(order, "agent.cordis.yml")
+		sort.Strings(order)
+	}
+	return order, composition, nil
 }
 
 // safeName is the filename a stored archive uses: <name>-<version>.tar.gz
