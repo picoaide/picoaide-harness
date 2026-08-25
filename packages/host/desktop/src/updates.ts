@@ -70,6 +70,21 @@ export function apply(ctx: Context, config: Config): void {
     let downloadTask: Promise<void> | undefined
     let refreshTray = (): void => {}
 
+    /** Push the current observable update state to the renderer bridge. */
+    const publishState = (): void => {
+      try {
+        adapter.publishState?.({
+          availableVersion,
+          downloadingVersion,
+          isPackaged: adapter.isPackaged,
+          canDownload: adapter.canDownload,
+          currentVersion: adapter.currentVersion,
+        })
+      } catch {
+        // The badge bridge is optional; state transitions must never fail the update flow.
+      }
+    }
+
     const persistState = async (): Promise<void> => {
       try {
         await writeFileAtomic(adapter.statePath, renderState(state), {
@@ -134,6 +149,7 @@ export function apply(ctx: Context, config: Config): void {
         ? result.latestVersion
         : undefined
       refreshTray()
+      publishState()
       return availableVersion
     }
 
@@ -148,13 +164,20 @@ export function apply(ctx: Context, config: Config): void {
         }
         if (!confirmed || disposed) return
 
+        // The user already confirmed exactly this version. Only skip when the
+        // re-check proves the release story changed (rotated to a newer
+        // stable); a failed re-check must NOT silently cancel the download —
+        // that turned "Download" into a no-op on flaky networks. The
+        // downloader re-validates asset name + SHA-256 against the release.
         const confirmedVersion = observeResult(await startCheck())
-        if (confirmedVersion !== version || disposed) return
+        if (confirmedVersion !== undefined && confirmedVersion !== version) return
+        if (disposed) return
 
         const controller = new AbortController()
         downloadController = controller
         downloadingVersion = version
         refreshTray()
+        publishState()
         try {
           await adapter.downloadAndOpen(version, controller.signal)
         } catch {
@@ -163,6 +186,7 @@ export function apply(ctx: Context, config: Config): void {
           if (downloadController === controller) downloadController = undefined
           downloadingVersion = undefined
           refreshTray()
+          publishState()
         }
       })().finally(() => {
         if (downloadTask === task) downloadTask = undefined
@@ -227,6 +251,14 @@ export function apply(ctx: Context, config: Config): void {
       invoke: runManualCheck,
     })
     refreshTray = registration.refresh
+
+    // Expose the renderer trigger after the state machine is fully installed.
+    adapter.checkNow = () => {
+      void runManualCheck()
+    }
+    // Publish the initial static facts so a renderer mounted later still has
+    // a snapshot to render (availableVersion stays undefined until first check).
+    publishState()
 
     if (adapter.isPackaged && config.enabled) scheduleBackgroundCheck(config.initialDelayMs)
 
