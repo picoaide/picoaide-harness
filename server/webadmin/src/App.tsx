@@ -5,14 +5,17 @@ import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
 import Login from './pages/Login'
-import UsersPage from './pages/Users'
-import Departments from './pages/Departments'
-import Gateway from './pages/Gateway'
-import Marketplace from './pages/Marketplace'
-import Audit from './pages/Audit'
-import ServerInfo from './pages/ServerInfo'
-import AgentPresets from './pages/AgentPresets'
-import SharedSkills from './pages/SharedSkills'
+
+// 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
+// 当前路由页面;其余页面(含各自依赖)在导航时按需加载,降低首屏体积。
+const UsersPage = lazy(() => import('./pages/Users'))
+const Departments = lazy(() => import('./pages/Departments'))
+const Gateway = lazy(() => import('./pages/Gateway'))
+const Marketplace = lazy(() => import('./pages/Marketplace'))
+const Audit = lazy(() => import('./pages/Audit'))
+const ServerInfo = lazy(() => import('./pages/ServerInfo'))
+const AgentPresets = lazy(() => import('./pages/AgentPresets'))
+const SharedSkills = lazy(() => import('./pages/SharedSkills'))
 
 // Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
 const Usage = lazy(() => import('./pages/Usage'))
@@ -210,19 +213,21 @@ export default function App() {
           <div className="sticky top-0 z-20 h-1 shrink-0 bg-gradient-to-r from-[#1E40AF] via-[#3B82F6] to-[#D97706]" />
           <div className="mx-auto w-full max-w-[1440px] flex-1 p-6 lg:p-7">
             <ErrorBoundary>
-              <Routes>
-                <Route path="/" element={<Navigate to="/users" />} />
-                <Route path="/users" element={<UsersPage />} />
-                <Route path="/departments" element={<Departments />} />
-                <Route path="/gateway" element={<Gateway />} />
-                <Route path="/usage" element={<Suspense fallback={<div className="text-muted-foreground">加载中…</div>}><Usage /></Suspense>} />
-                <Route path="/marketplace" element={<Marketplace />} />
-                <Route path="/agent-presets" element={<AgentPresets />} />
-                <Route path="/shared-skills" element={<SharedSkills />} />
-                <Route path="/audit" element={<Audit />} />
-                <Route path="/server-info" element={<ServerInfo />} />
-                <Route path="*" element={<NotFound />} />
-              </Routes>
+              <Suspense fallback={<div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>}>
+                <Routes>
+                  <Route path="/" element={<Navigate to="/users" />} />
+                  <Route path="/users" element={<UsersPage />} />
+                  <Route path="/departments" element={<Departments />} />
+                  <Route path="/gateway" element={<Gateway />} />
+                  <Route path="/usage" element={<Usage />} />
+                  <Route path="/marketplace" element={<Marketplace />} />
+                  <Route path="/agent-presets" element={<AgentPresets />} />
+                  <Route path="/shared-skills" element={<SharedSkills />} />
+                  <Route path="/audit" element={<Audit />} />
+                  <Route path="/server-info" element={<ServerInfo />} />
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </Suspense>
             </ErrorBoundary>
           </div>
         </main>
