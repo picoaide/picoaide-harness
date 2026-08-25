@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import * as tar from 'tar'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertSafeEntryPath, assertArchiveSafe, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
+import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Skill names must be a single safe directory segment. */
 export const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u
@@ -140,9 +141,26 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
     await synthesizeSkillFrontmatter(unpackRoot, name)
 
     // Replace an existing installation only with a fully verified tree.
+    // 审计 2026-08-25 P2-4:此前直接 rm(targetDir)+rename——两步之间 crash
+    // 窗口会让已装技能目录整个消失。改为「rename 旧 → backup,rename 新 →
+    // target,成功后删 backup」;失败时回滚旧目录。
     const targetDir = join(skillsDir, name)
-    await rm(targetDir, { recursive: true, force: true })
-    await rename(unpackRoot, targetDir)
+    const backupDir = join(skillsDir, `.${name}.backup-${process.pid}-${Date.now()}`)
+    try {
+      await rename(targetDir, backupDir).catch((cause: NodeJS.ErrnoException) => {
+        if (cause.code !== 'ENOENT') throw cause // 不存在 = 首次安装
+      })
+    } catch (cause) {
+      throw cause instanceof Error ? cause : new Error(String(cause))
+    }
+    try {
+      await rename(unpackRoot, targetDir)
+    } catch (cause) {
+      // 回滚:把旧目录还原,不留半安装状态。
+      await rename(backupDir, targetDir).catch(() => { /* 尽力 */ })
+      throw cause instanceof Error ? cause : new Error(String(cause))
+    }
+    await rm(backupDir, { recursive: true, force: true }).catch(() => { /* 尽力 */ })
 
     return { name, version, skillsDir, targetDir }
   } catch (cause) {
@@ -185,7 +203,14 @@ export async function synthesizeSkillFrontmatter(dir: string, fallbackName: stri
 /** Resolve the user skill root from the environment (product home default). */
 export function resolveSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.DSH_HOME?.trim()
-  if (home !== undefined && home.length > 0) return join(home, 'skills')
+  if (home !== undefined && home.length > 0) {
+    // 审计 2026-08-25 P2-3:DSH_HOME 不得指向系统关键目录(同机注入面)。
+    const resolved = join(home, 'skills')
+    if (!isSafeDshHome(home)) {
+      throw new Error(`unsafe DSH_HOME: ${home} resolves into a system directory`)
+    }
+    return resolved
+  }
   return join(process.env.HOME ?? tmpdir(), '.picoaide-harness', 'skills')
 }
 

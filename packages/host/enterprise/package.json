@@ -103,6 +103,7 @@
     "@picoaide/dsh-connectors": "workspace:*",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
+    "dsh-plugin-desktop": "workspace:*",
     "electron": "43.4.0",
     "react": "18.3.1",
     "tsdown": "0.22.2",

@@ -212,19 +212,28 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			return
 		}
 
+		// 作者校验(审计 2026-08-25 G1):rejected 行是某作者上次提交的独占
+		// 记录,只有作者本人可重提覆盖——防止他人劫持内容并重置为 pending。
+		if getErr == nil && existing.Author != u.Username {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+
+		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
+		// 重提:先 DB(作者校验在 SQL 内)成功后覆盖归档;新建:DB 失败补偿删除。
 		if err := os.MkdirAll(cacheDir, 0700); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "存储失败")
 			return
 		}
 		archivePath := filepath.Join(cacheDir, safeName(req.Name, req.Version))
-		if err := writeFileAtomic(archivePath, raw); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
-			return
-		}
 
 		if getErr == nil {
-			if err := serverstore.UpdateSharedSkillResubmit(db, req.Name, req.Version, display, desc, checksum); err != nil {
+			if err := serverstore.UpdateSharedSkillResubmit(db, req.Name, req.Version, display, desc, checksum, u.Username); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+				return
+			}
+			if err := writeFileAtomic(archivePath, raw); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		} else {
@@ -238,11 +247,17 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				Status:      serverstore.SharedSkillPending,
 			}
 			if _, err := serverstore.CreateSharedSkillCapped(db, s, pendingCap); err != nil {
+				// 补偿:INSERT 失败时删除刚写的归档,不留孤儿文件。
+				_ = os.Remove(archivePath)
 				if errors.Is(err, serverstore.ErrTooManyPending) {
 					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
 					return
 				}
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+				return
+			}
+			if err := writeFileAtomic(archivePath, raw); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		}
@@ -394,6 +409,21 @@ func setGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 		if !ok {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少授权主体")
 			return
+		}
+		// 存在性校验(审计 2026-08-25 G5):与 marketplace 对齐,防拼错主体。
+		if grant {
+			exists := false
+			if t == serverstore.GranteeUser {
+				_, uErr := serverstore.GetUserByUsername(db, subject)
+				exists = uErr == nil
+			} else {
+				_, gErr := serverstore.GroupByName(db, subject)
+				exists = gErr == nil
+			}
+			if !exists {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权主体不存在")
+				return
+			}
 		}
 		var err error
 		if grant {

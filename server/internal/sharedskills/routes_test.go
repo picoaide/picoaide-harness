@@ -197,7 +197,7 @@ func TestUploadApproveFlow(t *testing.T) {
 }
 
 func TestUploadValidation(t *testing.T) {
-	r, db, adminHdr, userHdr, _ := setup(t)
+	r, db, adminHdr, userHdr, bobHdr := setup(t)
 	defer db.Close()
 
 	post := func(body string) int {
@@ -270,6 +270,33 @@ func TestUploadValidation(t *testing.T) {
 	s, _ = serverstore.GetSharedSkill(db, "dup", "1.0.0")
 	if s.Reason != "" || s.Status != serverstore.SharedSkillPending {
 		t.Fatalf("resubmit row = %+v", s)
+	}
+
+	// G1(审计 2026-08-25):跨用户重提必须被拒绝。先再次拒绝,再让 bob 重提。
+	wR := httptest.NewRecorder()
+	reqR := httptest.NewRequest("POST", "/api/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(rejectBody("再拒")))
+	reqR.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		reqR.Header.Set(k, v)
+	}
+	r.ServeHTTP(wR, reqR)
+	if wR.Code != 200 {
+		t.Fatalf("reject2 = %d", wR.Code)
+	}
+	wB := httptest.NewRecorder()
+	reqB := httptest.NewRequest("POST", "/api/shared-skills",
+		strings.NewReader(uploadBody("dup", "1.0.0", "bob 劫持", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+	reqB.Header.Set("Content-Type", "application/json")
+	for k, v := range bobHdr {
+		reqB.Header.Set(k, v)
+	}
+	r.ServeHTTP(wB, reqB)
+	if wB.Code != http.StatusNotFound {
+		t.Fatalf("bob cross-user resubmit = %d, want 404 (body %s)", wB.Code, wB.Body.String())
+	}
+	sB, _ := serverstore.GetSharedSkill(db, "dup", "1.0.0")
+	if sB.Status != serverstore.SharedSkillRejected || sB.Description != "" {
+		t.Fatalf("row after bob attempt = %+v", sB)
 	}
 }
 

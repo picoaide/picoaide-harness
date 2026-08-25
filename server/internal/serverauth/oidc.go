@@ -196,6 +196,7 @@ func (a *API) handleOIDCLogin(c *gin.Context) {
 		Path:     "/api/auth/oidc",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secureCookieFor(c, a.DB),
 		MaxAge:   int(oidcFlowTTL.Seconds()),
 	})
 	c.Redirect(http.StatusFound, authURL)
