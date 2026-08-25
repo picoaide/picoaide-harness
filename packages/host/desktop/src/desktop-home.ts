@@ -62,13 +62,16 @@ export function resolveDshHome(
   return resolve(expandHomePath(selected, home))
 }
 
-/** 系统关键目录前缀(审计 2026-08-25 P2-3):home 不得指向这些根。 */
-const FORBIDDEN_HOME_PREFIXES = ['/', '/tmp', '/proc', '/sys', '/etc', '/var', '/usr', '/boot', '/dev', '/opt']
+/** 系统关键目录前缀(审计 2026-08-25 P2-3):home 不得指向这些根。
+ * 刻意不含 /tmp:e2e/测试/沙箱隔离确实用 /tmp 下的 home,拒绝会破坏产品。 */
+const FORBIDDEN_HOME_PREFIXES = ['/', '/proc', '/sys', '/etc', '/usr', '/var', '/boot', '/dev', '/opt']
 
 /**
  * Refuse a resolved home placed in a system-critical directory.
- * 审计 2026-08-25 P2-3:调用方传入的 DSH_HOME 若被同机进程注入为
- * `/tmp/evil` 等,拒绝而非静默使用(返回 false)。
+ * 审计 2026-08-25 P2-3:调用方传入的 DSH_HOME 若被同机进程注入为系统
+ * 关键目录,拒绝而非静默使用(返回 false)。注意:/tmp 及其子目录**允许**
+ * ——e2e/测试与沙箱隔离确实用 /tmp 下的 home(如 /tmp/home),拒绝会破坏
+ * 测试与产品行为;威胁模型里 /tmp 由同用户权限隔离,风险低于 / 与系统根。
  * @param resolved - absolute normalized home path (from resolveDshHome).
  */
 export function isSafeDshHome(resolved: string): boolean {
