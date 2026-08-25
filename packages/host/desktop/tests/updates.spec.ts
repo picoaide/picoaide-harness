@@ -32,6 +32,8 @@ interface Harness {
   readonly downloadAndOpen: ReturnType<typeof vi.fn>
   readonly refresh: ReturnType<typeof vi.fn>
   readonly registrationDispose: ReturnType<typeof vi.fn>
+  readonly publishedStates: ReturnType<typeof vi.fn>
+  readonly checkNow: (() => void) | undefined
   dispose(): Promise<void>
 }
 
@@ -60,21 +62,25 @@ async function createHarness(options: {
   const confirmDownload = vi.fn(options.confirmDownload ?? (async () => false))
   const showManualCheckResult = vi.fn(options.showManualCheckResult ?? (async () => {}))
   const downloadAndOpen = vi.fn(options.downloadAndOpen ?? (async () => {}))
+  const publishedStates = vi.fn()
   let tray: DesktopTrayItem | undefined
   let disposer: (() => void | Promise<void>) | undefined
+  const updatesAdapter = {
+    isPackaged: options.packaged ?? true,
+    currentVersion: '2.0.0',
+    statePath,
+    canDownload: options.canDownload ?? true,
+    request: options.request ?? (async () => versionResponse('2.0.0')),
+    confirmDownload,
+    showManualCheckResult,
+    downloadAndOpen,
+    notify: options.notify ?? ((notification: DesktopNotification) => { notifications.push(notification) }),
+    publishState: publishedStates,
+    checkNow: undefined as (() => void) | undefined,
+  }
   const runtime = {
     locale: options.locale ?? 'en',
-    updates: {
-      isPackaged: options.packaged ?? true,
-      currentVersion: '2.0.0',
-      statePath,
-      canDownload: options.canDownload ?? true,
-      request: options.request ?? (async () => versionResponse('2.0.0')),
-      confirmDownload,
-      showManualCheckResult,
-      downloadAndOpen,
-      notify: options.notify ?? ((notification: DesktopNotification) => { notifications.push(notification) }),
-    },
+    updates: updatesAdapter,
     registerTrayItem: (item: DesktopTrayItem) => {
       tray = item
       return { refresh, dispose: registrationDispose }
@@ -101,6 +107,8 @@ async function createHarness(options: {
     downloadAndOpen,
     refresh,
     registrationDispose,
+    publishedStates,
+    checkNow: updatesAdapter.checkNow,
     dispose: async () => { await disposer?.() },
   }
 }
@@ -247,6 +255,24 @@ describe('desktop update Host plugin', () => {
     expect(harness.downloadAndOpen).not.toHaveBeenCalled()
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
     expect(harness.tray.label()).toBe('PicoAide Harness 2.2.0 Available')
+  })
+
+  it('still downloads the confirmed version when the post-confirm re-check fails', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(versionResponse('2.1.0'))
+      .mockRejectedValueOnce(new TypeError('offline'))
+    const downloadAndOpen = vi.fn(async () => {})
+    const harness = await createHarness({
+      packaged: false,
+      request,
+      confirmDownload: async () => true,
+      downloadAndOpen,
+    })
+
+    await harness.tray.invoke()
+
+    // The user confirmed 2.1.0; a flaky re-check must not turn Download into a no-op.
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith('2.1.0', expect.any(AbortSignal))
   })
 
   it.each([
@@ -443,5 +469,36 @@ describe('desktop update Host plugin', () => {
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
     expect(harness.tray.label()).toBe('Check for Updates…')
+  })
+
+  it('publishes renderer snapshots on initial state and observable transitions', async () => {
+    const request = vi.fn(async () => versionResponse('2.3.0'))
+    const harness = await createHarness({ request })
+    // Initial static facts are published as soon as the state machine mounts.
+    expect(harness.publishedStates).toHaveBeenCalled()
+    expect(harness.publishedStates).toHaveBeenLastCalledWith({
+      availableVersion: undefined,
+      downloadingVersion: undefined,
+      isPackaged: true,
+      canDownload: true,
+      currentVersion: '2.0.0',
+    })
+
+    // An available version publishes a downloadable snapshot.
+    await harness.tray.invoke()
+    await vi.waitFor(() => { expect(harness.publishedStates).toHaveBeenCalled() })
+    expect(harness.publishedStates).toHaveBeenLastCalledWith(expect.objectContaining({
+      availableVersion: '2.3.0',
+      downloadingVersion: undefined,
+    }))
+  })
+
+  it('installs the renderer check trigger and connects it to the manual flow', async () => {
+    const request = vi.fn(async () => versionResponse('2.3.0'))
+    const harness = await createHarness({ request })
+    expect(typeof harness.checkNow).toBe('function')
+    // The trigger drives the same manual check (confirm dialog appears).
+    harness.checkNow?.()
+    await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.3.0') })
   })
 })
