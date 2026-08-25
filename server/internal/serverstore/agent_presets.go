@@ -227,11 +227,19 @@ func UpdateAgentPresetResubmit(db *sql.DB, name, displayName, description, check
 // UpdateAgentPresetResubmitByVersion resets one rejected name+version row
 // owned by the given author (author 校验,审计 2026-08-25 G1 深度防御)。
 func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, description, checksum, author string) error {
-	_, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
+	res, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
 		updated_at=`+NowExpr()+`
 		WHERE name=? AND version=? AND status=? AND author=?`,
 		displayName, description, checksum, AgentPresetPending, name, version, AgentPresetRejected, author)
-	return err
+	if err != nil {
+		return err
+	}
+	// 审计 2026-08-25 复查【2】:0 行 = 行被并发 approve/rejected 状态已变,
+	// 静默 201 会掩盖状态不一致;返回 ErrNotFound 让路由明确报错。
+	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteAgentPreset removes ALL rows of the name; returns ErrNotFound when
