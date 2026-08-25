@@ -4,9 +4,16 @@ on:
   pull_request:
   push:
 
+# 审计 2026-08-25 D-3:顶层权限收窄为 contents: read(actions: write 对纯 CI
+# 仓库非最小)。release job 在自身声明 contents: write。
 permissions:
   contents: read
-  actions: write
+
+# 审计 2026-08-25 D-2:同 ref 并发触发(重推 tag/两 tag)互斥,release 不再
+# 并行争抢同一版本。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DSH_TELEMETRY_DISABLED: '1'
@@ -15,6 +22,7 @@ jobs:
   server:
     name: Go server
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: server
@@ -44,6 +52,11 @@ jobs:
               docker compose -f docker-compose.yml -f docker-compose.pg.yml config -q
             PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
               docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml config -q
+          else
+            # 审计 2026-08-25 A-01:docker 缺失时显式失败(此前静默跳过 =
+            # compose 语法零验证)。
+            echo "::error::docker 不可用,compose 语法校验被跳过"
+            exit 1
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -54,6 +67,7 @@ jobs:
   desktop-linux:
     name: Desktop (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -61,6 +75,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: yarn
+          cache-dependency-path: yarn.lock
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn check
@@ -76,6 +92,7 @@ jobs:
   desktop-windows:
     name: Desktop (Windows installer)
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -83,6 +100,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: yarn
+          cache-dependency-path: yarn.lock
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn workspace dsh-plugin-desktop dist:win
@@ -95,6 +114,7 @@ jobs:
   desktop-macos:
     name: Desktop (macOS)
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -102,6 +122,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: yarn
+          cache-dependency-path: yarn.lock
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn workspace dsh-plugin-desktop dist:mac-smoke
@@ -116,6 +138,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -126,10 +149,25 @@ jobs:
         with:
           path: release-artifacts
           merge-multiple: true
+      # 审计 2026-08-25 D-2:发布前强制校验 tag == 两处 package.json version
+      # (update-checker 剥 v 后匹配资产名;版本号只改一处 = 发布成功但用户
+      # 升级源永久失效)。不一致直接 fail-loud。
+      - name: Verify tag matches package versions
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          ROOT_VERSION="$(node -p "require('./package.json').version")"
+          DESKTOP_VERSION="$(node -p "require('./packages/host/desktop/package.json').version")"
+          echo "tag=$TAG_VERSION root=$ROOT_VERSION desktop=$DESKTOP_VERSION"
+          if [ "$TAG_VERSION" != "$ROOT_VERSION" ] || [ "$TAG_VERSION" != "$DESKTOP_VERSION" ]; then
+            echo "::error::版本号不一致: tag=$TAG_VERSION root=$ROOT_VERSION desktop=$DESKTOP_VERSION"
+            exit 1
+          fi
       - name: Compute SHA-256 digests
         run: |
           cd release-artifacts
-          sha256sum *.AppImage *.exe *.dmg > SHA256SUMS.txt
+          # 审计 D-4:显式清单防 glob 吞入残留产物(无空格名,sha256sum 输出安全)
+          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -print0 \
+            | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create GitHub Release
         run: |

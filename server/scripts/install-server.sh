@@ -22,7 +22,9 @@
 #   SKIP_DEPS=1       跳过依赖自动安装(仅检查已装命令,缺失即提示并退出)
 #   SKIP_IMAGE_CHECK=1 跳过"镜像是否含 -db-driver 支持"探测(pg 模式)
 #   DOCKER_MIRROR     安装 docker 时使用的镜像源(如 https://mirrors.tuna.tsinghua.edu.cn/docker-ce)
-#   DEPLOY_BASE_URL   资产下载基址(默认 https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server)
+#   DEPLOY_BASE_URL   资产下载基址(默认 master 分支 raw;生产建议固定到发布
+#                     tag: https://raw.githubusercontent.com/picoaide/picoaide-harness/<tag>/server
+#                     或 GitHub Releases 资产 —— 审计 2026-08-25 B-02)
 #   MIRROR_URL        通用镜像加速(如 https://mirrors.aliyun.com,curl/apt/docker 取源)
 #   NO_DEPS           同 SKIP_DEPS(兼容)
 # ============================================================

@@ -52,7 +52,9 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 | macOS Apple Silicon | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-mac.dmg) | 打开 DMG，将 PicoAide Harness 拖入 Applications |
 | Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.1.0-x86_64.AppImage) | 授予执行权限后运行 |
 
-也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
+也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要（每个 Release 附 `SHA256SUMS.txt`，安装前建议校验）。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
+
+> 说明：CI 自动发布的 Windows 安装程序与 Linux 安装包暂未签名（macOS 正式发布版经签名/公证）。首次运行 Windows 安装包时 SmartScreen 可能提示"未知发布者"，请先在 Releases 下载 `SHA256SUMS.txt` 核对后再运行；Linux 安装包同理。
 
 ## 核心优势
 
