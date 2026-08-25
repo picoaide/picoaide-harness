@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { AgentSharePanel } from './AgentSharePanel.tsx'
+import { CapabilityCenterPanel } from './CapabilityCenterPanel.tsx'
+import { t } from './locales.ts'
 
 const TRIGGER_WIDE: React.CSSProperties = {
   flex: 'none',
@@ -36,17 +37,19 @@ const TRIGGER_RAIL: React.CSSProperties = {
 
 const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
 
-/** Cross-plugin panel activation event (shared with the skill center). */
+/** Cross-plugin panel activation event (shared with cron/task/connectors/browser). */
 const ACTIVATE_EVENT = 'dsh-panel-activate'
-const PANEL_NAME = 'agent-share'
+const PANEL_NAME = 'capability-center'
 
 /**
- * Sidebar foot action opening the shared-agent modal, stacked above the
- * Skill center trigger. Opening this panel evicts sibling panels via the
- * shared activation event; a sibling activation closes this panel.
+ * Sidebar foot action opening the Capability Center modal (技能/智能体统一入口),
+ * stacked above the Settings trigger. Replaces the old skill-center and
+ * agent-share triggers (decision 2026-08-25). Opening this panel evicts
+ * sibling panels via the shared activation event; a sibling activation
+ * closes this panel.
  * @param props - sidebar column state from the foot slot owner.
  */
-export function AgentShareTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
+export function CapabilityCenterTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
@@ -73,14 +76,12 @@ export function AgentShareTrigger(props: PropsRuntime<'sidebar.footer.action'>) 
         onClick={openPanel}
       >
         <svg width={props.wide ? 16 : 18} height={props.wide ? 16 : 18} viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <circle cx="5" cy="8" r="2.4" stroke="currentColor" strokeWidth="1.3" />
-          <circle cx="11" cy="4" r="2" stroke="currentColor" strokeWidth="1.3" />
-          <circle cx="11" cy="12" r="2" stroke="currentColor" strokeWidth="1.3" />
-          <path d="M7 7L9.5 5M7 9L9.5 11" stroke="currentColor" strokeWidth="1.3" />
+          <rect x="2" y="2" width="12" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.3"/>
+          <path d="M5 5h6M5 8h6M5 11h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
         </svg>
-        {props.wide && <span style={LABEL}>共享 Agent</span>}
+        {props.wide && <span style={LABEL}>{t('capability.title')}</span>}
       </button>
-      {open && <AgentSharePanel onClose={() => { setOpen(false) }} />}
+      {open && <CapabilityCenterPanel onClose={() => { setOpen(false) }} />}
     </>
   )
 }

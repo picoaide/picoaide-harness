@@ -22,6 +22,7 @@ const UPLOAD_BODY_BYTES = 24 * 1024 * 1024
 import {
   installPresetArchive,
   listInstalledPresets,
+  listLocalPresets,
   mapLocalPresets,
   packPreset,
   resolvePresetsDir,
@@ -775,6 +776,92 @@ export function apply(ctx: Context, config: Config): void {
           }
 
           return json(res, 404, { error: 'not found' })
+        },
+      }),
+
+      // Capability catalog proxy: /api/pico/capabilities (list).
+      // Aggregates the gateway's unified catalog (market skills + org shared
+      // skills + shared agents) and unions local-disk state: installed set,
+      // installed version (best-effort from frontmatter/metadata), and the
+      // locally authored rows (for the 「我的」 partition).
+      ctx.webServer.register({
+        kind: 'prefix', path: '/api/pico/capabilities',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (!guard(req, res)) return
+          const s = session()
+          if (s === null) return json(res, 401, { error: 'not logged in' })
+          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          if (pathname !== '/api/pico/capabilities' || req.method !== 'GET') {
+            return json(res, 404, { error: 'not found' })
+          }
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const source = url.searchParams.get('source')
+          if (source !== 'market' && source !== 'org' && source !== 'local') {
+            return json(res, 400, { error: 'invalid source' })
+          }
+          try {
+            const skillsDir = resolveSkillsDir()
+            const presetsDir = resolvePresetsDir()
+            const data = await fetchJSON(s.serverURL, `/api/capabilities?source=${encodeURIComponent(source)}`, { token: s.token })
+            const items = (data as { items?: Array<Record<string, unknown>> }).items ?? []
+            const installedSkills = new Set(await listInstalledSkills(skillsDir))
+            const installedPresets = new Set(await listInstalledPresets(presetsDir))
+            const localSkills = await listLocalSkills(skillsDir)
+            const localPresets = await listLocalPresets(presetsDir)
+            const localSkillVersions = new Map(localSkills.map(r => [r.name, r.version]))
+
+            // 本地创作行(我的分区):磁盘上存在的技能/预设,带上传状态(若在
+            // 服务端 catalog 里存在同名同 kind 的行,则取其 status——本机
+            // 作者是自己的上传,服务端 ListVisible* 已含 author-own 任意状态)。
+            const localRows: Array<Record<string, unknown>> = []
+            for (const l of localSkills) {
+              const match = items.find(i => (i as { kind?: string }).kind === 'skill' && (i as { name?: string }).name === l.name)
+              localRows.push({
+                kind: 'skill', source: 'local', name: l.name, display_name: l.displayName ?? l.name,
+                version: l.version ?? '1.0.0', description: l.description ?? '', author: '',
+                status: match !== undefined ? (match as { status?: string }).status : undefined,
+                reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
+                versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
+              })
+            }
+            for (const l of localPresets) {
+              const match = items.find(i => (i as { kind?: string }).kind === 'agent' && (i as { name?: string }).name === l.name)
+              localRows.push({
+                kind: 'agent', source: 'local', name: l.name, display_name: l.displayName ?? l.name,
+                version: '1.0.0', description: l.description ?? '', author: '',
+                status: match !== undefined ? (match as { status?: string }).status : undefined,
+                reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
+                versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
+              })
+            }
+
+            if (source === 'local') {
+              return json(res, 200, { items: localRows })
+            }
+
+            // 已装版本:best-effort(技能 metadata.yaml / frontmatter 的 version;
+            // preset 的 preset.yml 无 version 字段,取 '1.0.0' 兜底,hasUpdate 不精确时
+            // 以 approved 最高 ± 已装版本为准)。
+            const enriched = items.map(i => {
+              const kind = i.kind as string
+              const name = i.name as string
+              const installed = kind === 'skill' ? installedSkills.has(name) : installedPresets.has(name)
+              const installedVersion = kind === 'skill' ? localSkillVersions.get(name) : undefined
+              return {
+                ...i,
+                installed,
+                installedVersion,
+                hasUpdate: false, // 客户端按 versions 与 installedVersion 计算
+              }
+            })
+            json(res, 200, { items: enriched })
+          } catch (cause) {
+            if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+              ctx.picoSession.clear()
+              return json(res, 401, { error: 'auth expired' })
+            }
+            gatewayError(res, cause)
+          }
         },
       }),
     ]
