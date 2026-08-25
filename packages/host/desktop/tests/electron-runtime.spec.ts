@@ -572,7 +572,7 @@ describe('Electron compatibility runtime', () => {
     expect(diagnostics.export).toHaveBeenCalledWith(
       '/tmp/dsh-desktop-user-data',
       {
-        appVersion: '2.1.0',
+        appVersion: '2.2.0',
         crashDumpsDir: '/tmp/dsh-desktop-user-data/Crashpad',
       },
     )
@@ -705,7 +705,7 @@ describe('Electron compatibility runtime', () => {
     expect(runtime.updates).toMatchObject({
       isPackaged: false,
       canDownload: false,
-      currentVersion: '2.1.0',
+      currentVersion: '2.2.0',
       statePath: join('/tmp/dsh-desktop-user-data', 'updates', 'state.json'),
     })
     electron.app.isPackaged = true
