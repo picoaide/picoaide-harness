@@ -20,6 +20,16 @@ import {
 } from './renderer-boot.ts'
 import { DESKTOP_DIRECTORY_PICKER_PATH } from './directory-picker-contract.ts'
 import { handleDesktopDirectoryPickerRequest } from './directory-picker-route.ts'
+import {
+  DESKTOP_UPDATE_PATH,
+  DESKTOP_UPDATE_CHECK_PATH,
+  emptyDesktopUpdateState,
+  type DesktopUpdateStateResponse,
+} from './desktop-update-contract.ts'
+import {
+  handleDesktopUpdateRequest,
+  handleDesktopUpdateCheckRequest,
+} from './desktop-update-route.ts'
 import type { DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
@@ -135,6 +145,47 @@ export function apply(ctx: Context, config: Config): void {
     },
   )
   const rendererOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  let desktopUpdateState: DesktopUpdateStateResponse = {
+    ...emptyDesktopUpdateState(),
+    // Headless loader smokes provide a stub desktopRuntime without an update
+    // adapter; the badge route then serves empty state (renderer hides it).
+    isPackaged: runtime.updates?.isPackaged ?? false,
+    canDownload: runtime.updates?.canDownload ?? false,
+    currentVersion: runtime.updates?.currentVersion ?? '',
+  }
+  // Route publishes the latest update-coordinator transition; before the
+  // coordinator starts, the badge serves the static packaged facts.
+  if (runtime.updates !== undefined) {
+    runtime.updates.publishState = (snapshot) => {
+      desktopUpdateState = { ...snapshot }
+    }
+  }
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: DESKTOP_UPDATE_PATH,
+      handler: (req, res) => handleDesktopUpdateRequest(
+        req,
+        res,
+        rendererOrigin,
+        () => desktopUpdateState,
+      ),
+    }),
+    'dsh-plugin-desktop: update badge state route',
+  )
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: DESKTOP_UPDATE_CHECK_PATH,
+      handler: (req, res) => handleDesktopUpdateCheckRequest(
+        req,
+        res,
+        rendererOrigin,
+        () => { runtime.updates?.checkNow?.() },
+      ),
+    }),
+    'dsh-plugin-desktop: update badge check route',
+  )
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
