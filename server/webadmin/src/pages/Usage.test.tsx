@@ -7,10 +7,11 @@ import { ymd } from '../lib/format'
 
 const mockRequest = vi.mocked(request)
 
-// VChart 依赖 canvas/RAF,jsdom 无法真实渲染;这里渲染占位节点,
-// 测试聚焦数据驱动的 UI 行为而非图表内部实现。
-vi.mock('@visactor/react-vchart', () => ({
-  VChart: (props: any) => (
+// 图表组件依赖 canvas/RAF,jsdom 无法真实渲染;这里直接 mock 项目内
+// 轻量懒加载封装 chart-lazy(它内部按需加载 VChart),渲染占位节点,
+// 测试聚焦数据驱动的 UI 行为而非图表内部实现(2026-P 优化后组件路径变更)。
+vi.mock('../components/chart-lazy', () => ({
+  ChartLazy: (props: any) => (
     <div data-testid="vchart" data-chart-type={props?.spec?.type}>
       vchart-{props?.spec?.type}
     </div>
