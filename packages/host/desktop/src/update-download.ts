@@ -366,7 +366,10 @@ async function resolveChecksum(
     const match = SHA256_PATTERN.exec(trimmed)
     if (match === null) continue
     const digest = trimmed.slice(0, 64).toLowerCase()
-    const entryName = trimmed.slice(64).trim()
+    // 发布清单文件名为 `find … | xargs sha256sum` 等工具输出,可能带 `./`
+    // 前缀(如 `./PicoAide-Harness-2.2.0-x64-Setup.exe`);规范化为裸文件名后
+    // 再与资产名严格匹配,否则 v2.2.0 起 CI 产出的清单会永远 checksum-missing。
+    const entryName = trimmed.slice(64).trim().replace(/^\.\//u, '')
     if (entryName === assetName) return digest
   }
   throw new UpdateDownloadError('checksum-missing', `The checksum manifest has no digest for ${assetName}.`)

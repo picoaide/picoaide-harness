@@ -169,7 +169,11 @@ jobs:
             echo "::error::no release artifacts found";
             exit 1
           fi
-          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -print0 \
+          # 修复 2026-08-25:旧版 sha256sum * 无 ./ 前缀,find|xargs 产出 ./ 前缀,
+          # 而客户端 update-download 用裸文件名严格匹配 → v2.2.0 起 SHA256SUMS
+          # 永远 checksum-missing(升级提示后下载静默失败)。%f\0 保留 D-4 显式清单
+          # 健壮性,同时恢复裸文件名兼容全部客户端版本。
+          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -printf '%f\0' \
             | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create GitHub Release
