@@ -97,7 +97,7 @@ describe('installSkillArchive', () => {
       expect(result.targetDir).toBe(join(skillsDir, 'demo-skill'))
       const installedMd = await readFile(join(skillsDir, 'demo-skill', 'SKILL.md'), 'utf8')
       // metadata.yaml supplies name: demo; description falls back.
-      expect(installedMd).toMatch(/^---\nname: demo\ndescription: demo-skill skill\n---\n# Demo Skill/)
+      expect(installedMd).toMatch(/^---\nname: demo\ndescription: demo-skill skill(\nversion: 1\.0\.0)?\n---\n# Demo Skill/)
       expect(installedMd).toContain(SKILL_MD)
       expect(await readFile(join(skillsDir, 'demo-skill', 'scripts', 'run.sh'), 'utf8')).toContain('echo hi')
     } finally {
@@ -182,7 +182,7 @@ describe('synthesizeSkillFrontmatter', () => {
         await m.synthesizeSkillFrontmatter(dir, 'code-review')
       })
       const out = await readFile(join(dir, 'SKILL.md'), 'utf8')
-      expect(out).toMatch(/^---\nname: code-review\ndescription: 代码审查\n---\n# 代码审查技能/)
+      expect(out).toMatch(/^---\nname: code-review\ndescription: 代码审查(\nversion: 1\.0\.0)?\n---\n# 代码审查技能/)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -224,7 +224,9 @@ describe('synthesizeSkillFrontmatter', () => {
       })
       await installSkillArchive({ name: 'code-review', archive, skillsDir })
       const out = await readFile(join(skillsDir, 'code-review', 'SKILL.md'), 'utf8')
-      expect(out).toMatch(/^---\nname: code-review\ndescription: 代码审查\n---\n/)
+      // 新合成 frontmatter 会带上 metadata.yaml 的 version(installedVersion
+      // 依据);断言 name/description 始终存在,version 可选。
+      expect(out).toMatch(/^---\nname: code-review\ndescription: 代码审查(\nversion: 1\.0\.0)?\n---\n/)
     } finally {
       await rm(skillsDir, { recursive: true, force: true })
     }
