@@ -150,6 +150,21 @@ describe('packPreset', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('truncates display metadata to the gateway bound (500 chars)', async () => {
+    const dir = await newPresetsDir()
+    try {
+      const presetDir = join(dir, 'long-meta')
+      await mkdir(presetDir, { recursive: true })
+      await writeFile(join(presetDir, 'agent.cordis.yml'), COMPOSITION)
+      await writeFile(join(presetDir, 'preset.yml'), `name: ${'n'.repeat(600)}\ndescription: ${'x'.repeat(600)}\n`)
+      const result = await packPreset(dir, 'long-meta')
+      expect(result.displayName?.length).toBe(500)
+      expect(result.description?.length).toBe(500)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('installPresetArchive', () => {
@@ -252,9 +267,9 @@ describe('mapLocalPresets', () => {
       await writeFile(join(a, 'preset.yml'), 'name: 水果新到\n')
       await writeFile(join(b, 'agent.cordis.yml'), COMPOSITION)
       const map = await mapLocalPresets(dir, [
-        { name: 'fruit-new-arrival', status: 'pending' },
+        { name: 'fruit-new-arrival', status: 'rejected', reason: '缺少 skills/' },
       ])
-      expect(map['fruit-new-arrival']).toMatchObject({ name: 'fruit-new-arrival', displayName: '水果新到', status: 'pending' })
+      expect(map['fruit-new-arrival']).toMatchObject({ name: 'fruit-new-arrival', displayName: '水果新到', status: 'rejected', reason: '缺少 skills/' })
       expect(map['local-only']).toMatchObject({ name: 'local-only' })
       expect(map['local-only'].status).toBeUndefined()
       expect(Object.keys(map).length).toBe(2)

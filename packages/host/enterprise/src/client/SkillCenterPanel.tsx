@@ -8,6 +8,32 @@ interface Skill {
   author: string
 }
 
+/** Shared-library row from `/api/pico/shared-skills` (approved + own). */
+interface SharedSkill extends Skill {
+  display_name?: string | undefined
+  status?: 'pending' | 'approved' | 'rejected' | undefined
+  reason?: string | undefined
+}
+
+/** Highest approved version of a shared skill (undefined when none). */
+export function latestApprovedVersion(rows: readonly SharedSkill[], name: string): string | undefined {
+  const versions = rows.filter(s => s.name === name && s.status === 'approved')
+  if (versions.length === 0) return undefined
+  versions.sort((a, b) => (a.version.localeCompare(b.version, undefined, { numeric: true })))
+  return versions[versions.length - 1]!.version
+}
+
+/** Local disk skill row (SKILL.md under the skill root). */
+interface LocalSkill {
+  name: string
+  displayName?: string | undefined
+  description?: string | undefined
+  version?: string | undefined
+  /** Upload state from the gateway (pending/approved/rejected), when uploaded. */
+  status?: 'pending' | 'approved' | 'rejected' | undefined
+  reason?: string | undefined
+}
+
 const OVERLAY: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
@@ -196,6 +222,57 @@ const INSTALLED_CHIP: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
+/** 本地徽标(本地发现技能与商店/共享库区分)。 */
+const CHIP_LOCAL: React.CSSProperties = {
+  flex: 'none',
+  padding: '1px 8px',
+  borderRadius: 999,
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  whiteSpace: 'nowrap',
+}
+
+/** 审核中徽标。 */
+const CHIP_PENDING: React.CSSProperties = {
+  flex: 'none',
+  padding: '1px 8px',
+  borderRadius: 999,
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-state-warn-label)',
+  border: '1px solid var(--dsw-alias-state-warn-label)',
+  whiteSpace: 'nowrap',
+}
+
+/** 已拒绝徽标。 */
+const CHIP_REJECTED: React.CSSProperties = {
+  flex: 'none',
+  padding: '1px 8px',
+  borderRadius: 999,
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-state-error-primary)',
+  border: '1px solid var(--dsw-alias-state-error-primary)',
+  whiteSpace: 'nowrap',
+}
+
+/** 分区标题。 */
+const SECTION_HEAD: React.CSSProperties = { margin: 0, fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', padding: '0 0 4px' }
+
+/** 通用徽标(共享库条目)。 */
+const CHIP: React.CSSProperties = {
+  flex: 'none',
+  padding: '1px 8px',
+  borderRadius: 999,
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-state-success-primary)',
+  border: '1px solid var(--dsw-alias-state-success-primary)',
+  whiteSpace: 'nowrap',
+}
+
 /** 卡片底部操作区：分隔线 + 按钮（版本/作者信息并入描述下方，不再单独占用一行）。 */
 const CARD_FOOT: React.CSSProperties = {
   display: 'flex',
@@ -211,9 +288,9 @@ const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'cente
 /** Per-skill action feedback: which skill is busy and the outcome. */
 interface ActionState {
   name: string
-  kind: 'installing' | 'uninstalling' | 'done-install' | 'done-uninstall' | 'failed'
+  kind: 'installing' | 'uninstalling' | 'uploading' | 'done-install' | 'done-uninstall' | 'done-upload' | 'failed'
   /** Which action failed (for the failure notice copy). */
-  failedKind?: 'install' | 'uninstall' | undefined
+  failedKind?: 'install' | 'uninstall' | 'upload' | undefined
   error?: string | undefined
 }
 
@@ -226,7 +303,9 @@ interface ActionState {
  * @param props.onClose - close the modal.
  */
 export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
-  const [skills, setSkills] = useState<Skill[] | null>(null)
+  const [skills, setSkills] = useState<Skill[] | null>(null)   // marketplace (授权制)
+  const [shared, setShared] = useState<SharedSkill[]>([])      // shared-skills approved+own
+  const [local, setLocal] = useState<LocalSkill[]>([])         // disk skills + upload state
   const [installed, setInstalled] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState('')
   const [action, setAction] = useState<ActionState | null>(null)
@@ -244,13 +323,22 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
     const seq = ++loadSeqRef.current
     setLoading(true)
     setError('')
-    fetch('/api/pico/skills')
-      .then(async (res) => {
+    Promise.all([
+      fetch('/api/pico/skills').then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
+        return await res.json() as { skills?: Skill[]; installed?: string[] }
+      }),
+      fetch('/api/pico/shared-skills').then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
+        return await res.json() as { skills?: SharedSkill[]; installed?: string[]; local?: LocalSkill[] }
+      }),
+    ]).then(([market, sharedData]) => {
         if (seq !== loadSeqRef.current) return
-        const data = (await res.json()) as { skills?: Skill[]; installed?: string[] }
-        setSkills(data.skills ?? [])
-        setInstalled(new Set(data.installed ?? []))
+        setSkills(market.skills ?? [])
+        setShared(sharedData.skills ?? [])
+        setLocal(sharedData.local ?? [])
+        // installed 合并两个数据源(商城 installed + 本地存在的)
+        setInstalled(new Set([...(market.installed ?? []), ...(sharedData.installed ?? [])]))
         setLoading(false)
       })
       .catch(() => {
@@ -320,6 +408,61 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
+  /** Upload a local skill to the shared store (starts review). */
+  const upload = async (name: string): Promise<void> => {
+    if (action !== null) return
+    setAction({ name, kind: 'uploading' })
+    try {
+      const res = await fetch('/api/pico/shared-skills/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
+      }
+      setAction({ name, kind: 'done-upload' })
+    } catch (cause) {
+      setAction({ name, kind: 'failed', failedKind: 'upload', error: cause instanceof Error ? cause.message : undefined })
+    }
+    loadSkills()
+  }
+
+  /** Install (or update to) a shared-library version. */
+  const installShared = async (name: string, version: string): Promise<void> => {
+    if (action !== null) return
+    setAction({ name, kind: 'installing' })
+    try {
+      const res = await fetch(`/api/pico/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/install`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
+      }
+      setInstalled(prev => new Set(prev).add(name))
+      setAction({ name, kind: 'done-install' })
+    } catch (cause) {
+      setAction({ name, kind: 'failed', failedKind: 'install', error: cause instanceof Error ? cause.message : undefined })
+    }
+    loadSkills()
+  }
+
+  /** Highest approved version of a shared skill ('' when none). */
+  const latestApproved = (name: string): SharedSkill | undefined => {
+    const versions = shared.filter(s => s.name === name && s.status === 'approved')
+    if (versions.length === 0) return undefined
+    versions.sort((a, b) => (a.version.localeCompare(b.version, undefined, { numeric: true })))
+    return versions[versions.length - 1]
+  }
+
+  /** Whether an installed local skill has a newer approved shared version. */
+  const hasUpdate = (name: string): boolean => {
+    if (!installed.has(name)) return false
+    const latest = latestApproved(name)
+    if (latest === undefined) return false
+    return true // presence of an approved row for an installed skill ⇒ 可升级
+  }
+
   let content: React.ReactNode
   if (error !== '') {
     content = (
@@ -336,10 +479,88 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
         <p style={EMPTY}>{t('skill.loading')}</p>
       </div>
     )
-  } else if (skills.length === 0) {
+  } else if (skills === null || (skills.length === 0 && shared.length === 0 && local.length === 0)) {
     content = <p style={EMPTY}>{t('skill.empty')}</p>
   } else {
-    content = skills.map(skill => {
+    const renderHeader = (text: string, count: number) => (
+      <h3 style={{ ...SECTION_HEAD, gridColumn: '1 / -1' }}>{text}（{count}）</h3>
+    )
+
+    const renderLocalCard = (row: LocalSkill) => {
+      const name = row.name
+      const busy = action?.name === name && action.kind === 'uploading'
+      const title = row.displayName ?? name
+      return (
+        <div key={`local-${name}`} className="pico-skill-card" style={CARD}>
+          <div style={TITLE_ROW}>
+            <span style={{ ...AVATAR, color: avatarColor(name), background: `color-mix(in srgb, ${avatarColor(name)} 14%, transparent)` }} aria-hidden="true">
+              {name.charAt(0)}
+            </span>
+            <div style={NAME_COL}>
+              <div style={NAME_WRAP}>
+                <p style={{ ...NAME, ...NAME_TEXT }} title={title}>{title}</p>
+                <span style={CHIP_LOCAL}>{t('skill.localBadge')}</span>
+                {row.status === 'pending' && <span style={CHIP_PENDING}>{t('skill.reviewing')}</span>}
+                {row.status === 'approved' && <span style={CHIP}>{t('skill.shared')}</span>}
+                {row.status === 'rejected' && <span style={CHIP_REJECTED}>{t('skill.rejected')}</span>}
+              </div>
+              <p style={META}>{row.version !== undefined ? `v${row.version}` : t('skill.versionUnknown')}</p>
+            </div>
+          </div>
+          {row.description !== undefined && row.description !== '' && <p style={DESC}>{row.description}</p>}
+          {row.status === 'rejected' && row.reason !== undefined && row.reason !== '' && (
+            <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>
+              {t('skill.rejectReason', { reason: row.reason })}
+            </p>
+          )}
+          <div style={CARD_FOOT}>
+            {row.status === 'rejected'
+              ? <button type="button" style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY} disabled={busy} onClick={() => { void upload(name) }}>{t('skill.reupload')}</button>
+              : row.status === 'pending'
+                ? <span style={{ ...CHIP_PENDING, flex: 1, textAlign: 'center' }}>{t('skill.awaitingReview')}</span>
+                : row.status === 'approved'
+                  ? <span style={{ ...CHIP, flex: 1, textAlign: 'center' }}>{t('skill.sharedDone')}</span>
+                  : <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void upload(name) }}>{t('skill.upload')}</button>}
+          </div>
+        </div>
+      )
+    }
+
+    const renderSharedCard = (row: SharedSkill) => {
+      const name = row.name
+      const latest = latestApproved(name)
+      const busy = action?.name === name && action.kind === 'installing'
+      const isInstalled = installed.has(name)
+      return (
+        <div key={`shared-${name}-${row.version}`} className="pico-skill-card" style={CARD}>
+          <div style={TITLE_ROW}>
+            <span style={{ ...AVATAR, color: avatarColor(name), background: `color-mix(in srgb, ${avatarColor(name)} 14%, transparent)` }} aria-hidden="true">
+              {name.charAt(0)}
+            </span>
+            <div style={NAME_COL}>
+              <div style={NAME_WRAP}>
+                <p style={{ ...NAME, ...NAME_TEXT }} title={row.display_name || name}>{row.display_name || name}</p>
+                <span style={CHIP}>{t('skill.sharedBadge')}</span>
+                {isInstalled && <span style={INSTALLED_CHIP}>{t('skill.installedBadge')}</span>}
+              </div>
+              <p style={META}>v{row.version}{row.author !== '' ? ` · ${row.author}` : ''}</p>
+            </div>
+          </div>
+          {row.description !== '' && <p style={DESC}>{row.description}</p>}
+          <div style={CARD_FOOT}>
+            {isInstalled ? (
+              latest !== undefined && latest.version !== row.version && hasUpdate(name)
+                ? <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void installShared(name, latest.version) }}>{t('skill.update', { version: latest.version })}</button>
+                : <span style={{ ...CHIP, flex: 1, textAlign: 'center' }}>{t('skill.installed')}</span>
+            ) : (
+              <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void installShared(name, row.version) }}>{t('skill.install')}</button>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    const renderMarketCard = (skill: Skill) => {
       const busy = action?.name === skill.name && (action.kind === 'installing' || action.kind === 'uninstalling')
       const isInstalled = installed.has(skill.name)
       return (
@@ -401,7 +622,30 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       )
-    })
+    }
+
+    content = (
+      <>
+        {local.length > 0 && (
+          <>
+            {renderHeader(t('skill.localSection'), local.length)}
+            {local.map(renderLocalCard)}
+          </>
+        )}
+        {shared.length > 0 && (
+          <>
+            {renderHeader(t('skill.sharedSection'), shared.length)}
+            {shared.map(renderSharedCard)}
+          </>
+        )}
+        {skills.length > 0 && (
+          <>
+            {renderHeader(t('skill.marketSection'), skills.length)}
+            {skills.map(renderMarketCard)}
+          </>
+        )}
+      </>
+    )
   }
 
   return (
@@ -413,19 +657,25 @@ export function SkillCenterPanel({ onClose }: { onClose: () => void }) {
           <button type="button" style={CLOSE} onClick={onClose}>{t('skill.close')}</button>
         </div>
         <div style={BODY}>{content}</div>
-        {action !== null && action.kind !== 'installing' && action.kind !== 'uninstalling' && (
+        {action !== null && action.kind !== 'installing' && action.kind !== 'uninstalling' && action.kind !== 'uploading' && (
           <p style={{ ...NOTICE, color: action.kind === 'failed' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)' }}>
             {action.kind === 'done-install'
               ? t('skill.installed', { name: action.name })
               : action.kind === 'done-uninstall'
                 ? t('skill.uninstalled', { name: action.name })
-                : action.failedKind === 'install'
-                  ? action.error !== undefined && action.error !== ''
-                    ? `${t('skill.failed')}：${action.error}`
-                    : t('skill.failed')
-                  : action.error !== undefined && action.error !== ''
-                    ? `${t('skill.uninstallFailed')}：${action.error}`
-                    : t('skill.uninstallFailed')}
+                : action.kind === 'done-upload'
+                  ? t('skill.uploaded', { name: action.name })
+                  : action.failedKind === 'install'
+                    ? action.error !== undefined && action.error !== ''
+                      ? `${t('skill.failed')}：${action.error}`
+                      : t('skill.failed')
+                    : action.failedKind === 'upload'
+                      ? action.error !== undefined && action.error !== ''
+                        ? `${t('skill.uploadFail')}：${action.error}`
+                        : t('skill.uploadFail')
+                      : action.error !== undefined && action.error !== ''
+                        ? `${t('skill.uninstallFailed')}：${action.error}`
+                        : t('skill.uninstallFailed')}
           </p>
         )}
       </div>

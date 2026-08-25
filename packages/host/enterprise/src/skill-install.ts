@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { assertSafeEntryPath, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
+import { assertSafeEntryPath, assertArchiveSafe, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
 
 /** Skill names must be a single safe directory segment. */
 export const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u
@@ -247,4 +247,122 @@ export async function hasSkillMarkdown(dir: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/** One locally authored skill row (name + display metadata from frontmatter). */
+export interface LocalSkillRow {
+  name: string
+  displayName?: string | undefined
+  description?: string | undefined
+  version?: string | undefined
+}
+
+/** Extract a trimmed string from an unknown YAML value ('' → undefined). */
+function metaString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/**
+ * Enumerate locally authored skills (SKILL.md directories under the root)
+ * with their frontmatter display metadata: what the upstream filesystem
+ * provider discovers. Metadata is best-effort (unreadable frontmatter
+ * degrades to the id — presentation, not capability).
+ * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @returns rows sorted by name.
+ */
+export async function listLocalSkills(skillsDir: string): Promise<LocalSkillRow[]> {
+  const names = await listInstalledSkills(skillsDir)
+  const rows: LocalSkillRow[] = []
+  for (const name of names) {
+    const meta = await readSkillFrontmatter(join(skillsDir, name, 'SKILL.md'))
+    const displayName = metaString(meta.name)
+    const description = metaString(meta.description)
+    const version = metaString(meta.version)
+    rows.push({
+      name,
+      ...displayName === undefined ? {} : { displayName },
+      ...description === undefined ? {} : { description },
+      ...version === undefined ? {} : { version },
+    })
+  }
+  return rows
+}
+
+/** Parse the YAML frontmatter of a SKILL.md (best-effort). */
+async function readSkillFrontmatter(skillMdPath: string): Promise<Record<string, unknown>> {
+  let raw: string
+  try {
+    raw = await readFile(skillMdPath, 'utf8')
+  } catch {
+    return {}
+  }
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(raw)
+  if (match === null) return {}
+  try {
+    const parsed = parseYaml(match[1]!) as unknown
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // Unparsable frontmatter: degrade to id (presentation only).
+  }
+  return {}
+}
+
+/** Result of packing one local skill for upload. */
+export interface SkillPackResult {
+  name: string
+  displayName?: string | undefined
+  description?: string | undefined
+  version: string
+  checksum: string
+  archive: Buffer
+}
+
+/**
+ * Pack a locally authored skill's WHOLE directory into a gzipped tar whose
+ * entries are the directory's contents (the archive root IS the skill
+ * directory). Symlinks are packed and then refused by the safety scan, so an
+ * archive can never smuggle a reference outside the skill.
+ * @param skillsDir - the skill root (`<dshHome>/skills`).
+ * @param name - the skill directory name.
+ * @param version - upload version (caller-supplied, default 1.0.0).
+ * @returns the archive plus metadata, or throws with a user-facing message.
+ */
+export async function packSkill(skillsDir: string, name: string, version = '1.0.0'): Promise<SkillPackResult> {
+  validateSkillName(name)
+  const dir = join(skillsDir, name)
+  await stat(join(dir, 'SKILL.md')).catch(() => {
+    throw new Error(`skill "${name}" has no SKILL.md`)
+  })
+  const meta = await readSkillFrontmatter(join(dir, 'SKILL.md'))
+
+  const chunks: Buffer[] = []
+  await new Promise<void>((resolveP, rejectP) => {
+    const stream = tar.c({ gzip: true, cwd: dir, portable: true, follow: false }, ['.'])
+    stream.on('data', (c: Buffer) => chunks.push(c))
+    stream.on('error', rejectP)
+    stream.on('end', () => resolveP())
+  })
+  const archive = Buffer.concat(chunks)
+  if (archive.byteLength > MAX_ARCHIVE_BYTES) {
+    throw new Error(`skill archive too large (${archive.byteLength} bytes)`)
+  }
+  await assertArchiveSafe(archive)
+  const checksum = createHash('sha256').update(archive).digest('hex')
+  const displayName = metaString(meta.name)
+  const description = metaString(meta.description)
+  return {
+    name,
+    ...displayName === undefined ? {} : { displayName },
+    ...description === undefined ? {} : { description },
+    version,
+    checksum,
+    archive,
+  }
+}
+
+/** List installed skills: names only (compat alias). */
+export async function listInstalledSkillNames(skillsDir: string): Promise<string[]> {
+  return await listInstalledSkills(skillsDir)
 }

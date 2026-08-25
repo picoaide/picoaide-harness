@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { avatarColor } from '../src/client/SkillCenterPanel.tsx'
+import { avatarColor, latestApprovedVersion } from '../src/client/SkillCenterPanel.tsx'
+
+describe('latestApprovedVersion', () => {
+  const rows = [
+    { name: 'codeql', version: '1.0.0', description: '', author: '', status: 'approved' as const },
+    { name: 'codeql', version: '1.2.0', description: '', author: '', status: 'approved' as const },
+    { name: 'codeql', version: '2.0.0-rc1', description: '', author: '', status: 'pending' as const },
+    { name: 'codeql', version: '1.1.0', description: '', author: '', status: 'approved' as const },
+  ]
+
+  it('returns the numerically-highest approved version; ignores pending', () => {
+    expect(latestApprovedVersion(rows, 'codeql')).toBe('1.2.0')
+  })
+
+  it('returns undefined when no approved rows', () => {
+    expect(latestApprovedVersion(rows, 'nonexistent')).toBeUndefined()
+  })
+})
 
 describe('avatarColor', () => {
   it('returns a color token for any non-empty name', () => {
