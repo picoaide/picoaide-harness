@@ -5,7 +5,20 @@ import { fileURLToPath, URL } from 'node:url'
 export default defineConfig({
   plugins: [react()],
   base: '/admin/',
-  build: { outDir: 'dist' },
+  build: {
+    outDir: 'dist',
+    // vendor 分包(性能优化 2026-P):react/react-router 等依赖拆成独立
+    // vendor chunk,与业务代码分离。业务代码更新时 vendor 内容不变,
+    // 文件名哈希不变 → 浏览器 1 年 immutable 缓存长期命中,回访/发版
+    // 只重新下载业务 chunk(通常几 KB~几十 KB)。
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+        },
+      },
+    },
+  },
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
