@@ -82,7 +82,7 @@ export declare class HostCronLedger {
     setScheduler(patch: Omit<Partial<CronSchedulerSnapshot>, 'error'> & {
         error?: string | undefined;
     }): void;
-    /** Scheduler-owned: settle an execution with a result. */
+    /** Scheduler-owned: settle an execution with a result. Prunes old history. */
     settle(jobId: string, executionId: string, result: 'succeeded' | 'failed' | 'cancelled', error?: string): void;
     /** Scheduler-owned: roll every enabled job's nextRunAt past `now` (missed runs are skipped). */
     skipMissed(now: number): void;
@@ -109,4 +109,11 @@ export declare class HostCronLedger {
 }
 /** Validate a cron expression against the shared parser (UI and Host agree). */
 export declare function validateCron(expr: string): boolean;
+/**
+ * Migrate a ledger's jobs from an older schema version to the current one.
+ * 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走
+ * 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。当前只有
+ * v1;未来字段/枚举变更时在此加 v1→v2、v2→v3 … 并同步 bump 常量。
+ */
+export declare function migrateCronLedger(jobs: JobRecord[], fromVersion: number): JobRecord[];
 export { isValidCron };

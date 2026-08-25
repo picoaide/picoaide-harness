@@ -39,6 +39,11 @@ function expandHomePath(path, home = homedir()) {
 * Precedence, highest first: an explicit configured path, `$DSH_HOME`, then
 * `~/.picoaide-harness`. The product keeps all user data under one root. An
 * empty or whitespace-only `$DSH_HOME` is treated as unset.
+*
+* 审计 2026-08-25 P2-3:DSH_HOME 是完全可注入的环境变量(同机进程可设置后
+* 以同一用户拉起应用)。虽保留其覆盖能力(e2e/多 profile 依赖),但拒绝把
+* home 重定向到系统关键目录,避免「安全解压/凭据落盘」作用到 /tmp 等
+* 攻击者控制的路径。
 * @param configured - explicit harness-home override, highest precedence.
 * @param env - environment mapping used to read `DSH_HOME`.
 * @param home - platform home directory fallback (test seam).
@@ -62,6 +67,8 @@ function dshHome() {
 * (Apache-2.0) packages/dsh-task-board src/host-ledger.ts.
 */
 const MAX_REQUEST_CACHE = 256;
+/** 保留的执行历史条数上限(审计 2026-08-25 P2-5)。 */
+const MAX_EXECUTION_HISTORY = 100;
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45e3;
 /**
@@ -155,10 +162,13 @@ var HostTaskLedger = class {
 		}
 		try {
 			const parsed = JSON.parse(raw);
-			if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.tasks)) throw new Error("unexpected schema");
+			if (typeof parsed.schemaVersion !== "number" || !Array.isArray(parsed.tasks)) throw new Error("unexpected schema");
+			let tasks = parsed.tasks;
+			if (parsed.schemaVersion < 1) tasks = migrateTaskLedger(tasks, parsed.schemaVersion);
+			else if (parsed.schemaVersion > 1) throw new Error(`task ledger schema v${String(parsed.schemaVersion)} is newer than supported v1`);
 			const state = {
 				revision: parsed.revision,
-				tasks: parsed.tasks
+				tasks
 			};
 			for (const entry of Array.isArray(parsed.recentRequests) ? parsed.recentRequests : []) if (typeof entry?.requestId === "string" && typeof entry?.fingerprint === "string") this.cache.set(entry.requestId, { fingerprint: entry.fingerprint });
 			this.reconcileInterruptedStarts(state);
@@ -356,6 +366,7 @@ var HostTaskLedger = class {
 			if (index < 0) return false;
 			const task = state.tasks[index];
 			const next = settleExecution(task, executionId, result, this.now(), error);
+			if (next.executions.length > MAX_EXECUTION_HISTORY) next.executions = next.executions.slice(next.executions.length - MAX_EXECUTION_HISTORY);
 			state.tasks[index] = next;
 			return true;
 		});
@@ -373,7 +384,14 @@ var HostTaskLedger = class {
 		}
 	}
 };
+/**
+* Migrate a task ledger from an older schema version to the current one.
+* 审计 2026-08-25 C-1:旧版本逐级迁移(当前只有 v1;未来在此注册 v1→v2…)。
+*/
+function migrateTaskLedger(tasks, fromVersion) {
+	return tasks;
+}
 //#endregion
-export { HostTaskLedger as t };
+export { migrateTaskLedger as n, HostTaskLedger as t };
 
-//# sourceMappingURL=host-ledger-HMWwc9ga.js.map
+//# sourceMappingURL=host-ledger-DosoNhNE.js.map

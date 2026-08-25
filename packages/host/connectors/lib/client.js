@@ -216,7 +216,12 @@ window.__ModuleLoader__.load({
 								fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: "POST" }).then(() => onChanged()).catch(() => {});
 							}
 						}, 500);
-						window.setTimeout(() => window.clearInterval(timer), 31e4);
+						const grace = window.setTimeout(() => window.clearInterval(timer), 31e4);
+						return () => {
+							window.clearInterval(timer);
+							window.clearTimeout(grace);
+							if (activePopup.current === popup) activePopup.current = null;
+						};
 					}
 				}
 			}, [

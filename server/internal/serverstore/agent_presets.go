@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // AgentPresetStatus is the review state of one shared agent preset.
@@ -106,13 +108,31 @@ func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64,
 }
 
 // GetAgentPreset returns the row by name (latest version when multiple).
+// 审计 2026-08-25 D-1:SQL 的 `ORDER BY version DESC` 是字符串字典序
+// ("1.9.0" > "1.10.0" 错序);改为 Go 层按 CompareSemVer 数字感知比较取最大。
 func GetAgentPreset(db *sql.DB, name string) (*AgentPreset, error) {
-	p, err := scanAgentPreset(db.QueryRow(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ?
-		ORDER BY version DESC, id DESC LIMIT 1`, name))
-	if errors.Is(err, sql.ErrNoRows) {
+	rows, err := db.Query(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ?`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var best *AgentPreset
+	for rows.Next() {
+		p, err := scanAgentPreset(rows)
+		if err != nil {
+			return nil, err
+		}
+		if best == nil || util.CompareSemVer(p.Version, best.Version) > 0 {
+			best = p
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if best == nil {
 		return nil, ErrNotFound
 	}
-	return p, err
+	return best, nil
 }
 
 // GetAgentPresetByVersion returns the row by name+version or ErrNotFound.

@@ -39,6 +39,11 @@ function expandHomePath(path, home = homedir()) {
 * Precedence, highest first: an explicit configured path, `$DSH_HOME`, then
 * `~/.picoaide-harness`. The product keeps all user data under one root. An
 * empty or whitespace-only `$DSH_HOME` is treated as unset.
+*
+* 审计 2026-08-25 P2-3:DSH_HOME 是完全可注入的环境变量(同机进程可设置后
+* 以同一用户拉起应用)。虽保留其覆盖能力(e2e/多 profile 依赖),但拒绝把
+* home 重定向到系统关键目录,避免「安全解压/凭据落盘」作用到 /tmp 等
+* 攻击者控制的路径。
 * @param configured - explicit harness-home override, highest precedence.
 * @param env - environment mapping used to read `DSH_HOME`.
 * @param home - platform home directory fallback (test seam).
@@ -66,6 +71,9 @@ function dshHome() {
 * src/host-ledger.ts, adapted to the cron job domain.
 */
 const MAX_REQUEST_CACHE = 256;
+/** 保留的执行历史条数上限(审计 2026-08-25 P2-5):executions 曾只增不减,
+* 高频 job 的 ledger.json 无限膨胀且每次 mutate 全量重写。 */
+const MAX_EXECUTION_HISTORY = 100;
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45e3;
 function timeZone() {
@@ -198,10 +206,13 @@ var HostCronLedger = class {
 		}
 		try {
 			const parsed = JSON.parse(raw);
-			if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.jobs)) throw new Error("unexpected schema");
+			if (typeof parsed.schemaVersion !== "number" || !Array.isArray(parsed.jobs)) throw new Error("unexpected schema");
+			let jobs = parsed.jobs;
+			if (parsed.schemaVersion < 1) jobs = migrateCronLedger(jobs, parsed.schemaVersion);
+			else if (parsed.schemaVersion > 1) throw new Error(`ledger schema v${String(parsed.schemaVersion)} is newer than supported v1`);
 			const state = {
 				revision: parsed.revision,
-				jobs: parsed.jobs,
+				jobs,
 				scheduler: {
 					timeZone: parsed.scheduler?.timeZone ?? timeZone(),
 					...parsed.scheduler?.ledgerId === void 0 ? {} : { ledgerId: parsed.scheduler.ledgerId },
@@ -212,7 +223,7 @@ var HostCronLedger = class {
 			for (const entry of Array.isArray(parsed.recentRequests) ? parsed.recentRequests : []) if (typeof entry?.requestId === "string" && typeof entry?.fingerprint === "string") this.cache.set(entry.requestId, { fingerprint: entry.fingerprint });
 			this.reconcileInterruptedStarts(state, this.now());
 			return state;
-		} catch {
+		} catch (error) {
 			try {
 				renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
 			} catch {}
@@ -222,7 +233,7 @@ var HostCronLedger = class {
 				scheduler: {
 					timeZone: timeZone(),
 					ledgerId: crypto.randomUUID(),
-					error: "ledger was corrupt and reset"
+					error: "ledger was corrupt or too new and reset"
 				}
 			};
 		}
@@ -441,7 +452,7 @@ var HostCronLedger = class {
 			return true;
 		});
 	}
-	/** Scheduler-owned: settle an execution with a result. */
+	/** Scheduler-owned: settle an execution with a result. Prunes old history. */
 	settle(jobId, executionId, result, error) {
 		this.mutate((state) => {
 			const job = state.jobs.find((candidate) => candidate.id === jobId);
@@ -450,6 +461,7 @@ var HostCronLedger = class {
 			if (index < 0) return false;
 			const settled = settleExecution(job.executions[index], result, this.now(), error);
 			job.executions[index] = settled;
+			if (job.executions.length > MAX_EXECUTION_HISTORY) job.executions = job.executions.slice(job.executions.length - MAX_EXECUTION_HISTORY);
 			return true;
 		});
 	}
@@ -554,7 +566,16 @@ var HostCronLedger = class {
 function validateCron(expr) {
 	return isValidCron(expr);
 }
+/**
+* Migrate a ledger's jobs from an older schema version to the current one.
+* 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走
+* 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。当前只有
+* v1;未来字段/枚举变更时在此加 v1→v2、v2→v3 … 并同步 bump 常量。
+*/
+function migrateCronLedger(jobs, fromVersion) {
+	return jobs;
+}
 //#endregion
-export { openScheduledRun as n, validateCron as r, HostCronLedger as t };
+export { validateCron as i, migrateCronLedger as n, openScheduledRun as r, HostCronLedger as t };
 
-//# sourceMappingURL=host-ledger-Bi3N4tgX.js.map
+//# sourceMappingURL=host-ledger-CqX0T9MB.js.map

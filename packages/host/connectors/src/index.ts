@@ -92,9 +92,9 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
   // 审计 2026-08-25 P2-3:此前 `void handler(req, res)` 丢弃 promise,disconnect
   // 等 async handler 抛错会成为 unhandledRejection——Node≥15 默认直接退出
   // 整个 Electron 主进程(browser 的 action handler 有 .catch,这里缺失)。
-  // 修复:统一捕获并回 500,与 browser 行为一致。
+  // 修复:统一捕获并回 500(同步 handler 的返回值是 void,Promise.resolve 归一)。
   return (req, res) => {
-    void handler(req, res).catch(error => {
+    void Promise.resolve(handler(req, res)).catch(error => {
       console.error('[dsh-connectors] handler failed', error)
       if (!res.headersSent) json(res, 500, { error: 'internal error' })
     })
