@@ -60,6 +60,40 @@ body[data-dsh-desktop-mode="advanced"][data-dsh-desktop-platform="win32"] [data-
 body[data-dsh-desktop-mode="advanced"][data-dsh-desktop-platform="win32"] [data-dsh-better-sidebar] [class*='panel']:not([class*='panelHidden']):not([class*='panelBody']):not([class*='panelResize']):not([class*='bottomPanel']) {
   padding-top: max(var(--dsh-title-bar-strip, 0px), ${WINDOWS_TITLEBAR_HEIGHT}px);
 }
+/* Session-header update badge (right-aligned utilities seat). */
+.dshDesktopUpdateBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
+  background: var(--dsw-alias-bg-elevated, #fff);
+  color: var(--dsw-alias-fg-1, #333);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-family: inherit;
+  cursor: pointer;
+}
+.dshDesktopUpdateBadge:hover { border-color: var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.16)); }
+.dshDesktopUpdateBadge:focus-visible { outline: 2px solid #2f6fed; outline-offset: 1px; }
+.dshDesktopUpdateBadgeDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2f6fed;
+  flex: 0 0 auto;
+}
+.dshDesktopUpdateBadge[data-state="downloading"] .dshDesktopUpdateBadgeDot {
+  background: #e8871e;
+  animation: dshDesktopUpdatePulse 1.2s ease-in-out infinite;
+}
+@keyframes dshDesktopUpdatePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 @media (prefers-reduced-motion: reduce) { .dshDesktopFrame { transition: none !important; } }
 `
 

@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
 import { startRendererBootReporter } from './boot-health.ts'
+import { applyUpdateBadge } from './desktop-update.tsx'
 import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
 import { applySidebarBrowserPolicy } from './sidebar-policy.ts'
@@ -20,6 +21,7 @@ export {
 } from './boot-health.ts'
 export type { RendererBootLoader, RendererBootReport } from './boot-health.ts'
 export { parseDesktopClientEnvironment } from './environment.ts'
+export { applyUpdateBadge, DesktopUpdateBadge, fetchDesktopUpdateState } from './desktop-update.tsx'
 export type { DesktopClientEnvironment, DesktopClientMode, DesktopClientPlatform } from './environment.ts'
 
 /** Services required by advanced presentation. */
@@ -50,5 +52,8 @@ export function apply(ctx: ClientContext): void {
     return () => { /* one-shot boot policy; nothing to dispose */ }
   }, 'desktop: sidebar browser policy')
 
-  if (environment.mode === 'advanced') applyAdvancedShell(ctx, environment)
+  if (environment.mode === 'advanced') {
+    applyAdvancedShell(ctx, environment)
+    applyUpdateBadge(ctx)
+  }
 }

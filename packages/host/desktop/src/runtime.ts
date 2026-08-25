@@ -87,6 +87,20 @@ export interface DesktopNotification {
   body: string
 }
 
+/** One update-coordinator state observation published to the renderer shell. */
+export interface DesktopUpdateSnapshot {
+  /** Version reported available by the last completed check, if newer and downloadable. */
+  readonly availableVersion: string | undefined
+  /** Version currently downloading (between confirm and installer handoff). */
+  readonly downloadingVersion: string | undefined
+  /** Whether the running executable came from an Electron package. */
+  readonly isPackaged: boolean
+  /** Whether this platform has a fixed installer download endpoint. */
+  readonly canDownload: boolean
+  /** Installed desktop product version. */
+  readonly currentVersion: string
+}
+
 /** Electron capabilities used by the headless update plugin. */
 export interface DesktopUpdateAdapter {
   /** Whether the running executable came from an Electron package. */
@@ -107,6 +121,18 @@ export interface DesktopUpdateAdapter {
   downloadAndOpen(version: string, signal: AbortSignal): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
+  /**
+   * Optional renderer state bridge: the update coordinator pushes every
+   * observable state transition here so the desktop shell can serve the
+   * renderer badge via its local update route.
+   */
+  publishState?(snapshot: DesktopUpdateSnapshot): void
+  /**
+   * Optional renderer trigger: runs the same user-visible manual check as the
+   * tray "Check for Updates…" command (offers a download when available).
+   * The coordinator installs it after its state machine settles.
+   */
+  checkNow?(): void
 }
 
 /** Values the desktop-shell plugin hands to the Electron adapter. */
