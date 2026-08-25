@@ -147,10 +147,16 @@ func main() {
 				rel = "/"
 			}
 			if strings.HasPrefix(rel, "/assets/") {
+				// 性能优化 2026-P: assets 含内容哈希,内容变则文件名变,
+				// 浏览器缓存 1 年不重新校验(回访首屏零下载)。
+				c.Header("Cache-Control", "public, max-age=31536000, immutable")
 				c.Request.URL.Path = rel
 				fileServer.ServeHTTP(c.Writer, c.Request)
 				return
 			}
+			// SPA 入口/路由回退:index.html 无哈希,no-cache 保证
+			// 每次部署后都能拿到新版本(assets 由文件名哈希保证新鲜)。
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 			index, err := dist.Open("index.html")
 			if err != nil {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "webadmin 未构建")

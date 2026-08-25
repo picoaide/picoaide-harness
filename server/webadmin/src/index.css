@@ -4,7 +4,53 @@
    Colors: Blue data (#1E40AF primary) + amber highlights (#D97706)
    Type:   Fira Sans (body) + Fira Code (data/mono)
    ============================================================ */
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
+/* 自托管 Fira 字体(性能优化 2026-P):原 @import Google Fonts 在
+   内网/国内生产环境不可达时会阻塞 CSS 解析与文本渲染;改为本地
+   woff2(font-display: swap 不阻塞文本,字体就绪后无感替换)。 */
+@font-face {
+  font-family: 'Fira Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('./assets/fonts/fira-sans-300.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fira Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/fira-sans-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fira Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./assets/fonts/fira-sans-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fira Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./assets/fonts/fira-sans-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fira Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./assets/fonts/fira-sans-700.woff2') format('woff2');
+}
+/* Fira Code 可变字体:单文件覆盖 400-700 字重 */
+@font-face {
+  font-family: 'Fira Code';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./assets/fonts/fira-code-latin.woff2') format('woff2');
+}
 
 @tailwind base;
 @tailwind components;
