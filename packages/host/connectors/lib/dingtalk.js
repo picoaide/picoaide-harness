@@ -1,3 +1,4 @@
+import { dwsEnv } from "./user-scope.js";
 const dingTalkDef = {
 	id: "dingtalk",
 	name: "钉钉",
@@ -10,6 +11,7 @@ const dingTalkDef = {
 			"login",
 			"--device"
 		],
+		env: dwsEnv(),
 		installCommand: "npm install -g dingtalk-workspace-cli",
 		deviceFlow: {
 			uriPattern: "https://login\\.dingtalk\\.com/oauth2/device/verify\\.htm[^\\s\\n\\r\"'<>]*",
@@ -42,7 +44,8 @@ const dingTalkDef = {
 			"url",
 			"get",
 			mcpId
-		]
+		],
+		env: dwsEnv()
 	}))
 };
 //#endregion

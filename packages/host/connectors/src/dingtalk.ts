@@ -1,4 +1,5 @@
 import type { ConnectorDef } from './types.ts'
+import { dwsEnv } from './user-scope.ts'
 
 /**
  * 钉钉 (DingTalk) connector.
@@ -34,6 +35,7 @@ export const dingTalkDef: ConnectorDef = {
   auth: {
     command: 'dws',
     args: ['auth', 'login', '--device'],
+    env: dwsEnv(),
     installCommand: 'npm install -g dingtalk-workspace-cli',
     deviceFlow: {
       uriPattern: 'https://login\\.dingtalk\\.com/oauth2/device/verify\\.htm[^\\s\\n\\r"\'<>]*',
@@ -55,5 +57,6 @@ export const dingTalkDef: ConnectorDef = {
     serverName: `dingtalk-${mcpId}`,
     transport: 'streamable-http',
     urlCommand: ['dws', 'mcp', 'url', 'get', mcpId],
+    env: dwsEnv(),
   })),
 }
