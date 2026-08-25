@@ -192,11 +192,18 @@ func SetSharedSkillStatus(db *sql.DB, name, version string, status SharedSkillSt
 // of the same name+version, replacing metadata/checksum and clearing reason.
 // author 校验(审计 2026-08-25 G1 深度防御):只有行作者本人可重提。
 func UpdateSharedSkillResubmit(db *sql.DB, name, version, displayName, description, checksum, author string) error {
-	_, err := db.Exec(`UPDATE shared_skills SET display_name=?, description=?, checksum=?, status=?, reason='',
+	res, err := db.Exec(`UPDATE shared_skills SET display_name=?, description=?, checksum=?, status=?, reason='',
 		updated_at=`+NowExpr()+`
 		WHERE name=? AND version=? AND status=? AND author=?`,
 		displayName, description, checksum, SharedSkillPending, name, version, SharedSkillRejected, author)
-	return err
+	if err != nil {
+		return err
+	}
+	// 审计 2026-08-25 复查【2】:0 行 = 并发状态已变,静默成功会掩盖不一致。
+	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteSharedSkill removes the row; returns ErrNotFound when absent.
