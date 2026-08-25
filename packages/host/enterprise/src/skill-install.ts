@@ -137,8 +137,12 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
     // (name + description) on SKILL.md; gateway archives keep the metadata
     // in a separate metadata.yaml instead. Synthesize the frontmatter from
     // metadata.yaml when SKILL.md lacks it, so installed skills are
-    // discovered. Archives that already carry frontmatter are untouched.
-    await synthesizeSkillFrontmatter(unpackRoot, name)
+    // discovered — and carry the gateway-reported version so hasUpdate can
+    // compare against the installed copy. Archives that already carry
+    // frontmatter are untouched (installer-only archives still get a version
+    // injected here only when they lacked any frontmatter; full-control
+    // archives keep their own metadata).
+    await synthesizeSkillFrontmatter(unpackRoot, name, version)
 
     // Replace an existing installation only with a fully verified tree.
     // 审计 2026-08-25 P2-4:此前直接 rm(targetDir)+rename——两步之间 crash
@@ -162,6 +166,13 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
     }
     await rm(backupDir, { recursive: true, force: true }).catch(() => { /* 尽力 */ })
 
+    // 版本标记:安装在技能目录内写 .install-version(仅当版本已知),
+    // host 代理读取它作为 installedVersion(hasUpdate 比较基准)。
+    // 不碰 SKILL.md 内容(保留上游/用户归档原样)。
+    if (version !== undefined && version !== '') {
+      await writeFile(join(targetDir, '.install-version'), version, { mode: 0o600 }).catch(() => { /* 非致命 */ })
+    }
+
     return { name, version, skillsDir, targetDir }
   } catch (cause) {
     throw cause instanceof Error ? cause : new Error(String(cause))
@@ -171,14 +182,18 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
 }
 
 /**
- * Ensure `SKILL.md` under `dir` carries YAML frontmatter with `name` and
- * `description` (the upstream parser ignores skills without them). Reads a
- * sibling `metadata.yaml` (gateway format: `name`/`description` keys) and
- * prepends `---`-delimited frontmatter when the file has none.
+ * Ensure `SKILL.md` under `dir` carries YAML frontmatter with `name`,
+ * `description`, and (when known) `version` (the upstream parser ignores
+ * skills without name/description; `version` lets hasUpdate compare reliably
+ * against the installed copy). Reads a sibling `metadata.yaml` (gateway
+ * format: `name`/`description`/`version` keys) and prepends `---`-delimited
+ * frontmatter when the file has none.
  */
-export async function synthesizeSkillFrontmatter(dir: string, fallbackName: string): Promise<void> {
+export async function synthesizeSkillFrontmatter(dir: string, fallbackName: string, version?: string): Promise<void> {
   const skillMdPath = join(dir, 'SKILL.md')
   const raw = await readFile(skillMdPath, 'utf8')
+  // 已有 frontmatter 一律不动(上游/用户归档的元数据保持原样;版本由
+  // 安装器写入独立标记文件 .install-version,见 installSkillArchive)。
   if (raw.trimStart().startsWith('---')) return
 
   let meta: { name?: unknown; description?: unknown; version?: unknown } = {}
@@ -196,7 +211,13 @@ export async function synthesizeSkillFrontmatter(dir: string, fallbackName: stri
   const description = typeof meta.description === 'string' && meta.description !== ''
     ? meta.description
     : `${fallbackName} skill`
-  const frontmatter = stringifyYaml({ name, description }).trimEnd()
+  const metaVersion = typeof meta.version === 'string' && meta.version !== '' ? meta.version : undefined
+  const versionValue = version ?? metaVersion
+  const frontmatter = stringifyYaml({
+    name,
+    description,
+    ...versionValue === undefined ? {} : { version: versionValue },
+  }).trimEnd()
   await writeFile(skillMdPath, `---\n${frontmatter}\n---\n${raw}`)
 }
 
