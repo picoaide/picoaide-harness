@@ -218,3 +218,73 @@ func TestReplaceGroupGrantsRollbackOnUnknownDept(t *testing.T) {
 		t.Fatalf("empty dept err = %v, want ErrValidation", err)
 	}
 }
+
+func TestSharedResourceGrantsLifecycle(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Grant a shared skill to a user + a group (idempotent).
+	if err := GrantSharedResource(db, SharedSkillGrantTable, "codeql", "alice", GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSharedResource(db, SharedSkillGrantTable, "codeql", "@研发部", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	grants, err := ListSharedResourceGrants(db, SharedSkillGrantTable, "codeql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 2 || grants[0].Grantee != "研发部" || grants[1].Grantee != "alice" {
+		t.Fatalf("grants = %+v", grants)
+	}
+
+	// Accessible by direct user and by group membership.
+	names, err := AccessibleSharedResourceNames(db, SharedSkillGrantTable, "alice", nil)
+	if err != nil || len(names) != 1 || names[0] != "codeql" {
+		t.Fatalf("alice names = %v err=%v", names, err)
+	}
+	names, err = AccessibleSharedResourceNames(db, SharedSkillGrantTable, "bob", []string{"研发部"})
+	if err != nil || len(names) != 1 || names[0] != "codeql" {
+		t.Fatalf("bob group names = %v err=%v", names, err)
+	}
+	// Unrelated user sees nothing.
+	names, _ = AccessibleSharedResourceNames(db, SharedSkillGrantTable, "charlie", []string{"市场部"})
+	if len(names) != 0 {
+		t.Fatalf("charlie names = %v, want none", names)
+	}
+
+	// Revoke user grant; group grant remains.
+	if err := RevokeSharedResource(db, SharedSkillGrantTable, "codeql", "alice", GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	names, _ = AccessibleSharedResourceNames(db, SharedSkillGrantTable, "alice", nil)
+	if len(names) != 0 {
+		t.Fatalf("alice after revoke = %v, want none", names)
+	}
+
+	// Agent preset grants use their own table (independent namespace).
+	if err := GrantSharedResource(db, SharedPresetGrantTable, "ppt-gen", "bob", GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	pg, _ := ListSharedResourceGrants(db, SharedPresetGrantTable, "ppt-gen")
+	if len(pg) != 1 || pg[0].Grantee != "bob" {
+		t.Fatalf("preset grants = %+v", pg)
+	}
+	// Skill grants unaffected.
+	skills, _ := ListSharedResourceGrants(db, SharedSkillGrantTable, "codeql")
+	if len(skills) != 1 || skills[0].Grantee != "研发部" {
+		t.Fatalf("skill grants after preset grant = %+v", skills)
+	}
+
+	// Delete cascades.
+	if err := DeleteSharedResourceGrants(db, SharedSkillGrantTable, "codeql"); err != nil {
+		t.Fatal(err)
+	}
+	names, _ = AccessibleSharedResourceNames(db, SharedSkillGrantTable, "bob", []string{"研发部"})
+	if len(names) != 0 {
+		t.Fatalf("names after delete = %v", names)
+	}
+}

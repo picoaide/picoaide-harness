@@ -96,8 +96,9 @@ func setup(t *testing.T) (http.Handler, *sql.DB, map[string]string, map[string]s
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	serverauth.RegisterAdminRoutes(r, db)
-	RegisterRoutes(r, db, t.TempDir()+"/cache")
-	RegisterAdminRoutes(r, db, t.TempDir()+"/cache")
+	cacheDir := t.TempDir() + "/cache"
+	RegisterRoutes(r, db, cacheDir)
+	RegisterAdminRoutes(r, db, cacheDir)
 
 	// Admin login (session + CSRF).
 	w := httptest.NewRecorder()
@@ -120,10 +121,15 @@ func setup(t *testing.T) (http.Handler, *sql.DB, map[string]string, map[string]s
 		map[string]string{"Authorization": "Bearer " + tokens["bob"]}
 }
 
-func uploadBody(name, desc string, archive []byte) string {
+func uploadBody(name, desc, displayName string, archive []byte) string {
 	body, _ := json.Marshal(map[string]string{
-		"name": name, "description": desc, "archive": base64.StdEncoding.EncodeToString(archive),
+		"name": name, "description": desc, "display_name": displayName, "archive": base64.StdEncoding.EncodeToString(archive),
 	})
+	return string(body)
+}
+
+func rejectBody(reason string) string {
+	body, _ := json.Marshal(map[string]string{"reason": reason})
 	return string(body)
 }
 
@@ -133,7 +139,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 
 	// alice uploads; row is pending.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("ppt-gen", "生成PPT", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: PPT 生成\n"}))))
+	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("ppt-gen", "生成PPT", "PPT 生成", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: PPT 生成\n"}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -146,6 +152,23 @@ func TestUploadAndApproveFlow(t *testing.T) {
 	p, err := serverstore.GetAgentPreset(db, "ppt-gen")
 	if err != nil || p.Status != serverstore.AgentPresetPending || p.Author != "alice" || p.Checksum == "" {
 		t.Fatalf("row = %+v err=%v", p, err)
+	}
+	if p.DisplayName != "PPT 生成" {
+		t.Fatalf("display_name = %q, want 透传", p.DisplayName)
+	}
+
+	// Admin preview lists the composition + files.
+	wP := httptest.NewRecorder()
+	reqP := httptest.NewRequest("GET", "/api/admin/agent-presets/ppt-gen/preview", nil)
+	for k, v := range adminHdr {
+		reqP.Header.Set(k, v)
+	}
+	r.ServeHTTP(wP, reqP)
+	if wP.Code != 200 {
+		t.Fatalf("preview = %d %s", wP.Code, wP.Body.String())
+	}
+	if !strings.Contains(wP.Body.String(), "agent.cordis.yml") || !strings.Contains(wP.Body.String(), "dsh-persona") {
+		t.Fatalf("preview body = %s", wP.Body.String())
 	}
 
 	// Employee download while pending → 404 (not approved).
@@ -221,14 +244,14 @@ func TestUploadValidation(t *testing.T) {
 		body string
 		want int
 	}{
-		{"bad id uppercase", uploadBody("My-Preset", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})), 400},
-		{"bad id traversal", uploadBody("../x", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})), 400},
+		{"bad id uppercase", uploadBody("My-Preset", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})), 400},
+		{"bad id traversal", uploadBody("../x", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})), 400},
 		{"no archive", `{"name":"abc","description":"x","archive":""}`, 400},
 		{"bad base64", `{"name":"abc","archive":"@@@"}`, 400},
-		{"empty archive", uploadBody("abc", "", []byte{}), 400},
-		{"no composition", uploadBody("abc", "", makeArchive(t, map[string]string{"README.md": "hi"})), 422},
-		{"symlink", uploadBody("abc", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "evil": "SYMLINK"})), 422},
-		{"traversal entry", uploadBody("abc", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "../evil": "x"})), 422},
+		{"empty archive", uploadBody("abc", "", "", []byte{}), 400},
+		{"no composition", uploadBody("abc", "", "", makeArchive(t, map[string]string{"README.md": "hi"})), 422},
+		{"symlink", uploadBody("abc", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "evil": "SYMLINK"})), 422},
+		{"traversal entry", uploadBody("abc", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "../evil": "x"})), 422},
 	}
 	for _, c := range cases {
 		if got := post(c.body); got != c.want {
@@ -239,34 +262,73 @@ func TestUploadValidation(t *testing.T) {
 	// Oversized archive (> MaxArchiveBytes): incompressible random bytes so
 	// the gzip stream cannot shrink below the limit.
 	big := makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "big.bin": string(randomBytes(17 << 20))})
-	if got := post(uploadBody("big", "", big)); got != 422 {
+	if got := post(uploadBody("big", "", "", big)); got != 422 {
 		t.Errorf("oversized: got %d, want 422", got)
 	}
 
 	// Duplicate name: upload once, then again → 409 (pending).
-	if got := post(uploadBody("dup", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 201 {
+	if got := post(uploadBody("dup", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 201 {
 		t.Fatalf("first dup upload = %d", got)
 	}
-	if got := post(uploadBody("dup", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 409 {
+	if got := post(uploadBody("dup", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 409 {
 		t.Fatalf("second dup upload = %d, want 409", got)
 	}
 
-	// Reject then resubmit is allowed; row resets to pending.
+	// Reject without a reason is refused (admin must explain the refusal).
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", nil)
+	req := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		req.Header.Set(k, v)
 	}
 	r.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("reject = %d", w.Code)
+	if w.Code != 400 {
+		t.Fatalf("reject without reason = %d, want 400", w.Code)
 	}
-	if got := post(uploadBody("dup", "新描述", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 201 {
+
+	// Reject then resubmit is allowed; row resets to pending.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", strings.NewReader(rejectBody("缺少 skills/ 目录")))
+	req2.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		req2.Header.Set(k, v)
+	}
+	r.ServeHTTP(w2, req2)
+	if w2.Code != 200 {
+		t.Fatalf("reject = %d", w2.Code)
+	}
+	// Rejection reason is stored and visible to the author.
+	pRow, _ := serverstore.GetAgentPreset(db, "dup")
+	if pRow.Reason != "缺少 skills/ 目录" {
+		t.Fatalf("reject reason = %q", pRow.Reason)
+	}
+	if got := post(uploadBody("dup", "新描述", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 201 {
 		t.Fatalf("resubmit after reject = %d, want 201", got)
+	}
+	if pRow, _ = serverstore.GetAgentPreset(db, "dup"); pRow.Reason != "" {
+		t.Fatalf("reason not cleared on resubmit: %q", pRow.Reason)
 	}
 	p, _ := serverstore.GetAgentPreset(db, "dup")
 	if p.Status != serverstore.AgentPresetPending || p.Description != "新描述" {
 		t.Fatalf("resubmitted row = %+v", p)
+	}
+
+	// Multi-version: the same name may carry several versions independently.
+	bodyV2, _ := json.Marshal(map[string]string{
+		"name": "dup", "description": "v2", "version": "2.0.0",
+		"archive": base64.StdEncoding.EncodeToString(makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})),
+	})
+	if got := post(string(bodyV2)); got != 201 {
+		t.Fatalf("v2 upload = %d, want 201", got)
+	}
+	v2, err := serverstore.GetAgentPresetByVersion(db, "dup", "2.0.0")
+	if err != nil || v2.Status != serverstore.AgentPresetPending {
+		t.Fatalf("v2 row = %+v err=%v", v2, err)
+	}
+	// Same name+version is duplicated; different version stays independent.
+	v1, _ := serverstore.GetAgentPresetByVersion(db, "dup", "1.0.0")
+	if v1.Status != serverstore.AgentPresetPending {
+		t.Fatalf("v1 affected by v2 upload: %+v", v1)
 	}
 }
 
@@ -276,7 +338,7 @@ func TestPendingCap(t *testing.T) {
 
 	post := func(name string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody(name, "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody(name, "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -300,7 +362,7 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	// alice uploads.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("shared-1", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("shared-1", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -330,7 +392,8 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	// Admin rejects → bob still cannot see; alice still can (with status).
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/agent-presets/shared-1/reject", nil)
+	reqA := httptest.NewRequest("POST", "/api/admin/agent-presets/shared-1/reject", strings.NewReader(rejectBody("缺少 skills/ 目录")))
+	reqA.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
 	}

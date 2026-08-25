@@ -15,11 +15,11 @@ const (
 	// AgentPresetApproved is visible and installable by every employee.
 	AgentPresetApproved AgentPresetStatus = "approved"
 	// AgentPresetRejected is invisible to everyone but its author, who may
-	// resubmit the same name (the row is reused, reset to pending).
+	// resubmit the same name+version (the row is reused, reset to pending).
 	AgentPresetRejected AgentPresetStatus = "rejected"
 )
 
-// AgentPreset is one shared agent preset row.
+// AgentPreset is one shared agent preset row (unique by name+version).
 type AgentPreset struct {
 	ID          int64
 	Name        string
@@ -29,15 +29,18 @@ type AgentPreset struct {
 	Author      string
 	Checksum    string
 	Status      AgentPresetStatus
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Reason is the admin's rejection reason; empty unless the row is
+	// rejected. Visible only to the author (and admins).
+	Reason    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) {
 	var p AgentPreset
 	var createdAt, updatedAt any
 	if err := row.Scan(&p.ID, &p.Name, &p.DisplayName, &p.Description, &p.Version,
-		&p.Author, &p.Checksum, &p.Status, &createdAt, &updatedAt); err != nil {
+		&p.Author, &p.Checksum, &p.Status, &p.Reason, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	p.CreatedAt = parseSQLTime(createdAt)
@@ -45,10 +48,10 @@ func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) 
 	return &p, nil
 }
 
-const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, created_at, updated_at"
+const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, reason, created_at, updated_at"
 
 // CreateAgentPreset inserts a pending row; returns ErrDuplicate for an
-// existing name (any status: pending/approved/rejected all occupy the name).
+// existing name+version (any status).
 func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
 	id, err := InsertID(db, `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -62,9 +65,59 @@ func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
 	return id, nil
 }
 
-// GetAgentPreset returns the row by name or ErrNotFound.
+// CreateAgentPresetCapped inserts a fresh pending row when the author is
+// below pendingCap, atomically: the INSERT itself re-counts the author's
+// pending rows, so concurrent uploads can never exceed the cap. Returns
+// ErrTooManyPending when the author is at the cap and ErrDuplicate when the
+// name+version is taken (any status).
+func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64, error) {
+	q := `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status)
+		SELECT ?, ?, ?, ?, ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM agent_presets WHERE author = ? AND status = ?) < ?`
+	args := []any{
+		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status,
+		p.Author, AgentPresetPending, pendingCap,
+	}
+	if currentDriver == DriverPG {
+		var id int64
+		err := db.QueryRow(q+" RETURNING id", args...).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrTooManyPending
+		}
+		if err != nil {
+			if isUniqueViolation(err) {
+				return 0, ErrDuplicate
+			}
+			return 0, err
+		}
+		return id, nil
+	}
+	res, err := db.Exec(q, args...)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, ErrDuplicate
+		}
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return 0, ErrTooManyPending
+	}
+	return res.LastInsertId()
+}
+
+// GetAgentPreset returns the row by name (latest version when multiple).
 func GetAgentPreset(db *sql.DB, name string) (*AgentPreset, error) {
-	p, err := scanAgentPreset(db.QueryRow(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ?`, name))
+	p, err := scanAgentPreset(db.QueryRow(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ?
+		ORDER BY version DESC, id DESC LIMIT 1`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return p, err
+}
+
+// GetAgentPresetByVersion returns the row by name+version or ErrNotFound.
+func GetAgentPresetByVersion(db *sql.DB, name, version string) (*AgentPreset, error) {
+	p, err := scanAgentPreset(db.QueryRow(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ? AND version = ?`, name, version))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -80,7 +133,7 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 		q += " WHERE status = ?"
 		args = append(args, status)
 	}
-	q += " ORDER BY id"
+	q += " ORDER BY name, version"
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -97,13 +150,15 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 	return out, rows.Err()
 }
 
-// ListVisibleAgentPresets returns the rows an employee may see: every
-// approved preset plus the caller's own rows in any status. Own rows are
-// listed even while rejected or pending so the author sees the review state;
-// nobody else's non-approved rows are ever visible.
-func ListVisibleAgentPresets(db *sql.DB, author string) ([]AgentPreset, error) {
+// ListVisibleAgentPresets returns the rows an employee may see: approved
+// rows the caller is GRANTED plus the caller's own rows in any status
+// (nobody else's non-approved rows are ever visible). Strict default:
+// approved but not granted stays invisible.
+func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]AgentPreset, error) {
 	rows, err := db.Query(`SELECT `+agentPresetColumns+` FROM agent_presets
-		WHERE status = ? OR author = ? ORDER BY id`, AgentPresetApproved, author)
+		WHERE author = ?
+		OR (status = ? AND name IN (`+qmarks(len(granted))+`))
+		ORDER BY name, version`, append([]any{author, AgentPresetApproved}, toStringArgs(granted)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -120,27 +175,62 @@ func ListVisibleAgentPresets(db *sql.DB, author string) ([]AgentPreset, error) {
 }
 
 // SetAgentPresetStatus transitions the row to status (approve/reject/back to
-// pending on resubmit). Returns ErrNotFound when the row is absent.
-func SetAgentPresetStatus(db *sql.DB, name string, status AgentPresetStatus) error {
-	_, err := db.Exec(`UPDATE agent_presets SET status=?, updated_at=`+NowExpr()+` WHERE name=?`, status, name)
+// pending on resubmit) in one atomic UPDATE. Approving clears any stored
+// rejection reason; rejecting stores the admin's reason, which is returned
+// to the author and cleared again on resubmit. Updates the name's LATEST
+// version only (legacy single-param callers).
+func SetAgentPresetStatus(db *sql.DB, name string, status AgentPresetStatus, reason string) error {
+	_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, updated_at=`+NowExpr()+`
+		WHERE id = (SELECT id FROM agent_presets WHERE name=? ORDER BY version DESC, id DESC LIMIT 1)`,
+		status, reason, name)
+	return err
+}
+
+// SetAgentPresetStatusByVersion transitions one name+version row.
+func SetAgentPresetStatusByVersion(db *sql.DB, name, version string, status AgentPresetStatus, reason string) error {
+	_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, updated_at=`+NowExpr()+` WHERE name=? AND version=?`,
+		status, reason, name, version)
+	return err
+}
+
+// UpdateAgentPresetResubmit resets a rejected row to pending for resubmission
+// of the same name, replacing display metadata, archive checksum, and clearing
+// the stored rejection reason. Updates the name's LATEST version only.
+func UpdateAgentPresetResubmit(db *sql.DB, name, displayName, description, checksum string) error {
+	_, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
+		updated_at=`+NowExpr()+`
+		WHERE id = (SELECT id FROM agent_presets WHERE name=? ORDER BY version DESC, id DESC LIMIT 1) AND status=?`,
+		displayName, description, checksum, AgentPresetPending, name, AgentPresetRejected)
+	return err
+}
+
+// UpdateAgentPresetResubmitByVersion resets one rejected name+version row.
+func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, description, checksum string) error {
+	_, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
+		updated_at=`+NowExpr()+`
+		WHERE name=? AND version=? AND status=?`,
+		displayName, description, checksum, AgentPresetPending, name, version, AgentPresetRejected)
+	return err
+}
+
+// DeleteAgentPreset removes ALL rows of the name; returns ErrNotFound when
+// none existed.
+func DeleteAgentPreset(db *sql.DB, name string) error {
+	res, err := db.Exec(`DELETE FROM agent_presets WHERE name=?`, name)
 	if err != nil {
 		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
-// UpdateAgentPresetResubmit resets a rejected row to pending for resubmission
-// of the same name, replacing the description and archive checksum.
-func UpdateAgentPresetResubmit(db *sql.DB, name, description, checksum string) error {
-	_, err := db.Exec(`UPDATE agent_presets SET description=?, checksum=?, status=?, updated_at=`+NowExpr()+`
-		WHERE name=? AND status=?`,
-		description, checksum, AgentPresetPending, name, AgentPresetRejected)
-	return err
-}
-
-// DeleteAgentPreset removes the row; returns ErrNotFound when absent.
-func DeleteAgentPreset(db *sql.DB, name string) error {
-	res, err := db.Exec(`DELETE FROM agent_presets WHERE name=?`, name)
+// DeleteAgentPresetByVersion removes one name+version row; returns
+// ErrNotFound when absent.
+func DeleteAgentPresetByVersion(db *sql.DB, name, version string) error {
+	res, err := db.Exec(`DELETE FROM agent_presets WHERE name=? AND version=?`, name, version)
 	if err != nil {
 		return err
 	}

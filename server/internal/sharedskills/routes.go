@@ -1,0 +1,699 @@
+// Package sharedskills implements the shared-skill store: employees upload
+// local skills (SKILL.md bundles), admins review them, and every approved
+// version is visible and installable by all employees. Mirrors agentshare
+// with multi-version keying (name+version).
+package sharedskills
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/serverauth"
+	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
+)
+
+// Limits: the raw gzipped tar a client may upload, the total unpacked tree
+// size, entry count, and the request body ceiling (base64 inflation).
+const (
+	MaxArchiveBytes   = 16 << 20
+	MaxUnpackedBytes  = 64 << 20
+	MaxArchiveEntries = 10000
+	MaxBodyBytes      = 24 << 20
+)
+
+// pendingCap is the per-author cap on rows awaiting review.
+const pendingCap = 10
+
+// maxDescriptionLen bounds display metadata (both surfaces).
+const maxDescriptionLen = 500
+
+var (
+	// ErrArchiveInvalid: the archive failed structural validation.
+	ErrArchiveInvalid = errors.New("archive invalid")
+	// ErrNoSkillMarkdown: the archive carries no top-level SKILL.md.
+	ErrNoSkillMarkdown = errors.New("archive has no SKILL.md at its root")
+	// ErrUnsafeArchive: entry path escapes or is a link.
+	ErrUnsafeArchive = errors.New("unsafe archive")
+)
+
+// skillNameRe matches a single safe directory segment (mirrors the client
+// installer's SKILL_NAME_PATTERN).
+var skillNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// versionRe accepts semver-ish strings without path separators (1.0.0, v2).
+var versionRe = regexp.MustCompile(`^[0-9a-zA-Z.-]{1,64}$`)
+
+// RegisterRoutes mounts /api/shared-skills (employee Bearer endpoints).
+func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
+	g := r.Group("/api/shared-skills", serverauth.BearerAuth(db))
+	g.GET("", listVisible(db))
+	g.POST("", upload(db, cacheDir))
+	g.GET("/:name/:version/archive", download(db, cacheDir, false))
+}
+
+// RegisterAdminRoutes mounts /api/admin/shared-skills (AdminAuth endpoints).
+func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
+	g := r.Group("/api/admin/shared-skills", serverauth.AdminAuth(db))
+	g.GET("", listAll(db))
+	g.GET("/:name/:version/archive", download(db, cacheDir, true))
+	g.GET("/:name/:version/preview", preview(db, cacheDir))
+	g.POST("/:name/:version/approve", decide(db, serverstore.SharedSkillApproved, "shared_skill_approve"))
+	g.POST("/:name/:version/reject", decide(db, serverstore.SharedSkillRejected, "shared_skill_reject"))
+	g.DELETE("/:name/:version", remove(db, cacheDir))
+	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
+	g.GET("/:name/grants", listGrants(db))
+	g.PUT("/:name/grants", replaceGrants(db))
+	g.PUT("/:name/grant", setGrant(db, true))
+	g.DELETE("/:name/grant", setGrant(db, false))
+}
+
+func rowJSON(s serverstore.SharedSkill) gin.H {
+	return gin.H{
+		"name":         s.Name,
+		"display_name": s.DisplayName,
+		"version":      s.Version,
+		"description":  s.Description,
+		"author":       s.Author,
+		"status":       s.Status,
+		"reason":       s.Reason,
+		"created_at":   s.CreatedAt,
+		"updated_at":   s.UpdatedAt,
+	}
+}
+
+// viewer resolves the calling user's effective groups (department tree) and
+// admin flag. Returns ok=false when unauthenticated.
+func viewer(c *gin.Context, db *sql.DB) (u *serverstore.User, groups []string, ok bool) {
+	u = serverauth.CurrentUser(c)
+	if u == nil {
+		return nil, nil, false
+	}
+	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
+	if err != nil {
+		return nil, nil, false
+	}
+	return u, groups, true
+}
+
+func listVisible(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u, groups, ok := viewer(c, db)
+		if !ok {
+			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+			return
+		}
+		var list []serverstore.SharedSkill
+		if u.IsAdmin {
+			// Admins see everything already approved (admin 恒全量,不落授权表).
+			all, err := serverstore.ListSharedSkills(db, "")
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			for _, s := range all {
+				if s.Status == serverstore.SharedSkillApproved {
+					list = append(list, s)
+				}
+			}
+		} else {
+			granted, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			list, err = serverstore.ListVisibleSharedSkills(db, u.Username, granted)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+		}
+		out := make([]gin.H, 0, len(list))
+		for _, s := range list {
+			out = append(out, rowJSON(s))
+		}
+		c.JSON(http.StatusOK, gin.H{"skills": out})
+	}
+}
+
+func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.ContentLength > MaxBodyBytes {
+			serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "归档过大")
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxBodyBytes)
+		var req struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"display_name"`
+			Version     string `json:"version"`
+			Description string `json:"description"`
+			Archive     string `json:"archive"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+			return
+		}
+		if !skillNameRe.MatchString(req.Name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法(小写字母/数字/点/横线,以字母数字开头)")
+			return
+		}
+		if !versionRe.MatchString(req.Version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "版本号不合法")
+			return
+		}
+		if len(req.Archive) == 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少归档内容")
+			return
+		}
+		raw, err := base64.StdEncoding.DecodeString(req.Archive)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "归档编码错误")
+			return
+		}
+		checksum, err := ValidateSkillArchive(raw)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(err))
+			return
+		}
+
+		u := serverauth.CurrentUser(c)
+		if u == nil {
+			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+			return
+		}
+		existing, getErr := serverstore.GetSharedSkill(db, req.Name, req.Version)
+		switch {
+		case getErr == nil && existing.Status != serverstore.SharedSkillRejected:
+			serverauth.WriteError(c, http.StatusConflict, "NAME_TAKEN", "该技能版本已被占用(审核中或已共享)")
+			return
+		case getErr != nil && !errors.Is(getErr, serverstore.ErrNotFound):
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		desc := strings.TrimSpace(req.Description)
+		display := strings.TrimSpace(req.DisplayName)
+		if len([]rune(display)) > maxDescriptionLen || len([]rune(desc)) > maxDescriptionLen {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "描述过长(上限 500 字)")
+			return
+		}
+
+		if err := os.MkdirAll(cacheDir, 0700); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "存储失败")
+			return
+		}
+		archivePath := filepath.Join(cacheDir, safeName(req.Name, req.Version))
+		if err := writeFileAtomic(archivePath, raw); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
+			return
+		}
+
+		if getErr == nil {
+			if err := serverstore.UpdateSharedSkillResubmit(db, req.Name, req.Version, display, desc, checksum); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+				return
+			}
+		} else {
+			s := &serverstore.SharedSkill{
+				Name:        req.Name,
+				DisplayName: display,
+				Version:     req.Version,
+				Description: desc,
+				Author:      u.Username,
+				Checksum:    checksum,
+				Status:      serverstore.SharedSkillPending,
+			}
+			if _, err := serverstore.CreateSharedSkillCapped(db, s, pendingCap); err != nil {
+				if errors.Is(err, serverstore.ErrTooManyPending) {
+					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
+					return
+				}
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+				return
+			}
+		}
+		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload", req.Name+"@"+req.Version)
+		c.JSON(http.StatusCreated, gin.H{"skill": gin.H{"name": req.Name, "version": req.Version, "status": serverstore.SharedSkillPending}})
+	}
+}
+
+func listAll(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		list, err := serverstore.ListSharedSkills(db, c.Query("status"))
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		out := make([]gin.H, 0, len(list))
+		for _, s := range list {
+			out = append(out, rowJSON(s))
+		}
+		c.JSON(http.StatusOK, gin.H{"skills": out})
+	}
+}
+
+// decide approves or rejects one shared skill row (admin only). Rejecting
+// requires a reason, which the author sees and which is cleared on resubmit.
+func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if _, err := serverstore.GetSharedSkill(db, name, version); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		var reason string
+		if status == serverstore.SharedSkillRejected {
+			var body struct {
+				Reason string `json:"reason"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+				return
+			}
+			reason = strings.TrimSpace(body.Reason)
+			if len([]rune(reason)) > maxDescriptionLen {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "拒绝理由过长(上限 500 字)")
+				return
+			}
+			if reason == "" {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请填写拒绝理由")
+				return
+			}
+		}
+		if err := serverstore.SetSharedSkillStatus(db, name, version, status, reason); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, name+"@"+version)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if err := serverstore.DeleteSharedSkill(db, name, version); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+			return
+		}
+		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
+		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_delete", name+"@"+version)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// grantReq carries {username} or {group} (webadmin sends @group).
+type grantReq struct {
+	Username string `json:"username"`
+	Group    string `json:"group"`
+}
+
+func grantSubject(req grantReq) (string, serverstore.GranteeType, bool) {
+	if req.Username != "" {
+		return req.Username, serverstore.GranteeUser, true
+	}
+	if req.Group != "" {
+		return req.Group, serverstore.GranteeGroup, true
+	}
+	return "", "", false
+}
+
+// listGrants returns the grants on one shared skill (by name).
+func listGrants(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name := c.Param("name")
+		grants, err := serverstore.ListSharedResourceGrants(db, serverstore.SharedSkillGrantTable, name)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		if grants == nil {
+			grants = []serverstore.Grant{}
+		}
+		c.JSON(http.StatusOK, gin.H{"grants": grants})
+	}
+}
+
+// replaceGrants sets the full group-grant set of a shared skill (user grants
+// untouched), mirroring the marketplace contract.
+func replaceGrants(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name := c.Param("name")
+		var req struct {
+			Groups []string `json:"groups"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+			return
+		}
+		if err := serverstore.ReplaceSharedGroups(db, serverstore.SharedSkillGrantTable, name, req.Groups); err != nil {
+			if err == serverstore.ErrValidation {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门名不合法或不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_grant", name)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// setGrant adds/removes one user or group grant (idempotent).
+func setGrant(db *sql.DB, grant bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name := c.Param("name")
+		var req grantReq
+		if err := c.ShouldBindJSON(&req); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+			return
+		}
+		subject, t, ok := grantSubject(req)
+		if !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少授权主体")
+			return
+		}
+		var err error
+		if grant {
+			err = serverstore.GrantSharedResource(db, serverstore.SharedSkillGrantTable, name, subject, t)
+		} else {
+			err = serverstore.RevokeSharedResource(db, serverstore.SharedSkillGrantTable, name, subject, t)
+		}
+		if err != nil {
+			if err == serverstore.ErrValidation {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权主体不合法")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权失败")
+			return
+		}
+		action := "shared_skill_grant"
+		if !grant {
+			action = "shared_skill_revoke"
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), action, name+"@"+string(t)+":"+subject)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// download serves the stored archive. Employees may download only approved
+// rows; admins any row.
+func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if !skillNameRe.MatchString(name) || !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		s, err := serverstore.GetSharedSkill(db, name, version)
+		if err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		if !admin && s.Status != serverstore.SharedSkillApproved {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		// 授权检查:非 admin 下载须已授权(或为作者本人)。
+		if !admin {
+			u := serverauth.CurrentUser(c)
+			if u == nil {
+				serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+				return
+			}
+			isAuthor := u.Username == s.Author
+			granted := false
+			if !isAuthor {
+				groups, err := serverstore.UserEffectiveGroups(db, u.ID)
+				if err != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				var names []string
+				names, err = serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
+				if err != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				for _, n := range names {
+					if n == s.Name {
+						granted = true
+						break
+					}
+				}
+			}
+			if !isAuthor && !granted {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+		}
+		archivePath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
+		if _, err := os.Stat(archivePath); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档文件缺失")
+			return
+		}
+		c.Header("Content-Type", "application/gzip")
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(s.Name, s.Version)))
+		c.Header("X-Skill-Version", s.Version)
+		c.Header("X-Skill-Checksum", s.Checksum)
+		c.File(archivePath)
+	}
+}
+
+// preview returns the top-level SKILL.md content plus the full file list for
+// admin review.
+func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if !skillNameRe.MatchString(name) || !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		s, err := serverstore.GetSharedSkill(db, name, version)
+		if err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		archivePath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
+		raw, err := os.ReadFile(archivePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档文件缺失")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
+			return
+		}
+		files, content, err := ListArchiveContents(raw)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(err))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"files": files, "skill_md": content})
+	}
+}
+
+// ValidateSkillArchive lists a gzipped tar stream without extracting it,
+// refusing unsafe entries, bounding size/entry count, and requiring a
+// top-level SKILL.md. Returns the archive's sha256 hex.
+func ValidateSkillArchive(data []byte) (string, error) {
+	if len(data) == 0 || len(data) > MaxArchiveBytes {
+		return "", ErrArchiveInvalid
+	}
+	sum := sha256.Sum256(data)
+	hexSum := hex.EncodeToString(sum[:])
+	zr, err := gzip.NewReader(strings.NewReader(string(data)))
+	if err != nil {
+		return "", ErrUnsafeArchive
+	}
+	tr := tar.NewReader(zr)
+	var total int64
+	entries := 0
+	hasSkillMd := false
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", ErrUnsafeArchive
+		}
+		entries++
+		if entries > MaxArchiveEntries {
+			return "", ErrArchiveInvalid
+		}
+		name, err := posixNormalize(hdr.Name)
+		if err != nil {
+			return "", err
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			continue
+		}
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			return "", ErrUnsafeArchive
+		}
+		if name == "" {
+			return "", ErrUnsafeArchive
+		}
+		total += hdr.Size
+		if total > MaxUnpackedBytes {
+			return "", ErrArchiveInvalid
+		}
+		if name == "SKILL.md" {
+			hasSkillMd = true
+		}
+	}
+	if !hasSkillMd {
+		return "", ErrNoSkillMarkdown
+	}
+	return hexSum, nil
+}
+
+// ListArchiveContents lists non-directory entry paths (sorted, unique) and
+// returns the top-level SKILL.md content for admin review.
+func ListArchiveContents(data []byte) ([]string, string, error) {
+	zr, err := gzip.NewReader(strings.NewReader(string(data)))
+	if err != nil {
+		return nil, "", ErrUnsafeArchive
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	set := map[string]bool{}
+	var skillMd string
+	var order []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", ErrUnsafeArchive
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			continue
+		}
+		name, err := posixNormalize(hdr.Name)
+		if err != nil {
+			return nil, "", ErrUnsafeArchive
+		}
+		if name == "" || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			continue
+		}
+		if name == "SKILL.md" && skillMd == "" && hdr.Size <= 1<<20 {
+			buf := make([]byte, hdr.Size)
+			if _, err := io.ReadFull(tr, buf); err != nil {
+				return nil, "", ErrUnsafeArchive
+			}
+			skillMd = string(buf)
+		}
+		if !set[name] {
+			set[name] = true
+			order = append(order, name)
+		}
+	}
+	// sort the file list
+	for i := 1; i < len(order); i++ {
+		for j := i; j > 0 && order[j] < order[j-1]; j-- {
+			order[j], order[j-1] = order[j-1], order[j]
+		}
+	}
+	return order, skillMd, nil
+}
+
+func posixNormalize(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(raw, "/") {
+		return "", ErrUnsafeArchive
+	}
+	parts := strings.Split(strings.ReplaceAll(raw, "\\", "/"), "/")
+	out := make([]string, 0, len(parts))
+	for _, segment := range parts {
+		switch segment {
+		case "", ".":
+			continue
+		case "..":
+			return "", ErrUnsafeArchive
+		default:
+			out = append(out, segment)
+		}
+	}
+	return strings.Join(out, "/"), nil
+}
+
+func archiveErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, ErrNoSkillMarkdown):
+		return "归档缺少 SKILL.md"
+	case errors.Is(err, ErrUnsafeArchive):
+		return "归档内容不安全(路径越界或链接文件)"
+	case errors.Is(err, ErrArchiveInvalid):
+		return "归档过大或结构非法"
+	default:
+		return "归档校验失败"
+	}
+}
+
+func adminUsername(c *gin.Context) string {
+	u := serverauth.AdminUser(c)
+	if u == nil {
+		return "admin"
+	}
+	return u.Username
+}
+
+func safeName(name, version string) string {
+	return fmt.Sprintf("%s-%s.tar.gz", name, version)
+}
+
+// writeFileAtomic writes data to path via a temp file + rename (0600).
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".upload-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// ensure util import is used (SkillName pattern stays client-side).
+var _ = util.SafePathSegment
