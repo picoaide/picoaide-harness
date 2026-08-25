@@ -225,7 +225,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 }
 
 func TestUploadValidation(t *testing.T) {
-	r, db, adminHdr, userHdr, _ := setup(t)
+	r, db, adminHdr, userHdr, bobHdr := setup(t)
 	defer db.Close()
 
 	post := func(body string) int {
@@ -311,6 +311,50 @@ func TestUploadValidation(t *testing.T) {
 	p, _ := serverstore.GetAgentPreset(db, "dup")
 	if p.Status != serverstore.AgentPresetPending || p.Description != "新描述" {
 		t.Fatalf("resubmitted row = %+v", p)
+	}
+
+	// G1(审计 2026-08-25):跨用户重提必须被拒绝——A 的 rejected 行只能由
+	// A 本人重提;B(bob)凭已知 name+version 不得覆盖并重置为 pending。
+	wR := httptest.NewRecorder()
+	reqR := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", strings.NewReader(rejectBody("再拒一次")))
+	reqR.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		reqR.Header.Set(k, v)
+	}
+	r.ServeHTTP(wR, reqR)
+	if wR.Code != 200 {
+		t.Fatalf("reject2 = %d", wR.Code)
+	}
+	// bob 重提 → 404(与不存在同响应,不泄露存在性)。
+	{
+		wB := httptest.NewRecorder()
+		reqB := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("dup", "bob 劫持", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		reqB.Header.Set("Content-Type", "application/json")
+		for k, v := range bobHdr {
+			reqB.Header.Set(k, v)
+		}
+		r.ServeHTTP(wB, reqB)
+		if wB.Code != http.StatusNotFound {
+			t.Fatalf("bob cross-user resubmit = %d, want 404 (body %s)", wB.Code, wB.Body.String())
+		}
+		// 行仍为 rejected 且描述未被覆盖。
+		pB, _ := serverstore.GetAgentPresetByVersion(db, "dup", "1.0.0")
+		if pB.Status != serverstore.AgentPresetRejected || pB.Description != "新描述" {
+			t.Fatalf("row after bob attempt = %+v", pB)
+		}
+	}
+	// alice 本人重提仍可 → 201(回归护栏:合法路径不被误伤)。
+	{
+		wA2 := httptest.NewRecorder()
+		reqA2 := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("dup", "alice 重提", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		reqA2.Header.Set("Content-Type", "application/json")
+		for k, v := range userHdr {
+			reqA2.Header.Set(k, v)
+		}
+		r.ServeHTTP(wA2, reqA2)
+		if wA2.Code != http.StatusCreated {
+			t.Fatalf("alice legit resubmit = %d, want 201", wA2.Code)
+		}
 	}
 
 	// Multi-version: the same name may carry several versions independently.

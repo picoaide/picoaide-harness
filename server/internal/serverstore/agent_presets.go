@@ -204,12 +204,13 @@ func UpdateAgentPresetResubmit(db *sql.DB, name, displayName, description, check
 	return err
 }
 
-// UpdateAgentPresetResubmitByVersion resets one rejected name+version row.
-func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, description, checksum string) error {
+// UpdateAgentPresetResubmitByVersion resets one rejected name+version row
+// owned by the given author (author 校验,审计 2026-08-25 G1 深度防御)。
+func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, description, checksum, author string) error {
 	_, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
 		updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=?`,
-		displayName, description, checksum, AgentPresetPending, name, version, AgentPresetRejected)
+		WHERE name=? AND version=? AND status=? AND author=?`,
+		displayName, description, checksum, AgentPresetPending, name, version, AgentPresetRejected, author)
 	return err
 }
 

@@ -89,7 +89,16 @@ function decodeSegment(segment: string): string | null {
 }
 
 function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse) => void {
-  return (req, res) => { void handler(req, res) }
+  // 审计 2026-08-25 P2-3:此前 `void handler(req, res)` 丢弃 promise,disconnect
+  // 等 async handler 抛错会成为 unhandledRejection——Node≥15 默认直接退出
+  // 整个 Electron 主进程(browser 的 action handler 有 .catch,这里缺失)。
+  // 修复:统一捕获并回 500,与 browser 行为一致。
+  return (req, res) => {
+    void handler(req, res).catch(error => {
+      console.error('[dsh-connectors] handler failed', error)
+      if (!res.headersSent) json(res, 500, { error: 'internal error' })
+    })
+  }
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
@@ -164,6 +173,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
+  const URL_COMMAND_TIMEOUT_MS = 15_000
   const resolveUrlCommand = async (args: string[]): Promise<string> => {
     const [command, ...rest] = args
     if (command === undefined) throw new Error('urlCommand is empty')
@@ -176,12 +186,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: resolved?.shell,
       })
+      // 审计 2026-08-25 P2-1:此前无超时——子进程挂起会让连接器永远卡在
+      // 「连接中」并泄漏进程。与 auth.ts 的 CLI 超时策略一致(15s)。
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        reject(new Error(`urlCommand 超时(${URL_COMMAND_TIMEOUT_MS / 1000}s): ${spawnCommand}`))
+      }, URL_COMMAND_TIMEOUT_MS)
+      timer.unref?.()
       let stdout = ''
       let stderr = ''
       child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-      child.on('error', (error) => reject(error))
+      child.on('error', (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
       child.on('exit', (code) => {
+        clearTimeout(timer)
         if (code !== 0) {
           reject(new Error(stderr.trim() || `命令退出码 ${String(code)}`))
           return

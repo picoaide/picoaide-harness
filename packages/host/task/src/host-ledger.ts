@@ -52,6 +52,9 @@ export interface ApplyResult {
 
 const MAX_REQUEST_CACHE = 256
 
+/** 保留的执行历史条数上限(审计 2026-08-25 P2-5)。 */
+const MAX_EXECUTION_HISTORY = 100
+
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45_000
 
@@ -169,10 +172,18 @@ export class HostTaskLedger {
     }
     try {
       const parsed = JSON.parse(raw) as LedgerDocument
-      if (parsed.schemaVersion !== TASK_SCHEMA_VERSION || !Array.isArray(parsed.tasks)) {
+      if (typeof parsed.schemaVersion !== 'number' || !Array.isArray(parsed.tasks)) {
         throw new Error('unexpected schema')
       }
-      const state: LedgerState = { revision: parsed.revision, tasks: parsed.tasks }
+      let tasks = parsed.tasks
+      // Schema 迁移(审计 2026-08-25 C-1):旧版本逐级迁移,当前版本直读,
+      // 高于当前的未来版本保守拒绝(改 .corrupt 而非清空)。
+      if (parsed.schemaVersion < TASK_SCHEMA_VERSION) {
+        tasks = migrateTaskLedger(tasks, parsed.schemaVersion)
+      } else if (parsed.schemaVersion > TASK_SCHEMA_VERSION) {
+        throw new Error(`task ledger schema v${String(parsed.schemaVersion)} is newer than supported v${TASK_SCHEMA_VERSION}`)
+      }
+      const state: LedgerState = { revision: parsed.revision, tasks }
       // Restore the idempotency cache from the persisted request log so a
       // retried requestId after a Host restart is still recognized.
       for (const entry of Array.isArray(parsed.recentRequests) ? parsed.recentRequests : []) {
@@ -412,6 +423,10 @@ export class HostTaskLedger {
       if (index < 0) return false
       const task = state.tasks[index]!
       const next = settleExecution(task, executionId, result, this.now(), error)
+      // 裁剪执行历史(审计 2026-08-25 P2-5):只保留最近 N 条,防 ledger 膨胀。
+      if (next.executions.length > MAX_EXECUTION_HISTORY) {
+        next.executions = next.executions.slice(next.executions.length - MAX_EXECUTION_HISTORY)
+      }
       state.tasks[index] = next
       return true
     })
@@ -434,4 +449,15 @@ export class HostTaskLedger {
       this.lockFd = undefined
     }
   }
+}
+
+/**
+ * Migrate a task ledger from an older schema version to the current one.
+ * 审计 2026-08-25 C-1:旧版本逐级迁移(当前只有 v1;未来在此注册 v1→v2…)。
+ */
+export function migrateTaskLedger(tasks: TaskRecord[], fromVersion: number): TaskRecord[] {
+  let current = tasks
+  // v1 → v2 占位:未来字段变更在此逐字段修正。
+  void fromVersion
+  return current
 }
