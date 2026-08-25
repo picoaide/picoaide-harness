@@ -962,7 +962,7 @@ function apply(ctx, options = {}) {
 	};
 	/** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
 	const URL_COMMAND_TIMEOUT_MS = 15e3;
-	const resolveUrlCommand = async (args) => {
+	const resolveUrlCommand = async (args, extraEnv) => {
 		const [command, ...rest] = args;
 		if (command === void 0) throw new Error("urlCommand is empty");
 		const resolved = await cliRuntime.resolve(command, rest);
@@ -970,7 +970,10 @@ function apply(ctx, options = {}) {
 		const spawnArgs = resolved?.args ?? rest;
 		return new Promise((resolve, reject) => {
 			const child = spawn(spawnCommand, spawnArgs, {
-				env: { ...process.env },
+				env: {
+					...process.env,
+					...extraEnv ?? {}
+				},
 				stdio: [
 					"ignore",
 					"pipe",
@@ -1052,7 +1055,7 @@ function apply(ctx, options = {}) {
 			const config = server.transport === "streamable-http" ? {
 				transport: "streamable-http",
 				serverName: server.serverName,
-				url: server.urlCommand ? await resolveUrlCommand(server.urlCommand) : server.url ?? "",
+				url: server.urlCommand ? await resolveUrlCommand(server.urlCommand, server.env) : server.url ?? "",
 				headers: renderHeaders(server, credential),
 				toolCallTimeoutMs: 12e4,
 				failOnStartupError: false
