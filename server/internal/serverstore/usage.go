@@ -43,17 +43,20 @@ type PeakWindow struct {
 }
 
 // parseHHMM 解析 "HH:MM" → 自午夜分钟数;非法返回 ok=false。
+// 审计 2026-08-25:原实现 h/m 为无符号 byte(恒 >=0),h<0/m<0 是死条件,
+// hok/mok 实际是第二位数,命名误导。改为显式字符校验。
 func parseHHMM(s string) (int, bool) {
 	if len(s) != 5 || s[2] != ':' {
 		return 0, false
 	}
-	h, hok := s[0]-'0', s[1]-'0'
-	m, mok := s[3]-'0', s[4]-'0'
-	if h < 0 || h > 9 || m < 0 || m > 9 {
+	d0, d1 := s[0], s[1]
+	d3, d4 := s[3], s[4]
+	if d0 < '0' || d0 > '9' || d1 < '0' || d1 > '9' ||
+		d3 < '0' || d3 > '9' || d4 < '0' || d4 > '9' {
 		return 0, false
 	}
-	hh := int(h)*10 + int(hok)
-	mm := int(m)*10 + int(mok)
+	hh := int(d0-'0')*10 + int(d1-'0')
+	mm := int(d3-'0')*10 + int(d4-'0')
 	if hh > 23 || mm > 59 {
 		return 0, false
 	}

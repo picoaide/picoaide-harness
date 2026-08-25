@@ -108,6 +108,13 @@ log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
 warn() { log "警告: $*"; }
 fail() { log "错误: $*"; exit 1; }
 
+# mask_dsn 掩码 PostgreSQL DSN 中的密码(bash 的 ${DSN%%@*@} 会保留整个含密码
+# 前缀——实测输出完整 DSN,审计 2026-08-25 B-01 曾致密码明文进日志)。只按
+# postgres://user:pw@host 形态掩码;非该形态原样返回(不误报)。
+mask_dsn() {
+  sed -E 's#(://[^:@/]+:)[^@/]+@#\1***@#' <<<"$1"
+}
+
 # 数据库后端 → compose override 文件(COMPOSE_FILE 叠加,全部子命令自动生效)
 case "$DB_MODE" in
   sqlite) : ;;
@@ -333,9 +340,12 @@ ENV
 write_caddyfile() {
   local src
   case "$TLS_MODE" in
-    auto)   src="$TEMPLATE_DIR/Caddyfile.autocert" ;;
-    manual) src="$TEMPLATE_DIR/Caddyfile.manual" ;;
-    *)      fail "TLS_MODE 仅支持 manual/auto,当前: $TLS_MODE" ;;
+    auto)     src="$TEMPLATE_DIR/Caddyfile.autocert" ;;
+    manual)   src="$TEMPLATE_DIR/Caddyfile.manual" ;;
+    # 审计 2026-08-25 E-02:internal = 仓库默认 Caddyfile(tls internal 自签),
+    # 供纯内网/沙箱开箱即用;与占位域名 fail 校验配合,强制显式确认。
+    internal) src="$TEMPLATE_DIR/Caddyfile" ;;
+    *)        fail "TLS_MODE 仅支持 auto/manual/internal,当前: $TLS_MODE" ;;
   esac
   [ -f "$src" ] || fail "缺少模板: $src(请从仓库复制 Caddyfile.* 到部署目录)"
   sed "s/picoaide\.example\.com/$DOMAIN/g" "$src" > Caddyfile
@@ -371,8 +381,12 @@ wait_ready() {
 # ============================================================
 cmd_install() {
   log "========== PicoAide 部署(install)=="
-  [ "$TLS_MODE" = "auto" ] || [ "$TLS_MODE" = "manual" ] || fail "TLS_MODE 仅支持 manual/auto"
-  [ "$DOMAIN" != "picoaide.example.com" ] || warn "域名仍为示例值 picoaide.example.com,生产前请改 DOMAIN"
+  [ "$TLS_MODE" = "auto" ] || [ "$TLS_MODE" = "manual" ] || [ "$TLS_MODE" = "internal" ] || fail "TLS_MODE 仅支持 auto/manual/internal"
+  # 审计 2026-08-25 E-02:占位域名只 warn 会在生产误用自签证书+占位域名而不自知;
+  # 改为 fail(显式 ALLOW_PLACEHOLDER_DOMAIN=yes 可跳过,供内部沙箱测试)。
+  if [ "$DOMAIN" = "picoaide.example.com" ] && [ "${ALLOW_PLACEHOLDER_DOMAIN:-}" != "yes" ]; then
+    fail "DOMAIN 仍为示例值 picoaide.example.com —— 请修改 .env 中 DOMAIN 为你的真实域名/IP(内部自签部署请在 .env 设 ALLOW_PLACEHOLDER_DOMAIN=yes 并显式确认)"
+  fi
 
   log "▶ 检查命令依赖"
   check_cmds
@@ -410,7 +424,7 @@ cmd_install() {
       log "  备份: ./deploy.sh backup(pg_dump)或停服后拷 pg-data/;镜像需含 -db-driver 支持" ;;
     pg-external)
       log "数据库: PostgreSQL(外部实例;数据备份由外部 PG 运维策略负责)"
-      log "  DSN: ${PG_DSN%%@*@}@<host>/<db>(密码已掩码)" ;;
+      log "  DSN: $(mask_dsn "$PG_DSN") (密码已掩码)" ;;
   esac
   log "提示: 登录后在 webadmin 网关页填写\"对外访问地址\" = $BASE_URL"
 }
@@ -535,7 +549,7 @@ cmd_migrate() {
   export COMPOSE_FILE
 
   log "源: picoaide-data/picoaide.db"
-  log "目标: ${PG_DSN%%@*@}@<host>/<db>(密码已掩码);模式: $DB_MODE"
+  log "目标: $(mask_dsn "$PG_DSN") (密码已掩码);模式: $DB_MODE"
 
   local run_mig=()
   run_mig=(docker run --rm --entrypoint /app/migrate-sqlite-pg)
@@ -575,7 +589,11 @@ cmd_migrate() {
   $COMPOSE stop "$SERVER_CONTAINER" >/dev/null 2>&1 || true
 
   log "▶ 清空目标库表(TRUNCATE ... CASCADE;新库无表时忽略错误)..."
-  local tables="users, groups, gateway_providers, models, settings, skills, skill_grants, user_groups, usage, api_tokens, audit_logs, admin_sessions"
+  # 审计 2026-08-25 B-03:清单曾缺 shared_skills/shared_skill_grants/
+  # agent_presets/agent_preset_grants/kb_audit_logs/schema_migrations,
+  # 迁移后遗留旧数据或 schema_migrations 冲突。此处与服务端 migrations-pg
+  # 的 CREATE TABLE 全集对齐(新增表须同步更新)。
+  local tables="users, groups, user_groups, settings, api_tokens, gateway_providers, models, usage, skills, admin_sessions, skill_grants, audit_logs, kb_audit_logs, agent_presets, shared_skills, shared_skill_grants, agent_preset_grants, schema_migrations"
   local trunc="TRUNCATE TABLE $tables CASCADE"
   if [ "$DB_MODE" = "pg" ]; then
     docker exec "$PG_CONTAINER" psql -U picoaide -d picoaide -c "$trunc" >/dev/null 2>&1 \

@@ -165,6 +165,52 @@ export function apply(ctx: Context, config: Config): void {
     res.end(JSON.stringify(body))
   }
 
+  /**
+   * 流式读取上游 body 并带字节上限(审计 2026-08-25 P2-1/P2-2)。
+   * 此前 install/archive 分支用 `Buffer.from(await upstream.arrayBuffer())`
+   * 整段读入后才判 16MB——content-length 头可被不可信上游伪造/省略,真实
+   * 大 body 会把 Host 进程内存打满。此函数边读边计数,超限即 cancel 并抛错。
+   */
+  const readBodyLimited = async (body: ReadableStream<Uint8Array> | null, limit: number): Promise<Buffer> => {
+    if (body === null) return Buffer.alloc(0)
+    const reader = body.getReader()
+    const chunks: Buffer[] = []
+    let total = 0
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        total += value.byteLength
+        if (total > limit) {
+          await reader.cancel().catch(() => undefined)
+          throw new Error(`body exceeds ${limit} bytes`)
+        }
+        chunks.push(Buffer.from(value))
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    return Buffer.concat(chunks)
+  }
+
+  /**
+   * 收集本地 POST body 并带上限(审计 2026-08-25 P2-2):login/upload 此前
+   * `for await (const chunk of req)` 无界收集,同机恶意进程可打满内存。
+   */
+  const collectBody = async (req: IncomingMessage, limit: number): Promise<Buffer> => {
+    const chunks: Buffer[] = []
+    let total = 0
+    for await (const chunk of req) {
+      total += (chunk as Buffer).byteLength
+      if (total > limit) {
+        req.destroy()
+        throw new Error(`request body exceeds ${limit} bytes`)
+      }
+      chunks.push(chunk as Buffer)
+    }
+    return Buffer.concat(chunks)
+  }
+
   const session = (): { serverURL: string; token: string } | null => ctx.picoSession.getSession()
 
   /**
@@ -229,10 +275,11 @@ export function apply(ctx: Context, config: Config): void {
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
-          const chunks: Buffer[] = []
-          for await (const chunk of req) chunks.push(chunk as Buffer)
+          // 审计 2026-08-25 P2-2:body 上限 64KB(登录表单远小于此)。
+          const raw = await collectBody(req, 64 * 1024).catch(() => null)
+          if (raw === null) return json(res, 413, { error: 'body too large' })
           let body: { server?: unknown; username?: unknown; password?: unknown }
-          try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+          try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
           if (typeof body.server !== 'string' || typeof body.username !== 'string' || typeof body.password !== 'string') {
             return json(res, 400, { error: 'missing fields' })
           }
@@ -329,7 +376,9 @@ export function apply(ctx: Context, config: Config): void {
               if (length > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: 'archive too large' })
               }
-              const archive = Buffer.from(await upstream.arrayBuffer())
+              // 审计 2026-08-25 P2-1:流式读取+上限(头可能被伪造/省略)。
+              const archive = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
+              if (archive === null) return json(res, 413, { error: 'archive too large' })
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
               const version = upstream.headers.get('x-skill-version') ?? undefined
               const result = await installSkillArchive({
@@ -390,8 +439,10 @@ export function apply(ctx: Context, config: Config): void {
             if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
               return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
             }
-            const content = Buffer.from(await upstream.arrayBuffer())
-            if (content.length > MAX_ARCHIVE_BYTES) {
+            const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
+            if (content === null) {
+              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+            }
               return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
             }
             // Pass through the upstream integrity headers (M3): the server
@@ -451,10 +502,11 @@ export function apply(ctx: Context, config: Config): void {
 
           // POST /api/pico/agent-presets/upload { name } -> pack + gateway.
           if (pathname === '/api/pico/agent-presets/upload' && req.method === 'POST') {
-            const chunks: Buffer[] = []
-            for await (const chunk of req) chunks.push(chunk as Buffer)
+            // 审计 2026-08-25 P2-2:body 上限 64KB(upload 只带 name/元数据)。
+            const raw = await collectBody(req, 64 * 1024).catch(() => null)
+            if (raw === null) return json(res, 413, { error: 'body too large' })
             let body: { name?: unknown }
-            try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+            try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
             const name = typeof body.name === 'string' ? body.name.trim() : ''
             if (name === '') return json(res, 400, { error: 'missing name' })
             try {
@@ -513,8 +565,10 @@ export function apply(ctx: Context, config: Config): void {
               if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
-              const content = Buffer.from(await upstream.arrayBuffer())
-              if (content.length > MAX_ARCHIVE_BYTES) {
+              const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
+              if (content === null) {
+                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              }
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
               const checksum = upstream.headers.get('x-preset-checksum') ?? undefined
@@ -564,8 +618,10 @@ export function apply(ctx: Context, config: Config): void {
             if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
               return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
             }
-            const content = Buffer.from(await upstream.arrayBuffer())
-            if (content.length > MAX_ARCHIVE_BYTES) {
+            const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
+            if (content === null) {
+              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+            }
               return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
             }
             const headers: Record<string, string> = {
@@ -621,10 +677,11 @@ export function apply(ctx: Context, config: Config): void {
           }
 
           if (pathname === '/api/pico/shared-skills/upload' && req.method === 'POST') {
-            const chunks: Buffer[] = []
-            for await (const chunk of req) chunks.push(chunk as Buffer)
+            // 审计 2026-08-25 P2-2:body 上限 64KB。
+            const raw = await collectBody(req, 64 * 1024).catch(() => null)
+            if (raw === null) return json(res, 413, { error: 'body too large' })
             let body: { name?: unknown; version?: unknown }
-            try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+            try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
             const name = typeof body.name === 'string' ? body.name.trim() : ''
             const version = typeof body.version === 'string' && body.version.trim() !== '' ? body.version.trim() : '1.0.0'
             if (name === '') return json(res, 400, { error: 'missing name' })
@@ -681,8 +738,10 @@ export function apply(ctx: Context, config: Config): void {
               if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
-              const content = Buffer.from(await upstream.arrayBuffer())
-              if (content.length > MAX_ARCHIVE_BYTES) {
+              const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
+              if (content === null) {
+                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              }
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined

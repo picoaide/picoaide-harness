@@ -374,7 +374,9 @@ function createProbe(def: ConnectorDef, options: AuthRunOptions): AuthProbe {
 }
 
 async function runProbeCommand(command: string, args: string[], env?: Record<string, string>, cli?: CliRuntime): Promise<boolean> {
-  // The status command may also need the downloaded binary.
+  // 审计 2026-08-25 P2-2:此前 status command 无超时——子进程挂起会让
+  // pollUntilConnected 的 deadline 形同虚设(卡在第一次 await),UI 永久转圈。
+  // 与 CLI 路径一致:15s 超时 kill 并按失败处理。
   const resolved = cli ? await cli.resolve(command, args) : null
   return new Promise((resolve) => {
     const child = spawn(resolved?.command ?? command, resolved?.args ?? args, {
@@ -382,10 +384,24 @@ async function runProbeCommand(command: string, args: string[], env?: Record<str
       stdio: 'ignore',
       shell: resolved?.shell,
     })
-    child.on('error', () => resolve(false))
-    child.on('exit', (code) => resolve(code === 0))
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve(false)
+    }, PROBE_TIMEOUT_MS)
+    timer.unref?.()
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      resolve(code === 0)
+    })
   })
 }
+
+/** Status probe 子进程超时(审计 2026-08-25 P2-2)。 */
+const PROBE_TIMEOUT_MS = 15_000
 
 async function pollUntilConnected(
   probe: AuthProbe,

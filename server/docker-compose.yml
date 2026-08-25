@@ -84,6 +84,9 @@ services:
       PICOAI_ADMIN_PASSWORD: ${PICOAI_ADMIN_PASSWORD:-}
       # 主密钥:留空则由服务端首次启动自动生成于 data/master.key(请备份)
       PICOAI_MASTER_KEY: ${PICOAI_MASTER_KEY:-}
+      # 可信反向代理(审计 2026-08-25 F-02):Caddy 固定 IP 默认 172.28.0.2,
+      # 使登录限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS
+      PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-172.28.0.2}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./picoaide-data:/data

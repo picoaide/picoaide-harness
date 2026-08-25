@@ -57,6 +57,10 @@ export interface ApplyResult {
 
 const MAX_REQUEST_CACHE = 256
 
+/** 保留的执行历史条数上限(审计 2026-08-25 P2-5):executions 曾只增不减,
+ * 高频 job 的 ledger.json 无限膨胀且每次 mutate 全量重写。 */
+const MAX_EXECUTION_HISTORY = 100
+
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45_000
 
@@ -214,12 +218,24 @@ export class HostCronLedger {
     }
     try {
       const parsed = JSON.parse(raw) as LedgerDocument
-      if (parsed.schemaVersion !== CRON_SCHEMA_VERSION || !Array.isArray(parsed.jobs)) {
+      if (typeof parsed.schemaVersion !== 'number' || !Array.isArray(parsed.jobs)) {
         throw new Error('unexpected schema')
+      }
+      let jobs = parsed.jobs
+      // Schema 迁移(审计 2026-08-25 C-1):此前把「schema 版本不匹配」当损坏
+      // 处理 → rename .corrupt + 清空全部数据,且无迁移路径;任何未来字段
+      // 变更都会静默抹掉用户全部定时任务。现在区分:
+      // - 当前版本 → 直接读;
+      // - 已知旧版本 → 逐级 migrate(新版本必须在此注册);
+      // - 高于当前(未知未来) → 保守拒绝(不破坏数据,报错而非清空)。
+      if (parsed.schemaVersion < CRON_SCHEMA_VERSION) {
+        jobs = migrateCronLedger(jobs, parsed.schemaVersion)
+      } else if (parsed.schemaVersion > CRON_SCHEMA_VERSION) {
+        throw new Error(`ledger schema v${String(parsed.schemaVersion)} is newer than supported v${CRON_SCHEMA_VERSION}`)
       }
       const state: LedgerState = {
         revision: parsed.revision,
-        jobs: parsed.jobs,
+        jobs,
         scheduler: {
           timeZone: parsed.scheduler?.timeZone ?? timeZone(),
           ...(parsed.scheduler?.ledgerId === undefined ? {} : { ledgerId: parsed.scheduler.ledgerId }),
@@ -236,9 +252,11 @@ export class HostCronLedger {
       }
       this.reconcileInterruptedStarts(state, this.now())
       return state
-    } catch {
-      // Corrupt ledger: isolate the bytes and start empty (loudly visible via
-      // the scheduler error field), never overwrite the corrupt file.
+    } catch (error) {
+      // Corrupt or newer-than-supported ledger: isolate the bytes and start
+      // empty (loudly visible via the scheduler error field), never overwrite
+      // the original file. 审计 2026-08-25 C-1:只有真正的损坏/未来版本才
+      // 触发 .corrupt;可迁移旧版本已在上面的 migrate 路径处理。
       try {
         renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`)
       } catch {
@@ -247,7 +265,11 @@ export class HostCronLedger {
       return {
         revision: 0,
         jobs: [],
-        scheduler: { timeZone: timeZone(), ledgerId: crypto.randomUUID(), error: 'ledger was corrupt and reset' },
+        scheduler: {
+          timeZone: timeZone(),
+          ledgerId: crypto.randomUUID(),
+          error: 'ledger was corrupt or too new and reset',
+        },
       }
     }
   }
@@ -484,7 +506,7 @@ export class HostCronLedger {
     })
   }
 
-  /** Scheduler-owned: settle an execution with a result. */
+  /** Scheduler-owned: settle an execution with a result. Prunes old history. */
   settle(jobId: string, executionId: string, result: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
     this.mutate((state) => {
       const job = state.jobs.find(candidate => candidate.id === jobId)
@@ -493,6 +515,10 @@ export class HostCronLedger {
       if (index < 0) return false
       const settled = settleExecution(job.executions[index]!, result, this.now(), error)
       job.executions[index] = settled
+      // 裁剪执行的旧历史(审计 2026-08-25 P2-5):只保留最近 N 条。
+      if (job.executions.length > MAX_EXECUTION_HISTORY) {
+        job.executions = job.executions.slice(job.executions.length - MAX_EXECUTION_HISTORY)
+      }
       return true
     })
   }
@@ -614,6 +640,20 @@ export class HostCronLedger {
 /** Validate a cron expression against the shared parser (UI and Host agree). */
 export function validateCron(expr: string): boolean {
   return isValidCron(expr)
+}
+
+/**
+ * Migrate a ledger's jobs from an older schema version to the current one.
+ * 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走
+ * 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。当前只有
+ * v1;未来字段/枚举变更时在此加 v1→v2、v2→v3 … 并同步 bump 常量。
+ */
+export function migrateCronLedger(jobs: JobRecord[], fromVersion: number): JobRecord[] {
+  let current = jobs
+  // v1 → v2 占位示例(未来启用):逐字段向上兼容修正。
+  // if (fromVersion <= 1) { current = current.map(job => ({ ...job })) }
+  void fromVersion
+  return current
 }
 
 export { isValidCron }

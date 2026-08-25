@@ -20,10 +20,35 @@ import (
 
 const sessionCookieName = "picoaide_session"
 
-// secureCookiesEnabled reads server.secure_cookies(反代部署手动开启 Secure 标记)
+// adminMaxBodyBytes bounds admin JSON request bodies (审计 2026-08-25 F-06).
+const adminMaxBodyBytes = 1 << 20 // 1MB
+
+// secureCookiesEnabled reads server.secure_cookies(显式开关;未设置=自动)
+// 审计 2026-08-25 F-01:反代(Caddy)部署时 c.Request.TLS 恒为 nil,原实现
+// 只有在手动置 server.secure_cookies=1 时才给会话 cookie 加 Secure——默认
+// 反代部署下 cookie 明文跳段。安全修复:默认跟随 X-Forwarded-Proto(Caddy
+// 会设置该头;伪造它只会让 cookie 更严格,无降级风险),显式配置仍可覆盖。
 func secureCookiesEnabled(db *sql.DB) bool {
 	v, ok, err := serverstore.GetSetting(db, "server.secure_cookies")
-	return err == nil && ok && strings.TrimSpace(v) == "1"
+	if err == nil && ok {
+		return strings.TrimSpace(v) == "1"
+	}
+	return false // 未显式配置:调用方再按 X-Forwarded-Proto / TLS 判断
+}
+
+// secureCookieFor reports whether the session cookie should carry Secure.
+// Order: explicit server.secure_cookies setting → X-Forwarded-Proto: https
+// (behind Caddy) → direct TLS. Never trusts a downgrade header.
+func secureCookieFor(c *gin.Context, db *sql.DB) bool {
+	if v, ok, err := serverstore.GetSetting(db, "server.secure_cookies"); err == nil && ok {
+		return strings.TrimSpace(v) == "1"
+	}
+	if c.Request.TLS != nil {
+		return true
+	}
+	// 反代标志:仅信任 "https",不信任任何显式 "0"/"off"(攻击者伪造只会
+	// 增强而非削弱 cookie 安全)。
+	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
 }
 
 // minPasswordLength is the minimum password length for admin-created users.
@@ -54,6 +79,15 @@ type AdminAPI struct {
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	a := &AdminAPI{DB: db}
 	g := r.Group("/api/admin")
+	// 管理端 JSON 请求体统一上限(审计 2026-08-25 F-06):admin 路由的
+	// ShouldBindJSON 此前无 MaxBytesReader,被攻破/异常的管理会话可发起
+	// 大 body 内存消耗;1MB 足够全部管理表单(含技能描述/理由上限 500 字)。
+	g.Use(func(c *gin.Context) {
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, adminMaxBodyBytes)
+		}
+		c.Next()
+	})
 	g.POST("/login", a.handleLogin)
 	g.GET("/me", AdminAuth(db), a.handleMe)
 	g.POST("/logout", AdminAuth(db), a.handleLogout)
@@ -162,7 +196,9 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	if !adminLoginLimiter().allow(loginKey(c, req.Username)) {
+	// 双桶限流(审计 2026-08-25 F-02):ip|username 防单 IP 爆破;
+	// username 桶防反代坍缩/分布式下的账号级 DoS。
+	if !adminLoginLimiter().allow(loginKey(c, req.Username)) || !adminLoginLimiter().allow("u:"+req.Username) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
 	}
@@ -176,9 +212,9 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "会话创建失败")
 		return
 	}
-	// Secure cookie:直接 TLS 或 server.secure_cookies=1(反代后置)时开启,
-	// 避免会话 cookie 在明文跳段裸奔(审计2026-M6)
-	secure := c.Request.TLS != nil || secureCookiesEnabled(a.DB)
+	// Secure cookie(审计 2026-08-25 F-01):显式配置 → X-Forwarded-Proto
+	// (反代) → 直连 TLS;默认不再是「明文可绕」。
+	secure := secureCookieFor(c, a.DB)
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sess.ID,

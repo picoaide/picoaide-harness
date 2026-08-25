@@ -76,10 +76,20 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
-	// C-1: trust only loopback proxies, so gin's ClientIP never honors a
-	// spoofed X-Forwarded-For from the public side (rate-limit keys also
-	// derive from RemoteAddr as a second line of defense).
-	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+	// 可信代理(审计 2026-08-25 F-02):信任 loopback + 默认 compose
+	// 私有网段中的 Caddy(172.28.0.2),使 gin.ClientIP 解析 X-Forwarded-For
+	// 得到真实客户端 IP,登录限流键不再坍缩为单一代理 IP(否则 10 次错
+	// 密码即可锁死任意用户名——账号级 DoS)。仅从可信代理接受该头:
+	// 外部攻击者伪造的 XFF 不会生效,只会被计为 Caddy 本身(更严格)。
+	trusted := []string{"127.0.0.1", "::1"}
+	if v := os.Getenv("PICOAI_TRUSTED_PROXIES"); v != "" {
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				trusted = append(trusted, p)
+			}
+		}
+	}
+	if err := r.SetTrustedProxies(trusted); err != nil {
 		log.Fatalf("trusted proxies: %v", err)
 	}
 
