@@ -321,10 +321,23 @@ async function runProbeCommand(command, args, env, cli) {
 			stdio: "ignore",
 			shell: resolved?.shell
 		});
-		child.on("error", () => resolve(false));
-		child.on("exit", (code) => resolve(code === 0));
+		const timer = setTimeout(() => {
+			child.kill("SIGKILL");
+			resolve(false);
+		}, PROBE_TIMEOUT_MS);
+		timer.unref?.();
+		child.on("error", () => {
+			clearTimeout(timer);
+			resolve(false);
+		});
+		child.on("exit", (code) => {
+			clearTimeout(timer);
+			resolve(code === 0);
+		});
 	});
 }
+/** Status probe 子进程超时(审计 2026-08-25 P2-2)。 */
+const PROBE_TIMEOUT_MS = 15e3;
 async function pollUntilConnected(probe, pollIntervalMs, pollTimeoutMs, signal) {
 	const deadline = Date.now() + pollTimeoutMs;
 	while (Date.now() < deadline) {
@@ -884,7 +897,10 @@ function decodeSegment(segment) {
 }
 function exact(handler) {
 	return (req, res) => {
-		handler(req, res);
+		Promise.resolve(handler(req, res)).catch((error) => {
+			console.error("[dsh-connectors] handler failed", error);
+			if (!res.headersSent) json(res, 500, { error: "internal error" });
+		});
 	};
 }
 function apply(ctx, options = {}) {
@@ -945,6 +961,7 @@ function apply(ctx, options = {}) {
 		pendingRequests.set(request.connectorId, request);
 	};
 	/** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
+	const URL_COMMAND_TIMEOUT_MS = 15e3;
 	const resolveUrlCommand = async (args) => {
 		const [command, ...rest] = args;
 		if (command === void 0) throw new Error("urlCommand is empty");
@@ -961,6 +978,11 @@ function apply(ctx, options = {}) {
 				],
 				shell: resolved?.shell
 			});
+			const timer = setTimeout(() => {
+				child.kill("SIGKILL");
+				reject(/* @__PURE__ */ new Error(`urlCommand 超时(${URL_COMMAND_TIMEOUT_MS / 1e3}s): ${spawnCommand}`));
+			}, URL_COMMAND_TIMEOUT_MS);
+			timer.unref?.();
 			let stdout = "";
 			let stderr = "";
 			child.stdout.on("data", (chunk) => {
@@ -969,8 +991,12 @@ function apply(ctx, options = {}) {
 			child.stderr.on("data", (chunk) => {
 				stderr += chunk.toString();
 			});
-			child.on("error", (error) => reject(error));
+			child.on("error", (error) => {
+				clearTimeout(timer);
+				reject(error);
+			});
 			child.on("exit", (code) => {
+				clearTimeout(timer);
 				if (code !== 0) {
 					reject(new Error(stderr.trim() || `命令退出码 ${String(code)}`));
 					return;

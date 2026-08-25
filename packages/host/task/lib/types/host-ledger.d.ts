@@ -65,3 +65,8 @@ export declare class HostTaskLedger {
     settle(taskId: string, executionId: string, result: ExecutionResult, error?: string): void;
     dispose(): void;
 }
+/**
+ * Migrate a task ledger from an older schema version to the current one.
+ * 审计 2026-08-25 C-1:旧版本逐级迁移(当前只有 v1;未来在此注册 v1→v2…)。
+ */
+export declare function migrateTaskLedger(tasks: TaskRecord[], fromVersion: number): TaskRecord[];

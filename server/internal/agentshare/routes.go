@@ -330,8 +330,8 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 }
 
 // decide approves or rejects one row (admin only). Legacy single-param form
-// addresses the name's LATEST row (审计 2026-08-25 D-1:保留旧 UI 兼容,但
-// 多版本端点 decideVersioned 应成为 webadmin 的首选)。
+// addresses the name's LATEST row (审计 2026-08-25 D-1:保留旧 UI/代理兼容,
+// 但「最新」经 GetAgentPreset 的 semver 语义解析,非字符串排序)。
 func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
@@ -339,7 +339,8 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
 			return
 		}
-		if _, err := serverstore.GetAgentPreset(db, name); err != nil {
+		p, err := serverstore.GetAgentPreset(db, name)
+		if err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
 				return
@@ -350,11 +351,11 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 		if !decideBody(c, status) {
 			return
 		}
-		if err := serverstore.SetAgentPresetStatus(db, name, status, reasonOf(c)); err != nil {
+		if err := serverstore.SetAgentPresetStatusByVersion(db, p.Name, p.Version, status, reasonOf(c)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 			return
 		}
-		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, name)
+		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, p.Name+"@"+p.Version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }

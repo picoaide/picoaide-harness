@@ -173,10 +173,12 @@ window.__ModuleLoader__.load({
 			}
 			install(snapshot) {
 				const { transportError: _dropped, ...rest } = this.snapshot;
+				const selected = rest.selectedTaskId;
+				const selectedStillExists = selected !== void 0 && snapshot.tasks.some((task) => task.id === selected);
 				this.snapshot = {
 					tasks: snapshot.tasks,
 					revision: snapshot.revision,
-					...rest.selectedTaskId === void 0 ? {} : { selectedTaskId: rest.selectedTaskId },
+					...selected !== void 0 && selectedStillExists ? { selectedTaskId: selected } : {},
 					archiveView: rest.archiveView,
 					pendingTaskIds: rest.pendingTaskIds
 				};

@@ -1,4 +1,4 @@
-import { t as HostTaskLedger } from "./host-ledger-HMWwc9ga.js";
+import { t as HostTaskLedger } from "./host-ledger-DosoNhNE.js";
 import { taskVisibleTo } from "./tasks.js";
 import { HostExecutionRunner, SessionLaunchError } from "./host-runner.js";
 //#region src/host-service.ts
@@ -97,9 +97,18 @@ var HostTaskService = class {
 	async launch(task, executionId) {
 		try {
 			const sessionId = await this.runner.launch(task);
+			const execution = this.ledger.state().tasks.find((candidate) => candidate.id === task.id)?.executions.find((candidate) => candidate.id === executionId);
+			if (execution === void 0 || execution.endedAt !== void 0) {
+				this.runner.cancelSession(sessionId).catch(() => {});
+				console.warn(`[dsh-task] execution ${executionId} settled before launch returned; ghost session cancelled`);
+				return;
+			}
 			this.ledger.attachSession(task.id, executionId, sessionId);
 		} catch (error) {
-			if (error instanceof SessionLaunchError) this.ledger.attachSession(task.id, executionId, error.sessionId);
+			if (error instanceof SessionLaunchError) {
+				const execution = this.ledger.state().tasks.find((candidate) => candidate.id === task.id)?.executions.find((candidate) => candidate.id === executionId);
+				if (execution !== void 0 && execution.endedAt === void 0) this.ledger.attachSession(task.id, executionId, error.sessionId);
+			}
 			this.ledger.settle(task.id, executionId, "failed", error instanceof Error ? error.message : String(error));
 		}
 	}
