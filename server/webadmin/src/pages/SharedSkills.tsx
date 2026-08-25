@@ -8,14 +8,14 @@ import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
-import { Download, FileText, RefreshCw, Share2, ShieldCheck } from 'lucide-react'
+import { Download, FileText, RefreshCw, Sparkles, ShieldCheck } from 'lucide-react'
 import { GrantDialog } from '../components/grant-dialog'
 
-interface PresetRow {
+interface SkillRow {
   name: string
   display_name: string
-  description: string
   version: string
+  description: string
   author: string
   status: 'pending' | 'approved' | 'rejected'
   reason: string
@@ -30,11 +30,10 @@ interface Dept {
 
 interface PreviewData {
   files: string[]
-  composition: string
+  skill_md: string
 }
 
-// 状态 → 中文标签与徽章色
-const STATUS_META: Record<PresetRow['status'], { label: string; variant: 'secondary' | 'success' | 'destructive' }> = {
+const STATUS_META: Record<SkillRow['status'], { label: string; variant: 'secondary' | 'success' | 'destructive' }> = {
   pending: { label: '待审核', variant: 'secondary' },
   approved: { label: '已通过', variant: 'success' },
   rejected: { label: '已拒绝', variant: 'destructive' },
@@ -47,42 +46,36 @@ function fmtTime(iso: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
-export default function AgentPresets() {
-  const [allRows, setAllRows] = useState<PresetRow[]>([])
-  const [rows, setRows] = useState<PresetRow[]>([])
+export default function SharedSkills() {
+  const [allRows, setAllRows] = useState<SkillRow[]>([])
+  const [rows, setRows] = useState<SkillRow[]>([])
   const [tab, setTab] = useState('all')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  // 二次确认(通过/拒绝/删除共用行内确认)
-  const [confirm, setConfirm] = useState<{ name: string; kind: 'approve' | 'reject' | 'delete' } | null>(null)
-  // 拒绝理由输入(拒绝确认弹窗内)
+  const [confirm, setConfirm] = useState<{ name: string; version: string; kind: 'approve' | 'reject' | 'delete' } | null>(null)
   const [reason, setReason] = useState('')
-  // 审核预览(composition + 文件清单)
   const [preview, setPreview] = useState<PreviewData | null>(null)
-  const [previewName, setPreviewName] = useState('')
+  const [previewKey, setPreviewKey] = useState('')
   const [busy, setBusy] = useState('')
-  // 授权对话框(分享前需授权给用户/部门)
   const [grantName, setGrantName] = useState('')
   const [departments, setDepartments] = useState<Dept[]>([])
 
   useEffect(() => {
     request('/api/admin/departments')
       .then((data) => { setDepartments(data.departments ?? []) })
-      .catch(() => { /* 授权对话框内部门为空时仍可单用户授权 */ })
+      .catch(() => { /* 单用户授权仍可用 */ })
   }, [])
   const loadSeq = useRef(0)
 
-  // counts 必须基于全量数据,不能基于当前 tab 的 rows(否则切 tab 后数字全变)。
   const load = useCallback(async (status: string) => {
     const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ presets: PresetRow[] }>('/api/admin/agent-presets')
+      const data = await request<{ skills: SkillRow[] }>('/api/admin/shared-skills')
       if (current !== loadSeq.current) return
-      setAllRows(data.presets ?? [])
-      const filtered = status === 'all' ? (data.presets ?? []) : (data.presets ?? []).filter(r => r.status === status)
-      setRows(filtered)
+      setAllRows(data.skills ?? [])
+      setRows(status === 'all' ? (data.skills ?? []) : (data.skills ?? []).filter(r => r.status === status))
     } catch (err: any) {
       if (current !== loadSeq.current) return
       setError(err.message)
@@ -93,13 +86,14 @@ export default function AgentPresets() {
 
   useEffect(() => { load(tab) }, [load, tab])
 
-  const act = async (name: string, kind: 'approve' | 'reject' | 'delete') => {
+  const act = async (name: string, version: string, kind: 'approve' | 'reject' | 'delete') => {
     if (busy) return
-    setBusy(name + kind)
+    setBusy(name + version + kind)
     setError('')
     try {
+      const base = `/api/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
       if (kind === 'delete') {
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+        await request(base, { method: 'DELETE' })
       } else if (kind === 'reject') {
         const trimmed = reason.trim()
         if (trimmed === '') {
@@ -107,12 +101,9 @@ export default function AgentPresets() {
           setBusy('')
           return
         }
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/reject`, {
-          method: 'POST',
-          body: JSON.stringify({ reason: trimmed }),
-        })
+        await request(`${base}/reject`, { method: 'POST', body: JSON.stringify({ reason: trimmed }) })
       } else {
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/approve`, { method: 'POST' })
+        await request(`${base}/approve`, { method: 'POST' })
       }
       setConfirm(null)
       setReason('')
@@ -124,16 +115,17 @@ export default function AgentPresets() {
     }
   }
 
-  const openPreview = async (name: string) => {
-    setPreviewName(name)
+  const openPreview = async (name: string, version: string) => {
+    setPreviewKey(name + '@' + version)
     setPreview(null)
     setError('')
     try {
-      const data = await request<PreviewData>(`/api/admin/agent-presets/${encodeURIComponent(name)}/preview`)
+      const data = await request<PreviewData>(
+        `/api/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
       setPreview(data)
     } catch (err: any) {
       setError(err.message)
-      setPreviewName('')
+      setPreviewKey('')
     }
   }
 
@@ -147,8 +139,8 @@ export default function AgentPresets() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="共享 Agent"
-        desc="员工创造的 Agent 预设上传后在此审核;通过后全员可见可安装"
+        title="共享技能"
+        desc="员工本地技能上传后在此审核;通过版本全员可见可安装"
         actions={
           <Button variant="outline" size="sm" onClick={() => { void load(tab) }}>
             <RefreshCw className="h-4 w-4" /> 刷新
@@ -168,17 +160,17 @@ export default function AgentPresets() {
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       {loading ? (
-        <EmptyState icon={<Share2 className="h-6 w-6" />} title="加载中…" desc="请稍候" />
+        <EmptyState icon={<Sparkles className="h-6 w-6" />} title="加载中…" desc="请稍候" />
       ) : rows.length === 0 ? (
-        <EmptyState icon={<Share2 className="h-6 w-6" />} title="暂无共享 Agent" desc="员工上传后将出现在这里" />
+        <EmptyState icon={<Sparkles className="h-6 w-6" />} title="暂无共享技能" desc="员工上传后将出现在这里" />
       ) : (
         <div className="rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>名称 / 标题</TableHead>
-                <TableHead>作者</TableHead>
                 <TableHead>版本</TableHead>
+                <TableHead>作者</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>上传时间</TableHead>
@@ -188,33 +180,28 @@ export default function AgentPresets() {
             <TableBody>
               {rows.map(row => {
                 const meta = STATUS_META[row.status]
-                const isBusy = busy === row.name + 'approve' || busy === row.name + 'reject' || busy === row.name + 'delete'
+                const isBusy = busy === row.name + row.version + 'approve'
+                  || busy === row.name + row.version + 'reject'
+                  || busy === row.name + row.version + 'delete'
                 return (
-                  <TableRow key={row.name}>
+                  <TableRow key={row.name + '@' + row.version}>
                     <TableCell>
                       <div className="whitespace-nowrap font-medium">{row.display_name || row.name}</div>
                       <div className="text-xs text-muted-foreground">{row.name}</div>
                     </TableCell>
+                    <TableCell className="font-mono text-sm">{row.version}</TableCell>
                     <TableCell>{row.author}</TableCell>
-                    <TableCell>{row.version}</TableCell>
                     <TableCell className="max-w-xs truncate">{row.description || '—'}</TableCell>
                     <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
                     <TableCell className="text-muted-foreground">{fmtTime(row.created_at)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost" size="sm"
-                          onClick={() => { void openPreview(row.name) }}
-                          title="查看内容预览"
-                        >
+                        <Button variant="ghost" size="sm" onClick={() => { void openPreview(row.name, row.version) }} title="查看内容预览">
                           <FileText className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost" size="sm"
-                          asChild={false}
-                          onClick={() => { window.open(`/api/admin/agent-presets/${encodeURIComponent(row.name)}/archive`, '_blank') }}
-                          title="下载归档核查"
-                        >
+                        <Button variant="ghost" size="sm" asChild={false}
+                          onClick={() => { window.open(`/api/admin/shared-skills/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version)}/archive`, '_blank') }}
+                          title="下载归档核查">
                           <Download className="h-4 w-4" />
                         </Button>
                         {row.status === 'approved' && (
@@ -223,16 +210,16 @@ export default function AgentPresets() {
                           </Button>
                         )}
                         {row.status !== 'approved' && (
-                          <Button size="sm" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, kind: 'approve' }) }}>
+                          <Button size="sm" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, version: row.version, kind: 'approve' }) }}>
                             通过
                           </Button>
                         )}
                         {row.status !== 'rejected' && (
-                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setReason(''); setConfirm({ name: row.name, kind: 'reject' }) }}>
+                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setReason(''); setConfirm({ name: row.name, version: row.version, kind: 'reject' }) }}>
                             拒绝
                           </Button>
                         )}
-                        <Button size="sm" variant="destructive" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, kind: 'delete' }) }}>
+                        <Button size="sm" variant="destructive" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, version: row.version, kind: 'delete' }) }}>
                           删除
                         </Button>
                       </div>
@@ -245,20 +232,20 @@ export default function AgentPresets() {
         </div>
       )}
 
-      {/* 审核预览:composition + 文件清单 */}
-      <Dialog open={previewName !== ''} onOpenChange={(open) => { if (!open) setPreviewName('') }}>
+      {/* 审核预览 */}
+      <Dialog open={previewKey !== ''} onOpenChange={(open) => { if (!open) setPreviewKey('') }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>内容预览: {previewName}</DialogTitle>
-            <DialogDescription>顶层 agent.cordis.yml 与归档文件清单(用于决策审核)</DialogDescription>
+            <DialogTitle>内容预览: {previewKey}</DialogTitle>
+            <DialogDescription>SKILL.md 与归档文件清单(用于决策审核)</DialogDescription>
           </DialogHeader>
           {preview === null ? (
             <p className="text-sm text-muted-foreground">加载中…</p>
           ) : (
             <div className="space-y-3">
               <div>
-                <h4 className="mb-1 text-sm font-medium">agent.cordis.yml</h4>
-                <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{preview.composition || '—'}</pre>
+                <h4 className="mb-1 text-sm font-medium">SKILL.md</h4>
+                <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{preview.skill_md || '—'}</pre>
               </div>
               <div>
                 <h4 className="mb-1 text-sm font-medium">文件清单（{preview.files.length}）</h4>
@@ -273,19 +260,20 @@ export default function AgentPresets() {
         </DialogContent>
       </Dialog>
 
+      {/* 确认弹窗 */}
       <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) { setConfirm(null); setReason('') } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {confirm?.kind === 'approve' && '确定通过该共享 Agent 吗？'}
-              {confirm?.kind === 'reject' && '确定拒绝该共享 Agent 吗？'}
-              {confirm?.kind === 'delete' && '确定删除该共享 Agent 吗？'}
+              {confirm?.kind === 'approve' && `确定通过「${confirm?.name}@${confirm?.version}」吗？`}
+              {confirm?.kind === 'reject' && `确定拒绝「${confirm?.name}@${confirm?.version}」吗？`}
+              {confirm?.kind === 'delete' && `确定删除「${confirm?.name}@${confirm?.version}」吗？`}
             </DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            {confirm?.kind === 'approve' && `通过后「${confirm.name}」将全员可见可安装。`}
-            {confirm?.kind === 'reject' && `拒绝后「${confirm.name}」仅上传者本人可见并可重新上传。请填写拒绝理由,上传者将可见该理由。`}
-            {confirm?.kind === 'delete' && `删除后「${confirm.name}」记录与归档将被移除,不可恢复。`}
+            {confirm?.kind === 'approve' && '通过后该版本将全员可见可安装。'}
+            {confirm?.kind === 'reject' && '拒绝后仅上传者可见并可重新上传。请填写理由,上传者可见。'}
+            {confirm?.kind === 'delete' && '删除后记录与归档将被移除,不可恢复。'}
           </p>
           {confirm?.kind === 'reject' && (
             <Textarea
@@ -303,7 +291,7 @@ export default function AgentPresets() {
               <Button
                 variant={confirm.kind === 'delete' || confirm.kind === 'reject' ? 'destructive' : 'default'}
                 disabled={busy !== '' || (confirm.kind === 'reject' && reason.trim() === '')}
-                onClick={() => { void act(confirm.name, confirm.kind) }}
+                onClick={() => { void act(confirm.name, confirm.version, confirm.kind) }}
               >
                 {busy ? '处理中…' : '确认'}
               </Button>
@@ -315,7 +303,7 @@ export default function AgentPresets() {
       <GrantDialog
         open={grantName !== ''}
         name={grantName}
-        basePath={`/api/admin/agent-presets/${encodeURIComponent(grantName)}`}
+        basePath={`/api/admin/shared-skills/${encodeURIComponent(grantName)}`}
         departments={departments}
         onClose={() => { setGrantName('') }}
         onSaved={() => { void load(tab) }}
