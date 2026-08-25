@@ -251,8 +251,8 @@ step4_config() {
   log "  域名: $DOMAIN"
   case "$DOMAIN" in *[!0-9.]*) ;; *) log "  (IP 部署,证书将用自签名;TLS_MODE=auto 不支持 IP)" ;; esac
 
-  # TLS 模式(manual/auto)
-  if [ "$TLS_MODE" != "manual" ] && [ "$TLS_MODE" != "auto" ]; then fail "TLS_MODE 仅支持 manual/auto"; fi
+  # TLS 模式(manual/auto/internal——internal=仓库默认自签 Caddyfile,审计 2026-08-25 E-02)
+  if [ "$TLS_MODE" != "manual" ] && [ "$TLS_MODE" != "auto" ] && [ "$TLS_MODE" != "internal" ]; then fail "TLS_MODE 仅支持 manual/auto/internal"; fi
   if [ -t 0 ] && [ "$TLS_MODE" = "manual" ]; then
     log "  (提示: TLS_MODE=auto 可让 Caddy 自动申请 Let's Encrypt,需公网域名直连+80/443 开放)"
   fi

@@ -43,7 +43,9 @@ type PresetArchivePreview struct {
 }
 
 // preview reads one stored archive and returns the top-level composition
-// (agent.cordis.yml) plus the full file list for admin review.
+// (agent.cordis.yml) plus the full file list for admin review. When version
+// is non-empty it addresses one row; empty addresses the name's latest row
+// (legacy callers).
 func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
@@ -51,7 +53,18 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
 			return
 		}
-		p, err := serverstore.GetAgentPreset(db, name)
+		version := c.Param("version")
+		if version != "" && !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "版本号不合法")
+			return
+		}
+		var p *serverstore.AgentPreset
+		var err error
+		if version != "" {
+			p, err = serverstore.GetAgentPresetByVersion(db, name, version)
+		} else {
+			p, err = serverstore.GetAgentPreset(db, name) // latest
+		}
 		if err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
@@ -85,6 +98,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("", listVisible(db))
 	g.POST("", upload(db, cacheDir))
 	g.GET("/:name/archive", download(db, cacheDir, false))
+	g.GET("/:name/:version/archive", downloadVersioned(db, cacheDir, false))
 }
 
 // RegisterAdminRoutes mounts /api/admin/agent-presets (AdminAuth endpoints).
@@ -96,6 +110,13 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.POST("/:name/approve", decide(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
 	g.POST("/:name/reject", decide(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
 	g.DELETE("/:name", remove(db, cacheDir))
+	// 多版本端点(审计 2026-08-25 D-1):按 name@version 精确寻址,避免
+	// 旧「最新版本」语义与 hardcoded 1.0.0 文件名的断链。
+	g.GET("/:name/:version/archive", downloadVersioned(db, cacheDir, true))
+	g.GET("/:name/:version/preview", preview(db, cacheDir))
+	g.POST("/:name/:version/approve", decideVersioned(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
+	g.POST("/:name/:version/reject", decideVersioned(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
+	g.DELETE("/:name/:version", removeVersioned(db, cacheDir))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
 	g.GET("/:name/grants", listPresetGrants(db))
 	g.PUT("/:name/grants", replacePresetGrants(db))
@@ -234,20 +255,31 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			return
 		}
 
-		// Store the archive (a rejected resubmit replaces its old file).
+		// 作者校验(审计 2026-08-25 G1):rejected 行是某个作者上次提交的
+		// 独占记录,只有其作者本人可以重提覆盖——否则任意用户可猜 name+version
+		// 劫持他人提交并重置为 pending(内容替换 + 审核投毒 + 绕过 pendingCap)。
+		if getErr == nil && existing.Author != u.Username {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+			return
+		}
+
+		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
+		// - 重提:先 DB 更新(作者校验在 SQL 内),成功后覆盖归档;DB 失败时
+		//   旧归档原样保留,状态与文件始终一致(校验和失败方向 fail-closed)。
+		// - 新建:先写文件再 INSERT 会造成 DB 失败(上限/冲突)时残留孤儿文件,
+		//   因此在 INSERT 失败路径补偿删除刚写的文件。
 		if err := os.MkdirAll(cacheDir, 0700); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "存储失败")
 			return
 		}
 		archivePath := filepath.Join(cacheDir, safeName(req.Name, req.Version))
-		if err := writeFileAtomic(archivePath, raw); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
-			return
-		}
-
-		if getErr == nil { // rejected → resubmit: reset the row
-			if err := serverstore.UpdateAgentPresetResubmitByVersion(db, req.Name, req.Version, strings.TrimSpace(req.DisplayName), desc, checksum); err != nil {
+		if getErr == nil { // rejected → resubmit: reset the row (author-scoped)
+			if err := serverstore.UpdateAgentPresetResubmitByVersion(db, req.Name, req.Version, strings.TrimSpace(req.DisplayName), desc, checksum, u.Username); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+				return
+			}
+			if err := writeFileAtomic(archivePath, raw); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		} else {
@@ -263,11 +295,17 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			// Atomic cap enforcement: the INSERT itself re-counts pending
 			// rows, so concurrent uploads can never exceed pendingCap.
 			if _, err := serverstore.CreateAgentPresetCapped(db, p, pendingCap); err != nil {
+				// 补偿:INSERT 失败时删除刚写的归档,不留孤儿文件。
+				_ = os.Remove(archivePath)
 				if errors.Is(err, serverstore.ErrTooManyPending) {
 					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
 					return
 				}
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+				return
+			}
+			if err := writeFileAtomic(archivePath, raw); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		}
@@ -291,12 +329,16 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
-// decide approves or rejects one row (admin only). Approving publishes the
-// preset to all employees; rejecting hides it from everyone but its author,
-// storing the admin's reason so the author can fix and resubmit.
+// decide approves or rejects one row (admin only). Legacy single-param form
+// addresses the name's LATEST row (审计 2026-08-25 D-1:保留旧 UI 兼容,但
+// 多版本端点 decideVersioned 应成为 webadmin 的首选)。
 func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !presetIDRe.MatchString(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
 		if _, err := serverstore.GetAgentPreset(db, name); err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
@@ -305,26 +347,10 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		var reason string
-		if status == serverstore.AgentPresetRejected {
-			var body struct {
-				Reason string `json:"reason"`
-			}
-			if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
-				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
-				return
-			}
-			reason = strings.TrimSpace(body.Reason)
-			if len([]rune(reason)) > maxReasonLen {
-				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "拒绝理由过长(上限 500 字)")
-				return
-			}
-			if reason == "" {
-				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请填写拒绝理由")
-				return
-			}
+		if !decideBody(c, status) {
+			return
 		}
-		if err := serverstore.SetAgentPresetStatus(db, name, status, reason); err != nil {
+		if err := serverstore.SetAgentPresetStatus(db, name, status, reasonOf(c)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 			return
 		}
@@ -333,9 +359,97 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 	}
 }
 
+// decideVersioned approves or rejects one name@version row (admin only).
+// 审计 2026-08-25 D-1:webadmin 多版本化后必须能按版本精确审核,
+// 而不是只有「最新版本」行。
+func decideVersioned(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if !presetIDRe.MatchString(name) || !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		if _, err := serverstore.GetAgentPresetByVersion(db, name, version); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		if !decideBody(c, status) {
+			return
+		}
+		if err := serverstore.SetAgentPresetStatusByVersion(db, name, version, status, reasonOf(c)); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, name+"@"+version)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// decideBody parses the optional rejection reason for a reject decision.
+// Returns false (and writes the error response) when invalid.
+func decideBody(c *gin.Context, status serverstore.AgentPresetStatus) bool {
+	if status != serverstore.AgentPresetRejected {
+		c.Set("preset_reason", "")
+		return true
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return false
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if len([]rune(reason)) > maxReasonLen {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "拒绝理由过长(上限 500 字)")
+		return false
+	}
+	if reason == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请填写拒绝理由")
+		return false
+	}
+	c.Set("preset_reason", reason)
+	return true
+}
+
+// reasonOf reads the parsed rejection reason set by decideBody.
+func reasonOf(c *gin.Context) string {
+	if v, ok := c.Get("preset_reason"); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// remove deletes ALL rows of a name plus every archive file of that name
+// (审计 2026-08-25 D-1:旧实现只删 1.0.0,遗留其它版本孤儿归档)。
 func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !presetIDRe.MatchString(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
+		rows, err := serverstore.ListAgentPresets(db, "")
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		versions := make([]string, 0, 4)
+		for _, p := range rows {
+			if p.Name == name {
+				versions = append(versions, p.Version)
+			}
+		}
+		if len(versions) == 0 {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+			return
+		}
 		if err := serverstore.DeleteAgentPreset(db, name); err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
@@ -344,9 +458,33 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 			return
 		}
-		// Best-effort archive cleanup; the row is the source of truth.
-		_ = os.Remove(filepath.Join(cacheDir, safeName(name, "1.0.0")))
+		// Best-effort archive cleanup: every version of the name.
+		for _, v := range versions {
+			_ = os.Remove(filepath.Join(cacheDir, safeName(name, v)))
+		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_delete", name)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// removeVersioned deletes one name@version row plus its archive.
+func removeVersioned(db *sql.DB, cacheDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if !presetIDRe.MatchString(name) || !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		if err := serverstore.DeleteAgentPresetByVersion(db, name, version); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+			return
+		}
+		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
+		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
@@ -420,6 +558,22 @@ func setPresetGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少授权主体")
 			return
 		}
+		// 存在性校验(审计 2026-08-25 G5):与 marketplace 的 applyGrant 对齐,
+		// 防拼错主体导致「资源永远对某人可见/不可见」的静默授权错误。
+		if grant {
+			exists := false
+			if t == serverstore.GranteeUser {
+				_, uErr := serverstore.GetUserByUsername(db, subject)
+				exists = uErr == nil
+			} else {
+				_, gErr := serverstore.GroupByName(db, subject)
+				exists = gErr == nil
+			}
+			if !exists {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权主体不存在")
+				return
+			}
+		}
 		var err error
 		if grant {
 			err = serverstore.GrantSharedResource(db, serverstore.SharedPresetGrantTable, name, subject, t)
@@ -443,12 +597,17 @@ func setPresetGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 	}
 }
 
-// download serves the stored archive. Employees may download only approved
-// presets (anything else is the same 404 as "does not exist", so the review
-// queue of other people is never leaked); admins may download any row.
+// download serves the stored archive of the name's LATEST row (legacy
+// single-param form). Employees may download only approved presets (anything
+// else is the same 404 as "does not exist", so the review queue of other
+// people is never leaked); admins may download any row.
 func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !presetIDRe.MatchString(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
 		p, err := serverstore.GetAgentPreset(db, name)
 		if err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
@@ -458,63 +617,82 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		if !admin && p.Status != serverstore.AgentPresetApproved {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
-			return
-		}
-		// 授权检查:非 admin 下载须已授权(或为作者本人);否则与不存在同 404。
-		if !admin {
-			u := serverauth.CurrentUser(c)
-			if u == nil {
-				serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
-				return
-			}
-			isAuthor := u.Username == p.Author
-			if !isAuthor {
-				groups, gErr := serverstore.UserEffectiveGroups(db, u.ID)
-				if gErr != nil {
-					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-					return
-				}
-				names, gErr := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedPresetGrantTable, u.Username, groups)
-				if gErr != nil {
-					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-					return
-				}
-				granted := false
-				for _, n := range names {
-					if n == p.Name {
-						granted = true
-						break
-					}
-				}
-				if !granted {
-					serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
-					return
-				}
-			}
-		}
-		if !presetIDRe.MatchString(p.Name) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
-			return
-		}
-		archivePath := filepath.Join(cacheDir, safeName(p.Name, "1.0.0"))
-		if _, err := os.Stat(archivePath); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档文件缺失")
-			return
-		}
-		c.Header("Content-Type", "application/gzip")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(p.Name, p.Version)))
-		c.Header("X-Preset-Version", p.Version)
-		c.Header("X-Preset-Checksum", p.Checksum)
-		c.File(archivePath)
+		serveArchive(c, db, cacheDir, p, admin)
 	}
 }
 
-func countPending(db *sql.DB, author string) (int, error) {
-	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM agent_presets WHERE author=? AND status=?`, author, serverstore.AgentPresetPending).Scan(&n)
-	return n, err
+// downloadVersioned serves the stored archive of one name@version row.
+func downloadVersioned(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if !presetIDRe.MatchString(name) || !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		p, err := serverstore.GetAgentPresetByVersion(db, name, version)
+		if err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		serveArchive(c, db, cacheDir, p, admin)
+	}
+}
+
+// serveArchive performs the status/auth checks and streams the archive for
+// one resolved row; it writes the error response on any refusal.
+// 审计 2026-08-25 D-1:文件路径用 p.Version(与上传一致),不再硬编码
+// "1.0.0"(多版本下载曾必然 500「归档文件缺失」)。
+func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.AgentPreset, admin bool) {
+	if !admin && p.Status != serverstore.AgentPresetApproved {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+		return
+	}
+	// 授权检查:非 admin 下载须已授权(或为作者本人);否则与不存在同 404。
+	if !admin {
+		u := serverauth.CurrentUser(c)
+		if u == nil {
+			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+			return
+		}
+		isAuthor := u.Username == p.Author
+		if !isAuthor {
+			groups, gErr := serverstore.UserEffectiveGroups(db, u.ID)
+			if gErr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			names, gErr := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedPresetGrantTable, u.Username, groups)
+			if gErr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			granted := false
+			for _, n := range names {
+				if n == p.Name {
+					granted = true
+					break
+				}
+			}
+			if !granted {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+				return
+			}
+		}
+	}
+	archivePath := filepath.Join(cacheDir, safeName(p.Name, p.Version))
+	if _, err := os.Stat(archivePath); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档文件缺失")
+		return
+	}
+	c.Header("Content-Type", "application/gzip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(p.Name, p.Version)))
+	c.Header("X-Preset-Version", p.Version)
+	c.Header("X-Preset-Checksum", p.Checksum)
+	c.File(archivePath)
 }
 
 // archiveErrorMessage maps validation refusals to the client-facing message.

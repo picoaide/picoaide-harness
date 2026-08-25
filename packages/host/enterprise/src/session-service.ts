@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Session } from './server-connector/config.ts'
 import { loadElectronModule } from './server-connector/electron.ts'
+import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Session token file permissions: owner read/write only. */
 const TOKEN_FILE_MODE = 0o600
@@ -13,10 +14,17 @@ const TOKEN_FILE_MODE = 0o600
  * Resolve the session token file: `$DSH_HOME/session.json`, falling back to
  * the product home when DSH_HOME is unset (never the process cwd — a token
  * dropped there could be world-readable and bypasses the home's 0700).
+ * 审计 2026-08-25 P2-3:DSH_HOME 若指向系统关键目录则拒绝(同机注入面,
+ * bearer token 不得落到攻击者可读位置)。
  */
 export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.DSH_HOME?.trim()
-  if (home !== undefined && home.length > 0) return join(home, 'session.json')
+  if (home !== undefined && home.length > 0) {
+    if (!isSafeDshHome(home)) {
+      throw new Error(`unsafe DSH_HOME: ${home} resolves into a system directory`)
+    }
+    return join(home, 'session.json')
+  }
   return join(homedir(), '.picoaide-harness', 'session.json')
 }
 

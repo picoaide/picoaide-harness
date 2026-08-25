@@ -42,6 +42,11 @@ export function expandHomePath(path: string, home: string = homedir()): string {
  * Precedence, highest first: an explicit configured path, `$DSH_HOME`, then
  * `~/.picoaide-harness`. The product keeps all user data under one root. An
  * empty or whitespace-only `$DSH_HOME` is treated as unset.
+ *
+ * 审计 2026-08-25 P2-3:DSH_HOME 是完全可注入的环境变量(同机进程可设置后
+ * 以同一用户拉起应用)。虽保留其覆盖能力(e2e/多 profile 依赖),但拒绝把
+ * home 重定向到系统关键目录,避免「安全解压/凭据落盘」作用到 /tmp 等
+ * 攻击者控制的路径。
  * @param configured - explicit harness-home override, highest precedence.
  * @param env - environment mapping used to read `DSH_HOME`.
  * @param home - platform home directory fallback (test seam).
@@ -55,6 +60,36 @@ export function resolveDshHome(
   const fromEnv = env[DSH_HOME_ENV]
   const selected = configured ?? (fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(home, PRODUCT_DSH_HOME_DIR))
   return resolve(expandHomePath(selected, home))
+}
+
+/** 系统关键目录前缀(审计 2026-08-25 P2-3):home 不得指向这些根。 */
+const FORBIDDEN_HOME_PREFIXES = ['/', '/tmp', '/proc', '/sys', '/etc', '/var', '/usr', '/boot', '/dev', '/opt']
+
+/**
+ * Refuse a resolved home placed in a system-critical directory.
+ * 审计 2026-08-25 P2-3:调用方传入的 DSH_HOME 若被同机进程注入为
+ * `/tmp/evil` 等,拒绝而非静默使用(返回 false)。
+ * @param resolved - absolute normalized home path (from resolveDshHome).
+ */
+export function isSafeDshHome(resolved: string): boolean {
+  const normalized = resolve(resolved)
+  if (normalized === '/') return false
+  for (const prefix of FORBIDDEN_HOME_PREFIXES) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`) || normalized.startsWith(`${prefix}\\`)) {
+      return false
+    }
+  }
+  return true
+}
+
+/** Resolve the product home and refuse an unsafe override (throws a clear error). */
+export function dshHomeSafe(options: { configured?: string; env?: Record<string, string | undefined> } = {}): string {
+  const resolved = resolveDshHome(options.configured, options.env)
+  if (!isSafeDshHome(resolved)) {
+    const source = options.env?.[DSH_HOME_ENV] ?? options.configured
+    throw new Error(`unsafe DSH_HOME: ${String(source ?? resolved)} resolves into a system directory`)
+  }
+  return resolved
 }
 
 /**

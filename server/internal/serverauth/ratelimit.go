@@ -95,10 +95,10 @@ func (l *loginLimiter) allow(key string) bool {
 }
 
 // loginKey builds a rate-limit key from the connection IP and username.
-// RemoteAddr is used (never ClientIP): X-Forwarded-For is attacker-controlled
-// and a forged header must not reset the per-IP budget (C-1). Behind a
-// reverse proxy the proxy's own address becomes the key, which is still a
-// bounded choke point.
+// RemoteAddr 是安全默认(审计 C-1):X-Forwarded-For 攻击者可控,伪造头不得
+// 重置 per-IP 预算。反代部署时 RemoteAddr 会坍缩为代理 IP(审计 2026-08-25
+// F-02)导致单账号 DoS——因此 allow 额外维护一个 per-username 桶(见
+// allowLogin),反代下攻击者炸同一用户名仍会在 username 桶被限。
 func loginKey(c *gin.Context, username string) string {
 	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
 	if err != nil {
@@ -107,9 +107,15 @@ func loginKey(c *gin.Context, username string) string {
 	return host + "|" + username
 }
 
-// loginAllowed middleware-level guard; returns true if the request may proceed.
+// loginAllowed guards one login attempt through BOTH buckets: ip|username
+// (安全默认,防单 IP 爆破) and username (防账号级 DoS——反代坍缩/分布式
+// 爆破下,同一用户名跨 IP 的尝试总数仍受限)。审计 2026-08-25 F-02。
 func (a *API) loginAllowed(c *gin.Context, username string) bool {
 	if !a.limiter.allow(loginKey(c, username)) {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
+		return false
+	}
+	if !a.limiter.allow("u:" + username) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return false
 	}

@@ -17,42 +17,42 @@ import (
 // 系统信息来自 runtime/stdlib+Linux /proc(不引入 gopsutil 依赖);
 // 数据库统计按驱动(SQLite/PG)查询行数与磁盘大小。
 type sysinfoResponse struct {
-	UptimeSec   int64          `json:"uptime_sec"`
-	UptimeHuman string         `json:"uptime_human"`
-	GoVersion   string         `json:"go_version"`
-	NumCPU      int            `json:"num_cpu"`
-	GOMAXPROCS  int            `json:"gomaxprocs"`
-	Goroutines  int            `json:"goroutines"`
-	Mem         memInfo        `json:"mem"`
-	LoadAvg     [3]float64     `json:"load_avg"` // 1/5/15 分钟
-	Disk        diskInfo       `json:"disk"`
-	DB          dbStats        `json:"db"`
-	Version     string         `json:"version"`
+	UptimeSec   int64      `json:"uptime_sec"`
+	UptimeHuman string     `json:"uptime_human"`
+	GoVersion   string     `json:"go_version"`
+	NumCPU      int        `json:"num_cpu"`
+	GOMAXPROCS  int        `json:"gomaxprocs"`
+	Goroutines  int        `json:"goroutines"`
+	Mem         memInfo    `json:"mem"`
+	LoadAvg     [3]float64 `json:"load_avg"` // 1/5/15 分钟
+	Disk        diskInfo   `json:"disk"`
+	DB          dbStats    `json:"db"`
+	Version     string     `json:"version"`
 }
 
 type memInfo struct {
-	AllocatedMB   float64 `json:"allocated_mb"`
-	TotalSystemMB float64 `json:"total_system_mb"`
+	AllocatedMB    float64 `json:"allocated_mb"`
+	TotalSystemMB  float64 `json:"total_system_mb"`
 	SystemMemoryMB float64 `json:"system_memory_mb"` // 宿主机(读 /proc/meminfo)
 }
 
 type diskInfo struct {
-	DataPath   string `json:"data_path"`
-	TotalGB    float64 `json:"total_gb"`
-	UsedGB     float64 `json:"used_gb"`
-	FreeGB     float64 `json:"free_gb"`
-	UsedPct    float64 `json:"used_pct"`
+	DataPath string  `json:"data_path"`
+	TotalGB  float64 `json:"total_gb"`
+	UsedGB   float64 `json:"used_gb"`
+	FreeGB   float64 `json:"free_gb"`
+	UsedPct  float64 `json:"used_pct"`
 }
 
 // dbStats 是数据库统计(行数按表/磁盘大小按后端)。
 type dbStats struct {
-	Driver       string            `json:"driver"`        // sqlite | pg
-	BuildVersion string            `json:"-"`             // 内部
-	Tables       map[string]int64  `json:"tables"`        // 表名 -> 行数
-	TotalRows    int64             `json:"total_rows"`
-	DiskBytes    int64             `json:"disk_bytes"`
-	DiskHuman    string            `json:"disk_human"`
-	SchemaMig    int64             `json:"schema_migrations"` // 迁移版本
+	Driver       string           `json:"driver"` // sqlite | pg
+	BuildVersion string           `json:"-"`      // 内部
+	Tables       map[string]int64 `json:"tables"` // 表名 -> 行数
+	TotalRows    int64            `json:"total_rows"`
+	DiskBytes    int64            `json:"disk_bytes"`
+	DiskHuman    string           `json:"disk_human"`
+	SchemaMig    int64            `json:"schema_migrations"` // 迁移版本
 }
 
 // statTables 是需要统计行数的业务表(与 serverstore 迁移一致)。

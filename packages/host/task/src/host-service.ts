@@ -113,10 +113,26 @@ export class HostTaskService implements PicoTaskService {
   private async launch(task: TaskRecord, executionId: string): Promise<void> {
     try {
       const sessionId = await this.runner.launch(task)
+      // C-2(审计 2026-08-25):launch 期间用户可能已 cancel——执行已 settle
+      // 为 cancelled,此时 attachSession 会把 sessionId 写进 ended 执行,
+      // 造成 ghost session 孤儿化(无人 settle,真实运行 ≥6h 消耗配额)。
+      // 修复:attach 前检查执行是否仍 open;已结束则取消该 ghost session。
+      const current = this.ledger.state().tasks.find(candidate => candidate.id === task.id)
+      const execution = current?.executions.find(candidate => candidate.id === executionId)
+      if (execution === undefined || execution.endedAt !== undefined) {
+        void this.runner.cancelSession(sessionId).catch(() => { /* best effort */ })
+        console.warn(`[dsh-task] execution ${executionId} settled before launch returned; ghost session cancelled`)
+        return
+      }
       this.ledger.attachSession(task.id, executionId, sessionId)
     } catch (error) {
       if (error instanceof SessionLaunchError) {
-        this.ledger.attachSession(task.id, executionId, error.sessionId)
+        // 同样的竞态检查:SessionLaunchError 携带 sessionId 时也先查 open。
+        const current = this.ledger.state().tasks.find(candidate => candidate.id === task.id)
+        const execution = current?.executions.find(candidate => candidate.id === executionId)
+        if (execution !== undefined && execution.endedAt === undefined) {
+          this.ledger.attachSession(task.id, executionId, error.sessionId)
+        }
       }
       this.ledger.settle(task.id, executionId, 'failed', error instanceof Error ? error.message : String(error))
     }
