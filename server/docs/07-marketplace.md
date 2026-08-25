@@ -15,6 +15,7 @@
 
 - 员工(Bearer):`GET /api/marketplace/skills`、`GET /api/marketplace/skills/:name`、`GET /api/marketplace/skills/:name/archive`。
 - 管理端(Admin):`/api/admin/skills`(CRUD,下架置 enabled=0)、`/api/admin/skills/:name/grants`(授权)。
+- 统一聚合(Bearer):`GET /api/capabilities?source=market`(与共享技能/Agent 合并返回)。
 
 完整请求/响应见 03-api-reference.md §6-7。
 

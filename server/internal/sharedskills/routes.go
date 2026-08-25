@@ -75,6 +75,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.POST("/:name/:version/approve", decide(db, serverstore.SharedSkillApproved, "shared_skill_approve"))
 	g.POST("/:name/:version/reject", decide(db, serverstore.SharedSkillRejected, "shared_skill_reject"))
 	g.DELETE("/:name/:version", remove(db, cacheDir))
+	// 质量标记(0037):仅 approved 行可设置/清除(official/featured,互斥)。
+	g.PUT("/:name/:version/quality", setQuality(db))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
 	g.GET("/:name/grants", listGrants(db))
 	g.PUT("/:name/grants", replaceGrants(db))
@@ -91,6 +93,7 @@ func rowJSON(s serverstore.SharedSkill) gin.H {
 		"author":       s.Author,
 		"status":       s.Status,
 		"reason":       s.Reason,
+		"quality":      s.Quality, // 0037 组织库质量标记(official/featured)
 		"created_at":   s.CreatedAt,
 		"updated_at":   s.UpdatedAt,
 	}
@@ -393,6 +396,40 @@ func replaceGrants(db *sql.DB) gin.HandlerFunc {
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_grant", name)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// setQuality sets/clears the quality tag of one approved shared skill
+// (”|official|featured). Only approved rows may carry a tag; the tag is
+// mutual-exclusive (one per row), and audit as shared_skill_qualify.
+func setQuality(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		var req struct {
+			Quality string `json:"quality"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+			return
+		}
+		if !serverstore.ValidSharedQuality(req.Quality) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "质量标记不合法(空/official/featured)")
+			return
+		}
+		if err := serverstore.SetSharedSkillQuality(db, name, version, req.Quality); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在或未通过审核")
+				return
+			}
+			if errors.Is(err, serverstore.ErrValidation) {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "质量标记不合法")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_qualify", name+"@"+version+"="+req.Quality)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "quality": req.Quality})
 	}
 }
 

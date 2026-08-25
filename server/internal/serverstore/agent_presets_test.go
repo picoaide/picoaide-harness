@@ -235,3 +235,42 @@ func TestAgentPresetStatusValidate(t *testing.T) {
 		t.Fatalf("re-apply (idempotent) failed: %v", err)
 	}
 }
+
+func TestAgentPresetQuality(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	// 0037 quality 列:仅 approved 行可设置;非法值拒绝。
+	p := newAgentPreset("qual", "alice")
+	if _, err := CreateAgentPreset(db, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAgentPresetQuality(db, "qual", "1.0.0", "featured"); err != ErrNotFound {
+		t.Fatalf("quality on pending = %v, want ErrNotFound", err)
+	}
+	if err := SetAgentPresetStatusByVersion(db, "qual", "1.0.0", AgentPresetApproved, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAgentPresetQuality(db, "qual", "1.0.0", "featured"); err != nil {
+		t.Fatalf("set featured: %v", err)
+	}
+	if err := SetAgentPresetQuality(db, "qual", "1.0.0", "pro"); err != ErrValidation {
+		t.Fatalf("bad quality = %v, want ErrValidation", err)
+	}
+	got, err := GetAgentPresetByVersion(db, "qual", "1.0.0")
+	if err != nil || got.Quality != "featured" {
+		t.Fatalf("row = %+v err=%v", got, err)
+	}
+	if err := SetAgentPresetQuality(db, "qual", "1.0.0", ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, _ = GetAgentPresetByVersion(db, "qual", "1.0.0")
+	if got.Quality != "" {
+		t.Fatalf("after clear quality=%q", got.Quality)
+	}
+	if err := SetAgentPresetQuality(db, "nope", "1.0.0", "official"); err != ErrNotFound {
+		t.Fatalf("missing = %v, want ErrNotFound", err)
+	}
+}

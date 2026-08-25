@@ -160,3 +160,47 @@ func TestSharedSkillCappedAtomically(t *testing.T) {
 		t.Fatalf("bob create: %v", err)
 	}
 }
+
+func TestSharedSkillQuality(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	// 0037 quality 列:仅 approved 行可设置;非法值拒绝。
+	s := newSharedSkill("qual", "1.0.0", "alice")
+	if _, err := CreateSharedSkill(db, s); err != nil {
+		t.Fatal(err)
+	}
+	// pending 行设置 quality -> ErrNotFound(仅 approved 可标记)。
+	if err := SetSharedSkillQuality(db, "qual", "1.0.0", "official"); err != ErrNotFound {
+		t.Fatalf("quality on pending = %v, want ErrNotFound", err)
+	}
+	if err := SetSharedSkillStatus(db, "qual", "1.0.0", SharedSkillApproved, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetSharedSkillQuality(db, "qual", "1.0.0", "official"); err != nil {
+		t.Fatalf("set official: %v", err)
+	}
+	// 非法 quality -> ErrValidation。
+	if err := SetSharedSkillQuality(db, "qual", "1.0.0", "pro"); err != ErrValidation {
+		t.Fatalf("bad quality = %v, want ErrValidation", err)
+	}
+	// approved 行读取 quality。
+	got, err := GetSharedSkill(db, "qual", "1.0.0")
+	if err != nil || got.Quality != "official" {
+		t.Fatalf("row = %+v err=%v", got, err)
+	}
+	// 清除(空串)。
+	if err := SetSharedSkillQuality(db, "qual", "1.0.0", ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, _ = GetSharedSkill(db, "qual", "1.0.0")
+	if got.Quality != "" {
+		t.Fatalf("after clear quality=%q", got.Quality)
+	}
+	// 不存在版本 -> ErrNotFound。
+	if err := SetSharedSkillQuality(db, "nope", "1.0.0", "official"); err != ErrNotFound {
+		t.Fatalf("missing = %v, want ErrNotFound", err)
+	}
+}
