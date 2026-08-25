@@ -297,6 +297,12 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					return
 				}
 				for _, s := range visible {
+					// 组织分区只展示 approved(决策 2026-08-25):作者 own 的
+					// pending/rejected 状态由「我的」分区展示,不在来源分区
+					// 重复/混入。
+					if s.Status != serverstore.SharedSkillApproved {
+						continue
+					}
 					appendSharedSkill(&items, s, versions)
 				}
 			}
@@ -327,6 +333,11 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					return
 				}
 				for _, p := range visible {
+					// 组织分区只展示 approved(决策 2026-08-25),作者 own 状态
+					// 由「我的」分区展示。
+					if p.Status != serverstore.AgentPresetApproved {
+						continue
+					}
 					appendSharedAgent(&items, p, versions)
 				}
 			}
