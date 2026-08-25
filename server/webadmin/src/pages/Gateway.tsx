@@ -49,6 +49,8 @@ const MANUAL_CHANNEL = '__manual__'
 // 高峰时段结构化编辑(审计修复 M4):时间段行列表替代手填 JSON
 // weekdays: 适用星期(1=周一…7=周日);空 = 每天(兼容旧数据)。
 interface PeakWindowRow {
+  /** 行稳定 id(审计 2026-08-25 B2):替换 index key,防删除中间行时 DOM/焦点错位。 */
+  keyId: string
   start: string
   end: string
   weekdays: number[]
@@ -67,6 +69,7 @@ function parsePeakWindows(s: string): PeakWindowRow[] {
     return arr
       .filter((w: any) => w && typeof w.start === 'string' && typeof w.end === 'string')
       .map((w: any) => ({
+        keyId: `pk-${crypto.randomUUID()}`,
         start: w.start,
         end: w.end,
         weekdays: Array.isArray(w.weekdays) && w.weekdays.length > 0
@@ -279,7 +282,9 @@ export default function Gateway() {
     setBusy('save-gateway')
     try {
       // 高峰时段由结构化列表序列化;空列表 = 清空(无峰谷价,审计修复 H1/M4)
-      const body = { ...cfg, peak_windows: peakList.length ? JSON.stringify(peakList) : '' }
+      // 审计 2026-08-25 B2:线上只存业务字段,keyId 是纯 UI 稳定键,不落库。
+      const peaked = peakList.map(({ keyId: _drop, ...fields }) => fields)
+      const body = { ...cfg, peak_windows: peaked.length ? JSON.stringify(peaked) : '' }
       await request('/api/admin/gateway', { method: 'PUT', body: JSON.stringify(body) })
       setError('')
       flash('已保存')
@@ -523,12 +528,12 @@ export default function Gateway() {
     }
   }
 
-  const addPeak = () => setPeakList((l) => [...l, { start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
-  const removePeak = (i: number) => setPeakList((l) => l.filter((_, idx) => idx !== i))
+  const addPeak = () => setPeakList((l) => [...l, { keyId: `pk-${crypto.randomUUID()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
+  const removePeak = (i: number) => setPeakList((l) => l.filter((_, idx) => idx !== i)) // keyId 保证 DOM 稳定,index 仅定位数据
   // DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间周一至周五 09:00-12:00、14:00-18:00。
   const presetPeak = () => setPeakList([
-    { start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
-    { start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
+    { keyId: `pk-${crypto.randomUUID()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
+    { keyId: `pk-${crypto.randomUUID()}`, start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
   ])
   const updatePeak = (i: number, field: 'start' | 'end', v: string) =>
     setPeakList((l) => l.map((w, idx) => (idx === i ? { ...w, [field]: v } : w)))
@@ -592,7 +597,7 @@ export default function Gateway() {
             <Label>高峰时段(北京时间)</Label>
             <div className="space-y-2">
               {peakList.map((w, i) => (
-                <div key={i} className="flex flex-wrap items-center gap-2">
+                <div key={w.keyId} className="flex flex-wrap items-center gap-2">
                   <Input
                     type="time"
                     aria-label={`高峰开始 ${i + 1}`}

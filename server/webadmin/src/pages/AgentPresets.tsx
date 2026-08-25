@@ -54,7 +54,7 @@ export default function AgentPresets() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   // 二次确认(通过/拒绝/删除共用行内确认)
-  const [confirm, setConfirm] = useState<{ name: string; kind: 'approve' | 'reject' | 'delete' } | null>(null)
+  const [confirm, setConfirm] = useState<{ name: string; version: string; kind: 'approve' | 'reject' | 'delete' } | null>(null)
   // 拒绝理由输入(拒绝确认弹窗内)
   const [reason, setReason] = useState('')
   // 审核预览(composition + 文件清单)
@@ -93,13 +93,13 @@ export default function AgentPresets() {
 
   useEffect(() => { load(tab) }, [load, tab])
 
-  const act = async (name: string, kind: 'approve' | 'reject' | 'delete') => {
+  const act = async (name: string, version: string, kind: 'approve' | 'reject' | 'delete') => {
     if (busy) return
-    setBusy(name + kind)
+    setBusy(name + '@' + version + kind)
     setError('')
     try {
       if (kind === 'delete') {
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, { method: 'DELETE' })
       } else if (kind === 'reject') {
         const trimmed = reason.trim()
         if (trimmed === '') {
@@ -107,12 +107,12 @@ export default function AgentPresets() {
           setBusy('')
           return
         }
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/reject`, {
+        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/reject`, {
           method: 'POST',
           body: JSON.stringify({ reason: trimmed }),
         })
       } else {
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/approve`, { method: 'POST' })
+        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/approve`, { method: 'POST' })
       }
       setConfirm(null)
       setReason('')
@@ -124,12 +124,12 @@ export default function AgentPresets() {
     }
   }
 
-  const openPreview = async (name: string) => {
-    setPreviewName(name)
+  const openPreview = async (name: string, version: string) => {
+    setPreviewName(name + '@' + version)
     setPreview(null)
     setError('')
     try {
-      const data = await request<PreviewData>(`/api/admin/agent-presets/${encodeURIComponent(name)}/preview`)
+      const data = await request<PreviewData>(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
       setPreview(data)
     } catch (err: any) {
       setError(err.message)
@@ -188,9 +188,9 @@ export default function AgentPresets() {
             <TableBody>
               {rows.map(row => {
                 const meta = STATUS_META[row.status]
-                const isBusy = busy === row.name + 'approve' || busy === row.name + 'reject' || busy === row.name + 'delete'
+                const isBusy = busy === row.name + '@' + row.version + 'approve' || busy === row.name + '@' + row.version + 'reject' || busy === row.name + '@' + row.version + 'delete'
                 return (
-                  <TableRow key={row.name}>
+                  <TableRow key={row.name + '@' + row.version}>
                     <TableCell>
                       <div className="whitespace-nowrap font-medium">{row.display_name || row.name}</div>
                       <div className="text-xs text-muted-foreground">{row.name}</div>
@@ -204,7 +204,7 @@ export default function AgentPresets() {
                       <div className="flex items-center justify-end gap-1">
                         <Button
                           variant="ghost" size="sm"
-                          onClick={() => { void openPreview(row.name) }}
+                          onClick={() => { void openPreview(row.name, row.version) }}
                           title="查看内容预览"
                         >
                           <FileText className="h-4 w-4" />
@@ -212,7 +212,7 @@ export default function AgentPresets() {
                         <Button
                           variant="ghost" size="sm"
                           asChild={false}
-                          onClick={() => { window.open(`/api/admin/agent-presets/${encodeURIComponent(row.name)}/archive`, '_blank') }}
+                          onClick={() => { window.open(`/api/admin/agent-presets/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version)}/archive`, '_blank') }}
                           title="下载归档核查"
                         >
                           <Download className="h-4 w-4" />
@@ -223,16 +223,16 @@ export default function AgentPresets() {
                           </Button>
                         )}
                         {row.status !== 'approved' && (
-                          <Button size="sm" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, kind: 'approve' }) }}>
+                          <Button size="sm" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, version: row.version, kind: 'approve' }) }}>
                             通过
                           </Button>
                         )}
                         {row.status !== 'rejected' && (
-                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setReason(''); setConfirm({ name: row.name, kind: 'reject' }) }}>
+                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setReason(''); setConfirm({ name: row.name, version: row.version, kind: 'reject' }) }}>
                             拒绝
                           </Button>
                         )}
-                        <Button size="sm" variant="destructive" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, kind: 'delete' }) }}>
+                        <Button size="sm" variant="destructive" disabled={isBusy} onClick={() => { setConfirm({ name: row.name, version: row.version, kind: 'delete' }) }}>
                           删除
                         </Button>
                       </div>
@@ -283,9 +283,9 @@ export default function AgentPresets() {
             </DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            {confirm?.kind === 'approve' && `通过后「${confirm.name}」将全员可见可安装。`}
-            {confirm?.kind === 'reject' && `拒绝后「${confirm.name}」仅上传者本人可见并可重新上传。请填写拒绝理由,上传者将可见该理由。`}
-            {confirm?.kind === 'delete' && `删除后「${confirm.name}」记录与归档将被移除,不可恢复。`}
+            {confirm?.kind === 'approve' && `通过后「${confirm.name}@${confirm.version}」将全员可见可安装。`}
+            {confirm?.kind === 'reject' && `拒绝后「${confirm.name}@${confirm.version}」仅上传者本人可见并可重新上传。请填写拒绝理由,上传者将可见该理由。`}
+            {confirm?.kind === 'delete' && `删除后「${confirm.name}@${confirm.version}」记录与归档将被移除,不可恢复。`}
           </p>
           {confirm?.kind === 'reject' && (
             <Textarea
@@ -303,7 +303,7 @@ export default function AgentPresets() {
               <Button
                 variant={confirm.kind === 'delete' || confirm.kind === 'reject' ? 'destructive' : 'default'}
                 disabled={busy !== '' || (confirm.kind === 'reject' && reason.trim() === '')}
-                onClick={() => { void act(confirm.name, confirm.kind) }}
+                onClick={() => { void act(confirm.name, confirm.version, confirm.kind) }}
               >
                 {busy ? '处理中…' : '确认'}
               </Button>
