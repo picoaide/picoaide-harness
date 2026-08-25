@@ -206,7 +206,8 @@ export function apply(ctx: Context, config: Config): void {
     for await (const chunk of req) {
       total += (chunk as Buffer).byteLength
       if (total > limit) {
-        req.destroy()
+        // 只抛错不 destroy(审计 2026-08-25):destroy 会断开 socket,调用方
+        // 的 413 json 响应无法送达;抛错后 for-await 停止消费,路由回 413。
         throw new Error(`request body exceeds ${limit} bytes`)
       }
       chunks.push(chunk as Buffer)
