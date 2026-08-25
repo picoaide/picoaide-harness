@@ -177,10 +177,14 @@ export class TaskController {
   private install(snapshot: TaskSnapshot): void {
     const { transportError: _dropped, ...rest } = this.snapshot
     void _dropped
+    // 审计 2026-08-25 C1:selectedTaskId 若指向已被删除/归档的任务(脱离
+    // 新快照),立即丢弃,避免 dangling 选中态(详情关闭不了/重开残留)。
+    const selected = rest.selectedTaskId
+    const selectedStillExists = selected !== undefined && snapshot.tasks.some(task => task.id === selected)
     this.snapshot = {
       tasks: snapshot.tasks,
       revision: snapshot.revision,
-      ...(rest.selectedTaskId === undefined ? {} : { selectedTaskId: rest.selectedTaskId }),
+      ...(selected !== undefined && selectedStillExists ? { selectedTaskId: selected } : {}),
       archiveView: rest.archiveView,
       pendingTaskIds: rest.pendingTaskIds,
     }

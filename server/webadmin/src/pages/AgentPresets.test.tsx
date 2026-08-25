@@ -37,7 +37,7 @@ describe('AgentPresets 共享 Agent 审核页', () => {
     expect(confirm).toBeInTheDocument()
     fireEvent.click(screen.getByText('确认'))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/approve', { method: 'POST' })
+      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/1.0.0/approve', { method: 'POST' })
     })
   })
 
@@ -47,7 +47,7 @@ describe('AgentPresets 共享 Agent 审核页', () => {
     fireEvent.click(del[0]!)
     fireEvent.click(await screen.findByText('确认'))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen', { method: 'DELETE' })
+      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/1.0.0', { method: 'DELETE' })
     })
   })
 
@@ -61,7 +61,7 @@ describe('AgentPresets 共享 Agent 审核页', () => {
     fireEvent.change(screen.getByLabelText('拒绝理由'), { target: { value: '缺少 skills/' } })
     fireEvent.click(confirmBtn)
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/reject', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/1.0.0/reject', {
         method: 'POST',
         body: JSON.stringify({ reason: '缺少 skills/' }),
       })
@@ -81,7 +81,7 @@ describe('AgentPresets 共享 Agent 审核页', () => {
 
   it('点击预览展示 composition 与文件清单', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.endsWith('/preview')) return { files: ['agent.cordis.yml', 'skills/demo/SKILL.md'], composition: '- id: persona\n' }
+      if (path.includes('/preview')) return { files: ['agent.cordis.yml', 'skills/demo/SKILL.md'], composition: '- id: persona\n' }
       if (path.startsWith('/api/admin/agent-presets')) return { presets: ROWS }
       return {}
     })

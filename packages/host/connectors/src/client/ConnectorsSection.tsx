@@ -153,7 +153,15 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
               .catch(() => {})
           }
         }, 500)
-        window.setTimeout(() => window.clearInterval(timer), 5 * 60 * 1000 + 10_000)
+        const grace = window.setTimeout(() => window.clearInterval(timer), 5 * 60 * 1000 + 10_000)
+        // 审计 2026-08-25 P2-A1:此前无 cleanup——组件卸载(关闭连接器面板)
+        // 后定时器仍每 500ms 轮询 popup.closed 并 POST /cancel 至多 5 分钟,
+        // 泄漏网络/内存。卸载时立即清除。
+        return () => {
+          window.clearInterval(timer)
+          window.clearTimeout(grace)
+          if (activePopup.current === popup) activePopup.current = null
+        }
       }
     }
   }, [entry.request?.authorizeUrl, entry.id, onChanged])
