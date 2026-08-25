@@ -30,16 +30,29 @@ const arg = (name, fallback) => {
 const appBinary = arg('--app', DEFAULT_APP)
 const cdpPort = Number(arg('--port', String(CDP_PORT)))
 const reportShots = !args.includes('--no-screenshot')
-// Use fixed, sandbox-visible paths: a fresh temp dir per run is not guaranteed
-// writable across the spawn boundary.
-const workDir = '/tmp/dsh-e2e-work'
-rmSync(workDir, { recursive: true, force: true })
-mkdirSync(workDir, { recursive: true })
+// 审计 2026-08-25 B-04:原固定 /tmp 路径会让并行 e2e/真实实例互相踩踏,
+// 且 9223 被残留实例占用时复用错误目标卡死。改为唯一目录(pid+时间戳),
+// 仍保证跨 spawn 边界可见(先试 /tmp,失败回退工作区 temp)。
+let workDir = ''
+let HOME_DIR = ''
+for (const base of ['/tmp', './temp']) {
+  try {
+    const candidate = `${base}/dsh-e2e-${process.pid}-${Date.now()}`
+    mkdirSync(candidate, { recursive: true })
+    writeFileSync(join(candidate, '.probe'), 'ok')
+    rmSync(join(candidate, '.probe'))
+    workDir = candidate
+    HOME_DIR = `${candidate}-home`
+    mkdirSync(HOME_DIR, { recursive: true })
+    break
+  } catch {
+    continue
+  }
+}
+if (workDir === '') throw new Error('cannot create a writable e2e work directory')
+console.log(`[e2e] workDir=${workDir} home=${HOME_DIR} port=${cdpPort}`)
 
 const DISPLAY = process.env.DISPLAY ?? ':99'
-const HOME_DIR = '/tmp/dshui-home'
-rmSync(HOME_DIR, { recursive: true, force: true })
-mkdirSync(HOME_DIR, { recursive: true })
 
 /** Minimal CDP client bound to the main application target. */
 async function connectMain(port) {
