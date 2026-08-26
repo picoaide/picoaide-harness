@@ -1,0 +1,45 @@
+{
+  "name": "@picoaide/dsh-cli-tools",
+  "version": "0.1.0",
+  "description": "CLI binary auto-installer for connector-free skill tooling: pinned manifests (dws/wecom-cli/lark-cli/beisen-cli), npmmirror downloads, sha256 verification, safe archive extraction",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cli-manifest": {
+      "types": "./lib/types/cli-manifest.d.ts",
+      "default": "./lib/cli-manifest.js"
+    },
+    "./archive": {
+      "types": "./lib/types/archive.d.ts",
+      "default": "./lib/archive.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.map",
+    "lib/types/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "yarn run build && yarn run typecheck && yarn run test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/node": "^22.20.0",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}
