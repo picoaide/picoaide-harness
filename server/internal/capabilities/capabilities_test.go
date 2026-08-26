@@ -217,6 +217,29 @@ func TestListApprovalsQueue(t *testing.T) {
 			t.Fatalf("agent base=%s", a.BasePath)
 		}
 	}
+	// 决策 2026-08-25:市场 skills 表同名冲突 -> 队列行 conflict=true。
+	// 正常路径双向互斥会阻断,此处用 raw SQL 模拟竞态(共享技能上传后市场
+	// 技能被上架),验证审批队列的冲突提示。
+	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
+		VALUES ('s1', '1.0.0', '', 'boss', 'https://example.com/repo.git', 'main', '', 1)`); err != nil {
+		t.Fatalf("raw market seed: %v", err)
+	}
+	w2 := doGet(t, r, "/api/admin/capabilities/approvals", adminHdr)
+	var resp2 struct {
+		Approvals []ApprovalRow `json:"approvals"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	foundConflict := false
+	for _, a := range resp2.Approvals {
+		if a.Kind == KindSkill && a.Name == "s1" {
+			foundConflict = a.Conflict
+		}
+	}
+	if !foundConflict {
+		t.Fatalf("s1 conflict flag = false, want true (%+v)", resp2.Approvals)
+	}
 }
 
 func TestListApprovalsTypeFilter(t *testing.T) {

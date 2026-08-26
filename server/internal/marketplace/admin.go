@@ -216,6 +216,12 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能已存在")
 			return
 		}
+		if errors.Is(err, serverstore.ErrConflict) {
+			// 决策 2026-08-25:市场与组织合并为「市场」后,同名技能跨源互斥。
+			// 共享库已存在同名技能(任意状态)时拒绝上架,要求管理员先处理共享库行。
+			serverauth.WriteError(c, http.StatusConflict, "CONFLICT", "名称与组织共享库技能冲突,请先在共享库处理同名技能")
+			return
+		}
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
