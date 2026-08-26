@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -166,71 +165,6 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingRequests.set(request.connectorId, request)
   }
 
-  /** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
-  const URL_COMMAND_TIMEOUT_MS = 15_000
-  const resolveUrlCommand = async (args: string[], extraEnv?: Record<string, string>): Promise<string> => {
-    const [command, ...rest] = args
-    if (command === undefined) throw new Error('urlCommand is empty')
-    const spawnCommand = command
-    const spawnArgs = rest
-    return new Promise((resolve, reject) => {
-      const child = spawn(spawnCommand, spawnArgs, {
-        env: { ...process.env, ...(extraEnv ?? {}) },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      // 审计 2026-08-25 P2-1:此前无超时——子进程挂起会让连接器永远卡在
-      // 「连接中」并泄漏进程。与 auth.ts 的 CLI 超时策略一致(15s)。
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL')
-        reject(new Error(`urlCommand 超时(${URL_COMMAND_TIMEOUT_MS / 1000}s): ${spawnCommand}`))
-      }, URL_COMMAND_TIMEOUT_MS)
-      timer.unref?.()
-      let stdout = ''
-      let stderr = ''
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-      child.on('error', (error) => {
-        clearTimeout(timer)
-        reject(error)
-      })
-      child.on('exit', (code) => {
-        clearTimeout(timer)
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || `命令退出码 ${String(code)}`))
-          return
-        }
-        const match = /https?:\/\/[^\s"'<>]+/u.exec(stdout)
-        if (!match) {
-          reject(new Error(`无法从命令输出中解析 URL: ${stdout.trim().slice(0, 200)}`))
-          return
-        }
-        const url = match[0]
-        // P3-5: never send stored credentials to an arbitrary host. The CLI
-        // output must be https and must not point at a loopback/private
-        // address (SSRF-style token exfiltration guard).
-        try {
-          const parsed = new URL(url)
-          if (parsed.protocol !== 'https:') {
-            reject(new Error(`MCP URL 必须是 https: ${url.slice(0, 80)}`))
-            return
-          }
-          const host = parsed.hostname.toLowerCase()
-          const isPrivate = host === 'localhost' || host === '::1'
-            || /^127\./.test(host)
-            || /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)
-          if (isPrivate) {
-            reject(new Error(`MCP URL 指向本地/私网地址，已拒绝: ${url.slice(0, 80)}`))
-            return
-          }
-        } catch {
-          reject(new Error(`MCP URL 无效: ${url.slice(0, 80)}`))
-          return
-        }
-        resolve(url)
-      })
-    })
-  }
-
   /** Render request headers: static `${FIELD}` templates from credential fields, empty Authorization -> Bearer token, and the default Bearer injection for OAuth/token credentials. */
   const renderHeaders = (server: ConnectorMcp, credential: ConnectorCredential | null): Record<string, string> => {
     const headers: Record<string, string> = {}
@@ -265,9 +199,7 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
         ? {
             transport: 'streamable-http' as const,
             serverName: server.serverName,
-            url: server.urlCommand
-              ? await resolveUrlCommand(server.urlCommand, server.env)
-              : (server.url ?? ''),
+            url: server.url ?? '',
             headers: renderHeaders(server, credential),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
