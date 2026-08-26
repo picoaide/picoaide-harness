@@ -30,9 +30,9 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 | --- | --- | --- |
 | <img src="assets/screenshots/desktop-main.png" alt="Desktop main window" width="100%"> | <img src="assets/screenshots/desktop-chat.png" alt="Chat and memory" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="Connector hub" width="100%"> |
 
-| Skill center | Scheduled tasks | Task board |
-| --- | --- | --- |
-| <img src="assets/screenshots/desktop-skills.png" alt="Skill center" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="Scheduled tasks" width="100%"> | <img src="assets/screenshots/desktop-taskboard.png" alt="Task board" width="100%"> |
+| Skill center | Scheduled tasks |
+| --- | --- |
+| <img src="assets/screenshots/desktop-skills.png" alt="Skill center" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="Scheduled tasks" width="100%"> |
 
 ### Admin console
 
@@ -61,14 +61,14 @@ Installers and SHA-256 digests are also available from [GitHub Releases](https:/
 ### Enterprise-grade, all in one
 
 - **Desktop + service + console**: the client handles interaction, the local service runs agents, and the admin console manages accounts, quotas, and audit;
-- **Multi-user isolation**: connector credentials, browser sessions, scheduled tasks, and the task board are isolated per account; logout tears down every session;
+- **Multi-user isolation**: connector credentials, browser sessions, and scheduled tasks are isolated per account; logout tears down every session;
 - **Usage and quotas**: per-user, per-model billing, limits, and exemptions with peak-hour tiered pricing.
 
 ### Production-ready productivity tools
 
 - **Connector hub**: SaleEasy, DingTalk, Beisen, Feishu, Moka, WeCom connectors with OAuth and locally encrypted credential storage;
 - **Skill center**: one-click install of code-review, competitor-analysis, contract-review, data-extract, and more;
-- **Scheduled tasks and task board**: scheduled execution, execution history, and a four-state board driven by the Host scheduler;
+- **Scheduled tasks**: cron-triggered runs with a chosen agent and prompt; execution detail (session, result, error) is always inspectable; driven by the Host scheduler;
 - **Embedded browser**: the agent can take over the browser to act, with multi-tab, snapshots, permission approval, and download control;
 - **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and branch.
 

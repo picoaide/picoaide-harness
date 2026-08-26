@@ -3,10 +3,9 @@
  *
  * The Host half of dsh-cron provides `picoCronService` in the Host cordis
  * context, which is invisible to the browser. Sibling plugins that want to
- * drive schedules from the client (dsh-task's per-task schedule section)
- * consume this browser face instead: it wraps the same `/api/cron/*`
- * same-origin transport the job center uses, with the same snapshot-only
- * authority model.
+ * drive schedules from the client consume this browser face instead: it
+ * wraps the same `/api/cron/*` same-origin transport the job center uses,
+ * with the same snapshot-only authority model.
  */
 import type { JobRecord } from '../jobs.ts';
 import type { CronAction, CronSnapshot } from '../protocol.ts';

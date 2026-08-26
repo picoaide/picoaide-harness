@@ -56,7 +56,6 @@ const packageNameTable = new Map([
   ['packages/host/connectors', '@picoaide/dsh-connectors'],
   ['packages/host/browser', '@picoaide/dsh-browser'],
   ['packages/host/cron', '@picoaide/dsh-cron'],
-  ['packages/host/task', '@picoaide/dsh-task'],
   ['packages/client/account-card', '@picoaide/dsh-account-card'],
   ['packages/client/branding', '@picoaide/dsh-branding'],
   ['packages/client/better-sidebar', 'dsh-better-sidebar'],

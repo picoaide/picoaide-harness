@@ -84,6 +84,10 @@ export declare class HostCronLedger {
     }): void;
     /** Scheduler-owned: settle an execution with a result. Prunes old history. */
     settle(jobId: string, executionId: string, result: 'succeeded' | 'failed' | 'cancelled', error?: string): void;
+    /** Scheduler-owned: attach the spawned session id to a pending execution. */
+    attachSession(jobId: string, executionId: string, sessionId: string): void;
+    /** Scheduler-owned: attach the prompt text to a pending execution. */
+    attachPrompt(jobId: string, executionId: string, prompt: string): void;
     /** Scheduler-owned: roll every enabled job's nextRunAt past `now` (missed runs are skipped). */
     skipMissed(now: number): void;
     /** Scheduler-owned: roll one job's nextRunAt past `now` (post catch-up). */
@@ -112,8 +116,13 @@ export declare function validateCron(expr: string): boolean;
 /**
  * Migrate a ledger's jobs from an older schema version to the current one.
  * 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走
- * 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。当前只有
- * v1;未来字段/枚举变更时在此加 v1→v2、v2→v3 … 并同步 bump 常量。
+ * 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。
+ *
+ * v1 → v2(任务看板合并):v1 的动作是 task(taskId 引用 dsh-task 看板任务)
+ * 或 prompt(sessionId+text 向既有会话发消息)。dsh-task 插件已删除,看板
+ * 任务不复存在,无法解析到智能体+提示词:这类记录与新域模型不兼容,按
+ * 用户确认的迁移策略丢弃(原 leder 数据文件仍在,可手工恢复)。v2 动作
+ * 只有 agent(prompt 必填,可选 workspaceId/agentPreset/permission)。
  */
 export declare function migrateCronLedger(jobs: JobRecord[], fromVersion: number): JobRecord[];
 export { isValidCron };

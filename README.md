@@ -30,9 +30,9 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 | --- | --- | --- |
 | <img src="assets/screenshots/desktop-main.png" alt="桌面主界面" width="100%"> | <img src="assets/screenshots/desktop-chat.png" alt="对话与记忆" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="连接器中心" width="100%"> |
 
-| 技能中心 | 定时任务 | 任务看板 |
-| --- | --- | --- |
-| <img src="assets/screenshots/desktop-skills.png" alt="技能中心" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="定时任务" width="100%"> | <img src="assets/screenshots/desktop-taskboard.png" alt="任务看板" width="100%"> |
+| 技能中心 | 定时任务 |
+| --- | --- |
+| <img src="assets/screenshots/desktop-skills.png" alt="技能中心" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="定时任务" width="100%"> |
 
 ### 管理后台
 
@@ -61,14 +61,14 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 ### 企业级一体化
 
 - **桌面 + 服务 + 后台**：客户端负责交互，本地服务负责智能体运行，管理后台负责账号、配额与审计，三层协同；
-- **多用户隔离**：连接器凭据、浏览器会话、定时任务与任务看板按账号隔离，退出登录即解除所有会话；
+- **多用户隔离**：连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话；
 - **用量与配额**：按用户按模型计费、限额与豁免，高峰时段自动分级计价。
 
 ### 开箱即用的生产力工具
 
 - **连接器中心**：内置销售易、钉钉、北森、飞书、Moka、企业微信等连接器，OAuth 授权、凭据本地加密存储；
 - **技能中心**：一键安装 code-review、competitor-analysis、contract-review、data-extract 等技能；
-- **定时任务与任务看板**：定时执行、执行记录、四状态看板，任务与计划由 Host 统一调度；
+- **定时任务**：cron 定时执行，指定智能体与提示词，执行详情（会话/结果/错误）随时可查，由 Host 统一调度；
 - **内嵌浏览器**：Agent 可接管浏览器执行操作，多标签、快照、权限审批与下载管控；
 - **五轨记忆**：用户档案、全局事实、项目关键记忆、项目日志与每日日志，按目录与分支隔离。
 

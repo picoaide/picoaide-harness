@@ -1,6 +1,6 @@
 /**
  * Connectors client UI copy: zh is the key source, en mirrors the full key
- * set (the same pattern as dsh-cron/dsh-task locales).
+ * set (the same pattern as the dsh-cron locale).
  */
 export declare const zh: {
     'panel.title': string;

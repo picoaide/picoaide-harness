@@ -1,12 +1,19 @@
 /** Result states of one triggered execution (a trigger record, not an agent turn). */
 export type ExecutionResult = 'succeeded' | 'failed' | 'cancelled';
-/** One trigger record of a job. */
+/**
+ * One trigger record of a job. v2 carries session-level detail: the agent
+ * session spawned for this run, its prompt, and start/end timestamps.
+ */
 export interface ExecutionRecord {
     /** Stable id (unique per execution, idempotency key). */
     id: string;
     /** When the trigger fired (Host clock, ms epoch). */
     triggeredAt: number;
-    /** When the execution settled; undefined while pending. */
+    /** The agent session created for this run (attached after launch). */
+    sessionId?: string;
+    /** The full prompt sent to the session (task prompt, never a shell line). */
+    prompt?: string;
+    startedAt?: number;
     endedAt?: number;
     result?: ExecutionResult;
     /** Human-readable failure/cancellation reason. */
@@ -15,17 +22,18 @@ export interface ExecutionRecord {
 /**
  * What a triggered job does. The union is closed and versioned by the
  * protocol validator; adding a kind is a schema change, not a config escape.
+ * v2: the only kind is `agent` — spawn a fresh agent session and prompt it.
  */
 export type CronJobAction = {
-    kind: 'task';
-    /** A task id owned by the dsh-task plugin (resolved at run time). */
-    taskId: string;
-} | {
-    kind: 'prompt';
-    /** Target session; required — a prompt action always names a session. */
-    sessionId: string;
-    /** Prompt text sent to the session (queue mode). */
-    text: string;
+    kind: 'agent';
+    /** Prompt text sent to the new agent session (queue mode). */
+    prompt: string;
+    /** Pinned workspace; absent = current workspace. */
+    workspaceId?: string;
+    /** Pinned agent preset (from agentPresets.list); absent = composition default. */
+    agentPreset?: string;
+    /** Optional permission preset applied via /permission before the prompt. */
+    permission?: string;
 };
 /** A durable scheduled job record. */
 export interface JobRecord {

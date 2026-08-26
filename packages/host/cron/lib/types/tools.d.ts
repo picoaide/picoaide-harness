@@ -5,8 +5,8 @@
  * reachable from a conversation). These tools let the model create, list,
  * enable/disable, and trigger scheduled jobs directly, sharing the exact
  * same Host ledger and executor as the UI. A job action is a closed
- * discriminated union (run a dsh-task task / send a message) — never a
- * command or shell line.
+ * discriminated union — the only kind is `agent` (spawn a fresh agent
+ * session for a prompt) — never a command or shell line.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { HostCronService } from './host-service.ts';

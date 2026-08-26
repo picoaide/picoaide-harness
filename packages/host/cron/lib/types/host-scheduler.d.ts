@@ -41,6 +41,8 @@ export declare class HostCronScheduler {
      * Execute one job action and settle its execution record (also used for
      * manual run/rerun actions). Resolves when the execution is settled; a
      * settlement failure is contained (never rejects into the tick loop).
+     * When the executor reports the spawned session id / prompt, they are
+     * attached to the execution record before settling (execution detail).
      */
     fire(job: JobRecord, execution: {
         id: string;

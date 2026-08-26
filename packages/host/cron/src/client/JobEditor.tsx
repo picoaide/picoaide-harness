@@ -1,11 +1,11 @@
 /**
  * Job editor dialog: name, cron expression (with presets + live validation),
- * project (workspace) picker, and the action (run a dsh-task task, or send a
- * message to a session). Task actions select the target task from the chosen
- * project's board (fetched through the dsh-task loopback API); prompt actions
- * name a session id directly.
+ * project (workspace) picker, agent preset picker (from agentPresets.list),
+ * permission picker, and the prompt text sent to the spawned agent session.
+ * The only action kind is `agent`.
  */
 import { useEffect, useState } from 'react'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import { isValidCron, nextRunAtMs } from '../cron.ts'
 import { isCronJobAction, type JobRecord, type NewJobInput } from '../jobs.ts'
@@ -21,66 +21,60 @@ const PRESETS: ReadonlyArray<{ cron: string; key: 'preset.daily9' | 'preset.hour
   { cron: '0 9 * * 1', key: 'preset.weeklyMon9' },
 ]
 
-/** One task option fetched from the dsh-task board. */
-interface TaskOption {
+/** One agent preset option from the deployment roster. */
+interface AgentOption {
   id: string
-  title: string
-  /** Pinned workspace; absent = current workspace. */
-  workspaceId?: string
+  label: string
+  broken?: string
 }
 
-/** Fetch the dsh-task board tasks through its loopback API (soft dependency). */
-async function fetchTaskOptions(): Promise<TaskOption[]> {
+/** Fetch the deployment agent-preset roster through the client api (soft). */
+async function fetchAgentOptions(api?: ConnectionHandle['api']): Promise<AgentOption[]> {
+  if (api === undefined) return []
   try {
-    const response = await fetch('/api/task/state', { headers: { accept: 'application/json' } })
-    if (!response.ok) return []
-    const snapshot = await response.json() as { tasks?: Array<{ id: string; title: string; workspaceId?: string }> }
-    return (snapshot.tasks ?? []).map(task => ({
-      id: task.id,
-      title: task.title,
-      ...task.workspaceId !== undefined ? { workspaceId: task.workspaceId } : {},
+    // The client fetch facade fills rpcId itself; the payload is `{}`.
+    const response = await api.agentPresets.list({})
+    if (!response.result.ok) return []
+    return response.result.value.presets.map((preset: { id: string; name?: string; description?: string; broken?: string }) => ({
+      id: preset.id,
+      label: preset.name ?? preset.id,
+      ...(preset.broken === undefined ? {} : { broken: preset.broken }),
     }))
   } catch {
     return []
   }
 }
 
-export function JobEditor({ controller, job, workspaces, onClose }: {
+export function JobEditor({ controller, job, workspaces, api, onClose }: {
   controller: CronController
   job?: JobRecord
   workspaces?: IWorkspaces
+  api?: ConnectionHandle['api']
   onClose: () => void
 }): JSX.Element {
   const [name, setName] = useState(job?.name ?? '')
   const [cron, setCron] = useState(job?.cron ?? '0 9 * * *')
-  const [actionKind, setActionKind] = useState<'task' | 'prompt'>(job?.action.kind ?? 'task')
-  const [taskId, setTaskId] = useState(job?.action.kind === 'task' ? job.action.taskId : '')
-  const [sessionId, setSessionId] = useState(job?.action.kind === 'prompt' ? job.action.sessionId : '')
-  const [text, setText] = useState(job?.action.kind === 'prompt' ? job.action.text : '')
+  const [prompt, setPrompt] = useState(job?.action.kind === 'agent' ? job.action.prompt : '')
+  const [workspaceId, setWorkspaceId] = useState(job?.action.kind === 'agent' ? (job.action.workspaceId ?? '') : '')
+  const [agentPreset, setAgentPreset] = useState(job?.action.kind === 'agent' ? (job.action.agentPreset ?? '') : '')
+  const [permission, setPermission] = useState(job?.action.kind === 'agent' ? (job.action.permission ?? '') : '')
   const [error, setError] = useState<string | undefined>()
 
-  // Project picker: '' = current project (default), matching the board.
+  // Project picker: '' = current project (default).
   const workspaceOptions = useWorkspaceOptions(workspaces)
-  const [workspaceId, setWorkspaceId] = useState('')
-
-  // Task options for the chosen project ('' = tasks pinned to no project).
-  const [taskOptions, setTaskOptions] = useState<TaskOption[]>([])
+  // Agent roster: '' = deployment default.
+  const [agentOptions, setAgentOptions] = useState<AgentOption[]>([])
   useEffect(() => {
-    if (actionKind !== 'task') return
     let alive = true
-    void fetchTaskOptions().then(options => {
+    void fetchAgentOptions(api).then(options => {
       if (!alive) return
-      setTaskOptions(options)
+      setAgentOptions(options)
     })
     return () => { alive = false }
-  }, [actionKind, workspaceId])
+  }, [api])
 
   const cronValid = isValidCron(cron)
   const nextRun = cronValid ? nextRunAtMs(cron, Date.now()) : undefined
-
-  const visibleTasks = workspaceId === ''
-    ? taskOptions.filter(task => task.workspaceId === undefined)
-    : taskOptions.filter(task => task.workspaceId === workspaceId)
 
   const save = (): void => {
     if (!cronValid) {
@@ -91,15 +85,19 @@ export function JobEditor({ controller, job, workspaces, onClose }: {
       setError(t('job.nameRequired'))
       return
     }
-    const action = actionKind === 'task'
-      ? { kind: 'task' as const, taskId: taskId.trim() }
-      : { kind: 'prompt' as const, sessionId: sessionId.trim(), text }
+    if (prompt.trim() === '') {
+      setError(t('job.promptTextRequired'))
+      return
+    }
+    const action = {
+      kind: 'agent' as const,
+      prompt: prompt.trim(),
+      ...(workspaceId === '' ? {} : { workspaceId }),
+      ...(agentPreset === '' ? {} : { agentPreset }),
+      ...(permission === '' ? {} : { permission }),
+    }
     if (!isCronJobAction(action)) {
-      // Distinguish the two prompt-mode fields so the error names the
-      // missing input (P2-3): empty session ID vs empty message text.
-      if (actionKind === 'task') setError(t('job.taskIdRequired'))
-      else if (sessionId.trim() === '') setError(t('job.sessionIdRequired'))
-      else setError(t('job.promptTextRequired'))
+      setError(t('job.promptTextRequired'))
       return
     }
     if (job === undefined) {
@@ -107,6 +105,8 @@ export function JobEditor({ controller, job, workspaces, onClose }: {
       controller.create(input)
     } else {
       controller.update(job.id, { name: name.trim(), cron: cron.trim() })
+      // The action cannot be patched by the v2 protocol; keep the existing
+      // action as-is (the editor only edits name/cron)
       if (!job.enabled) controller.enable(job.id)
     }
     onClose()
@@ -176,42 +176,38 @@ export function JobEditor({ controller, job, workspaces, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.actionTask')} / {t('job.actionPrompt')}</span>
+          <span style={styles.label}>{t('job.agent')}</span>
           <select
             style={styles.input}
-            value={actionKind}
-            onChange={(event) => { setActionKind(event.target.value as 'task' | 'prompt') }}
+            value={agentPreset}
+            onChange={(event) => { setAgentPreset(event.target.value) }}
+            disabled={agentOptions.length === 0}
           >
-            <option value="task">{t('job.actionTask')}</option>
-            <option value="prompt">{t('job.actionPrompt')}</option>
+            <option value="">{t('job.agentDefault')}</option>
+            {agentOptions.map(option => (
+              <option key={option.id} value={option.id} disabled={option.broken !== undefined}>
+                {option.label}{option.broken !== undefined ? `（${option.broken}）` : ''}
+              </option>
+            ))}
           </select>
         </div>
-        {actionKind === 'task' ? (
-          <div style={styles.field}>
-            <span style={styles.label}>{t('job.taskId')}</span>
-            <select
-              style={styles.input}
-              value={taskId}
-              onChange={(event) => { setTaskId(event.target.value) }}
-            >
-              <option value="">{t('job.taskSelect')}</option>
-              {visibleTasks.map(task => (
-                <option key={task.id} value={task.id}>{task.title || task.id}</option>
-              ))}
-            </select>
-          </div>
-        ) : (
-          <>
-            <div style={styles.field}>
-              <span style={styles.label}>{t('job.sessionId')}</span>
-              <input style={styles.input} value={sessionId} onChange={(event) => { setSessionId(event.target.value) }} placeholder="session-…" />
-            </div>
-            <div style={styles.field}>
-              <span style={styles.label}>{t('job.promptText')}</span>
-              <textarea style={styles.input} rows={3} value={text} onChange={(event) => { setText(event.target.value) }} />
-            </div>
-          </>
-        )}
+        <div style={styles.field}>
+          <span style={styles.label}>{t('job.permission')}</span>
+          <select
+            style={styles.input}
+            value={permission}
+            onChange={(event) => { setPermission(event.target.value) }}
+          >
+            <option value="">{t('job.permissionNone')}</option>
+            <option value="read-only">{t('job.permissionRead')}</option>
+            <option value="workspace-write">{t('job.permissionWrite')}</option>
+            <option value="danger-full-access">{t('job.permissionFull')}</option>
+          </select>
+        </div>
+        <div style={styles.field}>
+          <span style={styles.label}>{t('job.promptText')}</span>
+          <textarea style={styles.input} rows={4} value={prompt} onChange={(event) => { setPrompt(event.target.value) }} />
+        </div>
         {error !== undefined && <span style={styles.error}>{error}</span>}
         <div style={styles.editorActions}>
           <button type="button" style={styles.button} onClick={onClose}>{t('job.cancel')}</button>
