@@ -1,0 +1,183 @@
+name: Server Docker image
+
+# 发布版本时自动构建服务端 Docker 镜像并推送 GHCR(契约见 server/docs/02-build-deploy.md §3.3):
+#   - push tag v*:版本号 = tag 去 v 前缀(与 GitHub Release 流程同源,同一 tag 触发)
+#   - workflow_dispatch:手动填版本号(填 v2.3.0 或 2.3.0 均可),默认分支选择 release 来源
+# 镜像标签规则:latest + vX.Y.Z + vX.Y;多平台 linux/amd64 + linux/arm64。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号(如 v2.3.0 或 2.3.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# 同 ref 并发触发(重推 tag/手动 dispatch)互斥,避免争抢写入同一组标签
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/picoaide/picoaide-server
+
+jobs:
+  build:
+    name: Build and push multi-arch image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # type=gha 缓存后端写 Actions 缓存需 actions: write;推送 GHCR 需 packages: write。
+    # 顶层已收窄为 contents: read,此处按 job 最小扩权(与 ci.yml release job 同风格)。
+    permissions:
+      contents: read
+      actions: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # 审计惯例(同 ci.yml release job):ubuntu 镜像自带 node 版本非保证,
+      # version.mjs 校验步骤需要确定性环境
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve version
+        id: version
+        # 手动 dispatch 输入不经 shell 拼接(注入防护:经 env 传入,官方推荐模式)
+        env:
+          REF_INPUT: ${{ github.event.inputs.version }}
+          REF_PUSH: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            REF="$REF_PUSH"
+          else
+            REF="$REF_INPUT"
+          fi
+          V="${REF#v}"
+          # 严格白名单(可含预发布如 2.3.0-rc.1):空 / 含白名单外字符(;, $, 引号,
+          # 空白, 换行等, 防 tag 名/手动输入注入 shell 与 GITHUB_OUTPUT) / 非数字开头
+          case "$V" in
+            ''|*[!0-9A-Za-z.-]*|[!0-9]*)
+              echo "::error::无效版本号: $REF(示例: v2.3.0 或 2.3.0)"; exit 1 ;;
+          esac
+          # semver 形状:主.次(.修订)(-预发布[, . 分段]),拒绝 '2.x' 之类
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::版本号形状非法: $REF(期望 semver 如 v2.3.0 或 v2.3.0-rc.1)"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$(echo "$V" | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
+
+      # 同一 tag 上,GitHub Release(ci.yml)校验 tag==package.json;Docker 镜像
+      # 也应保持同源,否则会出现"镜像里注入 2.3.0 而产品版本 2.3.1"的漂移。
+      # 注:PR/非 tag 分支上 package.json 可能先改版本后打 tag(开发常态),
+      # 因此仅 push tag 时强制校验;workflow_dispatch 输入不强制(可构建任意版本)。
+      - name: Verify tag matches product version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          node scripts/version.mjs check "$REF_PUSH"
+        env:
+          REF_PUSH: ${{ github.ref_name }}
+
+      - name: Compose image tags
+        id: tags
+        env:
+          IMAGE_NAME: ${{ env.IMAGE }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MAJOR_MINOR: ${{ steps.version.outputs.major_minor }}
+        shell: bash
+        run: |
+          IMAGE="$IMAGE_NAME"
+          V="$VERSION"
+          MM="$MAJOR_MINOR"
+          # 相邻去重(如手动填 '2.3' 时 v$V == v$MM),避免重复 tag 令 build 报错
+          TAGS="$(for T in latest "v$V" "v$MM"; do echo "${IMAGE}:$T"; done | uniq | paste -sd, -)"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "Composed tags: $TAGS"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          # context=server:server/.dockerignore 生效,Dockerfile 内相对路径不变
+          context: server
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+          push: true
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
+          sbom: true
+          provenance: mode=max
+
+      - name: Verify image runs (version injection + healthz)
+        env:
+          IMAGE_NAME: ${{ env.IMAGE }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          IMAGE="$IMAGE_NAME"
+          TAG="v$VERSION"
+          VERSION_WANTED="$VERSION"
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE:$TAG" >/dev/null
+          # 版本注入校验:--version 精确等于注入版本(非 dev)
+          VERSION_OUT="$(docker run --rm --platform linux/amd64 \
+            --entrypoint /app/picoaide-server "$IMAGE:$TAG" --version)"
+          if [ "$VERSION_OUT" != "$VERSION_WANTED" ]; then
+            echo "::error::版本注入失败: 镜像输出 '$VERSION_OUT',期望 '$VERSION_WANTED'"
+            exit 1
+          fi
+          echo "version injection OK: $VERSION_OUT"
+          # 健康端点:真实启动一次,等 /healthz 返回 200(${ok:true} 无认证)
+          CID="$(docker run -d --platform linux/amd64 -p 127.0.0.1:18080:8080 "$IMAGE:$TAG")"
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
+              echo "healthz OK (${i}s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::/healthz 未在 30s 内就绪"
+          exit 1
+
+      - name: Verify multi-arch manifest
+        env:
+          IMAGE_NAME: ${{ env.IMAGE }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          IMAGE="$IMAGE_NAME"
+          TAG="v$VERSION"
+          # inspect 输出每行格式 "Platform: linux/amd64"(+ attestation manifest 的
+          # unknown/unknown),逐平台断言;grep 'Platform: linux/<arch>$' 精确匹配行尾
+          MANIFEST="$(docker buildx imagetools inspect "$IMAGE:$TAG")"
+          echo "$MANIFEST"
+          for ARCH in amd64 arm64; do
+            if ! echo "$MANIFEST" | grep -Eq "Platform: +linux/$ARCH\$"; then
+              echo "::error::manifest 缺少 linux/$ARCH"
+              exit 1
+            fi
+          done
+          echo "multi-arch manifest OK (amd64 + arm64)"
