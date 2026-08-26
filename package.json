@@ -68,6 +68,9 @@
     "build:connectors": "yarn workspace @picoaide/dsh-connectors build",
     "typecheck:connectors": "yarn workspace @picoaide/dsh-connectors typecheck",
     "test:connectors": "yarn workspace @picoaide/dsh-connectors test",
-    "dist:linux": "yarn workspace dsh-plugin-desktop dist:linux"
+    "dist:linux": "yarn workspace dsh-plugin-desktop dist:linux",
+    "version": "node scripts/version.mjs",
+    "version:set": "node scripts/version.mjs set",
+    "version:check": "node scripts/version.mjs check"
   }
 }
