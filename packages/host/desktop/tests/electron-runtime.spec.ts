@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { DesktopShellSpec } from '../src/runtime.ts'
+
+// 产品版本来自 package.json 单一真值(scripts/version.mjs 同步),测试断言
+// 亦应动态读取,避免每次发版都要改测试(曾连续两个版本因硬编码 2.3.0 踩坑)。
+const APP_VERSION = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+).version as string
 
 const diagnostics = vi.hoisted(() => ({ export: vi.fn() }))
 const updater = vi.hoisted(() => ({ download: vi.fn() }))
@@ -572,7 +580,7 @@ describe('Electron compatibility runtime', () => {
     expect(diagnostics.export).toHaveBeenCalledWith(
       '/tmp/dsh-desktop-user-data',
       {
-        appVersion: '2.3.0',
+        appVersion: APP_VERSION,
         crashDumpsDir: '/tmp/dsh-desktop-user-data/Crashpad',
       },
     )
@@ -705,7 +713,7 @@ describe('Electron compatibility runtime', () => {
     expect(runtime.updates).toMatchObject({
       isPackaged: false,
       canDownload: false,
-      currentVersion: '2.3.0',
+      currentVersion: APP_VERSION,
       statePath: join('/tmp/dsh-desktop-user-data', 'updates', 'state.json'),
     })
     electron.app.isPackaged = true
