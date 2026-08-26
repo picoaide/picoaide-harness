@@ -204,3 +204,47 @@ func TestSharedSkillQuality(t *testing.T) {
 		t.Fatalf("missing = %v, want ErrNotFound", err)
 	}
 }
+
+// TestCrossSourceSkillNameConflict 决策 2026-08-25:市场与组织合并为「市场」后,
+// 同名技能跨源互斥(DAO 层校验)——shared_skills 上传/approve 与 marketplace
+// 上架双向阻断。
+func TestCrossSourceSkillNameConflict(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 市场已有同名技能 -> shared_skills 上传(新建/重提)阻断。
+	if _, err := AddSkill(db, &Skill{Name: "codeql-audit", Version: "2.0.0", Enabled: 1, GitURL: "https://example.com/repo.git"}); err != nil {
+		t.Fatalf("market create: %v", err)
+	}
+	if _, err := CreateSharedSkill(db, newSharedSkill("codeql-audit", "1.0.0", "alice")); err != ErrConflict {
+		t.Fatalf("shared upload under market name = %v, want ErrConflict", err)
+	}
+	if _, err := CreateSharedSkillCapped(db, newSharedSkill("codeql-audit", "1.0.0", "alice"), 10); err != ErrConflict {
+		t.Fatalf("shared upload capped under market name = %v, want ErrConflict", err)
+	}
+
+	// 2) 共享库已有同名技能 -> marketplace 上架阻断。
+	if _, err := CreateSharedSkill(db, newSharedSkill("org-only-x", "1.0.0", "bob")); err != nil {
+		t.Fatalf("shared create: %v", err)
+	}
+	if _, err := AddSkill(db, &Skill{Name: "org-only-x", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/repo2.git"}); err != ErrConflict {
+		t.Fatalf("market create under shared name = %v, want ErrConflict", err)
+	}
+
+	// 3) 无冲突(不同名)正常。
+	if _, err := CreateSharedSkill(db, newSharedSkill("fresh-org", "1.0.0", "carol")); err != nil {
+		t.Fatalf("fresh shared create: %v", err)
+	}
+	if _, err := AddSkill(db, &Skill{Name: "fresh-market", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/repo3.git"}); err != nil {
+		t.Fatalf("fresh market create: %v", err)
+	}
+
+	// 4) 共享库同 name 多版本(共享库内部)不受跨源影响——但 market 同名时
+	// 仍阻断(名称互斥不看版本)。
+	if _, err := AddSkill(db, &Skill{Name: "fresh-org", Version: "9.9.9", Enabled: 1, GitURL: "https://example.com/repo4.git"}); err != ErrConflict {
+		t.Fatalf("market create under shared name v9 = %v, want ErrConflict", err)
+	}
+}
