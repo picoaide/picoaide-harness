@@ -1,6 +1,5 @@
 import type { ConnectorAuthRequest, ConnectorDef, TokenField } from './types.ts';
 import type { ConnectorCredential } from './store.ts';
-import type { CliRuntime } from './cli-runtime.ts';
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
  * authStart → (open authorize URL | show verification URL + code | show token
@@ -19,8 +18,6 @@ export interface AuthRunOptions {
     callbackHost?: string;
     /** Pre-connect settings already collected from the user. */
     fields?: Record<string, string>;
-    /** Download-on-demand CLI resolver (dws / beisen-cli). */
-    cli?: CliRuntime;
 }
 /**
  * Device-flow probes: connectors whose poll is provider-specific (e.g. the

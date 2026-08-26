@@ -8,10 +8,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
-import { CliRuntime } from './cli-runtime.ts'
 import { userScopePath } from './user-scope.ts'
 import { salesEasyDef } from './sales-easy.ts'
-import { dingTalkDef } from './dingtalk.ts'
 import { marketplaceDefs } from './defs/index.ts'
 import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorState } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
@@ -48,8 +46,6 @@ export interface ConnectorsOptions {
   connectors?: ConnectorDef[]
   /** Override the token store directory (tests). */
   storeBaseDir?: string
-  /** Override the CLI download cache directory (tests). */
-  cliCacheDir?: string
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -102,7 +98,7 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
-  const defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef, dingTalkDef])
+  const defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef])
 
   // Current user scope: resolved from the enterprise session when present.
   // `getSession()` is a service read guarded by type-only import, so this
@@ -116,11 +112,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
   }
 
-  // Per-user store + CLI runtime. Rebuilt when the session changes; the old
-  // user's MCP registrations are disconnected first (server-side tokens stay
-  // on disk per user, never shared across accounts).
+  // Per-user store. Rebuilt when the session changes; the old user's MCP
+  // registrations are disconnected first (server-side tokens stay on disk
+  // per user, never shared across accounts).
   let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
-  let cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : { username: currentUser() })
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   const mcpDisposers = new Map<string, () => void>()
@@ -146,7 +141,6 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // upgrade): A's pre-upgrade credentials must not be lost silently.
     migrateLegacyStore(username)
     if (!options.storeBaseDir) store = new ConnectorStore({ username })
-    if (!options.cliCacheDir) cliRuntime = new CliRuntime({ username })
   }
 
   // Session lifecycle: disconnect registrations for the previous user, then
@@ -177,14 +171,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const resolveUrlCommand = async (args: string[], extraEnv?: Record<string, string>): Promise<string> => {
     const [command, ...rest] = args
     if (command === undefined) throw new Error('urlCommand is empty')
-    const resolved = await cliRuntime.resolve(command, rest)
-    const spawnCommand = resolved?.command ?? command
-    const spawnArgs = resolved?.args ?? rest
+    const spawnCommand = command
+    const spawnArgs = rest
     return new Promise((resolve, reject) => {
       const child = spawn(spawnCommand, spawnArgs, {
         env: { ...process.env, ...(extraEnv ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: resolved?.shell,
       })
       // 审计 2026-08-25 P2-1:此前无超时——子进程挂起会让连接器永远卡在
       // 「连接中」并泄漏进程。与 auth.ts 的 CLI 超时策略一致(15s)。
@@ -341,7 +333,6 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
       const patch = await runAuth(def, {
         onRequest: emitRequest,
         signal: controller.signal,
-        cli: cliRuntime,
         ...(existing?.fields ? { fields: existing.fields } : {}),
       })
       // Token-form flows finish on auth-submit; runAuth only emitted the fields.

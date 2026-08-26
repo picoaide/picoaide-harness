@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dwsEnv, encodeSegment, userScopePath, resolveDshHome } from '../src/user-scope.ts'
+import { encodeSegment, userScopePath, resolveDshHome } from '../src/user-scope.ts'
 
 describe('user scope paths', () => {
   it('scopes credentials per username under the DSH home', () => {
@@ -23,18 +23,5 @@ describe('user scope paths', () => {
   it('falls back to anonymous scope without a username', () => {
     const path = userScopePath(null, { DSH_HOME: '/dsh' })
     expect(path).toContain('/users/anonymous')
-  })
-
-  it('points dws config and keychain at the product DSH home', () => {
-    const env = dwsEnv({ DSH_HOME: '/custom-home' })
-    expect(env.DWS_CONFIG_DIR).toBe('/custom-home')
-    expect(env.DWS_KEYCHAIN_DIR).toBe('/custom-home/dws/keychain')
-  })
-
-  it('defaults dws env to ~/.picoaide-harness (product home, not upstream ~/.dsh)', () => {
-    const env = dwsEnv({})
-    expect(env.DWS_CONFIG_DIR).toBe(resolveDshHome(undefined, {}))
-    expect(env.DWS_CONFIG_DIR).toMatch(/\.picoaide-harness$/)
-    expect(env.DWS_CONFIG_DIR).not.toMatch(/\.dsh$/)
   })
 })
