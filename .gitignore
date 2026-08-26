@@ -55,5 +55,9 @@ packages/host/desktop/.e2e-report.md
 packages/host/desktop/.e2e-shots/
 packages/host/desktop/.real-env-report.md
 packages/host/desktop/.real-env-shots/
+packages/host/desktop/.real-env-cron-report.md
+packages/host/desktop/.real-env-cron-shots/
+packages/host/desktop/.real-env-cron-flow-report.md
+packages/host/desktop/.real-env-cron-flow-shots/
 # better-sidebar 构建 sourcemap（历史零入库；lib/*.js 本体入库）
 packages/client/better-sidebar/lib/*.map
