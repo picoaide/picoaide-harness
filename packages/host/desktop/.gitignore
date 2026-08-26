@@ -2,3 +2,4 @@ dist/
 lib/
 node_modules/
 
+# CLI 预取已移除(参考 scripts/prefetch-cli.mjs 删除) — build/cli 不再生成
