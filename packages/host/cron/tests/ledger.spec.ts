@@ -24,7 +24,7 @@ const CREATE = {
   input: {
     name: 'Daily',
     cron: '0 9 * * *',
-    action: { kind: 'task' as const, taskId: 'task-1' },
+    action: { kind: 'agent' as const, prompt: 'do the daily thing', workspaceId: 'ws-1', agentPreset: 'default' },
     enabled: true,
   },
 }
@@ -40,7 +40,7 @@ describe('HostCronLedger', () => {
     const mode = statSync(path).mode & 0o777
     expect(mode).toBe(0o600)
     const document = JSON.parse(readFileSync(path, 'utf8'))
-    expect(document.schemaVersion).toBe(1)
+    expect(document.schemaVersion).toBe(2)
     expect(document.revision).toBe(1)
     expect(document.jobs).toHaveLength(1)
     expect(document.jobs[0]!.name).toBe('Daily')
@@ -202,10 +202,10 @@ describe('HostCronLedger idempotency', () => {
   it('unregister can run repeatedly across attach/detach cycles', () => {
     const host = ledger()
     host.applyRequest('r1', CREATE)
-    // Simulate the dsh-task flow: attach → detach → attach → detach.
-    host.upsertJob({ id: 'task-t1', name: 't', cron: '0 9 * * *', action: { kind: 'task', taskId: 't1' }, enabled: true })
+    // Simulate a sibling-plugin upsert flow: attach → detach → attach → detach.
+    host.upsertJob({ id: 'task-t1', name: 't', cron: '0 9 * * *', action: { kind: 'agent', prompt: 'p' }, enabled: true })
     host.applyRequest('u1', { kind: 'delete', jobId: 'task-t1' })
-    host.upsertJob({ id: 'task-t1', name: 't', cron: '0 9 * * *', action: { kind: 'task', taskId: 't1' }, enabled: true })
+    host.upsertJob({ id: 'task-t1', name: 't', cron: '0 9 * * *', action: { kind: 'agent', prompt: 'p' }, enabled: true })
     host.applyRequest('u2', { kind: 'delete', jobId: 'task-t1' })
     expect(host.state().jobs.some(job => job.id === 'task-t1')).toBe(false)
     host.dispose()
@@ -234,6 +234,31 @@ describe('HostCronLedger reconcile nextRunAt preservation', () => {
     // The future nextRunAt (still ahead of restart) is preserved verbatim.
     expect(job.nextRunAt).toBe(rolled)
     restarted.dispose()
+  })
+})
+
+describe('HostCronLedger schema v1→v2 migration', () => {
+  it('drops v1 task/prompt jobs and keeps agent jobs', () => {
+    const path = join(dir, 'cron', 'ledger.json')
+    mkdirSync(join(dir, 'cron'), { recursive: true })
+    const document = {
+      schemaVersion: 1,
+      revision: 5,
+      jobs: [
+        { id: 'legacy-task', name: 'Old task', cron: '0 9 * * *', action: { kind: 'task', taskId: 't1' }, enabled: true, executions: [], createdAt: 1, updatedAt: 1 },
+        { id: 'legacy-prompt', name: 'Old ping', cron: '* * * * *', action: { kind: 'prompt', sessionId: 's1', text: 'hi' }, enabled: true, executions: [{ id: 'e1', triggeredAt: 1, result: 'succeeded', endedAt: 2 }], createdAt: 1, updatedAt: 1 },
+        { id: 'agent-keep', name: 'Agent job', cron: '0 9 * * *', action: { kind: 'agent', prompt: 'go' }, enabled: true, executions: [], createdAt: 1, updatedAt: 1 },
+      ],
+      scheduler: { timeZone: 'UTC' },
+      recentRequests: [],
+    }
+    writeFileSync(path, JSON.stringify(document), 'utf8')
+
+    const host = ledger()
+    const state = host.state()
+    expect(state.revision).toBe(5)
+    expect(state.jobs.map(job => job.id)).toEqual(['agent-keep'])
+    host.dispose()
   })
 })
 

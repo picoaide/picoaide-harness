@@ -63,10 +63,6 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ jobs: [], items: [] }))
     return
   }
-  if (url.pathname === '/api/tasks' || url.pathname.startsWith('/api/tasks/')) {
-    res.end(JSON.stringify({ tasks: [] }))
-    return
-  }
   if (url.pathname === '/api/agent-presets' || url.pathname.startsWith('/api/agent-presets/')) {
     res.end(JSON.stringify({
       presets: [

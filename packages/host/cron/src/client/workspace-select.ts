@@ -1,8 +1,7 @@
 /**
  * Project (workspace) options for the cron job editor. Reads the client
  * workspaces feed (the same list the shell sidebar shows) — implemented
- * locally because cross-package client imports are forbidden; the sibling
- * dsh-task plugin owns its own copy.
+ * locally because cross-package client imports are forbidden.
  */
 import { useEffect, useState } from 'react'
 import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'

@@ -44,8 +44,6 @@ const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
 const ACTIVATE_EVENT = 'dsh-panel-activate'
 /** The html attribute this panel toggles (sibling panels remove it). */
 export const CRON_ACTIVE_ATTR = 'data-dsh-cron-active'
-/** The html attribute sibling injected panels toggle (removed when we open). */
-const OTHER_ACTIVE_ATTR = 'data-dsh-task-active'
 
 function isCronOpen(): boolean {
   return document.documentElement.hasAttribute(CRON_ACTIVE_ATTR)
@@ -59,8 +57,9 @@ export function CronTrigger(props: PropsRuntime<'sidebar.footer.action'>): JSX.E
   const open = (): void => {
     if (isCronOpen()) return
     // Single-occupant main area: evict sibling panels (their html attribute
-    // and their controller state) before activating.
-    document.documentElement.removeAttribute(OTHER_ACTIVE_ATTR)
+    // and their controller state) before activating. The removed task-board
+    // attribute is defensive (a stale tab may still carry it).
+    document.documentElement.removeAttribute('data-dsh-task-active')
     document.documentElement.setAttribute(CRON_ACTIVE_ATTR, '')
     document.dispatchEvent(new CustomEvent(ACTIVATE_EVENT, { detail: 'cron' }))
   }

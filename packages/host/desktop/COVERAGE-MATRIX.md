@@ -1,6 +1,6 @@
 # DSH Desktop 测试覆盖矩阵
 
-三层覆盖：**单测**（45 个 vitest 文件）、**verify 脚本**（打包/加载/许可）、**E2E 自动化**（e2e-client.mjs 14 项断言 + real-env-verify.mjs 13 项真实服务断言）。
+三层覆盖：**单测**（44 个 vitest 文件）、**verify 脚本**（打包/加载/许可）、**E2E 自动化**（e2e-client.mjs 12 项断言 + real-env-verify.mjs 12 项真实服务断言）。
 
 ## 客户端功能覆盖
 
@@ -12,8 +12,7 @@
 | 聊天输入区 | — | verify-loader | ✅ 可输入消息 | |
 | 连接器中心 | desktop-plugins | verify-profile | ✅ 面板+内容+截图 | 真实环境已验（r04） |
 | 技能中心 | — | — | ✅ 模态打开 | 真实环境已验（r05 真实技能） |
-| 任务看板面板 | — | — | ✅ 挂载 | 真实环境已验（r09） |
-| 定时任务面板 | cron 53 单测 | — | ✅ 挂载 | 真实环境已验（r08） |
+| 定时任务面板 | cron 58 单测 | — | ✅ 挂载 | 真实环境已验（r08）；任务看板已并入本面板 |
 | 设置面板 | plugin.spec | — | ✅ + 账号页 | 真实账号/服务端地址已验证（r07） |
 | 工作区选择器 | directory-picker | — | ✅ 打开 | 真实环境已验（r03） |
 | 浏览器面板 | browser 47 单测 | — | ✅ WebContentsView target + 截图 | 真实环境已验（r11b） |

@@ -15,7 +15,7 @@ export interface CronTransport {
 function parseSnapshot(value: unknown): CronSnapshot {
   if (typeof value !== 'object' || value === null) throw new Error('invalid snapshot')
   const snapshot = value as CronSnapshot
-  if (snapshot.schemaVersion !== 1 || !Array.isArray(snapshot.jobs)) throw new Error('unexpected schema')
+  if (snapshot.schemaVersion !== 2 || !Array.isArray(snapshot.jobs)) throw new Error('unexpected schema')
   return snapshot
 }
 
