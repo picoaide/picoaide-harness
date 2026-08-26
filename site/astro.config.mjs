@@ -29,11 +29,8 @@ export default defineConfig({
           items: [
             { label: '欢迎', slug: 'welcome' },
             { label: '快速开始', slug: 'getting-started' },
+            { label: '产品哲学', slug: 'philosophy' },
           ],
-        },
-        {
-          label: '部署',
-          items: [{ label: '部署指南', slug: 'deployment' }],
         },
         {
           label: '使用',
@@ -43,8 +40,16 @@ export default defineConfig({
           ],
         },
         {
+          label: '部署',
+          items: [{ label: '私有化部署指南', slug: 'deployment' }],
+        },
+        {
           label: '开发',
           items: [{ label: '插件开发', slug: 'plugin-development' }],
+        },
+        {
+          label: '支持',
+          items: [{ label: '常见问题', slug: 'faq' }],
         },
       ],
     }),
