@@ -50,7 +50,9 @@ func GetDeptBudget(db *sql.DB, groupID int64) (float64, error) {
 	return b.Float64, nil
 }
 
-// EffectiveDeptBudget 返回用户生效的部门预算链(归属部门 + 祖先链)。
+// EffectiveDeptBudget 返回用户生效的部门预算链(归属部门 + 祖先链 +
+// 隐式「全员」组——审计修复 2026-P (M6):全员组预算对所有人都应生效,
+// 否则 UI 显示生效但网关永不 enforcement)。
 // 每级只返回配置了预算的部门,按祖先 → 自己排序。
 func EffectiveDeptBudget(db *sql.DB, userID int64) ([]DeptBudget, error) {
 	member, err := UserGroups(db, userID)
@@ -73,8 +75,13 @@ func EffectiveDeptBudget(db *sql.DB, userID int64) ([]DeptBudget, error) {
 	// 预算链:ancestorsOf 返回 [self, parent, ..., root],反转成
 	// [root, ..., parent, self](祖先在前,展示与语义都自然)。
 	// 去重:同部门多路径(不应发生,单部门归属)取一次。
+	// 隐式「全员」组并入链首(与 UserEffectiveGroups 授权语义一致)。
 	seen := map[int64]bool{}
 	var chain []int64
+	if n, ok := findNodeByName(byID, EveryoneGroupName); ok && !seen[n.id] {
+		seen[n.id] = true
+		chain = append(chain, n.id)
+	}
 	for _, mid := range memberIDs {
 		for _, a := range ancestorsOf(byID, mid) {
 			if !seen[a] {
