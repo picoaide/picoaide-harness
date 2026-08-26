@@ -2,7 +2,8 @@
 
 import { app, crashReporter } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   boot,
   installFailLoud,
@@ -214,6 +215,15 @@ async function start(): Promise<void> {
   // sibling plugins resolving DSH_HOME) agree on the same location.
   const homeDir = resolveDshHome()
   process.env[DSH_HOME_ENV] = homeDir
+  // Bundled CLI skills (official SKILL.md packages: dingtalk-* / wecom / lark /
+  // beisen) are discovered by the upstream skill-filesystem provider through
+  // $DSH_BUNDLED_SKILL_DIR (rank 600, trustedHost). Packaged builds ship them
+  // under resources/cli-skills; dev builds use the repository tree.
+  if (process.env.DSH_BUNDLED_SKILL_DIR === undefined || process.env.DSH_BUNDLED_SKILL_DIR === '') {
+    process.env.DSH_BUNDLED_SKILL_DIR = app.isPackaged
+      ? join(process.resourcesPath, 'cli-skills')
+      : join(dirname(fileURLToPath(import.meta.url)), '..', 'cli-skills')
+  }
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
     { label: 'application install', path: process.execPath },
     { label: 'desktop user data', path: app.getPath('userData') },
