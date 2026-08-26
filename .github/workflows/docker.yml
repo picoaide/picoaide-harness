@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE: ghcr.io/picoaide/picoaide-server
+  IMAGE: ghcr.io/picoaide/picoaide-harness-server
 
 jobs:
   build:
@@ -116,6 +116,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 生成 OCI 元数据标签(org.opencontainers.image.source 指向本仓库),GHCR
+      # 据此把包关联到本仓库——首次推送即自动关联并授予本仓库 Actions 写入
+      # 权限。此前镜像无 source label、且包已被 picoaide-next 关联,导致
+      # write_package 被拒的 bootstrap 死锁。tags 由上方 Compose image tags
+      # 步骤负责,此处仅产出 labels(flavor 关闭默认 tag 生成,避免与手工
+      # tags 冲突;labels 输出不依赖 tags 配置)。
+      - name: Extract metadata (OCI labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            prefix=
+            suffix=
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -124,6 +140,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           push: true
           cache-from: type=gha,scope=server
           cache-to: type=gha,scope=server,mode=max
