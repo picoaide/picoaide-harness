@@ -4,12 +4,12 @@
 # 运行镜像含 /data 挂载卷;密钥/数据库落在 /data,部署时以 volume 持久化。
 #
 # 构建(本地单平台):
-#   docker build -t ghcr.io/picoaide/picoaide-server:<tag> .
+#   docker build -t ghcr.io/picoaide/picoaide-harness-server:<tag> .
 # 构建(带版本号,--version 输出一致):
-#   docker build --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-server:v0.4.0 .
-# 构建(多平台 amd64+arm64,CI 用):
-#   docker buildx build --platform linux/amd64,linux/arm64 \
-#     --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-server:v0.4.0 --push .
+#   docker build --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-harness-server:v0.4.0 .
+# 构建(单平台 amd64,CI 用):
+#   docker buildx build --platform linux/amd64 \
+#     --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-harness-server:v0.4.0 --push .
 
 # --- Stage 1: webadmin(go:embed dist 需要预构建产物) ---
 FROM node:24-alpine AS webadmin

@@ -30,7 +30,7 @@ PicoAide Harness 2.3.0 正式发布。本版本完成了一次重要的**产品�
 ## 发布链路加固
 
 - **版本号统一 git tag 权威源**：新增 `scripts/version.mjs`（set/check/get），git tag 为唯一真值，一键同步 root 与 desktop 两处 package.json（semver 白名单 + 形状校验）；
-- **Docker 镜像自动构建发布**：推送 `v*` tag 后 CI 自动构建推送 `ghcr.io/picoaide/picoaide-server`（amd64 + arm64 多平台，SBOM / provenance），标签 `latest` + `vX.Y.Z` + `vX.Y`，构建参数注入版本并做实机验证（`--version` + `/healthz` + multi-arch manifest）。
+- **Docker 镜像自动构建发布**：推送 `v*` tag 后 CI 自动构建推送 `ghcr.io/picoaide/picoaide-harness-server`（amd64 + arm64 多平台，SBOM / provenance），标签 `latest` + `vX.Y.Z` + `vX.Y`，构建参数注入版本并做实机验证（`--version` + `/healthz` + multi-arch manifest）。（注：2026-08-26 v2.4.0 起镜像包名统一为 `picoaide-harness-server`、并收敛为 amd64 单平台。）
 
 ## 其他
 
