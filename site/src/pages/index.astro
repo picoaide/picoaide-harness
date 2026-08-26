@@ -9,7 +9,6 @@ import chatShot from '../assets/screenshots/desktop-chat.png'
 import connectorsShot from '../assets/screenshots/desktop-connectors.png'
 import skillsShot from '../assets/screenshots/desktop-skills.png'
 import cronShot from '../assets/screenshots/desktop-cron.png'
-import taskboardShot from '../assets/screenshots/desktop-taskboard.png'
 import adminUsersShot from '../assets/screenshots/admin-users.png'
 import adminGatewayShot from '../assets/screenshots/admin-gateway.png'
 import adminUsageShot from '../assets/screenshots/admin-usage.png'
@@ -54,7 +53,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <div class="features">
         <div class="feature">
           <h3>桌面客户端</h3>
-          <p>原生窗口、系统托盘、终端与自动更新。对话、记忆、连接器、技能、定时任务与任务看板一站式完成，无需安装 Node.js。</p>
+          <p>原生窗口、系统托盘、终端与自动更新。对话、记忆、连接器、技能、定时任务一站式完成，无需安装 Node.js。</p>
         </div>
         <div class="feature">
           <h3>本地智能体引擎</h3>
@@ -90,11 +89,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </figure>
         <figure>
           <Image src={cronShot} alt="定时任务" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>定时任务：计划与执行记录</figcaption>
-        </figure>
-        <figure>
-          <Image src={taskboardShot} alt="任务看板" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>任务看板：待办、进行中、已完成、已失败</figcaption>
+          <figcaption>定时任务：指定智能体、提示词与执行详情</figcaption>
         </figure>
       </div>
 
@@ -132,7 +127,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </div>
         <div class="feature">
           <h3>多用户隔离</h3>
-          <p>连接器凭据、浏览器会话、定时任务与任务看板按账号隔离，退出登录即解除所有会话。</p>
+          <p>连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话。</p>
         </div>
         <div class="feature">
           <h3>一切皆插件</h3>

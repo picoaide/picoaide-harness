@@ -1,7 +1,7 @@
 # Cron scheduler Host rows: the bare entry carries the package's client
 # bundle declaration (job center + settings card) and provides the
-# `picoCronService` Host service consumed by sibling plugins (e.g. dsh-task
-# registers per-task scheduled runs through it).
+# `picoCronService` Host service. The task board was merged into this
+# scheduler (agent actions), so no sibling plugin consumes it anymore.
 - insert:
     - id: pico-cron
       name: '@picoaide/dsh-cron'

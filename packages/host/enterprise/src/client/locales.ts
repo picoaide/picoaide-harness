@@ -1,6 +1,6 @@
 /**
  * Enterprise client UI copy: zh is the key source, en mirrors the full key
- * set (the same pattern as dsh-cron/dsh-task locales). The dictionary is
+ * set (the same pattern as the dsh-cron locale). The dictionary is
  * registered into the shared locale registry; `t()` resolves the zh key
  * source directly so components stay dependency-free.
  */

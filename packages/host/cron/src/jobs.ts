@@ -8,19 +8,32 @@
  * Actions are a closed discriminated union with no command, executable, or
  * shell fields: the prompt text is data sent to an agent session, never a
  * shell line.
+ *
+ * v2: only one action kind remains — `agent` (spawn a fresh agent session
+ * for a task prompt, optionally pinned to a workspace / agent preset /
+ * permission). The legacy `task` (dsh-task board reference) and `prompt`
+ * (send a message to an existing session) kinds were removed when the task
+ * board was merged into the scheduler.
  */
 import { nextRunAtMs } from './cron.ts'
 
 /** Result states of one triggered execution (a trigger record, not an agent turn). */
 export type ExecutionResult = 'succeeded' | 'failed' | 'cancelled'
 
-/** One trigger record of a job. */
+/**
+ * One trigger record of a job. v2 carries session-level detail: the agent
+ * session spawned for this run, its prompt, and start/end timestamps.
+ */
 export interface ExecutionRecord {
   /** Stable id (unique per execution, idempotency key). */
   id: string
   /** When the trigger fired (Host clock, ms epoch). */
   triggeredAt: number
-  /** When the execution settled; undefined while pending. */
+  /** The agent session created for this run (attached after launch). */
+  sessionId?: string
+  /** The full prompt sent to the session (task prompt, never a shell line). */
+  prompt?: string
+  startedAt?: number
   endedAt?: number
   result?: ExecutionResult
   /** Human-readable failure/cancellation reason. */
@@ -30,20 +43,19 @@ export interface ExecutionRecord {
 /**
  * What a triggered job does. The union is closed and versioned by the
  * protocol validator; adding a kind is a schema change, not a config escape.
+ * v2: the only kind is `agent` — spawn a fresh agent session and prompt it.
  */
-export type CronJobAction =
-  | {
-    kind: 'task'
-    /** A task id owned by the dsh-task plugin (resolved at run time). */
-    taskId: string
-  }
-  | {
-    kind: 'prompt'
-    /** Target session; required — a prompt action always names a session. */
-    sessionId: string
-    /** Prompt text sent to the session (queue mode). */
-    text: string
-  }
+export type CronJobAction = {
+  kind: 'agent'
+  /** Prompt text sent to the new agent session (queue mode). */
+  prompt: string
+  /** Pinned workspace; absent = current workspace. */
+  workspaceId?: string
+  /** Pinned agent preset (from agentPresets.list); absent = composition default. */
+  agentPreset?: string
+  /** Optional permission preset applied via /permission before the prompt. */
+  permission?: string
+}
 
 /** A durable scheduled job record. */
 export interface JobRecord {
@@ -93,23 +105,20 @@ export function isExecutionResult(value: unknown): value is ExecutionResult {
 export function isCronJobAction(value: unknown): value is CronJobAction {
   if (typeof value !== 'object' || value === null) return false
   const action = value as Record<string, unknown>
-  const keys = Object.keys(action)
-  if (action.kind === 'task') {
-    // Exact key set: no command, shell, or executable fields may ride along.
-    if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('taskId')) return false
-    return typeof action.taskId === 'string' && action.taskId !== ''
-  }
-  if (action.kind === 'prompt') {
-    if (keys.length !== 3 || !keys.includes('kind') || !keys.includes('sessionId') || !keys.includes('text')) return false
-    return typeof action.sessionId === 'string' && action.sessionId !== ''
-      && typeof action.text === 'string' && action.text !== ''
-  }
-  return false
+  if (action.kind !== 'agent') return false
+  // Exact key set: no command, shell, or executable fields may ride along.
+  const allowed = new Set(['kind', 'prompt', 'workspaceId', 'agentPreset', 'permission'])
+  if (!Object.keys(action).every(key => allowed.has(key))) return false
+  if (typeof action.prompt !== 'string' || action.prompt.trim() === '') return false
+  if (action.workspaceId !== undefined && typeof action.workspaceId !== 'string') return false
+  if (action.agentPreset !== undefined && typeof action.agentPreset !== 'string') return false
+  if (action.permission !== undefined && typeof action.permission !== 'string') return false
+  return true
 }
 
 /** Create an execution record for a pending trigger. */
 export function startExecution(id: string, now: number): ExecutionRecord {
-  return { id, triggeredAt: now }
+  return { id, triggeredAt: now, startedAt: now }
 }
 
 /** Settle a pending execution with a result and optional error. */

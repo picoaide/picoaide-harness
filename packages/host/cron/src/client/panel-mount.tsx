@@ -3,7 +3,7 @@
  *
  * The `conversation` slot is single-occupant (ui-conversation) and external
  * plugins cannot declare slots, so the center takes over the center column
- * at the DOM level — the same pattern as upstream dsh-task-board: a
+ * at the DOM level — the same pattern as the former dsh-task board: a
  * container is appended inside the center column as a trailing child React
  * never manages, and a global stylesheet rule scoped to the html activation
  * attribute hides the conversation content while the center is active. The
@@ -11,6 +11,7 @@
  */
 import { createRoot, type Root } from 'react-dom/client'
 import { createElement } from 'react'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import type { CronController } from './controller.ts'
 import { CronJobTab } from './CronJobTab.tsx'
@@ -62,7 +63,7 @@ function visibilityStyle(): HTMLStyleElement {
  * visibility to the html activation attribute.
  * @returns disposer unmounting the tree and restoring the column.
  */
-export function mountCronPanel(controller: CronController, workspaces?: IWorkspaces): () => void {
+export function mountCronPanel(controller: CronController, workspaces?: IWorkspaces, api?: ConnectionHandle['api']): () => void {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
@@ -80,7 +81,7 @@ export function mountCronPanel(controller: CronController, workspaces?: IWorkspa
     // stylesheet rule (an inline style would defeat the show rule).
     column.appendChild(container)
     root = createRoot(container)
-    root.render(createElement(CronCenterView, { controller, ...(workspaces === undefined ? {} : { workspaces }) }))
+    root.render(createElement(CronCenterView, { controller, ...(workspaces === undefined ? {} : { workspaces }), ...(api === undefined ? {} : { api }) }))
   }
 
   // The frame mounts after boot settlement; watch for the column's arrival.
@@ -115,7 +116,7 @@ export function mountCronPanel(controller: CronController, workspaces?: IWorkspa
 }
 
 /** Center view: a back-to-chat header plus the job center body. */
-function CronCenterView({ controller, workspaces }: { controller: CronController; workspaces?: IWorkspaces }): JSX.Element {
+function CronCenterView({ controller, workspaces, api }: { controller: CronController; workspaces?: IWorkspaces; api?: ConnectionHandle['api'] }): JSX.Element {
   const back = (): void => { closeCronPanel() }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 420 }}>
@@ -126,7 +127,7 @@ function CronCenterView({ controller, workspaces }: { controller: CronController
         </button>
       </div>
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        <CronJobTab controller={controller} {...(workspaces === undefined ? {} : { workspaces })} />
+        <CronJobTab controller={controller} {...(workspaces === undefined ? {} : { workspaces })} {...(api === undefined ? {} : { api })} />
       </div>
     </div>
   )

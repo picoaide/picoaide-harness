@@ -5,15 +5,17 @@ function envelope(action: unknown, requestId = 'req-1'): unknown {
   return { requestId, action }
 }
 
+const AGENT_ACTION = { kind: 'agent', prompt: 'do the thing', workspaceId: 'ws-1', agentPreset: 'default', permission: 'workspace-write' }
+
 describe('parseActionEnvelope', () => {
-  it('accepts a valid create', () => {
+  it('accepts a valid create (agent action)', () => {
     const parsed = parseActionEnvelope(envelope({
       kind: 'create',
       id: 'job-1',
       input: {
         name: 'Daily report',
         cron: '0 9 * * *',
-        action: { kind: 'task', taskId: 'task-1' },
+        action: AGENT_ACTION,
         enabled: true,
       },
     }))
@@ -21,14 +23,14 @@ describe('parseActionEnvelope', () => {
     expect(parsed!.action.kind).toBe('create')
   })
 
-  it('accepts a valid prompt action', () => {
+  it('accepts a minimal agent action (prompt only)', () => {
     const parsed = parseActionEnvelope(envelope({
       kind: 'create',
       id: 'job-2',
       input: {
         name: 'Ping',
         cron: '*/10 * * * *',
-        action: { kind: 'prompt', sessionId: 's-1', text: 'hello' },
+        action: { kind: 'agent', prompt: 'hello' },
       },
     }))
     expect(parsed).toBeDefined()
@@ -42,12 +44,23 @@ describe('parseActionEnvelope', () => {
     expect(parseActionEnvelope(envelope({
       kind: 'create',
       id: 'j',
-      input: { name: 'x', cron: '* * * * *', action: { kind: 'task', taskId: 't' }, command: 'rm -rf /' },
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'agent', prompt: 'p', command: 'rm -rf /' } },
     }))).toBeUndefined()
     expect(parseActionEnvelope(envelope({
       kind: 'create',
       id: 'j',
-      input: { name: 'x', cron: '* * * * *', action: { kind: 'prompt', sessionId: 's', text: 'hi', shell: '/bin/sh' } },
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'agent', prompt: 'p', shell: '/bin/sh' } },
+    }))).toBeUndefined()
+  })
+
+  it('rejects the removed task/prompt action kinds', () => {
+    expect(parseActionEnvelope(envelope({
+      kind: 'create', id: 'j',
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'task', taskId: 't' } },
+    }))).toBeUndefined()
+    expect(parseActionEnvelope(envelope({
+      kind: 'create', id: 'j',
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'prompt', sessionId: 's', text: 'hi' } },
     }))).toBeUndefined()
   })
 
@@ -61,18 +74,14 @@ describe('parseActionEnvelope', () => {
     expect(parseActionEnvelope(envelope({ kind: 'create', id: '', input: {} }))).toBeUndefined()
   })
 
-  it('rejects missing or empty taskId/sessionId/text', () => {
+  it('rejects missing or empty prompt', () => {
     expect(parseActionEnvelope(envelope({
       kind: 'create', id: 'j',
-      input: { name: 'x', cron: '* * * * *', action: { kind: 'task', taskId: '' } },
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'agent', prompt: '' } },
     }))).toBeUndefined()
     expect(parseActionEnvelope(envelope({
       kind: 'create', id: 'j',
-      input: { name: 'x', cron: '* * * * *', action: { kind: 'prompt', sessionId: '', text: 'hi' } },
-    }))).toBeUndefined()
-    expect(parseActionEnvelope(envelope({
-      kind: 'create', id: 'j',
-      input: { name: 'x', cron: '* * * * *', action: { kind: 'prompt', sessionId: 's', text: '' } },
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'agent', prompt: '   ' } },
     }))).toBeUndefined()
   })
 
@@ -92,25 +101,25 @@ describe('parseActionEnvelope cron validation', () => {
   it('rejects malformed cron expressions at the protocol layer', () => {
     expect(parseActionEnvelope(envelope({
       kind: 'create', id: 'j',
-      input: { name: 'x', cron: 'not-a-cron', action: { kind: 'task', taskId: 't' } },
+      input: { name: 'x', cron: 'not-a-cron', action: { kind: 'agent', prompt: 'p' } },
     }))).toBeUndefined()
     expect(parseActionEnvelope(envelope({
       kind: 'create', id: 'j',
-      input: { name: 'x', cron: '60 9 * * *', action: { kind: 'task', taskId: 't' } },
+      input: { name: 'x', cron: '60 9 * * *', action: { kind: 'agent', prompt: 'p' } },
     }))).toBeUndefined()
   })
 
   it('rejects calendar-impossible cron expressions (silently inert jobs)', () => {
     expect(parseActionEnvelope(envelope({
       kind: 'create', id: 'j',
-      input: { name: 'x', cron: '0 0 30 2 *', action: { kind: 'task', taskId: 't' } },
+      input: { name: 'x', cron: '0 0 30 2 *', action: { kind: 'agent', prompt: 'p' } },
     }))).toBeUndefined()
   })
 
   it('accepts valid cron expressions including February 29', () => {
     expect(parseActionEnvelope(envelope({
       kind: 'create', id: 'j',
-      input: { name: 'x', cron: '0 0 29 2 *', action: { kind: 'task', taskId: 't' } },
+      input: { name: 'x', cron: '0 0 29 2 *', action: { kind: 'agent', prompt: 'p' } },
     }))).toBeDefined()
   })
 })
