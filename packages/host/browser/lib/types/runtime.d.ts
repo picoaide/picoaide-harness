@@ -8,7 +8,6 @@
  */
 import { CdpSession } from './cdp.ts';
 import { type ElectronAdapter, type NativeBrowserWindow, type NativeView } from './electron-adapter.ts';
-import { BrowserGuard } from './guard.ts';
 import type { BrowserOpLogEntry, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions, BrowserWaitUntil, BrowserWindowState, CredentialResolver } from './types.ts';
 /** Default cooperative tool-call budget (ms). */
 export declare const DEFAULT_TIMEOUT_MS = 30000;
@@ -53,7 +52,7 @@ export declare class BrowserRuntime {
     private busy;
     /** The agent tool currently executing ('' when idle). */
     private busyTool;
-    constructor(adapter: ElectronAdapter, options?: BrowserToolOptions, askApproval?: BrowserGuard['askApproval'], credentials?: CredentialResolver | undefined, partition?: string);
+    constructor(adapter: ElectronAdapter, options?: BrowserToolOptions, credentials?: CredentialResolver | undefined, partition?: string);
     /** Swap the partition used by NEW tab views (user switch). Existing tabs
      * keep their partition; callers close all tabs first. */
     setPartition(partition: string): void;
@@ -75,8 +74,6 @@ export declare class BrowserRuntime {
     currentTabId(): number | undefined;
     /** Public tab state (throws for unknown ids). */
     tabState(id: number): BrowserTabState;
-    /** Route a sensitive-action approval through the guard. */
-    requireApproval(request: Parameters<BrowserGuard['askApproval']>[0]): Promise<boolean>;
     /** Content-area bounds below the shell toolbar (DIP). */
     private contentBounds;
     /** Re-layout every tab view + the mask over the window content area. */

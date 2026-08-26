@@ -533,20 +533,10 @@ describe('BrowserRuntime', () => {
     runtime.dispose()
   })
 
-  it('routes approval through the injected asker', async () => {
-    const { adapter, views } = makeAdapter()
-    const ask = vi.fn(async () => 'allowed-once' as const)
-    const runtime = new BrowserRuntime(adapter, {}, ask)
-    await runtime.open(undefined)
-    await expect(runtime.requireApproval({ agent: undefined, toolName: 'browser_eval', reason: 'test' })).resolves.toBe(true)
-    expect(ask).toHaveBeenCalledTimes(1)
-    runtime.dispose()
-  })
-
   it('fills login forms from stored credentials', async () => {
     const { adapter, views } = makeAdapter()
     const resolver = vi.fn(async () => ({ username: 'u1', password: 'p1' }))
-    const runtime = new BrowserRuntime(adapter, {}, undefined, resolver)
+    const runtime = new BrowserRuntime(adapter, {}, resolver)
     await runtime.open(undefined)
     views[0]!.transport.handler = (method, params) => {
       if (method === 'Runtime.evaluate' && typeof params.expression === 'string' && params.expression.includes('querySelectorAll(\'input\')')) {
@@ -569,7 +559,7 @@ describe('BrowserRuntime', () => {
 
   it('rejects credential injection for unknown connectors', async () => {
     const { adapter } = makeAdapter()
-    const runtime = new BrowserRuntime(adapter, {}, undefined, async () => null)
+    const runtime = new BrowserRuntime(adapter, {}, async () => null)
     await runtime.open(undefined)
     await expect(runtime.fillCredentials(1, 'nope')).rejects.toThrow(/no stored credentials/)
     runtime.dispose()

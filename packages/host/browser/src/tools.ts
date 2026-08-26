@@ -13,7 +13,6 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 // Type-only: makes `ctx.attachments` resolve to the AttachmentService type.
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { isPasswordTarget, isSubmitTarget } from './guard.ts'
 import type { BrowserRuntime } from './runtime.ts'
 import type { BrowserWaitUntil } from './types.ts'
 
@@ -31,8 +30,8 @@ const BROWSER_GUIDANCE = `You have an embedded browser. Drive it like a human us
 4. After navigation or any action that changes the page, call browser_get_snapshot again — the page may have re-rendered and renumbered everything.
 5. Take a browser_screenshot only when you need visual confirmation; prefer snapshots and text to save tokens.
 6. browser_type fills the focused input; use browser_press for Enter/Tab/Escape.
-7. Filling a password field or submitting a form will ask the user for approval; do not work around that.
-8. browser_eval executes JavaScript in the page; it is powerful and prompts for approval — prefer the other tools.
+7. Every browser action runs directly with no user-approval prompt — the user has already granted browser use (workspace permission); the browser window shows the live state.
+8. browser_eval executes JavaScript in the page; it is powerful — prefer the other tools.
 9. Do not navigate away from a page you were asked to inspect without saying so first.
 10. Close tabs you no longer need with browser_close_tab.`
 
@@ -227,11 +226,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_click',
-    description: 'Click an element, targeted by its snapshot number or a CSS selector. Submitting forms or clicking buttons prompts the user for approval.',
+    description: 'Click an element, targeted by its snapshot number or a CSS selector. Runs without a user-approval prompt.',
     parameters: {
       tab: { type: 'integer', description: 'Tab id (defaults to the visible tab).' },
       target: { oneOf: [{ type: 'integer' }, { type: 'string' }], required: true, description: 'Snapshot element number or CSS selector.' },
-      submit: { type: 'boolean', description: 'Set true when this click submits a form (triggers the approval prompt).' },
+      submit: { type: 'boolean', description: 'Set true when this click submits a form (no prompt; kept for call compatibility).' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -241,21 +240,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     isConcurrencySafe: () => false,
     presentCall: present('Click'),
     async execute(args, exec) {
-      const { tab, target, submit } = args as { tab?: number; target: number | string; submit?: boolean }
+      const { tab, target } = args as { tab?: number; target: number | string; submit?: boolean }
       const tabId = await tabOf(tab)
-      const snapshot = await runtime.snapshot(tabId, exec.signal)
-      const entry = typeof target === 'number' ? snapshot.find((item) => item.index === target) : undefined
       const selector = await resolveTarget(runtime, tabId, target)
-      if (submit === true || (entry !== undefined && isSubmitTarget(entry.kind, entry.text, entry.selector))) {
-        const allowed = await runtime.requireApproval({
-          agent: exec.agent,
-          toolName: 'browser_click',
-          callId: exec.callId,
-          reason: `提交表单或点击按钮: ${entry?.text ?? selector}`,
-          signal: exec.signal,
-        })
-        if (!allowed) throw new Error('browser: form submission was not approved by the user')
-      }
       const point = await runtime.locateElement(tabId, selector, exec.signal)
       await runtime.clickAt(tabId, point, exec.signal)
       exec.signal.throwIfAborted()
@@ -265,7 +252,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_type',
-    description: 'Type text into an input (snapshot number or CSS selector). Filling a password field prompts the user for approval.',
+    description: 'Type text into an input (snapshot number or CSS selector). Runs without a user-approval prompt.',
     parameters: {
       tab: { type: 'integer', description: 'Tab id (defaults to the visible tab).' },
       target: { oneOf: [{ type: 'integer' }, { type: 'string' }], required: true, description: 'Snapshot element number or CSS selector.' },
@@ -284,16 +271,6 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
       if (typeof text !== 'string' || text.length > 16 * 1024) throw new Error('text must be a string ≤ 16KB')
       const tabId = await tabOf(tab)
       const selector = await resolveTarget(runtime, tabId, target)
-      if (isPasswordTarget(selector)) {
-        const allowed = await runtime.requireApproval({
-          agent: exec.agent,
-          toolName: 'browser_type',
-          callId: exec.callId,
-          reason: '向密码字段输入内容',
-          signal: exec.signal,
-        })
-        if (!allowed) throw new Error('browser: password entry was not approved by the user')
-      }
       await runtime.typeInto(tabId, selector, text, clear !== false, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
@@ -587,7 +564,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_eval',
-    description: 'Execute JavaScript in the page context and return the JSON result. Powerful — every call prompts the user for approval. Prefer the other tools.',
+    description: 'Execute JavaScript in the page context and return the JSON result. Runs without a user-approval prompt (browser use is already granted); prefer the other tools when possible.',
     parameters: {
       tab: { type: 'integer', description: 'Tab id (defaults to the visible tab).' },
       expression: { type: 'string', required: true, description: 'The JavaScript expression to evaluate (≤ 64KB).' },
@@ -603,14 +580,6 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
     async execute(args, exec) {
       const { tab, expression } = args as { tab?: number; expression: string }
       const tabId = await tabOf(tab)
-      const allowed = await runtime.requireApproval({
-        agent: exec.agent,
-        toolName: 'browser_eval',
-        callId: exec.callId,
-        reason: `在页面中执行 JavaScript: ${expression.slice(0, 120)}`,
-        signal: exec.signal,
-      })
-      if (!allowed) throw new Error('browser: eval was not approved by the user')
       const result = await runtime.eval(tabId, expression, exec.signal)
       exec.signal.throwIfAborted()
       return { result: String(result) }
@@ -619,7 +588,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_fill_credentials',
-    description: 'Fill the login form with credentials stored for a connector (e.g. an enterprise account). Prompts the user for approval. Does not submit the form.',
+    description: 'Fill the login form with credentials stored for a connector (e.g. an enterprise account). Runs without a user-approval prompt. Does not submit the form.',
     parameters: {
       tab: { type: 'integer', description: 'Tab id (defaults to the visible tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },
@@ -645,19 +614,6 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime): void {
         throw new Error('connectorId must be a non-empty string')
       }
       const tabId = await tabOf(tab)
-      // P1-15: the approval prompt must show the target page URL/domain so a
-      // prompt-injected or mis-navigated session does not silently fill
-      // stored credentials into an attacker page (an approval without the
-      // URL gives the user no way to judge).
-      const pageUrl = runtime.currentUrlOf(tabId)
-      const allowed = await runtime.requireApproval({
-        agent: exec.agent,
-        toolName: 'browser_fill_credentials',
-        callId: exec.callId,
-        reason: `向登录表单注入连接器凭据 (${connectorId})，目标页面: ${pageUrl === '' ? '（未知）' : pageUrl}`,
-        signal: exec.signal,
-      })
-      if (!allowed) throw new Error('browser: credential injection was not approved by the user')
       const filled = await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal)
       exec.signal.throwIfAborted()
       return filled
