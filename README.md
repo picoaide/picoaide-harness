@@ -17,7 +17,7 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 - **桌面客户端**：原生窗口、系统托盘、终端、自动更新，无需安装 Node.js 或执行命令；
 - **本地服务**：自动启动、停止与恢复本地 Harness 服务，数据留在本机；
-- **管理后台**：Web 化管理台，覆盖用户、部门、网关、用量、商城与审计；
+- **管理后台**：Web 化管理台，覆盖用户、部门、网关、用量、市场与能力中心（共享审批）、审计；
 - **插件生态**：官方 DeepSeek Harness 以固定版本原样运行，桌面壳与业务插件通过官方机制组合。
 
 <a id="screenshots"></a>
@@ -26,19 +26,23 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 ### 桌面客户端
 
-| 主界面 | 对话与记忆 | 连接器中心 |
+| 主界面 | 能力中心 | 连接器中心 |
 | --- | --- | --- |
-| <img src="assets/screenshots/desktop-main.png" alt="桌面主界面" width="100%"> | <img src="assets/screenshots/desktop-chat.png" alt="对话与记忆" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="连接器中心" width="100%"> |
+| <img src="assets/screenshots/desktop-main.png" alt="桌面主界面" width="100%"> | <img src="assets/screenshots/desktop-capability-market.png" alt="能力中心" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="连接器中心" width="100%"> |
 
-| 技能中心 | 定时任务 |
+| 定时任务 | 设置 |
 | --- | --- |
-| <img src="assets/screenshots/desktop-skills.png" alt="技能中心" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="定时任务" width="100%"> |
+| <img src="assets/screenshots/desktop-cron.png" alt="定时任务" width="100%"> | <img src="assets/screenshots/desktop-settings.png" alt="设置" width="100%"> |
 
 ### 管理后台
 
-| 用户管理 | 网关配置 | 用量统计 | 审计日志 |
-| --- | --- | --- | --- |
-| <img src="assets/screenshots/admin-users.png" alt="用户管理" width="100%"> | <img src="assets/screenshots/admin-gateway.png" alt="网关配置" width="100%"> | <img src="assets/screenshots/admin-usage.png" alt="用量统计" width="100%"> | <img src="assets/screenshots/admin-audit.png" alt="审计日志" width="100%"> |
+| 用户管理 | 能力中心 | 网关配置 |
+| --- | --- | --- |
+| <img src="assets/screenshots/admin-users.png" alt="用户管理" width="100%"> | <img src="assets/screenshots/admin-capabilities.png" alt="能力中心" width="100%"> | <img src="assets/screenshots/admin-gateway.png" alt="网关配置" width="100%"> |
+
+| 用量统计 | 审计日志 | 服务器信息 |
+| --- | --- | --- |
+| <img src="assets/screenshots/admin-usage.png" alt="用量统计" width="100%"> | <img src="assets/screenshots/admin-audit.png" alt="审计日志" width="100%"> | <img src="assets/screenshots/admin-server-info.png" alt="服务器信息" width="100%"> |
 
 <a id="run"></a>
 
@@ -48,9 +52,9 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 | 平台 | 下载 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [下载安装程序](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.2.1-x64-Setup.exe) | 运行 NSIS 安装程序并按提示完成安装 |
-| macOS Apple Silicon | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.2.1-mac.dmg) | 打开 DMG，将 PicoAide Harness 拖入 Applications |
-| Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.2.1-x86_64.AppImage) | 授予执行权限后运行 |
+| Windows x64 | [下载安装程序](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-x64-Setup.exe) | 运行 NSIS 安装程序并按提示完成安装 |
+| macOS Apple Silicon | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-mac.dmg) | 打开 DMG，将 PicoAide Harness 拖入 Applications |
+| Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-x86_64.AppImage) | 授予执行权限后运行 |
 
 也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要（每个 Release 附 `SHA256SUMS.txt`，安装前建议校验）。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
 
@@ -66,22 +70,23 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 ### 开箱即用的生产力工具
 
-- **连接器中心**：内置销售易、钉钉、北森、飞书、Moka、企业微信等连接器，OAuth 授权、凭据本地加密存储；
-- **技能中心**：一键安装 code-review、competitor-analysis、contract-review、data-extract 等技能；
-- **定时任务**：cron 定时执行，指定智能体与提示词，执行详情（会话/结果/错误）随时可查，由 Host 统一调度；
-- **内嵌浏览器**：Agent 可接管浏览器执行操作，多标签、快照、权限审批与下载管控；
-- **五轨记忆**：用户档案、全局事实、项目关键记忆、项目日志与每日日志，按目录与分支隔离。
+- **能力中心**：我的 / 市场两分区，技能与智能体类型筛选，来源（市场/组织/本地）与质量（官方/精选）徽章，多版本归并与历史，一键安装/更新/卸载；
+- **连接器中心**：内置销售易（NeoCRM）、Moka HR 等 MCP 连接器，OAuth 授权 + PKCE，凭据本地加密存储，动态注册 MCP；
+- **定时任务**：cron 定时执行，指定智能体与提示词、工作区与权限，执行详情（会话/结果/错误）随时可查，支持会话跳转，由 Host 统一调度；
+- **内嵌浏览器**：Agent 可接管浏览器执行操作，多标签、地址栏、权限审批与下载管控；
+- **五轨记忆**：用户档案、全局事实、项目关键记忆、项目日志与每日日志，按目录与 git 分支隔离，确认制写入。
 
 ### 安全与合规
 
 - 凭据以 0600/0700 权限原子写入，防符号链接、路径逃逸与超大读取；
 - OAuth state 校验与超时控制，登录/登出整页刷新切断旧会话；
-- 管理后台操作留痕，审计日志覆盖用户、部门、配额、网关与商店操作；
+- 管理后台操作留痕，审计日志覆盖用户、部门、配额、网关、商店与共享审批操作；
+- 上游密钥 AES-GCM 加密存储，API token 只存哈希（90 天过期），改密/降权/禁用自动吊销；
 - 上游 DeepSeek Harness 以固定版本运行，桌面壳与插件保持单向依赖，不魔改上游源码。
 
 ### 插件优先的架构
 
-- 一切皆插件：核心智能体、Web UI、桌面外壳、连接器、任务、浏览器、记忆全部通过官方 Cordis 插件机制组合；
+- 一切皆插件：核心智能体、Web UI、桌面外壳、连接器、定时任务、浏览器、记忆全部通过官方 Cordis 插件机制组合；
 - 桌面壳自身就是合法的 DSH 插件，第三方插件与桌面能力走同一条组合路径；
 - 上游固定 pin，后续同步只跟随版本号，不破坏本地扩展。
 

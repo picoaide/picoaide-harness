@@ -5,15 +5,17 @@ import Layout from '../layouts/Layout.astro'
 import Header from '../components/Header.astro'
 import Footer from '../components/Footer.astro'
 import logo from '../assets/logo.svg'
-import chatShot from '../assets/screenshots/desktop-chat.png'
+import mainShot from '../assets/screenshots/desktop-main.png'
+import capabilityShot from '../assets/screenshots/desktop-capability-market.png'
 import connectorsShot from '../assets/screenshots/desktop-connectors.png'
-import skillsShot from '../assets/screenshots/desktop-skills.png'
 import cronShot from '../assets/screenshots/desktop-cron.png'
+import settingsShot from '../assets/screenshots/desktop-settings.png'
 import adminUsersShot from '../assets/screenshots/admin-users.png'
+import adminCapabilityShot from '../assets/screenshots/admin-capabilities.png'
 import adminGatewayShot from '../assets/screenshots/admin-gateway.png'
 import adminUsageShot from '../assets/screenshots/admin-usage.png'
 import adminAuditShot from '../assets/screenshots/admin-audit.png'
-import desktopMainShot from '../assets/screenshots/desktop-main.png'
+import adminServerShot from '../assets/screenshots/admin-server-info.png'
 
 // 更新说明：取最新 3 篇博客
 const updates = (await getCollection('blog', ({ data }) => !data.draft))
@@ -40,7 +42,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         <a class="btn btn--primary" href="#features">了解产品</a>
         <a class="btn btn--ghost" href="#screenshots">查看截图</a>
       </div>
-      <Image class="hero__shot" src={desktopMainShot} alt="PicoAide Harness 桌面主界面" width={1120} height={711} format="webp" quality={80} />
+      <Image class="hero__shot" src={mainShot} alt="PicoAide Harness 桌面主界面" width={1120} height={711} format="webp" quality={80} />
     </div>
   </section>
 
@@ -53,7 +55,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <div class="features">
         <div class="feature">
           <h3>桌面客户端</h3>
-          <p>原生窗口、系统托盘、终端与自动更新。对话、记忆、连接器、技能、定时任务一站式完成，无需安装 Node.js。</p>
+          <p>原生窗口、系统托盘、终端与自动更新。对话、能力中心、连接器、定时任务、浏览器一站式完成，无需安装 Node.js。</p>
         </div>
         <div class="feature">
           <h3>本地智能体引擎</h3>
@@ -61,7 +63,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </div>
         <div class="feature">
           <h3>管理后台</h3>
-          <p>Web 化管理台覆盖用户、部门、网关、用量、商城与审计。按用户按模型计费、限额与豁免，高峰时段自动分级计价。</p>
+          <p>Web 化管理台覆盖用户、部门、网关、用量、市场与能力中心审批。按用户按模型计费、限额与豁免，高峰时段自动分级计价。</p>
         </div>
       </div>
     </div>
@@ -76,20 +78,20 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <h3 class="gallery__group">桌面客户端</h3>
       <div class="gallery">
         <figure>
-          <Image src={chatShot} alt="对话与记忆" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>对话与五轨记忆</figcaption>
+          <Image src={capabilityShot} alt="能力中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
+          <figcaption>能力中心：我的 / 市场两分区，技能与智能体类型筛选，来源与质量徽章</figcaption>
         </figure>
         <figure>
           <Image src={connectorsShot} alt="连接器中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>连接器中心：销售易、钉钉、北森、飞书、Moka、企业微信</figcaption>
-        </figure>
-        <figure>
-          <Image src={skillsShot} alt="技能中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>技能中心：一键安装 code-review 等技能</figcaption>
+          <figcaption>连接器中心：销售易、Moka 等 MCP 连接器，OAuth 授权</figcaption>
         </figure>
         <figure>
           <Image src={cronShot} alt="定时任务" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>定时任务：指定智能体、提示词与执行详情</figcaption>
+          <figcaption>定时任务：cron + 提示词 + 工作区 + 智能体预设，执行详情随时可查</figcaption>
+        </figure>
+        <figure>
+          <Image src={settingsShot} alt="设置" width={640} height={400} loading="lazy" format="webp" quality={75} />
+          <figcaption>设置：Agent 预设、权限、语言与外观</figcaption>
         </figure>
       </div>
 
@@ -97,11 +99,15 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <div class="gallery">
         <figure>
           <Image src={adminUsersShot} alt="用户管理" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>用户管理：账号、部门、角色与状态</figcaption>
+          <figcaption>用户管理：账号、部门、角色、配额与令牌</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminCapabilityShot} alt="能力中心审批" width={640} height={400} loading="lazy" format="webp" quality={75} />
+          <figcaption>能力中心：共享技能与智能体统一审批队列</figcaption>
         </figure>
         <figure>
           <Image src={adminGatewayShot} alt="网关配置" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>网关配置：模型、限流、配额与高峰时段</figcaption>
+          <figcaption>网关配置：模型、限流、配额、高峰时段与认证</figcaption>
         </figure>
         <figure>
           <Image src={adminUsageShot} alt="用量统计" width={640} height={400} loading="lazy" format="webp" quality={75} />
@@ -110,6 +116,10 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         <figure>
           <Image src={adminAuditShot} alt="审计日志" width={640} height={400} loading="lazy" format="webp" quality={75} />
           <figcaption>审计日志：关键操作全程留痕</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminServerShot} alt="服务器信息" width={640} height={400} loading="lazy" format="webp" quality={75} />
+          <figcaption>服务器信息：运行状态、数据库驱动与迁移版本</figcaption>
         </figure>
       </div>
     </div>
@@ -123,19 +133,19 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <div class="features features--4">
         <div class="feature">
           <h3>安全合规</h3>
-          <p>凭据以 0600/0700 权限原子写入，防符号链接与路径逃逸；OAuth state 校验；操作审计全程留痕。</p>
+          <p>凭据以 0600/0700 权限原子写入，防符号链接与路径逃逸；OAuth state 校验；服务端操作审计全程留痕；上游密钥 AES-GCM 加密。</p>
         </div>
         <div class="feature">
           <h3>多用户隔离</h3>
-          <p>连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话。</p>
+          <p>连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话；服务端令牌哈希存储、90 天过期、改密自动吊销。</p>
         </div>
         <div class="feature">
           <h3>一切皆插件</h3>
-          <p>核心智能体、Web UI、桌面外壳、连接器、任务与记忆全部通过官方 Cordis 插件机制组合，可替换、可演进。</p>
+          <p>核心智能体、Web UI、桌面外壳、连接器、定时任务、浏览器与记忆全部通过官方 Cordis 插件机制组合，可替换、可演进。</p>
         </div>
         <div class="feature">
           <h3>私有化部署</h3>
-          <p>数据留在本机，企业内网部署，不依赖外部云服务，完全掌控自己的 AI 底座。</p>
+          <p>数据留在本机，企业内网部署，不依赖外部云服务，完全掌控自己的 AI 底座；SQLite / PostgreSQL 双后端。</p>
         </div>
       </div>
     </div>
@@ -150,17 +160,17 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         <div class="step">
           <span class="step__num">1</span>
           <h3>准备环境</h3>
-          <p>安装桌面客户端，或在内网服务器部署本地服务。</p>
+          <p>安装桌面客户端，或在内网服务器运行服务端（Docker Compose / 单二进制，SQLite 或 PostgreSQL）。</p>
         </div>
         <div class="step">
           <span class="step__num">2</span>
           <h3>配置网关</h3>
-          <p>配置模型网关、限流、配额与高峰时段策略。</p>
+          <p>配置模型网关、限流、配额、高峰时段定价与登录方式（local / LDAP / OIDC）。</p>
         </div>
         <div class="step">
           <span class="step__num">3</span>
           <h3>接入全员</h3>
-          <p>创建用户与部门，分配角色与配额，员工开箱即用。</p>
+          <p>创建用户与部门，分配角色与配额；市场/共享内容经审批与授权后员工开箱即用。</p>
         </div>
       </div>
       <p class="deployment__note">如需获取企业版部署方案，请前往 GitHub 仓库 <a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a> 提交 Issue。</p>
@@ -205,7 +215,11 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       </details>
       <details class="faq">
         <summary>是否支持私有化部署？</summary>
-        <p>支持。数据留在本机，可部署于企业内网，不依赖外部云服务。企业版部署方案请通过 GitHub Issue 联系。</p>
+        <p>支持。数据留在本机，可部署于企业内网，不依赖外部云服务；SQLite / PostgreSQL 双后端，Docker Compose 容器化部署。</p>
+      </details>
+      <details class="faq">
+        <summary>连接器与技能如何分发？</summary>
+        <p>遵循「技能 + MCP」两种标准形态：厂商 CLI 能力以 SKILL.md 经技能商店分发（审批 + 授权），MCP 能力走连接器框架（销售易、Moka 等），可审计、可审批、可卸载。</p>
       </details>
       <details class="faq">
         <summary>是否开源？</summary>
@@ -213,7 +227,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       </details>
       <details class="faq">
         <summary>支持哪些平台？</summary>
-        <p>支持 Windows x64、macOS Apple Silicon 与 Linux x64。</p>
+        <p>支持 Windows x64、macOS Apple Silicon 与 Linux x64（AppImage + deb）。</p>
       </details>
     </div>
   </section>

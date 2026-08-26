@@ -17,7 +17,7 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 
 - **Desktop client**: native windows, system tray, terminal, automatic updates, no Node.js or command-line setup required;
 - **Local service**: automatically starts, stops, and restores the local Harness service while keeping data on your machine;
-- **Admin console**: a web-based console covering users, departments, gateway, usage, marketplace, and audit;
+- **Admin console**: a web-based console covering users, departments, gateway, usage, marketplace, and the Capability Hub (shared-content approvals), and audit;
 - **Plugin ecosystem**: the official DeepSeek Harness runs unchanged at a pinned version; the desktop shell and business plugins compose through the official mechanism.
 
 <a id="screenshots"></a>
@@ -26,19 +26,23 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 
 ### Desktop client
 
-| Main window | Chat & memory | Connector hub |
+| Main window | Capability Hub | Connector hub |
 | --- | --- | --- |
-| <img src="assets/screenshots/desktop-main.png" alt="Desktop main window" width="100%"> | <img src="assets/screenshots/desktop-chat.png" alt="Chat and memory" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="Connector hub" width="100%"> |
+| <img src="assets/screenshots/desktop-main.png" alt="Desktop main window" width="100%"> | <img src="assets/screenshots/desktop-capability-market.png" alt="Capability Hub" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="Connector hub" width="100%"> |
 
-| Skill center | Scheduled tasks |
+| Scheduled tasks | Settings |
 | --- | --- |
-| <img src="assets/screenshots/desktop-skills.png" alt="Skill center" width="100%"> | <img src="assets/screenshots/desktop-cron.png" alt="Scheduled tasks" width="100%"> |
+| <img src="assets/screenshots/desktop-cron.png" alt="Scheduled tasks" width="100%"> | <img src="assets/screenshots/desktop-settings.png" alt="Settings" width="100%"> |
 
 ### Admin console
 
-| Users | Gateway | Usage | Audit |
-| --- | --- | --- | --- |
-| <img src="assets/screenshots/admin-users.png" alt="User management" width="100%"> | <img src="assets/screenshots/admin-gateway.png" alt="Gateway configuration" width="100%"> | <img src="assets/screenshots/admin-usage.png" alt="Usage statistics" width="100%"> | <img src="assets/screenshots/admin-audit.png" alt="Audit log" width="100%"> |
+| Users | Capability Hub | Gateway |
+| --- | --- | --- |
+| <img src="assets/screenshots/admin-users.png" alt="User management" width="100%"> | <img src="assets/screenshots/admin-capabilities.png" alt="Capability Hub" width="100%"> | <img src="assets/screenshots/admin-gateway.png" alt="Gateway configuration" width="100%"> |
+
+| Usage | Audit | Server info |
+| --- | --- | --- |
+| <img src="assets/screenshots/admin-usage.png" alt="Usage statistics" width="100%"> | <img src="assets/screenshots/admin-audit.png" alt="Audit log" width="100%"> | <img src="assets/screenshots/admin-server-info.png" alt="Server info" width="100%"> |
 
 <a id="run"></a>
 
@@ -48,9 +52,9 @@ Current release installers support Windows x64, Apple Silicon macOS, and Linux x
 
 | Platform | Download | Installation |
 | --- | --- | --- |
-| Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.2.1-x64-Setup.exe) | Run the NSIS installer and follow its prompts |
-| macOS Apple Silicon | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.2.1-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
-| Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.2.1-x86_64.AppImage) | Grant execute permission and run |
+| Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-x64-Setup.exe) | Run the NSIS installer and follow its prompts |
+| macOS Apple Silicon | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
+| Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-x86_64.AppImage) | Grant execute permission and run |
 
 Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) (each release ships a `SHA256SUMS.txt`; verifying before install is recommended). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [user guide](docs/user-guide.en.md) and [FAQ](docs/faq.en.md) for plugin commands, platform details, and troubleshooting.
 
@@ -66,22 +70,23 @@ Installers and SHA-256 digests are also available from [GitHub Releases](https:/
 
 ### Production-ready productivity tools
 
-- **Connector hub**: SaleEasy, DingTalk, Beisen, Feishu, Moka, WeCom connectors with OAuth and locally encrypted credential storage;
-- **Skill center**: one-click install of code-review, competitor-analysis, contract-review, data-extract, and more;
-- **Scheduled tasks**: cron-triggered runs with a chosen agent and prompt; execution detail (session, result, error) is always inspectable; driven by the Host scheduler;
-- **Embedded browser**: the agent can take over the browser to act, with multi-tab, snapshots, permission approval, and download control;
-- **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and branch.
+- **Capability Hub**: Mine/Market tabs with skill & agent type filters, source (Market/Organization/Local) and quality (Official/Featured) badges, multi-version merge with history, and one-click install/update/uninstall;
+- **Connector hub**: built-in SalesEasy (NeoCRM), Moka HR and other MCP connectors with OAuth + PKCE, locally encrypted credential storage, and dynamic MCP registration;
+- **Scheduled tasks**: cron-triggered runs with a chosen agent, prompt, workspace, and permissions; execution detail (session, result, error) is always inspectable, with session jump; driven by the Host scheduler;
+- **Embedded browser**: the agent can take over the browser to act, with multi-tab, address bar, permission approval, and download control;
+- **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and git branch, with confirmation-first writes.
 
 ### Security and compliance
 
 - Credentials written atomically with 0600/0700 permissions, plus symlink, path-escape, and oversized-read defenses;
 - OAuth state validation and timeouts; login/logout reloads to sever old sessions;
-- Admin operations are auditable, covering users, departments, quotas, gateway, and marketplace;
+- Admin operations are auditable, covering users, departments, quotas, gateway, marketplace, and shared-content approvals;
+- Upstream keys stored with AES-GCM encryption; API tokens hashed-only (90-day expiry) and automatically revoked on password change/role downgrade/disable;
 - Upstream DeepSeek Harness runs at a pinned version; the shell and plugins stay one-way dependent without forking upstream code.
 
 ### Plugin-first architecture
 
-- Everything is a plugin: the core agents, Web UI, desktop shell, connectors, tasks, browser, and memory all compose through the official Cordis plugin mechanism;
+- Everything is a plugin: the core agents, Web UI, desktop shell, connectors, scheduled tasks, browser, and memory all compose through the official Cordis plugin mechanism;
 - The desktop shell itself is a legitimate DSH plugin; third-party plugins and desktop abilities share the same composition path;
 - Upstream is pinned, and future sync follows versions only without breaking local extensions.
 
