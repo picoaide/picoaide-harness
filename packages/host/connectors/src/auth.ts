@@ -1,10 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { CliAuthConfig, ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig, TokenField } from './types.ts'
+import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig, TokenField } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
-import type { CliRuntime } from './cli-runtime.ts'
 
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
@@ -24,8 +22,6 @@ export interface AuthRunOptions {
   callbackHost?: string
   /** Pre-connect settings already collected from the user. */
   fields?: Record<string, string>
-  /** Download-on-demand CLI resolver (dws / beisen-cli). */
-  cli?: CliRuntime
 }
 
 /**
@@ -362,46 +358,12 @@ export interface AuthProbe {
 }
 
 function createProbe(def: ConnectorDef, options: AuthRunOptions): AuthProbe {
-  if (def.authMode === 'cli') {
-    const auth = def.auth as CliAuthConfig
-    return {
-      isConnected: () => runProbeCommand(auth.statusCommand ?? '', auth.statusArgs ?? [], auth.env, options.cli),
-    }
-  }
-  // Default: nothing to probe (device connectors that need a real endpoint
-  // define a status probe; without one the flow completes immediately).
+  // 决策 2026-08-25:CLI 连接器已删除(CLI 即 skill)——device 连接器默认
+  // 无状态探测,完成后立即成功。
+  void def
+  void options
   return { isConnected: async () => true }
 }
-
-async function runProbeCommand(command: string, args: string[], env?: Record<string, string>, cli?: CliRuntime): Promise<boolean> {
-  // 审计 2026-08-25 P2-2:此前 status command 无超时——子进程挂起会让
-  // pollUntilConnected 的 deadline 形同虚设(卡在第一次 await),UI 永久转圈。
-  // 与 CLI 路径一致:15s 超时 kill 并按失败处理。
-  const resolved = cli ? await cli.resolve(command, args) : null
-  return new Promise((resolve) => {
-    const child = spawn(resolved?.command ?? command, resolved?.args ?? args, {
-      env: { ...process.env, ...env },
-      stdio: 'ignore',
-      shell: resolved?.shell,
-    })
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      resolve(false)
-    }, PROBE_TIMEOUT_MS)
-    timer.unref?.()
-    child.on('error', () => {
-      clearTimeout(timer)
-      resolve(false)
-    })
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      resolve(code === 0)
-    })
-  })
-}
-
-/** Status probe 子进程超时(审计 2026-08-25 P2-2)。 */
-const PROBE_TIMEOUT_MS = 15_000
 
 async function pollUntilConnected(
   probe: AuthProbe,
@@ -427,104 +389,6 @@ async function runToken(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   return { updatedAt: Date.now() } as Partial<ConnectorCredential>
 }
 
-/**
- * CLI flow (mirrors WorkBuddy's CliExecutor.runAuth): spawn the login
- * command, scan stdout/stderr for the device-flow verification URL and user
- * code (pushed to the UI through onRequest), then keep the process running
- * until it exits naturally (exit 0 = authorized). Falls back to the login +
- * status-poll sequence when no deviceFlow is configured.
- */
-async function runCli(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
-  const auth = def.auth as CliAuthConfig
-  const signal = options.signal
-  const deviceFlow = auth.deviceFlow
-  const waitForExit = auth.authWaitForExit ?? deviceFlow !== undefined
-  const timeoutMs = auth.timeoutMs ?? (waitForExit ? 300_000 : 10_000)
-
-  // Download-on-demand: when the CLI is not installed, the runtime fetches
-  // the pinned native binary and reports progress through the pending
-  // request so the UI can show "正在下载…" instead of a bare ENOENT.
-  const resolved = options.cli
-    ? await options.cli.resolve(auth.command, auth.args, (message) => {
-        options.onRequest({ connectorId: def.id, message })
-      })
-    : null
-  const spawnCommand = resolved?.command ?? auth.command
-  const spawnArgs = resolved?.args ?? auth.args
-
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
-    const child = spawn(spawnCommand, spawnArgs, {
-      env: { ...process.env, ...auth.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: resolved?.shell,
-    })
-    let stdout = ''
-    let stderr = ''
-    let reportedUri: string | undefined
-    let reportedCode: string | undefined
-
-    const extract = (text: string, _source: string): void => {
-      if (!deviceFlow) return
-      let uri: string | undefined
-      try {
-        const match = text.match(new RegExp(deviceFlow.uriPattern))
-        uri = (match?.[1] ?? match?.[0])?.trim()
-      } catch { /* invalid pattern */ }
-      let code: string | undefined
-      if (deviceFlow.codePattern) {
-        try {
-          const match = text.match(new RegExp(deviceFlow.codePattern))
-          code = (match?.[1] ?? match?.[0])?.trim()
-        } catch { /* invalid pattern */ }
-      }
-      if (!uri && !code) return
-      // The URL and the code may land in different output chunks; keep
-      // reporting until both are known.
-      if (uri === reportedUri && code === reportedCode) return
-      reportedUri = uri ?? reportedUri
-      reportedCode = code ?? reportedCode
-      options.onRequest({ connectorId: def.id, ...(reportedUri !== undefined ? { verificationUrl: reportedUri } : {}), ...(reportedCode !== undefined ? { userCode: reportedCode } : {}) })
-    }
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString()
-      extract(stdout, 'stdout')
-    })
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
-      extract(stderr, 'stderr')
-    })
-    child.on('error', (error) => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        // The CLI binary is missing: always name the command and, when the
-        // def knows the install method, surface it so the UI can show an
-        // actionable hint instead of a bare ENOENT.
-        const hint = auth.installCommand
-          ? `，请先安装：${auth.installCommand}`
-          : '，请确认已安装该命令行工具并加入 PATH'
-        reject(new Error(`未找到命令 ${auth.command}${hint}`))
-        return
-      }
-      reject(error)
-    })
-    child.on('exit', (code) => resolve(code))
-
-    const timer = setTimeout(() => {
-      try { child.kill() } catch { /* already gone */ }
-      reject(new Error(`登录命令超时（${Math.round(timeoutMs / 1000)}s）`))
-    }, timeoutMs)
-    child.on('exit', () => { clearTimeout(timer) })
-    signal.addEventListener('abort', () => {
-      try { child.kill() } catch { /* already gone */ }
-    }, { once: true })
-  })
-
-  throwIfAborted(signal)
-  if (exitCode !== 0) throw new Error(`登录命令退出码 ${exitCode ?? 'error'}`)
-  if (waitForExit) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
-  return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, signal)
-}
-
 /** Server-side flow: fetch the managed token through the injected callback. */
 async function runServerSide(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   void def
@@ -544,8 +408,6 @@ export async function runAuth(def: ConnectorDef, options: AuthRunOptions): Promi
       return runDevice(def, options)
     case 'token':
       return runToken(def, options)
-    case 'cli':
-      return runCli(def, options)
     case 'server-side':
       return runServerSide(def, options)
   }

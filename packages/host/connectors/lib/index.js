@@ -1,13 +1,10 @@
 import { userScopePath } from "./user-scope.js";
 import { ConnectorStore } from "./store.js";
-import { CLI_MANIFESTS, cliPlatformKey } from "./cli-manifest.js";
-import { extractArchive, findEntry, readArchiveEntries } from "./archive.js";
 import { salesEasyDef } from "./sales-easy.js";
-import { dingTalkDef } from "./dingtalk.js";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, promises, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 //#region src/loopback.ts
@@ -304,40 +301,8 @@ async function runDevice(def, options) {
 	return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, options.signal);
 }
 function createProbe(def, options) {
-	if (def.authMode === "cli") {
-		const auth = def.auth;
-		return { isConnected: () => runProbeCommand(auth.statusCommand ?? "", auth.statusArgs ?? [], auth.env, options.cli) };
-	}
 	return { isConnected: async () => true };
 }
-async function runProbeCommand(command, args, env, cli) {
-	const resolved = cli ? await cli.resolve(command, args) : null;
-	return new Promise((resolve) => {
-		const child = spawn(resolved?.command ?? command, resolved?.args ?? args, {
-			env: {
-				...process.env,
-				...env
-			},
-			stdio: "ignore",
-			shell: resolved?.shell
-		});
-		const timer = setTimeout(() => {
-			child.kill("SIGKILL");
-			resolve(false);
-		}, PROBE_TIMEOUT_MS);
-		timer.unref?.();
-		child.on("error", () => {
-			clearTimeout(timer);
-			resolve(false);
-		});
-		child.on("exit", (code) => {
-			clearTimeout(timer);
-			resolve(code === 0);
-		});
-	});
-}
-/** Status probe 子进程超时(审计 2026-08-25 P2-2)。 */
-const PROBE_TIMEOUT_MS = 15e3;
 async function pollUntilConnected(probe, pollIntervalMs, pollTimeoutMs, signal) {
 	const deadline = Date.now() + pollTimeoutMs;
 	while (Date.now() < deadline) {
@@ -356,103 +321,6 @@ async function runToken(def, options) {
 	});
 	return { updatedAt: Date.now() };
 }
-/**
-* CLI flow (mirrors WorkBuddy's CliExecutor.runAuth): spawn the login
-* command, scan stdout/stderr for the device-flow verification URL and user
-* code (pushed to the UI through onRequest), then keep the process running
-* until it exits naturally (exit 0 = authorized). Falls back to the login +
-* status-poll sequence when no deviceFlow is configured.
-*/
-async function runCli(def, options) {
-	const auth = def.auth;
-	const signal = options.signal;
-	const deviceFlow = auth.deviceFlow;
-	const waitForExit = auth.authWaitForExit ?? deviceFlow !== void 0;
-	const timeoutMs = auth.timeoutMs ?? (waitForExit ? 3e5 : 1e4);
-	const resolved = options.cli ? await options.cli.resolve(auth.command, auth.args, (message) => {
-		options.onRequest({
-			connectorId: def.id,
-			message
-		});
-	}) : null;
-	const spawnCommand = resolved?.command ?? auth.command;
-	const spawnArgs = resolved?.args ?? auth.args;
-	const exitCode = await new Promise((resolve, reject) => {
-		const child = spawn(spawnCommand, spawnArgs, {
-			env: {
-				...process.env,
-				...auth.env
-			},
-			stdio: [
-				"ignore",
-				"pipe",
-				"pipe"
-			],
-			shell: resolved?.shell
-		});
-		let stdout = "";
-		let stderr = "";
-		let reportedUri;
-		let reportedCode;
-		const extract = (text, _source) => {
-			if (!deviceFlow) return;
-			let uri;
-			try {
-				const match = text.match(new RegExp(deviceFlow.uriPattern));
-				uri = (match?.[1] ?? match?.[0])?.trim();
-			} catch {}
-			let code;
-			if (deviceFlow.codePattern) try {
-				const match = text.match(new RegExp(deviceFlow.codePattern));
-				code = (match?.[1] ?? match?.[0])?.trim();
-			} catch {}
-			if (!uri && !code) return;
-			if (uri === reportedUri && code === reportedCode) return;
-			reportedUri = uri ?? reportedUri;
-			reportedCode = code ?? reportedCode;
-			options.onRequest({
-				connectorId: def.id,
-				...reportedUri !== void 0 ? { verificationUrl: reportedUri } : {},
-				...reportedCode !== void 0 ? { userCode: reportedCode } : {}
-			});
-		};
-		child.stdout?.on("data", (chunk) => {
-			stdout += chunk.toString();
-			extract(stdout, "stdout");
-		});
-		child.stderr?.on("data", (chunk) => {
-			stderr += chunk.toString();
-			extract(stderr, "stderr");
-		});
-		child.on("error", (error) => {
-			if (error.code === "ENOENT") {
-				const hint = auth.installCommand ? `，请先安装：${auth.installCommand}` : "，请确认已安装该命令行工具并加入 PATH";
-				reject(/* @__PURE__ */ new Error(`未找到命令 ${auth.command}${hint}`));
-				return;
-			}
-			reject(error);
-		});
-		child.on("exit", (code) => resolve(code));
-		const timer = setTimeout(() => {
-			try {
-				child.kill();
-			} catch {}
-			reject(/* @__PURE__ */ new Error(`登录命令超时（${Math.round(timeoutMs / 1e3)}s）`));
-		}, timeoutMs);
-		child.on("exit", () => {
-			clearTimeout(timer);
-		});
-		signal.addEventListener("abort", () => {
-			try {
-				child.kill();
-			} catch {}
-		}, { once: true });
-	});
-	throwIfAborted(signal);
-	if (exitCode !== 0) throw new Error(`登录命令退出码 ${exitCode ?? "error"}`);
-	if (waitForExit) return { updatedAt: Date.now() };
-	return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, signal);
-}
 /** Server-side flow: fetch the managed token through the injected callback. */
 async function runServerSide(def, options) {
 	const auth = def.auth;
@@ -467,386 +335,36 @@ async function runAuth(def, options) {
 		case "oauth": return runOAuth(def, options);
 		case "device": return runDevice(def, options);
 		case "token": return runToken(def, options);
-		case "cli": return runCli(def, options);
 		case "server-side": return runServerSide(def, options);
 	}
 }
 //#endregion
-//#region src/cli-runtime.ts
-/**
-* Download-on-demand runtime for connector CLI tools.
-*
-* Resolution order for a connector CLI command (`dws`, `beisen-cli`, ...):
-*   1. PATH lookup wins — a user-installed CLI is used as-is, nothing is
-*      downloaded and no cache is touched.
-*   2. Otherwise, if a pinned manifest exists for the command, the official
-*      platform archive is downloaded, sha256-verified against the pinned
-*      checksum, extracted into the user cache dir and the native binary is
-*      spawned directly (never the vendor's install scripts, which have
-*      invasive side effects — e.g. dws' postinstall writes skills into
-*      claude/cursor agent dirs).
-*   3. Otherwise `null` — the caller keeps the original command and the
-*      regular ENOENT flow produces the "install the CLI manually" hint.
-*
-* The cache is per command+version under the connector store dir; the binary
-* is only replaced when its marker (pinned archive checksum + extracted
-* binary size) is missing or mismatched. Downloads are deduplicated across
-* concurrent connects.
-*/
-/**
-* Default bundled-binary directory. In a packaged Electron app the
-* prefetched CLI binaries ship under `<resourcesPath>/cli` (see the desktop
-* prefetch script and electron-builder extraResources); outside a packaged
-* app (dev, tests) no bundled dir exists and every connect downloads on
-* demand.
-*/
-const DEFAULT_BUNDLED_DIR = (() => {
-	const resourcesPath = globalThis.process?.resourcesPath;
-	return typeof resourcesPath === "string" && resourcesPath.length > 0 ? join(resourcesPath, "cli") : null;
-})();
-const DIRECT_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024;
-const NPM_TARBALL_MAX_BYTES = 120 * 1024 * 1024;
-var CliRuntime = class {
-	cacheDir;
-	bundledDir;
-	manifests;
-	fetchImpl;
-	downloadTimeoutMs;
-	inflight = /* @__PURE__ */ new Map();
-	constructor(options = {}) {
-		this.cacheDir = options.cacheDir ?? join(userScopePath(options.username), "connectors", "cli");
-		this.bundledDir = options.bundledDir ?? DEFAULT_BUNDLED_DIR;
-		this.manifests = options.manifests ?? CLI_MANIFESTS;
-		this.fetchImpl = options.fetchImpl ?? fetch;
-		this.downloadTimeoutMs = options.downloadTimeoutMs ?? 12e4;
-	}
-	/**
-	* Resolve a CLI command to an executable, downloading the pinned binary
-	* when the command is not installed. Returns null when the runtime does not
-	* provide this command (caller falls back to the raw name).
-	*/
-	async resolve(command, args, onProgress) {
-		const onPath = await findOnPath(command);
-		if (onPath) return {
-			command: onPath.path,
-			args,
-			shell: onPath.shell
-		};
-		const manifest = this.manifests.get(command);
-		if (!manifest) return null;
-		const bundled = await this.bundledBinary(manifest);
-		if (bundled) return {
-			command: bundled,
-			args
-		};
-		const binary = await this.ensureBinary(manifest, onProgress);
-		if (!binary) return null;
-		return {
-			command: binary,
-			args
-		};
-	}
-	/** Locate a prefetched binary in the bundled directory, if any. */
-	async bundledBinary(manifest) {
-		if (!this.bundledDir) return null;
-		const binaryName = `${manifest.binaryName}${process.platform === "win32" ? ".exe" : ""}`;
-		const candidate = join(this.bundledDir, manifest.command, manifest.version, binaryName);
-		const stat = await promises.stat(candidate).catch(() => null);
-		if (stat?.isFile() && (process.platform === "win32" || (stat.mode & 73) !== 0)) return candidate;
-		return null;
-	}
-	/**
-	* Ensure the pinned native binary for `manifest` exists in the cache,
-	* downloading and extracting it when needed. Returns null on platforms the
-	* manifest does not cover.
-	*/
-	async ensureBinary(manifest, onProgress) {
-		const platform = cliPlatformKey(process.platform, process.arch);
-		if (!platform) return null;
-		const key = `${manifest.command}@${manifest.version}`;
-		const pending = this.inflight.get(key);
-		if (pending) return pending;
-		const run = this.installBinary(manifest, platform, onProgress);
-		this.inflight.set(key, run);
-		try {
-			return await run;
-		} finally {
-			if (this.inflight.get(key) === run) this.inflight.delete(key);
-		}
-	}
-	async installBinary(manifest, platform, onProgress) {
-		const expected = this.expectedAsset(manifest, platform);
-		if (!expected) return null;
-		const dir = join(this.cacheDir, manifest.command, manifest.version);
-		const binaryName = `${manifest.binaryName}${process.platform === "win32" ? ".exe" : ""}`;
-		const binaryPath = join(dir, binaryName);
-		const markerPath = join(dir, ".checksum");
-		const cached = await readMarker(markerPath);
-		if (cached?.archiveName === expected.archiveName && cached.checksum === expected.checksum) {
-			const stat = await promises.stat(binaryPath).catch(() => null);
-			if (stat?.isFile() && stat.size === cached.binarySize && (process.platform === "win32" || (stat.mode & 73) !== 0)) return binaryPath;
-		}
-		const fetched = await this.fetchPlatformArchive(manifest, platform, expected, onProgress);
-		onProgress?.(`正在解压并安装 ${manifest.displayName}…`);
-		await promises.mkdir(dir, {
-			recursive: true,
-			mode: 448
-		});
-		const tmp = join(dir, `.tmp-${process.pid}-${Date.now().toString(36)}`);
-		try {
-			await promises.mkdir(tmp, {
-				recursive: true,
-				mode: 448
-			});
-			const written = await extractArchive(fetched.archive, tmp);
-			let extracted = join(tmp, binaryName);
-			if (!written.includes(binaryName)) {
-				const found = await findFileNamed(tmp, binaryName);
-				if (!found) throw new Error(`压缩包内未找到 ${binaryName}`);
-				extracted = found;
-			}
-			await promises.rename(extracted, binaryPath);
-			await promises.chmod(binaryPath, 493);
-			const stat = await promises.stat(binaryPath);
-			await writeMarker(markerPath, `${expected.archiveName} ${expected.checksum} ${stat.size}\n`);
-		} finally {
-			await promises.rm(tmp, {
-				recursive: true,
-				force: true
-			});
-		}
-		return binaryPath;
-	}
-	/** Derive the expected platform asset from the manifest (no network). */
-	expectedAsset(manifest, platform) {
-		const source = manifest.source;
-		if (source.kind === "npm-package") {
-			const asset = source.asset(platform);
-			if (!asset) return null;
-			const checksum = source.checksums[asset];
-			if (!checksum) throw new Error(`下载清单缺少 ${asset} 的校验和，请更新插件`);
-			return {
-				archiveName: asset,
-				checksum
-			};
-		}
-		const url = source.url(platform);
-		if (!url) return null;
-		const archiveName = basename(new URL(url).pathname);
-		const checksum = source.checksums[archiveName];
-		if (!checksum) throw new Error(`下载清单缺少 ${archiveName} 的校验和，请更新插件`);
-		return {
-			archiveName,
-			checksum
-		};
-	}
-	/** Download the pinned platform archive (tarball inner asset or direct URL). */
-	async fetchPlatformArchive(manifest, platform, expected, onProgress) {
-		const source = manifest.source;
-		if (source.kind === "npm-package") {
-			let lastError;
-			for (const registry of source.registries) {
-				const url = `${registry.replace(/\/+$/, "")}/${source.packageName}/-/${source.packageName}-${source.packageVersion}.tgz`;
-				onProgress?.(`正在从 ${new URL(url).host} 下载 ${source.packageName}（仅首次连接，约 70MB）…`);
-				try {
-					const inner = findEntry(readArchiveEntries(await this.download(url, NPM_TARBALL_MAX_BYTES)), source.innerPath(expected.archiveName));
-					if (!inner) throw new Error(`npm 包内未找到 ${source.innerPath(expected.archiveName)}`);
-					verifyChecksum(expected.archiveName, inner.data, expected.checksum);
-					return {
-						archiveName: expected.archiveName,
-						checksum: expected.checksum,
-						archive: inner.data
-					};
-				} catch (error) {
-					lastError = error;
-				}
-			}
-			throw lastError instanceof Error ? lastError : /* @__PURE__ */ new Error(`下载 ${source.packageName} 失败`);
-		}
-		const url = source.url(platform);
-		onProgress?.(`正在从 ${new URL(url).host} 下载 ${manifest.displayName}（仅首次连接）…`);
-		const bytes = await this.download(url, DIRECT_DOWNLOAD_MAX_BYTES);
-		verifyChecksum(expected.archiveName, bytes, expected.checksum);
-		return {
-			archiveName: expected.archiveName,
-			checksum: expected.checksum,
-			archive: bytes
-		};
-	}
-	async download(url, maxBytes) {
-		let response;
-		try {
-			response = await this.fetchImpl(url, {
-				redirect: "follow",
-				signal: AbortSignal.timeout(this.downloadTimeoutMs),
-				headers: { "User-Agent": "picoaide-connectors/0.1" }
-			});
-		} catch (error) {
-			throw new Error(`网络请求失败：${error instanceof Error ? error.message : String(error)}`);
-		}
-		if (!response.ok) throw new Error(`HTTP ${response.status}`);
-		if (Number(response.headers.get("content-length") ?? 0) > maxBytes) throw new Error("文件超过大小上限，已拒绝");
-		const bytes = Buffer.from(await response.arrayBuffer());
-		if (bytes.length > maxBytes) throw new Error("文件超过大小上限，已拒绝");
-		return bytes;
-	}
-};
-function verifyChecksum(name, data, expected) {
-	if (createHash("sha256").update(data).digest("hex") !== expected) throw new Error(`校验和验证失败（${name}），下载源可能被篡改或清单过期，已中止`);
-}
-async function readMarker(path) {
-	try {
-		const [archiveName, checksum, size] = (await promises.readFile(path, "utf8")).trim().split(/\s+/u);
-		const binarySize = Number(size);
-		if (!archiveName || !checksum || !Number.isSafeInteger(binarySize)) return null;
-		return {
-			archiveName,
-			checksum,
-			binarySize
-		};
-	} catch {
-		return null;
-	}
-}
-async function writeMarker(path, marker) {
-	const tmp = `${path}.tmp`;
-	await promises.writeFile(tmp, marker, { mode: 384 });
-	await promises.rename(tmp, path);
-}
-async function findFileNamed(root, name) {
-	const queue = [root];
-	while (queue.length > 0) {
-		const dir = queue.shift();
-		let entries;
-		try {
-			entries = await promises.readdir(dir);
-		} catch {
-			continue;
-		}
-		for (const entry of entries) {
-			const full = join(dir, entry);
-			const stat = await promises.stat(full).catch(() => null);
-			if (!stat) continue;
-			if (stat.isDirectory()) queue.push(full);
-			else if (entry === name) return full;
-		}
-	}
-	return null;
-}
-/**
-* Locate `command` on PATH (Windows: PATHEXT-aware). Returns the concrete
-* file path; `.cmd`/`.bat` shims need a shell to spawn.
-*/
-async function findOnPath(command) {
-	const isWin = process.platform === "win32";
-	const pathVar = process.env.PATH ?? "";
-	const extensions = isWin ? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)] : [""];
-	const separators = isWin ? /[;:]/u : /:/u;
-	for (const dir of pathVar.split(separators)) {
-		if (!dir) continue;
-		for (const ext of extensions) {
-			const candidate = join(dir, `${command}${ext}`);
-			try {
-				const stat = await promises.stat(candidate);
-				if (!stat.isFile()) continue;
-				if (!isWin && (stat.mode & 73) === 0) continue;
-				return {
-					path: candidate,
-					shell: isWin && /\.(cmd|bat)$/iu.test(ext)
-				};
-			} catch {}
-		}
-	}
-	return null;
-}
-//#endregion
 //#region src/defs/index.ts
-/** Curated marketplace connector definitions (wecom / feishu / moka / beisen-cli). */
-const marketplaceDefs = [
-	{
-		"id": "beisen-cli",
-		"name": "北森AI · HR专家",
-		"description": "",
-		"authMode": "cli",
-		"auth": {
-			"command": "beisen-cli",
-			"args": ["auth", "login"],
-			"installCommand": "npm install -g beisen-cli",
-			"deviceFlow": { "uriPattern": "https?://[^\\s\\n\\r\"'<>]+" },
-			"authWaitForExit": true,
-			"suppressBrowser": false,
-			"statusCommand": "beisen-cli",
-			"statusArgs": ["auth", "status"]
-		},
-		"mcp": []
+/**
+* Marketplace connector definitions (决策 2026-08-25:CLI 连接器已移除——
+* CLI 即 skill,由技能市场承载;连接器只保留 MCP 类)。
+*/
+const marketplaceDefs = [{
+	"id": "moka",
+	"name": "Moka HR 智能体",
+	"description": "招聘和人事一体的 AI 同事，把查询与执行收进一个对话。人才推荐、招聘动态、考勤绩效、审批待办，一句话问清；智能寻聘、面试分析与面试官评估，一句话发起。",
+	"authMode": "oauth",
+	"auth": {
+		"discoveryUrl": "https://mcp.mokahr.com/mcp",
+		"clientId": "",
+		"authorizeUrl": "",
+		"tokenUrl": "",
+		"redirectUri": "http://127.0.0.1/callback",
+		"pkce": true,
+		"publicClient": true,
+		"scopes": "offline_access"
 	},
-	{
-		"id": "feishu",
-		"name": "飞书",
-		"description": "",
-		"authMode": "cli",
-		"auth": {
-			"command": "lark-cli",
-			"args": [
-				"config",
-				"init",
-				"--new",
-				"--lang",
-				"en"
-			],
-			"installCommand": "npm install -g @larksuite/cli",
-			"deviceFlow": { "uriPattern": "https?://[^\\s\\n\\r\"'<>]+" },
-			"authWaitForExit": true,
-			"suppressBrowser": true,
-			"statusCommand": "lark-cli",
-			"statusArgs": ["auth", "status"]
-		},
-		"mcp": []
-	},
-	{
-		"id": "moka",
-		"name": "Moka HR 智能体",
-		"description": "招聘和人事一体的 AI 同事，把查询与执行收进一个对话。人才推荐、招聘动态、考勤绩效、审批待办，一句话问清；智能寻聘、面试分析与面试官评估，一句话发起。",
-		"authMode": "oauth",
-		"auth": {
-			"discoveryUrl": "https://mcp.mokahr.com/mcp",
-			"clientId": "",
-			"authorizeUrl": "",
-			"tokenUrl": "",
-			"redirectUri": "http://127.0.0.1/callback",
-			"pkce": true,
-			"publicClient": true,
-			"scopes": "offline_access"
-		},
-		"mcp": [{
-			"serverName": "moka",
-			"transport": "streamable-http",
-			"url": "https://mcp.mokahr.com/mcp"
-		}]
-	},
-	{
-		"id": "wecom",
-		"name": "企业微信",
-		"description": "",
-		"authMode": "cli",
-		"auth": {
-			"command": "wecom-cli",
-			"args": [
-				"auth",
-				"init",
-				"--noninteractive",
-				"--no-browser"
-			],
-			"installCommand": "npm install -g @wecom/cli",
-			"deviceFlow": { "uriPattern": "https?://[^\\s\\n\\r\"'<>]+" },
-			"authWaitForExit": true,
-			"suppressBrowser": true,
-			"statusCommand": "wecom-cli",
-			"statusArgs": ["auth", "show"]
-		},
-		"mcp": []
-	}
-];
+	"mcp": [{
+		"serverName": "moka",
+		"transport": "streamable-http",
+		"url": "https://mcp.mokahr.com/mcp"
+	}]
+}];
 //#endregion
 //#region src/index.ts
 /**
@@ -904,7 +422,7 @@ function exact(handler) {
 	};
 }
 function apply(ctx, options = {}) {
-	const defs = dedupeById([...marketplaceDefs, ...options.connectors ?? []], [salesEasyDef, dingTalkDef]);
+	const defs = dedupeById([...marketplaceDefs, ...options.connectors ?? []], [salesEasyDef]);
 	const currentUser = () => {
 		try {
 			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
@@ -913,7 +431,6 @@ function apply(ctx, options = {}) {
 		}
 	};
 	let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() });
-	let cliRuntime = new CliRuntime(options.cliCacheDir ? { cacheDir: options.cliCacheDir } : { username: currentUser() });
 	const states = /* @__PURE__ */ new Map();
 	const pendingRequests = /* @__PURE__ */ new Map();
 	const mcpDisposers = /* @__PURE__ */ new Map();
@@ -935,7 +452,6 @@ function apply(ctx, options = {}) {
 		const username = currentUser();
 		migrateLegacyStore(username);
 		if (!options.storeBaseDir) store = new ConnectorStore({ username });
-		if (!options.cliCacheDir) cliRuntime = new CliRuntime({ username });
 	};
 	ctx.on("pico/session-changed", (next) => {
 		(async () => {
@@ -965,9 +481,8 @@ function apply(ctx, options = {}) {
 	const resolveUrlCommand = async (args, extraEnv) => {
 		const [command, ...rest] = args;
 		if (command === void 0) throw new Error("urlCommand is empty");
-		const resolved = await cliRuntime.resolve(command, rest);
-		const spawnCommand = resolved?.command ?? command;
-		const spawnArgs = resolved?.args ?? rest;
+		const spawnCommand = command;
+		const spawnArgs = rest;
 		return new Promise((resolve, reject) => {
 			const child = spawn(spawnCommand, spawnArgs, {
 				env: {
@@ -978,8 +493,7 @@ function apply(ctx, options = {}) {
 					"ignore",
 					"pipe",
 					"pipe"
-				],
-				shell: resolved?.shell
+				]
 			});
 			const timer = setTimeout(() => {
 				child.kill("SIGKILL");
@@ -1120,7 +634,6 @@ function apply(ctx, options = {}) {
 			const patch = await runAuth(def, {
 				onRequest: emitRequest,
 				signal: controller.signal,
-				cli: cliRuntime,
 				...existing?.fields ? { fields: existing.fields } : {}
 			});
 			if (def.authMode === "token") {

@@ -28,15 +28,15 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
-// The connectors package exposes its pinned manifest table through the
-// `./cli-manifest` subpath (same table the runtime uses).
+// The cli-tools package exposes its pinned manifest table through the
+// `./cli-manifest` subpath (same table the installer uses).
 let CLI_MANIFESTS
 let archiveHelpers
 try {
-  CLI_MANIFESTS = require('@picoaide/dsh-connectors/cli-manifest').CLI_MANIFESTS
-  archiveHelpers = require('@picoaide/dsh-connectors/archive')
+  CLI_MANIFESTS = require('@picoaide/dsh-cli-tools/cli-manifest').CLI_MANIFESTS
+  archiveHelpers = require('@picoaide/dsh-cli-tools/archive')
 } catch (error) {
-  console.error('prefetch-cli: cannot load @picoaide/dsh-connectors cli-manifest/archive — run the connectors build first')
+  console.error('prefetch-cli: cannot load @picoaide/dsh-cli-tools cli-manifest/archive — run the cli-tools build first')
   process.exit(1)
 }
 

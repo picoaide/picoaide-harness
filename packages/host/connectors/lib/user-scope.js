@@ -81,35 +81,7 @@ function userScopePath(username, env = process.env) {
 	const key = username !== void 0 && username !== null && username.length > 0 ? username : "anonymous";
 	return join(resolveDshHome(void 0, env), "users", encodeSegment(key));
 }
-/**
-* Environment for external CLI tools that persist credentials themselves
-* (e.g. `dws` / `dingtalk-workspace-cli`).
-*
-* The dws CLI stores its runtime config in `~/.dws` and its encrypted
-* keychain in `~/.local/share/dws-cli` by default. Both sit outside the
-* product home, which (a) leaks auth state across products and (b) breaks in
-* read-only / sandboxed homes where those directories cannot be created
-* (the token write fails -> every `dws mcp url get` returns
-* `business error: success=false`).
-*
-* Override both to live under the product DSH home (same resolver as every
-* other product data directory): `$DWS_CONFIG_DIR` -> `<dshHome>` and
-* `$DWS_KEYCHAIN_DIR` -> `<dshHome>/dws/keychain`.
-*
-* NOTE: `DWS_KEYCHAIN_DIR` is an undocumented dws knob (present in the dws
-* binary; not listed by `dws config list`). It is set for completeness —
-* dws falls back to `~/.local/share/dws-cli` on Linux without it — and is
-* harmless when the CLI ignores it. Verify against the pinned binary in
-* cli-manifest.ts (wiring lives in the connector defs).
-*/
-function dwsEnv(env = process.env) {
-	const home = resolveDshHome(void 0, env);
-	return {
-		DWS_CONFIG_DIR: home,
-		DWS_KEYCHAIN_DIR: join(home, "dws", "keychain")
-	};
-}
 //#endregion
-export { DSH_HOME_ENV, PRODUCT_DSH_HOME_DIR, dshHome, dshHomePath, dwsEnv, encodeSegment, expandHomePath, resolveDshHome, userScopePath };
+export { DSH_HOME_ENV, PRODUCT_DSH_HOME_DIR, dshHome, dshHomePath, encodeSegment, expandHomePath, resolveDshHome, userScopePath };
 
 //# sourceMappingURL=user-scope.js.map

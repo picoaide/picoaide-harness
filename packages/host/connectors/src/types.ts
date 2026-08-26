@@ -8,8 +8,8 @@
  * registration; connector packages only ship definitions.
  */
 
-/** Authentication modes, matching WorkBuddy's auth modes. */
-export type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'cli' | 'server-side'
+/** Authentication modes (决策 2026-08-25:CLI 已移除——CLI 即 skill)。 */
+export type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'server-side'
 
 /** OAuth authorization-code flow (supports RFC 8414 discovery + RFC 7591 dynamic registration + PKCE). */
 export interface OAuthAuthConfig {
@@ -56,40 +56,6 @@ export interface TokenField {
   defaultValue?: string
 }
 
-/** CLI flow: run a command that performs interactive auth (login), then poll a status command. */
-export interface CliAuthConfig {
-  /** Login command executable (e.g. 'dws', 'neocrm'). */
-  command: string
-  args: string[]
-  /** Env for the login command. */
-  env?: Record<string, string>
-  /** Shown in the failure message when the command is not installed (e.g. `npm install -g <pkg>`). */
-  installCommand?: string
-  /**
-   * Device-flow parsing (mirrors WorkBuddy's cli.json authDeviceFlow): the
-   * login command prints a verification URL and a user code, then keeps
-   * polling until the user authorizes and exits (exit 0 = success). The
-   * parsed URL/code are pushed to the UI through onRequest.
-   */
-  deviceFlow?: {
-    /** Regex extracting the verification URL (first capture group, else the whole match). */
-    uriPattern: string
-    /** Regex extracting the user code (first capture group, else the whole match). */
-    codePattern?: string
-  }
-  /** Keep the login process running until it exits naturally (device flow); default true when deviceFlow is set. */
-  authWaitForExit?: boolean
-  /** Do not auto-open the verification URL (the UI shows it). */
-  suppressBrowser?: boolean
-  /** Timeout for the whole auth process (ms). */
-  timeoutMs?: number
-  /** Status check. `command` run with these args should exit 0 when connected and non-zero while the user is still authorizing. */
-  statusCommand?: string
-  statusArgs?: string[]
-  pollIntervalMs?: number
-  pollTimeoutMs?: number
-}
-
 /** Server-side flow: a fetch callback yields the token (managed by the backend). */
 export interface ServerSideAuthConfig {
   /** Placeholder; the token fetch is injected by the framework owner. */
@@ -130,7 +96,7 @@ export interface ConnectorDef {
   /** Optional local icon path. */
   icon?: string
   authMode: ConnectorAuthMode
-  auth?: OAuthAuthConfig | DeviceAuthConfig | CliAuthConfig | ServerSideAuthConfig
+  auth?: OAuthAuthConfig | DeviceAuthConfig | ServerSideAuthConfig
   /** Token form fields when authMode is 'token'. */
   tokenFields?: TokenField[]
   /** Pre-connect settings the user must fill before auth starts (e.g. OAuth client id). */
