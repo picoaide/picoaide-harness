@@ -43,7 +43,7 @@ webadmin/ docs/ scripts/ data/
 | `make webadmin` | `cd webadmin && npm run build` |
 | `make build-server` | 编译 `bin/picoaide-server` |
 | `make build-desktop` | `cd desktop && npm run build && npx electron-builder --dir`(本地调试包,产出 `desktop/dist/`) |
-| `make docker-image` | `docker buildx build --platform linux/amd64 -t ghcr.io/picoaide/picoaide-server .`(amd64 镜像,阶段 4) |
+| `make docker-image` | `docker buildx build --platform linux/amd64 -t ghcr.io/picoaide/picoaide-harness-server .`(amd64 镜像,阶段 4) |
 | `make check` | format + lint(go vet + tsc)+ test |
 | `make pkg-linux` / `pkg-windows` / `pkg-macos` | 阶段 4 打包(Linux 本机;Windows/macOS 走 CI 矩阵) |
 
@@ -1859,7 +1859,7 @@ bash scripts/pkg-linux.sh
 #   windows-latest → npm test + electron-builder --win → picoaide-setup.exe
 #   macos-14(arm64)→ npm test + electron-builder --mac(arm64/x64)→ picoaide-arm64.dmg + picoaide-x64.dmg
 #   ubuntu         → docker buildx build --platform linux/amd64 \
-#                      -t ghcr.io/picoaide/picoaide-server:<tag> --push(amd64 镜像)
+#                      -t ghcr.io/picoaide/picoaide-harness-server:<tag> --push(amd64 镜像)
 #                    + bash scripts/pkg-extension.sh → picoaide-extension.zip
 #  全部产物上传 artifact/Release)
 git checkout master && git merge dev && git tag -a v0.4.0 -m "picoaide desktop 0.4.0"
@@ -1870,7 +1870,7 @@ Expected: Linux 安装包在本机 `desktop/dist/`;win/mac(含 M 系列 arm64)�
 
 `Dockerfile`:多阶段——`golang:1.24` 构建(`CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH` + `go:embed webadmin/dist` 预构建传入)→ 运行镜像 `distroless` 或 `alpine`(含 `-data` 目录挂载卷、0700 权限说明);CI 用 `docker/build-push-action` + buildx QEMU 交叉构建双平台
 Run: `make docker-image` 本地验证单平台 + CI 验证双平台
-Expected: `ghcr.io/picoaide/picoaide-server` 出现 `linux/amd64` 与 `linux/arm64` 两个平台标签
+Expected: `ghcr.io/picoaide/picoaide-harness-server` 出现 `linux/amd64` 与 `linux/arm64` 两个平台标签
 
 - [ ] **Step 3: 浏览器插件包**
 

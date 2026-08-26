@@ -113,7 +113,7 @@ docker buildx build --platform linux/amd64 \
 
 | Job | 环境 | 内容 |
 |-----|------|------|
-| `server` | ubuntu, Go 1.26 | `make test-server` + `go build ./...` + 交叉编译 amd64/arm64 |
+| `server` | ubuntu, Go 1.26 | `make test-server` + `make build-server`(原生 amd64) |
 | `webadmin` | ubuntu, Node 24 | `npm ci && npm run build`(产物 artifact 供 server 内嵌) |
 
 ## 5. 管理页访问
