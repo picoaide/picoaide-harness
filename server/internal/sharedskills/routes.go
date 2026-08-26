@@ -256,6 +256,12 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
 					return
 				}
+				if errors.Is(err, serverstore.ErrConflict) {
+					// 决策 2026-08-25:市场与组织合并为「市场」后,同名技能跨源
+					// 互斥——市场技能表已有同名时,员工上传即阻断(409)。
+					serverauth.WriteError(c, http.StatusConflict, "CONFLICT", "名称与市场技能冲突,请换个名字或联系管理员")
+					return
+				}
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 				return
 			}
@@ -316,6 +322,19 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 				return
 			}
 		}
+		// 决策 2026-08-25:审核通过前检测跨源同名——市场技能表已有同名技能
+		// 时,approve 拒绝(409),要求管理员先处理市场技能或驳回该共享技能。
+		if status == serverstore.SharedSkillApproved {
+			conflict, err := serverstore.SkillNameExists(db, name)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			if conflict {
+				serverauth.WriteError(c, http.StatusConflict, "CONFLICT", "名称与市场技能冲突,请先处理市场技能或驳回该共享技能")
+				return
+			}
+		}
 		if err := serverstore.SetSharedSkillStatus(db, name, version, status, reason); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 			return
@@ -324,7 +343,6 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
-
 func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")

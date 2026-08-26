@@ -35,8 +35,29 @@ func scanSkill(row interface{ Scan(...any) error }) (*Skill, error) {
 
 const skillColumns = "id, name, version, description, author, git_url, git_ref, checksum, enabled, created_at, updated_at"
 
+// SkillNameExists reports whether the marketplace skills table has a row
+// with the given name (any status/enabled state). Used by the shared-skill
+// store's upload/approve conflict check (决策 2026-08-25:市场与组织合并为
+// 「市场」后,同名技能跨源互斥——shared_skills 上传/approve 前须确认
+// marketplace 无同名)。
+func SkillNameExists(db *sql.DB, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM skills WHERE name = ?`, name).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // AddSkill inserts a skill row; returns ErrDuplicate for an existing name.
+// 决策 2026-08-25:双向互斥——shared_skills 已存在同名技能(任意状态)时
+// 返回 ErrConflict(admin 上架市场技能前检测)。
 func AddSkill(db *sql.DB, s *Skill) (int64, error) {
+	if conflict, err := SharedSkillNameExists(db, s.Name); err != nil {
+		return 0, err
+	} else if conflict {
+		return 0, ErrConflict
+	}
 	id, err := InsertID(db, `INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.Name, s.Version, s.Description, s.Author, s.GitURL, s.GitRef, s.Checksum, s.Enabled)

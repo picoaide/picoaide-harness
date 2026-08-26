@@ -368,6 +368,9 @@ type ApprovalRow struct {
 	BasePath string `json:"base_path"`
 	// Preview 是域预览端点(composition / SKILL.md),管理端弹窗复用。
 	PreviewPath string `json:"preview_path"`
+	// Conflict 决策 2026-08-25:该共享技能名与市场 skills 表同名(跨源互斥),
+	// approve 会被 409 阻断——管理端据此提示先处理市场技能。
+	Conflict bool `json:"conflict"`
 }
 
 // listApprovals 归并 shared-skills 与 agent-presets 的列表(默认 pending,
@@ -388,6 +391,14 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			for _, s := range rows {
+				// 决策 2026-08-25:跨源同名(市场技能表已有同名)标记冲突,
+				// 管理端提示且 approve 将被 409 阻断。
+				conflict := false
+				if s.Name != "" {
+					if has, err := serverstore.SkillNameExists(db, s.Name); err == nil {
+						conflict = has
+					}
+				}
 				out = append(out, ApprovalRow{
 					Kind:        KindSkill,
 					Name:        s.Name,
@@ -401,6 +412,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					CreatedAt:   s.CreatedAt.Format("2006-01-02 15:04:05"),
 					BasePath:    "/api/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
 					PreviewPath: "/api/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
+					Conflict:    conflict,
 				})
 			}
 		}

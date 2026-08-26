@@ -32,6 +32,8 @@ interface ApprovalRow {
   created_at: string
   base_path: string
   preview_path: string
+  /* 决策 2026-08-25:市场技能同名冲突(approve 将 409 阻断) */
+  conflict?: boolean
 }
 
 interface Dept {
@@ -212,6 +214,7 @@ export default function Capabilities() {
                 <TableHead>版本</TableHead>
                 <TableHead>作者</TableHead>
                 <TableHead>状态</TableHead>
+                <TableHead>名称冲突</TableHead>
                 <TableHead>质量</TableHead>
                 <TableHead>上传时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -236,6 +239,15 @@ export default function Capabilities() {
                     <TableCell className="font-mono text-sm">{row.version}</TableCell>
                     <TableCell>{row.author}</TableCell>
                     <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
+                    <TableCell>
+                      {row.conflict ? (
+                        <Badge variant="destructive" title="与市场技能同名,通过将被拒绝(409);请先删除/改名市场技能或驳回本共享技能">
+                          ⚠ 与市场重名
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {row.status === 'approved' ? (
                         <Select
@@ -328,7 +340,10 @@ export default function Capabilities() {
             </DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            {confirmKind === 'approve' && '通过后该版本将按授权可见可安装。'}
+            {confirmKind === 'approve' && confirm?.conflict && (
+              <span className="font-medium text-destructive">⚠ 名称与市场技能冲突,通过将被拒绝(409)。请先处理市场技能后重试。</span>
+            )}
+            {confirmKind === 'approve' && !confirm?.conflict && '通过后该版本将按授权可见可安装。'}
             {confirmKind === 'reject' && '拒绝后仅上传者可见并可重新上传。请填写理由,上传者可见。'}
             {confirmKind === 'delete' && '删除后记录与归档将被移除,不可恢复。'}
           </p>

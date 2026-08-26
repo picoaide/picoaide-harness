@@ -362,3 +362,56 @@ func TestVisibility(t *testing.T) {
 		t.Fatal("alice does not see own")
 	}
 }
+
+// TestCrossSourceConflictUploadApprove 决策 2026-08-25:市场与组织合并为
+// 「市场」后,同名技能跨源互斥——上传(员工)与 approve(管理员)对市场同名
+// 技能返回 409 CONFLICT。
+func TestCrossSourceConflictUploadApprove(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	// 市场预置同名技能。
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql-audit", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/repo.git"}); err != nil {
+		t.Fatalf("seed market skill: %v", err)
+	}
+
+	// 员工上传同名 -> 409 CONFLICT。
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/shared-skills",
+		strings.NewReader(uploadBody("codeql-audit", "1.0.0", "x", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("upload conflict = %d, want 409 (%s)", w.Code, w.Body.String())
+	}
+
+	// 员工上传非冲突技能 -> 201。
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/shared-skills",
+		strings.NewReader(uploadBody("fresh-open", "1.0.0", "x", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+	req2.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req2.Header.Set(k, v)
+	}
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("fresh upload = %d (%s)", w2.Code, w2.Body.String())
+	}
+	// admin 上架同名的市场技能会被双向互斥阻断(409,前面 serverstore 测试已
+	// 覆盖);approve 前的冲突检测是深度防御——模拟竞态:绕过 DAO 直接 SQL
+	// 插入市场同名行(等价于上架发生在共享技能上传之后)。
+	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
+		VALUES ('fresh-open', '1.0.0', '', 'boss', 'https://example.com/repo2.git', 'main', '', 1)`); err != nil {
+		t.Fatalf("raw market seed: %v", err)
+	}
+	wA := httptest.NewRecorder()
+	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/fresh-open/1.0.0/approve", nil)
+	for k, v := range adminHdr {
+		reqA.Header.Set(k, v)
+	}
+	r.ServeHTTP(wA, reqA)
+	if wA.Code != http.StatusConflict {
+		t.Fatalf("approve conflict = %d, want 409 (%s)", wA.Code, wA.Body.String())
+	}
+}
