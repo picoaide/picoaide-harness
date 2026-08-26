@@ -195,6 +195,13 @@ func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND "+CaseInsensitiveCmp("grantee"), name, g.Name); err != nil {
 			return err
 		}
+		// 审计修复 2026-P (H1): 0036 共享资源授权表同样级联改名,否则被授权
+		// 部门改名后共享技能/Agent 授权静默失效(陈旧 grantee)。
+		for _, grantTable := range []string{"shared_skill_grants", "agent_preset_grants"} {
+			if _, err := tx.Exec("UPDATE "+grantTable+" SET grantee = ? WHERE grantee_type = 'group' AND "+CaseInsensitiveCmp("grantee"), name, g.Name); err != nil {
+				return err
+			}
+		}
 	}
 	_, err = tx.Exec(`UPDATE groups SET name = ?, parent_id = ?, leader_id = ?, description = ? WHERE id = ?`,
 		name, parentID, leaderID, description, id)
@@ -234,18 +241,20 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	if g, err := GroupByID(db, id); err == nil && g.Name == EveryoneGroupName {
 		return ErrValidation // 保留名
 	}
-	var memberCount, childCount, grantCount int64
+	var memberCount, childCount, grantCount, sharedGrantCount, presetGrantCount int64
 	if err := tx.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND `+ciColumnCmp("sg.grantee", "g.name")+`)
-		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount); err != nil {
+		(SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND `+ciColumnCmp("sg.grantee", "g.name")+`),
+		(SELECT COUNT(*) FROM shared_skill_grants ssg WHERE ssg.grantee_type = 'group' AND `+ciColumnCmp("ssg.grantee", "g.name")+`),
+		(SELECT COUNT(*) FROM agent_preset_grants apg WHERE apg.grantee_type = 'group' AND `+ciColumnCmp("apg.grantee", "g.name")+`)
+		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount, &sharedGrantCount, &presetGrantCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
 	}
-	if memberCount > 0 || childCount > 0 || grantCount > 0 {
+	if memberCount > 0 || childCount > 0 || grantCount > 0 || sharedGrantCount > 0 || presetGrantCount > 0 {
 		return ErrDepartmentInUse
 	}
 	if _, err := tx.Exec("DELETE FROM groups WHERE id = ?", id); err != nil {
