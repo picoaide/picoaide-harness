@@ -128,11 +128,15 @@ const TAB: React.CSSProperties = {
   background: 'transparent',
   cursor: 'pointer',
   color: 'var(--dsw-alias-label-secondary)',
-  borderBottom: '2px solid transparent',
-  marginBottom: -1,
+  borderBottom: 'none',
+  marginBottom: 0,
 }
 
-const TAB_ACTIVE: React.CSSProperties = { ...TAB, color: 'var(--dsw-alias-label-primary)', borderBottomColor: 'var(--dsw-alias-brand-primary)' }
+const TAB_ACTIVE: React.CSSProperties = {
+  ...TAB,
+  color: 'var(--dsw-alias-label-primary)',
+  borderBottom: '2px solid var(--dsw-alias-brand-primary)',
+}
 
 const FILTER_SEP: React.CSSProperties = { width: 1, height: 14, background: 'var(--dsw-alias-border-l2)', margin: '0 6px' }
 
@@ -148,9 +152,9 @@ const FILTER: React.CSSProperties = {
 
 const FILTER_ACTIVE: React.CSSProperties = {
   ...FILTER,
-  borderColor: 'var(--dsw-alias-border-l2)',
-  color: 'var(--dsw-alias-label-primary)',
-  background: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.04))',
+  borderColor: 'var(--dsw-alias-brand-primary)',
+  color: 'var(--dsw-alias-brand-primary)',
+  background: 'color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)',
 }
 
 const BODY: React.CSSProperties = {
