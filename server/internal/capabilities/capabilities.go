@@ -248,6 +248,11 @@ func mergeVersions(items []CapabilityItem, versions map[string][]string) []Capab
 // listCapabilities 聚合市场(授权) + 组织(共享技能/共享 Agent)可见条目。
 // 可见性语义各自保留:market = enabled+authorized;org = author-own(任意
 // 状态) OR (approved+granted);admin 恒全量(不落授权表)。
+//
+// 决策 2026-08-25(市场/组织合并为「市场」):?source=market 返回合并结果——
+// 市场与组织可见条目合并,同名(kind+name) market 优先展示(组织同名折叠到
+// versions 与 source 徽章);?source=org 保留旧语义(仅组织,兼容旧客户端);
+// 无 source 参数返回全量(向后兼容)。
 func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		u, groups, ok := viewer(c, db)
@@ -255,12 +260,15 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
+		src := c.Query("source")
+		includeMarket := src == "" || src == "market"
+		includeOrg := src == "" || src == "market" || src == "org"
 		ft := parseTypeFilter(c)
 		items := []CapabilityItem{}
 		versions := map[string][]string{}
 
 		// 1) 市场技能(授权制)。
-		if ft.skills {
+		if includeMarket && ft.skills {
 			api := marketplace.NewAPI(db, cacheDir)
 			skillList, err := api.AccessibleSkills(u, groups)
 			if err != nil {
@@ -273,7 +281,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		}
 
 		// 2) 组织·共享技能(审核+授权)。
-		if ft.skills {
+		if includeOrg && ft.skills {
 			if u.IsAdmin {
 				all, err := serverstore.ListSharedSkills(db, "")
 				if err != nil {
@@ -309,7 +317,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		}
 
 		// 3) 组织·共享 Agent(审核+授权)。
-		if ft.agents {
+		if includeOrg && ft.agents {
 			if u.IsAdmin {
 				all, err := serverstore.ListAgentPresets(db, "")
 				if err != nil {
@@ -344,8 +352,69 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		}
 
 		merged := mergeVersions(items, versions)
+		if src == "market" {
+			merged = mergeMarketFirst(merged)
+		}
 		c.JSON(http.StatusOK, gin.H{"items": merged})
 	}
+}
+
+// mergeMarketFirst 决策 2026-08-25(市场/组织合并):同名(kind+name)时市场行
+// 优先——保留市场行的 Source/质量,组织行折叠进 versions(旧版本)与一个
+// org 同名标记(客户端徽章区分)。仅当无市场行时保留组织行。
+func mergeMarketFirst(items []CapabilityItem) []CapabilityItem {
+	type key struct {
+		kind CapabilityKind
+		name string
+	}
+	order := []key{}
+	byKey := map[key]CapabilityItem{}
+	for _, it := range items {
+		k := key{it.Kind, it.Name}
+		cur, exists := byKey[k]
+		if !exists {
+			byKey[k] = it
+			order = append(order, k)
+			continue
+		}
+		// 同名折叠:市场行优先。fold 时以双行的版本+当前版本回填 versions,
+		// 保证历史版本展开完整(单源 mergeVersions 只填了自己的版本集)。
+		versions := appendUniqueAll(appendUnique(appendUnique(cur.Versions, cur.Version), it.Version), it.Versions)
+		if cur.Source == SourceMarket {
+			cur.Versions = versions
+			byKey[k] = cur
+		} else if it.Source == SourceMarket {
+			merged := it
+			merged.Versions = versions
+			byKey[k] = merged
+		} else {
+			cur.Versions = versions
+			byKey[k] = cur
+		}
+	}
+	out := make([]CapabilityItem, 0, len(order))
+	for _, k := range order {
+		out = append(out, byKey[k])
+	}
+	return out
+}
+
+// appendUnique appends s to items unless already present (stable order).
+func appendUnique(items []string, s string) []string {
+	for _, v := range items {
+		if v == s {
+			return items
+		}
+	}
+	return append(items, s)
+}
+
+// appendUniqueAll appends every element of extra that is not already present.
+func appendUniqueAll(items []string, extra []string) []string {
+	for _, e := range extra {
+		items = appendUnique(items, e)
+	}
+	return items
 }
 
 // ---------------------------------------------------------------------------

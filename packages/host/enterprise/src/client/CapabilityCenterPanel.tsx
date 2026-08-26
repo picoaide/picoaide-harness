@@ -53,8 +53,8 @@ interface CapabilityItem {
   uploadStatus?: ItemStatus | undefined
 }
 
-/** 来源分区 tab。 */
-type SourceTab = 'mine' | 'market' | 'org'
+/** 来源分区 tab(决策 2026-08-25:市场/组织合并为「市场」——仅 我的/市场)。 */
+type SourceTab = 'mine' | 'market'
 type TypeFilter = 'all' | CapabilityKind
 
 const OVERLAY: React.CSSProperties = {
@@ -392,7 +392,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     try {
       const rows = await fetcher()
       if (seq !== loadSeqRef.current) return
-      setItems(prev => [...prev.filter(i => i.source !== sourceOf(key)), ...rows])
+      // 决策 2026-08-25:「市场」tab 承载 market+org 合并结果——加载 market
+      // 时清除两源旧条目;「我的」只清 local。
+      const drop = key === 'market' ? (i: CapabilityItem) => i.source !== 'local' : (i: CapabilityItem) => i.source === 'local'
+      setItems(prev => [...prev.filter(i => !drop(i)), ...rows])
       setSection(key, { status: 'ok' })
     } catch {
       if (seq !== loadSeqRef.current) return
@@ -400,18 +403,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const sourceOf = (key: string): CapabilitySource => (key === 'market' ? 'market' : key === 'org' ? 'org' : 'local')
-
   const loadAll = (): void => {
     ++loadSeqRef.current
     setLoading(true)
+    // 决策 2026-08-25:市场/组织合并为「市场」——?source=market 由服务端
+    // 合并返回(市场+组织,各自 source 徽章保留);「我的」仍走 local。
     void loadSection('market', async () => {
       const res = await fetch('/api/pico/capabilities?source=market')
-      if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
-      return (await res.json() as { items?: CapabilityItem[] }).items ?? []
-    })
-    void loadSection('org', async () => {
-      const res = await fetch('/api/pico/capabilities?source=org')
       if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
       return (await res.json() as { items?: CapabilityItem[] }).items ?? []
     })
@@ -452,15 +450,15 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     return () => { window.removeEventListener('keydown', onKey) }
   }, [onClose])
 
-  // 30s 静默轮询：组织库审批状态（pending→approved/rejected）后台变化刷新。
+  // 30s 静默轮询:市场(合并)审批状态/质量变化后台刷新。
   useEffect(() => {
     const timer = setInterval(() => {
       const seq = loadSeqRef.current
-      void fetch('/api/pico/capabilities?source=org').then(async (res) => {
+      void fetch('/api/pico/capabilities?source=market').then(async (res) => {
         if (!res.ok) return
         const data = await res.json() as { items?: CapabilityItem[] }
         if (seq !== loadSeqRef.current) return
-        setItems(prev => [...prev.filter(i => i.source !== 'org'), ...(data.items ?? [])])
+        setItems(prev => [...prev.filter(i => i.source === 'local'), ...(data.items ?? [])])
       }).catch(() => {})
     }, 30000)
     return () => { clearInterval(timer) }
@@ -538,9 +536,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   }
 
   const visibleByTab = useMemo(() => {
-    const base = tab === 'market' ? items.filter(i => i.source === 'market')
-      : tab === 'org' ? items.filter(i => i.source === 'org')
-        : items.filter(i => i.source === 'local')
+    const base = tab === 'market' ? items.filter(i => i.source !== 'local') : items.filter(i => i.source === 'local')
     const merged = mergeItems(base)
     return filter === 'all' ? merged : merged.filter(i => i.kind === filter)
   }, [items, tab, filter])
@@ -660,7 +656,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   if (loading) {
     content = <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'center', padding: 48 }}><p style={EMPTY}>{t('capability.loading')}</p></div>
   } else {
-    content = renderSection(tab === 'market' ? 'market' : tab === 'org' ? 'org' : 'local', tab === 'market' ? t('capability.emptyMarket') : tab === 'org' ? t('capability.emptyOrg') : t('capability.emptyMine'))
+    content = renderSection(tab === 'market' ? 'market' : 'local', tab === 'market' ? t('capability.emptyMarket') : t('capability.emptyMine'))
   }
 
   return (
@@ -672,9 +668,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           <button type="button" style={CLOSE} onClick={onClose}>{t('capability.close')}</button>
         </div>
         <div style={TAB_BAR}>
-          {(['mine', 'market', 'org'] as const).map(s => (
+          {(['mine', 'market'] as const).map(s => (
             <button key={s} type="button" style={tab === s ? TAB_ACTIVE : TAB} onClick={() => { setTab(s); setConfirmKey(null) }}>
-              {s === 'mine' ? t('capability.tabMine') : s === 'market' ? t('capability.tabMarket') : t('capability.tabOrg')}
+              {s === 'mine' ? t('capability.tabMine') : t('capability.tabMarket')}
             </button>
           ))}
           <span style={FILTER_SEP} aria-hidden="true" />
