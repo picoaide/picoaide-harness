@@ -350,6 +350,41 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	}
 }
 
+// 审计修复 2026-P (B2): rate_limit/monthly_quota/monthly_quota_money
+// 接受 JSON 数字或字符串(第三方直连 API 按业务直觉传数字不 400)。
+func TestAdminGatewayFlexibleNumericFields(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":60,"monthly_quota":100000,"monthly_quota_money":50.5}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("numeric fields rejected: %d %s", w.Code, w.Body.String())
+	}
+	v, ok, _ := serverstore.GetSetting(db, "gateway.rate_limit")
+	if !ok || v != "60" {
+		t.Fatalf("rate_limit = %q ok=%v (want 60)", v, ok)
+	}
+	v, ok, _ = serverstore.GetSetting(db, serverstore.MonthlyQuotaSetting)
+	if !ok || v != "100000" {
+		t.Fatalf("monthly_quota = %q ok=%v (want 100000)", v, ok)
+	}
+	v, ok, _ = serverstore.GetSetting(db, serverstore.MonthlyMoneyQuotaSetting)
+	if !ok || v != "50.5" {
+		t.Fatalf("monthly_quota_money = %q ok=%v (want 50.5)", v, ok)
+	}
+	// 字符串输入同样兼容(前端形式)
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":"30"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("string field rejected: %d %s", w.Code, w.Body.String())
+	}
+	v, _, _ = serverstore.GetSetting(db, "gateway.rate_limit")
+	if v != "30" {
+		t.Fatalf("rate_limit = %q (want 30)", v)
+	}
+	// 非法值仍拒绝
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":-5}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative rate_limit accepted: %d", w.Code)
+	}
+}
+
 // 禁用开关:enabled=false 后 provider 不再参与路由
 func TestProviderEnableToggle(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)

@@ -388,8 +388,10 @@ export default function Usage() {
   const statCards = [
     {
       title: '总费用', value: totals.cost, icon: CircleDollarSign,
-      desc: compareCostDelta === null ? '按模型定价折算(未定价模型计 0)'
-        : `按模型定价折算 · 环比 ${compareCostDelta >= 0 ? '+' : ''}${compareCostDelta}%`,
+      // 审计修复 2026-P (M8): 费用 = 全部请求实际支出(含 embedding 费用),
+      // 与「总 tokens(不含 embedding)」口径不同——desc 明确标注避免误判。
+      desc: compareCostDelta === null ? '按模型定价折算 · 含 embedding(未定价模型计 0)'
+        : `按模型定价折算 · 含 embedding · 环比 ${compareCostDelta >= 0 ? '+' : ''}${compareCostDelta}%`,
       money: true,
     },
     { title: '请求数', value: totals.requests, icon: Activity, desc: `chat ${totals.chatReq.toLocaleString()} · embedding ${totals.embedReq.toLocaleString()}`, int: true },
