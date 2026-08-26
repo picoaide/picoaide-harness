@@ -13,8 +13,6 @@
       name: dsh-plugin-desktop/asar-file-system
     - id: desktop-asar-guidance
       name: dsh-plugin-desktop/asar-guidance
-    - id: cli-skill-bridge
-      name: '@picoaide/dsh-cli-skill-bridge'
 
 # The desktop filesystem backend replaces upstream `fs-sandbox`: it inherits
 # the sandbox fence and adds asar-link unwinding for packaged in-box reads.
