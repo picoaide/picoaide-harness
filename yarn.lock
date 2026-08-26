@@ -5773,6 +5773,45 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@picoaide/dsh-cli-skill-bridge@workspace:*, @picoaide/dsh-cli-skill-bridge@workspace:packages/host/cli-skill-bridge":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-cli-skill-bridge@workspace:packages/host/cli-skill-bridge"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-agent": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-code-runtime": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-invariants": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-llm": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-scope": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-session": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-system-prompt": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-tools": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-user-approval": "npm:0.1.1-rc.2"
+    "@picoaide/dsh-cli-tools": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  peerDependencies:
+    "@deepseek-ai/cordis": 4.0.1
+    "@deepseek-ai/dsh-tools": 0.1.1-rc.2
+  languageName: unknown
+  linkType: soft
+
+"@picoaide/dsh-cli-tools@workspace:*, @picoaide/dsh-cli-tools@workspace:packages/host/cli-tools":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-cli-tools@workspace:packages/host/cli-tools"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.1"
+    "@types/node": "npm:^22.20.0"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  peerDependencies:
+    "@deepseek-ai/cordis": 4.0.1
+  languageName: unknown
+  linkType: soft
+
 "@picoaide/dsh-connectors@workspace:*, @picoaide/dsh-connectors@workspace:packages/host/connectors":
   version: 0.0.0-use.local
   resolution: "@picoaide/dsh-connectors@workspace:packages/host/connectors"
@@ -9523,6 +9562,8 @@ __metadata:
     "@electron/asar": "npm:3.4.1"
     "@picoaide/dsh-account-card": "workspace:*"
     "@picoaide/dsh-browser": "workspace:*"
+    "@picoaide/dsh-cli-skill-bridge": "workspace:*"
+    "@picoaide/dsh-cli-tools": "workspace:*"
     "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-cron": "workspace:*"
     "@picoaide/dsh-enterprise": "workspace:*"
