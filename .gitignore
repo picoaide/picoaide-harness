@@ -11,8 +11,8 @@ node_modules/
 
 # DSH plugin packages: build output is never committed for workspace members
 # that compile to lib/ (desktop, enterprise, account-card, branding) unless a
-# member intentionally ships it (dsh-browser, dsh-connectors, dsh-cron,
-# dsh-task and dsh-memory-evolve track lib/ for the packaged runtime).
+# member intentionally ships it (dsh-browser, dsh-connectors, dsh-cron and
+# dsh-memory-evolve track lib/ for the packaged runtime).
 packages/host/desktop/dist/
 packages/host/desktop/lib/
 packages/host/enterprise/lib/
@@ -42,6 +42,10 @@ server/webadmin/tsconfig.tsbuildinfo
 .go-path/
 .npm-cache/
 .smoke/
+
+# ephemeral scratch / agent-skill planning dirs (never committed)
+temp/
+.agents/skills/
 
 # local writable DSH home mirror (this sandbox root fs is read-only)
 .dsh-home/
