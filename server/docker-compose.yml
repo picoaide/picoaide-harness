@@ -23,12 +23,11 @@
 #   - pg 模式(postgres 容器)固定 172.28.0.4(PG_IP)
 #   - server 仅 expose 8080(不发布到宿主机),外部只能经 Caddy 进入
 #
-# 数据库后端(两种,由 .env 的 DB_MODE 选择,默认 sqlite):
-#   - sqlite(默认):数据落 ./picoaide-data/picoaide.db,单机零运维
-#   - pg:内置 postgres:16-alpine 容器,叠加 docker-compose.pg.yml
-#     (docker compose -f docker-compose.yml -f docker-compose.pg.yml up -d)
-#   - pg-external:使用已有 PostgreSQL 实例,叠加 docker-compose.pg-ext.yml
-#     (docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml up -d)
+# 数据库后端(三种,由 .env 的 DB_MODE 选择,默认 sqlite;每个模式一个
+# 完整独立 compose,可直接 docker compose -f <file> up -d):
+#   - sqlite(默认):本文件(caddy+server),数据落 ./picoaide-data/picoaide.db,单机零运维
+#   - pg:docker-compose.pg.yml(caddy+server+内置 postgres:16-alpine)
+#   - pg-external:docker-compose.pg-ext.yml(caddy+server,连已有 PostgreSQL 实例)
 #   - 两种 pg 模式均需要含 -db-driver 支持的服务端镜像(0.5.0+/本地构建);
 #     部署脚本 install 会自动校验。sqlite→pg 数据迁移: ./deploy.sh migrate
 #
