@@ -244,7 +244,7 @@ describe('published package surface', () => {
       'build/tray-icon*.png',
       'docs/**',
     ]))
-    expect(manifest.build?.files).toEqual([
+    expect(manifest.build?.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/app-icon-mac.png',
       'build/tray-icon.svg',
@@ -252,7 +252,11 @@ describe('published package surface', () => {
       'cordis.patch.yml',
       'lib/**',
       'package.json',
-    ])
+      '!**/*.map',
+    ]))
+    // 打包精简：排除 map 与 mermaid 依赖树（见 package.json build.files）
+    expect(manifest.build?.files).toContain('!**/node_modules/mermaid/**')
+    expect(manifest.build?.files).toContain('!**/node_modules/cytoscape/**')
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.mac?.mergeASARs).toBe(false)
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
