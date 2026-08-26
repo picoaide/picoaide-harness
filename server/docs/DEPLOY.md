@@ -129,8 +129,13 @@ mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -subj "/CN=<域名>" -addext "subjectAltName=DNS:<域名>"   # IP 用 subjectAltName=IP:<IP>
 chmod 600 certs/server.key
 
-# 3. 启动
+# 3. 启动(sqlite 默认 DB_MODE)
 docker compose up -d
+
+# 3'. PostgreSQL 模式(用完整独立 compose,含 caddy+server+postgres):
+#     .env 设 DB_MODE=pg 并配 PG_PASSWORD;部署脚本自动选用,手动则:
+#     docker compose -f docker-compose.pg.yml up -d
+#     外部 PG 模式:DB_MODE=pg-external + PG_DSN → docker compose -f docker-compose.pg-ext.yml up -d
 
 # 4. 验证
 docker compose ps                 # server healthy
@@ -172,7 +177,7 @@ docker inspect picoaide-server -f '{{range .NetworkSettings.Networks}}{{.IPAddre
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 ```
 
-**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式/数据库后端)→ 下载/复制部署资产(docker-compose.yml + Caddyfile 双模板 + .env.example + pg override + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、Caddyfile、镜像启动、健康等待)→ 打印部署摘要。
+**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式/数据库后端)→ 下载/复制部署资产(docker-compose.yml + docker-compose.pg.yml + docker-compose.pg-ext.yml + Caddyfile 双模板 + .env.example + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、Caddyfile、镜像启动、健康等待)→ 打印部署摘要。
 
 非交互(无人值守,需 root/sudo):
 
@@ -219,7 +224,7 @@ cd server
 | `migrate [--dry-run]` | SQLite→PostgreSQL 数据迁移(见 §6.3) |
 | `uninstall [--volumes]` | 停容器;`--volumes` 连数据目录一并删除(需确认,交互或 `UNINSTALL_VOLUMES=yes`) |
 
-`install`/`update`/`status`/`logs`/`backup`/`uninstall` 都会根据 `.env` 的 `DB_MODE` 自动叠加对应 compose override(pg → `docker-compose.pg.yml`,pg-external → `docker-compose.pg-ext.yml`),无需手工指定 `-f`。
+`install`/`update`/`status`/`logs`/`backup`/`uninstall` 都会根据 `.env` 的 `DB_MODE` 选择**完整独立 compose 文件**(sqlite → `docker-compose.yml` caddy+server;pg → `docker-compose.pg.yml` caddy+server+postgres;pg-external → `docker-compose.pg-ext.yml` caddy+server,外部 PG),无需手工指定 `-f`。
 
 ### 4.2 环境变量(非交互)
 
