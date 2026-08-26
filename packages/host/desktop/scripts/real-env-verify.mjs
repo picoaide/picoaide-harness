@@ -131,7 +131,7 @@ try {
 
   // 4. Main sidebar
   const mainBtns = await ev(`[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '任务看板', '技能中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).some(b => b.includes(x)))
+  const hasSidebar = ['定时任务', '任务看板', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).some(b => b.includes(x)))
   reportStep('主界面侧边栏导航完整（真实）', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 12).join(',')}`)
   await screenshot('r02-main')
 
@@ -150,9 +150,9 @@ try {
   await screenshot('r04-connectors')
   await clickLabel('关闭', 1000)
 
-  await clickLabel('技能中心', 3000)
-  const skillOk = (await bodyText()).includes('技能中心')
-  reportStep('技能中心面板打开（真实数据）', skillOk)
+  await clickLabel('能力中心', 3000)
+  const skillOk = (await bodyText()).includes('能力中心')
+  reportStep('能力中心面板打开（真实数据）', skillOk)
   await screenshot('r05-skills')
   await clickLabel('关闭', 1000).catch(() => {})
 
