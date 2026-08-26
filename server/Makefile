@@ -1,7 +1,7 @@
 BIN := bin/picoaide-server
 
 # 服务端镜像名(GHCR,与仓库同名);TAG 默认 latest
-IMAGE ?= ghcr.io/picoaide/picoaide-server
+IMAGE ?= ghcr.io/picoaide/picoaide-harness-server
 TAG ?= latest
 # 注入镜像内 --version 的版本号(默认取 git describe;可显式覆盖 VERSION=0.4.0)
 VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
@@ -27,7 +27,7 @@ webadmin:
 	cd webadmin && npm run build
 
 # 服务端 Docker 镜像(计划 Task 4.6):本地构建单平台,带版本注入(--version 输出 VERSION)
-# 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-server TAG=v0.4.0
+# 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
 docker-image:
 	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
