@@ -523,6 +523,34 @@ export class HostCronLedger {
     })
   }
 
+  /** Scheduler-owned: attach the spawned session id to a pending execution. */
+  attachSession(jobId: string, executionId: string, sessionId: string): void {
+    this.mutate((state) => {
+      const job = state.jobs.find(candidate => candidate.id === jobId)
+      if (job === undefined) return false
+      const index = job.executions.findIndex(execution => execution.id === executionId)
+      if (index < 0) return false
+      const execution = job.executions[index]!
+      if (execution.endedAt !== undefined) return false
+      job.executions[index] = { ...execution, sessionId }
+      return true
+    })
+  }
+
+  /** Scheduler-owned: attach the prompt text to a pending execution. */
+  attachPrompt(jobId: string, executionId: string, prompt: string): void {
+    this.mutate((state) => {
+      const job = state.jobs.find(candidate => candidate.id === jobId)
+      if (job === undefined) return false
+      const index = job.executions.findIndex(execution => execution.id === executionId)
+      if (index < 0) return false
+      const execution = job.executions[index]!
+      if (execution.endedAt !== undefined) return false
+      job.executions[index] = { ...execution, prompt }
+      return true
+    })
+  }
+
   /** Scheduler-owned: roll every enabled job's nextRunAt past `now` (missed runs are skipped). */
   skipMissed(now: number): void {
     this.mutate((state) => {
@@ -645,13 +673,31 @@ export function validateCron(expr: string): boolean {
 /**
  * Migrate a ledger's jobs from an older schema version to the current one.
  * 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走
- * 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。当前只有
- * v1;未来字段/枚举变更时在此加 v1→v2、v2→v3 … 并同步 bump 常量。
+ * 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。
+ *
+ * v1 → v2(任务看板合并):v1 的动作是 task(taskId 引用 dsh-task 看板任务)
+ * 或 prompt(sessionId+text 向既有会话发消息)。dsh-task 插件已删除,看板
+ * 任务不复存在,无法解析到智能体+提示词:这类记录与新域模型不兼容,按
+ * 用户确认的迁移策略丢弃(原 leder 数据文件仍在,可手工恢复)。v2 动作
+ * 只有 agent(prompt 必填,可选 workspaceId/agentPreset/permission)。
  */
 export function migrateCronLedger(jobs: JobRecord[], fromVersion: number): JobRecord[] {
   let current = jobs
-  // v1 → v2 占位示例(未来启用):逐字段向上兼容修正。
-  // if (fromVersion <= 1) { current = current.map(job => ({ ...job })) }
+  if (fromVersion <= 1) {
+    current = current
+      .filter(job => job.action?.kind === 'agent')
+      .map(job => {
+        // Strip v1-only execution fields that v2 no longer names (defensive;
+        // v1 executions never carried sessionId/prompt).
+        const executions = Array.isArray(job.executions)
+          ? job.executions.filter(execution => {
+            return execution !== null && typeof execution === 'object'
+              && typeof (execution as { id?: unknown }).id === 'string'
+          })
+          : []
+        return { ...job, executions }
+      })
+  }
   void fromVersion
   return current
 }

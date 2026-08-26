@@ -1,6 +1,7 @@
-import { t as HostCronLedger } from "./host-ledger-CqX0T9MB.js";
+import { t as HostCronLedger } from "./host-ledger-CUgvpM_p.js";
 import { isValidCron, nextRunAtMs } from "./cron.js";
 import { jobVisibleTo } from "./jobs.js";
+import "./protocol.js";
 import { HostCronExecutor } from "./host-executor.js";
 import { HostCronScheduler } from "./host-scheduler.js";
 import { t as makeCronRoutes } from "./host-routes-DXjUhAFq.js";
@@ -217,10 +218,7 @@ var HostCronService = class {
 	constructor(api, options = {}) {
 		this.ledger = options.ledger ?? new HostCronLedger({ owner: () => this.username });
 		this.now = options.now ?? Date.now;
-		const executor = options.executor ?? new HostCronExecutor({
-			api,
-			taskService: options.taskService ?? (() => void 0)
-		});
+		const executor = options.executor ?? new HostCronExecutor({ api });
 		this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, {
 			now: this.now,
 			visible: (job) => jobVisibleTo(job, this.username)
@@ -250,7 +248,7 @@ var HostCronService = class {
 	snapshot() {
 		const state = this.ledger.state();
 		return {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			revision: state.revision,
 			jobs: state.jobs.filter((job) => jobVisibleTo(job, this.username)),
 			scheduler: state.scheduler
@@ -322,7 +320,7 @@ function registerCronTools(ctx, service) {
 	const disposers = [];
 	disposers.push(ctx.tools.register(defineTool({
 		name: "cron_create",
-		description: "创建定时任务（cron 表达式，5 段：分 时 日 月 周，支持 */n 步进、a-b 范围、逗号列表，日/周 OR 语义）。到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行。动作二选一：执行看板任务（taskId）或向指定会话发送消息（sessionId+text）。",
+		description: "创建定时任务（cron 表达式，5 段：分 时 日 月 周，支持 */n 步进、a-b 范围、逗号列表，日/周 OR 语义）。到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行。每次执行新建一个智能体会话并发送提示词（可指定工作区、智能体预设和权限）。",
 		parameters: {
 			name: {
 				type: "string",
@@ -334,17 +332,22 @@ function registerCronTools(ctx, service) {
 				required: true,
 				description: "5 段 cron 表达式，如 0 9 * * *（每天 09:00）"
 			},
-			taskId: {
+			prompt: {
 				type: "string",
-				description: "要执行的看板任务 id（与 sessionId+text 二选一）；用 task_list 查询（任务创建时可用 workspace_list 选择项目）"
+				required: true,
+				description: "执行时发送给智能体会话的提示词内容（必填，非空）"
 			},
-			sessionId: {
+			workspaceId: {
 				type: "string",
-				description: "要发送消息的目标会话 id（与 taskId 二选一）"
+				description: "要钉住的工作区 id（缺省=当前工作区）"
 			},
-			text: {
+			agentPreset: {
 				type: "string",
-				description: "要发送的消息内容（sessionId 模式必填）"
+				description: "要使用的智能体预设 id（缺省=部署默认）"
+			},
+			permission: {
+				type: "string",
+				description: "可选权限预设：read-only / workspace-write / danger-full-access"
 			},
 			enabled: {
 				type: "boolean",
@@ -361,22 +364,18 @@ function registerCronTools(ctx, service) {
 		async execute(args) {
 			if (!isValidCron(args.cron)) throw new Error(`cron 表达式无效: ${args.cron}`);
 			if (nextRunAtMs(args.cron, Date.now()) === void 0) throw new Error(`cron 表达式在五年内无匹配时刻: ${args.cron}`);
-			const hasTask = args.taskId !== void 0 && args.taskId !== "";
-			const hasPrompt = args.sessionId !== void 0 && args.sessionId !== "";
-			if (hasTask === hasPrompt) throw new Error("必须且只能提供 taskId 或 sessionId+text 之一");
-			if (hasPrompt && (args.text === void 0 || args.text === "")) throw new Error("sessionId 模式必须提供 text");
+			if (args.prompt === void 0 || args.prompt.trim() === "") throw new Error("必须提供 prompt（执行时发送给智能体会话的提示词）");
 			const id = `job-${crypto.randomUUID()}`;
 			service.registerJob({
 				id,
 				name: args.name.trim(),
 				cron: args.cron.trim(),
-				action: hasTask ? {
-					kind: "task",
-					taskId: args.taskId
-				} : {
-					kind: "prompt",
-					sessionId: args.sessionId,
-					text: args.text
+				action: {
+					kind: "agent",
+					prompt: args.prompt.trim(),
+					...args.workspaceId === void 0 ? {} : { workspaceId: args.workspaceId },
+					...args.agentPreset === void 0 ? {} : { agentPreset: args.agentPreset },
+					...args.permission === void 0 ? {} : { permission: args.permission }
 				},
 				enabled: args.enabled ?? false
 			});
@@ -487,7 +486,7 @@ const inject = [
 	"tools"
 ];
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
-const CRON_GUIDANCE = "本机已安装 dsh-cron 插件（DSH Desktop 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；定时任务可执行 dsh-task 插件的任务，或向指定会话发送 prompt。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run 工具创建、查看、启停和触发定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。";
+const CRON_GUIDANCE = "本机已安装 dsh-cron 插件（DSH Desktop 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run 工具创建、查看、启停和触发定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。";
 /** Settings namespace of the cron plugin (spelled here and in the browser half). */
 const CRON_SETTINGS_NAMESPACE = settingsNamespace("cron");
 const Config = z.object({
@@ -501,7 +500,7 @@ const Config = z.object({
 * edit takes effect without a restart.
 */
 function apply(ctx, config) {
-	const host = new HostCronService(ctx.apiProxy, { taskService: () => ctx.get("picoTaskService") });
+	const host = new HostCronService(ctx.apiProxy, {});
 	host.setConfiguration(config.enabled ?? true, config.catchUpMissed ?? false);
 	host.start();
 	const currentUser = () => {

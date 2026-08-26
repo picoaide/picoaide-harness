@@ -309,7 +309,6 @@ the package names, versions, and licenses for transparency.
 | @picoaide/dsh-connectors | 0.1.0 | MIT |
 | @picoaide/dsh-cron | 0.1.0 | MIT |
 | @picoaide/dsh-enterprise | 0.1.0 | MIT |
-| @picoaide/dsh-task | 0.1.0 | MIT |
 | @protobufjs/aspromise | 1.1.2 | BSD-3-Clause |
 | @protobufjs/base64 | 1.1.2 | BSD-3-Clause |
 | @protobufjs/codegen | 2.0.5 | BSD-3-Clause |

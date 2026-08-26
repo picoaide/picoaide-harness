@@ -173,7 +173,7 @@ window.__ModuleLoader__.load({
 		function parseSnapshot(value) {
 			if (typeof value !== "object" || value === null) throw new Error("invalid snapshot");
 			const snapshot = value;
-			if (snapshot.schemaVersion !== 1 || !Array.isArray(snapshot.jobs)) throw new Error("unexpected schema");
+			if (snapshot.schemaVersion !== 2 || !Array.isArray(snapshot.jobs)) throw new Error("unexpected schema");
 			return snapshot;
 		}
 		var HttpCronTransport = class {
@@ -225,7 +225,7 @@ window.__ModuleLoader__.load({
 		/** Browser-side implementation of the cron service over the same-origin API. */
 		var HttpBrowserCronService = class {
 			snapshot = {
-				schemaVersion: 1,
+				schemaVersion: 2,
 				revision: 0,
 				jobs: [],
 				scheduler: { timeZone: "local" }
@@ -700,16 +700,20 @@ window.__ModuleLoader__.load({
 		function isCronJobAction(value) {
 			if (typeof value !== "object" || value === null) return false;
 			const action = value;
-			const keys = Object.keys(action);
-			if (action.kind === "task") {
-				if (keys.length !== 2 || !keys.includes("kind") || !keys.includes("taskId")) return false;
-				return typeof action.taskId === "string" && action.taskId !== "";
-			}
-			if (action.kind === "prompt") {
-				if (keys.length !== 3 || !keys.includes("kind") || !keys.includes("sessionId") || !keys.includes("text")) return false;
-				return typeof action.sessionId === "string" && action.sessionId !== "" && typeof action.text === "string" && action.text !== "";
-			}
-			return false;
+			if (action.kind !== "agent") return false;
+			const allowed = /* @__PURE__ */ new Set([
+				"kind",
+				"prompt",
+				"workspaceId",
+				"agentPreset",
+				"permission"
+			]);
+			if (!Object.keys(action).every((key) => allowed.has(key))) return false;
+			if (typeof action.prompt !== "string" || action.prompt.trim() === "") return false;
+			if (action.workspaceId !== void 0 && typeof action.workspaceId !== "string") return false;
+			if (action.agentPreset !== void 0 && typeof action.agentPreset !== "string") return false;
+			if (action.permission !== void 0 && typeof action.permission !== "string") return false;
+			return true;
 		}
 		//#endregion
 		//#region src/client/locales.ts
@@ -740,28 +744,31 @@ window.__ModuleLoader__.load({
 			"job.never": "从未",
 			"job.delete": "删除",
 			"job.run": "立即执行",
-			"job.actionTask": "执行任务",
-			"job.actionPrompt": "发送消息",
 			"job.workspace": "项目",
 			"job.workspaceCurrent": "当前项目（默认）",
-			"job.taskId": "任务",
-			"job.taskSelect": "选择任务…",
+			"job.agent": "执行智能体",
+			"job.agentDefault": "默认智能体（部署默认）",
+			"job.permission": "权限",
+			"job.permissionNone": "不使用（默认）",
+			"job.permissionRead": "只读",
+			"job.permissionWrite": "工作区可写",
+			"job.permissionFull": "完全访问",
 			"job.nameRequired": "请填写任务名称",
-			"job.taskIdRequired": "请选择要执行的任务",
-			"job.sessionIdRequired": "请填写会话 ID",
-			"job.promptTextRequired": "请填写消息内容",
-			"job.sessionId": "会话 ID",
-			"job.promptText": "消息内容",
+			"job.promptTextRequired": "请填写执行内容（发送给智能体的提示词）",
+			"job.promptText": "执行内容（提示词）",
 			"job.save": "保存",
 			"job.cancel": "取消",
-			"job.history": "触发历史",
+			"job.history": "执行详情",
 			"job.deleteConfirm": "确定删除该定时任务吗？",
-			"job.showHistory": "展开触发历史",
-			"job.hideHistory": "收起触发历史",
+			"job.showHistory": "展开执行详情",
+			"job.hideHistory": "收起执行详情",
 			"job.execution.succeeded": "成功",
 			"job.execution.failed": "失败",
 			"job.execution.cancelled": "已取消",
 			"job.execution.pending": "执行中",
+			"job.execution.startedAt": "开始",
+			"job.execution.endedAt": "结束",
+			"job.execution.prompt": "提示词",
 			"preset.daily9": "每天 09:00",
 			"preset.hourly": "每小时",
 			"preset.tenMin": "每 10 分钟",
@@ -792,28 +799,31 @@ window.__ModuleLoader__.load({
 			"job.never": "Never",
 			"job.delete": "Delete",
 			"job.run": "Run now",
-			"job.actionTask": "Run a task",
-			"job.actionPrompt": "Send a message",
 			"job.workspace": "Project",
 			"job.workspaceCurrent": "Current project (default)",
-			"job.taskId": "Task",
-			"job.taskSelect": "Select a task…",
-			"job.sessionId": "Session ID",
-			"job.promptText": "Message text",
+			"job.agent": "Agent",
+			"job.agentDefault": "Default agent (deployment default)",
+			"job.permission": "Permission",
+			"job.permissionNone": "None (default)",
+			"job.permissionRead": "Read only",
+			"job.permissionWrite": "Workspace write",
+			"job.permissionFull": "Full access",
+			"job.nameRequired": "Please enter a name",
+			"job.promptTextRequired": "Please enter the prompt text sent to the agent",
+			"job.promptText": "Prompt text",
 			"job.save": "Save",
 			"job.cancel": "Cancel",
-			"job.history": "Trigger history",
-			"job.nameRequired": "Please enter a name",
-			"job.taskIdRequired": "Please select a task to run",
-			"job.sessionIdRequired": "Please enter a session ID",
-			"job.promptTextRequired": "Please enter the message",
+			"job.history": "Execution detail",
 			"job.deleteConfirm": "Delete this scheduled job?",
-			"job.showHistory": "Expand trigger history",
-			"job.hideHistory": "Collapse trigger history",
+			"job.showHistory": "Expand execution detail",
+			"job.hideHistory": "Collapse execution detail",
 			"job.execution.succeeded": "Succeeded",
 			"job.execution.failed": "Failed",
 			"job.execution.cancelled": "Cancelled",
 			"job.execution.pending": "Running",
+			"job.execution.startedAt": "started",
+			"job.execution.endedAt": "ended",
+			"job.execution.prompt": "Prompt",
 			"preset.daily9": "Daily 09:00",
 			"preset.hourly": "Hourly",
 			"preset.tenMin": "Every 10 minutes",
@@ -831,8 +841,7 @@ window.__ModuleLoader__.load({
 		/**
 		* Project (workspace) options for the cron job editor. Reads the client
 		* workspaces feed (the same list the shell sidebar shows) — implemented
-		* locally because cross-package client imports are forbidden; the sibling
-		* dsh-task plugin owns its own copy.
+		* locally because cross-package client imports are forbidden.
 		*/
 		/** Extract the workspace option list from the client feed. */
 		function workspaceOptionsFrom(workspaces) {
@@ -859,10 +868,9 @@ window.__ModuleLoader__.load({
 		//#region src/client/JobEditor.tsx
 		/**
 		* Job editor dialog: name, cron expression (with presets + live validation),
-		* project (workspace) picker, and the action (run a dsh-task task, or send a
-		* message to a session). Task actions select the target task from the chosen
-		* project's board (fetched through the dsh-task loopback API); prompt actions
-		* name a session id directly.
+		* project (workspace) picker, agent preset picker (from agentPresets.list),
+		* permission picker, and the prompt text sent to the spawned agent session.
+		* The only action kind is `agent`.
 		*/
 		const PRESETS = [
 			{
@@ -882,45 +890,43 @@ window.__ModuleLoader__.load({
 				key: "preset.weeklyMon9"
 			}
 		];
-		/** Fetch the dsh-task board tasks through its loopback API (soft dependency). */
-		async function fetchTaskOptions() {
+		/** Fetch the deployment agent-preset roster through the client api (soft). */
+		async function fetchAgentOptions(api) {
+			if (api === void 0) return [];
 			try {
-				const response = await fetch("/api/task/state", { headers: { accept: "application/json" } });
-				if (!response.ok) return [];
-				return ((await response.json()).tasks ?? []).map((task) => ({
-					id: task.id,
-					title: task.title,
-					...task.workspaceId !== void 0 ? { workspaceId: task.workspaceId } : {}
+				const response = await api.agentPresets.list({});
+				if (!response.result.ok) return [];
+				return response.result.value.presets.map((preset) => ({
+					id: preset.id,
+					label: preset.name ?? preset.id,
+					...preset.broken === void 0 ? {} : { broken: preset.broken }
 				}));
 			} catch {
 				return [];
 			}
 		}
-		function JobEditor({ controller, job, workspaces, onClose }) {
+		function JobEditor({ controller, job, workspaces, api, onClose }) {
 			const [name, setName] = (0, react.useState)(job?.name ?? "");
 			const [cron, setCron] = (0, react.useState)(job?.cron ?? "0 9 * * *");
-			const [actionKind, setActionKind] = (0, react.useState)(job?.action.kind ?? "task");
-			const [taskId, setTaskId] = (0, react.useState)(job?.action.kind === "task" ? job.action.taskId : "");
-			const [sessionId, setSessionId] = (0, react.useState)(job?.action.kind === "prompt" ? job.action.sessionId : "");
-			const [text, setText] = (0, react.useState)(job?.action.kind === "prompt" ? job.action.text : "");
+			const [prompt, setPrompt] = (0, react.useState)(job?.action.kind === "agent" ? job.action.prompt : "");
+			const [workspaceId, setWorkspaceId] = (0, react.useState)(job?.action.kind === "agent" ? job.action.workspaceId ?? "" : "");
+			const [agentPreset, setAgentPreset] = (0, react.useState)(job?.action.kind === "agent" ? job.action.agentPreset ?? "" : "");
+			const [permission, setPermission] = (0, react.useState)(job?.action.kind === "agent" ? job.action.permission ?? "" : "");
 			const [error, setError] = (0, react.useState)();
 			const workspaceOptions = useWorkspaceOptions(workspaces);
-			const [workspaceId, setWorkspaceId] = (0, react.useState)("");
-			const [taskOptions, setTaskOptions] = (0, react.useState)([]);
+			const [agentOptions, setAgentOptions] = (0, react.useState)([]);
 			(0, react.useEffect)(() => {
-				if (actionKind !== "task") return;
 				let alive = true;
-				fetchTaskOptions().then((options) => {
+				fetchAgentOptions(api).then((options) => {
 					if (!alive) return;
-					setTaskOptions(options);
+					setAgentOptions(options);
 				});
 				return () => {
 					alive = false;
 				};
-			}, [actionKind, workspaceId]);
+			}, [api]);
 			const cronValid = isValidCron(cron);
 			const nextRun = cronValid ? nextRunAtMs(cron, Date.now()) : void 0;
-			const visibleTasks = workspaceId === "" ? taskOptions.filter((task) => task.workspaceId === void 0) : taskOptions.filter((task) => task.workspaceId === workspaceId);
 			const save = () => {
 				if (!cronValid) {
 					setError(t("job.cronInvalid"));
@@ -930,18 +936,19 @@ window.__ModuleLoader__.load({
 					setError(t("job.nameRequired"));
 					return;
 				}
-				const action = actionKind === "task" ? {
-					kind: "task",
-					taskId: taskId.trim()
-				} : {
-					kind: "prompt",
-					sessionId: sessionId.trim(),
-					text
+				if (prompt.trim() === "") {
+					setError(t("job.promptTextRequired"));
+					return;
+				}
+				const action = {
+					kind: "agent",
+					prompt: prompt.trim(),
+					...workspaceId === "" ? {} : { workspaceId },
+					...agentPreset === "" ? {} : { agentPreset },
+					...permission === "" ? {} : { permission }
 				};
 				if (!isCronJobAction(action)) {
-					if (actionKind === "task") setError(t("job.taskIdRequired"));
-					else if (sessionId.trim() === "") setError(t("job.sessionIdRequired"));
-					else setError(t("job.promptTextRequired"));
+					setError(t("job.promptTextRequired"));
 					return;
 				}
 				if (job === void 0) {
@@ -1063,74 +1070,71 @@ window.__ModuleLoader__.load({
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-								style: styles.label,
-								children: [
-									t("job.actionTask"),
-									" / ",
-									t("job.actionPrompt")
-								]
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
-								style: styles.input,
-								value: actionKind,
-								onChange: (event) => {
-									setActionKind(event.target.value);
-								},
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
-									value: "task",
-									children: t("job.actionTask")
-								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
-									value: "prompt",
-									children: t("job.actionPrompt")
-								})]
-							})]
-						}),
-						actionKind === "task" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							style: styles.field,
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								style: styles.label,
-								children: t("job.taskId")
+								children: t("job.agent")
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
 								style: styles.input,
-								value: taskId,
+								value: agentPreset,
 								onChange: (event) => {
-									setTaskId(event.target.value);
+									setAgentPreset(event.target.value);
 								},
+								disabled: agentOptions.length === 0,
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
 									value: "",
-									children: t("job.taskSelect")
-								}), visibleTasks.map((task) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
-									value: task.id,
-									children: task.title || task.id
-								}, task.id))]
+									children: t("job.agentDefault")
+								}), agentOptions.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("option", {
+									value: option.id,
+									disabled: option.broken !== void 0,
+									children: [option.label, option.broken !== void 0 ? `（${option.broken}）` : ""]
+								}, option.id))]
 							})]
-						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								style: styles.label,
-								children: t("job.sessionId")
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+								children: t("job.permission")
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
 								style: styles.input,
-								value: sessionId,
+								value: permission,
 								onChange: (event) => {
-									setSessionId(event.target.value);
+									setPermission(event.target.value);
 								},
-								placeholder: "session-…"
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: "",
+										children: t("job.permissionNone")
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: "read-only",
+										children: t("job.permissionRead")
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: "workspace-write",
+										children: t("job.permissionWrite")
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: "danger-full-access",
+										children: t("job.permissionFull")
+									})
+								]
 							})]
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles.field,
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								style: styles.label,
 								children: t("job.promptText")
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("textarea", {
 								style: styles.input,
-								rows: 3,
-								value: text,
+								rows: 4,
+								value: prompt,
 								onChange: (event) => {
-									setText(event.target.value);
+									setPrompt(event.target.value);
 								}
 							})]
-						})] }),
+						}),
 						error !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							style: styles.error,
 							children: error
@@ -1160,7 +1164,8 @@ window.__ModuleLoader__.load({
 		//#region src/client/CronJobTab.tsx
 		/**
 		* Scheduled-job center: the panel tab listing all jobs with enable/disable,
-		* run-now, edit, delete, and per-job trigger history.
+		* run-now, edit, delete, and per-job execution detail (triggered/start/end
+		* time, result, error, session id, prompt view).
 		*/
 		function executionLabel(result) {
 			if (result.endedAt === void 0) return {
@@ -1186,7 +1191,7 @@ window.__ModuleLoader__.load({
 				};
 			}
 		}
-		function CronJobTab({ controller, workspaces }) {
+		function CronJobTab({ controller, workspaces, api }) {
 			const [snapshot, setSnapshot] = (0, react.useState)(controller.getSnapshot());
 			const [editing, setEditing] = (0, react.useState)();
 			const [creating, setCreating] = (0, react.useState)(false);
@@ -1251,12 +1256,14 @@ window.__ModuleLoader__.load({
 							job,
 							pending: snapshot.pendingJobIds.includes(job.id),
 							controller,
-							onEdit: setEditing
+							onEdit: setEditing,
+							api
 						}, job.id))]
 					}),
 					creating && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(JobEditor, {
 						controller,
 						...workspaces === void 0 ? {} : { workspaces },
+						...api === void 0 ? {} : { api },
 						onClose: () => {
 							setCreating(false);
 						}
@@ -1265,6 +1272,7 @@ window.__ModuleLoader__.load({
 						controller,
 						job: editing,
 						...workspaces === void 0 ? {} : { workspaces },
+						...api === void 0 ? {} : { api },
 						onClose: () => {
 							setEditing(void 0);
 						}
@@ -1272,7 +1280,7 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		function JobRow({ job, pending, controller, onEdit }) {
+		function JobRow({ job, pending, controller, onEdit, api }) {
 			const [open, setOpen] = (0, react.useState)(false);
 			const recent = job.executions.slice(-5).reverse();
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -1371,17 +1379,34 @@ window.__ModuleLoader__.load({
 							return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								style: styles.historyRow,
 								children: [
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 										style: styles.historyTime,
-										children: new Date(execution.triggeredAt).toLocaleString()
+										children: [
+											new Date(execution.triggeredAt).toLocaleString(),
+											execution.startedAt !== void 0 && execution.startedAt !== execution.triggeredAt && ` · ${t("job.execution.startedAt")} ${new Date(execution.startedAt).toLocaleTimeString()}`,
+											execution.endedAt !== void 0 && ` · ${t("job.execution.endedAt")} ${new Date(execution.endedAt).toLocaleTimeString()}`
+										]
 									}),
 									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										style: label.style,
 										children: label.text
 									}),
+									execution.sessionId !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+										title: execution.sessionId,
+										children: [execution.sessionId.slice(0, 12), "…"]
+									}),
 									execution.error !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										title: execution.error,
 										children: execution.error.slice(0, 80)
+									}),
+									execution.prompt !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										style: styles.button,
+										title: t("job.execution.prompt"),
+										onClick: () => {
+											window.alert(`${t("job.execution.prompt")}:\n\n${execution.prompt}`);
+										},
+										children: t("job.execution.prompt")
 									})
 								]
 							}, execution.id);
@@ -1515,8 +1540,6 @@ window.__ModuleLoader__.load({
 		const ACTIVATE_EVENT$1 = "dsh-panel-activate";
 		/** The html attribute this panel toggles (sibling panels remove it). */
 		const CRON_ACTIVE_ATTR = "data-dsh-cron-active";
-		/** The html attribute sibling injected panels toggle (removed when we open). */
-		const OTHER_ACTIVE_ATTR = "data-dsh-task-active";
 		function isCronOpen() {
 			return document.documentElement.hasAttribute(CRON_ACTIVE_ATTR);
 		}
@@ -1527,7 +1550,7 @@ window.__ModuleLoader__.load({
 		function CronTrigger(props) {
 			const open = () => {
 				if (isCronOpen()) return;
-				document.documentElement.removeAttribute(OTHER_ACTIVE_ATTR);
+				document.documentElement.removeAttribute("data-dsh-task-active");
 				document.documentElement.setAttribute(CRON_ACTIVE_ATTR, "");
 				document.dispatchEvent(new CustomEvent(ACTIVATE_EVENT$1, { detail: "cron" }));
 			};
@@ -1567,7 +1590,7 @@ window.__ModuleLoader__.load({
 		*
 		* The `conversation` slot is single-occupant (ui-conversation) and external
 		* plugins cannot declare slots, so the center takes over the center column
-		* at the DOM level — the same pattern as upstream dsh-task-board: a
+		* at the DOM level — the same pattern as the former dsh-task board: a
 		* container is appended inside the center column as a trailing child React
 		* never manages, and a global stylesheet rule scoped to the html activation
 		* attribute hides the conversation content while the center is active. The
@@ -1607,7 +1630,7 @@ window.__ModuleLoader__.load({
 		* visibility to the html activation attribute.
 		* @returns disposer unmounting the tree and restoring the column.
 		*/
-		function mountCronPanel(controller, workspaces) {
+		function mountCronPanel(controller, workspaces, api) {
 			let root;
 			let container;
 			const style = visibilityStyle();
@@ -1623,7 +1646,8 @@ window.__ModuleLoader__.load({
 				root = (0, react_dom_client.createRoot)(container);
 				root.render((0, react.createElement)(CronCenterView, {
 					controller,
-					...workspaces === void 0 ? {} : { workspaces }
+					...workspaces === void 0 ? {} : { workspaces },
+					...api === void 0 ? {} : { api }
 				}));
 			};
 			const waitObserver = new MutationObserver(() => {
@@ -1658,7 +1682,7 @@ window.__ModuleLoader__.load({
 			};
 		}
 		/** Center view: a back-to-chat header plus the job center body. */
-		function CronCenterView({ controller, workspaces }) {
+		function CronCenterView({ controller, workspaces, api }) {
 			const back = () => {
 				closeCronPanel();
 			};
@@ -1693,7 +1717,8 @@ window.__ModuleLoader__.load({
 					},
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CronJobTab, {
 						controller,
-						...workspaces === void 0 ? {} : { workspaces }
+						...workspaces === void 0 ? {} : { workspaces },
+						...api === void 0 ? {} : { api }
 					})
 				})]
 			});
@@ -1728,7 +1753,8 @@ window.__ModuleLoader__.load({
 			"slots",
 			"settingsScope",
 			"locale",
-			"workspaces"
+			"workspaces",
+			"connection"
 		];
 		/** Settings namespace this card edits (the Host half registers it). */
 		const CRON_NS = "cron";
@@ -1768,12 +1794,13 @@ window.__ModuleLoader__.load({
 				return () => controller.dispose();
 			}, "controller lifecycle");
 			const workspacesService = ctx.get("workspaces");
+			const api = ctx.get("connection")?.api;
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
 				name: "sidebar.footer.action",
 				id: "pico-cron",
 				order: -10
 			}, CronTrigger));
-			ctx.effect(() => mountCronPanel(controller, workspacesService), "dsh-cron: main-area center");
+			ctx.effect(() => mountCronPanel(controller, workspacesService, api), "dsh-cron: main-area center");
 			ctx.inject(["betterSidebar"], (childCtx) => {
 				const service = childCtx.get("betterSidebar");
 				if (service === void 0) return;
@@ -1783,7 +1810,8 @@ window.__ModuleLoader__.load({
 					order: 30,
 					component: () => (0, react.createElement)(CronJobTab, {
 						controller,
-						...workspacesService === void 0 ? {} : { workspaces: workspacesService }
+						...workspacesService === void 0 ? {} : { workspaces: workspacesService },
+						...api === void 0 ? {} : { api }
 					})
 				});
 				childCtx.effect(() => () => {

@@ -141,9 +141,13 @@ export class HostCronScheduler {
    * Execute one job action and settle its execution record (also used for
    * manual run/rerun actions). Resolves when the execution is settled; a
    * settlement failure is contained (never rejects into the tick loop).
+   * When the executor reports the spawned session id / prompt, they are
+   * attached to the execution record before settling (execution detail).
    */
   fire(job: JobRecord, execution: { id: string }): Promise<void> {
-    return this.executor.execute(job, execution).then(({ result, error }) => {
+    return this.executor.execute(job).then(({ result, error, sessionId, prompt }) => {
+      if (sessionId !== undefined) this.ledger.attachSession(job.id, execution.id, sessionId)
+      if (prompt !== undefined) this.ledger.attachPrompt(job.id, execution.id, prompt)
       this.ledger.settle(job.id, execution.id, result, error)
     }).catch(error => {
       try {

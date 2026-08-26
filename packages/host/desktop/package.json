@@ -230,7 +230,6 @@
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
-    "@picoaide/dsh-task": "workspace:*",
     "adm-zip": "^0.6.0",
     "dsh-better-sidebar": "workspace:*",
     "dsh-memory-evolve": "workspace:*",

@@ -131,7 +131,7 @@ try {
 
   // 4. Main sidebar
   const mainBtns = await ev(`[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '任务看板', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).some(b => b.includes(x)))
+  const hasSidebar = ['定时任务', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).some(b => b.includes(x)))
   reportStep('主界面侧边栏导航完整（真实）', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 12).join(',')}`)
   await screenshot('r02-main')
 
@@ -174,20 +174,12 @@ try {
   await ev(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 
-  // 8. Task board (real data)
-  await clickLabel('任务看板', 3500)
-  const taskOk = await ev(`!!document.querySelector('[data-dsh-task-view]')`)
-  reportStep('任务看板面板挂载（真实数据）', taskOk === true)
-  await screenshot('r09-task')
-  await ev(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
-  await wait(1200)
-
-  // 9. Chat input
+  // 8. Chat input
   const chatOk = await ev(`!!document.querySelector('textarea, [contenteditable=true]')`)
   reportStep('聊天输入区可用（真实）', chatOk === true)
-  await screenshot('r10-chat')
+  await screenshot('r09-chat')
 
-  // 10. Browser panel
+  // 9. Browser panel
   await clickLabel('浏览器', 3000).catch(() => {})
   const browserText = await bodyText()
   reportStep('浏览器面板可打开', browserText.includes('浏览') || browserText.includes('地址'), `len=${browserText.length}`)

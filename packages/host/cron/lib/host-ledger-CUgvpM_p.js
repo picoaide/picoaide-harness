@@ -208,8 +208,8 @@ var HostCronLedger = class {
 			const parsed = JSON.parse(raw);
 			if (typeof parsed.schemaVersion !== "number" || !Array.isArray(parsed.jobs)) throw new Error("unexpected schema");
 			let jobs = parsed.jobs;
-			if (parsed.schemaVersion < 1) jobs = migrateCronLedger(jobs, parsed.schemaVersion);
-			else if (parsed.schemaVersion > 1) throw new Error(`ledger schema v${String(parsed.schemaVersion)} is newer than supported v1`);
+			if (parsed.schemaVersion < 2) jobs = migrateCronLedger(jobs, parsed.schemaVersion);
+			else if (parsed.schemaVersion > 2) throw new Error(`ledger schema v${String(parsed.schemaVersion)} is newer than supported v2`);
 			const state = {
 				revision: parsed.revision,
 				jobs,
@@ -240,7 +240,7 @@ var HostCronLedger = class {
 	}
 	persist() {
 		const document = {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			revision: this.current.revision,
 			jobs: this.current.jobs,
 			scheduler: this.current.scheduler,
@@ -465,6 +465,38 @@ var HostCronLedger = class {
 			return true;
 		});
 	}
+	/** Scheduler-owned: attach the spawned session id to a pending execution. */
+	attachSession(jobId, executionId, sessionId) {
+		this.mutate((state) => {
+			const job = state.jobs.find((candidate) => candidate.id === jobId);
+			if (job === void 0) return false;
+			const index = job.executions.findIndex((execution) => execution.id === executionId);
+			if (index < 0) return false;
+			const execution = job.executions[index];
+			if (execution.endedAt !== void 0) return false;
+			job.executions[index] = {
+				...execution,
+				sessionId
+			};
+			return true;
+		});
+	}
+	/** Scheduler-owned: attach the prompt text to a pending execution. */
+	attachPrompt(jobId, executionId, prompt) {
+		this.mutate((state) => {
+			const job = state.jobs.find((candidate) => candidate.id === jobId);
+			if (job === void 0) return false;
+			const index = job.executions.findIndex((execution) => execution.id === executionId);
+			if (index < 0) return false;
+			const execution = job.executions[index];
+			if (execution.endedAt !== void 0) return false;
+			job.executions[index] = {
+				...execution,
+				prompt
+			};
+			return true;
+		});
+	}
 	/** Scheduler-owned: roll every enabled job's nextRunAt past `now` (missed runs are skipped). */
 	skipMissed(now) {
 		this.mutate((state) => {
@@ -569,13 +601,28 @@ function validateCron(expr) {
 /**
 * Migrate a ledger's jobs from an older schema version to the current one.
 * 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走
-* 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。当前只有
-* v1;未来字段/枚举变更时在此加 v1→v2、v2→v3 … 并同步 bump 常量。
+* 逐级迁移;新版本必须在此注册(从 fromVersion 逐级到当前)。
+*
+* v1 → v2(任务看板合并):v1 的动作是 task(taskId 引用 dsh-task 看板任务)
+* 或 prompt(sessionId+text 向既有会话发消息)。dsh-task 插件已删除,看板
+* 任务不复存在,无法解析到智能体+提示词:这类记录与新域模型不兼容,按
+* 用户确认的迁移策略丢弃(原 leder 数据文件仍在,可手工恢复)。v2 动作
+* 只有 agent(prompt 必填,可选 workspaceId/agentPreset/permission)。
 */
 function migrateCronLedger(jobs, fromVersion) {
-	return jobs;
+	let current = jobs;
+	if (fromVersion <= 1) current = current.filter((job) => job.action?.kind === "agent").map((job) => {
+		const executions = Array.isArray(job.executions) ? job.executions.filter((execution) => {
+			return execution !== null && typeof execution === "object" && typeof execution.id === "string";
+		}) : [];
+		return {
+			...job,
+			executions
+		};
+	});
+	return current;
 }
 //#endregion
 export { validateCron as i, migrateCronLedger as n, openScheduledRun as r, HostCronLedger as t };
 
-//# sourceMappingURL=host-ledger-CqX0T9MB.js.map
+//# sourceMappingURL=host-ledger-CUgvpM_p.js.map

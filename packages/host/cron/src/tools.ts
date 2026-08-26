@@ -5,8 +5,8 @@
  * reachable from a conversation). These tools let the model create, list,
  * enable/disable, and trigger scheduled jobs directly, sharing the exact
  * same Host ledger and executor as the UI. A job action is a closed
- * discriminated union (run a dsh-task task / send a message) — never a
- * command or shell line.
+ * discriminated union — the only kind is `agent` (spawn a fresh agent
+ * session for a prompt) — never a command or shell line.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -19,13 +19,14 @@ export function registerCronTools(ctx: Context, service: HostCronService): () =>
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'cron_create',
-    description: '创建定时任务（cron 表达式，5 段：分 时 日 月 周，支持 */n 步进、a-b 范围、逗号列表，日/周 OR 语义）。到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行。动作二选一：执行看板任务（taskId）或向指定会话发送消息（sessionId+text）。',
+    description: '创建定时任务（cron 表达式，5 段：分 时 日 月 周，支持 */n 步进、a-b 范围、逗号列表，日/周 OR 语义）。到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行。每次执行新建一个智能体会话并发送提示词（可指定工作区、智能体预设和权限）。',
     parameters: {
       name: { type: 'string', required: true, description: '定时任务名称（非空）' },
       cron: { type: 'string', required: true, description: '5 段 cron 表达式，如 0 9 * * *（每天 09:00）' },
-      taskId: { type: 'string', description: '要执行的看板任务 id（与 sessionId+text 二选一）；用 task_list 查询（任务创建时可用 workspace_list 选择项目）' },
-      sessionId: { type: 'string', description: '要发送消息的目标会话 id（与 taskId 二选一）' },
-      text: { type: 'string', description: '要发送的消息内容（sessionId 模式必填）' },
+      prompt: { type: 'string', required: true, description: '执行时发送给智能体会话的提示词内容（必填，非空）' },
+      workspaceId: { type: 'string', description: '要钉住的工作区 id（缺省=当前工作区）' },
+      agentPreset: { type: 'string', description: '要使用的智能体预设 id（缺省=部署默认）' },
+      permission: { type: 'string', description: '可选权限预设：read-only / workspace-write / danger-full-access' },
       enabled: { type: 'boolean', description: '是否立即启用（默认 false）' },
     },
     output: {
@@ -36,19 +37,20 @@ export function registerCronTools(ctx: Context, service: HostCronService): () =>
       // Hand-check cross-field constraints the DSL does not express.
       if (!isValidCron(args.cron)) throw new Error(`cron 表达式无效: ${args.cron}`)
       if (nextRunAtMs(args.cron, Date.now()) === undefined) throw new Error(`cron 表达式在五年内无匹配时刻: ${args.cron}`)
-      const hasTask = args.taskId !== undefined && args.taskId !== ''
-      const hasPrompt = args.sessionId !== undefined && args.sessionId !== ''
-      if (hasTask === hasPrompt) throw new Error('必须且只能提供 taskId 或 sessionId+text 之一')
-      if (hasPrompt && (args.text === undefined || args.text === '')) throw new Error('sessionId 模式必须提供 text')
+      if (args.prompt === undefined || args.prompt.trim() === '') throw new Error('必须提供 prompt（执行时发送给智能体会话的提示词）')
 
       const id = `job-${crypto.randomUUID()}`
       service.registerJob({
         id,
         name: args.name.trim(),
         cron: args.cron.trim(),
-        action: hasTask
-          ? { kind: 'task', taskId: args.taskId! }
-          : { kind: 'prompt', sessionId: args.sessionId!, text: args.text! },
+        action: {
+          kind: 'agent',
+          prompt: args.prompt.trim(),
+          ...(args.workspaceId === undefined ? {} : { workspaceId: args.workspaceId }),
+          ...(args.agentPreset === undefined ? {} : { agentPreset: args.agentPreset }),
+          ...(args.permission === undefined ? {} : { permission: args.permission }),
+        },
         enabled: args.enabled ?? false,
       })
       return { id }

@@ -8,15 +8,13 @@ import { HostCronLedger } from './host-ledger.ts'
 import { HostCronExecutor } from './host-executor.ts'
 import { HostCronScheduler } from './host-scheduler.ts'
 import { jobVisibleTo, type JobRecord } from './jobs.ts'
-import type { CronEventPayload, CronSnapshot, CronAction } from './protocol.ts'
-import type { CronJobRegistration, PicoCronService, PicoTaskService } from './service.ts'
+import { CRON_SCHEMA_VERSION, type CronEventPayload, type CronSnapshot, type CronAction } from './protocol.ts'
+import type { CronJobRegistration, PicoCronService } from './service.ts'
 
 export interface HostCronServiceOptions {
   ledger?: HostCronLedger
   executor?: HostCronExecutor
   scheduler?: HostCronScheduler
-  /** Live resolver for the optional dsh-task service. */
-  taskService?: () => PicoTaskService | undefined
   now?: () => number
 }
 
@@ -36,10 +34,7 @@ export class HostCronService implements PicoCronService {
     // change (setUsername) takes effect immediately.
     this.ledger = options.ledger ?? new HostCronLedger({ owner: () => this.username })
     this.now = options.now ?? Date.now
-    const executor = options.executor ?? new HostCronExecutor({
-      api,
-      taskService: options.taskService ?? (() => undefined),
-    })
+    const executor = options.executor ?? new HostCronExecutor({ api })
     this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, {
       now: this.now,
       visible: (job) => jobVisibleTo(job, this.username),
@@ -74,7 +69,7 @@ export class HostCronService implements PicoCronService {
   snapshot(): CronSnapshot {
     const state = this.ledger.state()
     return {
-      schemaVersion: 1,
+      schemaVersion: CRON_SCHEMA_VERSION,
       revision: state.revision,
       // Owner filter applied on read: a logged-out session sees only legacy
       // records; a logged-in session sees legacy + its own.

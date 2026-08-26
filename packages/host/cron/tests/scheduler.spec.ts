@@ -53,7 +53,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     id: 'job-1',
     name: 'Daily',
     cron: '0 9 * * *',
-    action: { kind: 'task', taskId: 'task-1' },
+    action: { kind: 'agent', prompt: 'do the daily thing' },
     enabled: true,
     nextRunAt: new Date(2026, 7, 19, 9, 0, 0).getTime(),
     executions: [],

@@ -25,9 +25,10 @@ describe('cron tools surface', () => {
     expect(source).not.toMatch(/['"]shell['"]/)
   })
 
-  it('validates the cron expression and action exclusivity in execute', () => {
+  it('validates the cron expression and requires a prompt in execute', () => {
     expect(source).toContain('isValidCron(args.cron)')
-    expect(source).toContain('必须且只能提供 taskId 或 sessionId+text 之一')
+    expect(source).toContain(`prompt.trim() === ''`)
+    expect(source).toContain('必须提供 prompt')
   })
 
   it('routes through the Host service', () => {

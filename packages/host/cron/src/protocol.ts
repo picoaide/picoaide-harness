@@ -10,7 +10,7 @@
 import { isCronJobAction, type JobRecord, type NewJobInput, type JobUpdatePatch } from './jobs.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
 
-export const CRON_SCHEMA_VERSION = 1 as const
+export const CRON_SCHEMA_VERSION = 2 as const
 export const CRON_API_PREFIX = '/api/cron'
 
 export interface CronSchedulerSnapshot {

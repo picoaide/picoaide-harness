@@ -234,7 +234,7 @@ async function main() {
 
   // 5. Main surface assertions.
   const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '任务看板', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
+  const hasSidebar = ['定时任务', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
   reportStep('主界面侧边栏导航完整', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 14).join(',')}`)
 
   // 6. Feature panels (open, assert content, screenshot, close).
@@ -261,20 +261,12 @@ async function main() {
     await clickLabel(cdp, '关闭', 1000)
   }
 
-  // 7. Cron / Task board direct assert via panel views.
+  // 7. Cron panel direct assert via the center view.
   await clickLabel(cdp, '定时任务', 3500)
   const cronOk = await waitFor(cdp, `!!document.querySelector('[data-dsh-cron-view]')`)
   reportStep('定时任务中心面板挂载', cronOk)
   await screenshot(cdp, '06-cron')
   // Leave the cron board: its "返回聊天" header button removes the activation attr.
-  await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
-  await wait(1200)
-
-  await clickLabel(cdp, '任务看板', 3500)
-  const taskOk = await waitFor(cdp, `!!document.querySelector('[data-dsh-task-view]')`)
-  reportStep('任务看板面板挂载', taskOk)
-  await screenshot(cdp, '07-task')
-  // Leave the task board before the chat assertions so 08-chat shows the conversation.
   await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 

@@ -10,7 +10,7 @@ import { isCronJobAction } from "./jobs.js";
 * executable fields anywhere in the union. The browser never writes
 * scheduler-owned timestamps or execution results.
 */
-const CRON_SCHEMA_VERSION = 1;
+const CRON_SCHEMA_VERSION = 2;
 const CRON_API_PREFIX = "/api/cron";
 function record(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;

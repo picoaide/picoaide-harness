@@ -8,14 +8,12 @@ import { HostCronLedger } from './host-ledger.ts';
 import { HostCronExecutor } from './host-executor.ts';
 import { HostCronScheduler } from './host-scheduler.ts';
 import { type JobRecord } from './jobs.ts';
-import type { CronEventPayload, CronSnapshot, CronAction } from './protocol.ts';
-import type { CronJobRegistration, PicoCronService, PicoTaskService } from './service.ts';
+import { type CronEventPayload, type CronSnapshot, type CronAction } from './protocol.ts';
+import type { CronJobRegistration, PicoCronService } from './service.ts';
 export interface HostCronServiceOptions {
     ledger?: HostCronLedger;
     executor?: HostCronExecutor;
     scheduler?: HostCronScheduler;
-    /** Live resolver for the optional dsh-task service. */
-    taskService?: () => PicoTaskService | undefined;
     now?: () => number;
 }
 export declare class HostCronService implements PicoCronService {

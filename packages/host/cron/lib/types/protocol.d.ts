@@ -8,7 +8,7 @@
  * scheduler-owned timestamps or execution results.
  */
 import { type JobRecord, type NewJobInput, type JobUpdatePatch } from './jobs.ts';
-export declare const CRON_SCHEMA_VERSION: 1;
+export declare const CRON_SCHEMA_VERSION: 2;
 export declare const CRON_API_PREFIX = "/api/cron";
 export interface CronSchedulerSnapshot {
     timeZone: string;

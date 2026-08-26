@@ -10,6 +10,12 @@ import { nextRunAtMs } from "./cron.js";
 * Actions are a closed discriminated union with no command, executable, or
 * shell fields: the prompt text is data sent to an agent session, never a
 * shell line.
+*
+* v2: only one action kind remains — `agent` (spawn a fresh agent session
+* for a task prompt, optionally pinned to a workspace / agent preset /
+* permission). The legacy `task` (dsh-task board reference) and `prompt`
+* (send a message to an existing session) kinds were removed when the task
+* board was merged into the scheduler.
 */
 function isExecutionResult(value) {
 	return value === "succeeded" || value === "failed" || value === "cancelled";
@@ -17,22 +23,27 @@ function isExecutionResult(value) {
 function isCronJobAction(value) {
 	if (typeof value !== "object" || value === null) return false;
 	const action = value;
-	const keys = Object.keys(action);
-	if (action.kind === "task") {
-		if (keys.length !== 2 || !keys.includes("kind") || !keys.includes("taskId")) return false;
-		return typeof action.taskId === "string" && action.taskId !== "";
-	}
-	if (action.kind === "prompt") {
-		if (keys.length !== 3 || !keys.includes("kind") || !keys.includes("sessionId") || !keys.includes("text")) return false;
-		return typeof action.sessionId === "string" && action.sessionId !== "" && typeof action.text === "string" && action.text !== "";
-	}
-	return false;
+	if (action.kind !== "agent") return false;
+	const allowed = /* @__PURE__ */ new Set([
+		"kind",
+		"prompt",
+		"workspaceId",
+		"agentPreset",
+		"permission"
+	]);
+	if (!Object.keys(action).every((key) => allowed.has(key))) return false;
+	if (typeof action.prompt !== "string" || action.prompt.trim() === "") return false;
+	if (action.workspaceId !== void 0 && typeof action.workspaceId !== "string") return false;
+	if (action.agentPreset !== void 0 && typeof action.agentPreset !== "string") return false;
+	if (action.permission !== void 0 && typeof action.permission !== "string") return false;
+	return true;
 }
 /** Create an execution record for a pending trigger. */
 function startExecution(id, now) {
 	return {
 		id,
-		triggeredAt: now
+		triggeredAt: now,
+		startedAt: now
 	};
 }
 /** Settle a pending execution with a result and optional error. */

@@ -5887,48 +5887,6 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@picoaide/dsh-task@workspace:*, @picoaide/dsh-task@workspace:packages/host/task":
-  version: 0.0.0-use.local
-  resolution: "@picoaide/dsh-task@workspace:packages/host/task"
-  dependencies:
-    "@deepseek-ai/cordis": "npm:4.0.1"
-    "@deepseek-ai/dsh-api-remotes": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-client-locale": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-client-runtime": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-client-ui-settings-plugins": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-code-runtime": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-cordis-host-runner": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-host-apiproxy": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-host-plugin-inventory": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-host-webserver": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-invariants": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-scope": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-session": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-settings": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-system-prompt": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-timeout": "npm:0.1.1-rc.2"
-    "@deepseek-ai/dsh-tools": "npm:0.1.1-rc.2"
-    "@deepseek-ai/schemastery": "npm:^3.18.1"
-    "@types/node": "npm:^22.20.0"
-    "@types/react": "npm:~18.3.1"
-    "@types/react-dom": "npm:^18.3.5"
-    dsh-plugin-desktop: "workspace:*"
-    jsdom: "npm:^25.0.0"
-    react: "npm:^18.3.1"
-    react-dom: "npm:^18.3.1"
-    tsdown: "npm:0.22.2"
-    typescript: "npm:~5.7.2"
-    vitest: "npm:^3.0.0"
-  peerDependencies:
-    "@deepseek-ai/cordis": 4.0.1
-    react: ^18.2.0
-    react-dom: ^18.2.0
-  languageName: unknown
-  linkType: soft
-
 "@playwright/test@npm:^1.62.1":
   version: 1.62.1
   resolution: "@playwright/test@npm:1.62.1"
@@ -9526,7 +9484,6 @@ __metadata:
     "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-cron": "workspace:*"
     "@picoaide/dsh-enterprise": "workspace:*"
-    "@picoaide/dsh-task": "workspace:*"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
