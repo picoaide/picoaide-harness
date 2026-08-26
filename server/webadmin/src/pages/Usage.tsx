@@ -157,22 +157,30 @@ export default function Usage() {
     } catch { setCompareTokens(null); setCompareCost(null) }
   }, [group])
 
+  // 审计修复 2026-P: 请求序号防乱序——快速切换分组/查询时,
+  // 旧分组的迟到响应不得覆盖新分组数据(参照 Users/Audit 的 P1-8 模式);
+  // 60s 轮询 silent 与手动查询共用同一守卫。
+  const loadSeq = useRef(0)
+
   const load = useCallback(async (opts?: { silent?: boolean }) => {
+    const current = ++loadSeq.current
     if (!opts?.silent) setLoading(true)
     try {
       const params = new URLSearchParams({ group })
       if (fromRef.current) params.set('from', fromRef.current)
       if (toRef.current) params.set('to', toRef.current)
       const data = await request(`/api/admin/usage?${params}`)
+      if (current !== loadSeq.current) return // 过期响应丢弃
       setRows(data.rows ?? [])
       setError('')
       // 环比查询只在手动/首次加载时执行;60s 轮询(silent)跳过,避免
       // 每轮多打一个上一区间请求(审计2026-E3 P2-2)
       if (!opts?.silent) await refreshCompare()
     } catch (err: any) {
+      if (current !== loadSeq.current) return // 过期响应不写错误
       setError(err.message)
     } finally {
-      if (!opts?.silent) setLoading(false)
+      if (!opts?.silent && current === loadSeq.current) setLoading(false)
     }
   }, [group, refreshCompare])
 
