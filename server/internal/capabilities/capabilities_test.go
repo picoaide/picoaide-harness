@@ -85,6 +85,19 @@ func doGet(t *testing.T, r *gin.Engine, path string, hdr map[string]string) *htt
 	return w
 }
 
+// reqDo issues an admin PUT/POST with CSRF/cookie headers (e.g. grant calls).
+func reqDo(t *testing.T, r *gin.Engine, adminHdr map[string]string, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	return w
+}
+
 func TestMergeVersions(t *testing.T) {
 	// 1.0.0 与 1.10.0 的数值感知排序。
 	items := []CapabilityItem{
@@ -260,5 +273,91 @@ func TestListApprovalsTypeFilter(t *testing.T) {
 	}
 	if len(resp.Approvals) != 1 || resp.Approvals[0].Kind != KindSkill {
 		t.Fatalf("skill filter approvals=%+v", resp.Approvals)
+	}
+}
+
+// TestCapabilitiesMarketMerge 决策 2026-08-25:市场/组织合并为「市场」。
+// ?source=market 返回合并(市场+组织可见项,各保留 source 徽章);
+// ?source=org 仅组织;无参数全量(向后兼容)。
+// 注:跨源同名已被强制互斥(上传/上架 409)阻断,合并内在不变量是
+// 「同名不同源不会共存」,故本测试验证正常合并与 source 保留。
+func TestCapabilitiesMarketMerge(t *testing.T) {
+	r, db, _, userTokens := setupRouter(t)
+	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
+	defer db.Close()
+	// 市场技能(授权给 alice)。
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "market-only", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/m.git"}); err != nil {
+		t.Fatalf("market only: %v", err)
+	}
+	// 共享库技能(approved + 授权给 alice)。
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "org-only", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillApproved}); err != nil {
+		t.Fatalf("shared org-only: %v", err)
+	}
+	// 直接授权 alice 可见市场技能(perm_test 同款:serverstore.GrantSkill)。
+	if err := serverstore.GrantSkill(db, "market-only", "alice", serverstore.GranteeUser); err != nil {
+		t.Fatalf("grant market-only: %v", err)
+	}
+	// 共享库 org-only 的作者是 alice(作者 own 任意状态均可见),无需额外授权。
+
+	// ?source=market 合并:market-only(source=market) 与 org-only(source=org) 同在。
+	w := doGet(t, r, "/api/capabilities?source=market&type=skill", aliceHdr)
+	var resp struct {
+		Items []CapabilityItem `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]CapabilityItem{}
+	for _, it := range resp.Items {
+		byName[it.Name] = it
+	}
+	if len(byName) != 2 {
+		t.Fatalf("merged count=%d (%+v)", len(byName), resp.Items)
+	}
+	if byName["market-only"].Source != SourceMarket {
+		t.Fatalf("market-only source=%s, want market", byName["market-only"].Source)
+	}
+	if byName["org-only"].Source != SourceOrg {
+		t.Fatalf("org-only source=%s, want org", byName["org-only"].Source)
+	}
+
+	// ?source=org 仅组织,不泄漏市场。
+	w2 := doGet(t, r, "/api/capabilities?source=org&type=skill", aliceHdr)
+	var resp2 struct {
+		Items []CapabilityItem `json:"items"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range resp2.Items {
+		if it.Name == "market-only" {
+			t.Fatalf("org source leaked market-only")
+		}
+		if it.Source != SourceOrg {
+			t.Fatalf("org item source=%s", it.Source)
+		}
+	}
+}
+
+// TestMergeMarketFirst 直接验证同名折叠(防御性):市场行优先、组织版本并入。
+func TestMergeMarketFirst(t *testing.T) {
+	items := []CapabilityItem{
+		{Kind: KindSkill, Source: SourceMarket, Name: "dup", Version: "1.0.0", Status: "approved"},
+		{Kind: KindSkill, Source: SourceOrg, Name: "dup", Version: "2.0.0", Status: "approved"},
+		{Kind: KindSkill, Source: SourceOrg, Name: "only-org", Version: "1.0.0", Status: "approved"},
+	}
+	out := mergeMarketFirst(items)
+	if len(out) != 2 {
+		t.Fatalf("merged len=%d, want 2", len(out))
+	}
+	for _, it := range out {
+		if it.Name == "dup" {
+			if it.Source != SourceMarket {
+				t.Fatalf("dup source=%s, want market", it.Source)
+			}
+			if len(it.Versions) < 2 {
+				t.Fatalf("dup versions=%v, want org merged", it.Versions)
+			}
+		}
 	}
 }
