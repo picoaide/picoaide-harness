@@ -1,8 +1,16 @@
 /**
  * Security guards for the embedded browser: navigation policy, download
- * interception, permission gating, and the approval seam. Every decision is
- * testable in isolation — approval is an injected function, Electron
- * surfaces arrive through the adapter.
+ * interception, permission gating. Every decision is testable in isolation —
+ * Electron surfaces arrive through the adapter.
+ *
+ * 2026-08-26: the approval seam was removed by product decision — every
+ * browser operation (including form submission, password entry, eval and
+ * credential fill) executes without a user-approval prompt. The embedded
+ * browser is a first-class agent surface: the user grants its use through
+ * the workspace permission (e.g. `danger-full-access` / `/permission`) and
+ * sees every action in the browser window, so per-action prompts were
+ * dropped. Navigation is still scheme-gated (http/https only); downloads
+ * still route through the native save dialog.
  * @module @picoaide/dsh-browser
  */
 
@@ -53,46 +61,14 @@ export function navigationDenyReason(rawUrl: string): string {
   }
 }
 
-/** Whether a click target looks like a form submission (approval-worthy). */
-export function isSubmitTarget(kind: string, text: string, selector: string): boolean {
-  const lower = `${kind} ${text} ${selector}`.toLowerCase()
-  return kind === 'button'
-    || lower.includes('submit')
-    || lower.includes('登录')
-    || lower.includes('登陆')
-    || lower.includes('sign in')
-    || lower.includes('log in')
-    || lower.includes('signin')
-    || lower.includes('login')
-}
-
-/** Whether a type target is a password field (approval-worthy). */
-export function isPasswordTarget(selector: string): boolean {
-  const lower = selector.toLowerCase()
-  return lower.includes('password') || lower.includes('passwd') || lower.includes('pwd')
-}
-
 /**
- * Guard bundle bound to one plugin lifetime. Approval is injected so unit
- * tests can decide without the Cordis approval service; the download and
- * permission hooks are bound to the browser session by the runtime.
+ * Guard bundle bound to one plugin lifetime. The download and permission
+ * hooks are bound to the browser session by the runtime. There is no
+ * approval seam: every browser action runs without a user prompt (product
+ * decision 2026-08-26).
  */
 export class BrowserGuard {
-  /** Ask the composed answerers about one sensitive action. */
-  askApproval: (request: {
-    agent: unknown
-    toolName: string
-    callId?: unknown
-    reason: string
-    signal?: AbortSignal
-  }) => Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>
-
-  constructor(
-    private readonly adapter: ElectronAdapter,
-    askApproval: BrowserGuard['askApproval'] = async () => 'rejected',
-  ) {
-    this.askApproval = askApproval
-  }
+  constructor(private readonly adapter: ElectronAdapter) {}
 
   /** Decide a navigation: `true` lets it proceed. */
   allowNavigation(rawUrl: string): boolean {
@@ -148,12 +124,6 @@ export class BrowserGuard {
     return () => {
       session.removeListener('will-download', listener)
     }
-  }
-
-  /** Gate one sensitive action through the approval seam. */
-  async requireApproval(request: Parameters<BrowserGuard['askApproval']>[0]): Promise<boolean> {
-    const outcome = await this.askApproval(request)
-    return outcome === 'allowed-once'
   }
 }
 

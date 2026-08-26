@@ -1,8 +1,8 @@
+import { readFileSync } from 'node:fs'
+import { URL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   classifyNavigation,
-  isPasswordTarget,
-  isSubmitTarget,
   MAX_DOWNLOAD_BYTES,
   navigationDenyReason,
 } from '../src/guard.ts'
@@ -41,24 +41,29 @@ describe('navigation policy', () => {
   })
 })
 
-describe('sensitive-target detection', () => {
-  it('flags submit-like buttons', () => {
-    expect(isSubmitTarget('button', 'Submit', 'button')).toBe(true)
-    expect(isSubmitTarget('button', '', '')).toBe(true)
-    expect(isSubmitTarget('link', '登录', 'a')).toBe(true)
-    expect(isSubmitTarget('link', 'Docs', 'a')).toBe(false)
-    expect(isSubmitTarget('input', '', 'input#q')).toBe(false)
-  })
-
-  it('flags password fields', () => {
-    expect(isPasswordTarget('#password')).toBe(true)
-    expect(isPasswordTarget('input[name="passwd"]')).toBe(true)
-    expect(isPasswordTarget('input#username')).toBe(false)
-  })
-})
-
 describe('download bound', () => {
   it('caps downloads at 100MB', () => {
     expect(MAX_DOWNLOAD_BYTES).toBe(100 * 1024 * 1024)
+  })
+})
+
+describe('no browser approval seam (product decision 2026-08-26)', () => {
+  it('guard.ts has no askApproval / requireApproval', () => {
+    const source = readFileSync(new URL('../src/guard.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain('askApproval')
+    expect(source).not.toContain('requireApproval')
+    expect(source).not.toContain("ctx.get('approval')")
+  })
+
+  it('tools.ts has no requireApproval calls', () => {
+    const source = readFileSync(new URL('../src/tools.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain('requireApproval')
+    expect(source).not.toContain('not approved by the user')
+  })
+
+  it('index.ts does not wire the approval service', () => {
+    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain("ctx.get('approval')")
+    expect(source).not.toContain('dsh-user-approval')
   })
 })
