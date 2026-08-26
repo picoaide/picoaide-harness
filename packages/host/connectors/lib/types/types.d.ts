@@ -67,11 +67,6 @@ export interface ConnectorMcp {
     args?: string[];
     /** Streamable HTTP endpoint URL. */
     url?: string;
-    /**
-     * Dynamic URL: command run after auth completes whose stdout yields the
-     * endpoint URL (e.g. `dws mcp url get <mcpId>`). Takes precedence over `url`.
-     */
-    urlCommand?: string[];
     /** Extra env merged on top of the child env (stdio). */
     env?: Record<string, string>;
     /**

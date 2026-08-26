@@ -1,7 +1,6 @@
 import { userScopePath } from "./user-scope.js";
 import { ConnectorStore } from "./store.js";
 import { salesEasyDef } from "./sales-easy.js";
-import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -476,73 +475,6 @@ function apply(ctx, options = {}) {
 	const emitRequest = (request) => {
 		pendingRequests.set(request.connectorId, request);
 	};
-	/** Run a command whose stdout yields the MCP endpoint URL (e.g. `dws mcp url get <id>`). */
-	const URL_COMMAND_TIMEOUT_MS = 15e3;
-	const resolveUrlCommand = async (args, extraEnv) => {
-		const [command, ...rest] = args;
-		if (command === void 0) throw new Error("urlCommand is empty");
-		const spawnCommand = command;
-		const spawnArgs = rest;
-		return new Promise((resolve, reject) => {
-			const child = spawn(spawnCommand, spawnArgs, {
-				env: {
-					...process.env,
-					...extraEnv ?? {}
-				},
-				stdio: [
-					"ignore",
-					"pipe",
-					"pipe"
-				]
-			});
-			const timer = setTimeout(() => {
-				child.kill("SIGKILL");
-				reject(/* @__PURE__ */ new Error(`urlCommand 超时(${URL_COMMAND_TIMEOUT_MS / 1e3}s): ${spawnCommand}`));
-			}, URL_COMMAND_TIMEOUT_MS);
-			timer.unref?.();
-			let stdout = "";
-			let stderr = "";
-			child.stdout.on("data", (chunk) => {
-				stdout += chunk.toString();
-			});
-			child.stderr.on("data", (chunk) => {
-				stderr += chunk.toString();
-			});
-			child.on("error", (error) => {
-				clearTimeout(timer);
-				reject(error);
-			});
-			child.on("exit", (code) => {
-				clearTimeout(timer);
-				if (code !== 0) {
-					reject(new Error(stderr.trim() || `命令退出码 ${String(code)}`));
-					return;
-				}
-				const match = /https?:\/\/[^\s"'<>]+/u.exec(stdout);
-				if (!match) {
-					reject(/* @__PURE__ */ new Error(`无法从命令输出中解析 URL: ${stdout.trim().slice(0, 200)}`));
-					return;
-				}
-				const url = match[0];
-				try {
-					const parsed = new URL(url);
-					if (parsed.protocol !== "https:") {
-						reject(/* @__PURE__ */ new Error(`MCP URL 必须是 https: ${url.slice(0, 80)}`));
-						return;
-					}
-					const host = parsed.hostname.toLowerCase();
-					if (host === "localhost" || host === "::1" || /^127\./.test(host) || /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)) {
-						reject(/* @__PURE__ */ new Error(`MCP URL 指向本地/私网地址，已拒绝: ${url.slice(0, 80)}`));
-						return;
-					}
-				} catch {
-					reject(/* @__PURE__ */ new Error(`MCP URL 无效: ${url.slice(0, 80)}`));
-					return;
-				}
-				resolve(url);
-			});
-		});
-	};
 	/** Render request headers: static `${FIELD}` templates from credential fields, empty Authorization -> Bearer token, and the default Bearer injection for OAuth/token credentials. */
 	const renderHeaders = (server, credential) => {
 		const headers = {};
@@ -569,7 +501,7 @@ function apply(ctx, options = {}) {
 			const config = server.transport === "streamable-http" ? {
 				transport: "streamable-http",
 				serverName: server.serverName,
-				url: server.urlCommand ? await resolveUrlCommand(server.urlCommand, server.env) : server.url ?? "",
+				url: server.url ?? "",
 				headers: renderHeaders(server, credential),
 				toolCallTimeoutMs: 12e4,
 				failOnStartupError: false

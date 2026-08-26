@@ -338,6 +338,12 @@ export function hasUpdateFor(item: CapabilityItem): boolean {
 /** 单测用：把同名（kind+name）条目归并成一张卡（保留最高 approved 版本为当前）。 */
 export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
   const byKey = new Map<string, CapabilityItem>()
+  // 决策 2026-08-25(市场/组织合并) + bug 修复:同名 (kind+name) 归并时
+  // (a) 展示行保留 market 来源(市场优先,跨源同名的权威行);
+  // (b) displayName/description 取「较新」的(非空优先,避免 market 行
+  //      覆盖 org 的中文标题);
+  // (c) version 展示最高 approved(与来源无关的版本事实),installed 等
+  //      状态保留现有逻辑。
   for (const item of items) {
     const key = `${item.kind}:${item.name}`
     const existing = byKey.get(key)
@@ -351,7 +357,12 @@ export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
     // 取 approved 最高版作为当前展示；无 approved 保留原样。
     const approved = [...all].filter(v => items.some(x => x.kind === item.kind && x.name === item.name && x.version === v && x.status === 'approved'))
     const display = approved.length > 0 ? approved.reduce((best, v) => (compareVersions(v, best) > 0 ? v : best), approved[0]!) : existing.version
-    byKey.set(key, { ...existing, version: display, versions: sorted })
+    // 展示行来源:market 优先(跨源同名权威);否则保留已有。
+    const source = existing.source === 'market' || item.source === 'market' ? 'market' : existing.source
+    // displayName/description:非空优先(market 常与 name 同值,org 常带中文标题)。
+    const displayName = (item.displayName && item.displayName !== item.name) ? item.displayName : existing.displayName
+    const description = (item.description && item.description !== '') ? item.description : existing.description
+    byKey.set(key, { ...existing, source, displayName, description, version: display, versions: sorted })
   }
   return [...byKey.values()]
 }
@@ -373,6 +384,7 @@ interface ActionState {
 export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SourceTab>('mine')
   const [filter, setFilter] = useState<TypeFilter>('all')
+  const [search, setSearch] = useState('')
   const [items, setItems] = useState<CapabilityItem[]>([])
   const [sections, setSections] = useState<Record<string, SectionState>>({})
   const [loading, setLoading] = useState(true)
@@ -538,8 +550,15 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const visibleByTab = useMemo(() => {
     const base = tab === 'market' ? items.filter(i => i.source !== 'local') : items.filter(i => i.source === 'local')
     const merged = mergeItems(base)
-    return filter === 'all' ? merged : merged.filter(i => i.kind === filter)
-  }, [items, tab, filter])
+    // 搜索: name/displayName/description 关键词(大小写不敏感)。
+    const q = search.trim().toLowerCase()
+    const searched = q === '' ? merged : merged.filter(i =>
+      (i.name ?? '').toLowerCase().includes(q)
+      || (i.displayName ?? '').toLowerCase().includes(q)
+      || (i.description ?? '').toLowerCase().includes(q),
+    )
+    return filter === 'all' ? searched : searched.filter(i => i.kind === filter)
+  }, [items, tab, filter, search])
 
   const sectionStatus = (source: CapabilitySource): SectionState => sections[source] ?? { status: 'idle', error: '' }
 
@@ -669,7 +688,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         </div>
         <div style={TAB_BAR}>
           {(['mine', 'market'] as const).map(s => (
-            <button key={s} type="button" style={tab === s ? TAB_ACTIVE : TAB} onClick={() => { setTab(s); setConfirmKey(null) }}>
+            <button key={s} type="button" style={tab === s ? TAB_ACTIVE : TAB} onClick={() => { setTab(s); setFilter('all'); setConfirmKey(null) }}>
               {s === 'mine' ? t('capability.tabMine') : t('capability.tabMarket')}
             </button>
           ))}
@@ -679,6 +698,19 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               {f === 'all' ? t('capability.filterAll') : f === 'skill' ? t('capability.filterSkill') : t('capability.filterAgent')}
             </button>
           ))}
+          <span style={{ flex: 1 }} aria-hidden="true" />
+          <input
+            type="search"
+            value={search}
+            onChange={e => { setSearch(e.target.value) }}
+            placeholder={t('capability.searchPlaceholder')}
+            aria-label={t('capability.searchPlaceholder')}
+            style={{
+              width: 220, height: 28, padding: '0 10px', borderRadius: 6,
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-primary)', fontSize: 12, outline: 'none',
+            }}
+          />
         </div>
         <div style={BODY}>{content}</div>
         {confirmKey !== null && (
