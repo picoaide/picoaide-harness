@@ -17,7 +17,7 @@
 #   ADMIN_USER        超管用户名(默认 admin)
 #   ADMIN_PASS        超管密码(默认随机生成;兼容 PICOAI_ADMIN_PASSWORD)
 #   TLS_MODE          证书模式: manual(默认,自签占位+提示替换) | auto(Let's Encrypt)
-#   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-server:latest)
+#   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest)
 #   REINSTALL=yes     已存在部署时清除重装(默认安全退出)
 #   SKIP_DEPS=1       跳过依赖自动安装(仅检查已装命令,缺失即提示并退出)
 #   SKIP_IMAGE_CHECK=1 跳过"镜像是否含 -db-driver 支持"探测(pg 模式)
@@ -42,7 +42,7 @@ PG_DSN="${PG_DSN:-}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-${PICOAI_ADMIN_PASSWORD:-}}"
 TLS_MODE="${TLS_MODE:-manual}"
-SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-server:latest}"
+SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-harness-server:latest}"
 REINSTALL="${REINSTALL:-}"
 SKIP_DEPS="${SKIP_DEPS:-${NO_DEPS:-}}"
 SKIP_IMAGE_CHECK="${SKIP_IMAGE_CHECK:-}"

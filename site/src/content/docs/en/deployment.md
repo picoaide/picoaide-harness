@@ -61,7 +61,7 @@ Employee clients / browsers
 
 ### Images and versions
 
-- Image: `ghcr.io/picoaide/picoaide-server` (multi-platform amd64 + arm64, with SBOM + provenance attestation);
+- Image: `ghcr.io/picoaide/picoaide-harness-server` (multi-platform amd64 + arm64, with SBOM + provenance attestation);
 - Tags: `latest` + `vX.Y.Z` + `vX.Y`; after pushing a version tag CI automatically builds and releases (injected via `--build-arg VERSION`, so `picoaide-server --version` matches the tag exactly);
 - **Version-line note**: the server image uses its own version line (e.g. `v0.5.x`; PG support requires 0.5.0+); the `v2.x` at the repo root is the desktop client version line — the two advance independently;
 - No outbound internet in the intranet? `make release-export` exports the image tar + `docker load` for offline deployment; build locally with `make docker-image`.
