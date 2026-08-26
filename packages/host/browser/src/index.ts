@@ -25,16 +25,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createRequire } from 'node:module'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-// Type-only: makes `ctx.get('approval')` resolve to the ApprovalService type.
-import type {} from '@deepseek-ai/dsh-user-approval'
-// Type-only: makes `ctx.webServer` resolve to the host webserver contract.
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
 import { applyBrowserTools } from './tools.ts'
 import { BROWSER_MASK_HTML, BROWSER_SHELL_HTML } from './shell-pages.ts'
-import type { BrowserGuard } from './guard.ts'
 import type { CredentialResolver } from './types.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
@@ -126,19 +122,10 @@ function decodeSegment(segment: string | undefined): string | null {
  * @param config - runtime caps and enablement.
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  // Fail closed: without the approval service every sensitive action is
-  // rejected (the desktop profile always composes it; tests inject their own).
-  const askApproval: BrowserGuard['askApproval'] = async (request) => {
-    const approval = ctx.get('approval')
-    if (approval === undefined) return 'rejected'
-    return await approval.request({
-      agent: request.agent as never,
-      toolName: request.toolName,
-      ...request.callId !== undefined ? { callId: request.callId as import('@deepseek-ai/dsh-llm/brand').CallId } : {},
-      reason: request.reason,
-      ...request.signal !== undefined ? { signal: request.signal } : {},
-    })
-  }
+  // 2026-08-26 product decision: browser actions run with no user-approval
+  // prompt. The approval seam was removed from BrowserGuard/runtime/tools;
+  // browser use is granted through the workspace permission, and the
+  // browser window shows every live action.
 
   // Current user (enterprise session, may be absent in minimal compositions).
   const currentUser = (): string | null => {
@@ -176,7 +163,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   })()
 
-  const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver, browserPartitionFor(currentUser()))
+  const runtime = new BrowserRuntime(createRealElectronAdapter(), config, credentialResolver, browserPartitionFor(currentUser()))
   // The shell/mask pages live on the plugin's own loopback server; the
   // dedicated window loads them by absolute URL.
   runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
