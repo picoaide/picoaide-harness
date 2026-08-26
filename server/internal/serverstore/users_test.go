@@ -152,6 +152,38 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 	}
 }
 
+// 审计修复 2026-P (H1): 0036 共享资源授权(user 级)必须随用户删除级联,
+// 同名用户重建不得继承上一同名用户对共享技能/Agent 的授权。
+func TestDeleteUserCascadesSharedGrants(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	id, err := CreateUserWithPassword(db, "grace", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// shared_skill_grants 资源列 = skill_name;agent_preset_grants = preset_name
+	for _, tbl := range []struct{ table, col string }{
+		{"shared_skill_grants", "skill_name"},
+		{"agent_preset_grants", "preset_name"},
+	} {
+		if _, err := db.Exec("INSERT INTO "+tbl.table+" ("+tbl.col+", grantee_type, grantee) VALUES (?, 'user', ?)", "acme", "grace"); err != nil {
+			t.Fatalf("seed %s: %v", tbl.table, err)
+		}
+	}
+	if err := DeleteUser(db, id); err != nil {
+		t.Fatalf("DeleteUser with shared grants failed: %v", err)
+	}
+	for _, tbl := range []string{"shared_skill_grants", "agent_preset_grants"} {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM "+tbl+" WHERE grantee = 'grace'").Scan(&n); err != nil || n != 0 {
+			t.Fatalf("%s grants left after delete: %d err=%v", tbl, n, err)
+		}
+	}
+}
+
 // C-17: deleting the last admin rolls the delete back (guard lives inside the
 // transaction, so the count-then-delete TOCTOU is closed).
 func TestDeleteUserLastAdminGuard(t *testing.T) {
