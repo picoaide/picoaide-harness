@@ -295,7 +295,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
 
       <div style={{ marginTop: 'auto', paddingTop: 4 }}>
         {isConnected ? (
-          <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }}>
+          <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
             {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}
           </button>
         ) : entry.status === 'connecting' ? (
@@ -309,11 +309,12 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
             disabled={busy === 'disconnect'}
             onClick={() => { void cancel() }}
             title={t('action.cancelHint')}
+            aria-label={`${t('action.stop')} ${entry.name}`}
           >
             {busy === 'disconnect' ? t('action.cancelling') : t('action.stop')}
           </button>
         ) : (
-          <button type="button" style={BUTTON} disabled={busy === 'connect'} onClick={() => { void connect() }}>
+          <button type="button" style={BUTTON} disabled={busy === 'connect'} onClick={() => { void connect() }} aria-label={`${t('action.connect')} ${entry.name}`}>
             {busy === 'connect' ? t('action.connecting') : t('action.connect')}
           </button>
         )}
