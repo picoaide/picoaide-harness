@@ -15,6 +15,7 @@ export const zh = {
   'capability.filterAll': '全部',
   'capability.filterSkill': '技能',
   'capability.filterAgent': '智能体',
+  'capability.searchPlaceholder': '搜索技能/智能体…',
   // 徽章
   'capability.typeSkill': '技能',
   'capability.typeAgent': '智能体',
@@ -148,6 +149,7 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.filterAll': 'All',
   'capability.filterSkill': 'Skills',
   'capability.filterAgent': 'Agents',
+  'capability.searchPlaceholder': 'Search skills/agents…',
   'capability.typeSkill': 'Skill',
   'capability.typeAgent': 'Agent',
   'capability.sourceMarket': 'Market',

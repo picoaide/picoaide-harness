@@ -88,3 +88,40 @@ describe('avatarColor', () => {
     expect(avatarColor('')).toBe('var(--dsw-static-deepseek-5, var(--dsw-alias-brand-primary))')
   })
 })
+
+describe('mergeItems cross-source merge (market/org 合并 bug 修复)', () => {
+  it('keeps market as the display source when the same name exists in org', () => {
+    const items = [
+      { kind: 'skill', source: 'market', name: 'code-review', version: '1.0.0', status: 'approved', versions: ['1.0.0'], displayName: 'code-review', description: '代码审查' },
+      { kind: 'skill', source: 'org', name: 'code-review', version: '2.0.0', status: 'approved', versions: ['2.0.0'], displayName: '代码审查', description: '组织版代码审查' },
+    ] as never
+    const merged = mergeItems(items)
+    expect(merged.length).toBe(1)
+    const row = merged[0]
+    expect(row.source).toBe('market') // 市场优先
+    expect(row.version).toBe('2.0.0') // approved 最高版本
+    expect(row.displayName).toBe('代码审查') // 非空标题保留(不被 market 同名值覆盖)
+    expect(row.description).toBe('组织版代码审查') // 非空描述保留(较新)
+    expect(row.versions).toEqual(['1.0.0', '2.0.0'])
+  })
+
+  it('preserves org-only rows untouched', () => {
+    const items = [
+      { kind: 'agent', source: 'org', name: 'creative-writer', version: '1.0.0', status: 'pending', versions: [], displayName: '妙笔文案', description: '' },
+    ] as never
+    const merged = mergeItems(items)
+    expect(merged.length).toBe(1)
+    expect(merged[0].source).toBe('org')
+    expect(merged[0].displayName).toBe('妙笔文案')
+  })
+
+  it('does not let a market-only same-name row shadow the org title when market has none', () => {
+    const items = [
+      { kind: 'skill', source: 'org', name: 'x', version: '1.0.0', status: 'approved', versions: ['1.0.0'], displayName: '中文标题', description: '描述' },
+      { kind: 'skill', source: 'org', name: 'x', version: '1.1.0', status: 'approved', versions: ['1.1.0'], displayName: '', description: '' },
+    ] as never
+    const merged = mergeItems(items)
+    expect(merged[0].displayName).toBe('中文标题')
+    expect(merged[0].version).toBe('1.1.0')
+  })
+})
