@@ -1,6 +1,6 @@
 # PicoAide 服务端容器化部署文档
 
-> 适用版本:服务端 Docker 镜像 `ghcr.io/picoaide/picoaide-harness-server`(amd64/arm64 多平台)。
+> 适用版本:服务端 Docker 镜像 `ghcr.io/picoaide/picoaide-harness-server`(linux/amd64)。
 > 本文覆盖:镜像来源与发布、私有网段+固定 IP 的 Compose 部署、手动/自动两种证书模式、自动化脚本、升级/备份/恢复/卸载、安全清单与 FAQ。
 
 ## 0. 架构总览
@@ -71,11 +71,11 @@ git tag v0.4.0 && git push origin v0.4.0
 
 `.github/workflows/docker.yml` 在 `push tags v*` 时自动:
 
-1. buildx 多平台构建 `linux/amd64` + `linux/arm64`(Dockerfile 两阶段:webadmin 先构建,Go 交叉编译);
+1. buildx 单平台构建 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟;Dockerfile 两阶段:webadmin 先构建,Go 交叉编译);
 2. 注入版本:`--build-arg VERSION=0.4.0` → 镜像内 `picoaide-server --version` 输出 `0.4.0`(与 tag 强一致);
 3. 推送标签:`v0.4.0`(精确)/ `v0.4`(minor)/ `latest`(仅默认分支);
 4. 附注 SBOM 与构建证明(provenance mode=max);构建缓存 type=gha;
-5. 最后 `imagetools inspect` 校验 amd64+arm64 manifest 双架构都在。
+5. 最后 `imagetools inspect` 校验 amd64 manifest 存在。
 
 也可手动重发:Actions → Docker image → Run workflow → 填版本号(`workflow_dispatch`)。
 
@@ -99,7 +99,7 @@ docker load < dist/picoaide-server-v0.4.0.tar
 | 版本注入 | `docker run --rm <image> --version` | 输出构建时注入的版本号(非 `dev`) |
 | 非 root | `docker run --rm --entrypoint id <image>` | `uid=10001(picoaide)` |
 | 健康端点 | 起容器后 `curl http://127.0.0.1:8080/healthz` | `200 {"ok":true}` |
-| 多架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | `linux/amd64` + `linux/arm64` 均在 |
+| 架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | `linux/amd64`(arm64 已移除) |
 | 数据持久化 | 写入数据 → 重启容器 → 数据仍在 | 卷挂载生效 |
 
 ## 2. 手动部署(Compose)
@@ -347,8 +347,8 @@ docker compose up -d
 **Q6:端口被占(80/443)?**
 → 改 compose 的 `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT`(如 8080/8443 并在防火墙放行),Caddyfile 域名块不变;`ss -tln` 查占用。
 
-**Q7:buildx 多平台构建在哪跑?**
-→ CI(GitHub Actions)默认;本地需 `docker buildx create --use`(或 Docker Desktop 自带);仅需单 amd64 时 `make docker-image` 即可。
+**Q7:buildx 镜像构建在哪跑?**
+→ CI(GitHub Actions)默认;本地需 `docker buildx create --use`(或 Docker Desktop 自带);`make docker-image` 即可(单 amd64)。
 
 **Q8:镜像拉不下来(GHCR 网络)?**
 → 配置镜像加速/代理;或 `make release-export` 导出 tar 到内网 `docker load`(见 §1.2)。

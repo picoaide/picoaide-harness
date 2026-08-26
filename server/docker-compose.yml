@@ -1,7 +1,7 @@
 # ============================================================
 # PicoAide 服务端 Docker Compose 部署(私有网段 + 容器固定 IP)
 # ============================================================
-# 镜像:ghcr.io/picoaide/picoaide-harness-server(amd64+arm64 多平台)+ Caddy HTTPS 反代
+# 镜像:ghcr.io/picoaide/picoaide-harness-server(linux/amd64)+ Caddy HTTPS 反代
 #
 # 快速开始(手动部署):
 #   1. cp .env.example .env 并填写 DOMAIN / PICOAI_ADMIN_PASSWORD(必改)

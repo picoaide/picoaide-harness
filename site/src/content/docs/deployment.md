@@ -61,7 +61,7 @@ sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 
 ### 镜像与版本
 
-- 镜像：`ghcr.io/picoaide/picoaide-harness-server`（amd64 + arm64 多平台，附 SBOM + provenance 证明）；
+- 镜像：`ghcr.io/picoaide/picoaide-harness-server`（linux/amd64，附 SBOM + provenance 证明）；
 - 标签：`latest` + `vX.Y.Z` + `vX.Y`；推送版本 tag 后 CI 自动构建发布（`--build-arg VERSION` 注入，`picoaide-server --version` 与 tag 强一致）；
 - **版本线说明**：服务端镜像使用独立的版本线（如 `v0.5.x`，PG 支持需 0.5.0+）；仓库根的 `v2.x` 为桌面客户端版本线，两者独立推进；
 - 内网无外网？`make release-export` 导出镜像 tar + `docker load` 离线部署；本地构建 `make docker-image`。

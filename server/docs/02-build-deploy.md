@@ -75,15 +75,15 @@ pg 模式首次启动自动应用 `migrations-pg`(幂等);`-data` 仍用于 mast
 make docker-image                 # 本地单平台(版本=VERSION,默认 git describe)
 make docker-image TAG=v0.4.0      # 指定版本
 make release-export TAG=v0.4.0    # 离线导出 tar(内网 docker load)
-docker buildx build --platform linux/amd64,linux/arm64 \
+docker buildx build --platform linux/amd64 \
   --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-harness-server:v0.4.0 --push .
 ```
 
 ### 3.3 发布(CI 自动,Workflow: .github/workflows/docker.yml)
 
 - 触发:`push tag v*` 或手动 `workflow_dispatch`(填版本号);
-- 多平台 `linux/amd64,linux/arm64`;注入 VERSION;推送标签 `vX.Y.Z` / `vX.Y` / `latest`;
-- 附加 `type=gha` 构建缓存、`sbom=true`、`provenance=mode=max`;`imagetools inspect` 校验双架构 manifest;
+- 单平台 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟);注入 VERSION;推送标签 `vX.Y.Z` / `vX.Y` / `latest`;
+- 附加 `type=gha` 构建缓存、`sbom=true`、`provenance=mode=max`;`imagetools inspect` 校验 amd64 manifest;
 - 镜像地址 `ghcr.io/picoaide/picoaide-harness-server`(部署 .env `SERVER_IMAGE` 可换私有 registry)。
 
 ### 3.4 镜像验证清单
@@ -93,7 +93,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 | 版本注入 | `docker run --rm <image> --version` | 构建时注入版本(非 `dev`) |
 | 非 root | `docker run --rm --entrypoint id <image>` | `uid=10001(picoaide)` |
 | 健康端点 | 起容器后 `curl /healthz` | 200 `{"ok":true}` |
-| 多架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | amd64+arm64 均在 |
+| 架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | `linux/amd64`(arm64 已移除) |
 | 持久化 | 写数据→重启→数据在 | 卷挂载有效 |
 
 ## 3. 接入方(客户端)接入说明
