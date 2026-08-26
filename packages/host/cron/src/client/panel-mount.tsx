@@ -63,7 +63,7 @@ function visibilityStyle(): HTMLStyleElement {
  * visibility to the html activation attribute.
  * @returns disposer unmounting the tree and restoring the column.
  */
-export function mountCronPanel(controller: CronController, workspaces?: IWorkspaces, api?: ConnectionHandle['api']): () => void {
+export function mountCronPanel(controller: CronController, workspaces?: IWorkspaces, api?: ConnectionHandle['api'], openSession?: (sessionId: string) => void): () => void {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
@@ -81,7 +81,7 @@ export function mountCronPanel(controller: CronController, workspaces?: IWorkspa
     // stylesheet rule (an inline style would defeat the show rule).
     column.appendChild(container)
     root = createRoot(container)
-    root.render(createElement(CronCenterView, { controller, ...(workspaces === undefined ? {} : { workspaces }), ...(api === undefined ? {} : { api }) }))
+    root.render(createElement(CronCenterView, { controller, ...(workspaces === undefined ? {} : { workspaces }), ...(api === undefined ? {} : { api }), ...(openSession === undefined ? {} : { openSession }) }))
   }
 
   // The frame mounts after boot settlement; watch for the column's arrival.
@@ -116,7 +116,7 @@ export function mountCronPanel(controller: CronController, workspaces?: IWorkspa
 }
 
 /** Center view: a back-to-chat header plus the job center body. */
-function CronCenterView({ controller, workspaces, api }: { controller: CronController; workspaces?: IWorkspaces; api?: ConnectionHandle['api'] }): JSX.Element {
+function CronCenterView({ controller, workspaces, api, openSession }: { controller: CronController; workspaces?: IWorkspaces; api?: ConnectionHandle['api']; openSession?: (sessionId: string) => void }): JSX.Element {
   const back = (): void => { closeCronPanel() }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 420 }}>
@@ -127,7 +127,7 @@ function CronCenterView({ controller, workspaces, api }: { controller: CronContr
         </button>
       </div>
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        <CronJobTab controller={controller} {...(workspaces === undefined ? {} : { workspaces })} {...(api === undefined ? {} : { api })} />
+        <CronJobTab controller={controller} {...(workspaces === undefined ? {} : { workspaces })} {...(api === undefined ? {} : { api })} {...(openSession === undefined ? {} : { openSession })} />
       </div>
     </div>
   )

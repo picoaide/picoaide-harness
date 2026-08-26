@@ -288,3 +288,17 @@ describe('HttpBrowserCronService upsert semantics', () => {
     expect(source).toContain('existing !== undefined')
   })
 })
+
+describe('cron client execution detail', () => {
+  it('renders an open-session jump for execution session ids', () => {
+    const source = readFileSync(new URL('../src/client/CronJobTab.tsx', import.meta.url), 'utf8')
+    expect(source).toContain("openSession(execution.sessionId!)")
+    expect(source).toContain("'job.execution.openSession'")
+  })
+
+  it('wires the sessions service into the panel for the jump', () => {
+    const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+    expect(source).toContain("ctx.get('sessions')")
+    expect(source).toContain('openSession')
+  })
+})

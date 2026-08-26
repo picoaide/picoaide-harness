@@ -769,6 +769,7 @@ window.__ModuleLoader__.load({
 			"job.execution.startedAt": "开始",
 			"job.execution.endedAt": "结束",
 			"job.execution.prompt": "提示词",
+			"job.execution.openSession": "打开会话",
 			"preset.daily9": "每天 09:00",
 			"preset.hourly": "每小时",
 			"preset.tenMin": "每 10 分钟",
@@ -824,6 +825,7 @@ window.__ModuleLoader__.load({
 			"job.execution.startedAt": "started",
 			"job.execution.endedAt": "ended",
 			"job.execution.prompt": "Prompt",
+			"job.execution.openSession": "Open session",
 			"preset.daily9": "Daily 09:00",
 			"preset.hourly": "Hourly",
 			"preset.tenMin": "Every 10 minutes",
@@ -1191,7 +1193,7 @@ window.__ModuleLoader__.load({
 				};
 			}
 		}
-		function CronJobTab({ controller, workspaces, api }) {
+		function CronJobTab({ controller, workspaces, api, openSession }) {
 			const [snapshot, setSnapshot] = (0, react.useState)(controller.getSnapshot());
 			const [editing, setEditing] = (0, react.useState)();
 			const [creating, setCreating] = (0, react.useState)(false);
@@ -1257,7 +1259,8 @@ window.__ModuleLoader__.load({
 							pending: snapshot.pendingJobIds.includes(job.id),
 							controller,
 							onEdit: setEditing,
-							api
+							api,
+							...openSession === void 0 ? {} : { openSession }
 						}, job.id))]
 					}),
 					creating && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(JobEditor, {
@@ -1280,7 +1283,7 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		function JobRow({ job, pending, controller, onEdit, api }) {
+		function JobRow({ job, pending, controller, onEdit, api, openSession }) {
 			const [open, setOpen] = (0, react.useState)(false);
 			const recent = job.executions.slice(-5).reverse();
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -1393,7 +1396,24 @@ window.__ModuleLoader__.load({
 									}),
 									execution.sessionId !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 										title: execution.sessionId,
-										children: [execution.sessionId.slice(0, 12), "…"]
+										style: {
+											display: "inline-flex",
+											gap: 6,
+											alignItems: "center"
+										},
+										children: [
+											execution.sessionId.slice(0, 12),
+											"…",
+											openSession !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+												type: "button",
+												style: styles.button,
+												title: t("job.execution.openSession"),
+												onClick: () => {
+													openSession(execution.sessionId);
+												},
+												children: t("job.execution.openSession")
+											})
+										]
 									}),
 									execution.error !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										title: execution.error,
@@ -1630,7 +1650,7 @@ window.__ModuleLoader__.load({
 		* visibility to the html activation attribute.
 		* @returns disposer unmounting the tree and restoring the column.
 		*/
-		function mountCronPanel(controller, workspaces, api) {
+		function mountCronPanel(controller, workspaces, api, openSession) {
 			let root;
 			let container;
 			const style = visibilityStyle();
@@ -1647,7 +1667,8 @@ window.__ModuleLoader__.load({
 				root.render((0, react.createElement)(CronCenterView, {
 					controller,
 					...workspaces === void 0 ? {} : { workspaces },
-					...api === void 0 ? {} : { api }
+					...api === void 0 ? {} : { api },
+					...openSession === void 0 ? {} : { openSession }
 				}));
 			};
 			const waitObserver = new MutationObserver(() => {
@@ -1682,7 +1703,7 @@ window.__ModuleLoader__.load({
 			};
 		}
 		/** Center view: a back-to-chat header plus the job center body. */
-		function CronCenterView({ controller, workspaces, api }) {
+		function CronCenterView({ controller, workspaces, api, openSession }) {
 			const back = () => {
 				closeCronPanel();
 			};
@@ -1718,7 +1739,8 @@ window.__ModuleLoader__.load({
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CronJobTab, {
 						controller,
 						...workspaces === void 0 ? {} : { workspaces },
-						...api === void 0 ? {} : { api }
+						...api === void 0 ? {} : { api },
+						...openSession === void 0 ? {} : { openSession }
 					})
 				})]
 			});
@@ -1754,7 +1776,8 @@ window.__ModuleLoader__.load({
 			"settingsScope",
 			"locale",
 			"workspaces",
-			"connection"
+			"connection",
+			"sessions"
 		];
 		/** Settings namespace this card edits (the Host half registers it). */
 		const CRON_NS = "cron";
@@ -1795,12 +1818,16 @@ window.__ModuleLoader__.load({
 			}, "controller lifecycle");
 			const workspacesService = ctx.get("workspaces");
 			const api = ctx.get("connection")?.api;
+			const sessions = ctx.get("sessions");
+			const openSession = sessions === void 0 ? void 0 : (id) => {
+				sessions.open(id);
+			};
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
 				name: "sidebar.footer.action",
 				id: "pico-cron",
 				order: -10
 			}, CronTrigger));
-			ctx.effect(() => mountCronPanel(controller, workspacesService, api), "dsh-cron: main-area center");
+			ctx.effect(() => mountCronPanel(controller, workspacesService, api, openSession), "dsh-cron: main-area center");
 			ctx.inject(["betterSidebar"], (childCtx) => {
 				const service = childCtx.get("betterSidebar");
 				if (service === void 0) return;
@@ -1811,7 +1838,8 @@ window.__ModuleLoader__.load({
 					component: () => (0, react.createElement)(CronJobTab, {
 						controller,
 						...workspacesService === void 0 ? {} : { workspaces: workspacesService },
-						...api === void 0 ? {} : { api }
+						...api === void 0 ? {} : { api },
+						...openSession === void 0 ? {} : { openSession }
 					})
 				});
 				childCtx.effect(() => () => {

@@ -10,4 +10,4 @@ export declare const CRON_VIEW_SELECTOR = "[data-dsh-cron-view]";
  * visibility to the html activation attribute.
  * @returns disposer unmounting the tree and restoring the column.
  */
-export declare function mountCronPanel(controller: CronController, workspaces?: IWorkspaces, api?: ConnectionHandle['api']): () => void;
+export declare function mountCronPanel(controller: CronController, workspaces?: IWorkspaces, api?: ConnectionHandle['api'], openSession?: (sessionId: string) => void): () => void;

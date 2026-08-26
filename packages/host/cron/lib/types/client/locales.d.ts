@@ -50,6 +50,7 @@ export declare const zh: {
     readonly 'job.execution.startedAt': "开始";
     readonly 'job.execution.endedAt': "结束";
     readonly 'job.execution.prompt': "提示词";
+    readonly 'job.execution.openSession': "打开会话";
     readonly 'preset.daily9': "每天 09:00";
     readonly 'preset.hourly': "每小时";
     readonly 'preset.tenMin': "每 10 分钟";

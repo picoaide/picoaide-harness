@@ -22,10 +22,11 @@ function executionLabel(result: JobRecord['executions'][number]): { text: string
   }
 }
 
-export function CronJobTab({ controller, workspaces, api }: {
+export function CronJobTab({ controller, workspaces, api, openSession }: {
   controller: CronController
   workspaces?: IWorkspaces
   api?: ConnectionHandle['api']
+  openSession?: (sessionId: string) => void
 }): JSX.Element {
   const [snapshot, setSnapshot] = useState<CronViewSnapshot>(controller.getSnapshot())
   const [editing, setEditing] = useState<JobRecord | undefined>()
@@ -66,7 +67,7 @@ export function CronJobTab({ controller, workspaces, api }: {
       <div style={styles.list}>
         {snapshot.jobs.length === 0 && <div style={styles.empty}>{t('job.empty')}</div>}
         {snapshot.jobs.map(job => (
-          <JobRow key={job.id} job={job} pending={snapshot.pendingJobIds.includes(job.id)} controller={controller} onEdit={setEditing} api={api} />
+          <JobRow key={job.id} job={job} pending={snapshot.pendingJobIds.includes(job.id)} controller={controller} onEdit={setEditing} api={api} {...(openSession === undefined ? {} : { openSession })} />
         ))}
       </div>
       {creating && <JobEditor controller={controller} {...(workspaces === undefined ? {} : { workspaces })} {...(api === undefined ? {} : { api })} onClose={() => { setCreating(false) }} />}
@@ -75,12 +76,13 @@ export function CronJobTab({ controller, workspaces, api }: {
   )
 }
 
-function JobRow({ job, pending, controller, onEdit, api }: {
+function JobRow({ job, pending, controller, onEdit, api, openSession }: {
   job: JobRecord
   pending: boolean
   controller: CronController
   onEdit: (job: JobRecord) => void
   api?: ConnectionHandle['api']
+  openSession?: (sessionId: string) => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const recent = job.executions.slice(-5).reverse()
@@ -149,7 +151,21 @@ function JobRow({ job, pending, controller, onEdit, api }: {
                   {execution.endedAt !== undefined && ` · ${t('job.execution.endedAt')} ${new Date(execution.endedAt).toLocaleTimeString()}`}
                 </span>
                 <span style={label.style}>{label.text}</span>
-                {execution.sessionId !== undefined && <span title={execution.sessionId}>{execution.sessionId.slice(0, 12)}…</span>}
+                {execution.sessionId !== undefined && (
+                  <span title={execution.sessionId} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                    {execution.sessionId.slice(0, 12)}…
+                    {openSession !== undefined && (
+                      <button
+                        type="button"
+                        style={styles.button}
+                        title={t('job.execution.openSession')}
+                        onClick={() => { openSession(execution.sessionId!) }}
+                      >
+                        {t('job.execution.openSession')}
+                      </button>
+                    )}
+                  </span>
+                )}
                 {execution.error !== undefined && <span title={execution.error}>{execution.error.slice(0, 80)}</span>}
                 {execution.prompt !== undefined && (
                   <button

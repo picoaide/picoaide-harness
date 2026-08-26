@@ -39,7 +39,7 @@ import { mountCronPanel } from './panel-mount.tsx'
 import { en, zh } from './locales.ts'
 import type { BetterSidebarService } from './sidebar-face.ts'
 
-export const inject = ['slots', 'settingsScope', 'locale', 'workspaces', 'connection']
+export const inject = ['slots', 'settingsScope', 'locale', 'workspaces', 'connection', 'sessions']
 
 /** Settings namespace this card edits (the Host half registers it). */
 const CRON_NS = 'cron'
@@ -98,12 +98,15 @@ export function apply(ctx: ClientContext): void {
   const workspacesService = ctx.get('workspaces') as IWorkspaces | undefined
   const connection = ctx.get('connection') as ConnectionHandle | undefined
   const api = connection?.api
+  // Session jump: execution detail's "open session" button targets the shell.
+  const sessions = ctx.get('sessions') as { open(id: string): void } | undefined
+  const openSession = sessions === undefined ? undefined : (id: string) => { sessions.open(id) }
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'pico-cron',
     order: -10,
   }, CronTrigger))
-  ctx.effect(() => mountCronPanel(controller, workspacesService, api), 'dsh-cron: main-area center')
+  ctx.effect(() => mountCronPanel(controller, workspacesService, api, openSession), 'dsh-cron: main-area center')
   // Scheduled-job center tab in the better-sidebar: a child fiber that lives
   // exactly as long as the service. The tab shares the same controller as
   // the sidebar entry, so both surfaces stay in sync.
@@ -114,7 +117,7 @@ export function apply(ctx: ClientContext): void {
       id: 'pico:cron',
       title: () => zh['job.listTitle'],
       order: 30,
-      component: () => createElement(CronJobTab, { controller, ...(workspacesService === undefined ? {} : { workspaces: workspacesService }), ...(api === undefined ? {} : { api }) }),
+      component: () => createElement(CronJobTab, { controller, ...(workspacesService === undefined ? {} : { workspaces: workspacesService }), ...(api === undefined ? {} : { api }), ...(openSession === undefined ? {} : { openSession }) }),
     })
     childCtx.effect(() => () => { disposeTab() }, 'dsh-cron: better-sidebar tab')
   })
