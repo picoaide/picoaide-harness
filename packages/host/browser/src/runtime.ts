@@ -144,7 +144,6 @@ export class BrowserRuntime {
   constructor(
     private readonly adapter: ElectronAdapter,
     options: BrowserToolOptions = {},
-    askApproval?: BrowserGuard['askApproval'],
     private readonly credentials?: CredentialResolver,
     partition?: string,
   ) {
@@ -158,7 +157,7 @@ export class BrowserRuntime {
       screenshotMaxWidth: options.screenshotMaxWidth ?? 1280,
       screenshotQuality: options.screenshotQuality ?? 70,
     }
-    this.guard = new BrowserGuard(adapter, askApproval)
+    this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
   }
 
@@ -221,11 +220,6 @@ export class BrowserRuntime {
   /** Public tab state (throws for unknown ids). */
   tabState(id: number): BrowserTabState {
     return this.tabStateInternal(id)
-  }
-
-  /** Route a sensitive-action approval through the guard. */
-  async requireApproval(request: Parameters<BrowserGuard['askApproval']>[0]): Promise<boolean> {
-    return await this.guard.requireApproval(request)
   }
 
   /** Content-area bounds below the shell toolbar (DIP). */

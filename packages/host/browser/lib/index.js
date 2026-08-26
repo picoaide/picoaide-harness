@@ -1171,28 +1171,16 @@ function classifyNavigation(rawUrl) {
 	if (!ALLOWED_SCHEMES.has(parsed.protocol)) return "deny";
 	return "allow";
 }
-/** Whether a click target looks like a form submission (approval-worthy). */
-function isSubmitTarget(kind, text, selector) {
-	const lower = `${kind} ${text} ${selector}`.toLowerCase();
-	return kind === "button" || lower.includes("submit") || lower.includes("登录") || lower.includes("登陆") || lower.includes("sign in") || lower.includes("log in") || lower.includes("signin") || lower.includes("login");
-}
-/** Whether a type target is a password field (approval-worthy). */
-function isPasswordTarget(selector) {
-	const lower = selector.toLowerCase();
-	return lower.includes("password") || lower.includes("passwd") || lower.includes("pwd");
-}
 /**
-* Guard bundle bound to one plugin lifetime. Approval is injected so unit
-* tests can decide without the Cordis approval service; the download and
-* permission hooks are bound to the browser session by the runtime.
+* Guard bundle bound to one plugin lifetime. The download and permission
+* hooks are bound to the browser session by the runtime. There is no
+* approval seam: every browser action runs without a user prompt (product
+* decision 2026-08-26).
 */
 var BrowserGuard = class {
 	adapter;
-	/** Ask the composed answerers about one sensitive action. */
-	askApproval;
-	constructor(adapter, askApproval = async () => "rejected") {
+	constructor(adapter) {
 		this.adapter = adapter;
-		this.askApproval = askApproval;
 	}
 	/** Decide a navigation: `true` lets it proceed. */
 	allowNavigation(rawUrl) {
@@ -1244,10 +1232,6 @@ var BrowserGuard = class {
 		return () => {
 			session.removeListener("will-download", listener);
 		};
-	}
-	/** Gate one sensitive action through the approval seam. */
-	async requireApproval(request) {
-		return await this.askApproval(request) === "allowed-once";
 	}
 };
 /** Default permission stance: everything is denied unless the user grants it. */
@@ -1505,7 +1489,7 @@ var BrowserRuntime = class {
 	busy = false;
 	/** The agent tool currently executing ('' when idle). */
 	busyTool = "";
-	constructor(adapter, options = {}, askApproval, credentials, partition) {
+	constructor(adapter, options = {}, credentials, partition) {
 		this.adapter = adapter;
 		this.credentials = credentials;
 		this.options = {
@@ -1518,7 +1502,7 @@ var BrowserRuntime = class {
 			screenshotMaxWidth: options.screenshotMaxWidth ?? 1280,
 			screenshotQuality: options.screenshotQuality ?? 70
 		};
-		this.guard = new BrowserGuard(adapter, askApproval);
+		this.guard = new BrowserGuard(adapter);
 		this.partition = partition ?? BROWSER_PARTITION;
 	}
 	/** Swap the partition used by NEW tab views (user switch). Existing tabs
@@ -1570,10 +1554,6 @@ var BrowserRuntime = class {
 	/** Public tab state (throws for unknown ids). */
 	tabState(id) {
 		return this.tabStateInternal(id);
-	}
-	/** Route a sensitive-action approval through the guard. */
-	async requireApproval(request) {
-		return await this.guard.requireApproval(request);
 	}
 	/** Content-area bounds below the shell toolbar (DIP). */
 	contentBounds() {
@@ -2317,8 +2297,8 @@ const BROWSER_GUIDANCE = `You have an embedded browser. Drive it like a human us
 4. After navigation or any action that changes the page, call browser_get_snapshot again — the page may have re-rendered and renumbered everything.
 5. Take a browser_screenshot only when you need visual confirmation; prefer snapshots and text to save tokens.
 6. browser_type fills the focused input; use browser_press for Enter/Tab/Escape.
-7. Filling a password field or submitting a form will ask the user for approval; do not work around that.
-8. browser_eval executes JavaScript in the page; it is powerful and prompts for approval — prefer the other tools.
+7. Every browser action runs directly with no user-approval prompt — the user has already granted browser use (workspace permission); the browser window shows the live state.
+8. browser_eval executes JavaScript in the page; it is powerful — prefer the other tools.
 9. Do not navigate away from a page you were asked to inspect without saying so first.
 10. Close tabs you no longer need with browser_close_tab.`;
 /** Resolve `target` (snapshot number or CSS selector) to a selector. */
@@ -2578,7 +2558,7 @@ function applyBrowserTools(ctx, runtime) {
 	}));
 	ctx.tools.register(defineTool({
 		name: "browser_click",
-		description: "Click an element, targeted by its snapshot number or a CSS selector. Submitting forms or clicking buttons prompts the user for approval.",
+		description: "Click an element, targeted by its snapshot number or a CSS selector. Runs without a user-approval prompt.",
 		parameters: {
 			tab: {
 				type: "integer",
@@ -2591,7 +2571,7 @@ function applyBrowserTools(ctx, runtime) {
 			},
 			submit: {
 				type: "boolean",
-				description: "Set true when this click submits a form (triggers the approval prompt)."
+				description: "Set true when this click submits a form (no prompt; kept for call compatibility)."
 			}
 		},
 		output: {
@@ -2609,20 +2589,9 @@ function applyBrowserTools(ctx, runtime) {
 		isConcurrencySafe: () => false,
 		presentCall: present("Click"),
 		async execute(args, exec) {
-			const { tab, target, submit } = args;
+			const { tab, target } = args;
 			const tabId = await tabOf(tab);
-			const snapshot = await runtime.snapshot(tabId, exec.signal);
-			const entry = typeof target === "number" ? snapshot.find((item) => item.index === target) : void 0;
 			const selector = await resolveTarget(runtime, tabId, target);
-			if (submit === true || entry !== void 0 && isSubmitTarget(entry.kind, entry.text, entry.selector)) {
-				if (!await runtime.requireApproval({
-					agent: exec.agent,
-					toolName: "browser_click",
-					callId: exec.callId,
-					reason: `提交表单或点击按钮: ${entry?.text ?? selector}`,
-					signal: exec.signal
-				})) throw new Error("browser: form submission was not approved by the user");
-			}
 			const point = await runtime.locateElement(tabId, selector, exec.signal);
 			await runtime.clickAt(tabId, point, exec.signal);
 			exec.signal.throwIfAborted();
@@ -2631,7 +2600,7 @@ function applyBrowserTools(ctx, runtime) {
 	}));
 	ctx.tools.register(defineTool({
 		name: "browser_type",
-		description: "Type text into an input (snapshot number or CSS selector). Filling a password field prompts the user for approval.",
+		description: "Type text into an input (snapshot number or CSS selector). Runs without a user-approval prompt.",
 		parameters: {
 			tab: {
 				type: "integer",
@@ -2671,15 +2640,6 @@ function applyBrowserTools(ctx, runtime) {
 			if (typeof text !== "string" || text.length > 16 * 1024) throw new Error("text must be a string ≤ 16KB");
 			const tabId = await tabOf(tab);
 			const selector = await resolveTarget(runtime, tabId, target);
-			if (isPasswordTarget(selector)) {
-				if (!await runtime.requireApproval({
-					agent: exec.agent,
-					toolName: "browser_type",
-					callId: exec.callId,
-					reason: "向密码字段输入内容",
-					signal: exec.signal
-				})) throw new Error("browser: password entry was not approved by the user");
-			}
 			await runtime.typeInto(tabId, selector, text, clear !== false, exec.signal);
 			exec.signal.throwIfAborted();
 			return { ok: true };
@@ -3088,7 +3048,7 @@ function applyBrowserTools(ctx, runtime) {
 	}));
 	ctx.tools.register(defineTool({
 		name: "browser_eval",
-		description: "Execute JavaScript in the page context and return the JSON result. Powerful — every call prompts the user for approval. Prefer the other tools.",
+		description: "Execute JavaScript in the page context and return the JSON result. Runs without a user-approval prompt (browser use is already granted); prefer the other tools when possible.",
 		parameters: {
 			tab: {
 				type: "integer",
@@ -3118,13 +3078,6 @@ function applyBrowserTools(ctx, runtime) {
 		async execute(args, exec) {
 			const { tab, expression } = args;
 			const tabId = await tabOf(tab);
-			if (!await runtime.requireApproval({
-				agent: exec.agent,
-				toolName: "browser_eval",
-				callId: exec.callId,
-				reason: `在页面中执行 JavaScript: ${expression.slice(0, 120)}`,
-				signal: exec.signal
-			})) throw new Error("browser: eval was not approved by the user");
 			const result = await runtime.eval(tabId, expression, exec.signal);
 			exec.signal.throwIfAborted();
 			return { result: String(result) };
@@ -3132,7 +3085,7 @@ function applyBrowserTools(ctx, runtime) {
 	}));
 	ctx.tools.register(defineTool({
 		name: "browser_fill_credentials",
-		description: "Fill the login form with credentials stored for a connector (e.g. an enterprise account). Prompts the user for approval. Does not submit the form.",
+		description: "Fill the login form with credentials stored for a connector (e.g. an enterprise account). Runs without a user-approval prompt. Does not submit the form.",
 		parameters: {
 			tab: {
 				type: "integer",
@@ -3166,14 +3119,6 @@ function applyBrowserTools(ctx, runtime) {
 			const { tab, connectorId } = args;
 			if (typeof connectorId !== "string" || connectorId.trim() === "") throw new Error("connectorId must be a non-empty string");
 			const tabId = await tabOf(tab);
-			const pageUrl = runtime.currentUrlOf(tabId);
-			if (!await runtime.requireApproval({
-				agent: exec.agent,
-				toolName: "browser_fill_credentials",
-				callId: exec.callId,
-				reason: `向登录表单注入连接器凭据 (${connectorId})，目标页面: ${pageUrl === "" ? "（未知）" : pageUrl}`,
-				signal: exec.signal
-			})) throw new Error("browser: credential injection was not approved by the user");
 			const filled = await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal);
 			exec.signal.throwIfAborted();
 			return filled;
@@ -3619,17 +3564,6 @@ function decodeSegment(segment) {
 * @param config - runtime caps and enablement.
 */
 function apply(ctx, config = {}) {
-	const askApproval = async (request) => {
-		const approval = ctx.get("approval");
-		if (approval === void 0) return "rejected";
-		return await approval.request({
-			agent: request.agent,
-			toolName: request.toolName,
-			...request.callId !== void 0 ? { callId: request.callId } : {},
-			reason: request.reason,
-			...request.signal !== void 0 ? { signal: request.signal } : {}
-		});
-	};
 	const currentUser = () => {
 		try {
 			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
@@ -3655,7 +3589,7 @@ function apply(ctx, config = {}) {
 			return;
 		}
 	})();
-	const runtime = new BrowserRuntime(createRealElectronAdapter(), config, askApproval, credentialResolver, browserPartitionFor(currentUser()));
+	const runtime = new BrowserRuntime(createRealElectronAdapter(), config, credentialResolver, browserPartitionFor(currentUser()));
 	runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`);
 	ctx.on("pico/session-changed", (next) => {
 		const username = next?.username ?? null;
