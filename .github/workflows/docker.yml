@@ -3,7 +3,8 @@ name: Server Docker image
 # 发布版本时自动构建服务端 Docker 镜像并推送 GHCR(契约见 server/docs/02-build-deploy.md §3.3):
 #   - push tag v*:版本号 = tag 去 v 前缀(与 GitHub Release 流程同源,同一 tag 触发)
 #   - workflow_dispatch:手动填版本号(填 v2.3.0 或 2.3.0 均可),默认分支选择 release 来源
-# 镜像标签规则:latest + vX.Y.Z + vX.Y;多平台 linux/amd64 + linux/arm64。
+# 镜像标签规则:latest + vX.Y.Z + vX.Y;单平台 linux/amd64(2026-08-26 起移除
+# arm64——QEMU 模拟构建过慢且镜像体积翻倍;如后续需要可加回并启用原生 ARM runner)。
 on:
   push:
     tags:
@@ -28,7 +29,7 @@ env:
 
 jobs:
   build:
-    name: Build and push multi-arch image
+    name: Build and push amd64 image
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # type=gha 缓存后端写 Actions 缓存需 actions: write;推送 GHCR 需 packages: write。
@@ -45,9 +46,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
@@ -137,7 +135,7 @@ jobs:
         with:
           # context=server:server/.dockerignore 生效,Dockerfile 内相对路径不变
           context: server
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           build-args: VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -179,7 +177,7 @@ jobs:
           echo "::error::/healthz 未在 30s 内就绪"
           exit 1
 
-      - name: Verify multi-arch manifest
+      - name: Verify image manifest (amd64)
         env:
           IMAGE_NAME: ${{ env.IMAGE }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -187,14 +185,17 @@ jobs:
         run: |
           IMAGE="$IMAGE_NAME"
           TAG="v$VERSION"
-          # inspect 输出每行格式 "Platform: linux/amd64"(+ attestation manifest 的
-          # unknown/unknown),逐平台断言;grep 'Platform: linux/<arch>$' 精确匹配行尾
+          # 单平台镜像:inspect 输出应含 "Platform: linux/amd64"(+ attestation
+          # manifest 的 unknown/unknown),精确匹配行尾断言 amd64 存在且为唯一
+          # 平台镜像(不再有 arm64)。
           MANIFEST="$(docker buildx imagetools inspect "$IMAGE:$TAG")"
           echo "$MANIFEST"
-          for ARCH in amd64 arm64; do
-            if ! echo "$MANIFEST" | grep -Eq "Platform: +linux/$ARCH\$"; then
-              echo "::error::manifest 缺少 linux/$ARCH"
-              exit 1
-            fi
-          done
-          echo "multi-arch manifest OK (amd64 + arm64)"
+          if ! echo "$MANIFEST" | grep -Eq "Platform: +linux/amd64\$"; then
+            echo "::error::manifest 缺少 linux/amd64"
+            exit 1
+          fi
+          if echo "$MANIFEST" | grep -Eq "Platform: +linux/arm64\$"; then
+            echo "::error::manifest 不应包含 linux/arm64(已移除 arm64)"
+            exit 1
+          fi
+          echo "single-arch manifest OK (linux/amd64)"
