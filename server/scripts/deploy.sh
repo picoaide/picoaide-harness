@@ -12,8 +12,8 @@
 #   ./scripts/deploy.sh uninstall        # 卸载(停容器;--volumes 全删数据目录,需确认)
 #
 # 数据库后端(DB_MODE):
-#   sqlite(默认) | pg(内置 postgres 容器,叠加 docker-compose.pg.yml) |
-#   pg-external(已有 PostgreSQL 实例,叠加 docker-compose.pg-ext.yml)
+#   sqlite(默认) | pg(内置 postgres 容器,完整 compose docker-compose.pg.yml) |
+#   pg-external(已有 PostgreSQL 实例,完整 compose docker-compose.pg-ext.yml)
 #   pg 两种模式需含 -db-driver 支持的服务端镜像(发布 0.5.0+ 或 make docker-image 本地构建);
 #   sqlite→pg 数据迁移: ./deploy.sh migrate(migrate 子命令要求 .env 已配 DB_MODE=pg* + PG_DSN)
 #
@@ -115,11 +115,12 @@ mask_dsn() {
   sed -E 's#(://[^:@/]+:)[^@/]+@#\1***@#' <<<"$1"
 }
 
-# 数据库后端 → compose override 文件(COMPOSE_FILE 叠加,全部子命令自动生效)
+# 数据库后端 → 完整独立 compose 文件(每个都是 caddy+server(+postgres) 全服务,
+# 可直接 docker compose -f <file> up -d;COMPOSE_FILE 指向单个文件,不再叠加)
 case "$DB_MODE" in
-  sqlite) : ;;
-  pg) COMPOSE_FILE="${COMPOSE_FILE}:$(dirname "$COMPOSE_FILE")/docker-compose.pg.yml" ;;
-  pg-external) COMPOSE_FILE="${COMPOSE_FILE}:$(dirname "$COMPOSE_FILE")/docker-compose.pg-ext.yml" ;;
+  sqlite) : ;;  # 默认 docker-compose.yml(caddy+server,sqlite)
+  pg) COMPOSE_FILE="$(dirname "$COMPOSE_FILE")/docker-compose.pg.yml" ;;
+  pg-external) COMPOSE_FILE="$(dirname "$COMPOSE_FILE")/docker-compose.pg-ext.yml" ;;
   *) fail "DB_MODE 仅支持 sqlite/pg/pg-external,当前: $DB_MODE" ;;
 esac
 export COMPOSE_FILE
@@ -543,9 +544,9 @@ cmd_migrate() {
     ensure_env_key PG_IP "$PG_IP"
     chmod 600 .env
   fi
-  # 迁移后的 compose 必须叠加 pg override(脚本顶部按 sqlite 算的 COMPOSE_FILE 在此覆盖)
-  COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml:$DEPLOY_DIR/docker-compose.pg.yml"
-  [ "$DB_MODE" = "pg-external" ] && COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml:$DEPLOY_DIR/docker-compose.pg-ext.yml"
+  # 迁移后的 compose 使用 pg 模式的完整独立文件(不再叠加主文件)
+  COMPOSE_FILE="$DEPLOY_DIR/docker-compose.pg.yml"
+  [ "$DB_MODE" = "pg-external" ] && COMPOSE_FILE="$DEPLOY_DIR/docker-compose.pg-ext.yml"
   export COMPOSE_FILE
 
   log "源: picoaide-data/picoaide.db"

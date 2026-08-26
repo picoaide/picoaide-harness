@@ -11,7 +11,7 @@
 # 环境变量(全部可选,均有默认值;交互模式可省略,由脚本经 /dev/tty 询问):
 #   DOMAIN            对外域名或 IP(生产必改;交互时会询问,非交互必须提供)
 #   INSTALL_DIR       部署目录(默认 /data/picoaide/deploy;兼容旧版 DEPLOY_DIR)
-#   DB_MODE           数据库后端: sqlite(默认) | pg(内置 postgres 容器) | pg-external(已有实例)
+#   DB_MODE           数据库后端: sqlite(默认) | pg(内置 postgres 容器,完整 compose) | pg-external(已有实例,完整 compose)
 #   PG_PASSWORD       pg 模式:内置 postgres 密码(缺省随机生成并写入 .env)
 #   PG_DSN            pg-external 必填(如 postgres://user:pass@host:5432/db)
 #   ADMIN_USER        超管用户名(默认 admin)
