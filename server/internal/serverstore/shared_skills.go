@@ -70,9 +70,30 @@ func scanSharedSkill(row interface{ Scan(...any) error }) (*SharedSkill, error) 
 
 const sharedSkillColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, created_at, updated_at"
 
+// SharedSkillNameExists reports whether the shared_skills table has a row
+// with the given name (any status). Used by the marketplace admin's
+// create-skill conflict check (决策 2026-08-25:市场与组织合并为「市场」后,
+// 同名技能跨源互斥——admin 上架市场技能前须确认共享库无同名)。
+func SharedSkillNameExists(db *sql.DB, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM shared_skills WHERE name = ?`, name).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // CreateSharedSkill inserts a pending row (unique name+version); returns
 // ErrDuplicate when that exact version already exists in any status.
+// 决策 2026-08-25:上传即阻断跨源同名——marketplace skills 表已存在同名技能
+// 时返回 ErrConflict(市场与组织合并为「市场」后的互斥约束,DAO 层实现,
+// SQLite/PG 通用,不上 DB 触发器)。
 func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
+	if conflict, err := SkillNameExists(db, s.Name); err != nil {
+		return 0, err
+	} else if conflict {
+		return 0, ErrConflict
+	}
 	id, err := InsertID(db, `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status)
@@ -88,8 +109,14 @@ func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
 // CreateSharedSkillCapped inserts a fresh pending row when the author is below
 // pendingCap, atomically (the INSERT re-counts pending rows for the author).
 // Returns ErrTooManyPending when at the cap; ErrDuplicate when name+version
-// exist (any status).
+// exist (any status); ErrConflict when the marketplace skills table already
+// has a same-name skill (决策 2026-08-25:上传即阻断跨源同名)。
 func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64, error) {
+	if conflict, err := SkillNameExists(db, s.Name); err != nil {
+		return 0, err
+	} else if conflict {
+		return 0, ErrConflict
+	}
 	q := `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status)
 		SELECT ?, ?, ?, ?, ?, ?, ?
 		WHERE (SELECT COUNT(*) FROM shared_skills WHERE author = ? AND status = ?) < ?`
