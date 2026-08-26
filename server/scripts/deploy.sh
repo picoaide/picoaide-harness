@@ -23,7 +23,7 @@
 #   TLS_MODE          证书模式:manual(默认,自签占位+提示替换) | auto(Let's Encrypt 自动)
 #   ADMIN_USER        初始超管用户名(默认 admin)
 #   PICOAI_ADMIN_PASSWORD 初始超管密码(默认随机生成并在最后打印;已有 admin 后可用空值清除)
-#   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-server:latest)
+#   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest)
 #   NETWORK_SUBNET    私有网段(默认 172.28.0.0/24)
 #   CADDY_IP / SERVER_IP  容器固定 IP(默认 172.28.0.2 / 172.28.0.3)
 #   DB_MODE           sqlite(默认) | pg | pg-external
@@ -89,7 +89,7 @@ fi
 DOMAIN="${DOMAIN:-picoaide.example.com}"
 TLS_MODE="${TLS_MODE:-manual}"
 ADMIN_USER="${ADMIN_USER:-admin}"
-SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-server:latest}"
+SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-harness-server:latest}"
 NETWORK_SUBNET="${NETWORK_SUBNET:-172.28.0.0/24}"
 CADDY_IP="${CADDY_IP:-172.28.0.2}"
 SERVER_IP="${SERVER_IP:-172.28.0.3}"

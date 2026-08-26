@@ -1,6 +1,6 @@
 # PicoAide 服务端容器化部署文档
 
-> 适用版本:服务端 Docker 镜像 `ghcr.io/picoaide/picoaide-server`(amd64/arm64 多平台)。
+> 适用版本:服务端 Docker 镜像 `ghcr.io/picoaide/picoaide-harness-server`(amd64/arm64 多平台)。
 > 本文覆盖:镜像来源与发布、私有网段+固定 IP 的 Compose 部署、手动/自动两种证书模式、自动化脚本、升级/备份/恢复/卸载、安全清单与 FAQ。
 
 ## 0. 架构总览
@@ -61,7 +61,7 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 
 ## 1. 镜像来源与发布(编译 → 验证 → 推送)
 
-镜像仓库:`ghcr.io/picoaide/picoaide-server`(GitHub Container Registry,与 picoaide-harness 同 org)。
+镜像仓库:`ghcr.io/picoaide/picoaide-harness-server`(GitHub Container Registry,与 picoaide-harness 同 org)。
 
 ### 1.1 发布流程(CI 自动)
 
@@ -190,7 +190,7 @@ curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/se
 | `PG_DSN` | - | pg-external 必填(如 `postgres://user:pass@host:5432/db`) |
 | `ADMIN_USER` / `ADMIN_PASS` | admin / 随机生成 | 超管账号/密码(兼容 `PICOAI_ADMIN_PASSWORD`) |
 | `TLS_MODE` | manual | manual / auto |
-| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-server:latest | 可换私有 registry;pg 模式须含 `-db-driver`(0.5.0+ 或本地构建) |
+| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry;pg 模式须含 `-db-driver`(0.5.0+ 或本地构建) |
 | `SKIP_DEPS=1` | 空 | 跳过依赖自动安装(仅检查,缺失即提示并退出) |
 | `DOCKER_MIRROR` | 空 | docker 安装镜像源(如清华 `https://mirrors.tuna.tsinghua.edu.cn/docker-ce`) |
 | `MIRROR_URL` | 空 | 通用镜像加速提示(apt 源需自行改) |
@@ -234,7 +234,7 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 | `DOMAIN` | picoaide.example.com | 对外域名或 IP(生产必改) |
 | `TLS_MODE` | manual | manual / auto |
 | `ADMIN_USER` / `PICOAI_ADMIN_PASSWORD` | admin / 随机生成 | 首次启动创建超管;已有 admin 后密码可清空 |
-| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-server:latest | 可换私有 registry |
+| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry |
 | `NETWORK_SUBNET` / `CADDY_IP` / `SERVER_IP` | 172.28.0.0/24 / .2 / .3 | 私有网段与固定 IP |
 | `DB_MODE` | sqlite | sqlite / pg / pg-external(见 §0 与 §6.3) |
 | `PG_PASSWORD` | 随机生成 | pg 模式:内置 postgres 容器密码 |

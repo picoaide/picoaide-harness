@@ -76,7 +76,7 @@ make docker-image                 # 本地单平台(版本=VERSION,默认 git de
 make docker-image TAG=v0.4.0      # 指定版本
 make release-export TAG=v0.4.0    # 离线导出 tar(内网 docker load)
 docker buildx build --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-server:v0.4.0 --push .
+  --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-harness-server:v0.4.0 --push .
 ```
 
 ### 3.3 发布(CI 自动,Workflow: .github/workflows/docker.yml)
@@ -84,7 +84,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 - 触发:`push tag v*` 或手动 `workflow_dispatch`(填版本号);
 - 多平台 `linux/amd64,linux/arm64`;注入 VERSION;推送标签 `vX.Y.Z` / `vX.Y` / `latest`;
 - 附加 `type=gha` 构建缓存、`sbom=true`、`provenance=mode=max`;`imagetools inspect` 校验双架构 manifest;
-- 镜像地址 `ghcr.io/picoaide/picoaide-server`(部署 .env `SERVER_IMAGE` 可换私有 registry)。
+- 镜像地址 `ghcr.io/picoaide/picoaide-harness-server`(部署 .env `SERVER_IMAGE` 可换私有 registry)。
 
 ### 3.4 镜像验证清单
 
