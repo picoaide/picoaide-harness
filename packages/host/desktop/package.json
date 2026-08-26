@@ -96,8 +96,7 @@
     }
   },
   "scripts": {
-    "prefetch:cli": "node scripts/prefetch-cli.mjs",
-    "build": "node scripts/prefetch-cli.mjs && node scripts/generate-mac-app-icon.mjs && node scripts/generate-tray-icons.mjs && node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
+    "build": "node scripts/generate-mac-app-icon.mjs && node scripts/generate-tray-icons.mjs && node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
@@ -228,8 +227,6 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "@picoaide/dsh-account-card": "workspace:*",
     "@picoaide/dsh-browser": "workspace:*",
-    "@picoaide/dsh-cli-skill-bridge": "workspace:*",
-    "@picoaide/dsh-cli-tools": "workspace:*",
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
@@ -278,22 +275,7 @@
       "**/prebuilds/**/*.conpty_console_list*"
     ],
     "afterPack": "./scripts/verify-packaged-runtime.ts",
-    "extraResources": [
-      {
-        "from": "build/cli",
-        "to": "cli",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "cli-skills",
-        "to": "cli-skills",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
+    "extraResources": [],
     "electronFuses": {
       "runAsNode": true
     },
