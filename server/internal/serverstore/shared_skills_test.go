@@ -248,3 +248,60 @@ func TestCrossSourceSkillNameConflict(t *testing.T) {
 		t.Fatalf("market create under shared name v9 = %v, want ErrConflict", err)
 	}
 }
+
+// TestSharedSkillArchiveDB: 0040 — CreateSharedSkillCapped stores the archive
+// blob; SetSharedSkillArchive updates it; GetSharedSkillArchive reads it;
+// IncrementSharedSkillDownload bumps the counter; list views exclude the blob.
+func TestSharedSkillArchiveDB(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	blob := []byte("gz-tar-bytes")
+	s := &SharedSkill{Name: "arch", Version: "1.0.0", Author: "alice", Status: SharedSkillPending, Archive: blob, Checksum: "sum1"}
+	if _, err := CreateSharedSkill(db, s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetSharedSkillArchive(db, "arch", "1.0.0")
+	if err != nil || string(got) != string(blob) {
+		t.Fatalf("archive = %q err=%v", got, err)
+	}
+	// List must exclude the blob.
+	all, err := ListSharedSkills(db, "")
+	if err != nil || len(all) != 1 || len(all[0].Archive) != 0 {
+		t.Fatalf("list = %+v err=%v (blob must be excluded)", all, err)
+	}
+	// Download counter.
+	if ok, err := IncrementSharedSkillDownload(db, "arch", "1.0.0"); err != nil || !ok {
+		t.Fatalf("download inc: ok=%v err=%v", ok, err)
+	}
+	row, _ := GetSharedSkill(db, "arch", "1.0.0")
+	if row.Downloads != 1 || row.Calls != 0 {
+		t.Fatalf("stats = %+v", row)
+	}
+	// Version update + archive overwrite (resubmit path).
+	if err := SetSharedSkillArchive(db, "arch", "1.0.0", []byte("v2")); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = GetSharedSkillArchive(db, "arch", "1.0.0")
+	if string(got) != "v2" {
+		t.Fatalf("after overwrite = %q", got)
+	}
+	// Call counter by name+version.
+	if ok, err := IncrementSkillCall(db, "arch", "1.0.0"); err != nil || !ok {
+		t.Fatalf("call inc: ok=%v err=%v", ok, err)
+	}
+	row, _ = GetSharedSkill(db, "arch", "1.0.0")
+	if row.Calls != 1 {
+		t.Fatalf("calls = %d, want 1", row.Calls)
+	}
+	// Delete clears the blob.
+	if err := DeleteSharedSkillArchive(db, "arch", "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = GetSharedSkillArchive(db, "arch", "1.0.0")
+	if err != nil || got != nil {
+		t.Fatalf("after clear = %q err=%v", got, err)
+	}
+}

@@ -1,7 +1,11 @@
 package marketplace
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -202,5 +206,99 @@ func TestAdminSkillGitURLValidation(t *testing.T) {
 	w, _ := mreq(t, r, "PUT", "/api/admin/skills/demo", `{"git_url":"file:///tmp/x"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("update with file git_url = %d, want 400", w.Code)
+	}
+}
+
+// makeGzipTar builds a minimal gzipped tar with the given entries (helper for
+// the upload-mode tests).
+func makeGzipTar(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for name, content := range entries {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestAdminSkillUploadArchive: POST /api/admin/skills/:name/archive switches
+// the skill to upload mode — the archive is stored in the DB row, the git
+// source is cleared, and the employee download serves the DB bytes + counts.
+func TestAdminSkillUploadArchive(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	archive := makeGzipTar(t, map[string]string{"SKILL.md": "---\nname: demo\n---\n# demo\n"})
+	body := `{"version":"2.0.0","archive":"` + base64.StdEncoding.EncodeToString(archive) + `"}`
+	if w, out := mreq(t, r, "POST", "/api/admin/skills/demo/archive", body, hdr); w.Code != http.StatusOK {
+		t.Fatalf("upload archive: %d %s (%v)", w.Code, w.Body.String(), out)
+	}
+	s, err := serverstore.GetSkill(db, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Source != "upload" || s.Version != "2.0.0" || s.Checksum == "" {
+		t.Fatalf("after upload = %+v", s)
+	}
+	if len(s.Archive) == 0 || s.GitURL != "" {
+		t.Fatalf("archive must be stored in DB and git cleared, got %+v", s)
+	}
+	// 非法归档(缺 SKILL.md)→ 422。
+	bad := makeGzipTar(t, map[string]string{"readme.md": "x"})
+	w, _ := mreq(t, r, "POST", "/api/admin/skills/demo/archive",
+		`{"version":"3.0.0","archive":"`+base64.StdEncoding.EncodeToString(bad)+`"}`, hdr)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad archive = %d, want 422", w.Code)
+	}
+	s, _ = serverstore.GetSkill(db, "demo")
+	if s.Version != "2.0.0" {
+		t.Fatalf("bad upload must not mutate row, version=%s", s.Version)
+	}
+	// 员工下载:需授权 + 返回 DB 归档字节。
+	uid, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.GrantSkill(db, "demo", "alice", serverstore.GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(db, t.TempDir())
+	rr := gin.New()
+	api.RegisterRoutes(rr)
+	req := httptest.NewRequest("GET", "/api/marketplace/skills/demo/archive", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	wr := httptest.NewRecorder()
+	rr.ServeHTTP(wr, req)
+	if wr.Code != http.StatusOK {
+		t.Fatalf("employee download = %d %s", wr.Code, wr.Body.String())
+	}
+	if !bytes.Equal(wr.Body.Bytes(), archive) {
+		t.Fatalf("downloaded archive differs from uploaded")
+	}
+	if v := wr.Header().Get("X-Skill-Version"); v != "2.0.0" {
+		t.Fatalf("x-skill-version = %q", v)
+	}
+	s, _ = serverstore.GetSkill(db, "demo")
+	if s.Downloads != 1 {
+		t.Fatalf("downloads = %d, want 1", s.Downloads)
 	}
 }

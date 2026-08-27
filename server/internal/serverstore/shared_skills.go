@@ -51,7 +51,13 @@ type SharedSkill struct {
 	Reason string
 	// Quality 是组织库质量标记(0037):''|'official'|'featured' 互斥,
 	// 仅对 approved 行有展示语义;与市场「免费/专业」分级词表隔离。
-	Quality   string
+	Quality string
+	// Archive is the uploaded archive bytes (0040: 归档直存 DB,不再落磁盘).
+	Archive []byte
+	// Downloads counts successful archive downloads.
+	Downloads int64
+	// Calls counts skill invocations reported by clients (telemetry).
+	Calls     int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -60,7 +66,8 @@ func scanSharedSkill(row interface{ Scan(...any) error }) (*SharedSkill, error) 
 	var s SharedSkill
 	var createdAt, updatedAt any
 	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description,
-		&s.Author, &s.Checksum, &s.Status, &s.Reason, &s.Quality, &createdAt, &updatedAt); err != nil {
+		&s.Author, &s.Checksum, &s.Status, &s.Reason, &s.Quality,
+		&s.Archive, &s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	s.CreatedAt = parseSQLTime(createdAt)
@@ -68,7 +75,24 @@ func scanSharedSkill(row interface{ Scan(...any) error }) (*SharedSkill, error) 
 	return &s, nil
 }
 
-const sharedSkillColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, created_at, updated_at"
+const sharedSkillColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, archive, downloads, calls, created_at, updated_at"
+
+// sharedSkillListColumns excludes the archive blob: list views (admin table,
+// employee catalog) must not load every upload into memory.
+const sharedSkillListColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, downloads, calls, created_at, updated_at"
+
+func scanSharedSkillList(row interface{ Scan(...any) error }) (*SharedSkill, error) {
+	var s SharedSkill
+	var createdAt, updatedAt any
+	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description,
+		&s.Author, &s.Checksum, &s.Status, &s.Reason, &s.Quality,
+		&s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	s.CreatedAt = parseSQLTime(createdAt)
+	s.UpdatedAt = parseSQLTime(updatedAt)
+	return &s, nil
+}
 
 // SharedSkillNameExists reports whether the shared_skills table has a row
 // with the given name (any status). Used by the marketplace admin's
@@ -94,9 +118,9 @@ func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
 	} else if conflict {
 		return 0, ErrConflict
 	}
-	id, err := InsertID(db, `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status)
+	id, err := InsertID(db, `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status, archive)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status, s.Archive)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -117,11 +141,11 @@ func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64,
 	} else if conflict {
 		return 0, ErrConflict
 	}
-	q := `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status)
-		SELECT ?, ?, ?, ?, ?, ?, ?
+	q := `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status, archive)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE (SELECT COUNT(*) FROM shared_skills WHERE author = ? AND status = ?) < ?`
 	args := []any{
-		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status,
+		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status, s.Archive,
 		s.Author, SharedSkillPending, pendingCap,
 	}
 
@@ -138,7 +162,8 @@ func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64,
 	return id, nil
 }
 
-// GetSharedSkill returns the row by name+version or ErrNotFound.
+// GetSharedSkill returns the row by name+version or ErrNotFound. The row
+// carries the archive blob (single-row read; list views use list columns).
 func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
 	s, err := scanSharedSkill(db.QueryRow(`SELECT `+sharedSkillColumns+` FROM shared_skills WHERE name = ? AND version = ?`, name, version))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -148,9 +173,9 @@ func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
 }
 
 // ListSharedSkills returns every row (admin view), oldest first, optionally
-// filtered by status ("" = all).
+// filtered by status ("" = all). List columns exclude the archive blob.
 func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
-	q := `SELECT ` + sharedSkillColumns + ` FROM shared_skills`
+	q := `SELECT ` + sharedSkillListColumns + ` FROM shared_skills`
 	args := []any{}
 	if status != "" {
 		q += " WHERE status = ?"
@@ -164,7 +189,7 @@ func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
 	defer rows.Close()
 	var out []SharedSkill
 	for rows.Next() {
-		s, err := scanSharedSkill(rows)
+		s, err := scanSharedSkillList(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -176,9 +201,9 @@ func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
 // ListVisibleSharedSkills returns the rows an employee may see: approved
 // rows the caller is GRANTED (user or via groups) plus the caller's own rows
 // in any status (an author always sees their own submissions). Strict
-// default: approved but not granted stays invisible.
+// default: approved but not granted stays invisible. List columns (no blob).
 func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]SharedSkill, error) {
-	rows, err := db.Query(`SELECT `+sharedSkillColumns+` FROM shared_skills
+	rows, err := db.Query(`SELECT `+sharedSkillListColumns+` FROM shared_skills
 		WHERE author = ?
 		OR (status = ? AND name IN (`+qmarks(len(granted))+`))
 		ORDER BY name, version`, append([]any{author, SharedSkillApproved}, toStringArgs(granted)...)...)
@@ -188,13 +213,60 @@ func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]Sha
 	defer rows.Close()
 	var out []SharedSkill
 	for rows.Next() {
-		s, err := scanSharedSkill(rows)
+		s, err := scanSharedSkillList(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *s)
 	}
 	return out, rows.Err()
+}
+
+// SetSharedSkillArchive stores the uploaded archive blob in the row (0040:
+// DB 直存). Returns ErrNotFound when the row is absent.
+func SetSharedSkillArchive(db *sql.DB, name, version string, archive []byte) error {
+	res, err := db.Exec(`UPDATE shared_skills SET archive=?, updated_at=`+NowExpr()+`
+		WHERE name=? AND version=?`, archive, name, version)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetSharedSkillArchive returns the stored archive bytes. ErrNotFound when
+// the row is absent; nil when the row exists but has no DB archive yet
+// (pre-0040 rows keep their disk fallback in the handler).
+func GetSharedSkillArchive(db *sql.DB, name, version string) ([]byte, error) {
+	var b []byte
+	err := db.QueryRow(`SELECT archive FROM shared_skills WHERE name=? AND version=?`, name, version).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// DeleteSharedSkillArchive clears the DB archive on row removal (disk cache
+// cleanup is handled by the caller).
+func DeleteSharedSkillArchive(db *sql.DB, name, version string) error {
+	_, err := db.Exec(`UPDATE shared_skills SET archive=NULL WHERE name=? AND version=?`, name, version)
+	return err
+}
+
+// IncrementSharedSkillDownload bumps the shared-skill download counter.
+func IncrementSharedSkillDownload(db *sql.DB, name, version string) (bool, error) {
+	res, err := db.Exec(`UPDATE shared_skills SET downloads = downloads + 1 WHERE name=? AND version=?`, name, version)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // SetSharedSkillStatus transitions the row (approve/reject/resubmit) and

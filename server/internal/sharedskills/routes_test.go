@@ -411,3 +411,62 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 		t.Fatalf("approve conflict = %d, want 409 (%s)", wA.Code, wA.Body.String())
 	}
 }
+
+// TestSharedSkillArchiveInDB: 0040 — upload stores the archive in the DB row
+// (no disk file), approve + download serves the DB bytes and bumps the
+// download counter; disk cache stays absent.
+func TestSharedSkillArchiveInDB(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+	archive := makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/shared-skills",
+		strings.NewReader(uploadBody("db-arch", "1.0.0", "审计", archive)))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+	}
+	// 归档已在 DB 行(上传即落库)。
+	raw, err := serverstore.GetSharedSkillArchive(db, "db-arch", "1.0.0")
+	if err != nil || !bytes.Equal(raw, archive) {
+		t.Fatalf("db archive missing: err=%v len=%d", err, len(raw))
+	}
+	// 管理员通过。
+	wA := httptest.NewRecorder()
+	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/db-arch/1.0.0/approve", nil)
+	for k, v := range adminHdr {
+		reqA.Header.Set(k, v)
+	}
+	r.ServeHTTP(wA, reqA)
+	if wA.Code != http.StatusOK {
+		t.Fatalf("approve = %d %s", wA.Code, wA.Body.String())
+	}
+
+	// 员工下载(approved+作者):返回 DB 字节,计数 +1。
+	wD := httptest.NewRecorder()
+	reqD := httptest.NewRequest("GET", "/api/shared-skills/db-arch/1.0.0/archive", nil)
+	for k, v := range userHdr {
+		reqD.Header.Set(k, v)
+	}
+	r.ServeHTTP(wD, reqD)
+	if wD.Code != http.StatusOK {
+		t.Fatalf("download = %d %s", wD.Code, wD.Body.String())
+	}
+	if !bytes.Equal(wD.Body.Bytes(), archive) {
+		t.Fatalf("downloaded bytes differ")
+	}
+	s, _ := serverstore.GetSharedSkill(db, "db-arch", "1.0.0")
+	if s.Downloads != 1 {
+		t.Fatalf("downloads = %d, want 1", s.Downloads)
+	}
+	// 管理员列表不含归档 blob(列已裁剪)。
+	all, _ := serverstore.ListSharedSkills(db, "")
+	if len(all) != 1 || len(all[0].Archive) != 0 {
+		t.Fatalf("admin list must exclude blob: %+v", all)
+	}
+}

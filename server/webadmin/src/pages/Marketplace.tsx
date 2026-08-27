@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
-import { Store, GitBranch } from 'lucide-react'
+import { Store, GitBranch, Download, Package, Activity } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
@@ -22,6 +22,10 @@ interface Skill {
   git_url: string
   git_ref: string
   enabled: boolean
+  /** 0040: 'git' | 'upload' — upload 模式归档存 DB。 */
+  source?: string
+  downloads: number
+  calls: number
 }
 
 interface Grant {
@@ -36,7 +40,20 @@ interface Dept {
 }
 
 // ---- 表单状态 ----
-const EMPTY_SKILL_FORM = { name: '', git_url: '', version: '', description: '', author: '' }
+const EMPTY_SKILL_FORM = {
+  name: '',
+  git_url: '',
+  version: '',
+  description: '',
+  author: '',
+  // 上传模式:选中的压缩包文件(替代 git_url)。
+  archiveFile: null as File | null,
+}
+
+/** 上传模式表单(归档直接存 DB,0040):版本必填、无 Git 地址。 */
+function isUploadMode(form: typeof EMPTY_SKILL_FORM): boolean {
+  return form.archiveFile !== null
+}
 
 export default function Marketplace() {
   const [skills, setSkills] = useState<Skill[]>([])
@@ -51,6 +68,11 @@ export default function Marketplace() {
   const [skillDialog, setSkillDialog] = useState(false)
   const [skillEdit, setSkillEdit] = useState<Skill | null>(null)
   const [skillForm, setSkillForm] = useState(EMPTY_SKILL_FORM)
+  // 编辑已上架技能时上传新版压缩包(0040 上传模式)
+  const [replaceDialog, setReplaceDialog] = useState<Skill | null>(null)
+  const [replaceFile, setReplaceFile] = useState<File | null>(null)
+  const [replaceVersion, setReplaceVersion] = useState('')
+  const [replaceBusy, setReplaceBusy] = useState(false)
 
   // 授权
   const [grantDialog, setGrantDialog] = useState<{ kind: 'skill'; name: string; id: number } | null>(null)
@@ -89,20 +111,52 @@ export default function Marketplace() {
   useEffect(() => { loadSkills(); loadDepartments() }, [loadSkills, loadDepartments])
 
   // ---- 技能 ----
+  const archiveInput = useRef<HTMLInputElement>(null)
+
   async function saveSkill() {
     if (busy) return // P1-6: 双击守卫
     setDialogError('')
-    if (!skillForm.name.trim()) { setDialogError('名称必填'); return }
-    if (!skillForm.git_url.trim()) { setDialogError('Git 地址必填'); return }
+    const name = skillForm.name.trim()
+    if (!name) { setDialogError('名称必填'); return }
+    const uploadMode = isUploadMode(skillForm)
+    if (!uploadMode && !skillForm.git_url.trim()) { setDialogError('Git 地址必填(或选择压缩包上传)'); return }
+    if (uploadMode && !skillForm.version.trim()) { setDialogError('上传模式版本必填'); return }
     setBusy('save-skill')
     try {
       if (skillEdit) {
         await request(`/api/admin/skills/${encodeURIComponent(skillEdit.name)}`, {
           method: 'PUT',
-          body: JSON.stringify(skillForm),
+          body: JSON.stringify({
+            name: skillEdit.name,
+            version: skillForm.version,
+            description: skillForm.description,
+            author: skillForm.author,
+            git_url: skillForm.git_url,
+            git_ref: skillEdit.git_ref ?? 'main',
+          }),
         })
       } else {
-        await request('/api/admin/skills', { method: 'POST', body: JSON.stringify(skillForm) })
+        // 先建行(创建为 git 模式,git_url 允许空),再切换上传模式(0040)。
+        const created = await request('/api/admin/skills', {
+          method: 'POST',
+          body: JSON.stringify({
+            name,
+            version: uploadMode ? '' : skillForm.version.trim(),
+            description: skillForm.description,
+            author: skillForm.author,
+            git_url: uploadMode ? '' : skillForm.git_url.trim(),
+            git_ref: 'main',
+          }),
+        })
+        if (uploadMode) {
+          const file = skillForm.archiveFile!
+          const body = await readAsBase64(file)
+          await request(`/api/admin/skills/${encodeURIComponent(name)}/archive`, {
+            method: 'POST',
+            body: JSON.stringify({ version: skillForm.version.trim(), archive: body }),
+          })
+          if (created?.skill) created.skill.source = 'upload'
+        }
       }
       setSkillDialog(false)
       setSkillEdit(null)
@@ -125,7 +179,7 @@ export default function Marketplace() {
   function openEditSkill(s: Skill) {
     setDialogError('')
     setSkillEdit(s)
-    setSkillForm({ name: s.name, git_url: s.git_url, version: s.version, description: s.description, author: s.author })
+    setSkillForm({ name: s.name, git_url: s.git_url, version: s.version, description: s.description, author: s.author, archiveFile: null })
     setSkillDialog(true)
   }
 
@@ -155,6 +209,35 @@ export default function Marketplace() {
       setOpError(`上架失败:${err.message}`)
     } finally {
       setBusy(null)
+    }
+  }
+
+  // ---- 上传新版压缩包(0040:归档存 DB) ----
+  function openReplace(s: Skill) {
+    setReplaceDialog(s)
+    setReplaceFile(null)
+    setReplaceVersion('')
+    setDialogError('')
+  }
+
+  async function doReplace() {
+    if (!replaceDialog || replaceBusy) return
+    if (!replaceFile) { setDialogError('请选择压缩包(.tar.gz)'); return }
+    if (!replaceVersion.trim()) { setDialogError('版本必填'); return }
+    setReplaceBusy(true)
+    setDialogError('')
+    try {
+      const body = await readAsBase64(replaceFile)
+      await request(`/api/admin/skills/${encodeURIComponent(replaceDialog.name)}/archive`, {
+        method: 'POST',
+        body: JSON.stringify({ version: replaceVersion.trim(), archive: body }),
+      })
+      setReplaceDialog(null)
+      loadSkills()
+    } catch (err: any) {
+      setDialogError(err.message)
+    } finally {
+      setReplaceBusy(false)
     }
   }
 
@@ -258,7 +341,7 @@ export default function Marketplace() {
       <Card>
         <CardHeader>
           <CardTitle>技能(Skill)</CardTitle>
-          <CardDescription>Git 源上架 + 授权制:未授权用户不可见不可安装(授权用户或部门组)</CardDescription>
+          <CardDescription>压缩包上传(归档存数据库)+ 授权制;未授权用户不可见不可安装(授权用户或部门组)</CardDescription>
           <div className="flex justify-end">
             <Button size="sm" onClick={openCreateSkill}>上架技能</Button>
           </div>
@@ -287,18 +370,27 @@ export default function Marketplace() {
                       </div>
                       <div className="min-w-0">
                         <div className="truncate text-sm font-semibold">{s.name}</div>
-                        <div className="text-[11px] text-muted-foreground">{s.version ? `v${s.version}` : '—'}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {s.version ? `v${s.version}` : '—'}
+                          {s.source === 'upload' && <Badge variant="outline" className="ml-1.5 px-1 py-0 text-[10px]">上传包</Badge>}
+                        </div>
                       </div>
                     </div>
                     {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
                   </div>
                   <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500">{s.description || '暂无描述'}</p>
                   <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
-                    <GitBranch className="h-3 w-3 shrink-0" />
-                    <span className="truncate font-mono">{s.git_url}</span>
+                    {s.source === 'upload'
+                      ? (<><Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span></>)
+                      : (<><GitBranch className="h-3 w-3 shrink-0" /><span className="truncate font-mono">{s.git_url}</span></>)}
+                  </div>
+                  <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
+                    <span className="inline-flex items-center gap-1"><Download className="h-3 w-3" />下载 {s.downloads ?? 0}</span>
+                    <span className="inline-flex items-center gap-1"><Activity className="h-3 w-3" />调用 {s.calls ?? 0}</span>
                   </div>
                   <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
                     <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
+                    <Button variant="outline" onClick={() => openReplace(s)}>上传新版</Button>
                     <Button variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
                     {s.enabled
                       ? <Button variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
@@ -311,7 +403,7 @@ export default function Marketplace() {
                   <EmptyState
                     icon={<Store className="h-5 w-5 text-muted-foreground" />}
                     title="暂无技能"
-                    desc="点击「上架技能」从 Git 源接入第一个技能"
+                    desc="点击「上架技能」上传压缩包或从 Git 源接入第一个技能"
                   />
                 </div>
               )}
@@ -320,9 +412,13 @@ export default function Marketplace() {
         </CardContent>
       </Card>
 
+      {/* 新增/编辑弹窗 */}
       <Dialog open={skillDialog} onOpenChange={(v) => { setSkillDialog(v); if (!v) { setSkillEdit(null); setSkillForm(EMPTY_SKILL_FORM) } }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>{skillEdit ? `编辑技能 ${skillEdit.name}` : '上架技能'}</DialogTitle></DialogHeader>
+          <DialogHeader>
+            <DialogTitle>{skillEdit ? `编辑技能 ${skillEdit.name}` : '上架技能'}</DialogTitle>
+            <DialogDescription>两种模式:压缩包上传(推荐,归档直存数据库)或 Git 源</DialogDescription>
+          </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1">
               <Label htmlFor="skill-name">名称</Label>
@@ -330,14 +426,27 @@ export default function Marketplace() {
               {skillEdit && <p className="text-xs text-muted-foreground">名称不可修改(唯一键);如需改名请下架后重新上架</p>}
             </div>
             <div className="space-y-1">
-              <Label htmlFor="skill-git">Git 地址</Label>
-              <Input id="skill-git" value={skillForm.git_url} onChange={(e) => setSkillForm({ ...skillForm, git_url: e.target.value })} />
+              <Label htmlFor="skill-archive">压缩包(.tar.gz,GD 推荐)</Label>
+              <input
+                id="skill-archive"
+                ref={archiveInput}
+                type="file"
+                accept=".tar.gz,.tgz"
+                className="block w-full text-sm"
+                onChange={(e) => setSkillForm({ ...skillForm, archiveFile: e.target.files?.[0] ?? null })}
+              />
+              <p className="text-xs text-muted-foreground">选择压缩包后归档直存数据库,无需 Git;未选择则走 Git 地址</p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="skill-git">Git 地址(未选压缩包时)</Label>
+              <Input id="skill-git" value={skillForm.git_url} disabled={isUploadMode(skillForm)} onChange={(e) => setSkillForm({ ...skillForm, git_url: e.target.value })} />
               <p className="text-xs text-muted-foreground">仅支持 http/https 远程仓库</p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label htmlFor="skill-version">版本</Label>
                 <Input id="skill-version" value={skillForm.version} onChange={(e) => setSkillForm({ ...skillForm, version: e.target.value })} />
+                <p className="text-xs text-muted-foreground">压缩包模式必填</p>
               </div>
               <div className="space-y-1">
                 <Label htmlFor="skill-author">作者</Label>
@@ -350,6 +459,33 @@ export default function Marketplace() {
             </div>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
             <Button className="w-full" disabled={busy !== null} onClick={saveSkill}>{busy === 'save-skill' ? '处理中…' : (skillEdit ? '保存修改' : '上架')}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 上传新版压缩包弹窗(0040) */}
+      <Dialog open={replaceDialog !== null} onOpenChange={(v) => { if (!v) { setReplaceDialog(null); setDialogError('') } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>上传新版「{replaceDialog?.name}」</DialogTitle>
+            <DialogDescription>压缩包直存数据库;版本号与包内 SKILL.md 元数据需对应</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="replace-version">版本</Label>
+              <Input id="replace-version" value={replaceVersion} placeholder="如 2.0.0" onChange={(e) => setReplaceVersion(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>压缩包(.tar.gz)</Label>
+              <input
+                type="file"
+                accept=".tar.gz,.tgz"
+                className="block w-full text-sm"
+                onChange={(e) => setReplaceFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
+            {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
+            <Button className="w-full" disabled={replaceBusy} onClick={doReplace}>{replaceBusy ? '上传中…' : '上传'}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -403,4 +539,17 @@ export default function Marketplace() {
       </Dialog>
     </div>
   )
+}
+
+/** 读取文件为 base64(与共享技能上传同构:JSON base64 归档)。 */
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      resolve(result.slice(result.indexOf(',') + 1))
+    }
+    reader.onerror = () => reject(new Error('文件读取失败'))
+    reader.readAsDataURL(file)
+  })
 }
