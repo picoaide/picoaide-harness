@@ -136,7 +136,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', error_reporting_dsn: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', error_reporting_dsn: '', glitchtip_base_url: '', glitchtip_organization: '', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -708,6 +708,21 @@ export default function Gateway() {
               客户端集成错误监控(未捕获异常/未处理 rejection)后,填写此处 DSN 才会生效;留空 = 客户端不上报错误。
               仅支持 Sentry 兼容服务(如自托管 GlitchTip)。
             </p>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <Label htmlFor="glitchtip-base-url">GlitchTip 服务地址(连接器预填)</Label>
+              <Input id="glitchtip-base-url" type="text" placeholder="https://glitchtip.example.com 或空=不预填"
+                value={cfg.glitchtip_base_url}
+                onChange={(e) => setCfg({ ...cfg, glitchtip_base_url: e.target.value })} />
+              <p className="text-xs text-muted-foreground">客户端连接器自动预填,用户只需填 API Token</p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="glitchtip-organization">GlitchTip 组织 slug(连接器预填)</Label>
+              <Input id="glitchtip-organization" type="text" placeholder="如 picoaide 或空=不预填"
+                value={cfg.glitchtip_organization}
+                onChange={(e) => setCfg({ ...cfg, glitchtip_organization: e.target.value })} />
+            </div>
           </div>
           <div className="space-y-1">
             <Label htmlFor="server-base-url">对外访问地址 (Server Base URL)</Label>
