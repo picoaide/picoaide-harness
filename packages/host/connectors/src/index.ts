@@ -97,7 +97,45 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
-  const defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef])
+  let defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef])
+
+  // 统一分发(2026-08):服务端下发 GlitchTip 连接器预配置(地址/组织 slug),
+  // 用户连接时只需填 API Token;源码不含部署地址。监听 session-changed,
+  // 从 bootstrap 的 web.glitchtip_base_url / web.glitchtip_organization 更新
+  // defs 中 glitchtip 的 tokenFields 默认值。
+  const syncServerDefaults = async (): Promise<void> => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string; token?: string } | null } | undefined
+      const session = pico?.getSession?.()
+      if (!session?.serverURL || !session?.token) return
+      const res = await fetch(`${session.serverURL.replace(/\/+$/, '')}/api/config/bootstrap`, {
+        headers: { Authorization: `Bearer ${session.token}` },
+      })
+      if (!res.ok) return
+      const cfg = (await res.json()) as { web?: { glitchtip_base_url?: string; glitchtip_organization?: string } }
+      const baseURL = cfg.web?.glitchtip_base_url?.trim() ?? ''
+      const org = cfg.web?.glitchtip_organization?.trim() ?? ''
+      if (!baseURL && !org) return
+      defs = defs.map((d) => {
+        if (d.id !== 'glitchtip') return d
+        return {
+          ...d,
+          tokenFields: (d.tokenFields ?? []).map((f) =>
+            f.key === 'GLITCHTIP_BASE_URL' && baseURL
+              ? { ...f, defaultValue: baseURL }
+              : f.key === 'GLITCHTIP_ORGANIZATION' && org
+                ? { ...f, defaultValue: org }
+                : f,
+          ),
+        }
+      })
+    } catch {
+      /* 服务端配置获取失败不影响连接器基本功能 */
+    }
+  }
+  void syncServerDefaults()
+  // 用 cordis 事件监听 session 变化(与 enterprise bootstrap 同模式)
+  ctx.on('pico/session-changed', () => { void syncServerDefaults() })
 
   // Current user scope: resolved from the enterprise session when present.
   // `getSession()` is a service read guarded by type-only import, so this
