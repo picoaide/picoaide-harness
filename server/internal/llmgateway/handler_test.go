@@ -76,11 +76,8 @@ func newGateway(t *testing.T, f *fakeUpstream) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
 	// 测试环境未接 master key:身份解密(测试密钥明文存储)
 	DecryptSecret = func(s string) (string, error) { return s, nil }
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/gw.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
 
 	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
 	if err != nil {
@@ -482,11 +479,8 @@ func TestProxyRateLimited(t *testing.T) {
 
 func TestProxyInjectsChannelOverrides(t *testing.T) {
 	f := newFakeUpstream(t)
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/inject.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 
 	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
 	if err != nil {
@@ -496,11 +490,10 @@ func TestProxyInjectsChannelOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel) VALUES ('deepseek', ?, ?, '[]', 1, 'deepseek')`, f.baseURL, upstreamKey)
-	if err != nil {
+	var pid int64
+	if err := db.QueryRow(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel) VALUES ('deepseek', ?, ?, '[]', 1, 'deepseek') RETURNING id`, f.baseURL, upstreamKey).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
-	pid, _ := res.LastInsertId()
 	if _, err := db.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES ('deepseek-v4-flash', ?, 'DeepSeek V4 Flash')`, pid); err != nil {
 		t.Fatal(err)
 	}
@@ -531,11 +524,8 @@ func TestProxyInjectsChannelOverrides(t *testing.T) {
 
 func TestProxyInjectsMaxTokensFromModelDefaultParams(t *testing.T) {
 	f := newFakeUpstream(t)
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/maxout.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -592,11 +582,8 @@ func TestProxyInvalidBody(t *testing.T) {
 }
 
 func TestDecryptSecretHookUsedByLoadUpstreams(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/hook.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('p', 'http://x', 'encrypted:abc', '["m"]')`); err != nil {
 		t.Fatal(err)
 	}
@@ -613,11 +600,8 @@ func TestDecryptSecretHookUsedByLoadUpstreams(t *testing.T) {
 }
 
 func TestMatchModel(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/match.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('a', 'http://a', 'k', '["m1","m2"]'), ('b', 'http://b', 'k', '["m3"]')`); err != nil {
 		t.Fatal(err)
 	}
@@ -793,11 +777,8 @@ func TestQuotaGlobalDefault(t *testing.T) {
 // 审计修复:流式响应的 usage 已回填后客户端才断连,真实计量必须保留
 // (回退前无条件 DeleteUsage 会把已回填的真实用量删掉 → 统计丢失)。
 func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/backfill.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
 	if err != nil {
 		t.Fatal(err)

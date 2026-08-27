@@ -176,9 +176,9 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 // username substring (empty q = all users).
 //
 // NOTE(审计 L5):搜索词含 LIKE 通配符(%/_)时不得按通配匹配全部/任意单字符;
-// 而 modernc.org/sqlite 的 LIKE ... ESCAPE 子句实测解析不可靠,故改用
-// instr(lower(username), lower(?)) > 0:纯子串匹配、无通配符语义,
-// 大小写不敏感与 SQLite 默认 LIKE 的 ASCII 折叠一致。
+// 故用
+// POSITION(lower(?) IN lower(username)) > 0:纯子串匹配、无通配符语义,
+// 大小写不敏感(PG 端 POSITION/LOWER 组合)。
 func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 	q = strings.TrimSpace(q)
 	var total int64
@@ -191,11 +191,11 @@ func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 		rows, err = db.Query(`SELECT `+userCols+`
 			FROM users ORDER BY id LIMIT ? OFFSET ?`, limit, offset)
 	} else {
-		if err = db.QueryRow("SELECT COUNT(*) FROM users WHERE instr(lower(username), lower(?)) > 0", q).Scan(&total); err != nil {
+		if err = db.QueryRow("SELECT COUNT(*) FROM users WHERE POSITION(lower(?) IN lower(username)) > 0", q).Scan(&total); err != nil {
 			return nil, 0, err
 		}
 		rows, err = db.Query(`SELECT `+userCols+`
-			FROM users WHERE instr(lower(username), lower(?)) > 0 ORDER BY id LIMIT ? OFFSET ?`, q, limit, offset)
+			FROM users WHERE POSITION(lower(?) IN lower(username)) > 0 ORDER BY id LIMIT ? OFFSET ?`, q, limit, offset)
 	}
 	if err != nil {
 		return nil, 0, err

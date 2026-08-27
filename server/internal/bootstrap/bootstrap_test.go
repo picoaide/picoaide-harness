@@ -3,7 +3,6 @@ package bootstrap
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,10 +15,8 @@ import (
 
 func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/boot.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
 	// providers + models
 	pid, err := serverstore.AddGatewayProvider(db, &serverstore.GatewayProvider{
 		Name: "deepseek", BaseURL: "https://api.deepseek.com", Enabled: 1,

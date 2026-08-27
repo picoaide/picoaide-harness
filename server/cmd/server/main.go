@@ -33,9 +33,9 @@ var version = "dev"
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
-	dataDir := flag.String("data", "./data", "data directory")
-	dbDriver := flag.String("db-driver", "sqlite", "database backend: sqlite (default) or pg")
-	pgDSN := flag.String("pg-dsn", "", "PostgreSQL connection string (required when -db-driver=pg, e.g. postgres://user:pass@host:5432/db)")
+	dataDir := flag.String("data", "./data", "data directory (app data, not the DB — PG is external)")
+	dbDriver := flag.String("db-driver", "pg", "database backend: pg (default) or pg-external (alias)")
+	pgDSN := flag.String("pg-dsn", "", "PostgreSQL connection string (required, e.g. postgres://user:pass@host:5432/db)")
 	bootstrapAdmin := flag.String("bootstrap-admin", "", "username of the initial admin (password from PICOAI_ADMIN_PASSWORD)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -45,21 +45,14 @@ func main() {
 		return
 	}
 
-	if *dbDriver != "sqlite" && *dbDriver != "pg" {
-		log.Fatalf("unsupported -db-driver %q (want sqlite or pg)", *dbDriver)
+	if *dbDriver != "pg" && *dbDriver != "pg-external" {
+		log.Fatalf("unsupported -db-driver %q (want pg)", *dbDriver)
 	}
-	if *dbDriver == "pg" && *pgDSN == "" {
-		log.Fatal("-pg-dsn is required when -db-driver=pg")
-	}
-
-	if *dbDriver == "sqlite" {
-		if err := os.MkdirAll(*dataDir, 0700); err != nil {
-			log.Fatalf("create data dir: %v", err)
-		}
+	if *pgDSN == "" {
+		log.Fatal("-pg-dsn is required (PostgreSQL only since 2026-08)")
 	}
 	cfg := serverstore.DBConfig{
 		Driver: serverstore.DriverName(*dbDriver),
-		Path:   *dataDir + "/picoaide.db",
 		DSN:    *pgDSN,
 	}
 	db, err := serverstore.EnsureMigrated(cfg)

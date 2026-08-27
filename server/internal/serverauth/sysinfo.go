@@ -107,14 +107,8 @@ var buildVersion = "dev"
 // collectDBStats 按驱动收集行数与磁盘大小。
 func collectDBStats(db *sql.DB) (dbStats, error) {
 	s := dbStats{Tables: map[string]int64{}}
-	// 驱动检测:SQLite 用 PRAGMA / PG 用 pg_catalog
-	var driver string
-	_ = db.QueryRow("SELECT sqlite_version()").Scan(&driver)
-	if driver != "" {
-		s.Driver = "sqlite"
-	} else {
-		s.Driver = "pg"
-	}
+	// PG-only(2026-08 SQLite 已下线):驱动固定 pg,磁盘大小查 pg_database_size
+	s.Driver = "pg"
 
 	for _, t := range statTables {
 		var n int64
@@ -126,15 +120,11 @@ func collectDBStats(db *sql.DB) (dbStats, error) {
 	}
 	s.SchemaMig = schemaVersion(db)
 
-	if s.Driver == "sqlite" {
-		// 查 db 文件大小(需 data 路径,后面通过 FileInfo)
-	} else {
-		// PG: 数据库大小
-		var bytes int64
-		_ = db.QueryRow("SELECT pg_database_size(current_database())").Scan(&bytes)
-		s.DiskBytes = bytes
-		s.DiskHuman = humanBytes(bytes)
-	}
+	// PG: 数据库大小
+	var bytes int64
+	_ = db.QueryRow("SELECT pg_database_size(current_database())").Scan(&bytes)
+	s.DiskBytes = bytes
+	s.DiskHuman = humanBytes(bytes)
 	return s, nil
 }
 

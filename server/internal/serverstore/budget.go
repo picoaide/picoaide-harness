@@ -167,7 +167,7 @@ func DeptMonthlyCost(db *sql.DB, groupID int64) (float64, error) {
 	placeholders := strings.Repeat("?,", len(ids))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(ids)+1)
-	args = append(args, monthStart(time.Now()).Format(sqliteTimeFmt))
+	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -206,7 +206,7 @@ func DeptMonthlyCostBatch(db *sql.DB, groupIDs []int64) (map[int64]float64, erro
 	placeholders := strings.Repeat("?,", len(ids))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(ids)+1)
-	args = append(args, monthStart(time.Now()).Format(sqliteTimeFmt))
+	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
 	for _, id := range ids {
 		args = append(args, id)
 	}

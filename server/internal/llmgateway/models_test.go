@@ -2,7 +2,6 @@ package llmgateway
 
 import (
 	"database/sql"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,11 +14,8 @@ import (
 
 func modelsRouter(t *testing.T) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/models.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
 
 	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "bob", Source: "local", Status: 1})
 	if err != nil {
@@ -98,11 +94,8 @@ func TestMaxOutputFromModelDefaultParams(t *testing.T) {
 }
 
 func TestModelsEmptyReturnsArray(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/empty.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "bob", Source: "local", Status: 1})
 	if err != nil {
 		t.Fatal(err)

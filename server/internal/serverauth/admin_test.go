@@ -247,11 +247,11 @@ func TestAdminUsageRangeValidation(t *testing.T) {
 
 	// 2) 缺省窗口:100 天前的行应被排除,10 天前的行应包含
 	if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, created_at)
-		VALUES (1, 'm-old', 5, 5, datetime('now','localtime','-100 days'))`); err != nil {
+		VALUES (1, 'm-old', 5, 5, now() - interval '100 days')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, created_at)
-		VALUES (1, 'm-recent', 7, 3, datetime('now','localtime','-10 days'))`); err != nil {
+		VALUES (1, 'm-recent', 7, 3, now() - interval '10 days')`); err != nil {
 		t.Fatal(err)
 	}
 	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=model", "", hdr)
@@ -275,16 +275,12 @@ func TestAdminUsageRangeValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 501; i++ {
-		res, err := tx.Exec(`INSERT INTO users (username, source, is_admin, status) VALUES (?, 'local', 0, 1)`, fmt.Sprintf("bulk%03d", i))
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
+		var id int64
+		if err := tx.QueryRow(`INSERT INTO users (username, source, is_admin, status) VALUES (?, 'local', 0, 1) RETURNING id`, fmt.Sprintf("bulk%03d", i)).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := tx.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, created_at)
-			VALUES (?, 'm', 1, 1, datetime('now','localtime'))`, id); err != nil {
+			VALUES (?, 'm', 1, 1, now())`, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -483,10 +479,8 @@ func TestDeleteLastAdminRollsBack(t *testing.T) {
 
 func mustDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "admin.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
 	return db
 }
 

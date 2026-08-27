@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const sqliteTimeFmt = "2006-01-02 15:04:05"
+const pgTimeFmt = "2006-01-02 15:04:05"
 
 // MonthlyQuotaSetting is the settings key for the default per-user monthly
 // traffic quota in tokens (absent / "0" = unlimited).
@@ -262,7 +262,7 @@ func DeleteUsage(db *sql.DB, id int64) error {
 // pending rows left by interrupted streaming requests). Run at server startup.
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
 	_, err := db.Exec(`DELETE FROM usage WHERE kind = 'chat' AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?`,
-		cutoff.Format(sqliteTimeFmt))
+		cutoff.Format(pgTimeFmt))
 	return err
 }
 
@@ -279,7 +279,7 @@ func UserMonthlyUsage(db *sql.DB, userID int64) (int64, error) {
 	var total int64
 	err := db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)
 		FROM usage WHERE user_id = ? AND created_at >= ?`,
-		userID, monthStart(time.Now()).Format(sqliteTimeFmt)).Scan(&total)
+		userID, monthStart(time.Now()).Format(pgTimeFmt)).Scan(&total)
 	return total, err
 }
 
@@ -293,7 +293,7 @@ func UserMonthlyUsageBatch(db *sql.DB, userIDs []int64) (map[int64]int64, error)
 	placeholders := strings.Repeat("?,", len(userIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(userIDs)+1)
-	args = append(args, monthStart(time.Now()).Format(sqliteTimeFmt))
+	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
 	for _, id := range userIDs {
 		args = append(args, id)
 	}
@@ -342,7 +342,7 @@ func EffectiveQuota(db *sql.DB, user *User) (int64, error) {
 func UserMonthlyCost(db *sql.DB, userID int64) (float64, error) {
 	var total float64
 	err := db.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ? AND created_at >= ?`,
-		userID, monthStart(time.Now()).Format(sqliteTimeFmt)).Scan(&total)
+		userID, monthStart(time.Now()).Format(pgTimeFmt)).Scan(&total)
 	return total, err
 }
 
@@ -356,7 +356,7 @@ func UserMonthlyCostBatch(db *sql.DB, userIDs []int64) (map[int64]float64, error
 	placeholders := strings.Repeat("?,", len(userIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(userIDs)+1)
-	args = append(args, monthStart(time.Now()).Format(sqliteTimeFmt))
+	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
 	for _, id := range userIDs {
 		args = append(args, id)
 	}
@@ -574,7 +574,7 @@ func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cos
 	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cost),0)
 		FROM usage WHERE user_id = ? AND created_at >= ? AND created_at < ?`,
-		userID, start.Format(sqliteTimeFmt), end.Format(sqliteTimeFmt)).Scan(&usage, &cost)
+		userID, start.Format(pgTimeFmt), end.Format(pgTimeFmt)).Scan(&usage, &cost)
 	return usage, cost, err
 }
 

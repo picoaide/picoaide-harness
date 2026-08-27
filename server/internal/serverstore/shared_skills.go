@@ -138,17 +138,14 @@ func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64,
 		}
 		return id, nil
 	}
-	res, err := db.Exec(q, args...)
-	if err != nil {
+	var id int64
+	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
 		}
 		return 0, err
 	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return 0, ErrTooManyPending
-	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // GetSharedSkill returns the row by name+version or ErrNotFound.

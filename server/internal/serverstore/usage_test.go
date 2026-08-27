@@ -9,11 +9,8 @@ import (
 
 func newUsageDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
-	db, err := EnsureMigrated(DBConfig{Path: fmt.Sprintf("%s/usage.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return db, func() { db.Close() }
+	db, cleanup := newTestDB(t)
+	return db, cleanup
 }
 
 func mustUserID(t *testing.T, db *sql.DB) int64 {
@@ -134,11 +131,11 @@ func TestUserMonthlyUsage(t *testing.T) {
 
 	for _, ts := range []time.Time{thisMonth, thisMonth, lastMonth} {
 		id, _ := RecordUsage(db, uid, "m", 10, 5)
-		setCreatedAt(t, db, id, ts.Format(sqliteTimeFmt))
+		setCreatedAt(t, db, id, ts.Format(pgTimeFmt))
 	}
 	// pending row this month must not count
 	pending, _ := RecordUsage(db, uid, "m", 0, 0)
-	setCreatedAt(t, db, pending, thisMonth.Format(sqliteTimeFmt))
+	setCreatedAt(t, db, pending, thisMonth.Format(pgTimeFmt))
 
 	total, err := UserMonthlyUsage(db, uid)
 	if err != nil {
@@ -157,11 +154,11 @@ func TestUserMonthlyUsageBatch(t *testing.T) {
 	thisMonth := monthStart(time.Now()).AddDate(0, 0, 5)
 
 	id, _ := RecordUsage(db, a, "m", 10, 5)
-	setCreatedAt(t, db, id, thisMonth.Format(sqliteTimeFmt))
+	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
 	id, _ = RecordUsage(db, a, "m", 2, 0)
-	setCreatedAt(t, db, id, thisMonth.Format(sqliteTimeFmt))
+	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
 	id, _ = RecordUsage(db, b, "m", 7, 7)
-	setCreatedAt(t, db, id, thisMonth.Format(sqliteTimeFmt))
+	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
 
 	got, err := UserMonthlyUsageBatch(db, []int64{a, b})
 	if err != nil {
