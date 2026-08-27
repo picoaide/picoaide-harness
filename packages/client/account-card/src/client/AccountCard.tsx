@@ -192,6 +192,11 @@ function formatMoney(value: number): string {
   return `¥${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+/** Guard: value is a finite number (excludes null/undefined/NaN/Infinity). */
+function isMoney(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
 /** Format a token count with thousands separators. */
 function formatTokens(value: number): string {
   return value.toLocaleString('en-US')
@@ -307,8 +312,11 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   // ---- wide card: username + logout + balance ----
 
   // Balance resolution: money quota first, then token quota, then unlimited.
-  const remainingMoney = data !== null ? data.remaining_money : null
-  const remainingTokens = data !== null ? data.remaining_tokens : null
+  // 审计修复: 接口异常时 usageBody.data 可能是 {error:...} 或字段缺省,
+  // 必须用 != null + Number.isFinite 防御,否则 formatMoney(undefined) 崩溃
+  // 导致整个 sidebar.footer.action slot 崩溃(账户卡不渲染)。
+  const remainingMoney = data !== null && isMoney(data.remaining_money) ? data.remaining_money : null
+  const remainingTokens = data !== null && isMoney(data.remaining_tokens) ? data.remaining_tokens : null
   const admin = data?.is_admin === true
 
   let amount: string | null = null
@@ -317,13 +325,13 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   let unit: string | null = null
   if (remainingMoney !== null) {
     amount = formatMoney(remainingMoney)
-    quota = data!.quota_money
-    used = data!.monthly_cost
+    quota = isMoney(data!.quota_money) ? data!.quota_money : null
+    used = isMoney(data!.monthly_cost) ? data!.monthly_cost : null
     unit = null
   } else if (remainingTokens !== null) {
     amount = formatTokens(remainingTokens)
-    quota = data!.quota_tokens
-    used = data!.monthly_usage
+    quota = isMoney(data!.quota_tokens) ? data!.quota_tokens : null
+    used = isMoney(data!.monthly_usage) ? data!.monthly_usage : null
     unit = t('account.tokens')
   }
 
@@ -343,8 +351,9 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
 
   const metaParts: string[] = []
   if (data !== null) {
-    metaParts.push(`${t('account.usedThisMonth')} ${formatMoney(data.monthly_cost)}`)
-    metaParts.push(`${t('account.today')} ${formatMoney(data.today_cost)}`)
+    // 审计修复: 字段缺省/非法时跳过,不再进入 formatMoney(undefined)
+    if (isMoney(data.monthly_cost)) metaParts.push(`${t('account.usedThisMonth')} ${formatMoney(data.monthly_cost)}`)
+    if (isMoney(data.today_cost)) metaParts.push(`${t('account.today')} ${formatMoney(data.today_cost)}`)
   }
 
   return createPortal(

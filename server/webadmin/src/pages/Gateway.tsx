@@ -376,6 +376,17 @@ export default function Gateway() {
     }
   }
 
+  // 审计修复 2026-P: 价格/折扣前端合法性校验(服务端有兜底,但前端提前
+  // 拦截避免把 NaN/越界值提交):价格非负有限;折扣必须 0<d<1。
+  function validatePriceField(label: string, raw: string, isDiscount = false): string | null {
+    if (raw.trim() === '') return null // 留空 = 不覆盖/未定价
+    const n = Number(raw)
+    if (!Number.isFinite(n)) return `${label}必须是有效数字`
+    if (n < 0) return `${label}不能为负数`
+    if (isDiscount && (n <= 0 || n >= 1)) return `${label}必须在 (0,1) 之间`
+    return null
+  }
+
   async function createModel() {
     if (busy) return // P1-6: 双击守卫
     setModelErr('')
@@ -384,6 +395,13 @@ export default function Gateway() {
       setModelErr('请选择所属上游')
       return
     }
+    // 价格/折扣前置校验(审计修复 2026-P)
+    const priceErr =
+      validatePriceField('输入价格', modelForm.input_price_per_1m) ??
+      validatePriceField('输出价格', modelForm.output_price_per_1m) ??
+      validatePriceField('缓存命中输入价', modelForm.cache_input_price_per_1m) ??
+      validatePriceField('低谷折扣率', modelForm.offpeak_discount, true)
+    if (priceErr) { setModelErr(priceErr); return }
     setBusy('create-model')
     try {
       const body: Record<string, any> = {
@@ -462,6 +480,13 @@ export default function Gateway() {
   async function saveModelPricing() {
     if (busy || !editModel) return // P1-6: 双击守卫
     setPriceErr('')
+    // 价格/折扣前置校验(审计修复 2026-P,与 createModel 同一函数)
+    const priceErr =
+      validatePriceField('输入价格', editPriceForm.input) ??
+      validatePriceField('输出价格', editPriceForm.output) ??
+      validatePriceField('缓存命中输入价', editPriceForm.cache) ??
+      validatePriceField('低谷折扣率', editPriceForm.offpeak, true)
+    if (priceErr) { setPriceErr(priceErr); return }
     setBusy('save-model-pricing')
     try {
       const body: Record<string, any> = { name: editModel.name }
