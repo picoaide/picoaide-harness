@@ -285,8 +285,10 @@ export default function Users() {
       setQuotaErr('token 配额必须是 ≥0 的整数')
       return
     }
-    if (mv !== '' && Number(mv) < 0) {
-      setQuotaErr('金额配额不能为负数')
+    if (mv !== '' && (!Number.isFinite(Number(mv)) || Number(mv) < 0)) {
+      // 审计修复 2026-P: 金额校验补 Number.isFinite——Number('abc')=NaN 时
+      // NaN<0 为 false 会静默通过,JSON.stringify 把 NaN 序列化为 null 提交
+      setQuotaErr('金额配额必须是非负数字')
       return
     }
     setBusy(true)
