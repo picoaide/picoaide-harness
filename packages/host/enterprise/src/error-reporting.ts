@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { createRequire } from 'node:module'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import type { Session } from './server-connector/config.ts'
@@ -20,9 +21,16 @@ export const name = 'error-reporting'
 /** Services consumed: the session service providing login/logout lifecycle. */
 export const inject = ['picoSession']
 
-/** Desktop release 版本:与 enterprise package.json 对齐(0.1.0);
- * 后续如需注入产品版本,改为 tsdown define + typeof 防护,避免未定义引用。 */
-const VERSION = '0.1.0'
+/** Desktop release 版本:从 dsh-plugin-desktop 包读取真实产品版本(如 2.4.0),
+ * 用于 GlitchTip 按版本区分报错(release 字段)。读取失败回退 0.1.0。 */
+const DESKTOP_PACKAGE_REQUIRE = createRequire(import.meta.url)
+const DESKTOP_VERSION: string = (() => {
+  try {
+    return (DESKTOP_PACKAGE_REQUIRE('dsh-plugin-desktop/package.json') as { version?: string }).version ?? '0.1.0'
+  } catch {
+    return '0.1.0'
+  }
+})()
 
 /** Active Sentry instance (only one at a time; null = not initialized). */
 type SentryModule = { close: (timeout: number) => Promise<boolean> }
@@ -71,7 +79,7 @@ export function apply(ctx: Context): void {
   console.log('[error-reporting] plugin applied')
   // release 用桌面客户端包版本(粗粒度够用;sourcemap 可按需细化)。
   // 编译期由 tsdown define 注入;缺省回退 "0.1.0"(与 enterprise package.json 一致)。
-  const release = `picoaide-desktop@${VERSION}`
+  const release = `picoaide-desktop@${DESKTOP_VERSION}`
 
   const sync = async (session: Session | null): Promise<void> => {
     console.log('[error-reporting] session-changed:', session ? session.username : 'null')
