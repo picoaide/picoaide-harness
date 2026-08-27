@@ -68,9 +68,9 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 ### audit_logs(0028)
 `id, username, action, detail, created_at`——用户/部门/技能/令牌等敏感操作审计(90 天保留,启动时清理)。由 0008 的 `kb_audit_logs` 迁入数据后清除旧表。
 
-## 2. 客户端(better-sqlite3,`desktop/src/main/store/migrations.ts`)
+## 2. 客户端(已下线 2026-08:better-sqlite3 客户端存储的历史说明)
 
-用户数据目录下 SQLite,4 张业务表 + schema_migrations:
+> 自研桌面客户端已下线,本仓库不再包含 `desktop/`(旧版:用户数据目录下 SQLite,4 张业务表 + schema_migrations):
 
 | 表 | 列 | 说明 |
 |----|----|------|
