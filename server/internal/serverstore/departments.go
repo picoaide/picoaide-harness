@@ -11,10 +11,7 @@ import (
 // so there is no `?` placeholder. SQLite uses COLLATE NOCASE; PG folds both
 // sides with LOWER.
 func ciColumnCmp(colA, colB string) string {
-	if currentDriver == DriverPG {
-		return "LOWER(" + colA + ") = LOWER(" + colB + ")"
-	}
-	return colA + " = " + colB + " COLLATE NOCASE"
+	return "LOWER(" + colA + ") = LOWER(" + colB + ")"
 }
 
 // Group is an organization unit: a department with optional parent
