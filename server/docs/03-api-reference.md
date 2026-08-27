@@ -93,8 +93,8 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/agent-presets` | 可见清单:approved(全员)+ 自己上传的全部状态;返回 `{presets:[{name, display_name, description, version, author, status, reason, created_at}]}`(reason 仅自己 rejected 行非空) |
-| POST | `/api/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 tar.gz)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;display_name/描述 ≤500 字;同名同版本 pending/approved → 409(不同版本独立,多版本并存);rejected 可重提(重置 pending 并清空 reason);每用户待审上限 10(INSERT 原子计数)→ 429 |
-| GET | `/api/agent-presets/:name/archive` | 下载归档(仅 approved;其余与不存在同 404);附 `X-Preset-Checksum` / `X-Preset-Version` |
+| POST | `/api/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 tar.gz)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;归档**直存 DB**(0041 不落盘);display_name/描述 ≤500 字;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
+| GET | `/api/agent-presets/:name/archive` | 下载归档(仅 approved;其余与不存在同 404);从 DB 出(0041);附 `X-Preset-Checksum` / `X-Preset-Version` |
 
 ### 管理端(Admin)
 
