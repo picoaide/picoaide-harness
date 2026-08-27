@@ -58,6 +58,10 @@ jobs:
       - run: go test ./... -count=1
         env:
           PG_DSN_TEST: postgres://picoaide:ci@127.0.0.1:5432/picoaide_test?sslmode=disable
+          # 用量日账测试按北京时间午夜切日(与生产 TZ 一致);CI runner 默认
+          # UTC,UTC 16:00+ 恰逢北京 00:00 边界会翻日,造成 TestAdminUsage/
+          # TestRebuildUsageLedger 周期性失败。
+          TZ: Asia/Shanghai
       - run: make build-server
       - name: Deploy script syntax checks
         # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
