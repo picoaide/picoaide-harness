@@ -19,6 +19,7 @@ interface PresetRow {
   author: string
   status: 'pending' | 'approved' | 'rejected'
   reason: string
+  downloads?: number
   created_at: string
 }
 
@@ -181,6 +182,7 @@ export default function AgentPresets() {
                 <TableHead>版本</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>状态</TableHead>
+                <TableHead>下载</TableHead>
                 <TableHead>上传时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
@@ -199,6 +201,7 @@ export default function AgentPresets() {
                     <TableCell>{row.version}</TableCell>
                     <TableCell className="max-w-xs truncate">{row.description || '—'}</TableCell>
                     <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{row.downloads ?? 0}</TableCell>
                     <TableCell className="text-muted-foreground">{fmtTime(row.created_at)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
