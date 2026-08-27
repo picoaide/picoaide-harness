@@ -248,6 +248,27 @@ func (a *API) downloadArchive(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
 	}
+
+	if s.Source == string(serverstore.SkillSourceUpload) {
+		// 0040: 上传模式——归档直接存 DB,不再走磁盘 clone/打包。
+		if len(s.Archive) == 0 {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能归档缺失")
+			return
+		}
+		sum := s.Checksum
+		if sum == "" {
+			sum = sha256Hex(s.Archive)
+		}
+		c.Header("Content-Type", "application/gzip")
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".tar.gz"))
+		c.Header("X-Skill-Version", s.Version)
+		c.Header("X-Skill-Checksum", sum)
+		// 下载计数(4 档 5 次/秒聚合足够的真实访问轨迹;失败不阻断下载)
+		_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
+		c.Data(http.StatusOK, "application/gzip", s.Archive)
+		return
+	}
+
 	if err := os.MkdirAll(a.CacheDir, 0700); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "缓存目录创建失败")
 		return
@@ -281,7 +302,13 @@ func (a *API) downloadArchive(c *gin.Context) {
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".tar.gz"))
 	c.Header("X-Skill-Version", s.Version)
 	c.Header("X-Skill-Checksum", sum)
+	_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
 	c.File(pkg)
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func fileSHA256(path string) (string, error) {
@@ -308,6 +335,9 @@ func skillJSON(s serverstore.Skill) gin.H {
 		"git_ref":     s.GitRef,
 		"checksum":    s.Checksum,
 		"enabled":     s.Enabled == 1,
+		"source":      s.Source,
+		"downloads":   s.Downloads,
+		"calls":       s.Calls,
 		"created_at":  s.CreatedAt,
 		"updated_at":  s.UpdatedAt,
 	}
