@@ -11,6 +11,7 @@ export default defineConfig([
       invariant: 'src/invariant.ts',
       'auth-gate': 'src/auth-gate.ts',
       'gateway-model': 'src/gateway-model.ts',
+      'error-reporting': 'src/error-reporting.ts',
       bootstrap: 'src/bootstrap.ts',
       'session-service': 'src/session-service.ts',
       // Shared subpath exports consumed by sibling plugins (dsh-account-card):
