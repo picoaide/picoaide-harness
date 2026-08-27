@@ -52,6 +52,10 @@ export function apply(ctx: Context): void {
     }
     try {
       const { config: cfg } = await getBootstrap(session)
+      // 服务端下发的思考强度(2026-08):llm-deepseek 适配器的
+      // connection.defaults.reasoningEffort 来自 settings(off|low|high|max),
+      // 这是实际生效点;同时写 agent-default-model 保持 UI 展示一致。
+      const reasoningEffort = cfg.web?.default_thinking_level
       await ctx.settings.update(LLM_DEEPSEEK_NS, {
         models: cfg.models.map((m) => {
           const maxTokens = maxOutputFromDefaultParams(m.default_params)
@@ -61,13 +65,12 @@ export function apply(ctx: Context): void {
             ...maxTokens === undefined ? {} : { maxTokens },
           }
         }),
+        ...reasoningEffort ? { reasoningEffort } : {},
       })
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {
         provider: DEEPSEEK_PROVIDER,
         model: cfg.default_model,
-        ...cfg.web?.default_thinking_level
-          ? { reasoningEffort: cfg.web.default_thinking_level }
-          : {},
+        ...reasoningEffort ? { reasoningEffort } : {},
       })
     } catch (cause) {
       // M2: a revoked/expired/disabled session must not linger. Clear it so
