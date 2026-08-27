@@ -26,6 +26,21 @@ jobs:
     defaults:
       run:
         working-directory: server
+    # PostgreSQL 供测试使用(PG_DSN_TEST);数据库/账号由 env 传入测试。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: picoaide
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: picoaide_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U picoaide"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -41,6 +56,8 @@ jobs:
         working-directory: server/webadmin
       - run: go vet ./...
       - run: go test ./... -count=1
+        env:
+          PG_DSN_TEST: postgres://picoaide:ci@127.0.0.1:5432/picoaide_test?sslmode=disable
       - run: make build-server
       - name: Deploy script syntax checks
         # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
@@ -49,7 +66,7 @@ jobs:
           bash -n scripts/install-server.sh scripts/deploy.sh
           if command -v docker >/dev/null 2>&1; then
             PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@postgres:5432/picoaide \
-              docker compose -f docker-compose.yml -f docker-compose.pg.yml config -q
+              docker compose -f docker-compose.yml config -q
             PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
               docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml config -q
           else
