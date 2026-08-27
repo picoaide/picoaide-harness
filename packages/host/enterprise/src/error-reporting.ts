@@ -104,20 +104,38 @@ export function apply(ctx: Context): void {
   // 赋值时发生;1s 间隔轮询当前 session(最多 60s),发现登录即同步。
   // 与 auth-gate 相同,直接使用注入的 ctx.picoSession(TS 声明已提供,
   // 此前误用类型断言导致访问到未注入实例返回 null)。
+  // CI 修复(2026-08-27):定时器必须跟随 context 生命周期清理,避免
+  // context 关闭后回调访问 picoSession 抛 "inactive context" 崩溃。
   if (!ctx.picoSession) {
     console.warn('[error-reporting] picoSession 服务不可用,仅事件驱动')
   } else {
     let polls = 0
+    let finished = false
     const timer = setInterval(() => {
+      if (finished) return
       polls += 1
-      const session = ctx.picoSession.getSession()
-      console.log('[error-reporting] poll check:', session ? session.username : `null(${polls})`)
-      if (session) {
-        clearInterval(timer)
-        void sync(session).catch((cause) => ctx.logger.error(cause))
-      } else if (polls >= 60) {
+      try {
+        const session = ctx.picoSession.getSession()
+        if (session) {
+          finished = true
+          clearInterval(timer)
+          void sync(session).catch((cause) => ctx.logger.error(cause))
+        } else if (polls >= 60) {
+          finished = true
+          clearInterval(timer)
+        }
+      } catch {
+        // context 已关闭等异常:停止轮询,不再崩溃
+        finished = true
         clearInterval(timer)
       }
     }, 1000)
+    // context 生命周期清理:插件卸载时停掉轮询(effect,与 try/catch 双重防护)
+    ctx.effect(() => {
+      return () => {
+        finished = true
+        clearInterval(timer)
+      }
+    })
   }
 }
