@@ -136,7 +136,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -181,6 +181,7 @@ export default function Gateway() {
       setModels(m.models ?? [])
       setCfg(g)
       setPeakList(parsePeakWindows(g.peak_windows ?? ''))
+      setCfg(cfg => ({ ...cfg, retention_months: g.retention_months ?? '6' }))
       setChannels(ch.channels ?? [])
       // 认证配置回填(密码类为 "***" 掩码,保存时留空 = 不更换)
       const a = au.auth ?? {}
@@ -272,6 +273,10 @@ export default function Gateway() {
     if (cfg.monthly_quota_money !== '') {
       const mm = Number(cfg.monthly_quota_money)
       if (Number.isNaN(mm) || mm < 0) { setError('月金额配额必须是非负数字'); return }
+    }
+    if (cfg.retention_months !== '') {
+      const rm = Number(cfg.retention_months)
+      if (!Number.isInteger(rm) || rm < 0 || rm > 120) { setError('明细保留必须 0-120 个月(0=永不删除)'); return }
     }
     if (cfg.search_endpoint && !isHttpUrl(cfg.search_endpoint)) { setError('web_search 端点必须是 http(s) URL'); return }
     if (cfg.server_base_url && !isHttpUrl(cfg.server_base_url)) { setError('对外访问地址必须是 http(s) URL'); return }
@@ -587,6 +592,12 @@ export default function Gateway() {
               <Label htmlFor="monthly-quota-money">每用户默认月金额配额(元)</Label>
               <Input id="monthly-quota-money" type="number" min={0} step="0.01" value={cfg.monthly_quota_money}
                 onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
+              <Label htmlFor="usage-retention" className="mt-4">调用明细保留时长(月)</Label>
+              <Input id="usage-retention" type="number" min={0} max={120} value={cfg.retention_months}
+                onChange={(e) => setCfg({ ...cfg, retention_months: e.target.value })} />
+              <p className="text-xs text-muted-foreground">
+                0 = 永不删除;超出保留期的明细分区被自动清理;日账/月账统计永久保留
+              </p>
               <p className="text-xs text-muted-foreground">
                 0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖
               </p>
