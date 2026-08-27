@@ -451,6 +451,7 @@ window.__ModuleLoader__.load({
 							onClick: () => {
 								disconnect();
 							},
+							"aria-label": `${t("action.disconnect")} ${entry.name}`,
 							children: busy === "disconnect" ? t("action.disconnecting") : t("action.disconnect")
 						}) : entry.status === "connecting" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
@@ -463,6 +464,7 @@ window.__ModuleLoader__.load({
 								cancel();
 							},
 							title: t("action.cancelHint"),
+							"aria-label": `${t("action.stop")} ${entry.name}`,
 							children: busy === "disconnect" ? t("action.cancelling") : t("action.stop")
 						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
@@ -471,6 +473,7 @@ window.__ModuleLoader__.load({
 							onClick: () => {
 								connect();
 							},
+							"aria-label": `${t("action.connect")} ${entry.name}`,
 							children: busy === "connect" ? t("action.connecting") : t("action.connect")
 						})
 					})
