@@ -218,8 +218,10 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	if err := ensureUsagePartition(db, now); err != nil {
 		return 0, fmt.Errorf("ensure usage partition: %w", err)
 	}
-	id, err := InsertID(db, `INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost)
+	// created_at 显式 = now(请求时刻):与 cost 计费时点同源,回填时使用该
+	// 时刻折价(审计修复 2026-P M4:跨高峰/空闲边界的流式请求按发起时点计价)。
+	id, err := InsertID(db, `INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now)
 	if err != nil {
 		return 0, err
 	}
@@ -243,14 +245,24 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 }
 
 // updateUsageTokensAtCached 带缓存命中数的回填(时间注入)。
+// 审计修复 2026-P (M4): 计费时刻取该行 created_at(pending 行 = 请求发起
+// 时刻插入),而非回填时刻 time.Now()——跨高峰/空闲边界的流式请求不再因
+// 流结束时点计价,与「低谷窗口按记录时刻判定」的设计一致。
 func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, now time.Time) error {
 	var model string
-	if err := db.QueryRow("SELECT model FROM usage WHERE id = ?", id).Scan(&model); err != nil {
+	var createdAt any
+	if err := db.QueryRow("SELECT model, created_at FROM usage WHERE id = ?", id).Scan(&model, &createdAt); err != nil {
 		return err
+	}
+	// created_at(SQLite localtime 字符串 / PG TIMESTAMPTZ)解析回本地时刻;
+	// 解析失败(异常数据)回退到调用方传入 now(保持可用)。
+	billAt := now
+	if t := parseSQLTime(createdAt); !t.IsZero() {
+		billAt = t
 	}
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
-	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
+	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
 	_, err := db.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ? WHERE id = ?",
 		promptTokens, completionTokens, cacheTokens, cost, id)
 	return err
