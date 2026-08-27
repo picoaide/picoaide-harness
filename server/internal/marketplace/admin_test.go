@@ -302,3 +302,28 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 		t.Fatalf("downloads = %d, want 1", s.Downloads)
 	}
 }
+
+// TestAdminSkillUploadVersionGuard: 上传模式技能走元数据 PUT 改版本必须
+// 拒绝(版本由「上传新版」端点原子写入,与归档/校验和一致)。
+func TestAdminSkillUploadVersionGuard(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	archive := makeGzipTar(t, map[string]string{"SKILL.md": "---\nname: demo\n---\n# demo\n"})
+	if w, _ := mreq(t, r, "POST", "/api/admin/skills/demo/archive",
+		`{"version":"2.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("upload archive: %d", w.Code)
+	}
+	// 元数据 PUT 改版本 → 400。
+	w, out := mreq(t, r, "PUT", "/api/admin/skills/demo", `{"version":"3.0.0"}`, hdr)
+	if w.Code != http.StatusBadRequest || !hasErrCode(w, "VALIDATION") {
+		t.Fatalf("version put = %d %v, want 400 VALIDATION", w.Code, out)
+	}
+	s, _ := serverstore.GetSkill(db, "demo")
+	if s.Version != "2.0.0" {
+		t.Fatalf("version must stay 2.0.0, got %s", s.Version)
+	}
+}
