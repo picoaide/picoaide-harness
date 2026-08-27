@@ -529,10 +529,16 @@ func (a *API) rateLimitPerMinute() int {
 	return n
 }
 
+// 审计修复 2026-P (M3): 金额比较容差——usage.cost 为 REAL(float64),
+// 多次累加存在分钱级舍入误差;临界点误拦(差几分钱即 429)或漏拦都用
+// 半厘(0.005 元)容差规避,与「计量即金钱」的记账边界一致。
+const moneyEpsilon = 0.005
+
 // quotaBlocked reports whether the user has exhausted their calendar-month
 // token, money, or department budget quota (429 QUOTA_EXCEEDED at the caller).
-// Admins are always exempt; 0 quota means unlimited. Lookup failures degrade
-// open (fail-open), matching the rate-limiter's fail-open behaviour.
+// Admins are always exempt; 0 quota means unlimited.
+// 审计修复 2026-P (M1): 查询失败改为 fail-closed——计费强制路径上 DB 瞬时
+// 故障若放行超限请求,后台可能被刷出无限费用;改为拒绝并记日志。
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	if blocked, msg := a.deptBudgetBlocked(user); blocked {
 		return true, msg
@@ -542,16 +548,16 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	}
 	quota, err := serverstore.EffectiveQuota(a.DB, user)
 	if err != nil {
-		log.Printf("gateway: quota lookup: %v", err)
-		return false, ""
+		log.Printf("gateway: quota lookup error (fail-closed): %v", err)
+		return true, "配额校验暂不可用,请稍后再试"
 	}
 	if quota <= 0 {
 		return false, ""
 	}
 	used, err := serverstore.UserMonthlyUsage(a.DB, user.ID)
 	if err != nil {
-		log.Printf("gateway: usage lookup: %v", err)
-		return false, ""
+		log.Printf("gateway: usage lookup error (fail-closed): %v", err)
+		return true, "配额校验暂不可用,请稍后再试"
 	}
 	if used >= quota {
 		return true, "本月流量配额已用尽"
@@ -562,15 +568,16 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 // deptBudgetBlocked reports whether any department budget on the user's
 // inheritance chain (归属部门 + 祖先链) has been exhausted. A department
 // budget caps the whole subtree's monthly cost, so every member of the tree
-// is blocked once it is exceeded. Admins are exempt. Fail-open on errors.
+// is blocked once it is exceeded. Admins are exempt.
+// 审计修复 2026-P (M1): fail-closed——预算查询失败拒绝请求(不免费放行)。
 func (a *API) deptBudgetBlocked(user *serverstore.User) (bool, string) {
 	if user.IsAdmin {
 		return false, ""
 	}
 	budgets, err := serverstore.EffectiveDeptBudget(a.DB, user.ID)
 	if err != nil {
-		log.Printf("gateway: dept budget lookup: %v", err)
-		return false, ""
+		log.Printf("gateway: dept budget lookup error (fail-closed): %v", err)
+		return true, "部门预算校验暂不可用,请稍后再试"
 	}
 	if len(budgets) == 0 {
 		return false, ""
@@ -578,10 +585,11 @@ func (a *API) deptBudgetBlocked(user *serverstore.User) (bool, string) {
 	for _, b := range budgets {
 		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
 		if err != nil {
-			log.Printf("gateway: dept cost lookup: %v", err)
-			return false, ""
+			log.Printf("gateway: dept cost lookup error (fail-closed): %v", err)
+			return true, "部门预算校验暂不可用,请稍后再试"
 		}
-		if used >= b.Budget {
+		// 金额比较带容差(审计修复 2026-P M3):float64 舍入误差不误拦临界点
+		if used >= b.Budget-moneyEpsilon {
 			return true, "部门「" + b.Name + "」本月费用预算已用尽"
 		}
 	}
@@ -589,22 +597,24 @@ func (a *API) deptBudgetBlocked(user *serverstore.User) (bool, string) {
 }
 
 // moneyQuotaBlocked reports whether the user has exhausted their
-// calendar-month money quota (yuan, 0022). Fail-open on lookup errors.
+// calendar-month money quota (yuan, 0022).
+// 审计修复 2026-P (M1): fail-closed——金额配额查询失败拒绝请求。
 func (a *API) moneyQuotaBlocked(user *serverstore.User) (bool, string) {
 	quota, err := serverstore.EffectiveMoneyQuota(a.DB, user)
 	if err != nil {
-		log.Printf("gateway: money quota lookup: %v", err)
-		return false, ""
+		log.Printf("gateway: money quota lookup error (fail-closed): %v", err)
+		return true, "金额配额校验暂不可用,请稍后再试"
 	}
 	if quota <= 0 {
 		return false, ""
 	}
 	used, err := serverstore.UserMonthlyCost(a.DB, user.ID)
 	if err != nil {
-		log.Printf("gateway: money usage lookup: %v", err)
-		return false, ""
+		log.Printf("gateway: money usage lookup error (fail-closed): %v", err)
+		return true, "金额配额校验暂不可用,请稍后再试"
 	}
-	if used >= quota {
+	// 金额比较带容差(审计修复 2026-P M3)
+	if used >= quota-moneyEpsilon {
 		return true, "本月费用配额已用尽"
 	}
 	return false, ""

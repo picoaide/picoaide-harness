@@ -584,22 +584,54 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	})
 }
 
+// FlexibleString 接受 JSON string 或 number(审计修复 2026-P (B2):第三方
+// 直连 API 常按业务直觉传数字,如 rate_limit:60;统一解析为字符串存储,
+// 兼容两种输入,保持既有 *string 语义不变)。
+type FlexibleString string
+
+// UnmarshalJSON 接受 string / number;其他类型报错。
+func (f *FlexibleString) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 {
+		*f = ""
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*f = FlexibleString(s)
+		return nil
+	}
+	if b[0] == '-' || (b[0] >= '0' && b[0] <= '9') {
+		var n json.Number
+		if err := json.Unmarshal(b, &n); err != nil {
+			return err
+		}
+		*f = FlexibleString(n.String())
+		return nil
+	}
+	return errors.New("flexible string: unsupported type")
+}
+
 // setGatewayConfig validates default_model against enabled models and saves.
 // 契约(审计修复 M1):字符串/布尔字段全部用指针——缺省(null/未传)= 不覆盖,
 // 显式 "" / false = 清空/关闭;peak_windows 显式空串 = 移除高峰窗口(无峰谷价)。
 // 此前同一 handler 混用"空串跳过"与"无条件覆盖",allow_private/search_endpoint
 // 被部分提交意外重置,default_model/server_base_url 又永远无法清空。
+// rate_limit/monthly_quota/monthly_quota_money 用 FlexibleString:兼容
+// JSON 数字与字符串(第三方直连不踩坑,前端字符串不受影响)。
 func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
-		DefaultModel      *string `json:"default_model"`
-		RateLimit         *string `json:"rate_limit"`
-		MonthlyQuota      *string `json:"monthly_quota"`
-		MonthlyQuotaMoney *string `json:"monthly_quota_money"`
-		PeakWindows       *string `json:"peak_windows"`
-		RetentionMonths   *string `json:"retention_months"`
-		AllowPrivate      *bool   `json:"allow_private"`
-		SearchEndpoint    *string `json:"search_endpoint"`
-		ServerBaseURL     *string `json:"server_base_url"`
+		DefaultModel      *string         `json:"default_model"`
+		RateLimit         *FlexibleString `json:"rate_limit"`
+		MonthlyQuota      *FlexibleString `json:"monthly_quota"`
+		MonthlyQuotaMoney *FlexibleString `json:"monthly_quota_money"`
+		PeakWindows       *string         `json:"peak_windows"`
+		RetentionMonths   *string         `json:"retention_months"`
+		AllowPrivate      *bool           `json:"allow_private"`
+		SearchEndpoint    *string         `json:"search_endpoint"`
+		ServerBaseURL     *string         `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -618,19 +650,19 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if req.RateLimit != nil && *req.RateLimit != "" {
-		if n, err := strconv.Atoi(*req.RateLimit); err != nil || n <= 0 || n > 100000 {
+		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n <= 0 || n > 100000 {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是正整数")
 			return
 		}
 	}
 	if req.MonthlyQuota != nil && *req.MonthlyQuota != "" {
-		if n, err := strconv.Atoi(*req.MonthlyQuota); err != nil || n < 0 {
+		if n, err := strconv.Atoi(string(*req.MonthlyQuota)); err != nil || n < 0 {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "monthly_quota 必须是非负整数")
 			return
 		}
 	}
 	if req.MonthlyQuotaMoney != nil && *req.MonthlyQuotaMoney != "" {
-		if n, err := strconv.ParseFloat(*req.MonthlyQuotaMoney, 64); err != nil || n < 0 {
+		if n, err := strconv.ParseFloat(string(*req.MonthlyQuotaMoney), 64); err != nil || n < 0 {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "monthly_quota_money 必须是非负数字")
 			return
 		}
@@ -651,19 +683,19 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.RateLimit != nil {
-		if err := serverstore.SetSetting(db, "gateway.rate_limit", *req.RateLimit); err != nil {
+		if err := serverstore.SetSetting(db, "gateway.rate_limit", string(*req.RateLimit)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.MonthlyQuota != nil {
-		if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, *req.MonthlyQuota); err != nil {
+		if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, string(*req.MonthlyQuota)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.MonthlyQuotaMoney != nil {
-		if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, *req.MonthlyQuotaMoney); err != nil {
+		if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, string(*req.MonthlyQuotaMoney)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
