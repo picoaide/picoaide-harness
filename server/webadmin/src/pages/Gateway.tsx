@@ -136,7 +136,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', error_reporting_dsn: '', error_reporting_enabled: false, error_reporting_level: 'error', glitchtip_base_url: '', glitchtip_organization: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', error_reporting_dsn: '', error_reporting_enabled: false, error_reporting_level: 'error', glitchtip_base_url: '', glitchtip_organization: '', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -743,6 +743,24 @@ export default function Gateway() {
                 value={cfg.glitchtip_organization}
                 onChange={(e) => setCfg({ ...cfg, glitchtip_organization: e.target.value })} />
             </div>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="default-thinking-level">默认思考强度(客户端默认模型,登录自动应用)</Label>
+            <Select value={cfg.default_thinking_level} onValueChange={(v) => setCfg({ ...cfg, default_thinking_level: v })}>
+              <SelectTrigger id="default-thinking-level" aria-label="默认思考强度"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="max">max(最大思考)</SelectItem>
+                <SelectItem value="xhigh">xhigh(极高)</SelectItem>
+                <SelectItem value="high">high(高)</SelectItem>
+                <SelectItem value="medium">medium(中)</SelectItem>
+                <SelectItem value="low">low(低)</SelectItem>
+                <SelectItem value="minimal">minimal(最小)</SelectItem>
+                <SelectItem value="off">off(关闭思考)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              登录后客户端默认模型自动使用该思考强度;用户仍可在模型选择器单独调整当前对话
+            </p>
           </div>
           <div className="space-y-1">
             <Label htmlFor="server-base-url">对外访问地址 (Server Base URL)</Label>

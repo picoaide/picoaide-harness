@@ -585,6 +585,7 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"error_reporting_level":   settings["web.error_reporting_level"],
 		"glitchtip_base_url":     settings["web.glitchtip_base_url"],
 		"glitchtip_organization": settings["web.glitchtip_organization"],
+		"default_thinking_level":  settings["web.default_thinking_level"],
 		"server_base_url":     settings["server.base_url"],
 	})
 }
@@ -641,6 +642,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		ErrorReportingLevel   *string     `json:"error_reporting_level"`
 		GlitchTipBaseURL  *string         `json:"glitchtip_base_url"`
 		GlitchTipOrg      *string         `json:"glitchtip_organization"`
+		DefaultThinkingLevel *string      `json:"default_thinking_level"`
 		ServerBaseURL     *string         `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -777,6 +779,19 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	if req.GlitchTipOrg != nil {
 		// GlitchTip 组织 slug(统一分发)
 		if err := serverstore.SetSetting(db, "web.glitchtip_organization", *req.GlitchTipOrg); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.DefaultThinkingLevel != nil {
+		// 默认思考强度(2026-08):客户端默认模型 reasoningEffort
+		switch *req.DefaultThinkingLevel {
+		case "", "off", "minimal", "low", "medium", "high", "xhigh", "max":
+		default:
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "default_thinking_level 必须是 off|minimal|low|medium|high|xhigh|max")
+			return
+		}
+		if err := serverstore.SetSetting(db, "web.default_thinking_level", *req.DefaultThinkingLevel); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

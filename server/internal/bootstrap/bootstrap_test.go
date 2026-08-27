@@ -115,12 +115,39 @@ func TestBootstrapWebSettings(t *testing.T) {
 	if err := serverstore.SetSetting(db, "web.search_endpoint", "https://search.example.com/q"); err != nil {
 		t.Fatal(err)
 	}
+	if err := serverstore.SetSetting(db, "web.default_thinking_level", "high"); err != nil {
+		t.Fatal(err)
+	}
 	u, _ := serverstore.GetUserByUsername(db, "alice")
 	token, _ := serverauth.IssueToken(db, u.ID)
 	_, out := getJSON(t, r, "/api/config/bootstrap", token)
 	web := out["web"].(map[string]any)
 	if web["allow_private"] != true || web["search_endpoint"] != "https://search.example.com/q" {
 		t.Fatalf("web = %v", web)
+	}
+	if web["default_thinking_level"] != "high" {
+		t.Fatalf("default_thinking_level = %v, want high", web["default_thinking_level"])
+	}
+}
+
+func TestBootstrapDefaultThinkingLevelFallback(t *testing.T) {
+	r, db := setup(t)
+	// 未配置 + 非法值 → 回落 max
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	token, _ := serverauth.IssueToken(db, u.ID)
+	_, out := getJSON(t, r, "/api/config/bootstrap", token)
+	web := out["web"].(map[string]any)
+	if web["default_thinking_level"] != "max" {
+		t.Fatalf("default default_thinking_level = %v, want max", web["default_thinking_level"])
+	}
+	// 非法值回落 max
+	if err := serverstore.SetSetting(db, "web.default_thinking_level", "ultra"); err != nil {
+		t.Fatal(err)
+	}
+	_, out = getJSON(t, r, "/api/config/bootstrap", token)
+	web = out["web"].(map[string]any)
+	if web["default_thinking_level"] != "max" {
+		t.Fatalf("invalid default_thinking_level = %v, want max fallback", web["default_thinking_level"])
 	}
 }
 
