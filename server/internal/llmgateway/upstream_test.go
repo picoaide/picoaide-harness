@@ -10,11 +10,8 @@ import (
 // TestLoadUpstreamsSkipsBrokenProvider: one provider with an undecryptable
 // key must not abort the whole gateway; the healthy provider still loads.
 func TestLoadUpstreamsSkipsBrokenProvider(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/up.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 
 	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled) VALUES ('good', 'https://a', 'decryptable', '["m1"]', 1)`); err != nil {
 		t.Fatal(err)

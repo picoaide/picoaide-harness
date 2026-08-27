@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-//go:embed migrations/*.sql migrations-pg/*.sql
+//go:embed migrations-pg/*.sql
 var migrationFS embed.FS
 
 type migration struct {
@@ -22,18 +22,13 @@ type migration struct {
 // so failure paths can be exercised without a real broken embed.
 var testMigrationHook func() []migration
 
-// migrationsFor returns the embedded migration set for the current driver.
-// SQLite uses migrations/, PostgreSQL uses migrations-pg/ (same version
-// numbers, backend-appropriate DDL). Sorted by version ascending.
+// migrationsFor returns the embedded migration set (PostgreSQL only since the
+// SQLite removal). Sorted by version ascending.
 func migrationsFor() []migration {
 	if testMigrationHook != nil {
 		return testMigrationHook()
 	}
-	dir := "migrations"
-	if currentDriver == DriverPG {
-		dir = "migrations-pg"
-	}
-	entries, err := migrationFS.ReadDir(dir)
+	entries, err := migrationFS.ReadDir("migrations-pg")
 	if err != nil {
 		panic(err)
 	}
@@ -48,7 +43,7 @@ func migrationsFor() []migration {
 		if err != nil {
 			continue
 		}
-		content, err := migrationFS.ReadFile(dir + "/" + e.Name())
+		content, err := migrationFS.ReadFile("migrations-pg/" + e.Name())
 		if err != nil {
 			panic(err)
 		}
@@ -70,7 +65,7 @@ func latestMigration() int64 {
 // init embedded FS is validated at package init: both migration dirs must
 // exist and parse.
 func init() {
-	for _, dir := range []string{"migrations", "migrations-pg"} {
+	for _, dir := range []string{"migrations-pg"} {
 		if _, err := migrationFS.ReadDir(dir); err != nil {
 			panic(fmt.Sprintf("migrations dir %s: %v", dir, err))
 		}

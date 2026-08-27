@@ -56,11 +56,8 @@ func createSkillRepo(t *testing.T, dir, name string) string {
 func marketUserSetup(t *testing.T) (http.Handler, *sql.DB, string, int64, string) {
 	t.Helper()
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/mktu.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
 	uid, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456")
 	if err != nil {
 		t.Fatal(err)

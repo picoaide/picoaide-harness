@@ -1,14 +1,14 @@
 package serverstore
 
 import (
-	"fmt"
-	"path/filepath"
-	"sync"
 	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// TestOpen verifies the PG connection opens and pings (PG_DSN_TEST env).
 func TestOpen(t *testing.T) {
-	db, err := Open(DBConfig{Path: filepath.Join(t.TempDir(), "test.db")})
+	db, err := Open(DBConfig{Driver: DriverPG, DSN: PgTestDSN()})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -18,29 +18,26 @@ func TestOpen(t *testing.T) {
 	}
 }
 
-// FK 约束必须对池中每个连接生效(_pragma 方式,审计2026-M7:单连接 PRAGMA 会导致
-// 并发打开的其他连接 FK 静默关闭)
+// FK 约束必须对池中每个连接生效(PG 的 FK 是服务端约束,天然 per-connection
+// 一致;此处验证并发连接下 FK 仍被拒绝,防止回归为任意关约束)。
 func TestForeignKeysEnforcedOnAllConnections(t *testing.T) {
-	db := openTestDB(t)
-	defer db.Close()
-	if err := ApplyMigrations(db); err != nil {
-		t.Fatal(err)
-	}
+	db, cleanup := newTestDB(t)
+	defer cleanup()
 	const workers = 16
-	failures := make(chan error, workers)
-	var wg sync.WaitGroup
+	type result struct {
+		ok bool
+	}
+	results := make(chan result, workers)
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-			if _, err := db.Exec("INSERT INTO api_tokens (user_id, token_hash, expires_at) VALUES (999999, 'x', datetime('now'))"); err == nil {
-				failures <- fmt.Errorf("FK-violating insert succeeded on some connection")
-			}
+			_, err := db.Exec("INSERT INTO api_tokens (user_id, token_hash, expires_at) VALUES (999999, 'x', now())")
+			// FK 违例必须返回错误:err 非 nil 才算 FK 被拒绝(期望行为)
+			results <- result{ok: err != nil}
 		}()
 	}
-	wg.Wait()
-	close(failures)
-	for err := range failures {
-		t.Fatal(err)
+	for i := 0; i < workers; i++ {
+		if r := <-results; !r.ok {
+			t.Fatal("FK-violating insert succeeded on some connection")
+		}
 	}
 }
