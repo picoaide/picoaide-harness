@@ -32,6 +32,7 @@
 
 - 大小上限:原始归档 ≤16MB、解包后 ≤64MB、条目 ≤10000。
 - 拒绝:绝对路径、`..` 越界、空路径、symlink/hardlink;必须含顶层 `agent.cordis.yml`。**上传端与安装端跑同一套校验**(`assertArchiveSafe`):源目录里有 symlink 时在上传机就报错,不会传播给每台安装机。
+- **归档存储(0041)**:上传的归档字节**直存 agent_presets.archive(DB 行)**,不落磁盘;下载/预览读 DB;pre-0041 老行磁盘回退只读。下载成功 `downloads+1`(webadmin 可见)。
 - 服务端存 sha256(checksum);下载响应带 `X-Preset-Checksum`,客户端安装前校验。
 - 安装不覆盖本地同名 preset(冲突明确报错,由用户先卸载/改名)。
 
