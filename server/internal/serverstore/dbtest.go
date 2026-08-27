@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // PgTestDSN returns the PostgreSQL test DSN template (exported for
@@ -60,6 +61,12 @@ func NewTestDB(t *testing.T) (*sql.DB, func()) {
 		admin.Close()
 		t.Fatalf("apply migrations: %v", err)
 	}
+	// 预建历史+未来分区,覆盖测试硬编码月份(2026-07/08/09 等),避免 no partition
+	if err := ensureTestPartitions(db); err != nil {
+		db.Close()
+		admin.Close()
+		t.Fatalf("ensure test partitions: %v", err)
+	}
 	cleanup := func() {
 		db.Close()
 		if _, err := admin.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)"); err != nil {
@@ -102,4 +109,21 @@ func rewriteDSNQuery(rawQuery string, key, value string) string {
 func newTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 	return NewTestDB(t)
+}
+
+
+// ensureTestPartitions 预建 2026-01 起至当前+6 月的 usage 分区与 usage_daily 分区,
+// 覆盖测试中硬编码的历史月份(2026-07/08/09 等),避免"no partition found"。
+func ensureTestPartitions(db *sql.DB) error {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Now().AddDate(0, 6, 0)
+	for m := start; !m.After(end); m = m.AddDate(0, 1, 0) {
+		if err := ensureUsagePartition(db, m); err != nil {
+			return err
+		}
+		if err := ensureUsageDailyPartition(db, m); err != nil {
+			return err
+		}
+	}
+	return nil
 }
