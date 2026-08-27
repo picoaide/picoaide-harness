@@ -24,6 +24,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
+	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/webadmin"
 )
@@ -131,6 +132,7 @@ func main() {
 	sharedskills.RegisterAdminRoutes(r, db, *dataDir+"/shared-skills-cache")
 	capabilities.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	capabilities.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
+	telemetry.RegisterRoutes(r, db)
 	bootstrap.RegisterRoutes(r, db)
 	// 审计日志保留策略(90 天):启动时清理过期条目
 	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-90*24*time.Hour)); err != nil {

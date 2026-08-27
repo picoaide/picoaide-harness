@@ -94,6 +94,8 @@ func rowJSON(s serverstore.SharedSkill) gin.H {
 		"status":       s.Status,
 		"reason":       s.Reason,
 		"quality":      s.Quality, // 0037 组织库质量标记(official/featured)
+		"downloads":    s.Downloads,
+		"calls":        s.Calls,
 		"created_at":   s.CreatedAt,
 		"updated_at":   s.UpdatedAt,
 	}
@@ -224,18 +226,14 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 
 		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
 		// 重提:先 DB(作者校验在 SQL 内)成功后覆盖归档;新建:DB 失败补偿删除。
-		if err := os.MkdirAll(cacheDir, 0700); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "存储失败")
-			return
-		}
-		archivePath := filepath.Join(cacheDir, safeName(req.Name, req.Version))
-
+		// 0040:归档直存 DB(共享技能上传不再落磁盘;pre-0040 行的磁盘回退
+		// 只在下载/预览读取时触发,写路径一律 DB)。
 		if getErr == nil {
 			if err := serverstore.UpdateSharedSkillResubmit(db, req.Name, req.Version, display, desc, checksum, u.Username); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 				return
 			}
-			if err := writeFileAtomic(archivePath, raw); err != nil {
+			if err := serverstore.SetSharedSkillArchive(db, req.Name, req.Version, raw); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
@@ -248,10 +246,10 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				Author:      u.Username,
 				Checksum:    checksum,
 				Status:      serverstore.SharedSkillPending,
+				Archive:     raw,
 			}
 			if _, err := serverstore.CreateSharedSkillCapped(db, s, pendingCap); err != nil {
-				// 补偿:INSERT 失败时删除刚写的归档,不留孤儿文件。
-				_ = os.Remove(archivePath)
+				// 补偿:INSERT 失败时无归档落盘(DB 未写入即无孤儿对象)。
 				if errors.Is(err, serverstore.ErrTooManyPending) {
 					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
 					return
@@ -263,10 +261,6 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					return
 				}
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-				return
-			}
-			if err := writeFileAtomic(archivePath, raw); err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		}
@@ -354,6 +348,7 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 			return
 		}
+		_ = serverstore.DeleteSharedSkillArchive(db, name, version)
 		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
 		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -558,16 +553,31 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 				return
 			}
 		}
-		archivePath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
-		if _, err := os.Stat(archivePath); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档文件缺失")
+		// 0040:归档直存 DB;pre-0040 行的磁盘回退(read-only)。
+		var payload []byte
+		dbRaw, err := serverstore.GetSharedSkillArchive(db, s.Name, s.Version)
+		switch {
+		case err == nil && dbRaw != nil:
+			payload = dbRaw
+		case err == nil && dbRaw == nil:
+			// 老库行无 DB 归档:读磁盘(兼容迁移前的上传)。
+			diskPath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
+			if raw, rerr := os.ReadFile(diskPath); rerr == nil {
+				payload = raw
+			} else {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档数据缺失")
+				return
+			}
+		default:
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
 			return
 		}
 		c.Header("Content-Type", "application/gzip")
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(s.Name, s.Version)))
 		c.Header("X-Skill-Version", s.Version)
 		c.Header("X-Skill-Checksum", s.Checksum)
-		c.File(archivePath)
+		_, _ = serverstore.IncrementSharedSkillDownload(db, s.Name, s.Version)
+		c.Data(http.StatusOK, "application/gzip", payload)
 	}
 }
 
@@ -589,13 +599,21 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		archivePath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
-		raw, err := os.ReadFile(archivePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档文件缺失")
+		// 0040:归档直存 DB;老库行回退磁盘(read-only)。
+		var raw []byte
+		dbRaw, aerr := serverstore.GetSharedSkillArchive(db, s.Name, s.Version)
+		switch {
+		case aerr == nil && dbRaw != nil:
+			raw = dbRaw
+		case aerr == nil:
+			diskPath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
+			if r, rerr := os.ReadFile(diskPath); rerr == nil {
+				raw = r
+			} else {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档数据缺失")
 				return
 			}
+		default:
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
 			return
 		}
@@ -760,24 +778,6 @@ func adminUsername(c *gin.Context) string {
 
 func safeName(name, version string) string {
 	return fmt.Sprintf("%s-%s.tar.gz", name, version)
-}
-
-// writeFileAtomic writes data to path via a temp file + rename (0600).
-func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".upload-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
 }
 
 // ensure util import is used (SkillName pattern stays client-side).

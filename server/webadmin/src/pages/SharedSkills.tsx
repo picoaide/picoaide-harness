@@ -19,6 +19,9 @@ interface SkillRow {
   author: string
   status: 'pending' | 'approved' | 'rejected'
   reason: string
+  // 0040: 下载/调用统计
+  downloads?: number
+  calls?: number
   created_at: string
 }
 
@@ -173,6 +176,7 @@ export default function SharedSkills() {
                 <TableHead>作者</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>状态</TableHead>
+                <TableHead>下载/调用</TableHead>
                 <TableHead>上传时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
@@ -193,6 +197,9 @@ export default function SharedSkills() {
                     <TableCell>{row.author}</TableCell>
                     <TableCell className="max-w-xs truncate">{row.description || '—'}</TableCell>
                     <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                      下载 {row.downloads ?? 0} / 调用 {row.calls ?? 0}
+                    </TableCell>
                     <TableCell className="text-muted-foreground">{fmtTime(row.created_at)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">

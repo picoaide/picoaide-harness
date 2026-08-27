@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import Marketplace from './Marketplace'
 import { request } from '../api'
 
@@ -110,7 +110,7 @@ describe('Marketplace 商城页', () => {
       '/api/admin/skills/data-extract',
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ name: 'data-extract', git_url: 'https://x/data-extract', version: '2.0.0', description: '数据提取', author: 'seed' }),
+        body: JSON.stringify({ name: 'data-extract', version: '2.0.0', description: '数据提取', author: 'seed', git_url: 'https://x/data-extract', git_ref: 'main' }),
       }),
     )
   })
@@ -123,6 +123,25 @@ describe('Marketplace 商城页', () => {
     })
     render(<Marketplace />)
     expect(await screen.findByText(/暂无技能/)).toBeInTheDocument()
+  })
+
+  it('0040: 上传新版压缩包调用 archive 端点', async () => {
+    render(<Marketplace />)
+    await screen.findByText('data-extract')
+    fireEvent.click(screen.getAllByRole('button', { name: '上传新版' })[0]!)
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.change(dialog.getByLabelText('版本'), { target: { value: '2.0.0' } })
+    const file = new File(['x'], 'skill.tar.gz', { type: 'application/gzip' })
+    const input = document.querySelector('input[type="file"]')!
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    fireEvent.change(input)
+    fireEvent.click(dialog.getByRole('button', { name: '上传' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/admin/skills/data-extract/archive',
+        expect.objectContaining({ method: 'POST', body: expect.stringContaining('"version":"2.0.0"') }),
+      )
+    })
   })
 
   it('M4: 技能加载失败显示错误与重试,重试成功恢复列表', async () => {

@@ -2,6 +2,7 @@ package marketplace
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
@@ -23,6 +25,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/admin", serverauth.AdminAuth(db))
 	g.GET("/skills", func(c *gin.Context) { listSkillsAdmin(c, db) })
 	g.POST("/skills", func(c *gin.Context) { createSkillAdmin(c, db) })
+	g.POST("/skills/:name/archive", func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) })
 	g.PUT("/skills/:name", func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) })
 	g.DELETE("/skills/:name", func(c *gin.Context) { deleteSkillAdmin(c, db) })
 	// 重新上架(审计 A5-M1: 下架不可逆曾导致误下架无法恢复)
@@ -194,23 +197,25 @@ func validGitURL(u string) bool {
 
 func createSkillAdmin(c *gin.Context, db *sql.DB) {
 	var req skillReq
-	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" || req.GitURL == "" {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "名称和 Git 地址必填")
+	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "名称必填")
 		return
 	}
 	if !util.SafePathSegment(req.Name) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
 	}
-	if !validGitURL(req.GitURL) {
+	if req.GitURL != "" && !validGitURL(req.GitURL) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "Git 地址必须是 http/https 远程仓库")
 		return
 	}
 	if req.GitRef == "" {
 		req.GitRef = "main"
 	}
+	// 创建为 git 模式;上传模式由 POST /skills/:name/archive 切换(0040:
+	// 归档唯一入口,集中校验与存库,创建请求不接受 archive 字段)。
 	s := &serverstore.Skill{Name: req.Name, Version: req.Version, Description: req.Description,
-		Author: req.Author, GitURL: req.GitURL, GitRef: req.GitRef, Enabled: 1}
+		Author: req.Author, GitURL: req.GitURL, GitRef: req.GitRef, Enabled: 1, Source: string(serverstore.SkillSourceGit)}
 	if _, err := serverstore.AddSkill(db, s); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能已存在")
@@ -227,6 +232,66 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_create", s.Name+" v"+s.Version)
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
+}
+
+// uploadSkillArchiveAdmin switches a skill to uploaded-archive mode: the
+// admin submits a gzipped tar (base64 JSON, same envelope as shared-skills),
+// it is validated structurally (SKILL.md at root) and stored directly in
+// the DB row (0040). The git source is cleared — the archive is now the
+// single source of truth. The version is taken from the request (must match
+// the metadata inside, otherwise the client install fails cleanly).
+func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
+	// 归档以 base64 JSON 上传(base64 膨胀 ~33%):16MB 原始 → ≤24MB body。
+	// marketplace 自建 /api/admin 组,不受 serverauth 1MB 中间件覆盖,此处
+	// 显式限体(与 sharedskills.MaxBodyBytes 同值)。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 24<<20)
+	name := c.Param("name")
+	if !util.SafePathSegment(name) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+		return
+	}
+	if _, err := serverstore.GetSkill(db, name); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	var req struct {
+		Version string `json:"version"`
+		Archive string `json:"archive"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Version == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "version 与 archive 必填")
+		return
+	}
+	if strings.ContainsAny(req.Version, "/\\") || req.Version == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "版本不合法")
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(req.Archive)
+	if err != nil || len(raw) == 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "归档编码错误或为空")
+		return
+	}
+	if len(raw) > 16<<20 {
+		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "归档过大(上限 16MB)")
+		return
+	}
+	checksum, err := sharedskills.ValidateSkillArchive(raw)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档校验失败: "+err.Error())
+		return
+	}
+	if err := serverstore.ReplaceSkillArchive(db, name, req.Version, checksum, raw); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	// 上传模式不再依赖磁盘缓存:清掉旧 clone/包,避免误读。
+	invalidateSkillCache(cacheDir, name)
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", name+" v"+req.Version+" (upload)")
+	c.JSON(http.StatusOK, gin.H{"ok": true, "version": req.Version, "checksum": checksum})
 }
 
 func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
@@ -247,6 +312,12 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	}
 	sourceChanged := false
 	if req.Version != "" && req.Version != s.Version {
+		// 0040: 上传模式的版本由「上传新版」端点原子写入(与 DB 归档、校验和
+		// 一起),元数据 PUT 改版本会造成行版本与归档内容失配,直接拒绝。
+		if s.Source == string(serverstore.SkillSourceUpload) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "上传模式技能请用「上传新版」更改版本")
+			return
+		}
 		s.Version = req.Version
 		sourceChanged = true
 	}
