@@ -458,7 +458,36 @@ function exact(handler) {
 	};
 }
 function apply(ctx, options = {}) {
-	const defs = dedupeById([...marketplaceDefs, ...options.connectors ?? []], [salesEasyDef]);
+	let defs = dedupeById([...marketplaceDefs, ...options.connectors ?? []], [salesEasyDef]);
+	const syncServerDefaults = async () => {
+		try {
+			const session = ctx.get("picoSession")?.getSession?.();
+			if (!session?.serverURL || !session?.token) return;
+			const res = await fetch(`${session.serverURL.replace(/\/+$/, "")}/api/config/bootstrap`, { headers: { Authorization: `Bearer ${session.token}` } });
+			if (!res.ok) return;
+			const cfg = await res.json();
+			const baseURL = cfg.web?.glitchtip_base_url?.trim() ?? "";
+			const org = cfg.web?.glitchtip_organization?.trim() ?? "";
+			if (!baseURL && !org) return;
+			defs = defs.map((d) => {
+				if (d.id !== "glitchtip") return d;
+				return {
+					...d,
+					tokenFields: (d.tokenFields ?? []).map((f) => f.key === "GLITCHTIP_BASE_URL" && baseURL ? {
+						...f,
+						defaultValue: baseURL
+					} : f.key === "GLITCHTIP_ORGANIZATION" && org ? {
+						...f,
+						defaultValue: org
+					} : f)
+				};
+			});
+		} catch {}
+	};
+	syncServerDefaults();
+	ctx.on("pico/session-changed", () => {
+		syncServerDefaults();
+	});
 	const currentUser = () => {
 		try {
 			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
