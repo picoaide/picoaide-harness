@@ -182,3 +182,131 @@ func CleanupUsageRetention(db *sql.DB) error {
 	}
 	return nil
 }
+
+// UsageAggregateWithLedger 在保留窗口内查询 usage 明细(分区裁剪),
+// 窗口外(早于保留期)回退到永久账本 usage_daily/usage_monthly——
+// 保证"明细已删"的历史聚合仍可查(10 年数据不丢)。
+// group: day|week|month|model|user;opts 支持 WithUsername。
+func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts ...UsageAggregateOption) ([]UsageAggregateRow, error) {
+	if from.IsZero() {
+		// 无起始边界:直接查账本(覆盖全部历史,明细窗口内已并入日账)
+		return UsageAggregateFromLedger(db, from, to, group, opts...)
+	}
+	retention, err := EffectiveRetentionMonths(db)
+	if err != nil {
+		return nil, err
+	}
+	var cutoff time.Time
+	if retention > 0 {
+		cutoff = time.Now().AddDate(0, -retention, 0)
+	}
+	if retention == 0 || from.Before(cutoff) {
+		// 窗口外:先查账本覆盖全部;再查明细覆盖窗口内并合并(避免重复)。
+		rows, err := UsageAggregateFromLedger(db, from, to, group, opts...)
+		if err != nil {
+			return nil, err
+		}
+		detailFrom := from
+		if !cutoff.IsZero() && detailFrom.Before(cutoff) {
+			detailFrom = cutoff
+		}
+		if detailFrom.After(to) {
+			return rows, nil
+		}
+		detailRows, err := UsageAggregate(db, detailFrom, to, group, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return mergeUsageRows(rows, detailRows), nil
+	}
+	return UsageAggregate(db, from, to, group, opts...)
+}
+
+// UsageAggregateFromLedger 从 usage_daily/usage_monthly 聚合。
+func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts ...UsageAggregateOption) ([]UsageAggregateRow, error) {
+	var q UsageAggregateQuery
+	for _, o := range opts {
+		o(&q)
+	}
+	usernameFilter := ""
+	args := []any{}
+	if q.Username != "" {
+		usernameFilter = " AND ue.user_id = (SELECT id FROM users WHERE username = ?)"
+		args = append(args, q.Username)
+	}
+	var table, col string
+	switch group {
+	case "day", "week":
+		table, col = "usage_daily", "day"
+	case "user":
+		table, col = "usage_daily", "day"
+	default: // month / model
+		table, col = "usage_monthly", "month"
+	}
+	qstr := `SELECT `
+	switch group {
+	case "month":
+		qstr += `to_char(` + col + `, 'YYYY-MM') AS label,`
+	case "model":
+		qstr += col + ` AS label,`
+	case "user":
+		qstr += `COALESCE(u.username, CAST(ue.user_id AS TEXT)) AS label,`
+	default:
+		qstr += `to_char(` + col + `, 'YYYY-MM-DD') AS label,`
+	}
+	qstr += ` SUM(ue.prompt_tokens) AS pt, SUM(ue.completion_tokens) AS ct, SUM(ue.requests) AS req,
+		SUM(ue.cost) AS cost
+		FROM ` + table + ` ue`
+	if group == "user" {
+		qstr += " LEFT JOIN users u ON u.id = ue.user_id"
+	}
+	qstr += " WHERE 1=1"
+	if !from.IsZero() {
+		qstr += " AND " + col + " >= ?::date"
+		args = append(args, from.Format("2006-01-02"))
+	}
+	if !to.IsZero() {
+		qstr += " AND " + col + " <= ?::date"
+		args = append(args, to.Format("2006-01-02"))
+	}
+	qstr += usernameFilter
+	switch group {
+	case "model":
+		qstr += ` GROUP BY ` + col
+	case "user":
+		qstr += ` GROUP BY u.username, ue.user_id`
+	case "month", "day", "week":
+		qstr += ` GROUP BY 1`
+	}
+	qstr += " ORDER BY 1"
+	rows, err := db.Query(qstr, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []UsageAggregateRow{}
+	for rows.Next() {
+		var r UsageAggregateRow
+		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests, &r.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// mergeUsageRows 按 label 合并两批聚合行(账本 + 明细,后者优先生效)。
+func mergeUsageRows(a, b []UsageAggregateRow) []UsageAggregateRow {
+	byLabel := map[string]UsageAggregateRow{}
+	for _, r := range a {
+		byLabel[r.Label] = r
+	}
+	for _, r := range b {
+		byLabel[r.Label] = r
+	}
+	out := make([]UsageAggregateRow, 0, len(byLabel))
+	for _, r := range byLabel {
+		out = append(out, r)
+	}
+	return out
+}
