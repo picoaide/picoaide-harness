@@ -648,7 +648,7 @@ func (a *AdminAPI) usage(c *gin.Context) {
 	if username := c.Query("username"); username != "" {
 		opts = append(opts, serverstore.WithUsername(username))
 	}
-	rows, err := serverstore.UsageAggregate(a.DB, from, to, group, opts...)
+	rows, err := serverstore.UsageAggregateWithLedger(a.DB, from, to, group, opts...)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return
