@@ -9,7 +9,7 @@
 ```
 第三方客户端 / 员工接入 ──HTTPS + Bearer token──▶
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ Go 服务端(gin + modernc.org/sqlite)                                       │
+│ Go 服务端(gin + PostgreSQL)                                       │
 │   ├─ 认证:local/LDAP/OIDC + api_tokens(90 天过期,哈希存储)+ /api/auth/*   │
 │   ├─ AI 网关:/v1/chat/completions|embeddings|models 代理                  │
 │   │   + per-user 限流 + usage 计量(费用/峰谷折算)                         │
