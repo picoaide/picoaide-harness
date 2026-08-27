@@ -83,8 +83,8 @@ Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved
 
 ## Server Info
 
-- Shows the current server version, database driver (sqlite / pg), build info; health-check status (`/healthz`) and a runtime environment summary.
+- Shows the current server version, database driver (PostgreSQL), build info; health-check status (`/healthz`) and a runtime environment summary.
 
 ## Deployment-related
 
-The server runs as a single binary, or via Docker Compose (Caddy reverse proxy + fixed IP on a private subnet + non-root + bind mount data directory); the database supports SQLite (default) / built-in PostgreSQL / external PostgreSQL. See the [Private Deployment guide](./deployment).
+The server runs as a single binary, or via Docker Compose (Caddy reverse proxy + fixed IP on a private subnet + non-root + bind mount data directory); the database is PostgreSQL (built-in or external instance, PG-only). See the [Private Deployment guide](./deployment).
