@@ -42,7 +42,10 @@ let sentry: SentryModule | null = null
  * 随时 init/close;采集主进程未捕获异常/未处理 rejection。
  * 渲染进程采集(extension 集成)后续阶段接入。
  */
-export async function initSentry(dsn: string, release: string): Promise<void> {
+// 等级阈值(2026-08):数值越大越严重;level 为最低上报等级(>= 才上报)
+const LEVEL_RANK: Record<string, number> = { debug: 10, info: 20, warning: 30, error: 40, fatal: 50 }
+
+export async function initSentry(dsn: string, release: string, level = 'error'): Promise<void> {
   if (sentry !== null) {
     // 重新初始化前先关闭旧实例(登出/切换 DSN)
     try {
@@ -52,11 +55,18 @@ export async function initSentry(dsn: string, release: string): Promise<void> {
   }
   const normalized = dsn.trim()
   if (!normalized) return
+  const threshold = LEVEL_RANK[level] ?? LEVEL_RANK.error!
   try {
     const mod = SentryNode as unknown as { init: (o: Record<string, unknown>) => void; captureMessage: (m: string, l?: unknown) => void }
     mod.init({
       dsn: normalized,
       release,
+      // 等级过滤(2026-08):低于阈值的 event 不下发(如等级=warning 只报 warning/error)
+      beforeSend: (event: { level?: string }) => {
+        const lv = (event.level ?? 'error').toLowerCase()
+        const rank = LEVEL_RANK[lv] ?? LEVEL_RANK.error!
+        return rank >= threshold ? event : null
+      },
       // defaultIntegrations 缺省为 true(7.x);显式传 true 会因版本差异
       // 触发 forEach 报错,故不传
     })
@@ -89,9 +99,15 @@ export function apply(ctx: Context): void {
     }
     try {
       const { config } = await getBootstrap(session)
-      const dsn = config.web?.error_reporting_dsn ?? ''
-      console.log('[error-reporting] dsn from bootstrap:', dsn ? dsn.slice(0, 30) + '...' : '(empty)')
-      await initSentry(dsn, release)
+      const web = config.web
+      // 开关(2026-08):服务端关闭则不初始化上报;等级阈值传 init 过滤
+      const enabled = web?.error_reporting_enabled === true
+      console.log('[error-reporting] dsn from bootstrap:', enabled && web?.error_reporting_dsn ? web.error_reporting_dsn.slice(0, 30) + '...' : '(disabled/empty)')
+      if (!enabled) {
+        await initSentry('', release)
+        return
+      }
+      await initSentry(web?.error_reporting_dsn ?? '', release, web?.error_reporting_level ?? 'error')
     } catch (cause) {
       // bootstrap 失败不阻断;登录成功但上报配置拿不到时静默
       console.warn('[error-reporting] bootstrap 失败,不上报:', cause)

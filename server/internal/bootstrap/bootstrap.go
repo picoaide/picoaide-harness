@@ -24,6 +24,10 @@ type WebConfig struct {
 	// 错误上报 DSN(feat/error-monitoring 2026-08):客户端 Sentry SDK 的
 	// 上报地址(如 GlitchTip),空 = 客户端不启用错误上报。
 	ErrorReportingDSN string `json:"error_reporting_dsn"`
+	// 错误上报开关(2026-08 升级):服务端控制客户端是否自动启用上报。
+	ErrorReportingEnabled bool `json:"error_reporting_enabled"`
+	// 上报等级阈值(2026-08): error|warning|info|debug;>= 阈值才上报。
+	ErrorReportingLevel string `json:"error_reporting_level"`
 	// GlitchTip 连接器配置(统一分发 2026-08):服务端下发地址/组织,
 	// 客户端连接器预填,用户只需填 token。空 = 不预填。
 	GlitchTipBaseURL     string `json:"glitchtip_base_url"`
@@ -125,6 +129,13 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	web.SearchEndpoint = settings["web.search_endpoint"]
 	// 错误上报 DSN(feat/error-monitoring):空 = 客户端不启用
 	web.ErrorReportingDSN = settings["web.error_reporting_dsn"]
+	// 上报开关/等级(2026-08):enabled 默认 false(安全);level 默认 error
+	web.ErrorReportingEnabled = settings["web.error_reporting_enabled"] == "true"
+	if lv := settings["web.error_reporting_level"]; lv != "" {
+		web.ErrorReportingLevel = lv
+	} else {
+		web.ErrorReportingLevel = "error"
+	}
 	// 统一分发(2026-08):GlitchTip 连接器地址/组织由服务端下发
 	web.GlitchTipBaseURL = settings["web.glitchtip_base_url"]
 	web.GlitchTipOrganization = settings["web.glitchtip_organization"]
