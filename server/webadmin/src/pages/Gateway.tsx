@@ -136,7 +136,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', error_reporting_dsn: '', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -698,6 +698,16 @@ export default function Gateway() {
               <Input id="search-endpoint" type="url" placeholder="https://search.example.com/q" value={cfg.search_endpoint}
                 onChange={(e) => setCfg({ ...cfg, search_endpoint: e.target.value })} />
             </div>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="error-reporting-dsn">错误上报 DSN(客户端 Sentry 上报地址,如 GlitchTip)</Label>
+            <Input id="error-reporting-dsn" type="text" placeholder="https://glitchtip.example.com/...或空=不启用"
+              value={cfg.error_reporting_dsn}
+              onChange={(e) => setCfg({ ...cfg, error_reporting_dsn: e.target.value })} />
+            <p className="text-xs text-muted-foreground">
+              客户端集成错误监控(未捕获异常/未处理 rejection)后,填写此处 DSN 才会生效;留空 = 客户端不上报错误。
+              仅支持 Sentry 兼容服务(如自托管 GlitchTip)。
+            </p>
           </div>
           <div className="space-y-1">
             <Label htmlFor="server-base-url">对外访问地址 (Server Base URL)</Label>
