@@ -13,6 +13,8 @@
       name: '@picoaide/dsh-enterprise/bootstrap'
     - id: picoaide-error-reporting
       name: '@picoaide/dsh-enterprise/error-reporting'
+    - id: picoaide-skill-telemetry
+      name: '@picoaide/dsh-enterprise/skill-telemetry'
     - id: picoaide-auth-gate
       name: '@picoaide/dsh-enterprise/auth-gate'
 # Enterprise model governance: models come from the gateway after login only.
