@@ -65,6 +65,9 @@ export function apply(ctx: Context): void {
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {
         provider: DEEPSEEK_PROVIDER,
         model: cfg.default_model,
+        ...cfg.web?.default_thinking_level
+          ? { reasoningEffort: cfg.web.default_thinking_level }
+          : {},
       })
     } catch (cause) {
       // M2: a revoked/expired/disabled session must not linger. Clear it so
