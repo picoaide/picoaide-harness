@@ -1,5 +1,6 @@
 import type { ConnectorDef } from '../types.ts'
 import { def as example-aDef } from './example-a.ts'
+import { glitchTipDef } from './glitchtip.ts'
 
 /**
  * Marketplace connector definitions (决策 2026-08-25:CLI 连接器已移除——
@@ -7,4 +8,5 @@ import { def as example-aDef } from './example-a.ts'
  */
 export const marketplaceDefs: ConnectorDef[] = [
   example-aDef,
+  glitchTipDef,
 ]
