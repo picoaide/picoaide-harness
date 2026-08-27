@@ -11,6 +11,7 @@ export default defineConfig([
       invariant: 'src/invariant.ts',
       'auth-gate': 'src/auth-gate.ts',
       'gateway-model': 'src/gateway-model.ts',
+      'error-reporting': 'src/error-reporting.ts',
       bootstrap: 'src/bootstrap.ts',
       'session-service': 'src/session-service.ts',
       // Shared subpath exports consumed by sibling plugins (dsh-account-card):
@@ -33,6 +34,10 @@ export default defineConfig([
       '@deepseek-ai/dsh-host-webserver',
       '@deepseek-ai/dsh-settings',
       '@deepseek-ai/dsh-credentials',
+      '@sentry/node',
+      '@sentry/core',
+      '@sentry/utils',
+      '@sentry/types',
       'electron',
     ],
   },
