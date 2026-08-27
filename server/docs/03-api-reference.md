@@ -77,7 +77,8 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 | GET | `/api/marketplace/skills` | 技能建议清单 `[{name, version, description, author}]` |
 | GET | `/api/marketplace/skills/updates?installed=name:ver,...` | 技能版本检测(客户端自动升级):上报已装 `name:version`(逗号分隔,≤100 项),返回服务端较新的技能 `{updates:[{name, version, description, author, archive_url}], count}`;授权/下架技能不返回 |
 | GET | `/api/marketplace/skills/:name` | 单个技能详情 |
-| GET | `/api/marketplace/skills/:name/archive` | 下载技能包 `cacheDir/<name>-<version>.tar.gz` |
+| GET | `/api/marketplace/skills/:name/archive` | 下载技能包(上传模式:DB 归档;git 模式:`cacheDir/<name>-<version>.tar.gz`);成功累加 `downloads` |
+| POST | `/api/telemetry/skill-call` | 客户端上报技能调用 `{name, version?}` → 服务端累加 `calls`(shared_skills 优先,回退 market) |
 
 ## 7. 商城管理端(Admin)
 
@@ -85,6 +86,7 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 |------|------|------|
 | GET/POST | `/api/admin/skills` | 列表/上架技能(`{name, version, description, author, git_url, git_ref}`) |
 | PUT/DELETE | `/api/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
+| POST | `/api/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 tar.gz)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
 
 ## 8. 共享 Agent(客户端用,Bearer)
 
@@ -112,8 +114,8 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/shared-skills` | 可见清单:approved(全员)+ 自己上传的全部状态;返回 `{skills:[{name, display_name, version, description, author, status, reason, created_at}]}` |
-| POST | `/api/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 tar.gz)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
+| GET | `/api/shared-skills` | 可见清单:approved(全员)+ 自己上传的全部状态;返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
+| POST | `/api/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 tar.gz)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
 | GET | `/api/shared-skills/:name/:version/archive` | 下载归档(仅 approved);附 `X-Skill-Checksum` / `X-Skill-Version` |
 
 ### 管理端(Admin)
