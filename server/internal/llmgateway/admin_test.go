@@ -303,6 +303,17 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bogus default model accepted: %d", w.Code)
 	}
+	// default_thinking_level:非法值拒绝,合法值写入并读回
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_thinking_level":"ultra"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid default_thinking_level accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_thinking_level":"xhigh"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set default_thinking_level: %d %s", w.Code, w.Body.String())
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["default_thinking_level"] != "xhigh" {
+		t.Fatalf("default_thinking_level not persisted: %d %v", w.Code, out)
+	}
 	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_model":"deepseek-chat","allow_private":true,"search_endpoint":"https://s/q"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set default model: %d %s", w.Code, w.Body.String())

@@ -32,6 +32,15 @@ type WebConfig struct {
 	// 客户端连接器预填,用户只需填 token。空 = 不预填。
 	GlitchTipBaseURL     string `json:"glitchtip_base_url"`
 	GlitchTipOrganization string `json:"glitchtip_organization"`
+	// 默认思考强度(2026-08):客户端默认模型的 reasoningEffort,
+	// off|minimal|low|medium|high|xhigh|max;默认 max。
+	DefaultThinkingLevel string `json:"default_thinking_level"`
+}
+
+// validThinkingLevels 是合法的思考强度值(客户端 pi-ai ThinkingLevel + off)。
+var validThinkingLevels = map[string]bool{
+	"off": true, "minimal": true, "low": true, "medium": true,
+	"high": true, "xhigh": true, "max": true,
 }
 
 // Response is the bootstrap payload. Field names are FIXED: the desktop
@@ -139,6 +148,11 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	// 统一分发(2026-08):GlitchTip 连接器地址/组织由服务端下发
 	web.GlitchTipBaseURL = settings["web.glitchtip_base_url"]
 	web.GlitchTipOrganization = settings["web.glitchtip_organization"]
+	// 默认思考强度(2026-08):缺省 max;非法值回落 max(客户端按值过滤)。
+	web.DefaultThinkingLevel = "max"
+	if lv := settings["web.default_thinking_level"]; lv != "" && validThinkingLevels[lv] {
+		web.DefaultThinkingLevel = lv
+	}
 
 	return &Response{
 		DefaultModel: defaultModel,
