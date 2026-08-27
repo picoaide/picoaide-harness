@@ -1,15 +1,16 @@
 import type { ConnectorDef } from '../types.ts'
 
 /**
- * GlitchTip 错误追踪连接器(审计新增 2026-08):
- * 自托管 GlitchTip(https://GLITCHTIP_DEPLOY_HOST)通过官方社区 MCP server
- * `glitchtip-mcp`(npm,stdio)接入——查询 issue / 最新事件堆栈。
+ * GlitchTip 错误追踪连接器(审计新增 2026-08)。
  *
- * 认证方式 token:用户填 API token(GlitchTip 管理面板 Auth Tokens 创建,
- * 需 org/project/event read 权限)+ 组织 slug;字段值经 connector store 的
- * fields 持久化,并原样注入 stdio MCP 进程的 env(env 渲染 =
- * server.env ∪ credential.fields,见 index.ts registerConnectorMcp,
- * 用户填写值优先)。
+ * 通过官方社区 MCP server `glitchtip-mcp`(npm,stdio)接入——查询 issue /
+ * 最新事件堆栈。认证方式 token,字段值经 connector store 的 fields 持久化,
+ * 并原样注入 stdio MCP 进程的 env(env 渲染 = server.env ∪ credential.fields,
+ * 见 index.ts registerConnectorMcp,用户填写值优先)。
+ *
+ * 注意(安全约束 2026-08):部署地址(BASE_URL)属于部署环境配置,一律由
+ * 用户在连接时填写,不得写死在源码/默认值中——源码仓库不得包含任何
+ * 自部署实例的主机名。
  */
 export const glitchTipDef: ConnectorDef = {
   id: 'glitchtip',
@@ -17,6 +18,7 @@ export const glitchTipDef: ConnectorDef = {
   description: 'GlitchTip(Sentry 兼容错误追踪):查询 issue 与最新事件堆栈,用于错误排查与监控告警',
   authMode: 'token',
   tokenFields: [
+    { key: 'GLITCHTIP_BASE_URL', label: '服务地址(必填,如自部署地址或 app.glitchtip.com)', type: 'text', required: true },
     { key: 'GLITCHTIP_TOKEN', label: 'API Token(Auth Tokens 页创建,需 org:read / project:read / event:read)', type: 'password', required: true },
     { key: 'GLITCHTIP_ORGANIZATION', label: '组织 slug(如 picoaide)', type: 'text', required: true },
   ],
@@ -32,10 +34,9 @@ export const glitchTipDef: ConnectorDef = {
       // 官方社区 MCP server: npx -y glitchtip-mcp(见 vltansky/glitchtip-mcp)
       command: 'npx',
       args: ['-y', 'glitchtip-mcp'],
-      // 静态默认:自部署地址;用户若在设置中填 GLITCHTIP_BASE_URL 可覆盖
-      env: {
-        GLITCHTIP_BASE_URL: 'https://GLITCHTIP_DEPLOY_HOST',
-      },
+      // 部署地址/token/组织 slug 均由用户填写(tokenFields),经 env 渲染注入;
+      // 不在此处硬编码任何部署地址(安全约束:源码不含自部署主机名)。
+      env: {},
     },
   ],
 }
