@@ -67,7 +67,9 @@ jobs:
           if command -v docker >/dev/null 2>&1; then
             PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@postgres:5432/picoaide \
               docker compose -f docker-compose.yml config -q
-            PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
+            # 审计 2026-08-27:pg-ext 也引用 ${PG_PASSWORD:?},需同样注入,
+            # 否则 compose 插值报 PG_PASSWORD missing(GitHub Actions 失败)。
+            PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
               docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml config -q
           else
             # 审计 2026-08-25 A-01:docker 缺失时显式失败(此前静默跳过 =
