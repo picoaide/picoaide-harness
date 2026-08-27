@@ -112,7 +112,7 @@ func TestGrantGroupCaseInsensitive(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM groups WHERE name COLLATE NOCASE = 'finance'").Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM groups WHERE LOWER(name) = LOWER('finance')").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {

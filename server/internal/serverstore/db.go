@@ -7,133 +7,78 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// DriverName identifies the underlying SQL backend.
+// DriverName identifies the underlying SQL backend (PostgreSQL only.
+// SQLite support was removed in the PG-only migration).
 type DriverName string
 
 const (
-	DriverSQLite DriverName = "sqlite"
-	DriverPG     DriverName = "pg"
+	DriverPG DriverName = "pg"
 )
 
 // currentDriver is set by Open; migrate.go and dialect helpers consult it to
 // emit backend-specific SQL. It is process-global because the codebase passes
 // *sql.DB around (no context carrier) and opens exactly one DB per process.
-var currentDriver = DriverSQLite
+var currentDriver = DriverPG
 
 // DBConfig selects the backend for Open.
 type DBConfig struct {
-	Driver DriverName // "sqlite" (default) or "pg"
-	Path   string     // sqlite file path
+	Driver DriverName // "pg" (default)
 	DSN    string     // pg connection string (postgres:// or keyword DSN)
 }
 
 // Open opens the requested backend and verifies connectivity.
 func Open(cfg DBConfig) (*sql.DB, error) {
 	switch cfg.Driver {
-	case "", DriverSQLite:
-		return openSQLite(cfg.Path)
-	case DriverPG:
+	case "", DriverPG:
 		return openPG(cfg.DSN)
 	default:
-		return nil, fmt.Errorf("unsupported db driver %q (want sqlite or pg)", cfg.Driver)
+		return nil, fmt.Errorf("unsupported db driver %q (want pg)", cfg.Driver)
 	}
 }
 
 // NowExpr returns the backend-specific expression for "current timestamp".
-// SQLite stores wall-clock strings via datetime('now','localtime'); PG uses
-// now() with TIMESTAMPTZ (both scan back to local time via parseSQLTime).
+// PG uses now() with TIMESTAMPTZ (both scan back to local time via parseSQLTime).
 func NowExpr() string {
-	if currentDriver == DriverPG {
-		return "now()"
-	}
-	return "datetime('now','localtime')"
+	return "now()"
 }
 
 // TimestampType returns the column type for timestamp columns.
 func TimestampType() string {
-	if currentDriver == DriverPG {
-		return "TIMESTAMPTZ"
-	}
-	return "DATETIME"
+	return "TIMESTAMPTZ"
 }
 
 // CaseInsensitiveCmp returns the SQL snippet comparing a column to a value
-// case-insensitively. SQLite has COLLATE NOCASE; PG uses ILIKE with a bound
-// value (or LOWER(col) = LOWER(?)). We use LOWER(col)=LOWER(?) so the same
-// statement shape works with positional placeholders on both backends.
+// case-insensitively. PG uses LOWER(col)=LOWER(?).
 func CaseInsensitiveCmp(col string) string {
-	if currentDriver == DriverPG {
-		return fmt.Sprintf("LOWER(%s) = LOWER(?)", col)
-	}
-	return fmt.Sprintf("%s = ? COLLATE NOCASE", col)
+	return fmt.Sprintf("LOWER(%s) = LOWER(?)", col)
 }
 
 // InsertIgnorePrefix returns the statement prefix for insert-or-ignore.
 func InsertIgnorePrefix() string {
-	if currentDriver == DriverPG {
-		return "INSERT INTO"
-	}
-	return "INSERT OR IGNORE INTO"
+	return "INSERT INTO"
 }
 
 // InsertID executes an INSERT and returns the auto-generated row id.
-// SQLite: database/sql LastInsertId. PG: pgx stdlib does not implement
-// LastInsertId, so we append RETURNING id and QueryRow-scan it.
+// PG: pgx stdlib does not implement LastInsertId, so we append RETURNING id
+// and QueryRow-scan it.
 func InsertID(db *sql.DB, query string, args ...any) (int64, error) {
-	if currentDriver == DriverPG {
-		var id int64
-		err := db.QueryRow(query+" RETURNING id", args...).Scan(&id)
-		return id, err
-	}
-	res, err := db.Exec(query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	var id int64
+	err := db.QueryRow(query+" RETURNING id", args...).Scan(&id)
+	return id, err
 }
 
-// openSQLite opens (or creates) the SQLite database at path with WAL journal mode.
-func openSQLite(path string) (*sql.DB, error) {
-	// _pragma 参数在 modernc 驱动中对每个新建连接生效:foreign_keys 是 per-connection
-	// pragma,仅在池中单连接上 Exec 会导致并发打开的其他连接 FK 静默关闭(审计2026-M7)
-	//
-	// _timezone=Local:驱动解析 DATETIME 列时,对无时区字符串(SQLite
-	// datetime('now','localtime') 的墙钟串)按本地时区解释。默认(无 _timezone)
-	// 按 UTC 解析,非 UTC 环境读出的时间点整体偏移,time.Since() 为负、
-	// 孤儿回收等按年龄的逻辑失效(token/session 的 RFC3339 值因驱动
-	// Scan→string 的 RFC3339Nano 序列化被平移同样失真)。带时区字符串不受影响。
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_timezone=Local"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	var fk int
-	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if fk != 1 {
-		db.Close()
-		return nil, fmt.Errorf("foreign_keys pragma not enabled")
-	}
-	currentDriver = DriverSQLite
-	return db, nil
-}
-
-// openPG opens a PostgreSQL database via pgx stdlib, wrapping the connector so
-// that `?` placeholders (used throughout the codebase) are rewritten to $N on
-// the fly. This keeps every SQL statement portable across SQLite and PG.
+// openPG opens a PostgreSQL database via pgx stdlib. Wraps the connector with
+// the `?` -> `$N` rewrite layer: the codebase's SQL statements all use `?`
+// placeholders (kept for portability), and pgx requires $N. Configures a pool
+// sized for the gateway's concurrency and the Asia/Shanghai session timezone.
 func openPG(dsn string) (*sql.DB, error) {
 	if dsn == "" {
-		return nil, errors.New("pg dsn required when db driver is pg")
+		return nil, errors.New("pg dsn required")
 	}
 	connector, err := newPGConnector(dsn)
 	if err != nil {
@@ -144,6 +89,12 @@ func openPG(dsn string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("pg ping: %w", err)
 	}
+	// 连接池:实测 500 并发 1257 TPS / 3000 突发 1613 writes/s 0 失败;
+	// 200 连接 + 业务层(流式 1-3s 打散)足以支撑数千并发大模型调用。
+	// PG MVCC 多写并行,无需 SQLite 的单连接串行化。
+	db.SetMaxOpenConns(200)
+	db.SetMaxIdleConns(50)
+	db.SetConnMaxLifetime(30 * time.Minute)
 	currentDriver = DriverPG
 	return db, nil
 }

@@ -288,10 +288,8 @@ func TestProxyStreamIdleTimeout(t *testing.T) {
 }
 
 func TestMatchModelsReturnsAllCandidates(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/multi.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	defer db.Close()
 	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('a', 'http://a', 'k', '["m"]'), ('b', 'http://b', 'k', '["m"]'), ('c', 'http://c', 'k', '["other"]')`); err != nil {
 		t.Fatal(err)
