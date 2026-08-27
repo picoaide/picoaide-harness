@@ -581,6 +581,8 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"allow_private":       allowPrivate,
 		"search_endpoint":     settings["web.search_endpoint"],
 		"error_reporting_dsn": settings["web.error_reporting_dsn"],
+		"error_reporting_enabled": settings["web.error_reporting_enabled"] == "true",
+		"error_reporting_level":   settings["web.error_reporting_level"],
 		"glitchtip_base_url":     settings["web.glitchtip_base_url"],
 		"glitchtip_organization": settings["web.glitchtip_organization"],
 		"server_base_url":     settings["server.base_url"],
@@ -635,6 +637,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		AllowPrivate      *bool           `json:"allow_private"`
 		SearchEndpoint    *string         `json:"search_endpoint"`
 		ErrorReportingDSN *string         `json:"error_reporting_dsn"`
+		ErrorReportingEnabled *bool       `json:"error_reporting_enabled"`
+		ErrorReportingLevel   *string     `json:"error_reporting_level"`
 		GlitchTipBaseURL  *string         `json:"glitchtip_base_url"`
 		GlitchTipOrg      *string         `json:"glitchtip_organization"`
 		ServerBaseURL     *string         `json:"server_base_url"`
@@ -740,6 +744,25 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		// 错误上报 DSN(空串 = 清空/不启用);Sentry 格式,非空结尾必须 /、
 		// 否则 SDK 解析失败——此处仅存,合法性由客户端初始化容错。
 		if err := serverstore.SetSetting(db, "web.error_reporting_dsn", *req.ErrorReportingDSN); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.ErrorReportingEnabled != nil {
+		if err := serverstore.SetSetting(db, "web.error_reporting_enabled", strconv.FormatBool(*req.ErrorReportingEnabled)); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.ErrorReportingLevel != nil {
+		// 等级阈值校验(2026-08):error|warning|info|debug
+		switch *req.ErrorReportingLevel {
+		case "", "error", "warning", "info", "debug":
+		default:
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "reporting_level 必须是 error|warning|info|debug")
+			return
+		}
+		if err := serverstore.SetSetting(db, "web.error_reporting_level", *req.ErrorReportingLevel); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
