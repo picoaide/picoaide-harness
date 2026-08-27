@@ -31,8 +31,9 @@ const server = createServer((req, res) => {
       user: { username: 'admin', id: 1, department: 'dev' },
       usage: { balance: 100, quota: 1000 },
       serverTime: Date.now(),
-      // 错误监控 DSN(联调 2026-08-27):GlitchTip 项目 picoaide-web 的正确格式
-      // public_key(uuid去横线)@host/project_id
+      // 错误监控 DSN(联调 2026-08-27):GlitchTip 项目 picoaide-web。
+      // @sentry/node 要求 DSN 格式 https://<public_key>@host/<project_id>(无尾斜杠),
+      // SDK 内部自动拼 /api/<id>/envelope/
       web: { allow_private: false, search_endpoint: '', error_reporting_dsn: 'https://cc825c63d6494f9f8bb9cff238c1bdae@glitchtip.kq0575.cn/1' },
     }))
     return
