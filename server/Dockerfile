@@ -35,9 +35,6 @@ COPY --from=webadmin /build/dist ./webadmin/dist/
 COPY webadmin/embed.go ./webadmin/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/picoaide-server ./cmd/server
-# sqlite->pg 数据迁移工具(与主服务同构建,随镜像分发;部署脚本 migrate 子命令使用)
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags "-s -w" -o /out/migrate-sqlite-pg ./cmd/migrate-sqlite-pg
 
 # --- Stage 3: 运行镜像(CA 证书用于 HTTPS 上游/LDAPS;entrypoint 降权;数据卷 0700) ---
 FROM alpine:3.21
@@ -45,7 +42,6 @@ RUN apk add --no-cache ca-certificates tzdata su-exec && \
     adduser -D -u 10001 -h /app picoaide
 WORKDIR /app
 COPY --from=build /out/picoaide-server /app/picoaide-server
-COPY --from=build /out/migrate-sqlite-pg /app/migrate-sqlite-pg
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 # 以 root 启动 entrypoint(修正挂载卷所有权)→ su-exec 降权到 picoaide 运行

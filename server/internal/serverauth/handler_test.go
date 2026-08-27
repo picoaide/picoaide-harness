@@ -19,15 +19,11 @@ import (
 
 func newTestAPI(t *testing.T) (*gin.Engine, *sql.DB, func()) {
 	t.Helper()
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "auth.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, cleanup := serverstore.NewTestDB(t)
 	api := New(db)
 	api.RegisterProvider(NewLocalProvider(db))
 	r := gin.New()
 	api.RegisterRoutes(r)
-	cleanup := func() { db.Close() }
 	return r, db, cleanup
 }
 
@@ -179,11 +175,8 @@ func TestLoginRateLimitXFFSpoof(t *testing.T) {
 // C-13: concurrent first logins for the same new external user must not 500
 // (one goroutine's INSERT wins, the rest re-fetch the row).
 func TestProvisionUserConcurrentCreate(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "race.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	api := New(db)
 
 	ui := UserInfo{Username: "raceuser", Source: "external"}
@@ -216,11 +209,8 @@ func TestProvisionUserConcurrentCreate(t *testing.T) {
 }
 
 func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "takeover.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	createUser(t, db, "admin", "Admin@123", true) // local admin
 	api := New(db)
 
@@ -252,11 +242,8 @@ func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
 }
 
 func TestBootstrapAdmin(t *testing.T) {
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "boot.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 
 	// missing env -> error
 	t.Setenv("PICOAI_ADMIN_PASSWORD", "")

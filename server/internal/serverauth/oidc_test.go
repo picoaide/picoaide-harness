@@ -289,11 +289,8 @@ func TestOIDCHandleCallbackNonceMismatch(t *testing.T) {
 func TestOIDCRoutes(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: tempPath(t, "oidc.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
 	api := New(db)
 	api.RegisterOIDC(p)
 	r := gin.New()

@@ -3,7 +3,6 @@ package capabilities
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,11 +19,8 @@ func setupRouter(t *testing.T) (*gin.Engine, *sql.DB, map[string]string, map[str
 	t.Helper()
 	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "1000")
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
-	db, err := serverstore.EnsureMigrated(serverstore.DBConfig{Path: fmt.Sprintf("%s/capabilities.db", t.TempDir())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
 	userTokens := map[string]string{}
 	for _, name := range []string{"alice", "bob"} {
 		uid, err := serverstore.CreateUserWithPassword(db, name, "pw123456")

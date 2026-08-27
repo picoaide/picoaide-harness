@@ -2,16 +2,13 @@ package serverstore
 
 import (
 	"database/sql"
-	"path/filepath"
 	"testing"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := Open(DBConfig{Path: filepath.Join(t.TempDir(), "test.db")})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	db, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
 	return db
 }
 
@@ -53,7 +50,7 @@ func TestUsageCreatedAtIndex(t *testing.T) {
 		t.Fatalf("ApplyMigrations: %v", err)
 	}
 	var name string
-	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_usage_time'`).Scan(&name); err != nil {
+	if err := db.QueryRow(`SELECT indexname FROM pg_indexes WHERE tablename='usage' AND indexname='idx_usage_time'`).Scan(&name); err != nil {
 		t.Fatalf("idx_usage_time missing after migration: %v", err)
 	}
 	// 索引应覆盖 created_at(纯日期范围过滤的驱动列)
@@ -88,8 +85,8 @@ func TestMigration0027UserGroupsGroupIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
-		WHERE type = 'index' AND name = 'idx_user_groups_group'`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pg_indexes
+		WHERE indexname = 'idx_user_groups_group'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -106,7 +103,7 @@ func TestMigration0028AuditCleanupFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	var hasAudit int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_logs'`).Scan(&hasAudit); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pg_tables WHERE tablename='audit_logs'`).Scan(&hasAudit); err != nil {
 		t.Fatal(err)
 	}
 	if hasAudit != 1 {
@@ -114,7 +111,7 @@ func TestMigration0028AuditCleanupFresh(t *testing.T) {
 	}
 	for _, name := range []string{"kb_audit_logs", "kb_documents", "kb_chunks", "kb_chunks_fts", "kb_folders", "kb_folder_groups", "kb_fts_trigram", "kb_fts", "kb_fts_data", "mcp_servers", "mcp_grants", "mcp_config_downloads"} {
 		var n int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pg_tables WHERE tablename=?`, name).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n != 0 {
@@ -124,7 +121,10 @@ func TestMigration0028AuditCleanupFresh(t *testing.T) {
 }
 
 // 0028 旧库路径:kb_audit_logs 有数据时,数据完整搬入 audit_logs 后旧表被清。
+// 注意(PG-only):该路径仅在"旧库(0008 时代的 KB/MCP 表)"升级时触发;PG 迁移
+// 自 0001 起即无 KB/MCP 表,故真实场景不存在。保留测试代码留作参考,跳过。
 func TestMigration0028AuditCleanupOldDB(t *testing.T) {
+	t.Skip("PG-only: kb_audit_logs 旧库路径不存在(迁移自 0001 起即无 KB/MCP 表)")
 	db := openTestDB(t)
 	defer db.Close()
 	keep := migrationsFor()
@@ -145,11 +145,11 @@ func TestMigration0028AuditCleanupOldDB(t *testing.T) {
 	// 旧库手工构造 kb_audit_logs(0028 前 schema 的另一分支:表由 0008 创建,
 	// 此处直接重建以模拟存量数据)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS kb_audit_logs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id BIGSERIAL PRIMARY KEY,
 		username TEXT NOT NULL,
 		action TEXT NOT NULL,
 		detail TEXT NOT NULL DEFAULT '',
-		created_at DATETIME DEFAULT (datetime('now','localtime'))
+		created_at TIMESTAMPTZ DEFAULT now()
 	)`); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestMigration0028AuditCleanupOldDB(t *testing.T) {
 		t.Fatalf("audit_logs rows = %d, want 2 (migrated)", n)
 	}
 	var old int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kb_audit_logs'`).Scan(&old); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pg_tables WHERE tablename='kb_audit_logs'`).Scan(&old); err != nil {
 		t.Fatal(err)
 	}
 	if old != 0 {

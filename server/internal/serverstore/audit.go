@@ -107,6 +107,6 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 // PurgeOldAuditLogs deletes audit entries older than cutoff (audit
 // retention housekeeping, run at startup; 90 days by default).
 func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
-	_, err := db.Exec("DELETE FROM audit_logs WHERE created_at < ?", cutoff.Format(sqliteTimeFmt))
+	_, err := db.Exec("DELETE FROM audit_logs WHERE created_at < ?", cutoff.Format(pgTimeFmt))
 	return err
 }
