@@ -38,10 +38,7 @@ func GrantSkill(db queryer, skillName, grantee string, t GranteeType) error {
 	if !ok {
 		return ErrValidation
 	}
-	stmt := "INSERT OR IGNORE INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, ?, ?)"
-	if currentDriver == DriverPG {
-		stmt = "INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
-	}
+	stmt := "INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
 	_, err := db.Exec(stmt, skillName, t, g)
 	return err
 }
@@ -141,10 +138,7 @@ func GrantSharedResource(db queryer, table SharedGrantableTable, resourceName, g
 	if !ok {
 		return ErrValidation
 	}
-	stmt := "INSERT OR IGNORE INTO " + table.Table + " (" + table.Col + ", grantee_type, grantee) VALUES (?, ?, ?)"
-	if currentDriver == DriverPG {
-		stmt = "INSERT INTO " + table.Table + " (" + table.Col + ", grantee_type, grantee) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
-	}
+	stmt := "INSERT INTO " + table.Table + " (" + table.Col + ", grantee_type, grantee) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
 	_, err := db.Exec(stmt, resourceName, t, g)
 	return err
 }
