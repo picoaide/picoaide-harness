@@ -6,12 +6,12 @@
 #   sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 # 非交互(全部配置用环境变量):
 #   curl -fsSL <本脚本地址> | sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password \
-#     DB_MODE=sqlite bash
+#     DB_MODE=pg bash
 #
 # 环境变量(全部可选,均有默认值;交互模式可省略,由脚本经 /dev/tty 询问):
 #   DOMAIN            对外域名或 IP(生产必改;交互时会询问,非交互必须提供)
 #   INSTALL_DIR       部署目录(默认 /data/picoaide/deploy;兼容旧版 DEPLOY_DIR)
-#   DB_MODE           数据库后端: sqlite(默认) | pg(内置 postgres 容器,完整 compose) | pg-external(已有实例,完整 compose)
+#   DB_MODE           数据库后端: pg(默认,内置 postgres 容器,完整 compose) | pg-external(已有实例,完整 compose)
 #   PG_PASSWORD       pg 模式:内置 postgres 密码(缺省随机生成并写入 .env)
 #   PG_DSN            pg-external 必填(如 postgres://user:pass@host:5432/db)
 #   ADMIN_USER        超管用户名(默认 admin)
@@ -36,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-${DEPLOY_DIR:-/data/picoaide/deploy}}"
 DOMAIN="${DOMAIN:-}"
-DB_MODE="${DB_MODE:-sqlite}"
+DB_MODE="${DB_MODE:-pg}"
 PG_PASSWORD="${PG_PASSWORD:-}"
 PG_DSN="${PG_DSN:-}"
 ADMIN_USER="${ADMIN_USER:-admin}"
@@ -50,7 +50,7 @@ DOCKER_MIRROR="${DOCKER_MIRROR:-}"
 MIRROR_URL="${MIRROR_URL:-}"
 DEPLOY_BASE_URL="${DEPLOY_BASE_URL:-https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server}"
 
-ASSETS="docker-compose.yml Caddyfile.autocert Caddyfile.manual .env.example docker-compose.pg.yml docker-compose.pg-ext.yml"
+ASSETS="docker-compose.yml Caddyfile.autocert Caddyfile.manual .env.example docker-compose.pg-ext.yml"
 DEPLOY_SH="$SCRIPT_DIR/deploy.sh"
 SUDO=""
 LOG_FILE="${LOG_FILE:-/tmp/picoaide-install.log}"
@@ -260,10 +260,10 @@ step4_config() {
   fi
   log "  证书模式: $TLS_MODE"
 
-  # DB 模式(sqlite/pg/pg-external)
+  # DB 模式(pg/pg-external)
   case "$DB_MODE" in
-    sqlite|pg|pg-external) : ;;
-    *) fail "DB_MODE 仅支持 sqlite/pg/pg-external" ;;
+    pg|pg-external) : ;;
+    *) fail "DB_MODE 仅支持 pg/pg-external" ;;
   esac
   log "  数据库: $DB_MODE"
   if [ "$DB_MODE" = "pg-external" ] && [ -z "$PG_DSN" ]; then
