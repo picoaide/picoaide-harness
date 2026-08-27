@@ -1,6 +1,6 @@
 ---
 title: Private Deployment Guide
-description: 'Understand PicoAide Harness deployment in an enterprise intranet: standalone desktop / containerized server, dual backends of SQLite and PostgreSQL, LDAP/OIDC integration and operations.'
+description: 'Understand PicoAide Harness deployment in an enterprise intranet: containerized server (PostgreSQL), LDAP/OIDC integration and operations.'
 ---
 
 This article describes how PicoAide Harness is deployed in an enterprise intranet, from environment preparation to onboarding members.
@@ -17,10 +17,10 @@ This article describes how PicoAide Harness is deployed in an enterprise intrane
 - **Desktop client**: Windows 10+ x64 / macOS 12+ (Apple silicon) / Linux x64 (AppImage + deb); no Node.js, pnpm or DSH required;
 - **Server**: Linux x64 server; a single binary is enough to run (`picoaide-server`, gin), and Docker Compose containerization is also supported (Caddy reverse proxy, fixed IP on a private subnet, non-root uid 10001, data bind mount);
 - **Database**:
-  - **SQLite (default)**: single file `picoaide-data/picoaide.db` + `master.key` (0700), zero operations overhead;
+
   - **Built-in PostgreSQL**: `DB_MODE=pg`, a postgres:16-alpine container within Compose;
   - **External PostgreSQL**: `DB_MODE=pg-external` + `PG_DSN` (for enterprises that already run PG centrally);
-  - SQLite → PG provides a **data migration tool** (schema and indexes aligned for both the SQLite and PG backends).
+
 
 ## Deployment methods
 
@@ -37,7 +37,7 @@ The `deploy.sh` subcommands **automatically apply a compose override** based on 
 - `install`: subnet/port preflight → DNS/CDN validation (auto mode) → certificate preparation → generate `.env`/Caddyfile → pull images and start → wait for `/healthz` readiness;
 - `update`: pull new images and rebuild (data directory unchanged, zero-downtime upgrade; migrations run automatically in order);
 - `backup`: package `picoaide-data` (database + master.key) + the Caddy certificate store in auto mode + `pg_dump` in pg mode;
-- `migrate [--dry-run]`: SQLite → PostgreSQL data migration;
+
 - `uninstall [--volumes]`: stop containers (optionally delete the data directory).
 
 ### Docker Compose architecture
@@ -52,7 +52,7 @@ Employee clients / browsers
    Go server (non-root uid 10001, exposes 8080, fixed IP 172.28.0.3)
       │
       ▼
-   ./picoaide-data/ (SQLite picoaide.db + master.key, bind mount, not lost on upgrade)
+   ./picoaide-data/ (master.key + app data, bind mount, not lost on upgrade)
 ```
 
 - Custom private-subnet bridge (default `172.28.0.0/24`, configurable via `NETWORK_SUBNET`); fixed IPs stay unchanged across container rebuilds;
