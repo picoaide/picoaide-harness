@@ -16,5 +16,5 @@ export interface BootstrapConfig {
   models: BootstrapModel[]
   skills: { name: string; version: string; description: string }[]
   mcp: { id: number; name: string; description: string; recommended: boolean }[]
-  web: { allow_private: boolean; search_endpoint: string; error_reporting_dsn?: string }
+  web: { allow_private: boolean; search_endpoint: string; error_reporting_dsn?: string; error_reporting_enabled?: boolean; error_reporting_level?: string }
 }
