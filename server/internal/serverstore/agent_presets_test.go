@@ -274,3 +274,56 @@ func TestAgentPresetQuality(t *testing.T) {
 		t.Fatalf("missing = %v, want ErrNotFound", err)
 	}
 }
+
+// TestAgentPresetArchiveDB: 0041 — CreateAgentPresetCapped stores the archive
+// blob; SetAgentPresetArchive updates it; GetAgentPresetArchive reads it;
+// IncrementAgentPresetDownload bumps the counter; list views exclude the blob.
+func TestAgentPresetArchiveDB(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	blob := []byte("gz-tar-preset")
+	p := &AgentPreset{Name: "arch", Version: "1.0.0", Author: "alice", Status: AgentPresetPending, Archive: blob, Checksum: "sum1"}
+	if _, err := CreateAgentPresetCapped(db, p, 10); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetAgentPresetArchive(db, "arch", "1.0.0")
+	if err != nil || string(got) != string(blob) {
+		t.Fatalf("archive = %q err=%v", got, err)
+	}
+	// 单行读带 Archive;列表读不带 blob。
+	row, err := GetAgentPresetByVersion(db, "arch", "1.0.0")
+	if err != nil || string(row.Archive) != string(blob) {
+		t.Fatalf("row archive = %q err=%v", row.Archive, err)
+	}
+	all, err := ListAgentPresets(db, "")
+	if err != nil || len(all) != 1 || len(all[0].Archive) != 0 {
+		t.Fatalf("list = %+v err=%v (blob must be excluded)", all, err)
+	}
+	// 下载计数。
+	if ok, err := IncrementAgentPresetDownload(db, "arch", "1.0.0"); err != nil || !ok {
+		t.Fatalf("download inc: ok=%v err=%v", ok, err)
+	}
+	row, _ = GetAgentPresetByVersion(db, "arch", "1.0.0")
+	if row.Downloads != 1 {
+		t.Fatalf("downloads = %d, want 1", row.Downloads)
+	}
+	// 覆盖归档(重提路径)。
+	if err := SetAgentPresetArchive(db, "arch", "1.0.0", []byte("v2")); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = GetAgentPresetArchive(db, "arch", "1.0.0")
+	if string(got) != "v2" {
+		t.Fatalf("after overwrite = %q", got)
+	}
+	// 清除归档(删除路径)。
+	if err := ClearAgentPresetArchive(db, "arch", "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = GetAgentPresetArchive(db, "arch", "1.0.0")
+	if err != nil || got != nil {
+		t.Fatalf("after clear = %q err=%v", got, err)
+	}
+}
