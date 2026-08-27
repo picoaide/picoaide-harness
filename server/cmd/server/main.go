@@ -61,6 +61,18 @@ func main() {
 	}
 	defer db.Close()
 
+	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等),随后清理
+	// 超出保留期的明细分区(先校验对应月日账已生成,防删明细丢账)。
+	if n, rerr := serverstore.EffectiveRetentionMonths(db); rerr == nil {
+		from := time.Now().AddDate(0, -max(n, 6), 0)
+		if lerr := serverstore.RebuildUsageLedger(db, from, time.Now()); lerr != nil {
+			log.Printf("startup rebuild usage ledger: %v", lerr)
+		}
+	}
+	if cerr := serverstore.CleanupUsageRetention(db); cerr != nil {
+		log.Printf("startup cleanup usage retention: %v", cerr)
+	}
+
 	if *bootstrapAdmin != "" {
 		if err := serverauth.EnsureBootstrapAdmin(db, *bootstrapAdmin); err != nil {
 			log.Fatalf("bootstrap admin: %v", err)
