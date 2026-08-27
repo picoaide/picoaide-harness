@@ -235,7 +235,10 @@ window.__ModuleLoader__.load({
 				setBusy("connect");
 				try {
 					await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/connect`, { method: "POST" });
-					if (entry.request?.fields && entry.request.fields.length > 0) setFormValues({});
+					if (entry.request?.fields && entry.request.fields.length > 0) {
+						const defaults = Object.fromEntries(entry.request.fields.filter((f) => f.defaultValue != null).map((f) => [f.key, f.defaultValue]));
+						setFormValues(defaults);
+					}
 					onChanged();
 				} catch (e) {
 					setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e));
