@@ -83,8 +83,8 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 
 ## 服务器信息
 
-- 展示当前服务端版本、数据库驱动（sqlite / pg）、构建信息；健康检查状态（`/healthz`）与运行环境摘要。
+- 展示当前服务端版本、数据库驱动（PostgreSQL）、构建信息；健康检查状态（`/healthz`）与运行环境摘要。
 
 ## 部署相关
 
-服务端以单二进制运行，也可走 Docker Compose（Caddy 反代 + 私有网段固定 IP + 非 root + bind mount 数据目录）；数据库支持 SQLite（默认）/ 内置 PostgreSQL / 外部 PostgreSQL。详见[私有化部署指南](./deployment)。
+服务端以单二进制运行，也可走 Docker Compose（Caddy 反代 + 私有网段固定 IP + 非 root + bind mount 数据目录）；数据库为 PostgreSQL（内置或外部实例，PG-only）。详见[私有化部署指南](./deployment)。
