@@ -581,6 +581,8 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"allow_private":       allowPrivate,
 		"search_endpoint":     settings["web.search_endpoint"],
 		"error_reporting_dsn": settings["web.error_reporting_dsn"],
+		"glitchtip_base_url":     settings["web.glitchtip_base_url"],
+		"glitchtip_organization": settings["web.glitchtip_organization"],
 		"server_base_url":     settings["server.base_url"],
 	})
 }
@@ -633,6 +635,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		AllowPrivate      *bool           `json:"allow_private"`
 		SearchEndpoint    *string         `json:"search_endpoint"`
 		ErrorReportingDSN *string         `json:"error_reporting_dsn"`
+		GlitchTipBaseURL  *string         `json:"glitchtip_base_url"`
+		GlitchTipOrg      *string         `json:"glitchtip_organization"`
 		ServerBaseURL     *string         `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -736,6 +740,20 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		// 错误上报 DSN(空串 = 清空/不启用);Sentry 格式,非空结尾必须 /、
 		// 否则 SDK 解析失败——此处仅存,合法性由客户端初始化容错。
 		if err := serverstore.SetSetting(db, "web.error_reporting_dsn", *req.ErrorReportingDSN); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.GlitchTipBaseURL != nil {
+		// GlitchTip 连接器地址(统一分发;空串 = 清空,客户端不预填)
+		if err := serverstore.SetSetting(db, "web.glitchtip_base_url", *req.GlitchTipBaseURL); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.GlitchTipOrg != nil {
+		// GlitchTip 组织 slug(统一分发)
+		if err := serverstore.SetSetting(db, "web.glitchtip_organization", *req.GlitchTipOrg); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

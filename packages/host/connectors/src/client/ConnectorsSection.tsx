@@ -24,7 +24,7 @@ interface ConnectorEntry {
     verificationUrl?: string
     userCode?: string
     message?: string
-    fields?: { key: string; label: string; type: string; required?: boolean }[]
+    fields?: { key: string; label: string; type: string; required?: boolean; defaultValue?: string }[]
   } | null
 }
 
@@ -175,7 +175,14 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
         `/api/pico/connectors/${encodeURIComponent(entry.id)}/connect`,
         { method: 'POST' },
       )
-      if (entry.request?.fields && entry.request.fields.length > 0) setFormValues({})
+      if (entry.request?.fields && entry.request.fields.length > 0) {
+        // 统一分发(2026-08):服务端下发的默认值(如 GlitchTip 地址/组织 slug)
+        // 预填字段,用户只需填 token。
+        const defaults = Object.fromEntries(
+          entry.request.fields.filter((f) => f.defaultValue != null).map((f) => [f.key, f.defaultValue!]),
+        )
+        setFormValues(defaults)
+      }
       onChanged()
     } catch (e) {
       setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
