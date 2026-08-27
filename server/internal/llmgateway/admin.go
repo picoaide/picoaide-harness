@@ -784,11 +784,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.DefaultThinkingLevel != nil {
-		// 默认思考强度(2026-08):客户端默认模型 reasoningEffort
+		// 默认思考强度(2026-08):客户端默认模型 reasoningEffort,
+		// 与 llm-deepseek 适配器支持档位对齐(off|low|high|max)
 		switch *req.DefaultThinkingLevel {
-		case "", "off", "minimal", "low", "medium", "high", "xhigh", "max":
+		case "", "off", "low", "high", "max":
 		default:
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "default_thinking_level 必须是 off|minimal|low|medium|high|xhigh|max")
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "default_thinking_level 必须是 off|low|high|max")
 			return
 		}
 		if err := serverstore.SetSetting(db, "web.default_thinking_level", *req.DefaultThinkingLevel); err != nil {
