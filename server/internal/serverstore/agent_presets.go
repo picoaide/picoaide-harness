@@ -83,22 +83,11 @@ func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64,
 		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status,
 		p.Author, AgentPresetPending, pendingCap,
 	}
-	if currentDriver == DriverPG {
-		var id int64
-		err := db.QueryRow(q+" RETURNING id", args...).Scan(&id)
+	var id int64
+	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrTooManyPending
 		}
-		if err != nil {
-			if isUniqueViolation(err) {
-				return 0, ErrDuplicate
-			}
-			return 0, err
-		}
-		return id, nil
-	}
-	var id int64
-	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
 		}

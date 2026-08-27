@@ -124,22 +124,12 @@ func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64,
 		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status,
 		s.Author, SharedSkillPending, pendingCap,
 	}
-	if currentDriver == DriverPG {
-		var id int64
-		err := db.QueryRow(q+" RETURNING id", args...).Scan(&id)
+
+	var id int64
+	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrTooManyPending
 		}
-		if err != nil {
-			if isUniqueViolation(err) {
-				return 0, ErrDuplicate
-			}
-			return 0, err
-		}
-		return id, nil
-	}
-	var id int64
-	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
 		}
