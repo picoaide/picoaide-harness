@@ -750,11 +750,8 @@ export default function Gateway() {
               <SelectTrigger id="default-thinking-level" aria-label="默认思考强度"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="max">max(最大思考)</SelectItem>
-                <SelectItem value="xhigh">xhigh(极高)</SelectItem>
                 <SelectItem value="high">high(高)</SelectItem>
-                <SelectItem value="medium">medium(中)</SelectItem>
                 <SelectItem value="low">low(低)</SelectItem>
-                <SelectItem value="minimal">minimal(最小)</SelectItem>
                 <SelectItem value="off">off(关闭思考)</SelectItem>
               </SelectContent>
             </Select>
