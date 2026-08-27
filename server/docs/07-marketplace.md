@@ -21,9 +21,11 @@
 
 ## 3. 技能包格式(skill_pack.go)
 
-- 管理端上架时填 `git_url` + `git_ref`;服务端 clone 到 `data/skills-cache/`,校验仓库内元数据后构建归档 `cacheDir/<name>-<version>.tar.gz`(缓存命中直接返回)。
+- **上传模式(推荐,0040)**:管理端「上传新版」提交 `.tar.gz`,归档直接存 `skills.archive`(DB 行),`source='upload'`;下载不再走磁盘 clone/打包。
+- **Git 模式(兼容)**:上架时填 `git_url` + `git_ref`;服务端 clone 到 `data/skills-cache/`,校验仓库内元数据后构建归档 `cacheDir/<name>-<version>.tar.gz`(缓存命中直接返回)。
 - 仓库内元数据(YAML):`name` / `version` / `author` / `description`;归档 version 必须与元数据一致,否则构建失败。
 - 技能内容:Markdown 指令文件等(无独立执行环境);客户端安装后解析为指令注入系统提示词(`## Skills` 段),为 Agent 提供领域知识/流程/工具使用说明。
+- **下载/调用统计(0040)**:`GET /archive` 成功即 `downloads+1`;客户端 `POST /api/telemetry/skill-call` 上报技能调用(模型 `skill` 工具成功 / 用户 `/name` 手势注入),服务端按 shared_skills(name+version)或 market(name)累加 `calls`。
 
 ## 4. Skill 安装(desktop/src/main/skill/)
 
