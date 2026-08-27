@@ -1,6 +1,6 @@
 ---
 title: 企业私有化部署指南
-description: 了解 PicoAide Harness 的企业内网部署形态：单机桌面 / 容器化服务端、SQLite 与 PostgreSQL 双后端、LDAP/OIDC 接入与运维。
+description: 了解 PicoAide Harness 的企业内网部署形态：容器化服务端(PostgreSQL)、LDAP/OIDC 接入与运维。
 ---
 
 本文介绍 PicoAide Harness 在企业内网中的部署形态，从环境准备到接入成员。
@@ -17,10 +17,10 @@ description: 了解 PicoAide Harness 的企业内网部署形态：单机桌面 
 - **桌面客户端**：Windows 10+ x64 / macOS 12+（Apple 芯片）/ Linux x64（AppImage + deb）；无需 Node.js、pnpm 或 DSH；
 - **服务端**：Linux x64 服务器；单二进制即可运行（`picoaide-server`，gin），也支持 Docker Compose 容器化（Caddy 反代、私有网段固定 IP、非 root uid 10001、数据 bind mount）；
 - **数据库**：
-  - **SQLite（默认）**：单文件 `picoaide-data/picoaide.db` + `master.key`（0700），零运维；
+  
   - **内置 PostgreSQL**：`DB_MODE=pg`，Compose 内 postgres:16-alpine 容器；
   - **外部 PostgreSQL**：`DB_MODE=pg-external` + `PG_DSN`（企业已有 PG 统一运维）；
-  - SQLite → PG 提供**数据迁移工具**（表结构与索引对齐 SQLite + PG 双后端）。
+
 
 ## 部署方式
 
@@ -37,7 +37,7 @@ sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 - `install`：网段/端口预检 → DNS/CDN 校验（auto 模式）→ 证书准备 → 生成 `.env`/Caddyfile → 拉镜像启动 → 等待 `/healthz` 就绪；
 - `update`：拉新镜像重建（数据目录不变，零停机升级；迁移自动按序执行）；
 - `backup`：打包 `picoaide-data`（数据库 + master.key）+ auto 模式 Caddy 证书库 + pg 模式 `pg_dump`；
-- `migrate [--dry-run]`：SQLite → PostgreSQL 数据迁移；
+
 - `uninstall [--volumes]`：停容器（可选删除数据目录）。
 
 ### Docker Compose 架构
@@ -52,7 +52,7 @@ sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
    Go 服务端（非 root uid 10001，expose 8080，固定 IP 172.28.0.3）
       │
       ▼
-   ./picoaide-data/（SQLite picoaide.db + master.key，bind mount，升级不丢）
+   ./picoaide-data/（master.key + 应用数据，bind mount，升级不丢）
 ```
 
 - 私有网段自定义 bridge（默认 `172.28.0.0/24`，`NETWORK_SUBNET` 可改）；固定 IP 容器重建后不变；

@@ -18,7 +18,7 @@
 │ server           │   固定 IP 172.28.0.3
 └──────┬───────────┘
        ▼
-   ./picoaide-data/   SQLite picoaide.db + master.key(0700,目录 bind mount,升级不丢)
+   ./picoaide-data/   master.key + 应用数据(0700,目录 bind mount,升级不丢)
 ```
 
 - 私有网段:自定义 bridge `picoaide-net`,默认子网 `172.28.0.0/24`(`.env` 的 `NETWORK_SUBNET` 可改)。
@@ -26,12 +26,13 @@
 - server 不映射宿主机端口,外部流量只能经 Caddy 进入(内网隔离 + 攻击面收敛)。
 - **所有持久化数据均用 `./` 当前目录 bind mount,不使用命名卷**:`picoaide-data/`(数据库+主密钥)、`caddy-data/`(Caddy 自动证书库)、`caddy-config/`(Caddy 配置)+ `certs/`(手动证书);pg 模式另加 `pg-data/`(内置 postgres 数据)。备份 = 直接拷走部署目录或 `deploy.sh backup`。
 
-### 0.1 数据库后端:SQLite / PostgreSQL
+### 0.1 数据库后端:PostgreSQL(PG-only 2026-08)
+
+> 2026-08 起 SQLite 已全面下线,服务端必须使用 PostgreSQL。
 
 | 模式 | DB_MODE | 数据落地 | 适用 |
 |---|---|---|---|
-| SQLite(默认) | `sqlite` | `picoaide-data/picoaide.db`(单文件) | 单机/小规模,零运维 |
-| 内置 PostgreSQL | `pg` | `pg-data/`(容器 `postgres:16-alpine`,固定 IP `.4`) | 需要完整 PG 能力/集中管理 |
+| 内置 PostgreSQL(默认) | `pg` | `pg-data/`(容器 `postgres:16-alpine`,固定 IP `.4`) | 默认;完整 PG 能力 |
 | 外部 PostgreSQL | `pg-external` | 外部实例(`PG_DSN` 指定) | 企业已有 PG 统一运维 |
 
 pg 模式架构(caddy → server → postgres,全部内网固定 IP):
@@ -55,9 +56,9 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 └──────────────────┘
 ```
 
-- 两种 pg 模式都需要含 `-db-driver`/`migrate-sqlite-pg` 的服务端镜像(发布 0.5.0+ 或本地 `make docker-image`);
+- 需要含 `-db-driver` 支持的服务端镜像(发布 0.5.0+ 或本地 `make docker-image`);
 - 服务端首次启动自动应用 `migrations-pg` 建表(幂等,空库即建);
-- SQLite→PG 数据迁移:`./deploy.sh migrate`(见 §6.3),PG→SQLite 不提供。
+- usage 明细按月原生分区(保留 N 月可配,默认 6),日/月账本永久保留(见 docs/06-database.md)。
 
 ## 1. 镜像来源与发布(编译 → 验证 → 推送)
 
@@ -129,7 +130,7 @@ mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -subj "/CN=<域名>" -addext "subjectAltName=DNS:<域名>"   # IP 用 subjectAltName=IP:<IP>
 chmod 600 certs/server.key
 
-# 3. 启动(sqlite 默认 DB_MODE)
+# 3. 启动(默认 DB_MODE=pg,主 docker-compose.yml 即 PostgreSQL 模式)
 docker compose up -d
 
 # 3'. PostgreSQL 模式(用完整独立 compose,含 caddy+server+postgres):
@@ -183,14 +184,14 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
-  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password DB_MODE=sqlite bash
+  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password DB_MODE=pg bash
 ```
 
 | 安装器环境变量 | 默认 | 说明 |
 |---|---|---|
 | `DOMAIN` | - | 对外域名或 IP(生产必改;交互时询问,非交互必填) |
 | `INSTALL_DIR` | /data/picoaide/deploy | 部署目录(兼容旧版 `DEPLOY_DIR`) |
-| `DB_MODE` | sqlite | sqlite / pg(内置容器)/ pg-external(已有实例) |
+| `DB_MODE` | pg | pg(内置容器,默认)/ pg-external(已有实例) |
 | `PG_PASSWORD` | 随机生成 | pg 模式:postgres 容器密码 |
 | `PG_DSN` | - | pg-external 必填(如 `postgres://user:pass@host:5432/db`) |
 | `ADMIN_USER` / `ADMIN_PASS` | admin / 随机生成 | 超管账号/密码(兼容 `PICOAI_ADMIN_PASSWORD`) |
@@ -221,10 +222,9 @@ cd server
 | `status` | 容器状态 + 健康检查 + 固定 IP 一览 |
 | `logs [-t]` | 查看日志(--tail=200;`-t` 跟踪) |
 | `backup` | 打包 `picoaide-data`(含 master.key)+ auto 模式 `caddy-data` + pg 模式 `pg_dump` |
-| `migrate [--dry-run]` | SQLite→PostgreSQL 数据迁移(见 §6.3) |
 | `uninstall [--volumes]` | 停容器;`--volumes` 连数据目录一并删除(需确认,交互或 `UNINSTALL_VOLUMES=yes`) |
 
-`install`/`update`/`status`/`logs`/`backup`/`uninstall` 都会根据 `.env` 的 `DB_MODE` 选择**完整独立 compose 文件**(sqlite → `docker-compose.yml` caddy+server;pg → `docker-compose.pg.yml` caddy+server+postgres;pg-external → `docker-compose.pg-ext.yml` caddy+server,外部 PG),无需手工指定 `-f`。
+`install`/`update`/`status`/`logs`/`backup`/`uninstall` 都会根据 `.env` `DB_MODE` 选择 compose 文件(pg → 主 `docker-compose.yml` caddy+server+postgres;pg-external → `docker-compose.pg-ext.yml` caddy+server,外部 PG),无需手工指定 `-f`。
 
 ### 4.2 环境变量(非交互)
 
@@ -241,14 +241,13 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 | `ADMIN_USER` / `PICOAI_ADMIN_PASSWORD` | admin / 随机生成 | 首次启动创建超管;已有 admin 后密码可清空 |
 | `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry |
 | `NETWORK_SUBNET` / `CADDY_IP` / `SERVER_IP` | 172.28.0.0/24 / .2 / .3 | 私有网段与固定 IP |
-| `DB_MODE` | sqlite | sqlite / pg / pg-external(见 §0 与 §6.3) |
+| `DB_MODE` | pg | pg(内置容器,默认)/ pg-external(已有实例,见 §0) |
 | `PG_PASSWORD` | 随机生成 | pg 模式:内置 postgres 容器密码 |
 | `PG_DSN` | - | pg-external 必填;pg 模式由脚本生成 `postgres://picoaide:<pw>@postgres:5432/picoaide` |
 | `PG_IMAGE` | postgres:16-alpine | pg 模式内置镜像(可换内网镜像) |
 | `PG_IP` | 172.28.0.4 | pg 容器固定 IP(需在 NETWORK_SUBNET 内) |
 | `CONFIRM_CDN` | 空 | auto 模式非直连时 `yes` 跳过人工确认 |
 | `REINSTALL` | 空 | `.env` 已存在时 `yes` 清除重装(否则安全退出) |
-| `MIGRATE` | 空 | migrate 子命令 `yes` 跳过交互确认 |
 | `INSTALL_DIR`(install-server.sh) | /data/picoaide/deploy | 部署目录(旧版 INSTALL_DIR 兼容) |
 
 ### 4.3 命令存在性检查(内置,缺失即提示安装并退出)
@@ -282,44 +281,21 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 #      deploy-backup/pg-data-<时间>.dump(pg 模式:pg_dump 自定义格式,含 schema+数据)
 ```
 
-**master.key 丢失 = 已加密的上游密钥/商城凭证不可解密(永久失效)**。离线备份:直接 `cp -a picoaide-data/ 备份目录`(SQLite 单文件 + key,先 `docker compose stop server` 或直接冷备)。
+**master.key 丢失 = 已加密的上游密钥/商城凭证不可解密(永久失效)**。离线备份:直接 `cp -a picoaide-data/ 备份目录`(key + 应用数据,先 `docker compose stop server` 或直接冷备)。
 
-### 6.3 SQLite → PostgreSQL 迁移(deploy.sh migrate)
+### 6.3 数据保留与账本(PG-only)
 
-前置:已有一份 SQLite 部署(`picoaide-data/picoaide.db`),且目标 PostgreSQL 可达(内置容器或外部实例);**服务端镜像须含迁移工具与 `-db-driver` 支持**(0.5.0+ 或本地 `make docker-image`)。PG 模式首次启动会自动应用 `migrations-pg` 建表(幂等)。
+> SQLite → PostgreSQL 历史迁移工具(deploy.sh migrate/migrate-sqlite-pg)已于
+> 2026-08 全面下线(PG-only 起删除)。老 SQLite 用户如需升级,请先在本仓库
+> 历史版本(如 967c950d2e 之前)完成 migrate 后再升级本版本。
 
-```bash
-cd <部署目录>
-./deploy.sh migrate --dry-run     # ① 预览:只统计各表行数,不写入
-./deploy.sh backup                # ② 备份(强烈建议,回滚点)
-./deploy.sh migrate               # ③ 正式迁移(交互确认;MIGRATE=yes 无人值守)
-```
+PG 部署后数据保留说明:
 
-迁移流程(脚本自动完成):校验(DB_MODE=pg|pg-external + PG_DSN + sqlite 源)→ 起 postgres(内置模式)→ 停 server 保证 SQLite 一致性 → 清空目标库 12 张表(TRUNCATE ... CASCADE)→ 迁移镜像 `migrate-sqlite-pg` 写入(12 表按 FK 依赖序,时间戳转换,sequence setval)→ `.env` 的 `DB_MODE` 改为 `pg` → `docker compose up -d` → 健康等待。
-
-- **迁移后原 SQLite 文件保留**(`picoaide-data/picoaide.db`,回滚点);
-- **回滚**:`.env` 改回 `DB_MODE=sqlite` → `docker compose up -d`(SQLite 数据未动);
-- master.key 不变(加密凭证仍可解密;注意 `pg_dump` 不含 master.key,备份保留 picoaide-data);
-- SQLite→PG **没有自动迁移工具**(需上述 migrate);PG→SQLite 回迁同样不提供。
-
-### 6.4 恢复
-
-```bash
-docker compose stop server            # 先停服
-tar xzf deploy-backup/picoaide-data-<时间>.tar.gz -C picoaide-data/   # 解包覆盖(注意路径)
-# auto 模式还恢复 Caddy 证书库:
-tar xzf deploy-backup/caddy-data-<时间>.tar.gz -C .                    # 解包出 caddy-data/
-# pg 模式恢复数据(pg_dump 产物):
-docker exec -i picoaide-postgres pg_restore -U picoaide -d picoaide < deploy-backup/pg-data-<时间>.dump
-docker compose up -d
-```
-
-### 6.5 卸载
-
-```bash
-./scripts/deploy.sh uninstall              # 停容器,保留数据目录(picoaide-data/ caddy-data/ caddy-config/)
-./scripts/deploy.sh uninstall --volumes    # 停容器并删除以上数据目录(需确认)
-```
+- **usage 明细**:按月原生分区,保留 N 个月(settings `usage.retention_months`,
+  默认 6,0=永久,1~120),超出保留期的整分区被自动 DROP(先校验日账生成);
+- **usage_daily 日账 / usage_monthly 月账**:永久保留,由 `RebuildUsageLedger`
+  从明细生成(幂等可重算,启动时补算近 N 个月 + 每日任务);
+- 用量统计 API:保留窗口内查明细(分区裁剪),窗口外查账本——历史统计 10 年不丢。
 
 ## 7. 安全清单
 
@@ -365,10 +341,10 @@ docker compose up -d
 → `docker exec picoaide-server /app/picoaide-server --version`(输出镜像构建注入的版本号)。
 
 **Q11:PG 模式需要什么镜像?**
-→ 服务端镜像须含 `-db-driver`/`migrate-sqlite-pg`(本分支 `feat/pgsql-storage` 已实现;发布镜像 0.5.0+ 或本地 `make docker-image`)。旧镜像(0.4.x)用 `docker exec … --version` 与 `docker run --rm --entrypoint picoaide-server <img> -h | grep db-driver` 校验;缺失时安装器会给出提示(`SKIP_IMAGE_CHECK=1` 可跳过)。
+→ 服务端镜像须含 `-db-driver` 支持(发布 0.5.0+ 或本地 `make docker-image`);缺失时安装器会给出提示(`SKIP_IMAGE_CHECK=1` 可跳过)。
 
-**Q12:SQLite → PG 要迁数据吗?**
-→ 已有 SQLite 数据:先 `./deploy.sh migrate --dry-run` 预览,backup 后 `./deploy.sh migrate`(§6.3);全新部署:直接 `DB_MODE=pg` 安装,PG 空库自动建表。
+**Q12:用量明细/历史统计保留多久?**
+→ 明细默认保留 6 个月(可配 0=永久);日账/月账统计永久保留,窗口外查询自动走账本(§6.3)。
 
 **Q13:内置 postgres 容器安全吗?**
 → 不发布宿主机端口(仅 picoaide-net 内网);`PG_PASSWORD` 在 .env(600);建议企业内网同时限制到 pg 容器的网络(防火墙/iptables 只放行宿主机 80/443)。
