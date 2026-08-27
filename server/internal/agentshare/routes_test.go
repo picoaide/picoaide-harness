@@ -467,3 +467,59 @@ func randomBytes(n int) []byte {
 	_, _ = rand.Read(b)
 	return b
 }
+
+// TestPresetArchiveInDB: 上传归档直存 DB(0041),磁盘缓存无文件;preview 与
+// DOWNLOAD 读 DB;download 成功计数 +1。
+func TestPresetArchiveInDB(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+	archive := makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: DB 直存\n"})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("db-preset", "DB直存", "DB Preset", archive)))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+	}
+	// 归档已在 DB 行。
+	raw, err := serverstore.GetAgentPresetArchive(db, "db-preset", "1.0.0")
+	if err != nil || !bytes.Equal(raw, archive) {
+		t.Fatalf("db archive missing: err=%v len=%d", err, len(raw))
+	}
+	// 管理员通过。
+	wA := httptest.NewRecorder()
+	reqA := httptest.NewRequest("POST", "/api/admin/agent-presets/db-preset/approve", nil)
+	for k, v := range adminHdr {
+		reqA.Header.Set(k, v)
+	}
+	r.ServeHTTP(wA, reqA)
+	if wA.Code != http.StatusOK {
+		t.Fatalf("approve = %d %s", wA.Code, wA.Body.String())
+	}
+	// 员工下载(作者)= DB 字节 + 计数。
+	wD := httptest.NewRecorder()
+	reqD := httptest.NewRequest("GET", "/api/agent-presets/db-preset/archive", nil)
+	for k, v := range userHdr {
+		reqD.Header.Set(k, v)
+	}
+	r.ServeHTTP(wD, reqD)
+	if wD.Code != http.StatusOK {
+		t.Fatalf("download = %d %s", wD.Code, wD.Body.String())
+	}
+	if !bytes.Equal(wD.Body.Bytes(), archive) {
+		t.Fatalf("downloaded bytes differ")
+	}
+	p, _ := serverstore.GetAgentPresetByVersion(db, "db-preset", "1.0.0")
+	if p.Downloads != 1 {
+		t.Fatalf("downloads = %d, want 1", p.Downloads)
+	}
+	// 管理员列表不含 blob。
+	all, _ := serverstore.ListAgentPresets(db, "")
+	if len(all) != 1 || len(all[0].Archive) != 0 {
+		t.Fatalf("admin list must exclude blob: %+v", all)
+	}
+}

@@ -36,7 +36,11 @@ type AgentPreset struct {
 	Reason string
 	// Quality 是组织库质量标记(0037):''|'official'|'featured' 互斥,
 	// 仅对 approved 行有展示语义;与市场「免费/专业」分级词表隔离。
-	Quality   string
+	Quality string
+	// Archive 是上传的归档字节(0041: 归档直存 DB,不再落磁盘)。
+	Archive []byte
+	// Downloads 统计归档下载次数(0041)。
+	Downloads int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -45,7 +49,8 @@ func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) 
 	var p AgentPreset
 	var createdAt, updatedAt any
 	if err := row.Scan(&p.ID, &p.Name, &p.DisplayName, &p.Description, &p.Version,
-		&p.Author, &p.Checksum, &p.Status, &p.Reason, &p.Quality, &createdAt, &updatedAt); err != nil {
+		&p.Author, &p.Checksum, &p.Status, &p.Reason, &p.Quality,
+		&p.Archive, &p.Downloads, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	p.CreatedAt = parseSQLTime(createdAt)
@@ -53,14 +58,33 @@ func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) 
 	return &p, nil
 }
 
-const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, reason, quality, created_at, updated_at"
+// agentPresetColumns includes the archive blob; single-row reads (by
+// name+version) where the archive may be needed.
+const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, reason, quality, archive, downloads, created_at, updated_at"
+
+// agentPresetListColumns excludes the archive blob: list views (admin table,
+// employee catalog) must not load every upload into memory.
+const agentPresetListColumns = "id, name, display_name, description, version, author, checksum, status, reason, quality, downloads, created_at, updated_at"
+
+func scanAgentPresetList(row interface{ Scan(...any) error }) (*AgentPreset, error) {
+	var p AgentPreset
+	var createdAt, updatedAt any
+	if err := row.Scan(&p.ID, &p.Name, &p.DisplayName, &p.Description, &p.Version,
+		&p.Author, &p.Checksum, &p.Status, &p.Reason, &p.Quality,
+		&p.Downloads, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	p.CreatedAt = parseSQLTime(createdAt)
+	p.UpdatedAt = parseSQLTime(updatedAt)
+	return &p, nil
+}
 
 // CreateAgentPreset inserts a pending row; returns ErrDuplicate for an
 // existing name+version (any status).
 func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
-	id, err := InsertID(db, `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status)
+	id, err := InsertID(db, `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status, archive)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status, p.Archive)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -76,11 +100,11 @@ func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
 // ErrTooManyPending when the author is at the cap and ErrDuplicate when the
 // name+version is taken (any status).
 func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64, error) {
-	q := `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status)
-		SELECT ?, ?, ?, ?, ?, ?, ?
+	q := `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status, archive)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE (SELECT COUNT(*) FROM agent_presets WHERE author = ? AND status = ?) < ?`
 	args := []any{
-		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status,
+		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status, p.Archive,
 		p.Author, AgentPresetPending, pendingCap,
 	}
 	var id int64
@@ -136,7 +160,7 @@ func GetAgentPresetByVersion(db *sql.DB, name, version string) (*AgentPreset, er
 // ListAgentPresets returns every row (admin view), oldest first, optionally
 // filtered by status ("" = all).
 func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
-	q := `SELECT ` + agentPresetColumns + ` FROM agent_presets`
+	q := `SELECT ` + agentPresetListColumns + ` FROM agent_presets`
 	args := []any{}
 	if status != "" {
 		q += " WHERE status = ?"
@@ -150,7 +174,7 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 	defer rows.Close()
 	var out []AgentPreset
 	for rows.Next() {
-		p, err := scanAgentPreset(rows)
+		p, err := scanAgentPresetList(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -164,7 +188,7 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 // (nobody else's non-approved rows are ever visible). Strict default:
 // approved but not granted stays invisible.
 func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]AgentPreset, error) {
-	rows, err := db.Query(`SELECT `+agentPresetColumns+` FROM agent_presets
+	rows, err := db.Query(`SELECT `+agentPresetListColumns+` FROM agent_presets
 		WHERE author = ?
 		OR (status = ? AND name IN (`+qmarks(len(granted))+`))
 		ORDER BY name, version`, append([]any{author, AgentPresetApproved}, toStringArgs(granted)...)...)
@@ -174,7 +198,7 @@ func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]Age
 	defer rows.Close()
 	var out []AgentPreset
 	for rows.Next() {
-		p, err := scanAgentPreset(rows)
+		p, err := scanAgentPresetList(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -287,4 +311,50 @@ func SetAgentPresetQuality(db *sql.DB, name, version, quality string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetAgentPresetArchive stores the uploaded archive blob in the row (0041:
+// DB 直存)。Returns ErrNotFound when the row is absent.
+func SetAgentPresetArchive(db *sql.DB, name, version string, archive []byte) error {
+	res, err := db.Exec(`UPDATE agent_presets SET archive=?, updated_at=`+NowExpr()+`
+		WHERE name=? AND version=?`, archive, name, version)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetAgentPresetArchive returns the stored archive bytes. ErrNotFound when
+// the row is absent; nil when the row exists but has no DB archive yet
+// (pre-0041 rows keep their disk fallback in the handler).
+func GetAgentPresetArchive(db *sql.DB, name, version string) ([]byte, error) {
+	var b []byte
+	err := db.QueryRow(`SELECT archive FROM agent_presets WHERE name=? AND version=?`, name, version).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// ClearAgentPresetArchive clears the DB archive on row removal/update.
+func ClearAgentPresetArchive(db *sql.DB, name, version string) error {
+	_, err := db.Exec(`UPDATE agent_presets SET archive=NULL WHERE name=? AND version=?`, name, version)
+	return err
+}
+
+// IncrementAgentPresetDownload bumps the preset download counter.
+func IncrementAgentPresetDownload(db *sql.DB, name, version string) (bool, error) {
+	res, err := db.Exec(`UPDATE agent_presets SET downloads = downloads + 1 WHERE name=? AND version=?`, name, version)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }

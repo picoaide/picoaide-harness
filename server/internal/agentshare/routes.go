@@ -73,13 +73,21 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		archivePath := filepath.Join(cacheDir, safeName(p.Name, p.Version))
-		raw, err := os.ReadFile(archivePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档文件缺失")
+		// 0041:归档直存 DB;pre-0041 行的磁盘回退(read-only)。
+		var raw []byte
+		dbRaw, aerr := serverstore.GetAgentPresetArchive(db, p.Name, p.Version)
+		switch {
+		case aerr == nil && dbRaw != nil:
+			raw = dbRaw
+		case aerr == nil:
+			diskPath := filepath.Join(cacheDir, safeName(p.Name, p.Version))
+			if r, rerr := os.ReadFile(diskPath); rerr == nil {
+				raw = r
+			} else {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档数据缺失")
 				return
 			}
+		default:
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
 			return
 		}
@@ -138,6 +146,7 @@ func presetJSON(p serverstore.AgentPreset) gin.H {
 		// employee list endpoint serves approved rows too, where it is "").
 		"reason":     p.Reason,
 		"quality":    p.Quality, // 0037 组织库质量标记(official/featured)
+		"downloads":  p.Downloads,
 		"created_at": p.CreatedAt,
 		"updated_at": p.UpdatedAt,
 	}
@@ -266,22 +275,16 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			return
 		}
 
-		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
+		// 顺序约定(审计 2026-08-25 G4):DB 状态优先,归档直存 DB(0041)。
 		// - 重提:先 DB 更新(作者校验在 SQL 内),成功后覆盖归档;DB 失败时
-		//   旧归档原样保留,状态与文件始终一致(校验和失败方向 fail-closed)。
-		// - 新建:先写文件再 INSERT 会造成 DB 失败(上限/冲突)时残留孤儿文件,
-		//   因此在 INSERT 失败路径补偿删除刚写的文件。
-		if err := os.MkdirAll(cacheDir, 0700); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "存储失败")
-			return
-		}
-		archivePath := filepath.Join(cacheDir, safeName(req.Name, req.Version))
+		//   旧归档原样保留,状态与归档一致(校验和失败方向 fail-closed)。
+		// - 新建:INSERT 成功即归档已落库(原子),无孤儿文件/磁盘残留。
 		if getErr == nil { // rejected → resubmit: reset the row (author-scoped)
 			if err := serverstore.UpdateAgentPresetResubmitByVersion(db, req.Name, req.Version, strings.TrimSpace(req.DisplayName), desc, checksum, u.Username); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 				return
 			}
-			if err := writeFileAtomic(archivePath, raw); err != nil {
+			if err := serverstore.SetAgentPresetArchive(db, req.Name, req.Version, raw); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
@@ -294,21 +297,17 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				Author:      u.Username,
 				Checksum:    checksum,
 				Status:      serverstore.AgentPresetPending,
+				Archive:     raw,
 			}
 			// Atomic cap enforcement: the INSERT itself re-counts pending
 			// rows, so concurrent uploads can never exceed pendingCap.
 			if _, err := serverstore.CreateAgentPresetCapped(db, p, pendingCap); err != nil {
-				// 补偿:INSERT 失败时删除刚写的归档,不留孤儿文件。
-				_ = os.Remove(archivePath)
+				// 补偿:INSERT 失败即无归档(DB 未写入无孤儿对象)。
 				if errors.Is(err, serverstore.ErrTooManyPending) {
 					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
 					return
 				}
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-				return
-			}
-			if err := writeFileAtomic(archivePath, raw); err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		}
@@ -462,8 +461,10 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 			return
 		}
-		// Best-effort archive cleanup: every version of the name.
+		// Best-effort archive cleanup: every version (DB 行已删,归档列随之;
+		// 磁盘回退缓存仅清理旧文件)。
 		for _, v := range versions {
+			_ = serverstore.ClearAgentPresetArchive(db, name, v)
 			_ = os.Remove(filepath.Join(cacheDir, safeName(name, v)))
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_delete", name)
@@ -487,6 +488,7 @@ func removeVersioned(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 			return
 		}
+		_ = serverstore.ClearAgentPresetArchive(db, name, version)
 		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -721,16 +723,30 @@ func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.Ag
 			}
 		}
 	}
-	archivePath := filepath.Join(cacheDir, safeName(p.Name, p.Version))
-	if _, err := os.Stat(archivePath); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档文件缺失")
+	// 0041:归档直存 DB;pre-0041 行的磁盘回退(read-only)。
+	var payload []byte
+	dbRaw, aerr := serverstore.GetAgentPresetArchive(db, p.Name, p.Version)
+	switch {
+	case aerr == nil && dbRaw != nil:
+		payload = dbRaw
+	case aerr == nil:
+		diskPath := filepath.Join(cacheDir, safeName(p.Name, p.Version))
+		if r, rerr := os.ReadFile(diskPath); rerr == nil {
+			payload = r
+		} else {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档数据缺失")
+			return
+		}
+	default:
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
 		return
 	}
+	_, _ = serverstore.IncrementAgentPresetDownload(db, p.Name, p.Version)
 	c.Header("Content-Type", "application/gzip")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(p.Name, p.Version)))
 	c.Header("X-Preset-Version", p.Version)
 	c.Header("X-Preset-Checksum", p.Checksum)
-	c.File(archivePath)
+	c.Data(http.StatusOK, "application/gzip", payload)
 }
 
 // archiveErrorMessage maps validation refusals to the client-facing message.
@@ -755,22 +771,4 @@ func adminUsername(c *gin.Context) string {
 		return "admin"
 	}
 	return u.Username
-}
-
-// writeFileAtomic writes data to path via a temp file + rename (0600).
-func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".upload-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
 }
