@@ -123,14 +123,15 @@ func EffectiveRetentionMonths(db *sql.DB) (int, error) {
 	if !ok {
 		return DefaultRetentionMonths, nil
 	}
-	n, err := parseRetention(v)
+	n, err := ParseRetentionMonths(v)
 	if err != nil {
 		return DefaultRetentionMonths, nil
 	}
 	return n, nil
 }
 
-func parseRetention(v string) (int, error) {
+// ParseRetentionMonths 校验保留月数输入(0~120;0=永久)。供后台 API 校验。
+func ParseRetentionMonths(v string) (int, error) {
 	var n int
 	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &n); err != nil {
 		return 0, err
