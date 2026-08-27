@@ -23,6 +23,10 @@
       "types": "./lib/types/bootstrap.d.ts",
       "default": "./lib/bootstrap.js"
     },
+    "./error-reporting": {
+      "types": "./lib/types/error-reporting.d.ts",
+      "default": "./lib/error-reporting.js"
+    },
     "./session-service": {
       "types": "./lib/types/session-service.d.ts",
       "default": "./lib/session-service.js"
@@ -80,6 +84,7 @@
     "@deepseek-ai/dsh-skill-filesystem": "0.1.1-rc.2",
     "@deepseek-ai/dsh-tool-skill": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@sentry/node": "^7.120.0",
     "tar": "^7.5.0",
     "yaml": "^2.9.0"
   },

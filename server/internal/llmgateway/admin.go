@@ -580,6 +580,7 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"retention_months":    retention,                               // usage 明细保留月数(0=永久,默认 6)
 		"allow_private":       allowPrivate,
 		"search_endpoint":     settings["web.search_endpoint"],
+		"error_reporting_dsn": settings["web.error_reporting_dsn"],
 		"server_base_url":     settings["server.base_url"],
 	})
 }
@@ -631,6 +632,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		RetentionMonths   *string         `json:"retention_months"`
 		AllowPrivate      *bool           `json:"allow_private"`
 		SearchEndpoint    *string         `json:"search_endpoint"`
+		ErrorReportingDSN *string         `json:"error_reporting_dsn"`
 		ServerBaseURL     *string         `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -726,6 +728,14 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if req.SearchEndpoint != nil {
 		if err := serverstore.SetSetting(db, "web.search_endpoint", *req.SearchEndpoint); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.ErrorReportingDSN != nil {
+		// 错误上报 DSN(空串 = 清空/不启用);Sentry 格式,非空结尾必须 /、
+		// 否则 SDK 解析失败——此处仅存,合法性由客户端初始化容错。
+		if err := serverstore.SetSetting(db, "web.error_reporting_dsn", *req.ErrorReportingDSN); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
