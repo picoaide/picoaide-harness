@@ -3,6 +3,7 @@ package serverstore
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -213,6 +214,10 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
 	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
+	// 分区写路径:确保 now 所属月份分区存在(幂等 CREATE TABLE IF NOT EXISTS)。
+	if err := ensureUsagePartition(db, now); err != nil {
+		return 0, fmt.Errorf("ensure usage partition: %w", err)
+	}
 	id, err := InsertID(db, `INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost)
 	if err != nil {

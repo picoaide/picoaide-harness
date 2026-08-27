@@ -23,8 +23,15 @@ func mustUserID(t *testing.T, db *sql.DB) int64 {
 }
 
 // setCreatedAt backdates a usage row so day aggregation is deterministic.
+// 分区表:string 日期回填到历史月份时,必须确保目标月分区存在
+// (分区键 created_at 的 UPDATE 路由要求分区存在)。
 func setCreatedAt(t *testing.T, db *sql.DB, id int64, ts string) {
 	t.Helper()
+	if tm, err := time.Parse("2006-01-02 15:04:05", ts); err == nil {
+		if err := ensureUsagePartition(db, tm); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", ts, id); err != nil {
 		t.Fatal(err)
 	}
