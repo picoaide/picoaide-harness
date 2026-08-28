@@ -16,15 +16,15 @@ func TestConnectorCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) < 2 {
-		t.Fatalf("seed connectors = %d, want >= 2", len(list))
+	if len(list) < 3 {
+		t.Fatalf("seed connectors = %d, want >= 3", len(list))
 	}
 	ids := map[string]bool{}
 	for _, c := range list {
 		ids[c.ID] = true
 	}
-	if !ids["example-a"] || !ids["glitchtip"] {
-		t.Fatalf("seed missing example-a/glitchtip: %v", ids)
+	if !ids["example-a"] || !ids["glitchtip"] || !ids["sales-easy"] {
+		t.Fatalf("seed missing example-a/glitchtip/sales-easy: %v", ids)
 	}
 
 	// 创建新连接器。
