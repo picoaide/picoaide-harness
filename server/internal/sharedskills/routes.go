@@ -404,7 +404,7 @@ func replaceGrants(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		if err := serverstore.ReplaceSharedGroups(db, serverstore.SharedSkillGrantTable, name, req.Groups); err != nil {
-			if err == serverstore.ErrValidation {
+			if err == serverstore.ErrValidation || err == serverstore.ErrNotFound {
 				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门名不合法或不存在")
 				return
 			}
