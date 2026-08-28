@@ -384,6 +384,64 @@ func TestReplaceGrantsUnknownGroup(t *testing.T) {
 	}
 }
 
+// TestDeleteClearsGrants: 硬删技能行后,其全部授权必须级联清理
+// (旧授权不得复活重建的资源)——修复 2026-08-28(prod 演示删除后残留孤儿授权)。
+func TestDeleteClearsGrants(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+
+	// alice 上传 → admin approve → 授权全员 → 删除 → 授权表清空。
+	post := func() {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/shared-skills",
+			strings.NewReader(uploadBody("del-grant", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range userHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+		}
+	}
+	post()
+	wA := httptest.NewRecorder()
+	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/del-grant/1.0.0/approve", nil)
+	for k, v := range adminHdr {
+		reqA.Header.Set(k, v)
+	}
+	r.ServeHTTP(wA, reqA)
+	if wA.Code != 200 {
+		t.Fatalf("approve = %d", wA.Code)
+	}
+	wG := httptest.NewRecorder()
+	reqG := httptest.NewRequest("PUT", "/api/admin/shared-skills/del-grant/grants", strings.NewReader(`{"groups":["全员"]}`))
+	reqG.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		reqG.Header.Set(k, v)
+	}
+	r.ServeHTTP(wG, reqG)
+	if wG.Code != 200 {
+		t.Fatalf("grant = %d %s", wG.Code, wG.Body.String())
+	}
+	wD := httptest.NewRecorder()
+	reqD := httptest.NewRequest("DELETE", "/api/admin/shared-skills/del-grant/1.0.0", nil)
+	for k, v := range adminHdr {
+		reqD.Header.Set(k, v)
+	}
+	r.ServeHTTP(wD, reqD)
+	if wD.Code != 200 {
+		t.Fatalf("delete = %d %s", wD.Code, wD.Body.String())
+	}
+	grants, err := serverstore.ListSharedResourceGrants(db, serverstore.SharedSkillGrantTable, "del-grant")
+	if err != nil {
+		t.Fatalf("list grants: %v", err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("grants after delete = %+v, want empty", grants)
+	}
+}
+
 // TestCrossSourceConflictUploadApprove 决策 2026-08-25:市场与组织合并为
 // 「市场」后,同名技能跨源互斥——上传(员工)与 approve(管理员)对市场同名
 // 技能返回 409 CONFLICT。
