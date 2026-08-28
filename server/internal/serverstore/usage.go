@@ -275,10 +275,11 @@ func DeleteUsage(db *sql.DB, id int64) error {
 	return err
 }
 
-// CleanupPendingUsage deletes zero-token chat rows older than cutoff (stale
-// pending rows left by interrupted streaming requests). Run at server startup.
+// CleanupPendingUsage deletes zero-token chat/search rows older than cutoff
+// (stale pending rows left by interrupted streaming requests). Run at server
+// startup. 0043: search(kind='search') 的流式残留行同样清理。
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
-	_, err := db.Exec(`DELETE FROM usage WHERE kind = 'chat' AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?`,
+	_, err := db.Exec(`DELETE FROM usage WHERE kind IN ('chat','search') AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?`,
 		cutoff.Format(pgTimeFmt))
 	return err
 }

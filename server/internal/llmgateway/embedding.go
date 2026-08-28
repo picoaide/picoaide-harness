@@ -74,7 +74,7 @@ func NewEmbedder(db *sql.DB) *Embedder {
 // and transport errors move on. The returned token count is the upstream
 // usage when reported, else 0.
 func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][]float32, int64, error) {
-	ups, err := MatchModels(e.db, model)
+	ups, err := MatchModelsByProtocol(e.db, model, "openai")
 	if err != nil {
 		return nil, 0, err
 	}
@@ -192,7 +192,7 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
 		return
 	}
-	ups, err := MatchModels(a.DB, req.Model)
+	ups, err := MatchModelsByProtocol(a.DB, req.Model, "openai")
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
 		return
