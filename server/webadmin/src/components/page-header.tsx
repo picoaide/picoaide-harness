@@ -19,7 +19,7 @@ export function PageHeader({
         <h1 className="page-title">{title}</h1>
         {desc && <p className="page-desc mt-1">{desc}</p>}
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      {actions && <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:w-auto sm:shrink">{actions}</div>}
     </div>
   )
 }
