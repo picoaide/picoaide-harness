@@ -548,6 +548,8 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			_ = serverstore.ClearAgentPresetArchive(db, name, v)
 			_ = os.Remove(filepath.Join(cacheDir, safeName(name, v)))
 		}
+		// 硬删全部行后清理该 name 的全部授权(资源级联;旧授权不复活重建资源)。
+		_ = serverstore.DeleteSharedResourceGrants(db, serverstore.SharedPresetGrantTable, name)
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_delete", name)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}

@@ -353,6 +353,8 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			return
 		}
 		_ = serverstore.DeleteSharedSkillArchive(db, name, version)
+		// 硬删行后必须清理全部授权(资源级联;旧授权不得复活重建的资源)。
+		_ = serverstore.DeleteSharedResourceGrants(db, serverstore.SharedSkillGrantTable, name)
 		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
 		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
