@@ -64,4 +64,25 @@ describe('SharedSkills 共享技能审核页', () => {
     fireEvent.click(btns[0]!)
     expect(await screen.findByText('scripts/run.sh')).toBeInTheDocument()
   })
+
+  it('点击文件清单中的文件可查看其内容(审核全部内容)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/preview')) return { files: ['SKILL.md', 'scripts/run.sh'], skill_md: '---\nname: codeql\n---\n' }
+      if (path.includes('/file?path=scripts%2Frun.sh')) {
+        return { path: 'scripts/run.sh', size: 14, binary: false, too_large: false, content: '#!/bin/sh\necho hi\n' }
+      }
+      if (path.startsWith('/api/admin/shared-skills')) return { skills: ROWS }
+      return {}
+    })
+    render(<SharedSkills />)
+    const btns = await screen.findAllByTitle('查看内容预览')
+    fireEvent.click(btns[0]!)
+    const fileChip = await screen.findByText('scripts/run.sh')
+    expect(fileChip).toBeInTheDocument()
+    fireEvent.click(fileChip)
+    expect(await screen.findByText(/echo hi/u)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/admin/shared-skills/codeql/1.0.0/file?path=scripts%2Frun.sh')
+    })
+  })
 })

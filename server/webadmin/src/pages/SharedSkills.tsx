@@ -6,10 +6,11 @@ import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
 import { Download, FileText, RefreshCw, Sparkles, ShieldCheck } from 'lucide-react'
 import { GrantDialog } from '../components/grant-dialog'
+import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 
 interface SkillRow {
   name: string
@@ -29,14 +30,7 @@ interface Dept {
   id: number
   parent_id: number
   name: string
-}
-
-interface PreviewData {
-  files: string[]
-  skill_md: string
-}
-
-const STATUS_META: Record<SkillRow['status'], { label: string; variant: 'secondary' | 'success' | 'destructive' }> = {
+}const STATUS_META: Record<SkillRow['status'], { label: string; variant: 'secondary' | 'success' | 'destructive' }> = {
   pending: { label: '待审核', variant: 'secondary' },
   approved: { label: '已通过', variant: 'success' },
   rejected: { label: '已拒绝', variant: 'destructive' },
@@ -57,8 +51,10 @@ export default function SharedSkills() {
   const [loading, setLoading] = useState(true)
   const [confirm, setConfirm] = useState<{ name: string; version: string; kind: 'approve' | 'reject' | 'delete' } | null>(null)
   const [reason, setReason] = useState('')
-  const [preview, setPreview] = useState<PreviewData | null>(null)
+  const [preview, setPreview] = useState<ArchivePreviewData | null>(null)
   const [previewKey, setPreviewKey] = useState('')
+  const [previewName, setPreviewName] = useState('')
+  const [previewVersion, setPreviewVersion] = useState('')
   const [busy, setBusy] = useState('')
   const [grantName, setGrantName] = useState('')
   const [departments, setDepartments] = useState<Dept[]>([])
@@ -120,10 +116,12 @@ export default function SharedSkills() {
 
   const openPreview = async (name: string, version: string) => {
     setPreviewKey(name + '@' + version)
+    setPreviewName(name)
+    setPreviewVersion(version)
     setPreview(null)
     setError('')
     try {
-      const data = await request<PreviewData>(
+      const data = await request<ArchivePreviewData>(
         `/api/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
       setPreview(data)
     } catch (err: any) {
@@ -239,33 +237,15 @@ export default function SharedSkills() {
         </div>
       )}
 
-      {/* 审核预览 */}
-      <Dialog open={previewKey !== ''} onOpenChange={(open) => { if (!open) setPreviewKey('') }}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>内容预览: {previewKey}</DialogTitle>
-            <DialogDescription>SKILL.md 与归档文件清单(用于决策审核)</DialogDescription>
-          </DialogHeader>
-          {preview === null ? (
-            <p className="text-sm text-muted-foreground">加载中…</p>
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <h4 className="mb-1 text-sm font-medium">SKILL.md</h4>
-                <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{preview.skill_md || '—'}</pre>
-              </div>
-              <div>
-                <h4 className="mb-1 text-sm font-medium">文件清单（{preview.files.length}）</h4>
-                <div className="flex max-h-40 flex-wrap gap-1 overflow-auto">
-                  {preview.files.map(f => (
-                    <Badge key={f} variant="outline" className="font-mono text-[11px]">{f}</Badge>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* 审核预览(文件清单可点击查看任意文件内容) */}
+      <ArchivePreviewDialog
+        openKey={previewKey}
+        data={preview}
+        mainTitle="SKILL.md"
+        mainContent={preview?.skill_md ?? ''}
+        fileBase={`/api/admin/shared-skills/${encodeURIComponent(previewName)}/${encodeURIComponent(previewVersion)}`}
+        onClose={() => { setPreviewKey('') }}
+      />
 
       {/* 确认弹窗 */}
       <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) { setConfirm(null); setReason('') } }}>

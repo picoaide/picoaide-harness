@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -522,4 +523,73 @@ func TestPresetArchiveInDB(t *testing.T) {
 	if len(all) != 1 || len(all[0].Archive) != 0 {
 		t.Fatalf("admin list must exclude blob: %+v", all)
 	}
+}
+
+// TestPresetFileContent: 审核单文件内容端点——文本内联、二进制标记、
+// 超大标记、不存在 404、路径穿越拒绝。与 skill 侧共享契约。
+func TestPresetFileContent(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+	archive := makeArchive(t, map[string]string{
+		"agent.cordis.yml": testComposition,
+		"skills/demo/SKILL.md": "# demo\n",
+		"bin/blob.bin":    string([]byte{0x00, 0x01, 0xFF, 0xFE}),
+		"bin/big.txt":     strings.Repeat("x", maxFilePreviewBytes+16),
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/agent-presets",
+		strings.NewReader(uploadBody("fp-demo", "demo", "FP Demo", archive)))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+	}
+
+	get := func(path string) (*httptest.ResponseRecorder, map[string]any) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET",
+			"/api/admin/agent-presets/fp-demo/1.0.0/file?path="+url.QueryEscape(path), nil)
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w, out
+	}
+
+	t.Run("text inline", func(t *testing.T) {
+		w, out := get("skills/demo/SKILL.md")
+		if w.Code != http.StatusOK || out["content"] != "# demo\n" {
+			t.Fatalf("text = %d %v", w.Code, out)
+		}
+	})
+	t.Run("binary flagged", func(t *testing.T) {
+		w, out := get("bin/blob.bin")
+		if w.Code != http.StatusOK || out["binary"] != true || out["content"] != "" {
+			t.Fatalf("binary = %d %v", w.Code, out)
+		}
+	})
+	t.Run("oversized flagged", func(t *testing.T) {
+		w, out := get("bin/big.txt")
+		if w.Code != http.StatusOK || out["too_large"] != true || out["content"] != "" {
+			t.Fatalf("big = %d %v", w.Code, out)
+		}
+	})
+	t.Run("missing 404", func(t *testing.T) {
+		w, _ := get("nope.txt")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("missing = %d", w.Code)
+		}
+	})
+	t.Run("path escape rejected", func(t *testing.T) {
+		w, _ := get("../etc/passwd")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("escape = %d", w.Code)
+		}
+	})
 }

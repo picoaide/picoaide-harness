@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -469,4 +470,86 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 	if len(all) != 1 || len(all[0].Archive) != 0 {
 		t.Fatalf("admin list must exclude blob: %+v", all)
 	}
+}
+
+// TestAdminSkillFileContent: 审核单文件内容端点——文本内联、路径规范化、
+// 二进制标记、超大标记、不存在 404。
+func TestAdminSkillFileContent(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+
+	archive := makeSkillArchive(t, map[string]string{
+		"SKILL.md":        "---\nname: fpdemo\n---\n# demo\n",
+		"scripts/x.sh":    "#!/bin/sh\necho hi\n",
+		"docs/说明.md":      "中文内容 ok",
+		"bin/blob.bin":    string([]byte{0x00, 0x01, 0xFF, 0xFE}),
+		"bin/big.txt":     strings.Repeat("x", maxFilePreviewBytes+16),
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/shared-skills",
+		strings.NewReader(uploadBody("fpdemo", "1.0.0", "", archive)))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+	}
+
+	get := func(path string) (*httptest.ResponseRecorder, map[string]any) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET",
+			"/api/admin/shared-skills/fpdemo/1.0.0/file?path="+url.QueryEscape(path), nil)
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w, out
+	}
+
+	t.Run("text inline", func(t *testing.T) {
+		w, out := get("scripts/x.sh")
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d %s", w.Code, w.Body.String())
+		}
+		if out["content"] != "#!/bin/sh\necho hi\n" {
+			t.Fatalf("content = %q", out["content"])
+		}
+		if out["binary"] != false || out["too_large"] != false {
+			t.Fatalf("flags = %v %v", out["binary"], out["too_large"])
+		}
+	})
+	t.Run("utf8 path ok", func(t *testing.T) {
+		w, out := get("docs/说明.md")
+		if w.Code != http.StatusOK || out["content"] != "中文内容 ok" {
+			t.Fatalf("utf8 path = %d %v", w.Code, out)
+		}
+	})
+	t.Run("binary flagged", func(t *testing.T) {
+		w, out := get("bin/blob.bin")
+		if w.Code != http.StatusOK || out["binary"] != true || out["content"] != "" {
+			t.Fatalf("binary = %d %v", w.Code, out)
+		}
+	})
+	t.Run("oversized flagged", func(t *testing.T) {
+		w, out := get("bin/big.txt")
+		if w.Code != http.StatusOK || out["too_large"] != true || out["content"] != "" {
+			t.Fatalf("big = %d %v", w.Code, out)
+		}
+	})
+	t.Run("missing 404", func(t *testing.T) {
+		w, _ := get("nope.txt")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("missing = %d", w.Code)
+		}
+	})
+	t.Run("path escape rejected", func(t *testing.T) {
+		w, _ := get("../etc/passwd")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("escape = %d", w.Code)
+		}
+	})
 }
