@@ -112,6 +112,9 @@ export function releaseMac(options: MacReleaseOptions = defaultReleaseOptions())
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
   try {
+    // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
+    const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
+    prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
     releaseMac()
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
