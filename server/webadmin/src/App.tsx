@@ -136,10 +136,16 @@ export default function App() {
         {/* 品牌深海军蓝侧边栏(#0F172A 契约色) */}
         <aside className="flex w-56 shrink-0 flex-col border-r border-slate-800 bg-[#0F172A] text-slate-300">
           <div className="flex items-center gap-3 px-5 pb-5 pt-6">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-blue-400/40 bg-blue-500/15">
-              <svg viewBox="0 0 32 32" className="h-5 w-5" fill="none" aria-hidden="true">
-                <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(59,130,246,0.18)" stroke="#60A5FA" strokeWidth="2" />
-                <path d="M12 12 L20 16 L12 20 Z" fill="#93C5FD" />
+            {/* 与客户端一致的品牌 mark(花括号 tile,见 packages/client/branding BraceMark) */}
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg" style={{ backgroundColor: '#FFFFFF' }}>
+              <svg viewBox="0 0 1254 1254" className="h-full w-full" fill="none" aria-hidden="true">
+                <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
+                  <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#0F172A" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#0F172A" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                  <line x1="435" y1="627" x2="817" y2="627" stroke="#0F172A" strokeWidth="20" strokeLinecap="round" />
+                  <circle cx="435" cy="627" r="65" fill="#0F172A" />
+                  <circle cx="817" cy="627" r="65" fill="#0F172A" />
+                </g>
               </svg>
             </div>
             <div className="min-w-0">

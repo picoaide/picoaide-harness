@@ -1,7 +1,15 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { PLATFORM_MODULES, PRELOADED_CLIENT_EXTERNALS } from '../../../scripts/platform-modules.mjs'
 import { defineConfig } from 'tsdown'
 
 const PACKAGE_NAME = '@picoaide/dsh-branding'
+
+// 产品版本号:构建时从仓库根 package.json 读取,经 define 注入 client bundle,
+// 供 BrandName 在侧边栏品牌名旁渲染 vX.Y.Z 标签(与安装包/更新检查同源)。
+const PRODUCT_VERSION = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../../../package.json', import.meta.url)), 'utf8'),
+).version as string
 
 export default defineConfig([
   {
@@ -34,6 +42,10 @@ export default defineConfig([
     dts: false,
     clean: false,
     sourcemap: true,
+    // 品牌名旁的产品版本标签(见 src/client/Brand.tsx BrandName)
+    define: {
+      'process.env.PICOAI_PRODUCT_VERSION': JSON.stringify(PRODUCT_VERSION),
+    },
     external: [
       ...PLATFORM_MODULES,
       ...PRELOADED_CLIENT_EXTERNALS,
