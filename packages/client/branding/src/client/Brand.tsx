@@ -1,5 +1,9 @@
 import { createElement } from 'react'
 
+// build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
+// node types,声明最小面的 process 占位。
+declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
+
 /**
  * Brace mark tile matching the app/tray icon (`packages/host/desktop/build/tray-icon.svg`):
  * a rounded square carrying the two braces, connector line, and node circles.
@@ -80,8 +84,30 @@ export function BraceMark({ size, className }: { size: number; className?: strin
 
 /**
  * Sidebar brand name occupant. The upstream brand-name container owns
- * typography; this component supplies only the product name text.
+ * typography; this component supplies only the product name text, plus a
+ * small product-version label next to it (build-time injected via
+ * `process.env.PICOAI_PRODUCT_VERSION` define in tsdown.config.ts).
  */
 export function BrandName() {
-  return createElement('span', { style: { fontWeight: 700, letterSpacing: '0.3px' } }, 'PicoAide')
+  const version = process.env.PICOAI_PRODUCT_VERSION as string | undefined
+  return createElement(
+    'span',
+    { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 700, letterSpacing: '0.3px' } },
+    'PicoAide',
+    version != null && version !== ''
+      ? createElement('span', {
+          style: {
+            fontSize: 10,
+            fontWeight: 600,
+            lineHeight: 1,
+            letterSpacing: '0',
+            padding: '2px 5px',
+            borderRadius: '4px',
+            color: 'var(--dsw-alias-bg-base, #ffffff)',
+            backgroundColor: 'var(--dsw-alias-fg-primary, #000000)',
+            opacity: 0.75,
+          },
+        }, `v${version}`)
+      : null,
+  )
 }
