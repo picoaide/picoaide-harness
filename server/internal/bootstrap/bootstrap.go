@@ -5,6 +5,7 @@ package bootstrap
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
@@ -50,6 +51,22 @@ type Response struct {
 	Models       []llmgateway.Model `json:"models"`
 	Skills       []SkillItem        `json:"skills"`
 	Web          WebConfig          `json:"web"`
+	// Connectors 连接器目录(0042):客户端连接器中心的唯一定义源。
+	// 每项 = 客户端 ConnectorDef 对齐的 JSON(definition 字段内嵌),
+	// 服务端管理员经 webadmin 管理;客户端凭证仍只存本地,不随下发。
+	Connectors []ConnectorItem `json:"connectors"`
+}
+
+// ConnectorItem 是下发到客户端的连接器定义(与客户端 ConnectorDef 对齐)。
+// Definition 是 JSON 字符串(认证配置 + tokenFields + mcp 数组),客户端
+// 解析后 use(原样注入)。字段名与客户端 BootstrapConfig 一致。
+type ConnectorItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	AuthMode    string `json:"auth_mode"`
+	// 完整定义 JSON:客户端 parse 后覆盖内置(无内置,仅此下发)。
+	Definition string `json:"definition"`
 }
 
 // RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
@@ -154,12 +171,64 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 		web.DefaultThinkingLevel = lv
 	}
 
+	// 连接器目录(0042):只下发 enabled 连接器;GlitchTip 的 BASE_URL/ORGANIZATION
+	// 默认值由 web.glitchtip_base_url / web.glitchtip_organization 合成注入
+	// 定义 JSON 的 tokenFields defaultValue(取代客户端特判注入)。
+	connectors, err := serverstore.ListEnabledConnectors(db)
+	if err != nil {
+		return nil, err
+	}
+	connectorItems := make([]ConnectorItem, 0, len(connectors))
+	for _, c := range connectors {
+		item := ConnectorItem{ID: c.ID, Name: c.Name, Description: c.Description, AuthMode: c.AuthMode, Definition: c.Definition}
+		if c.ID == "glitchtip" {
+			item.Definition = injectGlitchTipDefaults(c.Definition, web.GlitchTipBaseURL, web.GlitchTipOrganization)
+		}
+		connectorItems = append(connectorItems, item)
+	}
+
 	return &Response{
 		DefaultModel: defaultModel,
 		Models:       models,
 		Skills:       skillItems,
 		Web:          web,
+		Connectors:   connectorItems,
 	}, nil
+}
+
+// injectGlitchTipDefaults 把服务端配置的 GlitchTip 地址/组织合成进连接器
+// 定义 JSON 的 tokenFields defaultValue(客户端连接表单自动预填)。
+// 定义 JSON 非法时原样返回(种子数据恒合法,此处防御)。
+func injectGlitchTipDefaults(defJSON, baseURL, org string) string {
+	if baseURL == "" && org == "" {
+		return defJSON
+	}
+	var def map[string]any
+	if err := json.Unmarshal([]byte(defJSON), &def); err != nil {
+		return defJSON
+	}
+	fields, _ := def["tokenFields"].([]any)
+	for _, f := range fields {
+		m, _ := f.(map[string]any)
+		if m == nil {
+			continue
+		}
+		switch m["key"] {
+		case "GLITCHTIP_BASE_URL":
+			if baseURL != "" {
+				m["defaultValue"] = baseURL
+			}
+		case "GLITCHTIP_ORGANIZATION":
+			if org != "" {
+				m["defaultValue"] = org
+			}
+		}
+	}
+	out, err := json.Marshal(def)
+	if err != nil {
+		return defJSON
+	}
+	return string(out)
 }
 
 // SkillItem is the bootstrap skill suggestion shape.

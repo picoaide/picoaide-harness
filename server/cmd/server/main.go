@@ -19,6 +19,7 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/serverauth"
@@ -132,6 +133,7 @@ func main() {
 	sharedskills.RegisterAdminRoutes(r, db, *dataDir+"/shared-skills-cache")
 	capabilities.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	capabilities.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
+	connectors.RegisterAdminRoutes(r, db)
 	telemetry.RegisterRoutes(r, db)
 	bootstrap.RegisterRoutes(r, db)
 	// 审计日志保留策略(90 天):启动时清理过期条目
