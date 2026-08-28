@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -196,5 +197,68 @@ func TestBootstrapStrictDefault(t *testing.T) {
 	models := out["models"].([]any)
 	if len(models) != 1 {
 		t.Fatalf("models = %v, want the enabled model", models)
+	}
+}
+
+// TestBootstrapConnectors: 0042 连接器下发——enabled 连接器出现在
+// connectors[];禁用后不再下发;glitchtip 定义合成 BASE_URL/ORGANIZATION
+// defaultValue(取代客户端特判)。
+func TestBootstrapConnectors(t *testing.T) {
+	r, db := setup(t)
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	token, _ := serverauth.IssueToken(db, u.ID)
+
+	_, out := getJSON(t, r, "/api/config/bootstrap", token)
+	conns := out["connectors"].([]any)
+	if len(conns) < 2 {
+		t.Fatalf("connectors = %d, want >= 2 (种子 moka+glitchtip)", len(conns))
+	}
+	byID := map[string]map[string]any{}
+	for _, c := range conns {
+		m := c.(map[string]any)
+		byID[m["id"].(string)] = m
+	}
+	gt := byID["glitchtip"]
+	if gt == nil {
+		t.Fatalf("glitchtip missing")
+	}
+	defStr := gt["definition"].(string)
+	if !strings.Contains(defStr, "GLITCHTIP_BASE_URL") {
+		t.Fatalf("glitchtip definition lacks tokenFields: %s", defStr)
+	}
+
+	// 服务端配置 GlitchTip 地址/组织 → 定义 JSON 合成 defaultValue。
+	if err := serverstore.SetSetting(db, "web.glitchtip_base_url", "https://gt.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetSetting(db, "web.glitchtip_organization", "picoaide"); err != nil {
+		t.Fatal(err)
+	}
+	_, out = getJSON(t, r, "/api/config/bootstrap", token)
+	conns = out["connectors"].([]any)
+	for _, c := range conns {
+		m := c.(map[string]any)
+		if m["id"] == "glitchtip" {
+			defStr = m["definition"].(string)
+		}
+	}
+	if !strings.Contains(defStr, `"defaultValue":"https://gt.example.com"`) {
+		t.Fatalf("glitchtip definition lacks baseURL defaultValue: %s", defStr)
+	}
+	if !strings.Contains(defStr, `"defaultValue":"picoaide"`) {
+		t.Fatalf("glitchtip definition lacks org defaultValue: %s", defStr)
+	}
+
+	// 禁用 moka → 不再出现。
+	if err := serverstore.SetConnectorEnabled(db, "moka", false); err != nil {
+		t.Fatal(err)
+	}
+	_, out = getJSON(t, r, "/api/config/bootstrap", token)
+	conns = out["connectors"].([]any)
+	for _, c := range conns {
+		m := c.(map[string]any)
+		if m["id"] == "moka" {
+			t.Fatalf("disabled moka still in connectors")
+		}
 	}
 }

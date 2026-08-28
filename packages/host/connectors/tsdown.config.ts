@@ -10,7 +10,6 @@ export default defineConfig([
       index: 'src/index.ts',
       store: 'src/store.ts',
       invariant: 'src/invariant.ts',
-      'sales-easy': 'src/sales-easy.ts',
       'user-scope': 'src/user-scope.ts',
     },
     outDir: 'lib',
