@@ -50,7 +50,7 @@ func LoadUpstreams(db *sql.DB) ([]Upstream, error) {
 			continue
 		}
 		u.APIKey = key
-		if u.Protocol != "anthropic" && u.Protocol != "openai" {
+		if u.Protocol != "anthropic" && u.Protocol != "openai" && u.Protocol != "both" {
 			// 未知协议(防御):不参与任何路由,与损坏 key 同档处理
 			log.Printf("gateway: skip provider %s: unknown protocol %q", u.Name, u.Protocol)
 			continue
@@ -116,6 +116,7 @@ func MatchModels(db *sql.DB, modelName string) ([]Upstream, error) {
 // MatchModelsByProtocol returns every enabled upstream serving modelName with
 // the given protocol ("" = any). This is how the Anthropic /v1/messages route
 // finds Anthropic-compatible providers only, while chat keeps OpenAI ones.
+// `both`(0044)同时匹配 openai 与 anthropic 两种路由——同一 key 双端点。
 func MatchModelsByProtocol(db *sql.DB, modelName, protocol string) ([]Upstream, error) {
 	ups, err := LoadUpstreams(db)
 	if err != nil {
@@ -123,8 +124,15 @@ func MatchModelsByProtocol(db *sql.DB, modelName, protocol string) ([]Upstream, 
 	}
 	var out []Upstream
 	for i := range ups {
-		if protocol != "" && ups[i].Protocol != protocol {
-			continue
+		if protocol != "" {
+			switch ups[i].Protocol {
+			case "both":
+				// both:与任何协议请求都匹配(openai 路由和 anthropic 路由)
+			case protocol:
+				// 精确匹配
+			default:
+				continue
+			}
 		}
 		for _, m := range ups[i].Models {
 			if m == modelName {
