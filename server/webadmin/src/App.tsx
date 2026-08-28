@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Bug } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -11,6 +11,7 @@ import Login from './pages/Login'
 const UsersPage = lazy(() => import('./pages/Users'))
 const Departments = lazy(() => import('./pages/Departments'))
 const Gateway = lazy(() => import('./pages/Gateway'))
+const ErrorMonitoring = lazy(() => import('./pages/ErrorMonitoring'))
 const Marketplace = lazy(() => import('./pages/Marketplace'))
 const Audit = lazy(() => import('./pages/Audit'))
 const ServerInfo = lazy(() => import('./pages/ServerInfo'))
@@ -25,6 +26,7 @@ const nav = [
   { to: '/users', label: '用户', icon: Users },
   { to: '/departments', label: '部门', icon: Network },
   { to: '/gateway', label: '网关', icon: Settings2 },
+  { to: '/error-monitoring', label: '错误监控', icon: Bug },
   { to: '/usage', label: '用量', icon: BarChart3 },
   { to: '/marketplace', label: '市场 · 技能', icon: Store },
   { to: '/capabilities', label: '能力中心', icon: Sparkles },
@@ -219,6 +221,7 @@ export default function App() {
                   <Route path="/users" element={<UsersPage />} />
                   <Route path="/departments" element={<Departments />} />
                   <Route path="/gateway" element={<Gateway />} />
+                  <Route path="/error-monitoring" element={<ErrorMonitoring />} />
                   <Route path="/usage" element={<Usage />} />
                   <Route path="/marketplace" element={<Marketplace />} />
                   <Route path="/capabilities" element={<Capabilities />} />
