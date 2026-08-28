@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Bug, Plug } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Bug, Plug, Menu, X } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -105,6 +105,8 @@ export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [baseURL, setBaseURL] = useState('')
   const [adminName, setAdminName] = useState('')
+  // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
+  const [mobileNav, setMobileNav] = useState(false)
 
   useEffect(() => {
     // 审计 A5-M3: 会话过期由全局回调原地切回登录态(取代整页跳转)
@@ -132,10 +134,26 @@ export default function App() {
 
   return (
     <BrowserRouter basename="/admin">
-      {/* DSH 风:浅色界面 + 白色侧栏 + 黑 logo tile + 蓝 accent */}
+      {/* DSH 风:浅色界面 + 白色侧栏 + 黑 logo tile + 蓝 accent;移动端侧栏为抽屉 */}
       <div className="flex h-screen bg-background">
-        {/* 侧边栏(浅色,DSH 组件面板底色) */}
-        <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-[#FFFFFF]">
+        {/* 遮罩(移动端抽屉打开时) */}
+        {mobileNav && (
+          <div
+            className="fixed inset-0 z-30 bg-black/30 lg:hidden"
+            onClick={() => setMobileNav(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* 侧边栏:桌面 lg 固定展开;移动端 fixed 抽屉 */}
+        <aside
+          className={cn(
+            'z-40 flex w-60 shrink-0 flex-col border-r border-border bg-[#FFFFFF] transition-transform duration-200',
+            // 桌面:常驻;移动:隐藏,抽屉开启时滑入
+            'fixed inset-y-0 left-0 lg:static lg:translate-x-0',
+            mobileNav ? 'translate-x-0' : '-translate-x-full',
+          )}
+        >
           <div className="flex items-center gap-3 px-4 pb-4 pt-5">
             {/* 品牌 mark:黑 tile + 白色花括号(与 DSH 客户端一致) */}
             <div className="brand-tile h-9 w-9 shrink-0">
@@ -149,10 +167,18 @@ export default function App() {
                 </g>
               </svg>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="truncate text-[15px] font-bold tracking-tight text-foreground">PicoAide</div>
               <div className="text-[10px] font-medium text-muted-foreground">Admin Console</div>
             </div>
+            {/* 移动端关闭按钮 */}
+            <button
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-muted lg:hidden"
+              onClick={() => setMobileNav(false)}
+              aria-label="关闭导航"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
 
           {baseURL && (
@@ -162,12 +188,13 @@ export default function App() {
             </div>
           )}
 
-          <nav className="flex-1 space-y-0.5 px-3">
+          <nav className="flex-1 space-y-0.5 px-3 overflow-y-auto">
             <div className="px-3 pb-1.5 pt-1 text-[11px] font-semibold text-muted-foreground">管理</div>
             {nav.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
+                onClick={() => setMobileNav(false)}
                 className={({ isActive }) =>
                   cn(
                     'group relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150',
@@ -220,7 +247,31 @@ export default function App() {
 
         {/* 主内容区 */}
         <main className="flex min-w-0 flex-1 flex-col overflow-auto">
-          <div className="mx-auto w-full max-w-[1440px] flex-1 p-6 lg:p-7">
+          {/* 移动端顶部栏:汉堡菜单 + 标题(桌面隐藏) */}
+          <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-border bg-background/90 px-4 py-3 backdrop-blur lg:hidden">
+            <button
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-muted"
+              onClick={() => setMobileNav(true)}
+              aria-label="打开导航"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="flex items-center gap-2">
+              <div className="brand-tile h-6 w-6">
+                <svg viewBox="0 0 1254 1254" className="h-full w-full" fill="none" aria-hidden="true">
+                  <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
+                    <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                    <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
+                    <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
+                    <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
+                  </g>
+                </svg>
+              </div>
+              <span className="text-[15px] font-bold">PicoAide 管理</span>
+            </div>
+          </div>
+          <div className="mx-auto w-full max-w-[1440px] flex-1 p-4 sm:p-6 lg:p-7">
             <ErrorBoundary>
               <Suspense fallback={<div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>}>
                 <Routes>
