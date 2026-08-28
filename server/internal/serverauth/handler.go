@@ -22,7 +22,7 @@ type API struct {
 	DB        *sql.DB
 	limiter   *loginLimiter
 	providers map[string]PasswordProvider
-	oidc      BrowserProvider
+	browsers  map[string]BrowserProvider
 }
 
 // New creates the auth API.
@@ -31,6 +31,7 @@ func New(db *sql.DB) *API {
 		DB:        db,
 		limiter:   newLoginLimiter(),
 		providers: map[string]PasswordProvider{},
+		browsers:  map[string]BrowserProvider{},
 	}
 }
 
@@ -39,9 +40,14 @@ func (a *API) RegisterProvider(p PasswordProvider) {
 	a.providers[p.Name()] = p
 }
 
-// RegisterOIDC adds the browser provider if configured.
+// RegisterOIDC adds a browser provider (legacy name, kept for compat).
 func (a *API) RegisterOIDC(p BrowserProvider) {
-	a.oidc = p
+	a.browsers[p.Name()] = p
+}
+
+// RegisterBrowser adds a browser provider by its Name (oidc/openid).
+func (a *API) RegisterBrowser(p BrowserProvider) {
+	a.browsers[p.Name()] = p
 }
 
 // WriteError writes the standard error envelope (contract §0.4.1).
@@ -97,9 +103,11 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	g.POST("/logout", BearerAuth(a.DB), a.handleLogout)
 	g.GET("/me", BearerAuth(a.DB), a.handleMe)
 	g.GET("/usage", BearerAuth(a.DB), a.handleUsageSummary)
-	if a.oidc != nil {
-		g.GET("/oidc/login", a.handleOIDCLogin)
-		g.GET("/oidc/callback", a.handleOIDCCallback)
+	// 每套 browser provider(oidc/openid)独立路由前缀
+	for _, p := range a.browsers {
+		name := p.Name()
+		g.GET("/"+name+"/login", a.handleOIDCLoginWith(p))
+		g.GET("/"+name+"/callback", a.handleOIDCCallbackWith(p))
 	}
 }
 
