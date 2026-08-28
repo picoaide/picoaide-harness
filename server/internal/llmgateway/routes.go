@@ -26,5 +26,6 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	v1 := r.Group("/v1", serverauth.BearerAuth(db))
 	v1.POST("/chat/completions", a.handleChatCompletions)
 	v1.POST("/embeddings", a.handleEmbeddings)
+	v1.POST("/messages", a.handleMessages)
 	v1.GET("/models", a.handleModels)
 }

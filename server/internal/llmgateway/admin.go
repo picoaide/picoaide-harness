@@ -2,9 +2,9 @@ package llmgateway
 
 import (
 	"database/sql"
-	"fmt"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -143,12 +143,19 @@ type providerReq struct {
 	Channel *string `json:"channel"`
 	// 显式禁用开关:enabled=false 的 provider 不再参与模型路由(审计2026-M14)
 	Enabled *bool `json:"enabled"`
+	// Protocol(0043):openai(默认)或 anthropic(/v1/messages 兼容端点)。
+	// nil/缺省/空串 = openai;非法值拒绝。
+	Protocol *string `json:"protocol"`
 }
 
 func providerJSON(p serverstore.GatewayProvider) gin.H {
 	key := p.APIKeyEnc
 	if key != "" {
 		key = "***"
+	}
+	protocol := p.Protocol
+	if protocol == "" {
+		protocol = "openai"
 	}
 	return gin.H{
 		"id":       p.ID,
@@ -158,6 +165,7 @@ func providerJSON(p serverstore.GatewayProvider) gin.H {
 		"models":   p.Models,
 		"enabled":  p.Enabled == 1,
 		"channel":  p.Channel,
+		"protocol": protocol,
 	}
 }
 
@@ -184,6 +192,14 @@ func createProvider(c *gin.Context, db *sql.DB) {
 	if req.Channel != nil {
 		channel = *req.Channel
 	}
+	protocol := "openai"
+	if req.Protocol != nil && *req.Protocol != "" {
+		protocol = *req.Protocol
+	}
+	if protocol != "openai" && protocol != "anthropic" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "protocol 仅支持 openai/anthropic")
+		return
+	}
 	if req.BaseURL == "" && channel != "" {
 		if ch, ok := channels.Get(channel); ok {
 			req.BaseURL = ch.BaseURL()
@@ -204,7 +220,7 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		return
 	}
 	// 渠道型上游的模型由同步维护,不落手动模型清单(审计修复 M3 附带)
-	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Channel: channel, Enabled: 1}
+	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Channel: channel, Enabled: 1, Protocol: protocol}
 	if channel == "" {
 		p.Models = req.Models
 	}
@@ -273,6 +289,13 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if req.Channel != nil {
 		// 指针语义:"" = 清空渠道(切回手动型)(审计修复 M3 附带)
 		p.Channel = *req.Channel
+	}
+	if req.Protocol != nil && *req.Protocol != "" {
+		if *req.Protocol != "openai" && *req.Protocol != "anthropic" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "protocol 仅支持 openai/anthropic")
+			return
+		}
+		p.Protocol = *req.Protocol
 	}
 	if req.APIKey != "" {
 		enc, err := encryptSecret(req.APIKey)
@@ -572,21 +595,21 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		retention = fmt.Sprintf("%d", serverstore.DefaultRetentionMonths)
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"default_model":       settings["gateway.default_model"],
-		"rate_limit":          rateLimit,
-		"monthly_quota":       monthlyQuota,                             // default per-user monthly tokens (0 = unlimited)
-		"monthly_quota_money": monthlyQuotaMoney,                        // default per-user monthly yuan (0 = unlimited)
-		"peak_windows":        settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
-		"retention_months":    retention,                               // usage 明细保留月数(0=永久,默认 6)
-		"allow_private":       allowPrivate,
-		"search_endpoint":     settings["web.search_endpoint"],
-		"error_reporting_dsn": settings["web.error_reporting_dsn"],
+		"default_model":           settings["gateway.default_model"],
+		"rate_limit":              rateLimit,
+		"monthly_quota":           monthlyQuota,                             // default per-user monthly tokens (0 = unlimited)
+		"monthly_quota_money":     monthlyQuotaMoney,                        // default per-user monthly yuan (0 = unlimited)
+		"peak_windows":            settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
+		"retention_months":        retention,                                // usage 明细保留月数(0=永久,默认 6)
+		"allow_private":           allowPrivate,
+		"search_endpoint":         settings["web.search_endpoint"],
+		"error_reporting_dsn":     settings["web.error_reporting_dsn"],
 		"error_reporting_enabled": settings["web.error_reporting_enabled"] == "true",
 		"error_reporting_level":   settings["web.error_reporting_level"],
-		"glitchtip_base_url":     settings["web.glitchtip_base_url"],
-		"glitchtip_organization": settings["web.glitchtip_organization"],
+		"glitchtip_base_url":      settings["web.glitchtip_base_url"],
+		"glitchtip_organization":  settings["web.glitchtip_organization"],
 		"default_thinking_level":  settings["web.default_thinking_level"],
-		"server_base_url":     settings["server.base_url"],
+		"server_base_url":         settings["server.base_url"],
 	})
 }
 
@@ -629,21 +652,21 @@ func (f *FlexibleString) UnmarshalJSON(b []byte) error {
 // JSON 数字与字符串(第三方直连不踩坑,前端字符串不受影响)。
 func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
-		DefaultModel      *string         `json:"default_model"`
-		RateLimit         *FlexibleString `json:"rate_limit"`
-		MonthlyQuota      *FlexibleString `json:"monthly_quota"`
-		MonthlyQuotaMoney *FlexibleString `json:"monthly_quota_money"`
-		PeakWindows       *string         `json:"peak_windows"`
-		RetentionMonths   *string         `json:"retention_months"`
-		AllowPrivate      *bool           `json:"allow_private"`
-		SearchEndpoint    *string         `json:"search_endpoint"`
-		ErrorReportingDSN *string         `json:"error_reporting_dsn"`
-		ErrorReportingEnabled *bool       `json:"error_reporting_enabled"`
-		ErrorReportingLevel   *string     `json:"error_reporting_level"`
-		GlitchTipBaseURL  *string         `json:"glitchtip_base_url"`
-		GlitchTipOrg      *string         `json:"glitchtip_organization"`
-		DefaultThinkingLevel *string      `json:"default_thinking_level"`
-		ServerBaseURL     *string         `json:"server_base_url"`
+		DefaultModel          *string         `json:"default_model"`
+		RateLimit             *FlexibleString `json:"rate_limit"`
+		MonthlyQuota          *FlexibleString `json:"monthly_quota"`
+		MonthlyQuotaMoney     *FlexibleString `json:"monthly_quota_money"`
+		PeakWindows           *string         `json:"peak_windows"`
+		RetentionMonths       *string         `json:"retention_months"`
+		AllowPrivate          *bool           `json:"allow_private"`
+		SearchEndpoint        *string         `json:"search_endpoint"`
+		ErrorReportingDSN     *string         `json:"error_reporting_dsn"`
+		ErrorReportingEnabled *bool           `json:"error_reporting_enabled"`
+		ErrorReportingLevel   *string         `json:"error_reporting_level"`
+		GlitchTipBaseURL      *string         `json:"glitchtip_base_url"`
+		GlitchTipOrg          *string         `json:"glitchtip_organization"`
+		DefaultThinkingLevel  *string         `json:"default_thinking_level"`
+		ServerBaseURL         *string         `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")

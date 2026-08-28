@@ -934,3 +934,27 @@ func TestAdminToggleProviderKeepsManualModels(t *testing.T) {
 		t.Fatalf("models after explicit sync = %d, want 1", n)
 	}
 }
+
+func TestCreateProviderProtocolValidation(t *testing.T) {
+	r, _, hdr := adminTestSetup(t)
+	// 非法协议拒绝
+	w, out := adminReq(t, r, "POST", "/api/admin/providers", `{"name":"x","base_url":"https://x.com","api_key":"k","protocol":"gopher"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if out["error"].(map[string]any)["code"] != "VALIDATION" {
+		t.Fatalf("body = %s", w.Body.String())
+	}
+	// anthropic 创建成功并回显 protocol
+	w, out = adminReq(t, r, "POST", "/api/admin/providers", `{"name":"ds-an","base_url":"https://api.deepseek.com/anthropic/v1","api_key":"k","protocol":"anthropic","models":["deepseek-v4-flash"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	p := out["provider"].(map[string]any)
+	if p["protocol"] != "anthropic" {
+		t.Fatalf("protocol = %v", p["protocol"])
+	}
+	if p["api_key"] != "***" {
+		t.Fatalf("api_key must be masked, got %v", p["api_key"])
+	}
+}
