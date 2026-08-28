@@ -136,7 +136,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', error_reporting_dsn: '', error_reporting_enabled: false, error_reporting_level: 'error', glitchtip_base_url: '', glitchtip_organization: '', default_thinking_level: 'max', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -697,51 +697,6 @@ export default function Gateway() {
               <Label htmlFor="search-endpoint">web_search 端点</Label>
               <Input id="search-endpoint" type="url" placeholder="https://search.example.com/q" value={cfg.search_endpoint}
                 onChange={(e) => setCfg({ ...cfg, search_endpoint: e.target.value })} />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Switch checked={cfg.error_reporting_enabled} onCheckedChange={(v) => setCfg({ ...cfg, error_reporting_enabled: v })} />
-              <Label>启用客户端错误上报(未捕获异常/未处理 rejection)</Label>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <Label htmlFor="error-reporting-dsn">错误上报 DSN(客户端 Sentry 上报地址,如 GlitchTip)</Label>
-                <Input id="error-reporting-dsn" type="text" placeholder="https://glitchtip.example.com/...或空=不启用"
-                  value={cfg.error_reporting_dsn}
-                  onChange={(e) => setCfg({ ...cfg, error_reporting_dsn: e.target.value })} />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="error-reporting-level">上报等级({'>= '}该等级才上报)</Label>
-                <Select value={cfg.error_reporting_level} onValueChange={(v) => setCfg({ ...cfg, error_reporting_level: v })}>
-                  <SelectTrigger id="error-reporting-level" aria-label="上报等级"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="debug">debug(全部)</SelectItem>
-                    <SelectItem value="info">info(debug+info)</SelectItem>
-                    <SelectItem value="warning">warning(含 error)</SelectItem>
-                    <SelectItem value="error">error(仅错误)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              开关开启 + DSN 非空时,客户端登录后自动启用错误上报(无需用户手动连接);
-              等级阈值:如 warning = 上报 warning 与 error。仅支持 Sentry 兼容服务(如自托管 GlitchTip)。
-            </p>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <Label htmlFor="glitchtip-base-url">GlitchTip 服务地址(连接器预填)</Label>
-              <Input id="glitchtip-base-url" type="text" placeholder="https://glitchtip.example.com 或空=不预填"
-                value={cfg.glitchtip_base_url}
-                onChange={(e) => setCfg({ ...cfg, glitchtip_base_url: e.target.value })} />
-              <p className="text-xs text-muted-foreground">客户端连接器自动预填,用户只需填 API Token</p>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="glitchtip-organization">GlitchTip 组织 slug(连接器预填)</Label>
-              <Input id="glitchtip-organization" type="text" placeholder="如 picoaide 或空=不预填"
-                value={cfg.glitchtip_organization}
-                onChange={(e) => setCfg({ ...cfg, glitchtip_organization: e.target.value })} />
             </div>
           </div>
           <div className="space-y-1">
