@@ -210,8 +210,8 @@ func TestBootstrapConnectors(t *testing.T) {
 
 	_, out := getJSON(t, r, "/api/config/bootstrap", token)
 	conns := out["connectors"].([]any)
-	if len(conns) < 2 {
-		t.Fatalf("connectors = %d, want >= 2 (种子 moka+glitchtip)", len(conns))
+	if len(conns) < 3 {
+		t.Fatalf("connectors = %d, want >= 3 (种子 moka+glitchtip+sales-easy)", len(conns))
 	}
 	byID := map[string]map[string]any{}
 	for _, c := range conns {
