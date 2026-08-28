@@ -175,6 +175,11 @@ export function packageWindowsInstaller(
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
   try {
+    // 打包前预构建依赖包(enterprise/account-card/branding 的 lib/ 未入库,
+    // 不构建则安装包携带缺失/旧 bundle,品牌版本号不显示。顺序见
+    // prebuild-workspace-deps.ts)。
+    const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
+    prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
     packageWindowsInstaller()
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
