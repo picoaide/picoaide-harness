@@ -360,6 +360,30 @@ func TestVisibility(t *testing.T) {
 	}
 }
 
+// TestReplaceGrantsUnknownGroup: 授权整组替换时,不存在/非法的部门名必须
+// 返回 400(而不是 500)——修复 2026-08-28(prod 演示 @all 触发 500)。
+func TestReplaceGrantsUnknownGroup(t *testing.T) {
+	r, db, adminHdr, _, _ := setup(t)
+	defer db.Close()
+
+	put := func(body string) int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("PUT", "/api/admin/shared-skills/any/grants", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if got := put(`{"groups":["不存在的部门"]}`); got != http.StatusBadRequest {
+		t.Fatalf("unknown group = %d, want 400", got)
+	}
+	if got := put(`{"groups":["@all"]}`); got != http.StatusBadRequest {
+		t.Fatalf("@all = %d, want 400", got)
+	}
+}
+
 // TestCrossSourceConflictUploadApprove 决策 2026-08-25:市场与组织合并为
 // 「市场」后,同名技能跨源互斥——上传(员工)与 approve(管理员)对市场同名
 // 技能返回 409 CONFLICT。
