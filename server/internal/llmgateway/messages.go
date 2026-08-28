@@ -74,7 +74,8 @@ func anthropicUsage(raw []byte) (pt, ct, cache int64, ok bool, err error) {
 
 // serveAnthropicJSON passes a non-stream Anthropic Messages response through
 // and records usage (kind "search" so admin usage pages can split it).
-func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int64, model string) {
+// secrets: 本次请求使用的上游官方 key(响应回显脱敏)。
+func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -103,6 +104,7 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游响应过大")
 		return
 	}
+	body = redactSecrets(body, secrets)
 	if pt, ct, cache, ok, _ := anthropicUsage(body); ok {
 		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cache, "search"); err != nil {
 			log.Printf("gateway: record anthropic usage: %v", err)
@@ -114,7 +116,7 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 			continue
 		}
 		for _, v := range vv {
-			c.Writer.Header().Add(k, v)
+			c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 		}
 	}
 	c.Writer.Write(body)
@@ -124,8 +126,8 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 // backfilling the pending usage row from the message's usage fields.
 // Anthropic 流式 usage 是分散的:input_tokens 只在 message_start 出现,
 // output_tokens 在 message_delta 出现(累积语义),因此按行合并(非零覆盖)
-// 再回填,不能像 OpenAI 那样整行覆盖。
-func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID int64) {
+// 再回填,不能像 OpenAI 那样整行覆盖。secrets: 上游官方 key(行/头脱敏)。
+func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
@@ -140,10 +142,11 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				continue
 			}
 			for _, v := range vv {
-				c.Writer.Header().Add(k, v)
+				c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 			}
 		}
-		io.Copy(c.Writer, resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		c.Writer.Write(redactSecrets(errBody, secrets))
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -163,6 +166,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 		}
 		line, err := readLineWithIdle(br, streamIdleTimeout)
 		if len(line) > 0 {
+			line = string(redactSecrets([]byte(line), secrets))
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
 				if lpt, lct, lcache, ok, perr := anthropicUsage([]byte(s)); perr != nil {
 					log.Printf("gateway: parse anthropic usage line: %v", perr)
@@ -274,9 +278,11 @@ func (a *API) handleMessages(c *gin.Context) {
 
 	// Failover across Anthropic-protocol providers (same policy as chat).
 	var resp *http.Response
+	var respSecrets []string // 成功 provider 的官方 key(响应脱敏用)
 	for i := range ups {
 		resp, err = a.forwardAnthropic(c, &ups[i], raw, req.Stream)
 		if err == nil {
+			respSecrets = []string{ups[i].APIKey}
 			break
 		}
 		log.Printf("gateway: anthropic model %s provider %s failed: %v",
@@ -292,10 +298,10 @@ func (a *API) handleMessages(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveAnthropicStream(c, resp, usageID)
+		a.serveAnthropicStream(c, resp, usageID, respSecrets)
 		return
 	}
-	a.serveAnthropicJSON(c, resp, user.ID, req.Model)
+	a.serveAnthropicJSON(c, resp, user.ID, req.Model, respSecrets)
 }
 
 // forwardAnthropic sends the raw body to an Anthropic-compatible upstream,

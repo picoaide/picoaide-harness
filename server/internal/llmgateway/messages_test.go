@@ -28,6 +28,9 @@ type fakeAnthropicUpstream struct {
 	streamResp string
 	nonStream  string
 	mu         sync.Mutex
+	// echoKey: 模拟恶意/异常上游——把收到的官方 key 回显到响应体与响应头,
+	// 用于验证网关响应脱敏。
+	echoKey bool
 }
 
 func newFakeAnthropicUpstream(t *testing.T) *fakeAnthropicUpstream {
@@ -54,18 +57,35 @@ data: {"type":"message_stop"}
 		f.mu.Lock()
 		f.requests++
 		f.gotBody.Store(r.URL.Path, string(body))
-		f.gotHeaders.Store(r.URL.Path, fmt.Sprintf("x-api-key=%s;authorization=%s;anthropic-version=%s",
-			r.Header.Get("x-api-key"), r.Header.Get("Authorization"), r.Header.Get("anthropic-version")))
+		auth := fmt.Sprintf("x-api-key=%s;authorization=%s;anthropic-version=%s",
+			r.Header.Get("x-api-key"), r.Header.Get("Authorization"), r.Header.Get("anthropic-version"))
+		f.gotHeaders.Store(r.URL.Path, auth)
 		f.mu.Unlock()
+		key := r.Header.Get("x-api-key")
+		if key == "" {
+			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
 		w.Header().Set("Content-Type", "application/json")
+		if f.echoKey {
+			// 恶意上游回显:响应头 + 响应体都带上官方 key
+			w.Header().Set("X-Upstream-Echo", key)
+		}
 		if strings.Contains(string(body), `"stream":true`) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(f.status)
-			fmt.Fprint(w, f.streamResp)
+			resp := f.streamResp
+			if f.echoKey {
+				resp = strings.ReplaceAll(resp, `"text":"hi"`, fmt.Sprintf(`"text":"hi %s"`, key))
+			}
+			fmt.Fprint(w, resp)
 			return
 		}
 		w.WriteHeader(f.status)
-		fmt.Fprint(w, f.nonStream)
+		resp := f.nonStream
+		if f.echoKey {
+			resp = strings.ReplaceAll(resp, `"text":"hi"`, fmt.Sprintf(`"text":"hi %s"`, key))
+		}
+		fmt.Fprint(w, resp)
 	}))
 	t.Cleanup(f.srv.Close)
 	f.baseURL = f.srv.URL
@@ -259,3 +279,43 @@ func TestAnthropicUsageParser(t *testing.T) {
 
 // compile-time check that json stays imported (used by test helpers above)
 var _ = context.Background
+
+// 恶意上游在响应体/响应头回显官方 key:/v1/messages 透传前必须脱敏。
+func TestMessagesRedactsUpstreamKeyEcho(t *testing.T) {
+	f := newFakeAnthropicUpstream(t)
+	f.echoKey = true
+	r, _, token := newMessagesGateway(t, f)
+
+	body := `{"model":"deepseek-v4-flash","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"keycheck"}]}]}`
+	w := doMessagesPost(t, r, body, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	out := w.Body.String()
+	if strings.Contains(out, upstreamKey) {
+		t.Fatalf("upstream key leaked in messages body:\n%s", out)
+	}
+	// mock 把 key 放进 citation URL 的场景(此前审计发现的真实路径)
+	if strings.Contains(out, "sk-upstream-test") || strings.Contains(out, "%") && strings.Contains(out, "sk-upstream-test") {
+		t.Fatalf("upstream key leaked via citation url:\n%s", out)
+	}
+	if !strings.Contains(out, "***") {
+		t.Fatalf("redaction marker missing:\n%s", out)
+	}
+}
+
+func TestMessagesStreamRedactsUpstreamKeyEcho(t *testing.T) {
+	f := newFakeAnthropicUpstream(t)
+	f.echoKey = true
+	r, _, token := newMessagesGateway(t, f)
+
+	body := `{"model":"deepseek-v4-flash","stream":true,"max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
+	w := doMessagesPost(t, r, body, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	out := w.Body.String()
+	if strings.Contains(out, upstreamKey) {
+		t.Fatalf("upstream key leaked in messages stream:\n%s", out)
+	}
+}
