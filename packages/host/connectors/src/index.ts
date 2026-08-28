@@ -47,6 +47,50 @@ export interface ConnectorsOptions {
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
 
+/** Server connector catalog item (bootstrap `connectors[]`). */
+export interface ServerConnectorItem {
+  id: string
+  name: string
+  description: string
+  auth_mode: string
+  definition: string
+}
+
+/**
+ * Parse the server-issued connector catalog into ConnectorDef[]: the catalog
+ * row wins for id/name/description/authMode; the definition JSON contributes
+ * the auth/tokenFields/examples/mcp payload. Invalid entries are dropped so a
+ * single bad row never blanks the whole catalog.
+ */
+export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDef[] {
+  const out: ConnectorDef[] = []
+  for (const item of items) {
+    if (!item?.id || !item.definition) continue
+    try {
+      const raw = JSON.parse(item.definition) as ConnectorDef
+      if (!raw?.mcp?.length) continue
+      let authMode = (item.auth_mode || raw.authMode || '') as ConnectorDef['authMode']
+      if (!authMode) {
+        // 回退推断:定义 JSON 的结构决定模式(tokenFields → token,
+        // auth 配置 → oauth;其余按 device 保守处理)。
+        if (raw.tokenFields?.length) authMode = 'token'
+        else if (raw.auth) authMode = 'oauth'
+        else authMode = 'device'
+      }
+      out.push({
+        ...raw,
+        id: item.id,
+        name: item.name !== '' ? item.name : raw.name ?? '',
+        description: item.description !== '' ? item.description : raw.description ?? '',
+        authMode,
+      })
+    } catch {
+      // 单条定义非法:跳过,不影响其他连接器。
+    }
+  }
+  return out
+}
+
 /** Cap on connector API request bodies (settings forms are small). */
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024
 
@@ -111,33 +155,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         headers: { Authorization: `Bearer ${session.token}` },
       })
       if (!res.ok) return
-      const cfg = (await res.json()) as { connectors?: { id: string; name: string; description: string; auth_mode: string; definition: string }[] }
+      const cfg = (await res.json()) as { connectors?: ServerConnectorItem[] }
       const items = cfg.connectors ?? []
       if (items.length === 0) {
         // 服务端未配置连接器:清空目录(连接器中心显示空;不与 options 冲突)。
         defs = [...(options.connectors ?? [])]
         return
       }
-      const parsed: ConnectorDef[] = []
-      for (const item of items) {
-        if (!item?.id || !item.definition) continue
-        try {
-          const raw = JSON.parse(item.definition) as ConnectorDef
-          if (!raw?.mcp?.length) continue
-          // 下发的是定义骨架;id/名称/描述/认证模式以目录行为准(防御
-          // 定义 JSON 内不一致字段,且客户端不可被定义 JSON 覆盖目录字段)。
-          parsed.push({ ...raw, id: item.id, name: item.name || raw.name, description: item.description || raw.description, authMode: (item.auth_mode || raw.authMode) as ConnectorDef['authMode'] })
-        } catch {
-          // 单条定义非法:跳过,不影响其他连接器。
-        }
-      }
-      defs = parsed
+      defs = parseServerConnectors(items)
     } catch {
       /* 服务端配置获取失败不影响连接器基本功能(保留当前 defs) */
     }
   }
   void syncServerDefs()
-  // Current user scope: resolved from the enterprise session when present.  // `getSession()` is a service read guarded by type-only import, so this
+  // Current user scope: resolved from the enterprise session when present.
+  // `getSession()` is a service read guarded by type-only import, so this
   // plugin also loads in compositions without the enterprise plugin.
   const currentUser = (): string | null => {
     try {
