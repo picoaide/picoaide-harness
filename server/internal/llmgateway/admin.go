@@ -196,8 +196,8 @@ func createProvider(c *gin.Context, db *sql.DB) {
 	if req.Protocol != nil && *req.Protocol != "" {
 		protocol = *req.Protocol
 	}
-	if protocol != "openai" && protocol != "anthropic" {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "protocol 仅支持 openai/anthropic")
+	if protocol != "openai" && protocol != "anthropic" && protocol != "both" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "protocol 仅支持 openai/anthropic/both")
 		return
 	}
 	if req.BaseURL == "" && channel != "" {
@@ -291,8 +291,8 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 		p.Channel = *req.Channel
 	}
 	if req.Protocol != nil && *req.Protocol != "" {
-		if *req.Protocol != "openai" && *req.Protocol != "anthropic" {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "protocol 仅支持 openai/anthropic")
+		if *req.Protocol != "openai" && *req.Protocol != "anthropic" && *req.Protocol != "both" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "protocol 仅支持 openai/anthropic/both")
 			return
 		}
 		p.Protocol = *req.Protocol

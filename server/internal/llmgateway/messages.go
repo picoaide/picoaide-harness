@@ -304,13 +304,30 @@ func (a *API) handleMessages(c *gin.Context) {
 	a.serveAnthropicJSON(c, resp, user.ID, req.Model, respSecrets)
 }
 
+// anthropicBaseURL 推导 Anthropic 兼容端点基址:
+//   - both(0044):provider 的 BaseURL 是 OpenAI 端点(如 https://api.deepseek.com),
+//     Anthropic 端点 = {BaseURL}/anthropic/v1(DeepSeek 官方布局);
+//     若 BaseURL 已含 /anthropic(显式填了 Anthropic 端点),尊重原样。
+//   - anthropic(0043):BaseURL 即管理员填写的 Anthropic 端点,原样返回
+//     (不推导——单 anthropic 协议的上游 base_url 就应是实际端点)。
+func anthropicBaseURL(base, protocol string) string {
+	base = strings.TrimSuffix(base, "/")
+	if protocol != "both" {
+		return base
+	}
+	if strings.Contains(base, "/anthropic") {
+		return base
+	}
+	return base + "/anthropic/v1"
+}
+
 // forwardAnthropic sends the raw body to an Anthropic-compatible upstream,
 // replacing every credential header with the upstream key. The client's
 // `x-api-key` / `authorization` / `anthropic-version` are dropped: only the
 // upstream key the server owns is sent, so a client can never inject its own
 // credential or version drift on a proxied search.
 func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
-	url := upstreamURLFor(up.BaseURL, "/messages")
+	url := upstreamURLFor(anthropicBaseURL(up.BaseURL, up.Protocol), "/messages")
 	client := a.client
 	if stream {
 		client = a.sse

@@ -319,3 +319,58 @@ func TestMessagesStreamRedactsUpstreamKeyEcho(t *testing.T) {
 		t.Fatalf("upstream key leaked in messages stream:\n%s", out)
 	}
 }
+
+// 0044: both——一个 provider 同一 key 同时服务 chat(OpenAI)与 search(Anthropic)。
+func TestMessagesRoutesToBothProvider(t *testing.T) {
+	f := newFakeAnthropicUpstream(t)
+	DecryptSecret = func(s string) (string, error) { return s, nil }
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "both", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// both 协议:BaseURL 是 OpenAI 端点(无 /anthropic)
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, protocol) VALUES ('deepseek-both', ?, ?, '["deepseek-v4-flash"]', 'both')`, f.baseURL, upstreamKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES ('deepseek-v4-flash', 1, 'V4')`); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterRoutes(r, db)
+
+	// messages 路由命中 both provider
+	body := `{"model":"deepseek-v4-flash","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
+	w := doMessagesPost(t, r, body, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("messages via both: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"text":"hi"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestAnthropicBaseURLDerivation(t *testing.T) {
+	cases := []struct{ in, proto, want string }{
+		// both:OpenAI 端点 → 推导官方 Anthropic 布局
+		{"https://api.deepseek.com", "both", "https://api.deepseek.com/anthropic/v1"},
+		{"https://api.deepseek.com/", "both", "https://api.deepseek.com/anthropic/v1"},
+		// both:显式含 /anthropic → 原样
+		{"https://api.deepseek.com/anthropic/v1", "both", "https://api.deepseek.com/anthropic/v1"},
+		{"https://api.deepseek.com/anthropic/v1/", "both", "https://api.deepseek.com/anthropic/v1"},
+		// anthropic(0043):不推导,原样(管理员已填实际端点)
+		{"http://127.0.0.1:18092", "anthropic", "http://127.0.0.1:18092"},
+		{"https://api.deepseek.com/anthropic/v1", "anthropic", "https://api.deepseek.com/anthropic/v1"},
+	}
+	for _, c := range cases {
+		if got := anthropicBaseURL(c.in, c.proto); got != c.want {
+			t.Fatalf("anthropicBaseURL(%q, %q) = %q, want %q", c.in, c.proto, got, c.want)
+		}
+	}
+}
