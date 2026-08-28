@@ -43,10 +43,16 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
       <div className="relative z-10 w-[420px] rounded-xl border border-slate-700/60 bg-white p-8 shadow-[0_25px_60px_rgba(0,0,0,0.35)]">
         <div className="mb-7 text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-blue-200 bg-blue-50">
-            <svg viewBox="0 0 32 32" className="h-8 w-8" fill="none" aria-hidden="true">
-              <rect x="3" y="3" width="26" height="26" rx="7" fill="rgba(30,64,175,0.06)" stroke="#1E40AF" strokeWidth="2" />
-              <path d="M12 12 L20 16 L12 20 Z" fill="#1E40AF" />
+          {/* 与客户端一致的品牌 mark(花括号 tile,见 packages/client/branding BraceMark) */}
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center overflow-hidden rounded-lg shadow-sm" style={{ backgroundColor: '#000000' }}>
+            <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
+              <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
+                <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
+                <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
+                <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
+              </g>
             </svg>
           </div>
           <h1 className="text-[22px] font-bold tracking-tight text-[#0F172A]">PicoAide 管理后台</h1>
