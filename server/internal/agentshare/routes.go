@@ -100,6 +100,85 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	}
 }
 
+// presetFileContent returns one file's content from a stored preset archive so
+// admins can review every uploaded file (审核查看全部内容)。Text (UTF-8) files
+// are returned inline capped at 1MB; binary or oversized entries are flagged
+// for archive download. Admin-only; version-empty resolves the name's latest
+// row (legacy callers).
+func presetFileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name := c.Param("name")
+		if !presetIDRe.MatchString(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
+		version := c.Param("version")
+		if version != "" && !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "版本号不合法")
+			return
+		}
+		target := c.Query("path")
+		if target == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少文件路径")
+			return
+		}
+		norm, err := posixNormalize(target)
+		if err != nil || norm == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件路径不合法")
+			return
+		}
+		var p *serverstore.AgentPreset
+		var gerr error
+		if version != "" {
+			p, gerr = serverstore.GetAgentPresetByVersion(db, name, version)
+		} else {
+			p, gerr = serverstore.GetAgentPreset(db, name)
+		}
+		if gerr != nil {
+			if errors.Is(gerr, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		// 0041:归档直存 DB;pre-0041 行的磁盘回退(read-only)。
+		var raw []byte
+		dbRaw, aerr := serverstore.GetAgentPresetArchive(db, p.Name, p.Version)
+		switch {
+		case aerr == nil && dbRaw != nil:
+			raw = dbRaw
+		case aerr == nil:
+			diskPath := filepath.Join(cacheDir, safeName(p.Name, p.Version))
+			if r, rerr := os.ReadFile(diskPath); rerr == nil {
+				raw = r
+			} else {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档数据缺失")
+				return
+			}
+		default:
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
+			return
+		}
+		content, size, found, binary, tooLarge, xerr := ExtractFileContent(raw, norm)
+		if xerr != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(xerr))
+			return
+		}
+		if !found {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档中不存在该文件")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"path":      norm,
+			"size":      size,
+			"binary":    binary,
+			"too_large": tooLarge,
+			"content":   content,
+		})
+	}
+}
+
 // RegisterRoutes mounts /api/agent-presets (employee Bearer endpoints).
 func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/agent-presets", serverauth.BearerAuth(db))
@@ -127,6 +206,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.DELETE("/:name/:version", removeVersioned(db, cacheDir))
 	// 质量标记(0037):仅 approved 行可设置/清除(official/featured,互斥)。
 	g.PUT("/:name/:version/quality", setPresetQuality(db))
+	// 单文件内容(审核查看):从归档提取指定文件内容,支持文本/二进制/超大。
+	g.GET("/:name/:version/file", presetFileContent(db, cacheDir))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
 	g.GET("/:name/grants", listPresetGrants(db))
 	g.PUT("/:name/grants", replacePresetGrants(db))

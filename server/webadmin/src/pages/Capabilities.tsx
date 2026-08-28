@@ -6,11 +6,12 @@ import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Download, FileText, RefreshCw, Sparkles, Share2, ShieldCheck } from 'lucide-react'
 import { GrantDialog } from '../components/grant-dialog'
+import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 
 /**
  * 能力中心·统一审批(决策 2026-08-25 Phase 3):共享技能与共享 Agent 的
@@ -69,8 +70,9 @@ export default function Capabilities() {
   const [confirm, setConfirm] = useState<ApprovalRow | null>(null)
   const [confirmKind, setConfirmKind] = useState<'approve' | 'reject' | 'delete'>('approve')
   const [reason, setReason] = useState('')
-  const [preview, setPreview] = useState<{ files: string[]; skill_md?: string; composition?: string } | null>(null)
+  const [preview, setPreview] = useState<ArchivePreviewData | null>(null)
   const [previewKey, setPreviewKey] = useState('')
+  const [previewRow, setPreviewRow] = useState<ApprovalRow | null>(null)
   const [busy, setBusy] = useState('')
   const [grantName, setGrantName] = useState('')
   const [grantBase, setGrantBase] = useState('')
@@ -149,10 +151,11 @@ export default function Capabilities() {
 
   const openPreview = async (row: ApprovalRow) => {
     setPreviewKey(row.display_name || row.name + '@' + row.version)
+    setPreviewRow(row)
     setPreview(null)
     setError('')
     try {
-      const data = await request<{ files: string[]; skill_md?: string; composition?: string }>(row.preview_path)
+      const data = await request<ArchivePreviewData>(row.preview_path)
       setPreview(data)
     } catch (err: any) {
       setError(err.message)
@@ -301,33 +304,15 @@ export default function Capabilities() {
         </div>
       )}
 
-      {/* 内容预览 */}
-      <Dialog open={previewKey !== ''} onOpenChange={(open) => { if (!open) setPreviewKey('') }}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>内容预览: {previewKey}</DialogTitle>
-            <DialogDescription>归档内容与文件清单(用于决策审核)</DialogDescription>
-          </DialogHeader>
-          {preview === null ? (
-            <p className="text-sm text-muted-foreground">加载中…</p>
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <h4 className="mb-1 text-sm font-medium">{preview.skill_md !== undefined ? 'SKILL.md' : 'agent.cordis.yml'}</h4>
-                <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{preview.skill_md ?? preview.composition ?? '—'}</pre>
-              </div>
-              <div>
-                <h4 className="mb-1 text-sm font-medium">文件清单（{preview.files.length}）</h4>
-                <div className="flex max-h-40 flex-wrap gap-1 overflow-auto">
-                  {preview.files.map(f => (
-                    <Badge key={f} variant="outline" className="font-mono text-[11px]">{f}</Badge>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* 内容预览(文件清单可点击查看任意文件内容) */}
+      <ArchivePreviewDialog
+        openKey={previewKey}
+        data={preview}
+        mainTitle={previewRow?.kind === 'agent' ? 'agent.cordis.yml' : 'SKILL.md'}
+        mainContent={previewRow?.kind === 'agent' ? preview?.composition ?? '' : preview?.skill_md ?? ''}
+        fileBase={previewRow ? previewRow.base_path : ''}
+        onClose={() => { setPreviewKey('') }}
+      />
 
       {/* 确认弹窗 */}
       <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) { setConfirm(null); setReason('') } }}>

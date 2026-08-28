@@ -6,6 +6,7 @@ package agentshare
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Archive limits: the raw gzipped tar a client may upload, and the total
@@ -185,6 +187,54 @@ func ListArchiveContents(data []byte) ([]string, string, error) {
 		sort.Strings(order)
 	}
 	return order, composition, nil
+}
+
+// maxFilePreviewBytes caps the inline text returned by the per-file review
+// endpoint; larger files are flagged for archive download instead.
+const maxFilePreviewBytes = 1 << 20
+
+// ExtractFileContent finds one archive entry by normalized path and returns
+// its text content. Binary (non-UTF-8) and oversized entries return flags
+// instead of payload; the caller decides how to present them.
+func ExtractFileContent(data []byte, target string) (content string, size int64, found, binary, tooLarge bool, err error) {
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return "", 0, false, false, false, ErrUnsafeArchive
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, herr := tr.Next()
+		if herr == io.EOF {
+			break
+		}
+		if herr != nil {
+			return "", 0, false, false, false, ErrUnsafeArchive
+		}
+		if hdr.Typeflag == tar.TypeDir || linkTypes[hdr.Typeflag] {
+			continue
+		}
+		name, nerr := posixNormalize(hdr.Name)
+		if nerr != nil || name == "" {
+			continue
+		}
+		if name != target {
+			continue
+		}
+		size = hdr.Size
+		if hdr.Size > maxFilePreviewBytes {
+			return "", size, true, false, true, nil
+		}
+		buf := make([]byte, hdr.Size)
+		if _, err := io.ReadFull(tr, buf); err != nil {
+			return "", size, true, false, false, ErrUnsafeArchive
+		}
+		if !utf8.Valid(buf) {
+			return "", size, true, true, false, nil
+		}
+		return string(buf), size, true, false, false, nil
+	}
+	return "", 0, false, false, false, nil
 }
 
 // safeName is the filename a stored archive uses: <name>-<version>.tar.gz
