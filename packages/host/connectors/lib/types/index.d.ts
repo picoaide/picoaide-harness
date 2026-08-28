@@ -31,5 +31,20 @@ export interface ConnectorsOptions {
     /** Override the token store directory (tests). */
     storeBaseDir?: string;
 }
+/** Server connector catalog item (bootstrap `connectors[]`). */
+export interface ServerConnectorItem {
+    id: string;
+    name: string;
+    description: string;
+    auth_mode: string;
+    definition: string;
+}
+/**
+ * Parse the server-issued connector catalog into ConnectorDef[]: the catalog
+ * row wins for id/name/description/authMode; the definition JSON contributes
+ * the auth/tokenFields/examples/mcp payload. Invalid entries are dropped so a
+ * single bad row never blanks the whole catalog.
+ */
+export declare function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDef[];
 export declare function apply(ctx: Context, options?: ConnectorsOptions): void;
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts';

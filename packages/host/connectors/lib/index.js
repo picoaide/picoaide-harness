@@ -354,6 +354,34 @@ async function runAuth(def, options) {
 */
 const name = "pico-connectors";
 const inject = ["webServer"];
+/**
+* Parse the server-issued connector catalog into ConnectorDef[]: the catalog
+* row wins for id/name/description/authMode; the definition JSON contributes
+* the auth/tokenFields/examples/mcp payload. Invalid entries are dropped so a
+* single bad row never blanks the whole catalog.
+*/
+function parseServerConnectors(items) {
+	const out = [];
+	for (const item of items) {
+		if (!item?.id || !item.definition) continue;
+		try {
+			const raw = JSON.parse(item.definition);
+			if (!raw?.mcp?.length) continue;
+			let authMode = item.auth_mode || raw.authMode || "";
+			if (!authMode) if (raw.tokenFields?.length) authMode = "token";
+			else if (raw.auth) authMode = "oauth";
+			else authMode = "device";
+			out.push({
+				...raw,
+				id: item.id,
+				name: item.name !== "" ? item.name : raw.name ?? "",
+				description: item.description !== "" ? item.description : raw.description ?? "",
+				authMode
+			});
+		} catch {}
+	}
+	return out;
+}
 /** Cap on connector API request bodies (settings forms are small). */
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 function json(res, status, body) {
@@ -405,22 +433,7 @@ function apply(ctx, options = {}) {
 				defs = [...options.connectors ?? []];
 				return;
 			}
-			const parsed = [];
-			for (const item of items) {
-				if (!item?.id || !item.definition) continue;
-				try {
-					const raw = JSON.parse(item.definition);
-					if (!raw?.mcp?.length) continue;
-					parsed.push({
-						...raw,
-						id: item.id,
-						name: item.name || raw.name,
-						description: item.description || raw.description,
-						authMode: item.auth_mode || raw.authMode
-					});
-				} catch {}
-			}
-			defs = parsed;
+			defs = parseServerConnectors(items);
 		} catch {}
 	};
 	syncServerDefs();
@@ -854,6 +867,6 @@ function migrateLegacyStore(username) {
 	} catch {}
 }
 //#endregion
-export { apply, inject, name };
+export { apply, inject, name, parseServerConnectors };
 
 //# sourceMappingURL=index.js.map
