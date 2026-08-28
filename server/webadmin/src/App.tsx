@@ -132,37 +132,38 @@ export default function App() {
 
   return (
     <BrowserRouter basename="/admin">
+      {/* DSH 风:浅色界面 + 白色侧栏 + 黑 logo tile + 蓝 accent */}
       <div className="flex h-screen bg-background">
-        {/* 品牌深海军蓝侧边栏(#0F172A 契约色) */}
-        <aside className="flex w-56 shrink-0 flex-col border-r border-slate-800 bg-[#0F172A] text-slate-300">
-          <div className="flex items-center gap-3 px-5 pb-5 pt-6">
-            {/* 与客户端一致的品牌 mark(花括号 tile,见 packages/client/branding BraceMark) */}
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg" style={{ backgroundColor: '#FFFFFF' }}>
-              <svg viewBox="0 0 1254 1254" className="h-full w-full" fill="none" aria-hidden="true">
+        {/* 侧边栏(浅色,DSH 组件面板底色) */}
+        <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-[#FFFFFF]">
+          <div className="flex items-center gap-3 px-4 pb-4 pt-5">
+            {/* 品牌 mark:黑 tile + 白色花括号(与 DSH 客户端一致) */}
+            <div className="brand-tile h-9 w-9 shrink-0">
+              <svg viewBox="0 0 1254 1254" className="h-full w-full p-0.5" fill="none" aria-hidden="true">
                 <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-                  <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#0F172A" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#0F172A" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                  <line x1="435" y1="627" x2="817" y2="627" stroke="#0F172A" strokeWidth="20" strokeLinecap="round" />
-                  <circle cx="435" cy="627" r="65" fill="#0F172A" />
-                  <circle cx="817" cy="627" r="65" fill="#0F172A" />
+                  <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+                  <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
+                  <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
+                  <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
                 </g>
               </svg>
             </div>
             <div className="min-w-0">
-              <div className="truncate text-[14px] font-bold tracking-tight text-white">PicoAide</div>
-              <div className="text-[10px] font-medium uppercase tracking-widest text-slate-500">Admin Console</div>
+              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">PicoAide</div>
+              <div className="text-[10px] font-medium text-muted-foreground">Admin Console</div>
             </div>
           </div>
 
           {baseURL && (
-            <div className="mx-4 mb-4 flex items-center gap-1.5 rounded-md border border-slate-700/60 bg-slate-800/50 px-2.5 py-1.5 text-[10px] text-slate-400">
-              <Globe className="h-3 w-3 shrink-0 text-slate-500" />
-              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate font-mono hover:text-slate-200" title={baseURL}>{baseURL}</a>
+            <div className="mx-3 mb-3 flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2.5 py-1.5 text-[10px] text-muted-foreground">
+              <Globe className="h-3 w-3 shrink-0" />
+              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate font-mono hover:text-foreground" title={baseURL}>{baseURL}</a>
             </div>
           )}
 
           <nav className="flex-1 space-y-0.5 px-3">
-            <div className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500">Management</div>
+            <div className="px-3 pb-1.5 pt-1 text-[11px] font-semibold text-muted-foreground">管理</div>
             {nav.map((n) => (
               <NavLink
                 key={n.to}
@@ -171,15 +172,15 @@ export default function App() {
                   cn(
                     'group relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150',
                     isActive
-                      ? 'bg-blue-500/15 font-medium text-white'
-                      : 'text-slate-400 hover:bg-white/5 hover:text-slate-200',
+                      ? 'bg-accent font-semibold text-accent-foreground'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                   )
                 }
               >
                 {({ isActive }) => (
                   <>
-                    {/* 激活左侧蓝条(swiss 垂直线) */}
-                    {isActive && <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-blue-400" />}
+                    {/* 激活左侧 accent 蓝条(DSH 激活态语义) */}
+                    {isActive && <span className="absolute left-0 top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-primary" />}
                     <n.icon className="h-4 w-4 shrink-0" />
                     <span className="flex-1">{n.label}</span>
                     <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-50" />
@@ -189,20 +190,20 @@ export default function App() {
             ))}
           </nav>
 
-          <div className="border-t border-slate-800 p-3">
-            <div className="mb-2 flex items-center gap-2.5 rounded-md bg-slate-800/40 px-2.5 py-2">
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-500/20 text-[11px] font-semibold text-blue-200">
+          <div className="border-t border-border p-3">
+            <div className="mb-2 flex items-center gap-2.5 rounded-md bg-muted/60 px-2.5 py-2">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-semibold text-primary">
                 {adminName.slice(0, 1).toUpperCase()}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[11px] font-medium text-slate-200">{adminName}</div>
-                <div className="flex items-center gap-1 text-[9px] text-slate-500"><ShieldCheck className="h-2.5 w-2.5" />SUPER ADMIN</div>
+                <div className="truncate text-[12px] font-medium text-foreground">{adminName}</div>
+                <div className="flex items-center gap-1 text-[10px] text-muted-foreground"><ShieldCheck className="h-2.5 w-2.5" />超级管理员</div>
               </div>
             </div>
             <Button
               variant="ghost"
               size="sm"
-              className="w-full justify-center text-slate-400 hover:bg-white/5 hover:text-red-400"
+              className="w-full justify-center text-muted-foreground hover:bg-muted hover:text-destructive"
               onClick={async () => {
                 try {
                   await logout()
@@ -219,8 +220,6 @@ export default function App() {
 
         {/* 主内容区 */}
         <main className="flex min-w-0 flex-1 flex-col overflow-auto">
-          {/* 顶部品牌渐变细条(3px,蓝→青) */}
-          <div className="sticky top-0 z-20 h-1 shrink-0 bg-gradient-to-r from-[#1E40AF] via-[#3B82F6] to-[#D97706]" />
           <div className="mx-auto w-full max-w-[1440px] flex-1 p-6 lg:p-7">
             <ErrorBoundary>
               <Suspense fallback={<div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>}>

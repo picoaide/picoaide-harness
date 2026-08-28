@@ -1,56 +1,9 @@
 /* ============================================================
-   PicoAide Admin — Design System (来自 ui-ux-pro-max 设计引擎)
-   Style: Data-Dense Dashboard (Flat + Swiss / Enterprise)
-   Colors: Blue data (#1E40AF primary) + amber highlights (#D97706)
-   Type:   Fira Sans (body) + Fira Code (data/mono)
+   PicoAide Admin — Design System (DSH 风格对齐)
+   视觉语言来自 deepseek-ai/deepseek-harness 客户端(DSW tokens):
+   浅色 bluish 中性(#F9FAFB 底 / #0F1115 主字) + DeepSeek 蓝
+   (#4176E6 accent) + 主按钮深色(#0F1115)+ 系统字体栈。
    ============================================================ */
-
-/* 自托管 Fira 字体(性能优化 2026-P):原 @import Google Fonts 在
-   内网/国内生产环境不可达时会阻塞 CSS 解析与文本渲染;改为本地
-   woff2(font-display: swap 不阻塞文本,字体就绪后无感替换)。 */
-@font-face {
-  font-family: 'Fira Sans';
-  font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-  src: url('./assets/fonts/fira-sans-300.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Fira Sans';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('./assets/fonts/fira-sans-400.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Fira Sans';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url('./assets/fonts/fira-sans-500.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Fira Sans';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url('./assets/fonts/fira-sans-600.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Fira Sans';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url('./assets/fonts/fira-sans-700.woff2') format('woff2');
-}
-/* Fira Code 可变字体:单文件覆盖 400-700 字重 */
-@font-face {
-  font-family: 'Fira Code';
-  font-style: normal;
-  font-weight: 400 700;
-  font-display: swap;
-  src: url('./assets/fonts/fira-code-latin.woff2') format('woff2');
-}
 
 @tailwind base;
 @tailwind components;
@@ -58,27 +11,27 @@
 
 @layer base {
   :root {
-    /* 色彩契约(MASTER.md): #1E40AF 主蓝 + #3B82F6 次蓝 + #D97706 琥珀强调 */
-    --background: 210 40% 98%;            /* #F8FAFC */
-    --foreground: 224 64% 33%;            /* #1E3A8A 深海军蓝正文 */
+    /* DSW 浅色 token 映射(bluish neutral + deepseek blue) */
+    --background: 220 14% 97%;            /* #F9FAFB */
+    --foreground: 220 17% 7%;             /* #0F1115 */
     --card: 0 0% 100%;
-    --card-foreground: 224 64% 33%;
+    --card-foreground: 220 17% 7%;
     --popover: 0 0% 100%;
-    --popover-foreground: 224 64% 33%;
-    --primary: 226 71% 40%;               /* #1E40AF */
+    --popover-foreground: 220 17% 7%;
+    --primary: 220 66% 44%;               /* #4176E6 DeepSeek 蓝 */
     --primary-foreground: 0 0% 100%;
-    --secondary: 217 91% 60%;             /* #3B82F6 */
-    --secondary-foreground: 0 0% 100%;
-    --muted: 219 42% 94%;                 /* #E9EEF6 */
-    --muted-foreground: 215 19% 35%;      /* #475569 */
-    --accent: 214 100% 93%;               /* #DBEAFE 浅蓝 accent */
-    --accent-foreground: 226 71% 28%;
+    --secondary: 220 20% 93%;             /* 浅灰蓝 */
+    --secondary-foreground: 220 17% 15%;
+    --muted: 220 16% 94%;                 /* #EFF1F3-ish */
+    --muted-foreground: 220 10% 40%;      /* #5C6167 */
+    --accent: 220 40% 94%;                /* 浅蓝 accent */
+    --accent-foreground: 220 66% 30%;
     --destructive: 0 72% 51%;             /* #DC2626 */
     --destructive-foreground: 0 0% 100%;
-    --border: 214 60% 91%;                /* 淡蓝灰边线 */
-    --input: 214 60% 91%;
-    --ring: 226 71% 40%;
-    --radius: 0.5rem;                     /* data-dense: 8px 圆角更紧凑 */
+    --border: 220 14% 90%;                /* 细分边框 rgba(0,0,0,0.1) 对齐 */
+    --input: 220 14% 88%;
+    --ring: 220 66% 44%;
+    --radius: 0.5rem;
   }
 }
 
@@ -88,21 +41,22 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: 'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    /* DSH 系统字体栈(去 Fira 替换,与 DSW font-family 一致) */
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
       'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
     font-size: 14px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
-  /* 数据/数字用 Fira Code(等宽,清晰精确) */
+  /* 数据/数字用系统等宽栈(DSH --ds-font-family-code) */
   .tabular-nums,
   code,
   kbd,
   pre,
   .font-mono {
-    font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+    font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas,
+      'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei' !important;
   }
-  /* 统一隐藏 number 输入原生 spinner(data-dense 契约:表单控件风格一致) */
   input[type='number']::-webkit-outer-spin-button,
   input[type='number']::-webkit-inner-spin-button {
     -webkit-appearance: none;
@@ -115,9 +69,9 @@
 }
 
 @layer components {
-  /* 页面容器:data-dense 风 — 白卡 + 细边框 + 轻阴影 */
+  /* 页面容器:DSH 风 — 白卡 + 细边框(1px rgba(0,0,0,0.08))+ 轻阴影 */
   .app-card {
-    @apply rounded-lg border bg-card;
+    @apply rounded-lg border bg-card shadow-[0_1px_2px_rgba(15,17,21,0.05)];
   }
   .stat-card {
     @apply rounded-lg border bg-card transition-shadow hover:shadow-md;
@@ -131,13 +85,18 @@
 }
 
 @layer utilities {
-  /* 卡片顶端品牌细线(强调当前区块,swiss 风垂直线性点缀) */
-  .brand-line::before {
-    content: '';
-    display: block;
-    height: 3px;
-    margin: -1px -1px 0;
-    border-radius: 7px 7px 0 0;
-    background: linear-gradient(90deg, #1E40AF 0%, #3B82F6 55%, #D97706 130%);
+  /* DSH 风:黑色主 logo tile(与客户端 BraceMark 一致的深色调) */
+  .brand-tile {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border-radius: 0.5rem;
+    background-color: #0f1115;
+    color: #fff;
+  }
+  /* 移除渐变品牌条(DSH 无渐变装饰) */
+  .brand-line {
+    display: none;
   }
 }

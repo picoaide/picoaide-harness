@@ -3,7 +3,7 @@ import { login } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
-import { User, Lock, Loader2, ShieldCheck, Database, Cpu } from 'lucide-react'
+import { User, Lock, Loader2 } from 'lucide-react'
 
 // 登录页 — Data-Dense Dashboard 企业风(契约:信赖蓝 + 深海军蓝 + Fira)
 export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
@@ -27,24 +27,11 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   }
 
   return (
-    <div className="relative flex h-screen items-center justify-center overflow-hidden bg-[#0F172A]">
-      {/* 数据网格背景(企业控制台氛围) */}
-      <div
-        className="pointer-events-none absolute inset-0 opacity-[0.06]"
-        style={{
-          backgroundImage:
-            'linear-gradient(rgba(148,163,184,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.5) 1px, transparent 1px)',
-          backgroundSize: '48px 48px',
-        }}
-      />
-      {/* 品牌光晕 */}
-      <div className="pointer-events-none absolute -top-40 left-1/4 h-96 w-96 rounded-full bg-blue-600/20 blur-3xl" />
-      <div className="pointer-events-none absolute -bottom-40 right-1/4 h-96 w-96 rounded-full bg-cyan-500/10 blur-3xl" />
-
-      <div className="relative z-10 w-[420px] rounded-xl border border-slate-700/60 bg-white p-8 shadow-[0_25px_60px_rgba(0,0,0,0.35)]">
+    <div className="flex min-h-screen items-center justify-center bg-[#F9FAFB] p-4">
+      <div className="w-full max-w-[400px] rounded-xl border border-border bg-white p-8 shadow-[0_8px_30px_rgba(15,17,21,0.06)]">
         <div className="mb-7 text-center">
-          {/* 与客户端一致的品牌 mark(花括号 tile,见 packages/client/branding BraceMark) */}
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center overflow-hidden rounded-lg shadow-sm" style={{ backgroundColor: '#000000' }}>
+          {/* 品牌 mark:黑 tile(DSH 客户端一致) */}
+          <div className="brand-tile mx-auto mb-4 h-14 w-14">
             <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
               <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
                 <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
@@ -55,35 +42,22 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               </g>
             </svg>
           </div>
-          <h1 className="text-[22px] font-bold tracking-tight text-[#0F172A]">PicoAide 管理后台</h1>
-          <p className="mt-1.5 text-[13px] text-slate-500">Enterprise AI Gateway · Admin Console</p>
-        </div>
-
-        {/* 能力徽标行(信任信号,契约:trust signals prominent) */}
-        <div className="mb-6 grid grid-cols-3 gap-2 border-y border-slate-100 py-3">
-          {[
-            { icon: ShieldCheck, label: '本地认证' },
-            { icon: Database, label: '密钥托管' },
-            { icon: Cpu, label: '计量计费' },
-          ].map(({ icon: I, label }) => (
-            <div key={label} className="flex items-center justify-center gap-1.5 text-[11px] text-slate-500">
-              <I className="h-3.5 w-3.5 text-[#1E40AF]" />{label}
-            </div>
-          ))}
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">PicoAide 管理后台</h1>
+          <p className="mt-1.5 text-[13px] text-muted-foreground">Enterprise AI Gateway · Admin Console</p>
         </div>
 
         <form onSubmit={submit} className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="username" className="text-[13px] text-slate-700">用户名</Label>
+            <Label htmlFor="username" className="text-[13px] text-foreground">用户名</Label>
             <div className="relative">
-              <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input id="username" className="pl-9" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus placeholder="请输入用户名" />
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="password" className="text-[13px] text-slate-700">密码</Label>
+            <Label htmlFor="password" className="text-[13px] text-foreground">密码</Label>
             <div className="relative">
-              <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input id="password" type="password" className="pl-9" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="请输入密码" />
             </div>
           </div>
@@ -95,7 +69,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           </Button>
         </form>
 
-        <p className="mt-6 text-center text-[11px] text-slate-400">© 2026 PicoAide · Enterprise Internal Deployment</p>
+        <p className="mt-6 text-center text-[11px] text-muted-foreground">© 2026 PicoAide · Enterprise Internal Deployment</p>
       </div>
     </div>
   )
