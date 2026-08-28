@@ -48,9 +48,9 @@
 | PUT | `/api/admin/users/:id` | 更新用户(改密/管理员/启用停用);`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认 |
 | DELETE | `/api/admin/users/:id` | 删除用户 |
 | GET | `/api/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
-| GET | `/api/admin/providers` | 网关上游列表 |
-| POST | `/api/admin/providers` | 添加上游 `{name, base_url, api_key, models, enabled}`(api_key 服务端加密存储) |
-| PUT | `/api/admin/providers/:id` | 更新上游 |
+| GET | `/api/admin/providers` | 网关上游列表(含 `protocol`:openai/anthropic) |
+| POST | `/api/admin/providers` | 添加上游 `{name, base_url, api_key, models, enabled, protocol?, channel?}`(api_key 服务端加密存储;protocol 缺省 openai,anthropic 供 /v1/messages 代理) |
+| PUT | `/api/admin/providers/:id` | 更新上游(protocol 可切换) |
 | DELETE | `/api/admin/providers/:id` | 删除上游 |
 | GET | `/api/admin/models` | 模型列表 |
 | POST | `/api/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;offpeak_discount 0<d≤1 低谷折扣) |
@@ -64,7 +64,11 @@
 
 ### POST `/v1/chat/completions`
 
-OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider 代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折);转发前按**月度 token 配额 / 金额配额 / 部门预算**检查(`EffectiveQuota` / `EffectiveMoneyQuota` / `EffectiveDeptBudget`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
+OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折);转发前按**月度 token 配额 / 金额配额 / 部门预算**检查(`EffectiveQuota` / `EffectiveMoneyQuota` / `EffectiveDeptBudget`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
+
+### POST `/v1/messages`(0043,Anthropic 兼容——web_search 服务端代理)
+
+Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools?, ...}`,头部携带 `anthropic-version`。**用途:web_search 工具的服务端代理路径**——服务端按模型匹配 protocol=`anthropic` 的 provider,把请求 `Authorization/x-api-key` 替换为服务端持有的上游 key 后转发官方 Anthropic 兼容端点(如 `https://api.deepseek.com/anthropic/v1/messages`)。客户端全程只持有网关登录 token,官方 key 不出服务端。鉴权/限流/配额/计量与 `/v1/chat/completions` 完全一致;usage 以 `kind='search'` 单独记账(流式按 message_start/message_delta 的 input/output tokens 合并回填,缓存命中按 cache_read 计费)。同一模型名可同时由 openai 与 anthropic 两个 provider 承载(provider 表 `protocol` 列区分,webadmin 上游表单可配)。
 
 ### GET `/v1/models`
 

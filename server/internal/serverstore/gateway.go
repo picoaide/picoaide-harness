@@ -15,6 +15,10 @@ type GatewayProvider struct {
 	Models    []string
 	Enabled   int
 	Channel   string
+	// Protocol 是上游 API 方言(0043):openai(默认,chat/embeddings)
+	// 或 anthropic(/v1/messages 兼容端点)。模型路由按协议过滤,
+	// 同一模型名可同时挂两种协议的 provider。
+	Protocol string
 }
 
 type Model struct {
@@ -103,7 +107,7 @@ func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
 	var p GatewayProvider
 	var models string
-	if err := scan.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKeyEnc, &models, &p.Enabled, &p.Channel); err != nil {
+	if err := scan.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKeyEnc, &models, &p.Enabled, &p.Channel, &p.Protocol); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(models), &p.Models)
@@ -112,7 +116,7 @@ func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error
 
 // ListGatewayProviders returns all providers.
 func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
-	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, enabled, channel
+	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, enabled, channel, protocol
 		FROM gateway_providers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -131,7 +135,7 @@ func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
 
 // GetGatewayProvider loads one provider.
 func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
-	row := db.QueryRow(`SELECT id, name, base_url, api_key_enc, models, enabled, channel
+	row := db.QueryRow(`SELECT id, name, base_url, api_key_enc, models, enabled, channel, protocol
 		FROM gateway_providers WHERE id = ?`, id)
 	p, err := scanProvider(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -142,9 +146,12 @@ func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
 
 // AddGatewayProvider inserts a provider; name conflicts return ErrDuplicate.
 func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
+	if p.Protocol == "" {
+		p.Protocol = "openai" // 存量/未指定:默认 OpenAI 兼容(0043 迁移默认一致)
+	}
 	modelsJSON, _ := json.Marshal(p.Models)
-	id, err := InsertID(db, `INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel)
-		VALUES (?, ?, ?, ?, ?, ?)`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel)
+	id, err := InsertID(db, `INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel, protocol)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.Protocol)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -157,9 +164,12 @@ func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 
 // UpdateGatewayProvider updates all fields.
 func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
+	if p.Protocol == "" {
+		p.Protocol = "openai" // 空串不允许(列 CHECK),归一为默认
+	}
 	modelsJSON, _ := json.Marshal(p.Models)
-	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?
-		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.ID)
+	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?, protocol=?
+		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.Protocol, p.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrDuplicate

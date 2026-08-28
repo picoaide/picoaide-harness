@@ -12,7 +12,7 @@ const baseImpl = async (path: string, init?: RequestInit) => {
   if (path === '/api/admin/providers/sync-all') {
     return { results: [{ provider: 'deepseek', added: 1, removed: 0 }, { provider: 'manual', skipped: true, error: '手动型上游无需同步' }] }
   }
-  if (path === '/api/admin/providers') return { providers: [{ id: 1, name: 'deepseek', base_url: 'https://api.deepseek.com', api_key: '***', models: ['deepseek-chat'], enabled: true, channel: 'deepseek' }] }
+  if (path === '/api/admin/providers') return { providers: [{ id: 1, name: 'deepseek', base_url: 'https://api.deepseek.com', api_key: '***', models: ['deepseek-chat'], enabled: true, channel: 'deepseek', protocol: 'openai' }] }
   if (path === '/api/admin/models') return { models: [{ id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', provider_name: 'deepseek', provider_channel: 'deepseek', provider_enabled: true }] }
   if (path === '/api/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' }
   if (path === '/api/admin/channels') return { channels: [{ name: 'deepseek', base_url: 'https://api.deepseek.com' }] }
@@ -44,6 +44,27 @@ describe('Gateway 网关配置页', () => {
     expect(dialog.getByPlaceholderText('如 deepseek')).toBeInTheDocument()
     expect(dialog.getByPlaceholderText('sk-...')).toBeInTheDocument()
     expect(dialog.getByPlaceholderText(/保存后自动同步|deepseek-chat/)).toBeInTheDocument()
+  })
+
+  it('提交上游时携带 protocol 字段(默认 openai;选择 anthropic 后提交 anthropic)', async () => {
+    let submitted: string | undefined
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/admin/providers' && init?.method === 'POST') {
+        submitted = (JSON.parse(String(init.body)) as { protocol?: string }).protocol
+        return { provider: { id: 2, name: 'ds-anthropic', channel: '', protocol: 'anthropic' }, sync: undefined }
+      }
+      return baseImpl(path, init)
+    })
+    const dialog = await openDialog()
+    fireEvent.change(dialog.getByPlaceholderText('如 deepseek'), { target: { value: 'ds-anthropic' } })
+    fireEvent.change(dialog.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://api.deepseek.com/anthropic/v1' } })
+    fireEvent.change(dialog.getByPlaceholderText('sk-...'), { target: { value: 'sk-a' } })
+    // 选择 Anthropic 协议
+    fireEvent.click(screen.getAllByText('OpenAI 兼容(chat/completions、embeddings)')[0]!)
+    fireEvent.click(await screen.findByText('Anthropic 兼容(/v1/messages,web 搜索)'))
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+    await screen.findByText('已保存')
+    expect(submitted).toBe('anthropic')
   })
 
   it('提交含 sync.added 时显示"已上架 N 个模型"', async () => {
@@ -126,7 +147,7 @@ describe('Gateway 网关配置页', () => {
       '/api/admin/providers/1',
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ name: 'deepseek-v2', channel: 'deepseek', base_url: 'https://api.deepseek.com', enabled: true }),
+        body: JSON.stringify({ name: 'deepseek-v2', channel: 'deepseek', base_url: 'https://api.deepseek.com', enabled: true, protocol: 'openai' }),
       }),
     )
   })

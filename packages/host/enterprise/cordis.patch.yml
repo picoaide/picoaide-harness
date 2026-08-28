@@ -23,6 +23,15 @@
 # llm-deepseek and clears it on logout.
 - id: ui-settings-models
   disabled: true
+# web_search 服务端代理(0043):官方 key 不得以任何形式出现在客户端直连配置中。
+# 覆盖 base bundle 的 apiKeyEnv=DEEPSEEK_API_KEY——即使登出后 bootstrap 将
+# user 层清空,composition 兜底也不再指向官方 key,而是指向网关 token。
+# 会话建立后 bootstrap.ts 再写入具体 serverURL/baseURL/model。登出态下
+# baseURL 回落官方端点,但 PICOAI_GATEWAY_TOKEN 已被 gateway-model unset,
+# 搜索在凭据解析处失败(未见官方端点即缺 key),不会构成直连泄露。
+- id: web-search-deepseek
+  config:
+    apiKeyEnv: PICOAI_GATEWAY_TOKEN
 # Local skill discovery: the web-app bundle disables the host skill
 # provider rows (presets own local discovery), but the desktop has no
 # presets. Mount the filesystem provider (scans `<dshHome>/skills`, which
