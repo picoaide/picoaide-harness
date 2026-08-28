@@ -8,8 +8,6 @@ import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { userScopePath } from './user-scope.ts'
-import { salesEasyDef } from './sales-easy.ts'
-import { marketplaceDefs } from './defs/index.ts'
 import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorState } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
 
@@ -97,13 +95,14 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
-  let defs = dedupeById([...marketplaceDefs, ...(options.connectors ?? [])], [salesEasyDef])
+  // 连接器目录(0042):服务端为准——bootstrap 下发 connectors[](定义 JSON),
+  // 客户端无内置定义,仅保留 options.connectors 作为开发/测试注入。
+  let defs: ConnectorDef[] = [...(options.connectors ?? [])]
 
-  // 统一分发(2026-08):服务端下发 GlitchTip 连接器预配置(地址/组织 slug),
-  // 用户连接时只需填 API Token;源码不含部署地址。监听 session-changed,
-  // 从 bootstrap 的 web.glitchtip_base_url / web.glitchtip_organization 更新
-  // defs 中 glitchtip 的 tokenFields 默认值。
-  const syncServerDefaults = async (): Promise<void> => {
+  // 从 bootstrap 同步连接器目录:每次 session 建立/变化时拉取,用服务端
+  // 下发定义整体替换(凭证按 id 匹配,定义变更不丢用户已连接的凭证)。
+  // 服务端不返回/请求失败时保留当前 defs(不影响已连接的 MCP 工具)。
+  const syncServerDefs = async (): Promise<void> => {
     try {
       const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string; token?: string } | null } | undefined
       const session = pico?.getSession?.()
@@ -112,33 +111,33 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         headers: { Authorization: `Bearer ${session.token}` },
       })
       if (!res.ok) return
-      const cfg = (await res.json()) as { web?: { glitchtip_base_url?: string; glitchtip_organization?: string } }
-      const baseURL = cfg.web?.glitchtip_base_url?.trim() ?? ''
-      const org = cfg.web?.glitchtip_organization?.trim() ?? ''
-      if (!baseURL && !org) return
-      defs = defs.map((d) => {
-        if (d.id !== 'glitchtip') return d
-        return {
-          ...d,
-          tokenFields: (d.tokenFields ?? []).map((f) =>
-            f.key === 'GLITCHTIP_BASE_URL' && baseURL
-              ? { ...f, defaultValue: baseURL }
-              : f.key === 'GLITCHTIP_ORGANIZATION' && org
-                ? { ...f, defaultValue: org }
-                : f,
-          ),
+      const cfg = (await res.json()) as { connectors?: { id: string; name: string; description: string; auth_mode: string; definition: string }[] }
+      const items = cfg.connectors ?? []
+      if (items.length === 0) {
+        // 服务端未配置连接器:清空目录(连接器中心显示空;不与 options 冲突)。
+        defs = [...(options.connectors ?? [])]
+        return
+      }
+      const parsed: ConnectorDef[] = []
+      for (const item of items) {
+        if (!item?.id || !item.definition) continue
+        try {
+          const raw = JSON.parse(item.definition) as ConnectorDef
+          if (!raw?.mcp?.length) continue
+          // 下发的是定义骨架;id/名称/描述/认证模式以目录行为准(防御
+          // 定义 JSON 内不一致字段,且客户端不可被定义 JSON 覆盖目录字段)。
+          parsed.push({ ...raw, id: item.id, name: item.name || raw.name, description: item.description || raw.description, authMode: (item.auth_mode || raw.authMode) as ConnectorDef['authMode'] })
+        } catch {
+          // 单条定义非法:跳过,不影响其他连接器。
         }
-      })
+      }
+      defs = parsed
     } catch {
-      /* 服务端配置获取失败不影响连接器基本功能 */
+      /* 服务端配置获取失败不影响连接器基本功能(保留当前 defs) */
     }
   }
-  void syncServerDefaults()
-  // 用 cordis 事件监听 session 变化(与 enterprise bootstrap 同模式)
-  ctx.on('pico/session-changed', () => { void syncServerDefaults() })
-
-  // Current user scope: resolved from the enterprise session when present.
-  // `getSession()` is a service read guarded by type-only import, so this
+  void syncServerDefs()
+  // Current user scope: resolved from the enterprise session when present.  // `getSession()` is a service read guarded by type-only import, so this
   // plugin also loads in compositions without the enterprise plugin.
   const currentUser = (): string | null => {
     try {
@@ -181,10 +180,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   // Session lifecycle: disconnect registrations for the previous user, then
-  // re-read credentials for the new one (restore fresh MCP servers).
+  // re-read credentials for the new one (restore fresh MCP servers). The def
+  // catalog is synced from bootstrap FIRST so the restore registers the
+  // current server directory (defs are server-issued now).
   ctx.on('pico/session-changed', (next: unknown) => {
     void (async () => {
       await teardownAll()
+      await syncServerDefs()
       reconfigureUser()
       if (next !== null) await restoreAll()
     })().catch((cause: unknown) => {
@@ -220,13 +222,6 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
     return headers
   }
-
-
-/** Merge connector definitions, keeping the hand-written ones when ids collide with generated defs. */
-function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): ConnectorDef[] {
-  const ids = new Set(handWritten.map((def) => def.id))
-  return [...handWritten, ...generated.filter((def) => !ids.has(def.id))]
-}
 
   /** Register the connector's MCP servers through the mcp-client plugin. */
   const registerMcp = async (def: ConnectorDef): Promise<void> => {
@@ -551,11 +546,15 @@ function dedupeById(generated: ConnectorDef[], handWritten: ConnectorDef[]): Con
     return () => { for (const dispose of disposers) dispose() }
   }, 'pico connectors: http routes')
 
-  // Initial restore: fire-and-forget after the routes are up (the session
-  // listener above handles later changes; this covers the startup path).
-  void restoreAll().catch((cause: unknown) => {
-    ctx.logger?.error('pico-connectors: initial restore failed', cause)
-  })
+  // Initial restore: wait for the bootstrap def sync (the directory is the
+  // source now), then restore — startup with an empty defs list would skip
+  // every registered credential. The session listener above handles later
+  // changes; this covers the startup path.
+  void syncServerDefs()
+    .then(() => restoreAll())
+    .catch((cause: unknown) => {
+      ctx.logger?.error('pico-connectors: initial restore failed', cause)
+    })
 }
 
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts'

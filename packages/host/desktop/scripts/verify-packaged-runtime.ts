@@ -104,7 +104,6 @@ export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
   '@picoaide/dsh-enterprise/bootstrap',
   '@picoaide/dsh-enterprise/client',
   '@picoaide/dsh-enterprise/package.json',
-  '@picoaide/dsh-connectors/sales-easy',
   '@picoaide/dsh-connectors/client',
   '@picoaide/dsh-connectors/package.json',
 ] as const
@@ -374,7 +373,6 @@ const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/bootstrap', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js' },
   { specifier: '@picoaide/dsh-enterprise/client', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/client.js' },
   { specifier: '@picoaide/dsh-enterprise/package.json', archivePath: 'node_modules/@picoaide/dsh-enterprise/package.json' },
-  { specifier: '@picoaide/dsh-connectors/sales-easy', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/sales-easy.js' },
   { specifier: '@picoaide/dsh-connectors/client', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/client.js' },
   { specifier: '@picoaide/dsh-connectors/package.json', archivePath: 'node_modules/@picoaide/dsh-connectors/package.json' },
 ]

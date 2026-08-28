@@ -11,10 +11,6 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./sales-easy": {
-      "types": "./lib/types/sales-easy.d.ts",
-      "default": "./lib/sales-easy.js"
-    },
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
