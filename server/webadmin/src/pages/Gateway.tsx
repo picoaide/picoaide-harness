@@ -159,12 +159,14 @@ export default function Gateway() {
   const [editProv, setEditProv] = useState<Provider | null>(null)
   const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true, protocol: '' })
 
-  // ---- 认证配置(LDAP/OIDC) ----
+  // ---- 认证配置(LDAP/OIDC/OpenID) ----
   const [authForm, setAuthForm] = useState({
     mode: 'local',
+    enabled: ['local' as string],
     ldap_server_url: '', ldap_bind_dn: '', ldap_bind_password: '', ldap_base_dn: '',
     ldap_user_filter: '', ldap_group_filter: '', ldap_group_attr: '',
     oidc_issuer: '', oidc_client_id: '', oidc_client_secret: '', oidc_redirect_url: '',
+    openid_issuer: '', openid_client_id: '', openid_client_secret: '', openid_redirect_url: '',
   })
   const [authErr, setAuthErr] = useState('')
   const [authMsg, setAuthMsg] = useState('')
@@ -188,14 +190,18 @@ export default function Gateway() {
       const a = au.auth ?? {}
       const ldap = a.ldap ?? {}
       const oidc = a.oidc ?? {}
+      const openid = a.openid ?? {}
       setAuthForm({
         mode: a.mode || 'local',
+        enabled: (a.enabled ? String(a.enabled).split(',').map((s: string) => s.trim()).filter(Boolean) : ['local']),
         ldap_server_url: ldap.server_url ?? '', ldap_bind_dn: ldap.bind_dn ?? '',
         ldap_bind_password: ldap.bind_password ?? '', ldap_base_dn: ldap.base_dn ?? '',
         ldap_user_filter: ldap.user_filter ?? '', ldap_group_filter: ldap.group_filter ?? '',
         ldap_group_attr: ldap.group_attr ?? '',
         oidc_issuer: oidc.issuer ?? '', oidc_client_id: oidc.client_id ?? '',
         oidc_client_secret: oidc.client_secret ?? '', oidc_redirect_url: oidc.redirect_url ?? '',
+        openid_issuer: openid.issuer ?? '', openid_client_id: openid.client_id ?? '',
+        openid_client_secret: openid.client_secret ?? '', openid_redirect_url: openid.redirect_url ?? '',
       })
       setError('')
     } catch (err: any) {
@@ -211,14 +217,21 @@ export default function Gateway() {
   async function saveAuth() {
     if (busy) return
     setAuthErr('')
-    if (authForm.mode === 'ldap' || authForm.mode === 'both') {
+    const enabled = authForm.enabled.filter((s) => s !== '')
+    if (!enabled.includes('local')) enabled.unshift('local') // 本地 admin 恒启用
+    if (enabled.includes('ldap')) {
       if (!authForm.ldap_server_url.trim() || !authForm.ldap_base_dn.trim()) {
         setAuthErr('LDAP 模式必须填写服务器地址与 Base DN'); return
       }
     }
-    if (authForm.mode === 'oidc') {
+    if (enabled.includes('oidc')) {
       if (!authForm.oidc_issuer.trim() || !authForm.oidc_client_id.trim() || !authForm.oidc_redirect_url.trim()) {
         setAuthErr('OIDC 模式必须填写 Issuer、Client ID 与 Redirect URL'); return
+      }
+    }
+    if (enabled.includes('openid')) {
+      if (!authForm.openid_issuer.trim() || !authForm.openid_client_id.trim() || !authForm.openid_redirect_url.trim()) {
+        setAuthErr('OpenID 模式必须填写 Issuer、Client ID 与 Redirect URL'); return
       }
     }
     setBusy('save-auth')
@@ -227,6 +240,7 @@ export default function Gateway() {
         method: 'PUT',
         body: JSON.stringify({
           mode: authForm.mode,
+          enabled: enabled.join(','),
           ldap: {
             server_url: authForm.ldap_server_url,
             bind_dn: authForm.ldap_bind_dn,
@@ -241,6 +255,12 @@ export default function Gateway() {
             client_id: authForm.oidc_client_id,
             client_secret: authForm.oidc_client_secret,
             redirect_url: authForm.oidc_redirect_url,
+          },
+          openid: {
+            issuer: authForm.openid_issuer,
+            client_id: authForm.openid_client_id,
+            client_secret: authForm.openid_client_secret,
+            redirect_url: authForm.openid_redirect_url,
           },
         }),
       })
@@ -863,33 +883,52 @@ export default function Gateway() {
         </CardContent>
       </Card>
 
-      {/* 认证配置(LDAP/OIDC):webadmin 配置入口,服务端启动时注册对应 provider */}
+      {/* 认证配置(LDAP/OIDC/OpenID):webadmin 配置入口,服务端启动时注册对应 provider */}
       <Card>
         <CardHeader>
           <CardTitle>认证配置</CardTitle>
-          <CardDescription>员工登录方式:本地账号 / LDAP / OIDC;修改后重启服务端生效(下拉框提示)</CardDescription>
+          <CardDescription>员工登录方式:本地账号(恒启用) / LDAP / OpenID / OIDC,可多选;修改后重启服务端生效</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {authErr && <div className="text-sm text-destructive">{authErr}</div>}
           {authMsg && <div className="text-sm text-green-600">{authMsg}</div>}
           <div className="space-y-1">
-            <Label>登录模式</Label>
-            <Select value={authForm.mode} onValueChange={(v) => setAuthForm({ ...authForm, mode: v })}>
-              <SelectTrigger aria-label="登录模式"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="local">仅本地账号</SelectItem>
-                <SelectItem value="ldap">仅 LDAP</SelectItem>
-                <SelectItem value="both">本地 + LDAP</SelectItem>
-                <SelectItem value="oidc">OIDC(浏览器登录)</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label>登录方式(可多选;本地 admin 恒启用)</Label>
+            <div className="flex flex-wrap gap-3 rounded-md border p-3">
+              {[
+                { key: 'local', label: '本地账号', desc: '用户名+密码(admin 回退,恒启用)' },
+                { key: 'ldap', label: 'LDAP', desc: '企业目录认证' },
+                { key: 'openid', label: 'OpenID', desc: '浏览器跳转登录(独立 IdP)' },
+                { key: 'oidc', label: 'OIDC', desc: '浏览器跳转登录(独立 IdP)' },
+              ].map((o) => {
+                const on = authForm.enabled.includes(o.key)
+                return (
+                  <label key={o.key} className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors ${on ? 'border-primary/40 bg-accent' : 'hover:bg-muted'}`}>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[#4176E6]"
+                      checked={on}
+                      disabled={o.key === 'local'} // 本地 admin 不可关
+                      onChange={(e) => {
+                        const next = e.target.checked
+                          ? [...authForm.enabled, o.key]
+                          : authForm.enabled.filter((s) => s !== o.key)
+                        setAuthForm({ ...authForm, enabled: next })
+                      }}
+                    />
+                    <span className="font-medium">{o.label}</span>
+                    <span className="text-xs text-muted-foreground">{o.desc}</span>
+                  </label>
+                )
+              })}
+            </div>
             <ul className="space-y-1 text-xs text-muted-foreground">
-              <li>ldap/both 模式需填写 LDAP 服务器;oidc 模式需填写 OIDC 配置。</li>
-              <li>密码类字段留空 = 保持现值。</li>
+              <li>勾选的方式会出现在登录页;未配置的下方表单留空即可。</li>
+              <li>密码/密钥字段留空 = 保持现值,清空 = 清除。</li>
             </ul>
           </div>
 
-          {(authForm.mode === 'ldap' || authForm.mode === 'both') && (
+          {authForm.enabled.includes('ldap') && (
             <div className="space-y-3 rounded-md border p-3">
               <div className="text-sm font-medium">LDAP 配置</div>
               <div className="grid grid-cols-2 gap-3">
@@ -932,7 +971,7 @@ export default function Gateway() {
             </div>
           )}
 
-          {authForm.mode === 'oidc' && (
+          {authForm.enabled.includes('oidc') && (
             <div className="space-y-3 rounded-md border p-3">
               <div className="text-sm font-medium">OIDC 配置</div>
               <div className="grid grid-cols-2 gap-3">
@@ -955,6 +994,34 @@ export default function Gateway() {
                   <Label htmlFor="oidc-redirect">Redirect URL</Label>
                   <Input id="oidc-redirect" value={authForm.oidc_redirect_url} placeholder="https://picoaide.example.com/api/auth/oidc/callback"
                     onChange={(e) => setAuthForm({ ...authForm, oidc_redirect_url: e.target.value })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {authForm.enabled.includes('openid') && (
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="text-sm font-medium">OpenID 配置(独立 IdP)</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="openid-issuer">Issuer(如 https://openid.example.com)</Label>
+                  <Input id="openid-issuer" value={authForm.openid_issuer} placeholder="https://openid.example.com"
+                    onChange={(e) => setAuthForm({ ...authForm, openid_issuer: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="openid-client-id">Client ID</Label>
+                  <Input id="openid-client-id" value={authForm.openid_client_id}
+                    onChange={(e) => setAuthForm({ ...authForm, openid_client_id: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="openid-secret">Client Secret(未改=保持现值;清空=清除密钥)</Label>
+                  <SecretInput id="openid-secret" value={authForm.openid_client_secret}
+                    onChange={(e) => setAuthForm({ ...authForm, openid_client_secret: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="openid-redirect">Redirect URL</Label>
+                  <Input id="openid-redirect" value={authForm.openid_redirect_url} placeholder="https://picoaide.example.com/api/auth/openid/callback"
+                    onChange={(e) => setAuthForm({ ...authForm, openid_redirect_url: e.target.value })} />
                 </div>
               </div>
             </div>

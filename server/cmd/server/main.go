@@ -113,12 +113,12 @@ func main() {
 		return util.Decrypt(key, s)
 	}
 
-	// 认证 provider 只按 ConfigureProviders 注册:auth.mode=ldap 时不注册 local,
-	// 防止过期本地账号(含管理员)仍可登录
+	// 认证 provider 按 ConfigureProviders 注册:local 恒注册(admin 回退),
+	// ldap/oidc/openid 按配置启用;多套 browser(oidc/openid)独立路由
 	authCfg := serverauth.NewConfiguredAPI(db)
 	auth := authCfg.API
-	if authCfg.OIDC != nil {
-		auth.RegisterOIDC(authCfg.OIDC)
+	for _, b := range authCfg.Browsers {
+		auth.RegisterBrowser(b)
 	}
 	auth.RegisterRoutes(r)
 
