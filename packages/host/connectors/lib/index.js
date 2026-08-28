@@ -1,6 +1,5 @@
 import { userScopePath } from "./user-scope.js";
 import { ConnectorStore } from "./store.js";
-import { salesEasyDef } from "./sales-easy.js";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -338,70 +337,6 @@ async function runAuth(def, options) {
 	}
 }
 //#endregion
-//#region src/defs/index.ts
-/**
-* Marketplace connector definitions (决策 2026-08-25:CLI 连接器已移除——
-* CLI 即 skill,由技能市场承载;连接器只保留 MCP 类)。
-*/
-const marketplaceDefs = [{
-	"id": "moka",
-	"name": "Moka HR 智能体",
-	"description": "招聘和人事一体的 AI 同事，把查询与执行收进一个对话。人才推荐、招聘动态、考勤绩效、审批待办，一句话问清；智能寻聘、面试分析与面试官评估，一句话发起。",
-	"authMode": "oauth",
-	"auth": {
-		"discoveryUrl": "https://mcp.mokahr.com/mcp",
-		"clientId": "",
-		"authorizeUrl": "",
-		"tokenUrl": "",
-		"redirectUri": "http://127.0.0.1/callback",
-		"pkce": true,
-		"publicClient": true,
-		"scopes": "offline_access"
-	},
-	"mcp": [{
-		"serverName": "moka",
-		"transport": "streamable-http",
-		"url": "https://mcp.mokahr.com/mcp"
-	}]
-}, {
-	id: "glitchtip",
-	name: "GlitchTip",
-	description: "GlitchTip(Sentry 兼容错误追踪):查询 issue 与最新事件堆栈,用于错误排查与监控告警",
-	authMode: "token",
-	tokenFields: [
-		{
-			key: "GLITCHTIP_BASE_URL",
-			label: "服务地址(必填,如自部署地址或 app.glitchtip.com)",
-			type: "text",
-			required: true
-		},
-		{
-			key: "GLITCHTIP_TOKEN",
-			label: "API Token(Auth Tokens 页创建,需 org:read / project:read / event:read)",
-			type: "password",
-			required: true
-		},
-		{
-			key: "GLITCHTIP_ORGANIZATION",
-			label: "组织 slug(如 picoaide)",
-			type: "text",
-			required: true
-		}
-	],
-	examples: [
-		"查询当前未解决的错误 issue",
-		"查看最近一次异常的堆栈详情",
-		"列出错误追踪中的高优先级问题"
-	],
-	mcp: [{
-		serverName: "glitchtip",
-		transport: "stdio",
-		command: "npx",
-		args: ["-y", "glitchtip-mcp"],
-		env: {}
-	}]
-}];
-//#endregion
 //#region src/index.ts
 /**
 * Connector framework (mirrors WorkBuddy's connector service):
@@ -458,36 +393,37 @@ function exact(handler) {
 	};
 }
 function apply(ctx, options = {}) {
-	let defs = dedupeById([...marketplaceDefs, ...options.connectors ?? []], [salesEasyDef]);
-	const syncServerDefaults = async () => {
+	let defs = [...options.connectors ?? []];
+	const syncServerDefs = async () => {
 		try {
 			const session = ctx.get("picoSession")?.getSession?.();
 			if (!session?.serverURL || !session?.token) return;
 			const res = await fetch(`${session.serverURL.replace(/\/+$/, "")}/api/config/bootstrap`, { headers: { Authorization: `Bearer ${session.token}` } });
 			if (!res.ok) return;
-			const cfg = await res.json();
-			const baseURL = cfg.web?.glitchtip_base_url?.trim() ?? "";
-			const org = cfg.web?.glitchtip_organization?.trim() ?? "";
-			if (!baseURL && !org) return;
-			defs = defs.map((d) => {
-				if (d.id !== "glitchtip") return d;
-				return {
-					...d,
-					tokenFields: (d.tokenFields ?? []).map((f) => f.key === "GLITCHTIP_BASE_URL" && baseURL ? {
-						...f,
-						defaultValue: baseURL
-					} : f.key === "GLITCHTIP_ORGANIZATION" && org ? {
-						...f,
-						defaultValue: org
-					} : f)
-				};
-			});
+			const items = (await res.json()).connectors ?? [];
+			if (items.length === 0) {
+				defs = [...options.connectors ?? []];
+				return;
+			}
+			const parsed = [];
+			for (const item of items) {
+				if (!item?.id || !item.definition) continue;
+				try {
+					const raw = JSON.parse(item.definition);
+					if (!raw?.mcp?.length) continue;
+					parsed.push({
+						...raw,
+						id: item.id,
+						name: item.name || raw.name,
+						description: item.description || raw.description,
+						authMode: item.auth_mode || raw.authMode
+					});
+				} catch {}
+			}
+			defs = parsed;
 		} catch {}
 	};
-	syncServerDefaults();
-	ctx.on("pico/session-changed", () => {
-		syncServerDefaults();
-	});
+	syncServerDefs();
 	const currentUser = () => {
 		try {
 			return ctx.get("picoSession")?.getSession?.()?.username ?? null;
@@ -521,6 +457,7 @@ function apply(ctx, options = {}) {
 	ctx.on("pico/session-changed", (next) => {
 		(async () => {
 			await teardownAll();
+			await syncServerDefs();
 			reconfigureUser();
 			if (next !== null) await restoreAll();
 		})().catch((cause) => {
@@ -554,11 +491,6 @@ function apply(ctx, options = {}) {
 		if (Object.keys(headers).length === 0 && credential?.accessToken) headers.Authorization = `Bearer ${credential.accessToken}`;
 		return headers;
 	};
-	/** Merge connector definitions, keeping the hand-written ones when ids collide with generated defs. */
-	function dedupeById(generated, handWritten) {
-		const ids = new Set(handWritten.map((def) => def.id));
-		return [...handWritten, ...generated.filter((def) => !ids.has(def.id))];
-	}
 	/** Register the connector's MCP servers through the mcp-client plugin. */
 	const registerMcp = async (def) => {
 		const credential = await store.readCredential(def.id);
@@ -875,7 +807,7 @@ function apply(ctx, options = {}) {
 			for (const dispose of disposers) dispose();
 		};
 	}, "pico connectors: http routes");
-	restoreAll().catch((cause) => {
+	syncServerDefs().then(() => restoreAll()).catch((cause) => {
 		ctx.logger?.error("pico-connectors: initial restore failed", cause);
 	});
 }

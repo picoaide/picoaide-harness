@@ -16,6 +16,8 @@ export interface BootstrapConfig {
   models: BootstrapModel[]
   skills: { name: string; version: string; description: string }[]
   mcp: { id: number; name: string; description: string; recommended: boolean }[]
+  /** 连接器目录(0042):服务端下发,客户端连接器中心显示/连接。 */
+  connectors?: { id: string; name: string; description: string; auth_mode: string; definition: string }[]
   web: {
     allow_private: boolean
     search_endpoint: string

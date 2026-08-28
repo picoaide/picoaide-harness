@@ -77,7 +77,7 @@ export interface ConnectorMcp {
     headers?: Record<string, string>;
 }
 export interface ConnectorDef {
-    /** Stable unique id, e.g. 'sales-easy'. */
+    /** Stable unique id, e.g. 'moka'. */
     id: string;
     name: string;
     description: string;

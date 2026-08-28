@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Bug } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Bug, Plug } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -18,6 +18,7 @@ const ServerInfo = lazy(() => import('./pages/ServerInfo'))
 const AgentPresets = lazy(() => import('./pages/AgentPresets'))
 const SharedSkills = lazy(() => import('./pages/SharedSkills'))
 const Capabilities = lazy(() => import('./pages/Capabilities'))
+const Connectors = lazy(() => import('./pages/Connectors'))
 
 // Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
 const Usage = lazy(() => import('./pages/Usage'))
@@ -30,6 +31,7 @@ const nav = [
   { to: '/usage', label: '用量', icon: BarChart3 },
   { to: '/marketplace', label: '市场 · 技能', icon: Store },
   { to: '/capabilities', label: '能力中心', icon: Sparkles },
+  { to: '/connectors', label: '连接器', icon: Plug },
   { to: '/audit', label: '审计', icon: ScrollText },
   { to: '/server-info', label: '服务器信息', icon: Server },
 ]
@@ -227,6 +229,7 @@ export default function App() {
                   <Route path="/capabilities" element={<Capabilities />} />
                   <Route path="/agent-presets" element={<AgentPresets />} />
                   <Route path="/shared-skills" element={<SharedSkills />} />
+                  <Route path="/connectors" element={<Connectors />} />
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />
                   <Route path="*" element={<NotFound />} />
