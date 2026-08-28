@@ -164,9 +164,28 @@ jobs:
             exit 1
           fi
           echo "version injection OK: $VERSION_OUT"
-          # 健康端点:真实启动一次,等 /healthz 返回 200(${ok:true} 无认证)
-          CID="$(docker run -d --platform linux/amd64 -p 127.0.0.1:18080:8080 "$IMAGE:$TAG")"
-          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          # 健康端点:真实启动一次,等 /healthz 返回 200(${ok:true} 无认证)。
+          # 注意:服务端 PG-only,/healthz 会 ping DB——必须同时起一个 postgres
+          # 容器并传 -pg-dsn,否则 503 导致 30s 校验失败(2026-08 修复:此前
+          # v2.4.1+ 每次 Docker 发版均因此失败)。
+          NET="picoaide-verify-$$"
+          docker network create "$NET" >/dev/null
+          PG_CID="$(docker run -d --network "$NET" --name picoaide-verify-pg \
+            -e POSTGRES_USER=picoaide -e POSTGRES_PASSWORD=verify -e POSTGRES_DB=picoaide \
+            postgres:16-alpine)"
+          CID=""
+          trap 'docker rm -f "$CID" "$PG_CID" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true' EXIT
+          # 等 PG 就绪(最多 30s)
+          for i in $(seq 1 30); do
+            if docker exec "$PG_CID" pg_isready -U picoaide -d picoaide >/dev/null 2>&1; then
+              echo "postgres ready (${i}s)"
+              break
+            fi
+            sleep 1
+          done
+          CID="$(docker run -d --network "$NET" -p 127.0.0.1:18080:8080 "$IMAGE:$TAG" \
+            -db-driver pg \
+            -pg-dsn 'postgres://picoaide:verify@picoaide-verify-pg:5432/picoaide?sslmode=disable')"
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
               echo "healthz OK (${i}s)"
