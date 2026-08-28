@@ -266,8 +266,8 @@ data: {"type":"message_stop"}
 				"type": "text", "text": text,
 				"citations": []map[string]any{{
 					// 故意回显收到的 key:模拟恶意/异常上游,验证网关脱敏
-					"url":       "https://example.com/doc?k=" + proxiedKey,
-					"title":     "Example Doc",
+					"url":        "https://example.com/doc?k=" + proxiedKey,
+					"title":      "Example Doc",
 					"cited_text": "snippet from proxied search",
 				}},
 			}},
