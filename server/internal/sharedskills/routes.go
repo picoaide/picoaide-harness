@@ -6,6 +6,7 @@ package sharedskills
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -77,6 +79,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.DELETE("/:name/:version", remove(db, cacheDir))
 	// 质量标记(0037):仅 approved 行可设置/清除(official/featured,互斥)。
 	g.PUT("/:name/:version/quality", setQuality(db))
+	// 单文件内容(审核查看):从归档提取指定文件内容,支持文本/二进制/超大。
+	g.GET("/:name/:version/file", fileContent(db, cacheDir))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
 	g.GET("/:name/grants", listGrants(db))
 	g.PUT("/:name/grants", replaceGrants(db))
@@ -624,6 +628,121 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, gin.H{"files": files, "skill_md": content})
 	}
+}
+
+// maxFilePreviewBytes caps the inline text returned by the per-file review
+// endpoint; larger files are flagged for archive download instead.
+const maxFilePreviewBytes = 1 << 20
+
+// fileContent returns one file's content from a stored archive so admins can
+// review every uploaded file (审核查看全部内容)。Text (UTF-8) files are
+// returned inline capped at 1MB; binary or oversized entries are flagged for
+// archive download. Admin-only: the payload never leaves the review flow.
+func fileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name, version := c.Param("name"), c.Param("version")
+		if !skillNameRe.MatchString(name) || !versionRe.MatchString(version) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		target := c.Query("path")
+		if target == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少文件路径")
+			return
+		}
+		norm, err := posixNormalize(target)
+		if err != nil || norm == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件路径不合法")
+			return
+		}
+		s, gerr := serverstore.GetSharedSkill(db, name, version)
+		if gerr != nil {
+			if errors.Is(gerr, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		// 0040:归档直存 DB;pre-0040 行的磁盘回退(read-only)。
+		var raw []byte
+		dbRaw, aerr := serverstore.GetSharedSkillArchive(db, s.Name, s.Version)
+		switch {
+		case aerr == nil && dbRaw != nil:
+			raw = dbRaw
+		case aerr == nil:
+			diskPath := filepath.Join(cacheDir, safeName(s.Name, s.Version))
+			if r, rerr := os.ReadFile(diskPath); rerr == nil {
+				raw = r
+			} else {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档数据缺失")
+				return
+			}
+		default:
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
+			return
+		}
+		content, size, found, binary, tooLarge, xerr := extractFileContent(raw, norm)
+		if xerr != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(xerr))
+			return
+		}
+		if !found {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档中不存在该文件")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"path":      norm,
+			"size":      size,
+			"binary":    binary,
+			"too_large": tooLarge,
+			"content":   content,
+		})
+	}
+}
+
+// extractFileContent finds one archive entry by normalized path and returns
+// its text content. Binary (non-UTF-8) and oversized entries return flags
+// instead of payload; the caller decides how to present them.
+func extractFileContent(data []byte, target string) (content string, size int64, found, binary, tooLarge bool, err error) {
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return "", 0, false, false, false, ErrUnsafeArchive
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, herr := tr.Next()
+		if herr == io.EOF {
+			break
+		}
+		if herr != nil {
+			return "", 0, false, false, false, ErrUnsafeArchive
+		}
+		if hdr.Typeflag == tar.TypeDir || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			continue
+		}
+		name, nerr := posixNormalize(hdr.Name)
+		if nerr != nil || name == "" {
+			continue
+		}
+		if name != target {
+			continue
+		}
+		size = hdr.Size
+		if hdr.Size > maxFilePreviewBytes {
+			return "", size, true, false, true, nil
+		}
+		buf := make([]byte, hdr.Size)
+		if _, err := io.ReadFull(tr, buf); err != nil {
+			return "", size, true, false, false, ErrUnsafeArchive
+		}
+		if !utf8.Valid(buf) {
+			return "", size, true, true, false, nil
+		}
+		return string(buf), size, true, false, false, nil
+	}
+	return "", 0, false, false, false, nil
 }
 
 // ValidateSkillArchive lists a gzipped tar stream without extracting it,

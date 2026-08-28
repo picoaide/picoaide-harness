@@ -71,4 +71,26 @@ describe('Capabilities 统一审批页', () => {
       expect(screen.getByText('PPT 生成')).toBeInTheDocument()
     })
   })
+
+  it('点击文件清单中的文件可查看其内容(审核全部内容)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/capabilities/approvals') return { approvals: ROWS }
+      if (path === '/api/admin/departments') return { departments: [] }
+      if (path.endsWith('/preview')) return { files: ['SKILL.md', 'scripts/run.sh'], skill_md: '---\nname: codeql\n---\n' }
+      if (path.includes('/file?path=scripts%2Frun.sh')) {
+        return { path: 'scripts/run.sh', size: 14, binary: false, too_large: false, content: '#!/bin/sh\necho hi\n' }
+      }
+      return {}
+    })
+    render(<Capabilities />)
+    await screen.findByText('CodeQL 审计')
+    const btns = await screen.findAllByTitle('查看内容预览')
+    fireEvent.click(btns[0]!)
+    const fileChip = await screen.findByText('scripts/run.sh')
+    fireEvent.click(fileChip)
+    expect(await screen.findByText(/echo hi/u)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/admin/shared-skills/codeql/1.0.0/file?path=scripts%2Frun.sh')
+    })
+  })
 })
