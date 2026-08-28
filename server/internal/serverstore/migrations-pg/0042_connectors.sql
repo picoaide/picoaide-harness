@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS connectors (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 种子:moka(OAuth + streamable-http)+ glitchtip(token + stdio)。
+-- 种子:moka(OAuth + streamable-http)+ glitchtip(token + stdio)+
+-- sales-easy(销售易 NeoCRM,OAuth + streamable-http)。
+-- 覆盖客户端此前全部硬编码连接器(0042 核查 2026-08-28:sales-easy 曾随
+-- dedupeById 注册但未入表,现补齐)。
 -- glitchtip 的 DEFAULT 字段值由服务端设置页(web.glitchtip_base_url/
 -- web.glitchtip_organization)在 bootstrap 时合成注入,数据库存定义不含
 -- 部署地址(源码/DB 均不含自部署主机名,见客户端旧 glitchtip.ts 约束)。
@@ -40,5 +43,9 @@ INSERT INTO connectors (id, name, description, auth_mode, definition) VALUES
 ('glitchtip', 'GlitchTip',
  'GlitchTip(Sentry 兼容错误追踪):查询 issue 与最新事件堆栈,用于错误排查与监控告警',
  'token',
- '{"tokenFields":[{"key":"GLITCHTIP_BASE_URL","label":"服务地址(必填,如自部署地址或 app.glitchtip.com)","type":"text","required":true},{"key":"GLITCHTIP_TOKEN","label":"API Token(Auth Tokens 页创建,需 org:read / project:read / event:read)","type":"password","required":true},{"key":"GLITCHTIP_ORGANIZATION","label":"组织 slug(如 picoaide)","type":"text","required":true}],"examples":["查询当前未解决的错误 issue","查看最近一次异常的堆栈详情","列出错误追踪中的高优先级问题"],"mcp":[{"serverName":"glitchtip","transport":"stdio","command":"npx","args":["-y","glitchtip-mcp"],"env":{}}]}')
+ '{"tokenFields":[{"key":"GLITCHTIP_BASE_URL","label":"服务地址(必填,如自部署地址或 app.glitchtip.com)","type":"text","required":true},{"key":"GLITCHTIP_TOKEN","label":"API Token(Auth Tokens 页创建,需 org:read / project:read / event:read)","type":"password","required":true},{"key":"GLITCHTIP_ORGANIZATION","label":"组织 slug(如 picoaide)","type":"text","required":true}],"examples":["查询当前未解决的错误 issue","查看最近一次异常的堆栈详情","列出错误追踪中的高优先级问题"],"mcp":[{"serverName":"glitchtip","transport":"stdio","command":"npx","args":["-y","glitchtip-mcp"],"env":{}}]}'),
+('sales-easy', '销售易',
+ '销售易 NeoCRM 官方 MCP:查询客户、线索、商机、联系人,执行 XOQL 查询与元数据操作',
+ 'oauth',
+ '{"auth":{"authorizeUrl":"https://mcp.xiaoshouyi.com/oauth/authorize","tokenUrl":"https://mcp.xiaoshouyi.com/oauth/token","registrationEndpoint":"https://mcp.xiaoshouyi.com/oauth/register","clientId":"","redirectUri":"","scopes":"offline_access","pkce":true,"publicClient":true},"examples":["查询最近赢单的 10 个商机","统计各行业客户数量","帮我找一下联系人张三"],"mcp":[{"serverName":"neo-crm","transport":"streamable-http","url":"https://mcp.xiaoshouyi.com/mcp"}]}')
 ON CONFLICT (id) DO NOTHING;
