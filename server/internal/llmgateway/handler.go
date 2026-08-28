@@ -118,6 +118,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	// 渠道 override 与 max_tokens 注入按候选独立计算(从原始 body 出发):
 	// failover 时第二个 provider 不得收到首个 provider 的渠道参数污染。
 	var resp *http.Response
+	var respSecrets []string // 成功 provider 的官方 key(响应脱敏用)
 	for i := range ups {
 		body := raw
 		if ups[i].Channel != "" {
@@ -143,6 +144,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		}
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
 		if err == nil {
+			respSecrets = []string{ups[i].APIKey}
 			break
 		}
 		log.Printf("gateway: model %s provider %s failed: %v", strconv.Quote(req.Model), strconv.Quote(ups[i].Name), err)
@@ -160,10 +162,10 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveStream(c, resp, usageID)
+		a.serveStream(c, resp, usageID, respSecrets)
 		return
 	}
-	a.serveJSON(c, resp, user.ID, req.Model)
+	a.serveJSON(c, resp, user.ID, req.Model, respSecrets)
 }
 
 // maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
@@ -328,8 +330,44 @@ var passHeaders = map[string]bool{
 	"X-RateLimit-Remaining": true,
 }
 
+// minRedactSecretLen 是脱敏密钥的最小长度阈值:过短的字符串(如单个字母)
+// 遍布正常响应内容,替换会破坏响应且几乎没有泄露价值;真实 API key
+// (sk- 前缀等)远长于此。
+const minRedactSecretLen = 8
+
+// redactSecrets 把 raw 中出现的每个 secret 替换为 `***`(仅替换长度 >= 8
+// 的密钥)。无匹配时返回原 slice(零分配);有匹配返回新 slice。
+// 用途:上游(恶意/被攻陷/异常)在响应体或响应头中回显服务端持有的官方
+// key 时,客户端不得看到——网关是 key 的唯一持有者与最终责任方。
+func redactSecrets(raw []byte, secrets []string) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	out := raw
+	for _, s := range secrets {
+		if len(s) < minRedactSecretLen || len(out) == 0 {
+			continue
+		}
+		if bytes.Index(out, []byte(s)) < 0 {
+			continue
+		}
+		out = bytes.ReplaceAll(out, []byte(s), []byte("***"))
+	}
+	return out
+}
+
+// redactHeaderValue 对单个响应头值做与 redactSecrets 相同的脱敏。
+func redactHeaderValue(value string, secrets []string) string {
+	redacted := redactSecrets([]byte(value), secrets)
+	if len(redacted) == len(value) {
+		return value
+	}
+	return string(redacted)
+}
+
 // serveJSON passes a non-stream upstream response through and records usage.
-func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string) {
+// secrets: 本次请求使用的上游官方 key——上游若在响应中回显,透传前脱敏。
+func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -358,6 +396,7 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游响应过大")
 		return
 	}
+	body = redactSecrets(body, secrets)
 	if pt, ct, cch, ok, _ := parseUsage(body); ok {
 		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cch, "chat"); err != nil {
 			log.Printf("gateway: record usage: %v", err)
@@ -369,7 +408,7 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 			continue
 		}
 		for _, v := range vv {
-			c.Writer.Header().Add(k, v)
+			c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 		}
 	}
 	c.Writer.Write(body)
@@ -378,8 +417,9 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 // serveStream passes an SSE response through line by line, preserving
 // "data:" lines and "[DONE]", and backfills the pending usage row from the
 // final chunk's "usage" field. Rows that can never be backfilled are deleted
-// (C-9): upstream 4xx, client disconnect, write failure.
-func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
+// (C-9): upstream 4xx, client disconnect, write failure. secrets: 上游官方
+// key,用于响应行/头脱敏。
+func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
@@ -394,10 +434,12 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 				continue
 			}
 			for _, v := range vv {
-				c.Writer.Header().Add(k, v)
+				c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 			}
 		}
-		io.Copy(c.Writer, resp.Body)
+		// 4xx body 限小读,透传前脱敏(错误体同样可能回显 key)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		c.Writer.Write(redactSecrets(errBody, secrets))
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -416,6 +458,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		}
 		line, err := readLineWithIdle(br, streamIdleTimeout)
 		if len(line) > 0 {
+			line = string(redactSecrets([]byte(line), secrets))
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
 				if pt, ct, cch, ok, perr := parseUsage([]byte(s)); perr != nil {
 					log.Printf("gateway: parse usage line: %v", perr)
