@@ -3,6 +3,7 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import { AuthError } from './server-connector/auth.ts'
+import { TOKEN_ENV } from './gateway-model.ts'
 import type { Session } from './server-connector/config.ts'
 
 /** Stable Cordis plugin name. */
@@ -13,6 +14,7 @@ export const inject = ['settings', 'picoSession']
 
 const LLM_DEEPSEEK_NS = settingsNamespace('llm-deepseek')
 const AGENT_DEFAULT_MODEL_NS = settingsNamespace('agent-default-model')
+const WEB_SEARCH_DEEPSEEK_NS = settingsNamespace('web-search-deepseek')
 
 /** The provider route the `llm-deepseek` adapter registers (gateway repoints its base URL). */
 const DEEPSEEK_PROVIDER = 'deepseek-official'
@@ -48,6 +50,7 @@ export function apply(ctx: Context): void {
     if (session === null) {
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {})
       await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
+      await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_NS, {})
       return
     }
     try {
@@ -71,6 +74,16 @@ export function apply(ctx: Context): void {
         provider: DEEPSEEK_PROVIDER,
         model: cfg.default_model,
         ...reasoningEffort ? { reasoningEffort } : {},
+      })
+      // web_search 服务端代理(0043):搜索也走网关 /v1/messages,官方 key
+      // 不下发客户端。apiKeyEnv 指向网关 token(与 chat 同一凭据),baseURL
+      // 指向网关路由前缀(provider 追加 /messages 即 /v1/messages),model 与
+      // chat 同用服务端 default_model(该模型名由服务端 anthropic 协议
+      // provider 承载,与 openai 协议 provider 可同名共存)。
+      await ctx.settings.update(WEB_SEARCH_DEEPSEEK_NS, {
+        apiKeyEnv: TOKEN_ENV,
+        baseURL: `${session.serverURL.replace(/\/+$/, '')}/v1`,
+        model: cfg.default_model,
       })
     } catch (cause) {
       // M2: a revoked/expired/disabled session must not linger. Clear it so

@@ -22,6 +22,7 @@ interface Provider {
   models: string[]
   enabled: boolean
   channel: string
+  protocol: string // 0043: openai(默认 chat/embeddings) | anthropic(/v1/messages)
 }
 
 interface Channel {
@@ -146,7 +147,7 @@ export default function Gateway() {
   const [busy, setBusy] = useState<string | null>(null)
 
   const [provDialog, setProvDialog] = useState(false)
-  const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
+  const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', protocol: '' })
   // 对话框内联错误(UX 改进):操作失败信息必须显示在用户操作处,而非页面顶部
   const [provErr, setProvErr] = useState('')
   const [editProvErr, setEditProvErr] = useState('')
@@ -156,7 +157,7 @@ export default function Gateway() {
   const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
   // 上游编辑(审计修复 M3):复用创建字段 + enabled 开关
   const [editProv, setEditProv] = useState<Provider | null>(null)
-  const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true })
+  const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true, protocol: '' })
 
   // ---- 认证配置(LDAP/OIDC) ----
   const [authForm, setAuthForm] = useState({
@@ -317,6 +318,7 @@ export default function Gateway() {
           base_url: provForm.base_url,
           api_key: provForm.api_key,
           models: provForm.models.split(',').map((s) => s.trim()).filter(Boolean),
+          protocol: provForm.protocol || 'openai',
         }),
       })
       const sync = r.sync
@@ -332,7 +334,7 @@ export default function Gateway() {
         flash('已保存')
       }
       setProvDialog(false)
-      setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '' })
+      setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '', protocol: '' })
       load()
     } catch (err: any) {
       setProvErr(err.message)
@@ -358,6 +360,7 @@ export default function Gateway() {
         channel: editProvForm.channel,
         base_url: editProvForm.base_url,
         enabled: editProvForm.enabled,
+        protocol: editProvForm.protocol || 'openai',
       }
       // 密钥留空 = 不更换;模型清单渠道型不提交(服务端切渠道时自动清空手动清单)
       if (editProvForm.api_key.trim() !== '') body.api_key = editProvForm.api_key
@@ -541,6 +544,7 @@ export default function Gateway() {
       api_key: '',
       models: p.models.join(', '),
       enabled: p.enabled,
+      protocol: p.protocol || 'openai',
     })
   }
 
@@ -740,6 +744,7 @@ export default function Gateway() {
               <TableRow>
                 <TableHead>名称</TableHead>
                 <TableHead>渠道</TableHead>
+                <TableHead>协议</TableHead>
                 <TableHead>Base URL</TableHead>
                 <TableHead>API Key</TableHead>
                 <TableHead>模型</TableHead>
@@ -749,9 +754,9 @@ export default function Gateway() {
             </TableHeader>
             <TableBody>
               {loading ? (
-                <TableRow><TableCell colSpan={7}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
+                <TableRow><TableCell colSpan={8}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
               ) : providers.length === 0 ? (
-                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
+                <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
               ) : providers.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell>
@@ -761,6 +766,7 @@ export default function Gateway() {
                     </div>
                   </TableCell>
                   <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
+                  <TableCell>{p.protocol === 'anthropic' ? <Badge variant="outline">Anthropic</Badge> : <Badge variant="secondary">OpenAI</Badge>}</TableCell>
                   <TableCell className="max-w-56 truncate font-mono text-xs">{p.base_url}</TableCell>
                   <TableCell>
                     {p.api_key ? (
@@ -990,6 +996,22 @@ export default function Gateway() {
               </p>
             </div>
             <div className="space-y-1">
+              <Label>协议</Label>
+              <Select
+                value={provForm.protocol || 'openai'}
+                onValueChange={(v) => setProvForm({ ...provForm, protocol: v })}
+              >
+                <SelectTrigger><SelectValue placeholder="选择协议" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="openai">OpenAI 兼容(chat/completions、embeddings)</SelectItem>
+                  <SelectItem value="anthropic">Anthropic 兼容(/v1/messages,web 搜索)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Anthropic 协议上游供 web_search 走服务端代理使用(如 https://api.deepseek.com/anthropic/v1)
+              </p>
+            </div>
+            <div className="space-y-1">
               <Label>名称(如 deepseek)</Label>
               <Input placeholder="如 deepseek" value={provForm.name} onChange={(e) => setProvForm({ ...provForm, name: e.target.value })} />
             </div>
@@ -1050,6 +1072,19 @@ export default function Gateway() {
               <p className="text-xs text-muted-foreground">
                 渠道型自动同步上游模型,手动模型清单将被清空;手动型可维护模型列表
               </p>
+            </div>
+            <div className="space-y-1">
+              <Label>协议</Label>
+              <Select
+                value={editProvForm.protocol || 'openai'}
+                onValueChange={(v) => setEditProvForm({ ...editProvForm, protocol: v })}
+              >
+                <SelectTrigger><SelectValue placeholder="选择协议" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="openai">OpenAI 兼容(chat/completions、embeddings)</SelectItem>
+                  <SelectItem value="anthropic">Anthropic 兼容(/v1/messages,web 搜索)</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1">
               <Label>名称</Label>

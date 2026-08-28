@@ -90,7 +90,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	ups, err := MatchModels(a.DB, req.Model)
+	ups, err := MatchModelsByProtocol(a.DB, req.Model, "openai")
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
 		return
