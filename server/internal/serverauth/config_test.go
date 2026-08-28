@@ -16,12 +16,12 @@ func newStoreDB(t *testing.T) *sql.DB {
 
 func TestConfigureProvidersEmptySettings(t *testing.T) {
 	db := newStoreDB(t)
-	pwds, browser := ConfigureProviders(db)
+	pwds, browsers := ConfigureProviders(db)
 	if len(pwds) != 1 || pwds[0].Name() != "local" {
 		t.Fatalf("pwds = %v, want [local]", pwds)
 	}
-	if browser != nil {
-		t.Fatalf("browser = %v, want nil", browser)
+	if len(browsers) != 0 {
+		t.Fatalf("browsers = %v, want none", browsers)
 	}
 }
 
@@ -30,9 +30,9 @@ func TestConfigureProvidersLDAPMode(t *testing.T) {
 	if err := serverstore.SetSetting(db, "auth.mode", "ldap"); err != nil {
 		t.Fatal(err)
 	}
-	// missing ldap config -> no providers at all
-	if pwds, _ := ConfigureProviders(db); len(pwds) != 0 {
-		t.Fatalf("pwds = %v, want none", pwds)
+	// missing ldap config -> only local (admin 回退恒存在)
+	if pwds, _ := ConfigureProviders(db); len(pwds) != 1 || pwds[0].Name() != "local" {
+		t.Fatalf("pwds = %v, want [local] (admin fallback)", pwds)
 	}
 	if err := serverstore.SetSetting(db, "ldap.server_url", "ldap://x"); err != nil {
 		t.Fatal(err)
@@ -41,8 +41,8 @@ func TestConfigureProvidersLDAPMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	pwds, _ := ConfigureProviders(db)
-	if len(pwds) != 1 || pwds[0].Name() != "ldap" {
-		t.Fatalf("pwds = %v, want [ldap]", pwds)
+	if len(pwds) != 2 || pwds[0].Name() != "local" || pwds[1].Name() != "ldap" {
+		t.Fatalf("pwds = %v, want [local ldap]", pwds)
 	}
 }
 
@@ -63,10 +63,9 @@ func TestConfigureProvidersBothMode(t *testing.T) {
 	}
 }
 
-// TestLDAPModeExcludesLocal verifies the wiring used by cmd/server/main.go:
-// the API registers exactly what ConfigureProviders returns. In ldap mode a
-// stale local account must not be able to log in.
-func TestLDAPModeExcludesLocal(t *testing.T) {
+// TestLDAPModeKeepsLocalAdminFallback verifies local provider 恒注册:
+// ldap 模式下本地 admin 永远可以登录管理后台(审计 2026-08-29)。
+func TestLDAPModeKeepsLocalAdminFallback(t *testing.T) {
 	db := newStoreDB(t)
 	if err := serverstore.SetSetting(db, "auth.mode", "ldap"); err != nil {
 		t.Fatal(err)
@@ -81,19 +80,22 @@ func TestLDAPModeExcludesLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := NewConfiguredAPI(db)
-	// local provider must NOT be registered in ldap-only mode
-	if _, ok := cfg.API.providers["local"]; ok {
-		t.Fatal("local provider registered in ldap mode")
+	// local provider 必须注册(admin 回退)
+	if _, ok := cfg.API.providers["local"]; !ok {
+		t.Fatal("local provider not registered in ldap mode")
 	}
-	// and the legacy local account cannot authenticate
-	if _, err := cfg.API.authenticate("legacy", "pw123456"); err == nil {
-		t.Fatal("local account authenticated in ldap-only mode")
+	// 本地账号仍可认证(管理后台登录用)
+	if _, err := cfg.API.authenticate("legacy", "pw123456"); err != nil {
+		t.Fatal("local account cannot authenticate in ldap mode:", err)
 	}
 }
 
 func TestConfigureProvidersOIDC(t *testing.T) {
 	idp := newFakeIDP(t)
 	db := newStoreDB(t)
+	if err := serverstore.SetSetting(db, "auth.enabled", "local,oidc"); err != nil {
+		t.Fatal(err)
+	}
 	if err := serverstore.SetSetting(db, "oidc.issuer", idp.srv.URL); err != nil {
 		t.Fatal(err)
 	}
@@ -103,8 +105,8 @@ func TestConfigureProvidersOIDC(t *testing.T) {
 	if err := serverstore.SetSetting(db, "oidc.redirect_url", "http://localhost/api/auth/oidc/callback"); err != nil {
 		t.Fatal(err)
 	}
-	_, browser := ConfigureProviders(db)
-	if browser == nil || browser.Name() != "oidc" {
-		t.Fatalf("browser = %v, want oidc", browser)
+	_, browsers := ConfigureProviders(db)
+	if len(browsers) != 1 || browsers[0].Name() != "oidc" {
+		t.Fatalf("browsers = %v, want [oidc]", browsers)
 	}
 }

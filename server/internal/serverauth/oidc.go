@@ -42,14 +42,21 @@ var oidcExchangeTimeout = 10 * time.Second
 
 // OIDCProvider implements the authorization code + PKCE flow.
 // Config keys: issuer, client_id, client_secret, redirect_url.
+// name 用于区分两套独立 IdP 配置("oidc" / "openid"),决定路由前缀。
 type OIDCProvider struct {
 	cfg      oauth2.Config
 	verifier *oidc.IDTokenVerifier
 	mu       sync.Mutex
 	flows    map[string]*oidcFlow
+	name     string
 }
 
-func (p *OIDCProvider) Name() string { return "oidc" }
+func (p *OIDCProvider) Name() string {
+	if p.name != "" {
+		return p.name
+	}
+	return "oidc"
+}
 
 func (p *OIDCProvider) Configure(cfg map[string]string) error {
 	issuer := cfg["issuer"]
@@ -179,69 +186,102 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 const oidcStateCookieName = "picoaide_oidc_state"
 
 // handleOIDCLogin redirects the browser to the IdP authorization URL.
+// 兼容保留:使用第一个/默认 browser provider(oidc)。
 func (a *API) handleOIDCLogin(c *gin.Context) {
-	state, err := randomHex(16)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "状态生成失败")
+	p := a.browsers["oidc"]
+	if p == nil {
+		p = a.browsers["openid"]
+	}
+	if p == nil {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "OIDC 未配置")
 		return
 	}
-	authURL, err := a.oidc.AuthURL(state)
-	if err != nil {
-		writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
-		return
+	a.handleOIDCLoginWith(p)(c)
+}
+
+// handleOIDCLoginWith runs the login flow for a specific browser provider.
+func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		state, err := randomHex(16)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "状态生成失败")
+			return
+		}
+		authURL, err := p.AuthURL(state)
+		if err != nil {
+			writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
+			return
+		}
+		name := p.Name()
+		http.SetCookie(c.Writer, &http.Cookie{
+			Name:     oidcStateCookieName + "_" + name,
+			Value:    state,
+			Path:     "/api/auth/" + name,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   secureCookieFor(c, a.DB),
+			MaxAge:   int(oidcFlowTTL.Seconds()),
+		})
+		c.Redirect(http.StatusFound, authURL)
 	}
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     oidcStateCookieName,
-		Value:    state,
-		Path:     "/api/auth/oidc",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   secureCookieFor(c, a.DB),
-		MaxAge:   int(oidcFlowTTL.Seconds()),
-	})
-	c.Redirect(http.StatusFound, authURL)
 }
 
 // handleOIDCCallback exchanges the code and redirects the client deep link
-// with a signed-in api token.
+// with a signed-in api token. 兼容保留:用默认/第一个 browser provider。
 func (a *API) handleOIDCCallback(c *gin.Context) {
-	code, state := c.Query("code"), c.Query("state")
-	if code == "" || state == "" {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "缺少 code 或 state")
+	p := a.browsers["oidc"]
+	if p == nil {
+		p = a.browsers["openid"]
+	}
+	if p == nil {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "OIDC 未配置")
 		return
 	}
-	// login CSRF 绑定:回调必须回显 login 时签发的 state cookie
-	stateCookie, err := c.Cookie(oidcStateCookieName)
-	if err != nil || stateCookie == "" || subtle.ConstantTimeCompare([]byte(stateCookie), []byte(state)) != 1 {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "state 与登录浏览器不匹配")
-		return
+	a.handleOIDCCallbackWith(p)(c)
+}
+
+// handleOIDCCallbackWith runs the callback for a specific browser provider.
+func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		code, state := c.Query("code"), c.Query("state")
+		if code == "" || state == "" {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "缺少 code 或 state")
+			return
+		}
+		name := p.Name()
+		// login CSRF 绑定:回调必须回显 login 时签发的 state cookie
+		stateCookie, err := c.Cookie(oidcStateCookieName + "_" + name)
+		if err != nil || stateCookie == "" || subtle.ConstantTimeCompare([]byte(stateCookie), []byte(state)) != 1 {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "state 与登录浏览器不匹配")
+			return
+		}
+		// 消费 cookie:流程单次有效
+		http.SetCookie(c.Writer, &http.Cookie{Name: oidcStateCookieName + "_" + name, Value: "", Path: "/api/auth/" + name, MaxAge: -1})
+		ui, err := p.HandleCallback(code, state)
+		if errors.Is(err, errOIDCState) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
+			return
+		}
+		if err != nil {
+			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "OIDC 认证失败")
+			return
+		}
+		user, err := a.provisionUser(ui)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "用户创建失败")
+			return
+		}
+		if user.Status != 1 {
+			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "账号已禁用")
+			return
+		}
+		token, err := IssueToken(a.DB, user.ID)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
+			return
+		}
+		c.Redirect(http.StatusFound, fmt.Sprintf("picoaide://auth?token=%s", url.QueryEscape(token)))
 	}
-	// 消费 cookie:流程单次有效
-	http.SetCookie(c.Writer, &http.Cookie{Name: oidcStateCookieName, Value: "", Path: "/api/auth/oidc", MaxAge: -1})
-	ui, err := a.oidc.HandleCallback(code, state)
-	if errors.Is(err, errOIDCState) {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
-		return
-	}
-	if err != nil {
-		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "OIDC 认证失败")
-		return
-	}
-	user, err := a.provisionUser(ui)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "用户创建失败")
-		return
-	}
-	if user.Status != 1 {
-		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "账号已禁用")
-		return
-	}
-	token, err := IssueToken(a.DB, user.ID)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
-		return
-	}
-	c.Redirect(http.StatusFound, fmt.Sprintf("picoaide://auth?token=%s", url.QueryEscape(token)))
 }
 
 func randomHex(n int) (string, error) {

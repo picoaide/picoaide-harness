@@ -306,7 +306,7 @@ func TestOIDCRoutes(t *testing.T) {
 	stateCookie := w.Result().Cookies()
 	var stateCookieVal string
 	for _, c := range stateCookie {
-		if c.Name == "picoaide_oidc_state" {
+		if c.Name == "picoaide_oidc_state_oidc" {
 			stateCookieVal = c.Value
 		}
 	}
@@ -348,7 +348,7 @@ func TestOIDCRoutes(t *testing.T) {
 	w = httptest.NewRecorder()
 	req := httptest.NewRequest("GET",
 		"/api/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
-	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state", Value: stateCookieVal})
+	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state_oidc", Value: stateCookieVal})
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {
 		t.Fatalf("callback status = %d body=%s", w.Code, w.Body.String())

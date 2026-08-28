@@ -8,15 +8,20 @@ import (
 )
 
 // ConfigureProviders reads auth settings and returns the password providers
-// and optional browser provider to register on the API. Settings:
+// and optional browser providers to register on the API. Settings:
 //
-//	auth.mode        local | ldap | both (default local)
-//	ldap.*           server_url/bind_dn/bind_password/base_dn/user_filter/group_filter/group_attr
-//	oidc.*           issuer/client_id/client_secret/redirect_url
+//	auth.enabled      local,ldap,openid,oidc (逗号分隔;优先级高于 auth.mode)
+//	auth.mode         local | ldap | both | oidc | openid (向后兼容,enabled 缺失时推导)
+//	ldap.*            server_url/bind_dn/bind_password/base_dn/user_filter/group_filter/group_attr
+//	oidc.*            issuer/client_id/client_secret/redirect_url
+//	openid.*          issuer/client_id/client_secret/redirect_url (独立两套 IdP)
 //
-// Unconfigured providers are omitted; a broken ldap/oidc config degrades to
-// nothing rather than failing startup.
-func ConfigureProviders(db *sql.DB) ([]PasswordProvider, BrowserProvider) {
+// Unconfigured providers are omitted; a broken ldap/oidc/openid config
+// degrades to nothing rather than failing startup.
+//
+// 强制本地 admin:任何模式下都注册 local provider(管理员回退),保证
+// 切换认证方式后本地 admin 仍能登录管理后台(审计 2026-08-29)。
+func ConfigureProviders(db *sql.DB) ([]PasswordProvider, []BrowserProvider) {
 	settings, err := serverstore.GetAllSettings(db)
 	if err != nil {
 		return nil, nil
@@ -25,42 +30,77 @@ func ConfigureProviders(db *sql.DB) ([]PasswordProvider, BrowserProvider) {
 	if mode == "" {
 		mode = "local"
 	}
+	enabledRaw := settings["auth.enabled"]
+	var enabled []string
+	if strings.TrimSpace(enabledRaw) != "" {
+		for _, p := range strings.Split(enabledRaw, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				enabled = append(enabled, p)
+			}
+		}
+	} else {
+		// 向后兼容:由 auth.mode 推导
+		switch mode {
+		case "ldap", "both":
+			enabled = []string{"local", "ldap"}
+		case "oidc":
+			enabled = []string{"local", "oidc"}
+		case "openid":
+			enabled = []string{"local", "openid"}
+		default:
+			enabled = []string{"local"}
+		}
+	}
+	has := func(name string) bool {
+		for _, e := range enabled {
+			if e == name {
+				return true
+			}
+		}
+		return false
+	}
 	var pwds []PasswordProvider
-	switch mode {
-	case "local":
+	if has("local") {
 		pwds = append(pwds, NewLocalProvider(db))
-	case "ldap":
+	}
+	if has("ldap") {
 		if p := ldapFromSettings(settings); p != nil {
 			pwds = append(pwds, p)
 		}
-	case "both":
-		pwds = append(pwds, NewLocalProvider(db))
-		if p := ldapFromSettings(settings); p != nil {
-			pwds = append(pwds, p)
+	}
+	// 强制本地 admin:无论 enabled 是否含 local,恒注册 local(管理员回退)
+	if !has("local") {
+		pwds = append([]PasswordProvider{NewLocalProvider(db)}, pwds...)
+	}
+	var browsers []BrowserProvider
+	// 两套 IdP 可独立配置并存(openid.* 与 oidc.*)
+	if has("oidc") {
+		if p := browserFromSettings(settings, "oidc", "oidc"); p != nil {
+			browsers = append(browsers, p)
 		}
-	case "oidc":
-		// OIDC 纯浏览器登录:保留本地密码 provider 作为回退(管理员/断网场景),
-		// 浏览器 OIDC flow 由 RegisterOIDC 单独启用。
-		pwds = append(pwds, NewLocalProvider(db))
 	}
-	var browser BrowserProvider
-	if p := oidcFromSettings(settings); p != nil {
-		browser = p
+	if has("openid") {
+		if p := browserFromSettings(settings, "openid", "openid"); p != nil {
+			browsers = append(browsers, p)
+		}
 	}
-	return pwds, browser
+	return pwds, browsers
 }
 
-func ldapFromSettings(s map[string]string) PasswordProvider {
-	p := &LDAPProvider{}
-	if err := p.Configure(stripPrefix(s, "ldap.")); err != nil {
+// browserFromSettings builds a browser (OIDC) provider from settings with the
+// given key prefix ("oidc." / "openid."); name is its protocol identity.
+func browserFromSettings(s map[string]string, prefix, name string) BrowserProvider {
+	p := &OIDCProvider{name: name}
+	if err := p.Configure(stripPrefix(s, prefix+".")); err != nil {
 		return nil
 	}
 	return p
 }
 
-func oidcFromSettings(s map[string]string) BrowserProvider {
-	p := &OIDCProvider{}
-	if err := p.Configure(stripPrefix(s, "oidc.")); err != nil {
+func ldapFromSettings(s map[string]string) PasswordProvider {
+	p := &LDAPProvider{}
+	if err := p.Configure(stripPrefix(s, "ldap.")); err != nil {
 		return nil
 	}
 	return p
@@ -76,20 +116,19 @@ func stripPrefix(m map[string]string, prefix string) map[string]string {
 	return out
 }
 
-// ConfiguredAPI bundles the auth API with its configured browser provider.
+// ConfiguredAPI bundles the auth API with its configured browser providers.
 type ConfiguredAPI struct {
-	API  *API
-	OIDC BrowserProvider
+	API      *API
+	Browsers []BrowserProvider
 }
 
 // NewConfiguredAPI builds the auth API registering exactly the providers that
-// ConfigureProviders returns. In ldap-only mode the local provider is NOT
-// registered, so stale local accounts cannot log in.
+// ConfigureProviders returns. local provider 恒注册(admin 回退)。
 func NewConfiguredAPI(db *sql.DB) *ConfiguredAPI {
 	api := New(db)
-	pwds, browser := ConfigureProviders(db)
+	pwds, browsers := ConfigureProviders(db)
 	for _, p := range pwds {
 		api.RegisterProvider(p)
 	}
-	return &ConfiguredAPI{API: api, OIDC: browser}
+	return &ConfiguredAPI{API: api, Browsers: browsers}
 }

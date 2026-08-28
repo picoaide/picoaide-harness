@@ -714,7 +714,8 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 	}
 }
 
-// auth.mode=ldap 时,本地管理员不得绕过配置登录管理页(审计2026-M1)
+// auth.mode=ldap 时,本地 admin 仍可登录管理后台(强制 admin 回退,
+// 审计 2026-08-29):切换认证方式后管理员不会被锁在门外。
 func TestAdminLoginRespectsAuthMode(t *testing.T) {
 	db := mustDB(t)
 	if _, err := createUserDB(db, "boss", "pw123456", true); err != nil {
@@ -726,10 +727,10 @@ func TestAdminLoginRespectsAuthMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	RegisterAdminRoutes(r, db)
-	// 无 LDAP 配置 → ldap provider 未注册 → 登录必须 401
+	// 无 LDAP 配置 → 仅 local provider 注册 → 本地 admin 必须能登录(回退)
 	w, _ := doAdmin(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("ldap-mode local admin login = %d, want 401", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ldap-mode local admin login = %d, want 200 (admin fallback)", w.Code)
 	}
 }
 
@@ -1393,8 +1394,9 @@ func TestAdminAuthConfig(t *testing.T) {
 		t.Fatalf("bind_password should be cleared, got %q", ld["bind_password"])
 	}
 
-	// 4. 切回 local → ldap/oidc 全部清空
-	w, _ = doJSON(t, r, "PUT", "/api/admin/auth", `{"mode":"local"}`, hdr)
+	// 4. 切回 local → configuration 独立保留(前端全量回传各方式配置)
+	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+		`{"mode":"local","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("switch local: %d", w.Code)
 	}
@@ -1404,8 +1406,14 @@ func TestAdminAuthConfig(t *testing.T) {
 	}
 	ld = a["ldap"].(map[string]any)
 	od := a["oidc"].(map[string]any)
-	if ld["server_url"].(string) != "" || ld["bind_password"].(string) != "" || od["issuer"].(string) != "" {
-		t.Fatalf("ldap/oidc should be cleared after local: ldap=%v oidc=%v", ld, od)
+	if ld["server_url"].(string) != "ldap://x:389" || ld["base_dn"].(string) != "dc=y" {
+		t.Fatalf("ldap config should be kept after local switch: ldap=%v", ld)
+	}
+	if ld["bind_password"].(string) != "" {
+		t.Fatalf("bind_password was cleared in step 3, should stay empty: %v", ld["bind_password"])
+	}
+	if od["issuer"].(string) != "" {
+		t.Fatalf("oidc should stay empty: %v", od)
 	}
 
 	// 5. 非法 mode 拒绝

@@ -113,6 +113,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换
 	g.GET("/auth", AdminAuth(db), a.getAuthConfig)
 	g.PUT("/auth", AdminAuth(db), a.setAuthConfig)
+	// 未认证可访问:登录页展示启用的认证方式(仅返回 enabled 列表,不含敏感配置)
+	g.GET("/auth/methods", a.getPublicAuthMethods)
 }
 
 // AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
@@ -686,7 +688,7 @@ func (a *AdminAPI) listAuditLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
 }
 
-// getAuthConfig 返回认证配置(脱敏):auth.mode / ldap.* / oidc.*。
+// getAuthConfig 返回认证配置(脱敏):auth.mode / auth.enabled / ldap.* / oidc.* / openid.*。
 // 敏感值(bind_password / client_secret)以 "***" 掩码返回,write 时留空=不更换。
 func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 	s, err := serverstore.GetAllSettings(a.DB)
@@ -701,7 +703,8 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 		return "***"
 	}
 	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
-		"mode": s["auth.mode"],
+		"mode":    s["auth.mode"],
+		"enabled": s["auth.enabled"],
 		"ldap": gin.H{
 			"server_url":    s["ldap.server_url"],
 			"bind_dn":       s["ldap.bind_dn"],
@@ -717,16 +720,26 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 			"client_secret": mask(s["oidc.client_secret"]),
 			"redirect_url":  s["oidc.redirect_url"],
 		},
+		"openid": gin.H{
+			"issuer":        s["openid.issuer"],
+			"client_id":     s["openid.client_id"],
+			"client_secret": mask(s["openid.client_secret"]),
+			"redirect_url":  s["openid.redirect_url"],
+		},
 	}})
 }
 
-// setAuthConfig 保存认证配置。契约:mode 必填(local|ldap|both|oidc);
-// 密码类字段(ldap.bind_password / oidc.client_secret)写入 "***" = 保持现值,
-// 其余值(含空串)= 覆盖/清空;非密码字段左右 trim 后写入。
+// setAuthConfig 保存认证配置。
+// 契约:enabled 必填(逗号分隔: local,ldap,openid,oidc),未传时按 mode 推导
+// (local→local / ldap→ldap / both→local,ldap / oidc→local,oidc / openid→local,openid)。
+// 密码类字段(ldap.bind_password / oidc.client_secret / openid.client_secret)写入
+// "***" = 保持现值,其余值(含空串)= 覆盖/清空;非密码字段左右 trim 后写入。
+// ldap/openid/oidc 三方配置独立保存(互不覆盖),按 enabled 启用。
 func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	var req struct {
-		Mode string `json:"mode"`
-		LDAP struct {
+		Mode    string `json:"mode"`
+		Enabled string `json:"enabled"`
+		LDAP    struct {
 			ServerURL    string `json:"server_url"`
 			BindDN       string `json:"bind_dn"`
 			BindPassword string `json:"bind_password"`
@@ -741,64 +754,143 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			ClientSecret string `json:"client_secret"`
 			RedirectURL  string `json:"redirect_url"`
 		} `json:"oidc"`
+		OpenID struct {
+			Issuer       string `json:"issuer"`
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+			RedirectURL  string `json:"redirect_url"`
+		} `json:"openid"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	mode := req.Mode
-	if mode == "" {
-		mode = "local"
+	// mode 兼容校验:合法值 local|ldap|both|oidc|openid(可空=默认 local)
+	if req.Mode != "" {
+		switch req.Mode {
+		case "local", "ldap", "both", "oidc", "openid":
+		default:
+			writeError(c, http.StatusBadRequest, "VALIDATION", "auth.mode 必须是 local|ldap|both|oidc|openid")
+			return
+		}
 	}
-	switch mode {
-	case "local", "ldap", "both", "oidc":
-	default:
-		writeError(c, http.StatusBadRequest, "VALIDATION", "auth.mode 必须是 local|ldap|both|oidc")
+	// enabled 推导:未传 enabled 时按 mode 兼容旧客户端
+	enabled := req.Enabled
+	if strings.TrimSpace(enabled) == "" {
+		switch req.Mode {
+		case "ldap", "both":
+			enabled = "local,ldap"
+		case "oidc":
+			enabled = "local,oidc"
+		case "openid":
+			enabled = "local,openid"
+		default:
+			enabled = "local"
+		}
+	}
+	// 校验 enabled 列表
+	parts := strings.Split(enabled, ",")
+	seen := map[string]bool{}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		switch p {
+		case "local", "ldap", "openid", "oidc":
+		default:
+			writeError(c, http.StatusBadRequest, "VALIDATION", "auth.enabled 只能包含 local|ldap|openid|oidc")
+			return
+		}
+		if seen[p] {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "auth.enabled 不能重复")
+			return
+		}
+		seen[p] = true
+	}
+	// 本地 admin 恒启用:enabled 里没有 local 也要强制加(admin 回退)
+	// (不写回 auth.enabled,仅运行时生效——配置展示保持用户原意)
+	upsert := func(key, val string) error { return serverstore.SetSetting(a.DB, key, val) }
+	_ = upsert("auth.mode", req.Mode)
+	_ = upsert("auth.enabled", enabled)
+	// 保存各类配置(独立,互不清空——切到 ldap 不清 openid,反之亦然)
+	_ = upsert("ldap.server_url", strings.TrimSpace(req.LDAP.ServerURL))
+	_ = upsert("ldap.bind_dn", strings.TrimSpace(req.LDAP.BindDN))
+	if req.LDAP.BindPassword != MaskSecret {
+		_ = upsert("ldap.bind_password", req.LDAP.BindPassword)
+	}
+	_ = upsert("ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN))
+	_ = upsert("ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter))
+	_ = upsert("ldap.group_filter", strings.TrimSpace(req.LDAP.GroupFilter))
+	_ = upsert("ldap.group_attr", strings.TrimSpace(req.LDAP.GroupAttr))
+	_ = upsert("oidc.issuer", strings.TrimSpace(req.OIDC.Issuer))
+	_ = upsert("oidc.client_id", strings.TrimSpace(req.OIDC.ClientID))
+	if req.OIDC.ClientSecret != MaskSecret {
+		_ = upsert("oidc.client_secret", req.OIDC.ClientSecret)
+	}
+	_ = upsert("oidc.redirect_url", strings.TrimSpace(req.OIDC.RedirectURL))
+	_ = upsert("openid.issuer", strings.TrimSpace(req.OpenID.Issuer))
+	_ = upsert("openid.client_id", strings.TrimSpace(req.OpenID.ClientID))
+	if req.OpenID.ClientSecret != MaskSecret {
+		_ = upsert("openid.client_secret", req.OpenID.ClientSecret)
+	}
+	_ = upsert("openid.redirect_url", strings.TrimSpace(req.OpenID.RedirectURL))
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "enabled:"+enabled)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// getPublicAuthMethods 返回登录页可用的认证方式(无认证要求):
+// enabled 列表 + 各方式是否已配置(browser provider 需要配置齐全才可用)。
+// 仅返回元信息,不含任何密码/密钥/URL 等敏感值。
+func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
+	s, err := serverstore.GetAllSettings(a.DB)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	upsert := func(key, val string) error { return serverstore.SetSetting(a.DB, key, val) }
-	_ = upsert("auth.mode", mode)
-	// 只保存当前 mode 相关的配置;其余(未启用模式的字段)清空,避免残留污染:
-	// 用户切回 local 后 ldap.*/oidc.* 不应继续存在(重启时不再被误解析)。
-	// 密码字段 "***" = 保持现值;其余(含空)= 覆盖/清空。
-	switch mode {
-	case "ldap", "both":
-		_ = upsert("ldap.server_url", strings.TrimSpace(req.LDAP.ServerURL))
-		_ = upsert("ldap.bind_dn", strings.TrimSpace(req.LDAP.BindDN))
-		if req.LDAP.BindPassword != MaskSecret {
-			_ = upsert("ldap.bind_password", req.LDAP.BindPassword)
+	configured := func(prefix string) bool {
+		return s[prefix+".issuer"] != "" && s[prefix+".client_id"] != "" && s[prefix+".redirect_url"] != ""
+	}
+	enabledRaw := s["auth.enabled"]
+	var methods []string
+	if strings.TrimSpace(enabledRaw) != "" {
+		for _, p := range strings.Split(enabledRaw, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				methods = append(methods, p)
+			}
 		}
-		_ = upsert("ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN))
-		_ = upsert("ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter))
-		_ = upsert("ldap.group_filter", strings.TrimSpace(req.LDAP.GroupFilter))
-		_ = upsert("ldap.group_attr", strings.TrimSpace(req.LDAP.GroupAttr))
-		_ = upsert("oidc.issuer", "")
-		_ = upsert("oidc.client_id", "")
-		_ = upsert("oidc.client_secret", "")
-		_ = upsert("oidc.redirect_url", "")
-	case "oidc":
-		_ = upsert("oidc.issuer", strings.TrimSpace(req.OIDC.Issuer))
-		_ = upsert("oidc.client_id", strings.TrimSpace(req.OIDC.ClientID))
-		if req.OIDC.ClientSecret != MaskSecret {
-			_ = upsert("oidc.client_secret", req.OIDC.ClientSecret)
-		}
-		_ = upsert("oidc.redirect_url", strings.TrimSpace(req.OIDC.RedirectURL))
-		_ = upsert("ldap.server_url", "")
-		_ = upsert("ldap.bind_dn", "")
-		_ = upsert("ldap.bind_password", "")
-		_ = upsert("ldap.base_dn", "")
-		_ = upsert("ldap.user_filter", "")
-		_ = upsert("ldap.group_filter", "")
-		_ = upsert("ldap.group_attr", "")
-	default: // local:清空全部外部认证配置
-		for _, k := range []string{"ldap.server_url", "ldap.bind_dn", "ldap.bind_password", "ldap.base_dn",
-			"ldap.user_filter", "ldap.group_filter", "ldap.group_attr",
-			"oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.redirect_url"} {
-			_ = upsert(k, "")
+	} else {
+		// 未设置 enabled:由 mode 推导
+		switch s["auth.mode"] {
+		case "ldap", "both":
+			methods = []string{"local", "ldap"}
+		case "oidc":
+			methods = []string{"local", "oidc"}
+		case "openid":
+			methods = []string{"local", "openid"}
+		default:
+			methods = []string{"local"}
 		}
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "mode:"+mode)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	// local 恒在(admin 回退)
+	found := false
+	for _, m := range methods {
+		if m == "local" {
+			found = true
+		}
+	}
+	if !found {
+		methods = append([]string{"local"}, methods...)
+	}
+	out := make([]gin.H, 0, len(methods))
+	for _, m := range methods {
+		out = append(out, gin.H{
+			"name":      m,
+			"configured": m == "local" || configured(m),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"methods": out})
 }
 
 // MaskSecret 是 webadmin 回传敏感字段时的占位符("***"):服务端遇此值保持现值。
