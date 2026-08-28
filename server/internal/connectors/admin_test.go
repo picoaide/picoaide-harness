@@ -77,8 +77,8 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 		t.Fatalf("list = %d %s", w.Code, w.Body.String())
 	}
 	conns := out["connectors"].([]any)
-	if len(conns) < 2 {
-		t.Fatalf("listed = %d, want >= 2", len(conns))
+	if len(conns) < 3 {
+		t.Fatalf("listed = %d, want >= 3", len(conns))
 	}
 
 	// 创建。
