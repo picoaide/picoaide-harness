@@ -766,7 +766,7 @@ export default function Gateway() {
                     </div>
                   </TableCell>
                   <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
-                  <TableCell>{p.protocol === 'anthropic' ? <Badge variant="outline">Anthropic</Badge> : <Badge variant="secondary">OpenAI</Badge>}</TableCell>
+                  <TableCell>{p.protocol === 'anthropic' ? <Badge variant="outline">Anthropic</Badge> : p.protocol === 'both' ? <Badge variant="secondary">共用</Badge> : <Badge variant="secondary">OpenAI</Badge>}</TableCell>
                   <TableCell className="max-w-56 truncate font-mono text-xs">{p.base_url}</TableCell>
                   <TableCell>
                     {p.api_key ? (
@@ -1005,6 +1005,7 @@ export default function Gateway() {
                 <SelectContent>
                   <SelectItem value="openai">OpenAI 兼容(chat/completions、embeddings)</SelectItem>
                   <SelectItem value="anthropic">Anthropic 兼容(/v1/messages,web 搜索)</SelectItem>
+                  <SelectItem value="both">共用(both:同一 key 双端点,chat+搜索)</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
@@ -1083,6 +1084,7 @@ export default function Gateway() {
                 <SelectContent>
                   <SelectItem value="openai">OpenAI 兼容(chat/completions、embeddings)</SelectItem>
                   <SelectItem value="anthropic">Anthropic 兼容(/v1/messages,web 搜索)</SelectItem>
+                  <SelectItem value="both">共用(both:同一 key 双端点,chat+搜索)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
