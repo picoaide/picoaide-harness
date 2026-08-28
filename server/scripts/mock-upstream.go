@@ -210,6 +210,76 @@ func main() {
 		})
 	})
 
+	// /v1/messages: Anthropic-compatible endpoint for the gateway's 0043
+	// web_search proxy path. Returns fixed Anthropic SSE/JSON with native
+	// web_search_tool_result blocks so the python client's search tool maps
+	// real citations. Also verifies the proxied key header reached us.
+	http.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+			Tools  []struct {
+				Type string `json:"type"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":{"message":"bad request"}}`, 400)
+			return
+		}
+		proxiedKey := r.Header.Get("x-api-key")
+		if proxiedKey == "" {
+			proxiedKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		log.Printf("mock messages: proxied key = %q (len %d)", proxiedKey, len(proxiedKey))
+		const text = "web search proxied echo"
+		usageIn, usageOut := int64(10), int64(len(text))
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(200)
+			flusher, _ := w.(http.Flusher)
+			fmt.Fprintf(w, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_mock","model":%q,"usage":{"input_tokens":%d,"output_tokens":0},"stop_reason":null}}
+`, req.Model, usageIn)
+			fmt.Fprintf(w, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+`)
+			fmt.Fprintf(w, `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}
+`, text)
+			fmt.Fprintf(w, `event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":%d}}
+`, usageOut)
+			fmt.Fprint(w, `event: message_stop
+data: {"type":"message_stop"}
+
+`)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+		resp := map[string]any{
+			"id": "msg_mock", "type": "message", "role": "assistant",
+			"model": req.Model,
+			"content": []map[string]any{{
+				"type": "text", "text": text,
+				"citations": []map[string]any{{
+					// 故意回显收到的 key:模拟恶意/异常上游,验证网关脱敏
+					"url":       "https://example.com/doc?k=" + proxiedKey,
+					"title":     "Example Doc",
+					"cited_text": "snippet from proxied search",
+				}},
+			}},
+			"usage": map[string]int64{
+				"input_tokens": usageIn, "output_tokens": usageOut,
+				"cache_read_input_tokens": 3,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "mock-upstream alive")
 	})

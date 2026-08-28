@@ -637,7 +637,7 @@ func TestServeJSONDropsUntrustedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, 1, "m")
+	a.serveJSON(c, resp, 1, "m", nil)
 	for k := range w.Header() {
 		if strings.EqualFold(k, "Set-Cookie") || strings.EqualFold(k, "X-Upstream-Key") {
 			t.Fatalf("untrusted header leaked: %s", k)
@@ -812,7 +812,7 @@ func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		a := &API{DB: db}
-		a.serveStream(c, resp, usageID)
+		a.serveStream(c, resp, usageID, nil)
 		close(done)
 	}()
 	<-body.blocked // usage chunk read + backfilled; stream is now holding
@@ -1022,5 +1022,111 @@ func TestQuotaDeptBudgetAdminExempt(t *testing.T) {
 	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
+	}
+}
+
+// 上游回显官方 key 时,客户端响应(体+头,含 4xx 错误路径)必须脱敏。
+// 覆盖 chat 非流式/流式 + messages 非流式/流式四条透传路径。
+func TestRedactSecrets(t *testing.T) {
+	raw := []byte(`{"content":"key sk-abc123456789 leaked here"}`)
+	out := redactSecrets(raw, []string{"sk-abc123456789"})
+	if strings.Contains(string(out), "sk-abc123456789") {
+		t.Fatalf("secret not redacted: %s", out)
+	}
+	if !strings.Contains(string(out), "***") {
+		t.Fatalf("no replacement marker: %s", out)
+	}
+	// 短于阈值不替换(避免误伤正常内容)
+	short := redactSecrets([]byte("a tiny xyz"), []string{"tiny"})
+	if string(short) != "a tiny xyz" {
+		t.Fatalf("short secret must not be replaced: %s", short)
+	}
+	// 无匹配返回原 slice(零分配路径)
+	same := redactSecrets([]byte("no secrets here"), []string{"sk-abcdefgh"})
+	if string(same) != "no secrets here" {
+		t.Fatalf("unexpected mutate: %s", same)
+	}
+	// 头部值脱敏
+	if v := redactHeaderValue("x-echo: sk-aaabbbcccdd", []string{"sk-aaabbbcccdd"}); strings.Contains(v, "sk-aaabbbcccdd") {
+		t.Fatalf("header not redacted: %s", v)
+	}
+}
+
+func TestServeJSONRedactsUpstreamKeyEcho(t *testing.T) {
+	secret := "sk-upstream-secret-12345678"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Upstream-Echo", secret)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"content":"echo %s","usage":{"prompt_tokens":1,"completion_tokens":1}}`, secret)
+	}))
+	t.Cleanup(up.Close)
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	a := API{DB: db}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", nil)
+	resp, err := http.Get(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.serveJSON(c, resp, 1, "m", []string{secret})
+	body := w.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("secret leaked in body: %s", body)
+	}
+	if strings.Contains(w.Header().Get("X-Upstream-Echo"), secret) {
+		t.Fatalf("secret leaked in header: %s", w.Header().Get("X-Upstream-Echo"))
+	}
+}
+
+func TestServeStreamRedactsUpstreamKeyEcho(t *testing.T) {
+	secret := "sk-upstream-secret-12345678"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"echo %s\"}}]}\n\n", secret)
+		fmt.Fprintf(w, "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(up.Close)
+	var a API
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", nil)
+	resp, err := http.Get(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.serveStream(c, resp, 0, []string{secret})
+	body := w.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("secret leaked in stream: %s", body)
+	}
+	if !strings.Contains(body, "echo ***") {
+		t.Fatalf("replacement missing: %s", body)
+	}
+}
+
+func TestServeStreamRedactsErrorBody(t *testing.T) {
+	secret := "sk-upstream-secret-12345678"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, `{"error":{"message":"bad key %s"}}`, secret)
+	}))
+	t.Cleanup(up.Close)
+	var a API
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", nil)
+	resp, err := http.Get(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.serveStream(c, resp, 0, []string{secret})
+	body := w.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("secret leaked in error body: %s", body)
 	}
 }
