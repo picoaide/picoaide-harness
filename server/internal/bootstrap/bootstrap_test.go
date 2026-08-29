@@ -201,8 +201,10 @@ func TestBootstrapStrictDefault(t *testing.T) {
 }
 
 // TestBootstrapConnectors: 0042 连接器下发——enabled 连接器出现在
-// connectors[];禁用后不再下发;glitchtip 定义合成 BASE_URL/ORGANIZATION
-// defaultValue(取代客户端特判)。
+// connectors[];禁用后不再下发。0045 已把 GlitchTip 连接器下架(enabled=0),
+// 因此 bootstrap 只下发 moka + sales-easy, glitchtip 不在列表中
+// (错误上报走独立 Sentry DSN, 不依赖连接器);定义 defaultValue 注入
+// 逻辑保留,由 TestInjectGlitchTipDefaults 直接单测(重新启用场景仍可用)。
 func TestBootstrapConnectors(t *testing.T) {
 	r, db := setup(t)
 	u, _ := serverstore.GetUserByUsername(db, "alice")
@@ -210,43 +212,20 @@ func TestBootstrapConnectors(t *testing.T) {
 
 	_, out := getJSON(t, r, "/api/config/bootstrap", token)
 	conns := out["connectors"].([]any)
-	if len(conns) < 3 {
-		t.Fatalf("connectors = %d, want >= 3 (种子 moka+glitchtip+sales-easy)", len(conns))
+	if len(conns) < 2 {
+		t.Fatalf("connectors = %d, want >= 2 (种子 moka+sales-easy)", len(conns))
 	}
 	byID := map[string]map[string]any{}
 	for _, c := range conns {
 		m := c.(map[string]any)
 		byID[m["id"].(string)] = m
 	}
-	gt := byID["glitchtip"]
-	if gt == nil {
-		t.Fatalf("glitchtip missing")
+	// moka / sales-easy 在;glitchtip(0045 下架)不在。
+	if byID["moka"] == nil || byID["sales-easy"] == nil {
+		t.Fatalf("enabled seeds missing: %v", byID)
 	}
-	defStr := gt["definition"].(string)
-	if !strings.Contains(defStr, "GLITCHTIP_BASE_URL") {
-		t.Fatalf("glitchtip definition lacks tokenFields: %s", defStr)
-	}
-
-	// 服务端配置 GlitchTip 地址/组织 → 定义 JSON 合成 defaultValue。
-	if err := serverstore.SetSetting(db, "web.glitchtip_base_url", "https://gt.example.com"); err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.SetSetting(db, "web.glitchtip_organization", "picoaide"); err != nil {
-		t.Fatal(err)
-	}
-	_, out = getJSON(t, r, "/api/config/bootstrap", token)
-	conns = out["connectors"].([]any)
-	for _, c := range conns {
-		m := c.(map[string]any)
-		if m["id"] == "glitchtip" {
-			defStr = m["definition"].(string)
-		}
-	}
-	if !strings.Contains(defStr, `"defaultValue":"https://gt.example.com"`) {
-		t.Fatalf("glitchtip definition lacks baseURL defaultValue: %s", defStr)
-	}
-	if !strings.Contains(defStr, `"defaultValue":"picoaide"`) {
-		t.Fatalf("glitchtip definition lacks org defaultValue: %s", defStr)
+	if byID["glitchtip"] != nil {
+		t.Fatalf("disabled glitchtip still in connectors")
 	}
 
 	// 禁用 moka → 不再出现。
@@ -260,5 +239,33 @@ func TestBootstrapConnectors(t *testing.T) {
 		if m["id"] == "moka" {
 			t.Fatalf("disabled moka still in connectors")
 		}
+	}
+}
+
+// TestInjectGlitchTipDefaults: 服务端配置的 GlitchTip 地址/组织合成进
+// tokenFields 的 defaultValue(0045 下架后仍保留该注入逻辑,重新启用
+// GlitchTip 连接器时客户端表单自动预填)。
+func TestInjectGlitchTipDefaults(t *testing.T) {
+	defJSON := `{"tokenFields":[{"key":"GLITCHTIP_BASE_URL","label":"服务地址","type":"text","required":true},{"key":"GLITCHTIP_TOKEN","label":"Token","type":"password","required":true},{"key":"GLITCHTIP_ORGANIZATION","label":"组织 slug","type":"text","required":true}],"mcp":[{"serverName":"glitchtip"}]}`
+
+	// 空配置 → 原样返回。
+	if out := injectGlitchTipDefaults(defJSON, "", ""); out != defJSON {
+		t.Fatalf("no-op expected, got %s", out)
+	}
+	// 地址+组织 → 两个 defaultValue。
+	out := injectGlitchTipDefaults(defJSON, "https://gt.example.com", "picoaide")
+	for _, want := range []string{`"defaultValue":"https://gt.example.com"`, `"defaultValue":"picoaide"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %s in %s", want, out)
+		}
+	}
+	// 只配地址 → 只有 BASE_URL 有 defaultValue, 组织无默认值。
+	out = injectGlitchTipDefaults(defJSON, "https://gt.example.com", "")
+	if !strings.Contains(out, `"defaultValue":"https://gt.example.com"`) || strings.Contains(out, `"defaultValue":"picoaide"`) {
+		t.Fatalf("partial inject wrong: %s", out)
+	}
+	// 非法 JSON → 原样返回。
+	if out := injectGlitchTipDefaults("{not json", "https://x", "y"); out != "{not json" {
+		t.Fatalf("invalid json expected passthrough, got %s", out)
 	}
 }
