@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,10 @@ type oidcFlow struct {
 	verifier  string
 	nonce     string
 	createdAt time.Time
+	// returnServer:发起 login 的客户端填写的服务端地址(深链回跳用)。
+	// 浏览器跳转完成后,桌面客户端深链需要知道 token 属于哪个服务端;
+	// 为空 = 未指定(默认深链只带 token,由客户端用登录页 server 填充)。
+	returnServer string
 }
 
 // oidcFlowTTL bounds how long a flow may sit before the callback arrives.
@@ -86,8 +91,10 @@ func (p *OIDCProvider) Configure(cfg map[string]string) error {
 }
 
 // AuthURL starts a flow for the given state and returns the authorization
-// URL carrying state, PKCE S256 challenge and nonce.
-func (p *OIDCProvider) AuthURL(state string) (string, error) {
+// URL carrying state, PKCE S256 challenge and nonce. `returnServer` (from the
+// login page's `?server=` param) is bound to the flow so the callback deep
+// link can carry it back to the initiating desktop client.
+func (p *OIDCProvider) AuthURL(state, returnServer string) (string, error) {
 	if state == "" {
 		return "", errors.New("oidc: empty state")
 	}
@@ -108,7 +115,7 @@ func (p *OIDCProvider) AuthURL(state string) (string, error) {
 		}
 		delete(p.flows, oldest)
 	}
-	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce, createdAt: time.Now()}
+	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce, createdAt: time.Now(), returnServer: returnServer}
 	p.mu.Unlock()
 	return p.cfg.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
@@ -200,6 +207,8 @@ func (a *API) handleOIDCLogin(c *gin.Context) {
 }
 
 // handleOIDCLoginWith runs the login flow for a specific browser provider.
+// `?server=<url>` records the initiating client's server address, carried in
+// the callback deep link so the desktop client knows which server to attach.
 func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		state, err := randomHex(16)
@@ -207,7 +216,22 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "状态生成失败")
 			return
 		}
-		authURL, err := p.AuthURL(state)
+		returnServer := strings.TrimSpace(c.Query("server"))
+		if returnServer != "" {
+			// 校验:仅接受 https 或 http 回环(与客户端 assertServerURLAllowed 同规),
+			// 防止不可信 server 被带进深链重定向。
+			u, perr := url.Parse(returnServer)
+			if perr != nil {
+				writeError(c, http.StatusBadRequest, "VALIDATION", "server 参数格式错误")
+				return
+			}
+			loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "[::1]"
+			if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
+				writeError(c, http.StatusBadRequest, "VALIDATION", "server 必须为 https(或 http 回环)")
+				return
+			}
+		}
+		authURL, err := p.AuthURL(state, returnServer)
 		if err != nil {
 			writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
 			return
@@ -257,6 +281,8 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		}
 		// 消费 cookie:流程单次有效
 		http.SetCookie(c.Writer, &http.Cookie{Name: oidcStateCookieName + "_" + name, Value: "", Path: "/api/auth/" + name, MaxAge: -1})
+		// 先取出 returnServer(HandleCallback 会删除 state,state 单次使用)
+		rs := returnServerOf(p, state)
 		ui, err := p.HandleCallback(code, state)
 		if errors.Is(err, errOIDCState) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
@@ -280,8 +306,38 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
 			return
 		}
-		c.Redirect(http.StatusFound, fmt.Sprintf("picoaide://auth?token=%s", url.QueryEscape(token)))
+		// 桌面客户端深链:携带 token + 发起 server + username(客户端拿到
+		// 后直接构造 session,无需再调 /api/auth/me)。server 为 login 时
+		// 记录的 returnServer;为空时客户端用其登录页输入的 server 兜底。
+		ret := fmt.Sprintf("picoaide://auth?token=%s", url.QueryEscape(token))
+		if rs != "" {
+			ret += fmt.Sprintf("&server=%s", url.QueryEscape(rs))
+		}
+		if ui.Username != "" {
+			ret += fmt.Sprintf("&user=%s", url.QueryEscape(ui.Username))
+		}
+		c.Redirect(http.StatusFound, ret)
 	}
+}
+
+// returnServerOf 从具体 provider 类型读取该 state 绑定的 returnServer;
+// 非 OIDCProvider 实现(测试桩)返回空串。
+func returnServerOf(p BrowserProvider, state string) string {
+	if o, ok := p.(*OIDCProvider); ok {
+		return o.ReturnServer(state)
+	}
+	return ""
+}
+
+// ReturnServer 返回该 state 绑定的发起方服务端地址(login 时 ?server= 记录)。
+func (p *OIDCProvider) ReturnServer(state string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f := p.flows[state]
+	if f == nil {
+		return ""
+	}
+	return f.returnServer
 }
 
 func randomHex(n int) (string, error) {

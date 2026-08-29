@@ -94,6 +94,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private diagnosticExport: Promise<void> | undefined
   private directoryPickTask: Promise<string | null> | undefined
   private rendererBootReported = false
+  /** Deep-link handler installed by the desktop-shell plugin (auth callback). */
+  private deepLinkHandler: ((url: string) => void) | undefined
+  /** Links received while no handler was installed yet (startup race). */
+  private readonly pendingDeepLinks: string[] = []
 
   /** Product name for native menus, trays, and update notifications (falls back while unscheduled). */
   private productName(): string {
@@ -286,6 +290,39 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** @inheritdoc */
   prepareToQuit(): void {
     this.quitting = true
+  }
+
+  /** @inheritdoc */
+  setDeepLinkHandler(handler: (url: string) => void): void {
+    this.deepLinkHandler = handler
+    // Flush links that arrived before the handler was installed:
+    // macOS open-url can fire before app.whenReady; second-instance argv
+    // arrives while the first instance is still booting. Do not drop them.
+    for (const url of this.pendingDeepLinks.splice(0)) {
+      try {
+        handler(url)
+      } catch (cause) {
+        this.logError(`dsh-plugin-desktop: deep link handler failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
+  }
+
+  /**
+   * Receive a `picoaide://` deep link: deliver to the installed handler, or
+   * queue it when the profile tree has not mounted yet.
+   */
+  receiveDeepLink(url: string): void {
+    if (this.deepLinkHandler !== undefined) {
+      try {
+        this.deepLinkHandler(url)
+      } catch (cause) {
+        this.logError(`dsh-plugin-desktop: deep link handler failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      return
+    }
+    // Startup race: profile plugins (enterprise deep-link listener) are not
+    // mounted yet. Keep the link; setDeepLinkHandler flushes on install.
+    this.pendingDeepLinks.push(url)
   }
 
   private async showRendererBootRecovery(report: Extract<RendererBootReport, { status: 'failed' }>): Promise<void> {
