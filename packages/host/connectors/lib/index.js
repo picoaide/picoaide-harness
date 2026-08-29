@@ -595,6 +595,7 @@ function apply(ctx, options = {}) {
 				connectedAt: Date.now(),
 				error: void 0
 			});
+			pendingRequests.delete(id);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const unauthorized = message.includes("授权") || message.includes("token") || message.includes("登录");
@@ -607,6 +608,7 @@ function apply(ctx, options = {}) {
 				status: unauthorized ? "unauthorized" : "error",
 				error: message
 			});
+			pendingRequests.delete(id);
 		} finally {
 			pendingFlows.delete(id);
 		}

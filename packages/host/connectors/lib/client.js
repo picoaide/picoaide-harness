@@ -201,32 +201,40 @@ window.__ModuleLoader__.load({
 			const [formValues, setFormValues] = (0, react.useState)({});
 			const [error, setError] = (0, react.useState)(null);
 			const [busy, setBusy] = (0, react.useState)(null);
-			const openedUrl = (0, react.useRef)(null);
 			const activePopup = (0, react.useRef)(null);
 			(0, react.useEffect)(() => {
-				if (entry.request?.authorizeUrl && openedUrl.current !== entry.request.authorizeUrl) {
-					openedUrl.current = entry.request.authorizeUrl;
-					const popup = window.open(entry.request.authorizeUrl, "_blank");
-					activePopup.current = popup;
-					if (popup) {
-						const timer = window.setInterval(() => {
-							if (popup.closed) {
-								window.clearInterval(timer);
-								activePopup.current = null;
-								fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: "POST" }).then(() => onChanged()).catch(() => {});
-							}
-						}, 500);
-						const grace = window.setTimeout(() => window.clearInterval(timer), 31e4);
-						return () => {
+				if (entry.status !== "connecting") return;
+				const url = entry.request?.authorizeUrl;
+				if (!url) return;
+				let lastOpened = null;
+				try {
+					lastOpened = window.sessionStorage.getItem(`pico-connector-opened:${entry.id}`);
+				} catch {}
+				if (lastOpened === url) return;
+				try {
+					window.sessionStorage.setItem(`pico-connector-opened:${entry.id}`, url);
+				} catch {}
+				const popup = window.open(url, "_blank");
+				activePopup.current = popup;
+				if (popup) {
+					const timer = window.setInterval(() => {
+						if (popup.closed) {
 							window.clearInterval(timer);
-							window.clearTimeout(grace);
-							if (activePopup.current === popup) activePopup.current = null;
-						};
-					}
+							activePopup.current = null;
+							fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: "POST" }).then(() => onChanged()).catch(() => {});
+						}
+					}, 500);
+					const grace = window.setTimeout(() => window.clearInterval(timer), 31e4);
+					return () => {
+						window.clearInterval(timer);
+						window.clearTimeout(grace);
+						if (activePopup.current === popup) activePopup.current = null;
+					};
 				}
 			}, [
 				entry.request?.authorizeUrl,
 				entry.id,
+				entry.status,
 				onChanged
 			]);
 			const connect = (0, react.useCallback)(async () => {
