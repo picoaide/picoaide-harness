@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { ApiError, AuthError, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
+import { ApiError, AuthError, assertServerURLAllowed, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   installSkillArchive,
@@ -62,21 +62,117 @@ const LOGIN_HTML = `<!DOCTYPE html>
   button:disabled { opacity: 0.6; cursor: default; }
   .err { color: var(--err); font-size: 13px; min-height: 16px; }
   h1 { font-size: 20px; margin: 0 0 8px; }
+  .methods { display: flex; flex-wrap: wrap; gap: 6px; }
+  .method { background: transparent; border: 1px solid var(--border); color: var(--fg); font-size: 12px; padding: 6px 10px; }
+  .method.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .method.disabled { opacity: 0.5; cursor: not-allowed; }
+  .browser { background: #2563eb; }
+  .hint { color: var(--fg); opacity: 0.7; font-size: 12px; }
+  .wrap { width: 320px; }
 </style>
 </head>
 <body>
-<form id="f">
+<div class="wrap">
   <h1>PicoAide 企业登录</h1>
-  <input id="server" placeholder="服务端地址 (https://...)" value="__DEFAULT_SERVER__">
-  <input id="username" placeholder="账号" autocomplete="username">
-  <input id="password" type="password" placeholder="密码" autocomplete="current-password">
-  <button type="submit" id="btn">登录</button>
-  <div class="err" id="err"></div>
-</form>
+  <form id="f">
+    <input id="server" placeholder="服务端地址 (https://...)" value="__DEFAULT_SERVER__">
+    <div id="methods" class="methods"></div>
+    <input id="username" placeholder="账号" autocomplete="username">
+    <div id="pw-wrap"><input id="password" type="password" placeholder="密码" autocomplete="current-password"></div>
+    <button type="submit" id="btn">登录</button>
+    <button type="button" id="browser-btn" class="browser" style="display:none">使用浏览器登录</button>
+    <div class="hint" id="waiting" style="display:none">请在弹出的浏览器窗口中完成授权，等待授权完成后此处会自动继续…</div>
+    <div class="err" id="err"></div>
+  </form>
+</div>
 <script>
   const f = document.getElementById('f')
   const err = document.getElementById('err')
   const btn = document.getElementById('btn')
+  const browserBtn = document.getElementById('browser-btn')
+  const methodsBox = document.getElementById('methods')
+  const waiting = document.getElementById('waiting')
+  let currentMethod = 'local'
+  let pollTimer = null
+
+  // ---- 方法选择器: 拉取服务端启用的认证方式(local/ldap/openid/oidc) ----
+  async function loadMethods() {
+    const server = document.getElementById('server').value.trim()
+    if (!server) { methodsBox.innerHTML = ''; renderMethodButtons([]); return }
+    try {
+      const r = await fetch('/api/pico/auth/methods?server=' + encodeURIComponent(server))
+      const data = await r.json().catch(() => ({}))
+      renderMethodButtons(data.methods || [{ name: 'local', configured: true }])
+    } catch { renderMethodButtons([{ name: 'local', configured: true }]) }
+  }
+  function renderMethodButtons(methods) {
+    if (!methods || methods.length <= 1) {
+      methodsBox.innerHTML = ''
+      currentMethod = 'local'
+      return
+    }
+    methodsBox.innerHTML = methods.map(function (m) {
+      const label = { local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' }[m.name] || m.name
+      const configured = m.configured !== false
+      return '<button type="button" data-method="' + m.name + '" class="method' +
+        (m.name === currentMethod ? ' active' : '') +
+        (configured ? '' : ' disabled') + '"' +
+        (configured ? '' : ' title="该方式未配置"') + '>' + label +
+        (configured ? '' : ' (未配置)') + '</button>'
+    }).join('')
+    methodsBox.querySelectorAll('.method').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (b.classList.contains('disabled')) return
+        currentMethod = b.dataset.method
+        methodsBox.querySelectorAll('.method').forEach(function (x) { x.classList.remove('active') })
+        b.classList.add('active')
+        updateFields()
+      })
+    })
+  }
+  function updateFields() {
+    const isPassword = currentMethod === 'local' || currentMethod === 'ldap'
+    document.getElementById('username').style.display = isPassword ? '' : 'none'
+    document.getElementById('pw-wrap').style.display = isPassword ? '' : 'none'
+    if (isPassword) document.getElementById('username').placeholder = currentMethod === 'ldap' ? 'LDAP 账号' : '账号'
+    document.getElementById('btn').style.display = isPassword ? '' : 'none'
+    browserBtn.style.display = isPassword ? 'none' : 'block'
+    waiting.style.display = 'none'
+  }
+
+  /**** 轮询登录状态: 用户去浏览器授权, 深链回桌面后 setSession, 此处检测到即刷新 ****/
+  function startPoll() {
+    if (pollTimer) clearInterval(pollTimer)
+    pollTimer = setInterval(async function () {
+      try {
+        const r = await fetch('/api/pico/auth/state')
+        if (!r.ok) return
+        const d = await r.json().catch(() => ({}))
+        if (d.loggedIn === true) {
+          clearInterval(pollTimer)
+          location.replace('/' + location.search)
+        }
+      } catch {}
+    }, 1500)
+  }
+
+  // ---- 浏览器方式(OpenID/OIDC): 打开授权页, 轮询等待深链回跳 ----
+  async function browserLogin() {
+    const server = document.getElementById('server').value.trim()
+    if (!server) { err.textContent = '请先填写服务端地址'; return }
+    err.textContent = ''
+    waiting.style.display = 'block'
+    browserBtn.disabled = true
+    // 打开授权页: 服务端 /api/auth/<name>/login?server=<url>
+    const name = currentMethod
+    window.open(server.replace(/\/$/, '') + '/api/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
+    startPoll()
+  }
+
+  browserBtn.addEventListener('click', browserLogin)
+  // 服务端地址变化 → 重新拉取方法列表
+  document.getElementById('server').addEventListener('change', loadMethods)
+
   f.addEventListener('submit', async (e) => {
     e.preventDefault()
     err.textContent = ''
@@ -122,6 +218,8 @@ const LOGIN_HTML = `<!DOCTYPE html>
     if (code.includes('disabled') || code.includes('inactive')) return '账号已被禁用，请联系管理员'
     return raw
   }
+  // 初始化: 默认 server 时立即拉取方法
+  loadMethods()
 </script>
 </body>
 </html>`
@@ -333,6 +431,32 @@ export function apply(ctx: Context, config: Config): void {
           }
           ctx.picoSession.clear()
           json(res, 200, { ok: true })
+        },
+      }),
+
+      ctx.webServer.register({
+        kind: 'exact', path: '/api/pico/auth/methods',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
+          // 登录页(未登录)需要显示启用方式:用登录页填的 server 地址,
+          // 或已有 session 的 server。服务端该端点为公开端(无需 token)。
+          const s = session()
+          let serverParam = ''
+          try {
+            const q = new URL(req.url ?? '/', 'http://localhost').searchParams
+            serverParam = q.get('server') ?? ''
+          } catch { /* ignore malformed query */ }
+          const serverURL: string = serverParam || s?.serverURL || ''
+          if (serverURL === '') return json(res, 200, { methods: [{ name: 'local', configured: true }] })
+          try {
+            assertServerURLAllowed(serverURL)
+            const data = await fetchJSON(serverURL, '/api/admin/auth/methods')
+            json(res, 200, data)
+          } catch {
+            // 服务端不可达:降级只显示 local(恒启用),登录页仍可提交密码。
+            json(res, 200, { methods: [{ name: 'local', configured: true }] })
+          }
         },
       }),
 

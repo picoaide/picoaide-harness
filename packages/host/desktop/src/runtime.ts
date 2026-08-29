@@ -211,6 +211,14 @@ export interface DesktopRuntime {
 
   /** Allow the final native quit after the Cordis tree has disposed. */
   prepareToQuit(): void
+
+  /**
+   * Install the handler for `picoaide://` deep links (auth callback etc.).
+   * The launcher captures protocol invocations via `open-url` (macOS),
+   * `second-instance`/argv (Windows/Linux); already-received links are
+   * delivered to the handler when it is installed.
+   */
+  setDeepLinkHandler(handler: (url: string) => void): void
 }
 
 declare module '@deepseek-ai/cordis' {

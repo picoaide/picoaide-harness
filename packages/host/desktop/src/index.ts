@@ -36,6 +36,14 @@ import type {} from './runtime.ts'
 /** Stable Cordis plugin name. */
 export const name = 'desktop-shell'
 
+// picoaide:// deep-link event forwarded by the desktop shell (auth callback);
+// the enterprise plugin listens and completes OIDC/OpenID login.
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/deep-link'(url: string): void
+  }
+}
+
 /** Services required before the shell can register its renderer generation. */
 /** Services required by the desktop shell; `desktopRuntime` is probed, not required. */
 export const inject = ['webServer', 'webRuntime', 'appExit', 'settings']
@@ -245,6 +253,12 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('settings/updated', (namespace, next) => {
     if (namespace !== UI_LOCALE_SETTINGS_NAMESPACE) return
     runtime.setLocalePreference((next as LocaleSettings).preference)
+  })
+  // picoaide:// deep links (auth callback): forward to Host consumers.
+  // The enterprise plugin listens for 'pico/deep-link' and completes the
+  // OIDC/OpenID login by storing the token from the link.
+  runtime.setDeepLinkHandler(url => {
+    ctx.emit('pico/deep-link', url)
   })
   ctx.effect(
     () => runtime.schedule({

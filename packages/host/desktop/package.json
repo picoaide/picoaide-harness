@@ -259,6 +259,14 @@
   "build": {
     "appId": "ai.deepseek.dsh.desktop",
     "productName": "PicoAide Harness",
+    "protocols": [
+      {
+        "name": "PicoAide Harness Deep Link",
+        "schemes": [
+          "picoaide"
+        ]
+      }
+    ],
     "asar": {
       "smartUnpack": false
     },

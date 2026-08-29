@@ -22,7 +22,10 @@ type PasswordProvider interface {
 // BrowserProvider authenticates via browser redirect flow (oidc).
 type BrowserProvider interface {
 	Name() string
-	AuthURL(state string) (string, error)
+	// AuthURL starts the browser redirect. `returnServer` is the client's
+	// server address recorded from the login page (callback deep link回跳用);
+	// 实现可忽略,接口统一签名。
+	AuthURL(state, returnServer string) (string, error)
 	HandleCallback(code, state string) (UserInfo, error)
 	Configure(cfg map[string]string) error
 }
