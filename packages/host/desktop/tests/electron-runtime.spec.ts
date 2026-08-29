@@ -890,4 +890,34 @@ describe('Electron compatibility runtime', () => {
     runtime.setThemeSource('dark')
     expect(electron.nativeTheme.themeSource).toBe('system')
   })
+
+  it('queues picoaide:// deep links before the handler is installed, then flushes', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const links: string[] = []
+    // 未安装 handler 时收到的链接入队
+    runtime.receiveDeepLink('picoaide://auth?token=early')
+    runtime.receiveDeepLink('picoaide://auth?token=early2')
+    expect(links).toEqual([])
+    // 安装 handler → 冲刷全部排队链接
+    runtime.setDeepLinkHandler((url) => links.push(url))
+    expect(links).toEqual(['picoaide://auth?token=early', 'picoaide://auth?token=early2'])
+    // 后续链接直接投递
+    runtime.receiveDeepLink('picoaide://auth?token=later')
+    expect(links).toContain('picoaide://auth?token=later')
+  })
+
+  it('does not re-deliver a deep link after the handler is replaced', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const first: string[] = []
+    const second: string[] = []
+    runtime.setDeepLinkHandler((url) => first.push(url))
+    runtime.receiveDeepLink('picoaide://auth?token=a')
+    expect(first).toEqual(['picoaide://auth?token=a'])
+    runtime.setDeepLinkHandler((url) => second.push(url))
+    runtime.receiveDeepLink('picoaide://auth?token=b')
+    expect(first).toEqual(['picoaide://auth?token=a'])
+    expect(second).toEqual(['picoaide://auth?token=b'])
+  })
 })
