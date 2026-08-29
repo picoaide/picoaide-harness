@@ -98,6 +98,7 @@ try {
     setThemeSource(source) { nativeThemeSource = source },
     async requestRestart() {},
     prepareToQuit() {},
+    setDeepLinkHandler() {},
   }
   ctx = await boot(
     BIN_NAME,
