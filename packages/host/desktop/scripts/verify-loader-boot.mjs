@@ -73,6 +73,7 @@ try {
     show() {},
     async requestRestart() {},
     prepareToQuit() {},
+    setDeepLinkHandler() {},
   }
   ctx = await boot(
     BIN_NAME,
