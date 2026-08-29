@@ -46,6 +46,7 @@ interface PluginHarness {
   notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
   notifyLocale(preference: LocaleId | undefined): void
   notifyTheme(preference: ThemePreference): void
+  deepLinkHandler(): ((url: string) => void) | undefined
 }
 
 function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginHarness {
@@ -61,6 +62,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const settingsUpdated = new Set<(namespace: unknown, next: unknown) => void>()
   let localePreference: LocaleId | undefined
   let themePreference: ThemePreference = 'system'
+  let deepLinkHandler: ((url: string) => void) | undefined = undefined
   const runtime: DesktopRuntime = {
     platform,
     locale: 'en',
@@ -89,6 +91,9 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     setThemeSource,
     requestRestart: restart,
     prepareToQuit: () => {},
+    setDeepLinkHandler: (handler) => {
+      deepLinkHandler = handler
+    },
   }
   const settings = {
     get: vi.fn((namespace: unknown) => {
@@ -145,6 +150,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       themePreference = preference
       for (const listener of settingsUpdated) listener(settingsNamespace('ui-theme'), { preference })
     },
+    deepLinkHandler: () => deepLinkHandler,
   }
 }
 

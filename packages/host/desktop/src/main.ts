@@ -198,8 +198,39 @@ async function start(): Promise<void> {
   )
   removeShutdownRequests = installShutdownRequests(process, app, requestQuit)
 
-  app.on('second-instance', () => { runtime.show() })
+  app.on('second-instance', (_event, argv) => {
+    runtime.show()
+    // Windows/Linux: the second instance carries the picoaide:// link in argv.
+    for (const arg of argv) {
+      if (arg.startsWith('picoaide://')) runtime.receiveDeepLink(arg)
+    }
+  })
+  // macOS: deep links are delivered through open-url (may fire before ready).
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    if (url.startsWith('picoaide://')) runtime.receiveDeepLink(url)
+  })
   await app.whenReady()
+  // Protocol registration: `picoaide://` deep links open (or focus) the app.
+  // Best-effort — Linux needs a packaged .desktop entry, dev builds hint only.
+  try {
+    if (process.platform === 'darwin') {
+      app.setAsDefaultProtocolClient('picoaide')
+    } else if (process.platform === 'win32') {
+      app.setAsDefaultProtocolClient('picoaide', process.execPath, [])
+    } else {
+      // Linux: the packaged AppImage/deb registers via electron-builder
+      // `protocols`; attempting setAsDefaultProtocolClient without a desktop
+      // entry is a no-op — register only when packaged with argv hints.
+      if (app.isPackaged) app.setAsDefaultProtocolClient('picoaide', process.execPath, [])
+    }
+  } catch (cause) {
+    electronLogger.error(`${BIN_NAME}: protocol registration failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+  // Cold-start argv may already carry a deep link (launched from a browser).
+  for (const arg of process.argv) {
+    if (arg.startsWith('picoaide://')) runtime.receiveDeepLink(arg)
+  }
   if (process.platform === 'win32') app.setAppUserModelId('ai.deepseek.dsh.desktop')
   if (app.isPackaged && process.cwd() === '/') process.chdir(app.getPath('home'))
   const shellEnvironmentResolution = await resolveDesktopShellEnvironment({

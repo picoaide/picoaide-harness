@@ -15,6 +15,8 @@ function stubCtx(): { ctx: Context; emit: ReturnType<typeof vi.fn> } {
     ctx: {
       emit,
       reflect: { provide: vi.fn() },
+      on: vi.fn(() => () => {}), // 2026-09: deep-link listener 安装需要
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     } as unknown as Context,
     emit,
   }
