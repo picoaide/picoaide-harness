@@ -341,6 +341,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       await store.updateCredential(id, { ...current, ...patch })
       await registerMcp(def)
       setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined })
+      // The flow reached a terminal success: the authorize URL in
+      // pendingRequests is stale (the auth page was already opened and the
+      // code exchanged). Leaving it behind makes every later panel open
+      // re-trigger `window.open(authorizeUrl)` in the client (the card's
+      // auto-open guard is per-mount; a reopened panel remounts the card and
+      // sees the stale URL as "new"). Drop it so terminal states stay clean.
+      pendingRequests.delete(id)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const unauthorized = message.includes('授权') || message.includes('token') || message.includes('登录')
@@ -351,6 +358,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       } else {
         setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message })
       }
+      // Terminal failure likewise invalidates the pending authorize URL.
+      pendingRequests.delete(id)
     } finally {
       pendingFlows.delete(id)
     }
