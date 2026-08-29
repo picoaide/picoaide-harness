@@ -163,15 +163,19 @@ const LOGIN_HTML = `<!DOCTYPE html>
     err.textContent = ''
     waiting.style.display = 'block'
     browserBtn.disabled = true
-    // 打开授权页: 服务端 /api/auth/<name>/login?server=<url>
+    // 打开授权页: 服务端 /api/auth/<name>/login?server=<url>。
+    // 注意: LOGIN_HTML 是 TS 模板字符串——正则里的反斜杠+斜杠会被转义成
+    // 斜杠,输出空正则加注释导致 SyntaxError。此处用字符串切片去尾斜杠。
     const name = currentMethod
-    window.open(server.replace(/\/$/, '') + '/api/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
+    const base = server.endsWith('/') ? server.slice(0, -1) : server
+    window.open(base + '/api/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
     startPoll()
   }
 
   browserBtn.addEventListener('click', browserLogin)
-  // 服务端地址变化 → 重新拉取方法列表
-  document.getElementById('server').addEventListener('change', loadMethods)
+  // 服务端地址变化 → 重新拉取方法列表(input 事件: 用户输入即触发,
+  // E2E 与真实输入均不依赖 blur/change)
+  document.getElementById('server').addEventListener('input', loadMethods)
 
   f.addEventListener('submit', async (e) => {
     e.preventDefault()
