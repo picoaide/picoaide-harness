@@ -126,7 +126,6 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   const [formValues, setFormValues] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'connect' | 'submit' | 'disconnect' | null>(null)
-  const openedUrl = useRef<string | null>(null)
   const activePopup = useRef<Window | null>(null)
 
   // The authorize URL is produced asynchronously by the flow; open it once
@@ -138,33 +137,47 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   // is detected by polling `popup.closed` (the popup is an external site, so
   // no script can be injected to signal closure); the close calls the same
   // cancel endpoint the cancel button uses, which aborts the host flow.
+  // 修复 2026-09-01:自动打开的守卫是「本页面会话级」(sessionStorage 按连接器
+  // id 记录最后一次自动打开的授权 URL),不是组件实例级。此前关闭面板再打开
+  // (卡片重挂载)会把宿主端仍挂起的 authorizeUrl 当成「新 URL」再次
+  // window.open —— 直接跳到授权页;已连接/登录后重开面板同样触发。现在
+  // 同一 URL 只会自动打开一次,重新打开面板只展示「点击打开授权页」链接;
+  // 且仅 status==='connecting' 时自动打开(connected/error 不再可能跳转)。
   useEffect(() => {
-    if (entry.request?.authorizeUrl && openedUrl.current !== entry.request.authorizeUrl) {
-      openedUrl.current = entry.request.authorizeUrl
-      const popup = window.open(entry.request.authorizeUrl, '_blank')
-      activePopup.current = popup
-      if (popup) {
-        const timer = window.setInterval(() => {
-          if (popup.closed) {
-            window.clearInterval(timer)
-            activePopup.current = null
-            void fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: 'POST' })
-              .then(() => onChanged())
-              .catch(() => {})
-          }
-        }, 500)
-        const grace = window.setTimeout(() => window.clearInterval(timer), 5 * 60 * 1000 + 10_000)
-        // 审计 2026-08-25 P2-A1:此前无 cleanup——组件卸载(关闭连接器面板)
-        // 后定时器仍每 500ms 轮询 popup.closed 并 POST /cancel 至多 5 分钟,
-        // 泄漏网络/内存。卸载时立即清除。
-        return () => {
+    if (entry.status !== 'connecting') return
+    const url = entry.request?.authorizeUrl
+    if (!url) return
+    let lastOpened: string | null = null
+    try {
+      lastOpened = window.sessionStorage.getItem(`pico-connector-opened:${entry.id}`)
+    } catch { /* storage unavailable (private mode) — fall back to per-mount ref below */ }
+    if (lastOpened === url) return
+    try {
+      window.sessionStorage.setItem(`pico-connector-opened:${entry.id}`, url)
+    } catch { /* storage unavailable */ }
+    const popup = window.open(url, '_blank')
+    activePopup.current = popup
+    if (popup) {
+      const timer = window.setInterval(() => {
+        if (popup.closed) {
           window.clearInterval(timer)
-          window.clearTimeout(grace)
-          if (activePopup.current === popup) activePopup.current = null
+          activePopup.current = null
+          void fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: 'POST' })
+            .then(() => onChanged())
+            .catch(() => {})
         }
+      }, 500)
+      const grace = window.setTimeout(() => window.clearInterval(timer), 5 * 60 * 1000 + 10_000)
+      // 审计 2026-08-25 P2-A1:此前无 cleanup——组件卸载(关闭连接器面板)
+      // 后定时器仍每 500ms 轮询 popup.closed 并 POST /cancel 至多 5 分钟,
+      // 泄漏网络/内存。卸载时立即清除。
+      return () => {
+        window.clearInterval(timer)
+        window.clearTimeout(grace)
+        if (activePopup.current === popup) activePopup.current = null
       }
     }
-  }, [entry.request?.authorizeUrl, entry.id, onChanged])
+  }, [entry.request?.authorizeUrl, entry.id, entry.status, onChanged])
 
   const connect = useCallback(async (): Promise<void> => {
     if (busy !== null) return
