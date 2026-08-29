@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { Session } from './server-connector/config.ts'
 import { loadElectronModule } from './server-connector/electron.ts'
 import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
+import { installDeepLinkListener } from './deep-link.ts'
 
 /** Session token file permissions: owner read/write only. */
 const TOKEN_FILE_MODE = 0o600
@@ -63,6 +64,12 @@ export default class SessionService extends Service {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'picoSession')
     this.tokenFile = config.tokenFile ?? defaultTokenFile()
+    // picoaide:// deep-link auth (OIDC/OpenID callback): store the session
+    // when a valid link arrives. Emits pico/session-changed → auth-gate
+    // reloads into the app (login page poll sees loggedIn).
+    installDeepLinkListener(ctx, (session) => {
+      this.setSession(session)
+    })
     void this.restore().finally(() => { this.restoreDone = true })
   }
 

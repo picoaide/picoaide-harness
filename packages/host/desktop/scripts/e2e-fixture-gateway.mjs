@@ -8,6 +8,11 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ token: 'mock-token-123', user: { username: 'admin' } }))
     return
   }
+  // 2026-09 客户端登录页方法选择器: 返回启用的认证方式(local 恒启用)。
+  if (url.pathname === '/api/admin/auth/methods') {
+    res.end(JSON.stringify({ methods: [{ name: 'local', configured: true }] }))
+    return
+  }
   if (url.pathname === '/api/auth/me' || url.pathname === '/api/auth/session' || url.pathname === '/api/auth/usage') {
     res.end(JSON.stringify({
       username: 'admin', id: 1, department: 'dev', token: 'mock-token-123',

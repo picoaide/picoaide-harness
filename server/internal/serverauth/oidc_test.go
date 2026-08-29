@@ -210,7 +210,7 @@ func TestOIDCConfigure(t *testing.T) {
 func TestOIDCAuthURL(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
-	u, err := p.AuthURL("state-1")
+	u, err := p.AuthURL("state-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestOIDCHandleCallbackSuccess(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
 	state := "s1"
-	authURL, err := p.AuthURL(state)
+	authURL, err := p.AuthURL(state, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestOIDCHandleCallbackWrongCode(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
 	state := "s2"
-	authURL, err := p.AuthURL(state)
+	authURL, err := p.AuthURL(state, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestOIDCHandleCallbackNonceMismatch(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
 	state := "s3"
-	authURL, err := p.AuthURL(state)
+	authURL, err := p.AuthURL(state, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,9 @@ func TestOIDCRoutes(t *testing.T) {
 	if !strings.HasPrefix(loc, "picoaide://auth?token=") {
 		t.Fatalf("redirect = %q", loc)
 	}
-	token := strings.TrimPrefix(loc, "picoaide://auth?token=")
+	// 解析深链参数(2026-09):回调携带 token + server(发起方地址)+ user
+	dlink := urlParse(t, strings.Replace(loc, "picoaide://auth", "https://auth.example", 1))
+	token := dlink.Query().Get("token")
 	u, err := VerifyToken(db, token)
 	if err != nil {
 		t.Fatalf("issued token invalid: %v", err)
@@ -374,10 +376,11 @@ func TestOIDCRoutes(t *testing.T) {
 	}
 }
 
+// TestOIDCStateSingleUse: state 单次使用(回调后失效)。
 func TestOIDCStateSingleUse(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
-	authURL, err := p.AuthURL("s4")
+	authURL, err := p.AuthURL("s4", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +390,60 @@ func TestOIDCStateSingleUse(t *testing.T) {
 	}
 	if _, err := p.HandleCallback("x", "s4"); !errors.Is(err, errOIDCState) {
 		t.Fatalf("err = %v, want errOIDCState", err)
+	}
+}
+
+// TestOIDCLoginServerParam: `?server=` 发起方地址被深链带回(桌面客户端
+// 用它在回调后构造 session,不必再询问 server 地址)。
+func TestOIDCLoginServerParam(t *testing.T) {
+	idp := newFakeIDP(t)
+	p := newOIDCProvider(t, idp)
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	api := New(db)
+	api.RegisterOIDC(p)
+	r := gin.New()
+	api.RegisterRoutes(r)
+
+	// 带 server 参数发起 login
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/login?server=https%3A%2F%2Fserver.example.com", nil))
+	if w.Code != http.StatusFound {
+		t.Fatalf("login status = %d body=%s", w.Code, w.Body.String())
+	}
+	authURL := w.Header().Get("Location")
+	state := urlParse(t, authURL).Query().Get("state")
+	stateCookie := ""
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "picoaide_oidc_state_oidc" {
+			stateCookie = c.Value
+		}
+	}
+	if stateCookie == "" {
+		t.Fatal("missing state cookie")
+	}
+	code := authorize(t, idp, authURL)
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest("GET",
+		"/api/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state_oidc", Value: stateCookie})
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	dlink := urlParse(t, strings.Replace(loc, "picoaide://auth", "https://auth.example", 1))
+	if got := dlink.Query().Get("server"); got != "https://server.example.com" {
+		t.Fatalf("deep link server = %q, want server.example.com", got)
+	}
+	if got := dlink.Query().Get("user"); got != "alice" {
+		t.Fatalf("deep link user = %q, want alice", got)
+	}
+	// 非法 server 参数 → 400
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/login?server=ftp%3A%2F%2Fbad.example.com", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad server param = %d, want 400", w.Code)
 	}
 }
 
@@ -402,7 +459,7 @@ func TestOIDCExchangeTimeout(t *testing.T) {
 	defer func() { oidcExchangeTimeout = prev }()
 
 	state := "s-timeout"
-	authURL, err := p.AuthURL(state)
+	authURL, err := p.AuthURL(state, "")
 	if err != nil {
 		t.Fatal(err)
 	}
