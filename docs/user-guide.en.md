@@ -2,24 +2,15 @@
 
 ## Installation and first launch
 
-Download the macOS or Windows installer from the product download page. PicoAide Harness includes Electron, Node, and its pinned DSH dependencies, so normal users do not need to install Node.js or pnpm separately.
+Download the Windows, macOS, or Linux installer from the product download page. PicoAide Harness includes Electron, Node, and its pinned DSH dependencies, so normal users do not need to install Node.js or pnpm separately.
 
-On first launch, the application prepares the default profile and starts the official DSH Web surface locally. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
+On first launch, the application prepares the default `desktop` profile and starts the official DSH Web surface locally. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
 
-## Profiles
+## Profile
 
-A profile is a composition of DSH bundles, dependencies, and patches. The tray **Profile** menu lists existing profiles and the lazy `desktop` and `web` defaults.
+The application runs a single fixed `desktop` profile (a composition of DSH bundles, dependencies, and patches). There is no Profile switcher in the tray; manage plugins with the ordinary `dsh plugin` commands and an explicit target profile.
 
-Selecting a profile performs an orderly restart. The new profile becomes the last-known-good choice only after the Host, window, and browser client all start successfully; a failed startup returns to the previous working choice. Official profiles normally use the same DSH home, so sessions, settings, and storage do not need to be migrated. A custom configuration (patch) can deliberately redirect a persistence root, in which case that profile's configuration wins.
-
-Switching profiles does not silently copy plugins from the old profile into the new one. Use an explicit profile in the terminal when preparing another profile, or use the default commands after switching.
-
-## Compatibility and advanced modes
-
-- **Compatibility mode** uses the upstream Web client and the selected profile's own layout/sidebar/conversation composition. It is the closest presentation to ordinary Harness.
-- **Advanced mode** keeps the same upstream Web carrier while adding Desktop-owned framing, layout, Mica/vibrancy, and native drag regions. It is intended for a fuller desktop presentation.
-
-Changing mode restarts the application; it does not hot-swap root slots or native materials in a live renderer. Linux provides compatibility mode only.
+A custom configuration (patch) can deliberately redirect a persistence root, in which case that profile's configuration wins. Restart PicoAide Harness after plugin changes so the new bundle enters the Loader composition.
 
 ## Local Web port
 
@@ -36,7 +27,7 @@ The port must be an integer from `0` through `65535`. Changing it performs an or
 
 Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. PicoAide Harness uses the same plugin system as official Harness, so official plugins install and work directly; multiple plugins follow the same conventions and can be installed and used together.
 
-Ordinary DSH plugins use the upstream CLI semantics:
+Ordinary DSH plugins use the upstream CLI semantics (from a system shell):
 
 ```sh
 dsh plugin --profile desktop add <plugin>
@@ -44,25 +35,11 @@ dsh plugin --profile desktop remove <plugin>
 dsh plugin --profile desktop update
 ```
 
-In the terminal opened from the PicoAide Harness tray, bare `dsh` and plugin commands without `--profile` default to the active profile:
-
-```sh
-dsh plugin add <plugin>
-dsh plugin remove <plugin>
-dsh plugin update
-```
-
-An explicit `--profile <name>` always wins. Restart PicoAide Harness after plugin changes so the new bundle enters the Loader composition.
-
-## Opening the terminal
-
-Choose **Open DSH Terminal** from the tray. macOS opens Terminal; Windows prefers Windows Terminal and falls back to PowerShell or Command Prompt when it is unavailable.
-
-The welcome text shows the application version, active profile, profile directory, and DSH home. Desktop creates private `dsh`, `pnpm`, and `node` shims in its user-data directory and prepends that directory only for the new terminal process. It does not modify the system PATH or the user's shell files.
+The application runs the fixed `desktop` profile; an explicit `--profile <name>` always wins. Restart PicoAide Harness after plugin changes so the new bundle enters the Loader composition.
 
 ## Updates
 
-Packaged macOS and Windows applications check for stable releases through GitHub Releases in the background. Startup is not blocked; network errors, non-200 responses, invalid versions, and a server version that is not newer remain silent in the background.
+Packaged macOS and Windows applications check for stable releases through GitHub Releases in the background. Startup is not blocked; network errors, non-200 responses, invalid versions, and a server version that is not newer remain silent in the background. Linux launches do not download an installer (AppImage/deb are published directly with the release).
 
 **Check for Updates…** in the tray is a manual check. It shows a result even when the installed version is current, and reports a retry message when the check fails. Only a server version strictly newer than the local version produces a download confirmation. Cancelling never requests the counted download endpoint.
 
@@ -80,8 +57,8 @@ After confirmation, the app requests the fixed platform download URL. macOS open
   If the npm desktop launcher is installed, `dsh-desktop --export-diagnostics` provides the same archive. This command does not start Host, profiles, plugins, or a window. It prints the absolute diagnostics ZIP path when complete.
 - **Diagnostic archive contents**: recent application logs, local Crashpad `.dmp` files, the active-run marker, and `system-info.txt`. System information records Desktop, Electron, Node, platform, and architecture versions. Recognized credentials are masked in logs, but local paths, workspace IDs, session IDs, and crash-time memory fragments may remain. Review the archive before public upload and send sensitive dumps only through a trusted channel.
 - **The window disappeared**: check the system tray; closing the window is not quitting.
-- **A plugin is missing**: confirm the command targeted the intended profile and restart the application.
-- **A terminal command is missing**: open a fresh Desktop terminal from the tray; Desktop does not modify the global PATH.
+- **A plugin is missing**: confirm the command targeted the intended profile (the application runs the fixed `desktop` profile) and restart the application.
+- **A terminal command is missing**: `dsh` is read from the system shell; PicoAide Harness does not modify the global PATH.
 - **No update notification appeared**: background failures are silent; use the manual tray check to see the result.
 
 The lower-level lifecycle, packaging, and platform limits belong to the developer documentation; see the [documentation index](README.md).

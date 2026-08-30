@@ -145,7 +145,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </div>
         <div class="feature">
           <h3>私有化部署</h3>
-          <p>数据留在本机，企业内网部署，不依赖外部云服务，完全掌控自己的 AI 底座；SQLite / PostgreSQL 双后端。</p>
+          <p>数据留在本机，企业内网部署，不依赖外部云服务，完全掌控自己的 AI 底座；PostgreSQL（PG-only）。</p>
         </div>
       </div>
     </div>
@@ -160,7 +160,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         <div class="step">
           <span class="step__num">1</span>
           <h3>准备环境</h3>
-          <p>安装桌面客户端，或在内网服务器运行服务端（Docker Compose / 单二进制，SQLite 或 PostgreSQL）。</p>
+          <p>安装桌面客户端，或在内网服务器运行服务端（Docker Compose / 单二进制，PostgreSQL）。</p>
         </div>
         <div class="step">
           <span class="step__num">2</span>
@@ -215,7 +215,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       </details>
       <details class="faq">
         <summary>是否支持私有化部署？</summary>
-        <p>支持。数据留在本机，可部署于企业内网，不依赖外部云服务；SQLite / PostgreSQL 双后端，Docker Compose 容器化部署。</p>
+        <p>支持。数据留在本机，可部署于企业内网，不依赖外部云服务；PostgreSQL（PG-only），Docker Compose 容器化部署。</p>
       </details>
       <details class="faq">
         <summary>连接器与技能如何分发？</summary>

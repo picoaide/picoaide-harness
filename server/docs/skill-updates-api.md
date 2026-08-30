@@ -62,7 +62,7 @@ Authorization: Bearer eyJ...
 
 ### harness 客户端调用方式
 
-harness 的 `plugins/dsh-enterprise` 已注册本地代理 `/api/pico/skills`(prefix),
+harness 的 `packages/host/enterprise` 已注册本地代理 `/api/pico/skills`(prefix),
 `/api/pico/skills/updates?...` 会**自动透传**到网关 `/api/client/v2/marketplace/skills/updates`,
 无需修改代理代码。客户端内直接:
 

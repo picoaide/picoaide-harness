@@ -13,7 +13,8 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 |---|---|---|
 | Users | `/users` | Accounts, roles, status, quotas |
 | Departments | `/departments` | Department tree, members, budgets |
-| Gateway | `/gateway` | Upstream providers, default model, rate limiting, peak windows, login modes |
+| Auth | `/auth` | Login-mode configuration (local / LDAP / OIDC) |
+| Gateway | `/gateway` | Upstream providers, default model, rate limiting, peak windows |
 | Usage | `/usage` | Cost, request counts, token detail, charts |
 | Marketplace · Skills | `/marketplace` | Marketplace skill management, tiering and grants |
 | Capability Hub | `/capabilities` | Unified approval queue for shared skills/agents (Official/Featured marking, grants) |
@@ -22,12 +23,11 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 
 ## Users
 
-- **Create user**: username + password + whether admin (`is_admin`);
+- **Create user**: username + password + role (`super_admin` / `auditor` / `user`); the current create/edit form exposes it through the compat alias `is_admin` (boolean), while the server already supports `role` (the RBAC role is the single source of truth since 0046; `is_admin` is a compatibility field);
 - **Status**: enabled / disabled — disabling **immediately revokes all API tokens for that user**, requiring the client to log in again (in the same transaction as the user update);
 - **Delete**: double confirmation (makes clear it wipes all API tokens, usage records and group membership, and is not recoverable);
 - **Quotas**: `quota_tokens` (monthly token cap: null = follow the global default, 0 = unlimited, >0 = monthly cap) and `quota_money` (monthly money cap, same semantics); the table shows the **resolved effective quota** (follow default = global value, admin = 0);
-- **Departments and roles**: users belong to departments, and department budgets take effect along the ancestor chain;
-- Login-mode related fields (local/LDAP/OIDC) are on the Gateway page.
+- **Departments and roles**: users belong to departments, and department budgets take effect along the ancestor chain.
 
 ## Departments
 
@@ -44,9 +44,7 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 - **Model pricing**: per-model input/output unit price (CNY per M tokens, `input_price_per_1m` / `output_price_per_1m`), plus the **cache-hit input price** (`cache_input_price_per_1m`) and the **off-peak discount rate** (`offpeak_discount`, 0-1) — unpriced models are charged as 0; changing prices/discounts only affects costs incurred afterward (historical costs remain at the pricing recorded at the time);
 - **Cache-hit billing**: input tokens that hit the cache are billed at the cache price; when no cache price is configured it falls back to the input price (DeepSeek cache price);
 - **Peak/off-peak conversion**: outside the peak windows (idle periods) and when the model has an off-peak discount rate, cost = standard price × discount rate; during peak windows, cost = standard price. DeepSeek's current official policy (from 2026-08 onwards) = peak on Monday-Friday 09:00-12:00, 14:00-18:00; everything else (including weekends) is off-peak, and the off-peak price = peak price × 50%.
-- **Login modes**: switch between `local` / `ldap` / `oidc` / `both` (local+ldap):
-  - LDAP: `ldap_url`, `ldap_bind_dn`, `ldap_base_dn`, `ldap_user_filter` (e.g. `(uid=%s)`), `ldap_group_filter` (e.g. `(memberOf=cn=%s)`);
-  - OIDC: `oidc_issuer`, `oidc_redirect_url` (e.g. `https://picoaide.example.com/api/client/v2/auth/oidc/callback`).
+- **Login modes**: not configured on this page; login methods (local / LDAP / OIDC) live on the separate **Auth (`/auth`)** page.
 
 ## Usage statistics
 
@@ -73,7 +71,7 @@ Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved
 - **Grant dialog**: reuses GrantDialog — even after approval, content must still be granted by user/department before it is visible and installable (**two-gate model**, same as the marketplace); admin always has full access;
 - Audit action names such as `skill_approve` / `*_qualify`.
 
-> Compatibility and history: the earlier standalone pages `/shared-skills` and `/agent-presets` routes are preserved; the navigation has been merged into "Capability Hub".
+> Compatibility and history: the earlier standalone `/shared-skills` and `/agent-presets` routes are not preserved; the navigation and routes were merged into "Capability Hub" (2026-09).
 
 ## Audit log
 

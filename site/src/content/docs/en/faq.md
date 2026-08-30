@@ -21,7 +21,7 @@ No. The installer already bundles Electron, Node.js, pnpm, and a pinned set of D
 
 ## Which operating systems are supported?
 
-Windows x64, macOS (Apple silicon, Universal DMG), and Linux x64 (AppImage + deb). There is currently no formal installer for Intel Mac.
+Windows x64, macOS (universal DMG, compatible with Apple silicon and Intel), and Linux x64 (AppImage + deb).
 
 ## Why are the installers unsigned?
 
@@ -45,11 +45,11 @@ The task board and scheduled jobs overlapped semantically, and it was **merged i
 
 ## Can I install DSH plugins?
 
-Yes. Open the DSH Terminal from the tray and run `dsh plugin add <plugin>` / `remove` / `update`. By default it applies to the currently active profile; specify one explicitly with `--profile <name>`. The app must be restarted after plugin changes.
+Yes. From a system shell, run `dsh plugin --profile desktop add <plugin>` / `remove` / `update` (the app runs the fixed desktop profile, with no terminal/Profile-switch tray entry); specify one explicitly with `--profile <name>`. The app must be restarted after plugin changes.
 
 ## Do the Desktop profile and an existing web profile sync automatically?
 
-No, plugins are not copied automatically. Each profile has its own bundle and dependency combination; after switching profiles, default terminal commands apply to the current profile.
+The app runs the fixed `desktop` profile; there is no `web` profile default and no switcher.
 
 ## Where do I download and report issues?
 

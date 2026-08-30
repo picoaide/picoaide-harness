@@ -1,8 +1,8 @@
 # API 参考(服务端 HTTP)
 
-> 所有端点以代码为准(`internal/**/routes.go`、`cmd/server/main.go`)。错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`。
+> 所有端点以代码为准(`internal/router` 包集中声明;业务包 handler 集合见 `internal/*/handlers.go`)。错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`。
 >
-> **2026-08-19**:自研 Electron 客户端已下线,服务端接口全部保留,供第三方/自研客户端接入。
+> 命名空间:`/api/server/*` 管理面、`/api/client/v2/*` 客户端员工面、`/v1/*` LLM 网关(独立命名空间,Bearer)。旧前缀(`/api/admin`、`/api/marketplace`、`/api/auth`、`/v2/api/*` 等)均已移除。
 
 ## 1. 错误码
 
@@ -29,42 +29,63 @@
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/api/client/v2/auth/login` | 无 | 密码登录(local/LDAP);body `{server_url?, username, password}` → `{token}` |
+| POST | `/api/client/v2/auth/login` | 无 | 密码登录(local/LDAP);body `{username, password}` → `{token}` |
 | POST | `/api/client/v2/auth/logout` | Bearer | 吊销当前 token |
-| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{id, username, display_name, email, is_admin, source}` |
+| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, quota_tokens, quota_money}}` |
 | GET | `/api/client/v2/auth/usage` | Bearer | 员工用量概览(自查询):`{is_admin, quota_tokens, quota_money, monthly_usage/cost, remaining_tokens/money(不限=null), today_usage/cost, yesterday_usage/cost, total_usage/cost, dept_budgets[]}`;有效配额 = 个人覆盖→全局默认,admin 豁免 |
-| GET | `/api/client/v2/auth/oidc/login` | 无 | 跳转 OIDC 授权页(配置后启用) |
-| GET | `/api/client/v2/auth/oidc/callback` | 无 | OIDC 回调,换取服务端 token |
+| GET | `/api/client/v2/auth/methods` | 无 | 登录方式发现(`public methods`,登录页未登录时探测) |
+| GET | `/api/client/v2/auth/:provider/login` | 无 | 跳转 OIDC/OpenID 授权页(provider 由配置注册,如 `oidc`、`openid`) |
+| GET | `/api/client/v2/auth/:provider/callback` | 无 | OIDC 回调,换取服务端 token |
 
-## 4. 管理端(webadmin,全部 session 鉴权)
+## 4. 管理端(webadmin,全部 session 鉴权 + RBAC)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/server/admin/login` | 管理员登录(仅 `is_admin=1` 用户;非管理员 → 403) |
-| GET | `/api/server/admin/me` | 当前管理员信息 |
+| POST | `/api/server/admin/login` | 管理员登录(仅 `super_admin`/`auditor` 角色;`user` → 403;本地账号) |
+| GET | `/api/server/admin/auth/methods` | 登录方式发现(公开) |
+| GET | `/api/server/admin/me` | 当前管理员信息(含 role/permissions) |
 | POST | `/api/server/admin/logout` | 登出(清 session) |
-| GET | `/api/server/admin/users` | 用户列表(附带 `quota_tokens`/`quota_money` 与 `monthly_usage`/`monthly_cost` 本月用量/费用) |
-| POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, is_admin?, source?}` |
-| PUT | `/api/server/admin/users/:id` | 更新用户(改密/管理员/启用停用);`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认 |
+| GET | `/api/server/admin/users` | 用户列表(附带 `quota_tokens`/`quota_money`/`role` 与 `monthly_usage`/`monthly_cost` 本月用量/费用) |
+| POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
+| PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认;改密/降权/禁用自动吊销 token) |
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
+| GET/PUT | `/api/server/admin/users/:id/department` | 员工单部门归属 |
+| GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
+| GET/PUT | `/api/server/admin/departments`、`/departments/:id` | 部门树 CRUD(含预算 `budget_money`、parent/leader) |
+| GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |
+| POST | `/api/server/admin/tokens/:id/revoke` | 吊销指定 token |
 | GET | `/api/server/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
-| GET | `/api/server/admin/providers` | 网关上游列表(含 `protocol`:openai/anthropic) |
-| POST | `/api/server/admin/providers` | 添加上游 `{name, base_url, api_key, models, enabled, protocol?, channel?}`(api_key 服务端加密存储;protocol 缺省 openai,anthropic 供 /v1/messages 代理) |
+| GET | `/api/server/admin/server-info` | 版本/数据库驱动(PG)/迁移版本/运行环境摘要 |
+| GET | `/api/server/admin/providers` | 网关上游列表(含 `protocol`:openai/anthropic/both) |
+| POST | `/api/server/admin/providers` | 添加上游 `{name, base_url, api_key, models, enabled, protocol?, channel?}`(api_key 服务端加密存储;protocol 缺省 openai) |
 | PUT | `/api/server/admin/providers/:id` | 更新上游(protocol 可切换) |
 | DELETE | `/api/server/admin/providers/:id` | 删除上游 |
+| POST | `/api/server/admin/providers/:id/sync` `providers/sync-all` | 模型同步 |
 | GET | `/api/server/admin/models` | 模型列表 |
-| POST | `/api/server/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;offpeak_discount 0<d≤1 低谷折扣) |
+| POST | `/api/server/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?, cache_input_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;0029 缓存命中输入价) |
 | PUT | `/api/server/admin/models/:id` | 更新模型(价格/折扣留空不覆盖;修改只影响之后产生的费用) |
 | DELETE | `/api/server/admin/models/:id` | 删除模型 |
-| GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(用户/部门/技能等敏感操作,90 天保留) |
-| GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, default_model, retention_months, default_thinking_level, server_base_url}` |
-| PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月 token 配额)、`usage.monthly_quota_money`(员工默认月金额配额)、`usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷)、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`) |
+| GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level, glitchtip_base_url/organization}` |
+| PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`、`usage.monthly_quota_money`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`) |
+| GET | `/api/server/admin/channels` | 渠道列表 |
+| GET/PUT | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD(0042;Moka/sales-easy 等定义服务端下发) |
+| GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(90 天保留 → 默认 180 天,settings `audit.retention_days`;0048 起哈希链) |
+| GET/PUT | `/api/server/admin/auth`、`POST /auth/test` | 认证配置(脱敏读/写/连接测试) |
 
-## 5. AI 网关(客户端用,Bearer)
+## 5. AI 网关(客户端用,Bearer;独立命名空间 `/v1/*`,另有无 `/v1` 官方原生变体)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/v1/chat/completions` | OpenAI 兼容 chat 代理(下方详述) |
+| POST | `/v1/completions` / `/v1/responses` / `/v1/embeddings` | 原生/兼容形态(同网关计量) |
+| POST | `/v1/messages` | Anthropic Messages 兼容(0043,web_search 服务端代理) |
+| GET | `/v1/models` | 可用模型列表 |
+
+> 无 `/v1` 前缀的官方原生变体(`/chat/completions`、`/completions`、`/responses`、`/embeddings`、`/models`、`/messages`)同样挂载(base_url=server 使用)。
 
 ### POST `/v1/chat/completions`
 
-OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折);转发前按**月度 token 配额 / 金额配额 / 部门预算**检查(`EffectiveQuota` / `EffectiveMoneyQuota` / `EffectiveDeptBudget`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
+OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`|`anthropic`|`both`,0043/0044)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折;缓存命中输入 token 按 `cache_input_price_per_1m`,0029);转发前按**月度 token 配额 / 金额配额 / 部门预算**检查(`EffectiveQuota` / `EffectiveMoneyQuota` / `EffectiveDeptBudget`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
 
 ### POST `/v1/messages`(0043,Anthropic 兼容——web_search 服务端代理)
 
@@ -78,10 +99,10 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/marketplace/skills` | 技能建议清单 `[{name, version, description, author}]` |
+| GET | `/api/client/v2/marketplace/skills` | 技能建议清单 `[{name, version, description, author}]`(仅 enabled 且已授权) |
 | GET | `/api/client/v2/marketplace/skills/updates?installed=name:ver,...` | 技能版本检测(客户端自动升级):上报已装 `name:version`(逗号分隔,≤100 项),返回服务端较新的技能 `{updates:[{name, version, description, author, archive_url}], count}`;授权/下架技能不返回 |
 | GET | `/api/client/v2/marketplace/skills/:name` | 单个技能详情 |
-| GET | `/api/client/v2/marketplace/skills/:name/archive` | 下载技能包(上传模式:DB 归档;git 模式:`cacheDir/<name>-<version>.tar.gz`);成功累加 `downloads` |
+| GET | `/api/client/v2/marketplace/skills/:name/archive` | 下载技能包(上传模式:DB 归档;git 模式老行:`cacheDir/<name>-<version>.tar.gz` 只读回退);成功累加 `downloads`(0040) |
 | POST | `/api/client/v2/telemetry/skill-call` | 客户端上报技能调用 `{name, version?}` → 服务端累加 `calls`(shared_skills 优先,回退 market) |
 
 ## 7. 商城管理端(Admin)
@@ -92,13 +113,13 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | PUT/DELETE | `/api/server/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
 | POST | `/api/server/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 tar.gz)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
 
-## 8. 共享 Agent(客户端用,Bearer)
+## 8. 共享 Agent(客户端用,Bearer,多版本)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/agent-presets` | 可见清单:approved(全员)+ 自己上传的全部状态;返回 `{presets:[{name, display_name, description, version, author, status, reason, created_at}]}`(reason 仅自己 rejected 行非空) |
+| GET | `/api/client/v2/agent-presets` | 可见清单:approved 且**已授权** + 自己上传的全部状态;返回 `{presets:[{name, display_name, description, version, author, status, reason, created_at}]}`(reason 仅自己 rejected 行非空) |
 | POST | `/api/client/v2/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 tar.gz)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;归档**直存 DB**(0041 不落盘);display_name/描述 ≤500 字;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
-| GET | `/api/client/v2/agent-presets/:name/archive` | 下载归档(仅 approved;其余与不存在同 404);从 DB 出(0041);附 `X-Preset-Checksum` / `X-Preset-Version` |
+| GET | `/api/client/v2/agent-presets/:name/:version/archive` | 下载归档(仅 approved 且已授权;旧路径 `/:name/archive` 取最高版本);从 DB 出(0041);附 `X-Preset-Checksum` / `X-Preset-Version` |
 
 ### 管理端(Admin)
 
@@ -125,9 +146,9 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/shared-skills` | 可见清单:approved(全员)+ 自己上传的全部状态;返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
+| GET | `/api/client/v2/shared-skills` | 可见清单:approved 且**已授权** + 自己上传的全部状态;返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
 | POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 tar.gz)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
-| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(仅 approved);附 `X-Skill-Checksum` / `X-Skill-Version` |
+| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(仅 approved 且已授权);附 `X-Skill-Checksum` / `X-Skill-Version` |
 
 ### 管理端(Admin)
 
@@ -165,8 +186,6 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 ## 9. Bootstrap
 
-
-
 ### GET `/api/client/v2/config/bootstrap`(Bearer)
 
 登录后统一下发启动配置,字段固定:
@@ -176,31 +195,37 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
   "default_model": "deepseek-chat",
   "models": [{ "id": "deepseek-chat", "display_name": "DeepSeek Chat" }],
   "skills": [{ "name": "invoice-helper", "version": "1.0.0", "description": "..." }],
-  "web": { "default_thinking_level": "max" }
+  "web": { "default_thinking_level": "max" },
+  "connectors": [{ "id": "moka", "name": "Moka HR 智能体", "auth_mode": "oauth", "definition": { ... } }]
 }
 ```
 
-客户端 `BootstrapConfig` 与之严格对齐;`default_model` 不在启用模型时自动回退到第一个可用模型。
+客户端 `BootstrapConfig` 与之严格对齐;`default_model` 不在启用模型时自动回退到第一个可用模型。`connectors`(0042 起)为服务端连接器目录,客户端按目录渲染连接器中心(glitchtip 0045 已下架,不下发)。
 
 ## 10. 其他
 
 | 路径 | 说明 |
 |------|------|
+| `/`、`/portal` | 门户首页(品牌 + 三平台客户端下载,`portal.public` 控制开放性;产品 HTML 面) |
 | `/admin/` | webadmin SPA(未构建返回 "webadmin 未构建") |
-| 其他 | 404 "not found" |
+| `/healthz` | 健康探针(JSON,DB Ping,503=DB 不可用) |
+| `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` | 品牌/门户公开端点(未认证) |
+| 其他 | 404 JSON 信封 "not found" |
 
-## 11. 客户端 IPC(renderer ↔ main)
+## 11. 品牌与门户(公开)
 
-| 通道 | 方向 | 说明 |
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| `auth:login` / `auth:loadSession` / `auth:logout` / `auth:refreshBootstrap` / `auth:oidcLogin` | invoke | 会话管理 |
-| `chat:new` / `chat:ask` / `chat:continue` / `chat:approvePlan` / `chat:cancel` / `chat:list` / `chat:listRunning` / `chat:messages` / `chat:artifacts` / `chat:delete` | invoke | 对话生命周期 |
-| `agent:confirm` | invoke | 审批回执 `{requestId, ok}` |
-| `agent:event` | 事件 | 引擎事件流(见 01-architecture.md §4) |
-| `artifact:showInFolder` | invoke | 在系统文件管理器中显示产物 |
-| `picoaide:version` / `picoaide:rendererReady` | invoke | 版本/就绪握手 |
-| `workspace:setAllowedDirs` 等 | invoke | 设置页:可访问目录(安全边界)+ 建议安装管理 + 刷新 |
+| GET | `/api/client/v2/brand` | 公开品牌配置 `{enabled, login:{logo_url, display_name, tagline, welcome}, client:{logo_url, display_name, tagline}, favicon_url, title}`(无 accent 主题色) |
+| GET/HEAD | `/api/client/v2/brand/logo/:name` | logo 文件(name ∈ login/client/favicon,白名单 + SVG sanitize + ETag) |
+| GET | `/api/client/v2/portal` | 公开门户首页配置 `{enabled, public, welcome, subtitle, client_download_linux/mac/win, client_download_note, landing_path}` |
 
-## 12. 浏览器插件桥(CDP,JSON-RPC over WebSocket)
+管理端点:`GET/PUT /api/server/admin/brand`、`POST/DELETE /api/server/admin/brand/logo`、`GET /api/server/admin/brand/snapshots`、`POST /api/server/admin/brand/restore`(0047 快照)、`GET/PUT /api/server/admin/portal`。
 
-固定 `ws://127.0.0.1:54321`,方法:`browser.tabInfo` / `getContent` / `click` / `type` / `navigate` / `scroll` / `executeScript`。无 method 的消息 = 插件回执,原样透传给请求方;未知方法返回 `-32601`。
+## 12. 连接器(admin)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD;`PUT /connectors/:id/enabled` 下架/上架 |
+
+员工面不直接调连接器端点:目录经 bootstrap `connectors[]` 下发;OAuth/设备/令牌授权由客户端本地代理(`/api/pico/connectors/...`,loopback guard)与服务端 `serverauth` 会话协同。

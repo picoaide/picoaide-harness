@@ -8,7 +8,7 @@ description: PicoAide Harness 桌面客户端的完整功能与操作指南：�
 ## 主界面
 
 - **原生窗口**：标准桌面窗口，支持高级模式下的自有 frame、原生材质（macOS vibrancy / Windows Mica 由平台能力提供）与原生拖动区域；
-- **系统托盘**：关闭窗口默认隐藏而非退出；托盘提供「打开窗口 / 检查更新 / 导出诊断 / 切换 Profile / 打开 DSH 终端 / 退出」等操作；
+- **系统托盘**：关闭窗口默认隐藏而非退出；托盘提供「打开窗口 / 检查更新 / 导出诊断 / 退出」等操作（Profile 固定为 desktop，无托盘切换入口，也无 DSH 终端项）；
 - **本地 Web 端口**：默认由系统随机分配（`dsh-desktop.port: 0`），避免端口冲突；服务只监听 `127.0.0.1`。若某个界面插件依赖稳定 origin（localStorage 按 origin 隔离），可在设置中固定端口；
 - **单实例**：重复启动会聚焦已有实例。
 
@@ -16,9 +16,8 @@ description: PicoAide Harness 桌面客户端的完整功能与操作指南：�
 
 | 概念 | 说明 |
 |---|---|
-| **Profile** | 一组 DSH bundle、依赖与 patch 的组合；托盘菜单可切换，切换通过**有序重启**生效（重启后 Host、窗口、客户端都成功才会记为最近一次可用） |
-| **兼容模式** | 使用上游默认 Web client，尊重 profile 自己的 layout/sidebar/conversation 组合，最接近官方 Harness |
-| **高级模式** | 在不改变上游 Web carrier 的前提下注入桌面自有 frame、布局与原生材质；产品默认 profile 固定使用高级模式 |
+| **Profile** | 一组 DSH bundle、依赖与 patch 的组合；产品**固定运行 desktop profile**，无托盘切换，也无 profile 选择器 |
+| **高级模式** | 产品固定使用高级模式：在不改变上游 Web carrier 的前提下注入桌面自有 frame、布局与原生材质；Linux 使用标准系统窗框（无 Mica / hidden-inset），但布局仍为高级模式 |
 
 ## 对话与智能体
 
@@ -153,21 +152,21 @@ Agent 驱动的内嵌浏览器位于**独立浏览器窗口**（2026-08-20 窗�
 
 - 升级源：GitHub Releases API（`releases/latest`），解析 `tag_name` 并去 `v` 前缀；
 - **SHA-256 校验**：下载 `SHA256SUMS.txt` 并与安装包逐项核对（兼容 `./` 前缀），校验失败**不安装**；
-- 平台资产：macOS 通用 DMG（universal）、Windows NSIS 安装器、Linux AppImage（`x86_64`）+ deb；
+- 平台资产：macOS 通用 DMG（universal，兼容 Intel 与 Apple Silicon）、Windows NSIS 安装器、Linux AppImage（`x86_64`）+ deb；**Linux 不自动下载安装包**（更新下载仅 macOS / Windows），Linux 用户需手动下载新版本安装包；
 - 交互：后台检查不阻塞启动；发现新版本先征得确认才下载；下载/安装失败不破坏当前版本（网络波动时仍使用已确认版本继续下载）；
 - 未签名说明：Windows / Linux 安装包 CI 自动发布未签名（macOS 正式版签名 + 公证）；Windows SmartScreen 可能提示「未知发布者」，请先核对 Release 附带的 SHA256SUMS.txt。
 
 ## 终端与插件管理
 
-从托盘打开 **DSH Terminal**（macOS 用 Terminal；Windows 优先 Windows Terminal，回退 PowerShell/CMD）。欢迎信息显示应用版本、当前 profile、profile 目录与 DSH home。终端内：
+插件管理从**系统 shell** 运行普通 `dsh plugin` 命令完成——应用固定运行 `desktop` profile，没有「打开 DSH 终端 / 切换 Profile / 模式切换」的托盘入口：
 
 ```sh
-dsh plugin add <plugin>     # 安装插件（作用于当前激活 profile）
-dsh plugin remove <plugin>  # 移除插件
-dsh plugin update           # 更新插件
+dsh plugin --profile desktop add <plugin>     # 安装插件（固定作用于 desktop profile）
+dsh plugin --profile desktop remove <plugin>  # 移除插件
+dsh plugin --profile desktop update           # 更新插件
 ```
 
-`--profile <name>` 显式指定目标。终端内的 `dsh`/`pnpm`/`node` 是 Desktop 私有 shim，**只对该终端进程设置 PATH**，不改系统全局 PATH 或 shell 配置。插件变更后需重启桌面应用才进入 Loader 组合。
+显式 `--profile <name>` 指定目标。应用自带 DSH 依赖，不改系统全局 PATH 或 shell 配置。插件变更后需重启应用才进入 Loader 组合。
 
 ## 排查
 

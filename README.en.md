@@ -48,12 +48,12 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 
 ## Download and install
 
-Current release installers support Windows x64, Apple Silicon macOS, and Linux x64. Ordinary users do not need to install Node.js, pnpm, or DSH separately.
+Current release installers support Windows x64, macOS (universal DMG, both Apple Silicon and Intel), and Linux x64. Ordinary users do not need to install Node.js, pnpm, or DSH separately.
 
 | Platform | Download | Installation |
 | --- | --- | --- |
 | Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x64-Setup.exe) | Run the NSIS installer and follow its prompts |
-| macOS Apple Silicon | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
+| macOS | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
 | Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x86_64.AppImage) | Grant execute permission and run |
 
 Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) (each release ships a `SHA256SUMS.txt`; verifying before install is recommended). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [user guide](docs/user-guide.en.md) and [FAQ](docs/faq.en.md) for plugin commands, platform details, and troubleshooting.

@@ -6,7 +6,7 @@
 
 ## PicoAide Harness 是什么？
 
-PicoAide Harness 是面向 Windows 和 macOS 的开源 DeepSeek Harness 桌面客户端。它把官方 Harness 的本地 Web UI、Host 服务和插件系统装进原生桌面应用，并提供窗口、系统托盘、终端、更新和 profile 管理。
+PicoAide Harness 是面向 Windows、macOS 和 Linux 的开源 DeepSeek Harness 桌面客户端。它把官方 Harness 的本地 Web UI、Host 服务和插件系统装进原生桌面应用，并提供窗口、系统托盘、更新和企业级管理能力。
 
 ## 这是 DeepSeek 官方产品吗？
 
@@ -14,7 +14,7 @@ PicoAide Harness 是面向 Windows 和 macOS 的开源 DeepSeek Harness 桌面�
 
 ## 支持哪些操作系统？
 
-当前正式安装包支持 Windows x64 和搭载 Apple 芯片的 macOS。当前没有 Linux 安装包，也不支持 Intel Mac；不要根据源码中存在跨平台兼容代码推断已经发布了对应安装包。
+当前正式安装包支持 Windows x64、macOS（universal DMG，Apple Silicon 与 Intel）和 Linux x64（AppImage + deb）。桌面壳固定高级显示呈现；Linux 使用标准系统窗口边框（无 Mica/hidden-inset 等平台原生材质），但界面布局与 macOS/Windows 一致。
 
 ## 需要安装 Node.js、pnpm 或 DSH 吗？
 
@@ -26,7 +26,7 @@ PicoAide Harness 是面向 Windows 和 macOS 的开源 DeepSeek Harness 桌面�
 
 ## PicoAide Harness 会修改官方 Harness 吗？
 
-不会。仓库固定一个未修改的官方 Harness 上游版本。兼容模式运行上游默认 Web client；高级模式通过 PicoAide Harness 自有插件增加桌面布局和原生窗口效果，不直接修改上游源码。
+不会。仓库固定一个未修改的官方 Harness 上游版本。桌面壳通过 PicoAide Harness 自有插件增加桌面布局和原生窗口效果（固定高级模式），不直接修改上游源码。
 
 ## 数据是否保存在本地？
 
@@ -34,15 +34,15 @@ Desktop Host、profile 和 DSH home 位于本机。是否向外部服务发送�
 
 ## 可以安装 DSH 插件吗？
 
-可以。PicoAide Harness 使用官方 Harness 插件体系。可以从托盘打开 DSH Terminal，然后运行 `dsh plugin add`、`dsh plugin remove` 和 `dsh plugin update`；命令默认作用于当前激活的 profile，插件变更后需要重启 Desktop。
+可以。PicoAide Harness 使用官方 Harness 插件体系。从系统 shell 运行 `dsh plugin --profile desktop add`、`remove` 和 `update`（应用固定运行 `desktop` profile）；插件变更后需要重启 Desktop。
 
 ## Desktop profile 和已有 web profile 会自动同步吗？
 
-不会自动复制插件。每个 profile 都有自己的 bundle 和依赖组合；切换 profile 后，终端中的默认插件命令会作用于当前 profile，也可以使用 `--profile <name>` 显式指定目标。
+不会。应用固定运行一个 `desktop` profile，没有 `web` 默认项，也没有 profile 切换入口。每个 profile 都有自己的 bundle 和依赖组合；使用 `dsh plugin --profile <name>` 可显式指定其他 profile。
 
 ## 应用如何更新？
 
-打包后的应用会在后台检查稳定版本，但不会静默安装。发现新版本后先征得用户确认；macOS 下载并打开 DMG，Windows 下载并启动 NSIS 安装程序。网络或下载失败不会破坏当前安装。
+打包后的应用会在后台检查稳定版本，但不会静默安装。发现新版本后先征得用户确认；macOS 下载并打开 DMG，Windows 下载并启动 NSIS 安装程序（Linux 不下载安装包，AppImage/deb 从发布页获取）。网络或下载失败不会破坏当前安装。
 
 ## 在哪里下载和报告问题？
 

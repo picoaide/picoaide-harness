@@ -10,7 +10,7 @@ POST /api/client/v2/auth/login          POST /api/server/admin/login
 ```
 
 - 员工:密码(local/LDAP)或 OIDC 浏览器登录 → 签发 `api_token`,客户端持 token 调全部员工端点。
-- 管理员:任一 `is_admin=1` 用户经 `POST /api/server/admin/login` 建立 session(24h),写操作带 `X-CSRF-Token`。
+- 管理员:角色为 `super_admin`/`auditor` 的用户(`user` 拒绝)经 `POST /api/server/admin/login` 建立 session(12h 硬上限 + 60min 空闲滑动失效),写操作带 `X-CSRF-Token`。
 - 密钥只在服务端:LLM 上游密钥 AES-GCM 加密落库,客户端只持 token。
 
 ## 2. 认证模式(auth.mode)
@@ -23,16 +23,20 @@ POST /api/client/v2/auth/login          POST /api/server/admin/login
 | `ldap` | 仅 LDAP 绑定校验(用户不存在时自动创建本地记录) |
 | `both` | 先 local 后 ldap 逐个尝试 |
 
+额外可独立启用 OIDC/OpenID 浏览器登录(`auth.enabled` 控制 providers 注册;`oidc.*` 与 `openid.*` 两组键均可配置一套 provider,provider 名即路由前缀 `/api/client/v2/auth/<name>/login`)。
+
 ### settings 键名(serverauth/config.go)
 
 ```
 auth.mode = local | ldap | both        # 密码模式
+auth.enabled                          # 启用哪些 provider(如 "local,ldap,oidc")
 ldap.server_url / ldap.bind_dn / ldap.bind_password
 ldap.base_dn / ldap.user_filter / ldap.group_filter / ldap.group_attr
 oidc.issuer / oidc.client_id / oidc.client_secret / oidc.redirect_url
+openid.issuer / openid.client_id / openid.client_secret / openid.redirect_url
 ```
 
-LDAP/OIDC 配置无效时对应 provider 不注册(启动即降级为 local,不会崩)。
+LDAP/OIDC 配置无效时对应 provider 不注册(启动即降级,不会崩)。
 
 ## 3. Token 生命周期(api_tokens)
 
@@ -47,8 +51,8 @@ LDAP/OIDC 配置无效时对应 provider 不注册(启动即降级为 local,不�
 
 ## 4. 管理端 session + CSRF
 
-- 登录:`POST /api/server/admin/login`,成功设置 Cookie `picoaide_session`(HttpOnly、SameSite=Lax、MaxAge=24h),session id 为随机值,存 `admin_sessions` 表。
-- 会话 TTL:`AdminSessionTTL = 24h`。
+- 登录:`POST /api/server/admin/login`,成功设置 Cookie `picoaide_session`(HttpOnly、SameSite=Lax、MaxAge=12h),session id 为随机值,存 `admin_sessions` 表。
+- 会话 TTL:`AdminSessionTTL = 12h` 硬上限 + 60min 空闲滑动到期(0046 起 `last_used_at`)。
 - **CSRF**:session 携带随机 `csrf_key`;登录响应返回 `X-CSRF-Token`(基于 csrf_key + 时间窗 HMAC,窗口 1h,±1 窗口容差)。所有写请求须带 `X-CSRF-Token` 头,`AdminAuth` 校验;读请求(GET)仅校验 cookie。
 - 登出:`POST /api/server/admin/logout` 删除 session 行。
 
@@ -74,4 +78,4 @@ PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -data ./data --bootstrap-admin admin
 
 ## 7. 用户模型
 
-`users` 表字段:`username`(唯一)、`display_name`、`email`、`password_hash`(argon2id)、`source`(local/ldap/oidc)、`is_admin`、`status`(1=启用)。LDAP/OIDC 首次登录的用户自动创建本地记录(source 标记来源),停用(`status=0`)后所有 token 即刻失效。
+`users` 表字段:`username`(唯一)、`display_name`、`email`、`password_hash`(argon2id)、`source`(local/ldap/oidc)、`role`(super_admin/auditor/user,0046;`is_admin` 为兼容别名)、`status`(1=启用)。LDAP/OIDC 首次登录的用户自动创建本地记录(source 标记来源),停用(`status=0`)后所有 token 即刻失效;管理员登录仅接受本地账号(SSO/LDAP 不进后台)。

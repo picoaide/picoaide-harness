@@ -1,15 +1,15 @@
 # PicoAide Harness 插件开发
 
-> **当前接口与 Draft 请勿混淆：** 本文介绍现在可用的 DSH/Cordis 与 Desktop service。`dsh-community-fabric` 中的 manifest、capability 和统一事件模型仍处于[社区 RFC Draft](../community/fabric/README.zh.md)，尚不能作为依赖或发布目标。
+> **当前接口与 Draft 请勿混淆：** 本文介绍现在可用的 DSH/Cordis 与 Desktop contract。`dsh-community-fabric` 中的 manifest、capability 和统一事件模型仍处于[社区 RFC Draft](../community/fabric/README.zh.md)，尚不能作为依赖或发布目标。
 
 ## 先理解两层插件
 
 一个普通 DSH 插件可以提供 Host service、命令、路由、bundle 或 Web Client。它应该尽量只依赖官方 DSH contract，因此可以在命令行、普通 Web profile 和 PicoAide Harness 中复用。
 
-Desktop 另外提供两个公开的 Host service：
+Desktop 侧公开的契约只有两个（见 [plugin-services.md](../packages/host/desktop/docs/plugin-services.md)）：
 
-- `desktopProfiles`：读取当前 profile、发现可选 profile，并请求安全的 profile 切换。
-- `desktopPnpm`：在当前 profile 中执行 pnpm，或通过官方 `dsh plugin` 语义管理插件。
+- `desktopRuntime.registerTrayItem`：向原生托盘贡献一个 effect 作用域内的菜单项（如 `tools`/`status` 分组），菜单在 observable 状态变化时自动重建。
+- `desktopActions`（通过 `dsh-plugin-desktop` 根入口类型声明）：generation 作用域的 Host service，只暴露重启操作，仅供显式用户动作使用。
 
 它们属于 Electron main 进程中的 Host Cordis generation。Renderer 不能直接读取它们；有浏览器界面的插件仍应使用普通 DSH Web routes、RPC、client metadata、service 和 slot。
 
@@ -17,39 +17,29 @@ Desktop 另外提供两个公开的 Host service：
 
 ## Desktop 专用插件
 
-如果插件只应该在 Desktop 中运行，可以把服务声明为 required injection：
+如果插件只应该在 Desktop 中运行，可以把 `desktopRuntime` 声明为 required injection（Cordis 会在该 provider 不可用时保持插件 pending）：
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from 'dsh-plugin-desktop/profile-service'
-import type { DesktopPnpmHandle } from 'dsh-plugin-desktop/pnpm'
+import type {} from 'dsh-plugin-desktop'
 
 export const name = 'example-desktop-plugin'
-export const inject = ['desktopProfiles', 'desktopPnpm']
+export const inject = ['desktopRuntime']
 
 export function apply(ctx: Context): void {
-  ctx.logger.info(`profile: ${ctx.desktopProfiles.current.name}`)
-  let active: DesktopPnpmHandle | undefined
-
-  // 将这个函数连接到插件界面的明确用户操作。
-  async function installExample(): Promise<void> {
-    active = ctx.desktopPnpm.runPlugin(
-      ['add', 'example-plugin'],
-      process.cwd(),
-    )
-    await active.done
-  }
-
   ctx.effect(() => {
-    return async () => {
-      active?.cancel()
-      await active?.done.catch(() => {})
-    }
-  }, 'example plugin operation')
+    const registration = ctx.desktopRuntime.registerTrayItem({
+      group: 'tools',
+      order: 30,
+      label: () => 'Example Action',
+      invoke: () => { /* 显式用户动作 */ },
+    })
+    return () => { registration.dispose() }
+  }, 'dsh-plugin-desktop: example tray command')
 }
 ```
 
-实际项目应该把 package operation 放在明确的用户动作中，校验目标来源，读取 stdout/stderr，设置自己的 timeout，并同时检查 `exitCode` 和 `signal`。一个 generation 同时只允许一个 `desktopPnpm` package operation；插件卸载时必须取消并等待它结束。
+实际项目应该把托盘动作放在明确的用户动作中，自行处理异步失败（托盘 adapter 会记录错误），并在 `invoke()` 内设置自己的超时。`registerTrayItem` 返回可刷新的注册句柄（`refresh`/`dispose`），不要保留到所属 effect 生命周期之外。
 
 ## 兼容 Desktop 和普通 DSH
 
@@ -59,50 +49,40 @@ export function apply(ctx: Context): void {
 export const inject = ['webServer', 'loader']
 
 export function apply(ctx: Context, config: { profile?: string }): void {
-  const profiles = ctx.get('desktopProfiles')
-  if (profiles === undefined) {
+  const runtime = ctx.get('desktopRuntime')
+  if (runtime === undefined) {
     mountOrdinaryDshManager(ctx, config.profile ?? 'web')
     return
   }
-
-  ctx.inject(['desktopPnpm'], (desktopPnpm) => {
-    mountManager(ctx, {
-      profile: profiles.current.name,
-      profileDir: profiles.current.dir,
-      runPlugin: (args, cwd, signal) => desktopPnpm.runPlugin(args, cwd, signal),
-    })
-  })
+  mountDesktopTrayAction(ctx, runtime)
 }
 ```
 
-普通 DSH 的 fallback 仍然是插件自己的权威实现。不要从 `process.argv`、`ctx.baseUrl`、settings 或 `$DSH_HOME` 推断 Desktop profile；在 Desktop 中以 `desktopProfiles.current` 为准。
+普通 DSH 的 fallback 仍然是插件自己的权威实现。应用固定运行 `desktop` profile；不要从 `process.argv`、`ctx.baseUrl`、settings 或 `$DSH_HOME` 推断 profile。
 
-## `run()` 和 `runPlugin()` 的区别
+## 插件管理（官方 CLI 语义）
 
-`desktopPnpm.run(args)` 是低层 pnpm operation，cwd 是当前 profile。它不保证 DSH 的 profile 初始化、调用方相对 `file:`/`link:` source 锚定或 `dsh.profile.bundles` reconcile。
+应用固定运行 `desktop` profile，从系统 shell 用官方 DSH CLI 管理插件：
 
-`desktopPnpm.runPlugin(args, invokingDir)` 执行打包的 `dsh plugin --profile <active>`，保留上游插件管理语义。安装、卸载、更新和依赖修复应使用它，例如：
-
-```ts
-desktopPnpm.runPlugin(['add', target], invokingDir, signal)
-desktopPnpm.runPlugin(['remove', packageName], invokingDir, signal)
-desktopPnpm.runPlugin(['update'], invokingDir, signal)
-desktopPnpm.runPlugin(['install', '--no-frozen-lockfile'], invokingDir, signal)
+```sh
+dsh plugin --profile desktop add <plugin>
+dsh plugin --profile desktop remove <plugin>
+dsh plugin --profile desktop update
 ```
 
-参数始终作为 argv 传递；不要拼接 shell 字符串，也不要依赖 Windows `.cmd` shim。服务会在完整子进程树退出后 settle，并在 generation dispose 时终止仍在运行的 operation。
+`--profile <name>` 始终优先；插件变更后需重启应用才进入下一次 Loader 组合。Desktp 不内置 pnpm 管理 service，也不提供 `dsh-plugin-desktop/pnpm` 或 `profile-service` 子路径——这类旧的内部 service 已随 profile 切换/终端功能移除。
 
 ## 不要依赖的接口
 
-`desktopRuntime`、`desktopPnpmBootstrap`、Electron `BrowserWindow`、托盘注册表、private Node helper、`ELECTRON_RUN_AS_NODE` 和生成的 shim 都是 Desktop 内部实现。即使它们出现在 declaration 或运行时上下文中，也不属于第三方兼容 contract。
+`desktopRuntime` 的窗口/托盘方法、`desktopPlugins`（profile bundle 禁用能力）、Electron `BrowserWindow`、托盘注册表、private Node helper、`ELECTRON_RUN_AS_NODE` 和生成的 shim 都是 Desktop 内部实现。即使它们出现在 declaration 或运行时上下文中，也不属于第三方兼容 contract；只有 plugin-services.md 声明的注册契约与 `desktopActions` 重启能力是受支持面。
 
 ## 测试与发布检查
 
 插件至少应覆盖：
 
 - 在普通 DSH 中没有 Desktop service 时仍能加载，或按产品定义保持 pending。
-- Desktop 中读取的 profile name/dir 与用户实际选择一致。
-- package operation 的取消、非零退出、spawn failure 和 generation teardown。
+- 托盘项的生命周期：effect dispose 后注册句柄同步释放，无可达泄漏。
+- 异步 invoke 失败、重复触发和 generation teardown。
 - 插件变更后重新启动，bundle 能进入下一次 Loader 组合。
 
 开发者可以先阅读 [架构说明](architecture.md)，再使用包级 [service contract](../packages/host/desktop/docs/plugin-services.md)。
