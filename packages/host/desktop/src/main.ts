@@ -1,4 +1,4 @@
-/** DSH Desktop executable: minimal Electron bootstrap around the Host Cordis root. */
+/** PicoAide Harness executable: minimal Electron bootstrap around the Host Cordis root. */
 
 import { app, crashReporter } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * One-command upstream pin upgrade for the DSH Desktop workspace.
+ * One-command upstream pin upgrade for the PicoAide Harness workspace.
  *
  * Replaces the manual rc.x dance: fetch tag -> checkout submodule -> rewrite
  * upstream.json -> bump every @deepseek-ai/dsh* dependency family -> migrate

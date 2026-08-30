@@ -1,8 +1,8 @@
 {
-  "name": "deepseek-harness-desktop",
+  "name": "picoaide-harness",
   "version": "2.4.6",
   "private": true,
-  "description": "DSH Desktop product workspace",
+  "description": "PicoAide Harness product workspace",
   "license": "MIT",
   "packageManager": "yarn@4.18.0",
   "engines": {

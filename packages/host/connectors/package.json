@@ -1,7 +1,7 @@
 {
   "name": "@picoaide/dsh-connectors",
   "version": "0.1.0",
-  "description": "Connector framework (OAuth/device/token/cli auth + MCP registration) and built-in connectors for DSH Desktop",
+  "description": "Connector framework (OAuth/device/token/cli auth + MCP registration) and built-in connectors for PicoAide Harness",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

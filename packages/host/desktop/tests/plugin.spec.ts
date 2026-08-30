@@ -157,8 +157,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
 describe('desktop Host plugin', () => {
   it('validates schemas without a presentation mode knob', () => {
     expect(Config({} as DesktopConfig)).toEqual({
-      productName: 'DSH Desktop',
-      windowTitle: 'DeepSeek Harness Desktop',
+      productName: 'PicoAide Harness',
+      windowTitle: 'PicoAide Harness',
       port: 0,
       width: 1280,
       height: 840,

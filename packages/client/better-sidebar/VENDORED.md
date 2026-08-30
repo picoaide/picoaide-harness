@@ -1,7 +1,7 @@
 # dsh-better-sidebar (vendored)
 
 本包是从 <https://github.com/omdsh-dev/DSH-better-sidebar>（v0.13.1，MIT）vendor
-进 DSH Desktop 产品仓库的第三方插件，作为桌面客户端的右侧面板/底部工作台。
+进 PicoAide Harness 产品仓库的第三方插件，作为桌面客户端的右侧面板/底部工作台。
 
 - **上游**：<https://github.com/omdsh-dev/DSH-better-sidebar>（commit 随 vendor 日期记录在 THIRD_PARTY_NOTICES.md）
 - **许可**：MIT，版权归 dsh-external（见 LICENSE）。

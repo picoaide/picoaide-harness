@@ -197,7 +197,7 @@ try {
 // --- report ---
 const failed = results.filter(r => !r.ok)
 const lines = [
-  '# DSH Desktop 真实环境-定时任务表单审计报告',
+  '# PicoAide Harness 真实环境-定时任务表单审计报告',
   '',
   `- 服务器: ${SERVER}`,
   `- 账号: ${USER}`,

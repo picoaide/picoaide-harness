@@ -1,8 +1,8 @@
-# DSH Desktop
+# PicoAide Harness
 
 English | [中文](README.zh.md)
 
-`dsh-plugin-desktop` runs DSH in Electron while remaining part of the ordinary Cordis composition. The installed application is named **DSH Desktop**. The package provides the `dsh-plugin-desktop` executable and the `dsh-desktop` alias; the registered npm package name is the reliable `npx` entry.
+`dsh-plugin-desktop` runs DSH in Electron while remaining part of the ordinary Cordis composition. The installed application is named **PicoAide Harness**. The package provides the `dsh-plugin-desktop` executable and the `dsh-desktop` alias; the registered npm package name is the reliable `npx` entry.
 
 ## Architecture
 
@@ -54,7 +54,7 @@ On macOS the advanced window uses a transparent hidden-inset title bar, position
 
 ## Development
 
-This package is managed by the Yarn workspace at the repository root. The sibling `deepseek-harness/` checkout remains an independent upstream pnpm project and is not part of the Yarn workspace. Install and verify DSH Desktop from the repository root:
+This package is managed by the Yarn workspace at the repository root. The sibling `deepseek-harness/` checkout remains an independent upstream pnpm project and is not part of the Yarn workspace. Install and verify PicoAide Harness from the repository root:
 
 ```sh
 yarn install
@@ -90,7 +90,7 @@ dsh plugin --profile desktop update
 
 The application runs the fixed `desktop` profile. There is no profile selector in the tray, so the forms below always target that profile; an explicit `--profile <name>` remains authoritative when invoking `dsh` from an external shell.
 
-`dshmarket@1.2.3` is not preinstalled and is not a dependency of DSH Desktop. That release still resolves a profile from config/argv and starts `dsh plugin` through private child-process code; its package exports no runner injection seam. A later compatible release must retain its existing CLI fallback under ordinary DSH. In addition, the `1.2.3` source repository and npm tarball contain no complete MIT license text or copyright notice, so that version does not pass the bundled-redistribution gate. User-directed installation of a third-party package is separate from Desktop embedding it in the application archive or installer.
+`dshmarket@1.2.3` is not preinstalled and is not a dependency of PicoAide Harness. That release still resolves a profile from config/argv and starts `dsh plugin` through private child-process code; its package exports no runner injection seam. A later compatible release must retain its existing CLI fallback under ordinary DSH. In addition, the `1.2.3` source repository and npm tarball contain no complete MIT license text or copyright notice, so that version does not pass the bundled-redistribution gate. User-directed installation of a third-party package is separate from Desktop embedding it in the application archive or installer.
 
 See [Plugin services for authors](docs/plugin-services.md) for required injection, optional Desktop adaptation, TypeScript examples, cancellation, and fallback guidance.
 
@@ -121,15 +121,15 @@ A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin wit
 
 ## Desktop operations
 
-Packaged macOS and Windows applications query `https://www.dshdesktop.cn/api/desktop/version` 60 seconds after startup and every six hours after a completed check. Each no-cache request has a 15-second deadline and shares one in-flight operation with the **Check for Updates…** tray command. The response is accepted only when it contains canonical stable Semantic Versioning. Background network, HTTP, timeout, invalid-response, equal-version, and older-version outcomes are silent. A manual check always opens a native result dialog: equal or older results report the installed version, failures ask the user to retry, and a strictly newer version uses the **Download** or **Later** prompt. Automatic update prompts are remembered per version, while the tray can retry explicitly. Development, unpackaged, and Linux launches do not download an installer.
+Packaged macOS and Windows applications query the GitHub Releases API 60 seconds after startup and every six hours after a completed check. Each no-cache request has a 15-second deadline and shares one in-flight operation with the **Check for Updates…** tray command. The response is accepted only when it contains canonical stable Semantic Versioning. Background network, HTTP, timeout, invalid-response, equal-version, and older-version outcomes are silent. A manual check always opens a native result dialog: equal or older results report the installed version, failures ask the user to retry, and a strictly newer version uses the **Download** or **Later** prompt. Automatic update prompts are remembered per version, while the tray can retry explicitly. Development, unpackaged, and Linux launches do not download an installer.
 
-Choosing **Download** first rechecks that the advertised version is unchanged, then makes the first request to the platform's fixed counted download endpoint. DSH Desktop follows the service redirect through Electron networking, streams at most 1 GiB into a private versioned user-data directory, and rejects an incomplete DMG or Windows PE before exposing it. On macOS it opens the downloaded DMG and tells the user to replace the application in `Applications` and reopen it. On Windows it asks again after the NSIS installer is ready; **Restart and Install** launches that installer and requests orderly Cordis teardown before the current process exits. Download, filesystem, and installer-opening failures remain silent and leave the available-version tray action retryable.
+Choosing **Download** first rechecks that the advertised version is unchanged, then makes the first request to the platform's fixed counted download endpoint. PicoAide Harness follows the service redirect through Electron networking, streams at most 1 GiB into a private versioned user-data directory, and rejects an incomplete DMG or Windows PE before exposing it. On macOS it opens the downloaded DMG and tells the user to replace the application in `Applications` and reopen it. On Windows it asks again after the NSIS installer is ready; **Restart and Install** launches that installer and requests orderly Cordis teardown before the current process exits. Download, filesystem, and installer-opening failures remain silent and leave the available-version tray action retryable.
 
-Release operators must publish both platform artifacts before making a version discoverable. After the artifacts and download redirects are ready, set `deepseek-harness-desktop:release:version` to the canonical stable version in the Upstash Redis console, for example `SET deepseek-harness-desktop:release:version 2.0.1`. The version API changes immediately; missing, unavailable, or invalid values produce no Desktop prompt.
+Release operators must publish both platform artifacts before making a version discoverable. After the artifacts and download redirects are ready, the latest `picoaide/picoaide-harness` GitHub Release is the release-version authority; tag `v<version>` and published assets make the release immediately discoverable, while missing or invalid releases produce no Desktop prompt.
 
 ## Logs and diagnostics
 
-DSH Desktop writes UTF-8 logs under Electron's user-data directory: `%APPDATA%\DSH Desktop\logs` on Windows and `~/Library/Application Support/DSH Desktop/logs` on macOS. Full logs use `dsh-YYYY-MM-DD.log`; warnings and errors are also written to `dsh-YYYY-MM-DD.error.log`. Files rotate at 10 MiB, files older than seven days are removed at startup, and the directory is kept below 200 MiB. The `dsh-desktop.logLevel` setting controls verbosity and defaults to `info`.
+PicoAide Harness writes UTF-8 logs under Electron's user-data directory: `%APPDATA%\PicoAide Harness\logs` on Windows and `~/Library/Application Support/PicoAide Harness/logs` on macOS. Full logs use `dsh-YYYY-MM-DD.log`; warnings and errors are also written to `dsh-YYYY-MM-DD.error.log`. Files rotate at 10 MiB, files older than seven days are removed at startup, and the directory is kept below 200 MiB. The `dsh-desktop.logLevel` setting controls verbosity and defaults to `info`.
 
 On macOS and Windows, choose **Export Diagnostics…** from the tray to create a ZIP under the sibling `diagnostics` directory and reveal it in the system file manager. Export runs outside Electron's main thread, includes at most the newest 50 MiB of owned logs plus `system-info.txt`, and retains the three newest ZIP files. The confirmation dialog explains the privacy boundary before any archive is created. Recognized credentials are masked, but logs can still contain local paths, workspace IDs, session IDs, prompts, tool output, or third-party plugin messages. Review the ZIP before sharing it, especially before uploading it publicly.
 
@@ -168,7 +168,7 @@ corepack.cmd yarn dist:win
 
 Python and Visual Studio C++ Build Tools are not required. The Windows command uses `node-pty`'s bundled x64 Node-API binaries instead of asking Electron Builder to rebuild them from source, and the packaged-runtime gate rejects an installer staging tree that omits those binaries.
 
-`dist:win` refuses non-Windows and non-x64 hosts, runs a Windows-safe gate containing the build, all TypeScript compiler faces, packaging and native-shell focused tests, and the runtime-closure verifier, then builds an assisted NSIS installer and verifies both generated PE files. The full cross-platform suite remains CI-owned because some POSIX execution tests are not Windows programs. The installer allows a per-user or elevated all-users installation, permits changing the installation directory, creates Start Menu and desktop shortcuts, and preserves DSH user data when the application is uninstalled. Version `2.0.1` is written to `dsh-plugin-desktop\dist\DSH-Desktop-2.0.1-x64-Setup.exe`; the unpacked application remains at `dsh-plugin-desktop\dist\win-unpacked\DSH Desktop.exe` for smoke testing.
+`dist:win` refuses non-Windows and non-x64 hosts, runs a Windows-safe gate containing the build, all TypeScript compiler faces, packaging and native-shell focused tests, and the runtime-closure verifier, then builds an assisted NSIS installer and verifies both generated PE files. The full cross-platform suite remains CI-owned because some POSIX execution tests are not Windows programs. The installer allows a per-user or elevated all-users installation, permits changing the installation directory, creates Start Menu and desktop shortcuts, and preserves DSH user data when the application is uninstalled. Version `2.0.1` is written to `dsh-plugin-desktop\dist\PicoAide-Harness-2.0.1-x64-Setup.exe`; the unpacked application remains at `dsh-plugin-desktop\dist\win-unpacked\PicoAide Harness.exe` for smoke testing.
 
 This local command deliberately strips Windows certificate variables and sets `signExecutable=false`. Its output is installable for testing but has no Authenticode publisher, so Windows can display an Unknown publisher or SmartScreen warning. A signed Windows release, certificate verification, installer upgrade/uninstall testing, and native UI/sandbox smoke remain separate release gates.
 
@@ -180,7 +180,7 @@ Use `yarn dist:win-portable` on a native Windows x64 machine to create an unsign
 corepack.cmd yarn dist:win-portable
 ```
 
-The output is `dsh-plugin-desktop\\dist\\DSH-Desktop-2.0.1-x64-Portable.zip`. Extract it to any writable directory and launch `DSH Desktop.exe` without an installer, administrator access, Start Menu registration, or uninstall step. The application still keeps its profiles, logs, and caches in the normal Windows user-data directory, so this is portable distribution rather than a self-contained data sandbox. Portable archives are not handed to the NSIS updater and must be replaced manually when a new version is released. Local builds are unsigned and may trigger an Unknown publisher or SmartScreen warning; signed portable artifacts remain a release gate.
+The output is `dsh-plugin-desktop\\dist\\PicoAide-Harness-2.0.1-x64-Portable.zip`. Extract it to any writable directory and launch `PicoAide Harness.exe` without an installer, administrator access, Start Menu registration, or uninstall step. The application still keeps its profiles, logs, and caches in the normal Windows user-data directory, so this is portable distribution rather than a self-contained data sandbox. Portable archives are not handed to the NSIS updater and must be replaced manually when a new version is released. Local builds are unsigned and may trigger an Unknown publisher or SmartScreen warning; signed portable artifacts remain a release gate.
 
 ### macOS DMG smoke
 
@@ -196,7 +196,7 @@ None. The same DSH Host and client feature plugins assemble model requests.
 
 ## Known Limitations and Deferred Work
 
-- Adding or removing a profile bundle requires restarting DSH Desktop; the launcher does not watch profile manifests. The tray has no profile selector.
+- Adding or removing a profile bundle requires restarting PicoAide Harness; the launcher does not watch profile manifests. The tray has no profile selector.
 - The advanced presentation is unavailable on Linux; Linux launches use the standard native window frame.
 - `dshmarket@1.2.3` remains an optional user-installed third-party package, not a bundled marketplace. Preinstallation is deferred until an audited release consumes the optional Desktop services while preserving ordinary DSH fallback and includes the complete license notice required for redistribution.
 - The update handoff validates the download container, not publisher identity. macOS still requires the user to replace the application from the opened DMG; Windows runs the downloaded NSIS installer but the local `dist:win` artifact is unsigned. Signed artifacts, Authenticode/publisher verification, SmartScreen reputation, and native upgrade testing remain release gates.

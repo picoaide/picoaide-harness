@@ -1,15 +1,15 @@
 {
   "name": "dsh-plugin-desktop",
   "version": "2.4.6",
-  "description": "DSH Desktop: an Electron shell composed as a DeepSeek Harness Cordis plugin",
+  "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://registry.npmjs.org"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anywhere-labs/deepseek-harness-desktop.git",
-    "directory": "dsh-plugin-desktop"
+    "url": "git+https://github.com/picoaide/picoaide-harness.git",
+    "directory": "packages/host/desktop"
   },
   "type": "module",
   "main": "lib/main.js",
@@ -365,7 +365,7 @@
           ]
         }
       ],
-      "artifactName": "DSH-Desktop-${version}-${arch}-Portable.${ext}",
+      "artifactName": "PicoAide-Harness-${version}-${arch}-Portable.${ext}",
       "icon": "build/app-icon.png"
     },
     "nsis": {
@@ -400,7 +400,7 @@
       "artifactName": "PicoAide-Harness-${version}-${arch}.${ext}",
       "category": "Development",
       "maintainer": "picoaide",
-      "synopsis": "DSH Desktop",
+      "synopsis": "PicoAide Harness",
       "files": [
         "!**/node_modules/@img/sharp-linux-arm64/**",
         "!**/node_modules/@img/sharp-linux-arm/**",

@@ -1,7 +1,7 @@
 {
   "name": "@picoaide/dsh-enterprise",
   "version": "0.1.0",
-  "description": "Enterprise login + server-side LLM gateway for DSH Desktop",
+  "description": "Enterprise login + server-side LLM gateway for PicoAide Harness",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

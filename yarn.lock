@@ -1513,9 +1513,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-brand-official@patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-brand-official@0.1.1-rc.2.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+"@deepseek-ai/dsh-client-ui-brand-official@patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-brand-official@0.1.1-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
   version: 0.1.1-rc.2
-  resolution: "@deepseek-ai/dsh-client-ui-brand-official@patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-brand-official@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=32abc8&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "@deepseek-ai/dsh-client-ui-brand-official@patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-brand-official@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=32abc8&locator=picoaide-harness%40workspace%3A."
   peerDependencies:
     "@deepseek-ai/cordis": ^4.0.1
     "@deepseek-ai/dsh-client-runtime": ^0.1.1-rc.2
@@ -1626,9 +1626,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-directory-picker-browse@patch:@deepseek-ai/dsh-client-ui-directory-picker-browse@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-directory-picker-browse@0.1.1-rc.2.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+"@deepseek-ai/dsh-client-ui-directory-picker-browse@patch:@deepseek-ai/dsh-client-ui-directory-picker-browse@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-directory-picker-browse@0.1.1-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
   version: 0.1.1-rc.2
-  resolution: "@deepseek-ai/dsh-client-ui-directory-picker-browse@patch:@deepseek-ai/dsh-client-ui-directory-picker-browse@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-directory-picker-browse@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=4fea58&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "@deepseek-ai/dsh-client-ui-directory-picker-browse@patch:@deepseek-ai/dsh-client-ui-directory-picker-browse@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-directory-picker-browse@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=4fea58&locator=picoaide-harness%40workspace%3A."
   dependencies:
     clsx: "npm:^2.0.0"
   peerDependencies:
@@ -2649,9 +2649,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-llm-deepseek@patch:@deepseek-ai/dsh-llm-deepseek@npm%3A0.1.1-rc.2#./patches/dsh-llm-deepseek@0.1.1-rc.2.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+"@deepseek-ai/dsh-llm-deepseek@patch:@deepseek-ai/dsh-llm-deepseek@npm%3A0.1.1-rc.2#./patches/dsh-llm-deepseek@0.1.1-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
   version: 0.1.1-rc.2
-  resolution: "@deepseek-ai/dsh-llm-deepseek@patch:@deepseek-ai/dsh-llm-deepseek@npm%3A0.1.1-rc.2#./patches/dsh-llm-deepseek@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=da7817&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "@deepseek-ai/dsh-llm-deepseek@patch:@deepseek-ai/dsh-llm-deepseek@npm%3A0.1.1-rc.2#./patches/dsh-llm-deepseek@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=da7817&locator=picoaide-harness%40workspace%3A."
   dependencies:
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     eventsource-parser: "npm:^3.1.0"
@@ -2928,9 +2928,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-sandbox-windows-acl@patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.1-rc.2#./patches/dsh-sandbox-windows-acl@0.1.1-rc.2.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+"@deepseek-ai/dsh-sandbox-windows-acl@patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.1-rc.2#./patches/dsh-sandbox-windows-acl@0.1.1-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
   version: 0.1.1-rc.2
-  resolution: "@deepseek-ai/dsh-sandbox-windows-acl@patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.1-rc.2#./patches/dsh-sandbox-windows-acl@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=1987f3&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "@deepseek-ai/dsh-sandbox-windows-acl@patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.1-rc.2#./patches/dsh-sandbox-windows-acl@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=1987f3&locator=picoaide-harness%40workspace%3A."
   dependencies:
     koffi: "npm:^3.1.0"
   peerDependencies:
@@ -7894,9 +7894,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+"app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch::locator=picoaide-harness%40workspace%3A.":
   version: 26.15.3
-  resolution: "app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch::version=26.15.3&hash=17e0f0&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "app-builder-lib@patch:app-builder-lib@npm%3A26.15.3#./patches/app-builder-lib@26.15.3.patch::version=26.15.3&hash=17e0f0&locator=picoaide-harness%40workspace%3A."
   dependencies:
     "@electron/asar": "npm:3.4.1"
     "@electron/fuses": "npm:^1.8.0"
@@ -9096,29 +9096,6 @@ __metadata:
   checksum: 10c0/7102cf3b7bb719c6b9c0db2e19bf0aa9318d141581befe8c7ce8ccd39af9eaa4346e5e05adef7f9bd7015da0f13a3a25dcfe306ef79dc8668aedbecb658dd247
   languageName: node
   linkType: hard
-
-"deepseek-harness-desktop@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "deepseek-harness-desktop@workspace:."
-  dependenciesMeta:
-    "@deepseek-ai/dsh-subprocess-local":
-      built: true
-    "@google/genai":
-      built: false
-    electron:
-      built: true
-    electron-winstaller:
-      built: false
-    esbuild:
-      built: true
-    koffi:
-      built: true
-    node-pty:
-      built: true
-    protobufjs:
-      built: false
-  languageName: unknown
-  linkType: soft
 
 "default-browser-id@npm:^5.0.0":
   version: 5.0.1
@@ -12551,6 +12528,29 @@ __metadata:
   checksum: 10c0/75c772e74c75d9710a2bf6b7e88fb57e4c26788422abd3b38c8100c796e311c72102ef71159b9e0b56f05f616a968e11b8ec218bcd625c896df067235af8da77
   languageName: node
   linkType: hard
+
+"picoaide-harness@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "picoaide-harness@workspace:."
+  dependenciesMeta:
+    "@deepseek-ai/dsh-subprocess-local":
+      built: true
+    "@google/genai":
+      built: false
+    electron:
+      built: true
+    electron-winstaller:
+      built: false
+    esbuild:
+      built: true
+    koffi:
+      built: true
+    node-pty:
+      built: true
+    protobufjs:
+      built: false
+  languageName: unknown
+  linkType: soft
 
 "picocolors@npm:^1.1.1":
   version: 1.1.1

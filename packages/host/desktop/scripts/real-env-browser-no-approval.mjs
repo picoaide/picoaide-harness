@@ -195,7 +195,7 @@ try {
 
 const failed = results.filter(r => !r.ok)
 const lines = [
-  '# DSH Desktop 真实环境-浏览器无审批验证报告',
+  '# PicoAide Harness 真实环境-浏览器无审批验证报告',
   '',
   `- 服务器: ${SERVER}`,
   `- 账号: ${USER}`,

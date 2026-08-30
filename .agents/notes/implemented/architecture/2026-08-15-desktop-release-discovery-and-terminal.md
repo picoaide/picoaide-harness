@@ -20,7 +20,7 @@ This composition is identical in compatibility and advanced mode and does not ad
 
 ## Stable release update handoff
 
-`desktop-updates` queries only `https://www.dshdesktop.cn/api/desktop/version`. Its explicit configuration defaults to enabled background checks, a 60-second initial delay, a six-hour interval measured after each completed attempt, and a 15-second request deadline. Automatic scheduling runs only when Electron reports a packaged application. Development and other unpackaged launches retain the manual tray command without initiating background network traffic.
+`desktop-updates` queries only the product version service. Its explicit configuration defaults to enabled background checks, a 60-second initial delay, a six-hour interval measured after each completed attempt, and a 15-second request deadline. Automatic scheduling runs only when Electron reports a packaged application. Development and other unpackaged launches retain the manual tray command without initiating background network traffic.
 
 Manual and scheduled work share one in-flight request. The checker sends `GET` with no-cache semantics, rejects redirects and non-200 responses, limits the response body to 4 KiB, and accepts only a JSON string field named `version` containing canonical stable Semantic Versioning. It compares SemVer identifiers without JavaScript numeric conversion. Scheduled invalid, equal, older, HTTP, timeout, cancellation, oversized-body, and network outcomes remain silent. A manual equal or older result opens an up-to-date dialog with the installed version, while any manual request or validation failure opens one fixed retry dialog without exposing response or error details.
 

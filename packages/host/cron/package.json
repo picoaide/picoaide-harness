@@ -1,7 +1,7 @@
 {
   "name": "@picoaide/dsh-cron",
   "version": "0.1.0",
-  "description": "Host cron scheduler for DSH Desktop: 5-field cron parsing, Host-authoritative job ledger, missed-trigger semantics, and a scheduled job executor (task / prompt actions)",
+  "description": "Host cron scheduler for PicoAide Harness: 5-field cron parsing, Host-authoritative job ledger, missed-trigger semantics, and a scheduled job executor (task / prompt actions)",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

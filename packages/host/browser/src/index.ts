@@ -1,5 +1,5 @@
 /**
- * Embedded agent-driven browser for DSH Desktop: owns the WebContentsView tab
+ * Embedded agent-driven browser for PicoAide Harness: owns the WebContentsView tab
  * pool, the CDP sessions, the `browser_*` tool suite, and the loopback panel
  * API consumed by the client browser panel.
  *

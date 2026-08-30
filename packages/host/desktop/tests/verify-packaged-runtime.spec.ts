@@ -28,7 +28,7 @@ function context(
     appOutDir,
     electronPlatformName,
     ...(arch === undefined ? {} : { arch }),
-    packager: { appInfo: { productFilename: 'DSH Desktop' } },
+    packager: { appInfo: { productFilename: 'PicoAide Harness' } },
   }
 }
 
@@ -138,7 +138,7 @@ describe('packaged desktop runtime verification', () => {
   it.each([
     [
       'darwin',
-      join('/build', 'DSH Desktop.app', 'Contents', 'Resources', 'app.asar'),
+      join('/build', 'PicoAide Harness.app', 'Contents', 'Resources', 'app.asar'),
     ],
     [
       'win32',

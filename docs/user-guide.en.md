@@ -1,8 +1,8 @@
-# DSH Desktop User Guide
+# PicoAide Harness User Guide
 
 ## Installation and first launch
 
-Download the macOS or Windows installer from the product download page. DSH Desktop includes Electron, Node, and its pinned DSH dependencies, so normal users do not need to install Node.js or pnpm separately.
+Download the macOS or Windows installer from the product download page. PicoAide Harness includes Electron, Node, and its pinned DSH dependencies, so normal users do not need to install Node.js or pnpm separately.
 
 On first launch, the application prepares the default profile and starts the official DSH Web surface locally. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
 
@@ -34,7 +34,7 @@ The port must be an integer from `0` through `65535`. Changing it performs an or
 
 ## Plugin management
 
-Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. DSH Desktop uses the same plugin system as official Harness, so official plugins install and work directly; multiple plugins follow the same conventions and can be installed and used together.
+Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. PicoAide Harness uses the same plugin system as official Harness, so official plugins install and work directly; multiple plugins follow the same conventions and can be installed and used together.
 
 Ordinary DSH plugins use the upstream CLI semantics:
 
@@ -44,7 +44,7 @@ dsh plugin --profile desktop remove <plugin>
 dsh plugin --profile desktop update
 ```
 
-In the terminal opened from the DSH Desktop tray, bare `dsh` and plugin commands without `--profile` default to the active profile:
+In the terminal opened from the PicoAide Harness tray, bare `dsh` and plugin commands without `--profile` default to the active profile:
 
 ```sh
 dsh plugin add <plugin>
@@ -52,7 +52,7 @@ dsh plugin remove <plugin>
 dsh plugin update
 ```
 
-An explicit `--profile <name>` always wins. Restart DSH Desktop after plugin changes so the new bundle enters the Loader composition.
+An explicit `--profile <name>` always wins. Restart PicoAide Harness after plugin changes so the new bundle enters the Loader composition.
 
 ## Opening the terminal
 
@@ -62,7 +62,7 @@ The welcome text shows the application version, active profile, profile director
 
 ## Updates
 
-Packaged macOS and Windows applications check `https://www.dshdesktop.cn/api/desktop/version` in the background. Startup is not blocked; network errors, non-200 responses, invalid versions, and a server version that is not newer remain silent in the background.
+Packaged macOS and Windows applications check for stable releases through GitHub Releases in the background. Startup is not blocked; network errors, non-200 responses, invalid versions, and a server version that is not newer remain silent in the background.
 
 **Check for Updates…** in the tray is a manual check. It shows a result even when the installed version is current, and reports a retry message when the check fails. Only a server version strictly newer than the local version produces a download confirmation. Cancelling never requests the counted download endpoint.
 
@@ -74,7 +74,7 @@ After confirmation, the app requests the fixed platform download URL. macOS open
 - **The application crashes repeatedly before the tray appears**: run the installed executable directly with the recovery option. The default Windows installation command is below; replace the path if you selected another installation directory.
 
   ```powershell
-  & "$env:LOCALAPPDATA\Programs\DSH Desktop\DSH Desktop.exe" --export-diagnostics
+  & "$env:LOCALAPPDATA\Programs\PicoAide Harness\PicoAide Harness.exe" --export-diagnostics
   ```
 
   If the npm desktop launcher is installed, `dsh-desktop --export-diagnostics` provides the same archive. This command does not start Host, profiles, plugins, or a window. It prints the absolute diagnostics ZIP path when complete.

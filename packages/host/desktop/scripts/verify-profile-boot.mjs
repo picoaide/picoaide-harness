@@ -1,4 +1,4 @@
-/** Headless smoke for the complete published DSH Desktop profile and renderer manifest. */
+/** Headless smoke for the complete published PicoAide Harness profile and renderer manifest. */
 
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

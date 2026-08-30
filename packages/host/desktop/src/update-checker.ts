@@ -3,7 +3,7 @@
 /** GitHub repository owning public client releases. */
 export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
 
-/** Public endpoint returning the latest stable DSH Desktop release. */
+/** Public endpoint returning the latest stable PicoAide Harness release. */
 export const DESKTOP_VERSION_ENDPOINT =
   `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
 

@@ -52,9 +52,9 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 | 平台 | 下载 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [下载安装程序](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-x64-Setup.exe) | 运行 NSIS 安装程序并按提示完成安装 |
-| macOS Apple Silicon | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-mac.dmg) | 打开 DMG，将 PicoAide Harness 拖入 Applications |
-| Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.3.0-x86_64.AppImage) | 授予执行权限后运行 |
+| Windows x64 | [下载安装程序](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x64-Setup.exe) | 运行 NSIS 安装程序并按提示完成安装 |
+| macOS Apple Silicon | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-mac.dmg) | 打开 DMG，将 PicoAide Harness 拖入 Applications |
+| Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x86_64.AppImage) | 授予执行权限后运行 |
 
 也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要（每个 Release 附 `SHA256SUMS.txt`，安装前建议校验）。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
 
@@ -136,6 +136,8 @@ PicoAide Harness 没有魔改上游源码，也不是一个固定写死的外壳
 ## 特别感谢
 
 特别感谢 DeepSeek Harness 原始仓库和 DeepSeek AI 团队。本项目基于固定版本的上游源码构建，核心的智能体、模型、工具、会话、Web UI 和插件生态都来自这个项目。
+
+特别感谢 [anywhere-labs/dsh-desktop](https://github.com/anywhere-labs/dsh-desktop)（原 `anywhere-labs/deepseek-harness-desktop`）项目提供的源码与灵感——本项目的桌面封装、插件化组合思路与产品体验从该项目起步，并在此基础上持续演进。
 
 同时感谢 Cordis 项目提供的插件化基础，以及 Koishi.js 项目和社区长期积累的插件化实践、工具与经验。
 

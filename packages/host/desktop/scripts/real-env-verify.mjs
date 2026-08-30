@@ -192,7 +192,7 @@ try {
 // --- report ---
 const failed = results.filter(r => !r.ok)
 const lines = [
-  '# DSH Desktop 真实环境客户端验证报告',
+  '# PicoAide Harness 真实环境客户端验证报告',
   '',
   `- 时间：${new Date().toISOString()}`,
   `- 服务：${SERVER}`,
