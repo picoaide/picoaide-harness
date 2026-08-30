@@ -259,24 +259,9 @@ func (a *API) handleMessages(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
 		return
 	}
-	// 官方 Anthropic 兼容语义(api-docs.deepseek.com/guides/anthropic_api):
-	// claude-* 模型名(Anthropic SDK)自动映射到默认模型——官方映射到
-	// deepseek-v4-pro/flash; 服务端按自己的模型目录取 gateway.default_model
-	// 或首个启用模型。其他未知模型保持 404(严格默认拒绝,不自动 fallback)。
-	if len(ups) == 0 && strings.HasPrefix(req.Model, "claude-") {
-		if mapped, ok := resolveAnthropicModel(a.DB, req.Model); ok {
-			// 映射后的模型按任意可用协议路由(官方 anthropic 端点背后是 openai 上游)。
-			ups, err = MatchModelsByProtocol(a.DB, mapped, "")
-			if err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
-				return
-			}
-			if len(ups) > 0 {
-				// 用映射后的模型名做计量/审计(与上游一致)。
-				req.Model = mapped
-			}
-		}
-	}
+	// 模型名原样转发(2026-09): 网关不做模型映射/别名字段转换——claude-*
+	// 等模型名直接透传给上游(官方 API 自会处理映射), 未知模型保持 404
+	// (严格默认拒绝, 不自动 fallback)。
 	if len(ups) == 0 {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "模型不存在或不可用")
 		return
