@@ -198,7 +198,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --repo picoaide/picoaide-harness \
             --title "PicoAide Harness ${GITHUB_REF_NAME}" \
-            --notes "DSH Desktop release ${GITHUB_REF_NAME}" \
+            --notes "PicoAide Harness release ${GITHUB_REF_NAME}" \
             release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
         env:
           GH_TOKEN: ${{ github.token }}

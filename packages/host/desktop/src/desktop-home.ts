@@ -1,5 +1,5 @@
 /**
- * Product home resolution for DSH Desktop.
+ * Product home resolution for PicoAide Harness.
  *
  * The product owns its data directory: the default Harness home under the
  * OS home is `~/.picoaide-harness` instead of the upstream `~/.dsh`.

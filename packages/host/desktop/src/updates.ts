@@ -1,4 +1,4 @@
-/** Cordis Host plugin for scheduled and interactive DSH Desktop updates. */
+/** Cordis Host plugin for scheduled and interactive PicoAide Harness updates. */
 
 import { open } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'

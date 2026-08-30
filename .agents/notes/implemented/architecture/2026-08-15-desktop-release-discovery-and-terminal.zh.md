@@ -20,7 +20,7 @@ Desktop 原生操作是围绕同一个 Electron adapter 组合的独立 Cordis H
 
 ## Stable release 更新交接
 
-`desktop-updates` 只查询 `https://www.dshdesktop.cn/api/desktop/version`。其显式配置默认启用后台检查：首次延迟 60 秒，每次检查完成六小时后安排下一次，并为每个请求设置 15 秒期限。只有 Electron 报告为打包应用时才会自动调度。开发运行与其他未打包启动会保留手工托盘命令，但不会主动发起后台网络流量。
+`desktop-updates` 只查询产品版本服务。其显式配置默认启用后台检查：首次延迟 60 秒，每次检查完成六小时后安排下一次，并为每个请求设置 15 秒期限。只有 Electron 报告为打包应用时才会自动调度。开发运行与其他未打包启动会保留手工托盘命令，但不会主动发起后台网络流量。
 
 手工检查与定时检查共用一个 in-flight request。Checker 使用 no-cache 语义发送 `GET`，拒绝 redirect 与非 200 响应，把响应正文限制为 4 KiB，并且只接受名为 `version` 的 JSON string 字段及规范的 stable Semantic Versioning。比较过程不会把 SemVer identifier 转成 JavaScript number。定时检查遇到无效、相同、旧版本、HTTP、timeout、cancellation、正文超限与网络结果时保持静默。手工检查得到相同或旧版本时会显示包含当前安装版本的“已是最新”对话框；请求或校验失败时则显示一条固定重试提示，不暴露响应或错误细节。
 

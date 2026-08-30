@@ -1,5 +1,5 @@
 /**
- * DSH Desktop client E2E automation.
+ * PicoAide Harness client E2E automation.
  *
  * One command: build mock gateway up, launch the packaged app (or dev main),
  * drive it over CDP, log in, assert every client surface, capture screenshots,
@@ -330,7 +330,7 @@ async function run() {
     await cleanup()
     const failed = results.filter(r => !r.ok)
     const lines = [
-      '# DSH Desktop 客户端 E2E 报告',
+      '# PicoAide Harness 客户端 E2E 报告',
       '',
       `- 时间：${new Date().toISOString()}`,
       `- 应用：${appBinary}`,
