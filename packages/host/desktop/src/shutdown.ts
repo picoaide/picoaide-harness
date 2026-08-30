@@ -1,7 +1,7 @@
 /** Application-level quit sources that must remain active before any window mounts. */
 
 /** Maximum grace allowed for the Cordis tree to dispose before native exit. */
-export const DESKTOP_SHUTDOWN_TIMEOUT_MS = 5_000
+const DESKTOP_SHUTDOWN_TIMEOUT_MS = 5_000
 
 /** Bounded, escalating shutdown controller for the Electron application. */
 export interface DesktopShutdown {

@@ -45,7 +45,7 @@ function readVersion(desktopRoot: string): string {
 }
 
 /** Verify that a generated Windows artifact has a valid PE header. */
-export function assertPortableExecutable(path: string, label: string): void {
+function assertPortableExecutable(path: string, label: string): void {
   const stat = statSync(path)
   if (!stat.isFile() || stat.size < 68) {
     throw new Error(`${label} is not a non-empty regular file: ${path}`)

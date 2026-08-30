@@ -64,7 +64,7 @@ export function applyUpdateBadge(ctx: ClientContext): void {
 }
 
 /** Full utilities seat props (owner passes nothing; the badge is self-sufficient). */
-export type DesktopUpdateBadgeProps = PropsRuntime<'conversation.session.header.utilities'>
+type DesktopUpdateBadgeProps = PropsRuntime<'conversation.session.header.utilities'>
 
 /** Ask the Host to run the user-visible manual check (same flow as the tray command). */
 export async function triggerDesktopUpdateCheck(

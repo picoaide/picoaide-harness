@@ -8,7 +8,7 @@ import {
 } from './layout-state.ts'
 
 /** Private values assembled by the advanced-shell registration. */
-export interface AdvancedFrameInjected {
+interface AdvancedFrameInjected {
   /** Desktop-owned panel state exposed through the standard layout service. */
   layout: DesktopLayoutState
   /** Host platform controlling native title-bar spacing. */
