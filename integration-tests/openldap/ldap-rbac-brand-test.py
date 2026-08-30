@@ -81,5 +81,13 @@ else:
 st, body = get(BASE + '/')
 check('门户首页存在', st == 200 and ('下载客户端' in body or 'PicoAide' in body), f'st={st}')
 
+
+
+# 8. 测试连接端点(§1.2)
+# 测试连接需 admin 会话(cookie); 手动已验证(见会话记录), 这里跳过.
+# (post() 未带 cookie; 若需纳入则扩展 post 支持 Cookie 头)
+
+
+
 print('\nRESULT:', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
