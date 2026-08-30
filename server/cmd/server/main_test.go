@@ -108,7 +108,11 @@ func isLegacyPath(p string) bool {
 	if p == "/api" || p == "/v1" || p == "/v2" {
 		return true
 	}
-	if strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/v2/") {
+	// DeepSeek 兼容 LLM 网关 /v1/* 是保留原样的独立命名空间(2026-09 定案)。
+	if strings.HasPrefix(p, "/v1/") {
+		return false
+	}
+	if strings.HasPrefix(p, "/v2/") {
 		return true
 	}
 	if strings.HasPrefix(p, "/api/") &&

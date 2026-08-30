@@ -155,3 +155,27 @@ func MatchModel(db *sql.DB, modelName string) (*Upstream, error) {
 	}
 	return &ups[0], nil
 }
+
+// resolveAnthropicModel 返回官方 Anthropic 兼容的模型映射目标(2026-09):
+// 请求模型不支持时,映射到服务端默认模型(gateway.default_model);
+// 空的则取第一个启用的 openai/anthropic 协议 provider 的模型。
+// 与官方「未知模型自动映射 deepseek-v4-flash」语义对齐,只是用服务端
+// 自有的模型目录。ok=false 表示没有任何可用模型(调用方维持 404)。
+func resolveAnthropicModel(db *sql.DB, requested string) (string, bool) {
+	// claude-* 是 Antheropic SDK 常用模型名,优先映射;任何未知模型同样映射。
+	if v, ok, _ := serverstore.GetSetting(db, "gateway.default_model"); ok && v != "" {
+		return v, true
+	}
+	// 回退:取第一个启用 provider 的任意模型(模型列表按 id 排序)。
+	ups, err := LoadUpstreams(db)
+	if err != nil {
+		return "", false
+	}
+	for i := range ups {
+		if len(ups[i].Models) > 0 {
+			return ups[i].Models[0], true
+		}
+	}
+	_ = requested
+	return "", false
+}

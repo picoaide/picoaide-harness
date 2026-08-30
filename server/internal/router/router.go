@@ -62,6 +62,9 @@ func Register(r *gin.Engine, deps Deps) {
 
 	// ================= 服务端管理面 /api/server =================
 	registerServer(srv, deps)
+
+	// ================= DeepSeek 兼容 LLM 网关 /v1(独立命名空间) =================
+	registerGatewayV1(r, deps)
 }
 
 // registerClientV2 客户端员工面全部端点。
@@ -114,13 +117,33 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 
 	// 遥测
 	cli.POST("/telemetry/skill-call", serverauth.BearerAuth(d.DB), d.Telemetry.ReportSkillCall)
+}
 
-	// 网关(v1 兼容子路径 /v2/v1/* 语义保留在 client v2 下)
-	v1 := cli.Group("/v1", serverauth.BearerAuth(d.DB))
+// registerGatewayV1 挂载 DeepSeek 兼容的 LLM 网关 API,与官方完全一致:
+// 官方原生端点(/chat/completions、/completions、/responses、/models)
+// + OpenAI/Anthropic 兼容(/v1/*)。独立于 /api/* 管理命名空间,第三方按
+// DeepSeek 标准 baseURL(server 或 server/v1、server/anthropic) 接入。
+func registerGatewayV1(r *gin.Engine, d Deps) {
+	// OpenAI/Anthropic 兼容形态(OpenAI SDK base_url=server 自动补 /v1;
+	// Anthropic SDK base_url=server/anthropic 用 /v1/messages)。
+	v1 := r.Group("/v1", serverauth.BearerAuth(d.DB))
 	v1.POST("/chat/completions", d.Gateway.ChatCompletions)
 	v1.POST("/embeddings", d.Gateway.Embeddings)
 	v1.POST("/messages", d.Gateway.Messages)
+	v1.POST("/completions", d.Gateway.Completions)
+	v1.POST("/responses", d.Gateway.Responses)
 	v1.GET("/models", d.Gateway.Models)
+
+	// 官方原生端点(base_url=server, 无 /v1 前缀)。
+	gw := r.Group("", serverauth.BearerAuth(d.DB))
+	gw.POST("/chat/completions", d.Gateway.ChatCompletions)
+	gw.POST("/embeddings", d.Gateway.Embeddings)
+	gw.POST("/completions", d.Gateway.Completions)
+	gw.POST("/responses", d.Gateway.Responses)
+	gw.GET("/models", d.Gateway.Models)
+	// Anthropic 原生兼容(base_url=server/anthropic): SDK 请求 /v1/messages,
+	// 已由上面 v1 组覆盖;再挂 /messages 兜底变体。
+	gw.POST("/messages", d.Gateway.Messages)
 }
 
 // registerServer 服务端管理面全部端点。
