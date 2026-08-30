@@ -16,8 +16,12 @@ type User struct {
 	Email        string
 	PasswordHash string
 	Source       string
-	IsAdmin      bool
-	Status       int
+	// Role is the RBAC role: "super_admin" | "auditor" | "user".
+	// Replaces the legacy is_admin boolean (which remains in the schema
+	// for historical dump compatibility but is never written with new values).
+	Role       string
+	IsAdmin    bool
+	Status     int
 	// QuotaTokens is the per-user monthly traffic quota in tokens (0017):
 	// nil = follow the global default, 0 = unlimited, >0 = capped.
 	// Admins are always unlimited regardless of this value.
@@ -30,8 +34,26 @@ type User struct {
 	UpdatedAt  time.Time
 }
 
+// Role constants (RBAC, design v3b).
+const (
+	RoleSuperAdmin = "super_admin"
+	RoleAuditor    = "auditor"
+	RoleUser       = "user"
+)
+
+// ValidRole reports whether role is one of the known RBAC roles.
+func ValidRole(role string) bool {
+	return role == RoleSuperAdmin || role == RoleAuditor || role == RoleUser
+}
+
+// IsAdminRole reports whether the role grants webadmin access (admin session).
+// auditor is allowed into the portal (read-only), user is not.
+func IsAdminRole(role string) bool {
+	return role == RoleSuperAdmin || role == RoleAuditor
+}
+
 // userCols is the canonical user column list (kept in sync with scanUser).
-const userCols = "id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at, quota_tokens, quota_money"
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -73,11 +95,11 @@ func AuthenticateLocal(db *sql.DB, username, password string) (User, error) {
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var isAdmin, status int
-	var displayName, email, passwordHash sql.NullString
+	var displayName, email, passwordHash, role sql.NullString
 	var quota sql.NullInt64
 	var quotaMoney sql.NullFloat64
 	var createdAt, updatedAt any
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &status, &createdAt, &updatedAt, &quota, &quotaMoney); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -85,7 +107,18 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u.DisplayName = displayName.String
 	u.Email = email.String
 	u.PasswordHash = passwordHash.String
-	u.IsAdmin = isAdmin == 1
+	u.Role = role.String
+	if u.Role == "" {
+		// Fallback for rows created before the role migration: derive from
+		// the legacy flag so IsSuperAdmin() stays correct during the window.
+		if u.IsAdmin {
+			u.Role = RoleSuperAdmin
+		} else {
+			u.Role = RoleUser
+		}
+	}
+	// Keep the legacy field in sync with the RBAC role (dump compatibility).
+	u.IsAdmin = u.Role == RoleSuperAdmin
 	u.Status = status
 	if quota.Valid {
 		u.QuotaTokens = &quota.Int64
@@ -96,12 +129,34 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	return &u, nil
 }
 
+// IsSuperAdmin reports whether the role is super_admin (RBAC single source).
+// Prefer this over the legacy IsAdmin field for authorization decisions.
+func (u *User) IsSuperAdmin() bool { return u.Role == RoleSuperAdmin }
+
+// HasManagementAccess reports whether the role may enter the webadmin portal.
+func (u *User) HasManagementAccess() bool { return IsAdminRole(u.Role) }
+
+// resolveRole derives the RBAC role for writes. The legacy IsAdmin flag is
+// the compatibility source of truth for existing callers (all of which toggle
+// IsAdmin, not Role): IsAdmin=true always maps to super_admin; IsAdmin=false
+// keeps an explicit valid Role (auditor) or falls back to user.
+func resolveRole(role string, isAdmin bool) string {
+	if isAdmin {
+		return RoleSuperAdmin
+	}
+	if ValidRole(role) {
+		return role
+	}
+	return RoleUser
+}
+
 // CreateUser inserts a user row and returns its id.
 func CreateUser(db *sql.DB, u *User) (int64, error) {
-	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status, quota_tokens, quota_money)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	role := resolveRole(u.Role, u.IsAdmin)
+	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, role, status, quota_tokens, quota_money)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.Username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		u.Source, boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney))
+		u.Source, boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -132,12 +187,13 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 	return u, err
 }
 
-// UpdateUser updates display_name/email/password_hash/is_admin/status.
+// UpdateUser updates display_name/email/password_hash/is_admin/role/status.
 func UpdateUser(db *sql.DB, u *User) error {
-	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
+	role := resolveRole(u.Role, u.IsAdmin)
+	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, role=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
+		boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
 	if err != nil {
 		return err
 	}
@@ -156,10 +212,11 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
+	role := resolveRole(u.Role, u.IsAdmin)
+	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, role=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
+		boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
 	if err != nil {
 		return err
 	}
@@ -319,13 +376,14 @@ func DeleteUser(db *sql.DB, id int64) error {
 	}
 	defer tx.Rollback()
 	var username string
-	var wasAdmin bool
-	if err := tx.QueryRow("SELECT username, is_admin FROM users WHERE id = ?", id).Scan(&username, &wasAdmin); err != nil {
+	var role string
+	if err := tx.QueryRow("SELECT username, role FROM users WHERE id = ?", id).Scan(&username, &role); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
 	}
+	wasSuperAdmin := role == RoleSuperAdmin
 	// cascade stmts keyed by user id
 	for _, stmt := range []string{
 		"DELETE FROM api_tokens WHERE user_id = ?",
@@ -363,10 +421,11 @@ func DeleteUser(db *sql.DB, id int64) error {
 		return ErrNotFound
 	}
 	// C-17: guard runs after the delete inside the same transaction; if the
-	// deleted row was an admin and none remain, roll back.
-	if wasAdmin {
+	// deleted row was a super_admin and none remain, roll back (v3b: count
+	// by role column, not the legacy is_admin boolean).
+	if wasSuperAdmin {
 		var admins int
-		if err := tx.QueryRow("SELECT COUNT(*) FROM users WHERE is_admin = 1").Scan(&admins); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM users WHERE role = ?", RoleSuperAdmin).Scan(&admins); err != nil {
 			return err
 		}
 		if admins == 0 {

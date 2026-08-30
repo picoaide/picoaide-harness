@@ -68,24 +68,24 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("/:name/:version/archive", download(db, cacheDir, false))
 }
 
-// RegisterAdminRoutes mounts /api/admin/shared-skills (AdminAuth endpoints).
+// RegisterAdminRoutes mounts /api/admin/shared-skills (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/admin/shared-skills", serverauth.AdminAuth(db))
-	g.GET("", listAll(db))
-	g.GET("/:name/:version/archive", download(db, cacheDir, true))
-	g.GET("/:name/:version/preview", preview(db, cacheDir))
-	g.POST("/:name/:version/approve", decide(db, serverstore.SharedSkillApproved, "shared_skill_approve"))
-	g.POST("/:name/:version/reject", decide(db, serverstore.SharedSkillRejected, "shared_skill_reject"))
-	g.DELETE("/:name/:version", remove(db, cacheDir))
+	serverauth.AdminRoute(g, "GET", "", serverauth.PermCapabilityRead, listAll(db))
+	serverauth.AdminRoute(g, "GET", "/:name/:version/archive", serverauth.PermCapabilityRead, download(db, cacheDir, true))
+	serverauth.AdminRoute(g, "GET", "/:name/:version/preview", serverauth.PermCapabilityRead, preview(db, cacheDir))
+	serverauth.AdminRoute(g, "POST", "/:name/:version/approve", serverauth.PermCapabilityWrite, decide(db, serverstore.SharedSkillApproved, "shared_skill_approve"))
+	serverauth.AdminRoute(g, "POST", "/:name/:version/reject", serverauth.PermCapabilityWrite, decide(db, serverstore.SharedSkillRejected, "shared_skill_reject"))
+	serverauth.AdminRoute(g, "DELETE", "/:name/:version", serverauth.PermCapabilityWrite, remove(db, cacheDir))
 	// 质量标记(0037):仅 approved 行可设置/清除(official/featured,互斥)。
-	g.PUT("/:name/:version/quality", setQuality(db))
+	serverauth.AdminRoute(g, "PUT", "/:name/:version/quality", serverauth.PermCapabilityWrite, setQuality(db))
 	// 单文件内容(审核查看):从归档提取指定文件内容,支持文本/二进制/超大。
-	g.GET("/:name/:version/file", fileContent(db, cacheDir))
+	serverauth.AdminRoute(g, "GET", "/:name/:version/file", serverauth.PermCapabilityRead, fileContent(db, cacheDir))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
-	g.GET("/:name/grants", listGrants(db))
-	g.PUT("/:name/grants", replaceGrants(db))
-	g.PUT("/:name/grant", setGrant(db, true))
-	g.DELETE("/:name/grant", setGrant(db, false))
+	serverauth.AdminRoute(g, "GET", "/:name/grants", serverauth.PermCapabilityRead, listGrants(db))
+	serverauth.AdminRoute(g, "PUT", "/:name/grants", serverauth.PermCapabilityWrite, replaceGrants(db))
+	serverauth.AdminRoute(g, "PUT", "/:name/grant", serverauth.PermCapabilityWrite, setGrant(db, true))
+	serverauth.AdminRoute(g, "DELETE", "/:name/grant", serverauth.PermCapabilityWrite, setGrant(db, false))
 }
 
 func rowJSON(s serverstore.SharedSkill) gin.H {
