@@ -50,13 +50,32 @@ interface QuotaUser {
 
 type Group = 'day' | 'week' | 'month' | 'model' | 'user'
 type ChartTab = 'trend' | 'proportion' | 'rank'
-// 统计口径:tokens(原指标)或 money(金额,0022 企业费用维度)
-type Metric = 'tokens' | 'money'
+// 统计口径:tokens(原指标)或 money(金额,0022 企业费用维度)——仅作用于图表区
+type Metric = 'money' | 'tokens'
 
 const RANK_TOP = 10
 
 const GROUP_LABEL: Record<Group, string> = {
   day: '日期', week: '周', month: '月', model: '模型', user: '用户',
+}
+
+const CHART_TAB_LABEL: Record<ChartTab, string> = {
+  trend: '趋势', proportion: '占比', rank: '排行',
+}
+
+// 2026-08-28 交互重构:维度(分组)与图表类型解耦。
+// - 时间维度(day/week/month):趋势/占比/排行均可用(数据为时间序列);
+// - 类别维度(model/user):仅占比/排行(无时间序列,趋势不适用)。
+// 切换图表=纯前端重绘(不发起查询);切换维度才重新查询,仅在当前图表
+// 类型不适用时自动落到该维度默认图表,不再出现"改一个控件另一个跟着变"。
+function chartTabsFor(g: Group): ChartTab[] {
+  return g === 'model' || g === 'user' ? ['proportion', 'rank'] : ['trend', 'proportion', 'rank']
+}
+
+function defaultTabFor(g: Group): ChartTab {
+  if (g === 'model') return 'proportion'
+  if (g === 'user') return 'rank'
+  return 'trend'
 }
 
 export default function Usage() {
@@ -93,18 +112,18 @@ export default function Usage() {
     toRef.current = to
   }, [from, to])
 
-  // 图表 Tab ↔ 分组双向联动:
-  //   group 下拉变化 → chartTab 同步;chartTab 手动切换 → 重新发起对应 group 查询
-  useEffect(() => {
-    if (group === 'model') setChartTab('proportion')
-    else if (group === 'user') setChartTab('rank')
-    else setChartTab('trend') // day/week/month → 趋势
-  }, [group])
+  // 2026-08-28:维度切换时若当前图表类型不适用,自动落到维度默认图表;
+  // 适用则保留用户当前选择(维度与图表解耦,互不覆盖)。
+  // 同时清除图表点击产生的明细过滤(filterName),避免跨维度残留误导。
+  const onGroupChange = (g: Group) => {
+    setGroup(g)
+    setFilterName('')
+    if (!chartTabsFor(g).includes(chartTab)) setChartTab(defaultTabFor(g))
+  }
 
+  // 2026-08-28:手动切换图表 = 纯前端重绘,不发查询(数据已在 rows 中)。
   function onChartTabChange(v: string) {
     setChartTab(v as ChartTab)
-    const g: Group = v === 'trend' ? 'day' : v === 'proportion' ? 'model' : 'user'
-    if (g !== group) setGroup(g)
   }
 
   // 用户列表 + 全局默认配额(含金额) + 模型定价状态 + 部门预算只拉一次;
@@ -210,6 +229,7 @@ export default function Usage() {
     setTo(r.to)
     fromRef.current = r.from
     toRef.current = r.to
+    setFilterName('')
     load()
   }
 
@@ -220,6 +240,7 @@ export default function Usage() {
       return
     }
     setError('')
+    setFilterName('')
     load()
   }
 
@@ -445,12 +466,12 @@ export default function Usage() {
         </div>
       )}
 
-      {/* 筛选区:分组 + 快捷区间 + 日期 + 统计口径 */}
+      {/* 筛选区:分组 + 快捷区间 + 日期(统计口径移到图表卡,只作用于图表) */}
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3 pt-6">
           <div>
             <Label className="mb-1 block text-sm text-muted-foreground">分组</Label>
-            <Select value={group} onValueChange={(v) => setGroup(v as Group)}>
+            <Select value={group} onValueChange={(v) => onGroupChange(v as Group)}>
               <SelectTrigger className="w-32" aria-label="分组"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="day">按日</SelectItem>
@@ -458,16 +479,6 @@ export default function Usage() {
                 <SelectItem value="month">按月</SelectItem>
                 <SelectItem value="model">按模型</SelectItem>
                 <SelectItem value="user">按用户</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label className="mb-1 block text-sm text-muted-foreground">统计口径</Label>
-            <Select value={metric} onValueChange={(v) => setMetric(v as Metric)}>
-              <SelectTrigger className="w-28" aria-label="统计口径"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="money">金额(元)</SelectItem>
-                <SelectItem value="tokens">tokens</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -520,7 +531,7 @@ export default function Usage() {
         ))}
       </div>
 
-      {/* 图表区:趋势 / 占比 / 排行(VChart) */}
+      {/* 图表区:趋势 / 占比 / 排行(VChart);口径选择只影响图表,前端即时切换 */}
       <Card>
         <Tabs value={chartTab} onValueChange={onChartTabChange}>
           <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -533,11 +544,20 @@ export default function Usage() {
                   : `Total: ${fmtTokens(totals.chatTotal)} tokens(不含 embedding)`}
               </CardDescription>
             </div>
-            <TabsList>
-              <TabsTrigger value="trend">趋势</TabsTrigger>
-              <TabsTrigger value="proportion">占比</TabsTrigger>
-              <TabsTrigger value="rank">排行</TabsTrigger>
-            </TabsList>
+            <div className="flex items-center gap-3">
+              <Select value={metric} onValueChange={(v) => setMetric(v as Metric)}>
+                <SelectTrigger className="h-8 w-28" aria-label="统计口径"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="money">金额(元)</SelectItem>
+                  <SelectItem value="tokens">tokens</SelectItem>
+                </SelectContent>
+              </Select>
+              <TabsList>
+                {chartTabsFor(group).map((tab) => (
+                  <TabsTrigger key={tab} value={tab}>{CHART_TAB_LABEL[tab]}</TabsTrigger>
+                ))}
+              </TabsList>
+            </div>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -559,7 +579,12 @@ export default function Usage() {
                   )}
                 </TabsContent>
                 <TabsContent value="rank" className="h-72">
-                  {chartTab === 'rank' && <ChartLazy spec={rankSpec} />}
+                  {chartTab === 'rank' && (
+                    <ChartLazy
+                      spec={rankSpec}
+                      onClick={(e: any) => setFilterName(e?.datum?.label ?? '')}
+                    />
+                  )}
                 </TabsContent>
               </>
             )}
