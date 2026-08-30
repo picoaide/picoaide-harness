@@ -51,7 +51,9 @@ describe('session-service', () => {
     service.clear()
     expect(service.isLoggedIn()).toBe(false)
     expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, null)
-  })
+    // mac CI runner 上 setup 需下载 Electron, 网络波动可致 5s 默认超时(flaky);
+    // 给足 30s。
+  }, 30000)
 
   it('never lets an async restore overwrite an already-set session', async () => {
     const { ctx, emit } = stubCtx()
