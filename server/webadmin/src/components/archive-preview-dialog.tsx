@@ -33,7 +33,7 @@ interface Props {
   mainTitle: string
   /** 主文件内容 */
   mainContent: string
-  /** 单文件内容端点前缀,如 /api/admin/shared-skills/xxx/1.0.0 */
+  /** 单文件内容端点前缀,如 /api/server/admin/shared-skills/xxx/1.0.0 */
   fileBase: string
   onClose: () => void
 }

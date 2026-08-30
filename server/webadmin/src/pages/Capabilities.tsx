@@ -9,19 +9,20 @@ import { EmptyState } from '../components/empty-state'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
-import { Download, FileText, RefreshCw, Share2, ShieldCheck } from 'lucide-react'
+import { Download, FileText, RefreshCw, Share2, ShieldCheck, Sparkles, TriangleAlert } from 'lucide-react'
 import { GrantDialog } from '../components/grant-dialog'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 
 /**
- * 能力中心·共享智能体审核(2026-08-28 定案):能力中心只承载智能体,
- * 技能审核由「共享技能」页(/shared-skills)承担,本页仅请求 type=agent。
- * approve/reject/delete 与授权仍走原域端点(base_path 由服务端逐行下发),
- * 质量标记(官方/精选)经 /quality 端点设置。不复制审核逻辑,仅状态编排。
+ * 能力中心·统一审批(决策 2026-08-25 Phase 3,2026-09 恢复):共享技能与
+ * 共享 Agent 的审核队列归并到一个列表(类型徽章区分 + 类型筛选),
+ * approve/reject/delete 与授权仍走各自原域端点(base_path 由服务端逐行
+ * 下发,均为 /api/server/admin 前缀),质量标记(官方/精选)经各域 /quality
+ * 端点设置。不复制审核逻辑,仅组合与状态编排。
  */
 
 interface ApprovalRow {
-  kind: 'agent'
+  kind: 'skill' | 'agent'
   name: string
   version: string
   display_name: string
@@ -30,9 +31,12 @@ interface ApprovalRow {
   status: 'pending' | 'approved' | 'rejected'
   reason: string
   quality: '' | 'official' | 'featured'
+  downloads: number
+  calls?: number
   created_at: string
   base_path: string
   preview_path: string
+  conflict?: boolean
 }
 
 interface Dept {
@@ -47,6 +51,11 @@ const STATUS_META: Record<ApprovalRow['status'], { label: string; variant: 'seco
   rejected: { label: '已拒绝', variant: 'destructive' },
 }
 
+const KIND_META: Record<ApprovalRow['kind'], { label: string; icon: typeof Sparkles }> = {
+  skill: { label: '技能', icon: Sparkles },
+  agent: { label: '智能体', icon: Share2 },
+}
+
 function fmtTime(iso: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -57,6 +66,7 @@ function fmtTime(iso: string): string {
 export default function Capabilities() {
   const [allRows, setAllRows] = useState<ApprovalRow[]>([])
   const [tab, setTab] = useState('pending')
+  const [typeFilter, setTypeFilter] = useState<'all' | 'skill' | 'agent'>('all')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [confirm, setConfirm] = useState<ApprovalRow | null>(null)
@@ -77,12 +87,15 @@ export default function Capabilities() {
   }, [])
   const loadSeq = useRef(0)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (status: string, kind: 'all' | 'skill' | 'agent') => {
     const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ approvals: ApprovalRow[] }>('/api/server/admin/capabilities/approvals?type=agent')
+      // status=all 必须显式传(服务端缺省=仅 pending);type 缺省=全部。
+      const qs = new URLSearchParams({ status })
+      if (kind !== 'all') qs.set('type', kind)
+      const data = await request<{ approvals: ApprovalRow[] }>(`/api/server/admin/capabilities/approvals?${qs}`)
       if (current !== loadSeq.current) return
       setAllRows(data.approvals ?? [])
     } catch (err: any) {
@@ -93,10 +106,10 @@ export default function Capabilities() {
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  // tab/type 变化都触发重拉(服务端过滤,保证 counts 永远基于当前类型全集)。
+  useEffect(() => { void load(tab, typeFilter) }, [load, tab, typeFilter])
 
   const shown = allRows
-    .filter(r => tab === 'all' || r.status === tab)
 
   const act = async (row: ApprovalRow, kind: 'approve' | 'reject' | 'delete') => {
     if (busy) return
@@ -119,7 +132,7 @@ export default function Capabilities() {
       }
       setConfirm(null)
       setReason('')
-      await load()
+      await load(tab, typeFilter)
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -133,7 +146,7 @@ export default function Capabilities() {
     setError('')
     try {
       await request(`${row.base_path}/quality`, { method: 'PUT', body: JSON.stringify({ quality }) })
-      await load()
+      await load(tab, typeFilter)
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -166,15 +179,15 @@ export default function Capabilities() {
     <div className="space-y-4">
       <PageHeader
         title="能力中心"
-        desc="共享智能体的统一审核队列;通过后需授权才可见可装"
+        desc="共享技能与共享 Agent 的统一审核队列;通过后需授权才可见可装"
         actions={
-          <Button variant="outline" size="sm" onClick={() => { void load() }}>
+          <Button variant="outline" size="sm" onClick={() => { void load(tab, typeFilter) }}>
             <RefreshCw className="h-4 w-4" /> 刷新
           </Button>
         }
       />
 
-      {/* 状态 tab */}
+      {/* 状态 tab + 类型筛选 */}
       <div className="flex items-center justify-between gap-2">
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
@@ -184,6 +197,13 @@ export default function Capabilities() {
             <TabsTrigger value="all">全部（{counts.all}）</TabsTrigger>
           </TabsList>
         </Tabs>
+        <div className="flex items-center gap-1">
+          {(['all', 'skill', 'agent'] as const).map(t => (
+            <Button key={t} size="sm" variant={typeFilter === t ? 'default' : 'outline'} onClick={() => { setTypeFilter(t) }}>
+              {t === 'all' ? '全部类型' : KIND_META[t].label}
+            </Button>
+          ))}
+        </div>
       </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
@@ -191,17 +211,19 @@ export default function Capabilities() {
       {loading ? (
         <EmptyState icon={<Share2 className="h-6 w-6" />} title="加载中…" desc="请稍候" />
       ) : shown.length === 0 ? (
-        <EmptyState icon={<Share2 className="h-6 w-6" />} title="暂无待处理智能体" desc="员工上传的共享 Agent 将出现在这里" />
+        <EmptyState icon={<Share2 className="h-6 w-6" />} title="暂无待处理能力" desc="员工上传的技能/Agent 将出现在这里" />
       ) : (
         <div className="rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead>类型</TableHead>
                 <TableHead>名称 / 标题</TableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>作者</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>质量</TableHead>
+                <TableHead>下载/调用</TableHead>
                 <TableHead>上传时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
@@ -209,6 +231,8 @@ export default function Capabilities() {
             <TableBody>
               {shown.map(row => {
                 const meta = STATUS_META[row.status]
+                const kindMeta = KIND_META[row.kind]
+                const KindIcon = kindMeta.icon
                 const isBusy = busy === row.name + row.version + 'approve'
                   || busy === row.name + row.version + 'reject'
                   || busy === row.name + row.version + 'delete'
@@ -216,7 +240,17 @@ export default function Capabilities() {
                 return (
                   <TableRow key={row.kind + ':' + row.name + '@' + row.version}>
                     <TableCell>
-                      <div className="whitespace-nowrap font-medium">{row.display_name || row.name}</div>
+                      <Badge variant="outline"><KindIcon className="mr-1 h-3 w-3" />{kindMeta.label}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="whitespace-nowrap font-medium">
+                        {row.display_name || row.name}
+                        {row.conflict && (
+                          <Badge variant="destructive" className="ml-2" title="与市场技能同名,通过会被 409 阻断,请先处理市场技能">
+                            <TriangleAlert className="mr-1 h-3 w-3" />名称冲突
+                          </Badge>
+                        )}
+                      </div>
                       <div className="text-xs text-muted-foreground">{row.name}</div>
                     </TableCell>
                     <TableCell className="font-mono text-sm">{row.version}</TableCell>
@@ -241,6 +275,9 @@ export default function Capabilities() {
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                      下载 {row.downloads ?? 0}{row.kind === 'skill' ? ` / 调用 ${row.calls ?? 0}` : ''}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{fmtTime(row.created_at)}</TableCell>
                     <TableCell className="text-right">
@@ -275,12 +312,12 @@ export default function Capabilities() {
         </div>
       )}
 
-      {/* 内容预览(文件清单可点击查看任意文件内容) */}
+      {/* 内容预览(文件清单可点击查看任意文件内容;主文件按 kind:SKILL.md / agent.cordis.yml) */}
       <ArchivePreviewDialog
         openKey={previewKey}
         data={preview}
-        mainTitle="agent.cordis.yml"
-        mainContent={preview?.composition ?? ''}
+        mainTitle={previewRow?.kind === 'agent' ? 'agent.cordis.yml' : 'SKILL.md'}
+        mainContent={previewRow?.kind === 'agent' ? (preview?.composition ?? '') : (preview?.skill_md ?? '')}
         fileBase={previewRow ? previewRow.base_path : ''}
         onClose={() => { setPreviewKey('') }}
       />
@@ -331,7 +368,7 @@ export default function Capabilities() {
         basePath={grantBase}
         departments={departments}
         onClose={() => { setGrantName(''); setGrantBase('') }}
-        onSaved={() => { void load() }}
+        onSaved={() => { void load(tab, typeFilter) }}
       />
     </div>
   )

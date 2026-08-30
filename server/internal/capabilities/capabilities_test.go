@@ -217,12 +217,13 @@ func TestListApprovalsQueue(t *testing.T) {
 	if len(resp.Approvals) != 2 {
 		t.Fatalf("approvals=%+v", resp.Approvals)
 	}
-	// kind 区分,base_path 指向原域端点。
+	// kind 区分,base_path 指向原域端点(2026-09 命名空间重构后为
+	// /api/server/admin 前缀,勿回退旧 /api/admin)。
 	for _, a := range resp.Approvals {
-		if a.Kind == KindSkill && a.BasePath != "/api/admin/shared-skills/s1/1.0.0" {
+		if a.Kind == KindSkill && a.BasePath != "/api/server/admin/shared-skills/s1/1.0.0" {
 			t.Fatalf("skill base=%s", a.BasePath)
 		}
-		if a.Kind == KindAgent && a.BasePath != "/api/admin/agent-presets/a1/1.0.0" {
+		if a.Kind == KindAgent && a.BasePath != "/api/server/admin/agent-presets/a1/1.0.0" {
 			t.Fatalf("agent base=%s", a.BasePath)
 		}
 	}
@@ -269,6 +270,41 @@ func TestListApprovalsTypeFilter(t *testing.T) {
 	}
 	if len(resp.Approvals) != 1 || resp.Approvals[0].Kind != KindSkill {
 		t.Fatalf("skill filter approvals=%+v", resp.Approvals)
+	}
+}
+
+// TestListApprovalsStatusAll 默认 pending;?status=all 返回全部状态
+// (2026-09 修复:统一审批队列重建后旧页面的「已通过/已拒绝」tab 依赖全量)。
+func TestListApprovalsStatusAll(t *testing.T) {
+	r, db, adminHdr, _ := setupRouter(t)
+	defer db.Close()
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "s1", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillPending}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "s2", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillApproved}); err != nil {
+		t.Fatal(err)
+	}
+	// 默认 pending:只 1 条。
+	w := doGet(t, r, "/api/admin/capabilities/approvals", adminHdr)
+	var resp struct {
+		Approvals []ApprovalRow `json:"approvals"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Approvals) != 1 || resp.Approvals[0].Status != "pending" {
+		t.Fatalf("default pending approvals=%+v", resp.Approvals)
+	}
+	// status=all:2 条,且 downloads/calls 字段透传(缺省 0)。
+	w2 := doGet(t, r, "/api/admin/capabilities/approvals?status=all", adminHdr)
+	var resp2 struct {
+		Approvals []ApprovalRow `json:"approvals"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp2.Approvals) != 2 {
+		t.Fatalf("status=all approvals=%+v", resp2.Approvals)
 	}
 }
 
