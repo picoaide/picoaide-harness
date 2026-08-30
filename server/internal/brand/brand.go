@@ -157,6 +157,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
 	g := r.Group("/api")
 	g.GET("/brand", func(c *gin.Context) { getPublicBrand(c, db) })
 	g.GET("/brand/logo/:name", func(c *gin.Context) { serveLogo(c, db, dataDir) })
+	g.HEAD("/brand/logo/:name", func(c *gin.Context) { serveLogo(c, db, dataDir) })
 	g.GET("/portal", func(c *gin.Context) { getPublicPortal(c, db) })
 }
 
