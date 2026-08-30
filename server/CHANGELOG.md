@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.5.0 (2026-08-31)
+
+### 修复
+- 连接器中心改用 `/api/client/v2/config/bootstrap`(命名空间迁移后旧路径 404,目录同步静默失败)
+- `TestCleanupUsageRetention` 月末日期归一化(Normalize 到每月 1 号,消除月末 flake)
+
+### 测试验证
+- 真实 DeepSeek API 全链路(登录→聊天→计费→配额)通过
+- LDAP + Dex OIDC + 多角色共享技能审批闭环通过
+- 全部 Go/TS 门禁通过
+
 ## Unreleased
 
 ### 部署
