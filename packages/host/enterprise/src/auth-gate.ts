@@ -45,6 +45,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     --input-bg: #ffffff;
     --border: #d0d5dd;
     --err: #dc2626;
+    --accent: #2563eb;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -53,72 +54,164 @@ const LOGIN_HTML = `<!DOCTYPE html>
       --input-bg: #1a1d24;
       --border: #333333;
       --err: #f87171;
+      --accent: #3b82f6;
     }
   }
-  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: var(--bg); color: var(--fg); }
-  form { display: flex; flex-direction: column; gap: 12px; width: 320px; }
-  input { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--input-bg); color: var(--fg); font-size: 14px; }
-  button { padding: 10px; border-radius: 8px; border: none; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
+  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: var(--bg); color: var(--fg); }
+  .card { width: 400px; max-width: 92vw; text-align: center; }
+  h1 { font-size: 22px; margin: 0 0 6px; font-weight: 700; }
+  .tagline { font-size: 13px; color: var(--fg); opacity: 0.65; margin-bottom: 22px; }
+  .stage { display: none; }
+  .stage.active { display: block; }
+  form { display: flex; flex-direction: column; gap: 12px; }
+  input { padding: 11px 13px; border-radius: 9px; border: 1px solid var(--border); background: var(--input-bg); color: var(--fg); font-size: 14px; box-sizing: border-box; width: 100%; }
+  button { padding: 11px; border-radius: 9px; border: none; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; }
   button:disabled { opacity: 0.6; cursor: default; }
-  .err { color: var(--err); font-size: 13px; min-height: 16px; }
-  h1 { font-size: 20px; margin: 0 0 8px; }
-  .methods { display: flex; flex-wrap: wrap; gap: 6px; }
-  .method { background: transparent; border: 1px solid var(--border); color: var(--fg); font-size: 12px; padding: 6px 10px; }
-  .method.active { background: #2563eb; border-color: #2563eb; color: #fff; }
-  .method.disabled { opacity: 0.5; cursor: not-allowed; }
-  .browser { background: #2563eb; }
-  .hint { color: var(--fg); opacity: 0.7; font-size: 12px; }
-  .wrap { width: 320px; }
+  .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 4px; text-align: left; }
+  .hint { color: var(--fg); opacity: 0.7; font-size: 12px; margin-top: 8px; }
+  .back { background: transparent; color: var(--accent); border: none; font-size: 12px; cursor: pointer; padding: 6px 12px; margin: 0 0 14px; width: auto; }
+  /* Step2 品牌区 */
+  .brand { margin-bottom: 18px; min-height: 92px; }
+  .brand img, .brand .fallback { width: 64px; height: 64px; border-radius: 14px; object-fit: contain; margin-bottom: 8px; }
+  .brand .fallback { display: inline-flex; align-items: center; justify-content: center; background: #0f1115; color: #fff; font-size: 28px; font-weight: 700; }
+  .brand-name { font-size: 20px; font-weight: 700; }
+  .brand-tag { font-size: 12px; color: var(--fg); opacity: 0.6; }
+  .welcome { font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
+  /* 方式选择器 */
+  .methods { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 14px; }
+  .method { background: transparent; border: 1px solid var(--border); color: var(--fg); font-size: 13px; padding: 8px 14px; border-radius: 8px; width: auto; font-weight: 500; }
+  .method.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .method.disabled { opacity: 0.45; cursor: not-allowed; }
+  .pw-fields .spacer { opacity: 0; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>PicoAide 企业登录</h1>
-  <form id="f">
-    <input id="server" placeholder="服务端地址 (https://...)" value="__DEFAULT_SERVER__">
+<div class="card">
+  <!-- Step 1: 服务端地址 -->
+  <div id="step1" class="stage active">
+    <h1>连接服务端</h1>
+    <div class="tagline">输入服务端地址以确认登录方式</div>
+    <form id="f1">
+      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" autocomplete="off" spellcheck="false" required>
+      <button type="submit" id="next-btn">下一步</button>
+      <div class="err" id="err-step1"></div>
+    </form>
+  </div>
+
+  <!-- Step 2: 品牌 + 登录方式 -->
+  <div id="step2" class="stage">
+    <button type="button" class="back" id="back-btn">← 修改服务端地址</button>
+    <div class="brand" id="brand-area"></div>
     <div id="methods" class="methods"></div>
-    <input id="username" placeholder="账号" autocomplete="username">
-    <div id="pw-wrap"><input id="password" type="password" placeholder="密码" autocomplete="current-password"></div>
-    <button type="submit" id="btn">登录</button>
-    <button type="button" id="browser-btn" class="browser" style="display:none">使用浏览器登录</button>
+    <form id="f2" style="display:none">
+      <input id="username" placeholder="账号" autocomplete="username" style="display:none">
+      <input id="password" type="password" placeholder="密码" autocomplete="current-password" style="display:none">
+      <button type="submit" id="btn" style="display:none">登录</button>
+    </form>
+    <button type="button" id="browser-btn" style="display:none">使用浏览器登录</button>
     <div class="hint" id="waiting" style="display:none">请在弹出的浏览器窗口中完成授权，等待授权完成后此处会自动继续…</div>
-    <div class="err" id="err"></div>
-  </form>
+    <div class="err" id="err-step2"></div>
+  </div>
 </div>
 <script>
-  const f = document.getElementById('f')
-  const err = document.getElementById('err')
-  const btn = document.getElementById('btn')
-  const browserBtn = document.getElementById('browser-btn')
-  const methodsBox = document.getElementById('methods')
-  const waiting = document.getElementById('waiting')
-  let currentMethod = 'local'
-  let pollTimer = null
+  var f1 = document.getElementById('f1')
+  var f2 = document.getElementById('f2')
+  var err1 = document.getElementById('err-step1')
+  var err2 = document.getElementById('err-step2')
+  var btn = document.getElementById('btn')
+  var browserBtn = document.getElementById('browser-btn')
+  var methodsBox = document.getElementById('methods')
+  var waiting = document.getElementById('waiting')
+  var brandArea = document.getElementById('brand-area')
+  var currentMethod = 'local'
+  var currentMethods = []
+  var currentBrand = null
+  var pollTimer = null
 
-  // ---- 方法选择器: 拉取服务端启用的认证方式(local/ldap/openid/oidc) ----
-  async function loadMethods() {
-    const server = document.getElementById('server').value.trim()
-    if (!server) { methodsBox.innerHTML = ''; renderMethodButtons([]); return }
+  // ---- Step1 → Step2: 并行探测 brand + methods(任一成功进 Step2) ----
+  f1.addEventListener('submit', async function (e) {
+    e.preventDefault()
+    err1.textContent = ''
+    var server = document.getElementById('server').value.trim()
+    if (!server) { err1.textContent = '请填写服务端地址'; return }
+    document.getElementById('next-btn').disabled = true
+    document.getElementById('next-btn').textContent = '连接中…'
     try {
-      const r = await fetch('/api/pico/auth/methods?server=' + encodeURIComponent(server))
-      const data = await r.json().catch(() => ({}))
-      renderMethodButtons(data.methods || [{ name: 'local', configured: true }])
-    } catch { renderMethodButtons([{ name: 'local', configured: true }]) }
-  }
-  function renderMethodButtons(methods) {
-    if (!methods || methods.length <= 1) {
-      methodsBox.innerHTML = ''
-      currentMethod = 'local'
-      return
+      var results = await Promise.allSettled([
+        fetch('/api/brand'),
+        fetch('/api/pico/auth/methods?server=' + encodeURIComponent(server)),
+      ])
+      var brandOk = results[0].status === 'fulfilled' && results[0].value.ok
+      var methodsOk = results[1].status === 'fulfilled' && results[1].value.ok
+      if (!brandOk && !methodsOk) {
+        err1.textContent = '无法连接服务端，请检查地址与网络'
+        return
+      }
+      if (brandOk) {
+        try {
+          var b = await results[0].value.json()
+          currentBrand = b.enabled ? b : null
+        } catch (e2) { currentBrand = null }
+      } else {
+        currentBrand = null
+      }
+      var ms = [{ name: 'local', configured: true, browser: false }]
+      if (methodsOk) {
+        try {
+          var md = await results[1].value.json()
+          if (md && md.methods && md.methods.length) ms = md.methods
+        } catch (e3) { /* keep default */ }
+      }
+      showStep2(ms)
+    } finally {
+      document.getElementById('next-btn').disabled = false
+      document.getElementById('next-btn').textContent = '下一步'
     }
+  })
+
+  function showStep2(methods) {
+    currentMethods = methods.filter(function (m) { return !m.hidden })
+    // 品牌区
+    brandArea.innerHTML = renderBrand(currentBrand)
+    // 方式选择器
+    currentMethod = pickDefault(currentMethods)
+    renderMethodButtons(currentMethods)
+    updateFields()
+    document.getElementById('step1').classList.remove('active')
+    document.getElementById('step2').classList.add('active')
+  }
+
+  function renderBrand(b) {
+    if (!b) {
+      return '<span class="fallback">P</span><div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
+    }
+    var login = b.login || {}
+    var logo = login.logo_url ? '<img src="' + login.logo_url + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">P</span>' : '<span class="fallback">P</span>'
+    var name = login.display_name || 'PicoAide'
+    var tag = login.tagline ? '<div class="brand-tag">' + esc(login.tagline) + '</div>' : ''
+    var welcome = login.welcome ? '<div class="welcome">' + esc(login.welcome) + '</div>' : ''
+    return logo + '<div class="brand-name">' + esc(name) + '</div>' + tag + welcome
+  }
+
+  function pickDefault(methods) {
+    // 密码方式优先(local/ldap); 否则首个可用浏览器方式。
+    var pw = methods.filter(function (m) { return m.name === 'local' || m.name === 'ldap' })
+    if (pw.length) return pw[0].name
+    if (methods.length) return methods[0].name
+    return 'local'
+  }
+
+  function renderMethodButtons(methods) {
+    if (!methods.length) { methodsBox.innerHTML = ''; return }
+    var only = methods.length === 1
+    if (only) { methodsBox.innerHTML = ''; return }
     methodsBox.innerHTML = methods.map(function (m) {
-      const label = { local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' }[m.name] || m.name
-      const configured = m.configured !== false
+      var label = ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[m.name] || m.name
+      var configured = m.configured !== false
       return '<button type="button" data-method="' + m.name + '" class="method' +
         (m.name === currentMethod ? ' active' : '') +
         (configured ? '' : ' disabled') + '"' +
-        (configured ? '' : ' title="该方式未配置"') + '>' + label +
-        (configured ? '' : ' (未配置)') + '</button>'
+        (configured ? '' : ' title="该方式未配置"') + '>' + label + '</button>'
     }).join('')
     methodsBox.querySelectorAll('.method').forEach(function (b) {
       b.addEventListener('click', function () {
@@ -130,100 +223,107 @@ const LOGIN_HTML = `<!DOCTYPE html>
       })
     })
   }
+
+  function isBrowserMethod(name) {
+    var m = currentMethods.find(function (x) { return x.name === name })
+    return !!m && m.browser === true
+  }
+
   function updateFields() {
-    const isPassword = currentMethod === 'local' || currentMethod === 'ldap'
+    var isPassword = currentMethod === 'local' || currentMethod === 'ldap'
     document.getElementById('username').style.display = isPassword ? '' : 'none'
-    document.getElementById('pw-wrap').style.display = isPassword ? '' : 'none'
+    document.getElementById('password').style.display = isPassword ? '' : 'none'
     if (isPassword) document.getElementById('username').placeholder = currentMethod === 'ldap' ? 'LDAP 账号' : '账号'
     document.getElementById('btn').style.display = isPassword ? '' : 'none'
-    browserBtn.style.display = isPassword ? 'none' : 'block'
+    f2.style.display = isPassword ? '' : 'none'
+    browserBtn.style.display = isPassword ? 'none' : ''
+    browserBtn.textContent = '使用 ' + methodLabel(currentMethod) + ' 登录'
     waiting.style.display = 'none'
   }
+
+  function methodLabel(name) {
+    return ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[name] || name
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  }
+
+  // 返回 Step1
+  document.getElementById('back-btn').addEventListener('click', function () {
+    document.getElementById('step2').classList.remove('active')
+    document.getElementById('step1').classList.add('active')
+    err2.textContent = ''
+  })
 
   /**** 轮询登录状态: 用户去浏览器授权, 深链回桌面后 setSession, 此处检测到即刷新 ****/
   function startPoll() {
     if (pollTimer) clearInterval(pollTimer)
     pollTimer = setInterval(async function () {
       try {
-        const r = await fetch('/api/pico/auth/state')
+        var r = await fetch('/api/pico/auth/state')
         if (!r.ok) return
-        const d = await r.json().catch(() => ({}))
+        var d = await r.json().catch(function () { return {} })
         if (d.loggedIn === true) {
           clearInterval(pollTimer)
           location.replace('/' + location.search)
         }
-      } catch {}
+      } catch (e4) {}
     }, 1500)
   }
 
   // ---- 浏览器方式(OpenID/OIDC): 打开授权页, 轮询等待深链回跳 ----
   async function browserLogin() {
-    const server = document.getElementById('server').value.trim()
-    if (!server) { err.textContent = '请先填写服务端地址'; return }
-    err.textContent = ''
+    var server = document.getElementById('server').value.trim()
+    if (!server) { err2.textContent = '请先填写服务端地址'; return }
+    err2.textContent = ''
     waiting.style.display = 'block'
     browserBtn.disabled = true
-    // 打开授权页: 服务端 /api/auth/<name>/login?server=<url>。
-    // 注意: LOGIN_HTML 是 TS 模板字符串——正则里的反斜杠+斜杠会被转义成
-    // 斜杠,输出空正则加注释导致 SyntaxError。此处用字符串切片去尾斜杠。
-    const name = currentMethod
-    const base = server.endsWith('/') ? server.slice(0, -1) : server
+    var name = currentMethod
+    var base = server.endsWith('/') ? server.slice(0, -1) : server
     window.open(base + '/api/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
     startPoll()
   }
 
   browserBtn.addEventListener('click', browserLogin)
-  // 服务端地址变化 → 重新拉取方法列表(input 事件: 用户输入即触发,
-  // E2E 与真实输入均不依赖 blur/change)
-  document.getElementById('server').addEventListener('input', loadMethods)
 
-  f.addEventListener('submit', async (e) => {
+  f2.addEventListener('submit', async function (e) {
     e.preventDefault()
-    err.textContent = ''
-    const body = {
+    err2.textContent = ''
+    var body = {
       server: document.getElementById('server').value.trim(),
       username: document.getElementById('username').value.trim(),
       password: document.getElementById('password').value,
     }
-    // Loading state: disable the button and show progress so repeated
-    // clicks are impossible and the user sees the request is in flight.
     btn.disabled = true
-    const btnLabel = btn.textContent
+    var btnLabel = btn.textContent
     btn.textContent = '登录中…'
     try {
-      const res = await fetch('/api/pico/auth/login', {
+      var res = await fetch('/api/pico/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
       if (res.ok) { location.replace('/' + location.search); return }
-      const data = await res.json().catch(() => ({}))
-      // Localize raw gateway error codes; keep the server message when the
-      // gateway already shipped a human-readable one.
-      const raw = String(data.error?.message || data.error || '')
-      err.textContent = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
-    } catch (e2) {
-      err.textContent = '网络错误，请检查服务端地址后重试'
+      var data = await res.json().catch(function () { return {} })
+      var raw = String(data.error && data.error.message ? data.error.message : (data.error || ''))
+      err2.textContent = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
+    } catch (e5) {
+      err2.textContent = '网络错误，请检查服务端地址后重试'
     } finally {
       btn.disabled = false
       btn.textContent = btnLabel
     }
   })
-  // Friendly message for common raw gateway error codes (server sends
-  // machine-readable codes; the login page must not show them verbatim).
-  // NOTE: this runs inside an inline <script> — plain JS only, no TS syntax.
-  const friendlyLoginError = (raw) => {
-    const code = raw.toLowerCase()
-    if (code.includes('invalid_credentials') || code.includes('invalid credentials') || code.includes('unauthorized')) {
-      return '账号或密码错误'
-    }
-    if (code.includes('rate') || code.includes('too many')) return '登录尝试过于频繁，请稍后再试'
-    if (code.includes('network') || code.includes('timeout') || code.includes('econnrefused')) return '无法连接服务端，请检查地址与网络'
-    if (code.includes('disabled') || code.includes('inactive')) return '账号已被禁用，请联系管理员'
+  var friendlyLoginError = function (raw) {
+    var code = raw.toLowerCase()
+    if (code.indexOf('invalid_credentials') >= 0 || code.indexOf('invalid credentials') >= 0 || code.indexOf('unauthorized') >= 0) return '账号或密码错误'
+    if (code.indexOf('rate') >= 0 || code.indexOf('too many') >= 0) return '登录尝试过于频繁，请稍后再试'
+    if (code.indexOf('network') >= 0 || code.indexOf('timeout') >= 0 || code.indexOf('econnrefused') >= 0) return '无法连接服务端，请检查地址与网络'
+    if (code.indexOf('disabled') >= 0 || code.indexOf('inactive') >= 0) return '账号已被禁用，请联系管理员'
+    if (code.indexOf('auditor_not_allowed') >= 0) return '审计账号不可登录客户端，请使用管理后台'
     return raw
   }
-  // 初始化: 默认 server 时立即拉取方法
-  loadMethods()
 </script>
 </body>
 </html>`
