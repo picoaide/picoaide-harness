@@ -247,7 +247,6 @@
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",
-    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
     "electron": "43.4.0",
