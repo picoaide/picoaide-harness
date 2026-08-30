@@ -17,6 +17,8 @@
       name: '@picoaide/dsh-enterprise/skill-telemetry'
     - id: picoaide-auth-gate
       name: '@picoaide/dsh-enterprise/auth-gate'
+    - id: picoaide-brand-sync
+      name: '@picoaide/dsh-enterprise/brand-sync'
 # Enterprise model governance: models come from the gateway after login only.
 # The upstream models settings page lets users define custom providers, so it
 # is disabled from the composition. bootstrap.ts keeps the gateway catalog in

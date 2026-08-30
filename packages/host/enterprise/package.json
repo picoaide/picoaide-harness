@@ -15,6 +15,10 @@
       "types": "./lib/types/auth-gate.d.ts",
       "default": "./lib/auth-gate.js"
     },
+    "./brand-sync": {
+      "types": "./lib/types/brand-sync.d.ts",
+      "default": "./lib/brand-sync.js"
+    },
     "./gateway-model": {
       "types": "./lib/types/gateway-model.d.ts",
       "default": "./lib/gateway-model.js"

@@ -13,7 +13,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { AccountSection } from './AccountSection.tsx'
-import { BraceMark, BrandName } from './Brand.tsx'
+import { BraceMark, BrandName, BrandBadge } from './Brand.tsx'
+import { startBrandStore } from './brand-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
 import { en, type EnterpriseKey, zh } from './locales.ts'
 
@@ -81,6 +82,12 @@ const BRAND_CSS = `
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
+  // 服务端品牌同步(登录后拉取 /api/brand; 登出回退默认)。
+  ctx.effect(
+    () => { startBrandStore(ctx); return () => { /* store is global; session events drive updates */ } },
+    'enterprise: brand store',
+  )
+
   // Enterprise client dictionaries (zh key source, en mirror).
   ctx.effect(() => {
     const off = ctx.locale.register(LOCALE_NS, { zh, en })
@@ -107,6 +114,16 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.hero.brand.mark',
     }, BraceMark)),
     'enterprise: hero brand mark',
+  )
+
+  // 右上角品牌位(v3b): 会话 header action 区, 仅服务端启用品牌时显示。
+  ctx.effect(
+    () => ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+      name: 'conversation.session.header.actions',
+      id: 'brand-badge',
+      order: 100,
+    }, BrandBadge)),
+    'enterprise: header brand badge',
   )
 
   ctx.effect(
