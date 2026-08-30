@@ -1,4 +1,4 @@
-/** Headless, confirmation-gated downloads for DSH Desktop GitHub release installers. */
+/** Headless, confirmation-gated downloads for PicoAide Harness GitHub release installers. */
 
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
@@ -11,7 +11,7 @@ export type DesktopDownloadPlatform = 'darwin' | 'win32'
 /** GitHub repository owning public client releases. */
 export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
 
-/** Public endpoint returning the latest stable DSH Desktop release metadata. */
+/** Public endpoint returning the latest stable PicoAide Harness release metadata. */
 export const DESKTOP_RELEASE_API_URL =
   `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
 

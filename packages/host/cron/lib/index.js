@@ -1,4 +1,4 @@
-import { t as HostCronLedger } from "./host-ledger-CUgvpM_p.js";
+import { t as HostCronLedger } from "./host-ledger-pCCnBmdy.js";
 import { isValidCron, nextRunAtMs } from "./cron.js";
 import { jobVisibleTo } from "./jobs.js";
 import "./protocol.js";
@@ -486,7 +486,7 @@ const inject = [
 	"tools"
 ];
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
-const CRON_GUIDANCE = "本机已安装 dsh-cron 插件（DSH Desktop 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run 工具创建、查看、启停和触发定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。";
+const CRON_GUIDANCE = "本机已安装 dsh-cron 插件（PicoAide Harness 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run 工具创建、查看、启停和触发定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。";
 /** Settings namespace of the cron plugin (spelled here and in the browser half). */
 const CRON_SETTINGS_NAMESPACE = settingsNamespace("cron");
 const Config = z.object({

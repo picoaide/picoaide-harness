@@ -211,7 +211,7 @@ try {
 
 const failed = results.filter(r => !r.ok)
 const lines = [
-  '# DSH Desktop 真实环境-定时任务深度流程报告',
+  '# PicoAide Harness 真实环境-定时任务深度流程报告',
   '',
   `- 服务器: ${SERVER}`,
   `- 账号: ${USER}`,

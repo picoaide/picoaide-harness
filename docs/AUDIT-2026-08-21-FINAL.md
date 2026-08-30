@@ -37,7 +37,7 @@
 ### Electron 客户端（19 条：P0×0 / P1×3 / P2×16）
 
 **P1（3）**
-1. 更新链供应链信任：硬编码 dshdesktop.cn 端点 + 仅魔数校验无签名 + redirect follow + --force-run
+1. 更新链供应链信任：硬编码版本端点 + 仅魔数校验无签名 + redirect follow + --force-run（现已迁移至 GitHub Releases 源）
 2. 渲染进程崩溃/加载失败仅日志无兜底 UI（白屏）
 3. Renderer 会话缺 setPermissionRequestHandler（自动批准摄像头等）+ 无 CSP
 

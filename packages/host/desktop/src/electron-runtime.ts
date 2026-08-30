@@ -68,7 +68,7 @@ function isZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | undefin
   return undefined
 }
 
-/** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
+/** Native adapter used by the PicoAide Harness launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
   readonly updates: DesktopUpdateAdapter = {
@@ -101,7 +101,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   /** Product name for native menus, trays, and update notifications (falls back while unscheduled). */
   private productName(): string {
-    return this.scheduled?.productName ?? 'DSH Desktop'
+    return this.scheduled?.productName ?? 'PicoAide Harness'
   }
 
   constructor(
@@ -336,9 +336,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const result = await dialog.showMessageBox({
       type: 'error',
       title: 'Plugin Recovery',
-      message: 'DSH Desktop could not load all plugins.',
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart DSH Desktop after resolving the failing plugin.`,
-      buttons: ['Restart DSH Desktop', 'Dismiss'],
+      message: 'PicoAide Harness could not load all plugins.',
+      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart PicoAide Harness after resolving the failing plugin.`,
+      buttons: ['Restart PicoAide Harness', 'Dismiss'],
       defaultId: 0,
       cancelId: 1,
       noLink: true,

@@ -23,9 +23,9 @@ function shellSpec(env?: Record<string, string>): ShellExecSpec {
 const adaptation: WindowsAclAdaptation = {
   platform: 'win32',
   electron: true,
-  execPath: 'C:\\Program Files\\DSH Desktop\\DSH Desktop.exe',
-  upstreamRunner: 'C:\\Program Files\\DSH Desktop\\resources\\app.asar\\runner.js',
-  trampoline: 'C:\\Program Files\\DSH Desktop\\resources\\app.asar\\desktop-runner.js',
+  execPath: 'C:\\Program Files\\PicoAide Harness\\PicoAide Harness.exe',
+  upstreamRunner: 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\runner.js',
+  trampoline: 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\desktop-runner.js',
 }
 
 describe('Windows Electron PowerShell sandbox adaptation', () => {

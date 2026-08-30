@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 //#region ../desktop/lib/desktop-home.js
 /**
-* Product home resolution for DSH Desktop.
+* Product home resolution for PicoAide Harness.
 *
 * The product owns its data directory: the default Harness home under the
 * OS home is `~/.picoaide-harness` instead of the upstream `~/.dsh`.
@@ -625,4 +625,4 @@ function migrateCronLedger(jobs, fromVersion) {
 //#endregion
 export { validateCron as i, migrateCronLedger as n, openScheduledRun as r, HostCronLedger as t };
 
-//# sourceMappingURL=host-ledger-CUgvpM_p.js.map
+//# sourceMappingURL=host-ledger-pCCnBmdy.js.map

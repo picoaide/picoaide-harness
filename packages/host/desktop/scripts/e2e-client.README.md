@@ -1,4 +1,4 @@
-# DSH Desktop 客户端 E2E 自动化
+# PicoAide Harness 客户端 E2E 自动化
 
 一键运行客户端端到端测试（mock gateway + 打包应用 + CDP 驱动 + 12 项断言 + 截图 + 报告）。
 

@@ -1,7 +1,7 @@
 {
   "name": "@picoaide/dsh-browser",
   "version": "0.1.0",
-  "description": "Embedded agent-driven browser (WebContentsView + CDP) for DSH Desktop",
+  "description": "Embedded agent-driven browser (WebContentsView + CDP) for PicoAide Harness",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

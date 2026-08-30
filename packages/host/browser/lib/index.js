@@ -1365,7 +1365,7 @@ async function extractSnapshot(send, snapshotLimit = 200) {
 /** Extract visible text of the page (or of `selector` when given), bounded. */
 async function extractText(send, selector, textLimit = TEXT_LIMIT) {
 	const result = await send("Runtime.evaluate", {
-		expression: selector === void 0 || selector.trim() === "" ? `(document.body ? document.body.innerText : '')` : `(() => { const el = document.querySelector(${JSON.stringify(selector)}); return el ? (el.innerText || el.textContent || '') : ''; })()`,
+		expression: selector === void 0 || selector.trim() === "" ? `(document.body ? document.body.innerText : '')` : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); return el ? (el.innerText || el.textContent || '') : ''; })()`,
 		returnByValue: true,
 		awaitPromise: false
 	});
@@ -2034,7 +2034,7 @@ var BrowserRuntime = class {
 				expression: `
           (() => {
             try {
-              const el = document.querySelector(${JSON.stringify(selector)});
+              const el = document.querySelector(${JSON.stringify(String(selector))});
               if (!el) return { error: 'element not found' };
               el.scrollIntoView({ block: 'center', inline: 'center' });
               const r = el.getBoundingClientRect();
@@ -2079,7 +2079,7 @@ var BrowserRuntime = class {
 			await tab.cdp.send("Runtime.evaluate", {
 				expression: `
           (() => {
-            const el = document.querySelector(${JSON.stringify(selector)});
+            const el = document.querySelector(${JSON.stringify(String(selector))});
             if (!el) return { error: 'element not found' };
             el.focus();
             ${clear ? "if (typeof el.select === \"function\") el.select();" : ""}
@@ -2118,7 +2118,7 @@ var BrowserRuntime = class {
 			const result = await tab.cdp.send("Runtime.evaluate", {
 				expression: `
           (() => {
-            const el = document.querySelector(${JSON.stringify(selector)});
+            const el = document.querySelector(${JSON.stringify(String(selector))});
             if (!el) return { error: 'element not found' };
             if (el.tagName !== 'SELECT') return { error: 'not a select element' };
             el.value = ${JSON.stringify(value)};
@@ -2186,7 +2186,7 @@ var BrowserRuntime = class {
 	/** Scroll the page by a delta (or the element into view). */
 	async scroll(id, deltaY, selector, signal) {
 		await this.withControl("browser_scroll", id, async (tab) => {
-			const expression = selector === void 0 || selector === "" ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'` : `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`;
+			const expression = selector === void 0 || selector === "" ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'` : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`;
 			await tab.cdp.send("Runtime.evaluate", {
 				expression,
 				returnByValue: true
@@ -2262,12 +2262,15 @@ const KEY_VK = {
 };
 const MASK = "****";
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu;
+const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu;
 /** Redact credential-shaped parts of a browser op-log summary (URLs and
 * query parameters). Mirrors the desktop logger's mask-secrets semantics. */
 function maskBrowserSummary(summary) {
-	return summary.replace(/https?:\/\/[^\s<>"']+/giu, (raw) => {
-		const trailing = /[),.;]+$/u.exec(raw)?.[0] ?? "";
-		const value = trailing === "" ? raw : raw.slice(0, -trailing.length);
+	return summary.replace(SUMMARY_URL, (raw) => {
+		let end = raw.length;
+		while (end > 0 && (raw[end - 1] === ")" || raw[end - 1] === "," || raw[end - 1] === "." || raw[end - 1] === ";")) end -= 1;
+		const trailing = raw.slice(end);
+		const value = raw.slice(0, end);
 		try {
 			const url = new URL(value);
 			if (url.username !== "") url.username = MASK;

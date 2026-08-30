@@ -10,12 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anywhere-labs/deepseek-harness-desktop.git",
-    "directory": "dsh-community-fabric"
+    "url": "git+https://github.com/picoaide/picoaide-harness.git",
+    "directory": "community/fabric"
   },
-  "homepage": "https://github.com/anywhere-labs/deepseek-harness-desktop/tree/master/dsh-community-fabric#readme",
+  "homepage": "https://github.com/picoaide/picoaide-harness/tree/master/community/fabric#readme",
   "bugs": {
-    "url": "https://github.com/anywhere-labs/deepseek-harness-desktop/issues"
+    "url": "https://github.com/picoaide/picoaide-harness/issues"
   },
   "type": "module",
   "files": [

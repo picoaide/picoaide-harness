@@ -1,8 +1,8 @@
-# DSH Desktop plugin services
+# PicoAide Harness plugin services
 
 English | [中文](plugin-services.zh.md)
 
-This document is the supported Host-side integration contract for plugin authors. DSH Desktop 2.x runs the fixed `desktop` profile with the advanced platform-native presentation. It does not grant third-party access to raw Electron APIs, the renderer, or launcher bootstrap state.
+This document is the supported Host-side integration contract for plugin authors. PicoAide Harness 2.x runs the fixed `desktop` profile with the advanced platform-native presentation. It does not grant third-party access to raw Electron APIs, the renderer, or launcher bootstrap state.
 
 ## Layers and data flow
 
@@ -31,7 +31,7 @@ flowchart LR
 
 The launcher loads one fixed profile before the Loader tree mounts. There is no profile selector in the tray and no mode switch. Service references must not cross a Cordis generation boundary.
 
-The renderer receives ordinary Web Client modules over the existing loopback carrier. It cannot read these Host services directly, and DSH Desktop adds no preload or Electron IPC bridge for them. A plugin with browser UI continues to use normal DSH Host routes, RPC, client metadata, services, and slots.
+The renderer receives ordinary Web Client modules over the existing loopback carrier. It cannot read these Host services directly, and PicoAide Harness adds no preload or Electron IPC bridge for them. A plugin with browser UI continues to use normal DSH Host routes, RPC, client metadata, services, and slots.
 
 ## Internal capabilities
 
@@ -46,7 +46,7 @@ The native tray supports effect-scoped contributions from Host plugins through `
 
 ### Desktop-only plugin: tray contribution
 
-A plugin that only makes sense inside DSH Desktop can contribute a native tray command. Cordis keeps the plugin pending until `desktopRuntime` is available and unloads its effects if the provider disappears.
+A plugin that only makes sense inside PicoAide Harness can contribute a native tray command. Cordis keeps the plugin pending until `desktopRuntime` is available and unloads its effects if the provider disappears.
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
@@ -81,7 +81,7 @@ export function apply(ctx: Context): void {
 
 `dshmarket@1.2.3` predates this contract. It chooses `config.profile`, then launcher argv, then `web`; it privately imports `node:child_process`, discovers a bare `dsh` command, and runs `dsh plugin --profile ...` itself. Its public package exports expose no route or runner injection seam. An external config patch can correct the profile name and a PATH shim can make its legacy command discoverable.
 
-DSH Desktop therefore does not preinstall or depend on that version. A compatible future release must keep its config/argv/CLI path when Desktop services are absent under ordinary DSH and avoid treating Desktop services as required top-level injections for the cross-environment package.
+PicoAide Harness therefore does not preinstall or depend on that version. A compatible future release must keep its config/argv/CLI path when Desktop services are absent under ordinary DSH and avoid treating Desktop services as required top-level injections for the cross-environment package.
 
 There is a separate redistribution gate. The `1.2.3` manifest and README say MIT, but its source repository and npm tarball contain no complete MIT license text or copyright notice. Until a newly audited release includes the required notice, user-directed installation remains distinct from Desktop embedding the package in its application archive or installer.
 

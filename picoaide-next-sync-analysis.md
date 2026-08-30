@@ -82,7 +82,7 @@ docker-compose.yml go.mod go.sum + 新增 .dockerignore
 **需要决策（勿直接覆盖）**：
 - `AGENTS.md` / `README.md` / `CHANGELOG.md` / `docs/` / `.github/` / `.gitignore`
   → 这些是 picoaide-next 仓库根级文件，与当前仓库根同名内容冲突
-  （当前仓库根有 DSH Desktop 版 AGENTS.md、产品 docs/、.github/ci.yml）
+  （当前仓库根有 PicoAide Harness 版 AGENTS.md、产品 docs/、.github/ci.yml）
 - `docs/research-usage-page/`（56 万行第三方项目源码树调研 JSON）→ 建议排除
 - `scripts/dev-env.sh` 将被删除 → 确认是否保留
 

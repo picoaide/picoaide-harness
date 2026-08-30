@@ -1,8 +1,8 @@
-# DSH Desktop 插件 service
+# PicoAide Harness 插件 service
 
 [English](plugin-services.md) | 中文
 
-本文档是面向插件作者、受支持的 Host 侧集成 contract。DSH Desktop 2.x 运行固定的 `desktop` profile 与高级平台原生呈现。它不会授予第三方访问原始 Electron API、renderer 或 launcher bootstrap 状态的能力。
+本文档是面向插件作者、受支持的 Host 侧集成 contract。PicoAide Harness 2.x 运行固定的 `desktop` profile 与高级平台原生呈现。它不会授予第三方访问原始 Electron API、renderer 或 launcher bootstrap 状态的能力。
 
 ## 分层与数据流
 
@@ -31,7 +31,7 @@ flowchart LR
 
 Launcher 在 Loader tree 挂载前加载固定 profile。托盘中没有 profile 选择器，也没有模式切换。service 引用不能跨越 Cordis generation 边界。
 
-renderer 通过现有 loopback carrier 接收普通 Web Client modules。它无法直接读取这些 Host services，DSH Desktop 也没有为它们添加 preload 或 Electron IPC bridge。带浏览器 UI 的插件继续使用普通 DSH Host routes、RPC、client metadata、services 与 slots。
+renderer 通过现有 loopback carrier 接收普通 Web Client modules。它无法直接读取这些 Host services，PicoAide Harness 也没有为它们添加 preload 或 Electron IPC bridge。带浏览器 UI 的插件继续使用普通 DSH Host routes、RPC、client metadata、services 与 slots。
 
 ## 内部能力
 
@@ -46,7 +46,7 @@ Native tray 支持 Host 插件通过 `desktopRuntime.registerTrayItem` 提供 ef
 
 ### Desktop-only 插件：托盘 contribution
 
-只在 DSH Desktop 内有意义的插件可以贡献原生托盘命令。Cordis 在 `desktopRuntime` 可用前保持插件 pending，provider 消失时卸载其 effects。
+只在 PicoAide Harness 内有意义的插件可以贡献原生托盘命令。Cordis 在 `desktopRuntime` 可用前保持插件 pending，provider 消失时卸载其 effects。
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
@@ -81,7 +81,7 @@ export function apply(ctx: Context): void {
 
 `dshmarket@1.2.3` 先于本 contract。它选择 `config.profile`、随后 launcher argv、再 `web`；它私下 import `node:child_process`、发现裸 `dsh` 命令并自行运行 `dsh plugin --profile ...`。其公开 package exports 没有暴露 route 或 runner injection seam。外部 config patch 可以修正 profile 名，PATH shim 可以让其 legacy 命令可被发现。
 
-因此 DSH Desktop 不会预装或依赖该版本。后续兼容版本必须在普通 DSH 环境缺少 Desktop services 时保留现有 config/argv/CLI 路径，并避免把 Desktop services 作为跨环境包的必需顶层 injection。
+因此 PicoAide Harness 不会预装或依赖该版本。后续兼容版本必须在普通 DSH 环境缺少 Desktop services 时保留现有 config/argv/CLI 路径，并避免把 Desktop services 作为跨环境包的必需顶层 injection。
 
 另有独立再分发 gate。`1.2.3` 的 manifest 与 README 声明 MIT，但其源码仓库与 npm tarball 均未包含完整 MIT 许可文本或版权通知。直到新审计版本包含所需通知前，用户主动安装仍与 Desktop 把该包嵌入 application archive 或 installer 是两回事。
 

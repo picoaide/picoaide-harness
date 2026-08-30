@@ -20,7 +20,7 @@ We want to build an **open, composable, and sustainable** DSH plugin ecosystem:
 
 ## The desktop shell is the first example
 
-DSH Desktop is the first practitioner of this approach: the desktop shell itself is an ordinary DSH plugin on the same composition path as official and third-party plugins, with no special privileges. We did not fork upstream source into a fixed shell — we made "the desktop" an equal member of the plugin ecosystem.
+PicoAide Harness is the first practitioner of this approach: the desktop shell itself is an ordinary DSH plugin on the same composition path as official and third-party plugins, with no special privileges. We did not fork upstream source into a fixed shell — we made "the desktop" an equal member of the plugin ecosystem.
 
 ## A living document, built with the community
 
@@ -36,7 +36,7 @@ Once the plugin marketplace ships, plugins that follow this manifesto will be ea
 
 Fabric capabilities begin as compatibility, consent, and audit declarations. They do not present in-process JavaScript as a security sandbox. Only a Host with evidence of real isolation may claim technical permission enforcement.
 
-The market is still in its [product and safety design phase](../dsh-community-market/README.md), with no usable page or installer yet. Catalog inclusion means that a project matched catalog rules; it is not a security review or endorsement.
+The community market is still at the documentation stage, with no usable page or installer yet; see the [DSH Community Fabric Draft](../community/fabric/README.md) for related discussion. Catalog inclusion means that a project matched catalog rules; it is not a security review or endorsement.
 
 ## How to participate
 

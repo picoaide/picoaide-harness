@@ -1,4 +1,4 @@
-/** Headless-safe npm launcher for the DSH Desktop Electron executable. */
+/** Headless-safe npm launcher for the PicoAide Harness Electron executable. */
 
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -51,13 +51,13 @@ export function defaultDesktopUserDataDirectory(
   if (platform === 'win32') {
     const appData = environment.APPDATA
     if (appData === undefined || appData.length === 0) {
-      throw new Error('APPDATA is unavailable; cannot locate DSH Desktop diagnostics')
+      throw new Error('APPDATA is unavailable; cannot locate PicoAide Harness diagnostics')
     }
-    return path.join(appData, 'DSH Desktop')
+    return path.join(appData, 'PicoAide Harness')
   }
-  if (platform === 'darwin') return path.join(homeDirectory, 'Library', 'Application Support', 'DSH Desktop')
+  if (platform === 'darwin') return path.join(homeDirectory, 'Library', 'Application Support', 'PicoAide Harness')
   const config = environment.XDG_CONFIG_HOME
-  return path.join(config === undefined || config.length === 0 ? path.join(homeDirectory, '.config') : config, 'DSH Desktop')
+  return path.join(config === undefined || config.length === 0 ? path.join(homeDirectory, '.config') : config, 'PicoAide Harness')
 }
 
 export interface DesktopCliOptions {
@@ -82,7 +82,7 @@ async function launchElectron(): Promise<number> {
       + '  npm install -g dsh-plugin-desktop\n'
       + 'Or add electron to the profile before launching:\n'
       + '  dsh plugin --profile <name> add electron\n'
-      + 'Or use the packaged DSH Desktop application.\n',
+      + 'Or use the packaged PicoAide Harness application.\n',
     )
     return 1
   }

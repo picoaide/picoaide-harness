@@ -1,4 +1,4 @@
-/** DSH Desktop Host plugin: owns the selected native shell generation. */
+/** PicoAide Harness Host plugin: owns the selected native shell generation. */
 
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -88,8 +88,8 @@ export interface Config {
 
 /** Validated native window configuration. */
 export const Config: z<Config> = z.object({
-  productName: z.string().default('DSH Desktop'),
-  windowTitle: z.string().default('DeepSeek Harness Desktop'),
+  productName: z.string().default('PicoAide Harness'),
+  windowTitle: z.string().default('PicoAide Harness'),
   port: z.number().step(1).min(0).max(65_535).default(0),
   width: z.number().step(1).min(800).default(1280),
   height: z.number().step(1).min(600).default(840),
@@ -124,8 +124,8 @@ export function apply(ctx: Context, config: Config): void {
   const runtime = ctx.get('desktopRuntime')
   if (runtime === undefined) {
     process.stderr.write(
-      'dsh-plugin-desktop: this profile is composed with the DSH Desktop shell, which requires the desktop launcher (desktopRuntime).\n'
-      + 'Start it with `dsh-desktop`, or select this profile inside the packaged DSH Desktop application.\n'
+      'dsh-plugin-desktop: this profile is composed with the PicoAide Harness shell, which requires the desktop launcher (desktopRuntime).\n'
+      + 'Start it with `dsh-desktop`, or select this profile inside the packaged PicoAide Harness application.\n'
       + 'The desktop terminal, profile, and update rows stay inactive in an ordinary DSH boot.\n',
     )
     return
