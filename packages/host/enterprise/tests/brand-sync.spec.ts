@@ -5,7 +5,7 @@ describe('resolveBrandLogoURLs', () => {
   const brand: BrandConfig = {
     enabled: true,
     login: { logo_url: '/api/client/v2/brand/logo/login', display_name: 'Acme', tagline: '', welcome: '' },
-    client: { logo_url: '/api/client/v2/brand/logo/client', display_name: 'Acme AI', accent: '' },
+    client: { logo_url: '/api/client/v2/brand/logo/client', display_name: 'Acme AI', tagline: '' },
     favicon_url: '/api/client/v2/brand/logo/favicon',
     title: 'Acme',
   }

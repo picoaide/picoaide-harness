@@ -70,7 +70,6 @@ type ClientBrand struct {
 	LogoURL     string `json:"logo_url,omitempty"`
 	DisplayName string `json:"display_name"`
 	Tagline     string `json:"tagline"`
-	Accent      string `json:"accent"`
 }
 
 // PortalConfig 是门户首页配置。
@@ -99,7 +98,6 @@ func (b *BrandConfig) load(s map[string]string) {
 	b.Client = ClientBrand{
 		DisplayName: s["brand.client.display_name"],
 		Tagline:     s["brand.client.tagline"],
-		Accent:      s["brand.client.accent"],
 	}
 	if f := s["brand.client.logo"]; f != "" {
 		b.Client.LogoURL = "/api/client/v2/brand/logo/client"
@@ -120,7 +118,6 @@ func (b *BrandConfig) save(db *sql.DB, set func(key, val string) error) error {
 		"brand.login.welcome":       b.Login.Welcome,
 		"brand.client.display_name": b.Client.DisplayName,
 		"brand.client.tagline":      b.Client.Tagline,
-		"brand.client.accent":       b.Client.Accent,
 		"brand.title":               b.Title,
 	} {
 		if err := set(k, v); err != nil {
@@ -366,11 +363,6 @@ func putAdminBrand(c *gin.Context, db *sql.DB, dataDir string) {
 	if len(req.Login.DisplayName) > 64 || len(req.Client.DisplayName) > 64 ||
 		len(req.Login.Tagline) > 200 || len(req.Client.Tagline) > 200 || len(req.Login.Welcome) > 200 {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "品牌文本过长")
-		return
-	}
-	// accent 校验 #RRGGBB
-	if req.Client.Accent != "" && !regexp.MustCompile(`^#[0-9a-fA-F]{6}$`).MatchString(req.Client.Accent) {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "品牌主色格式错误(需 #RRGGBB)")
 		return
 	}
 	// 快照保存前当前配置(若已配置)

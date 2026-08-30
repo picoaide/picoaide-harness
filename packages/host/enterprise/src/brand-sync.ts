@@ -7,7 +7,7 @@ import type { Session } from './server-connector/config.ts'
 export interface BrandConfig {
   enabled: boolean
   login?: { logo_url?: string; display_name?: string; tagline?: string; welcome?: string }
-  client?: { logo_url?: string; display_name?: string; tagline?: string; accent?: string }
+  client?: { logo_url?: string; display_name?: string; tagline?: string }
   favicon_url?: string
   title?: string
 }
@@ -16,7 +16,7 @@ export interface BrandConfig {
 export const DEFAULT_BRAND: BrandConfig = {
   enabled: false,
   login: { display_name: 'PicoAide', tagline: 'Enterprise AI Gateway', welcome: '' },
-  client: { display_name: 'PicoAide Harness', tagline: '', accent: '' },
+  client: { display_name: 'PicoAide Harness', tagline: '' },
   title: 'PicoAide Harness',
 }
 
@@ -56,7 +56,7 @@ function absolutizeURLs(brand: BrandConfig, serverURL: string): BrandConfig {
     enabled: brand.enabled,
     title: brand.title ?? '',
     ...(brand.login ? { login: { display_name: brand.login.display_name ?? '', tagline: brand.login.tagline ?? '', welcome: brand.login.welcome ?? '', ...(loginLogo !== undefined ? { logo_url: loginLogo } : {}) } } : {}),
-    ...(brand.client ? { client: { display_name: brand.client.display_name ?? '', tagline: brand.client.tagline ?? '', accent: brand.client.accent ?? '', ...(clientLogo !== undefined ? { logo_url: clientLogo } : {}) } } : {}),
+    ...(brand.client ? { client: { display_name: brand.client.display_name ?? '', tagline: brand.client.tagline ?? '', ...(clientLogo !== undefined ? { logo_url: clientLogo } : {}) } } : {}),
     ...(favicon !== undefined ? { favicon_url: favicon } : {}),
   }
 }

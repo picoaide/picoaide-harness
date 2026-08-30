@@ -138,6 +138,43 @@ func TestUploadLogoRejectsBadExt(t *testing.T) {
 	}
 }
 
+// 全部白名单格式(SVG/PNG/WebP/ICO)上传→下载往返, MIME 正确。
+func TestUploadLogoAllFormats(t *testing.T) {
+	cases := []struct {
+		ext  string
+		ct   string
+		body []byte
+	}{
+		{"svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8" fill="#000"/></svg>`)},
+		{"png", "image/png", []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde")},
+		{"webp", "image/webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 ")},
+		{"ico", "image/x-icon", []byte("\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00")},
+	}
+	db := useTestDB(t)
+	dataDir := t.TempDir()
+	r := testRouter(db, dataDir)
+	sess, csrf := adminSession(t, db)
+	// serveLogo 在 brand.enabled=false 时 404(防旧 logo 缓存), 先启用。
+	doReq(t, r, "PUT", "/api/server/admin/brand", `{"enabled":true,"login":{},"client":{},"title":""}`, sess, csrf)
+	for _, tc := range cases {
+		upload, ct := multipartBody(t, "login", "login."+tc.ext, string(tc.body))
+		w := doSend(t, r, "POST", "/api/server/admin/brand/logo", upload, ct, sess, csrf)
+		if w.Code != 200 {
+			t.Fatalf("upload %s = %d body=%s", tc.ext, w.Code, w.Body.String())
+		}
+		w = doReq(t, r, "GET", "/api/client/v2/brand/logo/login", "", "", "")
+		if w.Code != 200 {
+			t.Fatalf("download %s = %d", tc.ext, w.Code)
+		}
+		if got := w.Header().Get("Content-Type"); got != tc.ct {
+			t.Fatalf("%s content-type = %q, want %q", tc.ext, got, tc.ct)
+		}
+		if !bytes.Equal(w.Body.Bytes(), tc.body) {
+			t.Fatalf("%s body mismatch (sanitize only applies to svg)", tc.ext)
+		}
+	}
+}
+
 func TestBrandSnapshotRestore(t *testing.T) {
 	db := useTestDB(t)
 	r := testRouter(db, t.TempDir())
