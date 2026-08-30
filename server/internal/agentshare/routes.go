@@ -188,31 +188,31 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("/:name/:version/archive", downloadVersioned(db, cacheDir, false))
 }
 
-// RegisterAdminRoutes mounts /api/admin/agent-presets (AdminAuth endpoints).
+// RegisterAdminRoutes mounts /api/admin/agent-presets (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/admin/agent-presets", serverauth.AdminAuth(db))
-	g.GET("", listAll(db))
-	g.GET("/:name/archive", download(db, cacheDir, true))
-	g.GET("/:name/preview", preview(db, cacheDir))
-	g.POST("/:name/approve", decide(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
-	g.POST("/:name/reject", decide(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
-	g.DELETE("/:name", remove(db, cacheDir))
+	serverauth.AdminRoute(g, "GET", "", serverauth.PermCapabilityRead, listAll(db))
+	serverauth.AdminRoute(g, "GET", "/:name/archive", serverauth.PermCapabilityRead, download(db, cacheDir, true))
+	serverauth.AdminRoute(g, "GET", "/:name/preview", serverauth.PermCapabilityRead, preview(db, cacheDir))
+	serverauth.AdminRoute(g, "POST", "/:name/approve", serverauth.PermCapabilityWrite, decide(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
+	serverauth.AdminRoute(g, "POST", "/:name/reject", serverauth.PermCapabilityWrite, decide(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
+	serverauth.AdminRoute(g, "DELETE", "/:name", serverauth.PermCapabilityWrite, remove(db, cacheDir))
 	// 多版本端点(审计 2026-08-25 D-1):按 name@version 精确寻址,避免
 	// 旧「最新版本」语义与 hardcoded 1.0.0 文件名的断链。
-	g.GET("/:name/:version/archive", downloadVersioned(db, cacheDir, true))
-	g.GET("/:name/:version/preview", preview(db, cacheDir))
-	g.POST("/:name/:version/approve", decideVersioned(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
-	g.POST("/:name/:version/reject", decideVersioned(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
-	g.DELETE("/:name/:version", removeVersioned(db, cacheDir))
+	serverauth.AdminRoute(g, "GET", "/:name/:version/archive", serverauth.PermCapabilityRead, downloadVersioned(db, cacheDir, true))
+	serverauth.AdminRoute(g, "GET", "/:name/:version/preview", serverauth.PermCapabilityRead, preview(db, cacheDir))
+	serverauth.AdminRoute(g, "POST", "/:name/:version/approve", serverauth.PermCapabilityWrite, decideVersioned(db, serverstore.AgentPresetApproved, "agent_preset_approve"))
+	serverauth.AdminRoute(g, "POST", "/:name/:version/reject", serverauth.PermCapabilityWrite, decideVersioned(db, serverstore.AgentPresetRejected, "agent_preset_reject"))
+	serverauth.AdminRoute(g, "DELETE", "/:name/:version", serverauth.PermCapabilityWrite, removeVersioned(db, cacheDir))
 	// 质量标记(0037):仅 approved 行可设置/清除(official/featured,互斥)。
-	g.PUT("/:name/:version/quality", setPresetQuality(db))
+	serverauth.AdminRoute(g, "PUT", "/:name/:version/quality", serverauth.PermCapabilityWrite, setPresetQuality(db))
 	// 单文件内容(审核查看):从归档提取指定文件内容,支持文本/二进制/超大。
-	g.GET("/:name/:version/file", presetFileContent(db, cacheDir))
+	serverauth.AdminRoute(g, "GET", "/:name/:version/file", serverauth.PermCapabilityRead, presetFileContent(db, cacheDir))
 	// 授权(审核通过后仍需授权才可见可装):按 name 授权(同名多版本共享)。
-	g.GET("/:name/grants", listPresetGrants(db))
-	g.PUT("/:name/grants", replacePresetGrants(db))
-	g.PUT("/:name/grant", setPresetGrant(db, true))
-	g.DELETE("/:name/grant", setPresetGrant(db, false))
+	serverauth.AdminRoute(g, "GET", "/:name/grants", serverauth.PermCapabilityRead, listPresetGrants(db))
+	serverauth.AdminRoute(g, "PUT", "/:name/grants", serverauth.PermCapabilityWrite, replacePresetGrants(db))
+	serverauth.AdminRoute(g, "PUT", "/:name/grant", serverauth.PermCapabilityWrite, setPresetGrant(db, true))
+	serverauth.AdminRoute(g, "DELETE", "/:name/grant", serverauth.PermCapabilityWrite, setPresetGrant(db, false))
 }
 
 func presetJSON(p serverstore.AgentPreset) gin.H {

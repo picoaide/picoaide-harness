@@ -19,15 +19,15 @@ import (
 // ~1KB; a generous ceiling keeps admin forms honest).
 const maxDefinitionBytes = 64 << 10
 
-// RegisterAdminRoutes mounts /api/admin/connectors (AdminAuth).
+// RegisterAdminRoutes mounts /api/admin/connectors (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g := r.Group("/api/admin/connectors", serverauth.AdminAuth(db))
-	g.GET("", list(db))
-	g.GET("/:id", get(db))
-	g.POST("", create(db))
-	g.PUT("/:id", update(db))
-	g.DELETE("/:id", remove(db))
-	g.PUT("/:id/enabled", setEnabled(db))
+	serverauth.AdminRoute(g, "GET", "", serverauth.PermConnectorRead, list(db))
+	serverauth.AdminRoute(g, "GET", "/:id", serverauth.PermConnectorRead, get(db))
+	serverauth.AdminRoute(g, "POST", "", serverauth.PermConnectorWrite, create(db))
+	serverauth.AdminRoute(g, "PUT", "/:id", serverauth.PermConnectorWrite, update(db))
+	serverauth.AdminRoute(g, "DELETE", "/:id", serverauth.PermConnectorWrite, remove(db))
+	serverauth.AdminRoute(g, "PUT", "/:id/enabled", serverauth.PermConnectorWrite, setEnabled(db))
 }
 
 func rowJSON(c serverstore.Connector) gin.H {

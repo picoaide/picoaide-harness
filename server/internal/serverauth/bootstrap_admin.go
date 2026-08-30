@@ -20,8 +20,8 @@ func EnsureBootstrapAdmin(db *sql.DB, username string) error {
 		return err
 	}
 	for _, u := range users {
-		if u.IsAdmin {
-			return nil // admin exists; ignore
+		if u.IsSuperAdmin() {
+			return nil // super_admin exists; ignore
 		}
 	}
 	password := os.Getenv("PICOAI_ADMIN_PASSWORD")

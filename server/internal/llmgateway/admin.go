@@ -17,22 +17,22 @@ import (
 )
 
 // RegisterAdminRoutes mounts /api/admin/providers, /api/admin/models and
-// /api/admin/gateway behind AdminAuth.
+// /api/admin/gateway behind AdminAuth + RBAC permission checks (v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g := r.Group("/api/admin", serverauth.AdminAuth(db))
-	g.GET("/providers", func(c *gin.Context) { listProviders(c, db) })
-	g.POST("/providers", func(c *gin.Context) { createProvider(c, db) })
-	g.PUT("/providers/:id", func(c *gin.Context) { updateProvider(c, db) })
-	g.DELETE("/providers/:id", func(c *gin.Context) { deleteProvider(c, db) })
-	g.GET("/models", func(c *gin.Context) { listModelsAdmin(c, db) })
-	g.POST("/models", func(c *gin.Context) { createModel(c, db) })
-	g.PUT("/models/:id", func(c *gin.Context) { updateModel(c, db) })
-	g.DELETE("/models/:id", func(c *gin.Context) { deleteModel(c, db) })
-	g.GET("/gateway", func(c *gin.Context) { getGatewayConfig(c, db) })
-	g.PUT("/gateway", func(c *gin.Context) { setGatewayConfig(c, db) })
-	g.GET("/channels", func(c *gin.Context) { listChannelsAdmin(c) })
-	g.POST("/providers/:id/sync", func(c *gin.Context) { syncOneAdmin(c, db) })
-	g.POST("/providers/sync-all", func(c *gin.Context) { syncAllAdmin(c, db) })
+	serverauth.AdminRoute(g, "GET", "/providers", serverauth.PermGatewayRead, func(c *gin.Context) { listProviders(c, db) })
+	serverauth.AdminRoute(g, "POST", "/providers", serverauth.PermGatewayWrite, func(c *gin.Context) { createProvider(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/providers/:id", serverauth.PermGatewayWrite, func(c *gin.Context) { updateProvider(c, db) })
+	serverauth.AdminRoute(g, "DELETE", "/providers/:id", serverauth.PermGatewayWrite, func(c *gin.Context) { deleteProvider(c, db) })
+	serverauth.AdminRoute(g, "GET", "/models", serverauth.PermGatewayRead, func(c *gin.Context) { listModelsAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/models", serverauth.PermGatewayWrite, func(c *gin.Context) { createModel(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/models/:id", serverauth.PermGatewayWrite, func(c *gin.Context) { updateModel(c, db) })
+	serverauth.AdminRoute(g, "DELETE", "/models/:id", serverauth.PermGatewayWrite, func(c *gin.Context) { deleteModel(c, db) })
+	serverauth.AdminRoute(g, "GET", "/gateway", serverauth.PermGatewayRead, func(c *gin.Context) { getGatewayConfig(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/gateway", serverauth.PermGatewayWrite, func(c *gin.Context) { setGatewayConfig(c, db) })
+	serverauth.AdminRoute(g, "GET", "/channels", serverauth.PermGatewayRead, func(c *gin.Context) { listChannelsAdmin(c) })
+	serverauth.AdminRoute(g, "POST", "/providers/:id/sync", serverauth.PermGatewayWrite, func(c *gin.Context) { syncOneAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/providers/sync-all", serverauth.PermGatewayWrite, func(c *gin.Context) { syncAllAdmin(c, db) })
 }
 
 // syncFetchFn is the fetchFn used by immediate post-save syncs; nil uses

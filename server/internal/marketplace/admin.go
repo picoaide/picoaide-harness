@@ -19,22 +19,23 @@ import (
 	"github.com/picoaide/picoaide/internal/util"
 )
 
-// RegisterAdminRoutes mounts /api/admin/skills* behind AdminAuth. cacheDir is
-// the skill repo/archive cache, invalidated when a skill's source changes (C-6).
+// RegisterAdminRoutes mounts /api/admin/skills* behind AdminAuth + RBAC
+// (v3b). cacheDir is the skill repo/archive cache, invalidated when a
+// skill's source changes (C-6).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/admin", serverauth.AdminAuth(db))
-	g.GET("/skills", func(c *gin.Context) { listSkillsAdmin(c, db) })
-	g.POST("/skills", func(c *gin.Context) { createSkillAdmin(c, db) })
-	g.POST("/skills/:name/archive", func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) })
-	g.PUT("/skills/:name", func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) })
-	g.DELETE("/skills/:name", func(c *gin.Context) { deleteSkillAdmin(c, db) })
+	serverauth.AdminRoute(g, "GET", "/skills", serverauth.PermMarketRead, func(c *gin.Context) { listSkillsAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/skills", serverauth.PermMarketWrite, func(c *gin.Context) { createSkillAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/skills/:name/archive", serverauth.PermMarketWrite, func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) })
+	serverauth.AdminRoute(g, "PUT", "/skills/:name", serverauth.PermMarketWrite, func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) })
+	serverauth.AdminRoute(g, "DELETE", "/skills/:name", serverauth.PermMarketWrite, func(c *gin.Context) { deleteSkillAdmin(c, db) })
 	// 重新上架(审计 A5-M1: 下架不可逆曾导致误下架无法恢复)
-	g.POST("/skills/:name/enable", func(c *gin.Context) { enableSkillAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/skills/:name/enable", serverauth.PermMarketWrite, func(c *gin.Context) { enableSkillAdmin(c, db) })
 	// 授权管理(严格默认:未授权不可见/不可下载)
-	g.GET("/skills/:name/grants", func(c *gin.Context) { listSkillGrants(c, db) })
-	g.PUT("/skills/:name/grants", func(c *gin.Context) { replaceSkillGrants(c, db) })
-	g.PUT("/skills/:name/grant", func(c *gin.Context) { setSkillGrant(c, db, true) })
-	g.DELETE("/skills/:name/grant", func(c *gin.Context) { setSkillGrant(c, db, false) })
+	serverauth.AdminRoute(g, "GET", "/skills/:name/grants", serverauth.PermMarketRead, func(c *gin.Context) { listSkillGrants(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/skills/:name/grants", serverauth.PermMarketWrite, func(c *gin.Context) { replaceSkillGrants(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/skills/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { setSkillGrant(c, db, true) })
+	serverauth.AdminRoute(g, "DELETE", "/skills/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { setSkillGrant(c, db, false) })
 }
 
 // grantReq carries a subject: {username} or {group} (webadmin sends @group).

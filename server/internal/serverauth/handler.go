@@ -150,6 +150,13 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "账号已禁用")
 		return
 	}
+	// v3b: 审计账号禁止使用客户端——员工面登录一律拒绝(审计员仅可经
+	// /api/admin/login cookie 会话进 webadmin 只读工作台)。服务端强制,
+	// 客户端即使收到 200 也不会被放行(无 token 可签发)。
+	if user.Role == serverstore.RoleAuditor {
+		writeError(c, http.StatusUnauthorized, "AUDITOR_NOT_ALLOWED", "审计账号不可登录客户端,请使用管理后台")
+		return
+	}
 	token, err := IssueToken(a.DB, user.ID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
@@ -349,7 +356,10 @@ func userJSON(u *serverstore.User) gin.H {
 		"display_name": u.DisplayName,
 		"email":        u.Email,
 		"is_admin":     u.IsAdmin,
-		"status":       u.Status,
+		// RBAC (v3b): role + permissions for the current user's role.
+		"role":        u.Role,
+		"permissions": PermissionsOf(u.Role),
+		"status":      u.Status,
 		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
 		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
 	}
