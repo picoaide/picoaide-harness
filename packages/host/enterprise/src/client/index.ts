@@ -95,19 +95,14 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(
     () => {
       startBrandStore(ctx)
-      // v3b §4.2: hero/accent CSS 变量注入(品牌变化时更新)。
+      // v3b §4.2: hero CSS 变量注入(品牌变化时更新)。
       // 注意: --pico-hero-headline/--pico-hero-tagline 被 BRAND_CSS 的
       // `content: var(…)` 消费, content 只接受字符串字面量, 值必须带引号
       // 写入(buildBrandCSSVars 内 JSON.stringify), 否则整条声明非法、
-      // hero 标题文字不可见(2026-09 实测)。
+      // hero 标题文字不可见(2026-09 实测)。品牌色已下线(2026-09 决策)。
       const applyVars = (brand: BrandConfig | null): void => {
         const root = document.documentElement
-        const vars = buildBrandCSSVars(brand)
-        // 品牌关闭/颜色被移除时清掉残留 accent, 回退上游主题默认色。
-        if (!('--dsw-alias-brand-primary' in vars)) {
-          root.style.removeProperty('--dsw-alias-brand-primary')
-        }
-        for (const [k, v] of Object.entries(vars)) {
+        for (const [k, v] of Object.entries(buildBrandCSSVars(brand))) {
           root.style.setProperty(k, v)
         }
       }
