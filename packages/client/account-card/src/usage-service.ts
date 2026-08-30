@@ -1,5 +1,5 @@
 /**
- * Gateway usage snapshot service: fetches `GET /api/auth/usage` with the
+ * Gateway usage snapshot service: fetches `GET /api/client/v2/auth/usage` with the
  * enterprise session token, keeps one in-memory snapshot, and coalesces
  * refreshes (debounce + single flight) so agent-loop-complete notifications
  * and manual refreshes never stack duplicate gateway calls.
@@ -9,7 +9,7 @@
 import { fetchJSON } from '@picoaide/dsh-enterprise/server-connector/auth'
 import type { Session } from '@picoaide/dsh-enterprise/server-connector/config'
 
-/** Server `GET /api/auth/usage` payload (fields used by the card). */
+/** Server `GET /api/client/v2/auth/usage` payload (fields used by the card). */
 export interface UsagePayload {
   is_admin: boolean
   quota_tokens: number
@@ -104,7 +104,7 @@ export class UsageService {
     this.snapshot = { ...this.snapshot, state: 'loading', error: null }
     this.inflight = (async (): Promise<UsageSnapshot> => {
       try {
-        const data = await this.fetch(session.serverURL, '/api/auth/usage', { token: session.token })
+        const data = await this.fetch(session.serverURL, '/api/client/v2/auth/usage', { token: session.token })
         this.snapshot = { data, fetchedAt: Date.now(), state: 'idle', error: null }
       } catch (cause) {
         // 401/auth-expired surfaces here too: the route layer maps it to a
