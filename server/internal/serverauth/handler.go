@@ -127,6 +127,7 @@ func (a *API) handleLogin(c *gin.Context) {
 		return
 	}
 	if !a.loginAllowed(c, req.Username) {
+		_ = serverstore.AuditLog(a.DB, req.Username, "login_fail", "rate_limited ip="+c.ClientIP())
 		return
 	}
 
@@ -137,6 +138,8 @@ func (a *API) handleLogin(c *gin.Context) {
 	}
 	ui, err := a.authenticate(req.Username, req.Password)
 	if err != nil {
+		// v3b 审计: 登录失败留痕(合规要求; 含来源 IP)。
+		_ = serverstore.AuditLog(a.DB, req.Username, "login_fail", "ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误")
 		return
 	}
@@ -162,6 +165,8 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
 		return
 	}
+	// v3b 审计: 登录成功留痕。
+	_ = serverstore.AuditLog(a.DB, user.Username, "login_success", "ip="+c.ClientIP())
 	c.JSON(http.StatusOK, gin.H{"token": token, "user": userJSON(user)})
 }
 
