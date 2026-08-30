@@ -30,7 +30,7 @@ export default function ErrorMonitoring() {
     setLoading(true)
     setError('')
     try {
-      const g = await request('/api/admin/gateway')
+      const g = await request('/api/server/admin/gateway')
       setCfg({
         error_reporting_enabled: g.error_reporting_enabled === true,
         error_reporting_dsn: g.error_reporting_dsn ?? '',
@@ -61,7 +61,7 @@ export default function ErrorMonitoring() {
     setBusy(true)
     try {
       // 仅提交错误监控域字段;其余网关配置(默认模型/思考强度/限流等)不动。
-      await request('/api/admin/gateway', {
+      await request('/api/server/admin/gateway', {
         method: 'PUT',
         body: JSON.stringify({
           error_reporting_enabled: cfg.error_reporting_enabled,

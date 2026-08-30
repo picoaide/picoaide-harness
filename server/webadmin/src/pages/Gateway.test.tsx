@@ -6,16 +6,16 @@ import { request } from '../api'
 const mockRequest = vi.mocked(request)
 
 const baseImpl = async (path: string, init?: RequestInit) => {
-  if (path === '/api/admin/providers' && init?.method === 'POST') {
+  if (path === '/api/server/admin/providers' && init?.method === 'POST') {
     return { provider: { id: 2, name: 'deepseek2', channel: 'deepseek' }, sync: { added: 2, removed: 0 } }
   }
-  if (path === '/api/admin/providers/sync-all') {
+  if (path === '/api/server/admin/providers/sync-all') {
     return { results: [{ provider: 'deepseek', added: 1, removed: 0 }, { provider: 'manual', skipped: true, error: '手动型上游无需同步' }] }
   }
-  if (path === '/api/admin/providers') return { providers: [{ id: 1, name: 'deepseek', base_url: 'https://api.deepseek.com', api_key: '***', models: ['deepseek-chat'], enabled: true, channel: 'deepseek', protocol: 'openai' }] }
-  if (path === '/api/admin/models') return { models: [{ id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', provider_name: 'deepseek', provider_channel: 'deepseek', provider_enabled: true }] }
-  if (path === '/api/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' }
-  if (path === '/api/admin/channels') return { channels: [{ name: 'deepseek', base_url: 'https://api.deepseek.com' }] }
+  if (path === '/api/server/admin/providers') return { providers: [{ id: 1, name: 'deepseek', base_url: 'https://api.deepseek.com', api_key: '***', models: ['deepseek-chat'], enabled: true, channel: 'deepseek', protocol: 'openai' }] }
+  if (path === '/api/server/admin/models') return { models: [{ id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', provider_name: 'deepseek', provider_channel: 'deepseek', provider_enabled: true }] }
+  if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' }
+  if (path === '/api/server/admin/channels') return { channels: [{ name: 'deepseek', base_url: 'https://api.deepseek.com' }] }
   return {}
 }
 
@@ -49,7 +49,7 @@ describe('Gateway 网关配置页', () => {
   it('提交上游时携带 protocol 字段(默认 openai;选择 anthropic 后提交 anthropic)', async () => {
     let submitted: string | undefined
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/providers' && init?.method === 'POST') {
+      if (path === '/api/server/admin/providers' && init?.method === 'POST') {
         submitted = (JSON.parse(String(init.body)) as { protocol?: string }).protocol
         return { provider: { id: 2, name: 'ds-anthropic', channel: '', protocol: 'anthropic' }, sync: undefined }
       }
@@ -78,7 +78,7 @@ describe('Gateway 网关配置页', () => {
 
   it('提交 sync.error 时提示可重试', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/providers' && init?.method === 'POST') {
+      if (path === '/api/server/admin/providers' && init?.method === 'POST') {
         return { provider: { id: 2, name: 'deepseek2', channel: 'deepseek' }, sync: { error: 'upstream 500' } }
       }
       return baseImpl(path, init)
@@ -94,12 +94,12 @@ describe('Gateway 网关配置页', () => {
 
   it('全局设置渲染默认月金额配额字段并可编辑保存', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/gateway' && init?.method === 'PUT') {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
         return { ok: true }
       }
       return {
         ...(await baseImpl(path, init)),
-        ...(path === '/api/admin/gateway' ? { monthly_quota: '100000', monthly_quota_money: '500' } : {}),
+        ...(path === '/api/server/admin/gateway' ? { monthly_quota: '100000', monthly_quota_money: '500' } : {}),
       }
     })
     render(<Gateway />)
@@ -112,14 +112,14 @@ describe('Gateway 网关配置页', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('已保存')
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/gateway',
+      '/api/server/admin/gateway',
       expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"monthly_quota_money":"800"') }),
     )
   })
 
   it('模型表格展示价格列:未定价徽标与价格显示', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/models') {
+      if (path === '/api/server/admin/models') {
         return {
           models: [
             { id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', input_price_per_1m: 2, output_price_per_1m: 8 },
@@ -144,7 +144,7 @@ describe('Gateway 网关配置页', () => {
     fireEvent.change(dialog.getByDisplayValue('deepseek'), { target: { value: 'deepseek-v2' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/providers/1',
+      '/api/server/admin/providers/1',
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify({ name: 'deepseek-v2', channel: 'deepseek', base_url: 'https://api.deepseek.com', enabled: true, protocol: 'openai' }),
@@ -167,7 +167,7 @@ describe('Gateway 网关配置页', () => {
     fireEvent.change(screen.getByLabelText('对外访问地址 (Server Base URL)'), { target: { value: 'not-a-url' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(await screen.findByText('对外访问地址必须是 http(s) URL')).toBeInTheDocument()
-    expect(mockRequest).not.toHaveBeenCalledWith('/api/admin/gateway', expect.objectContaining({ method: 'PUT' }))
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/gateway', expect.objectContaining({ method: 'PUT' }))
   })
 
   it('立即同步:手动型上游折叠为汇总行', async () => {
@@ -179,7 +179,7 @@ describe('Gateway 网关配置页', () => {
 
   it('上游表格空态展示引导文案', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/providers') return { providers: [] }
+      if (path === '/api/server/admin/providers') return { providers: [] }
       return baseImpl(path)
     })
     render(<Gateway />)
@@ -195,7 +195,7 @@ describe('Gateway 网关配置页', () => {
     fireEvent.change(dialog.getByLabelText('输出价格(元/百万 token)'), { target: { value: '10' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/models/1',
+      '/api/server/admin/models/1',
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 3, output_price_per_1m: 10 }),
@@ -213,7 +213,7 @@ describe('Gateway 网关配置页', () => {
     fireEvent.change(dialog.getByLabelText('低谷折扣率(0-1,留空 = 保持现值;1 = 取消峰谷)'), { target: { value: '0.5' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/models/1',
+      '/api/server/admin/models/1',
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 2, output_price_per_1m: 8, offpeak_discount: 0.5 }),
@@ -223,7 +223,7 @@ describe('Gateway 网关配置页', () => {
 
   it('模型表格价格列:有低谷折扣时显示谷 N折', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/models') {
+      if (path === '/api/server/admin/models') {
         return {
           models: [
             { id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', input_price_per_1m: 2, output_price_per_1m: 8, offpeak_discount: 0.5 },
@@ -249,7 +249,7 @@ describe('Gateway 网关配置页', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('已保存')
     const call = mockRequest.mock.calls.find(
-      (c) => c[0] === '/api/admin/gateway' && c[1]?.method === 'PUT'
+      (c) => c[0] === '/api/server/admin/gateway' && c[1]?.method === 'PUT'
     )
     expect(call).toBeTruthy()
     const sent = JSON.parse(call![1]!.body as string)
@@ -258,10 +258,10 @@ describe('Gateway 网关配置页', () => {
 
   it('高峰时段:清空保存 = 无峰谷价(留空语义成立)', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/gateway' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') return { ok: true }
       return {
         ...(await baseImpl(path, init)),
-        ...(path === '/api/admin/gateway' ? { peak_windows: '[{"start":"09:00","end":"12:00"}]' } : {}),
+        ...(path === '/api/server/admin/gateway' ? { peak_windows: '[{"start":"09:00","end":"12:00"}]' } : {}),
       }
     })
     render(<Gateway />)
@@ -271,7 +271,7 @@ describe('Gateway 网关配置页', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('已保存')
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/gateway',
+      '/api/server/admin/gateway',
       expect.objectContaining({
         method: 'PUT',
         body: expect.stringContaining('"peak_windows":""'),
@@ -289,5 +289,5 @@ describe('Gateway 网关配置页', () => {
     fireEvent.change(end, { target: { value: '09:00' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(await screen.findByText('高峰时段每行的开始时间必须早于结束时间')).toBeInTheDocument()
-    expect(mockRequest).not.toHaveBeenCalledWith('/api/admin/gateway', expect.objectContaining({ method: 'PUT' }))
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/gateway', expect.objectContaining({ method: 'PUT' }))
   })

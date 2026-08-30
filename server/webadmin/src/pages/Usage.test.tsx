@@ -55,17 +55,17 @@ const urlStub = { createObjectURL: vi.fn(() => 'blob:test'), revokeObjectURL: vi
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
-    if (path.startsWith('/api/admin/usage')) {
+    if (path.startsWith('/api/server/admin/usage')) {
       // 环比查询(上一等长区间,to = 当前区间 from 的前一天)
       if (path.includes('to=' + prevToStr())) {
         return { rows: prevRows, group: 'day' }
       }
       return { rows: usageRows, group: 'day' }
     }
-    if (path.startsWith('/api/admin/users')) {
+    if (path.startsWith('/api/server/admin/users')) {
       return { users, total: 4, page: 1, size: 200 }
     }
-    if (path.startsWith('/api/admin/gateway')) {
+    if (path.startsWith('/api/server/admin/gateway')) {
       return { monthly_quota: '5000', monthly_quota_money: '50', default_model: 'm', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' }
     }
     return {}
@@ -126,7 +126,7 @@ describe('Usage 用量统计页', () => {
     await screen.findByTestId('stat-cards')
     fireEvent.click(screen.getByRole('button', { name: '近7天' }))
     await waitFor(() => {
-      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage'))
+      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/server/admin/usage'))
       const last = calls[calls.length - 1]
       expect(last[0]).toContain('from=')
       expect(last[0]).toContain('to=')
@@ -136,7 +136,7 @@ describe('Usage 用量统计页', () => {
   it('首次加载默认携带近30天 from/to(避免无界全表聚合)', async () => {
     render(<Usage />)
     await screen.findByTestId('stat-cards')
-    const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage'))
+    const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/server/admin/usage'))
     expect(calls[0][0]).toContain('from=')
     expect(calls[0][0]).toContain('to=')
   })
@@ -156,11 +156,11 @@ describe('Usage 用量统计页', () => {
     const user = userEvent.setup()
     render(<Usage />)
     await screen.findByTestId('stat-cards')
-    const callsBefore = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage')).length
+    const callsBefore = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/server/admin/usage')).length
     await user.click(screen.getByRole('tab', { name: '占比' }))
     // 切换图表后不再发起新的 usage 查询(维度不变,数据在 rows 中)
     await waitFor(() => {
-      const callsAfter = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage')).length
+      const callsAfter = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/server/admin/usage')).length
       expect(callsAfter).toBe(callsBefore)
     })
     // 图表 Tab 切换为占比
@@ -174,7 +174,7 @@ describe('Usage 用量统计页', () => {
     await user.click(screen.getByRole('combobox', { name: '分组' }))
     await user.click(await screen.findByRole('option', { name: '按模型' }))
     await waitFor(() => {
-      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage'))
+      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/server/admin/usage'))
       const last = calls[calls.length - 1]
       expect(last[0]).toContain('group=model')
     })
@@ -221,7 +221,7 @@ describe('Usage 用量统计页', () => {
     Object.defineProperty(URL, 'createObjectURL', { writable: true, value: createSpy })
     Object.defineProperty(URL, 'revokeObjectURL', { writable: true, value: vi.fn() })
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) {
+      if (path.startsWith('/api/server/admin/usage')) {
         if (path.includes('to=' + prevToStr())) return { rows: [], group: 'day' }
         return {
           rows: [
@@ -245,12 +245,12 @@ describe('Usage 用量统计页', () => {
 
   it('用户分组行点击打开钻取弹窗并发起 username 过滤查询', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) {
+      if (path.startsWith('/api/server/admin/usage')) {
         if (path.includes('username=')) return { rows: [{ label: '2026-08-10', prompt_tokens: 100, completion_tokens: 50, requests: 2, cost: 0.2 }], group: 'day' }
         return { rows: [{ label: 'alice', prompt_tokens: 100, completion_tokens: 50, requests: 2, cost: 0.2 }], group: 'user' }
       }
-      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
-      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/server/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/server/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
       return {}
     })
     const user = userEvent.setup()
@@ -266,7 +266,7 @@ describe('Usage 用量统计页', () => {
     })
     fireEvent.click(within(screen.getByRole('table')).getAllByText('alice')[0])
     await waitFor(() => {
-      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage') && p.includes('username='))
+      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/server/admin/usage') && p.includes('username='))
       expect(calls.length).toBeGreaterThan(0)
       expect(calls[calls.length - 1][0]).toContain('username=alice')
     })
@@ -275,9 +275,9 @@ describe('Usage 用量统计页', () => {
 
   it('空数据时展示兜底文案', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) return { rows: [], group: 'day' }
-      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
-      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/server/admin/usage')) return { rows: [], group: 'day' }
+      if (path.startsWith('/api/server/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/server/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
       return {}
     })
     render(<Usage />)
@@ -304,10 +304,10 @@ describe('Usage 用量统计页(口径/配额/钻取补充)', () => {
 
   it('存在未定价模型时展示提示条', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) return { rows: usageRows, group: 'day' }
-      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
-      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
-      if (path.startsWith('/api/admin/models')) {
+      if (path.startsWith('/api/server/admin/usage')) return { rows: usageRows, group: 'day' }
+      if (path.startsWith('/api/server/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/server/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/server/admin/models')) {
         return { models: [{ id: 1, name: 'free-model', input_price_per_1m: 0, output_price_per_1m: 0 }] }
       }
       return {}
@@ -328,9 +328,9 @@ describe('Usage 用量统计页(口径/配额/钻取补充)', () => {
 
   it('配额面板:员工总数 > 展示数时提示"仅展示前 N 名"', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) return { rows: usageRows, group: 'day' }
-      if (path.startsWith('/api/admin/users')) return { users, total: 250, page: 1, size: 200 }
-      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/server/admin/usage')) return { rows: usageRows, group: 'day' }
+      if (path.startsWith('/api/server/admin/users')) return { users, total: 250, page: 1, size: 200 }
+      if (path.startsWith('/api/server/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
       return {}
     })
     render(<Usage />)
@@ -356,10 +356,10 @@ describe('Usage 用量统计页(口径/配额/钻取补充)', () => {
 
   it('部门预算:仅展示配置了预算的部门及其占用', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) return { rows: usageRows, group: 'day' }
-      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
-      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
-      if (path.startsWith('/api/admin/departments')) {
+      if (path.startsWith('/api/server/admin/usage')) return { rows: usageRows, group: 'day' }
+      if (path.startsWith('/api/server/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/server/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/server/admin/departments')) {
         return {
           departments: [
             { id: 1, name: '研发部', budget_money: 1000, monthly_cost: 600 },
@@ -379,12 +379,12 @@ describe('Usage 用量统计页(口径/配额/钻取补充)', () => {
 
   it('钻取弹窗查询失败时展示弹窗内错误态', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/usage')) {
+      if (path.startsWith('/api/server/admin/usage')) {
         if (path.includes('username=')) throw new Error('钻取查询失败')
         return { rows: [{ label: 'alice', prompt_tokens: 100, completion_tokens: 50, requests: 2, cost: 0.2 }], group: 'user' }
       }
-      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
-      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/server/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/server/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
       return {}
     })
     const user = userEvent.setup()

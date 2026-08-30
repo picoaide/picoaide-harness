@@ -32,7 +32,7 @@ const AUTH_SAMPLE = {
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
-    if (path === '/api/admin/auth') return AUTH_SAMPLE
+    if (path === '/api/server/admin/auth') return AUTH_SAMPLE
     return {}
   })
 })
@@ -57,14 +57,14 @@ describe('Auth 认证配置页(v3b Tab 重设计)', () => {
     // 直接点保存(不切换 Tab; 服务端启用方式已全配置, 前端校验通过)
     fireEvent.click(screen.getByRole('button', { name: '保存认证配置' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/auth', expect.objectContaining({ method: 'PUT' }))
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/auth', expect.objectContaining({ method: 'PUT' }))
     })
     expect(await screen.findByText('认证配置已保存(重启服务端后生效)')).toBeInTheDocument()
   })
 
   it('校验:启用 LDAP 但配置不完整 → 复选框禁用', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/auth') return { auth: { mode: 'local', enabled: 'local' } }
+      if (path === '/api/server/admin/auth') return { auth: { mode: 'local', enabled: 'local' } }
       return {}
     })
     render(<Auth />)
@@ -81,7 +81,7 @@ describe('Auth 认证配置页(v3b Tab 重设计)', () => {
     fireEvent.click(hide)
     fireEvent.click(screen.getByRole('button', { name: '保存认证配置' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/auth', expect.objectContaining({
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/auth', expect.objectContaining({
         method: 'PUT',
         body: expect.stringContaining('"hide_local":true'),
       }))

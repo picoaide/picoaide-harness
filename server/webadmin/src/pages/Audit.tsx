@@ -90,7 +90,7 @@ export default function Audit() {
       const params = new URLSearchParams({ page: String(p), size: '50' })
       if (action) params.set('action', action)
       if (username) params.set('username', username)
-      const data = await request(`/api/admin/audit?${params.toString()}`)
+      const data = await request(`/api/server/admin/audit?${params.toString()}`)
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setLogs(data.logs)
       setTotal(data.total)

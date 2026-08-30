@@ -37,7 +37,7 @@ describe('ErrorMonitoring 错误监控页', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith(
-        '/api/admin/gateway',
+        '/api/server/admin/gateway',
         expect.objectContaining({
           method: 'PUT',
           body: JSON.stringify({
@@ -51,7 +51,7 @@ describe('ErrorMonitoring 错误监控页', () => {
       )
     })
     // 提交体中不得包含 default_model / default_thinking_level(避免误覆盖)
-    const call = mockRequest.mock.calls.find((c) => c[0] === '/api/admin/gateway' && (c[1] as RequestInit)?.method === 'PUT')
+    const call = mockRequest.mock.calls.find((c) => c[0] === '/api/server/admin/gateway' && (c[1] as RequestInit)?.method === 'PUT')
     const body = JSON.parse((call![1] as RequestInit).body as string)
     expect(body.default_model).toBeUndefined()
     expect(body.default_thinking_level).toBeUndefined()
@@ -63,7 +63,7 @@ describe('ErrorMonitoring 错误监控页', () => {
     fireEvent.change(input, { target: { value: 'not-a-url' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(await screen.findByText('错误上报 DSN 必须是 http(s) URL(如 https://glitchtip.example.com/...或留空)')).toBeInTheDocument()
-    expect(mockRequest).not.toHaveBeenCalledWith('/api/admin/gateway', expect.objectContaining({ method: 'PUT' }))
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/gateway', expect.objectContaining({ method: 'PUT' }))
   })
 
   it('关闭上报开关保存 false', async () => {
@@ -73,7 +73,7 @@ describe('ErrorMonitoring 错误监控页', () => {
     fireEvent.click(screen.getByRole('switch'))
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => {
-      const put = mockRequest.mock.calls.find((c) => c[0] === '/api/admin/gateway' && (c[1] as RequestInit)?.method === 'PUT')
+      const put = mockRequest.mock.calls.find((c) => c[0] === '/api/server/admin/gateway' && (c[1] as RequestInit)?.method === 'PUT')
       const body = JSON.parse((put![1] as RequestInit).body as string)
       expect(body.error_reporting_enabled).toBe(false)
     })

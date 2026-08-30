@@ -70,7 +70,8 @@ type ConnectorItem struct {
 }
 
 // RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
-// plus an unauthenticated /healthz for docker healthchecks.
+// plus an unauthenticated /healthz for docker healthchecks (only on the
+// no-prefix call — healthz is a fixed endpoint and must never be mirrored).
 func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	// 无需认证的存活探针:docker HEALTHCHECK 用(docker 官方语义:退出码 0=healthy)。
 	// 查询 DB(3s 超时),DB 不可用返回 503。
@@ -85,7 +86,13 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
-	r.GET("/api/config/bootstrap", serverauth.BearerAuth(db), func(c *gin.Context) {
+	r.GET("/api/config/bootstrap", serverauth.BearerAuth(db), buildBootstrapHandler(db))
+}
+
+// buildBootstrapHandler 返回 bootstrap 端点 handler;闭包在每次调用时新建,
+// 但行为一致——/api 与 /v2/api 两条路由各自持有等价闭包(相同 db 引用)。
+func buildBootstrapHandler(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		u := serverauth.CurrentUser(c)
 		if u == nil {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
@@ -97,7 +104,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 			return
 		}
 		c.JSON(http.StatusOK, resp)
-	})
+	}
 }
 
 // Build assembles the bootstrap payload for a specific user: models are

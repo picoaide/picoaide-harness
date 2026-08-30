@@ -49,8 +49,8 @@ export default function Departments() {
     const current = ++loadSeq.current
     try {
       const [d, u] = await Promise.all([
-        request('/api/admin/departments'),
-        request('/api/admin/users?size=200'),
+        request('/api/server/admin/departments'),
+        request('/api/server/admin/users?size=200'),
       ])
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setDepts(d.departments ?? [])
@@ -110,9 +110,9 @@ export default function Departments() {
     setBusy(true)
     try {
       if (deptForm.id > 0) {
-        await request(`/api/admin/departments/${deptForm.id}`, { method: 'PUT', body })
+        await request(`/api/server/admin/departments/${deptForm.id}`, { method: 'PUT', body })
       } else {
-        await request('/api/admin/departments', { method: 'POST', body })
+        await request('/api/server/admin/departments', { method: 'POST', body })
       }
       setDeptDialog(false)
       load()
@@ -128,7 +128,7 @@ export default function Departments() {
     if (!window.confirm(`确定删除部门「${d.name}」?有关联(成员/子部门/授权)时将被拒绝。`)) return
     setBusy(true)
     try {
-      await request(`/api/admin/departments/${d.id}`, { method: 'DELETE' })
+      await request(`/api/server/admin/departments/${d.id}`, { method: 'DELETE' })
       load()
     } catch (err: any) {
       setError(err.message)

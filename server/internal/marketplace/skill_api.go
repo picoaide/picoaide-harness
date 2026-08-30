@@ -35,7 +35,8 @@ func NewAPI(db *sql.DB, cacheDir string) *API {
 
 // RegisterRoutes mounts the /api/marketplace endpoints. All require login.
 func (a *API) RegisterRoutes(r *gin.Engine) {
-	g := r.Group("/api/marketplace", serverauth.BearerAuth(a.DB))
+	base := "/api/marketplace"
+	g := r.Group(base, serverauth.BearerAuth(a.DB))
 	g.GET("/skills", a.listSkills)
 	g.GET("/skills/updates", a.skillUpdates)
 	g.GET("/skills/:name", a.getSkill)

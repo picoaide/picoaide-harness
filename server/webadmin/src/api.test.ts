@@ -26,7 +26,7 @@ describe('api 请求层(审计 A5-M3/L5/L6)', () => {
       statusText: 'Unauthorized',
       json: async () => ({ error: { code: 'AUTH_REQUIRED', message: '未登录' } }),
     })
-    await expect(request('/api/admin/x')).rejects.toMatchObject({ status: 401, code: 'AUTH_REQUIRED' })
+    await expect(request('/api/server/admin/x')).rejects.toMatchObject({ status: 401, code: 'AUTH_REQUIRED' })
     expect(handler).toHaveBeenCalledTimes(1)
   })
 
@@ -38,7 +38,7 @@ describe('api 请求层(审计 A5-M3/L5/L6)', () => {
       statusText: 'Bad Gateway',
       json: async () => { throw new Error('not json') },
     })
-    await expect(request('/api/admin/x')).rejects.toMatchObject({ message: '服务暂时不可用,请稍后再试' })
+    await expect(request('/api/server/admin/x')).rejects.toMatchObject({ message: '服务暂时不可用,请稍后再试' })
   })
 
   it('成功响应返回解析后的 JSON', async () => {
@@ -48,6 +48,6 @@ describe('api 请求层(审计 A5-M3/L5/L6)', () => {
       status: 200,
       json: async () => ({ ok: true, items: [1] }),
     })
-    await expect(request('/api/admin/x')).resolves.toEqual({ ok: true, items: [1] })
+    await expect(request('/api/server/admin/x')).resolves.toEqual({ ok: true, items: [1] })
   })
 })

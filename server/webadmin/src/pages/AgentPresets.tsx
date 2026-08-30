@@ -67,7 +67,7 @@ export default function AgentPresets() {
   const [departments, setDepartments] = useState<Dept[]>([])
 
   useEffect(() => {
-    request('/api/admin/departments')
+    request('/api/server/admin/departments')
       .then((data) => { setDepartments(data.departments ?? []) })
       .catch(() => { /* 授权对话框内部门为空时仍可单用户授权 */ })
   }, [])
@@ -79,7 +79,7 @@ export default function AgentPresets() {
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ presets: PresetRow[] }>('/api/admin/agent-presets')
+      const data = await request<{ presets: PresetRow[] }>('/api/server/admin/agent-presets')
       if (current !== loadSeq.current) return
       setAllRows(data.presets ?? [])
       const filtered = status === 'all' ? (data.presets ?? []) : (data.presets ?? []).filter(r => r.status === status)
@@ -100,7 +100,7 @@ export default function AgentPresets() {
     setError('')
     try {
       if (kind === 'delete') {
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, { method: 'DELETE' })
+        await request(`/api/server/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, { method: 'DELETE' })
       } else if (kind === 'reject') {
         const trimmed = reason.trim()
         if (trimmed === '') {
@@ -108,12 +108,12 @@ export default function AgentPresets() {
           setBusy('')
           return
         }
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/reject`, {
+        await request(`/api/server/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/reject`, {
           method: 'POST',
           body: JSON.stringify({ reason: trimmed }),
         })
       } else {
-        await request(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/approve`, { method: 'POST' })
+        await request(`/api/server/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/approve`, { method: 'POST' })
       }
       setConfirm(null)
       setReason('')
@@ -130,7 +130,7 @@ export default function AgentPresets() {
     setPreview(null)
     setError('')
     try {
-      const data = await request<PreviewData>(`/api/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
+      const data = await request<PreviewData>(`/api/server/admin/agent-presets/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
       setPreview(data)
     } catch (err: any) {
       setError(err.message)
@@ -215,7 +215,7 @@ export default function AgentPresets() {
                         <Button
                           variant="ghost" size="sm"
                           asChild={false}
-                          onClick={() => { window.open(`/api/admin/agent-presets/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version)}/archive`, '_blank') }}
+                          onClick={() => { window.open(`/api/server/admin/agent-presets/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version)}/archive`, '_blank') }}
                           title="下载归档核查"
                         >
                           <Download className="h-4 w-4" />
@@ -318,7 +318,7 @@ export default function AgentPresets() {
       <GrantDialog
         open={grantName !== ''}
         name={grantName}
-        basePath={`/api/admin/agent-presets/${encodeURIComponent(grantName)}`}
+        basePath={`/api/server/admin/agent-presets/${encodeURIComponent(grantName)}`}
         departments={departments}
         onClose={() => { setGrantName('') }}
         onSaved={() => { void load(tab) }}

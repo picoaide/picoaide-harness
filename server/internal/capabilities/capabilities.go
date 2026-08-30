@@ -58,14 +58,16 @@ type CapabilityItem struct {
 
 // RegisterRoutes mounts /api/capabilities (employee Bearer endpoints).
 func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	g := r.Group("/api/capabilities", serverauth.BearerAuth(db))
+	base := "/api/capabilities"
+	g := r.Group(base, serverauth.BearerAuth(db))
 	g.GET("", listCapabilities(db, cacheDir))
 }
 
 // RegisterAdminRoutes mounts /api/admin/capabilities (AdminAuth + RBAC v3b):
 // the unified approval queue over shared-skills + agent-presets.
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	g := r.Group("/api/admin/capabilities", serverauth.AdminAuth(db))
+	base := "/api/admin/capabilities"
+	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "/approvals", serverauth.PermCapabilityRead, listApprovals(db, cacheDir))
 }
 

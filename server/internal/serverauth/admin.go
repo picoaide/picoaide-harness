@@ -85,9 +85,11 @@ var issuerURLRe = regexp.MustCompile(`^(https)://[A-Za-z0-9.\-]+(:\d+)?(/[^\s]*)
 // RegisterAdminRoutes mounts /api/admin/* with session+CSRF protection and
 // RBAC permission checks (design v3b: every protected route declares its
 // permission through AdminRoute; me/logout require only a valid session).
+// 双轨镜像,handler/中间件与 /api 完全共享,只能增加不能减少)。
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
+	base := "/api/admin"
 	a := &AdminAPI{DB: db}
-	g := r.Group("/api/admin")
+	g := r.Group(base)
 	// 管理端 JSON 请求体统一上限(审计 2026-08-25 F-06):admin 路由的
 	// ShouldBindJSON 此前无 MaxBytesReader,被攻破/异常的管理会话可发起
 	// 大 body 内存消耗;1MB 足够全部管理表单(含技能描述/理由上限 500 字)。

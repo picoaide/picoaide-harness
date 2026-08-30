@@ -61,7 +61,7 @@ export default function Auth() {
 
   const load = useCallback(async () => {
     try {
-      const r = await request('/api/admin/auth') as { auth?: AuthConfig }
+      const r = await request('/api/server/admin/auth') as { auth?: AuthConfig }
       const a = r.auth ?? {}
       setMode(a.mode || 'local')
       setEnabled((a.enabled ?? 'local').split(',').map((s) => s.trim()).filter(Boolean))
@@ -101,7 +101,7 @@ export default function Auth() {
       const body: any = { type: tab }
       if (tab === 'ldap') body.ldap = { server_url: form.ldap.server_url, bind_dn: form.ldap.bind_dn, bind_password: form.ldap.bind_password, base_dn: form.ldap.base_dn }
       if (tab === 'oidc' || tab === 'openid') body.oidc = { issuer: tab === 'oidc' ? form.oidc.issuer : form.openid.issuer }
-      const r = await request('/api/admin/auth/test', { method: 'POST', body: JSON.stringify(body) }) as { ok: boolean; message: string }
+      const r = await request('/api/server/admin/auth/test', { method: 'POST', body: JSON.stringify(body) }) as { ok: boolean; message: string }
       setTestMsg(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`)
     } catch (e: any) {
       setTestMsg(`✗ ${e.message}`)
@@ -128,7 +128,7 @@ export default function Auth() {
         oidc: form.oidc,
         openid: form.openid,
       }
-      await request('/api/admin/auth', { method: 'PUT', body: JSON.stringify(body) })
+      await request('/api/server/admin/auth', { method: 'PUT', body: JSON.stringify(body) })
       setAuthMsg('认证配置已保存(重启服务端后生效)')
       setTimeout(() => setAuthMsg(''), 4000)
       void load()

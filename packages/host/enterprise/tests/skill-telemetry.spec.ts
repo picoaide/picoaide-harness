@@ -36,7 +36,7 @@ describe('skill-telemetry', () => {
   it('模型 skill 工具成功执行即上报 name(无版本)', async () => {
     await reportSkillCall(SESSION, 'codeql', undefined, 'c-report-1')
     expect(captured).toHaveLength(1)
-    expect(captured[0]!.path).toBe('/api/telemetry/skill-call')
+    expect(captured[0]!.path).toBe('/api/client/v2/telemetry/skill-call')
     expect(captured[0]!.body).toEqual({ name: 'codeql', version: '' })
   })
 

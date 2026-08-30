@@ -158,7 +158,8 @@ func (p *PortalConfig) save(set func(key, val string) error) error {
 
 // RegisterRoutes 挂载公开端点(gateway 调用, 无需鉴权组)。
 func RegisterRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
-	g := r.Group("/api")
+	base := "/api"
+	g := r.Group(base)
 	g.GET("/brand", func(c *gin.Context) { getPublicBrand(c, db) })
 	g.GET("/brand/logo/:name", func(c *gin.Context) { serveLogo(c, db, dataDir) })
 	g.HEAD("/brand/logo/:name", func(c *gin.Context) { serveLogo(c, db, dataDir) })
@@ -167,7 +168,8 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
 
 // RegisterAdminRoutes 挂载管理端点(AdminAuth + RBAC 权限)。
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
-	g := r.Group("/api/admin", serverauth.AdminAuth(db))
+	base := "/api/admin"
+	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "/brand", serverauth.PermBrandRead, func(c *gin.Context) { getAdminBrand(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/brand", serverauth.PermBrandWrite, func(c *gin.Context) { putAdminBrand(c, db, dataDir) })
 	serverauth.AdminRoute(g, "POST", "/brand/logo", serverauth.PermBrandWrite, func(c *gin.Context) { uploadLogo(c, db, dataDir) })

@@ -21,6 +21,7 @@ declare module '@deepseek-ai/cordis' {
 }
 import { AccountSection } from './AccountSection.tsx'
 import { BraceMark, BrandName, BrandBadge } from './Brand.tsx'
+import { installFavicon } from './favicon.ts'
 import { startBrandStore, readBrandSync } from './brand-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
 import { en, type EnterpriseKey, zh } from './locales.ts'
@@ -147,6 +148,13 @@ export function apply(ctx: ClientContext): void {
     }, BrandBadge)),
     'enterprise: header brand badge',
   )
+
+  // 桌面 favicon: 替换上游 DeepSeek 鱼为官方花括号 mark(logo.svg)。
+  // 桌面组装不含 @picoaide/dsh-branding, 本面是 desktop 唯一 favicon 覆盖点。
+  ctx.effect(() => {
+    installFavicon()
+    return () => { /* favicon reverts on the next navigation */ }
+  }, 'enterprise: desktop favicon')
 
   ctx.effect(
     () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({

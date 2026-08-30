@@ -14,7 +14,7 @@ const ROWS = [
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
-    if (path.startsWith('/api/admin/shared-skills')) return { skills: ROWS }
+    if (path.startsWith('/api/server/admin/shared-skills')) return { skills: ROWS }
     return {}
   })
 })
@@ -36,7 +36,7 @@ describe('SharedSkills 共享技能审核页', () => {
     fireEvent.change(screen.getByLabelText('拒绝理由'), { target: { value: '缺演示文件' } })
     fireEvent.click(confirmBtn)
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/shared-skills/codeql/1.0.0/reject', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/shared-skills/codeql/1.0.0/reject', {
         method: 'POST',
         body: JSON.stringify({ reason: '缺演示文件' }),
       })
@@ -49,14 +49,14 @@ describe('SharedSkills 共享技能审核页', () => {
     fireEvent.click(approve[0]!)
     fireEvent.click(await screen.findByText('确认'))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/shared-skills/codeql/1.0.0/approve', { method: 'POST' })
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/shared-skills/codeql/1.0.0/approve', { method: 'POST' })
     })
   })
 
   it('点击预览展示 SKILL.md', async () => {
     mockRequest.mockImplementation(async (path: string) => {
       if (path.endsWith('/preview')) return { files: ['SKILL.md', 'scripts/run.sh'], skill_md: '---\nname: codeql\n---\n' }
-      if (path.startsWith('/api/admin/shared-skills')) return { skills: ROWS }
+      if (path.startsWith('/api/server/admin/shared-skills')) return { skills: ROWS }
       return {}
     })
     render(<SharedSkills />)
@@ -71,7 +71,7 @@ describe('SharedSkills 共享技能审核页', () => {
       if (path.includes('/file?path=scripts%2Frun.sh')) {
         return { path: 'scripts/run.sh', size: 14, binary: false, too_large: false, content: '#!/bin/sh\necho hi\n' }
       }
-      if (path.startsWith('/api/admin/shared-skills')) return { skills: ROWS }
+      if (path.startsWith('/api/server/admin/shared-skills')) return { skills: ROWS }
       return {}
     })
     render(<SharedSkills />)
@@ -82,7 +82,7 @@ describe('SharedSkills 共享技能审核页', () => {
     fireEvent.click(fileChip)
     expect(await screen.findByText(/echo hi/u)).toBeInTheDocument()
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/shared-skills/codeql/1.0.0/file?path=scripts%2Frun.sh')
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/shared-skills/codeql/1.0.0/file?path=scripts%2Frun.sh')
     })
   })
 })

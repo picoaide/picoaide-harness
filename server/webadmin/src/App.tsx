@@ -121,7 +121,7 @@ async function fetchBaseURL(): Promise<string> {
     }
   } catch { /* 缓存损坏按未命中处理 */ }
   try {
-    const g = await request('/api/admin/gateway')
+    const g = await request('/api/server/admin/gateway')
     const v = g?.server_base_url ?? ''
     try { sessionStorage.setItem(BASE_URL_CACHE_KEY, JSON.stringify({ v, t: Date.now() })) } catch { /* ignore */ }
     return v
@@ -155,7 +155,7 @@ export default function App() {
         setAdminName(u?.display_name || u?.username || '管理员')
         // 品牌跟随: 公开端点(登录前也可用), 失败忽略(默认品牌)。
         try {
-          const b = await request('/api/brand') as { enabled?: boolean; login?: { display_name?: string; logo_url?: string; tagline?: string } }
+          const b = await request('/api/client/v2/brand') as { enabled?: boolean; login?: { display_name?: string; logo_url?: string; tagline?: string } }
           setBrand(b?.enabled ? b : null)
         } catch { /* default brand */ }
       },

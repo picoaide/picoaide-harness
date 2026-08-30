@@ -8,9 +8,9 @@ const mockRequest = vi.mocked(request)
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
-    if (path === '/api/admin/brand') return { enabled: true, login: { display_name: 'Acme', tagline: 'AI', welcome: '欢迎' }, client: { display_name: 'Acme AI', accent: '#4176E6' }, title: '' }
-    if (path === '/api/admin/portal') return { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
-    if (path === '/api/admin/brand/snapshots') return { snapshots: [] }
+    if (path === '/api/server/admin/brand') return { enabled: true, login: { display_name: 'Acme', tagline: 'AI', welcome: '欢迎' }, client: { display_name: 'Acme AI', accent: '#4176E6' }, title: '' }
+    if (path === '/api/server/admin/portal') return { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
+    if (path === '/api/server/admin/brand/snapshots') return { snapshots: [] }
     return {}
   })
 })
@@ -30,8 +30,8 @@ describe('Brand 品牌配置页', () => {
     await screen.findByText('品牌配置')
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/brand', expect.objectContaining({ method: 'PUT' }))
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/portal', expect.objectContaining({ method: 'PUT' }))
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/brand', expect.objectContaining({ method: 'PUT' }))
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/portal', expect.objectContaining({ method: 'PUT' }))
     })
     expect(await screen.findByText(/已保存/)).toBeInTheDocument()
   })
@@ -42,7 +42,7 @@ describe('Brand 品牌配置页', () => {
     await screen.findByText('品牌配置')
     fireEvent.click(screen.getByRole('button', { name: /恢复默认/ }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/brand', expect.objectContaining({
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/brand', expect.objectContaining({
         method: 'PUT',
         body: expect.stringContaining('"enabled":false'),
       }))

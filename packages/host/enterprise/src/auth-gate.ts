@@ -128,6 +128,19 @@ const LOGIN_HTML = `<!DOCTYPE html>
   var currentMethods = []
   var currentBrand = null
   var pollTimer = null
+  // 去除服务端地址尾部一个或多个斜杠(兼容带/不带 / 的用户输入)。
+  // 纯字符串实现,禁用带反斜杠的正则:正斜杠转义(如 replace(反斜杠+/+$))
+  // 中的反斜杠会被本页所在的 TS 模板字面量求值吃掉,浏览器收到的脚本变成
+  // replace(//+$...) —— 双斜杠起行注释,整段内联脚本 SyntaxError,
+  // 登录页所有监听器失效(历史坑,见 tests/auth-gate-login.spec.ts)。
+  function trimServer(s) {
+    while (s.charAt(s.length - 1) === '/') s = s.slice(0, -1)
+    return s
+  }
+  // 品牌兜底图形:权威源为仓库根 logo.svg(黑色圆角方块 + 白色花括号桥形,
+  // 花括号 1.25x 放大)。任何 logo 兜底都必须与 logo.svg 一致,禁止字母 P 等
+  // 编造图形(旧版 P 字 logo 已退役)。
+  var BRACE_MARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" width="100%" height="100%" fill="none" aria-hidden="true"><g transform="translate(627 627) scale(1.25) translate(-627 -627)"><path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></g></svg>'
 
   // ---- Step1 → Step2: 并行探测 brand + methods(任一成功进 Step2) ----
   f1.addEventListener('submit', async function (e) {
@@ -184,13 +197,17 @@ const LOGIN_HTML = `<!DOCTYPE html>
 
   function renderBrand(b) {
     if (!b) {
-      return '<span class="fallback">P</span><div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
+      // 兜底:官方花括号 mark(与 logo.svg 一致), 而非字母/编造图形。
+      var fallback = '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
+      return fallback + '<div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
     }
     var login = b.login || {}
     // logo_url 是相对路径(/api/brand/logo/login): 在 Host 登录页需拼服务端地址。
-    var server = document.getElementById('server').value.trim()
-    var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server.replace(/\/+$/, '') + login.logo_url) : ''
-    var logo = logoUrl ? '<img src="' + logoUrl + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">P</span>' : '<span class="fallback">P</span>'
+    // 先统一去尾斜杠(trimServer),避免拼出 //api/brand/... 双斜杠路径。
+    var server = trimServer(document.getElementById('server').value.trim())
+    var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
+    // logo 加载失败时保留花括号兜底(与无品牌时同款)。
+    var logo = logoUrl ? '<img src="' + logoUrl + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
     var name = login.display_name || 'PicoAide'
     var tag = login.tagline ? '<div class="brand-tag">' + esc(login.tagline) + '</div>' : ''
     var welcome = login.welcome ? '<div class="welcome">' + esc(login.welcome) + '</div>' : ''
@@ -284,8 +301,8 @@ const LOGIN_HTML = `<!DOCTYPE html>
     waiting.style.display = 'block'
     browserBtn.disabled = true
     var name = currentMethod
-    var base = server.endsWith('/') ? server.slice(0, -1) : server
-    window.open(base + '/api/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
+    var base = trimServer(server)
+    window.open(base + '/api/client/v2/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
     startPoll()
   }
 
@@ -314,7 +331,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
       var msg = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
       // 开放问题2: auditor 拒绝时提供「打开管理后台」入口。
       if (raw.toLowerCase().indexOf('auditor_not_allowed') >= 0) {
-        var server = document.getElementById('server').value.trim()
+        var server = trimServer(document.getElementById('server').value.trim())
         err2.innerHTML = '审计账号不可登录客户端，请使用管理后台<br><a href="' + esc(server) + '/admin/" style="color:var(--accent);font-size:13px;text-decoration:underline">打开管理后台 ↗</a>'
       } else {
         err2.textContent = msg
@@ -555,7 +572,7 @@ export function apply(ctx: Context, config: Config): void {
           const s = session()
           if (s !== null) {
             try {
-              await fetchJSON(s.serverURL, '/api/auth/logout', { token: s.token, method: 'POST' })
+              await fetchJSON(s.serverURL, '/api/client/v2/auth/logout', { token: s.token, method: 'POST' })
             } catch {
               // The local session is still cleared even if the server is
               // unreachable; the token expires via its own TTL.
@@ -583,7 +600,7 @@ export function apply(ctx: Context, config: Config): void {
           if (serverURL === '') return json(res, 200, { methods: [{ name: 'local', configured: true }] })
           try {
             assertServerURLAllowed(serverURL)
-            const data = await fetchJSON(serverURL, '/api/admin/auth/methods')
+            const data = await fetchJSON(serverURL, '/api/client/v2/auth/methods')
             json(res, 200, data)
           } catch {
             // 服务端不可达:降级只显示 local(恒启用),登录页仍可提交密码。
@@ -608,7 +625,7 @@ export function apply(ctx: Context, config: Config): void {
           if (serverURL === '') return json(res, 200, { enabled: false })
           try {
             assertServerURLAllowed(serverURL)
-            const data = await fetchJSON(serverURL, '/api/brand')
+            const data = await fetchJSON(serverURL, '/api/client/v2/brand')
             json(res, 200, data)
           } catch {
             json(res, 200, { enabled: false })
@@ -632,7 +649,7 @@ export function apply(ctx: Context, config: Config): void {
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
-              const data = await fetchJSON(s.serverURL, '/api/marketplace/skills', { token: s.token })
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/marketplace/skills', { token: s.token })
               // Augment the gateway catalog with the locally installed skill
               // names so the panel can render per-skill install state.
               const installed = await listInstalledSkills(resolveSkillsDir())
@@ -779,7 +796,7 @@ export function apply(ctx: Context, config: Config): void {
           // GET /api/pico/agent-presets -> gateway catalog + installed + local.
           if (pathname === '/api/pico/agent-presets' && req.method === 'GET') {
             try {
-              const data = await fetchJSON(s.serverURL, '/api/agent-presets', { token: s.token })
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/agent-presets', { token: s.token })
               const installed = await listInstalledPresets(presetsDir)
               const local = await mapLocalPresets(presetsDir, data.presets ?? [])
               json(res, 200, { ...data, installed, local })
@@ -804,7 +821,7 @@ export function apply(ctx: Context, config: Config): void {
             if (name === '') return json(res, 400, { error: 'missing name' })
             try {
               const packed = await packPreset(presetsDir, name)
-              const gateway = await fetchJSON(s.serverURL, '/api/agent-presets', {
+              const gateway = await fetchJSON(s.serverURL, '/api/client/v2/agent-presets', {
                 token: s.token,
                 method: 'POST',
                 body: {
@@ -954,7 +971,7 @@ export function apply(ctx: Context, config: Config): void {
 
           if (pathname === '/api/pico/shared-skills' && req.method === 'GET') {
             try {
-              const data = await fetchJSON(s.serverURL, '/api/shared-skills', { token: s.token })
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/shared-skills', { token: s.token })
               const installed = await listInstalledSkills(skillsDir)
               const local = await listLocalSkills(skillsDir)
               json(res, 200, { ...data, installed, local })
@@ -979,7 +996,7 @@ export function apply(ctx: Context, config: Config): void {
             if (name === '') return json(res, 400, { error: 'missing name' })
             try {
               const packed = await packSkill(skillsDir, name, version)
-              const gateway = await fetchJSON(s.serverURL, '/api/shared-skills', {
+              const gateway = await fetchJSON(s.serverURL, '/api/client/v2/shared-skills', {
                 token: s.token,
                 method: 'POST',
                 body: {
@@ -1096,7 +1113,7 @@ export function apply(ctx: Context, config: Config): void {
           try {
             const skillsDir = resolveSkillsDir()
             const presetsDir = resolvePresetsDir()
-            const data = await fetchJSON(s.serverURL, `/api/capabilities?source=${encodeURIComponent(source)}`, { token: s.token })
+            const data = await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${encodeURIComponent(source)}`, { token: s.token })
             const items = (data as { items?: Array<Record<string, unknown>> }).items ?? []
             const installedSkills = new Set(await listInstalledSkills(skillsDir))
             const installedPresets = new Set(await listInstalledPresets(presetsDir))

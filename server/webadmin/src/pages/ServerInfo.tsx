@@ -57,7 +57,7 @@ export default function ServerInfo() {
   const load = async () => {
     setError('')
     try {
-      const d = await request('/api/admin/server-info')
+      const d = await request('/api/server/admin/server-info')
       setInfo(d)
     } catch (e: any) {
       setError(e.message || '加载失败')

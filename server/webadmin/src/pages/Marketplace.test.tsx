@@ -14,9 +14,9 @@ const DEPTS = [{ id: 1, name: '研发部', parent_id: 0 }, { id: 2, name: '人�
 
 function defaultMock() {
   mockRequest.mockImplementation(async (path: string) => {
-    if (path === '/api/admin/departments') return { departments: DEPTS }
-    if (path === '/api/admin/skills') return { skills: SKILLS }
-    if (path === '/api/admin/skills/data-extract/grants') return { grants: [{ grantee_type: 'group', grantee: '研发部' }] }
+    if (path === '/api/server/admin/departments') return { departments: DEPTS }
+    if (path === '/api/server/admin/skills') return { skills: SKILLS }
+    if (path === '/api/server/admin/skills/data-extract/grants') return { grants: [{ grantee_type: 'group', grantee: '研发部' }] }
     return {}
   })
 }
@@ -48,17 +48,17 @@ describe('Marketplace 商城页', () => {
     expect(dialog.queryByText(/未授权:所有用户均不可见/)).not.toBeInTheDocument()
     fireEvent.click(dialog.getAllByRole('button', { name: '撤销' })[0])
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/skills/data-extract/grant',
+      '/api/server/admin/skills/data-extract/grant',
       expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ group: '研发部' }) }),
     )
   })
 
   it('技能授权对话框:勾选部门多选保存(整组替换,保存前需确认)', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/skills/data-extract/grants' && init?.method === 'PUT') return { ok: true }
-      if (path === '/api/admin/departments') return { departments: DEPTS }
-      if (path === '/api/admin/skills') return { skills: SKILLS }
-      if (path === '/api/admin/skills/data-extract/grants') return { grants: [] }
+      if (path === '/api/server/admin/skills/data-extract/grants' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/server/admin/departments') return { departments: DEPTS }
+      if (path === '/api/server/admin/skills') return { skills: SKILLS }
+      if (path === '/api/server/admin/skills/data-extract/grants') return { grants: [] }
       return {}
     })
     render(<Marketplace />)
@@ -70,7 +70,7 @@ describe('Marketplace 商城页', () => {
     fireEvent.click(dialog.getByRole('button', { name: '保存部门授权' }))
     expect(confirmSpy).toHaveBeenCalled()
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/skills/data-extract/grants',
+      '/api/server/admin/skills/data-extract/grants',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify({ groups: ['研发部'] }) }),
     )
   })
@@ -84,7 +84,7 @@ describe('Marketplace 商城页', () => {
     await dialog.findByText('@研发部')
     fireEvent.click(dialog.getByRole('button', { name: '保存部门授权' }))
     expect(mockRequest).not.toHaveBeenCalledWith(
-      '/api/admin/skills/data-extract/grants',
+      '/api/server/admin/skills/data-extract/grants',
       expect.objectContaining({ method: 'PUT' }),
     )
   })
@@ -93,7 +93,7 @@ describe('Marketplace 商城页', () => {
     render(<Marketplace />)
     await screen.findByText('legacy')
     fireEvent.click(screen.getAllByRole('button', { name: '重新上架' })[0])
-    expect(mockRequest).toHaveBeenCalledWith('/api/admin/skills/legacy/enable', { method: 'POST' })
+    expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/skills/legacy/enable', { method: 'POST' })
   })
 
   it('M2: 编辑技能对话框回填并提交 PUT', async () => {
@@ -107,7 +107,7 @@ describe('Marketplace 商城页', () => {
     fireEvent.change(verInput, { target: { value: '2.0.0' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存修改' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/skills/data-extract',
+      '/api/server/admin/skills/data-extract',
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify({ name: 'data-extract', version: '2.0.0', description: '数据提取', author: 'seed', git_url: 'https://x/data-extract', git_ref: 'main' }),
@@ -117,8 +117,8 @@ describe('Marketplace 商城页', () => {
 
   it('L3: 空列表显示空态文案', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/departments') return { departments: DEPTS }
-      if (path === '/api/admin/skills') return { skills: [] }
+      if (path === '/api/server/admin/departments') return { departments: DEPTS }
+      if (path === '/api/server/admin/skills') return { skills: [] }
       return {}
     })
     render(<Marketplace />)
@@ -138,7 +138,7 @@ describe('Marketplace 商城页', () => {
     fireEvent.click(dialog.getByRole('button', { name: '上传' }))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith(
-        '/api/admin/skills/data-extract/archive',
+        '/api/server/admin/skills/data-extract/archive',
         expect.objectContaining({ method: 'POST', body: expect.stringContaining('"version":"2.0.0"') }),
       )
     })
@@ -147,8 +147,8 @@ describe('Marketplace 商城页', () => {
   it('M4: 技能加载失败显示错误与重试,重试成功恢复列表', async () => {
     let fail = true
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/departments') return { departments: DEPTS }
-      if (path === '/api/admin/skills') {
+      if (path === '/api/server/admin/departments') return { departments: DEPTS }
+      if (path === '/api/server/admin/skills') {
         if (fail) throw new Error('skills 加载失败')
         return { skills: SKILLS }
       }

@@ -19,7 +19,8 @@ import (
 // RegisterAdminRoutes mounts /api/admin/providers, /api/admin/models and
 // /api/admin/gateway behind AdminAuth + RBAC permission checks (v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
-	g := r.Group("/api/admin", serverauth.AdminAuth(db))
+	base := "/api/admin"
+	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "/providers", serverauth.PermGatewayRead, func(c *gin.Context) { listProviders(c, db) })
 	serverauth.AdminRoute(g, "POST", "/providers", serverauth.PermGatewayWrite, func(c *gin.Context) { createProvider(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/providers/:id", serverauth.PermGatewayWrite, func(c *gin.Context) { updateProvider(c, db) })

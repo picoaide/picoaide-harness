@@ -15,7 +15,7 @@ beforeEach(() => {
   window.confirm = confirmSpy as any
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-    if (path.startsWith('/api/admin/users?page=')) {
+    if (path.startsWith('/api/server/admin/users?page=')) {
       return {
         users: [
           { id: 1, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] },
@@ -24,8 +24,8 @@ beforeEach(() => {
         total: 2, page: 1, size: 20,
       }
     }
-    if (path === '/api/admin/departments') return { departments: depts }
-    if (path === '/api/admin/users/1/department' && init?.method === 'PUT') return { ok: true }
+    if (path === '/api/server/admin/departments') return { departments: depts }
+    if (path === '/api/server/admin/users/1/department' && init?.method === 'PUT') return { ok: true }
     return {}
   })
 })
@@ -47,7 +47,7 @@ describe('Users 用户管理页', () => {
     expect(dialog.getByText(/从部门树选择归属/)).toBeInTheDocument()
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/users/1/department',
+      '/api/server/admin/users/1/department',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify({ group_id: 1 }) }),
     )
   })
@@ -66,23 +66,23 @@ describe('Users 用户管理页', () => {
     confirmSpy.mockReturnValueOnce(false)
     fireEvent.click(screen.getAllByRole('button', { name: '禁用' })[0])
     expect(confirmSpy).toHaveBeenCalled()
-    expect(mockRequest).not.toHaveBeenCalledWith('/api/admin/users/1', expect.objectContaining({ method: 'PUT' }))
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/users/1', expect.objectContaining({ method: 'PUT' }))
     // 确认 → 发送 PUT status:0
     confirmSpy.mockReturnValueOnce(true)
     fireEvent.click(screen.getAllByRole('button', { name: '禁用' })[0])
     await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/users/1',
+      '/api/server/admin/users/1',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify({ status: 0 }) }),
     ))
   })
 
   it('新建用户失败:错误显示在对话框内(中3)', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path.startsWith('/api/admin/users?page=')) {
+      if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
       }
-      if (path === '/api/admin/departments') return { departments: depts }
-      if (path === '/api/admin/users' && init?.method === 'POST') throw new Error('密码至少 10 位')
+      if (path === '/api/server/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/users' && init?.method === 'POST') throw new Error('密码至少 10 位')
       return {}
     })
     render(<Users />)
@@ -98,11 +98,11 @@ describe('Users 用户管理页', () => {
 
   it('令牌加载失败:显示错误而非「暂无令牌」(中5)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/users?page=')) {
+      if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
       }
-      if (path === '/api/admin/departments') return { departments: depts }
-      if (path === '/api/admin/users/1/tokens') throw new Error('查询失败')
+      if (path === '/api/server/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/users/1/tokens') throw new Error('查询失败')
       return {}
     })
     render(<Users />)
@@ -115,7 +115,7 @@ describe('Users 用户管理页', () => {
 
   it('跟随默认配额展示全局默认值(中7)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/users?page=')) {
+      if (path.startsWith('/api/server/admin/users?page=')) {
         return {
           users: [{
             id: 1, username: 'alice', is_admin: false, status: 1, groups: ['研发部'],
@@ -125,7 +125,7 @@ describe('Users 用户管理页', () => {
           total: 1, page: 1, size: 20,
         }
       }
-      if (path === '/api/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
     render(<Users />)
@@ -138,11 +138,11 @@ describe('Users 用户管理页', () => {
 
   it('过期令牌显示「已过期」(L12)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/users?page=')) {
+      if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
       }
-      if (path === '/api/admin/departments') return { departments: depts }
-      if (path === '/api/admin/users/1/tokens') {
+      if (path === '/api/server/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/users/1/tokens') {
         return { tokens: [{ id: 9, name: 'old', created_at: '2025-01-01T00:00:00Z', expires_at: '2025-04-01T00:00:00Z', last_used_at: '', revoked: 0 }] }
       }
       return {}
@@ -164,8 +164,8 @@ describe('Users 用户管理页', () => {
 
   it('用户列表空态(L8)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/users?page=')) return { users: [], total: 0, page: 1, size: 20 }
-      if (path === '/api/admin/departments') return { departments: depts }
+      if (path.startsWith('/api/server/admin/users?page=')) return { users: [], total: 0, page: 1, size: 20 }
+      if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
     render(<Users />)
@@ -181,15 +181,15 @@ describe('Users 用户管理页', () => {
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(await dialog.findByText('token 配额必须是 ≥0 的整数')).toBeInTheDocument()
     // 未发送请求
-    expect(mockRequest).not.toHaveBeenCalledWith('/api/admin/users/1', expect.objectContaining({ method: 'PUT' }))
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/users/1', expect.objectContaining({ method: 'PUT' }))
   })
 
   it('多组用户:部门对话框提示替换语义(中4)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/admin/users?page=')) {
+      if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 3, username: 'multi', is_admin: false, status: 1, groups: ['研发部', '前端组'] }], total: 1, page: 1, size: 20 }
       }
-      if (path === '/api/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
     render(<Users />)
@@ -213,7 +213,7 @@ describe('Users 用户管理页', () => {
     fireEvent.change(moneyInput, { target: { value: '100' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/users/1',
+      '/api/server/admin/users/1',
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify({ quota_tokens: 50000, quota_money: 100 }),
@@ -228,7 +228,7 @@ describe('Users 用户管理页', () => {
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/users/1',
+      '/api/server/admin/users/1',
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify({ quota_clear: true, quota_money_clear: true }),

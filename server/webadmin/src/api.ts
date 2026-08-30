@@ -65,7 +65,7 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
 }
 
 export async function login(username: string, password: string): Promise<void> {
-  const res = await fetch('/api/admin/login', {
+  const res = await fetch('/api/server/admin/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -82,11 +82,11 @@ export async function login(username: string, password: string): Promise<void> {
 }
 
 export async function logout(): Promise<void> {
-  await request('/api/admin/logout', { method: 'POST' })
+  await request('/api/server/admin/logout', { method: 'POST' })
 }
 
 export async function me(): Promise<any> {
-  const body = await request('/api/admin/me')
+  const body = await request('/api/server/admin/me')
   if (body?.csrf_token) setCsrf(body.csrf_token)
   return body
 }

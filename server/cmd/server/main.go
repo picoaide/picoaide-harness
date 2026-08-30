@@ -26,6 +26,7 @@ import (
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
@@ -87,7 +88,6 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
 	// 可信代理(审计 2026-08-25 F-02):信任 loopback + 默认 compose
 	// 私有网段中的 Caddy(172.28.0.2),使 gin.ClientIP 解析 X-Forwarded-For
 	// 得到真实客户端 IP,登录限流键不再坍缩为单一代理 IP(否则 10 次错
@@ -124,24 +124,25 @@ func main() {
 	for _, b := range authCfg.Browsers {
 		auth.RegisterBrowser(b)
 	}
-	auth.RegisterRoutes(r)
-
-	serverauth.RegisterAdminRoutes(r, db)
-	llmgateway.RegisterRoutes(r, db)
-	llmgateway.RegisterAdminRoutes(r, db)
-	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
-	marketplace.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
-	agentshare.RegisterRoutes(r, db, *dataDir+"/agent-presets-cache")
-	agentshare.RegisterAdminRoutes(r, db, *dataDir+"/agent-presets-cache")
-	sharedskills.RegisterRoutes(r, db, *dataDir+"/shared-skills-cache")
-	sharedskills.RegisterAdminRoutes(r, db, *dataDir+"/shared-skills-cache")
-	capabilities.RegisterRoutes(r, db, *dataDir+"/skills-cache")
-	capabilities.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
-	connectors.RegisterAdminRoutes(r, db)
-	brand.RegisterRoutes(r, db, *dataDir)
-	brand.RegisterAdminRoutes(r, db, *dataDir)
-	telemetry.RegisterRoutes(r, db)
-	bootstrap.RegisterRoutes(r, db)
+	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明——
+	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
+	// /v2/api、/v2/v1)迁移后不再注册。
+	router.Register(r, router.Deps{
+		DB:         db,
+		Auth:       auth.Handlers(),
+		Admin:      (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Bootstrap:  bootstrap.NewHandlers(db),
+		Brand:      brand.NewHandlers(db, *dataDir),
+		Market:     marketplace.NewHandlers(db, *dataDir+"/skills-cache"),
+		Agentshare: agentshare.NewHandlers(db, *dataDir+"/agent-presets-cache"),
+		Shared:     sharedskills.NewHandlers(db, *dataDir+"/shared-skills-cache"),
+		Capability: capabilities.NewHandlers(db, *dataDir+"/skills-cache"),
+		Connector:  connectors.NewHandlers(db),
+		Telemetry:  telemetry.NewHandlers(db),
+		Gateway:    llmgateway.NewHandlers(db),
+	})
+	// 固定探针(不属于两命名空间)。
+	r.GET("/healthz", bootstrap.NewHandlers(db).Health)
 	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
 	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
 	retentionDays := 180
@@ -159,46 +160,7 @@ func main() {
 
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
-	r.NoRoute(func(c *gin.Context) {
-		p := c.Request.URL.Path
-		if p == "/admin" {
-			c.Redirect(http.StatusFound, "/admin/")
-			return
-		}
-		// v3b: 门户首页(未登录默认页)——服务端根路径与 /portal 展示
-		// 品牌(login)+欢迎语+客户端下载地址。数据内嵌(public brand+portal)。
-		if p == "/" || p == "/portal" {
-			servePortal(c, db)
-			return
-		}
-		if len(p) >= 7 && p[:7] == "/admin/" {
-			rel := strings.TrimPrefix(p, "/admin")
-			if rel == "" {
-				rel = "/"
-			}
-			if strings.HasPrefix(rel, "/assets/") {
-				// 性能优化 2026-P: assets 含内容哈希,内容变则文件名变,
-				// 浏览器缓存 1 年不重新校验(回访首屏零下载)。
-				c.Header("Cache-Control", "public, max-age=31536000, immutable")
-				c.Request.URL.Path = rel
-				fileServer.ServeHTTP(c.Writer, c.Request)
-				return
-			}
-			// SPA 入口/路由回退:index.html 无哈希,no-cache 保证
-			// 每次部署后都能拿到新版本(assets 由文件名哈希保证新鲜)。
-			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-			index, err := dist.Open("index.html")
-			if err != nil {
-				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "webadmin 未构建")
-				return
-			}
-			defer index.Close()
-			c.DataFromReader(http.StatusOK, -1, "text/html", index, nil)
-			return
-		}
-		// 错误信封契约(审计2026-S37):非 2xx 一律 {"error":{code,message}}
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "接口不存在")
-	})
+	mountAPIGuards(r, db, fileServer, dist)
 
 	log.Printf("picoaide-server v%s listening on %s (data=%s)", version, *addr, *dataDir)
 	// 显式超时(slowloris/慢体攻击防护);WriteTimeout 需覆盖 SSE 流(空闲流由网关侧
@@ -323,4 +285,66 @@ func servePortal(c *gin.Context, db *sql.DB) {
 func htmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
 	return r.Replace(s)
+}
+
+// mountAPIGuards 装配 API JSON 契约的两个护栏(审计 2026-09):
+//
+//  1. CustomRecovery:panic 时返回 JSON 错误信封,替换 gin 默认 Recovery
+//     的无 body 500 text/plain —— 客户端/第三方进程绝不拿到 HTML 或空文本。
+//  2. NoRoute:凡 /api/、/v1/ 前缀(含 405 落 NoRoute 场景)一律 JSON 信封;
+//     HTML 面仅保留 /、/portal、/admin/*(产品页面)。
+//
+// 单独成函数以便 cmd/server 集成测试用与生产完全一致的逻辑断言契约。
+func mountAPIGuards(r *gin.Engine, db *sql.DB, fileServer http.Handler, dist fs.FS) {
+	r.Use(gin.Logger(), gin.CustomRecoveryWithWriter(gin.DefaultErrorWriter, func(c *gin.Context, _ any) {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "服务端内部错误")
+	}))
+	r.NoRoute(func(c *gin.Context) {
+		p := c.Request.URL.Path
+		// 契约(审计 2026-09): 凡客户端/第三方进程 API 前缀(/api/、/v1/),
+		// 未匹配路由一律 JSON 错误信封。gin 默认 HandleMethodNotAllowed=false,
+		// 405 也会落到这里 —— 统一 JSON,绝不返回 text/html 或空文本。
+		// (HTML 面仅 /、/portal、/admin/* 产品页面;其 404 不在此列。)
+		if strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/v1/") || p == "/api" || p == "/v1" {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "接口不存在")
+			return
+		}
+		if p == "/admin" {
+			c.Redirect(http.StatusFound, "/admin/")
+			return
+		}
+		// v3b: 门户首页(未登录默认页)——服务端根路径与 /portal 展示
+		// 品牌(login)+欢迎语+客户端下载地址。数据内嵌(public brand+portal)。
+		if p == "/" || p == "/portal" {
+			servePortal(c, db)
+			return
+		}
+		if len(p) >= 7 && p[:7] == "/admin/" {
+			rel := strings.TrimPrefix(p, "/admin")
+			if rel == "" {
+				rel = "/"
+			}
+			if strings.HasPrefix(rel, "/assets/") {
+				// 性能优化 2026-P: assets 含内容哈希,内容变则文件名变,
+				// 浏览器缓存 1 年不重新校验(回访首屏零下载)。
+				c.Header("Cache-Control", "public, max-age=31536000, immutable")
+				c.Request.URL.Path = rel
+				fileServer.ServeHTTP(c.Writer, c.Request)
+				return
+			}
+			// SPA 入口/路由回退:index.html 无哈希,no-cache 保证
+			// 每次部署后都能拿到新版本(assets 由文件名哈希保证新鲜)。
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+			index, err := dist.Open("index.html")
+			if err != nil {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "webadmin 未构建")
+				return
+			}
+			defer index.Close()
+			c.DataFromReader(http.StatusOK, -1, "text/html", index, nil)
+			return
+		}
+		// 错误信封契约(审计2026-S37):非 2xx 一律 {"error":{code,message}}
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "接口不存在")
+	})
 }
