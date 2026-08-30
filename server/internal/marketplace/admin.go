@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -153,7 +154,8 @@ func applyGrant(c *gin.Context, db *sql.DB, grant bool, subjectLabel string,
 // invalidateSkillCache removes the cached repo clone and built archives for a
 // skill (C-6): a version/git change must not keep serving the old package.
 func invalidateSkillCache(cacheDir, name string) {
-	if !util.SafePathSegment(name) {
+	// CodeQL path-injection sanitizer: 仅字母数字与 ._- 的合法 skill 名。
+	if !util.SafePathSegment(name) || !skillNameRe.MatchString(name) {
 		return
 	}
 	os.RemoveAll(filepath.Join(cacheDir, name))
@@ -162,6 +164,9 @@ func invalidateSkillCache(cacheDir, name string) {
 		os.Remove(m)
 	}
 }
+
+// skillNameRe 白名单(与 SafePathSegment 双重防护): [A-Za-z0-9._-]+
+var skillNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func listSkillsAdmin(c *gin.Context, db *sql.DB) {
 	list, err := serverstore.ListSkills(db, false)

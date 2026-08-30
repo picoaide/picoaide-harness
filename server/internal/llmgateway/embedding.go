@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -102,7 +101,7 @@ func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][
 		resp, err := e.client.Do(req)
 		if err != nil {
 			lastErr = err
-			log.Printf("gateway: embed model %s provider %s failed: %v", strconv.Quote(model), strconv.Quote(ups[i].Name), err)
+			log.Printf("gateway: embed model %q provider %q failed: %v", model, ups[i].Name, err)
 			continue
 		}
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxUpstreamBody)))
@@ -116,7 +115,7 @@ func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][
 		}
 		if resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("embedding upstream %d", resp.StatusCode)
-			log.Printf("gateway: embed model %s provider %s: %d", strconv.Quote(model), strconv.Quote(ups[i].Name), resp.StatusCode)
+			log.Printf("gateway: embed model %q provider %q: %d", model, ups[i].Name, resp.StatusCode)
 			continue
 		}
 		var er embedResponse

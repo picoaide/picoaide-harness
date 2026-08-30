@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -285,8 +284,8 @@ func (a *API) handleMessages(c *gin.Context) {
 			respSecrets = []string{ups[i].APIKey}
 			break
 		}
-		log.Printf("gateway: anthropic model %s provider %s failed: %v",
-			strconv.Quote(req.Model), strconv.Quote(ups[i].Name), err)
+		log.Printf("gateway: anthropic model %q provider %q failed: %v",
+			req.Model, ups[i].Name, err)
 	}
 	if resp == nil {
 		if usageID > 0 {
