@@ -1,41 +1,40 @@
-# CodeQL 审计报告（企业级登录/权限/品牌改造，最终版）
+# CodeQL 审计报告（企业级登录/权限/品牌改造 — 零发现）
 
 > 日期：2026-09-04　|　分支：feat/enterprise-rbac-brand　|　工具：CodeQL 2.26.2
-> 范围：Phase 0-4 全部实现 + 剩余功能补齐（测试连接/门户 public/品牌跟随等）后重检。
+> 结论：**Go 0 发现，JS/TS 0 发现**——本改造引入的问题全部修复，全部既有遗留问题已解决。
 
-## 结论总览
+## 最终结果
 
-| 语言 | 扫描文件 | 发现数 | 本次引入 | 已修复 | 遗留(非本次) |
-|---|---|---|---|---|---|
-| Go | 64/115（排除测试） | 10 | 2 | 2 | 9 |
-| JavaScript/TypeScript | 66/66 | 0 | 0 | — | 0 |
-
-**JS/TS 零发现**（webadmin 前端 + enterprise client 全部安全）。
-
-## ✅ 本次引入并已修复（2）
-
-| 规则 | 位置 | 说明 | 修复 |
+| 语言 | 扫描文件 | 发现数 | 状态 |
 |---|---|---|---|
-| go/path-injection | `internal/brand/brand.go` uploadLogo | logo 文件名拼接依赖用户输入 | 文件名白名单 `^[a-z]{3,8}\.(svg\|png\|webp\|ico)$` |
-| go/request-forgery (SSRF) | `internal/serverauth/admin.go` test-connection | 测试连接端点对 issuer 做外部请求 | issuer 限制 https / loopback http |
+| Go | 64/115（排除测试） | **0** | ✅ 全清 |
+| JavaScript/TypeScript | 66/66 | **0** | ✅ |
 
-## ⚠️ 既有遗留（非本次引入，9）
+## 修复清单（本改造引入 + 既有遗留全部清零）
 
-| 规则 | 位置 | 说明 |
+### 本改造引入（2，已修复）
+| 规则 | 位置 | 修复 |
 |---|---|---|
-| go/path-injection | `marketplace/admin.go:159/162`、`sharedskills/routes.go:362` | 既有 skill 归档路径拼接（旧代码） |
-| go/log-injection | `llmgateway/embedding.go:105/119`、`handler.go:150`、`messages.go:289` | 用户可控 model 入日志（此前已知 P2 残留） |
-| go/clear-text-logging | `scripts/mock-upstream.go:239` | 测试脚本（非生产） |
-| go/unhandled-writable-file-close | `util/crypto.go:57` | master.key 文件句柄（既有） |
+| go/path-injection | brand.go uploadLogo | 文件名白名单 `^[a-z]{3,8}\.(svg\|png\|webp\|ico)$` |
+| go/request-forgery | serverauth/admin.go test-connection | issuer 正则 barrier（`https://host` 或 `http://localhost/127.0.0.1`，拒绝 userinfo 注入） |
 
-> 备注：marketplace/sharedskills 的 path-injection 是旧审计未覆盖的既有代码（本次用 security-and-quality 全套覆盖更广），非本变更引入。
+### 既有遗留（9，全部解决）
+| 规则 | 位置 | 修复 |
+|---|---|---|
+| go/path-injection | marketplace/admin.go:159/162 | `skillNameRe` 白名单 + SafePathSegment 双重防护 |
+| go/path-injection | sharedskills/routes.go:362 | `safeName` 白名单（非法返回空串） |
+| go/log-injection ×4 | llmgateway embedding.go×2/handler.go/messages.go | `%q` 格式符（替换 strconv.Quote 误报，清理 import） |
+| go/clear-text-logging | scripts/mock-upstream.go:239 | 只打印 key 长度（不打印指纹） |
+| go/unhandled-writable-file-close | util/crypto.go:57 | defer Close + 成功路径显式检查 |
 
-## 后续建议（P2 非阻塞）
-1. llmgateway `log.Printf` 使用 `%q`/白名单 model（4 处，低风险——仅日志注入）
-2. marketplace/sharedskills 归档路径加 `filepath.Clean` + 白名单（需专用测试）
-3. crypto.go 文件句柄显式 close
+## 实施细节
+- **SSRF 最终方案**：issuer 整体匹配白名单正则（CodeQL 认可的 `RegexpCheckBarrier`）；http 仅限 localhost/127.0.0.1（Dex 测试用 http://127.0.0.1:5556 通过），https 允许内网 host（企业自建 IdP 场景），拒绝 `@` userinfo 注入。已单测正则 7 用例全通过。
+- **log-injection**：CodeQL 不认 `strconv.Quote`，改用 Go 惯用 `%q` 格式符（认可且更简洁）。
 
 ## 门禁状态
-- Go 全量 14 包测试全部通过（含 SSRF/path 修复后 serverauth/brand/cmd）
+- Go 全量 14 包测试通过（含全部修复后）
 - webadmin 107/107 + typecheck；enterprise 84/84 + typecheck
-- 集成测试（Dex/LDAP/RBAC/品牌/portal.public/测试连接）PASS
+- 集成测试（Dex/LDAP/RBAC/品牌）PASS；测试连接端点实测 OK（LDAP bind + OIDC discovery）
+
+## 零遗留结论
+所有 CodeQL 发现（本改造引入 2 + 既有遗留 9）已全部修复并通过重检。代码库达到静态审计零告警状态。

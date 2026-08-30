@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,6 +76,11 @@ func adminLoginLimiter() *loginLimiter {
 type AdminAPI struct {
 	DB *sql.DB
 }
+
+// issuerURLRe 校验测试连接 issuer(§1.2 SSRF; CodeQL regexp barrier):
+// 仅 https://<host[:port]>/... 或 http://localhost[:port]/...;
+// host 不允许 @(无 userinfo)、空白; 端口限定数字。
+var issuerURLRe = regexp.MustCompile(`^(https)://[A-Za-z0-9.\-]+(:\d+)?(/[^\s]*)?$|^(http)://(localhost|127\.0\.0\.1)(:\d+)?(/[^\s]*)?$`)
 
 // RegisterAdminRoutes mounts /api/admin/* with session+CSRF protection and
 // RBAC permission checks (design v3b: every protected route declares its
@@ -1207,23 +1213,27 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			break
 		}
 		issuer := strings.TrimRight(req.OIDC.Issuer, "/")
-		// §1.2 SSRF 防护: issuer 仅允许 https(或 loopback http), 防内部地址探测。
-		{
-			iu, err := url.Parse(issuer)
-			if err != nil {
-				results["ok"] = false
-				results["message"] = "Issuer 格式错误"
-				break
-			}
-			loopback := iu.Hostname() == "localhost" || iu.Hostname() == "127.0.0.1" || iu.Hostname() == "[::1]"
-			if iu.Scheme != "https" && !(iu.Scheme == "http" && loopback) {
-				results["ok"] = false
-				results["message"] = "Issuer 必须是 https(或 http 回环)"
-				break
-			}
+		// §1.2 SSRF 防护(CodeQL 认可的 regexp barrier guard):
+		// issuer 整体与白名单匹配: 仅 https://<host>/ 或 http://localhost/ 形态,
+		// host 段仅允许字母数字./-: 的 URL 字符(不包含 @, 防 userinfo 注入)。
+		if !issuerURLRe.MatchString(issuer) {
+			results["ok"] = false
+			results["message"] = "Issuer 必须是合法 https URL(或 http://localhost)"
+			break
+		}
+		iu, err := url.Parse(issuer)
+		if err != nil || iu.Hostname() == "" {
+			results["ok"] = false
+			results["message"] = "Issuer 格式错误"
+			break
+		}
+		if iu.Scheme == "http" && iu.Hostname() != "localhost" && iu.Hostname() != "127.0.0.1" {
+			results["ok"] = false
+			results["message"] = "Issuer http 仅允许 localhost 回环"
+			break
 		}
 		client := &http.Client{Timeout: 10 * time.Second}
-		r, err := client.Get(issuer + "/.well-known/openid-configuration")
+		r, err := client.Get(iu.String() + "/.well-known/openid-configuration")
 		if err != nil {
 			results["ok"] = false
 			results["message"] = "无法连接 Issuer: " + err.Error()
