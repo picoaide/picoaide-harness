@@ -1,55 +1,45 @@
 # PicoAide Harness Plugin Development
 
-> **Do not confuse current APIs with a Draft:** this guide describes working DSH/Cordis and Desktop services. The manifest, capability, and unified event model in `dsh-community-fabric` remains a [community RFC Draft](../community/fabric/README.md) and cannot yet be used as a dependency or release target.
+> **Do not confuse current APIs with a Draft:** this guide describes working DSH/Cordis and Desktop contracts. The manifest, capability, and unified event model in `dsh-community-fabric` remains a [community RFC Draft](../community/fabric/README.md) and cannot yet be used as a dependency or release target.
 
 ## Understand the two plugin layers
 
 A normal DSH plugin can provide Host services, commands, routes, bundles, or a Web Client. It should depend on upstream DSH contracts whenever possible so the same package can work in the CLI, an ordinary Web profile, and PicoAide Harness.
 
-Desktop adds two public Host services:
+The Desktop side exposes only two supported contracts (see [plugin-services.md](../packages/host/desktop/docs/plugin-services.md)):
 
-- `desktopProfiles`: reads the active profile, discovers selectable profiles, and requests a safe profile switch.
-- `desktopPnpm`: runs pnpm in the active profile, or manages plugins through the official `dsh plugin` semantics.
+- `desktopRuntime.registerTrayItem`: contributes an effect-scoped native tray item (for example the `tools` or `status` group); the tray menu rebuilds automatically when observable state changes.
+- `desktopActions` (declared through the `dsh-plugin-desktop` root entry): a generation-scoped Host service exposing only the restart operation, for explicit user actions.
 
-These services live in the Host Cordis generation in Electron's main process. The renderer cannot read them directly; a plugin with browser UI should continue to use ordinary DSH Web routes, RPC, client metadata, services, and slots.
+Both live in the Host Cordis generation in Electron's main process. The renderer cannot read them directly; a plugin with browser UI should continue to use ordinary DSH Web routes, RPC, client metadata, services, and slots.
 
 The complete types, lifecycle, and failure semantics are in [`dsh-plugin-desktop/docs/plugin-services.md`](../packages/host/desktop/docs/plugin-services.md). This page focuses on selection and the minimum safe patterns.
 
 ## Desktop-only plugins
 
-If a plugin only makes sense in Desktop, declare the services as required injections:
+If a plugin only makes sense in Desktop, declare `desktopRuntime` as a required injection (Cordis keeps the plugin pending while the provider is unavailable):
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from 'dsh-plugin-desktop/profile-service'
-import type { DesktopPnpmHandle } from 'dsh-plugin-desktop/pnpm'
+import type {} from 'dsh-plugin-desktop'
 
 export const name = 'example-desktop-plugin'
-export const inject = ['desktopProfiles', 'desktopPnpm']
+export const inject = ['desktopRuntime']
 
 export function apply(ctx: Context): void {
-  ctx.logger.info(`profile: ${ctx.desktopProfiles.current.name}`)
-  let active: DesktopPnpmHandle | undefined
-
-  // Connect this function to an explicit user action in the plugin UI.
-  async function installExample(): Promise<void> {
-    active = ctx.desktopPnpm.runPlugin(
-      ['add', 'example-plugin'],
-      process.cwd(),
-    )
-    await active.done
-  }
-
   ctx.effect(() => {
-    return async () => {
-      active?.cancel()
-      await active?.done.catch(() => {})
-    }
-  }, 'example plugin operation')
+    const registration = ctx.desktopRuntime.registerTrayItem({
+      group: 'tools',
+      order: 30,
+      label: () => 'Example Action',
+      invoke: () => { /* explicit user action */ },
+    })
+    return () => { registration.dispose() }
+  }, 'dsh-plugin-desktop: example tray command')
 }
 ```
 
-Production code should invoke package operations from an explicit user action, validate the target, read stdout/stderr, set its own timeout, and check both `exitCode` and `signal`. A generation allows only one `desktopPnpm` package operation at a time; dispose must cancel and await it.
+Production code should trigger tray actions from explicit user actions, handle async failures inside `invoke()` (the tray adapter logs them), and set its own timeout. `registerTrayItem` returns a refreshable registration handle (`refresh`/`dispose`); do not retain it beyond the owning effect's lifetime.
 
 ## Plugins that work in Desktop and ordinary DSH
 
@@ -59,50 +49,40 @@ When the same package must also run under ordinary `dsh web`, do not put Desktop
 export const inject = ['webServer', 'loader']
 
 export function apply(ctx: Context, config: { profile?: string }): void {
-  const profiles = ctx.get('desktopProfiles')
-  if (profiles === undefined) {
+  const runtime = ctx.get('desktopRuntime')
+  if (runtime === undefined) {
     mountOrdinaryDshManager(ctx, config.profile ?? 'web')
     return
   }
-
-  ctx.inject(['desktopPnpm'], (desktopPnpm) => {
-    mountManager(ctx, {
-      profile: profiles.current.name,
-      profileDir: profiles.current.dir,
-      runPlugin: (args, cwd, signal) => desktopPnpm.runPlugin(args, cwd, signal),
-    })
-  })
+  mountDesktopTrayAction(ctx, runtime)
 }
 ```
 
-The ordinary DSH fallback remains the plugin's authoritative implementation. Do not infer the Desktop profile from `process.argv`, `ctx.baseUrl`, settings, or `$DSH_HOME`; in Desktop, use `desktopProfiles.current`.
+The ordinary DSH fallback remains the plugin's authoritative implementation. The application runs a fixed `desktop` profile; do not infer the profile from `process.argv`, `ctx.baseUrl`, settings, or `$DSH_HOME`.
 
-## `run()` versus `runPlugin()`
+## Plugin management (official CLI semantics)
 
-`desktopPnpm.run(args)` is a low-level pnpm operation with the active profile as its cwd. It does not promise DSH profile initialization, caller-relative `file:`/`link:` anchoring, or `dsh.profile.bundles` reconciliation.
+The application runs the fixed `desktop` profile; manage plugins with the official DSH CLI from a system shell:
 
-`desktopPnpm.runPlugin(args, invokingDir)` runs packaged `dsh plugin --profile <active>` and preserves upstream plugin-management semantics. Use it for install, remove, update, and dependency repair:
-
-```ts
-desktopPnpm.runPlugin(['add', target], invokingDir, signal)
-desktopPnpm.runPlugin(['remove', packageName], invokingDir, signal)
-desktopPnpm.runPlugin(['update'], invokingDir, signal)
-desktopPnpm.runPlugin(['install', '--no-frozen-lockfile'], invokingDir, signal)
+```sh
+dsh plugin --profile desktop add <plugin>
+dsh plugin --profile desktop remove <plugin>
+dsh plugin --profile desktop update
 ```
 
-Arguments are passed as argv. Do not concatenate shell strings or depend on Windows `.cmd` shims. The service settles only after the whole subprocess tree exits and terminates active operations during generation disposal.
+An explicit `--profile <name>` always wins; restart the application after plugin changes so the bundle enters the next Loader composition. Desktop does not bundle a pnpm management service and does not export `dsh-plugin-desktop/pnpm` or `profile-service` subpaths — those internal services were removed together with the profile switcher and bundled terminal.
 
 ## APIs not to depend on
 
-`desktopRuntime`, `desktopPnpmBootstrap`, Electron `BrowserWindow`, the tray registry, private Node helpers, `ELECTRON_RUN_AS_NODE`, and generated shims are Desktop internals. Their presence in declarations or runtime context does not make them third-party compatibility contracts.
+The `desktopRuntime` window/tray internals, `desktopPlugins` (profile-bundle disable capability), Electron `BrowserWindow`, the tray registry, private Node helpers, `ELECTRON_RUN_AS_NODE`, and generated shims are Desktop internals. Their presence in declarations or runtime context does not make them third-party compatibility contracts; only the registration contract and the `desktopActions` restart capability declared in plugin-services.md are supported.
 
 ## Testing and release checks
 
 At minimum, a plugin should cover:
 
 - Loading under ordinary DSH without Desktop services, or staying pending by design.
-- Matching the profile name and directory reported by Desktop to the user's actual selection.
-- Cancellation, non-zero exit, spawn failure, and generation teardown for package operations.
+- Tray-item lifetime: effect disposal synchronously releases the registration with no reachable leak.
+- Async invoke failures, repeated triggers, and generation teardown.
 - Restarting after a plugin change and seeing the bundle in the next Loader composition.
 
 Read the [architecture](architecture.en.md) next, then use the package-level [service contract](../packages/host/desktop/docs/plugin-services.md) as the API reference.
@@ -117,6 +97,6 @@ To that end we are starting a development-conventions initiative and hope it bec
 
 - **Composition first**: compose capabilities through official slots, services, and patches; do not assume or override other plugins' internals.
 - **Declare clearly**: state the services and slots you depend on; do not rely on runtime coincidences.
-- **Compatibility first**: keep upgrades backward compatible and never break existing compositions.
+- **Compatibility first**: keep upgrades backward-compatible so existing compositions do not break.
 
-The manifesto is a living document that follows ecosystem practice and accepts community discussion and revisions. Once the plugin marketplace ships, plugins following shared conventions will be easier to discover, install, and evaluate for compatibility, making convention-driven development the beneficial choice for every author. See the [DSH plugin ecosystem manifesto](plugin-ecosystem.en.md) for the vision and [DSH Community Fabric](../community/fabric/README.md) for the proposed future interoperability contract.
+The manifesto is a living document that changes with ecosystem practice and accepts community discussion and revision. Once the plugin marketplace is live, plugins following these conventions will be easier to discover, install, and reason about, making standard-conforming development beneficial for every author. See the full vision in [Plugin ecosystem manifesto](plugin-ecosystem.en.md); future interoperability contracts are discussed in [DSH Community Fabric](../community/fabric/README.md).

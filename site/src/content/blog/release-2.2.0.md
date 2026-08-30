@@ -9,6 +9,8 @@ tags:
   - 产品
 ---
 
+> 注：本发布说明为历史快照，SQLite 双后端与迁移工具已于 2026-08 随 PG-only 迁移下线。
+
 PicoAide Harness 2.2.0 正式发布。本版本带来以下变化：
 
 ## PostgreSQL 存储支持

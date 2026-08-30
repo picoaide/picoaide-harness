@@ -56,7 +56,7 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 └──────────────────┘
 ```
 
-- 需要含 `-db-driver` 支持的服务端镜像(发布 0.5.0+ 或本地 `make docker-image`);
+- 使用最新镜像(本地 `make docker-image` 或 CI 发布的 `ghcr.io/picoaide/picoaide-harness-server`);PG 支持是当前所有发布镜像的默认能力;
 - 服务端首次启动自动应用 `migrations-pg` 建表(幂等,空库即建);
 - usage 明细按月原生分区(保留 N 月可配,默认 6),日/月账本永久保留(见 docs/06-database.md)。
 
@@ -67,14 +67,14 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 ### 1.1 发布流程(CI 自动)
 
 ```bash
-git tag v0.4.0 && git push origin v0.4.0
+git tag v2.4.6 && git push origin v2.4.6
 ```
 
 `.github/workflows/docker.yml` 在 `push tags v*` 时自动:
 
 1. buildx 单平台构建 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟;Dockerfile 两阶段:webadmin 先构建,Go 交叉编译);
-2. 注入版本:`--build-arg VERSION=0.4.0` → 镜像内 `picoaide-server --version` 输出 `0.4.0`(与 tag 强一致);
-3. 推送标签:`v0.4.0`(精确)/ `v0.4`(minor)/ `latest`(仅默认分支);
+2. 注入版本:`--build-arg VERSION=2.4.6` → 镜像内 `picoaide-server --version` 输出 `2.4.6`(与 tag 强一致;push tag 时经 `scripts/version.mjs check` 与 root package.json 同源校验);
+3. 推送标签:`v2.4.6`(精确)/ `v2.4`(minor)/ `latest`(仅默认分支);
 4. 附注 SBOM 与构建证明(provenance mode=max);构建缓存 type=gha;
 5. 最后 `imagetools inspect` 校验 amd64 manifest 存在。
 
@@ -84,10 +84,10 @@ git tag v0.4.0 && git push origin v0.4.0
 
 ```bash
 make docker-image                        # 本地单平台构建(带 git describe 版本注入)
-make docker-image TAG=v0.4.0             # 指定版本(与 CI 相同注入)
-make release-export TAG=v0.4.0           # 导出 dist/picoaide-server-v0.4.0.tar
+make docker-image TAG=v2.4.6             # 指定版本(与 CI 相同注入)
+make release-export TAG=v2.4.6           # 导出 dist/picoaide-server-v2.4.6.tar
 # 目标机(内网,无外网)导入:
-docker load < dist/picoaide-server-v0.4.0.tar
+docker load < dist/picoaide-server-v2.4.6.tar
 # 然后 .env 的 SERVER_IMAGE 改成本地标签,或用 tar 镜像直接 compose up
 ```
 
@@ -133,9 +133,9 @@ chmod 600 certs/server.key
 # 3. 启动(默认 DB_MODE=pg,主 docker-compose.yml 即 PostgreSQL 模式)
 docker compose up -d
 
-# 3'. PostgreSQL 模式(用完整独立 compose,含 caddy+server+postgres):
+# 3'. PostgreSQL 模式(主 docker-compose.yml 即 PostgreSQL 内置模式,含 caddy+server+postgres):
 #     .env 设 DB_MODE=pg 并配 PG_PASSWORD;部署脚本自动选用,手动则:
-#     docker compose -f docker-compose.pg.yml up -d
+#     docker compose up -d
 #     外部 PG 模式:DB_MODE=pg-external + PG_DSN → docker compose -f docker-compose.pg-ext.yml up -d
 
 # 4. 验证
@@ -178,7 +178,7 @@ docker inspect picoaide-server -f '{{range .NetworkSettings.Networks}}{{.IPAddre
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 ```
 
-**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式/数据库后端)→ 下载/复制部署资产(docker-compose.yml + docker-compose.pg.yml + docker-compose.pg-ext.yml + Caddyfile 双模板 + .env.example + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、Caddyfile、镜像启动、健康等待)→ 打印部署摘要。
+**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式/数据库后端)→ 下载/复制部署资产(docker-compose.yml(PostgreSQL 内置模式)+ docker-compose.pg-ext.yml(外部 PG)+ Caddyfile 双模板 + .env.example + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、Caddyfile、镜像启动、健康等待)→ 打印部署摘要。
 
 非交互(无人值守,需 root/sudo):
 
@@ -196,7 +196,7 @@ curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/se
 | `PG_DSN` | - | pg-external 必填(如 `postgres://user:pass@host:5432/db`) |
 | `ADMIN_USER` / `ADMIN_PASS` | admin / 随机生成 | 超管账号/密码(兼容 `PICOAI_ADMIN_PASSWORD`) |
 | `TLS_MODE` | manual | manual / auto |
-| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry;pg 模式须含 `-db-driver`(0.5.0+ 或本地构建) |
+| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry;当前所有发布镜像均为 PG 模式 |
 | `SKIP_DEPS=1` | 空 | 跳过依赖自动安装(仅检查,缺失即提示并退出) |
 | `DOCKER_MIRROR` | 空 | docker 安装镜像源(如清华 `https://mirrors.tuna.tsinghua.edu.cn/docker-ce`) |
 | `MIRROR_URL` | 空 | 通用镜像加速提示(apt 源需自行改) |
@@ -270,13 +270,13 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 # 或手动: docker compose pull && docker compose up -d
 ```
 
-兼容性:DB 迁移按顺序执行(0001→0027+),升级前建议 backup;降级**不保证**兼容(数据迁移不可逆),回滚=备份恢复。
+兼容性:DB 迁移按顺序执行(0001→0048),升级前建议 backup;降级**不保证**兼容(数据迁移不可逆),回滚=备份恢复。
 
 ### 6.2 备份(重要:master.key 与数据库同备)
 
 ```bash
 ./scripts/deploy.sh backup
-# 产物: deploy-backup/picoaide-data-<时间>.tar.gz(含 picoaide.db + master.key)
+# 产物: deploy-backup/picoaide-data-<时间>.tar.gz(应用数据 + master.key;数据库在 PostgreSQL,另行 pg_dump)
 #      deploy-backup/caddy-data-<时间>.tar.gz(auto 模式 Caddy 证书库)
 #      deploy-backup/pg-data-<时间>.dump(pg 模式:pg_dump 自定义格式,含 schema+数据)
 ```
@@ -341,7 +341,7 @@ PG 部署后数据保留说明:
 → `docker exec picoaide-server /app/picoaide-server --version`(输出镜像构建注入的版本号)。
 
 **Q11:PG 模式需要什么镜像?**
-→ 服务端镜像须含 `-db-driver` 支持(发布 0.5.0+ 或本地 `make docker-image`);缺失时安装器会给出提示(`SKIP_IMAGE_CHECK=1` 可跳过)。
+→ 服务端镜像须含 `-db-driver`(安装器以 `docker run <img> -h` 探测 `db-driver` 字样;`SKIP_IMAGE_CHECK=1` 可跳过)。
 
 **Q12:用量明细/历史统计保留多久?**
 → 明细默认保留 6 个月(可配 0=永久);日账/月账统计永久保留,窗口外查询自动走账本(§6.3)。

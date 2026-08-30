@@ -8,7 +8,7 @@ The desktop client is the product surface employees use every day. It packages t
 ## Main Interface
 
 - **Native window**: a standard desktop window, with its own frame in advanced mode, native material (macOS vibrancy / Windows Mica provided by the platform), and native draggable regions;
-- **System tray**: closing the window hides it by default rather than quitting; the tray offers "Open window / Check for updates / Export diagnostics / Switch Profile / Open DSH terminal / Quit";
+- **System tray**: closing the window hides it by default rather than quitting; the tray offers "Open window / Check for updates / Export diagnostics / Quit" (Profile is fixed to desktop, with no tray switcher and no DSH terminal item);
 - **Local web port**: assigned randomly by the system by default (`dsh-desktop.port: 0`) to avoid port conflicts; the server only listens on `127.0.0.1`. If a UI plugin depends on a stable origin (localStorage is isolated per origin), you can fix a port in settings;
 - **Single instance**: launching again focuses the existing instance.
 
@@ -16,9 +16,8 @@ The desktop client is the product surface employees use every day. It packages t
 
 | Concept | Description |
 |---|---|
-| **Profile** | A combination of a DSH bundle, dependencies, and patches; switchable from the tray menu, applied via an **orderly restart** (the restart only counts as last-known-good if the Host, window, and client all start successfully) |
-| **Compatibility mode** | Uses the upstream default Web client and respects the profile's own layout/sidebar/conversation composition, closest to the official Harness |
-| **Advanced mode** | Injects the desktop-owned frame, layout, and native material without changing the upstream Web carrier; the product default profile always uses advanced mode |
+| **Profile** | A combination of a DSH bundle, dependencies, and patches; the product **runs the fixed `desktop` profile**, with no tray switcher and no profile selector |
+| **Advanced mode** | The product always uses advanced mode: it injects the desktop-owned frame, layout, and native material without changing the upstream Web carrier; Linux uses an ordinary system window frame (no Mica / hidden-inset) while the layout stays in advanced mode |
 
 ## Chat and Agents
 
@@ -153,21 +152,21 @@ Built into the product (vendored community plugin **dsh-memory-evolve**), this i
 
 - Upgrade source: GitHub Releases API (`releases/latest`); parses `tag_name` and strips the `v` prefix;
 - **SHA-256 verification**: downloads `SHA256SUMS.txt` and checks each installer against it (compatible with the `./` prefix); on failure, the package is **not installed**;
-- Platform assets: macOS universal DMG, Windows NSIS installer, Linux AppImage (`x86_64`) + deb;
+- Platform assets: macOS universal DMG (compatible with Intel and Apple Silicon), Windows NSIS installer, Linux AppImage (`x86_64`) + deb; **Linux does not auto-download installers** (update download is macOS / Windows only) — Linux users download the new installer manually;
 - Interaction: background checks don't block startup; a new version asks for confirmation before downloading; a download/install failure doesn't break the current version (under network fluctuation, continues downloading the confirmed version);
 - Unsigned note: Windows/Linux installers are auto-published unsigned by CI (macOS release builds are signed + notarized); Windows SmartScreen may warn about an "unknown publisher" — verify against the SHA256SUMS.txt shipped in the Release.
 
 ## Terminal and Plugin Management
 
-Open **DSH Terminal** from the tray (macOS uses Terminal; Windows prefers Windows Terminal, falling back to PowerShell/CMD). The welcome message shows the app version, current profile, profile directory, and DSH home. Inside the terminal:
+Manage plugins from a **system shell** using ordinary `dsh plugin` commands — the app runs the fixed `desktop` profile and has no "Open DSH terminal / Switch Profile / mode switch" tray entry:
 
 ```sh
-dsh plugin add <plugin>     # install a plugin (applies to the current active profile)
-dsh plugin remove <plugin>  # remove a plugin
-dsh plugin update           # update plugins
+dsh plugin --profile desktop add <plugin>     # install a plugin (always targets the desktop profile)
+dsh plugin --profile desktop remove <plugin>  # remove a plugin
+dsh plugin --profile desktop update           # update plugins
 ```
 
-Use `--profile <name>` to explicitly target a profile. The `dsh`/`pnpm`/`node` inside the terminal are Desktop-private shims that **only set PATH for that terminal process** — they don't change the system-wide PATH or shell config. After plugin changes, restart the desktop app to enter the Loader composition.
+Use an explicit `--profile <name>` to target a profile. The app ships its own DSH dependencies and does not modify the system-wide PATH or shell config. After plugin changes, restart the app to enter the Loader composition.
 
 ## Troubleshooting
 

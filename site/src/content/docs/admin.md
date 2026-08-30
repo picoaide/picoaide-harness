@@ -13,7 +13,8 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 |---|---|---|
 | 用户 | `/users` | 账号、角色、状态、配额 |
 | 部门 | `/departments` | 部门树、成员、预算 |
-| 网关 | `/gateway` | 上游供应商、默认模型、限流、高峰时段、登录模式 |
+| 认证 | `/auth` | 本地 / LDAP / OIDC 登录方式配置 |
+| 网关 | `/gateway` | 上游供应商、默认模型、限流、高峰时段 |
 | 用量 | `/usage` | 费用、请求数、Token 明细、图表 |
 | 市场 · 技能 | `/marketplace` | 商城技能管理、分级与授权 |
 | 能力中心 | `/capabilities` | 共享技能/智能体统一审批队列（官方/精选标记、授权） |
@@ -22,12 +23,11 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 
 ## 用户管理
 
-- **创建用户**：用户名 + 密码 + 是否管理员（`is_admin`）；
+- **创建用户**：用户名 + 密码 + 角色（`super_admin` / `auditor` / `user`）；当前创建/编辑表单以 `is_admin`（布尔）兼容别名呈现，服务端已支持 `role`（0046 起 RBAC 角色为唯一真源，`is_admin` 为兼容字段）；
 - **状态**：启用 / 禁用——禁用**立即吊销该用户全部 API 令牌**，客户端需重新登录（与用户更新同事务）；
 - **删除**：双重确认（明示会清除全部 API 令牌、用量记录与组归属，不可恢复）；
 - **配额**：`quota_tokens`（月 token 上限：null=跟随全局默认，0=不限，>0=月上限）与 `quota_money`（月金额上限，语义相同）；表格展示**解析后生效配额**（跟随默认=全局值，admin=0）；
-- **部门与角色**：用户归属部门，部门预算沿祖先链生效；
-- 登录模式相关字段（local/LDAP/OIDC）见网关页。
+- **部门与角色**：用户归属部门，部门预算沿祖先链生效。
 
 ## 部门管理
 
@@ -44,9 +44,7 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 - **模型定价**：每模型 input/output 单价（元/M tokens，`input_price_per_1m` / `output_price_per_1m`），另有**缓存命中输入价**（`cache_input_price_per_1m`）与**低谷折扣率**（`offpeak_discount`，0-1）——未定价模型费用按 0 计；修改价格/折扣只影响之后产生的费用（历史费用按记录时定价留存）；
 - **缓存命中计费**：命中缓存的输入 token 按缓存价计费，未配置缓存价时回退输入价（DeepSeek 缓存价）；
 - **峰谷折算**：高峰窗口外（空闲时段）且模型配置了低谷折扣率时，费用 = 标准价 × 折扣率；高峰时段按标准价；DeepSeek 官方当前政策（2026-08 起）= 周一至周五 09:00-12:00、14:00-18:00 为高峰，其余（含周末）为空闲，空闲价 = 高峰价 × 50%。
-- **登录模式**：`local` / `ldap` / `oidc` / `both`（local+ldap）切换：
-  - LDAP：`ldap_url`、`ldap_bind_dn`、`ldap_base_dn`、`ldap_user_filter`（如 `(uid=%s)`）、`ldap_group_filter`（如 `(memberOf=cn=%s)`）；
-  - OIDC：`oidc_issuer`、`oidc_redirect_url`（如 `https://picoaide.example.com/api/client/v2/auth/oidc/callback`）。
+- **登录模式**：不在本页配置；登录方式（local / LDAP / OIDC）见独立的「认证 `/auth`」页。
 
 ## 用量统计
 

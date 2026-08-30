@@ -8,7 +8,7 @@ description: 如何为 PicoAide Harness 开发插件：一切皆插件、客户�
 ## 插件机制总览
 
 - **上游 Holder**：agent、model、tool、session、settings、webServer、subprocess 等官方能力，以固定 pin 版本原样运行；
-- **Desktop Host 服务**：窗口、托盘、profile、终端、更新，对第三方开放明确的两个 contract（`dsh-plugin-desktop/profile-service`、`dsh-plugin-desktop/pnpm`）；
+- **Desktop Host 服务**：窗口、托盘、profile、终端、更新，对第三方开放的 contract 见 `packages/host/desktop/docs/plugin-services.md`（`dsh-plugin-desktop` 根入口 + `./desktop-home`、`./diagnostics`、`./updates` 等子路径；`desktopRuntime` 服务仅供 Desktop 自有 row 使用）；
 - **Web Client**：官方 Web UI + 第三方浏览器界面，经 loopback carrier 工作，不直接调用 Electron；
 - **原生 runtime**：Electron BrowserWindow、系统托盘、文件/网络/安装器适配——`desktopRuntime` 仅供 Desktop 自有 row 使用，**不是第三方 API**。
 

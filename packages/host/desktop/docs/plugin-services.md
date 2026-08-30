@@ -37,8 +37,10 @@ The renderer receives ordinary Web Client modules over the existing loopback car
 
 | Name | Boundary | Plugin-author status |
 | --- | --- | --- |
-| `desktopRuntime` | Launcher-provided native adapter used by Desktop-owned shell, diagnostics, and update rows. | Desktop-internal. Third-party plugins must not inject it or rely on its window/tray methods. |
-| `desktopActions` | Generation-scoped Host service exposing only the restart operation. | Public through `dsh-plugin-desktop` root entry; keep usage to explicit user actions. |
+| `desktopRuntime` | Launcher-provided native adapter used by Desktop-owned shell, diagnostics, and update rows. | Desktop-internal. Third-party plugins must not inject it or rely on its window/tray methods. Tray contributions use the `registerTrayItem` contract below. |
+| `desktopActions` | Generation-scoped Host service exposing only the restart operation. | Declared through the `dsh-plugin-desktop` root entry types. The launcher currently describes this contract for the desktop shell but does not expose it to third-party Host plugins; verify `ctx.get('desktopActions')` before use and treat it as not guaranteed. |
+
+The native tray supports effect-scoped contributions from Host plugins through `desktopRuntime.registerTrayItem`. A third-party plugin may contribute a `tools` or `status` item with a stable label and invocation; the tray menu is rebuilt automatically when the item's observable state changes.
 
 The native tray supports effect-scoped contributions from Host plugins through `desktopRuntime.registerTrayItem`. A third-party plugin may contribute a `tools` item with a stable label and invocation; the tray menu is rebuilt automatically when the item's observable state changes.
 

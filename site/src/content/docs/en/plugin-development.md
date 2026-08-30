@@ -8,7 +8,7 @@ Plugins are extension packages that add capabilities to DSH — models, tools, i
 ## Plugin Mechanism Overview
 
 - **Upstream Holder**: official capabilities such as agent, model, tool, session, settings, webServer, and subprocess run as-is at a pinned version;
-- **Desktop Host Services**: window, tray, profile, terminal, and updates, exposing two explicit contracts to third parties (`dsh-plugin-desktop/profile-service`, `dsh-plugin-desktop/pnpm`);
+- **Desktop Host Services**: window, tray, profile, terminal, and updates; the third-party contract is documented in `packages/host/desktop/docs/plugin-services.md` (the `dsh-plugin-desktop` root entry plus subpaths such as `./desktop-home`, `./diagnostics`, `./updates`; the `desktopRuntime` service is for Desktop's own rows only);
 - **Web Client**: the official Web UI plus third-party browser interfaces, working through the loopback carrier and not calling Electron directly;
 - **Native runtime**: Electron BrowserWindow, system tray, and file/network/installer adapters — `desktopRuntime` is for use only by Desktop's own rows, **not a third-party API**.
 

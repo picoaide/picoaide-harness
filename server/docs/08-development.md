@@ -3,41 +3,30 @@
 ## 1. 目录结构
 
 ```
-cmd/server/            # 服务端入口(--bootstrap-admin/-addr/-data + webadmin 静态内嵌)
-internal/              # serverauth(认证/管理端)/ llmgateway(网关)/ marketplace(商城)/
-                       # serverstore(DAO+迁移)/ util(crypto 等)/ bootstrap/webadmin(embed)
-desktop/
-  src/main/            # index.ts(工具注册表)/ ipc.ts / cdp_server.ts / plugin_ipc.ts / ws.d.ts
-                       # agent/(engine/modes/continue/events/artifacts/provider)
-                       # tools/(filesystem/terminal/sandbox/screen/ocr/clipboard/web/browser/paths)
-                       # skill/(loader/installer/integration)
-                       # store/(db/migrations/conversations/messages/artifacts/settings)
-                       # gateway/(auth/bootstrap/config/health/marketplace/tls)
-  src/preload/         # contextBridge 白名单 API
-  src/renderer/        # api/ components/(ui=shadcn + 业务) pages/(Login/Main/Settings) stores/ lib/
-  tests/               # E2E/冒烟预留
-browser-extension/     # Chrome MV3 插件
-webadmin/              # Vite React + shadcn,pages/(Login/Users/Gateway/Usage/Marketplace)
-scripts/               # pkg-*.sh + mock-upstream.go
-docs/                  # 本文档集
+cmd/server/            # 服务端入口(--bootstrap-admin/-addr/-data/-db-driver/-pg-dsn + / 与 /portal 门户页 + webadmin 静态内嵌)
+internal/              # router(路由唯一真源)/serverauth(认证/管理端/RBAC)/llmgateway(网关)/
+                       # marketplace(技能商城)/agentshare/sharedskills(共享内容)/
+                       # capabilities(能力中心聚合)/connectors/brand(品牌门户)/
+                       # bootstrap/telemetry/serverstore(DAO+PG 迁移)/util(crypto 等)
+webadmin/              # Vite React + shadcn,pages/(Login/Users/Departments/Auth/Brand/Gateway/Usage/Marketplace/Capabilities/Connectors/Audit/ErrorMonitoring/ServerInfo)
+scripts/               # install-server.sh(一键部署)+ deploy.sh(容器化生命周期)+ mock-upstream.go
+docs/                  # 本文档集(superpowers/ 为历史设计文档)
 ```
 
 ## 2. 工程原则(节选,完整见 AGENTS.md)
 
-1. UI 一律 shadcn/ui,禁止自写 UI 组件(`npx shadcn@latest add <name>` 拉取);renderer 与 webadmin 统一。
-2. 函数尽量复用:同一逻辑只实现一次,重复 2 次即提取共享模块(客户端 `tools/paths.ts` 的 `isAllowed`、审批门控、编码检测、gateway 连接器;服务端 serverstore DAO、util、公共中间件)。
+1. UI 一律 shadcn/ui,禁止自写 UI 组件(`npx shadcn@latest add <name>` 拉取);webadmin 统一。
+2. 函数尽量复用:同一逻辑只实现一次,重复 2 次即提取共享模块(服务端 serverstore DAO、util、公共中间件;客户端归档安全校验等)。
 3. **TDD 红-绿-commit**:每个任务先写测试(红)→ 实现(绿)→ commit;非平凡逻辑必须有可运行测试(Go `_test.go` / TS `*.test.ts`)。
 4. 每任务结束 commit,信息 `feat:|fix:|test:|docs:|chore:` 单行 ≤72 字符。
-5. 零配置原则:客户端不得新增"员工功能配置"入口;唯一本地配置 = 可访问目录 + 建议安装管理 + 刷新。
-6. 安全边界不得绕过:审批门控、`isAllowed`、命令白名单、凭证不落盘、TOFU 指纹、插件启发式审批。
-7. 服务端 HTTP 全走 `session.defaultSession.fetch`(证书/TOFU);登录页拒绝非 HTTPS 远程地址。
+5. 安全边界不得绕过:凭证 AES-GCM、API token 只存哈希、TOFU 证书校验、限流/审计、归档安全校验(SKILL.md/agent.cordis.yml 顶层要求、越界/symlink 拒绝)。
+6. 服务端 API 一律 JSON 信封;客户端接入方经 `/api/client/v2/*` 与 `/v1/*` 网关。
 
 ## 3. TDD 流程
 
 ```bash
-# 1) 写测试 → 运行确认红
-go test ./internal/serverauth/... -run TestXxx        # 服务端
-cd desktop && npm test -- engine                       # 客户端
+# 1) 写测试 → 运行确认红(需 PG_DSN_TEST 指向临时测试库)
+PG_DSN_TEST=postgres://picoaide:ci@127.0.0.1:5432/picoaide_test?sslmode=disable go test ./internal/... -run TestXxx
 # 2) 实现 → 运行确认绿
 # 3) git add -A && git commit -m "feat: xxx"
 ```
@@ -47,40 +36,34 @@ cd desktop && npm test -- engine                       # 客户端
 ## 4. 常用命令
 
 ```bash
-make test              # 服务端全量测试
-make test-server       # 服务端各域
-make test-client       # desktop npm test + typecheck
-make check             # gofmt + go vet + 全部测试(提交前跑)
-make build-server / build-client / build-desktop / webadmin / pkg-*
-cd desktop && npm run dev        # electron-vite 开发
-cd desktop && npx electron .     # 生产模式(先 build)
-PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
-bash scripts/mock-upstream.go    # 假上游(无外网验证网关)
+make test              # 服务端全量测试(需 PG_DSN_TEST)
+make test-server       # 服务端各业务域(显式枚举全部包)
+make check             # gofmt + go vet + test-server + webadmin 测试与构建(提交前跑)
+make build-server / webadmin / docker-image / release-export
+PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data -db-driver pg -pg-dsn <DSN> --bootstrap-admin admin
+go run scripts/mock-upstream.go    # 假上游(无外网验证网关)
+# 桌面客户端(Yarn workspace,见仓库根 README):
+corepack yarn workspace dsh-plugin-desktop dev   # 开发
+corepack yarn ws dsh-plugin-desktop test         # 单测(等)
 ```
 
 ## 5. 测试约定
 
-- 客户端单测内嵌源文件旁(`*.test.ts`,vitest);`tests/` 为 E2E 预留。
-- 引擎测试覆盖:审批门控(超时/队列/cancel/allow_dir)、三模式、恢复截断、`PICOAI_TEST_AUTO_APPROVE` 钩子、事件流。
-- 服务端测试覆盖:认证(token 生命周期/限流/admin CSRF)、网关代理(流式/错误映射/限流)、商城(授权/审计)、迁移。
+- 服务端:每测试独立临时 PostgreSQL 库(`NewTestDB`/pgx CREATE/DROP DATABASE),覆盖认证(token 生命周期/限流/admin CSRF/RBAC)、网关代理(流式/错误映射/限流/计量)、商城与共享(授权/审计/多版本/归档安全)、迁移、能力中心聚合、品牌门户。
+- 桌面客户端与 webadmin:vitest(仓库 Yarn workspace / webadmin npm)。
 
 ## 6. CI
 
-`.github/workflows/ci.yml`:server(Go 1.24, make test-server + build)/ desktop(Node 20, npm ci + test + typecheck + build)/ webadmin(Node 20, build)。本地 `make check` 近似 CI 的 server+desktop 部分。
+`.github/workflows/ci.yml`:server(Go 1.26 + postgres:16-alpine service,`go vet` + `go test ./...`(PG_DSN_TEST+TZ=Asia/Shanghai)+ `make build-server` + deploy 脚本/compose 校验)/ desktop-linux/windows/macos(Node 24,Yarn 门禁与三平台产物)/ release(GitHub Release)。本地 `make check` 近似 CI 的 server+webadmin 部分。
 
 ## 7. 契约(改代码前必读,两端必须一致)
 
-- 事件协议:`agent:event` 全 snake_case(text_delta/reasoning_delta/tool_start/tool_end/tool_error/confirm_required/artifact/done/canceled/error)——见 01-architecture.md §4。
 - REST 错误信封:`{"error":{"code","message"}}`;code 见 03-api-reference.md §1。
-- bootstrap:`{default_model, models, skills, web}` 服务端 ↔ 客户端 `BootstrapConfig` 严格对齐。
-- CDP 桥:固定 `127.0.0.1:54321`,JSON-RPC(`browser.tabInfo/getContent/click/type/navigate/scroll/executeScript`)。
-- 审批签名:`confirm(requestId, ok)`;`needsApprovalFor(command, allowedDirs)`;`isAllowed(absPath, allowedDirs)`。
-- DB:客户端 4 表 + schema_migrations;服务端 17 表(迁移 0001-0009,0007 废弃)——见 06-database.md。
+- bootstrap:`{default_model, models, skills, web, connectors}` 服务端 ↔ 客户端 `BootstrapConfig` 严格对齐。
+- 命名空间:全部路由经 `internal/router.Register` 集中声明(唯一真源),禁止业务包自行 `r.Group()` 注册生产路由。
+- DB:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/`(0001–0048)——见 06-database.md。
+- 客户端侧(桌面)契约见仓库根 `docs/plugin-development.md` 与 `packages/host/desktop/docs/plugin-services.md`。
 
-## 8. 客户端本地 settings 键
+## 8. 客户端本地配置(桌面侧,见仓库根文档)
 
-| 键 | 说明 |
-|----|------|
-| `allowed_dirs` | 可访问目录列表(安全边界,JSON 数组) |
-| 建议安装 | 已装 skill 记录(installer 模块) |
-| 其余 | 内部缓存,不向员工开放配置入口 |
+桌面客户端的本地设置由官方 DSH settings 与自研插件(enterprise/connectors/cron/browser)负责,见 `packages/host/*` 与 `packages/client/*`;服务端不持有客户端本地设置。

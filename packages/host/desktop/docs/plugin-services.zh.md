@@ -37,10 +37,10 @@ renderer 通过现有 loopback carrier 接收普通 Web Client modules。它无�
 
 | 名称 | 边界 | 插件作者状态 |
 | --- | --- | --- |
-| `desktopRuntime` | Launcher 提供的 native adapter，供 Desktop 自有的 shell、诊断与更新 row 使用。 | Desktop 内部。第三方插件不得 inject 或依赖其 window/tray 方法。 |
-| `desktopActions` | 只暴露 restart 操作的 generation 级 Host service。 | 通过 `dsh-plugin-desktop` 根入口公开；仅限显式用户操作。 |
+| `desktopRuntime` | Launcher 提供的 native adapter，供 Desktop 自有的 shell、诊断与更新 row 使用。 | Desktop 内部。第三方插件不得 inject 或依赖其 window/tray 方法。托盘贡献走下方 `registerTrayItem` 契约。 |
+| `desktopActions` | 只暴露 restart 操作的 generation 级 Host service。 | 通过 `dsh-plugin-desktop` 根入口类型声明。Launcher 当前为桌面 shell 描述该契约，但未向第三方 Host 插件暴露；使用时先 `ctx.get('desktopActions')` 探测，且不视为保证存在。 |
 
-Native tray 支持 Host 插件通过 `desktopRuntime.registerTrayItem` 提供 effect-scoped contribution。第三方插件可以贡献一个 `tools` 项，包含稳定 label 与 invocation；当该项的可观察状态变化时托盘菜单会自动重建。
+Native tray 支持 Host 插件通过 `desktopRuntime.registerTrayItem` 提供 effect-scoped contribution。第三方插件可以贡献一个 `tools` 或 `status` 项，包含稳定 label 与 invocation；当该项的可观察状态变化时托盘菜单会自动重建。
 
 ## 注入模式
 

@@ -12,7 +12,7 @@ Ordinary users can start with the [user guide](user-guide.en.md) and never need 
 
 | Document | Covers |
 | --- | --- |
-| [User guide](user-guide.en.md) | Installation, profiles, modes, terminal, plugins, and updates |
+| [User guide](user-guide.en.md) | Installation, the fixed profile, advanced presentation, plugins, and updates |
 | [FAQ](faq.en.md) | Direct answers about platforms, bundled runtime, project status, data, plugins, and updates |
 | [Why PicoAide Harness](why-desktop.en.md) | The boundary with upstream Harness and the case for plugins |
 
@@ -21,15 +21,15 @@ Ordinary users can start with the [user guide](user-guide.en.md) and never need 
 | Document | Covers |
 | --- | --- |
 | [Plugin ecosystem manifesto](plugin-ecosystem.en.md) | The vision of an open, composable, sustainable plugin ecosystem and its three principles |
-| [Plugin development](plugin-development.en.md) | Ordinary DSH plugins, Desktop services, compatibility, and lifecycle |
+| [Plugin development](plugin-development.en.md) | Ordinary DSH plugins, Desktop services, and lifecycle |
 | [Community Fabric Draft](../community/fabric/README.md) | Community interoperability drafts spanning manifest/capability foundations, Runtime/Presentation, service composition, and provenance diagnostics |
 | [Fabric community-feedback disposition](../community/fabric/docs/research/community-issue-23-review.md) | Which Issue #23 proposals were adopted, split into focused RFCs, deferred, or kept out of portable core |
 | [Fabric framework and plugin-needs research](../community/fabric/docs/research/mature-plugin-frameworks.md) | Mature Koishi, Chrome, and VS Code patterns plus requirements observed in real DSH plugins |
 | [VS Code extension-model research](../community/fabric/docs/research/vscode-extension-model.md) | Implemented declaration, Provider, UI, placement, and lifecycle patterns, with concrete constraints for the Fabric RFC |
 
 
-| [Architecture](architecture.en.md) | Electron, Host, loopback Web, profiles, and packaging |
-| [Desktop service reference](../packages/host/desktop/docs/plugin-services.md) | Stable `desktopProfiles` and `desktopPnpm` contracts with TypeScript examples |
+| [Architecture](architecture.en.md) | Electron, Host, loopback Web, the fixed profile, and packaging |
+| [Desktop service reference](../packages/host/desktop/docs/plugin-services.md) | Stable `desktopRuntime` and `desktopActions` contracts with TypeScript examples |
 | [Package reference](../packages/host/desktop/README.md) | Detailed build, runtime, release, and limitation notes |
 
 ## How the README files are organized
@@ -46,4 +46,4 @@ The outer repository has two formal product READMEs plus one legacy compatibilit
 
 ## Status convention
 
-These pages distinguish shipped behavior, platform limits, and roadmap items. Compatibility mode keeps the upstream default Web client; advanced mode installs the Desktop-owned layout and native materials. The community market remains at the documentation stage (see [`community/fabric`](../community/fabric/README.md)), with no usable page or installer; mobile remote control and Channels also remain separate roadmap items and are not implied to be part of the current installer.
+These pages distinguish shipped behavior, platform limits, and roadmap items. The desktop shell is fixed to the advanced presentation: the Desktop-owned layout and native materials are always installed (Linux uses the standard system window frame). The community market remains at the documentation stage (see [`community/fabric`](../community/fabric/README.md)), with no usable page or installer; mobile remote control and Channels also remain separate roadmap items and are not implied to be part of the current installer.

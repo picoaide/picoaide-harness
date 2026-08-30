@@ -6,7 +6,7 @@ This page answers common questions about installation, supported platforms, the 
 
 ## What is PicoAide Harness?
 
-PicoAide Harness is an open-source DeepSeek Harness desktop client for Windows and macOS. It packages the official Harness local Web UI, Host service, and plugin system into a native desktop application with a window, system tray, terminal, updates, and profile management.
+PicoAide Harness is an open-source DeepSeek Harness desktop client for Windows, macOS, and Linux. It packages the official Harness local Web UI, Host service, and plugin system into a native desktop application with a window, system tray, updates, and enterprise-grade administration.
 
 ## Is this an official DeepSeek product?
 
@@ -14,7 +14,7 @@ No. PicoAide Harness is an independent, community-maintained open-source project
 
 ## Which operating systems are supported?
 
-Current release installers support Windows x64 and Apple Silicon macOS. There is currently no Linux installer, and Intel Macs are not supported. Cross-platform compatibility code in the source tree does not imply that an installer has been released for that platform.
+Current release installers support Windows x64, macOS (universal DMG, both Apple Silicon and Intel), and Linux x64 (AppImage + deb). The desktop shell is fixed to the advanced presentation; Linux uses the standard system window frame (no platform-native Mica or hidden-inset chrome) while keeping the same advanced layout as macOS and Windows.
 
 ## Do I need to install Node.js, pnpm, or DSH?
 
@@ -26,7 +26,7 @@ No separate Node.js or Harness core download is required. The installer is large
 
 ## Does PicoAide Harness modify official Harness?
 
-No. The repository pins an unmodified official Harness checkout. Compatibility mode runs the upstream default Web client. Advanced mode adds Desktop-owned layout and native window presentation through plugins without editing upstream source.
+No. The repository pins an unmodified official Harness checkout. The desktop shell adds Desktop-owned layout and native window presentation through plugins (fixed advanced presentation), without editing upstream source.
 
 ## Is data stored locally?
 
@@ -34,15 +34,15 @@ The Desktop Host, profiles, and DSH home live on the local machine. Whether cont
 
 ## Can I install DSH plugins?
 
-Yes. PicoAide Harness uses the official Harness plugin system. Open DSH Terminal from the tray and run `dsh plugin add`, `dsh plugin remove`, or `dsh plugin update`. These commands default to the active profile, and Desktop must be restarted after plugin changes.
+Yes. PicoAide Harness uses the official Harness plugin system. Run `dsh plugin --profile desktop add`, `remove`, or `update` from a system shell (the application runs the fixed `desktop` profile); restart Desktop after plugin changes.
 
 ## Does the Desktop profile automatically sync with an existing web profile?
 
-No plugins are copied automatically. Each profile has its own bundle and dependency composition. After switching profiles, default plugin commands target the active profile; `--profile <name>` can always select one explicitly.
+No. The application runs a single fixed `desktop` profile; there is no `web` default and no profile switcher. Each profile has its own bundle and dependency composition; `dsh plugin --profile <name>` always selects one explicitly.
 
 ## How are updates installed?
 
-Packaged applications check for stable releases in the background but never install silently. A newer version requires confirmation. macOS downloads and opens a DMG; Windows downloads and starts an NSIS installer. Network and download failures leave the current installation intact.
+Packaged applications check for stable releases in the background but never install silently. A newer version requires confirmation. macOS downloads and opens a DMG; Windows downloads and starts an NSIS installer (Linux launches do not download installers — AppImage/deb come from the release page). Network and download failures leave the current installation intact.
 
 ## Where can I download the app or report a problem?
 

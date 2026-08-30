@@ -27,17 +27,16 @@ The plugin boundary also tells us what not to expose. Third-party plugins can on
 
 The current PicoAide Harness product provides:
 
-- Native windows, a tray, and single-instance lifecycle on macOS and Windows.
-- Compatibility and advanced presentation modes. Compatibility preserves the upstream client; advanced adds PicoAide Harness-owned layout, native materials, and drag regions.
-- Multiple profile selection. PicoAide Harness exposes the active profile identity for the current generation, and switching takes effect through an orderly restart.
-- A bundled terminal and pinned pnpm environment. They apply only to processes created by PicoAide Harness and do not modify the user's global PATH.
+- Native windows, a tray, and single-instance lifecycle on macOS, Windows, and Linux.
+- A fixed advanced presentation: PicoAide Harness-owned layout, native materials (macOS vibrancy / Windows Mica), and drag regions; Linux uses the standard system window frame.
+- A fixed `desktop` profile: PicoAide Harness exposes the active profile identity for the current generation, and plugin management uses the official `dsh plugin --profile desktop` semantics.
 - A controlled set of extension interfaces for plugin developers (see [plugin development](plugin-development.en.md)).
-- Version discovery and confirmation-gated installer downloads, handing off to a macOS DMG or Windows NSIS installer.
+- Version discovery and confirmation-gated installer downloads, handing off to a macOS DMG or Windows NSIS installer (Linux does not download installers).
 
 ## What we deliberately do not do
 
 - Reimplement the upstream Web UI as an Electron-native page.
-- Override the upstream layout, sidebar, or conversation composition in compatibility mode.
+- Override the upstream layout, sidebar, or conversation composition.
 - Copy records into a separate product database; official profiles share the DSH home for sessions and settings by default.
 - Give third-party plugins an undefined private Electron API.
 - Present roadmap items such as a plugin marketplace, mobile remote control, or Channels as shipped features.

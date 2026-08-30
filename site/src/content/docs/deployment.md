@@ -30,7 +30,7 @@ description: 了解 PicoAide Harness 的企业内网部署形态：容器化服�
 # 服务端一键部署（自动提权、按发行版装依赖、交互收集配置、复用 deploy.sh）
 sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 # 非交互：给 DOMAIN / ADMIN_PASS / DB_MODE / TLS_MODE 等环境变量
-./deploy.sh install|update|status|logs|backup|migrate|uninstall
+./deploy.sh install|update|status|logs|backup|uninstall
 ```
 
 `deploy.sh` 子命令按 `.env` 的 `DB_MODE` **自动叠加 compose override**，无需手传 `-f`：
@@ -63,7 +63,7 @@ sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 
 - 镜像：`ghcr.io/picoaide/picoaide-harness-server`（linux/amd64，附 SBOM + provenance 证明）；
 - 标签：`latest` + `vX.Y.Z` + `vX.Y`；推送版本 tag 后 CI 自动构建发布（`--build-arg VERSION` 注入，`picoaide-server --version` 与 tag 强一致）；
-- **版本线说明**：服务端镜像使用独立的版本线（如 `v0.5.x`，PG 支持需 0.5.0+）；仓库根的 `v2.x` 为桌面客户端版本线，两者独立推进；
+- **版本线说明**：服务端镜像与桌面客户端同属一个产品线，共用同一 `v*` tag（如 `v2.4.x`，与仓库根 `package.json` 同源）；CI 在 push tag 时用 `scripts/version.mjs check` 校验镜像版本与 root `package.json` 一致，`picoaide-server --version` 与 tag 强一致；
 - 内网无外网？`make release-export` 导出镜像 tar + `docker load` 离线部署；本地构建 `make docker-image`。
 
 ## 配置网关

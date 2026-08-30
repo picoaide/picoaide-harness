@@ -74,14 +74,11 @@ An Agent is not just a "chat box" — it can operate the browser, call connector
 3. **Boundaries**: downloads default to a 100MB cap, navigation policy is controlled, tools apply per session, and connector credentials are isolated per user;
 4. **Audit**: critical server operations (authorization, approvals, pricing, quotas) all write audit logs, forming a complete loop with the client execution details.
 
-## 7. Compatibility first, advanced progression
+## 7. Fixed advanced presentation: one integration, no switch
 
-Toward upstream, the product keeps the ability to "roll back":
+Desktop presentation has no user-switchable mode. The product runs the **advanced presentation** by default: it injects desktop-owned frames, layout, native materials, and drag regions without changing the upstream Web carrier. Linux has no platform-native materials (Mica/hidden-inset) and uses the standard system window frame, while keeping the same layout as macOS and Windows.
 
-- **Compatibility mode**: runs the upstream default Web client with a profile's own layout/sidebar/conversation combination, making the interface as close as possible to the official Harness;
-- **Advanced mode**: injects desktop-owned frames, layout, native materials, and drag regions without changing the upstream Web carrier.
-
-Mode switching takes effect through an ordered restart, not hot-swapped in a running renderer. **Operating principle: non-invasive by default, advanced capabilities are explicitly chosen by the user (the advanced mode is fixed to the product's default profile).**
+Startup-setting changes (such as the local Web port) take effect through an ordered restart, not hot-swapped in a running renderer. **Operating principle: advanced capability is the product's default shape rather than an option — the UI only shrinks and never grows cluttered between releases, and docs and screenshots must keep pace with each step of consolidation.**
 
 ## 8. Evolve rather than rewrite
 

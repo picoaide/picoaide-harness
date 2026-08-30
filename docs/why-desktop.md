@@ -27,17 +27,16 @@ PicoAide Harness 的目标不是重新实现 Harness，而是把同一个运行�
 
 当前 PicoAide Harness 主要提供：
 
-- macOS 和 Windows 原生窗口、托盘和单实例生命周期。
-- 兼容模式和高级模式。兼容模式保留上游默认客户端；高级模式提供 PicoAide Harness 自有的布局、窗口材质和原生拖动区域。
-- 多 profile 选择。当前 generation 的 profile 身份由 PicoAide Harness 明确提供，切换通过有序重启生效。
-- 内置终端和固定版本 pnpm 环境。它们只作用于 PicoAide Harness 自己创建的进程，不修改用户的全局 PATH。
+- macOS、Windows 和 Linux 原生窗口、托盘和单实例生命周期。
+- 固定的高级呈现：PicoAide Harness 自有的布局、窗口材质（macOS vibrancy / Windows Mica）和原生拖动区域；Linux 使用标准系统窗口边框。
+- 固定的 `desktop` profile：当前 generation 的 profile 身份由 PicoAide Harness 明确提供，插件管理经官方 `dsh plugin --profile desktop` 语义。
 - 面向插件开发者的一组受控扩展接口（详见[插件开发](plugin-development.md)）。
-- 版本检查、用户确认后的安装包下载，以及 macOS DMG/Windows NSIS 的平台交接。
+- 版本检查、用户确认后的安装包下载，以及 macOS DMG/Windows NSIS（Linux 不下载安装包）的平台交接。
 
 ## 我们刻意不做什么
 
 - 不把上游 Web UI 重新实现成 Electron 原生页面。
-- 不在兼容模式中覆盖上游 layout、sidebar 或 conversation 组合。
+- 不覆盖上游 layout、sidebar 或 conversation 组合。
 - 不把记录复制到另一个“产品数据库”；官方 profile 默认共享 DSH home 中的会话和设置。
 - 不给第三方插件一个未定义的 Electron 私有 API。
 - 不把 roadmap（插件市场、手机远程、Channels）写成当前版本已经交付的功能。

@@ -30,7 +30,7 @@ This article describes how PicoAide Harness is deployed in an enterprise intrane
 # One-click server deployment (auto privilege escalation, installs dependencies per distro, interactively collects configuration, reuses deploy.sh)
 sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 # Non-interactive: set environment variables such as DOMAIN / ADMIN_PASS / DB_MODE / TLS_MODE
-./deploy.sh install|update|status|logs|backup|migrate|uninstall
+./deploy.sh install|update|status|logs|backup|uninstall
 ```
 
 The `deploy.sh` subcommands **automatically apply a compose override** based on `DB_MODE` from `.env`, no manual `-f` needed:
@@ -63,7 +63,7 @@ Employee clients / browsers
 
 - Image: `ghcr.io/picoaide/picoaide-harness-server` (linux/amd64, with SBOM + provenance attestation);
 - Tags: `latest` + `vX.Y.Z` + `vX.Y`; after pushing a version tag CI automatically builds and releases (injected via `--build-arg VERSION`, so `picoaide-server --version` matches the tag exactly);
-- **Version-line note**: the server image uses its own version line (e.g. `v0.5.x`; PG support requires 0.5.0+); the `v2.x` at the repo root is the desktop client version line — the two advance independently;
+- **Version-line note**: the server image belongs to the same product line as the desktop client and shares the same `v*` tag (e.g. `v2.4.x`, same source as the repo-root `package.json`); on tag push, CI runs `scripts/version.mjs check` to verify the image version matches the root `package.json`, so `picoaide-server --version` matches the tag exactly;
 - No outbound internet in the intranet? `make release-export` exports the image tar + `docker load` for offline deployment; build locally with `make docker-image`.
 
 ## Configure the gateway

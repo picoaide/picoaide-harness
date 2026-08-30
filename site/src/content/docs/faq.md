@@ -21,7 +21,7 @@ PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/dee
 
 ## 支持哪些操作系统？
 
-Windows x64、macOS（Apple 芯片，Universal DMG）、Linux x64（AppImage + deb）。当前不支持 Intel Mac 的正式安装包。
+Windows x64、macOS（universal DMG，兼容 Apple 芯片与 Intel）、Linux x64（AppImage + deb）。
 
 ## 安装包为什么没签名？
 
@@ -45,11 +45,11 @@ CLI 直接 spawn 的「CLI 即 skill」方案（自动安装 dws/wecom-cli 等�
 
 ## 可以安装 DSH 插件吗？
 
-可以。从托盘打开 DSH Terminal，运行 `dsh plugin add <plugin>` / `remove` / `update`，默认作用于当前激活 profile，`--profile <name>` 显式指定；插件变更后需重启应用。
+可以。从系统 shell 运行 `dsh plugin --profile desktop add <plugin>` / `remove` / `update`（应用固定运行 desktop profile，没有终端/Profile 切换的托盘入口），`--profile <name>` 显式指定；插件变更后需重启应用。
 
 ## Desktop profile 和已有 web profile 会自动同步吗？
 
-不会自动复制插件。每个 profile 有自己的 bundle 与依赖组合；切换 profile 后终端默认命令作用于当前 profile。
+应用固定运行 `desktop` profile；没有 `web` profile 默认项，也没有切换入口。
 
 ## 在哪里下载和报告问题？
 

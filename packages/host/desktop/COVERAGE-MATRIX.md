@@ -1,6 +1,6 @@
 # PicoAide Harness 测试覆盖矩阵
 
-三层覆盖：**单测**（44 个 vitest 文件）、**verify 脚本**（打包/加载/许可）、**E2E 自动化**（e2e-client.mjs 12 项断言 + real-env-verify.mjs 12 项真实服务断言）。
+三层覆盖：**单测**（50 个 vitest 文件）、**verify 脚本**（打包/加载/许可）、**E2E 自动化**（e2e-client.mjs 12 项断言 + real-env-verify.mjs 13 项真实服务断言）。
 
 ## 客户端功能覆盖
 
@@ -12,10 +12,10 @@
 | 聊天输入区 | — | verify-loader | ✅ 可输入消息 | |
 | 连接器中心 | desktop-plugins | verify-profile | ✅ 面板+内容+截图 | 真实环境已验（r04） |
 | 技能中心 | — | — | ✅ 模态打开 | 真实环境已验（r05 真实技能） |
-| 定时任务面板 | cron 58 单测 | — | ✅ 挂载 | 真实环境已验（r08）；任务看板已并入本面板 |
+| 定时任务面板 | cron 67 单测 | — | ✅ 挂载 | 真实环境已验（r08）；任务看板已并入本面板 |
 | 设置面板 | plugin.spec | — | ✅ + 账号页 | 真实账号/服务端地址已验证（r07） |
 | 工作区选择器 | directory-picker | — | ✅ 打开 | 真实环境已验（r03） |
-| 浏览器面板 | browser 47 单测 | — | ✅ WebContentsView target + 截图 | 真实环境已验（r11b） |
+| 浏览器面板 | browser 52 单测 | — | ✅ WebContentsView target + 截图 | 真实环境已验（r11b） |
 | 托盘菜单 | electron-runtime | — | ◐ 源码级（无系统托盘） | 无终端/模式/profile 项已确认 |
 | 诊断导出 | diagnostic-export | verify-packaged | ◐ 原生 dialog（单测覆盖逻辑） | |
 | 更新检查 | update-checker/download | verify-win | ◐ 单测覆盖逻辑 | |
@@ -25,8 +25,8 @@
 ## 打包/分发覆盖（verify 脚本）
 - verify-packaged-runtime：app.asar/unpacked 条目与 exports 完整性
 - verify-loader-boot / verify-profile-boot：Loader/配置组合 headless smoke
-- verify-runtime-closure：200 首个方节点闭环
-- verify-licenses / verify-notices：702 生产包许可 + 通告
+- verify-runtime-closure：202 首个方节点闭环
+- verify-licenses / verify-notices：710 生产包许可（2 个 notice-required）+ 通告
 - verify-win-installer / verify-win-portable / verify-mac-smoke/release：三平台产物
 
 ## E2E 工具

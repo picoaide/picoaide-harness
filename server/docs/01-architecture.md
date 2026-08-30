@@ -2,7 +2,7 @@
 
 > 企业内网 AI 办公智能体服务端与管理系统。本文描述系统总体架构、进程模型、数据流与安全设计,与 `AGENTS.md` 保持一致;端点/表名以实际代码为准。
 >
-> **2026-08-19 变更**:自研 Electron 客户端(desktop/)与浏览器插件(browser-extension/)已下线删除。本文聚焦**服务端 + webadmin 管理端**;原客户端相关章节(进程模型/事件协议/审批门控)不再适用,已移除。
+> 服务端是 PicoAide Harness 平台的企业管控面;桌面客户端(`packages/host/*`)与 webadmin 均经本服务端接口工作。本文聚焦**服务端 + webadmin 管理端**。
 
 ## 1. 总体形态
 
@@ -26,7 +26,7 @@
 |------|------|
 | **服务端 Go 进程** | 认证、网关代理、技能商城、计量计费、管理端静态资源。密钥只存在服务端。 |
 | **webadmin SPA** | 内嵌进服务端二进制(go:embed dist),`/admin/` 访问;管理员会话(session + CSRF)。 |
-| **接入方客户端** | 任何 HTTP 客户端(自研/第三方),持 Bearer token 调 `/api/client/v2/*`(auth/bootstrap/marketplace 等)、`/v1/*`;用量余额经 `GET /api/client/v2/auth/usage` 自查询。 |
+| **接入方客户端** | 企业桌面客户端(host/enterprise)与任何 HTTP 客户端,持 Bearer token 调 `/api/client/v2/*`(auth/bootstrap/marketplace/shared-skills/agent-presets/capabilities/brand/portal 等)、`/v1/*` 网关;用量余额经 `GET /api/client/v2/auth/usage` 自查询。 |
 
 ## 3. 端到端数据流
 
@@ -56,7 +56,7 @@
 
 ```
 cmd/server/            # 服务端入口(--bootstrap-admin 等)
-internal/              # serverauth/llmgateway/marketplace/knowledge/serverstore/util/bootstrap
+internal/              # router(路由唯一真源)/serverauth/llmgateway/marketplace/agentshare/sharedskills/capabilities/connectors/brand/bootstrap/telemetry/serverstore/util
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/superpowers/      # 架构设计 + 实施计划(权威文档)
 scripts/               # install-server.sh(oh-my-zsh 式一键部署)+ deploy.sh(容器化部署生命周期)+ mock-upstream.go(假上游)

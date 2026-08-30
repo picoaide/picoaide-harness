@@ -1,7 +1,9 @@
-# 未使用的用户 API 清单（2026-08-21 盘点）
+# 未使用的用户 API 清单（2026-08-21 盘点，历史快照）
 
+> **历史快照（2026-08-21）**：本文盘点的是当时服务端以旧前缀（`/api/auth`、`/api/marketplace`、`/api/admin`、`/v1` 等）注册的**用户侧 API** 与客户端调用情况。2026-09 起服务端 API 已统一命名空间为 `/api/server/*` 与 `/api/client/v2/*`（LLM 网关独立保留 `/v1/*`），旧路径全部迁移移除；本文行号、端点清单均不再对应现状。如需当前事实，以 `server/docs/03-api-reference.md` 与 `server/internal/router/router.go` 为准。
+>
 > 盘点范围：`server/`（PicoAide-Next Go 服务端）注册的全部**用户侧 API**（Bearer token / 登录态，
-> 不含 `/api/admin/*` 管理端接口），对照实际客户端（`packages/host/enterprise` 企业客户端插件 +
+> 不含旧 `/api/admin/*` 管理端接口），对照实际客户端（`packages/host/enterprise` 企业客户端插件 +
 > DSH `llm-deepseek` 适配器）与 `server/webadmin` 的调用点。
 
 ## 结论速览
@@ -14,11 +16,11 @@
 
 | 方法 | 路径 | 调用点 |
 |---|---|---|
-| POST | `/api/auth/login` | `plugins/dsh-enterprise/src/server-connector/auth.ts:72` |
-| POST | `/api/auth/logout` | `plugins/dsh-enterprise/src/auth-gate.ts:214` |
-| GET | `/api/config/bootstrap` | `plugins/dsh-enterprise/src/server-connector/bootstrap.ts:17` |
-| GET | `/api/marketplace/skills` | `plugins/dsh-enterprise/src/auth-gate.ts:238` |
-| GET | `/api/marketplace/skills/:name/archive` | `plugins/dsh-enterprise/src/auth-gate.ts:266,325` |
+| POST | `/api/auth/login` | `packages/host/enterprise/src/server-connector/auth.ts:72` |
+| POST | `/api/auth/logout` | `packages/host/enterprise/src/auth-gate.ts:214` |
+| GET | `/api/config/bootstrap` | `packages/host/enterprise/src/server-connector/bootstrap.ts:17` |
+| GET | `/api/marketplace/skills` | `packages/host/enterprise/src/auth-gate.ts:238` |
+| GET | `/api/marketplace/skills/:name/archive` | `packages/host/enterprise/src/auth-gate.ts:266,325` |
 | POST | `/v1/chat/completions` | `gateway-model.ts` 配置 baseURL=`{server}/v1`，`deepseek-harness/packages/llm/llm-deepseek/src/adapter.ts:341` |
 
 > **2026-08-21 更新**：`GET /api/auth/usage` 已由新插件 `packages/client/account-card` 消费

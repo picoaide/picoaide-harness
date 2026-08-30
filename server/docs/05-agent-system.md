@@ -1,8 +1,8 @@
-# 客户端 Agent 引擎
+# 客户端 Agent 引擎(历史说明)
 
-> 代码位置:`desktop/src/main/agent/`(engine.ts / modes.ts / continue.ts / events.ts / artifacts.ts / provider.ts)+ `desktop/src/main/tools/`。引擎是"消息即状态"的轻量实现,不做 durable 状态机。
+> **本文档为历史存档**:早期自研 Electron 客户端(desktop/)的本地 Agent 引擎(engine.ts/modes/continue/events/artifacts/provider + tools/)。该客户端已于 2026-08 下线,本地 Agent 能力改由官方 DeepSeek Harness(上游 agent/model/tool/session 语义)提供,自研侧仅保留企业接入(gateway-model/auth-gate)与能力插件(connectors/cron/browser)。以下描述仅作演进追溯,当前客户端包见 `packages/host/*`。
 
-## 1. 技术栈
+## 1. 技术栈(历史)
 
 - AI SDK v7(`ai@^7.0.48`)+ `@ai-sdk/openai-compatible`(经服务端网关)。
 - `streamText` 多步循环;步数上限用 `stopWhen: isStepCount(n)` 控制。

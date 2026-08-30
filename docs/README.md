@@ -12,7 +12,7 @@
 
 | 文档 | 你会得到什么 |
 | --- | --- |
-| [用户指南](user-guide.md) | 安装、profile、模式、终端、插件命令和更新 |
+| [用户指南](user-guide.md) | 安装、固定 profile、高级呈现、插件命令和更新 |
 | [常见问题](faq.md) | 支持平台、内置环境、官方边界、数据、插件和更新的直接回答 |
 | [为什么做 PicoAide Harness](why-desktop.md) | PicoAide Harness 与官方 Harness 的边界，以及为什么坚持插件化 |
 
@@ -21,15 +21,15 @@
 | 文档 | 你会得到什么 |
 | --- | --- |
 | [插件生态倡议书](plugin-ecosystem.md) | 开放、可组合、可持续的插件生态愿景与三条原则 |
-| [插件开发](plugin-development.md) | 普通 DSH 插件、Desktop 服务、兼容模式和生命周期 |
+| [插件开发](plugin-development.md) | 普通 DSH 插件、Desktop 服务和生命周期 |
 | [Community Fabric Draft](../community/fabric/README.zh.md) | 从 Manifest/Capability 基础，到 Runtime/Presentation、service composition 和溯源诊断的社区互操作提案 |
 | [Fabric 社区意见处置记录](../community/fabric/docs/research/community-issue-23-review.zh.md) | Issue #23 中哪些建议已采纳、拆成独立 RFC、延期或不进入可移植核心 |
 | [Fabric 框架与插件需求调研](../community/fabric/docs/research/mature-plugin-frameworks.zh.md) | Koishi、Chrome、VS Code 的成熟模式，以及真实 DSH 插件的功能需求 |
 | [VS Code 扩展模型调研](../community/fabric/docs/research/vscode-extension-model.zh.md) | VS Code 已实现的声明、Provider、UI、运行位置和生命周期模式，以及它们对 Fabric RFC 的具体约束 |
 |  |
 
-| [架构说明](architecture.md) | Electron、Host、loopback Web、profile 和打包之间的关系 |
-| [Desktop service 参考](../packages/host/desktop/docs/plugin-services.md) | `desktopProfiles`、`desktopPnpm` 的稳定 contract 和 TypeScript 示例 |
+| [架构说明](architecture.md) | Electron、Host、loopback Web、固定 profile 和打包之间的关系 |
+| [Desktop service 参考](../packages/host/desktop/docs/plugin-services.md) | `desktopRuntime`/`desktopActions` 的稳定 contract 和 TypeScript 示例 |
 | [包级参考](../packages/host/desktop/README.md) | 完整的构建、运行、发布和已知限制 |
 
 ## README 文件怎么分工
@@ -46,4 +46,4 @@
 
 ## 状态约定
 
-文档会明确区分已实现能力、平台限制和 roadmap。Desktop 的兼容模式保留上游默认 Web 客户端；高级模式才安装 Desktop 自有的布局和原生材质。社区市场仍处于文档阶段（见 [`community/fabric`](../community/fabric/README.zh.md)），尚无可用页面或安装器；手机远程和 Channels 也仍是独立 roadmap，不代表当前安装包已经提供这些产品入口。
+文档会明确区分已实现能力、平台限制和 roadmap。桌面壳固定高级呈现：Desktop 自有的布局和原生材质始终安装（Linux 使用标准系统窗口边框，布局一致）。社区市场仍处于文档阶段（见 [`community/fabric`](../community/fabric/README.zh.md)），尚无可用页面或安装器；手机远程和 Channels 也仍是独立 roadmap，不代表当前安装包已经提供这些产品入口。
