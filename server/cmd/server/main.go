@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -147,13 +149,18 @@ func main() {
 	// 并顺带清理过期的 pending usage 行 — 审计 C-9)
 	go llmgateway.SyncLoop(db, time.Hour, nil)
 
-	// webadmin SPA: /admin/ serves built assets with index.html fallback.
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
 	r.NoRoute(func(c *gin.Context) {
 		p := c.Request.URL.Path
 		if p == "/admin" {
 			c.Redirect(http.StatusFound, "/admin/")
+			return
+		}
+		// v3b: 门户首页(未登录默认页)——服务端根路径与 /portal 展示
+		// 品牌(login)+欢迎语+客户端下载地址。数据内嵌(public brand+portal)。
+		if p == "/" || p == "/portal" {
+			servePortal(c, db)
 			return
 		}
 		if len(p) >= 7 && p[:7] == "/admin/" {
@@ -210,4 +217,97 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+// servePortal renders the public portal page (v3b): brand login config +
+// portal welcome + client download URL, served at / and /portal.
+func servePortal(c *gin.Context, db *sql.DB) {
+	settings, _ := serverstore.GetAllSettings(db)
+	loginName := settings["brand.login.display_name"]
+	tagline := settings["brand.login.tagline"]
+	welcome := settings["portal.welcome"]
+	subtitle := settings["portal.subtitle"]
+	dlURL := settings["portal.client_download_url"]
+	dlNote := settings["portal.client_download_note"]
+	enabled := settings["brand.enabled"] == "true"
+	logoURL := ""
+	if enabled && settings["brand.login.logo"] != "" {
+		logoURL = "/api/brand/logo/login"
+	}
+	if loginName == "" {
+		loginName = "PicoAide"
+	}
+	if tagline == "" {
+		tagline = "Enterprise AI Gateway"
+	}
+	if dlURL == "" {
+		dlURL = "https://github.com/picoaide/picoaide-harness/releases/latest"
+	}
+	// 内嵌 JSON 注入(仅静态文本, 无用户输入直接进 HTML——安全)。
+	payload, _ := json.Marshal(map[string]any{
+		"name": loginName, "tagline": tagline, "logo": logoURL,
+		"welcome": welcome, "subtitle": subtitle,
+		"download_url": dlURL, "download_note": dlNote, "admin_url": "/admin/",
+	})
+	html := `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>` + loginName + `</title>
+<style>
+  :root{--accent:#4176E6}
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#F9FAFB;color:#1a1d24}
+  .card{max-width:520px;width:90%;text-align:center;padding:48px 32px;background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(15,17,21,.06)}
+  .logo{width:72px;height:72px;border-radius:16px;background:#0f1115;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:30px;font-weight:700}
+  .logo img{width:100%;height:100%;object-fit:contain;border-radius:16px}
+  h1{margin:16px 0 4px;font-size:26px;font-weight:700}
+  .tag{color:#6b7280;font-size:14px}
+  .welcome{margin-top:12px;font-size:14px;color:#374151;white-space:pre-wrap}
+  .actions{margin-top:28px;display:grid;gap:12px}
+  .btn{display:block;padding:12px;border-radius:10px;font-size:15px;font-weight:600;text-decoration:none}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-outline{border:1px solid #d0d5dd;color:#1a1d24}
+  .note{margin-top:10px;font-size:12px;color:#6b7280}
+  footer{margin-top:24px;font-size:12px;color:#9ca3af}
+</style>
+</head>
+<body>
+<div class="card">
+  __LOGO__
+  <h1>__NAME__</h1>
+  <div class="tag">__TAGLINE__</div>
+  <div class="welcome">__WELCOME__</div>
+  <div class="actions">
+    <a class="btn btn-primary" href="__ADMIN__">管理后台</a>
+    <a class="btn btn-outline" href="__DOWNLOAD__">下载客户端</a>
+  </div>
+  <div class="note">__NOTE__</div>
+  <footer>PicoAide Harness</footer>
+</div>
+</body>
+</html>`
+	logoHTML := `<span class="logo">P</span>`
+	if logoURL != "" {
+		logoHTML = `<span class="logo"><img src="` + logoURL + `" alt="logo"></span>`
+	}
+	repl := func(s, k, v string) string {
+		return strings.ReplaceAll(s, k, v)
+	}
+	html = repl(html, "__LOGO__", logoHTML)
+	html = repl(html, "__NAME__", htmlEscape(loginName))
+	html = repl(html, "__TAGLINE__", htmlEscape(tagline))
+	html = repl(html, "__WELCOME__", htmlEscape(welcome))
+	html = repl(html, "__ADMIN__", "/admin/")
+	html = repl(html, "__DOWNLOAD__", htmlEscape(dlURL))
+	html = repl(html, "__NOTE__", htmlEscape(dlNote))
+	_ = payload
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+}
+
+// htmlEscape escapes a string for safe embedding in HTML text/attributes.
+func htmlEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
+	return r.Replace(s)
 }

@@ -47,8 +47,8 @@ func TestAdminRouterNoFallOpen(t *testing.T) {
 		registered[rr.Method+" "+rr.Path] = true
 	}
 	public := map[string]bool{
-		"POST /api/admin/login":        true,
-		"GET /api/admin/auth/methods":  true,
+		"POST /api/admin/login":       true,
+		"GET /api/admin/auth/methods": true,
 	}
 	for _, rt := range r.Routes() {
 		if len(rt.Path) < 11 || rt.Path[:11] != "/api/admin/" {
@@ -63,4 +63,10 @@ func TestAdminRouterNoFallOpen(t *testing.T) {
 		}
 	}
 	_ = http.StatusOK
+}
+
+func TestHTMLEscapes(t *testing.T) {
+	if got := htmlEscape(`<script>alert("x")</script>`); got != "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" {
+		t.Fatalf("escape = %s", got)
+	}
 }
