@@ -184,7 +184,7 @@ interface CapabilityItem {
 - **服务端**：0037 迁移（双后端 sqlite+pg）`shared_skills`/`agent_presets` 加 `quality`；serverstore 增加 `SetSharedSkillQuality`/`SetAgentPresetQuality`、`ValidSharedQuality`/`ValidAgentQuality`，approve 保留 quality、reject/pending 清空；两域 JSON 输出 quality；新增 `PUT /api/admin/{shared-skills,agent-presets}/:name/:version/quality`（qualify 审计）；新增 `server/internal/capabilities` 包（`/api/capabilities` 员工聚合面 + `/api/admin/capabilities/approvals` 统一审批队列，`marketplace.API.AccessibleSkills` 导出复用）。
 - **host 代理**：`/api/pico/capabilities`（GET ?source=market|org|local）合并已安装/本地创作状态；保留原共享技能/Agent 安装/卸载端点。
 - **客户端**：`CapabilityCenterPanel`（三分区 my/market/org × 类型筛选 × 徽章（类型/来源/质量/状态）× 多版本归并·历史展开 × hasUpdate semver 修复 × 30s 轮询 × Tab focus trap × 分区独立错误态 × 同名确认框）；`CapabilityCenterTrigger` 单入口替换两个旧 trigger；删除 4 个旧面板/触发器文件+2 个旧单测；新增 `capability-center-panel.spec.ts`（compareVersions/hasUpdateFor/mergeItems/latestApprovedVersionByName/avatarColor）；e2e-client.mjs 更新「能力中心」。
-- **webadmin**：菜单「市场 · 技能」+「能力中心」（统一审批页 `Capabilities.tsx`，类型/状态筛选、官方/精选质量标记、approve/reject/delete 走原域端点、授权弹窗）；保留原 `/shared-skills`、`/agent-presets` 路由兼容；新增 `Capabilities.test.tsx`。
+- **webadmin**：菜单「市场 · 技能」+「能力中心」（统一审批页 `Capabilities.tsx`，类型/状态筛选、官方/精选质量标记、approve/reject/delete 走原域端点、授权弹窗）；**2026-09 归一**：`Capabilities.tsx` 恢复承载共享技能+共享 Agent 统一审核（含类型/状态筛选、名称冲突列、下载/调用统计、按 kind 预览 SKILL.md/agent.cordis.yml），独立页 `SharedSkills.tsx`/`AgentPresets.tsx` 与其测试删除，`/shared-skills`、`/agent-presets` 路由与导航同步移除（原域 API 端点保留，供队列 base_path 引用）；服务端 `/api/server/admin/capabilities/approvals` 支持 `?status=all|pending|approved|rejected`（显式 status=all 才全量，缺省仅 pending）与 `?type=`，base_path/preview_path 修复为 `/api/server/admin` 前缀；新增 `Capabilities.test.tsx`。
 
 ### 实现偏离（决策修订，2026-08-25）
 

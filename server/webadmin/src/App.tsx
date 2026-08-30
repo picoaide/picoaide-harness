@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Share2, Bug, Plug, Menu, X, Palette, Lock, Eye } from 'lucide-react'
+import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Share2, Bug, Plug, Menu, X, Palette, Lock, Eye } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -17,8 +17,6 @@ const ErrorMonitoring = lazy(() => import('./pages/ErrorMonitoring'))
 const Marketplace = lazy(() => import('./pages/Marketplace'))
 const Audit = lazy(() => import('./pages/Audit'))
 const ServerInfo = lazy(() => import('./pages/ServerInfo'))
-const AgentPresets = lazy(() => import('./pages/AgentPresets'))
-const SharedSkills = lazy(() => import('./pages/SharedSkills'))
 const Capabilities = lazy(() => import('./pages/Capabilities'))
 const Connectors = lazy(() => import('./pages/Connectors'))
 const Brand = lazy(() => import('./pages/Brand'))
@@ -57,7 +55,6 @@ const nav: NavEntry[] = [
   { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },
   { to: '/usage', label: '用量', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
   { to: '/marketplace', label: '市场 · 技能', icon: Store, section: '运维', perms: [PERM_MARKET_READ] },
-  { to: '/shared-skills', label: '共享技能', icon: Sparkles, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/capabilities', label: '能力中心', icon: Share2, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
   { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
@@ -355,8 +352,6 @@ export default function App() {
                   <Route path="/usage" element={<Usage />} />
                   <Route path="/marketplace" element={<Marketplace />} />
                   <Route path="/capabilities" element={<Capabilities />} />
-                  <Route path="/agent-presets" element={<AgentPresets />} />
-                  <Route path="/shared-skills" element={<SharedSkills />} />
                   <Route path="/connectors" element={<Connectors />} />
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />

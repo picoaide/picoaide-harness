@@ -57,6 +57,8 @@ type CapabilityItem struct {
 }
 
 // RegisterRoutes mounts /api/capabilities (employee Bearer endpoints).
+// 仅测试自建路由树使用;生产路由由 internal/router 集中声明,
+// 实际路径为 /api/client/v2/capabilities。
 func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	base := "/api/capabilities"
 	g := r.Group(base, serverauth.BearerAuth(db))
@@ -65,6 +67,8 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 
 // RegisterAdminRoutes mounts /api/admin/capabilities (AdminAuth + RBAC v3b):
 // the unified approval queue over shared-skills + agent-presets.
+// 仅测试自建路由树使用;生产路由由 internal/router 集中声明,
+// 实际路径为 /api/server/admin/capabilities/approvals。
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	base := "/api/admin/capabilities"
 	g := r.Group(base, serverauth.AdminAuth(db))
@@ -435,6 +439,9 @@ type ApprovalRow struct {
 	Reason      string         `json:"reason,omitempty"`
 	Quality     string         `json:"quality,omitempty"`
 	CreatedAt   string         `json:"created_at"`
+	// Downloads 归档下载次数;Calls 技能调用计数(telemetry,仅共享技能有)。
+	Downloads int64 `json:"downloads"`
+	Calls     int64 `json:"calls,omitempty"`
 	// 原始域端点(approve/reject/delete 仍走各自原路由,本队列只读)。
 	BasePath string `json:"base_path"`
 	// Preview 是域预览端点(composition / SKILL.md),管理端弹窗复用。
@@ -445,7 +452,9 @@ type ApprovalRow struct {
 }
 
 // listApprovals 归并 shared-skills 与 agent-presets 的列表(默认 pending,
-// ?status= 过滤,type= 过滤 kind),返回统一行以便管理端单列表操作。
+// ?status=all|pending|approved|rejected 过滤,type= 过滤 kind),返回统一行
+// 以便管理端单列表操作。BasePath/PreviewPath 指向 /api/server/admin 命名
+// 空间下的原域端点(2026-09 工程化重构后前缀,勿回退旧 /api/admin)。
 func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		status := c.Query("status")
@@ -456,7 +465,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		out := []ApprovalRow{}
 
 		if ft.skills {
-			rows, err := serverstore.ListSharedSkills(db, status)
+			rows, err := serverstore.ListSharedSkills(db, mungeStatus(status))
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
@@ -481,14 +490,16 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					Reason:      s.Reason,
 					Quality:     s.Quality,
 					CreatedAt:   s.CreatedAt.Format("2006-01-02 15:04:05"),
-					BasePath:    "/api/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
-					PreviewPath: "/api/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
+					Downloads:   s.Downloads,
+					Calls:       s.Calls,
+					BasePath:    "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
+					PreviewPath: "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
 					Conflict:    conflict,
 				})
 			}
 		}
 		if ft.agents {
-			rows, err := serverstore.ListAgentPresets(db, status)
+			rows, err := serverstore.ListAgentPresets(db, mungeStatus(status))
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
@@ -505,13 +516,23 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					Reason:      p.Reason,
 					Quality:     p.Quality,
 					CreatedAt:   p.CreatedAt.Format("2006-01-02 15:04:05"),
-					BasePath:    "/api/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version),
-					PreviewPath: "/api/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version) + "/preview",
+					Downloads:   p.Downloads,
+					BasePath:    "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version),
+					PreviewPath: "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version) + "/preview",
 				})
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"approvals": out})
 	}
+}
+
+// mungeStatus maps the queue's ?status= 语法到 serverstore 的过滤语义:
+// 缺省/空 = pending;all = 全部(传 "" 关闭过滤);其余原样(权威状态值)。
+func mungeStatus(status string) string {
+	if status == "" || status == "all" {
+		return ""
+	}
+	return status
 }
 
 // pathEscape percent-encodes one path segment (RFC 3986, keep unreserved).

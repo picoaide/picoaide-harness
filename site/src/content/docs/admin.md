@@ -66,14 +66,15 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 
 共享技能（`shared_skills`）与共享智能体（`agent_presets`）在此统一审批：
 
-- **只读队列**：聚合两域 pending/approved/rejected，列表展示作者、版本、状态；操作走原域端点（`/api/admin/shared-skills/...`、`/api/admin/agent-presets/...`）；
+- **只读队列**：聚合两域 pending/approved/rejected，列表展示作者、版本、状态；操作走原域端点（`/api/server/admin/shared-skills/...`、`/api/server/admin/agent-presets/...`）；
 - **筛选**：状态 Tab（待审核/已通过/已拒绝/全部）+ 类型筛选（技能/智能体）；
 - **审批动作**：approve / reject（reject 必填 reason，员工端展示「未通过原因」） / delete；**名称冲突**：与市场技能同名时显示警告，approve 将 409 阻断（需先删/改市场技能或驳回共享技能）；
 - **质量标记**：`quality` = 官方（official）/ 精选（featured）——**仅 approved 可设**，reject/pending 自动清空；互斥；
 - **授权弹窗**：复用 GrantDialog——approved 后仍需按用户/部门授权才可见可装（**双门制**，与市场同构）；admin 恒可全量；
+- **统计**：下载/调用计数（技能含 calls）随审批队列展示；
 - 审计动作名如 `skill_approve` / `*_qualify`。
 
-> 兼容与历史：早期独立页面 `/shared-skills`、`/agent-presets` 路由保留，导航已合并为「能力中心」。
+> 历史：早期独立页面 `/shared-skills`、`/agent-presets` 及其导航已并入「能力中心」（2026-09），路由不再保留。
 
 ## 审计日志
 
