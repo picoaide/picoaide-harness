@@ -75,7 +75,9 @@ type AdminAPI struct {
 	DB *sql.DB
 }
 
-// RegisterAdminRoutes mounts /api/admin/* with session+CSRF protection.
+// RegisterAdminRoutes mounts /api/admin/* with session+CSRF protection and
+// RBAC permission checks (design v3b: every protected route declares its
+// permission through AdminRoute; me/logout require only a valid session).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	a := &AdminAPI{DB: db}
 	g := r.Group("/api/admin")
@@ -88,33 +90,36 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 		}
 		c.Next()
 	})
+	// 公开:登录与登录方式发现(不经过 AdminAuth/RequirePermission)。
 	g.POST("/login", a.handleLogin)
-	g.GET("/me", AdminAuth(db), a.handleMe)
-	g.POST("/logout", AdminAuth(db), a.handleLogout)
-	g.GET("/users", AdminAuth(db), a.listUsers)
-	g.POST("/users", AdminAuth(db), a.createUser)
-	g.PUT("/users/:id", AdminAuth(db), a.updateUser)
-	g.DELETE("/users/:id", AdminAuth(db), a.deleteUser)
-	g.GET("/users/:id/groups", AdminAuth(db), a.getUserGroups)
-	// 单部门归属:多部门 set 端点已移除(与金字塔单部门模型冲突,审计2026-C6)
-	g.PUT("/users/:id/department", AdminAuth(db), a.setUserDepartment)
-	// 部门管理(金字塔组织架构)
-	g.GET("/departments", AdminAuth(db), a.listDepartments)
-	g.POST("/departments", AdminAuth(db), a.createDepartment)
-	g.PUT("/departments/:id", AdminAuth(db), a.updateDepartment)
-	g.DELETE("/departments/:id", AdminAuth(db), a.deleteDepartment)
-	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
-	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
-	g.GET("/usage", AdminAuth(db), a.usage)
-	// 服务器信息面板(系统 + 数据库统计)
-	g.GET("/server-info", AdminAuth(db), a.handleServerInfo)
-	// 敏感操作审计日志(用户/部门/技能/令牌等)
-	g.GET("/audit", AdminAuth(db), a.listAuditLogs)
-	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换
-	g.GET("/auth", AdminAuth(db), a.getAuthConfig)
-	g.PUT("/auth", AdminAuth(db), a.setAuthConfig)
-	// 未认证可访问:登录页展示启用的认证方式(仅返回 enabled 列表,不含敏感配置)
 	g.GET("/auth/methods", a.getPublicAuthMethods)
+	// 管理会话内(AdminAuth 已校验 role != user + CSRF)。
+	authed := g.Group("", AdminAuth(db))
+	AdminRoute(authed, "GET", "/me", "", a.handleMe)
+	AdminRoute(authed, "POST", "/logout", "", a.handleLogout)
+	// 用户/角色/部门(RBAC 管理)。
+	AdminRoute(authed, "GET", "/users", PermUserRead, a.listUsers)
+	AdminRoute(authed, "POST", "/users", PermUserWrite, a.createUser)
+	AdminRoute(authed, "PUT", "/users/:id", PermUserWrite, a.updateUser)
+	AdminRoute(authed, "DELETE", "/users/:id", PermUserWrite, a.deleteUser)
+	AdminRoute(authed, "GET", "/users/:id/groups", PermUserRead, a.getUserGroups)
+	// 单部门归属:多部门 set 端点已移除(与金字塔单部门模型冲突,审计2026-C6)
+	AdminRoute(authed, "PUT", "/users/:id/department", PermDeptWrite, a.setUserDepartment)
+	// 部门管理(金字塔组织架构)
+	AdminRoute(authed, "GET", "/departments", PermDeptRead, a.listDepartments)
+	AdminRoute(authed, "POST", "/departments", PermDeptWrite, a.createDepartment)
+	AdminRoute(authed, "PUT", "/departments/:id", PermDeptWrite, a.updateDepartment)
+	AdminRoute(authed, "DELETE", "/departments/:id", PermDeptWrite, a.deleteDepartment)
+	AdminRoute(authed, "GET", "/users/:id/tokens", PermUserRead, a.listUserTokens)
+	AdminRoute(authed, "POST", "/tokens/:id/revoke", PermUserWrite, a.revokeToken)
+	AdminRoute(authed, "GET", "/usage", PermUsageRead, a.usage)
+	// 服务器信息面板(系统 + 数据库统计)
+	AdminRoute(authed, "GET", "/server-info", PermServerInfoRead, a.handleServerInfo)
+	// 敏感操作审计日志(用户/部门/技能/令牌等)
+	AdminRoute(authed, "GET", "/audit", PermAuditRead, a.listAuditLogs)
+	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换
+	AdminRoute(authed, "GET", "/auth", PermAuthRead, a.getAuthConfig)
+	AdminRoute(authed, "PUT", "/auth", PermAuthWrite, a.setAuthConfig)
 }
 
 // AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
@@ -153,40 +158,21 @@ func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 	}
 }
 
-// AuthenticateConfiguredAdmin authenticates an admin login through the same
-// provider registry as the client login (ConfigureProviders):在 auth.mode=ldap
-// 模式下,过期本地管理员无法绕开配置直接登录管理页。返回用户行(须已存在或
-// 可 provision),调用方仍需校验 IsAdmin。
+// AuthenticateConfiguredAdmin authenticates an admin login (v3b: local-only).
+// 管理后台仅本地账户:SSO(OIDC/OpenID)与 LDAP 一律不进后台——LDAP 仅员工面
+// 可用(/api/auth/login 走 ConfigureProviders 的 ldap 员工认证),webadmin 的
+// handleLogin 只接受 users 表本地账号。返回用户行,调用方仍需校验
+// HasManagementAccess(super_admin/auditor 可入,user 拒绝)。
 func AuthenticateConfiguredAdmin(db *sql.DB, username, password string) (*serverstore.User, error) {
-	pwds, _ := ConfigureProviders(db)
-	order := []string{"ldap", "local"}
-	var lastErr error
-	for _, name := range order {
-		var p PasswordProvider
-		for _, cand := range pwds {
-			if cand.Name() == name {
-				p = cand
-				break
-			}
-		}
-		if p == nil {
-			continue
-		}
-		ui, err := p.Authenticate(username, password)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		u, err := provisionUser(db, ui)
-		if err != nil {
-			return nil, err
-		}
-		return u, nil
+	ui, err := NewLocalProvider(db).Authenticate(username, password)
+	if err != nil {
+		return nil, err
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no password provider configured")
+	u, err := provisionUser(db, ui)
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return u, nil
 }
 
 func (a *AdminAPI) handleLogin(c *gin.Context) {
@@ -205,7 +191,7 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		return
 	}
 	u, err := AuthenticateConfiguredAdmin(a.DB, req.Username, req.Password)
-	if err != nil || !u.IsAdmin {
+	if err != nil || !u.HasManagementAccess() {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
@@ -352,8 +338,10 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
-		IsAdmin  bool   `json:"is_admin"`
-		Status   int    `json:"status"`
+		Role     string `json:"role"`
+		// Back-compat alias: is_admin=true → role=super_admin.
+		IsAdmin bool   `json:"is_admin"`
+		Status  int    `json:"status"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Username == "" || req.Password == "" {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名和密码必填")
@@ -372,6 +360,18 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "status 只能是 0 或 1")
 		return
 	}
+	role := req.Role
+	if role == "" {
+		if req.IsAdmin {
+			role = serverstore.RoleSuperAdmin
+		} else {
+			role = serverstore.RoleUser
+		}
+	}
+	if !serverstore.ValidRole(role) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "role 必须是 super_admin/auditor/user")
+		return
+	}
 	id, err := serverstore.CreateUserWithPassword(a.DB, req.Username, req.Password)
 	if errors.Is(err, serverstore.ErrDuplicate) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名已存在")
@@ -386,8 +386,9 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
-	if req.IsAdmin || status != 1 {
-		u.IsAdmin = req.IsAdmin
+	if role != serverstore.RoleUser || status != 1 {
+		u.Role = role
+		u.IsAdmin = role == serverstore.RoleSuperAdmin
 		u.Status = status
 		if err := serverstore.UpdateUser(a.DB, u); err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
@@ -414,11 +415,13 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		return
 	}
 	var req struct {
-		DisplayName     *string  `json:"display_name"`
-		Email           *string  `json:"email"`
-		Password        *string  `json:"password"`
-		IsAdmin         *bool    `json:"is_admin"`
-		Status          *int     `json:"status"`
+		DisplayName *string `json:"display_name"`
+		Email       *string `json:"email"`
+		Password    *string `json:"password"`
+		Role        *string `json:"role"`
+		// Back-compat alias: is_admin=false → role=user.
+		IsAdmin *bool `json:"is_admin"`
+		Status  *int  `json:"status"`
 		QuotaTokens     *int64   `json:"quota_tokens"`
 		QuotaClear      bool     `json:"quota_clear"` // reset quota_tokens to NULL (follow global default)
 		QuotaMoney      *float64 `json:"quota_money"`
@@ -429,14 +432,31 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		return
 	}
 	me := currentAdmin(c)
-	wasAdmin := u.IsAdmin
+	wasRole := u.Role
 	wasStatus := u.Status
-	// guard: cannot disable/remove admin rights of yourself or the last admin
-	if req.IsAdmin != nil && !*req.IsAdmin && u.IsAdmin && me != nil && me.ID == u.ID {
+	wasSuperAdmin := u.IsSuperAdmin()
+	// Resolve the new role: explicit role wins; is_admin alias maps to
+	// super_admin/user; otherwise the current role is unchanged.
+	newRole := u.Role
+	if req.Role != nil {
+		if !serverstore.ValidRole(*req.Role) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "role 必须是 super_admin/auditor/user")
+			return
+		}
+		newRole = *req.Role
+	} else if req.IsAdmin != nil {
+		if *req.IsAdmin {
+			newRole = serverstore.RoleSuperAdmin
+		} else {
+			newRole = serverstore.RoleUser
+		}
+	}
+	// guard: cannot demote/disable yourself or the last super_admin.
+	if newRole != serverstore.RoleSuperAdmin && wasSuperAdmin && me != nil && me.ID == u.ID {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "不能取消自己的管理员权限")
 		return
 	}
-	if req.Status != nil && *req.Status != 1 && u.IsAdmin && me != nil && me.ID == u.ID {
+	if req.Status != nil && *req.Status != 1 && wasSuperAdmin && me != nil && me.ID == u.ID {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "不能禁用自己")
 		return
 	}
@@ -464,9 +484,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		}
 		u.PasswordHash = hash
 	}
-	if req.IsAdmin != nil {
-		u.IsAdmin = *req.IsAdmin
-	}
+	u.Role = newRole
+	u.IsAdmin = newRole == serverstore.RoleSuperAdmin
 	if req.Status != nil {
 		u.Status = *req.Status
 	}
@@ -490,10 +509,11 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		q := *req.QuotaMoney
 		u.QuotaMoney = &q
 	}
-	// 权限敏感变更:改密 / 取消管理员 / 禁用 → 吊销全部 API token,
-	// 旧凭证立即失效(防已登录客户端继续以旧权限访问)。
+	// 权限敏感变更:改密 / 降权(role 降级或取消管理员) / 禁用 → 吊销全部
+	// API token,旧凭证立即失效(防已登录客户端继续以旧权限访问)。
 	// 与用户更新同事务(审计2026-L16):更新成功但吊销失败不再留下旧凭证
-	demote := (req.Password != nil && *req.Password != "") || (req.IsAdmin != nil && !*req.IsAdmin && wasAdmin) ||
+	demoted := wasRole != serverstore.RoleUser && u.Role == serverstore.RoleUser
+	demote := (req.Password != nil && *req.Password != "") || demoted ||
 		(req.Status != nil && *req.Status != 1 && wasStatus == 1)
 	if demote {
 		if err := serverstore.UpdateUserRevokingTokens(a.DB, u); err != nil {
@@ -505,7 +525,11 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_update", u.Username)
+	if wasRole != u.Role {
+		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "role_change", u.Username+"@"+wasRole+"→"+u.Role)
+	} else {
+		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_update", u.Username)
+	}
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 

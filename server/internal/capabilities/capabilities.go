@@ -62,11 +62,11 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("", listCapabilities(db, cacheDir))
 }
 
-// RegisterAdminRoutes mounts /api/admin/capabilities (AdminAuth endpoints):
+// RegisterAdminRoutes mounts /api/admin/capabilities (AdminAuth + RBAC v3b):
 // the unified approval queue over shared-skills + agent-presets.
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/admin/capabilities", serverauth.AdminAuth(db))
-	g.GET("/approvals", listApprovals(db, cacheDir))
+	serverauth.AdminRoute(g, "GET", "/approvals", serverauth.PermCapabilityRead, listApprovals(db, cacheDir))
 }
 
 // ---------------------------------------------------------------------------

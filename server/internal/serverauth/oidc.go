@@ -16,6 +16,8 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
+
+	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // errOIDCState is returned by HandleCallback for unknown or reused state.
@@ -310,6 +312,11 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		}
 		if user.Status != 1 {
 			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "账号已禁用")
+			return
+		}
+		// v3b: 审计账号禁止使用客户端——SSO 回调同样拒绝签发员工 token。
+		if user.Role == serverstore.RoleAuditor {
+			writeError(c, http.StatusUnauthorized, "AUDITOR_NOT_ALLOWED", "审计账号不可登录客户端,请使用管理后台")
 			return
 		}
 		token, err := IssueToken(a.DB, user.ID)
