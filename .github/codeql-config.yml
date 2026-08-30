@@ -10,10 +10,10 @@
 
 name: "picoaide-harness codeql"
 
-# 与 GitHub default code scanning 一致的安全查询套件(不含质量规则,
-# 避免 unused-var 等噪音; 质量类问题由 yarn check + staticcheck 兜底)
-queries:
-  - uses: default
+# 查询套件: 由 codeql-action/init 的默认值决定(default, 与 GitHub 默认
+# code scanning 一致)。config 文件的 queries 块只接受查询包名
+# (如 codeql/javascript-queries:...), 不接受 'default'; 故此处不写 queries。
+# 质量类问题由 yarn check + staticcheck 兜底, 避免 unused-var 噪音。
 
 paths:
   - packages
