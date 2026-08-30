@@ -9,7 +9,7 @@ const mockRequest = vi.mocked(request)
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
-    if (path === '/api/server/admin/brand') return { enabled: true, login: { display_name: 'Acme', tagline: 'AI', welcome: '欢迎' }, client: { display_name: 'Acme AI', accent: '#4176E6' }, title: '' }
+    if (path === '/api/server/admin/brand') return { enabled: true, login: { display_name: 'Acme', tagline: 'AI', welcome: '欢迎' }, client: { display_name: 'Acme AI', tagline: '' }, title: '' }
     if (path === '/api/server/admin/portal') return { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
     if (path === '/api/server/admin/brand/snapshots') return { snapshots: [] }
     return {}
@@ -40,7 +40,7 @@ describe('Brand 品牌配置页', () => {
   it('未配置(空配置)时预览与占位展示客户端默认值', async () => {
     const user = userEvent.setup()
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/server/admin/brand') return { enabled: false, login: { display_name: '', tagline: '', welcome: '' }, client: { display_name: '', tagline: '', accent: '' }, title: '' }
+      if (path === '/api/server/admin/brand') return { enabled: false, login: { display_name: '', tagline: '', welcome: '' }, client: { display_name: '', tagline: '' }, title: '' }
       if (path === '/api/server/admin/portal') return { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
       if (path === '/api/server/admin/brand/snapshots') return { snapshots: [] }
       return {}
@@ -56,6 +56,25 @@ describe('Brand 品牌配置页', () => {
     await user.click(screen.getByRole('tab', { name: '客户端品牌' }))
     expect(screen.getAllByPlaceholderText('留空=「PicoAide Harness」').length).toBeGreaterThan(0)
     expect(screen.getByPlaceholderText('留空=「企业版」')).toBeInTheDocument()
+  })
+
+  it('每个 Tab 都有说明文字与对应迷你预览', async () => {
+    const user = userEvent.setup()
+    render(<Brand />)
+    await screen.findByText('品牌配置')
+    // 登录页 Tab 说明 + 预览(登录卡片按钮)。
+    expect(screen.getByText(/这里是员工打开客户端时看到的/)).toBeInTheDocument()
+    expect(screen.getByText('登 录')).toBeInTheDocument()
+    // 客户端 Tab 说明 + 迷你预览(侧栏 hero)。
+    await user.click(screen.getByRole('tab', { name: '客户端品牌' }))
+    expect(screen.getByText(/登录后的客户端界面/)).toBeInTheDocument()
+    // 表单 Input + Hero 预览各一处。
+    expect(screen.getAllByText('Acme AI').length).toBeGreaterThan(0)
+    expect(screen.getByText(/侧栏\+hero\+右上角/)).toBeInTheDocument()
+    // 门户首页 Tab 说明 + 预览。
+    await user.click(screen.getByRole('tab', { name: '门户首页' }))
+    expect(screen.getByText(/未登录用户在浏览器访问服务器根地址/)).toBeInTheDocument()
+    expect(screen.getByText('管理后台')).toBeInTheDocument()
   })
 
   it('恢复默认: 弹确认并提交 enabled=false', async () => {

@@ -218,7 +218,7 @@ AdminAuth (会话+CSRF) → RequirePermission(perm) (403 FORBIDDEN)
 |---|---|---|
 | `brand.enabled` | 启用自定义品牌 | `false` |
 | `brand.login.logo/display_name/tagline/welcome` | 登录页 | 空/`PicoAide`/`Enterprise AI Gateway`/空 |
-| `brand.client.logo/display_name/tagline/accent` | 客户端 | 空/`PicoAide Harness`/空/空 |
+| `brand.client.logo/display_name/tagline` | 客户端 | 空/`PicoAide Harness`/空 |
 | `brand.favicon` | favicon | 空 |
 | `brand.title` | 页面标题后缀 | `PicoAide Harness` |
 
@@ -256,7 +256,7 @@ AdminAuth (会话+CSRF) → RequirePermission(perm) (403 FORBIDDEN)
 ```
 
 - **Step 1**：URL 输入 +「下一步」**不置灰**；并行拉 `/api/brand` + `/api/pico/auth/methods?server=<url>`；均失败停留 Step1 内联报错；任一成功进 Step2。
-- **Step 2 品牌区**：logo/名称/副标题/欢迎语/主色（`client.accent` 强调色）+ 固定占位高（防跳动）。无配置回退默认。
+- **Step 2 品牌区**：logo/名称/副标题/欢迎语 + 固定占位高（防跳动）。无配置回退默认。（2026-09 变更：品牌主色 `client.accent` 已下线，客户端界面固定内置主题色。）
 - **Step 2 登录方式区**：
   - 1 种 → 直接内联；>1 种 → 方式卡片选择器（label+desc+配置徽章）；未配置置灰。
   - 密码类（local/ldap）→ 用户名+密码表单；浏览器类（browser:true）→ 「使用 <label> 登录」+轮询授权。
@@ -378,7 +378,7 @@ AdminAuth (会话+CSRF) → RequirePermission(perm) (403 FORBIDDEN)
 
 ### Phase 3：客户端（登录两步式 + 品牌 + auditor 拦截）
 - [ ] 3.1 auth-gate.ts Step1/Step2 + brand/methods 并行探测 + 方式选择器（browser/hidden）
-- [ ] 3.2 brand-sync.ts + Brand.tsx 动态化 + 右上角 BrandBadge + hero/accent
+- [ ] 3.2 brand-sync.ts + Brand.tsx 动态化 + 右上角 BrandBadge + hero（（2026-09 变更：accent 下线））
 - [ ] 3.3 auditor 登录拦截（login 响应 role=auditor → 拒存 session + 提示打开 admin + 服务端员工面全拒）
 - [ ] 3.4 客户端代理角色校验（/api/pico/* 写类防御断言）
 - [ ] 3.5 测试：dsh-enterprise（Step 状态机/brand-sync/BrandMark/browser/auditor 拦截）
