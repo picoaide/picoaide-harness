@@ -23,11 +23,11 @@ import type {
 } from './types.ts'
 
 /** Default cooperative tool-call budget (ms). */
-export const DEFAULT_TIMEOUT_MS = 30_000
+const DEFAULT_TIMEOUT_MS = 30_000
 /** Default cap on waiting for Electron's loadURL promise (ms). */
-export const DEFAULT_LOAD_TIMEOUT_MS = 20_000
+const DEFAULT_LOAD_TIMEOUT_MS = 20_000
 /** Maximum simultaneous tabs. */
-export const DEFAULT_MAX_TABS = 8
+const DEFAULT_MAX_TABS = 8
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
 
@@ -1031,7 +1031,7 @@ const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
 /** Redact credential-shaped parts of a browser op-log summary (URLs and
  * query parameters). Mirrors the desktop logger's mask-secrets semantics. */
-export function maskBrowserSummary(summary: string): string {
+function maskBrowserSummary(summary: string): string {
   return summary.replace(SUMMARY_URL, (raw) => {
     // raw 形如 "https://host/path?x=1),."; 剥离尾随标点后再解析。
     // 审计 2026-08-30 (CodeQL js/polynomial-redos): 原 /[),.;]+$/u 仍可能对
