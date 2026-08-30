@@ -209,7 +209,7 @@ async function main() {
   // filling it — filling the restoring page would be wiped by its reload.
   const formReady = await waitFor(cdp, `!!document.getElementById('f') && !!document.getElementById('server')`, 15000, 300)
   if (!formReady) throw new Error('login form did not appear within 15s')
-  const login = await evalSafe(cdp, `(() => {
+  await evalSafe(cdp, `(() => {
     const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
     const ok = set('server', 'http://127.0.0.1:${GATEWAY_PORT}') && set('username', 'admin') && set('password', 'admin')
     return ok
