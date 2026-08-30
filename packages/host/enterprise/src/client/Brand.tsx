@@ -1,4 +1,6 @@
 import { createElement } from 'react'
+import type { BrandConfig } from '../brand-sync.ts'
+import { useBrand } from './brand-store.ts'
 
 // build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
 // node types(tsconfig.client.json types:[]),声明最小面的 process 占位。
@@ -56,8 +58,32 @@ function BraceGlyph() {
   )
 }
 
-/** The brace-mark tile; `className` rides along (upstream slot geometry). */
+/**
+ * The brace-mark tile; `className` rides along (upstream slot geometry).
+ * When a server logo_url is provided (dynamic server brand), an <img> is
+ * rendered instead of the brace artwork; failures fall back to the brace.
+ */
 export function BraceMark({ size, className }: { size: number; className?: string | undefined }) {
+  const brand = useBrand()
+  const logoUrl = resolveClientLogo(brand)
+  const name = resolveClientName(brand)
+  if (logoUrl) {
+    return createElement('span', {
+      className,
+      style: {
+        display: 'inline-flex',
+        flex: 'none',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: size,
+        height: size,
+      },
+    }, createElement('img', {
+      src: logoUrl,
+      alt: name,
+      style: { width: size, height: size, objectFit: 'contain', borderRadius: Math.max(4, Math.round(size * BRACE_TILE_RADIUS_RATIO)) },
+    }))
+  }
   return createElement(
     'span',
     {
@@ -78,18 +104,14 @@ export function BraceMark({ size, className }: { size: number; className?: strin
   )
 }
 
-/**
- * Sidebar brand name occupant. The upstream brand-name container owns
- * typography; this component supplies only the product name text, plus a
- * small product-version label next to it (build-time injected via
- * `process.env.PICOAI_PRODUCT_VERSION` define in tsdown.config.ts).
- */
 export function BrandName() {
+  const brand = useBrand()
   const version = process.env.PICOAI_PRODUCT_VERSION as string | undefined
+  const name = resolveClientName(brand) === 'PicoAide Harness' ? 'PicoAide' : resolveClientName(brand)
   return createElement(
     'span',
     { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 700, letterSpacing: '0.3px' } },
-    'PicoAide',
+    name,
     version != null && version !== ''
       ? createElement('span', {
           style: {
@@ -106,4 +128,28 @@ export function BrandName() {
         }, `v${version}`)
       : null,
   )
+}
+
+/** Right-top brand badge (conversation.session.header.actions slot). */
+export function BrandBadge() {
+  const brand = useBrand()
+  const logo = resolveClientLogo(brand)
+  const name = resolveClientName(brand)
+  if (!logo && !brand?.enabled) return null
+  return createElement(
+    'span',
+    { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-fg-secondary, #666)', opacity: 0.85 } },
+    logo ? createElement('img', { src: logo, alt: '', style: { width: 16, height: 16, objectFit: 'contain', borderRadius: 3 } }) : null,
+    name,
+  )
+}
+
+/** Resolve the client-side display name from a brand config (or default). */
+export function resolveClientName(brand: BrandConfig | null | undefined): string {
+  return brand?.client?.display_name && brand.client.display_name !== '' ? brand.client.display_name : 'PicoAide Harness'
+}
+
+/** Resolve the client logo URL from a brand config. */
+export function resolveClientLogo(brand: BrandConfig | null | undefined): string | undefined {
+  return brand?.enabled ? brand.client?.logo_url : undefined
 }
