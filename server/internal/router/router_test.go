@@ -82,14 +82,25 @@ func TestNamespaces(t *testing.T) {
 		"GET " + nsClient + "/shared-skills",
 		"GET " + nsClient + "/agent-presets",
 		"GET " + nsClient + "/capabilities",
-		"GET " + nsClient + "/v1/models",
-		"POST " + nsClient + "/v1/chat/completions",
 		"POST " + nsServer + "/admin/login",
 		"GET " + nsServer + "/admin/auth/methods",
 		"GET " + nsServer + "/admin/users",
 		"GET " + nsServer + "/admin/audit",
 		"GET " + nsServer + "/admin/brand",
 		"GET " + nsServer + "/admin/connectors",
+		// DeepSeek 兼容 LLM 网关(/v1 独立命名空间 + 官方原生端点, 原样保留)
+		"GET /v1/models",
+		"GET /models",
+		"POST /v1/chat/completions",
+		"POST /chat/completions",
+		"POST /v1/embeddings",
+		"POST /embeddings",
+		"POST /v1/messages",
+		"POST /messages",
+		"POST /v1/completions",
+		"POST /completions",
+		"POST /v1/responses",
+		"POST /responses",
 	} {
 		if !routes[want] {
 			t.Fatalf("missing route: %s", want)
@@ -107,9 +118,8 @@ func TestNamespace404(t *testing.T) {
 	}{
 		{"POST /api/auth/login", "GET /api/client/v2/auth/me"},
 		{"GET /api/brand", "GET /api/client/v2/config/bootstrap"},
-		{"GET /v1/models", "GET /api/client/v2/v1/models"},
-		{"GET /api/admin/me", "GET /api/server/admin/me"},
 		{"GET /v2/api/brand", "GET /api/client/v2/auth/usage"},
+		{"GET /api/admin/me", "GET /api/server/admin/me"},
 	}
 	for _, tc := range cases {
 		// 旧路径 404
@@ -146,7 +156,12 @@ func isLegacyPath(p string) bool {
 	if p == "/api" || p == "/v1" {
 		return true
 	}
-	if strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/v2/") {
+	// DeepSeek 兼容 LLM 网关 /v1/* 是保留原样的独立命名空间(2026-09 定案),
+	// 不是旧管理前缀——不视为 legacy。
+	if strings.HasPrefix(p, "/v1/") {
+		return false
+	}
+	if strings.HasPrefix(p, "/v2/") {
 		return true
 	}
 	if strings.HasPrefix(p, "/api/") &&
