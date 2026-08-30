@@ -20,31 +20,31 @@ import (
 
 // 权限点清单。命名规范: <域>:<动作>。
 const (
-	PermUserRead        = "user:read"         // 用户列表
-	PermUserWrite       = "user:write"        // 增改删用户、配额
-	PermRoleAssign      = "role:assign"       // 角色分配/提权降权
-	PermDeptRead        = "dept:read"         // 部门
+	PermUserRead        = "user:read"   // 用户列表
+	PermUserWrite       = "user:write"  // 增改删用户、配额
+	PermRoleAssign      = "role:assign" // 角色分配/提权降权
+	PermDeptRead        = "dept:read"   // 部门
 	PermDeptWrite       = "dept:write"
-	PermAuthRead        = "auth:read"         // 认证配置(脱敏)
-	PermAuthWrite       = "auth:write"        // 认证配置(含 client_secret)
-	PermGatewayRead     = "gateway:read"      // 网关/模型/渠道/价格
+	PermAuthRead        = "auth:read"    // 认证配置(脱敏)
+	PermAuthWrite       = "auth:write"   // 认证配置(含 client_secret)
+	PermGatewayRead     = "gateway:read" // 网关/模型/渠道/价格
 	PermGatewayWrite    = "gateway:write"
-	PermUsageRead       = "usage:read"        // 用量报表
-	PermQuotaWrite      = "quota:write"       // 配额/部门预算
-	PermMarketRead      = "market:read"       // 市场技能
-	PermMarketWrite     = "market:write"      // 技能审批/授权
-	PermCapabilityRead  = "capability:read"   // 能力中心
-	PermCapabilityWrite = "capability:write"  // 能力中心审批
-	PermConnectorRead   = "connector:read"    // 连接器
+	PermUsageRead       = "usage:read"       // 用量报表
+	PermQuotaWrite      = "quota:write"      // 配额/部门预算
+	PermMarketRead      = "market:read"      // 市场技能
+	PermMarketWrite     = "market:write"     // 技能审批/授权
+	PermCapabilityRead  = "capability:read"  // 能力中心
+	PermCapabilityWrite = "capability:write" // 能力中心审批
+	PermConnectorRead   = "connector:read"   // 连接器
 	PermConnectorWrite  = "connector:write"
-	PermAuditRead       = "audit:read"               // 审计日志
-	PermAuditRetention  = "audit:retention:write"    // 审计保留策略(仅 super_admin)
-	PermBrandRead       = "brand:read"               // 品牌
+	PermAuditRead       = "audit:read"            // 审计日志
+	PermAuditRetention  = "audit:retention:write" // 审计保留策略(仅 super_admin)
+	PermBrandRead       = "brand:read"            // 品牌
 	PermBrandWrite      = "brand:write"
-	PermPortalRead      = "portal:read"              // 门户首页
+	PermPortalRead      = "portal:read" // 门户首页
 	PermPortalWrite     = "portal:write"
-	PermServerInfoRead  = "server-info:read"         // 服务器信息
-	PermErrorMonRead    = "error-monitoring:read"    // 错误监控
+	PermServerInfoRead  = "server-info:read"      // 服务器信息
+	PermErrorMonRead    = "error-monitoring:read" // 错误监控
 )
 
 // AllPermissions is the full permission set (super_admin).

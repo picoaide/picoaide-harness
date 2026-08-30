@@ -61,9 +61,9 @@ func TestAllAuthMethodsEndToEnd(t *testing.T) {
 
 	api := New(db)
 	api.RegisterProvider(NewLocalProvider(db)) // local 恒注册
-	api.RegisterProvider(ldap)                  // ldap
-	api.RegisterOIDC(oidc)                      // oidc
-	api.RegisterOIDC(openid)                    // openid
+	api.RegisterProvider(ldap)                 // ldap
+	api.RegisterOIDC(oidc)                     // oidc
+	api.RegisterOIDC(openid)                   // openid
 	r := gin.New()
 	api.RegisterRoutes(r)
 	RegisterAdminRoutes(r, db) // /api/admin/auth/methods(公开无认证)

@@ -2,7 +2,6 @@ package serverstore
 
 import "testing"
 
-
 func TestAuditHashChain(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()

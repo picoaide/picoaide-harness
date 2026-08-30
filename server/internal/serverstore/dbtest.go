@@ -111,7 +111,6 @@ func newTestDB(t *testing.T) (*sql.DB, func()) {
 	return NewTestDB(t)
 }
 
-
 // ensureTestPartitions 预建 2026-01 起至当前+6 月的 usage 分区与 usage_daily 分区,
 // 覆盖测试中硬编码的历史月份(2026-07/08/09 等),避免"no partition found"。
 func ensureTestPartitions(db *sql.DB) error {

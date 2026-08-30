@@ -561,11 +561,11 @@ func TestAdminSkillFileContent(t *testing.T) {
 	defer db.Close()
 
 	archive := makeSkillArchive(t, map[string]string{
-		"SKILL.md":        "---\nname: fpdemo\n---\n# demo\n",
-		"scripts/x.sh":    "#!/bin/sh\necho hi\n",
-		"docs/说明.md":      "中文内容 ok",
-		"bin/blob.bin":    string([]byte{0x00, 0x01, 0xFF, 0xFE}),
-		"bin/big.txt":     strings.Repeat("x", maxFilePreviewBytes+16),
+		"SKILL.md":     "---\nname: fpdemo\n---\n# demo\n",
+		"scripts/x.sh": "#!/bin/sh\necho hi\n",
+		"docs/说明.md":   "中文内容 ok",
+		"bin/blob.bin": string([]byte{0x00, 0x01, 0xFF, 0xFE}),
+		"bin/big.txt":  strings.Repeat("x", maxFilePreviewBytes+16),
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/shared-skills",

@@ -362,9 +362,9 @@ func userJSON(u *serverstore.User) gin.H {
 		"email":        u.Email,
 		"is_admin":     u.IsAdmin,
 		// RBAC (v3b): role + permissions for the current user's role.
-		"role":        u.Role,
-		"permissions": PermissionsOf(u.Role),
-		"status":      u.Status,
+		"role":         u.Role,
+		"permissions":  PermissionsOf(u.Role),
+		"status":       u.Status,
 		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
 		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
 	}
