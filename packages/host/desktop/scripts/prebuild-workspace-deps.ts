@@ -44,4 +44,12 @@ export function prebuildWorkspaceDeps(workspaceRoot: string): void {
   runWorkspace('@picoaide/dsh-enterprise', workspaceRoot)
   runWorkspace('@picoaide/dsh-account-card', workspaceRoot)
   runWorkspace('@picoaide/dsh-branding', workspaceRoot)
+  // 其余自研插件包:lib/ 已从版本库移除(2026-09 产物清理),打包运行时经
+  // workspace 符号链接收集这些包的 lib/ —— 必须先构建,否则打包携带缺失 bundle。
+  runWorkspace('@picoaide/dsh-cron', workspaceRoot)
+  runWorkspace('@picoaide/dsh-connectors', workspaceRoot)
+  runWorkspace('@picoaide/dsh-browser', workspaceRoot)
+  runWorkspace('dsh-better-sidebar', workspaceRoot)
+  // dsh-memory-evolve 是 DSH 生态外部插件(构建依赖 ~/.dsh/source 的 esbuild,
+  // 见其 scripts/build.mjs),其 lib/ 保留版本库跟踪,不走标准 prebuild。
 }
