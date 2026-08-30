@@ -44,6 +44,9 @@ const COPIED_FEEDBACK_MS = 1500
  *  with per-entry jump/copy buttons (extracted for direct testing). */
 export function PluginListBody(props: { service: BetterSidebarService; kind: PluginKind }) {
   const { service, kind } = props
+  // `service` is kept in the contract for future extensions (installing a
+  // plugin through the sidebar service); lint marks it unused today.
+  void service
   // Which entry's copy button currently shows the "已复制" feedback.
   const [copiedId, setCopiedId] = useState<string | null>(null)
 

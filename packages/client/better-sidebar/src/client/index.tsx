@@ -158,11 +158,21 @@ export function apply(ctx: Context): void {
         // width from first paint. A settings route failure falls back to the
         // schema defaults; the sidebar still mounts (a stalled wire gives up
         // after the timeout and mounts on the defaults).
-        const prefs = await Promise.race([
-          loadPrefs(api),
-          new Promise<null>(resolve => { const timer = window.setTimeout(() => resolve(null), 2000) }),
-        ])
-        if (prefs !== null) sidebarStore.setPrefs(prefs)
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const prefs = await Promise.race([
+            loadPrefs(api),
+            new Promise<null>(resolve => {
+              timer = setTimeout(() => resolve(null), 2000)
+            }),
+          ])
+          if (prefs !== null) sidebarStore.setPrefs(prefs)
+        } finally {
+          // Audit 2026-08-31 (timer leak): clear the fallback timeout when
+          // the settings wire wins the race — a resolved-and-abandoned timer
+          // would otherwise stay in the event loop until it fires.
+          if (timer !== undefined) clearTimeout(timer)
+        }
         if (disposed) return
         // Mutual exclusion with the dsh-web-ui family right panel: while the
         // aionui-panel provider is selected, the sidebar must not mount at
