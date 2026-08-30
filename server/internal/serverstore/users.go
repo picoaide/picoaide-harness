@@ -19,9 +19,9 @@ type User struct {
 	// Role is the RBAC role: "super_admin" | "auditor" | "user".
 	// Replaces the legacy is_admin boolean (which remains in the schema
 	// for historical dump compatibility but is never written with new values).
-	Role       string
-	IsAdmin    bool
-	Status     int
+	Role    string
+	IsAdmin bool
+	Status  int
 	// QuotaTokens is the per-user monthly traffic quota in tokens (0017):
 	// nil = follow the global default, 0 = unlimited, >0 = capped.
 	// Admins are always unlimited regardless of this value.

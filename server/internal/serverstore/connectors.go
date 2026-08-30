@@ -21,9 +21,9 @@ type Connector struct {
 }
 
 var (
-	// ErrValidation: 连接器参数不合法(名称/编号/模式/定义 JSON)。
-	// ErrNotFound: 连接器不存在。
-	// 均复用 errors.go 的包级错误(避免重复定义)。
+// ErrValidation: 连接器参数不合法(名称/编号/模式/定义 JSON)。
+// ErrNotFound: 连接器不存在。
+// 均复用 errors.go 的包级错误(避免重复定义)。
 )
 
 // connectorIDRe: id 作为路径段/客户端键,限小写字母数字连字符。

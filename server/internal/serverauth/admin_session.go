@@ -23,10 +23,10 @@ const AdminIdleTimeout = 60 * time.Minute
 const csrfWindow = time.Hour
 
 type AdminSession struct {
-	ID        string
-	UserID    int64
-	CSRFKey   string
-	ExpiresAt time.Time
+	ID         string
+	UserID     int64
+	CSRFKey    string
+	ExpiresAt  time.Time
 	LastUsedAt time.Time
 }
 

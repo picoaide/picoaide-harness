@@ -8,7 +8,8 @@ import (
 )
 
 // RetentionMonthsSetting 明细保留月数(settings 键):
-//   缺省/非法 = 6 个月;>0 = 保留 N 个月;0 = 永不删除;最大值 120。
+//
+//	缺省/非法 = 6 个月;>0 = 保留 N 个月;0 = 永不删除;最大值 120。
 const RetentionMonthsSetting = "usage.retention_months"
 
 // DefaultRetentionMonths 默认保留月数(用户要求:默认 6 个月)。
