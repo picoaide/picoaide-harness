@@ -32,7 +32,7 @@ export function assertSafeEntryPath(rawPath: string): string {
 }
 
 /** Posix-style normalize (tar paths are always posix). */
-export function posixNormalize(raw: string): string {
+function posixNormalize(raw: string): string {
   const parts: string[] = []
   for (const segment of raw.replace(/\\/gu, '/').split('/')) {
     if (segment === '' || segment === '.') continue

@@ -24,19 +24,19 @@ import { assertArchiveSafe, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
-export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
+const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
 
 /** The composition file that makes a directory a preset (upstream constant). */
-export const COMPOSITION_FILE = 'agent.cordis.yml'
+const COMPOSITION_FILE = 'agent.cordis.yml'
 
 /** Optional display-metadata file beside the composition (upstream constant). */
-export const METADATA_FILE = 'preset.yml'
+const METADATA_FILE = 'preset.yml'
 
 /** Bound on display metadata: the gateway refuses descriptions over 500 chars. */
-export const MAX_PRESET_META_LEN = 500
+const MAX_PRESET_META_LEN = 500
 
 /** Display metadata read from `preset.yml` (name/description only). */
-export interface PresetMeta {
+interface PresetMeta {
   name?: string | undefined
   description?: string | undefined
 }
@@ -68,7 +68,7 @@ export function resolvePresetsDir(env: NodeJS.ProcessEnv = process.env): string 
  * @param dir - the preset directory.
  * @returns the metadata, possibly empty.
  */
-export async function readPresetMeta(dir: string): Promise<PresetMeta> {
+async function readPresetMeta(dir: string): Promise<PresetMeta> {
   let raw: string
   try {
     raw = await readFile(join(dir, METADATA_FILE), 'utf8')

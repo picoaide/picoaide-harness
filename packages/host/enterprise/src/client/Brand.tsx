@@ -145,11 +145,11 @@ export function BrandBadge() {
 }
 
 /** Resolve the client-side display name from a brand config (or default). */
-export function resolveClientName(brand: BrandConfig | null | undefined): string {
+function resolveClientName(brand: BrandConfig | null | undefined): string {
   return brand?.client?.display_name && brand.client.display_name !== '' ? brand.client.display_name : 'PicoAide Harness'
 }
 
 /** Resolve the client logo URL from a brand config. */
-export function resolveClientLogo(brand: BrandConfig | null | undefined): string | undefined {
+function resolveClientLogo(brand: BrandConfig | null | undefined): string | undefined {
   return brand?.enabled ? brand.client?.logo_url : undefined
 }
