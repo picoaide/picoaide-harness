@@ -1,4 +1,6 @@
-# Chatbox 客户端功能清单 — 可直接抄用的设计细节
+# Chatbox 客户端功能清单 — 历史参考(2026-08-03)
+
+> **历史快照**:本文为早期自研客户端时代的交互参考清单。2026-08 起自研 Electron 客户端已下线,本地 Agent 引擎/本地 SQLite 不再存在;「消息编辑/复制/引用」等交互已由上游 DeepSeek Harness 语义承接。仅作交互设计追溯,不再作为实现依据。
 
 日期:2026-08-03
 来源:https://github.com/chatboxai/chatbox(main 分支,41k stars,Electron + React + Zustand + SQLite)

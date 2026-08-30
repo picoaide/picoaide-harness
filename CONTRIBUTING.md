@@ -46,7 +46,7 @@ corepack yarn dev     # 有图形环境时启动应用
 
 ## 加入技术团队
 
-如果你希望加入我们的技术团队，欢迎通过 [t4wefan@qq.com](mailto:t4wefan@qq.com) 联系我们。
+如果你希望加入我们的技术团队，欢迎通过 [GitHub Discussions](https://github.com/orgs/picoaide/discussions) 或 [Issue](https://github.com/picoaide/picoaide-harness/issues) 联系我们。
 
 ## 行为准则
 

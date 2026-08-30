@@ -88,7 +88,14 @@ After deployment, log in to the Admin Console at `/admin/` and go to the **Gatew
 ## Security and operations essentials
 
 - **Secrets**: upstream provider keys are **encrypted at rest with AES-GCM** (`enc:v1:`, master key file, 0600), never stored in plaintext; API tokens store only a SHA-256 hash (90-day expiry), and changing the password / downgrading privileges / disabling automatically revokes all tokens (same transaction);
-- **Admin side**: session 24h + CSRF (HMAC time window ±1h); login dual-bucket rate limiting (10 attempts / 5 minutes / key, no trust in X-Forwarded-For); unified error envelope; `/healthz` unauthenticated probe (DB ping, 503 = DB unavailable);
+- **Admin side**: session 12h (hard TTL + 60-min idle sliding expiry) + CSRF (HMAC time window ±1h); login dual-bucket rate limiting (10 attempts / 5 minutes / key, no trust in X-Forwarded-For); unified error envelope; `/healthz` unauthenticated probe (DB ping, 503 = DB unavailable);
 - **Certificates**: three modes — `manual` (enterprise CA / self-signed placeholder, supports IPs), `auto` (Let's Encrypt automatic renewal, direct-connect public domain only, with built-in direct-connect/IP validation), `internal` (Caddy local CA, works out of the box in the intranet); employee client logins reject non-HTTPS addresses (TOFU);
 - **Backup and recovery**: `deploy.sh backup` packages the DB + **master.key** in one shot (if lost, encrypted keys are unrecoverable) + the Caddy certificate store (+ `pg_dump`); recovery = stop the service and unpack → `up -d`; `update` is zero-downtime, downgrades are not guaranteed compatible;
 - **Offline deployment**: `make release-export` exports the image tar + `docker load`.
+
+## Further reading
+
+- [System Architecture](./architecture) — server layering, data flow, security design
+- [API Reference](./api-reference) — health probe, auth, and gateway endpoints
+- [Admin Console](./admin) — webadmin guide
+- In-repo operational manuals: `server/docs/DEPLOY.md` (compose private network, deploy.sh lifecycle, image publishing) and `server/docs/02-build-deploy.md` (build, systemd, CI)

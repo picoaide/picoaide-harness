@@ -17,7 +17,11 @@ PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/dee
 
 ## 需要安装 Node.js、pnpm 或 DSH 吗？
 
-不需要。安装包已包含 Electron、Node.js、pnpm 与固定版本 DSH 依赖。普通用户下载安装后即可启动；应用不会修改系统全局 PATH 或 shell 配置（终端内的 `dsh`/`pnpm`/`node` 是私有 shim，只作用于该终端进程）。
+不需要。安装包已包含 Electron、Node.js、pnpm 与固定版本 DSH 依赖。普通用户下载安装后即可启动；应用不会修改系统全局 PATH 或 shell 配置。
+
+## 首次启动需要下载运行环境吗？
+
+不需要另行下载 Node.js 或 Harness 核心。安装包较大，是因为运行时和固定版本依赖已经包含在内，以换取更确定的首次启动和版本组合。使用云端模型、检查更新或下载新版本时仍然需要网络。
 
 ## 支持哪些操作系统？
 

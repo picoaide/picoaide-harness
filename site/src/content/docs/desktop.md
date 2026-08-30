@@ -16,8 +16,10 @@ description: PicoAide Harness 桌面客户端的完整功能与操作指南：�
 
 | 概念 | 说明 |
 |---|---|
-| **Profile** | 一组 DSH bundle、依赖与 patch 的组合；产品**固定运行 desktop profile**，无托盘切换，也无 profile 选择器 |
+| **Profile** | 一组 DSH bundle、依赖与 patch 的组合；产品**固定运行 desktop profile**，无托盘切换，也无 profile 选择器。自定义配置（patch）如果主动改写持久化路径，则以该 profile 自己的设置为准 |
 | **高级模式** | 产品固定使用高级模式：在不改变上游 Web carrier 的前提下注入桌面自有 frame、布局与原生材质；Linux 使用标准系统窗框（无 Mica / hidden-inset），但布局仍为高级模式 |
+
+插件变更后需重启应用，新 bundle 才会进入 Loader 组合。
 
 ## 对话与智能体
 
@@ -153,7 +155,8 @@ Agent 驱动的内嵌浏览器位于**独立浏览器窗口**（2026-08-20 窗�
 - 升级源：GitHub Releases API（`releases/latest`），解析 `tag_name` 并去 `v` 前缀；
 - **SHA-256 校验**：下载 `SHA256SUMS.txt` 并与安装包逐项核对（兼容 `./` 前缀），校验失败**不安装**；
 - 平台资产：macOS 通用 DMG（universal，兼容 Intel 与 Apple Silicon）、Windows NSIS 安装器、Linux AppImage（`x86_64`）+ deb；**Linux 不自动下载安装包**（更新下载仅 macOS / Windows），Linux 用户需手动下载新版本安装包；
-- 交互：后台检查不阻塞启动；发现新版本先征得确认才下载；下载/安装失败不破坏当前版本（网络波动时仍使用已确认版本继续下载）；
+- 交互：后台检查不阻塞启动；网络错误、非 200、非法版本或服务端版本不新时保持静默；发现新版本先征得确认才下载；用户取消不会访问计数下载入口；下载/安装失败不破坏当前版本（网络波动时仍使用已确认版本继续下载）；
+- 托盘 **Check for Updates…** 是手动检查：即使已是当前版本也显示结果，检查失败提示稍后重试；
 - 未签名说明：Windows / Linux 安装包 CI 自动发布未签名（macOS 正式版签名 + 公证）；Windows SmartScreen 可能提示「未知发布者」，请先核对 Release 附带的 SHA256SUMS.txt。
 
 ## 终端与插件管理
@@ -171,6 +174,10 @@ dsh plugin --profile desktop update           # 更新插件
 ## 排查
 
 - **应用能进托盘**：右键托盘 →「导出诊断信息…」→ 生成并打开 `diagnostics-*.zip`；
-- **应用持续闪退**：运行安装后的程序加 `--export-diagnostics` 参数（Windows 示例：`& "$env:LOCALAPPDATA\Programs\PicoAide Harness\PicoAide Harness.exe" --export-diagnostics`），该命令不启动 Host，输出诊断 ZIP 绝对路径；
+- **应用持续闪退**：运行安装后的程序加 `--export-diagnostics` 参数（Windows 示例：`& "$env:LOCALAPPDATA\Programs\PicoAide Harness\PicoAide Harness.exe" --export-diagnostics`），该命令不启动 Host，输出诊断 ZIP 绝对路径；通过 npm 安装过桌面启动器时 `dsh-desktop --export-diagnostics` 同理；
+- **诊断包内容**：最近日志、本地 Crashpad `.dmp`、当前运行标记与 `system-info.txt`（Desktop / Electron / Node / 平台 / 架构版本）；日志对可识别凭据脱敏，但本地路径、工作区 ID、会话 ID、崩溃内存片段仍可能存在——公开上传前必须检查，敏感 dump 走可信渠道；
 - **端口固定冲突**：把 `dsh-desktop.port` 改回 `0`（随机）或换空闲端口；
+- **窗口消失了**：先检查系统托盘，关闭窗口不是退出；
+- **插件没有出现**：确认命令作用于目标 profile（应用固定使用 `desktop`），并重启应用；
+- **更新没有提示**：后台错误静默；用托盘手动检查查看结果；
 - **开发者调试**：CDP 调试端口（9223）被残留实例占用会导致复用错误实例——排查前先 `pkill` 旧实例（使用 bracket 技巧避免误杀 shell）。
