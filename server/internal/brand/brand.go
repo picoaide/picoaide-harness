@@ -509,6 +509,11 @@ func uploadLogo(c *gin.Context, db *sql.DB, dataDir string) {
 		return
 	}
 	fname := fmt.Sprintf("%s%s", name, ext)
+	// 纵深防御: filename 白名单(防 CodeQL/未来调用方绕过 logoKinds/mimeFor)。
+	if !regexp.MustCompile(`^[a-z]{3,8}\.(svg|png|webp|ico)$`).MatchString(fname) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "非法 logo 文件名")
+		return
+	}
 	if err := os.WriteFile(filepath.Join(brandDir(dataDir), fname), raw, 0o600); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "写入失败")
 		return
