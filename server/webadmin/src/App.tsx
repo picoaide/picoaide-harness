@@ -133,7 +133,7 @@ export default function App() {
   const [adminName, setAdminName] = useState('')
   const [meUser, setMeUser] = useState<MeUser | null>(null)
   // v3b §5.2: webadmin 自身品牌跟随(登录后从 /api/brand 拉取)。
-  const [brand, setBrand] = useState<{ login?: { display_name?: string; logo_url?: string; tagline?: string }; client?: { display_name?: string; accent?: string } } | null>(null)
+  const [brand, setBrand] = useState<{ login?: { display_name?: string; logo_url?: string; tagline?: string }; client?: { display_name?: string; tagline?: string } } | null>(null)
   // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
   const [mobileNav, setMobileNav] = useState(false)
 
