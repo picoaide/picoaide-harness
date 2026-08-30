@@ -10,7 +10,7 @@ beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
     if (path === '/api/server/admin/brand') return { enabled: true, login: { display_name: 'Acme', tagline: 'AI', welcome: '欢迎' }, client: { display_name: 'Acme AI', tagline: '' }, title: '' }
-    if (path === '/api/server/admin/portal') return { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
+    if (path === '/api/server/admin/portal') return { enabled: true, public: true, welcome: '', subtitle: '', client_download_linux: '', client_download_mac: '', client_download_win: '', client_download_note: '', landing_path: '' }
     if (path === '/api/server/admin/brand/snapshots') return { snapshots: [] }
     return {}
   })
@@ -41,7 +41,7 @@ describe('Brand 品牌配置页', () => {
     const user = userEvent.setup()
     mockRequest.mockImplementation(async (path: string) => {
       if (path === '/api/server/admin/brand') return { enabled: false, login: { display_name: '', tagline: '', welcome: '' }, client: { display_name: '', tagline: '' }, title: '' }
-      if (path === '/api/server/admin/portal') return { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
+      if (path === '/api/server/admin/portal') return { enabled: true, public: true, welcome: '', subtitle: '', client_download_linux: '', client_download_mac: '', client_download_win: '', client_download_note: '', landing_path: '' }
       if (path === '/api/server/admin/brand/snapshots') return { snapshots: [] }
       return {}
     })
@@ -75,6 +75,20 @@ describe('Brand 品牌配置页', () => {
     await user.click(screen.getByRole('tab', { name: '门户首页' }))
     expect(screen.getByText(/未登录用户在浏览器访问服务器根地址/)).toBeInTheDocument()
     expect(screen.getByText('管理后台')).toBeInTheDocument()
+  })
+
+  it('门户 Tab: 三平台下载链接字段与预览按钮', async () => {
+    const user = userEvent.setup()
+    render(<Brand />)
+    await screen.findByText('品牌配置')
+    await user.click(screen.getByRole('tab', { name: '门户首页' }))
+    expect(screen.getByPlaceholderText(/Linux: https:\/\/github/)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/macOS: https:\/\/github/)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/Windows: https:\/\/github/)).toBeInTheDocument()
+    // 预览区三平台按钮。
+    expect(screen.getAllByText('Linux').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('macOS').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Windows').length).toBeGreaterThan(0)
   })
 
   it('恢复默认: 弹确认并提交 enabled=false', async () => {

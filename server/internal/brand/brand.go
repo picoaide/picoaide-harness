@@ -76,12 +76,15 @@ type ClientBrand struct {
 type PortalConfig struct {
 	Enabled bool `json:"enabled"`
 	// Public: 未认证用户是否可访问门户首页(§9; 默认 true)。
-	Public             bool   `json:"public"`
-	Welcome            string `json:"welcome"`
-	Subtitle           string `json:"subtitle"`
-	ClientDownloadURL  string `json:"client_download_url"`
-	ClientDownloadNote string `json:"client_download_note"`
-	LandingPath        string `json:"landing_path"`
+	Public              bool   `json:"public"`
+	Welcome             string `json:"welcome"`
+	Subtitle            string `json:"subtitle"`
+	ClientDownloadURL   string `json:"client_download_url,omitempty"`
+	ClientDownloadLinux string `json:"client_download_linux"`
+	ClientDownloadMac   string `json:"client_download_mac"`
+	ClientDownloadWin   string `json:"client_download_win"`
+	ClientDownloadNote  string `json:"client_download_note"`
+	LandingPath         string `json:"landing_path"`
 }
 
 // settings 键映射。
@@ -133,19 +136,25 @@ func (p *PortalConfig) load(s map[string]string) {
 	p.Welcome = s["portal.welcome"]
 	p.Subtitle = s["portal.subtitle"]
 	p.ClientDownloadURL = s["portal.client_download_url"]
+	p.ClientDownloadLinux = s["portal.client_download_linux"]
+	p.ClientDownloadMac = s["portal.client_download_mac"]
+	p.ClientDownloadWin = s["portal.client_download_win"]
 	p.ClientDownloadNote = s["portal.client_download_note"]
 	p.LandingPath = s["portal.landing_path"]
 }
 
 func (p *PortalConfig) save(set func(key, val string) error) error {
 	for k, v := range map[string]string{
-		"portal.enabled":              strconv.FormatBool(p.Enabled),
-		"portal.public":               strconv.FormatBool(p.Public),
-		"portal.welcome":              p.Welcome,
-		"portal.subtitle":             p.Subtitle,
-		"portal.client_download_url":  p.ClientDownloadURL,
-		"portal.client_download_note": p.ClientDownloadNote,
-		"portal.landing_path":         p.LandingPath,
+		"portal.enabled":               strconv.FormatBool(p.Enabled),
+		"portal.public":                strconv.FormatBool(p.Public),
+		"portal.welcome":               p.Welcome,
+		"portal.subtitle":              p.Subtitle,
+		"portal.client_download_url":   p.ClientDownloadURL,
+		"portal.client_download_linux": p.ClientDownloadLinux,
+		"portal.client_download_mac":   p.ClientDownloadMac,
+		"portal.client_download_win":   p.ClientDownloadWin,
+		"portal.client_download_note":  p.ClientDownloadNote,
+		"portal.landing_path":          p.LandingPath,
 	} {
 		if err := set(k, v); err != nil {
 			return err
