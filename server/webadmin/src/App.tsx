@@ -21,6 +21,7 @@ const AgentPresets = lazy(() => import('./pages/AgentPresets'))
 const SharedSkills = lazy(() => import('./pages/SharedSkills'))
 const Capabilities = lazy(() => import('./pages/Capabilities'))
 const Connectors = lazy(() => import('./pages/Connectors'))
+const Brand = lazy(() => import('./pages/Brand'))
 
 // Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
 const Usage = lazy(() => import('./pages/Usage'))
@@ -342,6 +343,7 @@ export default function App() {
                   <Route path="/departments" element={<Departments />} />
                   <Route path="/gateway" element={<Gateway />} />
                   <Route path="/auth" element={<Auth />} />
+                  <Route path="/brand" element={<Brand />} />
                   <Route path="/error-monitoring" element={<ErrorMonitoring />} />
                   <Route path="/usage" element={<Usage />} />
                   <Route path="/marketplace" element={<Marketplace />} />
