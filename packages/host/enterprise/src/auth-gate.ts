@@ -138,7 +138,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     document.getElementById('next-btn').textContent = '连接中…'
     try {
       var results = await Promise.allSettled([
-        fetch('/api/brand'),
+        fetch('/api/pico/brand?server=' + encodeURIComponent(server)),
         fetch('/api/pico/auth/methods?server=' + encodeURIComponent(server)),
       ])
       var brandOk = results[0].status === 'fulfilled' && results[0].value.ok
@@ -560,6 +560,30 @@ export function apply(ctx: Context, config: Config): void {
           } catch {
             // 服务端不可达:降级只显示 local(恒启用),登录页仍可提交密码。
             json(res, 200, { methods: [{ name: 'local', configured: true }] })
+          }
+        },
+      }),
+
+      // v3b: 登录页品牌代理(公开, 无需 token): ?server=<url> 转发服务端
+      // /api/brand; 未传 server 且无 session 时回退默认(登录页回退本地品牌)。
+      ctx.webServer.register({
+        kind: 'exact', path: '/api/pico/brand',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
+          const s = session()
+          let serverParam = ''
+          try {
+            serverParam = new URL(req.url ?? '/', 'http://localhost').searchParams.get('server') ?? ''
+          } catch { /* ignore malformed query */ }
+          const serverURL: string = serverParam || s?.serverURL || ''
+          if (serverURL === '') return json(res, 200, { enabled: false })
+          try {
+            assertServerURLAllowed(serverURL)
+            const data = await fetchJSON(serverURL, '/api/brand')
+            json(res, 200, data)
+          } catch {
+            json(res, 200, { enabled: false })
           }
         },
       }),
