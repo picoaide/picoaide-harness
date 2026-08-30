@@ -75,7 +75,14 @@ export async function login(serverURL: string, username: string, password: strin
       body: JSON.stringify({ username, password }),
       signal: controller.signal,
     })
-    if (res.status === 401) throw new AuthError('invalid_credentials')
+    if (res.status === 401) {
+      // v3b: 审计账号拒绝登录客户端(AUDITOR_NOT_ALLOWED)——给出明确提示。
+      const body = await res.json().catch(() => null) as { error?: { code?: string } } | null
+      if (body?.error?.code === 'AUDITOR_NOT_ALLOWED') {
+        throw new AuthError('server_error', '审计账号不可登录客户端,请使用管理后台')
+      }
+      throw new AuthError('invalid_credentials')
+    }
     if (!res.ok) throw new AuthError('server_error', `HTTP ${res.status}`)
     const data = (await res.json()) as { token?: string }
     if (!data.token) throw new AuthError('server_error', 'missing token in response')
