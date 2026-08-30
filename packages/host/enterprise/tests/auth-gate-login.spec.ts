@@ -12,7 +12,7 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     const m = src.match(/const LOGIN_HTML = `([\s\S]*?)`\n\nexport interface Config/)
     expect(m).not.toBeNull()
     const html = m![1]!
-    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/)
+    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/i)
     expect(scriptMatch).not.toBeNull()
     const script = scriptMatch![1]!
     // 模板字符串中不得出现会被转义成注释的 `//` 空正则(即 `\` 后直接 `/`)
@@ -27,7 +27,7 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     // 提取 HTML 的 script 段,不允许出现 `\/` 在正则字面量里(会被模板转义)
     const m = src.match(/const LOGIN_HTML = `([\s\S]*?)`\n\nexport interface Config/)
     const html = m![1]!
-    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/)
+    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/i)
     const script = scriptMatch![1]!
     // 禁止 `\/` 在正则中: 出现则说明把转义序列写进了模板(应改用字符串切片等)
     expect(script).not.toMatch(/\.replace\([^)]*\\\\\/[^)]*\)/)

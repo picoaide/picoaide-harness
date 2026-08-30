@@ -280,7 +280,18 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			return
 		}
 		// 消费 cookie:流程单次有效
-		http.SetCookie(c.Writer, &http.Cookie{Name: oidcStateCookieName + "_" + name, Value: "", Path: "/api/auth/" + name, MaxAge: -1})
+		// cookie-secure 修复(审计 2026-08-30 CodeQL go/cookie-secure-not-set):
+		// 删除指令的 cookie 须声明与写入时一致的 Secure/SameSite/Path,
+		// 否则非 HTTPS 部署下浏览器不发送删除指令, state 残留可被重放。
+		http.SetCookie(c.Writer, &http.Cookie{
+			Name:     oidcStateCookieName + "_" + name,
+			Value:    "",
+			Path:     "/api/auth/" + name,
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   secureCookieFor(c, a.DB),
+		})
 		// 先取出 returnServer(HandleCallback 会删除 state,state 单次使用)
 		rs := returnServerOf(p, state)
 		ui, err := p.HandleCallback(code, state)

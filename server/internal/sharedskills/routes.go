@@ -355,7 +355,12 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		_ = serverstore.DeleteSharedSkillArchive(db, name, version)
 		// 硬删行后必须清理全部授权(资源级联;旧授权不得复活重建的资源)。
 		_ = serverstore.DeleteSharedResourceGrants(db, serverstore.SharedSkillGrantTable, name)
-		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
+		// path-injection 防护(审计 2026-08-30 CodeQL go/path-injection):
+		// name/version 来自 URL 参数, safeName 只做字符串拼接; 此处补一道
+		// SafePathSegment 校验, 非法段直接跳过文件删除(DB 行删除不受影响)。
+		if util.SafePathSegment(name) && util.SafePathSegment(version) {
+			_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
+		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
@@ -900,6 +905,3 @@ func adminUsername(c *gin.Context) string {
 func safeName(name, version string) string {
 	return fmt.Sprintf("%s-%s.tar.gz", name, version)
 }
-
-// ensure util import is used (SkillName pattern stays client-side).
-var _ = util.SafePathSegment

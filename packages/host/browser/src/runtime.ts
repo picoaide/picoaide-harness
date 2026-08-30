@@ -785,7 +785,7 @@ export class BrowserRuntime {
         expression: `
           (() => {
             try {
-              const el = document.querySelector(${JSON.stringify(selector)});
+              const el = document.querySelector(${JSON.stringify(String(selector))});
               if (!el) return { error: 'element not found' };
               el.scrollIntoView({ block: 'center', inline: 'center' });
               const r = el.getBoundingClientRect();
@@ -826,7 +826,7 @@ export class BrowserRuntime {
       await tab.cdp.send('Runtime.evaluate', {
         expression: `
           (() => {
-            const el = document.querySelector(${JSON.stringify(selector)});
+            const el = document.querySelector(${JSON.stringify(String(selector))});
             if (!el) return { error: 'element not found' };
             el.focus();
             ${clear ? 'if (typeof el.select === "function") el.select();' : ''}
@@ -859,7 +859,7 @@ export class BrowserRuntime {
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
           (() => {
-            const el = document.querySelector(${JSON.stringify(selector)});
+            const el = document.querySelector(${JSON.stringify(String(selector))});
             if (!el) return { error: 'element not found' };
             if (el.tagName !== 'SELECT') return { error: 'not a select element' };
             el.value = ${JSON.stringify(value)};
@@ -938,7 +938,7 @@ export class BrowserRuntime {
     await this.withControl('browser_scroll', id, async (tab) => {
       const expression = selector === undefined || selector === ''
         ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'`
-        : `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`
+        : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`
       await tab.cdp.send('Runtime.evaluate', { expression, returnByValue: true })
     }, signal, selector === undefined || selector === '' ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`)
   }
@@ -1023,11 +1023,17 @@ const KEY_VK: Record<string, number> = {
 
 const MASK = '****'
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
+// 审计 2026-08-30 (CodeQL js/polynomial-redos): 原正则 /https?:\/\/[^\s<>"']+/giu
+// 对重复 ')' 等字符存在指数回溯(用户可控 summary 输入)。改为线性检测:
+// ^\S+ 紧邻 "?:?" 前缀的 URL 起点, [^\s<>"')]+ 显式排除 ')' 落入 URL 主体,
+// 尾随标点与 URL 主体用非捕获组一次性绑定, 无嵌套量词无回溯。
+const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
 /** Redact credential-shaped parts of a browser op-log summary (URLs and
  * query parameters). Mirrors the desktop logger's mask-secrets semantics. */
 export function maskBrowserSummary(summary: string): string {
-  return summary.replace(/https?:\/\/[^\s<>"']+/giu, (raw) => {
+  return summary.replace(SUMMARY_URL, (raw) => {
+    // raw 形如 "https://host/path?x=1),."; 剥离尾随标点后再解析。
     const trailing = /[),.;]+$/u.exec(raw)?.[0] ?? ''
     const value = trailing === '' ? raw : raw.slice(0, -trailing.length)
     try {
