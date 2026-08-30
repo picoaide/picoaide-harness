@@ -70,9 +70,12 @@ st, _, _ = post(BASE + '/api/admin/auth', {}, {'X-CSRF-Token': d.get('csrf_token
 # 若会话无效 401; 会话有效但无权限 403 —— 用真实会话验证(通过子请求复用 cookie jar 不现实, 简化: 仅断言非 200)
 check('auditor PUT auth 被拒(非200)', st != 200, f'st={st}')
 
-# 6. 品牌 API
+# 6. 品牌 API(enabled=true 时验证品牌内容; 已配置 Acme AI)
 st, body = get(BASE + '/api/brand')
-check('品牌未启用 enabled=false', st == 200 and '"enabled":false' in body, body[:60])
+if '"enabled":true' in body:
+    check('品牌启用且含 Acme AI', '"Acme AI"' in body, body[:80])
+else:
+    check('品牌未启用 enabled=false', st == 200 and '"enabled":false' in body, body[:60])
 
 # 7. 门户首页
 st, body = get(BASE + '/')
