@@ -1,0 +1,42 @@
+# CodeQL 配置 — picoaide-harness (2026-08-30)
+#
+# 目的:让 CodeQL 只扫本仓库产品代码(src), 跳过:
+#   - 构建产物(lib/dist/build/out —— 由 tsup/esbuild 生成, 权威在 src)
+#   - 外部 vendored 插件(better-sidebar —— omdsh-dev/DSH-better-sidebar)
+#   - 上游 submodule / 第三方源码 / 文档示例 / webadmin dist
+#
+# 本仓库的默认 CodeQL setup 曾把 lib/ 与 vendor 产物一并扫描, 产生 ~20 条
+# 与源码无关/无法在本仓库修复的告警(产物噪音)。此配置收敛到真实代码。
+
+name: "picoaide-harness codeql"
+
+# 与 GitHub default code scanning 一致的安全查询套件(不含质量规则,
+# 避免 unused-var 等噪音; 质量类问题由 yarn check + staticcheck 兜底)
+queries:
+  - uses: default
+
+paths:
+  - packages
+  - scripts
+  - server
+  - plugins
+  - site
+
+paths-ignore:
+  # 构建产物(永远重新生成, 权威在 src)
+  - '**/lib/**'
+  - '**/dist/**'
+  - '**/build/**'
+  - '**/out/**'
+  # 外部 vendored 插件(只读依赖, 不从本仓库修复)
+  - 'packages/client/better-sidebar/**'
+  - 'packages/vendor/memory-evolve/lib/**'
+  - 'packages/vendor/memory-evolve/tests/**'
+  # 上游 submodule / 第三方源码 / 文档示例
+  - 'deepseek-harness/**'
+  - 'server/docs/**'
+  - 'server/webadmin/dist/**'
+  - '**/node_modules/**'
+  # 本机扫描产物
+  - '.codeql-dbs/**'
+  - 'temp/**'

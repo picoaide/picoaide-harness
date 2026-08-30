@@ -8,7 +8,7 @@
  *   node scripts/real-env-verify.mjs [--port 9224] [--shots .real-env-shots]
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
 

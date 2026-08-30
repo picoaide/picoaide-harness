@@ -230,7 +230,13 @@ func main() {
 		if proxiedKey == "" {
 			proxiedKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
-		log.Printf("mock messages: proxied key = %q (len %d)", proxiedKey, len(proxiedKey))
+		// 审计 2026-08-30 (CodeQL go/clear-text-logging): 只记录密钥长度与
+		// 前后缀指纹, 不输出完整密钥——mock 日志可能被收集/转发。
+		keyFingerprint := ""
+		if len(proxiedKey) >= 8 {
+			keyFingerprint = proxiedKey[:4] + "…" + proxiedKey[len(proxiedKey)-4:]
+		}
+		log.Printf("mock messages: proxied key = %q (len %d)", keyFingerprint, len(proxiedKey))
 		const text = "web search proxied echo"
 		usageIn, usageOut := int64(10), int64(len(text))
 		if req.Stream {

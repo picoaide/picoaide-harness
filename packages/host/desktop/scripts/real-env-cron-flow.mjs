@@ -9,7 +9,7 @@
  *   node scripts/real-env-cron-flow.mjs --port 9224 --shots .real-env-cron-flow-shots
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
 

@@ -215,6 +215,18 @@ export function assertMacReleaseReady(options: MacReleasePreflightOptions): MacR
   }
 }
 
+/** Human-readable label for the notarization credential source. 审计
+ * 2026-08-30 (CodeQL js/clear-text-logging): 日志只应输出来源类型名称,
+ * 绝不能输出凭证本身; 这里显式把枚举值映射为静态字符串, 切断数据流。
+ * 导出供 release-mac.ts 复用(避免复制粘贴, 同一逻辑只实现一次)。 */
+export function notarizationLabel(source: NotarizationCredentialSource): string {
+  switch (source) {
+    case 'api-key': return 'Apple API key'
+    case 'apple-id': return 'Apple ID'
+    case 'keychain-profile': return 'Keychain profile'
+  }
+}
+
 function listCodeSigningIdentities(env: NodeJS.ProcessEnv): string {
   const result = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
     encoding: 'utf8',
@@ -236,8 +248,10 @@ function main(): void {
       platform: process.platform,
       listCodeSigningIdentities: () => listCodeSigningIdentities(safeEnvironment),
     })
+    // 审计 2026-08-30 (CodeQL js/clear-text-logging): notarizationLabel 只输出
+    // 来源类型; mac release 从不打印 APPLE_API_KEY / CSC_LINK 等凭证本体。
     console.log(
-      `macOS release preflight passed: ${result.identity}; signing via ${result.signing}; notarization via ${result.notarization}`,
+      `macOS release preflight passed: identity ok; signing via ${result.signing}; notarization via ${notarizationLabel(result.notarization)}`,
     )
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

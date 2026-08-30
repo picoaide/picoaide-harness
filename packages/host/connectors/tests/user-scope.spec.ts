@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { encodeSegment, userScopePath, resolveDshHome } from '../src/user-scope.ts'
+import { encodeSegment, userScopePath } from '../src/user-scope.ts'
 
 describe('user scope paths', () => {
   it('scopes credentials per username under the DSH home', () => {

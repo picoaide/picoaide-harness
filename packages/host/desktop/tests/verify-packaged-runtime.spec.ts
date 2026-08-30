@@ -244,7 +244,7 @@ describe('packaged desktop runtime verification', () => {
     const joined = ([...REQUIRED_PACKAGED_RUNTIME_ENTRIES] as string[]).filter(
       entry => entry !== 'node_modules/@picoaide/dsh-enterprise/lib/session-service.js',
     )
-    const entries = joined.map(entry => `/${entry.replaceAll('/', '/')}`)
+    const entries = joined.map(entry => `/${entry}`)
     expect(() => verifyPackagedRuntime(
       runtimeContext,
       () => entries,

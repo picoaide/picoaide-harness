@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import {
   adaptMacReleaseEnvironment,
   assertMacReleaseReady,
+  notarizationLabel,
   withoutMacReleaseSecrets,
 } from './release-preflight.ts'
 import { prepareInstalledMacUniversalRuntime } from './mac-universal.ts'
@@ -87,7 +88,7 @@ export function releaseMac(options: MacReleaseOptions = defaultReleaseOptions())
     listCodeSigningIdentities: () => options.listCodeSigningIdentities(buildEnvironment),
   })
   options.log(
-    `macOS release preflight passed: ${result.identity}; signing via ${result.signing}; notarization via ${result.notarization}`,
+    `macOS release preflight passed: identity ok; signing via ${result.signing}; notarization via ${notarizationLabel(result.notarization)}`,
   )
 
   // The workspace check includes the package build and repository-layout gate. Signing

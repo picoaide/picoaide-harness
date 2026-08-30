@@ -177,7 +177,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       throw new Error(`dsh-plugin-desktop: native workspace picker is unavailable on ${this.platform}`)
     }
     if (this.directoryPickTask !== undefined) return await this.directoryPickTask
-    const task = this.showDirectoryPicker()
+    // 审计 2026-08-30 (CodeQL js/missing-await): task 是 Promise 但此处故意不
+    // await——保存到 directoryPickTask 做「单飞」去重(并发调用共享同一 picker),
+    // finally 里比较的是 Promise 引用而非结果, 与 await 无关, 非 bug。
+    const task: Promise<string | null> = this.showDirectoryPicker()
     this.directoryPickTask = task
     try {
       return await task
@@ -696,10 +699,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       throw cause
     }
 
-    if (tray === undefined) {
-      throw new Error('dsh-plugin-desktop: native tray did not mount')
-    }
-    const mountedTray = tray
+    // 审计 2026-08-30 (CodeQL js/unneeded-defensive-code): 到达此处的 tray
+    // 必为已成功构造的 Tray(失败会走 catch 抛出), 防御判断恒 false——删除。
+    const mountedTray = tray!
 
     let released = false
     return async () => {

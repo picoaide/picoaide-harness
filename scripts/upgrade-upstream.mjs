@@ -17,9 +17,9 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync, readdirSync, renameSync, accessSync, constants } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, readdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve, basename } from 'node:path'
+import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const upstreamDir = join(root, 'deepseek-harness')
@@ -89,10 +89,17 @@ function manifests(workspace) {
   return paths.filter(p => existsSync(resolve(root, p))).map(p => ({ path: p, json: readJson(p) }))
 }
 
+/** Escape every regular-expression metacharacter (审计 2026-08-30 CodeQL
+ * js/incomplete-sanitization: 原实现只转义了 '.', 反斜杠/加号等元字符
+ * 仍可注入正则并导致错误替换或 ReDoS)。 */
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 /** Bump one dependency family value (`0.1.0-rc.N` / `^0.1.0-rc.N`). */
 function bumpRange(range, from, to) {
   if (typeof range !== 'string') return range
-  return range.replace(new RegExp(`(\\^?)${from.replace(/\./g, '\\.')}$`), `$1${to}`)
+  return range.replace(new RegExp(`(\\^?)${escapeRegExp(from)}$`), `$1${to}`)
 }
 
 /** Rewrite one manifest's @deepseek-ai/dsh* family fields. Returns changed count. */
