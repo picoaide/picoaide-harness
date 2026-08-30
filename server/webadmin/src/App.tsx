@@ -63,7 +63,7 @@ const nav: NavEntry[] = [
 ]
 
 // 审计 A5-L7: 页面运行时异常不再白屏整树卸载,展示错误与重载入口
-export class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
 
   static getDerivedStateFromError(error: Error) {
