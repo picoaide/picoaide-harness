@@ -40,7 +40,7 @@ export interface DesktopRunRecord {
   readonly version: string
 }
 
-export interface UnreadableDesktopRun {
+interface UnreadableDesktopRun {
   readonly unreadable: true
 }
 

@@ -6,10 +6,10 @@ import { Worker } from 'node:worker_threads'
 import type { DiagnosticExportWorkerResult } from './diagnostic-export-worker.ts'
 
 /** Bound both worker memory and the amount of potentially sensitive log history exported. */
-export const MAX_DIAGNOSTIC_EVIDENCE_BYTES = 50 * 1024 * 1024
+const MAX_DIAGNOSTIC_EVIDENCE_BYTES = 50 * 1024 * 1024
 
 /** Stop an export that cannot complete because its Worker or filesystem is wedged. */
-export const DIAGNOSTIC_EXPORT_TIMEOUT_MS = 60_000
+const DIAGNOSTIC_EXPORT_TIMEOUT_MS = 60_000
 
 export interface DiagnosticExportOptions {
   /** Installed Desktop package version recorded in system-info.txt. */

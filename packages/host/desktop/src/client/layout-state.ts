@@ -25,13 +25,13 @@ export const SIDEBAR_COLLAPSED = 56
 /** Wider compact rail reserved for the desktop-owned macOS sidebar. */
 export const MACOS_SIDEBAR_COLLAPSED = 90
 export const SIDEBAR_DEFAULT = 280
-export const SIDEBAR_MIN = 264
-export const SIDEBAR_MAX = 420
+const SIDEBAR_MIN = 264
+const SIDEBAR_MAX = 420
 export const SIDEBAR_AUTO_COLLAPSE = 1024
-export const DETAILS_DEFAULT = 360
-export const DETAILS_MIN = 300
-export const DETAILS_MAX = 520
-export const CENTER_MIN = 640
+const DETAILS_DEFAULT = 360
+const DETAILS_MIN = 300
+const DETAILS_MAX = 520
+const CENTER_MIN = 640
 
 /**
  * Resolve three desktop columns without allowing details to squeeze the conversation below its floor.

@@ -57,7 +57,7 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */
-export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
+const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // process.dlopen (native .node) and child_process.execFile (binaries) land here.
   // smartUnpack unpacks whole package dirs containing them.
   'node_modules/node-pty/prebuilds/linux-x64/pty.node',
@@ -86,27 +86,7 @@ export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
   ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => entry.path),
 ] as const
 
-/** Package exports that profile fallback links must resolve from the physical application tree. */
-export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
-  'dsh-plugin-desktop',
-  'dsh-plugin-desktop/profile',
-  'dsh-plugin-desktop/client',
-  'dsh-plugin-desktop/diagnostics',
-  'dsh-plugin-desktop/updates',
-  'dsh-plugin-desktop/windows-agent-presets',
-  'dsh-plugin-desktop/windows-pwsh-sandbox',
-  'dsh-plugin-desktop/package.json',
-  '@deepseek-ai/dsh-base/package.json',
-  '@deepseek-ai/dsh-web-app/package.json',
-  '@picoaide/dsh-enterprise/session-service',
-  '@picoaide/dsh-enterprise/auth-gate',
-  '@picoaide/dsh-enterprise/gateway-model',
-  '@picoaide/dsh-enterprise/bootstrap',
-  '@picoaide/dsh-enterprise/client',
-  '@picoaide/dsh-enterprise/package.json',
-  '@picoaide/dsh-connectors/client',
-  '@picoaide/dsh-connectors/package.json',
-] as const
+
 
 /** Injectable archive listing seam used by focused tests. */
 export type ArchiveLister = (archivePath: string, options: { isPack: boolean }) => readonly string[]
@@ -319,7 +299,7 @@ function normalizeArchiveEntry(entry: string): string {
  * @param list - ASAR listing implementation.
  * @returns Nothing; failure rejects the package before signing.
  */
-export function verifyPackagedAsar(
+function verifyPackagedAsar(
   archivePath: string,
   list: ArchiveLister = listPackage,
 ): ReadonlySet<string> {
@@ -383,7 +363,7 @@ const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
  * @param archivePath - resolved app.asar path.
  * @returns Nothing; failure rejects missing exports inside the archive.
  */
-export function verifyUnpackedPackageResolution(
+function verifyUnpackedPackageResolution(
   archivePath: string,
   asarEntries?: ReadonlySet<string>,
 ): void {
@@ -501,5 +481,3 @@ export async function afterPack(
   verify(context)
   await smoke(resolvePackagedUnpackedRoot(context), undefined, resolvePackagedAsarPath(context))
 }
-
-export default afterPack

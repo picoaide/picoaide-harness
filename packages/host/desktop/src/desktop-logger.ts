@@ -15,7 +15,7 @@ export interface DesktopUncaughtExceptionProcess {
   off(event: 'uncaughtException', listener: (error: Error) => void): unknown
 }
 
-export interface DesktopChildProcessDetails {
+interface DesktopChildProcessDetails {
   readonly type: string
   readonly reason: string
   readonly exitCode: number
