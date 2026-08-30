@@ -45,8 +45,8 @@
 | `sandbox_exec` | 本地沙盒执行脚本(`@ai-sdk/sandbox-just-bash`;**无 python3**,仅 bash;输出截断 50KB) | - |
 | `screen_capture` | 屏幕截图(OCR 依赖 tessdata 本地打包,惰性加载) | **高危** |
 | `clipboard_read` / `clipboard_write` | 剪贴板读写 | 读 **高危** |
-| `web_fetch` | 抓网页转纯文本(拒绝内网地址,`web.allow_private` 可放开) | - |
-| `web_search` | 搜索(管理员配置的 `web.search_endpoint`) | - |
+| `web_fetch` | 抓网页转纯文本(客户端直连 HTTP 抓取,默认启用,不做私有网段拦截) | - |
+| `web_search` | 搜索(客户端默认启用,走网关 `/v1/messages` 服务端代理) | - |
 | `browser_tab_info` / `browser_get_content` | 浏览器读取(当前页 URL/标题/文本,直通) | - |
 | `browser_click` / `browser_type` / `browser_navigate` / `browser_scroll` / `browser_execute_js` | 浏览器操作(经 CDP 桥) | **高危** |
 | `allow_dir` | 越界访问时的目录授权(引擎内置,非模型可调) | 引擎直接触发 |

@@ -663,11 +663,11 @@ GET  /api/config/bootstrap       # 启动配置(登录后拉取):模型列表 + 
   "models": [{"id": "deepseek-chat", "display_name": "DeepSeek Chat"}],
   "skills": [{"name": "ppt-gen", "version": "1.2.0", "description": "..."}],
   "mcp": [{"id": 3, "name": "xiaohongshu", "description": "...", "recommended": true}],
-  "web": {"allow_private": false, "search_endpoint": ""}
+  "web": {"default_thinking_level": "max"}
 }
 ```
 
-- `web.allow_private`(web_fetch 是否允许私有网段)与 `web.search_endpoint`(web_search 端点)由管理员配置,随 bootstrap 下发(webadmin 网关页可设)
+- `web.default_thinking_level`(客户端默认模型思考强度)由管理员配置,随 bootstrap 下发(webadmin 网关页可设);`web_search` 走网关 `/v1/messages` 服务端代理(官方 key 不出服务端),`web_fetch` 由客户端默认启用直连抓取(不做私有网段拦截)——两者均无需管理员配置。
 - 默认模型由管理员在管理页网关页配置(**保存时校验 `default_model` 属于 enabled 的 provider/models,防误配导致全员 502**),随启动配置下发——**员工零选择、零配置**。客户端每次启动拉取 bootstrap(登录态期间),设置页提供"刷新"按钮,管理员改动后重启客户端或手动刷新生效。
 
 #### 4.2.2 流程

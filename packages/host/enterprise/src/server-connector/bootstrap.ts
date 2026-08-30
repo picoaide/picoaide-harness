@@ -1,7 +1,7 @@
 import { fetchJSON } from './auth.ts'
 import type { BootstrapConfig, Session } from './config.ts'
 
-export const EMPTY: BootstrapConfig = { default_model: '', models: [], skills: [], mcp: [], web: { allow_private: false, search_endpoint: '' } }
+export const EMPTY: BootstrapConfig = { default_model: '', models: [], skills: [], mcp: [], web: {} }
 
 export function validateBootstrap(cfg: BootstrapConfig | null | undefined): { config: BootstrapConfig; fellBack: boolean } {
   if (!cfg || typeof cfg !== 'object' || !Array.isArray(cfg.models) || cfg.models.length === 0) {

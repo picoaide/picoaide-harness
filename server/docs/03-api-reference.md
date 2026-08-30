@@ -57,8 +57,8 @@
 | PUT | `/api/admin/models/:id` | 更新模型(价格/折扣留空不覆盖;修改只影响之后产生的费用) |
 | DELETE | `/api/admin/models/:id` | 删除模型 |
 | GET | `/api/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(用户/部门/技能等敏感操作,90 天保留) |
-| GET | `/api/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, default_model, allow_private, search_endpoint}` |
-| PUT | `/api/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月 token 配额)、`usage.monthly_quota_money`(员工默认月金额配额)、`usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷)、`web.allow_private`、`web.search_endpoint`) |
+| GET | `/api/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, default_model, retention_months, default_thinking_level, server_base_url}` |
+| PUT | `/api/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月 token 配额)、`usage.monthly_quota_money`(员工默认月金额配额)、`usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷)、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`) |
 
 ## 5. AI 网关(客户端用,Bearer)
 
@@ -149,7 +149,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
   "default_model": "deepseek-chat",
   "models": [{ "id": "deepseek-chat", "display_name": "DeepSeek Chat" }],
   "skills": [{ "name": "invoice-helper", "version": "1.0.0", "description": "..." }],
-  "web": { "allow_private": false, "search_endpoint": "" }
+  "web": { "default_thinking_level": "max" }
 }
 ```
 

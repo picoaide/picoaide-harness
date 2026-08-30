@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,8 +19,6 @@ import (
 
 // WebConfig mirrors the bootstrap `web` section.
 type WebConfig struct {
-	AllowPrivate   bool   `json:"allow_private"`
-	SearchEndpoint string `json:"search_endpoint"`
 	// 错误上报 DSN(feat/error-monitoring 2026-08):客户端 Sentry SDK 的
 	// 上报地址(如 GlitchTip),空 = 客户端不启用错误上报。
 	ErrorReportingDSN string `json:"error_reporting_dsn"`
@@ -156,10 +153,6 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 		}
 	}
 	web := WebConfig{}
-	if v, ok := settings["web.allow_private"]; ok {
-		web.AllowPrivate, _ = strconv.ParseBool(v)
-	}
-	web.SearchEndpoint = settings["web.search_endpoint"]
 	// 错误上报 DSN(feat/error-monitoring):空 = 客户端不启用
 	web.ErrorReportingDSN = settings["web.error_reporting_dsn"]
 	// 上报开关/等级(2026-08):enabled 默认 false(安全);level 默认 error

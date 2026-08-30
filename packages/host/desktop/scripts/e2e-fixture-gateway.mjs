@@ -39,7 +39,7 @@ const server = createServer((req, res) => {
       // 错误监控 DSN(联调 2026-08-27):GlitchTip 项目 picoaide-web。
       // @sentry/node 要求 DSN 格式 https://<public_key>@host/<project_id>(无尾斜杠),
       // SDK 内部自动拼 /api/<id>/envelope/
-      web: { allow_private: false, search_endpoint: '', error_reporting_dsn: 'https://cc825c63d6494f9f8bb9cff238c1bdae@glitchtip.kq0575.cn/1' },
+      web: { error_reporting_dsn: 'https://cc825c63d6494f9f8bb9cff238c1bdae@glitchtip.kq0575.cn/1' },
     }))
     return
   }

@@ -590,7 +590,6 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	if monthlyQuotaMoney == "" {
 		monthlyQuotaMoney = "0"
 	}
-	allowPrivate := settings["web.allow_private"] == "true"
 	retention := settings[serverstore.RetentionMonthsSetting]
 	if retention == "" {
 		retention = fmt.Sprintf("%d", serverstore.DefaultRetentionMonths)
@@ -602,8 +601,6 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"monthly_quota_money":     monthlyQuotaMoney,                        // default per-user monthly yuan (0 = unlimited)
 		"peak_windows":            settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
 		"retention_months":        retention,                                // usage 明细保留月数(0=永久,默认 6)
-		"allow_private":           allowPrivate,
-		"search_endpoint":         settings["web.search_endpoint"],
 		"error_reporting_dsn":     settings["web.error_reporting_dsn"],
 		"error_reporting_enabled": settings["web.error_reporting_enabled"] == "true",
 		"error_reporting_level":   settings["web.error_reporting_level"],
@@ -647,10 +644,10 @@ func (f *FlexibleString) UnmarshalJSON(b []byte) error {
 // setGatewayConfig validates default_model against enabled models and saves.
 // 契约(审计修复 M1):字符串/布尔字段全部用指针——缺省(null/未传)= 不覆盖,
 // 显式 "" / false = 清空/关闭;peak_windows 显式空串 = 移除高峰窗口(无峰谷价)。
-// 此前同一 handler 混用"空串跳过"与"无条件覆盖",allow_private/search_endpoint
-// 被部分提交意外重置,default_model/server_base_url 又永远无法清空。
 // rate_limit/monthly_quota/monthly_quota_money 用 FlexibleString:兼容
 // JSON 数字与字符串(第三方直连不踩坑,前端字符串不受影响)。
+// 2026-09:web.allow_private / web.search_endpoint 已随 web_fetch/web_search
+// 服务端链路调整删除(客户端默认启用、无消费方),不再下发/读写。
 func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
 		DefaultModel          *string         `json:"default_model"`
@@ -659,8 +656,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		MonthlyQuotaMoney     *FlexibleString `json:"monthly_quota_money"`
 		PeakWindows           *string         `json:"peak_windows"`
 		RetentionMonths       *string         `json:"retention_months"`
-		AllowPrivate          *bool           `json:"allow_private"`
-		SearchEndpoint        *string         `json:"search_endpoint"`
 		ErrorReportingDSN     *string         `json:"error_reporting_dsn"`
 		ErrorReportingEnabled *bool           `json:"error_reporting_enabled"`
 		ErrorReportingLevel   *string         `json:"error_reporting_level"`
@@ -751,18 +746,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 		if err := serverstore.CleanupUsageRetention(db); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保留清理失败")
-			return
-		}
-	}
-	if req.AllowPrivate != nil {
-		if err := serverstore.SetSetting(db, "web.allow_private", strconv.FormatBool(*req.AllowPrivate)); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
-			return
-		}
-	}
-	if req.SearchEndpoint != nil {
-		if err := serverstore.SetSetting(db, "web.search_endpoint", *req.SearchEndpoint); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
