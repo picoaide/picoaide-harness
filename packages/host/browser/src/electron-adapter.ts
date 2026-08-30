@@ -184,7 +184,7 @@ export const BROWSER_PARTITION = browserPartitionFor(null)
 export const BROWSER_SHELL_TOOLBAR_HEIGHT = 84
 
 /** Default browser window size (DIP). */
-export const BROWSER_WINDOW_DEFAULT = { width: 1100, height: 780 }
+const BROWSER_WINDOW_DEFAULT = { width: 1100, height: 780 }
 
 /** Lazy real adapter over Electron (imported only on first browser start). */
 export function createRealElectronAdapter(): ElectronAdapter {

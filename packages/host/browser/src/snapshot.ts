@@ -10,9 +10,9 @@
 import type { BrowserSnapshotElement } from './types.ts'
 
 /** Cap on snapshot entries per call. */
-export const SNAPSHOT_LIMIT = 200
+const SNAPSHOT_LIMIT = 200
 /** Cap on extracted text characters per call. */
-export const TEXT_LIMIT = 32 * 1024
+const TEXT_LIMIT = 32 * 1024
 
 /**
  * Probe script: collect interactable elements in DOM order. The page can see

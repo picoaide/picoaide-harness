@@ -9,7 +9,7 @@
 import type { IncomingMessage } from 'node:http'
 
 /** IPv4 127/8 predicate (four decimal octets, first == 127). */
-export function isIPv4Loopback(v4: string): boolean {
+function isIPv4Loopback(v4: string): boolean {
   const parts = v4.split('.')
   return parts.length === 4
     && parts[0] === '127'
@@ -17,7 +17,7 @@ export function isIPv4Loopback(v4: string): boolean {
 }
 
 /** Whether a socket remote address names the loopback range (127/8, ::1, IPv4-mapped). */
-export function isLoopbackAddress(address: string | undefined): boolean {
+function isLoopbackAddress(address: string | undefined): boolean {
   if (address === undefined) return false
   const normalized = address.toLowerCase()
   if (normalized === '::1') return true
@@ -26,7 +26,7 @@ export function isLoopbackAddress(address: string | undefined): boolean {
 }
 
 /** Whether a normalized URL hostname names the loopback authority (localhost, [::1], 127/8). */
-export function isLoopbackHostname(hostname: string): boolean {
+function isLoopbackHostname(hostname: string): boolean {
   if (hostname === 'localhost' || hostname === '[::1]') return true
   return isIPv4Loopback(hostname)
 }

@@ -8,9 +8,9 @@
 import type { NativeWebContents } from './electron-adapter.ts'
 
 /** Default screenshot max width (CSS pixels). */
-export const SCREENSHOT_MAX_WIDTH = 1280
+const SCREENSHOT_MAX_WIDTH = 1280
 /** Default JPEG quality (0-100). */
-export const SCREENSHOT_QUALITY = 70
+const SCREENSHOT_QUALITY = 70
 
 /**
  * Capture the visible page and return a JPEG data URL. The image is downscaled
