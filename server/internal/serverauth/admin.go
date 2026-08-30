@@ -340,8 +340,8 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		Password string `json:"password"`
 		Role     string `json:"role"`
 		// Back-compat alias: is_admin=true → role=super_admin.
-		IsAdmin bool   `json:"is_admin"`
-		Status  int    `json:"status"`
+		IsAdmin bool `json:"is_admin"`
+		Status  int  `json:"status"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Username == "" || req.Password == "" {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名和密码必填")
@@ -420,8 +420,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		Password    *string `json:"password"`
 		Role        *string `json:"role"`
 		// Back-compat alias: is_admin=false → role=user.
-		IsAdmin *bool `json:"is_admin"`
-		Status  *int  `json:"status"`
+		IsAdmin         *bool    `json:"is_admin"`
+		Status          *int     `json:"status"`
 		QuotaTokens     *int64   `json:"quota_tokens"`
 		QuotaClear      bool     `json:"quota_clear"` // reset quota_tokens to NULL (follow global default)
 		QuotaMoney      *float64 `json:"quota_money"`
@@ -727,8 +727,8 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 		return "***"
 	}
 	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
-		"mode":    s["auth.mode"],
-		"enabled": s["auth.enabled"],
+		"mode":       s["auth.mode"],
+		"enabled":    s["auth.enabled"],
 		"hide_local": s["auth.hide_local"] == "true",
 		"ldap": gin.H{
 			"server_url":    s["ldap.server_url"],

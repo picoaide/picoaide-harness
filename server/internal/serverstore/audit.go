@@ -17,8 +17,8 @@ type AuditLogEntry struct {
 	Username  string    `json:"username"`
 	Action    string    `json:"action"`
 	Detail    string    `json:"detail"`
-	PrevHash  string    `json:"prev_hash"`  // 0048 哈希链
-	Hash      string    `json:"hash"`       // 0048 本条目 sha256(省略响应)
+	PrevHash  string    `json:"prev_hash"` // 0048 哈希链
+	Hash      string    `json:"hash"`      // 0048 本条目 sha256(省略响应)
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -50,7 +50,7 @@ func auditHashPayload(prevHash, username, action, detail, createdAt string) stri
 
 // VerifyAuditChain walks the audit log from oldest to newest and verifies
 // every hash link. Returns the first broken entry id (or 0 if intact).
-// Rows written before the 0048 migration have hash='' and are skipped
+// Rows written before the 0048 migration have hash=” and are skipped
 // (the chain starts at the first post-migration entry).
 func VerifyAuditChain(db *sql.DB) (int64, error) {
 	rows, err := db.Query("SELECT id, username, action, detail, prev_hash, hash, created_at FROM audit_logs ORDER BY id ASC")

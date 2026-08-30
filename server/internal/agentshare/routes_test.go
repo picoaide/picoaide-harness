@@ -531,10 +531,10 @@ func TestPresetFileContent(t *testing.T) {
 	r, db, adminHdr, userHdr, _ := setup(t)
 	defer db.Close()
 	archive := makeArchive(t, map[string]string{
-		"agent.cordis.yml": testComposition,
+		"agent.cordis.yml":     testComposition,
 		"skills/demo/SKILL.md": "# demo\n",
-		"bin/blob.bin":    string([]byte{0x00, 0x01, 0xFF, 0xFE}),
-		"bin/big.txt":     strings.Repeat("x", maxFilePreviewBytes+16),
+		"bin/blob.bin":         string([]byte{0x00, 0x01, 0xFF, 0xFE}),
+		"bin/big.txt":          strings.Repeat("x", maxFilePreviewBytes+16),
 	})
 
 	w := httptest.NewRecorder()

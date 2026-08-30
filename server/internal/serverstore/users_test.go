@@ -178,7 +178,7 @@ func TestDeleteUserCascadesSharedGrants(t *testing.T) {
 	}
 	for _, tbl := range []string{"shared_skill_grants", "agent_preset_grants"} {
 		var n int
-		if err := db.QueryRow("SELECT COUNT(*) FROM "+tbl+" WHERE grantee = 'grace'").Scan(&n); err != nil || n != 0 {
+		if err := db.QueryRow("SELECT COUNT(*) FROM " + tbl + " WHERE grantee = 'grace'").Scan(&n); err != nil || n != 0 {
 			t.Fatalf("%s grants left after delete: %d err=%v", tbl, n, err)
 		}
 	}

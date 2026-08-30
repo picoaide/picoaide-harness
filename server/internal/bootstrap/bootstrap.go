@@ -31,7 +31,7 @@ type WebConfig struct {
 	ErrorReportingLevel string `json:"error_reporting_level"`
 	// GlitchTip 连接器配置(统一分发 2026-08):服务端下发地址/组织,
 	// 客户端连接器预填,用户只需填 token。空 = 不预填。
-	GlitchTipBaseURL     string `json:"glitchtip_base_url"`
+	GlitchTipBaseURL      string `json:"glitchtip_base_url"`
 	GlitchTipOrganization string `json:"glitchtip_organization"`
 	// 默认思考强度(2026-08):客户端默认模型的 reasoningEffort,
 	// off|low|high|max(与客户端 llm-deepseek 适配器支持档位一致);默认 max。

@@ -51,11 +51,11 @@ const MaxSnapshotKeep = 10
 
 // BrandConfig 是品牌配置(JSON 形态), 与 settings 键一一映射。
 type BrandConfig struct {
-	Enabled   bool           `json:"enabled"`
-	Login     LoginBrand     `json:"login"`
-	Client    ClientBrand    `json:"client"`
-	Favicon   string         `json:"favicon_url,omitempty"`
-	Title     string         `json:"title"`
+	Enabled bool        `json:"enabled"`
+	Login   LoginBrand  `json:"login"`
+	Client  ClientBrand `json:"client"`
+	Favicon string      `json:"favicon_url,omitempty"`
+	Title   string      `json:"title"`
 }
 
 type LoginBrand struct {
@@ -74,12 +74,12 @@ type ClientBrand struct {
 
 // PortalConfig 是门户首页配置。
 type PortalConfig struct {
-	Enabled             bool   `json:"enabled"`
-	Welcome             string `json:"welcome"`
-	Subtitle            string `json:"subtitle"`
-	ClientDownloadURL   string `json:"client_download_url"`
-	ClientDownloadNote  string `json:"client_download_note"`
-	LandingPath         string `json:"landing_path"`
+	Enabled            bool   `json:"enabled"`
+	Welcome            string `json:"welcome"`
+	Subtitle           string `json:"subtitle"`
+	ClientDownloadURL  string `json:"client_download_url"`
+	ClientDownloadNote string `json:"client_download_note"`
+	LandingPath        string `json:"landing_path"`
 }
 
 // settings 键映射。
@@ -112,9 +112,9 @@ func (b *BrandConfig) save(db *sql.DB, set func(key, val string) error) error {
 		return err
 	}
 	for k, v := range map[string]string{
-		"brand.login.display_name": b.Login.DisplayName,
-		"brand.login.tagline":      b.Login.Tagline,
-		"brand.login.welcome":      b.Login.Welcome,
+		"brand.login.display_name":  b.Login.DisplayName,
+		"brand.login.tagline":       b.Login.Tagline,
+		"brand.login.welcome":       b.Login.Welcome,
 		"brand.client.display_name": b.Client.DisplayName,
 		"brand.client.tagline":      b.Client.Tagline,
 		"brand.client.accent":       b.Client.Accent,
@@ -138,12 +138,12 @@ func (p *PortalConfig) load(s map[string]string) {
 
 func (p *PortalConfig) save(set func(key, val string) error) error {
 	for k, v := range map[string]string{
-		"portal.enabled":            strconv.FormatBool(p.Enabled),
-		"portal.welcome":            p.Welcome,
-		"portal.subtitle":           p.Subtitle,
-		"portal.client_download_url": p.ClientDownloadURL,
+		"portal.enabled":              strconv.FormatBool(p.Enabled),
+		"portal.welcome":              p.Welcome,
+		"portal.subtitle":             p.Subtitle,
+		"portal.client_download_url":  p.ClientDownloadURL,
 		"portal.client_download_note": p.ClientDownloadNote,
-		"portal.landing_path":       p.LandingPath,
+		"portal.landing_path":         p.LandingPath,
 	} {
 		if err := set(k, v); err != nil {
 			return err
@@ -249,11 +249,16 @@ func logoPath(db *sql.DB, dataDir, name string) (string, error) {
 // mimeFor maps extensions to allowed MIME (no content sniffing).
 func mimeFor(ext string) string {
 	switch strings.ToLower(ext) {
-	case ".svg": return "image/svg+xml"
-	case ".png": return "image/png"
-	case ".webp": return "image/webp"
-	case ".ico": return "image/x-icon"
-	default: return ""
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	case ".ico":
+		return "image/x-icon"
+	default:
+		return ""
 	}
 }
 
@@ -340,10 +345,10 @@ func getAdminBrand(c *gin.Context, db *sql.DB) {
 
 func putAdminBrand(c *gin.Context, db *sql.DB, dataDir string) {
 	var req struct {
-		Enabled bool       `json:"enabled"`
-		Login   LoginBrand `json:"login"`
+		Enabled bool        `json:"enabled"`
+		Login   LoginBrand  `json:"login"`
 		Client  ClientBrand `json:"client"`
-		Title   string     `json:"title"`
+		Title   string      `json:"title"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
