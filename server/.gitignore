@@ -7,7 +7,7 @@ data/
 *.db-wal
 *.db-shm
 webadmin/node_modules/
-!webadmin/dist/index.html
+!webadmin/dist/.gitkeep
 webadmin/dist/
 *.log
 .DS_Store
