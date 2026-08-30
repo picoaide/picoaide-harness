@@ -1,5 +1,3 @@
-# Dex IdP 配置(集成测试用): 静态密码, 用户 admin@example.com / alice@example.com
-# 密码均为 admin123(bcrypt, cost 10)
 issuer: http://127.0.0.1:5556
 storage:
   type: sqlite3
@@ -10,6 +8,8 @@ web:
 staticClients:
   - id: picoaide-test
     redirectURIs:
+      - 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback'
+      - 'http://127.0.0.1:8091/api/client/v2/auth/openid/callback'
       - 'http://127.0.0.1:8091/api/auth/oidc/callback'
       - 'http://127.0.0.1:8091/api/auth/openid/callback'
     name: PicoAide Test
