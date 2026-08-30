@@ -6,7 +6,7 @@ Status: implemented
 
 ## Problem
 
-DSH Desktop 需要在 macOS 与 Windows 上提供原生材质呈现，但不能编辑 pinned 上游 checkout，也不能复制官方 Web 应用。该呈现会同时改变多个维度：原生窗口构造、root/sidebar slot 所有权、`layout` service 与 document 级 theme 投影。如果只应用其中一部分，或在正在运行的 renderer 中改变它们，Host 组合与 Client 呈现就会不一致。
+PicoAide Harness 需要在 macOS 与 Windows 上提供原生材质呈现，但不能编辑 pinned 上游 checkout，也不能复制官方 Web 应用。该呈现会同时改变多个维度：原生窗口构造、root/sidebar slot 所有权、`layout` service 与 document 级 theme 投影。如果只应用其中一部分，或在正在运行的 renderer 中改变它们，Host 组合与 Client 呈现就会不一致。
 
 无论用户选择应用托盘命令，还是手工编辑 settings 文件，模式选择都必须使用同一个持久化事实源，并让每次修改跨越相同的重启边界。
 
@@ -80,6 +80,6 @@ Profile 测试会向临时 `settings.yaml` 写入 `dsh-desktop.mode: advanced`�
 
 ## Consequences
 
-DSH Desktop 在不修改上游 submodule、不复制 Web 应用，也不引入第二套插件或 transport 系统的前提下，获得了 macOS 与 Windows 原生材质呈现。托盘修改与手工编辑 `settings.yaml` 会聚合到一个持久化值，重启会创建一个一致的 Host、Client 与原生窗口 generation。
+PicoAide Harness 在不修改上游 submodule、不复制 Web 应用，也不引入第二套插件或 transport 系统的前提下，获得了 macOS 与 Windows 原生材质呈现。托盘修改与手工编辑 `settings.yaml` 会聚合到一个持久化值，重启会创建一个一致的 Host、Client 与原生窗口 generation。
 
 desktop package 现在拥有真实 Client 呈现代码，并且必须跟踪它使用的已发布 slot、theme 与 service contract。高级模式按设计与浏览器 Web 及兼容模式具有不同的呈现 row 组合。原生外观也取决于操作系统支持，必须在真实目标机器上验证；Linux 仍只支持兼容模式。

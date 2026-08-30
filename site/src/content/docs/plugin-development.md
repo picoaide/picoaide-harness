@@ -3,12 +3,12 @@ title: 插件开发
 description: 如何为 PicoAide Harness 开发插件：一切皆插件、客户端/服务端两种形态、slot 组合与约束。
 ---
 
-插件是给 DSH 添加能力的扩展包——模型、工具、界面、工作流都可以做成插件。**PicoAide Harness 没有魔改上游源码，一切皆插件组合**：桌面壳本身（窗口、托盘、终端、更新、profile）就是一个合法的 DSH 插件，与第三方插件走同一条官方 Cordis 组合路径。
+插件是给 DSH 添加能力的扩展包——模型、工具、界面、工作流都可以做成插件。**PicoAide Harness 没有魔改上游源码，一切皆插件组合**：桌面壳本身（窗口、托盘、更新、固定 desktop profile）就是一个合法的 DSH 插件，与第三方插件走同一条官方 Cordis 组合路径。
 
 ## 插件机制总览
 
 - **上游 Holder**：agent、model、tool、session、settings、webServer、subprocess 等官方能力，以固定 pin 版本原样运行；
-- **Desktop Host 服务**：窗口、托盘、profile、终端、更新，对第三方开放的 contract 见 `packages/host/desktop/docs/plugin-services.md`（`dsh-plugin-desktop` 根入口 + `./desktop-home`、`./diagnostics`、`./updates` 等子路径；`desktopRuntime` 服务仅供 Desktop 自有 row 使用）；
+- **Desktop Host 服务**：窗口、托盘、更新，对第三方开放的 contract 见仓库 [`packages/host/desktop/docs/plugin-services.md`](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs)（`dsh-plugin-desktop` 根入口 + `./desktop-home`、`./diagnostics`、`./updates` 等子路径；`desktopRuntime.registerTrayItem` 注册托盘项）；
 - **Web Client**：官方 Web UI + 第三方浏览器界面，经 loopback carrier 工作，不直接调用 Electron；
 - **原生 runtime**：Electron BrowserWindow、系统托盘、文件/网络/安装器适配——`desktopRuntime` 仅供 Desktop 自有 row 使用，**不是第三方 API**。
 
@@ -64,7 +64,7 @@ ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
 
 ## 更多资料
 
-- [仓库：插件开发完整文档](../docs/plugin-development.md)（仓库 docs/）
-- [桌面插件服务 contract](../docs/plugin-services.md)（`packages/host/desktop/docs/plugin-services.zh.md`）
-- [架构说明](../docs/architecture.md)
-- [Community Fabric（社区互操作 RFC）](../community/fabric/README.zh.md)
+- [插件生态倡议](./plugin-ecosystem) — 生态愿景与三条原则
+- [桌面插件服务 contract（仓库）](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs/plugin-services.zh.md) — 类型、生命周期与失败语义
+- [Community Fabric（社区互操作 RFC）](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/README.zh.md)
+- [系统架构](./architecture)

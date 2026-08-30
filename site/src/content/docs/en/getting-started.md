@@ -10,7 +10,7 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 | Platform | How to install |
 |---|---|
 | Windows x64 | Run the NSIS installer (`PicoAide-Harness-<v>-x64-Setup.exe`) |
-| macOS (Apple silicon) | Open the DMG and drag PicoAide Harness into Applications |
+| macOS | Open the DMG (universal, both Apple silicon and Intel) and drag PicoAide Harness into Applications |
 | Linux x64 | Grant execute permission and run the AppImage (`-x86_64.AppImage`); a deb is also provided |
 
 > **Recommended before installing**: every Release ships a `SHA256SUMS.txt`. The Windows/Linux installers are published by CI automatically and are **not yet signed**; SmartScreen may warn about an "unknown publisher" — download and verify the SHA-256 digest from Releases before running.
@@ -21,10 +21,20 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 - The installer already bundles Electron, Node.js, pnpm, and a pinned set of DSH dependencies — you do **not** need to install Node.js, pnpm, or DSH separately;
 - Closing the window hides to the tray by default; choose **Quit** from the tray to exit the app and stop the local service.
 
+## Local web port
+
+Desktop lets the OS pick a random local web port by default (`dsh-desktop.port: 0`), avoiding collisions; the service listens only on `127.0.0.1`. If a UI plugin needs a stable origin (`localStorage` is isolated per origin), set a fixed port in settings:
+
+```yaml
+dsh-desktop:
+  port: 43189
+```
+
+The port must be an integer from `0` to `65535`; changing it performs an orderly restart. If the fixed port is already taken, Desktop cannot start — free the port or set it back to `0` or another free port.
+
 ## Sign in
 
-- **Enterprise (server mode)**: enter the server address and sign in with your account; accounts are created by administrators in the admin console (local / LDAP / OIDC), and quotas and credits are decided by the server;
-- **Standalone mode**: use local models and capabilities without signing in;
+- **Enterprise (server mode)**: enter the server address and sign in with your account (local / LDAP / OIDC, configured server-side); accounts are created by administrators in the admin console, and quotas and credits are decided by the server;
 - Signing out clears all sessions (connectors, browser, scheduled-job tokens).
 
 ## Start using it: the four core entry points

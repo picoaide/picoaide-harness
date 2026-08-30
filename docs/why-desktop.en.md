@@ -1,48 +1,5 @@
 # Why PicoAide Harness Exists
 
-## The problem
-
-DeepSeek Harness is a composable agent harness. It is powerful from the command line and through its Web UI, and it lets developers combine models, tools, sessions, and workflows into their own runtime. For a first-time user, however, Node.js, profiles, dependency installation, ports, and process lifetime are still part of the experience.
-
-PicoAide Harness does not reimplement Harness. It puts the same runtime into an application that is easier to start and manage on a desktop operating system:
-
-- The installer provides Electron, a Node runtime, and pinned DSH dependencies.
-- The application owns the window, tray, single-instance lock, shutdown, and local-service lifecycle.
-- Users keep using the official DSH profiles, plugins, sessions, and Web UI.
-- Upstream Harness remains authoritative for agents, models, tools, sessions, and Web client behavior.
-
-PicoAide Harness is therefore a product entry point and runtime adapter. It is not a replacement for upstream Harness and it is not a second copy of the upstream source that must permanently diverge.
-
-## Why plugins
-
-Harness follows an “everything is a plugin” model. PicoAide Harness keeps the same principle for three practical reasons:
-
-1. **Upstream behavior stays replaceable.** PicoAide Harness can use the official Web client, while a profile can add model, tool, UI, or workflow plugins.
-2. **PicoAide Harness behavior stays extensible.** Profile management and the packaged package-manager environment can be exposed as explicit Host services instead of making every plugin guess at Electron internals.
-3. **Ownership stays clear.** Upstream DSH owns agent semantics, PicoAide Harness owns native integration, and third-party plugins depend only on the contracts they need.
-
-The plugin boundary also tells us what not to expose. Third-party plugins can only use clearly published interfaces; they cannot directly control the window, tray, installers, or other internal implementation. A stable boundary is easier to upgrade and debug than an unrestricted private API. See [plugin development](plugin-development.en.md) for the published interface details.
-
-## What PicoAide Harness provides
-
-The current PicoAide Harness product provides:
-
-- Native windows, a tray, and single-instance lifecycle on macOS, Windows, and Linux.
-- A fixed advanced presentation: PicoAide Harness-owned layout, native materials (macOS vibrancy / Windows Mica), and drag regions; Linux uses the standard system window frame.
-- A fixed `desktop` profile: PicoAide Harness exposes the active profile identity for the current generation, and plugin management uses the official `dsh plugin --profile desktop` semantics.
-- A controlled set of extension interfaces for plugin developers (see [plugin development](plugin-development.en.md)).
-- Version discovery and confirmation-gated installer downloads, handing off to a macOS DMG or Windows NSIS installer (Linux does not download installers).
-
-## What we deliberately do not do
-
-- Reimplement the upstream Web UI as an Electron-native page.
-- Override the upstream layout, sidebar, or conversation composition.
-- Copy records into a separate product database; official profiles share the DSH home for sessions and settings by default.
-- Give third-party plugins an undefined private Electron API.
-- Present roadmap items such as a plugin marketplace, mobile remote control, or Channels as shipped features.
-
-## Who should read this
-
-- Users who want to install and use Harness: start with the [user guide](user-guide.en.md).
-- Users installing or building DSH plugins: read [plugin development](plugin-development.en.md), then the [PicoAide Harness service contract](../packages/host/desktop/docs/plugin-services.md).
-- Maintainers working on startup, profiles, or packaging: read the [architecture](architecture.en.md) and the package [README](../packages/host/desktop/README.md).
+> **This content has been merged into the official wiki**: [Product Philosophy](https://www.picoaide.com/en/docs/philosophy/) (Section 0: what problem we solve, plus the principles).
+>
+> The repository keeps maintainer-oriented [Architecture](architecture.en.md) and [Plugin Development](plugin-development.en.md); the product positioning and boundaries live on the wiki philosophy page.

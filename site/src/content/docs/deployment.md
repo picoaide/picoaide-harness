@@ -80,7 +80,7 @@ sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 
 ## 接入成员
 
-1. 在**用户管理**创建用户（用户名 + 密码 + 是否管理员），或配置 LDAP/OIDC 后由外部身份源接入；
+1. 在**用户管理**创建用户（用户名 + 密码 + 角色：super_admin / auditor / user），或配置 LDAP/OIDC 后由外部身份源接入；
 2. 分配部门与预算；设置用户配额（token / 金额）或跟随全局默认；
 3. 员工登录客户端/浏览器后即可使用对话、能力中心、连接器、定时任务等能力；
 4. 管理员在**能力中心**审批员工上传的技能/智能体并授权（用户/部门）——共享内容才可见可装。
@@ -88,7 +88,14 @@ sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 ## 安全与运维要点
 
 - **密钥**：上游供应商密钥 **AES-GCM 加密存储**（`enc:v1:`，master key 文件，0600），永不落明文；API token 只存 SHA-256 哈希（90 天过期），改密/降权/禁用自动吊销全部令牌（同事务）；
-- **管理端**：session 24h + CSRF（HMAC 时间窗 ±1h）；登录双桶限流（10 次/5 分钟/键，不信任 X-Forwarded-For）；错误统一信封；`/healthz` 无认证探针（DB Ping，503=DB 不可用）；
+- **管理端**：session 12h（硬上限 + 60min 空闲滑动过期）+ CSRF（HMAC 时间窗 ±1h）；登录双桶限流（10 次/5 分钟/键，不信任 X-Forwarded-For）；错误统一信封；`/healthz` 无认证探针（DB Ping，503=DB 不可用）；
 - **证书**：三模式——`manual`（企业 CA/自签占位，支持 IP）、`auto`（Let's Encrypt 自动续期，仅公网域名直连，内置直连/IP 校验）、`internal`（Caddy 本地 CA，内网开箱即用）；员工客户端登录拒绝非 HTTPS 地址（TOFU）；
 - **备份与恢复**：`deploy.sh backup` 一次打包 DB + **master.key**（丢失=已加密密钥不可解）+ Caddy 证书库（+ pg_dump）；恢复 = 停服解包 → `up -d`；`update` 零停机，降级不保证兼容；
 - **离线部署**：`make release-export` 导出镜像 tar + `docker load`。
+
+## 深入资料
+
+- [系统架构](./architecture) — 服务端分层、数据流、安全设计
+- [API 参考](./api-reference) — 健康探针、认证与网关端点
+- [管理后台](./admin) — webadmin 操作指南
+- 仓库内完整运维手册：`server/docs/DEPLOY.md`（compose 私有网段、deploy.sh 生命周期、镜像发布）与 `server/docs/02-build-deploy.md`（构建、systemd、CI）

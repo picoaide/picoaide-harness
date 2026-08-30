@@ -46,7 +46,7 @@ corepack yarn dev     # launch the application when a graphical session is avail
 
 ## Join the technical team
 
-If you would like to join our technical team, contact us at [t4wefan@qq.com](mailto:t4wefan@qq.com).
+If you would like to join our technical team, reach us through [GitHub Discussions](https://github.com/orgs/picoaide/discussions) or an [Issue](https://github.com/picoaide/picoaide-harness/issues).
 
 ## Code of conduct
 

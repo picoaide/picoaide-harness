@@ -25,19 +25,6 @@ const sessionCookieName = "picoaide_session"
 // adminMaxBodyBytes bounds admin JSON request bodies (审计 2026-08-25 F-06).
 const adminMaxBodyBytes = 1 << 20 // 1MB
 
-// secureCookiesEnabled reads server.secure_cookies(显式开关;未设置=自动)
-// 审计 2026-08-25 F-01:反代(Caddy)部署时 c.Request.TLS 恒为 nil,原实现
-// 只有在手动置 server.secure_cookies=1 时才给会话 cookie 加 Secure——默认
-// 反代部署下 cookie 明文跳段。安全修复:默认跟随 X-Forwarded-Proto(Caddy
-// 会设置该头;伪造它只会让 cookie 更严格,无降级风险),显式配置仍可覆盖。
-func secureCookiesEnabled(db *sql.DB) bool {
-	v, ok, err := serverstore.GetSetting(db, "server.secure_cookies")
-	if err == nil && ok {
-		return strings.TrimSpace(v) == "1"
-	}
-	return false // 未显式配置:调用方再按 X-Forwarded-Proto / TLS 判断
-}
-
 // secureCookieFor reports whether the session cookie should carry Secure.
 // Order: explicit server.secure_cookies setting → X-Forwarded-Proto: https
 // (behind Caddy) → direct TLS. Never trusts a downgrade header.
@@ -336,13 +323,6 @@ func (a *AdminAPI) getUserGroups(c *gin.Context) {
 		groups = []string{}
 	}
 	c.JSON(http.StatusOK, gin.H{"groups": groups})
-}
-
-// setUserGroups 已随多部门端点移除(审计2026-C6):员工单部门归属一律走
-// PUT /users/:id/department;此处保留仅为类型说明,实际不注册路由。
-// nolint:unused // 保留防误注册的语义说明
-func (a *AdminAPI) setUserGroups(c *gin.Context) {
-	writeError(c, http.StatusNotFound, "NOT_FOUND", "该端点已移除,请使用 PUT /users/:id/department")
 }
 
 func (a *AdminAPI) createUser(c *gin.Context) {

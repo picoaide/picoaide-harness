@@ -1,0 +1,88 @@
+Unused files (2)
+scripts/e2e-fixture-gateway.mjs         
+scripts/real-env-browser-no-approval.mjs
+Unused dependencies (41)
+@deepseek-ai/cordis-plugin-timer                    package.json:129:6
+@deepseek-ai/dsh-agent-default-model                package.json:132:6
+@deepseek-ai/dsh-authorization                      package.json:140:6
+@deepseek-ai/dsh-base                               package.json:141:6
+@deepseek-ai/dsh-bash-local                         package.json:142:6
+@deepseek-ai/dsh-client-modules                     package.json:146:6
+@deepseek-ai/dsh-client-ui-attachment               package.json:148:6
+@deepseek-ai/dsh-client-ui-commands                 package.json:149:6
+@deepseek-ai/dsh-client-ui-directory-picker-browse  package.json:151:6
+@deepseek-ai/dsh-client-ui-directory-picker-native  package.json:152:6
+@deepseek-ai/dsh-client-ui-primitives               package.json:155:6
+@deepseek-ai/dsh-client-ui-sidebar                  package.json:157:6
+@deepseek-ai/dsh-client-ui-tool                     package.json:160:6
+@deepseek-ai/dsh-client-ui-workspace                package.json:161:6
+@deepseek-ai/dsh-command-feedback                   package.json:164:6
+@deepseek-ai/dsh-cordis-client-runner               package.json:167:6
+@deepseek-ai/dsh-fs-local                           package.json:172:6
+@deepseek-ai/dsh-host-directory-picker-browse       package.json:176:6
+@deepseek-ai/dsh-host-directory-picker-native       package.json:177:6
+@deepseek-ai/dsh-jobs                               package.json:181:6
+@deepseek-ai/dsh-session-telemetry                  package.json:201:6
+@deepseek-ai/dsh-session-title-llm                  package.json:203:6
+@deepseek-ai/dsh-shell-env                          package.json:207:6
+@deepseek-ai/dsh-skill                              package.json:208:6
+@deepseek-ai/dsh-spill                              package.json:209:6
+@deepseek-ai/dsh-subagent                           package.json:212:6
+@deepseek-ai/dsh-subagent-in-process-driver         package.json:213:6
+@deepseek-ai/dsh-terminal                           package.json:216:6
+@deepseek-ai/dsh-tool-workflow                      package.json:220:6
+@deepseek-ai/dsh-web                                package.json:226:6
+@deepseek-ai/dsh-web-app                            package.json:227:6
+@deepseek-ai/dsh-web-fetch-http                     package.json:228:6
+@deepseek-ai/dsh-workflow                           package.json:229:6
+@picoaide/dsh-account-card                          package.json:231:6
+@picoaide/dsh-browser                               package.json:232:6
+@picoaide/dsh-connectors                            package.json:233:6
+@picoaide/dsh-cron                                  package.json:234:6
+@picoaide/dsh-enterprise                            package.json:235:6
+dsh-better-sidebar                                  package.json:237:6
+dsh-memory-evolve                                   package.json:238:6
+react-dom                                           package.json:242:6
+Unused devDependencies (1)
+@types/js-yaml  package.json:250:6
+Unlisted dependencies (6)
+@deepseek-ai/dsh-fs-sandbox    lib/types/asar-file-system.d.ts:27:37         
+ws                             scripts/real-env-cron-audit.mjs:15:27         
+ws                             scripts/real-env-cron-flow.mjs:14:27          
+ws                             scripts/real-env-verify.mjs:13:27             
+@deepseek-ai/dsh-fs-sandbox    src/asar-file-system.ts:29:37                 
+@deepseek-ai/dsh-llm-deepseek  tests/deepseek-streaming-tool-call.spec.ts:6:8
+Unused exports (17)
+REQUIRED_UNPACKED_RUNTIME_ENTRIES               scripts/verify-packaged-runtime.ts:60:14 
+REQUIRED_UNPACKED_PACKAGE_SPECIFIERS            scripts/verify-packaged-runtime.ts:90:14 
+verifyPackagedAsar                    function  scripts/verify-packaged-runtime.ts:322:17
+verifyUnpackedPackageResolution       function  scripts/verify-packaged-runtime.ts:386:17
+default                               function  scripts/verify-packaged-runtime.ts:505:16
+assertPortableExecutable              function  scripts/verify-win-installer.ts:48:17    
+SIDEBAR_MIN                                     src/client/layout-state.ts:28:14         
+SIDEBAR_MAX                                     src/client/layout-state.ts:29:14         
+DETAILS_DEFAULT                                 src/client/layout-state.ts:31:14         
+DETAILS_MIN                                     src/client/layout-state.ts:32:14         
+DETAILS_MAX                                     src/client/layout-state.ts:33:14         
+CENTER_MIN                                      src/client/layout-state.ts:34:14         
+DesktopActionsService                 class     src/desktop-actions.ts:24:14             
+MAX_DIAGNOSTIC_EVIDENCE_BYTES                   src/diagnostic-export.ts:9:14            
+DIAGNOSTIC_EXPORT_TIMEOUT_MS                    src/diagnostic-export.ts:12:14           
+DESKTOP_SHELL_ENVIRONMENT_KEYS                  src/shell-environment.ts:29:14           
+DESKTOP_SHUTDOWN_TIMEOUT_MS                     src/shutdown.ts:4:14                     
+Unused exported types (8)
+PackagedDiagnosticWorkerData  interface  scripts/verify-packaged-runtime.ts:118:18
+AdvancedFrameInjected         interface  src/client/AdvancedFrame.tsx:11:18       
+DesktopSidebarOwnerProps      interface  src/client/contracts.ts:2:18             
+DesktopLayoutService          interface  src/client/contracts.ts:10:18            
+DesktopUpdateBadgeProps       type       src/client/desktop-update.tsx:67:13      
+UnreadableDesktopRun          interface  src/crash-evidence.ts:43:18              
+DesktopActions                interface  src/desktop-actions.ts:6:18              
+DesktopChildProcessDetails    interface  src/desktop-logger.ts:18:18              
+Duplicate exports (6)
+afterPack|default                  scripts/verify-packaged-runtime.ts
+DesktopAsarFileSystem|default      src/asar-file-system.ts           
+DesktopActionsService|default      src/desktop-actions.ts            
+DesktopPluginsService|default      src/desktop-plugins.ts            
+WindowsAgentPresets|default        src/windows-agent-presets.ts      
+DesktopWindowsPwshSandbox|default  src/windows-pwsh-sandbox.ts       
