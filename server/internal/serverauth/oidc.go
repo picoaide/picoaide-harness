@@ -294,6 +294,12 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			SameSite: http.SameSiteLaxMode,
 			Secure:   secureCookieFor(c, a.DB),
 		})
+		// v3b §2.6: OIDC 回调限流(按来源 IP; 防 IdP 妥协后暴力回调)。
+		if !a.loginAllowed(c, "oidc-callback") {
+			_ = serverstore.AuditLog(a.DB, "oidc-callback", "login_fail", "rate_limited ip="+c.ClientIP())
+			writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
+			return
+		}
 		// 先取出 returnServer(HandleCallback 会删除 state,state 单次使用)
 		rs := returnServerOf(p, state)
 		ui, err := p.HandleCallback(code, state)
@@ -302,6 +308,8 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			return
 		}
 		if err != nil {
+			// v3b 审计: OIDC 失败留痕。
+			_ = serverstore.AuditLog(a.DB, "oidc", "login_fail", "ip="+c.ClientIP())
 			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "OIDC 认证失败")
 			return
 		}
@@ -324,6 +332,8 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
 			return
 		}
+		// v3b 审计: OIDC 成功留痕。
+		_ = serverstore.AuditLog(a.DB, user.Username, "login_success", "oidc ip="+c.ClientIP())
 		// 桌面客户端深链:携带 token + 发起 server + username(客户端拿到
 		// 后直接构造 session,无需再调 /api/auth/me)。server 为 login 时
 		// 记录的 returnServer;为空时客户端用其登录页输入的 server 兜底。
