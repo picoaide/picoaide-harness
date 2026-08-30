@@ -1,0 +1,26 @@
+# Dex IdP 配置(集成测试用): 静态密码, 用户 admin@example.com / alice@example.com
+# 密码均为 admin123(bcrypt, cost 10)
+issuer: http://127.0.0.1:5556
+storage:
+  type: sqlite3
+  config:
+    file: /tmp/dex.db
+web:
+  http: 0.0.0.0:5556
+staticClients:
+  - id: picoaide-test
+    redirectURIs:
+      - 'http://127.0.0.1:8091/api/auth/oidc/callback'
+      - 'http://127.0.0.1:8091/api/auth/openid/callback'
+    name: PicoAide Test
+    secret: test-secret
+enablePasswordDB: true
+staticPasswords:
+  - email: "admin@example.com"
+    hash: "$2a$10$ZhZRIKE/lyMaIOyBIqQMDu9adjw4QBN/O3clx4b6U1hH8aRJ.w.MK"
+    username: "admin"
+    userID: "1234567890"
+  - email: "alice@example.com"
+    hash: "$2a$10$ZhZRIKE/lyMaIOyBIqQMDu9adjw4QBN/O3clx4b6U1hH8aRJ.w.MK"
+    username: "alice"
+    userID: "0987654321"
