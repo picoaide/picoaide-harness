@@ -6,80 +6,70 @@ import { Label } from '../components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { SecretInput } from '../components/secret-input'
 import { PageHeader } from '../components/page-header'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 
-// 认证配置页:员工登录方式(本地恒启用 / LDAP / OpenID / OIDC,可多选)
-// 与各 IdP 参数配置。原为网关页底部卡片,独立成菜单便于管理。
-// 修改后重启服务端生效(服务端启动时注册对应 provider)。
-
-interface AuthForm {
-  mode: string
-  enabled: string[]
-  ldap_server_url: string
-  ldap_bind_dn: string
-  ldap_bind_password: string
-  ldap_base_dn: string
-  ldap_user_filter: string
-  ldap_group_filter: string
-  ldap_group_attr: string
-  oidc_issuer: string
-  oidc_client_id: string
-  oidc_client_secret: string
-  oidc_redirect_url: string
-  openid_issuer: string
-  openid_client_id: string
-  openid_client_secret: string
-  openid_redirect_url: string
-}
+// 认证配置页(v3b): Tab 分区 + 启用绑定配置 + hide_local。
+// 登录面矩阵: 客户端 = 全部已启用方式(local 可被 hide_local 隐藏);
+// 管理后台 = 恒仅本地账户(SSO/LDAP 一律不进后台, 服务端强制)。
 
 interface AuthConfig {
   mode?: string
   enabled?: string
+  hide_local?: boolean
   ldap?: Record<string, string>
   oidc?: Record<string, string>
   openid?: Record<string, string>
 }
 
-const EMPTY_FORM: AuthForm = {
-  mode: 'local',
-  enabled: ['local'],
-  ldap_server_url: '', ldap_bind_dn: '', ldap_bind_password: '', ldap_base_dn: '',
-  ldap_user_filter: '', ldap_group_filter: '', ldap_group_attr: '',
-  oidc_issuer: '', oidc_client_id: '', oidc_client_secret: '', oidc_redirect_url: '',
-  openid_issuer: '', openid_client_id: '', openid_client_secret: '', openid_redirect_url: '',
+interface FormState {
+  hideLocal: boolean
+  ldap: Record<string, string>
+  oidc: Record<string, string>
+  openid: Record<string, string>
 }
 
-const METHODS = [
-  { key: 'local', label: '本地账号', desc: '用户名+密码(admin 回退,恒启用)' },
-  { key: 'ldap', label: 'LDAP', desc: '企业目录认证' },
-  { key: 'openid', label: 'OpenID', desc: '浏览器跳转登录(独立 IdP)' },
-  { key: 'oidc', label: 'OIDC', desc: '浏览器跳转登录(独立 IdP)' },
-]
+const EMPTY_FORM: FormState = {
+  hideLocal: false,
+  ldap: {},
+  oidc: {},
+  openid: {},
+}
+
+// 各 IdP 必填项判定(未配齐 → 启用开关禁用)
+const REQUIRED: Record<'ldap' | 'oidc' | 'openid', string[]> = {
+  ldap: ['server_url', 'bind_dn', 'base_dn'],
+  oidc: ['issuer', 'client_id', 'redirect_url'],
+  openid: ['issuer', 'client_id', 'redirect_url'],
+}
+
+const METHOD_META: Record<'local' | 'ldap' | 'oidc' | 'openid', { label: string; desc: string }> = {
+  local: { label: '本地账号', desc: '后台恒启用; 客户端可隐藏' },
+  ldap: { label: 'LDAP', desc: '企业目录认证(仅员工面)' },
+  oidc: { label: 'OIDC', desc: '浏览器跳转登录(仅客户端)' },
+  openid: { label: 'OpenID', desc: '浏览器跳转登录(仅客户端)' },
+}
 
 export default function Auth() {
-  const [authForm, setAuthForm] = useState<AuthForm>(EMPTY_FORM)
+  const [form, setForm] = useState<FormState>(EMPTY_FORM)
+  const [enabled, setEnabled] = useState<string[]>(['local'])
+  const [mode, setMode] = useState('local')
   const [authErr, setAuthErr] = useState('')
   const [authMsg, setAuthMsg] = useState('')
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [tab, setTab] = useState('local')
 
   const load = useCallback(async () => {
     try {
-      const au = await request('/api/admin/auth') as { auth?: AuthConfig }
-      const a = au.auth ?? {}
-      const ldap = a.ldap ?? {}
-      const oidc = a.oidc ?? {}
-      const openid = a.openid ?? {}
-      setAuthForm({
-        mode: a.mode || 'local',
-        enabled: (a.enabled ? String(a.enabled).split(',').map((s) => s.trim()).filter(Boolean) : ['local']),
-        ldap_server_url: ldap.server_url ?? '', ldap_bind_dn: ldap.bind_dn ?? '',
-        ldap_bind_password: ldap.bind_password ?? '', ldap_base_dn: ldap.base_dn ?? '',
-        ldap_user_filter: ldap.user_filter ?? '', ldap_group_filter: ldap.group_filter ?? '',
-        ldap_group_attr: ldap.group_attr ?? '',
-        oidc_issuer: oidc.issuer ?? '', oidc_client_id: oidc.client_id ?? '',
-        oidc_client_secret: oidc.client_secret ?? '', oidc_redirect_url: oidc.redirect_url ?? '',
-        openid_issuer: openid.issuer ?? '', openid_client_id: openid.client_id ?? '',
-        openid_client_secret: openid.client_secret ?? '', openid_redirect_url: openid.redirect_url ?? '',
+      const r = await request('/api/admin/auth') as { auth?: AuthConfig }
+      const a = r.auth ?? {}
+      setMode(a.mode || 'local')
+      setEnabled((a.enabled ?? 'local').split(',').map((s) => s.trim()).filter(Boolean))
+      setForm({
+        hideLocal: a.hide_local ?? false,
+        ldap: a.ldap ?? {},
+        oidc: a.oidc ?? {},
+        openid: a.openid ?? {},
       })
     } catch (err: any) {
       setAuthErr(err.message)
@@ -88,62 +78,43 @@ export default function Auth() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
-  // 保存认证配置:*** / 空 = 保持现值(密码类字段留在掩码态)
+  const isReady = (key: 'local' | 'ldap' | 'oidc' | 'openid'): boolean => {
+    if (key === 'local') return true
+    const need = REQUIRED[key] ?? []
+    return need.every((f) => (form[key]?.[f] ?? '').trim() !== '')
+  }
+
+  const toggle = (key: 'local' | 'ldap' | 'oidc' | 'openid', on: boolean) => {
+    if (key === 'local') return // 恒启用
+    setEnabled((prev) => on ? [...prev.filter((x) => x !== key), key] : prev.filter((x) => x !== key))
+  }
+
   async function saveAuth() {
     if (busy) return
     setAuthErr('')
-    const enabled = authForm.enabled.filter((s) => s !== '')
-    if (!enabled.includes('local')) enabled.unshift('local') // 本地 admin 恒启用
-    if (enabled.includes('ldap')) {
-      if (!authForm.ldap_server_url.trim() || !authForm.ldap_base_dn.trim()) {
-        setAuthErr('LDAP 模式必须填写服务器地址与 Base DN'); return
-      }
-    }
-    if (enabled.includes('oidc')) {
-      if (!authForm.oidc_issuer.trim() || !authForm.oidc_client_id.trim() || !authForm.oidc_redirect_url.trim()) {
-        setAuthErr('OIDC 模式必须填写 Issuer、Client ID 与 Redirect URL'); return
-      }
-    }
-    if (enabled.includes('openid')) {
-      if (!authForm.openid_issuer.trim() || !authForm.openid_client_id.trim() || !authForm.openid_redirect_url.trim()) {
-        setAuthErr('OpenID 模式必须填写 Issuer、Client ID 与 Redirect URL'); return
+    // 启用中的 IdP 必须配置完整(前端校验; 服务端亦有校验)
+    for (const key of enabled.filter((k) => k !== 'local')) {
+      if (!isReady(key as 'ldap' | 'oidc' | 'openid')) {
+        setAuthErr(`${METHOD_META[key as 'local' | 'ldap' | 'oidc' | 'openid']?.label} 配置不完整, 请完成必填项后再保存`)
+        return
       }
     }
     setBusy(true)
     try {
-      await request('/api/admin/auth', {
-        method: 'PUT',
-        body: JSON.stringify({
-          mode: authForm.mode,
-          enabled: enabled.join(','),
-          ldap: {
-            server_url: authForm.ldap_server_url,
-            bind_dn: authForm.ldap_bind_dn,
-            bind_password: authForm.ldap_bind_password,
-            base_dn: authForm.ldap_base_dn,
-            user_filter: authForm.ldap_user_filter,
-            group_filter: authForm.ldap_group_filter,
-            group_attr: authForm.ldap_group_attr,
-          },
-          oidc: {
-            issuer: authForm.oidc_issuer,
-            client_id: authForm.oidc_client_id,
-            client_secret: authForm.oidc_client_secret,
-            redirect_url: authForm.oidc_redirect_url,
-          },
-          openid: {
-            issuer: authForm.openid_issuer,
-            client_id: authForm.openid_client_id,
-            client_secret: authForm.openid_client_secret,
-            redirect_url: authForm.openid_redirect_url,
-          },
-        }),
-      })
+      const body: any = {
+        mode,
+        enabled: enabled.join(','),
+        hide_local: form.hideLocal,
+        ldap: form.ldap,
+        oidc: form.oidc,
+        openid: form.openid,
+      }
+      await request('/api/admin/auth', { method: 'PUT', body: JSON.stringify(body) })
       setAuthMsg('认证配置已保存(重启服务端后生效)')
       setTimeout(() => setAuthMsg(''), 4000)
-      load()
+      void load()
     } catch (err: any) {
       setAuthErr(err.message)
     } finally {
@@ -157,149 +128,132 @@ export default function Auth() {
     <div className="space-y-6">
       <PageHeader
         title="认证配置"
-        desc="员工登录方式:本地账号(恒启用) / LDAP / OpenID / OIDC,可多选;修改后重启服务端生效"
+        desc="员工登录方式(本地/LDAP/OpenID/OIDC); 管理后台恒仅本地账户(SSO/LDAP 不进后台)"
       />
       <Card>
         <CardHeader>
-          <CardTitle>登录方式</CardTitle>
-          <CardDescription>勾选的方式会出现在登录页;未配置的 IdP 下方表单留空即可</CardDescription>
+          <CardTitle>启用方式</CardTitle>
+          <CardDescription>勾选的方式出现在客户端登录页; 管理后台不受影响。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {authErr && <div className="text-sm text-destructive">{authErr}</div>}
           {authMsg && <div className="text-sm text-green-600">{authMsg}</div>}
-          <div className="space-y-1">
-            <Label>登录方式(可多选;本地 admin 恒启用)</Label>
-            <div className="flex flex-wrap gap-3 rounded-md border p-3">
-              {METHODS.map((o) => {
-                const on = authForm.enabled.includes(o.key)
-                return (
-                  <label key={o.key} className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors ${on ? 'border-primary/40 bg-accent' : 'hover:bg-muted'}`}>
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-[#4176E6]"
-                      checked={on}
-                      disabled={o.key === 'local'} // 本地 admin 不可关
-                      onChange={(e) => {
-                        const next = e.target.checked
-                          ? [...authForm.enabled, o.key]
-                          : authForm.enabled.filter((s) => s !== o.key)
-                        setAuthForm({ ...authForm, enabled: next })
-                      }}
-                    />
-                    <span className="font-medium">{o.label}</span>
-                    <span className="text-xs text-muted-foreground">{o.desc}</span>
-                  </label>
-                )
-              })}
-            </div>
-            <ul className="space-y-1 text-xs text-muted-foreground">
-              <li>勾选的方式会出现在登录页;未配置的下方表单留空即可。</li>
-              <li>密码/密钥字段留空 = 保持现值,清空 = 清除。</li>
-            </ul>
+          <div className="flex flex-wrap gap-3 rounded-md border p-3">
+            {Object.keys(METHOD_META).map((keyRaw) => {
+              const key = keyRaw as 'local' | 'ldap' | 'oidc' | 'openid'
+              const on = enabled.includes(key)
+              const ready = isReady(key)
+              return (
+                <label key={key} className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors ${on ? 'border-primary/40 bg-accent' : 'hover:bg-muted'}`}>
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-[#4176E6]"
+                    checked={on}
+                    disabled={key === 'local' || !ready}
+                    onChange={(e) => toggle(key, e.target.checked)}
+                  />
+                  <span className="font-medium">{METHOD_META[key].label}</span>
+                  <span className="text-xs text-muted-foreground">{!ready ? '(配置不完整)' : METHOD_META[key].desc}</span>
+                </label>
+              )
+            })}
           </div>
 
-          {authForm.enabled.includes('ldap') && (
-            <div className="space-y-3 rounded-md border p-3">
-              <div className="text-sm font-medium">LDAP 配置</div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-url">服务器地址(ldap://ldap.example.com:389)</Label>
-                  <Input id="ldap-url" value={authForm.ldap_server_url} placeholder="ldap://ldap.example.com:389"
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_server_url: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-bind-dn">Bind DN</Label>
-                  <Input id="ldap-bind-dn" value={authForm.ldap_bind_dn} placeholder="cn=admin,dc=example,dc=com"
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_bind_dn: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-bind-pw">Bind 密码(未改=保持现值;清空=清除密码)</Label>
-                  <SecretInput id="ldap-bind-pw" value={authForm.ldap_bind_password}
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_bind_password: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-base-dn">Base DN</Label>
-                  <Input id="ldap-base-dn" value={authForm.ldap_base_dn} placeholder="dc=example,dc=com"
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_base_dn: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-user-filter">用户过滤器(默认 (uid=%s))</Label>
-                  <Input id="ldap-user-filter" value={authForm.ldap_user_filter} placeholder="(uid=%s)"
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_user_filter: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-group-filter">组过滤器(可选)</Label>
-                  <Input id="ldap-group-filter" value={authForm.ldap_group_filter} placeholder="(memberOf=cn=%s)"
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_group_filter: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ldap-group-attr">组属性(默认 cn)</Label>
-                  <Input id="ldap-group-attr" value={authForm.ldap_group_attr}
-                    onChange={(e) => setAuthForm({ ...authForm, ldap_group_attr: e.target.value })} />
-                </div>
-              </div>
+          {/* hide_local 开关 */}
+          <div className="flex items-start gap-3 rounded-md border p-3">
+            <input
+              type="checkbox"
+              id="hide-local"
+              className="mt-1 h-4 w-4 accent-[#4176E6]"
+              checked={form.hideLocal}
+              onChange={(e) => setForm({ ...form, hideLocal: e.target.checked })}
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="hide-local" className="text-[13px] text-foreground">隐藏客户端本地登录入口</Label>
+              <p className="text-xs text-muted-foreground">
+                启用后客户端登录页不显示本地账号方式(仅 IdP); 管理后台本地登录恒可用, 不受此开关影响。
+              </p>
             </div>
-          )}
+          </div>
 
-          {authForm.enabled.includes('oidc') && (
-            <div className="space-y-3 rounded-md border p-3">
-              <div className="text-sm font-medium">OIDC 配置</div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label htmlFor="oidc-issuer">Issuer(如 https://idp.example.com)</Label>
-                  <Input id="oidc-issuer" value={authForm.oidc_issuer} placeholder="https://idp.example.com"
-                    onChange={(e) => setAuthForm({ ...authForm, oidc_issuer: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="oidc-client-id">Client ID</Label>
-                  <Input id="oidc-client-id" value={authForm.oidc_client_id}
-                    onChange={(e) => setAuthForm({ ...authForm, oidc_client_id: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="oidc-secret">Client Secret(未改=保持现值;清空=清除密钥)</Label>
-                  <SecretInput id="oidc-secret" value={authForm.oidc_client_secret}
-                    onChange={(e) => setAuthForm({ ...authForm, oidc_client_secret: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="oidc-redirect">Redirect URL</Label>
-                  <Input id="oidc-redirect" value={authForm.oidc_redirect_url} placeholder="https://picoaide.example.com/api/auth/oidc/callback"
-                    onChange={(e) => setAuthForm({ ...authForm, oidc_redirect_url: e.target.value })} />
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Tab 分区配置 */}
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList>
+              <TabsTrigger value="local">本地账号</TabsTrigger>
+              <TabsTrigger value="ldap">LDAP</TabsTrigger>
+              <TabsTrigger value="oidc">OIDC</TabsTrigger>
+              <TabsTrigger value="openid">OpenID</TabsTrigger>
+            </TabsList>
 
-          {authForm.enabled.includes('openid') && (
-            <div className="space-y-3 rounded-md border p-3">
-              <div className="text-sm font-medium">OpenID 配置(独立 IdP)</div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label htmlFor="openid-issuer">Issuer(如 https://openid.example.com)</Label>
-                  <Input id="openid-issuer" value={authForm.openid_issuer} placeholder="https://openid.example.com"
-                    onChange={(e) => setAuthForm({ ...authForm, openid_issuer: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="openid-client-id">Client ID</Label>
-                  <Input id="openid-client-id" value={authForm.openid_client_id}
-                    onChange={(e) => setAuthForm({ ...authForm, openid_client_id: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="openid-secret">Client Secret(未改=保持现值;清空=清除密钥)</Label>
-                  <SecretInput id="openid-secret" value={authForm.openid_client_secret}
-                    onChange={(e) => setAuthForm({ ...authForm, openid_client_secret: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="openid-redirect">Redirect URL</Label>
-                  <Input id="openid-redirect" value={authForm.openid_redirect_url} placeholder="https://picoaide.example.com/api/auth/openid/callback"
-                    onChange={(e) => setAuthForm({ ...authForm, openid_redirect_url: e.target.value })} />
+            <TabsContent value="local" className="space-y-2">
+              <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+                本地账号恒启用(管理员回退)。此页无需配置; 新建/管理账户请在「用户」页操作。
+              </div>
+            </TabsContent>
+
+            <TabsContent value="ldap" className="space-y-3">
+              <div className="rounded-md border p-3">
+                <div className="mb-2 text-sm font-medium">LDAP 配置(仅员工面)</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field abbr="ldap" label="服务器地址(ldap://...)" value={form.ldap.server_url ?? ''} ph="ldap://ldap.example.com:389" k="server_url" set={(v) => setForm({ ...form, ldap: { ...form.ldap, server_url: v } })} />
+                  <Field abbr="ldap" label="Bind DN" value={form.ldap.bind_dn ?? ''} ph="cn=admin,dc=example,dc=com" k="bind_dn" set={(v) => setForm({ ...form, ldap: { ...form.ldap, bind_dn: v } })} />
+                  <SecretField label="Bind 密码(未改=保持现值)" value={form.ldap.bind_password ?? ''} set={(v) => setForm({ ...form, ldap: { ...form.ldap, bind_password: v } })} />
+                  <Field abbr="ldap" label="Base DN" value={form.ldap.base_dn ?? ''} ph="dc=example,dc=com" k="base_dn" set={(v) => setForm({ ...form, ldap: { ...form.ldap, base_dn: v } })} />
+                  <Field abbr="ldap" label="用户过滤器(默认 (uid=%s))" value={form.ldap.user_filter ?? ''} ph="(uid=%s)" k="user_filter" set={(v) => setForm({ ...form, ldap: { ...form.ldap, user_filter: v } })} />
+                  <Field abbr="ldap" label="组过滤器(可选)" value={form.ldap.group_filter ?? ''} ph="(memberOf=cn=%s)" k="group_filter" set={(v) => setForm({ ...form, ldap: { ...form.ldap, group_filter: v } })} />
+                  <Field abbr="ldap" label="组属性(默认 cn)" value={form.ldap.group_attr ?? ''} k="group_attr" set={(v) => setForm({ ...form, ldap: { ...form.ldap, group_attr: v } })} />
                 </div>
               </div>
-            </div>
-          )}
+            </TabsContent>
+
+            <TabsContent value="oidc" className="space-y-3">
+              <div className="rounded-md border p-3">
+                <div className="mb-2 text-sm font-medium">OIDC 配置(仅客户端)</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field abbr="oidc" label="Issuer" value={form.oidc.issuer ?? ''} ph="https://idp.example.com" k="issuer" set={(v) => setForm({ ...form, oidc: { ...form.oidc, issuer: v } })} />
+                  <Field abbr="oidc" label="Client ID" value={form.oidc.client_id ?? ''} k="client_id" set={(v) => setForm({ ...form, oidc: { ...form.oidc, client_id: v } })} />
+                  <SecretField label="Client Secret(未改=保持现值)" value={form.oidc.client_secret ?? ''} set={(v) => setForm({ ...form, oidc: { ...form.oidc, client_secret: v } })} />
+                  <Field abbr="oidc" label="Redirect URL" value={form.oidc.redirect_url ?? ''} ph="https://picoaide.example.com/api/auth/oidc/callback" k="redirect_url" set={(v) => setForm({ ...form, oidc: { ...form.oidc, redirect_url: v } })} />
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="openid" className="space-y-3">
+              <div className="rounded-md border p-3">
+                <div className="mb-2 text-sm font-medium">OpenID 配置(独立 IdP, 仅客户端)</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field abbr="openid" label="Issuer" value={form.openid.issuer ?? ''} ph="https://openid.example.com" k="issuer" set={(v) => setForm({ ...form, openid: { ...form.openid, issuer: v } })} />
+                  <Field abbr="openid" label="Client ID" value={form.openid.client_id ?? ''} k="client_id" set={(v) => setForm({ ...form, openid: { ...form.openid, client_id: v } })} />
+                  <SecretField label="Client Secret(未改=保持现值)" value={form.openid.client_secret ?? ''} set={(v) => setForm({ ...form, openid: { ...form.openid, client_secret: v } })} />
+                  <Field abbr="openid" label="Redirect URL" value={form.openid.redirect_url ?? ''} ph="https://picoaide.example.com/api/auth/openid/callback" k="redirect_url" set={(v) => setForm({ ...form, openid: { ...form.openid, redirect_url: v } })} />
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
 
           <Button onClick={saveAuth} disabled={busy}>{busy ? '保存中…' : '保存认证配置'}</Button>
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+function Field(props: { label: string; value: string; ph?: string; k: string; abbr?: string; set: (v: string) => void }) {
+  const id = `auth-field-${props.abbr ?? 'x'}-${props.k}`
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-xs text-muted-foreground">{props.label}</Label>
+      <Input id={id} value={props.value} placeholder={props.ph ?? ''} onChange={(e) => props.set(e.target.value)} />
+    </div>
+  )
+}
+
+function SecretField(props: { label: string; value: string; set: (v: string) => void }) {
+  const id = `auth-secret-${Math.random().toString(36).slice(2, 8)}`
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-xs text-muted-foreground">{props.label}</Label>
+      <SecretInput id={id} value={props.value} onChange={(e) => props.set(e.target.value)} />
     </div>
   )
 }
