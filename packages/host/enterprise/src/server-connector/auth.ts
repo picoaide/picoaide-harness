@@ -33,6 +33,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Normalize a user-entered server URL: trim whitespace and strip one or more
+ * trailing slashes so `https://host/` and `https://host` behave identically.
+ * The login page brands/methods probes and every gateway request go through
+ * here — a trailing slash must never produce `//api/...` path segments.
+ */
+export function normalizeServerURL(input: string): string {
+  let s = input.trim()
+  // Strip trailing slashes (multiple, per user requests). Done with a plain
+  // loop rather than regex so no backslash escapes are involved.
+  while (s.length > 0 && s.endsWith('/')) s = s.slice(0, -1)
+  return s
+}
+
 async function electronSessionFetch(): Promise<typeof fetch | null> {
   const mod = await loadElectronModule()
   const f = mod?.session?.defaultSession?.fetch
@@ -65,11 +79,12 @@ export function assertServerURLAllowed(serverURL: string): void {
 }
 
 export async function login(serverURL: string, username: string, password: string): Promise<Session> {
+  const server = normalizeServerURL(serverURL)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
-    assertServerURLAllowed(serverURL)
-    const res = await gatewayFetch(`${serverURL}/api/auth/login`, {
+    assertServerURLAllowed(server)
+    const res = await gatewayFetch(`${server}/api/client/v2/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
@@ -86,7 +101,7 @@ export async function login(serverURL: string, username: string, password: strin
     if (!res.ok) throw new AuthError('server_error', `HTTP ${res.status}`)
     const data = (await res.json()) as { token?: string; user?: { role?: string } }
     if (!data.token) throw new AuthError('server_error', 'missing token in response')
-    const sess: Session = { serverURL, username, token: data.token }
+    const sess: Session = { serverURL: server, username, token: data.token }
     if (data.user?.role) sess.role = data.user.role
     return sess
   } catch (e) {
@@ -103,12 +118,13 @@ export async function fetchJSON(
   path: string,
   opts: { token?: string; method?: string; body?: unknown; timeoutMs?: number } = {},
 ): Promise<any> {
+  const server = normalizeServerURL(serverURL)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15000)
   let res: Response
   try {
-    assertServerURLAllowed(serverURL)
-    res = await gatewayFetch(`${serverURL}${path}`, {
+    assertServerURLAllowed(server)
+    res = await gatewayFetch(`${server}${path}`, {
       method: opts.method ?? 'GET',
       headers: {
         'Content-Type': 'application/json',
@@ -142,6 +158,14 @@ export async function fetchJSON(
     }
     throw new ApiError(code, message)
   }
-  if (parseFailed && res.status !== 204) throw new ApiError('UPSTREAM', '网关响应不是合法 JSON')
+  // 防御: 期望 JSON 的 API 却返回了 HTML(如误指向门户首页/SPA 或代理劫持)。
+  // 早失败给出明确提示,而不是把 HTML 当 JSON 解析失败成含糊的 UPSTREAM。
+  if (parseFailed && res.status !== 204) {
+    const ct = res.headers.get('content-type') ?? ''
+    if (ct.includes('text/html')) {
+      throw new ApiError('NOT_JSON', '服务端返回了 HTML 页面而非 JSON,请确认地址指向 API 服务根,而非门户/SPA 页面')
+    }
+    throw new ApiError('UPSTREAM', '网关响应不是合法 JSON')
+  }
   return data
 }

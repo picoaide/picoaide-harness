@@ -20,7 +20,8 @@ const maxNameLen = 128
 
 // RegisterRoutes mounts /api/telemetry/* behind BearerAuth.
 func RegisterRoutes(r *gin.Engine, db *sql.DB) {
-	g := r.Group("/api/telemetry", serverauth.BearerAuth(db))
+	base := "/api/telemetry"
+	g := r.Group(base, serverauth.BearerAuth(db))
 	g.POST("/skill-call", reportSkillCall(db))
 }
 

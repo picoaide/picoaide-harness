@@ -8,8 +8,8 @@ const ROWS = [
   {
     kind: 'agent' as const, name: 'ppt-gen', version: '1.0.0', display_name: 'PPT 生成',
     description: 'make ppt', author: 'bob', status: 'pending' as const, reason: '',
-    quality: '' as const, created_at: '2026-08-25T10:00:00Z', base_path: '/api/admin/agent-presets/ppt-gen/1.0.0',
-    preview_path: '/api/admin/agent-presets/ppt-gen/1.0.0/preview',
+    quality: '' as const, created_at: '2026-08-25T10:00:00Z', base_path: '/api/server/admin/agent-presets/ppt-gen/1.0.0',
+    preview_path: '/api/server/admin/agent-presets/ppt-gen/1.0.0/preview',
   },
 ]
 
@@ -18,8 +18,8 @@ const mockRequest = vi.mocked(request)
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path) => {
-    if (path === '/api/admin/capabilities/approvals?type=agent') return { approvals: ROWS }
-    if (path === '/api/admin/departments') return { departments: [] }
+    if (path === '/api/server/admin/capabilities/approvals?type=agent') return { approvals: ROWS }
+    if (path === '/api/server/admin/departments') return { departments: [] }
     return {}
   })
 })
@@ -28,7 +28,7 @@ describe('Capabilities 能力中心(共享智能体审核)', () => {
   it('只请求 type=agent 并渲染智能体队列', async () => {
     render(<Capabilities />)
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/capabilities/approvals?type=agent')
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/capabilities/approvals?type=agent')
     })
     expect(await screen.findByText('PPT 生成')).toBeInTheDocument()
     expect(screen.getByText(/共享智能体的统一审核队列/)).toBeInTheDocument()
@@ -40,7 +40,7 @@ describe('Capabilities 能力中心(共享智能体审核)', () => {
     fireEvent.click(screen.getAllByText('通过')[0]!)
     fireEvent.click(await screen.findByRole('button', { name: '确认' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/1.0.0/approve', { method: 'POST' })
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/agent-presets/ppt-gen/1.0.0/approve', { method: 'POST' })
     })
   })
 
@@ -59,8 +59,8 @@ describe('Capabilities 能力中心(共享智能体审核)', () => {
 
   it('点击文件清单中的文件可查看其内容(审核全部内容)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/capabilities/approvals?type=agent') return { approvals: ROWS }
-      if (path === '/api/admin/departments') return { departments: [] }
+      if (path === '/api/server/admin/capabilities/approvals?type=agent') return { approvals: ROWS }
+      if (path === '/api/server/admin/departments') return { departments: [] }
       if (path.endsWith('/preview')) return { files: ['agent.cordis.yml', 'scripts/run.sh'], composition: '---\nid: ppt-gen\n---\n' }
       if (path.includes('/file?path=scripts%2Frun.sh')) {
         return { path: 'scripts/run.sh', size: 14, binary: false, too_large: false, content: '#!/bin/sh\necho hi\n' }
@@ -75,7 +75,7 @@ describe('Capabilities 能力中心(共享智能体审核)', () => {
     fireEvent.click(fileChip)
     expect(await screen.findByText(/echo hi/u)).toBeInTheDocument()
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/agent-presets/ppt-gen/1.0.0/file?path=scripts%2Frun.sh')
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/agent-presets/ppt-gen/1.0.0/file?path=scripts%2Frun.sh')
     })
   })
 })

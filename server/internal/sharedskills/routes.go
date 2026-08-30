@@ -62,7 +62,8 @@ var versionRe = regexp.MustCompile(`^[0-9a-zA-Z.-]{1,64}$`)
 
 // RegisterRoutes mounts /api/shared-skills (employee Bearer endpoints).
 func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	g := r.Group("/api/shared-skills", serverauth.BearerAuth(db))
+	base := "/api/shared-skills"
+	g := r.Group(base, serverauth.BearerAuth(db))
 	g.GET("", listVisible(db))
 	g.POST("", upload(db, cacheDir))
 	g.GET("/:name/:version/archive", download(db, cacheDir, false))
@@ -70,7 +71,8 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 
 // RegisterAdminRoutes mounts /api/admin/shared-skills (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	g := r.Group("/api/admin/shared-skills", serverauth.AdminAuth(db))
+	base := "/api/admin/shared-skills"
+	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "", serverauth.PermCapabilityRead, listAll(db))
 	serverauth.AdminRoute(g, "GET", "/:name/:version/archive", serverauth.PermCapabilityRead, download(db, cacheDir, true))
 	serverauth.AdminRoute(g, "GET", "/:name/:version/preview", serverauth.PermCapabilityRead, preview(db, cacheDir))

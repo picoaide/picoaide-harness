@@ -21,7 +21,7 @@ const ROWS = [
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
-    if (path === '/api/admin/connectors') return { connectors: ROWS }
+    if (path === '/api/server/admin/connectors') return { connectors: ROWS }
     return {}
   })
 })
@@ -47,7 +47,7 @@ describe('Connectors 连接器目录页', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/connectors', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors', {
         method: 'POST',
         body: JSON.stringify({
           id: 'feishu', name: '飞书', description: '协作', auth_mode: 'token',
@@ -65,7 +65,7 @@ describe('Connectors 连接器目录页', () => {
     const switches = screen.getAllByRole('switch')
     fireEvent.click(switches[0]!)
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/connectors/moka/enabled', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/moka/enabled', {
         method: 'PUT',
         body: JSON.stringify({ enabled: false }),
       })
@@ -82,7 +82,7 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.change(nameInput, { target: { value: 'Moka HR 智能体 v2' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/connectors/moka', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/moka', {
         method: 'PUT',
         body: expect.stringContaining('Moka HR 智能体 v2'),
       })
@@ -96,7 +96,7 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.click(delBtns[0]!)
     fireEvent.click(await screen.findByRole('button', { name: '删除' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/admin/connectors/moka', { method: 'DELETE' })
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/moka', { method: 'DELETE' })
     })
   })
 })

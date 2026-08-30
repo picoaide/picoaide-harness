@@ -45,7 +45,7 @@ export function apply(ctx: Context): void {
       return
     }
     try {
-      const brand = await fetchJSON(session.serverURL, '/api/brand', { token: session.token })
+      const brand = await fetchJSON(session.serverURL, '/api/client/v2/brand', { token: session.token })
       ctx.emit('pico/brand-changed', (brand as BrandConfig) ?? null)
     } catch {
       // Unreachable server: fall back to default (client keeps local brand).

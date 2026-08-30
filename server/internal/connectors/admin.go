@@ -21,7 +21,8 @@ const maxDefinitionBytes = 64 << 10
 
 // RegisterAdminRoutes mounts /api/admin/connectors (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
-	g := r.Group("/api/admin/connectors", serverauth.AdminAuth(db))
+	base := "/api/admin/connectors"
+	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "", serverauth.PermConnectorRead, list(db))
 	serverauth.AdminRoute(g, "GET", "/:id", serverauth.PermConnectorRead, get(db))
 	serverauth.AdminRoute(g, "POST", "", serverauth.PermConnectorWrite, create(db))

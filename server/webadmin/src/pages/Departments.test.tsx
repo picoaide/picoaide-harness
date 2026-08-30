@@ -15,13 +15,13 @@ beforeEach(() => {
   window.confirm = confirmSpy as any
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-    if (path === '/api/admin/departments') return { departments: depts }
-    if (path === '/api/admin/users?size=200') {
+    if (path === '/api/server/admin/departments') return { departments: depts }
+    if (path === '/api/server/admin/users?size=200') {
       return { users: [{ id: 2, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] }], total: 1, page: 1, size: 200 }
     }
-    if (path === '/api/admin/departments' && init?.method === 'POST') return { department: { id: 3, name: '财务部' } }
-    if (path === '/api/admin/departments/1' && init?.method === 'PUT') return { ok: true }
-    if (path === '/api/admin/departments/1' && init?.method === 'DELETE') return { ok: true }
+    if (path === '/api/server/admin/departments' && init?.method === 'POST') return { department: { id: 3, name: '财务部' } }
+    if (path === '/api/server/admin/departments/1' && init?.method === 'PUT') return { ok: true }
+    if (path === '/api/server/admin/departments/1' && init?.method === 'DELETE') return { ok: true }
     return {}
   })
 })
@@ -45,7 +45,7 @@ describe('Departments 部门管理页', () => {
     fireEvent.change(dialog.getByPlaceholderText('如 研发部'), { target: { value: '财务部' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments',
+      '/api/server/admin/departments',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -84,7 +84,7 @@ describe('Departments 部门管理页', () => {
     expect((dialog.getByPlaceholderText('如 研发部') as HTMLInputElement).value).toBe('研发部')
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments/1',
+      '/api/server/admin/departments/1',
       expect.objectContaining({ method: 'PUT' }),
     )
   })
@@ -94,7 +94,7 @@ describe('Departments 部门管理页', () => {
     await screen.findByText('部门管理')
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0])
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments/1',
+      '/api/server/admin/departments/1',
       expect.objectContaining({ method: 'DELETE' }),
     )
   })
@@ -102,7 +102,7 @@ describe('Departments 部门管理页', () => {
 
   it('部门预算:表格展示费用/预算进度条,编辑提交 budget_money', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/admin/departments') {
+      if (path === '/api/server/admin/departments') {
         return {
           departments: [
             { id: 1, name: '研发部', parent_id: 0, leader_id: 2, leader_name: 'alice', description: '', member_count: 1, child_count: 1, granted_count: 0, budget_money: 1000, monthly_cost: 800 },
@@ -110,8 +110,8 @@ describe('Departments 部门管理页', () => {
           ],
         }
       }
-      if (path === '/api/admin/users?size=200') return { users: [{ id: 2, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] }], total: 1, page: 1, size: 200 }
-      if (path === '/api/admin/departments/1' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/server/admin/users?size=200') return { users: [{ id: 2, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] }], total: 1, page: 1, size: 200 }
+      if (path === '/api/server/admin/departments/1' && init?.method === 'PUT') return { ok: true }
       return {}
     })
     render(<Departments />)
@@ -127,7 +127,7 @@ describe('Departments 部门管理页', () => {
     fireEvent.change(budgetInput, { target: { value: '2000' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments/1',
+      '/api/server/admin/departments/1',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify({ name: '研发部', parent_id: 0, leader_id: 2, description: '', budget_money: 2000 }) }),
     )
   })
@@ -141,14 +141,14 @@ describe('Departments 部门管理页', () => {
     fireEvent.change(budgetInput, { target: { value: '0' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments/1',
+      '/api/server/admin/departments/1',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify({ name: '研发部', parent_id: 0, leader_id: 2, description: '', budget_money: 0 }) }),
     )
   })
 
   it('子部门无自身预算但祖先有预算:显示继承提示而非「不限」(中6)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/departments') {
+      if (path === '/api/server/admin/departments') {
         return {
           departments: [
             { id: 1, name: '研发部', parent_id: 0, leader_id: 2, leader_name: 'alice', description: '', member_count: 1, child_count: 1, granted_count: 0, budget_money: 1000, monthly_cost: 800 },
@@ -157,7 +157,7 @@ describe('Departments 部门管理页', () => {
           ],
         }
       }
-      if (path === '/api/admin/users?size=200') return { users: [], total: 0, page: 1, size: 200 }
+      if (path === '/api/server/admin/users?size=200') return { users: [], total: 0, page: 1, size: 200 }
       return {}
     })
     render(<Departments />)
@@ -170,8 +170,8 @@ describe('Departments 部门管理页', () => {
 
   it('用户超过 200 时主管下拉给出提示(L15)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/departments') return { departments: depts }
-      if (path === '/api/admin/users?size=200') {
+      if (path === '/api/server/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/users?size=200') {
         const users = Array.from({ length: 200 }, (_, i) => ({ id: i + 1, username: `user${i}`, is_admin: false, status: 1, groups: [] }))
         return { users, total: 200, page: 1, size: 200 }
       }

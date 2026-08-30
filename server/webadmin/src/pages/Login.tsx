@@ -18,7 +18,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [brand, setBrand] = useState<{ display_name?: string; logo_url?: string; tagline?: string } | null>(null)
 
   useEffect(() => {
-    fetch('/api/brand').then((r) => r.json()).then((d: any) => {
+    fetch('/api/client/v2/brand').then((r) => r.json()).then((d: any) => {
       if (d?.enabled && d.login) setBrand(d.login)
     }).catch(() => { /* default */ })
   }, [])

@@ -11,7 +11,7 @@ import { resolveSkillsDir } from './skill-install.ts'
 /**
  * 技能使用量上报客户端(0040):
  * 客户端在技能被真正调用后(模型侧 `skill` 工具执行成功,或用户 `/name`
- * 手势内容注入),向后端 `POST /api/telemetry/skill-call` 上报 name+version,
+ * 手势内容注入),向后端 `POST /api/client/v2/telemetry/skill-call` 上报 name+version,
  * 服务端累加 shared_skills(有版本)或 skills(市场)行的调用计数。
  *
  * 设计约束:
@@ -56,7 +56,7 @@ export async function reportSkillCall(
   if (reported.has(key)) return false
   reported.add(key)
   try {
-    await fetchJSON(session.serverURL, '/api/telemetry/skill-call', {
+    await fetchJSON(session.serverURL, '/api/client/v2/telemetry/skill-call', {
       token: session.token,
       method: 'POST',
       body: { name, version: version ?? '' },

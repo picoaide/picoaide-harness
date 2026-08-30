@@ -144,10 +144,10 @@ export default function Gateway() {
   const load = useCallback(async () => {
     try {
       const [p, m, g, ch] = await Promise.all([
-        request('/api/admin/providers'),
-        request('/api/admin/models'),
-        request('/api/admin/gateway'),
-        request('/api/admin/channels'),
+        request('/api/server/admin/providers'),
+        request('/api/server/admin/models'),
+        request('/api/server/admin/gateway'),
+        request('/api/server/admin/channels'),
       ])
       setProviders(p.providers ?? [])
       setModels(m.models ?? [])
@@ -202,7 +202,7 @@ export default function Gateway() {
       // 审计 2026-08-25 B2:线上只存业务字段,keyId 是纯 UI 稳定键,不落库。
       const peaked = peakList.map(({ keyId: _drop, ...fields }) => fields)
       const body = { ...cfg, peak_windows: peaked.length ? JSON.stringify(peaked) : '' }
-      await request('/api/admin/gateway', { method: 'PUT', body: JSON.stringify(body) })
+      await request('/api/server/admin/gateway', { method: 'PUT', body: JSON.stringify(body) })
       setError('')
       flash('已保存')
     } catch (err: any) {
@@ -221,7 +221,7 @@ export default function Gateway() {
     if (provForm.channel && !provForm.api_key) { setProvErr('渠道型上游必须填写 API Key'); return }
     setBusy('create-provider')
     try {
-      const r = await request('/api/admin/providers', {
+      const r = await request('/api/server/admin/providers', {
         method: 'POST',
         body: JSON.stringify({
           name: provForm.name.trim(),
@@ -278,7 +278,7 @@ export default function Gateway() {
       if (!editProvForm.channel && editProvForm.models.trim() !== '') {
         body.models = editProvForm.models.split(',').map((s) => s.trim()).filter(Boolean)
       }
-      await request(`/api/admin/providers/${editProv.id}`, { method: 'PUT', body: JSON.stringify(body) })
+      await request(`/api/server/admin/providers/${editProv.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditProv(null)
       setError('')
       flash('已保存')
@@ -330,7 +330,7 @@ export default function Gateway() {
       if (modelForm.cache_input_price_per_1m.trim() !== '') body.cache_input_price_per_1m = Number(modelForm.cache_input_price_per_1m)
       // 低谷折扣(0023):留空 = 无峰谷价;0<d<1 = 低谷窗口内 ×d
       if (modelForm.offpeak_discount.trim() !== '') body.offpeak_discount = Number(modelForm.offpeak_discount)
-      await request('/api/admin/models', {
+      await request('/api/server/admin/models', {
         method: 'POST',
         body: JSON.stringify(body),
       })
@@ -350,7 +350,7 @@ export default function Gateway() {
     if (!window.confirm('删除该上游?其模型将一并删除')) return
     setBusy(`del-provider-${id}`)
     try {
-      await request(`/api/admin/providers/${id}`, { method: 'DELETE' })
+      await request(`/api/server/admin/providers/${id}`, { method: 'DELETE' })
       setError('')
       load()
     } catch (err: any) {
@@ -369,7 +369,7 @@ export default function Gateway() {
     if (!window.confirm(`删除该模型?${hint}`)) return
     setBusy(`del-model-${m.id}`)
     try {
-      await request(`/api/admin/models/${m.id}`, { method: 'DELETE' })
+      await request(`/api/server/admin/models/${m.id}`, { method: 'DELETE' })
       setError('')
       load()
     } catch (err: any) {
@@ -409,7 +409,7 @@ export default function Gateway() {
       if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
       if (editPriceForm.cache.trim() !== '') body.cache_input_price_per_1m = Number(editPriceForm.cache)
       if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
-      await request(`/api/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
+      await request(`/api/server/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
       setError('')
       load()
@@ -424,7 +424,7 @@ export default function Gateway() {
     if (busy) return // P1-6: 双击守卫
     setBusy('sync-all')
     try {
-      const r = await request('/api/admin/providers/sync-all', { method: 'POST' })
+      const r = await request('/api/server/admin/providers/sync-all', { method: 'POST' })
       const results: { provider: string; added: number; removed: number; skipped?: boolean; error?: string }[] = r.results ?? []
       // 审计修复 L5/L8:手动型上游折叠为一行汇总,不再逐条当错误展示
       const skipped = results.filter((x) => x.skipped).length
@@ -463,7 +463,7 @@ export default function Gateway() {
     if (busy) return // P1-6: 双击守卫(Switch 无按钮态,handler 层防连点)
     setBusy(`toggle-${p.id}`)
     try {
-      await request(`/api/admin/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ enabled }) })
+      await request(`/api/server/admin/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ enabled }) })
       setError('')
       load()
     } catch (err: any) {

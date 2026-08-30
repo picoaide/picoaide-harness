@@ -71,7 +71,7 @@ export default function Capabilities() {
   const [departments, setDepartments] = useState<Dept[]>([])
 
   useEffect(() => {
-    request('/api/admin/departments')
+    request('/api/server/admin/departments')
       .then((data) => { setDepartments(data.departments ?? []) })
       .catch(() => { /* 单用户授权仍可用 */ })
   }, [])
@@ -82,7 +82,7 @@ export default function Capabilities() {
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ approvals: ApprovalRow[] }>('/api/admin/capabilities/approvals?type=agent')
+      const data = await request<{ approvals: ApprovalRow[] }>('/api/server/admin/capabilities/approvals?type=agent')
       if (current !== loadSeq.current) return
       setAllRows(data.approvals ?? [])
     } catch (err: any) {

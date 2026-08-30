@@ -14,6 +14,6 @@ export function validateBootstrap(cfg: BootstrapConfig | null | undefined): { co
 }
 
 export async function getBootstrap(session: Session): Promise<{ config: BootstrapConfig; fellBack: boolean }> {
-  const data = (await fetchJSON(session.serverURL, '/api/config/bootstrap', { token: session.token })) as BootstrapConfig
+  const data = (await fetchJSON(session.serverURL, '/api/client/v2/config/bootstrap', { token: session.token })) as BootstrapConfig
   return validateBootstrap(data)
 }

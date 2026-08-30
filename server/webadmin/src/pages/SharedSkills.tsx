@@ -60,7 +60,7 @@ export default function SharedSkills() {
   const [departments, setDepartments] = useState<Dept[]>([])
 
   useEffect(() => {
-    request('/api/admin/departments')
+    request('/api/server/admin/departments')
       .then((data) => { setDepartments(data.departments ?? []) })
       .catch(() => { /* 单用户授权仍可用 */ })
   }, [])
@@ -71,7 +71,7 @@ export default function SharedSkills() {
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ skills: SkillRow[] }>('/api/admin/shared-skills')
+      const data = await request<{ skills: SkillRow[] }>('/api/server/admin/shared-skills')
       if (current !== loadSeq.current) return
       setAllRows(data.skills ?? [])
       setRows(status === 'all' ? (data.skills ?? []) : (data.skills ?? []).filter(r => r.status === status))
@@ -90,7 +90,7 @@ export default function SharedSkills() {
     setBusy(name + version + kind)
     setError('')
     try {
-      const base = `/api/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+      const base = `/api/server/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
       if (kind === 'delete') {
         await request(base, { method: 'DELETE' })
       } else if (kind === 'reject') {
@@ -122,7 +122,7 @@ export default function SharedSkills() {
     setError('')
     try {
       const data = await request<ArchivePreviewData>(
-        `/api/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
+        `/api/server/admin/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/preview`)
       setPreview(data)
     } catch (err: any) {
       setError(err.message)
@@ -205,7 +205,7 @@ export default function SharedSkills() {
                           <FileText className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="sm" asChild={false}
-                          onClick={() => { window.open(`/api/admin/shared-skills/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version)}/archive`, '_blank') }}
+                          onClick={() => { window.open(`/api/server/admin/shared-skills/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version)}/archive`, '_blank') }}
                           title="下载归档核查">
                           <Download className="h-4 w-4" />
                         </Button>
@@ -243,7 +243,7 @@ export default function SharedSkills() {
         data={preview}
         mainTitle="SKILL.md"
         mainContent={preview?.skill_md ?? ''}
-        fileBase={`/api/admin/shared-skills/${encodeURIComponent(previewName)}/${encodeURIComponent(previewVersion)}`}
+        fileBase={`/api/server/admin/shared-skills/${encodeURIComponent(previewName)}/${encodeURIComponent(previewVersion)}`}
         onClose={() => { setPreviewKey('') }}
       />
 
@@ -290,7 +290,7 @@ export default function SharedSkills() {
       <GrantDialog
         open={grantName !== ''}
         name={grantName}
-        basePath={`/api/admin/shared-skills/${encodeURIComponent(grantName)}`}
+        basePath={`/api/server/admin/shared-skills/${encodeURIComponent(grantName)}`}
         departments={departments}
         onClose={() => { setGrantName('') }}
         onSaved={() => { void load(tab) }}

@@ -23,7 +23,8 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		sse: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
 		rl:  newRateLimiter(),
 	}
-	v1 := r.Group("/v1", serverauth.BearerAuth(db))
+	base := "/v1"
+	v1 := r.Group(base, serverauth.BearerAuth(db))
 	v1.POST("/chat/completions", a.handleChatCompletions)
 	v1.POST("/embeddings", a.handleEmbeddings)
 	v1.POST("/messages", a.handleMessages)

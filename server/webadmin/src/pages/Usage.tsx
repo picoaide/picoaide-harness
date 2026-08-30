@@ -131,10 +131,10 @@ export default function Usage() {
   const loadQuota = useCallback(async () => {
     try {
       const [users, gw, models, depts] = await Promise.all([
-        request('/api/admin/users?size=200'),
-        request('/api/admin/gateway').catch(() => null),
-        request('/api/admin/models').catch(() => null),
-        request('/api/admin/departments').catch(() => null),
+        request('/api/server/admin/users?size=200'),
+        request('/api/server/admin/gateway').catch(() => null),
+        request('/api/server/admin/models').catch(() => null),
+        request('/api/server/admin/departments').catch(() => null),
       ])
       const all: QuotaUser[] = (users.users ?? []).filter((u: QuotaUser) => !u.is_admin)
       setQuotaUsers(all)
@@ -169,7 +169,7 @@ export default function Usage() {
     pv.set('from', ymd(prevFrom))
     pv.set('to', ymd(prevTo))
     try {
-      const prev = await request(`/api/admin/usage?${pv}`)
+      const prev = await request(`/api/server/admin/usage?${pv}`)
       const prevRows: UsageRow[] = prev.rows ?? []
       setCompareTokens(prevRows.reduce((s, r) => s + chatTokens(r), 0))
       setCompareCost(prevRows.reduce((s, r) => s + (r.cost ?? 0), 0))
@@ -188,7 +188,7 @@ export default function Usage() {
       const params = new URLSearchParams({ group })
       if (fromRef.current) params.set('from', fromRef.current)
       if (toRef.current) params.set('to', toRef.current)
-      const data = await request(`/api/admin/usage?${params}`)
+      const data = await request(`/api/server/admin/usage?${params}`)
       if (current !== loadSeq.current) return // 过期响应丢弃
       setRows(data.rows ?? [])
       setError('')
@@ -373,7 +373,7 @@ export default function Usage() {
       if (fromRef.current) params.set('from', fromRef.current)
       if (toRef.current) params.set('to', toRef.current)
       params.set('username', username)
-      const data = await request(`/api/admin/usage?${params}`)
+      const data = await request(`/api/server/admin/usage?${params}`)
       setDrillRows(data.rows ?? [])
     } catch (err: any) {
       // 弹窗内独立错误态,不污染页面级 error(审计低5)
