@@ -86,8 +86,8 @@ func TestBootstrap(t *testing.T) {
 		t.Fatalf("skills = %v (disabled must be excluded)", skills)
 	}
 	web := out["web"].(map[string]any)
-	if web["allow_private"] != false {
-		t.Fatalf("web = %v", web)
+	if web["allow_private"] != nil || web["search_endpoint"] != nil {
+		t.Fatalf("web = %v (allow_private/search_endpoint must be removed)", web)
 	}
 	// no token → 401
 	if w, _ := getJSON(t, r, "/api/config/bootstrap", ""); w.Code != http.StatusUnauthorized {
@@ -110,6 +110,8 @@ func TestBootstrapDefaultModelFallback(t *testing.T) {
 
 func TestBootstrapWebSettings(t *testing.T) {
 	r, db := setup(t)
+	// 2026-09:web.allow_private / web.search_endpoint 已删除,不再下发;
+	// 旧 setting 值仍存在时也必须不出现在响应里(客户端不消费)。
 	if err := serverstore.SetSetting(db, "web.allow_private", "true"); err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +125,8 @@ func TestBootstrapWebSettings(t *testing.T) {
 	token, _ := serverauth.IssueToken(db, u.ID)
 	_, out := getJSON(t, r, "/api/config/bootstrap", token)
 	web := out["web"].(map[string]any)
-	if web["allow_private"] != true || web["search_endpoint"] != "https://search.example.com/q" {
-		t.Fatalf("web = %v", web)
+	if web["allow_private"] != nil || web["search_endpoint"] != nil {
+		t.Fatalf("web = %v (allow_private/search_endpoint must be removed)", web)
 	}
 	if web["default_thinking_level"] != "high" {
 		t.Fatalf("default_thinking_level = %v, want high", web["default_thinking_level"])

@@ -66,7 +66,7 @@ beforeEach(() => {
       return { users, total: 4, page: 1, size: 200 }
     }
     if (path.startsWith('/api/server/admin/gateway')) {
-      return { monthly_quota: '5000', monthly_quota_money: '50', default_model: 'm', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' }
+      return { monthly_quota: '5000', monthly_quota_money: '50', default_model: 'm', rate_limit: '60', server_base_url: '' }
     }
     return {}
   })

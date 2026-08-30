@@ -14,7 +14,7 @@ const SAMPLE_BOOTSTRAP = {
   models: [{ id: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{"max_output": 8192}' }],
   skills: [],
   mcp: [],
-  web: { allow_private: false, search_endpoint: '', default_thinking_level: 'high' },
+  web: { default_thinking_level: 'high' },
 }
 
 function stubCtx(): {

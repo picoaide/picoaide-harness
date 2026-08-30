@@ -101,7 +101,7 @@ function formatCaps(defaultParams: string): string {
   }
 }
 
-// http(s) URL 校验(审计修复 L3):base_url/search_endpoint/server_base_url 前置拦截
+// http(s) URL 校验(审计修复 L3):base_url/server_base_url 前置拦截
 function isHttpUrl(v: string): boolean {
   try {
     const u = new URL(v)
@@ -119,7 +119,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', allow_private: false, search_endpoint: '', default_thinking_level: 'max', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -190,7 +190,6 @@ export default function Gateway() {
       const rm = Number(cfg.retention_months)
       if (!Number.isInteger(rm) || rm < 0 || rm > 120) { setError('明细保留必须 0-120 个月(0=永不删除)'); return }
     }
-    if (cfg.search_endpoint && !isHttpUrl(cfg.search_endpoint)) { setError('web_search 端点必须是 http(s) URL'); return }
     if (cfg.server_base_url && !isHttpUrl(cfg.server_base_url)) { setError('对外访问地址必须是 http(s) URL'); return }
     if (peakList.some((w) => !w.start || !w.end || w.start >= w.end)) {
       setError('高峰时段每行的开始时间必须早于结束时间')
@@ -493,158 +492,17 @@ export default function Gateway() {
     <div className="space-y-6">
       <PageHeader
         title="网关配置"
-        desc="模型与上游接入、限流配额与峰谷计费"
+        desc="上游接入与模型管理、限流配额与峰谷计费、客户端默认配置"
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {okMsg && <div className="text-sm text-green-600">{okMsg}</div>}
       {syncMsg && <div className="text-sm text-green-600">{syncMsg}</div>}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>全局设置</CardTitle>
-          <CardDescription>默认模型与 web 工具配置,随客户端启动配置下发</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <Label>默认模型</Label>
-              <Select value={cfg.default_model} onValueChange={(v) => setCfg({ ...cfg, default_model: v })}>
-                <SelectTrigger><SelectValue placeholder="选择默认模型" /></SelectTrigger>
-                <SelectContent>
-                  {models.map((m) => (
-                    <SelectItem key={m.id} value={m.name}>{m.display_name || m.name} ({m.name})</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="rate-limit">每用户网关限流(次/分钟)</Label>
-              <Input id="rate-limit" type="number" min={1} max={100000} value={cfg.rate_limit}
-                onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="monthly-quota">每用户默认月配额(token)</Label>
-              <Input id="monthly-quota" type="number" min={0} value={cfg.monthly_quota}
-                onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
-              <p className="text-xs text-muted-foreground">0 = 不限;员工默认按月统计,可在用户页单独覆盖</p>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="monthly-quota-money">每用户默认月金额配额(元)</Label>
-              <Input id="monthly-quota-money" type="number" min={0} step="0.01" value={cfg.monthly_quota_money}
-                onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
-              <Label htmlFor="usage-retention" className="mt-4">调用明细保留时长(月)</Label>
-              <Input id="usage-retention" type="number" min={0} max={120} value={cfg.retention_months}
-                onChange={(e) => setCfg({ ...cfg, retention_months: e.target.value })} />
-              <p className="text-xs text-muted-foreground">
-                0 = 永不删除;超出保留期的明细分区被自动清理;日账/月账统计永久保留
-              </p>
-              <p className="text-xs text-muted-foreground">
-                0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖
-              </p>
-            </div>
-          </div>
-          {/* 高峰时段结构化编辑(审计修复 M4):时间段行列表,替代手填 JSON;weekdays 按天配置 */}
-          <div className="space-y-1">
-            <Label>高峰时段(北京时间)</Label>
-            <div className="space-y-2">
-              {peakList.map((w, i) => (
-                <div key={w.keyId} className="flex flex-wrap items-center gap-2">
-                  <Input
-                    type="time"
-                    aria-label={`高峰开始 ${i + 1}`}
-                    className="w-40 shrink-0"
-                    value={w.start}
-                    onChange={(e) => updatePeak(i, 'start', e.target.value)}
-                  />
-                  <span className="text-xs text-muted-foreground">至</span>
-                  <Input
-                    type="time"
-                    aria-label={`高峰结束 ${i + 1}`}
-                    className="w-40 shrink-0"
-                    value={w.end}
-                    onChange={(e) => updatePeak(i, 'end', e.target.value)}
-                  />
-                  {/* 星期多选:1=周一…7=周日;空 = 每天 */}
-                  <div className="flex items-center gap-0.5" aria-label={`星期选择 ${i + 1}`}>
-                    {WEEKDAY_LABELS.map((lbl, idx) => {
-                      const d = idx + 1
-                      const on = w.weekdays.includes(d)
-                      return (
-                        <button
-                          key={d}
-                          type="button"
-                          aria-pressed={on}
-                          aria-label={`周${lbl}`}
-                          onClick={() => togglePeakDay(i, d)}
-                          className={`flex h-7 w-7 items-center justify-center rounded text-[11px] transition-colors ${on
-                            ? 'bg-blue-600 font-semibold text-white'
-                            : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                        >
-                          {lbl}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  <Button size="sm" variant="outline" type="button" className="ml-2 shrink-0" onClick={() => removePeak(i)}>移除</Button>
-                </div>
-              ))}
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" type="button" onClick={addPeak}>添加时段</Button>
-                <Button size="sm" variant="outline" type="button" onClick={presetPeak}>DeepSeek 当前政策(工作日)</Button>
-                {peakList.length > 0 && (
-                  <Button size="sm" variant="ghost" type="button" onClick={() => setPeakList([])}>清空(无峰谷价)</Button>
-                )}
-              </div>
-            </div>
-            <ul className="space-y-1 text-xs text-muted-foreground">
-              <li>按北京时间判定,半开区间 [start,end);时段可勾选适用星期(周一…周日),未勾选 = 该天无峰谷。</li>
-              <li>高峰窗口外(空闲时段)且模型配置了低谷折扣率时,费用按折扣率打折。</li>
-              <li>清空 = 无峰谷价(全天标准价)。</li>
-              <li>DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间<strong>周一至周五</strong> 09:00-12:00、14:00-18:00(其余为空闲,含周末),空闲价 = 高峰价 × 50%。</li>
-            </ul>
-          </div>
-          <div className="grid grid-cols-2 items-start gap-4">
-            <div className="flex items-center gap-2">
-              <Switch checked={cfg.allow_private} onCheckedChange={(v) => setCfg({ ...cfg, allow_private: v })} />
-              <Label>允许 web_fetch 访问私有网段</Label>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="search-endpoint">web_search 端点</Label>
-              <Input id="search-endpoint" type="url" placeholder="https://search.example.com/q" value={cfg.search_endpoint}
-                onChange={(e) => setCfg({ ...cfg, search_endpoint: e.target.value })} />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="default-thinking-level">默认思考强度(客户端默认模型,登录自动应用)</Label>
-            <Select value={cfg.default_thinking_level} onValueChange={(v) => setCfg({ ...cfg, default_thinking_level: v })}>
-              <SelectTrigger id="default-thinking-level" aria-label="默认思考强度"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="max">max(最大思考)</SelectItem>
-                <SelectItem value="high">high(高)</SelectItem>
-                <SelectItem value="low">low(低)</SelectItem>
-                <SelectItem value="off">off(关闭思考)</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              登录后客户端默认模型自动使用该思考强度;用户仍可在模型选择器单独调整当前对话
-            </p>
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="server-base-url">对外访问地址 (Server Base URL)</Label>
-            <Input id="server-base-url" type="url" placeholder="https://picoaide.example.com" value={cfg.server_base_url}
-              onChange={(e) => setCfg({ ...cfg, server_base_url: e.target.value })} />
-            <p className="text-xs text-muted-foreground">
-              客户端登录与员工访问入口(经 Caddy HTTPS 反代后的地址);填写后管理页顶部展示;清空保存可移除
-            </p>
-          </div>
-          <Button onClick={saveGateway} disabled={busy !== null}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
-        </CardContent>
-      </Card>
-
+      {/* ① 上游 Provider */}
       <Card>
         <CardHeader>
           <CardTitle>上游 Provider</CardTitle>
-          <CardDescription>LLM 上游密钥只存服务端(AES-GCM 加密)</CardDescription>
+          <CardDescription>LLM 上游密钥只存服务端(AES-GCM 加密);协议「共用(both)」时搜索与对话共用同一 key</CardDescription>
           <div className="flex justify-end">
             <Button size="sm" onClick={() => setProvDialog(true)}>添加上游</Button>
           </div>
@@ -774,6 +632,169 @@ export default function Gateway() {
         </CardContent>
       </Card>
 
+      {/* ③ 全局设置(分组) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>全局设置</CardTitle>
+          <CardDescription>随客户端启动配置下发,员工登录后自动应用</CardDescription>
+          <div className="flex justify-end">
+            <Button onClick={saveGateway} disabled={busy !== null}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {/* 客户端默认 */}
+          <section className="space-y-1">
+            <h3 className="text-sm font-medium text-muted-foreground">客户端默认</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="default-model">默认模型</Label>
+                <Select value={cfg.default_model} onValueChange={(v) => setCfg({ ...cfg, default_model: v })}>
+                  <SelectTrigger id="default-model"><SelectValue placeholder="选择默认模型" /></SelectTrigger>
+                  <SelectContent>
+                    {models.map((m) => (
+                      <SelectItem key={m.id} value={m.name}>{m.display_name || m.name} ({m.name})</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">员工登录后的默认聊天模型</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="default-thinking-level">默认思考强度</Label>
+                <Select value={cfg.default_thinking_level} onValueChange={(v) => setCfg({ ...cfg, default_thinking_level: v })}>
+                  <SelectTrigger id="default-thinking-level"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="max">max(最大思考)</SelectItem>
+                    <SelectItem value="high">high(高)</SelectItem>
+                    <SelectItem value="low">low(低)</SelectItem>
+                    <SelectItem value="off">off(关闭思考)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">登录后默认模型自动使用该强度;用户可在模型选择器单独调整</p>
+              </div>
+            </div>
+          </section>
+
+          {/* 网关防护 */}
+          <section className="space-y-1">
+            <h3 className="text-sm font-medium text-muted-foreground">网关防护</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="rate-limit">每用户网关限流(次/分钟)</Label>
+                <Input id="rate-limit" type="number" min={1} max={100000} value={cfg.rate_limit}
+                  onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
+              </div>
+            </div>
+          </section>
+
+          {/* 配额与用量 */}
+          <section className="space-y-1">
+            <h3 className="text-sm font-medium text-muted-foreground">配额与用量</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="monthly-quota">每用户默认月配额(token)</Label>
+                <Input id="monthly-quota" type="number" min={0} value={cfg.monthly_quota}
+                  onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
+                <p className="text-xs text-muted-foreground">0 = 不限;员工默认按月统计,可在用户页单独覆盖</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="monthly-quota-money">每用户默认月金额配额(元)</Label>
+                <Input id="monthly-quota-money" type="number" min={0} step="0.01" value={cfg.monthly_quota_money}
+                  onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
+                <p className="text-xs text-muted-foreground">0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="usage-retention">调用明细保留时长(月)</Label>
+                <Input id="usage-retention" type="number" min={0} max={120} value={cfg.retention_months}
+                  onChange={(e) => setCfg({ ...cfg, retention_months: e.target.value })} />
+                <p className="text-xs text-muted-foreground">0 = 永不删除;超出保留期的明细分区被自动清理;日账/月账统计永久保留</p>
+              </div>
+            </div>
+          </section>
+
+          {/* 计费(峰谷折扣) */}
+          <section className="space-y-1">
+            <h3 className="text-sm font-medium text-muted-foreground">计费（峰谷折扣）</h3>
+            <div className="space-y-2">
+              <Label>高峰时段(北京时间)</Label>
+              {peakList.map((w, i) => (
+                <div key={w.keyId} className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="time"
+                    aria-label={`高峰开始 ${i + 1}`}
+                    className="w-40 shrink-0"
+                    value={w.start}
+                    onChange={(e) => updatePeak(i, 'start', e.target.value)}
+                  />
+                  <span className="text-xs text-muted-foreground">至</span>
+                  <Input
+                    type="time"
+                    aria-label={`高峰结束 ${i + 1}`}
+                    className="w-40 shrink-0"
+                    value={w.end}
+                    onChange={(e) => updatePeak(i, 'end', e.target.value)}
+                  />
+                  {/* 星期多选:1=周一…7=周日;空 = 每天 */}
+                  <div className="flex items-center gap-0.5" aria-label={`星期选择 ${i + 1}`}>
+                    {WEEKDAY_LABELS.map((lbl, idx) => {
+                      const d = idx + 1
+                      const on = w.weekdays.includes(d)
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          aria-pressed={on}
+                          aria-label={`周${lbl}`}
+                          onClick={() => togglePeakDay(i, d)}
+                          className={`flex h-7 w-7 items-center justify-center rounded text-[11px] transition-colors ${on
+                            ? 'bg-blue-600 font-semibold text-white'
+                            : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                        >
+                          {lbl}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <Button size="sm" variant="outline" type="button" className="ml-2 shrink-0" onClick={() => removePeak(i)}>移除</Button>
+                </div>
+              ))}
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" type="button" onClick={addPeak}>添加时段</Button>
+                <Button size="sm" variant="outline" type="button" onClick={presetPeak}>DeepSeek 当前政策(工作日)</Button>
+                {peakList.length > 0 && (
+                  <Button size="sm" variant="ghost" type="button" onClick={() => setPeakList([])}>清空(无峰谷价)</Button>
+                )}
+              </div>
+              <ul className="space-y-1 text-xs text-muted-foreground">
+                <li>按北京时间判定,半开区间 [start,end);时段可勾选适用星期(周一…周日),未勾选 = 该天无峰谷。</li>
+                <li>高峰窗口外(空闲时段)且模型配置了低谷折扣率时,费用按折扣率打折。</li>
+                <li>清空 = 无峰谷价(全天标准价)。</li>
+                <li>DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间<strong>周一至周五</strong> 09:00-12:00、14:00-18:00(其余为空闲,含周末),空闲价 = 高峰价 × 50%。</li>
+              </ul>
+            </div>
+          </section>
+
+          {/* Web 工具 */}
+          <section className="space-y-1">
+            <h3 className="text-sm font-medium text-muted-foreground">Web 工具</h3>
+            <p className="text-xs text-muted-foreground">
+              web_search / web_fetch 已随客户端默认启用（web_search 走网关 /v1/messages 服务端代理,web_fetch 由客户端直连抓取网页,支持内网访问）。无需额外配置。
+            </p>
+          </section>
+
+          {/* 部署 */}
+          <section className="space-y-1">
+            <h3 className="text-sm font-medium text-muted-foreground">部署</h3>
+            <div className="space-y-1">
+              <Label htmlFor="server-base-url">对外访问地址 (Server Base URL)</Label>
+              <Input id="server-base-url" type="url" placeholder="https://picoaide.example.com" value={cfg.server_base_url}
+                onChange={(e) => setCfg({ ...cfg, server_base_url: e.target.value })} />
+              <p className="text-xs text-muted-foreground">
+                客户端登录与员工访问入口(经 Caddy HTTPS 反代后的地址);填写后管理页顶部展示;清空保存可移除
+              </p>
+            </div>
+          </section>
+        </CardContent>
+      </Card>
 
       <Dialog open={provDialog} onOpenChange={(v) => { setProvDialog(v); if (!v) setProvErr('') }}>
         <DialogContent>

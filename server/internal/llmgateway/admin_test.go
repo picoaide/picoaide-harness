@@ -314,7 +314,7 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	if w.Code != http.StatusOK || out["default_thinking_level"] != "max" {
 		t.Fatalf("default_thinking_level not persisted: %d %v", w.Code, out)
 	}
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_model":"deepseek-chat","allow_private":true,"search_endpoint":"https://s/q"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_model":"deepseek-chat"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set default model: %d %s", w.Code, w.Body.String())
 	}
@@ -324,8 +324,12 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	}
 	// read back
 	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" || out["allow_private"] != true {
+	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" {
 		t.Fatalf("gateway config: %d %v", w.Code, out)
+	}
+	// 2026-09:allow_private/search_endpoint 已删除,不读不回显
+	if out["allow_private"] != nil || out["search_endpoint"] != nil {
+		t.Fatalf("removed fields still in gateway config: %v", out)
 	}
 	// server_base_url:对外 HTTPS 地址,webadmin 配置并读回
 	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"https://picoaide.example.com"}`, hdr)
@@ -632,8 +636,8 @@ func TestAdminGatewayPeakWindowsClear(t *testing.T) {
 }
 
 // 审计修复 M1:PUT /gateway 部分更新语义——未传字段不覆盖,显式空串清空。
-// 此前 allow_private/search_endpoint 被部分提交意外重置,server_base_url
-// /default_model 又永远无法清空。
+// 2026-09:allow_private/search_endpoint 已随客户端 web 工具链路调整删除,
+// server_base_url / default_model 保持"显式空串清空"语义。
 func TestAdminGatewayPartialUpdate(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
@@ -641,7 +645,7 @@ func TestAdminGatewayPartialUpdate(t *testing.T) {
 	// 先全量设置
 	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{
 		"default_model":"","rate_limit":"60","monthly_quota":"0","monthly_quota_money":"0",
-		"peak_windows":"","allow_private":true,"search_endpoint":"https://s/q","server_base_url":"https://picoaide.example.com"
+		"peak_windows":"","server_base_url":"https://picoaide.example.com"
 	}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("full set: %d", w.Code)
 	}
@@ -653,25 +657,16 @@ func TestAdminGatewayPartialUpdate(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("get: %d", w.Code)
 	}
-	if out["rate_limit"] != "120" || out["allow_private"] != true || out["search_endpoint"] != "https://s/q" ||
-		out["server_base_url"] != "https://picoaide.example.com" {
+	if out["rate_limit"] != "120" || out["server_base_url"] != "https://picoaide.example.com" {
 		t.Fatalf("partial update clobbered fields: %v", out)
 	}
-	// 显式空串清空 server_base_url / search_endpoint / default_model
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"","search_endpoint":""}`, hdr); w.Code != http.StatusOK {
+	// 显式空串清空 server_base_url / default_model
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"","default_model":""}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("clear fields: %d", w.Code)
 	}
 	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["server_base_url"] != "" || out["search_endpoint"] != "" {
+	if w.Code != http.StatusOK || out["server_base_url"] != "" || out["default_model"] != "" {
 		t.Fatalf("clear not applied: %v", out)
-	}
-	// 显式 false 关闭 allow_private
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"allow_private":false}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("disable allow_private: %d", w.Code)
-	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["allow_private"] != false {
-		t.Fatalf("allow_private not disabled: %v", out)
 	}
 }
 

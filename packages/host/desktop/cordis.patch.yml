@@ -25,3 +25,21 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: []
+
+# Web 工具默认启用(2026-09):web_search 走网关 /v1/messages 服务端代理,
+# web_fetch 由客户端直连抓取(web-fetch-http,允许内网访问,不做 SSRF 拦截)。
+# base bundle 的 tool-web 行 fetch:false 且 web-app bundle 整体 disabled,
+# 这里重新启用并挂载 fetch provider;preset(agent)层的 tool-web 只注册
+# web_search,web_fetch 由全局层注册,对所有会话可见。
+- id: web
+  config:
+    searchProvider: deepseek-official
+    fetchProvider: http
+- insert:
+    - id: web-fetch-http
+      name: '@deepseek-ai/dsh-web-fetch-http'
+- id: tool-web
+  disabled: false
+  config:
+    fetch: true
+    searchTimeoutMs: 60000

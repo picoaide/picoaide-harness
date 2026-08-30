@@ -720,7 +720,7 @@ Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`bootstrap.go`:`GET /api/config/bootstrap`(BearerAuth)——聚合返回:**`{default_model, models, skills, mcp, web}`(字段名固定,客户端 2.4 `BootstrapConfig` 严格对齐)**;模型列表来自 `ListModels`(enabled provider),技能建议来自 skills 表 enabled 全部,**MCP 建议复用 marketplace 查询逻辑(不直接读表,防漂移)**,脱敏;**`web: {allow_private, search_endpoint}` 来自 settings(webadmin 网关页配置)**;**default_model 无效时用列表首个模型兜底并记日志**——员工零配置的唯一启动入口
+`bootstrap.go`:`GET /api/config/bootstrap`(BearerAuth)——聚合返回:**`{default_model, models, skills, mcp, web}`(字段名固定,客户端 2.4 `BootstrapConfig` 严格对齐)**;模型列表来自 `ListModels`(enabled provider),技能建议来自 skills 表 enabled 全部,**MCP 建议复用 marketplace 查询逻辑(不直接读表,防漂移)**,脱敏;**`web: {default_thinking_level}` 来自 settings(webadmin 网关页配置;web_search 走网关 /v1/messages 代理、web_fetch 客户端默认启用,均无需配置)**;**default_model 无效时用列表首个模型兜底并记日志**——员工零配置的唯一启动入口
 `admin.go` 增:`/api/admin/providers` + `/api/admin/models`(CRUD + `gateway.default_model` 设置,**保存时校验属于 enabled models**)、`/api/admin/skills` POST/PUT/DELETE(承接 1.11,下架=置 enabled=0)、`/api/admin/mcp` POST/PUT/DELETE(承接 1.13,上架/编辑/下架=置 enabled=0,无 grants)、`/api/admin/kb`(上传/删除/文件夹/授权;txt/md 抽取,docx/pdf 在 4.2)、`/api/admin/mcp-downloads`(凭证下载审计列表)
 `main.go`:`/api/config/*` 挂 BearerAuth
 
@@ -1621,8 +1621,8 @@ Expected: FAIL
 export async function webFetch(url: string, opts: { maxBytes?: number; timeoutSec?: number }): Promise<string>
 export async function webSearch(query: string): Promise<{ title: string; url: string; snippet: string }[]>
 ```
-- `web_fetch`:HTTP GET,大小限制默认 5MB,超时 15s,HTML→文本;仅 http/https;**默认拒绝 loopback/私有/链路本地网段(SSRF 防护),`bootstrap.web.allow_private=true` 时放开(管理员配置,随启动配置下发,客户端不可自设)**
-- `web_search`:调 `bootstrap.web.search_endpoint`(管理员配置;未配置返回明确错误)
+- `web_fetch`:HTTP GET,大小限制默认 5MB,超时 15s,HTML→文本;仅 http/https;**客户端默认启用直连抓取(不做私有网段拦截,允许内网)**,无需管理员配置
+- `web_search`:客户端默认启用,走网关 `/v1/messages` 服务端代理(0043/0044,官方 key 不出服务端)
 - 引擎注册进工具表(Craft/Plan 模式可用);外发目标为显式 URL(用户可见 tool_start 输入),不自动外发
 Run: 同上
 Expected: PASS

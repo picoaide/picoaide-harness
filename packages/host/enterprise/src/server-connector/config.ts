@@ -21,8 +21,6 @@ export interface BootstrapConfig {
   /** 连接器目录(0042):服务端下发,客户端连接器中心显示/连接。 */
   connectors?: { id: string; name: string; description: string; auth_mode: string; definition: string }[]
   web: {
-    allow_private: boolean
-    search_endpoint: string
     error_reporting_dsn?: string
     error_reporting_enabled?: boolean
     error_reporting_level?: string
