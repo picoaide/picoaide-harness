@@ -21,6 +21,7 @@ declare module '@deepseek-ai/cordis' {
 }
 import { AccountSection } from './AccountSection.tsx'
 import { BraceMark, BrandName, BrandBadge } from './Brand.tsx'
+import { buildBrandCSSVars } from './brand-vars.ts'
 import { installFavicon } from './favicon.ts'
 import { startBrandStore, readBrandSync } from './brand-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
@@ -95,14 +96,20 @@ export function apply(ctx: ClientContext): void {
     () => {
       startBrandStore(ctx)
       // v3b §4.2: hero/accent CSS 变量注入(品牌变化时更新)。
+      // 注意: --pico-hero-headline/--pico-hero-tagline 被 BRAND_CSS 的
+      // `content: var(…)` 消费, content 只接受字符串字面量, 值必须带引号
+      // 写入(buildBrandCSSVars 内 JSON.stringify), 否则整条声明非法、
+      // hero 标题文字不可见(2026-09 实测)。
       const applyVars = (brand: BrandConfig | null): void => {
-        const name = brand?.enabled && brand?.client?.display_name ? brand.client.display_name : ''
-        const tagline = brand?.enabled && brand?.client?.tagline ? brand.client.tagline : ''
-        const accent = brand?.enabled && brand?.client?.accent ? brand.client.accent : ''
         const root = document.documentElement
-        root.style.setProperty('--pico-hero-headline', name || 'PicoAide Harness')
-        root.style.setProperty('--pico-hero-tagline', tagline || '企业版')
-        if (accent) root.style.setProperty('--dsw-alias-brand-primary', accent)
+        const vars = buildBrandCSSVars(brand)
+        // 品牌关闭/颜色被移除时清掉残留 accent, 回退上游主题默认色。
+        if (!('--dsw-alias-brand-primary' in vars)) {
+          root.style.removeProperty('--dsw-alias-brand-primary')
+        }
+        for (const [k, v] of Object.entries(vars)) {
+          root.style.setProperty(k, v)
+        }
       }
       applyVars(readBrandSync())
       const off = ctx.on('pico/brand-changed', (brand) => applyVars(brand))
