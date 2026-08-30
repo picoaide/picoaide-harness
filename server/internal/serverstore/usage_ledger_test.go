@@ -87,7 +87,10 @@ func TestCleanupUsageRetention(t *testing.T) {
 	}
 	uid := mustUserID(t, db)
 	// 上月一条(会被保留 1 个月 = 不删);上月-1 一条(会删)
-	older := time.Now().AddDate(0, -2, 0)
+	// 月份归一化到每月 1 号:AddDate(0,-2,0) 在月末(如 8/31 → 6/31→7/1)会
+	// 因天数溢出折进保留月,导致日期相关 flake(2026-08-31 实测复现)。
+	now := time.Now()
+	older := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -2, 0)
 	if err := ensureUsagePartition(db, older); err != nil {
 		t.Fatal(err)
 	}

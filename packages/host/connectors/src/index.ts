@@ -151,7 +151,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string; token?: string } | null } | undefined
       const session = pico?.getSession?.()
       if (!session?.serverURL || !session?.token) return
-      const res = await fetch(`${session.serverURL.replace(/\/+$/, '')}/api/config/bootstrap`, {
+      const res = await fetch(`${session.serverURL.replace(/\/+$/, '')}/api/client/v2/config/bootstrap`, {
         headers: { Authorization: `Bearer ${session.token}` },
       })
       if (!res.ok) return
