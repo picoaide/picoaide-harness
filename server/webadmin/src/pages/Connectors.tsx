@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import { Switch } from '../components/ui/switch'
@@ -60,7 +60,7 @@ export default function Connectors() {
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ connectors: ConnectorRow[] }>('/api/server/admin/connectors')
+      const data = await request<{ connectors: ConnectorRow[] }>(`${ADMIN_API}/connectors`)
       setRows(data.connectors ?? [])
     } catch (err: any) {
       setError(err.message)
@@ -94,7 +94,7 @@ export default function Connectors() {
     setBusy(row.id + '-enabled')
     setError('')
     try {
-      await request(`/api/server/admin/connectors/${encodeURIComponent(row.id)}/enabled`, {
+      await request(`${ADMIN_API}/connectors/${encodeURIComponent(row.id)}/enabled`, {
         method: 'PUT',
         body: JSON.stringify({ enabled }),
       })
@@ -128,7 +128,7 @@ export default function Connectors() {
     setError('')
     try {
       const isNew = editing === 'new'
-      const path = isNew ? '/api/server/admin/connectors' : `/api/server/admin/connectors/${encodeURIComponent(editing.id)}`
+      const path = isNew ? `${ADMIN_API}/connectors` : `${ADMIN_API}/connectors/${encodeURIComponent(editing.id)}`
       await request(path, {
         method: isNew ? 'POST' : 'PUT',
         body: JSON.stringify({
@@ -154,7 +154,7 @@ export default function Connectors() {
     setBusy(row.id + '-del')
     setError('')
     try {
-      await request(`/api/server/admin/connectors/${encodeURIComponent(row.id)}`, { method: 'DELETE' })
+      await request(`${ADMIN_API}/connectors/${encodeURIComponent(row.id)}`, { method: 'DELETE' })
       setConfirmDel(null)
       await load()
     } catch (err: any) {

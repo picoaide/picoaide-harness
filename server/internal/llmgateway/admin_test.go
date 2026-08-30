@@ -50,7 +50,7 @@ func adminTestSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 
 	// login
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -85,7 +85,7 @@ func TestAdminProviders(t *testing.T) {
 	defer db.Close()
 
 	// create provider with key
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"sk-secret-xyz","models":["deepseek-chat"]}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create provider: %d %s", w.Code, w.Body.String())
@@ -109,12 +109,12 @@ func TestAdminProviders(t *testing.T) {
 		t.Fatalf("decrypt round trip: %q %v", plain, err)
 	}
 	// non-admin → 403
-	if w, _ := adminReq(t, r, "GET", "/api/admin/providers", "", nil); w.Code != http.StatusUnauthorized {
+	if w, _ := adminReq(t, r, "GET", "/api/server/admin/providers", "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no session: %d", w.Code)
 	}
 
 	// update without key keeps old
-	w, _ = adminReq(t, r, "PUT", "/api/admin/providers/1", `{"base_url":"https://new.example.com"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/providers/1", `{"base_url":"https://new.example.com"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update provider: %d", w.Code)
 	}
@@ -128,7 +128,7 @@ func TestAdminProviderChannel(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
@@ -138,7 +138,7 @@ func TestAdminProviderChannel(t *testing.T) {
 		t.Fatalf("channel = %v", p["channel"])
 	}
 
-	w, out = adminReq(t, r, "GET", "/api/admin/channels", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/channels", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("channels: %d %s", w.Code, w.Body.String())
 	}
@@ -153,7 +153,7 @@ func TestAdminProviderChannelAutofill(t *testing.T) {
 	defer db.Close()
 
 	// base_url omitted + channel set → autofill from channel default
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
@@ -164,11 +164,11 @@ func TestAdminProviderChannelAutofill(t *testing.T) {
 	}
 
 	// stored custom base_url
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/providers/1", `{"base_url":"https://custom.example.com"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/providers/1", `{"base_url":"https://custom.example.com"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("set custom base_url: %d", w.Code)
 	}
 	// channel-only update must not clobber the stored custom base_url
-	w, out = adminReq(t, r, "PUT", "/api/admin/providers/1", `{"channel":"deepseek"}`, hdr)
+	w, out = adminReq(t, r, "PUT", "/api/server/admin/providers/1", `{"channel":"deepseek"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("channel update: %d %s", w.Code, w.Body.String())
 	}
@@ -188,7 +188,7 @@ func TestAdminChannelProviderUpdateKeepsSyncedModels(t *testing.T) {
 	t.Cleanup(func() { syncFetchFn = prev })
 
 	// create channel provider with models=[]
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
@@ -202,7 +202,7 @@ func TestAdminChannelProviderUpdateKeepsSyncedModels(t *testing.T) {
 	}
 
 	// update the provider (name change); must not wipe channel-synced models
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"name":"deepseek-v2"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"name":"deepseek-v2"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("update channel provider: %d %s", w.Code, w.Body.String())
 	}
 	models, _ := ListModels(db)
@@ -216,7 +216,7 @@ func TestCreateProviderChannelSyncsImmediately(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
@@ -243,7 +243,7 @@ func TestCreateProviderSyncFailureKeepsProvider(t *testing.T) {
 	syncFetchFn = func(url string) ([]byte, error) { return nil, errors.New("upstream 500") }
 	t.Cleanup(func() { syncFetchFn = prev })
 
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create must not fail on sync error: %d %s", w.Code, w.Body.String())
@@ -270,7 +270,7 @@ func TestCreateProviderSyncFailureKeepsProvider(t *testing.T) {
 // 渠道列表返回 name + 默认 base_url,页面据此自动回填。
 func TestChannelsListDetailed(t *testing.T) {
 	r, _, hdr := adminTestSetup(t)
-	w, out := adminReq(t, r, "GET", "/api/admin/channels", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/channels", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("channels: %d %s", w.Code, w.Body.String())
 	}
@@ -288,33 +288,33 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":["deepseek-chat"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("create provider failed")
 	}
 	// provider models are synced into the models table, so a model is
 	// immediately visible and selectable as default (no double source)
-	w, out := adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
 	if w.Code != http.StatusOK || len(out["models"].([]any)) != 1 {
 		t.Fatalf("models not synced from provider: %d %v", w.Code, out)
 	}
 	// default model must be in enabled models
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_model":"bogus-model"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_model":"bogus-model"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bogus default model accepted: %d", w.Code)
 	}
 	// default_thinking_level:非法值拒绝,合法值写入并读回
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_thinking_level":"ultra"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_thinking_level":"ultra"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid default_thinking_level accepted: %d", w.Code)
 	}
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_thinking_level":"max"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_thinking_level":"max"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("set default_thinking_level: %d %s", w.Code, w.Body.String())
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["default_thinking_level"] != "max" {
 		t.Fatalf("default_thinking_level not persisted: %d %v", w.Code, out)
 	}
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_model":"deepseek-chat"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_model":"deepseek-chat"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set default model: %d %s", w.Code, w.Body.String())
 	}
@@ -323,7 +323,7 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 		t.Fatalf("default_model = %q ok=%v", v, ok)
 	}
 	// read back
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" {
 		t.Fatalf("gateway config: %d %v", w.Code, out)
 	}
@@ -332,33 +332,33 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 		t.Fatalf("removed fields still in gateway config: %v", out)
 	}
 	// server_base_url:对外 HTTPS 地址,webadmin 配置并读回
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"https://picoaide.example.com"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"server_base_url":"https://picoaide.example.com"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set server_base_url: %d %s", w.Code, w.Body.String())
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["server_base_url"] != "https://picoaide.example.com" {
 		t.Fatalf("server_base_url not persisted: %d %v", w.Code, out)
 	}
 	// monthly_quota:全局默认员工月配额,读写并拒绝负数
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota":"-5"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota":"-5"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("negative monthly_quota accepted: %d", w.Code)
 	}
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota":"100000"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota":"100000"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set monthly_quota: %d %s", w.Code, w.Body.String())
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["monthly_quota"] != "100000" {
 		t.Fatalf("monthly_quota not persisted: %d %v", w.Code, out)
 	}
 	// 未配置时 GET 返回 "0"(不限)
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota":"0"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota":"0"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("reset monthly_quota: %d", w.Code)
 	}
 	// delete model
-	if w, _ := adminReq(t, r, "DELETE", "/api/admin/models/1", "", hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "DELETE", "/api/server/admin/models/1", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("delete model: %d", w.Code)
 	}
 }
@@ -369,7 +369,7 @@ func TestAdminGatewayFlexibleNumericFields(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":60,"monthly_quota":100000,"monthly_quota_money":50.5}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":60,"monthly_quota":100000,"monthly_quota_money":50.5}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("numeric fields rejected: %d %s", w.Code, w.Body.String())
 	}
 	v, ok, _ := serverstore.GetSetting(db, "gateway.rate_limit")
@@ -385,7 +385,7 @@ func TestAdminGatewayFlexibleNumericFields(t *testing.T) {
 		t.Fatalf("monthly_quota_money = %q ok=%v (want 50.5)", v, ok)
 	}
 	// 字符串输入同样兼容(前端形式)
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":"30"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":"30"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("string field rejected: %d %s", w.Code, w.Body.String())
 	}
 	v, _, _ = serverstore.GetSetting(db, "gateway.rate_limit")
@@ -393,7 +393,7 @@ func TestAdminGatewayFlexibleNumericFields(t *testing.T) {
 		t.Fatalf("rate_limit = %q (want 30)", v)
 	}
 	// 非法值仍拒绝
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":-5}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":-5}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("negative rate_limit accepted: %d", w.Code)
 	}
 }
@@ -402,14 +402,14 @@ func TestAdminGatewayFlexibleNumericFields(t *testing.T) {
 func TestProviderEnableToggle(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"manual","base_url":"https://x.example","api_key":"sk","models":["m1"]}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create provider: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["provider"].(map[string]any)["id"].(float64))
 	// 禁用
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("disable provider: %d %s", w.Code, w.Body.String())
 	}
 	ups, err := MatchModels(db, "m1")
@@ -420,7 +420,7 @@ func TestProviderEnableToggle(t *testing.T) {
 		t.Fatalf("disabled provider still routable: %+v", ups)
 	}
 	// 重新启用
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"enabled":true}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"enabled":true}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("enable provider: %d %s", w.Code, w.Body.String())
 	}
 	ups, err = MatchModels(db, "m1")
@@ -435,20 +435,20 @@ func TestAdminGatewayMoneyQuota(t *testing.T) {
 	defer db.Close()
 
 	// 未配置时 GET 返回 "0"(不限)
-	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["monthly_quota_money"] != "0" {
 		t.Fatalf("default monthly_quota_money: %d %v", w.Code, out)
 	}
 	// 负数拒绝
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota_money":"-5"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota_money":"-5"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("negative monthly_quota_money accepted: %d", w.Code)
 	}
 	// 写入并读回
-	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota_money":"500"}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota_money":"500"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set monthly_quota_money: %d %s", w.Code, w.Body.String())
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["monthly_quota_money"] != "500" {
 		t.Fatalf("monthly_quota_money not persisted: %d %v", w.Code, out)
 	}
@@ -459,12 +459,12 @@ func TestAdminModelPricing(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("create provider failed")
 	}
 	// 新增模型带价格
-	w, _ := adminReq(t, r, "POST", "/api/admin/models",
+	w, _ := adminReq(t, r, "POST", "/api/server/admin/models",
 		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天","input_price_per_1m":2,"output_price_per_1m":8}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create model with price: %d %s", w.Code, w.Body.String())
@@ -480,7 +480,7 @@ func TestAdminModelPricing(t *testing.T) {
 		t.Fatalf("output price = %v, want 8", m.OutputPricePer1M)
 	}
 	// 更新价格
-	w, _ = adminReq(t, r, "PUT", "/api/admin/models/1",
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/models/1",
 		`{"input_price_per_1m":3,"output_price_per_1m":10}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update model price: %d %s", w.Code, w.Body.String())
@@ -493,7 +493,7 @@ func TestAdminModelPricing(t *testing.T) {
 		t.Fatalf("prices after update = %v/%v, want 3/10", *m.InputPricePer1M, *m.OutputPricePer1M)
 	}
 	// 负数拒绝
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"input_price_per_1m":-1}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"input_price_per_1m":-1}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("negative price accepted: %d", w.Code)
 	}
 }
@@ -503,12 +503,12 @@ func TestAdminModelOffpeakDiscount(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("create provider failed")
 	}
 	// 新增带峰谷折扣
-	w, _ := adminReq(t, r, "POST", "/api/admin/models",
+	w, _ := adminReq(t, r, "POST", "/api/server/admin/models",
 		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天","input_price_per_1m":2,"output_price_per_1m":8,"offpeak_discount":0.5}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create model with offpeak: %d %s", w.Code, w.Body.String())
@@ -521,7 +521,7 @@ func TestAdminModelOffpeakDiscount(t *testing.T) {
 		t.Fatalf("offpeak_discount = %v, want 0.5", m.OffpeakDiscount)
 	}
 	// 更新折扣
-	w, _ = adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":0.6}`, hdr)
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"offpeak_discount":0.6}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update offpeak: %d %s", w.Code, w.Body.String())
 	}
@@ -530,13 +530,13 @@ func TestAdminModelOffpeakDiscount(t *testing.T) {
 		t.Fatalf("offpeak after update = %v, want 0.6", *m.OffpeakDiscount)
 	}
 	// 非法值拒绝:0 与 >1
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":0}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"offpeak_discount":0}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("offpeak 0 accepted: %d", w.Code)
 	}
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":1.5}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"offpeak_discount":1.5}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("offpeak 1.5 accepted: %d", w.Code)
 	}
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":-0.5}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"offpeak_discount":-0.5}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("offpeak -0.5 accepted: %d", w.Code)
 	}
 }
@@ -547,7 +547,7 @@ func TestAdminGatewayPeakWindows(t *testing.T) {
 	defer db.Close()
 
 	// 缺省返回空(无峰谷)
-	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("gateway get: %d", w.Code)
 	}
@@ -557,20 +557,20 @@ func TestAdminGatewayPeakWindows(t *testing.T) {
 
 	// 写入 DeepSeek 当前政策窗口
 	body := `{"peak_windows":"[{\"start\":\"09:00\",\"end\":\"12:00\"},{\"start\":\"14:00\",\"end\":\"18:00\"}]"}`
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", body, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", body, hdr); w.Code != http.StatusOK {
 		t.Fatalf("set peak_windows: %d %s", w.Code, w.Body.String())
 	}
 	v, ok, _ := serverstore.GetSetting(db, serverstore.PeakWindowsSetting)
 	if !ok || v == "" {
 		t.Fatalf("peak_windows not persisted: %q ok=%v", v, ok)
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["peak_windows"] != v {
 		t.Fatalf("peak_windows readback: %d %v", w.Code, out)
 	}
 
 	// 非法 JSON 拒绝(不写库,防计费口径混乱)
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"peak_windows":"not-json"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"peak_windows":"not-json"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad peak_windows accepted: %d", w.Code)
 	}
 }
@@ -581,17 +581,17 @@ func TestAdminModelsListIncludesPricing(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("create provider failed")
 	}
-	w, _ := adminReq(t, r, "POST", "/api/admin/models",
+	w, _ := adminReq(t, r, "POST", "/api/server/admin/models",
 		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天","input_price_per_1m":2,"output_price_per_1m":8,"offpeak_discount":0.5}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create model: %d %s", w.Code, w.Body.String())
 	}
 
-	w, out := adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list models: %d", w.Code)
 	}
@@ -618,7 +618,7 @@ func TestAdminGatewayPeakWindowsClear(t *testing.T) {
 	defer db.Close()
 
 	body := `{"peak_windows":"[{\"start\":\"09:00\",\"end\":\"12:00\"}]"}`
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", body, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", body, hdr); w.Code != http.StatusOK {
 		t.Fatalf("set peak_windows: %d", w.Code)
 	}
 	v, ok, _ := serverstore.GetSetting(db, serverstore.PeakWindowsSetting)
@@ -626,10 +626,10 @@ func TestAdminGatewayPeakWindowsClear(t *testing.T) {
 		t.Fatalf("peak_windows not persisted: %q ok=%v", v, ok)
 	}
 	// 显式空串清空
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"peak_windows":""}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"peak_windows":""}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("clear peak_windows: %d", w.Code)
 	}
-	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["peak_windows"] != "" {
 		t.Fatalf("peak_windows after clear = %v (%d), want empty", out["peak_windows"], w.Code)
 	}
@@ -643,17 +643,17 @@ func TestAdminGatewayPartialUpdate(t *testing.T) {
 	defer db.Close()
 
 	// 先全量设置
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{
 		"default_model":"","rate_limit":"60","monthly_quota":"0","monthly_quota_money":"0",
 		"peak_windows":"","server_base_url":"https://picoaide.example.com"
 	}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("full set: %d", w.Code)
 	}
 	// 只提交 rate_limit:其它字段必须保持原值
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":"120"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":"120"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("partial update: %d", w.Code)
 	}
-	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("get: %d", w.Code)
 	}
@@ -661,10 +661,10 @@ func TestAdminGatewayPartialUpdate(t *testing.T) {
 		t.Fatalf("partial update clobbered fields: %v", out)
 	}
 	// 显式空串清空 server_base_url / default_model
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"","default_model":""}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"server_base_url":"","default_model":""}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("clear fields: %d", w.Code)
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["server_base_url"] != "" || out["default_model"] != "" {
 		t.Fatalf("clear not applied: %v", out)
 	}
@@ -673,10 +673,10 @@ func TestAdminGatewayPartialUpdate(t *testing.T) {
 // 审计修复 M2:删除不存在的上游/模型 → 404 NOT_FOUND(此前 500)。
 func TestAdminDeleteNotFound(t *testing.T) {
 	r, _, hdr := adminTestSetup(t)
-	if w, out := adminReq(t, r, "DELETE", "/api/admin/providers/999", "", hdr); w.Code != http.StatusNotFound {
+	if w, out := adminReq(t, r, "DELETE", "/api/server/admin/providers/999", "", hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("delete missing provider = %d %v, want 404", w.Code, out)
 	}
-	if w, out := adminReq(t, r, "DELETE", "/api/admin/models/999", "", hdr); w.Code != http.StatusNotFound {
+	if w, out := adminReq(t, r, "DELETE", "/api/server/admin/models/999", "", hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("delete missing model = %d %v, want 404", w.Code, out)
 	}
 }
@@ -684,7 +684,7 @@ func TestAdminDeleteNotFound(t *testing.T) {
 // 审计修复 M2:createModel 指向不存在的上游 → VALIDATION(此前 FK 冲突落 500)。
 func TestAdminCreateModelBadProvider(t *testing.T) {
 	r, _, hdr := adminTestSetup(t)
-	if w, out := adminReq(t, r, "POST", "/api/admin/models",
+	if w, out := adminReq(t, r, "POST", "/api/server/admin/models",
 		`{"name":"m","provider_id":999}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("create model with bad provider = %d %v, want 400", w.Code, out)
 	}
@@ -696,16 +696,16 @@ func TestAdminModelRenameProtection(t *testing.T) {
 	defer db.Close()
 
 	// 渠道型上游(adminTestSetup 的 syncFetchFn 返回 deepseek-chat/reasoner)
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d", w.Code)
 	}
 	// 渠道同步模型拒绝改名
-	if w, out := adminReq(t, r, "PUT", "/api/admin/models/1", `{"name":"renamed-chat"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, out := adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"name":"renamed-chat"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("rename channel model = %d %v, want 400", w.Code, out)
 	}
 	// 手动型上游:无用量可改名
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"manual","base_url":"https://x.example","api_key":"sk","models":["m1"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create manual provider: %d", w.Code)
 	}
@@ -713,18 +713,18 @@ func TestAdminModelRenameProtection(t *testing.T) {
 	if err := db.QueryRow("SELECT id FROM models WHERE name = 'm1'").Scan(&mid); err != nil {
 		t.Fatal(err)
 	}
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/models/%d", mid), `{"name":"m1-renamed"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/models/%d", mid), `{"name":"m1-renamed"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("rename manual model without usage = %d", w.Code)
 	}
 	// 有用量记录后拒绝改名
 	if _, err := serverstore.RecordUsage(db, 1, "m1-renamed", 10, 10); err != nil {
 		t.Fatal(err)
 	}
-	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/models/%d", mid), `{"name":"m1-again"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/models/%d", mid), `{"name":"m1-again"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("rename model with usage = %d %v, want 400", w.Code, out)
 	}
 	// 改名撞已存在模型名 → VALIDATION(此前 UNIQUE 冲突落 500)
-	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/models/%d", mid), `{"name":"deepseek-reasoner"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/models/%d", mid), `{"name":"deepseek-reasoner"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("rename to existing name = %d %v, want 400", w.Code, out)
 	}
 }
@@ -734,16 +734,16 @@ func TestAdminModelPriceNullClears(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"p","base_url":"https://x.example","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("create provider failed")
 	}
-	if w, _ := adminReq(t, r, "POST", "/api/admin/models",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/models",
 		`{"name":"m","provider_id":1,"input_price_per_1m":2,"output_price_per_1m":8}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create model: %d", w.Code)
 	}
 	// 显式 null 清空输入价
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"input_price_per_1m":null}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/1", `{"input_price_per_1m":null}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("null clear: %d", w.Code)
 	}
 	m, err := serverstore.GetModel(db, 1)
@@ -761,7 +761,7 @@ func TestAdminModelPriceNullClears(t *testing.T) {
 // 审计修复 L4:渠道型上游无 API Key 创建 → VALIDATION。
 func TestAdminCreateChannelProviderRequiresKey(t *testing.T) {
 	r, _, hdr := adminTestSetup(t)
-	if w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"nokey","channel":"deepseek"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("channel provider without key = %d %v, want 400", w.Code, out)
 	}
@@ -772,14 +772,14 @@ func TestAdminProviderUpdateChannelClearsManualModels(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 	// 手动型上游带模型清单
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"p","base_url":"https://x.example","api_key":"k","models":["m1"]}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create manual provider: %d", w.Code)
 	}
 	id := int64(out["provider"].(map[string]any)["id"].(float64))
 	// 切到渠道型
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("switch to channel: %d", w.Code)
 	}
 	p, err := serverstore.GetGatewayProvider(db, id)
@@ -796,16 +796,16 @@ func TestAdminProviderUpdateChannelClearsManualModels(t *testing.T) {
 func TestAdminModelsListIncludesDisabledProvider(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"p","base_url":"https://x.example","api_key":"k","models":["m1"]}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create provider: %d", w.Code)
 	}
 	id := int64(out["provider"].(map[string]any)["id"].(float64))
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("disable provider: %d", w.Code)
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list models: %d", w.Code)
 	}
@@ -829,16 +829,16 @@ func TestAdminDeleteChannelModelNotResurrected(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 	// 渠道型上游创建即同步 2 个模型(adminTestSetup 的 syncFetchFn)
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d", w.Code)
 	}
-	w, out := adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
 	if w.Code != http.StatusOK || len(out["models"].([]any)) != 2 {
 		t.Fatalf("models after channel sync = %v", out)
 	}
 	// 删除 deepseek-chat(id=1)
-	if w, _ := adminReq(t, r, "DELETE", "/api/admin/models/1", "", hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "DELETE", "/api/server/admin/models/1", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("delete channel model: %d", w.Code)
 	}
 	// 再次同步同一目录:排除名单中的模型不复活
@@ -848,7 +848,7 @@ func TestAdminDeleteChannelModelNotResurrected(t *testing.T) {
 	if _, err := SyncOnce(db, fetch); err != nil {
 		t.Fatal(err)
 	}
-	w, out = adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list models: %d", w.Code)
 	}
@@ -868,7 +868,7 @@ func TestAdminProviderChannelClearToManual(t *testing.T) {
 	defer db.Close()
 
 	// 创建渠道型上游并携带 models:清单必须被丢弃(模型由同步维护)
-	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"ch","api_key":"sk","channel":"deepseek","models":["stale-model"]}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
@@ -883,7 +883,7 @@ func TestAdminProviderChannelClearToManual(t *testing.T) {
 	}
 
 	// 切回手动型:channel 显式空串
-	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"channel":""}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"channel":""}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("clear channel: %d %s", w.Code, w.Body.String())
 	}
 	p, err = serverstore.GetGatewayProvider(db, id)
@@ -905,7 +905,7 @@ func TestAdminToggleProviderKeepsManualModels(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
-	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
 		`{"name":"manual","base_url":"http://x","api_key":"k","models":["keep-a","keep-b"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create provider: %d", w.Code)
 	}
@@ -915,14 +915,14 @@ func TestAdminToggleProviderKeepsManualModels(t *testing.T) {
 		t.Fatalf("models after create = %d, want 2", n)
 	}
 	// 仅启停(不带 models 字段)
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/providers/1", `{"enabled":false}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/providers/1", `{"enabled":false}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("toggle: %d %s", w.Code, w.Body.String())
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE provider_id = 1").Scan(&n); err != nil || n != 2 {
 		t.Fatalf("models after toggle = %d, want 2 (must not be wiped)", n)
 	}
 	// 显式携带 models 才同步
-	if w, _ := adminReq(t, r, "PUT", "/api/admin/providers/1", `{"models":["only-a"]}`, hdr); w.Code != http.StatusOK {
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/providers/1", `{"models":["only-a"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("set models: %d", w.Code)
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE provider_id = 1").Scan(&n); err != nil || n != 1 {
@@ -933,7 +933,7 @@ func TestAdminToggleProviderKeepsManualModels(t *testing.T) {
 func TestCreateProviderProtocolValidation(t *testing.T) {
 	r, _, hdr := adminTestSetup(t)
 	// 非法协议拒绝
-	w, out := adminReq(t, r, "POST", "/api/admin/providers", `{"name":"x","base_url":"https://x.com","api_key":"k","protocol":"gopher"}`, hdr)
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers", `{"name":"x","base_url":"https://x.com","api_key":"k","protocol":"gopher"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -941,7 +941,7 @@ func TestCreateProviderProtocolValidation(t *testing.T) {
 		t.Fatalf("body = %s", w.Body.String())
 	}
 	// anthropic 创建成功并回显 protocol
-	w, out = adminReq(t, r, "POST", "/api/admin/providers", `{"name":"ds-an","base_url":"https://api.deepseek.com/anthropic/v1","api_key":"k","protocol":"anthropic","models":["deepseek-v4-flash"]}`, hdr)
+	w, out = adminReq(t, r, "POST", "/api/server/admin/providers", `{"name":"ds-an","base_url":"https://api.deepseek.com/anthropic/v1","api_key":"k","protocol":"anthropic","models":["deepseek-v4-flash"]}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}

@@ -45,10 +45,10 @@ func TestAllAuthMethodsEndToEnd(t *testing.T) {
 		"auth.enabled":        "local,ldap,openid,oidc",
 		"openid.issuer":       idp.srv.URL,
 		"openid.client_id":    "openid-client",
-		"openid.redirect_url": "http://localhost/api/auth/openid/callback",
+		"openid.redirect_url": "http://localhost/api/client/v2/auth/openid/callback",
 		"oidc.issuer":         idp.srv.URL,
 		"oidc.client_id":      "oidc-client",
-		"oidc.redirect_url":   "http://localhost/api/auth/oidc/callback",
+		"oidc.redirect_url":   "http://localhost/api/client/v2/auth/oidc/callback",
 		"ldap.server_url":     "ldap://fake",
 		"ldap.bind_dn":        "cn=svc,ou=system,dc=example",
 		"ldap.bind_password":  "svcpass",
@@ -131,7 +131,7 @@ func getMethods(t *testing.T, r http.Handler) []struct {
 } {
 	t.Helper()
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/auth/methods", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/server/admin/auth/methods", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("methods status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -152,7 +152,7 @@ func postLogin(t *testing.T, r http.Handler, username, password string) string {
 	t.Helper()
 	w := httptest.NewRecorder()
 	body := `{"username":"` + username + `","password":"` + password + `"}`
-	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/api/client/v2/auth/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -170,7 +170,7 @@ func browserLoginFlow(t *testing.T, r http.Handler, idp *fakeIDP, name string, a
 	t.Helper()
 	// login(带 server 参数)
 	w := httptest.NewRecorder()
-	loginPath := "/api/auth/" + name + "/login?server=https%3A%2F%2Fgw.example.com"
+	loginPath := "/api/client/v2/auth/" + name + "/login?server=https%3A%2F%2Fgw.example.com"
 	r.ServeHTTP(w, httptest.NewRequest("GET", loginPath, nil))
 	if w.Code != http.StatusFound {
 		t.Fatalf("%s login status = %d body=%s", name, w.Code, w.Body.String())
@@ -188,7 +188,7 @@ func browserLoginFlow(t *testing.T, r http.Handler, idp *fakeIDP, name string, a
 	}
 	code := authorize(t, idp, authURL)
 	w = httptest.NewRecorder()
-	cb := "/api/auth/" + name + "/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state)
+	cb := "/api/client/v2/auth/" + name + "/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state)
 	req := httptest.NewRequest("GET", cb, nil)
 	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state_" + name, Value: stateCookie})
 	r.ServeHTTP(w, req)

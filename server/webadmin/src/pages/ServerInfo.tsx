@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
@@ -57,7 +57,7 @@ export default function ServerInfo() {
   const load = async () => {
     setError('')
     try {
-      const d = await request('/api/server/admin/server-info')
+      const d = await request(`${ADMIN_API}/server-info`)
       setInfo(d)
     } catch (e: any) {
       setError(e.message || '加载失败')

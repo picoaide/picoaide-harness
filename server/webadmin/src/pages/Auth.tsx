@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -61,7 +61,7 @@ export default function Auth() {
 
   const load = useCallback(async () => {
     try {
-      const r = await request('/api/server/admin/auth') as { auth?: AuthConfig }
+      const r = await request(`${ADMIN_API}/auth`) as { auth?: AuthConfig }
       const a = r.auth ?? {}
       setMode(a.mode || 'local')
       setEnabled((a.enabled ?? 'local').split(',').map((s) => s.trim()).filter(Boolean))
@@ -101,7 +101,7 @@ export default function Auth() {
       const body: any = { type: tab }
       if (tab === 'ldap') body.ldap = { server_url: form.ldap.server_url, bind_dn: form.ldap.bind_dn, bind_password: form.ldap.bind_password, base_dn: form.ldap.base_dn }
       if (tab === 'oidc' || tab === 'openid') body.oidc = { issuer: tab === 'oidc' ? form.oidc.issuer : form.openid.issuer }
-      const r = await request('/api/server/admin/auth/test', { method: 'POST', body: JSON.stringify(body) }) as { ok: boolean; message: string }
+      const r = await request(`${ADMIN_API}/auth/test`, { method: 'POST', body: JSON.stringify(body) }) as { ok: boolean; message: string }
       setTestMsg(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`)
     } catch (e: any) {
       setTestMsg(`✗ ${e.message}`)
@@ -128,7 +128,7 @@ export default function Auth() {
         oidc: form.oidc,
         openid: form.openid,
       }
-      await request('/api/server/admin/auth', { method: 'PUT', body: JSON.stringify(body) })
+      await request(`${ADMIN_API}/auth`, { method: 'PUT', body: JSON.stringify(body) })
       setAuthMsg('认证配置已保存(重启服务端后生效)')
       setTimeout(() => setAuthMsg(''), 4000)
       void load()
@@ -230,7 +230,7 @@ export default function Auth() {
                   <Field abbr="oidc" label="Issuer" value={form.oidc.issuer ?? ''} ph="https://idp.example.com" k="issuer" set={(v) => setForm({ ...form, oidc: { ...form.oidc, issuer: v } })} />
                   <Field abbr="oidc" label="Client ID" value={form.oidc.client_id ?? ''} k="client_id" set={(v) => setForm({ ...form, oidc: { ...form.oidc, client_id: v } })} />
                   <SecretField label="Client Secret(未改=保持现值)" value={form.oidc.client_secret ?? ''} set={(v) => setForm({ ...form, oidc: { ...form.oidc, client_secret: v } })} />
-                  <Field abbr="oidc" label="Redirect URL" value={form.oidc.redirect_url ?? ''} ph="https://picoaide.example.com/api/auth/oidc/callback" k="redirect_url" set={(v) => setForm({ ...form, oidc: { ...form.oidc, redirect_url: v } })} />
+                  <Field abbr="oidc" label="Redirect URL" value={form.oidc.redirect_url ?? ''} ph="https://picoaide.example.com/api/client/v2/auth/oidc/callback" k="redirect_url" set={(v) => setForm({ ...form, oidc: { ...form.oidc, redirect_url: v } })} />
                 </div>
               </div>
             </TabsContent>
@@ -242,7 +242,7 @@ export default function Auth() {
                   <Field abbr="openid" label="Issuer" value={form.openid.issuer ?? ''} ph="https://openid.example.com" k="issuer" set={(v) => setForm({ ...form, openid: { ...form.openid, issuer: v } })} />
                   <Field abbr="openid" label="Client ID" value={form.openid.client_id ?? ''} k="client_id" set={(v) => setForm({ ...form, openid: { ...form.openid, client_id: v } })} />
                   <SecretField label="Client Secret(未改=保持现值)" value={form.openid.client_secret ?? ''} set={(v) => setForm({ ...form, openid: { ...form.openid, client_secret: v } })} />
-                  <Field abbr="openid" label="Redirect URL" value={form.openid.redirect_url ?? ''} ph="https://picoaide.example.com/api/auth/openid/callback" k="redirect_url" set={(v) => setForm({ ...form, openid: { ...form.openid, redirect_url: v } })} />
+                  <Field abbr="openid" label="Redirect URL" value={form.openid.redirect_url ?? ''} ph="https://picoaide.example.com/api/client/v2/auth/openid/callback" k="redirect_url" set={(v) => setForm({ ...form, openid: { ...form.openid, redirect_url: v } })} />
                 </div>
               </div>
             </TabsContent>

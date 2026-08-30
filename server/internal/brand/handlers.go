@@ -15,18 +15,18 @@ import (
 // Public 客户端面公开端点; Admin 服务端管理面端点(权限由 router 包申报)。
 type Handlers struct {
 	// 客户端面(/api/client/v2)
-	PublicBrand gin.HandlerFunc
-	Logo        gin.HandlerFunc // GET/HEAD /brand/logo/:name
+	PublicBrand  gin.HandlerFunc
+	Logo         gin.HandlerFunc // GET/HEAD /brand/logo/:name
 	PublicPortal gin.HandlerFunc
 	// 服务端面(/api/server/admin)
-	AdminBrand     gin.HandlerFunc // GET
-	PutAdminBrand  gin.HandlerFunc // PUT
-	UploadLogo     gin.HandlerFunc // POST /brand/logo
-	DeleteLogo     gin.HandlerFunc // DELETE /brand/logo
-	ListSnapshots  gin.HandlerFunc // GET /brand/snapshots
+	AdminBrand      gin.HandlerFunc // GET
+	PutAdminBrand   gin.HandlerFunc // PUT
+	UploadLogo      gin.HandlerFunc // POST /brand/logo
+	DeleteLogo      gin.HandlerFunc // DELETE /brand/logo
+	ListSnapshots   gin.HandlerFunc // GET /brand/snapshots
 	RestoreSnapshot gin.HandlerFunc // POST /brand/restore
-	AdminPortal    gin.HandlerFunc // GET /portal
-	PutAdminPortal gin.HandlerFunc // PUT /portal
+	AdminPortal     gin.HandlerFunc // GET /portal
+	PutAdminPortal  gin.HandlerFunc // PUT /portal
 }
 
 // NewHandlers 返回品牌/门户 handler 集合(db + dataDir 注入)。

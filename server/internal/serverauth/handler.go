@@ -107,7 +107,7 @@ func CurrentUser(c *gin.Context) *serverstore.User {
 // RegisterRoutes mounts /api/auth on the router (测试/自建路由辅助; 生产路由
 // 由 internal/router 包集中声明)。
 func (a *API) RegisterRoutes(r *gin.Engine) {
-	base := "/api/auth"
+	base := "/api/client/v2/auth"
 	g := r.Group(base)
 	g.POST("/login", a.handleLogin)
 	g.POST("/logout", BearerAuth(a.DB), a.handleLogout)

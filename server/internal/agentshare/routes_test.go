@@ -100,7 +100,7 @@ func setup(t *testing.T) (http.Handler, *sql.DB, map[string]string, map[string]s
 
 	// Admin login (session + CSRF).
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -137,7 +137,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 
 	// alice uploads; row is pending.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("ppt-gen", "生成PPT", "PPT 生成", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: PPT 生成\n"}))))
+	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("ppt-gen", "生成PPT", "PPT 生成", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: PPT 生成\n"}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -157,7 +157,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 
 	// Admin preview lists the composition + files.
 	wP := httptest.NewRecorder()
-	reqP := httptest.NewRequest("GET", "/api/admin/agent-presets/ppt-gen/preview", nil)
+	reqP := httptest.NewRequest("GET", "/api/server/admin/agent-presets/ppt-gen/preview", nil)
 	for k, v := range adminHdr {
 		reqP.Header.Set(k, v)
 	}
@@ -170,7 +170,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 	}
 
 	// Employee download while pending → 404 (not approved).
-	reqA := httptest.NewRequest("GET", "/api/agent-presets/ppt-gen/archive", nil)
+	reqA := httptest.NewRequest("GET", "/api/client/v2/agent-presets/ppt-gen/archive", nil)
 	for k, v := range userHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -182,7 +182,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 
 	// Admin list sees the pending row; approve it.
 	wL := httptest.NewRecorder()
-	reqL := httptest.NewRequest("GET", "/api/admin/agent-presets?status=pending", nil)
+	reqL := httptest.NewRequest("GET", "/api/server/admin/agent-presets?status=pending", nil)
 	for k, v := range adminHdr {
 		reqL.Header.Set(k, v)
 	}
@@ -192,7 +192,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 	}
 
 	wApp := httptest.NewRecorder()
-	reqApp := httptest.NewRequest("POST", "/api/admin/agent-presets/ppt-gen/approve", nil)
+	reqApp := httptest.NewRequest("POST", "/api/server/admin/agent-presets/ppt-gen/approve", nil)
 	for k, v := range adminHdr {
 		reqApp.Header.Set(k, v)
 	}
@@ -202,7 +202,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 	}
 
 	// Employee download now succeeds with integrity headers.
-	reqA2 := httptest.NewRequest("GET", "/api/agent-presets/ppt-gen/archive", nil)
+	reqA2 := httptest.NewRequest("GET", "/api/client/v2/agent-presets/ppt-gen/archive", nil)
 	for k, v := range userHdr {
 		reqA2.Header.Set(k, v)
 	}
@@ -228,7 +228,7 @@ func TestUploadValidation(t *testing.T) {
 
 	post := func(body string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -274,7 +274,7 @@ func TestUploadValidation(t *testing.T) {
 
 	// Reject without a reason is refused (admin must explain the refusal).
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", strings.NewReader(`{}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/agent-presets/dup/reject", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		req.Header.Set(k, v)
@@ -286,7 +286,7 @@ func TestUploadValidation(t *testing.T) {
 
 	// Reject then resubmit is allowed; row resets to pending.
 	w2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", strings.NewReader(rejectBody("缺少 skills/ 目录")))
+	req2 := httptest.NewRequest("POST", "/api/server/admin/agent-presets/dup/reject", strings.NewReader(rejectBody("缺少 skills/ 目录")))
 	req2.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		req2.Header.Set(k, v)
@@ -314,7 +314,7 @@ func TestUploadValidation(t *testing.T) {
 	// G1(审计 2026-08-25):跨用户重提必须被拒绝——A 的 rejected 行只能由
 	// A 本人重提;B(bob)凭已知 name+version 不得覆盖并重置为 pending。
 	wR := httptest.NewRecorder()
-	reqR := httptest.NewRequest("POST", "/api/admin/agent-presets/dup/reject", strings.NewReader(rejectBody("再拒一次")))
+	reqR := httptest.NewRequest("POST", "/api/server/admin/agent-presets/dup/reject", strings.NewReader(rejectBody("再拒一次")))
 	reqR.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		reqR.Header.Set(k, v)
@@ -326,7 +326,7 @@ func TestUploadValidation(t *testing.T) {
 	// bob 重提 → 404(与不存在同响应,不泄露存在性)。
 	{
 		wB := httptest.NewRecorder()
-		reqB := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("dup", "bob 劫持", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		reqB := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "bob 劫持", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
 		reqB.Header.Set("Content-Type", "application/json")
 		for k, v := range bobHdr {
 			reqB.Header.Set(k, v)
@@ -344,7 +344,7 @@ func TestUploadValidation(t *testing.T) {
 	// alice 本人重提仍可 → 201(回归护栏:合法路径不被误伤)。
 	{
 		wA2 := httptest.NewRecorder()
-		reqA2 := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("dup", "alice 重提", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		reqA2 := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "alice 重提", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
 		reqA2.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			reqA2.Header.Set(k, v)
@@ -380,7 +380,7 @@ func TestPendingCap(t *testing.T) {
 
 	post := func(name string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody(name, "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody(name, "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -404,7 +404,7 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	// alice uploads.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("shared-1", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("shared-1", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -416,7 +416,7 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	list := func(hdr map[string]string) string {
 		wL := httptest.NewRecorder()
-		reqL := httptest.NewRequest("GET", "/api/agent-presets", nil)
+		reqL := httptest.NewRequest("GET", "/api/client/v2/agent-presets", nil)
 		for k, v := range hdr {
 			reqL.Header.Set(k, v)
 		}
@@ -434,7 +434,7 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	// Admin rejects → bob still cannot see; alice still can (with status).
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/agent-presets/shared-1/reject", strings.NewReader(rejectBody("缺少 skills/ 目录")))
+	reqA := httptest.NewRequest("POST", "/api/server/admin/agent-presets/shared-1/reject", strings.NewReader(rejectBody("缺少 skills/ 目录")))
 	reqA.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
@@ -449,7 +449,7 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	// Admin deletes → row gone for everyone.
 	wD := httptest.NewRecorder()
-	reqD := httptest.NewRequest("DELETE", "/api/admin/agent-presets/shared-1", nil)
+	reqD := httptest.NewRequest("DELETE", "/api/server/admin/agent-presets/shared-1", nil)
 	for k, v := range adminHdr {
 		reqD.Header.Set(k, v)
 	}
@@ -477,7 +477,7 @@ func TestPresetArchiveInDB(t *testing.T) {
 	archive := makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: DB 直存\n"})
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/agent-presets", strings.NewReader(uploadBody("db-preset", "DB直存", "DB Preset", archive)))
+	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("db-preset", "DB直存", "DB Preset", archive)))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -493,7 +493,7 @@ func TestPresetArchiveInDB(t *testing.T) {
 	}
 	// 管理员通过。
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/agent-presets/db-preset/approve", nil)
+	reqA := httptest.NewRequest("POST", "/api/server/admin/agent-presets/db-preset/approve", nil)
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -503,7 +503,7 @@ func TestPresetArchiveInDB(t *testing.T) {
 	}
 	// 员工下载(作者)= DB 字节 + 计数。
 	wD := httptest.NewRecorder()
-	reqD := httptest.NewRequest("GET", "/api/agent-presets/db-preset/archive", nil)
+	reqD := httptest.NewRequest("GET", "/api/client/v2/agent-presets/db-preset/archive", nil)
 	for k, v := range userHdr {
 		reqD.Header.Set(k, v)
 	}
@@ -538,7 +538,7 @@ func TestPresetFileContent(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/agent-presets",
+	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets",
 		strings.NewReader(uploadBody("fp-demo", "demo", "FP Demo", archive)))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -552,7 +552,7 @@ func TestPresetFileContent(t *testing.T) {
 	get := func(path string) (*httptest.ResponseRecorder, map[string]any) {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("GET",
-			"/api/admin/agent-presets/fp-demo/1.0.0/file?path="+url.QueryEscape(path), nil)
+			"/api/server/admin/agent-presets/fp-demo/1.0.0/file?path="+url.QueryEscape(path), nil)
 		for k, v := range adminHdr {
 			req.Header.Set(k, v)
 		}

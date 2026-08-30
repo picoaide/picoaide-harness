@@ -93,17 +93,17 @@ func TestMarketplaceStrictDefault(t *testing.T) {
 	r, db, token, uid, _ := marketUserSetup(t)
 
 	// skill list: empty
-	w := bearerGet(t, r, "/api/marketplace/skills", token)
+	w := bearerGet(t, r, "/api/client/v2/marketplace/skills", token)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"skills":[]`) {
 		t.Fatalf("skill list = %d %s, want empty", w.Code, w.Body.String())
 	}
 	// single skill lookup: 404 (no existence leak)
-	w = bearerGet(t, r, "/api/marketplace/skills/data-extract", token)
+	w = bearerGet(t, r, "/api/client/v2/marketplace/skills/data-extract", token)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("getSkill = %d, want 404", w.Code)
 	}
 	// archive: 404
-	w = bearerGet(t, r, "/api/marketplace/skills/data-extract/archive", token)
+	w = bearerGet(t, r, "/api/client/v2/marketplace/skills/data-extract/archive", token)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("archive = %d, want 404", w.Code)
 	}
@@ -117,15 +117,15 @@ func TestMarketplaceUserGrant(t *testing.T) {
 	if err := serverstore.GrantSkill(db, "data-extract", "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
-	w := bearerGet(t, r, "/api/marketplace/skills", token)
+	w := bearerGet(t, r, "/api/client/v2/marketplace/skills", token)
 	if !strings.Contains(w.Body.String(), "data-extract") {
 		t.Fatalf("skill list missing granted skill: %s", w.Body.String())
 	}
-	w = bearerGet(t, r, "/api/marketplace/skills/data-extract", token)
+	w = bearerGet(t, r, "/api/client/v2/marketplace/skills/data-extract", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("getSkill = %d, want 200", w.Code)
 	}
-	w = bearerGet(t, r, "/api/marketplace/skills/data-extract/archive", token)
+	w = bearerGet(t, r, "/api/client/v2/marketplace/skills/data-extract/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
@@ -133,7 +133,7 @@ func TestMarketplaceUserGrant(t *testing.T) {
 	if err := serverstore.RevokeSkill(db, "data-extract", "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
-	w = bearerGet(t, r, "/api/marketplace/skills", token)
+	w = bearerGet(t, r, "/api/client/v2/marketplace/skills", token)
 	if !strings.Contains(w.Body.String(), `"skills":[]`) {
 		t.Fatalf("after revoke list = %s, want empty", w.Body.String())
 	}
@@ -148,7 +148,7 @@ func TestMarketplaceGroupGrant(t *testing.T) {
 	if err := serverstore.SyncUserGroups(db, uid, []string{"研发部"}); err != nil {
 		t.Fatal(err)
 	}
-	w := bearerGet(t, r, "/api/marketplace/skills", token)
+	w := bearerGet(t, r, "/api/client/v2/marketplace/skills", token)
 	if !strings.Contains(w.Body.String(), "data-extract") {
 		t.Fatalf("group grant not visible: %s", w.Body.String())
 	}
@@ -156,7 +156,7 @@ func TestMarketplaceGroupGrant(t *testing.T) {
 	if err := serverstore.SyncUserGroups(db, uid, nil); err != nil {
 		t.Fatal(err)
 	}
-	w = bearerGet(t, r, "/api/marketplace/skills", token)
+	w = bearerGet(t, r, "/api/client/v2/marketplace/skills", token)
 	if !strings.Contains(w.Body.String(), `"skills":[]`) {
 		t.Fatalf("after group removal list = %s, want empty", w.Body.String())
 	}
@@ -178,7 +178,7 @@ func TestMarketplaceAdminSeesAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := bearerGet(t, r, "/api/marketplace/skills", token)
+	w := bearerGet(t, r, "/api/client/v2/marketplace/skills", token)
 	if !strings.Contains(w.Body.String(), "data-extract") {
 		t.Fatalf("admin skill list = %s", w.Body.String())
 	}
@@ -201,14 +201,14 @@ func TestAdminGrantAPI(t *testing.T) {
 	}
 
 	// grant user + group on skill
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("grant user: %d %s", w.Code, w.Body.String())
 	}
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"group":"研发部"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grant", `{"group":"研发部"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("grant group: %d %s", w.Code, w.Body.String())
 	}
 	// list
-	w, out := mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
+	w, out := mreq(t, r, "GET", "/api/server/admin/skills/data-extract/grants", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list grants: %d %s", w.Code, w.Body.String())
 	}
@@ -217,14 +217,14 @@ func TestAdminGrantAPI(t *testing.T) {
 		t.Fatalf("grants = %v, want 2", grants)
 	}
 	// both username+group in one request → rejected
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"username":"a","group":"b"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grant", `{"username":"a","group":"b"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("ambiguous grant = %d, want 400", w.Code)
 	}
 	// revoke
-	if w, _ := mreq(t, r, "DELETE", "/api/admin/skills/data-extract/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/skills/data-extract/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
 	}
-	w, out = mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
+	w, out = mreq(t, r, "GET", "/api/server/admin/skills/data-extract/grants", "", hdr)
 	if len(out["grants"].([]any)) != 1 {
 		t.Fatalf("after revoke grants = %v", out["grants"])
 	}
@@ -243,15 +243,15 @@ func TestAdminGrantAPI(t *testing.T) {
 		}
 	}
 	// grants on unknown resources → 404
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/nope/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusNotFound {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/nope/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown skill grant = %d, want 404", w.Code)
 	}
 	// grants to a non-existent user → 400 (typos must not silently persist)
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"username":"no-such-user"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grant", `{"username":"no-such-user"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown user grant = %d, want 400", w.Code)
 	}
 	// grants to a non-existent group → 400(拼错的部门名不得静默落库)
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"group":"no-such-dept"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grant", `{"group":"no-such-dept"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown group grant = %d, want 400", w.Code)
 	}
 }
@@ -274,24 +274,24 @@ func TestAdminReplaceGrantsAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 一次提交两个部门(共享)
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":["研发部","人事部"]}`, hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grants", `{"groups":["研发部","人事部"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("replace skill grants: %d %s", w.Code, w.Body.String())
 	}
-	_, out := mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
+	_, out := mreq(t, r, "GET", "/api/server/admin/skills/data-extract/grants", "", hdr)
 	grants := out["grants"].([]any)
 	if len(grants) != 2 {
 		t.Fatalf("skill grants = %v, want 2 departments", grants)
 	}
 	// 空列表清空
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":[]}`, hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grants", `{"groups":[]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("clear grants: %d", w.Code)
 	}
-	_, out = mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
+	_, out = mreq(t, r, "GET", "/api/server/admin/skills/data-extract/grants", "", hdr)
 	if len(out["grants"].([]any)) != 0 {
 		t.Fatalf("grants after clear = %v", out["grants"])
 	}
 	// 不存在的部门 → 400
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":["不存在"]}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/data-extract/grants", `{"groups":["不存在"]}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown dept = %d, want 400", w.Code)
 	}
 	// 审计

@@ -207,7 +207,7 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	enabled := settings["brand.enabled"] == "true"
 	logoURL := ""
 	if enabled && settings["brand.login.logo"] != "" {
-		logoURL = "/api/brand/logo/login"
+		logoURL = "/api/client/v2/brand/logo/login"
 	}
 	if loginName == "" {
 		loginName = "PicoAide"

@@ -1,8 +1,9 @@
 // Package brand 实现服务端品牌与门户首页配置(设计 v3b 2026-09-04):
-//   - 公开端点 GET /api/brand(未认证, 登录页/客户端/门户读取品牌)
-//   - 公开端点 GET /api/brand/logo/:name(logo 文件, 白名单+SVG sanitize+ETag)
-//   - 管理端点 GET/PUT /api/admin/brand(brand:read/write, logo 走 multipart)
-//   - 门户首页 GET /api/portal + PUT /api/admin/portal(欢迎语/客户端下载地址)
+//   - 公开端点 GET /api/client/v2/brand(未认证, 登录页/客户端/门户读取品牌)
+//   - 公开端点 GET /api/client/v2/brand/logo/:name(logo 文件, 白名单+SVG sanitize+ETag)
+//   - 管理端点 GET/PUT /api/server/admin/brand(brand:read/write, logo 走 multipart)
+//   - 门户首页 GET /api/client/v2/portal + PUT /api/server/admin/portal
+//     (欢迎语/客户端下载地址; 产品 HTML 面 / 与 /portal 由 cmd/server 渲染)
 //
 // 配置存 settings KV 表(brand.* / portal.*); logo 文件存 dataDir/brand/(0700),
 // 文件名白名单 {login,client,favicon}, 大小 ≤4MB, 扩展名→MIME 白名单, SVG
@@ -93,7 +94,7 @@ func (b *BrandConfig) load(s map[string]string) {
 		Welcome:     s["brand.login.welcome"],
 	}
 	if f := s["brand.login.logo"]; f != "" {
-		b.Login.LogoURL = "/api/brand/logo/login"
+		b.Login.LogoURL = "/api/client/v2/brand/logo/login"
 	}
 	b.Client = ClientBrand{
 		DisplayName: s["brand.client.display_name"],
@@ -101,10 +102,10 @@ func (b *BrandConfig) load(s map[string]string) {
 		Accent:      s["brand.client.accent"],
 	}
 	if f := s["brand.client.logo"]; f != "" {
-		b.Client.LogoURL = "/api/brand/logo/client"
+		b.Client.LogoURL = "/api/client/v2/brand/logo/client"
 	}
 	if f := s["brand.favicon"]; f != "" {
-		b.Favicon = "/api/brand/logo/favicon"
+		b.Favicon = "/api/client/v2/brand/logo/favicon"
 	}
 	b.Title = s["brand.title"]
 }
@@ -158,7 +159,7 @@ func (p *PortalConfig) save(set func(key, val string) error) error {
 
 // RegisterRoutes 挂载公开端点(gateway 调用, 无需鉴权组)。
 func RegisterRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
-	base := "/api"
+	base := "/api/client/v2"
 	g := r.Group(base)
 	g.GET("/brand", func(c *gin.Context) { getPublicBrand(c, db) })
 	g.GET("/brand/logo/:name", func(c *gin.Context) { serveLogo(c, db, dataDir) })
@@ -168,7 +169,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
 
 // RegisterAdminRoutes 挂载管理端点(AdminAuth + RBAC 权限)。
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, dataDir string) {
-	base := "/api/admin"
+	base := "/api/server/admin"
 	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "/brand", serverauth.PermBrandRead, func(c *gin.Context) { getAdminBrand(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/brand", serverauth.PermBrandWrite, func(c *gin.Context) { putAdminBrand(c, db, dataDir) })
@@ -527,7 +528,7 @@ func uploadLogo(c *gin.Context, db *sql.DB, dataDir string) {
 	}
 	_ = serverstore.SetSetting(db, "brand."+name+".logo", fname)
 	_ = serverstore.AuditLog(db, serverauth.AdminUser(c).Username, "brand_logo_upload", name+":"+fname)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "url": "/api/brand/logo/" + name})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "url": "/api/client/v2/brand/logo/" + name})
 }
 
 // ---------------------------------------------------------------------------

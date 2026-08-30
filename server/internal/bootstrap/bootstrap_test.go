@@ -70,7 +70,7 @@ func TestBootstrap(t *testing.T) {
 	u, _ := serverstore.GetUserByUsername(db, "alice")
 	token, _ := serverauth.IssueToken(db, u.ID)
 
-	w, out := getJSON(t, r, "/api/config/bootstrap", token)
+	w, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -90,7 +90,7 @@ func TestBootstrap(t *testing.T) {
 		t.Fatalf("web = %v (allow_private/search_endpoint must be removed)", web)
 	}
 	// no token → 401
-	if w, _ := getJSON(t, r, "/api/config/bootstrap", ""); w.Code != http.StatusUnauthorized {
+	if w, _ := getJSON(t, r, "/api/client/v2/config/bootstrap", ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no token status = %d", w.Code)
 	}
 }
@@ -102,7 +102,7 @@ func TestBootstrapDefaultModelFallback(t *testing.T) {
 	}
 	u, _ := serverstore.GetUserByUsername(db, "alice")
 	token, _ := serverauth.IssueToken(db, u.ID)
-	_, out := getJSON(t, r, "/api/config/bootstrap", token)
+	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	if out["default_model"] != "deepseek-chat" {
 		t.Fatalf("fallback default_model = %v, want deepseek-chat", out["default_model"])
 	}
@@ -123,7 +123,7 @@ func TestBootstrapWebSettings(t *testing.T) {
 	}
 	u, _ := serverstore.GetUserByUsername(db, "alice")
 	token, _ := serverauth.IssueToken(db, u.ID)
-	_, out := getJSON(t, r, "/api/config/bootstrap", token)
+	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	web := out["web"].(map[string]any)
 	if web["allow_private"] != nil || web["search_endpoint"] != nil {
 		t.Fatalf("web = %v (allow_private/search_endpoint must be removed)", web)
@@ -138,7 +138,7 @@ func TestBootstrapDefaultThinkingLevelFallback(t *testing.T) {
 	// 未配置 + 非法值 → 回落 max
 	u, _ := serverstore.GetUserByUsername(db, "alice")
 	token, _ := serverauth.IssueToken(db, u.ID)
-	_, out := getJSON(t, r, "/api/config/bootstrap", token)
+	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	web := out["web"].(map[string]any)
 	if web["default_thinking_level"] != "max" {
 		t.Fatalf("default default_thinking_level = %v, want max", web["default_thinking_level"])
@@ -147,7 +147,7 @@ func TestBootstrapDefaultThinkingLevelFallback(t *testing.T) {
 	if err := serverstore.SetSetting(db, "web.default_thinking_level", "ultra"); err != nil {
 		t.Fatal(err)
 	}
-	_, out = getJSON(t, r, "/api/config/bootstrap", token)
+	_, out = getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	web = out["web"].(map[string]any)
 	if web["default_thinking_level"] != "max" {
 		t.Fatalf("invalid default_thinking_level = %v, want max fallback", web["default_thinking_level"])
@@ -187,7 +187,7 @@ func TestBootstrapStrictDefault(t *testing.T) {
 	u, _ := serverstore.GetUserByUsername(db, "nobody")
 	token, _ := serverauth.IssueToken(db, u.ID)
 
-	w, out := getJSON(t, r, "/api/config/bootstrap", token)
+	w, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -212,7 +212,7 @@ func TestBootstrapConnectors(t *testing.T) {
 	u, _ := serverstore.GetUserByUsername(db, "alice")
 	token, _ := serverauth.IssueToken(db, u.ID)
 
-	_, out := getJSON(t, r, "/api/config/bootstrap", token)
+	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	conns := out["connectors"].([]any)
 	if len(conns) < 2 {
 		t.Fatalf("connectors = %d, want >= 2 (种子 moka+sales-easy)", len(conns))
@@ -234,7 +234,7 @@ func TestBootstrapConnectors(t *testing.T) {
 	if err := serverstore.SetConnectorEnabled(db, "moka", false); err != nil {
 		t.Fatal(err)
 	}
-	_, out = getJSON(t, r, "/api/config/bootstrap", token)
+	_, out = getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	conns = out["connectors"].([]any)
 	for _, c := range conns {
 		m := c.(map[string]any)

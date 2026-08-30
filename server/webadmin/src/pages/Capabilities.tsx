@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
@@ -81,7 +81,7 @@ export default function Capabilities() {
   const [departments, setDepartments] = useState<Dept[]>([])
 
   useEffect(() => {
-    request('/api/server/admin/departments')
+    request(`${ADMIN_API}/departments`)
       .then((data) => { setDepartments(data.departments ?? []) })
       .catch(() => { /* 单用户授权仍可用 */ })
   }, [])
@@ -95,7 +95,7 @@ export default function Capabilities() {
       // status=all 必须显式传(服务端缺省=仅 pending);type 缺省=全部。
       const qs = new URLSearchParams({ status })
       if (kind !== 'all') qs.set('type', kind)
-      const data = await request<{ approvals: ApprovalRow[] }>(`/api/server/admin/capabilities/approvals?${qs}`)
+      const data = await request<{ approvals: ApprovalRow[] }>(`${ADMIN_API}/capabilities/approvals?${qs}`)
       if (current !== loadSeq.current) return
       setAllRows(data.approvals ?? [])
     } catch (err: any) {

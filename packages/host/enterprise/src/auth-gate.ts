@@ -202,8 +202,8 @@ const LOGIN_HTML = `<!DOCTYPE html>
       return fallback + '<div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
     }
     var login = b.login || {}
-    // logo_url 是相对路径(/api/brand/logo/login): 在 Host 登录页需拼服务端地址。
-    // 先统一去尾斜杠(trimServer),避免拼出 //api/brand/... 双斜杠路径。
+    // logo_url 是相对路径(/api/client/v2/brand/logo/login): 在 Host 登录页需拼服务端地址。
+    // 先统一去尾斜杠(trimServer),避免拼出 //api/client/v2/... 双斜杠路径。
     var server = trimServer(document.getElementById('server').value.trim())
     var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
     // logo 加载失败时保留花括号兜底(与无品牌时同款)。
@@ -677,7 +677,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               const upstream = await gatewayFetch(
-                `${s.serverURL}/api/marketplace/skills/${encodeURIComponent(name)}/archive`,
+                `${s.serverURL}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -738,7 +738,7 @@ export function apply(ctx: Context, config: Config): void {
           const name = decodeURIComponent(archiveMatch[1]!)
           try {
             const upstream = await gatewayFetch(
-              `${s.serverURL}/api/marketplace/skills/${encodeURIComponent(name)}/archive`,
+              `${s.serverURL}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -867,7 +867,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               const upstream = await gatewayFetch(
-                `${s.serverURL}/api/agent-presets/${encodeURIComponent(name)}/archive`,
+                `${s.serverURL}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -918,7 +918,7 @@ export function apply(ctx: Context, config: Config): void {
           const name = decodeURIComponent(archiveMatch[1]!)
           try {
             const upstream = await gatewayFetch(
-              `${s.serverURL}/api/agent-presets/${encodeURIComponent(name)}/archive`,
+              `${s.serverURL}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -1039,7 +1039,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               const upstream = await gatewayFetch(
-                `${s.serverURL}/api/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/archive`,
+                `${s.serverURL}/api/client/v2/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })

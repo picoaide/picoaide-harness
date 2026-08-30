@@ -22,7 +22,7 @@ interface Dept {
 interface GrantDialogProps {
   open: boolean
   name: string
-  /** API 前缀:如 `/api/server/admin/shared-skills/${name}`(不含 grant/grants)。 */
+  /** API 前缀:如 `${ADMIN_API}/shared-skills/${name}`(不含 grant/grants)。 */
   basePath: string
   departments: Dept[]
   onClose: () => void

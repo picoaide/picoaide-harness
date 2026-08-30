@@ -47,7 +47,7 @@ func TestReportSkillCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 市场技能:name-only 上报命中。
-	w := post(r, token, "/api/telemetry/skill-call", `{"name":"codeql"}`)
+	w := post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"codeql"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("market call = %d %s", w.Code, w.Body.String())
 	}
@@ -59,7 +59,7 @@ func TestReportSkillCall(t *testing.T) {
 	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "org-x", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillApproved}); err != nil {
 		t.Fatal(err)
 	}
-	w = post(r, token, "/api/telemetry/skill-call", `{"name":"org-x","version":"1.0.0"}`)
+	w = post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"org-x","version":"1.0.0"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("shared call = %d %s", w.Code, w.Body.String())
 	}
@@ -68,22 +68,22 @@ func TestReportSkillCall(t *testing.T) {
 		t.Fatalf("shared calls = %d, want 1", ss.Calls)
 	}
 	// 未知技能单点静默成功(本地创作技能)。
-	w = post(r, token, "/api/telemetry/skill-call", `{"name":"local-only"}`)
+	w = post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"local-only"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("unknown call = %d %s", w.Code, w.Body.String())
 	}
 	// 未认证 401。
-	w = post(r, "badtoken", "/api/telemetry/skill-call", `{"name":"x"}`)
+	w = post(r, "badtoken", "/api/client/v2/telemetry/skill-call", `{"name":"x"}`)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth = %d", w.Code)
 	}
 	// 非法名 400。
-	w = post(r, token, "/api/telemetry/skill-call", `{"name":"a/b"}`)
+	w = post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"a/b"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad name = %d %s", w.Code, w.Body.String())
 	}
 	// 空名 400。
-	w = post(r, token, "/api/telemetry/skill-call", `{"name":""}`)
+	w = post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":""}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("empty name = %d", w.Code)
 	}
@@ -91,7 +91,7 @@ func TestReportSkillCall(t *testing.T) {
 
 func TestReportSkillCallInvalidJSON(t *testing.T) {
 	r, _, token := newTestEnv(t)
-	w := post(r, token, "/api/telemetry/skill-call", `{broken`)
+	w := post(r, token, "/api/client/v2/telemetry/skill-call", `{broken`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("broken json = %d %s", w.Code, w.Body.String())
 	}

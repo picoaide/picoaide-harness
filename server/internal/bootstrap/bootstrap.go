@@ -83,7 +83,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
-	r.GET("/api/config/bootstrap", serverauth.BearerAuth(db), buildBootstrapHandler(db))
+	r.GET("/api/client/v2/config/bootstrap", serverauth.BearerAuth(db), buildBootstrapHandler(db))
 }
 
 // buildBootstrapHandler 返回 bootstrap 端点 handler;闭包在每次调用时新建,

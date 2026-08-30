@@ -242,7 +242,7 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name:     oidcStateCookieName + "_" + name,
 			Value:    state,
-			Path:     "/api/auth/" + name,
+			Path:     "/api/client/v2/auth/" + name,
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
 			Secure:   secureCookieFor(c, a.DB),
@@ -288,7 +288,7 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name:     oidcStateCookieName + "_" + name,
 			Value:    "",
-			Path:     "/api/auth/" + name,
+			Path:     "/api/client/v2/auth/" + name,
 			MaxAge:   -1,
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,

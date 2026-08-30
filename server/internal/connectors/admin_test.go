@@ -34,7 +34,7 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB, map[string]string) {
 	RegisterAdminRoutes(r, db)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -72,7 +72,7 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 	r, db, hdr := setup(t)
 
 	// 列表含种子。
-	w, out := doJSON(t, r, "GET", "/api/admin/connectors", "", hdr)
+	w, out := doJSON(t, r, "GET", "/api/server/admin/connectors", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list = %d %s", w.Code, w.Body.String())
 	}
@@ -84,7 +84,7 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 	// 创建。
 	body := `{"id":"feishu","name":"飞书","description":"协作","auth_mode":"token",
 		"definition":"{\"tokenFields\":[{\"key\":\"TOKEN\",\"label\":\"Token\",\"type\":\"password\",\"required\":true}],\"mcp\":[{\"serverName\":\"feishu\",\"transport\":\"streamable-http\",\"url\":\"https://mcp.example.com\"}]}","enabled":true}`
-	w, out = doJSON(t, r, "POST", "/api/admin/connectors", body, hdr)
+	w, out = doJSON(t, r, "POST", "/api/server/admin/connectors", body, hdr)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", w.Code, w.Body.String())
 	}
@@ -92,12 +92,12 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 		t.Fatalf("created id = %v", out["connector"])
 	}
 	// 重复 id → 409。
-	w, _ = doJSON(t, r, "POST", "/api/admin/connectors", body, hdr)
+	w, _ = doJSON(t, r, "POST", "/api/server/admin/connectors", body, hdr)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("dup create = %d, want 409", w.Code)
 	}
 	// 非法参数 → 400。
-	w, _ = doJSON(t, r, "POST", "/api/admin/connectors",
+	w, _ = doJSON(t, r, "POST", "/api/server/admin/connectors",
 		`{"id":"x!","name":"X","auth_mode":"cli","definition":"{}"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid create = %d, want 400", w.Code)
@@ -106,7 +106,7 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 	// 更新名称/启用状态。
 	upd := `{"name":"飞书协作","description":"更新","auth_mode":"token",
 		"definition":"{\"tokenFields\":[{\"key\":\"TOKEN\",\"label\":\"Token\",\"type\":\"password\",\"required\":true}],\"mcp\":[{\"serverName\":\"feishu\",\"transport\":\"streamable-http\",\"url\":\"https://mcp.example.com\"}]}","enabled":false}`
-	w, out = doJSON(t, r, "PUT", "/api/admin/connectors/feishu", upd, hdr)
+	w, out = doJSON(t, r, "PUT", "/api/server/admin/connectors/feishu", upd, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update = %d %s", w.Code, w.Body.String())
 	}
@@ -114,13 +114,13 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 		t.Fatalf("enabled after update = %v, want false", out["connector"])
 	}
 	// 更新不存在的 id → 404。
-	w, _ = doJSON(t, r, "PUT", "/api/admin/connectors/nope", upd, hdr)
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/connectors/nope", upd, hdr)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("update missing = %d, want 404", w.Code)
 	}
 
 	// 禁用开关端点。
-	w, _ = doJSON(t, r, "PUT", "/api/admin/connectors/moka/enabled", `{"enabled":false}`, hdr)
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/connectors/moka/enabled", `{"enabled":false}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("disable moka = %d", w.Code)
 	}
@@ -135,7 +135,7 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 	}
 
 	// 删除。
-	w, _ = doJSON(t, r, "DELETE", "/api/admin/connectors/feishu", "", hdr)
+	w, _ = doJSON(t, r, "DELETE", "/api/server/admin/connectors/feishu", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete = %d", w.Code)
 	}
@@ -143,7 +143,7 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 		t.Fatalf("after delete err = %v", err)
 	}
 	// 删除不存在 → 404。
-	w, _ = doJSON(t, r, "DELETE", "/api/admin/connectors/nope", "", hdr)
+	w, _ = doJSON(t, r, "DELETE", "/api/server/admin/connectors/nope", "", hdr)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("delete missing = %d, want 404", w.Code)
 	}

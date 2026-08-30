@@ -24,7 +24,7 @@ import (
 // (v3b). cacheDir is the skill repo/archive cache, invalidated when a
 // skill's source changes (C-6).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	base := "/api/admin"
+	base := "/api/server/admin"
 	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "/skills", serverauth.PermMarketRead, func(c *gin.Context) { listSkillsAdmin(c, db) })
 	serverauth.AdminRoute(g, "POST", "/skills", serverauth.PermMarketWrite, func(c *gin.Context) { createSkillAdmin(c, db) })
