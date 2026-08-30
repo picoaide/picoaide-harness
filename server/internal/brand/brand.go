@@ -74,7 +74,7 @@ type ClientBrand struct {
 
 // PortalConfig 是门户首页配置。
 type PortalConfig struct {
-	Enabled            bool   `json:"enabled"`
+	Enabled bool `json:"enabled"`
 	// Public: 未认证用户是否可访问门户首页(§9; 默认 true)。
 	Public             bool   `json:"public"`
 	Welcome            string `json:"welcome"`

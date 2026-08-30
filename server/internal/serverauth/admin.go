@@ -887,7 +887,7 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		// v3b: 仅客户端登录页隐藏本地账号入口; 管理后台恒本地登录不受影响。
 		_ = upsert("auth.hide_local", strconv.FormatBool(*req.HideLocal))
 	}
-		// v3b 字段级审计(§2.5):记录本次变更的键集合(值脱敏, 不落密钥)。
+	// v3b 字段级审计(§2.5):记录本次变更的键集合(值脱敏, 不落密钥)。
 	var changed []string
 	for _, k := range []string{"auth.mode", "auth.enabled"} {
 		changed = append(changed, k)
@@ -1162,6 +1162,7 @@ func (a *AdminAPI) setUserDepartment(c *gin.Context) {
 // testAuthConnection 测试认证提供方连通性(v3b §1.2, 不写配置):
 //   - ldap: 用配置的 bind_dn/密码做一次 bind
 //   - oidc/openid: 拉取 issuer 的 /.well-known/openid-configuration
+//
 // 返回逐项结果; 失败仅报告该方式, 不中断其他。
 func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 	var req struct {
