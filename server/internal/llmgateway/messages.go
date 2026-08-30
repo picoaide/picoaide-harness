@@ -265,7 +265,8 @@ func (a *API) handleMessages(c *gin.Context) {
 	// 或首个启用模型。其他未知模型保持 404(严格默认拒绝,不自动 fallback)。
 	if len(ups) == 0 && strings.HasPrefix(req.Model, "claude-") {
 		if mapped, ok := resolveAnthropicModel(a.DB, req.Model); ok {
-			ups, err = MatchModelsByProtocol(a.DB, mapped, "anthropic")
+			// 映射后的模型按任意可用协议路由(官方 anthropic 端点背后是 openai 上游)。
+			ups, err = MatchModelsByProtocol(a.DB, mapped, "")
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
 				return
