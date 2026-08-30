@@ -23,8 +23,12 @@ test-server:
 build-server: webadmin
 	go build -o $(BIN) ./cmd/server
 
+# 两段式构建(2026-09): 先构建前端 dist, 再 go build 嵌入真实产物。
+# vite build 会清空 dist 目录, build 后恢复 .gitkeep 占位(go:embed dist/*
+# 需要目录非空; 源码仓库只跟踪 .gitkeep)。
 webadmin:
 	cd webadmin && npm run build
+	@touch webadmin/dist/.gitkeep
 
 # 服务端 Docker 镜像(计划 Task 4.6):本地构建单平台,带版本注入(--version 输出 VERSION)
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
