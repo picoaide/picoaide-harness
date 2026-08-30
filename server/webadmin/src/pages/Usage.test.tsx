@@ -152,16 +152,36 @@ describe('Usage 用量统计页', () => {
     expect(within(list).queryByText(/100%/)).not.toBeInTheDocument() // bob 不限
   })
 
-  it('图表 Tab 联动分组:切换到"占比"发起 group=model 查询', async () => {
+  it('图表 Tab 与分组解耦:切换到"占比"不重新查询(纯前端重绘,2026-08-28 重构)', async () => {
     const user = userEvent.setup()
     render(<Usage />)
     await screen.findByTestId('stat-cards')
+    const callsBefore = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage')).length
     await user.click(screen.getByRole('tab', { name: '占比' }))
+    // 切换图表后不再发起新的 usage 查询(维度不变,数据在 rows 中)
+    await waitFor(() => {
+      const callsAfter = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage')).length
+      expect(callsAfter).toBe(callsBefore)
+    })
+    // 图表 Tab 切换为占比
+    expect(screen.getByRole('tab', { name: '占比' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('维度切换到"按模型"仅提供占比/排行,自动落到占比', async () => {
+    const user = userEvent.setup()
+    render(<Usage />)
+    await screen.findByTestId('stat-cards')
+    await user.click(screen.getByRole('combobox', { name: '分组' }))
+    await user.click(await screen.findByRole('option', { name: '按模型' }))
     await waitFor(() => {
       const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage'))
       const last = calls[calls.length - 1]
       expect(last[0]).toContain('group=model')
     })
+    // 按模型维度:趋势 tab 不存在,占比默认激活
+    expect(screen.queryByRole('tab', { name: '趋势' })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '占比' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: '排行' })).toBeInTheDocument()
   })
 
   it('起始日期晚于结束日期时提示并拒绝查询', async () => {
