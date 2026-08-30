@@ -218,12 +218,14 @@ export function assertMacReleaseReady(options: MacReleasePreflightOptions): MacR
 /** Human-readable label for the notarization credential source. 审计
  * 2026-08-30 (CodeQL js/clear-text-logging): 日志只应输出来源类型名称,
  * 绝不能输出凭证本身; 这里显式把枚举值映射为静态字符串, 切断数据流。
- * 导出供 release-mac.ts 复用(避免复制粘贴, 同一逻辑只实现一次)。 */
+ * 导出供 release-mac.ts 复用(避免复制粘贴, 同一逻辑只实现一次)。
+ * 注: 返回值保持原枚举字面量(api-key/apple-id/keychain-profile), 与既有
+ * 测试与日志格式一致——来源类型本身不含任何密钥信息。 */
 export function notarizationLabel(source: NotarizationCredentialSource): string {
   switch (source) {
-    case 'api-key': return 'Apple API key'
-    case 'apple-id': return 'Apple ID'
-    case 'keychain-profile': return 'Keychain profile'
+    case 'api-key': return 'api-key'
+    case 'apple-id': return 'apple-id'
+    case 'keychain-profile': return 'keychain-profile'
   }
 }
 
