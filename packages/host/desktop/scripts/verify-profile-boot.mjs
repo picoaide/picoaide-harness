@@ -23,7 +23,6 @@ prebuildWorkspaceDeps(packageRoot)
 
 const BIN_NAME = 'dsh-plugin-desktop-profile-smoke'
 const HOST_SERVICE_PLUGIN_NAME = 'dsh-desktop-host-services-smoke-plugin'
-const HOST_SERVICE_PROBE_KEY = 'desktopHostServiceProbe'
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-'))
 // Isolate the product home for the whole boot: profile files live in the
 // temporary home, and every plugin resolves its data dir through `$DSH_HOME`

@@ -94,10 +94,6 @@ async function resetToLogin() {
   await wait(4000)
 }
 
-async function bodyText() {
-  try { return await ev(`document.body.textContent ?? ''`) } catch { return '' }
-}
-
 try {
   // 1. Reset to login
   await resetToLogin()

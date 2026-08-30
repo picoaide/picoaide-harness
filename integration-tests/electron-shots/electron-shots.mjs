@@ -9,9 +9,8 @@
  * 用法: node electron-shots.mjs [--server http://127.0.0.1:8091]
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const PACKAGE_ROOT = '/data/picoaide-harness/packages/host/desktop'
 const APP = join(PACKAGE_ROOT, 'dist', 'linux-unpacked', 'dsh-plugin-desktop')
@@ -73,7 +72,10 @@ async function evalJS(send, expr) {
 }
 
 try {
+  // Keep the socket referenced until the script exits: a dropped WS reference
+  // would let GC close it mid-flight (unused-var audit 2026-08-31).
   const { ws, send } = await connect()
+  void ws
   await send('Page.enable')
   await sleep(2500)
   await shot(send, '01-login-step1.png')

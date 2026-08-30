@@ -232,7 +232,7 @@ function autoFixMermaid(source: string): string | null {
       if (
         !title.startsWith('"') &&
         !title.startsWith('[') &&
-        /[（）()！？!?，。；：、""''【】《》]/.test(title)
+        /[（）()！？!?，。；：、"'【】《》]/.test(title)
       ) {
         changed = true
         return `${sub[1]}"${title.replace(/"/g, '\\"')}"`

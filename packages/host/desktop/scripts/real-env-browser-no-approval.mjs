@@ -115,9 +115,6 @@ async function clickLabel(label, waitMs = 2500) {
   await wait(waitMs)
   return r
 }
-async function bodyText() {
-  try { return await ev(`document.body.textContent ?? ''`) } catch { return '' }
-}
 
 try {
   // 1. Reset to login and fill creds.
