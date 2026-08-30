@@ -4,16 +4,16 @@ const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1:34567')
   process.stderr.write(`[gw] ${req.method} ${url.pathname}\n`)
   res.setHeader('Content-Type', 'application/json')
-  if (url.pathname === '/api/auth/login') {
+  if (url.pathname === '/api/client/v2/auth/login') {
     res.end(JSON.stringify({ token: 'mock-token-123', user: { username: 'admin' } }))
     return
   }
   // 2026-09 客户端登录页方法选择器: 返回启用的认证方式(local 恒启用)。
-  if (url.pathname === '/api/admin/auth/methods') {
+  if (url.pathname === '/api/client/v2/auth/methods') {
     res.end(JSON.stringify({ methods: [{ name: 'local', configured: true }] }))
     return
   }
-  if (url.pathname === '/api/auth/me' || url.pathname === '/api/auth/session' || url.pathname === '/api/auth/usage') {
+  if (url.pathname === '/api/client/v2/auth/me' || url.pathname === '/api/client/v2/auth/session' || url.pathname === '/api/client/v2/auth/usage') {
     res.end(JSON.stringify({
       username: 'admin', id: 1, department: 'dev', token: 'mock-token-123',
       // Usage envelope expected by the account card (`/api/pico/account/usage`
@@ -27,7 +27,7 @@ const server = createServer((req, res) => {
     }))
     return
   }
-  if (url.pathname === '/api/config/bootstrap') {
+  if (url.pathname === '/api/client/v2/config/bootstrap') {
     res.end(JSON.stringify({
       models: [
         { id: 'deepseek-v4', name: 'DeepSeek V4', provider: 'deepseek' },
@@ -50,7 +50,7 @@ const server = createServer((req, res) => {
     ]))
     return
   }
-  if (url.pathname === '/api/models' || url.pathname === '/api/config/models') {
+  if (url.pathname === '/api/client/v2/models' || url.pathname === '/api/client/v2/config/models') {
     res.end(JSON.stringify({ models: [
       { id: 'deepseek-v4', name: 'DeepSeek V4', provider: 'deepseek' },
       { id: 'pico-v4-pro', name: 'Pico AI V4 Pro', provider: 'picoai' },
@@ -72,7 +72,7 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ jobs: [], items: [] }))
     return
   }
-  if (url.pathname === '/api/agent-presets' || url.pathname.startsWith('/api/agent-presets/')) {
+  if (url.pathname === '/api/client/v2/agent-presets' || url.pathname.startsWith('/api/client/v2/agent-presets/')) {
     res.end(JSON.stringify({
       presets: [
         { name: 'shared-demo', display_name: '共享演示', description: '演示预设', version: '1.0.0', author: 'admin', status: 'approved', reason: '', created_at: '2026-08-01T10:00:00+08:00' },
@@ -82,7 +82,7 @@ const server = createServer((req, res) => {
     }))
     return
   }
-  if (url.pathname === '/api/shared-skills' || url.pathname.startsWith('/api/shared-skills/')) {
+  if (url.pathname === '/api/client/v2/shared-skills' || url.pathname.startsWith('/api/client/v2/shared-skills/')) {
     res.end(JSON.stringify({
       skills: [
         { name: 'codeql-demo', display_name: '代码审计演示', version: '1.0.0', description: '演示技能', author: 'admin', status: 'approved', reason: '', created_at: '2026-08-01T10:00:00+08:00' },

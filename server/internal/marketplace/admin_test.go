@@ -41,7 +41,7 @@ func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	RegisterAdminRoutes(r, db, t.TempDir())
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -75,15 +75,15 @@ func TestAdminSkillsCRUD(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 
-	w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d %s", w.Code, w.Body.String())
 	}
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills", `{"name":"../evil","git_url":"https://x"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills", `{"name":"../evil","git_url":"https://x"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad skill name accepted: %d", w.Code)
 	}
-	if w, _ := mreq(t, r, "DELETE", "/api/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("disable skill: %d", w.Code)
 	}
 	s, err := serverstore.GetSkill(db, "demo")
@@ -91,7 +91,7 @@ func TestAdminSkillsCRUD(t *testing.T) {
 		t.Fatalf("skill not disabled: %+v %v", s, err)
 	}
 	// 列表返回技能
-	if w, out := mreq(t, r, "GET", "/api/admin/skills", "", hdr); w.Code != http.StatusOK {
+	if w, out := mreq(t, r, "GET", "/api/server/admin/skills", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("list skills: %d", w.Code)
 	} else if rows := out["skills"].([]any); len(rows) != 1 {
 		t.Fatalf("skills rows = %d, want 1", len(rows))
@@ -105,7 +105,7 @@ func TestNonAdminForbidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"eve","password":"evepw"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"eve","password":"evepw"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
@@ -116,26 +116,26 @@ func TestNonAdminForbidden(t *testing.T) {
 func TestAdminSkillEnable(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
-	w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d %s", w.Code, w.Body.String())
 	}
-	if w, _ := mreq(t, r, "DELETE", "/api/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("disable skill: %d", w.Code)
 	}
 	s, _ := serverstore.GetSkill(db, "demo")
 	if s.Enabled != 0 {
 		t.Fatalf("skill not disabled: %d", s.Enabled)
 	}
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills/demo/enable", "", hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/enable", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("enable skill: %d", w.Code)
 	}
 	s, _ = serverstore.GetSkill(db, "demo")
 	if s.Enabled != 1 {
 		t.Fatalf("skill not re-enabled: %d", s.Enabled)
 	}
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills/nope/enable", "", hdr); w.Code != http.StatusNotFound {
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/nope/enable", "", hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("enable unknown skill = %d, want 404", w.Code)
 	}
 }
@@ -144,11 +144,11 @@ func TestAdminSkillEnable(t *testing.T) {
 func TestAdminSkillDisableAudit(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
-	if w, _ := mreq(t, r, "DELETE", "/api/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("disable skill: %d", w.Code)
 	}
 	var n int
@@ -165,7 +165,7 @@ func TestAdminSkillDisableAudit(t *testing.T) {
 func TestAdminGrantsRejectUnknownFields(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
@@ -173,11 +173,11 @@ func TestAdminGrantsRejectUnknownFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 先正常设置部门授权
-	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/demo/grants", `{"groups":["研发部"]}`, hdr); w.Code != http.StatusOK {
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/demo/grants", `{"groups":["研发部"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("set grants: %d", w.Code)
 	}
 	// 误传 username → 400,且不得清空既有授权
-	w, out := mreq(t, r, "PUT", "/api/admin/skills/demo/grants", `{"username":"alice"}`, hdr)
+	w, out := mreq(t, r, "PUT", "/api/server/admin/skills/demo/grants", `{"username":"alice"}`, hdr)
 	if w.Code != http.StatusBadRequest || !hasErrCode(w, "VALIDATION") {
 		t.Fatalf("unknown field = %d %v, want 400 VALIDATION", w.Code, out)
 	}
@@ -192,18 +192,18 @@ func TestAdminSkillGitURLValidation(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	for _, u := range []string{"file:///tmp/repo", "ftp://host/repo", "not-a-url", "https://"} {
-		w, _ := mreq(t, r, "POST", "/api/admin/skills",
+		w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 			`{"name":"demo","git_url":"`+u+`"}`, hdr)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("create with git_url %q = %d, want 400", u, w.Code)
 		}
 	}
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create with https = %d", w.Code)
 	}
 	// 更新时把 git_url 改为非法值同样拒绝
-	w, _ := mreq(t, r, "PUT", "/api/admin/skills/demo", `{"git_url":"file:///tmp/x"}`, hdr)
+	w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/demo", `{"git_url":"file:///tmp/x"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("update with file git_url = %d, want 400", w.Code)
 	}
@@ -239,13 +239,13 @@ func makeGzipTar(t *testing.T, entries map[string]string) []byte {
 func TestAdminSkillUploadArchive(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	archive := makeGzipTar(t, map[string]string{"SKILL.md": "---\nname: demo\n---\n# demo\n"})
 	body := `{"version":"2.0.0","archive":"` + base64.StdEncoding.EncodeToString(archive) + `"}`
-	if w, out := mreq(t, r, "POST", "/api/admin/skills/demo/archive", body, hdr); w.Code != http.StatusOK {
+	if w, out := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive", body, hdr); w.Code != http.StatusOK {
 		t.Fatalf("upload archive: %d %s (%v)", w.Code, w.Body.String(), out)
 	}
 	s, err := serverstore.GetSkill(db, "demo")
@@ -260,7 +260,7 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 	}
 	// 非法归档(缺 SKILL.md)→ 422。
 	bad := makeGzipTar(t, map[string]string{"readme.md": "x"})
-	w, _ := mreq(t, r, "POST", "/api/admin/skills/demo/archive",
+	w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
 		`{"version":"3.0.0","archive":"`+base64.StdEncoding.EncodeToString(bad)+`"}`, hdr)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad archive = %d, want 422", w.Code)
@@ -284,7 +284,7 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 	api := NewAPI(db, t.TempDir())
 	rr := gin.New()
 	api.RegisterRoutes(rr)
-	req := httptest.NewRequest("GET", "/api/marketplace/skills/demo/archive", nil)
+	req := httptest.NewRequest("GET", "/api/client/v2/marketplace/skills/demo/archive", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	wr := httptest.NewRecorder()
 	rr.ServeHTTP(wr, req)
@@ -308,17 +308,17 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 func TestAdminSkillUploadVersionGuard(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills",
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
 		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	archive := makeGzipTar(t, map[string]string{"SKILL.md": "---\nname: demo\n---\n# demo\n"})
-	if w, _ := mreq(t, r, "POST", "/api/admin/skills/demo/archive",
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
 		`{"version":"2.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("upload archive: %d", w.Code)
 	}
 	// 元数据 PUT 改版本 → 400。
-	w, out := mreq(t, r, "PUT", "/api/admin/skills/demo", `{"version":"3.0.0"}`, hdr)
+	w, out := mreq(t, r, "PUT", "/api/server/admin/skills/demo", `{"version":"3.0.0"}`, hdr)
 	if w.Code != http.StatusBadRequest || !hasErrCode(w, "VALIDATION") {
 		t.Fatalf("version put = %d %v, want 400 VALIDATION", w.Code, out)
 	}

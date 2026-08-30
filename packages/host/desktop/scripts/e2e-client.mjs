@@ -149,7 +149,7 @@ async function main() {
   // 1. Ensure a mock gateway is reachable; start one detached otherwise.
   let gatewayReady = false
   try {
-    await fetch(`http://127.0.0.1:${GATEWAY_PORT}/api/auth/login`, { method: 'POST' })
+    await fetch(`http://127.0.0.1:${GATEWAY_PORT}/api/client/v2/auth/login`, { method: 'POST' })
     gatewayReady = true
   } catch { /* start below */ }
   if (!gatewayReady) {
@@ -159,7 +159,7 @@ async function main() {
     gateway.unref()
     for (let i = 0; i < 20; i += 1) {
       try {
-        await fetch(`http://127.0.0.1:${GATEWAY_PORT}/api/auth/login`, { method: 'POST' })
+        await fetch(`http://127.0.0.1:${GATEWAY_PORT}/api/client/v2/auth/login`, { method: 'POST' })
         gatewayReady = true
         break
       } catch { await wait(250) }

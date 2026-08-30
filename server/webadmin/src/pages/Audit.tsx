@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import { Input } from '../components/ui/input'
@@ -90,7 +90,7 @@ export default function Audit() {
       const params = new URLSearchParams({ page: String(p), size: '50' })
       if (action) params.set('action', action)
       if (username) params.set('username', username)
-      const data = await request(`/api/server/admin/audit?${params.toString()}`)
+      const data = await request(`${ADMIN_API}/audit?${params.toString()}`)
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setLogs(data.logs)
       setTotal(data.total)

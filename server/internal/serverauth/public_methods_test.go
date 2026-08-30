@@ -19,7 +19,7 @@ func TestGetPublicAuthMethods(t *testing.T) {
 	r := gin.New()
 	RegisterAdminRoutes(r, db)
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/auth/methods", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/server/admin/auth/methods", nil))
 	if w.Code != 200 {
 		t.Fatalf("methods status = %d", w.Code)
 	}
@@ -53,7 +53,7 @@ func TestGetPublicAuthMethodsForcesLocal(t *testing.T) {
 	r := gin.New()
 	RegisterAdminRoutes(r, db)
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/auth/methods", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/server/admin/auth/methods", nil))
 	var out struct {
 		Methods []struct {
 			Name       string `json:"name"`

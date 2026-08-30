@@ -34,7 +34,7 @@ func tempPath(t *testing.T, name string) string {
 
 func loginToken(t *testing.T, r *gin.Engine, username, password string) string {
 	t.Helper()
-	w, out := doJSON(t, r, "POST", "/api/auth/login", fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password), nil)
+	w, out := doJSON(t, r, "POST", "/api/client/v2/auth/login", fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login %s: %d %s", username, w.Code, w.Body.String())
 	}
@@ -78,7 +78,7 @@ func TestLoginLogoutMe(t *testing.T) {
 	createUser(t, db, "admin", "Admin@123", true)
 
 	// wrong password
-	w, out := doJSON(t, r, "POST", "/api/auth/login", `{"username":"admin","password":"bad"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/client/v2/auth/login", `{"username":"admin","password":"bad"}`, nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong pw status = %d, body=%s", w.Code, w.Body.String())
 	}
@@ -87,7 +87,7 @@ func TestLoginLogoutMe(t *testing.T) {
 	}
 
 	// correct login
-	w, out = doJSON(t, r, "POST", "/api/auth/login", `{"username":"admin","password":"Admin@123"}`, nil)
+	w, out = doJSON(t, r, "POST", "/api/client/v2/auth/login", `{"username":"admin","password":"Admin@123"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -97,7 +97,7 @@ func TestLoginLogoutMe(t *testing.T) {
 	}
 
 	// me
-	w, out = doJSON(t, r, "GET", "/api/auth/me", "", map[string]string{"Authorization": "Bearer " + token})
+	w, out = doJSON(t, r, "GET", "/api/client/v2/auth/me", "", map[string]string{"Authorization": "Bearer " + token})
 	if w.Code != http.StatusOK {
 		t.Fatalf("me status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -106,11 +106,11 @@ func TestLoginLogoutMe(t *testing.T) {
 	}
 
 	// logout revokes
-	w, _ = doJSON(t, r, "POST", "/api/auth/logout", "", map[string]string{"Authorization": "Bearer " + token})
+	w, _ = doJSON(t, r, "POST", "/api/client/v2/auth/logout", "", map[string]string{"Authorization": "Bearer " + token})
 	if w.Code != http.StatusOK {
 		t.Fatalf("logout status = %d", w.Code)
 	}
-	w, _ = doJSON(t, r, "GET", "/api/auth/me", "", map[string]string{"Authorization": "Bearer " + token})
+	w, _ = doJSON(t, r, "GET", "/api/client/v2/auth/me", "", map[string]string{"Authorization": "Bearer " + token})
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("me after logout status = %d", w.Code)
 	}
@@ -119,7 +119,7 @@ func TestLoginLogoutMe(t *testing.T) {
 func TestBearerAuthRequired(t *testing.T) {
 	r, _, cleanup := newTestAPI(t)
 	defer cleanup()
-	w, _ := doJSON(t, r, "GET", "/api/auth/me", "", nil)
+	w, _ := doJSON(t, r, "GET", "/api/client/v2/auth/me", "", nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("no token status = %d", w.Code)
 	}
@@ -132,7 +132,7 @@ func TestLoginRateLimit(t *testing.T) {
 
 	status := http.StatusOK
 	for i := 0; i < 15; i++ {
-		w, out := doJSON(t, r, "POST", "/api/auth/login", `{"username":"admin","password":"wrong"}`, nil)
+		w, out := doJSON(t, r, "POST", "/api/client/v2/auth/login", `{"username":"admin","password":"wrong"}`, nil)
 		status = w.Code
 		if status == http.StatusTooManyRequests {
 			if code, _ := out["error"].(map[string]any)["code"].(string); code != "RATE_LIMITED" {
@@ -157,7 +157,7 @@ func TestLoginRateLimitXFFSpoof(t *testing.T) {
 	status := http.StatusOK
 	xff := []string{"10.0.0.1", "10.0.0.2", "1.2.3.4", "203.0.113.9"}
 	for i := 0; i < 15; i++ {
-		w, out := doJSON(t, r, "POST", "/api/auth/login", `{"username":"admin","password":"wrong"}`,
+		w, out := doJSON(t, r, "POST", "/api/client/v2/auth/login", `{"username":"admin","password":"wrong"}`,
 			map[string]string{"X-Forwarded-For": xff[i%len(xff)]})
 		status = w.Code
 		if status == http.StatusTooManyRequests {
@@ -304,7 +304,7 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	}
 
 	token := loginToken(t, r, "alice", "Alice@123")
-	w, out := doJSON(t, r, "GET", "/api/auth/usage", "", map[string]string{"Authorization": "Bearer " + token})
+	w, out := doJSON(t, r, "GET", "/api/client/v2/auth/usage", "", map[string]string{"Authorization": "Bearer " + token})
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -342,7 +342,7 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	}
 
 	// 未登录 → 401
-	w, _ = doJSON(t, r, "GET", "/api/auth/usage", "", nil)
+	w, _ = doJSON(t, r, "GET", "/api/client/v2/auth/usage", "", nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("no token status = %d, want 401", w.Code)
 	}
@@ -356,7 +356,7 @@ func TestUsageSummaryUnlimitedAndAdmin(t *testing.T) {
 	createUser(t, db, "boss", "Boss@123", true)
 
 	token := loginToken(t, r, "alice", "Alice@123")
-	w, out := doJSON(t, r, "GET", "/api/auth/usage", "", map[string]string{"Authorization": "Bearer " + token})
+	w, out := doJSON(t, r, "GET", "/api/client/v2/auth/usage", "", map[string]string{"Authorization": "Bearer " + token})
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage status = %d", w.Code)
 	}
@@ -370,7 +370,7 @@ func TestUsageSummaryUnlimitedAndAdmin(t *testing.T) {
 
 	// admin:is_admin=true 且配额 0(豁免)
 	token2 := loginToken(t, r, "boss", "Boss@123")
-	w, out = doJSON(t, r, "GET", "/api/auth/usage", "", map[string]string{"Authorization": "Bearer " + token2})
+	w, out = doJSON(t, r, "GET", "/api/client/v2/auth/usage", "", map[string]string{"Authorization": "Bearer " + token2})
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin usage status = %d", w.Code)
 	}

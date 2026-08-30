@@ -102,7 +102,7 @@ func TestConfigureProvidersOIDC(t *testing.T) {
 	if err := serverstore.SetSetting(db, "oidc.client_id", "test-client"); err != nil {
 		t.Fatal(err)
 	}
-	if err := serverstore.SetSetting(db, "oidc.redirect_url", "http://localhost/api/auth/oidc/callback"); err != nil {
+	if err := serverstore.SetSetting(db, "oidc.redirect_url", "http://localhost/api/client/v2/auth/oidc/callback"); err != nil {
 		t.Fatal(err)
 	}
 	_, browsers := ConfigureProviders(db)

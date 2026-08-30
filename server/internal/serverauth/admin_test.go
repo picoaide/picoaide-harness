@@ -69,7 +69,7 @@ func TestAdminAPIs(t *testing.T) {
 	defer db.Close()
 
 	// login
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -92,7 +92,7 @@ func TestAdminAPIs(t *testing.T) {
 	}
 
 	// /me returns a fresh csrf_token so a reloaded admin SPA can keep writing
-	w, me := doJSON(t, r, "GET", "/api/admin/me", "", map[string]string{"Cookie": "picoaide_session=" + sess})
+	w, me := doJSON(t, r, "GET", "/api/server/admin/me", "", map[string]string{"Cookie": "picoaide_session=" + sess})
 	if w.Code != http.StatusOK {
 		t.Fatalf("me: %d %s", w.Code, w.Body.String())
 	}
@@ -101,40 +101,40 @@ func TestAdminAPIs(t *testing.T) {
 	}
 
 	// list users requires auth
-	if w, _ := doJSON(t, r, "GET", "/api/admin/users", "", nil); w.Code != http.StatusUnauthorized {
+	if w, _ := doJSON(t, r, "GET", "/api/server/admin/users", "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("users without session: %d", w.Code)
 	}
 	// create user
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
 	// update user
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"status":0}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"status":0}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("update user: %d %s", w.Code, w.Body.String())
 	}
 	// CSRF missing → 403
-	if w, _ := doJSON(t, r, "POST", "/api/admin/users", `{"username":"eve","password":"x"}`, map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusForbidden {
+	if w, _ := doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"eve","password":"x"}`, map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusForbidden {
 		t.Fatalf("create without csrf: %d", w.Code)
 	}
 	// delete user
-	w, _ = doJSON(t, r, "DELETE", fmt.Sprintf("/api/admin/users/%d", id), "", hdr())
+	w, _ = doJSON(t, r, "DELETE", fmt.Sprintf("/api/server/admin/users/%d", id), "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete user: %d %s", w.Code, w.Body.String())
 	}
 	// cannot delete self
-	w, _ = doJSON(t, r, "DELETE", "/api/admin/users/1", "", hdr())
+	w, _ = doJSON(t, r, "DELETE", "/api/server/admin/users/1", "", hdr())
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("delete self: %d", w.Code)
 	}
 	// logout
-	w, _ = doJSON(t, r, "POST", "/api/admin/logout", "", hdr())
+	w, _ = doJSON(t, r, "POST", "/api/server/admin/logout", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("logout: %d", w.Code)
 	}
-	if w, _ := doJSON(t, r, "GET", "/api/admin/users", "", hdr()); w.Code != http.StatusUnauthorized {
+	if w, _ := doJSON(t, r, "GET", "/api/server/admin/users", "", hdr()); w.Code != http.StatusUnauthorized {
 		t.Fatalf("users after logout: %d", w.Code)
 	}
 }
@@ -143,7 +143,7 @@ func TestAdminPasswordPolicy(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
 
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -157,7 +157,7 @@ func TestAdminPasswordPolicy(t *testing.T) {
 	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 
 	// short password -> VALIDATION
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"shorty","password":"tooshort"}`, hdr)
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"shorty","password":"tooshort"}`, hdr)
 	if w.Code != http.StatusBadRequest || out["error"].(map[string]any)["code"] != "VALIDATION" {
 		t.Fatalf("short password: %d %s", w.Code, w.Body.String())
 	}
@@ -165,18 +165,18 @@ func TestAdminPasswordPolicy(t *testing.T) {
 		t.Fatalf("short password message should mention min length: %s", w.Body.String())
 	}
 	// 10-char password -> ok
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"okuser","password":"tenchars12"}`, hdr)
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"okuser","password":"tenchars12"}`, hdr)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("10-char password: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
 	// update password to short -> VALIDATION
-	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"password":"short"}`, hdr)
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"password":"short"}`, hdr)
 	if w.Code != http.StatusBadRequest || out["error"].(map[string]any)["code"] != "VALIDATION" {
 		t.Fatalf("short password update: %d %s", w.Code, w.Body.String())
 	}
 	// update password to 10 chars -> ok
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"password":"newpassword123"}`, hdr)
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"password":"newpassword123"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("long password update: %d %s", w.Code, w.Body.String())
 	}
@@ -185,7 +185,7 @@ func TestAdminPasswordPolicy(t *testing.T) {
 func TestAdminUsage(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	csrf := out["csrf_token"].(string)
 	sess := ""
 	for _, ck := range w.Result().Cookies() {
@@ -199,7 +199,7 @@ func TestAdminUsage(t *testing.T) {
 	recordUsage(t, db, 1, "deepseek-chat", 10, 20)
 	recordUsage(t, db, 1, "deepseek-chat", 30, 40)
 
-	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=day&from="+time.Now().Format("2006-01-02")+"&to="+time.Now().Format("2006-01-02"), "", hdr)
+	w, out = doJSON(t, r, "GET", "/api/server/admin/usage?group=day&from="+time.Now().Format("2006-01-02")+"&to="+time.Now().Format("2006-01-02"), "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage: %d %s", w.Code, w.Body.String())
 	}
@@ -212,11 +212,11 @@ func TestAdminUsage(t *testing.T) {
 		t.Fatalf("usage row = %v", r0)
 	}
 	// invalid group
-	if w, _ := doJSON(t, r, "GET", "/api/admin/usage?group=nope", "", hdr); w.Code != http.StatusBadRequest {
+	if w, _ := doJSON(t, r, "GET", "/api/server/admin/usage?group=nope", "", hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad group: %d", w.Code)
 	}
 	// 缺省 from/to 默认近 90 天窗口且按日补零(审计中2)
-	if w, out := doJSON(t, r, "GET", "/api/admin/usage?group=day", "", hdr); w.Code != http.StatusOK {
+	if w, out := doJSON(t, r, "GET", "/api/server/admin/usage?group=day", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("usage default window: %d %s", w.Code, w.Body.String())
 	} else if n := len(out["rows"].([]any)); n != usageDefaultWindowDays {
 		t.Fatalf("usage default window rows = %d, want %d", n, usageDefaultWindowDays)
@@ -230,7 +230,7 @@ func TestAdminUsage(t *testing.T) {
 func TestAdminUsageRangeValidation(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	csrf := out["csrf_token"].(string)
 	sess := ""
 	for _, ck := range w.Result().Cookies() {
@@ -241,7 +241,7 @@ func TestAdminUsageRangeValidation(t *testing.T) {
 	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 
 	// 1) to < from → 400
-	if w, _ := doJSON(t, r, "GET", "/api/admin/usage?group=day&from=2026-08-10&to=2026-08-01", "", hdr); w.Code != http.StatusBadRequest {
+	if w, _ := doJSON(t, r, "GET", "/api/server/admin/usage?group=day&from=2026-08-10&to=2026-08-01", "", hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("to<from: %d, want 400", w.Code)
 	}
 
@@ -254,7 +254,7 @@ func TestAdminUsageRangeValidation(t *testing.T) {
 		VALUES (1, 'm-recent', 7, 3, now() - interval '10 days')`); err != nil {
 		t.Fatal(err)
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=model", "", hdr)
+	w, out = doJSON(t, r, "GET", "/api/server/admin/usage?group=model", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage default window: %d %s", w.Code, w.Body.String())
 	}
@@ -287,7 +287,7 @@ func TestAdminUsageRangeValidation(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=user", "", hdr)
+	w, out = doJSON(t, r, "GET", "/api/server/admin/usage?group=user", "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage group=user: %d %s", w.Code, w.Body.String())
 	}
@@ -302,7 +302,7 @@ func TestAdminUsageRangeValidation(t *testing.T) {
 func TestAdminTokens(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -327,11 +327,11 @@ func TestAdminTokens(t *testing.T) {
 	}
 
 	// requires session
-	if w, _ := doJSON(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/tokens", uid), "", nil); w.Code != http.StatusUnauthorized {
+	if w, _ := doJSON(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/tokens", uid), "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("tokens without session: %d", w.Code)
 	}
 	// list
-	w, out = doJSON(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/tokens", uid), "", map[string]string{"Cookie": "picoaide_session=" + sess})
+	w, out = doJSON(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/tokens", uid), "", map[string]string{"Cookie": "picoaide_session=" + sess})
 	if w.Code != http.StatusOK {
 		t.Fatalf("list: %d %s", w.Code, w.Body.String())
 	}
@@ -351,25 +351,25 @@ func TestAdminTokens(t *testing.T) {
 	tid := int64(toks[0].(map[string]any)["id"].(float64))
 
 	// unknown user -> 404
-	if w, _ := doJSON(t, r, "GET", "/api/admin/users/999999/tokens", "", map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusNotFound {
+	if w, _ := doJSON(t, r, "GET", "/api/server/admin/users/999999/tokens", "", map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown user list: %d", w.Code)
 	}
 	// revoke requires CSRF
-	if w, _ := doJSON(t, r, "POST", fmt.Sprintf("/api/admin/tokens/%d/revoke", tid), "", map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusForbidden {
+	if w, _ := doJSON(t, r, "POST", fmt.Sprintf("/api/server/admin/tokens/%d/revoke", tid), "", map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusForbidden {
 		t.Fatalf("revoke without csrf: %d", w.Code)
 	}
 	// revoke
-	w, _ = doJSON(t, r, "POST", fmt.Sprintf("/api/admin/tokens/%d/revoke", tid), "", hdr)
+	w, _ = doJSON(t, r, "POST", fmt.Sprintf("/api/server/admin/tokens/%d/revoke", tid), "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
 	}
-	w, out = doJSON(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/tokens", uid), "", map[string]string{"Cookie": "picoaide_session=" + sess})
+	w, out = doJSON(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/tokens", uid), "", map[string]string{"Cookie": "picoaide_session=" + sess})
 	toks = out["tokens"].([]any)
 	if toks[0].(map[string]any)["revoked"].(float64) != 1 {
 		t.Fatal("token not revoked in listing")
 	}
 	// unknown token -> 404
-	if w, _ := doJSON(t, r, "POST", "/api/admin/tokens/999999/revoke", "", hdr); w.Code != http.StatusNotFound {
+	if w, _ := doJSON(t, r, "POST", "/api/server/admin/tokens/999999/revoke", "", hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown token revoke: %d", w.Code)
 	}
 }
@@ -553,19 +553,19 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 
 	// 创建普通用户
 	var out map[string]any
-	w, out := doAdmin(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
+	w, out := doAdmin(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	aliceID := int64(out["user"].(map[string]any)["id"].(float64))
 
 	// 设置单部门归属(研发部;id=1 为迁移 seed 的隐式全员)
-	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", aliceID), fmt.Sprintf(`{"group_id":%d}`, devID), hdr)
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID), fmt.Sprintf(`{"group_id":%d}`, devID), hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set department: %d %s", w.Code, w.Body.String())
 	}
 	// 读取(仍走 GET groups,返回组名列表)
-	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), "", hdr)
+	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/groups", aliceID), "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("get groups: %d %s", w.Code, w.Body.String())
 	}
@@ -574,7 +574,7 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 		t.Fatalf("groups = %v", groups)
 	}
 	// 用户列表附带组
-	w, out = doAdmin(t, r, "GET", "/api/admin/users", "", hdr)
+	w, out = doAdmin(t, r, "GET", "/api/server/admin/users", "", hdr)
 	users := out["users"].([]any)
 	found := false
 	for _, u := range users {
@@ -590,29 +590,29 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 		t.Fatal("alice missing from user list")
 	}
 	// 多部门 set 端点已移除(单部门模型)
-	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), `{"groups":["研发部"]}`, hdr)
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/groups", aliceID), `{"groups":["研发部"]}`, hdr)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("legacy multi-group endpoint = %d, want 404", w.Code)
 	}
 	// 不存在的部门 → 400
-	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", aliceID), `{"group_id":9999}`, hdr)
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID), `{"group_id":9999}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad dept = %d, want 400", w.Code)
 	}
 	// 未知字段(误传 department_id)必须被拒 —— 不得静默清空用户组归属
-	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", aliceID), `{"department_id":1}`, hdr)
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID), `{"department_id":1}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field = %d, want 400 (must not silently clear groups)", w.Code)
 	}
 	// 拒绝后组归属保持原样(研发部仍在)
-	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), "", hdr)
+	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/groups", aliceID), "", hdr)
 	if w.Code == http.StatusOK {
 		if gs := out["groups"].([]any); len(gs) != 1 || gs[0] != "研发部" {
 			t.Fatalf("groups after rejected unknown-field put = %v, want 研发部 intact", gs)
 		}
 	}
 	// 不存在用户 → 404
-	w, _ = doAdmin(t, r, "PUT", "/api/admin/users/99999/department", fmt.Sprintf(`{"group_id":%d}`, devID), hdr)
+	w, _ = doAdmin(t, r, "PUT", "/api/server/admin/users/99999/department", fmt.Sprintf(`{"group_id":%d}`, devID), hdr)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("unknown user = %d, want 404", w.Code)
 	}
@@ -655,26 +655,26 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 
 	// 建部门树
 	var out map[string]any
-	w, out := doAdmin(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr)
+	w, out := doAdmin(t, r, "POST", "/api/server/admin/departments", `{"name":"研发部"}`, hdr)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create dept: %d %s", w.Code, w.Body.String())
 	}
 	devID := int64(out["department"].(map[string]any)["id"].(float64))
 	var frontID int64
-	w, out = doAdmin(t, r, "POST", "/api/admin/departments", `{"name":"前端组","parent_id":`+fmt.Sprint(devID)+`}`, hdr)
+	w, out = doAdmin(t, r, "POST", "/api/server/admin/departments", `{"name":"前端组","parent_id":`+fmt.Sprint(devID)+`}`, hdr)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create child: %d %s", w.Code, w.Body.String())
 	}
 	frontID = int64(out["department"].(map[string]any)["id"].(float64))
 
 	// 列表含层级(含迁移 seed 的隐式全员)
-	w, out = doAdmin(t, r, "GET", "/api/admin/departments", "", hdr)
+	w, out = doAdmin(t, r, "GET", "/api/server/admin/departments", "", hdr)
 	if w.Code != http.StatusOK || len(out["departments"].([]any)) != 3 {
 		t.Fatalf("list depts: %d %s", w.Code, w.Body.String())
 	}
 
 	// 循环防护:前端组不能成为研发部上级
-	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", devID),
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/departments/%d", devID),
 		`{"name":"研发部","parent_id":`+fmt.Sprint(frontID)+`}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("cycle parent = %d, want 400", w.Code)
@@ -682,12 +682,12 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 
 	// 用户单部门归属
 	var aliceID int64
-	w, out = doAdmin(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
+	w, out = doAdmin(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d", w.Code)
 	}
 	aliceID = int64(out["user"].(map[string]any)["id"].(float64))
-	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", aliceID),
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID),
 		`{"group_id":`+fmt.Sprint(frontID)+`}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set dept: %d %s", w.Code, w.Body.String())
@@ -698,12 +698,12 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 	}
 
 	// 删除约束:有成员 → 拒绝
-	w, _ = doAdmin(t, r, "DELETE", fmt.Sprintf("/api/admin/departments/%d", frontID), "", hdr)
+	w, _ = doAdmin(t, r, "DELETE", fmt.Sprintf("/api/server/admin/departments/%d", frontID), "", hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("delete with member = %d, want 400", w.Code)
 	}
 	// 有子部门 → 拒绝
-	w, _ = doAdmin(t, r, "DELETE", fmt.Sprintf("/api/admin/departments/%d", devID), "", hdr)
+	w, _ = doAdmin(t, r, "DELETE", fmt.Sprintf("/api/server/admin/departments/%d", devID), "", hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("delete with child = %d, want 400", w.Code)
 	}
@@ -728,7 +728,7 @@ func TestAdminLoginRespectsAuthMode(t *testing.T) {
 	r := gin.New()
 	RegisterAdminRoutes(r, db)
 	// 无 LDAP 配置 → 仅 local provider 注册 → 本地 admin 必须能登录(回退)
-	w, _ := doAdmin(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, _ := doAdmin(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("ldap-mode local admin login = %d, want 200 (admin fallback)", w.Code)
 	}
@@ -753,7 +753,7 @@ func TestExternalUserPasswordRejected(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	RegisterAdminRoutes(r, db)
-	w, _ := doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", extID), `{"password":"newpassword123"}`, hdr)
+	w, _ := doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", extID), `{"password":"newpassword123"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("external password change = %d, want 400", w.Code)
 	}
@@ -772,7 +772,7 @@ func TestAdminUserQuota(t *testing.T) {
 	defer db.Close()
 
 	// login as admin
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -789,7 +789,7 @@ func TestAdminUserQuota(t *testing.T) {
 	}
 
 	// create a regular user
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
@@ -803,11 +803,11 @@ func TestAdminUserQuota(t *testing.T) {
 	if _, err := serverstore.RecordUsage(db, id, "deepseek-chat", 100, 50); err != nil {
 		t.Fatal(err)
 	}
-	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_tokens":5000}`, hdr())
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"quota_tokens":5000}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("set quota: %d %s", w.Code, w.Body.String())
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/users", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
 	}
@@ -829,17 +829,17 @@ func TestAdminUserQuota(t *testing.T) {
 	}
 
 	// negative quota rejected
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_tokens":-1}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"quota_tokens":-1}`, hdr())
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("negative quota = %d, want 400", w.Code)
 	}
 
 	// quota_clear resets to NULL (follow global default)
-	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_clear":true}`, hdr())
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"quota_clear":true}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear quota: %d %s", w.Code, w.Body.String())
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/users", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
 	}
@@ -858,7 +858,7 @@ func TestAdminUserMoneyQuota(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
 
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -874,7 +874,7 @@ func TestAdminUserMoneyQuota(t *testing.T) {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
 
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
@@ -894,13 +894,13 @@ func TestAdminUserMoneyQuota(t *testing.T) {
 	}
 
 	// 设置金额配额 50 元
-	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_money":50}`, hdr())
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"quota_money":50}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("set quota_money: %d %s", w.Code, w.Body.String())
 	}
 
 	// 列表返回 quota_money + monthly_cost
-	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/users", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
 	}
@@ -922,17 +922,17 @@ func TestAdminUserMoneyQuota(t *testing.T) {
 	}
 
 	// 负数金额配额拒绝
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_money":-1}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"quota_money":-1}`, hdr())
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("negative quota_money = %d, want 400", w.Code)
 	}
 
 	// quota_money_clear 恢复 NULL(跟随全局默认)
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_money_clear":true}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"quota_money_clear":true}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear quota_money: %d %s", w.Code, w.Body.String())
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/users", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
 	}
@@ -951,7 +951,7 @@ func TestAdminUsageCost(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
 
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -967,7 +967,7 @@ func TestAdminUsageCost(t *testing.T) {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
 
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
@@ -985,7 +985,7 @@ func TestAdminUsageCost(t *testing.T) {
 	}
 
 	// group=model:单桶,避免按日补零把 rows[0] 变成 2000 年的空桶
-	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=model&from=2000-01-01&to=2100-12-31", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/usage?group=model&from=2000-01-01&to=2100-12-31", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage: %d %s", w.Code, w.Body.String())
 	}
@@ -1003,7 +1003,7 @@ func TestAdminUsageCost(t *testing.T) {
 func TestAdminListUsersEffectiveQuota(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d", w.Code)
 	}
@@ -1025,13 +1025,13 @@ func TestAdminListUsersEffectiveQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 员工(无个人配额)
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d", w.Code)
 	}
 	uid := int64(out["user"].(map[string]any)["id"].(float64))
 	// 列表:alice 的生效配额 = 全局默认
-	w, out = doJSON(t, r, "GET", "/api/admin/users?size=200", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/users?size=200", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list users: %d", w.Code)
 	}
@@ -1054,11 +1054,11 @@ func TestAdminListUsersEffectiveQuota(t *testing.T) {
 		t.Fatalf("boss effective_quota_tokens = %v, want 0", eq)
 	}
 	// 设个人配额后生效值 = 个人值
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", uid), `{"quota_tokens":5000,"quota_money":10}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", uid), `{"quota_tokens":5000,"quota_money":10}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("set quota: %d", w.Code)
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/users?size=200", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/users?size=200", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list users: %d", w.Code)
 	}
@@ -1085,7 +1085,7 @@ func findUser(out map[string]any, name string) map[string]any {
 func TestAdminCreateReturnsCreated(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d", w.Code)
 	}
@@ -1100,18 +1100,18 @@ func TestAdminCreateReturnsCreated(t *testing.T) {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
 	// POST /users → 201
-	w, _ = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123"}`, hdr())
+	w, _ = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123"}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user status = %d, want 201", w.Code)
 	}
 	// POST /departments → 201
-	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/departments", `{"name":"研发部"}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create dept status = %d, want 201", w.Code)
 	}
 	deptID := int64(out["department"].(map[string]any)["id"].(float64))
 	// PUT /departments/:id → 返回 department 资源(与 create 一致,不再 {ok:true})
-	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"技术中心"}`, hdr())
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/departments/%d", deptID), `{"name":"技术中心"}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("update dept: %d %s", w.Code, w.Body.String())
 	}
@@ -1126,7 +1126,7 @@ func TestAdminCreateReturnsCreated(t *testing.T) {
 func TestAdminCreateDeptWithBudget(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -1141,12 +1141,12 @@ func TestAdminCreateDeptWithBudget(t *testing.T) {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
 	// 创建带预算部门
-	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"财务部","budget_money":500}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/departments", `{"name":"财务部","budget_money":500}`, hdr())
 	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
 		t.Fatalf("create dept with budget: %d %s", w.Code, w.Body.String())
 	}
 	// 列表必须带 budget_money=500
-	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/departments", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list depts: %d", w.Code)
 	}
@@ -1166,7 +1166,7 @@ func TestAdminCreateDeptWithBudget(t *testing.T) {
 func TestAdminDeleteEveryoneDept(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d", w.Code)
 	}
@@ -1180,7 +1180,7 @@ func TestAdminDeleteEveryoneDept(t *testing.T) {
 	hdr := func() map[string]string {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/departments", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list depts: %d", w.Code)
 	}
@@ -1194,7 +1194,7 @@ func TestAdminDeleteEveryoneDept(t *testing.T) {
 	if everyoneID == 0 {
 		t.Fatal("everyone dept missing from list")
 	}
-	w, out = doJSON(t, r, "DELETE", fmt.Sprintf("/api/admin/departments/%d", everyoneID), "", hdr())
+	w, out = doJSON(t, r, "DELETE", fmt.Sprintf("/api/server/admin/departments/%d", everyoneID), "", hdr())
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("delete everyone dept: %d %s, want 400", w.Code, w.Body.String())
 	}
@@ -1207,7 +1207,7 @@ func TestAdminDeleteEveryoneDept(t *testing.T) {
 func TestAdminCreateDeptNegativeBudget(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d", w.Code)
 	}
@@ -1221,7 +1221,7 @@ func TestAdminCreateDeptNegativeBudget(t *testing.T) {
 	hdr := func() map[string]string {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
-	w, _ = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"坏预算","budget_money":-1}`, hdr())
+	w, _ = doJSON(t, r, "POST", "/api/server/admin/departments", `{"name":"坏预算","budget_money":-1}`, hdr())
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("negative budget create accepted: %d", w.Code)
 	}
@@ -1232,7 +1232,7 @@ func TestAdminDeptBudget(t *testing.T) {
 	r, db := adminRouter(t)
 	defer db.Close()
 
-	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", w.Code, w.Body.String())
 	}
@@ -1249,19 +1249,19 @@ func TestAdminDeptBudget(t *testing.T) {
 	}
 
 	// 建部门
-	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/departments", `{"name":"研发部"}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create dept: %d %s", w.Code, w.Body.String())
 	}
 	deptID := int64(out["department"].(map[string]any)["id"].(float64))
 
 	// 员工挂部门 + 产生费用
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	uid := int64(out["user"].(map[string]any)["id"].(float64))
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", uid), fmt.Sprintf(`{"group_id":%d}`, deptID), hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", uid), fmt.Sprintf(`{"group_id":%d}`, deptID), hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("assign dept: %d %s", w.Code, w.Body.String())
 	}
@@ -1278,13 +1278,13 @@ func TestAdminDeptBudget(t *testing.T) {
 	}
 
 	// 设置预算 100
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"研发部","budget_money":100}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/departments/%d", deptID), `{"name":"研发部","budget_money":100}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("set dept budget: %d %s", w.Code, w.Body.String())
 	}
 
 	// 列表附 budget_money 与 monthly_cost
-	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/departments", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list depts: %d %s", w.Code, w.Body.String())
 	}
@@ -1306,17 +1306,17 @@ func TestAdminDeptBudget(t *testing.T) {
 	}
 
 	// 负预算拒绝
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"研发部","budget_money":-5}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/departments/%d", deptID), `{"name":"研发部","budget_money":-5}`, hdr())
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("negative budget accepted: %d", w.Code)
 	}
 
 	// 清除预算(0)
-	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"研发部","budget_money":0}`, hdr())
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/departments/%d", deptID), `{"name":"研发部","budget_money":0}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear budget: %d %s", w.Code, w.Body.String())
 	}
-	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	w, out = doJSON(t, r, "GET", "/api/server/admin/departments", "", hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("list depts: %d", w.Code)
 	}
@@ -1336,7 +1336,7 @@ func TestAdminAuthConfig(t *testing.T) {
 	defer db.Close()
 
 	loginBody := `{"username":"boss","password":"pw123456"}`
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(loginBody))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -1352,13 +1352,13 @@ func TestAdminAuthConfig(t *testing.T) {
 	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 
 	// 1. 保存 ldap 模式(带密码)
-	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
 		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"s3cret","base_dn":"dc=x","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("save ldap: %d %s", w.Code, w.Body.String())
 	}
 	get := func() map[string]any {
-		_, o := doJSON(t, r, "GET", "/api/admin/auth", "", hdr)
+		_, o := doJSON(t, r, "GET", "/api/server/admin/auth", "", hdr)
 		return o["auth"].(map[string]any)
 	}
 	a := get()
@@ -1371,7 +1371,7 @@ func TestAdminAuthConfig(t *testing.T) {
 	}
 
 	// 2. 掩码回传 = 保持密码;改 base_dn 后密码不变
-	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
 		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update ldap: %d", w.Code)
@@ -1383,7 +1383,7 @@ func TestAdminAuthConfig(t *testing.T) {
 	}
 
 	// 3. 显式清空密码(空串覆盖)→ 回读无掩码(未配置)
-	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
 		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"","base_dn":"dc=y"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear ldap pw: %d", w.Code)
@@ -1395,7 +1395,7 @@ func TestAdminAuthConfig(t *testing.T) {
 	}
 
 	// 4. 切回 local → configuration 独立保留(前端全量回传各方式配置)
-	w, _ = doJSON(t, r, "PUT", "/api/admin/auth",
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
 		`{"mode":"local","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("switch local: %d", w.Code)
@@ -1417,7 +1417,7 @@ func TestAdminAuthConfig(t *testing.T) {
 	}
 
 	// 5. 非法 mode 拒绝
-	w, _ = doJSON(t, r, "PUT", "/api/admin/auth", `{"mode":"nonsense"}`, hdr)
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth", `{"mode":"nonsense"}`, hdr)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid mode = %d, want 400", w.Code)
 	}

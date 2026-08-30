@@ -87,7 +87,7 @@ var issuerURLRe = regexp.MustCompile(`^(https)://[A-Za-z0-9.\-]+(:\d+)?(/[^\s]*)
 // permission through AdminRoute; me/logout require only a valid session).
 // 双轨镜像,handler/中间件与 /api 完全共享,只能增加不能减少)。
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
-	base := "/api/admin"
+	base := "/api/server/admin"
 	a := &AdminAPI{DB: db}
 	g := r.Group(base)
 	// 管理端 JSON 请求体统一上限(审计 2026-08-25 F-06):admin 路由的

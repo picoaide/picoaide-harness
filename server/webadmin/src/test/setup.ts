@@ -25,9 +25,13 @@ if (typeof Element !== 'undefined' && !Element.prototype.hasPointerCapture) {
 
 // 页面级测试统一 mock 网络层(src/api.ts request):接口行为已由 Go 侧
 // 测试与 E2E 覆盖,组件测试只验证 UI 渲染与交互驱动。
+// 注意: 常量(ADMIN_API/CLIENT_API)必须与 lib/api-paths.ts 真源一致,
+// 页面从 ../api re-export 读取,测试端 mock 未提供会报「No export defined」。
 vi.mock('../api', () => ({
   request: vi.fn(),
   setCsrf: vi.fn(),
+  ADMIN_API: '/api/server/admin',
+  CLIENT_API: '/api/client/v2',
   ApiError: class extends Error {
     code: string
     status: number

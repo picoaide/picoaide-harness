@@ -26,9 +26,9 @@ func TestAdminRouteRegistryNoUnprotected(t *testing.T) {
 		registered[rr.Method+" "+rr.Path] = true
 	}
 	// 公开(未认证)路由显式豁免: 登录与登录方式发现。
-	public := map[string]bool{"POST /api/admin/login": true, "GET /api/admin/auth/methods": true}
+	public := map[string]bool{"POST /api/server/admin/login": true, "GET /api/server/admin/auth/methods": true}
 	for _, rt := range r.Routes() {
-		if !stringsHasPrefix(rt.Path, "/api/admin/") {
+		if !stringsHasPrefix(rt.Path, "/api/server/admin/") {
 			continue
 		}
 		key := rt.Method + " " + rt.Path
@@ -47,7 +47,7 @@ func TestAdminRouteRegistryNoUnprotected(t *testing.T) {
 func TestAdminRouteRegistryPermissionsDeclared(t *testing.T) {
 	for _, rr := range AdminRoutePerms() {
 		if rr.Perm == "" {
-			if rr.Path != "/api/admin/me" && rr.Path != "/api/admin/logout" {
+			if rr.Path != "/api/server/admin/me" && rr.Path != "/api/server/admin/logout" {
 				t.Fatalf("route %s %s has empty perm but is not me/logout", rr.Method, rr.Path)
 			}
 		}
@@ -118,11 +118,11 @@ func TestAuditorCannotWrite(t *testing.T) {
 		"X-CSRF-Token": csrf,
 	}
 	// auditor 可读
-	w, _ := doJSON(t, r, "GET", "/api/admin/audit", "", nil)
+	w, _ := doJSON(t, r, "GET", "/api/server/admin/audit", "", nil)
 	if w.Code == http.StatusForbidden {
 		t.Fatalf("auditor should read audit, got 403")
 	}
-	w, _ = doJSON(t, r, "GET", "/api/admin/users", "", nil)
+	w, _ = doJSON(t, r, "GET", "/api/server/admin/users", "", nil)
 	if w.Code == http.StatusForbidden {
 		t.Fatalf("auditor should read users (read-only), got 403")
 	}
@@ -130,9 +130,9 @@ func TestAuditorCannotWrite(t *testing.T) {
 	writeCases := []struct {
 		method, path, body string
 	}{
-		{"PUT", "/api/admin/auth", `{"mode":"local"}`},
-		{"POST", "/api/admin/users", `{"username":"x","password":"pwpw111111"}`},
-		{"PUT", "/api/admin/users/1", `{"role":"user"}`},
+		{"PUT", "/api/server/admin/auth", `{"mode":"local"}`},
+		{"POST", "/api/server/admin/users", `{"username":"x","password":"pwpw111111"}`},
+		{"PUT", "/api/server/admin/users/1", `{"role":"user"}`},
 	}
 	for _, tc := range writeCases {
 		w, _ := doJSON(t, r, tc.method, tc.path, tc.body, hdr)

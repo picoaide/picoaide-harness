@@ -12,6 +12,11 @@ export class ApiError extends Error {
 // 审计2026-W7:不得在请求层硬编码 /admin/)
 export const ADMIN_BASE = '/admin'
 
+import { ADMIN_API, CLIENT_API } from './lib/api-paths'
+
+// 页面/组件统一从集中常量取前缀,避免散落硬编码旧前缀(/api/admin 等)。
+export { ADMIN_API, CLIENT_API }
+
 let csrfToken = ''
 
 // 全局 401 回调(审计 A5-M3):会话过期时由 App 原地切换登录态,取代
@@ -65,7 +70,7 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
 }
 
 export async function login(username: string, password: string): Promise<void> {
-  const res = await fetch('/api/server/admin/login', {
+  const res = await fetch(`${ADMIN_API}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -82,11 +87,11 @@ export async function login(username: string, password: string): Promise<void> {
 }
 
 export async function logout(): Promise<void> {
-  await request('/api/server/admin/logout', { method: 'POST' })
+  await request(`${ADMIN_API}/logout`, { method: 'POST' })
 }
 
 export async function me(): Promise<any> {
-  const body = await request('/api/server/admin/me')
+  const body = await request(`${ADMIN_API}/me`)
   if (body?.csrf_token) setCsrf(body.csrf_token)
   return body
 }

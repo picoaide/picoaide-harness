@@ -175,7 +175,7 @@ func urlParse(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-const testRedirectURI = "http://localhost/api/auth/oidc/callback"
+const testRedirectURI = "http://localhost/api/client/v2/auth/oidc/callback"
 
 func newOIDCProvider(t *testing.T, idp *fakeIDP) *OIDCProvider {
 	t.Helper()
@@ -298,7 +298,7 @@ func TestOIDCRoutes(t *testing.T) {
 
 	// login -> 302 to IdP with state + pkce
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/login", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/client/v2/auth/oidc/login", nil))
 	if w.Code != http.StatusFound {
 		t.Fatalf("login status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -324,13 +324,13 @@ func TestOIDCRoutes(t *testing.T) {
 
 	// bad state -> 400 VALIDATION
 	w = httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/callback?code=x&state=nope", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/client/v2/auth/oidc/callback?code=x&state=nope", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad state status = %d body=%s", w.Code, w.Body.String())
 	}
 	// missing params -> 400
 	w = httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/callback", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/client/v2/auth/oidc/callback", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("missing params status = %d", w.Code)
 	}
@@ -338,7 +338,7 @@ func TestOIDCRoutes(t *testing.T) {
 	// 无 state cookie 的回调(第三方发起的 login CSRF)→ 400
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest("GET",
-		"/api/auth/oidc/callback?code=x&state="+url.QueryEscape(state), nil))
+		"/api/client/v2/auth/oidc/callback?code=x&state="+url.QueryEscape(state), nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("callback without state cookie = %d, want 400", w.Code)
 	}
@@ -347,7 +347,7 @@ func TestOIDCRoutes(t *testing.T) {
 	code := authorize(t, idp, authURL)
 	w = httptest.NewRecorder()
 	req := httptest.NewRequest("GET",
-		"/api/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+		"/api/client/v2/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
 	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state_oidc", Value: stateCookieVal})
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {
@@ -407,7 +407,7 @@ func TestOIDCLoginServerParam(t *testing.T) {
 
 	// 带 server 参数发起 login
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/login?server=https%3A%2F%2Fserver.example.com", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/client/v2/auth/oidc/login?server=https%3A%2F%2Fserver.example.com", nil))
 	if w.Code != http.StatusFound {
 		t.Fatalf("login status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -425,7 +425,7 @@ func TestOIDCLoginServerParam(t *testing.T) {
 	code := authorize(t, idp, authURL)
 	w = httptest.NewRecorder()
 	req := httptest.NewRequest("GET",
-		"/api/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+		"/api/client/v2/auth/oidc/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
 	req.AddCookie(&http.Cookie{Name: "picoaide_oidc_state_oidc", Value: stateCookie})
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {
@@ -441,7 +441,7 @@ func TestOIDCLoginServerParam(t *testing.T) {
 	}
 	// 非法 server 参数 → 400
 	w = httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/auth/oidc/login?server=ftp%3A%2F%2Fbad.example.com", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/client/v2/auth/oidc/login?server=ftp%3A%2F%2Fbad.example.com", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad server param = %d, want 400", w.Code)
 	}

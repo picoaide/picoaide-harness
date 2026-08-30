@@ -60,7 +60,7 @@ type CapabilityItem struct {
 // 仅测试自建路由树使用;生产路由由 internal/router 集中声明,
 // 实际路径为 /api/client/v2/capabilities。
 func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	base := "/api/capabilities"
+	base := "/api/client/v2/capabilities"
 	g := r.Group(base, serverauth.BearerAuth(db))
 	g.GET("", listCapabilities(db, cacheDir))
 }
@@ -70,7 +70,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 // 仅测试自建路由树使用;生产路由由 internal/router 集中声明,
 // 实际路径为 /api/server/admin/capabilities/approvals。
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	base := "/api/admin/capabilities"
+	base := "/api/server/admin/capabilities"
 	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "/approvals", serverauth.PermCapabilityRead, listApprovals(db, cacheDir))
 }

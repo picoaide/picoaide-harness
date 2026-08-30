@@ -78,7 +78,7 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB, map[string]string, map[string]st
 	RegisterAdminRoutes(r, db, cacheDir)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -114,7 +114,7 @@ func TestUploadApproveFlow(t *testing.T) {
 	defer db.Close()
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/shared-skills",
+	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("codeql-audit", "1.0.0", "审计", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -131,7 +131,7 @@ func TestUploadApproveFlow(t *testing.T) {
 
 	// Employee download while pending → 404.
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("GET", "/api/shared-skills/codeql-audit/1.0.0/archive", nil)
+	reqA := httptest.NewRequest("GET", "/api/client/v2/shared-skills/codeql-audit/1.0.0/archive", nil)
 	for k, v := range userHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -142,7 +142,7 @@ func TestUploadApproveFlow(t *testing.T) {
 
 	// Admin preview.
 	wP := httptest.NewRecorder()
-	reqP := httptest.NewRequest("GET", "/api/admin/shared-skills/codeql-audit/1.0.0/preview", nil)
+	reqP := httptest.NewRequest("GET", "/api/server/admin/shared-skills/codeql-audit/1.0.0/preview", nil)
 	for k, v := range adminHdr {
 		reqP.Header.Set(k, v)
 	}
@@ -153,7 +153,7 @@ func TestUploadApproveFlow(t *testing.T) {
 
 	// Approve; employee download succeeds.
 	wApp := httptest.NewRecorder()
-	reqApp := httptest.NewRequest("POST", "/api/admin/shared-skills/codeql-audit/1.0.0/approve", nil)
+	reqApp := httptest.NewRequest("POST", "/api/server/admin/shared-skills/codeql-audit/1.0.0/approve", nil)
 	for k, v := range adminHdr {
 		reqApp.Header.Set(k, v)
 	}
@@ -162,7 +162,7 @@ func TestUploadApproveFlow(t *testing.T) {
 		t.Fatalf("approve = %d", wApp.Code)
 	}
 	wA2 := httptest.NewRecorder()
-	reqA2 := httptest.NewRequest("GET", "/api/shared-skills/codeql-audit/1.0.0/archive", nil)
+	reqA2 := httptest.NewRequest("GET", "/api/client/v2/shared-skills/codeql-audit/1.0.0/archive", nil)
 	for k, v := range userHdr {
 		reqA2.Header.Set(k, v)
 	}
@@ -176,7 +176,7 @@ func TestUploadApproveFlow(t *testing.T) {
 
 	// Multi-version: upload 1.1.0 → approve → both visible.
 	w2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("POST", "/api/shared-skills",
+	req2 := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("codeql-audit", "1.1.0", "审计v2", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 	req2.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -199,7 +199,7 @@ func TestUploadValidation(t *testing.T) {
 
 	post := func(body string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/shared-skills", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -236,7 +236,7 @@ func TestUploadValidation(t *testing.T) {
 
 	// Reject requires reason.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(`{}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		req.Header.Set(k, v)
@@ -248,7 +248,7 @@ func TestUploadValidation(t *testing.T) {
 
 	// Reject with reason; resubmit resets.
 	w2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("POST", "/api/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(rejectBody("缺演示")))
+	req2 := httptest.NewRequest("POST", "/api/server/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(rejectBody("缺演示")))
 	req2.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		req2.Header.Set(k, v)
@@ -271,7 +271,7 @@ func TestUploadValidation(t *testing.T) {
 
 	// G1(审计 2026-08-25):跨用户重提必须被拒绝。先再次拒绝,再让 bob 重提。
 	wR := httptest.NewRecorder()
-	reqR := httptest.NewRequest("POST", "/api/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(rejectBody("再拒")))
+	reqR := httptest.NewRequest("POST", "/api/server/admin/shared-skills/dup/1.0.0/reject", strings.NewReader(rejectBody("再拒")))
 	reqR.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		reqR.Header.Set(k, v)
@@ -281,7 +281,7 @@ func TestUploadValidation(t *testing.T) {
 		t.Fatalf("reject2 = %d", wR.Code)
 	}
 	wB := httptest.NewRecorder()
-	reqB := httptest.NewRequest("POST", "/api/shared-skills",
+	reqB := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("dup", "1.0.0", "bob 劫持", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 	reqB.Header.Set("Content-Type", "application/json")
 	for k, v := range bobHdr {
@@ -303,7 +303,7 @@ func TestVisibility(t *testing.T) {
 
 	post := func(name, version string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/shared-skills",
+		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 			strings.NewReader(uploadBody(name, version, "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
@@ -317,7 +317,7 @@ func TestVisibility(t *testing.T) {
 	}
 	list := func(hdr map[string]string) string {
 		wL := httptest.NewRecorder()
-		reqL := httptest.NewRequest("GET", "/api/shared-skills", nil)
+		reqL := httptest.NewRequest("GET", "/api/client/v2/shared-skills", nil)
 		for k, v := range hdr {
 			reqL.Header.Set(k, v)
 		}
@@ -329,7 +329,7 @@ func TestVisibility(t *testing.T) {
 	}
 	// Admin approve → 但授权制:bob 未授权仍不可见。
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/priv/1.0.0/approve", nil)
+	reqA := httptest.NewRequest("POST", "/api/server/admin/shared-skills/priv/1.0.0/approve", nil)
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -342,7 +342,7 @@ func TestVisibility(t *testing.T) {
 	}
 	// 管理员给 bob 授权(按 name)→ 可见。
 	wG := httptest.NewRecorder()
-	reqG := httptest.NewRequest("PUT", "/api/admin/shared-skills/priv/grant", strings.NewReader(`{"username":"bob"}`))
+	reqG := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/priv/grant", strings.NewReader(`{"username":"bob"}`))
 	reqG.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		reqG.Header.Set(k, v)
@@ -368,7 +368,7 @@ func TestReplaceGrantsUnknownGroup(t *testing.T) {
 
 	put := func(body string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("PUT", "/api/admin/shared-skills/any/grants", strings.NewReader(body))
+		req := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/any/grants", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range adminHdr {
 			req.Header.Set(k, v)
@@ -393,7 +393,7 @@ func TestDeleteClearsGrants(t *testing.T) {
 	// alice 上传 → admin approve → 授权全员 → 删除 → 授权表清空。
 	post := func() {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/shared-skills",
+		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 			strings.NewReader(uploadBody("del-grant", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
@@ -406,7 +406,7 @@ func TestDeleteClearsGrants(t *testing.T) {
 	}
 	post()
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/del-grant/1.0.0/approve", nil)
+	reqA := httptest.NewRequest("POST", "/api/server/admin/shared-skills/del-grant/1.0.0/approve", nil)
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -415,7 +415,7 @@ func TestDeleteClearsGrants(t *testing.T) {
 		t.Fatalf("approve = %d", wA.Code)
 	}
 	wG := httptest.NewRecorder()
-	reqG := httptest.NewRequest("PUT", "/api/admin/shared-skills/del-grant/grants", strings.NewReader(`{"groups":["全员"]}`))
+	reqG := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/del-grant/grants", strings.NewReader(`{"groups":["全员"]}`))
 	reqG.Header.Set("Content-Type", "application/json")
 	for k, v := range adminHdr {
 		reqG.Header.Set(k, v)
@@ -425,7 +425,7 @@ func TestDeleteClearsGrants(t *testing.T) {
 		t.Fatalf("grant = %d %s", wG.Code, wG.Body.String())
 	}
 	wD := httptest.NewRecorder()
-	reqD := httptest.NewRequest("DELETE", "/api/admin/shared-skills/del-grant/1.0.0", nil)
+	reqD := httptest.NewRequest("DELETE", "/api/server/admin/shared-skills/del-grant/1.0.0", nil)
 	for k, v := range adminHdr {
 		reqD.Header.Set(k, v)
 	}
@@ -454,7 +454,7 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 
 	// 员工上传同名 -> 409 CONFLICT。
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/shared-skills",
+	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("codeql-audit", "1.0.0", "x", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -467,7 +467,7 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 
 	// 员工上传非冲突技能 -> 201。
 	w2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("POST", "/api/shared-skills",
+	req2 := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("fresh-open", "1.0.0", "x", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
 	req2.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -485,7 +485,7 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 		t.Fatalf("raw market seed: %v", err)
 	}
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/fresh-open/1.0.0/approve", nil)
+	reqA := httptest.NewRequest("POST", "/api/server/admin/shared-skills/fresh-open/1.0.0/approve", nil)
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -504,7 +504,7 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 	archive := makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd})
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/shared-skills",
+	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("db-arch", "1.0.0", "审计", archive)))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -521,7 +521,7 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 	}
 	// 管理员通过。
 	wA := httptest.NewRecorder()
-	reqA := httptest.NewRequest("POST", "/api/admin/shared-skills/db-arch/1.0.0/approve", nil)
+	reqA := httptest.NewRequest("POST", "/api/server/admin/shared-skills/db-arch/1.0.0/approve", nil)
 	for k, v := range adminHdr {
 		reqA.Header.Set(k, v)
 	}
@@ -532,7 +532,7 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 
 	// 员工下载(approved+作者):返回 DB 字节,计数 +1。
 	wD := httptest.NewRecorder()
-	reqD := httptest.NewRequest("GET", "/api/shared-skills/db-arch/1.0.0/archive", nil)
+	reqD := httptest.NewRequest("GET", "/api/client/v2/shared-skills/db-arch/1.0.0/archive", nil)
 	for k, v := range userHdr {
 		reqD.Header.Set(k, v)
 	}
@@ -568,7 +568,7 @@ func TestAdminSkillFileContent(t *testing.T) {
 		"bin/big.txt":  strings.Repeat("x", maxFilePreviewBytes+16),
 	})
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/shared-skills",
+	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
 		strings.NewReader(uploadBody("fpdemo", "1.0.0", "", archive)))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
@@ -582,7 +582,7 @@ func TestAdminSkillFileContent(t *testing.T) {
 	get := func(path string) (*httptest.ResponseRecorder, map[string]any) {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("GET",
-			"/api/admin/shared-skills/fpdemo/1.0.0/file?path="+url.QueryEscape(path), nil)
+			"/api/server/admin/shared-skills/fpdemo/1.0.0/file?path="+url.QueryEscape(path), nil)
 		for k, v := range adminHdr {
 			req.Header.Set(k, v)
 		}

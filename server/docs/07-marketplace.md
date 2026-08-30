@@ -5,17 +5,17 @@
 ## 1. 数据流
 
 ```
-管理员(webadmin /api/admin/skills)  →  上架 + 授权(skill_grants)
-员工客户端登录 → GET /api/config/bootstrap → skills[] 建议清单(授权可见)
-员工安装 Skill → GET /api/marketplace/skills/:name/archive 下载技能包
+管理员(webadmin /api/server/admin/skills)  →  上架 + 授权(skill_grants)
+员工客户端登录 → GET /api/client/v2/config/bootstrap → skills[] 建议清单(授权可见)
+员工安装 Skill → GET /api/client/v2/marketplace/skills/:name/archive 下载技能包
 客户端运行时    → Skill:指令注入 sysPrompt
 ```
 
 ## 2. 端点
 
-- 员工(Bearer):`GET /api/marketplace/skills`、`GET /api/marketplace/skills/:name`、`GET /api/marketplace/skills/:name/archive`。
-- 管理端(Admin):`/api/admin/skills`(CRUD,下架置 enabled=0)、`/api/admin/skills/:name/grants`(授权)。
-- 统一聚合(Bearer):`GET /api/capabilities?source=market`(与共享技能/Agent 合并返回)。
+- 员工(Bearer):`GET /api/client/v2/marketplace/skills`、`GET /api/client/v2/marketplace/skills/:name`、`GET /api/client/v2/marketplace/skills/:name/archive`。
+- 管理端(Admin):`/api/server/admin/skills`(CRUD,下架置 enabled=0)、`/api/server/admin/skills/:name/grants`(授权)。
+- 统一聚合(Bearer):`GET /api/client/v2/capabilities?source=market`(与共享技能/Agent 合并返回)。
 
 完整请求/响应见 03-api-reference.md §6-7。
 
@@ -25,7 +25,7 @@
 - **Git 模式(兼容)**:上架时填 `git_url` + `git_ref`;服务端 clone 到 `data/skills-cache/`,校验仓库内元数据后构建归档 `cacheDir/<name>-<version>.tar.gz`(缓存命中直接返回)。
 - 仓库内元数据(YAML):`name` / `version` / `author` / `description`;归档 version 必须与元数据一致,否则构建失败。
 - 技能内容:Markdown 指令文件等(无独立执行环境);客户端安装后解析为指令注入系统提示词(`## Skills` 段),为 Agent 提供领域知识/流程/工具使用说明。
-- **下载/调用统计(0040)**:`GET /archive` 成功即 `downloads+1`;客户端 `POST /api/telemetry/skill-call` 上报技能调用(模型 `skill` 工具成功 / 用户 `/name` 手势注入),服务端按 shared_skills(name+version)或 market(name)累加 `calls`。
+- **下载/调用统计(0040)**:`GET /archive` 成功即 `downloads+1`;客户端 `POST /api/client/v2/telemetry/skill-call` 上报技能调用(模型 `skill` 工具成功 / 用户 `/name` 手势注入),服务端按 shared_skills(name+version)或 market(name)累加 `calls`。
 
 ## 4. Skill 安装(desktop/src/main/skill/)
 

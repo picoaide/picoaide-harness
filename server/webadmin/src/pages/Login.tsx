@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { login } from '../api'
+import { login, CLIENT_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -18,7 +18,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [brand, setBrand] = useState<{ display_name?: string; logo_url?: string; tagline?: string } | null>(null)
 
   useEffect(() => {
-    fetch('/api/client/v2/brand').then((r) => r.json()).then((d: any) => {
+    fetch(`${CLIENT_API}/brand`).then((r) => r.json()).then((d: any) => {
       if (d?.enabled && d.login) setBrand(d.login)
     }).catch(() => { /* default */ })
   }, [])

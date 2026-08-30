@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { fmtTokens, fmtMoney, usageRate, moneyRate } from '../lib/format'
 import { deptTreeOptions } from '../lib/utils'
 import { Button } from '../components/ui/button'
@@ -119,8 +119,8 @@ export default function Users() {
       const params = new URLSearchParams({ page: String(p), size: '20' })
       if (search) params.set('q', search)
       const [u, d] = await Promise.all([
-        request(`/api/server/admin/users?${params}`),
-        request('/api/server/admin/departments'),
+        request(`${ADMIN_API}/users?${params}`),
+        request(`${ADMIN_API}/departments`),
       ])
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setUsers(u.users)
@@ -145,7 +145,7 @@ export default function Users() {
     if (password.length < 10) { setCreateErr('密码至少 10 位'); return }
     setBusy(true)
     try {
-      await request('/api/server/admin/users', {
+      await request(`${ADMIN_API}/users`, {
         method: 'POST',
         body: JSON.stringify({ username, password, is_admin: isAdmin }),
       })
@@ -168,7 +168,7 @@ export default function Users() {
     if (u.status === 1 && !window.confirm(`确定禁用用户 ${u.username}?禁用将立即吊销其全部 API 令牌,客户端需重新登录。`)) return
     setBusy(true)
     try {
-      await request(`/api/server/admin/users/${u.id}`, {
+      await request(`${ADMIN_API}/users/${u.id}`, {
         method: 'PUT',
         body: JSON.stringify({ status: u.status === 1 ? 0 : 1 }),
       })
@@ -187,7 +187,7 @@ export default function Users() {
     if (!window.confirm(`再确认:删除 ${u.username} 将同时清除其全部 API 令牌、用量记录与组归属,此操作不可恢复。确定继续?`)) return
     setBusy(true)
     try {
-      await request(`/api/server/admin/users/${u.id}`, { method: 'DELETE' })
+      await request(`${ADMIN_API}/users/${u.id}`, { method: 'DELETE' })
       // L14:末页删除最后一条后回退页码,避免出现「第 2/1 页」空表
       const newPages = Math.max(1, Math.ceil((total - 1) / 20))
       load(Math.min(page, newPages), q)
@@ -205,7 +205,7 @@ export default function Users() {
     setTokenErr('')
     setTokensLoading(true)
     try {
-      const data = await request(`/api/server/admin/users/${u.id}/tokens`)
+      const data = await request(`${ADMIN_API}/users/${u.id}/tokens`)
       if (current !== tokensSeq.current) return // P1-8: 过期响应丢弃
       setTokens(data.tokens)
     } catch (err: any) {
@@ -221,7 +221,7 @@ export default function Users() {
     if (!window.confirm(`确定撤销令牌 #${t.id}(${t.name})?撤销后客户端需重新登录。`)) return
     setBusy(true)
     try {
-      await request(`/api/server/admin/tokens/${t.id}/revoke`, { method: 'POST' })
+      await request(`${ADMIN_API}/tokens/${t.id}/revoke`, { method: 'POST' })
       if (tokensUser) openTokens(tokensUser)
     } catch (err: any) {
       setTokenErr(err.message)
@@ -253,7 +253,7 @@ export default function Users() {
     if (busy || !deptUser) return // 双击守卫(L10)
     setBusy(true)
     try {
-      await request(`/api/server/admin/users/${deptUser.id}/department`, {
+      await request(`${ADMIN_API}/users/${deptUser.id}/department`, {
         method: 'PUT',
         body: JSON.stringify({ group_id: Number(deptSelect) }),
       })
@@ -300,7 +300,7 @@ export default function Users() {
       // 金额(0022):空 = 跟随全局默认;0 = 不限;正数 = 月金额上限
       if (mv === '') body.quota_money_clear = true
       else body.quota_money = Number(mv)
-      await request(`/api/server/admin/users/${quotaUser.id}`, {
+      await request(`${ADMIN_API}/users/${quotaUser.id}`, {
         method: 'PUT',
         body: JSON.stringify(body),
       })

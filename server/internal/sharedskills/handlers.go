@@ -17,41 +17,41 @@ import (
 // Public 客户端面(Bearer 认证); Admin 服务端面(RBAC 权限由 router 申报)。
 type Handlers struct {
 	// 客户端面 /api/client/v2/shared-skills
-	ListVisible     gin.HandlerFunc // GET ""
-	Upload          gin.HandlerFunc // POST ""
-	Download        gin.HandlerFunc // GET /:name/:version/archive
+	ListVisible gin.HandlerFunc // GET ""
+	Upload      gin.HandlerFunc // POST ""
+	Download    gin.HandlerFunc // GET /:name/:version/archive
 	// 服务端面 /api/server/admin
-	ListAll              gin.HandlerFunc // GET ""
-	DownloadAdmin        gin.HandlerFunc // GET /:name/:version/archive
-	Preview              gin.HandlerFunc // GET /:name/:version/preview
-	Decide               gin.HandlerFunc // 批准(POST /:name/:version/approve)
-	Reject               gin.HandlerFunc // 拒绝(POST /:name/:version/reject)
-	Remove               gin.HandlerFunc // DELETE /:name/:version
-	SetQuality           gin.HandlerFunc // PUT /:name/:version/quality
-	FileContent          gin.HandlerFunc // GET /:name/:version/file
-	ListGrants           gin.HandlerFunc // GET /:name/grants
-	ReplaceGrants        gin.HandlerFunc // PUT /:name/grants
-	SetGrant             gin.HandlerFunc // PUT /:name/grant
-	RemoveGrant          gin.HandlerFunc // DELETE /:name/grant
+	ListAll       gin.HandlerFunc // GET ""
+	DownloadAdmin gin.HandlerFunc // GET /:name/:version/archive
+	Preview       gin.HandlerFunc // GET /:name/:version/preview
+	Decide        gin.HandlerFunc // 批准(POST /:name/:version/approve)
+	Reject        gin.HandlerFunc // 拒绝(POST /:name/:version/reject)
+	Remove        gin.HandlerFunc // DELETE /:name/:version
+	SetQuality    gin.HandlerFunc // PUT /:name/:version/quality
+	FileContent   gin.HandlerFunc // GET /:name/:version/file
+	ListGrants    gin.HandlerFunc // GET /:name/grants
+	ReplaceGrants gin.HandlerFunc // PUT /:name/grants
+	SetGrant      gin.HandlerFunc // PUT /:name/grant
+	RemoveGrant   gin.HandlerFunc // DELETE /:name/grant
 }
 
 // NewHandlers 返回共享技能 handler 集合(db + cacheDir 注入)。
 func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 	return &Handlers{
-		ListVisible:     listVisible(db),
-		Upload:          upload(db, cacheDir),
-		Download:        download(db, cacheDir, false),
-		ListAll:         listAll(db),
-		DownloadAdmin:   download(db, cacheDir, true),
-		Preview:         preview(db, cacheDir),
-		Decide:          decide(db, serverstore.SharedSkillApproved, "shared_skill_approve"),
-		Reject:          decide(db, serverstore.SharedSkillRejected, "shared_skill_reject"),
-		Remove:          remove(db, cacheDir),
-		SetQuality:      setQuality(db),
-		FileContent:     fileContent(db, cacheDir),
-		ListGrants:      listGrants(db),
-		ReplaceGrants:   replaceGrants(db),
-		SetGrant:        setGrant(db, true),
-		RemoveGrant:     setGrant(db, false),
+		ListVisible:   listVisible(db),
+		Upload:        upload(db, cacheDir),
+		Download:      download(db, cacheDir, false),
+		ListAll:       listAll(db),
+		DownloadAdmin: download(db, cacheDir, true),
+		Preview:       preview(db, cacheDir),
+		Decide:        decide(db, serverstore.SharedSkillApproved, "shared_skill_approve"),
+		Reject:        decide(db, serverstore.SharedSkillRejected, "shared_skill_reject"),
+		Remove:        remove(db, cacheDir),
+		SetQuality:    setQuality(db),
+		FileContent:   fileContent(db, cacheDir),
+		ListGrants:    listGrants(db),
+		ReplaceGrants: replaceGrants(db),
+		SetGrant:      setGrant(db, true),
+		RemoveGrant:   setGrant(db, false),
 	}
 }

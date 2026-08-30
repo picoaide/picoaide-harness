@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -30,7 +30,7 @@ export default function ErrorMonitoring() {
     setLoading(true)
     setError('')
     try {
-      const g = await request('/api/server/admin/gateway')
+      const g = await request(`${ADMIN_API}/gateway`)
       setCfg({
         error_reporting_enabled: g.error_reporting_enabled === true,
         error_reporting_dsn: g.error_reporting_dsn ?? '',
@@ -61,7 +61,7 @@ export default function ErrorMonitoring() {
     setBusy(true)
     try {
       // 仅提交错误监控域字段;其余网关配置(默认模型/思考强度/限流等)不动。
-      await request('/api/server/admin/gateway', {
+      await request(`${ADMIN_API}/gateway`, {
         method: 'PUT',
         body: JSON.stringify({
           error_reporting_enabled: cfg.error_reporting_enabled,

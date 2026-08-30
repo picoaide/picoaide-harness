@@ -181,7 +181,7 @@ func presetFileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
 
 // RegisterRoutes mounts /api/agent-presets (employee Bearer endpoints).
 func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	base := "/api/agent-presets"
+	base := "/api/client/v2/agent-presets"
 	g := r.Group(base, serverauth.BearerAuth(db))
 	g.GET("", listVisible(db))
 	g.POST("", upload(db, cacheDir))
@@ -191,7 +191,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 
 // RegisterAdminRoutes mounts /api/admin/agent-presets (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
-	base := "/api/admin/agent-presets"
+	base := "/api/server/admin/agent-presets"
 	g := r.Group(base, serverauth.AdminAuth(db))
 	serverauth.AdminRoute(g, "GET", "", serverauth.PermCapabilityRead, listAll(db))
 	serverauth.AdminRoute(g, "GET", "/:name/archive", serverauth.PermCapabilityRead, download(db, cacheDir, true))

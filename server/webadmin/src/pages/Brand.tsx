@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -49,9 +49,9 @@ export default function Brand() {
   const load = useCallback(async () => {
     try {
       const [b, p, s] = await Promise.all([
-        request('/api/server/admin/brand'),
-        request('/api/server/admin/portal'),
-        request('/api/server/admin/brand/snapshots'),
+        request(`${ADMIN_API}/brand`),
+        request(`${ADMIN_API}/portal`),
+        request(`${ADMIN_API}/brand/snapshots`),
       ])
       setBrand({ ...EMPTY_BRAND, ...(b as BrandCfg) })
       setPortal({ ...EMPTY_PORTAL, ...(p as PortalCfg) })
@@ -69,8 +69,8 @@ export default function Brand() {
     if (busy) return
     setBusy(true); setErr(''); setMsg('')
     try {
-      await request('/api/server/admin/brand', { method: 'PUT', body: JSON.stringify(brand) })
-      await request('/api/server/admin/portal', { method: 'PUT', body: JSON.stringify(portal) })
+      await request(`${ADMIN_API}/brand`, { method: 'PUT', body: JSON.stringify(brand) })
+      await request(`${ADMIN_API}/portal`, { method: 'PUT', body: JSON.stringify(portal) })
       setMsg('已保存(客户端/登录页刷新后生效)')
       setTimeout(() => setMsg(''), 4000)
       void load()
@@ -89,7 +89,7 @@ export default function Brand() {
     fd.append('file', input.files[0])
     setBusy(true); setErr('')
     try {
-      await request('/api/server/admin/brand/logo', { method: 'POST', body: fd })
+      await request(`${ADMIN_API}/brand/logo`, { method: 'POST', body: fd })
       setMsg('Logo 已上传')
       setTimeout(() => setMsg(''), 3000)
       void load()
@@ -104,7 +104,7 @@ export default function Brand() {
   async function removeLogo(kind: 'login' | 'client') {
     setBusy(true)
     try {
-      await request('/api/server/admin/brand/logo', { method: 'DELETE', body: JSON.stringify({ name: kind }) })
+      await request(`${ADMIN_API}/brand/logo`, { method: 'DELETE', body: JSON.stringify({ name: kind }) })
       void load()
     } catch (e: any) { setErr(e.message) } finally { setBusy(false) }
   }
@@ -113,7 +113,7 @@ export default function Brand() {
     if (!window.confirm('确认恢复到该快照?当前配置将被覆盖。')) return
     setBusy(true)
     try {
-      await request('/api/server/admin/brand/restore', { method: 'POST', body: JSON.stringify({ id }) })
+      await request(`${ADMIN_API}/brand/restore`, { method: 'POST', body: JSON.stringify({ id }) })
       setMsg('已恢复快照')
       void load()
     } catch (e: any) { setErr(e.message) } finally { setBusy(false) }
@@ -123,7 +123,7 @@ export default function Brand() {
     if (!window.confirm('将清空所有自定义品牌配置(log/名称/主色),恢复为 PicoAide 默认样式。确认?')) return
     setBusy(true)
     try {
-      await request('/api/server/admin/brand', { method: 'PUT', body: JSON.stringify({ ...EMPTY_BRAND, enabled: false }) })
+      await request(`${ADMIN_API}/brand`, { method: 'PUT', body: JSON.stringify({ ...EMPTY_BRAND, enabled: false }) })
       setMsg('已恢复默认')
       void load()
     } catch (e: any) { setErr(e.message) } finally { setBusy(false) }

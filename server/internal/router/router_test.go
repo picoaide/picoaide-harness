@@ -54,7 +54,7 @@ func TestNamespaces(t *testing.T) {
 
 	const (
 		nsClient = NamespaceClientV2 // /api/client/v2
-		nsServer = NamespaceServer    // /api/server
+		nsServer = NamespaceServer   // /api/server
 	)
 
 	checked := 0

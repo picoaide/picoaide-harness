@@ -23,9 +23,9 @@
 
 | 域 | 员工 Bearer | 管理端 Admin | 数据表（+授权表） |
 |---|---|---|---|
-| 商城 skills | `/api/marketplace/skills` | `/api/admin/skills` | `skills`(0005) + `skill_grants`(0016) |
-| 共享技能 | `/api/shared-skills` | `/api/admin/shared-skills` | `shared_skills`(0034, name+version 复合唯一) + `shared_skill_grants`(0036) |
-| 共享智能体 | `/api/agent-presets` | `/api/admin/agent-presets` | `agent_presets`(0032/0033/0035 多版本) + `agent_preset_grants`(0036) |
+| 商城 skills | `/api/client/v2/marketplace/skills` | `/api/server/admin/skills` | `skills`(0005) + `skill_grants`(0016) |
+| 共享技能 | `/api/client/v2/shared-skills` | `/api/server/admin/shared-skills` | `shared_skills`(0034, name+version 复合唯一) + `shared_skill_grants`(0036) |
+| 共享智能体 | `/api/client/v2/agent-presets` | `/api/server/admin/agent-presets` | `agent_presets`(0032/0033/0035 多版本) + `agent_preset_grants`(0036) |
 
 **共享库现状模型（0036 起）**：上传→ `pending` → admin `approve`/`reject`（reject 必填 reason）；**approved 后仍需授权（grants：用户 / 部门组）才可见可装**，admin 恒全量不落授权表；同名多版本独立审核、共享一个授权；作者可看自己的全部状态（他人 pending/rejected 视同 404）。
 
@@ -96,10 +96,10 @@
 
 ### Phase 2 服务端聚合面（facade，不动表结构 + 新增质量标记迁移）
 
-1. 员工侧：新增 `GET /api/capabilities`（Bearer），聚合 `listVisible` 语义：`source=market` 走 marketplace 已授权清单、`source=org` 走 shared-skills + agent-presets 的已授权+自己的全部状态；响应统一 `CapabilityItem[]`；`installed`/`hasUpdate` 由 host 代理层（`/api/pico/capabilities`）合并本地状态（沿 `/api/pico/shared-skills` 现模式）。
+1. 员工侧：新增 `GET /api/client/v2/capabilities`（Bearer），聚合 `listVisible` 语义：`source=market` 走 marketplace 已授权清单、`source=org` 走 shared-skills + agent-presets 的已授权+自己的全部状态；响应统一 `CapabilityItem[]`；`installed`/`hasUpdate` 由 host 代理层（`/api/pico/capabilities`）合并本地状态（沿 `/api/pico/shared-skills` 现模式）。
 2. **组织库质量标记（新迁移 0037）**：`shared_skills` 与 `agent_presets` 各加 `quality TEXT NOT NULL DEFAULT ''`（`''`/`official`/`featured`，互斥）；授权表不动。管理端审核页在 approve 时可勾选「官方/精选」，并支持事后修改（新增 `PUT .../quality` 或并入现有编辑端点），审计动作 `shared_skill_qualify`/`agent_preset_qualify`（沿用 audit 90 天契约）。**注意 0037 必须同时落地 sqlite（migrations/）与 pg（migrations-pg/）两套迁移**。
 3. **安装冲突契约**：host 代理安装端点检测目标目录已存在且非同源 → 409 `{"error":{"code":"CONFLICT"}}`；客户端确认后带 `?force=1` 重试（服务端/host 放行，仍做归档安全校验）。市场与组织同名、与本地手工同名统一走此路径。
-4. 管理端：新增 `GET /api/admin/approvals?type=skill|agent|all&status=` 统一审批队列（内部复用两个域的 listAll + decide，**不复制审核逻辑**）；单资源 approve/reject/delete/grants 仍走各自原路由，避免破坏性重命名。
+4. 管理端：新增 `GET /api/server/admin/approvals?type=skill|agent|all&status=` 统一审批队列（内部复用两个域的 listAll + decide，**不复制审核逻辑**）；单资源 approve/reject/delete/grants 仍走各自原路由，避免破坏性重命名。
 5. **不动表**：`shared_skills` / `agent_presets` / `skills` 及 grants 表全部保留（多版本+授权已各自闭环）；聚合面只是读侧 facade（+0037 两列）。
 6. 审计动作名不变（`shared_skill_approve`/`agent_preset_approve` 等），新动作仅 `*_qualify`。
 
@@ -137,10 +137,10 @@ interface CapabilityItem {
 }
 ```
 
-- `GET /api/capabilities?source=&type=&q=`（员工 Bearer）；`GET /api/admin/approvals?type=&status=pending`（Admin）。
+- `GET /api/client/v2/capabilities?source=&type=&q=`（员工 Bearer）；`GET /api/server/admin/approvals?type=&status=pending`（Admin）。
 - 后端只返回当前用户可见/已授权条目（坚持「默认拒绝」，不泄露存在性）；`installed/installedVersion/hasUpdate` 由 host 代理补齐。
 - 安装冲突：`POST .../install`（无 force）→ 409 `CONFLICT`；`?force=1` 放行。
-- 后端实现建议：**同包聚合，不跨域 import**——`/api/capabilities` 放在新包 `server/internal/capabilities/`，内部复用 `serverstore` 函数（`ListVisibleSharedSkills`/`AccessibleSharedResourceNames`/marketplace 的可见性函数），不复制审核与归档安全逻辑。
+- 后端实现建议：**同包聚合，不跨域 import**——`/api/client/v2/capabilities` 放在新包 `server/internal/capabilities/`，内部复用 `serverstore` 函数（`ListVisibleSharedSkills`/`AccessibleSharedResourceNames`/marketplace 的可见性函数），不复制审核与归档安全逻辑。
 
 ## 七、术语对照（界面旧 → 新）
 
@@ -153,12 +153,12 @@ interface CapabilityItem {
 | （新增） | 组织库质量徽章：官方 / 精选 |
 | （新增，placeholder） | 市场 · 智能体（免费版/专业版，Phase 4） |
 
-保留不变：数据库表名（`shared_skills`/`agent_presets`）、API 路由前缀（`/api/shared-skills`、`/api/agent-presets`）、存量审计动作名、上传/安装/审批状态机。
+保留不变：数据库表名（`shared_skills`/`agent_presets`）、API 路由前缀（`/api/client/v2/shared-skills`、`/api/client/v2/agent-presets`）、存量审计动作名、上传/安装/审批状态机。
 
 ## 八、验收
 
 1. **Phase 1**：客户端侧边栏仅一个「能力中心」入口；面板三分区（我的/市场/组织）× 类型筛选（全部/技能/智能体）；同名技能与智能体不串卡（复合键）；共享技能可卸载、卸载走确认条；hasUpdate 只在「approved 最高版本 > 已装」时出现；30s 轮询与 Tab focus trap 生效；分区独立错误态；同名安装先确认后 `?force=1`；多版本归并一张卡且历史版本可展开安装；`capability-center-panel.spec.ts` 与 `e2e-client.mjs`（新 marker）全绿；`yarn check` 全绿。
-2. **Phase 2**：`/api/capabilities` 对非授权用户不泄露 pending/rejected 存在性；聚合层单测覆盖同名 `kind` 冲突、多版本 hasUpdate（semver）、409 CONFLICT→force 流程、0037 quality 迁移（sqlite+pg 双跑）；`make test` / `make check` 全绿。
+2. **Phase 2**：`/api/client/v2/capabilities` 对非授权用户不泄露 pending/rejected 存在性；聚合层单测覆盖同名 `kind` 冲突、多版本 hasUpdate（semver）、409 CONFLICT→force 流程、0037 quality 迁移（sqlite+pg 双跑）；`make test` / `make check` 全绿。
 3. **Phase 3**：webadmin 新导航生效（能力中心分组/市场·技能）；统一审批页仅使用下沉共享组件；approve 可勾选官方/精选且落 `*_qualify` 审计；`make webadmin` 通过。
 4. 各 Phase 独立 commit（`feat:|refactor:|chore:` 单行 ≤72 字符），不混入行为无关改动。
 
@@ -181,7 +181,7 @@ interface CapabilityItem {
 
 ### 实施记录（2026-08-25 完成 Phase 1-3）
 
-- **服务端**：0037 迁移（双后端 sqlite+pg）`shared_skills`/`agent_presets` 加 `quality`；serverstore 增加 `SetSharedSkillQuality`/`SetAgentPresetQuality`、`ValidSharedQuality`/`ValidAgentQuality`，approve 保留 quality、reject/pending 清空；两域 JSON 输出 quality；新增 `PUT /api/admin/{shared-skills,agent-presets}/:name/:version/quality`（qualify 审计）；新增 `server/internal/capabilities` 包（`/api/capabilities` 员工聚合面 + `/api/admin/capabilities/approvals` 统一审批队列，`marketplace.API.AccessibleSkills` 导出复用）。
+- **服务端**：0037 迁移（双后端 sqlite+pg）`shared_skills`/`agent_presets` 加 `quality`；serverstore 增加 `SetSharedSkillQuality`/`SetAgentPresetQuality`、`ValidSharedQuality`/`ValidAgentQuality`，approve 保留 quality、reject/pending 清空；两域 JSON 输出 quality；新增 `PUT /api/server/admin/{shared-skills,agent-presets}/:name/:version/quality`（qualify 审计）；新增 `server/internal/capabilities` 包（`/api/client/v2/capabilities` 员工聚合面 + `/api/server/admin/capabilities/approvals` 统一审批队列，`marketplace.API.AccessibleSkills` 导出复用）。
 - **host 代理**：`/api/pico/capabilities`（GET ?source=market|org|local）合并已安装/本地创作状态；保留原共享技能/Agent 安装/卸载端点。
 - **客户端**：`CapabilityCenterPanel`（三分区 my/market/org × 类型筛选 × 徽章（类型/来源/质量/状态）× 多版本归并·历史展开 × hasUpdate semver 修复 × 30s 轮询 × Tab focus trap × 分区独立错误态 × 同名确认框）；`CapabilityCenterTrigger` 单入口替换两个旧 trigger；删除 4 个旧面板/触发器文件+2 个旧单测；新增 `capability-center-panel.spec.ts`（compareVersions/hasUpdateFor/mergeItems/latestApprovedVersionByName/avatarColor）；e2e-client.mjs 更新「能力中心」。
 - **webadmin**：菜单「市场 · 技能」+「能力中心」（统一审批页 `Capabilities.tsx`，类型/状态筛选、官方/精选质量标记、approve/reject/delete 走原域端点、授权弹窗）；**2026-09 归一**：`Capabilities.tsx` 恢复承载共享技能+共享 Agent 统一审核（含类型/状态筛选、名称冲突列、下载/调用统计、按 kind 预览 SKILL.md/agent.cordis.yml），独立页 `SharedSkills.tsx`/`AgentPresets.tsx` 与其测试删除，`/shared-skills`、`/agent-presets` 路由与导航同步移除（原域 API 端点保留，供队列 base_path 引用）；服务端 `/api/server/admin/capabilities/approvals` 支持 `?status=all|pending|approved|rejected`（显式 status=all 才全量，缺省仅 pending）与 `?type=`，base_path/preview_path 修复为 `/api/server/admin` 前缀；新增 `Capabilities.test.tsx`。
@@ -195,7 +195,7 @@ interface CapabilityItem {
 ## 十、风险与决策依据
 
 - **合并面板是纯 UI 重构**：两面板都已是「卡片网格 + 分区标题」同构骨架，合并成本低；退出点：若合并后信息密度不达标，可退化为「能力中心」容器内两个 tab（技能 / 智能体），IA 不变。
-- **保留旧路由而非重命名**：`/api/shared-skills` 等内容语义仍准确（「共享」描述的是组织内分发机制），重命名收益低、破坏 host 代理与第三方接入方；新词只落在界面与聚合面上。
+- **保留旧路由而非重命名**：`/api/client/v2/shared-skills` 等内容语义仍准确（「共享」描述的是组织内分发机制），重命名收益低、破坏 host 代理与第三方接入方；新词只落在界面与聚合面上。
 - **「专业」的词性**：词表内把它固定为「等级」语义（市场定价层），全产品内不复用为别的含义，避免再次单维度化命名；组织库质量标记另起「官方/精选」词表。
 - **强制 force 的边界**：`?force=1` 只豁免「同名目录已存在」这一项检查；归档安全校验、大小上限、拒绝符号链接等**永远不会**因 force 豁免。
 - **0037 双后端**：本项目 sqlite 与 pg 迁移目录并存（`migrations/` 与 `migrations-pg/`），任何表结构改动必须双落地，否则 pg 部署失步。

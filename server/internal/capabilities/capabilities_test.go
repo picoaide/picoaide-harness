@@ -54,7 +54,7 @@ func setupRouter(t *testing.T) (*gin.Engine, *sql.DB, map[string]string, map[str
 
 	// admin login
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -157,7 +157,7 @@ func TestListCapabilitiesVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
-	w := doGet(t, r, "/api/capabilities", aliceHdr)
+	w := doGet(t, r, "/api/client/v2/capabilities", aliceHdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -182,7 +182,7 @@ func TestListCapabilitiesAuthorOwnApproved(t *testing.T) {
 		t.Fatal(err)
 	}
 	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
-	w := doGet(t, r, "/api/capabilities", aliceHdr)
+	w := doGet(t, r, "/api/client/v2/capabilities", aliceHdr)
 	var resp struct {
 		Items []CapabilityItem `json:"items"`
 	}
@@ -204,7 +204,7 @@ func TestListApprovalsQueue(t *testing.T) {
 	if _, err := serverstore.CreateAgentPreset(db, &serverstore.AgentPreset{Name: "a1", Version: "1.0.0", Author: "alice", Status: serverstore.AgentPresetPending}); err != nil {
 		t.Fatal(err)
 	}
-	w := doGet(t, r, "/api/admin/capabilities/approvals", adminHdr)
+	w := doGet(t, r, "/api/server/admin/capabilities/approvals", adminHdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -234,7 +234,7 @@ func TestListApprovalsQueue(t *testing.T) {
 		VALUES ('s1', '1.0.0', '', 'boss', 'https://example.com/repo.git', 'main', '', 1)`); err != nil {
 		t.Fatalf("raw market seed: %v", err)
 	}
-	w2 := doGet(t, r, "/api/admin/capabilities/approvals", adminHdr)
+	w2 := doGet(t, r, "/api/server/admin/capabilities/approvals", adminHdr)
 	var resp2 struct {
 		Approvals []ApprovalRow `json:"approvals"`
 	}
@@ -261,7 +261,7 @@ func TestListApprovalsTypeFilter(t *testing.T) {
 	if _, err := serverstore.CreateAgentPreset(db, &serverstore.AgentPreset{Name: "a1", Version: "1.0.0", Author: "alice", Status: serverstore.AgentPresetPending}); err != nil {
 		t.Fatal(err)
 	}
-	w := doGet(t, r, "/api/admin/capabilities/approvals?type=skill", adminHdr)
+	w := doGet(t, r, "/api/server/admin/capabilities/approvals?type=skill", adminHdr)
 	var resp struct {
 		Approvals []ApprovalRow `json:"approvals"`
 	}
@@ -285,7 +285,7 @@ func TestListApprovalsStatusAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 默认 pending:只 1 条。
-	w := doGet(t, r, "/api/admin/capabilities/approvals", adminHdr)
+	w := doGet(t, r, "/api/server/admin/capabilities/approvals", adminHdr)
 	var resp struct {
 		Approvals []ApprovalRow `json:"approvals"`
 	}
@@ -296,7 +296,7 @@ func TestListApprovalsStatusAll(t *testing.T) {
 		t.Fatalf("default pending approvals=%+v", resp.Approvals)
 	}
 	// status=all:2 条,且 downloads/calls 字段透传(缺省 0)。
-	w2 := doGet(t, r, "/api/admin/capabilities/approvals?status=all", adminHdr)
+	w2 := doGet(t, r, "/api/server/admin/capabilities/approvals?status=all", adminHdr)
 	var resp2 struct {
 		Approvals []ApprovalRow `json:"approvals"`
 	}
@@ -332,7 +332,7 @@ func TestCapabilitiesMarketMerge(t *testing.T) {
 	// 共享库 org-only 的作者是 alice(作者 own 任意状态均可见),无需额外授权。
 
 	// ?source=market 合并:market-only(source=market) 与 org-only(source=org) 同在。
-	w := doGet(t, r, "/api/capabilities?source=market&type=skill", aliceHdr)
+	w := doGet(t, r, "/api/client/v2/capabilities?source=market&type=skill", aliceHdr)
 	var resp struct {
 		Items []CapabilityItem `json:"items"`
 	}
@@ -354,7 +354,7 @@ func TestCapabilitiesMarketMerge(t *testing.T) {
 	}
 
 	// ?source=org 仅组织,不泄漏市场。
-	w2 := doGet(t, r, "/api/capabilities?source=org&type=skill", aliceHdr)
+	w2 := doGet(t, r, "/api/client/v2/capabilities?source=org&type=skill", aliceHdr)
 	var resp2 struct {
 		Items []CapabilityItem `json:"items"`
 	}

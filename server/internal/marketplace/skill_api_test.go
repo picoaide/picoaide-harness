@@ -104,7 +104,7 @@ func TestSkillAPI(t *testing.T) {
 	}
 
 	// list: enabled only
-	w := doReq(r, "GET", "/api/marketplace/skills", token)
+	w := doReq(r, "GET", "/api/client/v2/marketplace/skills", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list status = %d, body %s", w.Code, w.Body.String())
 	}
@@ -117,7 +117,7 @@ func TestSkillAPI(t *testing.T) {
 	}
 
 	// detail
-	w = doReq(r, "GET", "/api/marketplace/skills/demo", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("detail status = %d, body %s", w.Code, w.Body.String())
 	}
@@ -130,13 +130,13 @@ func TestSkillAPI(t *testing.T) {
 	}
 
 	// unknown skill -> 404
-	w = doReq(r, "GET", "/api/marketplace/skills/nope", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/nope", token)
 	if w.Code != http.StatusNotFound || !hasErrCode(w, "NOT_FOUND") {
 		t.Fatalf("unknown skill = %d, body %s", w.Code, w.Body.String())
 	}
 
 	// archive: downloads a valid tar.gz with version header
-	w = doReq(r, "GET", "/api/marketplace/skills/demo/archive", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive status = %d, body %s", w.Code, w.Body.String())
 	}
@@ -164,7 +164,7 @@ func TestSkillAPI(t *testing.T) {
 		t.Fatalf("archive entries = %v", names)
 	}
 	// second request: cache hit, same checksum
-	w = doReq(r, "GET", "/api/marketplace/skills/demo/archive", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive cache status = %d", w.Code)
 	}
@@ -173,14 +173,14 @@ func TestSkillAPI(t *testing.T) {
 	}
 
 	// no token -> 401 on every endpoint
-	for _, p := range []string{"/api/marketplace/skills", "/api/marketplace/skills/demo", "/api/marketplace/skills/demo/archive"} {
+	for _, p := range []string{"/api/client/v2/marketplace/skills", "/api/client/v2/marketplace/skills/demo", "/api/client/v2/marketplace/skills/demo/archive"} {
 		if w := doReq(r, "GET", p, ""); w.Code != http.StatusUnauthorized {
 			t.Fatalf("no-token %s = %d", p, w.Code)
 		}
 	}
 
 	// C-10: a disabled skill is not downloadable — same 404 as a missing one
-	w = doReq(r, "GET", "/api/marketplace/skills/hidden/archive", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/hidden/archive", token)
 	if w.Code != http.StatusNotFound || !hasErrCode(w, "NOT_FOUND") {
 		t.Fatalf("disabled skill archive = %d, body %s; want 404 NOT_FOUND", w.Code, w.Body.String())
 	}
@@ -238,7 +238,7 @@ func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
 	if err := serverstore.GrantSkill(db, "demo", "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
-	w := doReq(r, "GET", "/api/marketplace/skills/demo/archive", token)
+	w := doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("v1 download: %d %s", w.Code, w.Body.String())
 	}
@@ -249,13 +249,13 @@ func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
 	// source moves to v2, then the admin bumps the DB row (the cache
 	// invalidation lives in the admin update path)
 	rewriteRepoVersion(t, src, "2.0.0")
-	w, _ = mreq(t, r, "PUT", "/api/admin/skills/demo", `{"version":"2.0.0"}`, adminHdr(t, r))
+	w, _ = mreq(t, r, "PUT", "/api/server/admin/skills/demo", `{"version":"2.0.0"}`, adminHdr(t, r))
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin update: %d %s", w.Code, w.Body.String())
 	}
 
 	// the download must serve the NEW package, not the stale cached clone
-	w = doReq(r, "GET", "/api/marketplace/skills/demo/archive", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("v2 download = %d, body %s; want 200 (stale cache must be invalidated)", w.Code, w.Body.String())
 	}
@@ -271,7 +271,7 @@ func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
 func adminHdr(t *testing.T, r http.Handler) map[string]string {
 	t.Helper()
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	var out map[string]any
@@ -362,7 +362,7 @@ func TestSkillUpdates(t *testing.T) {
 	}
 
 	// 有更新 + 无更新 + 下架不出现
-	w := doReq(r, "GET", "/api/marketplace/skills/updates?installed=upd:1.0.0,same:1.0.0,gone:0.1.0", token)
+	w := doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed=upd:1.0.0,same:1.0.0,gone:0.1.0", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -384,36 +384,36 @@ func TestSkillUpdates(t *testing.T) {
 	if u.Name != "upd" || u.Version != "1.2.0" || u.Description != "会更新" || u.Author != "pico" {
 		t.Fatalf("update item = %+v", u)
 	}
-	if u.ArchiveURL != "/api/marketplace/skills/upd/archive" {
+	if u.ArchiveURL != "/api/client/v2/marketplace/skills/upd/archive" {
 		t.Fatalf("archive_url = %q", u.ArchiveURL)
 	}
 
 	// 无更新 → 空
-	w = doReq(r, "GET", "/api/marketplace/skills/updates?installed=upd:1.2.0,same:1.0.0", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed=upd:1.2.0,same:1.0.0", token)
 	decodeJSON(t, w, &out)
 	if out.Count != 0 || len(out.Updates) != 0 {
 		t.Fatalf("no-update = %+v, want empty", out)
 	}
 
 	// 未带 installed → 等价空(不返回任何技能)
-	w = doReq(r, "GET", "/api/marketplace/skills/updates", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/updates", token)
 	decodeJSON(t, w, &out)
 	if out.Count != 0 {
 		t.Fatalf("no installed = %+v, want empty", out)
 	}
 
 	// 非法 installed → 400
-	w = doReq(r, "GET", "/api/marketplace/skills/updates?installed=badformat", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed=badformat", token)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad format status = %d, want 400", w.Code)
 	}
-	w = doReq(r, "GET", "/api/marketplace/skills/updates?installed="+strings.Repeat("a:1,", 101), token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed="+strings.Repeat("a:1,", 101), token)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("too many status = %d, want 400", w.Code)
 	}
 
 	// 未登录 → 401
-	w = doReq(r, "GET", "/api/marketplace/skills/updates?installed=upd:1.0.0", "")
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed=upd:1.0.0", "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("no token status = %d, want 401", w.Code)
 	}
@@ -428,7 +428,7 @@ func TestSkillUpdatesPermissionFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := doReq(r, "GET", "/api/marketplace/skills/updates?installed=secret:1.0.0", token)
+	w := doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed=secret:1.0.0", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -445,7 +445,7 @@ func TestSkillUpdatesPermissionFilter(t *testing.T) {
 	if err := serverstore.GrantSkill(db, "secret", "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
-	w = doReq(r, "GET", "/api/marketplace/skills/updates?installed=secret:1.0.0", token)
+	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/updates?installed=secret:1.0.0", token)
 	decodeJSON(t, w, &out)
 	if out.Count != 1 || out.Updates[0]["name"] != "secret" {
 		t.Fatalf("granted updates = %+v", out)

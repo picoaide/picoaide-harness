@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { request } from '../api'
+import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -90,7 +90,7 @@ export default function Marketplace() {
     setSkillsLoading(true)
     setSkillsError('')
     try {
-      const s = await request('/api/server/admin/skills')
+      const s = await request(`${ADMIN_API}/skills`)
       setSkills(s.skills ?? [])
     } catch (err: any) {
       setSkillsError(err.message)
@@ -101,7 +101,7 @@ export default function Marketplace() {
 
   const loadDepartments = useCallback(async () => {
     try {
-      const dep = await request('/api/server/admin/departments')
+      const dep = await request(`${ADMIN_API}/departments`)
       setDepartments(dep.departments ?? [])
     } catch {
       // 部门列表仅授权对话框使用,加载失败不阻塞主页面
@@ -124,7 +124,7 @@ export default function Marketplace() {
     setBusy('save-skill')
     try {
       if (skillEdit) {
-        await request(`/api/server/admin/skills/${encodeURIComponent(skillEdit.name)}`, {
+        await request(`${ADMIN_API}/skills/${encodeURIComponent(skillEdit.name)}`, {
           method: 'PUT',
           body: JSON.stringify({
             name: skillEdit.name,
@@ -137,7 +137,7 @@ export default function Marketplace() {
         })
       } else {
         // 先建行(创建为 git 模式,git_url 允许空),再切换上传模式(0040)。
-        const created = await request('/api/server/admin/skills', {
+        const created = await request(`${ADMIN_API}/skills`, {
           method: 'POST',
           body: JSON.stringify({
             name,
@@ -151,7 +151,7 @@ export default function Marketplace() {
         if (uploadMode) {
           const file = skillForm.archiveFile!
           const body = await readAsBase64(file)
-          await request(`/api/server/admin/skills/${encodeURIComponent(name)}/archive`, {
+          await request(`${ADMIN_API}/skills/${encodeURIComponent(name)}/archive`, {
             method: 'POST',
             body: JSON.stringify({ version: skillForm.version.trim(), archive: body }),
           })
@@ -189,7 +189,7 @@ export default function Marketplace() {
     setOpError('')
     setBusy(`disable-skill-${name}`)
     try {
-      await request(`/api/server/admin/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      await request(`${ADMIN_API}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
       loadSkills()
     } catch (err: any) {
       setOpError(`下架失败:${err.message}`)
@@ -203,7 +203,7 @@ export default function Marketplace() {
     setOpError('')
     setBusy(`enable-skill-${name}`)
     try {
-      await request(`/api/server/admin/skills/${encodeURIComponent(name)}/enable`, { method: 'POST' })
+      await request(`${ADMIN_API}/skills/${encodeURIComponent(name)}/enable`, { method: 'POST' })
       loadSkills()
     } catch (err: any) {
       setOpError(`上架失败:${err.message}`)
@@ -228,7 +228,7 @@ export default function Marketplace() {
     setDialogError('')
     try {
       const body = await readAsBase64(replaceFile)
-      await request(`/api/server/admin/skills/${encodeURIComponent(replaceDialog.name)}/archive`, {
+      await request(`${ADMIN_API}/skills/${encodeURIComponent(replaceDialog.name)}/archive`, {
         method: 'POST',
         body: JSON.stringify({ version: replaceVersion.trim(), archive: body }),
       })
@@ -243,11 +243,11 @@ export default function Marketplace() {
 
   // ---- 授权 ----
   function grantPath(d: { kind: 'skill'; name: string; id: number }): string {
-    return `/api/server/admin/skills/${encodeURIComponent(d.name)}/grant`
+    return `${ADMIN_API}/skills/${encodeURIComponent(d.name)}/grant`
   }
 
   function grantsPath(d: { kind: 'skill'; name: string; id: number }): string {
-    return `/api/server/admin/skills/${encodeURIComponent(d.name)}/grants`
+    return `${ADMIN_API}/skills/${encodeURIComponent(d.name)}/grants`
   }
 
   async function openGrants(d: { kind: 'skill'; name: string; id: number }) {

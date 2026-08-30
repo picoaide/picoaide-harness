@@ -24,19 +24,19 @@ type Handlers struct {
 	Completions     gin.HandlerFunc // POST /completions (FIM Beta)
 	Responses       gin.HandlerFunc // POST /responses (Responses API)
 	// 服务端面 /api/server/admin
-	ListProviders    gin.HandlerFunc
-	CreateProvider   gin.HandlerFunc
-	UpdateProvider   gin.HandlerFunc
-	DeleteProvider   gin.HandlerFunc
-	ListModelsAdmin  gin.HandlerFunc
-	CreateModel      gin.HandlerFunc
-	UpdateModel      gin.HandlerFunc
-	DeleteModel      gin.HandlerFunc
-	GetGatewayConfig gin.HandlerFunc
-	SetGatewayConfig gin.HandlerFunc
+	ListProviders     gin.HandlerFunc
+	CreateProvider    gin.HandlerFunc
+	UpdateProvider    gin.HandlerFunc
+	DeleteProvider    gin.HandlerFunc
+	ListModelsAdmin   gin.HandlerFunc
+	CreateModel       gin.HandlerFunc
+	UpdateModel       gin.HandlerFunc
+	DeleteModel       gin.HandlerFunc
+	GetGatewayConfig  gin.HandlerFunc
+	SetGatewayConfig  gin.HandlerFunc
 	ListChannelsAdmin gin.HandlerFunc
-	SyncOneAdmin     gin.HandlerFunc
-	SyncAllAdmin     gin.HandlerFunc
+	SyncOneAdmin      gin.HandlerFunc
+	SyncAllAdmin      gin.HandlerFunc
 }
 
 // NewHandlers 返回网关 handler 集合(db 注入)。
@@ -55,24 +55,24 @@ func NewHandlers(db *sql.DB) *Handlers {
 		rl:  newRateLimiter(),
 	}
 	return &Handlers{
-		ChatCompletions:  api.handleChatCompletions,
-		Embeddings:       api.handleEmbeddings,
-		Messages:         api.handleMessages,
-		Models:           api.handleModels,
-		Completions:      api.handleCompletions,
-		Responses:        api.handleResponses,
-		ListProviders:    func(c *gin.Context) { listProviders(c, db) },
-		CreateProvider:   func(c *gin.Context) { createProvider(c, db) },
-		UpdateProvider:   func(c *gin.Context) { updateProvider(c, db) },
-		DeleteProvider:   func(c *gin.Context) { deleteProvider(c, db) },
-		ListModelsAdmin:  func(c *gin.Context) { listModelsAdmin(c, db) },
-		CreateModel:      func(c *gin.Context) { createModel(c, db) },
-		UpdateModel:      func(c *gin.Context) { updateModel(c, db) },
-		DeleteModel:      func(c *gin.Context) { deleteModel(c, db) },
-		GetGatewayConfig: func(c *gin.Context) { getGatewayConfig(c, db) },
-		SetGatewayConfig: func(c *gin.Context) { setGatewayConfig(c, db) },
+		ChatCompletions:   api.handleChatCompletions,
+		Embeddings:        api.handleEmbeddings,
+		Messages:          api.handleMessages,
+		Models:            api.handleModels,
+		Completions:       api.handleCompletions,
+		Responses:         api.handleResponses,
+		ListProviders:     func(c *gin.Context) { listProviders(c, db) },
+		CreateProvider:    func(c *gin.Context) { createProvider(c, db) },
+		UpdateProvider:    func(c *gin.Context) { updateProvider(c, db) },
+		DeleteProvider:    func(c *gin.Context) { deleteProvider(c, db) },
+		ListModelsAdmin:   func(c *gin.Context) { listModelsAdmin(c, db) },
+		CreateModel:       func(c *gin.Context) { createModel(c, db) },
+		UpdateModel:       func(c *gin.Context) { updateModel(c, db) },
+		DeleteModel:       func(c *gin.Context) { deleteModel(c, db) },
+		GetGatewayConfig:  func(c *gin.Context) { getGatewayConfig(c, db) },
+		SetGatewayConfig:  func(c *gin.Context) { setGatewayConfig(c, db) },
 		ListChannelsAdmin: func(c *gin.Context) { listChannelsAdmin(c) },
-		SyncOneAdmin:     func(c *gin.Context) { syncOneAdmin(c, db) },
-		SyncAllAdmin:     func(c *gin.Context) { syncAllAdmin(c, db) },
+		SyncOneAdmin:      func(c *gin.Context) { syncOneAdmin(c, db) },
+		SyncAllAdmin:      func(c *gin.Context) { syncAllAdmin(c, db) },
 	}
 }
