@@ -63,3 +63,10 @@ packages/host/desktop/.real-env-browser-report.md
 packages/host/desktop/.real-env-browser-shots/
 # better-sidebar 构建 sourcemap（历史零入库；lib/*.js 本体入库）
 packages/client/better-sidebar/lib/*.map
+
+# CodeQL scan artifacts (rebuilt per audit round; not source)
+.codeql-dbs/
+temp/gopath/
+temp/gocache/
+temp/gomodcache/
+temp/xdgcache/
