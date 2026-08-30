@@ -186,7 +186,10 @@ const LOGIN_HTML = `<!DOCTYPE html>
       return '<span class="fallback">P</span><div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
     }
     var login = b.login || {}
-    var logo = login.logo_url ? '<img src="' + login.logo_url + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">P</span>' : '<span class="fallback">P</span>'
+    // logo_url 是相对路径(/api/brand/logo/login): 在 Host 登录页需拼服务端地址。
+    var server = document.getElementById('server').value.trim()
+    var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server.replace(/\/+$/, '') + login.logo_url) : ''
+    var logo = logoUrl ? '<img src="' + logoUrl + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">P</span>' : '<span class="fallback">P</span>'
     var name = login.display_name || 'PicoAide'
     var tag = login.tagline ? '<div class="brand-tag">' + esc(login.tagline) + '</div>' : ''
     var welcome = login.welcome ? '<div class="welcome">' + esc(login.welcome) + '</div>' : ''
