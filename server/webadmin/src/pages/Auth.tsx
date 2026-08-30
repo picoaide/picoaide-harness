@@ -91,6 +91,23 @@ export default function Auth() {
     setEnabled((prev) => on ? [...prev.filter((x) => x !== key), key] : prev.filter((x) => x !== key))
   }
 
+  const [testMsg, setTestMsg] = useState('')
+  const [testing, setTesting] = useState(false)
+
+  // v3b §1.2: 测试当前 Tab 提供方连接(不保存)。
+  async function testConnection() {
+    setTesting(true); setTestMsg(''); setAuthErr('')
+    try {
+      const body: any = { type: tab }
+      if (tab === 'ldap') body.ldap = { server_url: form.ldap.server_url, bind_dn: form.ldap.bind_dn, bind_password: form.ldap.bind_password, base_dn: form.ldap.base_dn }
+      if (tab === 'oidc' || tab === 'openid') body.oidc = { issuer: tab === 'oidc' ? form.oidc.issuer : form.openid.issuer }
+      const r = await request('/api/admin/auth/test', { method: 'POST', body: JSON.stringify(body) }) as { ok: boolean; message: string }
+      setTestMsg(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`)
+    } catch (e: any) {
+      setTestMsg(`✗ ${e.message}`)
+    } finally { setTesting(false) }
+  }
+
   async function saveAuth() {
     if (busy) return
     setAuthErr('')
@@ -231,7 +248,13 @@ export default function Auth() {
             </TabsContent>
           </Tabs>
 
-          <Button onClick={saveAuth} disabled={busy}>{busy ? '保存中…' : '保存认证配置'}</Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={testConnection} disabled={testing || tab === 'local'}>
+              {testing ? '测试中…' : '测试连接'}
+            </Button>
+            <Button onClick={saveAuth} disabled={busy}>{busy ? '保存中…' : '保存认证配置'}</Button>
+          </div>
+          {testMsg && <div className={`text-[13px] ${testMsg.startsWith('✓') ? 'text-green-600' : 'text-red-600'}`}>{testMsg}</div>}
         </CardContent>
       </Card>
     </div>

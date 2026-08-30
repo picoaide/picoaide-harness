@@ -42,6 +42,11 @@ export function useBrand(): BrandConfig | null {
   return b
 }
 
+/** 同步读取当前品牌(供 effect 初始化时用, 非 React)。 */
+export function readBrandSync(): BrandConfig | null {
+  return current
+}
+
 /** Reset for tests. */
 export function _resetBrandStoreForTest(): void {
   current = null

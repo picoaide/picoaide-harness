@@ -84,9 +84,11 @@ export async function login(serverURL: string, username: string, password: strin
       throw new AuthError('invalid_credentials')
     }
     if (!res.ok) throw new AuthError('server_error', `HTTP ${res.status}`)
-    const data = (await res.json()) as { token?: string }
+    const data = (await res.json()) as { token?: string; user?: { role?: string } }
     if (!data.token) throw new AuthError('server_error', 'missing token in response')
-    return { serverURL, username, token: data.token }
+    const sess: Session = { serverURL, username, token: data.token }
+    if (data.user?.role) sess.role = data.user.role
+    return sess
   } catch (e) {
     if (e instanceof AuthError) throw e
     if (controller.signal.aborted) throw new AuthError('network', 'timeout')

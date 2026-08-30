@@ -231,6 +231,11 @@ func main() {
 // portal welcome + client download URL, served at / and /portal.
 func servePortal(c *gin.Context, db *sql.DB) {
 	settings, _ := serverstore.GetAllSettings(db)
+	// §9: portal.public=false 时门户不对外开放, 跳转管理后台登录。
+	if settings["portal.public"] == "false" {
+		c.Redirect(http.StatusFound, "/admin/")
+		return
+	}
 	loginName := settings["brand.login.display_name"]
 	tagline := settings["brand.login.tagline"]
 	welcome := settings["portal.welcome"]

@@ -75,6 +75,21 @@ func (p *LDAPProvider) dialConn() (ldapConn, error) {
 	return conn, nil
 }
 
+// TestConnection verifies LDAP connectivity with a service-account bind
+// (v3b §1.2). Used by the webadmin "测试连接" button; does not authenticate
+// any specific user.
+func (p *LDAPProvider) TestConnection() error {
+	conn, err := p.dialConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.Bind(p.BindDN, p.BindPassword); err != nil {
+		return errors.New("ldap bind failed: " + err.Error())
+	}
+	return nil
+}
+
 // Authenticate verifies the password via a user bind and resolves groups:
 // bind (service account or anonymous) -> search user (escaped username) ->
 // user bind -> group search.
