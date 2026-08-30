@@ -32,6 +32,16 @@ interface PortalCfg {
   landing_path: string
 }
 
+// 默认值 = 客户端「未配置品牌」时的展示(与 dsh-enterprise 客户端
+// DEFAULT 兜底一致): 名称/副标题/页面标题。占位符仅供表单提示,
+// 空值提交后服务端仍按未配置处理(客户端回退默认)。
+const DEFAULT_LOGIN_NAME = 'PicoAide'
+const DEFAULT_LOGIN_TAGLINE = 'Enterprise AI Gateway'
+const DEFAULT_CLIENT_NAME = 'PicoAide Harness'
+const DEFAULT_CLIENT_TAGLINE = '企业版'
+const DEFAULT_ACCENT = '#4176E6'
+const DEFAULT_TITLE = 'PicoAide Harness'
+
 const EMPTY_BRAND: BrandCfg = { enabled: false, login: { display_name: '', tagline: '', welcome: '' }, client: { display_name: '', tagline: '', accent: '' }, title: '' }
 const EMPTY_PORTAL: PortalCfg = { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
 
@@ -131,7 +141,7 @@ export default function Brand() {
 
   if (loading) return <div className="p-6 text-sm text-muted-foreground">加载中…</div>
 
-  const previewAccent = brand.client.accent || '#4176E6'
+  const previewAccent = brand.client.accent || DEFAULT_ACCENT
 
   return (
     <div className="space-y-6">
@@ -180,8 +190,8 @@ export default function Brand() {
                   <LogoRow label="登录页 Logo" url={brand.login.logo_url as any} kind="login"
                     onPick={() => { setUploadKind('login'); fileRef.current?.click() }}
                     onRemove={() => removeLogo('login')} />
-                  <Field label="产品/公司名" value={brand.login.display_name} onChange={(v) => setBrand({ ...brand, login: { ...brand.login, display_name: v } })} />
-                  <Field label="副标题" value={brand.login.tagline} onChange={(v) => setBrand({ ...brand, login: { ...brand.login, tagline: v } })} />
+                  <Field label="产品/公司名" value={brand.login.display_name} placeholder={`留空=「${DEFAULT_LOGIN_NAME}」`} onChange={(v) => setBrand({ ...brand, login: { ...brand.login, display_name: v } })} />
+                  <Field label="副标题" value={brand.login.tagline} placeholder={`留空=「${DEFAULT_LOGIN_TAGLINE}」`} onChange={(v) => setBrand({ ...brand, login: { ...brand.login, tagline: v } })} />
                   <div className="space-y-1">
                     <Label className="text-xs text-muted-foreground">欢迎语(可选)</Label>
                     <Textarea value={brand.login.welcome} onChange={(e) => setBrand({ ...brand, login: { ...brand.login, welcome: e.target.value } })} />
@@ -197,17 +207,17 @@ export default function Brand() {
                   <LogoRow label="客户端 Logo" url={brand.client.logo_url as any} kind="client"
                     onPick={() => { setUploadKind('client'); fileRef.current?.click() }}
                     onRemove={() => removeLogo('client')} />
-                  <Field label="展示名称" value={brand.client.display_name} onChange={(v) => setBrand({ ...brand, client: { ...brand.client, display_name: v } })} />
-                  <Field label="副标题" value={brand.client.tagline} onChange={(v) => setBrand({ ...brand, client: { ...brand.client, tagline: v } })} />
+                  <Field label="展示名称" value={brand.client.display_name} placeholder={`留空=「${DEFAULT_CLIENT_NAME}」`} onChange={(v) => setBrand({ ...brand, client: { ...brand.client, display_name: v } })} />
+                  <Field label="副标题" value={brand.client.tagline} placeholder={`留空=「${DEFAULT_CLIENT_TAGLINE}」`} onChange={(v) => setBrand({ ...brand, client: { ...brand.client, tagline: v } })} />
                   <div className="space-y-1">
                     <Label className="text-xs text-muted-foreground">品牌主色(#RRGGBB)</Label>
                     <div className="flex items-center gap-2">
                       <input type="color" className="h-9 w-12 rounded-md border" value={previewAccent}
                         onChange={(e) => setBrand({ ...brand, client: { ...brand.client, accent: e.target.value } })} />
-                      <Input value={brand.client.accent} placeholder="#4176E6" onChange={(e) => setBrand({ ...brand, client: { ...brand.client, accent: e.target.value } })} />
+                      <Input value={brand.client.accent} placeholder={DEFAULT_ACCENT} onChange={(e) => setBrand({ ...brand, client: { ...brand.client, accent: e.target.value } })} />
                     </div>
                   </div>
-                  <Field label="页面标题后缀" value={brand.title} onChange={(v) => setBrand({ ...brand, title: v })} />
+                  <Field label="页面标题后缀" value={brand.title} placeholder={`留空=「${DEFAULT_TITLE}」`} onChange={(v) => setBrand({ ...brand, title: v })} />
                 </CardContent>
               </Card>
             </TabsContent>
@@ -256,9 +266,9 @@ export default function Brand() {
                 </div>
               )}
               <div className="text-[20px] font-bold" style={{ color: previewAccent }}>
-                {brand.login.display_name || 'PicoAide'}
+                {brand.login.display_name || DEFAULT_LOGIN_NAME}
               </div>
-              <div className="mt-0.5 text-[12px] text-muted-foreground">{brand.login.tagline || 'Enterprise AI Gateway'}</div>
+              <div className="mt-0.5 text-[12px] text-muted-foreground">{brand.login.tagline || DEFAULT_LOGIN_TAGLINE}</div>
               {brand.login.welcome && <div className="mt-2 text-[12px] text-foreground">{brand.login.welcome}</div>}
               <div className="mt-4 flex justify-center gap-2">
                 <div className="h-9 w-36 rounded-md text-white text-[13px] leading-9" style={{ backgroundColor: previewAccent }}>登 录</div>
@@ -272,11 +282,11 @@ export default function Brand() {
   )
 }
 
-function Field(props: { label: string; value: string; onChange: (v: string) => void }) {
+function Field(props: { label: string; value: string; placeholder?: string; onChange: (v: string) => void }) {
   return (
     <div className="space-y-1">
       <Label className="text-xs text-muted-foreground">{props.label}</Label>
-      <Input value={props.value} onChange={(e) => props.onChange(e.target.value)} />
+      <Input value={props.value} placeholder={props.placeholder} onChange={(e) => props.onChange(e.target.value)} />
     </div>
   )
 }
