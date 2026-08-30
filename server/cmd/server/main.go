@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"strconv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -141,8 +142,15 @@ func main() {
 	brand.RegisterAdminRoutes(r, db, *dataDir)
 	telemetry.RegisterRoutes(r, db)
 	bootstrap.RegisterRoutes(r, db)
-	// 审计日志保留策略(90 天):启动时清理过期条目
-	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-90*24*time.Hour)); err != nil {
+	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
+	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
+	retentionDays := 180
+	if v, ok, _ := serverstore.GetSetting(db, "audit.retention_days"); ok && v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			retentionDays = n
+		}
+	}
+	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-time.Duration(retentionDays)*24*time.Hour)); err != nil {
 		log.Printf("audit log purge: %v", err)
 	}
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,

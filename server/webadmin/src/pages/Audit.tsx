@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { Card } from '../components/ui/card'
-import { ScrollText, RefreshCw } from 'lucide-react'
+import { ScrollText, RefreshCw, Download } from 'lucide-react'
 
 interface LogRow {
   id: number
@@ -112,15 +112,35 @@ export default function Audit() {
 
   const pages = Math.max(1, Math.ceil(total / 50))
 
+  // CSV 导出(当前页数据; 轻量版 v3b, 不调服务端)
+  const exportCSV = () => {
+    const header = ['id', 'username', 'action', 'detail', 'created_at']
+    const lines = [header.join(',')]
+    for (const l of logs) {
+      lines.push([l.id, l.username, l.action, l.detail, l.created_at].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `audit-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
   return (
     <div className="space-y-4">
       <PageHeader
         title="审计日志"
         desc="敏感操作记录(用户/部门/技能等)"
         actions={
-          <Button size="sm" variant="outline" onClick={() => load(page, appliedAction, appliedUser)}>
-            <RefreshCw className="h-3.5 w-3.5" /> 刷新
-          </Button>
+          <>
+            <Button size="sm" variant="outline" onClick={exportCSV}>
+              <Download className="h-3.5 w-3.5" /> 导出 CSV
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => load(page, appliedAction, appliedUser)}>
+              <RefreshCw className="h-3.5 w-3.5" /> 刷新
+            </Button>
+          </>
         }
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
