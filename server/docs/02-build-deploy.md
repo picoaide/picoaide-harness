@@ -2,7 +2,7 @@
 
 ## 1. Makefile 目标
 
-> **2026-08-19**:自研 Electron 客户端(desktop/)与浏览器插件已下线删除。项目只保留**服务端 + webadmin 管理端**;接入方经保留的 HTTP 接口(`/api/auth/*`、`/v1/*`、`/api/config/bootstrap`)接入。
+> **2026-08-19**:自研 Electron 客户端(desktop/)与浏览器插件已下线删除。项目只保留**服务端 + webadmin 管理端**;接入方经保留的 HTTP 接口(`/api/client/v2/*`、`/v1/*`)接入。
 
 ```bash
 make test              # go test ./... -count=1(服务端全量)
@@ -100,10 +100,10 @@ docker buildx build --platform linux/amd64 \
 
 自研客户端已下线,但**服务端接口全部保留**,任何 HTTP 客户端可直接接入:
 
-1. `POST /api/auth/login` 获取 Bearer token(90 天);`GET /api/auth/me` 校验身份。
-2. `GET /api/config/bootstrap` 拉默认模型与建议清单(零配置接入)。
+1. `POST /api/client/v2/auth/login` 获取 Bearer token(90 天);`GET /api/client/v2/auth/me` 校验身份。
+2. `GET /api/client/v2/config/bootstrap` 拉默认模型与建议清单(零配置接入)。
 3. `POST /v1/chat/completions` / `/v1/embeddings` 调用 LLM(经网关计量计费)。
-4. `GET /api/auth/usage` 查询本员工余额(金额/token)与今日/昨日/本月/累计统计。
+4. `GET /api/client/v2/auth/usage` 查询本员工余额(金额/token)与今日/昨日/本月/累计统计。
 
 接口契约见 `docs/03-api-reference.md`。
 

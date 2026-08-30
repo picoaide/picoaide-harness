@@ -46,7 +46,7 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 - **峰谷折算**：高峰窗口外（空闲时段）且模型配置了低谷折扣率时，费用 = 标准价 × 折扣率；高峰时段按标准价；DeepSeek 官方当前政策（2026-08 起）= 周一至周五 09:00-12:00、14:00-18:00 为高峰，其余（含周末）为空闲，空闲价 = 高峰价 × 50%。
 - **登录模式**：`local` / `ldap` / `oidc` / `both`（local+ldap）切换：
   - LDAP：`ldap_url`、`ldap_bind_dn`、`ldap_base_dn`、`ldap_user_filter`（如 `(uid=%s)`）、`ldap_group_filter`（如 `(memberOf=cn=%s)`）；
-  - OIDC：`oidc_issuer`、`oidc_redirect_url`（如 `https://picoaide.example.com/api/auth/oidc/callback`）。
+  - OIDC：`oidc_issuer`、`oidc_redirect_url`（如 `https://picoaide.example.com/api/client/v2/auth/oidc/callback`）。
 
 ## 用量统计
 
@@ -54,7 +54,7 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 - **维度**：按用户 / 按模型 / 按日期；费用（money）与 token 两套口径切换；
 - **图表**：柱状图（费用/tokens 趋势）、饼图（模型分布）、钻取（drill-down：筛选用户 → 看其模型构成）；
 - **明细**：行级费用、prompt/completion tokens、请求数；缓存命中计费在明细中体现（按缓存价）；
-- **余额**：`GET /api/auth/usage` 员工自查询——剩余额度（配额−本月已用；不限=null）、今日/昨日/本月/累计 tokens 与费用、部门预算链。
+- **余额**：`GET /api/client/v2/auth/usage` 员工自查询——剩余额度（配额−本月已用；不限=null）、今日/昨日/本月/累计 tokens 与费用、部门预算链。
 
 ## 市场 · 技能（商城）
 
