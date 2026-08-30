@@ -3,13 +3,26 @@ title: Product Philosophy
 description: 'Understand the design and operating principles behind PicoAide Harness: everything is a plugin, local-first, enterprise boundaries, the capability distribution trust model, confirmation-first, and AI guardrails.'
 ---
 
-PicoAide Harness is not "a piece of software with lots of features" — it is the implementation of a **design philosophy with clear boundaries**. Once you understand the eight principles below, you can predict why almost every feature in the product looks the way it does.
+PicoAide Harness is not "a piece of software with lots of features" — it is the implementation of a **design philosophy with clear boundaries**. Once you understand the principles below, you can predict why almost every feature in the product looks the way it does.
+
+## 0. What problem we solve
+
+DeepSeek Harness's core is a composable agent harness. It works well from the command line and through the Web UI, and it lets developers combine models, tools, sessions, and workflows into their own runtime. For many users, though, the first run still means Node.js, profiles, dependency installation, ports, and process lifecycle.
+
+PicoAide Harness does not aim to re-implement Harness; it puts the same runtime into an application that is easy to launch, easy to manage, and fits operating-system habits:
+
+- The installer provides Electron, the Node runtime, and pinned DSH dependencies;
+- The application owns the window, tray, single-instance lifecycle, quit, and local-service lifecycle;
+- Users still use the official DSH profiles, plugins, sessions, and Web UI;
+- Upstream Harness keeps owning the core semantics of agents, models, tools, sessions, and the Web client.
+
+So PicoAide Harness is a **product entry point and runtime adapter layer** — not a replacement for the upstream project, and not a long-term fork of copied upstream source.
 
 ## 1. Everything is a plugin: the desktop itself is a plugin
 
 This is the first principle of the entire product line.
 
-DeepSeek Harness's core is a composable agent harness: agents, models, tools, sessions, and the Web UI are all composed through the Cordis plugin mechanism. Instead of rewriting from scratch, PicoAide Harness **treats the entire product as a plugin** too — the desktop shell (window, tray, terminal, update, profile management) is itself a legitimate DSH plugin that runs through the same composition path as third-party plugins:
+DeepSeek Harness's core is a composable agent harness: agents, models, tools, sessions, and the Web UI are all composed through the Cordis plugin mechanism. Instead of rewriting from scratch, PicoAide Harness **treats the entire product as a plugin** too — the desktop shell (window, tray, updates, the fixed `desktop` profile) is itself a legitimate DSH plugin that runs through the same composition path as third-party plugins:
 
 - The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `0.1.1-rc.2`); no product capability modifies the upstream source;
 - Plugins from the official ecosystem can be installed and used directly;

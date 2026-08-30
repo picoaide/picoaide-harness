@@ -6,7 +6,7 @@ English | [中文](2026-08-15-windows-electron-acl-runner.zh.md)
 
 ## Problem
 
-The upstream Windows sandbox composes the ACL runner argv as `[process.execPath, runner.js, ...]`. This is correct under the DSH CLI because `process.execPath` is Node. DSH Desktop boots the same Host plugins inside Electron, where the value is the Electron executable during development and the installed `DSH Desktop.exe` after packaging. Starting that executable with the runner path as an argument does not establish the plain-Node process expected by the upstream runner and can instead start another desktop application instance.
+The upstream Windows sandbox composes the ACL runner argv as `[process.execPath, runner.js, ...]`. This is correct under the DSH CLI because `process.execPath` is Node. PicoAide Harness boots the same Host plugins inside Electron, where the value is the Electron executable during development and the installed `PicoAide Harness.exe` after packaging. Starting that executable with the runner path as an argument does not establish the plain-Node process expected by the upstream runner and can instead start another desktop application instance.
 
 The Windows sandbox has no weaker automatic provider fallback. A broken runner therefore makes ordinary workspace-write PowerShell unavailable, while silently bypassing confinement would misrepresent the selected permission mode. The upstream native spawn also deliberately omits `CREATE_NO_WINDOW` and `CREATE_NEW_CONSOLE` because restricted children fail DLL initialization with either flag. That is correct for a console Host, but an Electron GUI Host has no console for the restricted PowerShell process to inherit, so Windows allocates a visible console window for each shell execution.
 

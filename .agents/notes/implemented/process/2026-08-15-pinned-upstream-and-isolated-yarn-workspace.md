@@ -6,13 +6,13 @@ English | [中文](2026-08-15-pinned-upstream-and-isolated-yarn-workspace.zh.md)
 
 ## Problem
 
-DSH Desktop needs the exact official DeepSeek Harness source for review while the desktop product evolves independently. Tracking that source as ordinary files lets desktop commits rewrite upstream implementation and obscures ownership. A shared package-manager graph would also mix upstream pnpm rules with the desktop product's Yarn release.
+PicoAide Harness needs the exact official DeepSeek Harness source for review while the desktop product evolves independently. Tracking that source as ordinary files lets desktop commits rewrite upstream implementation and obscures ownership. A shared package-manager graph would also mix upstream pnpm rules with the desktop product's Yarn release.
 
 ## Decision
 
 [`deepseek-harness/`](../../../../deepseek-harness/) is a Git submodule pinned to the official repository and exact commit recorded in [`upstream.json`](../../../../upstream.json). Desktop branches treat the submodule as read-only. An upstream update changes the gitlink and metadata in a dedicated commit.
 
-The outer README files and assets are product-owned and preserve the established DSH Desktop landing page from `anywhere-labs/deepseek-harness-desktop`. They are not derived from the official source submodule. Package-level setup and release documentation belongs to [`dsh-plugin-desktop/README.md`](../../../../dsh-plugin-desktop/README.md); the proposed community interoperability contract belongs to [`dsh-community-fabric/README.md`](../../../../dsh-community-fabric/README.md).
+The outer README files and assets are product-owned and preserve the established PicoAide Harness landing page from `anywhere-labs/deepseek-harness-desktop`. They are not derived from the official source submodule. Package-level setup and release documentation belongs to [`dsh-plugin-desktop/README.md`](../../../../dsh-plugin-desktop/README.md); the proposed community interoperability contract belongs to [`dsh-community-fabric/README.md`](../../../../dsh-community-fabric/README.md).
 
 The outer repository is a Yarn 4 workspace using the `node_modules` linker. Its owned workspace members are [`dsh-plugin-desktop`](../../../../dsh-plugin-desktop/) and [`dsh-community-fabric`](../../../../dsh-community-fabric/). Fabric begins as a private documentation scaffold with no runtime entry, SDK, schema release, or DSH bundle until the community Draft has reviewed contracts and conformance evidence. The upstream checkout remains an independent pnpm workspace under its own [package-manager decision](../../../../deepseek-harness/.agents/notes/implemented/process/2026-06-16-pnpm-over-yarn.md). Root `upstream:*` scripts use Yarn's portable shell to enter the submodule before invoking its pinned pnpm release through Corepack.
 
@@ -38,6 +38,6 @@ Acceptance requires `yarn check:layout`, `yarn upstream:version`, `yarn install 
 
 ## Consequences
 
-Desktop changes have three explicitly owned package trees, and the official checkout remains directly comparable with its remote commit. The outer landing page presents DSH Desktop, the desktop README owns application setup and release usage, the Fabric README owns the proposed community contract boundary, and the Market README owns the proposed market boundary. Product installs and checks are reproducible from the outer Yarn lockfile, while upstream verification continues to use its own pnpm lockfile.
+Desktop changes have three explicitly owned package trees, and the official checkout remains directly comparable with its remote commit. The outer landing page presents PicoAide Harness, the desktop README owns application setup and release usage, the Fabric README owns the proposed community contract boundary, and the Market README owns the proposed market boundary. Product installs and checks are reproducible from the outer Yarn lockfile, while upstream verification continues to use its own pnpm lockfile.
 
 Clones must initialize the submodule, and contributors maintain two intentionally separate package-manager caches. Source-pin updates and runtime-family updates require separate evidence because a public GitHub revision and a published npm family may not correspond.

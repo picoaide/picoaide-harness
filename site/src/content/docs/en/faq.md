@@ -17,7 +17,11 @@ By default everything is on your machine: all profiles, sessions, settings, and 
 
 ## Do I need to install Node.js, pnpm, or DSH?
 
-No. The installer already bundles Electron, Node.js, pnpm, and a pinned set of DSH dependencies. Ordinary users can download, install, and launch it directly; the app does not modify the system-wide PATH or shell config (the `dsh`/`pnpm`/`node` inside a terminal are private shims that only apply to that terminal process).
+No. The installer already bundles Electron, Node.js, pnpm, and a pinned set of DSH dependencies. Ordinary users can download, install, and launch it directly; the app does not modify the system-wide PATH or shell config.
+
+## Does the first launch download a runtime?
+
+No separate Node.js or Harness core download is required. The installer is larger precisely because the runtime and pinned dependencies are already inside, trading download size for a more deterministic first launch and version set. Cloud models, update checks, and new-version downloads still need network access.
 
 ## Which operating systems are supported?
 
