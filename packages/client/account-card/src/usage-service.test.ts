@@ -103,7 +103,7 @@ describe('UsageService', () => {
       },
     })
     await service.refreshNow(SESSION)
-    expect(seen).toEqual({ serverURL: 'https://gw.example.com', path: '/api/auth/usage', token: 'tok-1' })
+    expect(seen).toEqual({ serverURL: 'https://gw.example.com', path: '/api/client/v2/auth/usage', token: 'tok-1' })
   })
 
   it('dispose cancels a pending debounced refresh', async () => {
