@@ -9,19 +9,19 @@ import { EmptyState } from '../components/empty-state'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
-import { Download, FileText, RefreshCw, Sparkles, Share2, ShieldCheck } from 'lucide-react'
+import { Download, FileText, RefreshCw, Share2, ShieldCheck } from 'lucide-react'
 import { GrantDialog } from '../components/grant-dialog'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 
 /**
- * 能力中心·统一审批(决策 2026-08-25 Phase 3):共享技能与共享 Agent 的
- * pending 队列归并到一个列表(类型徽章区分),approve/reject/delete 与授权
- * 仍走各自原域端点(base_path 由服务端逐行下发),质量标记(官方/精选)经
- * 各域 /quality 端点设置。不复制审核逻辑,仅组合与状态编排。
+ * 能力中心·共享智能体审核(2026-08-28 定案):能力中心只承载智能体,
+ * 技能审核由「共享技能」页(/shared-skills)承担,本页仅请求 type=agent。
+ * approve/reject/delete 与授权仍走原域端点(base_path 由服务端逐行下发),
+ * 质量标记(官方/精选)经 /quality 端点设置。不复制审核逻辑,仅状态编排。
  */
 
 interface ApprovalRow {
-  kind: 'skill' | 'agent'
+  kind: 'agent'
   name: string
   version: string
   display_name: string
@@ -33,8 +33,6 @@ interface ApprovalRow {
   created_at: string
   base_path: string
   preview_path: string
-  /* 决策 2026-08-25:市场技能同名冲突(approve 将 409 阻断) */
-  conflict?: boolean
 }
 
 interface Dept {
@@ -49,11 +47,6 @@ const STATUS_META: Record<ApprovalRow['status'], { label: string; variant: 'seco
   rejected: { label: '已拒绝', variant: 'destructive' },
 }
 
-const KIND_META: Record<ApprovalRow['kind'], { label: string; icon: typeof Sparkles }> = {
-  skill: { label: '技能', icon: Sparkles },
-  agent: { label: '智能体', icon: Share2 },
-}
-
 function fmtTime(iso: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -64,7 +57,6 @@ function fmtTime(iso: string): string {
 export default function Capabilities() {
   const [allRows, setAllRows] = useState<ApprovalRow[]>([])
   const [tab, setTab] = useState('pending')
-  const [typeFilter, setTypeFilter] = useState<'all' | 'skill' | 'agent'>('all')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [confirm, setConfirm] = useState<ApprovalRow | null>(null)
@@ -90,7 +82,7 @@ export default function Capabilities() {
     setLoading(true)
     setError('')
     try {
-      const data = await request<{ approvals: ApprovalRow[] }>('/api/admin/capabilities/approvals')
+      const data = await request<{ approvals: ApprovalRow[] }>('/api/admin/capabilities/approvals?type=agent')
       if (current !== loadSeq.current) return
       setAllRows(data.approvals ?? [])
     } catch (err: any) {
@@ -104,7 +96,7 @@ export default function Capabilities() {
   useEffect(() => { void load() }, [load])
 
   const shown = allRows
-    .filter(r => (tab === 'all' || r.status === tab) && (typeFilter === 'all' || r.kind === typeFilter))
+    .filter(r => tab === 'all' || r.status === tab)
 
   const act = async (row: ApprovalRow, kind: 'approve' | 'reject' | 'delete') => {
     if (busy) return
@@ -174,7 +166,7 @@ export default function Capabilities() {
     <div className="space-y-4">
       <PageHeader
         title="能力中心"
-        desc="共享技能与共享 Agent 的统一审核队列;通过后需授权才可见可装"
+        desc="共享智能体的统一审核队列;通过后需授权才可见可装"
         actions={
           <Button variant="outline" size="sm" onClick={() => { void load() }}>
             <RefreshCw className="h-4 w-4" /> 刷新
@@ -182,7 +174,7 @@ export default function Capabilities() {
         }
       />
 
-      {/* 状态 tab + 类型筛选 */}
+      {/* 状态 tab */}
       <div className="flex items-center justify-between gap-2">
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
@@ -192,32 +184,23 @@ export default function Capabilities() {
             <TabsTrigger value="all">全部（{counts.all}）</TabsTrigger>
           </TabsList>
         </Tabs>
-        <div className="flex items-center gap-1">
-          {(['all', 'skill', 'agent'] as const).map(t => (
-            <Button key={t} size="sm" variant={typeFilter === t ? 'default' : 'outline'} onClick={() => { setTypeFilter(t) }}>
-              {t === 'all' ? '全部类型' : KIND_META[t].label}
-            </Button>
-          ))}
-        </div>
       </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       {loading ? (
-        <EmptyState icon={<Sparkles className="h-6 w-6" />} title="加载中…" desc="请稍候" />
+        <EmptyState icon={<Share2 className="h-6 w-6" />} title="加载中…" desc="请稍候" />
       ) : shown.length === 0 ? (
-        <EmptyState icon={<Sparkles className="h-6 w-6" />} title="暂无待处理能力" desc="员工上传的技能/Agent 将出现在这里" />
+        <EmptyState icon={<Share2 className="h-6 w-6" />} title="暂无待处理智能体" desc="员工上传的共享 Agent 将出现在这里" />
       ) : (
         <div className="rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>类型</TableHead>
                 <TableHead>名称 / 标题</TableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>作者</TableHead>
                 <TableHead>状态</TableHead>
-                <TableHead>名称冲突</TableHead>
                 <TableHead>质量</TableHead>
                 <TableHead>上传时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -226,15 +209,12 @@ export default function Capabilities() {
             <TableBody>
               {shown.map(row => {
                 const meta = STATUS_META[row.status]
-                const kindMeta = KIND_META[row.kind]
-                const KindIcon = kindMeta.icon
                 const isBusy = busy === row.name + row.version + 'approve'
                   || busy === row.name + row.version + 'reject'
                   || busy === row.name + row.version + 'delete'
                   || busy === row.name + row.version + 'quality'
                 return (
                   <TableRow key={row.kind + ':' + row.name + '@' + row.version}>
-                    <TableCell><Badge variant="outline"><KindIcon className="mr-1 h-3 w-3" />{kindMeta.label}</Badge></TableCell>
                     <TableCell>
                       <div className="whitespace-nowrap font-medium">{row.display_name || row.name}</div>
                       <div className="text-xs text-muted-foreground">{row.name}</div>
@@ -242,15 +222,6 @@ export default function Capabilities() {
                     <TableCell className="font-mono text-sm">{row.version}</TableCell>
                     <TableCell>{row.author}</TableCell>
                     <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
-                    <TableCell>
-                      {row.conflict ? (
-                        <Badge variant="destructive" title="与市场技能同名,通过将被拒绝(409);请先删除/改名市场技能或驳回本共享技能">
-                          ⚠ 与市场重名
-                        </Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
                     <TableCell>
                       {row.status === 'approved' ? (
                         <Select
@@ -308,8 +279,8 @@ export default function Capabilities() {
       <ArchivePreviewDialog
         openKey={previewKey}
         data={preview}
-        mainTitle={previewRow?.kind === 'agent' ? 'agent.cordis.yml' : 'SKILL.md'}
-        mainContent={previewRow?.kind === 'agent' ? preview?.composition ?? '' : preview?.skill_md ?? ''}
+        mainTitle="agent.cordis.yml"
+        mainContent={preview?.composition ?? ''}
         fileBase={previewRow ? previewRow.base_path : ''}
         onClose={() => { setPreviewKey('') }}
       />
@@ -325,10 +296,7 @@ export default function Capabilities() {
             </DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            {confirmKind === 'approve' && confirm?.conflict && (
-              <span className="font-medium text-destructive">⚠ 名称与市场技能冲突,通过将被拒绝(409)。请先处理市场技能后重试。</span>
-            )}
-            {confirmKind === 'approve' && !confirm?.conflict && '通过后该版本将按授权可见可安装。'}
+            {confirmKind === 'approve' && '通过后该版本将按授权可见可安装。'}
             {confirmKind === 'reject' && '拒绝后仅上传者可见并可重新上传。请填写理由,上传者可见。'}
             {confirmKind === 'delete' && '删除后记录与归档将被移除,不可恢复。'}
           </p>
