@@ -1,3 +1,6 @@
 [submodule "deepseek-harness"]
 	path = deepseek-harness
 	url = https://github.com/deepseek-ai/deepseek-harness.git
+[submodule "packages/vendor/memory-evolve"]
+	path = packages/vendor/memory-evolve
+	url = https://github.com/csyangwen/dsh-memory-evolve.git

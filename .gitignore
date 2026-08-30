@@ -9,15 +9,24 @@ node_modules/
 *.tsbuildinfo
 .build/
 
-# DSH plugin packages: build output is never committed for workspace members
-# that compile to lib/ (desktop, enterprise, account-card, branding) unless a
-# member intentionally ships it (dsh-browser, dsh-connectors, dsh-cron and
-# dsh-memory-evolve track lib/ for the packaged runtime).
+# DSH plugin packages: build output (lib/) is never committed — every workspace
+# member compiles to lib/ at build time (tsdown/tsc) and packaging pre-builds
+# deps (packages/host/desktop/scripts/prebuild-workspace-deps.ts).
 packages/host/desktop/dist/
 packages/host/desktop/lib/
+# desktop build 生成图标(scripts/generate-*.mjs 从 logo.svg/tray-icon.svg 派生),
+# 仅源文件(app-icon.png/tray-icon.svg/assistedMessages.yml)入库。
+packages/host/desktop/build/app-icon-mac.png
+packages/host/desktop/build/tray-icon*.png
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/
+packages/host/cron/lib/
+packages/host/connectors/lib/
+packages/host/browser/lib/
+packages/client/better-sidebar/lib/
+# dsh-memory-evolve 是 git submodule(独立仓库 github:csyangwen/dsh-memory-evolve),
+# 其 lib/ 在子仓库内跟踪,主仓库只记录 submodule pin。
 community/market/lib/
 
 # server (Go)
@@ -28,7 +37,7 @@ server/*.db-wal
 server/*.db-shm
 server/webadmin/node_modules/
 server/webadmin/dist/*
-!server/webadmin/dist/index.html
+!server/webadmin/dist/.gitkeep
 server/webadmin/tsconfig.tsbuildinfo
 *.log
 .yarn/cache
