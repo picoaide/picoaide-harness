@@ -16,6 +16,7 @@ import {
   validateSkillName,
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import type { Session } from './server-connector/config.ts'
 
 /** 上传 body 上限(审计 2026-08-25 P2-2):本地 upload body 实际只含元数据
  * (archive 由 pack 后经 fetchJSON 出站);24MB 与服务端 MaxBodyBytes 对齐,
@@ -425,7 +426,19 @@ export function apply(ctx: Context, config: Config): void {
     return Buffer.concat(chunks)
   }
 
-  const session = (): { serverURL: string; token: string } | null => ctx.picoSession.getSession()
+  const session = (): Session | null => ctx.picoSession.getSession()
+
+  /**
+   * §4.5 双保险防御断言: /api/pico/* 写类操作禁止 auditor(理论不可达——
+   * auditor 员工面登录已被服务端拒绝; 若未来边界放开, 此处拦截)。
+   */
+  const writeGuard = (): boolean => {
+    const s = session()
+    if (s !== null && s.role === 'auditor') {
+      return false
+    }
+    return true
+  }
 
   /**
    * Trust fence for every local route: loopback socket + Host + same-origin
@@ -516,7 +529,12 @@ export function apply(ctx: Context, config: Config): void {
           const s = session()
           json(res, 200, s === null
             ? { loggedIn: false }
-            : { loggedIn: true, username: ctx.picoSession.getSession()?.username, serverURL: s.serverURL })
+            : {
+                loggedIn: true,
+                username: ctx.picoSession.getSession()?.username,
+                serverURL: s.serverURL,
+                role: ctx.picoSession.getSession()?.role ?? '',
+              })
         },
       }),
 
@@ -601,6 +619,9 @@ export function apply(ctx: Context, config: Config): void {
           if (!guard(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
+          if (req.method !== 'GET' && !writeGuard()) {
+            return json(res, 403, { error: 'auditor cannot modify' })
+          }
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
@@ -742,6 +763,9 @@ export function apply(ctx: Context, config: Config): void {
           if (!guard(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
+          if (req.method !== 'GET' && !writeGuard()) {
+            return json(res, 403, { error: 'auditor cannot modify' })
+          }
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           const presetsDir = resolvePresetsDir()
 
@@ -915,6 +939,9 @@ export function apply(ctx: Context, config: Config): void {
           if (!guard(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
+          if (req.method !== 'GET' && !writeGuard()) {
+            return json(res, 403, { error: 'auditor cannot modify' })
+          }
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           const skillsDir = resolveSkillsDir()
 
@@ -1047,6 +1074,9 @@ export function apply(ctx: Context, config: Config): void {
           if (!guard(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
+          if (req.method !== 'GET' && !writeGuard()) {
+            return json(res, 403, { error: 'auditor cannot modify' })
+          }
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           if (pathname !== '/api/pico/capabilities' || req.method !== 'GET') {
             return json(res, 404, { error: 'not found' })
