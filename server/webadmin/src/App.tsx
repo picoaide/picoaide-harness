@@ -1,9 +1,10 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Share2, Bug, Plug, Menu, X } from 'lucide-react'
+import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Share2, Bug, Plug, Menu, X, Palette, Lock, Eye } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
+import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
 import Login from './pages/Login'
 
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
@@ -24,19 +25,43 @@ const Connectors = lazy(() => import('./pages/Connectors'))
 // Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
 const Usage = lazy(() => import('./pages/Usage'))
 
-const nav = [
-  { to: '/users', label: '用户', icon: Users },
-  { to: '/departments', label: '部门', icon: Network },
-  { to: '/gateway', label: '网关', icon: Settings2 },
-  { to: '/auth', label: '认证', icon: KeyRound },
-  { to: '/error-monitoring', label: '错误监控', icon: Bug },
-  { to: '/usage', label: '用量', icon: BarChart3 },
-  { to: '/marketplace', label: '市场 · 技能', icon: Store },
-  { to: '/shared-skills', label: '共享技能', icon: Sparkles },
-  { to: '/capabilities', label: '能力中心', icon: Share2 },
-  { to: '/connectors', label: '连接器', icon: Plug },
-  { to: '/audit', label: '审计', icon: ScrollText },
-  { to: '/server-info', label: '服务器信息', icon: Server },
+// 权限点常量(与服务端 serverauth/rbac.go 对齐; 前端仅作导航可见性)。
+const PERM_AUTH_READ = 'auth:read'
+const PERM_BRAND_READ = 'brand:read'
+const PERM_GATEWAY_READ = 'gateway:read'
+const PERM_ERRMON_READ = 'error-monitoring:read'
+const PERM_USAGE_READ = 'usage:read'
+const PERM_MARKET_READ = 'market:read'
+const PERM_CAP_READ = 'capability:read'
+const PERM_CONNECTOR_READ = 'connector:read'
+const PERM_SERVERINFO_READ = 'server-info:read'
+const PERM_AUDIT_READ = 'audit:read'
+
+interface NavEntry {
+  to: string
+  label: string
+  icon: any
+  section: '管理' | '运维' | '审计'
+  perms?: string[]
+}
+
+const nav: NavEntry[] = [
+  // 管理分区(super_admin 专属; auditor 无这些权限)
+  { to: '/users', label: '用户', icon: Users, section: '管理' },
+  { to: '/departments', label: '部门', icon: Network, section: '管理' },
+  { to: '/auth', label: '认证', icon: KeyRound, section: '管理', perms: [PERM_AUTH_READ] },
+  { to: '/brand', label: '品牌', icon: Palette, section: '管理', perms: [PERM_BRAND_READ] },
+  // 运维分区(super_admin)
+  { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
+  { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },
+  { to: '/usage', label: '用量', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
+  { to: '/marketplace', label: '市场 · 技能', icon: Store, section: '运维', perms: [PERM_MARKET_READ] },
+  { to: '/shared-skills', label: '共享技能', icon: Sparkles, section: '运维', perms: [PERM_CAP_READ] },
+  { to: '/capabilities', label: '能力中心', icon: Share2, section: '运维', perms: [PERM_CAP_READ] },
+  { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
+  { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
+  // 审计分区(auditor + super_admin 只读)
+  { to: '/audit', label: '审计日志', icon: ScrollText, section: '审计', perms: [PERM_AUDIT_READ] },
 ]
 
 // 审计 A5-L7: 页面运行时异常不再白屏整树卸载,展示错误与重载入口
@@ -108,6 +133,7 @@ export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [baseURL, setBaseURL] = useState('')
   const [adminName, setAdminName] = useState('')
+  const [meUser, setMeUser] = useState<MeUser | null>(null)
   // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
   const [mobileNav, setMobileNav] = useState(false)
 
@@ -119,10 +145,25 @@ export default function App() {
 
   useEffect(() => {
     me().then(
-      (body) => { setAuthed(true); setAdminName(body?.user?.display_name || body?.user?.username || '管理员') },
+      (body) => {
+        setAuthed(true)
+        const u = body?.user as MeUser | undefined
+        setMeUser(u ?? null)
+        setAdminName(u?.display_name || u?.username || '管理员')
+      },
       () => setAuthed(false)
     )
   }, [])
+
+  // 可见 nav: 按角色权限过滤(体验层; 服务端 RequirePermission 为护栏)。
+  const visibleNav = nav.filter((n) => {
+    if (meUser?.role === 'super_admin') return true
+    if (meUser?.role === 'auditor') return n.section === '审计'
+    return false
+  })
+
+  // 落地页: 角色第一个有权限的分区。
+  const landingPath = meUser?.role === 'auditor' ? '/audit' : nav[0]?.to ?? '/users'
 
   useEffect(() => {
     if (!authed) return
@@ -192,32 +233,40 @@ export default function App() {
           )}
 
           <nav className="flex-1 space-y-0.5 px-3 overflow-y-auto">
-            <div className="px-3 pb-1.5 pt-1 text-[11px] font-semibold text-muted-foreground">管理</div>
-            {nav.map((n) => (
-              <NavLink
-                key={n.to}
-                to={n.to}
-                onClick={() => setMobileNav(false)}
-                className={({ isActive }) =>
-                  cn(
-                    'group relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150',
-                    isActive
-                      ? 'bg-accent font-semibold text-accent-foreground'
-                      : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-                  )
-                }
-              >
-                {({ isActive }) => (
-                  <>
-                    {/* 激活左侧 accent 蓝条(DSH 激活态语义) */}
-                    {isActive && <span className="absolute left-0 top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-primary" />}
-                    <n.icon className="h-4 w-4 shrink-0" />
-                    <span className="flex-1">{n.label}</span>
-                    <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-50" />
-                  </>
-                )}
-              </NavLink>
-            ))}
+            {(['管理', '运维', '审计'] as const).map((section) => {
+              const items = visibleNav.filter((n) => n.section === section)
+              if (items.length === 0) return null
+              return (
+                <div key={section}>
+                  <div className="px-3 pb-1.5 pt-1 text-[11px] font-semibold text-muted-foreground">{section}</div>
+                  {items.map((n) => (
+                    <NavLink
+                      key={n.to}
+                      to={n.to}
+                      onClick={() => setMobileNav(false)}
+                      className={({ isActive }) =>
+                        cn(
+                          'group relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150',
+                          isActive
+                            ? 'bg-accent font-semibold text-accent-foreground'
+                            : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                        )
+                      }
+                    >
+                      {({ isActive }) => (
+                        <>
+                          {/* 激活左侧 accent 蓝条(DSH 激活态语义) */}
+                          {isActive && <span className="absolute left-0 top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-primary" />}
+                          <n.icon className="h-4 w-4 shrink-0" />
+                          <span className="flex-1">{n.label}</span>
+                          <ChevronRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-50" />
+                        </>
+                      )}
+                    </NavLink>
+                  ))}
+                </div>
+              )
+            })}
           </nav>
 
           <div className="border-t border-border p-3">
@@ -227,7 +276,10 @@ export default function App() {
               </div>
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[12px] font-medium text-foreground">{adminName}</div>
-                <div className="flex items-center gap-1 text-[10px] text-muted-foreground"><ShieldCheck className="h-2.5 w-2.5" />超级管理员</div>
+                <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                  {isAuditor(meUser) ? <Eye className="h-2.5 w-2.5" /> : <ShieldCheck className="h-2.5 w-2.5" />}
+                  {roleLabel(meUser?.role)}
+                </div>
               </div>
             </div>
             <Button
@@ -250,6 +302,13 @@ export default function App() {
 
         {/* 主内容区 */}
         <main className="flex min-w-0 flex-1 flex-col overflow-auto">
+          {/* auditor 只读横幅(体验提示; 服务端 403 兜底) */}
+          {isAuditor(meUser) && (
+            <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[12px] font-medium text-amber-700">
+              <Lock className="h-3.5 w-3.5" />
+              当前为审计只读视图 —— 可查看日志/用量/用户列表, 所有修改已禁用
+            </div>
+          )}
           {/* 移动端顶部栏:汉堡菜单 + 标题(桌面隐藏) */}
           <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-border bg-background/90 px-4 py-3 backdrop-blur lg:hidden">
             <button
@@ -278,7 +337,7 @@ export default function App() {
             <ErrorBoundary>
               <Suspense fallback={<div className="flex h-full items-center justify-center text-muted-foreground">加载中…</div>}>
                 <Routes>
-                  <Route path="/" element={<Navigate to="/users" />} />
+                  <Route path="/" element={<Navigate to={landingPath} />} />
                   <Route path="/users" element={<UsersPage />} />
                   <Route path="/departments" element={<Departments />} />
                   <Route path="/gateway" element={<Gateway />} />
