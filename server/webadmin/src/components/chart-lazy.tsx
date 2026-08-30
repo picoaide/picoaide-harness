@@ -36,5 +36,3 @@ export function ChartLazy({ spec, ...props }: ChartLazyProps) {
     </Suspense>
   )
 }
-
-export default ChartLazy
