@@ -10,8 +10,10 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 )
 
-// RegisterRoutes mounts /v1/chat/completions and /v1/models behind
-// bearer-token auth.
+// RegisterRoutes mounts the DeepSeek-compatible gateway endpoints behind
+// bearer-token auth. Production routes are declared centrally by
+// internal/router (registerGatewayV1); this helper keeps the full endpoint
+// set for in-package tests (llmgateway cannot import router due to cycle).
 func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	a := &API{
 		DB: db,
@@ -23,10 +25,20 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		sse: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
 		rl:  newRateLimiter(),
 	}
-	base := "/v1"
-	v1 := r.Group(base, serverauth.BearerAuth(db))
+	// OpenAI/Anthropic 兼容形态(/v1/*)。
+	v1 := r.Group("/v1", serverauth.BearerAuth(db))
 	v1.POST("/chat/completions", a.handleChatCompletions)
 	v1.POST("/embeddings", a.handleEmbeddings)
 	v1.POST("/messages", a.handleMessages)
+	v1.POST("/completions", a.handleCompletions)
+	v1.POST("/responses", a.handleResponses)
 	v1.GET("/models", a.handleModels)
+	// 官方原生形态(无 /v1 前缀)。
+	gw := r.Group("", serverauth.BearerAuth(db))
+	gw.POST("/chat/completions", a.handleChatCompletions)
+	gw.POST("/embeddings", a.handleEmbeddings)
+	gw.POST("/completions", a.handleCompletions)
+	gw.POST("/responses", a.handleResponses)
+	gw.GET("/models", a.handleModels)
+	gw.POST("/messages", a.handleMessages)
 }
