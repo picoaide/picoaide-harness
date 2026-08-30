@@ -729,6 +729,7 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
 		"mode":    s["auth.mode"],
 		"enabled": s["auth.enabled"],
+		"hide_local": s["auth.hide_local"] == "true",
 		"ldap": gin.H{
 			"server_url":    s["ldap.server_url"],
 			"bind_dn":       s["ldap.bind_dn"],
@@ -761,9 +762,10 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 // ldap/openid/oidc 三方配置独立保存(互不覆盖),按 enabled 启用。
 func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	var req struct {
-		Mode    string `json:"mode"`
-		Enabled string `json:"enabled"`
-		LDAP    struct {
+		Mode      string `json:"mode"`
+		Enabled   string `json:"enabled"`
+		HideLocal *bool  `json:"hide_local"`
+		LDAP      struct {
 			ServerURL    string `json:"server_url"`
 			BindDN       string `json:"bind_dn"`
 			BindPassword string `json:"bind_password"`
@@ -859,6 +861,10 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		_ = upsert("openid.client_secret", req.OpenID.ClientSecret)
 	}
 	_ = upsert("openid.redirect_url", strings.TrimSpace(req.OpenID.RedirectURL))
+	if req.HideLocal != nil {
+		// v3b: 仅客户端登录页隐藏本地账号入口; 管理后台恒本地登录不受影响。
+		_ = upsert("auth.hide_local", strconv.FormatBool(*req.HideLocal))
+	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "enabled:"+enabled)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -908,10 +914,15 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 		methods = append([]string{"local"}, methods...)
 	}
 	out := make([]gin.H, 0, len(methods))
+	hideLocal := s["auth.hide_local"] == "true"
 	for _, m := range methods {
 		out = append(out, gin.H{
-			"name":      m,
+			"name":       m,
 			"configured": m == "local" || configured(m),
+			// v3b: browser = 浏览器跳转登录(openid/oidc); hidden 仅用于
+			// 客户端登录页隐藏本地入口(管理后台恒本地,不消费该标记)。
+			"browser": m == "openid" || m == "oidc",
+			"hidden":  m == "local" && hideLocal,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"methods": out})
