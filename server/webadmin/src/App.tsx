@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Bug, Plug, Menu, X } from 'lucide-react'
+import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Sparkles, Share2, Bug, Plug, Menu, X } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -32,7 +32,8 @@ const nav = [
   { to: '/error-monitoring', label: '错误监控', icon: Bug },
   { to: '/usage', label: '用量', icon: BarChart3 },
   { to: '/marketplace', label: '市场 · 技能', icon: Store },
-  { to: '/capabilities', label: '能力中心', icon: Sparkles },
+  { to: '/shared-skills', label: '共享技能', icon: Sparkles },
+  { to: '/capabilities', label: '能力中心', icon: Share2 },
   { to: '/connectors', label: '连接器', icon: Plug },
   { to: '/audit', label: '审计', icon: ScrollText },
   { to: '/server-info', label: '服务器信息', icon: Server },
