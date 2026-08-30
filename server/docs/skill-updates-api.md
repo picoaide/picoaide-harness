@@ -1,25 +1,25 @@
 # Skill 版本检测与自动升级 API 使用说明
 
 > 面向接入方客户端(picoaide-harness feat/enterprise 等)。服务端已上线
-> `GET /api/marketplace/skills/updates`,供客户端登录后检测技能新版本并自动升级。
+> `GET /api/client/v2/marketplace/skills/updates`,供客户端登录后检测技能新版本并自动升级。
 
 ## 1. 接口
 
 ```
-GET /api/marketplace/skills/updates?installed=<name>:<version>,<name>:<version>,...
+GET /api/client/v2/marketplace/skills/updates?installed=<name>:<version>,<name>:<version>,...
 Authorization: Bearer <token>
 ```
 
 | 项 | 说明 |
 |----|------|
-| 鉴权 | Bearer token(员工/管理员登录 `POST /api/auth/login` 获取) |
+| 鉴权 | Bearer token(员工/管理员登录 `POST /api/client/v2/auth/login` 获取) |
 | `installed` | 客户端已安装技能的 `name:version` 列表,逗号分隔,URL 编码;≤100 项 |
 | 幂等 | 纯读操作,无副作用,可任意频次调用 |
 
 ## 2. 请求示例
 
 ```http
-GET /api/marketplace/skills/updates?installed=data-extract:0.1.0,web-search:2.0.0
+GET /api/client/v2/marketplace/skills/updates?installed=data-extract:0.1.0,web-search:2.0.0
 Authorization: Bearer eyJ...
 ```
 
@@ -34,7 +34,7 @@ Authorization: Bearer eyJ...
       "version": "1.0.0",
       "description": "从表格、日志或非结构化文本中提取结构化数据,输出 CSV/JSON",
       "author": "picoaide-admin",
-      "archive_url": "/api/marketplace/skills/data-extract/archive"
+      "archive_url": "/api/client/v2/marketplace/skills/data-extract/archive"
     }
   ]
 }
@@ -48,7 +48,7 @@ Authorization: Bearer eyJ...
 
 ```
 登录成功
-  └─> GET /api/marketplace/skills/updates?installed=<本地已装版本列表>
+  └─> GET /api/client/v2/marketplace/skills/updates?installed=<本地已装版本列表>
         │
         ├─ count=0 ──> 无需升级
         │
@@ -63,7 +63,7 @@ Authorization: Bearer eyJ...
 ### harness 客户端调用方式
 
 harness 的 `plugins/dsh-enterprise` 已注册本地代理 `/api/pico/skills`(prefix),
-`/api/pico/skills/updates?...` 会**自动透传**到网关 `/api/marketplace/skills/updates`,
+`/api/pico/skills/updates?...` 会**自动透传**到网关 `/api/client/v2/marketplace/skills/updates`,
 无需修改代理代码。客户端内直接:
 
 ```ts
@@ -86,6 +86,6 @@ const data = await res.json() // { count, updates: [...] }
 
 | 接口 | 用途 |
 |------|------|
-| `GET /api/marketplace/skills` | 技能目录(全量,含 version) |
-| `GET /api/marketplace/skills/updates` | 版本检测(本接口) |
-| `GET /api/marketplace/skills/:name/archive` | 下载技能包(响应头 `X-Skill-Version` / `X-Skill-Checksum`) |
+| `GET /api/client/v2/marketplace/skills` | 技能目录(全量,含 version) |
+| `GET /api/client/v2/marketplace/skills/updates` | 版本检测(本接口) |
+| `GET /api/client/v2/marketplace/skills/:name/archive` | 下载技能包(响应头 `X-Skill-Version` / `X-Skill-Checksum`) |

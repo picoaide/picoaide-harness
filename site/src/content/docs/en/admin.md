@@ -46,7 +46,7 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 - **Peak/off-peak conversion**: outside the peak windows (idle periods) and when the model has an off-peak discount rate, cost = standard price × discount rate; during peak windows, cost = standard price. DeepSeek's current official policy (from 2026-08 onwards) = peak on Monday-Friday 09:00-12:00, 14:00-18:00; everything else (including weekends) is off-peak, and the off-peak price = peak price × 50%.
 - **Login modes**: switch between `local` / `ldap` / `oidc` / `both` (local+ldap):
   - LDAP: `ldap_url`, `ldap_bind_dn`, `ldap_base_dn`, `ldap_user_filter` (e.g. `(uid=%s)`), `ldap_group_filter` (e.g. `(memberOf=cn=%s)`);
-  - OIDC: `oidc_issuer`, `oidc_redirect_url` (e.g. `https://picoaide.example.com/api/auth/oidc/callback`).
+  - OIDC: `oidc_issuer`, `oidc_redirect_url` (e.g. `https://picoaide.example.com/api/client/v2/auth/oidc/callback`).
 
 ## Usage statistics
 
@@ -54,7 +54,7 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 - **Dimensions**: by user / by model / by date; two measurement modes — cost (money) and tokens — switchable;
 - **Charts**: bar chart (cost/tokens trend), pie chart (model distribution), drill-down (filter user → see their model composition);
 - **Detail**: row-level cost, prompt/completion tokens, request counts; cache-hit billing is reflected in the detail (at the cache price);
-- **Balance**: `GET /api/auth/usage` employee self-service query — remaining quota (quota − used this month; unlimited = null), today/yesterday/month/cumulative tokens and cost, department budget chain.
+- **Balance**: `GET /api/client/v2/auth/usage` employee self-service query — remaining quota (quota − used this month; unlimited = null), today/yesterday/month/cumulative tokens and cost, department budget chain.
 
 ## Marketplace · Skills (marketplace)
 
@@ -66,7 +66,7 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 
 Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved here in a unified way:
 
-- **Read-only queue**: aggregates both domains' pending/approved/rejected, listing author, version and status; operations go through the original domain endpoints (`/api/admin/shared-skills/...`, `/api/admin/agent-presets/...`);
+- **Read-only queue**: aggregates both domains' pending/approved/rejected, listing author, version and status; operations go through the original domain endpoints (`/api/server/admin/shared-skills/...`, `/api/server/admin/agent-presets/...`);
 - **Filtering**: status tabs (pending/approved/rejected/all) + type filter (skills/agents);
 - **Approval actions**: approve / reject (reject requires a reason, shown to employees as "reason for rejection") / delete; **name conflicts**: when the name collides with a marketplace skill, a warning is shown and approve is blocked with 409 (you must first delete/rename the marketplace skill or reject the shared skill);
 - **Quality marking**: `quality` = Official (`official`) / Featured (`featured`) — **only settable when approved**; automatically cleared on reject/pending; mutually exclusive;

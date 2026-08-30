@@ -23,7 +23,7 @@ The desktop client is the product surface employees use every day. It packages t
 ## Chat and Agents
 
 - **Session**: each session has independent context and can specify a workspace (project directory); session listing, search, and recovery are provided by the official Harness semantics;
-- **Models**: the enterprise edition fetches the model list through the server gateway (`/api/config/bootstrap`); model availability and quota are decided server-side;
+- **Models**: the enterprise edition fetches the model list through the server gateway (`/api/client/v2/config/bootstrap`); model availability and quota are decided server-side;
 - **Context management**: sessions can clear/rebuild context at any time; execution details and the message flow follow the official UI;
 - **Permission approval**: when a model calls a risky tool (write files, run commands, operate the browser), it asks the user for confirmation under the upstream permission gate — this is the first gate of "AI only proposes".
 
@@ -145,7 +145,7 @@ Built into the product (vendored community plugin **dsh-memory-evolve**), this i
 ## Settings and Account
 
 - **Settings**: General (language/theme), scheduled jobs, connectors, browser, about & updates, and other sections;
-- **Account page** (enterprise edition): current account, server address, quota/balance (from `/api/auth/usage` — today's/month-to-date accumulated cost, remaining quota), sign out (signing out triggers session release; connector, browser, and scheduled job tokens are all cleared);
+- **Account page** (enterprise edition): current account, server address, quota/balance (from `/api/client/v2/auth/usage` — today's/month-to-date accumulated cost, remaining quota), sign out (signing out triggers session release; connector, browser, and scheduled job tokens are all cleared);
 - **Upgrade badge**: a new-version notice appears at the top right of the session header (blue dot + version number); click to download, with progress shown during download; the tray menu syncs the upgrade status;
 - **Diagnostics export**: tray "Export diagnostics…" generates a `diagnostics-*.zip` (version, profile, logs, env summary, sanitized before output).
 
