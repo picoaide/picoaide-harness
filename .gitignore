@@ -80,3 +80,7 @@ temp/gocache/
 temp/gomodcache/
 temp/xdgcache/
 .tmp-gocache/
+
+# Dead-code/knip analysis artifacts (rebuild per scan round; not source)
+.scan/
+server/.scan-staticcheck.txt
