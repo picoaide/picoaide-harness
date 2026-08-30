@@ -1207,6 +1207,21 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			break
 		}
 		issuer := strings.TrimRight(req.OIDC.Issuer, "/")
+		// §1.2 SSRF 防护: issuer 仅允许 https(或 loopback http), 防内部地址探测。
+		{
+			iu, err := url.Parse(issuer)
+			if err != nil {
+				results["ok"] = false
+				results["message"] = "Issuer 格式错误"
+				break
+			}
+			loopback := iu.Hostname() == "localhost" || iu.Hostname() == "127.0.0.1" || iu.Hostname() == "[::1]"
+			if iu.Scheme != "https" && !(iu.Scheme == "http" && loopback) {
+				results["ok"] = false
+				results["message"] = "Issuer 必须是 https(或 http 回环)"
+				break
+			}
+		}
 		client := &http.Client{Timeout: 10 * time.Second}
 		r, err := client.Get(issuer + "/.well-known/openid-configuration")
 		if err != nil {
