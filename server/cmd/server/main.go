@@ -202,7 +202,21 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	tagline := settings["brand.login.tagline"]
 	welcome := settings["portal.welcome"]
 	subtitle := settings["portal.subtitle"]
-	dlURL := settings["portal.client_download_url"]
+	// 下载链接: 三平台独立 URL;兼容旧单链接 client_download_url(未拆分时
+	// 三个平台都指向它, 方便从旧配置平滑迁移)。
+	dlLinux := settings["portal.client_download_linux"]
+	dlMac := settings["portal.client_download_mac"]
+	dlWin := settings["portal.client_download_win"]
+	legacyDL := settings["portal.client_download_url"]
+	if dlLinux == "" {
+		dlLinux = legacyDL
+	}
+	if dlMac == "" {
+		dlMac = legacyDL
+	}
+	if dlWin == "" {
+		dlWin = legacyDL
+	}
 	dlNote := settings["portal.client_download_note"]
 	enabled := settings["brand.enabled"] == "true"
 	logoURL := ""
@@ -215,14 +229,23 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	if tagline == "" {
 		tagline = "Enterprise AI Gateway"
 	}
-	if dlURL == "" {
-		dlURL = "https://github.com/picoaide/picoaide-harness/releases/latest"
+	// 默认单链接指向官方 Releases(未配置任何平台链接时)。
+	defaultDL := "https://github.com/picoaide/picoaide-harness/releases/latest"
+	if dlLinux == "" {
+		dlLinux = defaultDL
+	}
+	if dlMac == "" {
+		dlMac = defaultDL
+	}
+	if dlWin == "" {
+		dlWin = defaultDL
 	}
 	// 内嵌 JSON 注入(仅静态文本, 无用户输入直接进 HTML——安全)。
 	payload, _ := json.Marshal(map[string]any{
 		"name": loginName, "tagline": tagline, "logo": logoURL,
 		"welcome": welcome, "subtitle": subtitle,
-		"download_url": dlURL, "download_note": dlNote, "admin_url": "/admin/",
+		"download_linux": dlLinux, "download_mac": dlMac, "download_win": dlWin,
+		"download_note": dlNote, "admin_url": "/admin/",
 	})
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -243,6 +266,11 @@ func servePortal(c *gin.Context, db *sql.DB) {
   .btn{display:block;padding:12px;border-radius:10px;font-size:15px;font-weight:600;text-decoration:none}
   .btn-primary{background:var(--accent);color:#fff}
   .btn-outline{border:1px solid #d0d5dd;color:#1a1d24}
+  .downloads{margin-top:20px;display:grid;gap:10px}
+  .downloads .dl-label{font-size:12px;color:#6b7280;text-align:left}
+  .dl-row{display:flex;align-items:center;gap:10px}
+  .dl-row .btn{flex:1;padding:10px}
+  .dl-icon{font-size:16px;line-height:1}
   .note{margin-top:10px;font-size:12px;color:#6b7280}
   footer{margin-top:24px;font-size:12px;color:#9ca3af}
 </style>
@@ -255,7 +283,21 @@ func servePortal(c *gin.Context, db *sql.DB) {
   <div class="welcome">__WELCOME__</div>
   <div class="actions">
     <a class="btn btn-primary" href="__ADMIN__">管理后台</a>
-    <a class="btn btn-outline" href="__DOWNLOAD__">下载客户端</a>
+  </div>
+  <div class="downloads">
+    <div class="dl-label">客户端下载</div>
+    <div class="dl-row">
+      <span class="dl-icon">🐧</span>
+      <a class="btn btn-outline" href="__DL_LINUX__">Linux</a>
+    </div>
+    <div class="dl-row">
+      <span class="dl-icon">🍎</span>
+      <a class="btn btn-outline" href="__DL_MAC__">macOS</a>
+    </div>
+    <div class="dl-row">
+      <span class="dl-icon">🪟</span>
+      <a class="btn btn-outline" href="__DL_WIN__">Windows</a>
+    </div>
   </div>
   <div class="note">__NOTE__</div>
   <footer>PicoAide Harness</footer>
@@ -274,7 +316,9 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	html = repl(html, "__TAGLINE__", htmlEscape(tagline))
 	html = repl(html, "__WELCOME__", htmlEscape(welcome))
 	html = repl(html, "__ADMIN__", "/admin/")
-	html = repl(html, "__DOWNLOAD__", htmlEscape(dlURL))
+	html = repl(html, "__DL_LINUX__", htmlEscape(dlLinux))
+	html = repl(html, "__DL_MAC__", htmlEscape(dlMac))
+	html = repl(html, "__DL_WIN__", htmlEscape(dlWin))
 	html = repl(html, "__NOTE__", htmlEscape(dlNote))
 	_ = payload
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")

@@ -215,12 +215,30 @@ func TestPortalConfig(t *testing.T) {
 	db := useTestDB(t)
 	r := testRouter(db, t.TempDir())
 	sess, csrf := adminSession(t, db)
-	doReq(t, r, "PUT", "/api/server/admin/portal", `{"enabled":true,"welcome":"企业首页","client_download_url":"https://example.com/dl"}`, sess, csrf)
+	doReq(t, r, "PUT", "/api/server/admin/portal", `{"enabled":true,"welcome":"企业首页","client_download_linux":"https://example.com/linux","client_download_mac":"https://example.com/mac","client_download_win":"https://example.com/win"}`, sess, csrf)
 	w := doReq(t, r, "GET", "/api/client/v2/portal", "", "", "")
 	var p map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &p)
-	if p["welcome"] != "企业首页" || p["client_download_url"] != "https://example.com/dl" {
+	if p["welcome"] != "企业首页" ||
+		p["client_download_linux"] != "https://example.com/linux" ||
+		p["client_download_mac"] != "https://example.com/mac" ||
+		p["client_download_win"] != "https://example.com/win" {
 		t.Fatalf("portal = %v", p)
+	}
+}
+
+// 旧单链接(client_download_url)保留读写兼容: 保存后可读回, 不丢配置。
+func TestPortalLegacyDownloadURL(t *testing.T) {
+	db := useTestDB(t)
+	r := testRouter(db, t.TempDir())
+	sess, csrf := adminSession(t, db)
+	doReq(t, r, "PUT", "/api/server/admin/portal", `{"enabled":true,"welcome":"","client_download_url":"https://example.com/legacy"}`, sess, csrf)
+	w := doReq(t, r, "GET", "/api/server/admin/portal", "", sess, csrf)
+	var p map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &p)
+	legacy, _ := p["client_download_url"].(string)
+	if legacy != "https://example.com/legacy" {
+		t.Fatalf("legacy client_download_url lost: %v", p)
 	}
 }
 

@@ -25,9 +25,12 @@ interface BrandCfg {
 
 interface PortalCfg {
   enabled: boolean
+  public: boolean
   welcome: string
   subtitle: string
-  client_download_url: string
+  client_download_linux: string
+  client_download_mac: string
+  client_download_win: string
   client_download_note: string
   landing_path: string
 }
@@ -43,7 +46,9 @@ const DEFAULT_CLIENT_TAGLINE = '企业版'
 const DEFAULT_TITLE = 'PicoAide Harness'
 
 const EMPTY_BRAND: BrandCfg = { enabled: false, login: { display_name: '', tagline: '', welcome: '' }, client: { display_name: '', tagline: '' }, title: '' }
-const EMPTY_PORTAL: PortalCfg = { enabled: true, welcome: '', subtitle: '', client_download_url: '', client_download_note: '', landing_path: '' }
+const EMPTY_PORTAL: PortalCfg = { enabled: true, public: true, welcome: '', subtitle: '', client_download_linux: '', client_download_mac: '', client_download_win: '', client_download_note: '', landing_path: '' }
+// 三平台默认下载地址(与更新链一致: 官方 GitHub Releases)。
+const DEFAULT_DOWNLOAD_URL = 'https://github.com/picoaide/picoaide-harness/releases/latest'
 
 export default function Brand() {
   const [brand, setBrand] = useState<BrandCfg>(EMPTY_BRAND)
@@ -227,9 +232,30 @@ export default function Brand() {
               <Card>
                 <CardHeader><CardTitle className="text-base">门户首页(未登录默认页)</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={portal.public}
+                      onCheckedChange={(v) => setPortal({ ...portal, public: v === true })}
+                    />
+                    <Label htmlFor="portal-public">对外公开(未登录用户可访问;关闭时跳转管理后台登录)</Label>
+                  </div>
                   <Field label="欢迎语标题" value={portal.welcome} onChange={(v) => setPortal({ ...portal, welcome: v })} />
                   <Field label="副标题" value={portal.subtitle} onChange={(v) => setPortal({ ...portal, subtitle: v })} />
-                  <Field label="客户端下载地址" value={portal.client_download_url} onChange={(v) => setPortal({ ...portal, client_download_url: v })} />
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">客户端下载链接(三个平台分别配置;留空=官方 Releases)</Label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[18px]">🐧</span>
+                      <Input value={portal.client_download_linux} placeholder={`Linux: ${DEFAULT_DOWNLOAD_URL}`} onChange={(e) => setPortal({ ...portal, client_download_linux: e.target.value })} />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[18px]">🍎</span>
+                      <Input value={portal.client_download_mac} placeholder={`macOS: ${DEFAULT_DOWNLOAD_URL}`} onChange={(e) => setPortal({ ...portal, client_download_mac: e.target.value })} />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[18px]">🪟</span>
+                      <Input value={portal.client_download_win} placeholder={`Windows: ${DEFAULT_DOWNLOAD_URL}`} onChange={(e) => setPortal({ ...portal, client_download_win: e.target.value })} />
+                    </div>
+                  </div>
                   <div className="space-y-1">
                     <Label className="text-xs text-muted-foreground">下载说明(可选)</Label>
                     <Textarea value={portal.client_download_note} onChange={(e) => setPortal({ ...portal, client_download_note: e.target.value })} />
@@ -355,7 +381,7 @@ function ClientPreview(props: { brand: BrandCfg }) {
   )
 }
 
-/** 门户首页迷你预览: 大卡片(logo+名称+副标题+欢迎语+两个按钮)。 */
+/** 门户首页迷你预览: 大卡片(logo+名称+副标题+欢迎语+三平台下载按钮)。 */
 function PortalPreview(props: { brand: BrandCfg; portal: PortalCfg }) {
   const { brand, portal } = props
   return (
@@ -368,7 +394,23 @@ function PortalPreview(props: { brand: BrandCfg; portal: PortalCfg }) {
         <div className="mt-1 text-[11px] text-muted-foreground">{portal.subtitle || '(副标题)'}</div>
         <div className="mt-4 flex justify-center gap-2">
           <div className="h-9 w-36 rounded-md bg-blue-600 text-white text-[13px] leading-9">管理后台</div>
-          <div className="h-9 w-36 rounded-md border text-[13px] leading-9 text-muted-foreground">下载客户端</div>
+        </div>
+        <div className="mt-4 rounded-md border p-3 text-left">
+          <div className="mb-2 text-[11px] text-muted-foreground">客户端下载</div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[14px]">🐧</span>
+              <div className="flex-1 rounded-md border py-1.5 text-center text-[12px] font-medium">{portal.client_download_linux ? 'Linux' : 'Linux'}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[14px]">🍎</span>
+              <div className="flex-1 rounded-md border py-1.5 text-center text-[12px] font-medium">macOS</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[14px]">🪟</span>
+              <div className="flex-1 rounded-md border py-1.5 text-center text-[12px] font-medium">Windows</div>
+            </div>
+          </div>
         </div>
         {portal.client_download_note && <div className="mt-2 text-[11px] text-muted-foreground">{portal.client_download_note}</div>}
       </div>

@@ -139,13 +139,17 @@ AdminAuth (会话+CSRF) → RequirePermission(perm) (403 FORBIDDEN)
 | 键 | 含义 | 默认 |
 |---|---|---|
 | `portal.enabled` | 启用自定义门户首页 | `true` |
+| `portal.public` | 未认证用户可访问门户(关闭则跳转管理后台登录) | `true` |
 | `portal.welcome` | 欢迎语标题 | 空 |
 | `portal.subtitle` | 副标题 | 空 |
-| `portal.client_download_url` | **客户端下载地址**（GitHub Releases / 内网分发链接） | 官方 Releases URL |
+| `portal.client_download_linux` | **Linux 客户端下载链接** | 官方 Releases URL |
+| `portal.client_download_mac` | **macOS 客户端下载链接** | 官方 Releases URL |
+| `portal.client_download_win` | **Windows 客户端下载链接** | 官方 Releases URL |
+| `portal.client_download_url` | 旧单链接(兼容迁移;三平台未配置时兜底) | 空 |
 | `portal.client_download_note` | 下载说明文字 | 空 |
 | `portal.landing_path` | 登录后默认落地页 | ``（角色默认） |
 
-**客户端下载地址来源**：`client_download_url` 可由管理员填任意 URL（默认 GitHub Releases `https://github.com/picoaide/picoaide-harness/releases/latest`）；门户页展示下载按钮 + 说明。**品牌/门户一致性**：门户页复用 `brand.login.*`（logo/名称/副标题），与登录页同源。
+**客户端下载(2026-09 三平台化)**：门户页渲染 **Linux / macOS / Windows 三个独立下载按钮**，分别取 `client_download_linux/mac/win`；任一未配置时兜底官方 Releases `https://github.com/picoaide/picoaide-harness/releases/latest`；旧 `client_download_url` 保留兼容(读写均保留,未拆分时三平台共用)。**品牌/门户一致性**：门户页复用 `brand.login.*`（logo/名称/副标题），与登录页同源。
 
 ### 2.2 角色权限管理页（新：替换 Users.tsx is_admin switch）
 
