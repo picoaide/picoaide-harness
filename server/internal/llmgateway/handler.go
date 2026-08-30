@@ -147,7 +147,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 			respSecrets = []string{ups[i].APIKey}
 			break
 		}
-		log.Printf("gateway: model %s provider %s failed: %v", strconv.Quote(req.Model), strconv.Quote(ups[i].Name), err)
+		log.Printf("gateway: model %q provider %q failed: %v", req.Model, ups[i].Name, err)
 	}
 	if resp == nil {
 		// C-9: no provider succeeded; the pending usage row can never be
