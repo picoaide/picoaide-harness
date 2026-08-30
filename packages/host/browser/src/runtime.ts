@@ -1023,10 +1023,10 @@ const KEY_VK: Record<string, number> = {
 
 const MASK = '****'
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
-// 审计 2026-08-30 (CodeQL js/polynomial-redos): 原正则 /https?:\/\/[^\s<>"']+/giu
-// 对重复 ')' 等字符存在指数回溯(用户可控 summary 输入)。改为线性检测:
-// ^\S+ 紧邻 "?:?" 前缀的 URL 起点, [^\s<>"')]+ 显式排除 ')' 落入 URL 主体,
-// 尾随标点与 URL 主体用非捕获组一次性绑定, 无嵌套量词无回溯。
+// 审计 2026-08-30 (CodeQL js/polynomial-redos): 原主正则 /https?:\/\/[^\s<>"']+/giu
+// 对重复 ')' 存在指数回溯(用户可控 summary)。改用无嵌套量词的结构:
+// URL 主体显式排除 ')' 与空白/引号([^\s<>"')]+ 线性), 尾随标点用非捕获组
+// 一次性绑定((?:[),.;]*)? 无回溯), 杜绝多项式级输入放大。
 const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
 /** Redact credential-shaped parts of a browser op-log summary (URLs and
@@ -1034,8 +1034,14 @@ const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 export function maskBrowserSummary(summary: string): string {
   return summary.replace(SUMMARY_URL, (raw) => {
     // raw 形如 "https://host/path?x=1),."; 剥离尾随标点后再解析。
-    const trailing = /[),.;]+$/u.exec(raw)?.[0] ?? ''
-    const value = trailing === '' ? raw : raw.slice(0, -trailing.length)
+    // 审计 2026-08-30 (CodeQL js/polynomial-redos): 原 /[),.;]+$/u 仍可能对
+    // 长标点串回溯; 改用字符级循环, 线性时间且无正则状态。
+    let end = raw.length
+    while (end > 0 && (raw[end - 1] === ')' || raw[end - 1] === ',' || raw[end - 1] === '.' || raw[end - 1] === ';')) {
+      end -= 1
+    }
+    const trailing = raw.slice(end)
+    const value = raw.slice(0, end)
     try {
       const url = new URL(value)
       if (url.username !== '') url.username = MASK
