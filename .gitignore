@@ -70,3 +70,4 @@ temp/gopath/
 temp/gocache/
 temp/gomodcache/
 temp/xdgcache/
+.tmp-gocache/
