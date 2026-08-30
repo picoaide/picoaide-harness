@@ -46,10 +46,3 @@ export function useBrand(): BrandConfig | null {
 export function readBrandSync(): BrandConfig | null {
   return current
 }
-
-/** Reset for tests. */
-export function _resetBrandStoreForTest(): void {
-  current = null
-  listeners = new Set()
-  started = false
-}
