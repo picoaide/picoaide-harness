@@ -27,11 +27,6 @@ func newTestAPI(t *testing.T) (*gin.Engine, *sql.DB, func()) {
 	return r, db, cleanup
 }
 
-func tempPath(t *testing.T, name string) string {
-	t.Helper()
-	return fmt.Sprintf("%s/%s", t.TempDir(), name)
-}
-
 func loginToken(t *testing.T, r *gin.Engine, username, password string) string {
 	t.Helper()
 	w, out := doJSON(t, r, "POST", "/api/client/v2/auth/login", fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password), nil)

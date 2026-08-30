@@ -194,20 +194,6 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 // 浏览器里发起登录流程并把自己的身份塞给受害者)。
 const oidcStateCookieName = "picoaide_oidc_state"
 
-// handleOIDCLogin redirects the browser to the IdP authorization URL.
-// 兼容保留:使用第一个/默认 browser provider(oidc)。
-func (a *API) handleOIDCLogin(c *gin.Context) {
-	p := a.browsers["oidc"]
-	if p == nil {
-		p = a.browsers["openid"]
-	}
-	if p == nil {
-		writeError(c, http.StatusNotFound, "NOT_FOUND", "OIDC 未配置")
-		return
-	}
-	a.handleOIDCLoginWith(p)(c)
-}
-
 // handleOIDCLoginWith runs the login flow for a specific browser provider.
 // `?server=<url>` records the initiating client's server address, carried in
 // the callback deep link so the desktop client knows which server to attach.
@@ -250,20 +236,6 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 		})
 		c.Redirect(http.StatusFound, authURL)
 	}
-}
-
-// handleOIDCCallback exchanges the code and redirects the client deep link
-// with a signed-in api token. 兼容保留:用默认/第一个 browser provider。
-func (a *API) handleOIDCCallback(c *gin.Context) {
-	p := a.browsers["oidc"]
-	if p == nil {
-		p = a.browsers["openid"]
-	}
-	if p == nil {
-		writeError(c, http.StatusNotFound, "NOT_FOUND", "OIDC 未配置")
-		return
-	}
-	a.handleOIDCCallbackWith(p)(c)
 }
 
 // handleOIDCCallbackWith runs the callback for a specific browser provider.

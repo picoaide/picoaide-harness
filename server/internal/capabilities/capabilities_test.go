@@ -81,19 +81,6 @@ func doGet(t *testing.T, r *gin.Engine, path string, hdr map[string]string) *htt
 	return w
 }
 
-// reqDo issues an admin PUT/POST with CSRF/cookie headers (e.g. grant calls).
-func reqDo(t *testing.T, r *gin.Engine, adminHdr map[string]string, method, path, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range adminHdr {
-		req.Header.Set(k, v)
-	}
-	r.ServeHTTP(w, req)
-	return w
-}
-
 func TestMergeVersions(t *testing.T) {
 	// 1.0.0 与 1.10.0 的数值感知排序。
 	items := []CapabilityItem{
