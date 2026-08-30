@@ -75,6 +75,8 @@ type ClientBrand struct {
 // PortalConfig 是门户首页配置。
 type PortalConfig struct {
 	Enabled            bool   `json:"enabled"`
+	// Public: 未认证用户是否可访问门户首页(§9; 默认 true)。
+	Public             bool   `json:"public"`
 	Welcome            string `json:"welcome"`
 	Subtitle           string `json:"subtitle"`
 	ClientDownloadURL  string `json:"client_download_url"`
@@ -129,6 +131,7 @@ func (b *BrandConfig) save(db *sql.DB, set func(key, val string) error) error {
 
 func (p *PortalConfig) load(s map[string]string) {
 	p.Enabled = s["portal.enabled"] != "false"
+	p.Public = s["portal.public"] != "false"
 	p.Welcome = s["portal.welcome"]
 	p.Subtitle = s["portal.subtitle"]
 	p.ClientDownloadURL = s["portal.client_download_url"]
@@ -139,6 +142,7 @@ func (p *PortalConfig) load(s map[string]string) {
 func (p *PortalConfig) save(set func(key, val string) error) error {
 	for k, v := range map[string]string{
 		"portal.enabled":              strconv.FormatBool(p.Enabled),
+		"portal.public":               strconv.FormatBool(p.Public),
 		"portal.welcome":              p.Welcome,
 		"portal.subtitle":             p.Subtitle,
 		"portal.client_download_url":  p.ClientDownloadURL,

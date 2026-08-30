@@ -12,9 +12,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type { BrandConfig } from '../brand-sync.ts'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/brand-changed'(brand: BrandConfig | null): void
+  }
+}
 import { AccountSection } from './AccountSection.tsx'
 import { BraceMark, BrandName, BrandBadge } from './Brand.tsx'
-import { startBrandStore } from './brand-store.ts'
+import { startBrandStore, readBrandSync } from './brand-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
 import { en, type EnterpriseKey, zh } from './locales.ts'
 
@@ -52,9 +59,9 @@ const BRAND_CSS = `
 
 /* Hero headline + preview badge text (upstream locale not overridable). */
 [class$="_headlineText"] { font-size: 0; }
-[class$="_headlineText"]::after { content: "PicoAide Harness"; font-size: 26px; line-height: 32px; font-weight: 500; }
+[class$="_headlineText"]::after { content: var(--pico-hero-headline, "PicoAide Harness"); font-size: 26px; line-height: 32px; font-weight: 500; }
 [class$="_previewBadge"] { font-size: 0; }
-[class$="_previewBadge"]::after { content: "企业版"; font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
+[class$="_previewBadge"]::after { content: var(--pico-hero-tagline, "企业版"); font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
 
 /* Skill center trigger hover feedback, matching the Settings trigger. */
 .pico-skill-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }
@@ -84,7 +91,22 @@ const BRAND_CSS = `
 export function apply(ctx: ClientContext): void {
   // 服务端品牌同步(登录后拉取 /api/brand; 登出回退默认)。
   ctx.effect(
-    () => { startBrandStore(ctx); return () => { /* store is global; session events drive updates */ } },
+    () => {
+      startBrandStore(ctx)
+      // v3b §4.2: hero/accent CSS 变量注入(品牌变化时更新)。
+      const applyVars = (brand: BrandConfig | null): void => {
+        const name = brand?.enabled && brand?.client?.display_name ? brand.client.display_name : ''
+        const tagline = brand?.enabled && brand?.client?.tagline ? brand.client.tagline : ''
+        const accent = brand?.enabled && brand?.client?.accent ? brand.client.accent : ''
+        const root = document.documentElement
+        root.style.setProperty('--pico-hero-headline', name || 'PicoAide Harness')
+        root.style.setProperty('--pico-hero-tagline', tagline || '企业版')
+        if (accent) root.style.setProperty('--dsw-alias-brand-primary', accent)
+      }
+      applyVars(readBrandSync())
+      const off = ctx.on('pico/brand-changed', (brand) => applyVars(brand))
+      return () => { off() }
+    },
     'enterprise: brand store',
   )
 
@@ -145,9 +167,15 @@ export function apply(ctx: ClientContext): void {
     'enterprise: account section',
   )
 
+  // v3b §4.2: document.title 跟随品牌(brand.title), 品牌变化时更新。
   ctx.effect(() => {
-    document.title = 'PicoAide Harness'
-    return () => { /* document title resets with the next navigation */ }
+    const apply = (brand: BrandConfig | null): void => {
+      const title = brand?.enabled && brand.title ? brand.title : 'PicoAide Harness'
+      document.title = title
+    }
+    apply(readBrandSync())
+    const off = ctx.on('pico/brand-changed', (brand) => apply(brand))
+    return () => { off() }
   }, 'enterprise: document brand title')
 
   ctx.effect(() => {

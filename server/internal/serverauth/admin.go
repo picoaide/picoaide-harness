@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,6 +121,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换
 	AdminRoute(authed, "GET", "/auth", PermAuthRead, a.getAuthConfig)
 	AdminRoute(authed, "PUT", "/auth", PermAuthWrite, a.setAuthConfig)
+	// v3b §1.2: 测试连接(LDAP bind / OIDC discovery, 不写配置)。
+	AdminRoute(authed, "POST", "/auth/test", PermAuthWrite, a.testAuthConnection)
 }
 
 // AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
@@ -837,6 +840,25 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	// 本地 admin 恒启用:enabled 里没有 local 也要强制加(admin 回退)
 	// (不写回 auth.enabled,仅运行时生效——配置展示保持用户原意)
 	upsert := func(key, val string) error { return serverstore.SetSetting(a.DB, key, val) }
+	// v3b redirect_url 安全(§1.5):浏览器跳转方式的 redirect_url 必须
+	// https(或 loopback http), 防 open redirect / 任意回调劫持。
+	validateRedirect := func(prefix, value string) bool {
+		if strings.TrimSpace(value) == "" {
+			return true // 未配置允许(仅启用时校验必填)
+		}
+		u, err := url.Parse(strings.TrimSpace(value))
+		if err != nil {
+			return false
+		}
+		loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "[::1]"
+		return u.Scheme == "https" || (u.Scheme == "http" && loopback)
+	}
+	for _, kv := range [][2]string{{"oidc", req.OIDC.RedirectURL}, {"openid", req.OpenID.RedirectURL}} {
+		if !validateRedirect(kv[0], kv[1]) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", kv[0]+".redirect_url 必须是 https(或 http 回环)")
+			return
+		}
+	}
 	_ = upsert("auth.mode", req.Mode)
 	_ = upsert("auth.enabled", enabled)
 	// 保存各类配置(独立,互不清空——切到 ldap 不清 openid,反之亦然)
@@ -865,7 +887,24 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		// v3b: 仅客户端登录页隐藏本地账号入口; 管理后台恒本地登录不受影响。
 		_ = upsert("auth.hide_local", strconv.FormatBool(*req.HideLocal))
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "enabled:"+enabled)
+		// v3b 字段级审计(§2.5):记录本次变更的键集合(值脱敏, 不落密钥)。
+	var changed []string
+	for _, k := range []string{"auth.mode", "auth.enabled"} {
+		changed = append(changed, k)
+	}
+	if req.LDAP.ServerURL != "" || req.LDAP.BindDN != "" || req.LDAP.BindPassword != MaskSecret && req.LDAP.BindPassword != "" {
+		changed = append(changed, "ldap.*")
+	}
+	if req.OIDC.Issuer != "" || req.OIDC.ClientID != "" || req.OIDC.RedirectURL != "" || req.OIDC.ClientSecret != MaskSecret && req.OIDC.ClientSecret != "" {
+		changed = append(changed, "oidc.*")
+	}
+	if req.OpenID.Issuer != "" || req.OpenID.ClientID != "" || req.OpenID.RedirectURL != "" || req.OpenID.ClientSecret != MaskSecret && req.OpenID.ClientSecret != "" {
+		changed = append(changed, "openid.*")
+	}
+	if req.HideLocal != nil {
+		changed = append(changed, "auth.hide_local")
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "changed:"+strings.Join(changed, ","))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1118,4 +1157,73 @@ func (a *AdminAPI) setUserDepartment(c *gin.Context) {
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_dept", u.Username+" → "+strings.Join(names, ","))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// testAuthConnection 测试认证提供方连通性(v3b §1.2, 不写配置):
+//   - ldap: 用配置的 bind_dn/密码做一次 bind
+//   - oidc/openid: 拉取 issuer 的 /.well-known/openid-configuration
+// 返回逐项结果; 失败仅报告该方式, 不中断其他。
+func (a *AdminAPI) testAuthConnection(c *gin.Context) {
+	var req struct {
+		Type string `json:"type"` // ldap | oidc | openid
+		LDAP struct {
+			ServerURL    string `json:"server_url"`
+			BindDN       string `json:"bind_dn"`
+			BindPassword string `json:"bind_password"`
+			BaseDN       string `json:"base_dn"`
+		} `json:"ldap"`
+		OIDC struct {
+			Issuer string `json:"issuer"`
+		} `json:"oidc"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	results := gin.H{}
+	switch req.Type {
+	case "ldap":
+		prov := &LDAPProvider{ServerURL: req.LDAP.ServerURL, BindDN: req.LDAP.BindDN, BindPassword: req.LDAP.BindPassword, BaseDN: req.LDAP.BaseDN}
+		if err := prov.Configure(map[string]string{
+			"server_url": req.LDAP.ServerURL, "bind_dn": req.LDAP.BindDN,
+			"bind_password": req.LDAP.BindPassword, "base_dn": req.LDAP.BaseDN,
+		}); err != nil {
+			results["ok"] = false
+			results["message"] = "配置不完整: " + err.Error()
+			break
+		}
+		if err := prov.TestConnection(); err != nil {
+			results["ok"] = false
+			results["message"] = err.Error()
+		} else {
+			results["ok"] = true
+			results["message"] = "LDAP 连接成功"
+		}
+	case "oidc", "openid":
+		if req.OIDC.Issuer == "" {
+			results["ok"] = false
+			results["message"] = "缺少 Issuer"
+			break
+		}
+		issuer := strings.TrimRight(req.OIDC.Issuer, "/")
+		client := &http.Client{Timeout: 10 * time.Second}
+		r, err := client.Get(issuer + "/.well-known/openid-configuration")
+		if err != nil {
+			results["ok"] = false
+			results["message"] = "无法连接 Issuer: " + err.Error()
+			break
+		}
+		defer r.Body.Close()
+		if r.StatusCode != 200 {
+			results["ok"] = false
+			results["message"] = fmt.Sprintf("Issuer 返回 %d", r.StatusCode)
+			break
+		}
+		results["ok"] = true
+		results["message"] = req.Type + " discovery 正常"
+	default:
+		writeError(c, http.StatusBadRequest, "VALIDATION", "type 必须是 ldap|oidc|openid")
+		return
+	}
+	c.JSON(http.StatusOK, results)
 }

@@ -135,6 +135,8 @@ export default function App() {
   const [baseURL, setBaseURL] = useState('')
   const [adminName, setAdminName] = useState('')
   const [meUser, setMeUser] = useState<MeUser | null>(null)
+  // v3b §5.2: webadmin 自身品牌跟随(登录后从 /api/brand 拉取)。
+  const [brand, setBrand] = useState<{ login?: { display_name?: string; logo_url?: string; tagline?: string }; client?: { display_name?: string; accent?: string } } | null>(null)
   // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
   const [mobileNav, setMobileNav] = useState(false)
 
@@ -146,11 +148,16 @@ export default function App() {
 
   useEffect(() => {
     me().then(
-      (body) => {
+      async (body) => {
         setAuthed(true)
         const u = body?.user as MeUser | undefined
         setMeUser(u ?? null)
         setAdminName(u?.display_name || u?.username || '管理员')
+        // 品牌跟随: 公开端点(登录前也可用), 失败忽略(默认品牌)。
+        try {
+          const b = await request('/api/brand') as { enabled?: boolean; login?: { display_name?: string; logo_url?: string; tagline?: string } }
+          setBrand(b?.enabled ? b : null)
+        } catch { /* default brand */ }
       },
       () => setAuthed(false)
     )
@@ -213,7 +220,7 @@ export default function App() {
               </svg>
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">PicoAide</div>
+              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">{brand?.login?.display_name || 'PicoAide'}</div>
               <div className="text-[10px] font-medium text-muted-foreground">Admin Console</div>
             </div>
             {/* 移动端关闭按钮 */}

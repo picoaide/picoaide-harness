@@ -14,6 +14,14 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  // v3b §5.2: 登录页品牌跟随(公开端点)。
+  const [brand, setBrand] = useState<{ display_name?: string; logo_url?: string; tagline?: string } | null>(null)
+
+  useEffect(() => {
+    fetch('/api/brand').then((r) => r.json()).then((d: any) => {
+      if (d?.enabled && d.login) setBrand(d.login)
+    }).catch(() => { /* default */ })
+  }, [])
 
   useEffect(() => {
     // 管理后台只允许本地账户: 无方式选择器, 直接聚焦用户名。
@@ -40,6 +48,9 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
       <div className="w-full max-w-[420px] rounded-xl border border-border bg-white p-6 shadow-[0_8px_30px_rgba(15,17,21,0.06)] sm:p-8">
         <div className="mb-6 text-center">
           {/* 品牌 mark:黑 tile(DSH 客户端一致) */}
+          {brand?.logo_url ? (
+            <img src={brand.logo_url} alt="logo" className="mx-auto mb-4 h-14 w-14 rounded-lg object-contain" />
+          ) : (
           <div className="brand-tile mx-auto mb-4 h-14 w-14">
             <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
               <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
@@ -51,7 +62,8 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               </g>
             </svg>
           </div>
-          <h1 className="text-[22px] font-bold tracking-tight text-foreground">PicoAide 管理后台</h1>
+          )}
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">{brand?.display_name || 'PicoAide'} 管理后台</h1>
           <p className="mt-1.5 text-[13px] text-muted-foreground">Enterprise AI Gateway · Admin Console</p>
           <p className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
             <KeyRound className="h-3 w-3" />

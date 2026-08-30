@@ -2,6 +2,8 @@ export interface Session {
   serverURL: string
   username: string
   token: string
+  /** RBAC role from the server login response (v3b §4.4); undefined = 未返回. */
+  role?: string
 }
 
 export interface BootstrapModel {
