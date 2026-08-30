@@ -18,6 +18,7 @@ export default defineConfig([
       index: 'src/index.ts',
       invariant: 'src/invariant.ts',
       'auth-gate': 'src/auth-gate.ts',
+      'brand-sync': 'src/brand-sync.ts',
       'gateway-model': 'src/gateway-model.ts',
       'error-reporting': 'src/error-reporting.ts',
       'skill-telemetry': 'src/skill-telemetry.ts',
