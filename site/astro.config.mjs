@@ -45,7 +45,15 @@ export default defineConfig({
         },
         {
           label: '开发',
-          items: [{ label: '插件开发', slug: 'plugin-development' }],
+          items: [
+            { label: '插件开发', slug: 'plugin-development' },
+            { label: '插件生态', slug: 'plugin-ecosystem' },
+            { label: 'API 参考', slug: 'api-reference' },
+          ],
+        },
+        {
+          label: '架构',
+          items: [{ label: '系统架构', slug: 'architecture' }],
         },
         {
           label: '支持',

@@ -1,0 +1,15 @@
+used  	ws	scripts/real-env-cron-audit.mjs	=> packages/client/better-sidebar/package.json,packages/client/better-sidebar/src/index.ts,packages/client/better-sidebar/src/client/browser.ts,packages/client/better-sidebar/src/client/Sidebar.tsx,packages/client/better-sidebar/src/client/TerminalView.tsx,packages/client/better-sidebar/src/context-types.ts
+used  	ws	scripts/real-env-cron-flow.mjs	=> packages/client/better-sidebar/package.json,packages/client/better-sidebar/src/index.ts,packages/client/better-sidebar/src/client/browser.ts,packages/client/better-sidebar/src/client/Sidebar.tsx,packages/client/better-sidebar/src/client/TerminalView.tsx,packages/client/better-sidebar/src/context-types.ts
+used  	ws	scripts/real-env-verify.mjs	=> packages/client/better-sidebar/package.json,packages/client/better-sidebar/src/index.ts,packages/client/better-sidebar/src/client/browser.ts,packages/client/better-sidebar/src/client/Sidebar.tsx,packages/client/better-sidebar/src/client/TerminalView.tsx,packages/client/better-sidebar/src/context-types.ts
+UNUSED	REQUIRED_UNPACKED_RUNTIME_ENTRIES	scripts/verify-packaged-runtime.ts
+UNUSED	REQUIRED_UNPACKED_PACKAGE_SPECIFIERS	scripts/verify-packaged-runtime.ts
+UNUSED	SIDEBAR_MIN	src/client/layout-state.ts
+UNUSED	SIDEBAR_MAX	src/client/layout-state.ts
+UNUSED	DETAILS_DEFAULT	src/client/layout-state.ts
+UNUSED	DETAILS_MIN	src/client/layout-state.ts
+UNUSED	DETAILS_MAX	src/client/layout-state.ts
+UNUSED	CENTER_MIN	src/client/layout-state.ts
+UNUSED	MAX_DIAGNOSTIC_EVIDENCE_BYTES	src/diagnostic-export.ts
+UNUSED	DIAGNOSTIC_EXPORT_TIMEOUT_MS	src/diagnostic-export.ts
+used  	DESKTOP_SHELL_ENVIRONMENT_KEYS	src/shell-environment.ts	=> packages/host/desktop/tests/package.spec.ts
+UNUSED	DESKTOP_SHUTDOWN_TIMEOUT_MS	src/shutdown.ts

@@ -1,0 +1,22 @@
+Unused devDependencies (5)
+@deepseek-ai/dsh-client-ui-commands       package.json:65:6
+@deepseek-ai/dsh-client-ui-input-trigger  package.json:66:6
+@deepseek-ai/dsh-client-ui-primitives     package.json:67:6
+@types/react                              package.json:79:6
+react                                     package.json:81:6
+Unlisted dependencies (2)
+@deepseek-ai/schemastery  lib/types/index.d.ts:24:15
+@deepseek-ai/schemastery  src/index.ts:25:15        
+Unused exports (12)
+BROWSER_WINDOW_DEFAULT             src/electron-adapter.ts:187:14
+isIPv4Loopback           function  src/loopback.ts:12:17         
+isLoopbackAddress        function  src/loopback.ts:20:17         
+isLoopbackHostname       function  src/loopback.ts:29:17         
+DEFAULT_TIMEOUT_MS                 src/runtime.ts:26:14          
+DEFAULT_LOAD_TIMEOUT_MS            src/runtime.ts:28:14          
+DEFAULT_MAX_TABS                   src/runtime.ts:30:14          
+maskBrowserSummary       function  src/runtime.ts:1034:17        
+SCREENSHOT_MAX_WIDTH               src/shots.ts:11:14            
+SCREENSHOT_QUALITY                 src/shots.ts:13:14            
+SNAPSHOT_LIMIT                     src/snapshot.ts:13:14         
+TEXT_LIMIT                         src/snapshot.ts:15:14         

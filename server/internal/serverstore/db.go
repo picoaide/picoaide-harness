@@ -20,11 +20,6 @@ const (
 	DriverPG DriverName = "pg"
 )
 
-// currentDriver is set by Open; migrate.go and dialect helpers consult it to
-// emit backend-specific SQL. It is process-global because the codebase passes
-// *sql.DB around (no context carrier) and opens exactly one DB per process.
-var currentDriver = DriverPG
-
 // DBConfig selects the backend for Open.
 type DBConfig struct {
 	Driver DriverName // "pg" (default)
@@ -95,7 +90,6 @@ func openPG(dsn string) (*sql.DB, error) {
 	db.SetMaxOpenConns(200)
 	db.SetMaxIdleConns(50)
 	db.SetConnMaxLifetime(30 * time.Minute)
-	currentDriver = DriverPG
 	return db, nil
 }
 

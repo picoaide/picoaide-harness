@@ -1,6 +1,6 @@
-# PicoAide-Next 系统架构
+# PicoAide Harness 系统架构
 
-> 企业内网 AI 办公智能体服务端与管理系统。本文描述系统总体架构、进程模型、数据流与安全设计,与 `AGENTS.md` 保持一致;端点/表名以实际代码为准。
+> 企业内网 AI 办公智能体服务端与管理系统。本文描述系统总体架构、进程模型、数据流与安全设计;端点/表名以实际代码为准(API 全量端点见 03-api-reference.md)。
 >
 > 服务端是 PicoAide Harness 平台的企业管控面;桌面客户端(`packages/host/*`)与 webadmin 均经本服务端接口工作。本文聚焦**服务端 + webadmin 管理端**。
 
@@ -48,7 +48,7 @@
 - 上游密钥 AES-GCM(`enc:v1:`,master key 文件),永不落明文;API token 只存哈希。
 - 严格默认拒绝:商城资源未授权一律 404;授权对象 = 用户或部门组(NOCASE),admin 恒全量不落表;授权变更审计。
 - 改密/降权/禁用自动吊销全部 API token(与用户更新同事务)。
-- 管理端 session 24h + CSRF;登录限流(10 次/5min/键)。
+- 管理端 session 12h(硬上限 + 60min 空闲滑动过期)+ CSRF;登录限流(10 次/5min/键,双桶)。
 - 错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`;健康探针 `/healthz`。
 - 接入方 TLS:登录页/客户端拒绝非 HTTPS 远程地址(TOFU 由接入方实现)。
 
@@ -58,7 +58,7 @@
 cmd/server/            # 服务端入口(--bootstrap-admin 等)
 internal/              # router(路由唯一真源)/serverauth/llmgateway/marketplace/agentshare/sharedskills/capabilities/connectors/brand/bootstrap/telemetry/serverstore/util
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
-docs/superpowers/      # 架构设计 + 实施计划(权威文档)
+docs/superpowers/      # 历史设计文档(2026-08 前)
 scripts/               # install-server.sh(oh-my-zsh 式一键部署)+ deploy.sh(容器化部署生命周期)+ mock-upstream.go(假上游)
 data/                  # 服务端运行时数据(0700,gitignore)
 ```

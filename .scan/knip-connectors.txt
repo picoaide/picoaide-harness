@@ -1,0 +1,15 @@
+Unused devDependencies (2)
+@deepseek-ai/dsh-cordis-host-runner     package.json:71:6
+@deepseek-ai/dsh-host-plugin-inventory  package.json:72:6
+Unused exports (4)
+registerDeviceProbe  function  src/auth.ts:39:17    
+isIPv4Loopback       function  src/loopback.ts:12:17
+isLoopbackAddress    function  src/loopback.ts:20:17
+isLoopbackHostname   function  src/loopback.ts:29:17
+Unused exported types (6)
+DeviceProbe           type       src/auth.ts:32:13  
+AuthProbe             interface  src/auth.ts:353:18 
+TokenField            type       src/auth.ts:416:15 
+ConnectorAuthMode     type       src/types.ts:12:13 
+ServerSideAuthConfig  interface  src/types.ts:60:18 
+ConnectorStatus       type       src/types.ts:105:13

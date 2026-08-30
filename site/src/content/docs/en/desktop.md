@@ -16,8 +16,10 @@ The desktop client is the product surface employees use every day. It packages t
 
 | Concept | Description |
 |---|---|
-| **Profile** | A combination of a DSH bundle, dependencies, and patches; the product **runs the fixed `desktop` profile**, with no tray switcher and no profile selector |
+| **Profile** | A combination of a DSH bundle, dependencies, and patches; the product **runs the fixed `desktop` profile**, with no tray switcher and no profile selector. A custom configuration (patch) that deliberately redirects a persistence root follows that profile's own settings |
 | **Advanced mode** | The product always uses advanced mode: it injects the desktop-owned frame, layout, and native material without changing the upstream Web carrier; Linux uses an ordinary system window frame (no Mica / hidden-inset) while the layout stays in advanced mode |
+
+Restart the app after plugin changes so the new bundle enters the Loader composition.
 
 ## Chat and Agents
 
@@ -153,7 +155,8 @@ Built into the product (vendored community plugin **dsh-memory-evolve**), this i
 - Upgrade source: GitHub Releases API (`releases/latest`); parses `tag_name` and strips the `v` prefix;
 - **SHA-256 verification**: downloads `SHA256SUMS.txt` and checks each installer against it (compatible with the `./` prefix); on failure, the package is **not installed**;
 - Platform assets: macOS universal DMG (compatible with Intel and Apple Silicon), Windows NSIS installer, Linux AppImage (`x86_64`) + deb; **Linux does not auto-download installers** (update download is macOS / Windows only) — Linux users download the new installer manually;
-- Interaction: background checks don't block startup; a new version asks for confirmation before downloading; a download/install failure doesn't break the current version (under network fluctuation, continues downloading the confirmed version);
+- Interaction: background checks don't block startup; network errors, non-200 responses, invalid versions, and versions not newer than the installed one stay silent; a new version asks for confirmation before downloading; cancelling never hits the counted download endpoint; a download/install failure doesn't break the current version (under network fluctuation, continues downloading the confirmed version);
+- Tray **Check for Updates…** is a manual check: shows a result even when already current, and asks to retry when the check fails;
 - Unsigned note: Windows/Linux installers are auto-published unsigned by CI (macOS release builds are signed + notarized); Windows SmartScreen may warn about an "unknown publisher" — verify against the SHA256SUMS.txt shipped in the Release.
 
 ## Terminal and Plugin Management
@@ -171,6 +174,10 @@ Use an explicit `--profile <name>` to target a profile. The app ships its own DS
 ## Troubleshooting
 
 - **App only goes to the tray**: right-click the tray → "Export diagnostics…" → generates and opens `diagnostics-*.zip`;
-- **App keeps crashing**: run the installed binary with the `--export-diagnostics` flag (Windows example: `& "$env:LOCALAPPDATA\Programs\PicoAide Harness\PicoAide Harness.exe" --export-diagnostics`); this command doesn't start the Host, and outputs the absolute path of the diagnostics ZIP;
+- **App keeps crashing**: run the installed binary with the `--export-diagnostics` flag (Windows example: `& "$env:LOCALAPPDATA\Programs\PicoAide Harness\PicoAide Harness.exe" --export-diagnostics`); this command doesn't start the Host, and outputs the absolute path of the diagnostics ZIP; `dsh-desktop --export-diagnostics` works the same after an npm install of the launcher;
+- **Diagnostic archive contents**: recent logs, local Crashpad `.dmp` files, the active-run marker, and `system-info.txt` (Desktop / Electron / Node / platform / architecture versions); logs mask recognized credentials, but local paths, workspace IDs, session IDs, and crash-time memory fragments may remain — review before public upload and route sensitive dumps through a trusted channel;
 - **Port-fixed conflict**: set `dsh-desktop.port` back to `0` (random) or use a free port;
+- **Window disappeared**: check the system tray first; closing the window is not quitting;
+- **Plugin missing**: confirm the command targeted the intended profile (the app uses the fixed `desktop`) and restart the app;
+- **No update notification**: background failures are silent; use the manual tray check to see the result;
 - **Developer debugging**: the CDP debug port (9223) being occupied by a residual instance causes reuse of the wrong instance — `pkill` the old instance before troubleshooting (use the bracket trick to avoid killing the shell).

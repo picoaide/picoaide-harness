@@ -178,12 +178,6 @@ func costOfAt(now time.Time, promptTokens, completionTokens, cacheTokens int64, 
 	return base * offpeakFactor(now, offpeak, windows)
 }
 
-// costOf computes the cost for a usage row right now (no peak windows —
-// used only by callers that resolve windows themselves).
-func costOf(promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64) float64 {
-	return costOfAt(time.Now(), promptTokens, completionTokens, 0, inputPer1M, outputPer1M, 0, offpeak, nil)
-}
-
 // RecordUsage inserts a chat usage row and returns its id.
 func RecordUsage(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64) (int64, error) {
 	return RecordUsageKind(db, userID, model, promptTokens, completionTokens, "chat")

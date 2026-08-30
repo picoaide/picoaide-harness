@@ -6,7 +6,7 @@ English | [中文](2026-08-15-desktop-advanced-shell.zh.md)
 
 ## Problem
 
-DSH Desktop needs a native-material presentation on macOS and Windows without editing the pinned upstream checkout or copying the official Web application. The presentation changes several axes together: native window construction, root/sidebar slot ownership, the `layout` service, and document-level theme projection. Applying only part of that set, or changing it inside a running renderer, would leave Host composition and Client presentation inconsistent.
+PicoAide Harness needs a native-material presentation on macOS and Windows without editing the pinned upstream checkout or copying the official Web application. The presentation changes several axes together: native window construction, root/sidebar slot ownership, the `layout` service, and document-level theme projection. Applying only part of that set, or changing it inside a running renderer, would leave Host composition and Client presentation inconsistent.
 
 Mode selection must use one durable source whether a user chooses the application tray command or edits the settings file by hand, and every change must cross the same restart boundary.
 
@@ -80,6 +80,6 @@ Window-option and Electron-runtime tests verify macOS hidden-inset vibrancy, Win
 
 ## Consequences
 
-DSH Desktop gains a native-material macOS and Windows presentation without modifying the upstream submodule, copying the Web application, or introducing a second plugin or transport system. Tray changes and manual `settings.yaml` edits converge on one durable value, and a restart creates a coherent Host, Client, and native-window generation.
+PicoAide Harness gains a native-material macOS and Windows presentation without modifying the upstream submodule, copying the Web application, or introducing a second plugin or transport system. Tray changes and manual `settings.yaml` edits converge on one durable value, and a restart creates a coherent Host, Client, and native-window generation.
 
 The desktop package now owns real Client presentation code and must track the published slot, theme, and service contracts it uses. Advanced mode deliberately has a different presentation-row composition from browser Web and compatibility mode. Native appearance also depends on operating-system support and must be verified on real target machines; Linux remains compatibility-only.

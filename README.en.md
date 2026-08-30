@@ -56,7 +56,7 @@ Current release installers support Windows x64, macOS (universal DMG, both Apple
 | macOS | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
 | Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x86_64.AppImage) | Grant execute permission and run |
 
-Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) (each release ships a `SHA256SUMS.txt`; verifying before install is recommended). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [user guide](docs/user-guide.en.md) and [FAQ](docs/faq.en.md) for plugin commands, platform details, and troubleshooting.
+Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) (each release ships a `SHA256SUMS.txt`; verifying before install is recommended). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [Desktop Client](https://www.picoaide.com/en/docs/desktop/) and [FAQ](https://www.picoaide.com/en/docs/faq/) on the official wiki for plugin commands, platform details, and troubleshooting.
 
 > Note: the Windows installers and Linux packages published automatically by CI are not code-signed yet (the macOS release builds are signed/notarized). Windows SmartScreen may show an "unknown publisher" warning on first run — fetch `SHA256SUMS.txt` from the release and verify the digest before running; the same applies to Linux packages.
 
@@ -92,26 +92,27 @@ Installers and SHA-256 digests are also available from [GitHub Releases](https:/
 
 ## Documentation
 
-Ordinary users can start with the [user guide](docs/user-guide.en.md); developer docs are only needed for extension or maintenance.
+Ordinary users should start at the [official wiki](https://www.picoaide.com/en/docs/); developer docs are only needed for extension or maintenance.
 
-### User documentation
-
-| Goal | Entry |
-| --- | --- |
-| Installation and daily use | [User guide](docs/user-guide.en.md) |
-| Platform, environment, and usage boundaries | [FAQ](docs/faq.en.md) |
-| Why this project exists | [Why PicoAide Harness](docs/why-desktop.en.md) |
-| Full documentation index | [Docs index](docs/README.md) |
-
-### Developer and maintainer documentation
+### User documentation (official wiki)
 
 | Goal | Entry |
 | --- | --- |
-| Write plain or Desktop plugins | [Plugin development](docs/plugin-development.en.md) |
+| Installation and daily use | [Desktop Client](https://www.picoaide.com/en/docs/desktop/) · [Getting Started](https://www.picoaide.com/en/docs/getting-started/) |
+| Platform, environment, and usage boundaries | [FAQ](https://www.picoaide.com/en/docs/faq/) |
+| Why this project exists | [Product Philosophy](https://www.picoaide.com/en/docs/philosophy/) |
+| System architecture and API | [System Architecture](https://www.picoaide.com/en/docs/architecture/) · [API Reference](https://www.picoaide.com/en/docs/api-reference/) |
+
+### Developer and maintainer documentation (repo)
+
+| Goal | Entry |
+| --- | --- |
+| Write plain or Desktop plugins | [Plugin development (wiki)](https://www.picoaide.com/en/docs/plugin-development/) |
 | Unified plugin contract discussion | [DSH Community Fabric Draft](community/fabric/README.md) |
-| Desktop plugin capabilities | [Desktop plugin services](packages/host/desktop/docs/plugin-services.zh.md) |
-| How the desktop application works | [Architecture](docs/architecture.en.md) |
+| Desktop plugin capabilities | [Desktop plugin services contract](packages/host/desktop/docs/plugin-services.md) |
+| How the desktop application works | [Architecture](docs/architecture.en.md) (maintainer view) |
 | Package-level build and release details | [`dsh-plugin-desktop/README.md`](packages/host/desktop/README.md) |
+| Full documentation division of labor | [Docs index](docs/README.en.md) |
 
 ## Plugin ecosystem
 

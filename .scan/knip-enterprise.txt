@@ -1,0 +1,23 @@
+Unused dependencies (3)
+@deepseek-ai/dsh-skill             package.json:92:6
+@deepseek-ai/dsh-skill-filesystem  package.json:93:6
+@deepseek-ai/dsh-tool-skill        package.json:94:6
+Unused devDependencies (3)
+@deepseek-ai/dsh-cordis-host-runner     package.json:114:6
+@deepseek-ai/dsh-host-plugin-inventory  package.json:115:6
+@picoaide/dsh-connectors                package.json:118:6
+Unused exports (12)
+PRESET_ID_PATTERN                  src/agent-preset-install.ts:27:14 
+COMPOSITION_FILE                   src/agent-preset-install.ts:30:14 
+METADATA_FILE                      src/agent-preset-install.ts:33:14 
+MAX_PRESET_META_LEN                src/agent-preset-install.ts:36:14 
+readPresetMeta           function  src/agent-preset-install.ts:71:23 
+assertArchiveSafe                  src/agent-preset-install.ts:159:10
+posixNormalize           function  src/archive-util.ts:35:17         
+_resetBrandStoreForTest  function  src/client/brand-store.ts:51:17   
+resolveClientName        function  src/client/Brand.tsx:148:17       
+resolveClientLogo        function  src/client/Brand.tsx:153:17       
+loadFingerprints         function  src/server-connector/tls.ts:33:17 
+clearFingerprints        function  src/server-connector/tls.ts:49:17 
+Unused exported types (1)
+PresetMeta  interface  src/agent-preset-install.ts:39:18

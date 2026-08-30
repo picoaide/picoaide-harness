@@ -6,13 +6,13 @@ Status: implemented
 
 ## Problem
 
-DSH Desktop 需要保留可供审查的 DeepSeek Harness 官方精确源码，同时让桌面产品独立演进。若把上游源码作为普通文件跟踪，桌面提交就能改写上游实现，代码归属也会变得模糊。共享同一个包管理图还会把上游的 pnpm 规则与桌面产品的 Yarn 发行流程混在一起。
+PicoAide Harness 需要保留可供审查的 DeepSeek Harness 官方精确源码，同时让桌面产品独立演进。若把上游源码作为普通文件跟踪，桌面提交就能改写上游实现，代码归属也会变得模糊。共享同一个包管理图还会把上游的 pnpm 规则与桌面产品的 Yarn 发行流程混在一起。
 
 ## Decision
 
 [`deepseek-harness/`](../../../../deepseek-harness/) 是 Git 子模块，固定到 [`upstream.json`](../../../../upstream.json) 记录的官方仓库和精确提交。桌面分支把该子模块视为只读内容。更新上游时，在独立提交中同时修改 gitlink 与元数据。
 
-外层 README 文件和资源由产品仓库拥有，并保留 `anywhere-labs/deepseek-harness-desktop` 已有的 DSH Desktop 落地页；这些内容不从官方源码子模块派生。Desktop package 的初始化与发行文档属于 [`dsh-plugin-desktop/README.md`](../../../../dsh-plugin-desktop/README.md)；规划中的社区互操作 contract 属于 [`dsh-community-fabric/README.zh.md`](../../../../dsh-community-fabric/README.zh.md)。
+外层 README 文件和资源由产品仓库拥有，并保留 `anywhere-labs/deepseek-harness-desktop` 已有的 PicoAide Harness 落地页；这些内容不从官方源码子模块派生。Desktop package 的初始化与发行文档属于 [`dsh-plugin-desktop/README.md`](../../../../dsh-plugin-desktop/README.md)；规划中的社区互操作 contract 属于 [`dsh-community-fabric/README.zh.md`](../../../../dsh-community-fabric/README.zh.md)。
 
 外层仓库是使用 `node_modules` linker 的 Yarn 4 工作区。自有 workspace 成员是 [`dsh-plugin-desktop`](../../../../dsh-plugin-desktop/) 和 [`dsh-community-fabric`](../../../../dsh-community-fabric/)。Fabric 从私有文档初始化工程开始：在社区 Draft 拥有经过评审的 contract 与一致性证据前，不提供 runtime 入口、SDK、正式 schema 或 DSH bundle。上游 checkout 按照自己的[包管理器决策](../../../../deepseek-harness/.agents/notes/implemented/process/2026-06-16-pnpm-over-yarn.zh.md)保持为独立的 pnpm 工作区。根目录的 `upstream:*` 脚本通过 Yarn portable shell 进入子模块，再由 Corepack 调用上游固定的 pnpm 版本。
 
@@ -38,6 +38,6 @@ DSH Desktop 需要保留可供审查的 DeepSeek Harness 官方精确源码，�
 
 ## Consequences
 
-桌面改动有三个边界明确的自有 package tree，官方 checkout 可以与其远端提交直接比较。外层落地页展示 DSH Desktop，Desktop README 负责应用初始化与发行说明，Fabric README 负责规划中的社区 contract 边界，Market README 负责规划中的市场边界。产品安装与检查可由外层 Yarn lockfile 复现，上游验证则继续使用自己的 pnpm lockfile。
+桌面改动有三个边界明确的自有 package tree，官方 checkout 可以与其远端提交直接比较。外层落地页展示 PicoAide Harness，Desktop README 负责应用初始化与发行说明，Fabric README 负责规划中的社区 contract 边界，Market README 负责规划中的市场边界。产品安装与检查可由外层 Yarn lockfile 复现，上游验证则继续使用自己的 pnpm lockfile。
 
 克隆时必须初始化子模块，贡献者也需要维护两套有意隔离的包管理器缓存。GitHub 公开修订与 npm 发布 family 可能不对应，因此源码 pin 更新和运行时 family 更新需要分别提供验证证据。

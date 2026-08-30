@@ -1,0 +1,18 @@
+Unused exports (11)
+ErrorBoundary   class     src/App.tsx:66:14                  
+default         function  src/components/chart-lazy.tsx:40:16
+badgeVariants             src/components/ui/badge.tsx:27:17  
+buttonVariants            src/components/ui/button.tsx:44:18 
+CardFooter                src/components/ui/card.tsx:52:28   
+DialogPortal              src/components/ui/dialog.tsx:68:18 
+DialogOverlay             src/components/ui/dialog.tsx:68:32 
+DialogTrigger             src/components/ui/dialog.tsx:68:47 
+DialogClose               src/components/ui/dialog.tsx:68:62 
+hasPerm         function  src/lib/rbac.ts:15:17              
+visibleFor      function  src/lib/rbac.ts:43:17              
+Unused exported types (3)
+BadgeProps   interface  src/components/ui/badge.tsx:21:18 
+ButtonProps  interface  src/components/ui/button.tsx:30:18
+NavItem      interface  src/lib/rbac.ts:33:18             
+Duplicate exports (1)
+ChartLazy|default  src/components/chart-lazy.tsx

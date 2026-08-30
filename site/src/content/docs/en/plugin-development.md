@@ -3,12 +3,12 @@ title: Plugin Development
 description: 'How to develop plugins for PicoAide Harness: everything is a plugin, the two client-side/server-side forms, slot composition and constraints.'
 ---
 
-Plugins are extension packages that add capabilities to DSH — models, tools, interfaces, and workflows can all be made into plugins. **PicoAide Harness does not fork or modify the upstream source; everything is a plugin composition**: the desktop shell itself (window, tray, terminal, updates, profile) is a legitimate DSH plugin, taking the same official Cordis composition path as third-party plugins.
+Plugins are extension packages that add capabilities to DSH — models, tools, interfaces, and workflows can all be made into plugins. **PicoAide Harness does not fork or modify the upstream source; everything is a plugin composition**: the desktop shell itself (window, tray, updates, the fixed `desktop` profile) is a legitimate DSH plugin, taking the same official Cordis composition path as third-party plugins.
 
 ## Plugin Mechanism Overview
 
 - **Upstream Holder**: official capabilities such as agent, model, tool, session, settings, webServer, and subprocess run as-is at a pinned version;
-- **Desktop Host Services**: window, tray, profile, terminal, and updates; the third-party contract is documented in `packages/host/desktop/docs/plugin-services.md` (the `dsh-plugin-desktop` root entry plus subpaths such as `./desktop-home`, `./diagnostics`, `./updates`; the `desktopRuntime` service is for Desktop's own rows only);
+- **Desktop Host Services**: window, tray, and updates; the third-party contract is documented in the repository at `packages/host/desktop/docs/plugin-services.md` ([link](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs)) — the `dsh-plugin-desktop` root entry plus subpaths such as `./desktop-home`, `./diagnostics`, `./updates`, and the `desktopRuntime.registerTrayItem` tray registration;
 - **Web Client**: the official Web UI plus third-party browser interfaces, working through the loopback carrier and not calling Electron directly;
 - **Native runtime**: Electron BrowserWindow, system tray, and file/network/installer adapters — `desktopRuntime` is for use only by Desktop's own rows, **not a third-party API**.
 
@@ -65,6 +65,9 @@ The server is modularized under `server/internal/` (serverauth / llmgateway / ma
 ## More Resources
 
 - [Repository: full plugin development doc](../docs/plugin-development.md) (repo docs/)
-- [Desktop plugin service contract](../docs/plugin-services.md) (`packages/host/desktop/docs/plugin-services.zh.md`)
+- [Plugin ecosystem manifesto](./plugin-ecosystem)
+- [Desktop plugin service contract (repo)](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs/plugin-services.md)
+- [Community Fabric RFC (repo)](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/README.md)
+- [System Architecture](./architecture)
 - [Architecture overview](../docs/architecture.md)
 - [Community Fabric (community interoperability RFC)](../community/fabric/README.zh.md)

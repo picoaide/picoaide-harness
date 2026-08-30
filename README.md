@@ -56,7 +56,7 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 | macOS | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-mac.dmg) | 打开 DMG，将 PicoAide Harness 拖入 Applications |
 | Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x86_64.AppImage) | 授予执行权限后运行 |
 
-也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要（每个 Release 附 `SHA256SUMS.txt`，安装前建议校验）。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见[用户指南](docs/user-guide.md)与[常见问题](docs/faq.md)。
+也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要（每个 Release 附 `SHA256SUMS.txt`，安装前建议校验）。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见官网 [桌面客户端](https://www.picoaide.com/docs/desktop/)与[常见问题](https://www.picoaide.com/docs/faq/)。
 
 > 说明：CI 自动发布的 Windows 安装程序与 Linux 安装包暂未签名（macOS 正式发布版经签名/公证）。首次运行 Windows 安装包时 SmartScreen 可能提示"未知发布者"，请先在 Releases 下载 `SHA256SUMS.txt` 核对后再运行；Linux 安装包同理。
 
@@ -92,26 +92,27 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 ## 文档
 
-普通用户从[用户指南](docs/user-guide.md)开始即可；开发者文档只在需要扩展或维护时才需要阅读。
+普通用户直接从[官网 Wiki](https://www.picoaide.com/docs/)开始即可；开发者文档只在需要扩展或维护时才需要阅读。
 
-### 用户文档
-
-| 目标 | 入口 |
-| --- | --- |
-| 安装和日常使用 | [用户指南](docs/user-guide.md) |
-| 快速确认平台、环境和使用边界 | [常见问题](docs/faq.md) |
-| 了解项目为什么存在 | [为什么做 PicoAide Harness](docs/why-desktop.md) |
-| 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
-
-### 开发者与维护者文档
+### 用户文档（官网）
 
 | 目标 | 入口 |
 | --- | --- |
-| 编写普通或 Desktop 插件 | [插件开发](docs/plugin-development.md) |
+| 安装和日常使用 | [桌面客户端](https://www.picoaide.com/docs/desktop/) · [快速开始](https://www.picoaide.com/docs/getting-started/) |
+| 快速确认平台、环境和使用边界 | [常见问题](https://www.picoaide.com/docs/faq/) |
+| 了解项目为什么存在 | [产品哲学](https://www.picoaide.com/docs/philosophy/) |
+| 系统架构与 API | [系统架构](https://www.picoaide.com/docs/architecture/) · [API 参考](https://www.picoaide.com/docs/api-reference/) |
+
+### 开发者与维护者文档（仓库）
+
+| 目标 | 入口 |
+| --- | --- |
+| 编写普通或 Desktop 插件 | [插件开发（官网）](https://www.picoaide.com/docs/plugin-development/) |
 | 参与统一插件 contract 讨论 | [DSH Community Fabric Draft](community/fabric/README.zh.md) |
-| 了解桌面插件可以使用的能力 | [桌面插件接口说明](packages/host/desktop/docs/plugin-services.zh.md) |
-| 了解桌面应用如何工作 | [架构说明](docs/architecture.md) |
+| 了解桌面插件可以使用的能力 | [桌面插件服务 contract](packages/host/desktop/docs/plugin-services.zh.md) |
+| 了解桌面应用如何工作 | [架构说明](docs/architecture.md)（维护者视角） |
 | 查阅包级构建与发布细节 | [`dsh-plugin-desktop/README.md`](packages/host/desktop/README.md) |
+| 查看全部文档分工 | [文档索引](docs/README.md) |
 
 ## 插件生态
 

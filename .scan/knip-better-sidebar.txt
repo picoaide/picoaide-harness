@@ -1,0 +1,29 @@
+Unused files (1)
+scripts/package-registry.mjs
+Unused dependencies (2)
+@codemirror/search  package.json:127:6
+rxjs                package.json:134:6
+Unused devDependencies (21)
+@deepseek-ai/cosmokit                      package.json:143:6
+@deepseek-ai/dsh-agent-default-model       package.json:145:6
+@deepseek-ai/dsh-client-locale             package.json:152:6
+@deepseek-ai/dsh-client-ui-attachment      package.json:154:6
+@deepseek-ai/dsh-client-ui-conversation    package.json:155:6
+@deepseek-ai/dsh-client-ui-input-trigger   package.json:156:6
+@deepseek-ai/dsh-compaction                package.json:162:6
+@deepseek-ai/dsh-host-directory-picker     package.json:167:6
+@deepseek-ai/dsh-jobs                      package.json:171:6
+@deepseek-ai/dsh-native-command            package.json:175:6
+@deepseek-ai/dsh-sandbox                   package.json:176:6
+@deepseek-ai/dsh-sandbox-policy            package.json:177:6
+@deepseek-ai/dsh-session-projection-cache  package.json:182:6
+@deepseek-ai/dsh-session-query             package.json:183:6
+@deepseek-ai/dsh-session-stats             package.json:184:6
+@deepseek-ai/dsh-skill                     package.json:187:6
+@deepseek-ai/dsh-subagent                  package.json:190:6
+@deepseek-ai/dsh-token-meter               package.json:193:6
+@deepseek-ai/dsh-user-questions            package.json:198:6
+@deepseek-ai/dsh-workspace                 package.json:199:6
+@playwright/test                           package.json:201:6
+Unlisted dependencies (1)
+uuid/package.json  tsdown.config.ts:235:29
