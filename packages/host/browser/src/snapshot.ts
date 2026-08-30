@@ -141,7 +141,7 @@ export async function extractText(
 ): Promise<string> {
   const expression = selector === undefined || selector.trim() === ''
     ? `(document.body ? document.body.innerText : '')`
-    : `(() => { const el = document.querySelector(${JSON.stringify(selector)}); return el ? (el.innerText || el.textContent || '') : ''; })()`
+    : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); return el ? (el.innerText || el.textContent || '') : ''; })()`
   const result = await send<{ result?: { value?: unknown }, exceptionDetails?: unknown }>('Runtime.evaluate', {
     expression,
     returnByValue: true,

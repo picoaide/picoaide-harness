@@ -232,10 +232,15 @@ function autoFixMermaid(source: string): string | null {
       if (
         !title.startsWith('"') &&
         !title.startsWith('[') &&
-        /[（）()！？!?，。；：、""''【】《》]/.test(title)
+        // 审计 2026-08-30 (CodeQL js/regex/duplicate-in-character-class):
+        // 原字符类混入 ASCII 与全角重复项, 去重后语义不变。
+        /[（）()！?，。；：、""''【】《》]/.test(title)
       ) {
         changed = true
-        return `${sub[1]}"${title.replace(/"/g, '\\"')}"`
+        // 审计 2026-08-30 (CodeQL js/incomplete-sanitization): 转义必须覆盖
+        // 反斜杠与双引号——否则 title 含 `\` 时 `\"` 转义失效, mermaid 标签
+        // 可被注入折行/语法破坏(模型原文控制 title)。
+        return `${sub[1]}"${title.replace(/[\\"]/g, (ch) => ch === '\\' ? '\\\\' : '\\"')}"`
       }
       return line
     }
