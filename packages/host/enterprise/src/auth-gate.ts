@@ -311,7 +311,14 @@ const LOGIN_HTML = `<!DOCTYPE html>
       if (res.ok) { location.replace('/' + location.search); return }
       var data = await res.json().catch(function () { return {} })
       var raw = String(data.error && data.error.message ? data.error.message : (data.error || ''))
-      err2.textContent = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
+      var msg = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
+      // 开放问题2: auditor 拒绝时提供「打开管理后台」入口。
+      if (raw.toLowerCase().indexOf('auditor_not_allowed') >= 0) {
+        var server = document.getElementById('server').value.trim()
+        err2.innerHTML = '审计账号不可登录客户端，请使用管理后台<br><a href="' + esc(server) + '/admin/" style="color:var(--accent);font-size:13px;text-decoration:underline">打开管理后台 ↗</a>'
+      } else {
+        err2.textContent = msg
+      }
     } catch (e5) {
       err2.textContent = '网络错误，请检查服务端地址后重试'
     } finally {

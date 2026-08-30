@@ -53,13 +53,21 @@ func EnsureMasterKey(dataDir string) ([]byte, error) {
 		}
 		return nil, err
 	}
+	// defer 确保任何路径都关闭句柄(unhandled-writable-file-close 修复);
+	// 成功路径显式检查关闭错误。
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 	if _, err := f.Write(key); err != nil {
-		f.Close()
 		return nil, err
 	}
 	if err := f.Close(); err != nil {
 		return nil, err
 	}
+	closed = true
 	masterKeyFile = path
 	return key, nil
 }

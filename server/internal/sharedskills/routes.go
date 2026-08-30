@@ -358,8 +358,9 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		// path-injection 防护(审计 2026-08-30 CodeQL go/path-injection):
 		// name/version 来自 URL 参数, safeName 只做字符串拼接; 此处补一道
 		// SafePathSegment 校验, 非法段直接跳过文件删除(DB 行删除不受影响)。
-		if util.SafePathSegment(name) && util.SafePathSegment(version) {
-			_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
+		safe := safeName(name, version)
+		if safe != "" && util.SafePathSegment(name) && util.SafePathSegment(version) {
+			_ = os.Remove(filepath.Join(cacheDir, safe))
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "shared_skill_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -902,6 +903,13 @@ func adminUsername(c *gin.Context) string {
 	return u.Username
 }
 
+// safeName 构造归档文件名; 严格白名单(CodeQL path-injection sanitizer):
+// name/version 仅允许 [A-Za-z0-9._-], 非法则返回空串(调用方跳过文件操作)。
+var safeSeg = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 func safeName(name, version string) string {
+	if !safeSeg.MatchString(name) || !safeSeg.MatchString(version) {
+		return ""
+	}
 	return fmt.Sprintf("%s-%s.tar.gz", name, version)
 }
