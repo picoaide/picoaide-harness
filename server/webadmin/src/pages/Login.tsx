@@ -3,49 +3,26 @@ import { login } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
-import { User, Lock, Loader2, KeyRound, Network, ShieldCheck, LogOut } from 'lucide-react'
+import { User, Lock, Loader2, KeyRound } from 'lucide-react'
 
-// 登录页 — DSH 风格;认证方式独立选择(local/ldap/openid/oidc),按后台启用显示
-interface AuthMethod {
-  name: string
-  configured: boolean
-}
-
-const METHOD_META: Record<string, { label: string; desc: string; icon: any }> = {
-  local: { label: '本地账号', desc: '用户名 + 密码', icon: KeyRound },
-  ldap: { label: 'LDAP', desc: '企业目录认证', icon: Network },
-  openid: { label: 'OpenID', desc: '浏览器跳转登录', icon: ShieldCheck },
-  oidc: { label: 'OIDC', desc: '浏览器跳转登录', icon: ShieldCheck },
-}
+// 管理后台登录页 — v3b: 仅本地账号密码。
+// SSO(OIDC/OpenID)与 LDAP 一律不进管理后台: 后台是本地账户唯一入口,
+// 与员工客户端登录面完全隔离(服务端 AuthenticateConfiguredAdmin local-only)。
 
 export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
-  const [methods, setMethods] = useState<AuthMethod[]>([])
-  const [method, setMethod] = useState('local')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // 登录前拉取启用的认证方式(未认证端点 /api/admin/auth/methods)
   useEffect(() => {
-    fetch('/api/admin/auth/methods')
-      .then((r) => r.json())
-      .then((d) => {
-        const ms: AuthMethod[] = (d?.methods ?? []).filter((m: AuthMethod) => m?.name)
-        setMethods(ms)
-        if (ms.length > 0) setMethod(ms[0].name)
-      })
-      .catch(() => setMethods([{ name: 'local', configured: true }]))
+    // 管理后台只允许本地账户: 无方式选择器, 直接聚焦用户名。
+    const el = document.getElementById('admin-username')
+    if (el) el.focus()
   }, [])
-
-  const current = methods.find((m) => m.name === method)
-  const isPassword = method === 'local' || method === 'ldap'
-  const isBrowser = method === 'openid' || method === 'oidc'
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    if (!current?.configured) return
-    if (!isPassword) return
     setBusy(true)
     setError('')
     try {
@@ -56,12 +33,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     } finally {
       setBusy(false)
     }
-  }
-
-  // 浏览器跳转登录(OpenID/OIDC)
-  function browserLogin() {
-    if (!current?.configured) return
-    window.location.href = `/api/auth/${method}/login`
   }
 
   return (
@@ -82,77 +53,34 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           </div>
           <h1 className="text-[22px] font-bold tracking-tight text-foreground">PicoAide 管理后台</h1>
           <p className="mt-1.5 text-[13px] text-muted-foreground">Enterprise AI Gateway · Admin Console</p>
+          <p className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
+            <KeyRound className="h-3 w-3" />
+            仅限本地账户登录（SSO/LDAP 不适用于管理后台）
+          </p>
         </div>
 
-        {/* 认证方式列表(按后台启用情况显示) */}
-        {methods.length > 1 && (
-          <div className="mb-5 grid grid-cols-2 gap-2">
-            {methods.map((m) => {
-              const meta = METHOD_META[m.name] ?? { label: m.name, desc: '', icon: KeyRound }
-              const I = meta.icon
-              const active = m.name === method
-              return (
-                <button
-                  key={m.name}
-                  type="button"
-                  disabled={!m.configured}
-                  onClick={() => { setMethod(m.name); setError('') }}
-                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors ${
-                    active
-                      ? 'border-primary/50 bg-accent'
-                      : m.configured
-                        ? 'hover:bg-muted'
-                        : 'cursor-not-allowed opacity-50'
-                  }`}
-                >
-                  <I className="h-4 w-4 shrink-0 text-primary" />
-                  <span className="min-w-0">
-                    <span className="block truncate text-[13px] font-medium">{meta.label}</span>
-                    <span className="block truncate text-[10px] text-muted-foreground">{m.configured ? meta.desc : '未配置'}</span>
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        )}
-
-        {isPassword && (
-          <form onSubmit={submit} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="username" className="text-[13px] text-foreground">用户名</Label>
-              <div className="relative">
-                <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input id="username" className="pl-9" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus placeholder="请输入用户名" />
-              </div>
+        <form onSubmit={submit} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="admin-username" className="text-[13px] text-foreground">用户名</Label>
+            <div className="relative">
+              <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input id="admin-username" className="pl-9" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus placeholder="请输入用户名" />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password" className="text-[13px] text-foreground">密码</Label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input id="password" type="password" className="pl-9" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="请输入密码" />
-              </div>
-            </div>
-            {error && (
-              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div>
-            )}
-            <Button type="submit" className="h-10 w-full text-[15px] font-semibold" disabled={busy || !current?.configured}>
-              {busy ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />登录中…</>) : '登 录'}
-            </Button>
-          </form>
-        )}
-
-        {isBrowser && (
-          <div className="space-y-4">
-            {!current?.configured && (
-              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">
-                该认证方式未配置,请联系管理员
-              </div>
-            )}
-            <Button className="h-10 w-full text-[15px] font-semibold" disabled={!current?.configured} onClick={browserLogin}>
-              <LogOut className="mr-2 h-4 w-4 rotate-180" />跳转 {METHOD_META[method]?.label ?? method} 登录
-            </Button>
           </div>
-        )}
+          <div className="space-y-1.5">
+            <Label htmlFor="admin-password" className="text-[13px] text-foreground">密码</Label>
+            <div className="relative">
+              <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input id="admin-password" type="password" className="pl-9" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="请输入密码" />
+            </div>
+          </div>
+          {error && (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div>
+          )}
+          <Button type="submit" className="h-10 w-full text-[15px] font-semibold" disabled={busy}>
+            {busy ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />登录中…</>) : '登 录'}
+          </Button>
+        </form>
 
         <p className="mt-6 text-center text-[11px] text-muted-foreground">© 2026 PicoAide · Enterprise Internal Deployment</p>
       </div>
