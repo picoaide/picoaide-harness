@@ -106,7 +106,7 @@ docker buildx build --platform linux/amd64 \
 
 | Job | 环境 | 内容 |
 |-----|------|------|
-| `server` | ubuntu, Go 1.26(go.mod)+ Node 24 | `go vet` + `go test ./...`(postgres:16-alpine service,`PG_DSN_TEST`+`TZ=Asia/Shanghai`)+ `make build-server` + deploy 脚本语法/compose 校验 |
+| `server` | ubuntu, Go 1.26(go.mod)+ Node 24 | `go vet` + `go test ./...`(postgres:18-alpine service,`PG_DSN_TEST`+`TZ=Asia/Shanghai`)+ `make build-server` + deploy 脚本语法/compose 校验 |
 | `desktop-linux` / `desktop-windows` / `desktop-macos` | Node 24 | 桌面客户端 build/typecheck/test + 三平台产物(AppImage+deb / NSIS / DMG) |
 | `release` | tag push | GitHub Release 发布三平台资产 + SHA256SUMS |
 

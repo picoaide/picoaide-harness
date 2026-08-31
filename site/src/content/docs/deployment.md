@@ -18,7 +18,7 @@ description: 了解 PicoAide Harness 的企业内网部署形态：容器化服�
 - **服务端**：Linux x64 服务器；单二进制即可运行（`picoaide-server`，gin），也支持 Docker Compose 容器化（Caddy 反代、私有网段固定 IP、非 root uid 10001、数据 bind mount）；
 - **数据库**：
   
-  - **内置 PostgreSQL**：`DB_MODE=pg`，Compose 内 postgres:16-alpine 容器；
+  - **内置 PostgreSQL**：`DB_MODE=pg`，Compose 内 postgres:18-alpine 容器；
   - **外部 PostgreSQL**：`DB_MODE=pg-external` + `PG_DSN`（企业已有 PG 统一运维）；
 
 

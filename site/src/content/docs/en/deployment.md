@@ -18,7 +18,7 @@ This article describes how PicoAide Harness is deployed in an enterprise intrane
 - **Server**: Linux x64 server; a single binary is enough to run (`picoaide-server`, gin), and Docker Compose containerization is also supported (Caddy reverse proxy, fixed IP on a private subnet, non-root uid 10001, data bind mount);
 - **Database**:
 
-  - **Built-in PostgreSQL**: `DB_MODE=pg`, a postgres:16-alpine container within Compose;
+  - **Built-in PostgreSQL**: `DB_MODE=pg`, a postgres:18-alpine container within Compose;
   - **External PostgreSQL**: `DB_MODE=pg-external` + `PG_DSN` (for enterprises that already run PG centrally);
 
 
