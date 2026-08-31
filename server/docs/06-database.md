@@ -26,7 +26,7 @@
 
 ### groups + user_groups(0001, 0017 起为部门实体)
 `groups(id, name 唯一, parent_id(0=顶层), leader_id, description, budget_money)`;`user_groups(user_id, group_id, PK 复合)`。组用于技能/共享内容授权与部门预算(本地账号无组映射,以用户级授权兜底)。
-- 0017 部门树:parent_id 任意层级、leader_id 主管;员工单部门归属(`users/:id/department`);权限继承 = 归属部门+祖先链 + 主管部门子树 + 隐式「全员」组。
+- 0017 部门树:parent_id 任意层级、leader_id 主管;员工部门归属(`users/:id/department`,2026-09 起支持多部门:`group_ids` 数组);权限继承 = 归属部门+祖先链 + 主管部门子树 + 隐式「全员」组。
 - 0024 新增 `budget_money REAL`(部门月度金额预算,元):约束该部门树(含全部子部门)成员当月费用合计;员工生效预算 = 归属部门 + 祖先链(链上全部预算都约束,父部门 = 子树封顶);任一超限网关 429。费用聚合 `DeptMonthlyCost`/`DeptMonthlyCostBatch`(部门树 SUM(cost))。
 
 ### settings(0001)

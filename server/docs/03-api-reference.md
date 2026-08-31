@@ -49,7 +49,7 @@
 | POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
 | PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认;改密/降权/禁用自动吊销 token) |
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
-| GET/PUT | `/api/server/admin/users/:id/department` | 员工单部门归属 |
+| PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。预算 = 全部所属部门+祖先链同时生效,任一超限即拦(429) |
 | GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
 | GET/PUT | `/api/server/admin/departments`、`/departments/:id` | 部门树 CRUD(含预算 `budget_money`、parent/leader) |
 | GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |

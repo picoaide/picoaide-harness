@@ -589,10 +589,38 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 	if !found {
 		t.Fatal("alice missing from user list")
 	}
-	// 多部门 set 端点已移除(单部门模型)
+	// 历史遗留:PUT /users/:id/groups 端点不存在(多部门经 department 的 group_ids)
 	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/groups", aliceID), `{"groups":["研发部"]}`, hdr)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("legacy multi-group endpoint = %d, want 404", w.Code)
+	}
+	// 2026-09 多部门支持:建第二个部门,一次设置两个(研发部+市场部)
+	mktID, err := serverstore.CreateDepartment(db, "市场部", 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID),
+		fmt.Sprintf(`{"group_ids":[%d,%d]}`, devID, mktID), hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set multi departments: %d %s", w.Code, w.Body.String())
+	}
+	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/groups", aliceID), "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get groups: %d", w.Code)
+	}
+	gs := out["groups"].([]any)
+	if len(gs) != 2 || gs[0] != "市场部" || gs[1] != "研发部" {
+		t.Fatalf("multi groups = %v, want [市场部 研发部]", gs)
+	}
+	// 旧单部门 group_id 向后兼容:重新设回研发部
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID), fmt.Sprintf(`{"group_id":%d}`, devID), hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("legacy single group_id: %d", w.Code)
+	}
+	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/server/admin/users/%d/groups", aliceID), "", hdr)
+	gs = out["groups"].([]any)
+	if len(gs) != 1 || gs[0] != "研发部" {
+		t.Fatalf("after legacy single = %v, want [研发部]", gs)
 	}
 	// 不存在的部门 → 400
 	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d/department", aliceID), `{"group_id":9999}`, hdr)

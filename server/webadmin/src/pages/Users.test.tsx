@@ -39,16 +39,18 @@ describe('Users 用户管理页', () => {
     expect(screen.getByText('员工')).toBeInTheDocument()
   })
 
-  it('员工部门归属:打开对话框从部门树单选并保存', async () => {
+  it('员工部门归属:打开对话框从部门树多选并保存(group_ids)', async () => {
     render(<Users />)
     await screen.findByText('alice')
     fireEvent.click(screen.getAllByRole('button', { name: '部门' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     expect(dialog.getByText(/从部门树选择归属/)).toBeInTheDocument()
+    // alice 归属研发部 → 复选框已勾选;保存提交 group_ids 数组
+    expect(dialog.getByRole('checkbox', { name: /研发部/ })).toBeChecked()
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
       '/api/server/admin/users/1/department',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ group_id: 1 }) }),
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ group_ids: [1] }) }),
     )
   })
 
@@ -184,7 +186,7 @@ describe('Users 用户管理页', () => {
     expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/users/1', expect.objectContaining({ method: 'PUT' }))
   })
 
-  it('多组用户:部门对话框提示替换语义(中4)', async () => {
+  it('多部门用户:部门对话框显示全部当前归属并提示预算同时生效', async () => {
     mockRequest.mockImplementation(async (path: string) => {
       if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 3, username: 'multi', is_admin: false, status: 1, groups: ['研发部', '前端组'] }], total: 1, page: 1, size: 20 }
@@ -196,8 +198,11 @@ describe('Users 用户管理页', () => {
     await screen.findByText('multi')
     fireEvent.click(screen.getByRole('button', { name: '部门' }))
     const dialog = within(await screen.findByRole('dialog'))
-    expect(await dialog.findByText(/该用户当前归属 2 个组/)).toBeInTheDocument()
+    expect(await dialog.findByText(/当前归属 2 个部门/)).toBeInTheDocument()
     expect(dialog.getByText(/保存将替换该用户全部部门归属/)).toBeInTheDocument()
+    // 多部门复选框被勾选(研发部 + 前端组)
+    expect(dialog.getByRole('checkbox', { name: /研发部/ })).toBeChecked()
+    expect(dialog.getByRole('checkbox', { name: /前端组/ })).toBeChecked()
   })
 })
 
