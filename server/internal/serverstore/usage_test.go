@@ -1102,18 +1102,30 @@ func TestUserTotalUsageCost(t *testing.T) {
 }
 
 // TestUserUsageSummary: 汇总结构(本月+今日+昨日+总计)一次取齐。
+// 跨月安全(2026-09):昨日与今日跨月时(每月 1 号),月度统计只含今日
+// 记录(昨日属上月),断言随实际日期计算。
 func TestUserUsageSummary(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
+	now := time.Now()
 	// 今天
 	id, _ := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
-	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
-	// 昨天(若月初则跨月,仅检查字段存在与 cost 口径)
+	setCreatedAt(t, db, id, now.Format("2006-01-02")+" 09:00:00")
+	// 昨天(可能跨月:8/31 23:00)
 	id2, _ := RecordUsage(db, uid, "priced-model", 500_000, 0)
-	setCreatedAt(t, db, id2, time.Now().AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+	setCreatedAt(t, db, id2, now.AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+
+	yesterday := now.AddDate(0, 0, -1)
+	sameMonth := yesterday.Year() == now.Year() && yesterday.Month() == now.Month()
+	monthlyUsage := int64(1_000_000)
+	monthlyCost := 2.0
+	if sameMonth {
+		monthlyUsage = 1_500_000
+		monthlyCost = 3.0
+	}
 
 	s, err := UserUsageSummary(db, uid)
 	if err != nil {
@@ -1128,8 +1140,8 @@ func TestUserUsageSummary(t *testing.T) {
 	if s.TotalUsage != 1_500_000 || s.TotalCost != 3.0 {
 		t.Fatalf("total = %d/%v", s.TotalUsage, s.TotalCost)
 	}
-	if s.MonthlyUsage != s.TotalUsage || s.MonthlyCost != s.TotalCost {
-		t.Fatalf("monthly=%d/%v vs total=%d/%v(同日应一致)", s.MonthlyUsage, s.MonthlyCost, s.TotalUsage, s.TotalCost)
+	if s.MonthlyUsage != monthlyUsage || s.MonthlyCost != monthlyCost {
+		t.Fatalf("monthly=%d/%v vs want %d/%v", s.MonthlyUsage, s.MonthlyCost, monthlyUsage, monthlyCost)
 	}
 }
 
