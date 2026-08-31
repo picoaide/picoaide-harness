@@ -21,6 +21,13 @@ const baseInfo = {
 describe('ServerInfo update check', () => {
   beforeEach(() => {
     mockRequest.mockReset()
+    // 默认 concurrency 返回空(其他用例不受影响)
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/concurrency')) {
+        return { checked_at: '2026-08-31T02:00:00Z', models: [] }
+      }
+      return {}
+    })
   })
 
   afterEach(() => {
@@ -80,5 +87,43 @@ describe('ServerInfo update check', () => {
 
     await waitFor(() => expect(screen.getByText(/2\.5\.1/)).toBeInTheDocument())
     expect(screen.queryByText(/发现新版本/)).not.toBeInTheDocument()
+  })
+
+  it('shows per-model concurrency with goal utilization', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/concurrency')) {
+        return {
+          checked_at: '2026-08-31T02:00:00Z',
+          models: [
+            { model: 'deepseek-v4-flash', current: 120, peak_90d: 2500, target: 2500 },
+            { model: 'deepseek-v4-pro', current: 30, peak_90d: 480, target: 500 },
+          ],
+        }
+      }
+      return { ...baseInfo, version: '2.5.1', update_check: null }
+    })
+
+    render(<ServerInfo />)
+
+    expect(await screen.findByText(/模型并发/)).toBeInTheDocument()
+    expect(screen.getByText('deepseek-v4-flash')).toBeInTheDocument()
+    expect(screen.getByText('deepseek-v4-pro')).toBeInTheDocument()
+    // flash 2500/2500 = 100% 触发 ⚠;pro 480/500 = 96%
+    expect(screen.getByText('100% ⚠')).toBeInTheDocument()
+    expect(screen.getByText('96%')).toBeInTheDocument()
+  })
+
+  it('renders model table even when concurrency endpoint fails (degrade)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/concurrency')) {
+        throw new Error('concurrency unavailable')
+      }
+      return { ...baseInfo, version: '2.5.1', update_check: null }
+    })
+
+    render(<ServerInfo />)
+
+    await waitFor(() => expect(screen.getByText(/2\.5\.1/)).toBeInTheDocument())
+    expect(screen.queryByText(/模型并发/)).not.toBeInTheDocument()
   })
 })

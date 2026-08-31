@@ -37,6 +37,9 @@ type Handlers struct {
 	ListChannelsAdmin gin.HandlerFunc
 	SyncOneAdmin      gin.HandlerFunc
 	SyncAllAdmin      gin.HandlerFunc
+	// ConcurrencyStatus 返回各模型当前并发(内存快照)+ 90 天历史峰值(DB),
+	// 供服务器信息页展示与扩容申请(2026-08-31)。
+	ConcurrencyStatus gin.HandlerFunc
 }
 
 // NewHandlers 返回网关 handler 集合(db 注入)。
@@ -51,9 +54,13 @@ func NewHandlers(db *sql.DB) *Handlers {
 		client: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
 		// streaming client: headers (first byte) must arrive within the same
 		// window as the non-stream client, but the body streams unbounded.
-		sse: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
-		rl:  newRateLimiter(),
+		sse:  &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
+		rl:   newRateLimiter(),
+		conc: newConcurrencyMeter(),
 	}
+	// 启动按模型并发采样(2026-08-31):每 15s 落库峰值。
+	// db 为 nil(测试路由树)时内部跳过。
+	api.startConcurrencySampler(nil)
 	return &Handlers{
 		ChatCompletions:   api.handleChatCompletions,
 		Embeddings:        api.handleEmbeddings,
@@ -74,5 +81,8 @@ func NewHandlers(db *sql.DB) *Handlers {
 		ListChannelsAdmin: func(c *gin.Context) { listChannelsAdmin(c) },
 		SyncOneAdmin:      func(c *gin.Context) { syncOneAdmin(c, db) },
 		SyncAllAdmin:      func(c *gin.Context) { syncAllAdmin(c, db) },
+		ConcurrencyStatus: func(c *gin.Context) {
+			concurrencyStatus(c, db, api.conc)
+		},
 	}
 }

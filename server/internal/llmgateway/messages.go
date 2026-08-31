@@ -267,6 +267,10 @@ func (a *API) handleMessages(c *gin.Context) {
 		return
 	}
 
+	// 并发计量(2026-08-31):Anthropic 协议也计入对应模型并发。
+	done := a.conc.begin(req.Model)
+	defer done()
+
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
 	// kind=search 与其他渠道区分,且被 CleanupPendingUsage 兜底清理。

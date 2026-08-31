@@ -4,7 +4,7 @@ import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { PageHeader } from '../components/page-header'
-import { Server, Cpu, MemoryStick, HardDrive, Database, Activity, RefreshCw, ShieldCheck, Sparkles, ExternalLink } from 'lucide-react'
+import { Server, Cpu, MemoryStick, HardDrive, Database, Activity, RefreshCw, ShieldCheck, Sparkles, ExternalLink, Gauge } from 'lucide-react'
 
 interface SysInfo {
   uptime_sec: number
@@ -35,6 +35,18 @@ interface SysInfo {
   } | null
 }
 
+// 2026-08-31: 按模型并发状态(网关内存快照 + 90 天峰值 DB + 配置目标)
+interface ConcurrencyStatus {
+  checked_at: string
+  models: Array<{
+    model: string
+    current: number
+    peak_90d: number
+    target: number
+    provider?: string
+  }>
+}
+
 // 统计卡(与用量页 stat-card 风格一致):图标品牌色渐变方块 + 标题 + 主值
 function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
   return (
@@ -60,13 +72,19 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
 
 export default function ServerInfo() {
   const [info, setInfo] = useState<SysInfo | null>(null)
+  const [conc, setConc] = useState<ConcurrencyStatus | null>(null)
   const [error, setError] = useState('')
 
   const load = async () => {
     setError('')
     try {
-      const d = await request(`${ADMIN_API}/server-info`)
+      // server-info + concurrency 并行拉取(并发指标独立于系统状态,失败降级)
+      const [d, c] = await Promise.all([
+        request(`${ADMIN_API}/server-info`),
+        request(`${ADMIN_API}/concurrency`).catch(() => null),
+      ])
       setInfo(d)
+      setConc(c)
     } catch (e: any) {
       setError(e.message || '加载失败')
     }
@@ -164,6 +182,54 @@ export default function ServerInfo() {
               </CardContent>
             </Card>
           </div>
+
+          {/* 按模型并发(2026-08-31):扩容申请依据。当前=实时 in-flight;
+              90 天峰值=采样历史最大;目标=default_params.concurrency_target
+              (如 flash 2500 / pro 500);利用率=峰值/目标。 */}
+          {conc && conc.models && conc.models.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Gauge className="h-4 w-4 text-muted-foreground" /> 模型并发
+                  <span className="ml-1 text-xs font-normal text-muted-foreground">当前 / 90 天峰值 / 目标(扩容申请参考)</span>
+                </CardTitle>
+                <CardDescription>
+                  采样于 {conc.checked_at?.replace('T', ' ').replace(/Z$/, ' UTC') ?? '—'} · 峰值每 15s 采样落库(GREATEST 累计,永不回退)
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>模型</TableHead>
+                      <TableHead className="text-right">当前并发</TableHead>
+                      <TableHead className="text-right">90 天峰值</TableHead>
+                      <TableHead className="text-right">目标</TableHead>
+                      <TableHead className="text-right">峰值利用率</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {conc.models.map((m) => {
+                      const util = m.target > 0 ? ((m.peak_90d / m.target) * 100).toFixed(0) + '%' : '—'
+                      const exceeding = m.target > 0 && m.peak_90d >= m.target
+                      return (
+                        <TableRow key={m.model}>
+                          <TableCell className="font-mono text-xs">{m.model}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.current}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.peak_90d}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.target > 0 ? m.target : '未配置'}</TableCell>
+                          <TableCell className={`text-right tabular-nums ${exceeding ? 'font-semibold text-destructive' : ''}`}>
+                            {util}
+                            {exceeding && ' ⚠'}
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
 
           <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <ShieldCheck className="h-3 w-3" /> 仅管理员可访问 · 数据实时从服务器获取

@@ -52,6 +52,7 @@ type API struct {
 	client *http.Client // non-stream requests (bounded timeout)
 	sse    *http.Client // streaming requests (lifecycle = request context)
 	rl     *rateLimiter
+	conc   *concurrencyMeter // 按模型 in-flight 计数(2026-08-31)
 }
 
 // handleChatCompletions proxies /v1/chat/completions to the matching upstream.
@@ -102,6 +103,11 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 
 	// max_tokens 默认值注入依据(模型维度,与候选无关,提前读取)
 	defaultParams, _ := serverstore.ModelDefaultParams(a.DB, req.Model)
+
+	// 并发计量(2026-08-31):模型已确认,记录 in-flight;done 在所有退出
+	// 路径执行(defer,含 panic/流中断)。
+	done := a.conc.begin(req.Model)
+	defer done()
 
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).

@@ -22,8 +22,9 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		client: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
 		// streaming client: headers (first byte) must arrive within the same
 		// window as the non-stream client, but the body streams unbounded.
-		sse: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
-		rl:  newRateLimiter(),
+		sse:  &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
+		rl:   newRateLimiter(),
+		conc: newConcurrencyMeter(),
 	}
 	// OpenAI/Anthropic 兼容形态(/v1/*)。
 	v1 := r.Group("/v1", serverauth.BearerAuth(db))
