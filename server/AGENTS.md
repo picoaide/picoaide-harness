@@ -51,7 +51,7 @@ internal/              # router(路由唯一真源)/serverauth/llmgateway/market
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/                  # 服务端文档(01-09/DEPLOY;superpowers/ 为历史设计文档)
 scripts/               # install-server.sh / deploy.sh(一键部署)+ mock-upstream.go(假上游)
-data/                  # 服务端运行时数据(0700,gitignore);数据库在 PostgreSQL(内置容器或外部实例)
+data/                  # 服务端运行时数据(0700,gitignore);数据库在 PostgreSQL(单 compose 内置 postgres 容器)
 ```
 
 ## 7. 关键契约(两端必须一致)
@@ -94,7 +94,7 @@ make check             # gofmt + go vet + test-server + webadmin 测试与构建
 PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
 go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证网关
 bash scripts/install-server.sh         # 生产一键部署(oh-my-zsh 式单命令,自动装依赖;域名/账号/密码,见 docs/02-build-deploy.md)
-# 数据库: PostgreSQL 唯一。-db-driver 仅接受 pg(默认)|pg-external(部署模式别名),-pg-dsn 必填;
+# 数据库: PostgreSQL 唯一。-db-driver 仅接受 pg(默认;pg-external 为历史兼容别名,部署层已不用),-pg-dsn 必填;
 #   迁移 DDL 见 internal/serverstore/migrations-pg/(迁移自动应用)。SQLite 与 migrate-sqlite-pg 已下线,
 #   老数据需先在历史版本完成迁移。
 ```

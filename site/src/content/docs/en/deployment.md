@@ -16,10 +16,7 @@ This article describes how PicoAide Harness is deployed in an enterprise intrane
 
 - **Desktop client**: Windows 10+ x64 / macOS 12+ (Apple silicon) / Linux x64 (AppImage + deb); no Node.js, pnpm or DSH required;
 - **Server**: Linux x64 server; a single binary is enough to run (`picoaide-server`, gin), and Docker Compose containerization is also supported (Caddy reverse proxy, fixed IP on a private subnet, non-root uid 10001, data bind mount);
-- **Database**:
-
-  - **Built-in PostgreSQL**: `DB_MODE=pg`, a postgres:18-alpine container within Compose;
-  - **External PostgreSQL**: `DB_MODE=pg-external` + `PG_DSN` (for enterprises that already run PG centrally);
+- **Database**: **built-in PostgreSQL 18** (a postgres:18-alpine container within Compose; the external-PG `DB_MODE=pg-external` form has been removed);
 
 
 ## Deployment methods
@@ -30,14 +27,14 @@ This article describes how PicoAide Harness is deployed in an enterprise intrane
 # One-click server deployment (auto privilege escalation, installs dependencies per distro, interactively collects configuration, reuses deploy.sh)
 # Note: must be run with bash (the script uses bash-only syntax; `sh -c` resolves to dash on Debian/Ubuntu and fails)
 bash -c "$(curl -fsSL .../server/scripts/install-server.sh)"
-# Non-interactive: set environment variables such as DOMAIN / ADMIN_PASS / DB_MODE / TLS_MODE
+# Non-interactive: set environment variables such as DOMAIN / ADMIN_PASS / PG_PASSWORD / TLS_MODE
 ./deploy.sh install|update|status|logs|backup|uninstall
 ```
 
-The `deploy.sh` subcommands **automatically select the full compose file** based on `DB_MODE` from `.env` (`pg` → main `docker-compose.yml` with the postgres container; `pg-external` → `docker-compose.pg-ext.yml`), no manual `-f` needed:
-- `install`: subnet/port preflight → DNS/CDN validation (auto mode) → certificate preparation → generate `.env`/Caddyfile → pull images and start → wait for `/healthz` readiness;
+`deploy.sh` uses a **single compose file** (`docker-compose.yml` with the caddy+server+postgres services); all subcommands act on it directly — no file switching or manual `-f`:
+- `install`: subnet/port preflight → DNS/CDN validation (auto mode) → certificate preparation → generate a minimal `.env` (4 keys) → pull images and start → wait for `/healthz` readiness;
 - `update`: pull new images and rebuild (data directory unchanged, brief downtime as containers are recreated in sequence; migrations run automatically in order);
-- `backup`: package `picoaide-data` (application data + master.key) + the Caddy certificate store in auto mode + `pg_dump` in pg mode;
+- `backup`: package `picoaide-data` (application data + master.key) + the Caddy certificate store in auto mode + a PostgreSQL `pg_dump`;
 
 - `uninstall [--volumes]`: stop containers (optionally delete the data directory).
 
@@ -53,7 +50,7 @@ Employee clients / browsers
    Go server (non-root uid 10001, exposes 8080, fixed IP 172.28.0.3)
       │
       ▼
-   PostgreSQL 18 (built-in container when DB_MODE=pg, fixed IP 172.28.0.4, data ./pg-data)
+   PostgreSQL 18 (built-in container, fixed IP 172.28.0.4, data ./pg-data)
 ```
 
 - Custom private-subnet bridge (default `172.28.0.0/24`, configurable via `NETWORK_SUBNET`); fixed IPs stay unchanged across container rebuilds;

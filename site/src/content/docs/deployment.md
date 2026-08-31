@@ -16,10 +16,7 @@ description: 了解 PicoAide Harness 的企业内网部署形态：容器化服�
 
 - **桌面客户端**：Windows 10+ x64 / macOS 12+（Apple 芯片）/ Linux x64（AppImage + deb）；无需 Node.js、pnpm 或 DSH；
 - **服务端**：Linux x64 服务器；单二进制即可运行（`picoaide-server`，gin），也支持 Docker Compose 容器化（Caddy 反代、私有网段固定 IP、非 root uid 10001、数据 bind mount）；
-- **数据库**：
-  
-  - **内置 PostgreSQL**：`DB_MODE=pg`，Compose 内 postgres:18-alpine 容器；
-  - **外部 PostgreSQL**：`DB_MODE=pg-external` + `PG_DSN`（企业已有 PG 统一运维）；
+- **数据库**：**内置 PostgreSQL 18**（Compose 内 postgres:18-alpine 容器，`DB_MODE=pg` 已删除，只有这一个形态）；
 
 
 ## 部署方式
@@ -30,14 +27,14 @@ description: 了解 PicoAide Harness 的企业内网部署形态：容器化服�
 # 服务端一键部署（自动提权、按发行版装依赖、交互收集配置、复用 deploy.sh）
 # 注意:必须用 bash 执行(脚本为 bash 专属语法;`sh -c` 在 Debian/Ubuntu 会以 dash 解析而失败)
 bash -c "$(curl -fsSL .../server/scripts/install-server.sh)"
-# 非交互：给 DOMAIN / ADMIN_PASS / DB_MODE / TLS_MODE 等环境变量
+# 非交互：给 DOMAIN / ADMIN_PASS / PG_PASSWORD / TLS_MODE 等环境变量
 ./deploy.sh install|update|status|logs|backup|uninstall
 ```
 
-`deploy.sh` 子命令按 `.env` 的 `DB_MODE` **自动选择完整 compose 文件**（`pg` → 主 `docker-compose.yml`，含 postgres 容器；`pg-external` → `docker-compose.pg-ext.yml`），无需手传 `-f`：
-- `install`：网段/端口预检 → DNS/CDN 校验（auto 模式）→ 证书准备 → 生成 `.env`/Caddyfile → 拉镜像启动 → 等待 `/healthz` 就绪；
+`deploy.sh` 使用**单一 compose 文件**（`docker-compose.yml`，含 caddy+server+postgres 三服务），所有子命令直接作用于它，无需切换文件或手传 `-f`：
+- `install`：网段/端口预检 → DNS/CDN 校验（auto 模式）→ 证书准备 → 生成最小 `.env`（4 键）→ 拉镜像启动 → 等待 `/healthz` 就绪；
 - `update`：拉新镜像重建（数据目录不变，容器依次重建先后短暂停机；迁移自动按序执行）；
-- `backup`：打包 `picoaide-data`（数据库 + master.key）+ auto 模式 Caddy 证书库 + pg 模式 `pg_dump`；
+- `backup`：打包 `picoaide-data`（应用数据 + master.key）+ auto 模式 Caddy 证书库 + PostgreSQL `pg_dump`；
 
 - `uninstall [--volumes]`：停容器（可选删除数据目录）。
 
@@ -53,12 +50,12 @@ bash -c "$(curl -fsSL .../server/scripts/install-server.sh)"
    Go 服务端（非 root uid 10001，expose 8080，固定 IP 172.28.0.3）
       │
       ▼
-   PostgreSQL 18（DB_MODE=pg 时内置容器，固定 IP 172.28.0.4，数据 ./pg-data）
+   PostgreSQL 18（内置容器，固定 IP 172.28.0.4，数据 ./pg-data）
 ```
 
 - 私有网段自定义 bridge（默认 `172.28.0.0/24`，`NETWORK_SUBNET` 可改）；固定 IP 容器重建后不变；
 - server 不映射宿主机端口，外部流量只能经 Caddy 进入（内网隔离 + 攻击面收敛）；
-- **所有持久化数据用 `./` bind mount，不使用命名卷**：`picoaide-data/`（master.key + 应用数据）、`caddy-data/`、`caddy-config/`、`certs/`（手动证书）、`pg-data/`（PG 模式，挂载到容器内 `/var/lib/postgresql`）；备份 = 直接拷走部署目录或 `deploy.sh backup`。
+- **所有持久化数据用 `./` bind mount，不使用命名卷**：`picoaide-data/`（master.key + 应用数据）、`caddy-data/`、`caddy-config/`、`certs/`（手动证书）、`pg-data/`（挂载到容器内 `/var/lib/postgresql`）；备份 = 直接拷走部署目录或 `deploy.sh backup`。
 
 ### 镜像与版本
 

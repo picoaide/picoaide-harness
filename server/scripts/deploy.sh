@@ -1,41 +1,32 @@
 #!/usr/bin/env bash
 # ============================================================
-# PicoAide 服务端自动化部署脚本
+# PicoAide Harness 服务端部署脚本(单 compose 文件)
 # ============================================================
 # 用法:
 #   ./scripts/deploy.sh install          # 首次部署(非交互,环境变量驱动)
 #   ./scripts/deploy.sh update           # 升级镜像并重启(数据不丢)
 #   ./scripts/deploy.sh status           # 查看容器状态 + 健康检查 + 固定 IP
 #   ./scripts/deploy.sh logs [-t]        # 查看日志(--tail=200;-t/--follow 跟踪)
-#   ./scripts/deploy.sh backup           # 备份数据(picoaide-data + caddy-data 证书库;pg 模式含 pg_dump)
+#   ./scripts/deploy.sh backup           # 备份数据(picoaide-data + caddy-data 证书库 + pg_dump)
 #   ./scripts/deploy.sh uninstall        # 卸载(停容器;--volumes 全删数据目录,需确认)
 #
-# 数据库后端(DB_MODE):
-#   pg(默认,内置 postgres 容器,即主 docker-compose.yml) |
-#   pg-external(已有 PostgreSQL 实例,完整 compose docker-compose.pg-ext.yml)
-#   PG-only(2026-08):当前所有发布镜像均含 -db-driver 支持,无需版本门槛;
-#   仅早期(0.5.0 前)镜像不支持,如误用会由镜像探测/启动失败暴露。
-#
 # 环境变量(全部可选,均有默认值):
-#   DEPLOY_DIR        部署目录(含 docker-compose.yml;默认 = 当前目录,install-server.sh 会传入)
 #   DOMAIN            对外域名或 IP(默认 picoaide.example.com,部署时必改)
-#   TLS_MODE          证书模式:manual(默认,自签占位+提示替换) | auto(Let's Encrypt 自动)
+#   TLS_MODE          证书模式:manual(默认,自签占位+提示替换) | auto(Let's Encrypt) | internal(本地自签)
 #   ADMIN_USER        初始超管用户名(默认 admin)
 #   PICOAI_ADMIN_PASSWORD 初始超管密码(默认随机生成并在最后打印;已有 admin 后可用空值清除)
 #   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest)
 #   NETWORK_SUBNET    私有网段(默认 172.28.0.0/24)
-#   CADDY_IP / SERVER_IP  容器固定 IP(默认 172.28.0.2 / 172.28.0.3)
-#   DB_MODE           pg(默认) | pg-external
-#   PG_PASSWORD       pg 模式:内置 postgres 容器密码(缺省随机生成并写入 .env)
-#   PG_DSN            pg-external 必填;pg 模式由脚本生成(postgres://picoaide:<pw>@postgres:5432/picoaide)
-#   PG_IMAGE          pg 模式内置镜像(默认 postgres:18-alpine)
-#   PG_IP             pg 容器固定 IP(默认 172.28.0.4)
+#   CADDY_IP / SERVER_IP / PG_IP  容器固定 IP(默认 172.28.0.2 / .3 / .4)
+#   PG_PASSWORD       postgres 容器密码(缺省随机生成并写入 .env)
+#   PG_IMAGE          内置镜像(默认 postgres:18-alpine)
 #   CONFIRM_CDN       auto 模式:域名解析不直连本机(疑似 CDN/代理)时,
 #                     交互确认;无人值守设 CONFIRM_CDN=yes 直接继续
 #   REINSTALL=yes     .env 已存在时清除旧部署重装(默认安全退出)
 #   UNINSTALL_VOLUMES=yes  uninstall --volumes 无人值守确认(删除数据目录)
-# 注意:依赖(docker/compose/curl/jq/openssl/dns 工具)自动安装由 install-server.sh 负责;
-#   直接运行本脚本需先自行安装 REQUIRED_CMDS 中的命令,缺失即报错退出(绝不带病执行)。
+# 注意:依赖(docker/compose/curl/jq/openssl/dns 工具)自动安装由 install-server.sh
+#   负责;直接运行本脚本需先自行安装 REQUIRED_CMDS 中的命令,缺失即报错退出
+#   (绝不带病执行)。
 set -euo pipefail
 
 # ---- 路径与参数 ----
@@ -44,10 +35,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="${DEPLOY_DIR:-$PWD}"
 cd "$DEPLOY_DIR"
 COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml"
-# 资产模板目录:部署目录优先(install-server.sh 已复制),否则回退仓库脚本上级
-TEMPLATE_DIR=""
-if [ -f "$DEPLOY_DIR/Caddyfile.autocert" ]; then TEMPLATE_DIR="$DEPLOY_DIR"; fi
-if [ -z "$TEMPLATE_DIR" ] && [ -f "$SCRIPT_DIR/../Caddyfile.autocert" ]; then TEMPLATE_DIR="$SCRIPT_DIR/.."; fi
 LOG_FILE="${LOG_FILE:-/tmp/picoaide-deploy.log}"
 COMPOSE="docker compose"
 : > "$LOG_FILE"
@@ -60,24 +47,21 @@ SERVER_IMAGE="${SERVER_IMAGE:-}"
 NETWORK_SUBNET="${NETWORK_SUBNET:-}"
 CADDY_IP="${CADDY_IP:-}"
 SERVER_IP="${SERVER_IP:-}"
+PG_IP="${PG_IP:-}"
 CONFIRM_CDN="${CONFIRM_CDN:-}"
 REINSTALL="${REINSTALL:-}"
 UNINSTALL_VOLUMES="${UNINSTALL_VOLUMES:-}"
-DB_MODE="${DB_MODE:-}"
 PG_PASSWORD="${PG_PASSWORD:-}"
-PG_DSN="${PG_DSN:-}"
 PG_IMAGE="${PG_IMAGE:-}"
-PG_IP="${PG_IP:-}"
 CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-}"
 CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-}"
 TZ="${TZ:-}"
 
 # 优先级:环境变量 > 已存在 .env > 内置默认(下面赋值)
-# 只读非敏感部署变量;PICOAI_ADMIN_PASSWORD 不在此加载(由 compose 读取 .env,避免 shell 环境暴露明文)
 if [ -f "$DEPLOY_DIR/.env" ]; then
   while IFS='=' read -r key val; do
     case "$key" in
-      TLS_MODE|DOMAIN|ADMIN_USER|SERVER_IMAGE|NETWORK_SUBNET|CADDY_IP|SERVER_IP|TZ|DB_MODE|PG_PASSWORD|PG_DSN|PG_IMAGE|PG_IP|CADDY_HTTP_PORT|CADDY_HTTPS_PORT)
+      TLS_MODE|DOMAIN|ADMIN_USER|SERVER_IMAGE|NETWORK_SUBNET|CADDY_IP|SERVER_IP|PG_IP|TZ|PG_PASSWORD|PG_IMAGE|CADDY_HTTP_PORT|CADDY_HTTPS_PORT)
         : "${!key:=$val}" ;;   # 环境变量已设置则保留,否则用 .env 值
     esac
   done < <(grep -E '^[A-Z_]+=' "$DEPLOY_DIR/.env" 2>/dev/null || true)
@@ -90,9 +74,8 @@ SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-harness-server:latest}"
 NETWORK_SUBNET="${NETWORK_SUBNET:-172.28.0.0/24}"
 CADDY_IP="${CADDY_IP:-172.28.0.2}"
 SERVER_IP="${SERVER_IP:-172.28.0.3}"
-DB_MODE="${DB_MODE:-pg}"
-PG_IMAGE="${PG_IMAGE:-postgres:18-alpine}"
 PG_IP="${PG_IP:-172.28.0.4}"
+PG_IMAGE="${PG_IMAGE:-postgres:18-alpine}"
 TZ="${TZ:-Asia/Shanghai}"
 CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-80}"
 CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-443}"
@@ -104,22 +87,6 @@ NETWORK_NAME="picoaide-net"
 log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
 warn() { log "警告: $*"; }
 fail() { log "错误: $*"; exit 1; }
-
-# mask_dsn 掩码 PostgreSQL DSN 中的密码(bash 的 ${DSN%%@*@} 会保留整个含密码
-# 前缀——实测输出完整 DSN,审计 2026-08-25 B-01 曾致密码明文进日志)。只按
-# postgres://user:pw@host 形态掩码;非该形态原样返回(不误报)。
-mask_dsn() {
-  sed -E 's#(://[^:@/]+:)[^@/]+@#\1***@#' <<<"$1"
-}
-
-# 数据库后端 → 完整独立 compose 文件(每个都是 caddy+server(+postgres) 全服务,
-# 可直接 docker compose -f <file> up -d;COMPOSE_FILE 指向单个文件,不再叠加)
-case "$DB_MODE" in
-  pg) : ;;  # 默认: 主 docker-compose.yml 即 PostgreSQL 内置模式(caddy+server+postgres)
-  pg-external) COMPOSE_FILE="$(dirname "$COMPOSE_FILE")/docker-compose.pg-ext.yml" ;;
-  *) fail "DB_MODE 仅支持 pg/pg-external(PG-only 2026-08),当前: $DB_MODE" ;;
-esac
-export COMPOSE_FILE
 
 # ============================================================
 # 命令存在性检查:缺失即提示安装包并退出,绝不带病执行
@@ -253,7 +220,7 @@ verify_dns_auto() {
 
 # ---- 证书准备(manual 模式:openssl 自签占位 / 已有正式证书则直接使用) ----
 prepare_certs() {
-  [ "$TLS_MODE" = manual ] || return 0   # auto 模式证书由 Caddy 自动管理
+  [ "$TLS_MODE" = manual ] || return 0   # auto/internal 证书由 Caddy 管理
   mkdir -p certs
   if [ -f certs/server.crt ] && [ -f certs/server.key ]; then
     log "  ✓ 检测到已有证书,直接使用: certs/server.crt + certs/server.key"
@@ -290,63 +257,26 @@ write_env() {
       log "  已随机生成管理员密码(部署完成后打印)"
     fi
   fi
-  # ---- PG 后端字段 ----
-  if [ "$DB_MODE" = "pg" ]; then
-    if [ -z "$PG_PASSWORD" ]; then
-      if [ -f .env ] && grep -q '^PG_PASSWORD=.\+' .env 2>/dev/null; then
-        : # 复用旧 .env 里的 PG 密码
-      else
-        PG_PASSWORD="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)"
-        log "  已随机生成 PostgreSQL 密码(部署完成后写入 .env)"
-      fi
+  if [ -z "$PG_PASSWORD" ]; then
+    if [ -f .env ] && grep -q '^PG_PASSWORD=.\+' .env 2>/dev/null; then
+      : # 复用旧 .env 里的 PG 密码
+    else
+      PG_PASSWORD="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)"
+      log "  已随机生成 PostgreSQL 密码(部署完成后写入 .env)"
     fi
-    [ -z "$PG_DSN" ] && PG_DSN="postgres://picoaide:${PG_PASSWORD}@postgres:5432/picoaide"
-  elif [ "$DB_MODE" = "pg-external" ]; then
-    [ -n "$PG_DSN" ] || fail "DB_MODE=pg-external 必须提供 PG_DSN(如 postgres://user:pass@host:5432/db)"
-    case "$PG_DSN" in
-      postgres://*|postgresql://*|*host=*|*hostaddr=*) : ;;
-      *) fail "PG_DSN 格式不合法(需 postgres:// 或 keyword 形式)" ;;
-    esac
   fi
   cat > .env <<ENV
 # PicoAide 部署配置(由 deploy.sh 生成;手工修改后 docker compose up -d 生效)
-# 证书模式: manual(自签占位+提示替换,默认) | auto(Caddy 自动申请 Let's Encrypt)
-# 数据库后端: pg(默认,内置 postgres 容器) | pg-external(已有 PostgreSQL 实例)
-TLS_MODE=$TLS_MODE
+# 证书模式: manual(默认,自签占位+提示替换) | auto(Caddy 自动申请 Let's Encrypt) | internal(本地自签)
 DOMAIN=$DOMAIN
+TLS_MODE=$TLS_MODE
 ADMIN_USER=$ADMIN_USER
 PICOAI_ADMIN_PASSWORD=$PICOAI_ADMIN_PASSWORD
-SERVER_IMAGE=$SERVER_IMAGE
-NETWORK_SUBNET=$NETWORK_SUBNET
-CADDY_IP=$CADDY_IP
-SERVER_IP=$SERVER_IP
-CADDY_HTTP_PORT=$CADDY_HTTP_PORT
-CADDY_HTTPS_PORT=$CADDY_HTTPS_PORT
-TZ=${TZ:-Asia/Shanghai}
-DB_MODE=$DB_MODE
 PG_PASSWORD=$PG_PASSWORD
-PG_DSN=$PG_DSN
-PG_IMAGE=$PG_IMAGE
-PG_IP=$PG_IP
+TZ=${TZ:-Asia/Shanghai}
 ENV
   chmod 600 .env
   log "  ✓ 已生成 .env(权限 600)"
-}
-
-# ---- Caddyfile 生成(按 TLS_MODE 选模板并替换域名) ----
-write_caddyfile() {
-  local src
-  case "$TLS_MODE" in
-    auto)     src="$TEMPLATE_DIR/Caddyfile.autocert" ;;
-    manual)   src="$TEMPLATE_DIR/Caddyfile.manual" ;;
-    # 审计 2026-08-25 E-02:internal = 仓库默认 Caddyfile(tls internal 自签),
-    # 供纯内网/沙箱开箱即用;与占位域名 fail 校验配合,强制显式确认。
-    internal) src="$TEMPLATE_DIR/Caddyfile" ;;
-    *)        fail "TLS_MODE 仅支持 auto/manual/internal,当前: $TLS_MODE" ;;
-  esac
-  [ -f "$src" ] || fail "缺少模板: $src(请从仓库复制 Caddyfile.* 到部署目录)"
-  sed "s/picoaide\.example\.com/$DOMAIN/g" "$src" > Caddyfile
-  log "  ✓ 已生成 Caddyfile(TLS_MODE=$TLS_MODE,域名=$DOMAIN)"
 }
 
 # ---- 健康等待 ----
@@ -394,7 +324,6 @@ cmd_install() {
   verify_dns_auto
   prepare_certs
   write_env
-  write_caddyfile
 
   log "▶ 拉取镜像并启动"
   $COMPOSE pull 2>/dev/null || warn "镜像拉取失败(网络/权限),尝试直接启动"
@@ -411,18 +340,11 @@ cmd_install() {
   case "$TLS_MODE" in
     manual) log "  当前为自签占位(正式证书替换: 覆盖 certs/server.crt+server.key → docker compose restart caddy)" ;;
     auto)   log "  Caddy 将自动签发/续期 Let's Encrypt 证书" ;;
+    internal) log "  Caddy 本地 CA 自签(客户端首次连接需信任 Caddy 本地 CA)" ;;
   esac
-  log "固定 IP: caddy=$CADDY_IP, server=$SERVER_IP(网段 $NETWORK_SUBNET)"
-  case "$DB_MODE" in
-
-    pg)
-      log "数据库: PostgreSQL(内置容器 $PG_CONTAINER,IP $PG_IP,数据 $DEPLOY_DIR/pg-data)"
-      log "  DSN: postgres://picoaide:***@postgres:5432/picoaide"
-      log "  备份: ./deploy.sh backup(pg_dump)或停服后拷 pg-data/;镜像需含 -db-driver 支持" ;;
-    pg-external)
-      log "数据库: PostgreSQL(外部实例;数据备份由外部 PG 运维策略负责)"
-      log "  DSN: $(mask_dsn "$PG_DSN") (密码已掩码)" ;;
-  esac
+  log "固定 IP: caddy=$CADDY_IP, server=$SERVER_IP, postgres=$PG_IP(网段 $NETWORK_SUBNET)"
+  log "数据库: PostgreSQL(内置容器 $PG_CONTAINER,IP $PG_IP,数据 $DEPLOY_DIR/pg-data)"
+  log "  备份: ./deploy.sh backup(pg_dump)或停服后拷 pg-data/"
   log "提示: 登录后在 webadmin 网关页填写\"对外访问地址\" = $BASE_URL"
 }
 
@@ -434,7 +356,7 @@ cmd_update() {
   # PG_VERSION/base/(挂载点 /var/lib/postgresql/data);新 compose 挂载父目录
   # /var/lib/postgresql,旧数据会被 18 镜像判为 OLD_DATABASES 拒绝启动(exit 1)。
   # 检测到旧布局时提示手动迁移,绝不让 update 静默踩坏旧数据。
-  if [ "$DB_MODE" = "pg" ] && [ -d pg-data ] && [ -f pg-data/PG_VERSION ]; then
+  if [ -d pg-data ] && [ -f pg-data/PG_VERSION ]; then
     fail "检测到旧版 PG16 数据布局(pg-data/PG_VERSION 位于根目录)。
   请先备份: ./deploy.sh backup
   再按 docs/DEPLOY.md §0.1 的 PG16→18 迁移指引处理(pg_dump/restore 或 pg_upgrade),
@@ -453,7 +375,7 @@ cmd_status() {
   $COMPOSE ps 2>&1 || true
   echo
   log "容器固定 IP:"
-  for c in "$CADDY_CONTAINER" "$SERVER_CONTAINER"; do
+  for c in "$CADDY_CONTAINER" "$SERVER_CONTAINER" "$PG_CONTAINER"; do
     ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$c" 2>/dev/null || echo "<未运行>")"
     log "  $c → $ip"
   done
@@ -491,8 +413,8 @@ cmd_backup() {
     [ -d picoaide-data ] && tar czf "$outdir/picoaide-data-$ts.tar.gz" -C . picoaide-data \
       && log "  ✓ 数据备份(离线): $outdir/picoaide-data-$ts.tar.gz" || warn "数据备份失败(容器未运行且数据目录为空?)"
   fi
-  # PostgreSQL 模式:pg_dump 自定义格式(运行中安全,含 schema+数据)
-  if [ "$DB_MODE" = "pg" ] && docker ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
+  # PostgreSQL:pg_dump 自定义格式(运行中安全,含 schema+数据)
+  if docker ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
     if docker exec "$PG_CONTAINER" sh -c 'command -v pg_dump >/dev/null 2>&1'; then
       docker exec "$PG_CONTAINER" pg_dump -U picoaide -Fc picoaide > "$outdir/pg-data-$ts.dump" \
         && log "  ✓ PostgreSQL 备份(pg_dump): $outdir/pg-data-$ts.dump" \
@@ -501,7 +423,7 @@ cmd_backup() {
     else
       warn "容器内无 pg_dump,跳过线上备份;可停服后拷贝 pg-data/ 目录冷备"
     fi
-  elif [ "$DB_MODE" = "pg" ]; then
+  else
     [ -d pg-data ] && tar czf "$outdir/pg-data-$ts.tar.gz" -C . pg-data \
       && log "  ✓ PostgreSQL 数据备份(离线): $outdir/pg-data-$ts.tar.gz" || warn "pg 数据备份失败(容器未运行且目录为空?)"
   fi
@@ -514,10 +436,8 @@ cmd_backup() {
     fi
   fi
   log "恢复方式: 停服(picoaide-server 容器)后解包覆盖 picoaide-data/、caddy-data/,再 docker compose up -d"
-  [ "$DB_MODE" = "pg" ] && log "  PostgreSQL 数据恢复: 用上条 pg_restore 命令(或停服后恢复 pg-data/ 冷备)"
+  log "  PostgreSQL 数据恢复: 用上条 pg_restore 命令(或停服后恢复 pg-data/ 冷备)"
 }
-
-
 
 cmd_uninstall() {
   log "========== 卸载(uninstall)=========="
@@ -556,10 +476,10 @@ case "$CMD" in
   update         升级镜像并重启(数据不丢)
   status         容器状态 + 健康检查 + 固定 IP
   logs [-t]      查看日志(--tail=200;-t=跟踪)
-  backup         备份数据 + auto 模式 Caddy 证书(+ pg 模式 pg_dump)
+  backup         备份数据 + auto 模式 Caddy 证书(+ PostgreSQL pg_dump)
   uninstall [--volumes]  卸载(--volumes 连同数据卷删除,需确认)
 
-环境变量见脚本头部注释(如 DOMAIN/TLS_MODE/DB_MODE/PG_DSN/PICOAI_ADMIN_PASSWORD/CONFIRM_CDN)。
+环境变量见脚本头部注释(如 DOMAIN/TLS_MODE/PG_PASSWORD/PICOAI_ADMIN_PASSWORD/CONFIRM_CDN)。
 EOF
     exit 1 ;;
 esac

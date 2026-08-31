@@ -7,22 +7,19 @@
 #   上会以 dash 解析而失败):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 # 非交互(全部配置用环境变量):
-#   curl -fsSL <本脚本地址> | sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password \
-#     DB_MODE=pg bash
+#   curl -fsSL <本脚本地址> | sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
 #
 # 环境变量(全部可选,均有默认值;交互模式可省略,由脚本经 /dev/tty 询问):
 #   DOMAIN            对外域名或 IP(生产必改;交互时会询问,非交互必须提供)
 #   INSTALL_DIR       部署目录(默认 /data/picoaide/deploy;兼容旧版 DEPLOY_DIR)
-#   DB_MODE           数据库后端: pg(默认,内置 postgres 容器,完整 compose) | pg-external(已有实例,完整 compose)
-#   PG_PASSWORD       pg 模式:内置 postgres 密码(缺省随机生成并写入 .env)
-#   PG_DSN            pg-external 必填(如 postgres://user:pass@host:5432/db)
+#   PG_PASSWORD       内置 postgres 密码(缺省随机生成并写入 .env)
 #   ADMIN_USER        超管用户名(默认 admin)
 #   ADMIN_PASS        超管密码(默认随机生成;兼容 PICOAI_ADMIN_PASSWORD)
 #   TLS_MODE          证书模式: manual(默认,自签占位+提示替换) | auto(Let's Encrypt) | internal(本地自签)
 #   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest)
 #   REINSTALL=yes     已存在部署时清除重装(默认安全退出)
 #   SKIP_DEPS=1       跳过依赖自动安装(仅检查已装命令,缺失即提示并退出)
-#   SKIP_IMAGE_CHECK=1 跳过"镜像是否含 -db-driver 支持"探测(pg 模式)
+#   SKIP_IMAGE_CHECK=1 跳过"镜像是否含 -db-driver 支持"探测
 #   DOCKER_MIRROR     安装 docker 时使用的镜像源(如 https://mirrors.tuna.tsinghua.edu.cn/docker-ce)
 #   DEPLOY_BASE_URL   资产下载基址(默认 master 分支 raw;生产建议固定到发布
 #                     tag: https://raw.githubusercontent.com/picoaide/picoaide-harness/<tag>/server
@@ -38,9 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-${DEPLOY_DIR:-/data/picoaide/deploy}}"
 DOMAIN="${DOMAIN:-}"
-DB_MODE="${DB_MODE:-pg}"
 PG_PASSWORD="${PG_PASSWORD:-}"
-PG_DSN="${PG_DSN:-}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-${PICOAI_ADMIN_PASSWORD:-}}"
 TLS_MODE="${TLS_MODE:-manual}"
@@ -52,7 +47,7 @@ DOCKER_MIRROR="${DOCKER_MIRROR:-}"
 MIRROR_URL="${MIRROR_URL:-}"
 DEPLOY_BASE_URL="${DEPLOY_BASE_URL:-https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server}"
 
-ASSETS="docker-compose.yml Caddyfile Caddyfile.autocert Caddyfile.manual .env.example docker-compose.pg-ext.yml"
+ASSETS="docker-compose.yml Caddyfile Caddyfile.autocert Caddyfile.manual .env.example"
 DEPLOY_SH="$SCRIPT_DIR/deploy.sh"
 SUDO=""
 LOG_FILE="${LOG_FILE:-/tmp/picoaide-install.log}"
@@ -262,25 +257,12 @@ step4_config() {
   fi
   log "  证书模式: $TLS_MODE"
 
-  # DB 模式(pg/pg-external)
-  case "$DB_MODE" in
-    pg|pg-external) : ;;
-    *) fail "DB_MODE 仅支持 pg/pg-external" ;;
-  esac
-  log "  数据库: $DB_MODE"
-  if [ "$DB_MODE" = "pg-external" ] && [ -z "$PG_DSN" ]; then
-    if [ -t 0 ]; then
-      read -r -p "请输入外部 PostgreSQL 连接串(PG_DSN,如 postgres://user:pass@host:5432/db): " PG_DSN < /dev/tty || true
-    fi
-    [ -n "$PG_DSN" ] || fail "DB_MODE=pg-external 需要 PG_DSN"
-    case "$PG_DSN" in postgres://*|postgresql://*|*host=*) : ;; *) fail "PG_DSN 格式不合法" ;; esac
-  fi
-  if [ "$DB_MODE" = "pg" ] && [ -z "$PG_PASSWORD" ] && [ -t 0 ]; then
+  # 数据库:固定内置 PostgreSQL(单一 compose 文件,caddy+server+postgres)
+  log "  数据库: PostgreSQL(内置容器,PG-only)"
+  if [ -z "$PG_PASSWORD" ] && [ -t 0 ]; then
     read -r -p "请输入内置 PostgreSQL 密码(回车则随机生成): " PG_PASSWORD < /dev/tty || true
   fi
-  if [ "$DB_MODE" = "pg" ] || [ "$DB_MODE" = "pg-external" ]; then
-    require_pg_image "$SERVER_IMAGE" || fail "当前镜像 $SERVER_IMAGE 不支持 PG(-db-driver)。请使用当前分支构建的镜像(make docker-image 本地构建)或 SKIP_IMAGE_CHECK=1 跳过"
-  fi
+  require_pg_image "$SERVER_IMAGE" || fail "当前镜像 $SERVER_IMAGE 不支持 PG(-db-driver)。请使用当前分支构建的镜像(make docker-image 本地构建)或 SKIP_IMAGE_CHECK=1 跳过"
   log "  管理员账号: $ADMIN_USER"
 
   # 已部署检测(INSTALL_DIR 非空)
@@ -338,7 +320,7 @@ step5_assets() {
 # ============================================================
 step6_deploy() {
   log "▶ [6/6] 开始部署(转发 deploy.sh install)"
-  log "  (部署由 deploy.sh 完成: 网段/端口预检、证书、.env、Caddyfile、镜像启动、健康等待)"
+  log "  (部署由 deploy.sh 完成: 网段/端口预检、证书、.env、镜像启动、健康等待)"
   cd "$INSTALL_DIR"
   DEPLOY_DIR="$INSTALL_DIR" \
   DOMAIN="$DOMAIN" \
@@ -346,17 +328,15 @@ step6_deploy() {
   PICOAI_ADMIN_PASSWORD="$ADMIN_PASS" \
   TLS_MODE="$TLS_MODE" \
   SERVER_IMAGE="$SERVER_IMAGE" \
-  DB_MODE="$DB_MODE" \
   PG_PASSWORD="$PG_PASSWORD" \
-  PG_DSN="$PG_DSN" \
   REINSTALL="$REINSTALL" \
   bash "$INSTALL_DIR/deploy.sh" install
   log "========== 安装器完成 =========="
   log "部署目录: $INSTALL_DIR"
-  log "数据库: $DB_MODE"
+  log "数据库: PostgreSQL(内置容器)"
   log "后续命令: cd $INSTALL_DIR && ./deploy.sh update | status | logs | backup | uninstall"
   log "提醒: 定期 ./deploy.sh backup(含 master.key);升级前先备份"
-  [ "$DB_MODE" = "pg" ] && log "  PostgreSQL 数据目录: $INSTALL_DIR/pg-data(备份: ./deploy.sh backup)" || true
+  log "  PostgreSQL 数据目录: $INSTALL_DIR/pg-data(备份: ./deploy.sh backup)"
   return 0
 }
 

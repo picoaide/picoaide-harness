@@ -17,16 +17,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harnes
 > 域名/IP);也可非交互指定(需 root/sudo):
 
 ```bash
-# 指定域名 + 管理员密码（PostgreSQL 内置容器，DB_MODE=pg 默认）
+# 指定域名 + 管理员密码（内置 PostgreSQL 容器）
 curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
   sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
-
-# 使用已有 PostgreSQL 实例（DB_MODE=pg-external + PG_DSN）
-curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
-  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password DB_MODE=pg-external PG_DSN='postgres://user:pass@host:5432/db' bash
 ```
 
-- 数据库后端 `DB_MODE`：`pg`（默认，内置 postgres:18-alpine 容器）| `pg-external`（已有 PostgreSQL 实例，需 `PG_DSN`）；PG-only，SQLite 已下线。
+- 数据库：**固定内置 PostgreSQL 18 容器**（单 compose 文件 caddy+server+postgres），PG-only，SQLite 已下线。
+- 部署目录默认 `/data/picoaide/deploy`（可用 `INSTALL_DIR` 覆盖；兼容旧版 `DEPLOY_DIR`）；依赖自动安装可用 `SKIP_DEPS=1` 跳过；Docker 安装可用 `DOCKER_MIRROR` 指定镜像源。
+- 已有部署时提示改用 `./deploy.sh update`（升级）或 `REINSTALL=yes`（清除重装）。
 - 部署目录默认 `/data/picoaide/deploy`（可用 `INSTALL_DIR` 覆盖；兼容旧版 `DEPLOY_DIR`）；依赖自动安装可用 `SKIP_DEPS=1` 跳过；Docker 安装可用 `DOCKER_MIRROR` 指定镜像源。
 - 已有部署时提示改用 `./deploy.sh update`（升级）或 `REINSTALL=yes`（清除重装）。
 

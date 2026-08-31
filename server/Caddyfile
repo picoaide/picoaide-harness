@@ -3,15 +3,14 @@
 # ============================================================
 # 证书模式:INTERNAL(自签,内网开箱即用)
 # 适用场景:纯内网/无公网域名/测试环境;客户端首次连接需信任 Caddy 本地 CA
+# 域名:本文件经 compose 传递 {$DOMAIN} 环境变量,无需手工替换
 # 证书模式三选一:
 #   - Caddyfile.autocert → 自动证书(Let's Encrypt,需公网域名直连)
 #   - Caddyfile.manual   → 手动证书(部署者提供 PEM,先自签占位)
 #   - 本文件              → 内部自签(tls internal,Caddy 本地 CA)
-# 切换:cp Caddyfile.<模式> Caddyfile && docker compose restart caddy
-#
-# 部署时把 picoaide.example.com 替换为你的真实域名(或 IP)。
+# 切换:.env 改 TLS_MODE 后 docker compose up -d(compose 按模式挂载模板)
 # ============================================================
-picoaide.example.com {
+{$DOMAIN} {
 	# INTERNAL 模式:Caddy 用本地 CA 生成自签名证书(域名/IP 均可)
 	tls internal
 
