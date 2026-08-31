@@ -742,6 +742,7 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 			"bind_password": mask(s["ldap.bind_password"]),
 			"base_dn":       s["ldap.base_dn"],
 			"user_filter":   s["ldap.user_filter"],
+			"user_attr":     s["ldap.user_attr"],
 			"group_filter":  s["ldap.group_filter"],
 			"group_attr":    s["ldap.group_attr"],
 		},
@@ -777,6 +778,7 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			BindPassword string `json:"bind_password"`
 			BaseDN       string `json:"base_dn"`
 			UserFilter   string `json:"user_filter"`
+			UserAttr     string `json:"user_attr"`
 			GroupFilter  string `json:"group_filter"`
 			GroupAttr    string `json:"group_attr"`
 		} `json:"ldap"`
@@ -872,6 +874,7 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	}
 	_ = upsert("ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN))
 	_ = upsert("ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter))
+	_ = upsert("ldap.user_attr", strings.TrimSpace(req.LDAP.UserAttr))
 	_ = upsert("ldap.group_filter", strings.TrimSpace(req.LDAP.GroupFilter))
 	_ = upsert("ldap.group_attr", strings.TrimSpace(req.LDAP.GroupAttr))
 	_ = upsert("oidc.issuer", strings.TrimSpace(req.OIDC.Issuer))
@@ -1223,6 +1226,7 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			BindPassword string `json:"bind_password"`
 			BaseDN       string `json:"base_dn"`
 			UserFilter   string `json:"user_filter"`
+			UserAttr     string `json:"user_attr"`
 			GroupFilter  string `json:"group_filter"`
 			GroupAttr    string `json:"group_attr"`
 		} `json:"ldap"`
@@ -1251,14 +1255,15 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			BindPassword: password,
 			BaseDN:       req.LDAP.BaseDN,
 			UserFilter:   req.LDAP.UserFilter,
+			UserAttr:     req.LDAP.UserAttr,
 			GroupFilter:  req.LDAP.GroupFilter,
 			GroupAttr:    req.LDAP.GroupAttr,
 		}
 		if err := prov.Configure(map[string]string{
 			"server_url": req.LDAP.ServerURL, "bind_dn": req.LDAP.BindDN,
 			"bind_password": password, "base_dn": req.LDAP.BaseDN,
-			"user_filter": req.LDAP.UserFilter, "group_filter": req.LDAP.GroupFilter,
-			"group_attr": req.LDAP.GroupAttr,
+			"user_filter": req.LDAP.UserFilter, "user_attr": req.LDAP.UserAttr,
+			"group_filter": req.LDAP.GroupFilter, "group_attr": req.LDAP.GroupAttr,
 		}); err != nil {
 			results["ok"] = false
 			results["message"] = "配置不完整: " + err.Error()
