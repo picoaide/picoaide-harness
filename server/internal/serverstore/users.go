@@ -384,6 +384,15 @@ func DeleteUser(db *sql.DB, id int64) error {
 		return err
 	}
 	wasSuperAdmin := role == RoleSuperAdmin
+	// 最后管理员保护(C-17 + 2026-09 并发修复):两个管理员并发互相删除时,
+	// READ COMMITTED 下各自事务 DELETE 后 count 可能都看到"还有 1 个"——
+	// 双双 commit,清空全部管理员。先对全部 super_admin 行加 FOR UPDATE 锁,
+	// 串行化该检查:第二个事务须等第一个 commit 后再 count(此时已只剩 0 或 1)。
+	if wasSuperAdmin {
+		if _, err := tx.Exec("SELECT id FROM users WHERE role = ? FOR UPDATE", RoleSuperAdmin); err != nil {
+			return err
+		}
+	}
 	// cascade stmts keyed by user id
 	for _, stmt := range []string{
 		"DELETE FROM api_tokens WHERE user_id = ?",
