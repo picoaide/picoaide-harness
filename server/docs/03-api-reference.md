@@ -55,7 +55,8 @@
 | GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |
 | POST | `/api/server/admin/tokens/:id/revoke` | 吊销指定 token |
 | GET | `/api/server/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
-| GET | `/api/server/admin/server-info` | 版本/数据库驱动(PG)/迁移版本/运行环境摘要 |
+| GET | `/api/server/admin/server-info` | 版本/数据库驱动(PG)/迁移版本/运行环境摘要 + `update_check`(实时 GitHub Releases 版本检查,失败为 null) |
+| GET | `/api/server/admin/concurrency` | 按模型并发状态(2026-08-31):当前 in-flight + 90 天峰值(`model_concurrency_stats`)+ 目标(`default_params.concurrency_target`),扩容申请依据 |
 | GET | `/api/server/admin/providers` | 网关上游列表(含 `protocol`:openai/anthropic/both) |
 | POST | `/api/server/admin/providers` | 添加上游 `{name, base_url, api_key, models, enabled, protocol?, channel?}`(api_key 服务端加密存储;protocol 缺省 openai) |
 | PUT | `/api/server/admin/providers/:id` | 更新上游(protocol 可切换) |

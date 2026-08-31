@@ -88,6 +88,8 @@ func TestNamespaces(t *testing.T) {
 		"GET " + nsServer + "/admin/audit",
 		"GET " + nsServer + "/admin/brand",
 		"GET " + nsServer + "/admin/connectors",
+		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)
+		"GET " + nsServer + "/admin/concurrency",
 		// DeepSeek 兼容 LLM 网关(/v1 独立命名空间 + 官方原生端点, 原样保留)
 		"GET /v1/models",
 		"GET /models",

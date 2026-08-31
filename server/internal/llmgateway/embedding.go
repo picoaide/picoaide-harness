@@ -200,6 +200,9 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "模型不存在或不可用")
 		return
 	}
+	// 并发计量(2026-08-31):embedding 也计入对应模型并发。
+	done := a.conc.begin(req.Model)
+	defer done()
 	vecs, tokens, err := NewEmbedder(a.DB).Embed(c.Request.Context(), req.Model, inputs)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用")

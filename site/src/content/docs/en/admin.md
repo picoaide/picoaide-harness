@@ -83,6 +83,7 @@ Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved
 
 - Shows the current server version, database driver (PostgreSQL), build info; health-check status (`/healthz`) and a runtime environment summary.
 - Update notifications: the server automatically checks GitHub Releases for the latest version; when a newer version exists, a banner appears at the top of the page (with a release notes link). Administrators upgrade on the server with `./deploy.sh update` (data preserved). Check failures degrade silently.
+- Model concurrency: per-model "current concurrency / 90-day peak / target". The target is configured in the model's `default_params.concurrency_target` (e.g. deepseek-v4-flash=2500, deepseek-v4-pro=500) and the UI shows peak utilization, highlighted in red when the target is reached — a quantitative basis for requesting capacity increases from the vendor. Current concurrency is a live in-memory snapshot (request start → end); peaks are sampled to the database every 15s (GREATEST accumulates, never rolls back).
 
 ## Deployment-related
 

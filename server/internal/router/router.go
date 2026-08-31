@@ -192,6 +192,8 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/gateway", serverauth.PermGatewayRead, d.Gateway.GetGatewayConfig)
 	serverauth.AdminRoute(authed, "PUT", "/gateway", serverauth.PermGatewayWrite, d.Gateway.SetGatewayConfig)
 	serverauth.AdminRoute(authed, "GET", "/channels", serverauth.PermGatewayRead, d.Gateway.ListChannelsAdmin)
+	// 按模型并发状态(当前 + 90 天峰值 + 目标;2026-08-31 扩容申请指标)
+	serverauth.AdminRoute(authed, "GET", "/concurrency", serverauth.PermGatewayRead, d.Gateway.ConcurrencyStatus)
 
 	// 技能商城管理
 	serverauth.AdminRoute(authed, "GET", "/skills", serverauth.PermMarketRead, d.Market.ListSkillsAdmin)

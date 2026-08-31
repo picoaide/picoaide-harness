@@ -74,6 +74,10 @@ func (a *API) handleResponses(c *gin.Context) {
 
 	defaultParams, _ := serverstore.ModelDefaultParams(a.DB, req.Model)
 
+	// 并发计量(2026-08-31):Responses API 也计入对应模型并发。
+	done := a.conc.begin(req.Model)
+	defer done()
+
 	var usageID int64
 	if req.Stream {
 		usageID, err = serverstore.RecordUsage(a.DB, user.ID, req.Model, 0, 0)

@@ -84,6 +84,7 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 
 - 展示当前服务端版本、数据库驱动（PostgreSQL）、构建信息；健康检查状态（`/healthz`）与运行环境摘要。
 - 版本更新提示：自动检测 GitHub Releases 最新版本；有新版本时页面顶部显示提示横幅（含发行说明链接），管理员在服务器执行 `./deploy.sh update` 升级（数据不丢）。检测失败静默降级，不打扰管理。
+- 模型并发：按模型展示「当前并发 / 90 天峰值 / 目标」，目标在模型 `default_params.concurrency_target` 配置（如 deepseek-v4-flash=2500、deepseek-v4-pro=500），展示峰值利用率，达到目标时标红提醒——用于向官方申请扩容的量化依据。当前并发为内存实时快照（请求发起→结束），峰值每 15s 采样落库（GREATEST 累计永不回退）。
 
 ## 部署相关
 
