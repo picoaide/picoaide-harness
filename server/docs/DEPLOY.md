@@ -32,7 +32,7 @@
 
 | 模式 | DB_MODE | 数据落地 | 适用 |
 |---|---|---|---|
-| 内置 PostgreSQL(默认) | `pg` | `pg-data/`(容器 `postgres:16-alpine`,固定 IP `.4`) | 默认;完整 PG 能力 |
+| 内置 PostgreSQL(默认) | `pg` | `pg-data/`(容器 `postgres:18-alpine`,固定 IP `.4`) | 默认;完整 PG 能力 |
 | 外部 PostgreSQL | `pg-external` | 外部实例(`PG_DSN` 指定) | 企业已有 PG 统一运维 |
 
 pg 模式架构(caddy → server → postgres,全部内网固定 IP):
@@ -51,7 +51,7 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 └──────┬───────────┘
        │ postgres://picoaide:…@postgres:5432/picoaide
        ▼
-┌──────────────────┐   PostgreSQL 16(不发布宿主机端口)
+┌──────────────────┐   PostgreSQL 18(不发布宿主机端口)
 │ postgres         │   固定 IP 172.28.0.4,数据 ./pg-data
 └──────────────────┘
 ```
@@ -244,7 +244,7 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 | `DB_MODE` | pg | pg(内置容器,默认)/ pg-external(已有实例,见 §0) |
 | `PG_PASSWORD` | 随机生成 | pg 模式:内置 postgres 容器密码 |
 | `PG_DSN` | - | pg-external 必填;pg 模式由脚本生成 `postgres://picoaide:<pw>@postgres:5432/picoaide` |
-| `PG_IMAGE` | postgres:16-alpine | pg 模式内置镜像(可换内网镜像) |
+| `PG_IMAGE` | postgres:18-alpine | pg 模式内置镜像(可换内网镜像) |
 | `PG_IP` | 172.28.0.4 | pg 容器固定 IP(需在 NETWORK_SUBNET 内) |
 | `CONFIRM_CDN` | 空 | auto 模式非直连时 `yes` 跳过人工确认 |
 | `REINSTALL` | 空 | `.env` 已存在时 `yes` 清除重装(否则安全退出) |

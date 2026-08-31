@@ -27,7 +27,7 @@
 #   DB_MODE           pg(默认) | pg-external
 #   PG_PASSWORD       pg 模式:内置 postgres 容器密码(缺省随机生成并写入 .env)
 #   PG_DSN            pg-external 必填;pg 模式由脚本生成(postgres://picoaide:<pw>@postgres:5432/picoaide)
-#   PG_IMAGE          pg 模式内置镜像(默认 postgres:16-alpine)
+#   PG_IMAGE          pg 模式内置镜像(默认 postgres:18-alpine)
 #   PG_IP             pg 容器固定 IP(默认 172.28.0.4)
 #   CONFIRM_CDN       auto 模式:域名解析不直连本机(疑似 CDN/代理)时,
 #                     交互确认;无人值守设 CONFIRM_CDN=yes 直接继续
@@ -91,7 +91,7 @@ NETWORK_SUBNET="${NETWORK_SUBNET:-172.28.0.0/24}"
 CADDY_IP="${CADDY_IP:-172.28.0.2}"
 SERVER_IP="${SERVER_IP:-172.28.0.3}"
 DB_MODE="${DB_MODE:-pg}"
-PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
+PG_IMAGE="${PG_IMAGE:-postgres:18-alpine}"
 PG_IP="${PG_IP:-172.28.0.4}"
 TZ="${TZ:-Asia/Shanghai}"
 CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-80}"

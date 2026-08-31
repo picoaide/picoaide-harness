@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/se
   sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password DB_MODE=pg-external PG_DSN='postgres://user:pass@host:5432/db' bash
 ```
 
-- 数据库后端 `DB_MODE`：`pg`（默认，内置 postgres:16-alpine 容器）| `pg-external`（已有 PostgreSQL 实例，需 `PG_DSN`）；PG-only，SQLite 已下线。
+- 数据库后端 `DB_MODE`：`pg`（默认，内置 postgres:18-alpine 容器）| `pg-external`（已有 PostgreSQL 实例，需 `PG_DSN`）；PG-only，SQLite 已下线。
 - 部署目录默认 `/data/picoaide/deploy`（可用 `INSTALL_DIR` 覆盖；兼容旧版 `DEPLOY_DIR`）；依赖自动安装可用 `SKIP_DEPS=1` 跳过；Docker 安装可用 `DOCKER_MIRROR` 指定镜像源。
 - 已有部署时提示改用 `./deploy.sh update`（升级）或 `REINSTALL=yes`（清除重装）。
 

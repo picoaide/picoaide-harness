@@ -54,7 +54,7 @@ corepack yarn ws dsh-plugin-desktop test         # 单测(等)
 
 ## 6. CI
 
-`.github/workflows/ci.yml`:server(Go 1.26 + postgres:16-alpine service,`go vet` + `go test ./...`(PG_DSN_TEST+TZ=Asia/Shanghai)+ `make build-server` + deploy 脚本/compose 校验)/ desktop-linux/windows/macos(Node 24,Yarn 门禁与三平台产物)/ release(GitHub Release)。本地 `make check` 近似 CI 的 server+webadmin 部分。
+`.github/workflows/ci.yml`:server(Go 1.26 + postgres:18-alpine service,`go vet` + `go test ./...`(PG_DSN_TEST+TZ=Asia/Shanghai)+ `make build-server` + deploy 脚本/compose 校验)/ desktop-linux/windows/macos(Node 24,Yarn 门禁与三平台产物)/ release(GitHub Release)。本地 `make check` 近似 CI 的 server+webadmin 部分。
 
 ## 7. 契约(改代码前必读,两端必须一致)
 

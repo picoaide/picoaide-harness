@@ -14,7 +14,7 @@
 # 服务与固定 IP:
 #   - caddy(172.28.0.2,CADDDY_IP):HTTPS 反代,唯一对外入口
 #   - server(172.28.0.3,SERVER_IP):PicoAide 服务端,仅内网可达
-#   - postgres(172.28.0.4,PG_IP):内置 PostgreSQL 16,数据落 ./pg-data
+#   - postgres(172.28.0.4,PG_IP):内置 PostgreSQL 18,数据落 ./pg-data
 #
 # 环境变量(见 .env,deploy.sh 自动生成):
 #   DOMAIN  PICOAI_ADMIN_PASSWORD  ADMIN_USER  TLS_MODE  SERVER_IMAGE
@@ -100,7 +100,7 @@ services:
         max-file: "3"
 
   postgres:
-    image: ${PG_IMAGE:-postgres:16-alpine}
+    image: ${PG_IMAGE:-postgres:18-alpine}
     container_name: picoaide-postgres
     restart: unless-stopped
     environment:

@@ -172,7 +172,7 @@ jobs:
           docker network create "$NET" >/dev/null
           PG_CID="$(docker run -d --network "$NET" --name picoaide-verify-pg \
             -e POSTGRES_USER=picoaide -e POSTGRES_PASSWORD=verify -e POSTGRES_DB=picoaide \
-            postgres:16-alpine)"
+            postgres:18-alpine)"
           CID=""
           trap 'docker rm -f "$CID" "$PG_CID" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true' EXIT
           # 等 PG 就绪(最多 30s)
