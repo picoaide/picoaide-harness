@@ -261,23 +261,17 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 }
 
 // subtreeGroupIDs returns the department id plus all descendant ids
-// (in-memory walk; the tree is small).
+// (in-memory walk; the tree is small). 复用 loadGroupTree 的缓存:
+// 不再每次全表 SELECT groups(与 EffectiveDeptBudget 共用同一缓存树,
+// 变更后 InvalidateGroupTree 同步失效)。
 func subtreeGroupIDs(db *sql.DB, rootID int64) ([]int64, error) {
-	rows, err := db.Query("SELECT id, parent_id FROM groups")
+	nodes, err := loadGroupTree(db)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	children := map[int64][]int64{}
-	for rows.Next() {
-		var id, parent int64
-		if err := rows.Scan(&id, &parent); err != nil {
-			return nil, err
-		}
-		children[parent] = append(children[parent], id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for _, n := range nodes {
+		children[n.parent] = append(children[n.parent], n.id)
 	}
 	out := []int64{rootID}
 	stack := []int64{rootID}

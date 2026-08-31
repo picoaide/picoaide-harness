@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,6 +49,9 @@ type Handlers struct {
 // embeddings/messages handler 依赖它们, 缺省时 nil 解引用 panic(2026-09
 // API 集中声明重构引入的回归)。
 func NewHandlers(db *sql.DB) *Handlers {
+	// 注册 serverstore 模型/上游写路径的回调:管理端增删 provider/模型时
+	// 立即清空本包的上游路由缓存(配合 30s TTL 双保险)。
+	serverstore.RegisterModelsChangedHook(InvalidateUpstreams)
 	api := &API{
 		DB: db,
 		// 非流式:仅约束响应头到达(ResponseHeaderTimeout),body 单独限时读取——

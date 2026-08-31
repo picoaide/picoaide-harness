@@ -30,6 +30,9 @@ func PgTestDSN() string {
 // out to leak runs between tests).
 func NewTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
+	// 清空进程级 TTL 缓存(组织树/模型配置/settings):每个测试独立临时库,
+	// 前一个测试写入的缓存值会污染后续测试(2026-08-31 加缓存后引入)。
+	resetTestCaches()
 	adminDSN := PgTestDSN()
 	u, err := url.Parse(adminDSN)
 	if err != nil {
@@ -83,6 +86,15 @@ func randomSuffix(n int) string {
 		return fmt.Sprintf("%d", os.Getpid())
 	}
 	return hex.EncodeToString(b)
+}
+
+// resetTestCaches 清空进程级 TTL 缓存(仅测试用):每个测试独立临时库,
+// 缓存 key 与 DB 数据绑定,测试间必须隔离。
+// 注意:llmgateway 的上游路由缓存由该包测试自行调 InvalidateUpstreams()。
+func resetTestCaches() {
+	groupTreeCache.invalidateAll()
+	modelConfigCache.invalidateAll()
+	settingsCache.invalidateAll()
 }
 
 // rewriteDSNQuery sets/keeps query params (sslmode etc.) from the original.

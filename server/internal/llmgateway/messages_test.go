@@ -95,6 +95,8 @@ data: {"type":"message_stop"}
 func newMessagesGateway(t *testing.T, f *fakeAnthropicUpstream) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
 	DecryptSecret = func(s string) (string, error) { return s, nil }
+	// 每个测试独立临时 DB:清空上游路由缓存防污染
+	InvalidateUpstreams()
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 
