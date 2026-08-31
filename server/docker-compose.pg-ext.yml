@@ -3,7 +3,8 @@
 # ============================================================
 # 完整可独立运行的 compose:包含 caddy + server 两个服务,server 直连
 # 外部已存在的 PostgreSQL 实例(如企业统一数据库),不内置 postgres 容器。
-# 不需要叠加 docker-compose.yml(与 sqlite/pg 模式同构,仅数据库后端不同)。
+# 不需要叠加 docker-compose.yml(与 pg 模式同构,仅数据库后端不同——一个内置
+# postgres 容器、一个连外部实例,均为完整独立 compose 文件)。
 #
 # 用途:DB_MODE=pg-external 时使用(部署脚本 install/deploy 生成、或手动):
 #   cp .env.example .env 并填写 DOMAIN / PICOAI_ADMIN_PASSWORD(必改)
@@ -11,7 +12,7 @@
 #   docker compose -f docker-compose.pg-ext.yml up -d
 #
 # 服务与固定 IP:
-#   - caddy(172.28.0.2,CADDDY_IP):HTTPS 反代,唯一对外入口
+#   - caddy(172.28.0.2,CADDY_IP):HTTPS 反代,唯一对外入口
 #   - server(172.28.0.3,SERVER_IP):PicoAide 服务端,仅内网可达,连外部 PG
 #
 # 环境变量(见 .env):

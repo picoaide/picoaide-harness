@@ -13,7 +13,8 @@
 # 数据库后端(DB_MODE):
 #   pg(默认,内置 postgres 容器,即主 docker-compose.yml) |
 #   pg-external(已有 PostgreSQL 实例,完整 compose docker-compose.pg-ext.yml)
-#   pg 两种模式需含 -db-driver 支持的服务端镜像(发布 0.5.0+ 或 make docker-image 本地构建);
+#   PG-only(2026-08):当前所有发布镜像均含 -db-driver 支持,无需版本门槛;
+#   仅早期(0.5.0 前)镜像不支持,如误用会由镜像探测/启动失败暴露。
 #
 # 环境变量(全部可选,均有默认值):
 #   DEPLOY_DIR        部署目录(含 docker-compose.yml;默认 = 当前目录,install-server.sh 会传入)
@@ -67,7 +68,6 @@ PG_PASSWORD="${PG_PASSWORD:-}"
 PG_DSN="${PG_DSN:-}"
 PG_IMAGE="${PG_IMAGE:-}"
 PG_IP="${PG_IP:-}"
-MIGRATE="${MIGRATE:-}"
 CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-}"
 CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-}"
 TZ="${TZ:-}"
@@ -77,7 +77,7 @@ TZ="${TZ:-}"
 if [ -f "$DEPLOY_DIR/.env" ]; then
   while IFS='=' read -r key val; do
     case "$key" in
-      TLS_MODE|DOMAIN|ADMIN_USER|SERVER_IMAGE|NETWORK_SUBNET|CADDY_IP|SERVER_IP|TZ|DB_MODE|PG_PASSWORD|PG_DSN|PG_IMAGE|PG_IP|MIGRATE|CADDY_HTTP_PORT|CADDY_HTTPS_PORT)
+      TLS_MODE|DOMAIN|ADMIN_USER|SERVER_IMAGE|NETWORK_SUBNET|CADDY_IP|SERVER_IP|TZ|DB_MODE|PG_PASSWORD|PG_DSN|PG_IMAGE|PG_IP|CADDY_HTTP_PORT|CADDY_HTTPS_PORT)
         : "${!key:=$val}" ;;   # 环境变量已设置则保留,否则用 .env 值
     esac
   done < <(grep -E '^[A-Z_]+=' "$DEPLOY_DIR/.env" 2>/dev/null || true)
@@ -430,6 +430,16 @@ cmd_update() {
   log "========== PicoAide 升级(update)=="
   [ -f .env ] || fail "未发现 .env,请先执行 install(或 cd 到部署目录)"
   check_cmds
+  # PG18 挂载点迁移防护(2026-08-31 修复):旧 PG16 部署的 pg-data/ 根下直接是
+  # PG_VERSION/base/(挂载点 /var/lib/postgresql/data);新 compose 挂载父目录
+  # /var/lib/postgresql,旧数据会被 18 镜像判为 OLD_DATABASES 拒绝启动(exit 1)。
+  # 检测到旧布局时提示手动迁移,绝不让 update 静默踩坏旧数据。
+  if [ "$DB_MODE" = "pg" ] && [ -d pg-data ] && [ -f pg-data/PG_VERSION ]; then
+    fail "检测到旧版 PG16 数据布局(pg-data/PG_VERSION 位于根目录)。
+  请先备份: ./deploy.sh backup
+  再按 docs/DEPLOY.md §0.1 的 PG16→18 迁移指引处理(pg_dump/restore 或 pg_upgrade),
+  完成后本目录数据将落在 pg-data/18/docker/ 下再执行 update。"
+  fi
   log "▶ 拉取新镜像($SERVER_IMAGE)"
   $COMPOSE pull || warn "拉取失败(可能已是最新/无网络),尝试直接重建"
   log "▶ 重建并重启容器(数据卷不变,数据不丢)"
@@ -473,7 +483,7 @@ cmd_backup() {
   local ts="$(date +%Y%m%d-%H%M%S)" outdir="$DEPLOY_DIR/deploy-backup"
   mkdir -p "$outdir"
   log "========== 备份(backup)=========="
-  # 数据目录:经容器内 busybox tar 打包(避免 SQLite WAL 缺文件;含 master.key)
+  # 应用数据目录:经容器内 busybox tar 打包(含 master.key;PG 数据另用 pg_dump)
   if docker ps --format '{{.Names}}' | grep -qx "$SERVER_CONTAINER"; then
     docker exec "$SERVER_CONTAINER" sh -c 'tar czf - -C /data .' > "$outdir/picoaide-data-$ts.tar.gz" \
       && log "  ✓ 数据备份: $outdir/picoaide-data-$ts.tar.gz" || warn "数据备份失败"

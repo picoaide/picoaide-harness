@@ -3,7 +3,9 @@
 # PicoAide 服务端 oh-my-zsh 式一键部署安装器
 # ============================================================
 # 单命令安装(自动提权/按发行版装依赖/交互收集配置/复用 deploy.sh 部署):
-#   sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
+#   注意:脚本是 bash 专属语法,必须用 bash -c 执行(`sh -c` 在 Debian/Ubuntu
+#   上会以 dash 解析而失败):
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 # 非交互(全部配置用环境变量):
 #   curl -fsSL <本脚本地址> | sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password \
 #     DB_MODE=pg bash
@@ -16,7 +18,7 @@
 #   PG_DSN            pg-external 必填(如 postgres://user:pass@host:5432/db)
 #   ADMIN_USER        超管用户名(默认 admin)
 #   ADMIN_PASS        超管密码(默认随机生成;兼容 PICOAI_ADMIN_PASSWORD)
-#   TLS_MODE          证书模式: manual(默认,自签占位+提示替换) | auto(Let's Encrypt)
+#   TLS_MODE          证书模式: manual(默认,自签占位+提示替换) | auto(Let's Encrypt) | internal(本地自签)
 #   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest)
 #   REINSTALL=yes     已存在部署时清除重装(默认安全退出)
 #   SKIP_DEPS=1       跳过依赖自动安装(仅检查已装命令,缺失即提示并退出)
@@ -50,7 +52,7 @@ DOCKER_MIRROR="${DOCKER_MIRROR:-}"
 MIRROR_URL="${MIRROR_URL:-}"
 DEPLOY_BASE_URL="${DEPLOY_BASE_URL:-https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server}"
 
-ASSETS="docker-compose.yml Caddyfile.autocert Caddyfile.manual .env.example docker-compose.pg-ext.yml"
+ASSETS="docker-compose.yml Caddyfile Caddyfile.autocert Caddyfile.manual .env.example docker-compose.pg-ext.yml"
 DEPLOY_SH="$SCRIPT_DIR/deploy.sh"
 SUDO=""
 LOG_FILE="${LOG_FILE:-/tmp/picoaide-install.log}"
@@ -277,7 +279,7 @@ step4_config() {
     read -r -p "请输入内置 PostgreSQL 密码(回车则随机生成): " PG_PASSWORD < /dev/tty || true
   fi
   if [ "$DB_MODE" = "pg" ] || [ "$DB_MODE" = "pg-external" ]; then
-    require_pg_image "$SERVER_IMAGE" || fail "当前镜像 $SERVER_IMAGE 不支持 PG(-db-driver)。请使用含本分支的镜像(0.5.0+ 或 make docker-image 本地构建),或 SKIP_IMAGE_CHECK=1 跳过"
+    require_pg_image "$SERVER_IMAGE" || fail "当前镜像 $SERVER_IMAGE 不支持 PG(-db-driver)。请使用当前分支构建的镜像(make docker-image 本地构建)或 SKIP_IMAGE_CHECK=1 跳过"
   fi
   log "  管理员账号: $ADMIN_USER"
 
@@ -310,13 +312,20 @@ step5_assets() {
       curl -fsSL "$DEPLOY_BASE_URL/$f" -o "$INSTALL_DIR/$f" || fail "下载 $f 失败(可用 DEPLOY_BASE_URL 指定资产源,或手动 curl -fsSLo $INSTALL_DIR/$f $DEPLOY_BASE_URL/$f)"
       chmod 644 "$INSTALL_DIR/$f"
     done
-    curl -fsSL "$DEPLOY_BASE_URL/deploy.sh" -o "$INSTALL_DIR/deploy.sh" || fail "下载 deploy.sh 失败"
+    # deploy.sh 与安装器同在 scripts/ 目录(与 docker-compose.yml 同级却在
+    # DEPLOY_BASE_URL 的一级子目录);先按正确路径下载,兼容旧版
+    # $DEPLOY_BASE_URL/deploy.sh(404)再回退(曾致下载失败)。
+    if ! curl -fsSL "$DEPLOY_BASE_URL/scripts/deploy.sh" -o "$INSTALL_DIR/deploy.sh" 2>/dev/null; then
+      curl -fsSL "$DEPLOY_BASE_URL/deploy.sh" -o "$INSTALL_DIR/deploy.sh" || fail "下载 deploy.sh 失败(可用 DEPLOY_BASE_URL 指定资产源,或手动 curl -fsSLo $INSTALL_DIR/deploy.sh $DEPLOY_BASE_URL/scripts/deploy.sh)"
+    fi
   else
     log "  $INSTALL_DIR 已含资产(或仓库即目录),复用"
     # 若 deploy.sh 缺失,补一份(deploy.sh 不在 ASSETS 里,单独处理)
     if [ ! -f "$INSTALL_DIR/deploy.sh" ]; then
       if [ -f "$REPO_DIR/scripts/deploy.sh" ]; then cp -f "$REPO_DIR/scripts/deploy.sh" "$INSTALL_DIR/deploy.sh"
-      else curl -fsSL "$DEPLOY_BASE_URL/deploy.sh" -o "$INSTALL_DIR/deploy.sh" || fail "下载 deploy.sh 失败"; fi
+      elif curl -fsSL "$DEPLOY_BASE_URL/scripts/deploy.sh" -o "$INSTALL_DIR/deploy.sh" 2>/dev/null; then :
+      else curl -fsSL "$DEPLOY_BASE_URL/deploy.sh" -o "$INSTALL_DIR/deploy.sh" || fail "下载 deploy.sh 失败(可用 DEPLOY_BASE_URL 指定资产源)"
+      fi
     fi
   fi
   [ -f "$INSTALL_DIR/deploy.sh" ] || fail "缺少 deploy.sh"
@@ -345,7 +354,7 @@ step6_deploy() {
   log "========== 安装器完成 =========="
   log "部署目录: $INSTALL_DIR"
   log "数据库: $DB_MODE"
-  log "后续命令: cd $INSTALL_DIR && ./deploy.sh update | status | logs | backup | migrate | uninstall"
+  log "后续命令: cd $INSTALL_DIR && ./deploy.sh update | status | logs | backup | uninstall"
   log "提醒: 定期 ./deploy.sh backup(含 master.key);升级前先备份"
   [ "$DB_MODE" = "pg" ] && log "  PostgreSQL 数据目录: $INSTALL_DIR/pg-data(备份: ./deploy.sh backup)" || true
   return 0
