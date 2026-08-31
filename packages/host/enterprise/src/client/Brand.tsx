@@ -1,6 +1,7 @@
 import { createElement } from 'react'
 import type { BrandConfig } from '../brand-sync.ts'
 import { useBrand } from './brand-store.ts'
+import { UpdateIndicator, useUpdateState } from './UpdateIndicator.tsx'
 
 // build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
 // node types(tsconfig.client.json types:[]),声明最小面的 process 占位。
@@ -107,6 +108,7 @@ export function BraceMark({ size, className }: { size: number; className?: strin
 export function BrandName() {
   const brand = useBrand()
   const version = process.env.PICOAI_PRODUCT_VERSION as string | undefined
+  const updateState = useUpdateState()
   const name = resolveClientName(brand) === 'PicoAide Harness' ? 'PicoAide' : resolveClientName(brand)
   return createElement(
     'span',
@@ -127,6 +129,7 @@ export function BrandName() {
           },
         }, `v${version}`)
       : null,
+    createElement(UpdateIndicator, { state: updateState }),
   )
 }
 

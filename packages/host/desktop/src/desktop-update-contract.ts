@@ -16,6 +16,18 @@ export interface DesktopUpdateStateResponse {
   readonly canDownload: boolean
   /** Installed desktop product version. */
   readonly currentVersion: string
+  /** Current download progress (bytes) while downloading; undefined otherwise. */
+  readonly downloadProgress: UpdateDownloadProgressState | undefined
+  /** Last user-visible check failure category; undefined when the last check succeeded. */
+  readonly lastError: 'network' | 'release-missing' | 'unsupported' | undefined
+}
+
+/** Byte-level download progress served to the renderer badge. */
+export interface UpdateDownloadProgressState {
+  /** Bytes received so far. */
+  readonly receivedBytes: number
+  /** Total expected bytes (content-length), or undefined when unknown. */
+  readonly totalBytes: number | undefined
 }
 
 /** Empty snapshot before the update coordinator has produced any state. */
@@ -26,5 +38,7 @@ export function emptyDesktopUpdateState(): DesktopUpdateStateResponse {
     isPackaged: false,
     canDownload: false,
     currentVersion: '',
+    downloadProgress: undefined,
+    lastError: undefined,
   }
 }

@@ -35,6 +35,14 @@ function windowsArtifact(): Uint8Array {
   return artifact
 }
 
+function appImageArtifact(): Uint8Array {
+  // ELF magic + AppImage signature (0x41 0x49 0x02 at offset 8).
+  const artifact = Buffer.alloc(512, 0)
+  artifact.set([0x7f, 0x45, 0x4c, 0x46], 0)
+  artifact.set([0x41, 0x49, 0x02], 8)
+  return artifact
+}
+
 function sha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -163,9 +171,41 @@ describe('desktop update installer download', () => {
       request,
     })
 
-    expect(result).toBe(join(userDataPath, 'updates', '2.2.0', 'PicoAide-Harness-2.2.0-windows.exe'))
+    expect(result).toBe(join(userDataPath, 'updates', '2.2.0', 'PicoAide-Harness-2.2.0-x64-Setup.exe'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     await expectNoPartialFiles(userDataPath, '2.2.0')
+  })
+
+  it('accepts a Linux AppImage with ELF + AppImage signatures', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifact = appImageArtifact()
+    const digest = sha256(artifact)
+    const request: UpdateArtifactRequest = async (url) => {
+      if (url === DESKTOP_RELEASE_API_URL) {
+        return releaseMetadata('2.2.1', [
+          { name: 'PicoAide-Harness-2.2.1-x86_64.AppImage', url: 'https://artifacts.test/appimage' },
+          { name: RELEASE_CHECKSUM_ASSET_NAME, url: 'https://artifacts.test/SHA256SUMS.txt' },
+        ])
+      }
+      if (url === 'https://artifacts.test/SHA256SUMS.txt') {
+        return checksumResponse([{ name: 'PicoAide-Harness-2.2.1-x86_64.AppImage', digest }])
+      }
+      if (url === 'https://artifacts.test/appimage') {
+        return chunkedResponse([artifact])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }
+
+    const result = await downloadDesktopUpdate({
+      platform: 'linux',
+      version: '2.2.1',
+      userDataPath,
+      request,
+    })
+
+    expect(result).toBe(join(userDataPath, 'updates', '2.2.1', 'PicoAide-Harness-2.2.1-x86_64.AppImage'))
+    expect(await readFile(result)).toEqual(Buffer.from(artifact))
+    await expectNoPartialFiles(userDataPath, '2.2.1')
   })
 
   it('accepts canonical stable SemVer build metadata in the private artifact path', async () => {
@@ -207,12 +247,16 @@ describe('desktop update installer download', () => {
     ['darwin', new Uint8Array(1024)],
     ['win32', Object.assign(windowsArtifact(), { 0: 0 })],
     ['win32', Object.assign(windowsArtifact(), { 0x80: 0 })],
+    ['linux', new Uint8Array(1024)],
+    ['linux', Object.assign(appImageArtifact(), { 0: 0 })],
   ] as const)('rejects and removes an invalid %s artifact', async (platform, artifact) => {
     const userDataPath = await temporaryUserData()
     const digest = sha256(artifact)
     const assetName = platform === 'darwin'
       ? 'PicoAide-Harness-2.3.0-mac.dmg'
-      : 'PicoAide-Harness-2.3.0-x64-Setup.exe'
+      : platform === 'linux'
+        ? 'PicoAide-Harness-2.3.0-x86_64.AppImage'
+        : 'PicoAide-Harness-2.3.0-x64-Setup.exe'
     const request: UpdateArtifactRequest = async (url) => {
       if (url === DESKTOP_RELEASE_API_URL) {
         return releaseMetadata('2.3.0', [
@@ -432,7 +476,7 @@ describe('desktop update installer download', () => {
   })
 
   it.each([
-    ['linux', '2.8.0'],
+    ['windows', '2.8.0'],
     ['darwin', '../2.8.0'],
     ['win32', 'v2.8.0'],
     ['win32', '2.8.0-rc.1'],

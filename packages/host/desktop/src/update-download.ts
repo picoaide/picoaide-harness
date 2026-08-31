@@ -6,7 +6,15 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { parseSemVer } from './update-checker.ts'
 
 /** Desktop platforms with a fixed GitHub release asset convention. */
-export type DesktopDownloadPlatform = 'darwin' | 'win32'
+export type DesktopDownloadPlatform = 'darwin' | 'win32' | 'linux'
+
+/** Progress of one confirmed update download (bytes). */
+export interface UpdateDownloadProgress {
+  /** Bytes received so far. */
+  readonly receivedBytes: number
+  /** Total expected bytes (content-length), or undefined when unknown. */
+  readonly totalBytes: number | undefined
+}
 
 /** GitHub repository owning public client releases. */
 export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
@@ -55,6 +63,8 @@ export interface DownloadDesktopUpdateOptions {
   readonly request: UpdateArtifactRequest
   /** Optional cancellation signal owned by the update coordinator. */
   readonly signal?: AbortSignal
+  /** Optional progress callback (bytes received / declared total). */
+  readonly onProgress?: (progress: UpdateDownloadProgress) => void
 }
 
 /** Typed failure from installer request, validation, or cancellation. */
@@ -91,6 +101,10 @@ const DMG_TRAILER_MAGIC = Buffer.from('koly', 'ascii')
 const DOS_HEADER_BYTES = 64
 const PE_OFFSET_POSITION = 0x3c
 const PE_MAGIC = Buffer.from([0x50, 0x45, 0x00, 0x00])
+/** AppImage magic: 0x41 0x49 0x02 (ELF magic + AppImage type). */
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46])
+const APPIMAGE_MAGIC_INDEX = 8
+const APPIMAGE_MAGIC = Buffer.from('AI\x02', 'ascii')
 
 interface ReleaseAsset {
   readonly name: string
@@ -160,7 +174,15 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
 
   let failure: unknown
   try {
-    await writeResponseBody(paths.temporary, response.body, options.signal, manifest.checksum)
+    const declaredTotal = Number(response.headers.get('content-length') ?? '')
+    await writeResponseBody(
+      paths.temporary,
+      response.body,
+      options.signal,
+      manifest.checksum,
+      options.onProgress,
+      Number.isFinite(declaredTotal) && declaredTotal > 0 ? declaredTotal : undefined,
+    )
     throwIfAborted(options.signal)
     await validateArtifact(paths.temporary, platform)
     throwIfAborted(options.signal)
@@ -180,7 +202,7 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
 }
 
 function validatedPlatform(platform: DesktopDownloadPlatform): DesktopDownloadPlatform {
-  if (platform !== 'darwin' && platform !== 'win32') {
+  if (platform !== 'darwin' && platform !== 'win32' && platform !== 'linux') {
     throw new UpdateDownloadError('invalid-options', `Unsupported update download platform: ${String(platform)}`)
   }
   return platform
@@ -219,9 +241,9 @@ async function prepareDownloadPaths(
   await preparePrivateDirectory(updatesDirectory)
   await preparePrivateDirectory(directory)
 
-  const extension = platform === 'darwin' ? 'dmg' : 'exe'
-  const platformName = platform === 'darwin' ? 'mac' : 'windows'
-  const filename = `PicoAide-Harness-${version}-${platformName}.${extension}`
+  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
+  const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
+  const filename = `PicoAide-Harness-${version}-${assetBase}.${extension}`
   const completed = join(directory, filename)
   const completedStat = await lstatOptional(completed)
   if (completedStat !== undefined) {
@@ -280,7 +302,9 @@ async function resolveDownloadManifest(
   const normalizedVersion = version.replace(/^v/u, '')
   const expectedName = platform === 'darwin'
     ? `PicoAide-Harness-${normalizedVersion}-mac.dmg`
-    : `PicoAide-Harness-${normalizedVersion}-x64-Setup.exe`
+    : platform === 'win32'
+      ? `PicoAide-Harness-${normalizedVersion}-x64-Setup.exe`
+      : `PicoAide-Harness-${normalizedVersion}-x86_64.AppImage`
   const asset = metadata.assets.find(
     (entry: unknown): entry is ReleaseAsset =>
       isRecord(entry)
@@ -296,13 +320,14 @@ async function resolveDownloadManifest(
   }
 
   const checksum = await resolveChecksum(request, expectedName, signal)
-  const extension = platform === 'darwin' ? 'dmg' : 'exe'
+  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
+  const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
   return {
     assetName: expectedName,
     downloadUrl: asset.browser_download_url,
     checksum,
     extension,
-    completedFilename: `PicoAide-Harness-${normalizedVersion}-${platform === 'darwin' ? 'mac' : 'windows'}.${extension}`,
+    completedFilename: `PicoAide-Harness-${normalizedVersion}-${assetBase}.${extension}`,
   }
 }
 
@@ -454,6 +479,8 @@ async function writeResponseBody(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
   expectedDigest: string,
+  onProgress?: (progress: UpdateDownloadProgress) => void,
+  totalBytes?: number,
 ): Promise<void> {
   const handle = await open(filename, 'wx', PRIVATE_FILE_MODE)
   const reader = body.getReader()
@@ -474,6 +501,7 @@ async function writeResponseBody(
       await writeAll(handle, chunk.value)
       digestStream.update(chunk.value)
       bytesWritten += chunk.value.byteLength
+      onProgress?.({ receivedBytes: bytesWritten, totalBytes })
     }
     if (bytesWritten === 0) {
       throw new UpdateDownloadError('empty-body', 'The update download service returned an empty body.')
@@ -525,6 +553,22 @@ async function validateArtifact(filename: string, platform: DesktopDownloadPlatf
       return
     }
 
+    // Linux AppImage: ELF magic at offset 0 + AppImage signature at offset 8.
+    if (platform === 'linux') {
+      if (stat.size < APPIMAGE_MAGIC_INDEX + APPIMAGE_MAGIC.byteLength) throw invalidArtifact(platform)
+      const elf = Buffer.alloc(ELF_MAGIC.byteLength)
+      const elfResult = await handle.read(elf, 0, elf.byteLength, 0)
+      if (elfResult.bytesRead !== elf.byteLength || !elf.equals(ELF_MAGIC)) {
+        throw invalidArtifact(platform)
+      }
+      const ai = Buffer.alloc(APPIMAGE_MAGIC.byteLength)
+      const aiResult = await handle.read(ai, 0, ai.byteLength, APPIMAGE_MAGIC_INDEX)
+      if (aiResult.bytesRead !== ai.byteLength || !ai.equals(APPIMAGE_MAGIC)) {
+        throw invalidArtifact(platform)
+      }
+      return
+    }
+
     if (stat.size < DOS_HEADER_BYTES) throw invalidArtifact(platform)
     const dosHeader = Buffer.alloc(DOS_HEADER_BYTES)
     const dosResult = await handle.read(dosHeader, 0, dosHeader.byteLength, 0)
@@ -548,7 +592,9 @@ function invalidArtifact(platform: DesktopDownloadPlatform): UpdateDownloadError
     'invalid-artifact',
     platform === 'darwin'
       ? 'The downloaded file is not a UDIF disk image.'
-      : 'The downloaded file is not a PE executable.',
+      : platform === 'linux'
+        ? 'The downloaded file is not an AppImage.'
+        : 'The downloaded file is not a PE executable.',
   )
 }
 

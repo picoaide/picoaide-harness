@@ -339,6 +339,34 @@ export function hasUpdateFor(item: CapabilityItem): boolean {
   return compareVersions(latest, item.installedVersion) > 0
 }
 
+/** 单测用：按（kind, source）解析安装端点。
+ * 市场技能只存在于服务端 skills/marketplace 表,必须走 /api/pico/skills 代理
+ * (网关 marketplace /archive);共享技能走 shared-skills 代理(带版本);
+ * 智能体走 agent-presets 代理。合并面板时(57aeffecbb)曾把市场技能误路由
+ * 到 shared-skills 端点 → 网关 404 → 面板「操作失败:gateway error」。
+ */
+export function installEndpoint(item: CapabilityItem, version: string, force?: boolean): string {
+  let base: string
+  if (item.kind === 'skill') {
+    base = item.source === 'market'
+      ? `/api/pico/skills/${encodeURIComponent(item.name)}/install`
+      : `/api/pico/shared-skills/${encodeURIComponent(item.name)}/${encodeURIComponent(version)}/install`
+  } else {
+    base = `/api/pico/agent-presets/${encodeURIComponent(item.name)}/install`
+  }
+  return force === true ? `${base}?force=1` : base
+}
+
+/** 单测用：按（kind, source）解析卸载端点(与安装同一来源规则)。 */
+export function uninstallEndpoint(item: CapabilityItem, version: string): string {
+  if (item.kind === 'skill') {
+    return item.source === 'market'
+      ? `/api/pico/skills/${encodeURIComponent(item.name)}/uninstall`
+      : `/api/pico/shared-skills/${encodeURIComponent(item.name)}/${encodeURIComponent(version)}/uninstall`
+  }
+  return `/api/pico/agent-presets/${encodeURIComponent(item.name)}/uninstall`
+}
+
 /** 单测用：把同名（kind+name）条目归并成一张卡（保留最高 approved 版本为当前）。 */
 export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
   const byKey = new Map<string, CapabilityItem>()
@@ -393,7 +421,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const [sections, setSections] = useState<Record<string, SectionState>>({})
   const [loading, setLoading] = useState(true)
   const [action, setAction] = useState<ActionState | null>(null)
-  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  /** 安装覆盖确认 key（{kind}:{name}）；与卸载确认分离，避免互串。 */
+  const [installConfirmKey, setInstallConfirmKey] = useState<string | null>(null)
+  /** 卸载确认 key（{kind}:{name}）。 */
+  const [uninstallConfirmKey, setUninstallConfirmKey] = useState<string | null>(null)
   const [expandedVersions, setExpandedVersions] = useState<Record<string, boolean>>({})
   const loadSeqRef = useRef(0)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -485,17 +516,14 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const key = `${item.kind}:${item.name}`
     // 同名冲突确认（磁盘/installed 已有同名目录且非覆盖安装）。
     if (!opts?.force && (item.installed || (item.source !== 'local' && item.isLocal))) {
-      setConfirmKey(key)
+      setInstallConfirmKey(key)
       return
     }
-    setConfirmKey(null)
+    setInstallConfirmKey(null)
     setAction({ key, kind: 'installing' })
     try {
       const targetVersion = opts?.version ?? item.version
-      const base = item.kind === 'skill'
-        ? `/api/pico/shared-skills/${encodeURIComponent(item.name)}/${encodeURIComponent(targetVersion)}/install`
-        : `/api/pico/agent-presets/${encodeURIComponent(item.name)}/install`
-      const url = opts?.force ? `${base}?force=1` : base
+      const url = installEndpoint(item, targetVersion, opts?.force)
       const res = await fetch(url, { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -511,13 +539,11 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const uninstall = async (item: CapabilityItem): Promise<void> => {
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')) return
     const key = `${item.kind}:${item.name}`
-    if (confirmKey !== key) { setConfirmKey(key); return }
-    setConfirmKey(null)
+    if (uninstallConfirmKey !== key) { setUninstallConfirmKey(key); return }
+    setUninstallConfirmKey(null)
     setAction({ key, kind: 'uninstalling' })
     try {
-      const base = item.kind === 'skill'
-        ? `/api/pico/shared-skills/${encodeURIComponent(item.name)}/${encodeURIComponent(item.version)}/uninstall`
-        : `/api/pico/agent-presets/${encodeURIComponent(item.name)}/uninstall`
+      const base = uninstallEndpoint(item, item.version)
       const res = await fetch(base, { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -626,12 +652,12 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void install(item, { force: true }) }}>
                 {t('capability.updateTo', { version: item.versions[item.versions.length - 1] ?? item.version })}
               </button>
-            ) : confirmKey === key ? (
+            ) : uninstallConfirmKey === key ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
                 <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-label-inverted, #fff)' }} disabled={busy} onClick={() => { void uninstall(item) }}>
                   {busy && action?.kind === 'uninstalling' ? t('capability.uninstalling') : t('capability.confirmUninstall')}
                 </button>
-                <button type="button" style={{ ...BUTTON_SECONDARY, flex: 1 }} disabled={busy} onClick={() => { setConfirmKey(null) }}>{t('capability.cancel')}</button>
+                <button type="button" style={{ ...BUTTON_SECONDARY, flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</button>
               </div>
             ) : (
               <button type="button" style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY} disabled={busy} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</button>
@@ -692,7 +718,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         </div>
         <div style={TAB_BAR}>
           {(['mine', 'market'] as const).map(s => (
-            <button key={s} type="button" style={tab === s ? TAB_ACTIVE : TAB} onClick={() => { setTab(s); setFilter('all'); setConfirmKey(null) }}>
+            <button key={s} type="button" style={tab === s ? TAB_ACTIVE : TAB} onClick={() => { setTab(s); setFilter('all'); setInstallConfirmKey(null); setUninstallConfirmKey(null) }}>
               {s === 'mine' ? t('capability.tabMine') : t('capability.tabMarket')}
             </button>
           ))}
@@ -717,18 +743,18 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           />
         </div>
         <div style={BODY}>{content}</div>
-        {confirmKey !== null && (
+        {installConfirmKey !== null && (
           <div style={{ padding: '0 20px 12px' }}>
             <p style={{ ...NOTICE, color: 'var(--dsw-alias-state-warn-label)' }}>
-              {t('capability.conflictConfirm', { name: confirmKey.split(':')[1] ?? '' })}
+              {t('capability.conflictConfirm', { name: installConfirmKey.split(':')[1] ?? '' })}
             </p>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
               <button type="button" style={BUTTON} onClick={() => {
-                const item = items.find(i => `${i.kind}:${i.name}` === confirmKey)
-                setConfirmKey(null)
+                const item = items.find(i => `${i.kind}:${i.name}` === installConfirmKey)
+                setInstallConfirmKey(null)
                 if (item !== undefined) void install(item, { force: true })
               }}>{t('capability.forceInstall')}</button>
-              <button type="button" style={BUTTON_SECONDARY} onClick={() => { setConfirmKey(null) }}>{t('capability.cancel')}</button>
+              <button type="button" style={BUTTON_SECONDARY} onClick={() => { setInstallConfirmKey(null) }}>{t('capability.cancel')}</button>
             </div>
           </div>
         )}

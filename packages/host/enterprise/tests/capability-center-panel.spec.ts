@@ -3,8 +3,10 @@ import {
   avatarColor,
   compareVersions,
   hasUpdateFor,
+  installEndpoint,
   latestApprovedVersionByName,
   mergeItems,
+  uninstallEndpoint,
   type CapabilityItem,
 } from '../src/client/CapabilityCenterPanel.tsx'
 
@@ -53,6 +55,37 @@ describe('hasUpdateFor', () => {
   it('false when not installed', () => {
     const item: CapabilityItem = { kind: 'skill', source: 'org', name: 'x', displayName: '', version: '1.2.0', description: '', author: '', status: 'approved', versions: ['1.2.0'], installed: false }
     expect(hasUpdateFor(item)).toBe(false)
+  })
+})
+
+describe('installEndpoint / uninstallEndpoint (来源路由 bug 回归)', () => {
+  const base: CapabilityItem = { kind: 'skill', source: 'org', name: 'codeql', displayName: '', version: '1.0.0', description: '', author: 'a', status: 'approved', versions: ['1.0.0'], installed: false }
+
+  it('market skill installs via /api/pico/skills (gateway marketplace), NOT shared-skills', () => {
+    const market = { ...base, source: 'market' as const }
+    expect(installEndpoint(market, '1.0.0')).toBe('/api/pico/skills/codeql/install')
+    // 回归:57aeffecbb 曾把所有技能路由到 shared-skills → 网关 404 gateway error。
+    expect(installEndpoint(market, '1.0.0')).not.toContain('shared-skills')
+  })
+
+  it('org shared skill installs via /api/pico/shared-skills with version', () => {
+    expect(installEndpoint(base, '1.2.0')).toBe('/api/pico/shared-skills/codeql/1.2.0/install')
+  })
+
+  it('market skill uninstalls via /api/pico/skills (matched install route)', () => {
+    const market = { ...base, source: 'market' as const }
+    expect(uninstallEndpoint(market, '1.0.0')).toBe('/api/pico/skills/codeql/uninstall')
+    expect(uninstallEndpoint(base, '1.0.0')).toBe('/api/pico/shared-skills/codeql/1.0.0/uninstall')
+  })
+
+  it('agent install/uninstall route via /api/pico/agent-presets', () => {
+    const agent: CapabilityItem = { ...base, kind: 'agent', name: 'creative-writer', source: 'org' }
+    expect(installEndpoint(agent, '1.0.0')).toBe('/api/pico/agent-presets/creative-writer/install')
+    expect(uninstallEndpoint(agent, '1.0.0')).toBe('/api/pico/agent-presets/creative-writer/uninstall')
+  })
+
+  it('force install appends ?force=1', () => {
+    expect(installEndpoint(base, '1.0.0', true)).toBe('/api/pico/shared-skills/codeql/1.0.0/install?force=1')
   })
 })
 

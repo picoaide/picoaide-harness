@@ -272,7 +272,7 @@ describe('desktop update Host plugin', () => {
     await harness.tray.invoke()
 
     // The user confirmed 2.1.0; a flaky re-check must not turn Download into a no-op.
-    expect(harness.downloadAndOpen).toHaveBeenCalledWith('2.1.0', expect.any(AbortSignal))
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith('2.1.0', expect.any(AbortSignal), expect.any(Function))
   })
 
   it.each([

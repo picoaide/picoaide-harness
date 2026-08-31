@@ -107,6 +107,15 @@ export function DesktopUpdateBadge({ request }: DesktopUpdateBadgeProps & {
   if (available === undefined && downloading === undefined) return null
   if (!snapshot.canDownload) return null
 
+  // 下载进度百分比(label 内展示,避免依赖外部样式资源)。
+  const progress = snapshot.downloadProgress
+  let progressLabel: string | undefined
+  if (downloading !== undefined && progress !== undefined) {
+    progressLabel = progress.totalBytes !== undefined && progress.totalBytes > 0
+      ? `${Math.min(99, Math.floor((progress.receivedBytes / progress.totalBytes) * 100))}%`
+      : '…'
+  }
+
   return (
     <button
       type="button"
@@ -118,7 +127,9 @@ export function DesktopUpdateBadge({ request }: DesktopUpdateBadgeProps & {
       onClick={() => { void triggerDesktopUpdateCheck(request) }}
     >
       <span className="dshDesktopUpdateBadgeDot" aria-hidden="true" />
-      {downloading !== undefined ? downloading : available}
+      {downloading !== undefined
+        ? `${downloading}${progressLabel !== undefined ? ` ${progressLabel}` : ''}`
+        : available}
     </button>
   )
 }

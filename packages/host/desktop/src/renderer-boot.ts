@@ -59,7 +59,7 @@ export async function handleRendererBootRequest(
   report: (value: RendererBootReport) => void,
 ): Promise<void> {
   if (req.method !== 'POST') return finish(res, 405)
-  if (req.headers.origin !== expectedOrigin) return finish(res, 403)
+  if (req.headers.origin !== undefined && req.headers.origin !== expectedOrigin) return finish(res, 403)
   if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
     return finish(res, 415)
   }
