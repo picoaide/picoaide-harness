@@ -300,3 +300,130 @@ func TestDirectorySyncRunFromSettings(t *testing.T) {
 		t.Fatalf("alice = %+v %v", u, err)
 	}
 }
+
+// TestSyncDirectoryNoUid:目录条目无 uid(如 mokahr 系,只有 cn/mail)——
+// 同步必须回退 cn 作为用户名,不能把全部用户跳过(用户 2026-09 生产实例
+// 报告"配置 LDAP 后用户没同步":447 用户全部因 username 为空被跳过)。
+func TestSyncDirectoryNoUid(t *testing.T) {
+	db := mustDB(t)
+	users := []*ldap.Entry{
+		dirUser("cn=ranting,ou=users,dc=mokahr,dc=com", "ranting", "ranting", "ranting@mokahr.com"),
+		dirUser("cn=xiedi,ou=users,dc=mokahr,dc=com", "xiedi", "xiedi", "xiedi@mokahr.com"),
+	}
+	// 构造无 uid 的条目(仅 cn/mail)
+	for _, u := range users {
+		attrs := []*ldap.EntryAttribute{}
+		for _, a := range u.Attributes {
+			if a.Name != "uid" {
+				attrs = append(attrs, a)
+			}
+		}
+		u.Attributes = attrs
+	}
+	f := &fakeLDAPConn{
+		passwords: map[string]string{"cn=admin,dc=mokahr,dc=com": "pw", "cn=ranting,ou=people,dc=mokahr,dc=com": "pw"},
+		searchResults: map[string]*ldap.SearchResult{
+			"(&(cn=*)(objectClass=inetOrgPerson))": {Entries: users},
+		},
+	}
+	p := &LDAPProvider{ServerURL: "ldap://fake", BindDN: "cn=admin,dc=mokahr,dc=com", BindPassword: "pw", BaseDN: "dc=mokahr,dc=com", UserFilter: "(&(cn=%s)(objectClass=inetOrgPerson))", GroupAttr: "cn"}
+	p.dial = func(string) (ldapConn, error) { return f, nil }
+
+	res, err := SyncDirectoryRun(db, p)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if res.Added != 2 {
+		t.Fatalf("added = %d, want 2 (no-uid users must sync via cn)", res.Added)
+	}
+	u, err := serverstore.GetUserByUsername(db, "ranting")
+	if err != nil || u.Source != "external" || u.DisplayName != "ranting" {
+		t.Fatalf("ranting = %+v %v (username must fall back to cn)", u, err)
+	}
+	// entryUserName 规则:uid→cn→mail→DN RND
+	e := dirUser("cn=alice,ou=x,dc=y", "ignored", "cnname", "m@x")
+	if got := entryUserName(e, "fallback"); got != "ignored" {
+		t.Fatalf("uid priority: got %q", got)
+	}
+	e2 := dirUser("cn=alice,ou=x,dc=y", "", "cnname", "m@x")
+	if got := entryUserName(e2, "fallback"); got != "cnname" {
+		t.Fatalf("cn fallback: got %q", got)
+	}
+	e3 := dirUser("cn=alice,ou=x,dc=y", "", "", "m@x")
+	if got := entryUserName(e3, "fallback"); got != "m@x" {
+		t.Fatalf("mail fallback: got %q", got)
+	}
+	e4 := &ldap.Entry{DN: "uid=alice,ou=x,dc=y"}
+	if got := entryUserName(e4, "fallback"); got != "alice" {
+		t.Fatalf("DN RDN fallback: got %q", got)
+	}
+}
+
+// TestSyncDirectoryUserAttrCn:user_attr=cn 的目录(如 mokahr 系,无 uid)——
+// 同步回退到配置的 cn 属性,目录全部用户都能同步;且登录用户规范化一致。
+func TestSyncDirectoryUserAttrCn(t *testing.T) {
+	db := mustDB(t)
+	f := &fakeLDAPConn{
+		passwords: map[string]string{"cn=admin,dc=mokahr,dc=com": "pw", "cn=ranting,ou=people,dc=mokahr,dc=com": "pw"},
+		searchResults: map[string]*ldap.SearchResult{
+			// user_filter=(&(cn=%s)(objectClass=inetOrgPerson));扫描替换 %s→*
+			"(&(cn=*)(objectClass=inetOrgPerson))": {Entries: []*ldap.Entry{
+				{ // 无 uid,仅 cn/mail/sn(与生产 mokahr 目录一致)
+					DN: "cn=ranting,ou=people,dc=mokahr,dc=com",
+					Attributes: []*ldap.EntryAttribute{
+						{Name: "cn", Values: []string{"ranting"}},
+						{Name: "sn", Values: []string{"冉婷"}},
+						{Name: "mail", Values: []string{"ranting@mokahr.com"}},
+					},
+				},
+				{
+					DN: "cn=xiedi,ou=people,dc=mokahr,dc=com",
+					Attributes: []*ldap.EntryAttribute{
+						{Name: "cn", Values: []string{"xiedi"}},
+						{Name: "sn", Values: []string{"谢迪"}},
+						{Name: "mail", Values: []string{"xiedi@mokahr.com"}},
+					},
+				},
+			}},
+			"(&(cn=ranting)(objectClass=inetOrgPerson))": {Entries: []*ldap.Entry{
+				{DN: "cn=ranting,ou=people,dc=mokahr,dc=com",
+					Attributes: []*ldap.EntryAttribute{
+						{Name: "cn", Values: []string{"ranting"}}, {Name: "sn", Values: []string{"冉婷"}}, {Name: "mail", Values: []string{"ranting@mokahr.com"}},
+					}},
+			}},
+			"(member=cn=ranting,ou=people,dc=mokahr,dc=com)": {Entries: []*ldap.Entry{
+				{DN: "cn=SSC,ou=groups,dc=mokahr,dc=com", Attributes: []*ldap.EntryAttribute{{Name: "cn", Values: []string{"SSC"}}}},
+			}},
+		},
+	}
+	p := &LDAPProvider{
+		ServerURL: "ldap://fake", BindDN: "cn=admin,dc=mokahr,dc=com", BindPassword: "pw",
+		BaseDN: "dc=mokahr,dc=com", UserFilter: "(&(cn=%s)(objectClass=inetOrgPerson))",
+		UserAttr: "cn", GroupFilter: "(member=%s)", GroupAttr: "cn",
+	}
+	p.dial = func(string) (ldapConn, error) { return f, nil }
+
+	res, err := SyncDirectoryRun(db, p)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if res.Added != 2 {
+		t.Fatalf("added = %d, want 2 (cn-based users)", res.Added)
+	}
+	u, err := serverstore.GetUserByUsername(db, "ranting")
+	if err != nil || u.Source != "external" || u.DisplayName != "冉婷" {
+		t.Fatalf("ranting = %+v %v", u, err)
+	}
+	groups, err := serverstore.UserGroups(db, u.ID)
+	if err != nil || len(groups) != 1 || groups[0] != "SSC" {
+		t.Fatalf("ranting groups = %v %v", groups, err)
+	}
+	// 登录:user_attr=cn → canonical 取 cn(ranting)
+	ui, err := p.Authenticate("ranting", "pw")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if ui.Username != "ranting" {
+		t.Fatalf("login username = %q, want ranting (user_attr=cn)", ui.Username)
+	}
+}

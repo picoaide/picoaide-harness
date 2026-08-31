@@ -98,7 +98,7 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 	if err := conn.Bind(prov.BindDN, prov.BindPassword); err != nil {
 		return nil, errors.New("ldap bind failed")
 	}
-	entries, err := prov.scanEntries(conn, prov.userScanFilter(), []string{"uid", "cn", "mail", prov.GroupAttr})
+	entries, err := prov.scanEntries(conn, prov.userScanFilter(), uniqAttrs([]string{prov.UserAttr, "cn", "sn", "mail", prov.GroupAttr}))
 	if err != nil {
 		return nil, err
 	}
@@ -111,12 +111,17 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 	seen := make(map[string]bool, len(entries))
 	groupSeen := make(map[string]bool)
 	for _, e := range entries {
-		username := entryUserName(e, "")
+		username := prov.usernameOf(e)
 		if username == "" {
-			continue // 无 uid 的条目不是可登录用户(组织单元/组对象等)
+			continue // 无 user_attr/cn/mail 的条目不是可登录用户(组织单元/组对象等)
 		}
 		seen[username] = true
-		displayName := e.GetAttributeValue("cn")
+		// 显示名:sn(真实姓名,如 mokahr 目录 "冉婷")→ cn 兜底
+		// (cn 可能是登录名,如 ranting;显示名取 sn 更人性化)。
+		displayName := e.GetAttributeValue("sn")
+		if displayName == "" {
+			displayName = e.GetAttributeValue("cn")
+		}
 		email := e.GetAttributeValue("mail")
 
 		u, err := serverstore.GetUserByUsername(db, username)

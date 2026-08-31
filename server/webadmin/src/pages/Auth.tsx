@@ -139,6 +139,7 @@ export default function Auth() {
           bind_password: form.ldap.bind_password,
           base_dn: form.ldap.base_dn,
           user_filter: form.ldap.user_filter,
+          user_attr: form.ldap.user_attr,
           group_filter: form.ldap.group_filter,
           group_attr: form.ldap.group_attr,
         }
@@ -280,6 +281,7 @@ export default function Auth() {
                   <SecretField label="Bind 密码(已设置=保持现值)" preset={secrets.ldap_password} value={form.ldap.bind_password ?? ''} onChange={(v) => setForm({ ...form, ldap: { ...form.ldap, bind_password: v } })} onClear={() => { setForm({ ...form, ldap: { ...form.ldap, bind_password: '' } }); setClearedSecrets({ ...clearedSecrets, ldap_password: true }) }} />
                   <Field abbr="ldap" label="Base DN" value={form.ldap.base_dn ?? ''} ph="dc=example,dc=com" k="base_dn" set={(v) => setForm({ ...form, ldap: { ...form.ldap, base_dn: v } })} />
                   <Field abbr="ldap" label="用户过滤器(默认 (uid=%s))" value={form.ldap.user_filter ?? ''} ph="(uid=%s)" k="user_filter" set={(v) => setForm({ ...form, ldap: { ...form.ldap, user_filter: v } })} />
+                  <Field abbr="ldap" label="用户名字段(属性,默认 uid)" value={form.ldap.user_attr ?? ''} ph="uid / cn / sAMAccountName / mail" k="user_attr" set={(v) => setForm({ ...form, ldap: { ...form.ldap, user_attr: v } })} />
                   <Field abbr="ldap" label="组过滤器(可选)" value={form.ldap.group_filter ?? ''} ph="(memberOf=cn=%s)" k="group_filter" set={(v) => setForm({ ...form, ldap: { ...form.ldap, group_filter: v } })} />
                   <Field abbr="ldap" label="组属性(默认 cn)" value={form.ldap.group_attr ?? ''} k="group_attr" set={(v) => setForm({ ...form, ldap: { ...form.ldap, group_attr: v } })} />
                 </div>
