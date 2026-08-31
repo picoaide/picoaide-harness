@@ -87,9 +87,13 @@ func openPG(dsn string) (*sql.DB, error) {
 	// 连接池:实测 500 并发 1257 TPS / 3000 突发 1613 writes/s 0 失败;
 	// 200 连接 + 业务层(流式 1-3s 打散)足以支撑数千并发大模型调用。
 	// PG MVCC 多写并行,无需 SQLite 的单连接串行化。
-	db.SetMaxOpenConns(200)
-	db.SetMaxIdleConns(50)
+	// 2026-08-31 实测（100tok/s 长流 2000 并发）: 池 200 时流式回填风暴
+	// 打满池 -> database/sql 连接饥饿全站僵死(1490 goroutine 卡 waitForConn)。
+	// 上调 400 + 短 IdleTime 淘汰半死连接(僵死元凶是"坏连接占池位不可复用")。
+	db.SetMaxOpenConns(400)
+	db.SetMaxIdleConns(100)
 	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 	return db, nil
 }
 
