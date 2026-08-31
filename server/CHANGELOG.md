@@ -8,7 +8,7 @@
 - **内置 PostgreSQL 升级到 18**(最新稳定大版本):compose/deploy.sh/.env.example/CI/文档全同步;18.6 全量测试+冒烟验证通过
 
 ### 部署
-- 服务端镜像 `ghcr.io/picoaide/picoaide-harness-server` 随 tag 自动构建(v2.6.0/latest),内置 PG18
+- 服务端镜像 `ghcr.io/picoaide/picoaide-harness-server` 随 tag 自动构建(v2.5.2/latest),内置 PG18
 
 ## v2.5.1 (2026-08-31)
 
