@@ -212,12 +212,24 @@ jobs:
           find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -printf '%f\0' \
             | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      # 变更说明优先读取仓库内 docs/releases/<tag>.md(由发布者随版本提交,
+      # 保持与 GitHub Release Body 一致),保证每个版本都有完整、可审阅的说明;
+      # 文件缺失时降级为 GitHub 原生 --generate-notes(按版本区间提交自动生成),
+      # 避免再次出现「版本发布但 Release 无变更说明」的占位文案。
       - name: Create GitHub Release
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          TAG="${GITHUB_REF_NAME}"
+          NOTES_FLAG="--notes-file docs/releases/${TAG}.md"
+          if [ -f "docs/releases/${TAG}.md" ]; then
+            echo "Using curated release notes from docs/releases/${TAG}.md"
+          else
+            echo "::warning::docs/releases/${TAG}.md not found — falling back to GitHub auto-generated notes"
+            NOTES_FLAG="--generate-notes"
+          fi
+          gh release create "${TAG}" \
             --repo picoaide/picoaide-harness \
-            --title "PicoAide Harness ${GITHUB_REF_NAME}" \
-            --notes "PicoAide Harness release ${GITHUB_REF_NAME}" \
+            --title "PicoAide Harness ${TAG}" \
+            ${NOTES_FLAG} \
             release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
         env:
           GH_TOKEN: ${{ github.token }}
