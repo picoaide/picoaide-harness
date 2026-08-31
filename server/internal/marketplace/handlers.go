@@ -16,7 +16,6 @@ import (
 type Handlers struct {
 	// 客户端面 /api/client/v2/marketplace
 	ListSkills      gin.HandlerFunc // GET /skills
-	SkillUpdates    gin.HandlerFunc // GET /skills/updates
 	GetSkill        gin.HandlerFunc // GET /skills/:name
 	DownloadArchive gin.HandlerFunc // GET /skills/:name/archive
 	// 服务端面 /api/server/admin
@@ -37,7 +36,6 @@ func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 	api := NewAPI(db, cacheDir)
 	return &Handlers{
 		ListSkills:              api.listSkills,
-		SkillUpdates:            api.skillUpdates,
 		GetSkill:                api.getSkill,
 		DownloadArchive:         api.downloadArchive,
 		ListSkillsAdmin:         func(c *gin.Context) { listSkillsAdmin(c, db) },

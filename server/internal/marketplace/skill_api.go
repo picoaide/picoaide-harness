@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -38,7 +37,6 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	base := "/api/client/v2/marketplace"
 	g := r.Group(base, serverauth.BearerAuth(a.DB))
 	g.GET("/skills", a.listSkills)
-	g.GET("/skills/updates", a.skillUpdates)
 	g.GET("/skills/:name", a.getSkill)
 	g.GET("/skills/:name/archive", a.downloadArchive)
 }
@@ -107,71 +105,6 @@ func (a *API) listSkills(c *gin.Context) {
 		skills = append(skills, skillJSON(s))
 	}
 	c.JSON(http.StatusOK, gin.H{"skills": skills})
-}
-
-// parseInstalled parses the `installed` query param: "name:version" pairs
-// separated by commas (URL-encoded). Bounds: ≤100 items, safe names.
-func parseInstalled(v string) (map[string]string, error) {
-	out := map[string]string{}
-	if v == "" {
-		return out, nil
-	}
-	items := strings.Split(v, ",")
-	if len(items) > 100 {
-		return nil, fmt.Errorf("installed 超过 100 项")
-	}
-	for _, it := range items {
-		name, ver, ok := strings.Cut(it, ":")
-		if !ok || name == "" || strings.TrimSpace(ver) == "" {
-			return nil, fmt.Errorf("installed 格式错误(应为 name:version,逗号分隔)")
-		}
-		if !util.SafePathSegment(name) {
-			return nil, fmt.Errorf("技能名不合法")
-		}
-		out[name] = strings.TrimSpace(ver)
-	}
-	return out, nil
-}
-
-// skillUpdates returns skills that have a newer version than the client's
-// installed set (auto-upgrade detection for connecting clients). Permission
-// model matches the catalog: admins see all enabled skills, everyone else
-// only granted skills; disabled skills never appear.
-func (a *API) skillUpdates(c *gin.Context) {
-	u, groups, ok := a.viewer(c)
-	if !ok {
-		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
-		return
-	}
-	installed, err := parseInstalled(c.Query("installed"))
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
-		return
-	}
-	if len(installed) == 0 {
-		c.JSON(http.StatusOK, gin.H{"updates": []gin.H{}, "count": 0})
-		return
-	}
-	list, err := a.accessibleSkills(u, groups)
-	if err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能列表读取失败")
-		return
-	}
-	updates := make([]gin.H, 0)
-	for _, s := range list {
-		clientVer, present := installed[s.Name]
-		if !present || s.Version == clientVer {
-			continue
-		}
-		updates = append(updates, gin.H{
-			"name":        s.Name,
-			"version":     s.Version,
-			"description": s.Description,
-			"author":      s.Author,
-			"archive_url": "/api/client/v2/marketplace/skills/" + s.Name + "/archive",
-		})
-	}
-	c.JSON(http.StatusOK, gin.H{"updates": updates, "count": len(updates)})
 }
 
 func (a *API) getSkill(c *gin.Context) {

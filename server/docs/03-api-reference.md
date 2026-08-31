@@ -101,7 +101,6 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/client/v2/marketplace/skills` | 技能建议清单 `[{name, version, description, author}]`(仅 enabled 且已授权) |
-| GET | `/api/client/v2/marketplace/skills/updates?installed=name:ver,...` | 技能版本检测(客户端自动升级):上报已装 `name:version`(逗号分隔,≤100 项),返回服务端较新的技能 `{updates:[{name, version, description, author, archive_url}], count}`;授权/下架技能不返回 |
 | GET | `/api/client/v2/marketplace/skills/:name` | 单个技能详情 |
 | GET | `/api/client/v2/marketplace/skills/:name/archive` | 下载技能包(上传模式:DB 归档;git 模式老行:`cacheDir/<name>-<version>.tar.gz` 只读回退);成功累加 `downloads`(0040) |
 | POST | `/api/client/v2/telemetry/skill-call` | 客户端上报技能调用 `{name, version?}` → 服务端累加 `calls`(shared_skills 优先,回退 market) |

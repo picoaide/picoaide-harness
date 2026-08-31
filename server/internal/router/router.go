@@ -94,7 +94,6 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	// 技能商城
 	mg := cli.Group("/marketplace", serverauth.BearerAuth(d.DB))
 	mg.GET("/skills", d.Market.ListSkills)
-	mg.GET("/skills/updates", d.Market.SkillUpdates)
 	mg.GET("/skills/:name", d.Market.GetSkill)
 	mg.GET("/skills/:name/archive", d.Market.DownloadArchive)
 

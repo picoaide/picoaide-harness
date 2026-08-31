@@ -66,7 +66,6 @@ description: PicoAide Harness 服务端 HTTP API 参考：认证、LLM 网关、
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/client/v2/marketplace/skills` | 技能目录（授权可见） |
-| GET | `/api/client/v2/marketplace/skills/updates?installed=...` | 技能版本检测：上报已装 `name:version`（≤100 项），返回较新的 `{updates, count}` |
 | GET | `/api/client/v2/marketplace/skills/:name/archive` | 下载技能包（`X-Skill-Version` / `X-Skill-Checksum`） |
 | GET | `/api/client/v2/shared-skills` | 共享技能清单（approved 且已授权 + 自己上传的全部状态） |
 | POST | `/api/client/v2/shared-skills` | 上传共享技能（归档 base64，≤16MB，含顶层 `SKILL.md`），直存 DB |
