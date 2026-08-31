@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.6.0 (2026-08-31)
+## v2.5.2 (2026-08-31)
 
 ### 新增
 - **按模型并发峰值统计**:网关内存 in-flight 计数(全部协议:chat/embeddings/FIM/messages/responses)+ 每 15s 采样落库(`model_concurrency_stats`,GREATEST 累计永不回退),服务器信息页「模型并发」卡片展示当前/90 天峰值/目标/峰值利用率(≥100% 标红)——扩容申请量化依据;目标在模型 `default_params.concurrency_target` 配置(如 flash 2500 / pro 500)
