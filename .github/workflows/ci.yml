@@ -76,20 +76,29 @@ jobs:
             # 是 /var/lib/postgresql/18/docker,compose 挂载 ./pg-data:/var/lib/postgresql
             # (父目录)。旧挂载点 /var/lib/postgresql/data 会被 entrypoint 判定为
             # "unused mount/volume" 而拒绝启动(exit 1),导致部署失败。
-            PG18_MOUNT="$(mktemp -d)"
-            PG18_CID="$(docker run -d --rm --name picoaide-ci-pg18 \
+            # 2026-08-31 修复:临时目录改用 $RUNNER_TEMP(runner 保证可写且宿主可
+            # 清理),不再依赖 /tmp;PG 容器非 root 写入的子目录用 chmod 兜底,
+            # 避免 rm 遇 Permission denied 报次级错误。
+            PG18_MOUNT="$(mktemp -d -p "${RUNNER_TEMP:-/tmp}")"
+            if ! PG18_CID="$(docker run -d --rm --name picoaide-ci-pg18 \
               -e POSTGRES_USER=picoaide -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=picoaide \
-              -v "$PG18_MOUNT:/var/lib/postgresql" postgres:18-alpine)"
+              -v "$PG18_MOUNT:/var/lib/postgresql" postgres:18-alpine)"; then
+              echo "::error::docker run postgres:18-alpine 启动失败(详见上方 docker 输出)"
+              rm -rf "$PG18_MOUNT"
+              exit 1
+            fi
             sleep 8
             if ! docker ps --format '{{.Names}}' | grep -qx picoaide-ci-pg18; then
               echo "::error::postgres:18-alpine 未能在挂载 /var/lib/postgresql 下启动(请检查 compose 挂载点)"
               docker logs "$PG18_CID" 2>&1 | tail -20 || true
               docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
-              rm -rf "$PG18_MOUNT"
+              chmod -R u+w "$PG18_MOUNT" 2>/dev/null || true
+              rm -rf "$PG18_MOUNT" 2>/dev/null || true
               exit 1
             fi
             docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
-            rm -rf "$PG18_MOUNT"
+            chmod -R u+w "$PG18_MOUNT" 2>/dev/null || true
+            rm -rf "$PG18_MOUNT" 2>/dev/null || true
             echo "postgres:18-alpine mount-point check OK"
           else
             # 审计 2026-08-25 A-01:docker 缺失时显式失败(此前静默跳过 =
