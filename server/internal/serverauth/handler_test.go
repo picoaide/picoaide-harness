@@ -265,6 +265,9 @@ func TestBootstrapAdmin(t *testing.T) {
 }
 
 // TestUsageSummaryEndpoint: GET /api/auth/usage 返回配额/余额/统计字段。
+// 跨月安全(2026-09 修复):「昨日」记录与「今日」若跨月(每月 1 号),
+// monthly_usage 只含本月(今日)部分,断言按实际日期动态计算——
+// 此前用固定期望 150 万,月初运行必然失败(经典时间边界 bug)。
 func TestUsageSummaryEndpoint(t *testing.T) {
 	r, db, cleanup := newTestAPI(t)
 	defer cleanup()
@@ -280,10 +283,23 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "m1", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now()
+	// 今日记录(恒在本月)
 	id, _ := serverstore.RecordUsage(db, uid, "m1", 1_000_000, 0)
-	setUsageAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00") // 今日 cost 2
+	setUsageAt(t, db, id, now.Format("2006-01-02")+" 09:00:00")
+	// 昨日记录(可能跨月:8/31 23:00)
 	id2, _ := serverstore.RecordUsage(db, uid, "m1", 500_000, 0)
-	setUsageAt(t, db, id2, time.Now().AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00") // 昨日 cost 1
+	setUsageAt(t, db, id2, now.AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+
+	yesterday := now.AddDate(0, 0, -1)
+	sameMonth := yesterday.Year() == now.Year() && yesterday.Month() == now.Month()
+	// 跨月时:月度统计不含昨日记录(它属于上月)
+	monthlyUsage := int64(1_000_000)
+	monthlyCost := 2.0
+	if sameMonth {
+		monthlyUsage = 1_500_000
+		monthlyCost = 3.0
+	}
 
 	// 个人配额:token 100000、金额 100
 	q := int64(100000)
@@ -309,23 +325,25 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	if out["quota_tokens"].(float64) != 100000 || out["quota_money"].(float64) != 100 {
 		t.Fatalf("quota = %v/%v", out["quota_tokens"], out["quota_money"])
 	}
-	// 本月已用 150 万 token / 3 元 → 剩余 985000 / 97
-	if out["monthly_usage"].(float64) != 1_500_000 {
-		t.Fatalf("monthly_usage = %v", out["monthly_usage"])
+	if out["monthly_usage"].(float64) != float64(monthlyUsage) {
+		t.Fatalf("monthly_usage = %v, want %d", out["monthly_usage"], monthlyUsage)
 	}
-	// 剩余 = 配额 - 本月已用 = 100000 - 1500000 = -1400000(超额为负)
-	if out["remaining_tokens"].(float64) != -1_400_000 {
-		t.Fatalf("remaining_tokens = %v", out["remaining_tokens"])
+	// 剩余 = 配额 - 本月已用(超额为负)
+	wantRemaining := float64(q) - float64(monthlyUsage)
+	if out["remaining_tokens"].(float64) != wantRemaining {
+		t.Fatalf("remaining_tokens = %v, want %v", out["remaining_tokens"], wantRemaining)
 	}
-	if out["monthly_cost"].(float64) != 3.0 {
-		t.Fatalf("monthly_cost = %v", out["monthly_cost"])
+	if out["monthly_cost"].(float64) != monthlyCost {
+		t.Fatalf("monthly_cost = %v, want %v", out["monthly_cost"], monthlyCost)
 	}
-	if out["remaining_money"].(float64) != 97.0 {
-		t.Fatalf("remaining_money = %v", out["remaining_money"])
+	wantRemainingMoney := 100.0 - monthlyCost
+	if out["remaining_money"].(float64) != wantRemainingMoney {
+		t.Fatalf("remaining_money = %v, want %v", out["remaining_money"], wantRemainingMoney)
 	}
 	if out["today_usage"].(float64) != 1_000_000 || out["today_cost"].(float64) != 2.0 {
 		t.Fatalf("today = %v/%v", out["today_usage"], out["today_cost"])
 	}
+	// 昨日:按真实"昨天"查询(跨月时仍是 8/31 的记录,不随断言分支变化)
 	if out["yesterday_usage"].(float64) != 500_000 || out["yesterday_cost"].(float64) != 1.0 {
 		t.Fatalf("yesterday = %v/%v", out["yesterday_usage"], out["yesterday_cost"])
 	}

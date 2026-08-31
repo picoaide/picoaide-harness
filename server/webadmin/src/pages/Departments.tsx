@@ -141,7 +141,7 @@ export default function Departments() {
     <div className="space-y-4">
       <PageHeader
         title="部门管理"
-        desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门"
+        desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门;月度预算按月实时统计,每月 1 日自动重置,超限自动拦截"
         actions={<Button onClick={() => openDeptEdit()}>新建部门</Button>}
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
