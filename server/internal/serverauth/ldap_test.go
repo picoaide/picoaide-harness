@@ -11,7 +11,7 @@ import (
 )
 
 // fakeLDAPConn is an in-memory stand-in for *ldap.Conn exercising the
-// ldapConn seam: bind, search (user vs group), close.
+// ldapConn seam: bind, search (user vs group), paging, close.
 type fakeLDAPConn struct {
 	userDN       string
 	userPassword string
@@ -20,6 +20,9 @@ type fakeLDAPConn struct {
 	passwords    map[string]string
 	filters      []string
 	binds        []string
+	paged        bool
+	// searchResults: filter → 精确返回值(优先命中;否则回退旧单用户行为)。
+	searchResults map[string]*ldap.SearchResult
 }
 
 func (f *fakeLDAPConn) Bind(dn, password string) error {
@@ -38,6 +41,12 @@ func (f *fakeLDAPConn) Bind(dn, password string) error {
 
 func (f *fakeLDAPConn) Search(req *ldap.SearchRequest) (*ldap.SearchResult, error) {
 	f.filters = append(f.filters, req.Filter)
+	// 精确命中 map(目录扫描/组枚举测试用)
+	if f.searchResults != nil {
+		if r, ok := f.searchResults[req.Filter]; ok {
+			return r, nil
+		}
+	}
 	if strings.HasPrefix(req.Filter, "(uid=") {
 		if f.userDN == "" {
 			return &ldap.SearchResult{}, nil
@@ -48,6 +57,13 @@ func (f *fakeLDAPConn) Search(req *ldap.SearchRequest) (*ldap.SearchResult, erro
 		}}}, nil
 	}
 	return &ldap.SearchResult{Entries: f.groupEntries}, nil
+}
+
+// SearchWithPaging 与 Search 同语义(fake 不分页):委托给 Search,
+// 并记录调用了 paging 接口(目录扫描路径必须走分页)。
+func (f *fakeLDAPConn) SearchWithPaging(req *ldap.SearchRequest, _ uint32) (*ldap.SearchResult, error) {
+	f.paged = true
+	return f.Search(req)
 }
 
 func (f *fakeLDAPConn) Close() error { return nil }

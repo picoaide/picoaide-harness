@@ -73,3 +73,54 @@ func TestGetPublicAuthMethodsForcesLocal(t *testing.T) {
 		t.Fatalf("methods = %v, want local always present", out.Methods)
 	}
 }
+
+// TestGetPublicAuthMethodsLDAPConfigured:LDAP 配置齐全(config 后)必须
+// 返回 configured=true —— 否则客户端登录页 LDAP 按钮永久灰(用户报告:
+// "配置好以后,显示了ldap登录,但是框是灰色")。
+func TestGetPublicAuthMethodsLDAPConfigured(t *testing.T) {
+	db := mustDB(t)
+	r := gin.New()
+	RegisterAdminRoutes(r, db)
+	// 未配置: enabled 含 ldap 但缺必填 → configured=false
+	if err := serverstore.SetSetting(db, "auth.enabled", "local,ldap"); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	check := func() map[string]bool {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/api/server/admin/auth/methods", nil))
+		var out struct {
+			Methods []struct {
+				Name       string `json:"name"`
+				Configured bool   `json:"configured"`
+			} `json:"methods"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for _, x := range out.Methods {
+			m[x.Name] = x.Configured
+		}
+		return m
+	}
+	m := check()
+	if m["ldap"] {
+		t.Fatalf("ldap should be unconfigured before settings: %v", m)
+	}
+	// 配置齐全 → configured=true
+	for key, val := range map[string]string{
+		"ldap.server_url":    "ldap://x:389",
+		"ldap.bind_dn":       "cn=admin,dc=x",
+		"ldap.bind_password": "secret",
+		"ldap.base_dn":       "dc=x",
+	} {
+		if err := serverstore.SetSetting(db, key, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m = check()
+	if !m["ldap"] {
+		t.Fatalf("ldap should be configured after settings: %v", m)
+	}
+}

@@ -17,10 +17,13 @@ const ldapTimeoutDefault = 5 * time.Second
 var ldapTimeout = ldapTimeoutDefault
 
 // ldapConn is the subset of *ldap.Conn used by LDAPProvider; it exists so
-// tests can substitute an in-memory fake.
+// tests can substitute an in-memory fake. SearchWithPaging backs the
+// directory-wide sync/probe (large directories exceed a server's default
+// size limit; go-ldap handles the paging control transparently).
 type ldapConn interface {
 	Bind(dn, password string) error
 	Search(req *ldap.SearchRequest) (*ldap.SearchResult, error)
+	SearchWithPaging(req *ldap.SearchRequest, size uint32) (*ldap.SearchResult, error)
 	Close() error
 }
 
@@ -75,19 +78,133 @@ func (p *LDAPProvider) dialConn() (ldapConn, error) {
 	return conn, nil
 }
 
-// TestConnection verifies LDAP connectivity with a service-account bind
-// (v3b §1.2). Used by the webadmin "测试连接" button; does not authenticate
-// any specific user.
-func (p *LDAPProvider) TestConnection() error {
+// ldapSearchPagingSize bounds each LDAP page during full-directory scans
+// (sync/probe). Small pages keep memory flat and avoid server-side
+// size-limit rejections on very large directories.
+const ldapSearchPagingSize = 200
+
+// DirectoryUser is one directory entry captured by a full-directory scan.
+type DirectoryUser struct {
+	Username    string   `json:"username"`
+	DisplayName string   `json:"display_name"`
+	Email       string   `json:"email"`
+	Groups      []string `json:"groups"`
+}
+
+// DirectoryReport summarizes a full-directory scan (webadmin 测试连接).
+type DirectoryReport struct {
+	Users  int             `json:"users"`
+	Groups int             `json:"groups"`
+	Sample []DirectoryUser `json:"sample"`
+}
+
+// scanEntries runs a paged full-subtree search on an already-bound conn.
+func (p *LDAPProvider) scanEntries(conn ldapConn, filter string, attrs []string) ([]*ldap.Entry, error) {
+	req := &ldap.SearchRequest{
+		BaseDN:     p.BaseDN,
+		Scope:      ldap.ScopeWholeSubtree,
+		Filter:     filter,
+		Attributes: attrs,
+	}
+	res, err := conn.SearchWithPaging(req, ldapSearchPagingSize)
+	if err != nil {
+		return nil, err
+	}
+	return res.Entries, nil
+}
+
+// userScanFilter 把用户过滤器里的 %s 占位替换为 *:登录时 %s=用户名,全量
+// 扫描时没有单用户概念,应匹配"所有满足该结构过滤器的条目"。管理员若无
+// 占位(如 (objectClass=person)),原样使用。* 由过滤器结构保证不在
+// 参数位置(过滤器整体是管理员配置,占位符位置才是值),无需转义。
+func (p *LDAPProvider) userScanFilter() string {
+	if strings.Contains(p.UserFilter, "%s") {
+		return strings.ReplaceAll(p.UserFilter, "%s", "*")
+	}
+	return p.UserFilter
+}
+
+// groupScanFilter 把组过滤器里的 %s(成员占位,如 (member=%s))替换为 *:
+// (member=*) 是合法存在性断言,匹配所有含 member 属性的条目(即组对象)。
+func (p *LDAPProvider) groupScanFilter() string {
+	if strings.Contains(p.GroupFilter, "%s") {
+		return strings.ReplaceAll(p.GroupFilter, "%s", "*")
+	}
+	return p.GroupFilter
+}
+
+// ProbeDirectory 绑定服务账号后统计目录规模:用户数、组数与用户样例(前 5,
+// 含每个样例用户的组)。用于 webadmin「测试连接」,让管理员在保存前就能
+// 看到 LDAP 连通 + 过滤器匹配结果。单个连接完成,避免每样例用户重复 bind。
+func (p *LDAPProvider) ProbeDirectory() (*DirectoryReport, error) {
 	conn, err := p.dialConn()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 	if err := conn.Bind(p.BindDN, p.BindPassword); err != nil {
-		return errors.New("ldap bind failed: " + err.Error())
+		return nil, errors.New("ldap bind failed")
 	}
-	return nil
+	users, err := p.scanEntries(conn, p.userScanFilter(), []string{"uid", "cn", "mail", p.GroupAttr})
+	if err != nil {
+		return nil, err
+	}
+	report := &DirectoryReport{Users: len(users)}
+	if p.GroupFilter != "" {
+		groups, gerr := p.scanEntries(conn, p.groupScanFilter(), []string{p.GroupAttr})
+		if gerr != nil {
+			return nil, gerr
+		}
+		report.Groups = len(groups)
+	}
+	for i, e := range users {
+		if i >= 5 {
+			break
+		}
+		gres, gerr := p.groupsOfEntry(conn, e.DN)
+		if gerr != nil {
+			gres = nil // 组解析失败不影响整体报告(样例组显示为无)
+		}
+		report.Sample = append(report.Sample, DirectoryUser{
+			Username:    entryUserName(e, ""),
+			DisplayName: e.GetAttributeValue("cn"),
+			Email:       e.GetAttributeValue("mail"),
+			Groups:      gres,
+		})
+	}
+	return report, nil
+}
+
+// entryUserName 取条目的 uid 属性作为规范用户名(与 Authenticate 同一规则),
+// 缺失时回退 dst。
+func entryUserName(e *ldap.Entry, dst string) string {
+	if name := e.GetAttributeValue("uid"); name != "" {
+		return name
+	}
+	return dst
+}
+
+// groupsOfEntry 查询某用户/条目的全部组(复用 group_filter 单用户语义)。
+func (p *LDAPProvider) groupsOfEntry(conn ldapConn, dn string) ([]string, error) {
+	if p.GroupFilter == "" {
+		return nil, nil
+	}
+	res, err := conn.Search(&ldap.SearchRequest{
+		BaseDN:     p.BaseDN,
+		Scope:      ldap.ScopeWholeSubtree,
+		Filter:     strings.ReplaceAll(p.GroupFilter, "%s", ldap.EscapeFilter(dn)),
+		Attributes: []string{p.GroupAttr},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range res.Entries {
+		if name := e.GetAttributeValue(p.GroupAttr); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out, nil
 }
 
 // Authenticate verifies the password via a user bind and resolves groups:
@@ -134,20 +251,11 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		Source:      "external",
 	}
 	if p.GroupFilter != "" {
-		gres, err := conn.Search(&ldap.SearchRequest{
-			BaseDN:     p.BaseDN,
-			Scope:      ldap.ScopeWholeSubtree,
-			Filter:     strings.ReplaceAll(p.GroupFilter, "%s", ldap.EscapeFilter(entry.DN)),
-			Attributes: []string{p.GroupAttr},
-		})
+		groups, err := p.groupsOfEntry(conn, entry.DN)
 		if err != nil {
 			return UserInfo{}, err
 		}
-		for _, e := range gres.Entries {
-			if name := e.GetAttributeValue(p.GroupAttr); name != "" {
-				ui.Groups = append(ui.Groups, name)
-			}
-		}
+		ui.Groups = groups
 	}
 	return ui, nil
 }
