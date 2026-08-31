@@ -2,6 +2,7 @@
 # PicoAide 服务端 Caddyfile — 手动证书模式 (MANUAL)
 # ============================================================
 # 用途:部署者使用正式 PEM 证书(企业 CA / 购买证书 / 已有中间证书),或先自签占位
+# 域名:本文件经 compose 传递 {$DOMAIN} 环境变量,无需手工替换
 # 证书文件位置(compose 已挂载 ./certs → /certs):
 #   /certs/server.crt  (证书链,可含中间证书)
 #   /certs/server.key  (私钥)
@@ -15,9 +16,9 @@
 # 替换正式证书:
 #   1. 用新证书覆盖 certs/server.crt 与 certs/server.key(权限 0600)
 #   2. docker compose restart caddy
-# 启用:cp Caddyfile.manual Caddyfile && docker compose restart caddy
+# 启用:compose 挂载本文件(TLS_MODE=manual)
 # ============================================================
-picoaide.example.com {
+{$DOMAIN} {
 	# MANUAL 模式:显式指定证书文件(改动后必须 restart caddy 生效)
 	tls /certs/server.crt /certs/server.key
 

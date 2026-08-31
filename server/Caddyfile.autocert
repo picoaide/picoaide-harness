@@ -2,15 +2,15 @@
 # PicoAide 服务端 Caddyfile — 自动证书模式 (AUTO)
 # ============================================================
 # 用途:有公网域名且 80/443 对外开放时,Caddy 自动申请 Let's Encrypt 正式证书
+# 域名:本文件经 compose 传递 {$DOMAIN} 环境变量,无需手工替换
 # 前置条件:
 #   1. 域名解析到本服务器(直接 A/AAAA 记录,非 CDN 代理,否则 ACME 验证会失败)
 #   2. 80/443 端口可被公网访问(Let's Encrypt HTTP-01 挑战需要)
-# 启用:
-#   cp Caddyfile.autocert Caddyfile && docker compose restart caddy
+# 启用:compose 挂载本文件(TLS_MODE=auto)
 # 验证:首次启动 Caddy 自动签发并续期,浏览器 https://<域名> 显示绿色锁
 # 注意:本文件没有 tls 指令 = Caddy 默认自动 HTTPS(自动申请/续期证书)
 # ============================================================
-picoaide.example.com {
+{$DOMAIN} {
 	# 反代到后端 picoaide-server(compose 私有网段),保留原始 Host 与真实来源 IP
 	reverse_proxy server:8080 {
 		header_up Host {host}

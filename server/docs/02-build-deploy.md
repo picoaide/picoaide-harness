@@ -38,7 +38,7 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 |------|------|
 | `-addr` | 监听地址,默认 `:8080` |
 | `-data` | 数据目录(0700),默认 `./data`;内含 master key 文件与品牌/归档静态数据(数据库在 PostgreSQL) |
-| `-db-driver` | 数据库后端:仅接受 `pg`(默认)与 `pg-external`(部署模式别名,均为 PostgreSQL);需 `-pg-dsn` |
+| `-db-driver` | 数据库后端:仅接受 `pg`(默认;`pg-external` 为历史兼容别名,部署层已不再使用,单 compose 固定内置 PostgreSQL);需 `-pg-dsn` |
 | `-pg-dsn` | PostgreSQL 连接串(如 `postgres://user:pass@host:5432/db?sslmode=disable`);必填 |
 | `--bootstrap-admin` | 初始超管用户名;首次启动时用 `PICOAI_ADMIN_PASSWORD` 创建(已存在则校验其为管理员);**首次启动后不可重复创建** |
 | `PICOAI_ADMIN_PASSWORD` | 初始超管密码(**必须**与 `--bootstrap-admin` 同时提供,否则启动失败) |

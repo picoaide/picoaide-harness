@@ -1,31 +1,32 @@
 # ============================================================
-# PicoAide 服务端 Docker Compose 部署 —— PostgreSQL 内置容器模式(PG-only 2026-08)
+# PicoAide Harness 服务端 Docker Compose 部署(单文件)
 # ============================================================
-# 完整可独立运行的 compose:包含 caddy + server + postgres 三个服务。
-# 这是默认部署文件(原 sqlite 模式已下线;PG-only)。
+# 本文件是完整 compose:caddy(反代+TLS) + server(PicoAide 服务端)
+# + postgres(内置 PostgreSQL 18),一个文件直接部署:
 #
-# 用途:DB_MODE=pg(默认)时使用(部署脚本 install/deploy 生成、或手动):
-#   cp .env.example .env 并填写 DOMAIN / PICOAI_ADMIN_PASSWORD(必改)
-#   cp Caddyfile.<模式> Caddyfile   # autocert=自动证书 / manual=手动证书
-#   docker compose -f docker-compose.yml up -d
-#   docker compose -f docker-compose.yml down   # 停止
-#   docker compose -f docker-compose.yml logs -f
+#   cp .env.example .env && docker compose up -d
 #
-# 服务与固定 IP:
-#   - caddy(172.28.0.2,CADDY_IP):HTTPS 反代,唯一对外入口
-#   - server(172.28.0.3,SERVER_IP):PicoAide 服务端,仅内网可达
-#   - postgres(172.28.0.4,PG_IP):内置 PostgreSQL 18,数据落 ./pg-data
+# .env 必填(其余均有默认值,见下方变量说明):
+#   PICOAI_ADMIN_PASSWORD  首启超管密码(已有 admin 后幂等跳过,可置空清除明文)
+#   PG_PASSWORD            内置 postgres 容器密码
+#   DOMAIN                 对外域名或 IP(默认示例值,生产必改)
 #
-# 环境变量(见 .env,deploy.sh 自动生成):
-#   DOMAIN  PICOAI_ADMIN_PASSWORD  ADMIN_USER  TLS_MODE  SERVER_IMAGE
-#   DB_MODE=pg  PG_PASSWORD  PG_DSN  PG_IMAGE  PG_IP
-#   NETWORK_SUBNET  CADDY_IP  SERVER_IP  TZ
+# 证书模式(由 .env 的 TLS_MODE 决定挂载哪个 Caddyfile 模板):
+#   manual   → Caddyfile.manual   (自签占位/企业 CA;支持 IP)
+#   auto     → Caddyfile.autocert (Let's Encrypt 自动;需公网域名直连)
+#   internal → Caddyfile          (Caddy 本地 CA;纯内网开箱即用)
 #
-# 注意:
-#   - 本文件是完整 compose,可单独使用(不再依赖主 docker-compose.yml)
-#   - postgres 不发布宿主机端口,仅内网(picoaide-net)可达
-#   - 数据目录 ./pg-data(bind mount,冷备=停服拷贝目录);勿手工 chown
-#     (postgres 官方镜像 entrypoint 自动处理目录所有权)
+# 服务与固定 IP(容器重建后不变):
+#   caddy(172.28.0.2)  唯一对外入口,HTTPS 反代 + TLS 终结
+#   server(172.28.0.3) PicoAide 服务端,仅 expose 8080 内网可达
+#   postgres(172.28.0.4) 内置 PostgreSQL 18,不发布宿主机端口
+#
+# 数据目录(全部 ./ 当前目录 bind mount,升级不丢):
+#   ./picoaide-data  master.key + 应用数据(0700)
+#   ./pg-data        PostgreSQL 数据(PG18 起容器内落 18/docker/ 子目录)
+#   ./caddy-data     Caddy 自动证书库(auto 模式)
+#   ./caddy-config   Caddy 配置
+#   ./certs          手动证书(manual 模式,certs/server.crt + server.key)
 # ============================================================
 
 services:
@@ -36,12 +37,15 @@ services:
     ports:
       - "${CADDY_HTTP_PORT:-80}:80"
       - "${CADDY_HTTPS_PORT:-443}:443"
-    # 手动证书模式需要挂载 certs/ 目录(auto 模式无 certs/ 时挂载空目录无害)
+    # 按 TLS_MODE 选择 Caddyfile 模板(默认 manual);域名用 {$DOMAIN} 在
+    # Caddyfile 内插值,模板内无需写死域名
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile.${TLS_MODE:-manual}:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
       - ./caddy-data:/data
       - ./caddy-config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-picoaide.example.com}
     networks:
       picoaide-net:
         ipv4_address: ${CADDY_IP:-172.28.0.2}
@@ -77,9 +81,9 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./picoaide-data:/data
-    # pg 模式:command 为 PostgreSQL 后端启动参数(compose 对 command 是整组替换,
-    # 必须写全——含 bootstrap-admin;更短的写法见 deploy.sh 生成的 .env)
-    command: ["--bootstrap-admin", "${ADMIN_USER:-admin}", "-db-driver", "pg", "-pg-dsn", "${PG_DSN:?PG_DSN must be set in .env}"]
+    # DSN 由 PG_PASSWORD 派生(compose 对 command 是整组替换,必须写全——
+    # 含 bootstrap-admin);PG_PASSWORD 用 :? 强制必填,缺失时 compose 直接报错
+    command: ["--bootstrap-admin", "${ADMIN_USER:-admin}", "-db-driver", "pg", "-pg-dsn", "postgres://picoaide:${PG_PASSWORD:?PG_PASSWORD must be set in .env}@postgres:5432/picoaide"]
     depends_on:
       postgres:
         condition: service_healthy

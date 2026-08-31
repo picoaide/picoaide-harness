@@ -26,14 +26,17 @@
 - server 不映射宿主机端口,外部流量只能经 Caddy 进入(内网隔离 + 攻击面收敛)。
 - **所有持久化数据均用 `./` 当前目录 bind mount,不使用命名卷**:`picoaide-data/`(应用数据+主密钥)、`caddy-data/`(Caddy 自动证书库)、`caddy-config/`(Caddy 配置)+ `certs/`(手动证书);pg 模式另加 `pg-data/`(内置 postgres 数据,挂载到容器 `/var/lib/postgresql`)。备份 = 直接拷走部署目录或 `deploy.sh backup`。
 
-### 0.1 数据库后端:PostgreSQL(PG-only 2026-08)
+### 0.1 数据库后端:PostgreSQL(唯一形态,内置容器)
 
-> 2026-08 起 SQLite 已全面下线,服务端必须使用 PostgreSQL。
+> 2026-08 起 SQLite 已全面下线,服务端只支持 PostgreSQL,且部署形态固定为
+> **内置 postgres 容器**(`docker-compose.yml` 单文件含 caddy+server+postgres
+> 三服务)。早前的 `DB_MODE` / `pg-external`(外部实例)模式已删除。
 
-| 模式 | DB_MODE | 数据落地 | 适用 |
-|---|---|---|---|
-| 内置 PostgreSQL(默认) | `pg` | `pg-data/`(容器 `postgres:18-alpine`,固定 IP `.4`) | 默认;完整 PG 能力 |
-| 外部 PostgreSQL | `pg-external` | 外部实例(`PG_DSN` 指定) | 企业已有 PG 统一运维 |
+| 项目 | 值 |
+|---|---|
+| 数据落地 | `pg-data/`(容器 `postgres:18-alpine`,固定 IP `.4`) |
+| 连接 | 容器内 `postgres://picoaide:<密码>@postgres:5432/picoaide` |
+| 密码 | `.env` 的 `PG_PASSWORD`(compose 强必填,缺失时 `docker compose up` 直接报错) |
 
 > **PG18 挂载点变化(重要)**:PostgreSQL 18 起官方镜像把 PGDATA 改为
 > `/var/lib/postgresql/<major>/docker`,compose 挂载 **父目录**
@@ -127,26 +130,19 @@ docker load < dist/picoaide-server-v2.4.6.tar
 git clone https://github.com/picoaide/picoaide-harness.git
 cd server
 
-# 1. 配置(必改密码与域名)
+# 1. 配置(必改密码与域名;仅 4 个键)
 cp .env.example .env
-vi .env            # DOMAIN / PICOAI_ADMIN_PASSWORD 必改;TLS_MODE 按 §3 决策
+vi .env            # DOMAIN / PICOAI_ADMIN_PASSWORD / PG_PASSWORD 必改;TLS_MODE 按 §3 决策
 
-# 2. 证书:按模式选择 Caddyfile
-cp Caddyfile.manual Caddyfile     # 手动证书(自签占位,推荐内网)
-# 或 cp Caddyfile.autocert Caddyfile   # 自动证书(公网域名)
-# 手动证书若 certs/ 为空,先生成自签占位:
+# 2. 证书(compose 按 TLS_MODE 自动挂载对应 Caddyfile 模板,无需手工 cp)
+#    manual 且 certs/ 为空时,先生成自签占位(部署脚本 install 会自动生成):
 mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -keyout certs/server.key -out certs/server.crt \
   -subj "/CN=<域名>" -addext "subjectAltName=DNS:<域名>"   # IP 用 subjectAltName=IP:<IP>
 chmod 600 certs/server.key
 
-# 3. 启动(默认 DB_MODE=pg,主 docker-compose.yml 即 PostgreSQL 模式)
+# 3. 启动(单 compose 文件,含 caddy+server+postgres)
 docker compose up -d
-
-# 3'. PostgreSQL 模式(主 docker-compose.yml 即 PostgreSQL 内置模式,含 caddy+server+postgres):
-#     .env 设 DB_MODE=pg 并配 PG_PASSWORD;部署脚本自动选用,手动则:
-#     docker compose up -d
-#     外部 PG 模式:DB_MODE=pg-external + PG_DSN → docker compose -f docker-compose.pg-ext.yml up -d
 
 # 4. 验证
 docker compose ps                 # server healthy
@@ -175,8 +171,8 @@ docker inspect picoaide-server -f '{{range .NetworkSettings.Networks}}{{.IPAddre
 ### 3.2 证书切换与更新
 
 ```bash
-# 从 manual 换 auto: 改 .env TLS_MODE=auto → 重新生成 Caddyfile(容器内模板替换)
-#   或手动: cp Caddyfile.autocert Caddyfile && docker compose restart caddy
+# 从 manual 换 auto: 改 .env TLS_MODE=auto → docker compose up -d
+#   (compose 按 TLS_MODE 自动切换挂载的 Caddyfile 模板,无需手工 cp)
 # 换正式证书(manual): 覆盖 certs/server.crt + certs/server.key(0600) → docker compose restart caddy
 # Caddy 自动续期(auto): Caddy 自动处理,无需干预;备份见 §6
 ```
@@ -191,22 +187,20 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harnes
 
 > 注意:必须用 `bash` 执行(脚本使用 bash 专属语法);`sh -c`(Debian/Ubuntu 上 `/bin/sh`=dash)会解析失败。
 
-**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式/数据库后端)→ 下载/复制部署资产(docker-compose.yml(PostgreSQL 内置模式)+ docker-compose.pg-ext.yml(外部 PG)+ Caddyfile 三模板(manual/auto/internal)+ .env.example + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、Caddyfile、镜像启动、健康等待)→ 打印部署摘要。
+**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式)→ 下载/复制部署资产(单 `docker-compose.yml`(caddy+server+postgres)+ Caddyfile 三模板(manual/auto/internal)+ .env.example + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、镜像启动、健康等待)→ 打印部署摘要。
 
 非交互(无人值守,需 root/sudo):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
-  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password DB_MODE=pg bash
+  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
 ```
 
 | 安装器环境变量 | 默认 | 说明 |
 |---|---|---|
 | `DOMAIN` | - | 对外域名或 IP(生产必改;交互时询问,非交互必填) |
 | `INSTALL_DIR` | /data/picoaide/deploy | 部署目录(兼容旧版 `DEPLOY_DIR`) |
-| `DB_MODE` | pg | pg(内置容器,默认)/ pg-external(已有实例) |
-| `PG_PASSWORD` | 随机生成 | pg 模式:postgres 容器密码 |
-| `PG_DSN` | - | pg-external 必填(如 `postgres://user:pass@host:5432/db`) |
+| `PG_PASSWORD` | 随机生成 | 内置 postgres 容器密码 |
 | `ADMIN_USER` / `ADMIN_PASS` | admin / 随机生成 | 超管账号/密码(兼容 `PICOAI_ADMIN_PASSWORD`) |
 | `TLS_MODE` | manual | manual / auto / internal(本地自签,内网开箱即用) |
 | `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry;当前所有发布镜像均为 PG 模式 |
@@ -214,7 +208,7 @@ curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/se
 | `DOCKER_MIRROR` | 空 | docker 安装镜像源(如清华 `https://mirrors.tuna.tsinghua.edu.cn/docker-ce`) |
 | `MIRROR_URL` | 空 | 通用镜像加速提示(apt 源需自行改) |
 | `DEPLOY_BASE_URL` | harness master/server | 资产下载基址(可指向 tag 路径固定版本) |
-| `SKIP_IMAGE_CHECK=1` | 空 | pg 模式跳过镜像 `-db-driver` 探测 |
+| `SKIP_IMAGE_CHECK=1` | 空 | 跳过镜像 `-db-driver` 探测 |
 | `REINSTALL=yes` | 空 | `.env` 已存在时清除重装(默认安全退出) |
 | `NO_DEPS` | 空 | 同 `SKIP_DEPS`(兼容) |
 
@@ -226,18 +220,18 @@ cd server
 # 或(兼容 curl 一键): DOMAIN=picoaide.example.com ./scripts/install-server.sh
 ```
 
-### 4.1 子命令(db 感知)
+### 4.1 子命令(single compose)
 
 | 子命令 | 说明 |
 |---|---|
-| `install` | 首次部署:命令检查 → 网段/端口预检 → DNS/CDN 校验(auto)→ 证书准备(manual 自签)→ 生成 .env/Caddyfile → 拉镜像启动 → 等就绪 → 打印账号密码与替换证书指引 |
+| `install` | 首次部署:命令检查 → 网段/端口预检 → DNS/CDN 校验(auto)→ 证书准备(manual 自签)→ 生成最小 .env(4 键)→ 拉镜像启动 → 等就绪 → 打印账号密码与替换证书指引 |
 | `update` | 拉新镜像 → 重建重启(数据目录不变;容器依次重建,短暂停机) |
 | `status` | 容器状态 + 健康检查 + 固定 IP 一览 |
 | `logs [-t]` | 查看日志(--tail=200;`-t` 跟踪) |
-| `backup` | 打包 `picoaide-data`(含 master.key)+ auto 模式 `caddy-data` + pg 模式 `pg_dump` |
+| `backup` | 打包 `picoaide-data`(含 master.key)+ auto 模式 `caddy-data` + PostgreSQL `pg_dump` |
 | `uninstall [--volumes]` | 停容器;`--volumes` 连数据目录一并删除(需确认,交互或 `UNINSTALL_VOLUMES=yes`) |
 
-`install`/`update`/`status`/`logs`/`backup`/`uninstall` 都会根据 `.env` `DB_MODE` 选择 compose 文件(pg → 主 `docker-compose.yml` caddy+server+postgres;pg-external → `docker-compose.pg-ext.yml` caddy+server,外部 PG),无需手工指定 `-f`。
+所有子命令直接作用于单 `docker-compose.yml`(caddy+server+postgres),无需手工指定 `-f` 或切换文件。
 
 ### 4.2 环境变量(非交互)
 
@@ -254,11 +248,9 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 | `ADMIN_USER` / `PICOAI_ADMIN_PASSWORD` | admin / 随机生成 | 首次启动创建超管;已有 admin 后密码可清空 |
 | `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry |
 | `NETWORK_SUBNET` / `CADDY_IP` / `SERVER_IP` | 172.28.0.0/24 / .2 / .3 | 私有网段与固定 IP |
-| `DB_MODE` | pg | pg(内置容器,默认)/ pg-external(已有实例,见 §0) |
-| `PG_PASSWORD` | 随机生成 | pg 模式:内置 postgres 容器密码 |
-| `PG_DSN` | - | pg-external 必填;pg 模式由脚本生成 `postgres://picoaide:<pw>@postgres:5432/picoaide` |
-| `PG_IMAGE` | postgres:18-alpine | pg 模式内置镜像(可换内网镜像) |
-| `PG_IP` | 172.28.0.4 | pg 容器固定 IP(需在 NETWORK_SUBNET 内) |
+| `PG_PASSWORD` | 随机生成 | 内置 postgres 容器密码(compose 强必填) |
+| `PG_IMAGE` | postgres:18-alpine | 内置镜像(可换内网镜像) |
+| `PG_IP` | 172.28.0.4 | postgres 容器固定 IP(需在 NETWORK_SUBNET 内) |
 | `CONFIRM_CDN` | 空 | auto 模式非直连时 `yes` 跳过人工确认 |
 | `REINSTALL` | 空 | `.env` 已存在时 `yes` 清除重装(否则安全退出) |
 | `INSTALL_DIR`(install-server.sh) | /data/picoaide/deploy | 部署目录(旧版 INSTALL_DIR 兼容) |
