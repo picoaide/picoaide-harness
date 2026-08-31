@@ -16,7 +16,10 @@ export async function handleDesktopDirectoryPickerRequest(
   reportError: (cause: unknown) => void = () => {},
 ): Promise<void> {
   if (req.method !== 'POST') return finishJson(res, 405, { error: 'method not allowed' })
-  if (req.headers.origin !== expectedOrigin) return finishJson(res, 403, { error: 'forbidden' })
+  // 同源 POST 也允许无 Origin(本地脚本/非浏览器客户端);跨站请求无法隐藏 Origin。
+  if (req.headers.origin !== undefined && req.headers.origin !== expectedOrigin) {
+    return finishJson(res, 403, { error: 'forbidden' })
+  }
   try {
     const response: DesktopDirectoryPickerResponse = { path: await pickDirectory() }
     finishJson(res, 200, response)

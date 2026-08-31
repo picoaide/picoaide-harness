@@ -4,7 +4,7 @@ import { open } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
-import type {} from './runtime.ts'
+import type { UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
 import {
   checkForStableUpdate,
@@ -60,6 +60,8 @@ export function apply(ctx: Context, config: Config): void {
     let checking = false
     let availableVersion: string | undefined
     let downloadingVersion: string | undefined
+    let downloadProgress: UpdateDownloadProgressSnapshot | undefined
+    let lastError: 'network' | 'release-missing' | 'unsupported' | undefined
     let state: UpdateStateV2 = EMPTY_STATE
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     let requestTimer: ReturnType<typeof setTimeout> | undefined
@@ -79,6 +81,8 @@ export function apply(ctx: Context, config: Config): void {
           isPackaged: adapter.isPackaged,
           canDownload: adapter.canDownload,
           currentVersion: adapter.currentVersion,
+          downloadProgress,
+          lastError,
         })
       } catch {
         // The badge bridge is optional; state transitions must never fail the update flow.
@@ -144,7 +148,15 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     const observeResult = (result: UpdateCheckResult | null): string | undefined => {
-      if (disposed || result === null) return undefined
+      if (disposed) return undefined
+      if (result === null) {
+        // 检查失败(网络/限流/超时):保留此前可用版本,但记录错误供 UI 提示。
+        if (availableVersion === undefined) lastError = 'network'
+        refreshTray()
+        publishState()
+        return undefined
+      }
+      lastError = undefined
       availableVersion = result.status === 'update-available' && adapter.canDownload
         ? result.latestVersion
         : undefined
@@ -176,15 +188,22 @@ export function apply(ctx: Context, config: Config): void {
         const controller = new AbortController()
         downloadController = controller
         downloadingVersion = version
+        downloadProgress = undefined
         refreshTray()
         publishState()
         try {
-          await adapter.downloadAndOpen(version, controller.signal)
+          await adapter.downloadAndOpen(version, controller.signal, (progress) => {
+            downloadProgress = progress
+            publishState()
+          })
         } catch {
-          // Network, filesystem, and installer-opening failures are deliberately silent.
+          lastError = 'network'
+          refreshTray()
+          publishState()
         } finally {
           if (downloadController === controller) downloadController = undefined
           downloadingVersion = undefined
+          downloadProgress = undefined
           refreshTray()
           publishState()
         }

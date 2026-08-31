@@ -21,6 +21,7 @@ declare module '@deepseek-ai/cordis' {
 }
 import { AccountSection } from './AccountSection.tsx'
 import { BraceMark, BrandName, BrandBadge } from './Brand.tsx'
+import { applyUpdateSection } from './UpdateSection.tsx'
 import { buildBrandCSSVars } from './brand-vars.ts'
 import { installFavicon } from './favicon.ts'
 import { startBrandStore, readBrandSync } from './brand-store.ts'
@@ -134,6 +135,8 @@ export function apply(ctx: ClientContext): void {
     }, BrandName)),
     'enterprise: sidebar brand name',
   )
+  // v2.5.1: 设置页「关于」区(当前版本 + 检查更新)。
+  applyUpdateSection(ctx)
   ctx.effect(
     () => ctx.slots.inject('conversation.hero.brand.mark', () => ctx.slots.register({
       name: 'conversation.hero.brand.mark',

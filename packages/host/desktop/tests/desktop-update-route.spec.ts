@@ -6,8 +6,8 @@ import {
 } from '../src/desktop-update-route.ts'
 import { emptyDesktopUpdateState } from '../src/desktop-update-contract.ts'
 
-function request(method = 'GET', origin = 'http://127.0.0.1:43120'): IncomingMessage {
-  return { method, headers: { origin } } as IncomingMessage
+function request(method = 'GET', origin: string | undefined = 'http://127.0.0.1:43120'): IncomingMessage {
+  return { method, headers: origin === undefined ? {} : { origin } } as IncomingMessage
 }
 
 function response(): ServerResponse & {
@@ -48,6 +48,19 @@ describe('desktop update badge route', () => {
       currentVersion: '2.2.0',
       availableVersion: '2.3.0',
     })
+  })
+
+  it('serves a same-origin request carrying no Origin header (Chromium GET)', async () => {
+    // 同源 GET 在 Chromium 中不携带 Origin;strict equality 曾把合法请求判为
+    // forbidden(2026-08-31 实测, 更新徽章因此永不显示)。
+    const res = response()
+    await handleDesktopUpdateRequest(
+      request('GET', undefined),
+      res,
+      'http://127.0.0.1:43120',
+      () => ({ ...emptyDesktopUpdateState(), isPackaged: true, canDownload: true, currentVersion: '2.2.0' }),
+    )
+    expect(res.statusCode).toBe(200)
   })
 
   it('rejects cross-origin and non-GET state requests', async () => {

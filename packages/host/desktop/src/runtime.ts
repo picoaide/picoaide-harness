@@ -99,6 +99,18 @@ export interface DesktopUpdateSnapshot {
   readonly canDownload: boolean
   /** Installed desktop product version. */
   readonly currentVersion: string
+  /** Current download progress (bytes) while downloading; undefined otherwise. */
+  readonly downloadProgress: UpdateDownloadProgressSnapshot | undefined
+  /** Last user-visible check failure category; undefined when the last check succeeded. */
+  readonly lastError: 'network' | 'release-missing' | 'unsupported' | undefined
+}
+
+/** Progress snapshot published to the renderer (percent derived client-side). */
+export interface UpdateDownloadProgressSnapshot {
+  /** Bytes received so far. */
+  readonly receivedBytes: number
+  /** Total expected bytes (content-length), or undefined when unknown. */
+  readonly totalBytes: number | undefined
 }
 
 /** Electron capabilities used by the headless update plugin. */
@@ -117,8 +129,11 @@ export interface DesktopUpdateAdapter {
   confirmDownload(version: string): Promise<boolean>
   /** Present the outcome of a user-triggered version check. */
   showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
-  /** Download and hand one confirmed update to the platform installer. */
-  downloadAndOpen(version: string, signal: AbortSignal): Promise<void>
+  /**
+   * Download and hand one confirmed update to the platform installer.
+   * @param onProgress - optional byte-progress callback while streaming.
+   */
+  downloadAndOpen(version: string, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
   /**

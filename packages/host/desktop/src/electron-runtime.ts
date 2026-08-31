@@ -13,6 +13,7 @@ import {
   Tray,
 } from 'electron'
 import { spawn } from 'node:child_process'
+import { chmod } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
@@ -26,6 +27,7 @@ import type {
   DesktopTrayItemGroup,
   DesktopTrayItemRegistration,
   DesktopUpdateAdapter,
+  UpdateDownloadProgressSnapshot,
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
 import { formatDesktopExitCode, type DesktopLogger } from './desktop-logger.ts'
@@ -73,13 +75,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
   readonly updates: DesktopUpdateAdapter = {
     get isPackaged() { return app.isPackaged },
-    get canDownload() { return app.isPackaged && (process.platform === 'darwin' || process.platform === 'win32') },
+    get canDownload() { return app.isPackaged },
     get currentVersion() { return PRODUCT_VERSION },
     get statePath() { return join(app.getPath('userData'), 'updates', 'state.json') },
     request: (url, init) => net.fetch(url, init),
     confirmDownload: version => this.confirmUpdateDownload(version),
     showManualCheckResult: result => this.showManualUpdateCheckResult(result),
-    downloadAndOpen: (version, signal) => this.downloadAndOpenUpdate(version, signal),
+    downloadAndOpen: (version, signal, onProgress) => this.downloadAndOpenUpdate(version, signal, onProgress),
     notify: notification => { this.showNotification(notification) },
   }
 
@@ -447,8 +449,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** Download a confirmed installer and hand it to the native installation flow. */
-  private async downloadAndOpenUpdate(version: string, signal: AbortSignal): Promise<void> {
-    if (this.platform !== 'darwin' && this.platform !== 'win32') {
+  private async downloadAndOpenUpdate(
+    version: string,
+    signal: AbortSignal,
+    onProgress?: (progress: UpdateDownloadProgressSnapshot) => void,
+  ): Promise<void> {
+    if (this.platform !== 'darwin' && this.platform !== 'win32' && this.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: updates are unavailable on ${this.platform}`)
     }
     const artifactPath = await downloadDesktopUpdate({
@@ -457,8 +463,25 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       userDataPath: app.getPath('userData'),
       request: (url, init) => net.fetch(url, init),
       signal,
+      ...(onProgress === undefined ? {} : { onProgress }),
     })
     signal.throwIfAborted()
+
+    if (this.platform === 'linux') {
+      // AppImage 无静默自安装:下载完 chmod +x 并提示用户替换运行。
+      try { await chmod(artifactPath, 0o755) } catch { /* 非致命:提示仍展示 */ }
+      signal.throwIfAborted()
+      await dialog.showMessageBox({
+        type: 'info',
+        title: `${this.productName()} Update Downloaded`,
+        message: `${this.productName()} ${version} is ready to install.`,
+        detail: `新版本 AppImage 已下载到: ${artifactPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
+        buttons: ['OK'],
+        defaultId: 0,
+        noLink: true,
+      })
+      return
+    }
 
     if (this.platform === 'darwin') {
       const openError = await shell.openPath(artifactPath)
