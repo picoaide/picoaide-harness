@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.6.0 (2026-08-31)
+
+### 新增
+- **按模型并发峰值统计**:网关内存 in-flight 计数(全部协议:chat/embeddings/FIM/messages/responses)+ 每 15s 采样落库(`model_concurrency_stats`,GREATEST 累计永不回退),服务器信息页「模型并发」卡片展示当前/90 天峰值/目标/峰值利用率(≥100% 标红)——扩容申请量化依据;目标在模型 `default_params.concurrency_target` 配置(如 flash 2500 / pro 500)
+- **管理后台版本更新提示**:服务器信息页顶部横幅(服务端代理 GitHub Releases latest,严格 SemVer 比较,8s 超时,6h 缓存+并发合并,失败静默降级),附发行说明链接与 `./deploy.sh update` 指引;修复 server-info 版本号恒为 dev 的存量 bug(SetBuildVersion 与 --version 同源注入)
+- **内置 PostgreSQL 升级到 18**(最新稳定大版本):compose/deploy.sh/.env.example/CI/文档全同步;18.6 全量测试+冒烟验证通过
+
+### 部署
+- 服务端镜像 `ghcr.io/picoaide/picoaide-harness-server` 随 tag 自动构建(v2.6.0/latest),内置 PG18
+
+## v2.5.1 (2026-08-31)
+
+### 修复
+- 端可见更新体验:各平台(mac/win/linux)更新提示、进度与设置入口
+- 连接器中心改用 `/api/client/v2/config/bootstrap`(命名空间迁移后旧路径 404,目录同步静默失败)
+- `TestCleanupUsageRetention` 月末日期归一化(Normalize 到每月 1 号,消除月末 flake)
+
 ## v2.5.0 (2026-08-31)
 
 ### 修复
