@@ -47,7 +47,6 @@
 
 | 方法 | 路径 | 说明 | 潜在使用方 |
 |---|---|---|---|
-| GET | `/api/marketplace/skills/updates` | 技能更新检查（`skill_api.go:58`） | 客户端只列目录+装/卸，不做更新提醒 |
 | GET | `/api/marketplace/skills/:name` | 技能详情（`skill_api.go:59`） | 客户端列表已含所需字段，不拉单条详情 |
 | GET | `/api/marketplace/mcp` | MCP 服务器列表（`skill_api.go:61`） | 客户端无 MCP 目录/安装流程 |
 | GET | `/api/marketplace/mcp/:id/config` | MCP 配置下发（`skill_api.go:62`） | 同上 |

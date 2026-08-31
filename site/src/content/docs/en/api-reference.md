@@ -66,7 +66,6 @@ description: 'PicoAide Harness server HTTP API reference: auth, LLM gateway, mar
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/client/v2/marketplace/skills` | Skill catalog (grant-visible) |
-| GET | `/api/client/v2/marketplace/skills/updates?installed=...` | Version check: report installed `name:version` (≤100), returns newer `{updates, count}` |
 | GET | `/api/client/v2/marketplace/skills/:name/archive` | Download a skill package (`X-Skill-Version` / `X-Skill-Checksum`) |
 | GET | `/api/client/v2/shared-skills` | Shared skills (approved + granted, plus your own uploads in any state) |
 | POST | `/api/client/v2/shared-skills` | Upload a shared skill (base64 archive, ≤16MB, top-level `SKILL.md`), stored in DB |
