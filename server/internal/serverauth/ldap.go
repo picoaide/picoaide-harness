@@ -29,16 +29,22 @@ type ldapConn interface {
 
 // LDAPProvider authenticates against an LDAP directory.
 // Config keys: server_url, bind_dn, bind_password, base_dn, user_filter,
-// group_filter, group_attr. Filters are templates where %s is replaced with
-// the escaped username (user_filter) or escaped user DN (group_filter).
+// user_attr(用户名属性,默认 uid;cn/sAMAccountName/mail 等),group_filter,
+// group_attr. Filters are templates where %s is replaced with the escaped
+// username (user_filter) or escaped user DN (group_filter).
 type LDAPProvider struct {
 	ServerURL    string
 	BindDN       string
 	BindPassword string
 	BaseDN       string
 	UserFilter   string
-	GroupFilter  string
-	GroupAttr    string
+	// UserAttr 是目录中"登录用户名"的属性名(如 uid/cn/sAMAccountName)。
+	// 各厂商目录命名不同:OpenLDAP 常用 uid,AD 常用 sAMAccountName,
+	// 部分企业目录只有 cn/mail(如 mokahr 系)。默认 uid,管理员可配置。
+	// 生效范围:登录用户规范化、目录同步、测试连接的 username 字段。
+	UserAttr    string
+	GroupFilter string
+	GroupAttr   string
 
 	dial func(url string) (ldapConn, error)
 }
@@ -53,6 +59,10 @@ func (p *LDAPProvider) Configure(cfg map[string]string) error {
 	p.UserFilter = cfg["user_filter"]
 	if p.UserFilter == "" {
 		p.UserFilter = "(uid=%s)"
+	}
+	p.UserAttr = cfg["user_attr"]
+	if p.UserAttr == "" {
+		p.UserAttr = "uid"
 	}
 	p.GroupFilter = cfg["group_filter"]
 	p.GroupAttr = cfg["group_attr"]
@@ -96,6 +106,29 @@ type DirectoryReport struct {
 	Users  int             `json:"users"`
 	Groups int             `json:"groups"`
 	Sample []DirectoryUser `json:"sample"`
+}
+
+// ldapDisplayName 取条目的显示名:sn(真实姓名,如 "zhangsan")→ cn 兜底——
+// 部分目录 cn 是登录名(如 mokahr 系 "alice"),显示名应取 sn。
+func ldapDisplayName(e *ldap.Entry) string {
+	if v := e.GetAttributeValue("sn"); v != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(e.GetAttributeValue("cn"))
+}
+
+// uniqAttrs 去重属性列表(如 UserAttr 与 GroupAttr 同名时),保持顺序。
+func uniqAttrs(attrs []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(attrs))
+	for _, a := range attrs {
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		out = append(out, a)
+	}
+	return out
 }
 
 // scanEntries runs a paged full-subtree search on an already-bound conn.
@@ -145,7 +178,7 @@ func (p *LDAPProvider) ProbeDirectory() (*DirectoryReport, error) {
 	if err := conn.Bind(p.BindDN, p.BindPassword); err != nil {
 		return nil, errors.New("ldap bind failed")
 	}
-	users, err := p.scanEntries(conn, p.userScanFilter(), []string{"uid", "cn", "mail", p.GroupAttr})
+	users, err := p.scanEntries(conn, p.userScanFilter(), uniqAttrs([]string{p.UserAttr, "cn", "sn", "mail", p.GroupAttr}))
 	if err != nil {
 		return nil, err
 	}
@@ -166,8 +199,8 @@ func (p *LDAPProvider) ProbeDirectory() (*DirectoryReport, error) {
 			gres = nil // 组解析失败不影响整体报告(样例组显示为无)
 		}
 		report.Sample = append(report.Sample, DirectoryUser{
-			Username:    entryUserName(e, ""),
-			DisplayName: e.GetAttributeValue("cn"),
+			Username:    p.usernameOf(e),
+			DisplayName: ldapDisplayName(e),
 			Email:       e.GetAttributeValue("mail"),
 			Groups:      gres,
 		})
@@ -175,13 +208,57 @@ func (p *LDAPProvider) ProbeDirectory() (*DirectoryReport, error) {
 	return report, nil
 }
 
-// entryUserName 取条目的 uid 属性作为规范用户名(与 Authenticate 同一规则),
-// 缺失时回退 dst。
+// usernameOf 取条目的规范用户名(同步/探测/登录共用):
+// 1. 配置的 user_attr(默认 uid;支持 cn/sAMAccountName/mail 等);
+// 2. 缺失时回退 cn → mail(兼容只有 cn/mail 的目录);
+// 3. 再回退 DN 首个 RDN 值。
+// 此前仅取 uid,无 uid 目录同步全部跳过(用户报告"配置 LDAP 后用户没同步")。
+func (p *LDAPProvider) usernameOf(e *ldap.Entry) string {
+	attr := p.UserAttr
+	if attr == "" {
+		attr = "uid"
+	}
+	if v := e.GetAttributeValue(attr); v != "" {
+		return strings.TrimSpace(v)
+	}
+	for _, a := range []string{"cn", "mail"} {
+		if v := e.GetAttributeValue(a); v != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if dn := e.DN; dn != "" {
+		if i := strings.Index(dn, "="); i > 0 {
+			if j := strings.Index(dn[i:], ","); j > 0 {
+				return strings.TrimSpace(dn[i+1 : i+j])
+			}
+			return strings.TrimSpace(dn[i+1:])
+		}
+	}
+	return ""
+}
+
+// entryUserName 保留的自由函数(测试/兼容):默认属性链 uid → cn → mail → DN RDN。
 func entryUserName(e *ldap.Entry, dst string) string {
-	if name := e.GetAttributeValue("uid"); name != "" {
-		return name
+	p := &LDAPProvider{UserAttr: "uid"}
+	if v := p.usernameOf(e); v != "" {
+		return v
 	}
 	return dst
+}
+
+// loginUsername 规范登录用户名(登录时):只取配置的 user_attr 属性
+// (默认 uid;可配 cn/sAMAccountName 等)的值——大小写规范化,防
+// "Alice"/"alice" 分裂。配置属性缺失时回退用户输入(过滤器已按输入匹配,
+// 此时绝不能改用 cn 的值,否则用户输入 "alice" 会落成 "Alice")。
+func (p *LDAPProvider) loginUsername(e *ldap.Entry, dst string) string {
+	attr := p.UserAttr
+	if attr == "" {
+		attr = "uid"
+	}
+	if v := e.GetAttributeValue(attr); v != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(dst)
 }
 
 // groupsOfEntry 查询某用户/条目的全部组(复用 group_filter 单用户语义)。
@@ -226,7 +303,7 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		BaseDN:     p.BaseDN,
 		Scope:      ldap.ScopeWholeSubtree,
 		Filter:     strings.ReplaceAll(p.UserFilter, "%s", ldap.EscapeFilter(username)),
-		Attributes: []string{"uid", "cn", "mail"},
+		Attributes: []string{p.UserAttr, "cn", "sn", "mail"},
 	})
 	if err != nil {
 		return UserInfo{}, err
@@ -238,15 +315,12 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 	if err := conn.Bind(entry.DN, password); err != nil {
 		return UserInfo{}, errors.New("invalid credentials")
 	}
-	// 用户名取目录条目的 uid 属性(规范化大小写):LDAP 绑定大小写不敏感,
-	// 用户手输 "Alice"/"alice" 必须落到同一本地账号,否则授权/token 分裂
-	canonical := entry.GetAttributeValue("uid")
-	if canonical == "" {
-		canonical = username
-	}
+	// 用户名取目录 user_attr(默认 uid;可配 cn/sAMAccountName 等),缺失回退
+	// 用户输入——统一走 p.loginUsername(与 sync/探测同一规范化规则)。
+	canonical := p.loginUsername(entry, username)
 	ui := UserInfo{
 		Username:    canonical,
-		DisplayName: entry.GetAttributeValue("cn"),
+		DisplayName: ldapDisplayName(entry),
 		Email:       entry.GetAttributeValue("mail"),
 		Source:      "external",
 	}
