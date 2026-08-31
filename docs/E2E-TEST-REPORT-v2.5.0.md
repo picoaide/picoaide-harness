@@ -123,3 +123,29 @@
 - **LDAP 登录组同步设计**：外部身份每次登录全量对齐组（空组即回收）；本测试 LDAP 目录未配组，因此 LDAP 用户的管理端部门分配会被登录同步清除——这是文档化设计（serverauth/handler.go），生产需配置 LDAP group_filter。
 - `dsh-community-fabric` 无 typecheck script（仅 check），非故障。
 - Desktop E2E 正式脚本（mock gateway）在本机因 CDP 复用 flaky，已用真实服务端全面验证替代。
+
+## 8. 更新功能修复（v2.5.1）
+
+### 发现的问题
+| # | 严重度 | 现象 | 根因 |
+|---|--------|------|------|
+| B5 | P1 | 更新徽章未显示（用户"win 也没有"） | `desktop-update-route.ts` 严格校验 `req.headers.origin === expectedOrigin`；Chromium 同源 GET 不携带 Origin header → 403 forbidden → badge 轮询永远失败（2026-08-31 实测 `{"error":"forbidden"}`） |
+| B6 | P1 | Linux 用户完全无更新功能 | `canDownload` 仅 darwin/win32；下载器 `DesktopDownloadPlatform` 无 linux；Linux AppImage 资产被忽略 |
+| B7 | P2 | 下载过程无进度可见 | 状态机未追踪下载字节进度，badge 只显示版本号 |
+| B8 | P2 | 无主动更新入口 | 设置页无「检查更新」；仅托盘/会话头部徽章 |
+| B9 | P2 | 网络失败静默 | 检查失败无 UI 状态（badge 隐藏，无提示） |
+| B10 | P1 | 市场技能安装「操作失败: gateway error」 | CapabilityCenterPanel 将 market 源技能误路由到 shared-skills 网关端点 → 404 |
+
+### 修复（commit 142e563f8a 等）
+1. **Origin 校验放宽**：同源无 Origin（Chromium GET）放行，跨源仍 403（同步修 directory-picker-route / renderer-boot）
+2. **Linux AppImage 更新**：`DesktopDownloadPlatform` 加 linux；下载器支持 `x86_64.AppImage`（ELF+AppImage magic 校验）；下载后 chmod +x + 对话框提示替换运行
+3. **下载进度**：`UpdateDownloadProgressSnapshot` 字节级 progress → renderer badge 显示百分比
+4. **设置「关于」区**：当前版本 + 检查更新按钮 + 状态（发现新版本/下载中 x%/检查失败网络/已是最新）
+5. **侧边栏版本角标**：品牌版本号旁蓝点 + 新版本号提醒（点击触发检查）
+6. **网络失败提示**：lastError 状态推到设置页显示「检查更新失败：网络不可达」
+7. **安装端点修复**：installEndpoint/uninstallEndpoint 按 source 路由（market→/api/pico/skills，org→shared-skills）
+
+### 验证
+- 单测：desktop 421 / enterprise 106 全绿（新增 linux AppImage 接受/拒绝、origin 无头放行、进度状态等用例）
+- 真机：`/api/pico/desktop/update` 从 403 修复为 200 `{"isPackaged":true,"canDownload":true,"currentVersion":"2.5.0"}`
+- 已发布 v2.5.1：2.5.0 客户端 60s 内显示更新徽章（真实闭环）
