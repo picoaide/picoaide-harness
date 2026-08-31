@@ -10,7 +10,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Card } from '../components/ui/card'
 import { Switch } from '../components/ui/switch'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { Search, Users as UsersIcon } from 'lucide-react'
@@ -106,7 +105,7 @@ export default function Users() {
   const [tokensUser, setTokensUser] = useState<User | null>(null)
   const [tokens, setTokens] = useState<ApiToken[]>([])
   const [deptUser, setDeptUser] = useState<User | null>(null)
-  const [deptSelect, setDeptSelect] = useState('0')
+  const [deptSelect, setDeptSelect] = useState<string[]>([])   // 多部门(2026-09)
   const [quotaUser, setQuotaUser] = useState<User | null>(null)
   const [quotaInput, setQuotaInput] = useState('')
   // P1-8: 请求序号防乱序——快速翻页/搜索/删除重拉时只有最新请求的响应能更新 state
@@ -230,18 +229,17 @@ export default function Users() {
     }
   }
 
-  // ---- 员工部门归属(金字塔单选,从部门树选择) ----
+  // ---- 员工部门归属(2026-09 起支持多部门:部门树多选) ----
   async function openDept(u: User) {
     setDeptUser(u)
     setDeptErr('')
-    // 中4:不猜 groups[0];只取在部门树中的组作为当前归属
+    // 只取在部门树中的组作为当前归属(不在部门树的组可能是 LDAP 授权组)
     const groups = u.groups ?? []
     const deptNames = groups.filter((g) => depts.some((d) => d.name === g))
-    const current = deptNames.length === 1 ? deptNames[0] : undefined
-    const d = current ? depts.find((x) => x.name === current) : undefined
-    setDeptSelect(d ? String(d.id) : '0')
+    const ids = depts.filter((d) => deptNames.includes(d.name)).map((d) => String(d.id))
+    setDeptSelect(ids)
     if (deptNames.length > 1) {
-      setDeptNote(`该用户当前归属 ${deptNames.length} 个组(${deptNames.join('、')}),保存将替换为所选单个部门。`)
+      setDeptNote(`当前归属 ${deptNames.length} 个部门(${deptNames.join('、')});保存保留为多部门,预算按全部所属部门同时生效(任一超限即拦)。`)
     } else if (deptNames.length === 0 && groups.length > 0) {
       setDeptNote(`该用户当前组(${groups.join('、')})不在部门树中,保存将清空其全部归属。`)
     } else {
@@ -255,7 +253,7 @@ export default function Users() {
     try {
       await request(`${ADMIN_API}/users/${deptUser.id}/department`, {
         method: 'PUT',
-        body: JSON.stringify({ group_id: Number(deptSelect) }),
+        body: JSON.stringify({ group_ids: deptSelect.map((x) => Number(x)) }),
       })
       setDeptErr('')
       setDeptUser(null)
@@ -463,29 +461,38 @@ export default function Users() {
         </DialogContent>
       </Dialog>
 
-      {/* 员工部门归属(金字塔单选) */}
+      {/* 员工部门归属(2026-09:支持多部门,多选) */}
       <Dialog open={!!deptUser} onOpenChange={(open) => { if (!open) setDeptUser(null) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>设置部门 · {deptUser?.username}</DialogTitle>
-            <DialogDescription>从部门树选择归属(单选);授权给上级部门自动覆盖本部门</DialogDescription>
+            <DialogDescription>从部门树选择归属(可多选);所属部门全部生效,授权/预算按全部部门计算</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1">
-              <Label htmlFor="dept-select">部门</Label>
-              <Select value={deptSelect} onValueChange={setDeptSelect}>
-                <SelectTrigger aria-label="部门" id="dept-select"><SelectValue placeholder="选择部门" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="0">未分配</SelectItem>
-                  {deptTreeOptions(depts, 0, 0).map((o) => (
-                    <SelectItem key={o.id} value={String(o.id)}>{o.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>部门(多选)</Label>
+              <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-2">
+                {deptTreeOptions(depts, 0, 0).map((o) => (
+                  <label key={o.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[#4176E6]"
+                      checked={deptSelect.includes(String(o.id))}
+                      onChange={(e) => {
+                        const v = String(o.id)
+                        setDeptSelect((prev) => e.target.checked ? [...prev, v] : prev.filter((x) => x !== v))
+                      }}
+                    />
+                    <span className="flex-1">{o.label}</span>
+                    {deptSelect.includes(String(o.id)) && <span className="text-xs text-muted-foreground">已选</span>}
+                  </label>
+                ))}
+              </div>
             </div>
             {deptNote && <p className="text-xs text-destructive">{deptNote}</p>}
             <p className="text-xs text-muted-foreground">
-              保存将替换该用户全部部门归属(LDAP 用户下次登录可能被企业目录同步回滚)
+              保存将替换该用户全部部门归属(LDAP/OIDC 用户下次登录/同步可能被企业目录覆盖);
+              预算 = 全部所属部门+祖先链同时生效,任一超限即拦截
             </p>
             {deptErr && <div className="text-sm text-destructive">{deptErr}</div>}
             <Button onClick={saveDept} className="w-full">保存</Button>

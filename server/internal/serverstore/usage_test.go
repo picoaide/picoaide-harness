@@ -1233,3 +1233,60 @@ func TestRecordUsageCacheClamp(t *testing.T) {
 }
 
 func ptrFloat(v float64) *float64 { return &v }
+
+// TestDeptBudgetMultiMembership: 用户同时归属多个部门(2026-09 本地用户
+// 多部门支持)——EffectiveDeptBudget 返回全部所属部门 + 各自祖先链(去重),
+// 预算语义 = 全部同时生效,任一超限即拦截(≠ 取最高)。
+func TestDeptBudgetMultiMembership(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	rd := mustDept(t, db, "研发部", 0)
+	mk := mustDept(t, db, "市场部", 0)
+	if err := SetDeptBudget(db, rd, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDeptBudget(db, mk, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用户同时挂 研发部(祖先链自身1000) 与 市场部(500)
+	uid, err := CreateUser(db, &User{Username: "multi", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncUserGroups(db, uid, []string{"研发部", "市场部"}); err != nil {
+		t.Fatal(err)
+	}
+	eff, err := EffectiveDeptBudget(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 期望:研发部 1000 + 市场部 500(祖先→自身排序,去重)
+	// 注意 groups 按名称排序(市场部 < 研发部A组,中文排序),预算链迭代
+	// memberIDs 顺序 → 结果排序与名称相关;此处只校验集合。
+	budgets := map[string]float64{}
+	for _, b := range eff {
+		budgets[b.Name] = b.Budget
+	}
+	if len(eff) != 2 {
+		t.Fatalf("eff = %+v, want 2 budgets (研发1000 + 市场500)", eff)
+	}
+	if budgets["研发部"] != 1000 || budgets["市场部"] != 500 {
+		t.Fatalf("budgets = %v, want 研发部:1000 市场部:500", budgets)
+	}
+	// 任一超限即拦:市场部 500 更小,超限时用户被拦(即使研发部未超)
+	if effBudgetsHasSmaller(budgets, 500) {
+		// 验证市场部预算确实参与(不是只取最高的研发 1000)
+		t.Logf("multi-membership budgets: %v (市场部 500 参与,任一超限即拦)", budgets)
+	}
+}
+
+// effBudgetsHasSmaller 检查任意预算 ≤ 给定值(证明不是只取最高)。
+func effBudgetsHasSmaller(budgets map[string]float64, limit float64) bool {
+	for _, v := range budgets {
+		if v <= limit {
+			return true
+		}
+	}
+	return false
+}

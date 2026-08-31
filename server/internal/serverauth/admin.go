@@ -1153,7 +1153,11 @@ func (a *AdminAPI) deleteDepartment(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// setUserDepartment 单部门归属(员工金字塔单选):替换用户全部组为指定部门。
+// setUserDepartment 设置用户部门归属(支持多部门,2026-09):
+// 替换用户全部组为指定的部门集合。请求体 {group_ids:[n1,n2,...]}(空数组=
+// 清空);兼容旧 {group_id:n} 单部门请求(旧 webadmin 客户端)。
+// 预算语义(EffectiveDeptBudget)自然支持多部门:全部所属部门+祖先链的
+// 预算同时生效,任一超限即拦截(与 LDAP/OIDC 组同步一致)。
 func (a *AdminAPI) setUserDepartment(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -1166,30 +1170,42 @@ func (a *AdminAPI) setUserDepartment(c *gin.Context) {
 		return
 	}
 	var req struct {
-		GroupID int64 `json:"group_id"`
+		GroupIDs []int64 `json:"group_ids"`
+		GroupID  int64   `json:"group_id"` // 旧单部门请求兼容
 	}
 	// 未知字段(如误传 department_id)必须报错,不能静默解析为默认值 ——
 	// 否则 SyncUserGroups(nil) 会清空用户全部组归属(安全/健壮性)。
 	dec := json.NewDecoder(c.Request.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误(仅接受 group_id 字段)")
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误(仅接受 group_ids 数组或 group_id)")
 		return
 	}
+	// 解析:group_ids 优先;否则回退旧的 group_id(单部门)
+	ids := req.GroupIDs
+	if len(ids) == 0 && req.GroupID > 0 {
+		ids = []int64{req.GroupID}
+	}
+	// 校验 + 去重 + 保序(防重复部门)
 	var names []string
-	if req.GroupID > 0 {
-		g, err := serverstore.GroupByID(a.DB, req.GroupID)
+	seen := map[int64]bool{}
+	for _, gid := range ids {
+		if seen[gid] || gid <= 0 {
+			continue
+		}
+		seen[gid] = true
+		g, err := serverstore.GroupByID(a.DB, gid)
 		if err != nil {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "部门不存在")
 			return
 		}
-		names = []string{g.Name}
+		names = append(names, g.Name)
 	}
 	if err := serverstore.SyncUserGroups(a.DB, id, names); err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_dept", u.Username+" → "+strings.Join(names, ","))
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_dept", u.Username+" → ["+strings.Join(names, ",")+"]")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
