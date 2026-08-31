@@ -455,37 +455,78 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
 	idleTimedOut := false
+	lineEOF := false
 	backfilled := false // usage row received real tokens (must not be dropped)
+
+	// 2026-08-31 性能优化:原 readLineWithIdle 每行创建 goroutine+channel+
+	// NewTimer(2000 并发流 × 2000 行/流 ≈ 800 万次分配,timer 调度在万级
+	// 活跃 timer 下显著退化——实测服务端每流 26s→52s,吞吐腰斩)。
+	// 改为:单读 goroutine 常驻循环读行(零 per-line goroutine),
+	// idle 超时用一个共享 ticker 每 1s 检查(零 per-line timer)。
+	type lineRes struct {
+		line string
+		err  error
+	}
+	lines := make(chan lineRes, 64)
+	readGone := make(chan struct{})
+	go func() {
+		defer close(readGone)
+		for {
+			l, e := br.ReadString('\n')
+			select {
+			case lines <- lineRes{l, e}:
+			case <-c.Request.Context().Done():
+				return
+			}
+			if e != nil {
+				return
+			}
+		}
+	}()
+	// idle 检查:每 1s 看一次"距上次收到行的间隔",超过 streamIdleTimeout 即超时。
+	// 复用全局 ticker 不可行(每流独立计时应复位),用每流单 ticker(仅 1 个/流,
+	// 非每行) + lastLineAt 判定。
+	idleTick := time.NewTicker(time.Second)
+	defer idleTick.Stop()
+	lastLineAt := time.Now()
+
 	for {
 		// 5#9/5#10: stop pumping once the client context is gone
 		if c.Request.Context().Err() != nil {
 			clientGone = true
 			break
 		}
-		line, err := readLineWithIdle(br, streamIdleTimeout)
-		if len(line) > 0 {
-			line = string(redactSecrets([]byte(line), secrets))
-			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
-				if pt, ct, cch, ok, perr := parseUsage([]byte(s)); perr != nil {
-					log.Printf("gateway: parse usage line: %v", perr)
-				} else if ok && usageID > 0 {
-					if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cch); uerr != nil {
-						log.Printf("gateway: backfill usage: %v", uerr)
-					} else if pt+ct > 0 {
-						backfilled = true
+		select {
+		case r := <-lines:
+			lastLineAt = time.Now()
+			if len(r.line) > 0 {
+				line := string(redactSecrets([]byte(r.line), secrets))
+				if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
+					if strings.Contains(s, `"usage"`) {
+						if pt, ct, cch, ok, perr := parseUsage([]byte(s)); perr != nil {
+							log.Printf("gateway: parse usage line: %v", perr)
+						} else if ok && usageID > 0 {
+							if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cch); uerr != nil {
+								log.Printf("gateway: backfill usage: %v", uerr)
+							} else if pt+ct > 0 {
+								backfilled = true
+							}
+						}
 					}
 				}
+				if _, werr := c.Writer.WriteString(line); werr != nil {
+					clientGone = true
+					break
+				}
+				if fl != nil {
+					fl.Flush()
+				}
 			}
-			if _, werr := c.Writer.WriteString(line); werr != nil {
-				clientGone = true
-				break
+			if r.err != nil { // EOF / 上游关闭
+				lineEOF = true
 			}
-			if fl != nil {
-				fl.Flush()
-			}
-		}
-		if err != nil { // EOF, client disconnect, or idle timeout
-			if errors.Is(err, errStreamIdleTimeout) {
+		case <-idleTick.C:
+			if time.Since(lastLineAt) > streamIdleTimeout {
 				idleTimedOut = true
 				log.Printf("gateway: stream idle timeout after %v, terminating", streamIdleTimeout)
 				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
@@ -493,8 +534,17 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 					fl.Flush()
 				}
 			}
+		case <-c.Request.Context().Done():
+			clientGone = true
+		}
+		if clientGone || idleTimedOut || lineEOF {
 			break
 		}
+	}
+	// 等待读 goroutine 退出(defer resp.Body.Close 释放阻塞读)
+	select {
+	case <-readGone:
+	case <-time.After(time.Second):
 	}
 	// idle 超时与客户端断开时,从未回填的 pending 行必须清除(否则计量虚增
 	// 一小时);已回填真实 token 的行不得删除,否则真实用量从统计中丢失。
@@ -508,6 +558,10 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 // readLineWithIdle reads a line, failing with errStreamIdleTimeout if no
 // bytes arrive within idle. A blocked read goroutine is released by the
 // caller's deferred resp.Body.Close() once this returns.
+// 2026-08-31 性能优化:每行创建 goroutine+channel+timer 在 2000 并发长流下
+// 开销极大(400 万次分配)。缓冲 channel 复用——但 bufio 阻塞读仍需 goroutine;
+// 见 serveStream 的 readLineCh 单 goroutine 模式批量读行(原实现保留此函数
+// 供 messages 路径等使用,其行频率低)。
 func readLineWithIdle(br *bufio.Reader, idle time.Duration) (string, error) {
 	if idle <= 0 {
 		return br.ReadString('\n')
