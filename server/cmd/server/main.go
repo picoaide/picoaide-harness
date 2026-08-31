@@ -159,6 +159,9 @@ func main() {
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
 	// 并顺带清理过期的 pending usage 行 — 审计 C-9)
 	go llmgateway.SyncLoop(db, time.Hour, nil)
+	// LDAP 目录全量同步(固定间隔 1 小时;用户/组自动对账;配置保存时
+	// 已触发一轮,此处兜底周期同步——新员工入职/离职/组变化在 1h 内反映)
+	go serverauth.SyncDirectoryLoop(db, serverauth.LDAPSyncInterval, nil)
 
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))

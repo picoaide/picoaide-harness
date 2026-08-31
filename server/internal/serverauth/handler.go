@@ -180,23 +180,54 @@ func (a *API) handleLogin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": token, "user": userJSON(user)})
 }
 
+// ldapProvider returns the LDAP provider to use for this login attempt:
+//  1. 显式注册的(测试通过 RegisterProvider 注入 fake);
+//  2. 否则从 settings 实时构建(生产):LDAP 配置在 webadmin 保存后无需重启
+//     即可生效——provider 此前在启动时构建一次,配置变更必须重启才能用
+//     (用户 2026-09 报告"配置好了登录不能用"的根因之一)。
+//     仅当 auth.enabled 含 ldap(或兼容 mode=ldap/both)时返回,绝不使
+//     未启用的 LDAP 配置意外生效。
+func (a *API) ldapProvider() PasswordProvider {
+	if p, ok := a.providers["ldap"]; ok {
+		return p
+	}
+	if a.DB == nil {
+		return nil
+	}
+	settings, err := serverstore.GetAllSettings(a.DB)
+	if err != nil {
+		return nil
+	}
+	if !ldapEnabled(settings) {
+		return nil
+	}
+	return ldapFromSettings(settings)
+}
+
 // resolvePasswordProvider returns the configured password provider.
 func (a *API) resolvePasswordProvider() PasswordProvider {
 	if p, ok := a.providers["local"]; ok {
 		return p
 	}
-	if p, ok := a.providers["ldap"]; ok {
+	if p := a.ldapProvider(); p != nil {
 		return p
 	}
 	return nil
 }
 
 // authenticate tries providers in order (ldap first in "both" mode, then local).
+// LDAP provider 每次登录实时构建(见 ldapProvider)——配置热生效。
 func (a *API) authenticate(username, password string) (UserInfo, error) {
 	order := []string{"ldap", "local"}
 	var lastErr error
 	for _, name := range order {
-		if p, ok := a.providers[name]; ok {
+		var p PasswordProvider
+		if name == "ldap" {
+			p = a.ldapProvider()
+		} else if p0, ok := a.providers[name]; ok {
+			p = p0
+		}
+		if p != nil {
 			ui, err := p.Authenticate(username, password)
 			if err == nil {
 				return ui, nil

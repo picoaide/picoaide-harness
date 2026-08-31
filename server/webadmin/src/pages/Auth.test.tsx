@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { request } from '../api'
 import Auth from './Auth'
 
@@ -86,5 +87,55 @@ describe('Auth 认证配置页(v3b Tab 重设计)', () => {
         body: expect.stringContaining('"hide_local":true'),
       }))
     })
+  })
+
+  it('密码回显修复: 掩码不进输入框; 未改密码保存时回传 *** 保持现值', async () => {
+    const user = userEvent.setup()
+    render(<Auth />)
+    await screen.findByText('认证配置')
+    // 打开 LDAP tab(radix tabs 需要完整 pointer 事件)
+    await user.click(screen.getByRole('tab', { name: 'LDAP' }))
+    // Bind 密码输入框应为空(不显示 ***), 且有「已配置」徽标
+    const pw = screen.getByLabelText(/Bind 密码/) as HTMLInputElement
+    expect(pw.value).toBe('')
+    expect(screen.getByText('已配置')).toBeInTheDocument()
+    // 保存: 提交的 bind_password 必须是 *** (保持现值)
+    fireEvent.click(screen.getByRole('button', { name: '保存认证配置' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/auth', expect.objectContaining({
+        method: 'PUT',
+        body: expect.stringContaining('"bind_password":"***"'),
+      }))
+    })
+  })
+
+  it('LDAP 测试连接: 返回目录统计并展示样例', async () => {
+    const user = userEvent.setup()
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/auth') return AUTH_SAMPLE
+      if (path === '/api/server/admin/auth/test') {
+        return {
+          ok: true,
+          message: 'LDAP 连接成功',
+          users: 128,
+          groups: 9,
+          sample: [
+            { username: 'alice', display_name: 'Alice', email: 'alice@example.com', groups: ['admins'] },
+            { username: 'bob', display_name: 'Bob', email: 'bob@example.com', groups: [] },
+          ],
+        }
+      }
+      return {}
+    })
+    render(<Auth />)
+    await screen.findByText('认证配置')
+    await user.click(screen.getByRole('tab', { name: 'LDAP' }))
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    expect(await screen.findByText(/匹配到/)).toBeInTheDocument()
+    expect(screen.getByText(/128/)).toBeInTheDocument()
+    expect(screen.getByText(/9/)).toBeInTheDocument()
+    // 样例展示
+    expect(screen.getByText('alice')).toBeInTheDocument()
+    expect(screen.getByText('admins')).toBeInTheDocument()
   })
 })

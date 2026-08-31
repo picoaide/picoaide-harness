@@ -28,6 +28,15 @@ interface FormState {
   openid: Record<string, string>
 }
 
+// 测试连接返回(ldap 目录统计)
+interface ConnTestResult {
+  ok: boolean
+  message: string
+  users?: number
+  groups?: number
+  sample?: Array<{ username: string; display_name?: string; email?: string; groups?: string[] }>
+}
+
 const EMPTY_FORM: FormState = {
   hideLocal: false,
   ldap: {},
@@ -58,6 +67,10 @@ export default function Auth() {
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState('local')
+  // 密码/密钥是否「已设置」(服务端掩码 *** 表示已存值,不能回填进输入框)
+  const [secrets, setSecrets] = useState<Record<string, 'has-value' | 'unset'>>({})
+  // 用户显式"清空"的密钥(保存时提交空串覆盖)
+  const [clearedSecrets, setClearedSecrets] = useState<Record<string, boolean>>({})
 
   const load = useCallback(async () => {
     try {
@@ -67,9 +80,15 @@ export default function Auth() {
       setEnabled((a.enabled ?? 'local').split(',').map((s) => s.trim()).filter(Boolean))
       setForm({
         hideLocal: a.hide_local ?? false,
-        ldap: a.ldap ?? {},
-        oidc: a.oidc ?? {},
-        openid: a.openid ?? {},
+        ldap: nonSecret(a.ldap ?? {}),
+        oidc: nonSecret(a.oidc ?? {}),
+        openid: nonSecret(a.openid ?? {}),
+      })
+      // 服务端对已配置的密钥返回 *** → 标记「已设置」,输入框显示占位
+      setSecrets({
+        ldap_password: isSet(a.ldap?.bind_password),
+        oidc_secret: isSet(a.oidc?.client_secret),
+        openid_secret: isSet(a.openid?.client_secret),
       })
     } catch (err: any) {
       setAuthErr(err.message)
@@ -79,6 +98,18 @@ export default function Auth() {
   }, [])
 
   useEffect(() => { void load() }, [load])
+
+  // 掩码值不得回填进表单:回显 *** 会让下一次保存把 *** 当新密码写回
+  // (服务端把 *** 解释为「保持现值」,但用户改过其它字段再保存时,输入框
+  // 里的 *** 会被当密码……实测行:掩码只用于状态,不进 value)。
+  function nonSecret(cfg: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(cfg)) out[k] = v === '***' ? '' : v
+    return out
+  }
+  function isSet(v?: string): 'has-value' | 'unset' {
+    return v === '***' ? 'has-value' : 'unset'
+  }
 
   const isReady = (key: 'local' | 'ldap' | 'oidc' | 'openid'): boolean => {
     if (key === 'local') return true
@@ -92,17 +123,30 @@ export default function Auth() {
   }
 
   const [testMsg, setTestMsg] = useState('')
+  const [testDetail, setTestDetail] = useState<ConnTestResult | null>(null)
   const [testing, setTesting] = useState(false)
 
-  // v3b §1.2: 测试当前 Tab 提供方连接(不保存)。
+  // v3b §1.2: 测试当前 Tab 提供方连接(不保存)。LDAP 传完整配置(含
+  // 过滤器),密码留空/占位 = 用已保存的(服务端回读),不再把 *** 当密码。
   async function testConnection() {
-    setTesting(true); setTestMsg(''); setAuthErr('')
+    setTesting(true); setTestMsg(''); setAuthErr(''); setTestDetail(null)
     try {
       const body: any = { type: tab }
-      if (tab === 'ldap') body.ldap = { server_url: form.ldap.server_url, bind_dn: form.ldap.bind_dn, bind_password: form.ldap.bind_password, base_dn: form.ldap.base_dn }
+      if (tab === 'ldap') {
+        body.ldap = {
+          server_url: form.ldap.server_url,
+          bind_dn: form.ldap.bind_dn,
+          bind_password: form.ldap.bind_password,
+          base_dn: form.ldap.base_dn,
+          user_filter: form.ldap.user_filter,
+          group_filter: form.ldap.group_filter,
+          group_attr: form.ldap.group_attr,
+        }
+      }
       if (tab === 'oidc' || tab === 'openid') body.oidc = { issuer: tab === 'oidc' ? form.oidc.issuer : form.openid.issuer }
-      const r = await request(`${ADMIN_API}/auth/test`, { method: 'POST', body: JSON.stringify(body) }) as { ok: boolean; message: string }
+      const r = await request(`${ADMIN_API}/auth/test`, { method: 'POST', body: JSON.stringify(body) }) as ConnTestResult
       setTestMsg(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`)
+      if (r.sample) setTestDetail(r)
     } catch (e: any) {
       setTestMsg(`✗ ${e.message}`)
     } finally { setTesting(false) }
@@ -120,16 +164,32 @@ export default function Auth() {
     }
     setBusy(true)
     try {
+      // 密码字段语义(服务端契约):未输入(空)且已存在保存值 → 提交 ***
+      // 保持现值; 用户输入新值 → 提交新值。空串仅在用户显式清空时提交。
+      // 此前把服务端掩码 *** 回显进输入框,用户一保存就把 *** 当密码/清空
+      // 密码写回 ——「每次保存后用不了」的根因。
+      const secretField = (value: string, preset: 'has-value' | 'unset', cleared: boolean): string => {
+        // 用户显式清空 → 提交空串(服务端清空保存值)
+        if (cleared) return ''
+        // 已设置且未输入新值 → *** 保持现值
+        if (value === '') return preset === 'has-value' ? '***' : ''
+        // 用户输入了新值(或初次配置) → 提交
+        return value
+      }
+      const ldapBody = { ...form.ldap, bind_password: secretField(form.ldap.bind_password ?? '', secrets.ldap_password, !!clearedSecrets.ldap_password) }
+      const oidcBody = { ...form.oidc, client_secret: secretField(form.oidc.client_secret ?? '', secrets.oidc_secret, !!clearedSecrets.oidc_secret) }
+      const openidBody = { ...form.openid, client_secret: secretField(form.openid.client_secret ?? '', secrets.openid_secret, !!clearedSecrets.openid_secret) }
       const body: any = {
         mode,
         enabled: enabled.join(','),
         hide_local: form.hideLocal,
-        ldap: form.ldap,
-        oidc: form.oidc,
-        openid: form.openid,
+        ldap: ldapBody,
+        oidc: oidcBody,
+        openid: openidBody,
       }
       await request(`${ADMIN_API}/auth`, { method: 'PUT', body: JSON.stringify(body) })
       setAuthMsg('认证配置已保存(重启服务端后生效)')
+      setClearedSecrets({})
       setTimeout(() => setAuthMsg(''), 4000)
       void load()
     } catch (err: any) {
@@ -211,10 +271,13 @@ export default function Auth() {
             <TabsContent value="ldap" className="space-y-3">
               <div className="rounded-md border p-3">
                 <div className="mb-2 text-sm font-medium">LDAP 配置(仅员工面)</div>
+                <div className="mb-2 text-xs text-muted-foreground">
+                  配置保存后每 1 小时自动同步一次用户与组(新员工/离职/组调整 1 小时内生效); 也可在「测试连接」后立即保存以当场同步。
+                </div>
                 <div className="grid grid-cols-2 gap-3">
                   <Field abbr="ldap" label="服务器地址(ldap://...)" value={form.ldap.server_url ?? ''} ph="ldap://ldap.example.com:389" k="server_url" set={(v) => setForm({ ...form, ldap: { ...form.ldap, server_url: v } })} />
                   <Field abbr="ldap" label="Bind DN" value={form.ldap.bind_dn ?? ''} ph="cn=admin,dc=example,dc=com" k="bind_dn" set={(v) => setForm({ ...form, ldap: { ...form.ldap, bind_dn: v } })} />
-                  <SecretField label="Bind 密码(未改=保持现值)" value={form.ldap.bind_password ?? ''} set={(v) => setForm({ ...form, ldap: { ...form.ldap, bind_password: v } })} />
+                  <SecretField label="Bind 密码(已设置=保持现值)" preset={secrets.ldap_password} value={form.ldap.bind_password ?? ''} onChange={(v) => setForm({ ...form, ldap: { ...form.ldap, bind_password: v } })} onClear={() => { setForm({ ...form, ldap: { ...form.ldap, bind_password: '' } }); setClearedSecrets({ ...clearedSecrets, ldap_password: true }) }} />
                   <Field abbr="ldap" label="Base DN" value={form.ldap.base_dn ?? ''} ph="dc=example,dc=com" k="base_dn" set={(v) => setForm({ ...form, ldap: { ...form.ldap, base_dn: v } })} />
                   <Field abbr="ldap" label="用户过滤器(默认 (uid=%s))" value={form.ldap.user_filter ?? ''} ph="(uid=%s)" k="user_filter" set={(v) => setForm({ ...form, ldap: { ...form.ldap, user_filter: v } })} />
                   <Field abbr="ldap" label="组过滤器(可选)" value={form.ldap.group_filter ?? ''} ph="(memberOf=cn=%s)" k="group_filter" set={(v) => setForm({ ...form, ldap: { ...form.ldap, group_filter: v } })} />
@@ -229,7 +292,7 @@ export default function Auth() {
                 <div className="grid grid-cols-2 gap-3">
                   <Field abbr="oidc" label="Issuer" value={form.oidc.issuer ?? ''} ph="https://idp.example.com" k="issuer" set={(v) => setForm({ ...form, oidc: { ...form.oidc, issuer: v } })} />
                   <Field abbr="oidc" label="Client ID" value={form.oidc.client_id ?? ''} k="client_id" set={(v) => setForm({ ...form, oidc: { ...form.oidc, client_id: v } })} />
-                  <SecretField label="Client Secret(未改=保持现值)" value={form.oidc.client_secret ?? ''} set={(v) => setForm({ ...form, oidc: { ...form.oidc, client_secret: v } })} />
+                  <SecretField label="Client Secret(已设置=保持现值)" preset={secrets.oidc_secret} value={form.oidc.client_secret ?? ''} onChange={(v) => setForm({ ...form, oidc: { ...form.oidc, client_secret: v } })} onClear={() => { setForm({ ...form, oidc: { ...form.oidc, client_secret: '' } }); setClearedSecrets({ ...clearedSecrets, oidc_secret: true }) }} />
                   <Field abbr="oidc" label="Redirect URL" value={form.oidc.redirect_url ?? ''} ph="https://picoaide.example.com/api/client/v2/auth/oidc/callback" k="redirect_url" set={(v) => setForm({ ...form, oidc: { ...form.oidc, redirect_url: v } })} />
                 </div>
               </div>
@@ -241,7 +304,7 @@ export default function Auth() {
                 <div className="grid grid-cols-2 gap-3">
                   <Field abbr="openid" label="Issuer" value={form.openid.issuer ?? ''} ph="https://openid.example.com" k="issuer" set={(v) => setForm({ ...form, openid: { ...form.openid, issuer: v } })} />
                   <Field abbr="openid" label="Client ID" value={form.openid.client_id ?? ''} k="client_id" set={(v) => setForm({ ...form, openid: { ...form.openid, client_id: v } })} />
-                  <SecretField label="Client Secret(未改=保持现值)" value={form.openid.client_secret ?? ''} set={(v) => setForm({ ...form, openid: { ...form.openid, client_secret: v } })} />
+                  <SecretField label="Client Secret(已设置=保持现值)" preset={secrets.openid_secret} value={form.openid.client_secret ?? ''} onChange={(v) => setForm({ ...form, openid: { ...form.openid, client_secret: v } })} onClear={() => { setForm({ ...form, openid: { ...form.openid, client_secret: '' } }); setClearedSecrets({ ...clearedSecrets, openid_secret: true }) }} />
                   <Field abbr="openid" label="Redirect URL" value={form.openid.redirect_url ?? ''} ph="https://picoaide.example.com/api/client/v2/auth/openid/callback" k="redirect_url" set={(v) => setForm({ ...form, openid: { ...form.openid, redirect_url: v } })} />
                 </div>
               </div>
@@ -255,6 +318,29 @@ export default function Auth() {
             <Button onClick={saveAuth} disabled={busy}>{busy ? '保存中…' : '保存认证配置'}</Button>
           </div>
           {testMsg && <div className={`text-[13px] ${testMsg.startsWith('✓') ? 'text-green-600' : 'text-red-600'}`}>{testMsg}</div>}
+          {testDetail && testDetail.ok && (
+            <div className="rounded-md border bg-muted/20 p-3 text-[13px]">
+              <div className="mb-1 font-medium">
+                目录统计: 匹配到 <span className="text-green-700 font-semibold">{testDetail.users ?? 0}</span> 个用户,
+                {' '}<span className="text-green-700 font-semibold">{testDetail.groups ?? 0}</span> 个组
+              </div>
+              {(testDetail.sample?.length ?? 0) > 0 && (
+                <div className="space-y-0.5">
+                  <div className="text-muted-foreground">用户样例(前 {testDetail.sample!.length} 个):</div>
+                  {testDetail.sample!.map((u, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="font-mono">{u.username}</span>
+                      <span className="text-muted-foreground">{u.display_name || u.email || ''}</span>
+                      {u.groups && u.groups.length > 0 && (
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-xs">{u.groups.join(', ')}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-1.5 text-xs text-muted-foreground">保存后立即同步一次, 之后每 1 小时自动同步(新员工/离职/组变更 1 小时内生效)。</div>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
@@ -271,12 +357,45 @@ function Field(props: { label: string; value: string; ph?: string; k: string; ab
   )
 }
 
-function SecretField(props: { label: string; value: string; set: (v: string) => void }) {
+function SecretField(props: {
+  label: string
+  value: string
+  preset?: 'has-value' | 'unset'
+  onChange: (v: string) => void
+  onClear?: () => void
+}) {
   const id = `auth-secret-${Math.random().toString(36).slice(2, 8)}`
+  const preset = props.preset ?? 'unset'
+  // 已设置且未输入新值: 显示「已配置」徽标, 输入框留空(不显示 ***,
+  // 避免用户把 *** 当密码; 留空 + 已设置 = 服务端保持现值)。
+  const configured = preset === 'has-value' && props.value === ''
   return (
     <div className="space-y-1">
-      <Label htmlFor={id} className="text-xs text-muted-foreground">{props.label}</Label>
-      <SecretInput id={id} value={props.value} onChange={(e) => props.set(e.target.value)} />
+      <div className="flex items-center justify-between">
+        <Label htmlFor={id} className="text-xs text-muted-foreground">{props.label}</Label>
+        {configured && props.onClear && (
+          <button
+            type="button"
+            onClick={props.onClear}
+            className="text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+          >
+            清空已保存密码
+          </button>
+        )}
+      </div>
+      <div className="relative">
+        <SecretInput
+          id={id}
+          value={props.value}
+          placeholder={configured ? '已配置(重新输入可覆盖)' : ''}
+          onChange={(e) => props.onChange(e.target.value)}
+        />
+        {configured && (
+          <span className="pointer-events-none absolute right-9 top-1/2 -translate-y-1/2 rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
+            已配置
+          </span>
+        )}
+      </div>
     </div>
   )
 }

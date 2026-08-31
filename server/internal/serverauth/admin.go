@@ -80,6 +80,10 @@ type AdminAPI struct {
 // host 不允许 @(无 userinfo)、空白; 端口限定数字。
 var issuerURLRe = regexp.MustCompile(`^(https)://[A-Za-z0-9.\-]+(:\d+)?(/[^\s]*)?$|^(http)://(localhost|127\.0\.0\.1)(:\d+)?(/[^\s]*)?$`)
 
+// ldapProbeDialHook 是 testAuthConnection 的 LDAP dial 注入点(仅测试用;
+// 生产 nil 走真实网络)。
+var ldapProbeDialHook func(url string) (ldapConn, error)
+
 // RegisterAdminRoutes mounts /api/admin/* with session+CSRF protection and
 // RBAC permission checks (design v3b: every protected route declares its
 // permission through AdminRoute; me/logout require only a valid session).
@@ -904,6 +908,23 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		changed = append(changed, "auth.hide_local")
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "changed:"+strings.Join(changed, ","))
+	// LDAP 配置生效后立即同步一轮目录(用户要求:配置后自动同步用户/组)。
+	// 异步执行:同步为网络 IO(LDAP bind+分页扫描),不应阻塞保存响应;
+	// 失败仅记日志,不影响保存结果。
+	ldapOn := false
+	for _, p := range strings.Split(enabled, ",") {
+		if strings.TrimSpace(p) == "ldap" {
+			ldapOn = true
+			break
+		}
+	}
+	if ldapOn {
+		go func() {
+			if _, err := SyncDirectoryOnce(a.DB, nil); err != nil {
+				_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "ldap_sync", "failed: "+err.Error())
+			}
+		}()
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -916,7 +937,14 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	// v3b 修复(2026-09):此前 configured 只判 oidc 三件套,LDAP 恒判
+	// 未配置 → 客户端登录页 LDAP 按钮永久灰(禁用)。LDAP 的可配置性 =
+	// server_url/bind_dn/base_dn 必填项齐全(与 webadmin REQUIRED 一致)。
+	ldapConfigured := func() bool {
+		return s["ldap.server_url"] != "" && s["ldap.base_dn"] != "" && s["ldap.bind_dn"] != ""
+	}
 	configured := func(prefix string) bool {
+		// oidc/openid:browser 三件套齐全才可用
 		return s[prefix+".issuer"] != "" && s[prefix+".client_id"] != "" && s[prefix+".redirect_url"] != ""
 	}
 	enabledRaw := s["auth.enabled"]
@@ -954,9 +982,16 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 	out := make([]gin.H, 0, len(methods))
 	hideLocal := s["auth.hide_local"] == "true"
 	for _, m := range methods {
+		isConfigured := m == "local"
+		switch m {
+		case "ldap":
+			isConfigured = ldapConfigured()
+		case "oidc", "openid":
+			isConfigured = configured(m)
+		}
 		out = append(out, gin.H{
 			"name":       m,
-			"configured": m == "local" || configured(m),
+			"configured": isConfigured,
 			// v3b: browser = 浏览器跳转登录(openid/oidc); hidden 仅用于
 			// 客户端登录页隐藏本地入口(管理后台恒本地,不消费该标记)。
 			"browser": m == "openid" || m == "oidc",
@@ -1171,6 +1206,9 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			BindDN       string `json:"bind_dn"`
 			BindPassword string `json:"bind_password"`
 			BaseDN       string `json:"base_dn"`
+			UserFilter   string `json:"user_filter"`
+			GroupFilter  string `json:"group_filter"`
+			GroupAttr    string `json:"group_attr"`
 		} `json:"ldap"`
 		OIDC struct {
 			Issuer string `json:"issuer"`
@@ -1183,22 +1221,49 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 	results := gin.H{}
 	switch req.Type {
 	case "ldap":
-		prov := &LDAPProvider{ServerURL: req.LDAP.ServerURL, BindDN: req.LDAP.BindDN, BindPassword: req.LDAP.BindPassword, BaseDN: req.LDAP.BaseDN}
+		// 密码留空/掩码时回读已保存的 bind_password(webadmin 的「测试连接」
+		// 必须能用已保存的密码测试,否则每次保存后密码「丢失」无法再验证)。
+		password := req.LDAP.BindPassword
+		if password == "" || password == MaskSecret {
+			if saved, ok, err := serverstore.GetSetting(a.DB, "ldap.bind_password"); err == nil && ok {
+				password = saved
+			}
+		}
+		prov := &LDAPProvider{
+			ServerURL:    req.LDAP.ServerURL,
+			BindDN:       req.LDAP.BindDN,
+			BindPassword: password,
+			BaseDN:       req.LDAP.BaseDN,
+			UserFilter:   req.LDAP.UserFilter,
+			GroupFilter:  req.LDAP.GroupFilter,
+			GroupAttr:    req.LDAP.GroupAttr,
+		}
 		if err := prov.Configure(map[string]string{
 			"server_url": req.LDAP.ServerURL, "bind_dn": req.LDAP.BindDN,
-			"bind_password": req.LDAP.BindPassword, "base_dn": req.LDAP.BaseDN,
+			"bind_password": password, "base_dn": req.LDAP.BaseDN,
+			"user_filter": req.LDAP.UserFilter, "group_filter": req.LDAP.GroupFilter,
+			"group_attr": req.LDAP.GroupAttr,
 		}); err != nil {
 			results["ok"] = false
 			results["message"] = "配置不完整: " + err.Error()
 			break
 		}
-		if err := prov.TestConnection(); err != nil {
+		// 目录探测(bind + 用户/组统计 + 前 5 样例):替代只 bind 的旧测试。
+		// ldapProbeDialHook 是测试注入点(生产 nil,走真实 LDAP 连接)。
+		if ldapProbeDialHook != nil {
+			prov.dial = ldapProbeDialHook
+		}
+		report, err := prov.ProbeDirectory()
+		if err != nil {
 			results["ok"] = false
 			results["message"] = err.Error()
-		} else {
-			results["ok"] = true
-			results["message"] = "LDAP 连接成功"
+			break
 		}
+		results["ok"] = true
+		results["message"] = "LDAP 连接成功"
+		results["users"] = report.Users
+		results["groups"] = report.Groups
+		results["sample"] = report.Sample
 	case "oidc", "openid":
 		if req.OIDC.Issuer == "" {
 			results["ok"] = false
