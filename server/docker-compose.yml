@@ -7,12 +7,12 @@
 # 用途:DB_MODE=pg(默认)时使用(部署脚本 install/deploy 生成、或手动):
 #   cp .env.example .env 并填写 DOMAIN / PICOAI_ADMIN_PASSWORD(必改)
 #   cp Caddyfile.<模式> Caddyfile   # autocert=自动证书 / manual=手动证书
-#   docker compose -f docker-compose.pg.yml up -d
-#   docker compose -f docker-compose.pg.yml down   # 停止
-#   docker compose -f docker-compose.pg.yml logs -f
+#   docker compose -f docker-compose.yml up -d
+#   docker compose -f docker-compose.yml down   # 停止
+#   docker compose -f docker-compose.yml logs -f
 #
 # 服务与固定 IP:
-#   - caddy(172.28.0.2,CADDDY_IP):HTTPS 反代,唯一对外入口
+#   - caddy(172.28.0.2,CADDY_IP):HTTPS 反代,唯一对外入口
 #   - server(172.28.0.3,SERVER_IP):PicoAide 服务端,仅内网可达
 #   - postgres(172.28.0.4,PG_IP):内置 PostgreSQL 18,数据落 ./pg-data
 #
@@ -109,7 +109,11 @@ services:
       POSTGRES_DB: picoaide
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - ./pg-data:/var/lib/postgresql/data
+      # PG 18+ 官方镜像 PGDATA=/var/lib/postgresql/<major>/docker,
+      # 挂载父目录 /var/lib/postgresql(容器内数据落 18/docker 子目录);
+      # 旧挂载点 /var/lib/postgresql/data 会被 entrypoint 判定为
+      # "unused mount/volume" 并拒绝启动(实测 exit 1)。
+      - ./pg-data:/var/lib/postgresql
     networks:
       picoaide-net:
         ipv4_address: ${PG_IP:-172.28.0.4}

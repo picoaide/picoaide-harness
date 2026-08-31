@@ -69,12 +69,31 @@ jobs:
         run: |
           bash -n scripts/install-server.sh scripts/deploy.sh
           if command -v docker >/dev/null 2>&1; then
+            # 生产按 DB_MODE 选择单个完整 compose 文件(不叠加),这里分别校验;
+            # 两个文件都引用 ${PG_PASSWORD:?}/${PG_DSN:?},需注入否则插值报错。
             PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@postgres:5432/picoaide \
               docker compose -f docker-compose.yml config -q
-            # 审计 2026-08-27:pg-ext 也引用 ${PG_PASSWORD:?},需同样注入,
-            # 否则 compose 插值报 PG_PASSWORD missing(GitHub Actions 失败)。
             PG_PASSWORD=ci PG_DSN=postgres://picoaide:ci@pg.example.com:5432/picoaide \
-              docker compose -f docker-compose.yml -f docker-compose.pg-ext.yml config -q
+              docker compose -f docker-compose.pg-ext.yml config -q
+            # 审计 2026-08-31:PG18 挂载点兼容验证——postgres:18-alpine 的 PGDATA
+            # 是 /var/lib/postgresql/18/docker,compose 挂载 ./pg-data:/var/lib/postgresql
+            # (父目录)。旧挂载点 /var/lib/postgresql/data 会被 entrypoint 判定为
+            # "unused mount/volume" 而拒绝启动(exit 1),导致部署失败。
+            PG18_MOUNT="$(mktemp -d)"
+            PG18_CID="$(docker run -d --rm --name picoaide-ci-pg18 \
+              -e POSTGRES_USER=picoaide -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=picoaide \
+              -v "$PG18_MOUNT:/var/lib/postgresql" postgres:18-alpine)"
+            sleep 8
+            if ! docker ps --format '{{.Names}}' | grep -qx picoaide-ci-pg18; then
+              echo "::error::postgres:18-alpine 未能在挂载 /var/lib/postgresql 下启动(请检查 compose 挂载点)"
+              docker logs "$PG18_CID" 2>&1 | tail -20 || true
+              docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
+              rm -rf "$PG18_MOUNT"
+              exit 1
+            fi
+            docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
+            rm -rf "$PG18_MOUNT"
+            echo "postgres:18-alpine mount-point check OK"
           else
             # 审计 2026-08-25 A-01:docker 缺失时显式失败(此前静默跳过 =
             # compose 语法零验证)。

@@ -28,15 +28,16 @@ This article describes how PicoAide Harness is deployed in an enterprise intrane
 
 ```sh
 # One-click server deployment (auto privilege escalation, installs dependencies per distro, interactively collects configuration, reuses deploy.sh)
-sh -c "$(curl -fsSL .../server/scripts/install-server.sh)"
+# Note: must be run with bash (the script uses bash-only syntax; `sh -c` resolves to dash on Debian/Ubuntu and fails)
+bash -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 # Non-interactive: set environment variables such as DOMAIN / ADMIN_PASS / DB_MODE / TLS_MODE
 ./deploy.sh install|update|status|logs|backup|uninstall
 ```
 
-The `deploy.sh` subcommands **automatically apply a compose override** based on `DB_MODE` from `.env`, no manual `-f` needed:
+The `deploy.sh` subcommands **automatically select the full compose file** based on `DB_MODE` from `.env` (`pg` → main `docker-compose.yml` with the postgres container; `pg-external` → `docker-compose.pg-ext.yml`), no manual `-f` needed:
 - `install`: subnet/port preflight → DNS/CDN validation (auto mode) → certificate preparation → generate `.env`/Caddyfile → pull images and start → wait for `/healthz` readiness;
-- `update`: pull new images and rebuild (data directory unchanged, zero-downtime upgrade; migrations run automatically in order);
-- `backup`: package `picoaide-data` (database + master.key) + the Caddy certificate store in auto mode + `pg_dump` in pg mode;
+- `update`: pull new images and rebuild (data directory unchanged, brief downtime as containers are recreated in sequence; migrations run automatically in order);
+- `backup`: package `picoaide-data` (application data + master.key) + the Caddy certificate store in auto mode + `pg_dump` in pg mode;
 
 - `uninstall [--volumes]`: stop containers (optionally delete the data directory).
 
@@ -52,12 +53,12 @@ Employee clients / browsers
    Go server (non-root uid 10001, exposes 8080, fixed IP 172.28.0.3)
       │
       ▼
-   ./picoaide-data/ (master.key + app data, bind mount, not lost on upgrade)
+   PostgreSQL 18 (built-in container when DB_MODE=pg, fixed IP 172.28.0.4, data ./pg-data)
 ```
 
 - Custom private-subnet bridge (default `172.28.0.0/24`, configurable via `NETWORK_SUBNET`); fixed IPs stay unchanged across container rebuilds;
 - The server does not map a host port, so external traffic can only enter through Caddy (intranet isolation + reduced attack surface);
-- **All persistent data uses `./` bind mounts, not named volumes**: `picoaide-data/`, `caddy-data/`, `caddy-config/`, `certs/` (manual certificates), `pg-data/` (PG mode); backup = copy the deployment directory directly or `deploy.sh backup`.
+- **All persistent data uses `./` bind mounts, not named volumes**: `picoaide-data/` (master.key + app data), `caddy-data/`, `caddy-config/`, `certs/` (manual certificates), `pg-data/` (PG mode, mounted at `/var/lib/postgresql` inside the container); backup = copy the deployment directory directly or `deploy.sh backup`.
 
 ### Images and versions
 
@@ -90,7 +91,7 @@ After deployment, log in to the Admin Console at `/admin/` and go to the **Gatew
 - **Secrets**: upstream provider keys are **encrypted at rest with AES-GCM** (`enc:v1:`, master key file, 0600), never stored in plaintext; API tokens store only a SHA-256 hash (90-day expiry), and changing the password / downgrading privileges / disabling automatically revokes all tokens (same transaction);
 - **Admin side**: session 12h (hard TTL + 60-min idle sliding expiry) + CSRF (HMAC time window ±1h); login dual-bucket rate limiting (10 attempts / 5 minutes / key, no trust in X-Forwarded-For); unified error envelope; `/healthz` unauthenticated probe (DB ping, 503 = DB unavailable);
 - **Certificates**: three modes — `manual` (enterprise CA / self-signed placeholder, supports IPs), `auto` (Let's Encrypt automatic renewal, direct-connect public domain only, with built-in direct-connect/IP validation), `internal` (Caddy local CA, works out of the box in the intranet); employee client logins reject non-HTTPS addresses (TOFU);
-- **Backup and recovery**: `deploy.sh backup` packages the DB + **master.key** in one shot (if lost, encrypted keys are unrecoverable) + the Caddy certificate store (+ `pg_dump`); recovery = stop the service and unpack → `up -d`; `update` is zero-downtime, downgrades are not guaranteed compatible;
+- **Backup and recovery**: `deploy.sh backup` packages the app data + **master.key** in one shot (if lost, encrypted keys are unrecoverable) + the Caddy certificate store (+ `pg_dump`); recovery = stop the service and unpack → `up -d`; `update` recreates containers in sequence (brief downtime), downgrades are not guaranteed compatible;
 - **Offline deployment**: `make release-export` exports the image tar + `docker load`.
 
 ## Further reading

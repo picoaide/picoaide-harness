@@ -9,10 +9,12 @@ PicoAide Harness 平台的企业管控面：Go 服务端提供认证（local / L
 ### 0. 一键部署（oh-my-zsh 式，单命令）
 
 ```bash
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
 ```
 
-运行时会交互询问域名（也可回车跳过，生产前必须设置）；也可非交互指定（需 root/sudo）：
+> 注意:必须用 `bash` 执行(脚本使用 bash 专属语法);`sh -c`(Debian/Ubuntu 上
+> `/bin/sh`=dash)会解析失败。交互运行时会询问域名(必填,生产前必须设置为真实
+> 域名/IP);也可非交互指定(需 root/sudo):
 
 ```bash
 # 指定域名 + 管理员密码（PostgreSQL 内置容器，DB_MODE=pg 默认）
