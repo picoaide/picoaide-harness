@@ -83,6 +83,7 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 ## 服务器信息
 
 - 展示当前服务端版本、数据库驱动（PostgreSQL）、构建信息；健康检查状态（`/healthz`）与运行环境摘要。
+- 版本更新提示：自动检测 GitHub Releases 最新版本；有新版本时页面顶部显示提示横幅（含发行说明链接），管理员在服务器执行 `./deploy.sh update` 升级（数据不丢）。检测失败静默降级，不打扰管理。
 
 ## 部署相关
 

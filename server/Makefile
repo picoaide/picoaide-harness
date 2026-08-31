@@ -16,8 +16,9 @@ test:
 # CI 门禁(审计 2026-08-25 G2):必须覆盖全部业务包——agentshare/sharedskills
 # 曾是两个游离于自动化之外的新商城包,其越权/多版本缺陷零拦截。这里显式
 # 枚举全部包,避免将来新增包再次漏跑。
+# 2026-08-31:加入 updatecheck(版本检查)。
 test-server:
-	go test ./internal/serverauth/... ./internal/llmgateway/... ./internal/marketplace/... ./internal/serverstore/... ./internal/agentshare/... ./internal/sharedskills/... ./internal/bootstrap/... ./internal/util/... -count=1
+	go test ./internal/serverauth/... ./internal/llmgateway/... ./internal/marketplace/... ./internal/serverstore/... ./internal/agentshare/... ./internal/sharedskills/... ./internal/bootstrap/... ./internal/util/... ./internal/updatecheck/... -count=1
 
 # webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
 build-server: webadmin

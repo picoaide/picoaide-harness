@@ -4,7 +4,7 @@ import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { PageHeader } from '../components/page-header'
-import { Server, Cpu, MemoryStick, HardDrive, Database, Activity, RefreshCw, ShieldCheck } from 'lucide-react'
+import { Server, Cpu, MemoryStick, HardDrive, Database, Activity, RefreshCw, ShieldCheck, Sparkles, ExternalLink } from 'lucide-react'
 
 interface SysInfo {
   uptime_sec: number
@@ -25,6 +25,14 @@ interface SysInfo {
     schema_migrations: number
   }
   version: string
+  // 2026-08-31: 实时版本检查(服务端代理 GitHub Releases;失败为 null 静默降级)
+  update_check?: {
+    current: string
+    latest: string
+    update_available: boolean
+    release_url: string
+    checked_at: string
+  } | null
 }
 
 // 统计卡(与用量页 stat-card 风格一致):图标品牌色渐变方块 + 标题 + 主值
@@ -78,6 +86,29 @@ export default function ServerInfo() {
         }
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
+
+      {/* 版本升级提示(2026-08-31):有更新且服务端可达时显示;静默降级。
+          链接跳转 GitHub Releases(管理员手动升级,不自动执行)。 */}
+      {info?.update_check?.update_available && (
+        <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-600/10 text-[#1E40AF]">
+            <Sparkles className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-blue-900">
+              发现新版本 {info.update_check.latest}(当前 v{info.version})
+            </div>
+            <div className="mt-0.5 text-xs text-blue-700">
+              请查看发行说明并在服务器上执行 <code className="rounded bg-blue-100 px-1 font-mono text-[11px]">./deploy.sh update</code> 升级(数据不丢)。
+            </div>
+          </div>
+          <a href={info.update_check.release_url} target="_blank" rel="noreferrer">
+            <Button size="sm" variant="outline" className="shrink-0 border-blue-300 bg-white text-blue-700 hover:bg-blue-100 hover:text-blue-900">
+              <ExternalLink className="h-3.5 w-3.5" /> 查看发行说明
+            </Button>
+          </a>
+        </div>
+      )}
 
       {info ? (
         <>

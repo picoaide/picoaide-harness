@@ -1,21 +1,26 @@
 package serverauth
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/updatecheck"
 )
 
-// sysinfoResponse 是 /api/admin/server-info 的响应体。
+// sysinfoResponse 是 /api/server/admin/server-info 的响应体。
 // 系统信息来自 runtime/stdlib+Linux /proc(不引入 gopsutil 依赖);
 // 数据库统计按驱动(SQLite/PG)查询行数与磁盘大小。
+// 2026-08-31 起含 update_check 字段(服务端代理的 GitHub Releases 版本检查)。
 type sysinfoResponse struct {
 	UptimeSec   int64      `json:"uptime_sec"`
 	UptimeHuman string     `json:"uptime_human"`
@@ -28,6 +33,9 @@ type sysinfoResponse struct {
 	Disk        diskInfo   `json:"disk"`
 	DB          dbStats    `json:"db"`
 	Version     string     `json:"version"`
+	// UpdateCheck 是实时版本检查结果(2026-08-31 新增);服务不可达/非
+	// SemVer 时为 null,前端静默降级(绝不因版本检查失败打扰管理员)。
+	UpdateCheck *updatecheck.Result `json:"update_check"`
 }
 
 type memInfo struct {
@@ -95,14 +103,45 @@ func (a *AdminAPI) handleServerInfo(c *gin.Context) {
 	}
 	resp.DB = dbStats
 
+	// 实时版本检查(2026-08-31):查询 GitHub Releases latest,对比当前版本。
+	// 结果失败时留 nil(JSON null),前端静默降级——版本提示是增强体验,
+	// 绝不能让外网 API 故障影响服务器信息页正常展示。
+	// AdminAPI.UpdateChecker 可注入 mock(测试);nil 时用包级缓存 checker。
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	checker := a.UpdateChecker
+	if checker == nil {
+		checker = defaultUpdateChecker()
+	}
+	if uc, uerr := checker.Check(ctx, buildVersion); uerr == nil {
+		resp.UpdateCheck = uc
+	}
+
 	c.JSON(http.StatusOK, resp)
 }
 
 // ---- 启动时间(包级,进程启动时设置) ----
 var startTime = time.Now()
 
-// buildVersion 可在构建时注入(-X main.buildVersion? 用包内变量,保持简单)。
+// buildVersion 是 server-info 上报与版本检查对比的当前版本。
+// 由 main 在启动时注入与 --version 相同的版本(单一来源:避免两处
+// ldflags 注入漂移;旧行为恒为 "dev" 导致 ServerInfo 页版本恒 dev,
+// 2026-08-31 修复)。
 var buildVersion = "dev"
+
+// SetBuildVersion 注入运行时版本(main 启动时调用一次)。
+func SetBuildVersion(v string) { buildVersion = v }
+
+// defaultUpdateChecker 是生产用包级缓存 checker(单例,跨请求共享缓存)。
+var defaultUpdateCheckOnce sync.Once
+var defaultUpdateCheckVal *updatecheck.CachedChecker
+
+func defaultUpdateChecker() *updatecheck.CachedChecker {
+	defaultUpdateCheckOnce.Do(func() {
+		defaultUpdateCheckVal = updatecheck.NewCached()
+	})
+	return defaultUpdateCheckVal
+}
 
 // collectDBStats 按驱动收集行数与磁盘大小。
 func collectDBStats(db *sql.DB) (dbStats, error) {

@@ -82,6 +82,7 @@ Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved
 ## Server Info
 
 - Shows the current server version, database driver (PostgreSQL), build info; health-check status (`/healthz`) and a runtime environment summary.
+- Update notifications: the server automatically checks GitHub Releases for the latest version; when a newer version exists, a banner appears at the top of the page (with a release notes link). Administrators upgrade on the server with `./deploy.sh update` (data preserved). Check failures degrade silently.
 
 ## Deployment-related
 
