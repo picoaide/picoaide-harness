@@ -1,6 +1,7 @@
 package serverauth
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
@@ -59,9 +61,18 @@ func adminLoginLimiter() *loginLimiter {
 	return adminLoginLimiterVal
 }
 
+// UpdateChecker 接口是版本检查的最小依赖(生产用 updatecheck.CachedChecker,
+// 测试注入 fake 避免外网)。定义在 serverauth 以避免反向依赖。
+type UpdateChecker interface {
+	Check(ctx context.Context, current string) (*updatecheck.Result, error)
+}
+
 // AdminAPI holds the admin web handlers.
 type AdminAPI struct {
 	DB *sql.DB
+	// UpdateChecker 是版本检查器(2026-08-31);nil 时 handler 用包级
+	// 默认缓存 checker(生产),测试可注入 mock 避免打外网。
+	UpdateChecker UpdateChecker
 }
 
 // issuerURLRe 校验测试连接 issuer(§1.2 SSRF; CodeQL regexp barrier):

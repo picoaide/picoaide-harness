@@ -58,6 +58,8 @@ func main() {
 	if *pgDSN == "" {
 		log.Fatal("-pg-dsn is required (PostgreSQL only since 2026-08)")
 	}
+	// server-info 上报与版本检查使用与 --version 同一版本(单一来源)。
+	serverauth.SetBuildVersion(version)
 	cfg := serverstore.DBConfig{
 		Driver: serverstore.DriverName(*dbDriver),
 		DSN:    *pgDSN,
