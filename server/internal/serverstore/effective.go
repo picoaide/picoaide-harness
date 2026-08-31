@@ -1,6 +1,9 @@
 package serverstore
 
-import "database/sql"
+import (
+	"database/sql"
+	"time"
+)
 
 // Effective groups 解析(金字塔权限继承):
 //
@@ -8,6 +11,15 @@ import "database/sql"
 //	             + 该用户任主管的部门及其全部子部门(主管向上兼容)
 //
 // 实时解析无缓存:组织树/主管/授权变更立即生效。
+
+// groupTreeTTL 组织树缓存时长:部门树低频率变更(管理员操作),30s 内
+// 变更可接受;每次全表 SELECT groups 在热路径(每请求配额/授权)代价高。
+const groupTreeTTL = 30 * time.Second
+
+var groupTreeCache = newTTLCache(groupTreeTTL)
+
+// InvalidateGroupTree 使组织树缓存失效(部门/主管/组变更时调用)。
+func InvalidateGroupTree() { groupTreeCache.invalidateAll() }
 
 type groupNode struct {
 	id     int64
@@ -17,6 +29,9 @@ type groupNode struct {
 }
 
 func loadGroupTree(db *sql.DB) ([]groupNode, error) {
+	if v := groupTreeCache.get(db, "tree"); v != nil {
+		return v.([]groupNode), nil
+	}
 	rows, err := db.Query("SELECT id, name, parent_id, leader_id FROM groups")
 	if err != nil {
 		return nil, err
@@ -30,7 +45,11 @@ func loadGroupTree(db *sql.DB) ([]groupNode, error) {
 		}
 		nodes = append(nodes, n)
 	}
-	return nodes, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	groupTreeCache.set(db, "tree", nodes)
+	return nodes, nil
 }
 
 func indexTree(nodes []groupNode) (children map[int64][]groupNode, byID map[int64]groupNode) {

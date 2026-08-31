@@ -76,6 +76,9 @@ func newGateway(t *testing.T, f *fakeUpstream) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
 	// 测试环境未接 master key:身份解密(测试密钥明文存储)
 	DecryptSecret = func(s string) (string, error) { return s, nil }
+	// 每个测试独立临时 DB:清空上游路由缓存,防前一测试的 provider 污染
+	// (2026-08-31 加 LoadUpstreams 缓存后引入)。
+	InvalidateUpstreams()
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 

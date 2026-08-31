@@ -588,27 +588,76 @@ const moneyEpsilon = 0.005
 // Admins are always exempt; 0 quota means unlimited.
 // 审计修复 2026-P (M1): 查询失败改为 fail-closed——计费强制路径上 DB 瞬时
 // 故障若放行超限请求,后台可能被刷出无限费用;改为拒绝并记日志。
+// 2026-08-31 查询优化:原实现 6 次串行 DB 查询(部门成员+预算+用户用量×3),
+// 改为 1 次 MonthUsageByUsers 批量取用户+部门成员用量,减少热路径 DB 往返。
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
-	if blocked, msg := a.deptBudgetBlocked(user); blocked {
-		return true, msg
+	if user.IsAdmin {
+		return false, ""
 	}
-	if blocked, msg := a.moneyQuotaBlocked(user); blocked {
-		return true, msg
+
+	// 1) 部门预算链路(仅需 groupID/name/budget,不查用量)
+	budgets, err := serverstore.EffectiveDeptBudget(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: dept budget lookup error (fail-closed): %v", err)
+		return true, "部门预算校验暂不可用,请稍后再试"
 	}
+
+	// 2) 收集需要查用量的用户集合:本人 + 各部门树成员(用户与部门共用一次查询)
+	memberIDs := map[int64]bool{user.ID: true}
+	for _, b := range budgets {
+		ids, err := serverstore.DeptMemberIDs(a.DB, b.GroupID)
+		if err != nil {
+			log.Printf("gateway: dept member lookup error (fail-closed): %v", err)
+			return true, "部门预算校验暂不可用,请稍后再试"
+		}
+		for _, id := range ids {
+			memberIDs[id] = true
+		}
+	}
+	ids := make([]int64, 0, len(memberIDs))
+	for id := range memberIDs {
+		ids = append(ids, id)
+	}
+	usages, err := serverstore.MonthUsageByUsers(a.DB, ids)
+	if err != nil {
+		log.Printf("gateway: usage lookup error (fail-closed): %v", err)
+		return true, "配额校验暂不可用,请稍后再试"
+	}
+
+	// 3) 部门预算:任一部门树内成本合计超限即拦截
+	for _, b := range budgets {
+		total := 0.0
+		ids, err := serverstore.DeptMemberIDs(a.DB, b.GroupID)
+		if err != nil {
+			log.Printf("gateway: dept member lookup error (fail-closed): %v", err)
+			return true, "部门预算校验暂不可用,请稍后再试"
+		}
+		for _, id := range ids {
+			total += usages[id].Cost
+		}
+		if total >= b.Budget-moneyEpsilon {
+			return true, "部门「" + b.Name + "」本月费用预算已用尽"
+		}
+	}
+
+	// 4) 用户金额配额
+	moneyQuota, err := serverstore.EffectiveMoneyQuota(a.DB, user)
+	if err != nil {
+		log.Printf("gateway: money quota lookup error (fail-closed): %v", err)
+		return true, "金额配额校验暂不可用,请稍后再试"
+	}
+	myUsage := usages[user.ID]
+	if moneyQuota > 0 && myUsage.Cost >= moneyQuota-moneyEpsilon {
+		return true, "本月费用配额已用尽"
+	}
+
+	// 5) 用户 token 配额
 	quota, err := serverstore.EffectiveQuota(a.DB, user)
 	if err != nil {
 		log.Printf("gateway: quota lookup error (fail-closed): %v", err)
 		return true, "配额校验暂不可用,请稍后再试"
 	}
-	if quota <= 0 {
-		return false, ""
-	}
-	used, err := serverstore.UserMonthlyUsage(a.DB, user.ID)
-	if err != nil {
-		log.Printf("gateway: usage lookup error (fail-closed): %v", err)
-		return true, "配额校验暂不可用,请稍后再试"
-	}
-	if used >= quota {
+	if quota > 0 && myUsage.Tokens >= quota {
 		return true, "本月流量配额已用尽"
 	}
 	return false, ""

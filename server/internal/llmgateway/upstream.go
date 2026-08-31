@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -13,6 +15,60 @@ import (
 // 审计2026-L14):AES-GCM master-key wiring 由 cmd/server/main.go 安装。
 var DecryptSecret = func(s string) (string, error) {
 	return "", errors.New("master key not wired")
+}
+
+// upstreamTTL 上游路由缓存时长:provider/模型表由管理端低频改动,
+// 而每条聊天请求都调 LoadUpstreams(N+1:provider + 每 provider 的 synced models)。
+// 30s TTL 内管理端变更最多延迟 30s 生效(路由一致性可接受,换来热路径 0 DB)。
+const upstreamTTL = 30 * time.Second
+
+var (
+	upstreamCacheMu sync.Mutex
+	upstreamCache   []Upstream
+	upstreamCacheAt time.Time
+	upstreamCacheDB *sql.DB // 缓存绑定的 DB 实例:不同 DB(测试)不共享
+)
+
+// InvalidateUpstreams 主动失效上游缓存(管理端增删 provider/模型时调用)。
+func InvalidateUpstreams() {
+	upstreamCacheMu.Lock()
+	defer upstreamCacheMu.Unlock()
+	upstreamCache = nil
+	upstreamCacheDB = nil
+}
+
+// withCache 包装 LoadUpstreams 内部逻辑,附加缓存(供测试无缓存路径)。
+// 兼容签名:测试直接调 LoadUpstreams;缓存命中返回上次结果。
+// DB 实例绑定:测试用独立临时库(不同 *sql.DB),缓存按 DB 隔离——
+// 同一进程内不同 DB 的测试不会相互污染。
+func loadUpstreamsCached(db *sql.DB) ([]Upstream, error) {
+	upstreamCacheMu.Lock()
+	if upstreamCache != nil && upstreamCacheDB == db && time.Since(upstreamCacheAt) < upstreamTTL {
+		c := upstreamCache
+		upstreamCacheMu.Unlock()
+		return c, nil
+	}
+	upstreamCacheMu.Unlock()
+
+	ups, err := loadUpstreamsDB(db)
+	if err != nil {
+		return nil, err
+	}
+	upstreamCacheMu.Lock()
+	upstreamCache = ups
+	upstreamCacheAt = time.Now()
+	upstreamCacheDB = db
+	upstreamCacheMu.Unlock()
+	return ups, nil
+}
+
+// LoadUpstreams returns all enabled providers with their model lists.
+// Model names merge the provider's models JSON column with the models table
+// (where channel sync writes), so both manually-entered and synced models route.
+// One broken provider (undecryptable key, corrupt models JSON) is skipped and
+// logged instead of aborting the whole gateway.
+func LoadUpstreams(db *sql.DB) ([]Upstream, error) {
+	return loadUpstreamsCached(db)
 }
 
 // Upstream is an enabled LLM provider (OpenAI-compatible, or Anthropic-compatible when Protocol == "anthropic").
@@ -25,12 +81,7 @@ type Upstream struct {
 	Protocol string
 }
 
-// LoadUpstreams returns all enabled providers with their model lists.
-// Model names merge the provider's models JSON column with the models table
-// (where channel sync writes), so both manually-entered and synced models route.
-// One broken provider (undecryptable key, corrupt models JSON) is skipped and
-// logged instead of aborting the whole gateway.
-func LoadUpstreams(db *sql.DB) ([]Upstream, error) {
+func loadUpstreamsDB(db *sql.DB) ([]Upstream, error) {
 	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, channel, protocol FROM gateway_providers WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
 		return nil, err

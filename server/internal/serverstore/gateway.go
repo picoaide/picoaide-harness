@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 )
 
 type GatewayProvider struct {
@@ -98,6 +99,9 @@ func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
 	}
 	if len(out) == 0 {
 		_, err := db.Exec("DELETE FROM settings WHERE key = ?", excludedModelsKey(providerID))
+		if err == nil {
+			settingsCache.invalidateAll() // 直写 settings 需同步失效缓存
+		}
 		return err
 	}
 	b, _ := json.Marshal(out)
@@ -159,6 +163,8 @@ func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 		return 0, err
 	}
 	p.ID = id
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
 	return p.ID, nil
 }
 
@@ -180,6 +186,8 @@ func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
 	return nil
 }
 
@@ -225,7 +233,14 @@ func DeleteGatewayProvider(db *sql.DB, id int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 上游/models/settings 已变更:失效模型配置与服务端上游路由缓存
+	InvalidateModelConfig()
+	InvalidateSettings()
+	InvalidateModelsChanged()
+	return nil
 }
 
 // SyncProviderModels replaces the models table rows for a provider so it
@@ -256,7 +271,12 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return nil
 }
 
 // SyncProviderModel upsert 一个模型的 display_name 与 default_params(幂等)。
@@ -265,6 +285,10 @@ func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(provider_id, name) DO UPDATE SET display_name=excluded.display_name, default_params=excluded.default_params`,
 		name, providerID, name, defaultParams)
+	if err == nil {
+		InvalidateModelConfig()
+		InvalidateModelsChanged()
+	}
 	return err
 }
 
@@ -320,6 +344,9 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	InvalidateModelConfig()
+	InvalidateSettings()
+	InvalidateModelsChanged()
 	return len(doomed), nil
 }
 
@@ -360,13 +387,30 @@ func GetModel(db *sql.DB, id int64) (*Model, error) {
 	return m, err
 }
 
+// modelConfigTTL 模型配置缓存时长(30s):价格/default_params 由 webadmin
+// 低频配置;热路径每条流式请求调 ModelPrices+ModelCachePrice+
+// ModelDefaultParams 三次查询,缓存后 0 DB。
+const modelConfigTTL = 30 * time.Second
+
+var modelConfigCache = newTTLCache(modelConfigTTL)
+
+// InvalidateModelConfig 使模型配置缓存失效(webadmin 改模型价格/参数时调用)。
+func InvalidateModelConfig() { modelConfigCache.invalidateAll() }
+
 // ModelDefaultParams loads a model's default_params by name.
 func ModelDefaultParams(db *sql.DB, name string) (string, error) {
+	if v := modelConfigCache.get(db, "dp:"+name); v != nil {
+		return v.(string), nil
+	}
 	var params string
 	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ?`, name).Scan(&params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
+	if err != nil {
+		return "", err
+	}
+	modelConfigCache.set(db, "dp:"+name, params)
 	return params, err
 }
 
@@ -374,31 +418,44 @@ func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 // off-peak discount for a model name (0, 0, 0 when the model is missing or
 // unpriced). Used to compute usage cost at record time (0022/0023).
 func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak float64) {
+	if v := modelConfigCache.get(db, "price:"+name); v != nil {
+		p := v.([3]float64)
+		return p[0], p[1], p[2]
+	}
 	var in, out, off sql.NullFloat64
 	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount FROM models WHERE name = ?`, name).Scan(&in, &out, &off)
 	if err != nil {
 		return 0, 0, 0
 	}
+	r := [3]float64{}
 	if in.Valid {
-		inputPer1M = in.Float64
+		r[0] = in.Float64
 	}
 	if out.Valid {
-		outputPer1M = out.Float64
+		r[1] = out.Float64
 	}
 	if off.Valid {
-		offpeak = off.Float64
+		r[2] = off.Float64
 	}
-	return inputPer1M, outputPer1M, offpeak
+	modelConfigCache.set(db, "price:"+name, r)
+	return r[0], r[1], r[2]
 }
 
 // ModelCachePrice returns the cache-hit input price (yuan per 1M tokens,
 // 0029). 0 = 未配置缓存价(命中按输入价计费)。
 func ModelCachePrice(db *sql.DB, name string) float64 {
+	if v := modelConfigCache.get(db, "cache:"+name); v != nil {
+		return v.(float64)
+	}
 	var cache sql.NullFloat64
 	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ?`, name).Scan(&cache)
 	if err != nil || !cache.Valid {
+		if err == nil {
+			modelConfigCache.set(db, "cache:"+name, 0.0)
+		}
 		return 0
 	}
+	modelConfigCache.set(db, "cache:"+name, cache.Float64)
 	return cache.Float64
 }
 
@@ -417,6 +474,8 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 		return 0, err
 	}
 	m.ID = id
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
 	return m.ID, nil
 }
 
@@ -435,6 +494,8 @@ func UpdateModel(db *sql.DB, m *Model) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
 	return nil
 }
 
@@ -473,7 +534,13 @@ func DeleteModel(db *sql.DB, id int64) error {
 	if err := clearDefaultModelIf(tx, name); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateModelConfig()
+	InvalidateSettings()
+	InvalidateModelsChanged()
+	return nil
 }
 
 // clearDefaultModelIf 把指向指定模型名的 gateway.default_model 置空(事务内)。

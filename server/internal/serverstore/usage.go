@@ -358,6 +358,47 @@ func UserMonthlyCost(db *sql.DB, userID int64) (float64, error) {
 	return total, err
 }
 
+// MonthUsageByUser 用户在当月的 token 与金额用量。
+type MonthUsageByUser struct {
+	Tokens int64
+	Cost   float64
+}
+
+// MonthUsageByUsers 一次查询返回一批用户当月的 tokens+cost 用量
+// (按 user_id 分组;无用量用户不在结果中)。供配额校验合并使用:
+// 服务端每请求的 quotaBlocked 需要 用户用量 + 部门成员用量,
+// 以前是 3 次独立 SUM 查询,这里一次 GROUP BY 搞定。
+func MonthUsageByUsers(db *sql.DB, userIDs []int64) (map[int64]MonthUsageByUser, error) {
+	out := map[int64]MonthUsageByUser{}
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	placeholders := strings.Repeat("?,", len(userIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(userIDs)+1)
+	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
+	for _, id := range userIDs {
+		args = append(args, id)
+	}
+	rows, err := db.Query(`SELECT user_id,
+		COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t,
+		COALESCE(SUM(cost),0) AS c
+		FROM usage WHERE created_at >= ? AND user_id IN (`+placeholders+`) GROUP BY user_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid int64
+		var m MonthUsageByUser
+		if err := rows.Scan(&uid, &m.Tokens, &m.Cost); err != nil {
+			return nil, err
+		}
+		out[uid] = m
+	}
+	return out, rows.Err()
+}
+
 // UserMonthlyCostBatch returns a map of user_id → cost (yuan) this calendar
 // month for a bounded set of users (one query, no N+1).
 func UserMonthlyCostBatch(db *sql.DB, userIDs []int64) (map[int64]float64, error) {
