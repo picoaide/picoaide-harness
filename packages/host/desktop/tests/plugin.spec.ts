@@ -17,6 +17,7 @@ import {
   type DesktopSettings,
 } from '../src/index.ts'
 import { DESKTOP_DIRECTORY_PICKER_PATH } from '../src/directory-picker-contract.ts'
+import { DESKTOP_LOOP_NOTIFY_SESSION_PATH } from '../src/loop-notify-contract.ts'
 import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
 import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
 
@@ -47,6 +48,7 @@ interface PluginHarness {
   notifyLocale(preference: LocaleId | undefined): void
   notifyTheme(preference: ThemePreference): void
   deepLinkHandler(): ((url: string) => void) | undefined
+  sessionOpenHandler(): ((sessionId: string) => void) | undefined
 }
 
 function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginHarness {
@@ -63,6 +65,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   let localePreference: LocaleId | undefined
   let themePreference: ThemePreference = 'system'
   let deepLinkHandler: ((url: string) => void) | undefined = undefined
+  let sessionOpenHandler: ((sessionId: string) => void) | undefined = undefined
   const runtime: DesktopRuntime = {
     platform,
     locale: 'en',
@@ -93,6 +96,9 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     prepareToQuit: () => {},
     setDeepLinkHandler: (handler) => {
       deepLinkHandler = handler
+    },
+    setSessionOpenRequestHandler: (handler) => {
+      sessionOpenHandler = handler
     },
   }
   const settings = {
@@ -151,6 +157,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       for (const listener of settingsUpdated) listener(settingsNamespace('ui-theme'), { preference })
     },
     deepLinkHandler: () => deepLinkHandler,
+    sessionOpenHandler: () => sessionOpenHandler,
   }
 }
 
@@ -351,5 +358,56 @@ describe('desktop Host plugin', () => {
     Object.assign(harness.ctx.webServer, { host: '0.0.0.0' })
 
     expect(() => apply(harness.ctx, config)).toThrow('requires a loopback Web server')
+  })
+
+  it('forwards notification clicks to the renderer session route', async () => {
+    const harness = createHarness()
+    apply(harness.ctx, config)
+
+    const handler = harness.sessionOpenHandler()
+    expect(handler).toBeDefined()
+    handler?.('session-abc')
+
+    const route = harness.route(DESKTOP_LOOP_NOTIFY_SESSION_PATH)
+    expect(route).toEqual(expect.objectContaining({
+      kind: 'exact',
+      path: DESKTOP_LOOP_NOTIFY_SESSION_PATH,
+    }))
+    const req = {
+      method: 'GET',
+      headers: { origin: 'http://127.0.0.1:43120' },
+    } as unknown as IncomingMessage
+    let body = ''
+    const res = {
+      statusCode: 200,
+      setHeader: vi.fn(),
+      end: vi.fn((value?: string) => { body = value ?? '' }),
+    } as unknown as ServerResponse
+    await route?.handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(body)).toEqual({
+      sessionId: 'session-abc',
+      requestedAt: expect.any(Number),
+    })
+  })
+
+  it('rejects cross-origin session-open route requests', async () => {
+    const harness = createHarness()
+    apply(harness.ctx, config)
+    const route = harness.route(DESKTOP_LOOP_NOTIFY_SESSION_PATH)
+    const req = {
+      method: 'GET',
+      headers: { origin: 'https://evil.example' },
+    } as unknown as IncomingMessage
+    let body = ''
+    const res = {
+      statusCode: 200,
+      setHeader: vi.fn(),
+      end: vi.fn((value?: string) => { body = value ?? '' }),
+    } as unknown as ServerResponse
+    await route?.handler(req, res)
+    expect(res.statusCode).toBe(403)
+    expect(JSON.parse(body)).toEqual({ error: 'forbidden' })
   })
 })

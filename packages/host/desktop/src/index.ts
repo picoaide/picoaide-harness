@@ -30,6 +30,12 @@ import {
   handleDesktopUpdateRequest,
   handleDesktopUpdateCheckRequest,
 } from './desktop-update-route.ts'
+import {
+  DESKTOP_LOOP_NOTIFY_SESSION_PATH,
+  emptyDesktopLoopNotifySession,
+  type DesktopLoopNotifySessionResponse,
+} from './loop-notify-contract.ts'
+import { handleDesktopLoopNotifySessionRequest } from './loop-notify-route.ts'
 import type { DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
@@ -168,6 +174,23 @@ export function apply(ctx: Context, config: Config): void {
       desktopUpdateState = { ...snapshot }
     }
   }
+  let loopNotifySession: DesktopLoopNotifySessionResponse = emptyDesktopLoopNotifySession()
+  runtime.setSessionOpenRequestHandler?.(sessionId => {
+    loopNotifySession = { sessionId, requestedAt: Date.now() }
+  })
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: DESKTOP_LOOP_NOTIFY_SESSION_PATH,
+      handler: (req, res) => handleDesktopLoopNotifySessionRequest(
+        req,
+        res,
+        rendererOrigin,
+        () => loopNotifySession,
+      ),
+    }),
+    'dsh-plugin-desktop: loop-notify session jump route',
+  )
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
