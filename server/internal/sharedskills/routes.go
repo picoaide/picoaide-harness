@@ -92,6 +92,13 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	serverauth.AdminRoute(g, "PUT", "/:name/grants", serverauth.PermCapabilityWrite, replaceGrants(db))
 	serverauth.AdminRoute(g, "PUT", "/:name/grant", serverauth.PermCapabilityWrite, setGrant(db, true))
 	serverauth.AdminRoute(g, "DELETE", "/:name/grant", serverauth.PermCapabilityWrite, setGrant(db, false))
+
+	// 能力锁定(D4)挂在另一个基路径,与生产路由树一致(AGENTS.md:测试自建
+	// 路由树的前缀必须与生产相同,否则测不出路径不匹配)。
+	lg := r.Group("/api/server/admin/capability-locks", serverauth.AdminAuth(db))
+	serverauth.AdminRoute(lg, "GET", "", serverauth.PermCapabilityRead, listLocks(db))
+	serverauth.AdminRoute(lg, "PUT", "/:kind/:name", serverauth.PermCapabilityWrite, setLock(db))
+	serverauth.AdminRoute(lg, "DELETE", "/:kind/:name", serverauth.PermCapabilityWrite, removeLock(db))
 }
 
 func rowJSON(s serverstore.SharedSkill) gin.H {
@@ -227,6 +234,20 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		u := serverauth.CurrentUser(c)
 		if u == nil {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+			return
+		}
+		// 应用锁定(决策 2026-09-01 D4):被锁定的技能只能由管理员发布,
+		// 员工命中即明确拒绝并原样回显管理员填写的理由(不做本地化改写)。
+		// 管理员自己走 /api/server/admin/* 上架,不经过本路径。
+		if lock, lerr := serverstore.GetCapabilityLock(db, serverstore.CapabilityKindSkill, req.Name); lerr == nil {
+			msg := "该技能已被管理员锁定,仅管理员可发布"
+			if lock.Reason != "" {
+				msg += ":" + lock.Reason
+			}
+			serverauth.WriteError(c, http.StatusForbidden, "APP_LOCKED", msg)
+			return
+		} else if !errors.Is(lerr, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
 		// 版本即不可变快照(决策 2026-09-01 D1/D3):
@@ -838,4 +859,80 @@ func UploadAuditDetail(name, version, title, checksum string) string {
 		detail += " sha256:" + checksum[:8]
 	}
 	return detail
+}
+
+// ---------------------------------------------------------------------------
+// 能力锁定(决策 2026-09-01 D4):管理员把某个技能名标记为「仅管理员可发布」。
+// 允许对尚不存在的名字预锁定(占名),因此不校验该技能是否已存在。
+// ---------------------------------------------------------------------------
+
+// ListLocks 返回全部锁定记录(管理端)。
+func listLocks(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		list, err := serverstore.ListCapabilityLocks(db)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		out := make([]gin.H, 0, len(list))
+		for _, l := range list {
+			out = append(out, gin.H{
+				"kind": l.Kind, "name": l.Name, "reason": l.Reason,
+				"locked_by": l.LockedBy, "created_at": l.CreatedAt,
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"locks": out})
+	}
+}
+
+// setLock 锁定一个能力名(幂等);body {reason} 会在员工被拒时原样回显。
+func setLock(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		kind, name := c.Param("kind"), c.Param("name")
+		if !serverstore.ValidCapabilityKind(kind) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "类型不合法(skill|agent)")
+			return
+		}
+		if !skillmanifest.IsAppID(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, skillmanifest.CodeInvalidAppID,
+				"名称不合法:必须是小写 kebab-case")
+			return
+		}
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.ShouldBindJSON(&req)
+		reason := strings.TrimSpace(req.Reason)
+		if len([]rune(reason)) > maxDescriptionLen {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "理由过长(上限 500 字)")
+			return
+		}
+		if err := serverstore.LockCapability(db, kind, name, reason, adminUsername(c)); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "锁定失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "capability_lock", kind+":"+name+" "+reason)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// removeLock 解除锁定。
+func removeLock(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		kind, name := c.Param("kind"), c.Param("name")
+		if !serverstore.ValidCapabilityKind(kind) || !skillmanifest.IsAppID(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		if err := serverstore.UnlockCapability(db, kind, name); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "该名称未被锁定")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "解锁失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "capability_unlock", kind+":"+name)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
 }
