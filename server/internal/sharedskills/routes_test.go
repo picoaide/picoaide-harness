@@ -62,7 +62,24 @@ func makeSkillTarGz(t *testing.T, entries map[string]string) []byte {
 	return buf.Bytes()
 }
 
-const testSkillMd = "---\nname: codeql\n---\n# codeql\n"
+// skillMd builds a SKILL.md that satisfies the strict publish contract
+// (决策 2026-09-01 §5.1):name 必须等于上传名,version 必须是包内真相。
+func skillMd(name, version string) string {
+	return "---\n" +
+		"name: " + name + "\n" +
+		"title: " + name + " 技能\n" +
+		"version: " + version + "\n" +
+		"description: 用于集成测试的技能包,描述需要满足最短长度要求。\n" +
+		"author: tester\n" +
+		"category: 测试\n" +
+		"---\n\n# " + name + "\n\n本技能是服务端集成测试使用的夹具包,正文需要足够长才能通过空壳校验,因此这里补充了一段用于说明用途的文字。\n"
+}
+
+// skillUpload builds a complete, contract-compliant upload body.
+func skillUpload(t *testing.T, name, version, desc string) string {
+	t.Helper()
+	return uploadBody(name, version, desc, makeSkillArchive(t, map[string]string{"SKILL.md": skillMd(name, version)}))
+}
 
 func setup(t *testing.T) (*gin.Engine, *sql.DB, map[string]string, map[string]string, map[string]string) {
 	t.Helper()
@@ -136,7 +153,7 @@ func TestUploadApproveFlow(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-		strings.NewReader(uploadBody("codeql-audit", "1.0.0", "审计", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+		strings.NewReader(skillUpload(t, "codeql-audit", "1.0.0", "审计")))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -198,7 +215,7 @@ func TestUploadApproveFlow(t *testing.T) {
 	// Multi-version: upload 1.1.0 → approve → both visible.
 	w2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-		strings.NewReader(uploadBody("codeql-audit", "1.1.0", "审计v2", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+		strings.NewReader(skillUpload(t, "codeql-audit", "1.1.0", "审计v2")))
 	req2.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req2.Header.Set(k, v)
@@ -233,8 +250,20 @@ func TestUploadValidation(t *testing.T) {
 		body string
 		want int
 	}{
-		{"bad name", uploadBody("My-Skill", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd})), 400},
-		{"bad version", uploadBody("ok", "../x", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd})), 400},
+		{"bad name", skillUpload(t, "My-Skill", "1.0.0", ""), 400},
+		// 版本不再取自请求:包内 version 非 semver 才是版本错误(422)。
+		{"bad version in package", uploadBody("okskill", "1.0.0", "",
+			makeSkillArchive(t, map[string]string{"SKILL.md": skillMd("okskill", "v1")})), 422},
+		// 身份错位:包内 name 与上传名不一致必须拒绝(否则装到磁盘后
+		// 运行时按包内 name 注册,与市场卡片对不上)。
+		{"identity mismatch", uploadBody("okskill", "1.0.0", "",
+			makeSkillArchive(t, map[string]string{"SKILL.md": skillMd("other-name", "1.0.0")})), 422},
+		// 必填字段缺失(此处以 title 为例,矩阵在 skillmanifest 单测里)。
+		{"missing title", uploadBody("okskill", "1.0.0", "", makeSkillArchive(t, map[string]string{
+			"SKILL.md": "---\nname: okskill\nversion: 1.0.0\ndescription: 描述足够长可以通过校验。\nauthor: t\ncategory: 测试\n---\n\n" +
+				"正文需要足够长才能通过空壳校验,所以这里补一段说明文字用于测试。\n"})), 422},
+		{"BOM", uploadBody("okskill", "1.0.0", "",
+			makeSkillArchive(t, map[string]string{"SKILL.md": "\ufeff" + skillMd("okskill", "1.0.0")})), 422},
 		{"no archive", `{"name":"abc","version":"1.0.0","archive":""}`, 400},
 		{"no SKILL.md", uploadBody("abc", "1.0.0", "", makeSkillArchive(t, map[string]string{"README.md": "hi"})), 422},
 	}
@@ -245,13 +274,13 @@ func TestUploadValidation(t *testing.T) {
 	}
 
 	// Duplicate name+version → 409; different version OK.
-	if got := post(uploadBody("dup", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))); got != 201 {
+	if got := post(skillUpload(t, "dup", "1.0.0", "")); got != 201 {
 		t.Fatalf("first upload = %d", got)
 	}
-	if got := post(uploadBody("dup", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))); got != 409 {
+	if got := post(skillUpload(t, "dup", "1.0.0", "")); got != 409 {
 		t.Fatalf("duplicate = %d, want 409", got)
 	}
-	if got := post(uploadBody("dup", "1.1.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))); got != 201 {
+	if got := post(skillUpload(t, "dup", "1.1.0", "")); got != 201 {
 		t.Fatalf("v2 upload = %d, want 201", got)
 	}
 
@@ -282,7 +311,7 @@ func TestUploadValidation(t *testing.T) {
 	if s.Reason != "缺演示" {
 		t.Fatalf("reason = %q", s.Reason)
 	}
-	if got := post(uploadBody("dup", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))); got != 201 {
+	if got := post(skillUpload(t, "dup", "1.0.0", "")); got != 201 {
 		t.Fatalf("resubmit = %d, want 201", got)
 	}
 	s, _ = serverstore.GetSharedSkill(db, "dup", "1.0.0")
@@ -301,9 +330,12 @@ func TestUploadValidation(t *testing.T) {
 	if wR.Code != 200 {
 		t.Fatalf("reject2 = %d", wR.Code)
 	}
+	// 劫持前快照:断言 bob 的尝试对行「零改动」(此前用 Description=="" 表达,
+	// 但 2026-09-01 起描述必然来自包内清单,空描述不再是有效判据)。
+	before, _ := serverstore.GetSharedSkill(db, "dup", "1.0.0")
 	wB := httptest.NewRecorder()
 	reqB := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-		strings.NewReader(uploadBody("dup", "1.0.0", "bob 劫持", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+		strings.NewReader(skillUpload(t, "dup", "1.0.0", "bob 劫持")))
 	reqB.Header.Set("Content-Type", "application/json")
 	for k, v := range bobHdr {
 		reqB.Header.Set(k, v)
@@ -313,8 +345,10 @@ func TestUploadValidation(t *testing.T) {
 		t.Fatalf("bob cross-user resubmit = %d, want 404 (body %s)", wB.Code, wB.Body.String())
 	}
 	sB, _ := serverstore.GetSharedSkill(db, "dup", "1.0.0")
-	if sB.Status != serverstore.SharedSkillRejected || sB.Description != "" {
-		t.Fatalf("row after bob attempt = %+v", sB)
+	if sB.Status != serverstore.SharedSkillRejected || sB.Author != before.Author ||
+		sB.Description != before.Description || sB.Checksum != before.Checksum {
+		t.Fatalf("bob attempt mutated the row: status=%s author=%s desc=%q checksum=%s",
+			sB.Status, sB.Author, sB.Description, sB.Checksum)
 	}
 }
 
@@ -325,7 +359,7 @@ func TestVisibility(t *testing.T) {
 	post := func(name, version string) int {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-			strings.NewReader(uploadBody(name, version, "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+			strings.NewReader(skillUpload(t, name, version, "")))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -415,7 +449,7 @@ func TestDeleteClearsGrants(t *testing.T) {
 	post := func() {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-			strings.NewReader(uploadBody("del-grant", "1.0.0", "", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+			strings.NewReader(skillUpload(t, "del-grant", "1.0.0", "")))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -476,7 +510,7 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 	// 员工上传同名 -> 409 CONFLICT。
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-		strings.NewReader(uploadBody("codeql-audit", "1.0.0", "x", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+		strings.NewReader(skillUpload(t, "codeql-audit", "1.0.0", "x")))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -489,7 +523,7 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 	// 员工上传非冲突技能 -> 201。
 	w2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
-		strings.NewReader(uploadBody("fresh-open", "1.0.0", "x", makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd}))))
+		strings.NewReader(skillUpload(t, "fresh-open", "1.0.0", "x")))
 	req2.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req2.Header.Set(k, v)
@@ -522,7 +556,7 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 func TestSharedSkillArchiveInDB(t *testing.T) {
 	r, db, adminHdr, userHdr, _ := setup(t)
 	defer db.Close()
-	archive := makeSkillArchive(t, map[string]string{"SKILL.md": testSkillMd})
+	archive := makeSkillArchive(t, map[string]string{"SKILL.md": skillMd("db-arch", "1.0.0")})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
@@ -586,7 +620,7 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 func TestSharedSkillArchiveTarGzCompat(t *testing.T) {
 	r, db, adminHdr, userHdr, _ := setup(t)
 	defer db.Close()
-	archive := makeSkillTarGz(t, map[string]string{"SKILL.md": testSkillMd})
+	archive := makeSkillTarGz(t, map[string]string{"SKILL.md": skillMd("oldfmt", "1.0.0")})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
@@ -632,7 +666,7 @@ func TestAdminSkillFileContent(t *testing.T) {
 	defer db.Close()
 
 	archive := makeSkillArchive(t, map[string]string{
-		"SKILL.md":     "---\nname: fpdemo\n---\n# demo\n",
+		"SKILL.md":     skillMd("fpdemo", "1.0.0"),
 		"scripts/x.sh": "#!/bin/sh\necho hi\n",
 		"docs/说明.md":   "中文内容 ok",
 		"bin/blob.bin": string([]byte{0x00, 0x01, 0xFF, 0xFE}),

@@ -21,6 +21,7 @@ import (
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
@@ -182,14 +183,14 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 			return
 		}
-		if !skillNameRe.MatchString(req.Name) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法(小写字母/数字/点/横线,以字母数字开头)")
+		if !skillmanifest.IsAppID(req.Name) {
+			serverauth.WriteError(c, http.StatusBadRequest, skillmanifest.CodeInvalidAppID,
+				"技能名不合法:必须是小写 kebab-case(如 my-skill),且与 SKILL.md 的 name 一致")
 			return
 		}
-		if !versionRe.MatchString(req.Version) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "版本号不合法")
-			return
-		}
+		// 版本不再取自请求:决策 2026-09-01「包内即真相」——版本/标题/描述
+		// 一律以包内 SKILL.md frontmatter 为准。旧客户端硬编码发
+		// version=1.0.0,此处忽略该字段(P1 客户端改为读本地 frontmatter)。
 		if len(req.Archive) == 0 {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少归档内容")
 			return
@@ -204,13 +205,31 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(err))
 			return
 		}
+		// 严格清单校验:上游以 frontmatter 的 name 作运行时身份且强制
+		// kebab-case,不合规的包装到磁盘后会被**静默忽略**。发布期不拦,
+		// 用户就会拿到「上传成功但技能不存在」。
+		entries, skillMD, listErr := ListArchiveContents(raw)
+		if listErr != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(listErr))
+			return
+		}
+		man, manErr := skillmanifest.Parse(entries, skillMD, req.Name)
+		if manErr != nil {
+			var me *skillmanifest.Error
+			if errors.As(manErr, &me) {
+				serverauth.WriteError(c, skillmanifest.StatusFor(me.Code), me.Code, me.Message)
+				return
+			}
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "SKILL.md 校验失败")
+			return
+		}
 
 		u := serverauth.CurrentUser(c)
 		if u == nil {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
-		existing, getErr := serverstore.GetSharedSkill(db, req.Name, req.Version)
+		existing, getErr := serverstore.GetSharedSkill(db, req.Name, man.Version)
 		switch {
 		case getErr == nil && existing.Status != serverstore.SharedSkillRejected:
 			serverauth.WriteError(c, http.StatusConflict, "NAME_TAKEN", "该技能版本已被占用(审核中或已共享)")
@@ -219,12 +238,9 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		desc := strings.TrimSpace(req.Description)
-		display := strings.TrimSpace(req.DisplayName)
-		if len([]rune(display)) > maxDescriptionLen || len([]rune(desc)) > maxDescriptionLen {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "描述过长(上限 500 字)")
-			return
-		}
+		// 元数据全部来自包内清单(长度上限已在 skillmanifest 校验)。
+		desc := man.Description
+		display := man.Title
 
 		// 作者校验(审计 2026-08-25 G1):rejected 行是某作者上次提交的独占
 		// 记录,只有作者本人可重提覆盖——防止他人劫持内容并重置为 pending。
@@ -239,7 +255,7 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		// 0040:归档直存 DB(共享技能上传不再落磁盘;pre-0040 行的磁盘回退
 		// 只在下载/预览读取时触发,写路径一律 DB)。
 		if getErr == nil {
-			if err := serverstore.UpdateSharedSkillResubmitWithArchive(db, req.Name, req.Version, display, desc, checksum, u.Username, raw); err != nil {
+			if err := serverstore.UpdateSharedSkillResubmitWithArchive(db, req.Name, man.Version, display, desc, checksum, u.Username, raw); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 				return
 			}
@@ -247,7 +263,7 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			s := &serverstore.SharedSkill{
 				Name:        req.Name,
 				DisplayName: display,
-				Version:     req.Version,
+				Version:     man.Version,
 				Description: desc,
 				Author:      u.Username,
 				Checksum:    checksum,
@@ -270,8 +286,8 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 		}
-		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload", req.Name+"@"+req.Version)
-		c.JSON(http.StatusCreated, gin.H{"skill": gin.H{"name": req.Name, "version": req.Version, "status": serverstore.SharedSkillPending}})
+		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload", req.Name+"@"+man.Version)
+		c.JSON(http.StatusCreated, gin.H{"skill": gin.H{"name": req.Name, "version": man.Version, "status": serverstore.SharedSkillPending}})
 	}
 }
 
