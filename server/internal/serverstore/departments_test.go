@@ -493,3 +493,27 @@ func TestUpdateDepartmentWithBudgetAtomic(t *testing.T) {
 		t.Fatalf("name changed despite rejected budget: %q", g.Name)
 	}
 }
+
+func TestSubtreeOfCycleGuard(t *testing.T) {
+	// B9(2026-09-01):组树成环(迁移/手工数据/DB 修复)时 DFS 必须终止——
+	// ancestorsOf 已有环保护,本次为 subtreeOf 补齐同样栅栏。
+	children := map[int64][]groupNode{
+		1: {{id: 2}, {id: 3}},
+		2: {{id: 1, name: "loop"}}, // 2 → 1 构成环
+		3: {},
+	}
+	got := subtreeOf(children, 1)
+	seen := map[int64]bool{}
+	for _, id := range got {
+		if seen[id] {
+			t.Fatalf("subtreeOf 返回重复节点: %v", got)
+		}
+		seen[id] = true
+	}
+	if len(got) != 3 {
+		t.Fatalf("subtreeOf len=%d, want 3 (1,2,3), got %v", len(got), got)
+	}
+	if got[0] != 1 {
+		t.Fatalf("subtreeOf must start at root, got %v", got[0])
+	}
+}

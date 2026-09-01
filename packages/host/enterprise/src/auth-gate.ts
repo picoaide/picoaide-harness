@@ -762,6 +762,14 @@ export function apply(ctx: Context, config: Config): void {
             : null
           if (archiveMatch === null) return json(res, 404, { error: 'not found' })
           const name = decodeURIComponent(archiveMatch[1]!)
+          // B8(2026-09-01):归档下载分支此前未校验 name——解码后的名字会
+          // 原样拼进 Content-Disposition(如 %22 → `"` 产生畸形头)。与
+          // install/uninstall 分支对齐,先验名再放行。
+          try {
+            validateSkillName(name)
+          } catch (cause) {
+            return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+          }
           try {
             const upstream = await gatewayFetch(
               `${normalizeServerURL(s.serverURL)}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
@@ -947,6 +955,13 @@ export function apply(ctx: Context, config: Config): void {
             : null
           if (archiveMatch === null) return json(res, 404, { error: 'not found' })
           const name = decodeURIComponent(archiveMatch[1]!)
+          // B8(2026-09-01):与 install/uninstall 对齐,归档下载分支先验名再拼
+          // Content-Disposition(此前解码后的 quote 会产出畸形头)。
+          try {
+            validatePresetId(name)
+          } catch (cause) {
+            return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+          }
           try {
             const upstream = await gatewayFetch(
               `${normalizeServerURL(s.serverURL)}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,

@@ -41,9 +41,9 @@ func TestAppReleaseLifecycle(t *testing.T) {
 	if len(full.Tags) != 2 || full.Tags[0] != "hr" {
 		t.Fatalf("tags 未往返: %v", full.Tags)
 	}
-	// 同版本号不可复用(DB 唯一约束是最后一道防线)。
-	if _, err := CreateRelease(db, r1); err == nil {
-		t.Fatal("同 (kind,app,version) 必须被唯一约束拒绝")
+	// 同版本号不可复用(DB 唯一约束是最后一道防线;B7:必须映射 ErrDuplicate)。
+	if _, err := CreateRelease(db, r1); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("同 (kind,app,version) 必须被唯一约束拒绝为 ErrDuplicate, got %v", err)
 	}
 
 	// 审核:只改状态,不碰内容。

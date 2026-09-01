@@ -208,6 +208,12 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		Tags: req.Manifest.Tags, Author: req.Manifest.Author, Publisher: req.Publisher,
 		Checksum: req.Checksum, Archive: req.Archive, Status: status,
 	}); err != nil {
+		// B7(2026-09-01):并发窗口内 (kind,app_id,version) 唯一约束兜底,
+		// 映射为语义正确的 409 VERSION_EXISTS 而非 500。
+		if errors.Is(err, serverstore.ErrDuplicate) {
+			return nil, newErr(http.StatusConflict, CodeVersionExists,
+				"版本 %s 已存在(每个版本都是不可修改的快照),请升版本号后重试", req.Manifest.Version)
+		}
 		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "保存失败")
 	}
 	return &Result{Version: req.Manifest.Version, Status: status, Checksum: req.Checksum}, nil

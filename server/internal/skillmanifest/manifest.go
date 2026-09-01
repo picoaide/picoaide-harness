@@ -176,7 +176,73 @@ func CompareVersions(a, b string) int {
 	case bPre == "":
 		return -1
 	}
-	return strings.Compare(aPre, bPre)
+	// 预发布段按 SemVer §11 比较(逐段、数字段按数值)。此前用
+	// strings.Compare 字典序,`rc.2` > `rc.10` 会错误地让 1.2.0-rc.10
+	// 无法作为递增版本发布(2026-09-01 审计 B4)。
+	return comparePrerelease(aPre, bPre)
+}
+
+// comparePrerelease implements SemVer §11 prerelease precedence:
+// dot-separated identifiers compared one by one; numeric identifiers compare
+// numerically and rank below alphanumeric identifiers; a longer identifier
+// list wins when all shared identifiers are equal.
+func comparePrerelease(a, b string) int {
+	ap := strings.Split(a, ".")
+	bp := strings.Split(b, ".")
+	n := len(ap)
+	if len(bp) > n {
+		n = len(bp)
+	}
+	for i := 0; i < n; i++ {
+		if i >= len(ap) {
+			return -1 // b 还有标识符 → b 更大
+		}
+		if i >= len(bp) {
+			return 1
+		}
+		x, y := ap[i], bp[i]
+		xNum, yNum := isNumericString(x), isNumericString(y)
+		switch {
+		case xNum && yNum:
+			if c := compareNumericStrings(x, y); c != 0 {
+				return c
+			}
+		case xNum && !yNum:
+			return -1 // 数字标识符 < 字母数字标识符
+		case !xNum && yNum:
+			return 1
+		default:
+			if c := strings.Compare(x, y); c != 0 {
+				return c
+			}
+		}
+	}
+	return 0
+}
+
+// isNumericString reports whether s consists solely of ASCII digits.
+func isNumericString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// compareNumericStrings compares two digit strings numerically without
+// parsing (长度优先,避免超长数字溢出;纯数字无前导零语义时仍按数值大小)。
+func compareNumericStrings(a, b string) int {
+	if len(a) != len(b) {
+		if len(a) < len(b) {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 // Parse validates one skill package and returns its manifest.
