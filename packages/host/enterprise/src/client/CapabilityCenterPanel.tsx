@@ -57,6 +57,8 @@ interface CapabilityItem {
   originAppId?: string | undefined
   /** 溯源：安装后内容被本地修改过。 */
   dirty?: boolean | undefined
+  /** 运行时技能名（SKILL.md 的 name）；与 name 不同时需显式提示。 */
+  runtimeName?: string | undefined
 }
 
 /** 来源分区 tab(决策 2026-08-25:市场/组织合并为「市场」——仅 我的/市场)。 */
@@ -670,7 +672,14 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               <p style={{ ...NAME, ...NAME_TEXT }} title={title}>{title}</p>
               {renderBadges(item)}
             </div>
-            <p style={META}>{item.author !== '' ? `v${item.version} · ${item.author}` : `v${item.version}`}</p>
+            <p style={META}>
+              {item.author !== '' ? `v${item.version} · ${item.author}` : `v${item.version}`}
+              {/* 运行时名与应用 ID 不一致时显式提示：模型里要 @ 的是运行时名，
+                  此前用户只能装完才发现（如 workspace-cli → dws）。 */}
+              {item.runtimeName !== undefined && item.runtimeName !== '' && item.runtimeName !== item.name
+                ? ` · ${t('capability.runtimeName')}: ${item.runtimeName}`
+                : ''}
+            </p>
           </div>
         </div>
         {item.description !== '' && (

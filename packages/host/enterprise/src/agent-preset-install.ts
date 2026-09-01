@@ -22,6 +22,7 @@ import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import { computeSkillContentHash, PROVENANCE_DIR, writeProvenance } from './skill-install.ts'
 import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
@@ -159,6 +160,7 @@ async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: st
     if (entry.isSymbolicLink()) {
       throw new Error(`symlink refused in package: ${rel}`)
     }
+    if (relPrefix === '' && entry.name === PROVENANCE_DIR) continue
     if (entry.isDirectory()) {
       zip.addFile(`${rel}/`, Buffer.alloc(0), '', 0o755)
       await addDirToZip(zip, root, abs, rel)
@@ -190,6 +192,12 @@ export interface InstallPresetArchiveOptions {
   checksum?: string | undefined
   /** The preset root (`<dshHome>/.agent-presets`). */
   presetsDir: string
+  /** 安装的版本号(写入溯源标记)。 */
+  version?: string | undefined
+  /** 分发渠道(写入溯源标记;智能体目前只有组织库)。 */
+  channel?: 'market' | 'org' | undefined
+  /** 来源服务端地址(写入溯源标记)。 */
+  server?: string | undefined
 }
 
 /**
@@ -250,6 +258,16 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
     })
 
     await rename(unpackRoot, targetDir)
+    // 溯源(D6):与技能同构——记录应用 ID/版本/渠道/来源服务端与安装时内容哈希,
+    // 客户端据此判定「来自哪里、是否被本地改过」。写失败不致命。
+    await writeProvenance(targetDir, {
+      appId: name,
+      version: options.version ?? '',
+      channel: options.channel ?? 'org',
+      ...options.server === undefined ? {} : { server: options.server },
+      archiveChecksum: await computeSkillContentHash(targetDir),
+      installedAt: new Date().toISOString(),
+    }).catch(() => { /* 非致命 */ })
     return { name, targetDir }
   } catch (cause) {
     throw cause instanceof Error ? cause : new Error(String(cause))

@@ -109,7 +109,16 @@ describe('packPreset', () => {
       try {
         await installPresetArchive({ name: 'ppt-gen', archive: result.archive, presetsDir: scratch })
         const installed = await readdir(join(scratch, 'ppt-gen'))
-        expect(installed.sort()).toEqual(['agent.cordis.yml', 'assets', 'preset.yml', 'skills'])
+        // .picoaide 是安装器写入的溯源标记(与技能同构),不属于包内容。
+        expect(installed.sort()).toEqual(['.picoaide', 'agent.cordis.yml', 'assets', 'preset.yml', 'skills'])
+        const prov = JSON.parse(await readFile(join(scratch, 'ppt-gen', '.picoaide', 'release.json'), 'utf8')) as { appId: string, channel: string }
+        expect(prov.appId).toBe('ppt-gen')
+        expect(prov.channel).toBe('org')
+        // 重新打包时溯源目录必须被排除,否则再次上传会被判为伪造归属。
+        const repacked = await packPreset(scratch, 'ppt-gen')
+        const AdmZipCtor = (await import('adm-zip')).default
+        const names = new AdmZipCtor(repacked.archive).getEntries().map((e) => e.entryName)
+        expect(names.some((n) => n.startsWith('.picoaide'))).toBe(false)
         expect((await readFile(join(scratch, 'ppt-gen', 'skills', 'demo', 'SKILL.md'), 'utf8')).trim()).toBe('# demo')
         expect(await readFile(join(scratch, 'ppt-gen', 'assets', 'note.txt'), 'utf8')).toBe('hello')
       } finally {

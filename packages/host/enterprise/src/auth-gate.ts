@@ -906,7 +906,12 @@ export function apply(ctx: Context, config: Config): void {
                 return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
               }
               const checksum = upstream.headers.get('x-preset-checksum') ?? undefined
-              await installPresetArchive({ name, archive: content, checksum, presetsDir })
+              const presetVersion = upstream.headers.get('x-preset-version') ?? undefined
+              await installPresetArchive({
+                name, archive: content, checksum, presetsDir,
+                // 溯源(D6):与技能同构,记录版本/渠道/来源服务端。
+                version: presetVersion, channel: 'org', server: s.serverURL,
+              })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
@@ -1187,6 +1192,9 @@ export function apply(ctx: Context, config: Config): void {
               const prov = provenance.get(l.name)
               localRows.push({
                 kind: 'skill', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
+                // 运行时名 = SKILL.md 的 name(上游据它注册技能),与目录名不同时
+                // 面板会显式提示,避免「装完才知道该 @ 什么」。
+                runtimeName: l.displayName ?? l.name,
                 version: prov?.version !== undefined && prov.version !== '' ? prov.version : (l.version ?? '1.0.0'),
                 description: l.description ?? '', author: '',
                 // 归属与本地改动(D6):面板据此显示「来自市场 · vX · 已本地修改」。
@@ -1198,9 +1206,18 @@ export function apply(ctx: Context, config: Config): void {
             }
             for (const l of localPresets) {
               const match = items.find(i => (i as { kind?: string }).kind === 'agent' && (i as { name?: string }).name === l.name)
+              const dir = join(presetsDir, l.name)
+              const prov = await readProvenance(dir)
+              let dirty = false
+              if (prov?.archiveChecksum !== undefined) {
+                const now = await computeSkillContentHash(dir).catch(() => undefined)
+                dirty = now !== undefined && now !== prov.archiveChecksum
+              }
               localRows.push({
                 kind: 'agent', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
-                version: '1.0.0', description: l.description ?? '', author: '',
+                version: prov?.version !== undefined && prov.version !== '' ? prov.version : '1.0.0',
+                description: l.description ?? '', author: '',
+                ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty },
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
