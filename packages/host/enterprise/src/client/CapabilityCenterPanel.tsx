@@ -187,6 +187,13 @@ const DESC: React.CSSProperties = {
   lineHeight: '18px',
   margin: 0,
   color: 'var(--dsw-alias-label-secondary)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  cursor: 'pointer',
+}
+
+const DESC_CLAMP: React.CSSProperties = {
+  ...DESC,
   display: '-webkit-box',
   WebkitLineClamp: 3,
   WebkitBoxOrient: 'vertical',
@@ -426,6 +433,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   /** 卸载确认 key（{kind}:{name}）。 */
   const [uninstallConfirmKey, setUninstallConfirmKey] = useState<string | null>(null)
   const [expandedVersions, setExpandedVersions] = useState<Record<string, boolean>>({})
+  /** 展开描述的卡片 key（{kind}:{name}）；长描述默认截 3 行,点击展开全文。 */
+  const [expandedDescs, setExpandedDescs] = useState<Record<string, boolean>>({})
   const loadSeqRef = useRef(0)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
@@ -634,7 +643,15 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
             <p style={META}>{item.author !== '' ? `v${item.version} · ${item.author}` : `v${item.version}`}</p>
           </div>
         </div>
-        {item.description !== '' && <p style={DESC}>{item.description}</p>}
+        {item.description !== '' && (
+          <p
+            style={expandedDescs[key] === true ? DESC : DESC_CLAMP}
+            title={expandedDescs[key] === true ? undefined : item.description}
+            onClick={(e) => { e.stopPropagation(); setExpandedDescs(prev => ({ ...prev, [key]: !(prev[key] ?? false) })) }}
+          >
+            {item.description}
+          </p>
+        )}
         {item.status === 'rejected' && item.reason !== undefined && item.reason !== '' && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>{t('capability.rejectReason', { reason: item.reason })}</p>
         )}

@@ -133,6 +133,23 @@ describe('installSkillArchive', () => {
     }
   })
 
+  it('installs a zip archive carrying a `./` root directory entry (zip -r . style)', async () => {
+    const skillsDir = await mkdtemp(join(tmpdir(), 'pico-skill-skills-'))
+    try {
+      // `zip -r skill.zip .` 类打包的典型产物: 根目录条目以 `./` 出现。
+      const z = new AdmZip()
+      z.addFile('./', Buffer.alloc(0), '', 0o755)
+      z.addFile('./SKILL.md', Buffer.from(SKILL_MD), '', 0o644)
+      z.addFile('./metadata.yaml', Buffer.from('name: dot-demo\nversion: 1.0.0\n'), '', 0o644)
+      const archive = z.toBuffer()
+      const result = await installSkillArchive({ name: 'dot-demo', archive, skillsDir, version: '1.0.0' })
+      expect(result.targetDir).toBe(join(skillsDir, 'dot-demo'))
+      expect(await readFile(join(skillsDir, 'dot-demo', 'SKILL.md'), 'utf8')).toContain('# Demo Skill')
+    } finally {
+      await rm(skillsDir, { recursive: true, force: true })
+    }
+  })
+
   it('refuses a checksum mismatch', async () => {
     const skillsDir = await mkdtemp(join(tmpdir(), 'pico-skill-skills-'))
     try {
