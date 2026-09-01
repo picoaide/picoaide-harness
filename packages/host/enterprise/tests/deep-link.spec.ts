@@ -30,4 +30,11 @@ describe('parseAuthDeepLink', () => {
     const s = parseAuthDeepLink('picoaide://auth?token=t&server=https%3A%2F%2Fgw.example.com%3A8443&user=bob')
     expect(s!.serverURL).toBe('https://gw.example.com:8443')
   })
+
+  it('剥离 server 尾斜杠(防模板拼接出 //api 双斜杠 404)', () => {
+    const s = parseAuthDeepLink('picoaide://auth?token=t&server=https%3A%2F%2Fgw.example.com%2F&user=bob')
+    expect(s!.serverURL).toBe('https://gw.example.com')
+    const multi = parseAuthDeepLink('picoaide://auth?token=t&server=https%3A%2F%2Fgw.example.com%2F%2F&user=bob')
+    expect(multi!.serverURL).toBe('https://gw.example.com')
+  })
 })

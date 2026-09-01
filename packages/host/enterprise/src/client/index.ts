@@ -108,8 +108,10 @@ export function apply(ctx: ClientContext): void {
         }
       }
       applyVars(readBrandSync())
+      const offStore = startBrandStore(ctx)
+      // 品牌变更驱动 hero 变量(与 brand-store 同事件;此处仅应用 CSS 变量)。
       const off = ctx.on('pico/brand-changed', (brand) => applyVars(brand))
-      return () => { off() }
+      return () => { off(); offStore() }
     },
     'enterprise: brand store',
   )

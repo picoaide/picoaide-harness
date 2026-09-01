@@ -200,6 +200,18 @@ const DESC_CLAMP: React.CSSProperties = {
   overflow: 'hidden',
 }
 
+/** 描述展开按钮:重置 button 默认外观,与 <p> 语义一致(键盘可访问)。
+ *  不含 display——折叠态需保留 DESC_CLAMP 的 -webkit-box(WebkitLineClamp)。 */
+const DESC_BUTTON: React.CSSProperties = {
+  width: '100%',
+  padding: 0,
+  border: 'none',
+  background: 'none',
+  textAlign: 'left',
+  font: 'inherit',
+  color: 'inherit',
+}
+
 const AVATAR_COLORS = [
   'var(--dsw-static-deepseek-5, var(--dsw-alias-brand-primary))',
   'var(--dsw-static-green-5, var(--dsw-alias-state-success-primary))',
@@ -426,7 +438,6 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const [search, setSearch] = useState('')
   const [items, setItems] = useState<CapabilityItem[]>([])
   const [sections, setSections] = useState<Record<string, SectionState>>({})
-  const [loading, setLoading] = useState(true)
   const [action, setAction] = useState<ActionState | null>(null)
   /** 安装覆盖确认 key（{kind}:{name}）；与卸载确认分离，避免互串。 */
   const [installConfirmKey, setInstallConfirmKey] = useState<string | null>(null)
@@ -461,9 +472,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
 
   const loadAll = (): void => {
     ++loadSeqRef.current
-    setLoading(true)
     // 决策 2026-08-25:市场/组织合并为「市场」——?source=market 由服务端
     // 合并返回(市场+组织,各自 source 徽章保留);「我的」仍走 local。
+    // loading 由两个分区各自的状态驱动（renderSection 按 tab 显示对应分区
+    // 的 loading/错误/空态）；此处不再翻转全局 loading。
     void loadSection('market', async () => {
       const res = await fetch('/api/pico/capabilities?source=market')
       if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
@@ -474,7 +486,6 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
       return (await res.json() as { items?: CapabilityItem[] }).items ?? []
     })
-    setLoading(false)
   }
 
   useEffect(() => {
@@ -515,6 +526,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         const data = await res.json() as { items?: CapabilityItem[] }
         if (seq !== loadSeqRef.current) return
         setItems(prev => [...prev.filter(i => i.source === 'local'), ...(data.items ?? [])])
+        // 后台刷新成功即退出先前 error 态——否则首次加载失败后,错误提示与
+        // 重试按钮会遮住已刷新的数据(2026-09-01 深挖)。
+        setSection('market', { status: 'ok', error: '' })
       }).catch(() => {})
     }, 30000)
     return () => { clearInterval(timer) }
@@ -566,7 +580,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   }
 
   const upload = async (item: CapabilityItem): Promise<void> => {
-    if (action !== null) return
+    // 只拦进行中的动作（与 install/uninstall 守卫一致）；done-*/failed 是
+    // 终态展示,不得阻断后续上传——此前 `action !== null` 会在动作终态后
+    // 永久锁死「我的」分区的上传/重新上传按钮。
+    if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')) return
     setAction({ key: `${item.kind}:${item.name}`, kind: 'uploading' })
     try {
       const path = item.kind === 'skill' ? '/api/pico/shared-skills/upload' : '/api/pico/agent-presets/upload'
@@ -599,7 +616,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     return filter === 'all' ? searched : searched.filter(i => i.kind === filter)
   }, [items, tab, filter, search])
 
-  const sectionStatus = (source: CapabilitySource): SectionState => sections[source] ?? { status: 'idle', error: '' }
+  const sectionStatus = (key: 'mine' | 'market'): SectionState => sections[key] ?? { status: 'idle', error: '' }
 
   const renderBadges = (item: CapabilityItem): React.ReactNode => {
     const statusBadge = item.status === 'pending' ? <span style={CHIP_WARN}>{t('capability.pending')}</span>
@@ -644,13 +661,17 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         {item.description !== '' && (
-          <p
-            style={expandedDescs[key] === true ? DESC : DESC_CLAMP}
+          <button
+            type="button"
+            style={expandedDescs[key] === true
+              ? { ...DESC, display: 'block', ...DESC_BUTTON }
+              : { ...DESC_CLAMP, ...DESC_BUTTON }}
             title={expandedDescs[key] === true ? undefined : item.description}
-            onClick={(e) => { e.stopPropagation(); setExpandedDescs(prev => ({ ...prev, [key]: !(prev[key] ?? false) })) }}
+            aria-expanded={expandedDescs[key] === true}
+            onClick={() => { setExpandedDescs(prev => ({ ...prev, [key]: !(prev[key] ?? false) })) }}
           >
             {item.description}
-          </p>
+          </button>
         )}
         {item.status === 'rejected' && item.reason !== undefined && item.reason !== '' && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>{t('capability.rejectReason', { reason: item.reason })}</p>
@@ -708,8 +729,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
 
   const renderEmpty = (text: string): React.ReactNode => <p style={EMPTY}>{text}</p>
 
-  const renderSection = (key: CapabilitySource, emptyText: string): React.ReactNode => {
+  const renderSection = (key: 'mine' | 'market', emptyText: string): React.ReactNode => {
     const st = sectionStatus(key)
+    // idle = 尚未发起加载(初始态),与 loading 同样显示 spinner;
+    // error = 错误态 + 重试;ok/loading = 列表或继续等待(可见 byId 更新)。
+    if (st.status === 'idle' || st.status === 'loading') {
+      return <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'center', padding: 48 }}><p style={EMPTY}>{t('capability.loading')}</p></div>
+    }
     if (st.status === 'error') {
       return <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24 }}><p style={EMPTY}>{st.error}</p><button type="button" style={BUTTON_SECONDARY} onClick={() => { void loadAll() }}>{t('capability.retry')}</button></div>
     }
@@ -718,12 +744,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     return rows.map(renderCard)
   }
 
-  let content: React.ReactNode
-  if (loading) {
-    content = <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'center', padding: 48 }}><p style={EMPTY}>{t('capability.loading')}</p></div>
-  } else {
-    content = renderSection(tab === 'market' ? 'market' : 'local', tab === 'market' ? t('capability.emptyMarket') : t('capability.emptyMine'))
-  }
+  // 分区状态驱动内容;全局 loading 已移除(旧实现 setLoading(true) 后同步置
+  // false,React 批处理下 spinner 不可见且掩盖分区错误)。
+  const content = renderSection(tab === 'market' ? 'market' : 'mine', tab === 'market' ? t('capability.emptyMarket') : t('capability.emptyMine'))
 
   return (
     <div style={OVERLAY} role="presentation">

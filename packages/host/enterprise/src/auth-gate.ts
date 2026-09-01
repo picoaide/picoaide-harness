@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { ApiError, AuthError, assertServerURLAllowed, fetchJSON, gatewayFetch, login } from './server-connector/auth.ts'
+import { ApiError, AuthError, assertServerURLAllowed, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   installSkillArchive,
@@ -207,7 +207,9 @@ const LOGIN_HTML = `<!DOCTYPE html>
     var server = trimServer(document.getElementById('server').value.trim())
     var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
     // logo 加载失败时保留花括号兜底(与无品牌时同款)。
-    var logo = logoUrl ? '<img src="' + logoUrl + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
+    // 安全:logoUrl 来自网关数据(管理员可控),仍须属性转义——旧实现直接拼
+    // <img src="...">,网关被劫持/注入时可在登录页(认证前)形成 XSS(2026-09-01 审计)。
+    var logo = logoUrl ? '<img src="' + esc(logoUrl) + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
     var name = login.display_name || 'PicoAide'
     var tag = login.tagline ? '<div class="brand-tag">' + esc(login.tagline) + '</div>' : ''
     var welcome = login.welcome ? '<div class="welcome">' + esc(login.welcome) + '</div>' : ''
@@ -275,12 +277,18 @@ const LOGIN_HTML = `<!DOCTYPE html>
     document.getElementById('step2').classList.remove('active')
     document.getElementById('step1').classList.add('active')
     err2.textContent = ''
+    // 复位浏览器授权守卫(2026-09-01 深挖):返回 Step1 时若 OIDC 授权尚未
+    // 完成,按钮 disabled 与轮询需复位,否则用户只能重启应用再登录。
+    resetBrowserLogin()
   })
 
   /**** 轮询登录状态: 用户去浏览器授权, 深链回桌面后 setSession, 此处检测到即刷新 ****/
+  var pollAttempts = 0
   function startPoll() {
     if (pollTimer) clearInterval(pollTimer)
+    pollAttempts = 0
     pollTimer = setInterval(async function () {
+      pollAttempts++
       try {
         var r = await fetch('/api/pico/auth/state')
         if (!r.ok) return
@@ -290,7 +298,18 @@ const LOGIN_HTML = `<!DOCTYPE html>
           location.replace('/' + location.search)
         }
       } catch (e4) {}
+      // 超时上限(200 次 × 1.5s = 5 分钟):用户在浏览器里取消/失败了授权,
+      // 不能无限轮询旧状态——超时复位按钮与提示(2026-09-01 深挖)。
+      if (pollAttempts >= 200) resetBrowserLogin()
     }, 1500)
+  }
+
+  function resetBrowserLogin() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    pollAttempts = 0
+    browserBtn.disabled = false
+    waiting.style.display = 'none'
+    err2.textContent = '浏览器授权未完成或已取消，请重试'
   }
 
   // ---- 浏览器方式(OpenID/OIDC): 打开授权页, 轮询等待深链回跳 ----
@@ -550,14 +569,16 @@ export function apply(ctx: Context, config: Config): void {
         handler: (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
-          const s = session()
-          json(res, 200, s === null
+          // 单次读取会话快照(旧实现取 s 后又两次 getSession(),并发登出
+          // 会给出 loggedIn:true 但 username/role 缺失的不一致响应)。
+          const current = ctx.picoSession.getSession()
+          json(res, 200, current === null
             ? { loggedIn: false }
             : {
                 loggedIn: true,
-                username: ctx.picoSession.getSession()?.username,
-                serverURL: s.serverURL,
-                role: ctx.picoSession.getSession()?.role ?? '',
+                username: current.username,
+                serverURL: current.serverURL,
+                role: current.role ?? '',
               })
         },
       }),
@@ -677,7 +698,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               const upstream = await gatewayFetch(
-                `${s.serverURL}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
+                `${normalizeServerURL(s.serverURL)}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -738,7 +759,7 @@ export function apply(ctx: Context, config: Config): void {
           const name = decodeURIComponent(archiveMatch[1]!)
           try {
             const upstream = await gatewayFetch(
-              `${s.serverURL}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
+              `${normalizeServerURL(s.serverURL)}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -867,7 +888,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               const upstream = await gatewayFetch(
-                `${s.serverURL}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
+                `${normalizeServerURL(s.serverURL)}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -918,7 +939,7 @@ export function apply(ctx: Context, config: Config): void {
           const name = decodeURIComponent(archiveMatch[1]!)
           try {
             const upstream = await gatewayFetch(
-              `${s.serverURL}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
+              `${normalizeServerURL(s.serverURL)}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -1039,7 +1060,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               const upstream = await gatewayFetch(
-                `${s.serverURL}/api/client/v2/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/archive`,
+                `${normalizeServerURL(s.serverURL)}/api/client/v2/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
@@ -1113,7 +1134,12 @@ export function apply(ctx: Context, config: Config): void {
           try {
             const skillsDir = resolveSkillsDir()
             const presetsDir = resolvePresetsDir()
-            const data = await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${encodeURIComponent(source)}`, { token: s.token })
+            // 本地创作分区的状态匹配:服务端 ?source=local 返回空清单(本地
+            // 由 host 聚合),但 ?source=org 含 author-own 任意状态
+            // (ListVisible* 语义)——用 org 结果匹配本地上传行的 status/
+            // reason(2026-09-01 契约断层修复,此前本地行状态徽章恒空)。
+            const matchSource = source === 'local' ? 'org' : source
+            const data = await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${encodeURIComponent(matchSource)}`, { token: s.token })
             const items = (data as { items?: Array<Record<string, unknown>> }).items ?? []
             const installedSkills = new Set(await listInstalledSkills(skillsDir))
             const installedPresets = new Set(await listInstalledPresets(presetsDir))
@@ -1135,7 +1161,7 @@ export function apply(ctx: Context, config: Config): void {
             for (const l of localSkills) {
               const match = items.find(i => (i as { kind?: string }).kind === 'skill' && (i as { name?: string }).name === l.name)
               localRows.push({
-                kind: 'skill', source: 'local', name: l.name, display_name: l.displayName ?? l.name,
+                kind: 'skill', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
                 version: l.version ?? '1.0.0', description: l.description ?? '', author: '',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
@@ -1145,7 +1171,7 @@ export function apply(ctx: Context, config: Config): void {
             for (const l of localPresets) {
               const match = items.find(i => (i as { kind?: string }).kind === 'agent' && (i as { name?: string }).name === l.name)
               localRows.push({
-                kind: 'agent', source: 'local', name: l.name, display_name: l.displayName ?? l.name,
+                kind: 'agent', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
                 version: '1.0.0', description: l.description ?? '', author: '',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
@@ -1167,6 +1193,12 @@ export function apply(ctx: Context, config: Config): void {
               const installedVersion = kind === 'skill' ? localSkillVersions.get(name) : undefined
               return {
                 ...i,
+                // 服务端为 snake_case(display_name 等),客户端读驼峰
+                // displayName——统一在此映射,避免卡片标题恒等于 name、
+                // 搜索/归并失效(2026-09-01 深挖)。
+                displayName: (i as { display_name?: string; displayName?: string }).displayName
+                  ?? (i as { display_name?: string }).display_name
+                  ?? i.name,
                 installed,
                 installedVersion,
                 hasUpdate: false, // 客户端按 versions 与 installedVersion 计算
