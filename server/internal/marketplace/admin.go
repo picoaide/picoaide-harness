@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -244,8 +245,8 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
 	}
-	current, err := serverstore.GetSkill(db, name)
-	if err != nil {
+	// 存在性检查:上架前该 App 必须已登记(创建与内容分两步)。
+	if _, err := serverstore.GetApp(db, serverstore.AppKindSkill, name); err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
@@ -298,43 +299,35 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "SKILL.md 校验失败")
 		return
 	}
-	// 管理端表单的版本是显式意图:与包内版本不一致必须报错,不能静默取其一
-	// (员工端的 version 是旧客户端硬编码值,那里直接以包内为准)。
-	if req.Version != man.Version {
-		serverauth.WriteError(c, skillmanifest.StatusFor(skillmanifest.CodeManifestMismatch),
-			skillmanifest.CodeManifestMismatch,
-			"表单版本("+req.Version+")与 SKILL.md 的 version("+man.Version+")不一致,请以包内版本为准")
+	// 2026-09-01:管理端上架同样走统一发布内核——版本语义(不可复用/必须
+	// 递增/内容未变更)、跨渠道同名互斥、changelog 规则与员工路径完全一致,
+	// 差别只有 AdminPublish=true(跳过锁定与待审配额,且发布即 approved)。
+	res, perr := appstore.Publish(db, appstore.PublishRequest{
+		Kind:            serverstore.AppKindSkill,
+		AppID:           name,
+		Channel:         serverstore.AppChannelMarket,
+		Archive:         raw,
+		Publisher:       adminUsername(c),
+		AdminPublish:    true,
+		DeclaredVersion: req.Version,
+		Manifest:        appstore.FromSkillManifest(man),
+		Checksum:        checksum,
+	})
+	if perr != nil {
+		var ae *appstore.Error
+		if errors.As(perr, &ae) {
+			serverauth.WriteError(c, ae.Status, ae.Code, ae.Message)
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "发布失败")
 		return
 	}
-	// 版本即快照(决策 2026-09-01 D1):市场域当前是单行模型(name UNIQUE,
-	// 归档原地替换),表结构层面的多版本快照留到 P2 的 app_releases;这里
-	// 先把「同内容重复上架」与「版本倒挂」两类错误挡在门外。
-	if current.Checksum != "" && checksum == current.Checksum {
-		serverauth.WriteError(c, http.StatusConflict, "CONTENT_UNCHANGED",
-			"内容与线上 v"+current.Version+" 完全一致,无需重复上传")
-		return
-	}
-	// 递增判定只在**已发布过内容**时生效:新建技能行(git 模式或刚创建)的
-	// version 只是占位元数据,此时还没有归档,首次上传同版本号必须放行,
-	// 否则「创建时填 1.0.0 → 上传 1.0.0 的包」会被自己的校验挡死
-	// (2026-09-01 三路径端到端验证发现)。
-	published := len(current.Archive) > 0 || current.Checksum != ""
-	if published && current.Version != "" && skillmanifest.IsVersion(current.Version) &&
-		skillmanifest.CompareVersions(man.Version, current.Version) <= 0 {
-		serverauth.WriteError(c, http.StatusConflict, "VERSION_NOT_INCREASING",
-			"版本号必须大于当前线上版本 v"+current.Version+"(当前包内为 "+man.Version+")")
-		return
-	}
-	if err := serverstore.ReplaceSkillArchive(db, name, man.Version, checksum, raw); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
-		return
-	}
-	// 展示名取自包内 title(0051):此前市场卡片只能显示目录名。
 	_ = serverstore.SetSkillDisplayName(db, name, man.Title)
 	// 上传模式不再依赖磁盘缓存:清掉旧 clone/包,避免误读。
 	invalidateSkillCache(cacheDir, name)
-	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", sharedskills.UploadAuditDetail(name, man.Version, man.Title, checksum))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "version": man.Version, "checksum": checksum})
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update",
+		sharedskills.UploadAuditDetail(name, res.Version, man.Title, checksum))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "version": res.Version, "checksum": checksum})
 }
 
 func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {

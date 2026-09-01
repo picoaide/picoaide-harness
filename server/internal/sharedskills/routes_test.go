@@ -71,7 +71,7 @@ func skillMd(name, version string) string {
 		"version: " + version + "\n" +
 		"description: 用于集成测试的技能包,描述需要满足最短长度要求。\n" +
 		"author: tester\n" +
-		"category: 测试\n" +
+		"category: 测试\nchangelog: 测试夹具的更新说明。\n" +
 		"---\n\n# " + name + "\n\n本技能是服务端集成测试使用的夹具包,正文需要足够长才能通过空壳校验,因此这里补充了一段用于说明用途的文字。\n"
 }
 

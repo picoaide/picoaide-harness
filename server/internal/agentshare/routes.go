@@ -14,9 +14,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/util"
 )
@@ -336,66 +338,59 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
-		existing, getErr := serverstore.GetAgentPresetByVersion(db, req.Name, req.Version)
-		switch {
-		case getErr == nil && existing.Status != serverstore.AgentPresetRejected:
-			// Pending or approved for this name+version: occupied.
-			serverauth.WriteError(c, http.StatusConflict, "NAME_TAKEN", "该预设版本已被占用(审核中或已共享)")
-			return
-		case getErr != nil && !errors.Is(getErr, serverstore.ErrNotFound):
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		// 2026-09-01:智能体对齐技能标准——展示元数据一律来自包内 preset.yml
+		// (「包内即真相」),此前靠请求体手填,导致卡片只能显示目录名、版本
+		// 永远是兜底的 1.0.0。
+		entries, _, listErr := ListArchiveContents(raw)
+		if listErr != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(listErr))
 			return
 		}
-
-		desc := strings.TrimSpace(req.Description)
-		if len([]rune(desc)) > maxDescriptionLen {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "描述过长(上限 500 字)")
+		presetYML, _, found, _, _, xerr := archiveutil.ExtractFileContent(raw, skillmanifest.PresetMetaFile, maxFilePreviewBytes)
+		if xerr != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档解析失败")
 			return
 		}
-
-		// 作者校验(审计 2026-08-25 G1):rejected 行是某个作者上次提交的
-		// 独占记录,只有其作者本人可以重提覆盖——否则任意用户可猜 name+version
-		// 劫持他人提交并重置为 pending(内容替换 + 审核投毒 + 绕过 pendingCap)。
-		if getErr == nil && existing.Author != u.Username {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+		if !found {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, skillmanifest.CodeMissingField,
+				"归档缺少 "+skillmanifest.PresetMetaFile+":展示名/版本/描述/作者/分类必须写在包内")
 			return
 		}
-
-		// 顺序约定(审计 2026-08-25 G4):DB 状态优先,归档直存 DB(0041)。
-		// - 重提:单条原子 UPDATE(metadata+checksum+archive+status,2026-09-01
-		//   修复此前两步的脏行窗口);DB 失败时旧归档原样保留,状态与归档一致
-		//   (校验和失败方向 fail-closed)。
-		// - 新建:INSERT 成功即归档已落库(原子),无孤儿文件/磁盘残留。
-		if getErr == nil { // rejected → resubmit: reset the row (author-scoped)
-			if err := serverstore.UpdateAgentPresetResubmitByVersionWithArchive(db, req.Name, req.Version, strings.TrimSpace(req.DisplayName), desc, checksum, u.Username, raw); err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		man, manErr := skillmanifest.ParseAgent(entries, presetYML, req.Name)
+		if manErr != nil {
+			var me *skillmanifest.Error
+			if errors.As(manErr, &me) {
+				serverauth.WriteError(c, skillmanifest.StatusFor(me.Code), me.Code, me.Message)
 				return
 			}
-		} else {
-			p := &serverstore.AgentPreset{
-				Name:        req.Name,
-				DisplayName: strings.TrimSpace(req.DisplayName),
-				Description: desc,
-				Version:     req.Version,
-				Author:      u.Username,
-				Checksum:    checksum,
-				Status:      serverstore.AgentPresetPending,
-				Archive:     raw,
-			}
-			// Atomic cap enforcement: the INSERT itself re-counts pending
-			// rows, so concurrent uploads can never exceed pendingCap.
-			if _, err := serverstore.CreateAgentPresetCapped(db, p, pendingCap); err != nil {
-				// 补偿:INSERT 失败即无归档(DB 未写入无孤儿对象)。
-				if errors.Is(err, serverstore.ErrTooManyPending) {
-					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
-					return
-				}
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "预设元数据校验失败")
+			return
+		}
+		// 锁定、版本语义(不可复用/必须递增/内容未变更)、归属保护与待审配额
+		// 与技能共用同一个发布内核——此前智能体这条路径全都没有,管理员锁定
+		// 对它不生效。
+		res, perr := appstore.Publish(db, appstore.PublishRequest{
+			Kind:       serverstore.AppKindAgent,
+			AppID:      req.Name,
+			Channel:    serverstore.AppChannelOrg,
+			Archive:    raw,
+			Publisher:  u.Username,
+			PendingCap: pendingCap,
+			Manifest:   appstore.FromSkillManifest(man),
+			Checksum:   checksum,
+		})
+		if perr != nil {
+			var ae *appstore.Error
+			if errors.As(perr, &ae) {
+				serverauth.WriteError(c, ae.Status, ae.Code, ae.Message)
 				return
 			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "发布失败")
+			return
 		}
-		_ = serverstore.AuditLog(db, u.Username, "agent_preset_upload", req.Name+"@"+req.Version)
-		c.JSON(http.StatusCreated, gin.H{"preset": gin.H{"name": req.Name, "version": req.Version, "status": serverstore.AgentPresetPending}})
+		_ = serverstore.AuditLog(db, u.Username, "agent_preset_upload",
+			sharedskills.UploadAuditDetail(req.Name, res.Version, man.Title, checksum))
+		c.JSON(http.StatusCreated, gin.H{"preset": gin.H{"name": req.Name, "version": res.Version, "status": res.Status}})
 	}
 }
 
