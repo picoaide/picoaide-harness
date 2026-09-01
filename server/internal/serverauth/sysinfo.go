@@ -66,7 +66,8 @@ type dbStats struct {
 // statTables 是需要统计行数的业务表(与 serverstore 迁移一致)。
 var statTables = []string{
 	"users", "groups", "user_groups", "settings", "api_tokens",
-	"gateway_providers", "models", "usage", "skills", "skill_grants",
+	// P5:旧的 skills/skill_grants 已下线,统计改为统一应用模型的三张表。
+	"gateway_providers", "models", "usage", "apps", "app_releases", "app_grants",
 	"audit_logs", "admin_sessions",
 }
 

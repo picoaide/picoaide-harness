@@ -164,13 +164,11 @@ func TestDeleteUserCascadesSharedGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// shared_skill_grants 资源列 = skill_name;agent_preset_grants = preset_name
-	for _, tbl := range []struct{ table, col string }{
-		{"shared_skill_grants", "skill_name"},
-		{"agent_preset_grants", "preset_name"},
-	} {
-		if _, err := db.Exec("INSERT INTO "+tbl.table+" ("+tbl.col+", grantee_type, grantee) VALUES (?, 'user', ?)", "acme", "grace"); err != nil {
-			t.Fatalf("seed %s: %v", tbl.table, err)
+	// P5:三张旧授权表已下线,统一到 app_grants(kind 区分技能/智能体)。
+	for _, kind := range []string{"skill", "agent"} {
+		if _, err := db.Exec("INSERT INTO app_grants (kind, app_id, grantee_type, grantee) VALUES (?, ?, 'user', ?)",
+			kind, "acme", "grace"); err != nil {
+			t.Fatalf("seed app_grants(%s): %v", kind, err)
 		}
 	}
 	if err := DeleteUser(db, id); err != nil {

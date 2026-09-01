@@ -224,11 +224,11 @@ func TestAgentPresetStatusValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 非法 status 被 CHECK 拒绝
-	if _, err := db.Exec(`INSERT INTO agent_presets (name, author, status) VALUES ('x', 'y', 'bogus')`); err == nil {
+	if _, err := db.Exec(`INSERT INTO app_releases (kind, app_id, version, status) VALUES ('agent', 'x', '1.0.0', 'bogus')`); err == nil {
 		t.Fatal("bogus status accepted")
 	}
 	// 空 author 拒绝(NOT NULL)
-	if _, err := db.Exec(`INSERT INTO agent_presets (name, author) VALUES ('x', NULL)`); err == nil {
+	if _, err := db.Exec(`INSERT INTO app_releases (kind, app_id, version) VALUES ('bogus-kind', 'x', '1.0.0')`); err == nil {
 		t.Fatal("null author accepted")
 	}
 	if err := ApplyMigrations(db); err != nil {

@@ -324,7 +324,7 @@ metadata:
 | P2 | `apps` / `app_releases` 建表 + 回填 + 统一 publish 内核 + 三域存储切换 | ✅ **已实施** |
 | P3 | 应用锁定 + webadmin 管控 UI + 审计 | ✅ **已实施** |
 | P4 | 溯源块 + dirty 检测 + 存量规范化 | ✅ **已实施** |
-| P5 | 旧表与旧路由下线 | ✓ |
+| P5 | 旧表下线 | ✅ **已实施**（迁移 0055） |
 
 ### P0 实施记录（2026-09-01）
 
@@ -414,3 +414,9 @@ metadata:
 - **强制 `name == app_id` 是破坏性约定**：会拒绝掉 内部技能中心 现行的发布规范（`skill-publish-helper` 技能明文要求 `name` 写中文名）。**需要同步修订该技能与 GitLab 仓库的发布规范文档**，否则上游持续产出不合规包。
 - **本地改动检测的边界**：技能运行时可能在自己目录里写缓存文件，会误判 dirty。落地时需要一份排除清单（`.picoaide/`、`node_modules/`、`__pycache__/` 等），或只对 `SKILL.md` + `references/` 计算 checksum。
 - 智能体预设的版本号目前也由客户端兜底 `1.0.0`，与技能同病，P1 一并修。
+
+### P5 实施记录（2026-09-01）
+
+迁移 `0055_drop_legacy_capability_tables.sql` 下线六张旧表（`skills` / `shared_skills` / `agent_presets` + 三张旧授权表）。执行前核实三件事：0053/0054 回填完整（生产 30/30/30）、生产代码对旧表**零引用**、目标机保留下线前 `pg_dump` 备份。
+
+下线过程中查出并修掉一处**三表合并时的漏改**：`departments.go` 的部门删除守卫仍在统计 `agent_preset_grants`——它数了三次授权，其中两次已指向 `app_grants`、第三次还落在旧表上。若直接 DROP 而不修，删除部门会在守卫查询处报表不存在。现已收敛为一次 `app_grants` 统计。同时 `sysinfo.go` 的行数统计表清单由 `skills/skill_grants` 改为 `apps/app_releases/app_grants`。
