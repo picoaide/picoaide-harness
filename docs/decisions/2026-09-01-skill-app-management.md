@@ -320,10 +320,10 @@ metadata:
 | 阶段 | 范围 | 独立可上线 |
 |---|---|---|
 | P0 | 发布期校验（BOM / frontmatter / `name == app_id`）接入现有两条上传链路 + 错误码 | ✅ **已实施** |
-| P1 | 客户端传真实版本号 + `CONTENT_UNCHANGED` + rejected 不再可覆盖（D1/D3 语义先落地） | ✓ 不依赖建表 |
-| P2 | `apps` / `app_releases` 建表 + 回填 + 统一 publish 内核 + 新路由（旧路由转发） | ✓ 客户端无感 |
-| P3 | 应用锁定 + webadmin 管控 UI + 审计 | ✓ |
-| P4 | 溯源块 + dirty 检测 + 卡片显示运行时名 + 存量规范化版本 | ✓ |
+| P1 | 客户端传真实版本号 + `CONTENT_UNCHANGED` + rejected 不再可覆盖（D1/D3 语义先落地） | ✅ **已实施** |
+| P2 | `apps` / `app_releases` 建表 + 回填 + 统一 publish 内核 + 新路由（旧路由转发） | ⏸ 后置（见下） |
+| P3 | 应用锁定 + webadmin 管控 UI + 审计 | ✅ **已实施** |
+| P4 | 溯源块 + dirty 检测 + 存量规范化 | ✅ **已实施** |
 | P5 | 旧表与旧路由下线 | ✓ |
 
 ### P0 实施记录（2026-09-01）
@@ -336,6 +336,30 @@ metadata:
 - 测试夹具同步升级为合规包（`skillMd(name, version)` 助手），并新增管理端四类拒绝用例（中文 name / BOM / 缺 title / 版本不一致）。
 - 门禁：`gofmt` + `go vet` + 18 个 Go 包测试全绿。
 - **真实包回归验证**：把线上 30 个市场技能包逐个喂给新校验器，全部被拦下且原因精确——`INVALID_APP_ID` 25 个、`BOM_DETECTED` 2 个、`MISSING_FIELD(version)` 3 个，与 §2.3 的运行时实测分类逐一吻合（运行时能加载的那 3 个，同样因缺 `version`/`title` 不满足新契约，走存量规范化流程补齐）。
+
+### P1/P3/P4 实施记录（2026-09-01）
+
+**P1 版本即快照**
+- `serverstore.ListSharedSkillVersions` 提供同名全部版本的（版本/校验和/状态/作者）摘要；
+- 员工上传：同版本号存在（**含 rejected**）→ `409 VERSION_EXISTS`；与本人已提交版本内容相同 → `409 CONTENT_UNCHANGED`；版本号不大于现有最高版 → `409 VERSION_NOT_INCREASING`；**删除了 rejected 覆盖重提分支**（`UpdateSharedSkillResubmitWithArchive` 不再被调用）；跨作者防劫持 404 仍优先于版本提示，不泄露他人未公开行；
+- 市场端（单行模型）先落地 `CONTENT_UNCHANGED` + `VERSION_NOT_INCREASING`；
+- 客户端 `packSkill` 改为**读包内 frontmatter `version`**（缺失即报错），host 代理不再兜底 `1.0.0`。
+
+**② 审计与预览**
+- 新增市场技能后台预览：`GET /api/server/admin/skills/:name/preview`（文件清单 + SKILL.md）与 `/file?path=`（逐文件查看，越界路径拒绝），契约与共享技能一致，webadmin 复用同一个 `ArchivePreviewDialog`；
+- 审计明细统一为 `name@version 「展示名」 sha256:前8位`（`sharedskills.UploadAuditDetail`，有 Go 测试锁定格式）；审计页据此正则还原预览入口，**上传类条目可当场打开归档预览**。
+
+**P3 应用锁定（D4）**
+- 迁移 `0050_capability_locks.sql`：`capability_locks(kind, name, reason, locked_by)`，**不设外键**以支持对尚不存在的名字预锁定（占名）；
+- 员工上传命中 → `403 APP_LOCKED` + 原样回显管理员理由；管理员发布不受限；
+- 管理端 `/api/server/admin/capability-locks`（GET/PUT/DELETE），审计 `capability_lock`/`capability_unlock`；webadmin 能力中心页新增「锁定管理」面板。
+
+**P4 溯源与规范化**
+- 安装器写 `.picoaide/release.json`（appId/version/channel/server/内容哈希/安装时间），取代 `.install-version` 的单值语义；`packSkill` **排除 `.picoaide/`**，否则重新上传会被自己的 `PROVENANCE_FORBIDDEN` 拦下；
+- `computeSkillContentHash` 重算内容哈希做 dirty 判定；能力中心卡片显示「市场 vX」与「已本地修改」徽章；
+- `skillmanifest.NormalizeSkillMD` + `POST /api/server/admin/skills/:name/normalize`：把存量不合规包改写为合规内容并作为 **patch+1 新版本**入库（中文 name → title、剥 BOM、补 version/author/category、剥离自带溯源块）；**拒绝编造 description**（缺失即报错要人工补写）；入库前用与上传同一套 `Parse` 自检。
+
+**P2 为何后置**：`apps`/`app_releases` 大表重构是纯内部演进，对用户可见价值低但风险最高（数据迁移 + 路由切换）。本轮目标是「上传可靠 + 审批可预览 + 可发布上线」，这些在现有表结构上均已实现。建议 P2 单独立项、独立灰度，不与生产发布叠加。
 
 ## 十、验收标准
 
