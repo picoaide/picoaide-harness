@@ -133,6 +133,35 @@ func TestMergeVersionsOwnNonApproved(t *testing.T) {
 	}
 }
 
+func TestMergeMarketFirstSortsVersions(t *testing.T) {
+	// B5(2026-09-01):同名 market 行 [1.0.0,2.0.0] 与 org 行 [1.5.0] 折叠后,
+	// versions 必须升序 [1.0.0,1.5.0,2.0.0](append 顺序会得到 1.0.0,2.0.0,1.5.0)。
+	items := []CapabilityItem{
+		{Kind: KindSkill, Source: SourceMarket, Name: "hub", Version: "2.0.0", Status: "approved", Versions: []string{"1.0.0", "2.0.0"}},
+		{Kind: KindSkill, Source: SourceOrg, Name: "hub", Version: "1.5.0", Status: "approved", Versions: []string{"1.5.0"}},
+	}
+	merged := mergeMarketFirst(items)
+	if len(merged) != 1 {
+		t.Fatalf("len=%d, want 1", len(merged))
+	}
+	m := merged[0]
+	if m.Source != SourceMarket {
+		t.Fatalf("source=%s, want market first", m.Source)
+	}
+	want := []string{"1.0.0", "1.5.0", "2.0.0"}
+	if len(m.Versions) != len(want) {
+		t.Fatalf("versions=%v, want %v", m.Versions, want)
+	}
+	for i := range want {
+		if m.Versions[i] != want[i] {
+			t.Fatalf("versions=%v, want %v (ascending)", m.Versions, want)
+		}
+	}
+	if m.Version != "2.0.0" {
+		t.Fatalf("current version=%s, want 2.0.0 (market highest)", m.Version)
+	}
+}
+
 func TestListCapabilitiesVisibility(t *testing.T) {
 	r, db, _, userTokens := setupRouter(t)
 	defer db.Close()
@@ -178,6 +207,64 @@ func TestListCapabilitiesAuthorOwnApproved(t *testing.T) {
 	}
 	if len(resp.Items) != 1 || resp.Items[0].Name != "mine" || resp.Items[0].Status != "approved" {
 		t.Fatalf("items=%+v, want own approved visible", resp.Items)
+	}
+}
+
+func TestListCapabilitiesSourceOwn(t *testing.T) {
+	r, db, _, userTokens := setupRouter(t)
+	defer db.Close()
+	// alice 上传 pending + rejected 各一,bob 上传 approved 但未授权 alice。
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "waiting", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillPending, DisplayName: "waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "denied", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillRejected, Reason: "内容不合规"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "notmine", Version: "1.0.0", Author: "bob", Status: serverstore.SharedSkillApproved}); err != nil {
+		t.Fatal(err)
+	}
+
+	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
+	w := doGet(t, r, "/api/client/v2/capabilities?source=own", aliceHdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []CapabilityItem `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	// own 分区:alice 的 waiting(pending)/denied(rejected 含 reason)可见;
+	// 他人 approved 不入 own。
+	got := map[string]CapabilityItem{}
+	for _, it := range resp.Items {
+		got[it.Name] = it
+	}
+	if len(got) != 2 {
+		t.Fatalf("items=%+v, want waiting+denied", resp.Items)
+	}
+	if it := got["waiting"]; it.Status != "pending" {
+		t.Fatalf("waiting status=%s, want pending", it.Status)
+	}
+	if it := got["denied"]; it.Status != "rejected" || it.Reason != "内容不合规" {
+		t.Fatalf("denied=%+v, want rejected with reason", it)
+	}
+	if _, ok := got["notmine"]; ok {
+		t.Fatalf("own 分区不得包含他人条目: %+v", got["notmine"])
+	}
+
+	// bob 无 own 上传 → 空。这里 notmine 是 bob 自己上传的,own 分区应返回。
+	bobHdr := map[string]string{"Authorization": "Bearer " + userTokens["bob"]}
+	w2 := doGet(t, r, "/api/client/v2/capabilities?source=own", bobHdr)
+	var resp2 struct {
+		Items []CapabilityItem `json:"items"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp2.Items) != 1 || resp2.Items[0].Name != "notmine" || resp2.Items[0].Status != "approved" {
+		t.Fatalf("bob own items=%+v, want [notmine approved]", resp2.Items)
 	}
 }
 
