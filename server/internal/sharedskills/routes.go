@@ -302,7 +302,7 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 		}
-		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload", req.Name+"@"+man.Version)
+		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload", UploadAuditDetail(req.Name, man.Version, man.Title, checksum))
 		c.JSON(http.StatusCreated, gin.H{"skill": gin.H{"name": req.Name, "version": man.Version, "status": serverstore.SharedSkillPending}})
 	}
 }
@@ -824,4 +824,18 @@ func newestVersion(history []serverstore.SharedSkillVersionInfo) string {
 		}
 	}
 	return newest
+}
+
+// UploadAuditDetail 组装上传类审计明细:审计页要能直接看清「谁上传了什么」
+// ——名称@版本 + 展示名 + 校验和前 8 位(可与归档比对)。前缀固定为
+// `name@version`,便于审计页据此解析出预览入口;市场域复用同一格式。
+func UploadAuditDetail(name, version, title, checksum string) string {
+	detail := name + "@" + version
+	if title != "" {
+		detail += " 「" + title + "」"
+	}
+	if len(checksum) >= 8 {
+		detail += " sha256:" + checksum[:8]
+	}
+	return detail
 }

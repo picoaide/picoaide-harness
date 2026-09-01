@@ -22,6 +22,8 @@ type Handlers struct {
 	ListSkillsAdmin         gin.HandlerFunc
 	CreateSkillAdmin        gin.HandlerFunc
 	UploadSkillArchiveAdmin gin.HandlerFunc
+	PreviewSkillAdmin       gin.HandlerFunc
+	FileContentSkillAdmin   gin.HandlerFunc
 	UpdateSkillAdmin        gin.HandlerFunc
 	DeleteSkillAdmin        gin.HandlerFunc
 	EnableSkillAdmin        gin.HandlerFunc
@@ -41,6 +43,8 @@ func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 		ListSkillsAdmin:         func(c *gin.Context) { listSkillsAdmin(c, db) },
 		CreateSkillAdmin:        func(c *gin.Context) { createSkillAdmin(c, db) },
 		UploadSkillArchiveAdmin: func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) },
+		PreviewSkillAdmin:       func(c *gin.Context) { previewSkillAdmin(c, db, cacheDir) },
+		FileContentSkillAdmin:   func(c *gin.Context) { fileContentSkillAdmin(c, db, cacheDir) },
 		UpdateSkillAdmin:        func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) },
 		DeleteSkillAdmin:        func(c *gin.Context) { deleteSkillAdmin(c, db) },
 		EnableSkillAdmin:        func(c *gin.Context) { enableSkillAdmin(c, db) },

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
@@ -34,6 +35,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	serverauth.AdminRoute(g, "DELETE", "/skills/:name", serverauth.PermMarketWrite, func(c *gin.Context) { deleteSkillAdmin(c, db) })
 	// 重新上架(审计 A5-M1: 下架不可逆曾导致误下架无法恢复)
 	serverauth.AdminRoute(g, "POST", "/skills/:name/enable", serverauth.PermMarketWrite, func(c *gin.Context) { enableSkillAdmin(c, db) })
+	// 审批预览(2026-09-01):管理员上架前后都要能看到包内到底是什么。
+	serverauth.AdminRoute(g, "GET", "/skills/:name/preview", serverauth.PermMarketRead, func(c *gin.Context) { previewSkillAdmin(c, db, cacheDir) })
+	serverauth.AdminRoute(g, "GET", "/skills/:name/file", serverauth.PermMarketRead, func(c *gin.Context) { fileContentSkillAdmin(c, db, cacheDir) })
 	// 授权管理(严格默认:未授权不可见/不可下载)
 	serverauth.AdminRoute(g, "GET", "/skills/:name/grants", serverauth.PermMarketRead, func(c *gin.Context) { listSkillGrants(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/skills/:name/grants", serverauth.PermMarketWrite, func(c *gin.Context) { replaceSkillGrants(c, db) })
@@ -341,7 +345,7 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	}
 	// 上传模式不再依赖磁盘缓存:清掉旧 clone/包,避免误读。
 	invalidateSkillCache(cacheDir, name)
-	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", name+" v"+man.Version+" (upload)")
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", sharedskills.UploadAuditDetail(name, man.Version, man.Title, checksum))
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": man.Version, "checksum": checksum})
 }
 
@@ -459,4 +463,108 @@ func replaceSkillGrants(c *gin.Context, db *sql.DB) {
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_grants_replace", name+" "+strings.Join(req.Groups, ","))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// maxFilePreviewBytes caps the inline text returned by the per-file review
+// endpoint (与共享技能审核面一致)。
+const maxFilePreviewBytes = 1 << 20
+
+// skillArchiveForReview resolves the reviewable archive bytes of one market
+// skill: 上传模式直接取 DB 归档;git 模式取磁盘上已构建的包(未构建则明确
+// 告知,不静默回空)。
+func skillArchiveForReview(s *serverstore.Skill, cacheDir string) ([]byte, string) {
+	if len(s.Archive) > 0 {
+		return s.Archive, ""
+	}
+	if !util.SafePathSegment(s.Name) {
+		return nil, "技能名不合法"
+	}
+	for _, ext := range []string{".zip", ".tar.gz"} {
+		p := filepath.Join(cacheDir, s.Name+"-"+s.Version+ext)
+		if raw, err := os.ReadFile(p); err == nil {
+			return raw, ""
+		}
+	}
+	return nil, "该技能尚未上传归档(git 源需先构建),暂无法预览"
+}
+
+// previewSkillAdmin lists a market skill's archive entries and returns its
+// SKILL.md inline —— 管理员审批前查看「到底上传了什么」的入口。
+// 此前只有组织共享库有预览,管理后台上架的市场技能无从查看内容。
+func previewSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
+	name := c.Param("name")
+	if !util.SafePathSegment(name) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+		return
+	}
+	s, err := serverstore.GetSkill(db, name)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	raw, msg := skillArchiveForReview(s, cacheDir)
+	if raw == nil {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", msg)
+		return
+	}
+	files, content, lerr := sharedskills.ListArchiveContents(raw)
+	if lerr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档解析失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"files": files, "skill_md": content,
+		"name": s.Name, "version": s.Version, "checksum": s.Checksum, "source": s.Source,
+	})
+}
+
+// fileContentSkillAdmin returns one file's content from a market skill's
+// archive (审批时逐文件查看)。契约与共享技能审核面完全一致,webadmin 复用
+// 同一个预览组件。
+func fileContentSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
+	name := c.Param("name")
+	if !util.SafePathSegment(name) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+		return
+	}
+	target := c.Query("path")
+	if target == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少文件路径")
+		return
+	}
+	norm, nerr := archiveutil.NormalizePath(target)
+	if nerr != nil || norm == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件路径不合法")
+		return
+	}
+	s, err := serverstore.GetSkill(db, name)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	raw, msg := skillArchiveForReview(s, cacheDir)
+	if raw == nil {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", msg)
+		return
+	}
+	content, size, found, binary, tooLarge, xerr := archiveutil.ExtractFileContent(raw, norm, maxFilePreviewBytes)
+	if xerr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档解析失败")
+		return
+	}
+	if !found {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "归档中不存在该文件")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"path": norm, "size": size, "binary": binary, "too_large": tooLarge, "content": content,
+	})
 }
