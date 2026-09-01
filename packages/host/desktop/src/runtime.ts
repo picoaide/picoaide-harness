@@ -85,6 +85,12 @@ export interface DesktopNotification {
   title: string
   /** Concise user-facing status. */
   body: string
+  /**
+   * Session the notification belongs to: a native click focuses the window
+   * and hands the id to the shell so the renderer can open that session.
+   * Absent = notification is informational only (no click navigation).
+   */
+  sessionId?: string
 }
 
 /** One update-coordinator state observation published to the renderer shell. */
@@ -234,6 +240,18 @@ export interface DesktopRuntime {
    * delivered to the handler when it is installed.
    */
   setDeepLinkHandler(handler: (url: string) => void): void
+
+  /**
+   * Install the handler for a native-notification click that carries a
+   * session id (loop-completion/question/approval bell). The launcher focuses
+   * the window before invoking the handler; the shell forwards the id to the
+   * renderer, which opens the session. Notifications without a session id do
+   * not call this handler. Headless launcher smokes may omit it.
+   */
+  setSessionOpenRequestHandler?(handler: (sessionId: string) => void): void
+
+  /** Whether the native window currently holds keyboard focus (headless stubs may omit). */
+  isFocused?(): boolean
 }
 
 declare module '@deepseek-ai/cordis' {
