@@ -185,6 +185,8 @@ func SetAppEnabled(db *sql.DB, kind, appID string, enabled bool) error {
 
 // CreateRelease 写入一个新的版本快照。调用方必须已完成严格校验与版本语义
 // 判定(版本不可复用、必须递增、内容未变更等),本函数只负责落库。
+// (kind, app_id, version) 唯一约束兜底并发判重:竞争窗口内先落库者赢,
+// 后者返回 ErrDuplicate(B7,2026-09-01——此前直接吞成 INTERNAL 500)。
 func CreateRelease(db *sql.DB, r *Release) (int64, error) {
 	tags := "[]"
 	if len(r.Tags) > 0 {
@@ -195,12 +197,16 @@ func CreateRelease(db *sql.DB, r *Release) (int64, error) {
 	if r.Status == "" {
 		r.Status = ReleaseStatusPending
 	}
-	return InsertID(db, `INSERT INTO app_releases
+	id, err := InsertID(db, `INSERT INTO app_releases
 		(kind, app_id, version, title, description, changelog, category, tags, author, publisher,
 		 checksum, size, archive, status, reason, quality)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Kind, r.AppID, r.Version, r.Title, r.Description, r.Changelog, r.Category, tags,
 		r.Author, r.Publisher, r.Checksum, int64(len(r.Archive)), r.Archive, r.Status, r.Reason, r.Quality)
+	if err != nil && isUniqueViolation(err) {
+		return 0, ErrDuplicate
+	}
+	return id, err
 }
 
 // GetRelease 取一个版本(含归档);软删的版本同样返回,调用方据 DeletedAt 判断。
@@ -309,10 +315,12 @@ func IncrementReleaseDownload(db *sql.DB, kind, appID, version string) error {
 	return err
 }
 
-// IncrementReleaseCalls 调用计数(客户端遥测上报)。
-func IncrementReleaseCalls(db *sql.DB, kind, appID string, delta int64) error {
+// IncrementReleaseCalls 调用计数(客户端遥测上报)。必须指定版本:一个 App
+// 可有多个 approved 版本,不带 version 会把该 App 全部 approved 版本的
+// calls 一起 +1,每个版本计数虚增 N 倍(2026-09-01 审计 B6)。
+func IncrementReleaseCalls(db *sql.DB, kind, appID, version string, delta int64) error {
 	_, err := db.Exec(`UPDATE app_releases SET calls = calls + ?
-		WHERE kind = ? AND app_id = ? AND status = 'approved'`, delta, kind, appID)
+		WHERE kind = ? AND app_id = ? AND version = ? AND status = 'approved'`, delta, kind, appID, version)
 	return err
 }
 

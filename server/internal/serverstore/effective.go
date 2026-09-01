@@ -82,14 +82,22 @@ func ancestorsOf(byID map[int64]groupNode, groupID int64) []int64 {
 	return out
 }
 
-// subtreeOf collects groupID and all descendants (DFS).
+// subtreeOf collects groupID and all descendants (DFS). Cycle-guarded:
+// UpdateDepartment 防环,但迁移/手工数据可能造环——环上重复访问直接跳过,
+// 保证主管权限解析永不因树损坏而无限循环(B9,2026-09-01 审计;ancestorsOf
+// 已有同等保护)。
 func subtreeOf(children map[int64][]groupNode, rootID int64) []int64 {
 	out := []int64{rootID}
 	stack := []int64{rootID}
+	seen := map[int64]bool{rootID: true}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		for _, c := range children[cur] {
+			if seen[c.id] {
+				continue
+			}
+			seen[c.id] = true
 			out = append(out, c.id)
 			stack = append(stack, c.id)
 		}
