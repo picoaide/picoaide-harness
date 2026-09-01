@@ -413,7 +413,7 @@ func NormalizePath(raw string) (string, error) {
 	if strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "\\") {
 		return "", ErrUnsafe
 	}
-	if len(raw) >= 2 && isASCIILetter(raw[0]) && (raw[1] == ':' ) {
+	if len(raw) >= 2 && isASCIILetter(raw[0]) && (raw[1] == ':') {
 		return "", ErrUnsafe
 	}
 	parts := strings.Split(strings.ReplaceAll(raw, "\\", "/"), "/")
