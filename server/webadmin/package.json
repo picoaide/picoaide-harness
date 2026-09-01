@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "postbuild": "node -e \"require('fs').writeFileSync('dist/.gitkeep','')\""
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.1",
