@@ -85,9 +85,9 @@ func AddSkill(db *sql.DB, s *Skill) (int64, error) {
 	} else if conflict {
 		return 0, ErrConflict
 	}
-	id, err := InsertID(db, `INSERT INTO skills (name, version, description, author, checksum, enabled, archive, downloads, calls)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)`,
-		s.Name, s.Version, s.Description, s.Author, s.Checksum, s.Enabled, s.Archive)
+	id, err := InsertID(db, `INSERT INTO skills (name, display_name, version, description, author, checksum, enabled, archive, downloads, calls)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
+		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Enabled, s.Archive)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -111,9 +111,9 @@ func GetSkill(db *sql.DB, name string) (*Skill, error) {
 // UpdateSkill updates all mutable fields by id; returns ErrNotFound. Archive
 // is written only when non-nil(元数据编辑不得清空已上传的归档)。
 func UpdateSkill(db *sql.DB, s *Skill) error {
-	res, err := db.Exec(`UPDATE skills SET version=?, description=?, author=?, checksum=?, enabled=?, archive=COALESCE(?, archive), updated_at=`+NowExpr()+`
+	res, err := db.Exec(`UPDATE skills SET display_name=?, version=?, description=?, author=?, checksum=?, enabled=?, archive=COALESCE(?, archive), updated_at=`+NowExpr()+`
 		WHERE id=?`,
-		s.Version, s.Description, s.Author, s.Checksum, s.Enabled,
+		s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Enabled,
 		anyBytes(s.Archive), s.ID)
 	if err != nil {
 		return err
