@@ -7,10 +7,12 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ApiError, AuthError, assertServerURLAllowed, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
+  computeSkillContentHash,
   installSkillArchive,
   listInstalledSkills,
   listLocalSkills,
   packSkill,
+  readProvenance,
   resolveSkillsDir,
   uninstallSkill,
   validateSkillName,
@@ -717,6 +719,9 @@ export function apply(ctx: Context, config: Config): void {
                 checksum,
                 version,
                 skillsDir: resolveSkillsDir(),
+                // 溯源(D6):记录渠道与来源服务端,客户端据此显示归属。
+                channel: 'market',
+                server: s.serverURL,
               })
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
@@ -1077,7 +1082,7 @@ export function apply(ctx: Context, config: Config): void {
               }
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
               const ver = upstream.headers.get('x-skill-version') ?? version
-              await installSkillArchive({ name, archive: content, checksum, skillsDir, version: ver })
+              await installSkillArchive({ name, archive: content, checksum, skillsDir, version: ver, channel: 'org', server: s.serverURL })
               json(res, 200, { ok: true, name, version: ver })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
@@ -1151,8 +1156,24 @@ export function apply(ctx: Context, config: Config): void {
             // installedVersion:优先读安装器写的 .install-version 标记
             // (可靠);否则退回 SKILL.md frontmatter 的 version(best-effort)。
             const localSkillVersions = new Map<string, string | undefined>()
+            // 溯源(D6):优先读 .picoaide/release.json(应用 ID/渠道/版本 +
+            // 安装时内容哈希),回退旧 .install-version 标记;并重算当前内容
+            // 哈希判定「是否被本地修改过」。
+            const provenance = new Map<string, { appId: string, channel: string, version: string, dirty: boolean }>()
             for (const r of localSkills) {
-              const marker = join(skillsDir, r.name, '.install-version')
+              const dir = join(skillsDir, r.name)
+              const prov = await readProvenance(dir)
+              if (prov !== undefined) {
+                let dirty = false
+                if (prov.archiveChecksum !== undefined) {
+                  const now = await computeSkillContentHash(dir).catch(() => undefined)
+                  dirty = now !== undefined && now !== prov.archiveChecksum
+                }
+                provenance.set(r.name, { appId: prov.appId, channel: prov.channel, version: prov.version, dirty })
+                localSkillVersions.set(r.name, prov.version !== '' ? prov.version : r.version)
+                continue
+              }
+              const marker = join(dir, '.install-version')
               const mv = await readFile(marker, 'utf8').then(s => s.trim()).catch(() => undefined)
               localSkillVersions.set(r.name, mv ?? r.version)
             }
@@ -1163,9 +1184,13 @@ export function apply(ctx: Context, config: Config): void {
             const localRows: Array<Record<string, unknown>> = []
             for (const l of localSkills) {
               const match = items.find(i => (i as { kind?: string }).kind === 'skill' && (i as { name?: string }).name === l.name)
+              const prov = provenance.get(l.name)
               localRows.push({
                 kind: 'skill', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
-                version: l.version ?? '1.0.0', description: l.description ?? '', author: '',
+                version: prov?.version !== undefined && prov.version !== '' ? prov.version : (l.version ?? '1.0.0'),
+                description: l.description ?? '', author: '',
+                // 归属与本地改动(D6):面板据此显示「来自市场 · vX · 已本地修改」。
+                ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty: prov.dirty },
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,

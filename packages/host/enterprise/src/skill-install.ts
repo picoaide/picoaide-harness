@@ -59,6 +59,10 @@ export interface InstallSkillArchiveOptions {
   skillsDir: string
   /** Optional gateway-reported version (`x-skill-version`), passed through. */
   version?: string | undefined
+  /** 分发渠道(写入溯源标记;缺省 market)。 */
+  channel?: 'market' | 'org' | undefined
+  /** 来源服务端地址(写入溯源标记)。 */
+  server?: string | undefined
 }
 
 /**
@@ -68,7 +72,8 @@ export interface InstallSkillArchiveOptions {
  * partial install behind (the staging directory is removed on failure).
  */
 export async function installSkillArchive(options: InstallSkillArchiveOptions): Promise<SkillInstallResult> {
-  const { name, archive, checksum, skillsDir, version } = options
+  const { name, archive, checksum, skillsDir, version, server } = options
+  const channel = options.channel ?? 'market'
   validateSkillName(name)
 
   if (archive.byteLength === 0) throw new Error('empty archive')
@@ -152,6 +157,17 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
     if (version !== undefined && version !== '') {
       await writeFile(join(targetDir, '.install-version'), version, { mode: 0o600 }).catch(() => { /* 非致命 */ })
     }
+    // 溯源标记(决策 2026-09-01 D6):记录应用 ID/版本/渠道/来源服务端与
+    // 安装时的内容哈希,客户端据此判定归属与「是否被本地修改过」。
+    // 写失败不致命——溯源是展示能力,不影响技能可用性。
+    await writeProvenance(targetDir, {
+      appId: name,
+      version: version ?? '',
+      channel,
+      ...server === undefined ? {} : { server },
+      archiveChecksum: await computeSkillContentHash(targetDir),
+      installedAt: new Date().toISOString(),
+    }).catch(() => { /* 非致命 */ })
 
     return { name, version, skillsDir, targetDir }
   } catch (cause) {
@@ -273,6 +289,83 @@ export async function hasSkillMarkdown(dir: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/** 安装器写入的溯源目录名(服务端拒绝归档自带同名目录)。 */
+export const PROVENANCE_DIR = '.picoaide'
+
+/** 安装来源溯源:客户端据此判断「这份技能是市场上的哪个应用的哪个版本」。 */
+export interface SkillProvenance {
+  /** 市场/组织库中的应用 ID(= 技能目录名 = frontmatter name)。 */
+  appId: string
+  /** 安装时的版本号。 */
+  version: string
+  /** 分发渠道:market=市场,org=组织共享库。 */
+  channel: 'market' | 'org'
+  /** 来源服务端(多环境时区分)。 */
+  server?: string | undefined
+  /** 安装时归档的 sha256(本地改动检测的基准)。 */
+  archiveChecksum?: string | undefined
+  /** 安装时间(ISO)。 */
+  installedAt: string
+}
+
+/**
+ * Write the provenance marker into an installed skill directory.
+ * 取代旧的 `.install-version` 单值文件:除版本外还记录应用 ID、渠道、
+ * 来源服务端与归档校验和,使客户端能可靠回答「装的是市场哪个技能」。
+ */
+export async function writeProvenance(skillDir: string, info: SkillProvenance): Promise<void> {
+  const dir = join(skillDir, PROVENANCE_DIR)
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  await writeFile(join(dir, 'release.json'), `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 })
+}
+
+/** Read the provenance marker; undefined when absent or unreadable. */
+export async function readProvenance(skillDir: string): Promise<SkillProvenance | undefined> {
+  try {
+    const raw = await readFile(join(skillDir, PROVENANCE_DIR, 'release.json'), 'utf8')
+    const parsed = JSON.parse(raw) as Partial<SkillProvenance>
+    if (typeof parsed.appId !== 'string' || typeof parsed.version !== 'string') return undefined
+    const channel = parsed.channel === 'market' || parsed.channel === 'org' ? parsed.channel : 'market'
+    return {
+      appId: parsed.appId,
+      version: parsed.version,
+      channel,
+      server: typeof parsed.server === 'string' ? parsed.server : undefined,
+      archiveChecksum: typeof parsed.archiveChecksum === 'string' ? parsed.archiveChecksum : undefined,
+      installedAt: typeof parsed.installedAt === 'string' ? parsed.installedAt : '',
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Compute a stable content hash of an installed skill directory, excluding
+ * the installer-owned provenance directory. 与安装时记录的归档校验和不同源,
+ * 因此只用于「与上次计算相比是否变化」——首次安装时由 writeProvenance
+ * 记录当时的内容哈希,之后据此判定本地是否被改动过。
+ */
+export async function computeSkillContentHash(skillDir: string): Promise<string> {
+  const hash = createHash('sha256')
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))
+    for (const entry of entries) {
+      if (prefix === '' && entry.name === PROVENANCE_DIR) continue
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      if (entry.isDirectory()) {
+        hash.update(`D:${rel}\n`)
+        await walk(join(dir, entry.name), rel)
+      } else if (entry.isFile()) {
+        hash.update(`F:${rel}:`)
+        hash.update(await readFile(join(dir, entry.name)))
+        hash.update('\n')
+      }
+    }
+  }
+  await walk(skillDir, '')
+  return hash.digest('hex')
 }
 
 /** One locally authored skill row (name + display metadata from frontmatter). */
@@ -397,6 +490,9 @@ async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: st
   for (const entry of entries) {
     const abs = join(dir, entry.name)
     const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`
+    // 溯源目录是安装器的本地产物,不属于技能内容:必须排除,否则重新上传
+    // 会被服务端以 PROVENANCE_FORBIDDEN 拒绝(伪造归属防护)。
+    if (relPrefix === '' && entry.name === PROVENANCE_DIR) continue
     // 拒绝符号链接:打包时即失败(安装侧同样拒绝)。
     if (entry.isSymbolicLink()) {
       throw new Error(`symlink refused in package: ${rel}`)

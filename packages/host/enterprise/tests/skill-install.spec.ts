@@ -6,9 +6,11 @@ import { join } from 'node:path'
 import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import {
+  computeSkillContentHash,
   installSkillArchive,
   listInstalledSkills,
   packSkill,
+  readProvenance,
   resolveSkillsDir,
   SKILL_NAME_PATTERN,
   synthesizeSkillFrontmatter,
@@ -379,6 +381,65 @@ describe('packSkill', () => {
       await writeFile(join(root, 'demo-skill', 'SKILL.md'), skillMd('demo-skill', '1.0.0'))
       const packed = await packSkill(root, 'demo-skill', '9.9.9')
       expect(packed.version).toBe('9.9.9')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('溯源标记与本地改动检测', () => {
+  const makeArchive = (name: string): Buffer => {
+    const zip = new AdmZip()
+    zip.addFile('SKILL.md', Buffer.from(
+      `---\nname: ${name}\ntitle: ${name} 技能\nversion: 1.2.0\n` +
+      `description: 用于单测的技能包描述,需满足最短长度。\nauthor: t\ncategory: 测试\n---\n\n正文\n`))
+    zip.addFile('references/a.md', Buffer.from('参考\n'))
+    return zip.toBuffer()
+  }
+
+  it('安装后写入 .picoaide/release.json,可回答「来自哪个应用哪个版本」', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-prov-'))
+    try {
+      await installSkillArchive({
+        name: 'demo-skill', archive: makeArchive('demo-skill'), skillsDir: root,
+        version: '1.2.0', channel: 'market', server: 'https://harness.example.com',
+      })
+      const prov = await readProvenance(join(root, 'demo-skill'))
+      expect(prov?.appId).toBe('demo-skill')
+      expect(prov?.version).toBe('1.2.0')
+      expect(prov?.channel).toBe('market')
+      expect(prov?.server).toBe('https://harness.example.com')
+      expect(prov?.archiveChecksum).toMatch(/^[0-9a-f]{64}$/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('本地改动会让内容哈希与安装时记录不一致(dirty 判定)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-prov-'))
+    try {
+      await installSkillArchive({ name: 'demo-skill', archive: makeArchive('demo-skill'), skillsDir: root, version: '1.2.0' })
+      const prov = await readProvenance(join(root, 'demo-skill'))
+      // 未改动:一致。
+      expect(await computeSkillContentHash(join(root, 'demo-skill'))).toBe(prov?.archiveChecksum)
+      // 改动一个文件后:不一致。
+      await writeFile(join(root, 'demo-skill', 'references', 'a.md'), '被本地改过\n')
+      expect(await computeSkillContentHash(join(root, 'demo-skill'))).not.toBe(prov?.archiveChecksum)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('打包时排除 .picoaide/,避免重新上传被服务端判为伪造归属', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-prov-'))
+    try {
+      await installSkillArchive({ name: 'demo-skill', archive: makeArchive('demo-skill'), skillsDir: root, version: '1.2.0' })
+      const packed = await packSkill(root, 'demo-skill')
+      const names = new AdmZip(packed.archive).getEntries().map((e) => e.entryName)
+      expect(names.some((n) => n.startsWith('.picoaide'))).toBe(false)
+      expect(names).toContain('SKILL.md')
+      // 版本仍取自包内 frontmatter。
+      expect(packed.version).toBe('1.2.0')
     } finally {
       await rm(root, { recursive: true, force: true })
     }
