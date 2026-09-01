@@ -11,7 +11,7 @@ const realWorldMD = "---\n" +
 	"category: 通用\n" +
 	"version: 1.0.0\n" +
 	"description: \"员工日常咨询知识库的索引与强制读取规则,覆盖人事行政与报销。\"\n" +
-	"tags: [moka, HR]\n" +
+	"tags: [example-org, HR]\n" +
 	"author: zhangsan\n" +
 	"---\n\n# 员工日常咨询知识库\n\n本技能用于服务端单元测试:正文需要足够长才能通过空壳校验,因此这里补充了两句完整的说明文字,描述该技能的用途、触发时机与使用方式,确保长度稳稳超过五十字的下限要求。\n"
 

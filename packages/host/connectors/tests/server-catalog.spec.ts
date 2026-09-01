@@ -4,7 +4,7 @@ import { parseServerConnectors } from '../src/index.ts'
 // 服务端 0042 种子的真实定义(从 migrations-pg/0042_connectors.sql 复制)。
 const MOKA_DEF = JSON.stringify({
   auth: {
-    discoveryUrl: 'https://mcp.mokahr.com/mcp',
+    discoveryUrl: 'https://mcp.example.com/mcp',
     clientId: '',
     authorizeUrl: '',
     tokenUrl: '',
@@ -13,7 +13,7 @@ const MOKA_DEF = JSON.stringify({
     publicClient: true,
     scopes: 'offline_access',
   },
-  mcp: [{ serverName: 'moka', transport: 'streamable-http', url: 'https://mcp.mokahr.com/mcp' }],
+  mcp: [{ serverName: 'example-crm', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }],
 })
 
 const GLITCHTIP_DEF = JSON.stringify({
@@ -29,17 +29,17 @@ const GLITCHTIP_DEF = JSON.stringify({
 describe('parseServerConnectors', () => {
   it('解析 moka: 目录行字段覆盖 + auth/mcp 完整保留', () => {
     const defs = parseServerConnectors([
-      { id: 'moka', name: 'Moka HR 智能体', description: '招聘与人事', auth_mode: 'oauth', definition: MOKA_DEF },
+      { id: 'example-crm', name: 'Moka HR 智能体', description: '招聘与人事', auth_mode: 'oauth', definition: MOKA_DEF },
     ])
     expect(defs).toHaveLength(1)
     const m = defs[0]!
-    expect(m.id).toBe('moka')
+    expect(m.id).toBe('example-crm')
     expect(m.name).toBe('Moka HR 智能体')
     expect(m.authMode).toBe('oauth')
-    expect(m.auth?.discoveryUrl).toBe('https://mcp.mokahr.com/mcp')
+    expect(m.auth?.discoveryUrl).toBe('https://mcp.example.com/mcp')
     expect(m.auth?.pkce).toBe(true)
     expect(m.auth?.publicClient).toBe(true)
-    expect(m.mcp).toEqual([{ serverName: 'moka', transport: 'streamable-http', url: 'https://mcp.mokahr.com/mcp' }])
+    expect(m.mcp).toEqual([{ serverName: 'example-crm', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }])
   })
 
   it('解析 glitchtip: tokenFields/examples/mcp 完整保留, authMode=token', () => {
@@ -68,7 +68,7 @@ describe('parseServerConnectors', () => {
 
   it('目录行缺 auth_mode 时回退定义 JSON 的 authMode', () => {
     const defs = parseServerConnectors([
-      { id: 'moka', name: '', description: '', auth_mode: '', definition: MOKA_DEF },
+      { id: 'example-crm', name: '', description: '', auth_mode: '', definition: MOKA_DEF },
     ])
     expect(defs[0]!.authMode).toBe('oauth')
     expect(defs[0]!.name).toBe('') // 目录行 name 为空 → 原样(定义内没有 name)

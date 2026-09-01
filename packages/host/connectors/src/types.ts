@@ -84,7 +84,7 @@ export interface ConnectorMcp {
 }
 
 export interface ConnectorDef {
-  /** Stable unique id, e.g. 'moka'. */
+  /** Stable unique id, e.g. 'example-crm'. */
   id: string
   name: string
   description: string

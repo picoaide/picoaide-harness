@@ -143,7 +143,7 @@ const TEMPLATES: { label: string; name: string; description: string; authMode: A
     name: 'Moka HR 智能体',
     description: '招聘和人事一体的 AI 同事,把查询与执行收进一个对话。',
     authMode: 'oauth',
-    json: '{"auth":{"discoveryUrl":"https://mcp.mokahr.com/mcp","clientId":"","authorizeUrl":"","tokenUrl":"","redirectUri":"http://127.0.0.1/callback","pkce":true,"publicClient":true,"scopes":"offline_access"},"mcp":[{"serverName":"moka","transport":"streamable-http","url":"https://mcp.mokahr.com/mcp"}]}',
+    json: '{"auth":{"discoveryUrl":"https://mcp.example.com/mcp","clientId":"","authorizeUrl":"","tokenUrl":"","redirectUri":"http://127.0.0.1/callback","pkce":true,"publicClient":true,"scopes":"offline_access"},"mcp":[{"serverName":"example-crm","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}',
   },
   {
     label: 'GlitchTip(本地 stdio + Token 表单)',

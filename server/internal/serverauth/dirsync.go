@@ -116,7 +116,7 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 			continue // 无 user_attr/cn/mail 的条目不是可登录用户(组织单元/组对象等)
 		}
 		seen[username] = true
-		// 显示名:sn(真实姓名,如 mokahr 目录 "zhangsan")→ cn 兜底
+		// 显示名:sn(真实姓名,如 某些企业目录)→ cn 兜底
 		// (cn 可能是登录名,如 alice;显示名取 sn 更人性化)。
 		displayName := e.GetAttributeValue("sn")
 		if displayName == "" {

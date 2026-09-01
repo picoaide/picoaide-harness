@@ -40,7 +40,7 @@ type LDAPProvider struct {
 	UserFilter   string
 	// UserAttr 是目录中"登录用户名"的属性名(如 uid/cn/sAMAccountName)。
 	// 各厂商目录命名不同:OpenLDAP 常用 uid,AD 常用 sAMAccountName,
-	// 部分企业目录只有 cn/mail(如 mokahr 系)。默认 uid,管理员可配置。
+	// 部分企业目录只有 cn/mail(如 某些企业目录)。默认 uid,管理员可配置。
 	// 生效范围:登录用户规范化、目录同步、测试连接的 username 字段。
 	UserAttr    string
 	GroupFilter string
@@ -109,7 +109,7 @@ type DirectoryReport struct {
 }
 
 // ldapDisplayName 取条目的显示名:sn(真实姓名,如 "zhangsan")→ cn 兜底——
-// 部分目录 cn 是登录名(如 mokahr 系 "alice"),显示名应取 sn。
+// 部分目录 cn 是登录名(如 "alice"),显示名应取 sn。
 func ldapDisplayName(e *ldap.Entry) string {
 	if v := e.GetAttributeValue("sn"); v != "" {
 		return strings.TrimSpace(v)

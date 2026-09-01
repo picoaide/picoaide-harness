@@ -69,7 +69,7 @@
 | GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level, glitchtip_base_url/organization}` |
 | PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`、`usage.monthly_quota_money`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`) |
 | GET | `/api/server/admin/channels` | 渠道列表 |
-| GET/PUT | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD(0042;Moka/sales-easy 等定义服务端下发) |
+| GET/PUT | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD(0042;示例企业/sales-easy 等定义服务端下发) |
 | GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(90 天保留 → 默认 180 天,settings `audit.retention_days`;0048 起哈希链) |
 | GET/PUT | `/api/server/admin/auth`、`POST /auth/test` | 认证配置(脱敏读/写/连接测试;LDAP 测试连接返回目录统计 `{ok, message, users, groups, sample[5]}`;密码传 `***`/空 = 用已保存值测试) |
 
@@ -198,7 +198,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
   "models": [{ "id": "deepseek-chat", "display_name": "DeepSeek Chat" }],
   "skills": [{ "name": "invoice-helper", "version": "1.0.0", "description": "..." }],
   "web": { "default_thinking_level": "max" },
-  "connectors": [{ "id": "moka", "name": "Moka HR 智能体", "auth_mode": "oauth", "definition": { ... } }]
+  "connectors": [{ "id": "example-org", "name": "示例企业 HR 智能体", "auth_mode": "oauth", "definition": { ... } }]
 }
 ```
 

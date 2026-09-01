@@ -491,7 +491,7 @@ func TestAdminSkillNormalize(t *testing.T) {
 	// 直接把「线上那种」不合规归档塞进 DB(绕过上传校验,模拟历史数据)。
 	legacy := "\ufeff---\nname: 团队知识库助手\ncategory: 通用\nversion: 1.0.0\n" +
 		"description: 员工日常咨询知识库的索引与强制读取规则,覆盖人事行政与报销制度。\n" +
-		"tags: [moka, HR]\nauthor: zhangsan\n---\n\n# 知识库\n\n" +
+		"tags: [example-org, HR]\nauthor: zhangsan\n---\n\n# 知识库\n\n" +
 		"本技能提供员工日常咨询知识库的索引与强制读取规则,覆盖人事、行政、商业保险与财务报销等高频问题的查询路径。\n"
 	archive := makeZip(t, map[string]string{"SKILL.md": legacy, "references/wiki.md": "参考\n"})
 	// 直接写入一个「历史形态」的版本(绕过发布校验,模拟存量数据)。

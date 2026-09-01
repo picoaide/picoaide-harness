@@ -204,7 +204,7 @@ func TestBootstrapStrictDefault(t *testing.T) {
 
 // TestBootstrapConnectors: 0042 连接器下发——enabled 连接器出现在
 // connectors[];禁用后不再下发。0045 已把 GlitchTip 连接器下架(enabled=0),
-// 因此 bootstrap 只下发 moka + sales-easy, glitchtip 不在列表中
+// 因此 bootstrap 只下发 example-org + sales-easy, glitchtip 不在列表中
 // (错误上报走独立 Sentry DSN, 不依赖连接器);定义 defaultValue 注入
 // 逻辑保留,由 TestInjectGlitchTipDefaults 直接单测(重新启用场景仍可用)。
 func TestBootstrapConnectors(t *testing.T) {
@@ -215,31 +215,31 @@ func TestBootstrapConnectors(t *testing.T) {
 	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	conns := out["connectors"].([]any)
 	if len(conns) < 2 {
-		t.Fatalf("connectors = %d, want >= 2 (种子 moka+sales-easy)", len(conns))
+		t.Fatalf("connectors = %d, want >= 2 (种子 example-org+sales-easy)", len(conns))
 	}
 	byID := map[string]map[string]any{}
 	for _, c := range conns {
 		m := c.(map[string]any)
 		byID[m["id"].(string)] = m
 	}
-	// moka / sales-easy 在;glitchtip(0045 下架)不在。
-	if byID["moka"] == nil || byID["sales-easy"] == nil {
+	// example-org / sales-easy 在;glitchtip(0045 下架)不在。
+	if byID["example-org"] == nil || byID["sales-easy"] == nil {
 		t.Fatalf("enabled seeds missing: %v", byID)
 	}
 	if byID["glitchtip"] != nil {
 		t.Fatalf("disabled glitchtip still in connectors")
 	}
 
-	// 禁用 moka → 不再出现。
-	if err := serverstore.SetConnectorEnabled(db, "moka", false); err != nil {
+	// 禁用 example-org → 不再出现。
+	if err := serverstore.SetConnectorEnabled(db, "example-org", false); err != nil {
 		t.Fatal(err)
 	}
 	_, out = getJSON(t, r, "/api/client/v2/config/bootstrap", token)
 	conns = out["connectors"].([]any)
 	for _, c := range conns {
 		m := c.(map[string]any)
-		if m["id"] == "moka" {
-			t.Fatalf("disabled moka still in connectors")
+		if m["id"] == "example-org" {
+			t.Fatalf("disabled example-org still in connectors")
 		}
 	}
 }

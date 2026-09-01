@@ -301,14 +301,14 @@ func TestDirectorySyncRunFromSettings(t *testing.T) {
 	}
 }
 
-// TestSyncDirectoryNoUid:目录条目无 uid(如 mokahr 系,只有 cn/mail)——
+// TestSyncDirectoryNoUid:目录条目无 uid(如 某些企业目录,只有 cn/mail)——
 // 同步必须回退 cn 作为用户名,不能把全部用户跳过(用户 2026-09 生产实例
 // 报告"配置 LDAP 后用户没同步":447 用户全部因 username 为空被跳过)。
 func TestSyncDirectoryNoUid(t *testing.T) {
 	db := mustDB(t)
 	users := []*ldap.Entry{
-		dirUser("cn=alice,ou=users,dc=mokahr,dc=com", "alice", "alice", "alice@mokahr.com"),
-		dirUser("cn=bob,ou=users,dc=mokahr,dc=com", "bob", "bob", "bob@mokahr.com"),
+		dirUser("cn=alice,ou=users,dc=example,dc=com", "alice", "alice", "alice@example.com"),
+		dirUser("cn=bob,ou=users,dc=example,dc=com", "bob", "bob", "bob@example.com"),
 	}
 	// 构造无 uid 的条目(仅 cn/mail)
 	for _, u := range users {
@@ -321,12 +321,12 @@ func TestSyncDirectoryNoUid(t *testing.T) {
 		u.Attributes = attrs
 	}
 	f := &fakeLDAPConn{
-		passwords: map[string]string{"cn=admin,dc=mokahr,dc=com": "pw", "cn=alice,ou=people,dc=mokahr,dc=com": "pw"},
+		passwords: map[string]string{"cn=admin,dc=example,dc=com": "pw", "cn=alice,ou=people,dc=example,dc=com": "pw"},
 		searchResults: map[string]*ldap.SearchResult{
 			"(&(cn=*)(objectClass=inetOrgPerson))": {Entries: users},
 		},
 	}
-	p := &LDAPProvider{ServerURL: "ldap://fake", BindDN: "cn=admin,dc=mokahr,dc=com", BindPassword: "pw", BaseDN: "dc=mokahr,dc=com", UserFilter: "(&(cn=%s)(objectClass=inetOrgPerson))", GroupAttr: "cn"}
+	p := &LDAPProvider{ServerURL: "ldap://fake", BindDN: "cn=admin,dc=example,dc=com", BindPassword: "pw", BaseDN: "dc=example,dc=com", UserFilter: "(&(cn=%s)(objectClass=inetOrgPerson))", GroupAttr: "cn"}
 	p.dial = func(string) (ldapConn, error) { return f, nil }
 
 	res, err := SyncDirectoryRun(db, p)
@@ -359,46 +359,46 @@ func TestSyncDirectoryNoUid(t *testing.T) {
 	}
 }
 
-// TestSyncDirectoryUserAttrCn:user_attr=cn 的目录(如 mokahr 系,无 uid)——
+// TestSyncDirectoryUserAttrCn:user_attr=cn 的目录(如 某些企业目录,无 uid)——
 // 同步回退到配置的 cn 属性,目录全部用户都能同步;且登录用户规范化一致。
 func TestSyncDirectoryUserAttrCn(t *testing.T) {
 	db := mustDB(t)
 	f := &fakeLDAPConn{
-		passwords: map[string]string{"cn=admin,dc=mokahr,dc=com": "pw", "cn=alice,ou=people,dc=mokahr,dc=com": "pw"},
+		passwords: map[string]string{"cn=admin,dc=example,dc=com": "pw", "cn=alice,ou=people,dc=example,dc=com": "pw"},
 		searchResults: map[string]*ldap.SearchResult{
 			// user_filter=(&(cn=%s)(objectClass=inetOrgPerson));扫描替换 %s→*
 			"(&(cn=*)(objectClass=inetOrgPerson))": {Entries: []*ldap.Entry{
-				{ // 无 uid,仅 cn/mail/sn(与生产 mokahr 目录一致)
-					DN: "cn=alice,ou=people,dc=mokahr,dc=com",
+				{ // 无 uid,仅 cn/mail/sn(与生产 example-directory 目录一致)
+					DN: "cn=alice,ou=people,dc=example,dc=com",
 					Attributes: []*ldap.EntryAttribute{
 						{Name: "cn", Values: []string{"alice"}},
 						{Name: "sn", Values: []string{"zhangsan"}},
-						{Name: "mail", Values: []string{"alice@mokahr.com"}},
+						{Name: "mail", Values: []string{"alice@example.com"}},
 					},
 				},
 				{
-					DN: "cn=bob,ou=people,dc=mokahr,dc=com",
+					DN: "cn=bob,ou=people,dc=example,dc=com",
 					Attributes: []*ldap.EntryAttribute{
 						{Name: "cn", Values: []string{"bob"}},
 						{Name: "sn", Values: []string{"谢迪"}},
-						{Name: "mail", Values: []string{"bob@mokahr.com"}},
+						{Name: "mail", Values: []string{"bob@example.com"}},
 					},
 				},
 			}},
 			"(&(cn=alice)(objectClass=inetOrgPerson))": {Entries: []*ldap.Entry{
-				{DN: "cn=alice,ou=people,dc=mokahr,dc=com",
+				{DN: "cn=alice,ou=people,dc=example,dc=com",
 					Attributes: []*ldap.EntryAttribute{
-						{Name: "cn", Values: []string{"alice"}}, {Name: "sn", Values: []string{"zhangsan"}}, {Name: "mail", Values: []string{"alice@mokahr.com"}},
+						{Name: "cn", Values: []string{"alice"}}, {Name: "sn", Values: []string{"zhangsan"}}, {Name: "mail", Values: []string{"alice@example.com"}},
 					}},
 			}},
-			"(member=cn=alice,ou=people,dc=mokahr,dc=com)": {Entries: []*ldap.Entry{
-				{DN: "cn=SSC,ou=groups,dc=mokahr,dc=com", Attributes: []*ldap.EntryAttribute{{Name: "cn", Values: []string{"SSC"}}}},
+			"(member=cn=alice,ou=people,dc=example,dc=com)": {Entries: []*ldap.Entry{
+				{DN: "cn=SSC,ou=groups,dc=example,dc=com", Attributes: []*ldap.EntryAttribute{{Name: "cn", Values: []string{"SSC"}}}},
 			}},
 		},
 	}
 	p := &LDAPProvider{
-		ServerURL: "ldap://fake", BindDN: "cn=admin,dc=mokahr,dc=com", BindPassword: "pw",
-		BaseDN: "dc=mokahr,dc=com", UserFilter: "(&(cn=%s)(objectClass=inetOrgPerson))",
+		ServerURL: "ldap://fake", BindDN: "cn=admin,dc=example,dc=com", BindPassword: "pw",
+		BaseDN: "dc=example,dc=com", UserFilter: "(&(cn=%s)(objectClass=inetOrgPerson))",
 		UserAttr: "cn", GroupFilter: "(member=%s)", GroupAttr: "cn",
 	}
 	p.dial = func(string) (ldapConn, error) { return f, nil }
