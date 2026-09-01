@@ -350,18 +350,26 @@ export interface SkillPackResult {
  * are the directory's contents (the archive root IS the skill directory).
  * Symlinks are refused by the safety scan, so an archive can never smuggle a
  * reference outside the skill.
+ *
+ * 版本号取自包内 `SKILL.md` 的 frontmatter `version`(决策 2026-09-01
+ * 「包内即真相」)。此前这里的默认值 '1.0.0' 让每次上传都声称是 1.0.0——
+ * 服务端因此永远看到同一个版本号,「本地与线上版本一致就拒绝」无从判断。
  * @param skillsDir - the skill root (`<dshHome>/skills`).
  * @param name - the skill directory name.
- * @param version - upload version (caller-supplied, default 1.0.0).
+ * @param version - 可选覆盖;缺省时用包内 frontmatter 的 version。
  * @returns the archive plus metadata, or throws with a user-facing message.
  */
-export async function packSkill(skillsDir: string, name: string, version = '1.0.0'): Promise<SkillPackResult> {
+export async function packSkill(skillsDir: string, name: string, version?: string): Promise<SkillPackResult> {
   validateSkillName(name)
   const dir = join(skillsDir, name)
   await stat(join(dir, 'SKILL.md')).catch(() => {
     throw new Error(`skill "${name}" has no SKILL.md`)
   })
   const meta = await readSkillFrontmatter(join(dir, 'SKILL.md'))
+  const packVersion = version ?? metaString(meta.version)
+  if (packVersion === undefined) {
+    throw new Error(`技能 "${name}" 的 SKILL.md 缺少 version 字段:请写明版本号(如 version: 1.0.0)后再上传`)
+  }
 
   const zip = new AdmZip()
   await addDirToZip(zip, dir, dir, '')
@@ -377,7 +385,7 @@ export async function packSkill(skillsDir: string, name: string, version = '1.0.
     name,
     ...displayName === undefined ? {} : { displayName },
     ...description === undefined ? {} : { description },
-    version,
+    version: packVersion,
     checksum,
     archive,
   }

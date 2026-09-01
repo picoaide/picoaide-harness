@@ -1013,7 +1013,10 @@ export function apply(ctx: Context, config: Config): void {
             let body: { name?: unknown; version?: unknown }
             try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
             const name = typeof body.name === 'string' ? body.name.trim() : ''
-            const version = typeof body.version === 'string' && body.version.trim() !== '' ? body.version.trim() : '1.0.0'
+            // 版本号不再由代理兜底 '1.0.0':以包内 SKILL.md 的 version 为准
+            // (决策 2026-09-01「包内即真相」)。此前的硬编码让服务端永远只
+            // 看到 1.0.0,「版本必须递增/不可复用」在链路上无从判断。
+            const version = typeof body.version === 'string' && body.version.trim() !== '' ? body.version.trim() : undefined
             if (name === '') return json(res, 400, { error: 'missing name' })
             try {
               const packed = await packSkill(skillsDir, name, version)

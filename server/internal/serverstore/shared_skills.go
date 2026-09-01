@@ -172,6 +172,37 @@ func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
 	return s, err
 }
 
+// SharedSkillVersionInfo 是同名技能已有版本的摘要(不含归档 blob),供发布期
+// 做「版本必须递增」与「内容未变更」判定(决策 2026-09-01 §四 不可变性规则)。
+type SharedSkillVersionInfo struct {
+	Version  string
+	Checksum string
+	Status   SharedSkillStatus
+	Author   string
+}
+
+// ListSharedSkillVersions returns every existing version of one shared skill
+// name, whatever its review status. 被拒的版本号同样占位——版本一经提交即
+// 永久占用,不可复用(决策 2026-09-01 D3)。
+func ListSharedSkillVersions(db *sql.DB, name string) ([]SharedSkillVersionInfo, error) {
+	rows, err := db.Query(`SELECT version, checksum, status, author FROM shared_skills WHERE name = ?`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SharedSkillVersionInfo
+	for rows.Next() {
+		var v SharedSkillVersionInfo
+		var status string
+		if err := rows.Scan(&v.Version, &v.Checksum, &status, &v.Author); err != nil {
+			return nil, err
+		}
+		v.Status = SharedSkillStatus(status)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // ListSharedSkills returns every row (admin view), oldest first, optionally
 // filtered by status ("" = all). List columns exclude the archive blob.
 func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
