@@ -6,7 +6,7 @@
 
 ## 架构
 
-Electron 可执行文件只包含最小启动代码。它获取单实例锁、加载固定的 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过 Cordis effect 拥有 `BrowserWindow`、导航策略、settings namespace，以及关闭与退出生命周期。原生 runtime 拥有实体托盘；`desktop-shell`、`desktop-diagnostics` 与 `desktop-updates` 则通过有序 item registry 提供 effect-scoped 命令。
+Electron 可执行文件只包含最小启动代码。它获取单实例锁、加载固定的 `desktop` profile、提供原生运行时能力，并在 Electron main 进程中启动 Host Cordis 根。`desktop-shell` Host 插件通过 Cordis effect 拥有 `BrowserWindow`、导航策略、settings namespace，以及关闭与退出生命周期。原生 runtime 拥有实体托盘；`desktop-shell`、`desktop-diagnostics` 与 `desktop-updates` 则通过有序 item registry 提供 effect-scoped 命令。`desktop-loop-notify` 在 agent loop 完成、模型提问或权限审批后发送原生系统通知；点击带会话的桌面通知会聚焦窗口并打开对应会话。
 
 产品运行固定高级呈现，复用现有 loopback Web carrier。profile 挂载普通 `dsh-base` 与 `dsh-web-app` bundle；Host 把 HTTP 与 WebSocket surface 绑定到 `127.0.0.1` 的临时端口；Electron 在沙箱 renderer 中加载该同源页面。Electron 不维护自有插件 roster，不使用 preload bridge，renderer 也不会获得原始 Electron API。
 

@@ -63,6 +63,14 @@
       "types": "./lib/types/updates.d.ts",
       "default": "./lib/updates.js"
     },
+    "./loop-notify": {
+      "types": "./lib/types/loop-notify.d.ts",
+      "default": "./lib/loop-notify.js"
+    },
+    "./loop-notify-contract": {
+      "types": "./lib/types/loop-notify-contract.d.ts",
+      "default": "./lib/loop-notify-contract.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

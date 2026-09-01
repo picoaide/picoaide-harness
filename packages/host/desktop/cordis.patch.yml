@@ -9,6 +9,8 @@
       name: dsh-plugin-desktop/diagnostics
     - id: desktop-updates
       name: dsh-plugin-desktop/updates
+    - id: desktop-loop-notify
+      name: dsh-plugin-desktop/loop-notify
     - id: desktop-asar-fs
       name: dsh-plugin-desktop/asar-file-system
     - id: desktop-asar-guidance

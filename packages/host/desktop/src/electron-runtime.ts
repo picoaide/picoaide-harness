@@ -100,6 +100,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private deepLinkHandler: ((url: string) => void) | undefined
   /** Links received while no handler was installed yet (startup race). */
   private readonly pendingDeepLinks: string[] = []
+  /** Session-open handler installed by the desktop-shell plugin (notification click). */
+  private sessionOpenHandler: ((sessionId: string) => void) | undefined
 
   /** Product name for native menus, trays, and update notifications (falls back while unscheduled). */
   private productName(): string {
@@ -171,6 +173,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
+  }
+
+  /** Whether the mounted native window currently holds keyboard focus. */
+  isFocused(): boolean {
+    const window = this.window
+    return window !== undefined && !window.isDestroyed() && window.isFocused()
   }
 
   /** @inheritdoc */
@@ -330,6 +338,21 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     this.pendingDeepLinks.push(url)
   }
 
+  /** @inheritdoc */
+  setSessionOpenRequestHandler(handler: (sessionId: string) => void): void {
+    this.sessionOpenHandler = handler
+  }
+
+  /** Deliver a notification-click session request, focusing the window first. */
+  private requestSessionOpen(sessionId: string): void {
+    this.show()
+    try {
+      this.sessionOpenHandler?.(sessionId)
+    } catch (cause) {
+      this.logError(`dsh-plugin-desktop: session open handler failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+
   private async showRendererBootRecovery(report: Extract<RendererBootReport, { status: 'failed' }>): Promise<void> {
     const plugins = report.plugins.length === 0
       ? 'Unknown client plugin'
@@ -391,6 +414,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       title: notification.title,
       body: notification.body,
     })
+    if (notification.sessionId !== undefined) {
+      nativeNotification.once('click', () => {
+        this.requestSessionOpen(notification.sessionId!)
+      })
+    }
     nativeNotification.show()
   }
 
