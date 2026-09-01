@@ -257,6 +257,19 @@ func makeTarGz(t *testing.T, entries map[string]string) []byte {
 // TestAdminSkillUploadArchive: POST /api/admin/skills/:name/archive switches
 // the skill to upload mode — the archive is stored in the DB row, the git
 // source is cleared, and the employee download serves the DB bytes + counts.
+// skillMd builds a SKILL.md satisfying the strict publish contract
+// (决策 2026-09-01 §5.1):管理端上架与员工上传共用同一套必填字段规则。
+func skillMd(name, version string) string {
+	return "---\n" +
+		"name: " + name + "\n" +
+		"title: " + name + " 技能\n" +
+		"version: " + version + "\n" +
+		"description: 用于集成测试的市场技能包,描述需要满足最短长度要求。\n" +
+		"author: tester\n" +
+		"category: 测试\n" +
+		"---\n\n# " + name + "\n\n本技能是服务端集成测试使用的夹具包,正文需要足够长才能通过空壳校验,因此这里补充了一段用于说明用途的文字。\n"
+}
+
 func TestAdminSkillUploadArchive(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
@@ -264,7 +277,7 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
-	archive := makeZip(t, map[string]string{"SKILL.md": "---\nname: demo\n---\n# demo\n"})
+	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
 	body := `{"version":"2.0.0","archive":"` + base64.StdEncoding.EncodeToString(archive) + `"}`
 	if w, out := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive", body, hdr); w.Code != http.StatusOK {
 		t.Fatalf("upload archive: %d %s (%v)", w.Code, w.Body.String(), out)
@@ -336,7 +349,7 @@ func TestAdminSkillUploadArchiveTarGzCompat(t *testing.T) {
 		`{"name":"oldfmt","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
-	archive := makeTarGz(t, map[string]string{"SKILL.md": "---\nname: oldfmt\n---\n"})
+	archive := makeTarGz(t, map[string]string{"SKILL.md": skillMd("oldfmt", "2.0.0")})
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/oldfmt/archive",
 		`{"version":"2.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("upload tar.gz archive: %d", w.Code)
@@ -379,7 +392,7 @@ func TestAdminSkillUploadVersionGuard(t *testing.T) {
 		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
-	archive := makeZip(t, map[string]string{"SKILL.md": "---\nname: demo\n---\n# demo\n"})
+	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
 		`{"version":"2.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("upload archive: %d", w.Code)
@@ -392,5 +405,50 @@ func TestAdminSkillUploadVersionGuard(t *testing.T) {
 	s, _ := serverstore.GetSkill(db, "demo")
 	if s.Version != "2.0.0" {
 		t.Fatalf("version must stay 2.0.0, got %s", s.Version)
+	}
+}
+
+// TestAdminSkillUploadRejectsNonCompliantPackage: 严格发布契约在管理端同样
+// 生效(决策 2026-09-01 §5)。这三类包在本次改造前都能上架成功,但装到客户端
+// 后会被上游 skill-filesystem 静默忽略——「上传成功但技能不存在」。
+func TestAdminSkillUploadRejectsNonCompliantPackage(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
+		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	post := func(md, formVersion string) (int, string) {
+		archive := makeZip(t, map[string]string{"SKILL.md": md})
+		body := `{"version":"` + formVersion + `","archive":"` + base64.StdEncoding.EncodeToString(archive) + `"}`
+		w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive", body, hdr)
+		return w.Code, w.Body.String()
+	}
+
+	// 中文 name:上游 kebab 文法拒绝加载。
+	cn := strings.Replace(skillMd("demo", "2.0.0"), "name: demo", "name: 演示技能", 1)
+	if code, body := post(cn, "2.0.0"); code != 422 || !strings.Contains(body, "INVALID_APP_ID") {
+		t.Fatalf("中文 name = %d %s, want 422 INVALID_APP_ID", code, body)
+	}
+	// UTF-8 BOM:frontmatter 解析失败。
+	if code, body := post("\ufeff"+skillMd("demo", "2.0.0"), "2.0.0"); code != 422 || !strings.Contains(body, "BOM_DETECTED") {
+		t.Fatalf("BOM = %d %s, want 422 BOM_DETECTED", code, body)
+	}
+	// 缺 title(必填展示名)。
+	noTitle := strings.Replace(skillMd("demo", "2.0.0"), "title: demo 技能\n", "", 1)
+	if code, body := post(noTitle, "2.0.0"); code != 422 || !strings.Contains(body, "MISSING_FIELD") {
+		t.Fatalf("缺 title = %d %s, want 422 MISSING_FIELD", code, body)
+	}
+	// 表单版本与包内版本不一致:管理端是显式意图,必须报错而非静默取其一。
+	if code, body := post(skillMd("demo", "2.0.0"), "3.0.0"); code != 422 || !strings.Contains(body, "MANIFEST_MISMATCH") {
+		t.Fatalf("版本不一致 = %d %s, want 422 MANIFEST_MISMATCH", code, body)
+	}
+	// 合规包 + 一致版本 → 通过。
+	if code, body := post(skillMd("demo", "2.0.0"), "2.0.0"); code != http.StatusOK {
+		t.Fatalf("合规包应通过, got %d %s", code, body)
+	}
+	s, err := serverstore.GetSkill(db, "demo")
+	if err != nil || s.Version != "2.0.0" {
+		t.Fatalf("skill = %+v err=%v", s, err)
 	}
 }

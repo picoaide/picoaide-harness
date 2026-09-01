@@ -17,6 +17,7 @@ import (
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
@@ -310,8 +311,9 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		if req.Version == "" {
 			req.Version = "1.0.0"
 		}
-		if !versionRe.MatchString(req.Version) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "版本号不合法")
+		if !skillmanifest.IsVersion(req.Version) {
+			serverauth.WriteError(c, http.StatusBadRequest, skillmanifest.CodeInvalidVersion,
+				"版本号不合法:必须是 x.y.z(可带 -rc.1 预发布后缀)")
 			return
 		}
 		if len(req.Archive) == 0 {

@@ -17,6 +17,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
@@ -292,14 +293,41 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档校验失败: "+err.Error())
 		return
 	}
-	if err := serverstore.ReplaceSkillArchive(db, name, req.Version, checksum, raw); err != nil {
+	// 严格清单校验(决策 2026-09-01「包内即真相」):管理端上架与员工上传共用
+	// 同一套规则——上游以 frontmatter 的 name 作运行时身份且强制 kebab-case,
+	// 不合规的包上架后会被运行时静默忽略(2026-09-01 实测线上 30 个市场技能
+	// 只有 3 个能被加载)。
+	entries, skillMD, listErr := sharedskills.ListArchiveContents(raw)
+	if listErr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档校验失败: "+listErr.Error())
+		return
+	}
+	man, manErr := skillmanifest.Parse(entries, skillMD, name)
+	if manErr != nil {
+		var me *skillmanifest.Error
+		if errors.As(manErr, &me) {
+			serverauth.WriteError(c, skillmanifest.StatusFor(me.Code), me.Code, me.Message)
+			return
+		}
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "SKILL.md 校验失败")
+		return
+	}
+	// 管理端表单的版本是显式意图:与包内版本不一致必须报错,不能静默取其一
+	// (员工端的 version 是旧客户端硬编码值,那里直接以包内为准)。
+	if req.Version != man.Version {
+		serverauth.WriteError(c, skillmanifest.StatusFor(skillmanifest.CodeManifestMismatch),
+			skillmanifest.CodeManifestMismatch,
+			"表单版本("+req.Version+")与 SKILL.md 的 version("+man.Version+")不一致,请以包内版本为准")
+		return
+	}
+	if err := serverstore.ReplaceSkillArchive(db, name, man.Version, checksum, raw); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
 	// 上传模式不再依赖磁盘缓存:清掉旧 clone/包,避免误读。
 	invalidateSkillCache(cacheDir, name)
-	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", name+" v"+req.Version+" (upload)")
-	c.JSON(http.StatusOK, gin.H{"ok": true, "version": req.Version, "checksum": checksum})
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", name+" v"+man.Version+" (upload)")
+	c.JSON(http.StatusOK, gin.H{"ok": true, "version": man.Version, "checksum": checksum})
 }
 
 func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
