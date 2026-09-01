@@ -19,6 +19,11 @@ export const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 /** Upper bound on the unpacked tree (bytes). */
 export const MAX_UNPACKED_BYTES = 64 * 1024 * 1024
 
+/** Upper bound on archive entries — 与 Go 侧 server/internal/archiveutil 的
+ *  MaxEntries(10000) 对齐(2026-09-01 审计:此前仅 Go 侧有该上限,大量
+ *  极小的条目在 TS 侧放行、Go 侧拒绝)。 */
+export const MAX_ENTRIES = 10_000
+
 /** Tar entry types we refuse: symbolic links and hard links. */
 export const LINK_TYPES = new Set(['SymbolicLink', 'Link'])
 
@@ -45,19 +50,25 @@ function zipEntryIsSymlink(entry: AdmZip.IZipEntry): boolean {
 
 /** Zip entry path safety: reject absolute/`..`/empty files; directory roots OK. */
 function assertSafeZipEntry(entry: AdmZip.IZipEntry): string {
-  const normalized = posixNormalize(entry.entryName)
+  const raw = entry.entryName
+  // 绝对路径必须在 normalize 前检查:posixNormalize 丢弃前导 `/`(空段),
+  // normalize 后 startsWith('/') 恒 false(死代码——绝对路径被静默规范化成
+  // 相对路径放行而非拒绝;2026-09-01 审计)。`C:\abs`/`C:/abs` 一并拒绝。
+  if (raw.startsWith('/') || raw.startsWith('\\') || /^[A-Za-z]:[\\/]/u.test(raw)) {
+    throw new Error(`absolute path in archive: ${raw}`)
+  }
+  const normalized = posixNormalize(raw)
   if (entry.isDirectory) {
     // 根目录自引用条目(`./` 或 `/`): `zip -r skill.zip .` 类打包的常见产物,
     // 规范化后为空且不写任何文件(extractZip 对空目录条目跳过),直接放行;
     // `..` 目录条目仍拒绝(目录穿越)。与 tar 分支 assertSafeEntryPath('')→'' 对齐。
     if (normalized.split('/').includes('..')) {
-      throw new Error(`unsafe path in archive: ${entry.entryName}`)
+      throw new Error(`unsafe path in archive: ${raw}`)
     }
     return normalized
   }
-  if (normalized === '') throw new Error(`empty path in archive: ${entry.entryName}`)
-  if (normalized.startsWith('/')) throw new Error(`absolute path in archive: ${entry.entryName}`)
-  if (normalized.split('/').includes('..')) throw new Error(`parent traversal in archive: ${entry.entryName}`)
+  if (normalized === '') throw new Error(`empty path in archive: ${raw}`)
+  if (normalized.split('/').includes('..')) throw new Error(`parent traversal in archive: ${raw}`)
   if (zipEntryIsSymlink(entry)) throw new Error(`link entry refused in archive: ${normalized}`)
   return normalized
 }
@@ -68,9 +79,13 @@ function assertSafeZipEntry(entry: AdmZip.IZipEntry): string {
  * @returns the normalized relative path ('' for the pack root).
  */
 export function assertSafeEntryPath(rawPath: string): string {
+  // 绝对路径必须在 normalize 前检查(同 zip 分支):posixNormalize 丢弃前导
+  // `/`/`\`(空段),normalize 后 startsWith('/') 恒 false(死代码,2026-09-01)。
+  if (rawPath.startsWith('/') || rawPath.startsWith('\\') || /^[A-Za-z]:[\\/]/u.test(rawPath)) {
+    throw new Error(`absolute path in archive: ${rawPath}`)
+  }
   const normalized = posixNormalize(rawPath)
   if (normalized === '') return ''
-  if (normalized.startsWith('/')) throw new Error(`absolute path in archive: ${rawPath}`)
   if (normalized.split('/').includes('..')) throw new Error(`parent traversal in archive: ${rawPath}`)
   return normalized
 }
@@ -95,7 +110,12 @@ function scanZip(archive: Buffer): void {
     throw new Error('archive invalid')
   }
   let total = 0
+  let entries = 0
   for (const entry of z.getEntries()) {
+    entries++
+    if (entries > MAX_ENTRIES) {
+      throw new Error(`archive has too many entries (${entries} > ${MAX_ENTRIES})`)
+    }
     assertSafeZipEntry(entry)
     if (!entry.isDirectory) {
       total += entry.header.size

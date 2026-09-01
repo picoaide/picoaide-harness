@@ -388,7 +388,9 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
       ) : admin || amount === null ? (
         <div style={BALANCE_ROW}>
           <span style={BALANCE_AMOUNT}>{t('account.unlimited')}</span>
-          <span style={BALANCE_CAPTION}>{admin ? t('account.admin') : ''}</span>
+          {/* 区分语义:admin「管理员不限」;普通用户 remaining_money=null=服务
+              端无金额配额(非数据缺失——缺失在 318 行 isMoney 已归 null) */}
+          <span style={BALANCE_CAPTION}>{admin ? t('account.admin') : t('account.noQuota')}</span>
         </div>
       ) : (
         <>
@@ -401,7 +403,7 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
             )}
           </div>
           {ratio !== null && (
-            <div style={BAR_TRACK} role="progressbar" aria-valuenow={Math.round(ratio * 100)} aria-valuemin={0} aria-valuemax={100}>
+            <div style={BAR_TRACK} role="progressbar" aria-valuenow={Math.min(100, Math.max(0, Math.round(ratio * 100)))} aria-valuemin={0} aria-valuemax={100}>
               <div style={{ height: '100%', width: `${Math.min(100, ratio * 100)}%`, background: fillColor }} />
             </div>
           )}

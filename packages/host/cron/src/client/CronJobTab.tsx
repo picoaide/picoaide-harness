@@ -85,6 +85,8 @@ function JobRow({ job, pending, controller, onEdit, api, openSession }: {
   openSession?: (sessionId: string) => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
+  /** 当前展开查看全文的 prompt(行内展示;null=收起)。 */
+  const [shownPrompt, setShownPrompt] = useState<string | null>(null)
   const recent = job.executions.slice(-5).reverse()
   void api
   return (
@@ -113,7 +115,7 @@ function JobRow({ job, pending, controller, onEdit, api, openSession }: {
           <button type="button" style={{ ...styles.button, ...(pending || !job.enabled ? styles.buttonDisabled : {}) }} disabled={pending || !job.enabled} onClick={() => { controller.run(job.id) }}>
             {t('job.run')}
           </button>
-          <button type="button" style={{ ...styles.button, ...(pending ? styles.buttonDisabled : {}) }} disabled={pending} onClick={() => { onEdit(job) }}>…</button>
+          <button type="button" style={{ ...styles.button, ...(pending ? styles.buttonDisabled : {}) }} disabled={pending} aria-label={t('job.editTitle')} title={t('job.editTitle')} onClick={() => { onEdit(job) }}>…</button>
           <button
             type="button"
             style={{ ...styles.button, ...(pending ? styles.buttonDisabled : {}) }}
@@ -168,14 +170,22 @@ function JobRow({ job, pending, controller, onEdit, api, openSession }: {
                 )}
                 {execution.error !== undefined && <span title={execution.error}>{execution.error.slice(0, 80)}</span>}
                 {execution.prompt !== undefined && (
-                  <button
-                    type="button"
-                    style={styles.button}
-                    title={t('job.execution.prompt')}
-                    onClick={() => { window.alert(`${t('job.execution.prompt')}:\n\n${execution.prompt}`) }}
-                  >
-                    {t('job.execution.prompt')}
-                  </button>
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                    <span style={{ ...styles.historyRow, display: 'contents' }}>
+                      <span style={{ ...styles.historyTime, flex: 'none' }}>{t('job.execution.prompt')}:</span>
+                      <button
+                        type="button"
+                        style={styles.button}
+                        title={t('job.execution.prompt')}
+                        onClick={() => { setShownPrompt(shownPrompt === execution.prompt ? null : (execution.prompt ?? null)) }}
+                      >
+                        {shownPrompt === execution.prompt ? t('job.hideHistory') : t('job.showHistory')}
+                      </button>
+                    </span>
+                    {shownPrompt === execution.prompt && (
+                      <span style={{ ...styles.historyRow, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{execution.prompt}</span>
+                    )}
+                  </span>
                 )}
               </div>
             )
