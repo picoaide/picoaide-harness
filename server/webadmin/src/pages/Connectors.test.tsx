@@ -7,8 +7,8 @@ const mockRequest = vi.mocked(request)
 
 const ROWS = [
   {
-    id: 'example-a', name: '示例 MCP 智能体', description: '招聘人事', auth_mode: 'oauth',
-    definition: '{"auth":{"discoveryUrl":"https://mcp-a.example.com/mcp","pkce":true,"publicClient":true},"mcp":[{"serverName":"example-a","transport":"streamable-http","url":"https://mcp-a.example.com/mcp"}]}',
+    id: 'example-crm', name: '示例 MCP 智能体', description: '招聘人事', auth_mode: 'oauth',
+    definition: '{"auth":{"discoveryUrl":"https://mcp.example.com/mcp","pkce":true,"publicClient":true},"mcp":[{"serverName":"example-crm","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}',
     enabled: true, updated_at: '2026-08-28T10:00:00+08:00', created_at: '2026-08-28T10:00:00+08:00',
   },
   {
@@ -68,7 +68,7 @@ describe('Connectors 连接器目录页', () => {
     await screen.findByText('示例 MCP 智能体')
     fireEvent.click(screen.getByRole('button', { name: '新建连接器' }))
     const dialog = within(await screen.findByRole('dialog'))
-    fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'example-a2' } })
+    fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'example-crm2' } })
     fireEvent.change(dialog.getByLabelText('名称'), { target: { value: 'Example-A2' } })
     fireEvent.click(dialog.getByRole('button', { name: '从 JSON 导入' }))
     fireEvent.change(dialog.getByLabelText('JSON'), {
@@ -98,10 +98,10 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.click(dialog.getByRole('button', { name: '从 JSON 导入' }))
     fireEvent.click(dialog.getByRole('button', { name: 'Example-A(远程 MCP + OAuth 发现)' }))
     const preview = dialog.getByLabelText('定义 JSON(与客户端 ConnectorDef 对齐,实时生成)') as HTMLTextAreaElement
-    expect(preview.value).toContain('"discoveryUrl": "https://mcp-a.example.com/mcp"')
-    expect(preview.value).toContain('"serverName": "example-a"')
+    expect(preview.value).toContain('"discoveryUrl": "https://mcp.example.com/mcp"')
+    expect(preview.value).toContain('"serverName": "example-crm"')
     // 示例同时填好名称/描述;补编号后即可保存
-    fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'example-a' } })
+    fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'example-crm' } })
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors', expect.objectContaining({
@@ -118,7 +118,7 @@ describe('Connectors 连接器目录页', () => {
     const switches = screen.getAllByRole('switch')
     fireEvent.click(switches[0]!)
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-a/enabled', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-crm/enabled', {
         method: 'PUT',
         body: JSON.stringify({ enabled: false }),
       })
@@ -135,7 +135,7 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.change(nameInput, { target: { value: '示例 MCP 智能体 v2' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-a', {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-crm', {
         method: 'PUT',
         body: expect.stringContaining('示例 MCP 智能体 v2'),
       })
@@ -149,7 +149,7 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.click(delBtns[0]!)
     fireEvent.click(await screen.findByRole('button', { name: '删除' }))
     await waitFor(() => {
-      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-a', { method: 'DELETE' })
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-crm', { method: 'DELETE' })
     })
   })
 })
