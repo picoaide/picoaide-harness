@@ -345,6 +345,8 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
+	// 展示名取自包内 title(0051):此前市场卡片只能显示目录名。
+	_ = serverstore.SetSkillDisplayName(db, name, man.Title)
 	// 上传模式不再依赖磁盘缓存:清掉旧 clone/包,避免误读。
 	invalidateSkillCache(cacheDir, name)
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", sharedskills.UploadAuditDetail(name, man.Version, man.Title, checksum))
@@ -607,6 +609,18 @@ func normalizeSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档缺少 SKILL.md")
 		return
 	}
+	// 幂等:已经合规的包不再空转升版本(否则重复点「规范化」会不断产生
+	// 内容相同、版本号递增的噪音版本)。
+	if curEntries, curMD, cerr := sharedskills.ListArchiveContents(raw); cerr == nil {
+		if m0, perr := skillmanifest.Parse(curEntries, curMD, s.Name); perr == nil && m0.Version == s.Version {
+			_ = serverstore.SetSkillDisplayName(db, s.Name, m0.Title)
+			c.JSON(http.StatusOK, gin.H{
+				"ok": true, "version": s.Version, "checksum": s.Checksum,
+				"changes": []string{}, "already_compliant": true,
+			})
+			return
+		}
+	}
 	nextVersion := skillmanifest.BumpPatch(s.Version)
 	normalized, changes, nerr := skillmanifest.NormalizeSkillMD(string(skillMD), skillmanifest.NormalizeOptions{
 		AppID:   s.Name,
@@ -660,6 +674,9 @@ func normalizeSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	if err := serverstore.ReplaceSkillArchive(db, s.Name, nextVersion, checksum, rebuilt); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
+	}
+	if m2, perr2 := skillmanifest.Parse(entries, md, s.Name); perr2 == nil {
+		_ = serverstore.SetSkillDisplayName(db, s.Name, m2.Title)
 	}
 	invalidateSkillCache(cacheDir, s.Name)
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_normalize",

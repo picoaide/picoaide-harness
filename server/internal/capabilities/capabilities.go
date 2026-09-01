@@ -132,11 +132,17 @@ func parseTypeFilter(c *gin.Context) typeFilter {
 // appendSkill merges one marketplace skill into the catalog (authorized/enabled only).
 func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
+	// 展示名(0051):优先包内 title 写入的 display_name,为空回退 name
+	// ——此前这里硬编码 s.Name,是「市场卡片显示目录名」的直接原因。
+	display := s.DisplayName
+	if display == "" {
+		display = s.Name
+	}
 	*out = append(*out, CapabilityItem{
 		Kind:        KindSkill,
 		Source:      SourceMarket,
 		Name:        s.Name,
-		DisplayName: s.Name,
+		DisplayName: display,
 		Version:     s.Version,
 		Description: s.Description,
 		Author:      s.Author,

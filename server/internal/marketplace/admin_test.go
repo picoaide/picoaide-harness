@@ -566,3 +566,33 @@ func containsStr(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestAdminSkillNormalizeIdempotent: 对已合规技能重复规范化必须是空操作,
+// 不能不断产生内容相同、版本号递增的噪音版本;同时展示名要落到 DB(0051)。
+func TestAdminSkillNormalizeIdempotent(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
+		`{"name":"demo","git_url":"https://example.com/x.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create: %d", w.Code)
+	}
+	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
+		`{"version":"2.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("upload: %d", w.Code)
+	}
+	// 上传即写入展示名(包内 title)。
+	s, _ := serverstore.GetSkill(db, "demo")
+	if s.DisplayName != "demo 技能" {
+		t.Fatalf("display_name = %q, want 包内 title", s.DisplayName)
+	}
+	// 已合规 → 规范化为空操作,版本不变。
+	w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/normalize", "", hdr)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "already_compliant") {
+		t.Fatalf("normalize = %d %s, want already_compliant", w.Code, w.Body.String())
+	}
+	s2, _ := serverstore.GetSkill(db, "demo")
+	if s2.Version != "2.0.0" {
+		t.Fatalf("版本被空转升到 %s", s2.Version)
+	}
+}
