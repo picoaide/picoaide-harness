@@ -119,3 +119,46 @@ describe('HostCronScheduler', () => {
     scheduler.dispose()
   })
 })
+
+describe('HostCronScheduler idle settlement (审计 2026-09)', () => {
+  it('keeps a session-launched execution pending and settles on agent idle', async () => {
+    const ledger = fakeLedger([job()])
+    ledger.attachSession = vi.fn()
+    ledger.attachPrompt = vi.fn()
+    const executor = {
+      execute: vi.fn(async () => ({
+        result: 'succeeded' as const,
+        sessionId: 'sess-abc',
+        prompt: 'do task',
+      })),
+    }
+    const now = new Date(2026, 7, 19, 9, 1, 0).getTime()
+    const scheduler = new HostCronScheduler(ledger as never, executor as never, { now: () => now })
+    await scheduler['tick'](false)
+    // 会话已启动: 不得立即 settle succeeded(旧行为是「入队即完成」)。
+    expect(ledger.settle).not.toHaveBeenCalled()
+    expect(ledger.attachSession).toHaveBeenCalledWith('job-1', expect.any(String), 'sess-abc')
+    // agent/status idle 到来 → 真实结算 succeeded。
+    scheduler.onAgentStatus('sess-abc', 'idle')
+    expect(ledger.settle).toHaveBeenCalledWith('job-1', ledger.opened[0]!.execution.id, 'succeeded')
+    // 重复 idle / 其它 session 的 idle 不再影响。
+    scheduler.onAgentStatus('sess-abc', 'idle')
+    scheduler.onAgentStatus('sess-other', 'idle')
+    expect(ledger.settle).toHaveBeenCalledTimes(1)
+    scheduler.dispose()
+  })
+
+  it('still settles failed immediately when session launch fails', async () => {
+    const ledger = fakeLedger([job()])
+    ledger.attachSession = vi.fn()
+    ledger.attachPrompt = vi.fn()
+    const executor = {
+      execute: vi.fn(async () => ({ result: 'failed' as const, error: 'launch failed' })),
+    }
+    const now = new Date(2026, 7, 19, 9, 1, 0).getTime()
+    const scheduler = new HostCronScheduler(ledger as never, executor as never, { now: () => now })
+    await scheduler['tick'](false)
+    expect(ledger.settle).toHaveBeenCalledWith('job-1', ledger.opened[0]!.execution.id, 'failed', 'launch failed')
+    scheduler.dispose()
+  })
+})
