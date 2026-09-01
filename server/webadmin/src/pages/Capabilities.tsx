@@ -35,6 +35,8 @@ interface ApprovalRow {
   calls?: number
   created_at: string
   base_path: string
+  /** 授权基路径(name-only,授权是资源级,同名多版本共享);非 base_path。 */
+  grants_base: string
   preview_path: string
   conflict?: boolean
 }
@@ -65,6 +67,9 @@ function fmtTime(iso: string): string {
 
 export default function Capabilities() {
   const [allRows, setAllRows] = useState<ApprovalRow[]>([])
+  // 独立的全状态计数数据(仅 tab 徽章用);allRows 只含当前 status 过滤后的
+  // 列表,不能用于跨状态计数(否则其它 tab 的徽章恒为 0,2026-09-01 审计发现)。
+  const [countRows, setCountRows] = useState<ApprovalRow[]>([])
   const [tab, setTab] = useState('pending')
   const [typeFilter, setTypeFilter] = useState<'all' | 'skill' | 'agent'>('all')
   const [error, setError] = useState('')
@@ -106,8 +111,20 @@ export default function Capabilities() {
     }
   }, [])
 
-  // tab/type 变化都触发重拉(服务端过滤,保证 counts 永远基于当前类型全集)。
+  // tab/type 变化都触发重拉(服务端过滤);计数用独立的全状态数据。
   useEffect(() => { void load(tab, typeFilter) }, [load, tab, typeFilter])
+
+  // tab 徽章计数:status=all 全量(与当前 tab/type 无关——计数反映每种
+  // 状态的真实总量;type 筛选时同样按 type 拉全状态)。
+  useEffect(() => {
+    let cancelled = false
+    const qs = new URLSearchParams({ status: 'all' })
+    if (typeFilter !== 'all') qs.set('type', typeFilter)
+    void request<{ approvals: ApprovalRow[] }>(`${ADMIN_API}/capabilities/approvals?${qs}`)
+      .then((data) => { if (!cancelled) setCountRows(data.approvals ?? []) })
+      .catch(() => { /* 徽章保持上次值,不阻塞列表 */ })
+    return () => { cancelled = true }
+  }, [typeFilter])
 
   const shown = allRows
 
@@ -169,10 +186,10 @@ export default function Capabilities() {
   }
 
   const counts = {
-    all: allRows.length,
-    pending: allRows.filter(r => r.status === 'pending').length,
-    approved: allRows.filter(r => r.status === 'approved').length,
-    rejected: allRows.filter(r => r.status === 'rejected').length,
+    all: countRows.length,
+    pending: countRows.filter(r => r.status === 'pending').length,
+    approved: countRows.filter(r => r.status === 'approved').length,
+    rejected: countRows.filter(r => r.status === 'rejected').length,
   }
 
   return (
@@ -291,7 +308,7 @@ export default function Capabilities() {
                           <Download className="h-4 w-4" />
                         </Button>
                         {row.status === 'approved' && (
-                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setGrantName(row.name); setGrantBase(row.base_path) }} title="授权">
+                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setGrantName(row.name); setGrantBase(row.grants_base) }} title="授权">
                             <ShieldCheck className="h-4 w-4" />
                           </Button>
                         )}

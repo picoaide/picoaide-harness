@@ -234,16 +234,13 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		}
 
 		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
-		// 重提:先 DB(作者校验在 SQL 内)成功后覆盖归档;新建:DB 失败补偿删除。
+		// 重提:单条原子 UPDATE(metadata+checksum+archive+status,2026-09-01
+		// 修复此前两步的脏行窗口);新建:DB 失败补偿删除。
 		// 0040:归档直存 DB(共享技能上传不再落磁盘;pre-0040 行的磁盘回退
 		// 只在下载/预览读取时触发,写路径一律 DB)。
 		if getErr == nil {
-			if err := serverstore.UpdateSharedSkillResubmit(db, req.Name, req.Version, display, desc, checksum, u.Username); err != nil {
+			if err := serverstore.UpdateSharedSkillResubmitWithArchive(db, req.Name, req.Version, display, desc, checksum, u.Username, raw); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
-				return
-			}
-			if err := serverstore.SetSharedSkillArchive(db, req.Name, req.Version, raw); err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		} else {

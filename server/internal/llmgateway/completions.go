@@ -118,7 +118,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 			respSecrets = []string{ups[i].APIKey}
 			break
 		}
-		log.Printf("gateway: model %q provider %q FIM failed: %v", req.Model, ups[i].Name, err)
+		log.Printf("gateway: model %s provider %q FIM failed: %v", safeModelForLog(req.Model), ups[i].Name, err)
 	}
 	if resp == nil {
 		if usageID > 0 {

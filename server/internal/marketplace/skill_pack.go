@@ -21,7 +21,10 @@ import (
 const maxRepoSize = 200 << 20
 
 // maxPackageSize is enforced while archiving (审计 6-M4); test-injectable.
-var maxPackageSize = 100 << 20
+// 与客户端安装/下载上限对齐(客户端 MAX_ARCHIVE_BYTES = 16MB,
+// packages/host/enterprise/src/archive-util.ts)——服务端允许构建到 100MB
+// 却无客户端能安装,属两端契约断层(2026-09-01 审计)。
+var maxPackageSize = 16 << 20
 
 type skillMetadata struct {
 	Name         string   `yaml:"name"`

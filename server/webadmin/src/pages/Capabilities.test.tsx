@@ -12,6 +12,7 @@ const SKILL_ROWS = [
     description: 'find vulns', author: 'bob', status: 'pending' as const, reason: '',
     quality: '' as const, downloads: 3, calls: 5, created_at: '2026-08-25T10:00:00Z',
     base_path: '/api/server/admin/shared-skills/codeql/1.0.0',
+    grants_base: '/api/server/admin/shared-skills/codeql',
     preview_path: '/api/server/admin/shared-skills/codeql/1.0.0/preview',
   },
 ]
@@ -21,6 +22,7 @@ const AGENT_ROWS = [
     description: 'make ppt', author: 'bob', status: 'pending' as const, reason: '',
     quality: '' as const, downloads: 1, created_at: '2026-08-25T10:00:00Z',
     base_path: '/api/server/admin/agent-presets/ppt-gen/1.0.0',
+    grants_base: '/api/server/admin/agent-presets/ppt-gen',
     preview_path: '/api/server/admin/agent-presets/ppt-gen/1.0.0/preview',
   },
 ]
