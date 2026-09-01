@@ -203,15 +203,24 @@ async function main() {
 
   const cdp = await connectMain(cdpPort)
 
-  // 4. Log in against the mock gateway. The auth-gate serves a transient
-  // "restoring session" page first (it re-requests the index after 1.2s), so
-  // wait until the real login form (with a #f submit form) is present before
-  // filling it — filling the restoring page would be wiped by its reload.
-  const formReady = await waitFor(cdp, `!!document.getElementById('f') && !!document.getElementById('server')`, 15000, 300)
-  if (!formReady) throw new Error('login form did not appear within 15s')
+  // 4. Log in against the mock gateway. The auth-gate now uses a two-step
+  // flow: Step1 (#f1 + #server) probes brand/methods, Step2 (#f2) holds the
+  // password form. Fill Step1, submit, then wait for the Step2 form (#f2)
+  // before filling credentials. (Fix 2026-09: form id was f → f1/f2 after the
+  // auth-gate two-step rework; the old selector never matched.)
+  const step1Ready = await waitFor(cdp, `!!document.getElementById('f1') && !!document.getElementById('server')`, 15000, 300)
+  if (!step1Ready) throw new Error('login step1 did not appear within 15s')
   await evalSafe(cdp, `(() => {
     const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
-    const ok = set('server', 'http://127.0.0.1:${GATEWAY_PORT}') && set('username', 'admin') && set('password', 'admin')
+    const ok = set('server', 'http://127.0.0.1:${GATEWAY_PORT}')
+    if (ok) document.getElementById('next-btn')?.click()
+    return ok
+  })()`)
+  const formReady = await waitFor(cdp, `!!document.getElementById('f2') && !!document.getElementById('username')`, 15000, 300)
+  if (!formReady) throw new Error('login step2 did not appear within 15s')
+  await evalSafe(cdp, `(() => {
+    const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
+    const ok = set('username', 'admin') && set('password', 'admin')
     return ok
   })()`)
   await wait(400)
@@ -234,17 +243,28 @@ async function main() {
 
   // 5. Main surface assertions.
   const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
+  // 审计 2026-09:侧边栏标签随 locale 可中可英(上游壳层默认英文 Settings/
+  // Choose workspace, enterprise 插件中文场景为 设置/选择工作区)——断言
+  // 接受任一语言, 不把 UI 语言绑定死。
+  const sidebarLabels = [
+    ['定时任务', 'Scheduled Jobs', '定时任务'],
+    ['能力中心', 'Capability Center', '能力中心'],
+    ['连接器', 'Connectors', '连接器'],
+    ['浏览器', 'Browser', '浏览器'],
+    ['设置', 'Settings', '设置'],
+  ]
+  const hasSidebar = sidebarLabels.every(([zh, en]) =>
+    (mainBtns ?? []).some(b => b.includes(zh) || b.includes(en)))
   reportStep('主界面侧边栏导航完整', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 14).join(',')}`)
 
   // 6. Feature panels (open, assert content, screenshot, close).
   const panelChecks = [
     { label: '连接器', marker: '连接', shot: '03-connectors' },
     { label: '能力中心', marker: '能力中心', shot: '04-capability' },
-    { label: '设置', marker: '关闭', shot: '05-settings' },
+    { label: 'Settings', labelZh: '设置', marker: 'Close', shot: '05-settings' },
   ]
   for (const item of panelChecks) {
-    const open = await clickLabel(cdp, item.label, 3000)
+    const open = await clickLabel(cdp, item.label, 3000).catch(() => item.labelZh ? clickLabel(cdp, item.labelZh, 3000) : null)
     // The skill center mounts a modal; re-read the current target since panel
     // switches can replace the document. Assert either a matching dialog or a
     // known surface text.
@@ -258,7 +278,7 @@ async function main() {
     })()
     reportStep(`${item.label}面板可打开且含预期内容`, ok, `marker=${item.marker}`)
     await screenshot(cdp, item.shot)
-    await clickLabel(cdp, '关闭', 1000)
+    await clickLabel(cdp, 'Close', 1000).catch(() => clickLabel(cdp, '关闭', 1000))
   }
 
   // 7. Cron panel direct assert via the center view.
@@ -279,9 +299,10 @@ async function main() {
   const mode = await evalSafe(cdp, `document.body.dataset.dshDesktopMode ?? ''`)
   reportStep('高级模式固定生效', mode === 'advanced', `mode=${mode}`)
 
-  // 10. Workspace picker (native dialog path).
-  const wsClicked = await clickLabel(cdp, '选择工作区', 2500)
-  const wsOpen = await evalSafe(cdp, `document.body.textContent?.includes('Selection') || document.body.textContent?.includes('选择工作区')`).catch(() => false)
+  // 10. Workspace picker (native dialog path). Button label is locale-dependent:
+  // upstream shell shows "Choose workspace", enterprise zh shows 选择工作区.
+  const wsClicked = await clickLabel(cdp, 'Choose workspace', 2500).catch(() => clickLabel(cdp, '选择工作区', 2500))
+  const wsOpen = await evalSafe(cdp, `document.body.textContent?.includes('Selection') || document.body.textContent?.includes('选择工作区') || document.body.textContent?.includes('Workspace')`).catch(() => false)
   reportStep('工作区选择器可打开', wsClicked === 'CLICKED' && !!wsOpen, `click=${wsClicked}`)
   await screenshot(cdp, '09-workspace')
   // Native dialog may block; press Escape via CDP if the renderer still responds.
@@ -289,12 +310,12 @@ async function main() {
   await wait(1000)
 
   // 11. Account page (settings -> 账号).
-  await clickLabel(cdp, '设置', 2000).catch(() => {})
-  await clickLabel(cdp, '账号', 2000).catch(() => {})
+  await clickLabel(cdp, 'Settings', 2000).catch(() => clickLabel(cdp, '设置', 2000))
+  await clickLabel(cdp, 'Account', 2000).catch(() => clickLabel(cdp, '账号', 2000))
   const account = await bodyText(cdp)
-  reportStep('账号页可打开（设置内）', account.includes('账号') || account.includes('user'), `len=${account.length}`)
+  reportStep('账号页可打开（设置内）', account.includes('账号') || account.includes('user') || account.includes('Account') || account.includes('退出登录'), `len=${account.length}`)
   await screenshot(cdp, '10-account')
-  await clickLabel(cdp, '关闭', 800).catch(() => {})
+  await clickLabel(cdp, 'Close', 800).catch(() => clickLabel(cdp, '关闭', 800))
 
   // 12. Textarea input + send affordance.
   const typed = await evalSafe(cdp, `(() => {
