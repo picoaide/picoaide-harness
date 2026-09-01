@@ -777,3 +777,64 @@ func TestUploadAuditDetailFormat(t *testing.T) {
 		t.Fatalf("minimal detail = %q", got)
 	}
 }
+
+// TestCapabilityLock: 被锁定的技能只能由管理员发布,员工上传必须明确拒绝
+// 并回显管理员填写的理由(决策 2026-09-01 D4)。
+func TestCapabilityLock(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+
+	post := func(body string) (int, string) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range userHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	admin := func(method, path, body string) (int, string) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+
+	// 预锁定一个尚不存在的名字(占名:防止员工抢占官方命名)。
+	if code, body := admin("PUT", "/api/server/admin/capability-locks/skill/org-official",
+		`{"reason":"官方技能,请联系管理员发布"}`); code != 200 {
+		t.Fatalf("lock = %d %s", code, body)
+	}
+	code, body := post(skillUpload(t, "org-official", "1.0.0", ""))
+	if code != 403 || !strings.Contains(body, "APP_LOCKED") {
+		t.Fatalf("锁定后员工上传 = %d %s, want 403 APP_LOCKED", code, body)
+	}
+	if !strings.Contains(body, "官方技能,请联系管理员发布") {
+		t.Fatalf("必须原样回显管理员理由: %s", body)
+	}
+	// 未锁定的名字不受影响。
+	if code, body := post(skillUpload(t, "free-skill", "1.0.0", "")); code != 201 {
+		t.Fatalf("未锁定技能上传 = %d %s, want 201", code, body)
+	}
+	// 锁定清单可查。
+	if code, body := admin("GET", "/api/server/admin/capability-locks", ""); code != 200 ||
+		!strings.Contains(body, "org-official") {
+		t.Fatalf("locks list = %d %s", code, body)
+	}
+	// 解锁后恢复可上传。
+	if code, body := admin("DELETE", "/api/server/admin/capability-locks/skill/org-official", ""); code != 200 {
+		t.Fatalf("unlock = %d %s", code, body)
+	}
+	if code, body := post(skillUpload(t, "org-official", "1.0.0", "")); code != 201 {
+		t.Fatalf("解锁后上传 = %d %s, want 201", code, body)
+	}
+	// 重复解锁 → 404。
+	if code, _ := admin("DELETE", "/api/server/admin/capability-locks/skill/org-official", ""); code != 404 {
+		t.Fatalf("重复解锁 = %d, want 404", code)
+	}
+}

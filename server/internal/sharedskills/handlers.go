@@ -33,6 +33,10 @@ type Handlers struct {
 	ReplaceGrants gin.HandlerFunc // PUT /:name/grants
 	SetGrant      gin.HandlerFunc // PUT /:name/grant
 	RemoveGrant   gin.HandlerFunc // DELETE /:name/grant
+	// 能力锁定(D4):/api/server/admin/capability-locks
+	ListLocks  gin.HandlerFunc // GET  ""
+	SetLock    gin.HandlerFunc // PUT  /:kind/:name
+	RemoveLock gin.HandlerFunc // DELETE /:kind/:name
 }
 
 // NewHandlers 返回共享技能 handler 集合(db + cacheDir 注入)。
@@ -53,5 +57,8 @@ func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 		ReplaceGrants: replaceGrants(db),
 		SetGrant:      setGrant(db, true),
 		RemoveGrant:   setGrant(db, false),
+		ListLocks:     listLocks(db),
+		SetLock:       setLock(db),
+		RemoveLock:    removeLock(db),
 	}
 }

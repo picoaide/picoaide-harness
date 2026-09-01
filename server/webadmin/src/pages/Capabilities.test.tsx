@@ -38,6 +38,8 @@ beforeEach(() => {
     if (path === '/api/server/admin/capabilities/approvals?status=all') return { approvals: [...SKILL_ROWS, ...AGENT_ROWS] }
     if (path === '/api/server/admin/capabilities/approvals?status=all&type=skill') return { approvals: SKILL_ROWS }
     if (path === '/api/server/admin/departments') return { departments: [] }
+    // 锁定管理面板(2026-09-01 D4)与审批队列同页,mock 需覆盖其清单端点。
+    if (path === '/api/server/admin/capability-locks') return { locks: [] }
     if (path.endsWith('/preview')) {
       return { files: ['SKILL.md', 'scripts/run.sh'], skill_md: '# codeql\n', composition: '---\nid: ppt-gen\n---\n' } as any
     }
@@ -126,7 +128,9 @@ describe('Capabilities 能力中心(统一审批)', () => {
     // 默认 tab=pending,切到「已通过」触发 status=approved 请求。
     await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
     await screen.findByText('CodeQL 审计')
-    expect(screen.getByRole('combobox')).toBeInTheDocument()
+    // 同页还有「锁定管理」的类型下拉,这里只断言质量 Select(默认值「官方」)。
+    const qualitySelect = screen.getAllByRole('combobox').find((el) => el.textContent?.includes('官方'))
+    expect(qualitySelect).toBeDefined()
     expect(screen.getByTitle('授权')).toBeInTheDocument()
   })
 })
