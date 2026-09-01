@@ -335,6 +335,7 @@ metadata:
 - **读路径正则保持宽松**：`skillNameRe` / `versionRe` 仍用于下载/预览/审批等**读**路径，收紧它们会让存量非 kebab 命名、非 semver 版本的历史行直接 404。严格文法只作用于**写**路径。
 - 测试夹具同步升级为合规包（`skillMd(name, version)` 助手），并新增管理端四类拒绝用例（中文 name / BOM / 缺 title / 版本不一致）。
 - 门禁：`gofmt` + `go vet` + 18 个 Go 包测试全绿。
+- **真实包回归验证**：把线上 30 个市场技能包逐个喂给新校验器，全部被拦下且原因精确——`INVALID_APP_ID` 25 个、`BOM_DETECTED` 2 个、`MISSING_FIELD(version)` 3 个，与 §2.3 的运行时实测分类逐一吻合（运行时能加载的那 3 个，同样因缺 `version`/`title` 不满足新契约，走存量规范化流程补齐）。
 
 ## 十、验收标准
 
