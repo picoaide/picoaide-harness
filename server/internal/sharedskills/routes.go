@@ -229,37 +229,53 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
+		// 版本即不可变快照(决策 2026-09-01 D1/D3):
+		// ① 同版本号已存在(含被拒)→ 一律拒绝,必须升版本号;
+		// ② 内容与自己已提交过的某版本完全相同 → 无需上传;
+		// ③ 新版本号必须严格大于该技能现有最高版本。
+		// 跨作者防劫持(审计 2026-08-25 G1)优先于版本提示:他人的未公开行
+		// 一律回 404,不泄露存在性。
 		existing, getErr := serverstore.GetSharedSkill(db, req.Name, man.Version)
-		switch {
-		case getErr == nil && existing.Status != serverstore.SharedSkillRejected:
-			serverauth.WriteError(c, http.StatusConflict, "NAME_TAKEN", "该技能版本已被占用(审核中或已共享)")
-			return
-		case getErr != nil && !errors.Is(getErr, serverstore.ErrNotFound):
+		if getErr != nil && !errors.Is(getErr, serverstore.ErrNotFound) {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		if getErr == nil {
+			if existing.Author != u.Username && existing.Status != serverstore.SharedSkillApproved {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusConflict, "VERSION_EXISTS",
+				"版本 "+man.Version+" 已存在(每个版本都是不可修改的快照),请在 SKILL.md 中升版本号后重试")
+			return
+		}
+		history, histErr := serverstore.ListSharedSkillVersions(db, req.Name)
+		if histErr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		for _, h := range history {
+			if h.Checksum == checksum && h.Author == u.Username {
+				serverauth.WriteError(c, http.StatusConflict, "CONTENT_UNCHANGED",
+					"内容与你已提交的 v"+h.Version+" 完全一致,无需重复上传")
+				return
+			}
+		}
+		if newest := newestVersion(history); newest != "" && skillmanifest.CompareVersions(man.Version, newest) <= 0 {
+			serverauth.WriteError(c, http.StatusConflict, "VERSION_NOT_INCREASING",
+				"版本号必须大于当前最高版本 v"+newest+"(当前包内为 "+man.Version+")")
 			return
 		}
 		// 元数据全部来自包内清单(长度上限已在 skillmanifest 校验)。
 		desc := man.Description
 		display := man.Title
 
-		// 作者校验(审计 2026-08-25 G1):rejected 行是某作者上次提交的独占
-		// 记录,只有作者本人可重提覆盖——防止他人劫持内容并重置为 pending。
-		if getErr == nil && existing.Author != u.Username {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
-			return
-		}
-
 		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
-		// 重提:单条原子 UPDATE(metadata+checksum+archive+status,2026-09-01
-		// 修复此前两步的脏行窗口);新建:DB 失败补偿删除。
 		// 0040:归档直存 DB(共享技能上传不再落磁盘;pre-0040 行的磁盘回退
 		// 只在下载/预览读取时触发,写路径一律 DB)。
-		if getErr == nil {
-			if err := serverstore.UpdateSharedSkillResubmitWithArchive(db, req.Name, man.Version, display, desc, checksum, u.Username, raw); err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
-				return
-			}
-		} else {
+		// 快照语义下只有「新建」一条路径:已存在的版本在上面就被拒绝了,
+		// 不再有覆盖重提(旧 UpdateSharedSkillResubmitWithArchive 分支已删)。
+		{
 			s := &serverstore.SharedSkill{
 				Name:        req.Name,
 				DisplayName: display,
@@ -795,4 +811,17 @@ func safeName(name, version string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s-%s.tar.gz", name, version)
+}
+
+// newestVersion returns the highest semver among existing rows ("" when none).
+// 版本递增判定的基准:被拒/待审版本同样计入,否则「拒了就能降版本重发」会
+// 让同一版本号在不同时间指向不同内容。
+func newestVersion(history []serverstore.SharedSkillVersionInfo) string {
+	newest := ""
+	for _, h := range history {
+		if newest == "" || skillmanifest.CompareVersions(h.Version, newest) > 0 {
+			newest = h.Version
+		}
+	}
+	return newest
 }

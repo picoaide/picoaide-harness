@@ -311,12 +311,30 @@ func TestUploadValidation(t *testing.T) {
 	if s.Reason != "缺演示" {
 		t.Fatalf("reason = %q", s.Reason)
 	}
-	if got := post(skillUpload(t, "dup", "1.0.0", "")); got != 201 {
-		t.Fatalf("resubmit = %d, want 201", got)
+	// D3(决策 2026-09-01):版本即不可变快照——被拒的版本号同样永久占位,
+	// 同版本重提必须 409 VERSION_EXISTS,作者只能升版本号重新提交。
+	if got := post(skillUpload(t, "dup", "1.0.0", "")); got != 409 {
+		t.Fatalf("被拒后同版本重提 = %d, want 409(版本不可复用)", got)
 	}
 	s, _ = serverstore.GetSharedSkill(db, "dup", "1.0.0")
-	if s.Reason != "" || s.Status != serverstore.SharedSkillPending {
-		t.Fatalf("resubmit row = %+v", s)
+	if s.Status != serverstore.SharedSkillRejected || s.Reason != "缺演示" {
+		t.Fatalf("被拒行不得被重提改写: %+v", s)
+	}
+	// 升版本号后可以重新提交(1.1.0 在前面的用例里已占用,这里用 1.2.0)。
+	if got := post(skillUpload(t, "dup", "1.2.0", "")); got != 201 {
+		t.Fatalf("升版本号重提 = %d, want 201", got)
+	}
+	sNew, _ := serverstore.GetSharedSkill(db, "dup", "1.2.0")
+	if sNew.Status != serverstore.SharedSkillPending {
+		t.Fatalf("新版本行 = %+v, want pending", sNew)
+	}
+	// 内容未变更:换个版本号但内容完全一致 → CONTENT_UNCHANGED。
+	if got := post(skillUpload(t, "dup", "1.2.0", "")); got != 409 {
+		t.Fatalf("同版本重复 = %d, want 409", got)
+	}
+	// 版本倒挂:低于现有最高版本 → VERSION_NOT_INCREASING。
+	if got := post(skillUpload(t, "dup", "1.0.5", "")); got != 409 {
+		t.Fatalf("版本倒挂 = %d, want 409", got)
 	}
 
 	// G1(审计 2026-08-25):跨用户重提必须被拒绝。先再次拒绝,再让 bob 重提。

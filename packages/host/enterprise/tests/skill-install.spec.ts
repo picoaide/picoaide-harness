@@ -8,6 +8,7 @@ import AdmZip from 'adm-zip'
 import {
   installSkillArchive,
   listInstalledSkills,
+  packSkill,
   resolveSkillsDir,
   SKILL_NAME_PATTERN,
   synthesizeSkillFrontmatter,
@@ -335,6 +336,49 @@ describe('uninstallSkill', () => {
     try {
       await expect(uninstallSkill(root, '../evil')).rejects.toThrow(/invalid skill name/)
       await expect(uninstallSkill(root, '')).rejects.toThrow(/invalid skill name/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('packSkill', () => {
+  const skillMd = (name: string, version?: string): string =>
+    `---\nname: ${name}\ntitle: ${name} 技能\n${version === undefined ? '' : `version: ${version}\n`}` +
+    `description: 用于单测的技能包描述,需满足最短长度。\nauthor: tester\ncategory: 测试\n---\n\n正文\n`
+
+  it('takes the version from the package frontmatter (包内即真相)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-pack-'))
+    try {
+      await mkdir(join(root, 'demo-skill'), { recursive: true })
+      await writeFile(join(root, 'demo-skill', 'SKILL.md'), skillMd('demo-skill', '2.3.0'))
+      const packed = await packSkill(root, 'demo-skill')
+      // 此前这里恒为 '1.0.0'(默认参数),服务端因此永远看不到真实版本。
+      expect(packed.version).toBe('2.3.0')
+      expect(packed.checksum).toMatch(/^[0-9a-f]{64}$/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to pack a skill whose SKILL.md has no version', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-pack-'))
+    try {
+      await mkdir(join(root, 'demo-skill'), { recursive: true })
+      await writeFile(join(root, 'demo-skill', 'SKILL.md'), skillMd('demo-skill'))
+      await expect(packSkill(root, 'demo-skill')).rejects.toThrow(/version/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('still honours an explicit version override', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-pack-'))
+    try {
+      await mkdir(join(root, 'demo-skill'), { recursive: true })
+      await writeFile(join(root, 'demo-skill', 'SKILL.md'), skillMd('demo-skill', '1.0.0'))
+      const packed = await packSkill(root, 'demo-skill', '9.9.9')
+      expect(packed.version).toBe('9.9.9')
     } finally {
       await rm(root, { recursive: true, force: true })
     }

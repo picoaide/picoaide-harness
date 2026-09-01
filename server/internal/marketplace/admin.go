@@ -259,7 +259,8 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
 	}
-	if _, err := serverstore.GetSkill(db, name); err != nil {
+	current, err := serverstore.GetSkill(db, name)
+	if err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
@@ -318,6 +319,20 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, skillmanifest.StatusFor(skillmanifest.CodeManifestMismatch),
 			skillmanifest.CodeManifestMismatch,
 			"表单版本("+req.Version+")与 SKILL.md 的 version("+man.Version+")不一致,请以包内版本为准")
+		return
+	}
+	// 版本即快照(决策 2026-09-01 D1):市场域当前是单行模型(name UNIQUE,
+	// 归档原地替换),表结构层面的多版本快照留到 P2 的 app_releases;这里
+	// 先把「同内容重复上架」与「版本倒挂」两类错误挡在门外。
+	if checksum == current.Checksum {
+		serverauth.WriteError(c, http.StatusConflict, "CONTENT_UNCHANGED",
+			"内容与线上 v"+current.Version+" 完全一致,无需重复上传")
+		return
+	}
+	if current.Version != "" && skillmanifest.IsVersion(current.Version) &&
+		skillmanifest.CompareVersions(man.Version, current.Version) <= 0 {
+		serverauth.WriteError(c, http.StatusConflict, "VERSION_NOT_INCREASING",
+			"版本号必须大于当前线上版本 v"+current.Version+"(当前包内为 "+man.Version+")")
 		return
 	}
 	if err := serverstore.ReplaceSkillArchive(db, name, man.Version, checksum, raw); err != nil {
