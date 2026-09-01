@@ -330,12 +330,17 @@ func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	// 版本即快照(决策 2026-09-01 D1):市场域当前是单行模型(name UNIQUE,
 	// 归档原地替换),表结构层面的多版本快照留到 P2 的 app_releases;这里
 	// 先把「同内容重复上架」与「版本倒挂」两类错误挡在门外。
-	if checksum == current.Checksum {
+	if current.Checksum != "" && checksum == current.Checksum {
 		serverauth.WriteError(c, http.StatusConflict, "CONTENT_UNCHANGED",
 			"内容与线上 v"+current.Version+" 完全一致,无需重复上传")
 		return
 	}
-	if current.Version != "" && skillmanifest.IsVersion(current.Version) &&
+	// 递增判定只在**已发布过内容**时生效:新建技能行(git 模式或刚创建)的
+	// version 只是占位元数据,此时还没有归档,首次上传同版本号必须放行,
+	// 否则「创建时填 1.0.0 → 上传 1.0.0 的包」会被自己的校验挡死
+	// (2026-09-01 三路径端到端验证发现)。
+	published := len(current.Archive) > 0 || current.Checksum != ""
+	if published && current.Version != "" && skillmanifest.IsVersion(current.Version) &&
 		skillmanifest.CompareVersions(man.Version, current.Version) <= 0 {
 		serverauth.WriteError(c, http.StatusConflict, "VERSION_NOT_INCREASING",
 			"版本号必须大于当前线上版本 v"+current.Version+"(当前包内为 "+man.Version+")")
