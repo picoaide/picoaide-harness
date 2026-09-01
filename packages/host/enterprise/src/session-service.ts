@@ -117,17 +117,34 @@ async function loadPersisted(tokenFile: string): Promise<Session | null> {
     const ss = mod?.safeStorage
     if (!ss) return null
     if (!existsSync(tokenFile)) return null
+    const raw = readFileSync(tokenFile)
+    // 双格式恢复(2026-09-01 审计):safeStorage 后端可在两次运行间切换
+    // (有 keyring ↔ basic_text)——旧加密文件遇 basic_text 会走明文解析失败、
+    // 旧明文文件遇可用 keyring 会走 decryptString 失败;两端分别回退,
+    // 避免跨后端切换后丢失已存 session 被迫重新登录(旧注释引用不存在的
+    // loadLegacyEncrypted,实际从未实现该兼容)。
     // P1-10: on Linux without a keyring (basic_text backend) safeStorage is
     // effectively plaintext, so it is not a security improvement over our own
     // 0600 file — but refusing to persist at all forces a re-login on every
     // launch. Fall back to the 0600 file (TOKEN_FILE_MODE keeps it owner-only)
     // so a headless/minimal desktop still remembers the session.
+    let keyringAvailable = false
     if (ss.isEncryptionAvailable() && !isBasicTextBackend(ss)) {
-      return JSON.parse(ss.decryptString(readFileSync(tokenFile)).toString('utf8')) as Session
+      try {
+        return JSON.parse(ss.decryptString(raw).toString('utf8')) as Session
+      } catch {
+        keyringAvailable = true // 解密失败:文件可能是 basic_text 期间写的明文
+      }
     }
-    // loadLegacyEncrypted handles pre-fallback files; a raw JSON read is the
-    // fallback format written by persist() when basic_text.
-    return JSON.parse(readFileSync(tokenFile, 'utf8')) as Session
+    try {
+      return JSON.parse(raw.toString('utf8')) as Session
+    } catch {
+      // 有 keyring 但明文解析失败:回退 decrypt(跨后端切回来的加密文件)。
+      if (keyringAvailable) {
+        return JSON.parse(ss.decryptString(raw).toString('utf8')) as Session
+      }
+      return null
+    }
   } catch { return null }
 }
 

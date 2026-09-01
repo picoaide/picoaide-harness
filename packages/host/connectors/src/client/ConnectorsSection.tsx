@@ -265,7 +265,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
         <p style={TITLE} title={entry.name}>{entry.name}</p>
         <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusText[entry.status] ?? entry.status}</p>
       </div>
-      <p style={DESC}>{entry.description}</p>
+      <p style={DESC} title={entry.description}>{entry.description}</p>
 
       {entry.request?.verificationUrl && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -347,13 +347,16 @@ type StatusFilter = 'all' | 'connected' | 'disconnected'
 
 export function ConnectorsList() {
   const [connectors, setConnectors] = useState<ConnectorEntry[] | null>(null)
+  const [loadError, setLoadError] = useState('')
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
   const refresh = useCallback((): void => {
     fetchJson<{ connectors: ConnectorEntry[] }>('/api/pico/connectors')
-      .then((data) => setConnectors(data.connectors))
-      .catch(() => setConnectors([]))
+      .then((data) => { setConnectors(data.connectors); setLoadError('') })
+      // 瞬时失败保留旧列表(不置空——旧实现把已连接卡片刷成「无连接器」
+      // 空态误导用户),仅标错误态;首载失败(connectors===null)仍显示连接中。
+      .catch(() => setLoadError('刷新失败,显示上次数据'))
   }, [])
 
   useEffect(() => {
@@ -391,6 +394,7 @@ export function ConnectorsList() {
         <button type="button" style={statusFilter === 'disconnected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('disconnected')}>{t('filter.disconnected')}</button>
         <span style={{ ...LABEL, flex: 'none' }}>{t('filter.count', { connected: String(connectedCount), total: String(connectors.length) })}</span>
       </div>
+      {loadError !== '' && <p style={{ ...DESC, color: 'var(--dsw-alias-state-warn-label, #b45309)' }}>{loadError}</p>}
       {visible.length === 0 && <p style={DESC}>{t('empty.noMatch')}</p>}
       <div style={GRID}>
         {visible.map((entry) => (

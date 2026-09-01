@@ -1,36 +1,12 @@
 /** Settings "关于" row: installed version + check-updates action with status/progress. */
 
-import { createElement, useEffect, useState } from 'react'
+import { createElement, useState } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { useUpdateState } from './UpdateIndicator.tsx'
 
-const UPDATE_ROUTE = '/api/pico/desktop/update'
 const UPDATE_CHECK_ROUTE = '/api/pico/desktop/update/check'
 const POLL_MS = 5_000
-
-interface UpdateState {
-  readonly availableVersion: string | undefined
-  readonly downloadingVersion: string | undefined
-  readonly downloadProgress?: { receivedBytes: number; totalBytes: number | undefined } | undefined
-  readonly isPackaged: boolean
-  readonly canDownload: boolean
-  readonly currentVersion: string
-  readonly lastError?: 'network' | 'release-missing' | 'unsupported' | undefined
-}
-
-async function fetchUpdateState(): Promise<UpdateState | null> {
-  try {
-    const res = await fetch(UPDATE_ROUTE, { method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store' })
-    if (!res.ok) return null
-    const value: unknown = await res.json()
-    if (typeof value !== 'object' || value === null) return null
-    const record = value as Record<string, unknown>
-    if (typeof record.isPackaged !== 'boolean' || typeof record.canDownload !== 'boolean') return null
-    return value as UpdateState
-  } catch {
-    return null
-  }
-}
 
 const ROW: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 8 }
 const LABEL: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-caption)' }
@@ -48,24 +24,11 @@ const BUTTON: React.CSSProperties = {
 }
 const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 'default' }
 
-/** 设置-账号区: 当前版本 + 检查更新/下载进度/失败提示。 */
+/** 设置-账号区: 当前版本 + 检查更新/下载进度/失败提示。
+ *  复用 UpdateIndicator 的 useUpdateState(5s 轮询),消除同一路口两份订阅。 */
 export function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
-  const [state, setState] = useState<UpdateState | null>(null)
+  const state = useUpdateState(POLL_MS)
   const [checking, setChecking] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    const poll = async (): Promise<void> => {
-      const next = await fetchUpdateState()
-      if (!cancelled) setState(next)
-    }
-    void poll()
-    const timer = window.setInterval(() => { void poll() }, POLL_MS)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [])
 
   const available = state?.availableVersion
   const downloading = state?.downloadingVersion

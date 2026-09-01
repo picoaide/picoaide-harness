@@ -262,14 +262,20 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   // RFC 8707: the token must be bound to the MCP server resource.
   if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
   options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
-  const code = await codePromise
-
-  // The flow settled (code received, error, or abort): stop watching for
-  // further aborts and stop the timeout so the token exchange below is not
-  // racing a cancelled flow.
-  options.signal.removeEventListener('abort', onAbort)
-  clearTimeout(flowTimer)
-  callbackServer = null
+  // 无论 codePromise 成功/失败/中止都先清理:失败路径(用户拒绝/OAuth 错误/
+  // abort)此前会绕过清理,残留 5 分钟 flowTimer 与 signal 上的 abort 监听
+  // (2026-09-01 审计修复)。
+  let code: string
+  try {
+    code = await codePromise
+  } finally {
+    // The flow settled (code received, error, or abort): stop watching for
+    // further aborts and stop the timeout so the token exchange below is not
+    // racing a cancelled flow.
+    options.signal.removeEventListener('abort', onAbort)
+    clearTimeout(flowTimer)
+    callbackServer = null
+  }
 
   throwIfAborted(options.signal)
   const tokenUrl = options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl

@@ -105,9 +105,9 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
       controller.create(input)
     } else {
       controller.update(job.id, { name: name.trim(), cron: cron.trim() })
-      // The action cannot be patched by the v2 protocol; keep the existing
-      // action as-is (the editor only edits name/cron)
-      if (!job.enabled) controller.enable(job.id)
+      // 编辑只改 name/cron——不得静默改变启停状态(旧实现 `if(!job.enabled)
+      // controller.enable()` 会让用户编辑名称后任务被悄悄重新启用,颠覆其
+      // 显式停用意图;重新启用请用任务行的显式开关)。
     }
     onClose()
   }
@@ -163,10 +163,11 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           )}
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.workspace')}</span>
+          <span style={styles.label}>{t('job.workspace')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
           <select
             style={styles.input}
             value={workspaceId}
+            disabled={job !== undefined}
             onChange={(event) => { setWorkspaceId(event.target.value) }}
           >
             <option value="">{t('job.workspaceCurrent')}</option>
@@ -176,12 +177,12 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.agent')}</span>
+          <span style={styles.label}>{t('job.agent')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
           <select
             style={styles.input}
             value={agentPreset}
+            disabled={job !== undefined || agentOptions.length === 0}
             onChange={(event) => { setAgentPreset(event.target.value) }}
-            disabled={agentOptions.length === 0}
           >
             <option value="">{t('job.agentDefault')}</option>
             {agentOptions.map(option => (
@@ -192,10 +193,11 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.permission')}</span>
+          <span style={styles.label}>{t('job.permission')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
           <select
             style={styles.input}
             value={permission}
+            disabled={job !== undefined}
             onChange={(event) => { setPermission(event.target.value) }}
           >
             <option value="">{t('job.permissionNone')}</option>
@@ -205,8 +207,8 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.promptText')}</span>
-          <textarea style={styles.input} rows={4} value={prompt} onChange={(event) => { setPrompt(event.target.value) }} />
+          <span style={styles.label}>{t('job.promptText')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
+          <textarea style={styles.input} rows={4} value={prompt} disabled={job !== undefined} onChange={(event) => { setPrompt(event.target.value) }} />
         </div>
         {error !== undefined && <span style={styles.error}>{error}</span>}
         <div style={styles.editorActions}>

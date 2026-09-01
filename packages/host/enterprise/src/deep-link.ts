@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { assertServerURLAllowed, AuthError } from './server-connector/auth.ts'
+import { assertServerURLAllowed, AuthError, fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 
 // 声明桌面壳转发的深链事件(desktop shell 的 ctx.emit)。
@@ -34,8 +34,13 @@ export function parseAuthDeepLink(url: string): Session | null {
   if (parsed.hostname !== 'auth') return null
   const token = parsed.searchParams.get('token')
   if (!token) return null
+  let serverURL = parsed.searchParams.get('server') ?? ''
+  // 与登录表单一致地归一尾斜杠:fetchJSON 内部会 normalize,但本机
+  // 模板拼接路径处(如 auth-gate 的 archive 下载)不会——深链会话带尾
+  // 斜杠会在这些路径产生 `//api/...` 双斜杠 404(2026-09-01 审计)。
+  while (serverURL.endsWith('/')) serverURL = serverURL.slice(0, -1)
   return {
-    serverURL: parsed.searchParams.get('server') ?? '',
+    serverURL,
     username: parsed.searchParams.get('user') ?? '',
     token,
   }
@@ -62,7 +67,20 @@ export function installDeepLinkListener(ctx: Context, applySession: (session: Se
       ctx.logger?.warn(`pico-deep-link: rejected unsafe server: ${error instanceof AuthError ? error.message : String(error)}`)
       return
     }
-    ctx.logger?.info(`pico-deep-link: logged in as ${session.username}`)
-    applySession(session)
+    // 安全:深链 token 先对目标网关预验证(/auth/me 带 token 探通),避免
+    // 攻击者可控网关返回合法 bootstrap 把活动 session 劫持到任意 server——
+    // 验证失败即拒绝,成功才 applySession(fire-and-forget,失败静默降级)。
+    void (async (): Promise<void> => {
+      try {
+        await fetchJSON(session.serverURL, '/api/client/v2/auth/me', { token: session.token })
+      } catch (error) {
+        // 日志消毒:serverURL/username 来自链接参数(攻击者可控),
+        // JSON.stringify 剥离换行/控制符,防日志注入(2026-09-01 审计)。
+        ctx.logger?.warn(`pico-deep-link: token rejected by ${JSON.stringify(session.serverURL)}: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      ctx.logger?.info(`pico-deep-link: logged in as ${JSON.stringify(session.username)}`)
+      applySession(session)
+    })()
   })
 }

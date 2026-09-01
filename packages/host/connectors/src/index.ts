@@ -361,7 +361,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // Terminal failure likewise invalidates the pending authorize URL.
       pendingRequests.delete(id)
     } finally {
-      pendingFlows.delete(id)
+      // 按身份删除:connect 路由发现旧流程会 stale.abort() 后启动新流程,
+      // 旧流程异步 unwind 可能晚于新流程 set——无条件 delete 会抹掉新流程
+      // 的 controller,使 /cancel、disconnect 找不到活流程(2026-09-01 深挖)。
+      if (pendingFlows.get(id) === controller) pendingFlows.delete(id)
     }
   }
 
