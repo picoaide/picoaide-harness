@@ -5,11 +5,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/gin-gonic/gin"
 
@@ -184,69 +182,29 @@ func (a *API) downloadArchive(c *gin.Context) {
 		return
 	}
 
-	if s.Source == string(serverstore.SkillSourceUpload) {
-		// 0040: 上传模式——归档直接存 DB,不再走磁盘 clone/打包。
-		if len(s.Archive) == 0 {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能归档缺失")
-			return
-		}
-		sum := s.Checksum
-		if sum == "" {
-			sum = sha256Hex(s.Archive)
-		}
-		// 按归档实际格式回响应(zip 推荐 / tar.gz 兼容):文件名与 Content-Type
-		// 跟随魔数嗅探,老行(存库为 tar.gz)下载仍正确。
-		dispName := s.Name + "-" + s.Version + ".tar.gz"
-		contentType := "application/gzip"
-		if archiveutil.Format(s.Archive) == "zip" {
-			dispName = s.Name + "-" + s.Version + ".zip"
-			contentType = "application/zip"
-		}
-		c.Header("Content-Type", contentType)
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
-		c.Header("X-Skill-Version", s.Version)
-		c.Header("X-Skill-Checksum", sum)
-		// 下载计数(4 档 5 次/秒聚合足够的真实访问轨迹;失败不阻断下载)
-		_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
-		c.Data(http.StatusOK, contentType, s.Archive)
+	if len(s.Archive) == 0 {
+		// 0052: git 源模式已移除,归档是唯一内容来源;尚未上传归档的技能
+		// 明确 404,不再回退到克隆构建。
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能尚未上传归档")
 		return
 	}
-
-	if err := os.MkdirAll(a.CacheDir, 0700); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "缓存目录创建失败")
-		return
+	sum := s.Checksum
+	if sum == "" {
+		sum = sha256Hex(s.Archive)
 	}
-	repoDir := filepath.Join(a.CacheDir, s.Name)
-	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
-		if err := CloneRepo(s.GitURL, s.GitRef, repoDir); err != nil {
-			serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "技能源克隆失败")
-			return
-		}
+	// 按归档实际格式回响应(zip 推荐 / tar.gz 兼容)。
+	dispName := s.Name + "-" + s.Version + ".tar.gz"
+	contentType := "application/gzip"
+	if archiveutil.Format(s.Archive) == "zip" {
+		dispName = s.Name + "-" + s.Version + ".zip"
+		contentType = "application/zip"
 	}
-	pkg, err := BuildPackage(repoDir, s.Name, s.Version)
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "技能打包失败")
-		return
-	}
-	// SHA-256 of the built archive: persisted once into the skills row and
-	// served to clients so they can reject tampered/corrupt downloads.
-	sum, err := fileSHA256(pkg)
-	if err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能校验失败")
-		return
-	}
-	if s.Checksum != sum {
-		s.Checksum = sum
-		// best effort: the header is authoritative for the bytes served;
-		// the row is re-synced on the next download if this write fails.
-		_ = serverstore.UpdateSkill(a.DB, s)
-	}
-	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".zip"))
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", "attachment; filename=\""+dispName+"\"")
 	c.Header("X-Skill-Version", s.Version)
 	c.Header("X-Skill-Checksum", sum)
 	_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
-	c.File(pkg)
+	c.Data(http.StatusOK, contentType, s.Archive)
 }
 
 func sha256Hex(data []byte) string {
@@ -274,11 +232,8 @@ func skillJSON(s serverstore.Skill) gin.H {
 		"version":     s.Version,
 		"description": s.Description,
 		"author":      s.Author,
-		"git_url":     s.GitURL,
-		"git_ref":     s.GitRef,
 		"checksum":    s.Checksum,
 		"enabled":     s.Enabled == 1,
-		"source":      s.Source,
 		"downloads":   s.Downloads,
 		"calls":       s.Calls,
 		"created_at":  s.CreatedAt,

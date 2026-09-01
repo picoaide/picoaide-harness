@@ -29,11 +29,11 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 		t.Fatal(err)
 	}
 	// skill (one enabled, one disabled)
-	_, err = serverstore.AddSkill(db, &serverstore.Skill{Name: "ppt-gen", Version: "1.2.0", Description: "PPT 生成", GitURL: "https://x/ppt", Enabled: 1})
+	_, err = serverstore.AddSkill(db, &serverstore.Skill{Name: "ppt-gen", Version: "1.2.0", Description: "PPT 生成", Enabled: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = serverstore.AddSkill(db, &serverstore.Skill{Name: "off", Version: "0.1.0", GitURL: "https://x/off", Enabled: 0})
+	_, err = serverstore.AddSkill(db, &serverstore.Skill{Name: "off", Version: "0.1.0", Enabled: 0})
 	if err != nil {
 		t.Fatal(err)
 	}

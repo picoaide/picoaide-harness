@@ -227,8 +227,8 @@ func TestListApprovalsQueue(t *testing.T) {
 	// 决策 2026-08-25:市场 skills 表同名冲突 -> 队列行 conflict=true。
 	// 正常路径双向互斥会阻断,此处用 raw SQL 模拟竞态(共享技能上传后市场
 	// 技能被上架),验证审批队列的冲突提示。
-	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
-		VALUES ('s1', '1.0.0', '', 'boss', 'https://example.com/repo.git', 'main', '', 1)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, checksum, enabled)
+		VALUES ('s1', '1.0.0', '', 'boss', '', 1)`); err != nil {
 		t.Fatalf("raw market seed: %v", err)
 	}
 	w2 := doGet(t, r, "/api/server/admin/capabilities/approvals", adminHdr)
@@ -315,7 +315,7 @@ func TestCapabilitiesMarketMerge(t *testing.T) {
 	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
 	defer db.Close()
 	// 市场技能(授权给 alice)。
-	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "market-only", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/m.git"}); err != nil {
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "market-only", Version: "1.0.0", Enabled: 1}); err != nil {
 		t.Fatalf("market only: %v", err)
 	}
 	// 共享库技能(approved + 授权给 alice)。

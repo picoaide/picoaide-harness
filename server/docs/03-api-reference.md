@@ -111,7 +111,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST | `/api/server/admin/skills` | 列表/上架技能(`{name, version, description, author, git_url, git_ref}`) |
+| GET/POST | `/api/server/admin/skills` | 列表/上架技能(`{name, description, author}`;内容经 `POST /skills/:name/archive` 上传,元数据以包内 SKILL.md 为准) |
 | PUT/DELETE | `/api/server/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
 | POST | `/api/server/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 zip)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
 

@@ -521,7 +521,7 @@ func TestDeleteClearsGrants(t *testing.T) {
 func TestCrossSourceConflictUploadApprove(t *testing.T) {
 	r, db, adminHdr, userHdr, _ := setup(t)
 	// 市场预置同名技能。
-	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql-audit", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/repo.git"}); err != nil {
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql-audit", Version: "1.0.0", Enabled: 1}); err != nil {
 		t.Fatalf("seed market skill: %v", err)
 	}
 
@@ -553,8 +553,8 @@ func TestCrossSourceConflictUploadApprove(t *testing.T) {
 	// admin 上架同名的市场技能会被双向互斥阻断(409,前面 serverstore 测试已
 	// 覆盖);approve 前的冲突检测是深度防御——模拟竞态:绕过 DAO 直接 SQL
 	// 插入市场同名行(等价于上架发生在共享技能上传之后)。
-	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled)
-		VALUES ('fresh-open', '1.0.0', '', 'boss', 'https://example.com/repo2.git', 'main', '', 1)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, checksum, enabled)
+		VALUES ('fresh-open', '1.0.0', '', 'boss', '', 1)`); err != nil {
 		t.Fatalf("raw market seed: %v", err)
 	}
 	wA := httptest.NewRecorder()

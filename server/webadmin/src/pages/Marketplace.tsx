@@ -11,7 +11,7 @@ import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
-import { Store, GitBranch, Download, Package, Activity } from 'lucide-react'
+import { Store, Download, Package, Activity } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
@@ -20,8 +20,6 @@ interface Skill {
   version: string
   description: string
   author: string
-  git_url: string
-  git_ref: string
   enabled: boolean
   /** 0040: 'git' | 'upload' — upload 模式归档存 DB。 */
   source?: string
@@ -43,15 +41,14 @@ interface Dept {
 // ---- 表单状态 ----
 const EMPTY_SKILL_FORM = {
   name: '',
-  git_url: '',
   version: '',
   description: '',
   author: '',
-  // 上传模式:选中的压缩包文件(替代 git_url)。
+  // 压缩包(0052:归档是唯一内容入口)。
   archiveFile: null as File | null,
 }
 
-/** 上传模式表单(归档直接存 DB,0040):版本必填、无 Git 地址。 */
+/** 归档上传表单(0040 存 DB / 0052 唯一入口):版本必填。 */
 function isUploadMode(form: typeof EMPTY_SKILL_FORM): boolean {
   return form.archiveFile !== null
 }
@@ -124,8 +121,9 @@ export default function Marketplace() {
     const name = skillForm.name.trim()
     if (!name) { setDialogError('名称必填'); return }
     const uploadMode = isUploadMode(skillForm)
-    if (!uploadMode && !skillForm.git_url.trim()) { setDialogError('Git 地址必填(或选择压缩包上传)'); return }
-    if (uploadMode && !skillForm.version.trim()) { setDialogError('上传模式版本必填'); return }
+    // 0052:git 源模式已移除——新建技能必须随压缩包上架(发布期严格校验)。
+    if (!skillEdit && !uploadMode) { setDialogError('请选择技能压缩包(.zip)'); return }
+    if (uploadMode && !skillForm.version.trim()) { setDialogError('版本必填(需与包内 SKILL.md 的 version 一致)'); return }
     setBusy('save-skill')
     try {
       if (skillEdit) {
@@ -136,21 +134,17 @@ export default function Marketplace() {
             version: skillForm.version,
             description: skillForm.description,
             author: skillForm.author,
-            git_url: skillForm.git_url,
-            git_ref: skillEdit.git_ref ?? 'main',
           }),
         })
       } else {
-        // 先建行(创建为 git 模式,git_url 允许空),再切换上传模式(0040)。
+        // 先建行(仅登记名称与元数据),再上传归档(0052:归档唯一入口)。
         const created = await request(`${ADMIN_API}/skills`, {
           method: 'POST',
           body: JSON.stringify({
             name,
-            version: uploadMode ? '' : skillForm.version.trim(),
+            version: '',
             description: skillForm.description,
             author: skillForm.author,
-            git_url: uploadMode ? '' : skillForm.git_url.trim(),
-            git_ref: 'main',
           }),
         })
         if (uploadMode) {
@@ -184,7 +178,7 @@ export default function Marketplace() {
   function openEditSkill(s: Skill) {
     setDialogError('')
     setSkillEdit(s)
-    setSkillForm({ name: s.name, git_url: s.git_url, version: s.version, description: s.description, author: s.author, archiveFile: null })
+    setSkillForm({ name: s.name, version: s.version, description: s.description, author: s.author, archiveFile: null })
     setSkillDialog(true)
   }
 
@@ -417,9 +411,7 @@ export default function Marketplace() {
                   </div>
                   <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500" title={s.description || undefined}>{s.description || '暂无描述'}</p>
                   <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
-                    {s.source === 'upload'
-                      ? (<><Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span></>)
-                      : (<><GitBranch className="h-3 w-3 shrink-0" /><span className="truncate font-mono">{s.git_url}</span></>)}
+                    <Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span>
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
                     <span className="inline-flex items-center gap-1"><Download className="h-3 w-3" />下载 {s.downloads ?? 0}</span>
@@ -476,12 +468,9 @@ export default function Marketplace() {
                 className="block w-full text-sm"
                 onChange={(e) => setSkillForm({ ...skillForm, archiveFile: e.target.files?.[0] ?? null })}
               />
-              <p className="text-xs text-muted-foreground">选择 zip 后归档直存数据库,无需 Git;未选择则走 Git 地址</p>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="skill-git">Git 地址(未选压缩包时)</Label>
-              <Input id="skill-git" value={skillForm.git_url} disabled={isUploadMode(skillForm)} onChange={(e) => setSkillForm({ ...skillForm, git_url: e.target.value })} />
-              <p className="text-xs text-muted-foreground">仅支持 http/https 远程仓库</p>
+              <p className="text-xs text-muted-foreground">
+                归档直存数据库;包内 SKILL.md 需含 name/title/version/description/author/category,发布时严格校验
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">

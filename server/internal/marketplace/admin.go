@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -195,19 +194,6 @@ type skillReq struct {
 	Version     string `json:"version"`
 	Description string `json:"description"`
 	Author      string `json:"author"`
-	GitURL      string `json:"git_url"`
-	GitRef      string `json:"git_ref"`
-}
-
-// validGitURL restricts skill git sources to http/https (审计 A5-L10):
-// file://、ftp 与内网协议会让服务端按管理员输入主动出网克隆,扩大攻击面;
-// 只放行可被 git 安全拉取的远程仓库地址。
-func validGitURL(u string) bool {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return false
-	}
-	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func createSkillAdmin(c *gin.Context, db *sql.DB) {
@@ -220,17 +206,10 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
 	}
-	if req.GitURL != "" && !validGitURL(req.GitURL) {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "Git 地址必须是 http/https 远程仓库")
-		return
-	}
-	if req.GitRef == "" {
-		req.GitRef = "main"
-	}
-	// 创建为 git 模式;上传模式由 POST /skills/:name/archive 切换(0040:
-	// 归档唯一入口,集中校验与存库,创建请求不接受 archive 字段)。
+	// 0052:git 源模式已移除——创建只登记名称与元数据,内容一律由
+	// POST /skills/:name/archive 上传(归档是唯一入口,发布期集中严格校验)。
 	s := &serverstore.Skill{Name: req.Name, Version: req.Version, Description: req.Description,
-		Author: req.Author, GitURL: req.GitURL, GitRef: req.GitRef, Enabled: 1, Source: string(serverstore.SkillSourceGit)}
+		Author: req.Author, Enabled: 1}
 	if _, err := serverstore.AddSkill(db, s); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能已存在")
@@ -374,16 +353,11 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	sourceChanged := false
+	// 0052:版本号一律由「上传新版」端点与归档原子写入——元数据 PUT 改版本
+	// 会造成行版本与归档内容失配(git 模式移除后不再有例外)。
 	if req.Version != "" && req.Version != s.Version {
-		// 0040: 上传模式的版本由「上传新版」端点原子写入(与 DB 归档、校验和
-		// 一起),元数据 PUT 改版本会造成行版本与归档内容失配,直接拒绝。
-		if s.Source == string(serverstore.SkillSourceUpload) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "上传模式技能请用「上传新版」更改版本")
-			return
-		}
-		s.Version = req.Version
-		sourceChanged = true
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请用「上传新版」随归档一起更改版本")
+		return
 	}
 	if req.Description != "" {
 		s.Description = req.Description
@@ -391,25 +365,9 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	if req.Author != "" {
 		s.Author = req.Author
 	}
-	if req.GitURL != "" && req.GitURL != s.GitURL {
-		if !validGitURL(req.GitURL) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "Git 地址必须是 http/https 远程仓库")
-			return
-		}
-		s.GitURL = req.GitURL
-		sourceChanged = true
-	}
-	if req.GitRef != "" && req.GitRef != s.GitRef {
-		s.GitRef = req.GitRef
-		sourceChanged = true
-	}
 	if err := serverstore.UpdateSkill(db, s); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
-	}
-	// C-6: the cached repo/archive now describe a different source
-	if sourceChanged {
-		invalidateSkillCache(cacheDir, s.Name)
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", s.Name+" v"+s.Version)
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
@@ -494,7 +452,7 @@ func skillArchiveForReview(s *serverstore.Skill, cacheDir string) ([]byte, strin
 			return raw, ""
 		}
 	}
-	return nil, "该技能尚未上传归档(git 源需先构建),暂无法预览"
+	return nil, "该技能尚未上传归档,暂无法预览"
 }
 
 // previewSkillAdmin lists a market skill's archive entries and returns its
@@ -527,7 +485,7 @@ func previewSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"files": files, "skill_md": content,
-		"name": s.Name, "version": s.Version, "checksum": s.Checksum, "source": s.Source,
+		"name": s.Name, "version": s.Version, "checksum": s.Checksum,
 	})
 }
 

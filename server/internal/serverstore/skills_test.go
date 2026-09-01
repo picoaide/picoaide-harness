@@ -14,12 +14,12 @@ func TestSkills(t *testing.T) {
 
 	id, err := AddSkill(db, &Skill{
 		Name: "demo", Version: "1.0.0", Description: "demo skill",
-		Author: "pico", GitURL: "https://example.com/demo.git", GitRef: "main", Enabled: 1, Source: "git",
+		Author: "pico", Enabled: 1,
 	})
 	if err != nil || id == 0 {
 		t.Fatalf("AddSkill: id=%d err=%v", id, err)
 	}
-	if _, err := AddSkill(db, &Skill{Name: "demo", Version: "2.0.0", GitURL: "x"}); !errors.Is(err, ErrDuplicate) {
+	if _, err := AddSkill(db, &Skill{Name: "demo", Version: "2.0.0"}); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate AddSkill err = %v, want ErrDuplicate", err)
 	}
 
@@ -31,17 +31,17 @@ func TestSkills(t *testing.T) {
 		t.Fatalf("GetSkill = %+v", s)
 	}
 
-	s.Version = "1.1.0"
-	s.GitRef = "dev"
+	// 0052:版本由「上传新版」随归档写入,元数据更新只改描述/作者。
+	s.Description = "demo skill v2"
 	if err := UpdateSkill(db, s); err != nil {
 		t.Fatal(err)
 	}
 	s, _ = GetSkill(db, "demo")
-	if s.Version != "1.1.0" || s.GitRef != "dev" {
+	if s.Description != "demo skill v2" {
 		t.Fatalf("after update = %+v", s)
 	}
 
-	if _, err := AddSkill(db, &Skill{Name: "off", Version: "1.0.0", GitURL: "x", Source: "git"}); err != nil {
+	if _, err := AddSkill(db, &Skill{Name: "off", Version: "1.0.0"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := SetSkillEnabled(db, "off", false); err != nil {
@@ -72,7 +72,7 @@ func TestSkillUploadArchive(t *testing.T) {
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AddSkill(db, &Skill{Name: "up", Version: "0.1.0", GitURL: "https://example.com/up.git", GitRef: "main", Enabled: 1, Source: "git"}); err != nil {
+	if _, err := AddSkill(db, &Skill{Name: "up", Version: "0.1.0", Enabled: 1}); err != nil {
 		t.Fatal(err)
 	}
 	blob := []byte("fake-gzip-tar")
@@ -83,11 +83,8 @@ func TestSkillUploadArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Source != "upload" || string(s.Archive) != string(blob) || s.Checksum != "abc123" || s.Version != "1.0.0" {
+	if string(s.Archive) != string(blob) || s.Checksum != "abc123" || s.Version != "1.0.0" {
 		t.Fatalf("after replace = %+v", s)
-	}
-	if s.GitURL != "" || s.GitRef != "" {
-		t.Fatalf("git fields should be cleared, got %+v", s)
 	}
 	// ListSkills (list columns) must not load the blob.
 	list, err := ListSkills(db, false)
@@ -124,7 +121,7 @@ func TestSkillUpdateKeepsArchive(t *testing.T) {
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AddSkill(db, &Skill{Name: "up2", Version: "0.1.0", GitURL: "x", GitRef: "main", Enabled: 1, Source: "git"}); err != nil {
+	if _, err := AddSkill(db, &Skill{Name: "up2", Version: "0.1.0", Enabled: 1}); err != nil {
 		t.Fatal(err)
 	}
 	blob := []byte("data")
