@@ -321,7 +321,7 @@ metadata:
 |---|---|---|
 | P0 | 发布期校验（BOM / frontmatter / `name == app_id`）接入现有两条上传链路 + 错误码 | ✅ **已实施** |
 | P1 | 客户端传真实版本号 + `CONTENT_UNCHANGED` + rejected 不再可覆盖（D1/D3 语义先落地） | ✅ **已实施** |
-| P2 | `apps` / `app_releases` 建表 + 回填 + 统一 publish 内核 + 新路由（旧路由转发） | ⏸ 后置（见下） |
+| P2 | `apps` / `app_releases` 建表 + 回填 + 统一 publish 内核 + 三域存储切换 | ✅ **已实施** |
 | P3 | 应用锁定 + webadmin 管控 UI + 审计 | ✅ **已实施** |
 | P4 | 溯源块 + dirty 检测 + 存量规范化 | ✅ **已实施** |
 | P5 | 旧表与旧路由下线 | ✓ |
@@ -359,7 +359,16 @@ metadata:
 - `computeSkillContentHash` 重算内容哈希做 dirty 判定；能力中心卡片显示「市场 vX」与「已本地修改」徽章；
 - `skillmanifest.NormalizeSkillMD` + `POST /api/server/admin/skills/:name/normalize`：把存量不合规包改写为合规内容并作为 **patch+1 新版本**入库（中文 name → title、剥 BOM、补 version/author/category、剥离自带溯源块）；**拒绝编造 description**（缺失即报错要人工补写）；入库前用与上传同一套 `Parse` 自检。
 
-**P2 为何后置**：`apps`/`app_releases` 大表重构是纯内部演进，对用户可见价值低但风险最高（数据迁移 + 路由切换）。本轮目标是「上传可靠 + 审批可预览 + 可发布上线」，这些在现有表结构上均已实现。建议 P2 单独立项、独立灰度，不与生产发布叠加。
+### P2 实施记录（2026-09-01）
+
+- **迁移 0053/0054**：`apps`(kind, app_id) + `app_releases`(kind, app_id, version 唯一) + `app_grants`；三张旧表与三张旧授权表一次性回填，旧表兼容期内只读保留（P5 下线）。
+- **统一发布内核 `internal/appstore`**：锁定检查、版本语义（不可复用/必须递增/内容未变更）、跨渠道同名互斥、归属保护、待审配额只实现一次，三条上传路径共用。
+- **落地方式是「适配层」而非重写 handler**：`serverstore` 里 `shared_skills.go` / `agent_presets.go` / `skills.go` 保留原有函数签名，内部改读写统一表。这样 4 个业务包、上百个调用点无需改动即可切换存储，行为由既有测试套件逐条保证——比逐个改 handler 风险低一个数量级。
+- **授权表合并**：`SharedGrantableTable` 增加 `Kind` 维度后统一指向 `app_grants`，用户删除与部门改名的级联从「三表循环」收敛为一条语句。
+- **市场因此获得多版本快照**：`ReplaceSkillArchive` 由「原地覆盖」改为「新增 Release」，市场终于有版本历史与回滚基础。
+- **两处语义澄清**（迁移中暴露）：① 旧 DTO 的 `Author` 是**上传者**（全部归属判断依赖它），对应统一模型的 `Publisher`，包内署名单独存 `Release.Author`；② 版本号随内容产生——只登记元数据的 App 没有版本，避免「创建时填版本 → 首次上传同版本被自己的唯一约束挡死」。
+- **跨渠道同名冲突已结构性消失**：一个 `(kind, app_id)` 只能属于一个渠道，旧的「conflict 标记 + approve 时 409 阻断」不再有产生条件（字段保留兼容）。
+- 门禁：`gofmt` + `go vet` + 全部 Go 包测试 + 110 webadmin 测试全绿。
 
 ## 十、验收标准
 
