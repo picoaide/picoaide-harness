@@ -103,15 +103,12 @@ describe('Marketplace 商城页', () => {
     const dialog = within(await screen.findByRole('dialog'))
     const nameInput = dialog.getByLabelText('名称') as HTMLInputElement
     expect(nameInput.value).toBe('data-extract')
-    const verInput = dialog.getByLabelText('版本') as HTMLInputElement
-    fireEvent.change(verInput, { target: { value: '2.0.0' } })
+    // 2026-09-01「包内即真相」:版本只能随归档由「上传新版」写入,编辑态不再暴露;
+    // 展示名/描述/作者也一律取自包内,元数据 PUT 只保留兼容语义。
     fireEvent.click(dialog.getByRole('button', { name: '保存修改' }))
     expect(mockRequest).toHaveBeenCalledWith(
       '/api/server/admin/skills/data-extract',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ name: 'data-extract', version: '2.0.0', description: '数据提取', author: 'seed' }),
-      }),
+      expect.objectContaining({ method: 'PUT' }),
     )
   })
 

@@ -473,7 +473,9 @@ export default function Marketplace() {
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
+              {/* 编辑态不显示版本:版本只能随归档一起由「上传新版」写入
+                  (元数据 PUT 改版本会造成行版本与包内容失配,服务端已拒绝)。 */}
+              <div className="space-y-1" hidden={!!skillEdit}>
                 <Label htmlFor="skill-version">版本(须与包内 SKILL.md 的 version 一致)</Label>
                 <Input id="skill-version" value={skillForm.version} onChange={(e) => setSkillForm({ ...skillForm, version: e.target.value })} />
                 <p className="text-xs text-muted-foreground">压缩包模式必填</p>
