@@ -148,6 +148,11 @@ export class HostCronScheduler {
     return this.executor.execute(job).then(({ result, error, sessionId, prompt }) => {
       if (sessionId !== undefined) this.ledger.attachSession(job.id, execution.id, sessionId)
       if (prompt !== undefined) this.ledger.attachPrompt(job.id, execution.id, prompt)
+      if (result === 'succeeded' && sessionId !== undefined) {
+        // 会话已创建并收到 prompt: 保持 pending 直到 agent/status idle。
+        this.idleWatch.set(sessionId, { jobId: job.id, executionId: execution.id })
+        return
+      }
       this.ledger.settle(job.id, execution.id, result, error)
     }).catch(error => {
       try {
@@ -156,6 +161,27 @@ export class HostCronScheduler {
         console.error('[dsh-cron] execution settlement failed', settleError)
       }
     })
+  }
+
+  /** sessionId → (jobId, executionId) of executions awaiting agent completion. */
+  private readonly idleWatch = new Map<string, { jobId: string; executionId: string }>()
+
+  /**
+   * Agent completion signal (插件 index 从 ctx.on('agent/status') 转发):
+   * status 'idle' 表示该会话的 agent 循环完成; 匹配到等待中的 execution
+   * 时 settle succeeded 并移除监听。非 idle 状态(提问/审批/运行)不处理。
+   */
+  onAgentStatus(sessionId: string, status: string): void {
+    if (status !== 'idle') return
+    const watch = this.idleWatch.get(sessionId)
+    if (watch === undefined) return
+    this.idleWatch.delete(sessionId)
+    try {
+      this.ledger.settle(watch.jobId, watch.executionId, 'succeeded')
+    } catch (error) {
+      // 结算失败(如 execution 已被取消/重启回收)不致命: 仅记日志。
+      console.error('[dsh-cron] idle settle failed', error)
+    }
   }
 
   dispose(): void {

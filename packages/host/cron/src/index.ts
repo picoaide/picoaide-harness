@@ -23,6 +23,9 @@ import { registerCronTools } from './tools.ts'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+    // Agent loop status (desktop loop-notify 同源信号): status 'idle' 表示
+    // 该会话的 agent 循环完成——cron 用它给等待中的执行记录真实结算。
+    'agent/status'(payload: { agent?: { session?: { header?: { id?: unknown } } }, status?: string }): void
   }
 }
 
@@ -81,6 +84,14 @@ export function apply(ctx: Context, config: Config): void {
   host.setUsername(currentUser())
   ctx.on('pico/session-changed', (next: unknown) => {
     host.setUsername((next as { username?: string } | null)?.username ?? null)
+  })
+  // 审计 2026-09: agent 循环完成信号 → 给等待中的 cron 执行记录真实结算
+  // (prompt 入队 ≠ 完成)。idle 即 succeeded; 事件缺失时执行记录保持
+  // pending, 由引擎恢复回收(host-ledger 重启 reconcile)兜底。
+  ctx.on('agent/status', (payload: { agent?: { session?: { header?: { id?: unknown } } }, status?: string }) => {
+    const sessionId = payload?.agent?.session?.header?.id
+    if (typeof sessionId !== 'string' || typeof payload?.status !== 'string') return
+    host.scheduler.onAgentStatus(sessionId, payload.status)
   })
 
   // The picoCronService surface sibling plugins inject.
