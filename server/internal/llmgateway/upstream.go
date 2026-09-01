@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -15,6 +16,18 @@ import (
 // 审计2026-L14):AES-GCM master-key wiring 由 cmd/server/main.go 安装。
 var DecryptSecret = func(s string) (string, error) {
 	return "", errors.New("master key not wired")
+}
+
+// safeModelForLog 脱敏模型名再入日志:model 是用户可控输入(%q 已阻止换行
+// 注行,但仍可能超长或含敏感串)——仅记录截断后的前 40 字符与原始长度。
+// 2026-09-01 审计:多处 log.Printf 直接打印 req.Model。
+func safeModelForLog(model string) string {
+	const max = 40
+	runes := []rune(model)
+	if len(runes) <= max {
+		return fmt.Sprintf("%q (len=%d)", model, len(runes))
+	}
+	return fmt.Sprintf("%q… (len=%d)", string(runes[:max]), len(runes))
 }
 
 // upstreamTTL 上游路由缓存时长:provider/模型表由管理端低频改动,

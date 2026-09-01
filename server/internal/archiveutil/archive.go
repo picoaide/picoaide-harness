@@ -240,10 +240,16 @@ func zipExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		if rerr != nil {
 			return "", size, true, false, false, ErrInvalid
 		}
-		buf, rerr := io.ReadAll(rc)
+		// 声明大小可伪造(小声明+高压缩比 = zip 炸弹):按实际解压字节设
+		// 硬上限,超出即按 tooLarge 返回——与 zipList 的 LimitReader 一致
+		// (2026-09-01 审计:此前信任 UncompressedSize64,管理端预览 OOM)。
+		buf, rerr := io.ReadAll(io.LimitReader(rc, maxPreview+1))
 		rc.Close()
 		if rerr != nil {
 			return "", size, true, false, false, ErrInvalid
+		}
+		if int64(len(buf)) > maxPreview {
+			return "", int64(len(buf)), true, false, true, nil
 		}
 		if !utf8.Valid(buf) {
 			return "", size, true, true, false, nil
@@ -401,7 +407,13 @@ func NormalizePath(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	if strings.HasPrefix(raw, "/") {
+	// 绝对路径(正斜杠/反斜杠/Windows 盘符)在归一前拒绝——`\etc` 或
+	// `C:\x` 经 ReplaceAll 与空段折叠会被静默变成相对路径放行,与客户端
+	// assertSafeZipEntry 的 pre-normalize 检查对齐(2026-09-01 深挖)。
+	if strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "\\") {
+		return "", ErrUnsafe
+	}
+	if len(raw) >= 2 && isASCIILetter(raw[0]) && (raw[1] == ':' ) {
 		return "", ErrUnsafe
 	}
 	parts := strings.Split(strings.ReplaceAll(raw, "\\", "/"), "/")
@@ -417,6 +429,11 @@ func NormalizePath(raw string) (string, error) {
 		}
 	}
 	return strings.Join(out, "/"), nil
+}
+
+// isASCIILetter reports whether b is an ASCII letter (for drive-prefix check).
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // ErrorText maps sentinels to the human-facing (Chinese) description used by

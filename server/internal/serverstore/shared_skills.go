@@ -302,6 +302,24 @@ func UpdateSharedSkillResubmit(db *sql.DB, name, version, displayName, descripti
 	return nil
 }
 
+// UpdateSharedSkillResubmitWithArchive 是重提的原子变体:同一 UPDATE 内替换
+// metadata/checksum/status 与 archive 列,消除此前「UpdateSharedSkillResubmit
+// + SetSharedSkillArchive 两步」间的脏行窗口(行已置 pending 但归档仍旧——
+// 第二步失败即不一致;2026-09-01 审计)。
+func UpdateSharedSkillResubmitWithArchive(db *sql.DB, name, version, displayName, description, checksum, author string, archive []byte) error {
+	res, err := db.Exec(`UPDATE shared_skills SET display_name=?, description=?, checksum=?, archive=?, status=?, reason='',
+		updated_at=`+NowExpr()+`
+		WHERE name=? AND version=? AND status=? AND author=?`,
+		displayName, description, checksum, archive, SharedSkillPending, name, version, SharedSkillRejected, author)
+	if err != nil {
+		return err
+	}
+	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteSharedSkill removes the row; returns ErrNotFound when absent.
 func DeleteSharedSkill(db *sql.DB, name, version string) error {
 	res, err := db.Exec(`DELETE FROM shared_skills WHERE name=? AND version=?`, name, version)

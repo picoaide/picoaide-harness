@@ -360,16 +360,13 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		}
 
 		// 顺序约定(审计 2026-08-25 G4):DB 状态优先,归档直存 DB(0041)。
-		// - 重提:先 DB 更新(作者校验在 SQL 内),成功后覆盖归档;DB 失败时
-		//   旧归档原样保留,状态与归档一致(校验和失败方向 fail-closed)。
+		// - 重提:单条原子 UPDATE(metadata+checksum+archive+status,2026-09-01
+		//   修复此前两步的脏行窗口);DB 失败时旧归档原样保留,状态与归档一致
+		//   (校验和失败方向 fail-closed)。
 		// - 新建:INSERT 成功即归档已落库(原子),无孤儿文件/磁盘残留。
 		if getErr == nil { // rejected → resubmit: reset the row (author-scoped)
-			if err := serverstore.UpdateAgentPresetResubmitByVersion(db, req.Name, req.Version, strings.TrimSpace(req.DisplayName), desc, checksum, u.Username); err != nil {
+			if err := serverstore.UpdateAgentPresetResubmitByVersionWithArchive(db, req.Name, req.Version, strings.TrimSpace(req.DisplayName), desc, checksum, u.Username, raw); err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
-				return
-			}
-			if err := serverstore.SetAgentPresetArchive(db, req.Name, req.Version, raw); err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档写入失败")
 				return
 			}
 		} else {

@@ -378,7 +378,7 @@ export default function Marketplace() {
                     </div>
                     {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
                   </div>
-                  <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500">{s.description || '暂无描述'}</p>
+                  <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500" title={s.description || undefined}>{s.description || '暂无描述'}</p>
                   <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
                     {s.source === 'upload'
                       ? (<><Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span></>)
