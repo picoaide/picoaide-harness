@@ -5,7 +5,7 @@
 服务端是 PicoAide Harness 平台的企业管控面,接入方(企业客户端 `packages/host/enterprise` 及第三方 HTTP 客户端)经 `/api/client/v2/*` 与 `/v1/*` 网关接入。
 
 ```bash
-make test              # go test ./... -count=1(服务端全量;需 PG_DSN_TEST 指向测试库)
+make test              # go test ./... -count=1(服务端全量;不依赖数据库——无 PG 时 DB 用例自动 Skip,有 PG_DSN_TEST 时全量跑)
 make test-server       # 服务端各业务域测试(显式枚举全部包,见 Makefile)
 make build-server      # make webadmin + go build -o bin/picoaide-server
 make webadmin          # cd webadmin && npm run build(产物嵌入服务端二进制)
@@ -106,7 +106,7 @@ docker buildx build --platform linux/amd64 \
 
 | Job | 环境 | 内容 |
 |-----|------|------|
-| `server` | ubuntu, Go 1.26(go.mod)+ Node 24 | `go vet` + `go test ./...`(postgres:18-alpine service,`PG_DSN_TEST`+`TZ=Asia/Shanghai`)+ `make build-server` + deploy 脚本语法/compose 校验 |
+| `server` | ubuntu, Go 1.26(go.mod)+ Node 24 | `go vet` + `go test ./...`(无数据库;DB 用例在无 PG 时自动 Skip,2026-09-02)+ `make build-server` + deploy 脚本语法/compose 校验 |
 | `desktop-linux` / `desktop-windows` / `desktop-macos` | Node 24 | 桌面客户端 build/typecheck/test + 三平台产物(AppImage+deb / NSIS / DMG) |
 | `release` | tag push | GitHub Release 发布三平台资产 + SHA256SUMS |
 

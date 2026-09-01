@@ -84,7 +84,7 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 ## 8. 常用命令
 
 ```bash
-make test              # go test ./... -count=1(服务端全量,需 PG_DSN_TEST)
+make test              # go test ./... -count=1(服务端全量;不依赖数据库,无 PG 时 DB 用例自动 Skip,设 PG_DSN_TEST 则全量)
 make test-server       # 服务端各业务域测试(显式枚举全部包)
 make webadmin          # cd webadmin && npm run build(产物内嵌进服务端二进制)
 make build-server      # make webadmin + go build -o bin/picoaide-server
