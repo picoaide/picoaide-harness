@@ -38,6 +38,9 @@ interface BrowserTab {
   url: string
   title: string
   loading: boolean
+  /** 本 tab 独占的权限/下载守卫 disposer(关闭/失败时释放——同 partition
+   *  的 session 共享监听器,不释放会在开关 N 次后触发 N 份保存框)。 */
+  disposers: Array<() => void>
 }
 
 /** One evaluation result from the page (CDP value). */
@@ -98,6 +101,10 @@ class ControlMutex {
 
   /** User takeover: block agent operations until released. */
   take(): void {
+    // 幂等:已接管时保留现有 released——重复 take() 若覆盖承诺,停泊在本
+    // released 上的 agent 操作将永不唤醒(2026-09-01 深挖:遮罩接管后 1s 内
+    // 再点 shell「接管」即触发,整个浏览器工具面死锁)。
+    if (this.taken) return
     this.taken = true
     this.released = new Promise<void>((resolve) => { this.releaseTaken = resolve })
   }
@@ -129,8 +136,6 @@ export class BrowserRuntime {
   private window: NativeBrowserWindow | null = null
   private mask: NativeView | null = null
   private readonly guard: BrowserGuard
-  private readonly permissionsDisposers: Array<() => void> = []
-  private readonly downloadDisposers: Array<() => void> = []
   private windowResizeDisposer: (() => void) | null = null
   private windowClosedDisposer: (() => void) | null = null
   private disposed = false
@@ -405,7 +410,7 @@ export class BrowserRuntime {
         try { view.destroy() } catch { /* teardown never throws */ }
         throw cause
       }
-      const tab: BrowserTab = { id, view, cdp, url: '', title: '', loading: false }
+      const tab: BrowserTab = { id, view, cdp, url: '', title: '', loading: false, disposers: [] }
       this.tabs.set(id, tab)
 
       // The dedicated browser window is created (and shown) on first open.
@@ -425,8 +430,8 @@ export class BrowserRuntime {
       view.webContents.on('page-title-updated', () => this.updateTabState(tab))
 
       const session = view.webContents.session
-      this.permissionsDisposers.push(installPermissionGuard(session))
-      this.downloadDisposers.push(this.guard.installDownloadGuard(session, (summary) => {
+      tab.disposers.push(installPermissionGuard(session))
+      tab.disposers.push(this.guard.installDownloadGuard(session, (summary) => {
         this.record('browser_download', id, summary)
       }))
 
@@ -440,6 +445,7 @@ export class BrowserRuntime {
             cdp.detach()
             view.destroy()
           } catch { /* teardown never throws */ }
+          this.releaseTabDisposers(id)
           this.tabs.delete(id)
           if (this.visibleTabId === id) this.visibleTabId = undefined
           throw cause
@@ -453,8 +459,17 @@ export class BrowserRuntime {
     return await this.agentRun('browser_open', body, signal)
   }
 
-  private tabStateInternal(id: number): BrowserTabState {
-    const tab = this.tab(id)
+  /** 释放某 tab 的权限/下载守卫 disposer(关闭或 open 失败时)。 */
+  private releaseTabDisposers(id: number): void {
+    const tab = this.tabs.get(id)
+    if (tab === undefined) return
+    for (const dispose of tab.disposers) {
+      try { dispose() } catch { /* 守卫释放失败不阻断关闭 */ }
+    }
+    tab.disposers.length = 0
+  }
+
+  private tabStateInternal(id: number): BrowserTabState {    const tab = this.tab(id)
     return {
       id: tab.id,
       url: tab.url,
@@ -674,6 +689,7 @@ export class BrowserRuntime {
       tab.cdp.detach()
       tab.view.detach()
       tab.view.destroy()
+      this.releaseTabDisposers(id)
       this.tabs.delete(id)
       if (this.visibleTabId === id) {
         this.visibleTabId = [...this.tabs.keys()].at(-1)
@@ -703,22 +719,24 @@ export class BrowserRuntime {
         tab.cdp.detach()
         tab.view.detach()
         tab.view.destroy()
+        this.releaseTabDisposers(id)
         this.tabs.delete(id)
       }
       this.visibleTabId = undefined
-      for (const dispose of this.permissionsDisposers) dispose()
-      for (const dispose of this.downloadDisposers) dispose()
-      this.permissionsDisposers.length = 0
-      this.downloadDisposers.length = 0
       this.record('browser_close', 0, 'close browser')
       this.hideWindow()
     }
     if (user) {
-      this.mutex.take()
+      // 用户侧独占:仅在未被接管时 take/release(保存原状态)——若已将
+      // 控制权交给用户(接管中),此处再 take 是幂等空操作,而 finally
+      // 无条件 release 会错误解除用户的接管(2026-09-01 深挖:清除/切号
+      // 后 agent 循环静默恢复对浏览器的控制)。
+      const alreadyControlled = this.mutex.controlled
+      if (!alreadyControlled) this.mutex.take()
       try {
         return await body()
       } finally {
-        this.mutex.release()
+        if (!alreadyControlled) this.mutex.release()
       }
     }
     return await this.agentRun('browser_close', body, signal)

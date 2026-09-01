@@ -70,9 +70,31 @@ export function ConnectorPanel({ onClose }: { onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement | null>(null)
 
   // Esc closes; initial focus lands on the panel so keyboard users can act.
+  // Tab 陷阱:焦点循环在面板内(与 CapabilityCenterPanel 一致——aria-modal
+  // 要求焦点不得移出对话框,旧实现缺 trap,Tab 会逃逸到背景页面)。
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const root = panelRef.current
+      if (root === null) return
+      const focusables = Array.from(root.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ))
+      if (focusables.length === 0) { e.preventDefault(); return }
+      const first = focusables[0]!
+      const last = focusables[focusables.length - 1]!
+      const active = document.activeElement as HTMLElement | null
+      if (e.shiftKey && (active === first || active === root || active === null)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     panelRef.current?.focus()

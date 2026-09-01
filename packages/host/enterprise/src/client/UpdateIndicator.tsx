@@ -4,7 +4,9 @@ import { createElement, useEffect, useState } from 'react'
 
 const UPDATE_ROUTE = '/api/pico/desktop/update'
 const UPDATE_CHECK_ROUTE = '/api/pico/desktop/update/check'
-const POLL_MS = 30_000
+
+/** 侧边栏轮询间隔(30s)。 */
+export const SIDEBAR_UPDATE_POLL_MS = 30_000
 
 interface UpdateState {
   readonly availableVersion: string | undefined
@@ -16,7 +18,8 @@ interface UpdateState {
   readonly lastError?: 'network' | 'release-missing' | 'unsupported' | undefined
 }
 
-async function fetchUpdateState(): Promise<UpdateState | null> {
+/** 拉取宿主更新快照(与设置「关于」页共用;2026-09-01 审计消除重复轮询)。 */
+export async function fetchUpdateState(): Promise<UpdateState | null> {
   try {
     const res = await fetch(UPDATE_ROUTE, { method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store' })
     if (!res.ok) return null
@@ -38,8 +41,11 @@ async function triggerCheck(): Promise<void> {
   }
 }
 
-/** 侧边栏品牌版本号旁的更新提醒:蓝点 + 新版本号;点击触发检查/下载。 */
-export function useUpdateState(): UpdateState | null {
+/** 侧边栏品牌版本号旁的更新提醒:蓝点 + 新版本号;点击触发检查/下载。
+ *  共享 hook:侧边栏(默认 30s)与设置「关于」页(5s)经同一订阅源消费,
+ *  避免同一端点两份独立 setInterval(2026-09-01 审计)。
+ *  @param pollMs - 轮询间隔(毫秒);缺省 30s。 */
+export function useUpdateState(pollMs: number = SIDEBAR_UPDATE_POLL_MS): UpdateState | null {
   const [state, setState] = useState<UpdateState | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -48,12 +54,12 @@ export function useUpdateState(): UpdateState | null {
       if (!cancelled) setState(next)
     }
     void poll()
-    const timer = window.setInterval(() => { void poll() }, POLL_MS)
+    const timer = window.setInterval(() => { void poll() }, pollMs)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [pollMs])
   return state
 }
 
