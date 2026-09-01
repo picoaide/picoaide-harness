@@ -5891,6 +5891,7 @@ __metadata:
     "@sentry/node": "npm:^7.120.0"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
+    adm-zip: "npm:^0.6.0"
     dsh-plugin-desktop: "workspace:*"
     electron: "npm:43.4.0"
     react: "npm:18.3.1"

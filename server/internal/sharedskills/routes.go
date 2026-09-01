@@ -5,13 +5,8 @@
 package sharedskills
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,10 +15,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
@@ -52,6 +47,14 @@ var (
 	// ErrUnsafeArchive: entry path escapes or is a link.
 	ErrUnsafeArchive = errors.New("unsafe archive")
 )
+
+// archiveLimits: 归档校验边界(与 archiveutil 共享常量语义;zip/tar.gz 双格式)。
+var archiveLimits = archiveutil.Limits{
+	MaxArchiveBytes:  MaxArchiveBytes,
+	MaxUnpackedBytes: MaxUnpackedBytes,
+	MaxEntries:       MaxArchiveEntries,
+	RequiredFile:     "SKILL.md",
+}
 
 // skillNameRe matches a single safe directory segment (mirrors the client
 // installer's SKILL_NAME_PATTERN).
@@ -586,12 +589,20 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "归档读取失败")
 			return
 		}
-		c.Header("Content-Type", "application/gzip")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(s.Name, s.Version)))
+		// 按归档实际格式回响应(zip 推荐 / tar.gz 兼容):文件名与 Content-Type
+		// 跟随魔数嗅探,旧行(存库为 tar.gz)下载仍正确。
+		dispName := safeName(s.Name, s.Version)
+		contentType := "application/gzip"
+		if archiveutil.Format(payload) == "zip" {
+			dispName = name + "-" + s.Version + ".zip"
+			contentType = "application/zip"
+		}
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 		c.Header("X-Skill-Version", s.Version)
 		c.Header("X-Skill-Checksum", s.Checksum)
 		_, _ = serverstore.IncrementSharedSkillDownload(db, s.Name, s.Version)
-		c.Data(http.StatusOK, "application/gzip", payload)
+		c.Data(http.StatusOK, contentType, payload)
 	}
 }
 
@@ -660,7 +671,7 @@ func fileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少文件路径")
 			return
 		}
-		norm, err := posixNormalize(target)
+		norm, err := archiveutil.NormalizePath(target)
 		if err != nil || norm == "" {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件路径不合法")
 			return
@@ -715,173 +726,30 @@ func fileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
 // its text content. Binary (non-UTF-8) and oversized entries return flags
 // instead of payload; the caller decides how to present them.
 func extractFileContent(data []byte, target string) (content string, size int64, found, binary, tooLarge bool, err error) {
-	zr, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return "", 0, false, false, false, ErrUnsafeArchive
-	}
-	defer zr.Close()
-	tr := tar.NewReader(zr)
-	for {
-		hdr, herr := tr.Next()
-		if herr == io.EOF {
-			break
-		}
-		if herr != nil {
-			return "", 0, false, false, false, ErrUnsafeArchive
-		}
-		if hdr.Typeflag == tar.TypeDir || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
-			continue
-		}
-		name, nerr := posixNormalize(hdr.Name)
-		if nerr != nil || name == "" {
-			continue
-		}
-		if name != target {
-			continue
-		}
-		size = hdr.Size
-		if hdr.Size > maxFilePreviewBytes {
-			return "", size, true, false, true, nil
-		}
-		buf := make([]byte, hdr.Size)
-		if _, err := io.ReadFull(tr, buf); err != nil {
-			return "", size, true, false, false, ErrUnsafeArchive
-		}
-		if !utf8.Valid(buf) {
-			return "", size, true, true, false, nil
-		}
-		return string(buf), size, true, false, false, nil
-	}
-	return "", 0, false, false, false, nil
+	return archiveutil.ExtractFileContent(data, target, maxFilePreviewBytes)
 }
 
-// ValidateSkillArchive lists a gzipped tar stream without extracting it,
-// refusing unsafe entries, bounding size/entry count, and requiring a
-// top-level SKILL.md. Returns the archive's sha256 hex.
+// ValidateSkillArchive lists an archive (zip 推荐 / tar.gz 兼容) without
+// extracting it, refusing unsafe entries, bounding size/entry count, and
+// requiring a top-level SKILL.md. Returns the archive's sha256 hex.
 func ValidateSkillArchive(data []byte) (string, error) {
-	if len(data) == 0 || len(data) > MaxArchiveBytes {
-		return "", ErrArchiveInvalid
-	}
-	sum := sha256.Sum256(data)
-	hexSum := hex.EncodeToString(sum[:])
-	zr, err := gzip.NewReader(strings.NewReader(string(data)))
-	if err != nil {
-		return "", ErrUnsafeArchive
-	}
-	tr := tar.NewReader(zr)
-	var total int64
-	entries := 0
-	hasSkillMd := false
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", ErrUnsafeArchive
-		}
-		entries++
-		if entries > MaxArchiveEntries {
-			return "", ErrArchiveInvalid
-		}
-		name, err := posixNormalize(hdr.Name)
-		if err != nil {
-			return "", err
-		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
-		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
-			return "", ErrUnsafeArchive
-		}
-		if name == "" {
-			return "", ErrUnsafeArchive
-		}
-		total += hdr.Size
-		if total > MaxUnpackedBytes {
-			return "", ErrArchiveInvalid
-		}
-		if name == "SKILL.md" {
-			hasSkillMd = true
-		}
-	}
-	if !hasSkillMd {
+	checksum, err := archiveutil.Validate(data, archiveLimits)
+	switch {
+	case errors.Is(err, archiveutil.ErrNoRequired):
 		return "", ErrNoSkillMarkdown
+	case errors.Is(err, archiveutil.ErrUnsafe):
+		return "", ErrUnsafeArchive
+	case errors.Is(err, archiveutil.ErrInvalid), errors.Is(err, archiveutil.ErrTooMany):
+		return "", ErrArchiveInvalid
+	default:
+		return checksum, err
 	}
-	return hexSum, nil
 }
 
 // ListArchiveContents lists non-directory entry paths (sorted, unique) and
 // returns the top-level SKILL.md content for admin review.
 func ListArchiveContents(data []byte) ([]string, string, error) {
-	zr, err := gzip.NewReader(strings.NewReader(string(data)))
-	if err != nil {
-		return nil, "", ErrUnsafeArchive
-	}
-	defer zr.Close()
-	tr := tar.NewReader(zr)
-	set := map[string]bool{}
-	var skillMd string
-	var order []string
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, "", ErrUnsafeArchive
-		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
-		name, err := posixNormalize(hdr.Name)
-		if err != nil {
-			return nil, "", ErrUnsafeArchive
-		}
-		if name == "" || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
-			continue
-		}
-		if name == "SKILL.md" && skillMd == "" && hdr.Size <= 1<<20 {
-			buf := make([]byte, hdr.Size)
-			if _, err := io.ReadFull(tr, buf); err != nil {
-				return nil, "", ErrUnsafeArchive
-			}
-			skillMd = string(buf)
-		}
-		if !set[name] {
-			set[name] = true
-			order = append(order, name)
-		}
-	}
-	// sort the file list
-	for i := 1; i < len(order); i++ {
-		for j := i; j > 0 && order[j] < order[j-1]; j-- {
-			order[j], order[j-1] = order[j-1], order[j]
-		}
-	}
-	return order, skillMd, nil
-}
-
-func posixNormalize(raw string) (string, error) {
-	if raw == "" {
-		return "", nil
-	}
-	if strings.HasPrefix(raw, "/") {
-		return "", ErrUnsafeArchive
-	}
-	parts := strings.Split(strings.ReplaceAll(raw, "\\", "/"), "/")
-	out := make([]string, 0, len(parts))
-	for _, segment := range parts {
-		switch segment {
-		case "", ".":
-			continue
-		case "..":
-			return "", ErrUnsafeArchive
-		default:
-			out = append(out, segment)
-		}
-	}
-	return strings.Join(out, "/"), nil
+	return archiveutil.ListContents(data, archiveLimits, maxFilePreviewBytes)
 }
 
 func archiveErrorMessage(err error) string {

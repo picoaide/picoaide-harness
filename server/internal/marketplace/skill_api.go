@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
@@ -193,13 +194,21 @@ func (a *API) downloadArchive(c *gin.Context) {
 		if sum == "" {
 			sum = sha256Hex(s.Archive)
 		}
-		c.Header("Content-Type", "application/gzip")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".tar.gz"))
+		// 按归档实际格式回响应(zip 推荐 / tar.gz 兼容):文件名与 Content-Type
+		// 跟随魔数嗅探,老行(存库为 tar.gz)下载仍正确。
+		dispName := s.Name + "-" + s.Version + ".tar.gz"
+		contentType := "application/gzip"
+		if archiveutil.Format(s.Archive) == "zip" {
+			dispName = s.Name + "-" + s.Version + ".zip"
+			contentType = "application/zip"
+		}
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 		c.Header("X-Skill-Version", s.Version)
 		c.Header("X-Skill-Checksum", sum)
 		// 下载计数(4 档 5 次/秒聚合足够的真实访问轨迹;失败不阻断下载)
 		_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
-		c.Data(http.StatusOK, "application/gzip", s.Archive)
+		c.Data(http.StatusOK, contentType, s.Archive)
 		return
 	}
 
@@ -232,8 +241,8 @@ func (a *API) downloadArchive(c *gin.Context) {
 		// the row is re-synced on the next download if this write fails.
 		_ = serverstore.UpdateSkill(a.DB, s)
 	}
-	c.Header("Content-Type", "application/gzip")
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".tar.gz"))
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".zip"))
 	c.Header("X-Skill-Version", s.Version)
 	c.Header("X-Skill-Checksum", sum)
 	_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
