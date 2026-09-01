@@ -1,8 +1,7 @@
 package marketplace
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"archive/zip"
 	"io"
 	"os"
 	"path/filepath"
@@ -81,24 +80,30 @@ func readArchive(t *testing.T, path string) map[string][]byte {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	gr, err := gzip.NewReader(f)
+	zr, err := zip.NewReader(f, statSize(t, f))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := tar.NewReader(gr)
 	out := map[string][]byte{}
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
+	for _, zf := range zr.File {
+		rc, err := zf.Open()
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, _ := io.ReadAll(tr)
-		out[hdr.Name] = b
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		out[zf.Name] = b
 	}
 	return out
+}
+
+func statSize(t *testing.T, f *os.File) int64 {
+	t.Helper()
+	st, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Size()
 }
 
 func TestBuildPackage(t *testing.T) {
@@ -110,7 +115,7 @@ func TestBuildPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(cache, "demo-1.0.0.tar.gz")
+	want := filepath.Join(cache, "demo-1.0.0.zip")
 	if pkg != want {
 		t.Fatalf("package path = %q, want %q", pkg, want)
 	}
@@ -149,7 +154,7 @@ func TestBuildPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pkg3 != filepath.Join(cache, "demo-2.0.0.tar.gz") {
+	if pkg3 != filepath.Join(cache, "demo-2.0.0.zip") {
 		t.Fatalf("v2 path = %q", pkg3)
 	}
 	if _, err := os.Stat(pkg); !os.IsNotExist(err) {
@@ -189,7 +194,7 @@ func TestBuildPackageSizeLimit(t *testing.T) {
 	if _, err := BuildPackage(repo, "demo", "1.0.0"); err == nil {
 		t.Fatal("oversized package accepted")
 	}
-	if _, err := os.Stat(filepath.Join(cache, "demo-1.0.0.tar.gz")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(cache, "demo-1.0.0.zip")); !os.IsNotExist(err) {
 		t.Fatal("oversized archive left on disk")
 	}
 }

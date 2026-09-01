@@ -1,8 +1,7 @@
 package marketplace
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"archive/zip"
 	"fmt"
 	"io"
 	"io/fs"
@@ -34,7 +33,7 @@ type skillMetadata struct {
 }
 
 // CloneRepo shallow-clones gitURL@ref into repoPath. The repo lives at
-// cacheDir/<name>/ so the archive ends up in cacheDir/<name>-<version>.tar.gz.
+// cacheDir/<name>/ so the archive ends up in cacheDir/<name>-<version>.zip.
 // A wrong ref falls back to the default branch; clones over maxRepoSize are
 // rejected.
 func CloneRepo(gitURL, ref, repoPath string) error {
@@ -79,7 +78,7 @@ func CloneRepo(gitURL, ref, repoPath string) error {
 }
 
 // BuildPackage validates the repo at repoPath and returns the path of the
-// built archive at cacheDir/<name>-<version>.tar.gz (cacheDir = parent of
+// built zip archive at cacheDir/<name>-<version>.zip (cacheDir = parent of
 // repoPath). Cache hits return immediately; building a new version removes
 // older archives for the same name.
 func BuildPackage(repoPath, name, version string) (string, error) {
@@ -90,7 +89,7 @@ func BuildPackage(repoPath, name, version string) (string, error) {
 		return "", fmt.Errorf("invalid skill version %q", version)
 	}
 	cacheDir := filepath.Dir(repoPath)
-	dst := filepath.Join(cacheDir, name+"-"+version+".tar.gz")
+	dst := filepath.Join(cacheDir, name+"-"+version+".zip")
 	if _, err := os.Stat(dst); err == nil {
 		return dst, nil // cache hit
 	}
@@ -98,7 +97,8 @@ func BuildPackage(repoPath, name, version string) (string, error) {
 		return "", err
 	}
 	matches, _ := filepath.Glob(filepath.Join(cacheDir, name+"-*.tar.gz"))
-	for _, m := range matches {
+	zipMatches, _ := filepath.Glob(filepath.Join(cacheDir, name+"-*.zip"))
+	for _, m := range append(zipMatches, matches...) {
 		if m != dst {
 			os.Remove(m)
 		}
@@ -121,7 +121,7 @@ func buildArchive(repoPath, name, version, dst string) error {
 		return fmt.Errorf("SKILL.md: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".build-*.tar.gz")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".build-*.zip")
 	if err != nil {
 		return err
 	}
@@ -129,8 +129,7 @@ func buildArchive(repoPath, name, version, dst string) error {
 		tmp.Close()
 		os.Remove(tmp.Name())
 	}()
-	gw := gzip.NewWriter(tmp)
-	tw := tar.NewWriter(gw)
+	zw := zip.NewWriter(tmp)
 	total := int64(0) // 审计 6-M4: archive byte counter
 	err = filepath.WalkDir(repoPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -165,29 +164,27 @@ func buildArchive(repoPath, name, version, dst string) error {
 		if total > int64(maxPackageSize) {
 			return fmt.Errorf("package exceeds %d bytes", maxPackageSize)
 		}
-		hdr := &tar.Header{
-			Name: filepath.ToSlash(rel),
-			Mode: int64(info.Mode().Perm()),
-			Size: info.Size(),
+		hdr := &zip.FileHeader{
+			Name:   filepath.ToSlash(rel),
+			Method: zip.Deflate,
 		}
-		if err := tw.WriteHeader(hdr); err != nil {
+		hdr.SetMode(info.Mode() | 0) // 保留权限位
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
 			return err
 		}
 		f, err := os.Open(p)
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(tw, f)
+		_, err = io.Copy(w, f)
 		f.Close()
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	if err := gw.Close(); err != nil {
+	if err := zw.Close(); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {

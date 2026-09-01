@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
+import AdmZip from 'adm-zip'
 import {
   installSkillArchive,
   listInstalledSkills,
@@ -40,6 +41,15 @@ async function makeArchive(files: Record<string, string>): Promise<Buffer> {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+/** Build a zip from the given files (new preferred skill bundle format). */
+function makeZipArchive(files: Record<string, string>): Buffer {
+  const z = new AdmZip()
+  for (const [path, content] of Object.entries(files)) {
+    z.addFile(path, Buffer.from(content), '', 0o644)
+  }
+  return z.toBuffer()
 }
 
 /** Build a tar whose entries use a leading `../` name via a fileList entry. */
@@ -100,6 +110,24 @@ describe('installSkillArchive', () => {
       expect(installedMd).toMatch(/^---\nname: demo\ndescription: demo-skill skill(\nversion: 1\.0\.0)?\n---\n# Demo Skill/)
       expect(installedMd).toContain(SKILL_MD)
       expect(await readFile(join(skillsDir, 'demo-skill', 'scripts', 'run.sh'), 'utf8')).toContain('echo hi')
+    } finally {
+      await rm(skillsDir, { recursive: true, force: true })
+    }
+  })
+
+  it('installs a zip archive (preferred new format) with the same result', async () => {
+    const skillsDir = await mkdtemp(join(tmpdir(), 'pico-skill-skills-'))
+    try {
+      const archive = makeZipArchive({
+        'SKILL.md': SKILL_MD,
+        'metadata.yaml': 'name: zip-demo\nversion: 1.0.0\n',
+        'scripts/run.sh': '#!/bin/sh\necho hi\n',
+      })
+      const checksum = createHash('sha256').update(archive).digest('hex')
+      const result = await installSkillArchive({ name: 'zip-demo', archive, checksum, skillsDir, version: '1.0.0' })
+      expect(result.targetDir).toBe(join(skillsDir, 'zip-demo'))
+      expect(await readFile(join(skillsDir, 'zip-demo', 'SKILL.md'), 'utf8')).toContain('# Demo Skill')
+      expect(await readFile(join(skillsDir, 'zip-demo', 'scripts', 'run.sh'), 'utf8')).toContain('echo hi')
     } finally {
       await rm(skillsDir, { recursive: true, force: true })
     }

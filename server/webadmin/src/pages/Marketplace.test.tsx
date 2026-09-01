@@ -131,7 +131,7 @@ describe('Marketplace 商城页', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '上传新版' })[0]!)
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('版本'), { target: { value: '2.0.0' } })
-    const file = new File(['x'], 'skill.tar.gz', { type: 'application/gzip' })
+    const file = new File(['x'], 'skill.zip', { type: 'application/zip' })
     const input = document.querySelector('input[type="file"]')!
     Object.defineProperty(input, 'files', { value: [file], configurable: true })
     fireEvent.change(input)

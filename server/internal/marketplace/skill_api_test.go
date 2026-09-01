@@ -1,14 +1,12 @@
 package marketplace
 
 import (
-	"archive/tar"
+	"archive/zip"
 	"bytes"
-	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -135,12 +133,12 @@ func TestSkillAPI(t *testing.T) {
 		t.Fatalf("unknown skill = %d, body %s", w.Code, w.Body.String())
 	}
 
-	// archive: downloads a valid tar.gz with version header
+	// archive: downloads a valid zip with version header (git 模式包为 zip)
 	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive status = %d, body %s", w.Code, w.Body.String())
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+	if ct := w.Header().Get("Content-Type"); ct != "application/zip" {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 	if v := w.Header().Get("X-Skill-Version"); v != "1.0.0" {
@@ -326,21 +324,13 @@ func rewriteRepoVersion(t *testing.T, dir, version string) {
 
 func tarNames(t *testing.T, data []byte) map[string]bool {
 	t.Helper()
-	gr, err := gzip.NewReader(bytes.NewReader(data))
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := tar.NewReader(gr)
 	names := map[string]bool{}
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		names[hdr.Name] = true
+	for _, zf := range zr.File {
+		names[zf.Name] = true
 	}
 	return names
 }

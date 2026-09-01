@@ -95,6 +95,7 @@
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@sentry/node": "^7.120.0",
+    "adm-zip": "^0.6.0",
     "tar": "^7.5.0",
     "yaml": "^2.9.0"
   },

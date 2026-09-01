@@ -75,6 +75,8 @@ describe('packPreset', () => {
       expect(result.displayName).toBe('PPT 生成')
       expect(result.description).toBe('生成 PPT 演示文稿')
       expect(result.checksum).toMatch(/^[0-9a-f]{64}$/u)
+      // 新格式为 zip(PK 魔数)。
+      expect(result.archive.subarray(0, 2).toString('latin1')).toBe('PK')
       // The archive root carries the composition: install it into a scratch
       // root (the installer repeats the composition check).
       expect(result.archive.byteLength).toBeGreaterThan(0)
@@ -125,7 +127,7 @@ describe('packPreset', () => {
       await mkdir(presetDir, { recursive: true })
       await writeFile(join(presetDir, 'agent.cordis.yml'), COMPOSITION)
       await symlink('/etc/passwd', join(presetDir, 'secret'))
-      await expect(packPreset(dir, 'linky')).rejects.toThrow(/link entry refused/u)
+      await expect(packPreset(dir, 'linky')).rejects.toThrow(/link entry refused|symlink refused/u)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

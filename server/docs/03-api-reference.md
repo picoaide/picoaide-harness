@@ -104,7 +104,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 |------|------|------|
 | GET | `/api/client/v2/marketplace/skills` | 技能建议清单 `[{name, version, description, author}]`(仅 enabled 且已授权) |
 | GET | `/api/client/v2/marketplace/skills/:name` | 单个技能详情 |
-| GET | `/api/client/v2/marketplace/skills/:name/archive` | 下载技能包(上传模式:DB 归档;git 模式老行:`cacheDir/<name>-<version>.tar.gz` 只读回退);成功累加 `downloads`(0040) |
+| GET | `/api/client/v2/marketplace/skills/:name/archive` | 下载技能包(上传模式:DB 归档;git 模式老行:`cacheDir/<name>-<version>.zip` 只读回退);成功累加 `downloads`(0040) |
 | POST | `/api/client/v2/telemetry/skill-call` | 客户端上报技能调用 `{name, version?}` → 服务端累加 `calls`(shared_skills 优先,回退 market) |
 
 ## 7. 商城管理端(Admin)
@@ -113,14 +113,14 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 |------|------|------|
 | GET/POST | `/api/server/admin/skills` | 列表/上架技能(`{name, version, description, author, git_url, git_ref}`) |
 | PUT/DELETE | `/api/server/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
-| POST | `/api/server/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 tar.gz)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
+| POST | `/api/server/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 zip)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
 
 ## 8. 共享 Agent(客户端用,Bearer,多版本)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/client/v2/agent-presets` | 可见清单:approved 且**已授权** + 自己上传的全部状态;返回 `{presets:[{name, display_name, description, version, author, status, reason, created_at}]}`(reason 仅自己 rejected 行非空) |
-| POST | `/api/client/v2/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 tar.gz)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;归档**直存 DB**(0041 不落盘);display_name/描述 ≤500 字;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
+| POST | `/api/client/v2/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 zip)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;归档**直存 DB**(0041 不落盘);display_name/描述 ≤500 字;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
 | GET | `/api/client/v2/agent-presets/:name/:version/archive` | 下载归档(仅 approved 且已授权;旧路径 `/:name/archive` 取最高版本);从 DB 出(0041);附 `X-Preset-Checksum` / `X-Preset-Version` |
 
 ### 管理端(Admin)
@@ -149,7 +149,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/client/v2/shared-skills` | 可见清单:approved 且**已授权** + 自己上传的全部状态;返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
-| POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 tar.gz)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
+| POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 zip)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
 | GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(仅 approved 且已授权);附 `X-Skill-Checksum` / `X-Skill-Version` |
 
 ### 管理端(Admin)
