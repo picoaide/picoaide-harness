@@ -164,6 +164,10 @@ func TestParseDescriptionBounds(t *testing.T) {
 	_, err := Parse(entries(), goodMD(map[string]string{"description": "太短"}), "")
 	assertCode(t, err, CodeFieldTooShort, "description")
 
+	// 真实技能的 description 可以很长(线上最长 958 字),上限只防滥用。
+	if _, err := Parse(entries(), goodMD(map[string]string{"description": strings.Repeat("详", 960)}), ""); err != nil {
+		t.Fatalf("958 字量级的真实描述必须放行: %v", err)
+	}
 	long := strings.Repeat("长", MaxDescriptionRunes+1)
 	_, err = Parse(entries(), goodMD(map[string]string{"description": long}), "")
 	assertCode(t, err, CodeFieldTooLong, "description")

@@ -60,13 +60,18 @@ const (
 	MaxAppIDLen         = 64
 	MaxTitleRunes       = 100
 	MinDescriptionRunes = 10
-	MaxDescriptionRunes = 500
+	// description 是**模型侧的触发文本**(上游对其长度无限制):它决定模型
+	// 何时加载该技能,写详尽是正确做法而非滥用。2026-09-01 实测线上 30 个
+	// 技能:中位数 244 字、最长 958 字——上限一度定为 500 直接卡死 4 个合法
+	// 技能,故放宽到 2000(仍有界,防滥用)。
+	MaxDescriptionRunes = 2000
 	MaxAuthorRunes      = 64
 	MaxCategoryRunes    = 32
 	MaxChangelogRunes   = 500
-	MaxTags             = 10
-	MaxTagRunes         = 24
-	MinBodyRunes        = 50
+	// 实测线上技能最多 15 个标签(检索关键词),上限 10 会误伤。
+	MaxTags      = 30
+	MaxTagRunes  = 32
+	MinBodyRunes = 50
 )
 
 // ProvenanceKey 是安装器写入的溯源块键名;包内自带即视为伪造归属。

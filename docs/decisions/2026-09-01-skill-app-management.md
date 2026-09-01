@@ -136,7 +136,7 @@ Release（版本快照，一次性写入）
 | `name` | **必须等于 app_id**；严格 kebab `^[a-z0-9]+(?:-[a-z0-9]+)*$`；2–64 字符 | `MISSING_FIELD` / `INVALID_APP_ID` / `IDENTITY_MISMATCH` | 30/30 存在，但 **27 个值非法** |
 | `version` | 严格 semver `^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$`；必须 **>** 该 App 线上最高版本 | `MISSING_FIELD` / `INVALID_VERSION` / `VERSION_NOT_INCREASING` | 8 个缺失；其余 22 个恰好全合法 |
 | `title` | 非空，1–100 字；**展示名（中文名放这里）** | `MISSING_FIELD` / `FIELD_TOO_LONG` | **30 个全缺**（中文名现全挤在 `name` 里，由规范化工具迁移） |
-| `description` | 非空，10–500 字（下限防 `test` 这类占位） | `MISSING_FIELD` / `FIELD_TOO_LONG` | 30/30 存在 |
+| `description` | 非空，10–2000 字（下限防占位；**上限按真实数据放宽**：它是模型侧触发文本，线上最长 958 字） | `MISSING_FIELD` / `FIELD_TOO_LONG` | 30/30 存在 |
 | `author` | 非空，1–64 字；技能**署名** | `MISSING_FIELD` | 3 个缺失（三个外部 CLI 包） |
 | `category` | 非空单值字符串，1–32 字（商城分类浏览依赖它） | `MISSING_FIELD` / `INVALID_TYPE` | 3 个缺失 |
 
@@ -149,7 +149,7 @@ Release（版本快照，一次性写入）
 | 字段 | 规则 |
 |---|---|
 | `changelog` | **非首个版本必填**：frontmatter `changelog` 或包内 `CHANGELOG.md` 顶部段落；≤500 字 |
-| `tags` | 可选；字符串数组，≤10 个，单个 ≤24 字 |
+| `tags` | 可选；字符串数组，≤30 个，单个 ≤32 字（线上最多 15 个） |
 
 ### 5.3 结构性校验（包本身必须满足）
 
