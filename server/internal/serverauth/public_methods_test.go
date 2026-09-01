@@ -124,3 +124,38 @@ func TestGetPublicAuthMethodsLDAPConfigured(t *testing.T) {
 		t.Fatalf("ldap should be configured after settings: %v", m)
 	}
 }
+
+// TestGetPublicAuthMethodsWhitelist:auth.enabled 含未知方法(恶意/误配)时
+// 一律不下发——客户端登录页 name 数据流只允许已知四方法(审计 2026-09)。
+func TestGetPublicAuthMethodsWhitelist(t *testing.T) {
+	db := mustDB(t)
+	if err := serverstore.SetSetting(db, "auth.enabled", "local,evil<svg/onload=alert(1)>,ldap"); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterAdminRoutes(r, db)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/server/admin/auth/methods", nil))
+	if w.Code != 200 {
+		t.Fatalf("methods status = %d", w.Code)
+	}
+	var out struct {
+		Methods []struct {
+			Name string `json:"name"`
+		} `json:"methods"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range out.Methods {
+		switch m.Name {
+		case "local", "ldap", "oidc", "openid":
+		default:
+			t.Fatalf("unexpected method name %q (whitelist violated)", m.Name)
+		}
+	}
+	if len(out.Methods) != 2 {
+		t.Fatalf("methods = %v, want [local ldap] (evil filtered)", out.Methods)
+	}
+}

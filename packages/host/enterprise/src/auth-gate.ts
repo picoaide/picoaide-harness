@@ -228,12 +228,15 @@ const LOGIN_HTML = `<!DOCTYPE html>
     var only = methods.length === 1
     if (only) { methodsBox.innerHTML = ''; return }
     methodsBox.innerHTML = methods.map(function (m) {
-      var label = ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[m.name] || m.name
+      var name = String(m.name || '')
+      var label = ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[m.name] || name
       var configured = m.configured !== false
-      return '<button type="button" data-method="' + m.name + '" class="method' +
+      // 审计 2026-09:name 来自服务端 auth.enabled(管理员字符串, 无白名单),
+      // 拼接进 HTML 属性前必须转义——恶意配置注入 data-method 事件属性。
+      return '<button type="button" data-method="' + esc(name) + '" class="method' +
         (m.name === currentMethod ? ' active' : '') +
         (configured ? '' : ' disabled') + '"' +
-        (configured ? '' : ' title="该方式未配置"') + '>' + label + '</button>'
+        (configured ? '' : ' title="该方式未配置"') + '>' + esc(String(label)) + '</button>'
     }).join('')
     methodsBox.querySelectorAll('.method').forEach(function (b) {
       b.addEventListener('click', function () {
