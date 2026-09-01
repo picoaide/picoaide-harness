@@ -25,7 +25,7 @@ docs/                  # 本文档集(superpowers/ 为历史设计文档)
 ## 3. TDD 流程
 
 ```bash
-# 1) 写测试 → 运行确认红(需 PG_DSN_TEST 指向临时测试库)
+# 1) 写测试 → 运行确认红(DB 用例:设置 PG_DSN_TEST 指向临时测试库;不设则自动 Skip)
 PG_DSN_TEST=postgres://picoaide:ci@127.0.0.1:5432/picoaide_test?sslmode=disable go test ./internal/... -run TestXxx
 # 2) 实现 → 运行确认绿
 # 3) git add -A && git commit -m "feat: xxx"
@@ -36,7 +36,7 @@ PG_DSN_TEST=postgres://picoaide:ci@127.0.0.1:5432/picoaide_test?sslmode=disable 
 ## 4. 常用命令
 
 ```bash
-make test              # 服务端全量测试(需 PG_DSN_TEST)
+make test              # 服务端全量测试(不依赖数据库;无 PG 时 DB 用例 Skip)
 make test-server       # 服务端各业务域(显式枚举全部包)
 make check             # gofmt + go vet + test-server + webadmin 测试与构建(提交前跑)
 make build-server / webadmin / docker-image / release-export
@@ -54,7 +54,7 @@ corepack yarn ws dsh-plugin-desktop test         # 单测(等)
 
 ## 6. CI
 
-`.github/workflows/ci.yml`:server(Go 1.26 + postgres:18-alpine service,`go vet` + `go test ./...`(PG_DSN_TEST+TZ=Asia/Shanghai)+ `make build-server` + deploy 脚本/compose 校验)/ desktop-linux/windows/macos(Node 24,Yarn 门禁与三平台产物)/ release(GitHub Release)。本地 `make check` 近似 CI 的 server+webadmin 部分。
+`.github/workflows/ci.yml`:server(Go 1.26,`go vet` + `go test ./...`——CI 不提供数据库,DB 用例自动 Skip)+ deploy 脚本/compose 校验)/ desktop-linux/windows/macos(Node 24,Yarn 门禁与三平台产物)/ release(GitHub Release)。本地 `make check` 近似 CI 的 server+webadmin 部分。
 
 ## 7. 契约(改代码前必读,两端必须一致)
 

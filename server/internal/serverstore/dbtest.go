@@ -1,6 +1,7 @@
 package serverstore
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -23,6 +24,31 @@ func PgTestDSN() string {
 	return "postgres://postgres:postgres@127.0.0.1:5432/picoaide_test?sslmode=disable"
 }
 
+// requireTestPG skips the test when the PostgreSQL test server is
+// unreachable. Database-dependent tests must never fail (nor hang) in an
+// environment without a database: `go test ./...` must pass without DB, and
+// CI must not depend on a database service (2026-09-02).
+// Returned admin handle (administrative "postgres" connection) is non-nil
+// only when the probe succeeded; callers close it on cleanup.
+func requireTestPG(t *testing.T, adminDSN string) *sql.DB {
+	t.Helper()
+	adminURL, err := url.Parse(adminDSN)
+	if err != nil {
+		t.Skipf("DB test skipped: parse test dsn: %v", err)
+	}
+	adminURL.Path = "/postgres"
+	adminURL.RawQuery = rewriteDSNQuery(adminURL.RawQuery, "connect_timeout", "3")
+	admin, err := sql.Open("pgx", adminURL.String())
+	if err != nil {
+		t.Skipf("DB test skipped: open admin db: %v", err)
+	}
+	if err := admin.PingContext(context.Background()); err != nil {
+		admin.Close()
+		t.Skipf("DB test skipped: postgres unavailable at %s: %v", adminURL.Host, err)
+	}
+	return admin
+}
+
 // NewTestDB creates an isolated temporary PostgreSQL database for one test
 // (CREATE DATABASE picoaide_test_<rand>), applies migrations, and returns a
 // connection plus a cleanup func that drops the database. Each test gets a
@@ -34,6 +60,7 @@ func NewTestDB(t *testing.T) (*sql.DB, func()) {
 	// 前一个测试写入的缓存值会污染后续测试(2026-08-31 加缓存后引入)。
 	resetTestCaches()
 	adminDSN := PgTestDSN()
+	admin := requireTestPG(t, adminDSN)
 	u, err := url.Parse(adminDSN)
 	if err != nil {
 		t.Fatalf("parse test dsn: %v", err)
@@ -44,10 +71,6 @@ func NewTestDB(t *testing.T) (*sql.DB, func()) {
 	adminURL := *u
 	adminURL.Path = "/postgres"
 	adminURL.RawQuery = rewriteDSNQuery(adminURL.RawQuery, "connect_timeout", "5")
-	admin, err := sql.Open("pgx", adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin db: %v", err)
-	}
 	if _, err := admin.Exec("CREATE DATABASE " + dbName); err != nil {
 		admin.Close()
 		t.Fatalf("create test db %s: %v", dbName, err)

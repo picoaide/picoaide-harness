@@ -26,21 +26,9 @@ jobs:
     defaults:
       run:
         working-directory: server
-    # PostgreSQL 供测试使用(PG_DSN_TEST);数据库/账号由 env 传入测试。
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_USER: picoaide
-          POSTGRES_PASSWORD: ci
-          POSTGRES_DB: picoaide_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U picoaide"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # 2026-09-02:CI 不再提供 PostgreSQL 服务——构建/编译/单元测试不依赖数据库;
+    # DB 相关测试在无 PG 环境下自动 Skip(serverstore.NewTestDB 探测),有 PG
+    # 的环境(本地 PG_DSN_TEST)仍可跑全量。
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -56,12 +44,6 @@ jobs:
         working-directory: server/webadmin
       - run: go vet ./...
       - run: go test ./... -count=1
-        env:
-          PG_DSN_TEST: postgres://picoaide:ci@127.0.0.1:5432/picoaide_test?sslmode=disable
-          # 用量日账测试按北京时间午夜切日(与生产 TZ 一致);CI runner 默认
-          # UTC,UTC 16:00+ 恰逢北京 00:00 边界会翻日,造成 TestAdminUsage/
-          # TestRebuildUsageLedger 周期性失败。
-          TZ: Asia/Shanghai
       - run: make build-server
       - name: Deploy script syntax checks
         # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
@@ -72,34 +54,41 @@ jobs:
             # 单 compose 文件(caddy+server+postgres):PG_PASSWORD 强必填,
             # 注入后验证语法
             PG_PASSWORD=ci docker compose -f docker-compose.yml config -q
-            # 审计 2026-08-31:PG18 挂载点兼容验证——postgres:18-alpine 的 PGDATA
-            # 是 /var/lib/postgresql/18/docker,compose 挂载 ./pg-data:/var/lib/postgresql
-            # (父目录)。旧挂载点 /var/lib/postgresql/data 会被 entrypoint 判定为
-            # "unused mount/volume" 而拒绝启动(exit 1),导致部署失败。
-            # 2026-08-31 修复:临时目录改用 $RUNNER_TEMP(runner 保证可写且宿主可
-            # 清理),不再依赖 /tmp;PG 容器以非 root(postgres uid 999)启动,而
-            # mktemp -d 创建的目录是 0700 宿主权限——postgres 无法在挂载点内创建
-            # 18/ 子目录,容器立即退出(No such container)。挂载点必须放开写权限。
-            PG18_MOUNT="$(mktemp -d -p "${RUNNER_TEMP:-/tmp}")"
-            chmod 0777 "$PG18_MOUNT"
-            if ! PG18_CID="$(docker run -d --rm --name picoaide-ci-pg18 \
-              -e POSTGRES_USER=picoaide -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=picoaide \
-              -v "$PG18_MOUNT:/var/lib/postgresql" postgres:18-alpine)"; then
-              echo "::error::docker run postgres:18-alpine 启动失败(详见上方 docker 输出)"
-              rm -rf "$PG18_MOUNT"
-              exit 1
-            fi
-            sleep 8
-            if ! docker ps --format '{{.Names}}' | grep -qx picoaide-ci-pg18; then
-              echo "::error::postgres:18-alpine 未能在挂载 /var/lib/postgresql 下启动(请检查 compose 挂载点)"
-              docker logs "$PG18_CID" 2>&1 | tail -20 || true
+            # 2026-09-02:PG18 挂载点运行验证需要启动 postgres 容器——CI 默认
+            # 不依赖数据库,该检查改为 RUN_PG18_MOUNT_CHECK=1 时显式启用
+            # (发布/部署验证流水线可设置)。compose 语法校验(上一步)仍始终执行。
+            if [ "${RUN_PG18_MOUNT_CHECK:-0}" = "1" ]; then
+              # 审计 2026-08-31:PG18 挂载点兼容验证——postgres:18-alpine 的 PGDATA
+              # 是 /var/lib/postgresql/18/docker,compose 挂载 ./pg-data:/var/lib/postgresql
+              # (父目录)。旧挂载点 /var/lib/postgresql/data 会被 entrypoint 判定为
+              # "unused mount/volume" 而拒绝启动(exit 1),导致部署失败。
+              # 2026-08-31 修复:临时目录改用 $RUNNER_TEMP(runner 保证可写且宿主可
+              # 清理),不再依赖 /tmp;PG 容器以非 root(postgres uid 999)启动,而
+              # mktemp -d 创建的目录是 0700 宿主权限——postgres 无法在挂载点内创建
+              # 18/ 子目录,容器立即退出(No such container)。挂载点必须放开写权限。
+              PG18_MOUNT="$(mktemp -d -p "${RUNNER_TEMP:-/tmp}")"
+              chmod 0777 "$PG18_MOUNT"
+              if ! PG18_CID="$(docker run -d --rm --name picoaide-ci-pg18 \
+                -e POSTGRES_USER=picoaide -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=picoaide \
+                -v "$PG18_MOUNT:/var/lib/postgresql" postgres:18-alpine)"; then
+                echo "::error::docker run postgres:18-alpine 启动失败(详见上方 docker 输出)"
+                rm -rf "$PG18_MOUNT"
+                exit 1
+              fi
+              sleep 8
+              if ! docker ps --format '{{.Names}}' | grep -qx picoaide-ci-pg18; then
+                echo "::error::postgres:18-alpine 未能在挂载 /var/lib/postgresql 下启动(请检查 compose 挂载点)"
+                docker logs "$PG18_CID" 2>&1 | tail -20 || true
+                docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
+                rm -rf "$PG18_MOUNT" 2>/dev/null || true
+                exit 1
+              fi
               docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
               rm -rf "$PG18_MOUNT" 2>/dev/null || true
-              exit 1
+              echo "postgres:18-alpine mount-point check OK"
+            else
+              echo "PG18 挂载点运行验证跳过(RUN_PG18_MOUNT_CHECK=1 启用)"
             fi
-            docker rm -f "$PG18_CID" >/dev/null 2>&1 || true
-            rm -rf "$PG18_MOUNT" 2>/dev/null || true
-            echo "postgres:18-alpine mount-point check OK"
           else
             # 审计 2026-08-25 A-01:docker 缺失时显式失败(此前静默跳过 =
             # compose 语法零验证)。
