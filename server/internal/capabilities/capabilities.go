@@ -275,6 +275,12 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		src := c.Query("source")
 		includeMarket := src == "" || src == "market"
 		includeOrg := src == "" || src == "market" || src == "org"
+		// own:作者本人上传的任意状态行(「我的」分区专用)。客户端
+		// /api/pico/capabilities?source=local 经宿主转换为 source=own,
+		// 用于渲染本地上传行的 status/reason 徽章(2026-09-01 契约修复:
+		// 此前 org 仅 approved 且 a6eed6397d 过滤掉 own 非 approved 行,
+		// 徽章与拒因恒空)。
+		includeOwn := src == "own" || src == "local"
 		ft := parseTypeFilter(c)
 		items := []CapabilityItem{}
 		versions := map[string][]string{}
@@ -328,6 +334,28 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 		}
 
+		// 2b) 「我的」分区:作者 own 的任意状态(含 pending/rejected + 拒因)。
+		// 只取 own 行,不混入他人已授权的 approved 行。管理员 own 恒空
+		// (管理员不通过共享库上传),仍走同一查询语义保持简单。
+		if includeOwn && ft.skills && !u.IsAdmin {
+			granted, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			visible, err := serverstore.ListVisibleSharedSkills(db, u.Username, granted)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			for _, s := range visible {
+				if s.Author != u.Username {
+					continue
+				}
+				appendSharedSkill(&items, s, versions)
+			}
+		}
+
 		// 3) 组织·共享 Agent(审核+授权)。
 		if includeOrg && ft.agents {
 			if u.IsAdmin {
@@ -363,6 +391,26 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 		}
 
+		// 3b) 「我的」分区:作者 own 的智能体预设(任意状态)。
+		if includeOwn && ft.agents && !u.IsAdmin {
+			granted, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedPresetGrantTable, u.Username, groups)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			visible, err := serverstore.ListVisibleAgentPresets(db, u.Username, granted)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			for _, p := range visible {
+				if p.Author != u.Username {
+					continue
+				}
+				appendSharedAgent(&items, p, versions)
+			}
+		}
+
 		merged := mergeVersions(items, versions)
 		if src == "market" {
 			merged = mergeMarketFirst(merged)
@@ -392,6 +440,9 @@ func mergeMarketFirst(items []CapabilityItem) []CapabilityItem {
 		// 同名折叠:市场行优先。fold 时以双行的版本+当前版本回填 versions,
 		// 保证历史版本展开完整(单源 mergeVersions 只填了自己的版本集)。
 		versions := appendUniqueAll(appendUnique(appendUnique(cur.Versions, cur.Version), it.Version), it.Versions)
+		// B5(2026-09-01):append 顺序不保证升序,合并后按数值感知 semver
+		// 升序重排,否则客户端「历史版本」展开乱序(如 [1.0.0,2.0.0]+1.5.0)。
+		versions = sortVersions(versions)
 		if cur.Source == SourceMarket {
 			cur.Versions = versions
 			byKey[k] = cur
@@ -427,6 +478,19 @@ func appendUniqueAll(items []string, extra []string) []string {
 		items = appendUnique(items, e)
 	}
 	return items
+}
+
+// sortVersions 按数值感知 semver 升序排序(非原地,B5:mergeMarketFirst 折叠
+// 合并后的 versions 需保持升序,与 mergeVersions.approvedOnly 同规则)。
+func sortVersions(vs []string) []string {
+	out := make([]string, len(vs))
+	copy(out, vs)
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && util.CompareSemVer(out[j-1], out[j]) > 0; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

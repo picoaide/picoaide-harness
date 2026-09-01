@@ -1,6 +1,7 @@
 package serverstore
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -111,4 +112,61 @@ func TestCleanupUsageRetention(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("usage rows after retention = %d, want 0 (2-month-old partition dropped)", n)
 	}
+}
+
+// TestRebuildUsageLedgerPartialWindowKeepsMonthly 覆盖 2026-09-01 审计 B2:
+// 启动补算窗口(from = now.AddDate(0,-N,0),非整月对齐;to = now)不得把边界
+// 月月账覆盖为"仅窗口内几天"的部分和——月账聚合必须按整月边界进行,
+// usage_daily 保留的旧日数据使结果单调收敛。
+func TestRebuildUsageLedgerPartialWindowKeepsMonthly(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	uid := mustUserID(t, db)
+	// 固定月份(2026-03,避开真实时间):3/1 与 3/5 各一条明细。
+	day1 := time.Date(2026, 2, 28, 10, 0, 0, 0, time.UTC) // 月末基准(防 3/1 溢出)
+	day1 = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	day5 := time.Date(2026, 3, 5, 10, 0, 0, 0, time.UTC)
+	if err := ensureUsagePartition(db, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordUsageKindAt(db, uid, "m", 100, 10, "chat", day1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordUsageKindAt(db, uid, "m", 100, 10, "chat", day5); err != nil {
+		t.Fatal(err)
+	}
+	// 基线:整月重建 → 月账 requests=2。
+	marStart := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	marEnd := time.Date(2026, 3, 31, 23, 59, 59, 0, time.UTC)
+	if err := RebuildUsageLedger(db, marStart, marEnd); err != nil {
+		t.Fatalf("full-month rebuild: %v", err)
+	}
+	if n := monthlyRequests(t, db, uid, "m", "2026-03-01"); n != 2 {
+		t.Fatalf("full-month monthly requests=%d, want 2", n)
+	}
+	// 模拟启动补算:from = 3/5(非整月对齐),to = 3/10(月中)。
+	if err := RebuildUsageLedger(db, time.Date(2026, 3, 5, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 10, 23, 59, 59, 0, time.UTC)); err != nil {
+		t.Fatalf("partial-window rebuild: %v", err)
+	}
+	if n := monthlyRequests(t, db, uid, "m", "2026-03-01"); n != 2 {
+		t.Fatalf("BUG: partial-window rebuild overwrote monthly ledger (requests=%d, want 2)", n)
+	}
+	// 再验证月账含 3/1 那笔(次数),日账同样完好。
+	var d int64
+	if err := db.QueryRow("SELECT prompt_tokens FROM usage_daily WHERE user_id=$1 AND model='m' ORDER BY day LIMIT 1", uid).Scan(&d); err != nil {
+		t.Fatalf("daily: %v", err)
+	}
+	if d != 100 {
+		t.Fatalf("daily prompt_tokens=%d, want 100", d)
+	}
+}
+
+func monthlyRequests(t *testing.T, db *sql.DB, uid int64, model, month string) int64 {
+	t.Helper()
+	var n int64
+	if err := db.QueryRow("SELECT COALESCE(SUM(requests),0) FROM usage_monthly WHERE user_id=$1 AND model=$2 AND month=$3::date", uid, model, month).Scan(&n); err != nil {
+		t.Fatalf("query monthly: %v", err)
+	}
+	return n
 }

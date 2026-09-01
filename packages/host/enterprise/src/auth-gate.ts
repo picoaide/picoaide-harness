@@ -1147,11 +1147,11 @@ export function apply(ctx: Context, config: Config): void {
           try {
             const skillsDir = resolveSkillsDir()
             const presetsDir = resolvePresetsDir()
-            // 本地创作分区的状态匹配:服务端 ?source=local 返回空清单(本地
-            // 由 host 聚合),但 ?source=org 含 author-own 任意状态
-            // (ListVisible* 语义)——用 org 结果匹配本地上传行的 status/
-            // reason(2026-09-01 契约断层修复,此前本地行状态徽章恒空)。
-            const matchSource = source === 'local' ? 'org' : source
+            // 本地创作分区的状态匹配:服务端 ?source=own 返回 author-own
+            // 任意状态(含 pending/rejected + 拒因)——用 own 结果匹配本地
+            // 上传行的 status/reason(2026-09-01 契约修复:此前匹配 org 而
+            // org 仅含 approved,本地行状态徽章恒空)。
+            const matchSource = source === 'local' ? 'own' : source
             const data = await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${encodeURIComponent(matchSource)}`, { token: s.token })
             const items = (data as { items?: Array<Record<string, unknown>> }).items ?? []
             const installedSkills = new Set(await listInstalledSkills(skillsDir))

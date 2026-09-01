@@ -95,13 +95,20 @@ func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 		return fmt.Errorf("rebuild usage_daily: %w", err)
 	}
 	// 月账:从日账按月份聚合(只用本窗口覆盖的月,避免全量重扫)。
+	// 边界月取**整月**(date_trunc 到月初、下月月初开区间):usage_daily 中
+	// 窗口外的旧日数据保留不删,聚合因此单调收敛——不会把完整月账覆盖成
+	// "仅窗口内几天"的部分和。2026-09-01 审计(B2):此前 WHERE day BETWEEN
+	// from..to 使启动补算(from = now.AddDate(0,-N,0),非整月对齐)每次启动
+	// 都把 from/to 所在月的月账 OVERWRITE 成部分月数据,明细分区 DROP 后
+	// 永久亏空(真 PG 复现:整月重建 requests=2 → 部分窗口重建后被覆盖为 1)。
 	if _, err := db.Exec(`
 		INSERT INTO usage_monthly (user_id, model, month, prompt_tokens, completion_tokens, cache_prompt_tokens, requests, cost)
 		SELECT user_id, model, date_trunc('month', day)::date AS month,
 		       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_prompt_tokens),
 		       SUM(requests), SUM(cost)
 		FROM usage_daily
-		WHERE day >= ?::date AND day <= ?::date
+		WHERE day >= (date_trunc('month', ?::date))::date
+		  AND day < (date_trunc('month', ?::date) + interval '1 month')::date
 		GROUP BY user_id, model, month
 		ON CONFLICT (user_id, model, month) DO UPDATE SET
 		  prompt_tokens = EXCLUDED.prompt_tokens,
