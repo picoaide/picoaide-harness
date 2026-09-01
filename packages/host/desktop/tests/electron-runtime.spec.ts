@@ -770,6 +770,40 @@ describe('Electron compatibility runtime', () => {
     expect(notification?.once).not.toHaveBeenCalled()
   })
 
+  it('forwards a notification click to the session-open handler and focuses the window', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const open = vi.fn()
+    runtime.setSessionOpenRequestHandler(open)
+
+    runtime.updates.notify({
+      title: 'Task finished',
+      body: 'Session "x" finished.',
+      sessionId: 'session-x',
+    })
+    const notification = electron.notifications[0]
+    expect(notification?.once).toHaveBeenCalledWith('click', expect.any(Function))
+    const click = notification?.once.mock.calls[0]?.[1] as (() => void) | undefined
+    click?.()
+    expect(open).toHaveBeenCalledWith('session-x')
+  })
+
+  it('never opens a session for a notification without a session id', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const open = vi.fn()
+    runtime.setSessionOpenRequestHandler(open)
+
+    runtime.updates.notify({
+      title: 'Info',
+      body: 'Just an update.',
+    })
+    const notification = electron.notifications[0]
+    expect(notification?.once).not.toHaveBeenCalled()
+  })
+
   it('starts the downloaded Windows installer before requesting orderly exit', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     updater.download.mockResolvedValueOnce('C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')

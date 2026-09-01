@@ -93,6 +93,10 @@ describe('published package surface', () => {
       types: './lib/types/updates.d.ts',
       default: './lib/updates.js',
     })
+    expect(manifest.exports).toHaveProperty('./loop-notify', {
+      types: './lib/types/loop-notify.d.ts',
+      default: './lib/loop-notify.js',
+    })
     expect(manifest.exports).not.toHaveProperty('./windows-acl-runner')
     expect(manifest.exports).not.toHaveProperty('./terminal')
     expect(manifest.exports).not.toHaveProperty('./pnpm')
@@ -118,6 +122,7 @@ describe('published package surface', () => {
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).not.toContain('name: dsh-plugin-desktop/profiles')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/diagnostics')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/loop-notify')
   })
 
   it('keeps unaudited marketplace packages out of the published runtime', () => {

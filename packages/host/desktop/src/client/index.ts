@@ -10,6 +10,7 @@ import { startRendererBootReporter } from './boot-health.ts'
 import { applyUpdateBadge } from './desktop-update.tsx'
 import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
+import { applyLoopNotifyClient } from './loop-notify.tsx'
 import { applySidebarBrowserPolicy } from './sidebar-policy.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
@@ -52,6 +53,7 @@ export function apply(ctx: ClientContext): void {
     return () => { /* one-shot boot policy; nothing to dispose */ }
   }, 'desktop: sidebar browser policy')
 
+  applyLoopNotifyClient(ctx)
   if (environment.mode === 'advanced') {
     applyAdvancedShell(ctx, environment)
     applyUpdateBadge(ctx)
