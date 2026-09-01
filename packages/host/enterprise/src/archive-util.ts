@@ -43,11 +43,14 @@ function zipEntryIsSymlink(entry: AdmZip.IZipEntry): boolean {
   return (unix & ZIP_MODE_TYPE) === ZIP_S_IFLNK
 }
 
-/** Zip entry path safety: reject absolute/`..`/empty (directories are OK). */
+/** Zip entry path safety: reject absolute/`..`/empty files; directory roots OK. */
 function assertSafeZipEntry(entry: AdmZip.IZipEntry): string {
   const normalized = posixNormalize(entry.entryName)
   if (entry.isDirectory) {
-    if (normalized === '' || normalized.split('/').includes('..')) {
+    // 根目录自引用条目(`./` 或 `/`): `zip -r skill.zip .` 类打包的常见产物,
+    // 规范化后为空且不写任何文件(extractZip 对空目录条目跳过),直接放行;
+    // `..` 目录条目仍拒绝(目录穿越)。与 tar 分支 assertSafeEntryPath('')→'' 对齐。
+    if (normalized.split('/').includes('..')) {
       throw new Error(`unsafe path in archive: ${entry.entryName}`)
     }
     return normalized
