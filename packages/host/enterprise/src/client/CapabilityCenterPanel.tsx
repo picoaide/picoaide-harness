@@ -51,6 +51,12 @@ interface CapabilityItem {
   isLocal?: boolean | undefined
   /** 本地创作时是否有上传状态记录（无 = 未上传过）。 */
   uploadStatus?: ItemStatus | undefined
+  /** 溯源（D6）：安装来源渠道（market/org）；本地原创时为空。 */
+  originChannel?: string | undefined
+  /** 溯源：来源应用 ID（即使用户改了目录名也能认出归属）。 */
+  originAppId?: string | undefined
+  /** 溯源：安装后内容被本地修改过。 */
+  dirty?: boolean | undefined
 }
 
 /** 来源分区 tab(决策 2026-08-25:市场/组织合并为「市场」——仅 我的/市场)。 */
@@ -635,6 +641,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
             : <span style={CHIP_NEUTRAL}>{t('capability.sourceLocal')}</span>}
         {qualityBadge}
         {statusBadge}
+        {item.source === 'local' && item.originChannel !== undefined && (
+          <span style={CHIP_NEUTRAL}>
+            {item.originChannel === 'org' ? t('capability.sourceOrg') : t('capability.sourceMarket')}
+            {` v${item.version}`}
+          </span>
+        )}
+        {item.dirty === true && <span style={CHIP_WARN}>{t('capability.dirty')}</span>}
       </>
     )
   }
