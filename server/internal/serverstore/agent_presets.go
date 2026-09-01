@@ -261,6 +261,24 @@ func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, 
 	return nil
 }
 
+// UpdateAgentPresetResubmitByVersionWithArchive 是重提的原子变体:同一 UPDATE
+// 内替换 metadata/checksum/status 与 archive 列,消除此前
+// 「UpdateAgentPresetResubmitByVersion + SetAgentPresetArchive 两步」间的
+// 脏行窗口(行已置 pending 但归档仍旧;2026-09-01 审计)。
+func UpdateAgentPresetResubmitByVersionWithArchive(db *sql.DB, name, version, displayName, description, checksum, author string, archive []byte) error {
+	res, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, archive=?, status=?, reason='',
+		updated_at=`+NowExpr()+`
+		WHERE name=? AND version=? AND status=? AND author=?`,
+		displayName, description, checksum, archive, AgentPresetPending, name, version, AgentPresetRejected, author)
+	if err != nil {
+		return err
+	}
+	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteAgentPreset removes ALL rows of the name; returns ErrNotFound when
 // none existed.
 func DeleteAgentPreset(db *sql.DB, name string) error {

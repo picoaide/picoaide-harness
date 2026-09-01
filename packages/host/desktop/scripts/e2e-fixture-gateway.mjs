@@ -1,4 +1,10 @@
-/** Mock gateway used by the client E2E tool (fixed port 34567). */
+/** Mock gateway used by the client E2E tool (fixed port 34567).
+ *  职责:模拟企业网关 /api/client/v2/* 供登录与各面板取数;同时 e2e 把桌面
+ *  app 整体指向本 fixture,enterprise host 的本地代理(如 /api/pico/*)与
+ *  DSH host 路由(如 /api/workspaces)打到此处时也返回空/固定模拟。
+ *  注意:网关路由必须与 server/internal/router/router.go 的 registerClientV2
+ *  一致(2026-09-01 已删除 /api/client/v2/models、/config/models、
+ *  /auth/session 三个服务端无声明的死路由);保留的其它路径是 host 模拟。 */
 import { createServer } from 'node:http'
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1:34567')
@@ -13,7 +19,7 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ methods: [{ name: 'local', configured: true }] }))
     return
   }
-  if (url.pathname === '/api/client/v2/auth/me' || url.pathname === '/api/client/v2/auth/session' || url.pathname === '/api/client/v2/auth/usage') {
+  if (url.pathname === '/api/client/v2/auth/me' || url.pathname === '/api/client/v2/auth/usage') {
     res.end(JSON.stringify({
       username: 'admin', id: 1, department: 'dev', token: 'mock-token-123',
       // Usage envelope expected by the account card (`/api/pico/account/usage`
@@ -48,13 +54,6 @@ const server = createServer((req, res) => {
       { id: 'skill-1', name: '代码审计', description: 'CodeQL 审计', installed: true, version: '1.0.0' },
       { id: 'skill-2', name: '钉钉集成', description: 'DingTalk 办公', installed: false, version: '0.1.0' },
     ]))
-    return
-  }
-  if (url.pathname === '/api/client/v2/models' || url.pathname === '/api/client/v2/config/models') {
-    res.end(JSON.stringify({ models: [
-      { id: 'deepseek-v4', name: 'DeepSeek V4', provider: 'deepseek' },
-      { id: 'pico-v4-pro', name: 'Pico AI V4 Pro', provider: 'picoai' },
-    ] }))
     return
   }
   if (url.pathname === '/api/workspaces' || url.pathname === '/api/workspace' || url.pathname === '/api/pico/workspaces') {

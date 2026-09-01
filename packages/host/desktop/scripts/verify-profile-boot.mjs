@@ -205,6 +205,9 @@ try {
     // Enterprise model governance: custom model providers are disabled from
     // the composition; models come from the gateway after login only.
     '@deepseek-ai/dsh-client-ui-settings-models',
+    // 桌面隐藏「插件」设置选项卡(2026-09 产品决策,与 ui-settings-models
+    // 同机制:desktop/cordis.patch.yml 同 id 覆盖行 disabled)。
+    '@deepseek-ai/dsh-client-ui-settings-plugins',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
   }
