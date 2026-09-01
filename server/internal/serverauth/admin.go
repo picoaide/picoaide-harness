@@ -984,7 +984,13 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(methods))
 	hideLocal := s["auth.hide_local"] == "true"
+	// 审计 2026-09:auth.enabled 是管理员字符串, 必须白名单过滤——
+	// 未知方法不下发(客户端登录页以此 name 渲染按钮/事件);
+	// 防御纵深: 恶意/误配值不进入登录页 DOM 数据流。
 	for _, m := range methods {
+		if m != "local" && m != "ldap" && m != "oidc" && m != "openid" {
+			continue
+		}
 		isConfigured := m == "local"
 		switch m {
 		case "ldap":
