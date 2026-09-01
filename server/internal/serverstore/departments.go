@@ -234,20 +234,20 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	if g, err := GroupByID(db, id); err == nil && g.Name == EveryoneGroupName {
 		return ErrValidation // 保留名
 	}
-	var memberCount, childCount, grantCount, sharedGrantCount, presetGrantCount int64
+	// P2 后三张授权表合并为 app_grants:此处从「数三张表」收敛为一次统计
+	// (此前第三项仍落在旧表 agent_preset_grants 上,是三表合并时的漏改)。
+	var memberCount, childCount, grantCount int64
 	if err := tx.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM app_grants sg WHERE sg.grantee_type = 'group' AND `+ciColumnCmp("sg.grantee", "g.name")+`),
-		(SELECT COUNT(*) FROM app_grants ssg WHERE ssg.grantee_type = 'group' AND `+ciColumnCmp("ssg.grantee", "g.name")+`),
-		(SELECT COUNT(*) FROM agent_preset_grants apg WHERE apg.grantee_type = 'group' AND `+ciColumnCmp("apg.grantee", "g.name")+`)
-		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount, &sharedGrantCount, &presetGrantCount); err != nil {
+		(SELECT COUNT(*) FROM app_grants ag WHERE ag.grantee_type = 'group' AND `+ciColumnCmp("ag.grantee", "g.name")+`)
+		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
 	}
-	if memberCount > 0 || childCount > 0 || grantCount > 0 || sharedGrantCount > 0 || presetGrantCount > 0 {
+	if memberCount > 0 || childCount > 0 || grantCount > 0 {
 		return ErrDepartmentInUse
 	}
 	if _, err := tx.Exec("DELETE FROM groups WHERE id = ?", id); err != nil {

@@ -124,35 +124,26 @@ func TestAppGrantsVisibility(t *testing.T) {
 	}
 }
 
-// TestAppsBackfill: 0054 回填必须把三张旧表的数据完整搬进统一模型。
-func TestAppsBackfill(t *testing.T) {
+// TestAppMarketProjection: 市场技能经统一模型往返后,展示投影必须保持一致
+// (P5 后旧 skills 表已下线,回填 SQL 的语义由生产迁移一次性验证过)。
+func TestAppMarketProjection(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	t.Cleanup(cleanup)
-	// 迁移已在建库时跑完;此处模拟「回填后」的增量校验:旧表写入 → 手工回填
-	// 不再发生(生产由迁移一次性完成),所以这里验证的是回填 SQL 的语义等价性:
-	// 通过直接执行同样的 INSERT ... SELECT 逻辑来确认列映射正确。
 	if _, err := AddSkill(db, &Skill{Name: "mk", DisplayName: "市场技能", Version: "1.0.0",
 		Description: "d", Author: "boss", Enabled: 1, Archive: []byte("zzz"), Checksum: "c1"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO apps (kind, app_id, title, description, owner, channel, enabled)
-		SELECT 'skill', s.name, COALESCE(NULLIF(s.display_name, ''), s.name), s.description, s.author, 'market', s.enabled
-		FROM skills s ON CONFLICT (kind, app_id) DO NOTHING`); err != nil {
-		t.Fatalf("回填 App: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO app_releases (kind, app_id, version, title, description, author,
-		publisher, checksum, size, archive, status, downloads, calls)
-		SELECT 'skill', s.name, s.version, COALESCE(NULLIF(s.display_name, ''), s.name), s.description,
-		       s.author, s.author, s.checksum, COALESCE(octet_length(s.archive),0), s.archive, 'approved', s.downloads, s.calls
-		FROM skills s ON CONFLICT (kind, app_id, version) DO NOTHING`); err != nil {
-		t.Fatalf("回填 Release: %v", err)
-	}
 	a, err := GetApp(db, AppKindSkill, "mk")
 	if err != nil || a.Title != "市场技能" || a.Channel != AppChannelMarket {
-		t.Fatalf("回填后 App = %+v err=%v", a, err)
+		t.Fatalf("App = %+v err=%v", a, err)
 	}
 	r, err := GetRelease(db, AppKindSkill, "mk", "1.0.0")
 	if err != nil || r.Status != ReleaseStatusApproved || string(r.Archive) != "zzz" || r.Size != 3 {
-		t.Fatalf("回填后 Release = %+v err=%v", r, err)
+		t.Fatalf("Release = %+v err=%v", r, err)
+	}
+	// 旧 DTO 投影:展示版本 = 最高 approved。
+	s, err := GetSkill(db, "mk")
+	if err != nil || s.Version != "1.0.0" || s.DisplayName != "市场技能" || string(s.Archive) != "zzz" {
+		t.Fatalf("Skill 投影 = %+v err=%v", s, err)
 	}
 }
