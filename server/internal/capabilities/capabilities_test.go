@@ -214,6 +214,16 @@ func TestListApprovalsQueue(t *testing.T) {
 			t.Fatalf("agent base=%s", a.BasePath)
 		}
 	}
+	// grants_base 是授权基路径(name-only,授权是资源级,同名多版本共享)——
+	// 与含版本段的 base_path 不同;授权弹窗误用 base_path 会多出版本段 → 404。
+	for _, a := range resp.Approvals {
+		if a.Kind == KindSkill && a.GrantsBase != "/api/server/admin/shared-skills/s1" {
+			t.Fatalf("skill grants_base=%s", a.GrantsBase)
+		}
+		if a.Kind == KindAgent && a.GrantsBase != "/api/server/admin/agent-presets/a1" {
+			t.Fatalf("agent grants_base=%s", a.GrantsBase)
+		}
+	}
 	// 决策 2026-08-25:市场 skills 表同名冲突 -> 队列行 conflict=true。
 	// 正常路径双向互斥会阻断,此处用 raw SQL 模拟竞态(共享技能上传后市场
 	// 技能被上架),验证审批队列的冲突提示。

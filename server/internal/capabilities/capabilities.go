@@ -444,6 +444,11 @@ type ApprovalRow struct {
 	Calls     int64 `json:"calls,omitempty"`
 	// 原始域端点(approve/reject/delete 仍走各自原路由,本队列只读)。
 	BasePath string `json:"base_path"`
+	// 授权端点基路径——与 BasePath 不同:授权是资源级(name-only,同名多版本
+	// 共享授权),而 BasePath 含版本段(approve/reject/delete/preview 需要)。
+	// 管理端授权弹窗用本字段拼 /grant、/grants;若误用 BasePath 会多出版本
+	// 段 → 404(2026-09-01 实际线上故障)。
+	GrantsBase string `json:"grants_base"`
 	// Preview 是域预览端点(composition / SKILL.md),管理端弹窗复用。
 	PreviewPath string `json:"preview_path"`
 	// Conflict 决策 2026-08-25:该共享技能名与市场 skills 表同名(跨源互斥),
@@ -493,6 +498,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					Downloads:   s.Downloads,
 					Calls:       s.Calls,
 					BasePath:    "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
+					GrantsBase:  "/api/server/admin/shared-skills/" + pathEscape(s.Name),
 					PreviewPath: "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
 					Conflict:    conflict,
 				})
@@ -518,6 +524,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					CreatedAt:   p.CreatedAt.Format("2006-01-02 15:04:05"),
 					Downloads:   p.Downloads,
 					BasePath:    "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version),
+					GrantsBase:  "/api/server/admin/agent-presets/" + pathEscape(p.Name),
 					PreviewPath: "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version) + "/preview",
 				})
 			}

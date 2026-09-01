@@ -217,7 +217,7 @@ async function main() {
   await wait(400)
   await clickLabel(cdp, '登录', 7000)
   const title = await evalSafe(cdp, 'document.title')
-  reportStep('登录成功（mock gateway）', title === 'DeepSeek Harness', `title=${title}`)
+  reportStep('登录成功（mock gateway）', title.includes('PicoAide'), `title=${title}`)
   await screenshot(cdp, '01-login-main')
 
   // 4.5 Boot graph completeness: the host composes window.__DSH_BOOT__ from

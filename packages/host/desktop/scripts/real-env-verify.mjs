@@ -117,7 +117,7 @@ try {
   await wait(500)
   await clickLabel('登录', 9000)
   const title = await ev('document.title')
-  reportStep('真实环境登录成功', title === 'DeepSeek Harness', `title=${title}`)
+  reportStep('真实环境登录成功', title.includes('PicoAide'), `title=${title}`)
   await screenshot('r01-login-success')
 
   // 3. Boot graph completeness

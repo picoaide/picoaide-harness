@@ -113,7 +113,7 @@ func (a *API) handleResponses(c *gin.Context) {
 			respSecrets = []string{ups[i].APIKey}
 			break
 		}
-		log.Printf("gateway: model %q provider %q responses failed: %v", req.Model, ups[i].Name, err)
+		log.Printf("gateway: model %s provider %q responses failed: %v", safeModelForLog(req.Model), ups[i].Name, err)
 	}
 	if resp == nil {
 		if usageID > 0 {
