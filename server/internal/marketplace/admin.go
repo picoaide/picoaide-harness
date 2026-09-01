@@ -161,7 +161,8 @@ func invalidateSkillCache(cacheDir, name string) {
 	}
 	os.RemoveAll(filepath.Join(cacheDir, name))
 	matches, _ := filepath.Glob(filepath.Join(cacheDir, name+"-*.tar.gz"))
-	for _, m := range matches {
+	zipMatches, _ := filepath.Glob(filepath.Join(cacheDir, name+"-*.zip"))
+	for _, m := range append(zipMatches, matches...) {
 		os.Remove(m)
 	}
 }

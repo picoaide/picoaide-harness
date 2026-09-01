@@ -2,6 +2,7 @@ package sharedskills
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"database/sql"
@@ -20,6 +21,26 @@ import (
 )
 
 func makeSkillArchive(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// makeSkillTarGz builds a legacy gzipped-tar archive (still accepted).
+func makeSkillTarGz(t *testing.T, entries map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -543,6 +564,12 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 	if !bytes.Equal(wD.Body.Bytes(), archive) {
 		t.Fatalf("downloaded bytes differ")
 	}
+	if ct := wD.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if disp := wD.Header().Get("Content-Disposition"); !strings.Contains(disp, "db-arch-1.0.0.zip") {
+		t.Fatalf("Content-Disposition = %q", disp)
+	}
 	s, _ := serverstore.GetSharedSkill(db, "db-arch", "1.0.0")
 	if s.Downloads != 1 {
 		t.Fatalf("downloads = %d, want 1", s.Downloads)
@@ -551,6 +578,50 @@ func TestSharedSkillArchiveInDB(t *testing.T) {
 	all, _ := serverstore.ListSharedSkills(db, "")
 	if len(all) != 1 || len(all[0].Archive) != 0 {
 		t.Fatalf("admin list must exclude blob: %+v", all)
+	}
+}
+
+// TestSharedSkillArchiveTarGzCompat: 旧 tar.gz 归档仍可上传(向后兼容),
+// 下载按格式回 application/gzip + <name>-<version>.tar.gz 文件名。
+func TestSharedSkillArchiveTarGzCompat(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+	archive := makeSkillTarGz(t, map[string]string{"SKILL.md": testSkillMd})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
+		strings.NewReader(uploadBody("oldfmt", "1.0.0", "兼容", archive)))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+	}
+	wA := httptest.NewRecorder()
+	reqA := httptest.NewRequest("POST", "/api/server/admin/shared-skills/oldfmt/1.0.0/approve", nil)
+	for k, v := range adminHdr {
+		reqA.Header.Set(k, v)
+	}
+	r.ServeHTTP(wA, reqA)
+	if wA.Code != http.StatusOK {
+		t.Fatalf("approve = %d %s", wA.Code, wA.Body.String())
+	}
+	wD := httptest.NewRecorder()
+	reqD := httptest.NewRequest("GET", "/api/client/v2/shared-skills/oldfmt/1.0.0/archive", nil)
+	for k, v := range userHdr {
+		reqD.Header.Set(k, v)
+	}
+	r.ServeHTTP(wD, reqD)
+	if wD.Code != http.StatusOK {
+		t.Fatalf("download = %d %s", wD.Code, wD.Body.String())
+	}
+	if ct := wD.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if disp := wD.Header().Get("Content-Disposition"); !strings.Contains(disp, "oldfmt-1.0.0.tar.gz") {
+		t.Fatalf("Content-Disposition = %q", disp)
 	}
 }
 

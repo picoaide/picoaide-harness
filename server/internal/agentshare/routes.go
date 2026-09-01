@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
@@ -122,7 +123,7 @@ func presetFileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少文件路径")
 			return
 		}
-		norm, err := posixNormalize(target)
+		norm, err := archiveutil.NormalizePath(target)
 		if err != nil || norm == "" {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件路径不合法")
 			return
@@ -827,11 +828,19 @@ func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.Ag
 		return
 	}
 	_, _ = serverstore.IncrementAgentPresetDownload(db, p.Name, p.Version)
-	c.Header("Content-Type", "application/gzip")
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(p.Name, p.Version)))
+	// 按归档实际格式回响应(zip 推荐 / tar.gz 兼容):文件名与 Content-Type
+	// 跟随魔数嗅探,旧行(存库为 tar.gz)下载仍正确。
+	dispName := safeName(p.Name, p.Version)
+	contentType := "application/gzip"
+	if archiveutil.Format(payload) == "zip" {
+		dispName = p.Name + "-" + p.Version + ".zip"
+		contentType = "application/zip"
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 	c.Header("X-Preset-Version", p.Version)
 	c.Header("X-Preset-Checksum", p.Checksum)
-	c.Data(http.StatusOK, "application/gzip", payload)
+	c.Data(http.StatusOK, contentType, payload)
 }
 
 // archiveErrorMessage maps validation refusals to the client-facing message.

@@ -222,7 +222,7 @@ export default function Marketplace() {
 
   async function doReplace() {
     if (!replaceDialog || replaceBusy) return
-    if (!replaceFile) { setDialogError('请选择压缩包(.tar.gz)'); return }
+    if (!replaceFile) { setDialogError('请选择压缩包(.zip)'); return }
     if (!replaceVersion.trim()) { setDialogError('版本必填'); return }
     setReplaceBusy(true)
     setDialogError('')
@@ -426,16 +426,16 @@ export default function Marketplace() {
               {skillEdit && <p className="text-xs text-muted-foreground">名称不可修改(唯一键);如需改名请下架后重新上架</p>}
             </div>
             <div className="space-y-1">
-              <Label htmlFor="skill-archive">压缩包(.tar.gz,GD 推荐)</Label>
+              <Label htmlFor="skill-archive">压缩包(.zip,推荐)</Label>
               <input
                 id="skill-archive"
                 ref={archiveInput}
                 type="file"
-                accept=".tar.gz,.tgz"
+                accept=".zip"
                 className="block w-full text-sm"
                 onChange={(e) => setSkillForm({ ...skillForm, archiveFile: e.target.files?.[0] ?? null })}
               />
-              <p className="text-xs text-muted-foreground">选择压缩包后归档直存数据库,无需 Git;未选择则走 Git 地址</p>
+              <p className="text-xs text-muted-foreground">选择 zip 后归档直存数据库,无需 Git;未选择则走 Git 地址</p>
             </div>
             <div className="space-y-1">
               <Label htmlFor="skill-git">Git 地址(未选压缩包时)</Label>
@@ -476,10 +476,10 @@ export default function Marketplace() {
               <Input id="replace-version" value={replaceVersion} placeholder="如 2.0.0" onChange={(e) => setReplaceVersion(e.target.value)} />
             </div>
             <div className="space-y-1">
-              <Label>压缩包(.tar.gz)</Label>
+              <Label>压缩包(.zip)</Label>
               <input
                 type="file"
-                accept=".tar.gz,.tgz"
+                accept=".zip"
                 className="block w-full text-sm"
                 onChange={(e) => setReplaceFile(e.target.files?.[0] ?? null)}
               />

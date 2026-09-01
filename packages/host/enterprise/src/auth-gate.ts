@@ -759,7 +759,7 @@ export function apply(ctx: Context, config: Config): void {
               'Content-Length': String(content.length),
             }
             const disposition = upstream.headers.get('content-disposition')
-            headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.tar.gz"`
+            headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.zip"`
             for (const key of ['x-skill-checksum', 'x-skill-version']) {
               const value = upstream.headers.get(key)
               if (value !== null) headers[key] = value
@@ -935,7 +935,7 @@ export function apply(ctx: Context, config: Config): void {
               'Content-Length': String(content.length),
             }
             const disposition = upstream.headers.get('content-disposition')
-            headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.tar.gz"`
+            headers['Content-Disposition'] = disposition ?? `attachment; filename="${name}.zip"`
             for (const key of ['x-preset-checksum', 'x-preset-version']) {
               const value = upstream.headers.get(key)
               if (value !== null) headers[key] = value
