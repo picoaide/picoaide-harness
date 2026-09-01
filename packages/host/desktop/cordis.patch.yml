@@ -21,6 +21,14 @@
 - id: fs-sandbox
   disabled: true
 
+# 桌面隐藏「插件」设置选项卡(2026-09 产品决策): 上游 web-app bundle 挂载的
+# ui-settings-plugins 行按用户配置展开可配置卡片,桌面端无此诉求,与模型
+# 选项卡的治理方式一致(见 enterprise/cordis.patch.yml 的 ui-settings-models)。
+# better-sidebar 的「侧边卡片」选项卡保留(无独立挂载行,为 vendored 客户端
+# 注册面,不在此处禁用)。
+- id: ui-settings-plugins
+  disabled: true
+
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime
   config:
