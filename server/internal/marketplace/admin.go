@@ -38,6 +38,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	// 审批预览(2026-09-01):管理员上架前后都要能看到包内到底是什么。
 	serverauth.AdminRoute(g, "GET", "/skills/:name/preview", serverauth.PermMarketRead, func(c *gin.Context) { previewSkillAdmin(c, db, cacheDir) })
 	serverauth.AdminRoute(g, "GET", "/skills/:name/file", serverauth.PermMarketRead, func(c *gin.Context) { fileContentSkillAdmin(c, db, cacheDir) })
+	// 存量规范化(决策 2026-09-01 §八):产出符合发布契约的新版本(patch+1)。
+	serverauth.AdminRoute(g, "POST", "/skills/:name/normalize", serverauth.PermMarketWrite, func(c *gin.Context) { normalizeSkillAdmin(c, db, cacheDir) })
 	// 授权管理(严格默认:未授权不可见/不可下载)
 	serverauth.AdminRoute(g, "GET", "/skills/:name/grants", serverauth.PermMarketRead, func(c *gin.Context) { listSkillGrants(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/skills/:name/grants", serverauth.PermMarketWrite, func(c *gin.Context) { replaceSkillGrants(c, db) })
@@ -567,4 +569,116 @@ func fileContentSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	c.JSON(http.StatusOK, gin.H{
 		"path": norm, "size": size, "binary": binary, "too_large": tooLarge, "content": content,
 	})
+}
+
+// normalizeSkillAdmin 一键规范化:把一个不合规的存量技能包改写成符合发布
+// 契约的内容,并作为**新版本**(patch+1)入库。
+//
+// 决策 2026-09-01 §八:历史版本不可变,因此规范化不改写原版本,而是产出新
+// 版本;规范化只做搬运与补齐(中文 name → title、剥 BOM、补 version/author/
+// category),绝不编造 description —— 缺失时明确报错要人工补写。
+func normalizeSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
+	name := c.Param("name")
+	if !util.SafePathSegment(name) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+		return
+	}
+	s, err := serverstore.GetSkill(db, name)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	raw, msg := skillArchiveForReview(s, cacheDir)
+	if raw == nil {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", msg)
+		return
+	}
+	files, rerr := archiveutil.ReadAll(raw, sharedskills.ArchiveLimits())
+	if rerr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档解析失败")
+		return
+	}
+	skillMD, ok := files["SKILL.md"]
+	if !ok {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档缺少 SKILL.md")
+		return
+	}
+	nextVersion := skillmanifest.BumpPatch(s.Version)
+	normalized, changes, nerr := skillmanifest.NormalizeSkillMD(string(skillMD), skillmanifest.NormalizeOptions{
+		AppID:   s.Name,
+		Version: nextVersion,
+		Author:  s.Author,
+	})
+	if nerr != nil {
+		var me *skillmanifest.Error
+		if errors.As(nerr, &me) {
+			serverauth.WriteError(c, skillmanifest.StatusFor(me.Code), me.Code, me.Message)
+			return
+		}
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "规范化失败")
+		return
+	}
+	// 规范化产出的是新版本:版本号必须体现在包内(包内即真相)。
+	normalized = forceVersion(normalized, nextVersion)
+	files["SKILL.md"] = []byte(normalized)
+	// 溯源目录是客户端本地产物,不应存在于归档中。
+	for path := range files {
+		if strings.HasPrefix(path, skillmanifest.ProvenanceDir) {
+			delete(files, path)
+		}
+	}
+	rebuilt, werr := archiveutil.WriteZip(files)
+	if werr != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "重新打包失败")
+		return
+	}
+	checksum, verr := sharedskills.ValidateSkillArchive(rebuilt)
+	if verr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "规范化后归档校验失败")
+		return
+	}
+	entries, md, lerr := sharedskills.ListArchiveContents(rebuilt)
+	if lerr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "规范化后归档解析失败")
+		return
+	}
+	// 自检:规范化产物必须通过与上传同一套严格校验,否则不入库。
+	if _, perr := skillmanifest.Parse(entries, md, s.Name); perr != nil {
+		var me *skillmanifest.Error
+		if errors.As(perr, &me) {
+			serverauth.WriteError(c, skillmanifest.StatusFor(me.Code), me.Code,
+				"规范化后仍不合规("+me.Message+"),需人工修正")
+			return
+		}
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "规范化后仍不合规")
+		return
+	}
+	if err := serverstore.ReplaceSkillArchive(db, s.Name, nextVersion, checksum, rebuilt); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	invalidateSkillCache(cacheDir, s.Name)
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_normalize",
+		s.Name+" v"+s.Version+" → v"+nextVersion+" ("+strings.Join(changes, "; ")+")")
+	c.JSON(http.StatusOK, gin.H{"ok": true, "version": nextVersion, "checksum": checksum, "changes": changes})
+}
+
+// forceVersion 保证 frontmatter 的 version 与入库版本一致(规范化时旧包可能
+// 自带一个较低的 version,不改会与新版本号失配)。
+func forceVersion(skillMD, version string) string {
+	lines := strings.Split(skillMD, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "version:") {
+			lines[i] = "version: " + version
+			return strings.Join(lines, "\n")
+		}
+		if i > 0 && line == "---" {
+			break
+		}
+	}
+	return skillMD
 }

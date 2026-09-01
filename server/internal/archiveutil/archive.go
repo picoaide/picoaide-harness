@@ -452,3 +452,128 @@ func ErrorText(err error, requiredName string, maxArchiveMB int) string {
 		return "归档校验失败"
 	}
 }
+
+// ReadAll extracts every regular file from an archive into memory, bounded by
+// lim (同 Validate 的安全边界:拒绝越界路径与链接项)。规范化流程需要重写
+// 归档中的 SKILL.md 并重新打包,因此必须能拿到全部条目内容。
+func ReadAll(data []byte, lim Limits) (map[string][]byte, error) {
+	switch Format(data) {
+	case "zip":
+		return zipReadAll(data, lim)
+	case "tar.gz":
+		return tarReadAll(data, lim)
+	default:
+		return nil, ErrInvalid
+	}
+}
+
+func zipReadAll(data []byte, lim Limits) (map[string][]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	out := map[string][]byte{}
+	var total int64
+	entries := 0
+	for _, zf := range zr.File {
+		entries++
+		if entries > lim.MaxEntries {
+			return nil, ErrTooMany
+		}
+		if zf.Mode()&fs.ModeSymlink != 0 {
+			return nil, ErrUnsafe
+		}
+		name, err := NormalizePath(zf.Name)
+		if err != nil {
+			return nil, ErrUnsafe
+		}
+		if name == "" || strings.HasSuffix(zf.Name, "/") {
+			continue
+		}
+		rc, rerr := zf.Open()
+		if rerr != nil {
+			return nil, ErrInvalid
+		}
+		buf, rerr := io.ReadAll(io.LimitReader(rc, lim.MaxUnpackedBytes))
+		rc.Close()
+		if rerr != nil {
+			return nil, ErrInvalid
+		}
+		total += int64(len(buf))
+		if total > lim.MaxUnpackedBytes {
+			return nil, ErrInvalid
+		}
+		out[name] = buf
+	}
+	return out, nil
+}
+
+func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	out := map[string][]byte{}
+	var total int64
+	entries := 0
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, ErrInvalid
+		}
+		entries++
+		if entries > lim.MaxEntries {
+			return nil, ErrTooMany
+		}
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			return nil, ErrUnsafe
+		}
+		name, nerr := NormalizePath(hdr.Name)
+		if nerr != nil {
+			return nil, ErrUnsafe
+		}
+		if name == "" || hdr.Typeflag == tar.TypeDir {
+			continue
+		}
+		buf, rerr := io.ReadAll(io.LimitReader(tr, lim.MaxUnpackedBytes))
+		if rerr != nil {
+			return nil, ErrInvalid
+		}
+		total += int64(len(buf))
+		if total > lim.MaxUnpackedBytes {
+			return nil, ErrInvalid
+		}
+		out[name] = buf
+	}
+	return out, nil
+}
+
+// WriteZip packs files into a deterministic zip (entry order sorted), used by
+// 规范化流程重新打包归档。
+func WriteZip(files map[string][]byte) ([]byte, error) {
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, n := range names {
+		w, err := zw.Create(n)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := w.Write(files[n]); err != nil {
+			return nil, err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}

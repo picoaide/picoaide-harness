@@ -17,6 +17,8 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
 
 func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
@@ -498,4 +500,69 @@ func TestAdminSkillPreview(t *testing.T) {
 	if w, _ := mreq(t, r, "GET", "/api/server/admin/skills/demo/file?path=nope.md", "", hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("不存在文件 = %d, want 404", w.Code)
 	}
+}
+
+// TestAdminSkillNormalize: 存量不合规技能(中文 name + BOM)一键规范化为
+// 合规的新版本(patch+1),中文名保留到 title,原版本不被改写。
+func TestAdminSkillNormalize(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
+		`{"name":"team-knowledge-wiki","git_url":"https://example.com/x.git","version":"1.0.0","author":"zhangsan"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	// 直接把「线上那种」不合规归档塞进 DB(绕过上传校验,模拟历史数据)。
+	legacy := "\ufeff---\nname: 团队知识库助手\ncategory: 通用\nversion: 1.0.0\n" +
+		"description: 员工日常咨询知识库的索引与强制读取规则,覆盖人事行政与报销制度。\n" +
+		"tags: [moka, HR]\nauthor: zhangsan\n---\n\n# 知识库\n\n" +
+		"本技能提供员工日常咨询知识库的索引与强制读取规则,覆盖人事、行政、商业保险与财务报销等高频问题的查询路径。\n"
+	archive := makeZip(t, map[string]string{"SKILL.md": legacy, "references/wiki.md": "参考\n"})
+	if err := serverstore.ReplaceSkillArchive(db, "team-knowledge-wiki", "1.0.0", "deadbeef", archive); err != nil {
+		t.Fatal(err)
+	}
+	// 规范化前:该包无法通过发布校验(证明它确实是不合规存量)。
+	entries, md, _ := sharedskills.ListArchiveContents(archive)
+	if _, err := skillmanifest.Parse(entries, md, "team-knowledge-wiki"); err == nil {
+		t.Fatal("夹具应当是不合规的")
+	}
+
+	w, out := mreq(t, r, "POST", "/api/server/admin/skills/team-knowledge-wiki/normalize", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("normalize = %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "1.0.1") {
+		t.Fatalf("应产出 patch+1 新版本: %v", out)
+	}
+	s, err := serverstore.GetSkill(db, "team-knowledge-wiki")
+	if err != nil || s.Version != "1.0.1" {
+		t.Fatalf("skill = %+v err=%v", s, err)
+	}
+	// 规范化后的包必须通过与上传同一套严格校验。
+	entries, md, lerr := sharedskills.ListArchiveContents(s.Archive)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	m, perr := skillmanifest.Parse(entries, md, "team-knowledge-wiki")
+	if perr != nil {
+		t.Fatalf("规范化后仍不合规: %v\n%s", perr, md)
+	}
+	if m.Title != "团队知识库助手" {
+		t.Fatalf("中文名必须保留到 title, got %q", m.Title)
+	}
+	if m.Version != "1.0.1" || m.Author != "zhangsan" || m.Category != "通用" {
+		t.Fatalf("manifest = %+v", m)
+	}
+	// 其它文件必须原样保留。
+	if !containsStr(entries, "references/wiki.md") {
+		t.Fatalf("附属文件丢失: %v", entries)
+	}
+}
+
+func containsStr(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
