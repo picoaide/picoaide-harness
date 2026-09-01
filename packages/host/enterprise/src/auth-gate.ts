@@ -206,8 +206,9 @@ const LOGIN_HTML = `<!DOCTYPE html>
     // 先统一去尾斜杠(trimServer),避免拼出 //api/client/v2/... 双斜杠路径。
     var server = trimServer(document.getElementById('server').value.trim())
     var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
-    // logo 加载失败时保留花括号兜底(与无品牌时同款)。
-    var logo = logoUrl ? '<img src="' + logoUrl + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
+    // 审计 2026-09:logo_url 来自服务端品牌配置, 完整转义再入 HTML 属性
+    // (修复前直接拼接, 恶意的 logo_url 可注入 onerror 等事件属性)。
+    var logo = logoUrl ? '<img src="' + esc(logoUrl) + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
     var name = login.display_name || 'PicoAide'
     var tag = login.tagline ? '<div class="brand-tag">' + esc(login.tagline) + '</div>' : ''
     var welcome = login.welcome ? '<div class="welcome">' + esc(login.welcome) + '</div>' : ''
