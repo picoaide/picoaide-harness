@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -41,6 +42,8 @@ describe('exportDiagnosticsZip', () => {
     const out = await exportDiagnosticsZip(dir, dir, { appVersion: APP_VERSION })
     expect(existsSync(out)).toBe(true)
     expect(out.endsWith('.zip')).toBe(true)
+    // 审计 2026-09:归档含日志/崩溃转储(可能带 token 碎片), 必须 0600。
+    expect(statSync(out).mode & 0o777).toBe(0o600)
 
     const zip = new AdmZip(out)
     const names = zip.getEntries().map(entry => entry.entryName)

@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  chmodSync,
   closeSync,
   constants,
   fstatSync,
@@ -206,7 +207,11 @@ async function createDiagnosticsArchive(data: DiagnosticExportWorkerData): Promi
   const temporaryPath = `${outPath}.tmp`
   try {
     await zip.writeZipPromise(temporaryPath)
+    // 审计 2026-09:AdmZip 默认以 0666 创建归档——诊断包含日志/崩溃转储
+    // (可能带 token/密码碎片), 必须收紧为 0600, 否则同机用户可读。
+    chmodSync(temporaryPath, 0o600)
     renameSync(temporaryPath, outPath)
+    chmodSync(outPath, 0o600)
   } catch (cause) {
     try {
       unlinkSync(temporaryPath)
