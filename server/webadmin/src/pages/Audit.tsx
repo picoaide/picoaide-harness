@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
+import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { Card } from '../components/ui/card'
 import { ScrollText, RefreshCw, Download } from 'lucide-react'
 
@@ -55,6 +56,24 @@ const FILTER_ACTIONS = Object.keys(ACTION_LABEL).sort()
 
 // 操作 → 徽章语义色:创建=绿 / 删除=红 / 更新=琥珀 / 授权=绿
 // 未收录进 ACTION_LABEL 的动作统一中性 outline,避免误撞成实心蓝(default)。
+/**
+ * 上传类审计条目的预览目标:服务端把明细固定写成 `name@version …`
+ * (sharedskills.UploadAuditDetail),审计页据此还原出归档预览端点,
+ * 审批人无需再去技能页翻找就能当场查看「上传了什么」。
+ */
+function previewTargetOf(action: string, detail: string): { base: string; key: string } | null {
+  const m = /^([A-Za-z0-9._-]+)@(\S+)/.exec(detail)
+  if (!m) return null
+  const [, name, version] = m
+  if (action === 'shared_skill_upload') {
+    return { base: `${ADMIN_API}/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, key: `${name}@${version}` }
+  }
+  if (action === 'skill_update' || action === 'skill_create') {
+    return { base: `${ADMIN_API}/skills/${encodeURIComponent(name)}`, key: `${name}@${version}` }
+  }
+  return null
+}
+
 function actionBadgeVariant(action: string): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' {
   if (!(action in ACTION_LABEL)) return 'outline'
   if (/create|enable|grant/.test(action)) return 'success'
@@ -108,6 +127,22 @@ export default function Audit() {
     setAppliedUser(filterUser.trim())
     setPage(1)
     load(1, filterAction, filterUser.trim())
+  }
+
+  // 审批预览:上传类审计条目可当场查看归档内容(2026-09-01)
+  const [preview, setPreview] = useState<ArchivePreviewData | null>(null)
+  const [previewKey, setPreviewKey] = useState('')
+  const [previewBase, setPreviewBase] = useState('')
+  const openPreview = async (base: string, key: string) => {
+    setPreviewBase(base)
+    setPreviewKey(key)
+    setPreview(null)
+    try {
+      setPreview(await request<ArchivePreviewData>(`${base}/preview`))
+    } catch (e) {
+      setError(`预览失败:${(e as Error).message}`)
+      setPreviewKey('')
+    }
   }
 
   const pages = Math.max(1, Math.ceil(total / 50))
@@ -201,6 +236,17 @@ export default function Audit() {
                 aria-label={l.detail}
               >
                 {l.detail}
+                {(() => {
+                  const target = previewTargetOf(l.action, l.detail)
+                  return target === null ? null : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-2 h-5 px-1.5 text-[11px]"
+                      onClick={() => void openPreview(target.base, target.key)}
+                    >预览</Button>
+                  )
+                })()}
               </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">{fmtTime(l.created_at)}</TableCell>
             </TableRow>
@@ -218,6 +264,15 @@ export default function Audit() {
           )}
         </TableBody>
       </Table>
+
+      <ArchivePreviewDialog
+        openKey={previewKey}
+        data={preview}
+        mainTitle="SKILL.md"
+        mainContent={preview?.skill_md ?? ''}
+        fileBase={previewBase}
+        onClose={() => { setPreviewKey(''); setPreview(null) }}
+      />
       </Card>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1, appliedAction, appliedUser)}>上一页</Button>

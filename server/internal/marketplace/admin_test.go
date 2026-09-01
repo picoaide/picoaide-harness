@@ -452,3 +452,50 @@ func TestAdminSkillUploadRejectsNonCompliantPackage(t *testing.T) {
 		t.Fatalf("skill = %+v err=%v", s, err)
 	}
 }
+
+// TestAdminSkillPreview: 管理员审批前必须能看到「上传了什么」——列出归档
+// 全部文件并逐个查看内容(此前只有组织共享库有此能力,市场技能没有)。
+func TestAdminSkillPreview(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
+		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	// 未上传归档时:明确告知不可预览,而不是空响应。
+	if w, _ := mreq(t, r, "GET", "/api/server/admin/skills/demo/preview", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("未上传归档的预览 = %d, want 404", w.Code)
+	}
+	archive := makeZip(t, map[string]string{
+		"SKILL.md":            skillMd("demo", "2.0.0"),
+		"references/notes.md": "# 参考资料\n\n审批时应当能看到这个文件。\n",
+	})
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
+		`{"version":"2.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("upload archive: %d", w.Code)
+	}
+	// 预览:文件清单 + SKILL.md 正文。
+	w, out := mreq(t, r, "GET", "/api/server/admin/skills/demo/preview", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("preview = %d %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{"SKILL.md", "references/notes.md", "demo 技能", "2.0.0"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preview 缺少 %q: %v", want, out)
+		}
+	}
+	// 逐文件查看。
+	w, _ = mreq(t, r, "GET", "/api/server/admin/skills/demo/file?path=references%2Fnotes.md", "", hdr)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "审批时应当能看到这个文件") {
+		t.Fatalf("file preview = %d %s", w.Code, w.Body.String())
+	}
+	// 越界路径必须拒绝。
+	if w, _ := mreq(t, r, "GET", "/api/server/admin/skills/demo/file?path=..%2F..%2Fetc%2Fpasswd", "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("路径越界 = %d, want 400", w.Code)
+	}
+	// 归档中不存在的文件 → 404。
+	if w, _ := mreq(t, r, "GET", "/api/server/admin/skills/demo/file?path=nope.md", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("不存在文件 = %d, want 404", w.Code)
+	}
+}

@@ -10,6 +10,7 @@ import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
+import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { Store, GitBranch, Download, Package, Activity } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
@@ -69,6 +70,10 @@ export default function Marketplace() {
   const [skillEdit, setSkillEdit] = useState<Skill | null>(null)
   const [skillForm, setSkillForm] = useState(EMPTY_SKILL_FORM)
   // 编辑已上架技能时上传新版压缩包(0040 上传模式)
+  // 审批预览:管理员上架前后都要能看到包内到底是什么(2026-09-01)
+  const [preview, setPreview] = useState<ArchivePreviewData | null>(null)
+  const [previewKey, setPreviewKey] = useState('')
+  const [previewName, setPreviewName] = useState('')
   const [replaceDialog, setReplaceDialog] = useState<Skill | null>(null)
   const [replaceFile, setReplaceFile] = useState<File | null>(null)
   const [replaceVersion, setReplaceVersion] = useState('')
@@ -209,6 +214,21 @@ export default function Marketplace() {
       setOpError(`上架失败:${err.message}`)
     } finally {
       setBusy(null)
+    }
+  }
+
+  // ---- 审批预览 ----
+  const openPreview = async (s2: Skill) => {
+    setPreviewName(s2.name)
+    setPreviewKey(`${s2.name}@${s2.version}`)
+    setPreview(null)
+    try {
+      const data = await request<ArchivePreviewData>(`${ADMIN_API}/skills/${encodeURIComponent(s2.name)}/preview`)
+      setPreview(data)
+    } catch (e) {
+      const err = e as Error
+      setOpError(`预览失败:${err.message}`)
+      setPreviewKey('')
     }
   }
 
@@ -389,6 +409,7 @@ export default function Marketplace() {
                     <span className="inline-flex items-center gap-1"><Activity className="h-3 w-3" />调用 {s.calls ?? 0}</span>
                   </div>
                   <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
+                    <Button variant="outline" onClick={() => void openPreview(s)}>预览</Button>
                     <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
                     <Button variant="outline" onClick={() => openReplace(s)}>上传新版</Button>
                     <Button variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
@@ -462,6 +483,15 @@ export default function Marketplace() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <ArchivePreviewDialog
+        openKey={previewKey}
+        data={preview}
+        mainTitle="SKILL.md"
+        mainContent={preview?.skill_md ?? ''}
+        fileBase={previewName ? `${ADMIN_API}/skills/${encodeURIComponent(previewName)}` : ''}
+        onClose={() => { setPreviewKey(''); setPreview(null) }}
+      />
 
       {/* 上传新版压缩包弹窗(0040) */}
       <Dialog open={replaceDialog !== null} onOpenChange={(v) => { if (!v) { setReplaceDialog(null); setDialogError('') } }}>

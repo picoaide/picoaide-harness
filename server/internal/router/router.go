@@ -201,6 +201,8 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "PUT", "/skills/:name", serverauth.PermMarketWrite, d.Market.UpdateSkillAdmin)
 	serverauth.AdminRoute(authed, "DELETE", "/skills/:name", serverauth.PermMarketWrite, d.Market.DeleteSkillAdmin)
 	serverauth.AdminRoute(authed, "POST", "/skills/:name/enable", serverauth.PermMarketWrite, d.Market.EnableSkillAdmin)
+	serverauth.AdminRoute(authed, "GET", "/skills/:name/preview", serverauth.PermMarketRead, d.Market.PreviewSkillAdmin)
+	serverauth.AdminRoute(authed, "GET", "/skills/:name/file", serverauth.PermMarketRead, d.Market.FileContentSkillAdmin)
 	serverauth.AdminRoute(authed, "GET", "/skills/:name/grants", serverauth.PermMarketRead, d.Market.ListSkillGrants)
 	serverauth.AdminRoute(authed, "PUT", "/skills/:name/grants", serverauth.PermMarketWrite, d.Market.ReplaceSkillGrants)
 	serverauth.AdminRoute(authed, "PUT", "/skills/:name/grant", serverauth.PermMarketWrite, d.Market.SetSkillGrant)

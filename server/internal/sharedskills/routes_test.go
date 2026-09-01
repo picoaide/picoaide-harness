@@ -758,3 +758,22 @@ func TestAdminSkillFileContent(t *testing.T) {
 		}
 	})
 }
+
+// TestUploadAuditDetailFormat: 审计明细格式是「服务端写入」与「审计页解析
+// 预览入口」之间的契约(webadmin Audit.tsx 用 ^name@version 正则还原预览
+// 端点)。改格式必须同步改前端,否则预览按钮会静默消失。
+func TestUploadAuditDetailFormat(t *testing.T) {
+	got := UploadAuditDetail("team-knowledge-wiki", "1.2.0", "团队知识库助手",
+		"13a1853c2594416cb14a5aeb12c3d911deb45e3d6f4c71ed3e2aaa28a5502cf4")
+	want := "team-knowledge-wiki@1.2.0 「团队知识库助手」 sha256:13a1853c"
+	if got != want {
+		t.Fatalf("detail = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, "team-knowledge-wiki@1.2.0") {
+		t.Fatal("前缀必须是 name@version(审计页据此解析预览入口)")
+	}
+	// 无标题/无校验和时仍保持可解析前缀。
+	if got := UploadAuditDetail("demo", "1.0.0", "", ""); got != "demo@1.0.0" {
+		t.Fatalf("minimal detail = %q", got)
+	}
+}
