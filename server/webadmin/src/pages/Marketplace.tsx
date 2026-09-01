@@ -474,19 +474,14 @@ export default function Marketplace() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label htmlFor="skill-version">版本</Label>
+                <Label htmlFor="skill-version">版本(须与包内 SKILL.md 的 version 一致)</Label>
                 <Input id="skill-version" value={skillForm.version} onChange={(e) => setSkillForm({ ...skillForm, version: e.target.value })} />
                 <p className="text-xs text-muted-foreground">压缩包模式必填</p>
               </div>
-              <div className="space-y-1">
-                <Label htmlFor="skill-author">作者</Label>
-                <Input id="skill-author" value={skillForm.author} onChange={(e) => setSkillForm({ ...skillForm, author: e.target.value })} />
-              </div>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="skill-desc">描述</Label>
-              <Input id="skill-desc" value={skillForm.description} onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })} />
-            </div>
+            <p className="text-xs text-muted-foreground">
+              展示名 / 描述 / 作者 / 分类一律取自包内 SKILL.md（包内即真相），此处无需填写
+            </p>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
             <Button className="w-full" disabled={busy !== null} onClick={saveSkill}>{busy === 'save-skill' ? '处理中…' : (skillEdit ? '保存修改' : '上架')}</Button>
           </div>

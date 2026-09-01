@@ -347,7 +347,7 @@ describe('uninstallSkill', () => {
 describe('packSkill', () => {
   const skillMd = (name: string, version?: string): string =>
     `---\nname: ${name}\ntitle: ${name} 技能\n${version === undefined ? '' : `version: ${version}\n`}` +
-    `description: 用于单测的技能包描述,需满足最短长度。\nauthor: tester\ncategory: 测试\n---\n\n正文\n`
+    `description: 用于单测的技能包描述,需满足最短长度。\nauthor: tester\ncategory: 测试\n---\n\n本技能用于单元测试:正文需要足够长才能通过空壳校验,因此这里补充两句完整的说明文字,确保长度稳稳超过五十字的下限要求。\n`
 
   it('takes the version from the package frontmatter (包内即真相)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pico-pack-'))
@@ -392,7 +392,7 @@ describe('溯源标记与本地改动检测', () => {
     const zip = new AdmZip()
     zip.addFile('SKILL.md', Buffer.from(
       `---\nname: ${name}\ntitle: ${name} 技能\nversion: 1.2.0\n` +
-      `description: 用于单测的技能包描述,需满足最短长度。\nauthor: t\ncategory: 测试\n---\n\n正文\n`))
+      `description: 用于单测的技能包描述,需满足最短长度。\nauthor: t\ncategory: 测试\n---\n\n本技能用于单元测试:正文需要足够长才能通过空壳校验,因此这里补充两句完整的说明文字,确保长度稳稳超过五十字的下限要求。\n`))
     zip.addFile('references/a.md', Buffer.from('参考\n'))
     return zip.toBuffer()
   }

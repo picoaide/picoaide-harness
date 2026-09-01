@@ -23,6 +23,7 @@ import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import { precheckSkillPackage } from './manifest-precheck.ts'
 import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Skill names must be a single safe directory segment. */
@@ -471,6 +472,15 @@ export async function packSkill(skillsDir: string, name: string, version?: strin
     throw new Error(`skill archive too large (${archive.byteLength} bytes)`)
   }
   await assertArchiveSafe(archive)
+  // 发布前本地预检(决策 §5.5):与服务端同一套规则的前 7 步,错误码一致。
+  // 在这里失败就不发请求——用户不必等一次网络往返才知道包不合规。
+  const raw = await readFile(join(dir, 'SKILL.md'), 'utf8')
+  const entryNames = zip.getEntries().map((e) => e.entryName)
+  const issues = precheckSkillPackage(raw, name, entryNames)
+  if (issues.length > 0) {
+    const first = issues[0]!
+    throw new Error(`${first.code}: ${first.message}${issues.length > 1 ? `（另有 ${issues.length - 1} 项问题）` : ''}`)
+  }
   const checksum = createHash('sha256').update(archive).digest('hex')
   const displayName = metaString(meta.name)
   const description = metaString(meta.description)

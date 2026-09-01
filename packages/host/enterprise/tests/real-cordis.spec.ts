@@ -22,7 +22,8 @@ describe('real 创造模式 preset round-trip', () => {
       await installPresetArchive({ name: 'my-creator', archive: packed.archive, checksum: packed.checksum, presetsDir: scratch })
 
       const installed = (await readdir(join(scratch, 'my-creator'))).sort()
-      expect(installed).toEqual(['agent.cordis.yml', 'preset.yml', 'skills'])
+      // .picoaide = 安装器写入的溯源标记(记录来源应用/版本/渠道)。
+      expect(installed).toEqual(['.picoaide', 'agent.cordis.yml', 'preset.yml', 'skills'])
       const skills = (await readdir(join(scratch, 'my-creator', 'skills'))).sort()
       expect(skills).toEqual(['cordis-plugin-development', 'editing-cordis-compositions'])
       await expect(stat(join(scratch, 'my-creator', 'skills', 'editing-cordis-compositions', 'SKILL.md'))).resolves.toBeDefined()

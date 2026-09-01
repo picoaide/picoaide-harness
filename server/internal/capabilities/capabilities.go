@@ -457,7 +457,10 @@ type ApprovalRow struct {
 	GrantsBase string `json:"grants_base"`
 	// Preview 是域预览端点(composition / SKILL.md),管理端弹窗复用。
 	PreviewPath string `json:"preview_path"`
-	// Conflict 决策 2026-08-25:该共享技能名与市场 skills 表同名(跨源互斥),
+	// Conflict 历史字段(决策 2026-08-25):曾用于标记「组织技能名与市场同名」。
+	// P2(迁移 0053)后一个 (kind, app_id) 只能属于一个渠道,这种冲突**结构上
+	// 不可能**再产生,因此恒为 false;字段保留仅为不破坏 webadmin 的旧响应契约。
+	// 原注释:该共享技能名与市场 skills 表同名(跨源互斥),
 	// approve 会被 409 阻断——管理端据此提示先处理市场技能。
 	Conflict bool `json:"conflict"`
 }
@@ -484,12 +487,8 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			for _, s := range rows {
 				// 决策 2026-08-25:跨源同名(市场技能表已有同名)标记冲突,
 				// 管理端提示且 approve 将被 409 阻断。
+				// P2 后跨渠道同名不可能并存,恒 false(见 ApprovalRow.Conflict 说明)。
 				conflict := false
-				if s.Name != "" {
-					if has, err := serverstore.SkillNameExists(db, s.Name); err == nil {
-						conflict = has
-					}
-				}
 				out = append(out, ApprovalRow{
 					Kind:        KindSkill,
 					Name:        s.Name,
