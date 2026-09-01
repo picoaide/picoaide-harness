@@ -596,3 +596,27 @@ func TestAdminSkillNormalizeIdempotent(t *testing.T) {
 		t.Fatalf("版本被空转升到 %s", s2.Version)
 	}
 }
+
+// TestAdminSkillFirstArchiveSameVersion: 新建技能行(git 模式,尚无归档)时
+// 管理员已填 version,首次上传**同版本号**的归档必须放行——递增校验只应在
+// 已发布过内容之后生效(2026-09-01 三路径端到端验证发现的真实缺陷)。
+func TestAdminSkillFirstArchiveSameVersion(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
+		`{"name":"demo","git_url":"https://example.com/x.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create: %d", w.Code)
+	}
+	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "1.0.0")})
+	w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
+		`{"version":"1.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("首次上传同版本号 = %d %s, want 200", w.Code, w.Body.String())
+	}
+	// 之后再传同版本同内容 → 才应被拒。
+	w, _ = mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
+		`{"version":"1.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "CONTENT_UNCHANGED") {
+		t.Fatalf("二次同内容上传 = %d %s, want 409 CONTENT_UNCHANGED", w.Code, w.Body.String())
+	}
+}

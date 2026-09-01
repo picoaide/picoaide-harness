@@ -186,14 +186,21 @@ jobs:
           CID="$(docker run -d --network "$NET" -p 127.0.0.1:18080:8080 "$IMAGE:$TAG" \
             -db-driver pg \
             -pg-dsn 'postgres://picoaide:verify@picoaide-verify-pg:5432/picoaide?sslmode=disable')"
-          for i in $(seq 1 30); do
+          # 冷启动要跑全部迁移(50+ 条)并建 usage 分区,受限 runner 上 30s 偏紧
+          # (2026-09-01 v2.5.11 因此假失败);放宽到 120s,并在失败时打印容器
+          # 日志——此前失败只有一行超时,零诊断信息。
+          for i in $(seq 1 120); do
             if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
               echo "healthz OK (${i}s)"
               exit 0
             fi
             sleep 1
           done
-          echo "::error::/healthz 未在 30s 内就绪"
+          echo "::error::/healthz 未在 120s 内就绪"
+          echo "----- server logs -----"
+          docker logs "$CID" 2>&1 | tail -50
+          echo "----- postgres logs -----"
+          docker logs "$PG_CID" 2>&1 | tail -20
           exit 1
 
       - name: Verify image manifest (amd64)
