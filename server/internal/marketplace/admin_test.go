@@ -79,11 +79,11 @@ func TestAdminSkillsCRUD(t *testing.T) {
 	defer db.Close()
 
 	w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr)
+		`{"name":"demo","version":"1.0.0"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d %s", w.Code, w.Body.String())
 	}
-	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills", `{"name":"../evil","git_url":"https://x"}`, hdr); w.Code != http.StatusBadRequest {
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills", `{"name":"../evil"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad skill name accepted: %d", w.Code)
 	}
 	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
@@ -120,7 +120,7 @@ func TestAdminSkillEnable(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr)
+		`{"name":"demo","version":"1.0.0"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d %s", w.Code, w.Body.String())
 	}
@@ -148,7 +148,7 @@ func TestAdminSkillDisableAudit(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/skills/demo", "", hdr); w.Code != http.StatusOK {
@@ -169,7 +169,7 @@ func TestAdminGrantsRejectUnknownFields(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	if _, err := serverstore.CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
@@ -190,30 +190,6 @@ func TestAdminGrantsRejectUnknownFields(t *testing.T) {
 	}
 }
 
-// 审计 A5-L10: 技能 Git 地址只允许 http/https 远程仓库(file:// 等拒绝)。
-func TestAdminSkillGitURLValidation(t *testing.T) {
-	r, db, hdr := marketAdminSetup(t)
-	defer db.Close()
-	for _, u := range []string{"file:///tmp/repo", "ftp://host/repo", "not-a-url", "https://"} {
-		w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-			`{"name":"demo","git_url":"`+u+`"}`, hdr)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("create with git_url %q = %d, want 400", u, w.Code)
-		}
-	}
-	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git"}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("create with https = %d", w.Code)
-	}
-	// 更新时把 git_url 改为非法值同样拒绝
-	w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/demo", `{"git_url":"file:///tmp/x"}`, hdr)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("update with file git_url = %d, want 400", w.Code)
-	}
-}
-
-// makeZip builds a minimal zip with the given entries (helper for the
-// upload-mode tests). zip 是新的上传格式。
 func makeZip(t *testing.T, entries map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -276,7 +252,7 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
@@ -288,11 +264,12 @@ func TestAdminSkillUploadArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Source != "upload" || s.Version != "2.0.0" || s.Checksum == "" {
+	if s.Version != "2.0.0" || s.Checksum == "" {
 		t.Fatalf("after upload = %+v", s)
 	}
-	if len(s.Archive) == 0 || s.GitURL != "" {
-		t.Fatalf("archive must be stored in DB and git cleared, got %+v", s)
+	// 0052:归档是唯一内容来源(git 模式已移除)。
+	if len(s.Archive) == 0 {
+		t.Fatalf("archive must be stored in DB, got %+v", s)
 	}
 	// 非法归档(缺 SKILL.md)→ 422。
 	bad := makeZip(t, map[string]string{"readme.md": "x"})
@@ -348,7 +325,7 @@ func TestAdminSkillUploadArchiveTarGzCompat(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"oldfmt","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"oldfmt","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	archive := makeTarGz(t, map[string]string{"SKILL.md": skillMd("oldfmt", "2.0.0")})
@@ -391,7 +368,7 @@ func TestAdminSkillUploadVersionGuard(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
@@ -417,7 +394,7 @@ func TestAdminSkillUploadRejectsNonCompliantPackage(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	post := func(md, formVersion string) (int, string) {
@@ -461,7 +438,7 @@ func TestAdminSkillPreview(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/demo.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	// 未上传归档时:明确告知不可预览,而不是空响应。
@@ -508,7 +485,7 @@ func TestAdminSkillNormalize(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"team-knowledge-wiki","git_url":"https://example.com/x.git","version":"1.0.0","author":"zhangsan"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"team-knowledge-wiki","version":"1.0.0","author":"zhangsan"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create skill: %d", w.Code)
 	}
 	// 直接把「线上那种」不合规归档塞进 DB(绕过上传校验,模拟历史数据)。
@@ -573,7 +550,7 @@ func TestAdminSkillNormalizeIdempotent(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/x.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create: %d", w.Code)
 	}
 	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
@@ -604,7 +581,7 @@ func TestAdminSkillFirstArchiveSameVersion(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
 	defer db.Close()
 	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills",
-		`{"name":"demo","git_url":"https://example.com/x.git","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		`{"name":"demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("create: %d", w.Code)
 	}
 	archive := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "1.0.0")})

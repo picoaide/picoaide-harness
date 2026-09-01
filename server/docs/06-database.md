@@ -59,7 +59,7 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 - 0023 新增 `models.offpeak_discount REAL`(低谷折扣率):结合 settings `usage.peak_windows`(高峰时段 JSON,北京时间,如 `[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]`)——高峰窗口外(空闲时段)费用 × 折扣率;DeepSeek 官方当前政策(2026-08-16 生效)高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%(含缓存命中价)。历史 16:30-00:30 错峰政策已废弃,可在网关页自行配置。
 
 ### skills(0005, 0040 起归档直存 DB + 统计)
-`id, name 唯一, version, description, author, git_url, git_ref(默认 main), checksum, enabled(0/1,下架置 0 不删行), created_at, updated_at`。bootstrap 建议清单只返回 enabled=1。
+`id, name 唯一, display_name(0051 展示名,来自包内 title), version, description, author, checksum, enabled(0/1,下架置 0 不删行), archive(0040 直存), downloads/calls, created_at, updated_at`;0052 移除 git_url/git_ref/source 三列(归档上传是唯一入口)。bootstrap 建议清单只返回 enabled=1。
 - 0040 新增 `source('git'|'upload')`、`archive BYTEA`(上传包直存 DB)、`downloads`/`calls` 计数:归档下载成功 downloads+1,客户端 telemetry 上报累加 calls。老 git 行下载走磁盘缓存只读回退,新上传一律写 DB。
 
 ### agent_presets(0032, 0033, 0035, 0037, 0041 + agent_preset_grants 0036)

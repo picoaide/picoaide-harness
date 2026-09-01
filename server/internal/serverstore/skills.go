@@ -6,18 +6,6 @@ import (
 	"time"
 )
 
-// SkillSource is how a marketplace skill's archive is produced: 'git' clones
-// and packs the repo (legacy), 'upload' serves the admin-uploaded archive
-// stored directly in the DB row.
-type SkillSource string
-
-const (
-	// SkillSourceGit preserves the legacy git clone + build path.
-	SkillSourceGit SkillSource = "git"
-	// SkillSourceUpload serves the admin-uploaded archive blob from the DB.
-	SkillSourceUpload SkillSource = "upload"
-)
-
 // Skill is a marketplace skill row.
 type Skill struct {
 	ID   int64
@@ -28,13 +16,9 @@ type Skill struct {
 	Version     string
 	Description string
 	Author      string
-	GitURL      string
-	GitRef      string
 	Checksum    string
 	Enabled     int
-	// Source is 'git' (legacy) or 'upload' (archive stored in Archive).
-	Source string
-	// Archive holds the uploaded archive bytes (only for Source=upload).
+	// Archive holds the uploaded archive bytes (归档上传是唯一入口)。
 	Archive []byte
 	// Downloads counts successful archive downloads.
 	Downloads int64
@@ -48,15 +32,15 @@ type Skill struct {
 // skillColumns includes the archive blob; used by single-row reads
 // (GetSkill) where the archive may be needed. List queries must use
 // skillListColumns (no blob) so the catalog never loads every archive.
-const skillColumns = "id, name, display_name, version, description, author, git_url, git_ref, checksum, enabled, source, archive, downloads, calls, created_at, updated_at"
+const skillColumns = "id, name, display_name, version, description, author, checksum, enabled, archive, downloads, calls, created_at, updated_at"
 
-const skillListColumns = "id, name, display_name, version, description, author, git_url, git_ref, checksum, enabled, source, downloads, calls, created_at, updated_at"
+const skillListColumns = "id, name, display_name, version, description, author, checksum, enabled, downloads, calls, created_at, updated_at"
 
 func scanSkill(row interface{ Scan(...any) error }) (*Skill, error) {
 	var s Skill
 	var createdAt, updatedAt any
 	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description, &s.Author,
-		&s.GitURL, &s.GitRef, &s.Checksum, &s.Enabled, &s.Source, &s.Archive,
+		&s.Checksum, &s.Enabled, &s.Archive,
 		&s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
@@ -69,7 +53,7 @@ func scanSkillList(row interface{ Scan(...any) error }) (*Skill, error) {
 	var s Skill
 	var createdAt, updatedAt any
 	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description, &s.Author,
-		&s.GitURL, &s.GitRef, &s.Checksum, &s.Enabled, &s.Source,
+		&s.Checksum, &s.Enabled,
 		&s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
@@ -101,12 +85,9 @@ func AddSkill(db *sql.DB, s *Skill) (int64, error) {
 	} else if conflict {
 		return 0, ErrConflict
 	}
-	if s.Source == "" {
-		s.Source = string(SkillSourceGit)
-	}
-	id, err := InsertID(db, `INSERT INTO skills (name, version, description, author, git_url, git_ref, checksum, enabled, source, archive, downloads, calls)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
-		s.Name, s.Version, s.Description, s.Author, s.GitURL, s.GitRef, s.Checksum, s.Enabled, s.Source, s.Archive)
+	id, err := InsertID(db, `INSERT INTO skills (name, version, description, author, checksum, enabled, archive, downloads, calls)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)`,
+		s.Name, s.Version, s.Description, s.Author, s.Checksum, s.Enabled, s.Archive)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -117,7 +98,7 @@ func AddSkill(db *sql.DB, s *Skill) (int64, error) {
 }
 
 // GetSkill returns the skill by unique name or ErrNotFound. The row carries
-// the archive blob when Source=upload (single-row read; list reads use
+// the archive blob (single-row read; list reads use
 // ListSkills which skips the blob).
 func GetSkill(db *sql.DB, name string) (*Skill, error) {
 	s, err := scanSkill(db.QueryRow(`SELECT `+skillColumns+` FROM skills WHERE name = ?`, name))
@@ -128,12 +109,11 @@ func GetSkill(db *sql.DB, name string) (*Skill, error) {
 }
 
 // UpdateSkill updates all mutable fields by id; returns ErrNotFound. Archive
-// is written only when non-nil (git-mode metadata edits must not clobber an
-// upload-mode blob).
+// is written only when non-nil(元数据编辑不得清空已上传的归档)。
 func UpdateSkill(db *sql.DB, s *Skill) error {
-	res, err := db.Exec(`UPDATE skills SET version=?, description=?, author=?, git_url=?, git_ref=?, checksum=?, enabled=?, source=?, archive=COALESCE(?, archive), updated_at=`+NowExpr()+`
+	res, err := db.Exec(`UPDATE skills SET version=?, description=?, author=?, checksum=?, enabled=?, archive=COALESCE(?, archive), updated_at=`+NowExpr()+`
 		WHERE id=?`,
-		s.Version, s.Description, s.Author, s.GitURL, s.GitRef, s.Checksum, s.Enabled, s.Source,
+		s.Version, s.Description, s.Author, s.Checksum, s.Enabled,
 		anyBytes(s.Archive), s.ID)
 	if err != nil {
 		return err
@@ -145,13 +125,12 @@ func UpdateSkill(db *sql.DB, s *Skill) error {
 	return nil
 }
 
-// ReplaceSkillArchive switches a skill to Source=upload with the given
-// version/checksum/archive and clears the git source (the archive is now the
-// single source of truth). Returns ErrNotFound when the name is absent.
+// ReplaceSkillArchive stores a new archive with its version/checksum
+// (归档是唯一内容来源)。Returns ErrNotFound when the name is absent.
 func ReplaceSkillArchive(db *sql.DB, name, version, checksum string, archive []byte) error {
-	res, err := db.Exec(`UPDATE skills SET source=?, version=?, checksum=?, archive=?, git_url='', git_ref='',
+	res, err := db.Exec(`UPDATE skills SET version=?, checksum=?, archive=?,
 		updated_at=`+NowExpr()+` WHERE name=?`,
-		SkillSourceUpload, version, checksum, archive, name)
+		version, checksum, archive, name)
 	if err != nil {
 		return err
 	}

@@ -216,7 +216,7 @@ func TestCrossSourceSkillNameConflict(t *testing.T) {
 	}
 
 	// 1) 市场已有同名技能 -> shared_skills 上传(新建/重提)阻断。
-	if _, err := AddSkill(db, &Skill{Name: "codeql-audit", Version: "2.0.0", Enabled: 1, GitURL: "https://example.com/repo.git"}); err != nil {
+	if _, err := AddSkill(db, &Skill{Name: "codeql-audit", Version: "2.0.0", Enabled: 1}); err != nil {
 		t.Fatalf("market create: %v", err)
 	}
 	if _, err := CreateSharedSkill(db, newSharedSkill("codeql-audit", "1.0.0", "alice")); err != ErrConflict {
@@ -230,7 +230,7 @@ func TestCrossSourceSkillNameConflict(t *testing.T) {
 	if _, err := CreateSharedSkill(db, newSharedSkill("org-only-x", "1.0.0", "bob")); err != nil {
 		t.Fatalf("shared create: %v", err)
 	}
-	if _, err := AddSkill(db, &Skill{Name: "org-only-x", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/repo2.git"}); err != ErrConflict {
+	if _, err := AddSkill(db, &Skill{Name: "org-only-x", Version: "1.0.0", Enabled: 1}); err != ErrConflict {
 		t.Fatalf("market create under shared name = %v, want ErrConflict", err)
 	}
 
@@ -238,13 +238,13 @@ func TestCrossSourceSkillNameConflict(t *testing.T) {
 	if _, err := CreateSharedSkill(db, newSharedSkill("fresh-org", "1.0.0", "carol")); err != nil {
 		t.Fatalf("fresh shared create: %v", err)
 	}
-	if _, err := AddSkill(db, &Skill{Name: "fresh-market", Version: "1.0.0", Enabled: 1, GitURL: "https://example.com/repo3.git"}); err != nil {
+	if _, err := AddSkill(db, &Skill{Name: "fresh-market", Version: "1.0.0", Enabled: 1}); err != nil {
 		t.Fatalf("fresh market create: %v", err)
 	}
 
 	// 4) 共享库同 name 多版本(共享库内部)不受跨源影响——但 market 同名时
 	// 仍阻断(名称互斥不看版本)。
-	if _, err := AddSkill(db, &Skill{Name: "fresh-org", Version: "9.9.9", Enabled: 1, GitURL: "https://example.com/repo4.git"}); err != ErrConflict {
+	if _, err := AddSkill(db, &Skill{Name: "fresh-org", Version: "9.9.9", Enabled: 1}); err != ErrConflict {
 		t.Fatalf("market create under shared name v9 = %v, want ErrConflict", err)
 	}
 }

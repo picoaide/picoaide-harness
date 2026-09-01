@@ -2,57 +2,27 @@ package marketplace
 
 import (
 	"database/sql"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	git "github.com/go-git/go-git/v5"
-	gitobj "github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// createSkillRepo builds a real local git repo (metadata.yaml + SKILL.md)
-// so the archive endpoint can clone and package it.
-func createSkillRepo(t *testing.T, dir, name string) string {
+// skillArchiveBytes 构造一个合规技能归档(0052:git 模式移除后,内容一律
+// 来自上传的归档)。
+func skillArchiveBytes(t *testing.T, name string) []byte {
 	t.Helper()
-	repo := filepath.Join(dir, name)
-	if err := os.MkdirAll(repo, 0755); err != nil {
-		t.Fatal(err)
-	}
-	meta := fmt.Sprintf("name: %s\nversion: 1.0.0\nauthor: test\ndescription: test skill\n", name)
-	if err := os.WriteFile(filepath.Join(repo, "metadata.yaml"), []byte(meta), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "SKILL.md"), []byte("# "+name+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	r, err := git.PlainInit(repo, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := r.Worktree()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Add("."); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Commit("seed", &git.CommitOptions{Author: &gitobj.Signature{Name: "test", Email: "test@local", When: time.Now()}}); err != nil {
-		t.Fatal(err)
-	}
-	return repo
+	md := "---\nname: " + name + "\ntitle: " + name + " 技能\nversion: 1.0.0\n" +
+		"description: 权限测试使用的技能包,描述需要满足最短长度要求。\nauthor: test\ncategory: 测试\n---\n\n" +
+		"本技能是权限测试夹具,正文需要足够长才能通过空壳校验,因此补充这段说明文字。\n"
+	return makeZip(t, map[string]string{"SKILL.md": md})
 }
 
-// marketUserSetup seeds one normal user and one skill; returns the router,
-// db, the user's bearer token and user id.
 func marketUserSetup(t *testing.T) (http.Handler, *sql.DB, string, int64, string) {
 	t.Helper()
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
@@ -66,17 +36,16 @@ func marketUserSetup(t *testing.T) (http.Handler, *sql.DB, string, int64, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := createSkillRepo(t, t.TempDir(), "data-extract")
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "data-extract", Version: "1.0.0", Description: "数据提取",
-		Author: "test", GitURL: "file://" + repo, GitRef: "master", Enabled: 1,
+		Author: "test", Enabled: 1, Archive: skillArchiveBytes(t, "data-extract"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	NewAPI(db, t.TempDir()).RegisterRoutes(r)
-	return r, db, token, uid, repo
+	return r, db, token, uid, ""
 }
 
 func bearerGet(t *testing.T, r http.Handler, path, token string) *httptest.ResponseRecorder {
@@ -192,7 +161,7 @@ func TestAdminGrantAPI(t *testing.T) {
 	}
 	// seed a skill
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
-		Name: "data-extract", Version: "1.0.0", GitURL: "https://x/data-extract", Enabled: 1,
+		Name: "data-extract", Version: "1.0.0", Enabled: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +238,7 @@ func TestAdminReplaceGrantsAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
-		Name: "data-extract", Version: "1.0.0", GitURL: "https://x/data-extract", Enabled: 1,
+		Name: "data-extract", Version: "1.0.0", Enabled: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}

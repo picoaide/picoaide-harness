@@ -7,8 +7,8 @@ const mockRequest = vi.mocked(request)
 const confirmSpy = vi.fn(() => true)
 
 const SKILLS = [
-  { id: 1, name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', git_url: 'https://x/data-extract', git_ref: 'main', enabled: true },
-  { id: 2, name: 'legacy', version: '0.9.0', description: '旧版', author: 'seed', git_url: 'https://x/legacy', git_ref: 'main', enabled: false },
+  { id: 1, name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', enabled: true },
+  { id: 2, name: 'legacy', version: '0.9.0', description: '旧版', author: 'seed', enabled: false },
 ]
 const DEPTS = [{ id: 1, name: '研发部', parent_id: 0 }, { id: 2, name: '人事部', parent_id: 0 }]
 
@@ -110,7 +110,7 @@ describe('Marketplace 商城页', () => {
       '/api/server/admin/skills/data-extract',
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ name: 'data-extract', version: '2.0.0', description: '数据提取', author: 'seed', git_url: 'https://x/data-extract', git_ref: 'main' }),
+        body: JSON.stringify({ name: 'data-extract', version: '2.0.0', description: '数据提取', author: 'seed' }),
       }),
     )
   })

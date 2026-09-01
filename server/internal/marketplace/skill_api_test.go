@@ -5,21 +5,16 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -88,15 +83,17 @@ func hasErrCode(w *httptest.ResponseRecorder, code string) bool {
 func TestSkillAPI(t *testing.T) {
 	r, db, token, _ := newTestRouter(t)
 
-	src := makeGitRepo(t, filepath.Join(t.TempDir(), "skill-src"))
+	// 0052:git 源已移除,内容一律来自 DB 中的归档;校验和与归档原子写入,
+	// 夹具同样必须用真实 sha256(下载响应头据此让客户端校验完整性)。
+	demoArchive := skillArchiveBytes(t, "demo")
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "demo", Version: "1.0.0", Description: "demo skill",
-		Author: "pico", GitURL: src, GitRef: "main", Enabled: 1,
+		Author: "pico", Enabled: 1, Archive: demoArchive, Checksum: sha256Hex(demoArchive),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
-		Name: "hidden", Version: "1.0.0", GitURL: src, Enabled: 0,
+		Name: "hidden", Version: "1.0.0", Enabled: 0, Archive: skillArchiveBytes(t, "hidden"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -157,11 +154,13 @@ func TestSkillAPI(t *testing.T) {
 	if got.Checksum != want {
 		t.Fatalf("persisted checksum = %q, want %q", got.Checksum, want)
 	}
+	// 0052:metadata.yaml 是旧 git 构建的产物;上传归档的清单在 SKILL.md
+	// frontmatter 里,归档只需带 SKILL.md。
 	names := tarNames(t, w.Body.Bytes())
-	if !names["metadata.yaml"] || !names["SKILL.md"] {
+	if !names["SKILL.md"] {
 		t.Fatalf("archive entries = %v", names)
 	}
-	// second request: cache hit, same checksum
+	// second request: 同一份 DB 归档,校验和稳定
 	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive cache status = %d", w.Code)
@@ -187,81 +186,63 @@ func TestSkillAPI(t *testing.T) {
 // C-6: updating a skill's version invalidates the cached repo, so the next
 // download rebuilds from the new source instead of serving a stale archive
 // (or failing the version check forever with 502).
-func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
+func TestSkillNewArchiveServedImmediately(t *testing.T) {
+	// 0052:git clone 缓存已随 git 模式一并移除。此处验证新语义——管理员
+	// 上传新版归档后,客户端下载立刻拿到新版本内容,不会残留旧包。
 	db, cleanup := serverstore.NewTestDB(t)
-	defer cleanup()
-	if err := serverstore.ApplyMigrations(db); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if _, err := serverstore.CreateUserWithPassword(db, "boss", "pw123456"); err != nil {
-		t.Fatal(err)
-	}
-	u, _ := serverstore.GetUserByUsername(db, "boss")
-	u.IsAdmin = true
-	if err := serverstore.UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	uid, err := serverstore.CreateUserWithPassword(db, "alice", "secret123")
+	t.Cleanup(cleanup)
+	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "1000")
+	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	uid, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456")
 	if err != nil {
-		t.Fatal(err)
-	}
-	// admin view for API-behavior assertions (permission filtering is
-	// covered in perm_test.go)
-	au, _ := serverstore.GetUserByUsername(db, "alice")
-	au.IsAdmin = true
-	if err := serverstore.UpdateUser(db, au); err != nil {
 		t.Fatal(err)
 	}
 	token, err := serverauth.IssueToken(db, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-
+	if _, err := serverstore.CreateUserWithPassword(db, "boss", "pw123456"); err != nil {
+		t.Fatal(err)
+	}
+	boss, _ := serverstore.GetUserByUsername(db, "boss")
+	boss.IsAdmin = true
+	if err := serverstore.UpdateUser(db, boss); err != nil {
+		t.Fatal(err)
+	}
 	gin.SetMode(gin.TestMode)
-	cacheDir := filepath.Join(t.TempDir(), "skills-cache")
-	api := NewAPI(db, cacheDir)
 	r := gin.New()
-	api.RegisterRoutes(r)
+	cacheDir := t.TempDir()
+	NewAPI(db, cacheDir).RegisterRoutes(r)
 	serverauth.RegisterAdminRoutes(r, db)
 	RegisterAdminRoutes(r, db, cacheDir)
 
-	src := makeGitRepo(t, filepath.Join(t.TempDir(), "skill-src"))
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
-		Name: "demo", Version: "1.0.0", GitURL: src, GitRef: "main", Enabled: 1,
+		Name: "demo", Version: "1.0.0", Enabled: 1,
+		Archive: skillArchiveBytes(t, "demo"), Checksum: "seed",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// grant alice so the admin-view archive download is unambiguous
 	if err := serverstore.GrantSkill(db, "demo", "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
 	w := doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
-	if w.Code != http.StatusOK {
-		t.Fatalf("v1 download: %d %s", w.Code, w.Body.String())
-	}
-	if v := w.Header().Get("X-Skill-Version"); v != "1.0.0" {
-		t.Fatalf("v1 version header = %q", v)
+	if w.Code != http.StatusOK || w.Header().Get("X-Skill-Version") != "1.0.0" {
+		t.Fatalf("v1 download = %d version=%q", w.Code, w.Header().Get("X-Skill-Version"))
 	}
 
-	// source moves to v2, then the admin bumps the DB row (the cache
-	// invalidation lives in the admin update path)
-	rewriteRepoVersion(t, src, "2.0.0")
-	w, _ = mreq(t, r, "PUT", "/api/server/admin/skills/demo", `{"version":"2.0.0"}`, adminHdr(t, r))
-	if w.Code != http.StatusOK {
-		t.Fatalf("admin update: %d %s", w.Code, w.Body.String())
+	// 管理员上传 v2 归档(唯一的内容入口)。
+	v2 := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "2.0.0")})
+	body := `{"version":"2.0.0","archive":"` + base64.StdEncoding.EncodeToString(v2) + `"}`
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills/demo/archive", body, adminHdr(t, r)); w.Code != http.StatusOK {
+		t.Fatalf("upload v2: %d %s", w.Code, w.Body.String())
 	}
 
-	// the download must serve the NEW package, not the stale cached clone
 	w = doReq(r, "GET", "/api/client/v2/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
-		t.Fatalf("v2 download = %d, body %s; want 200 (stale cache must be invalidated)", w.Code, w.Body.String())
+		t.Fatalf("v2 download = %d %s", w.Code, w.Body.String())
 	}
 	if v := w.Header().Get("X-Skill-Version"); v != "2.0.0" {
-		t.Fatalf("stale cache served %q, want 2.0.0", v)
-	}
-	if names := tarNames(t, w.Body.Bytes()); !names["metadata.yaml"] {
-		t.Fatal("v2 archive missing metadata.yaml")
+		t.Fatalf("下载到的仍是旧版本 %q, want 2.0.0", v)
 	}
 }
 
@@ -285,43 +266,6 @@ func adminHdr(t *testing.T, r http.Handler) map[string]string {
 }
 
 // rewriteRepoVersion bumps metadata.yaml's version in a committed git repo.
-func rewriteRepoVersion(t *testing.T, dir, version string) {
-	t.Helper()
-	metaPath := filepath.Join(dir, "metadata.yaml")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := regexp.MustCompile(`version: .*`).ReplaceAllString(string(data), "version: "+version)
-	if err := os.WriteFile(metaPath, []byte(out), 0644); err != nil {
-		t.Fatal(err)
-	}
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Add("metadata.yaml"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Commit("bump to "+version, &git.CommitOptions{
-		Author: &object.Signature{Name: "t", Email: "t@t", When: time.Now()},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// the clone pulls branch "main": point it at the new commit
-	h, err := repo.Head()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), h.Hash())); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func tarNames(t *testing.T, data []byte) map[string]bool {
 	t.Helper()
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))

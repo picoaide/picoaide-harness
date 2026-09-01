@@ -22,7 +22,7 @@
 ## 3. 技能包格式(skill_pack.go)
 
 - **上传模式(推荐,0040)**:管理端「上传新版」提交 `.zip`,归档直接存 `skills.archive`(DB 行),`source='upload'`;下载不再走磁盘 clone/打包。
-- **Git 模式(兼容)**:上架时填 `git_url` + `git_ref`;服务端 clone 到 `data/skills-cache/`,校验仓库内元数据后构建归档 `cacheDir/<name>-<version>.zip`(缓存命中直接返回)。
+- **归档上传(唯一入口,0052)**:上架时上传 zip,服务端严格校验包内 SKILL.md 后直存 DB(git 源模式已移除)。
 - 仓库内元数据(YAML):`name` / `version` / `author` / `description`;归档 version 必须与元数据一致,否则构建失败。
 - 技能内容:Markdown 指令文件等(无独立执行环境);客户端安装后解析为指令注入系统提示词(`## Skills` 段),为 Agent 提供领域知识/流程/工具使用说明。
 - **格式兼容**:服务端校验/预览/下载按魔数嗅探——zip 为新格式(推荐),gzipped tar(旧归档/旧库行)仍可上传、审核与安装;下载响应头(Content-Type/文件名)跟随实际格式。
