@@ -2,10 +2,7 @@ package serverstore
 
 import (
 	"database/sql"
-	"errors"
 	"time"
-
-	"github.com/picoaide/picoaide/internal/util"
 )
 
 // AgentPresetStatus is the review state of one shared agent preset.
@@ -45,334 +42,261 @@ type AgentPreset struct {
 	UpdatedAt time.Time
 }
 
-func scanAgentPreset(row interface{ Scan(...any) error }) (*AgentPreset, error) {
-	var p AgentPreset
-	var createdAt, updatedAt any
-	if err := row.Scan(&p.ID, &p.Name, &p.DisplayName, &p.Description, &p.Version,
-		&p.Author, &p.Checksum, &p.Status, &p.Reason, &p.Quality,
-		&p.Archive, &p.Downloads, &createdAt, &updatedAt); err != nil {
-		return nil, err
+// ---------------------------------------------------------------------------
+// P2 适配层(迁移 0053/0054):智能体预设与技能共用 apps/app_releases
+// (kind=agent, channel=org),保留原有签名与语义。旧表 agent_presets 兼容期
+// 内只读保留,P5 下线。
+// ---------------------------------------------------------------------------
+
+// releaseToPreset 把统一模型的 Release 投影成旧 DTO。
+// 注意 Author 语义:旧 DTO 的 Author 是**上传者**(归属判断依赖它),对应 Publisher。
+func releaseToPreset(r Release) AgentPreset {
+	return AgentPreset{
+		ID: r.ID, Name: r.AppID, DisplayName: r.Title, Description: r.Description,
+		Version: r.Version, Author: r.Publisher, Checksum: r.Checksum,
+		Status: AgentPresetStatus(r.Status), Reason: r.Reason, Quality: r.Quality,
+		Archive: r.Archive, Downloads: r.Downloads,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	p.CreatedAt = parseSQLTime(createdAt)
-	p.UpdatedAt = parseSQLTime(updatedAt)
-	return &p, nil
 }
 
-// agentPresetColumns includes the archive blob; single-row reads (by
-// name+version) where the archive may be needed.
-const agentPresetColumns = "id, name, display_name, description, version, author, checksum, status, reason, quality, archive, downloads, created_at, updated_at"
-
-// agentPresetListColumns excludes the archive blob: list views (admin table,
-// employee catalog) must not load every upload into memory.
-const agentPresetListColumns = "id, name, display_name, description, version, author, checksum, status, reason, quality, downloads, created_at, updated_at"
-
-func scanAgentPresetList(row interface{ Scan(...any) error }) (*AgentPreset, error) {
-	var p AgentPreset
-	var createdAt, updatedAt any
-	if err := row.Scan(&p.ID, &p.Name, &p.DisplayName, &p.Description, &p.Version,
-		&p.Author, &p.Checksum, &p.Status, &p.Reason, &p.Quality,
-		&p.Downloads, &createdAt, &updatedAt); err != nil {
-		return nil, err
-	}
-	p.CreatedAt = parseSQLTime(createdAt)
-	p.UpdatedAt = parseSQLTime(updatedAt)
-	return &p, nil
-}
-
-// CreateAgentPreset inserts a pending row; returns ErrDuplicate for an
-// existing name+version (any status).
-func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
-	id, err := InsertID(db, `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status, archive)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status, p.Archive)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return 0, ErrDuplicate
-		}
-		return 0, err
-	}
-	return id, nil
-}
-
-// CreateAgentPresetCapped inserts a fresh pending row when the author is
-// below pendingCap, atomically: the INSERT itself re-counts the author's
-// pending rows, so concurrent uploads can never exceed the cap. Returns
-// ErrTooManyPending when the author is at the cap and ErrDuplicate when the
-// name+version is taken (any status).
-func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64, error) {
-	q := `INSERT INTO agent_presets (name, display_name, description, version, author, checksum, status, archive)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE (SELECT COUNT(*) FROM agent_presets WHERE author = ? AND status = ?) < ?`
-	args := []any{
-		p.Name, p.DisplayName, p.Description, p.Version, p.Author, p.Checksum, p.Status, p.Archive,
-		p.Author, AgentPresetPending, pendingCap,
-	}
-	var id int64
-	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrTooManyPending
-		}
-		if isUniqueViolation(err) {
-			return 0, ErrDuplicate
-		}
-		return 0, err
-	}
-	return id, nil
-}
-
-// GetAgentPreset returns the row by name (latest version when multiple).
-// 审计 2026-08-25 D-1:SQL 的 `ORDER BY version DESC` 是字符串字典序
-// ("1.9.0" > "1.10.0" 错序);改为 Go 层按 CompareSemVer 数字感知比较取最大。
-func GetAgentPreset(db *sql.DB, name string) (*AgentPreset, error) {
-	rows, err := db.Query(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ?`, name)
+// latestPresetRelease 取一个预设的展示版本:最高 approved;没有则取最新一条。
+func latestPresetRelease(db *sql.DB, name string) (*Release, error) {
+	list, err := ListReleases(db, AppKindAgent, name)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var best *AgentPreset
-	for rows.Next() {
-		p, err := scanAgentPreset(rows)
-		if err != nil {
-			return nil, err
+	var best, newest *Release
+	for i := range list {
+		r := list[i]
+		if r.DeletedAt != nil {
+			continue
 		}
-		if best == nil || util.CompareSemVer(p.Version, best.Version) > 0 {
-			best = p
+		if newest == nil || r.CreatedAt.After(newest.CreatedAt) {
+			newest = &list[i]
+		}
+		if r.Status != ReleaseStatusApproved {
+			continue
+		}
+		if best == nil || compareVersionStrings(r.Version, best.Version) > 0 {
+			best = &list[i]
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if best == nil {
+		best = newest
 	}
 	if best == nil {
 		return nil, ErrNotFound
 	}
-	return best, nil
+	return GetRelease(db, AppKindAgent, name, best.Version)
 }
 
-// GetAgentPresetByVersion returns the row by name+version or ErrNotFound.
+// CreateAgentPreset 新建一个预设版本(App 身份 + Release 快照)。
+func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
+	appTitle := p.DisplayName
+	if appTitle == "" {
+		appTitle = p.Name
+	}
+	if err := UpsertApp(db, &App{
+		Kind: AppKindAgent, AppID: p.Name, Title: appTitle, Description: p.Description,
+		Owner: p.Author, Channel: AppChannelOrg, Enabled: 1,
+	}); err != nil {
+		return 0, err
+	}
+	status := string(p.Status)
+	if status == "" {
+		status = ReleaseStatusPending
+	}
+	version := p.Version
+	if version == "" {
+		version = "1.0.0"
+	}
+	id, err := CreateRelease(db, &Release{
+		Kind: AppKindAgent, AppID: p.Name, Version: version, Title: p.DisplayName,
+		Description: p.Description, Author: p.Author, Publisher: p.Author,
+		Checksum: p.Checksum, Archive: p.Archive, Status: status, Reason: p.Reason, Quality: p.Quality,
+	})
+	if err != nil && isUniqueViolation(err) {
+		return 0, ErrDuplicate
+	}
+	return id, err
+}
+
+// CreateAgentPresetCapped 同上,附带每作者待审配额。
+func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64, error) {
+	if pendingCap > 0 {
+		n, err := PendingReleaseCount(db, p.Author)
+		if err != nil {
+			return 0, err
+		}
+		if n >= pendingCap {
+			return 0, ErrTooManyPending
+		}
+	}
+	return CreateAgentPreset(db, p)
+}
+
+// GetAgentPreset 取展示版本(含归档)。
+func GetAgentPreset(db *sql.DB, name string) (*AgentPreset, error) {
+	r, err := latestPresetRelease(db, name)
+	if err != nil {
+		return nil, err
+	}
+	out := releaseToPreset(*r)
+	return &out, nil
+}
+
+// GetAgentPresetByVersion 取指定版本(含归档)。
 func GetAgentPresetByVersion(db *sql.DB, name, version string) (*AgentPreset, error) {
-	p, err := scanAgentPreset(db.QueryRow(`SELECT `+agentPresetColumns+` FROM agent_presets WHERE name = ? AND version = ?`, name, version))
-	if errors.Is(err, sql.ErrNoRows) {
+	r, err := GetRelease(db, AppKindAgent, name, version)
+	if err != nil {
+		return nil, err
+	}
+	if r.DeletedAt != nil {
 		return nil, ErrNotFound
 	}
-	return p, err
+	out := releaseToPreset(*r)
+	return &out, nil
 }
 
-// ListAgentPresets returns every row (admin view), oldest first, optionally
-// filtered by status ("" = all).
+// ListAgentPresets 管理端清单(status 为空 = 全部)。
 func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
-	q := `SELECT ` + agentPresetListColumns + ` FROM agent_presets`
-	args := []any{}
-	if status != "" {
-		q += " WHERE status = ?"
-		args = append(args, status)
-	}
-	q += " ORDER BY name, version"
-	rows, err := db.Query(q, args...)
+	list, err := ListReleasesByStatus(db, AppKindAgent, status)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []AgentPreset
-	for rows.Next() {
-		p, err := scanAgentPresetList(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *p)
+	out := make([]AgentPreset, 0, len(list))
+	for _, r := range list {
+		out = append(out, releaseToPreset(r))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-// ListVisibleAgentPresets returns the rows an employee may see: approved
-// rows the caller is GRANTED plus the caller's own rows in any status
-// (nobody else's non-approved rows are ever visible). Strict default:
-// approved but not granted stays invisible.
+// ListVisibleAgentPresets 员工可见清单:approved 且已授权 + 自己上传的全部状态。
 func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]AgentPreset, error) {
-	rows, err := db.Query(`SELECT `+agentPresetListColumns+` FROM agent_presets
-		WHERE author = ?
-		OR (status = ? AND name IN (`+qmarks(len(granted))+`))
-		ORDER BY name, version`, append([]any{author, AgentPresetApproved}, toStringArgs(granted)...)...)
+	list, err := ListReleasesByStatus(db, AppKindAgent, "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []AgentPreset
-	for rows.Next() {
-		p, err := scanAgentPresetList(rows)
-		if err != nil {
-			return nil, err
+	ok := map[string]bool{}
+	for _, g := range granted {
+		ok[g] = true
+	}
+	out := []AgentPreset{}
+	for _, r := range list {
+		if r.Publisher == author || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
+			out = append(out, releaseToPreset(r))
 		}
-		out = append(out, *p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-// SetAgentPresetStatus transitions the row to status (approve/reject/back to
-// pending on resubmit) in one atomic UPDATE. Approving clears any stored
-// rejection reason; rejecting stores the admin's reason, which is returned
-// to the author and cleared again on resubmit. Updates the name's LATEST
-// version only (legacy single-param callers).
+// SetAgentPresetStatus 审核展示版本。
 func SetAgentPresetStatus(db *sql.DB, name string, status AgentPresetStatus, reason string) error {
-	_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, updated_at=`+NowExpr()+`
-		WHERE id = (SELECT id FROM agent_presets WHERE name=? ORDER BY version DESC, id DESC LIMIT 1)`,
-		status, reason, name)
-	return err
+	r, err := latestPresetRelease(db, name)
+	if err != nil {
+		return err
+	}
+	return SetReleaseStatus(db, AppKindAgent, name, r.Version, string(status), reason)
 }
 
-// SetAgentPresetStatusByVersion transitions one name+version row.
-// 语义(0037):approve 保留 quality;reject/pending 清空 quality。
+// SetAgentPresetStatusByVersion 审核指定版本。
 func SetAgentPresetStatusByVersion(db *sql.DB, name, version string, status AgentPresetStatus, reason string) error {
-	if status == AgentPresetApproved {
-		_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, updated_at=`+NowExpr()+` WHERE name=? AND version=?`,
-			status, reason, name, version)
-		return err
-	}
-	_, err := db.Exec(`UPDATE agent_presets SET status=?, reason=?, quality='', updated_at=`+NowExpr()+` WHERE name=? AND version=?`,
-		status, reason, name, version)
-	return err
+	return SetReleaseStatus(db, AppKindAgent, name, version, string(status), reason)
 }
 
-// UpdateAgentPresetResubmit resets a rejected row to pending for resubmission
-// of the same name, replacing display metadata, archive checksum, and clearing
-// the stored rejection reason. Updates the name's LATEST version only.
-func UpdateAgentPresetResubmit(db *sql.DB, name, displayName, description, checksum string) error {
-	_, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
-		updated_at=`+NowExpr()+`
-		WHERE id = (SELECT id FROM agent_presets WHERE name=? ORDER BY version DESC, id DESC LIMIT 1) AND status=?`,
-		displayName, description, checksum, AgentPresetPending, name, AgentPresetRejected)
-	return err
-}
-
-// UpdateAgentPresetResubmitByVersion resets one rejected name+version row
-// owned by the given author (author 校验,审计 2026-08-25 G1 深度防御)。
-func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, description, checksum, author string) error {
-	res, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, status=?, reason='',
-		updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=? AND author=?`,
-		displayName, description, checksum, AgentPresetPending, name, version, AgentPresetRejected, author)
-	if err != nil {
-		return err
-	}
-	// 审计 2026-08-25 复查【2】:0 行 = 行被并发 approve/rejected 状态已变,
-	// 静默 201 会掩盖状态不一致;返回 ErrNotFound 让路由明确报错。
-	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateAgentPresetResubmitByVersionWithArchive 是重提的原子变体:同一 UPDATE
-// 内替换 metadata/checksum/status 与 archive 列,消除此前
-// 「UpdateAgentPresetResubmitByVersion + SetAgentPresetArchive 两步」间的
-// 脏行窗口(行已置 pending 但归档仍旧;2026-09-01 审计)。
-func UpdateAgentPresetResubmitByVersionWithArchive(db *sql.DB, name, version, displayName, description, checksum, author string, archive []byte) error {
-	res, err := db.Exec(`UPDATE agent_presets SET display_name=?, description=?, checksum=?, archive=?, status=?, reason='',
-		updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=? AND author=?`,
-		displayName, description, checksum, archive, AgentPresetPending, name, version, AgentPresetRejected, author)
-	if err != nil {
-		return err
-	}
-	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// DeleteAgentPreset removes ALL rows of the name; returns ErrNotFound when
-// none existed.
+// DeleteAgentPreset 删除展示版本(软删:版本号永久占位)。
 func DeleteAgentPreset(db *sql.DB, name string) error {
-	res, err := db.Exec(`DELETE FROM agent_presets WHERE name=?`, name)
+	r, err := latestPresetRelease(db, name)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return SoftDeleteRelease(db, AppKindAgent, name, r.Version)
 }
 
-// DeleteAgentPresetByVersion removes one name+version row; returns
-// ErrNotFound when absent.
+// DeleteAgentPresetByVersion 删除指定版本(软删)。
 func DeleteAgentPresetByVersion(db *sql.DB, name, version string) error {
-	res, err := db.Exec(`DELETE FROM agent_presets WHERE name=? AND version=?`, name, version)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return SoftDeleteRelease(db, AppKindAgent, name, version)
 }
 
-// ValidAgentQuality reports whether q is a legal quality tag (0037).
-func ValidAgentQuality(q string) bool {
-	return q == "" || q == "official" || q == "featured"
-}
+// ValidAgentQuality 质量标记合法值。
+func ValidAgentQuality(q string) bool { return q == "" || q == "official" || q == "featured" }
 
-// SetAgentPresetQuality sets the quality tag (”|'official'|'featured') on one
-// name+version row. Only approved rows may carry a tag; returns ErrNotFound
-// when the version is absent or not approved.
+// SetAgentPresetQuality 质量标记(仅 approved 版本)。
 func SetAgentPresetQuality(db *sql.DB, name, version, quality string) error {
 	if !ValidAgentQuality(quality) {
 		return ErrValidation
 	}
-	res, err := db.Exec(`UPDATE agent_presets SET quality=?, updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=?`, quality, name, version, AgentPresetApproved)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return SetReleaseQuality(db, AppKindAgent, name, version, quality)
 }
 
-// SetAgentPresetArchive stores the uploaded archive blob in the row (0041:
-// DB 直存)。Returns ErrNotFound when the row is absent.
+// SetAgentPresetArchive 覆盖某版本归档(数据修复/测试播种用;发布路径不调用)。
 func SetAgentPresetArchive(db *sql.DB, name, version string, archive []byte) error {
-	res, err := db.Exec(`UPDATE agent_presets SET archive=?, updated_at=`+NowExpr()+`
-		WHERE name=? AND version=?`, archive, name, version)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// GetAgentPresetArchive returns the stored archive bytes. ErrNotFound when
-// the row is absent; nil when the row exists but has no DB archive yet
-// (pre-0041 rows keep their disk fallback in the handler).
-func GetAgentPresetArchive(db *sql.DB, name, version string) ([]byte, error) {
-	var b []byte
-	err := db.QueryRow(`SELECT archive FROM agent_presets WHERE name=? AND version=?`, name, version).Scan(&b)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// ClearAgentPresetArchive clears the DB archive on row removal/update.
-func ClearAgentPresetArchive(db *sql.DB, name, version string) error {
-	_, err := db.Exec(`UPDATE agent_presets SET archive=NULL WHERE name=? AND version=?`, name, version)
+	_, err := db.Exec(`UPDATE app_releases SET archive = ?, size = ?, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND version = ?`, archive, len(archive), AppKindAgent, name, version)
 	return err
 }
 
-// IncrementAgentPresetDownload bumps the preset download counter.
-func IncrementAgentPresetDownload(db *sql.DB, name, version string) (bool, error) {
-	res, err := db.Exec(`UPDATE agent_presets SET downloads = downloads + 1 WHERE name=? AND version=?`, name, version)
+// GetAgentPresetArchive 取归档字节。
+func GetAgentPresetArchive(db *sql.DB, name, version string) ([]byte, error) {
+	r, err := GetRelease(db, AppKindAgent, name, version)
 	if err != nil {
+		return nil, err
+	}
+	return r.Archive, nil
+}
+
+// ClearAgentPresetArchive 清空归档字节。
+func ClearAgentPresetArchive(db *sql.DB, name, version string) error {
+	_, err := db.Exec(`UPDATE app_releases SET archive = NULL, size = 0, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND version = ?`, AppKindAgent, name, version)
+	return err
+}
+
+// IncrementAgentPresetDownload 下载计数。
+func IncrementAgentPresetDownload(db *sql.DB, name, version string) (bool, error) {
+	if err := IncrementReleaseDownload(db, AppKindAgent, name, version); err != nil {
 		return false, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return true, nil
+}
+
+// UpdateAgentPresetResubmit 兼容旧签名:覆盖展示版本的元数据并回到 pending。
+// 版本快照原则下生产不再走覆盖重提(必须升版本号),此函数仅供数据修复与测试。
+func UpdateAgentPresetResubmit(db *sql.DB, name, displayName, description, checksum string) error {
+	r, err := latestPresetRelease(db, name)
+	if err != nil {
+		return err
+	}
+	return UpdateAgentPresetResubmitByVersion(db, name, r.Version, displayName, description, checksum, r.Publisher)
+}
+
+// UpdateAgentPresetResubmitByVersion 覆盖指定版本的元数据并回到 pending。
+func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, description, checksum, author string) error {
+	res, err := db.Exec(`UPDATE app_releases SET title = ?, description = ?, checksum = ?,
+		publisher = ?, status = 'pending', reason = '', quality = '', updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND version = ?`,
+		displayName, description, checksum, author, AppKindAgent, name, version)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateAgentPresetResubmitByVersionWithArchive 同上并覆盖归档。
+func UpdateAgentPresetResubmitByVersionWithArchive(db *sql.DB, name, version, displayName, description, checksum, author string, archive []byte) error {
+	res, err := db.Exec(`UPDATE app_releases SET title = ?, description = ?, checksum = ?,
+		publisher = ?, archive = ?, size = ?, status = 'pending', reason = '', quality = '',
+		updated_at = `+NowExpr()+` WHERE kind = ? AND app_id = ? AND version = ?`,
+		displayName, description, checksum, author, archive, len(archive), AppKindAgent, name, version)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

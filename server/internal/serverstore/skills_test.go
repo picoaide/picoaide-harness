@@ -27,7 +27,8 @@ func TestSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Version != "1.0.0" || s.Enabled != 1 || s.Description != "demo skill" {
+	// P2:版本号随内容一起产生——只登记元数据的 App 没有版本(Version="")。
+	if s.Version != "" || s.Enabled != 1 || s.Description != "demo skill" {
 		t.Fatalf("GetSkill = %+v", s)
 	}
 

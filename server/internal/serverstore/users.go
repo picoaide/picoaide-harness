@@ -405,17 +405,13 @@ func DeleteUser(db *sql.DB, id int64) error {
 		}
 	}
 	// 同名用户重建不得继承旧授权(权限体系:用户级授权随用户删除级联)
-	if _, err := tx.Exec("DELETE FROM skill_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
+	if _, err := tx.Exec("DELETE FROM app_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
 		return err
 	}
 	// 审计修复 2026-P (H1): 0036 共享资源授权表同样随用户删除级联——
 	// shared_skill_grants / agent_preset_grants 的 user 级授权若不清除,
 	// 同名用户重建后会继承上一同名用户对共享技能/Agent 的授权(越权)。
-	for _, grantTable := range []string{"shared_skill_grants", "agent_preset_grants"} {
-		if _, err := tx.Exec("DELETE FROM "+grantTable+" WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
-			return err
-		}
-	}
+	// P2:三张授权表已合并为 app_grants,上面的 DELETE 已覆盖全部能力类型。
 	// 删除担任部门主管的用户:清空其主管身份(审计 M1),否则悬空
 	// leader_id 会卡死该部门的后续更新(UpdateDepartment 校验主管存在)。
 	if _, err := tx.Exec("UPDATE groups SET leader_id = 0 WHERE leader_id = ?", id); err != nil {

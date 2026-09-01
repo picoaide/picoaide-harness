@@ -98,82 +98,49 @@ func scanSharedSkillList(row interface{ Scan(...any) error }) (*SharedSkill, err
 // with the given name (any status). Used by the marketplace admin's
 // create-skill conflict check (决策 2026-08-25:市场与组织合并为「市场」后,
 // 同名技能跨源互斥——admin 上架市场技能前须确认共享库无同名)。
-func SharedSkillNameExists(db *sql.DB, name string) (bool, error) {
-	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM shared_skills WHERE name = ?`, name).Scan(&n)
+// ---------------------------------------------------------------------------
+// P2 适配层(迁移 0053/0054):以下函数保留原有签名与语义,内部改为读写统一的
+// apps/app_releases。旧表 shared_skills 在兼容期内只读保留,P5 再下线。
+// 这样做的好处是三条上传路径与全部审核/授权 handler 无需改动即可切换存储。
+// ---------------------------------------------------------------------------
+
+// releaseToShared 把统一模型的 Release 投影成旧 DTO。
+func releaseToShared(r Release) SharedSkill {
+	return SharedSkill{
+		ID: r.ID, Name: r.AppID, DisplayName: r.Title, Version: r.Version,
+		// 旧 DTO 的 Author 语义是**上传者**(全部归属/可见性判断都依赖它),
+		// 对应统一模型的 Publisher;包内署名 Release.Author 不参与这些判断。
+		Description: r.Description, Author: r.Publisher, Checksum: r.Checksum,
+		Status: SharedSkillStatus(r.Status), Reason: r.Reason, Quality: r.Quality,
+		Archive: r.Archive, Downloads: r.Downloads, Calls: r.Calls,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+}
+
+// orgSkillReleases 取组织渠道技能的全部版本(排除软删)。
+func orgSkillReleases(db *sql.DB, status string) ([]Release, error) {
+	all, err := ListReleasesByStatus(db, AppKindSkill, status)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return n > 0, nil
-}
-
-// CreateSharedSkill inserts a pending row (unique name+version); returns
-// ErrDuplicate when that exact version already exists in any status.
-// 决策 2026-08-25:上传即阻断跨源同名——marketplace skills 表已存在同名技能
-// 时返回 ErrConflict(市场与组织合并为「市场」后的互斥约束,DAO 层实现,
-// SQLite/PG 通用,不上 DB 触发器)。
-func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
-	if conflict, err := SkillNameExists(db, s.Name); err != nil {
-		return 0, err
-	} else if conflict {
-		return 0, ErrConflict
-	}
-	id, err := InsertID(db, `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status, archive)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status, s.Archive)
+	apps, err := ListApps(db, AppKindSkill, AppChannelOrg)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return 0, ErrDuplicate
-		}
-		return 0, err
+		return nil, err
 	}
-	return id, nil
+	org := map[string]bool{}
+	for _, a := range apps {
+		org[a.AppID] = true
+	}
+	out := []Release{}
+	for _, r := range all {
+		if org[r.AppID] {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
-// CreateSharedSkillCapped inserts a fresh pending row when the author is below
-// pendingCap, atomically (the INSERT re-counts pending rows for the author).
-// Returns ErrTooManyPending when at the cap; ErrDuplicate when name+version
-// exist (any status); ErrConflict when the marketplace skills table already
-// has a same-name skill (决策 2026-08-25:上传即阻断跨源同名)。
-func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64, error) {
-	if conflict, err := SkillNameExists(db, s.Name); err != nil {
-		return 0, err
-	} else if conflict {
-		return 0, ErrConflict
-	}
-	q := `INSERT INTO shared_skills (name, display_name, version, description, author, checksum, status, archive)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE (SELECT COUNT(*) FROM shared_skills WHERE author = ? AND status = ?) < ?`
-	args := []any{
-		s.Name, s.DisplayName, s.Version, s.Description, s.Author, s.Checksum, s.Status, s.Archive,
-		s.Author, SharedSkillPending, pendingCap,
-	}
-
-	var id int64
-	if err := db.QueryRow(q+" RETURNING id", args...).Scan(&id); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrTooManyPending
-		}
-		if isUniqueViolation(err) {
-			return 0, ErrDuplicate
-		}
-		return 0, err
-	}
-	return id, nil
-}
-
-// GetSharedSkill returns the row by name+version or ErrNotFound. The row
-// carries the archive blob (single-row read; list views use list columns).
-func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
-	s, err := scanSharedSkill(db.QueryRow(`SELECT `+sharedSkillColumns+` FROM shared_skills WHERE name = ? AND version = ?`, name, version))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return s, err
-}
-
-// SharedSkillVersionInfo 是同名技能已有版本的摘要(不含归档 blob),供发布期
-// 做「版本必须递增」与「内容未变更」判定(决策 2026-09-01 §四 不可变性规则)。
+// SharedSkillVersionInfo 是同名技能已有版本的摘要,供发布期做版本语义判定。
 type SharedSkillVersionInfo struct {
 	Version  string
 	Checksum string
@@ -181,215 +148,190 @@ type SharedSkillVersionInfo struct {
 	Author   string
 }
 
-// ListSharedSkillVersions returns every existing version of one shared skill
-// name, whatever its review status. 被拒的版本号同样占位——版本一经提交即
-// 永久占用,不可复用(决策 2026-09-01 D3)。
-func ListSharedSkillVersions(db *sql.DB, name string) ([]SharedSkillVersionInfo, error) {
-	rows, err := db.Query(`SELECT version, checksum, status, author FROM shared_skills WHERE name = ?`, name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SharedSkillVersionInfo
-	for rows.Next() {
-		var v SharedSkillVersionInfo
-		var status string
-		if err := rows.Scan(&v.Version, &v.Checksum, &status, &v.Author); err != nil {
-			return nil, err
+// SharedSkillNameExists reports whether any release exists under that name.
+func SharedSkillNameExists(db *sql.DB, name string) (bool, error) {
+	if _, err := GetApp(db, AppKindSkill, name); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
 		}
-		v.Status = SharedSkillStatus(status)
-		out = append(out, v)
-	}
-	return out, rows.Err()
-}
-
-// ListSharedSkills returns every row (admin view), oldest first, optionally
-// filtered by status ("" = all). List columns exclude the archive blob.
-func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
-	q := `SELECT ` + sharedSkillListColumns + ` FROM shared_skills`
-	args := []any{}
-	if status != "" {
-		q += " WHERE status = ?"
-		args = append(args, status)
-	}
-	q += " ORDER BY name, version"
-	rows, err := db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SharedSkill
-	for rows.Next() {
-		s, err := scanSharedSkillList(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *s)
-	}
-	return out, rows.Err()
-}
-
-// ListVisibleSharedSkills returns the rows an employee may see: approved
-// rows the caller is GRANTED (user or via groups) plus the caller's own rows
-// in any status (an author always sees their own submissions). Strict
-// default: approved but not granted stays invisible. List columns (no blob).
-func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]SharedSkill, error) {
-	rows, err := db.Query(`SELECT `+sharedSkillListColumns+` FROM shared_skills
-		WHERE author = ?
-		OR (status = ? AND name IN (`+qmarks(len(granted))+`))
-		ORDER BY name, version`, append([]any{author, SharedSkillApproved}, toStringArgs(granted)...)...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SharedSkill
-	for rows.Next() {
-		s, err := scanSharedSkillList(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *s)
-	}
-	return out, rows.Err()
-}
-
-// SetSharedSkillArchive stores the uploaded archive blob in the row (0040:
-// DB 直存). Returns ErrNotFound when the row is absent.
-func SetSharedSkillArchive(db *sql.DB, name, version string, archive []byte) error {
-	res, err := db.Exec(`UPDATE shared_skills SET archive=?, updated_at=`+NowExpr()+`
-		WHERE name=? AND version=?`, archive, name, version)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// GetSharedSkillArchive returns the stored archive bytes. ErrNotFound when
-// the row is absent; nil when the row exists but has no DB archive yet
-// (pre-0040 rows keep their disk fallback in the handler).
-func GetSharedSkillArchive(db *sql.DB, name, version string) ([]byte, error) {
-	var b []byte
-	err := db.QueryRow(`SELECT archive FROM shared_skills WHERE name=? AND version=?`, name, version).Scan(&b)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// DeleteSharedSkillArchive clears the DB archive on row removal (disk cache
-// cleanup is handled by the caller).
-func DeleteSharedSkillArchive(db *sql.DB, name, version string) error {
-	_, err := db.Exec(`UPDATE shared_skills SET archive=NULL WHERE name=? AND version=?`, name, version)
-	return err
-}
-
-// IncrementSharedSkillDownload bumps the shared-skill download counter.
-func IncrementSharedSkillDownload(db *sql.DB, name, version string) (bool, error) {
-	res, err := db.Exec(`UPDATE shared_skills SET downloads = downloads + 1 WHERE name=? AND version=?`, name, version)
-	if err != nil {
 		return false, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return true, nil
 }
 
-// SetSharedSkillStatus transitions the row (approve/reject/resubmit) and
-// stores/clears the rejection reason in one atomic UPDATE.
-// 语义(0037):approve 保留 admin 预置的 quality;reject 与重提(pending)清空
-// quality——质量标记只属于 approved 内容,被拒/重提后不再携带。
-func SetSharedSkillStatus(db *sql.DB, name, version string, status SharedSkillStatus, reason string) error {
-	if status == SharedSkillApproved {
-		_, err := db.Exec(`UPDATE shared_skills SET status=?, reason=?, updated_at=`+NowExpr()+`
-			WHERE name=? AND version=?`, status, reason, name, version)
-		return err
+// GetSharedSkill 取一个版本(含归档)。
+func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
+	r, err := GetRelease(db, AppKindSkill, name, version)
+	if err != nil {
+		return nil, err
 	}
-	_, err := db.Exec(`UPDATE shared_skills SET status=?, reason=?, quality='', updated_at=`+NowExpr()+`
-		WHERE name=? AND version=?`, status, reason, name, version)
+	if r.DeletedAt != nil {
+		return nil, ErrNotFound
+	}
+	out := releaseToShared(*r)
+	return &out, nil
+}
+
+// ListSharedSkillVersions 返回同名技能的全部版本摘要(含被拒/软删:版本号
+// 一经使用即永久占位)。
+func ListSharedSkillVersions(db *sql.DB, name string) ([]SharedSkillVersionInfo, error) {
+	list, err := ListReleases(db, AppKindSkill, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SharedSkillVersionInfo, 0, len(list))
+	for _, r := range list {
+		out = append(out, SharedSkillVersionInfo{
+			Version: r.Version, Checksum: r.Checksum,
+			Status: SharedSkillStatus(r.Status), Author: r.Publisher,
+		})
+	}
+	return out, nil
+}
+
+// ListSharedSkills 管理端清单(status 为空 = 全部)。
+func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
+	list, err := orgSkillReleases(db, status)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SharedSkill, 0, len(list))
+	for _, r := range list {
+		out = append(out, releaseToShared(r))
+	}
+	return out, nil
+}
+
+// ListVisibleSharedSkills 员工可见清单:approved 且已授权 + 自己上传的全部状态。
+func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]SharedSkill, error) {
+	list, err := orgSkillReleases(db, "")
+	if err != nil {
+		return nil, err
+	}
+	ok := map[string]bool{}
+	for _, g := range granted {
+		ok[g] = true
+	}
+	out := []SharedSkill{}
+	for _, r := range list {
+		if r.Publisher == author || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
+			out = append(out, releaseToShared(r))
+		}
+	}
+	return out, nil
+}
+
+// GetSharedSkillArchive 取归档字节。
+func GetSharedSkillArchive(db *sql.DB, name, version string) ([]byte, error) {
+	r, err := GetRelease(db, AppKindSkill, name, version)
+	if err != nil {
+		return nil, err
+	}
+	return r.Archive, nil
+}
+
+// IncrementSharedSkillDownload 下载计数。
+func IncrementSharedSkillDownload(db *sql.DB, name, version string) (bool, error) {
+	if err := IncrementReleaseDownload(db, AppKindSkill, name, version); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SetSharedSkillStatus 审核(只改状态位,不碰内容)。
+func SetSharedSkillStatus(db *sql.DB, name, version string, status SharedSkillStatus, reason string) error {
+	return SetReleaseStatus(db, AppKindSkill, name, version, string(status), reason)
+}
+
+// DeleteSharedSkill 删除一个版本 = 软删(版本号永久占位,不可复用)。
+func DeleteSharedSkill(db *sql.DB, name, version string) error {
+	return SoftDeleteRelease(db, AppKindSkill, name, version)
+}
+
+// DeleteSharedSkillArchive 清空某版本的归档字节(版本行与审核记录保留)。
+func DeleteSharedSkillArchive(db *sql.DB, name, version string) error {
+	_, err := db.Exec(`UPDATE app_releases SET archive = NULL, size = 0, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND version = ?`, AppKindSkill, name, version)
 	return err
 }
 
-// UpdateSharedSkillResubmit resets a rejected row to pending for resubmission
-// of the same name+version, replacing metadata/checksum and clearing reason.
-// author 校验(审计 2026-08-25 G1 深度防御):只有行作者本人可重提。
-func UpdateSharedSkillResubmit(db *sql.DB, name, version, displayName, description, checksum, author string) error {
-	res, err := db.Exec(`UPDATE shared_skills SET display_name=?, description=?, checksum=?, status=?, reason='',
-		updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=? AND author=?`,
-		displayName, description, checksum, SharedSkillPending, name, version, SharedSkillRejected, author)
-	if err != nil {
-		return err
-	}
-	// 审计 2026-08-25 复查【2】:0 行 = 并发状态已变,静默成功会掩盖不一致。
-	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateSharedSkillResubmitWithArchive 是重提的原子变体:同一 UPDATE 内替换
-// metadata/checksum/status 与 archive 列,消除此前「UpdateSharedSkillResubmit
-// + SetSharedSkillArchive 两步」间的脏行窗口(行已置 pending 但归档仍旧——
-// 第二步失败即不一致;2026-09-01 审计)。
-func UpdateSharedSkillResubmitWithArchive(db *sql.DB, name, version, displayName, description, checksum, author string, archive []byte) error {
-	res, err := db.Exec(`UPDATE shared_skills SET display_name=?, description=?, checksum=?, archive=?, status=?, reason='',
-		updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=? AND author=?`,
-		displayName, description, checksum, archive, SharedSkillPending, name, version, SharedSkillRejected, author)
-	if err != nil {
-		return err
-	}
-	if n, err2 := res.RowsAffected(); err2 == nil && n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// DeleteSharedSkill removes the row; returns ErrNotFound when absent.
-func DeleteSharedSkill(db *sql.DB, name, version string) error {
-	res, err := db.Exec(`DELETE FROM shared_skills WHERE name=? AND version=?`, name, version)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// SharedSkillPendingCount returns the author's pending row count.
+// SharedSkillPendingCount 某作者的待审数量。
 func SharedSkillPendingCount(db *sql.DB, author string) (int, error) {
-	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM shared_skills WHERE author=? AND status=?`, author, SharedSkillPending).Scan(&n)
-	return n, err
+	return PendingReleaseCount(db, author)
 }
 
-// ValidSharedQuality reports whether q is a legal quality tag (0037).
-func ValidSharedQuality(q string) bool {
-	return q == "" || q == "official" || q == "featured"
-}
+// ValidSharedQuality 质量标记合法值。
+func ValidSharedQuality(q string) bool { return q == "" || q == "official" || q == "featured" }
 
-// SetSharedSkillQuality sets the quality tag (”|'official'|'featured') on one
-// name+version row. Only approved rows may carry a tag; returns ErrNotFound
-// when the version is absent or not approved.
+// SetSharedSkillQuality 质量标记(仅 approved 版本)。
 func SetSharedSkillQuality(db *sql.DB, name, version, quality string) error {
 	if !ValidSharedQuality(quality) {
 		return ErrValidation
 	}
-	res, err := db.Exec(`UPDATE shared_skills SET quality=?, updated_at=`+NowExpr()+`
-		WHERE name=? AND version=? AND status=?`, quality, name, version, SharedSkillApproved)
+	return SetReleaseQuality(db, AppKindSkill, name, version, quality)
+}
+
+// CreateSharedSkill 新建一个组织渠道技能版本(App 身份 + Release 快照)。
+// 保留此签名供播种与测试使用;生产上传路径走 appstore.Publish(统一发布内核)。
+func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
+	appTitle := s.DisplayName
+	if appTitle == "" {
+		appTitle = s.Name
+	}
+	// 跨渠道同名互斥(旧 skills/shared_skills 双向阻断的等价约束)。
+	if existing, err := GetApp(db, AppKindSkill, s.Name); err == nil && existing.Channel != AppChannelOrg {
+		return 0, ErrConflict
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return 0, err
+	}
+	if err := UpsertApp(db, &App{
+		Kind: AppKindSkill, AppID: s.Name, Title: appTitle, Description: s.Description,
+		Owner: s.Author, Channel: AppChannelOrg, Enabled: 1,
+	}); err != nil {
+		return 0, err
+	}
+	status := string(s.Status)
+	if status == "" {
+		status = ReleaseStatusPending
+	}
+	id, err := CreateRelease(db, &Release{
+		// Release.Title 保留调用方给的展示名原值(可为空),DTO 往返一致。
+		Kind: AppKindSkill, AppID: s.Name, Version: s.Version, Title: s.DisplayName,
+		Description: s.Description, Author: s.Author, Publisher: s.Author,
+		Checksum: s.Checksum, Archive: s.Archive, Status: status, Reason: s.Reason,
+		Quality: s.Quality,
+	})
+	if err != nil && isUniqueViolation(err) {
+		return 0, ErrDuplicate
+	}
+	return id, err
+}
+
+// CreateSharedSkillCapped 同上,附带每作者待审配额(超出返回 ErrTooManyPending)。
+func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64, error) {
+	if pendingCap > 0 {
+		n, err := PendingReleaseCount(db, s.Author)
+		if err != nil {
+			return 0, err
+		}
+		if n >= pendingCap {
+			return 0, ErrTooManyPending
+		}
+	}
+	return CreateSharedSkill(db, s)
+}
+
+// SetSharedSkillArchive 覆盖某版本的归档。
+// 注意:版本快照不可变(决策 D3),该函数仅供数据修复/测试播种使用,
+// 生产发布路径不会调用它。
+func SetSharedSkillArchive(db *sql.DB, name, version string, archive []byte) error {
+	res, err := db.Exec(`UPDATE app_releases SET archive = ?, size = ?, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND version = ?`,
+		archive, len(archive), AppKindSkill, name, version)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
 	return nil

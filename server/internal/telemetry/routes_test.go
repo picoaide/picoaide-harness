@@ -43,7 +43,7 @@ func post(r *gin.Engine, token, path, body string) *httptest.ResponseRecorder {
 
 func TestReportSkillCall(t *testing.T) {
 	r, db, token := newTestEnv(t)
-	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql", Version: "1.0.0", Enabled: 1}); err != nil {
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql", Version: "1.0.0", Enabled: 1, Archive: []byte("pkg")}); err != nil {
 		t.Fatal(err)
 	}
 	// 市场技能:name-only 上报命中。
