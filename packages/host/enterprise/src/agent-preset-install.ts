@@ -19,8 +19,9 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from '
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
+import AdmZip from 'adm-zip'
 import { parse as parseYaml } from 'yaml'
-import { assertArchiveSafe, MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
@@ -101,21 +102,20 @@ export interface PresetPackResult {
   description?: string | undefined
   /** sha256 hex of the packed archive (reported to the gateway). */
   checksum: string
-  /** The packed gzipped tar bytes. */
+  /** The packed zip bytes. */
   archive: Buffer
 }
 
 /**
- * Pack a locally authored preset's WHOLE directory into a gzipped tar whose
- * entries are the directory's contents (the archive root IS the preset
- * directory).
+ * Pack a locally authored preset's WHOLE directory into a zip whose entries
+ * are the directory's contents (the archive root IS the preset directory).
  *
  * A preset is its directory, not one file: the shipped 创造模式 preset
  * references `skills/` inside its own directory
  * (`new URL('skills/', baseUrl)`), and a copy of it carries that directory —
  * a composition-only pack would install a preset whose skill root is absent.
- * Symlinks are packed as entries and then refused by the safety scan below,
- * so an archive can never smuggle a reference to a file outside the preset.
+ * Symlinks are refused by the safety scan, so an archive can never smuggle a
+ * reference to a file outside the preset.
  * @param presetsDir - the preset root (`<dshHome>/.agent-presets`).
  * @param name - the preset id.
  * @returns the archive plus metadata, or throws with a user-facing message.
@@ -130,14 +130,9 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
   })
   const meta = await readPresetMeta(dir)
 
-  const chunks: Buffer[] = []
-  await new Promise<void>((resolveP, rejectP) => {
-    const stream = tar.c({ gzip: true, cwd: dir, portable: true, follow: false }, ['.'])
-    stream.on('data', (c: Buffer) => chunks.push(c))
-    stream.on('error', rejectP)
-    stream.on('end', () => resolveP())
-  })
-  const archive = Buffer.concat(chunks)
+  const zip = new AdmZip()
+  await addDirToZip(zip, dir, dir, '')
+  const archive = zip.toBuffer()
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
     throw new Error(`preset archive too large (${archive.byteLength} bytes)`)
   }
@@ -152,6 +147,26 @@ export async function packPreset(presetsDir: string, name: string): Promise<Pres
     ...meta.description === undefined ? {} : { description: meta.description.slice(0, MAX_PRESET_META_LEN) },
     checksum,
     archive,
+  }
+}
+
+/** Recursively add a directory tree into an AdmZip (relative entry names). */
+async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: string): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    const abs = join(dir, entry.name)
+    const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`
+    if (entry.isSymbolicLink()) {
+      throw new Error(`symlink refused in package: ${rel}`)
+    }
+    if (entry.isDirectory()) {
+      zip.addFile(`${rel}/`, Buffer.alloc(0), '', 0o755)
+      await addDirToZip(zip, root, abs, rel)
+    } else if (entry.isFile()) {
+      const data = await readFile(abs)
+      const st = await stat(abs)
+      zip.addFile(rel, data, '', st.mode & 0o777)
+    }
   }
 }
 
@@ -211,8 +226,8 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
 
   const staging = await mkdtemp(join(presetsDir, `.install-${name}-`))
   try {
-    const archiveFile = join(staging, 'archive.tar.gz')
-    await writeFile(archiveFile, archive, { mode: 0o600 })
+    const format = archiveFormat(archive)
+    if (format === null) throw new Error('unsupported archive format')
 
     // Pass 1: reject unsafe entries and bound the unpacked size before any
     // extraction (the same scan the packer runs on the uploading machine).
@@ -221,7 +236,13 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
     // Pass 2: extract into the staging subdir.
     const unpackRoot = join(staging, 'unpacked')
     await mkdir(unpackRoot, { recursive: true })
-    await tar.x({ file: archiveFile, cwd: unpackRoot })
+    if (format === 'zip') {
+      await extractZip(archive, unpackRoot)
+    } else {
+      const archiveFile = join(staging, 'archive.tar.gz')
+      await writeFile(archiveFile, archive, { mode: 0o600 })
+      await tar.x({ file: archiveFile, cwd: unpackRoot })
+    }
 
     // The archive must carry a top-level composition (flat bundle).
     await stat(join(unpackRoot, COMPOSITION_FILE)).catch(() => {

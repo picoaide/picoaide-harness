@@ -20,8 +20,9 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from '
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
+import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { assertSafeEntryPath, assertArchiveSafe, LINK_TYPES, MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES } from './archive-util.ts'
+import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /** Skill names must be a single safe directory segment. */
@@ -86,47 +87,26 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
   const staging = await mkdtemp(join(skillsDir, `.install-${name}-`))
 
   try {
-    const archiveFile = join(staging, 'archive.tar.gz')
-    await writeFile(archiveFile, archive, { mode: 0o600 })
+    const format = archiveFormat(archive)
+    if (format === null) throw new Error('unsupported archive format')
 
-    // Pass 1: list entries without extracting; reject unsafe entries and
-    // bound the unpacked size. Directory entries (including the `./` pack
-    // root) are structural, not payload: they only need a safe path.
+    // Pass 1: reject unsafe entries and bound the unpacked size without
+    // extracting (zip via AdmZip in-memory scan; tar.gz via node-tar listing).
     // Violations are collected (throwing inside onentry does not terminate
     // the tar stream) and abort the offending entry; the stream still runs
     // to completion, then the first violation is thrown.
-    let total = 0
-    let violation: string | null = null
-    await tar.t({
-      file: archiveFile,
-      onentry: (entry) => {
-        if (violation !== null) return
-        try {
-          if (entry.type === 'Directory') {
-            assertSafeEntryPath(entry.path)
-            return
-          }
-          const safePath = assertSafeEntryPath(entry.path)
-          if (safePath === '') throw new Error(`empty path in archive: ${entry.path}`)
-          if (LINK_TYPES.has(entry.type)) {
-            throw new Error(`link entry refused in archive: ${safePath}`)
-          }
-          total += entry.size ?? 0
-          if (total > MAX_UNPACKED_BYTES) {
-            throw new Error(`unpacked archive too large (${total} bytes)`)
-          }
-        } catch (cause) {
-          violation = cause instanceof Error ? cause.message : String(cause)
-        }
-      },
-    })
-    if (violation !== null) throw new Error(violation)
+    await assertArchiveSafe(archive)
 
-    // Pass 2: extract into the staging directory (node-tar additionally
-    // refuses escapes by default; entries were already validated above).
+    // Pass 2: extract into the staging directory.
     const unpackRoot = join(staging, 'unpacked')
     await mkdir(unpackRoot, { recursive: true })
-    await tar.x({ file: archiveFile, cwd: unpackRoot })
+    if (format === 'zip') {
+      await extractZip(archive, unpackRoot)
+    } else {
+      const archiveFile = join(staging, 'archive.tar.gz')
+      await writeFile(archiveFile, archive, { mode: 0o600 })
+      await tar.x({ file: archiveFile, cwd: unpackRoot })
+    }
 
     // The archive must carry a top-level SKILL.md (directory bundle or flat).
     await stat(join(unpackRoot, 'SKILL.md')).catch(() => {
@@ -366,10 +346,10 @@ export interface SkillPackResult {
 }
 
 /**
- * Pack a locally authored skill's WHOLE directory into a gzipped tar whose
- * entries are the directory's contents (the archive root IS the skill
- * directory). Symlinks are packed and then refused by the safety scan, so an
- * archive can never smuggle a reference outside the skill.
+ * Pack a locally authored skill's WHOLE directory into a zip whose entries
+ * are the directory's contents (the archive root IS the skill directory).
+ * Symlinks are refused by the safety scan, so an archive can never smuggle a
+ * reference outside the skill.
  * @param skillsDir - the skill root (`<dshHome>/skills`).
  * @param name - the skill directory name.
  * @param version - upload version (caller-supplied, default 1.0.0).
@@ -383,14 +363,9 @@ export async function packSkill(skillsDir: string, name: string, version = '1.0.
   })
   const meta = await readSkillFrontmatter(join(dir, 'SKILL.md'))
 
-  const chunks: Buffer[] = []
-  await new Promise<void>((resolveP, rejectP) => {
-    const stream = tar.c({ gzip: true, cwd: dir, portable: true, follow: false }, ['.'])
-    stream.on('data', (c: Buffer) => chunks.push(c))
-    stream.on('error', rejectP)
-    stream.on('end', () => resolveP())
-  })
-  const archive = Buffer.concat(chunks)
+  const zip = new AdmZip()
+  await addDirToZip(zip, dir, dir, '')
+  const archive = zip.toBuffer()
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
     throw new Error(`skill archive too large (${archive.byteLength} bytes)`)
   }
@@ -405,6 +380,27 @@ export async function packSkill(skillsDir: string, name: string, version = '1.0.
     version,
     checksum,
     archive,
+  }
+}
+
+/** Recursively add a directory tree into an AdmZip (relative entry names). */
+async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: string): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    const abs = join(dir, entry.name)
+    const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`
+    // 拒绝符号链接:打包时即失败(安装侧同样拒绝)。
+    if (entry.isSymbolicLink()) {
+      throw new Error(`symlink refused in package: ${rel}`)
+    }
+    if (entry.isDirectory()) {
+      zip.addFile(`${rel}/`, Buffer.alloc(0), '', 0o755)
+      await addDirToZip(zip, root, abs, rel)
+    } else if (entry.isFile()) {
+      const data = await readFile(abs)
+      const st = await stat(abs)
+      zip.addFile(rel, data, '', st.mode & 0o777)
+    }
   }
 }
 
