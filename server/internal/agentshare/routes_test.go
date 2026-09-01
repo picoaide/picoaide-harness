@@ -136,6 +136,13 @@ func setup(t *testing.T) (http.Handler, *sql.DB, map[string]string, map[string]s
 		map[string]string{"Authorization": "Bearer " + tokens["bob"]}
 }
 
+// presetMeta 生成符合发布契约的 preset.yml(2026-09-01:智能体对齐技能标准,
+// 展示名/版本/描述/作者/分类必须写在包内)。name 按上游约定是展示名。
+func presetMeta(display, version string) string {
+	return "name: " + display + "\nversion: " + version +
+		"\ndescription: 用于集成测试的智能体预设,描述需满足最短长度要求。\nauthor: tester\ncategory: 测试\n"
+}
+
 func uploadBody(name, desc, displayName string, archive []byte) string {
 	body, _ := json.Marshal(map[string]string{
 		"name": name, "description": desc, "display_name": displayName, "archive": base64.StdEncoding.EncodeToString(archive),
@@ -154,7 +161,7 @@ func TestUploadAndApproveFlow(t *testing.T) {
 
 	// alice uploads; row is pending.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("ppt-gen", "生成PPT", "PPT 生成", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: PPT 生成\n"}))))
+	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("ppt-gen", "生成PPT", "PPT 生成", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("PPT 生成", "1.0.0")}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -259,13 +266,13 @@ func TestUploadValidation(t *testing.T) {
 		body string
 		want int
 	}{
-		{"bad id uppercase", uploadBody("My-Preset", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})), 400},
-		{"bad id traversal", uploadBody("../x", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})), 400},
+		{"bad id uppercase", uploadBody("My-Preset", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")})), 400},
+		{"bad id traversal", uploadBody("../x", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")})), 400},
 		{"no archive", `{"name":"abc","description":"x","archive":""}`, 400},
 		{"bad base64", `{"name":"abc","archive":"@@@"}`, 400},
 		{"empty archive", uploadBody("abc", "", "", []byte{}), 400},
 		{"no composition", uploadBody("abc", "", "", makeArchive(t, map[string]string{"README.md": "hi"})), 422},
-		{"symlink", uploadBody("abc", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "evil": "SYMLINK"})), 422},
+		{"symlink", uploadBody("abc", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0"), "evil": "SYMLINK"})), 422},
 		{"traversal entry", uploadBody("abc", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "../evil": "x"})), 422},
 	}
 	for _, c := range cases {
@@ -282,10 +289,10 @@ func TestUploadValidation(t *testing.T) {
 	}
 
 	// Duplicate name: upload once, then again → 409 (pending).
-	if got := post(uploadBody("dup", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 201 {
+	if got := post(uploadBody("dup", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))); got != 201 {
 		t.Fatalf("first dup upload = %d", got)
 	}
-	if got := post(uploadBody("dup", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 409 {
+	if got := post(uploadBody("dup", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))); got != 409 {
 		t.Fatalf("second dup upload = %d, want 409", got)
 	}
 
@@ -317,15 +324,22 @@ func TestUploadValidation(t *testing.T) {
 	if pRow.Reason != "缺少 skills/ 目录" {
 		t.Fatalf("reject reason = %q", pRow.Reason)
 	}
-	if got := post(uploadBody("dup", "新描述", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))); got != 201 {
-		t.Fatalf("resubmit after reject = %d, want 201", got)
+	// 2026-09-01:智能体对齐「版本即不可变快照」——被拒的版本号同样永久占位,
+	// 同版本重提必须 409,作者只能升版本号重新提交(与技能一致)。
+	if got := post(uploadBody("dup", "新描述", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))); got != 409 {
+		t.Fatalf("被拒后同版本重提 = %d, want 409(版本不可复用)", got)
+	}
+	if got := post(uploadBody("dup", "新描述", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.1.0") + "changelog: 修正内容。\n"}))); got != 201 {
+		t.Fatalf("升版本号重提 = %d, want 201", got)
 	}
 	if pRow, _ = serverstore.GetAgentPreset(db, "dup"); pRow.Reason != "" {
-		t.Fatalf("reason not cleared on resubmit: %q", pRow.Reason)
+		t.Fatalf("新版本不应携带旧拒绝理由: %q", pRow.Reason)
 	}
+	// 2026-09-01「包内即真相」:描述取自包内 preset.yml,请求体的 description
+	// 不再被信任(此前手填值会与包内容脱节)。
 	p, _ := serverstore.GetAgentPreset(db, "dup")
-	if p.Status != serverstore.AgentPresetPending || p.Description != "新描述" {
-		t.Fatalf("resubmitted row = %+v", p)
+	if p.Status != serverstore.AgentPresetPending || !strings.Contains(p.Description, "用于集成测试的智能体预设") {
+		t.Fatalf("新版本行 status=%s desc=%q", p.Status, p.Description)
 	}
 
 	// G1(审计 2026-08-25):跨用户重提必须被拒绝——A 的 rejected 行只能由
@@ -343,7 +357,7 @@ func TestUploadValidation(t *testing.T) {
 	// bob 重提 → 404(与不存在同响应,不泄露存在性)。
 	{
 		wB := httptest.NewRecorder()
-		reqB := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "bob 劫持", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		reqB := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "bob 劫持", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))))
 		reqB.Header.Set("Content-Type", "application/json")
 		for k, v := range bobHdr {
 			reqB.Header.Set(k, v)
@@ -352,16 +366,16 @@ func TestUploadValidation(t *testing.T) {
 		if wB.Code != http.StatusNotFound {
 			t.Fatalf("bob cross-user resubmit = %d, want 404 (body %s)", wB.Code, wB.Body.String())
 		}
-		// 行仍为 rejected 且描述未被覆盖。
+		// 行仍为 rejected 且内容未被覆盖(描述来自包内 preset.yml)。
 		pB, _ := serverstore.GetAgentPresetByVersion(db, "dup", "1.0.0")
-		if pB.Status != serverstore.AgentPresetRejected || pB.Description != "新描述" {
-			t.Fatalf("row after bob attempt = %+v", pB)
+		if pB.Status != serverstore.AgentPresetRejected || pB.Author != "alice" {
+			t.Fatalf("bob 的尝试改动了行: status=%s author=%s", pB.Status, pB.Author)
 		}
 	}
 	// alice 本人重提仍可 → 201(回归护栏:合法路径不被误伤)。
 	{
 		wA2 := httptest.NewRecorder()
-		reqA2 := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "alice 重提", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		reqA2 := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "alice 重提", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.2.0") + "changelog: alice 重提。\n"}))))
 		reqA2.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			reqA2.Header.Set(k, v)
@@ -375,7 +389,7 @@ func TestUploadValidation(t *testing.T) {
 	// Multi-version: the same name may carry several versions independently.
 	bodyV2, _ := json.Marshal(map[string]string{
 		"name": "dup", "description": "v2", "version": "2.0.0",
-		"archive": base64.StdEncoding.EncodeToString(makeArchive(t, map[string]string{"agent.cordis.yml": testComposition})),
+		"archive": base64.StdEncoding.EncodeToString(makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "2.0.0") + "changelog: 第二个大版本。\n"})),
 	})
 	if got := post(string(bodyV2)); got != 201 {
 		t.Fatalf("v2 upload = %d, want 201", got)
@@ -384,10 +398,11 @@ func TestUploadValidation(t *testing.T) {
 	if err != nil || v2.Status != serverstore.AgentPresetPending {
 		t.Fatalf("v2 row = %+v err=%v", v2, err)
 	}
-	// Same name+version is duplicated; different version stays independent.
+	// 版本之间互相独立:v1 早先被拒,不因 v2 的上传而改变
+	// (新语义下被拒版本不可复用,只能升版本号,所以它会一直停在 rejected)。
 	v1, _ := serverstore.GetAgentPresetByVersion(db, "dup", "1.0.0")
-	if v1.Status != serverstore.AgentPresetPending {
-		t.Fatalf("v1 affected by v2 upload: %+v", v1)
+	if v1.Status != serverstore.AgentPresetRejected {
+		t.Fatalf("v1 被 v2 上传影响了: status=%s", v1.Status)
 	}
 }
 
@@ -397,7 +412,7 @@ func TestPendingCap(t *testing.T) {
 
 	post := func(name string) int {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody(name, "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+		req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody(name, "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))))
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range userHdr {
 			req.Header.Set(k, v)
@@ -421,7 +436,7 @@ func TestVisibilityAndAdminDelete(t *testing.T) {
 
 	// alice uploads.
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("shared-1", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition}))))
+	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("shared-1", "", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range userHdr {
 		req.Header.Set(k, v)
@@ -491,7 +506,7 @@ func randomBytes(n int) []byte {
 func TestPresetArchiveInDB(t *testing.T) {
 	r, db, adminHdr, userHdr, _ := setup(t)
 	defer db.Close()
-	archive := makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": "name: DB 直存\n"})
+	archive := makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("DB 直存", "1.0.0")})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("db-preset", "DB直存", "DB Preset", archive)))
@@ -553,7 +568,7 @@ func TestPresetArchiveInDB(t *testing.T) {
 func TestPresetArchiveTarGzCompat(t *testing.T) {
 	r, db, adminHdr, userHdr, _ := setup(t)
 	defer db.Close()
-	archive := makeTarGz(t, map[string]string{"agent.cordis.yml": testComposition})
+	archive := makeTarGz(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/client/v2/agent-presets",
@@ -599,6 +614,7 @@ func TestPresetFileContent(t *testing.T) {
 	defer db.Close()
 	archive := makeArchive(t, map[string]string{
 		"agent.cordis.yml":     testComposition,
+		"preset.yml":           presetMeta("FP Demo", "1.0.0"),
 		"skills/demo/SKILL.md": "# demo\n",
 		"bin/blob.bin":         string([]byte{0x00, 0x01, 0xFF, 0xFE}),
 		"bin/big.txt":          strings.Repeat("x", maxFilePreviewBytes+16),

@@ -244,7 +244,7 @@ func skillMd(name, version string) string {
 		"version: " + version + "\n" +
 		"description: 用于集成测试的市场技能包,描述需要满足最短长度要求。\n" +
 		"author: tester\n" +
-		"category: 测试\n" +
+		"category: 测试\nchangelog: 测试夹具的更新说明。\n" +
 		"---\n\n# " + name + "\n\n本技能是服务端集成测试使用的夹具包,正文需要足够长才能通过空壳校验,因此这里补充了一段用于说明用途的文字。\n"
 }
 
@@ -591,10 +591,17 @@ func TestAdminSkillFirstArchiveSameVersion(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("首次上传同版本号 = %d %s, want 200", w.Code, w.Body.String())
 	}
-	// 之后再传同版本同内容 → 才应被拒。
+	// 再传同版本 → VERSION_EXISTS(版本号已占用,提示升版本比「内容未变更」更可操作)。
 	w, _ = mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
 		`{"version":"1.0.0","archive":"`+base64.StdEncoding.EncodeToString(archive)+`"}`, hdr)
-	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "CONTENT_UNCHANGED") {
-		t.Fatalf("二次同内容上传 = %d %s, want 409 CONTENT_UNCHANGED", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "VERSION_EXISTS") {
+		t.Fatalf("二次同版本上传 = %d %s, want 409 VERSION_EXISTS", w.Code, w.Body.String())
+	}
+	// 升了版本号但内容一模一样 → CONTENT_UNCHANGED。
+	bumped := makeZip(t, map[string]string{"SKILL.md": skillMd("demo", "1.0.0")})
+	w, _ = mreq(t, r, "POST", "/api/server/admin/skills/demo/archive",
+		`{"version":"1.0.0","archive":"`+base64.StdEncoding.EncodeToString(bumped)+`"}`, hdr)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("同内容再传 = %d %s, want 409", w.Code, w.Body.String())
 	}
 }

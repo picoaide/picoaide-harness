@@ -433,3 +433,71 @@ func checkProvenance(entries []string, data map[string]any) error {
 	}
 	return nil
 }
+
+// PresetMetaFile 是智能体预设的展示元数据文件(上游约定,与功能文件
+// agent.cordis.yml 分离)。
+const PresetMetaFile = "preset.yml"
+
+// ParseAgent validates one agent-preset package and returns its manifest.
+//
+// 与技能的两点关键差异(遵循上游约定,不强行套用技能语义):
+//  1. 智能体的**运行时身份是目录名**,不是包内字段——没有技能那种
+//     「name 非 kebab 就整个被忽略」的失效模式,因此不要求包内声明 ID;
+//  2. 上游 preset.yml 的 `name` 就是**展示名**(客户端读作 displayName),
+//     所以展示名取 `title`,缺省回退 `name`,不能反过来把它当 ID 校验。
+//
+// 但展示之外的元数据(版本/描述/作者/分类)同样必须来自包内——「包内即真相」
+// 对两类能力一致,否则智能体会退回「卡片显示目录名、版本永远兜底 1.0.0」。
+func ParseAgent(entries []string, presetYML, appID string) (*Manifest, error) {
+	if strings.HasPrefix(presetYML, "\ufeff") {
+		return nil, newErr(CodeBOMDetected, "",
+			PresetMetaFile+" 含 UTF-8 BOM,请另存为「UTF-8 无 BOM」")
+	}
+	if strings.TrimSpace(presetYML) == "" {
+		return nil, newErr(CodeMissingField, PresetMetaFile,
+			"归档缺少 "+PresetMetaFile+":展示名/版本/描述/作者/分类必须写在包内")
+	}
+	var data map[string]any
+	if err := yaml.Unmarshal([]byte(presetYML), &data); err != nil || data == nil {
+		return nil, newErr(CodeFrontmatterInvalid, PresetMetaFile,
+			PresetMetaFile+" 不是合法的 YAML 映射")
+	}
+
+	m := &Manifest{AppID: appID}
+	var ferr error
+	// 展示名:title 优先,回退上游约定的 name。
+	if title, err := optionalString(data, "title", MaxTitleRunes); err == nil && title != "" {
+		m.Title = title
+	} else if err != nil {
+		return nil, err
+	} else if m.Title, ferr = requiredString(data, "name", MaxTitleRunes); ferr != nil {
+		return nil, newErr(CodeMissingField, "name",
+			"缺少展示名:请在 "+PresetMetaFile+" 中填写 name(或 title)")
+	}
+	if m.Version, ferr = requiredVersion(data); ferr != nil {
+		return nil, ferr
+	}
+	if m.Description, ferr = requiredString(data, "description", MaxDescriptionRunes); ferr != nil {
+		return nil, ferr
+	}
+	if utf8.RuneCountInString(m.Description) < MinDescriptionRunes {
+		return nil, newErr(CodeFieldTooShort, "description",
+			"description 过短(至少 %d 字)", MinDescriptionRunes)
+	}
+	if m.Author, ferr = requiredString(data, "author", MaxAuthorRunes); ferr != nil {
+		return nil, ferr
+	}
+	if m.Category, ferr = requiredString(data, "category", MaxCategoryRunes); ferr != nil {
+		return nil, ferr
+	}
+	if m.Changelog, ferr = optionalString(data, "changelog", MaxChangelogRunes); ferr != nil {
+		return nil, ferr
+	}
+	if m.Tags, ferr = optionalTags(data); ferr != nil {
+		return nil, ferr
+	}
+	if ferr = checkProvenance(entries, data); ferr != nil {
+		return nil, ferr
+	}
+	return m, nil
+}

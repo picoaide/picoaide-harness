@@ -12,8 +12,11 @@ func req(appID, version, checksum, publisher string) PublishRequest {
 		Kind: serverstore.AppKindSkill, AppID: appID, Channel: serverstore.AppChannelOrg,
 		Archive: []byte("zip-" + version), Publisher: publisher, Checksum: checksum,
 		PendingCap: 10,
+		// 非首个版本必须带 changelog(决策 §5.2),夹具统一带上;
+		// 「缺 changelog 被拒」由专门的用例覆盖。
 		Manifest: Manifest{Version: version, Title: appID + " 技能",
-			Description: "足够长的技能描述用于测试。", Author: publisher, Category: "测试"},
+			Description: "足够长的技能描述用于测试。", Author: publisher, Category: "测试",
+			Changelog: "测试用更新说明。"},
 	}
 }
 
@@ -104,6 +107,25 @@ func TestPublishLockAndOwnership(t *testing.T) {
 	}
 	if _, err := Publish(db, req("alice-app", "2.0.0", "b1", "bob")); code(t, err) != CodeNotFound {
 		t.Fatalf("跨作者接管 = %v", err)
+	}
+}
+
+// 非首个版本缺 changelog 必须被拒(首版不要求)。
+func TestPublishRequiresChangelogAfterFirstVersion(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	first := req("cl", "1.0.0", "c1", "alice")
+	first.Manifest.Changelog = ""
+	if _, err := Publish(db, first); err != nil {
+		t.Fatalf("首版不应要求 changelog: %v", err)
+	}
+	second := req("cl", "1.1.0", "c2", "alice")
+	second.Manifest.Changelog = ""
+	if _, err := Publish(db, second); code(t, err) != "MISSING_FIELD" {
+		t.Fatalf("非首版缺 changelog = %v, want MISSING_FIELD", err)
+	}
+	if _, err := Publish(db, req("cl", "1.1.0", "c2", "alice")); err != nil {
+		t.Fatalf("带 changelog 应通过: %v", err)
 	}
 }
 

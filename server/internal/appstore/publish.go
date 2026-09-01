@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
@@ -160,6 +161,12 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 	if newest != "" && skillmanifest.CompareVersions(req.Manifest.Version, newest) <= 0 {
 		return nil, newErr(http.StatusConflict, CodeVersionNotIncreasing,
 			"版本号必须大于当前最高版本 v%s(当前包内为 %s)", newest, req.Manifest.Version)
+	}
+	// 非首个版本必须写更新说明(决策 §5.2):审核人与使用者据此判断该不该升级。
+	// 该规则依赖「是否已有历史版本」,因此只能在发布内核里判定。
+	if len(history) > 0 && strings.TrimSpace(req.Manifest.Changelog) == "" {
+		return nil, newErr(http.StatusUnprocessableEntity, skillmanifest.CodeMissingField,
+			"非首个版本必须填写 changelog(本版改了什么)")
 	}
 
 	// 待审配额(仅员工发布)。
