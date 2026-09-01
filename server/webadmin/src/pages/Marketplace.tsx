@@ -232,6 +232,23 @@ export default function Marketplace() {
     }
   }
 
+  // ---- 存量规范化(决策 2026-09-01 §八:产出合规的 patch+1 新版本) ----
+  const normalize = async (s2: Skill) => {
+    if (!window.confirm(
+      `规范化「${s2.name}」?\n\n将把包内 SKILL.md 改写为符合发布标准的内容` +
+      `(中文名迁到 title、剥离 BOM、补齐必填字段),并作为新版本发布。原版本不会被修改。`)) return
+    setBusy(`normalize-${s2.name}`)
+    setOpError('')
+    try {
+      const r = await request<{ version: string; changes?: string[] }>(
+        `${ADMIN_API}/skills/${encodeURIComponent(s2.name)}/normalize`, { method: 'POST' })
+      window.alert(`已规范化为 v${r.version}\n\n${(r.changes ?? []).join('\n') || '无需改动'}`)
+      await loadSkills()
+    } catch (e) {
+      setOpError(`规范化失败:${(e as Error).message}`)
+    } finally { setBusy(null) }
+  }
+
   // ---- 上传新版压缩包(0040:归档存 DB) ----
   function openReplace(s: Skill) {
     setReplaceDialog(s)
@@ -410,6 +427,9 @@ export default function Marketplace() {
                   </div>
                   <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
                     <Button variant="outline" onClick={() => void openPreview(s)}>预览</Button>
+                    <Button variant="outline" disabled={busy !== null} onClick={() => void normalize(s)}>
+                      {busy === `normalize-${s.name}` ? '规范化中…' : '规范化'}
+                    </Button>
                     <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
                     <Button variant="outline" onClick={() => openReplace(s)}>上传新版</Button>
                     <Button variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>

@@ -936,3 +936,6 @@ func removeLock(db *sql.DB) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
+
+// ArchiveLimits 暴露归档安全边界,供同仓其他域(市场规范化)复用同一套上限。
+func ArchiveLimits() archiveutil.Limits { return archiveLimits }
