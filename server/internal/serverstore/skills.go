@@ -20,8 +20,11 @@ const (
 
 // Skill is a marketplace skill row.
 type Skill struct {
-	ID          int64
-	Name        string
+	ID   int64
+	Name string
+	// DisplayName 是展示名(0051):来自包内 SKILL.md 的 frontmatter title,
+	// 空值时读侧回退 Name。
+	DisplayName string
 	Version     string
 	Description string
 	Author      string
@@ -45,14 +48,14 @@ type Skill struct {
 // skillColumns includes the archive blob; used by single-row reads
 // (GetSkill) where the archive may be needed. List queries must use
 // skillListColumns (no blob) so the catalog never loads every archive.
-const skillColumns = "id, name, version, description, author, git_url, git_ref, checksum, enabled, source, archive, downloads, calls, created_at, updated_at"
+const skillColumns = "id, name, display_name, version, description, author, git_url, git_ref, checksum, enabled, source, archive, downloads, calls, created_at, updated_at"
 
-const skillListColumns = "id, name, version, description, author, git_url, git_ref, checksum, enabled, source, downloads, calls, created_at, updated_at"
+const skillListColumns = "id, name, display_name, version, description, author, git_url, git_ref, checksum, enabled, source, downloads, calls, created_at, updated_at"
 
 func scanSkill(row interface{ Scan(...any) error }) (*Skill, error) {
 	var s Skill
 	var createdAt, updatedAt any
-	if err := row.Scan(&s.ID, &s.Name, &s.Version, &s.Description, &s.Author,
+	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description, &s.Author,
 		&s.GitURL, &s.GitRef, &s.Checksum, &s.Enabled, &s.Source, &s.Archive,
 		&s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
 		return nil, err
@@ -65,7 +68,7 @@ func scanSkill(row interface{ Scan(...any) error }) (*Skill, error) {
 func scanSkillList(row interface{ Scan(...any) error }) (*Skill, error) {
 	var s Skill
 	var createdAt, updatedAt any
-	if err := row.Scan(&s.ID, &s.Name, &s.Version, &s.Description, &s.Author,
+	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description, &s.Author,
 		&s.GitURL, &s.GitRef, &s.Checksum, &s.Enabled, &s.Source,
 		&s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
 		return nil, err
@@ -234,4 +237,19 @@ func anyBytes(b []byte) any {
 		return nil
 	}
 	return b
+}
+
+// SetSkillDisplayName 写入市场技能的展示名(0051)。发布/规范化时从包内
+// SKILL.md 的 frontmatter title 取值——「包内即真相」在读侧的落点。
+func SetSkillDisplayName(db *sql.DB, name, displayName string) error {
+	res, err := db.Exec(`UPDATE skills SET display_name=?, updated_at=`+NowExpr()+` WHERE name=?`,
+		displayName, name)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
