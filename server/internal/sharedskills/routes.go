@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -236,95 +237,31 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
-		// 应用锁定(决策 2026-09-01 D4):被锁定的技能只能由管理员发布,
-		// 员工命中即明确拒绝并原样回显管理员填写的理由(不做本地化改写)。
-		// 管理员自己走 /api/server/admin/* 上架,不经过本路径。
-		if lock, lerr := serverstore.GetCapabilityLock(db, serverstore.CapabilityKindSkill, req.Name); lerr == nil {
-			msg := "该技能已被管理员锁定,仅管理员可发布"
-			if lock.Reason != "" {
-				msg += ":" + lock.Reason
-			}
-			serverauth.WriteError(c, http.StatusForbidden, "APP_LOCKED", msg)
-			return
-		} else if !errors.Is(lerr, serverstore.ErrNotFound) {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
-		// 版本即不可变快照(决策 2026-09-01 D1/D3):
-		// ① 同版本号已存在(含被拒)→ 一律拒绝,必须升版本号;
-		// ② 内容与自己已提交过的某版本完全相同 → 无需上传;
-		// ③ 新版本号必须严格大于该技能现有最高版本。
-		// 跨作者防劫持(审计 2026-08-25 G1)优先于版本提示:他人的未公开行
-		// 一律回 404,不泄露存在性。
-		existing, getErr := serverstore.GetSharedSkill(db, req.Name, man.Version)
-		if getErr != nil && !errors.Is(getErr, serverstore.ErrNotFound) {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
-		if getErr == nil {
-			if existing.Author != u.Username && existing.Status != serverstore.SharedSkillApproved {
-				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+		// P2:锁定检查、版本语义(不可复用/必须递增/内容未变更)、跨渠道同名
+		// 互斥、归属保护与待审配额全部收敛到统一发布内核——三条上传路径
+		// (管理后台/能力中心/智能体预设)共用同一份实现,不再各写一遍。
+		res, perr := appstore.Publish(db, appstore.PublishRequest{
+			Kind:       serverstore.AppKindSkill,
+			AppID:      req.Name,
+			Channel:    serverstore.AppChannelOrg,
+			Archive:    raw,
+			Publisher:  u.Username,
+			PendingCap: pendingCap,
+			Manifest:   appstore.FromSkillManifest(man),
+			Checksum:   checksum,
+		})
+		if perr != nil {
+			var ae *appstore.Error
+			if errors.As(perr, &ae) {
+				serverauth.WriteError(c, ae.Status, ae.Code, ae.Message)
 				return
 			}
-			serverauth.WriteError(c, http.StatusConflict, "VERSION_EXISTS",
-				"版本 "+man.Version+" 已存在(每个版本都是不可修改的快照),请在 SKILL.md 中升版本号后重试")
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "发布失败")
 			return
 		}
-		history, histErr := serverstore.ListSharedSkillVersions(db, req.Name)
-		if histErr != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
-		for _, h := range history {
-			if h.Checksum == checksum && h.Author == u.Username {
-				serverauth.WriteError(c, http.StatusConflict, "CONTENT_UNCHANGED",
-					"内容与你已提交的 v"+h.Version+" 完全一致,无需重复上传")
-				return
-			}
-		}
-		if newest := newestVersion(history); newest != "" && skillmanifest.CompareVersions(man.Version, newest) <= 0 {
-			serverauth.WriteError(c, http.StatusConflict, "VERSION_NOT_INCREASING",
-				"版本号必须大于当前最高版本 v"+newest+"(当前包内为 "+man.Version+")")
-			return
-		}
-		// 元数据全部来自包内清单(长度上限已在 skillmanifest 校验)。
-		desc := man.Description
-		display := man.Title
-
-		// 顺序约定(审计 2026-08-25 G4):DB 状态优先于文件落盘。
-		// 0040:归档直存 DB(共享技能上传不再落磁盘;pre-0040 行的磁盘回退
-		// 只在下载/预览读取时触发,写路径一律 DB)。
-		// 快照语义下只有「新建」一条路径:已存在的版本在上面就被拒绝了,
-		// 不再有覆盖重提(旧 UpdateSharedSkillResubmitWithArchive 分支已删)。
-		{
-			s := &serverstore.SharedSkill{
-				Name:        req.Name,
-				DisplayName: display,
-				Version:     man.Version,
-				Description: desc,
-				Author:      u.Username,
-				Checksum:    checksum,
-				Status:      serverstore.SharedSkillPending,
-				Archive:     raw,
-			}
-			if _, err := serverstore.CreateSharedSkillCapped(db, s, pendingCap); err != nil {
-				// 补偿:INSERT 失败时无归档落盘(DB 未写入即无孤儿对象)。
-				if errors.Is(err, serverstore.ErrTooManyPending) {
-					serverauth.WriteError(c, http.StatusTooManyRequests, "PENDING_LIMIT", "待审核数量已达上限,请等待审核")
-					return
-				}
-				if errors.Is(err, serverstore.ErrConflict) {
-					// 决策 2026-08-25:市场与组织合并为「市场」后,同名技能跨源
-					// 互斥——市场技能表已有同名时,员工上传即阻断(409)。
-					serverauth.WriteError(c, http.StatusConflict, "CONFLICT", "名称与市场技能冲突,请换个名字或联系管理员")
-					return
-				}
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-				return
-			}
-		}
-		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload", UploadAuditDetail(req.Name, man.Version, man.Title, checksum))
-		c.JSON(http.StatusCreated, gin.H{"skill": gin.H{"name": req.Name, "version": man.Version, "status": serverstore.SharedSkillPending}})
+		_ = serverstore.AuditLog(db, u.Username, "shared_skill_upload",
+			UploadAuditDetail(req.Name, res.Version, man.Title, checksum))
+		c.JSON(http.StatusCreated, gin.H{"skill": gin.H{"name": req.Name, "version": res.Version, "status": res.Status}})
 	}
 }
 

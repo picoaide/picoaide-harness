@@ -224,12 +224,12 @@ func TestListApprovalsQueue(t *testing.T) {
 			t.Fatalf("agent grants_base=%s", a.GrantsBase)
 		}
 	}
-	// 决策 2026-08-25:市场 skills 表同名冲突 -> 队列行 conflict=true。
-	// 正常路径双向互斥会阻断,此处用 raw SQL 模拟竞态(共享技能上传后市场
-	// 技能被上架),验证审批队列的冲突提示。
-	if _, err := db.Exec(`INSERT INTO skills (name, version, description, author, checksum, enabled)
-		VALUES ('s1', '1.0.0', '', 'boss', '', 1)`); err != nil {
-		t.Fatalf("raw market seed: %v", err)
+	// P2(迁移 0053):跨渠道同名冲突在统一应用模型里**结构上不可能**——
+	// 一个 (kind, app_id) 只能属于一个渠道,市场与组织共用同一命名空间。
+	// 因此这里改为断言该不变量本身:用市场语义登记同名技能会被直接拒绝,
+	// 队列也就不会再出现「同名双份」的冲突行。
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "s1", Version: "9.0.0", Enabled: 1}); err == nil {
+		t.Fatal("市场登记组织已占用的名字必须被拒绝(跨渠道同名互斥)")
 	}
 	w2 := doGet(t, r, "/api/server/admin/capabilities/approvals", adminHdr)
 	var resp2 struct {
@@ -238,14 +238,14 @@ func TestListApprovalsQueue(t *testing.T) {
 	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
 		t.Fatal(err)
 	}
-	foundConflict := false
+	skillRows := 0
 	for _, a := range resp2.Approvals {
 		if a.Kind == KindSkill && a.Name == "s1" {
-			foundConflict = a.Conflict
+			skillRows++
 		}
 	}
-	if !foundConflict {
-		t.Fatalf("s1 conflict flag = false, want true (%+v)", resp2.Approvals)
+	if skillRows != 1 {
+		t.Fatalf("s1 应当只有一条队列行(同名不可能跨渠道并存), got %d (%+v)", skillRows, resp2.Approvals)
 	}
 }
 

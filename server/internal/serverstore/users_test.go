@@ -176,11 +176,10 @@ func TestDeleteUserCascadesSharedGrants(t *testing.T) {
 	if err := DeleteUser(db, id); err != nil {
 		t.Fatalf("DeleteUser with shared grants failed: %v", err)
 	}
-	for _, tbl := range []string{"shared_skill_grants", "agent_preset_grants"} {
-		var n int
-		if err := db.QueryRow("SELECT COUNT(*) FROM " + tbl + " WHERE grantee = 'grace'").Scan(&n); err != nil || n != 0 {
-			t.Fatalf("%s grants left after delete: %d err=%v", tbl, n, err)
-		}
+	// P2:三张授权表已合并为 app_grants(kind 区分技能/智能体)。
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM app_grants WHERE grantee = 'grace'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("app_grants grants left after delete: %d err=%v", n, err)
 	}
 }
 

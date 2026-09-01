@@ -494,6 +494,7 @@ func TestAdminSkillNormalize(t *testing.T) {
 		"tags: [moka, HR]\nauthor: zhangsan\n---\n\n# 知识库\n\n" +
 		"本技能提供员工日常咨询知识库的索引与强制读取规则,覆盖人事、行政、商业保险与财务报销等高频问题的查询路径。\n"
 	archive := makeZip(t, map[string]string{"SKILL.md": legacy, "references/wiki.md": "参考\n"})
+	// 直接写入一个「历史形态」的版本(绕过发布校验,模拟存量数据)。
 	if err := serverstore.ReplaceSkillArchive(db, "team-knowledge-wiki", "1.0.0", "deadbeef", archive); err != nil {
 		t.Fatal(err)
 	}

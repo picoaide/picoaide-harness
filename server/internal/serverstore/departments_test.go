@@ -350,7 +350,7 @@ func TestRenameCascadeCaseInsensitive(t *testing.T) {
 	if err := GrantSkill(db, "data-extract", "研发部", GranteeGroup); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES ('code-review', 'group', '研发部')"); err != nil {
+	if _, err := db.Exec("INSERT INTO app_grants (kind, app_id, grantee_type, grantee) VALUES ('skill', 'code-review', 'group', '研发部')"); err != nil {
 		t.Fatal(err)
 	}
 	// 改名:级联(NOCASE)必须覆盖大小写变体授权
@@ -372,14 +372,14 @@ func TestDeleteGuardCountsCaseVariantGrants(t *testing.T) {
 	}
 	salesID, _ := CreateDepartment(db, "Sales", 0, 0, "")
 	// 手输大小写变体授权(grantee 与组名大小写不同)
-	if _, err := db.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES ('x', 'group', 'sales')"); err != nil {
+	if _, err := db.Exec("INSERT INTO app_grants (kind, app_id, grantee_type, grantee) VALUES ('skill', 'x', 'group', 'sales')"); err != nil {
 		t.Fatal(err)
 	}
 	if err := DeleteDepartment(db, salesID); err != ErrDepartmentInUse {
 		t.Fatalf("delete Sales with case-variant grant err = %v, want ErrDepartmentInUse", err)
 	}
 	// 清掉变体授权后可删
-	if _, err := db.Exec("DELETE FROM skill_grants WHERE grantee = 'sales'"); err != nil {
+	if _, err := db.Exec("DELETE FROM app_grants WHERE grantee = 'sales'"); err != nil {
 		t.Fatal(err)
 	}
 	if err := DeleteDepartment(db, salesID); err != nil {
