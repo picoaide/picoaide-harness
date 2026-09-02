@@ -69,6 +69,8 @@ type AdminHandlers struct {
 	ListUserTokens gin.HandlerFunc
 	RevokeToken    gin.HandlerFunc
 	Usage          gin.HandlerFunc
+	UsageOverview  gin.HandlerFunc // GET /usage/overview(2026-09 用量中心总览)
+	UsageRequests  gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
 	ServerInfo     gin.HandlerFunc
 	ListAuditLogs  gin.HandlerFunc
 	GetAuthConfig  gin.HandlerFunc
@@ -96,6 +98,8 @@ func (a *AdminAPI) Handlers() *AdminHandlers {
 		ListUserTokens: a.listUserTokens,
 		RevokeToken:    a.revokeToken,
 		Usage:          a.usage,
+		UsageOverview:  a.usageOverview,
+		UsageRequests:  a.usageRequests,
 		ServerInfo:     a.handleServerInfo,
 		ListAuditLogs:  a.listAuditLogs,
 		GetAuthConfig:  a.getAuthConfig,

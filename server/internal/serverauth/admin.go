@@ -124,6 +124,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	AdminRoute(authed, "GET", "/users/:id/tokens", PermUserRead, a.listUserTokens)
 	AdminRoute(authed, "POST", "/tokens/:id/revoke", PermUserWrite, a.revokeToken)
 	AdminRoute(authed, "GET", "/usage", PermUsageRead, a.usage)
+	// 用量中心(2026-09 重构):总览聚合 + 请求级明细(与 router 包镜像)。
+	AdminRoute(authed, "GET", "/usage/overview", PermUsageRead, a.usageOverview)
+	AdminRoute(authed, "GET", "/usage/requests", PermUsageRead, a.usageRequests)
 	// 服务器信息面板(系统 + 数据库统计)
 	AdminRoute(authed, "GET", "/server-info", PermServerInfoRead, a.handleServerInfo)
 	// 敏感操作审计日志(用户/部门/技能/令牌等)
@@ -420,6 +423,9 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	// 配额审计基线(2026-09 P1):变更后写 quota_change(旧值→新值)
+	wasTokens := u.QuotaTokens
+	wasMoney := u.QuotaMoney
 	var req struct {
 		DisplayName *string `json:"display_name"`
 		Email       *string `json:"email"`
@@ -536,6 +542,13 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 	} else {
 		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_update", u.Username)
 	}
+	// 配额变更审计(2026-09 P1):null=跟随全局默认,0=不限
+	if !quotaPtrEq(wasTokens, u.QuotaTokens) || !quotaMoneyPtrEq(wasMoney, u.QuotaMoney) {
+		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "quota_change",
+			fmt.Sprintf("%s: token %s→%s, money %s→%s",
+				u.Username, quotaLabel(wasTokens), quotaLabel(u.QuotaTokens),
+				quotaMoneyLabel(wasMoney), quotaMoneyLabel(u.QuotaMoney)))
+	}
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 
@@ -641,49 +654,41 @@ const maxUserUsageRows = 500
 
 func (a *AdminAPI) usage(c *gin.Context) {
 	// 日期解析失败 → 400,而不是静默无界范围(审计2026-L7)
-	fromRaw := c.DefaultQuery("from", "")
-	toRaw := c.DefaultQuery("to", "")
-	var from, to time.Time
-	var err error
-	if fromRaw != "" {
-		if from, err = time.Parse("2006-01-02", fromRaw); err != nil {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "from 日期格式错误(YYYY-MM-DD)")
-			return
-		}
-	}
-	if toRaw != "" {
-		if to, err = time.Parse("2006-01-02", toRaw); err != nil {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "to 日期格式错误(YYYY-MM-DD)")
-			return
-		}
-	}
-	// to < from → 400,拒绝静默空结果(审计中2)
-	if !from.IsZero() && !to.IsZero() && from.After(to) {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "起始日期不能晚于结束日期")
+	from, to, ok := usageDateRange(c)
+	if !ok {
 		return
 	}
-	// 缺省区间 → 服务端默认近 90 天窗口,避免无界全表聚合(审计中2)
-	if from.IsZero() && to.IsZero() {
-		to = time.Now()
-		from = to.AddDate(0, 0, -usageDefaultWindowDays+1)
-	} else if from.IsZero() {
-		from = to.AddDate(0, 0, -usageDefaultWindowDays+1)
-	} else if to.IsZero() {
-		to = from.AddDate(0, 0, usageDefaultWindowDays-1)
-	}
 	group := c.DefaultQuery("group", "day")
-	if group != "day" && group != "week" && group != "month" && group != "model" && group != "user" {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "group 必须是 day|week|month|model|user")
+	if group != "day" && group != "week" && group != "month" && group != "model" &&
+		group != "user" && group != "dept" && group != "provider" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "group 必须是 day|week|month|model|user|dept|provider")
 		return
 	}
 	var opts []serverstore.UsageAggregateOption
 	if username := c.Query("username"); username != "" {
 		opts = append(opts, serverstore.WithUsername(username))
 	}
-	rows, err := serverstore.UsageAggregateWithLedger(a.DB, from, to, group, opts...)
+	if dept := c.Query("dept"); dept != "" {
+		opts = append(opts, serverstore.WithDept(dept))
+	}
+	// group=provider 为展示层归并(usage 无 provider 列,按 models 表模型→
+	// 渠道映射近似归并,见 serverstore/usage_provider.go):聚合底层仍按 model。
+	aggGroup := group
+	if group == "provider" {
+		aggGroup = "model"
+	}
+	rows, err := serverstore.UsageAggregateWithLedger(a.DB, from, to, aggGroup, opts...)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return
+	}
+	if group == "provider" && len(rows) > 0 {
+		mp, err := serverstore.ModelProviderMap(a.DB)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
+			return
+		}
+		rows = serverstore.RegroupByProvider(rows, mp)
 	}
 	// group=user 行数上限:超出截断并置 truncated,避免超大响应拖垮
 	// 前端渲染与网络(审计中2)
@@ -1099,6 +1104,8 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
 		return
 	}
+	// 预算审计基线:须在更新前捕获(UpdateDepartmentWithBudget 事务内已写新值)
+	oldBudget, _ := serverstore.GetDeptBudget(a.DB, id)
 	// 预算与部门更新同一事务(审计 M2):预算失败整体回滚,不留半更新状态
 	if err := serverstore.UpdateDepartmentWithBudget(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description, req.BudgetMoney); err != nil {
 		if errors.Is(err, serverstore.ErrValidation) {
@@ -1122,6 +1129,11 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		detail += fmt.Sprintf(" budget:%.2f", *req.BudgetMoney)
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", detail)
+	// 部门预算独立审计(2026-09 P1):预算口径单列动作,便于审计检索
+	if req.BudgetMoney != nil && *req.BudgetMoney != oldBudget {
+		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_budget_change",
+			fmt.Sprintf("%s: 预算 %s→%s", req.Name, deptBudgetLabel(oldBudget), deptBudgetLabel(*req.BudgetMoney)))
+	}
 	// L6:返回资源对象,与 createDepartment 响应结构一致
 	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
 }
@@ -1331,4 +1343,54 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, results)
+}
+
+// ---------------------------------------------------------------------------
+// 配额/预算审计辅助(2026-09 P1)
+// ---------------------------------------------------------------------------
+
+// quotaPtrEq 指针配额相等(nil = 跟随全局默认,0 = 不限)。
+func quotaPtrEq(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// quotaLabel 配额可读标签:null=跟随默认,0=不限,其余原值。
+func quotaLabel(v *int64) string {
+	if v == nil {
+		return "默认"
+	}
+	if *v == 0 {
+		return "0(不限)"
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// deptBudgetLabel 部门预算可读标签:unset=未配置(不限),0=清除,其余金额。
+func deptBudgetLabel(v float64) string {
+	if v <= 0 {
+		return "unset"
+	}
+	return fmt.Sprintf("%.2f", v)
+}
+
+// quotaMoneyPtrEq 金额配额指针相等(nil = 跟随全局默认,0 = 不限)。
+func quotaMoneyPtrEq(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// quotaMoneyLabel 金额配额可读标签。
+func quotaMoneyLabel(v *float64) string {
+	if v == nil {
+		return "默认"
+	}
+	if *v == 0 {
+		return "0(不限)"
+	}
+	return fmt.Sprintf("%.2f", *v)
 }

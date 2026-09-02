@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,6 +17,40 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
 )
+
+// ---------------------------------------------------------------------------
+// 网关配置审计(2026-09 P1 补全):provider/模型/全局配置变更全部落 audit_logs。
+// 此前 llmgateway 对 AuditLog 零调用——「计量即金钱」的平台,价格/渠道/配额
+// 变更不留痕是审计缺口(见 .smoke/ENTERPRISE-FEATURE-AUDIT-2026-09-02.md)。
+// ---------------------------------------------------------------------------
+
+// auditActor 取管理会话用户名(AdminAuth 一定已注入;防御性兜底空串)。
+func auditActor(c *gin.Context) string {
+	if u := serverauth.AdminUser(c); u != nil {
+		return u.Username
+	}
+	return ""
+}
+
+// auditSetSetting 写 settings 并记录变更到 changes(旧→新),用于 gateway_config
+// 审计的字段级明细。
+func auditSetSetting(db *sql.DB, key, label, value string, changes *[]string) error {
+	old, _, err := serverstore.GetSetting(db, key)
+	if err != nil {
+		old = ""
+	}
+	if old != value {
+		*changes = append(*changes, fmt.Sprintf("%s:%s→%s", label, orEmpty(old), orEmpty(value)))
+	}
+	return serverstore.SetSetting(db, key, value)
+}
+
+func orEmpty(v string) string {
+	if v == "" {
+		return "(空)"
+	}
+	return v
+}
 
 // RegisterAdminRoutes mounts /api/admin/providers, /api/admin/models and
 // /api/admin/gateway behind AdminAuth + RBAC permission checks (v3b).
@@ -252,6 +288,9 @@ func createProvider(c *gin.Context, db *sql.DB) {
 	if p.Channel != "" {
 		syncRes = syncProviderNow(db, p)
 	}
+	_ = serverstore.AuditLog(db, auditActor(c), "provider_create",
+		fmt.Sprintf("%s base_url=%s channel=%s protocol=%s enabled=%v models=%d",
+			p.Name, p.BaseURL, p.Channel, p.Protocol, p.Enabled == 1, len(p.Models)))
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p), "sync": syncRes})
 }
 
@@ -270,6 +309,7 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	orig := *p // 审计基线(p.Models 切片仅读,后续赋值不回溯)
 	var req providerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -351,6 +391,32 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if p.Channel != "" {
 		syncRes = syncProviderNow(db, p)
 	}
+	// 审计:字段级变更明细(密钥只记"已更换",不落明文/密文)
+	var ch []string
+	if p.Name != orig.Name {
+		ch = append(ch, "name:"+orig.Name+"→"+p.Name)
+	}
+	if p.BaseURL != orig.BaseURL {
+		ch = append(ch, "base_url:"+orig.BaseURL+"→"+p.BaseURL)
+	}
+	if p.Channel != orig.Channel {
+		ch = append(ch, "channel:"+orEmpty(orig.Channel)+"→"+orEmpty(p.Channel))
+	}
+	if p.Protocol != orig.Protocol {
+		ch = append(ch, "protocol:"+orig.Protocol+"→"+p.Protocol)
+	}
+	if p.Enabled != orig.Enabled {
+		ch = append(ch, fmt.Sprintf("enabled:%v→%v", orig.Enabled == 1, p.Enabled == 1))
+	}
+	if p.APIKeyEnc != orig.APIKeyEnc {
+		ch = append(ch, "api_key:已更换")
+	}
+	if !slices.Equal(orig.Models, p.Models) {
+		ch = append(ch, fmt.Sprintf("models:%d→%d", len(orig.Models), len(p.Models)))
+	}
+	if len(ch) > 0 {
+		_ = serverstore.AuditLog(db, auditActor(c), "provider_update", p.Name+": "+strings.Join(ch, ", "))
+	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p), "sync": syncRes})
 }
 
@@ -358,6 +424,15 @@ func deleteProvider(c *gin.Context, db *sql.DB) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	p, err := serverstore.GetGatewayProvider(db, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "上游不存在")
+		return
+	}
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
 	if err := serverstore.DeleteGatewayProvider(db, id); err != nil {
@@ -369,6 +444,7 @@ func deleteProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
+	_ = serverstore.AuditLog(db, auditActor(c), "provider_delete", fmt.Sprintf("%s base_url=%s", p.Name, p.BaseURL))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -440,6 +516,20 @@ func listModelsAdmin(c *gin.Context, db *sql.DB) {
 	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
+// auditModelDetail 模型审计明细(价格 nil = 未定价)。
+func auditModelDetail(m *serverstore.Model) string {
+	return fmt.Sprintf("%s provider=%d display=%s input=%s output=%s cache=%s offpeak=%s",
+		m.Name, m.ProviderID, m.DisplayName, priceStr(m.InputPricePer1M),
+		priceStr(m.OutputPricePer1M), priceStr(m.CacheInputPricePer1M), priceStr(m.OffpeakDiscount))
+}
+
+func priceStr(p *float64) string {
+	if p == nil {
+		return "未定价"
+	}
+	return strconv.FormatFloat(*p, 'g', -1, 64)
+}
+
 func createModel(c *gin.Context, db *sql.DB) {
 	var req modelReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" || req.ProviderID <= 0 {
@@ -468,6 +558,7 @@ func createModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
+	_ = serverstore.AuditLog(db, auditActor(c), "model_create", auditModelDetail(m))
 	c.JSON(http.StatusOK, gin.H{"model": m})
 }
 
@@ -486,6 +577,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	orig := *m // 审计基线(指针字段仅读)
 	var req modelReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -543,7 +635,44 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
+	// 审计:价格/参数变更明细(口径即计费,必须留痕)
+	var ch []string
+	if m.Name != orig.Name {
+		ch = append(ch, "name:"+orig.Name+"→"+m.Name)
+	}
+	if m.ProviderID != orig.ProviderID {
+		ch = append(ch, fmt.Sprintf("provider:%d→%d", orig.ProviderID, m.ProviderID))
+	}
+	if m.DisplayName != orig.DisplayName {
+		ch = append(ch, "display:"+orig.DisplayName+"→"+m.DisplayName)
+	}
+	if m.DefaultParams != orig.DefaultParams {
+		ch = append(ch, "params:已修改")
+	}
+	if !optF64Eq(m.InputPricePer1M, orig.InputPricePer1M) {
+		ch = append(ch, "input:"+priceStr(orig.InputPricePer1M)+"→"+priceStr(m.InputPricePer1M))
+	}
+	if !optF64Eq(m.OutputPricePer1M, orig.OutputPricePer1M) {
+		ch = append(ch, "output:"+priceStr(orig.OutputPricePer1M)+"→"+priceStr(m.OutputPricePer1M))
+	}
+	if !optF64Eq(m.CacheInputPricePer1M, orig.CacheInputPricePer1M) {
+		ch = append(ch, "cache:"+priceStr(orig.CacheInputPricePer1M)+"→"+priceStr(m.CacheInputPricePer1M))
+	}
+	if !optF64Eq(m.OffpeakDiscount, orig.OffpeakDiscount) {
+		ch = append(ch, "offpeak:"+priceStr(orig.OffpeakDiscount)+"→"+priceStr(m.OffpeakDiscount))
+	}
+	if len(ch) > 0 {
+		_ = serverstore.AuditLog(db, auditActor(c), "model_update", m.Name+": "+strings.Join(ch, ", "))
+	}
 	c.JSON(http.StatusOK, gin.H{"model": m})
+}
+
+// optF64Eq 指针浮点相等(含 nil 语义)。
+func optF64Eq(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func deleteModel(c *gin.Context, db *sql.DB) {
@@ -553,10 +682,14 @@ func deleteModel(c *gin.Context, db *sql.DB) {
 		return
 	}
 	// 渠道型上游:删除其同步模型记入排除名单,防止被 SyncLoop 复活(审计修复 H2)
-	if m, err := serverstore.GetModel(db, id); err == nil && m.ProviderChannel != "" {
-		if err := serverstore.AddExcludedModel(db, m.ProviderID, m.Name); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
-			return
+	var delName string
+	if m, err := serverstore.GetModel(db, id); err == nil {
+		delName = m.Name
+		if m.ProviderChannel != "" {
+			if err := serverstore.AddExcludedModel(db, m.ProviderID, m.Name); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+				return
+			}
 		}
 	}
 	if err := serverstore.DeleteModel(db, id); err != nil {
@@ -567,6 +700,9 @@ func deleteModel(c *gin.Context, db *sql.DB) {
 		}
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
+	}
+	if delName != "" {
+		_ = serverstore.AuditLog(db, auditActor(c), "model_delete", delName)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -707,25 +843,40 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	// 审计(2026-09 P1):字段级变更明细捕获 + 默认配额专属动作。
+	changes := []string{}
+	quotaChanges := []string{}
 	if req.DefaultModel != nil {
+		old, _, _ := serverstore.GetSetting(db, "gateway.default_model")
+		if old != *req.DefaultModel {
+			changes = append(changes, "默认模型:"+orEmpty(old)+"→"+orEmpty(*req.DefaultModel))
+		}
 		if err := serverstore.SetSetting(db, "gateway.default_model", *req.DefaultModel); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.RateLimit != nil {
-		if err := serverstore.SetSetting(db, "gateway.rate_limit", string(*req.RateLimit)); err != nil {
+		if err := auditSetSetting(db, "gateway.rate_limit", "每用户限流", string(*req.RateLimit), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.MonthlyQuota != nil {
+		old, _, _ := serverstore.GetSetting(db, serverstore.MonthlyQuotaSetting)
+		if old != string(*req.MonthlyQuota) {
+			quotaChanges = append(quotaChanges, "默认token配额:"+orEmpty(old)+"→"+orEmpty(string(*req.MonthlyQuota)))
+		}
 		if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, string(*req.MonthlyQuota)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.MonthlyQuotaMoney != nil {
+		old, _, _ := serverstore.GetSetting(db, serverstore.MonthlyMoneyQuotaSetting)
+		if old != string(*req.MonthlyQuotaMoney) {
+			quotaChanges = append(quotaChanges, "默认金额配额:"+orEmpty(old)+"→"+orEmpty(string(*req.MonthlyQuotaMoney)))
+		}
 		if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, string(*req.MonthlyQuotaMoney)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
@@ -733,14 +884,14 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	// 高峰窗口:显式空串 = 移除(无峰谷价),显式合法 JSON = 写入(审计修复 H1)
 	if req.PeakWindows != nil {
-		if err := serverstore.SetSetting(db, serverstore.PeakWindowsSetting, *req.PeakWindows); err != nil {
+		if err := auditSetSetting(db, serverstore.PeakWindowsSetting, "高峰时段", *req.PeakWindows, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	// usage 明细保留月数(0=永久,默认 6);变更后立即执行一次清理。
 	if req.RetentionMonths != nil {
-		if err := serverstore.SetSetting(db, serverstore.RetentionMonthsSetting, *req.RetentionMonths); err != nil {
+		if err := auditSetSetting(db, serverstore.RetentionMonthsSetting, "明细保留", *req.RetentionMonths, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -750,15 +901,13 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.ErrorReportingDSN != nil {
-		// 错误上报 DSN(空串 = 清空/不启用);Sentry 格式,非空结尾必须 /、
-		// 否则 SDK 解析失败——此处仅存,合法性由客户端初始化容错。
-		if err := serverstore.SetSetting(db, "web.error_reporting_dsn", *req.ErrorReportingDSN); err != nil {
+		if err := auditSetSetting(db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.ErrorReportingEnabled != nil {
-		if err := serverstore.SetSetting(db, "web.error_reporting_enabled", strconv.FormatBool(*req.ErrorReportingEnabled)); err != nil {
+		if err := auditSetSetting(db, "web.error_reporting_enabled", "错误上报开关", strconv.FormatBool(*req.ErrorReportingEnabled), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -771,21 +920,19 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "reporting_level 必须是 error|warning|info|debug")
 			return
 		}
-		if err := serverstore.SetSetting(db, "web.error_reporting_level", *req.ErrorReportingLevel); err != nil {
+		if err := auditSetSetting(db, "web.error_reporting_level", "错误上报等级", *req.ErrorReportingLevel, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.GlitchTipBaseURL != nil {
-		// GlitchTip 连接器地址(统一分发;空串 = 清空,客户端不预填)
-		if err := serverstore.SetSetting(db, "web.glitchtip_base_url", *req.GlitchTipBaseURL); err != nil {
+		if err := auditSetSetting(db, "web.glitchtip_base_url", "GlitchTip地址", *req.GlitchTipBaseURL, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.GlitchTipOrg != nil {
-		// GlitchTip 组织 slug(统一分发)
-		if err := serverstore.SetSetting(db, "web.glitchtip_organization", *req.GlitchTipOrg); err != nil {
+		if err := auditSetSetting(db, "web.glitchtip_organization", "GlitchTip组织", *req.GlitchTipOrg, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -799,17 +946,22 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "default_thinking_level 必须是 off|low|high|max")
 			return
 		}
-		if err := serverstore.SetSetting(db, "web.default_thinking_level", *req.DefaultThinkingLevel); err != nil {
+		if err := auditSetSetting(db, "web.default_thinking_level", "默认思考强度", *req.DefaultThinkingLevel, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.ServerBaseURL != nil {
-		// 对外 HTTPS 地址(经 Caddy 反代后的访问入口),webadmin 配置展示用
-		if err := serverstore.SetSetting(db, "server.base_url", *req.ServerBaseURL); err != nil {
+		if err := auditSetSetting(db, "server.base_url", "对外地址", *req.ServerBaseURL, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
+	}
+	if len(changes) > 0 {
+		_ = serverstore.AuditLog(db, auditActor(c), "gateway_config", strings.Join(changes, ", "))
+	}
+	if len(quotaChanges) > 0 {
+		_ = serverstore.AuditLog(db, auditActor(c), "quota_default_change", strings.Join(quotaChanges, ", "))
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

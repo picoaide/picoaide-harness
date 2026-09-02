@@ -28,6 +28,7 @@ import (
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -54,6 +55,7 @@ func buildRouter(t *testing.T) *gin.Engine {
 		Connector:  connectors.NewHandlers(nil),
 		Telemetry:  telemetry.NewHandlers(nil),
 		Gateway:    llmgateway.NewHandlers(nil),
+		Reports:    reports.NewHandlers(nil),
 	})
 	return r
 }
@@ -218,6 +220,7 @@ func TestV2RealDB(t *testing.T) {
 		Connector:  connectors.NewHandlers(db),
 		Telemetry:  telemetry.NewHandlers(db),
 		Gateway:    llmgateway.NewHandlers(db),
+		Reports:    reports.NewHandlers(db),
 	})
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
