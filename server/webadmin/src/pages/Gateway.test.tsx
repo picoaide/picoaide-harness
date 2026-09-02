@@ -14,7 +14,7 @@ const baseImpl = async (path: string, init?: RequestInit) => {
   }
   if (path === '/api/server/admin/providers') return { providers: [{ id: 1, name: 'deepseek', base_url: 'https://api.deepseek.com', api_key: '***', models: ['deepseek-chat'], enabled: true, channel: 'deepseek', protocol: 'openai' }] }
   if (path === '/api/server/admin/models') return { models: [{ id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', provider_name: 'deepseek', provider_channel: 'deepseek', provider_enabled: true }] }
-  if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', server_base_url: '' }
+  if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', peak_windows: '', server_base_url: '' }
   if (path === '/api/server/admin/channels') return { channels: [{ name: 'deepseek', base_url: 'https://api.deepseek.com' }] }
   return {}
 }
@@ -92,30 +92,8 @@ describe('Gateway 网关配置页', () => {
   })
 })
 
-  it('全局设置渲染默认月金额配额字段并可编辑保存', async () => {
-    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
-        return { ok: true }
-      }
-      return {
-        ...(await baseImpl(path, init)),
-        ...(path === '/api/server/admin/gateway' ? { monthly_quota: '100000', monthly_quota_money: '500' } : {}),
-      }
-    })
-    render(<Gateway />)
-    await screen.findByText('全局设置')
-    // 默认月金额配额字段存在并渲染已保存值
-    const moneyInput = screen.getByDisplayValue('500')
-    expect(moneyInput).toBeInTheDocument()
-    // 修改并保存
-    fireEvent.change(moneyInput, { target: { value: '800' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
-    await screen.findByText('已保存')
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/gateway',
-      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"monthly_quota_money":"800"') }),
-    )
-  })
+  // 全局默认配额已迁至「用量中心 → 配额与预算」页(2026-09 重构):
+  // 网关页不再渲染/提交 monthly_quota 相关字段。
 
   it('模型表格展示价格列:未定价徽标与价格显示', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
