@@ -1,7 +1,9 @@
 package serverstore
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -449,5 +451,121 @@ func TestParseSQLTimeLocalZone(t *testing.T) {
 	gotRFC := parseSQLTime(rfc.Format(time.RFC3339))
 	if !gotRFC.Equal(rfc) {
 		t.Fatalf("parseSQLTime RFC3339 = %v, want %v", gotRFC, rfc)
+	}
+}
+
+// createTestAdminSession 测试内直接插入 admin_sessions 行(避免依赖 serverauth 包)。
+func createTestAdminSession(t *testing.T, db *sql.DB, uid int64) {
+	t.Helper()
+	if _, err := db.Exec("INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at, last_used_at) VALUES (?, ?, ?, ?, ?)",
+		"testsess"+fmt.Sprint(uid), uid, "csrfkey", time.Now().Add(time.Hour).UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ---- 0057 密码/mfa 字段与 DAO ----
+
+func TestPasswordAndMFAFields(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := CreateUserWithPassword(db, "alice", "pw1234567890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateToken(db, uid, "rawtoken1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	createTestAdminSession(t, db, uid)
+
+	// 改密: 全吊销(api_tokens + admin_sessions) + must_change 标志 + 时间戳
+	if err := UpdateUserPassword(db, uid, "newhash", true); err != nil {
+		t.Fatal(err)
+	}
+	u, err := GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.PasswordHash != "newhash" || !u.PasswordMustChange {
+		t.Fatalf("password fields not applied: %+v", u)
+	}
+	if u.PasswordChangedAt.IsZero() {
+		t.Fatal("password_changed_at not set")
+	}
+	var tokens, sessions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM api_tokens WHERE user_id = ?", uid).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions WHERE user_id = ?", uid).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 0 || sessions != 0 {
+		t.Fatalf("password change must revoke all sessions: tokens=%d sessions=%d", tokens, sessions)
+	}
+
+	// 改密取消强制标志
+	if err := UpdateUserPassword(db, uid, "newhash2", false); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if u.PasswordMustChange {
+		t.Fatal("must_change not cleared")
+	}
+
+	// SetUserMFA / ClearUserMFA roundtrip
+	if err := SetUserMFA(db, uid, "enc:v1:xyz", true); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if !u.TotpEnabled || u.TotpSecret != "enc:v1:xyz" {
+		t.Fatalf("mfa not set: %+v", u)
+	}
+	if err := ClearUserMFA(db, uid); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if u.TotpEnabled || u.TotpSecret != "" {
+		t.Fatalf("mfa not cleared: %+v", u)
+	}
+
+	// UpdateUser 不影响 totp 字段(独立 DAO 管理)
+	if err := SetUserMFA(db, uid, "enc:v1:abc", true); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	u.DisplayName = "Alice"
+	if err := UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if !u.TotpEnabled || u.TotpSecret != "enc:v1:abc" {
+		t.Fatalf("UpdateUser clobbered totp: %+v", u)
+	}
+}
+
+func TestRevokeAllUserSessions(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := CreateUserWithPassword(db, "bob", "pw1234567890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateToken(db, uid, "t1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	createTestAdminSession(t, db, uid)
+	if err := RevokeAllUserSessions(db, uid); err != nil {
+		t.Fatal(err)
+	}
+	var tokens, sessions int
+	_ = db.QueryRow("SELECT COUNT(*) FROM api_tokens WHERE user_id = ?", uid).Scan(&tokens)
+	_ = db.QueryRow("SELECT COUNT(*) FROM admin_sessions WHERE user_id = ?", uid).Scan(&sessions)
+	if tokens != 0 || sessions != 0 {
+		t.Fatalf("revoke: tokens=%d sessions=%d", tokens, sessions)
 	}
 }

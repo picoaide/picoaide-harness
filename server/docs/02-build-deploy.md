@@ -43,6 +43,7 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 | `--bootstrap-admin` | 初始超管用户名;首次启动时用 `PICOAI_ADMIN_PASSWORD` 创建(已存在则校验其为管理员);**首次启动后不可重复创建** |
 | `PICOAI_ADMIN_PASSWORD` | 初始超管密码(**必须**与 `--bootstrap-admin` 同时提供,否则启动失败) |
 | `PICOAI_MASTER_KEY` | 可选;不设置时首次启动自动生成随机 master key 写入 `data/` 下(0700)。**备份该文件**,丢失后已加密的网关/商城凭证无法解密 |
+| `--reset-mfa <username>` | 运维兜底操作模式(0057):清空该用户的 TOTP 配置并吊销其全部会话(api_tokens + admin_sessions),完成即退出不启动服务。适用唯一超管丢失验证器/无法登录后台的场景;需 `-pg-dsn`(自动应用迁移);完成写入审计 `admin_mfa_reset(cli)` |
 
 ### 生产建议
 

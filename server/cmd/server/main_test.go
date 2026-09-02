@@ -70,6 +70,7 @@ func TestAdminRouterNoFallOpen(t *testing.T) {
 	}
 	public := map[string]bool{
 		"POST /api/server/admin/login":       true,
+		"POST /api/server/admin/login/mfa":   true,
 		"GET /api/server/admin/auth/methods": true,
 	}
 	for _, rt := range r.Routes() {

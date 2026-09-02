@@ -5,10 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // CtxUserKey is the gin context key for the authenticated user.
@@ -67,6 +70,9 @@ func WithVersionPrefix(prefix, base string) string {
 func writeError(c *gin.Context, status int, code, msg string) { WriteError(c, status, code, msg) }
 
 // BearerAuth authenticates the request via Authorization: Bearer <token>.
+// 0057: 强制改密守卫 —— password_must_change 用户仅可调用改密/me/logout,
+// 其余业务接口一律 403 PASSWORD_CHANGE_REQUIRED(客户端在完成改密前不得
+// 使用任何业务能力, 防止绕过强制改密拦截直接使用)。
 func BearerAuth(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := bearerToken(c)
@@ -79,10 +85,29 @@ func BearerAuth(db *sql.DB) gin.HandlerFunc {
 			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "令牌无效或已过期")
 			return
 		}
+		if u.PasswordMustChange && !passwordChangeAllowed(c.Request) {
+			writeError(c, http.StatusForbidden, "PASSWORD_CHANGE_REQUIRED", "请先修改密码")
+			return
+		}
 		c.Set(CtxUserKey, u)
 		c.Set(CtxTokenKey, raw)
 		c.Next()
 	}
+}
+
+// passwordChangeAllowed 是强制改密态的白名单: 仅改密本身/查看自身信息/登出。
+func passwordChangeAllowed(r *http.Request) bool {
+	p := r.URL.Path
+	if r.Method == http.MethodPost && p == "/api/client/v2/auth/password" {
+		return true
+	}
+	if r.Method == http.MethodGet && p == "/api/client/v2/auth/me" {
+		return true
+	}
+	if r.Method == http.MethodPost && p == "/api/client/v2/auth/logout" {
+		return true
+	}
+	return false
 }
 
 func bearerToken(c *gin.Context) string {
@@ -104,7 +129,7 @@ func CurrentUser(c *gin.Context) *serverstore.User {
 	return u
 }
 
-// RegisterRoutes mounts /api/auth on the router (测试/自建路由辅助; 生产路由
+// RegisterRoutes mounts /api/client/v2/auth on the router (测试/自建路由辅助; 生产路由
 // 由 internal/router 包集中声明)。
 func (a *API) RegisterRoutes(r *gin.Engine) {
 	base := "/api/client/v2/auth"
@@ -113,6 +138,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	g.POST("/logout", BearerAuth(a.DB), a.handleLogout)
 	g.GET("/me", BearerAuth(a.DB), a.handleMe)
 	g.GET("/usage", BearerAuth(a.DB), a.handleUsageSummary)
+	g.POST("/password", BearerAuth(a.DB), a.handleChangePassword)
 	// 每套 browser provider(oidc/openid)独立路由前缀
 	for _, p := range a.browsers {
 		name := p.Name()
@@ -177,7 +203,62 @@ func (a *API) handleLogin(c *gin.Context) {
 	}
 	// v3b 审计: 登录成功留痕。
 	_ = serverstore.AuditLog(a.DB, user.Username, "login_success", "ip="+c.ClientIP())
-	c.JSON(http.StatusOK, gin.H{"token": token, "user": userJSON(user)})
+	c.JSON(http.StatusOK, gin.H{
+		"token": token, "user": userJSON(user),
+		// 0057: 管理员重置密码后强制改密, 客户端须进入强制改密态。
+		"must_change_password": user.PasswordMustChange,
+	})
+}
+
+// handleChangePassword 员工自助改密(0057; 仅本地认证用户):
+// 校验旧密码 → 更新密码(事务内吊销该用户全部 api_tokens 与 admin_sessions,
+// 含当前 —— 改密后客户端必须重新登录) → 审计。
+func (a *API) handleChangePassword(c *gin.Context) {
+	u := CurrentUser(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	if len(req.OldPassword) > 1024 || len(req.NewPassword) > 1024 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "密码过长")
+		return
+	}
+	if utf8.RuneCountInString(req.NewPassword) < minPasswordLength {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+		return
+	}
+	// 外部认证(LDAP/OIDC)用户的密码由企业 IdP 管理(与管理员重置同一口径)。
+	if u.Source != "local" || u.PasswordHash == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "外部认证用户的密码由企业 IdP 管理,不能在此修改")
+		return
+	}
+	if !util.VerifyPassword(u.PasswordHash, req.OldPassword) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "原密码错误")
+		return
+	}
+	if util.VerifyPassword(u.PasswordHash, req.NewPassword) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "新密码不能与原密码相同")
+		return
+	}
+	hash, err := util.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "密码处理失败")
+		return
+	}
+	if err := serverstore.UpdateUserPassword(a.DB, u.ID, hash, false); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "修改密码失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, u.Username, "password_change", "self")
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // ldapProvider returns the LDAP provider to use for this login attempt:
@@ -408,5 +489,13 @@ func userJSON(u *serverstore.User) gin.H {
 		"status":       u.Status,
 		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
 		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
+		// 0057 密码/MFA: source 供客户端判断改密入口; password_changeable =
+		// 本地认证且启用的账号; password_must_change = 下次登录强制改密;
+		// mfa_enabled 供 webadmin 列表控制「重置 MFA」按钮。
+		"source":               u.Source,
+		"password_changeable":  u.Source == "local" && u.PasswordHash != "" && u.Status == 1,
+		"password_must_change": u.PasswordMustChange,
+		"password_changed_at":  u.PasswordChangedAt.Format(time.RFC3339),
+		"mfa_enabled":          u.TotpEnabled,
 	}
 }

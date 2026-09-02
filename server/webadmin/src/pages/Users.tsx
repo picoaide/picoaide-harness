@@ -26,6 +26,12 @@ interface User {
   monthly_cost?: number // 0022:yuan spent this calendar month
   effective_quota_tokens?: number // 0021:解析后生效配额(跟随默认=全局值,admin=0)
   effective_quota_money?: number // 0022:同上(元)
+  // 0057 密码/MFA
+  source?: string // 'local' | 'external'; external 密码由 IdP 管理
+  password_changeable?: boolean
+  password_must_change?: boolean
+  password_changed_at?: string
+  mfa_enabled?: boolean
 }
 
 interface Department {
@@ -312,6 +318,53 @@ export default function Users() {
     }
   }
 
+  // ---- 0057 重置密码 / 重置 MFA ----
+  const [resetPwUser, setResetPwUser] = useState<User | null>(null)
+  const [resetPw1, setResetPw1] = useState('')
+  const [resetPw2, setResetPw2] = useState('')
+  const [resetPwErr, setResetPwErr] = useState('')
+
+  function openResetPw(u: User) {
+    setResetPwUser(u)
+    setResetPw1(''); setResetPw2(''); setResetPwErr('')
+  }
+
+  async function saveResetPw() {
+    if (busy || !resetPwUser) return // 双击守卫(L10)
+    if (resetPw1.length < 10) { setResetPwErr('新密码至少 10 位'); return }
+    if (resetPw1 !== resetPw2) { setResetPwErr('两次输入的新密码不一致'); return }
+    const name = resetPwUser.username
+    setBusy(true)
+    try {
+      await request(`${ADMIN_API}/users/${resetPwUser.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ password: resetPw1 }),
+      })
+      setResetPwUser(null)
+      setError(`已重置 ${name} 的密码:已吊销其全部会话,对方下次登录须先修改密码`)
+      load(page, q)
+    } catch (err: any) {
+      setResetPwErr(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function resetMFA(u: User) {
+    if (busy) return // 双击守卫(L10)
+    if (!window.confirm(`确定重置 ${u.username} 的双重验证?将关闭其 MFA 并吊销全部会话,对方需用密码重新登录。`)) return
+    setBusy(true)
+    try {
+      await request(`${ADMIN_API}/users/${u.id}/mfa`, { method: 'PUT' })
+      setError(`已重置 ${u.username} 的双重验证`)
+      load(page, q)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
@@ -348,6 +401,7 @@ export default function Users() {
               <TableHead>角色</TableHead>
               <TableHead>状态</TableHead>
               <TableHead className="min-w-0">本月流量</TableHead>
+              <TableHead className="min-w-0">上次改密</TableHead>
               <TableHead className="w-1 text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -400,12 +454,28 @@ export default function Users() {
                     </div>
                   )}
                 </TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {/* 0057: 上次改密时间; 未改密(NULL)= 创建时初始密码 */}
+                  {u.password_changed_at ? fmtTime(u.password_changed_at) : '初始密码'}
+                </TableCell>
               <TableCell className="text-right">
                 <div className="flex justify-end gap-2 whitespace-nowrap">
                   <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
                   <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
                   {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
                   <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
+                  {/* 0057: 重置密码(local 用户; external 由 IdP 管理) */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={u.source === 'external'}
+                    title={u.source === 'external' ? '外部认证(LDAP/OIDC)用户的密码由企业 IdP 管理' : '重置后将吊销其全部会话,对方下次登录须改密'}
+                    onClick={() => openResetPw(u)}
+                  >重置密码</Button>
+                  {/* 0057: 重置他人 MFA(仅对已开启者显示; 不显示自己不在此页判定,服务端 400 兜底) */}
+                  {u.mfa_enabled && (
+                    <Button size="sm" variant="outline" onClick={() => void resetMFA(u)}>重置MFA</Button>
+                  )}
                   <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
                     {u.status === 1 ? '禁用' : '启用'}
                   </Button>
@@ -416,7 +486,7 @@ export default function Users() {
           ))}
           {users.length === 0 && (
             <TableRow>
-              <TableCell colSpan={7} className="border-0 p-0">
+              <TableCell colSpan={8} className="border-0 p-0">
                 <EmptyState
                   icon={<UsersIcon className="h-5 w-5 text-muted-foreground" />}
                   title="暂无匹配用户"
@@ -457,6 +527,34 @@ export default function Users() {
             </div>
             {createErr && <div className="text-sm text-destructive">{createErr}</div>}
             <Button onClick={create} className="w-full">创建</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 0057 重置密码对话框: 重置即生效; 服务端置 must_change 并吊销全部会话 */}
+      <Dialog open={!!resetPwUser} onOpenChange={(open) => { if (!open) setResetPwUser(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>重置密码 · {resetPwUser?.username}</DialogTitle>
+            <DialogDescription>
+              重置后该用户全部登录会话被立即吊销,下次登录必须修改密码(防止管理员代设的密码被长期沿用)。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label htmlFor="reset-pw-1">新密码(至少 10 位)</Label>
+              <Input id="reset-pw-1" type="password" value={resetPw1} onChange={(e) => setResetPw1(e.target.value)} autoFocus />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="reset-pw-2">确认新密码</Label>
+              <Input id="reset-pw-2" type="password" value={resetPw2} onChange={(e) => setResetPw2(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void saveResetPw() }} />
+            </div>
+            {resetPwErr && <div className="text-sm text-destructive">{resetPwErr}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setResetPwUser(null)} disabled={busy}>取消</Button>
+              <Button onClick={() => void saveResetPw()} disabled={busy}>{busy ? '提交中…' : '确认重置'}</Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

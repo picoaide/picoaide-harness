@@ -5,6 +5,8 @@ import { me, logout, request, setOnUnauthorized, ADMIN_API, CLIENT_API } from '.
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
 import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
+import { PasswordDialog } from './components/password-dialog'
+import { MFASettingsDialog } from './components/mfa-settings-dialog'
 import Login from './pages/Login'
 
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
@@ -145,10 +147,17 @@ export default function App() {
   const [brand, setBrand] = useState<{ login?: { display_name?: string; logo_url?: string; tagline?: string }; client?: { display_name?: string; tagline?: string } } | null>(null)
   // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
   const [mobileNav, setMobileNav] = useState(false)
+  // 0057 密码/MFA 自助管理
+  const [pwdOpen, setPwdOpen] = useState(false)
+  const [mfaOpen, setMfaOpen] = useState(false)
+  const [forceChange, setForceChange] = useState(false)
 
   useEffect(() => {
     // 审计 A5-M3: 会话过期由全局回调原地切回登录态(取代整页跳转)
-    setOnUnauthorized(() => setAuthed(false))
+    setOnUnauthorized(() => {
+      setAuthed(false)
+      setForceChange(false)
+    })
     return () => setOnUnauthorized(null)
   }, [])
 
@@ -159,6 +168,8 @@ export default function App() {
         const u = body?.user as MeUser | undefined
         setMeUser(u ?? null)
         setAdminName(u?.display_name || u?.username || '管理员')
+        // 0057: 管理员重置密码后强制改密拦截(完成前业务端点均被 403)。
+        if (u?.password_must_change) setForceChange(true)
         // 品牌跟随: 公开端点(登录前也可用), 失败忽略(默认品牌)。
         try {
           const b = await request(`${CLIENT_API}/brand`) as { enabled?: boolean; login?: { display_name?: string; logo_url?: string; tagline?: string } }
@@ -296,6 +307,15 @@ export default function App() {
                 </div>
               </div>
             </div>
+              {/* 0057 密码/MFA 自助管理(任意管理角色; 服务端守卫 = 会话+CSRF+旧密码/动态码) */}
+              <div className="mb-1.5 grid grid-cols-2 gap-1.5">
+                <Button variant="outline" size="sm" className="h-7 text-[12px]" onClick={() => setPwdOpen(true)}>
+                  <KeyRound className="h-3 w-3" /> 修改密码
+                </Button>
+                <Button variant="outline" size="sm" className="h-7 text-[12px]" onClick={() => setMfaOpen(true)}>
+                  <ShieldCheck className="h-3 w-3" /> 安全设置
+                </Button>
+              </div>
             <Button
               variant="ghost"
               size="sm"
@@ -380,6 +400,37 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {/* 0057 密码/MFA 自助管理对话框 */}
+      <PasswordDialog
+        open={pwdOpen}
+        onOpenChange={setPwdOpen}
+        onDone={async () => {
+          // 改密后服务端吊销全部会话(含当前) → 前端登出
+          try { await logout() } catch { /* session already revoked */ }
+          try { sessionStorage.removeItem(BASE_URL_CACHE_KEY) } catch { /* ignore */ }
+          setAuthed(false)
+          setForceChange(false)
+        }}
+      />
+      <MFASettingsDialog open={mfaOpen} onOpenChange={setMfaOpen} onChanged={() => {
+        // MFA 状态变化后刷新自身信息(安全设置菜单旁的徽章等)
+        me().then((b) => setMeUser((b?.user as MeUser) ?? null)).catch(() => { /* ignore */ })
+      }} />
+      {/* 强制改密拦截(不可关闭): 完成改密后服务端吊销当前会话 → 回登录页 */}
+      {forceChange && (
+        <PasswordDialog
+          open
+          force
+          onOpenChange={() => { /* noop: 拦截不可关闭 */ }}
+          onDone={async () => {
+            try { await logout() } catch { /* session already revoked */ }
+            try { sessionStorage.removeItem(BASE_URL_CACHE_KEY) } catch { /* ignore */ }
+            setForceChange(false)
+            setAuthed(false)
+          }}
+        />
+      )}
     </BrowserRouter>
   )
 }

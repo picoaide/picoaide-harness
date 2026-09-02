@@ -3,11 +3,12 @@
 ## 1. 服务端(PostgreSQL,PG-only 2026-08)
 
 > 2026-08 起 SQLite 已全面下线:服务端数据库为 PostgreSQL(内置容器或外部实例)。
-> 迁移在 `internal/serverstore/migrations-pg/`(0001–0049;0007 已废弃;0028 下线
+> 迁移在 `internal/serverstore/migrations-pg/`(0001–0057;0007 已废弃;0028 下线
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
-> 0049 按模型并发峰值 model_concurrency_stats)。
+> 0049 按模型并发峰值 model_concurrency_stats;0050-0056 能力中心/用量中心与
+> 报表订阅;0057 密码改密字段 + 管理员 MFA(admin_mfa_challenges))。
 
 ### users(0001, 0046 起 role 取代 is_admin)
 | 列 | 说明 |
@@ -21,6 +22,10 @@
 | role | 0046 新增:`super_admin` \| `auditor` \| `user`(默认,用户创建时写入;回填 is_admin=1→super_admin) |
 | status | 1=启用 |
 | quota_tokens | 0021 新增,月流量配额三态:NULL=跟随全局默认(`usage.monthly_quota`),0=不限,>0=按月限额;admin 一律豁免(网关强制) |
+| password_changed_at | 0057:上次改密时间(创建时 NULL = 从未改密;展示/审计用) |
+| password_must_change | 0057:1=下次登录强制改密(管理员重置密码置位,改密成功清除;期间业务 API 403 `PASSWORD_CHANGE_REQUIRED`) |
+| totp_secret | 0057:管理员 TOTP 密钥 AES-GCM 密文(master key;'' = 未配置;绝不返回明文) |
+| totp_enabled | 0057:1=管理员双因素认证已启用(verify 成功才置位) |
 | quota_money | 0022 新增,月金额配额三态:NULL=跟随全局默认(`usage.monthly_quota_money`),0=不限,>0=按月金额上限(元);admin 一律豁免(网关强制) |
 | created_at / updated_at | timestamptz |
 
@@ -93,6 +98,7 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 | messages | id, conversation_id(CASCADE), role, content, reasoning(默认 ''), tool_calls JSON '[]', tool_call_id, tool_name, is_error(0/1), created_at | 消息;工具调用链与错误标记;索引 idx_messages_conv |
 | artifacts | id, conversation_id(CASCADE), path, type(默认 'file'), size, created_at | 产物登记(磁盘产物路径) |
 | settings | key PK, value | 可访问目录/建议安装管理等 |
+| admin_mfa_challenges | 0057:两步行登录/开启 MFA 的一次性挑战(id PK, user_id, kind, secret, attempts, expires_at, used_at;5 分钟/60 秒有效,失败 ≥5 作废) |
 | schema_migrations | version PK, applied_at | 迁移记录 |
 
 ### usage_daily / usage_monthly(0039,永久账本)

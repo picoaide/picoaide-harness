@@ -77,6 +77,8 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	ag.POST("/logout", serverauth.BearerAuth(d.DB), d.Auth.Logout)
 	ag.GET("/me", serverauth.BearerAuth(d.DB), d.Auth.Me)
 	ag.GET("/usage", serverauth.BearerAuth(d.DB), d.Auth.Usage)
+	// 0057 员工自助改密(本地认证用户; 改密后全部令牌吊销, 客户端重新登录)。
+	ag.POST("/password", serverauth.BearerAuth(d.DB), d.Auth.ChangePassword)
 	// 公开发现: 登录方式(客户端登录页未登录时探测; 与 /api/server/admin 同 handler)。
 	ag.GET("/methods", d.Admin.PublicMethods)
 	for _, ro := range d.Auth.OIDC {
@@ -150,20 +152,29 @@ func registerGatewayV1(r *gin.Engine, d Deps) {
 // registerServer 服务端管理面全部端点。
 func registerServer(srv *gin.RouterGroup, d Deps) {
 	sg := srv.Group("/admin")
-	// 公开: 管理登录 + 登录方式发现
+	// 公开: 管理登录(含 0057 两步验证第二步) + 登录方式发现
 	sg.POST("/login", d.Admin.Login)
+	sg.POST("/login/mfa", d.Admin.LoginMFA)
 	sg.GET("/auth/methods", d.Admin.PublicMethods)
 
 	// 会话内(AdminAuth + RBAC)
 	authed := sg.Group("", serverauth.AdminAuth(d.DB))
 	serverauth.AdminRoute(authed, "GET", "/me", "", d.Admin.Me)
 	serverauth.AdminRoute(authed, "POST", "/logout", "", d.Admin.Logout)
+	// 0057 密码/MFA 自助管理(任意管理角色; 有效会话 + CSRF + 旧密码/动态码双验)
+	serverauth.AdminRoute(authed, "POST", "/me/password", "", d.Admin.MePassword)
+	serverauth.AdminRoute(authed, "GET", "/me/mfa", "", d.Admin.GetMyMFA)
+	serverauth.AdminRoute(authed, "POST", "/me/mfa/enable", "", d.Admin.EnableMyMFA)
+	serverauth.AdminRoute(authed, "POST", "/me/mfa/verify", "", d.Admin.VerifyMyMFA)
+	serverauth.AdminRoute(authed, "POST", "/me/mfa/disable", "", d.Admin.DisableMyMFA)
 
 	// 用户/部门
 	serverauth.AdminRoute(authed, "GET", "/users", serverauth.PermUserRead, d.Admin.ListUsers)
 	serverauth.AdminRoute(authed, "POST", "/users", serverauth.PermUserWrite, d.Admin.CreateUser)
 	serverauth.AdminRoute(authed, "PUT", "/users/:id", serverauth.PermUserWrite, d.Admin.UpdateUser)
 	serverauth.AdminRoute(authed, "DELETE", "/users/:id", serverauth.PermUserWrite, d.Admin.DeleteUser)
+	// 0057: 管理员重置他人 MFA(不能对自己; 关闭后吊销其全部会话)。
+	serverauth.AdminRoute(authed, "PUT", "/users/:id/mfa", serverauth.PermUserWrite, d.Admin.ResetUserMFA)
 	serverauth.AdminRoute(authed, "GET", "/users/:id/groups", serverauth.PermUserRead, d.Admin.GetUserGroups)
 	serverauth.AdminRoute(authed, "PUT", "/users/:id/department", serverauth.PermDeptWrite, d.Admin.SetUserDept)
 	serverauth.AdminRoute(authed, "GET", "/departments", serverauth.PermDeptRead, d.Admin.ListDepts)

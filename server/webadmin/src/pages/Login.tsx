@@ -1,17 +1,22 @@
 import { useEffect, useState } from 'react'
-import { login, CLIENT_API } from '../api'
+import { login, loginMFA } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
-import { User, Lock, Loader2, KeyRound } from 'lucide-react'
+import { User, Lock, Loader2, KeyRound, ShieldCheck } from 'lucide-react'
+import { CLIENT_API } from '../api'
 
 // 管理后台登录页 — v3b: 仅本地账号密码。
 // SSO(OIDC/OpenID)与 LDAP 一律不进管理后台: 后台是本地账户唯一入口,
 // 与员工客户端登录面完全隔离(服务端 AuthenticateConfiguredAdmin local-only)。
+// 0057: 管理员开启 MFA 后为两步登录状态机(密码 → TOTP 动态码)。
 
 export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [step, setStep] = useState<'password' | 'mfa'>('password')
+  const [ticket, setTicket] = useState('')
+  const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   // v3b §5.2: 登录页品牌跟随(公开端点)。
@@ -25,16 +30,27 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
   useEffect(() => {
     // 管理后台只允许本地账户: 无方式选择器, 直接聚焦用户名。
-    const el = document.getElementById('admin-username')
-    if (el) el.focus()
-  }, [])
+    if (step === 'password') {
+      const el = document.getElementById('admin-username')
+      if (el) el.focus()
+    } else {
+      const el = document.getElementById('admin-mfa-code')
+      if (el) el.focus()
+    }
+  }, [step])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError('')
     try {
-      await login(username, password)
+      const body = await login(username, password)
+      if (body?.mfa_required) {
+        setTicket(body.mfa_ticket)
+        setCode('')
+        setStep('mfa')
+        return
+      }
       onLoggedIn()
     } catch (err: any) {
       setError(err.message || '登录失败')
@@ -43,56 +59,104 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
   }
 
+  async function submitMFA(e: React.FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await loginMFA(ticket, code.trim())
+      onLoggedIn()
+    } catch (err: any) {
+      setError(err.message || '动态码验证失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const logo = brand?.logo_url ? (
+    <img src={brand.logo_url} alt="logo" className="mx-auto mb-4 h-14 w-14 rounded-lg object-contain" />
+  ) : (
+    <div className="brand-tile mx-auto mb-4 h-14 w-14">
+      <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
+        <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
+          <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
+          <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
+          <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
+          <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
+        </g>
+      </svg>
+    </div>
+  )
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#F9FAFB] p-4">
       <div className="w-full max-w-[420px] rounded-xl border border-border bg-white p-6 shadow-[0_8px_30px_rgba(15,17,21,0.06)] sm:p-8">
         <div className="mb-6 text-center">
-          {/* 品牌 mark:黑 tile(DSH 客户端一致) */}
-          {brand?.logo_url ? (
-            <img src={brand.logo_url} alt="logo" className="mx-auto mb-4 h-14 w-14 rounded-lg object-contain" />
-          ) : (
-          <div className="brand-tile mx-auto mb-4 h-14 w-14">
-            <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
-              <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-                <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
-                <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-                <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-              </g>
-            </svg>
-          </div>
-          )}
+          {logo}
           <h1 className="text-[22px] font-bold tracking-tight text-foreground">{brand?.display_name || 'PicoAide'} 管理后台</h1>
           <p className="mt-1.5 text-[13px] text-muted-foreground">Enterprise AI Gateway · Admin Console</p>
-          <p className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
-            <KeyRound className="h-3 w-3" />
-            仅限本地账户登录（SSO/LDAP 不适用于管理后台）
-          </p>
+          {step === 'password' ? (
+            <p className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
+              <KeyRound className="h-3 w-3" />
+              仅限本地账户登录（SSO/LDAP 不适用于管理后台）
+            </p>
+          ) : (
+            <p className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
+              <ShieldCheck className="h-3 w-3" />
+              该账户已开启双重验证,请输入验证器动态码
+            </p>
+          )}
         </div>
 
-        <form onSubmit={submit} className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="admin-username" className="text-[13px] text-foreground">用户名</Label>
-            <div className="relative">
-              <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input id="admin-username" className="pl-9" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus placeholder="请输入用户名" />
+        {step === 'password' ? (
+          <form onSubmit={submit} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-username" className="text-[13px] text-foreground">用户名</Label>
+              <div className="relative">
+                <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input id="admin-username" className="pl-9" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus placeholder="请输入用户名" />
+              </div>
             </div>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="admin-password" className="text-[13px] text-foreground">密码</Label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input id="admin-password" type="password" className="pl-9" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="请输入密码" />
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-password" className="text-[13px] text-foreground">密码</Label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input id="admin-password" type="password" className="pl-9" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="请输入密码" />
+              </div>
             </div>
-          </div>
-          {error && (
-            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div>
-          )}
-          <Button type="submit" className="h-10 w-full text-[15px] font-semibold" disabled={busy}>
-            {busy ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />登录中…</>) : '登 录'}
-          </Button>
-        </form>
+            {error && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div>
+            )}
+            <Button type="submit" className="h-10 w-full text-[15px] font-semibold" disabled={busy}>
+              {busy ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />登录中…</>) : '登 录'}
+            </Button>
+          </form>
+        ) : (
+          <form onSubmit={submitMFA} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-mfa-code" className="text-[13px] text-foreground">动态验证码</Label>
+              <div className="relative">
+                <ShieldCheck className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input id="admin-mfa-code" className="pl-9 font-mono tracking-widest" value={code} onChange={(e) => setCode(e.target.value)} required autoComplete="one-time-code" maxLength={6} placeholder="6 位数字" />
+              </div>
+            </div>
+            {error && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div>
+            )}
+            <Button type="submit" className="h-10 w-full text-[15px] font-semibold" disabled={busy}>
+              {busy ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />验证中…</>) : '验 证'}
+            </Button>
+            <button
+              type="button"
+              className="w-full text-center text-[12px] text-muted-foreground hover:text-foreground"
+              disabled={busy}
+              onClick={() => { setStep('password'); setError(''); setCode('') }}
+            >
+              返回重新登录
+            </button>
+          </form>
+        )}
 
         <p className="mt-6 text-center text-[11px] text-muted-foreground">© 2026 PicoAide · Enterprise Internal Deployment</p>
       </div>
