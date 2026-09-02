@@ -14,8 +14,8 @@ export default defineConfig({
       title: 'PicoAide Wiki',
       description: 'PicoAide Harness 部署、使用与开发文档',
       logo: {
-        light: './src/assets/logo.svg',
-        dark: './src/assets/logo-dark.svg',
+        light: '../brands/official/logo.svg',
+        dark: '../brands/official/logo-dark.svg',
         replacesTitle: true,
       },
       defaultLocale: 'root',

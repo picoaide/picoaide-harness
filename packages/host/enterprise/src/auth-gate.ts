@@ -139,7 +139,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     while (s.charAt(s.length - 1) === '/') s = s.slice(0, -1)
     return s
   }
-  // 品牌兜底图形:权威源为仓库根 logo.svg(黑色圆角方块 + 白色花括号桥形,
+  // 品牌兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
   // 花括号 1.25x 放大)。任何 logo 兜底都必须与 logo.svg 一致,禁止字母 P 等
   // 编造图形(旧版 P 字 logo 已退役)。
   var BRACE_MARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" width="100%" height="100%" fill="none" aria-hidden="true"><g transform="translate(627 627) scale(1.25) translate(-627 -627)"><path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></g></svg>'

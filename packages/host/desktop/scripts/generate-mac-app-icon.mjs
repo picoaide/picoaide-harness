@@ -13,7 +13,9 @@ export const MAC_APP_ICON_ARTWORK_SIZE = 824
 export const MAC_APP_ICON_INSET = (MAC_APP_ICON_CANVAS_SIZE - MAC_APP_ICON_ARTWORK_SIZE) / 2
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
-const sourcePath = join(packageRoot, 'build', 'app-icon.png')
+const repoRoot = resolve(packageRoot, '..', '..', '..')
+const brandRoot = join(repoRoot, 'brands', 'official')
+const sourcePath = join(brandRoot, 'app-icon.png')
 const outputPath = join(packageRoot, 'build', 'app-icon-mac.png')
 
 /**

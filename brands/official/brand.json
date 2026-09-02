@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "channel_id": "official",
+  "meta": {
+    "description": "官方渠道品牌配置（唯一事实源）。所有品牌文案/图标/标识从本目录派生；渠道化时复制目录为 brands/<channel-id>/ 并修改值（结构不变）。",
+    "updated": "2026-09-04"
+  },
+  "identity": {
+    "display_name": "PicoAide Harness",
+    "short_name": "PicoAide",
+    "slug": "PicoAide-Harness",
+    "app_id": "ai.deepseek.dsh.desktop",
+    "company": "PicoAide",
+    "copyright": "© 2026 PicoAide",
+    "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
+    "deep_link": { "name": "PicoAide Harness Deep Link", "scheme": "picoaide" },
+    "linux": { "maintainer": "picoaide", "synopsis": "PicoAide Harness", "category": "Development" },
+    "data_dir_name": "PicoAide Harness",
+    "product_home_dir": ".picoaide-harness",
+    "telemetry_release": "picoaide-desktop"
+  },
+  "assets": {
+    "logo_primary": "logo.svg",
+    "logo_dark": "logo-dark.svg",
+    "app_icon": "app-icon.png",
+    "accent": "#2563eb",
+    "tray": {
+      "source": "logo.svg",
+      "variants": [
+        { "file": "tray-iconTemplate.png", "size": 16 },
+        { "file": "tray-iconTemplate@2x.png", "size": 32 },
+        { "file": "tray-icon-blue.png", "size": 16 },
+        { "file": "tray-icon-blue@1.25x.png", "size": 20 },
+        { "file": "tray-icon-blue@1.5x.png", "size": 24 },
+        { "file": "tray-icon-blue@2x.png", "size": 32 }
+      ]
+    },
+    "mac_app_icon": {
+      "source": "app-icon.png",
+      "canvas": 1024,
+      "artwork": 824
+    }
+  },
+  "copy": {
+    "window_title": "PicoAide Harness",
+    "product_name": "PicoAide Harness",
+    "login_title": "PicoAide 登录",
+    "login_fallback_name": "PicoAide",
+    "login_fallback_tagline": "Enterprise AI Gateway",
+    "session_title_zh": "PicoAide 企业登录",
+    "session_title_en": "PicoAide Enterprise Login",
+    "hero_headline": "PicoAide Harness",
+    "default_brand": {
+      "login_display_name": "PicoAide",
+      "client_display_name": "PicoAide Harness",
+      "tagline": "Enterprise AI Gateway",
+      "title": "PicoAide Harness"
+    },
+    "tray_update": {
+      "downloading_en": "Downloading {product} {version}…",
+      "available_en": "{product} {version} Available",
+      "downloading_zh": "正在下载 {product} {version}…",
+      "available_zh": "{product} {version} 可用"
+    },
+    "installer_installing": {
+      "en": "Installing {product}. This may take several minutes; please keep this window open.",
+      "zh_CN": "{product} 正在安装，可能需要几分钟；请保持此窗口打开。",
+      "zh_TW": "{product} 正在安裝，可能需要幾分鐘；請保持此視窗開啟。"
+    },
+    "update_version_label": "{product} v{version}",
+    "errors": {
+      "engine_load_title": "{product} could not load all plugins.",
+      "engine_load_detail": "Failed plugins:\n{plugins}\n\n{error}\n\nRestart {product} after resolving the failing plugin.",
+      "engine_load_buttons": ["Restart {product}", "Dismiss"],
+      "folder_picker_open": "{product} could not open the system folder picker",
+      "folder_picker_response": "{product} received an invalid response from the system folder picker"
+    },
+    "diagnostics_help": "Launch {product} with the selected Web-capable profile."
+  },
+  "defaults": {
+    "server_url": "",
+    "telemetry_channel": "official"
+  },
+  "updates": {
+    "mode": "github",
+    "repository": "picoaide/picoaide-harness",
+    "asset_template": "{slug}-{version}-{platform}.{ext}",
+    "assets": {
+      "mac": { "pattern": "{slug}-{version}-mac.dmg", "ext": "dmg" },
+      "win": { "pattern": "{slug}-{version}-x64-Setup.exe", "ext": "exe" },
+      "linux": { "pattern": "{slug}-{version}-x86_64.AppImage", "ext": "AppImage" }
+    },
+    "sha256": true
+  },
+  "sources": {
+    "copy": {
+      "window_title": ["packages/host/desktop/src/main.ts:55", "packages/host/desktop/src/index.ts:97-98", "packages/host/desktop/src/electron-runtime.ts:108"],
+      "product_name": ["packages/host/desktop/package.json {build.productName}", "packages/host/desktop/package.json {nsis.shortcutName}"],
+      "login_title": ["packages/host/enterprise/src/auth-gate.ts:43"],
+      "login_fallback_name": ["packages/host/enterprise/src/auth-gate.ts:204,215"],
+      "login_fallback_tagline": ["packages/host/enterprise/src/auth-gate.ts:204"],
+      "session_title_zh": ["packages/host/enterprise/src/client/locales.ts:153"],
+      "session_title_en": ["packages/host/enterprise/src/client/locales.ts:302"],
+      "hero_headline": ["packages/host/enterprise/src/client/index.ts:65", "packages/host/enterprise/src/client/brand-vars.ts:11"],
+      "default_brand": ["packages/host/enterprise/src/brand-sync.ts:16-21", "packages/host/enterprise/src/client/Brand.tsx:112,152"],
+      "tray_update": ["packages/host/desktop/src/tray-locale.ts:23-46"],
+      "installer_installing": ["packages/host/desktop/build/assistedMessages.yml"],
+      "update_version_label": ["packages/host/enterprise/src/client/UpdateSection.tsx:55"],
+      "errors": ["packages/host/desktop/src/electron-runtime.ts:364-366", "packages/host/desktop/src/client/directory-picker.ts:30,32"],
+      "diagnostics_help": ["packages/host/desktop/src/bin.ts:16"]
+    },
+    "assets": {
+      "logo_primary": ["AGENTS.md（单一权威规则）", "site/src/layouts/Layout.astro/Hero/Header（官网引用）", "packages/host/enterprise/src/auth-gate.ts:142-143,202（BRACE_MARK_SVG 兜底）", "packages/host/enterprise/src/client/index.ts:159,188（BraceMark/favicon）"],
+      "logo_dark": ["site（暗色官网/主题面，引用 brands/official）"],
+      "app_icon": ["packages/host/desktop/package.json {build.win.icon} {build.linux.icon}", "generate-mac-app-icon 输入"],
+      "app_icon_mac": ["packages/host/desktop/package.json {build.mac.icon}"]
+    }
+  }
+}
