@@ -26,6 +26,7 @@ import (
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -142,6 +143,7 @@ func main() {
 		Connector:  connectors.NewHandlers(db),
 		Telemetry:  telemetry.NewHandlers(db),
 		Gateway:    llmgateway.NewHandlers(db),
+		Reports:    reports.NewHandlers(db),
 	})
 	// 固定探针(不属于两命名空间)。
 	r.GET("/healthz", bootstrap.NewHandlers(db).Health)
@@ -180,6 +182,8 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 月度报表推送调度(2026-09 P1):每小时检查补跑上月报表。
+	reports.NewScheduler(db, time.Hour, nil).Start(ctx)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)

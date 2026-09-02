@@ -30,6 +30,7 @@ const (
 	PermGatewayRead     = "gateway:read" // 网关/模型/渠道/价格
 	PermGatewayWrite    = "gateway:write"
 	PermUsageRead       = "usage:read"       // 用量报表
+	PermReportWrite     = "report:write"     // 报表订阅管理(2026-09 P1)
 	PermQuotaWrite      = "quota:write"      // 配额/部门预算
 	PermMarketRead      = "market:read"      // 市场技能
 	PermMarketWrite     = "market:write"     // 技能审批/授权
@@ -53,7 +54,7 @@ var AllPermissions = []string{
 	PermDeptRead, PermDeptWrite,
 	PermAuthRead, PermAuthWrite,
 	PermGatewayRead, PermGatewayWrite,
-	PermUsageRead, PermQuotaWrite,
+	PermUsageRead, PermReportWrite, PermQuotaWrite,
 	PermMarketRead, PermMarketWrite,
 	PermCapabilityRead, PermCapabilityWrite,
 	PermConnectorRead, PermConnectorWrite,
