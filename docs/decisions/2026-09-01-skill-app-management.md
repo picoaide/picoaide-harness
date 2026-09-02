@@ -420,3 +420,18 @@ metadata:
 迁移 `0055_drop_legacy_capability_tables.sql` 下线六张旧表（`skills` / `shared_skills` / `agent_presets` + 三张旧授权表）。执行前核实三件事：0053/0054 回填完整（生产 30/30/30）、生产代码对旧表**零引用**、目标机保留下线前 `pg_dump` 备份。
 
 下线过程中查出并修掉一处**三表合并时的漏改**：`departments.go` 的部门删除守卫仍在统计 `agent_preset_grants`——它数了三次授权，其中两次已指向 `app_grants`、第三次还落在旧表上。若直接 DROP 而不修，删除部门会在守卫查询处报表不存在。现已收敛为一次 `app_grants` 统计。同时 `sysinfo.go` 的行数统计表清单由 `skills/skill_grants` 改为 `apps/app_releases/app_grants`。
+
+### 归属权补强实施记录（2026-09-02）
+
+需求（用户拍板）：员工 A 上传后员工 B 不可再传同名；管理员上传的技能普通用户不可传同名；**技能负责人管理员可修改**（D2 归属转移纳入本轮；D1 保持 404+通用文案；D3 部门共属不做）。
+
+现状核实：两条规则的内核级实现已存在（归属保护 `publish.go`、跨渠道互斥、能力锁定），本轮为**边界补强 + 管理面补齐**，未重复建设：
+
+- **空 owner 收紧（G1）**：`appstore.Publish` 归属保护条件去掉 `Owner != ""` ——空 owner 的历史行(0054 回填边缘)一律视同占名，员工发布 404，杜绝「接管成新归属人」；管理员不受限。404 文案改为中性「名称不可用:可能已被占用或不属于你」(不暴露占名者)。
+- **归属转移（G2）**：`PUT /api/server/admin/apps/:kind/:app_id/owner`（RBAC `capability:write`，路由经 `internal/router` 集中声明 + router_test 完整性断言）；校验目标用户存在、同归属幂等成功不写审计；审计动作 `app_owner_transfer`（明细 `kind:app_id 「title」 归属 旧 → 新`）；`serverstore.SetAppOwner` 落 `apps.owner`。
+- **可见性**：能力中心聚合面 `CapabilityItem.is_owner`（员工侧，按 viewer 相对计算）+ 审批队列 `ApprovalRow.owner`（管理侧，一次 `ListApps` 映射避免逐行查询）。
+- **客户端（P2）**：`ApiError` 增加 `status` 透传，`fetchJSON` 携带服务端原始状态码；auth-gate 两条上传代理（技能/智能体）不再把 404/403/409 一律压平成 422；`CapabilityCenterPanel` 上传前本地预检——同名同类型已存在且非本人（`is_owner !== true`）→ 直接提示「名称已被占用」，不发请求（服务端 404 仍是权威，他人待审行不可见时兜底）。
+- **webadmin（P3）**：能力中心审批页新增「归属」列（与「作者」=本行上传者可不同）+ 行操作「转移归属(负责人)」弹窗（用户名输入，预填当前归属）。
+- **测试**：`publish_test.go`（空 owner 404/管理员可发、被拒后占名、转移后新旧归属行为、404 文案断言）+ `admin_test.go`（转移成功/审计/幂等/参数校验/明细格式）；webadmin 106 测试全绿（新增归属列、转移流程、空负责人禁用 3 用例）。
+- **文档**：`server/docs/07-marketplace.md` §5、`08-agent-share.md` §7 补归属显式契约；本决策文档追加本节。
+- 验收：门禁 `go test ./...`（含 PG 用例）+ `go vet` + webadmin 106 测试 + typecheck/build 全绿；三个 commit（server / client / webadmin）。
