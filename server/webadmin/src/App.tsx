@@ -21,8 +21,17 @@ const Capabilities = lazy(() => import('./pages/Capabilities'))
 const Connectors = lazy(() => import('./pages/Connectors'))
 const Brand = lazy(() => import('./pages/Brand'))
 
-// Usage 页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)
-const Usage = lazy(() => import('./pages/Usage'))
+// Usage 相关页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)。
+// 用量中心(2026-09 重构):子导航布局 + 6 个二级页。
+const UsageLayout = lazy(() => import('./pages/usage/UsageLayout'))
+const UsageOverview = lazy(() => import('./pages/usage/Overview'))
+const UsageDepartments = lazy(() => import('./pages/usage/Departments'))
+const UsageMembers = lazy(() => import('./pages/usage/Members'))
+const UsageMemberDetail = lazy(() => import('./pages/usage/MemberDetail'))
+const UsageModels = lazy(() => import('./pages/usage/Models'))
+const UsageLogs = lazy(() => import('./pages/usage/Logs'))
+const UsageQuota = lazy(() => import('./pages/usage/Quota'))
+const UsageReports = lazy(() => import('./pages/usage/Reports'))
 
 // 权限点常量(与服务端 serverauth/rbac.go 对齐; 前端仅作导航可见性)。
 const PERM_AUTH_READ = 'auth:read'
@@ -53,7 +62,7 @@ const nav: NavEntry[] = [
   // 运维分区(super_admin)
   { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
   { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },
-  { to: '/usage', label: '用量', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
+  { to: '/usage', label: '用量中心', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
   { to: '/marketplace', label: '市场 · 技能', icon: Store, section: '运维', perms: [PERM_MARKET_READ] },
   { to: '/capabilities', label: '能力中心', icon: Share2, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
@@ -349,7 +358,16 @@ export default function App() {
                   <Route path="/auth" element={<Auth />} />
                   <Route path="/brand" element={<Brand />} />
                   <Route path="/error-monitoring" element={<ErrorMonitoring />} />
-                  <Route path="/usage" element={<Usage />} />
+                  <Route path="/usage" element={<UsageLayout />}>
+                    <Route index element={<UsageOverview />} />
+                    <Route path="depts" element={<UsageDepartments />} />
+                    <Route path="members" element={<UsageMembers />} />
+                    <Route path="members/:username" element={<UsageMemberDetail />} />
+                    <Route path="models" element={<UsageModels />} />
+                    <Route path="logs" element={<UsageLogs />} />
+                    <Route path="quota" element={<UsageQuota />} />
+                    <Route path="reports" element={<UsageReports />} />
+                  </Route>
                   <Route path="/marketplace" element={<Marketplace />} />
                   <Route path="/capabilities" element={<Capabilities />} />
                   <Route path="/connectors" element={<Connectors />} />

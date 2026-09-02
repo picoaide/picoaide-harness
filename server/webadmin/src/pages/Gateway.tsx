@@ -119,7 +119,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -178,14 +178,8 @@ export default function Gateway() {
       setError('每用户限流必须是正整数(1-100000)')
       return
     }
-    if (cfg.monthly_quota !== '') {
-      const mq = Number(cfg.monthly_quota)
-      if (!Number.isInteger(mq) || mq < 0) { setError('月 token 配额必须是非负整数'); return }
-    }
-    if (cfg.monthly_quota_money !== '') {
-      const mm = Number(cfg.monthly_quota_money)
-      if (Number.isNaN(mm) || mm < 0) { setError('月金额配额必须是非负数字'); return }
-    }
+    // 全局默认配额已迁至「用量中心 → 配额与预算」页(2026-09 重构),
+    // 网关页不再承载 monthly_quota/monthly_quota_money(避免双入口)。
     if (cfg.retention_months !== '') {
       const rm = Number(cfg.retention_months)
       if (!Number.isInteger(rm) || rm < 0 || rm > 120) { setError('明细保留必须 0-120 个月(0=永不删除)'); return }
@@ -686,22 +680,11 @@ export default function Gateway() {
             </div>
           </section>
 
-          {/* 配额与用量 */}
+          {/* 用量中心迁出:全局默认配额(monthly_quota/monthly_quota_money)已移入
+              「用量中心 → 配额与预算」页(2026-09 重构);本页仅保留明细保留时长 */}
           <section className="space-y-1">
-            <h3 className="text-sm font-medium text-muted-foreground">配额与用量</h3>
+            <h3 className="text-sm font-medium text-muted-foreground">用量策略</h3>
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <Label htmlFor="monthly-quota">每用户默认月配额(token)</Label>
-                <Input id="monthly-quota" type="number" min={0} value={cfg.monthly_quota}
-                  onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
-                <p className="text-xs text-muted-foreground">0 = 不限;员工默认按月统计,可在用户页单独覆盖</p>
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="monthly-quota-money">每用户默认月金额配额(元)</Label>
-                <Input id="monthly-quota-money" type="number" min={0} step="0.01" value={cfg.monthly_quota_money}
-                  onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
-                <p className="text-xs text-muted-foreground">0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖</p>
-              </div>
               <div className="space-y-1">
                 <Label htmlFor="usage-retention">调用明细保留时长(月)</Label>
                 <Input id="usage-retention" type="number" min={0} max={120} value={cfg.retention_months}
