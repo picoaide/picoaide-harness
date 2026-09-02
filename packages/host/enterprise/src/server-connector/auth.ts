@@ -27,6 +27,9 @@ export class ApiError extends Error {
   constructor(
     public code: string,
     message: string,
+    /** 服务端原始 HTTP 状态码(2026-09-02 归属权:上传错误转发须透传,
+     *  否则 VERSION_EXISTS=409 / APP_LOCKED=403 / NOT_FOUND=404 被压平成 422)。 */
+    public status?: number,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -204,7 +207,7 @@ export async function fetchJSON(
     if (res.status === 401 || code === 'AUTH_REQUIRED' || code === 'AUTH_FAILED') {
       throw new AuthError('auth_expired', message)
     }
-    throw new ApiError(code, message)
+    throw new ApiError(code, message, res.status)
   }
   // 防御: 期望 JSON 的 API 却返回了 HTML(如误指向门户首页/SPA 或代理劫持)。
   // 早失败给出明确提示,而不是把 HTML 当 JSON 解析失败成含糊的 UPSTREAM。

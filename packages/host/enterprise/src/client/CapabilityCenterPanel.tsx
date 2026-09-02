@@ -59,6 +59,8 @@ interface CapabilityItem {
   dirty?: boolean | undefined
   /** 运行时技能名（SKILL.md 的 name）；与 name 不同时需显式提示。 */
   runtimeName?: string | undefined
+  /** 是否当前用户归属（2026-09-02 归属权：上传预检据此区分「我的」与「他人」同名）。 */
+  isOwner?: boolean | undefined
 }
 
 /** 来源分区 tab(决策 2026-08-25:市场/组织合并为「市场」——仅 我的/市场)。 */
@@ -592,7 +594,20 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     // 终态展示,不得阻断后续上传——此前 `action !== null` 会在动作终态后
     // 永久锁死「我的」分区的上传/重新上传按钮。
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')) return
-    setAction({ key: `${item.kind}:${item.name}`, kind: 'uploading' })
+    const key = `${item.kind}:${item.name}`
+    // 归属权预检(2026-09-02):同名同类型已在能力中心存在且非本人归属 →
+    // 不发送请求,直接提示「名称已被占用」。服务端仍是权威(他人待审行不可见,
+    // 预检可能漏网,由 404「名称不可用」兜底;防泄露语义不变)。
+    const clash = items.find(i => i.kind === item.kind && i.name === item.name && i.source !== 'local')
+    if (clash !== undefined && clash.isOwner !== true) {
+      setAction({
+        key, kind: 'failed',
+        error: `名称已被占用:「${clash.displayName || clash.name}」已存在于能力中心,请更换名称或联系管理员`,
+        name: item.name,
+      })
+      return
+    }
+    setAction({ key, kind: 'uploading' })
     try {
       const path = item.kind === 'skill' ? '/api/pico/shared-skills/upload' : '/api/pico/agent-presets/upload'
       const res = await fetch(path, {
@@ -604,10 +619,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         const data = await res.json().catch(() => ({}))
         throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
       }
-      setAction({ key: `${item.kind}:${item.name}`, kind: 'done-upload', name: item.name })
+      setAction({ key, kind: 'done-upload', name: item.name })
       loadAll()
     } catch (cause) {
-      setAction({ key: `${item.kind}:${item.name}`, kind: 'failed', error: cause instanceof Error ? cause.message : undefined, name: item.name })
+      setAction({ key, kind: 'failed', error: cause instanceof Error ? cause.message : undefined, name: item.name })
     }
   }
 
