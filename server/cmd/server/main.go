@@ -336,7 +336,9 @@ func servePortal(c *gin.Context, db *sql.DB) {
 </div>
 </body>
 </html>`
-	logoHTML := `<span class="logo">P</span>`
+	// 兜底图形必须与 brands/official/logo.svg 几何一致(黑 tile + 白 brace
+	// mark, 1.25x 放大)——禁止字母 P 等编造图形(AGENTS.md 单一权威规则)。
+	logoHTML := `<span class="logo"><svg viewBox="0 0 1254 1254" width="100%" height="100%" aria-hidden="true"><rect x="0" y="0" width="1254" height="1254" rx="180" fill="#000000"/><g transform="translate(627 627) scale(1.25) translate(-627 -627)"><path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></g></svg></span>`
 	if logoURL != "" {
 		logoHTML = `<span class="logo"><img src="` + logoURL + `" alt="logo"></span>`
 	}

@@ -14,7 +14,7 @@ declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
  * single declarative occupant, so the upstream layout owns geometry and
  * fallbacks while this component owns only the artwork.
  *
- * Artwork matches `packages/host/desktop/build/tray-icon.svg` exactly: the
+ * Artwork matches `brands/official/logo.svg` exactly: the
  * braces sit on a full-bleed rounded square and are enlarged 1.25× around
  * the canvas center (translate/scale/translate of the source paths).
  *
@@ -25,7 +25,7 @@ declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
 const BRACE_TILE_VIEWBOX = '0 0 1254 1254'
 const BRACE_TILE_RADIUS_RATIO = 180 / 1254
 
-/** Braces + connector + nodes in tray-icon.svg coordinates, enlarged 1.25×. */
+/** Braces + connector + nodes in brands/official/logo.svg coordinates, enlarged 1.25×. */
 function BraceGlyph() {
   return createElement(
     'svg',
