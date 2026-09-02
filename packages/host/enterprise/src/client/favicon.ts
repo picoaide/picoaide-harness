@@ -1,8 +1,8 @@
 /**
- * Desktop favicon replacement: the exact tray/app icon SVG
- * (`packages/host/desktop/build/tray-icon.svg` — black rounded square, white
- * brace mark, uniformly enlarged 1.25×; authority: repo-root `logo.svg`),
- * inlined as a data URI so no server static override is needed — the upstream
+ * Desktop favicon replacement: the exact brand mark (`brands/official/logo.svg` —
+ * black rounded square, white brace mark, uniformly enlarged 1.25×; single
+ * brand authority), inlined as a data URI so no server static override is
+ * needed — the upstream
  * `/favicon.svg` (DeepSeek fish) is served by dsh-web-frontend and cannot be
  * patched from the desktop profile layer.
  *

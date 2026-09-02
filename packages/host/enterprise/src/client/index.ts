@@ -156,7 +156,7 @@ export function apply(ctx: ClientContext): void {
     'enterprise: header brand badge',
   )
 
-  // 桌面 favicon: 替换上游 DeepSeek 鱼为官方花括号 mark(logo.svg)。
+  // 桌面 favicon: 替换上游 DeepSeek 鱼为官方花括号 mark(brands/official/logo.svg)。
   // 桌面组装不含 @picoaide/dsh-branding, 本面是 desktop 唯一 favicon 覆盖点。
   ctx.effect(() => {
     installFavicon()

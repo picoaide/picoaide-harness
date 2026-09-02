@@ -14,10 +14,13 @@ node_modules/
 # deps (packages/host/desktop/scripts/prebuild-workspace-deps.ts).
 packages/host/desktop/dist/
 packages/host/desktop/lib/
-# desktop build 生成图标(scripts/generate-*.mjs 从 logo.svg/tray-icon.svg 派生),
-# 仅源文件(app-icon.png/tray-icon.svg/assistedMessages.yml)入库。
+# 品牌唯一事实源 = brands/official/(双色 logo + app-icon.png + brand.json +
+# assistedMessages.yml); packages/host/desktop/build/ 下的图标与安装消息
+# 全部由 scripts/brand-prepare.mjs 编译期派生, 不入库。
+packages/host/desktop/build/app-icon.png
 packages/host/desktop/build/app-icon-mac.png
 packages/host/desktop/build/tray-icon*.png
+packages/host/desktop/build/assistedMessages.yml
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/

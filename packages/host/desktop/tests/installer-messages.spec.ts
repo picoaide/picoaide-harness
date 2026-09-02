@@ -1,11 +1,10 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { parse } from 'yaml'
 import { describe, expect, it } from 'vitest'
 
 describe('Windows assisted installer messages', () => {
   it('sets a clearer message for the slow install stage', () => {
-    const messages = parse(readFileSync(join(process.cwd(), 'build', 'assistedMessages.yml'), 'utf8')) as {
+    const messages = parse(readFileSync(new URL('../../../../brands/official/assistedMessages.yml', import.meta.url), 'utf8')) as {
       installing?: Record<string, string>
     }
 

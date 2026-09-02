@@ -245,14 +245,12 @@ describe('published package surface', () => {
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/app-icon-mac.png',
-      'build/tray-icon.svg',
       'build/tray-icon*.png',
       'docs/**',
     ]))
     expect(manifest.build?.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/app-icon-mac.png',
-      'build/tray-icon.svg',
       'build/tray-icon*.png',
       'cordis.patch.yml',
       'lib/**',
@@ -296,7 +294,7 @@ describe('published package surface', () => {
   it('separates unsigned smoke packaging from the signed macOS release', () => {
     const packageDir = readFileSync(new URL('scripts/package-dir.mjs', packageRoot), 'utf8')
 
-    expect(manifest.scripts?.build).toContain('node scripts/generate-mac-app-icon.mjs')
+    expect(manifest.scripts?.build).toContain('node scripts/brand-prepare.mjs')
     expect(manifest.scripts?.['package:dir'])
       .toBe('yarn workspace @picoaide/dsh-enterprise build && yarn workspace @picoaide/dsh-account-card build && yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
@@ -353,8 +351,8 @@ describe('published package surface', () => {
     expect(macosJob).toContain('dist/mac-smoke/*.dmg')
   })
 
-  it('keeps one fixed brand-black tray source for generated native assets', () => {
-    const source = readFileSync(new URL('build/tray-icon.svg', packageRoot), 'utf8')
+  it('keeps one fixed brand-black tray source (brand folder authority) for generated native assets', () => {
+    const source = readFileSync(new URL('brands/official/logo.svg', workspaceRoot), 'utf8')
 
     expect(source.match(/#000000/gu)).toHaveLength(1)
     expect(source).not.toMatch(/<style\b|prefers-color-scheme/iu)
