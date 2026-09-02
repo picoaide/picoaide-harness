@@ -9,7 +9,7 @@ import { EmptyState } from '../components/empty-state'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
-import { Download, FileText, Lock, RefreshCw, Share2, ShieldCheck, Sparkles, TriangleAlert } from 'lucide-react'
+import { Download, FileText, Lock, RefreshCw, Share2, ShieldCheck, Sparkles, TriangleAlert, UserCog } from 'lucide-react'
 import { Input } from '../components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { GrantDialog } from '../components/grant-dialog'
@@ -30,6 +30,8 @@ interface ApprovalRow {
   display_name: string
   description: string
   author: string
+  /** 归属人(apps.owner,2026-09-02 归属权)——与 author(本行上传者)可不同。 */
+  owner?: string
   status: 'pending' | 'approved' | 'rejected'
   reason: string
   quality: '' | 'official' | 'featured'
@@ -177,6 +179,10 @@ export default function Capabilities() {
   const [grantName, setGrantName] = useState('')
   const [grantBase, setGrantBase] = useState('')
   const [departments, setDepartments] = useState<Dept[]>([])
+  // 归属转移(2026-09-02):管理员可修改技能/智能体负责人。
+  const [transferRow, setTransferRow] = useState<ApprovalRow | null>(null)
+  const [transferOwner, setTransferOwner] = useState('')
+  const [transferBusy, setTransferBusy] = useState(false)
 
   useEffect(() => {
     request(`${ADMIN_API}/departments`)
@@ -278,6 +284,28 @@ export default function Capabilities() {
     }
   }
 
+  // 归属转移(2026-09-02):PUT /api/server/admin/apps/:kind/:app_id/owner。
+  // 只改 apps.owner(谁能续传),不触碰版本/授权/渠道;审计由服务端留痕。
+  const transfer = async (row: ApprovalRow) => {
+    const target = transferOwner.trim()
+    if (target === '' || transferRow === null) return
+    setTransferBusy(true)
+    setError('')
+    try {
+      await request(`${ADMIN_API}/apps/${row.kind}/${encodeURIComponent(row.name)}/owner`, {
+        method: 'PUT',
+        body: JSON.stringify({ owner: target }),
+      })
+      setTransferRow(null)
+      setTransferOwner('')
+      await load(tab, typeFilter)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setTransferBusy(false)
+    }
+  }
+
   const counts = {
     all: countRows.length,
     pending: countRows.filter(r => r.status === 'pending').length,
@@ -331,6 +359,7 @@ export default function Capabilities() {
                 <TableHead>名称 / 标题</TableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>作者</TableHead>
+                <TableHead>归属</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>质量</TableHead>
                 <TableHead>下载/调用</TableHead>
@@ -365,6 +394,9 @@ export default function Capabilities() {
                     </TableCell>
                     <TableCell className="font-mono text-sm">{row.version}</TableCell>
                     <TableCell>{row.author}</TableCell>
+                    <TableCell title="归属人(谁能续传新版本;与作者可不同)">
+                      {row.owner || '—'}
+                    </TableCell>
                     <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
                     <TableCell>
                       {row.status === 'approved' ? (
@@ -399,6 +431,11 @@ export default function Capabilities() {
                           onClick={() => { window.open(`${row.base_path}/archive`, '_blank') }}
                           title="下载归档核查">
                           <Download className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="sm" disabled={isBusy}
+                          onClick={() => { setTransferRow(row); setTransferOwner(row.owner ?? '') }}
+                          title="转移归属(负责人)">
+                          <UserCog className="h-4 w-4" />
                         </Button>
                         {row.status === 'approved' && (
                           <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setGrantName(row.name); setGrantBase(row.grants_base) }} title="授权">
@@ -482,6 +519,33 @@ export default function Capabilities() {
         onClose={() => { setGrantName(''); setGrantBase('') }}
         onSaved={() => { void load(tab, typeFilter) }}
       />
+
+      {/* 归属转移(2026-09-02):管理员把维护权交给其他员工/管理员账号。 */}
+      <Dialog open={transferRow !== null} onOpenChange={(open) => { if (!open) { setTransferRow(null); setTransferOwner('') } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>转移归属</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            {transferRow && `将「${transferRow.display_name || transferRow.name}」的维护权转移给新负责人:原负责人不能再上传新版本,新负责人获得续传权(版本须递增)。`}
+          </p>
+          <Input
+            value={transferOwner}
+            onChange={e => { setTransferOwner(e.target.value) }}
+            placeholder="新归属人用户名"
+            aria-label="新归属人用户名"
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => { setTransferRow(null); setTransferOwner('') }}>取消</Button>
+            <Button
+              disabled={transferBusy || transferOwner.trim() === ''}
+              onClick={() => { void transfer(transferRow!) }}
+            >
+              {transferBusy ? '处理中…' : '确认转移'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

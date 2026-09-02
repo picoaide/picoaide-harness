@@ -9,7 +9,7 @@ import Capabilities from './Capabilities'
 const SKILL_ROWS = [
   {
     kind: 'skill' as const, name: 'codeql', version: '1.0.0', display_name: 'CodeQL 审计',
-    description: 'find vulns', author: 'bob', status: 'pending' as const, reason: '',
+    description: 'find vulns', author: 'bob', owner: 'alice', status: 'pending' as const, reason: '',
     quality: '' as const, downloads: 3, calls: 5, created_at: '2026-08-25T10:00:00Z',
     base_path: '/api/server/admin/shared-skills/codeql/1.0.0',
     grants_base: '/api/server/admin/shared-skills/codeql',
@@ -19,7 +19,7 @@ const SKILL_ROWS = [
 const AGENT_ROWS = [
   {
     kind: 'agent' as const, name: 'ppt-gen', version: '1.0.0', display_name: 'PPT 生成',
-    description: 'make ppt', author: 'bob', status: 'pending' as const, reason: '',
+    description: 'make ppt', author: 'bob', owner: 'alice', status: 'pending' as const, reason: '',
     quality: '' as const, downloads: 1, created_at: '2026-08-25T10:00:00Z',
     base_path: '/api/server/admin/agent-presets/ppt-gen/1.0.0',
     grants_base: '/api/server/admin/agent-presets/ppt-gen',
@@ -132,5 +132,44 @@ describe('Capabilities 能力中心(统一审批)', () => {
     const qualitySelect = screen.getAllByRole('combobox').find((el) => el.textContent?.includes('官方'))
     expect(qualitySelect).toBeDefined()
     expect(screen.getByTitle('授权')).toBeInTheDocument()
+  })
+
+  it('归属列显示 apps.owner(与上传者可不同)', async () => {
+    render(<Capabilities />)
+    await screen.findByText('CodeQL 审计')
+    expect(screen.getByRole('columnheader', { name: '归属' })).toBeInTheDocument()
+    // SKILL_ROWS/AGENT_ROWS:author=bob(上传者)、owner=alice(归属人)→ 两列都渲染。
+    expect(screen.getAllByText('alice', { selector: 'td' }).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('bob', { selector: 'td' }).length).toBeGreaterThan(0)
+  })
+
+  it('转移归属:弹窗输入负责人 → PUT apps/:kind/:name/owner', async () => {
+    const u = userEvent.setup()
+    render(<Capabilities />)
+    await screen.findByText('CodeQL 审计')
+    fireEvent.click((await screen.findAllByTitle('转移归属(负责人)'))[0]!)
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('转移归属')
+    const input = screen.getByLabelText('新归属人用户名')
+    await u.clear(input)
+    await u.type(input, 'carol')
+    fireEvent.click(screen.getByRole('button', { name: '确认转移' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/apps/skill/codeql/owner',
+        { method: 'PUT', body: JSON.stringify({ owner: 'carol' }) },
+      )
+    })
+  })
+
+  it('转移归属:空负责人时确认按钮禁用', async () => {
+    render(<Capabilities />)
+    await screen.findByText('CodeQL 审计')
+    fireEvent.click((await screen.findAllByTitle('转移归属(负责人)'))[0]!)
+    await screen.findByRole('dialog')
+    // 弹窗预填当前归属人 alice;清空后确认按钮禁用。
+    const input = screen.getByLabelText('新归属人用户名')
+    fireEvent.change(input, { target: { value: '' } })
+    expect(screen.getByRole('button', { name: '确认转移' })).toBeDisabled()
   })
 })
