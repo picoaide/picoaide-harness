@@ -16,8 +16,8 @@ export const name = 'picoaide-branding-client'
 export const inject = ['slots']
 
 /**
- * Browser favicon artwork: the exact tray/app icon SVG
- * (`packages/host/desktop/build/tray-icon.svg` — black rounded square, white
+ * Browser favicon artwork: the exact brand mark
+ * (`brands/official/logo.svg` — black rounded square, white
  * brace mark, uniformly enlarged 1.25×), inlined as a data URI so no server
  * static override is needed — the upstream `/favicon.svg` (DeepSeek fish) is
  * served by dsh-web-frontend and cannot be patched from this profile layer.

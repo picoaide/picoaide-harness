@@ -5,7 +5,7 @@ import { createElement } from 'react'
 declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
 
 /**
- * Brace mark tile matching the app/tray icon (`packages/host/desktop/build/tray-icon.svg`):
+ * Brace mark tile matching the brand folder icon (`brands/official/logo.svg`):
  * a rounded square carrying the two braces, connector line, and node circles.
  * Rendered at the upstream brand slots (`sidebar.brand.mark`,
  * `conversation.hero.brand.mark`) as a single declarative occupant.
@@ -19,14 +19,14 @@ declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
  * tile takes the foreground ink (black on light, white on dark) and the
  * braces take the base surface, so the tile flips with the skin system.
  *
- * Artwork matches `packages/host/desktop/build/tray-icon.svg` exactly: the
+ * Artwork matches `brands/official/logo.svg` exactly: the
  * braces sit on a full-bleed rounded square and are enlarged 1.25× around
  * the canvas center (translate/scale/translate of the source paths).
  */
 const BRACE_TILE_VIEWBOX = '0 0 1254 1254'
 const BRACE_TILE_RADIUS_RATIO = 180 / 1254
 
-/** Braces + connector + nodes in tray-icon.svg coordinates, enlarged 1.25×. */
+/** Braces + connector + nodes in brands/official/logo.svg coordinates, enlarged 1.25×. */
 function BraceGlyph() {
   return createElement(
     'svg',

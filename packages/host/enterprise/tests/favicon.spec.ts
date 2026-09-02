@@ -52,10 +52,10 @@ describe('installFavicon', () => {
     expect(svg).toContain('cx="817" cy="627" r="65"')
   })
 
-  it('matches the checked-in authored favicon source', () => {
-    // The desktop build icon is the single-authority artwork; the inline
+  it('matches the checked-in authored brand source', () => {
+    // The brand folder logo is the single-authority artwork; the inline
     // favicon must be byte-identical in geometry (whitespace-insensitive).
-    const authored = readFileSync(resolve(__dirname, '../../desktop/build/tray-icon.svg'), 'utf8')
+    const authored = readFileSync(resolve(__dirname, '../../../../brands/official/logo.svg'), 'utf8')
     const links: FakeLink[] = [{ href: '', rel: 'icon' }]
     vi.stubGlobal('document', fixtureDocument(links, null))
     installFavicon()
