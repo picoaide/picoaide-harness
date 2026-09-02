@@ -476,11 +476,18 @@ type UsageAggregateOption func(*UsageAggregateQuery)
 // UsageAggregateQuery 收集聚合过滤条件。
 type UsageAggregateQuery struct {
 	Username string // 仅统计该用户名(用于用户钻取)
+	Dept     string // 仅统计该部门树内成员(2026-09 用量中心,与预算同口径)
 }
 
 // WithUsername 只聚合指定用户名(JOIN users),用于用户详情钻取。
 func WithUsername(username string) UsageAggregateOption {
 	return func(q *UsageAggregateQuery) { q.Username = username }
+}
+
+// WithDept 只聚合指定部门(含其子树)的成员用量——与部门预算 enforcement
+// 同口径(成员归属祖先链全部计入)。部门不存在 = 空结果。
+func WithDept(dept string) UsageAggregateOption {
+	return func(q *UsageAggregateQuery) { q.Dept = dept }
 }
 
 // zeroFiller 生成完整的时间桶序列(缺桶填 0),避免折线跨缺日直连。
@@ -543,6 +550,25 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	if q.Username != "" {
 		usernameFilter = " AND usage.user_id = (SELECT id FROM users WHERE username = ?)"
 	}
+	// 部门过滤:子树成员集合(2026-09 用量中心,与预算 enforcement 同口径)
+	var deptFilter string
+	var deptIDs []int64
+	if q.Dept != "" {
+		ids, err := DeptUserIDsByName(db, q.Dept)
+		if err != nil {
+			if err == ErrNotFound {
+				return []UsageAggregateRow{}, nil // 部门不存在 = 空结果
+			}
+			return nil, err
+		}
+		if len(ids) == 0 {
+			return []UsageAggregateRow{}, nil
+		}
+		ph := strings.Repeat("?,", len(ids))
+		ph = ph[:len(ph)-1]
+		deptFilter = " AND usage.user_id IN (" + ph + ")"
+		deptIDs = ids
+	}
 	switch group {
 	case "day":
 		selectExpr, groupExpr = DateDayExpr("usage.created_at"), DateDayExpr("usage.created_at")
@@ -582,6 +608,12 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	if q.Username != "" {
 		qstr += usernameFilter
 		args = append(args, q.Username)
+	}
+	if q.Dept != "" {
+		qstr += deptFilter
+		for _, id := range deptIDs {
+			args = append(args, id)
+		}
 	}
 	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
 	rows, err := db.Query(qstr, args...)

@@ -194,8 +194,17 @@ func CleanupUsageRetention(db *sql.DB) error {
 // UsageAggregateWithLedger 在保留窗口内查询 usage 明细(分区裁剪),
 // 窗口外(早于保留期)回退到永久账本 usage_daily/usage_monthly——
 // 保证"明细已删"的历史聚合仍可查(10 年数据不丢)。
-// group: day|week|month|model|user;opts 支持 WithUsername。
+// group: day|week|month|model|user|dept;opts 支持 WithUsername/WithDept。
+// group=dept 是展示层归并:以 group=user 聚合行为基础,按部门树(归属+祖先链,
+// 与预算 enforcement 同口径)在内存归并(树小,避免 N 个部门 N 条 SQL)。
 func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts ...UsageAggregateOption) ([]UsageAggregateRow, error) {
+	if group == "dept" {
+		rows, err := UsageAggregateWithLedger(db, from, to, "user", opts...)
+		if err != nil {
+			return nil, err
+		}
+		return RegroupByDept(db, rows)
+	}
 	if from.IsZero() {
 		// 无起始边界:直接查账本(覆盖全部历史,明细窗口内已并入日账)
 		return UsageAggregateFromLedger(db, from, to, group, opts...)
@@ -242,6 +251,26 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 		usernameFilter = " AND ue.user_id = (SELECT id FROM users WHERE username = ?)"
 		args = append(args, q.Username)
 	}
+	// 部门过滤:子树成员集合,与预算 enforcement 同口径(2026-09 用量中心)
+	var deptFilter string
+	if q.Dept != "" {
+		ids, err := DeptUserIDsByName(db, q.Dept)
+		if err != nil {
+			if err == ErrNotFound {
+				return []UsageAggregateRow{}, nil // 部门不存在 = 空结果
+			}
+			return nil, err
+		}
+		if len(ids) == 0 {
+			return []UsageAggregateRow{}, nil
+		}
+		ph := strings.Repeat("?,", len(ids))
+		ph = ph[:len(ph)-1]
+		deptFilter = " AND ue.user_id IN (" + ph + ")"
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
 	var table, col string
 	switch group {
 	case "day", "week":
@@ -278,6 +307,7 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 		args = append(args, to.Format("2006-01-02"))
 	}
 	qstr += usernameFilter
+	qstr += deptFilter
 	switch group {
 	case "model":
 		qstr += ` GROUP BY ` + col
