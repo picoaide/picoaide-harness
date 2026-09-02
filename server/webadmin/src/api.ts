@@ -69,7 +69,10 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
   return res.json() as Promise<T>
 }
 
-export async function login(username: string, password: string): Promise<void> {
+// login 返回完整响应体: 常规登录 {csrf_token, user}; MFA 两步登录第一步
+// {mfa_required, mfa_ticket}; must_change_password 标记由调用方决定是否进入
+// 强制改密拦截。
+export async function login(username: string, password: string): Promise<any> {
   const res = await fetch(`${ADMIN_API}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -83,7 +86,27 @@ export async function login(username: string, password: string): Promise<void> {
     throw new Error(msg)
   }
   const body = await res.json()
-  setCsrf(body.csrf_token)
+  if (body?.csrf_token) setCsrf(body.csrf_token)
+  return body
+}
+
+// 0057 两步登录第二步: mfa_ticket + 动态码 → 会话 cookie + csrf。
+export async function loginMFA(ticket: string, code: string): Promise<any> {
+  const res = await fetch(`${ADMIN_API}/login/mfa`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mfa_ticket: ticket, code }),
+  })
+  if (!res.ok) {
+    let msg = '动态码验证失败'
+    try {
+      msg = (await res.json())?.error?.message ?? msg
+    } catch { /* ignore */ }
+    throw new Error(msg)
+  }
+  const body = await res.json()
+  if (body?.csrf_token) setCsrf(body.csrf_token)
+  return body
 }
 
 export async function logout(): Promise<void> {

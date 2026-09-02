@@ -103,16 +103,26 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	})
 	// 公开:登录与登录方式发现(不经过 AdminAuth/RequirePermission)。
 	g.POST("/login", a.handleLogin)
+	g.POST("/login/mfa", a.handleLoginMFA)
 	g.GET("/auth/methods", a.getPublicAuthMethods)
 	// 管理会话内(AdminAuth 已校验 role != user + CSRF)。
 	authed := g.Group("", AdminAuth(db))
 	AdminRoute(authed, "GET", "/me", "", a.handleMe)
 	AdminRoute(authed, "POST", "/logout", "", a.handleLogout)
+	// 0057 密码/MFA 自助管理: 属于「自己的安全设置」, 与 /me 同权限档
+	// (任意管理角色可用; 服务端守卫 = 有效会话 + CSRF + 旧密码/动态码双验)。
+	AdminRoute(authed, "POST", "/me/password", "", a.handleMePassword)
+	AdminRoute(authed, "GET", "/me/mfa", "", a.getMyMFA)
+	AdminRoute(authed, "POST", "/me/mfa/enable", "", a.enableMyMFA)
+	AdminRoute(authed, "POST", "/me/mfa/verify", "", a.verifyMyMFA)
+	AdminRoute(authed, "POST", "/me/mfa/disable", "", a.disableMyMFA)
 	// 用户/角色/部门(RBAC 管理)。
 	AdminRoute(authed, "GET", "/users", PermUserRead, a.listUsers)
 	AdminRoute(authed, "POST", "/users", PermUserWrite, a.createUser)
 	AdminRoute(authed, "PUT", "/users/:id", PermUserWrite, a.updateUser)
 	AdminRoute(authed, "DELETE", "/users/:id", PermUserWrite, a.deleteUser)
+	// 0057: 管理员重置他人 MFA(不能对自己; 关闭后吊销其全部会话)。
+	AdminRoute(authed, "PUT", "/users/:id/mfa", PermUserWrite, a.resetUserMFA)
 	AdminRoute(authed, "GET", "/users/:id/groups", PermUserRead, a.getUserGroups)
 	// 单部门归属:多部门 set 端点已移除(与金字塔单部门模型冲突,审计2026-C6)
 	AdminRoute(authed, "PUT", "/users/:id/department", PermDeptWrite, a.setUserDepartment)
@@ -170,8 +180,29 @@ func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 				return
 			}
 		}
+		// 0057 强制改密守卫: password_must_change 期间仅放行改密/me/logout,
+		// 其余管理端点一律 403(完成改密前不得操作管理后台任何功能)。
+		if u.PasswordMustChange && !adminPasswordChangeAllowed(c.Request) {
+			writeError(c, http.StatusForbidden, "PASSWORD_CHANGE_REQUIRED", "请先修改密码")
+			return
+		}
 		c.Next()
 	}
+}
+
+// adminPasswordChangeAllowed 是管理面强制改密态白名单。
+func adminPasswordChangeAllowed(r *http.Request) bool {
+	p := r.URL.Path
+	if r.Method == http.MethodPost && p == "/api/server/admin/me/password" {
+		return true
+	}
+	if r.Method == http.MethodGet && p == "/api/server/admin/me" {
+		return true
+	}
+	if r.Method == http.MethodPost && p == "/api/server/admin/logout" {
+		return true
+	}
+	return false
 }
 
 // AuthenticateConfiguredAdmin authenticates an admin login (v3b: local-only).
@@ -211,6 +242,61 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
+	// 0057: MFA 已开启 → 不建会话, 签发 5 分钟一次性挑战, 前端进入两步登录。
+	if u.TotpEnabled {
+		ticket, err := createMFAChallenge(a.DB, u.ID, "login", "", mfaTicketTTL)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "挑战创建失败")
+			return
+		}
+		_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "challenge issued")
+		c.JSON(http.StatusOK, gin.H{"mfa_required": true, "mfa_ticket": ticket})
+		return
+	}
+	a.issueAdminSession(c, u)
+}
+
+// handleLoginMFA 两步登录第二步: 校验一次性挑战 + 动态码/主密码, 通过后建
+// 管理会话(与一步登录相同响应; 含 must_change_password 标记)。
+func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
+	var req struct {
+		MFATicket string `json:"mfa_ticket"`
+		Code      string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.MFATicket == "" || req.Code == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	// 挑战校验(未过期/未消费/未超次); 任何失败消息一致, 不泄露状态。
+	ch, err := getMFAChallenge(a.DB, req.MFATicket)
+	if err != nil || ch.Kind != "login" || ch.Attempts >= mfaChallengeMaxFailed || time.Now().After(ch.ExpiresAt) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新登录")
+		return
+	}
+	u, err := serverstore.GetUserByID(a.DB, ch.UserID)
+	if err != nil || u == nil || u.TotpEnabled != true || u.Status != 1 || !u.HasManagementAccess() {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新登录")
+		return
+	}
+	secret, err := decryptMFASecret(u.TotpSecret)
+	if err != nil || !totpValid(secret, req.Code) {
+		_ = bumpMFAChallengeAttempts(a.DB, req.MFATicket)
+		_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "fail ip="+c.ClientIP())
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误或已失效")
+		return
+	}
+	// 消费先于建会话: 重放同一 ticket 必须在第一次就被拒绝。
+	if err := consumeMFAChallenge(a.DB, req.MFATicket); err != nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新登录")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "success ip="+c.ClientIP())
+	a.issueAdminSession(c, u)
+}
+
+// issueAdminSession 创建管理会话并下发 cookie(handleLogin / handleLoginMFA
+// 共用; 响应带 CSRF token 与强制改密标记)。
+func (a *AdminAPI) issueAdminSession(c *gin.Context, u *serverstore.User) {
 	sess, csrf, err := CreateAdminSession(a.DB, u.ID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "会话创建失败")
@@ -228,7 +314,12 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		Secure:   secure,
 		MaxAge:   int(AdminSessionTTL.Seconds()),
 	})
-	c.JSON(http.StatusOK, gin.H{"csrf_token": csrf, "user": userJSON(u)})
+	c.JSON(http.StatusOK, gin.H{
+		"csrf_token": csrf,
+		"user":       userJSON(u),
+		// 0057: 管理员重置密码后强制改密, 前端必须进入强制改密拦截。
+		"must_change_password": u.PasswordMustChange,
+	})
 }
 
 func (a *AdminAPI) handleMe(c *gin.Context) {
@@ -254,6 +345,229 @@ func (a *AdminAPI) handleLogout(c *gin.Context) {
 			_ = DeleteAdminSession(a.DB, s)
 		}
 	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- 0057 管理员密码自改 + MFA 自助管理 ----
+
+// handleMePassword 管理员修改自己的密码: 旧密码校验 → 更新(事务内吊销其
+// 全部 api_tokens 与 admin_sessions, 含当前会话 —— 安全决策: 改密后全部
+// 踢掉, webadmin 前端收到响应后强制登出)。
+func (a *AdminAPI) handleMePassword(c *gin.Context) {
+	u := currentAdmin(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
+		return
+	}
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	if len(req.OldPassword) > 1024 || len(req.NewPassword) > 1024 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "密码过长")
+		return
+	}
+	if utf8.RuneCountInString(req.NewPassword) < minPasswordLength {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+		return
+	}
+	// 管理后台登录 local-only, 正常路径必为本地账号; 防御性一致处理。
+	if u.Source != "local" || u.PasswordHash == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "外部认证用户的密码由企业 IdP 管理,不能在此修改")
+		return
+	}
+	if !util.VerifyPassword(u.PasswordHash, req.OldPassword) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "原密码错误")
+		return
+	}
+	if util.VerifyPassword(u.PasswordHash, req.NewPassword) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "新密码不能与原密码相同")
+		return
+	}
+	hash, err := util.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "密码处理失败")
+		return
+	}
+	if err := serverstore.UpdateUserPassword(a.DB, u.ID, hash, false); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "修改密码失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, u.Username, "admin_password_change", "self")
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// getMyMFA 返回当前管理员的 MFA 状态(静默, 不返回任何密钥/URL)。
+func (a *AdminAPI) getMyMFA(c *gin.Context) {
+	u := currentAdmin(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"enabled": u.TotpEnabled})
+}
+
+// enableMyMFA 开启 MFA 第一步: 主密码校验 → 生成 TOTP 密钥(密钥经响应
+// 一次性下发, 服务端仅存密文于 60s 挑战) → 前端展示二维码/文本并等待
+// 用户输入动态码完成 verifyMyMFA。
+func (a *AdminAPI) enableMyMFA(c *gin.Context) {
+	u := currentAdmin(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	if u.Source != "local" || u.PasswordHash == "" || !util.VerifyPassword(u.PasswordHash, req.Password) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
+		return
+	}
+	secret, otpauthURL, err := genTOTPSecret(u.Username)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥生成失败")
+		return
+	}
+	cipher, err := encryptMFASecret(secret)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥处理失败")
+		return
+	}
+	ticket, err := createMFAChallenge(a.DB, u.ID, "enable", cipher, mfaEnableTicketTTL)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "挑战创建失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"secret": secret, "otpauth_url": otpauthURL, "ticket": ticket})
+}
+
+// verifyMyMFA 开启 MFA 第二步: 校验用户输入的动态码 → 加密落库 + enabled=1
+// → 吊销该管理员其他已登录会话(当前保留)。
+func (a *AdminAPI) verifyMyMFA(c *gin.Context) {
+	u := currentAdmin(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
+		return
+	}
+	var req struct {
+		Ticket string `json:"ticket"`
+		Code   string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Ticket == "" || req.Code == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	ch, err := getMFAChallenge(a.DB, req.Ticket)
+	if err != nil || ch.Kind != "enable" || ch.Attempts >= mfaChallengeMaxFailed || time.Now().After(ch.ExpiresAt) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新开启")
+		return
+	}
+	secret, err := decryptMFASecret(ch.Secret)
+	if err != nil || !totpValid(secret, req.Code) {
+		_ = bumpMFAChallengeAttempts(a.DB, req.Ticket)
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误")
+		return
+	}
+	if err := consumeMFAChallenge(a.DB, req.Ticket); err != nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新开启")
+		return
+	}
+	if err := serverstore.SetUserMFA(a.DB, u.ID, ch.Secret, true); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	// 开启即排除旧会话(防绕过 MFA 的存量登录继续使用)。
+	if sid, ok := c.Get("admin_session"); ok {
+		if s, ok := sid.(string); ok {
+			_, _ = a.DB.Exec("DELETE FROM admin_sessions WHERE user_id = ? AND id <> ?", u.ID, s)
+		}
+	}
+	_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_enable", "self")
+	c.JSON(http.StatusOK, gin.H{"enabled": true})
+}
+
+// disableMyMFA 关闭 MFA: 主密码 + 当前动态码双验(决策 2026-09-04) →
+// 清空密钥 → 吊销该管理员其他已登录会话(当前保留, 且其登录不再要求动态码)。
+func (a *AdminAPI) disableMyMFA(c *gin.Context) {
+	u := currentAdmin(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	if !u.TotpEnabled {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "MFA 未开启")
+		return
+	}
+	if u.Source != "local" || u.PasswordHash == "" || !util.VerifyPassword(u.PasswordHash, req.Password) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
+		return
+	}
+	secret, err := decryptMFASecret(u.TotpSecret)
+	if err != nil || !totpValid(secret, req.Code) {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误")
+		return
+	}
+	if err := serverstore.ClearUserMFA(a.DB, u.ID); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "关闭失败")
+		return
+	}
+	if sid, ok := c.Get("admin_session"); ok {
+		if s, ok := sid.(string); ok {
+			_, _ = a.DB.Exec("DELETE FROM admin_sessions WHERE user_id = ? AND id <> ?", u.ID, s)
+		}
+	}
+	_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_disable", "self")
+	c.JSON(http.StatusOK, gin.H{"enabled": false})
+}
+
+// resetUserMFA 其他管理员直接关闭目标的 MFA(兜底: 无恢复码方案, 决策
+// 2026-09-04): 清空密钥 + 吊销其全部会话(api_tokens + admin_sessions)。
+// 禁止对自己操作(自己走 disableMyMFA 双验流程)。
+func (a *AdminAPI) resetUserMFA(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	me := currentAdmin(c)
+	if me != nil && me.ID == id {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "不能重置自己的 MFA,请在「安全设置」中关闭")
+		return
+	}
+	target, err := serverstore.GetUserByID(a.DB, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	}
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if err := serverstore.ClearUserMFA(a.DB, id); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "重置失败")
+		return
+	}
+	if err := serverstore.RevokeAllUserSessions(a.DB, id); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "会话吊销失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "admin_mfa_reset", target.Username)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -495,6 +809,9 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 			return
 		}
 		u.PasswordHash = hash
+		// 0057: 管理员重置密码 → 该用户下次登录强制改密(改密成功清除)。
+		u.PasswordMustChange = true
+		u.PasswordChangedAt = time.Now()
 	}
 	u.Role = newRole
 	u.IsAdmin = newRole == serverstore.RoleSuperAdmin

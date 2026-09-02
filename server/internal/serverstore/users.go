@@ -32,6 +32,17 @@ type User struct {
 	QuotaMoney *float64
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// PasswordChangedAt is the last password set/reset time (0057).
+	// Zero = never changed (created with an initial password).
+	PasswordChangedAt time.Time
+	// PasswordMustChange forces the next login to end in a password change
+	// (0057: set by admin password reset; cleared on successful change).
+	PasswordMustChange bool
+	// TotpSecret is the AES-GCM ciphertext of the admin TOTP secret (0057);
+	// "" = not configured. Never returned to clients in plaintext.
+	TotpSecret string
+	// TotpEnabled reports whether MFA is active for this admin (webadmin login).
+	TotpEnabled bool
 }
 
 // Role constants (RBAC, design v3b).
@@ -53,7 +64,7 @@ func IsAdminRole(role string) bool {
 }
 
 // userCols is the canonical user column list (kept in sync with scanUser).
-const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money"
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -95,11 +106,12 @@ func AuthenticateLocal(db *sql.DB, username, password string) (User, error) {
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var isAdmin, status int
-	var displayName, email, passwordHash, role sql.NullString
+	var displayName, email, passwordHash, role, totpSecret sql.NullString
 	var quota sql.NullInt64
 	var quotaMoney sql.NullFloat64
-	var createdAt, updatedAt any
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney); err != nil {
+	var createdAt, updatedAt, passwordChangedAt any
+	var mustChange, totpEnabled int
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -126,6 +138,10 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	if quotaMoney.Valid {
 		u.QuotaMoney = &quotaMoney.Float64
 	}
+	u.PasswordChangedAt = parseSQLTime(passwordChangedAt)
+	u.PasswordMustChange = mustChange == 1
+	u.TotpSecret = totpSecret.String
+	u.TotpEnabled = totpEnabled == 1
 	return &u, nil
 }
 
@@ -187,13 +203,16 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 	return u, err
 }
 
-// UpdateUser updates display_name/email/password_hash/is_admin/role/status.
+// UpdateUser updates display_name/email/password_hash/is_admin/role/status
+// plus the 0057 password bookkeeping columns (kept consistent via the loaded
+// row; totp_secret/totp_enabled are managed by SetUserMFA/ClearUserMFA only).
 func UpdateUser(db *sql.DB, u *User) error {
 	role := resolveRole(u.Role, u.IsAdmin)
-	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, role=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
+	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, role=?, status=?, quota_tokens=?, quota_money=?, password_changed_at=?, password_must_change=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
+		boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney),
+		nilIfZeroTime(u.PasswordChangedAt), boolInt(u.PasswordMustChange), u.ID)
 	if err != nil {
 		return err
 	}
@@ -213,10 +232,11 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 	}
 	defer tx.Rollback()
 	role := resolveRole(u.Role, u.IsAdmin)
-	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, role=?, status=?, quota_tokens=?, quota_money=?, updated_at=`+NowExpr()+`
+	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, role=?, status=?, quota_tokens=?, quota_money=?, password_changed_at=?, password_must_change=?, updated_at=`+NowExpr()+`
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
+		boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney),
+		nilIfZeroTime(u.PasswordChangedAt), boolInt(u.PasswordMustChange), u.ID)
 	if err != nil {
 		return err
 	}
@@ -224,6 +244,80 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 		return ErrNotFound
 	}
 	if _, err := tx.Exec("DELETE FROM api_tokens WHERE user_id = ?", u.ID); err != nil {
+		return err
+	}
+	// 2026-09-04: 降权/禁用/改密同样吊销管理会话(旧 session 即使通过
+	// ValidateAdminSession 的 role/status 复查, 也不留存量登录面)。
+	if _, err := tx.Exec("DELETE FROM admin_sessions WHERE user_id = ?", u.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// UpdateUserPassword 改密专用(0057): 事务内更新 password_hash + 改密时间 +
+// 强制改密标志, 并吊销该用户全部 api_tokens 与 admin_sessions —— 安全决策
+// (2026-09-04 评审): 改密后全部踢掉(含当前会话), 客户端必须重新登录。
+func UpdateUserPassword(db *sql.DB, userID int64, newHash string, mustChange bool) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE users SET password_hash=?, password_must_change=?, password_changed_at=`+NowExpr()+`, updated_at=`+NowExpr()+`
+		WHERE id=?`, newHash, boolInt(mustChange), userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec("DELETE FROM api_tokens WHERE user_id = ?", userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM admin_sessions WHERE user_id = ?", userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SetUserMFA 保存/更新 TOTP 配置(secret 为 AES-GCM 密文; enabled=1 仅由
+// verify 成功后写入)。
+func SetUserMFA(db *sql.DB, userID int64, totpSecretCipher string, enabled bool) error {
+	res, err := db.Exec(`UPDATE users SET totp_secret=?, totp_enabled=?, updated_at=`+NowExpr()+` WHERE id=?`,
+		totpSecretCipher, boolInt(enabled), userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearUserMFA 关闭/重置 TOTP(管理员自助关闭或他人重置)。
+func ClearUserMFA(db *sql.DB, userID int64) error {
+	res, err := db.Exec(`UPDATE users SET totp_secret='', totp_enabled=0, updated_at=`+NowExpr()+` WHERE id=?`, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RevokeAllUserSessions 吊销用户全部 api_tokens 与 admin_sessions(不改任何
+// 用户字段; 供 MFA 重置等独立场景)。
+func RevokeAllUserSessions(db *sql.DB, userID int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM api_tokens WHERE user_id = ?", userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM admin_sessions WHERE user_id = ?", userID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -357,6 +451,14 @@ func nilIfNilFloat64(v *float64) any {
 		return nil
 	}
 	return *v
+}
+
+// nilIfZeroTime maps a zero time.Time to SQL NULL (password_changed_at unset).
+func nilIfZeroTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 // DeleteUser removes a user and all their FK-referenced rows

@@ -25,8 +25,12 @@ func TestAdminRouteRegistryNoUnprotected(t *testing.T) {
 	for _, rr := range AdminRoutePerms() {
 		registered[rr.Method+" "+rr.Path] = true
 	}
-	// 公开(未认证)路由显式豁免: 登录与登录方式发现。
-	public := map[string]bool{"POST /api/server/admin/login": true, "GET /api/server/admin/auth/methods": true}
+	// 公开(未认证)路由显式豁免: 登录、两步登录第二步、登录方式发现。
+	public := map[string]bool{
+		"POST /api/server/admin/login":       true,
+		"POST /api/server/admin/login/mfa":   true,
+		"GET /api/server/admin/auth/methods": true,
+	}
 	for _, rt := range r.Routes() {
 		if !stringsHasPrefix(rt.Path, "/api/server/admin/") {
 			continue
@@ -47,7 +51,13 @@ func TestAdminRouteRegistryNoUnprotected(t *testing.T) {
 func TestAdminRouteRegistryPermissionsDeclared(t *testing.T) {
 	for _, rr := range AdminRoutePerms() {
 		if rr.Perm == "" {
-			if rr.Path != "/api/server/admin/me" && rr.Path != "/api/server/admin/logout" {
+			// 空权限 = 仅需有效管理会话: me/logout + 0057 密码/MFA 自助管理。
+			switch rr.Path {
+			case "/api/server/admin/me", "/api/server/admin/logout",
+				"/api/server/admin/me/password", "/api/server/admin/me/mfa",
+				"/api/server/admin/me/mfa/enable", "/api/server/admin/me/mfa/verify",
+				"/api/server/admin/me/mfa/disable":
+			default:
 				t.Fatalf("route %s %s has empty perm but is not me/logout", rr.Method, rr.Path)
 			}
 		}

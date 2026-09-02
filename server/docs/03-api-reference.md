@@ -15,6 +15,7 @@
 | `VALIDATION` | 400 | 参数校验失败 |
 | `UPSTREAM` | 502 | 上游 LLM 错误 |
 | `RATE_LIMITED` | 429 | 触发限流 |
+| `PASSWORD_CHANGE_REQUIRED` | 403 | 密码被管理员重置后强制改密:改密完成前仅放行改密/me/logout(0057) |
 | `QUOTA_EXCEEDED` | 429 | 员工本月 token 或金额配额已用尽(admin 豁免;每用户配额见 users.quota_tokens / users.quota_money,全局默认见 usage.monthly_quota / usage.monthly_quota_money) |
 | `INTERNAL` | 500 | 内部错误 |
 
@@ -29,9 +30,10 @@
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/api/client/v2/auth/login` | 无 | 密码登录(local/LDAP);body `{username, password}` → `{token}` |
+| POST | `/api/client/v2/auth/login` | 无 | 密码登录(local/LDAP);body `{username, password}` → `{token, user, must_change_password}`(0057:must_change_password=true 时客户端进入强制改密页,改密前业务 API 均 403 `PASSWORD_CHANGE_REQUIRED`) |
+| POST | `/api/client/v2/auth/password` | Bearer | 员工自助改密(0057):body `{old_password, new_password}` → `{ok}`;仅本地认证(`source=local`)用户;成功后吊销该用户全部 api_tokens 与 admin_sessions(含当前),客户端须重新登录 |
 | POST | `/api/client/v2/auth/logout` | Bearer | 吊销当前 token |
-| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, quota_tokens, quota_money}}` |
+| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, quota_tokens, quota_money, source, password_changeable, password_must_change, password_changed_at, mfa_enabled}}`(0057 起 source/password_changeable 供客户端判断改密入口;mfa_enabled 供管理端列表) |
 | GET | `/api/client/v2/auth/usage` | Bearer | 员工用量概览(自查询):`{is_admin, quota_tokens, quota_money, monthly_usage/cost, remaining_tokens/money(不限=null), today_usage/cost, yesterday_usage/cost, total_usage/cost, dept_budgets[]}`;有效配额 = 个人覆盖→全局默认,admin 豁免 |
 | GET | `/api/client/v2/auth/methods` | 无 | 登录方式发现(`public methods`,登录页未登录时探测) |
 | GET | `/api/client/v2/auth/:provider/login` | 无 | 跳转 OIDC/OpenID 授权页(provider 由配置注册,如 `oidc`、`openid`) |
@@ -41,7 +43,14 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/server/admin/login` | 管理员登录(仅 `super_admin`/`auditor` 角色;`user` → 403;本地账号) |
+| POST | `/api/server/admin/login` | 管理员登录(仅 `super_admin`/`auditor` 角色;`user` → 403;本地账号;0057 起已开启 MFA 时返回 `{mfa_required:true, mfa_ticket}` 而非直接建会话) |
+| POST | `/api/server/admin/login/mfa` | 两步登录第二步(0057,公开):body `{mfa_ticket, code}`(TOTP 6 位码)→ 与一步登录相同响应 `{csrf_token, user, must_change_password}`;挑战 5 分钟有效、失败 ≥5 次作废、一次性消费 |
+| POST | `/api/server/admin/me/password` | 改自己密码(0057):body `{old_password, new_password}`;校验旧密码;成功后吊销其全部 api_tokens 与 admin_sessions(含当前),webadmin 强制登出 |
+| GET | `/api/server/admin/me/mfa` | 当前管理员 MFA 状态 `{enabled}`(0057) |
+| POST | `/api/server/admin/me/mfa/enable` | 开启 MFA(0057,第一步):body `{password}`(主密码)→ `{secret, otpauth_url, ticket}`(密钥仅此一次下发;60s 内完成 verify) |
+| POST | `/api/server/admin/me/mfa/verify` | 开启 MFA(0057,第二步):body `{ticket, code}` 验证通过 → 启用并吊销该管理员其他已登录会话(当前保留) |
+| POST | `/api/server/admin/me/mfa/disable` | 关闭 MFA(0057):body `{password, code}` 主密码+当前动态码双验 → 吊销其他会话(当前保留) |
+| PUT | `/api/server/admin/users/:id/mfa` | 重置(关闭)其他管理员的 MFA(0057,`PermUserWrite`):清空密钥并吊销其全部会话;不能对自己操作 |
 | GET | `/api/server/admin/auth/methods` | 登录方式发现(公开) |
 | GET | `/api/server/admin/me` | 当前管理员信息(含 role/permissions) |
 | POST | `/api/server/admin/logout` | 登出(清 session) |

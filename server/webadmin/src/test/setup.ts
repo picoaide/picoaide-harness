@@ -30,6 +30,11 @@ if (typeof Element !== 'undefined' && !Element.prototype.hasPointerCapture) {
 vi.mock('../api', () => ({
   request: vi.fn(),
   setCsrf: vi.fn(),
+  setOnUnauthorized: vi.fn(),
+  login: vi.fn(),
+  loginMFA: vi.fn(),
+  me: vi.fn(),
+  logout: vi.fn(),
   ADMIN_API: '/api/server/admin',
   CLIENT_API: '/api/client/v2',
   ApiError: class extends Error {

@@ -16,6 +16,8 @@ type ClientHandlers struct {
 	Logout gin.HandlerFunc
 	Me     gin.HandlerFunc
 	Usage  gin.HandlerFunc
+	// ChangePassword 员工自助改密(0057; 本地认证用户)。
+	ChangePassword gin.HandlerFunc
 	// OIDC 每套已配置 browser provider(oidc/openid)一条 login/callback。
 	// 由 Handlers() 预生成绑定 provider 的闭包; key 是 provider 名。
 	OIDC []OIDCRoute
@@ -41,11 +43,12 @@ func (a *API) Handlers() *ClientHandlers {
 		})
 	}
 	return &ClientHandlers{
-		Login:  a.handleLogin,
-		Logout: a.handleLogout,
-		Me:     a.handleMe,
-		Usage:  a.handleUsageSummary,
-		OIDC:   oidc,
+		Login:          a.handleLogin,
+		Logout:         a.handleLogout,
+		Me:             a.handleMe,
+		Usage:          a.handleUsageSummary,
+		ChangePassword: a.handleChangePassword,
+		OIDC:           oidc,
 	}
 }
 
@@ -53,9 +56,16 @@ func (a *API) Handlers() *ClientHandlers {
 // 含 RBAC 权限点位: 路径声明由 router 包集中, 权限由 AdminRoute 申报。
 type AdminHandlers struct {
 	Login          gin.HandlerFunc // 公开: 管理登录
+	LoginMFA       gin.HandlerFunc // 公开: 两步登录第二步(0057)
 	PublicMethods  gin.HandlerFunc // 公开: 登录方式发现
 	Me             gin.HandlerFunc
 	Logout         gin.HandlerFunc
+	MePassword     gin.HandlerFunc // POST /me/password 管理员改自己密码(0057)
+	GetMyMFA       gin.HandlerFunc // GET /me/mfa
+	EnableMyMFA    gin.HandlerFunc // POST /me/mfa/enable
+	VerifyMyMFA    gin.HandlerFunc // POST /me/mfa/verify
+	DisableMyMFA   gin.HandlerFunc // POST /me/mfa/disable
+	ResetUserMFA   gin.HandlerFunc // PUT /users/:id/mfa 重置他人 MFA
 	ListUsers      gin.HandlerFunc
 	CreateUser     gin.HandlerFunc
 	UpdateUser     gin.HandlerFunc
@@ -82,9 +92,16 @@ type AdminHandlers struct {
 func (a *AdminAPI) Handlers() *AdminHandlers {
 	return &AdminHandlers{
 		Login:          a.handleLogin,
+		LoginMFA:       a.handleLoginMFA,
 		PublicMethods:  a.getPublicAuthMethods,
 		Me:             a.handleMe,
 		Logout:         a.handleLogout,
+		MePassword:     a.handleMePassword,
+		GetMyMFA:       a.getMyMFA,
+		EnableMyMFA:    a.enableMyMFA,
+		VerifyMyMFA:    a.verifyMyMFA,
+		DisableMyMFA:   a.disableMyMFA,
+		ResetUserMFA:   a.resetUserMFA,
 		ListUsers:      a.listUsers,
 		CreateUser:     a.createUser,
 		UpdateUser:     a.updateUser,

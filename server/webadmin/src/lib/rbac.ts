@@ -10,6 +10,11 @@ export interface MeUser {
   display_name?: string
   role?: Role
   permissions?: string[]
+  // 0057: 密码/MFA 自助管理所需状态。
+  password_must_change?: boolean
+  password_changeable?: boolean
+  mfa_enabled?: boolean
+  source?: string
 }
 
 export function isAuditor(user: MeUser | null | undefined): boolean {

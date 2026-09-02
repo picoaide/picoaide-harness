@@ -99,7 +99,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('令牌加载失败:显示错误而非「暂无令牌」(中5)', async () => {
-    mockRequest.mockImplementation(async (path: string) => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
       if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
       }
@@ -116,7 +116,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('跟随默认配额展示全局默认值(中7)', async () => {
-    mockRequest.mockImplementation(async (path: string) => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
       if (path.startsWith('/api/server/admin/users?page=')) {
         return {
           users: [{
@@ -139,7 +139,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('过期令牌显示「已过期」(L12)', async () => {
-    mockRequest.mockImplementation(async (path: string) => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
       if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
       }
@@ -165,7 +165,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('用户列表空态(L8)', async () => {
-    mockRequest.mockImplementation(async (path: string) => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
       if (path.startsWith('/api/server/admin/users?page=')) return { users: [], total: 0, page: 1, size: 20 }
       if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
@@ -187,7 +187,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('多部门用户:部门对话框显示全部当前归属并提示预算同时生效', async () => {
-    mockRequest.mockImplementation(async (path: string) => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
       if (path.startsWith('/api/server/admin/users?page=')) {
         return { users: [{ id: 3, username: 'multi', is_admin: false, status: 1, groups: ['研发部', '前端组'] }], total: 1, page: 1, size: 20 }
       }
@@ -240,3 +240,71 @@ describe('Users 用户管理页', () => {
       }),
     )
   })
+
+describe('Users 0057 密码/MFA 操作', () => {
+  it('重置密码: 提交 PUT /users/:id {password} 并提示强制改密', async () => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return {
+          users: [{ id: 1, username: 'alice', is_admin: false, status: 1, source: 'local', password_changed_at: '2026-08-01T06:00:00Z' }],
+          total: 1, page: 1, size: 20,
+        }
+      }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Users />)
+    await screen.findByText('alice')
+    // 上次改密列渲染本地格式化时间
+    expect(screen.getByText(/2026-08-0[12]/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    const inputs = dialog.getAllByLabelText(/新密码|确认新密码/)
+    fireEvent.change(inputs[0], { target: { value: 'newpass123456' } })
+    fireEvent.change(inputs[1], { target: { value: 'newpass123456' } })
+    fireEvent.click(dialog.getByRole('button', { name: '确认重置' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
+      '/api/server/admin/users/1',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ password: 'newpass123456' }) }),
+    ))
+  })
+
+  it('重置 MFA: 仅对已开启 MFA 的用户显示按钮, 确认后调用 PUT /users/:id/mfa', async () => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return {
+          users: [
+            { id: 1, username: 'alice', is_admin: false, status: 1, source: 'local' },
+            { id: 2, username: 'boss', is_admin: true, status: 1, source: 'local', mfa_enabled: true },
+          ],
+          total: 2, page: 1, size: 20,
+        }
+      }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Users />)
+    await screen.findByText('alice')
+    // 未开启 MFA 的 alice 无按钮; 仅 boss 有(全页恰一个)
+    expect(screen.getAllByRole('button', { name: '重置MFA' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '重置MFA' }))
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/users/2/mfa', expect.objectContaining({ method: 'PUT' })))
+  })
+
+  it('外部认证(LDAP/OIDC)用户的重置密码按钮禁用', async () => {
+    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return {
+          users: [{ id: 3, username: 'ldap1', is_admin: false, status: 1, source: 'external' }],
+          total: 1, page: 1, size: 20,
+        }
+      }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Users />)
+    await screen.findByText('ldap1')
+    expect(screen.getByRole('button', { name: '重置密码' })).toBeDisabled()
+  })
+})

@@ -45,6 +45,7 @@ func main() {
 	dbDriver := flag.String("db-driver", "pg", "database backend: pg (default) or pg-external (alias)")
 	pgDSN := flag.String("pg-dsn", "", "PostgreSQL connection string (required, e.g. postgres://user:pass@host:5432/db)")
 	bootstrapAdmin := flag.String("bootstrap-admin", "", "username of the initial admin (password from PICOAI_ADMIN_PASSWORD)")
+	resetMFA := flag.String("reset-mfa", "", "clear MFA for an admin username and revoke all their sessions (operation mode, no server started)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -70,6 +71,28 @@ func main() {
 		log.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
+
+	// --reset-mfa: 运维兜底操作模式(唯一超管丢失验证器场景, 规划 2026-09-04)。
+	// 清空目标的 TOTP 配置并吊销其全部会话; 完成即退出, 不启动 HTTP。
+	if *resetMFA != "" {
+		u, err := serverstore.GetUserByUsername(db, *resetMFA)
+		if err != nil {
+			log.Fatalf("reset-mfa: user %q not found: %v", *resetMFA, err)
+		}
+		if !u.TotpEnabled && u.TotpSecret == "" {
+			log.Printf("reset-mfa: user %q has no MFA configured; nothing to reset", *resetMFA)
+			return
+		}
+		if err := serverstore.ClearUserMFA(db, u.ID); err != nil {
+			log.Fatalf("reset-mfa: %v", err)
+		}
+		if err := serverstore.RevokeAllUserSessions(db, u.ID); err != nil {
+			log.Fatalf("reset-mfa: revoke sessions: %v", err)
+		}
+		_ = serverstore.AuditLog(db, "cli", "admin_mfa_reset", u.Username+" (CLI --reset-mfa)")
+		log.Printf("reset-mfa: MFA cleared for %q; all its sessions revoked", *resetMFA)
+		return
+	}
 
 	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等),随后清理
 	// 超出保留期的明细分区(先校验对应月日账已生成,防删明细丢账)。
