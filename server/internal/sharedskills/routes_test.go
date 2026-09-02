@@ -359,8 +359,11 @@ func TestUploadValidation(t *testing.T) {
 		reqB.Header.Set(k, v)
 	}
 	r.ServeHTTP(wB, reqB)
-	if wB.Code != http.StatusNotFound {
-		t.Fatalf("bob cross-user resubmit = %d, want 404 (body %s)", wB.Code, wB.Body.String())
+	if wB.Code != http.StatusConflict {
+		t.Fatalf("bob cross-user resubmit = %d, want 409 NAME_TAKEN (body %s)", wB.Code, wB.Body.String())
+	}
+	if !strings.Contains(wB.Body.String(), "名称已被占用") {
+		t.Fatalf("bob cross-user resubmit body = %s (应明确提示已被占用)", wB.Body.String())
 	}
 	sB, _ := serverstore.GetSharedSkill(db, "dup", "1.0.0")
 	if sB.Status != serverstore.SharedSkillRejected || sB.Author != before.Author ||

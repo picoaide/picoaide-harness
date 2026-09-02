@@ -427,10 +427,10 @@ metadata:
 
 现状核实：两条规则的内核级实现已存在（归属保护 `publish.go`、跨渠道互斥、能力锁定），本轮为**边界补强 + 管理面补齐**，未重复建设：
 
-- **空 owner 收紧（G1）**：`appstore.Publish` 归属保护条件去掉 `Owner != ""` ——空 owner 的历史行(0054 回填边缘)一律视同占名，员工发布 404，杜绝「接管成新归属人」；管理员不受限。404 文案改为中性「名称不可用:可能已被占用或不属于你」(不暴露占名者)。
+- **空 owner 收紧（G1）**：`appstore.Publish` 归属保护条件去掉 `Owner != ""` ——空 owner 的历史行(0054 回填边缘)一律视同占名，员工发布被拒，杜绝「接管成新归属人」；管理员不受限。归属保护响应为 **409 NAME_TAKEN** + 明确文案「名称已被占用，无法上传：请更换名称或联系管理员」(用户拍板:明确告知占用关系,不用 404;不泄露「是谁/什么内容」)。
 - **归属转移（G2）**：`PUT /api/server/admin/apps/:kind/:app_id/owner`（RBAC `capability:write`，路由经 `internal/router` 集中声明 + router_test 完整性断言）；校验目标用户存在、同归属幂等成功不写审计；审计动作 `app_owner_transfer`（明细 `kind:app_id 「title」 归属 旧 → 新`）；`serverstore.SetAppOwner` 落 `apps.owner`。
 - **可见性**：能力中心聚合面 `CapabilityItem.is_owner`（员工侧，按 viewer 相对计算）+ 审批队列 `ApprovalRow.owner`（管理侧，一次 `ListApps` 映射避免逐行查询）。
-- **客户端（P2）**：`ApiError` 增加 `status` 透传，`fetchJSON` 携带服务端原始状态码；auth-gate 两条上传代理（技能/智能体）不再把 404/403/409 一律压平成 422；`CapabilityCenterPanel` 上传前本地预检——同名同类型已存在且非本人（`is_owner !== true`）→ 直接提示「名称已被占用」，不发请求（服务端 404 仍是权威，他人待审行不可见时兜底）。
+- **客户端（P2）**：`ApiError` 增加 `status` 透传，`fetchJSON` 携带服务端原始状态码；auth-gate 两条上传代理（技能/智能体）不再把 409/403 等一律压平成 422；`CapabilityCenterPanel` 上传前本地预检——同名同类型已存在且非本人（`is_owner !== true`）→ 直接提示「名称已被占用」，不发请求（服务端 409 NAME_TAKEN 仍是权威，他人待审行不可见时兜底）。
 - **webadmin（P3）**：能力中心审批页新增「归属」列（与「作者」=本行上传者可不同）+ 行操作「转移归属(负责人)」弹窗（用户名输入，预填当前归属）。
 - **测试**：`publish_test.go`（空 owner 404/管理员可发、被拒后占名、转移后新旧归属行为、404 文案断言）+ `admin_test.go`（转移成功/审计/幂等/参数校验/明细格式）；webadmin 106 测试全绿（新增归属列、转移流程、空负责人禁用 3 用例）。
 - **文档**：`server/docs/07-marketplace.md` §5、`08-agent-share.md` §7 补归属显式契约；本决策文档追加本节。

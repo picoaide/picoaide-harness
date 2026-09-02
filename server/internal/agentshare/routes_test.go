@@ -354,7 +354,8 @@ func TestUploadValidation(t *testing.T) {
 	if wR.Code != 200 {
 		t.Fatalf("reject2 = %d", wR.Code)
 	}
-	// bob 重提 → 404(与不存在同响应,不泄露存在性)。
+	// bob 重提 → 409 NAME_TAKEN(2026-09-02 用户拍板:明确提示已被占用,
+	// 不再与不存在同响应 404)。
 	{
 		wB := httptest.NewRecorder()
 		reqB := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(uploadBody("dup", "bob 劫持", "", makeArchive(t, map[string]string{"agent.cordis.yml": testComposition, "preset.yml": presetMeta("测试预设", "1.0.0")}))))
@@ -363,8 +364,11 @@ func TestUploadValidation(t *testing.T) {
 			reqB.Header.Set(k, v)
 		}
 		r.ServeHTTP(wB, reqB)
-		if wB.Code != http.StatusNotFound {
-			t.Fatalf("bob cross-user resubmit = %d, want 404 (body %s)", wB.Code, wB.Body.String())
+		if wB.Code != http.StatusConflict {
+			t.Fatalf("bob cross-user resubmit = %d, want 409 (body %s)", wB.Code, wB.Body.String())
+		}
+		if !strings.Contains(wB.Body.String(), "名称已被占用") {
+			t.Fatalf("bob cross-user resubmit body = %s (应明确提示已被占用)", wB.Body.String())
 		}
 		// 行仍为 rejected 且内容未被覆盖(描述来自包内 preset.yml)。
 		pB, _ := serverstore.GetAgentPresetByVersion(db, "dup", "1.0.0")

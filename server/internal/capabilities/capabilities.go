@@ -53,7 +53,7 @@ type CapabilityItem struct {
 	Quality     string           `json:"quality,omitempty"`
 	// IsOwner 当前用户是否为该 App 的归属人(2026-09-02 归属权补强)。
 	// 客户端上传前据此预检:同名且非本人 → 提前提示「名称已被占用」,
-	// 不必等一次网络往返(服务端 404 兜底,防泄露语义不变)。
+	// 不必等一次网络往返(服务端 409 NAME_TAKEN 兜底,语义一致)。
 	IsOwner bool `json:"is_owner"`
 	// Versions 是该名全部 approved 版本(升序,数值感知)。归并后当前
 	// Version = 最高 approved 版本;versions[last] 恒等于 Version。
