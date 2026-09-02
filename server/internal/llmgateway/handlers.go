@@ -30,6 +30,7 @@ type Handlers struct {
 	CreateProvider    gin.HandlerFunc
 	UpdateProvider    gin.HandlerFunc
 	DeleteProvider    gin.HandlerFunc
+	ProviderBalance   gin.HandlerFunc // GET /providers/:id/balance(2026-09 渠道余额)
 	ListModelsAdmin   gin.HandlerFunc
 	CreateModel       gin.HandlerFunc
 	UpdateModel       gin.HandlerFunc
@@ -77,6 +78,7 @@ func NewHandlers(db *sql.DB) *Handlers {
 		CreateProvider:    func(c *gin.Context) { createProvider(c, db) },
 		UpdateProvider:    func(c *gin.Context) { updateProvider(c, db) },
 		DeleteProvider:    func(c *gin.Context) { deleteProvider(c, db) },
+		ProviderBalance:   func(c *gin.Context) { providerBalance(c, db) },
 		ListModelsAdmin:   func(c *gin.Context) { listModelsAdmin(c, db) },
 		CreateModel:       func(c *gin.Context) { createModel(c, db) },
 		UpdateModel:       func(c *gin.Context) { updateModel(c, db) },

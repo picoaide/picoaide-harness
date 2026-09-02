@@ -22,6 +22,7 @@ import (
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
@@ -50,6 +51,7 @@ type Deps struct {
 	Connector  *connectors.Handlers
 	Telemetry  *telemetry.Handlers
 	Gateway    *llmgateway.Handlers
+	Reports    *reports.Handlers
 }
 
 // Register 集中装配两个命名空间分组下的全部路由。
@@ -171,6 +173,9 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/users/:id/tokens", serverauth.PermUserRead, d.Admin.ListUserTokens)
 	serverauth.AdminRoute(authed, "POST", "/tokens/:id/revoke", serverauth.PermUserWrite, d.Admin.RevokeToken)
 	serverauth.AdminRoute(authed, "GET", "/usage", serverauth.PermUsageRead, d.Admin.Usage)
+	// 用量中心(2026-09 重构):总览聚合 + 请求级明细
+	serverauth.AdminRoute(authed, "GET", "/usage/overview", serverauth.PermUsageRead, d.Admin.UsageOverview)
+	serverauth.AdminRoute(authed, "GET", "/usage/requests", serverauth.PermUsageRead, d.Admin.UsageRequests)
 	serverauth.AdminRoute(authed, "GET", "/server-info", serverauth.PermServerInfoRead, d.Admin.ServerInfo)
 	serverauth.AdminRoute(authed, "GET", "/audit", serverauth.PermAuditRead, d.Admin.ListAuditLogs)
 	serverauth.AdminRoute(authed, "GET", "/auth", serverauth.PermAuthRead, d.Admin.GetAuthConfig)
@@ -179,6 +184,7 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 
 	// 网关管理
 	serverauth.AdminRoute(authed, "GET", "/providers", serverauth.PermGatewayRead, d.Gateway.ListProviders)
+	serverauth.AdminRoute(authed, "GET", "/providers/:id/balance", serverauth.PermGatewayRead, d.Gateway.ProviderBalance)
 	serverauth.AdminRoute(authed, "POST", "/providers", serverauth.PermGatewayWrite, d.Gateway.CreateProvider)
 	serverauth.AdminRoute(authed, "PUT", "/providers/:id", serverauth.PermGatewayWrite, d.Gateway.UpdateProvider)
 	serverauth.AdminRoute(authed, "DELETE", "/providers/:id", serverauth.PermGatewayWrite, d.Gateway.DeleteProvider)
@@ -193,6 +199,13 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/channels", serverauth.PermGatewayRead, d.Gateway.ListChannelsAdmin)
 	// 按模型并发状态(当前 + 90 天峰值 + 目标;2026-08-31 扩容申请指标)
 	serverauth.AdminRoute(authed, "GET", "/concurrency", serverauth.PermGatewayRead, d.Gateway.ConcurrencyStatus)
+
+	// 报表订阅(2026-09 P1):月度用量报表推送 webhook
+	serverauth.AdminRoute(authed, "GET", "/report-subscriptions", serverauth.PermUsageRead, d.Reports.List)
+	serverauth.AdminRoute(authed, "POST", "/report-subscriptions", serverauth.PermReportWrite, d.Reports.Create)
+	serverauth.AdminRoute(authed, "PUT", "/report-subscriptions/:id", serverauth.PermReportWrite, d.Reports.Update)
+	serverauth.AdminRoute(authed, "DELETE", "/report-subscriptions/:id", serverauth.PermReportWrite, d.Reports.Delete)
+	serverauth.AdminRoute(authed, "POST", "/report-subscriptions/:id/test", serverauth.PermReportWrite, d.Reports.TestPush)
 
 	// 技能商城管理
 	serverauth.AdminRoute(authed, "GET", "/skills", serverauth.PermMarketRead, d.Market.ListSkillsAdmin)
