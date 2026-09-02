@@ -108,6 +108,83 @@ func TestPublishLockAndOwnership(t *testing.T) {
 	if _, err := Publish(db, req("alice-app", "2.0.0", "b1", "bob")); code(t, err) != CodeNotFound {
 		t.Fatalf("跨作者接管 = %v", err)
 	}
+	// 拒绝文案必须中性,不暴露被占名者的任何信息(2026-09-02 D1)。
+	_, err = Publish(db, req("alice-app", "2.0.0", "b1", "bob"))
+	errors.As(err, &e)
+	if e.Message != "名称不可用:可能已被占用或不属于你" {
+		t.Fatalf("拒绝文案 = %q", e.Message)
+	}
+}
+
+// 空 owner 的历史行(0054 回填边缘)必须同样受归属保护:员工不能发布,
+// 管理员可以(并成为 owner)——防止员工「接管」成新归属人。
+func TestPublishEmptyOwnerBlocked(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	if err := serverstore.UpsertApp(db, &serverstore.App{
+		Kind: serverstore.AppKindSkill, AppID: "legacy-orphan", Title: "历史技能",
+		Description: "旧数据回填行", Owner: "", Channel: serverstore.AppChannelOrg, Enabled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, req("legacy-orphan", "1.0.0", "o1", "alice")); code(t, err) != CodeNotFound {
+		t.Fatalf("空 owner 未被拦截 = %v", err)
+	}
+	adminReq := req("legacy-orphan", "1.0.0", "o1", "admin")
+	adminReq.AdminPublish = true
+	if _, err := Publish(db, adminReq); err != nil {
+		t.Fatalf("管理员发布空 owner 行: %v", err)
+	}
+	app, err := serverstore.GetApp(db, serverstore.AppKindSkill, "legacy-orphan")
+	if err != nil || app.Owner != "admin" {
+		t.Fatalf("owner = %q err=%v, want admin", app.Owner, err)
+	}
+}
+
+// 被拒后归属仍保留(占名与版本号永久占位同一精神):他人任何状态都不能
+// 上传同名,本人可升版本重提。
+func TestPublishOwnershipPersistsAfterReject(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	if _, err := Publish(db, req("persist", "1.0.0", "p1", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetReleaseStatus(db, serverstore.AppKindSkill, "persist", "1.0.0",
+		serverstore.ReleaseStatusRejected, "不合规"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, req("persist", "2.0.0", "p2", "bob")); code(t, err) != CodeNotFound {
+		t.Fatalf("他人接管被拒行的名字 = %v", err)
+	}
+	if _, err := Publish(db, req("persist", "1.1.0", "p3", "alice")); err != nil {
+		t.Fatalf("本人升版重提: %v", err)
+	}
+}
+
+// 归属转移(管理员指定):转移后新归属者获得续传权,旧归属者 404;
+// 相同归属幂等成功。
+func TestPublishAfterOwnerTransfer(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	if _, err := Publish(db, req("transfer-me", "1.0.0", "t1", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetAppOwner(db, serverstore.AppKindSkill, "transfer-me", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, req("transfer-me", "2.0.0", "t2", "bob")); err != nil {
+		t.Fatalf("新归属者续传: %v", err)
+	}
+	if _, err := Publish(db, req("transfer-me", "3.0.0", "t3", "alice")); code(t, err) != CodeNotFound {
+		t.Fatalf("旧归属者续传 = %v", err)
+	}
+	// 幂等:再次转移为同一归属不报错。
+	if err := serverstore.SetAppOwner(db, serverstore.AppKindSkill, "transfer-me", "bob"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // 非首个版本缺 changelog 必须被拒(首版不要求)。

@@ -51,6 +51,10 @@ type CapabilityItem struct {
 	Status      string           `json:"status"`
 	Reason      string           `json:"reason,omitempty"`
 	Quality     string           `json:"quality,omitempty"`
+	// IsOwner 当前用户是否为该 App 的归属人(2026-09-02 归属权补强)。
+	// 客户端上传前据此预检:同名且非本人 → 提前提示「名称已被占用」,
+	// 不必等一次网络往返(服务端 404 兜底,防泄露语义不变)。
+	IsOwner bool `json:"is_owner"`
 	// Versions 是该名全部 approved 版本(升序,数值感知)。归并后当前
 	// Version = 最高 approved 版本;versions[last] 恒等于 Version。
 	Versions []string `json:"versions"`
@@ -130,7 +134,8 @@ func parseTypeFilter(c *gin.Context) typeFilter {
 }
 
 // appendSkill merges one marketplace skill into the catalog (authorized/enabled only).
-func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string) {
+// isOwner 由调用方按 apps.owner 计算(市场适配层 Skill.Author == apps.owner)。
+func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	// 展示名(0051):优先包内 title 写入的 display_name,为空回退 name
 	// ——此前这里硬编码 s.Name,是「市场卡片显示目录名」的直接原因。
@@ -147,12 +152,13 @@ func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string
 		Description: s.Description,
 		Author:      s.Author,
 		Status:      "approved",
+		IsOwner:     isOwner,
 	})
 }
 
 // appendSharedSkill merges one shared-skill row (already visibility-filtered
 // by the caller) with its quality tag and status.
-func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string) {
+func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	item := CapabilityItem{
 		Kind:        KindSkill,
@@ -165,12 +171,13 @@ func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, version
 		Status:      string(s.Status),
 		Reason:      s.Reason,
 		Quality:     s.Quality,
+		IsOwner:     isOwner,
 	}
 	*out = append(*out, item)
 }
 
 // appendSharedAgent merges one shared-agent row (visibility-filtered).
-func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, versions map[string][]string) {
+func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, versions map[string][]string, isOwner bool) {
 	versions[p.Name] = append(versions[p.Name], p.Version)
 	*out = append(*out, CapabilityItem{
 		Kind:        KindAgent,
@@ -183,6 +190,7 @@ func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, version
 		Status:      string(p.Status),
 		Reason:      p.Reason,
 		Quality:     p.Quality,
+		IsOwner:     isOwner,
 	})
 }
 
@@ -257,6 +265,20 @@ func mergeVersions(items []CapabilityItem, versions map[string][]string) []Capab
 	return out
 }
 
+// appOwnerMap 一次性取某 (kind, channel) 全部 App 的归属映射(列表量级小,
+// 一次查询避免逐行 GetApp;2026-09-02 归属权:is_owner 供客户端预检)。
+func appOwnerMap(db *sql.DB, kind, channel string) map[string]string {
+	apps, err := serverstore.ListApps(db, kind, channel)
+	if err != nil {
+		return map[string]string{}
+	}
+	m := make(map[string]string, len(apps))
+	for _, a := range apps {
+		m[a.AppID] = a.Owner
+	}
+	return m
+}
+
 // listCapabilities 聚合市场(授权) + 组织(共享技能/共享 Agent)可见条目。
 // 可见性语义各自保留:market = enabled+authorized;org = author-own(任意
 // 状态) OR (approved+granted);admin 恒全量(不落授权表)。
@@ -284,6 +306,9 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		ft := parseTypeFilter(c)
 		items := []CapabilityItem{}
 		versions := map[string][]string{}
+		// 归属映射(2026-09-02):一个 App 的 owner 恒定,一次查询覆盖全部行。
+		skillOwners := appOwnerMap(db, serverstore.AppKindSkill, serverstore.AppChannelOrg)
+		agentOwners := appOwnerMap(db, serverstore.AppKindAgent, serverstore.AppChannelOrg)
 
 		// 1) 市场技能(授权制)。
 		if includeMarket && ft.skills {
@@ -294,7 +319,8 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			for _, s := range skillList {
-				appendSkill(&items, s, versions)
+				// 市场适配层 Skill.Author == apps.owner(2026-09-02 归属权)。
+				appendSkill(&items, s, versions, s.Author == u.Username)
 			}
 		}
 
@@ -308,7 +334,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				}
 				for _, s := range all {
 					if s.Status == serverstore.SharedSkillApproved {
-						appendSharedSkill(&items, s, versions)
+						appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username)
 					}
 				}
 			} else {
@@ -329,7 +355,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					if s.Status != serverstore.SharedSkillApproved {
 						continue
 					}
-					appendSharedSkill(&items, s, versions)
+					appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username)
 				}
 			}
 		}
@@ -352,7 +378,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				if s.Author != u.Username {
 					continue
 				}
-				appendSharedSkill(&items, s, versions)
+				appendSharedSkill(&items, s, versions, true)
 			}
 		}
 
@@ -366,7 +392,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				}
 				for _, p := range all {
 					if p.Status == serverstore.AgentPresetApproved {
-						appendSharedAgent(&items, p, versions)
+						appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username)
 					}
 				}
 			} else {
@@ -386,7 +412,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					if p.Status != serverstore.AgentPresetApproved {
 						continue
 					}
-					appendSharedAgent(&items, p, versions)
+					appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username)
 				}
 			}
 		}
@@ -407,7 +433,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				if p.Author != u.Username {
 					continue
 				}
-				appendSharedAgent(&items, p, versions)
+				appendSharedAgent(&items, p, versions, true)
 			}
 		}
 
@@ -505,10 +531,13 @@ type ApprovalRow struct {
 	DisplayName string         `json:"display_name"`
 	Description string         `json:"description"`
 	Author      string         `json:"author"`
-	Status      string         `json:"status"`
-	Reason      string         `json:"reason,omitempty"`
-	Quality     string         `json:"quality,omitempty"`
-	CreatedAt   string         `json:"created_at"`
+	// Owner 是该 (kind, name) 的归属人(apps.owner,2026-09-02 归属权):
+	// 与 Author(本行上传者)可不同——管理员代发/归属转移后即分叉。
+	Owner     string `json:"owner"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	Quality   string `json:"quality,omitempty"`
+	CreatedAt string `json:"created_at"`
 	// Downloads 归档下载次数;Calls 技能调用计数(telemetry,仅共享技能有)。
 	Downloads int64 `json:"downloads"`
 	Calls     int64 `json:"calls,omitempty"`
@@ -548,6 +577,8 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
+			// 归属映射(2026-09-02):owner 是 App 级,与版本无关,一次查询覆盖。
+			skillOwners := appOwnerMap(db, serverstore.AppKindSkill, "")
 			for _, s := range rows {
 				// 决策 2026-08-25:跨源同名(市场技能表已有同名)标记冲突,
 				// 管理端提示且 approve 将被 409 阻断。
@@ -560,6 +591,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					DisplayName: s.DisplayName,
 					Description: s.Description,
 					Author:      s.Author,
+					Owner:       skillOwners[s.Name],
 					Status:      string(s.Status),
 					Reason:      s.Reason,
 					Quality:     s.Quality,
@@ -579,6 +611,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
+			agentOwners := appOwnerMap(db, serverstore.AppKindAgent, "")
 			for _, p := range rows {
 				out = append(out, ApprovalRow{
 					Kind:        KindAgent,
@@ -587,6 +620,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					DisplayName: p.DisplayName,
 					Description: p.Description,
 					Author:      p.Author,
+					Owner:       agentOwners[p.Name],
 					Status:      string(p.Status),
 					Reason:      p.Reason,
 					Quality:     p.Quality,

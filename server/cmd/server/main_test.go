@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/agentshare"
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
@@ -46,6 +47,7 @@ func buildRouter(t *testing.T) *gin.Engine {
 		DB:         nil,
 		Auth:       serverauth.New(nil).Handlers(),
 		Admin:      (&serverauth.AdminAPI{}).Handlers(),
+		Appstore:   appstore.NewHandlers(nil),
 		Bootstrap:  bootstrap.NewHandlers(nil),
 		Brand:      brand.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
 		Market:     marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
@@ -212,6 +214,7 @@ func TestV2RealDB(t *testing.T) {
 		DB:         db,
 		Auth:       authCfg.API.Handlers(),
 		Admin:      (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Appstore:   appstore.NewHandlers(db),
 		Bootstrap:  bootstrap.NewHandlers(db),
 		Brand:      brand.NewHandlers(db, t.TempDir()),
 		Market:     marketplace.NewHandlers(db, t.TempDir()),
