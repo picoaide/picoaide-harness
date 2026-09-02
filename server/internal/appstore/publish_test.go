@@ -20,6 +20,15 @@ func req(appID, version, checksum, publisher string) PublishRequest {
 	}
 }
 
+// agentReq 与 req 同构,仅 kind=agent(智能体与技能共用同一发布内核,
+// 本夹具用于验证「同样策略」的显式回归)。
+func agentReq(appID, version, checksum, publisher string) PublishRequest {
+	r := req(appID, version, checksum, publisher)
+	r.Kind = serverstore.AppKindAgent
+	r.Manifest.Title = appID + " 智能体"
+	return r
+}
+
 func code(t *testing.T, err error) string {
 	t.Helper()
 	var e *Error
@@ -185,6 +194,84 @@ func TestPublishAfterOwnerTransfer(t *testing.T) {
 	// 幂等:再次转移为同一归属不报错。
 	if err := serverstore.SetAppOwner(db, serverstore.AppKindSkill, "transfer-me", "bob"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// 智能体与技能执行同一套归属/锁定/版本策略(2026-09-02 用户要求):
+// 每条规则各断言一次,防止未来某条路径再次分叉。
+func TestPublishAgentSamePolicyAsSkill(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	// 1) 首次发布 → pending 即占名并注册 owner。
+	if _, err := Publish(db, agentReq("agent-own", "1.0.0", "g1", "alice")); err != nil {
+		t.Fatalf("agent 首次发布: %v", err)
+	}
+	app, err := serverstore.GetApp(db, serverstore.AppKindAgent, "agent-own")
+	if err != nil || app.Owner != "alice" {
+		t.Fatalf("agent owner = %q err=%v, want alice", app.Owner, err)
+	}
+
+	// 2) 他人同名(任意版本)→ 409 NAME_TAKEN + 明确文案(与技能同码)。
+	_, err = Publish(db, agentReq("agent-own", "2.0.0", "g2", "bob"))
+	if code(t, err) != CodeNameTaken {
+		t.Fatalf("agent 跨作者接管 = %v", err)
+	}
+	var e *Error
+	errors.As(err, &e)
+	if e.Message != "名称已被占用，无法上传：请更换名称或联系管理员" {
+		t.Fatalf("agent 拒绝文案 = %q", e.Message)
+	}
+
+	// 3) 版本语义:同名同版本不可复用、版本只能递增。
+	if _, err := Publish(db, agentReq("agent-own", "1.0.0", "g3", "alice")); code(t, err) != CodeVersionExists {
+		t.Fatalf("agent 同版本 = %v", err)
+	}
+	if _, err := Publish(db, agentReq("agent-own", "0.9.0", "g4", "alice")); code(t, err) != CodeVersionNotIncreasing {
+		t.Fatalf("agent 版本倒挂 = %v", err)
+	}
+	// 4) 本人升版本续传 → 成功。
+	if _, err := Publish(db, agentReq("agent-own", "1.1.0", "g5", "alice")); err != nil {
+		t.Fatalf("agent 本人升版: %v", err)
+	}
+
+	// 5) 管理员改归属后:新归属者可续传、旧归属者 409、管理员可发布被锁名。
+	if err := serverstore.SetAppOwner(db, serverstore.AppKindAgent, "agent-own", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, agentReq("agent-own", "1.2.0", "g6", "bob")); err != nil {
+		t.Fatalf("agent 新归属者续传: %v", err)
+	}
+	if _, err := Publish(db, agentReq("agent-own", "1.3.0", "g7", "alice")); code(t, err) != CodeNameTaken {
+		t.Fatalf("agent 旧归属者 = %v", err)
+	}
+	// 6) 锁定(占名)对智能体同样生效。
+	if err := serverstore.LockCapability(db, serverstore.AppKindAgent, "agent-official", "官方维护", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, agentReq("agent-official", "1.0.0", "g8", "alice")); code(t, err) != CodeAppLocked {
+		t.Fatalf("agent 锁定 = %v", err)
+	}
+	adminReq := agentReq("agent-official", "1.0.0", "g8", "admin")
+	adminReq.AdminPublish = true
+	if r, err := Publish(db, adminReq); err != nil || r.Status != serverstore.ReleaseStatusApproved {
+		t.Fatalf("agent 管理员发布锁定名 = %+v %v", r, err)
+	}
+}
+
+// 空 owner 历史行:智能体同样禁止员工接管(2026-09-02 收紧)。
+func TestPublishAgentEmptyOwnerBlocked(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	if err := serverstore.UpsertApp(db, &serverstore.App{
+		Kind: serverstore.AppKindAgent, AppID: "agent-legacy", Title: "历史智能体",
+		Description: "旧数据回填行", Owner: "", Channel: serverstore.AppChannelOrg, Enabled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, agentReq("agent-legacy", "1.0.0", "h1", "alice")); code(t, err) != CodeNameTaken {
+		t.Fatalf("agent 空 owner 未被拦截 = %v", err)
 	}
 }
 
