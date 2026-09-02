@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/agentshare"
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
@@ -42,6 +43,7 @@ type Deps struct {
 
 	Auth       *serverauth.ClientHandlers
 	Admin      *serverauth.AdminHandlers
+	Appstore   *appstore.Handlers
 	Bootstrap  *bootstrap.Handlers
 	Brand      *brand.Handlers
 	Market     *marketplace.Handlers
@@ -246,6 +248,9 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/capability-locks", serverauth.PermCapabilityRead, d.Shared.ListLocks)
 	serverauth.AdminRoute(authed, "PUT", "/capability-locks/:kind/:name", serverauth.PermCapabilityWrite, d.Shared.SetLock)
 	serverauth.AdminRoute(authed, "DELETE", "/capability-locks/:kind/:name", serverauth.PermCapabilityWrite, d.Shared.RemoveLock)
+	// 归属转移(2026-09-02):统一模型的管理端点——owner 是 (kind, app_id) 级,
+	// 与版本无关,故挂 apps 基路径。
+	serverauth.AdminRoute(authed, "PUT", "/apps/:kind/:app_id/owner", serverauth.PermCapabilityWrite, d.Appstore.TransferOwner)
 	serverauth.AdminRoute(authed, "GET", "/shared-skills/:name/grants", serverauth.PermCapabilityRead, d.Shared.ListGrants)
 	serverauth.AdminRoute(authed, "PUT", "/shared-skills/:name/grants", serverauth.PermCapabilityWrite, d.Shared.ReplaceGrants)
 	serverauth.AdminRoute(authed, "PUT", "/shared-skills/:name/grant", serverauth.PermCapabilityWrite, d.Shared.SetGrant)

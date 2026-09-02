@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/agentshare"
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
@@ -157,6 +158,7 @@ func main() {
 		DB:         db,
 		Auth:       auth.Handlers(),
 		Admin:      (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Appstore:   appstore.NewHandlers(db),
 		Bootstrap:  bootstrap.NewHandlers(db),
 		Brand:      brand.NewHandlers(db, *dataDir),
 		Market:     marketplace.NewHandlers(db, *dataDir+"/skills-cache"),

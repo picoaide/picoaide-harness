@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/agentshare"
+	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
@@ -31,6 +32,7 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 		DB:         nil,
 		Auth:       serverauth.New(nil).Handlers(),
 		Admin:      (&serverauth.AdminAPI{}).Handlers(),
+		Appstore:   appstore.NewHandlers(nil),
 		Bootstrap:  bootstrap.NewHandlers(nil),
 		Brand:      brand.NewHandlers(nil, "/tmp/nonexistent"),
 		Market:     marketplace.NewHandlers(nil, "/tmp/nonexistent"),
@@ -92,6 +94,7 @@ func TestNamespaces(t *testing.T) {
 		"GET " + nsServer + "/admin/connectors",
 		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)
 		"GET " + nsServer + "/admin/concurrency",
+		"PUT " + nsServer + "/admin/apps/:kind/:app_id/owner",
 		// DeepSeek 兼容 LLM 网关(/v1 独立命名空间 + 官方原生端点, 原样保留)
 		"GET /v1/models",
 		"GET /models",

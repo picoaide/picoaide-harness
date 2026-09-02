@@ -135,9 +135,13 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		return nil, newErr(http.StatusConflict, CodeNameTaken,
 			"名称已被%s占用,请换个名字或联系管理员", channelLabel(existingApp.Channel))
 	}
-	// 归属保护:组织库里他人的 App,不允许被其他人接管发布。
-	if appErr == nil && !req.AdminPublish && existingApp.Owner != "" && existingApp.Owner != req.Publisher {
-		return nil, newErr(http.StatusNotFound, CodeNotFound, "能力不存在")
+	// 归属保护(2026-09-02 收紧):他人的 App(任意状态,含空 owner 的历史
+	// 行——空 owner 一律视同占名,杜绝员工「接管」成新 owner)不允许被其他
+	// 非管理员接管发布。404 不泄露存在性(与「未授权不可见」同一原则),
+	// 文案保持中性,不暴露被占名者的任何信息。
+	if appErr == nil && !req.AdminPublish && existingApp.Owner != req.Publisher {
+		return nil, newErr(http.StatusNotFound, CodeNotFound,
+			"名称不可用:可能已被占用或不属于你")
 	}
 
 	history, err := serverstore.ListReleases(db, req.Kind, req.AppID)

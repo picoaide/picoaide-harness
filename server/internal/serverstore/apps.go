@@ -170,6 +170,20 @@ func ListApps(db *sql.DB, kind, channel string) ([]App, error) {
 	return out, rows.Err()
 }
 
+// SetAppOwner 归属转移(管理员指定,2026-09-02):apps.owner 是归属人的唯一
+// 真源——转移后旧归属者发布的后续版本请求一律 404,新归属者获得续传权。
+func SetAppOwner(db *sql.DB, kind, appID, owner string) error {
+	res, err := db.Exec(`UPDATE apps SET owner = ?, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ?`, owner, kind, appID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAppEnabled 上下架(保留数据)。
 func SetAppEnabled(db *sql.DB, kind, appID string, enabled bool) error {
 	res, err := db.Exec(`UPDATE apps SET enabled = ?, updated_at = `+NowExpr()+`
