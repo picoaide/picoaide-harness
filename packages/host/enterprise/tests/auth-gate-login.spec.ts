@@ -53,3 +53,28 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     expect(html).toContain('__DEFAULT_SERVER__')
   })
 })
+
+// ---- 0057 强制改密页模板(CHANGE_PASSWORD_HTML) ----
+function renderedChangePasswordHTML(): string {
+  const src = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
+  const m = src.match(/const CHANGE_PASSWORD_HTML = `([\s\S]*?)`\n\n\/\/ P1-11/)
+  expect(m, 'CHANGE_PASSWORD_HTML template must be findable').not.toBeNull()
+  const raw = m![1]!
+  const fn = new Function(`return \`${raw}\``) // eslint-disable-line no-new-func
+  return fn()
+}
+
+describe('auth-gate CHANGE_PASSWORD_HTML inline script', () => {
+  it('rendered change-password page script parses as valid JavaScript', () => {
+    const html = renderedChangePasswordHTML()
+    const script = html.match(/<script>([\s\S]*?)<\/script>/i)![1]!
+    expect(() => { new Function(script) }).not.toThrow()
+  })
+
+  it('submits old_password + new_password to the local API and returns to login on success', () => {
+    const html = renderedChangePasswordHTML()
+    expect(html).toContain('/api/pico/auth/password')
+    expect(html).toContain('old_password: oldpw')
+    expect(html).toContain("location.replace('/login'")
+  })
+})

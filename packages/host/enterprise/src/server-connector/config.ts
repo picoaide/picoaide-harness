@@ -4,6 +4,12 @@ export interface Session {
   token: string
   /** RBAC role from the server login response (v3b §4.4); undefined = 未返回. */
   role?: string
+  /** 0057: 账号来源('local'|'external'); external=LDAP/OIDC 由 IdP 管理密码. */
+  source?: string
+  /** 0057: 是否可自助改密(本地认证且启用); 客户端据此渲染改密入口. */
+  passwordChangeable?: boolean
+  /** 0057: 管理员重置密码后强制改密; 为 true 时客户端进入强制改密页. */
+  mustChangePassword?: boolean
 }
 
 export interface BootstrapModel {

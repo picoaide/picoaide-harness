@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { ApiError, AuthError, assertServerURLAllowed, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
+import { ApiError, AuthError, assertServerURLAllowed, changePassword, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   computeSkillContentHash,
@@ -346,7 +346,13 @@ const LOGIN_HTML = `<!DOCTYPE html>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (res.ok) { location.replace('/' + location.search); return }
+      if (res.ok) {
+        // 0057: 管理员重置密码后强制改密 —— 进入强制改密页而非应用。
+        var okBody = await res.json().catch(function () { return null })
+        if (okBody && okBody.must_change_password) { location.replace('/change-password' + location.search); return }
+        location.replace('/' + location.search)
+        return
+      }
       var data = await res.json().catch(function () { return {} })
       var raw = String(data.error && data.error.message ? data.error.message : (data.error || ''))
       var msg = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
@@ -384,6 +390,78 @@ export interface Config {
 export const Config: z<Config> = z.object({
   defaultServer: z.string(),
 })
+
+// 0057 强制改密页: 登录后被管理员重置密码(必须改密才能使用)时展示。
+// 与 LOGIN_HTML 无关联的关系不在此处理; 页面样式与登录页保持一致(浅色卡片)。
+const CHANGE_PASSWORD_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>修改密码</title>
+<style>
+  :root { --accent: #4176E6 }
+  body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #F9FAFB; color: #1a1d24; }
+  .card { width: 90%; max-width: 400px; padding: 36px 28px; background: #fff; border-radius: 14px; box-shadow: 0 8px 30px rgba(15,17,21,.06); }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .hint { font-size: 13px; color: #6b7280; margin: 0 0 20px; line-height: 1.6; }
+  input { width: 100%; box-sizing: border-box; padding: 11px 12px; margin-bottom: 12px; border: 1px solid #d0d5dd; border-radius: 8px; font-size: 14px; }
+  input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  button { width: 100%; padding: 11px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  .err { margin-top: 10px; font-size: 13px; color: #dc2626; min-height: 1em; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>修改密码</h1>
+  <p class="hint">你的密码已被管理员重置，为保障账号安全需要先设置新密码；修改成功后请用新密码重新登录。</p>
+  <form id="cf">
+    <input id="oldpw" type="password" placeholder="当前密码(管理员设置的临时密码)" autocomplete="current-password" required>
+    <input id="new1" type="password" placeholder="新密码(至少 10 位)" autocomplete="new-password" required>
+    <input id="new2" type="password" placeholder="确认新密码" autocomplete="new-password" required>
+    <button type="submit" id="cb">确认修改</button>
+    <div class="err" id="cerr"></div>
+  </form>
+</div>
+<script>
+  var cf = document.getElementById('cf')
+  var cerr = document.getElementById('cerr')
+  var cb = document.getElementById('cb')
+  cf.addEventListener('submit', async function (e) {
+    e.preventDefault()
+    var oldpw = document.getElementById('oldpw').value
+    var p1 = document.getElementById('new1').value
+    var p2 = document.getElementById('new2').value
+    cerr.textContent = ''
+    if (p1.length < 10) { cerr.textContent = '新密码至少 10 位'; return }
+    if (p1 !== p2) { cerr.textContent = '两次输入的新密码不一致'; return }
+    if (p1 === oldpw) { cerr.textContent = '新密码不能与当前密码相同'; return }
+    cb.disabled = true
+    cb.textContent = '提交中…'
+    try {
+      var res = await fetch('/api/pico/auth/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_password: oldpw, new_password: p1 }),
+      })
+      if (res.ok) {
+        // 改密成功后服务端已吊销全部会话(含当前): 回登录页用新密码重新登录。
+        location.replace('/login' + location.search)
+        return
+      }
+      var data = await res.json().catch(function () { return {} })
+      cerr.textContent = String(data.error && data.error.message ? data.error.message : '修改失败')
+    } catch (e5) {
+      cerr.textContent = '网络错误，请检查服务端地址后重试'
+    } finally {
+      cb.disabled = false
+      cb.textContent = '确认修改'
+    }
+  })
+<\/script>
+</body>
+</html>`
 
 // P1-11: transient page shown while the persisted session is still being
 // restored; it re-requests the index (which now resolves to the app or the
@@ -530,6 +608,10 @@ export function apply(ctx: Context, config: Config): void {
       // lightweight "loading" page that re-requests the index once ready —
       // never flash the login form over an existing valid session.
       if (!ctx.picoSession.isRestored()) return RESTORING_HTML
+      const restored = ctx.picoSession.getSession()
+      // 0057: 会话带强制改密标记(管理员重置密码) → 一律回强制改密页,
+      // 即使应用重启后仍在(业务 API 在改密完成前也被服务端 403)。
+      if (restored !== null && restored.mustChangePassword === true) return CHANGE_PASSWORD_HTML
       if (!ctx.picoSession.isLoggedIn()) return loginHTML
       return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
       }),
@@ -539,6 +621,15 @@ export function apply(ctx: Context, config: Config): void {
         handler: (_req: IncomingMessage, res: ServerResponse) => {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(loginHTML)
+        },
+      }),
+
+      // 0057 强制改密页(管理员重置密码后; 完成前业务 API 均被 403)。
+      ctx.webServer.register({
+        kind: 'exact', path: '/change-password',
+        handler: (_req: IncomingMessage, res: ServerResponse) => {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          res.end(CHANGE_PASSWORD_HTML)
         },
       }),
 
@@ -556,12 +647,42 @@ export function apply(ctx: Context, config: Config): void {
             return json(res, 400, { error: 'missing fields' })
           }
           try {
-            ctx.picoSession.setSession(await login(body.server, body.username, body.password))
-            json(res, 200, { ok: true })
+            const sess = await login(body.server, body.username, body.password)
+            ctx.picoSession.setSession(sess)
+            // 0057: 强制改密标记 → 登录页跳转强制改密页(而非直接进应用)。
+            json(res, 200, { ok: true, must_change_password: sess.mustChangePassword === true })
           } catch (err) {
             // AuthError carries a user-facing message (账号或密码错误 etc.).
             const status = err instanceof AuthError && err.kind === 'network' ? 502 : 401
             json(res, status, { error: err instanceof Error ? err.message : 'login failed' })
+          }
+        },
+      }),
+
+      ctx.webServer.register({
+        kind: 'exact', path: '/api/pico/auth/password',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
+          const raw = await collectBody(req, 64 * 1024).catch(() => null)
+          if (raw === null) return json(res, 413, { error: 'body too large' })
+          let body: { old_password?: unknown; new_password?: unknown }
+          try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+          if (typeof body.old_password !== 'string' || typeof body.new_password !== 'string') {
+            return json(res, 400, { error: 'missing fields' })
+          }
+          const s = session()
+          if (s === null) return json(res, 401, { error: 'not logged in' })
+          try {
+            await changePassword(s.serverURL, s.token, body.old_password, body.new_password)
+            // 服务端已吊销该用户全部令牌(含当前): 清除本地会话 → 客户端回登录页。
+            ctx.picoSession.clear()
+            json(res, 200, { ok: true })
+          } catch (err) {
+            const status = err instanceof AuthError
+              ? (err.kind === 'network' ? 502 : 401)
+              : (err instanceof ApiError ? 400 : 500)
+            json(res, status, { error: err instanceof Error ? err.message : 'change password failed' })
           }
         },
       }),
@@ -581,6 +702,10 @@ export function apply(ctx: Context, config: Config): void {
                 username: current.username,
                 serverURL: current.serverURL,
                 role: current.role ?? '',
+                // 0057: 账号来源与可改密标志(客户端设置-账号页据此渲染改密入口)。
+                source: current.source ?? '',
+                password_changeable: current.passwordChangeable === true,
+                must_change_password: current.mustChangePassword === true,
               })
         },
       }),

@@ -99,13 +99,61 @@ export async function login(serverURL: string, username: string, password: strin
       throw new AuthError('invalid_credentials')
     }
     if (!res.ok) throw new AuthError('server_error', `HTTP ${res.status}`)
-    const data = (await res.json()) as { token?: string; user?: { role?: string } }
+    const data = (await res.json()) as {
+      token?: string
+      user?: { role?: string; source?: string; password_changeable?: boolean }
+      must_change_password?: boolean
+    }
     if (!data.token) throw new AuthError('server_error', 'missing token in response')
     const sess: Session = { serverURL: server, username, token: data.token }
     if (data.user?.role) sess.role = data.user.role
+    // 0057: 来源/可改密标志(客户端判断改密入口); 强制改密标记驱动登录后拦截。
+    // exactOptionalPropertyTypes: 仅在值存在时赋值, 不写 undefined。
+    if (data.user?.source !== undefined) sess.source = data.user.source
+    if (data.user?.password_changeable !== undefined) sess.passwordChangeable = data.user.password_changeable
+    if (data.must_change_password === true) sess.mustChangePassword = true
     return sess
   } catch (e) {
     if (e instanceof AuthError) throw e
+    if (controller.signal.aborted) throw new AuthError('network', 'timeout')
+    throw new AuthError('network', e instanceof Error ? e.message : 'network error')
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 0057 员工自助改密(本地认证用户): 成功后服务端吊销该用户全部令牌(含当前),
+ * 调用方必须清除本地会话并让用户重新登录。
+ * 失败时抛出携带服务端中文消息的错误(原密码错误/外部用户/长度不足等)。
+ */
+export async function changePassword(
+  serverURL: string,
+  token: string,
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const server = normalizeServerURL(serverURL)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15000)
+  try {
+    assertServerURLAllowed(server)
+    const res = await gatewayFetch(`${server}/api/client/v2/auth/password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+      signal: controller.signal,
+    })
+    if (res.ok) return
+    const data = await res.json().catch(() => null) as { error?: { message?: string } } | null
+    const message = data?.error?.message ?? `HTTP ${res.status}`
+    if (res.status === 401 || res.status === 403) throw new AuthError('invalid_credentials', message)
+    throw new ApiError(`HTTP_${res.status}`, message)
+  } catch (e) {
+    if (e instanceof AuthError || e instanceof ApiError) throw e
     if (controller.signal.aborted) throw new AuthError('network', 'timeout')
     throw new AuthError('network', e instanceof Error ? e.message : 'network error')
   } finally {
