@@ -1003,8 +1003,13 @@ export function apply(ctx: Context, config: Config): void {
               if (cause instanceof ApiError) {
                 // Gateway envelope: surface its human-readable message with
                 // the code-appropriate status (NAME_TAKEN→409, PENDING_LIMIT→429).
-                const code = cause.code as string
-                const status = code === 'PENDING_LIMIT' ? 429 : code === 'NAME_TAKEN' ? 409 : 422
+                // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
+                // 版本冲突各有语义(404/403/409)。
+                const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
+                  : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
+                    : cause.code === 'APP_LOCKED' ? 403
+                      : cause.code === 'NOT_FOUND' ? 404
+                        : 422)
                 return json(res, status, { error: cause.message })
               }
               const message = cause instanceof Error ? cause.message : String(cause)
@@ -1189,8 +1194,13 @@ export function apply(ctx: Context, config: Config): void {
                 return json(res, 401, { error: 'auth expired' })
               }
               if (cause instanceof ApiError) {
-                const code = cause.code as string
-                const status = code === 'PENDING_LIMIT' ? 429 : code === 'NAME_TAKEN' ? 409 : 422
+                // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
+                // 版本冲突各有语义(404/403/409),客户端按状态码分别提示。
+                const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
+                  : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
+                    : cause.code === 'APP_LOCKED' ? 403
+                      : cause.code === 'NOT_FOUND' ? 404
+                        : 422)
                 return json(res, status, { error: cause.message })
               }
               const message = cause instanceof Error ? cause.message : String(cause)
@@ -1384,6 +1394,9 @@ export function apply(ctx: Context, config: Config): void {
                 displayName: (i as { display_name?: string; displayName?: string }).displayName
                   ?? (i as { display_name?: string }).display_name
                   ?? i.name,
+                // 2026-09-02 归属权:is_owner 由服务端按 apps.owner 计算,
+                // 客户端上传预检依赖它(「我的」与「他人」同名区分)。
+                isOwner: (i as { is_owner?: boolean }).is_owner ?? false,
                 installed,
                 installedVersion,
                 hasUpdate: false, // 客户端按 versions 与 installedVersion 计算
