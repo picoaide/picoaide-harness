@@ -1004,7 +1004,7 @@ export function apply(ctx: Context, config: Config): void {
                 // Gateway envelope: surface its human-readable message with
                 // the code-appropriate status (NAME_TAKEN→409, PENDING_LIMIT→429).
                 // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
-                // 版本冲突各有语义(404/403/409)。
+                // 版本冲突各有语义(409/403)。
                 const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
                   : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
                     : cause.code === 'APP_LOCKED' ? 403
@@ -1195,7 +1195,7 @@ export function apply(ctx: Context, config: Config): void {
               }
               if (cause instanceof ApiError) {
                 // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
-                // 版本冲突各有语义(404/403/409),客户端按状态码分别提示。
+                // 版本冲突各有语义(409/403),客户端按状态码分别提示。
                 const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
                   : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
                     : cause.code === 'APP_LOCKED' ? 403

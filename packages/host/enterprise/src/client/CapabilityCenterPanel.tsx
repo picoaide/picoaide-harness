@@ -597,7 +597,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const key = `${item.kind}:${item.name}`
     // 归属权预检(2026-09-02):同名同类型已在能力中心存在且非本人归属 →
     // 不发送请求,直接提示「名称已被占用」。服务端仍是权威(他人待审行不可见,
-    // 预检可能漏网,由 404「名称不可用」兜底;防泄露语义不变)。
+    // 预检可能漏网,由 409 NAME_TAKEN「名称已被占用」兜底)。
     const clash = items.find(i => i.kind === item.kind && i.name === item.name && i.source !== 'local')
     if (clash !== undefined && clash.isOwner !== true) {
       setAction({

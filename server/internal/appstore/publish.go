@@ -25,7 +25,6 @@ const (
 	CodeAppLocked            = "APP_LOCKED"
 	CodeNameTaken            = "NAME_TAKEN"
 	CodePendingLimit         = "PENDING_LIMIT"
-	CodeNotFound             = "NOT_FOUND"
 )
 
 // Error 是发布失败的结构化结果:HTTP 状态 + 稳定错误码 + 面向用户的中文说明。
@@ -137,11 +136,12 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 	}
 	// 归属保护(2026-09-02 收紧):他人的 App(任意状态,含空 owner 的历史
 	// 行——空 owner 一律视同占名,杜绝员工「接管」成新 owner)不允许被其他
-	// 非管理员接管发布。404 不泄露存在性(与「未授权不可见」同一原则),
-	// 文案保持中性,不暴露被占名者的任何信息。
+	// 非管理员接管发布。冲突语义 409 NAME_TAKEN + 明确「已被占用」提示
+	// (2026-09-02 用户拍板:明确告知占用关系——注意不泄露「是谁/什么内容」,
+	// 只告知该名称不可用;跨渠道同名互斥与归属保护同码同语义)。
 	if appErr == nil && !req.AdminPublish && existingApp.Owner != req.Publisher {
-		return nil, newErr(http.StatusNotFound, CodeNotFound,
-			"名称不可用:可能已被占用或不属于你")
+		return nil, newErr(http.StatusConflict, CodeNameTaken,
+			"名称已被占用，无法上传：请更换名称或联系管理员")
 	}
 
 	history, err := serverstore.ListReleases(db, req.Kind, req.AppID)

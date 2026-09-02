@@ -105,13 +105,14 @@ func TestPublishLockAndOwnership(t *testing.T) {
 	if _, err := Publish(db, req("alice-app", "1.0.0", "a1", "alice")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Publish(db, req("alice-app", "2.0.0", "b1", "bob")); code(t, err) != CodeNotFound {
+	if _, err := Publish(db, req("alice-app", "2.0.0", "b1", "bob")); code(t, err) != CodeNameTaken {
 		t.Fatalf("跨作者接管 = %v", err)
 	}
-	// 拒绝文案必须中性,不暴露被占名者的任何信息(2026-09-02 D1)。
+	// 明确告知占用(2026-09-02 用户拍板:409 冲突语义,不返回 404);
+	// 文案只说明「已被占用」,不暴露被占名者是谁。
 	_, err = Publish(db, req("alice-app", "2.0.0", "b1", "bob"))
 	errors.As(err, &e)
-	if e.Message != "名称不可用:可能已被占用或不属于你" {
+	if e.Message != "名称已被占用，无法上传：请更换名称或联系管理员" {
 		t.Fatalf("拒绝文案 = %q", e.Message)
 	}
 }
@@ -128,7 +129,7 @@ func TestPublishEmptyOwnerBlocked(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Publish(db, req("legacy-orphan", "1.0.0", "o1", "alice")); code(t, err) != CodeNotFound {
+	if _, err := Publish(db, req("legacy-orphan", "1.0.0", "o1", "alice")); code(t, err) != CodeNameTaken {
 		t.Fatalf("空 owner 未被拦截 = %v", err)
 	}
 	adminReq := req("legacy-orphan", "1.0.0", "o1", "admin")
@@ -155,7 +156,7 @@ func TestPublishOwnershipPersistsAfterReject(t *testing.T) {
 		serverstore.ReleaseStatusRejected, "不合规"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Publish(db, req("persist", "2.0.0", "p2", "bob")); code(t, err) != CodeNotFound {
+	if _, err := Publish(db, req("persist", "2.0.0", "p2", "bob")); code(t, err) != CodeNameTaken {
 		t.Fatalf("他人接管被拒行的名字 = %v", err)
 	}
 	if _, err := Publish(db, req("persist", "1.1.0", "p3", "alice")); err != nil {
@@ -178,7 +179,7 @@ func TestPublishAfterOwnerTransfer(t *testing.T) {
 	if _, err := Publish(db, req("transfer-me", "2.0.0", "t2", "bob")); err != nil {
 		t.Fatalf("新归属者续传: %v", err)
 	}
-	if _, err := Publish(db, req("transfer-me", "3.0.0", "t3", "alice")); code(t, err) != CodeNotFound {
+	if _, err := Publish(db, req("transfer-me", "3.0.0", "t3", "alice")); code(t, err) != CodeNameTaken {
 		t.Fatalf("旧归属者续传 = %v", err)
 	}
 	// 幂等:再次转移为同一归属不报错。
