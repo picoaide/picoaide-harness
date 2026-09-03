@@ -30,6 +30,7 @@ func agentJSON(a serverstore.App, r *serverstore.Release) gin.H {
 	out := gin.H{
 		"name": a.AppID, "title": a.Title, "description": a.Description,
 		"author": a.Owner, "enabled": a.Enabled == 1,
+		"official":   a.Official == 1,
 		"created_at": a.CreatedAt, "updated_at": a.UpdatedAt,
 	}
 	if r != nil {
