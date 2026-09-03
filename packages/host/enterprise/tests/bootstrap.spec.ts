@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { apply as applyBootstrap, maxOutputFromDefaultParams } from '../src/bootstrap.ts'
+import { apply as applyBootstrap, maxOutputFromDefaultParams, resolveInputModalities } from '../src/bootstrap.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
 
@@ -15,6 +15,14 @@ const SAMPLE_BOOTSTRAP = {
   skills: [],
   mcp: [],
   web: { default_thinking_level: 'high' },
+}
+
+const VISION_BOOTSTRAP = {
+  ...SAMPLE_BOOTSTRAP,
+  models: [
+    { id: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{"max_output": 8192}' },
+    { id: 'deepseek-v4-flash-vision-exp', display_name: '视觉', input_modalities: ['text', 'image'] },
+  ],
 }
 
 function stubCtx(): {
@@ -73,6 +81,30 @@ describe('bootstrap sync', () => {
     }
   })
 
+  it('maps the vision model input modalities onto the catalog (0058)', async () => {
+    const { ctx, settings, onHandler } = stubCtx()
+    const origFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(VISION_BOOTSTRAP), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    try {
+      applyBootstrap(ctx)
+      await onHandler(SAMPLE_SESSION)
+      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() })
+
+      expect(settings.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        models: [
+          { id: 'deepseek-chat', name: 'DeepSeek Chat', maxTokens: 8192 },
+          { id: 'deepseek-v4-flash-vision-exp', name: '视觉', inputModalities: ['text', 'image'] },
+        ],
+      }))
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+
   it('clears the search namespace on logout', async () => {
     const { ctx, settings, onHandler } = stubCtx()
     applyBootstrap(ctx)
@@ -92,5 +124,19 @@ describe('maxOutputFromDefaultParams', () => {
     expect(maxOutputFromDefaultParams('not-json')).toBeUndefined()
     expect(maxOutputFromDefaultParams('{"max_output": -1}')).toBeUndefined()
     expect(maxOutputFromDefaultParams(undefined as unknown as string)).toBeUndefined()
+  })
+})
+
+describe('resolveInputModalities', () => {
+  it('passes through text+image and deduplicates', () => {
+    expect(resolveInputModalities(['text', 'image'])).toEqual(['text', 'image'])
+    expect(resolveInputModalities(['image', 'text', 'text'])).toEqual(['image', 'text'])
+    expect(resolveInputModalities(['text'])).toEqual(['text'])
+  })
+  it('returns undefined for missing/invalid/empty values (schema defaults text-only)', () => {
+    expect(resolveInputModalities(undefined)).toBeUndefined()
+    expect(resolveInputModalities([])).toBeUndefined()
+    expect(resolveInputModalities(['audio'])).toBeUndefined()
+    expect(resolveInputModalities('text' as unknown as string[])).toBeUndefined()
   })
 })

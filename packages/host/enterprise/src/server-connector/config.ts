@@ -17,6 +17,8 @@ export interface BootstrapModel {
   display_name: string
   /** Server-configured provider defaults as JSON text (e.g. `{"max_output": N}`). */
   default_params?: string
+  /** 0058: 模型接受的输入模态('text'/'image');缺失 = 仅 text(客户端 schema 缺省)。 */
+  input_modalities?: string[]
 }
 
 export interface BootstrapConfig {
