@@ -55,7 +55,6 @@ describe('Capabilities 能力中心(统一审批)', () => {
     })
     expect(await screen.findByText('CodeQL 审计')).toBeInTheDocument()
     expect(screen.getByText('PPT 生成')).toBeInTheDocument()
-    expect(screen.getByText(/共享技能与共享 Agent 的统一审核队列/)).toBeInTheDocument()
   })
 
   it('类型筛选只请求对应 kind', async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import Marketplace from './Marketplace'
 import { request } from '../api'
 
@@ -37,6 +38,35 @@ describe('Marketplace 商城页', () => {
     const legacyCard = screen.getByText('legacy').closest('[class*="group"]')!
     expect(legacyCard.textContent).toContain('已下架')
     expect(screen.queryByText('MCP 插件')).not.toBeInTheDocument()
+  })
+
+  it('技能卡片显示归属人,并可通过「归属」按钮转移负责人', async () => {
+    const u = userEvent.setup()
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/departments') return { departments: DEPTS }
+      if (path === '/api/server/admin/skills') return { skills: SKILLS }
+      if (path === '/api/server/admin/apps/skill/data-extract/owner' && init?.method === 'PUT') return { ok: true }
+      return {}
+    })
+    render(<Marketplace />)
+    await screen.findByText('data-extract')
+    // 归属展示:author 字段 = apps.owner。
+    const extractCard = screen.getByText('data-extract').closest<HTMLElement>('[class*="group"]')! as HTMLElement
+    expect(extractCard.textContent).toContain('归属 seed')
+    // 转移归属:弹窗预填当前归属 → 输入新负责人 → PUT /apps/:kind/:name/owner。
+    fireEvent.click(within(extractCard).getByRole('button', { name: '归属' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(dialog.getByText('转移归属')).toBeInTheDocument()
+    const input = dialog.getByLabelText('新归属人用户名')
+    await u.clear(input)
+    await u.type(input, 'carol')
+    fireEvent.click(dialog.getByRole('button', { name: '确认转移' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/apps/skill/data-extract/owner',
+        expect.objectContaining({ method: 'PUT', body: JSON.stringify({ owner: 'carol' }) }),
+      )
+    })
   })
 
   it('技能授权对话框:展示已有组授权并可撤销', async () => {
