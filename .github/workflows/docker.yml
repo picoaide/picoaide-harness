@@ -139,7 +139,7 @@ jobs:
           context: server
           platforms: linux/amd64
           contexts: |
-            root=.
+            root=type=local,src=.
           build-args: VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
