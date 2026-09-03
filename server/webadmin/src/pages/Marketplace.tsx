@@ -8,10 +8,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
-import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
-import { Store, Download, Package, Activity } from 'lucide-react'
+import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
+import { Store, Download, Package, Activity, UserCog } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
@@ -78,6 +78,8 @@ export default function Marketplace() {
 
   // 授权
   const [grantDialog, setGrantDialog] = useState<{ kind: 'skill'; name: string; id: number } | null>(null)
+  // 归属转移(2026-09-02):技能归属人 = 首个成功占名者(apps.owner)。
+  const [transferSkill, setTransferSkill] = useState<Skill | null>(null)
   const [grants, setGrants] = useState<Grant[]>([])
   const [grantTarget, setGrantTarget] = useState('')
   const [grantGroups, setGrantGroups] = useState<string[]>([])
@@ -363,10 +365,6 @@ export default function Marketplace() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="商城管理"
-        desc="技能资源上架与授权分发:未授权用户不可见不可安装"
-      />
       {opError && <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{opError}</div>}
 
       <Card>
@@ -413,6 +411,9 @@ export default function Marketplace() {
                   <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
                     <Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span>
                   </div>
+                  <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者,只有归属人(及管理员)能更新该技能">
+                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {s.author || '未指定'}</span>
+                  </div>
                   <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
                     <span className="inline-flex items-center gap-1"><Download className="h-3 w-3" />下载 {s.downloads ?? 0}</span>
                     <span className="inline-flex items-center gap-1"><Activity className="h-3 w-3" />调用 {s.calls ?? 0}</span>
@@ -424,6 +425,7 @@ export default function Marketplace() {
                     </Button>
                     <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
                     <Button variant="outline" onClick={() => openReplace(s)}>上传新版</Button>
+                    <Button variant="outline" onClick={() => setTransferSkill(s)} title="转移归属(负责人)">归属</Button>
                     <Button variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
                     {s.enabled
                       ? <Button variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
@@ -497,6 +499,17 @@ export default function Marketplace() {
         mainContent={preview?.skill_md ?? ''}
         fileBase={previewName ? `${ADMIN_API}/skills/${encodeURIComponent(previewName)}` : ''}
         onClose={() => { setPreviewKey(''); setPreview(null) }}
+      />
+
+      {/* 归属转移(2026-09-02):公共弹窗,与服务端的 /apps/:kind/:app_id/owner 同源。 */}
+      <TransferOwnerDialog
+        open={transferSkill !== null}
+        kind="skill"
+        name={transferSkill?.name ?? ''}
+        displayName={transferSkill?.name}
+        currentOwner={transferSkill?.author ?? ''}
+        onClose={() => { setTransferSkill(null) }}
+        onSaved={() => { setTransferSkill(null); void loadSkills() }}
       />
 
       {/* 上传新版压缩包弹窗(0040) */}

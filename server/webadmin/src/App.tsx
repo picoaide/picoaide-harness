@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Share2, Bug, Plug, Menu, X, Palette, Lock, Eye } from 'lucide-react'
+import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Bug, Plug, Menu, X, Palette, Lock, Eye } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized, ADMIN_API, CLIENT_API } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -16,10 +16,10 @@ const Departments = lazy(() => import('./pages/Departments'))
 const Gateway = lazy(() => import('./pages/Gateway'))
 const Auth = lazy(() => import('./pages/Auth'))
 const ErrorMonitoring = lazy(() => import('./pages/ErrorMonitoring'))
-const Marketplace = lazy(() => import('./pages/Marketplace'))
 const Audit = lazy(() => import('./pages/Audit'))
 const ServerInfo = lazy(() => import('./pages/ServerInfo'))
-const Capabilities = lazy(() => import('./pages/Capabilities'))
+// 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
+const CapabilityCenter = lazy(() => import('./pages/CapabilityCenter'))
 const Connectors = lazy(() => import('./pages/Connectors'))
 const Brand = lazy(() => import('./pages/Brand'))
 
@@ -65,8 +65,8 @@ const nav: NavEntry[] = [
   { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
   { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },
   { to: '/usage', label: '用量中心', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
-  { to: '/marketplace', label: '市场 · 技能', icon: Store, section: '运维', perms: [PERM_MARKET_READ] },
-  { to: '/capabilities', label: '能力中心', icon: Share2, section: '运维', perms: [PERM_CAP_READ] },
+  // 2026-09-02:合并「市场 · 技能」与「能力中心」为单入口(客户端同构)。
+  { to: '/capabilities', label: '能力中心', icon: Store, section: '运维', perms: [PERM_MARKET_READ, PERM_CAP_READ] },
   { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
   { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
   // 审计分区(auditor + super_admin 只读)
@@ -388,8 +388,8 @@ export default function App() {
                     <Route path="quota" element={<UsageQuota />} />
                     <Route path="reports" element={<UsageReports />} />
                   </Route>
-                  <Route path="/marketplace" element={<Marketplace />} />
-                  <Route path="/capabilities" element={<Capabilities />} />
+                  <Route path="/marketplace" element={<Navigate to="/capabilities?tab=market" replace />} />
+                  <Route path="/capabilities" element={<CapabilityCenter />} />
                   <Route path="/connectors" element={<Connectors />} />
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />

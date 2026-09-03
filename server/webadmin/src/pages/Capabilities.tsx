@@ -4,7 +4,6 @@ import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
-import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
@@ -14,6 +13,7 @@ import { Input } from '../components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { GrantDialog } from '../components/grant-dialog'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
+import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
 
 /**
  * 能力中心·统一审批(决策 2026-08-25 Phase 3,2026-09 恢复):共享技能与
@@ -181,8 +181,6 @@ export default function Capabilities() {
   const [departments, setDepartments] = useState<Dept[]>([])
   // 归属转移(2026-09-02):管理员可修改技能/智能体负责人。
   const [transferRow, setTransferRow] = useState<ApprovalRow | null>(null)
-  const [transferOwner, setTransferOwner] = useState('')
-  const [transferBusy, setTransferBusy] = useState(false)
 
   useEffect(() => {
     request(`${ADMIN_API}/departments`)
@@ -284,28 +282,8 @@ export default function Capabilities() {
     }
   }
 
-  // 归属转移(2026-09-02):PUT /api/server/admin/apps/:kind/:app_id/owner。
-  // 只改 apps.owner(谁能续传),不触碰版本/授权/渠道;审计由服务端留痕。
-  const transfer = async (row: ApprovalRow) => {
-    const target = transferOwner.trim()
-    if (target === '' || transferRow === null) return
-    setTransferBusy(true)
-    setError('')
-    try {
-      await request(`${ADMIN_API}/apps/${row.kind}/${encodeURIComponent(row.name)}/owner`, {
-        method: 'PUT',
-        body: JSON.stringify({ owner: target }),
-      })
-      setTransferRow(null)
-      setTransferOwner('')
-      await load(tab, typeFilter)
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setTransferBusy(false)
-    }
-  }
-
+  // 归属转移(2026-09-02):行按钮只打开公共 TransferOwnerDialog,
+  // PUT /apps/:kind/:app_id/owner 与错误展示在弹窗组件内,审计由服务端留痕。
   const counts = {
     all: countRows.length,
     pending: countRows.filter(r => r.status === 'pending').length,
@@ -315,16 +293,6 @@ export default function Capabilities() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="能力中心"
-        desc="共享技能与共享 Agent 的统一审核队列;通过后需授权才可见可装"
-        actions={
-          <Button variant="outline" size="sm" onClick={() => { void load(tab, typeFilter) }}>
-            <RefreshCw className="h-4 w-4" /> 刷新
-          </Button>
-        }
-      />
-
       {/* 状态 tab + 类型筛选 */}
       <div className="flex items-center justify-between gap-2">
         <Tabs value={tab} onValueChange={setTab}>
@@ -341,6 +309,9 @@ export default function Capabilities() {
               {t === 'all' ? '全部类型' : KIND_META[t].label}
             </Button>
           ))}
+          <Button variant="outline" size="sm" className="ml-1" onClick={() => { void load(tab, typeFilter) }} title="刷新">
+            <RefreshCw className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 
@@ -433,7 +404,7 @@ export default function Capabilities() {
                           <Download className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="sm" disabled={isBusy}
-                          onClick={() => { setTransferRow(row); setTransferOwner(row.owner ?? '') }}
+                          onClick={() => { setTransferRow(row) }}
                           title="转移归属(负责人)">
                           <UserCog className="h-4 w-4" />
                         </Button>
@@ -520,32 +491,17 @@ export default function Capabilities() {
         onSaved={() => { void load(tab, typeFilter) }}
       />
 
-      {/* 归属转移(2026-09-02):管理员把维护权交给其他员工/管理员账号。 */}
-      <Dialog open={transferRow !== null} onOpenChange={(open) => { if (!open) { setTransferRow(null); setTransferOwner('') } }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>转移归属</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            {transferRow && `将「${transferRow.display_name || transferRow.name}」的维护权转移给新负责人:原负责人不能再上传新版本,新负责人获得续传权(版本须递增)。`}
-          </p>
-          <Input
-            value={transferOwner}
-            onChange={e => { setTransferOwner(e.target.value) }}
-            placeholder="新归属人用户名"
-            aria-label="新归属人用户名"
-          />
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => { setTransferRow(null); setTransferOwner('') }}>取消</Button>
-            <Button
-              disabled={transferBusy || transferOwner.trim() === ''}
-              onClick={() => { void transfer(transferRow!) }}
-            >
-              {transferBusy ? '处理中…' : '确认转移'}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* 归属转移(2026-09-02):管理员把维护权交给其他员工/管理员账号。
+          弹窗组件自包含(输入/错误/提交),与市场技能页共用同一实现。 */}
+      <TransferOwnerDialog
+        open={transferRow !== null}
+        kind={transferRow?.kind ?? 'skill'}
+        name={transferRow?.name ?? ''}
+        displayName={transferRow?.display_name}
+        currentOwner={transferRow?.owner ?? ''}
+        onClose={() => { setTransferRow(null) }}
+        onSaved={() => { void load(tab, typeFilter) }}
+      />
     </div>
   )
 }
