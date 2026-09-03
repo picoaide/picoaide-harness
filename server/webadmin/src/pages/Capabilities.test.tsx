@@ -29,9 +29,17 @@ const AGENT_ROWS = [
 
 const mockRequest = vi.mocked(request)
 
+// 归属转移弹窗(2026-09-04 起)从用户列表搜索选择,需 mock 用户列表端点。
+const USERS = [
+  { username: 'alice', display_name: 'Alice' },
+  { username: 'bob', display_name: 'Bob' },
+  { username: 'carol', display_name: 'Carol' },
+]
+
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/server/admin/users')) return { users: USERS, total: USERS.length }
     if (path === '/api/server/admin/capabilities/approvals?status=pending') return { approvals: [...SKILL_ROWS, ...AGENT_ROWS] }
     if (path === '/api/server/admin/capabilities/approvals?status=pending&type=skill') return { approvals: SKILL_ROWS }
     if (path === '/api/server/admin/capabilities/approvals?status=pending&type=agent') return { approvals: AGENT_ROWS }
@@ -142,16 +150,22 @@ describe('Capabilities 能力中心(统一审批)', () => {
     expect(screen.getAllByText('bob', { selector: 'td' }).length).toBeGreaterThan(0)
   })
 
-  it('转移归属:弹窗输入负责人 → PUT apps/:kind/:name/owner', async () => {
+  it('转移归属:从用户列表搜索选择负责人 → PUT apps/:kind/:name/owner', async () => {
     const u = userEvent.setup()
     render(<Capabilities />)
     await screen.findByText('CodeQL 审计')
     fireEvent.click((await screen.findAllByTitle('转移归属(负责人)'))[0]!)
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('转移归属')
-    const input = screen.getByLabelText('新归属人用户名')
-    await u.clear(input)
+    // 打开候选列表 → 输入搜索(防抖后服务端 q= 搜索)
+    fireEvent.click(screen.getByRole('combobox'))
+    const input = await screen.findByLabelText('新归属人用户名')
     await u.type(input, 'carol')
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/users?page=1&size=200&q=carol')
+    })
+    // 从候选点选 carol(不允许自由输入;选中后确认按钮才可用)
+    fireEvent.click(await screen.findByText('carol'))
     fireEvent.click(screen.getByRole('button', { name: '确认转移' }))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith(
@@ -161,14 +175,21 @@ describe('Capabilities 能力中心(统一审批)', () => {
     })
   })
 
-  it('转移归属:空负责人时确认按钮禁用', async () => {
+  it('转移归属:未选择时确认按钮禁用,当前归属人不可选', async () => {
     render(<Capabilities />)
     await screen.findByText('CodeQL 审计')
     fireEvent.click((await screen.findAllByTitle('转移归属(负责人)'))[0]!)
     await screen.findByRole('dialog')
-    // 弹窗预填当前归属人 alice;清空后确认按钮禁用。
-    const input = screen.getByLabelText('新归属人用户名')
-    fireEvent.change(input, { target: { value: '' } })
+    // 未选择新负责人 → 确认禁用(不预填,杜绝直接回车提交错误用户名)。
     expect(screen.getByRole('button', { name: '确认转移' })).toBeDisabled()
+    // 当前归属人在候选列表中标记且不可选。
+    fireEvent.click(screen.getByRole('combobox'))
+    expect(await screen.findByText('当前归属')).toBeInTheDocument()
+    const currentItems = screen
+      .getAllByText('alice')
+      .map((el) => el.closest('[cmdk-item]'))
+      .filter((el) => el !== null)
+    expect(currentItems.length).toBeGreaterThan(0)
+    expect(currentItems[0]?.getAttribute('data-disabled')).toBe('true')
   })
 })

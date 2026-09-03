@@ -43,6 +43,9 @@ describe('Marketplace 商城页', () => {
   it('技能卡片显示归属人,并可通过「归属」按钮转移负责人', async () => {
     const u = userEvent.setup()
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users')) {
+        return { users: [{ username: 'alice', display_name: 'Alice' }, { username: 'carol', display_name: 'Carol' }], total: 2 }
+      }
       if (path === '/api/server/admin/departments') return { departments: DEPTS }
       if (path === '/api/server/admin/skills') return { skills: SKILLS }
       if (path === '/api/server/admin/apps/skill/data-extract/owner' && init?.method === 'PUT') return { ok: true }
@@ -53,13 +56,17 @@ describe('Marketplace 商城页', () => {
     // 归属展示:author 字段 = apps.owner。
     const extractCard = screen.getByText('data-extract').closest<HTMLElement>('[class*="group"]')! as HTMLElement
     expect(extractCard.textContent).toContain('归属 seed')
-    // 转移归属:弹窗预填当前归属 → 输入新负责人 → PUT /apps/:kind/:name/owner。
+    // 转移归属:弹窗从用户列表搜索选择 → PUT /apps/:kind/:name/owner。
     fireEvent.click(within(extractCard).getByRole('button', { name: '归属' }))
     const dialog = within(await screen.findByRole('dialog'))
     expect(dialog.getByText('转移归属')).toBeInTheDocument()
-    const input = dialog.getByLabelText('新归属人用户名')
-    await u.clear(input)
+    fireEvent.click(dialog.getByRole('combobox'))
+    const input = await screen.findByLabelText('新归属人用户名')
     await u.type(input, 'carol')
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/users?page=1&size=200&q=carol')
+    })
+    fireEvent.click(await screen.findByText('carol'))
     fireEvent.click(dialog.getByRole('button', { name: '确认转移' }))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith(
