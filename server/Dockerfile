@@ -14,6 +14,11 @@
 # --- Stage 1: webadmin(go:embed dist 需要预构建产物) ---
 FROM node:24-alpine AS webadmin
 WORKDIR /build
+# 品牌权威源: webadmin 编译期 ?url 引用 ../../../../brands/official/logo.svg
+# (上跳 4 级 = 容器根 /),故注入到 /brands。来源=buildx 命名上下文 root(仓库根),
+# 本地单命令构建示例:
+#   docker buildx build --build-context root=.. -f Dockerfile -t ghcr.io/picoaide/picoaide-harness-server:dev .
+COPY --from=root /brands /brands
 COPY webadmin/package.json webadmin/package-lock.json ./
 RUN npm ci
 COPY webadmin/ ./
