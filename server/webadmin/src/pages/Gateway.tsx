@@ -649,7 +649,7 @@ export default function Gateway() {
                 <TableHead>显示名</TableHead>
                 <TableHead>上游</TableHead>
                 <TableHead>能力</TableHead>
-                <TableHead>价格(元/百万 token)</TableHead>
+                <TableHead>计费(元/百万 token)</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -691,7 +691,7 @@ export default function Gateway() {
                       )}
                     </TableCell>
                     <TableCell className="text-right space-x-2">
-                      <Button size="sm" variant="outline" onClick={() => openModelPricing(m)}>价格</Button>
+                      <Button size="sm" variant="outline" title="编辑显示名/上游/参数/模态/价格" onClick={() => openModelPricing(m)}>配置</Button>
                       <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => deleteModel(m)}>{busy === `del-model-${m.id}` ? '删除中…' : '删除'}</Button>
                     </TableCell>
                   </TableRow>

@@ -164,10 +164,10 @@ describe('Gateway 网关配置页', () => {
     expect(await screen.findByText('暂无上游,点击「添加上游」开始接入')).toBeInTheDocument()
   })
 
-  it('模型价格编辑:打开对话框提交价格 PUT', async () => {
+  it('模型配置编辑:打开对话框提交显示名+价格', async () => {
     render(<Gateway />)
     await screen.findByText('全局设置')
-    fireEvent.click(screen.getAllByRole('button', { name: '价格' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: '配置' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('输入价格(元/百万 token)'), { target: { value: '3' } })
     fireEvent.change(dialog.getByLabelText('输出价格(元/百万 token)'), { target: { value: '10' } })
@@ -181,10 +181,10 @@ describe('Gateway 网关配置页', () => {
     )
   })
 
-  it('模型价格编辑:提交含低谷折扣率', async () => {
+  it('模型配置编辑:提交含低谷折扣率', async () => {
     render(<Gateway />)
     await screen.findByText('全局设置')
-    fireEvent.click(screen.getAllByRole('button', { name: '价格' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: '配置' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('输入价格(元/百万 token)'), { target: { value: '2' } })
     fireEvent.change(dialog.getByLabelText('输出价格(元/百万 token)'), { target: { value: '8' } })
@@ -213,7 +213,7 @@ describe('Gateway 网关配置页', () => {
     render(<Gateway />)
     // 列表徽章
     expect(await screen.findByText('图片')).toBeInTheDocument()
-    fireEvent.click(screen.getAllByRole('button', { name: '价格' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: '配置' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     // 预填「文字 + 图片」按模型现有配置;保存即提交 text+image
     expect(dialog.getByText('文字 + 图片')).toBeInTheDocument()
