@@ -13,6 +13,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
 </p>
 
+<p align="center">
+  <a href="assets/community-qr.png"><img src="assets/community-qr.png" alt="PicoAide Harness 官方交流群二维码" width="220"></a><br>
+  <strong>扫码加入 PicoAide Harness 官方交流群</strong>
+</p>
+
 PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件系统与企业级管理能力装进一个平台：
 
 - **桌面客户端**：原生窗口、系统托盘、终端、自动更新，无需安装 Node.js 或执行命令；

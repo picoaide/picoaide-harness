@@ -13,6 +13,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License"></a>
 </p>
 
+<p align="center">
+  <a href="assets/community-qr.png"><img src="assets/community-qr.png" alt="Scan the QR code to join the official PicoAide Harness community" width="220"></a><br>
+  <strong>Scan the QR code to join the official PicoAide Harness community</strong>
+</p>
+
 PicoAide Harness packages DeepSeek Harness local agents, the Host service, its plugin system, and enterprise-grade administration into one platform:
 
 - **Desktop client**: native windows, system tray, terminal, automatic updates, no Node.js or command-line setup required;
