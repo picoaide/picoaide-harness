@@ -9,12 +9,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { PageHeader } from '../components/page-header'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { RefreshCcw, Trash2, Upload } from 'lucide-react'
+import { BRAND_LOGO_URL } from '../lib/brand-assets'
 
 // 品牌配置页(v3b): 登录页品牌 / 客户端品牌 / 门户首页 3 Tab + 实时预览。
 // 生效以「保存」为准; 快照恢复内置(brand_snapshots 服务端自动保存)。
-// 本页所有 logo 兜底图形必须与根目录 logo.svg 一致(黑色圆角方块 + 白色
-// 花括号桥形, 花括号 1.25x 放大); 禁止字母 P 或其他编造图形(旧版 P 字
-// logo 已退役)。
+// 本页所有 logo 兜底图形由 ../lib/brand-assets 编译期注入 brands/official/logo.svg
+// (黑色圆角方块 + 白色花括号桥形, 花括号 1.25x 放大); 禁止字母 P 或其他
+// 编造图形(旧版 P 字 logo 已退役)。
 
 interface BrandCfg {
   enabled: boolean
@@ -288,27 +289,16 @@ export default function Brand() {
 // 迷你预览(与真实页面同构: 登录页卡片 / 客户端 hero / 门户首页)
 // ---------------------------------------------------------------------------
 
-const BRACE_TILE = (
-  <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
-    <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-      <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-      <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
-      <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-      <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-    </g>
-  </svg>
-)
+// 品牌 logo 兜底: 编译期从 brands/official/logo.svg 注入(见 ../lib/brand-assets),
+// 与客户端/门户/托盘同源 — 禁止手写 SVG 几何(旧版 P 字 logo 已退役;
+// 手写几何曾缩小 mark, 与权威 logo 全出血比例不一致)。
+const BRACE_TILE = <img src={BRAND_LOGO_URL} alt="brand logo" className="h-full w-full object-contain" draggable={false} />
 
 function BrandTile({ logoUrl, size, alt }: { logoUrl?: string; size: number; alt: string }) {
   if (logoUrl) {
     return <img src={logoUrl} alt={alt} className="mx-auto mb-3 object-contain" style={{ width: size, height: size, borderRadius: Math.max(4, size * 0.143) }} />
   }
-  return (
-    <div className="mx-auto mb-3 flex items-center justify-center bg-slate-900" style={{ width: size, height: size, borderRadius: Math.max(4, size * 0.143) }}>
-      {BRACE_TILE}
-    </div>
-  )
+  return <div className="mx-auto mb-3 overflow-hidden" style={{ width: size, height: size }}>{BRACE_TILE}</div>
 }
 
 /** 登录页迷你预览: 居中卡片(logo+名称+副标题+两个按钮)。 */
@@ -343,17 +333,7 @@ function ClientPreview(props: { brand: BrandCfg }) {
           <div className="flex items-center gap-1.5">
             {brand.client.logo_url
               ? <img src={brand.client.logo_url} alt="logo" className="h-5 w-5 rounded-md object-contain" />
-              : <div className="flex h-5 w-5 items-center justify-center rounded-md bg-slate-900">
-                  <svg viewBox="0 0 1254 1254" className="h-3 w-3" fill="none" aria-hidden="true">
-                    <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-                      <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                      <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                      <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
-                      <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-                      <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-                    </g>
-                  </svg>
-                </div>}
+              : <div className="h-5 w-5 overflow-hidden">{BRACE_TILE}</div>}
             <span className="truncate text-[11px] font-bold">{name}</span>
           </div>
           <div className="mt-3 h-1.5 w-full rounded bg-slate-200" />
@@ -365,12 +345,7 @@ function ClientPreview(props: { brand: BrandCfg }) {
           <div className="flex items-center justify-center gap-2">
             {brand.client.logo_url
               ? <img src={brand.client.logo_url} alt="logo" className="h-6 w-6 rounded-md object-contain" />
-              : <div className="flex h-6 w-6 items-center justify-center rounded-md bg-slate-900">
-                  <svg viewBox="0 0 1254 1254" className="h-3.5 w-3.5" fill="none" aria-hidden="true">
-                    <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-                    <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-                  </svg>
-                </div>}
+              : <div className="h-6 w-6 overflow-hidden">{BRACE_TILE}</div>}
             <span className="text-[14px] font-semibold">{name}</span>
             <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-muted-foreground">{tagline}</span>
           </div>

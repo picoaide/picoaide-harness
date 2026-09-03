@@ -5,6 +5,7 @@ import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { User, Lock, Loader2, KeyRound, ShieldCheck } from 'lucide-react'
 import { CLIENT_API } from '../api'
+import { BRAND_LOGO_URL } from '../lib/brand-assets'
 
 // 管理后台登录页 — v3b: 仅本地账号密码。
 // SSO(OIDC/OpenID)与 LDAP 一律不进管理后台: 后台是本地账户唯一入口,
@@ -73,20 +74,12 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
   }
 
+  // 兜底图形: 编译期从 brands/official/logo.svg 注入(见 ../lib/brand-assets),
+  // 与客户端/门户同源; 禁止手写 SVG 几何或字母 P 等编造图形(旧版已退役)。
   const logo = brand?.logo_url ? (
     <img src={brand.logo_url} alt="logo" className="mx-auto mb-4 h-14 w-14 rounded-lg object-contain" />
   ) : (
-    <div className="brand-tile mx-auto mb-4 h-14 w-14">
-      <svg viewBox="0 0 1254 1254" className="h-8 w-8" fill="none" aria-hidden="true">
-        <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-          <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-          <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
-          <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-          <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-        </g>
-      </svg>
-    </div>
+    <img src={BRAND_LOGO_URL} alt="logo" className="mx-auto mb-4 h-14 w-14 object-contain" draggable={false} />
   )
 
   return (

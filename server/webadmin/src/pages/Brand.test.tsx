@@ -52,6 +52,9 @@ describe('Brand 品牌配置页', () => {
     expect(screen.getByText('Enterprise AI Gateway')).toBeInTheDocument()
     // 登录页 Tab 占位提示默认值。
     expect(screen.getByPlaceholderText('留空=「PicoAide」')).toBeInTheDocument()
+    // 预览兜底 logo 由编译期注入 brands/official/logo.svg(非手写几何)。
+    const previewLogo = screen.getByAltText('brand logo')
+    expect(previewLogo.getAttribute('src') || '').toMatch(/^data:image\/svg\+xml|logo\.svg/)
     // 切到客户端品牌 Tab: 展示名称/副标题占位默认值(展示名称与页面标题后缀同默认)。
     await user.click(screen.getByRole('tab', { name: '客户端品牌' }))
     expect(screen.getAllByPlaceholderText('留空=「PicoAide Harness」').length).toBeGreaterThan(0)
