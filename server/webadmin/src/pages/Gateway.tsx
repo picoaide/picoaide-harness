@@ -36,6 +36,8 @@ interface Model {
   name: string
   display_name: string
   default_params: string
+  // 0058:模型接受的输入模态('text'/'image');客户端据此渲染图片支持
+  input_modalities?: string[]
   input_price_per_1m?: number | null // 0022:元/百万 token,nil = 未定价
   output_price_per_1m?: number | null
   cache_input_price_per_1m?: number | null // 0029:缓存命中输入价(元/百万 token),nil = 未配置
@@ -136,7 +138,7 @@ export default function Gateway() {
   const [modelErr, setModelErr] = useState('')
   const [priceErr, setPriceErr] = useState('')
   const [modelDialog, setModelDialog] = useState(false)
-  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
+  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_modalities: 'text', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
   // 上游编辑(审计修复 M3):复用创建字段 + enabled 开关
   const [editProv, setEditProv] = useState<Provider | null>(null)
   const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true, protocol: '' })
@@ -315,6 +317,8 @@ export default function Gateway() {
         name: modelForm.name,
         provider_id: Number(modelForm.provider_id),
         display_name: modelForm.display_name,
+        // 0058:输入模态(仅文本 / 文本+图片)。模型不上传图片时无需勾选图片。
+        input_modalities: modelForm.input_modalities === 'image' ? ['text', 'image'] : ['text'],
       }
       // 价格留空 = 未定价(NULL);输入 0 = 定价 0(等价未定价);正数 = 元/百万 token
       if (modelForm.input_price_per_1m.trim() !== '') body.input_price_per_1m = Number(modelForm.input_price_per_1m)
@@ -328,7 +332,7 @@ export default function Gateway() {
         body: JSON.stringify(body),
       })
       setModelDialog(false)
-      setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
+      setModelForm({ name: '', provider_id: '', display_name: '', input_modalities: 'text', input_price_per_1m: '', output_price_per_1m: '', cache_input_price_per_1m: '', offpeak_discount: '' })
       setError('')
       load()
     } catch (err: any) {
@@ -372,9 +376,10 @@ export default function Gateway() {
     }
   }
 
-  // 模型编辑:价格补录/修改(0022 金额计费前提 + 0023 峰谷折扣);其余字段留空不覆盖
+  // 模型编辑:价格补录/修改(0022 金额计费前提 + 0023 峰谷折扣)与输入模态(0058);
+  // 其余字段留空不覆盖
   const [editModel, setEditModel] = useState<Model | null>(null)
-  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '', cache: '', offpeak: '' })
+  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '', cache: '', offpeak: '', modalities: 'text' })
   function openModelPricing(m: Model) {
     setEditModel(m)
     setEditPriceForm({
@@ -382,6 +387,7 @@ export default function Gateway() {
       output: m.output_price_per_1m === null || m.output_price_per_1m === undefined ? '' : String(m.output_price_per_1m),
       cache: m.cache_input_price_per_1m === null || m.cache_input_price_per_1m === undefined ? '' : String(m.cache_input_price_per_1m),
       offpeak: m.offpeak_discount === null || m.offpeak_discount === undefined ? '' : String(m.offpeak_discount),
+      modalities: m.input_modalities?.includes('image') ? 'image' : 'text',
     })
   }
   async function saveModelPricing() {
@@ -402,6 +408,8 @@ export default function Gateway() {
       if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
       if (editPriceForm.cache.trim() !== '') body.cache_input_price_per_1m = Number(editPriceForm.cache)
       if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
+      // 输入模态:仅两项选择,显式随保存提交(服务端校验后写入)
+      body.input_modalities = editPriceForm.modalities === 'image' ? ['text', 'image'] : ['text']
       await request(`${ADMIN_API}/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
       setError('')
@@ -592,7 +600,12 @@ export default function Gateway() {
                 const offpeak = m.offpeak_discount !== null && m.offpeak_discount !== undefined && m.offpeak_discount > 0 && m.offpeak_discount < 1
                 return (
                   <TableRow key={m.id}>
-                    <TableCell className="font-mono">{m.name}</TableCell>
+                    <TableCell className="font-mono">
+                      {m.name}
+                      {m.input_modalities?.includes('image') && (
+                        <Badge variant="secondary" className="ml-1 text-[10px]">图片</Badge>
+                      )}
+                    </TableCell>
                     <TableCell>{m.display_name}</TableCell>
                     <TableCell>
                       <span className="text-xs">{m.provider_name || '—'}</span>
@@ -967,6 +980,16 @@ export default function Gateway() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="space-y-1">
+              <Label>输入模态(0058:客户端据此允许图片上传)</Label>
+              <Select value={modelForm.input_modalities} onValueChange={(v) => setModelForm({ ...modelForm, input_modalities: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="text">仅文字</SelectItem>
+                  <SelectItem value="image">文字 + 图片</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label htmlFor="model-price-in">输入价格(元/百万 token)</Label>
@@ -1085,6 +1108,16 @@ export default function Gateway() {
                 value={editPriceForm.offpeak}
                 onChange={(e) => setEditPriceForm({ ...editPriceForm, offpeak: e.target.value })}
               />
+            </div>
+            <div className="space-y-1">
+              <Label>输入模态(0058:客户端据此允许图片上传)</Label>
+              <Select value={editPriceForm.modalities} onValueChange={(v) => setEditPriceForm({ ...editPriceForm, modalities: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="text">仅文字</SelectItem>
+                  <SelectItem value="image">文字 + 图片</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <p className="text-xs text-muted-foreground">
               修改价格/折扣只影响之后产生的用量费用(历史费用按记录时定价留存)。

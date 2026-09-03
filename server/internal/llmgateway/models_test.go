@@ -60,10 +60,40 @@ func TestModelsList(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	// {"models":[{"id":"gpt-4o","display_name":"GPT-4o","default_params":"{}"}]} — disabled provider excluded
-	want := `{"models":[{"id":"gpt-4o","display_name":"GPT-4o","default_params":"{}"}]}`
+	// {"models":[{"id":"gpt-4o","display_name":"GPT-4o","default_params":"{}","input_modalities":["text"]}]} — disabled provider excluded
+	want := `{"models":[{"id":"gpt-4o","display_name":"GPT-4o","default_params":"{}","input_modalities":["text"]}]}`
 	if w.Body.String() != want {
 		t.Fatalf("body = %s", w.Body.String())
+	}
+}
+
+func TestModelsListInputModalities(t *testing.T) {
+	// 0058:模型输入模态随清单下发(文本+图片视觉模型)。
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled)
+		VALUES ('openai', 'http://a', 'k', '["vision-model"]', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, input_modalities) VALUES
+		('vision-model', 1, 'Vision', '["text","image"]')`); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "bob", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterRoutes(r, db)
+	w := getModels(t, r, token)
+	want := `{"models":[{"id":"vision-model","display_name":"Vision","default_params":"{}","input_modalities":["text","image"]}]}`
+	if w.Code != http.StatusOK || w.Body.String() != want {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

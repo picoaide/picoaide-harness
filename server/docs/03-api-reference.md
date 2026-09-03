@@ -72,8 +72,8 @@
 | DELETE | `/api/server/admin/providers/:id` | 删除上游 |
 | POST | `/api/server/admin/providers/:id/sync` `providers/sync-all` | 模型同步 |
 | GET | `/api/server/admin/models` | 模型列表 |
-| POST | `/api/server/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?, cache_input_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;0029 缓存命中输入价) |
-| PUT | `/api/server/admin/models/:id` | 更新模型(价格/折扣留空不覆盖;修改只影响之后产生的费用) |
+| POST | `/api/server/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_modalities?(['text'/'image' 数组,0058,缺省仅 text]), input_price_per_1m?, output_price_per_1m?, cache_input_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;0029 缓存命中输入价) |
+| PUT | `/api/server/admin/models/:id` | 更新模型(价格/折扣留空不覆盖;修改只影响之后产生的费用)。`input_modalities`(0058)显式数组 = 设置、缺省 = 不覆盖;name 改名受保护(有用量记录/渠道同步模型拒绝);`offpeak_discount` 0<d≤1 |
 | DELETE | `/api/server/admin/models/:id` | 删除模型 |
 | GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level, glitchtip_base_url/organization}` |
 | PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`、`usage.monthly_quota_money`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`) |
@@ -204,12 +204,14 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 ```json
 {
   "default_model": "deepseek-chat",
-  "models": [{ "id": "deepseek-chat", "display_name": "DeepSeek Chat" }],
+  "models": [{ "id": "deepseek-chat", "display_name": "DeepSeek Chat", "input_modalities": ["text"] }],
   "skills": [{ "name": "invoice-helper", "version": "1.0.0", "description": "..." }],
   "web": { "default_thinking_level": "max" },
   "connectors": [{ "id": "example-org", "name": "示例企业 HR 智能体", "auth_mode": "oauth", "definition": { ... } }]
 }
 ```
+
+`models[].input_modalities`(0058)为模型接受的输入模态数组(`text`/`image`),客户端据此允许/拒绝图片上传;缺省/非法值客户端回落仅 `text`。`/v1/models` 同字段。
 
 客户端 `BootstrapConfig` 与之严格对齐;`default_model` 不在启用模型时自动回退到第一个可用模型。`connectors`(0042 起)为服务端连接器目录,客户端按目录渲染连接器中心(glitchtip 0045 已下架,不下发)。
 

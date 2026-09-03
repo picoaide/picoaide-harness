@@ -541,6 +541,87 @@ func TestAdminModelOffpeakDiscount(t *testing.T) {
 	}
 }
 
+// TestAdminModelInputModalities: 模型输入模态增改、缺省、校验与审计(0058)。
+func TestAdminModelInputModalities(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create provider failed")
+	}
+	// 未传 input_modalities:缺省仅 text
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/models",
+		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天"}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create model failed")
+	}
+	m, err := serverstore.GetModel(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.InputModalities) != 1 || m.InputModalities[0] != "text" {
+		t.Fatalf("default input_modalities = %v, want [text]", m.InputModalities)
+	}
+	// 视觉模型:文本+图片
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/models",
+		`{"name":"deepseek-vision","provider_id":1,"display_name":"视觉","input_modalities":["text","image"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create vision model failed")
+	}
+	vm, err := serverstore.GetModel(db, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vm.InputModalities) != 2 || vm.InputModalities[0] != "text" || vm.InputModalities[1] != "image" {
+		t.Fatalf("vision input_modalities = %v, want [text image]", vm.InputModalities)
+	}
+	// 更新:未传保持现值;显式数组覆盖并按「未传不覆盖」语义
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/2",
+		`{"input_modalities":["text"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("update modalities failed")
+	}
+	vm, _ = serverstore.GetModel(db, 2)
+	if len(vm.InputModalities) != 1 || vm.InputModalities[0] != "text" {
+		t.Fatalf("modalities after update = %v, want [text]", vm.InputModalities)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/2",
+		`{"display_name":"视觉2"}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("partial update failed")
+	}
+	vm, _ = serverstore.GetModel(db, 2)
+	if len(vm.InputModalities) != 1 || vm.InputModalities[0] != "text" {
+		t.Fatalf("partial update changed modalities = %v", vm.InputModalities)
+	}
+	// 非法值拒绝:空数组/未知模态/重复
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/2", `{"input_modalities":[]}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("empty modalities accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/2", `{"input_modalities":["audio"]}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown modality accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/2", `{"input_modalities":["text","text"]}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate modality accepted: %d", w.Code)
+	}
+	// 修改留痕(model_update 含 modalities 字段级明细)
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/models/2",
+		`{"input_modalities":["text","image"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("re-enable image failed")
+	}
+	rows, err := db.Query(`SELECT detail FROM audit_logs WHERE action='model_update' ORDER BY id DESC LIMIT 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var detail string
+	if rows.Next() {
+		if err := rows.Scan(&detail); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.Contains(detail, "modalities:text→text+image") {
+		t.Fatalf("audit detail = %q, want modalities diff", detail)
+	}
+}
+
 // TestAdminGatewayPeakWindows: 高峰时段配置读写 + 非法值拒绝。
 func TestAdminGatewayPeakWindows(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)

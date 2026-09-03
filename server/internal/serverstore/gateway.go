@@ -28,6 +28,9 @@ type Model struct {
 	ProviderID    int64  `json:"provider_id"`
 	DisplayName   string `json:"display_name"`
 	DefaultParams string `json:"default_params"`
+	// InputModalities 模型接受的输入模态(0058):'text'/'image'(客户端据此
+	// 渲染图片支持; 空/非法 = 仅 text)。存储为 JSON 数组文本。
+	InputModalities []string `json:"input_modalities"`
 	// InputPricePer1M / OutputPricePer1M 元/百万 token(0022);nil/0 = 未定价,
 	// 费用按 0 计,页面标注「未定价」。embedding 复用 input 价。
 	InputPricePer1M  *float64 `json:"input_price_per_1m"`
@@ -350,14 +353,50 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 	return len(doomed), nil
 }
 
+// validInputModality 校验单个模态值。
+func validInputModality(m string) bool { return m == "text" || m == "image" }
+
+// NormalizeInputModalities 归一化输入模态:非法/空值过滤,去重,空结果回落
+// 仅 text(与数据库默认/客户端 schema 缺省一致)。
+func NormalizeInputModalities(raw []string) []string {
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, m := range raw {
+		if !validInputModality(m) || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return []string{"text"}
+	}
+	return out
+}
+
+// ParseInputModalities 解析 models.input_modalities 列(JSON 文本数组;
+// 空/非法 = 仅 text)。
+func ParseInputModalities(raw string) []string {
+	if raw == "" {
+		return []string{"text"}
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return []string{"text"}
+	}
+	return NormalizeInputModalities(out)
+}
+
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
 	var in, out, cache, off sql.NullFloat64
 	var pEnabled int
-	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams,
+	var modalities string
+	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams, &modalities,
 		&in, &out, &cache, &off, &m.ProviderName, &m.ProviderChannel, &pEnabled); err != nil {
 		return nil, err
 	}
+	m.InputModalities = ParseInputModalities(modalities)
 	m.ProviderEnabled = pEnabled == 1
 	if in.Valid {
 		m.InputPricePer1M = &in.Float64
@@ -377,7 +416,8 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 // GetModel loads a model by id.
 func GetModel(db *sql.DB, id int64) (*Model, error) {
 	row := db.QueryRow(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
-		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
+		COALESCE(m.default_params, '{}'), COALESCE(m.input_modalities, '["text"]'),
+		m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
 		p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`, id)
 	m, err := scanModel(row)
@@ -464,8 +504,12 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {
 		m.DefaultParams = "{}"
 	}
-	id, err := InsertID(db, `INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
+	if m.InputModalities == nil {
+		m.InputModalities = []string{"text"}
+	}
+	modalitiesJSON, _ := json.Marshal(m.InputModalities)
+	id, err := InsertID(db, `INSERT INTO models (name, provider_id, display_name, default_params, input_modalities, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams, string(modalitiesJSON),
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -481,8 +525,9 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 
 // UpdateModel updates a model row.
 func UpdateModel(db *sql.DB, m *Model) error {
-	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_price_per_1m=?, output_price_per_1m=?, cache_input_price_per_1m=?, offpeak_discount=?
-		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
+	modalitiesJSON, _ := json.Marshal(NormalizeInputModalities(m.InputModalities))
+	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_modalities=?, input_price_per_1m=?, output_price_per_1m=?, cache_input_price_per_1m=?, offpeak_discount=?
+		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams, string(modalitiesJSON),
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -565,7 +610,8 @@ func clearDefaultModelIf(tx *sql.Tx, name string) error {
 // 客户端可见性由 ListModels 的 WHERE p.enabled = 1 单独控制。
 func ListAdminModels(db *sql.DB) ([]Model, error) {
 	rows, err := db.Query(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
-		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
+		COALESCE(m.default_params, '{}'), COALESCE(m.input_modalities, '["text"]'),
+		m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
 		p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
 		ORDER BY m.id`)

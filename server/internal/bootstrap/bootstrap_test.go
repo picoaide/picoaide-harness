@@ -81,6 +81,12 @@ func TestBootstrap(t *testing.T) {
 	if len(models) != 1 {
 		t.Fatalf("models = %v", models)
 	}
+	// 0058:输入模态随清单下发(缺省仅 text;视觉模型为 text+image)
+	m0 := models[0].(map[string]any)
+	mods, ok := m0["input_modalities"].([]any)
+	if !ok || len(mods) != 1 || mods[0] != "text" {
+		t.Fatalf("model input_modalities = %v, want [text]", m0["input_modalities"])
+	}
 	skills := out["skills"].([]any)
 	if len(skills) != 1 {
 		t.Fatalf("skills = %v (disabled must be excluded)", skills)
@@ -92,6 +98,39 @@ func TestBootstrap(t *testing.T) {
 	// no token → 401
 	if w, _ := getJSON(t, r, "/api/client/v2/config/bootstrap", ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no token status = %d", w.Code)
+	}
+}
+
+func TestBootstrapInputModalitiesImage(t *testing.T) {
+	// 0058:视觉模型(文本+图片)的 input_modalities 随 bootstrap 下发。
+	r, db := setup(t)
+	pid, err := serverstore.AddGatewayProvider(db, &serverstore.GatewayProvider{
+		Name: "deepseek-vision", BaseURL: "https://api.deepseek.com", Enabled: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.AddModel(db, &serverstore.Model{
+		Name: "vision-exp", ProviderID: pid, DisplayName: "Vision",
+		InputModalities: []string{"text", "image"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	token, _ := serverauth.IssueToken(db, u.ID)
+	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
+	models := out["models"].([]any)
+	if len(models) != 2 {
+		t.Fatalf("models = %v", models)
+	}
+	var got []any
+	for _, m := range models {
+		if m.(map[string]any)["id"] == "vision-exp" {
+			got = m.(map[string]any)["input_modalities"].([]any)
+		}
+	}
+	if len(got) != 2 || got[0] != "text" || got[1] != "image" {
+		t.Fatalf("vision input_modalities = %v, want [text image]", got)
 	}
 }
 
