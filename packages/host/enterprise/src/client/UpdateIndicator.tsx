@@ -6,7 +6,7 @@ const UPDATE_ROUTE = '/api/pico/desktop/update'
 const UPDATE_CHECK_ROUTE = '/api/pico/desktop/update/check'
 
 /** 侧边栏轮询间隔(30s)。 */
-export const SIDEBAR_UPDATE_POLL_MS = 30_000
+const SIDEBAR_UPDATE_POLL_MS = 30_000
 
 interface UpdateState {
   readonly availableVersion: string | undefined
@@ -19,7 +19,7 @@ interface UpdateState {
 }
 
 /** 拉取宿主更新快照(与设置「关于」页共用;2026-09-01 审计消除重复轮询)。 */
-export async function fetchUpdateState(): Promise<UpdateState | null> {
+async function fetchUpdateState(): Promise<UpdateState | null> {
   try {
     const res = await fetch(UPDATE_ROUTE, { method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store' })
     if (!res.ok) return null

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { loadElectronModule } from './electron.ts'
 
@@ -30,10 +30,6 @@ function writeStore(storePath: string, fingerprints: Record<string, string>): vo
   writeFileSync(storePath, JSON.stringify({ fingerprints }, null, 2), { mode: 0o600 })
 }
 
-export function loadFingerprints(storePath: string): Record<string, string> {
-  return readStore(storePath)
-}
-
 export function saveFingerprint(storePath: string, serverHost: string, fingerprint: string): void {
   const map = readStore(storePath)
   map[serverHost] = fingerprint
@@ -44,10 +40,6 @@ export function checkFingerprint(storePath: string, serverHost: string, fingerpr
   const known = readStore(storePath)[serverHost]
   if (known === undefined) return 'unknown'
   return known === fingerprint ? 'trusted' : 'mismatch'
-}
-
-export function clearFingerprints(storePath: string): void {
-  rmSync(storePath, { force: true })
 }
 
 export interface InstallCertOptions {

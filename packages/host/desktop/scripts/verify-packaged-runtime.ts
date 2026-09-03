@@ -95,7 +95,7 @@ export type ArchiveLister = (archivePath: string, options: { isPack: boolean }) 
 export type FileProbe = (filename: string) => boolean
 
 /** Inputs understood by the bundled diagnostics Worker. */
-export interface PackagedDiagnosticWorkerData {
+interface PackagedDiagnosticWorkerData {
   readonly logsDir: string
   readonly userDataDir: string
   readonly appVersion: string

@@ -27,11 +27,6 @@ import (
 // not flood the review queue; resubmitting a rejected name is always allowed.
 const pendingCap = 10
 
-// maxDescriptionLen bounds a preset's display description (both backends
-// store it in an unbounded TEXT column; the bound protects every surface
-// that renders it).
-const maxDescriptionLen = 500
-
 // maxReasonLen bounds the admin's rejection reason shown to the author.
 const maxReasonLen = 500
 

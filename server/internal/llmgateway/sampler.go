@@ -1,7 +1,6 @@
 package llmgateway
 
 import (
-	"database/sql"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -34,10 +33,4 @@ func (a *API) startConcurrencySampler(stop <-chan struct{}) {
 			}
 		}
 	}()
-}
-
-// concurrencyPeaksForAdmin 读取近 N 天按模型并发峰值(供 server-info)。
-func concurrencyPeaksForAdmin(db *sql.DB, days int) ([]serverstore.ModelConcurrencyPeak, error) {
-	since := time.Now().AddDate(0, 0, -days)
-	return serverstore.ModelConcurrencyPeaks(db, since)
 }

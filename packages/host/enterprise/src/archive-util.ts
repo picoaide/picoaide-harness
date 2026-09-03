@@ -17,15 +17,15 @@ import * as tar from 'tar'
 export const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 
 /** Upper bound on the unpacked tree (bytes). */
-export const MAX_UNPACKED_BYTES = 64 * 1024 * 1024
+const MAX_UNPACKED_BYTES = 64 * 1024 * 1024
 
 /** Upper bound on archive entries — 与 Go 侧 server/internal/archiveutil 的
  *  MaxEntries(10000) 对齐(2026-09-01 审计:此前仅 Go 侧有该上限,大量
  *  极小的条目在 TS 侧放行、Go 侧拒绝)。 */
-export const MAX_ENTRIES = 10_000
+const MAX_ENTRIES = 10_000
 
 /** Tar entry types we refuse: symbolic links and hard links. */
-export const LINK_TYPES = new Set(['SymbolicLink', 'Link'])
+const LINK_TYPES = new Set(['SymbolicLink', 'Link'])
 
 /** Unix S_IFLNK extracted from a zip entry's packed attribute. */
 const ZIP_MODE_TYPE = 0o170000
@@ -78,7 +78,7 @@ function assertSafeZipEntry(entry: AdmZip.IZipEntry): string {
  * @param rawPath - the entry path as stored in the tar header.
  * @returns the normalized relative path ('' for the pack root).
  */
-export function assertSafeEntryPath(rawPath: string): string {
+function assertSafeEntryPath(rawPath: string): string {
   // 绝对路径必须在 normalize 前检查(同 zip 分支):posixNormalize 丢弃前导
   // `/`/`\`(空段),normalize 后 startsWith('/') 恒 false(死代码,2026-09-01)。
   if (rawPath.startsWith('/') || rawPath.startsWith('\\') || /^[A-Za-z]:[\\/]/u.test(rawPath)) {

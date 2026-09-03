@@ -368,15 +368,6 @@ func IncrementReleaseDownload(db *sql.DB, kind, appID, version string) error {
 	return err
 }
 
-// IncrementReleaseCalls 调用计数(客户端遥测上报)。必须指定版本:一个 App
-// 可有多个 approved 版本,不带 version 会把该 App 全部 approved 版本的
-// calls 一起 +1,每个版本计数虚增 N 倍(2026-09-01 审计 B6)。
-func IncrementReleaseCalls(db *sql.DB, kind, appID, version string, delta int64) error {
-	_, err := db.Exec(`UPDATE app_releases SET calls = calls + ?
-		WHERE kind = ? AND app_id = ? AND version = ? AND status = 'approved'`, delta, kind, appID, version)
-	return err
-}
-
 // PendingReleaseCount 某发布者的待审数量(配额)。
 func PendingReleaseCount(db *sql.DB, publisher string) (int, error) {
 	var n int

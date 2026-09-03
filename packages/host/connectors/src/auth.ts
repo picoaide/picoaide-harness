@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig, TokenField } from './types.ts'
+import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
 
 /**
@@ -28,17 +28,9 @@ export interface AuthRunOptions {
  * Device-flow probes: connectors whose poll is provider-specific (e.g. the
  * sales-easy clawId poll) register a probe under their connector id; the
  * framework surfaces the authorize URL through onRequest and awaits the probe.
+ * (2026-09 清理:无任何连接器注册 probe——CLI 连接器已移除,device 默认
+ * 无状态探测,注册表为空,扩展点随注册 API 一并删除。)
  */
-export type DeviceProbe = (
-  def: ConnectorDef,
-  options: AuthRunOptions,
-) => Promise<Partial<ConnectorCredential>>
-
-const deviceProbes = new Map<string, DeviceProbe>()
-
-export function registerDeviceProbe(connectorId: string, probe: DeviceProbe): void {
-  deviceProbes.set(connectorId, probe)
-}
 
 const DEFAULT_POLL_INTERVAL_MS = 1500
 const DEFAULT_POLL_TIMEOUT_MS = 300_000
@@ -346,8 +338,6 @@ export async function refreshOAuthToken(
 
 /** Device-code flow: surface verification URL + user code, poll until connected. */
 async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
-  const probe = deviceProbes.get(def.id)
-  if (probe) return probe(def, options)
   const auth = def.auth as DeviceAuthConfig
   options.onRequest({
     connectorId: def.id,
@@ -356,7 +346,7 @@ async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Pa
   return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, options.signal)
 }
 
-export interface AuthProbe {
+interface AuthProbe {
   /** Optional: obtain the user code to display. */
   issueUserCode?: () => Promise<string>
   /** Resolve true once the user finished authorizing. */
@@ -418,5 +408,3 @@ export async function runAuth(def: ConnectorDef, options: AuthRunOptions): Promi
       return runServerSide(def, options)
   }
 }
-
-export type { TokenField }

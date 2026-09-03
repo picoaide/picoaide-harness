@@ -771,19 +771,6 @@ func safeName(name, version string) string {
 	return fmt.Sprintf("%s-%s.tar.gz", name, version)
 }
 
-// newestVersion returns the highest semver among existing rows ("" when none).
-// 版本递增判定的基准:被拒/待审版本同样计入,否则「拒了就能降版本重发」会
-// 让同一版本号在不同时间指向不同内容。
-func newestVersion(history []serverstore.SharedSkillVersionInfo) string {
-	newest := ""
-	for _, h := range history {
-		if newest == "" || skillmanifest.CompareVersions(h.Version, newest) > 0 {
-			newest = h.Version
-		}
-	}
-	return newest
-}
-
 // UploadAuditDetail 组装上传类审计明细:审计页要能直接看清「谁上传了什么」
 // ——名称@版本 + 展示名 + 校验和前 8 位(可与归档比对)。前缀固定为
 // `name@version`,便于审计页据此解析出预览入口;市场域复用同一格式。

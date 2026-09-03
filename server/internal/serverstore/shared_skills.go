@@ -15,15 +15,6 @@ func qmarks(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
-// toStringArgs converts a string slice to []any (IN clause args).
-func toStringArgs(names []string) []any {
-	out := make([]any, len(names))
-	for i, n := range names {
-		out[i] = n
-	}
-	return out
-}
-
 // SharedSkillStatus is the review state of one shared skill row.
 type SharedSkillStatus string
 
@@ -62,42 +53,6 @@ type SharedSkill struct {
 	UpdatedAt time.Time
 }
 
-func scanSharedSkill(row interface{ Scan(...any) error }) (*SharedSkill, error) {
-	var s SharedSkill
-	var createdAt, updatedAt any
-	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description,
-		&s.Author, &s.Checksum, &s.Status, &s.Reason, &s.Quality,
-		&s.Archive, &s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
-		return nil, err
-	}
-	s.CreatedAt = parseSQLTime(createdAt)
-	s.UpdatedAt = parseSQLTime(updatedAt)
-	return &s, nil
-}
-
-const sharedSkillColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, archive, downloads, calls, created_at, updated_at"
-
-// sharedSkillListColumns excludes the archive blob: list views (admin table,
-// employee catalog) must not load every upload into memory.
-const sharedSkillListColumns = "id, name, display_name, version, description, author, checksum, status, reason, quality, downloads, calls, created_at, updated_at"
-
-func scanSharedSkillList(row interface{ Scan(...any) error }) (*SharedSkill, error) {
-	var s SharedSkill
-	var createdAt, updatedAt any
-	if err := row.Scan(&s.ID, &s.Name, &s.DisplayName, &s.Version, &s.Description,
-		&s.Author, &s.Checksum, &s.Status, &s.Reason, &s.Quality,
-		&s.Downloads, &s.Calls, &createdAt, &updatedAt); err != nil {
-		return nil, err
-	}
-	s.CreatedAt = parseSQLTime(createdAt)
-	s.UpdatedAt = parseSQLTime(updatedAt)
-	return &s, nil
-}
-
-// SharedSkillNameExists reports whether the shared_skills table has a row
-// with the given name (any status). Used by the marketplace admin's
-// create-skill conflict check (决策 2026-08-25:市场与组织合并为「市场」后,
-// 同名技能跨源互斥——admin 上架市场技能前须确认共享库无同名)。
 // ---------------------------------------------------------------------------
 // P2 适配层(迁移 0053/0054):以下函数保留原有签名与语义,内部改为读写统一的
 // apps/app_releases。旧表 shared_skills 在兼容期内只读保留,P5 再下线。
@@ -140,25 +95,6 @@ func orgSkillReleases(db *sql.DB, status string) ([]Release, error) {
 	return out, nil
 }
 
-// SharedSkillVersionInfo 是同名技能已有版本的摘要,供发布期做版本语义判定。
-type SharedSkillVersionInfo struct {
-	Version  string
-	Checksum string
-	Status   SharedSkillStatus
-	Author   string
-}
-
-// SharedSkillNameExists reports whether any release exists under that name.
-func SharedSkillNameExists(db *sql.DB, name string) (bool, error) {
-	if _, err := GetApp(db, AppKindSkill, name); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
 // GetSharedSkill 取一个版本(含归档)。
 func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
 	r, err := GetRelease(db, AppKindSkill, name, version)
@@ -170,23 +106,6 @@ func GetSharedSkill(db *sql.DB, name, version string) (*SharedSkill, error) {
 	}
 	out := releaseToShared(*r)
 	return &out, nil
-}
-
-// ListSharedSkillVersions 返回同名技能的全部版本摘要(含被拒/软删:版本号
-// 一经使用即永久占位)。
-func ListSharedSkillVersions(db *sql.DB, name string) ([]SharedSkillVersionInfo, error) {
-	list, err := ListReleases(db, AppKindSkill, name)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SharedSkillVersionInfo, 0, len(list))
-	for _, r := range list {
-		out = append(out, SharedSkillVersionInfo{
-			Version: r.Version, Checksum: r.Checksum,
-			Status: SharedSkillStatus(r.Status), Author: r.Publisher,
-		})
-	}
-	return out, nil
 }
 
 // ListSharedSkills 管理端清单(status 为空 = 全部)。
@@ -253,11 +172,6 @@ func DeleteSharedSkillArchive(db *sql.DB, name, version string) error {
 	_, err := db.Exec(`UPDATE app_releases SET archive = NULL, size = 0, updated_at = `+NowExpr()+`
 		WHERE kind = ? AND app_id = ? AND version = ?`, AppKindSkill, name, version)
 	return err
-}
-
-// SharedSkillPendingCount 某作者的待审数量。
-func SharedSkillPendingCount(db *sql.DB, author string) (int, error) {
-	return PendingReleaseCount(db, author)
 }
 
 // ValidSharedQuality 质量标记合法值。

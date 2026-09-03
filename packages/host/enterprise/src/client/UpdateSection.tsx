@@ -26,7 +26,7 @@ const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 
 
 /** 设置-账号区: 当前版本 + 检查更新/下载进度/失败提示。
  *  复用 UpdateIndicator 的 useUpdateState(5s 轮询),消除同一路口两份订阅。 */
-export function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
+function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
   const state = useUpdateState(POLL_MS)
   const [checking, setChecking] = useState(false)
 

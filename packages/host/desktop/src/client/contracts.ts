@@ -1,5 +1,5 @@
 /** Sidebar geometry passed by the desktop root slot. */
-export interface DesktopSidebarOwnerProps {
+interface DesktopSidebarOwnerProps {
   /** Whether the sidebar is showing its compact rail. */
   collapsed: boolean
   /** Current rendered sidebar width. */
@@ -7,7 +7,7 @@ export interface DesktopSidebarOwnerProps {
 }
 
 /** Public panel transitions consumed by conversation and sidebar plugins. */
-export interface DesktopLayoutService {
+interface DesktopLayoutService {
   /** Toggle the sidebar between wide and compact presentation. */
   toggleSidebar(): void
   /** Open the current session's details panel. */

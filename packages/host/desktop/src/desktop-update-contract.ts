@@ -23,7 +23,7 @@ export interface DesktopUpdateStateResponse {
 }
 
 /** Byte-level download progress served to the renderer badge. */
-export interface UpdateDownloadProgressState {
+interface UpdateDownloadProgressState {
   /** Bytes received so far. */
   readonly receivedBytes: number
   /** Total expected bytes (content-length), or undefined when unknown. */

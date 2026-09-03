@@ -53,11 +53,6 @@ func CaseInsensitiveCmp(col string) string {
 	return fmt.Sprintf("LOWER(%s) = LOWER(?)", col)
 }
 
-// InsertIgnorePrefix returns the statement prefix for insert-or-ignore.
-func InsertIgnorePrefix() string {
-	return "INSERT INTO"
-}
-
 // InsertID executes an INSERT and returns the auto-generated row id.
 // PG: pgx stdlib does not implement LastInsertId, so we append RETURNING id
 // and QueryRow-scan it.

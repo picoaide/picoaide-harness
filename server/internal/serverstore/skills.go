@@ -33,13 +33,6 @@ type Skill struct {
 	UpdatedAt time.Time
 }
 
-// skillColumns includes the archive blob; used by single-row reads
-// (GetSkill) where the archive may be needed. List queries must use
-// skillListColumns (no blob) so the catalog never loads every archive.
-const skillColumns = "id, name, display_name, version, description, author, checksum, enabled, archive, downloads, calls, created_at, updated_at"
-
-const skillListColumns = "id, name, display_name, version, description, author, checksum, enabled, downloads, calls, created_at, updated_at"
-
 // ---------------------------------------------------------------------------
 // P2 适配层(迁移 0053/0054):市场技能保留原有签名,内部读写统一的
 // apps/app_releases(channel=market)。市场因此获得**多版本快照**能力——
@@ -289,11 +282,4 @@ func SetSkillDisplayName(db *sql.DB, name, displayName string) error {
 		return ErrNotFound
 	}
 	return nil
-}
-
-func anyBytes(b []byte) any {
-	if b == nil {
-		return nil
-	}
-	return b
 }

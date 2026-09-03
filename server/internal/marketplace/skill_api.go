@@ -5,9 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"io"
 	"net/http"
-	"os"
 
 	"github.com/gin-gonic/gin"
 
@@ -210,19 +208,6 @@ func (a *API) downloadArchive(c *gin.Context) {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func skillJSON(s serverstore.Skill) gin.H {

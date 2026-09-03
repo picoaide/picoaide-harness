@@ -172,9 +172,6 @@ async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: st
   }
 }
 
-/** Re-exported from archive-util for backward compat. */
-export { assertArchiveSafe } from './archive-util.ts'
-
 /** Result of a successful install. */
 export interface PresetInstallResult {
   /** The preset id installed. */

@@ -717,61 +717,6 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	return false, ""
 }
 
-// deptBudgetBlocked reports whether any department budget on the user's
-// inheritance chain (归属部门 + 祖先链) has been exhausted. A department
-// budget caps the whole subtree's monthly cost, so every member of the tree
-// is blocked once it is exceeded. Admins are exempt.
-// 审计修复 2026-P (M1): fail-closed——预算查询失败拒绝请求(不免费放行)。
-func (a *API) deptBudgetBlocked(user *serverstore.User) (bool, string) {
-	if user.IsAdmin {
-		return false, ""
-	}
-	budgets, err := serverstore.EffectiveDeptBudget(a.DB, user.ID)
-	if err != nil {
-		log.Printf("gateway: dept budget lookup error (fail-closed): %v", err)
-		return true, "部门预算校验暂不可用,请稍后再试"
-	}
-	if len(budgets) == 0 {
-		return false, ""
-	}
-	for _, b := range budgets {
-		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
-		if err != nil {
-			log.Printf("gateway: dept cost lookup error (fail-closed): %v", err)
-			return true, "部门预算校验暂不可用,请稍后再试"
-		}
-		// 金额比较带容差(审计修复 2026-P M3):float64 舍入误差不误拦临界点
-		if used >= b.Budget-moneyEpsilon {
-			return true, "部门「" + b.Name + "」本月费用预算已用尽"
-		}
-	}
-	return false, ""
-}
-
-// moneyQuotaBlocked reports whether the user has exhausted their
-// calendar-month money quota (yuan, 0022).
-// 审计修复 2026-P (M1): fail-closed——金额配额查询失败拒绝请求。
-func (a *API) moneyQuotaBlocked(user *serverstore.User) (bool, string) {
-	quota, err := serverstore.EffectiveMoneyQuota(a.DB, user)
-	if err != nil {
-		log.Printf("gateway: money quota lookup error (fail-closed): %v", err)
-		return true, "金额配额校验暂不可用,请稍后再试"
-	}
-	if quota <= 0 {
-		return false, ""
-	}
-	used, err := serverstore.UserMonthlyCost(a.DB, user.ID)
-	if err != nil {
-		log.Printf("gateway: money usage lookup error (fail-closed): %v", err)
-		return true, "金额配额校验暂不可用,请稍后再试"
-	}
-	// 金额比较带容差(审计修复 2026-P M3)
-	if used >= quota-moneyEpsilon {
-		return true, "本月费用配额已用尽"
-	}
-	return false, ""
-}
-
 // rateLimiter is a per-user token bucket with bounded map and lazy cleanup.
 type rateLimiter struct {
 	mu      sync.Mutex

@@ -65,24 +65,6 @@ func doJSON2(t *testing.T, r http.Handler, method, path string, body any, cookie
 	return w.Code, out
 }
 
-func lastAuditActions(t *testing.T, db *sql.DB) []string {
-	t.Helper()
-	rows, err := db.Query(`SELECT action FROM audit_logs ORDER BY id DESC LIMIT 30`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, a)
-	}
-	return out
-}
-
 func lastAudit(t *testing.T, db *sql.DB, action string) (string, bool) {
 	t.Helper()
 	var detail string
