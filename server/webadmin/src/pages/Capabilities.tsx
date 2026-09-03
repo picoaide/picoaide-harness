@@ -5,12 +5,11 @@ import { Badge } from '../components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { EmptyState } from '../components/empty-state'
+import { PageHeader } from '../components/page-header'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
-import { Download, FileText, Lock, RefreshCw, Share2, ShieldCheck, Sparkles, TriangleAlert, UserCog } from 'lucide-react'
-import { Input } from '../components/ui/input'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
+import { Download, FileText, RefreshCw, Share2, ShieldCheck, Sparkles, TriangleAlert, UserCog } from 'lucide-react'
 import { GrantDialog } from '../components/grant-dialog'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
@@ -34,7 +33,7 @@ interface ApprovalRow {
   owner?: string
   status: 'pending' | 'approved' | 'rejected'
   reason: string
-  quality: '' | 'official' | 'featured'
+  quality: '' | 'featured'
   downloads: number
   calls?: number
   created_at: string
@@ -69,96 +68,11 @@ function fmtTime(iso: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
-interface LockRow { kind: 'skill' | 'agent'; name: string; reason: string; locked_by: string }
-
 /**
  * 锁定管理(决策 2026-09-01 D4):被锁定的技能/智能体只能由管理员发布,
  * 员工在客户端上传时会收到 403 与此处填写的理由。支持对**尚不存在**的
  * 名字预先锁定(占名),防止员工抢占官方命名。
  */
-function LockPanel() {
-  const [locks, setLocks] = useState<LockRow[]>([])
-  const [err, setErr] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [kind, setKind] = useState<'skill' | 'agent'>('skill')
-  const [name, setName] = useState('')
-  const [reason, setReason] = useState('')
-
-  const load = useCallback(async () => {
-    try {
-      const data = await request<{ locks: LockRow[] }>(`${ADMIN_API}/capability-locks`)
-      setLocks(data.locks ?? [])
-      setErr('')
-    } catch (e) { setErr((e as Error).message) }
-  }, [])
-  useEffect(() => { void load() }, [load])
-
-  const add = async () => {
-    if (!name.trim()) return
-    setBusy(true)
-    try {
-      await request(`${ADMIN_API}/capability-locks/${kind}/${encodeURIComponent(name.trim())}`,
-        { method: 'PUT', body: JSON.stringify({ reason: reason.trim() }) })
-      setName(''); setReason(''); await load()
-    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
-  }
-  const remove = async (l: LockRow) => {
-    if (!window.confirm(`解除「${l.name}」的锁定?解除后员工可再次上传该名称。`)) return
-    setBusy(true)
-    try {
-      await request(`${ADMIN_API}/capability-locks/${l.kind}/${encodeURIComponent(l.name)}`, { method: 'DELETE' })
-      await load()
-    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base"><Lock className="h-4 w-4" /> 锁定管理</CardTitle>
-        <CardDescription>
-          锁定的名称只能由管理员发布,员工上传会被拒绝并看到下方理由;可对尚不存在的名称预先锁定以保护官方命名
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {err !== '' && <div className="text-sm text-destructive">{err}</div>}
-        <div className="flex flex-wrap items-end gap-2">
-          <Select value={kind} onValueChange={(v) => { setKind(v as 'skill' | 'agent') }}>
-            <SelectTrigger className="w-28" aria-label="锁定类型"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="skill">技能</SelectItem>
-              <SelectItem value="agent">智能体</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input className="w-56" placeholder="名称(小写 kebab-case)" value={name} onChange={(e) => { setName(e.target.value) }} />
-          <Input className="w-72" placeholder="锁定理由(员工可见)" value={reason} onChange={(e) => { setReason(e.target.value) }} />
-          <Button size="sm" disabled={busy || !name.trim()} onClick={() => { void add() }}>锁定</Button>
-        </div>
-        {locks.length === 0
-          ? <p className="text-sm text-muted-foreground">暂无锁定名称</p>
-          : (
-            <Table>
-              <TableHeader>
-                <TableRow><TableHead>类型</TableHead><TableHead>名称</TableHead><TableHead>理由</TableHead><TableHead>操作人</TableHead><TableHead /></TableRow>
-              </TableHeader>
-              <TableBody>
-                {locks.map((l) => (
-                  <TableRow key={`${l.kind}:${l.name}`}>
-                    <TableCell><Badge variant="outline">{l.kind === 'agent' ? '智能体' : '技能'}</Badge></TableCell>
-                    <TableCell className="font-mono text-xs">{l.name}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{l.reason || '—'}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{l.locked_by || '—'}</TableCell>
-                    <TableCell className="text-right">
-                      <Button size="sm" variant="ghost" disabled={busy} onClick={() => { void remove(l) }}>解除</Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-      </CardContent>
-    </Card>
-  )
-}
 
 export default function Capabilities() {
   const [allRows, setAllRows] = useState<ApprovalRow[]>([])
@@ -254,7 +168,7 @@ export default function Capabilities() {
     }
   }
 
-  const setQuality = async (row: ApprovalRow, quality: '' | 'official' | 'featured') => {
+  const setQuality = async (row: ApprovalRow, quality: '' | 'featured') => {
     if (row.status !== 'approved') return
     setBusy(row.name + row.version + 'quality')
     setError('')
@@ -293,6 +207,10 @@ export default function Capabilities() {
 
   return (
     <div className="space-y-4">
+      <PageHeader
+        title="审批"
+        desc="员工上传的技能/智能体统一审批队列:通过→授权可见;官方归属与锁定管理在对应市场页"
+      />
       {/* 状态 tab + 类型筛选 */}
       <div className="flex items-center justify-between gap-2">
         <Tabs value={tab} onValueChange={setTab}>
@@ -373,7 +291,7 @@ export default function Capabilities() {
                       {row.status === 'approved' ? (
                         <Select
                           value={row.quality || 'none'}
-                          onValueChange={(v) => { void setQuality(row, v === 'none' ? '' : v as '' | 'official' | 'featured') }}
+                          onValueChange={(v) => { void setQuality(row, v === 'none' ? '' : 'featured') }}
                           disabled={isBusy}
                         >
                           <SelectTrigger className="h-7 w-24 text-xs">
@@ -381,7 +299,6 @@ export default function Capabilities() {
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="none">无</SelectItem>
-                            <SelectItem value="official">官方</SelectItem>
                             <SelectItem value="featured">精选</SelectItem>
                           </SelectContent>
                         </Select>
@@ -430,7 +347,6 @@ export default function Capabilities() {
         </div>
       )}
 
-      <LockPanel />
 
       {/* 内容预览(文件清单可点击查看任意文件内容;主文件按 kind:SKILL.md / agent.cordis.yml) */}
       <ArchivePreviewDialog

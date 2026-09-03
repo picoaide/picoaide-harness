@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../api'
 import { Button } from './ui/button'
+import { Label } from './ui/label'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import {
@@ -40,6 +41,7 @@ export function TransferOwnerDialog({
   onSaved: () => void
 }) {
   const [owner, setOwner] = useState('')
+  const [toOfficial, setToOfficial] = useState(false)
   const [query, setQuery] = useState('')
   const [users, setUsers] = useState<UserOption[]>([])
   const [loading, setLoading] = useState(false)
@@ -72,6 +74,7 @@ export function TransferOwnerDialog({
     setLastOpen(open)
     if (open) {
       setOwner('')
+      setToOfficial(false)
       setQuery('')
       setError('')
       setBusy(false)
@@ -91,13 +94,13 @@ export function TransferOwnerDialog({
   }, [])
 
   const transfer = async () => {
-    if (owner === '' || owner === currentOwner || busy) return
+    if ((!toOfficial && (owner === '' || owner === currentOwner)) || busy) return
     setBusy(true)
     setError('')
     try {
       await request(`${ADMIN_API}/apps/${kind}/${encodeURIComponent(name)}/owner`, {
         method: 'PUT',
-        body: JSON.stringify({ owner }),
+        body: JSON.stringify(toOfficial ? { official: true } : { owner }),
       })
       onSaved()
       onClose()
@@ -117,6 +120,31 @@ export function TransferOwnerDialog({
         <p className="text-sm text-muted-foreground">
           将「{displayName || name}」的维护权转移给新负责人:原负责人不能再上传新版本,新负责人获得续传权(版本须递增)。
         </p>
+        <div className="flex items-center gap-2 rounded-md border p-3">
+          <input
+            type="radio"
+            id="transfer-target-user"
+            name="transfer-target"
+            className="h-4 w-4 accent-[#4176E6]"
+            checked={!toOfficial}
+            onChange={() => { setToOfficial(false) }}
+          />
+          <Label htmlFor="transfer-target-user" className="flex-1 cursor-pointer text-sm">
+            转给用户(从下方列表搜索选择)
+          </Label>
+          <input
+            type="radio"
+            id="transfer-target-official"
+            name="transfer-target"
+            className="h-4 w-4 accent-[#4176E6]"
+            checked={toOfficial}
+            onChange={() => { setToOfficial(true) }}
+          />
+          <Label htmlFor="transfer-target-official" className="cursor-pointer text-sm font-medium text-[#1E40AF]">
+            归属官方(蓝标,仅管理员可上传新版)
+          </Label>
+        </div>
+        {!toOfficial && (
         <Popover open={listOpen} onOpenChange={setListOpen}>
           <PopoverTrigger asChild>
             <Button type="button" variant="outline" role="combobox" className="w-full justify-between font-normal">
@@ -167,9 +195,21 @@ export function TransferOwnerDialog({
             </Command>
           </PopoverContent>
         </Popover>
+        )}
+        {toOfficial && (
+          <p className="text-xs text-muted-foreground">
+            归属官方后:技能/智能体卡片亮蓝色「官方」标,普通员工不能再上传新版,仅管理员可维护。当前归属：
+            <span className="font-mono">{currentOwner || '官方'}</span>
+          </p>
+        )}
+        {!toOfficial && (
         <p className="text-xs text-muted-foreground">
-          当前归属人：<span className="font-mono">{currentOwner}</span>
+          当前归属人：<span className="font-mono">{currentOwner || '(官方)'}</span>
         </p>
+        )}
+        {!toOfficial && (
+        <p className="text-xs text-muted-foreground">仅可选择系统内已有用户;匹配失败请检查用户名。</p>
+        )}
         {error !== '' && <div className="text-sm text-destructive">{error}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="outline" onClick={onClose}>取消</Button>

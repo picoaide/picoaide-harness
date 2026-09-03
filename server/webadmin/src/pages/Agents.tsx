@@ -11,9 +11,10 @@ import { Skeleton } from '../components/ui/skeleton'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
+import { CapabilityLockPanel } from '../components/capability-lock-panel'
 import { GrantDialog } from '../components/grant-dialog'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
-import { Download, UserCog, Bot, Upload } from 'lucide-react'
+import { Download, UserCog, Bot, Upload, Lock } from 'lucide-react'
 
 interface AgentRow {
   name: string
@@ -25,6 +26,10 @@ interface AgentRow {
   quality?: string
   downloads?: number
   changelog?: string
+  /** 0059: 官方属性(蓝标, 仅管理员可上传)。 */
+  official?: boolean
+  /** 来源渠道: market(市场直上架) || org(员工上传审批后)。 */
+  channel?: 'market' | 'org'
 }
 
 /**
@@ -52,6 +57,8 @@ export default function Agents() {
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [uploadBusy, setUploadBusy] = useState(false)
   const [uploadErr, setUploadErr] = useState('')
+  // 锁定管理(2026-09-04 从审批页迁入市场页)
+  const [lockOpen, setLockOpen] = useState(false)
   // 编辑描述
   const [editAgent, setEditAgent] = useState<AgentRow | null>(null)
   const [editDesc, setEditDesc] = useState('')
@@ -69,8 +76,27 @@ export default function Agents() {
     setLoading(true)
     setError('')
     try {
-      const d = await request(`${ADMIN_API}/agents`)
-      setAgents(d.agents ?? [])
+      const [d, approvals] = await Promise.all([
+        request(`${ADMIN_API}/agents`),
+        request(`${ADMIN_API}/capabilities/approvals?status=approved&type=agent`).catch(() => ({ approvals: [] })),
+      ])
+      const merged: AgentRow[] = [...(d.agents ?? [])]
+      for (const row of (approvals.approvals ?? []) as { name: string; version: string; display_name: string; description: string; author: string; downloads?: number; official?: boolean; quality?: string }[]) {
+        merged.push({
+          name: row.name, title: row.display_name || row.name, version: row.version,
+          description: row.description, author: row.author, enabled: true,
+          downloads: row.downloads ?? 0, official: row.official, quality: row.quality, channel: 'org',
+        })
+      }
+      // 排序定案: 官方 → 精选 → score(calls*3+downloads) 降序 → 名称
+      const score = (x: AgentRow): number => (x.downloads ?? 0)
+      merged.sort((a, b) => {
+        if (!!a.official !== !!b.official) return a.official ? -1 : 1
+        if (!!(a.quality === 'featured') !== !!(b.quality === 'featured')) return a.quality === 'featured' ? -1 : 1
+        if (score(a) !== score(b)) return score(b) - score(a)
+        return a.name.localeCompare(b.name)
+      })
+      setAgents(merged)
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -186,12 +212,17 @@ export default function Agents() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="市场智能体"
-        desc="智能体市场管理:上架(上传 agent.cordis.yml + preset.yml 归档)、授权制可见、归属约束续传"
+        title="智能体市场"
+        desc="官方智能体(蓝标) / 员工上传(审批后);授权制可见、归属约束续传"
         actions={
-          <Button size="sm" onClick={() => { setCreateOpen(true); setCreateErr('') }}>
-            <Upload className="h-3.5 w-3.5" /> 上架智能体
-          </Button>
+          <>
+            <Button size="sm" variant="outline" onClick={() => setLockOpen(true)}>
+              <Lock className="h-3.5 w-3.5" /> 锁定管理
+            </Button>
+            <Button size="sm" onClick={() => { setCreateOpen(true); setCreateErr('') }}>
+              <Upload className="h-3.5 w-3.5" /> 上架智能体
+            </Button>
+          </>
         }
       />
       {opError && <div className="text-sm text-destructive">{opError}</div>}
@@ -224,11 +255,16 @@ export default function Agents() {
                         <div className="text-[11px] text-muted-foreground">{a.version ? `v${a.version}` : '尚未发布版本'} · {a.name}</div>
                       </div>
                     </div>
-                    {a.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
+                    <span className="flex items-center gap-1.5">
+                      {a.official && <Badge className="bg-[#1E40AF] text-white hover:bg-[#1E40AF]">官方</Badge>}
+                      {a.quality === 'featured' && <Badge variant="secondary">精选</Badge>}
+                      {a.channel === 'org' && <Badge variant="outline">员工上传</Badge>}
+                      {a.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
+                    </span>
                   </div>
                   <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500" title={a.description || undefined}>{a.description || '暂无描述'}</p>
                   <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者,只有归属人(及管理员)能更新">
-                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {a.author || '未指定'}</span>
+                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {a.official ? '官方' : (a.author || '未指定')}</span>
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
                     {a.quality && a.quality !== '' && <Badge variant="secondary" className="px-1 py-0 text-[10px]">{a.quality}</Badge>}
@@ -319,6 +355,7 @@ export default function Agents() {
         </DialogContent>
       </Dialog>
 
+      <CapabilityLockPanel open={lockOpen} onClose={() => setLockOpen(false)} />
       {preview && (
         <ArchivePreviewDialog
           openKey={previewKey}
