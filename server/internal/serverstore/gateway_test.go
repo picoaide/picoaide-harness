@@ -31,6 +31,89 @@ func TestModelDefaultParams(t *testing.T) {
 	}
 }
 
+// TestModelInputModalities: 模型输入模态的归一化、存取往返与同步保留(0058)。
+func TestModelInputModalities(t *testing.T) {
+	db := openTestDB(t)
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p", BaseURL: "http://a", APIKeyEnc: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// AddModel 缺省仅 text;显式 [text,image] 往返一致
+	mid, err := AddModel(db, &Model{Name: "vision", ProviderID: pid, DisplayName: "视觉"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := GetModel(db, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.InputModalities) != 1 || m.InputModalities[0] != "text" {
+		t.Fatalf("default modalities = %v, want [text]", m.InputModalities)
+	}
+	mid2, err := AddModel(db, &Model{Name: "v2", ProviderID: pid, InputModalities: []string{"text", "image"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := GetModel(db, mid2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m2.InputModalities) != 2 || m2.InputModalities[0] != "text" || m2.InputModalities[1] != "image" {
+		t.Fatalf("modalities = %v, want [text image]", m2.InputModalities)
+	}
+	// UpdateModel 归一化写入
+	m2.InputModalities = []string{"text", "image", "text"}
+	if err := UpdateModel(db, m2); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := GetModel(db, mid2)
+	if len(got.InputModalities) != 2 {
+		t.Fatalf("normalize failed: %v", got.InputModalities)
+	}
+	// SyncProviderModel 重同步不覆盖管理员配置(已有行保持,新行缺省 text)
+	if err := SyncProviderModel(db, pid, "v2", `{"max_output":1}`); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = GetModel(db, mid2)
+	if len(got.InputModalities) != 2 {
+		t.Fatalf("sync overwrote modalities: %v", got.InputModalities)
+	}
+}
+
+// TestParseNormalizeInputModalities: 解析(空/非法回落 text)与归一化(过滤/去重)。
+func TestParseNormalizeInputModalities(t *testing.T) {
+	for _, c := range []struct {
+		raw  string
+		want []string
+	}{
+		{`["text"]`, []string{"text"}},
+		{`["text","image"]`, []string{"text", "image"}},
+		{`["image","text"]`, []string{"image", "text"}},
+		{``, []string{"text"}},
+		{`not-json`, []string{"text"}},
+		{`["audio"]`, []string{"text"}},
+		{`["text","text"]`, []string{"text"}},
+		{`[]`, []string{"text"}},
+	} {
+		if got := ParseInputModalities(c.raw); len(got) != len(c.want) {
+			t.Fatalf("ParseInputModalities(%q) = %v, want %v", c.raw, got, c.want)
+		} else {
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("ParseInputModalities(%q) = %v, want %v", c.raw, got, c.want)
+				}
+			}
+		}
+	}
+	if got := NormalizeInputModalities(nil); len(got) != 1 || got[0] != "text" {
+		t.Fatalf("Normalize(nil) = %v, want [text]", got)
+	}
+}
+
 func TestGatewayProviderChannelField(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()

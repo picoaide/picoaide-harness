@@ -176,7 +176,7 @@ describe('Gateway 网关配置页', () => {
       '/api/server/admin/models/1',
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 3, output_price_per_1m: 10 }),
+        body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 3, output_price_per_1m: 10, input_modalities: ['text'] }),
       }),
     )
   })
@@ -194,7 +194,35 @@ describe('Gateway 网关配置页', () => {
       '/api/server/admin/models/1',
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 2, output_price_per_1m: 8, offpeak_discount: 0.5 }),
+        body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 2, output_price_per_1m: 8, offpeak_discount: 0.5, input_modalities: ['text'] }),
+      }),
+    )
+  })
+
+  it('模型输入模态:图片模型显示徽章,编辑对话框切换并提交 text+image(0058)', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/models') {
+        return {
+          models: [
+            { id: 1, name: 'deepseek-v4-flash-vision-exp', display_name: 'Vision', default_params: '{}', input_modalities: ['text', 'image'], input_price_per_1m: 2, output_price_per_1m: 8 },
+          ],
+        }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    // 列表徽章
+    expect(await screen.findByText('图片')).toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: '价格' })[0])
+    const dialog = within(await screen.findByRole('dialog'))
+    // 预填「文字 + 图片」按模型现有配置;保存即提交 text+image
+    expect(dialog.getByText('文字 + 图片')).toBeInTheDocument()
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/server/admin/models/1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ name: 'deepseek-v4-flash-vision-exp', input_price_per_1m: 2, output_price_per_1m: 8, input_modalities: ['text', 'image'] }),
       }),
     )
   })

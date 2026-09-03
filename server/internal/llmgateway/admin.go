@@ -453,6 +453,10 @@ type modelReq struct {
 	ProviderID    int64  `json:"provider_id"`
 	DisplayName   string `json:"display_name"`
 	DefaultParams string `json:"default_params"`
+	// InputModalities 模型接受的输入模态(0058,'text'/'image' 数组):
+	// create 缺省 = 仅 text;update 缺省/空 = 不覆盖,显式数组 = 设置
+	// (与价格字段「未传不覆盖」同语义;空数组/非法值由校验拒绝)。
+	InputModalities []string `json:"input_modalities"`
 	// 价格/折扣用 optionalFloat 区分「未传」与「显式 null」(审计修复 L6):
 	// 未传 = 不覆盖;显式 null = 清空(设为未定价)。此前 null 与缺省同义,
 	// 定价后无法回退到未定价。
@@ -505,6 +509,39 @@ func validateModelPrices(c *gin.Context, in, out, cache, offpeak *float64) bool 
 	return true
 }
 
+// validateInputModalities rejects invalid input modality arrays (0058):
+// non-empty subsets of {text, image}, no duplicates. nil = 未设置,允许
+// (create 缺省仅 text / update 不覆盖)。
+func validateInputModalities(c *gin.Context, modalities []string) bool {
+	if modalities == nil {
+		return true
+	}
+	if len(modalities) == 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "input_modalities 不能为空数组")
+		return false
+	}
+	seen := make(map[string]bool, len(modalities))
+	for _, m := range modalities {
+		if m != "text" && m != "image" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				"input_modalities 只能包含 text/image")
+			return false
+		}
+		if seen[m] {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				"input_modalities 不能包含重复项")
+			return false
+		}
+		seen[m] = true
+	}
+	return true
+}
+
+// modalitiesDetail 模型模态审计明细(仅 text 归一显示)。
+func modalitiesDetail(ms []string) string {
+	return strings.Join(ms, "+")
+}
+
 func listModelsAdmin(c *gin.Context, db *sql.DB) {
 	// 管理端用完整字段(含价格/峰谷折扣,0022/0023);客户端 /v1/models 仍走
 	// 公开 ListModels(基础字段,不泄露定价配置)。
@@ -518,8 +555,8 @@ func listModelsAdmin(c *gin.Context, db *sql.DB) {
 
 // auditModelDetail 模型审计明细(价格 nil = 未定价)。
 func auditModelDetail(m *serverstore.Model) string {
-	return fmt.Sprintf("%s provider=%d display=%s input=%s output=%s cache=%s offpeak=%s",
-		m.Name, m.ProviderID, m.DisplayName, priceStr(m.InputPricePer1M),
+	return fmt.Sprintf("%s provider=%d display=%s modalities=%s input=%s output=%s cache=%s offpeak=%s",
+		m.Name, m.ProviderID, m.DisplayName, modalitiesDetail(m.InputModalities), priceStr(m.InputPricePer1M),
 		priceStr(m.OutputPricePer1M), priceStr(m.CacheInputPricePer1M), priceStr(m.OffpeakDiscount))
 }
 
@@ -539,6 +576,9 @@ func createModel(c *gin.Context, db *sql.DB) {
 	if !validateModelPrices(c, req.InputPricePer1M.Value, req.OutputPricePer1M.Value, req.CacheInputPricePer1M.Value, req.OffpeakDiscount.Value) {
 		return
 	}
+	if !validateInputModalities(c, req.InputModalities) {
+		return
+	}
 	// provider 必须存在:FK 冲突此前落 500,掩盖参数错误(审计修复 M2)
 	if _, err := serverstore.GetGatewayProvider(db, req.ProviderID); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "所属上游不存在")
@@ -546,7 +586,8 @@ func createModel(c *gin.Context, db *sql.DB) {
 	}
 	m := &serverstore.Model{
 		Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName,
-		DefaultParams: req.DefaultParams, InputPricePer1M: req.InputPricePer1M.Value,
+		DefaultParams: req.DefaultParams, InputModalities: serverstore.NormalizeInputModalities(req.InputModalities),
+		InputPricePer1M:  req.InputPricePer1M.Value,
 		OutputPricePer1M: req.OutputPricePer1M.Value, CacheInputPricePer1M: req.CacheInputPricePer1M.Value,
 		OffpeakDiscount: req.OffpeakDiscount.Value,
 	}
@@ -586,6 +627,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	if !validateModelPrices(c, req.InputPricePer1M.Value, req.OutputPricePer1M.Value, req.CacheInputPricePer1M.Value, req.OffpeakDiscount.Value) {
 		return
 	}
+	if !validateInputModalities(c, req.InputModalities) {
+		return
+	}
 	// 改名防护(审计修复 M7):模型名承担路由键/记账键/默认模型键多重身份,
 	// 改名会破坏 usage 历史口径并使默认模型悬空。渠道同步模型本由上游命名,
 	// 改名必被下次同步覆盖;有用量记录的模型改名会错位历史费用。
@@ -612,6 +656,10 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	}
 	if req.DefaultParams != "" {
 		m.DefaultParams = req.DefaultParams
+	}
+	// input_modalities:显式数组(含空数组——校验拒绝)才覆盖,缺省保持现值。
+	if req.InputModalities != nil {
+		m.InputModalities = serverstore.NormalizeInputModalities(req.InputModalities)
 	}
 	// optionalFloat:未传(Set=false)不覆盖;显式 null(Set=true,Value=nil)
 	// 清空为未定价(审计修复 L6)
@@ -648,6 +696,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	}
 	if m.DefaultParams != orig.DefaultParams {
 		ch = append(ch, "params:已修改")
+	}
+	if modalitiesDetail(m.InputModalities) != modalitiesDetail(orig.InputModalities) {
+		ch = append(ch, "modalities:"+modalitiesDetail(orig.InputModalities)+"→"+modalitiesDetail(m.InputModalities))
 	}
 	if !optF64Eq(m.InputPricePer1M, orig.InputPricePer1M) {
 		ch = append(ch, "input:"+priceStr(orig.InputPricePer1M)+"→"+priceStr(m.InputPricePer1M))
