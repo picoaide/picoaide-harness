@@ -2,8 +2,60 @@ package serverstore
 
 import (
 	"database/sql"
+	"strconv"
 	"time"
 )
+
+// AuthMinPasswordLengthSetting 密码最小长度 settings 键(管理面可配,默认 10)。
+const AuthMinPasswordLengthSetting = "auth.min_password_length"
+
+// DefaultMinPasswordLength 密码最小长度默认值(与历史常量 minPasswordLength=10 一致)。
+const DefaultMinPasswordLength = 10
+
+// MinPasswordLengthBounds 密码最小长度允许范围。
+const (
+	MinPasswordLengthLower = 8
+	MinPasswordLengthUpper = 64
+)
+
+// AuthMinPasswordLength 读取密码最小长度:settings 缺失/非法(非 8~64 整数)
+// 回落默认 10。所有密码校验点(建用户/重置/自助改密/bootstrap)统一读此值。
+func AuthMinPasswordLength(db *sql.DB) int {
+	if db == nil {
+		return DefaultMinPasswordLength
+	}
+	v, ok, err := GetSetting(db, AuthMinPasswordLengthSetting)
+	if err != nil || !ok || v == "" {
+		return DefaultMinPasswordLength
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < MinPasswordLengthLower || n > MinPasswordLengthUpper {
+		return DefaultMinPasswordLength
+	}
+	return n
+}
+
+// AuditRetentionSetting 审计日志保留天数 settings 键(默认 180)。
+const AuditRetentionSetting = "audit.retention_days"
+
+// DefaultAuditRetentionDays 审计日志保留默认天数。
+const DefaultAuditRetentionDays = 180
+
+// AuditRetentionDays 读取审计保留天数:缺失/非法回落默认 180。
+func AuditRetentionDays(db *sql.DB) int {
+	if db == nil {
+		return DefaultAuditRetentionDays
+	}
+	v, ok, err := GetSetting(db, AuditRetentionSetting)
+	if err != nil || !ok || v == "" {
+		return DefaultAuditRetentionDays
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return DefaultAuditRetentionDays
+	}
+	return n
+}
 
 // settingsTTL settings 缓存时长:kv 表低频变更(webadmin 配置),而热路径
 // 每请求读多键(quota/rate_limit/peak_windows)。30s TTL,SetSetting 主动失效。

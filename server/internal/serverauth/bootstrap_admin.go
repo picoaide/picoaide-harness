@@ -30,8 +30,8 @@ func EnsureBootstrapAdmin(db *sql.DB, username string) error {
 	}
 	// C-16: enforce the same policy as admin-created users, or the
 	// --bootstrap-admin path would be a weak-password backdoor.
-	if utf8.RuneCountInString(password) < minPasswordLength {
-		return fmt.Errorf("PICOAI_ADMIN_PASSWORD must be at least %d characters", minPasswordLength)
+	if utf8.RuneCountInString(password) < serverstore.AuthMinPasswordLength(db) {
+		return fmt.Errorf("PICOAI_ADMIN_PASSWORD must be at least %d characters", serverstore.AuthMinPasswordLength(db))
 	}
 	_, err = serverstore.GetUserByUsername(db, username)
 	if err == nil {

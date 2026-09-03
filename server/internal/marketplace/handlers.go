@@ -18,7 +18,19 @@ type Handlers struct {
 	ListSkills      gin.HandlerFunc // GET /skills
 	GetSkill        gin.HandlerFunc // GET /skills/:name
 	DownloadArchive gin.HandlerFunc // GET /skills/:name/archive
-	// 服务端面 /api/server/admin
+	// 服务端面 /api/server/admin(G4 市场智能体, 与技能同构)
+	ListAgentsAdmin         gin.HandlerFunc
+	CreateAgentAdmin        gin.HandlerFunc
+	UploadAgentArchiveAdmin gin.HandlerFunc
+	PreviewAgentAdmin       gin.HandlerFunc
+	FileContentAgentAdmin   gin.HandlerFunc
+	UpdateAgentAdmin        gin.HandlerFunc
+	DeleteAgentAdmin        gin.HandlerFunc
+	EnableAgentAdmin        gin.HandlerFunc
+	ListAgentGrants         gin.HandlerFunc
+	ReplaceAgentGrants      gin.HandlerFunc
+	SetAgentGrant           gin.HandlerFunc
+	RemoveAgentGrant        gin.HandlerFunc
 	ListSkillsAdmin         gin.HandlerFunc
 	CreateSkillAdmin        gin.HandlerFunc
 	UploadSkillArchiveAdmin gin.HandlerFunc
@@ -41,6 +53,18 @@ func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 		ListSkills:              api.listSkills,
 		GetSkill:                api.getSkill,
 		DownloadArchive:         api.downloadArchive,
+		ListAgentsAdmin:         func(c *gin.Context) { listAgentsAdmin(c, db) },
+		CreateAgentAdmin:        func(c *gin.Context) { createAgentAdmin(c, db) },
+		UploadAgentArchiveAdmin: func(c *gin.Context) { uploadAgentArchiveAdmin(c, db) },
+		PreviewAgentAdmin:       func(c *gin.Context) { previewAgentAdmin(c, db) },
+		FileContentAgentAdmin:   func(c *gin.Context) { fileContentAgentAdmin(c, db) },
+		UpdateAgentAdmin:        func(c *gin.Context) { updateAgentAdmin(c, db) },
+		DeleteAgentAdmin:        func(c *gin.Context) { deleteAgentAdmin(c, db) },
+		EnableAgentAdmin:        func(c *gin.Context) { enableAgentAdmin(c, db) },
+		ListAgentGrants:         func(c *gin.Context) { listAgentGrants(c, db) },
+		ReplaceAgentGrants:      func(c *gin.Context) { replaceAgentGrants(c, db) },
+		SetAgentGrant:           func(c *gin.Context) { applyAgentGrant(c, db, true) },
+		RemoveAgentGrant:        func(c *gin.Context) { applyAgentGrant(c, db, false) },
 		ListSkillsAdmin:         func(c *gin.Context) { listSkillsAdmin(c, db) },
 		CreateSkillAdmin:        func(c *gin.Context) { createSkillAdmin(c, db) },
 		UploadSkillArchiveAdmin: func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) },

@@ -45,6 +45,19 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	serverauth.AdminRoute(g, "PUT", "/skills/:name/grants", serverauth.PermMarketWrite, func(c *gin.Context) { replaceSkillGrants(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/skills/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { setSkillGrant(c, db, true) })
 	serverauth.AdminRoute(g, "DELETE", "/skills/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { setSkillGrant(c, db, false) })
+	// 市场智能体(G4):与市场技能同构(与 router 包镜像)。
+	serverauth.AdminRoute(g, "GET", "/agents", serverauth.PermMarketRead, func(c *gin.Context) { listAgentsAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/agents", serverauth.PermMarketWrite, func(c *gin.Context) { createAgentAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/agents/:name/archive", serverauth.PermMarketWrite, func(c *gin.Context) { uploadAgentArchiveAdmin(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/agents/:name", serverauth.PermMarketWrite, func(c *gin.Context) { updateAgentAdmin(c, db) })
+	serverauth.AdminRoute(g, "DELETE", "/agents/:name", serverauth.PermMarketWrite, func(c *gin.Context) { deleteAgentAdmin(c, db) })
+	serverauth.AdminRoute(g, "POST", "/agents/:name/enable", serverauth.PermMarketWrite, func(c *gin.Context) { enableAgentAdmin(c, db) })
+	serverauth.AdminRoute(g, "GET", "/agents/:name/preview", serverauth.PermMarketRead, func(c *gin.Context) { previewAgentAdmin(c, db) })
+	serverauth.AdminRoute(g, "GET", "/agents/:name/file", serverauth.PermMarketRead, func(c *gin.Context) { fileContentAgentAdmin(c, db) })
+	serverauth.AdminRoute(g, "GET", "/agents/:name/grants", serverauth.PermMarketRead, func(c *gin.Context) { listAgentGrants(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/agents/:name/grants", serverauth.PermMarketWrite, func(c *gin.Context) { replaceAgentGrants(c, db) })
+	serverauth.AdminRoute(g, "PUT", "/agents/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { applyAgentGrant(c, db, true) })
+	serverauth.AdminRoute(g, "DELETE", "/agents/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { applyAgentGrant(c, db, false) })
 }
 
 // grantReq carries a subject: {username} or {group} (webadmin sends @group).

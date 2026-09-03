@@ -90,6 +90,9 @@ func TestNamespaces(t *testing.T) {
 		"GET " + nsServer + "/admin/auth/methods",
 		"GET " + nsServer + "/admin/users",
 		"GET " + nsServer + "/admin/audit",
+		"PUT " + nsServer + "/admin/audit/settings",
+		"GET " + nsServer + "/admin/agents",
+		"POST " + nsServer + "/admin/agents",
 		"GET " + nsServer + "/admin/brand",
 		"GET " + nsServer + "/admin/connectors",
 		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)

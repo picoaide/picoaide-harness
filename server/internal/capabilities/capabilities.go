@@ -156,6 +156,31 @@ func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string
 	})
 }
 
+// appendMarketAgent merges one marketplace agent into the catalog
+// (enabled+authorized only; G4 2026-09-04 市场智能体)。
+func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[string][]string, releases map[string]serverstore.Release, isOwner bool) {
+	r, ok := releases[a.AppID]
+	if !ok {
+		return
+	}
+	versions[a.AppID] = append(versions[a.AppID], r.Version)
+	display := a.Title
+	if display == "" {
+		display = a.AppID
+	}
+	*out = append(*out, CapabilityItem{
+		Kind:        KindAgent,
+		Source:      SourceMarket,
+		Name:        a.AppID,
+		DisplayName: display,
+		Version:     r.Version,
+		Description: a.Description,
+		Author:      a.Owner,
+		Status:      "approved",
+		IsOwner:     isOwner,
+	})
+}
+
 // appendSharedSkill merges one shared-skill row (already visibility-filtered
 // by the caller) with its quality tag and status.
 func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool) {
@@ -321,6 +346,41 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			for _, s := range skillList {
 				// 市场适配层 Skill.Author == apps.owner(2026-09-02 归属权)。
 				appendSkill(&items, s, versions, s.Author == u.Username)
+			}
+		}
+
+		// 1b) 市场智能体(授权制,G4)。
+		if includeMarket && ft.agents {
+			agentApps, err := serverstore.ListApps(db, serverstore.AppKindAgent, serverstore.AppChannelMarket)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			allowed := map[string]bool{}
+			if !u.IsAdmin {
+				names, err := serverstore.AccessibleAppIDs(db, serverstore.AppKindAgent, u.Username, groups)
+				if err != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				for _, n := range names {
+					allowed[n] = true
+				}
+			}
+			releases := map[string]serverstore.Release{}
+			for _, a := range agentApps {
+				if a.Enabled != 1 {
+					continue
+				}
+				if !u.IsAdmin && !allowed[a.AppID] {
+					continue
+				}
+				r, err := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, a.AppID, false)
+				if err != nil || r == nil {
+					continue
+				}
+				releases[a.AppID] = *r
+				appendMarketAgent(&items, a, versions, releases, a.Owner == u.Username)
 			}
 		}
 

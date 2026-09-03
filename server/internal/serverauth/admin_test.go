@@ -1450,3 +1450,94 @@ func TestAdminAuthConfig(t *testing.T) {
 		t.Fatalf("invalid mode = %d, want 400", w.Code)
 	}
 }
+
+func TestAdminAuthMinPasswordLength(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sessionCookie(t, w), "X-CSRF-Token": out["csrf_token"].(string)}
+
+	// 默认 10
+	_, a0 := doJSON(t, r, "GET", "/api/server/admin/auth", "", hdr)
+	if a0["auth"].(map[string]any)["min_password_length"].(float64) != 10 {
+		t.Fatalf("default min_password_length = %v, want 10", a0["auth"].(map[string]any)["min_password_length"])
+	}
+	// 设为 12:建用户 9 位拒绝、11 位通过
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/auth", `{"enabled":"local","min_password_length":12}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("save min_password_length failed")
+	}
+	_, a1 := doJSON(t, r, "GET", "/api/server/admin/auth", "", hdr)
+	if a1["auth"].(map[string]any)["min_password_length"].(float64) != 12 {
+		t.Fatalf("min_password_length after save = %v, want 12", a1["auth"].(map[string]any)["min_password_length"])
+	}
+	if w, _ := doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"a1","password":"123456789"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("9-char password accepted with policy 12: %d", w.Code)
+	}
+	if w, out2 := doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"a1","password":"123456789012"}`, hdr); w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Fatalf("12-char password rejected with policy 12: %d %v", w.Code, out2)
+	}
+	// 边界:8/64 允许,7/65 拒绝
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/auth", `{"enabled":"local","min_password_length":8}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("min 8 rejected")
+	}
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/auth", `{"enabled":"local","min_password_length":64}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("min 64 rejected")
+	}
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/auth", `{"enabled":"local","min_password_length":7}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("min 7 accepted: %d", w.Code)
+	}
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/auth", `{"enabled":"local","min_password_length":65}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("min 65 accepted: %d", w.Code)
+	}
+}
+
+func TestAdminAuditSettings(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sessionCookie(t, w), "X-CSRF-Token": out["csrf_token"].(string)}
+
+	// 默认 180
+	_, s0 := doJSON(t, r, "GET", "/api/server/admin/audit/settings", "", hdr)
+	if s0["retention_days"].(float64) != 180 {
+		t.Fatalf("default retention_days = %v, want 180", s0["retention_days"])
+	}
+	// 非法拒绝
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/audit/settings", `{"retention_days":0}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("retention 0 accepted: %d", w.Code)
+	}
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/audit/settings", `{"retention_days":3651}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("retention 3651 accepted: %d", w.Code)
+	}
+	// 合法保存 + 回读 + 审计留痕
+	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/audit/settings", `{"retention_days":90}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("save retention failed")
+	}
+	_, s1 := doJSON(t, r, "GET", "/api/server/admin/audit/settings", "", hdr)
+	if s1["retention_days"].(float64) != 90 {
+		t.Fatalf("retention_days after save = %v, want 90", s1["retention_days"])
+	}
+	var detail string
+	if err := db.QueryRow(`SELECT detail FROM audit_logs WHERE action='audit_retention_change' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail != "180→90" {
+		t.Fatalf("audit detail = %q, want 180→90", detail)
+	}
+}
+
+func sessionCookie(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			return ck.Value
+		}
+	}
+	return ""
+}
