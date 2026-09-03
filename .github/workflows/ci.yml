@@ -113,6 +113,14 @@ jobs:
         with:
           node-version: 24
       - run: corepack enable
+      - name: Cache yarn & electron (linux)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .yarn/cache
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       - run: yarn check
       - run: yarn workspace dsh-plugin-desktop dist:linux
@@ -136,6 +144,14 @@ jobs:
         with:
           node-version: 24
       - run: corepack enable
+      - name: Cache yarn & electron (windows)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .yarn/cache
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       - run: yarn workspace dsh-plugin-desktop dist:win
       - uses: actions/upload-artifact@v7
@@ -156,6 +172,14 @@ jobs:
         with:
           node-version: 24
       - run: corepack enable
+      - name: Cache yarn & electron (macos)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .yarn/cache
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       - run: yarn workspace dsh-plugin-desktop dist:mac-smoke
       - uses: actions/upload-artifact@v7
