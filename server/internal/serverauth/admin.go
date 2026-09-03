@@ -42,10 +42,6 @@ func secureCookieFor(c *gin.Context, db *sql.DB) bool {
 	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
 }
 
-// minPasswordLength is the minimum password length for admin-created users.
-// Password expiry is deliberately out of scope for now.
-const minPasswordLength = 10
-
 // adminLoginLimiter bounds admin login attempts (ip+username) so the
 // password is not brute-forceable without rate limiting.
 // 延迟到首次登录调用时创建(惰性单例):newLoginLimiter 在包 init 时读
@@ -141,6 +137,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	AdminRoute(authed, "GET", "/server-info", PermServerInfoRead, a.handleServerInfo)
 	// 敏感操作审计日志(用户/部门/技能/令牌等)
 	AdminRoute(authed, "GET", "/audit", PermAuditRead, a.listAuditLogs)
+	// 审计保留策略(G13):读 auditor 可;写仅 super_admin(与 router 包镜像)。
+	AdminRoute(authed, "GET", "/audit/settings", PermAuditRead, a.getAuditSettings)
+	AdminRoute(authed, "PUT", "/audit/settings", PermAuditRetention, a.putAuditSettings)
 	// 认证配置(LDAP/OIDC):读 settings 脱敏返回;写时密码留空=不更换
 	AdminRoute(authed, "GET", "/auth", PermAuthRead, a.getAuthConfig)
 	AdminRoute(authed, "PUT", "/auth", PermAuthWrite, a.setAuthConfig)
@@ -371,8 +370,9 @@ func (a *AdminAPI) handleMePassword(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "密码过长")
 		return
 	}
-	if utf8.RuneCountInString(req.NewPassword) < minPasswordLength {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+	minLength := serverstore.AuthMinPasswordLength(a.DB)
+	if utf8.RuneCountInString(req.NewPassword) < minLength {
+		writeError(c, http.StatusBadRequest, "VALIDATION", fmt.Sprintf("密码至少 %d 位", minLength))
 		return
 	}
 	// 管理后台登录 local-only, 正常路径必为本地账号; 防御性一致处理。
@@ -670,8 +670,9 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名和密码必填")
 		return
 	}
-	if utf8.RuneCountInString(req.Password) < minPasswordLength {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+	minLength := serverstore.AuthMinPasswordLength(a.DB)
+	if utf8.RuneCountInString(req.Password) < minLength {
+		writeError(c, http.StatusBadRequest, "VALIDATION", fmt.Sprintf("密码至少 %d 位", minLength))
 		return
 	}
 	status := req.Status
@@ -799,8 +800,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "外部认证用户的密码由企业 IdP 管理,不能在此修改")
 			return
 		}
-		if utf8.RuneCountInString(*req.Password) < minPasswordLength {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+		if utf8.RuneCountInString(*req.Password) < serverstore.AuthMinPasswordLength(a.DB) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", fmt.Sprintf("密码至少 %d 位", serverstore.AuthMinPasswordLength(a.DB)))
 			return
 		}
 		hash, err := util.HashPassword(*req.Password)
@@ -1040,6 +1041,37 @@ func (a *AdminAPI) listAuditLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
 }
 
+// GetAuditSettings 返回审计保留策略(auditor 只读; 写仅 super_admin, PermAuditRetention)。
+func (a *AdminAPI) getAuditSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"retention_days": serverstore.AuditRetentionDays(a.DB)})
+}
+
+// PutAuditSettings 写审计保留策略(1~3650 天),立即按新策略清理旧日志并审计留痕。
+func (a *AdminAPI) putAuditSettings(c *gin.Context) {
+	var req struct {
+		RetentionDays *int `json:"retention_days"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.RetentionDays == nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "retention_days 必填")
+		return
+	}
+	if *req.RetentionDays < 1 || *req.RetentionDays > 3650 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "retention_days 必须在 1~3650 天之间")
+		return
+	}
+	old := serverstore.AuditRetentionDays(a.DB)
+	if err := serverstore.SetSetting(a.DB, serverstore.AuditRetentionSetting, strconv.Itoa(*req.RetentionDays)); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	// 立即生效:启动清理兜底周期执行,此处主动触发一次。
+	if err := serverstore.PurgeOldAuditLogs(a.DB, time.Now().Add(-time.Duration(*req.RetentionDays)*24*time.Hour)); err != nil {
+		// 清理失败不影响保存(启动清理兜底); 审计中不落错误。
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "audit_retention_change", fmt.Sprintf("%d→%d", old, *req.RetentionDays))
+	c.JSON(http.StatusOK, gin.H{"retention_days": *req.RetentionDays})
+}
+
 // getAuthConfig 返回认证配置(脱敏):auth.mode / auth.enabled / ldap.* / oidc.* / openid.*。
 // 敏感值(bind_password / client_secret)以 "***" 掩码返回,write 时留空=不更换。
 func (a *AdminAPI) getAuthConfig(c *gin.Context) {
@@ -1055,9 +1087,10 @@ func (a *AdminAPI) getAuthConfig(c *gin.Context) {
 		return "***"
 	}
 	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
-		"mode":       s["auth.mode"],
-		"enabled":    s["auth.enabled"],
-		"hide_local": s["auth.hide_local"] == "true",
+		"mode":                s["auth.mode"],
+		"enabled":             s["auth.enabled"],
+		"hide_local":          s["auth.hide_local"] == "true",
+		"min_password_length": serverstore.AuthMinPasswordLength(a.DB),
 		"ldap": gin.H{
 			"server_url":    s["ldap.server_url"],
 			"bind_dn":       s["ldap.bind_dn"],
@@ -1094,7 +1127,9 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		Mode      string `json:"mode"`
 		Enabled   string `json:"enabled"`
 		HideLocal *bool  `json:"hide_local"`
-		LDAP      struct {
+		// MinPasswordLength 密码最小长度(G14, 8~64; 缺省不覆盖, 默认 10)。
+		MinPasswordLength *int `json:"min_password_length"`
+		LDAP              struct {
 			ServerURL    string `json:"server_url"`
 			BindDN       string `json:"bind_dn"`
 			BindPassword string `json:"bind_password"`
@@ -1215,6 +1250,14 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		// v3b: 仅客户端登录页隐藏本地账号入口; 管理后台恒本地登录不受影响。
 		_ = upsert("auth.hide_local", strconv.FormatBool(*req.HideLocal))
 	}
+	if req.MinPasswordLength != nil {
+		if *req.MinPasswordLength < serverstore.MinPasswordLengthLower || *req.MinPasswordLength > serverstore.MinPasswordLengthUpper {
+			writeError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("min_password_length 必须在 %d~%d 之间", serverstore.MinPasswordLengthLower, serverstore.MinPasswordLengthUpper))
+			return
+		}
+		_ = upsert(serverstore.AuthMinPasswordLengthSetting, strconv.Itoa(*req.MinPasswordLength))
+	}
 	// v3b 字段级审计(§2.5):记录本次变更的键集合(值脱敏, 不落密钥)。
 	var changed []string
 	for _, k := range []string{"auth.mode", "auth.enabled"} {
@@ -1231,6 +1274,9 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	}
 	if req.HideLocal != nil {
 		changed = append(changed, "auth.hide_local")
+	}
+	if req.MinPasswordLength != nil {
+		changed = append(changed, "auth.min_password_length")
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "changed:"+strings.Join(changed, ","))
 	// LDAP 配置生效后立即同步一轮目录(用户要求:配置后自动同步用户/组)。

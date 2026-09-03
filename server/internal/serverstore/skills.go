@@ -47,7 +47,17 @@ const skillListColumns = "id, name, display_name, version, description, author, 
 
 // currentMarketRelease 取市场技能的展示版本:最高 approved 且未软删。
 func currentMarketRelease(db *sql.DB, appID string, withArchive bool) (*Release, error) {
-	list, err := ListReleases(db, AppKindSkill, appID)
+	return currentRelease(db, AppKindSkill, appID, withArchive)
+}
+
+// CurrentMarketReleaseFor 取任意 kind 的展示版本(G4 市场智能体复用同一语义)。
+func CurrentMarketReleaseFor(db *sql.DB, kind, appID string, withArchive bool) (*Release, error) {
+	return currentRelease(db, kind, appID, withArchive)
+}
+
+// currentRelease 取某 App 的展示版本:最高 approved 且未软删。
+func currentRelease(db *sql.DB, kind, appID string, withArchive bool) (*Release, error) {
+	list, err := ListReleases(db, kind, appID)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +75,7 @@ func currentMarketRelease(db *sql.DB, appID string, withArchive bool) (*Release,
 		return nil, nil
 	}
 	if withArchive {
-		return GetRelease(db, AppKindSkill, appID, best.Version)
+		return GetRelease(db, kind, appID, best.Version)
 	}
 	return best, nil
 }

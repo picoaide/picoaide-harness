@@ -55,72 +55,76 @@ func (a *API) Handlers() *ClientHandlers {
 // AdminHandlers 服务端管理面(webadmin)handler 集合。
 // 含 RBAC 权限点位: 路径声明由 router 包集中, 权限由 AdminRoute 申报。
 type AdminHandlers struct {
-	Login          gin.HandlerFunc // 公开: 管理登录
-	LoginMFA       gin.HandlerFunc // 公开: 两步登录第二步(0057)
-	PublicMethods  gin.HandlerFunc // 公开: 登录方式发现
-	Me             gin.HandlerFunc
-	Logout         gin.HandlerFunc
-	MePassword     gin.HandlerFunc // POST /me/password 管理员改自己密码(0057)
-	GetMyMFA       gin.HandlerFunc // GET /me/mfa
-	EnableMyMFA    gin.HandlerFunc // POST /me/mfa/enable
-	VerifyMyMFA    gin.HandlerFunc // POST /me/mfa/verify
-	DisableMyMFA   gin.HandlerFunc // POST /me/mfa/disable
-	ResetUserMFA   gin.HandlerFunc // PUT /users/:id/mfa 重置他人 MFA
-	ListUsers      gin.HandlerFunc
-	CreateUser     gin.HandlerFunc
-	UpdateUser     gin.HandlerFunc
-	DeleteUser     gin.HandlerFunc
-	GetUserGroups  gin.HandlerFunc
-	SetUserDept    gin.HandlerFunc
-	ListDepts      gin.HandlerFunc
-	CreateDept     gin.HandlerFunc
-	UpdateDept     gin.HandlerFunc
-	DeleteDept     gin.HandlerFunc
-	ListUserTokens gin.HandlerFunc
-	RevokeToken    gin.HandlerFunc
-	Usage          gin.HandlerFunc
-	UsageOverview  gin.HandlerFunc // GET /usage/overview(2026-09 用量中心总览)
-	UsageRequests  gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
-	ServerInfo     gin.HandlerFunc
-	ListAuditLogs  gin.HandlerFunc
-	GetAuthConfig  gin.HandlerFunc
-	SetAuthConfig  gin.HandlerFunc
-	TestConn       gin.HandlerFunc
+	Login            gin.HandlerFunc // 公开: 管理登录
+	LoginMFA         gin.HandlerFunc // 公开: 两步登录第二步(0057)
+	PublicMethods    gin.HandlerFunc // 公开: 登录方式发现
+	Me               gin.HandlerFunc
+	Logout           gin.HandlerFunc
+	MePassword       gin.HandlerFunc // POST /me/password 管理员改自己密码(0057)
+	GetMyMFA         gin.HandlerFunc // GET /me/mfa
+	EnableMyMFA      gin.HandlerFunc // POST /me/mfa/enable
+	VerifyMyMFA      gin.HandlerFunc // POST /me/mfa/verify
+	DisableMyMFA     gin.HandlerFunc // POST /me/mfa/disable
+	ResetUserMFA     gin.HandlerFunc // PUT /users/:id/mfa 重置他人 MFA
+	ListUsers        gin.HandlerFunc
+	CreateUser       gin.HandlerFunc
+	UpdateUser       gin.HandlerFunc
+	DeleteUser       gin.HandlerFunc
+	GetUserGroups    gin.HandlerFunc
+	SetUserDept      gin.HandlerFunc
+	ListDepts        gin.HandlerFunc
+	CreateDept       gin.HandlerFunc
+	UpdateDept       gin.HandlerFunc
+	DeleteDept       gin.HandlerFunc
+	ListUserTokens   gin.HandlerFunc
+	RevokeToken      gin.HandlerFunc
+	Usage            gin.HandlerFunc
+	UsageOverview    gin.HandlerFunc // GET /usage/overview(2026-09 用量中心总览)
+	UsageRequests    gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
+	ServerInfo       gin.HandlerFunc
+	ListAuditLogs    gin.HandlerFunc
+	GetAuditSettings gin.HandlerFunc // GET /audit/settings 审计保留策略(G13)
+	PutAuditSettings gin.HandlerFunc // PUT /audit/settings 审计保留策略(仅 super_admin)
+	GetAuthConfig    gin.HandlerFunc
+	SetAuthConfig    gin.HandlerFunc
+	TestConn         gin.HandlerFunc
 }
 
 // AdminHandlers 返回服务端管理面 handler 集合(供 router 包集中声明路由)。
 func (a *AdminAPI) Handlers() *AdminHandlers {
 	return &AdminHandlers{
-		Login:          a.handleLogin,
-		LoginMFA:       a.handleLoginMFA,
-		PublicMethods:  a.getPublicAuthMethods,
-		Me:             a.handleMe,
-		Logout:         a.handleLogout,
-		MePassword:     a.handleMePassword,
-		GetMyMFA:       a.getMyMFA,
-		EnableMyMFA:    a.enableMyMFA,
-		VerifyMyMFA:    a.verifyMyMFA,
-		DisableMyMFA:   a.disableMyMFA,
-		ResetUserMFA:   a.resetUserMFA,
-		ListUsers:      a.listUsers,
-		CreateUser:     a.createUser,
-		UpdateUser:     a.updateUser,
-		DeleteUser:     a.deleteUser,
-		GetUserGroups:  a.getUserGroups,
-		SetUserDept:    a.setUserDepartment,
-		ListDepts:      a.listDepartments,
-		CreateDept:     a.createDepartment,
-		UpdateDept:     a.updateDepartment,
-		DeleteDept:     a.deleteDepartment,
-		ListUserTokens: a.listUserTokens,
-		RevokeToken:    a.revokeToken,
-		Usage:          a.usage,
-		UsageOverview:  a.usageOverview,
-		UsageRequests:  a.usageRequests,
-		ServerInfo:     a.handleServerInfo,
-		ListAuditLogs:  a.listAuditLogs,
-		GetAuthConfig:  a.getAuthConfig,
-		SetAuthConfig:  a.setAuthConfig,
-		TestConn:       a.testAuthConnection,
+		Login:            a.handleLogin,
+		LoginMFA:         a.handleLoginMFA,
+		PublicMethods:    a.getPublicAuthMethods,
+		Me:               a.handleMe,
+		Logout:           a.handleLogout,
+		MePassword:       a.handleMePassword,
+		GetMyMFA:         a.getMyMFA,
+		EnableMyMFA:      a.enableMyMFA,
+		VerifyMyMFA:      a.verifyMyMFA,
+		DisableMyMFA:     a.disableMyMFA,
+		ResetUserMFA:     a.resetUserMFA,
+		ListUsers:        a.listUsers,
+		CreateUser:       a.createUser,
+		UpdateUser:       a.updateUser,
+		DeleteUser:       a.deleteUser,
+		GetUserGroups:    a.getUserGroups,
+		SetUserDept:      a.setUserDepartment,
+		ListDepts:        a.listDepartments,
+		CreateDept:       a.createDepartment,
+		UpdateDept:       a.updateDepartment,
+		DeleteDept:       a.deleteDepartment,
+		ListUserTokens:   a.listUserTokens,
+		RevokeToken:      a.revokeToken,
+		Usage:            a.usage,
+		UsageOverview:    a.usageOverview,
+		UsageRequests:    a.usageRequests,
+		ServerInfo:       a.handleServerInfo,
+		ListAuditLogs:    a.listAuditLogs,
+		GetAuditSettings: a.getAuditSettings,
+		PutAuditSettings: a.putAuditSettings,
+		GetAuthConfig:    a.getAuthConfig,
+		SetAuthConfig:    a.setAuthConfig,
+		TestConn:         a.testAuthConnection,
 	}
 }

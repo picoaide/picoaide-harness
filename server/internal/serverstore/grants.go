@@ -75,36 +75,7 @@ func ListSkillGrants(db *sql.DB, skillName string) ([]Grant, error) {
 // or through any of their groups. Single query, no N+1; a user with no
 // grants gets an empty set (strict default: nothing is implicitly visible).
 func AccessibleSkillNames(db *sql.DB, username string, groups []string) ([]string, error) {
-	var sb strings.Builder
-	sb.WriteString("SELECT DISTINCT app_id FROM app_grants WHERE kind = 'skill' AND ((grantee_type = 'user' AND grantee = ?)")
-	args := []any{username}
-	if len(groups) > 0 {
-		// COLLATE NOCASE: LDAP 组名与手输组名大小写差异不得导致授权静默失效
-		sb.WriteString(" OR (grantee_type = 'group' AND (")
-		for i, g := range groups {
-			if i > 0 {
-				sb.WriteString(" OR ")
-			}
-			sb.WriteString(CaseInsensitiveCmp("grantee"))
-			args = append(args, g)
-		}
-		sb.WriteString("))")
-	}
-	sb.WriteString(")")
-	rows, err := db.Query(sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
+	return AccessibleAppIDs(db, "skill", username, groups)
 }
 
 // DeleteSkillGrants removes all grants of a skill (resource deletion
@@ -302,4 +273,10 @@ func ReplaceSkillGroupGrants(db *sql.DB, skillName string, groups []string) erro
 			return err
 		},
 		groups)
+}
+
+// DeleteAppGrants 清空某 App 的全部授权(资源删除级联; 授权不可复活已删资源)。
+func DeleteAppGrants(db queryer, kind, appID string) error {
+	_, err := db.Exec("DELETE FROM app_grants WHERE kind = ? AND app_id = ?", kind, appID)
+	return err
 }

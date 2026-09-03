@@ -3,6 +3,7 @@ package serverauth
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -231,8 +232,8 @@ func (a *API) handleChangePassword(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "密码过长")
 		return
 	}
-	if utf8.RuneCountInString(req.NewPassword) < minPasswordLength {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+	if utf8.RuneCountInString(req.NewPassword) < serverstore.AuthMinPasswordLength(a.DB) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", fmt.Sprintf("密码至少 %d 位", serverstore.AuthMinPasswordLength(a.DB)))
 		return
 	}
 	// 外部认证(LDAP/OIDC)用户的密码由企业 IdP 管理(与管理员重置同一口径)。
