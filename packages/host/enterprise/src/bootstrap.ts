@@ -40,6 +40,19 @@ export function maxOutputFromDefaultParams(raw: unknown): number | undefined {
 }
 
 /**
+ * Validate and project the server-delivered input modalities (0058).
+ * Invalid/empty values yield undefined (the llm-deepseek settings schema then
+ * defaults to text-only), so a misconfigured server can never inject an
+ * unknown modality that would invalidate the whole settings section.
+ */
+export function resolveInputModalities(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined
+  const filtered = raw.filter((m): m is string => m === 'text' || m === 'image')
+  if (filtered.length === 0) return undefined
+  return [...new Set(filtered)]
+}
+
+/**
  * Project a gateway session onto the DSH model settings: the gateway model
  * catalog drives the `llm-deepseek` models list, and the gateway default model
  * becomes the Agent default. Clearing the session resets both to composition
@@ -62,10 +75,14 @@ export function apply(ctx: Context): void {
       await ctx.settings.update(LLM_DEEPSEEK_NS, {
         models: cfg.models.map((m) => {
           const maxTokens = maxOutputFromDefaultParams(m.default_params)
+          const inputModalities = resolveInputModalities(m.input_modalities)
           return {
             id: m.id,
             name: m.display_name,
             ...maxTokens === undefined ? {} : { maxTokens },
+            // 0058:图片支持配置随模型清单下发;缺失 = 仅 text(适配器据此
+            // 拒绝图片输入,与服务端「配置未下发」时旧行为一致)。
+            ...inputModalities === undefined ? {} : { inputModalities },
           }
         }),
         ...reasoningEffort ? { reasoningEffort } : {},
