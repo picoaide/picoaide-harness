@@ -61,13 +61,6 @@ func RevokeToken(db *sql.DB, hash string) error {
 	return nil
 }
 
-// RevokeAllUserTokens deletes every api token of a user (password change /
-// admin demotion / disable: old credentials must die immediately).
-func RevokeAllUserTokens(db *sql.DB, userID int64) error {
-	_, err := db.Exec("DELETE FROM api_tokens WHERE user_id = ?", userID)
-	return err
-}
-
 // RevokeTokenByID revokes a token by id. Idempotent: revoking an
 // already-revoked token succeeds.
 func RevokeTokenByID(db *sql.DB, tokenID int64) error {

@@ -19,19 +19,8 @@ export function usageRate(used: number, quota: number | null | undefined): numbe
   return Math.min(100, Math.round((used / quota) * 100))
 }
 
-// 实际占用百分比(可 >100% 用于超额展示;quota=0/null 返回 null)
-export function quotaPercent(used: number, quota: number | null | undefined): number | null {
-  if (!quota || quota <= 0) return null
-  return Math.round((used / quota) * 100)
-}
-
-// 是否超额(used > quota,且 quota 有限)
-export function quotaOver(used: number, quota: number | null | undefined): boolean {
-  return !!quota && quota > 0 && used > quota
-}
-
 // 本地时区 YYYY-MM-DD(修复 UTC 偏移一天的 bug;toISOString 在 UTC+8 上午会回退一天)
-export function ymd(d: Date): string {
+function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 

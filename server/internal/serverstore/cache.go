@@ -54,23 +54,9 @@ func (c *ttlCache) set(db *sql.DB, key string, val any) {
 	c.items[key] = cacheEntry{val: val, exp: time.Now().Add(c.ttl), db: db}
 }
 
-// invalidate 主动失效(管理端变更模型/组织/上游时调用)。
-func (c *ttlCache) invalidate(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.items, key)
-}
-
 // invalidateAll 全量失效(不区分 key)。
 func (c *ttlCache) invalidateAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.items = map[string]cacheEntry{}
-}
-
-// InvalidateAllCaches 全量失效(供测试/维护入口)。
-func InvalidateAllCaches() {
-	groupTreeCache.invalidateAll()
-	modelConfigCache.invalidateAll()
-	settingsCache.invalidateAll()
 }

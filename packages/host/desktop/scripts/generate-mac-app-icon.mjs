@@ -6,11 +6,11 @@ import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 
 /** Pixel width and height of the generated macOS icon canvas. */
-export const MAC_APP_ICON_CANVAS_SIZE = 1024
+const MAC_APP_ICON_CANVAS_SIZE = 1024
 /** Pixel width and height of the centered source artwork. */
-export const MAC_APP_ICON_ARTWORK_SIZE = 824
+const MAC_APP_ICON_ARTWORK_SIZE = 824
 /** Transparent inset on each edge of the generated macOS icon. */
-export const MAC_APP_ICON_INSET = (MAC_APP_ICON_CANVAS_SIZE - MAC_APP_ICON_ARTWORK_SIZE) / 2
+const MAC_APP_ICON_INSET = (MAC_APP_ICON_CANVAS_SIZE - MAC_APP_ICON_ARTWORK_SIZE) / 2
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const repoRoot = resolve(packageRoot, '..', '..', '..')

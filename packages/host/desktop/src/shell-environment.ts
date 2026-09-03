@@ -26,7 +26,7 @@ const SUPPORTED_SHELL_ARGUMENTS = new Map<string, readonly string[]>([
  * code, but their complete exported environment is not an appropriate ambient
  * API for Electron or model-facing subprocesses.
  */
-export const DESKTOP_SHELL_ENVIRONMENT_KEYS: ReadonlySet<string> = new Set([
+const DESKTOP_SHELL_ENVIRONMENT_KEYS: ReadonlySet<string> = new Set([
   'ANDROID_HOME',
   'ANDROID_SDK_ROOT',
   'ASDF_DATA_DIR',

@@ -259,7 +259,7 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 // subtreeGroupIDs returns the department id plus all descendant ids
 // (in-memory walk; the tree is small). 复用 loadGroupTree 的缓存:
 // 不再每次全表 SELECT groups(与 EffectiveDeptBudget 共用同一缓存树,
-// 变更后 InvalidateGroupTree 同步失效)。
+// 变更后应失效组织树缓存(当前依赖 TTL 兜底)。
 func subtreeGroupIDs(db *sql.DB, rootID int64) ([]int64, error) {
 	nodes, err := loadGroupTree(db)
 	if err != nil {

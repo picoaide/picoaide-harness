@@ -109,7 +109,7 @@ export function sumRows(rows: UsageRow[]): { cost: number; tokens: number; reque
 }
 
 // 导出 CSV(带 BOM;公式注入转义,与旧用量页一致)
-export function csvCell(v: string | number): string {
+function csvCell(v: string | number): string {
   let s = String(v)
   if (/^[=+\-@]/.test(s)) s = "'" + s
   if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"'

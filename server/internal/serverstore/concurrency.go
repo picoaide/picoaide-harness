@@ -5,9 +5,6 @@ import (
 	"time"
 )
 
-// concurrencySampleInterval 是采样间隔(生产 15s;测试注入更短)。
-var concurrencySampleInterval = 15 * time.Second
-
 // RecordConcurrencySample 记录某模型当前 in-flight 数的采样,更新当日
 // 峰值(GREATEST 永不回退;peak_at 取首个触发峰值的时刻)。
 // 幂等:同一模型+天重复调用安全。

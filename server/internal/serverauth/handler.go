@@ -59,14 +59,6 @@ func WriteError(c *gin.Context, status int, code, msg string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": msg}})
 }
 
-// WithVersionPrefix prefixes a route group base path with an API major-version
-// marker, e.g. WithVersionPrefix("/v2", "/api/auth") -> "/v2/api/auth".
-// v2(v2 客户端)双轨镜像: 只在注册源头把同一组 handler 多挂一份前缀,
-// 认证/权限中间件与旧 /api 完全共享, 只能增加不能减少。
-func WithVersionPrefix(prefix, base string) string {
-	return strings.TrimSuffix(prefix, "/") + base
-}
-
 // writeError is a short alias used within this package.
 func writeError(c *gin.Context, status int, code, msg string) { WriteError(c, status, code, msg) }
 

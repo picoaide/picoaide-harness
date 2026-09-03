@@ -9,7 +9,7 @@
  */
 
 /** Authentication modes (决策 2026-08-25:CLI 已移除——CLI 即 skill)。 */
-export type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'server-side'
+type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'server-side'
 
 /** OAuth authorization-code flow (supports RFC 8414 discovery + RFC 7591 dynamic registration + PKCE). */
 export interface OAuthAuthConfig {
@@ -47,7 +47,8 @@ export interface DeviceAuthConfig {
 }
 
 /** Token form flow: ask the user for static fields (API key, access token...). */
-export interface TokenField {
+/** Token form fields: labels + defaults for one credential input. */
+interface TokenField {
   key: string
   label: string
   /** 'password' renders masked and is persisted as a secret. */
@@ -57,7 +58,7 @@ export interface TokenField {
 }
 
 /** Server-side flow: a fetch callback yields the token (managed by the backend). */
-export interface ServerSideAuthConfig {
+interface ServerSideAuthConfig {
   /** Placeholder; the token fetch is injected by the framework owner. */
   fetchToken: () => Promise<string>
 }
@@ -102,7 +103,7 @@ export interface ConnectorDef {
 }
 
 /** Connection lifecycle state (mirrors WorkBuddy's status machine). */
-export type ConnectorStatus = 'disconnected' | 'connecting' | 'connected' | 'unauthorized' | 'error'
+type ConnectorStatus = 'disconnected' | 'connecting' | 'connected' | 'unauthorized' | 'error'
 
 export interface ConnectorState {
   status: ConnectorStatus

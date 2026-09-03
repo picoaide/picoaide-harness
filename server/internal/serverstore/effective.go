@@ -18,9 +18,6 @@ const groupTreeTTL = 30 * time.Second
 
 var groupTreeCache = newTTLCache(groupTreeTTL)
 
-// InvalidateGroupTree 使组织树缓存失效(部门/主管/组变更时调用)。
-func InvalidateGroupTree() { groupTreeCache.invalidateAll() }
-
 type groupNode struct {
 	id     int64
 	parent int64

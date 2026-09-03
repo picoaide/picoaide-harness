@@ -26,11 +26,6 @@ func DateMonthExpr(col string) string {
 	return fmt.Sprintf("to_char(%s AT TIME ZONE '%s', 'YYYY-MM')", col, pgTZ)
 }
 
-// DateTruncDayExpr is used in WHERE / comparisons for day buckets.
-func DateTruncDayExpr(col string) string {
-	return fmt.Sprintf("(%s AT TIME ZONE '%s')::date", col, pgTZ)
-}
-
 // DateCompareExpr wraps a column so range comparisons (>= ?, < ?) align with
 // the "day" semantics (PG TIMESTAMPTZ vs formatted date string argument).
 func DateCompareExpr(col string) string {

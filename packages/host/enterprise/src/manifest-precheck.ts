@@ -34,7 +34,7 @@ export interface PrecheckIssue {
 }
 
 /** 与服务端一致的上限(server/internal/skillmanifest/manifest.go)。 */
-export const LIMITS = {
+const LIMITS = {
   minAppId: 2,
   maxAppId: 64,
   maxTitle: 100,
