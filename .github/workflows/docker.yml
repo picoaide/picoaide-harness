@@ -138,7 +138,7 @@ jobs:
           # Dockerfile stage1 用 --from=root 注入,保持 brands 唯一权威不入镜像构建目录)。
           context: server
           platforms: linux/amd64
-          contexts: |
+          build-contexts: |
             root=type=local,src=.
           build-args: VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}
