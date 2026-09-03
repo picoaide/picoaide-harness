@@ -5,6 +5,13 @@ import { fileURLToPath, URL } from 'node:url'
 export default defineConfig({
   plugins: [react()],
   base: '/admin/',
+  // 品牌资产从仓库根 brands/official/ 编译期注入(单一权威源)。
+  // dev 模式文件服务需放行仓库根(默认只允许项目根内文件)。
+  server: {
+    fs: {
+      allow: [fileURLToPath(new URL('../..', import.meta.url))],
+    },
+  },
   build: {
     outDir: 'dist',
     // vendor 分包(性能优化 2026-P):react/react-router 等依赖拆成独立

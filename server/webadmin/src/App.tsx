@@ -7,6 +7,7 @@ import { cn } from './lib/utils'
 import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
 import { PasswordDialog } from './components/password-dialog'
 import { MFASettingsDialog } from './components/mfa-settings-dialog'
+import { BRAND_LOGO_URL } from './lib/brand-assets'
 import Login from './pages/Login'
 
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
@@ -224,18 +225,8 @@ export default function App() {
           )}
         >
           <div className="flex items-center gap-3 px-4 pb-4 pt-5">
-            {/* 品牌 mark:黑 tile + 白色花括号(与 DSH 客户端一致) */}
-            <div className="brand-tile h-9 w-9 shrink-0">
-              <svg viewBox="0 0 1254 1254" className="h-full w-full p-0.5" fill="none" aria-hidden="true">
-                <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-                  <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                  <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
-                  <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-                  <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-                </g>
-              </svg>
-            </div>
+            {/* 品牌 mark: 编译期注入 brands/official/logo.svg(黑 tile + 白花括号) */}
+            <img src={BRAND_LOGO_URL} alt="logo" className="h-9 w-9 shrink-0 object-contain" draggable={false} />
             <div className="min-w-0 flex-1">
               <div className="truncate text-[15px] font-bold tracking-tight text-foreground">{brand?.login?.display_name || 'PicoAide'}</div>
               <div className="text-[10px] font-medium text-muted-foreground">Admin Console</div>
@@ -353,17 +344,7 @@ export default function App() {
               <Menu className="h-5 w-5" />
             </button>
             <div className="flex items-center gap-2">
-              <div className="brand-tile h-6 w-6">
-                <svg viewBox="0 0 1254 1254" className="h-full w-full" fill="none" aria-hidden="true">
-                  <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
-                    <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                    <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" stroke="#FFFFFF" strokeWidth="40" strokeLinecap="round" strokeLinejoin="round" />
-                    <line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" strokeWidth="20" strokeLinecap="round" />
-                    <circle cx="435" cy="627" r="65" fill="#FFFFFF" />
-                    <circle cx="817" cy="627" r="65" fill="#FFFFFF" />
-                  </g>
-                </svg>
-              </div>
+              <img src={BRAND_LOGO_URL} alt="logo" className="h-6 w-6 object-contain" draggable={false} />
               <span className="text-[15px] font-bold">PicoAide 管理</span>
             </div>
           </div>

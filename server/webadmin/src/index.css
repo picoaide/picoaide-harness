@@ -85,16 +85,6 @@
 }
 
 @layer utilities {
-  /* DSH 风:黑色主 logo tile(与客户端 BraceMark 一致的深色调) */
-  .brand-tile {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    border-radius: 0.5rem;
-    background-color: #0f1115;
-    color: #fff;
-  }
   /* 移除渐变品牌条(DSH 无渐变装饰) */
   .brand-line {
     display: none;
