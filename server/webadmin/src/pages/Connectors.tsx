@@ -578,7 +578,7 @@ export default function Connectors() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              服务端模式由企业网关注入 token,无需在表单填写任何认证字段。
+              服务端模式由企业网关注入 token,无需在表单填写任何认证字段;仅需在下方配置 MCP 服务器。
             </p>
           </div>
 

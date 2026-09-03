@@ -989,6 +989,13 @@ func (a *AdminAPI) usage(c *gin.Context) {
 	if dept := c.Query("dept"); dept != "" {
 		opts = append(opts, serverstore.WithDept(dept))
 	}
+	// G9: 日志页统计与明细同口径(model/kind 过滤)。
+	if model := c.Query("model"); model != "" {
+		opts = append(opts, serverstore.WithModel(model))
+	}
+	if kind := c.Query("kind"); kind != "" {
+		opts = append(opts, serverstore.WithKind(kind))
+	}
 	// group=provider 为展示层归并(usage 无 provider 列,按 models 表模型→
 	// 渠道映射近似归并,见 serverstore/usage_provider.go):聚合底层仍按 model。
 	aggGroup := group

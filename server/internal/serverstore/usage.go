@@ -477,11 +477,23 @@ type UsageAggregateOption func(*UsageAggregateQuery)
 type UsageAggregateQuery struct {
 	Username string // 仅统计该用户名(用于用户钻取)
 	Dept     string // 仅统计该部门树内成员(2026-09 用量中心,与预算同口径)
+	Model    string // 仅统计指定模型(G9: 日志页统计徽标与明细同口径)
+	Kind     string // 仅统计指定类型 chat|embedding|search(G9)
 }
 
 // WithUsername 只聚合指定用户名(JOIN users),用于用户详情钻取。
 func WithUsername(username string) UsageAggregateOption {
 	return func(q *UsageAggregateQuery) { q.Username = username }
+}
+
+// WithModel 只聚合指定模型的用量。
+func WithModel(model string) UsageAggregateOption {
+	return func(q *UsageAggregateQuery) { q.Model = model }
+}
+
+// WithKind 只聚合指定类型(chat|embedding|search)的用量。
+func WithKind(kind string) UsageAggregateOption {
+	return func(q *UsageAggregateQuery) { q.Kind = kind }
 }
 
 // WithDept 只聚合指定部门(含其子树)的成员用量——与部门预算 enforcement
@@ -608,6 +620,14 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	if q.Username != "" {
 		qstr += usernameFilter
 		args = append(args, q.Username)
+	}
+	if q.Model != "" {
+		qstr += " AND usage.model = ?"
+		args = append(args, q.Model)
+	}
+	if q.Kind != "" {
+		qstr += " AND usage.kind = ?"
+		args = append(args, q.Kind)
 	}
 	if q.Dept != "" {
 		qstr += deptFilter

@@ -102,6 +102,9 @@ export default function Audit() {
   const [appliedUser, setAppliedUser] = useState('')
   // P1-8: 请求序号防乱序——快速翻页/切筛选时只有最新请求的响应能更新 state
   const loadSeq = useRef(0)
+  // G13: 审计保留策略(仅 super_admin 可写; auditor 只读展示)
+  const [retentionDays, setRetentionDays] = useState(180)
+  const [retentionBusy, setRetentionBusy] = useState(false)
 
   const load = useCallback(async (p: number, action: string, username: string) => {
     const current = ++loadSeq.current
@@ -114,6 +117,10 @@ export default function Audit() {
       setLogs(data.logs)
       setTotal(data.total)
       setPage(p)
+      // G13: 保留策略(读仅 PermAuditRead; 写 403 由保存按钮语义兜底)
+      request(`${ADMIN_API}/audit/settings`).then((s) => {
+        if (s?.retention_days) setRetentionDays(s.retention_days)
+      }).catch(() => { /* 非 super_admin 亦可读 */ })
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
@@ -162,6 +169,27 @@ export default function Audit() {
     URL.revokeObjectURL(a.href)
   }
 
+  const saveRetention = async () => {
+    if (retentionBusy) return
+    if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+      setError('保留天数必须是 1~3650 的整数')
+      return
+    }
+    setRetentionBusy(true)
+    setError('')
+    try {
+      await request(`${ADMIN_API}/audit/settings`, {
+        method: 'PUT',
+        body: JSON.stringify({ retention_days: retentionDays }),
+      })
+      setError('')
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setRetentionBusy(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <PageHeader
@@ -179,6 +207,23 @@ export default function Audit() {
         }
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
+      {/* G13: 审计保留策略 */}
+      <div className="flex flex-wrap items-center gap-2 rounded-md border p-3">
+        <span className="text-[13px] font-medium">审计日志保留</span>
+        <Input
+          type="number"
+          min={1}
+          max={3650}
+          className="h-8 w-28"
+          aria-label="审计保留天数"
+          value={retentionDays}
+          onChange={(e) => setRetentionDays(Number(e.target.value))}
+        />
+        <span className="text-xs text-muted-foreground">天(1~3650; 保存后立即清理更旧日志)</span>
+        <Button size="sm" variant="outline" disabled={retentionBusy} onClick={() => { void saveRetention() }}>
+          {retentionBusy ? '保存中…' : '保存策略'}
+        </Button>
+      </div>
       {/* M8: 筛选条 */}
       <div className="flex flex-wrap items-center gap-2">
         <Select value={filterAction} onValueChange={setFilterAction}>

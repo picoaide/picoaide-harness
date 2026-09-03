@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Card } from '../components/ui/card'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
+import { UserSearchSelect } from '../components/user-search-select'
 import { Network } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { deptSubtreeIds, deptTreeOptions } from '../lib/utils'
@@ -28,14 +29,8 @@ interface Department {
   monthly_cost?: number // 0024:部门树当月费用(元)
 }
 
-interface UserOption {
-  id: number
-  username: string
-}
-
 export default function Departments() {
   const [depts, setDepts] = useState<Department[]>([])
-  const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
@@ -48,13 +43,9 @@ export default function Departments() {
   const load = useCallback(async () => {
     const current = ++loadSeq.current
     try {
-      const [d, u] = await Promise.all([
-        request(`${ADMIN_API}/departments`),
-        request(`${ADMIN_API}/users?size=200`),
-      ])
+      const d = await request(`${ADMIN_API}/departments`)
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setDepts(d.departments ?? [])
-      setUsers(u.users ?? [])
       setError('') // 成功后清空错误(中3 同口径)
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
@@ -265,19 +256,15 @@ export default function Departments() {
             </div>
             <div className="space-y-1">
               <Label htmlFor="dept-leader">部门主管</Label>
-              <Select value={deptForm.leader_id} onValueChange={(v) => setDeptForm({ ...deptForm, leader_id: v })}>
-                <SelectTrigger aria-label="部门主管" id="dept-leader"><SelectValue placeholder="选择主管" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="0">未设置</SelectItem>
-                  {users.map((u) => (
-                    <SelectItem key={u.id} value={String(u.id)}>{u.username}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {/* L15:主管候选截断提示(接口 size 上限 200) */}
-              {users.length >= 200 && (
-                <p className="text-xs text-muted-foreground">用户较多,仅展示前 200 名,超出部分无法在此选择主管</p>
-              )}
+              <UserSearchSelect
+                ariaLabel="部门主管"
+                value={deptForm.leader_id}
+                onValueChange={(v) => setDeptForm({ ...deptForm, leader_id: v })}
+                placeholder="搜索并选择主管"
+                allowEmpty
+                emptyLabel="未设置"
+              />
+              {/* G10: 主管从全量用户搜索选择(服务端 q= 搜索, 不再受前 200 截断) */}
             </div>
             <div className="space-y-1">
               <Label htmlFor="dept-desc">描述(可选)</Label>

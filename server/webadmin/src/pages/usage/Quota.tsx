@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { PageHeader } from '../../components/page-header'
+import { useSearchParams, Link } from 'react-router-dom'
 import { fmtY, type UserInfo, type DeptInfo } from './common'
 import { fmtTokens, moneyPercent, moneyOver } from '../../lib/format'
 import { cn } from '../../lib/utils'
@@ -42,6 +43,9 @@ export default function UsageQuota() {
   const [defToken, setDefToken] = useState('')
   const [defMoney, setDefMoney] = useState('')
   const [q, setQ] = useState('')
+  // G8: 用户页「去用量中心调整」跳转定位(?user=username 预填并按 Enter)
+  const [searchParams] = useSearchParams()
+  const presetUser = searchParams.get('user') ?? ''
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -70,7 +74,15 @@ export default function UsageQuota() {
     }
   }, [])
 
-  useEffect(() => { void load(q) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    // G8: ?user= 预填并查询(用户页跳转定位)
+    if (presetUser) {
+      setQ(presetUser)
+      void load(presetUser)
+    } else {
+      void load('')
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveDefault = async () => {
     setSaving(true)
@@ -266,7 +278,8 @@ export default function UsageQuota() {
                         {over && <Badge variant="destructive" className="ml-1.5">超预算</Badge>}
                       </TableCell>
                       <TableCell>
-                        <Button size="sm" variant="outline" onClick={() => { setBudgetDept(d); setBudgetVal(d.budget_money === null ? '' : String(d.budget_money)) }}>设置</Button>
+                        {/* G8 收敛: 部门预算唯一编辑入口 = 部门管理页(此处只读展示) */}
+                        <Link to={`/departments`} className="text-xs text-primary hover:underline">去部门管理</Link>
                       </TableCell>
                     </TableRow>
                   )

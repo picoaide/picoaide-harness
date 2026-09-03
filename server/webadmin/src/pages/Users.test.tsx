@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import Users from './Users'
+import { MemoryRouter } from 'react-router-dom'
 import { request } from '../api'
 
 const mockRequest = vi.mocked(request)
@@ -32,7 +33,7 @@ beforeEach(() => {
 
 describe('Users 用户管理页', () => {
   it('渲染用户表格:部门徽标与管理角色', async () => {
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     expect(await screen.findByText('alice')).toBeInTheDocument()
     expect(screen.getByText('研发部')).toBeInTheDocument()
     expect(screen.getByText('管理员')).toBeInTheDocument()
@@ -40,7 +41,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('员工部门归属:打开对话框从部门树多选并保存(group_ids)', async () => {
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getAllByRole('button', { name: '部门' })[0])
     const dialog = within(await screen.findByRole('dialog'))
@@ -55,14 +56,14 @@ describe('Users 用户管理页', () => {
   })
 
   it('未分配部门用户显示占位', async () => {
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('boss')
     // boss 无部门
     expect(screen.getByText('—')).toBeInTheDocument()
   })
 
   it('禁用用户需确认(高2):确认后 PUT status 0,取消不发送', async () => {
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     // 取消 → 不发送请求
     confirmSpy.mockReturnValueOnce(false)
@@ -87,7 +88,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/users' && init?.method === 'POST') throw new Error('密码至少 10 位')
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getByRole('button', { name: '新建用户' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -107,7 +108,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/users/1/tokens') throw new Error('查询失败')
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getByRole('button', { name: '令牌' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -130,7 +131,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     // 跟随默认 + 全局值
     expect(await screen.findByText(/跟随默认\(100K\/月\)/)).toBeInTheDocument()
     expect(screen.getByText(/跟随默认\(¥50\.00\/月\)/)).toBeInTheDocument()
@@ -149,7 +150,7 @@ describe('Users 用户管理页', () => {
       }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getByRole('button', { name: '令牌' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -157,7 +158,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('管理员配额按钮禁用(L9)', async () => {
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('boss')
     // boss 是 admin → 配额按钮禁用
     const row = screen.getByText('boss').closest('tr')!
@@ -170,19 +171,18 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     expect(await screen.findByText(/暂无匹配用户/)).toBeInTheDocument()
   })
 
-  it('配额输入非法整数被前端拦截(L7)', async () => {
-    render(<Users />)
+  it('配额概览:只读展示生效配额并跳转用量中心(G8 单入口)', async () => {
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getAllByRole('button', { name: '配额' })[0])
     const dialog = within(await screen.findByRole('dialog'))
-    fireEvent.change(dialog.getByLabelText('月度 token 配额'), { target: { value: '12.5' } })
-    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
-    expect(await dialog.findByText('token 配额必须是 ≥0 的整数')).toBeInTheDocument()
-    // 未发送请求
+    // 只读概览(生效配额) + 跳转入口; 不发任何 PUT
+    expect(dialog.getByText(/生效 token 配额/)).toBeInTheDocument()
+    expect(dialog.getByRole('link', { name: /去用量中心调整/ })).toBeInTheDocument()
     expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/users/1', expect.objectContaining({ method: 'PUT' }))
   })
 
@@ -194,7 +194,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('multi')
     fireEvent.click(screen.getByRole('button', { name: '部门' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -206,40 +206,7 @@ describe('Users 用户管理页', () => {
   })
 })
 
-  it('员工金额配额:打开对话框设置 token+金额并保存', async () => {
-    render(<Users />)
-    await screen.findByText('alice')
-    fireEvent.click(screen.getAllByRole('button', { name: '配额' })[0])
-    const dialog = within(await screen.findByRole('dialog'))
-    expect(dialog.getByText(/流量配额/)).toBeInTheDocument()
-    const tokenInput = dialog.getByLabelText('月度 token 配额')
-    const moneyInput = dialog.getByLabelText('月度金额配额(元)')
-    fireEvent.change(tokenInput, { target: { value: '50000' } })
-    fireEvent.change(moneyInput, { target: { value: '100' } })
-    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/users/1',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ quota_tokens: 50000, quota_money: 100 }),
-      }),
-    )
-  })
-
-  it('员工金额配额:留空清空金额(quota_money_clear)', async () => {
-    render(<Users />)
-    await screen.findByText('alice')
-    fireEvent.click(screen.getAllByRole('button', { name: '配额' })[0])
-    const dialog = within(await screen.findByRole('dialog'))
-    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/users/1',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ quota_clear: true, quota_money_clear: true }),
-      }),
-    )
-  })
+// G8: 配额编辑唯一入口 = 用量中心 → 配额与预算(Adjust Quota); 用户页仅只读概览。
 
 describe('Users 0057 密码/MFA 操作', () => {
   it('重置密码: 提交 PUT /users/:id {password} 并提示强制改密', async () => {
@@ -253,7 +220,7 @@ describe('Users 0057 密码/MFA 操作', () => {
       if (path === '/api/server/admin/departments') return { departments: [] }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     // 上次改密列渲染本地格式化时间
     expect(screen.getByText(/2026-08-0[12]/)).toBeInTheDocument()
@@ -283,7 +250,7 @@ describe('Users 0057 密码/MFA 操作', () => {
       if (path === '/api/server/admin/departments') return { departments: [] }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('alice')
     // 未开启 MFA 的 alice 无按钮; 仅 boss 有(全页恰一个)
     expect(screen.getAllByRole('button', { name: '重置MFA' })).toHaveLength(1)
@@ -303,7 +270,7 @@ describe('Users 0057 密码/MFA 操作', () => {
       if (path === '/api/server/admin/departments') return { departments: [] }
       return {}
     })
-    render(<Users />)
+    render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('ldap1')
     expect(screen.getByRole('button', { name: '重置密码' })).toBeDisabled()
   })
