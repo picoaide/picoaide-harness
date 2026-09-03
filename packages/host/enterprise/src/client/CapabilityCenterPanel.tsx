@@ -40,7 +40,14 @@ interface CapabilityItem {
   status?: ItemStatus | undefined
   reason?: string | undefined
   /** 组织库质量标记（0037）：仅 approved 行有展示语义。 */
-  quality?: 'official' | 'featured' | undefined
+  /** 质量(0059 起仅 featured;官方语义移交 official 属性)。 */
+  quality?: '' | 'featured' | undefined
+  /** 0059 官方:蓝标 + 仅管理员可上传(员工端更新禁用)。 */
+  official?: boolean | undefined
+  /** 市场排序评分(服务端计算 = calls*3+downloads),客户端直接按此排序。 */
+  score?: number | undefined
+  downloads?: number | undefined
+  calls?: number | undefined
   /** 该名全部 approved 版本（历史版本展开用；不含当前版本则单元素）。 */
   versions: string[]
   /** 已安装（磁盘存在同名目录，且并非本机创作）。 */
@@ -306,6 +313,8 @@ const CHIP_BRAND = chipStyle('var(--dsw-alias-brand-primary)')
 const CHIP_SUCCESS = chipStyle('var(--dsw-alias-state-success-primary)')
 const CHIP_WARN = chipStyle('var(--dsw-alias-state-warn-label)')
 const CHIP_ERROR = chipStyle('var(--dsw-alias-state-error-primary)')
+/** 自制徽章(紫, 与官方蓝/来源灰区分)。 */
+const CHIP_LOCAL = chipStyle('#7C3AED')
 
 /** 单测用：数值感知版本比较（对齐服务端 util.CompareSemVer 语义）。 */
 export function compareVersions(left: string, right: string): number {
@@ -627,7 +636,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   }
 
   const visibleByTab = useMemo(() => {
-    const base = tab === 'market' ? items.filter(i => i.source !== 'local') : items.filter(i => i.source === 'local')
+    const base = tab === 'market'
+      ? items.filter(i => i.source !== 'local')
+      : items.filter(i => i.source === 'local' || i.installed === true)
     const merged = mergeItems(base)
     // 搜索: name/displayName/description 关键词(大小写不敏感)。
     const q = search.trim().toLowerCase()
@@ -636,18 +647,47 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       || (i.displayName ?? '').toLowerCase().includes(q)
       || (i.description ?? '').toLowerCase().includes(q),
     )
-    return filter === 'all' ? searched : searched.filter(i => i.kind === filter)
+    const kindFiltered = filter === 'all' ? searched : searched.filter(i => i.kind === filter)
+    // 0059 排序定案: 市场 = 官方→精选→score 降序;「我的」= 已安装(score 降序→名称),
+    // 自制组在后(名称升序)。
+    const sortScore = (a: CapabilityItem, b: CapabilityItem): number => (b.score ?? 0) - (a.score ?? 0)
+    if (tab === 'market') {
+      return [...kindFiltered].sort((a, b) => {
+        if (!!a.official !== !!b.official) return a.official ? -1 : 1
+        const af = a.quality === 'featured'; const bf = b.quality === 'featured'
+        if (af !== bf) return af ? -1 : 1
+        if (sortScore(a, b) !== 0) return sortScore(a, b)
+        return a.name.localeCompare(b.name)
+      })
+    }
+    return [...kindFiltered].sort((a, b) => {
+      const aLocal = a.source === 'local'; const bLocal = b.source === 'local'
+      if (aLocal !== bLocal) return aLocal ? 1 : -1
+      return aLocal ? a.name.localeCompare(b.name) : (sortScore(a, b) !== 0 ? sortScore(a, b) : a.name.localeCompare(b.name))
+    })
   }, [items, tab, filter, search])
 
   const sectionStatus = (key: 'mine' | 'market'): SectionState => sections[key] ?? { status: 'idle', error: '' }
 
+  const isMineSection = tab === 'mine'
   const renderBadges = (item: CapabilityItem): React.ReactNode => {
     const statusBadge = item.status === 'pending' ? <span style={CHIP_WARN}>{t('capability.pending')}</span>
       : item.status === 'rejected' ? <span style={CHIP_ERROR}>{t('capability.rejected')}</span>
         : item.source === 'org' && item.installed ? <span style={CHIP_SUCCESS}>{t('capability.installed')}</span>
           : item.installed ? <span style={CHIP_SUCCESS}>{t('capability.installed')}</span> : null
-    const qualityBadge = item.quality === 'official' ? <span style={CHIP_BRAND}>{t('capability.official')}</span>
-      : item.quality === 'featured' ? <span style={CHIP_WARN}>{t('capability.featured')}</span> : null
+    const officialBadge = item.official === true ? <span style={CHIP_BRAND}>{t('capability.official')}</span> : null
+    const qualityBadge = item.quality === 'featured' ? <span style={CHIP_WARN}>{t('capability.featured')}</span> : null
+    // 「我的」来源区分(2026-09-04 定案):已安装=商店渠道(市场/共享)或其他安装;
+    // 自制=本地创作(紫色, 与 sourceLocal 徽章互补)。
+    const mineSourceBadge = !isMineSection
+      ? null
+      : item.source === 'local'
+        ? <span style={CHIP_LOCAL}>{t('capability.sourceLocal')}</span>
+        : item.originChannel === 'org'
+          ? <span style={CHIP_NEUTRAL}>{t('capability.sourceOrg')}</span>
+          : item.originChannel === 'market'
+            ? <span style={CHIP_NEUTRAL}>{t('capability.sourceMarket')}</span>
+            : <span style={CHIP_NEUTRAL}>{t('capability.sourceOther')}</span>
     return (
       <>
         <span style={chipStyle(item.kind === 'skill' ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)')}>
@@ -656,7 +696,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         {item.source === 'market' ? <span style={CHIP_NEUTRAL}>{t('capability.sourceMarket')}</span>
           : item.source === 'org' ? <span style={CHIP_NEUTRAL}>{t('capability.sourceOrg')}</span>
             : <span style={CHIP_NEUTRAL}>{t('capability.sourceLocal')}</span>}
+        {officialBadge}
         {qualityBadge}
+        {mineSourceBadge}
         {statusBadge}
         {item.source === 'local' && item.originChannel !== undefined && (
           <span style={CHIP_NEUTRAL}>
@@ -724,7 +766,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
                   : <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void upload(item) }}>{t('capability.upload')}</button>
           ) : item.installed ? (
             needUpdate ? (
-              <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void install(item, { force: true }) }}>
+              <button type="button" style={busy || item.official ? BUTTON_DISABLED : BUTTON} disabled={busy || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item, { force: true }) }}>
                 {t('capability.updateTo', { version: item.versions[item.versions.length - 1] ?? item.version })}
               </button>
             ) : uninstallConfirmKey === key ? (

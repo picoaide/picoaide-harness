@@ -158,3 +158,20 @@ describe('mergeItems cross-source merge (market/org 合并 bug 修复)', () => {
     expect(merged[0].version).toBe('1.1.0')
   })
 })
+
+describe('0059 official & score fields', () => {
+  const base: CapabilityItem = {
+    kind: 'skill', source: 'market', name: 'official-skill', displayName: '', version: '1.0.0',
+    description: '', author: '', status: 'approved', versions: ['1.0.0'], installed: false,
+  }
+  it('types permit official/downloads/calls/score', () => {
+    const item: CapabilityItem = { ...base, official: true, downloads: 10, calls: 5, score: 25 }
+    expect(item.official).toBe(true)
+    expect(item.score).toBe(25)
+  })
+  it('quality no longer permits official value (retired to official attr)', () => {
+    // 编译期保证: quality 只接受 '' | 'featured'
+    const item: CapabilityItem = { ...base, quality: 'featured' }
+    expect(item.quality).toBe('featured')
+  })
+})
