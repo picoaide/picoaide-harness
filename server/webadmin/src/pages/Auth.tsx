@@ -16,6 +16,8 @@ interface AuthConfig {
   mode?: string
   enabled?: string
   hide_local?: boolean
+  /** G14: 密码最小长度(8~64,缺失=默认 10)。 */
+  min_password_length?: number
   ldap?: Record<string, string>
   oidc?: Record<string, string>
   openid?: Record<string, string>
@@ -61,7 +63,7 @@ const METHOD_META: Record<'local' | 'ldap' | 'oidc' | 'openid', { label: string;
 export default function Auth() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [enabled, setEnabled] = useState<string[]>(['local'])
-  const [mode, setMode] = useState('local')
+  const [minPasswordLength, setMinPasswordLength] = useState(10)
   const [authErr, setAuthErr] = useState('')
   const [authMsg, setAuthMsg] = useState('')
   const [busy, setBusy] = useState(false)
@@ -76,7 +78,7 @@ export default function Auth() {
     try {
       const r = await request(`${ADMIN_API}/auth`) as { auth?: AuthConfig }
       const a = r.auth ?? {}
-      setMode(a.mode || 'local')
+      setMinPasswordLength(a.min_password_length || 10)
       setEnabled((a.enabled ?? 'local').split(',').map((s) => s.trim()).filter(Boolean))
       setForm({
         hideLocal: a.hide_local ?? false,
@@ -181,9 +183,9 @@ export default function Auth() {
       const oidcBody = { ...form.oidc, client_secret: secretField(form.oidc.client_secret ?? '', secrets.oidc_secret, !!clearedSecrets.oidc_secret) }
       const openidBody = { ...form.openid, client_secret: secretField(form.openid.client_secret ?? '', secrets.openid_secret, !!clearedSecrets.openid_secret) }
       const body: any = {
-        mode,
         enabled: enabled.join(','),
         hide_local: form.hideLocal,
+        min_password_length: minPasswordLength,
         ldap: ldapBody,
         oidc: oidcBody,
         openid: openidBody,
@@ -266,6 +268,20 @@ export default function Auth() {
             <TabsContent value="local" className="space-y-2">
               <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
                 本地账号恒启用(管理员回退)。此页无需配置; 新建/管理账户请在「用户」页操作。
+              </div>
+              <div className="space-y-1 rounded-md border p-3">
+                <Label htmlFor="min-password-length">密码最小长度(G14)</Label>
+                <Input
+                  id="min-password-length"
+                  type="number"
+                  min={8}
+                  max={64}
+                  value={minPasswordLength}
+                  onChange={(e) => setMinPasswordLength(Number(e.target.value) || 10)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  新建用户/重置密码/自助改密的最短密码位数(8~64,默认 10); 改动只影响密码校验, 不追溯既有密码。
+                </p>
               </div>
             </TabsContent>
 

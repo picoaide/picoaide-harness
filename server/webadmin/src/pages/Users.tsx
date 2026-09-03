@@ -9,15 +9,18 @@ import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Card } from '../components/ui/card'
-import { Switch } from '../components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
+import { Link } from 'react-router-dom'
 import { Search, Users as UsersIcon } from 'lucide-react'
 
 interface User {
   id: number
   username: string
   is_admin: boolean
+  /** G3: RBAC 角色(super_admin/auditor/user); 兼容旧 is_admin 展示。 */
+  role?: string
   status: number
   groups?: string[]
   quota_tokens?: number | null // null = follow global default, 0 = unlimited, >0 = monthly cap
@@ -32,6 +35,12 @@ interface User {
   password_must_change?: boolean
   password_changed_at?: string
   mfa_enabled?: boolean
+}
+
+function roleBadge(u: { is_admin: boolean; role?: string }): React.ReactNode {
+  if (u.role === 'super_admin' || u.is_admin) return <Badge>管理员</Badge>
+  if (u.role === 'auditor') return <Badge variant="outline">审计员</Badge>
+  return <Badge variant="secondary">员工</Badge>
 }
 
 interface Department {
@@ -100,11 +109,10 @@ export default function Users() {
   const [createOpen, setCreateOpen] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [role, setRole] = useState('user')
   const [error, setError] = useState('')          // 页面级(列表加载失败)
   const [createErr, setCreateErr] = useState('')  // 新建用户对话框内错误(中3)
   const [deptErr, setDeptErr] = useState('')      // 部门归属对话框内错误(中3)
-  const [quotaErr, setQuotaErr] = useState('')    // 配额对话框内错误(中3)
   const [tokenErr, setTokenErr] = useState('')    // 令牌对话框内错误(中5)
   const [tokensLoading, setTokensLoading] = useState(false)
   const [deptNote, setDeptNote] = useState('')    // 多组/LDAP 归属提示(中4)
@@ -113,7 +121,6 @@ export default function Users() {
   const [deptUser, setDeptUser] = useState<User | null>(null)
   const [deptSelect, setDeptSelect] = useState<string[]>([])   // 多部门(2026-09)
   const [quotaUser, setQuotaUser] = useState<User | null>(null)
-  const [quotaInput, setQuotaInput] = useState('')
   // P1-8: 请求序号防乱序——快速翻页/搜索/删除重拉时只有最新请求的响应能更新 state
   const loadSeq = useRef(0)
   const tokensSeq = useRef(0)
@@ -152,13 +159,13 @@ export default function Users() {
     try {
       await request(`${ADMIN_API}/users`, {
         method: 'POST',
-        body: JSON.stringify({ username, password, is_admin: isAdmin }),
+        body: JSON.stringify({ username, password, role }),
       })
       setCreateErr('')
       setCreateOpen(false)
       setUsername('')
       setPassword('')
-      setIsAdmin(false)
+      setRole('user')
       load(1, "")
     } catch (err: any) {
       setCreateErr(err.message) // 错误显示在对话框内(中3),不再被遮罩盖住
@@ -271,55 +278,42 @@ export default function Users() {
     }
   }
 
-  // ---- 员工流量配额(token + 金额,跟随全局 / 不限 / 按月限额) ----
-  const [quotaMoneyInput, setQuotaMoneyInput] = useState('')
+  // ---- 员工流量配额(G8 收敛:编辑入口唯一 = 用量中心 Adjust Quota) ----
   function openQuota(u: User) {
     setQuotaUser(u)
-    setQuotaErr('')
-    setQuotaInput(u.quota_tokens === null || u.quota_tokens === undefined ? '' : String(u.quota_tokens))
-    setQuotaMoneyInput(u.quota_money === null || u.quota_money === undefined ? '' : String(u.quota_money))
   }
 
-  async function saveQuota() {
-    if (busy || !quotaUser) return // 双击守卫(L10)
-    const v = quotaInput.trim()
-    const mv = quotaMoneyInput.trim()
-    // L7:前端校验,token 必须 ≥0 整数,金额 ≥0
-    if (v !== '' && (Number(v) < 0 || !Number.isInteger(Number(v)))) {
-      setQuotaErr('token 配额必须是 ≥0 的整数')
-      return
-    }
-    if (mv !== '' && (!Number.isFinite(Number(mv)) || Number(mv) < 0)) {
-      // 审计修复 2026-P: 金额校验补 Number.isFinite——Number('abc')=NaN 时
-      // NaN<0 为 false 会静默通过,JSON.stringify 把 NaN 序列化为 null 提交
-      setQuotaErr('金额配额必须是非负数字')
-      return
-    }
+  // G8 收敛:单入口 = 用量中心 → 配额与预算(Adjust Quota 支持覆盖/增减/预览)。
+  // 本页仅保留只读概览与跳转。
+
+  // ---- 0057 重置密码 / 重置 MFA ----
+  const [resetPwUser, setResetPwUser] = useState<User | null>(null)
+  // G3: 角色编辑(服务端 PUT /users/:id role; 接管 last-super-admin 保护)
+  const [roleEditUser, setRoleEditUser] = useState<User | null>(null)
+  const [roleEditValue, setRoleEditValue] = useState('user')
+  const [roleEditErr, setRoleEditErr] = useState('')
+  function openRoleEdit(u: User) {
+    setRoleEditUser(u)
+    setRoleEditValue(u.role || (u.is_admin ? 'super_admin' : 'user'))
+    setRoleEditErr('')
+  }
+  async function saveRoleEdit() {
+    if (!roleEditUser || busy) return
     setBusy(true)
+    setRoleEditErr('')
     try {
-      const body: Record<string, any> = {}
-      // token:空 = 跟随全局默认(清空覆盖);"0" = 不限;正数 = 月配额
-      if (v === '') body.quota_clear = true
-      else body.quota_tokens = Number(v)
-      // 金额(0022):空 = 跟随全局默认;0 = 不限;正数 = 月金额上限
-      if (mv === '') body.quota_money_clear = true
-      else body.quota_money = Number(mv)
-      await request(`${ADMIN_API}/users/${quotaUser.id}`, {
+      await request(`${ADMIN_API}/users/${roleEditUser.id}`, {
         method: 'PUT',
-        body: JSON.stringify(body),
+        body: JSON.stringify({ role: roleEditValue }),
       })
-      setQuotaErr('')
-      setQuotaUser(null)
-      load(page, q)
+      setRoleEditUser(null)
+      load(1, q)
     } catch (err: any) {
-      setQuotaErr(err.message)
+      setRoleEditErr(err.message)
     } finally {
       setBusy(false)
     }
   }
-
-  // ---- 0057 重置密码 / 重置 MFA ----
-  const [resetPwUser, setResetPwUser] = useState<User | null>(null)
   const [resetPw1, setResetPw1] = useState('')
   const [resetPw2, setResetPw2] = useState('')
   const [resetPwErr, setResetPwErr] = useState('')
@@ -422,7 +416,7 @@ export default function Users() {
                     ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
                     : <span className="text-xs text-muted-foreground">—</span>}
                 </TableCell>
-                <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
+                <TableCell>{roleBadge(u)}</TableCell>
                 <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
                 <TableCell className="font-mono text-xs">
                   {u.is_admin ? (
@@ -464,6 +458,7 @@ export default function Users() {
                   <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
                   {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
                   <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
+                  <Button size="sm" variant="outline" title="修改角色(G3)" onClick={() => openRoleEdit(u)}>角色</Button>
                   {/* 0057: 重置密码(local 用户; external 由 IdP 管理) */}
                   <Button
                     size="sm"
@@ -521,12 +516,45 @@ export default function Users() {
               <Input id="create-password" type="password" placeholder="至少 10 位" value={password} onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && create()} />
             </div>
-            <div className="flex items-center gap-2">
-              <Switch id="create-admin" checked={isAdmin} onCheckedChange={setIsAdmin} />
-              <Label htmlFor="create-admin">管理员</Label>
+            <div className="space-y-1">
+              <Label htmlFor="create-role">角色(G3)</Label>
+              <Select value={role} onValueChange={setRole}>
+                <SelectTrigger id="create-role" className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">员工(user)</SelectItem>
+                  <SelectItem value="auditor">审计员(auditor, 只读)</SelectItem>
+                  <SelectItem value="super_admin">管理员(super_admin)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">管理员可配置全部设置;审计员仅查看日志/用量/用户清单。</p>
             </div>
             {createErr && <div className="text-sm text-destructive">{createErr}</div>}
             <Button onClick={create} className="w-full">创建</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* G3 角色编辑对话框 */}
+      <Dialog open={!!roleEditUser} onOpenChange={(open) => { if (!open) setRoleEditUser(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>修改角色 · {roleEditUser?.username}</DialogTitle>
+            <DialogDescription>角色变更立即生效并写入审计; 系统须保留至少一名管理员。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label>角色</Label>
+              <Select value={roleEditValue} onValueChange={setRoleEditValue}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">员工(user)</SelectItem>
+                  <SelectItem value="auditor">审计员(auditor, 只读)</SelectItem>
+                  <SelectItem value="super_admin">管理员(super_admin)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {roleEditErr && <div className="text-sm text-destructive">{roleEditErr}</div>}
+            <Button className="w-full" disabled={busy} onClick={() => { void saveRoleEdit() }}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -608,37 +636,23 @@ export default function Users() {
               配额按月统计,每月 1 日重置。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <Label htmlFor="quota-tokens">月度 token 配额</Label>
-              <Input
-                id="quota-tokens"
-                type="number"
-                min={0}
-                step={1}
-                placeholder="留空 = 跟随全局默认;0 = 不限"
-                value={quotaInput}
-                onChange={(e) => setQuotaInput(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="quota-money">月度金额配额(元)</Label>
-              <Input
-                id="quota-money"
-                type="number"
-                min={0}
-                step="0.01"
-                placeholder="留空 = 跟随全局默认;0 = 不限"
-                value={quotaMoneyInput}
-                onChange={(e) => setQuotaMoneyInput(e.target.value)}
-              />
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">生效 token 配额</div>
+                <div className="font-mono text-base">{quotaUser?.effective_quota_tokens ?? 0 === 0 ? '不限' : fmtTokens(quotaUser?.effective_quota_tokens ?? 0)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">生效金额配额</div>
+                <div className="font-mono text-base">{quotaUser?.effective_quota_money && quotaUser.effective_quota_money > 0 ? `¥${fmtMoney(quotaUser.effective_quota_money)}` : '不限'}</div>
+              </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              留空:跟随网关「全局设置」中的默认配额;输入 0:该员工不限;输入正数:按月限额。
-              金额配额按模型定价折算费用统计,任一维度超限即拦截。管理员(admin)不受配额限制。
+              调整配额(覆盖 / 增加 / 减少)请到「用量中心 → 配额与预算」;管理员(admin)不受配额限制。
             </p>
-            {quotaErr && <div className="text-sm text-destructive">{quotaErr}</div>}
-            <Button className="w-full" onClick={saveQuota}>保存</Button>
+            <Link to={`/usage/quota?user=${encodeURIComponent(quotaUser?.username ?? '')}`} className="block">
+              <Button className="w-full">去用量中心调整</Button>
+            </Link>
           </div>
         </DialogContent>
       </Dialog>

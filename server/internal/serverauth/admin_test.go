@@ -1541,3 +1541,43 @@ func sessionCookie(t *testing.T, w *httptest.ResponseRecorder) string {
 	}
 	return ""
 }
+
+// G9: 统计聚合支持 model/kind 过滤(日志页统计徽标与明细同口径)。
+func TestAdminUsageAggregateModelKindFilter(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sessionCookie(t, w), "X-CSRF-Token": out["csrf_token"].(string)}
+	w, out = doJSON(t, r, "POST", "/api/server/admin/users", `{"username":"alice","password":"alicepw123","role":"user"}`, hdr)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create user: %d", w.Code)
+	}
+	uid := int64(out["user"].(map[string]any)["id"].(float64))
+	if _, err := serverstore.RecordUsage(db, uid, "text-model", 1000, 500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecordUsage(db, uid, "vision-model", 2000, 800); err != nil {
+		t.Fatal(err)
+	}
+	// 无过滤:两模型都有(group=model 无补零桶)
+	_, all := doJSON(t, r, "GET", "/api/server/admin/usage?group=model&from=2000-01-01&to=2100-12-31", "", hdr)
+	rows := all["rows"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("aggregate rows = %v, want 2 models", rows)
+	}
+	// model 过滤:只含 text-model
+	_, mf := doJSON(t, r, "GET", "/api/server/admin/usage?group=model&from=2000-01-01&to=2100-12-31&model=text-model", "", hdr)
+	rows2 := mf["rows"].([]any)
+	if len(rows2) != 1 || rows2[0].(map[string]any)["prompt_tokens"].(float64) != 1000 {
+		t.Fatalf("model filter rows = %v", rows2)
+	}
+	// kind 过滤:不存在的 kind → 空结果
+	_, kf := doJSON(t, r, "GET", "/api/server/admin/usage?group=model&from=2000-01-01&to=2100-12-31&kind=search", "", hdr)
+	rows3 := kf["rows"]
+	if rows3 == nil || len(rows3.([]any)) != 0 {
+		t.Fatalf("kind filter rows = %v, want empty", rows3)
+	}
+}

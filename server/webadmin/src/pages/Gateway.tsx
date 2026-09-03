@@ -34,6 +34,7 @@ interface Channel {
 interface Model {
   id: number
   name: string
+  provider_id?: number
   display_name: string
   default_params: string
   // 0058:模型接受的输入模态('text'/'image');客户端据此渲染图片支持
@@ -379,15 +380,37 @@ export default function Gateway() {
   // 模型编辑:价格补录/修改(0022 金额计费前提 + 0023 峰谷折扣)与输入模态(0058);
   // 其余字段留空不覆盖
   const [editModel, setEditModel] = useState<Model | null>(null)
-  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '', cache: '', offpeak: '', modalities: 'text' })
+  // G1/G2: 模型编辑(价格 + 显示名/所属上游/default_params 结构化)。
+  function parseDefaultParams(raw: string): { contextLength: string; maxOutput: string; concurrencyTarget: string } {
+    try {
+      const p = JSON.parse(raw) as Record<string, unknown>
+      return {
+        contextLength: typeof p.context_length === 'number' && p.context_length > 0 ? String(p.context_length) : '',
+        maxOutput: typeof p.max_output === 'number' && p.max_output > 0 ? String(p.max_output) : '',
+        concurrencyTarget: typeof p.concurrency_target === 'number' && p.concurrency_target > 0 ? String(p.concurrency_target) : '',
+      }
+    } catch {
+      return { contextLength: '', maxOutput: '', concurrencyTarget: '' }
+    }
+  }
+  const [editModelForm, setEditModelForm] = useState({
+    input: '', output: '', cache: '', offpeak: '', modalities: 'text',
+    displayName: '', providerId: '', contextLength: '', maxOutput: '', concurrencyTarget: '',
+    originalDefaultParams: '{}',
+  })
   function openModelPricing(m: Model) {
     setEditModel(m)
-    setEditPriceForm({
+    const dp = parseDefaultParams(m.default_params)
+    setEditModelForm({
       input: m.input_price_per_1m === null || m.input_price_per_1m === undefined ? '' : String(m.input_price_per_1m),
       output: m.output_price_per_1m === null || m.output_price_per_1m === undefined ? '' : String(m.output_price_per_1m),
       cache: m.cache_input_price_per_1m === null || m.cache_input_price_per_1m === undefined ? '' : String(m.cache_input_price_per_1m),
       offpeak: m.offpeak_discount === null || m.offpeak_discount === undefined ? '' : String(m.offpeak_discount),
       modalities: m.input_modalities?.includes('image') ? 'image' : 'text',
+      displayName: m.display_name,
+      providerId: m.provider_id !== undefined && m.provider_id > 0 ? String(m.provider_id) : '',
+      ...dp,
+      originalDefaultParams: m.default_params || '{}',
     })
   }
   async function saveModelPricing() {
@@ -395,21 +418,58 @@ export default function Gateway() {
     setPriceErr('')
     // 价格/折扣前置校验(审计修复 2026-P,与 createModel 同一函数)
     const priceErr =
-      validatePriceField('输入价格', editPriceForm.input) ??
-      validatePriceField('输出价格', editPriceForm.output) ??
-      validatePriceField('缓存命中输入价', editPriceForm.cache) ??
-      validatePriceField('低谷折扣率', editPriceForm.offpeak, true)
+      validatePriceField('输入价格', editModelForm.input) ??
+      validatePriceField('输出价格', editModelForm.output) ??
+      validatePriceField('缓存命中输入价', editModelForm.cache) ??
+      validatePriceField('低谷折扣率', editModelForm.offpeak, true)
     if (priceErr) { setPriceErr(priceErr); return }
+    // G1/G2: default_params 结构化字段数值校验
+    for (const [label, value] of [
+      ['上下文窗口', editModelForm.contextLength],
+      ['最大输出', editModelForm.maxOutput],
+      ['并发目标', editModelForm.concurrencyTarget],
+    ] as const) {
+      if (value.trim() !== '' && (!Number.isInteger(Number(value)) || Number(value) <= 0)) {
+        setPriceErr(`${label} 必须是正整数`)
+        return
+      }
+    }
     setBusy('save-model-pricing')
     try {
       const body: Record<string, any> = { name: editModel.name }
       // 留空 = 保持现值(服务端对缺省字段不覆盖);输入 0 = 定价 0(计费为 0)
-      if (editPriceForm.input.trim() !== '') body.input_price_per_1m = Number(editPriceForm.input)
-      if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
-      if (editPriceForm.cache.trim() !== '') body.cache_input_price_per_1m = Number(editPriceForm.cache)
-      if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
+      if (editModelForm.input.trim() !== '') body.input_price_per_1m = Number(editModelForm.input)
+      if (editModelForm.output.trim() !== '') body.output_price_per_1m = Number(editModelForm.output)
+      if (editModelForm.cache.trim() !== '') body.cache_input_price_per_1m = Number(editModelForm.cache)
+      if (editModelForm.offpeak.trim() !== '') body.offpeak_discount = Number(editModelForm.offpeak)
       // 输入模态:仅两项选择,显式随保存提交(服务端校验后写入)
-      body.input_modalities = editPriceForm.modalities === 'image' ? ['text', 'image'] : ['text']
+      body.input_modalities = editModelForm.modalities === 'image' ? ['text', 'image'] : ['text']
+      // G1: 显示名/所属上游(服务端: display_name 非空覆盖; provider_id>0 覆盖)
+      if (editModelForm.displayName.trim() !== '') body.display_name = editModelForm.displayName.trim()
+      if (editModelForm.providerId !== '') body.provider_id = Number(editModelForm.providerId)
+      // G2: default_params 仅当结构字段有改动时提交(JSON 合并保留其它键)
+      const dp = parseDefaultParams(editModelForm.originalDefaultParams)
+      const changed = dp.contextLength !== editModelForm.contextLength.trim()
+        || dp.maxOutput !== editModelForm.maxOutput.trim()
+        || dp.concurrencyTarget !== editModelForm.concurrencyTarget.trim()
+      if (changed) {
+        let merged: Record<string, unknown>
+        try {
+          merged = JSON.parse(editModelForm.originalDefaultParams) as Record<string, unknown>
+        } catch {
+          merged = {}
+        }
+        const num = (v: string): number | undefined =>
+          v.trim() === '' ? undefined : Number(v.trim())
+        const next: Record<string, unknown> = { ...merged }
+        const cl = num(editModelForm.contextLength)
+        const mo = num(editModelForm.maxOutput)
+        const ct = num(editModelForm.concurrencyTarget)
+        if (cl === undefined) delete next.context_length; else next.context_length = cl
+        if (mo === undefined) delete next.max_output; else next.max_output = mo
+        if (ct === undefined) delete next.concurrency_target; else next.concurrency_target = ct
+        body.default_params = JSON.stringify(next)
+      }
       await request(`${ADMIN_API}/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
       setError('')
@@ -546,7 +606,10 @@ export default function Gateway() {
                           <Lock className="h-3 w-3" />••••••••••{(p.channel ? ' (AES)' : '')}
                         </span>
                       ) : (
-                        <span className="font-mono text-xs">{p.api_key}</span>
+                        // G11: 任何非掩码值都不明文渲染——密钥只透传(编辑框留空不更换)
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                          <Lock className="h-3 w-3" />••••••••••••••••(已配置)
+                        </span>
                       )
                     ) : (
                       <span className="text-xs text-amber-600">未设置</span>
@@ -1055,9 +1118,49 @@ export default function Gateway() {
       {/* 模型价格编辑(0022) */}
       <Dialog open={!!editModel} onOpenChange={(open) => { if (!open) setEditModel(null) }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>模型价格 · {editModel?.name}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>模型编辑 · {editModel?.name}</DialogTitle></DialogHeader>
           <div className="space-y-3">
             {priceErr && <div className="text-sm text-destructive">{priceErr}</div>}
+            {/* G1/G2: 显示名 / 所属上游 / default_params 结构化 */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="edit-display-name">显示名</Label>
+                <Input
+                  id="edit-display-name"
+                  placeholder="留空 = 保持现值"
+                  value={editModelForm.displayName}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, displayName: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>所属上游</Label>
+                <Select value={editModelForm.providerId} onValueChange={(v) => setEditModelForm({ ...editModelForm, providerId: v })}>
+                  <SelectTrigger><SelectValue placeholder="保持现值" /></SelectTrigger>
+                  <SelectContent>
+                    {providers.map((p) => (
+                      <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="edit-ctx">上下文窗口(token)</Label>
+                <Input id="edit-ctx" type="number" min={1} placeholder="如 131072" value={editModelForm.contextLength}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, contextLength: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-max-out">最大输出 token 数</Label>
+                <Input id="edit-max-out" type="number" min={1} placeholder="如 64000" value={editModelForm.maxOutput}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, maxOutput: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-conc">并发目标(参考)</Label>
+                <Input id="edit-conc" type="number" min={1} placeholder="如 100" value={editModelForm.concurrencyTarget}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, concurrencyTarget: e.target.value })} />
+              </div>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label htmlFor="edit-price-in">输入价格(元/百万 token)</Label>
@@ -1067,8 +1170,8 @@ export default function Gateway() {
                   min={0}
                   step="0.01"
                   placeholder="留空 = 保持现值"
-                  value={editPriceForm.input}
-                  onChange={(e) => setEditPriceForm({ ...editPriceForm, input: e.target.value })}
+                  value={editModelForm.input}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, input: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
@@ -1079,8 +1182,8 @@ export default function Gateway() {
                   min={0}
                   step="0.01"
                   placeholder="留空 = 保持现值"
-                  value={editPriceForm.output}
-                  onChange={(e) => setEditPriceForm({ ...editPriceForm, output: e.target.value })}
+                  value={editModelForm.output}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, output: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
@@ -1091,8 +1194,8 @@ export default function Gateway() {
                   min={0}
                   step="0.01"
                   placeholder="留空 = 保持现值"
-                  value={editPriceForm.cache}
-                  onChange={(e) => setEditPriceForm({ ...editPriceForm, cache: e.target.value })}
+                  value={editModelForm.cache}
+                  onChange={(e) => setEditModelForm({ ...editModelForm, cache: e.target.value })}
                 />
               </div>
             </div>
@@ -1105,13 +1208,13 @@ export default function Gateway() {
                 max={1}
                 step="0.05"
                 placeholder="DeepSeek 官方错峰五折 = 0.5"
-                value={editPriceForm.offpeak}
-                onChange={(e) => setEditPriceForm({ ...editPriceForm, offpeak: e.target.value })}
+                value={editModelForm.offpeak}
+                onChange={(e) => setEditModelForm({ ...editModelForm, offpeak: e.target.value })}
               />
             </div>
             <div className="space-y-1">
               <Label>输入模态(0058:客户端据此允许图片上传)</Label>
-              <Select value={editPriceForm.modalities} onValueChange={(v) => setEditPriceForm({ ...editPriceForm, modalities: v })}>
+              <Select value={editModelForm.modalities} onValueChange={(v) => setEditModelForm({ ...editModelForm, modalities: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="text">仅文字</SelectItem>

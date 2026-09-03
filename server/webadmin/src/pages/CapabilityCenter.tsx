@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { Button } from '../components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { PageHeader } from '../components/page-header'
 import { useSearchParams } from 'react-router-dom'
 import Marketplace from './Marketplace'
+import Agents from './Agents'
 import Capabilities from './Capabilities'
 
 /**
@@ -16,6 +18,8 @@ import Capabilities from './Capabilities'
 export default function CapabilityCenter() {
   const [params, setParams] = useSearchParams()
   const [tab, setTab] = useState<'market' | 'org'>(params.get('tab') === 'org' ? 'org' : 'market')
+  // G4: 市场分区内类型切换(技能/智能体)
+  const [kind, setKind] = useState<'skill' | 'agent'>(params.get('kind') === 'agent' ? 'agent' : 'skill')
 
   return (
     <div className="space-y-4">
@@ -31,11 +35,17 @@ export default function CapabilityCenter() {
         }}
       >
         <TabsList>
-          <TabsTrigger value="market">市场技能</TabsTrigger>
+          <TabsTrigger value="market">市场</TabsTrigger>
           <TabsTrigger value="org">组织共享</TabsTrigger>
         </TabsList>
+        {tab === 'market' && (
+          <div className="mt-2 flex gap-2">
+            <Button size="sm" variant={kind === 'skill' ? 'default' : 'outline'} onClick={() => { setKind('skill'); setParams({ tab: 'market', kind: 'skill' }, { replace: true }) }}>技能</Button>
+            <Button size="sm" variant={kind === 'agent' ? 'default' : 'outline'} onClick={() => { setKind('agent'); setParams({ tab: 'market', kind: 'agent' }, { replace: true }) }}>智能体</Button>
+          </div>
+        )}
       </Tabs>
-      {tab === 'market' ? <Marketplace /> : <Capabilities />}
+      {tab === 'market' ? (kind === 'agent' ? <Agents /> : <Marketplace />) : <Capabilities />}
     </div>
   )
 }

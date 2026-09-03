@@ -47,7 +47,8 @@ export default function UsageLogs() {
       setRows(d.rows ?? [])
       setTotal(d.total ?? 0)
       // 统计徽标:区间聚合(与过滤条件一致)
-      const agg: any = await fetchUsageList({ group: 'day', from, to, ...(username ? { username } : {}) })
+      // G9: 统计徽标携带与明细一致的 model/kind 过滤
+      const agg: any = await fetchUsageList({ group: 'day', from, to, ...(username ? { username } : {}), ...(model ? { model } : {}), ...(kind ? { kind } : {}) })
       const s = sumRows(agg)
       setStats({ cost: s.cost, tokens: s.tokens, requests: s.requests })
     } catch (e: any) {

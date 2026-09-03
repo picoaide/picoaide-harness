@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
+import { Textarea } from '../components/ui/textarea'
 import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -483,9 +484,21 @@ export default function Marketplace() {
                 <p className="text-xs text-muted-foreground">压缩包模式必填</p>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              展示名 / 描述 / 作者 / 分类一律取自包内 SKILL.md（包内即真相），此处无需填写
-            </p>
+            <div className="space-y-1">
+              <Label htmlFor="skill-desc">描述(G5: 编辑态可覆盖包内值)</Label>
+              <Textarea
+                id="skill-desc"
+                rows={3}
+                value={skillForm.description ?? ''}
+                onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">新上架时描述取自包内 SKILL.md;可在此修正展示文案。</p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="skill-author">作者(G5: 编辑态可覆盖包内值)</Label>
+              <Input id="skill-author" value={skillForm.author ?? ''} onChange={(e) => setSkillForm({ ...skillForm, author: e.target.value })} />
+              <p className="text-xs text-muted-foreground">作者 = 归属人(可经「归属」转移);此处仅改署名展示。</p>
+            </div>
             {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
             <Button className="w-full" disabled={busy !== null} onClick={saveSkill}>{busy === 'save-skill' ? '处理中…' : (skillEdit ? '保存修改' : '上架')}</Button>
           </div>
