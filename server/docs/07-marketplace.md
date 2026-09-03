@@ -14,7 +14,7 @@
 ## 2. 端点
 
 - 员工(Bearer):`GET /api/client/v2/marketplace/skills`、`GET /api/client/v2/marketplace/skills/:name`、`GET /api/client/v2/marketplace/skills/:name/archive`。
-- 管理端(Admin):`/api/server/admin/skills`(CRUD,下架置 enabled=0)、`/api/server/admin/skills/:name/grants`(授权)。
+- 管理端(Admin):`/api/server/admin/skills`(CRUD,下架置 enabled=0)、`/api/server/admin/skills/:name/grants`(授权);管理后台入口为「能力中心 → 市场技能」Tab(2026-09-02 起与组织共享合并为单入口,旧 `/marketplace` 重定向)。
 - 统一聚合(Bearer):`GET /api/client/v2/capabilities?source=market`(与共享技能/Agent 合并返回)。
 
 完整请求/响应见 03-api-reference.md §6-7。

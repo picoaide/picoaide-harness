@@ -432,6 +432,15 @@ metadata:
 - **可见性**：能力中心聚合面 `CapabilityItem.is_owner`（员工侧，按 viewer 相对计算）+ 审批队列 `ApprovalRow.owner`（管理侧，一次 `ListApps` 映射避免逐行查询）。
 - **客户端（P2）**：`ApiError` 增加 `status` 透传，`fetchJSON` 携带服务端原始状态码；auth-gate 两条上传代理（技能/智能体）不再把 409/403 等一律压平成 422；`CapabilityCenterPanel` 上传前本地预检——同名同类型已存在且非本人（`is_owner !== true`）→ 直接提示「名称已被占用」，不发请求（服务端 409 NAME_TAKEN 仍是权威，他人待审行不可见时兜底）。
 - **webadmin（P3）**：能力中心审批页新增「归属」列（与「作者」=本行上传者可不同）+ 行操作「转移归属(负责人)」弹窗（用户名输入，预填当前归属）。
+
+### 管理端合并与归属管理面（2026-09-02 第二轮）
+
+用户反馈（截图核验）：客户端能力中心把「市场+组织」放在一个入口，管理后台却分「市场 · 技能」(商城管理)与「能力中心」(审批)两个菜单；技能卡片也未显示归属人、无归属指定功能。本轮收敛：
+
+- **单入口合并**：菜单与路由合并为「能力中心」(`/capabilities`)，页内 Tab「市场技能」(原商城管理：上架/授权/上下架/归属) +「组织共享」(统一审批队列+锁定管理)；旧 `/marketplace` 路由重定向到 `?tab=market`(深链兼容)。两页移除各自 PageHeader，标题/描述由合并页统一(标题「能力中心」)。
+- **归属展示与指定**：市场技能卡片新增「归属 <owner>」行（服务端 `Skill.author` 即 apps.owner 的适配映射，无需新端点）+「归属」按钮；组织审批页沿用归属列+转移按钮。**转移弹窗抽为公共组件 `components/transfer-owner-dialog.tsx`**（自包含：预填/校验/错误/提交，PUT `/apps/:kind/:app_id/owner`），两处共用同一实现——遵守「同一逻辑只实现一次」的工程原则。
+- 测试：新增 CapabilityCenter.test.tsx(3 用例：默认市场技能/切组织共享/?tab=org 深链)+ Market 归属转移用例；Capabilities 既有转移用例迁移到公共组件后**行为与断言不变**。全量 110 测试绿。
+- 坑：Radix Tabs 的 value 切换需要完整 pointer 事件序——**fireEvent.click 不触发 onValueChange，必须用 userEvent.click**(jsdom 下)；Tab 状态用组件内 state 驱动、URL `?tab=` 仅作深链/刷新兼容(受控于 searchParams 时初次点击不生效的问题用 state 规避)。
 - **测试**：`publish_test.go`（空 owner 404/管理员可发、被拒后占名、转移后新旧归属行为、404 文案断言）+ `admin_test.go`（转移成功/审计/幂等/参数校验/明细格式）；webadmin 106 测试全绿（新增归属列、转移流程、空负责人禁用 3 用例）。
 - **文档**：`server/docs/07-marketplace.md` §5、`08-agent-share.md` §7 补归属显式契约；本决策文档追加本节。
 - 验收：门禁 `go test ./...`（含 PG 用例）+ `go vet` + webadmin 106 测试 + typecheck/build 全绿；三个 commit（server / client / webadmin）。
