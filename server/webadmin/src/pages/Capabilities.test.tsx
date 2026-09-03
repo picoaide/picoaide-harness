@@ -124,7 +124,7 @@ describe('Capabilities 能力中心(统一审批)', () => {
   it('已通过行展示质量 Select 与授权按钮', async () => {
     const u = userEvent.setup()
     const approvedSkill = {
-      ...SKILL_ROWS[0]!, status: 'approved' as const, quality: 'official' as const,
+      ...SKILL_ROWS[0]!, status: 'approved' as const, quality: 'featured' as const,
     }
     mockRequest.mockImplementation(async (path: string) => {
       if (path === '/api/server/admin/capabilities/approvals?status=approved') return { approvals: [approvedSkill] }
@@ -135,8 +135,8 @@ describe('Capabilities 能力中心(统一审批)', () => {
     // 默认 tab=pending,切到「已通过」触发 status=approved 请求。
     await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
     await screen.findByText('CodeQL 审计')
-    // 同页还有「锁定管理」的类型下拉,这里只断言质量 Select(默认值「官方」)。
-    const qualitySelect = screen.getAllByRole('combobox').find((el) => el.textContent?.includes('官方'))
+    // 质量 Select(已无「官方」选项——官方语义移交归属官方)
+    const qualitySelect = screen.getAllByRole('combobox').find((el) => el.textContent?.includes('精选') || el.textContent?.includes('无'))
     expect(qualitySelect).toBeDefined()
     expect(screen.getByTitle('授权')).toBeInTheDocument()
   })

@@ -12,6 +12,7 @@ import { Skeleton } from '../components/ui/skeleton'
 import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
+import { CapabilityLockPanel } from '../components/capability-lock-panel'
 import { Store, Download, Package, Activity, UserCog } from 'lucide-react'
 import { deptTreeOptions } from '../lib/utils'
 
@@ -26,6 +27,12 @@ interface Skill {
   source?: string
   downloads: number
   calls: number
+  /** 0059: 官方属性(蓝标, 仅管理员可上传)。 */
+  official?: boolean
+  /** 0059 质量(精选 featured 保留; 官方语义移交 official)。 */
+  quality?: string
+  /** 来源渠道: market=市场(管理端直上架) || org=员工上传(审批后)。 */
+  channel?: 'market' | 'org'
 }
 
 interface Grant {
@@ -80,6 +87,8 @@ export default function Marketplace() {
   // 授权
   const [grantDialog, setGrantDialog] = useState<{ kind: 'skill'; name: string; id: number } | null>(null)
   // 归属转移(2026-09-02):技能归属人 = 首个成功占名者(apps.owner)。
+  // 锁定管理(2026-09-04 从审批页迁入市场页)
+  const [lockOpen, setLockOpen] = useState(false)
   const [transferSkill, setTransferSkill] = useState<Skill | null>(null)
   const [grants, setGrants] = useState<Grant[]>([])
   const [grantTarget, setGrantTarget] = useState('')
@@ -95,8 +104,28 @@ export default function Marketplace() {
     setSkillsLoading(true)
     setSkillsError('')
     try {
-      const s = await request(`${ADMIN_API}/skills`)
-      setSkills(s.skills ?? [])
+      const [s, approvals] = await Promise.all([
+        request(`${ADMIN_API}/skills`),
+        request(`${ADMIN_API}/capabilities/approvals?status=approved&type=skill`).catch(() => ({ approvals: [] })),
+      ])
+      const merged: Skill[] = [...(s.skills ?? [])]
+      for (const row of (approvals.approvals ?? []) as { name: string; version: string; display_name: string; description: string; author: string; downloads?: number; calls?: number; official?: boolean; quality?: string }[]) {
+        // UI 归一: 员工上传(审批通过)的技能并入技能市场页, 来源徽章 org
+        merged.push({
+          id: 0, name: row.name, version: row.version, description: row.description,
+          author: row.author, enabled: true, downloads: row.downloads ?? 0, calls: row.calls ?? 0,
+          official: row.official, quality: row.quality, channel: 'org',
+        })
+      }
+      // 排序定案: 官方 → 精选(featured) → score(calls*3+downloads) 降序 → 名称升序
+      const score = (x: Skill): number => (x.calls ?? 0) * 3 + (x.downloads ?? 0)
+      merged.sort((a, b) => {
+        if (!!a.official !== !!b.official) return a.official ? -1 : 1
+        if (!!(a.quality === 'featured') !== !!(b.quality === 'featured')) return a.quality === 'featured' ? -1 : 1
+        if (score(a) !== score(b)) return score(b) - score(a)
+        return a.name.localeCompare(b.name)
+      })
+      setSkills(merged)
     } catch (err: any) {
       setSkillsError(err.message)
     } finally {
@@ -371,8 +400,9 @@ export default function Marketplace() {
       <Card>
         <CardHeader>
           <CardTitle>技能(Skill)</CardTitle>
-          <CardDescription>压缩包上传(归档存数据库)+ 授权制;未授权用户不可见不可安装(授权用户或部门组)</CardDescription>
-          <div className="flex justify-end">
+          <CardDescription>官方技能(蓝标) / 员工上传(审批后);授权制;未授权用户不可见不可安装</CardDescription>
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={() => setLockOpen(true)}>锁定管理</Button>
             <Button size="sm" onClick={openCreateSkill}>上架技能</Button>
           </div>
         </CardHeader>
@@ -406,14 +436,19 @@ export default function Marketplace() {
                         </div>
                       </div>
                     </div>
-                    {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
+                    <span className="flex items-center gap-1.5">
+                      {s.official && <Badge className="bg-[#1E40AF] text-white hover:bg-[#1E40AF]">官方</Badge>}
+                      {s.quality === 'featured' && <Badge variant="secondary">精选</Badge>}
+                      {s.channel === 'org' && <Badge variant="outline">员工上传</Badge>}
+                      {s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="outline">已下架</Badge>}
+                    </span>
                   </div>
                   <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500" title={s.description || undefined}>{s.description || '暂无描述'}</p>
                   <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
                     <Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span>
                   </div>
                   <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者,只有归属人(及管理员)能更新该技能">
-                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {s.author || '未指定'}</span>
+                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {s.official ? '官方' : (s.author || '未指定')}</span>
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
                     <span className="inline-flex items-center gap-1"><Download className="h-3 w-3" />下载 {s.downloads ?? 0}</span>
@@ -513,6 +548,9 @@ export default function Marketplace() {
         fileBase={previewName ? `${ADMIN_API}/skills/${encodeURIComponent(previewName)}` : ''}
         onClose={() => { setPreviewKey(''); setPreview(null) }}
       />
+
+      {/* 锁定管理(2026-09-04 从审批页迁入市场页) */}
+      <CapabilityLockPanel open={lockOpen} onClose={() => setLockOpen(false)} />
 
       {/* 归属转移(2026-09-02):公共弹窗,与服务端的 /apps/:kind/:app_id/owner 同源。 */}
       <TransferOwnerDialog

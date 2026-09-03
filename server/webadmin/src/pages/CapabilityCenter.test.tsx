@@ -6,7 +6,7 @@ import CapabilityCenter from './CapabilityCenter'
 import { request } from '../api'
 
 // 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
-// 默认 Tab = 市场技能(商城管理);「组织共享」Tab = 审批队列 + 锁定管理。
+// 默认 Tab = 技能市场;三个一级 Tab:技能/智能体/审批(锁定管理随市场页)。
 const mockRequest = vi.mocked(request)
 
 const SKILLS = [
@@ -36,7 +36,7 @@ function renderPage(initialEntry = '/capabilities') {
 }
 
 describe('CapabilityCenter 能力中心(统一管理面)', () => {
-  it('默认展示「市场技能」Tab:上架按钮与技能卡片', async () => {
+  it('默认展示「技能」Tab:上架按钮与技能卡片', async () => {
     renderPage()
     expect(await screen.findByText('上架技能')).toBeInTheDocument()
     expect(await screen.findByText('data-extract')).toBeInTheDocument()
@@ -44,21 +44,22 @@ describe('CapabilityCenter 能力中心(统一管理面)', () => {
     expect(screen.getByText(/归属 seed/)).toBeInTheDocument()
   })
 
-  it('切换「组织共享」Tab 展示审批队列与锁定管理', async () => {
+  it('切换「审批」Tab 展示审批队列(锁定管理已迁市场页)', async () => {
     const u = userEvent.setup()
     renderPage()
     await screen.findByText('上架技能')
     // Radix Tabs 需要完整 pointer 事件(userEvent),fireEvent.click 不触发。
-    await u.click(screen.getByRole('tab', { name: '组织共享' }))
-    expect(await screen.findByText('锁定管理')).toBeInTheDocument()
+    await u.click(screen.getByRole('tab', { name: '审批' }))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/capabilities/approvals?status=pending')
     })
+    // 审批页展示队列(锁定面板不在审批页)
+    expect(screen.queryByText('锁定管理')).not.toBeInTheDocument()
   })
 
-  it('?tab=org 直接定位到组织共享(旧 /marketplace 重定向兼容)', async () => {
+  it('?tab=org 直接定位审批页(旧 /marketplace 重定向兼容)', async () => {
     renderPage('/capabilities?tab=org')
-    expect(await screen.findByText('锁定管理')).toBeInTheDocument()
+    expect(await screen.findByText(/暂无待处理能力|CodeQL 审计/)).toBeInTheDocument()
     expect(screen.queryByText('上架技能')).not.toBeInTheDocument()
   })
 })
