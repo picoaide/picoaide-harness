@@ -23,6 +23,7 @@ const (
 	CodeVersionNotIncreasing = "VERSION_NOT_INCREASING"
 	CodeContentUnchanged     = "CONTENT_UNCHANGED"
 	CodeAppLocked            = "APP_LOCKED"
+	CodeOfficialLocked       = "OFFICIAL_LOCKED"
 	CodeNameTaken            = "NAME_TAKEN"
 	CodePendingLimit         = "PENDING_LIMIT"
 )
@@ -89,6 +90,9 @@ type Result struct {
 	Checksum string
 }
 
+// ErrOfficialLocked 官方内容锁定(0059): 非管理员发布官方 App 被拒。
+var ErrOfficialLocked = errors.New("OFFICIAL_LOCKED")
+
 // Publish 执行一次发布:锁定检查 → 版本语义 → 落库。
 //
 // 版本语义(决策 D1/D3),三条规则都以「该 App 的全部历史版本」为依据,
@@ -125,7 +129,6 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		}
 	}
 
-	// 跨渠道同名互斥:一个 (kind, app_id) 只能属于一个渠道。
 	existingApp, appErr := serverstore.GetApp(db, req.Kind, req.AppID)
 	if appErr != nil && !errors.Is(appErr, serverstore.ErrNotFound) {
 		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -133,6 +136,11 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 	if appErr == nil && existingApp.Channel != req.Channel {
 		return nil, newErr(http.StatusConflict, CodeNameTaken,
 			"名称已被%s占用,请换个名字或联系管理员", channelLabel(existingApp.Channel))
+	}
+	// 官方内容锁定(0059): 归属官方的内容仅管理员可发布新版。
+	if appErr == nil && existingApp.Official == 1 && !req.AdminPublish {
+		return nil, newErr(http.StatusForbidden, CodeOfficialLocked,
+			"官方%s仅管理员可上传", kindLabelOf(req.Kind))
 	}
 	// 归属保护(2026-09-02 收紧):他人的 App(任意状态,含空 owner 的历史
 	// 行——空 owner 一律视同占名,杜绝员工「接管」成新 owner)不允许被其他
@@ -320,4 +328,12 @@ func ApprovedVersions(db *sql.DB, kind, appID string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// kindLabelOf 官方锁定提示用(与 channelLabel 同风格)。
+func kindLabelOf(kind string) string {
+	if kind == "agent" {
+		return "智能体"
+	}
+	return "技能"
 }

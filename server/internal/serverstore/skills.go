@@ -26,6 +26,8 @@ type Skill struct {
 	Downloads int64
 	// Calls counts skill invocations reported by clients (telemetry).
 	Calls int64
+	// Official 官方属性(0059, App 级): 归属官方 = 蓝标 + 仅管理员可上传。
+	Official int
 	// DownloadedAt/updated overlay created/updated.
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -103,7 +105,8 @@ func compareVersionStrings(a, b string) int {
 func appToSkill(a App, r *Release) Skill {
 	out := Skill{
 		Name: a.AppID, DisplayName: a.Title, Description: a.Description,
-		Author: a.Owner, Enabled: a.Enabled, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		Author: a.Owner, Enabled: a.Enabled, Official: a.Official,
+		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 	if r != nil {
 		out.ID, out.Version, out.Checksum = r.ID, r.Version, r.Checksum

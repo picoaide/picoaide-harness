@@ -477,3 +477,97 @@ func TestMergeMarketFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestCapabilitiesOfficialScore 0059: 聚合面 official/downloads/calls/score 字段与排序。
+func TestCapabilitiesOfficialScore(t *testing.T) {
+	r, db, adminHdr, userTokens := setupRouter(t)
+	// 市场技能×3: alice 上传(普通)、官方(高 calls)、精选(中 calls)
+	mk := func(name, version string, calls, downloads int64) {
+		// 直接建 apps + release(绕过上传端点,聚焦聚合面)
+		if err := serverstore.UpsertApp(db, &serverstore.App{
+			Kind: serverstore.AppKindSkill, AppID: name, Title: name, Description: name,
+			Owner: "alice", Channel: serverstore.AppChannelMarket, Enabled: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := serverstore.CreateRelease(db, &serverstore.Release{
+			Kind: serverstore.AppKindSkill, AppID: name, Version: "1.0.0", Title: name,
+			Description: name, Author: "alice", Publisher: "alice", Status: serverstore.ReleaseStatusApproved,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// CreateRelease 不落计数列(计数由统计路径累加),测试直接置值。
+		if _, err := db.Exec(`UPDATE app_releases SET downloads = ?, calls = ?
+			WHERE kind = 'skill' AND app_id = ? AND version = '1.0.0'`, downloads, calls, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("plain-skill", "1.0.0", 1, 2)
+	mk("official-skill", "1.0.0", 500, 10)
+	mk("featured-skill", "1.0.0", 100, 5)
+	// 官方与精选标记(official 走 App 属性; featured 走 release quality)
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "official-skill", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetReleaseQuality(db, serverstore.AppKindSkill, "featured-skill", "1.0.0", "featured"); err != nil {
+		t.Fatal(err)
+	}
+	// 授权 alice 可见全部三个技能(市场授权制, alice 走授权制验证排序也一致)
+	for _, n := range []string{"plain-skill", "official-skill", "featured-skill"} {
+		if err := serverstore.GrantApp(db, serverstore.AppKindSkill, n, "alice", "user"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wr := doGet(t, r, "/api/client/v2/capabilities?source=market", map[string]string{"Authorization": "Bearer " + userTokens["alice"]})
+	if wr.Code != http.StatusOK {
+		t.Fatalf("status %d body=%s", wr.Code, wr.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(wr.Body.Bytes(), &out)
+	items := out["items"].([]any)
+	if len(items) < 3 {
+		t.Fatalf("items = %d", len(items))
+	}
+	byName := map[string]map[string]any{}
+	for _, it := range items {
+		m := it.(map[string]any)
+		byName[m["name"].(string)] = m
+	}
+	// official 字段与 score = calls*3+downloads
+	if o := byName["official-skill"]; o["official"] != true || o["score"].(float64) != 500*3+10 {
+		t.Fatalf("official row = %v", o)
+	}
+	if f := byName["featured-skill"]; f["official"] != false || f["score"].(float64) != 100*3+5 {
+		t.Fatalf("featured row = %v", f)
+	}
+	if p := byName["plain-skill"]; p["official"] != false || p["score"].(float64) != 1*3+2 {
+		t.Fatalf("plain row = %v", p)
+	}
+	// 排序: 官方 → 精选 → score 降序
+	var order []string
+	for _, it := range items {
+		order = append(order, it.(map[string]any)["name"].(string))
+	}
+	found := map[string]int{}
+	for i, n := range order {
+		found[n] = i
+	}
+	if !(found["official-skill"] < found["featured-skill"] && found["featured-skill"] < found["plain-skill"]) {
+		t.Fatalf("order = %v", order)
+	}
+	// 市场 DTO 官方字段投影(listSkillsAdmin 的输入面)
+	skills, err := serverstore.ListSkills(db, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sFound := false
+	for _, sk := range skills {
+		if sk.Name == "official-skill" && sk.Official == 1 {
+			sFound = true
+		}
+	}
+	if !sFound {
+		t.Fatal("ListSkills missing official projection")
+	}
+	_ = adminHdr
+}

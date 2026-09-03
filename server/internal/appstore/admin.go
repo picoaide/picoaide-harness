@@ -57,14 +57,17 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		var req struct {
+			// Owner 转给用户(互斥: 与 Official 二选一)。
 			Owner string `json:"owner"`
+			// Official 归属官方(0059): official=1 + owner=''(员工端蓝标, 仅管理员可上传)。
+			Official *bool `json:"official"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 			return
 		}
-		if req.Owner == "" {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "归属人不能为空")
+		if (req.Owner != "" && req.Official != nil) || (req.Owner == "" && req.Official == nil) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "owner 与 official 必须指定其一")
 			return
 		}
 		app, err := serverstore.GetApp(db, kind, appID)
@@ -76,16 +79,36 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		if req.Official != nil {
+			// 归属官方: official=1, owner 清空(展示「官方」)。
+			if app.Official == 1 && app.Owner == "" {
+				c.JSON(http.StatusOK, gin.H{"ok": true, "official": true})
+				return
+			}
+			if err := serverstore.SetAppOfficial(db, kind, appID, true, ""); err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+				return
+			}
+			admin := serverauth.AdminUser(c)
+			actor := ""
+			if admin != nil {
+				actor = admin.Username
+			}
+			_ = serverstore.AuditLog(db, actor, "app_owner_transfer",
+				TransferOwnerAuditDetail(kind, appID, app.Title, app.Owner, "官方"))
+			c.JSON(http.StatusOK, gin.H{"ok": true, "official": true})
+			return
+		}
 		if _, err := serverstore.GetUserByUsername(db, req.Owner); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "目标用户不存在")
 			return
 		}
-		if app.Owner == req.Owner {
+		if app.Owner == req.Owner && app.Official == 0 {
 			// 幂等:归属未变更,直接成功且不写审计(避免噪音条目)。
 			c.JSON(http.StatusOK, gin.H{"ok": true, "owner": req.Owner})
 			return
 		}
-		if err := serverstore.SetAppOwner(db, kind, appID, req.Owner); err != nil {
+		if err := serverstore.SetAppOfficial(db, kind, appID, false, req.Owner); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -94,8 +117,12 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 		if admin != nil {
 			actor = admin.Username
 		}
+		from := app.Owner
+		if app.Official == 1 {
+			from = "官方"
+		}
 		_ = serverstore.AuditLog(db, actor, "app_owner_transfer",
-			TransferOwnerAuditDetail(kind, appID, app.Title, app.Owner, req.Owner))
+			TransferOwnerAuditDetail(kind, appID, app.Title, from, req.Owner))
 		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": req.Owner})
 	}
 }
