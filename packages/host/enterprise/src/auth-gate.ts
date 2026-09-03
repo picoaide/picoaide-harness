@@ -1375,6 +1375,33 @@ export function apply(ctx: Context, config: Config): void {
             }
 
             if (source === 'local') {
+              // 「我的」定案(2026-09-04):已安装(商店渠道/其他) + 本地制作。
+              // 已安装商店行取自 market+org 目录(installed=true 的行),
+              // originChannel/provenance 已在上游 enriched 计算。
+              if (localRows.length > 0 || true) {
+                const [mkt, org] = await Promise.all([
+                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=market`, { token: s.token }).catch(() => ({ items: [] })),
+                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=org`, { token: s.token }).catch(() => ({ items: [] })),
+                ])
+                const storeInstalled = [...(mkt as { items?: Array<Record<string, unknown>> }).items ?? [], ...(org as { items?: Array<Record<string, unknown>> }).items ?? []]
+                  .filter((i) => {
+                    const kind = (i as { kind?: string }).kind ?? ''
+                    const name = (i as { name?: string }).name ?? ''
+                    return kind === 'skill' ? installedSkills.has(name) : installedPresets.has(name)
+                  })
+                  .map((i) => ({
+                    ...i,
+                    source: (i as { source?: string }).source ?? 'market',
+                    displayName: ((i as { display_name?: string }).display_name ?? i.name) as string,
+                    installed: true,
+                    // 0059 官方字段透传(与 enriched 同构)。
+                    official: (i as { official?: boolean }).official ?? false,
+                    downloads: Number((i as { downloads?: number }).downloads ?? 0),
+                    calls: Number((i as { calls?: number }).calls ?? 0),
+                    score: Number((i as { score?: number }).score ?? 0),
+                  }))
+                return json(res, 200, { items: [...storeInstalled, ...localRows] })
+              }
               return json(res, 200, { items: localRows })
             }
 
@@ -1397,6 +1424,11 @@ export function apply(ctx: Context, config: Config): void {
                 // 2026-09-02 归属权:is_owner 由服务端按 apps.owner 计算,
                 // 客户端上传预检依赖它(「我的」与「他人」同名区分)。
                 isOwner: (i as { is_owner?: boolean }).is_owner ?? false,
+                // 0059 官方机制:蓝标 + 市场排序评分(score 由服务端计算)。
+                official: (i as { official?: boolean }).official ?? false,
+                downloads: Number((i as { downloads?: number }).downloads ?? 0),
+                calls: Number((i as { calls?: number }).calls ?? 0),
+                score: Number((i as { score?: number }).score ?? 0),
                 installed,
                 installedVersion,
                 hasUpdate: false, // 客户端按 versions 与 installedVersion 计算
