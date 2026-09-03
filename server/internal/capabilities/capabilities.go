@@ -11,6 +11,7 @@ package capabilities
 import (
 	"database/sql"
 	"net/http"
+	"sort"
 
 	"github.com/gin-gonic/gin"
 
@@ -51,6 +52,13 @@ type CapabilityItem struct {
 	Status      string           `json:"status"`
 	Reason      string           `json:"reason,omitempty"`
 	Quality     string           `json:"quality,omitempty"`
+	// Official 官方属性(0059, App 级): 客户端渲染蓝色「官方」标。
+	Official bool `json:"official"`
+	// Downloads/Calls 展示与评分数据源(App 级:市场取展示版本,组织取自身行)。
+	Downloads int64 `json:"downloads"`
+	Calls     int64 `json:"calls"`
+	// Score 综合评分 = calls*3 + downloads(聚合面统一计算,客户端按此排序)。
+	Score int64 `json:"score"`
 	// IsOwner 当前用户是否为该 App 的归属人(2026-09-02 归属权补强)。
 	// 客户端上传前据此预检:同名且非本人 → 提前提示「名称已被占用」,
 	// 不必等一次网络往返(服务端 409 NAME_TAKEN 兜底,语义一致)。
@@ -135,7 +143,7 @@ func parseTypeFilter(c *gin.Context) typeFilter {
 
 // appendSkill merges one marketplace skill into the catalog (authorized/enabled only).
 // isOwner 由调用方按 apps.owner 计算(市场适配层 Skill.Author == apps.owner)。
-func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool) {
+func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool, official bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	// 展示名(0051):优先包内 title 写入的 display_name,为空回退 name
 	// ——此前这里硬编码 s.Name,是「市场卡片显示目录名」的直接原因。
@@ -152,6 +160,9 @@ func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string
 		Description: s.Description,
 		Author:      s.Author,
 		Status:      "approved",
+		Official:    official,
+		Downloads:   s.Downloads,
+		Calls:       s.Calls,
 		IsOwner:     isOwner,
 	})
 }
@@ -177,13 +188,16 @@ func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[st
 		Description: a.Description,
 		Author:      a.Owner,
 		Status:      "approved",
+		Official:    a.Official == 1,
+		Downloads:   r.Downloads,
+		Calls:       r.Calls,
 		IsOwner:     isOwner,
 	})
 }
 
 // appendSharedSkill merges one shared-skill row (already visibility-filtered
 // by the caller) with its quality tag and status.
-func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool) {
+func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool, official bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	item := CapabilityItem{
 		Kind:        KindSkill,
@@ -202,7 +216,7 @@ func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, version
 }
 
 // appendSharedAgent merges one shared-agent row (visibility-filtered).
-func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, versions map[string][]string, isOwner bool) {
+func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, versions map[string][]string, isOwner bool, official bool) {
 	versions[p.Name] = append(versions[p.Name], p.Version)
 	*out = append(*out, CapabilityItem{
 		Kind:        KindAgent,
@@ -215,6 +229,8 @@ func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, version
 		Status:      string(p.Status),
 		Reason:      p.Reason,
 		Quality:     p.Quality,
+		Official:    official,
+		Downloads:   p.Downloads,
 		IsOwner:     isOwner,
 	})
 }
@@ -334,6 +350,9 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		// 归属映射(2026-09-02):一个 App 的 owner 恒定,一次查询覆盖全部行。
 		skillOwners := appOwnerMap(db, serverstore.AppKindSkill, serverstore.AppChannelOrg)
 		agentOwners := appOwnerMap(db, serverstore.AppKindAgent, serverstore.AppChannelOrg)
+		// 官方属性(0059, App 级,与来源无关:market/org 行取同一 App)。
+		skillOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
+		agentOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
 
 		// 1) 市场技能(授权制)。
 		if includeMarket && ft.skills {
@@ -345,7 +364,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 			for _, s := range skillList {
 				// 市场适配层 Skill.Author == apps.owner(2026-09-02 归属权)。
-				appendSkill(&items, s, versions, s.Author == u.Username)
+				appendSkill(&items, s, versions, s.Author == u.Username, skillOfficials[s.Name])
 			}
 		}
 
@@ -394,7 +413,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				}
 				for _, s := range all {
 					if s.Status == serverstore.SharedSkillApproved {
-						appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username)
+						appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username, skillOfficials[s.Name])
 					}
 				}
 			} else {
@@ -415,7 +434,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					if s.Status != serverstore.SharedSkillApproved {
 						continue
 					}
-					appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username)
+					appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username, skillOfficials[s.Name])
 				}
 			}
 		}
@@ -438,7 +457,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				if s.Author != u.Username {
 					continue
 				}
-				appendSharedSkill(&items, s, versions, true)
+				appendSharedSkill(&items, s, versions, true, skillOfficials[s.Name])
 			}
 		}
 
@@ -452,7 +471,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				}
 				for _, p := range all {
 					if p.Status == serverstore.AgentPresetApproved {
-						appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username)
+						appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username, agentOfficials[p.Name])
 					}
 				}
 			} else {
@@ -472,7 +491,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					if p.Status != serverstore.AgentPresetApproved {
 						continue
 					}
-					appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username)
+					appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username, agentOfficials[p.Name])
 				}
 			}
 		}
@@ -493,13 +512,19 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				if p.Author != u.Username {
 					continue
 				}
-				appendSharedAgent(&items, p, versions, true)
+				appendSharedAgent(&items, p, versions, true, agentOfficials[p.Name])
 			}
 		}
 
 		merged := mergeVersions(items, versions)
 		if src == "market" {
 			merged = mergeMarketFirst(merged)
+		}
+		// 评分与市场排序(0059 定案):官方→精选→score 降序→名称;"我的"
+		// (own/local)不参与(自制内容无官方/评分语义)。
+		if src != "own" && src != "local" {
+			scoreItems(merged)
+			merged = sortCatalog(merged)
 		}
 		c.JSON(http.StatusOK, gin.H{"items": merged})
 	}
@@ -616,6 +641,8 @@ type ApprovalRow struct {
 	// 原注释:该共享技能名与市场 skills 表同名(跨源互斥),
 	// approve 会被 409 阻断——管理端据此提示先处理市场技能。
 	Conflict bool `json:"conflict"`
+	// Official 官方属性(0059, App 级,与来源无关): 管理端渲染蓝标与归属语义。
+	Official bool `json:"official"`
 }
 
 // listApprovals 归并 shared-skills 与 agent-presets 的列表(默认 pending,
@@ -639,6 +666,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 			// 归属映射(2026-09-02):owner 是 App 级,与版本无关,一次查询覆盖。
 			skillOwners := appOwnerMap(db, serverstore.AppKindSkill, "")
+			skillOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
 			for _, s := range rows {
 				// 决策 2026-08-25:跨源同名(市场技能表已有同名)标记冲突,
 				// 管理端提示且 approve 将被 409 阻断。
@@ -658,6 +686,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					CreatedAt:   s.CreatedAt.Format("2006-01-02 15:04:05"),
 					Downloads:   s.Downloads,
 					Calls:       s.Calls,
+					Official:    skillOfficials[s.Name],
 					BasePath:    "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
 					GrantsBase:  "/api/server/admin/shared-skills/" + pathEscape(s.Name),
 					PreviewPath: "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
@@ -672,6 +701,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			agentOwners := appOwnerMap(db, serverstore.AppKindAgent, "")
+			agentOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
 			for _, p := range rows {
 				out = append(out, ApprovalRow{
 					Kind:        KindAgent,
@@ -686,6 +716,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					Quality:     p.Quality,
 					CreatedAt:   p.CreatedAt.Format("2006-01-02 15:04:05"),
 					Downloads:   p.Downloads,
+					Official:    agentOfficials[p.Name],
 					BasePath:    "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version),
 					GrantsBase:  "/api/server/admin/agent-presets/" + pathEscape(p.Name),
 					PreviewPath: "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version) + "/preview",
@@ -718,4 +749,35 @@ func pathEscape(s string) string {
 		}
 	}
 	return string(out)
+}
+
+// scoreItems 统一计算综合评分(score = calls*3 + downloads),在排序前调用。
+func scoreItems(items []CapabilityItem) {
+	for i := range items {
+		items[i].Score = items[i].Calls*3 + items[i].Downloads
+	}
+}
+
+// sortCatalog 市场排序(0059 定案):官方置顶 → 精选(quality=featured) →
+// score 降序 → 名称升序兜底(稳定)。「我的」分区不调用。
+func sortCatalog(items []CapabilityItem) []CapabilityItem {
+	if len(items) == 0 {
+		return []CapabilityItem{}
+	}
+	sorted := append([]CapabilityItem(nil), items...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
+		if a.Official != b.Official {
+			return a.Official
+		}
+		af, bf := a.Quality == "featured", b.Quality == "featured"
+		if af != bf {
+			return af
+		}
+		if a.Score != b.Score {
+			return a.Score > b.Score
+		}
+		return a.Name < b.Name
+	})
+	return sorted
 }

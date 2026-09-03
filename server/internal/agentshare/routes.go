@@ -644,7 +644,7 @@ func setPresetQuality(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		if !serverstore.ValidAgentQuality(req.Quality) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "质量标记不合法(空/official/featured)")
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "质量标记不合法(空/featured;官方已移交归属官方操作)")
 			return
 		}
 		if err := serverstore.SetAgentPresetQuality(db, name, version, req.Quality); err != nil {

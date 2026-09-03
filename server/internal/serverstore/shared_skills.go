@@ -261,7 +261,7 @@ func SharedSkillPendingCount(db *sql.DB, author string) (int, error) {
 }
 
 // ValidSharedQuality 质量标记合法值。
-func ValidSharedQuality(q string) bool { return q == "" || q == "official" || q == "featured" }
+func ValidSharedQuality(q string) bool { return q == "" || q == "featured" }
 
 // SetSharedSkillQuality 质量标记(仅 approved 版本)。
 func SetSharedSkillQuality(db *sql.DB, name, version, quality string) error {

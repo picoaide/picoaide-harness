@@ -38,8 +38,11 @@ type App struct {
 	Owner       string
 	Channel     string
 	Enabled     int
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Official 官方属性(0059, App 级): 1=归属官方(蓝标/仅管理员可上传),
+	// 此时 Owner 为 ''(无个人归属)。
+	Official  int
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Release 是一次不可变的版本快照。内容字段一经写入不再更新,只有审核状态、
@@ -69,7 +72,7 @@ type Release struct {
 	UpdatedAt   time.Time
 }
 
-const appColumns = "kind, app_id, title, description, owner, channel, enabled, created_at, updated_at"
+const appColumns = "kind, app_id, title, description, owner, channel, enabled, official, created_at, updated_at"
 
 // releaseListColumns 不含 archive blob:清单查询绝不加载全部归档。
 const releaseListColumns = "id, kind, app_id, version, title, description, changelog, category, tags, " +
@@ -82,7 +85,7 @@ func scanApp(row interface{ Scan(...any) error }) (*App, error) {
 	var a App
 	var created, updated any
 	if err := row.Scan(&a.Kind, &a.AppID, &a.Title, &a.Description, &a.Owner, &a.Channel,
-		&a.Enabled, &created, &updated); err != nil {
+		&a.Enabled, &a.Official, &created, &updated); err != nil {
 		return nil, err
 	}
 	a.CreatedAt, a.UpdatedAt = parseSQLTime(created), parseSQLTime(updated)
@@ -168,6 +171,42 @@ func ListApps(db *sql.DB, kind, channel string) ([]App, error) {
 		out = append(out, *a)
 	}
 	return out, rows.Err()
+}
+
+// SetAppOfficial 设置 App 官方属性与归属(转官方=official=1+owner=”;
+// 转用户=official=0+owner=<username>)。官方属性是 App 级唯一事实源,
+// 不经 UpsertApp 泄露(发布/元数据更新不触碰本列)。
+func SetAppOfficial(db *sql.DB, kind, appID string, official bool, owner string) error {
+	_, err := db.Exec(`UPDATE apps SET official = ?, owner = ?, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ?`, boolToInt(official), owner, kind, appID)
+	return err
+}
+
+// AppOfficialMap 返回某 kind 全部 App 的官方属性(名→bool),聚合面/列表用。
+func AppOfficialMap(db *sql.DB, kind string) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT app_id, official FROM apps WHERE kind = ?`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		var off int
+		if err := rows.Scan(&id, &off); err != nil {
+			return nil, err
+		}
+		out[id] = off == 1
+	}
+	return out, rows.Err()
+}
+
+// boolToInt 布尔转 smallint。
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // SetAppOwner 归属转移(管理员指定,2026-09-02):apps.owner 是归属人的唯一

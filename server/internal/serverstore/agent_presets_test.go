@@ -270,7 +270,7 @@ func TestAgentPresetQuality(t *testing.T) {
 	if got.Quality != "" {
 		t.Fatalf("after clear quality=%q", got.Quality)
 	}
-	if err := SetAgentPresetQuality(db, "nope", "1.0.0", "official"); err != ErrNotFound {
+	if err := SetAgentPresetQuality(db, "nope", "1.0.0", "featured"); err != ErrNotFound {
 		t.Fatalf("missing = %v, want ErrNotFound", err)
 	}
 }

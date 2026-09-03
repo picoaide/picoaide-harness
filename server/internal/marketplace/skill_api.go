@@ -236,6 +236,7 @@ func skillJSON(s serverstore.Skill) gin.H {
 		"enabled":     s.Enabled == 1,
 		"downloads":   s.Downloads,
 		"calls":       s.Calls,
+		"official":    s.Official == 1,
 		"created_at":  s.CreatedAt,
 		"updated_at":  s.UpdatedAt,
 	}

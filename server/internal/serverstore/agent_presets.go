@@ -31,7 +31,7 @@ type AgentPreset struct {
 	// Reason is the admin's rejection reason; empty unless the row is
 	// rejected. Visible only to the author (and admins).
 	Reason string
-	// Quality 是组织库质量标记(0037):''|'official'|'featured' 互斥,
+	// Quality 是组织库质量标记(0037, 0059 起仅 ''|featured——官方语义移交 apps.official):
 	// 仅对 approved 行有展示语义;与市场「免费/专业」分级词表隔离。
 	Quality string
 	// Archive 是上传的归档字节(0041: 归档直存 DB,不再落磁盘)。
@@ -220,7 +220,7 @@ func DeleteAgentPresetByVersion(db *sql.DB, name, version string) error {
 }
 
 // ValidAgentQuality 质量标记合法值。
-func ValidAgentQuality(q string) bool { return q == "" || q == "official" || q == "featured" }
+func ValidAgentQuality(q string) bool { return q == "" || q == "featured" }
 
 // SetAgentPresetQuality 质量标记(仅 approved 版本)。
 func SetAgentPresetQuality(db *sql.DB, name, version, quality string) error {
