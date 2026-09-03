@@ -207,11 +207,21 @@ async function main() {
   // "restoring session" page first (it re-requests the index after 1.2s), so
   // wait until the real login form (with a #f submit form) is present before
   // filling it — filling the restoring page would be wiped by its reload.
-  const formReady = await waitFor(cdp, `!!document.getElementById('f') && !!document.getElementById('server')`, 15000, 300)
-  if (!formReady) throw new Error('login form did not appear within 15s')
+  // auth-gate 登录页已是两步式(2026-09):f1 服务端地址 → /api/pico/auth/methods
+  // 探测 → f2 本地表单。e2e 脚本原按旧单页 #f 断言,2026-09-05 同步两步流程。
+  const step1Ready = await waitFor(cdp, `!!document.getElementById('f1') && !!document.getElementById('server')`, 15000, 300)
+  if (!step1Ready) throw new Error('login form did not appear within 15s')
   await evalSafe(cdp, `(() => {
     const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
-    const ok = set('server', 'http://127.0.0.1:${GATEWAY_PORT}') && set('username', 'admin') && set('password', 'admin')
+    return set('server', 'http://127.0.0.1:${GATEWAY_PORT}')
+  })()`)
+  await wait(400)
+  await clickLabel(cdp, '下一步', 7000)
+  const step2Ready = await waitFor(cdp, `!!document.getElementById('f2') && !!document.getElementById('username') && !!document.getElementById('password')`, 15000, 300)
+  if (!step2Ready) throw new Error('login method form did not appear within 15s')
+  await evalSafe(cdp, `(() => {
+    const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
+    const ok = set('username', 'admin') && set('password', 'admin')
     return ok
   })()`)
   await wait(400)

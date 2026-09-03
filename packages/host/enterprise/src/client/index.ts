@@ -183,14 +183,34 @@ export function apply(ctx: ClientContext): void {
   )
 
   // v3b §4.2: document.title 跟随品牌(brand.title), 品牌变化时更新。
+  // 2026-09-05: 上游 dsh-client-ui-renderer 的 DocumentTitle 把 productTitle
+  // 硬编码为 "DeepSeek Harness", 其 React useEffect 在本面插件 apply 之后
+  // 运行, 会把标题盖回来(且带会话标题投影: `<会话名> — <产品名>`)。
+  // 这里在品牌标题之上加 MutationObserver 归一化: 仅替换产品名片段、
+  // 保留会话标题前缀, 不做无条件重写(避免与上游会话标题投影打架)。
   ctx.effect(() => {
+    const UPSTREAM_PRODUCT_TITLE = 'DeepSeek Harness'
+    const productTitle = (brand: BrandConfig | null): string =>
+      brand?.enabled && brand.title ? brand.title : 'PicoAide Harness'
+    const current = (): string => document.title
     const apply = (brand: BrandConfig | null): void => {
-      const title = brand?.enabled && brand.title ? brand.title : 'PicoAide Harness'
-      document.title = title
+      const product = productTitle(brand)
+      const t = current()
+      let next: string
+      if (t === UPSTREAM_PRODUCT_TITLE) {
+        next = product
+      } else if (t.endsWith(` — ${UPSTREAM_PRODUCT_TITLE}`)) {
+        next = `${t.slice(0, -(UPSTREAM_PRODUCT_TITLE.length + 3))} — ${product}`
+      } else {
+        next = t
+      }
+      if (next !== t) document.title = next
     }
     apply(readBrandSync())
     const off = ctx.on('pico/brand-changed', (brand) => apply(brand))
-    return () => { off() }
+    const observer = new MutationObserver(() => apply(readBrandSync()))
+    observer.observe(document.head, { childList: true, subtree: true, characterData: true })
+    return () => { off(); observer.disconnect() }
   }, 'enterprise: document brand title')
 
   ctx.effect(() => {
