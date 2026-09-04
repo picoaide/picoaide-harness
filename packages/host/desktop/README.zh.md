@@ -186,6 +186,8 @@ corepack.cmd yarn dist:win-portable
 
 `yarn dist:mac-smoke` 会在原生 macOS 宿主机上构建一个未签名的 universal DMG，同一个安装包可以在 Intel 和 Apple Silicon Mac 上原生运行。该命令拒绝非 macOS 宿主，并在打包前运行完整产品 gate：仓库布局与社区契约检查、Market 的 build 与 check，然后再运行 Desktop build、全部 TypeScript compiler face、完整 unit-test suite、runtime-closure 验证、CLI/Loader/profile headless smoke 与 license audit；其中包括对 macOS runner 上已安装的每种受支持 shell 执行真实 login-shell 测试。随后它会在不接触任何签名材料的情况下打包，挂载 DMG，并检查属性列表、主程序执行权限、`x86_64` 与 `arm64` 两个架构切片，以及 `app.asar`。该命令与 `dist:win` 的密钥纪律一致：剥离 Electron Builder 能识别的全部 macOS 签名与公证变量、设置 `CSC_IDENTITY_AUTO_DISCOVERY=false`、关闭 notarization，且从不发布。产物没有 Developer ID 签名，因此 Gatekeeper 会在其他机器上拦截它；它的存在是为了让打包回归在人工发布之前就在 CI 中失败。签名并公证的 universal 正式发布仍是在持有凭证的 macOS 机器上执行 `yarn dist:mac`，产物写入 `dsh-plugin-desktop/dist/mac-release/`。
 
+> **签名发布凭证（重要坑）**：Developer ID Application 证书必须导出为 **Apple `security` 可导入的 PKCS#12 加密格式（旧式 3DES + SHA-1）**。用 OpenSSL 导出时加 `-legacy`（更明确可加 `-macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES`）；OpenSSL 3 默认的 PBES2/AES-256-CBC/SHA-256 MAC 会让 electron-builder 内的 `security import` 报 `SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong password?)`——即使密码完全正确。导出后用 `openssl pkcs12 -info` 检查应看到 `MAC: sha1` 与 `pbeWithSHA1And3-KeyTripleDES-CBC`（而非 PBES2）再入库。
+
 ## 模型体验
 
 无。desktop package 只改变应用组合与原生呈现，不增加任何模型可见的指令、工具、事件或请求字段。
