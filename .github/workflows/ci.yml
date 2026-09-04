@@ -200,7 +200,10 @@ jobs:
     name: Desktop (macOS signed release)
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
-    timeout-minutes: 90
+    # 2026-09-05:完整 gate(check)+universal 打包+公证轮询实测 56~88 分钟,
+    # 且 Apple 公证队列可能更久;90 分钟曾两次在 notarytool 轮询阶段被
+    # timeout-minutes 杀掉(签名均已成功)。150 分钟 + 步骤级重试兜底。
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
         with:
@@ -228,7 +231,22 @@ jobs:
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       - name: Build signed and notarized DMG
-        run: yarn workspace dsh-plugin-desktop dist:mac
+        # 公证轮询阶段偶发 runner 瞬时断网(NSURLError -1009,重试即可)或
+        # Apple 队列抖动;整步最多重试 3 次,失败才 fail-loud。每次重试都会
+        # 重新跑完整 gate+打包(幂等,安全),代价是时间而非正确性。
+        run: |
+          for attempt in 1 2 3; do
+            echo "attempt ${attempt}/3: yarn dist:mac"
+            if yarn workspace dsh-plugin-desktop dist:mac; then
+              echo "signed and notarized DMG built on attempt ${attempt}"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "attempt ${attempt} failed; retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
