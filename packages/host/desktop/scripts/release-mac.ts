@@ -93,8 +93,8 @@ function defaultReleaseOptions(): MacReleaseOptions {
         deadlineMs: 100 * 60_000,
         retries: 5,
         backoffMs: 15_000,
-        run: (command, args) => {
-          const result = spawnSync(command, args, { env, encoding: 'utf8' })
+        run: (command, args, cwd) => {
+          const result = spawnSync(command, args, { env, encoding: 'utf8', cwd })
           if (result.error !== undefined) throw result.error
           if (result.status !== 0) {
             const stderr = (result.stderr ?? result.stdout ?? '').toString().trim()

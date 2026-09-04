@@ -14,7 +14,9 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { resolve } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SUBMISSION_ID_RE = /Submission ID:\s*([0-9a-fA-F-]+)/u
@@ -35,7 +37,7 @@ export interface NotarizeMacOptions {
   /** Backoff between per-command retries. */
   readonly backoffMs: number
   /** Execute one command; returns stdout, throws on non-zero. */
-  readonly run: (command: string, args: readonly string[]) => string
+  readonly run: (command: string, args: readonly string[], cwd?: string) => string
   /** Injectable sleep for tests and between polls. */
   readonly sleep: (ms: number) => Promise<void>
   /** Report one non-secret progress line. */
@@ -85,28 +87,36 @@ export async function notarizeMacApp(options: NotarizeMacOptions): Promise<Notar
   const authArgs = credentialArgumentGroup(options.env)
   const deadlineAt = Date.now() + options.deadlineMs
 
-  // 1) Submit without --wait: one short request, individually retried.
-  let submissionId = ''
-  {
-    let attempt = 0
-    let stdout = ''
-    while (attempt <= options.retries) {
-      attempt += 1
-      try {
-        stdout = options.run('xcrun', ['notarytool', 'submit', options.appPath, ...authArgs])
-        submissionId = SUBMISSION_ID_RE.exec(stdout)?.[1] ?? ''
-        if (submissionId === '') {
-          throw new Error(`could not parse Submission ID from notarytool output:\n${stdout.slice(0, 400)}`)
+  // 0) notarytool only accepts zip/pkg/dmg archives — zip the app bundle first
+  // (mirrors @electron/notarize: ditto -c -k --sequesterRsrc --keepParent).
+  const workingDir = mkdtempSync(join(tmpdir(), 'dsh-notary-'))
+  const zipPath = join(workingDir, `${basename(options.appPath)}.zip`)
+  try {
+    options.run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', basename(options.appPath), zipPath], dirname(options.appPath))
+    options.log(`notarization payload prepared: ${zipPath}`)
+
+    // 1) Submit without --wait: one short request, individually retried.
+    let submissionId = ''
+    {
+      let attempt = 0
+      let stdout = ''
+      while (attempt <= options.retries) {
+        attempt += 1
+        try {
+          stdout = options.run('xcrun', ['notarytool', 'submit', zipPath, ...authArgs])
+          submissionId = SUBMISSION_ID_RE.exec(stdout)?.[1] ?? ''
+          if (submissionId === '') {
+            throw new Error(`could not parse Submission ID from notarytool output:\n${stdout.slice(0, 400)}`)
+          }
+          break
+        } catch (error) {
+          if (attempt > options.retries) throw error
+          options.log(`notarytool submit failed (attempt ${attempt}); retrying in ${options.backoffMs}ms`)
+          await options.sleep(options.backoffMs)
         }
-        break
-      } catch (error) {
-        if (attempt > options.retries) throw error
-        options.log(`notarytool submit failed (attempt ${attempt}); retrying in ${options.backoffMs}ms`)
-        await options.sleep(options.backoffMs)
       }
     }
-  }
-  options.log(`notarytool submission ${submissionId} accepted`)
+    options.log(`notarytool submission ${submissionId} accepted`)
 
   // 2) Short-poll the submission status; each call carries its own retries.
   // A poll that keeps failing (network drop, unparseable output) is treated as
@@ -160,10 +170,13 @@ export async function notarizeMacApp(options: NotarizeMacOptions): Promise<Notar
   options.run('xcrun', ['stapler', 'staple', options.appPath])
   options.run('xcrun', ['stapler', 'validate', options.appPath])
   return { appPath: options.appPath, submissionId, status }
+  } finally {
+    rmSync(workingDir, { recursive: true, force: true })
+  }
 }
 
-function defaultRun(command: string, args: readonly string[], env: NodeJS.ProcessEnv): string {
-  const result = spawnSync(command, args, { env, encoding: 'utf8' })
+function defaultRun(command: string, args: readonly string[], env: NodeJS.ProcessEnv, cwd?: string): string {
+  const result = spawnSync(command, args, { env, encoding: 'utf8', cwd })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
     const stderr = (result.stderr ?? result.stdout ?? '').toString().trim()
@@ -184,7 +197,7 @@ function defaultOptions(): NotarizeMacOptions {
     deadlineMs: 100 * 60_000,
     retries: 5,
     backoffMs: 15_000,
-    run: (command, args) => defaultRun(command, args, process.env),
+    run: (command, args, cwd) => defaultRun(command, args, process.env, cwd),
     sleep: ms => new Promise(resolveTimer => setTimeout(resolveTimer, ms)),
     log: message => console.log(message),
   }

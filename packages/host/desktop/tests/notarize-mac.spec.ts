@@ -27,6 +27,9 @@ function makeOptions(overrides: Partial<NotarizeMacOptions> = {}): {
       backoffMs: 1,
       run: (command, args) => {
         calls.push({ command, args })
+        // 只有 submit/info/log 消费脚本化响应;ditto/staple/validate 一律成功且无输出
+        const sub = args[1] ?? ''
+        if (sub !== 'submit' && sub !== 'info' && sub !== 'log') return ''
         const response = responses.shift()
         if (response === undefined) return ''
         if (response.startsWith('!')) throw new Error(response.slice(1))
@@ -56,14 +59,20 @@ describe('notarytool-resilient notarization', () => {
       status: 'Accepted',
     })
     expect(calls.map(call => [call.command, call.args[1]])).toEqual([
+      ['ditto', '-k'],
       ['xcrun', 'submit'],
       ['xcrun', 'info'],
       ['xcrun', 'info'],
       ['xcrun', 'staple'],
       ['xcrun', 'validate'],
     ])
-    expect(calls[3]?.args).toEqual(['stapler', 'staple', '/app/PicoAide Harness.app'])
-    expect(calls[4]?.args).toEqual(['stapler', 'validate', '/app/PicoAide Harness.app'])
+    // 提交的是 zip(notarytool 不收 .app 目录),点击目标是 .app
+    expect(calls[0]?.args).toContain('PicoAide Harness.app')
+    expect(calls[1]?.args[2]).toMatch(/\.zip$/u)
+    // ditto 在 .app 父目录执行(keepParent 归档根为 .app 而非绝对路径)
+    expect(calls[0]?.args).toContain('--keepParent')
+    expect(calls[4]?.args).toEqual(['stapler', 'staple', '/app/PicoAide Harness.app'])
+    expect(calls[5]?.args).toEqual(['stapler', 'validate', '/app/PicoAide Harness.app'])
   })
 
   it('retries a transient polling failure and still succeeds', async () => {
