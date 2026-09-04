@@ -45,8 +45,9 @@ function makeOptions(overrides: Partial<NotarizeMacOptions> = {}): {
 describe('notarytool-resilient notarization', () => {
   it('submits, short-polls until Accepted, then staples and validates', async () => {
     const { options, calls, responses } = makeOptions()
+    // 新式 notarytool 输出(Xcode 15+):'Submission ID received' + 'id:' 行
     responses.push(
-      'Submission ID: 00000000-0000-0000-0000-000000000001\n',
+      'Conducting pre-submission checks...\nSubmission ID received\n  id: 00000000-0000-0000-0000-000000000001\nSuccessfully uploaded file\n  id: 00000000-0000-0000-0000-000000000001\n',
       'Submission Status: In Progress\n',
       'Status: Accepted\n',
     )
@@ -73,6 +74,18 @@ describe('notarytool-resilient notarization', () => {
     expect(calls[0]?.args).toContain('--keepParent')
     expect(calls[4]?.args).toEqual(['stapler', 'staple', '/app/PicoAide Harness.app'])
     expect(calls[5]?.args).toEqual(['stapler', 'validate', '/app/PicoAide Harness.app'])
+  })
+
+  it('accepts the legacy one-line Submission ID format too', async () => {
+    const { options, calls, responses } = makeOptions()
+    responses.push(
+      'Submission ID: 00000000-0000-0000-0000-000000000005\n',
+      'Status: Accepted\n',
+    )
+
+    await notarizeMacApp(options)
+
+    expect(calls[1]?.args[2]).toMatch(/\.zip$/u)
   })
 
   it('retries a transient polling failure and still succeeds', async () => {

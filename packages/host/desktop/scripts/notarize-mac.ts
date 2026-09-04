@@ -19,8 +19,10 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SUBMISSION_ID_RE = /Submission ID:\s*([0-9a-fA-F-]+)/u
-const STATUS_RE = /(?:Submission )?Status:\s*([A-Za-z][A-Za-z ]*)/u
+// 新式 notarytool(Xcode 15+)输出 "Submission ID received" 后跟一行
+// "  id: <uuid>";旧式输出单行 "Submission ID: <uuid>"。两种都要认。
+const SUBMISSION_ID_RE = /(?:Submission ID|id):\s*([0-9a-fA-F-]+)/u
+const STATUS_RE = /Status:\s*([A-Za-z][A-Za-z ]*)/iu
 
 export interface NotarizeMacOptions {
   /** Application bundle to notarize and staple. */
@@ -105,10 +107,13 @@ export async function notarizeMacApp(options: NotarizeMacOptions): Promise<Notar
         try {
           stdout = options.run('xcrun', ['notarytool', 'submit', zipPath, ...authArgs])
           submissionId = SUBMISSION_ID_RE.exec(stdout)?.[1] ?? ''
-          if (submissionId === '') {
+          if (submissionId !== '') break
+          // 输出已确认上传成功但解析不出 id:这是确定性缺陷,重试只会重复提交
+          // 同样的包产生多余 submission;立即 fail-loud。
+          if (/Successfully uploaded file/u.test(stdout)) {
             throw new Error(`could not parse Submission ID from notarytool output:\n${stdout.slice(0, 400)}`)
           }
-          break
+          throw new Error(`notarytool submit produced no Submission ID:\n${stdout.slice(0, 300)}`)
         } catch (error) {
           if (attempt > options.retries) throw error
           options.log(`notarytool submit failed (attempt ${attempt}); retrying in ${options.backoffMs}ms`)
@@ -195,8 +200,8 @@ function defaultOptions(): NotarizeMacOptions {
     env: process.env,
     pollIntervalMs: 60_000,
     deadlineMs: 100 * 60_000,
-    retries: 5,
-    backoffMs: 15_000,
+    retries: 8,
+    backoffMs: 10_000,
     run: (command, args, cwd) => defaultRun(command, args, process.env, cwd),
     sleep: ms => new Promise(resolveTimer => setTimeout(resolveTimer, ms)),
     log: message => console.log(message),
