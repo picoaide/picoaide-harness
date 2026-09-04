@@ -91,8 +91,8 @@ function defaultReleaseOptions(): MacReleaseOptions {
         env,
         pollIntervalMs: 60_000,
         deadlineMs: 100 * 60_000,
-        retries: 5,
-        backoffMs: 15_000,
+        retries: 8,
+        backoffMs: 10_000,
         run: (command, args, cwd) => {
           const result = spawnSync(command, args, { env, encoding: 'utf8', cwd })
           if (result.error !== undefined) throw result.error
