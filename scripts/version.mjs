@@ -11,9 +11,10 @@
  *   node scripts/version.mjs set 2.3.0     # 同步写两处 package.json
  *   git commit ...; git tag v2.3.0; git push --tags   # 之后 CI 自动做剩余一切
  *
- * 测试版:版本带 prerelease 段(如 2.7.0-rc.1,可任意多次迭代)——CI 将其
- * 发布为 GitHub Pre-release,正式客户端更新检查(releases/latest)天然
- * 排除,用户不会收到更新;验证通过后再 bump 纯版本(2.7.0)发正式版。
+ * 预发布:版本带 prerelease 段(如 2.7.0-beta.1,可任意多次迭代)——CI 将其
+ * 发布为 GitHub Pre-release(官方命名,不用 rc 等自定义叫法),正式客户端
+ * 更新检查(releases/latest)天然排除,用户不会收到更新;验证通过后再 bump
+ * 纯版本(2.7.0)发正式版(Latest)。
  * 详见 docs/decisions/2026-09-05-prerelease-test-channel.md。
  *
  * 子命令:

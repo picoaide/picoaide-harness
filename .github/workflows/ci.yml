@@ -162,10 +162,10 @@ jobs:
 
   desktop-macos:
     name: Desktop (macOS)
-    # 未签名冒烟在 PR/分支/测试版 tag 上跑:rc(带 prerelease 段)不签名不公证
-    # (内部测试用,右键打开即可),只有正式 tag 走 desktop-macos-release
-    # (签名+公证,用户安装体验)。避免 mac runner(10 倍计费)+Apple 公证队列
-    # 成为测试迭代瓶颈(2026-09-05 定案)。
+    # 未签名冒烟在 PR/分支/预发布 tag 上跑:Pre-release(带 prerelease 段,
+    # 如 v2.7.0-beta.1)不签名不公证——内部测试用,右侧打开即可;只有正式 tag
+    # (纯 vX.Y.Z,Latest)走 desktop-macos-release(签名+公证,用户安装体验)。
+    # 避免 mac runner(10 倍计费)+Apple 公证队列成为测试迭代瓶颈(2026-09-05 定案)。
     if: ${{ !startsWith(github.ref, 'refs/tags/v') || contains(github.ref_name, '-') }}
     runs-on: macos-latest
     timeout-minutes: 60
@@ -200,8 +200,8 @@ jobs:
   # 未签/未公证的 DMG 作为发布资产。
   desktop-macos-release:
     name: Desktop (macOS signed release)
-    # 仅正式 tag(纯 vX.Y.Z)签名+公证;测试版 tag(vX.Y.Z-*)不在此列
-    # (走 desktop-macos 未签名冒烟,rc 不进苹果签名公证)。
+    # 仅正式 tag(纯 vX.Y.Z,Latest)签名+公证;Pre-release tag(vX.Y.Z-*,
+    # 如 beta)不在此列——走 desktop-macos 未签名冒烟,测试版不进苹果签名公证。
     if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
     # arm64 原生 runner(macos-15 = Apple Silicon):产物已是 arm64-only
     # (见 b32165bd25),原生架构上 electron 与原生依赖全部 arm64 原生下载/
@@ -339,11 +339,12 @@ jobs:
             echo "::warning::docs/releases/${TAG}.md not found — falling back to GitHub auto-generated notes"
             NOTES_FLAG="--generate-notes"
           fi
-          # 测试版 tag(带 prerelease 段,如 v2.7.0-rc.1,version.mjs check 已保证
-          # 是合法 semver,不含 + 元数据)以 Pre-release 发布:GitHub
-          # releases/latest 端点与客户端 update-checker/update-download 都
-          # 排除 prerelease,正式用户不会收到更新;资产完整签名公证,可手动
-          # 下载验证。正式 tag(纯 vX.Y.Z)发布为普通 release,才推送给用户。
+          # Pre-release tag(带 prerelease 段,如 v2.7.0-beta.1,version.mjs check
+          # 已保证是合法 semver,不含 + 元数据)按 GitHub 官方语义以
+          # Pre-release 发布:releases/latest 与客户端 update-checker/
+          # update-download 都排除 prerelease,正式用户不会收到更新。正式 tag
+          # (纯 vX.Y.Z,Latest)发布为普通 release,才推送给用户(默认成为 Latest;
+          # 若已有更新的正式版,GitHub 自动降为 None)。
           PRERELEASE=""
           if [[ "${TAG}" == *-* ]]; then
             PRERELEASE="--prerelease"

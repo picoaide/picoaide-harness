@@ -46,11 +46,22 @@
 
 无「推送」概念——一切仍是客户端定期（默认 6h）或手动「拉取」检查。
 
-## 版本号与 tag 规范
+## 版本号与 tag 规范（命名对齐 GitHub 官方）
+
+GitHub Release 的官方 label 语义（我们按其执行）：
+
+| GitHub Release label | 用法 | 我们的对应 |
+|---|---|---|
+| **Latest** | 最新正式版（`releases/latest` 返回它） | 纯 SemVer tag（`v2.7.0`），默认即 Latest |
+| **Pre-release** | 非生产就绪（正式客户端更新检查永远排除） | prerelease 段 tag（`v2.7.0-beta.1`），CI 以 `--prerelease` 发布 |
+| **None** | 普通的旧正式版（被更新的正式版取代后自动落位） | 无需手动设置；GitHub 自动 |
 
 - 正式版：纯 SemVer，如 `2.7.0` → tag `v2.7.0`（现有流程不变）。
-- 测试版：SemVer prerelease 段，如 `2.7.0-rc.1`、`2.7.0-rc.2`… → tag `v2.7.0-rc.1`。
-  同一正式版本可任意多次迭代（rc.1 → rc.2 → …）；正式版 = 去掉 prerelease 段。
+- 预发布（测试版）：SemVer prerelease 段，如 `2.7.0-beta.1`、`2.7.0-beta.2`… →
+  tag `v2.7.0-beta.1`。同一正式版本可任意多次迭代；正式版 = 去掉 prerelease 段。
+- 命名纪律：测试版一律以 GitHub 官方称呼 **Pre-release / 预发布** 指代，不再使用
+  "rc" 等自定义叫法（2026-09-05 前历史 tag 如 v2.6.7-rc.3 仅是失败尝试的残留，
+  无 GitHub Release，后续不再沿用 rc 后缀）。
 - `scripts/version.mjs` 的 `validateVersion` / docker.yml 白名单本就接受 `-后缀`，
   资产名 `PicoAide-Harness-2.7.0-rc.1-mac.dmg` 等自动对齐 tag，无特殊处理。
 
@@ -67,7 +78,7 @@ git push origin master --tags                 # CI 自动构建三平台 + 发�
 
 CI 行为（ci.yml）：
 
-- 三平台资产照常构建；**mac 测试版（rc）不签名、不公证**（2026-09-05 定案）：测试版
+- 三平台资产照常构建；**mac 预发布版不签名、不公证**（2026-09-05 定案）：测试版
   只给内部/测试机手动安装（未签名 DMG 右键打开即可），不进 Apple 签名公证链——彻底
   摆脱公证队列对测试迭代的瓶颈；只有正式 tag（纯 vX.Y.Z）走签名+公证；
 - Release job 检测 tag 含 prerelease 段 → `gh release create --prerelease`，GitHub
