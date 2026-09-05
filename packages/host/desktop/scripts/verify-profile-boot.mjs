@@ -147,10 +147,26 @@ try {
     throw new Error(`assembled Windows browse picker listed ${listing.path} instead of ${home}`)
   }
 
-  const expectedUrl = `http://127.0.0.1:${String(ctx.webServer.port)}/?dsh-desktop-mode=advanced&dsh-desktop-platform=win32`
-  // Upstream 0.1.2: the shell URL carries the process launch token for the
-  // Web index exchange — compare the token-bearing form.
-  const expectedRendererUrl = ctx.connection.authenticatedUrl(expectedUrl)
+  const baseUrl = `http://127.0.0.1:${String(ctx.webServer.port)}/`
+  // Clean renderer root carrying the desktop markers — the URL the
+  // cookie-authenticated index fetch below reads.
+  const expectedUrl = (() => {
+    const url = new URL(baseUrl)
+    url.searchParams.set('dsh-desktop-mode', 'advanced')
+    url.searchParams.set('dsh-desktop-platform', 'win32')
+    return url.href
+  })()
+  // The shell URL the desktop plugin mounts: the 0.1.2 process launch-token
+  // exchange URL with the markers restored. authenticatedUrl wipes any
+  // pre-existing query, so the plugin mints the token on the bare origin
+  // first and only then appends mode/platform — mirror that assembly exactly
+  // (desktopRendererUrlWithToken in ../src/index.ts).
+  const expectedRendererUrl = (() => {
+    const url = new URL(ctx.connection.authenticatedUrl(baseUrl))
+    url.searchParams.set('dsh-desktop-mode', 'advanced')
+    url.searchParams.set('dsh-desktop-platform', 'win32')
+    return url.href
+  })()
   if (mountedSpec?.url !== expectedRendererUrl) {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }

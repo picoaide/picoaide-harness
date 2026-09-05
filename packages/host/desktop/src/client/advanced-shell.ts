@@ -5,6 +5,7 @@ import type {} from './contracts.ts'
 import type { DesktopClientEnvironment } from './environment.ts'
 import { AdvancedFrame } from './AdvancedFrame.tsx'
 import { DesktopLayoutState } from './layout-state.ts'
+import { provideDesktopLayout } from './layout-service.ts'
 import { installAdvancedStyles } from './styles.ts'
 import { DesktopThemePresenter } from './theme-presenter.ts'
 
@@ -19,10 +20,15 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
   }
 
   const desktopLayout = new DesktopLayoutState()
-  // Upstream 0.1.2: the `layout` service belongs to ui-layout (its client
-  // apply registers the LayoutController); this shell only consumes its own
-  // DesktopLayoutState through the root registration's inject face, so no
-  // 'layout' service is provided here (a duplicate registration is fatal).
+  // ui-layout is disabled in the advanced desktop profile (profile.ts), so
+  // this shell is the single `layout` service provider and the single root
+  // registrant; the child-slot declarations (sidebar/conversation/details/
+  // shell.overlay) ride this registration — a second declaration would be
+  // fatal, which is exactly why the official frame row cannot stay enabled.
+  ctx.effect(
+    () => provideDesktopLayout(ctx, desktopLayout),
+    'desktop: layout service',
+  )
 
   ctx.effect(() => {
     document.body.dataset.dshDesktopMode = 'advanced'
@@ -47,10 +53,6 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
 
   ctx.effect(() => ctx.slots.register({
     name: 'root',
-    // Shadow the official AppFrame entry (priority 0) at the root hole: the
-    // desktop frame wins the render while ui-layout still ships the `layout`
-    // service every other surface needs (upstream 0.1.2 split).
-    priority: -1,
     children: {
       'sidebar': { kind: 'single', scope: 'root' },
       'conversation': { kind: 'single', scope: 'session-maybe' },

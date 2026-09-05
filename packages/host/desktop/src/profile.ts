@@ -449,11 +449,13 @@ export async function prepareDesktopProfile(
       }
     }
     patches.push(
-      // Upstream 0.1.2: the `layout` service ships only with ui-layout (the
-      // client runtime that used to own it is gone), so the official frame
-      // row must stay enabled; the desktop AdvancedFrame shadows its root
-      // registration via a lower slot priority instead.
-      { id: 'ui-layout', disabled: false },
+      // Advanced desktop owns the root frame itself: ui-layout's client row
+      // is disabled so its AppFrame/child-slot declarations and `layout`
+      // service provider never activate (0.1.2 forbids a second declaration
+      // of the sidebar/conversation/details slots and a duplicate service).
+      // The desktop shell provides the `layout` service and registers the
+      // root frame with the child declarations instead (advanced-shell.ts).
+      { id: 'ui-layout', disabled: true },
       { id: 'ui-sidebar', disabled: false },
       { id: 'ui-conversation', disabled: false },
     )
