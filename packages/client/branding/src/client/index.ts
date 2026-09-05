@@ -7,13 +7,17 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: declares the conversation hero brand-mark slot.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: declares the settings-page `settings.section` slot contract
+// (the About section occupant).
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BraceMark, BrandName } from './Brand.tsx'
+import { AboutSection, OverlayBadge, applyBrandTheme, injectBrandShellStyles } from './brand-shell.tsx'
 
 /** Stable Cordis plugin name for the branding client half. */
 export const name = 'picoaide-branding-client'
 
-/** Services required: the slot registry for the brand holes. */
-export const inject = ['slots']
+/** Services required: the slot registry for the brand holes, plus the theme runtime. */
+export const inject = ['slots', 'theme']
 
 /**
  * Browser favicon artwork: the exact brand mark
@@ -84,4 +88,30 @@ export function apply(ctx: ClientContext): void {
     installFavicon()
     return () => { /* favicon reverts on the next navigation */ }
   }, 'picoaide-branding: favicon')
+
+  // --- Brand shell surfaces (merged from the retired @picoaide/dsh-shell) ---
+
+  ctx.effect(() => {
+    injectBrandShellStyles()
+    // The theme layer disposer teardowns the token override on disposal.
+    return applyBrandTheme(ctx) ?? (() => {})
+  }, 'picoaide-branding: shell styles + theme tokens')
+
+  ctx.effect(
+    () => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+      name: 'shell.overlay',
+      id: 'picoaide-badge',
+    }, OverlayBadge)),
+    'picoaide-branding: overlay badge',
+  )
+
+  ctx.effect(
+    () => ctx.slots.inject('settings.section', () => ctx.slots.register({
+      name: 'settings.section',
+      id: 'picoaide-about',
+      order: 900,
+      label: 'About PicoAide',
+    }, AboutSection)),
+    'picoaide-branding: about section',
+  )
 }
