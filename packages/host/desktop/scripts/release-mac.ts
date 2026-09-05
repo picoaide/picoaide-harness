@@ -100,9 +100,9 @@ export async function releaseMac(
   options.prepareRuntime()
   // One standard electron-builder invocation: pack + sign + notarize (its inline
   // @electron/notarize zips the app, runs `notarytool submit --wait`, staples the
-  // ticket) + DMG. The long-lived --wait connection was flaky on macos-latest
-  // (arm64) runners; the release job pins macos-15 (Intel, community-verified
-  // stable per electron/notarize#219) and the workflow retries the whole step.
+  // ticket) + DMG. The long-lived --wait connection was flaky on arm64 runners;
+  // the release job pins macos-15-intel (community-verified stable per
+  // electron/notarize#219) and the workflow retries the whole step.
   options.run('yarn', [
     'exec', 'electron-builder', '--mac', 'dmg', '--arm64',
     '--config.forceCodeSigning=true', '--config.mac.notarize=true',
