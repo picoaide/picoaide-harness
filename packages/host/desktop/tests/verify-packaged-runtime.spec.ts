@@ -17,7 +17,7 @@ import {
   type PackagedRuntimeContext,
   type PackagedDiagnosticWorkerLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
-import { FORBIDDEN_MACOS_UNIVERSAL_ENTRIES } from '../scripts/mac-universal.ts'
+import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 
 function context(
   appOutDir: string,
@@ -167,7 +167,7 @@ describe('packaged desktop runtime verification', () => {
       .toThrow('unsupported Electron afterPack platform "mas"')
   })
 
-  it('rejects a no-native unpacked root and passes with one native entry for universal macOS', () => {
+  it('rejects a no-native unpacked root and passes with one native entry for arm64 macOS', () => {
     const runtimeContext = context('/build', 'darwin', 4)
     // 无任何原生条目 -> 拒绝
     expect(() => verifyPackagedRuntime(
@@ -189,16 +189,16 @@ describe('packaged desktop runtime verification', () => {
     )).not.toThrow()
   })
 
-  it('rejects a host-architecture node-pty build from a universal app', () => {
+  it('rejects a host-architecture node-pty build from a arm64 app', () => {
     const runtimeContext = context('/build', 'darwin', 4)
     const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
-    const forbidden = FORBIDDEN_MACOS_UNIVERSAL_ENTRIES[0]
+    const forbidden = FORBIDDEN_MACOS_NATIVE_ENTRIES[0]
 
     expect(() => verifyPackagedRuntime(
       runtimeContext,
       () => completeArchiveEntries(),
       filename => filename === join(unpackedRoot, forbidden)
-        || !FORBIDDEN_MACOS_UNIVERSAL_ENTRIES
+        || !FORBIDDEN_MACOS_NATIVE_ENTRIES
           .some(entry => filename === join(unpackedRoot, entry)),
     )).toThrow(`contains host-architecture build output: ${forbidden}`)
   })

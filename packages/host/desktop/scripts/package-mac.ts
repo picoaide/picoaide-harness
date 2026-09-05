@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { withoutMacReleaseSecrets } from './release-preflight.ts'
-import { prepareInstalledMacUniversalRuntime } from './mac-universal.ts'
+import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
 
 /** Injectable native macOS packaging boundary used by focused tests. */
 export interface MacSmokePackageOptions {
@@ -72,7 +72,7 @@ function defaultOptions(): MacSmokePackageOptions {
     desktopRoot,
     outputDir,
     resetOutput: () => rmSync(outputDir, { recursive: true, force: true }),
-    prepareRuntime: () => prepareInstalledMacUniversalRuntime(desktopRoot),
+    prepareRuntime: () => prepareInstalledMacArm64Runtime(desktopRoot),
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL('./verify-mac-smoke.ts', import.meta.url)),
     nodeExecutable: process.execPath,
@@ -86,8 +86,8 @@ function defaultOptions(): MacSmokePackageOptions {
  *
  * The signed and notarized release stays a manual step on a credentialed
  * machine; this smoke exists so macOS packaging regressions fail in CI before
- * a manual release. The universal target exercises both Intel and Apple
- * Silicon packaging in one artifact.
+ * a manual release. The target builds the arm64-only artifact for Apple
+ * Silicon Macs.
  * @param options - Injectable process and command boundaries.
  */
 export function packageMacSmoke(options: MacSmokePackageOptions = defaultOptions()): void {
@@ -122,7 +122,7 @@ export function packageMacSmoke(options: MacSmokePackageOptions = defaultOptions
       options.builderCli,
       '--mac',
       'dmg',
-      '--universal',
+      '--arm64',
       '--publish',
       'never',
       '--config.mac.notarize=false',

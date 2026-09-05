@@ -329,7 +329,7 @@ describe('published package surface', () => {
       hardenedRuntime: true,
       mergeASARs: false,
       notarize: true,
-      target: [{ target: 'dmg', arch: ['universal'] }],
+      target: [{ target: 'dmg', arch: ['arm64'] }],
       artifactName: 'PicoAide-Harness-${version}-mac.${ext}',
       x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))

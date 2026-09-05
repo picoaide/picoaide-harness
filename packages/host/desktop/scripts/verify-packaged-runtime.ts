@@ -7,9 +7,9 @@ import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
 import {
-  FORBIDDEN_MACOS_UNIVERSAL_ENTRIES,
-  MACOS_UNIVERSAL_NATIVE_ENTRIES,
-} from './mac-universal.ts'
+  FORBIDDEN_MACOS_NATIVE_ENTRIES,
+  MACOS_ARM64_NATIVE_ENTRIES,
+} from './mac-runtime.ts'
 
 /** AfterPack fields consumed without importing Electron Builder's incomplete declaration graph. */
 export interface PackagedRuntimeContext {
@@ -83,7 +83,7 @@ export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
 
 /** CPU-specific runtime assets that must coexist in a universal macOS application. */
 export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
-  ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => entry.path),
+  ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => entry.path),
 ] as const
 
 
@@ -412,7 +412,7 @@ export function verifyPackagedRuntime(
     )
   }
   if (context.electronPlatformName === 'darwin' && context.arch === 4) {
-    const forbidden = FORBIDDEN_MACOS_UNIVERSAL_ENTRIES
+    const forbidden = FORBIDDEN_MACOS_NATIVE_ENTRIES
       .filter(entry => exists(join(unpackedRoot, entry)))
     if (forbidden.length > 0) {
       throw new Error(

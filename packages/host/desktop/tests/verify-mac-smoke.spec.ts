@@ -6,7 +6,7 @@ import {
   verifyMacSmoke,
   type MacSmokeVerificationOptions,
 } from '../scripts/verify-mac-smoke.ts'
-import { MACOS_UNIVERSAL_NATIVE_ENTRIES } from '../scripts/mac-universal.ts'
+import { MACOS_ARM64_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 
 const temporaryRoots: string[] = []
 
@@ -35,7 +35,7 @@ function fixture(): AppFixture {
   chmodSync(executable, 0o755)
   modeOverrides.set(executable, 0o755)
   writeFileSync(appAsar, 'packed')
-  for (const entry of MACOS_UNIVERSAL_NATIVE_ENTRIES) {
+  for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
     const path = join(`${appAsar}.unpacked`, entry.path)
     mkdirSync(join(path, '..'), { recursive: true })
     writeFileSync(path, 'native')
@@ -114,12 +114,8 @@ describe('macOS DMG smoke artifact verification', () => {
         ],
       },
       { command: 'plutil', args: ['-lint', value.infoPlist] },
-      {
-        command: 'lipo',
-        args: [value.executable, '-verify_arch', 'x86_64'],
-      },
       { command: 'lipo', args: [value.executable, '-verify_arch', 'arm64'] },
-      ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => ({
+      ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => ({
         command: 'lipo',
         args: [join(`${value.appAsar}.unpacked`, entry.path), '-verify_arch', entry.arch],
       })),

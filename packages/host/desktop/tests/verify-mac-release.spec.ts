@@ -4,7 +4,7 @@ import {
   verifyMacRelease,
   type MacReleaseVerificationOptions,
 } from '../scripts/verify-mac-release.ts'
-import { MACOS_UNIVERSAL_NATIVE_ENTRIES } from '../scripts/mac-universal.ts'
+import { MACOS_ARM64_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 
 function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const calls: Array<{ command: string; args: readonly string[] }> = []
@@ -12,7 +12,7 @@ function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const value: MacReleaseVerificationOptions = {
     distDir: '/release/dist',
     productName: 'PicoAide Harness',
-    listDmgs: () => ['/release/dist/PicoAide Harness-2.0.0-universal.dmg'],
+    listDmgs: () => ['/release/dist/PicoAide Harness-2.0.0-arm64.dmg'],
     makeMountPoint: () => '/private/tmp/dsh-desktop-dmg-test',
     run: (command, args) => { calls.push({ command, args: [...args] }) },
     removeMountPoint,
@@ -28,26 +28,22 @@ describe('macOS release artifact verification', () => {
 
     expect(verifyMacRelease(harness.value)).toEqual({
       appPath: '/private/tmp/dsh-desktop-dmg-test/PicoAide Harness.app',
-      dmgPath: '/release/dist/PicoAide Harness-2.0.0-universal.dmg',
+      dmgPath: '/release/dist/PicoAide Harness-2.0.0-arm64.dmg',
     })
 
     expect(harness.calls).toEqual([
       {
         command: 'hdiutil',
         args: [
-          'attach', '/release/dist/PicoAide Harness-2.0.0-universal.dmg',
+          'attach', '/release/dist/PicoAide Harness-2.0.0-arm64.dmg',
           '-mountpoint', '/private/tmp/dsh-desktop-dmg-test', '-nobrowse', '-readonly',
         ],
       },
       {
         command: 'lipo',
-        args: [join(appPath, 'Contents', 'MacOS', 'PicoAide Harness'), '-verify_arch', 'x86_64'],
-      },
-      {
-        command: 'lipo',
         args: [join(appPath, 'Contents', 'MacOS', 'PicoAide Harness'), '-verify_arch', 'arm64'],
       },
-      ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => ({
+      ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => ({
         command: 'lipo',
         args: [
           join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', entry.path),
