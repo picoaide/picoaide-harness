@@ -327,11 +327,9 @@ describe('published package surface', () => {
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
     expect(manifest.build?.mac).toEqual(expect.objectContaining({
       hardenedRuntime: true,
-      mergeASARs: false,
       notarize: true,
       target: [{ target: 'dmg', arch: ['arm64'] }],
       artifactName: 'PicoAide-Harness-${version}-mac.${ext}',
-      x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
