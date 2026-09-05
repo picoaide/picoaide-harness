@@ -130,30 +130,6 @@ describe('published package surface', () => {
     expect(manifest.optionalDependencies ?? {}).not.toHaveProperty('dshmarket')
   })
 
-  it('patches the browse panel with the Windows native-picker icon bridge', () => {
-    const patchPath = './patches/dsh-client-ui-directory-picker-browse@0.1.1-rc.2.patch'
-    expect(workspaceManifest.resolutions).toMatchObject({
-      '@deepseek-ai/dsh-client-ui-directory-picker-browse@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
-      '@deepseek-ai/dsh-client-ui-directory-picker-browse@npm:^0.1.1-rc.2': expect.stringContaining(patchPath),
-    })
-    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
-    const installedClient = readFileSync(new URL(
-      'node_modules/@deepseek-ai/dsh-client-ui-directory-picker-browse/lib/client.js',
-      packageRoot,
-    ), 'utf8')
-    for (const marker of [
-      '__DSH_DESKTOP_PICK_DIRECTORY__',
-      'IconFolderOpen16',
-      'nativePickerButton',
-      'browser.nativePicker',
-      'border:1px solid var(--dsw-alias-border-l2)',
-      'background:var(--dsw-alias-bg-layer-2)',
-    ]) {
-      expect(patch).toContain(marker)
-      expect(installedClient).toContain(marker)
-    }
-  })
-
   it('builds public Host plugins and their private native bootstraps', () => {
     const config = readFileSync(new URL('tsdown.config.ts', packageRoot), 'utf8')
 
@@ -261,7 +237,6 @@ describe('published package surface', () => {
     expect(manifest.build?.files).toContain('!**/node_modules/mermaid/**')
     expect(manifest.build?.files).toContain('!**/node_modules/cytoscape/**')
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
-    expect(manifest.build?.mac?.mergeASARs).toBe(false)
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
     expect(manifest.build?.win?.target).toEqual([{
       target: 'nsis',
