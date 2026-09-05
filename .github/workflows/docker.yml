@@ -102,8 +102,16 @@ jobs:
           IMAGE="$IMAGE_NAME"
           V="$VERSION"
           MM="$MAJOR_MINOR"
-          # 相邻去重(如手动填 '2.3' 时 v$V == v$MM),避免重复 tag 令 build 报错
-          TAGS="$(for T in latest "v$V" "v$MM"; do echo "${IMAGE}:$T"; done | uniq | paste -sd, -)"
+          if [[ "$V" == *-* ]]; then
+            # 测试版(prerelease 段,如 2.7.0-rc.1):仅推具体版本 tag,不打
+            # latest / 主版本宽 tag —— 测试镜像不得污染生产拉取面(显式引
+            # 版本不受影响,latest 与 v2.7 留给正式版)。
+            TAGS="${IMAGE}:v${V}"
+            echo "Prerelease version: tagging ${TAGS} only"
+          else
+            # 相邻去重(如手动填 '2.3' 时 v$V == v$MM),避免重复 tag 令 build 报错
+            TAGS="$(for T in latest "v$V" "v$MM"; do echo "${IMAGE}:$T"; done | uniq | paste -sd, -)"
+          fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "Composed tags: $TAGS"
 
