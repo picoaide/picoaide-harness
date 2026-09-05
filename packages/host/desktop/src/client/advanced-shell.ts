@@ -5,7 +5,6 @@ import type {} from './contracts.ts'
 import type { DesktopClientEnvironment } from './environment.ts'
 import { AdvancedFrame } from './AdvancedFrame.tsx'
 import { DesktopLayoutState } from './layout-state.ts'
-import { provideDesktopLayout } from './layout-service.ts'
 import { installAdvancedStyles } from './styles.ts'
 import { DesktopThemePresenter } from './theme-presenter.ts'
 
@@ -20,10 +19,10 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
   }
 
   const desktopLayout = new DesktopLayoutState()
-  ctx.effect(
-    () => provideDesktopLayout(ctx, desktopLayout),
-    'desktop: layout service',
-  )
+  // Upstream 0.1.2: the `layout` service belongs to ui-layout (its client
+  // apply registers the LayoutController); this shell only consumes its own
+  // DesktopLayoutState through the root registration's inject face, so no
+  // 'layout' service is provided here (a duplicate registration is fatal).
 
   ctx.effect(() => {
     document.body.dataset.dshDesktopMode = 'advanced'

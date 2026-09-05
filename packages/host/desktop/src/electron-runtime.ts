@@ -731,6 +731,15 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     window.once('ready-to-show', show)
     let tray: Tray | undefined
     try {
+      // Upstream 0.1.2: the index token exchange clears the query string (and
+      // the auth-gate login page is reached through that clean redirect), so
+      // the desktop shell marker travels in a cookie set before the first
+      // load — the client half reads it synchronously from document.cookie.
+      await window.webContents.session.cookies.set({
+        url: new URL(spec.url).origin,
+        name: 'dsh-desktop-env',
+        value: encodeURIComponent(`dsh-desktop-mode=advanced&dsh-desktop-platform=${this.platform}`),
+      })
       await window.loadURL(spec.url)
       tray = new Tray(prepareTrayIcon(spec.trayIcons, this.platform))
       this.tray = tray

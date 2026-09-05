@@ -87,6 +87,9 @@ const electron = vi.hoisted(() => {
       webRequest: {
         onHeadersReceived: vi.fn(),
       },
+      cookies: {
+        set: vi.fn(async () => {}),
+      },
     },
   }
   const nativeTheme = { themeSource: 'system' }

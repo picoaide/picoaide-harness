@@ -179,10 +179,11 @@ function syncPlatformModules() {
   const table = source.match(/export const PLATFORM_MODULES = \[([\s\S]*?)\] as const/)
   const preload = source.match(/export const PRELOADED_CLIENT_EXTERNALS = \[([\s\S]*?)\] as const/)
   if (!table || !preload) fail(`cannot parse ${src}: PLATFORM_MODULES/PRELOADED_CLIENT_EXTERNALS not found`)
-  const fmt = (body) => body.split('\n')
-    .map(l => l.trim())
-    .filter(l => /^'[^']*',$/u.test(l))
-    .map(l => `  ${l}`)
+  // The upstream table packs several entries on one line ('react',
+  // 'react/jsx-runtime', ...), so collect every string literal in the
+  // array body instead of filtering single-entry lines.
+  const fmt = (body) => (body.match(/'[^']+'/gu) ?? [])
+    .map(entry => `  ${entry}`)
     .join('\n')
   const generated = `/**
  * Single source of truth for the upstream platform module table.

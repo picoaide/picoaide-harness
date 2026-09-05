@@ -280,8 +280,9 @@ async function main() {
   await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 
-  // 8. Chat input availability.
-  const chatOk = await evalSafe(cdp, `!!document.querySelector('textarea, [contenteditable=true]')`)
+  // 8. Chat input availability. Upstream 0.1.2 rebuilt the composer around a
+  // plain input element (textarea-refactor), so accept input/role=textbox too.
+  const chatOk = await evalSafe(cdp, `!!document.querySelector('textarea, [contenteditable=true], input[placeholder], [role="textbox"]')`)
   reportStep('聊天输入区可用', !!chatOk, `hasTextarea=${Boolean(chatOk)}`)
   await screenshot(cdp, '08-chat')
 
@@ -308,10 +309,14 @@ async function main() {
 
   // 12. Textarea input + send affordance.
   const typed = await evalSafe(cdp, `(() => {
-    const ta = document.querySelector('textarea, [contenteditable=true]')
+    const ta = document.querySelector('textarea, [contenteditable=true], input[placeholder], [role="textbox"]')
     if (!ta) return false
     if (ta.tagName === 'TEXTAREA') {
       const s = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+      s.call(ta, 'e2e 消息')
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    } else if (ta.tagName === 'INPUT') {
+      const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
       s.call(ta, 'e2e 消息')
       ta.dispatchEvent(new Event('input', { bubbles: true }))
     } else {
