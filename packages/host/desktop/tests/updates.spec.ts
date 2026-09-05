@@ -22,6 +22,14 @@ function versionResponse(version: unknown): Response {
   return Response.json({ tag_name: version, draft: false, prerelease: false })
 }
 
+function releaseListResponse(versions: readonly string[]): Response {
+  return Response.json(versions.map(version => ({
+    tag_name: version,
+    draft: false,
+    prerelease: version.includes('-'),
+  })))
+}
+
 interface Harness {
   readonly statePath: string
   readonly tray: DesktopTrayItem
@@ -39,6 +47,7 @@ interface Harness {
 
 async function createHarness(options: {
   readonly packaged?: boolean
+  readonly currentVersion?: string
   readonly canDownload?: boolean
   readonly config?: UpdateConfig
   readonly request?: DesktopRuntime['updates']['request']
@@ -67,7 +76,7 @@ async function createHarness(options: {
   let disposer: (() => void | Promise<void>) | undefined
   const updatesAdapter = {
     isPackaged: options.packaged ?? true,
-    currentVersion: '2.0.0',
+    currentVersion: options.currentVersion ?? '2.0.0',
     statePath,
     canDownload: options.canDownload ?? true,
     request: options.request ?? (async () => versionResponse('2.0.0')),
@@ -500,5 +509,64 @@ describe('desktop update Host plugin', () => {
     // The trigger drives the same manual check (confirm dialog appears).
     harness.checkNow?.()
     await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.3.0') })
+  })
+})
+
+
+describe('desktop update test channel (prerelease installs)', () => {
+  it('checks the release list and prompts prerelease installs for a newer prerelease', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn(async () => releaseListResponse(['v2.0.0', 'v2.1.0-rc.1', 'v2.1.0-rc.2']))
+    const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
+
+    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
+    await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0-rc.2') })
+    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
+    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Available')
+    await vi.waitFor(async () => {
+      expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
+        version: 2,
+        lastPromptedVersion: '2.1.0-rc.2',
+      })
+    })
+
+    await harness.dispose()
+  })
+
+  it('accepts prerelease prompt history and does not prompt for it again', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn(async () => releaseListResponse(['v2.1.0-rc.1', 'v2.1.0-rc.2']))
+    const harness = await createHarness({
+      currentVersion: '2.1.0-rc.1',
+      request,
+      state: JSON.stringify({ version: 2, lastPromptedVersion: '2.1.0-rc.2' }),
+    })
+
+    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
+    await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
+    expect(harness.confirmDownload).not.toHaveBeenCalled()
+    // The availability snapshot stays visible (same as the stable flow after a
+    // dismissed prompt); only the re-prompt is suppressed by the persisted
+    // prerelease history.
+    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Available')
+
+    await harness.dispose()
+  })
+
+  it('still runs a stable check when the installed version is stable', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn(async () => versionResponse('2.0.0'))
+    const harness = await createHarness({ request })
+
+    await harness.tray.invoke()
+    expect(request).toHaveBeenCalledOnce()
+    expect(harness.showManualCheckResult).toHaveBeenCalledWith({
+      status: 'up-to-date',
+      currentVersion: '2.0.0',
+      latestVersion: '2.0.0',
+    })
+    expect(harness.confirmDownload).not.toHaveBeenCalled()
+
+    await harness.dispose()
   })
 })

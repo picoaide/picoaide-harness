@@ -7,7 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import type { UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
 import {
-  checkForStableUpdate,
+  checkForChannelUpdate,
   parseSemVer,
   type UpdateCheckResult,
 } from './update-checker.ts'
@@ -127,7 +127,7 @@ export function apply(ctx: Context, config: Config): void {
       const task = (async () => {
         requestTimer = setTimeout(() => { controller.abort() }, config.requestTimeoutMs)
         try {
-          return await checkForStableUpdate({
+          return await checkForChannelUpdate({
             currentVersion: adapter.currentVersion,
             signal: controller.signal,
             request: adapter.request,
@@ -178,7 +178,7 @@ export function apply(ctx: Context, config: Config): void {
 
         // The user already confirmed exactly this version. Only skip when the
         // re-check proves the release story changed (rotated to a newer
-        // stable); a failed re-check must NOT silently cancel the download —
+        // release); a failed re-check must NOT silently cancel the download —
         // that turned "Download" into a no-op on flaky networks. The
         // downloader re-validates asset name + SHA-256 against the release.
         const confirmedVersion = observeResult(await startCheck())
@@ -300,7 +300,7 @@ function parseState(text: string): UpdateStateV2 {
   const value: unknown = JSON.parse(text)
   if (!isRecord(value)
     || value.version !== 2
-    || (value.lastPromptedVersion !== undefined && !isStableVersion(value.lastPromptedVersion))
+    || (value.lastPromptedVersion !== undefined && !isCanonicalVersion(value.lastPromptedVersion))
     || Object.keys(value).some(key => !['version', 'lastPromptedVersion'].includes(key))) {
     throw new Error('invalid v2 update state')
   }
@@ -325,10 +325,12 @@ function renderState(state: UpdateStateV2): string {
   return `${JSON.stringify(state, null, 2)}\n`
 }
 
-function isStableVersion(value: unknown): value is string {
+function isCanonicalVersion(value: unknown): value is string {
   if (typeof value !== 'string') return false
   const parsed = parseSemVer(value)
-  return parsed !== null && parsed.prerelease.length === 0 && parsed.version === value
+  // 提示历史接受任一规范 SemVer:稳定通道只写稳定版本,测试通道(已装版本
+  // 带 prerelease 段)会写入 rc 版本,跨重启同样只提示一次。
+  return parsed !== null && parsed.version === value
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

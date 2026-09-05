@@ -7,6 +7,15 @@ export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
 export const DESKTOP_VERSION_ENDPOINT =
   `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
 
+/**
+ * Public endpoint listing recent published releases (newest first) for the
+ * test channel. The test channel compares every published release — stable
+ * and prerelease — and offers the SemVer-maximum one, so a prerelease build
+ * tracks newer prereleases of the same line and any newer stable release.
+ */
+export const DESKTOP_RELEASES_LIST_ENDPOINT =
+  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases?per_page=30`
+
 /** Maximum response body bytes accepted from the release service. */
 export const MAX_VERSION_RESPONSE_BYTES = 256 * 1024
 
@@ -29,9 +38,9 @@ export interface ParsedSemVer {
 /** Fetch-compatible request function used by the headless checker. */
 export type UpdateRequest = (url: string, init: RequestInit) => Promise<Response>
 
-/** Inputs for one stable version check. */
+/** Inputs for one channel version check. */
 export interface UpdateCheckOptions {
-  /** Installed application version, expressed as canonical stable SemVer. */
+  /** Installed application version, expressed as canonical SemVer. */
   readonly currentVersion: string
   /** Caller-owned cancellation signal; the checker does not create its own timeout. */
   readonly signal?: AbortSignal
@@ -39,13 +48,13 @@ export interface UpdateCheckOptions {
   readonly request?: UpdateRequest
 }
 
-/** Successful comparison returned by the stable version service. */
+/** Successful comparison returned by the channel version service. */
 export type UpdateCheckResult = {
   /** Whether the service reports a version newer than the installed application. */
   readonly status: 'up-to-date' | 'update-available'
-  /** Canonical installed stable version. */
+  /** Canonical installed version. */
   readonly currentVersion: string
-  /** Canonical latest stable version returned by the service. */
+  /** Canonical newest version reported by the selected channel service. */
   readonly latestVersion: string
 }
 
@@ -98,19 +107,91 @@ export async function checkForStableUpdate(
 ): Promise<UpdateCheckResult | null> {
   const current = parseCanonicalStableVersion(options.currentVersion)
   if (current === null) return null
+  const latest = await fetchLatestReleasedVersion(
+    DESKTOP_VERSION_ENDPOINT,
+    options.request ?? defaultRequest,
+    options.signal,
+    parseStableReleaseTag,
+  )
+  if (latest === null) return null
+  return {
+    status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
+    currentVersion: current.version,
+    latestVersion: latest.version,
+  }
+}
 
+/**
+ * Check the update channel implied by the installed version: stable builds
+ * query the latest-stable endpoint (prerelease releases are never offered),
+ * while prerelease builds query the published-release list and are offered
+ * the SemVer-maximum release — newer prereleases of the same line first, and
+ * a newer stable release once one ships.
+ * @param options - installed version, caller-owned signal, and optional request adapter.
+ * @returns a successful channel comparison, or null when any step fails.
+ */
+export async function checkForChannelUpdate(
+  options: UpdateCheckOptions,
+): Promise<UpdateCheckResult | null> {
+  const parsed = parseSemVer(options.currentVersion)
+  if (parsed === null || parsed.version !== options.currentVersion) return null
+  return parsed.prerelease.length > 0
+    ? checkForTestChannelUpdate(options)
+    : checkForStableUpdate(options)
+}
+
+/**
+ * Check the test channel: the newest published release of any kind
+ * (prerelease or stable) that outranks the installed prerelease version.
+ * @param options - installed prerelease version, caller-owned signal, and optional request adapter.
+ * @returns a successful comparison, or null when any request or validation step fails.
+ */
+export async function checkForTestChannelUpdate(
+  options: UpdateCheckOptions,
+): Promise<UpdateCheckResult | null> {
+  const current = parseSemVer(options.currentVersion)
+  if (current === null || current.version !== options.currentVersion || current.prerelease.length === 0) {
+    return null
+  }
+  const latest = await fetchLatestReleasedVersion(
+    DESKTOP_RELEASES_LIST_ENDPOINT,
+    options.request ?? defaultRequest,
+    options.signal,
+    parseReleaseListBestTag,
+  )
+  if (latest === null) return null
+  return {
+    status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
+    currentVersion: current.version,
+    latestVersion: latest.version,
+  }
+}
+
+/**
+ * Request one version document and select its newest released version.
+ * @param url - fixed endpoint returning one release object or a release array.
+ * @param request - fetch-compatible boundary.
+ * @param signal - caller-owned cancellation.
+ * @param select - parser turning the bounded response body into the newest version.
+ * @returns the newest released version, or null on any request/validation failure.
+ */
+async function fetchLatestReleasedVersion(
+  url: string,
+  request: UpdateRequest,
+  signal: AbortSignal | undefined,
+  select: (body: string) => ParsedSemVer | null,
+): Promise<ParsedSemVer | null> {
   const init: RequestInit = {
     method: 'GET',
     headers: { Accept: 'application/json' },
     cache: 'no-store',
     redirect: 'error',
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(signal === undefined ? {} : { signal }),
   }
-  const request = options.request ?? defaultRequest
 
   let response: Response
   try {
-    response = await request(DESKTOP_VERSION_ENDPOINT, init)
+    response = await request(url, init)
   } catch {
     return null
   }
@@ -122,14 +203,7 @@ export async function checkForStableUpdate(
   } catch {
     return null
   }
-
-  const latest = parseVersionResponse(body)
-  if (latest === null) return null
-  return {
-    status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
-    currentVersion: current.version,
-    latestVersion: latest.version,
-  }
+  return select(body)
 }
 
 async function defaultRequest(url: string, init: RequestInit): Promise<Response> {
@@ -166,7 +240,7 @@ async function readLimitedBody(response: Response): Promise<string> {
   }
 }
 
-function parseVersionResponse(body: string): ParsedSemVer | null {
+function parseStableReleaseTag(body: string): ParsedSemVer | null {
   let value: unknown
   try {
     value = JSON.parse(body)
@@ -178,6 +252,36 @@ function parseVersionResponse(body: string): ParsedSemVer | null {
   // endpoint. The tag prefix is stripped before strict SemVer validation.
   if (!isRecord(value) || typeof value.tag_name !== 'string') return null
   return parseCanonicalStableVersion(value.tag_name.replace(/^v/u, ''))
+}
+
+/**
+ * Select the SemVer-maximum published release from a release-list response.
+ * Drafts never count; entries whose tag is absent or not strict SemVer are
+ * ignored. Equal tags collapse to the first occurrence.
+ * @param body - JSON release-list response body.
+ * @returns the newest released version, or null when no entry qualifies.
+ */
+function parseReleaseListBestTag(body: string): ParsedSemVer | null {
+  let value: unknown
+  try {
+    value = JSON.parse(body)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(value)) return null
+
+  let best: ParsedSemVer | null = null
+  const seenTags = new Set<string>()
+  for (const entry of value) {
+    if (!isRecord(entry) || entry.draft === true || typeof entry.tag_name !== 'string') continue
+    const tag = entry.tag_name.replace(/^v/u, '')
+    if (seenTags.has(tag)) continue
+    seenTags.add(tag)
+    const parsed = parseSemVer(tag)
+    if (parsed === null || parsed.version !== tag) continue
+    if (best === null || compareParsedSemVer(parsed, best) > 0) best = parsed
+  }
+  return best
 }
 
 function parseCanonicalStableVersion(input: string): ParsedSemVer | null {

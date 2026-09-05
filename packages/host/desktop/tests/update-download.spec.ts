@@ -440,6 +440,47 @@ describe('desktop update installer download', () => {
     await expectNoPartialFiles(userDataPath, '2.8.0')
   })
 
+  it('downloads a prerelease (test channel) installer from its exact release tag', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifact = appImageArtifact()
+    const digest = sha256(artifact)
+    const calls: string[] = []
+    const tagUrl = 'https://api.github.com/repos/picoaide/picoaide-harness/releases/tags/v2.8.0-rc.1'
+    const request: UpdateArtifactRequest = async (url) => {
+      calls.push(String(url))
+      if (url === tagUrl) {
+        return releaseMetadata('2.8.0-rc.1', [
+          { name: 'PicoAide-Harness-2.8.0-rc.1-x86_64.AppImage', url: 'https://artifacts.test/appimage-rc' },
+          { name: RELEASE_CHECKSUM_ASSET_NAME, url: 'https://artifacts.test/SHA256SUMS-rc.txt' },
+        ])
+      }
+      if (url === 'https://artifacts.test/SHA256SUMS-rc.txt') {
+        return checksumResponse([{ name: 'PicoAide-Harness-2.8.0-rc.1-x86_64.AppImage', digest }])
+      }
+      if (url === 'https://artifacts.test/appimage-rc') {
+        return chunkedResponse([artifact])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }
+
+    const result = await downloadDesktopUpdate({
+      platform: 'linux',
+      version: '2.8.0-rc.1',
+      userDataPath,
+      request,
+    })
+
+    expect(result).toBe(
+      join(userDataPath, 'updates', '2.8.0-rc.1', 'PicoAide-Harness-2.8.0-rc.1-x86_64.AppImage'),
+    )
+    expect(await readFile(result)).toEqual(Buffer.from(artifact))
+    // The prerelease download must address the exact release tag, never the
+    // latest-stable endpoint (which excludes prereleases).
+    expect(calls.some(call => call === 'https://api.github.com/repos/picoaide/picoaide-harness/releases/latest')).toBe(false)
+    expect(calls[0]).toBe(tagUrl)
+    await expectNoPartialFiles(userDataPath, '2.8.0-rc.1')
+  })
+
   it('rejects a missing release asset or checksum manifest', async () => {
     const userDataPath = await temporaryUserData()
     const request: UpdateArtifactRequest = async (url) => {
@@ -479,7 +520,8 @@ describe('desktop update installer download', () => {
     ['windows', '2.8.0'],
     ['darwin', '../2.8.0'],
     ['win32', 'v2.8.0'],
-    ['win32', '2.8.0-rc.1'],
+    ['win32', '2.8.0-rc.'],
+    ['win32', '2.8.0-rc..1'],
   ])('rejects platform %s and version %s before requesting', async (platform, version) => {
     const userDataPath = await temporaryUserData()
     let requested = false
