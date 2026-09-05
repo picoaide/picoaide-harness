@@ -137,7 +137,6 @@ function desktopRendererUrlWithToken(ctx: Context, port: number, platform: Conte
   const url = new URL(authed)
   url.searchParams.set('dsh-desktop-mode', 'advanced')
   url.searchParams.set('dsh-desktop-platform', platform)
-  console.error('[desktop] renderer url:', url.href)
   return url.href
 }
 
