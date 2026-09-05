@@ -324,10 +324,21 @@ jobs:
             echo "::warning::docs/releases/${TAG}.md not found — falling back to GitHub auto-generated notes"
             NOTES_FLAG="--generate-notes"
           fi
+          # 测试版 tag(带 prerelease 段,如 v2.7.0-rc.1,version.mjs check 已保证
+          # 是合法 semver,不含 + 元数据)以 Pre-release 发布:GitHub
+          # releases/latest 端点与客户端 update-checker/update-download 都
+          # 排除 prerelease,正式用户不会收到更新;资产完整签名公证,可手动
+          # 下载验证。正式 tag(纯 vX.Y.Z)发布为普通 release,才推送给用户。
+          PRERELEASE=""
+          if [[ "${TAG}" == *-* ]]; then
+            PRERELEASE="--prerelease"
+            echo "Releasing ${TAG} as a prerelease (test build — stable clients will not see it)"
+          fi
           gh release create "${TAG}" \
             --repo picoaide/picoaide-harness \
             --title "PicoAide Harness ${TAG}" \
             ${NOTES_FLAG} \
+            ${PRERELEASE} \
             release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
         env:
           GH_TOKEN: ${{ github.token }}
