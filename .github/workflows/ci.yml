@@ -237,27 +237,33 @@ jobs:
           chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      - name: Build signed and notarized DMG
-        # 公证轮询阶段偶发 runner 瞬时断网(NSURLError -1009,重试即可)或
-        # Apple 队列抖动;整步最多重试 3 次,失败才 fail-loud。每次重试都会
-        # 重新跑完整 gate+打包(幂等,安全),代价是时间而非正确性。
+      # 2026-09-05 拆分:打包(含完整 gate)与公证解耦。electron-builder 内联
+      # notarytool 在 runner 上会断连(已实证),因此:
+      #  1) dist:mac:pack —— 一次通过 fail-loud(不再被公证重试连带重跑);
+      #  2) dist:mac:notarize —— 公证+staple+DMG+验证,独立重试至多 3 次:每次
+      #     断连只损失 bounded wait 调用,submission id 经输出目录的状态文件
+      #     持久化,后续重试续等同一 submission(不会重新提交/重新排队)。
+      - name: Pack and sign app bundle
+        run: yarn workspace dsh-plugin-desktop dist:mac:pack
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      - name: Notarize and build DMG (resumable)
         run: |
           for attempt in 1 2 3; do
-            echo "attempt ${attempt}/3: yarn dist:mac"
-            if yarn workspace dsh-plugin-desktop dist:mac; then
-              echo "signed and notarized DMG built on attempt ${attempt}"
+            echo "attempt ${attempt}/3: yarn dist:mac:notarize"
+            if yarn workspace dsh-plugin-desktop dist:mac:notarize; then
+              echo "notarized DMG built on attempt ${attempt}"
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
-              echo "attempt ${attempt} failed; retrying in 60s"
+              echo "attempt ${attempt} failed; retrying in 60s (same submission resumed)"
               sleep 60
             fi
           done
           exit 1
         env:
-          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
           APPLE_API_KEY: ${{ runner.temp }}/notary/AuthKey.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}

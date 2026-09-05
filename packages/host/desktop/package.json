@@ -126,7 +126,9 @@
     "e2e:client": "node scripts/e2e-client.mjs",
     "e2e:real": "node scripts/real-env-verify.mjs",
     "e2e:real-cron-audit": "node scripts/real-env-cron-audit.mjs",
-    "e2e:real-cron-flow": "node scripts/real-env-cron-flow.mjs"
+    "e2e:real-cron-flow": "node scripts/real-env-cron-flow.mjs",
+    "dist:mac:pack": "node scripts/release-mac.ts --pack",
+    "dist:mac:notarize": "node scripts/release-mac.ts --notarize"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.2",
