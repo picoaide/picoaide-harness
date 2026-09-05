@@ -249,6 +249,11 @@ jobs:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          # preflight 校验整体发布凭据完整性(含公证三元组),pack 不公证但需通过
+          # 校验——不传会在"Pack"步骤提前 fail(2026-09-05 rc.3 实测)。
+          APPLE_API_KEY: ${{ runner.temp }}/notary/AuthKey.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       - name: Notarize and build DMG (resumable)
         run: |
           for attempt in 1 2 3; do
