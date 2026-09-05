@@ -89,8 +89,8 @@ function defaultReleaseOptions(): MacReleaseOptions {
       await notarizeMacApp({
         appPath,
         env,
-        pollIntervalMs: 60_000,
-        deadlineMs: 100 * 60_000,
+        pollIntervalMs: 90_000,
+        deadlineMs: 240 * 60_000,
         retries: 8,
         backoffMs: 10_000,
         run: (command, args, cwd) => {
