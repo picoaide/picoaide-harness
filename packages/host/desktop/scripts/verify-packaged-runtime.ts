@@ -48,9 +48,11 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'build/tray-iconTemplate.png',
   'build/tray-icon-blue.png',
   'node_modules/@deepseek-ai/dsh/package.json',
-  'node_modules/@deepseek-ai/dsh/config/agent-presets/cordis/agent.cordis.yml',
-  'node_modules/@deepseek-ai/dsh/config/agent-presets/cordis/skills/cordis-plugin-development/SKILL.md',
-  'node_modules/@deepseek-ai/dsh/config/agent-presets/cordis/skills/editing-cordis-compositions/SKILL.md',
+  // Upstream 0.1.2: shipped presets moved from @deepseek-ai/dsh/config to
+  // the agent-presets package root `presets/` directory.
+  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
+  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
+  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
