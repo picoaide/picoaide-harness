@@ -449,7 +449,11 @@ export async function prepareDesktopProfile(
       }
     }
     patches.push(
-      { id: 'ui-layout', disabled: true },
+      // Upstream 0.1.2: the `layout` service ships only with ui-layout (the
+      // client runtime that used to own it is gone), so the official frame
+      // row must stay enabled; the desktop AdvancedFrame shadows its root
+      // registration via a lower slot priority instead.
+      { id: 'ui-layout', disabled: false },
       { id: 'ui-sidebar', disabled: false },
       { id: 'ui-conversation', disabled: false },
     )

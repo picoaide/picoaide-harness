@@ -48,6 +48,10 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
 
   ctx.effect(() => ctx.slots.register({
     name: 'root',
+    // Shadow the official AppFrame entry (priority 0) at the root hole: the
+    // desktop frame wins the render while ui-layout still ships the `layout`
+    // service every other surface needs (upstream 0.1.2 split).
+    priority: -1,
     children: {
       'sidebar': { kind: 'single', scope: 'root' },
       'conversation': { kind: 'single', scope: 'session-maybe' },
