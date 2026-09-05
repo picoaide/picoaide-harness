@@ -1,0 +1,38 @@
+name: GHCR cleanup (manual)
+
+# 手动运维:列出 GHCR server 镜像全部版本,删除带 v2.6.7-rc 前缀的测试垃圾镜像
+# (正式镜像 latest/v2.x 一律保留)。包的权限来自关联仓库的 Actions token,
+# 与 docker.yml 推送同源(包级动作访问)。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List and delete prerelease image tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "/orgs/picoaide/packages/container/picoaide-harness-server/versions?per_page=100" \
+            --jq '.[] | [.id, (.metadata.container.tags // [] | join(","))] | @tsv' > versions.tsv
+          echo "== all versions =="
+          cat versions.tsv
+          echo "== deleting v2.6.7-rc.* =="
+          while IFS=$'\t' read -r id tags; do
+            [ -z "$id" ] && continue
+            case ",$tags," in
+              *,v2.6.7-rc.*,)
+                echo "deleting version $id ($tags)"
+                gh api -X DELETE "/orgs/picoaide/packages/container/picoaide-harness-server/versions/$id"
+                ;;
+            esac
+          done < versions.tsv
+          echo "== remaining =="
+          gh api "/orgs/picoaide/packages/container/picoaide-harness-server/versions?per_page=100" \
+            --jq '.[] | (.metadata.container.tags // [] | join(","))'
