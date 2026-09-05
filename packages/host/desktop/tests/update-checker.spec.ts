@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  DESKTOP_RELEASES_LIST_ENDPOINT,
   DESKTOP_VERSION_ENDPOINT,
   MAX_VERSION_RESPONSE_BYTES,
+  checkForChannelUpdate,
   checkForStableUpdate,
+  checkForTestChannelUpdate,
   compareSemVerVersions,
   parseSemVer,
   type UpdateRequest,
@@ -10,6 +13,16 @@ import {
 
 function releaseResponse(tagName: unknown, init: ResponseInit = {}): Response {
   return Response.json({ tag_name: tagName, draft: false, prerelease: false }, init)
+}
+
+function releaseListResponse(
+  entries: ReadonlyArray<{ readonly tag: string; readonly draft?: boolean }>,
+): Response {
+  return Response.json(entries.map(entry => ({
+    tag_name: entry.tag,
+    draft: entry.draft === true,
+    prerelease: entry.tag.includes('-'),
+  })))
 }
 
 describe('strict SemVer parsing', () => {
@@ -175,5 +188,130 @@ describe('public Desktop version check', () => {
 
     await expect(checkForStableUpdate({ currentVersion, request })).resolves.toBeNull()
     expect(request).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('release-list test channel check', () => {
+  it('picks the SemVer-maximum published release for an installed prerelease', async () => {
+    const calls: string[] = []
+    const request: UpdateRequest = async (url) => {
+      calls.push(String(url))
+      return releaseListResponse([
+        { tag: 'v2.7.0-rc.2' },
+        { tag: 'v2.7.0-rc.1' },
+        { tag: 'v2.6.6' },
+      ])
+    }
+
+    await expect(checkForTestChannelUpdate({
+      currentVersion: '2.7.0-rc.1',
+      request,
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.7.0-rc.1',
+      latestVersion: '2.7.0-rc.2',
+    })
+    expect(calls).toEqual([DESKTOP_RELEASES_LIST_ENDPOINT])
+  })
+
+  it('offers a stable release once it outranks every published prerelease', async () => {
+    await expect(checkForTestChannelUpdate({
+      currentVersion: '2.7.0-rc.2',
+      request: async () => releaseListResponse([
+        { tag: 'v2.7.0' },
+        { tag: 'v2.7.0-rc.1' },
+      ]),
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.7.0-rc.2',
+      latestVersion: '2.7.0',
+    })
+  })
+
+  it('reports up-to-date while the newest release is the installed prerelease', async () => {
+    await expect(checkForTestChannelUpdate({
+      currentVersion: '2.7.0-rc.2',
+      request: async () => releaseListResponse([
+        { tag: 'v2.7.0-rc.2' },
+        { tag: 'v2.6.6' },
+      ]),
+    })).resolves.toEqual({
+      status: 'up-to-date',
+      currentVersion: '2.7.0-rc.2',
+      latestVersion: '2.7.0-rc.2',
+    })
+  })
+
+  it('ignores drafts, duplicate tags, and malformed entries in the list', async () => {
+    const request: UpdateRequest = async () => releaseListResponse([
+      { tag: 'v2.7.0-rc.2', draft: true },
+      { tag: 'v2.7.0-rc.1' },
+      { tag: 'v2.7.0-rc.1' },
+      { tag: 'not-a-version' },
+    ])
+    // The draft rc.2 and the duplicate rc.1 never count: rc.1 stays newest.
+    await expect(checkForTestChannelUpdate({
+      currentVersion: '2.7.0-rc.1',
+      request,
+    })).resolves.toMatchObject({ status: 'up-to-date', latestVersion: '2.7.0-rc.1' })
+  })
+
+  it.each([
+    ['a non-array body', Response.json({ tag_name: 'v2.8.0-rc.1' })],
+    ['non-200 status', new Response('', { status: 500 })],
+  ])('silently ignores %s from the release list endpoint', async (_case, response) => {
+    await expect(checkForTestChannelUpdate({
+      currentVersion: '2.7.0-rc.1',
+      request: async () => response,
+    })).resolves.toBeNull()
+  })
+
+  it('requires the installed version itself to be a prerelease', async () => {
+    await expect(checkForTestChannelUpdate({
+      currentVersion: '2.7.0',
+      request: async () => releaseListResponse([{ tag: 'v2.7.1' }]),
+    })).resolves.toBeNull()
+  })
+})
+
+describe('channel dispatch by installed version', () => {
+  it('routes stable installs to the latest-stable endpoint', async () => {
+    const calls: string[] = []
+    const request: UpdateRequest = async (url) => {
+      calls.push(String(url))
+      return url === DESKTOP_VERSION_ENDPOINT
+        ? releaseResponse('v2.10.0')
+        : releaseListResponse([{ tag: 'v2.10.1' }])
+    }
+
+    await expect(checkForChannelUpdate({
+      currentVersion: '2.9.9',
+      request,
+    })).resolves.toMatchObject({ status: 'update-available', latestVersion: '2.10.0' })
+    expect(calls).toEqual([DESKTOP_VERSION_ENDPOINT])
+  })
+
+  it('routes prerelease installs to the release-list endpoint', async () => {
+    const calls: string[] = []
+    const request: UpdateRequest = async (url) => {
+      calls.push(String(url))
+      return url === DESKTOP_VERSION_ENDPOINT
+        ? releaseResponse('v2.10.0')
+        : releaseListResponse([{ tag: 'v2.10.0-rc.2' }])
+    }
+
+    await expect(checkForChannelUpdate({
+      currentVersion: '2.10.0-rc.1',
+      request,
+    })).resolves.toMatchObject({ status: 'update-available', latestVersion: '2.10.0-rc.2' })
+    expect(calls).toEqual([DESKTOP_RELEASES_LIST_ENDPOINT])
+  })
+
+  it('silently ignores malformed installed versions', async () => {
+    await expect(checkForChannelUpdate({
+      currentVersion: 'v2.0.0',
+      request: async () => releaseResponse('v2.1.0'),
+    })).resolves.toBeNull()
   })
 })

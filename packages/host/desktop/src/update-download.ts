@@ -23,6 +23,10 @@ export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
 export const DESKTOP_RELEASE_API_URL =
   `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
 
+/** Prefix of the by-tag release endpoint used for prerelease installers. */
+export const DESKTOP_RELEASE_TAG_API_URL =
+  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/tags/`
+
 /** Release asset carrying SHA-256 digests for every installer artifact. */
 export const RELEASE_CHECKSUM_ASSET_NAME = 'SHA256SUMS.txt'
 
@@ -210,10 +214,24 @@ function validatedPlatform(platform: DesktopDownloadPlatform): DesktopDownloadPl
 
 function validatedVersion(version: string): string {
   const parsed = parseSemVer(version)
-  if (parsed === null || parsed.prerelease.length > 0 || parsed.version !== version) {
-    throw new UpdateDownloadError('invalid-options', 'The update version must be stable Semantic Versioning.')
+  if (parsed === null || parsed.version !== version) {
+    throw new UpdateDownloadError('invalid-options', 'The update version must be strict Semantic Versioning.')
   }
   return version
+}
+
+/**
+ * Select the release-metadata endpoint for one version: prerelease versions
+ * (test channel) address the release by its exact tag; stable versions use
+ * the latest-stable endpoint.
+ * @param version - canonical version (no `v` prefix).
+ * @returns the fixed metadata endpoint the release is published under.
+ */
+function releaseMetadataEndpoint(version: string): string {
+  const parsed = parseSemVer(version)
+  return parsed !== null && parsed.prerelease.length > 0
+    ? `${DESKTOP_RELEASE_TAG_API_URL}${encodeURIComponent(`v${version}`)}`
+    : DESKTOP_RELEASE_API_URL
 }
 
 function validatedUserDataPath(userDataPath: string): string {
@@ -279,7 +297,8 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
 }
 
 /**
- * Fetch release metadata, locate the platform asset, and resolve its digest.
+ * Fetch one release's metadata (channel endpoint), locate the platform
+ * asset, and resolve its digest from the same release's checksum asset.
  * @param platform - selected installer family.
  * @param version - release version the asset name must embed.
  * @param request - network boundary.
@@ -292,12 +311,16 @@ async function resolveDownloadManifest(
   request: UpdateArtifactRequest,
   signal: AbortSignal | undefined,
 ): Promise<DownloadManifest> {
-  const metadata = await fetchJson<ReleaseMetadata>(request, DESKTOP_RELEASE_API_URL, signal)
+  const metadata = await fetchJson<ReleaseMetadata>(
+    request,
+    releaseMetadataEndpoint(version),
+    signal,
+  )
   if (metadata === null) {
-    throw new UpdateDownloadError('network', 'The latest release metadata could not be fetched.')
+    throw new UpdateDownloadError('network', 'The release metadata could not be fetched.')
   }
   if (!isRecord(metadata) || !Array.isArray(metadata.assets)) {
-    throw new UpdateDownloadError('release-missing', 'The latest release has no asset manifest.')
+    throw new UpdateDownloadError('release-missing', 'The release has no asset manifest.')
   }
   const normalizedVersion = version.replace(/^v/u, '')
   const expectedName = platform === 'darwin'
@@ -315,11 +338,23 @@ async function resolveDownloadManifest(
   if (asset === undefined) {
     throw new UpdateDownloadError(
       'release-missing',
-      `The latest release has no ${expectedName} asset.`,
+      `The release has no ${expectedName} asset.`,
     )
   }
 
-  const checksum = await resolveChecksum(request, expectedName, signal)
+  const checksumAsset = metadata.assets.find(
+    (entry: unknown): entry is ReleaseAsset =>
+      isRecord(entry)
+      && typeof entry.name === 'string'
+      && typeof entry.browser_download_url === 'string'
+      && entry.name === RELEASE_CHECKSUM_ASSET_NAME,
+  )
+  const checksum = checksumAsset === undefined
+    ? undefined
+    : await resolveChecksum(request, checksumAsset.browser_download_url, expectedName, signal)
+  if (checksum === undefined) {
+    throw new UpdateDownloadError('checksum-missing', 'The release has no checksum manifest.')
+  }
   const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
   const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
   return {
@@ -332,34 +367,23 @@ async function resolveDownloadManifest(
 }
 
 /**
- * Fetch the companion checksum manifest and extract the digest for one asset.
+ * Download the companion checksum manifest and extract the digest for one asset.
  * @param request - network boundary.
+ * @param checksumAssetUrl - download URL of the release's SHA-256 manifest asset.
  * @param assetName - expected asset name inside the manifest.
  * @param signal - caller-owned cancellation.
- * @returns lowercase hexadecimal SHA-256 digest.
- * @throws {UpdateDownloadError} When the manifest or entry is missing or malformed.
+ * @returns lowercase hexadecimal SHA-256 digest, or undefined when the manifest is absent.
+ * @throws {UpdateDownloadError} When the manifest download fails or the entry is missing.
  */
 async function resolveChecksum(
   request: UpdateArtifactRequest,
+  checksumAssetUrl: string,
   assetName: string,
   signal: AbortSignal | undefined,
-): Promise<string> {
-  const metadata = await fetchJson<ReleaseMetadata>(request, DESKTOP_RELEASE_API_URL, signal)
-  const assets = isRecord(metadata) && Array.isArray(metadata.assets) ? metadata.assets : []
-  const checksumAsset = assets.find(
-    (entry: unknown): entry is ReleaseAsset =>
-      isRecord(entry)
-      && typeof entry.name === 'string'
-      && typeof entry.browser_download_url === 'string'
-      && entry.name === RELEASE_CHECKSUM_ASSET_NAME,
-  )
-  if (checksumAsset === undefined) {
-    throw new UpdateDownloadError('checksum-missing', 'The latest release has no checksum manifest.')
-  }
-
+): Promise<string | undefined> {
   let response: Response
   try {
-    response = await request(checksumAsset.browser_download_url, {
+    response = await request(checksumAssetUrl, {
       method: 'GET',
       cache: 'no-store',
       redirect: 'follow',
