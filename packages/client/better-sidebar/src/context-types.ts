@@ -84,11 +84,11 @@ export interface SidebarSessionStore {
   get(id: string): {
     header: SidebarSessionHeader
     /**
-     * The live session's append-only event log (immutable snapshot; absent
-     * on sessions the runtime has not hydrated). Read-only access — the
+     * The live session's append-only event log snapshot (read-on-demand API
+     * since the 0.1.2 event-access rework). Read-only access — the
      * jobs.output route replays `job_output` tool/result rows from it.
      */
-    events?: readonly SidebarSessionEvent[]
+    snapshotEvents(): readonly SidebarSessionEvent[]
   } | undefined
 }
 

@@ -1,4 +1,5 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the settings slot contract (settings.section) and the
 // slot runtime props into this compilation face.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'

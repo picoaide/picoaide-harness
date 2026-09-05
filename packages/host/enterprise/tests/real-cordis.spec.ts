@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { installPresetArchive, packPreset } from '../src/agent-preset-install.ts'
 
 /** The pinned upstream 创造模式 preset: the real shape a user copy starts from. */
-const CORDIS = fileURLToPath(new URL('../../../../deepseek-harness/apps/cli/config/agent-presets/cordis', import.meta.url))
+const CORDIS = fileURLToPath(new URL('../../../../deepseek-harness/packages/preset/agent-presets/presets/cordis', import.meta.url))
 
 describe('real 创造模式 preset round-trip', () => {
   it('ships skills/ with the composition', async () => {

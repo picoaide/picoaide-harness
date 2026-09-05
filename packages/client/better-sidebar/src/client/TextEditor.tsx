@@ -392,8 +392,8 @@ export function TextEditor(props: FileViewerProps) {
               parse; cross-fence references/footnotes stay intact); files
               without one render exactly as before. */}
           {hasMermaid
-            ? <LazyMermaidMarkdown text={mdText} codeLabels={codeLabels} />
-            : <MarkdownText text={mdText} codeLabels={codeLabels} />}
+            ? <LazyMermaidMarkdown text={mdText} labels={{ code: codeLabels, footnotes: '' }} />
+            : <MarkdownText text={mdText} labels={{ code: codeLabels, footnotes: '' }} />}
         </div>
       )}
       {html && mode === 'preview' && (

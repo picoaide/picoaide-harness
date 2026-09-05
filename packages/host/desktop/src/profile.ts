@@ -166,11 +166,11 @@ export function readDesktopShellMode(config: SettingsFileConfig): DesktopShellMo
 
 /** Resolve the public Web template once and reject an incompatible DSH release. */
 function requiredWebBundles(): string[] {
-  const bundles = PROFILE_TEMPLATES.web
-  if (bundles === undefined) {
+  const template = PROFILE_TEMPLATES.web
+  if (template === undefined) {
     throw new Error(`${BIN_NAME}: installed dsh-app-boot has no web profile template`)
   }
-  return [...bundles]
+  return [...template.bundles]
 }
 
 /** Prepared profile inputs consumed by app-boot. */
@@ -359,15 +359,15 @@ function omitUnresolvedOptionalEntries(
  * @param pluginStatePath - optional Desktop-private disabled-bundle state.
  * @returns root config, profile metadata, and ordered patches.
  */
-export function prepareDesktopProfile(
+export async function prepareDesktopProfile(
   telemetryDisabled: string | undefined = process.env.DSH_TELEMETRY_DISABLED,
   home: string = resolveDshHome(),
   platform: NodeJS.Platform = process.platform,
   pluginStatePath?: string,
-): PreparedDesktopProfile {
+): Promise<PreparedDesktopProfile> {
   const profileName = DESKTOP_PROFILE_NAME
   const profileDir = ensureDesktopProfile(home)
-  healProfilesModuleFallback(INSTALL_ANCHOR, home)
+  await healProfilesModuleFallback({ installAnchor: INSTALL_ANCHOR, home })
   const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
   const disabledBundles = pluginStatePath === undefined
     ? new Set<string>()

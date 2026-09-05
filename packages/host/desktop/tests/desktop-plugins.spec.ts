@@ -194,7 +194,7 @@ describe('desktop direct bundle management', () => {
     const preview = harness.service.previewDisable(target.bundleId)
     await harness.service.executeDisable(preview.previewId)
 
-    const prepared = prepareDesktopProfile(undefined, options.homeDir, 'darwin', options.statePath)
+    const prepared = await prepareDesktopProfile(undefined, options.homeDir, 'darwin', options.statePath)
     const inserted = prepared.patches.flatMap(patch => Array.isArray(patch.insert) ? patch.insert : [])
     expect(inserted.filter(row => row.id === 'external-marker')).toHaveLength(0)
 
@@ -280,7 +280,7 @@ describe('desktop direct bundle management', () => {
     expect(() => harness.service.previewDisable(target.bundleId)).toThrow('service disposed')
   })
 
-  it('treats only a missing state as empty and fails loud for invalid state files', () => {
+  it('treats only a missing state as empty and fails loud for invalid state files', async () => {
     const root = temporaryRoot()
     const options = bootstrap(root)
     expect(readDesktopDisabledBundles(options.statePath, 'desktop').size).toBe(0)
@@ -365,12 +365,12 @@ describe('desktop direct bundle management', () => {
     await harness.service.executeDisable(harness.service.previewDisable(target.bundleId).previewId)
     writeFileSync(join(packageDir, 'cordis.patch.yml'), 'not: a-list\n')
 
-    expect(() => prepareDesktopProfile(
+    await expect(prepareDesktopProfile(
       undefined,
       options.homeDir,
       'darwin',
       options.statePath,
-    )).toThrow('must be a top-level YAML array')
+    )).rejects.toThrow('must be a top-level YAML array')
     await harness.dispose()
   })
 })

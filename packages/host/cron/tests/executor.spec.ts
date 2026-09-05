@@ -2,36 +2,42 @@ import { describe, expect, it, vi } from 'vitest'
 import { HostCronExecutor } from '../src/host-executor.ts'
 import type { JobRecord } from '../src/jobs.ts'
 
-/** A minimal ApiProxy fake with just enough surface for the executor. */
-function fakeApi(overrides: Record<string, (payload: unknown) => Promise<unknown>> = {}) {
+/**
+ * Minimal downstream fakes for the 0.1.2 collaborators: the SessionController
+ * Remote owner (create/rename/prompt), the Workspace registry, and the
+ * AgentPresets roster — just enough surface for the executor.
+ */
+function fakeDeps(overrides: Record<string, (payload: unknown) => Promise<unknown>> = {}) {
   const ok = (value: unknown) => ({ result: { ok: true as const, value } })
-  const api = {
-    workspace: { list: vi.fn(async () => ok({ items: [{ workspaceId: 'ws-1' }] })) },
-    agentPresets: {
-      list: vi.fn(async () => ok({
-        presets: [
-          { id: 'default', name: 'Default', trust: 'system', isDefault: true },
-          { id: 'broken-preset', name: 'Broken', trust: 'system', isDefault: false, broken: 'missing plugin' },
-        ],
-        authorable: false,
-        hasDocument: false,
-      })),
+  const sessionController = {
+    create: vi.fn(async () => ({ sessionId: 'sess-1' })),
+    rename: vi.fn(async () => ({ title: 'Daily', seq: 1 })),
+    prompt: vi.fn(async () => ({ accepted: true })),
+  }
+  const deps = {
+    sessionController: sessionController as unknown,
+    workspaceRegistry: {
+      list: vi.fn(() => [{ id: 'ws-1', path: '/w', title: 'W', sessionIds: [], createdAt: '', updatedAt: '' }]),
     },
-    sessions: {
-      create: vi.fn(async () => ok({ sessionId: 'sess-1' })),
-      rename: vi.fn(async () => ok({})),
-      prompt: vi.fn(async () => ok({ command: { kind: 'success' } })),
+    agentPresets: {
+      list: vi.fn(async () => [
+        { id: 'default', name: 'Default', trust: 'system' as const, isDefault: true },
+        {
+          id: 'broken-preset', name: 'Broken', trust: 'system' as const,
+          isDefault: false, broken: 'missing plugin',
+        },
+      ]),
     },
   }
   for (const [path, fn] of Object.entries(overrides)) {
     const parts = path.split('.')
-    let cursor: Record<string, unknown> = api as unknown as Record<string, unknown>
+    let cursor: Record<string, unknown> = deps as unknown as Record<string, unknown>
     for (const part of parts.slice(0, -1)) {
       cursor = cursor[part] as Record<string, unknown>
     }
     cursor[parts[parts.length - 1]] = fn
   }
-  return api
+  return { deps, sessionController, workspaceRegistry: deps.workspaceRegistry, agentPresets: deps.agentPresets }
 }
 
 function job(overrides: Partial<JobRecord['action']> & { name?: string } = {}): JobRecord {
@@ -50,54 +56,54 @@ function job(overrides: Partial<JobRecord['action']> & { name?: string } = {}): 
 
 describe('HostCronExecutor agent action', () => {
   it('creates a session, prompts it, and reports success with session info', async () => {
-    const api = fakeApi()
-    const executor = new HostCronExecutor({ api: api as never })
+    const { deps, sessionController } = fakeDeps()
+    const executor = new HostCronExecutor(deps as never)
     const result = await executor.execute(job())
     expect(result.result).toBe('succeeded')
     expect(result.sessionId).toBe('sess-1')
     expect(result.prompt).toBe('do the thing')
-    expect(api.sessions.create).toHaveBeenCalledOnce()
-    expect(api.sessions.prompt).toHaveBeenCalledOnce()
+    expect(sessionController.create).toHaveBeenCalledOnce()
+    expect(sessionController.prompt).toHaveBeenCalledOnce()
   })
 
   it('validates the workspace before creating a session', async () => {
-    const api = fakeApi({
-      'workspace.list': async () => ({ result: { ok: true as const, value: { items: [] } } }),
+    const { deps, sessionController } = fakeDeps({
+      'workspaceRegistry.list': () => [],
     })
-    const executor = new HostCronExecutor({ api: api as never })
+    const executor = new HostCronExecutor(deps as never)
     const result = await executor.execute(job({ workspaceId: 'ws-missing' }))
     expect(result.result).toBe('failed')
     expect(result.error).toMatch(/workspace not found/)
-    expect(api.sessions.create).not.toHaveBeenCalled()
+    expect(sessionController.create).not.toHaveBeenCalled()
   })
 
   it('rejects an unknown or broken agent preset before creating a session', async () => {
-    const api = fakeApi()
-    const executor = new HostCronExecutor({ api: api as never })
+    const { deps, sessionController } = fakeDeps()
+    const executor = new HostCronExecutor(deps as never)
     const unknown = await executor.execute(job({ agentPreset: 'nope' }))
     expect(unknown.result).toBe('failed')
     expect(unknown.error).toMatch(/agent preset not found/)
     const broken = await executor.execute(job({ agentPreset: 'broken-preset' }))
     expect(broken.result).toBe('failed')
     expect(broken.error).toMatch(/unavailable/)
-    expect(api.sessions.create).not.toHaveBeenCalled()
+    expect(sessionController.create).not.toHaveBeenCalled()
   })
 
   it('applies /permission before the prompt', async () => {
-    const api = fakeApi()
-    const executor = new HostCronExecutor({ api: api as never })
+    const { deps, sessionController } = fakeDeps()
+    const executor = new HostCronExecutor(deps as never)
     const result = await executor.execute(job({ permission: 'workspace-write' }))
     expect(result.result).toBe('succeeded')
-    expect(api.sessions.prompt).toHaveBeenCalledTimes(2)
-    const firstCall = (api.sessions.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![0]
+    expect(sessionController.prompt).toHaveBeenCalledTimes(2)
+    const firstCall = (sessionController.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![0]
     expect(JSON.stringify(firstCall)).toContain('/permission workspace-write')
   })
 
   it('reports failed when the session prompt is refused', async () => {
-    const api = fakeApi({
-      'sessions.prompt': async () => ({ result: { ok: false as const, error: { code: 'E', message: 'refused' } } }),
+    const { deps, sessionController } = fakeDeps({
+      'sessionController.prompt': async () => { throw new Error('E: refused') },
     })
-    const executor = new HostCronExecutor({ api: api as never })
+    const executor = new HostCronExecutor(deps as never)
     const result = await executor.execute(job())
     expect(result.result).toBe('failed')
     expect(result.error).toMatch(/refused/)
@@ -105,10 +111,10 @@ describe('HostCronExecutor agent action', () => {
   })
 
   it('rejects a post-create failure with the session id attached (ghost guard)', async () => {
-    const api = fakeApi({
-      'sessions.rename': async () => ({ result: { ok: false as const, error: { code: 'E', message: 'rename failed' } } }),
+    const { deps, sessionController } = fakeDeps({
+      'sessionController.rename': async () => { throw new Error('E: rename failed') },
     })
-    const executor = new HostCronExecutor({ api: api as never })
+    const executor = new HostCronExecutor(deps as never)
     const result = await executor.execute(job())
     expect(result.result).toBe('failed')
     expect(result.error).toMatch(/rename failed/)

@@ -3,7 +3,7 @@
 // external store (no context provider needed — slots are function components
 // that call useBrand()).
 import { useEffect, useState } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { BrandConfig } from '../brand-sync.ts'
 
 // 声明 Host 侧事件(客户端编译面不加载 brand-sync 的 module 声明)。

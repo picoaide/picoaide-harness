@@ -8,7 +8,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { GenericCallView, JsonValue, ToolResult } from '@deepseek-ai/dsh-tools'
+import type { GenericCallView, ToolResult } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 // Type-only: makes `ctx.attachments` resolve to the AttachmentService type.
 import type {} from '@deepseek-ai/dsh-attachment'

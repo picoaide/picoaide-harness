@@ -6,7 +6,7 @@
  * @module dsh-plugin-desktop/loop-notify-client
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { DESKTOP_LOOP_NOTIFY_SESSION_PATH, type DesktopLoopNotifySessionResponse } from '../loop-notify-contract.ts'
 

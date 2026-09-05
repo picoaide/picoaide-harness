@@ -61,6 +61,7 @@ describe('DeepSeek streaming tool calls', () => {
       options: () => connection,
       resolveApiKey: async () => 'test-key',
       resolveUserId: () => 'test-user' as AnonymousUserId,
+      prepareExtensions: async () => ({ fields: {}, accept: async () => {} }),
     })
     const chunks: StreamChunk[] = []
 

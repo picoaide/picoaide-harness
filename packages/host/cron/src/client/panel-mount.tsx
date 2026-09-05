@@ -12,7 +12,7 @@
 import { createRoot, type Root } from 'react-dom/client'
 import { createElement } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
+import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { CronController } from './controller.ts'
 import { CronJobTab } from './CronJobTab.tsx'
 import { CRON_ACTIVE_ATTR } from './CronTrigger.tsx'

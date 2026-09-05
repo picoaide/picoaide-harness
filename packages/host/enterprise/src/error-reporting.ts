@@ -115,7 +115,14 @@ export function apply(ctx: Context): void {
     }
   }
 
-  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
+  const reportFailure = (cause: unknown): void => {
+    try {
+      ctx.logger.error(cause)
+    } catch {
+      // logger 不可用（极端环境/已关闭 context）时静默:错误上报失败不阻断主机。
+    }
+  }
+  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch(reportFailure) })
   // 兜底(联调 2026-08-27):UI 登录可能在事件注册后但 getSession 尚未
   // 赋值时发生;1s 间隔轮询当前 session(最多 60s),发现登录即同步。
   // 与 auth-gate 相同,直接使用注入的 ctx.picoSession(TS 声明已提供,
@@ -135,7 +142,7 @@ export function apply(ctx: Context): void {
         if (session) {
           finished = true
           clearInterval(timer)
-          void sync(session).catch((cause) => ctx.logger.error(cause))
+          void sync(session).catch(reportFailure)
         } else if (polls >= 60) {
           finished = true
           clearInterval(timer)

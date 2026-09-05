@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-client-connection'
 /** PicoAide Harness Host plugin: owns the selected native shell generation. */
 
 import { fileURLToPath } from 'node:url'
@@ -13,7 +14,7 @@ import {
   THEME_SETTINGS_NAMESPACE,
   type ThemeSettings,
 } from '@deepseek-ai/dsh-client-ui-theme'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import {
   handleRendererBootRequest,
   RENDERER_BOOT_REPORT_PATH,
@@ -36,7 +37,7 @@ import {
   type DesktopLoopNotifySessionResponse,
 } from './loop-notify-contract.ts'
 import { handleDesktopLoopNotifySessionRequest } from './loop-notify-route.ts'
-import type { DesktopShellMode } from './runtime.ts'
+import type { DesktopLocale, DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
 /** Stable Cordis plugin name. */
@@ -52,13 +53,19 @@ declare module '@deepseek-ai/cordis' {
 
 /** Services required before the shell can register its renderer generation. */
 /** Services required by the desktop shell; `desktopRuntime` is probed, not required. */
-export const inject = ['webServer', 'webRuntime', 'appExit', 'settings']
+export const inject = ['webServer', 'webRuntime', 'appExit', 'settings', 'connection']
 
 /** Standard settings namespace shared by tray and configuration surfaces. */
-export const DESKTOP_SETTINGS_NAMESPACE = settingsNamespace('dsh-desktop')
+export const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop' as SettingsNamespace
 
-const UI_THEME_SETTINGS_NAMESPACE = settingsNamespace(THEME_SETTINGS_NAMESPACE)
-const UI_LOCALE_SETTINGS_NAMESPACE = settingsNamespace(LOCALE_SETTINGS_NAMESPACE)
+const UI_THEME_SETTINGS_NAMESPACE = THEME_SETTINGS_NAMESPACE as SettingsNamespace
+const UI_LOCALE_SETTINGS_NAMESPACE = LOCALE_SETTINGS_NAMESPACE as SettingsNamespace
+
+/** Bin the upstream locale preference onto the desktop's supported pair. */
+function normalizeDesktopLocale(value: string | undefined): DesktopLocale | undefined {
+  if (value === 'zh' || value === 'en') return value
+  return undefined
+}
 
 /** Desktop settings presented by the standard settings service. */
 export interface DesktopSettings {
@@ -119,6 +126,11 @@ export function desktopRendererUrl(
   url.searchParams.set('dsh-desktop-mode', mode)
   url.searchParams.set('dsh-desktop-platform', platform)
   return url.href
+}
+
+/** Renderer URL carrying the 0.1.2 launch token (the full desktop profile always composes the connection carrier). */
+function desktopRendererUrlWithToken(ctx: Context, port: number, platform: Context['desktopRuntime']['platform']): string {
+  return ctx.connection.authenticatedUrl(desktopRendererUrl(port, 'advanced', platform))
 }
 
 /**
@@ -275,7 +287,7 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.on('settings/updated', (namespace, next) => {
     if (namespace !== UI_LOCALE_SETTINGS_NAMESPACE) return
-    runtime.setLocalePreference((next as LocaleSettings).preference)
+    runtime.setLocalePreference(normalizeDesktopLocale((next as LocaleSettings).preference))
   })
   // picoaide:// deep links (auth callback): forward to Host consumers.
   // The enterprise plugin listens for 'pico/deep-link' and completes the
@@ -286,13 +298,18 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(
     () => runtime.schedule({
       ...config,
-      url: desktopRendererUrl(ctx.webServer.port, 'advanced', runtime.platform),
+      // Upstream 0.1.2: the Web index requires a process launch-token exchange
+      // (`authorizeIndex`); the shell must load the token-bearing URL so the
+      // renderer gets index bytes instead of a 401. The connection service is
+      // optional here (minimal boot smokes omit the Web carrier); the full
+      // desktop profile always composes it.
+      url: desktopRendererUrlWithToken(ctx, ctx.webServer.port, runtime.platform),
       productName: config.productName,
       windowTitle: config.windowTitle,
       iconPath,
       trayIcons,
       readLocalePreference: () => {
-        return (ctx.settings.get(UI_LOCALE_SETTINGS_NAMESPACE) as LocaleSettings | undefined)?.preference
+        return normalizeDesktopLocale((ctx.settings.get(UI_LOCALE_SETTINGS_NAMESPACE) as LocaleSettings | undefined)?.preference)
       },
       readThemeSource: () => {
         const theme = ctx.settings.get(UI_THEME_SETTINGS_NAMESPACE) as ThemeSettings | undefined

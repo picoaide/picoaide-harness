@@ -266,7 +266,7 @@ async function start(): Promise<void> {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
     const pluginManagementStatePath = join(app.getPath('userData'), 'plugin-management', 'state.json')
     const activeProfileName = DESKTOP_PROFILE_NAME
-    const prepared = prepareDesktopProfile(
+    const prepared = await prepareDesktopProfile(
       process.env.DSH_TELEMETRY_DISABLED,
       homeDir,
       process.platform,
