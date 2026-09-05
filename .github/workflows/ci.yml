@@ -205,9 +205,10 @@ jobs:
     # 原生、arm64 切片取 prebuild,lipo 合并),macos-13 已下线故用 macos-15。
     runs-on: macos-15
     # 2026-09-05:完整 gate(check)+universal 打包+公证轮询实测 56~88 分钟,
-    # 且 Apple 公证队列可能更久;90 分钟曾两次在 notarytool 轮询阶段被
-    # timeout-minutes 杀掉(签名均已成功)。150 分钟 + 步骤级重试兜底。
-    timeout-minutes: 150
+    # 且 Apple 公证队列可能更久(实测定例 >100 分钟仍在 In Progress);
+    # 曾两次在 notarytool 轮询阶段被 timeout-minutes 杀掉(签名均已成功)。
+    # 轮询窗口 240 分钟 + job 上限 330 分钟(GitHub 上限 360)兜底。
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
         with:
