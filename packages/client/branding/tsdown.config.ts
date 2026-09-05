@@ -49,8 +49,10 @@ export default defineConfig([
     external: [
       ...PLATFORM_MODULES,
       ...PRELOADED_CLIENT_EXTERNALS,
+      '@deepseek-ai/dsh-client-ui-theme/client',
       '@deepseek-ai/dsh-client-ui-sidebar/client',
       '@deepseek-ai/dsh-client-ui-conversation/client',
+      '@deepseek-ai/dsh-client-ui-settings/client',
     ],
     outputOptions: {
       entryFileNames: 'client.js',

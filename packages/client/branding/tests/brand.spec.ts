@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { BrandName } from '../src/client/Brand.tsx'
+import { AboutSection, OverlayBadge, applyBrandTheme } from '../src/client/brand-shell.tsx'
 
 describe('branding BrandName version label', () => {
   it('renders the version tag when PICOAI_PRODUCT_VERSION is set', () => {
@@ -14,5 +15,35 @@ describe('branding BrandName version label', () => {
     const src = BrandName.toString()
     expect(src).toContain('PICOAI_PRODUCT_VERSION')
     expect(src).toContain('v')
+  })
+})
+
+describe('branding brand shell surfaces (merged from @picoaide/dsh-shell)', () => {
+  it('OverlayBadge renders the product name', () => {
+    const node = OverlayBadge()
+    const texts = JSON.stringify(node.props.children)
+    expect(texts).toContain('PicoAide Harness')
+  })
+
+  it('AboutSection renders the product name and package identity', () => {
+    const node = AboutSection()
+    const texts = JSON.stringify(node.props.children)
+    expect(texts).toContain('PicoAide Harness')
+    expect(texts).toContain('@picoaide/dsh-branding')
+  })
+
+  it('applyBrandTheme calls theme.overrideTokens with the brand layer', () => {
+    const overrideTokens = vi.fn(() => () => {})
+    const ctx = { get: vi.fn(() => ({ overrideTokens })) }
+    applyBrandTheme(ctx)
+    expect(ctx.get).toHaveBeenCalledWith('theme')
+    expect(overrideTokens).toHaveBeenCalledWith('picoaide-brand', {
+      '--dsw-alias-brand-primary': { light: '#0e8a6a', dark: '#34c79c' },
+    })
+  })
+
+  it('applyBrandTheme degrades gracefully when the theme service is absent', () => {
+    const ctx = { get: vi.fn(() => undefined) }
+    expect(() => applyBrandTheme(ctx)).not.toThrow()
   })
 })
