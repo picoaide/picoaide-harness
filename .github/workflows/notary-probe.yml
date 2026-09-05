@@ -1,0 +1,51 @@
+name: Notary probe
+
+# 运维探针:手动触发,用 repo secrets 里的 App Store Connect API key 查询
+# Apple 公证端全部历史 submission 状态(官方 xcrun notarytool history/log)。
+# 用于诊断「提交后长时间 In Progress / 网络断连」到底是 Apple 侧问题
+# (新团队首次公证排队、statusCode 7000 等)还是我方流程问题。
+# 输出只含 submission id/status/日期与日志,不含凭据。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Materialize App Store Connect API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/notary"
+          printf '%s' "$APPLE_API_KEY" > "$RUNNER_TEMP/notary/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      - name: Submission history
+        run: |
+          echo "== notarytool history =="
+          xcrun notarytool history \
+            --key "$RUNNER_TEMP/notary/AuthKey.p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" || echo "history failed"
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Logs for known submissions
+        run: |
+          for ID in \
+            2195f54c-fdac-4fd5-8999-065e92f04125 \
+            b5cfdbed-230b-41bd-8d8a-9cc46e3e1cfb; do
+            if [ -z "$ID" ]; then continue; fi
+            echo "== notarytool log $ID =="
+            xcrun notarytool log "$ID" \
+              --key "$RUNNER_TEMP/notary/AuthKey.p8" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" || echo "log $ID failed (maybe still processing)"
+          done
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
