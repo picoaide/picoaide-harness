@@ -26,9 +26,25 @@ jobs:
     defaults:
       run:
         working-directory: server
-    # 2026-09-02:CI 不再提供 PostgreSQL 服务——构建/编译/单元测试不依赖数据库;
-    # DB 相关测试在无 PG 环境下自动 Skip(serverstore.NewTestDB 探测),有 PG
-    # 的环境(本地 PG_DSN_TEST)仍可跑全量。
+    # 2026-09-06 恢复 PG 服务:DB 相关测试全量在 CI 执行(serverstore 等按
+    # PG_DSN_TEST 临时库隔离),启动重试/迁移改动不再依赖本地容器验证。
+    # (2026-09-02 曾因"构建/单测不依赖 DB"移除,DB 测试自动 Skip。)
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -160,60 +176,13 @@ jobs:
           path: packages/host/desktop/dist/*Setup*.exe
           if-no-files-found: error
 
+  # macOS 单 job 双分支:正式 tag(纯 vX.Y.Z,Latest)打包+签名+公证;i 其他
+  # (PR/分支/Pre-release tag vX.Y.Z-*)只做未签名冒烟。合并而非两个互斥 job:
+  # Release job 的 needs 需要稳定的 mac 依赖(两颗互斥 job 会让 Release 因
+  # needs 里某颗被 skip 而连带 skip,2026-09-05 beta.1 实测)。
   desktop-macos:
     name: Desktop (macOS)
-    # 未签名冒烟在 PR/分支/预发布 tag 上跑:Pre-release(带 prerelease 段,
-    # 如 v2.7.0-beta.1)不签名不公证——内部测试用,右侧打开即可;只有正式 tag
-    # (纯 vX.Y.Z,Latest)走 desktop-macos-release(签名+公证,用户安装体验)。
-    # 避免 mac runner(10 倍计费)+Apple 公证队列成为测试迭代瓶颈(2026-09-05 定案)。
-    if: ${{ !startsWith(github.ref, 'refs/tags/v') || contains(github.ref_name, '-') }}
-    runs-on: macos-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - run: corepack enable
-      - name: Cache yarn & electron (macos)
-        uses: actions/cache@v6
-        with:
-          path: |
-            .yarn/cache
-            ~/Library/Caches/electron
-            ~/Library/Caches/electron-builder
-          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
-      - run: yarn install --immutable
-      - run: yarn workspace dsh-plugin-desktop dist:mac-smoke
-      - uses: actions/upload-artifact@v7
-        with:
-          name: desktop-macOS
-          path: packages/host/desktop/dist/mac-smoke/*.dmg
-          if-no-files-found: error
-
-  # 签名+公证的正式 mac 发布：tag 推送触发,凭据全走 repo secrets。
-  # 凭证仅在 electron-builder 子进程可见(yarn check 等其余步骤经
-  # release-mac.ts 的 withoutMacReleaseSecrets 剥离),不会进入构建检查环境。
-  # dist:mac 预检 fail-loud:任一 secret 缺失/格式非法立即失败,绝不产出
-  # 未签/未公证的 DMG 作为发布资产。
-  desktop-macos-release:
-    name: Desktop (macOS signed release)
-    # 仅正式 tag(纯 vX.Y.Z,Latest)签名+公证;Pre-release tag(vX.Y.Z-*,
-    # 如 beta)不在此列——走 desktop-macos 未签名冒烟,测试版不进苹果签名公证。
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-    # arm64 原生 runner(macos-15 = Apple Silicon):产物已是 arm64-only
-    # (见 b32165bd25),原生架构上 electron 与原生依赖全部 arm64 原生下载/
-    # rebuild,无需在 Intel 上交叉打包。早期 macos-latest 上 notarytool
-    # submit --wait 公证轮询曾随机断连(NSURLError -1009/-1005,
-    # electron/notarize#219 同款),由下方 3x 整步重试 + 240 分钟窗口兜底
-    # (2026-09-05 起 macos-15-intel 首测作为对照;arm64 若复现断连再评估)。
     runs-on: macos-15
-    # 2026-09-05:完整 gate(check)+arm64 打包+公证轮询实测 56~88 分钟,
-    # 且 Apple 公证队列可能更久(实测定例 >100 分钟仍在 In Progress);
-    # 曾两次在 notarytool 轮询阶段被 timeout-minutes 杀掉(签名均已成功)。
-    # 轮询窗口 240 分钟 + job 上限 330 分钟(GitHub 上限 360)兜底。
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
@@ -233,7 +202,7 @@ jobs:
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       # App Store Connect API Key:secret 里存的是 .p8 文件内容,写入临时文件
-      # 以路径形式传给 electron-builder(与 release-preflight 测试同构)。
+      # 以路径形式传给 electron-builder(正式分支专用;冒烟分支不ary用)。
       - name: Materialize App Store Connect API key
         run: |
           mkdir -p "$RUNNER_TEMP/notary"
@@ -241,13 +210,9 @@ jobs:
           chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      # 2026-09-05 拆分:打包(含完整 gate)与公证解耦。electron-builder 内联
-      # notarytool 在 runner 上会断连(已实证),因此:
-      #  1) dist:mac:pack —— 一次通过 fail-loud(不再被公证重试连带重跑);
-      #  2) dist:mac:notarize —— 公证+staple+DMG+验证,独立重试至多 3 次:每次
-      #     断连只损失 bounded wait 调用,submission id 经输出目录的状态文件
-      #     持久化,后续重试续等同一 submission(不会重新提交/重新排队)。
+      # ==== 正式分支:打包(含完整 gate)+签名,公证在下一步(可续等) ====
       - name: Pack and sign app bundle
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
         run: yarn workspace dsh-plugin-desktop dist:mac:pack
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
@@ -259,15 +224,16 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       - name: Notarize and build DMG (resumable)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
         run: |
           for attempt in 1 2 3; do
-            echo "attempt ${attempt}/3: yarn dist:mac:notarize"
+            echo "attempt ${{ attempt }}/3: yarn dist:mac:notarize"
             if yarn workspace dsh-plugin-desktop dist:mac:notarize; then
-              echo "notarized DMG built on attempt ${attempt}"
+              echo "notarized DMG built on attempt ${{ attempt }}"
               exit 0
             fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "attempt ${attempt} failed; retrying in 60s (same submission resumed)"
+            if [ "${{ attempt }}" -lt 3 ]; then
+              echo "attempt ${{ attempt }} failed; retrying in 60s (same submission resumed)"
               sleep 60
             fi
           done
@@ -276,16 +242,27 @@ jobs:
           APPLE_API_KEY: ${{ runner.temp }}/notary/AuthKey.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      # ==== 非正式分支(PR/分支/Pre-release):未签名冒烟,不进签名公证 ====
+      - name: Build unsigned smoke DMG
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
+        run: yarn workspace dsh-plugin-desktop dist:mac-smoke
       - uses: actions/upload-artifact@v7
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
         with:
           name: desktop-macOS
           path: packages/host/desktop/dist/mac-release/*.dmg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
+        with:
+          name: desktop-macOS
+          path: packages/host/desktop/dist/mac-smoke/*.dmg
           if-no-files-found: error
 
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [server, desktop-linux, desktop-windows, desktop-macos-release]
+    needs: [server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

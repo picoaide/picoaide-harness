@@ -75,9 +75,22 @@ func openPG(dsn string) (*sql.DB, error) {
 		return nil, err
 	}
 	db := sql.OpenDB(&rewriteConnector{raw: connector})
-	if err := db.Ping(); err != nil {
+	// 启动竞态容忍:PG 与 server 并行拉起时(compose/CI 验证),连接可能撞上
+	// "database system is starting up"(SQLSTATE 57P03)。重试 30 次 × 1s,
+	// 逾期返回最后一次错误(服务端配合 CI docker.yml 的 Verify 步骤双保险)。
+	var lastErr error
+	for attempt := 0; attempt < 30; attempt++ {
+		if err := db.Ping(); err != nil {
+			lastErr = err
+			time.Sleep(time.Second)
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
 		db.Close()
-		return nil, fmt.Errorf("pg ping: %w", err)
+		return nil, fmt.Errorf("pg ping: %w", lastErr)
 	}
 	// 连接池:实测 500 并发 1257 TPS / 3000 突发 1613 writes/s 0 失败;
 	// 200 连接 + 业务层(流式 1-3s 打散)足以支撑数千并发大模型调用。

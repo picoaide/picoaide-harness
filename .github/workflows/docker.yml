@@ -187,9 +187,13 @@ jobs:
             postgres:18-alpine)"
           CID=""
           trap 'docker rm -f "$CID" "$PG_CID" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true' EXIT
-          # 等 PG 就绪(最多 30s)
+          # 等 PG 就绪(最多 30s):pg_isready 通过后仍可能处于
+          # "database system is starting up" 短暂窗口(2026-09-05 beta 实测
+          # 服务端撞上 SQLSTATE 57P03),用 psql SELECT 1 的真连接级检查,
+          # 配合服务端 30s 启动重试(serverstore.openPG)双保险。
           for i in $(seq 1 30); do
-            if docker exec "$PG_CID" pg_isready -U picoaide -d picoaide >/dev/null 2>&1; then
+            if docker exec "$PG_CID" pg_isready -U picoaide -d picoaide >/dev/null 2>&1 \
+              && docker exec "$PG_CID" psql -U picoaide -d picoaide -c 'SELECT 1' >/dev/null 2>&1; then
               echo "postgres ready (${i}s)"
               break
             fi
