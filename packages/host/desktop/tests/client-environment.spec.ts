@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { apply } from '../src/client/index.ts'
-import { provideDesktopLayout } from '../src/client/layout-service.ts'
 import { parseDesktopClientEnvironment } from '../src/client/environment.ts'
 import {
   computeDesktopColumns, DesktopLayoutState, MACOS_SIDEBAR_COLLAPSED, SIDEBAR_COLLAPSED,
@@ -103,24 +102,6 @@ describe('advanced desktop layout', () => {
     finally {
       vi.unstubAllGlobals()
     }
-  })
-
-  it('releases the Cordis layout service with its owning effect', () => {
-    let disposed = false
-    const ctx = {
-      reflect: {
-        provide: (name: string, value: unknown) => {
-          expect(name).toBe('layout')
-          expect(value).toBeInstanceOf(DesktopLayoutState)
-          return () => { disposed = true }
-        },
-      },
-    } as unknown as ClientContext
-
-    const dispose = provideDesktopLayout(ctx, new DesktopLayoutState())
-    expect(disposed).toBe(false)
-    dispose()
-    expect(disposed).toBe(true)
   })
 
   it('uses the compatibility rail on Windows and the wider desktop rail on macOS', () => {

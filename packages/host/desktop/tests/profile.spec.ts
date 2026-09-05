@@ -212,7 +212,9 @@ describe('desktop profile composition', {
       const matching = rows.filter(row => row.id === id)
       expect(matching).toHaveLength(1)
       expect(matching[0]).toEqual(expect.objectContaining({ name }))
-      if (id === 'ui-layout') expect(matching[0]?.disabled).toBe(true)
+      // Upstream 0.1.2: the layout row must stay enabled — the `layout`
+      // service ships only with ui-layout and the desktop frame shadows it.
+      if (id === 'ui-layout') expect(matching[0]?.disabled).not.toBe(true)
       else expect(matching[0]?.disabled).not.toBe(true)
     }
     expect(rows.find(row => row.id === 'directory-picker')).toEqual(expect.objectContaining({
@@ -266,9 +268,11 @@ describe('desktop profile composition', {
 
     expect(prepared.profile.name).toBe('desktop')
     expect(prepared.mode).toBe('advanced')
+    // The user patch disabling ui-layout is overridden: 0.1.2 needs the row
+    // active for the `layout` service; the desktop frame shadows instead.
     expect(rows.find(row => row.id === 'ui-layout')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-client-ui-layout',
-      disabled: true,
+      disabled: false,
     }))
     expect(rows.find(row => row.id === 'third-party-layout')).toEqual({
       id: 'third-party-layout',
@@ -299,7 +303,7 @@ describe('desktop profile composition', {
     expect(rows.find(row => row.id === 'settings')).toEqual(expect.objectContaining({
       config: expect.objectContaining({ dshHome: home }),
     }))
-    expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(false)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(false)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
   })

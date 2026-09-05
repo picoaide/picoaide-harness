@@ -128,9 +128,17 @@ export function desktopRendererUrl(
   return url.href
 }
 
-/** Renderer URL carrying the 0.1.2 launch token (the full desktop profile always composes the connection carrier). */
+/** Renderer URL carrying the 0.1.2 launch token plus the desktop presentation parameters. */
 function desktopRendererUrlWithToken(ctx: Context, port: number, platform: Context['desktopRuntime']['platform']): string {
-  return ctx.connection.authenticatedUrl(desktopRendererUrl(port, 'advanced', platform))
+  // The upstream token exchange clears the query string, so mint the token on
+  // the bare origin first, then restore the desktop presentation parameters
+  // the client shell parses (mode/platform).
+  const authed = ctx.connection.authenticatedUrl(`http://127.0.0.1:${String(port)}/`)
+  const url = new URL(authed)
+  url.searchParams.set('dsh-desktop-mode', 'advanced')
+  url.searchParams.set('dsh-desktop-platform', platform)
+  console.error('[desktop] renderer url:', url.href)
+  return url.href
 }
 
 /**

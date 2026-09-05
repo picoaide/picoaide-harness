@@ -117,6 +117,13 @@ const LOGIN_HTML = `<!DOCTYPE html>
   </div>
 </div>
 <script>
+  // Desktop shell marker: the 0.1.2 token exchange clears the query string
+  // after login, so stash the presentation parameters for the client shell
+  // (token excluded — the exchange already minted the authority cookie).
+  try {
+    var dshEnv = location.search.replace(/[?&]token=[^&]*/gu, '').replace(/^&/, '?')
+    if (/dsh-desktop-mode=/.test(dshEnv)) sessionStorage.setItem('dsh-desktop-env', dshEnv)
+  } catch (e) { /* sessionStorage unavailable: keep the old query path */ }
   var f1 = document.getElementById('f1')
   var f2 = document.getElementById('f2')
   var err1 = document.getElementById('err-step1')
