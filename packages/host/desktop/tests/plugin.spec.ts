@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { LocaleId } from '@deepseek-ai/dsh-client-locale'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ThemePreference } from '@deepseek-ai/dsh-client-ui-theme'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   apply,
@@ -128,6 +128,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       }),
     },
     settings,
+    connection: { authenticatedUrl: (url: string) => url },
     logger: { warn: vi.fn(), error: vi.fn() },
     get: vi.fn((key: unknown) => String(key) === 'desktopRuntime' ? runtime : () => {}),
     effect: vi.fn((register: () => unknown) => register()),
@@ -150,11 +151,11 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     notify: async (next, prev) => { await watcher?.(next, prev) },
     notifyLocale: (preference) => {
       localePreference = preference
-      for (const listener of settingsUpdated) listener(settingsNamespace('locale'), { preference })
+      for (const listener of settingsUpdated) listener('locale' as SettingsNamespace, { preference })
     },
     notifyTheme: (preference) => {
       themePreference = preference
-      for (const listener of settingsUpdated) listener(settingsNamespace('ui-theme'), { preference })
+      for (const listener of settingsUpdated) listener('ui-theme' as SettingsNamespace, { preference })
     },
     deepLinkHandler: () => deepLinkHandler,
     sessionOpenHandler: () => sessionOpenHandler,
@@ -184,6 +185,7 @@ describe('desktop Host plugin', () => {
     const registerRoute = vi.fn()
     const ctx = {
       webServer: { host: '127.0.0.1', port: 43120, register: registerRoute },
+      connection: { authenticatedUrl: (url: string) => url },
       settings: {
         register: vi.fn(),
         get: vi.fn(() => undefined),

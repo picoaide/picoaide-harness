@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 /**
  * Cron plugin client half: registers the settings card (settings.plugin.item
  * keyed 'cron') and, when dsh-better-sidebar is present, the scheduled-job
@@ -11,7 +12,9 @@
  */
 import { createElement } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ClientContext, IWorkspaces, SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the sidebar shell's footer slot declaration.

@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from './contracts.ts'

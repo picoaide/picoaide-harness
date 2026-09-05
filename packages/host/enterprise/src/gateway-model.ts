@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -13,7 +13,7 @@ export const name = 'gateway-model'
 /** Services consumed: settings writes and the credential store the adapter resolves against. */
 export const inject = ['settings', 'credentials', 'picoSession']
 
-const LLM_DEEPSEEK_NS = settingsNamespace('llm-deepseek')
+const LLM_DEEPSEEK_NS = 'llm-deepseek' as SettingsNamespace
 
 /**
  * Point the `llm-deepseek` adapter at the enterprise gateway: store the session

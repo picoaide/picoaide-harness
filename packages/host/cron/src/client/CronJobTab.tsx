@@ -5,7 +5,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
+import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { JobRecord } from '../jobs.ts'
 import type { CronController, CronViewSnapshot } from './controller.ts'
 import { styles } from './styles.ts'

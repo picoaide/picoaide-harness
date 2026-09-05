@@ -29,9 +29,9 @@ function installWebClient(
   manifest: Record<string, unknown> = {},
 ): string {
   const webDir = join(home, 'profiles', 'web')
-  const bundles = PROFILE_TEMPLATES.web
-  if (bundles === undefined) throw new Error('test requires the shipped Web template')
-  initProfile(webDir, bundles)
+  const template = PROFILE_TEMPLATES.web
+  if (template === undefined) throw new Error('test requires the shipped Web template')
+  initProfile(webDir, template.bundles)
   const packageDir = join(webDir, 'node_modules', ...packageName.split('/'))
   mkdirSync(packageDir, { recursive: true })
   writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
@@ -61,7 +61,7 @@ afterEach(() => {
 describe('desktop profile composition', {
   timeout: process.platform === 'win32' ? 10_000 : 5_000,
 }, () => {
-  it('reads packaged Cordis skills from the physical unpacked preset root', () => {
+  it('reads packaged Cordis skills from the physical unpacked preset root', async () => {
     const home = temporaryHome()
     const resources = join(home, 'resources')
     const archivedDsh = join(resources, 'app.asar', 'node_modules', '@deepseek-ai', 'dsh')
@@ -100,7 +100,7 @@ describe('desktop profile composition', {
     ), 'utf8')).toBe('# Cordis plugin development\n')
   })
 
-  it('adds the Web surface before third-party bundles and removes the launcher bundle duplicate', () => {
+  it('adds the Web surface before third-party bundles and removes the launcher bundle duplicate', async () => {
     expect(desktopBundleList([
       '@deepseek-ai/dsh-base',
       'third-party-one',
@@ -114,7 +114,7 @@ describe('desktop profile composition', {
     ])
   })
 
-  it('repairs a base-only CLI profile without replacing dependencies', () => {
+  it('repairs a base-only CLI profile without replacing dependencies', async () => {
     const home = temporaryHome()
     const dir = ensureDesktopProfile(home)
     const path = join(dir, 'package.json')
@@ -141,7 +141,7 @@ describe('desktop profile composition', {
     expect(repaired.custom.preserved).toBe(true)
   })
 
-  it('migrates the obsolete Desktop bundle before loading a historical profile', () => {
+  it('migrates the obsolete Desktop bundle before loading a historical profile', async () => {
     const home = temporaryHome()
     const dir = ensureDesktopProfile(home)
     const path = join(dir, 'package.json')
@@ -159,7 +159,7 @@ describe('desktop profile composition', {
       },
     }, undefined, 2) + '\n')
 
-    expect(() => prepareDesktopProfile(undefined, home, 'win32')).not.toThrow()
+    await expect(prepareDesktopProfile(undefined, home, 'win32')).resolves.toBeDefined()
     const repaired = JSON.parse(readFileSync(path, 'utf8')) as {
       dsh: { profile: { bundles: string[] } }
     }
@@ -169,7 +169,7 @@ describe('desktop profile composition', {
     ])
   })
 
-  it('rejects malformed persistent bundle metadata', () => {
+  it('rejects malformed persistent bundle metadata', async () => {
     const home = temporaryHome()
     const dir = ensureDesktopProfile(home)
     const path = join(dir, 'package.json')
@@ -178,9 +178,9 @@ describe('desktop profile composition', {
     expect(() => ensureDesktopProfile(home)).toThrow('dsh.profile.bundles must be an array')
   })
 
-  it('assembles the Host shell with the fixed advanced client shell', () => {
+  it('assembles the Host shell with the fixed advanced client shell', async () => {
     const home = temporaryHome()
-    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const prepared = await prepareDesktopProfile(undefined, home, 'darwin')
     const patches = prepared.patches as Array<Record<string, unknown>>
     const inserted = patches.flatMap((patch) => {
       const rows = patch.insert
@@ -245,7 +245,7 @@ describe('desktop profile composition', {
     expect(rows.map(row => row.id)).not.toContain('desktop-profiles')
   })
 
-  it('boots the fixed desktop profile with advanced shell rows', () => {
+  it('boots the fixed desktop profile with advanced shell rows', async () => {
     const home = temporaryHome()
     const desktopDir = ensureDesktopProfile(home)
     const bundles = PROFILE_TEMPLATES.web
@@ -261,7 +261,7 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const prepared = await prepareDesktopProfile(undefined, home, 'darwin')
     const rows = composeEntries([prepared.patches])
 
     expect(prepared.profile.name).toBe('desktop')
@@ -280,11 +280,11 @@ describe('desktop profile composition', {
     }))
   })
 
-  it('projects YAML startup settings into the Host, Web server, and client Loader rows', () => {
+  it('projects YAML startup settings into the Host, Web server, and client Loader rows', async () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n  port: 43189\n')
 
-    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const prepared = await prepareDesktopProfile(undefined, home, 'darwin')
     const rows = composeEntries([prepared.patches])
 
     expect(prepared.mode).toBe('advanced')
@@ -304,7 +304,7 @@ describe('desktop profile composition', {
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
   })
 
-  it('reads JSON settings and defaults an absent desktop namespace to advanced', () => {
+  it('reads JSON settings and defaults an absent desktop namespace to advanced', async () => {
     const home = temporaryHome()
     const path = join(home, 'desktop-settings.json')
     writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
@@ -321,7 +321,7 @@ describe('desktop profile composition', {
     expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('advanced')
   })
 
-  it('rejects invalid settings roots, sections, modes, and YAML', () => {
+  it('rejects invalid settings roots, sections, modes, and YAML', async () => {
     expect(() => desktopShellModeFromSettings([])).toThrow('must be a map')
     expect(() => desktopShellModeFromSettings({ 'dsh-desktop': true })).toThrow('settings must be a map')
     expect(() => desktopShellModeFromSettings({ 'dsh-desktop': { mode: 'glass' } })).toThrow(
@@ -339,7 +339,7 @@ describe('desktop profile composition', {
     expect(() => readDesktopShellMode({ path })).toThrow('invalid settings document')
   })
 
-  it('keeps the Windows browse panel and desktop pwsh provider without replacing process boundaries', () => {
+  it('keeps the Windows browse panel and desktop pwsh provider without replacing process boundaries', async () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'cordis.patch.yml'), [
       '- id: pwsh-sandbox',
@@ -349,7 +349,7 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const prepared = prepareDesktopProfile(undefined, home, 'win32')
+    const prepared = await prepareDesktopProfile(undefined, home, 'win32')
     const rows = composeEntries([prepared.patches])
     const picker = rows.find(row => row.id === 'directory-picker')
 
@@ -394,7 +394,7 @@ describe('desktop profile composition', {
     }))
   })
 
-  it('rejects a bundle and user patch that register the same loader entry id', () => {
+  it('rejects a bundle and user patch that register the same loader entry id', async () => {
     const home = temporaryHome()
     const packageName = 'dsh-usage-stats'
     const bundlePatch = [
@@ -418,12 +418,12 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    expect(() => prepareDesktopProfile(undefined, home, 'win32')).toThrow(
+    await expect(prepareDesktopProfile(undefined, home, 'win32')).rejects.toThrow(
       'duplicate loader entry id "usage-stats" in the composed profile',
     )
   })
 
-  it('keeps a Web Client in its owning profile and omits it from desktop', () => {
+  it('keeps a Web Client in its owning profile and omits it from desktop', async () => {
     const home = temporaryHome()
     const packageName = '@linxin666/dsh-client-ui-skin-whale-song'
     installWebClient(home, packageName, { exports: { '.': { import: './index.js' } } })
@@ -436,7 +436,7 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const desktop = prepareDesktopProfile(undefined, home, 'darwin')
+    const desktop = await prepareDesktopProfile(undefined, home, 'darwin')
     const desktopRows = composeEntries([desktop.patches])
 
     expect(desktopRows.map(row => row.id)).not.toContain('missing-skin')
@@ -450,7 +450,7 @@ describe('desktop profile composition', {
     }])
   })
 
-  it('keeps unresolved non-UI package entries fail-loud', () => {
+  it('keeps unresolved non-UI package entries fail-loud', async () => {
     const home = temporaryHome()
     const packageName = '@example/whale-song-theme'
     writeFileSync(join(home, 'cordis.patch.yml'), [
@@ -460,12 +460,12 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const desktop = prepareDesktopProfile(undefined, home, 'darwin')
+    const desktop = await prepareDesktopProfile(undefined, home, 'darwin')
     expect(composeEntries([desktop.patches])).toContainEqual({ id: 'optional-theme', name: packageName })
     expect(desktop.skippedOptionalEntries).toEqual([])
   })
 
-  it('does not treat ordinary array config as nested Loader entries', () => {
+  it('does not treat ordinary array config as nested Loader entries', async () => {
     const home = temporaryHome()
     const packageName = '@example/whale-song-theme'
     installWebClient(home, packageName)
@@ -479,7 +479,7 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const prepared = await prepareDesktopProfile(undefined, home, 'darwin')
     expect(composeEntries([prepared.patches])).toContainEqual({
       id: 'config-holder',
       name: 'third-party-host-plugin',
@@ -488,7 +488,7 @@ describe('desktop profile composition', {
     expect(prepared.skippedOptionalEntries).toEqual([])
   })
 
-  it('leaves non-package Loader specifiers unchanged', () => {
+  it('leaves non-package Loader specifiers unchanged', async () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'cordis.patch.yml'), [
       '- insert:',
@@ -497,7 +497,7 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const prepared = await prepareDesktopProfile(undefined, home, 'darwin')
     expect(composeEntries([prepared.patches])).toContainEqual({
       id: 'builtin-plugin',
       name: 'cordis:example',
@@ -505,7 +505,7 @@ describe('desktop profile composition', {
     expect(prepared.skippedOptionalEntries).toEqual([])
   })
 
-  it('preserves an explicitly disabled upstream pwsh provider and a third-party replacement', () => {
+  it('preserves an explicitly disabled upstream pwsh provider and a third-party replacement', async () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'cordis.patch.yml'), [
       '- id: pwsh-sandbox',
@@ -517,7 +517,7 @@ describe('desktop profile composition', {
       '',
     ].join('\n'))
 
-    const prepared = prepareDesktopProfile(undefined, home, 'win32')
+    const prepared = await prepareDesktopProfile(undefined, home, 'win32')
     const rows = composeEntries([prepared.patches])
 
     expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({

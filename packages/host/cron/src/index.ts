@@ -1,3 +1,8 @@
+import type {} from '@deepseek-ai/dsh-api-session-controller'
+import type {} from '@deepseek-ai/dsh-api-workspace-controller'
+import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-workspace'
+import type {} from '@deepseek-ai/dsh-settings'
 /**
  * Host loader entry for the dsh-cron plugin.
  *
@@ -11,9 +16,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-host-apiproxy'
+
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-tools'
 import { HostCronService } from './host-service.ts'
 import { makeCronRoutes } from './host-routes.ts'
@@ -32,13 +37,13 @@ const SECTION_ORDER = 200
 export const name = 'pico-cron'
 
 /** Required Host services (cordis inject waiting). */
-export const inject = ['systemPrompt', 'apiProxy', 'webServer', 'tools']
+export const inject = ['systemPrompt', 'webServer', 'tools', 'sessionController', 'workspaceRegistry', 'agentPresets']
 
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
 export const CRON_GUIDANCE = '本机已安装 dsh-cron 插件（PicoAide Harness 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run 工具创建、查看、启停和触发定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。'
 
 /** Settings namespace of the cron plugin (spelled here and in the browser half). */
-export const CRON_SETTINGS_NAMESPACE = settingsNamespace('cron')
+export const CRON_SETTINGS_NAMESPACE = 'cron' as SettingsNamespace
 
 export interface Config {
   /** Master switch for the scheduler (host + browser surfaces). */
@@ -64,7 +69,11 @@ export const Config: z<Config> = z.object({
  * edit takes effect without a restart.
  */
 export function apply(ctx: Context, config: Config): void {
-  const host = new HostCronService(ctx.apiProxy, {})
+  const host = new HostCronService({
+    sessionController: ctx.sessionController,
+    workspaceRegistry: ctx.workspaceRegistry,
+    agentPresets: ctx.agentPresets,
+  }, {})
   host.setConfiguration(config.enabled ?? true, config.catchUpMissed ?? false)
   host.start()
 
@@ -123,9 +132,15 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  installSettingsSection(ctx, CRON_SETTINGS_NAMESPACE, Config, config ?? {}, {
-    setSource: (source) => { current = source },
-    onChange: sync,
+  // Live settings section: registered lazily through the optional settings
+  // provider (upstream 0.1.2 API); edits arrive on settings/updated.
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.register(CRON_SETTINGS_NAMESPACE, Config, { base: config ?? {} })
+  })
+  ctx.on('settings/updated', (namespace, next) => {
+    if (namespace !== CRON_SETTINGS_NAMESPACE) return
+    current = () => next as Config
+    sync()
   })
 
   sync()

@@ -25,10 +25,13 @@ export interface MarkdownBlock {
 export type MdBlock = MarkdownBlock | MermaidBlock
 
 /** Props of the chunk-resident `MermaidMarkdown` component (shared contract). */
+import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+
 export interface MermaidMarkdownProps {
   /** The full markdown source (rendered in a single MarkdownText pass). */
   text: string
-  codeLabels: { copyLabel: string; copiedLabel: string }
+  /** Localized Markdown chrome forwarded to the upstream MarkdownText. */
+  labels: MarkdownLabels
 }
 
 /** CommonMark opening fence: 0-3 spaces indent + a run of 3+ backticks or tildes. */

@@ -4,7 +4,7 @@
  * locally because cross-package client imports are forbidden.
  */
 import { useEffect, useState } from 'react'
-import type { IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
+import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
 
 export interface WorkspaceOption {
   workspaceId: string

@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import { AuthError } from './server-connector/auth.ts'
@@ -12,9 +12,9 @@ export const name = 'bootstrap'
 /** Services consumed: settings writes and the session being synced. */
 export const inject = ['settings', 'picoSession']
 
-const LLM_DEEPSEEK_NS = settingsNamespace('llm-deepseek')
-const AGENT_DEFAULT_MODEL_NS = settingsNamespace('agent-default-model')
-const WEB_SEARCH_DEEPSEEK_NS = settingsNamespace('web-search-deepseek')
+const LLM_DEEPSEEK_NS = 'llm-deepseek' as SettingsNamespace
+const AGENT_DEFAULT_MODEL_NS = 'agent-default-model' as SettingsNamespace
+const WEB_SEARCH_DEEPSEEK_NS = 'web-search-deepseek' as SettingsNamespace
 
 /** The provider route the `llm-deepseek` adapter registers (gateway repoints its base URL). */
 const DEEPSEEK_PROVIDER = 'deepseek-official'

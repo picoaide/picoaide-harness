@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { applyAdvancedShell } from '../src/client/advanced-shell.ts'
 import { DesktopLayoutState } from '../src/client/layout-state.ts'
 import { parseDesktopClientEnvironment } from '../src/client/environment.ts'

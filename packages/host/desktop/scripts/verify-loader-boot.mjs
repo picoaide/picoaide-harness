@@ -32,7 +32,7 @@ try {
     source: 'process',
     values: { ...process.env },
   }])
-  const prepared = prepareDesktopProfile(undefined, home)
+  const prepared = await prepareDesktopProfile(undefined, home)
   const thirdPartyDir = join(prepared.profile.dir, 'node_modules', THIRD_PARTY_NAME)
   mkdirSync(thirdPartyDir, { recursive: true })
   writeFileSync(join(thirdPartyDir, 'package.json'), JSON.stringify({
@@ -49,6 +49,24 @@ try {
     '',
   ].join('\n'))
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
+  const connectionStubDir = join(prepared.profile.dir, 'node_modules', 'connection-stub')
+  mkdirSync(join(connectionStubDir, 'lib'), { recursive: true })
+  writeFileSync(join(connectionStubDir, 'package.json'), JSON.stringify({
+    name: 'connection-stub',
+    version: '0.0.0',
+    type: 'module',
+    main: 'lib/index.js',
+    exports: './lib/index.js',
+  }) + '\n')
+  writeFileSync(join(connectionStubDir, 'lib', 'index.js'), [
+    "export const name = 'connection-stub'",
+    "export function apply(ctx) {",
+    "  // The desktop shell needs the connection carrier's launch-token URL",
+    "  // (upstream 0.1.2 index auth); the loader smoke composes no Web bundle.",
+    "  ctx.provide('connection', { authenticatedUrl: (url) => url })",
+    "}",
+    '',
+  ].join('\n'))
   const profileRequire = createRequire(prepared.bareModuleBaseUrl)
   const desktopManifest = fileURLToPath(new URL('../package.json', import.meta.url))
   if (profileRequire.resolve('dsh-plugin-desktop/package.json') !== desktopManifest) {
@@ -81,6 +99,7 @@ try {
     [{ insert: [
       { id: 'desktop-shell', name: 'dsh-plugin-desktop' },
       { id: 'third-party-smoke', name: THIRD_PARTY_NAME },
+      { id: 'connection-stub', name: 'connection-stub' },
     ] }],
     (host) => {
       // Packaged Electron does not expose Node's internal ESM loader.

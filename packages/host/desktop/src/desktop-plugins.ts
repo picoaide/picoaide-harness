@@ -26,7 +26,7 @@ const BUNDLE_ID_PATTERN = /^bundle_[A-Za-z0-9_-]{32}$/u
 const PREVIEW_ID_PATTERN = /^disable_[A-Za-z0-9_-]{43}$/u
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
 const IMMUTABLE_BUNDLES = new Set([
-  ...(PROFILE_TEMPLATES.web ?? []),
+  ...(PROFILE_TEMPLATES.web?.bundles ?? []),
   '@deepseek-ai/dsh-desktop-app',
   'dsh-plugin-desktop',
 ])

@@ -44,7 +44,7 @@ try {
     '  default: minimal',
     '',
   ].join('\n'))
-  const prepared = prepareDesktopProfile('1', home, 'win32')
+  const prepared = await prepareDesktopProfile('1', home, 'win32')
   const hostServicePluginDir = join(
     prepared.profile.dir,
     'node_modules',
@@ -148,7 +148,10 @@ try {
   }
 
   const expectedUrl = `http://127.0.0.1:${String(ctx.webServer.port)}/?dsh-desktop-mode=advanced&dsh-desktop-platform=win32`
-  if (mountedSpec?.url !== expectedUrl) {
+  // Upstream 0.1.2: the shell URL carries the process launch token for the
+  // Web index exchange — compare the token-bearing form.
+  const expectedRendererUrl = ctx.connection.authenticatedUrl(expectedUrl)
+  if (mountedSpec?.url !== expectedRendererUrl) {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
   if (mountedSpec?.mode !== 'advanced') {
@@ -177,7 +180,12 @@ try {
     username: 'profile-smoke',
     token: 'profile-smoke-token',
   })
-  const response = await fetch(expectedUrl)
+  // Upstream 0.1.2: mint the launch-token URL, exchange it for the authority
+  // cookie, then read the clean index bytes.
+  const authUrl = ctx.connection.authenticatedUrl(expectedUrl)
+  const exchange = await fetch(authUrl, { redirect: 'manual' })
+  const cookie = exchange.headers.get('set-cookie')
+  const response = await fetch(expectedUrl, { headers: cookie === null ? {} : { cookie } })
   const html = await response.text()
   if (response.status !== 200) {
     throw new Error(`assembled Web root returned HTTP ${String(response.status)}`)

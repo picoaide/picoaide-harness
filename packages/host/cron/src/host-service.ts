@@ -3,9 +3,8 @@
  * picoCronService surface, owns the browser-visible snapshot/SSE state, and
  * exposes the sibling-plugin registration API.
  */
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { HostCronLedger } from './host-ledger.ts'
-import { HostCronExecutor } from './host-executor.ts'
+import { HostCronExecutor, type CronExecutorDeps } from './host-executor.ts'
 import { HostCronScheduler } from './host-scheduler.ts'
 import { jobVisibleTo, type JobRecord } from './jobs.ts'
 import { CRON_SCHEMA_VERSION, type CronEventPayload, type CronSnapshot, type CronAction } from './protocol.ts'
@@ -28,13 +27,13 @@ export class HostCronService implements PicoCronService {
   /** Current account (gateway username); set by the plugin on session change. */
   private username: string | null = null
 
-  constructor(api: ApiProxy, options: HostCronServiceOptions = {}) {
+  constructor(executorDeps: CronExecutorDeps, options: HostCronServiceOptions = {}) {
     // The ledger stamps new jobs with and enforces target actions against the
     // current account (`owner()`), read through the service so a session
     // change (setUsername) takes effect immediately.
     this.ledger = options.ledger ?? new HostCronLedger({ owner: () => this.username })
     this.now = options.now ?? Date.now
-    const executor = options.executor ?? new HostCronExecutor({ api })
+    const executor = options.executor ?? new HostCronExecutor(executorDeps)
     this.scheduler = options.scheduler ?? new HostCronScheduler(this.ledger, executor, {
       now: this.now,
       visible: (job) => jobVisibleTo(job, this.username),
