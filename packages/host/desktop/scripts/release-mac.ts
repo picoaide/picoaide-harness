@@ -150,12 +150,14 @@ export async function packMacApp(options: MacReleaseOptions): Promise<string> {
   // The notarization runs outside electron-builder because its inline
   // `notarytool submit --wait` keeps one long-lived connection that
   // GitHub-hosted macOS runners drop mid-poll (NSURLError -1009/-1005),
-  // failing the whole build. `--config.publish=never` also disables the
-  // implicit publish electron-builder triggers on git tags (v27 前行为,
-  // 曾因缺 GH_TOKEN 打挂 tag 运行)——发布由 CI Release job 统一负责。
+  // failing the whole build. `--publish never` also disables the implicit
+  // publish electron-builder triggers on git tags (v27 前行为,曾因缺
+  // GH_TOKEN 打挂 tag 运行)——发布由 CI Release job 统一负责。注意必须是
+  // 顶层 --publish 选项:`--config.publish=never` 会被当成发布插件名
+  // "never" 加载失败(2026-09-05 rc.3 公证成功后死于 DMG 步骤的元凶)。
   options.run('yarn', [
     'exec', 'electron-builder', '--mac', 'dir', '--arm64',
-    '--config.publish=never',
+    '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
     `--config.directories.output=${options.outputDir}`,
@@ -189,7 +191,7 @@ export async function notarizeAndPackageMacDmg(
   options.run('yarn', [
     'exec', 'electron-builder', '--mac', 'dmg', '--arm64',
     '--prepackaged', appPath,
-    '--config.publish=never',
+    '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
     `--config.directories.output=${options.outputDir}`,
@@ -200,6 +202,11 @@ export async function notarizeAndPackageMacDmg(
     options.desktopRoot,
     buildEnvironment,
   )
+  // 整条发布链路(公证+staple+DMG+验证)成功后才清除状态文件:之前提前删除
+  // 导致"公证已 Accepted 但 DMG 失败"时重试重新提交同一构建(2026-09-05 rc.3)。
+  try {
+    rmSync(stateFile, { force: true })
+  } catch { /* 非致命:状态文件已缺失 */ }
 }
 
 /**
