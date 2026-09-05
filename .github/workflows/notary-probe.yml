@@ -30,7 +30,7 @@ jobs:
           xcrun notarytool history \
             --key "$RUNNER_TEMP/notary/AuthKey.p8" \
             --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER" || echo "history failed"
+            --issuer "$APPLE_API_ISSUER" --output-format json || echo "history failed"
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
