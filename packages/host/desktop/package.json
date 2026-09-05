@@ -378,7 +378,7 @@
         {
           "target": "dmg",
           "arch": [
-            "universal"
+            "arm64"
           ]
         }
       ],
@@ -386,9 +386,7 @@
       "hardenedRuntime": true,
       "icon": "build/app-icon-mac.png",
       "artifactName": "PicoAide-Harness-${version}-mac.${ext}",
-      "mergeASARs": false,
-      "notarize": true,
-      "x64ArchFiles": "{**/node_modules/{node-pty/prebuilds/darwin-*/**,node-addon-require-builtin-darwin-*/**,@vscode/ripgrep-darwin-*/**,@img/sharp-darwin-*/**,@img/sharp-libvips-darwin-*/**,@koromix/koffi-darwin-*/**},**/Resources/cli/**}"
+      "notarize": true
     },
     "win": {
       "target": [

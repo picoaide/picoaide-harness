@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'nod
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MACOS_UNIVERSAL_NATIVE_ENTRIES } from './mac-universal.ts'
+import { MACOS_ARM64_NATIVE_ENTRIES } from './mac-runtime.ts'
 
 /** Injectable filesystem and command boundaries for release verification. */
 export interface MacReleaseVerificationOptions {
@@ -86,10 +86,9 @@ export function verifyMacRelease(
     options.run('hdiutil', ['attach', dmgPath, '-mountpoint', mountPoint, '-nobrowse', '-readonly'])
     mounted = true
     const executablePath = join(appPath, 'Contents', 'MacOS', options.productName)
-    options.run('lipo', [executablePath, '-verify_arch', 'x86_64'])
     options.run('lipo', [executablePath, '-verify_arch', 'arm64'])
     const unpackedRoot = join(appPath, 'Contents', 'Resources', 'app.asar.unpacked')
-    for (const entry of MACOS_UNIVERSAL_NATIVE_ENTRIES) {
+    for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
       options.run('lipo', [join(unpackedRoot, entry.path), '-verify_arch', entry.arch])
     }
     options.run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath])
