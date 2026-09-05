@@ -162,9 +162,11 @@ jobs:
 
   desktop-macos:
     name: Desktop (macOS)
-    # 未签名冒烟只在 PR/分支上跑;tag 推送走 desktop-macos-release(签名+公证),
-    # 避免 mac runner(10 倍计费)在同一 tag 上重复构建。
-    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    # 未签名冒烟在 PR/分支/测试版 tag 上跑:rc(带 prerelease 段)不签名不公证
+    # (内部测试用,右键打开即可),只有正式 tag 走 desktop-macos-release
+    # (签名+公证,用户安装体验)。避免 mac runner(10 倍计费)+Apple 公证队列
+    # 成为测试迭代瓶颈(2026-09-05 定案)。
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') || contains(github.ref_name, '-') }}
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -198,7 +200,9 @@ jobs:
   # 未签/未公证的 DMG 作为发布资产。
   desktop-macos-release:
     name: Desktop (macOS signed release)
-    if: startsWith(github.ref, 'refs/tags/v')
+    # 仅正式 tag(纯 vX.Y.Z)签名+公证;测试版 tag(vX.Y.Z-*)不在此列
+    # (走 desktop-macos 未签名冒烟,rc 不进苹果签名公证)。
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
     # arm64 原生 runner(macos-15 = Apple Silicon):产物已是 arm64-only
     # (见 b32165bd25),原生架构上 electron 与原生依赖全部 arm64 原生下载/
     # rebuild,无需在 Intel 上交叉打包。早期 macos-latest 上 notarytool

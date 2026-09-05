@@ -77,7 +77,7 @@ describe('macOS release command boundary', () => {
       command: 'yarn',
       args: [
         'exec', 'electron-builder', '--mac', 'dir', '--arm64',
-        '--config.publish=never',
+        '--publish', 'never',
         '--config.forceCodeSigning=true', '--config.mac.notarize=false',
         '--config.npmRebuild=false',
         '--config.directories.output=/repo/packages/host/desktop/dist/mac-release',
@@ -102,7 +102,7 @@ describe('macOS release command boundary', () => {
       args: [
         'exec', 'electron-builder', '--mac', 'dmg', '--arm64',
         '--prepackaged', '/repo/packages/host/desktop/dist/mac-release/mac-arm64/PicoAide Harness.app',
-        '--config.publish=never',
+        '--publish', 'never',
         '--config.forceCodeSigning=true', '--config.mac.notarize=false',
         '--config.npmRebuild=false',
         '--config.directories.output=/repo/packages/host/desktop/dist/mac-release',

@@ -230,13 +230,13 @@ export async function notarizeMacApp(options: NotarizeMacOptions): Promise<Notar
       throw new Error(`notarization submission ${submissionId} did not reach Accepted within ${options.deadlineMs}ms (last status: ${status || 'unknown'})`)
     }
 
-    // 3) Staple the ticket into the app bundle and validate it; drop the
-    // resume file now that the ticket is applied.
+    // 3) Staple the ticket into the app bundle and validate it. The resume
+    // file is intentionally kept: downstream steps (DMG build + release
+    // verification) may still fail, and the retry must resume this already
+    // accepted submission instead of submitting the same build again. The
+    // caller deletes the state file once the whole release is verified.
     options.run('xcrun', ['stapler', 'staple', options.appPath])
     options.run('xcrun', ['stapler', 'validate', options.appPath])
-    if (options.resumeFilePath !== undefined) {
-      try { rmSync(options.resumeFilePath, { force: true }) } catch { /* 非致命 */ }
-    }
     return { appPath: options.appPath, submissionId, status }
   } finally {
     rmSync(workingDir, { recursive: true, force: true })

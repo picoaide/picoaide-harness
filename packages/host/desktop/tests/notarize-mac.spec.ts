@@ -137,8 +137,14 @@ describe('notarytool-resilient notarization', () => {
 
     expect(calls.map(call => call.args[1])).not.toContain('submit')
     expect(calls.some(call => call.args[1] === 'wait' && call.args[2] === '00000000-0000-0000-0000-000000000009')).toBe(true)
-    // 完成即清除状态文件:同一构建的后续运行不误判为进行中。
-    expect(existsSync(resumeFile)).toBe(false)
+    // 状态文件在公证成功后仍保留:下游 DMG 构建/验证可能失败,重试必须续等
+    // 同一个已 Accepted 的提交,而不是重新提交同一构建(2026-09-05 rc.3 教训)。
+    // 由调用方在整条发布链路成功后清除。
+    expect(existsSync(resumeFile)).toBe(true)
+    expect(JSON.parse(readFileSync(resumeFile, 'utf8'))).toEqual({
+      appPath: '/app/PicoAide Harness.app',
+      submissionId: '00000000-0000-0000-0000-000000000009',
+    })
     rmSync(dir, { recursive: true, force: true })
   })
 
