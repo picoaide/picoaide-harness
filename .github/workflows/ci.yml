@@ -199,7 +199,11 @@ jobs:
   desktop-macos-release:
     name: Desktop (macOS signed release)
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-latest
+    # macos-15 = Intel 镜像。macos-latest(arm64) 上 notarytool submit --wait
+    # 在公证阶段随机断连(NSURLError -1009/-1005,electron/notarize#219 同款),
+    # 社区实证换 Intel runner 后稳定;universal 产出与宿主架构无关(x64 切片
+    # 原生、arm64 切片取 prebuild,lipo 合并),macos-13 已下线故用 macos-15。
+    runs-on: macos-15
     # 2026-09-05:完整 gate(check)+universal 打包+公证轮询实测 56~88 分钟,
     # 且 Apple 公证队列可能更久;90 分钟曾两次在 notarytool 轮询阶段被
     # timeout-minutes 杀掉(签名均已成功)。150 分钟 + 步骤级重试兜底。
