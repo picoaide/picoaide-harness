@@ -5,6 +5,7 @@ pub mod healthz;
 pub mod marketplace;
 pub mod namespace;
 pub mod bootstrap_service;
+pub mod brand_service;
 pub mod capabilities_service;
 pub mod connector_service;
 pub mod reports_service;
