@@ -1548,6 +1548,7 @@ name = "picoaide-dsh-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -1588,15 +1589,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
+ "flate2",
+ "hex",
+ "picoaide-dsh-store",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "sqlx",
+ "tar",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1627,15 +1635,18 @@ dependencies = [
  "anyhow",
  "argon2",
  "base64",
+ "chrono",
  "flate2",
  "hex",
  "rand 0.8.8",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "subtle",
  "tar",
  "thiserror 2.0.20",
+ "tokio",
  "zip",
 ]
 
