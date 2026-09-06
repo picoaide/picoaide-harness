@@ -8,6 +8,7 @@ pub mod config;
 pub mod ldap;
 pub mod local;
 pub mod mfa;
+pub mod oidc;
 pub mod ratelimit;
 pub mod rbac;
 pub mod token;
