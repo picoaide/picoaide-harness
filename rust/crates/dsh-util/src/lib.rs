@@ -2,6 +2,7 @@
 //!
 //! 对应 Go `server/internal/util`：加密/密码哈希/路径安全/版本比较。
 
+pub mod archiveutil;
 pub mod crypto;
 pub mod password;
 pub mod semver;
