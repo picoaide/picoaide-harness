@@ -1,6 +1,6 @@
 /** Fail-loud verification of the runtime entries sealed into Electron's app.asar. */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
@@ -193,7 +193,7 @@ export async function smokePackagedDiagnosticWorker(
   // The worker lives inside app.asar now; extract it to a physical temp path so
   // the packaging machine's plain Node can run it (it has no asar fs patch).
   const archivePath = asarPath ?? resolvePackagedAsarPath(contextForUnpackedRoot(unpackedRoot))
-  const workerTmp = join(root, 'lib', 'diagnostic-export-worker.js')
+  let workerTmp = join(root, 'lib', 'diagnostic-export-worker.js')
   try {
     // The worker imports shared chunks from lib/; extract the whole lib/ JS
     // surface into the temp dir so ESM resolution works.
@@ -223,7 +223,10 @@ export async function smokePackagedDiagnosticWorker(
     }
     writeFileSync(workerTmp, extractFile(archivePath, 'lib/diagnostic-export-worker.js'))
   } catch (cause) {
-    // Fallback: unpacked physical tree (development / older layout).
+    // Fallback: physical tree (the `asar: false` layout, or a development
+    // tree). The worker resolves its shared chunk siblings from its own
+    // directory, so launch the in-place physical file rather than copying a
+    // single file into a temp tree that lacks the chunks.
     const physical = join(unpackedRoot, 'lib', 'diagnostic-export-worker.js')
     if (!existsSync(physical)) {
       throw new Error(
@@ -231,7 +234,7 @@ export async function smokePackagedDiagnosticWorker(
         { cause },
       )
     }
-    writeFileSync(workerTmp, readFileSync(physical))
+    workerTmp = physical
   }
   const logsDir = join(root, 'logs')
   const userDataDir = join(root, 'user-data')
@@ -290,31 +293,45 @@ export function resolvePackagedUnpackedRoot(context: PackagedRuntimeContext): st
   return `${resolvePackagedAsarPath(context)}.unpacked`
 }
 
+/**
+ * Resolve the physical application root emitted when Electron Builder packs
+ * with `asar: false` (the desktop layout: profile-relative resolution and
+ * preset discovery disk checks need real files, so the runtime is a physical
+ * tree rather than an archive).
+ * @param context - completed application directory and target platform.
+ * @returns absolute path to the unpacked application root.
+ */
+export function resolvePackagedAppRoot(context: PackagedRuntimeContext): string {
+  if (context.electronPlatformName === 'darwin') {
+    return join(
+      context.appOutDir,
+      `${context.packager.appInfo.productFilename}.app`,
+      'Contents',
+      'Resources',
+      'app',
+    )
+  }
+  if (context.electronPlatformName === 'win32' || context.electronPlatformName === 'linux') {
+    return join(context.appOutDir, 'resources', 'app')
+  }
+  throw new Error(
+    `dsh-plugin-desktop: unsupported Electron afterPack platform ${JSON.stringify(context.electronPlatformName)}`,
+  )
+}
+
 /** Normalize the host-specific separators emitted by the ASAR reader. */
 function normalizeArchiveEntry(entry: string): string {
   return entry.replaceAll('\\', '/').replace(/^\/+/, '').replace(/\/+$/, '')
 }
 
-/**
- * Inspect one archive and reject an incomplete packaged runtime.
- * @param archivePath - resolved app.asar path.
- * @param list - ASAR listing implementation.
- * @returns Nothing; failure rejects the package before signing.
- */
-function verifyPackagedAsar(
-  archivePath: string,
-  list: ArchiveLister = listPackage,
-): ReadonlySet<string> {
+/** Try to list one archive; an absent archive is the physical-layout signal. */
+function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<string> | undefined {
   let entries: readonly string[]
   try {
     entries = list(archivePath, { isPack: false })
-  } catch (cause) {
-    throw new Error(
-      `dsh-plugin-desktop: failed to inspect packaged runtime at ${archivePath}`,
-      { cause },
-    )
+  } catch {
+    return undefined
   }
-
   const present = new Set(entries.map(normalizeArchiveEntry))
   const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !present.has(entry))
   if (missing.length > 0) {
@@ -381,6 +398,14 @@ function verifyUnpackedPackageResolution(
 
 /**
  * Verify Electron Builder's completed application before signing begins.
+ *
+ * Two layouts are accepted: the packaged archive (`asar` true —
+ * `resources/app.asar` with `app.asar.unpacked` holding native binaries) and
+ * the physical tree (`asar: false` — `resources/app/`, the layout the desktop
+ * ships since the DSH 0.1.2 preset discovery reads package presence with raw
+ * disk checks that cannot traverse a symlink into an archive). The archive
+ * checks run only when the archive exists; the physical layout checks every
+ * required entry and export against the real files.
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
@@ -392,7 +417,15 @@ export function verifyPackagedRuntime(
   list: ArchiveLister = listPackage,
   exists: FileProbe = existsSync,
 ): void {
-  const asarEntries = verifyPackagedAsar(resolvePackagedAsarPath(context), list)
+  const asarPath = resolvePackagedAsarPath(context)
+  const asarEntries = tryListArchive(asarPath, list)
+  if (asarEntries === undefined) {
+    // Physical layout (asar: false): the runtime is a real file tree (the
+    // layout the desktop ships so profile-relative resolution and preset
+    // discovery disk checks see real files).
+    verifyPhysicalRuntime(resolvePackagedAppRoot(context), exists)
+    return
+  }
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
   const requiredPhysicalEntries = context.electronPlatformName === 'win32'
     ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES]
@@ -422,7 +455,35 @@ export function verifyPackagedRuntime(
       )
     }
   }
-  verifyUnpackedPackageResolution(resolvePackagedAsarPath(context), asarEntries)
+  verifyUnpackedPackageResolution(asarPath, asarEntries)
+}
+
+/**
+ * Verify a physical (non-archive) packaged runtime: every required entry and
+ * package export must be a real file under the application root, and nothing
+ * may resolve back into the build workspace (the `files` list is the only
+ * allowlist; a missing entry here means the artifact was repacked outside
+ * the sealed list).
+ * @param appRoot - absolute path to the physical application root.
+ * @param exists - physical-file probe.
+ * @returns Nothing; failure rejects the package before signing.
+ */
+function verifyPhysicalRuntime(
+  appRoot: string,
+  exists: FileProbe,
+): void {
+  const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !exists(join(appRoot, entry)))
+  if (missing.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required entries: ${missing.join(', ')}`,
+    )
+  }
+  const missingExports = REQUIRED_ASAR_EXPORTS.filter(required => !exists(join(appRoot, required.archivePath)))
+  if (missingExports.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required package exports: ${missingExports.map(entry => entry.archivePath).join(', ')}`,
+    )
+  }
 }
 
 /** Package names smartUnpack legitimately keeps physical (native binaries). */
@@ -481,5 +542,11 @@ export async function afterPack(
   smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
 ): Promise<void> {
   verify(context)
-  await smoke(resolvePackagedUnpackedRoot(context), undefined, resolvePackagedAsarPath(context))
+  const asarPath = resolvePackagedAsarPath(context)
+  // Physical tree (asar: false): the worker smoke's extraction fallback reads
+  // from the application root; the archive layout reads from app.asar.unpacked.
+  const sourceRoot = existsSync(asarPath)
+    ? resolvePackagedUnpackedRoot(context)
+    : resolvePackagedAppRoot(context)
+  await smoke(sourceRoot, undefined, asarPath)
 }

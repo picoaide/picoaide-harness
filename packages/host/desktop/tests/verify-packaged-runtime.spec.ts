@@ -88,8 +88,8 @@ describe('packaged desktop runtime verification', () => {
       let smokeRoot: string | undefined
       const launch = vi.fn<PackagedDiagnosticWorkerLauncher>(async (workerPath, workerData) => {
         smokeRoot = join(workerData.logsDir, '..')
-        expect(workerPath.endsWith(join('diagnostic-export-worker.js'))).toBe(true)
-        expect(workerPath.startsWith(join(tmpdir(), 'dsh-packaged-diagnostics-'))).toBe(true)
+        // 物理布局:worker 原地启动(其共享 chunk 兄弟文件在同目录)。
+        expect(workerPath).toBe(join(unpackedRoot, 'lib', 'diagnostic-export-worker.js'))
         expect(readFileSync(join(workerData.logsDir, 'dsh-2000-01-01.log'), 'utf8'))
           .toBe('packaged worker smoke\n')
         expect(workerData.appVersion).toBe('packaged-smoke')
@@ -117,13 +117,15 @@ describe('packaged desktop runtime verification', () => {
     const runtimeContext = context('/build', 'win32')
     const calls: string[] = []
 
+    // The production afterPack resolves the worker source root from the real
+    // filesystem: no app.asar in this fixture, so the physical app root is used.
     await afterPack(
       runtimeContext,
       () => { calls.push('static') },
-      async (unpackedRoot) => { calls.push(unpackedRoot) },
+      async (workerRoot) => { calls.push(workerRoot) },
     )
 
-    expect(calls).toEqual(['static', resolvePackagedUnpackedRoot(runtimeContext)])
+    expect(calls).toEqual(['static', expect.stringMatching(/resources[\\/]app$/u)])
   })
 
   it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
@@ -255,5 +257,32 @@ describe('packaged desktop runtime verification', () => {
   it('verifies required package exports resolve from the ASAR archive', () => {
     // 该用例由 verifyUnpackedPackageResolution 直接覆盖（见下）。
     expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES.length).toBeGreaterThan(0)
+  })
+})
+
+describe('packaged desktop runtime verification (physical layout, asar: false)', () => {
+  it('accepts a complete physical tree and rejects missing entries', () => {
+    const runtimeContext = context('/build', 'linux')
+    const appRoot = join('/build', 'resources', 'app')
+    const noArchive = vi.fn<ArchiveLister>(() => {
+      throw new Error('no app.asar')
+    })
+    const existsComplete = vi.fn<FileProbe>(filename => {
+      const rel = filename.replaceAll('\\', '/')
+      return rel === appRoot
+        || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+    })
+    expect(() => verifyPackagedRuntime(runtimeContext, noArchive, existsComplete)).not.toThrow()
+
+    const existsMissing = vi.fn<FileProbe>(filename => {
+      const rel = filename.replaceAll('\\', '/')
+      return rel === appRoot
+        || REQUIRED_PACKAGED_RUNTIME_ENTRIES
+          .filter(entry => entry !== 'lib/main.js')
+          .some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+    })
+    expect(() => verifyPackagedRuntime(runtimeContext, noArchive, existsMissing))
+      .toThrow('missing required entries: lib/main.js')
   })
 })
