@@ -5,6 +5,7 @@
 
 use sqlx::postgres::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use chrono::Datelike;
 
 /// PgTestDSN 返回 PostgreSQL 测试 DSN 模板（PG_DSN_TEST 覆盖）。
 pub fn pg_test_dsn() -> String {
@@ -55,7 +56,55 @@ pub async fn try_new_test_db() -> Option<PgPool> {
         panic!("apply migrations: {e}");
     }
 
+    // 预建 2026-01 起至当前+6月的 usage 分区与 usage_daily 分区
+    // （等价 Go ensureTestPartitions，覆盖测试硬编码月份）。
+    if let Err(e) = ensure_test_partitions(&pool).await {
+        panic!("ensure test partitions: {e}");
+    }
+
     Some(pool)
+}
+
+/// ensure_usage_partition 幂等创建某月的 usage 分区（Go ensureUsagePartition 等价）。
+pub async fn ensure_usage_partition(pool: &PgPool, month: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+    let y = month.year();
+    let m = month.month();
+    let key = format!("{y}{m:02}");
+    let start = format!("{y}-{m:02}-01");
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let end = format!("{ny}-{nm:02}-01");
+    let sql = format!(
+        "CREATE TABLE IF NOT EXISTS usage_{key} PARTITION OF usage FOR VALUES FROM ('{start}') TO ('{end}')"
+    );
+    sqlx::query(&sql).execute(pool).await?;
+    Ok(())
+}
+
+/// ensure_test_partitions 预建历史+未来分区（Go ensureTestPartitions 等价）。
+async fn ensure_test_partitions(pool: &PgPool) -> anyhow::Result<()> {
+    let start = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let end = chrono::Utc::now() + chrono::Duration::days(183);
+    let mut m = start;
+    while m <= end {
+        ensure_usage_partition(pool, m).await?;
+        // usage_daily 年分区
+        let y = m.year();
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS usage_daily_{y} PARTITION OF usage_daily FOR VALUES FROM ('{y}-01-01') TO ('{}-01-01')",
+            y + 1
+        );
+        sqlx::query(&sql).execute(pool).await?;
+        m = if m.month() == 12 {
+            chrono::DateTime::from_timestamp(
+                m.timestamp() + chrono::Duration::days(31).num_seconds(),
+                0,
+            ).unwrap()
+        } else {
+            // 下一月:加一个月天数的近似(用 chrono Months)
+            m + chrono::Months::new(1)
+        };
+    }
+    Ok(())
 }
 
 /// new_test_db 便捷封装（不跳过，直接 panic）。
