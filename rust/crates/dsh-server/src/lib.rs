@@ -1,5 +1,6 @@
 //! PicoAide HTTP 服务端（Go `cmd/server` + `router` 等价）。
 
+pub mod admin_endpoints;
 pub mod error;
 pub mod handlers;
 pub mod llm_gateway_service;
