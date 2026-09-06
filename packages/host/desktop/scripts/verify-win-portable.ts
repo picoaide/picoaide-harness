@@ -47,8 +47,9 @@ export function verifyWindowsPortable(
   if (executable === undefined) {
     throw new Error(`Windows portable archive is missing PicoAide Harness.exe: ${portablePath}`)
   }
-  if (!entries.some(entry => entry.entryName.replaceAll('\\', '/') === 'resources/app.asar')) {
-    throw new Error(`Windows portable archive is missing resources/app.asar: ${portablePath}`)
+  if (!entries.some(entry => entry.entryName.replaceAll('\\', '/') === 'resources/app.asar')
+    && !entries.some(entry => entry.entryName.replaceAll('\\', '/') === 'resources/app/package.json')) {
+    throw new Error(`Windows portable archive is missing the packaged runtime (resources/app.asar or resources/app): ${portablePath}`)
   }
   assertPortableExecutableBuffer(
     executable.getData(),

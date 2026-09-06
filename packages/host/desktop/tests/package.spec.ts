@@ -216,7 +216,7 @@ describe('published package surface', () => {
       '**/prebuilds/**/OpenConsole.exe',
       '**/prebuilds/**/*.conpty_console_list*',
     ])
-    expect(manifest.build?.asar).toEqual({ smartUnpack: false })
+    expect(manifest.build?.asar).toBe(false)
     expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
