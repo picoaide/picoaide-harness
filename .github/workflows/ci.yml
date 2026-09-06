@@ -239,10 +239,11 @@ jobs:
           Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
           sleep 2
           yarn workspace dsh-plugin-desktop e2e:client
-          # upload-artifact v4+ 不收录点开头文件/.e2e-report.md 与 .e2e-shots/,
-          # 复制到非隐藏目录再上传(2026-09-06 实测缺失)。
+          # upload-artifact v4+ 不收录点开头文件/目录(.e2e-report.md/.e2e-shots),
+          # 复制并重命名为非点名称再上传(2026-09-06 两轮实测缺失)。
           mkdir -p packages/host/desktop/e2e-results
-          cp -r packages/host/desktop/.e2e-report.md packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/ 2>/dev/null || true
+          cp packages/host/desktop/.e2e-report.md packages/host/desktop/e2e-results/e2e-report.md 2>/dev/null || true
+          cp -r packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/shots 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
