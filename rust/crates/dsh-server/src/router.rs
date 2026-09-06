@@ -55,11 +55,10 @@ pub async fn admin_auth(
 
 /// webadmin 静态挂载（axum ServeDir；webadmin 产物在 repo 的 server/webadmin/dist）。
 /// 走错误信封降级：dist 缺失时 /admin/* 返回 JSON 错误（对应 Go embed 语义）。
-pub fn webadmin_router() -> Router<Arc<AppState>> {
-    // SPA index（占位；真实产物嵌入在部署时放入 webadmin_dist）
-    let fallback = get(|| async {
-        axum::response::Html("<!doctype html><html><body>webadmin</body></html>".to_string())
-    });
+pub fn webadmin_router() -> Router<()> {
+    // 编译期嵌入 SPA index（build.rs 已把 server/webadmin/dist 复制到 webadmin_dist）
+    const SPA_INDEX: &str = include_str!("../webadmin_dist/index.html");
+    let fallback = get(|| async { axum::response::Html(SPA_INDEX.to_string()) });
     Router::new().fallback(fallback)
 }
 
