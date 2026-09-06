@@ -44,7 +44,10 @@ export const inject = ['picoSession']
  * 而 404 —— 这里解析为绝对 URL(拼 session.serverURL, 保持 https/回环校验)。
  */
 function absolutizeURLs(brand: BrandConfig, serverURL: string): BrandConfig {
-  const server = serverURL.replace(/\/+$/, '')
+  // 2026-09-06 CodeQL js/polynomial-redos:尾部斜杠剥离改为无正则形式
+  // (原 /\/+$/ 被保守标为多项式回溯;while 循环语义等价)。
+  let server = serverURL
+  while (server.endsWith('/')) server = server.slice(0, -1)
   const abs = (u?: string): string | undefined =>
     u === undefined || u === '' ? undefined : u.startsWith('http') ? u : server + u
   // exactOptionalPropertyTypes: 可选属性不可显式置 undefined——
