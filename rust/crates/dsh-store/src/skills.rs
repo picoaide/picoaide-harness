@@ -135,11 +135,15 @@ pub async fn skill_name_exists(pool: &sqlx::PgPool, name: &str) -> Result<bool, 
 
 /// AddSkill 登记一个市场 App(可带首个版本的归档)。跨渠道同名互斥。
 pub async fn add_skill(pool: &sqlx::PgPool, s: &Skill) -> Result<i64, StoreError> {
-    if let Ok(existing) = get_app(pool, APP_KIND_SKILL, &s.name).await {
-        if existing.channel != APP_CHANNEL_MARKET {
-            return Err(StoreError::Conflict);
+    match get_app(pool, APP_KIND_SKILL, &s.name).await {
+        Ok(existing) => {
+            if existing.channel != APP_CHANNEL_MARKET {
+                return Err(StoreError::Conflict);
+            }
+            return Err(StoreError::Duplicate);
         }
-        return Err(StoreError::Duplicate);
+        Err(StoreError::NotFound) => {}
+        Err(e) => return Err(e),
     }
     let title = if s.display_name.is_empty() {
         s.name.clone()
