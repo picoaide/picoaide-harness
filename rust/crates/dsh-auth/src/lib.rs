@@ -14,7 +14,7 @@ pub mod ratelimit;
 pub mod rbac;
 pub mod token;
 
-pub use admin_session::{create_admin_session, validate_admin_session, verify_csrf, issue_csrf, AdminSession};
+pub use admin_session::{create_admin_session, get_admin_session, validate_admin_session, verify_csrf, issue_csrf, AdminSession};
 pub use config::{configure_providers, strip_prefix, ConfiguredApi};
 pub use local::{local_provider_authenticate, UserInfo};
 pub use mfa::{bump_mfa_challenge_attempts, consume_mfa_challenge, create_mfa_challenge, get_mfa_challenge, MfaChallenge};

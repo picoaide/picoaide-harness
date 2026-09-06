@@ -334,6 +334,36 @@ pub async fn user_monthly_cost(pool: &sqlx::PgPool, user_id: i64) -> Result<f64,
     Ok(total)
 }
 
+/// UserMonthlyCostBatch 一次查询返回一批用户本月费用（对齐 Go UserMonthlyCostBatch）。
+pub async fn user_monthly_cost_batch(
+    pool: &sqlx::PgPool,
+    user_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, f64>, StoreError> {
+    let mut out = std::collections::HashMap::new();
+    if user_ids.is_empty() {
+        return Ok(out);
+    }
+    let mut sql = String::from(
+        "SELECT user_id, COALESCE(SUM(cost),0)::float8 AS c FROM usage WHERE created_at >= date_trunc('month', now()) AND user_id IN (",
+    );
+    for (i, _) in user_ids.iter().enumerate() {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push_str(&format!("${}", i + 1));
+    }
+    sql.push_str(") GROUP BY user_id");
+    let mut q = sqlx::query(&sql);
+    for id in user_ids {
+        q = q.bind(*id as i32);
+    }
+    let rows = q.fetch_all(pool).await.map_err(map_db_error)?;
+    for r in rows {
+        out.insert(r.get::<i32, _>("user_id") as i64, r.get("c"));
+    }
+    Ok(out)
+}
+
 /// EffectiveMoneyQuota 用户月度金额配额（0=不限；admin 恒 0）。
 pub async fn effective_money_quota(pool: &sqlx::PgPool, user: &crate::users::User) -> Result<f64, StoreError> {
     if user.is_admin {

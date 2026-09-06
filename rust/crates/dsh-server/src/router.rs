@@ -61,7 +61,7 @@ pub fn webadmin_router() -> Router<()> {
         .unwrap_or_else(|_| "webadmin_dist".to_string());
     let base = std::path::PathBuf::from(&base_str);
     let serve_dir = tower_http::services::ServeDir::new(&base)
-        .not_found_service(
+        .fallback(
             tower_http::services::ServeFile::new(base.join("index.html")),
         );
     Router::new().fallback_service(serve_dir)

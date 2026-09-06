@@ -110,9 +110,9 @@ pub async fn user_groups_batch(
     }
     let rows = q.fetch_all(pool).await.map_err(map_db_error)?;
     for r in rows {
-        let uid: i64 = r.get("user_id");
+        let uid: i32 = r.get("user_id");
         let name: String = r.get("name");
-        out.entry(uid).or_default().push(name);
+        out.entry(uid as i64).or_default().push(name);
     }
     Ok(out)
 }
