@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod healthz;
+pub mod marketplace;
 pub mod namespace;
 pub mod skillmanifest;
 
