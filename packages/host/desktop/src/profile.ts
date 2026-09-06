@@ -1,8 +1,8 @@
 /** Compatibility profile composition over the official Web bundle and user plugins. */
 
 import { createRequire, findPackageJSON } from 'node:module'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -255,6 +255,50 @@ export function shippedPresetRoot(moduleUrl: string = import.meta.url): string {
   return join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
 }
 
+/**
+ * Remove stale module-fallback symlinks produced by an asar-packaged install.
+ *
+ * The 2.6.7-beta.1/2 layout pointed every shared and profile-owned fallback
+ * link into `resources/app.asar`; the physical layout (`asar: false`) no
+ * longer ships that archive, so those links dangle. The upstream heal
+ * canonicalizes link targets with `realpathSync` before replacing them —
+ * Electron's asar probe reports a plain `Invalid package ...app.asar` error
+ * (not ENOENT) for a vanished archive and aborts boot before the heal can
+ * rebuild. Deleting every asar-targeting symlink under `$DSH_HOME/profiles`
+ * first lets the heal recreate the links against the real tree. Only
+ * symlinks are touched; real directories (proxy entries, pnpm-managed
+ * installs) are never removed.
+ * @param home - the harness home whose profiles tree is cleaned.
+ */
+export function removeStaleAsarFallbackLinks(home: string = resolveDshHome()): void {
+  const profilesDir = join(home, 'profiles')
+  const walk = (dir: string): void => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+      } else if (entry.isSymbolicLink()) {
+        try {
+          const target = readlinkSync(path)
+          const resolved = isAbsolute(target) ? target : resolve(dirname(path), target)
+          if (resolved.toLowerCase().includes('app.asar')) {
+            unlinkSync(path)
+          }
+        } catch {
+          // An unreadable link is not ours to remove.
+        }
+      }
+    }
+  }
+  walk(profilesDir)
+}
+
 /** Read a row's object config without trusting arbitrary YAML values. */
 function rowConfig(row: EntryOptions | undefined): Record<string, unknown> {
   const config = row?.config
@@ -367,6 +411,7 @@ export async function prepareDesktopProfile(
 ): Promise<PreparedDesktopProfile> {
   const profileName = DESKTOP_PROFILE_NAME
   const profileDir = ensureDesktopProfile(home)
+  removeStaleAsarFallbackLinks(home)
   await healProfilesModuleFallback({ installAnchor: INSTALL_ANCHOR, home })
   const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
   const disabledBundles = pluginStatePath === undefined
