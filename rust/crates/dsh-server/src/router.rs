@@ -65,21 +65,8 @@ pub fn webadmin_router() -> Router<Arc<AppState>> {
 
 /// build_router 构建完整路由（命名空间分组 + 认证中间件接入）。
 /// 业务 handler 由各 service 提供；此处注册端点骨架（后续逐步填充）。
-pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let client_v2 = axum::Router::new()
-        .route("/healthz", get(healthz_handler))
-        .route("/config/bootstrap", get(|_: State<Arc<AppState>>| async {
-            Json(error_body("AUTH_REQUIRED", "未认证"))
-        }))
-        .route("/telemetry/skill-call", get(|| async {
-            Json(error_body("NOT_FOUND", "not found"))
-        }));
-    let server = axum::Router::new().route("/admin/healthz", get(healthz_handler));
-    let v1 = axum::Router::new().route("/models", get(|| async { Json(serde_json::json!({ "data": [] })) }));
-    Router::new()
-        .nest("/api/client/v2", client_v2)
-        .nest("/api/server", server)
-        .nest("/v1", v1)
+pub fn build_router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
+    crate::handlers::register_client_handlers(Router::new())
 }
 
 async fn healthz_handler() -> Json<serde_json::Value> {
