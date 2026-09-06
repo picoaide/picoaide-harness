@@ -23,6 +23,7 @@ pub mod tokens;
 pub mod migrate;
 pub mod testutil;
 pub mod usage;
+pub mod usage_ledger;
 pub mod users;
 
 pub use db::{open, DbConfig, DriverName};
