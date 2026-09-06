@@ -56,10 +56,15 @@ pub async fn admin_auth(
 /// webadmin 静态挂载（axum ServeDir；webadmin 产物在 repo 的 server/webadmin/dist）。
 /// 走错误信封降级：dist 缺失时 /admin/* 返回 JSON 错误（对应 Go embed 语义）。
 pub fn webadmin_router() -> Router<()> {
-    // 编译期嵌入 SPA index（build.rs 已把 server/webadmin/dist 复制到 webadmin_dist）
-    const SPA_INDEX: &str = include_str!("../webadmin_dist/index.html");
-    let fallback = get(|| async { axum::response::Html(SPA_INDEX.to_string()) });
-    Router::new().fallback(fallback)
+    // 用 tower-http ServeDir 服务静态 SPA（自动 MIME + index fallback）。
+    let base_str = std::env::var("DSH_WEBADMIN_DIST")
+        .unwrap_or_else(|_| "webadmin_dist".to_string());
+    let base = std::path::PathBuf::from(&base_str);
+    let serve_dir = tower_http::services::ServeDir::new(&base)
+        .not_found_service(
+            tower_http::services::ServeFile::new(base.join("index.html")),
+        );
+    Router::new().fallback_service(serve_dir)
 }
 
 /// build_router 构建完整路由（命名空间分组 + 认证中间件接入）。
