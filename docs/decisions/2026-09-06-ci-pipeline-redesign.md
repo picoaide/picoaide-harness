@@ -26,8 +26,9 @@
 ### D1. 门禁一次，平台只管打包：gate job + 三平台 job（needs: gate）
 - 新增 `gate`（ubuntu）：`yarn install` → **根 `yarn check`（新语义，每包只构建一次）** → 上传 `workspace-build` artifact（8 个包的 `lib/**` + desktop 的 `build/**`，即 electron-builder 打包入口所需的全部产物）。
 - `desktop-linux/win/macos` 全部 `needs: gate`：下载 `workspace-build`，恢复到仓库树，**只做平台专属打包 + 平台验证 + E2E**。
+- **`server` 与 `gate` 无任何依赖、同时启动并行编译**（server 不用客户端产物：Go 工具链/PG 容器/webadmin 都是独立路径）；三平台打包与 server 完成窗口重叠，server 不占总时长关键路径（2026-09-06 实测：既并行编排也在运行期重叠，两 job 同秒启动）。
 - 收益：同一代码三平台不再平行重复编译（审计的跨 job 重复）；平台 job 从「门禁 + 打包」收敛为「打包 + 验证」。
-- 代价：平台 job 与 gate 串行，单次 PR 总时长 ≈ gate + 平台最长 job（约 10-13 分钟，比原先 5-8 分钟略长，但消除了 2-4 倍编译）。
+- 代价：平台 job 与 gate 串行，单次 PR 总时长 ≈ gate + 平台最长 job（实测 7.5 分钟：gate 2.9 + 平台 4.5；server 4.9 被完全掩盖）。
 
 ### D2. 根 `check` 语义重排（R1 消除，每包只构建一次）
 新顺序：`check:layout` → **`desktop check`**（build+typecheck+test+verify:closure/loader/profile/licenses，一次构建产出 desktop `lib/`+`lib/types/`——其余包 tsc 依赖）→ `better-sidebar check` → connectors/enterprise/account-card/branding/browser/cron 各 `check` → `community-fabric check`。
