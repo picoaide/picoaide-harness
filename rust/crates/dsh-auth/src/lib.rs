@@ -3,6 +3,7 @@
 //! 密码 provider（local）、浏览器 provider（OIDC）、令牌签发/验证、RBAC。
 
 pub mod admin_session;
+pub mod bootstrap_admin;
 pub mod config;
 pub mod local;
 pub mod mfa;
