@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/dsh-util",
+  "crates/dsh-store",
+  "crates/dsh-auth",
+  "crates/dsh-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["picoaide"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "migrate", "chrono", "uuid"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+hex = "0.4"
+subtle = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
