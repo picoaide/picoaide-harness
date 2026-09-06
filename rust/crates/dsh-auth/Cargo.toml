@@ -1,0 +1,20 @@
+[package]
+name = "picoaide-dsh-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+picoaide-dsh-util = { path = "../dsh-util" }
+picoaide-dsh-store = { path = "../dsh-store" }
+axum = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
