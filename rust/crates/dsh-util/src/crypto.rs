@@ -152,6 +152,8 @@ pub fn decrypt(key: &[u8], s: &str) -> Result<String, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 环境变量测试与文件测试互斥（进程级 env 并行修改竞态，2026-09 修复）
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn crypto_round_trip() {
@@ -184,6 +186,7 @@ mod tests {
 
     #[test]
     fn ensure_master_key_file() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("picoaide-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let key = ensure_master_key(dir.to_str().unwrap()).unwrap();
@@ -200,6 +203,7 @@ mod tests {
 
     #[test]
     fn ensure_master_key_env() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         // 环境变量优先：不写文件
         unsafe { std::env::set_var(MASTER_KEY_ENV, "0123456789abcdef0123456789abcdef") }
         let dir = std::env::temp_dir().join("picoaide-env-test");
@@ -213,6 +217,7 @@ mod tests {
 
     #[test]
     fn get_master_key_uninitialized() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         unsafe { std::env::remove_var(MASTER_KEY_ENV); }
         assert!(get_master_key().is_err());
     }
