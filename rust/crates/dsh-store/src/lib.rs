@@ -3,7 +3,10 @@
 //! 包含：数据库连接、迁移、DAO（用户/部门/组/网关/用量/授权等）。
 
 pub mod db;
+pub mod departments;
+pub mod effective;
 pub mod errors;
+pub mod groups;
 pub mod migrate;
 #[cfg(test)]
 pub mod testutil;
