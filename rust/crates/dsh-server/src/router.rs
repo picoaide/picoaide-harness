@@ -65,7 +65,9 @@ pub fn webadmin_router() -> Router<()> {
 /// build_router 构建完整路由（命名空间分组 + 认证中间件接入）。
 /// 业务 handler 由各 service 提供；此处注册端点骨架（后续逐步填充）。
 pub fn build_router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
-    crate::handlers::register_client_handlers(Router::new())
+    let r = crate::handlers::register_client_handlers(Router::new());
+    let v1 = axum::Router::new().route("/models", axum::routing::get(|| async { Json(serde_json::json!({ "data": [] })) }));
+    r.nest("/v1", v1)
 }
 
 async fn healthz_handler() -> Json<serde_json::Value> {
