@@ -1,0 +1,27 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -251,9 +251,23 @@
+ 	for (;;) {
+ 		if (existsSync(join(dir, "node_modules", pkg, "package.json"))) return true;
+ 		const parent = dirname(dir);
+-		if (parent === dir) return false;
++		if (parent === dir) break;
+ 		dir = parent;
+ 	}
++	// Desktop fallback (patch): a packaged install keeps its in-box modules
++	// inside an asar archive whose fallback entries are links Electron's fs
++	// patch cannot follow, so the disk walk reports them missing. The desktop
++	// profile resolver (dsh-plugin-desktop module-resolution hooks) answers
++	// the manifest from the application tree, so ask the resolver as the last
++	// witness instead of declaring the row broken. An absent or failed
++	// resolver degrades to the previous behavior.
++	try {
++		const { createRequire } = process.getBuiltinModule("node:module") ?? { createRequire: null };
++		createRequire(join(fileURLToPath(base), "package.json")).resolve(pkg + "/package.json");
++		return true;
++	} catch {
++		return false;
++	}
+ }
+ /**
+ * Whether one classified row names a module that exists, importing nothing.

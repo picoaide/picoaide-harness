@@ -1159,6 +1159,32 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@deepseek-ai/dsh-agent-presets@patch:@deepseek-ai/dsh-agent-presets@npm%3A0.1.2-rc.1#./patches/dsh-agent-presets@0.1.2-rc.1.patch::locator=picoaide-harness%40workspace%3A.":
+  version: 0.1.2-rc.1
+  resolution: "@deepseek-ai/dsh-agent-presets@patch:@deepseek-ai/dsh-agent-presets@npm%3A0.1.2-rc.1#./patches/dsh-agent-presets@0.1.2-rc.1.patch::version=0.1.2-rc.1&hash=71975c&locator=picoaide-harness%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/schemastery": "npm:^3.18.2"
+    js-yaml: "npm:^4.1.0"
+    zod: "npm:^4.4.3"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+    "@deepseek-ai/cordis-plugin-include": ^1.0.7
+    "@deepseek-ai/cordis-plugin-loader": ^1.0.3
+    "@deepseek-ai/dsh-agent": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-atomic-write": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-home-paths": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-invariants": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-scope": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-session": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-session-projection": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-settings": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-system-prompt": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-tools": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-typert-protocol": ^0.1.2-rc.1
+  checksum: 10c0/f947baf63c1231aac65100733b73200c64316d52481feb253d4f8011a4a29d8de44b291be2eca5f8cf3b8197b0ca16ab1027beba52c96fa77a12e7ae73383e54
+  languageName: node
+  linkType: hard
+
 "@deepseek-ai/dsh-agent-tool-presentation@npm:^0.1.2-rc.1":
   version: 0.1.2-rc.1
   resolution: "@deepseek-ai/dsh-agent-tool-presentation@npm:0.1.2-rc.1"

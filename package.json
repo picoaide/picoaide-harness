@@ -1,6 +1,6 @@
 {
   "name": "picoaide-harness",
-  "version": "2.6.7-beta.4",
+  "version": "2.6.7-beta.5",
   "private": true,
   "description": "PicoAide Harness product workspace",
   "license": "MIT",
@@ -20,7 +20,8 @@
     "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.2-rc.1": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.2-rc.1#./patches/dsh-client-ui-brand-official@0.1.2-rc.1.patch",
     "koffi@npm:^3.1.0": "3.1.5",
     "@deepseek-ai/dsh-win32-process@npm:0.1.2-rc.1": "patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.2-rc.1#./patches/dsh-win32-process@0.1.2-rc.1.patch",
-    "@deepseek-ai/dsh-client-ui-brand-official@npm:0.1.2-rc.1": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.2-rc.1#./patches/dsh-client-ui-brand-official@0.1.2-rc.1.patch"
+    "@deepseek-ai/dsh-client-ui-brand-official@npm:0.1.2-rc.1": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.2-rc.1#./patches/dsh-client-ui-brand-official@0.1.2-rc.1.patch",
+    "@deepseek-ai/dsh-agent-presets@npm:0.1.2-rc.1": "patch:@deepseek-ai/dsh-agent-presets@npm%3A0.1.2-rc.1#./patches/dsh-agent-presets@0.1.2-rc.1.patch"
   },
   "dependenciesMeta": {
     "@deepseek-ai/dsh-subprocess-local": {
