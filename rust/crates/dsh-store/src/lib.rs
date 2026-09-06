@@ -8,6 +8,7 @@ pub mod apps;
 pub mod audit;
 pub mod capability_locks;
 pub mod connectors;
+pub mod brand_config;
 pub mod budget;
 pub mod concurrency;
 pub mod db;
