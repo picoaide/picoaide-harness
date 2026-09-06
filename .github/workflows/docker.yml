@@ -1,4 +1,4 @@
-name: Server Docker image
+name: Publish server image
 
 # 发布版本时自动构建服务端 Docker 镜像并推送 GHCR(契约见 server/docs/02-build-deploy.md §3.3):
 #   - push tag v*:版本号 = tag 去 v 前缀(与 GitHub Release 流程同源,同一 tag 触发)

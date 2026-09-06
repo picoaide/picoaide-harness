@@ -277,7 +277,10 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['dist:mac-smoke']).toBe('node scripts/package-mac.ts')
     expect(manifest.scripts?.['dist:win']).toBe('node scripts/package-win.ts')
     expect(manifest.scripts?.['dist:win-portable']).toBe('node scripts/package-win-portable.ts')
-    expect(manifest.scripts?.['check:win-package']).toContain('yarn run build')
+    // 2026-09-06 CI 重设计:check:win-package 是「构建后」平台检查——产物由
+    // dist:win 入口的 prebuild(本地)或 CI gate job 提供,不再内嵌 build
+    // (消除审计 R3 重复编译)。
+    expect(manifest.scripts?.['check:win-package']).not.toContain('yarn run build')
     expect(manifest.scripts?.['check:win-package']).toContain('yarn run typecheck')
     expect(manifest.scripts?.['check:win-package']).toContain('tests/package-win.spec.ts')
     expect(manifest.scripts?.['check:win-package']).toContain('tests/verify-win-portable.spec.ts')

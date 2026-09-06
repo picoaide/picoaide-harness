@@ -45,6 +45,12 @@ export interface MacSmokePackageOptions {
   readonly log: (message: string) => void
 }
 
+/** Optional switches for CI reuse (gates/build already run by the CI gate job). */
+export interface MacSmokeSwitches {
+  /** Skip the in-package root `check` gate (CI runs it as the gate job). */
+  readonly skipGates?: boolean
+}
+
 function run(
   command: string,
   args: readonly string[],
@@ -90,7 +96,10 @@ function defaultOptions(): MacSmokePackageOptions {
  * Silicon Macs.
  * @param options - Injectable process and command boundaries.
  */
-export function packageMacSmoke(options: MacSmokePackageOptions = defaultOptions()): void {
+export function packageMacSmoke(
+  options: MacSmokePackageOptions = defaultOptions(),
+  switches: MacSmokeSwitches = {},
+): void {
   if (options.platform !== 'darwin') {
     throw new Error('macOS DMG smoke must be built on a native macOS host')
   }
@@ -108,12 +117,14 @@ export function packageMacSmoke(options: MacSmokePackageOptions = defaultOptions
 
   const cleanEnvironment = withoutMacReleaseSecrets(options.env)
   options.log('Building an unsigned macOS DMG smoke; signing and notarization are release-only steps.')
-  options.run(
-    'corepack',
-    ['yarn', 'workspace', 'dsh-plugin-desktop', 'check:mac-package'],
-    options.workspaceRoot,
-    cleanEnvironment,
-  )
+  if (!switches.skipGates) {
+    options.run(
+      'corepack',
+      ['yarn', 'workspace', 'dsh-plugin-desktop', 'check:mac-package'],
+      options.workspaceRoot,
+      cleanEnvironment,
+    )
+  }
   options.resetOutput()
   options.prepareRuntime()
   options.run(
@@ -146,10 +157,12 @@ export function packageMacSmoke(options: MacSmokePackageOptions = defaultOptions
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
   try {
-    // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
-    const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-    prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
-    packageMacSmoke()
+    if (!process.argv.includes('--no-prebuild')) {
+      // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
+      const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
+      prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+    }
+    packageMacSmoke(undefined, { skipGates: process.argv.includes('--no-gates') })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

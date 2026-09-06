@@ -16,7 +16,7 @@ const RELEASE_VARIABLES = [
   'MAC_CERT_P12_BASE64',
 ] as const
 
-type NotarizationCredentialSource = 'api-key' | 'apple-id' | 'keychain-profile'
+type NotarizationCredentialSource = 'api-key' | 'apple-id' | 'keychain-profile' | 'none'
 type SigningCredentialSource = 'keychain' | 'p12'
 
 /** Injectable process inputs for the macOS release preflight. */
@@ -27,6 +27,10 @@ export interface MacReleasePreflightOptions {
   readonly platform: NodeJS.Platform
   /** Return the valid code-signing identities visible to the build process. */
   readonly listCodeSigningIdentities: () => string
+  /** Allow a signed-but-not-notarized build (pre-release tag). When true,
+   * missing notarization credentials report 'none' instead of failing; a
+   * partially-present credential group still fails loudly. */
+  readonly notarizationOptional?: boolean
 }
 
 /** Safe release facts confirmed by the preflight. */
@@ -132,7 +136,10 @@ function resolveCredentialGroup(
   return source
 }
 
-function resolveNotarizationCredentials(env: NodeJS.ProcessEnv): NotarizationCredentialSource {
+function resolveNotarizationCredentials(
+  env: NodeJS.ProcessEnv,
+  allowNone: boolean,
+): NotarizationCredentialSource {
   const appleId = resolveCredentialGroup(
     env,
     ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID'],
@@ -152,6 +159,7 @@ function resolveNotarizationCredentials(env: NodeJS.ProcessEnv): NotarizationCre
   if (environmentValue(env, 'APPLE_KEYCHAIN') !== undefined) {
     throw new Error('Incomplete macOS notarization credentials: missing APPLE_KEYCHAIN_PROFILE')
   }
+  if (allowNone) return 'none'
   throw new Error(
     'macOS notarization credentials are required: set APPLE_KEYCHAIN_PROFILE, the Apple ID trio, or the App Store Connect API key trio',
   )
@@ -210,7 +218,7 @@ export function assertMacReleaseReady(options: MacReleasePreflightOptions): MacR
 
   return {
     identity,
-    notarization: resolveNotarizationCredentials(options.env),
+    notarization: resolveNotarizationCredentials(options.env, options.notarizationOptional === true),
     signing,
   }
 }
@@ -226,6 +234,7 @@ export function notarizationLabel(source: NotarizationCredentialSource): string 
     case 'api-key': return 'api-key'
     case 'apple-id': return 'apple-id'
     case 'keychain-profile': return 'keychain-profile'
+    case 'none': return 'none (signed only, no notarization)'
   }
 }
 

@@ -14,6 +14,8 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /** 执行一个 yarn workspace 命令,失败即抛错。 */
 function runWorkspace(workspace: string, cwd: string): void {
@@ -52,4 +54,15 @@ export function prebuildWorkspaceDeps(workspaceRoot: string): void {
   runWorkspace('dsh-better-sidebar', workspaceRoot)
   // dsh-memory-evolve 是 DSH 生态外部插件(构建依赖 ~/.dsh/source 的 esbuild,
   // 见其 scripts/build.mjs),其 lib/ 保留版本库跟踪,不走标准 prebuild。
+}
+
+const invokedPath = process.argv[1]
+if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+  const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+  try {
+    prebuildWorkspaceDeps(workspaceRoot)
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  }
 }

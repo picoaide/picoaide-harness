@@ -174,7 +174,10 @@ async function main() {
     ready = list.some(t => t.type === 'page')
   } catch { /* launch below */ }
   if (!ready) {
-    child = spawn(appBinary, ['--no-sandbox', `--remote-debugging-port=${String(cdpPort)}`], {
+    // 断言语料是中文 UI(连接/能力中心/关闭等 marker),--lang 强制 Chromium
+    // renderer 语言,与 runner 系统语言解耦(2026-09-06 CI 实测:en_US runner
+    // 上 UI 变英文,中文 marker 断言失败)。
+    child = spawn(appBinary, ['--no-sandbox', '--lang=zh-CN', `--remote-debugging-port=${String(cdpPort)}`], {
       env: {
         ...process.env,
         HOME: HOME_DIR,
