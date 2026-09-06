@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod handlers;
+pub mod llm_gateway_service;
 pub mod healthz;
 pub mod marketplace;
 pub mod namespace;

@@ -25,3 +25,4 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = { workspace = true }
 picoaide-dsh-auth = { path = "../dsh-auth" }
+picoaide-dsh-llm = { path = "../dsh-llm" }
