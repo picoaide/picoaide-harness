@@ -125,14 +125,24 @@ export function verifyMacSmoke(
 
     const appAsarPath = join(appPath, 'Contents', 'Resources', 'app.asar')
     if (!options.exists(appAsarPath)) {
-      throw new Error(`packaged application is missing ${appAsarPath}`)
-    }
-    const appAsarStat = options.stat(appAsarPath)
-    if (!appAsarStat.isFile || appAsarStat.size === 0) {
-      throw new Error(`packaged application archive is empty: ${appAsarPath}`)
+      // Physical layout (asar: false): the runtime is Resources/app.
+      const appRoot = join(appPath, 'Contents', 'Resources', 'app')
+      if (!options.exists(join(appRoot, 'package.json'))) {
+        throw new Error(`packaged application is missing ${appAsarPath} and ${appRoot}/package.json`)
+      }
+      if (!options.exists(join(appRoot, 'lib', 'main.js'))) {
+        throw new Error(`packaged application is missing ${appRoot}/lib/main.js`)
+      }
+    } else {
+      const appAsarStat = options.stat(appAsarPath)
+      if (!appAsarStat.isFile || appAsarStat.size === 0) {
+        throw new Error(`packaged application archive is empty: ${appAsarPath}`)
+      }
     }
 
-    const unpackedRoot = `${appAsarPath}.unpacked`
+    const unpackedRoot = options.exists(appAsarPath)
+      ? `${appAsarPath}.unpacked`
+      : join(appPath, 'Contents', 'Resources', 'app')
     for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
       const nativePath = join(unpackedRoot, entry.path)
       if (!options.exists(nativePath)) {

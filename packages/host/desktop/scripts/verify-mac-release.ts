@@ -1,7 +1,7 @@
 /** Verify the signed application sealed inside one macOS release DMG. */
 
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -93,7 +93,10 @@ export function verifyMacRelease(
     mounted = true
     const executablePath = join(appPath, 'Contents', 'MacOS', options.productName)
     options.run('lipo', [executablePath, '-verify_arch', 'arm64'])
-    const unpackedRoot = join(appPath, 'Contents', 'Resources', 'app.asar.unpacked')
+    const asarPath = join(appPath, 'Contents', 'Resources', 'app.asar')
+    const unpackedRoot = existsSync(asarPath)
+      ? join(appPath, 'Contents', 'Resources', 'app.asar.unpacked')
+      : join(appPath, 'Contents', 'Resources', 'app')
     for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
       options.run('lipo', [join(unpackedRoot, entry.path), '-verify_arch', entry.arch])
     }

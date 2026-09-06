@@ -46,7 +46,7 @@ describe('macOS release artifact verification', () => {
       ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => ({
         command: 'lipo',
         args: [
-          join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', entry.path),
+          join(appPath, 'Contents', 'Resources', 'app', entry.path),
           '-verify_arch', entry.arch,
         ],
       })),
