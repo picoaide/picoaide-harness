@@ -36,12 +36,12 @@ pub async fn list_usage_requests(
     let mut binds: Vec<String> = vec![];
     let mut bind_idx = 1usize;
     if let Some(f) = from {
-        where_clause.push(format!("u.created_at >= ${bind_idx}"));
+        where_clause.push(format!("u.created_at >= ${bind_idx}::timestamptz"));
         binds.push(f.to_rfc3339());
         bind_idx += 1;
     }
     if let Some(t) = to {
-        where_clause.push(format!("u.created_at < ${bind_idx}"));
+        where_clause.push(format!("u.created_at < ${bind_idx}::timestamptz"));
         binds.push(t.to_rfc3339());
         bind_idx += 1;
     }

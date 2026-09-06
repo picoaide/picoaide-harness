@@ -50,13 +50,13 @@ pub async fn list_departments(pool: &sqlx::PgPool) -> Result<Vec<DepartmentInfo>
     let mut out = Vec::new();
     for r in rows {
         let budget_money: Option<f64> = r.get("budget_money");
-        let leader_id: i64 = r.get("leader_id");
+        let leader_id: Option<i64> = r.get("leader_id");
         let leader_name: String = r.get("leader_name");
         out.push(DepartmentInfo {
             id: r.get("id"),
             name: r.get("name"),
             parent_id: r.get("parent_id"),
-            leader_id,
+            leader_id: leader_id.unwrap_or(0),
             leader_name,
             description: r.get("description"),
             member_count: r.get("member_count"),

@@ -1624,6 +1624,7 @@ dependencies = [
 name = "picoaide-dsh-server"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "axum",
  "base64",
@@ -1631,9 +1632,11 @@ dependencies = [
  "flate2",
  "hex",
  "include_dir",
+ "libc",
  "picoaide-dsh-auth",
  "picoaide-dsh-llm",
  "picoaide-dsh-store",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
