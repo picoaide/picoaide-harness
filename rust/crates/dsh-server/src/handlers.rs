@@ -24,9 +24,18 @@ pub async fn handle_healthz() -> Json<serde_json::Value> {
 /// handle_bootstrap 客户端 bootstrap（BearerAuth 保护由 router 挂载）。
 pub async fn handle_bootstrap(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let user = picoaide_dsh_auth::verify_token(&state.pool, token)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(error_body("AUTH_REQUIRED", "未认证"))))?;
     let svc = crate::bootstrap_service::BootstrapService::new(state.pool.clone());
-    svc.build("anonymous", false)
+    svc.build(&user.username, user.is_admin)
         .await
         .map(Json)
         .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))
