@@ -5,6 +5,7 @@
 pub mod admin_session;
 pub mod bootstrap_admin;
 pub mod config;
+pub mod dirsync;
 pub mod ldap;
 pub mod local;
 pub mod mfa;
