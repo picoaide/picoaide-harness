@@ -2,11 +2,13 @@
 //!
 //! 密码 provider（local）、浏览器 provider（OIDC）、令牌签发/验证、RBAC。
 
+pub mod admin_session;
 pub mod config;
 pub mod local;
 pub mod rbac;
 pub mod token;
 
+pub use admin_session::{create_admin_session, validate_admin_session, verify_csrf, issue_csrf, AdminSession};
 pub use config::{configure_providers, strip_prefix, ConfiguredApi};
 pub use local::{local_provider_authenticate, UserInfo};
 pub use rbac::{has_permission, permissions_of};
