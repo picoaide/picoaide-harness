@@ -8,6 +8,7 @@ pub mod db;
 pub mod departments;
 pub mod effective;
 pub mod errors;
+pub mod gateway;
 pub mod grants;
 pub mod groups;
 pub mod settings;
