@@ -5,6 +5,7 @@
 pub mod crypto;
 pub mod password;
 pub mod semver;
+pub mod updatecheck;
 
 pub use crypto::{decrypt, encrypt, ensure_master_key, get_master_key, ENC_PREFIX};
 pub use password::{hash_password, verify_password};
