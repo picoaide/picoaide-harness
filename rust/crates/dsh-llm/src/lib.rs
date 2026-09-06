@@ -187,6 +187,7 @@ const _: usize = MIN_REDACT_SECRET_LEN;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn parse_usage_full_body_and_sse_line() {
