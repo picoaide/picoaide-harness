@@ -2,6 +2,7 @@
 //!
 //! 包含：数据库连接、迁移、DAO（用户/部门/组/网关/用量/授权等）。
 
+pub mod aggregate;
 pub mod agent_presets;
 pub mod apps;
 pub mod audit;
