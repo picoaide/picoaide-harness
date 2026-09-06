@@ -94,6 +94,9 @@ pub fn register_client_handlers(router: Router<Arc<AppState>>) -> Router<Arc<App
         .route("/api/client/v2/capabilities", axum::routing::post(handle_capabilities))
         .route("/api/server/admin/connectors", axum::routing::get(handle_connectors_list))
         .route("/api/server/admin/reports", axum::routing::get(handle_reports_list))
+        .route("/api/server/admin/users", axum::routing::post(handle_admin_users))
+        .route("/api/server/admin/departments", axum::routing::get(handle_admin_departments))
+        .route("/api/server/admin/gateway/providers", axum::routing::get(handle_admin_gateway_providers))
         .route("/healthz", axum::routing::get(handle_healthz))
 }
 
@@ -245,4 +248,50 @@ pub async fn handle_reports_list(
         .await
         .map(Json)
         .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))
+}
+
+/// handle_admin_users 用户列表（管理面）。
+pub async fn handle_admin_users(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let page = payload.get("page").and_then(|v| v.as_i64()).unwrap_or(1);
+    let size = payload.get("size").and_then(|v| v.as_i64()).unwrap_or(20);
+    let q = payload.get("q").and_then(|v| v.as_str()).unwrap_or("");
+    let (users, total) = picoaide_dsh_store::users::list_users(&state.pool, (page - 1) * size, size, q)
+        .await
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))?;
+    let items: Vec<serde_json::Value> = users
+        .iter()
+        .map(|u| serde_json::json!({ "username": u.username, "display_name": u.display_name, "role": u.role, "status": u.status }))
+        .collect();
+    Ok(Json(serde_json::json!({ "users": items, "total": total })))
+}
+
+/// handle_admin_departments 部门列表（管理面）。
+pub async fn handle_admin_departments(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let depts = picoaide_dsh_store::departments::list_departments(&state.pool)
+        .await
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))?;
+    let items: Vec<serde_json::Value> = depts
+        .iter()
+        .map(|d| serde_json::json!({ "id": d.id, "name": d.name, "parent_id": d.parent_id, "member_count": d.member_count }))
+        .collect();
+    Ok(Json(serde_json::json!({ "departments": items })))
+}
+
+/// handle_admin_gateway_providers 网关上游列表（管理面）。
+pub async fn handle_admin_gateway_providers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let providers = picoaide_dsh_store::gateway::list_gateway_providers(&state.pool)
+        .await
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))?;
+    let items: Vec<serde_json::Value> = providers
+        .iter()
+        .map(|p| serde_json::json!({ "name": p.name, "base_url": p.base_url, "protocol": p.protocol, "enabled": p.enabled }))
+        .collect();
+    Ok(Json(serde_json::json!({ "providers": items })))
 }
