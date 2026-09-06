@@ -2,11 +2,86 @@
 
 use crate::errors::map_db_error;
 use crate::errors::StoreError;
+use chrono::Datelike;
 use sqlx::Row;
 
 pub const RETENTION_MONTHS_SETTING: &str = "usage.retention_months";
 pub const DEFAULT_RETENTION_MONTHS: i32 = 6;
 pub const MAX_RETENTION_MONTHS: i32 = 120;
+
+/// RebuildUsageLedger 从 usage 明细 UPSERT 日账/月账（幂等，可重复执行）。
+/// from/to 为闭区间日期。
+pub async fn rebuild_usage_ledger(
+    pool: &sqlx::PgPool,
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+) -> anyhow::Result<()> {
+    if from > to {
+        return Ok(());
+    }
+    // 建好涉及月份/年份的分区
+    let mut m = from;
+    while m <= to {
+        let key = m.format("%Y%m").to_string();
+        let start = m.format("%Y-%m-%d").to_string();
+        let (ny, nm) = if m.month() == 12 { (m.year() + 1, 1) } else { (m.year(), m.month() + 1) };
+        let end = format!("{ny}-{nm:02}-01");
+        let sql = format!("CREATE TABLE IF NOT EXISTS usage_{key} PARTITION OF usage FOR VALUES FROM ('{start}') TO ('{end}')");
+        sqlx::query(&sql).execute(pool).await?;
+        let ykey = m.year().to_string();
+        let dsql = format!(
+            "CREATE TABLE IF NOT EXISTS usage_daily_{ykey} PARTITION OF usage_daily FOR VALUES FROM ('{ykey}-01-01') TO ('{}-01-01')",
+            m.year() + 1
+        );
+        sqlx::query(&dsql).execute(pool).await?;
+        m = if m.month() == 12 {
+            chrono::NaiveDate::from_ymd_opt(m.year() + 1, 1, 1).unwrap()
+        } else {
+            chrono::NaiveDate::from_ymd_opt(m.year(), m.month() + 1, 1).unwrap()
+        };
+    }
+    let from_str = from.format("%Y-%m-%d").to_string();
+    let to_plus1_str = to.succ_opt().unwrap().format("%Y-%m-%d").to_string();
+    let to_str = to.format("%Y-%m-%d").to_string();
+    // 日账
+    sqlx::query(
+        "INSERT INTO usage_daily (user_id, model, day, prompt_tokens, completion_tokens, cache_prompt_tokens, requests, cost) \
+         SELECT user_id, model, (created_at AT TIME ZONE 'Asia/Shanghai')::date AS day, \
+         SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_prompt_tokens), COUNT(*), SUM(cost) \
+         FROM usage \
+         WHERE created_at >= $1::timestamptz AND created_at < $2::timestamptz \
+         AND (created_at AT TIME ZONE 'Asia/Shanghai')::date >= $3::date \
+         AND (created_at AT TIME ZONE 'Asia/Shanghai')::date <= $4::date \
+         GROUP BY user_id, model, day \
+         ON CONFLICT (user_id, model, day) DO UPDATE SET \
+         prompt_tokens = EXCLUDED.prompt_tokens, completion_tokens = EXCLUDED.completion_tokens, \
+         cache_prompt_tokens = EXCLUDED.cache_prompt_tokens, requests = EXCLUDED.requests, cost = EXCLUDED.cost",
+    )
+    .bind(&from_str)
+    .bind(&to_plus1_str)
+    .bind(&from_str)
+    .bind(&to_str)
+    .execute(pool)
+    .await?;
+    // 月账（边界月取整月）
+    sqlx::query(
+        "INSERT INTO usage_monthly (user_id, model, month, prompt_tokens, completion_tokens, cache_prompt_tokens, requests, cost) \
+         SELECT user_id, model, date_trunc('month', day)::date AS month, \
+         SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_prompt_tokens), SUM(requests), SUM(cost) \
+         FROM usage_daily \
+         WHERE day >= (date_trunc('month', $1::date))::date \
+         AND day < (date_trunc('month', $2::date) + interval '1 month')::date \
+         GROUP BY user_id, model, month \
+         ON CONFLICT (user_id, model, month) DO UPDATE SET \
+         prompt_tokens = EXCLUDED.prompt_tokens, completion_tokens = EXCLUDED.completion_tokens, \
+         cache_prompt_tokens = EXCLUDED.cache_prompt_tokens, requests = EXCLUDED.requests, cost = EXCLUDED.cost",
+    )
+    .bind(&from_str)
+    .bind(&to_str)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
 
 /// EffectiveRetentionMonths 返回明细保留月数（settings；缺省/非法=6；0=永久）。
 pub async fn effective_retention_months(pool: &sqlx::PgPool) -> Result<i32, StoreError> {
