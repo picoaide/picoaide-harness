@@ -249,13 +249,13 @@ pub async fn delete_department(pool: &sqlx::PgPool, id: i64) -> Result<(), Store
 
 /// subtree_group_ids 返回部门 id 及其全部后代 id（内存遍历，树很小）。
 pub async fn subtree_group_ids(pool: &sqlx::PgPool, root_id: i64) -> Result<Vec<i64>, StoreError> {
-    let nodes: Vec<(i64, i64)> = sqlx::query_as("SELECT id, parent_id FROM groups")
+    let nodes: Vec<(i64, i32)> = sqlx::query_as("SELECT id, parent_id FROM groups")
         .fetch_all(pool)
         .await
         .map_err(map_db_error)?;
     let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
     for (id, parent) in nodes {
-        children.entry(parent).or_default().push(id);
+        children.entry(parent as i64).or_default().push(id);
     }
     let mut out = vec![root_id];
     let mut stack = vec![root_id];
