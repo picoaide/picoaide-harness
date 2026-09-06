@@ -5,6 +5,7 @@ members = [
   "crates/dsh-store",
   "crates/dsh-auth",
   "crates/dsh-server",
+  "crates/dsh-llm",
 ]
 
 [workspace.package]
