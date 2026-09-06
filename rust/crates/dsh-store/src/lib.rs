@@ -7,6 +7,8 @@ pub mod departments;
 pub mod effective;
 pub mod errors;
 pub mod groups;
+pub mod settings;
+pub mod tokens;
 pub mod migrate;
 #[cfg(test)]
 pub mod testutil;
