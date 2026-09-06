@@ -130,6 +130,9 @@ pub async fn handle_client_login(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
     let password = payload.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if username.is_empty() || password.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(error_body("VALIDATION", "请求体格式错误"))));
+    }
     let info = picoaide_dsh_auth::local_provider_authenticate(&state.pool, username, password)
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, Json(error_body("AUTH_FAILED", "用户名或密码错误"))))?;
@@ -190,12 +193,15 @@ pub async fn handle_admin_login(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
     let password = payload.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if username.is_empty() || password.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(error_body("VALIDATION", "请求体格式错误"))));
+    }
     let info = picoaide_dsh_auth::local_provider_authenticate(&state.pool, username, password)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(error_body("AUTH_FAILED", "用户名或密码错误"))))?;
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(error_body("AUTH_FAILED", "用户名或密码错误或非管理员"))))?;
     let user = picoaide_dsh_store::users::get_user_by_username(&state.pool, &info.username)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(error_body("AUTH_FAILED", "用户名或密码错误"))))?;
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(error_body("AUTH_FAILED", "用户名或密码错误或非管理员"))))?;
     if !user.has_management_access() {
         return Err((StatusCode::FORBIDDEN, Json(error_body("FORBIDDEN", "无管理权限"))));
     }
@@ -352,7 +358,15 @@ pub async fn handle_auth_methods(
         .await
         .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))?;
     let (pwds, browsers) = picoaide_dsh_auth::config::enabled_providers(&all);
-    Ok(Json(serde_json::json!({ "password": pwds, "browser": browsers })))
+    // 与 Go 契约一致：methods 数组 [{name, configured, browser, hidden}]
+    let mut methods = Vec::new();
+    for p in &pwds {
+        methods.push(serde_json::json!({ "name": p, "configured": true, "browser": false, "hidden": false }));
+    }
+    for b in &browsers {
+        methods.push(serde_json::json!({ "name": b, "configured": true, "browser": true, "hidden": false }));
+    }
+    Ok(Json(serde_json::json!({ "methods": methods })))
 }
 
 /// handle_usage_aggregate 用量聚合（管理面运维）。

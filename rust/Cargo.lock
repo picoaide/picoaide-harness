@@ -1577,9 +1577,11 @@ name = "picoaide-dsh-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 
@@ -1593,6 +1595,8 @@ dependencies = [
  "chrono",
  "flate2",
  "hex",
+ "picoaide-dsh-auth",
+ "picoaide-dsh-llm",
  "picoaide-dsh-store",
  "serde",
  "serde_json",
