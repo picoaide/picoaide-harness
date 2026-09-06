@@ -90,6 +90,10 @@ pub fn register_client_handlers(router: Router<Arc<AppState>>) -> Router<Arc<App
         .route("/api/client/v2/auth/me", axum::routing::get(handle_client_me))
         .route("/api/client/v2/auth/usage", axum::routing::get(handle_client_usage))
         .route("/api/server/admin/login", axum::routing::post(handle_admin_login))
+        .route("/api/client/v2/marketplace/skills", axum::routing::post(handle_market_skills))
+        .route("/api/client/v2/capabilities", axum::routing::post(handle_capabilities))
+        .route("/api/server/admin/connectors", axum::routing::get(handle_connectors_list))
+        .route("/api/server/admin/reports", axum::routing::get(handle_reports_list))
         .route("/healthz", axum::routing::get(handle_healthz))
 }
 
@@ -191,4 +195,54 @@ pub async fn handle_admin_login(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(error_body("INTERNAL", "会话创建失败"))))?;
     Ok(Json(serde_json::json!({ "session_id": session.id, "csrf_token": csrf, "user": { "username": info.username } })))
+}
+
+/// handle_market_skills 市场技能列表（授权制）。
+pub async fn handle_market_skills(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let is_admin = payload.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
+    let svc = crate::marketplace::MarketplaceService::new(state.pool.clone());
+    svc.list_apps(&crate::marketplace::Viewer { username: username.into(), groups: vec![], is_admin }, "skill")
+        .await
+        .map(Json)
+        .map_err(|e| service_error(e.status, &e.code, &e.message))
+}
+
+/// handle_capabilities 能力中心列表。
+pub async fn handle_capabilities(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let is_admin = payload.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
+    let svc = crate::capabilities_service::CapabilitiesService::new(state.pool.clone());
+    svc.list(username, &[], is_admin, "all")
+        .await
+        .map(Json)
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))
+}
+
+/// handle_connectors_list 连接器列表（admin）。
+pub async fn handle_connectors_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let svc = crate::connector_service::ConnectorService::new(state.pool.clone());
+    svc.list()
+        .await
+        .map(Json)
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))
+}
+
+/// handle_reports_list 报表订阅列表。
+pub async fn handle_reports_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let svc = crate::reports_service::ReportsService::new(state.pool.clone());
+    svc.list()
+        .await
+        .map(Json)
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))
 }
