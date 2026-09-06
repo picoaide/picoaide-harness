@@ -16,8 +16,13 @@ export const DESKTOP_VERSION_ENDPOINT =
 export const DESKTOP_RELEASES_LIST_ENDPOINT =
   `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases?per_page=30`
 
-/** Maximum response body bytes accepted from the release service. */
-export const MAX_VERSION_RESPONSE_BYTES = 256 * 1024
+/**
+ * Maximum response body bytes accepted from the release service.
+ * 2026-09-06 实测修复:per_page=30 的发布列表响应体 ~287KB,超过旧上限
+ * 256KB 会被 readLimitedBody 拒绝 → 测试通道(beta/rc)永远返回 null、
+ * 预发构建收不到任何更新提示(P0)。1MB 同时容纳列表膨胀空间。
+ */
+export const MAX_VERSION_RESPONSE_BYTES = 1024 * 1024
 
 /** Strictly parsed SemVer components. Numeric components remain strings to avoid overflow. */
 export interface ParsedSemVer {
