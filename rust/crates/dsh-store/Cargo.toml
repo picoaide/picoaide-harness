@@ -18,3 +18,5 @@ uuid = { workspace = true }
 tokio = { workspace = true }
 url = "2"
 rand = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
