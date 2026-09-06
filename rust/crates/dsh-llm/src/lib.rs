@@ -11,6 +11,7 @@
 
 pub mod match_;
 pub mod protocol;
+pub mod http_proxy;
 pub mod ratelimit;
 
 pub use match_::{match_model, match_models_by_protocol, merge_model_names, protocol_matches, Upstream};
