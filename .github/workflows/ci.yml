@@ -29,27 +29,26 @@ jobs:
     # 2026-09-06 恢复 PG 服务:DB 相关测试全量在 CI 执行(serverstore 等按
     # PG_DSN_TEST 临时库隔离),启动重试/迁移改动不再依赖本地容器验证。
     # (2026-09-02 曾因"构建/单测不依赖 DB"移除,DB 测试自动 Skip。)
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-          --command "postgres -c max_connections=500"
-          # 多测试包并行各自建库 + serverstore 连接池(400)会击穿 PG 默认
-          # 100 上限(2026-09-05 beta.1 CI 实测:serverauth/serverstore 批量
-          # 连库失败),显式调高并发上限。
     env:
       PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
     steps:
+      # GitHub Actions services 不支持自定义 container command 覆盖
+      # (service 的 options 只能拼 docker create 参数,IMAGE 后的 command
+      # 无法覆盖),所以步骤内手动 docker run:便于把 max_connections 调高
+      # (多测试包+serverstore 池 400 会击穿 PG 默认 100,2026-09-05 beta.1
+      # CI 实测),与 docker.yml Verify 步骤同构。
+      - name: Start PostgreSQL
+        run: |
+          docker run -d --name pg-ci \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            -p 5432:5432 postgres:18-alpine postgres -c max_connections=500
+          for i in $(seq 1 30); do
+            if docker exec pg-ci pg_isready -U postgres >/dev/null 2>&1; then
+              echo "postgres ready (${i}s)"
+              break
+            fi
+            sleep 1
+          done
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
