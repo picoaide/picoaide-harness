@@ -7,6 +7,7 @@ pub mod apps;
 pub mod audit;
 pub mod capability_locks;
 pub mod connectors;
+pub mod budget;
 pub mod db;
 pub mod departments;
 pub mod effective;
