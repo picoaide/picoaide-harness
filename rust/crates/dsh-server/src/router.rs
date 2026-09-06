@@ -71,6 +71,11 @@ pub fn webadmin_router() -> Router<()> {
 /// 业务 handler 由各 service 提供；此处注册端点骨架（后续逐步填充）。
 pub fn build_router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
     let r = crate::handlers::register_client_handlers(Router::new());
+    // 管理面通配分发（webadmin 全 API）
+    let r = r.route("/api/server/admin/{*path}", axum::routing::get(crate::admin_endpoints::dispatch_admin))
+        .route("/api/server/admin/{*path}", axum::routing::post(crate::admin_endpoints::dispatch_admin))
+        .route("/api/server/admin/{*path}", axum::routing::put(crate::admin_endpoints::dispatch_admin))
+        .route("/api/server/admin/{*path}", axum::routing::delete(crate::admin_endpoints::dispatch_admin));
     let v1 = axum::Router::new().route(
         "/models",
         axum::routing::get(|headers: axum::http::HeaderMap| async move {

@@ -36,10 +36,10 @@ pub struct DepartmentInfo {
 pub async fn list_departments(pool: &sqlx::PgPool) -> Result<Vec<DepartmentInfo>, StoreError> {
     let rows = sqlx::query(
         r#"SELECT g.id::bigint, g.name, g.parent_id::bigint, g.leader_id::bigint, g.description,
-        COALESCE(u.username, ''),
-        (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
-        (SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-        (SELECT COUNT(*) FROM app_grants sg WHERE sg.grantee_type = 'group' AND LOWER(sg.grantee) = LOWER(g.name)),
+        COALESCE(u.username, '') AS leader_name,
+        (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count,
+        (SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id) AS child_count,
+        (SELECT COUNT(*) FROM app_grants sg WHERE sg.grantee_type = 'group' AND LOWER(sg.grantee) = LOWER(g.name)) AS granted_count,
         g.budget_money
         FROM groups g LEFT JOIN users u ON u.id = g.leader_id
         ORDER BY g.id"#,
