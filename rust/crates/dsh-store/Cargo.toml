@@ -16,3 +16,5 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
+url = "2"
+rand = { workspace = true }

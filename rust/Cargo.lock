@@ -1107,12 +1107,14 @@ dependencies = [
  "anyhow",
  "chrono",
  "picoaide-dsh-util",
+ "rand",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
