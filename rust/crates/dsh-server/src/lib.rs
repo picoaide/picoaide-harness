@@ -1,6 +1,7 @@
 //! PicoAide HTTP 服务端（Go `cmd/server` + `router` 等价）。
 
 pub mod error;
+pub mod handlers;
 pub mod healthz;
 pub mod marketplace;
 pub mod namespace;
