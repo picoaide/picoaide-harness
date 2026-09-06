@@ -18,6 +18,9 @@ pub enum StoreError {
     LastAdmin,
     #[error("department in use")]
     DepartmentInUse,
+    /// 带原始 sqlx 消息的数据库错误（便于诊断；调用方可再 match）。
+    #[error("database: {0}")]
+    Database(String),
 }
 
 /// 将 sqlx 错误映射为 StoreError（保留其他错误）。
@@ -31,7 +34,7 @@ pub fn map_db_error(e: sqlx::Error) -> StoreError {
             } else if msg.contains("23502") || msg.contains("not-null") {
                 StoreError::Validation
             } else {
-                StoreError::NotFound // 兜底；调用方可通过 as_database_error 再判定
+                StoreError::Database(msg)
             }
         }
     }

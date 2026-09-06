@@ -18,3 +18,5 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
+base64 = "0.22"
+rand = "0.8"
