@@ -8,6 +8,7 @@ pub mod bootstrap_service;
 pub mod capabilities_service;
 pub mod agent_share_service;
 pub mod shared_skills_service;
+pub mod telemetry_service;
 pub mod skillmanifest;
 
 pub use error::{error_body, write_json_error, ErrorBody, ErrorResponse, ERROR_INTERNAL};
