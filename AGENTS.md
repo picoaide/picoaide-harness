@@ -14,9 +14,16 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 - Build the desktop package with `corepack yarn build`.
 - Run unit tests with `corepack yarn test`.
 - Run type checking with `corepack yarn typecheck`.
-- Run the complete headless gate with `corepack yarn check`.
+- Run the complete headless gate with `corepack yarn check` (2026-09-06 重排：`dsh-plugin-desktop check` 最先——一次构建产出 desktop `lib/`+`lib/types/`，其余包的 tsc 依赖它——随后 `dsh-better-sidebar check` 与各包 `check`；全程每包只构建一次，本地 `yarn check` 与 CI gate job 完全同义。`yarn prebuild` = `prebuildWorkspaceDeps` 一键构建全部 8 个 workspace 包）。
 - Run the client E2E automation with `corepack yarn workspace dsh-plugin-desktop e2e:client` (see GUI E2E below; works against a packaged build and Xvfb, produces `.e2e-report.md` + `.e2e-shots/`). Real-service verification uses `e2e:real` (`REAL_SERVER/REAL_USER/REAL_PASS` env; produces `.real-env-report.md` + `.real-env-shots/`).
 - Run upstream operations through the root scripts, such as `corepack yarn upstream:build`.
+
+### CI (2026-09-06 重设计，见 docs/decisions/2026-09-06-ci-pipeline-redesign.md)
+
+- 触发 = `pull_request` + `push`（全分支含 tag）。**每个提交都产出可下载产物**（Artifacts）：`desktop-Linux`（AppImage+deb）、`desktop-Windows-installer`（NSIS）、`desktop-macOS`（DMG）、`picoaide-server-linux-amd64`；PR 由 `pr-summary` job 评论汇总入口（fork PR 跳过）。
+- job 结构：`gate`（ubuntu：`yarn check` 全量门禁 + 一次构建，上传 `workspace-build` = 8 包 `lib/**` + desktop `build/**`）→ `server`（并行：PG 18 容器 + gofmt + go vet + `go test -p 1` + webadmin `npm test` + `make build-server`）→ `desktop-linux/win/macos`（`needs: gate`，下载 `workspace-build` 恢复后**只做打包 + 平台验证**，其中 linux 追加 `e2e:client`）→ tag 时 `release`（needs 四 job，`pattern: desktop-*` 只取三平台安装包发布）。`docker.yml`（GHCR 镜像）独立不变。
+- 打包脚本开关（消除重复编译）：`--no-prebuild`（跳过 `prebuildWorkspaceDeps` 8 包构建）、`--no-gates`（跳过入口内嵌 check：win `check:win-package` / mac smoke 根 check / mac release pack 内根 check）。默认（本地 `yarn dist:*`）= prebuild + 内嵌 check + 打包 + 验证，行为不变。打包后的平台验证（`verify-win-installer` / `verify-mac-smoke` / `verify-mac-release` / `afterPack`）**不在跳过范围**。
+- `check:win-package` 是「构建后」平台检查（不含 build；产物由 prebuild 或 CI gate 提供）；`dsh-better-sidebar` 的 vendored 副本不含 `tests/`，其 `check = build + typecheck + check:consumer-types`（无 test）。
 
 - `deepseek-harness/` is a pinned upstream Git submodule. Never edit files inside it from a desktop feature branch.
 - The outer repository is product-owned and independent of the former `anywhere-labs/dsh-desktop` (previously `anywhere-labs/deepseek-harness-desktop`) upstream: no `upstream` remote exists and no whole-tree merges are performed. Valuable upstream fixes are cherry-picked by commit when needed. Only the `deepseek-harness/` submodule pin is followed as an upstream sync.

@@ -1,6 +1,11 @@
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { releaseMac, type MacReleaseOptions } from '../scripts/release-mac.ts'
+import {
+  buildMacDmgWithoutNotarization,
+  packMacApp,
+  releaseMac,
+  type MacReleaseOptions,
+} from '../scripts/release-mac.ts'
 
 const DEVELOPER_ID_OUTPUT = `
   1) 0123456789ABCDEF "Developer ID Application: Mengxin Yang (TEAM123456)"
@@ -179,6 +184,40 @@ describe('macOS release command boundary', () => {
 
     await expect(releaseMac(options)).rejects.toThrow('Developer ID Application')
     expect(calls).toEqual([])
+  })
+
+  it('packs signed-only pre-release builds and produces an un-notarized DMG', async () => {
+    const calls: CommandCall[] = []
+    const logs: string[] = []
+    const options: MacReleaseOptions = {
+      ...baseOptions({ PATH: '/usr/bin' }, calls, [], logs),
+    }
+
+    // 预发:signOnly=true 时 preflight 接受"无公证凭据"(notarization 'none')。
+    const appPath = await packMacApp(options, { skipGates: true, signOnly: true })
+    expect(appPath).toBe(
+      '/repo/packages/host/desktop/dist/mac-release/mac-arm64/PicoAide Harness.app',
+    )
+    expect(logs[0]).toContain('signing via keychain; notarization via none')
+
+    // 省公证:对已签名 app 直接 --prepackaged 出 DMG,verify 带 --unnotarized。
+    await buildMacDmgWithoutNotarization(options, appPath)
+
+    const dmgCall = calls.find(call => call.args.includes('--prepackaged'))
+    expect(dmgCall?.args).toEqual([
+      'exec', 'electron-builder', '--mac', 'dmg', '--arm64',
+      '--prepackaged', '/repo/packages/host/desktop/dist/mac-release/mac-arm64/PicoAide Harness.app',
+      '--publish', 'never',
+      '--config.forceCodeSigning=true', '--config.mac.notarize=false',
+      '--config.npmRebuild=false',
+      '--config.directories.output=/repo/packages/host/desktop/dist/mac-release',
+    ])
+    const verifierCall = calls.find(call => call.args.some(arg => arg.includes('verify-mac-release.ts')))
+    expect(verifierCall?.args).toEqual([
+      'scripts/verify-mac-release.ts',
+      '/repo/packages/host/desktop/dist/mac-release',
+      '--unnotarized',
+    ])
   })
 
   it('does not invoke electron-builder after a failed credential-free check', async () => {

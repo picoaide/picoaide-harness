@@ -13,6 +13,11 @@ export interface MacReleaseVerificationOptions {
   readonly distDir: string
   /** Installed application name inside the mounted image. */
   readonly productName: string
+  /** True (default) when the app is notarized and stapled — spctl/stapler
+   * checks apply. Pre-release sign-only builds pass false so verification
+   * checks codesign/deep/strict only (a signed-but-unnotarized app is
+   * rejected by spctl and has no stapled ticket). */
+  readonly notarized?: boolean
   /** Return regular DMG files in the distribution directory. */
   readonly listDmgs: (distDir: string) => readonly string[]
   /** Create a private empty mount point. */
@@ -54,6 +59,7 @@ function defaultOptions(): MacReleaseVerificationOptions {
       ? join(packageRoot, 'dist', 'mac-release')
       : resolve(process.argv[2]),
     productName,
+    notarized: !process.argv.includes('--unnotarized'),
     listDmgs,
     makeMountPoint: () => mkdtempSync(join(tmpdir(), 'dsh-desktop-dmg-')),
     run,
@@ -92,8 +98,12 @@ export function verifyMacRelease(
       options.run('lipo', [join(unpackedRoot, entry.path), '-verify_arch', entry.arch])
     }
     options.run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath])
-    options.run('spctl', ['--assess', '--type', 'execute', '--verbose=4', appPath])
-    options.run('xcrun', ['stapler', 'validate', appPath])
+    // spctl/stapler 只对已公证+staple 的产物有意义;预发只签名不公证传
+    // notarized: false 跳过(未公证 app 会被 spctl 拒绝,且无 stapled ticket)。
+    if (options.notarized !== false) {
+      options.run('spctl', ['--assess', '--type', 'execute', '--verbose=4', appPath])
+      options.run('xcrun', ['stapler', 'validate', appPath])
+    }
   } catch (cause) {
     failure = cause
   }

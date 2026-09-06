@@ -79,7 +79,8 @@
     "prepare": "tsdown",
     "test": "vitest run",
     "test:mount": "bash scripts/e2e-mount.sh",
-    "check:consumer-types": "bash scripts/check-consumer-types.sh"
+    "check:consumer-types": "bash scripts/check-consumer-types.sh",
+    "check": "yarn run build && yarn run typecheck && yarn run check:consumer-types"
   },
   "license": "MIT",
   "peerDependencies": {

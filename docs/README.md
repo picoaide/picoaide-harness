@@ -32,6 +32,7 @@
 | [VS Code 扩展模型调研](../community/fabric/docs/research/vscode-extension-model.zh.md) | VS Code 已实现的声明、Provider、UI、运行位置和生命周期模式，以及它们对 Fabric RFC 的具体约束 |
 
 | [架构说明](architecture.md) | Electron、Host、loopback Web、固定 profile 和打包之间的关系（维护者视角） |
+| [CI 与分支整体规划](ci-and-branch-plan.md) | CI 触发器/job/产物/发布如何运转；分支与 tag 规范、团队协作与产物取用、master 保护建议 |
 | [Desktop service 参考](../packages/host/desktop/docs/plugin-services.md) | `desktopRuntime`/`desktopActions` 的稳定 contract 和 TypeScript 示例 |
 | [包级参考](../packages/host/desktop/README.md) | 完整的构建、运行、发布和已知限制 |
 | [服务端 API 完整参考](../server/docs/03-api-reference.md) | 全部 HTTP 端点（官网只放公开摘要） |

@@ -1,4 +1,4 @@
-name: GHCR cleanup (manual)
+name: Ops · GHCR cleanup
 
 # 手动运维:列出 GHCR server 镜像全部版本,删除所有"预发布"镜像 tag
 # (tag 含连字符,如 v2.6.7-beta.1;正式版标签为纯数字 vX.Y.Z 与 latest,绝不误删)。

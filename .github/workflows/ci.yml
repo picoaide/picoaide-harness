@@ -5,7 +5,8 @@ on:
   push:
 
 # 审计 2026-08-25 D-3:顶层权限收窄为 contents: read(actions: write 对纯 CI
-# 仓库非最小)。release job 在自身声明 contents: write。
+# 仓库非最小)。release job 在自身声明 contents: write;pr-summary 声明
+# pull-requests: write;gate/平台 job 声明 actions: write(artifact 上传)。
 permissions:
   contents: read
 
@@ -18,7 +19,64 @@ concurrency:
 env:
   DSH_TELEMETRY_DISABLED: '1'
 
+# ============================================================================
+# 重设计(2026-09-06,见 docs/decisions/2026-09-06-ci-pipeline-redesign.md):
+#   gate    = 平台无关门禁 + 全 workspace 一次构建(产物上传,喂三平台 job)。
+#   server  = Go + webadmin 门禁 + server 二进制。
+#   desktop-* = needs: gate,下载构建产物,只做平台专属打包/验证/E2E,
+#              不再重复编译(打包脚本 --no-prebuild / --no-gates)。
+#   每个 push/PR 提交都产出:三平台安装包 + server 二进制(Artifacts 可下载),
+#   PR 由 pr-summary 评论指引;tag 走 mac 签名 + release job 发布。
+# ============================================================================
+
 jobs:
+  gate:
+    name: Gate (tests + workspace build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false
+      # 且会重排 PATH——corepack enable 必须在 setup-node 之后执行,否则
+      # Windows 上 yarn shim 被覆盖,install 落到全局 Yarn 1.22(实测报错)。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: Cache yarn (and electron for the linux packaging job)
+        uses: actions/cache@v6
+        with:
+          path: |
+            .yarn/cache
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      - run: yarn install --immutable
+      # 根 check(2026-09-06 重排):desktop check 最前(一次构建产出桌面 lib/types,
+      # 其余包 tsc 依赖),随后 better-sidebar 与其余包 check,全程每包只构建一次。
+      - run: yarn check
+      # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
+      # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
+      - name: Package workspace build products
+        run: |
+          tar -czf workspace-build.tgz \
+            packages/host/desktop/lib packages/host/desktop/build \
+            packages/host/enterprise/lib packages/host/connectors/lib \
+            packages/host/browser/lib packages/host/cron/lib \
+            packages/client/account-card/lib packages/client/branding/lib \
+            packages/client/better-sidebar/lib
+      - name: Upload workspace build products (one build, three platforms)
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-build
+          path: workspace-build.tgz
+          if-no-files-found: error
+
   server:
     name: Go server
     runs-on: ubuntu-latest
@@ -28,7 +86,6 @@ jobs:
         working-directory: server
     # 2026-09-06 恢复 PG 服务:DB 相关测试全量在 CI 执行(serverstore 等按
     # PG_DSN_TEST 临时库隔离),启动重试/迁移改动不再依赖本地容器验证。
-    # (2026-09-02 曾因"构建/单测不依赖 DB"移除,DB 测试自动 Skip。)
     env:
       PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
     steps:
@@ -61,11 +118,22 @@ jobs:
           cache-dependency-path: server/webadmin/package-lock.json
       - run: npm ci
         working-directory: server/webadmin
+      # 2026-09-06 补上门禁缺口(审计 G1/G2):gofmt 与 webadmin 测试此前只在
+      # server/Makefile check 中,CI 从未执行。
+      - name: gofmt check
+        run: |
+          FILES="$(gofmt -l cmd internal)"
+          if [ -n "$FILES" ]; then
+            echo "::error::gofmt 未通过: $FILES"
+            exit 1
+          fi
       - run: go vet ./...
       # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
       # max_connections(500),串行换取确定性(耗时 ~5-10 分钟,在 30 分钟
       # 窗口内)。
       - run: go test ./... -count=1 -p 1
+      - run: npm test
+        working-directory: server/webadmin
       - run: make build-server
       - name: Deploy script syntax checks
         # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
@@ -125,8 +193,12 @@ jobs:
 
   desktop-linux:
     name: Desktop (Linux)
+    needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -144,8 +216,34 @@ jobs:
             ~/.cache/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
-      - run: yarn check
-      - run: yarn workspace dsh-plugin-desktop dist:linux
+      - uses: actions/download-artifact@v7
+        with:
+          name: workspace-build
+          path: package-input
+      # Windows 默认 shell 是 pwsh,restore 用 POSIX bash 语法需显式 shell: bash。
+      - name: Restore workspace build products
+        shell: bash
+        run: |
+          tar -xzf package-input/workspace-build.tgz
+          [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
+          [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
+      # 构建产物来自 gate(同一次提交),此处不重复编译(--no-prebuild)。
+      - run: yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+      # 客户端 E2E(2026-09-06 接入,G3 缺口):在打包产物上跑 13 项断言
+      # (mock gateway + Xvfb + CDP),报告与截图随后上传。
+      - name: Client E2E (packaged app, Xvfb)
+        run: |
+          if ! command -v Xvfb >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y xvfb
+          fi
+          Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
+          sleep 2
+          yarn workspace dsh-plugin-desktop e2e:client
+          # upload-artifact v4+ 不收录点开头文件/目录(.e2e-report.md/.e2e-shots),
+          # 复制并重命名为非点名称再上传(2026-09-06 两轮实测缺失)。
+          mkdir -p packages/host/desktop/e2e-results
+          cp packages/host/desktop/.e2e-report.md packages/host/desktop/e2e-results/e2e-report.md 2>/dev/null || true
+          cp -r packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/shots 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
@@ -153,11 +251,21 @@ jobs:
             packages/host/desktop/dist/*.AppImage
             packages/host/desktop/dist/*.deb
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-report
+          path: packages/host/desktop/e2e-results/**
+          if-no-files-found: ignore
 
   desktop-windows:
     name: Desktop (Windows installer)
+    needs: gate
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -175,21 +283,40 @@ jobs:
             ~/AppData/Local/electron-builder/Cache
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
-      - run: yarn workspace dsh-plugin-desktop dist:win
+      - uses: actions/download-artifact@v7
+        with:
+          name: workspace-build
+          path: package-input
+      # Windows 默认 shell 是 pwsh,restore 用 POSIX bash 语法需显式 shell: bash。
+      - name: Restore workspace build products
+        shell: bash
+        run: |
+          tar -xzf package-input/workspace-build.tgz
+          [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
+          [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
+      # 构建产物来自 gate,不重复编译(--no-prebuild);门禁在 gate 已跑,
+      # 不再内嵌 check:win-package(--no-gates),但打包后 verify-win-installer
+      # 仍在脚本内执行。
+      - run: yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Windows-installer
           path: packages/host/desktop/dist/*Setup*.exe
           if-no-files-found: error
 
-  # macOS 单 job 双分支:正式 tag(纯 vX.Y.Z,Latest)打包+签名+公证;i 其他
-  # (PR/分支/Pre-release tag vX.Y.Z-*)只做未签名冒烟。合并而非两个互斥 job:
-  # Release job 的 needs 需要稳定的 mac 依赖(两颗互斥 job 会让 Release 因
-  # needs 里某颗被 skip 而连带 skip,2026-09-05 beta.1 实测)。
+  # macOS 单 job 三态:正式 tag(纯 vX.Y.Z)打包+签名+公证(可重试);预发 tag
+  # (vX.Y.Z-*,如 beta/rc)只签名不公证——Releases 页面可见、真机可装(首次
+  # 右键打开),免去每次 1-5 小时公证排队;其他(PR/分支)只做未签名冒烟。
+  # 合并而非互斥 job:Release job 的 needs 需要稳定的 mac 依赖(两颗互斥 job
+  # 会让 Release 因 needs 里某颗被 skip 而连带 skip,2026-09-05 beta.1 实测)。
   desktop-macos:
     name: Desktop (macOS)
+    needs: gate
     runs-on: macos-15
     timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -207,6 +334,15 @@ jobs:
             ~/Library/Caches/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
+      - uses: actions/download-artifact@v7
+        with:
+          name: workspace-build
+          path: package-input
+      - name: Restore workspace build products
+        run: |
+          tar -xzf package-input/workspace-build.tgz
+          [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
+          [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
       # App Store Connect API Key:secret 里存的是 .p8 文件内容,写入临时文件
       # 以路径形式传给 electron-builder(正式分支专用;冒烟分支不ary用)。
       - name: Materialize App Store Connect API key
@@ -216,10 +352,12 @@ jobs:
           chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      # 构建产物来自 gate,不重复编译;门禁与根 check 在 gate 已跑
+      # (--no-prebuild --no-gates)。
       # ==== 正式分支:打包(含完整 gate)+签名,公证在下一步(可续等) ====
       - name: Pack and sign app bundle
         if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-        run: yarn workspace dsh-plugin-desktop dist:mac:pack
+        run: yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -234,7 +372,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "attempt ${attempt}/3: yarn dist:mac:notarize"
-            if yarn workspace dsh-plugin-desktop dist:mac:notarize; then
+            if yarn workspace dsh-plugin-desktop dist:mac:notarize --no-prebuild; then
               echo "notarized DMG built on attempt ${attempt}"
               exit 0
             fi
@@ -248,18 +386,29 @@ jobs:
           APPLE_API_KEY: ${{ runner.temp }}/notary/AuthKey.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      # ==== 非正式分支(PR/分支/Pre-release):未签名冒烟,不进签名公证 ====
+      # ==== 预发 tag(vX.Y.Z-beta.N / -rc.N):签名不公证(preflight 免公证元组) ====
+      - name: Pack and sign app bundle (prerelease, sign-only)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-') }}
+        run: yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates --sign-only
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      - name: Build signed DMG without notarization (prerelease)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-') }}
+        run: yarn workspace dsh-plugin-desktop dist:mac:dmg --no-prebuild
+      # ==== 非正式分支(PR/分支):未签名冒烟,不进签名公证 ====
       - name: Build unsigned smoke DMG
-        if: ${{ !(startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
-        run: yarn workspace dsh-plugin-desktop dist:mac-smoke
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: yarn workspace dsh-plugin-desktop dist:mac-smoke --no-prebuild --no-gates
       - uses: actions/upload-artifact@v7
-        if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: desktop-macOS
           path: packages/host/desktop/dist/mac-release/*.dmg
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
-        if: ${{ !(startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: desktop-macOS
           path: packages/host/desktop/dist/mac-smoke/*.dmg
@@ -277,8 +426,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      # 只取三平台安装包(gate 的 workspace-build / server 二进制不参与发布)。
       - uses: actions/download-artifact@v7
         with:
+          pattern: desktop-*
           path: release-artifacts
           merge-multiple: true
       # 审计 2026-08-25 复查【7】:release job 需要显式 node(ubuntu 镜像自带
@@ -315,6 +466,7 @@ jobs:
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF_NAME}"
+          REPO="picoaide/picoaide-harness"
           NOTES_FLAG="--notes-file docs/releases/${TAG}.md"
           if [ -f "docs/releases/${TAG}.md" ]; then
             echo "Using curated release notes from docs/releases/${TAG}.md"
@@ -324,20 +476,88 @@ jobs:
           fi
           # Pre-release tag(带 prerelease 段,如 v2.7.0-beta.1,version.mjs check
           # 已保证是合法 semver,不含 + 元数据)按 GitHub 官方语义以
-          # Pre-release 发布:releases/latest 与客户端 update-checker/
-          # update-download 都排除 prerelease,正式用户不会收到更新。正式 tag
-          # (纯 vX.Y.Z,Latest)发布为普通 release,才推送给用户(默认成为 Latest;
-          # 若已有更新的正式版,GitHub 自动降为 None)。
+          # Pre-release 发布:Releases 页面可见(带 Pre-release 徽章),但
+          # releases/latest 与客户端 update-checker/update-download 都排除
+          # prerelease,正式用户不会收到更新。正式 tag(纯 vX.Y.Z,Latest)
+          # 发布为普通 release,才推送给用户(默认成为 Latest;若已有更新的
+          # 正式版,GitHub 自动降为 None)。
           PRERELEASE=""
           if [[ "${TAG}" == *-* ]]; then
             PRERELEASE="--prerelease"
-            echo "Releasing ${TAG} as a prerelease (test build — stable clients will not see it)"
+            echo "Releasing ${TAG} as a prerelease (visible on Releases page; stable clients will not see it)"
           fi
-          gh release create "${TAG}" \
-            --repo picoaide/picoaide-harness \
-            --title "PicoAide Harness ${TAG}" \
-            ${NOTES_FLAG} \
-            ${PRERELEASE} \
-            release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+          # 幂等(2026-09-06):同 tag 重跑/重推时 release 已存在会 422——先查,
+          # 存在则 edit(标题/说明/Pre-release 标记)+ 强制覆盖上传资产(旧资产
+          # 是上次运行产物,必须刷新为本次构建);不存在则 create。两种情况
+          # 下 releases/<tag> 页面都完整可见。
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — updating title/notes/flags and clobbering assets"
+            gh release edit "${TAG}" \
+              --repo "${REPO}" \
+              --title "PicoAide Harness ${TAG}" \
+              ${NOTES_FLAG} \
+              ${PRERELEASE}
+            gh release upload "${TAG}" \
+              --repo "${REPO}" \
+              --clobber \
+              release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+          else
+            gh release create "${TAG}" \
+              --repo "${REPO}" \
+              --title "PicoAide Harness ${TAG}" \
+              ${NOTES_FLAG} \
+              ${PRERELEASE} \
+              release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # PR 场景:把本次提交的编译产物汇总评论到 PR(fork 分支 token 只读,跳过)。
+  pr-summary:
+    name: PR build artifacts summary
+    if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+    needs: [desktop-linux, desktop-windows, desktop-macos, server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- picoaide-ci-artifacts -->'
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            const body = [
+              marker,
+              '## CI 编译产物',
+              '',
+              '本次提交的门禁（gate + server + 三平台打包）全部通过，可下载产物：',
+              '',
+              `- Desktop (Linux): \`desktop-Linux\` — AppImage + deb（含 \`e2e-report\` 客户端 E2E 结果）`,
+              `- Desktop (Windows): \`desktop-Windows-installer\` — NSIS Setup`,
+              `- Desktop (macOS): \`desktop-macOS\` — DMG`,
+              `- Server: \`picoaide-server-linux-amd64\` — Go 服务端二进制`,
+              '',
+              `下载入口：[Actions 运行页 → Artifacts](${runUrl}#artifacts)`,
+            ].join('\n')
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            for (const comment of comments.data) {
+              if (comment.body && comment.body.includes(marker)) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                })
+              }
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            })

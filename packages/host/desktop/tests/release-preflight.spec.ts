@@ -19,6 +19,26 @@ function ready(overrides: Partial<NodeJS.ProcessEnv> = {}) {
 }
 
 describe('macOS release preflight', () => {
+  it('allows signed-only pre-release builds when no notarization credentials are present', () => {
+    const result = assertMacReleaseReady({
+      env: {},
+      platform: 'darwin',
+      listCodeSigningIdentities: () => DEVELOPER_ID_OUTPUT,
+      notarizationOptional: true,
+    })
+    expect(result.notarization).toBe('none')
+    expect(result.signing).toBe('keychain')
+  })
+
+  it('still rejects partial notarization credentials even when notarization is optional', () => {
+    expect(() => assertMacReleaseReady({
+      env: { APPLE_API_KEY: '/private/AuthKey.p8' },
+      platform: 'darwin',
+      listCodeSigningIdentities: () => DEVELOPER_ID_OUTPUT,
+      notarizationOptional: true,
+    })).toThrow('Incomplete macOS notarization credentials')
+  })
+
   it('accepts a valid Developer ID identity and Keychain notary profile', () => {
     expect(ready()).toEqual({
       identity: 'Developer ID Application: Mengxin Yang (TEAM123456)',
