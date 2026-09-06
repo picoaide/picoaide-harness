@@ -39,11 +39,14 @@
 - 数据库兼容：Rust 迁移与 Go 幂等（schema_migrations 共用），回滚 Go 服务端无数据风险。
 - 快速回滚：停止 dsh-server，重启 Go `picoaide-server`（同一 PG）。
 
-## 4. 已知限制（切换后持续跟踪）
+## 4. 已覆盖端点（2026-09-06 实测）
 
-- 部分 admin CRUD handler 还在接入中（端点覆盖子代理进行中；服务层方法已就绪）。
-- LLM 网关 v1 端点的**完整 HTTP 集成**（转发+计量回写）已就核心（dsh-llm http_proxy +
-  llm_gateway_service），个别细分销路按 Go 测试补齐。
+- **客户端面**：auth login/me/usage、config/bootstrap、brand、portal、telemetry/skill-call、
+  marketplace skills（列表/详情）、shared-skills、agent-presets、capabilities、v1/models。
+- **管理面**：admin/login、auth/methods、users、departments、gateway/providers、
+  connectors、reports、usage/aggregate。
+- **基础**：healthz、webadmin SPA（/admin/）。
+- **持续完善**：v1 网关转发完整挂载（服务层已就绪）、细粒度 admin 写操作可按 Go 测试补齐。
 
 ## 5. 结论
 
