@@ -4,6 +4,7 @@ pub mod error;
 pub mod healthz;
 pub mod marketplace;
 pub mod namespace;
+pub mod agent_share_service;
 pub mod shared_skills_service;
 pub mod skillmanifest;
 
