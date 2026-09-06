@@ -118,27 +118,36 @@ function assertWindowsPackageHost(options: WindowsPackageOptions, artifact: stri
   }
 }
 
+/** Optional switches for CI reuse (gates/build already run by the CI gate job). */
+export interface WindowsPackageSwitches {
+  /** Skip the in-package `check:win-package` gate (CI runs it as the gate job). */
+  readonly skipGates?: boolean
+}
+
 /** Run the gates and package one unsigned x64 Windows artifact. */
 export function packageWindowsArtifact(
   options: WindowsPackageOptions,
   target: 'nsis' | 'zip',
   artifact: 'installer' | 'portable archive',
+  switches: WindowsPackageSwitches = {},
 ): void {
   assertWindowsPackageHost(options, artifact)
 
   const cleanEnvironment = withoutWindowsSigningSecrets(options.env)
   options.log(`Building an unsigned Windows x64 ${artifact}; Authenticode is a separate release step.`)
-  options.run(
-    options.commandShell,
-    [
-      '/d',
-      '/s',
-      '/c',
-      'corepack yarn workspace dsh-plugin-desktop check:win-package',
-    ],
-    options.workspaceRoot,
-    cleanEnvironment,
-  )
+  if (!switches.skipGates) {
+    options.run(
+      options.commandShell,
+      [
+        '/d',
+        '/s',
+        '/c',
+        'corepack yarn workspace dsh-plugin-desktop check:win-package',
+      ],
+      options.workspaceRoot,
+      cleanEnvironment,
+    )
+  }
   options.run(
     options.nodeExecutable,
     [
@@ -168,19 +177,23 @@ export function packageWindowsArtifact(
 /** Run the headless release gates and package one unsigned x64 NSIS installer. */
 export function packageWindowsInstaller(
   options: WindowsPackageOptions = createWindowsPackageOptions(),
+  switches: WindowsPackageSwitches = {},
 ): void {
-  packageWindowsArtifact(options, 'nsis', 'installer')
+  packageWindowsArtifact(options, 'nsis', 'installer', switches)
 }
 
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
   try {
-    // 打包前预构建依赖包(enterprise/account-card/branding 的 lib/ 未入库,
-    // 不构建则安装包携带缺失/旧 bundle,品牌版本号不显示。顺序见
-    // prebuild-workspace-deps.ts)。
-    const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-    prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
-    packageWindowsInstaller()
+    const noPrebuild = process.argv.includes('--no-prebuild')
+    if (!noPrebuild) {
+      // 打包前预构建依赖包(enterprise/account-card/branding 的 lib/ 未入库,
+      // 不构建则安装包携带缺失/旧 bundle,品牌版本号不显示。顺序见
+      // prebuild-workspace-deps.ts)。
+      const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
+      prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+    }
+    packageWindowsInstaller(undefined, { skipGates: process.argv.includes('--no-gates') })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

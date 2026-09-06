@@ -122,20 +122,34 @@ function defaultReleaseOptions(): MacReleaseOptions {
 
 const SUBMISSION_STATE_FILENAME = '.notary-submission.json'
 
+/** Optional switches for CI reuse (gates/build already run by the CI gate job). */
+export interface MacReleaseSwitches {
+  /** Skip the root `yarn run check` gate inside packMacApp (CI runs it as the gate job). */
+  readonly skipGates?: boolean
+  /** Sign only, without notarization credentials (pre-release tag): the
+   * preflight then reports notarization 'none' instead of failing. */
+  readonly signOnly?: boolean
+}
+
 /**
  * Validate credentials and build the signed arm64 app bundle only
  * (no DMG, no notarization). Used both by the full release and by the
  * CI-split "pack" step so a later notarization step can reuse this output.
  * @param options - Injectable process and command boundaries.
+ * @param switches - Optional CI reuse switches.
  * @returns absolute path of the signed application bundle.
  */
-export async function packMacApp(options: MacReleaseOptions): Promise<string> {
+export async function packMacApp(
+  options: MacReleaseOptions,
+  switches: MacReleaseSwitches = {},
+): Promise<string> {
   const releaseEnvironment = adaptMacReleaseEnvironment(options.env)
   const buildEnvironment = withoutMacReleaseSecrets(releaseEnvironment)
   const result = assertMacReleaseReady({
     env: releaseEnvironment,
     platform: options.platform,
     listCodeSigningIdentities: () => options.listCodeSigningIdentities(buildEnvironment),
+    notarizationOptional: switches.signOnly === true,
   })
   options.log(
     `macOS release preflight passed: identity ok; signing via ${result.signing}; notarization via ${notarizationLabel(result.notarization)}`,
@@ -143,7 +157,9 @@ export async function packMacApp(options: MacReleaseOptions): Promise<string> {
 
   // The workspace check includes the package build and repository-layout gate. Signing
   // material is withheld from every build, test, Loader smoke, and layout subprocess.
-  options.run('yarn', ['run', 'check'], resolve(options.desktopRoot, '..', '..'), buildEnvironment)
+  if (!switches.skipGates) {
+    options.run('yarn', ['run', 'check'], resolve(options.desktopRoot, '..', '..'), buildEnvironment)
+  }
   options.resetOutput()
   options.prepareRuntime()
   // Pack and sign the arm64 app bundle only (no DMG, no notarization).
@@ -168,6 +184,36 @@ export async function packMacApp(options: MacReleaseOptions): Promise<string> {
     rmSync(join(options.outputDir, SUBMISSION_STATE_FILENAME), { force: true })
   } catch { /* non-fatal: no state file yet */ }
   return join(options.outputDir, 'mac-arm64', `${options.productName}.app`)
+}
+
+/**
+ * Build the DMG from an already signed app bundle **without notarization**
+ * (pre-release sign-only path), then run the release verification with the
+ * notarized-specific checks disabled. The app bundle itself is untouched
+ * (`--prepackaged`); no notarization state file is involved.
+ * @param options - Injectable process and command boundaries.
+ * @param appPath - absolute path produced by {@link packMacApp}.
+ */
+export async function buildMacDmgWithoutNotarization(
+  options: MacReleaseOptions,
+  appPath: string,
+): Promise<void> {
+  const releaseEnvironment = adaptMacReleaseEnvironment(options.env)
+  const buildEnvironment = withoutMacReleaseSecrets(releaseEnvironment)
+  options.run('yarn', [
+    'exec', 'electron-builder', '--mac', 'dmg', '--arm64',
+    '--prepackaged', appPath,
+    '--publish', 'never',
+    '--config.forceCodeSigning=true', '--config.mac.notarize=false',
+    '--config.npmRebuild=false',
+    `--config.directories.output=${options.outputDir}`,
+  ], options.desktopRoot, releaseEnvironment)
+  options.run(
+    process.execPath,
+    ['scripts/verify-mac-release.ts', options.outputDir, '--unnotarized'],
+    options.desktopRoot,
+    buildEnvironment,
+  )
 }
 
 /**
@@ -223,22 +269,33 @@ export async function releaseMac(
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
   try {
-    // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
-    const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-    prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+    const noPrebuild = process.argv.includes('--no-prebuild')
+    const noGates = process.argv.includes('--no-gates')
+    if (!noPrebuild) {
+      // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
+      const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
+      prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+    }
     // 拆分模式:--pack 只打包+签名;--notarize 只公证+DMG+验证(可对同一产物
-    // 重试,公证 submission id 经状态文件续等)。无参数 = 完整发布。
+    // 重试,公证 submission id 经状态文件续等);--dmg 对已签名 app 直接出
+    // 未公证 DMG(预发签名单路径)。无参数 = 完整发布。
     const phase = process.argv[2]
     const options = defaultReleaseOptions()
+    const switches = { skipGates: noGates, signOnly: process.argv.includes('--sign-only') }
     if (phase === '--pack') {
-      await packMacApp(options)
+      await packMacApp(options, switches)
     } else if (phase === '--notarize') {
       const appPath = join(options.outputDir, 'mac-arm64', `${options.productName}.app`)
       await notarizeAndPackageMacDmg(options, appPath)
+    } else if (phase === '--dmg') {
+      const appPath = join(options.outputDir, 'mac-arm64', `${options.productName}.app`)
+      await buildMacDmgWithoutNotarization(options, appPath)
     } else if (phase === undefined) {
       await releaseMac(options)
     } else {
-      throw new Error(`unknown release phase: ${phase} (expected --pack, --notarize, or no argument)`)
+      throw new Error(
+        `unknown release phase: ${phase} (expected --pack, --notarize, --dmg, or no argument)`,
+      )
     }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

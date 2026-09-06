@@ -1,4 +1,4 @@
-name: Notary probe
+name: Ops · Notary probe
 
 # 运维探针:手动触发,用 repo secrets 里的 App Store Connect API key 查询
 # Apple 公证端全部历史 submission 状态(官方 xcrun notarytool history/log)。
