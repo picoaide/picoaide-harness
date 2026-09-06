@@ -97,6 +97,11 @@ pub fn register_client_handlers(router: Router<Arc<AppState>>) -> Router<Arc<App
         .route("/api/server/admin/users", axum::routing::post(handle_admin_users))
         .route("/api/server/admin/departments", axum::routing::get(handle_admin_departments))
         .route("/api/server/admin/gateway/providers", axum::routing::get(handle_admin_gateway_providers))
+        .route("/api/client/v2/marketplace/skills/detail", axum::routing::post(handle_market_skill_detail))
+        .route("/api/client/v2/shared-skills", axum::routing::post(handle_shared_skills_visible))
+        .route("/api/client/v2/agent-presets", axum::routing::post(handle_agent_share_visible))
+        .route("/api/server/admin/auth/methods", axum::routing::get(handle_auth_methods))
+        .route("/api/server/admin/usage/aggregate", axum::routing::post(handle_usage_aggregate))
         .route("/healthz", axum::routing::get(handle_healthz))
 }
 
@@ -294,4 +299,80 @@ pub async fn handle_admin_gateway_providers(
         .map(|p| serde_json::json!({ "name": p.name, "base_url": p.base_url, "protocol": p.protocol, "enabled": p.enabled }))
         .collect();
     Ok(Json(serde_json::json!({ "providers": items })))
+}
+
+/// handle_market_skill_detail 市场技能详情（授权制）。
+pub async fn handle_market_skill_detail(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let is_admin = payload.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
+    let svc = crate::marketplace::MarketplaceService::new(state.pool.clone());
+    svc.get_app(&crate::marketplace::Viewer { username: username.into(), groups: vec![], is_admin }, "skill", name)
+        .await
+        .map(Json)
+        .map_err(|e| service_error(e.status, &e.code, &e.message))
+}
+
+/// handle_shared_skills_visible 组织共享技能可见列表。
+pub async fn handle_shared_skills_visible(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let is_admin = payload.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
+    let svc = crate::shared_skills_service::SharedSkillsService::new(state.pool.clone());
+    svc.list_visible(username, &[], is_admin)
+        .await
+        .map(Json)
+        .map_err(|e| service_error(e.status, &e.code, &e.message))
+}
+
+/// handle_agent_share_visible 共享智能体可见列表。
+pub async fn handle_agent_share_visible(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let is_admin = payload.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
+    let svc = crate::agent_share_service::AgentShareService::new(state.pool.clone());
+    svc.list_visible(username, &[], is_admin)
+        .await
+        .map(Json)
+        .map_err(|e| service_error(e.status, &e.code, &e.message))
+}
+
+/// handle_auth_methods 公开认证方法列表。
+pub async fn handle_auth_methods(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let all = picoaide_dsh_store::settings::get_all_settings(&state.pool)
+        .await
+        .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))?;
+    let (pwds, browsers) = picoaide_dsh_auth::config::enabled_providers(&all);
+    Ok(Json(serde_json::json!({ "password": pwds, "browser": browsers })))
+}
+
+/// handle_usage_aggregate 用量聚合（管理面运维）。
+pub async fn handle_usage_aggregate(
+    State(state): State<Arc<AppState>>,
+    payload: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let group = payload.get("group").and_then(|v| v.as_str()).unwrap_or("day");
+    let rows = picoaide_dsh_store::aggregate::usage_aggregate(
+        &state.pool,
+        None,
+        None,
+        group,
+        &picoaide_dsh_store::aggregate::UsageAggregateQuery::default(),
+    )
+    .await
+    .map_err(|e| service_error(500, "INTERNAL", &e.to_string()))?;
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| serde_json::json!({ "label": r.label, "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens, "requests": r.requests, "cost": r.cost }))
+        .collect();
+    Ok(Json(serde_json::json!({ "rows": items })))
 }
