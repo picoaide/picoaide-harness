@@ -8,6 +8,7 @@ pub mod bootstrap_service;
 pub mod capabilities_service;
 pub mod connector_service;
 pub mod reports_service;
+pub mod router;
 pub mod agent_share_service;
 pub mod shared_skills_service;
 pub mod telemetry_service;
