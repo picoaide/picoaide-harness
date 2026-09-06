@@ -1,0 +1,27 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -117,7 +117,14 @@
+ 	}
+ 	const unique = /* @__PURE__ */ new Map();
+ 	for (const activeEntry of entries) {
+-		const identity = resolver.resolve(activeEntry);
++		let identity;
++		try {
++			identity = resolver.resolve(activeEntry);
++		} catch {
++			// Desktop robustness (patch): one unresolvable active entry must not
++			// fail the whole request — skip it instead of rejecting the turn.
++			continue;
++		}
+ 		if (identity === void 0) continue;
+ 		unique.set(`${identity.name}\u0000${identity.version}`, identity);
+ 	}
+@@ -135,7 +142,7 @@
+ 	ctx.deepseekLlmApiExtensions.register("dsh_plugin_packages", { prepare: async (request) => {
+ 		return { value: {
+ 			version: 1,
+-			packages: await collectActivePluginPackages(ctx, resolver, hostBaseUrl, request.sessionId)
++			packages: await collectActivePluginPackages(ctx, resolver, hostBaseUrl, request.sessionId).catch(() => [])
+ 		} };
+ 	} });
+ }
