@@ -32,6 +32,7 @@ jobs:
     env:
       PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
     steps:
+      - uses: actions/checkout@v7
       # GitHub Actions services 不支持自定义 container command 覆盖
       # (service 的 options 只能拼 docker create 参数,IMAGE 后的 command
       # 无法覆盖),所以步骤内手动 docker run:便于把 max_connections 调高
@@ -49,7 +50,6 @@ jobs:
             fi
             sleep 1
           done
-      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: server/go.mod
