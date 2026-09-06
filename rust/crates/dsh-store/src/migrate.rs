@@ -10,37 +10,14 @@ pub struct Migration {
     pub sql: String,
 }
 
-/// migrations_dir 指向本 crate 内嵌的迁移目录（编译期拷贝自 Go migrations-pg/）。
-const MIGRATIONS_DIR: &str = "migrations-pg";
-
-/// migrations_dir_path 用 CARGO_MANIFEST_DIR 定位（cargo test 从任意 cwd 运行均正确）。
-fn migrations_dir_path() -> std::path::PathBuf {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.join(MIGRATIONS_DIR)
+/// migrations_embedded: build.rs 从 migrations-pg/*.sql 生成的编译期嵌入模块。
+mod migrations_embedded {
+    include!("migrations_embedded.rs");
 }
 
-/// migrationsFor 返回按版本升序的迁移集合（编译期嵌入）。
+/// migrationsFor 返回按版本升序的迁移集合（编译期嵌入，发布二进制自包含）。
 pub fn migrations_for() -> Vec<Migration> {
-    let dir = migrations_dir_path();
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("migrations dir embedded") {
-        let e = entry.expect("read entry");
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".sql") {
-            continue;
-        }
-        let prefix = name.splitn(2, '_').next().unwrap_or("");
-        let version: i64 = match prefix.parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let sql = std::fs::read_to_string(e.path()).expect("read migration");
-        out.push(Migration {
-            version,
-            name,
-            sql,
-        });
-    }
+    let mut out = migrations_embedded::all_migrations();
     out.sort_by_key(|m| m.version);
     out
 }

@@ -66,7 +66,26 @@ pub fn webadmin_router() -> Router<()> {
 /// 业务 handler 由各 service 提供；此处注册端点骨架（后续逐步填充）。
 pub fn build_router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
     let r = crate::handlers::register_client_handlers(Router::new());
-    let v1 = axum::Router::new().route("/models", axum::routing::get(|| async { Json(serde_json::json!({ "data": [] })) }));
+    let v1 = axum::Router::new().route(
+        "/models",
+        axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            let token = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("");
+            if token.is_empty() {
+                return axum::response::IntoResponse::into_response((
+                    StatusCode::UNAUTHORIZED,
+                    Json(error_body("AUTH_REQUIRED", "未认证")),
+                ));
+            }
+            axum::response::IntoResponse::into_response((
+                StatusCode::OK,
+                Json(serde_json::json!({ "data": [] })),
+            ))
+        }),
+    );
     r.nest("/v1", v1)
 }
 
