@@ -72,7 +72,15 @@ func RegroupByProvider(rows []UsageAggregateRow, modelProvider map[string]string
 	for _, r := range agg {
 		out = append(out, *r)
 	}
-	// 费用降序(与模型 TOP 展示同序)
-	sort.Slice(out, func(i, j int) bool { return out[i].Cost > out[j].Cost })
+	// 费用降序(与模型 TOP 展示同序);费用相同时按 label 字典序做确定性
+	// tie-break——原 sort.Slice 只按 Cost 比较,等值(如 0 费用)下顺序由
+	// map 迭代随机决定,曾导致 group=provider 行序每轮漂移(2026-09-05
+	// TestAdminUsageProvider 首跑必挂实测)。
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Cost != out[j].Cost {
+			return out[i].Cost > out[j].Cost
+		}
+		return out[i].Label < out[j].Label
+	})
 	return out
 }

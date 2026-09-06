@@ -119,7 +119,12 @@ func TestAdminUsageProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "deepseek-chat", ProviderID: p1}); err != nil {
+	// 模型带价格:让 DeepSeek 行的费用 >0,(未配置渠道)行费用为 0,
+	// 费用降序下 DeepSeek 稳定排第一(否则等值费用时行序随机漂移,
+	// 2026-09-05 CI 首跑必挂实测)。
+	one := 0.1
+	two := 0.2
+	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "deepseek-chat", ProviderID: p1, InputPricePer1M: &one, OutputPricePer1M: &two}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := serverstore.RecordUsage(db, 1, "deepseek-chat", 10, 5); err != nil {
