@@ -49,7 +49,8 @@ async fn run(args: ServerArgs) -> anyhow::Result<()> {
     }
     let state = Arc::new(AppState { pool });
     let app = picoaide_dsh_server::router::build_router(state.clone());
-    let app = app.with_state(state);
+    let app = app.with_state(state.clone());
+    let app = app.nest_service("/admin", picoaide_dsh_server::router::webadmin_router());
     tracing::info!("listening on {}", args.addr);
     let listener = tokio::net::TcpListener::bind(&args.addr).await?;
     axum::serve(listener, app).await?;
