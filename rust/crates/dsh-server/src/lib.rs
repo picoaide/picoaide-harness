@@ -4,6 +4,7 @@ pub mod error;
 pub mod healthz;
 pub mod marketplace;
 pub mod namespace;
+pub mod shared_skills_service;
 pub mod skillmanifest;
 
 pub use error::{error_body, write_json_error, ErrorBody, ErrorResponse, ERROR_INTERNAL};
