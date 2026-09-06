@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -12,6 +12,7 @@ import {
   ensureDesktopProfile,
   prepareDesktopProfile,
   readDesktopShellMode,
+  removeStaleAsarFallbackLinks,
   shippedPresetRoot,
 } from '../src/profile.ts'
 
@@ -534,5 +535,28 @@ describe('desktop profile composition', {
       name: 'third-party-pwsh-sandbox',
     }))
     expect(rows.map(row => row.id)).not.toContain('desktop-windows-pwsh-sandbox')
+  })
+})
+
+describe('removeStaleAsarFallbackLinks', () => {
+  it('removes asar-targeting fallback symlinks and keeps real links and directories', () => {
+    const home = temporaryHome()
+    const modulesDir = join(home, 'profiles', 'node_modules')
+    mkdirSync(join(modulesDir, '@deepseek-ai', 'real-pkg'), { recursive: true })
+    // A stale asar-targeting link (the pre-physical-layout shape; the target
+    // archive is gone and Electron's realpath fails on it).
+    symlinkSync(
+      '/srv/app/resources/app.asar/node_modules/@deepseek-ai/dsh-persona',
+      join(modulesDir, '@deepseek-ai', 'dsh-persona'),
+    )
+    // A link into the physical tree must stay (the current layout).
+    const physicalTarget = join(modulesDir, '@deepseek-ai', 'real-pkg')
+    symlinkSync(physicalTarget, join(modulesDir, '@deepseek-ai', 'kept-pkg'))
+
+    removeStaleAsarFallbackLinks(home)
+
+    expect(() => lstatSync(join(modulesDir, '@deepseek-ai', 'dsh-persona'))).toThrow()
+    expect(lstatSync(join(modulesDir, '@deepseek-ai', 'kept-pkg')).isSymbolicLink()).toBe(true)
+    expect(lstatSync(join(modulesDir, '@deepseek-ai', 'real-pkg')).isDirectory()).toBe(true)
   })
 })
