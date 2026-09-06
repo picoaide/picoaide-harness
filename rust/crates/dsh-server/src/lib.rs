@@ -3,5 +3,6 @@
 pub mod error;
 pub mod healthz;
 pub mod namespace;
+pub mod skillmanifest;
 
 pub use error::{error_body, write_json_error, ErrorBody, ErrorResponse, ERROR_INTERNAL};
