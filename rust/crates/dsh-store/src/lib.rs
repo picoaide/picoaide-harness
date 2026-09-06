@@ -2,7 +2,10 @@
 //!
 //! 包含：数据库连接、迁移、DAO（用户/部门/组/网关/用量/授权等）。
 
+pub mod agent_presets;
+pub mod apps;
 pub mod audit;
+pub mod capability_locks;
 pub mod connectors;
 pub mod db;
 pub mod departments;
@@ -11,7 +14,10 @@ pub mod errors;
 pub mod gateway;
 pub mod grants;
 pub mod groups;
+pub mod reports;
 pub mod settings;
+pub mod shared_skills;
+pub mod skills;
 pub mod tokens;
 pub mod migrate;
 pub mod testutil;
