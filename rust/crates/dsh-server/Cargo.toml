@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+picoaide-dsh-store = { path = "../dsh-store" }
 axum = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
@@ -17,3 +18,9 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde_yaml = "0.9.34"
+zip = "8"
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+hex = "0.4"
+base64 = { workspace = true }
