@@ -43,6 +43,10 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+          --command "postgres -c max_connections=500"
+          # 多测试包并行各自建库 + serverstore 连接池(400)会击穿 PG 默认
+          # 100 上限(2026-09-05 beta.1 CI 实测:serverauth/serverstore 批量
+          # 连库失败),显式调高并发上限。
     env:
       PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
     steps:
@@ -59,7 +63,10 @@ jobs:
       - run: npm ci
         working-directory: server/webadmin
       - run: go vet ./...
-      - run: go test ./... -count=1
+      # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
+      # max_connections(500),串行换取确定性(耗时 ~5-10 分钟,在 30 分钟
+      # 窗口内)。
+      - run: go test ./... -count=1 -p 1
       - run: make build-server
       - name: Deploy script syntax checks
         # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
