@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { groupLabelFrom, resolveGroupKey, SessionLineage } from '../src/resolve.ts'
+import { projectLabelFrom, projectKeyFrom, resolveGroupKey, SessionLineage } from '../src/resolve.ts'
 
 describe('SessionLineage.resolve', () => {
   it('returns the session id itself when no lineage is known', () => {
@@ -88,19 +88,48 @@ describe('resolveGroupKey', () => {
   it('resolves a known agent id to its group key, and unknown ids to themselves', () => {
     const lineage = new SessionLineage()
     lineage.registerLineage('sub', 'top')
-    expect(resolveGroupKey(lineage, 'sub')).toBe('top')
-    expect(resolveGroupKey(lineage, 'loner')).toBe('loner')
+    expect(resolveGroupKey(lineage, 'sub')).toBe('session:top')
+    expect(resolveGroupKey(lineage, 'loner')).toBe('session:loner')
   })
 })
 
-describe('groupLabelFrom', () => {
+describe('projectLabelFrom', () => {
   it('uses the trimmed title when present', () => {
-    expect(groupLabelFrom('  Hello World  ', 'abcdef123456')).toBe('Hello World')
+    expect(projectLabelFrom('  Hello World  ', '/a/b')).toBe('Hello World')
   })
 
-  it('falls back to the short code when the title is empty or whitespace', () => {
-    expect(groupLabelFrom('', 'abcdef123456')).toBe('会话 abcdef')
-    expect(groupLabelFrom('   ', 'abcdef123456')).toBe('会话 abcdef')
-    expect(groupLabelFrom(undefined, 'abcdef123456')).toBe('会话 abcdef')
+  it('falls back to the directory basename when no title', () => {
+    expect(projectLabelFrom('', '/data/picoaide-harness')).toBe('picoaide-harness')
+    expect(projectLabelFrom('   ', '/data/my-app')).toBe('my-app')
+    expect(projectLabelFrom(undefined, 'C:\\\\work\\\\my-app')).toBe('my-app')
+  })
+
+  it('falls back to the default when nothing is known', () => {
+    expect(projectLabelFrom(undefined, undefined)).toBe('未命名项目')
+  })
+})
+
+describe('projectKeyFrom', () => {
+  it('uses the session header cwd (canonical) as the project key', () => {
+    expect(projectKeyFrom({ id: 's1', session: { header: { cwd: '/data/my-app' } } })).toBe('proj:/data/my-app')
+  })
+
+  it('prefers header cwd over meta cwd over session cwd', () => {
+    expect(projectKeyFrom({ id: 's1', session: { header: { cwd: '/a' }, meta: { cwd: '/b' }, cwd: '/c' } })).toBe('proj:/a')
+    expect(projectKeyFrom({ id: 's1', session: { meta: { cwd: '/b' }, cwd: '/c' } })).toBe('proj:/b')
+    expect(projectKeyFrom({ id: 's1', session: { cwd: '/c' } })).toBe('proj:/c')
+  })
+
+  it('falls back to a per-session key when no cwd exists', () => {
+    expect(projectKeyFrom({ id: 's1' })).toBe('session:s1')
+  })
+
+  it('returns undefined without an agent identity', () => {
+    expect(projectKeyFrom(undefined)).toBeUndefined()
+    expect(projectKeyFrom({ id: '' })).toBeUndefined()
+  })
+
+  it('canonicalizes trailing slashes', () => {
+    expect(projectKeyFrom({ id: 's1', session: { cwd: '/data/my-app/' } })).toBe('proj:/data/my-app')
   })
 })
