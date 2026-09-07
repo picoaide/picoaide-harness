@@ -456,13 +456,13 @@ export class BrowserRuntime {
     this.applyOverlay()
   }
 
-  /** Effective overlay mode: while the AI drives (and the user has NOT taken
-   * over) the overlay covers the content as an interception mask with the
-   * 「AI 操作中 · 点击让我接管」pill; otherwise it shows the user-selected UI. */
+  /** Effective overlay mode: the interception mask is the DEFAULT state —
+   * the whole window is locked (idle OR busy) until the user explicitly clicks
+   * 我来操作. Releasing control (交给 AI) re-arms the mask immediately, and it
+   * stays armed even while the AI is idle (2026-09-07 product decision). */
   private effectiveOverlayMode(): OverlayMode | 'mask' {
     if (this.pool.controlled) return this.overlayMode
-    if (this.pool.isBusy()) return 'mask'
-    return this.overlayMode
+    return 'mask'
   }
 
   /** Overlay view bounds per mode. The view is always attached (z-top); its
@@ -474,6 +474,9 @@ export class BrowserRuntime {
     const h = Math.max(0, size.height)
     switch (mode) {
       case 'mask':
+        // Full window: the ONLY interaction is the 我来操作 pill — the
+        // toolbar, tabs and the page are all locked behind it.
+        return { x: 0, y: 0, width: w, height: h }
       case 'viewer':
         return { x: 0, y: BROWSER_SHELL_TOOLBAR_HEIGHT, width: w, height: Math.max(0, h - BROWSER_SHELL_TOOLBAR_HEIGHT) }
       case 'panel':
