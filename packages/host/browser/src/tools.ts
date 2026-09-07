@@ -67,6 +67,25 @@ function noteAgent(runtime: BrowserRuntime, agent: unknown): void {
   runtime.setAgentContext(id)
 }
 
+/** The live agent/session shape inspected for the workspace path (defensive —
+ * fields vary across DSH versions). */
+interface AgentProjectInfo {
+  id?: string
+  session?: {
+    header?: { cwd?: string }
+    meta?: { cwd?: string }
+    cwd?: string
+  }
+}
+
+/** Upload whitelist: downloads dir (always) + the calling session's cwd. */
+function uploadAllowDirs(runtime: BrowserRuntime, session: AgentProjectInfo['session']): string[] {
+  const dirs = [runtime.options.downloadDir]
+  const cwd = session?.header?.cwd ?? session?.meta?.cwd ?? session?.cwd
+  if (typeof cwd === 'string' && cwd.trim() !== '') dirs.push(cwd.trim())
+  return dirs
+}
+
 /**
  * Register the full browser tool suite (v4, 32 tools).
  * @param ctx - context whose `tools` and `systemPrompt` registries receive the
@@ -94,7 +113,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_open',
-    description: '[导航] Open the browser for your session (creating its tab group) and optionally navigate a new tab to a URL. Use this as the first browser action.',
+    description: '[导航] Open the browser (shared single tab pool) and optionally navigate a new tab to a URL. Use this as the first browser action.',
     parameters: {
       url: { type: 'string', description: 'Optional URL to open in the new tab.' },
     },
@@ -213,7 +232,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_list_tabs',
-    description: '[导航] List YOUR session tabs (ids, urls, titles, active marker). Other sessions\' tabs are never visible.',
+    description: '[导航] List ALL tabs of the shared browser pool (every session and the user share one pool) with ids, urls, titles and the active marker.',
     parameters: {},
     output: {
       schema: {
@@ -284,7 +303,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_close_tab',
-    description: '[导航] Close a tab of your session. Closing your last tab closes the session group.',
+    description: '[导航] Close a tab of the shared pool (defaults to your active tab).',
     parameters: { tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -438,7 +457,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_upload_file',
-    description: '[交互] Upload local files through the page file input (default first input[type=file]; no dialogs).',
+    description: '[交互] Upload local files through the page file input (default first input[type=file]; no dialogs). Only paths inside the downloads dir or the current workspace are allowed.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       paths: { type: 'array', required: true, items: { type: 'string' }, description: 'Absolute paths to upload (allowed: downloads dir + current workspace).' },
@@ -453,9 +472,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { tab, paths } = args as { tab?: number; paths: string[] }
       if (!Array.isArray(paths) || paths.length === 0) throw new Error('paths must be a non-empty array of absolute paths')
+      const allowedDirs = uploadAllowDirs(runtime, (exec.agent as AgentProjectInfo | undefined)?.session)
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
-      return await runtime.uploadFile(tabId, paths, exec.signal)
+      return await runtime.uploadFile(tabId, paths, exec.signal, allowedDirs)
     },
   }))
 
@@ -759,8 +779,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Search history'),
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
-      const { q, limit } = args as { q?: string; limit?: number }
-      return { entries: runtime.history({ q, limit }).map((h) => ({ time: h.time, url: h.url, title: h.title, actor: h.actor, group: h.group })) }
+      const { q, limit, group } = args as { q?: string; limit?: number; group?: string }
+      return { entries: runtime.history({ q, limit, group }).map((h) => ({ time: h.time, url: h.url, title: h.title, actor: h.actor, group: h.group })) }
     },
   }))
 
@@ -833,7 +853,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_downloads_remove',
-    description: '[产物] Remove a download record (and optionally delete the file).',
+    description: '[产物] Remove a download record by id.',
     parameters: { id: { type: 'integer', required: true, description: 'Download id from downloads_list.' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -852,7 +872,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_takeover',
-    description: '[控制] Hand control to the user (pauses ALL sessions\' browser actions until release). Usually the user clicks 我来操作; this tool exists for guided flows.',
+    description: '[控制] Hand control to the user (pauses ALL browser actions until release). Usually the user clicks 我来操作; this tool exists for guided flows.',
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -863,7 +883,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Hand control to user'),
     async execute(_args, exec) {
       noteAgent(runtime, exec.agent)
-      runtime.setUserControl(true)
+      runtime.setUserControl(true, 'ai')
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -882,7 +902,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Release control'),
     async execute(_args, exec) {
       noteAgent(runtime, exec.agent)
-      runtime.setUserControl(false)
+      runtime.setUserControl(false, 'ai')
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -957,7 +977,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_clear_data',
-    description: '[控制] Clear browsing data (scope: your session group = site storage/cache for your tabs; all-data = everything incl. cookies).',
+    description: '[控制] Clear site data (storage/cache) for your tabs. Clearing EVERYTHING incl. cookies (all-data) requires the user to confirm in the browser window menu — the tool refuses it.',
     parameters: {
       scope: { type: 'string', enum: ['group', 'all-data'], description: 'What to clear (default group).' },
     },
@@ -969,8 +989,14 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Clear browsing data'),
     async execute(args, exec) {
+      const scope = (args as { scope?: string }).scope
+      if (scope === 'all-data') {
+        // Design §7.3-4: all-data needs the USER's shell confirmation — the
+        // tool surface refuses; users clear everything via the browser menu.
+        throw browserError('policy', 'browser: clear_data all-data requires a user confirmation in the browser window menu — use the ⋮ menu → 清除数据')
+      }
       noteAgent(runtime, exec.agent)
-      await runtime.clearData((args as { scope?: string }).scope === 'all-data')
+      await runtime.clearData(false)
       exec.signal.throwIfAborted()
       return { ok: true }
     },

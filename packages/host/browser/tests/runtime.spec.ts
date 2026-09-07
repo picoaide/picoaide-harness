@@ -163,6 +163,7 @@ class MockWindow implements NativeBrowserWindow {
   }
   onResize(listener: () => void): () => void { this.resize.add(listener); return () => { this.resize.delete(listener) } }
   onClosed(listener: () => void): () => void { this.closed.add(listener); return () => { this.closed.delete(listener) } }
+  focusPage(): void {}
 }
 
 class MockAdapter implements ElectronAdapter {
@@ -170,6 +171,7 @@ class MockAdapter implements ElectronAdapter {
   readonly masks: MockView[] = []
   readonly windows: MockWindow[] = []
   showSaveDialog = vi.fn(async () => ({ canceled: true }))
+  openPath = vi.fn(async () => ({}))
   createView(partition?: string): NativeView {
     const view = new MockView()
     view.session.partition = partition ?? 'persist:agent-browser'
