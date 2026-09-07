@@ -1,44 +1,51 @@
 /**
- * Embedded agent-driven browser for PicoAide Harness: owns the WebContentsView tab
- * pool, the CDP sessions, the `browser_*` tool suite, and the loopback panel
- * API consumed by the client browser panel.
+ * Embedded agent-driven browser for PicoAide Harness (v4): owns the
+ * WebContentsView tab pool (session-grouped), the CDP sessions, the
+ * `browser_*` tool suite (32), the loopback shell API + SSE push, and the
+ * local stores (bookmarks/history/downloads/group ledger).
  *
- * HTTP API (loopback, mirroring the connectors plugin):
- *   GET  /api/pico/browser/state          -> tabs + window + control + ops
- *   POST /api/pico/browser/open           -> { url? }
- *   POST /api/pico/browser/navigate       -> { tab, url }
- *   POST /api/pico/browser/reload|back|forward -> { tab? }
- *   POST /api/pico/browser/switch-tab     -> { tab }
- *   POST /api/pico/browser/close-tab      -> { tab }
- *   POST /api/pico/browser/close-all
- *   POST /api/pico/browser/show           -> wake the browser window
- *   POST /api/pico/browser/hide           -> hide the window (keep tabs)
- *   POST /api/pico/browser/takeover       -> { active }
- *   POST /api/pico/browser/clear-data
+ * HTTP API (loopback, same-origin fenced):
+ *   GET  /api/pico/browser/state          -> groups + window + control
  *   GET  /api/pico/browser/ops            -> recent op log
- *   GET  /browser-shell                   -> the browser window control page
- *   GET  /browser-mask                    -> the AI-control mask page
+ *   GET  /api/pico/browser/stream         -> SSE (state-change signals)
+ *   POST /api/pico/browser/open           -> { url? } (foreground/user group)
+ *   POST /api/pico/browser/navigate       -> { url } (foreground group)
+ *   POST /api/pico/browser/reload|back|forward -> (foreground active tab)
+ *   POST /api/pico/browser/switch-tab     -> { tab }
+ *   POST /api/pico/browser/switch-group   -> { group }
+ *   POST /api/pico/browser/close-tab      -> { tab }
+ *   POST /api/pico/browser/close-group    -> { group }
+ *   POST /api/pico/browser/show|hide|takeover|clear-data
+ *   GET  /api/pico/browser/bookmarks [+ POST {url,title} / DELETE ?id=]
+ *   GET  /api/pico/browser/history        -> ?q=&group=&limit=
+ *   GET  /api/pico/browser/downloads [DELETE ?id=]
+ *   GET  /browser-shell                   -> the browser window shell (v4)
  * @module @picoaide/dsh-browser
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createRequire } from 'node:module'
+import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
-import { applyBrowserTools } from './tools.ts'
-import { BROWSER_MASK_HTML, BROWSER_SHELL_HTML } from './shell-pages.ts'
+import { GroupRegistry, type GroupLedger } from './registry.ts'
+import { SessionLineage } from './resolve.ts'
+import { BrowserStore } from './store.ts'
+import { applyBrowserTools, parseToolGroups } from './tools.ts'
+import { BROWSER_SHELL_HTML } from './shell-pages.ts'
 import type { CredentialResolver } from './types.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
-// The enterprise package owns the runtime event (SessionService emits it);
-// this declaration lets plugins type-check without a runtime dependency.
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+    'pico/session-archived'(session: { id?: string; username?: string } | null): void
+    'pico/session-reopened'(session: { id?: string; username?: string } | null): void
   }
 }
 
@@ -50,22 +57,22 @@ export const inject = ['webServer', 'tools', 'systemPrompt', 'attachments']
 
 /** Plugin config: runtime caps and enablement. */
 export interface Config {
-  /** Maximum simultaneous tabs (default 8). */
   maxTabs?: number
-  /** Cooperative tool-call timeout budget ms (default 30000). */
   timeoutMs?: number
-  /** Cap on waiting for Electron's loadURL promise ms (default 20000). */
   loadTimeoutMs?: number
-  /** Whether `browser_eval` is enabled (default true). */
   evalEnabled?: boolean
-  /** Cap on snapshot entries per call (default 200). */
   snapshotLimit?: number
-  /** Cap on extracted text characters per call (default 32768). */
   textLimit?: number
-  /** Screenshot max width in CSS pixels (default 1280). */
   screenshotMaxWidth?: number
-  /** Screenshot JPEG quality 0-100 (default 70). */
   screenshotQuality?: number
+  maxGroups?: number
+  maxTabsPerGroup?: number
+  maxTabsTotal?: number
+  waitTimeoutMs?: number
+  archiveRetentionMs?: number
+  downloadDir?: string
+  /** Tool groups to enable (navigate/interact/read/memory/artifacts/control); default all. */
+  toolGroups?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -77,6 +84,13 @@ export const Config: z<Config> = z.object({
   textLimit: z.number(),
   screenshotMaxWidth: z.number(),
   screenshotQuality: z.number(),
+  maxGroups: z.number(),
+  maxTabsPerGroup: z.number(),
+  maxTabsTotal: z.number(),
+  waitTimeoutMs: z.number(),
+  archiveRetentionMs: z.number(),
+  downloadDir: z.string(),
+  toolGroups: z.array(z.string()),
 })
 
 /** Cap on browser API request bodies. */
@@ -115,19 +129,26 @@ function decodeSegment(segment: string | undefined): string | null {
   }
 }
 
+/** Resolve Electron userData dir for the browser store (host-only). */
+function resolveUserDataDir(): string | undefined {
+  try {
+    const electron = require('electron') as typeof import('electron')
+    return electron.app?.getPath?.('userData')
+  } catch {
+    return undefined
+  }
+}
+
 /**
- * Register the embedded browser plugin.
- * @param ctx - Cordis context carrying the webServer, tools, systemPrompt and
- *   attachments services.
+ * Register the embedded browser plugin (v4).
+ * @param ctx - Cordis context carrying webServer/tools/systemPrompt/attachments.
  * @param config - runtime caps and enablement.
  */
 export function apply(ctx: Context, config: Config = {}): void {
   // 2026-08-26 product decision: browser actions run with no user-approval
-  // prompt. The approval seam was removed from BrowserGuard/runtime/tools;
-  // browser use is granted through the workspace permission, and the
-  // browser window shows every live action.
+  // prompt; browser use is granted through the workspace permission and the
+  // browser window shows every live action (v4: activity panel).
 
-  // Current user (enterprise session, may be absent in minimal compositions).
   const currentUser = (): string | null => {
     try {
       const pico = ctx.get('picoSession') as { getSession?: () => { username?: string } | null } | undefined
@@ -137,16 +158,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  // Credential injection resolves through the connectors store (per-user
-  // private files); the lookup is defensive and never logs values. Each
-  // resolution builds a store for the CURRENT user, so a session switch never
-  // injects another account's credentials (no cached store to rebuild).
   const credentialResolver: CredentialResolver | undefined = (() => {
     try {
-      // Lazy require: the connectors package must be present in the profile.
       const require = createRequire(import.meta.url)
       const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
-      return async (connectorId) => {
+      const resolveCredentials = async (connectorId: string): Promise<{ username?: string; password?: string } | null> => {
         const store = new ConnectorStore({ username: currentUser() })
         const credential = await store.readCredential(connectorId)
         if (credential === null) return null
@@ -158,37 +174,108 @@ export function apply(ctx: Context, config: Config = {}): void {
           ...password !== undefined ? { password } : {},
         }
       }
+      // List credential ids + usernames (no secrets) through the user-scope dir.
+      resolveCredentials.list = async (): Promise<Array<{ id: string; username?: string }>> => {
+        try {
+          const { userScopePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
+          const dir = join(userScopePath(currentUser()), 'connectors')
+          const names: string[] = []
+          try {
+            for (const file of readdirSync(dir)) {
+              if (file.endsWith('.json')) names.push(file.slice(0, -5))
+            }
+          } catch {
+            return []
+          }
+          const store = new ConnectorStore({ username: currentUser() })
+          const out: Array<{ id: string; username?: string }> = []
+          for (const id of names) {
+            const credential = await store.readCredential(id)
+            const username = typeof credential?.fields?.username === 'string' ? credential.fields.username : undefined
+            out.push({ id, ...username !== undefined ? { username } : {} })
+          }
+          return out
+        } catch {
+          return []
+        }
+      }
+      return resolveCredentials
     } catch {
       return undefined
     }
   })()
 
-  const runtime = new BrowserRuntime(createRealElectronAdapter(), config, credentialResolver, browserPartitionFor(currentUser()))
-  // The shell/mask pages live on the plugin's own loopback server; the
-  // dedicated window loads them by absolute URL.
+  const userDataDir = resolveUserDataDir()
+  const usernameForStore = currentUser() ?? 'anonymous'
+  const store = new BrowserStore({
+    dir: userDataDir !== undefined
+      ? join(userDataDir, 'browser-store', encodePartitionSegment(usernameForStore))
+      : join(process.cwd(), '.browser-store', encodePartitionSegment(usernameForStore)),
+  })
+  const registry = new GroupRegistry({
+    ...(config.maxGroups !== undefined ? { maxGroups: config.maxGroups } : {}),
+    ...(config.maxTabsPerGroup !== undefined || config.maxTabs !== undefined ? { maxTabsPerGroup: config.maxTabsPerGroup ?? config.maxTabs } : {}),
+    ...(config.maxTabsTotal !== undefined ? { maxTabsTotal: config.maxTabsTotal } : {}),
+    ...(config.waitTimeoutMs !== undefined ? { waitTimeoutMs: config.waitTimeoutMs } : {}),
+    ...(config.archiveRetentionMs !== undefined ? { archiveRetentionMs: config.archiveRetentionMs } : {}),
+  })
+  const lineage = new SessionLineage()
+  const runtime = new BrowserRuntime(
+    createRealElectronAdapter(),
+    config,
+    credentialResolver,
+    browserPartitionFor(currentUser()),
+    { registry, lineage, store, currentUsername: currentUser },
+  )
   runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
+  // Restore persisted group ledger (archived until reopened, v4 §10).
+  runtime.restoreLedger()
+  const saveLedger = (): void => {
+    registry.saveLedger = (ledger: GroupLedger) => { store.saveGroupLedger(ledger) }
+  }
+  saveLedger()
+  registry.onChange(() => saveLedger())
 
-  // User switch: close every tab (old user's pages/login state), then point
-  // new tabs at the new user's partition. The partition dataset stays on disk
-  // per user; it is simply no longer mounted for another account.
+  // User switch: close every tab (old user's pages/login state), point new
+  // tabs at the new user's partition, swap the store to the new user.
   ctx.on('pico/session-changed', (next) => {
     const username = (next as { username?: string } | null)?.username ?? null
     void (async () => {
-      await runtime.closeAll(undefined, true)
+      await runtime.closeAllGroups()
       runtime.setPartition(browserPartitionFor(username))
     })().catch((cause: unknown) => {
       ctx.logger?.error('pico-browser: session change handling failed', cause)
     })
   })
 
-  // Tool registrations are fiber-scoped: the tools/systemPrompt registries
-  // clean them up on plugin dispose, so no manual disposer is needed here.
-  applyBrowserTools(ctx, runtime)
+  // Session archived → archive its group (24h retention); reopened → restore.
+  ctx.on('pico/session-archived', (session) => {
+    const id = (session as { id?: string } | null)?.id
+    if (id === undefined) return
+    void runtime.archiveFor(id).catch((cause: unknown) => {
+      ctx.logger?.error('pico-browser: session archive handling failed', cause)
+    })
+  })
+  ctx.on('pico/session-reopened', (session) => {
+    const id = (session as { id?: string } | null)?.id
+    if (id === undefined) return
+    void runtime.reactivateFor(id).catch((cause: unknown) => {
+      ctx.logger?.error('pico-browser: session reopen handling failed', cause)
+    })
+  })
+  // Lineage: subagent sessions inherit their top-level parent's group.
+  const captureLineage = (sessionEvent: { id?: string; parentSession?: string; origin?: string } | null): void => {
+    const id = sessionEvent?.id
+    const parent = sessionEvent?.parentSession
+    if (id !== undefined && parent !== undefined && sessionEvent?.origin === 'subagent') {
+      lineage.registerLineage(id, parent)
+    }
+  }
+  ctx.on('session/created' as never, captureLineage as never)
+
+  applyBrowserTools(ctx, runtime, parseToolGroups(config.toolGroups))
 
   ctx.effect(() => {
-    // Trust fence for every browser route: loopback socket + Host +
-    // same-origin markers. All actions below are state-changing and
-    // therefore require POST (P1-1: a cross-site GET must not trigger them).
     const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
       if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
       json(res, 403, { error: 'forbidden' })
@@ -203,13 +290,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
     }
 
-    const handleAction = async (action: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const foregroundRequired = (): string => {
+      const fg = runtime.foreground
+      if (fg === undefined) throw new Error('browser: no session group — open a tab first')
+      return fg
+    }
+
+    const handleAction = async (actionName: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> => {
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
       if (!guard(req, res)) return
       const raw = await readJson(req)
       const body = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
 
-      switch (action) {
+      switch (actionName) {
         case 'show': {
           await runtime.showWindow()
           json(res, 200, { ok: true })
@@ -220,66 +313,77 @@ export function apply(ctx: Context, config: Config = {}): void {
           json(res, 200, { ok: true })
           return
         }
-        case 'open': {
-          const url = typeof body.url === 'string' ? body.url : undefined
-          // Shell `+` button: the USER's surface — bypass the takeover mutex.
-          const tab = await runtime.open(url, undefined, true)
-          json(res, 200, { tab })
-          return
-        }
-        case 'navigate': {
-          const tab = numberOr(body.tab, 0)
-          const url = typeof body.url === 'string' ? body.url : ''
-          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
-          // Address bar: the USER's surface — bypass the takeover mutex.
-          await runtime.navigate(tab, url, 'domcontentloaded', undefined, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'reload': {
-          // The shell toolbar is the USER's surface: its actions must not be
-          // blocked by an agent takeover (user==true bypasses the mutex).
-          await runtime.reload(tabOf(runtime, body), undefined, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'back': {
-          await runtime.goBack(tabOf(runtime, body), undefined, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'forward': {
-          await runtime.goForward(tabOf(runtime, body), undefined, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'switch-tab': {
-          const tab = numberOr(body.tab, 0)
-          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
-          await runtime.switchTab(tab, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'close-tab': {
-          const tab = numberOr(body.tab, 0)
-          if (tab <= 0) return json(res, 400, { error: 'tab is required' })
-          await runtime.closeTab(tab, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'close-all': {
-          // Shell 清除: the USER's surface — bypass the takeover mutex.
-          await runtime.closeAll(undefined, true)
-          json(res, 200, { ok: true })
-          return
-        }
         case 'takeover': {
           runtime.setUserControl(body.active === true)
           json(res, 200, { ok: true })
           return
         }
+        case 'open': {
+          const url = typeof body.url === 'string' ? body.url : undefined
+          // Shell `+`: the USER's surface — bypass the takeover mutex.
+          const tab = await runtime.userOpen(url)
+          json(res, 200, { tab })
+          return
+        }
+        case 'navigate': {
+          const url = typeof body.url === 'string' ? body.url : ''
+          await runtime.navigateUser(url)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'reload': {
+          const fg = foregroundRequired()
+          const tab = runtime.registry.activeTabOf(fg)
+          if (tab !== undefined) await runtime.reloadFor(fg, tab, undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'back': {
+          const fg = foregroundRequired()
+          const tab = runtime.registry.activeTabOf(fg)
+          if (tab !== undefined) await runtime.goBackFor(fg, tab, undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'forward': {
+          const fg = foregroundRequired()
+          const tab = runtime.registry.activeTabOf(fg)
+          if (tab !== undefined) await runtime.goForwardFor(fg, tab, undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'switch-tab': {
+          const fg = foregroundRequired()
+          const tab = typeof body.tab === 'number' ? body.tab : undefined
+          if (tab === undefined) return json(res, 400, { error: 'tab is required' })
+          await runtime.switchTabFor(fg, tab, undefined)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'switch-group': {
+          const group = typeof body.group === 'string' ? body.group : undefined
+          if (group === undefined) return json(res, 400, { error: 'group is required' })
+          runtime.switchGroup(group)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'close-tab': {
+          const fg = foregroundRequired()
+          const tab = typeof body.tab === 'number' ? body.tab : runtime.registry.activeTabOf(fg)
+          if (tab === undefined) return json(res, 400, { error: 'tab is required' })
+          await runtime.closeTabFor(fg, tab, undefined, true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'close-group': {
+          const group = typeof body.group === 'string' ? body.group : undefined
+          if (group === undefined) return json(res, 400, { error: 'group is required' })
+          await runtime.closeGroup(group)
+          json(res, 200, { ok: true })
+          return
+        }
         case 'clear-data': {
-          await runtime.clearData()
+          await runtime.clearDataFor(foregroundRequired(), 'all-data')
           json(res, 200, { ok: true })
           return
         }
@@ -291,22 +395,92 @@ export function apply(ctx: Context, config: Config = {}): void {
     const state: JsonHandler = (req, res) => {
       if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
       if (!guard(req, res)) return
-      json(res, 200, {
-        tabs: runtime.listTabs(),
-        window: runtime.windowState,
-        controlled: runtime.controlled,
-        // AI-control overlay status: what the agent is doing right now and
-        // the last completed operation (so the user knows when to step in).
-        busy: runtime.isBusy,
-        busyTool: runtime.busyToolName,
-        latestOp: runtime.latestOp ?? null,
-      })
+      json(res, 200, runtime.shellState())
     }
 
     const ops: JsonHandler = (req, res) => {
       if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
       if (!guard(req, res)) return
       json(res, 200, { ops: runtime.opLog })
+    }
+
+    // SSE stream: signals only; clients re-pull /state on each event.
+    const stream: JsonHandler = (req, res) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+      if (!guard(req, res)) return
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-store',
+        Connection: 'keep-alive',
+      })
+      res.write('retry: 1500\n\n')
+      const off = runtime.onAny((event) => {
+        res.write(`event: ${event}\ndata: {}\n\n`)
+      })
+      const heartbeat = setInterval(() => {
+        res.write(': ping\n\n')
+      }, 15_000)
+      const timer = heartbeat
+      res.on('close', () => {
+        clearInterval(timer)
+        off()
+      })
+    }
+
+    const bookmarksGet: JsonHandler = (req, res) => {
+      if (!guard(req, res)) return
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      json(res, 200, { bookmarks: runtime.listBookmarksFor({ q: url.searchParams.get('q') ?? undefined, limit: num(url.searchParams.get('limit'), 200) }) })
+    }
+    const bookmarksPost: JsonHandler = async (req, res) => {
+      if (!guard(req, res)) return
+      const raw = await readJson(req)
+      const body = (raw ?? {}) as { url?: string; label?: string }
+      const fg = runtime.foreground
+      if (fg === undefined) return json(res, 400, { error: 'no session group to attribute the bookmark to' })
+      const tab = runtime.registry.activeTabOf(fg)
+      if (tab === undefined) return json(res, 400, { error: 'no tab open in the foreground session' })
+      // Bookmark for the foreground group (user-side add).
+      const entry = runtime.addBookmarkFor(fg, tab, body.label)
+      json(res, 200, { id: entry.id, url: entry.url, title: body.label ?? entry.title })
+    }
+    const bookmarksDelete: JsonHandler = (req, res) => {
+      if (!guard(req, res)) return
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const id = num(url.searchParams.get('id'), undefined)
+      if (id === undefined) return json(res, 400, { error: 'id is required' })
+      json(res, 200, { ok: runtime.removeBookmarkFor(id) })
+    }
+
+    const historyGet: JsonHandler = (req, res) => {
+      if (!guard(req, res)) return
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      json(res, 200, {
+        entries: runtime.historyFor({
+          q: url.searchParams.get('q') ?? undefined,
+          group: url.searchParams.get('group') ?? undefined,
+          limit: num(url.searchParams.get('limit'), 100),
+        }),
+      })
+    }
+
+    const downloadsGet: JsonHandler = (req, res) => {
+      if (!guard(req, res)) return
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const status = url.searchParams.get('status')
+      json(res, 200, {
+        downloads: runtime.downloadsFor({
+          status: status !== null && ['in-progress', 'done', 'cancelled', 'rejected'].includes(status) ? status as 'done' : undefined,
+          limit: num(url.searchParams.get('limit'), 100),
+        }),
+      })
+    }
+    const downloadsDelete: JsonHandler = (req, res) => {
+      if (!guard(req, res)) return
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const id = num(url.searchParams.get('id'), undefined)
+      if (id === undefined) return json(res, 400, { error: 'id is required' })
+      json(res, 200, { ok: runtime.removeDownloadFor(id) })
     }
 
     const html = (content: string): JsonHandler => (_req, res) => {
@@ -317,11 +491,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     const disposers = [
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/state', handler: state }),
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/ops', handler: ops }),
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/stream', handler: stream }),
       ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser', handler: action }),
-      // Local pages for the dedicated browser window (served by the same
-      // loopback server; the window navigates to these absolute paths).
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/bookmarks', handler: bookmarksGet }),
+      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser/bookmarks', handler: (req, res) => {
+        void (async () => {
+          if (req.method === 'POST') return await bookmarksPost(req, res)
+          if (req.method === 'DELETE') return bookmarksDelete(req, res)
+          json(res, 405, { error: 'method not allowed' })
+        })().catch((cause: unknown) => json(res, 400, { error: cause instanceof Error ? cause.message : String(cause) }))
+      } }),
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/history', handler: historyGet }),
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/downloads', handler: downloadsGet }),
+      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser/downloads', handler: (req, res) => {
+        if (req.method === 'DELETE') return downloadsDelete(req, res)
+        json(res, 405, { error: 'method not allowed' })
+      } }),
       ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: html(BROWSER_SHELL_HTML) }),
-      ctx.webServer.register({ kind: 'exact', path: '/browser-mask', handler: html(BROWSER_MASK_HTML) }),
     ]
     return () => {
       for (const dispose of disposers) dispose()
@@ -335,18 +521,28 @@ export function apply(ctx: Context, config: Config = {}): void {
   }, 'pico browser: teardown')
 }
 
-/** Read a number from a JSON field with a fallback. */
-function numberOr(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+/** Read a number from a string with a fallback. */
+function num(value: string | null, fallback: number | undefined): number | undefined {
+  if (value === null) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
 }
 
-/** Resolve the tab id from a body, defaulting to the visible tab. */
-function tabOf(runtime: BrowserRuntime, body: Record<string, unknown>): number {
-  const explicit = numberOr(body.tab, 0)
-  if (explicit > 0) return explicit
-  const current = runtime.currentTabId()
-  if (current === undefined) throw new Error('browser: no tab open')
-  return current
+/** Encode the per-user store key (reflects the partition encoding). */
+function encodePartitionSegment(segment: string): string {
+  let out = ''
+  for (const char of segment) {
+    const code = char.codePointAt(0)!
+    if ((code >= 0x30 && code <= 0x39)
+      || (code >= 0x41 && code <= 0x5a)
+      || (code >= 0x61 && code <= 0x7a)
+      || char === '-' || char === '_') {
+      out += char
+    } else {
+      out += `~${code.toString(16).toUpperCase()}~`
+    }
+  }
+  return out.length === 0 ? 'anonymous' : out
 }
 
 export type { BrowserRuntime } from './runtime.ts'
