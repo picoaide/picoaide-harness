@@ -10,7 +10,15 @@
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
-import type { GroupLedger } from './registry.ts'
+
+/** Persisted tab ledger (v4.2 single pool): registry metadata + active tab.
+ * Views are re-materialized by the runtime on restore. */
+export interface BrowserLedger {
+  version: 1
+  activeTabId: number | undefined
+  tabs: Array<{ tabId: number; url: string; title: string }>
+  savedAt: number
+}
 
 /** Actor of a record. */
 export type RecordActor = 'ai' | 'user'
@@ -88,7 +96,7 @@ export class BrowserStore {
   private readonly history: HistoryEntry[] = []
   private readonly bookmarks: BookmarkEntry[] = []
   private readonly downloads: DownloadEntry[] = []
-  private ledger: GroupLedger | undefined
+  private ledger: BrowserLedger | undefined
   private historySeq = 0
   private bookmarkSeq = 0
   private downloadSeq = 0
@@ -159,17 +167,17 @@ export class BrowserStore {
     }
   }
 
-  private readLedger(): GroupLedger | undefined {
+  private readLedger(): BrowserLedger | undefined {
     const path = this.filePath('groups')
     try {
       const raw = readFileSync(path, 'utf8').trim()
-      return raw === '' ? undefined : JSON.parse(raw) as GroupLedger
+      return raw === '' ? undefined : JSON.parse(raw) as BrowserLedger
     } catch {
       return undefined
     }
   }
 
-  private writeLedger(ledger: GroupLedger): void {
+  private writeLedger(ledger: BrowserLedger): void {
     try {
       writeFileSync(this.filePath('groups'), JSON.stringify(ledger))
     } catch {
@@ -223,8 +231,11 @@ export class BrowserStore {
   // --------------------------------------------------------------- bookmarks
 
   addBookmark(entry: Omit<BookmarkEntry, 'id' | 'createdAt'>): BookmarkEntry {
-    // Idempotent: same URL re-bookmark updates the stamp.
-    const existing = this.bookmarks.find((b) => b.url === entry.url)
+    // Idempotent: same URL re-bookmark updates the stamp. Compare the
+    // SANITIZED url (the stored form) — a raw URL with sensitive params must
+    // not re-add a duplicate whose stored url differs only by masking.
+    const url = stripSensitiveUrl(entry.url)
+    const existing = this.bookmarks.find((b) => b.url === url)
     if (existing !== undefined) {
       existing.title = entry.title
       existing.actor = entry.actor
@@ -232,7 +243,7 @@ export class BrowserStore {
       existing.createdAt = Date.now()
       return existing
     }
-    const record: BookmarkEntry = { ...entry, id: ++this.bookmarkSeq, createdAt: Date.now(), url: stripSensitiveUrl(entry.url) }
+    const record: BookmarkEntry = { ...entry, id: ++this.bookmarkSeq, createdAt: Date.now(), url }
     this.bookmarks.push(record)
     this.append('bookmarks', record)
     this.pruneBookmarks()
@@ -321,11 +332,11 @@ export class BrowserStore {
 
   // ------------------------------------------------------------------ ledger
 
-  getGroupLedger(): GroupLedger | undefined {
+  getGroupLedger(): BrowserLedger | undefined {
     return this.ledger
   }
 
-  saveGroupLedger(ledger: GroupLedger): void {
+  saveGroupLedger(ledger: BrowserLedger): void {
     this.ledger = ledger
     this.writeLedger(ledger)
   }

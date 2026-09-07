@@ -14,10 +14,12 @@ import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, 
 import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot } from './shots.ts'
-import { TabPool, type PoolTabView } from './pool.ts'
+import { TabPool } from './pool.ts'
 import { BrowserStore, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { browserError, BrowserError } from './errors.ts'
+import { realpathSync } from 'node:fs'
+import { resolve, sep } from 'node:path'
 import type {
   BrowserOpLogEntry,
   BrowserSnapshotElement,
@@ -43,7 +45,10 @@ interface BrowserTab {
   readonly ownerSession: string
   url: string
   title: string
+  favicon: string
   loading: boolean
+  canGoBack: boolean
+  canGoForward: boolean
   disposers: Array<() => void>
 }
 
@@ -68,10 +73,16 @@ export interface BrowserShellState {
   busy: boolean
   busyTool: string
   latestOp: BrowserOpLogEntry | null
+  /** Overlay UI mode (capsule/panel/menu/viewer, or 'mask' while AI drives). */
+  ui: { mode: OverlayMode | 'mask' }
 }
 
 /** State-change events emitted by the runtime (SSE stream). */
 export type BrowserStreamEvent = 'state' | 'tab' | 'tab-meta' | 'busy' | 'takeover' | 'release' | 'ops'
+
+/** Overlay UI modes (user-facing surfaces; the effective mode is forced to
+ * 'mask' while the AI drives). */
+export type OverlayMode = 'capsule' | 'panel' | 'menu' | 'viewer'
 
 /** Runtime dependencies wired by the plugin. */
 export interface RuntimeDeps {
@@ -90,8 +101,18 @@ export class BrowserRuntime {
   private readonly ops: BrowserOpLogEntry[] = []
   private opSeq = 0
   private window: NativeBrowserWindow | null = null
-  /** AI-drive interception overlay (transparent, z-top; click = 我来操作). */
-  private mask: NativeView | null = null
+  /** AI-control overlay view (transparent, z-top): hosts the AI indicator
+   * capsule, the activity panel, the ⋮ menu, the viewers and the busy-mask
+   * pill. Its bounds follow the current UI mode (`overlayBounds`). */
+  private overlay: NativeView | null = null
+  /** User-chosen overlay mode (capsule/panel/menu/viewer); the effective mode
+   * is forced to 'mask' while the AI drives (busy && !controlled). */
+  private overlayMode: OverlayMode = 'capsule'
+  /** Ledger tabs registered but not yet materialized into views (lazy
+   * restore: the browser window must not pop up at app boot). */
+  private pendingLedgerTabs: Array<{ tabId: number; url: string; title: string }> = []
+  private materializing = false
+  private materializeEpoch = 0
   private readonly guard: BrowserGuard
   private windowResizeDisposer: (() => void) | null = null
   private windowClosedDisposer: (() => void) | null = null
@@ -101,7 +122,7 @@ export class BrowserRuntime {
   private shellOrigin: string | undefined
   private lastAgentId = ''
   readonly pool: TabPool
-  readonly store: BrowserStore
+  store: BrowserStore
 
   constructor(
     private readonly adapter: ElectronAdapter,
@@ -133,7 +154,7 @@ export class BrowserRuntime {
     const mapped = (['tab', 'tab-meta', 'busy', 'takeover', 'release'] as const).includes(event as never)
       ? event as BrowserStreamEvent
       : 'state'
-    if (mapped === 'busy' || mapped === 'takeover' || mapped === 'release') this.applyMask()
+    if (mapped === 'busy' || mapped === 'takeover' || mapped === 'release') this.applyOverlay()
     this.emitAll(mapped)
   }
 
@@ -191,30 +212,11 @@ export class BrowserRuntime {
   }
 
   listTabs(): BrowserTabState[] {
-    const active = this.pool.activeTab
-    return [...this.tabs.values()].map((tab) => ({
-      id: tab.id,
-      url: tab.url,
-      title: tab.title,
-      loading: tab.loading,
-      visible: tab.id === active,
-    }))
-  }
-
-  poolTabs(): PoolTabView[] {
-    return this.pool.list()
+    return [...this.tabs.values()].map((tab) => this.projectTabState(tab))
   }
 
   shellState(): BrowserShellState {
-    const active = this.pool.activeTab
-    const tabs = [...this.tabs.values()].map((tab) => ({
-      id: tab.id,
-      url: tab.url,
-      title: tab.title,
-      loading: tab.loading,
-      visible: tab.id === active,
-    }))
-    void active
+    const tabs = [...this.tabs.values()].map((tab) => this.projectTabState(tab))
     return {
       tabs,
       window: this.windowState,
@@ -222,6 +224,7 @@ export class BrowserRuntime {
       busy: this.pool.isBusy(),
       busyTool: this.pool.busyToolOf(),
       latestOp: this.ops.at(-1) ?? null,
+      ui: { mode: this.effectiveOverlayMode() },
     }
   }
 
@@ -230,40 +233,101 @@ export class BrowserRuntime {
   }
 
   /**
-   * Restore the persisted tab ledger (tabs reappear on demand; login state
-   * lives in the per-user partition).
+   * Restore the persisted tab ledger (lazy, Chrome-like session restore):
+   * registry metadata is repopulated immediately; VIEWS are materialized on
+   * first browser use (`ensureWindow`/`showWindow`) — restoring must never
+   * pop the window at app boot or on a session switch.
    */
   restoreLedger(): void {
-    const ledger = this.store.getGroupLedger() as never
+    const ledger = this.store.getGroupLedger()
     if (ledger === undefined) return
-    const tabLedger = ledger as { activeTabId?: number; tabs?: Array<{ tabId: number; url: string; title: string }>; savedAt?: number }
+    const ledgerTabs = ledger.tabs ?? []
     this.pool.restoreLedger({
       version: 1,
-      activeTabId: tabLedger.activeTabId,
-      tabs: tabLedger.tabs ?? [],
-      savedAt: tabLedger.savedAt ?? Date.now(),
+      activeTabId: ledger.activeTabId,
+      tabs: ledgerTabs,
+      savedAt: ledger.savedAt ?? Date.now(),
     })
+    let maxId = 0
+    for (const item of ledgerTabs) {
+      if (typeof item.tabId === 'number') maxId = Math.max(maxId, item.tabId)
+    }
+    this.nextTabId = Math.max(this.nextTabId, maxId + 1)
+    this.pendingLedgerTabs = ledgerTabs
+      .filter((item): item is { tabId: number; url: string; title: string } => typeof item.tabId === 'number')
+      .map((item) => ({ tabId: item.tabId, url: item.url ?? '', title: item.title ?? '' }))
+    this.relayout()
+  }
+
+  /** Materialize pending ledger tabs into real views (idempotent). Triggered
+   * when the browser actually opens; runs under the serial mutex so agent
+   * operations never interleave with restoration. A session switch / closeAll
+   * bumps the epoch, cancelling any in-flight materialization so a previous
+   * user's tabs can never resurrect under the new user's partition. */
+  materializePendingTabs(): void {
+    if (this.materializing) return
+    const pending = this.pendingLedgerTabs
+    if (pending.length === 0) return
+    this.materializing = true
+    const epoch = this.materializeEpoch
+    void (async () => {
+      try {
+        for (const item of [...pending]) {
+          if (epoch !== this.materializeEpoch || this.disposed) return
+          if (this.tabs.has(item.tabId)) {
+            this.pendingLedgerTabs = this.pendingLedgerTabs.filter((p) => p.tabId !== item.tabId)
+            continue
+          }
+          try {
+            await this.createTabReal(item.url, undefined, item.tabId, 'ai')
+            if (epoch === this.materializeEpoch) {
+              this.pendingLedgerTabs = this.pendingLedgerTabs.filter((p) => p.tabId !== item.tabId)
+            }
+          } catch {
+            // A restored tab that fails to load is dropped (createTabReal's
+            // error path already cleans view + registry meta).
+            this.pendingLedgerTabs = this.pendingLedgerTabs.filter((p) => p.tabId !== item.tabId)
+          }
+        }
+      } finally {
+        this.materializing = false
+      }
+      if (!this.disposed && epoch === this.materializeEpoch) {
+        const ledger = this.store.getGroupLedger()
+        if (ledger !== undefined && ledger.activeTabId !== undefined && this.pool.has(ledger.activeTabId)) {
+          this.pool.setActiveTab(ledger.activeTabId)
+        }
+        this.relayout()
+        this.saveLedger()
+      }
+    })()
   }
 
   /** Persist the tab ledger (host wires this on every state change). */
   saveLedger(): void {
-    this.store.saveGroupLedger(this.pool.snapshotLedger() as never)
+    this.store.saveGroupLedger(this.pool.snapshotLedger())
   }
 
-  /** Swap the partition used by NEW tab views (user switch). */
+  /** Swap the partition used by NEW tab views (user switch) and the store. */
   setPartition(partition: string): void {
     this.partition = partition
   }
 
+  /** Switch the per-user store (session change): re-point ledger/stores. */
+  setStore(store: BrowserStore): void {
+    this.store = store
+  }
+
   // ------------------------------------------------------------ tab creation
 
-  /** Set the loopback origin the shell/mask pages are served from. */
+  /** Set the loopback origin the shell/overlay pages are served from. */
   setShellOrigin(origin: string): void {
     this.shellOrigin = origin
   }
 
   /**
-   * Open a tab (agent path: serial + quota wait; user path: fail-fast quota).
+   * Open a tab (agent path: serial + quota wait under the user gate; user
+   * path: fail-fast quota, gate bypassed).
    */
   async open(url: string | undefined, signal?: AbortSignal, user = false): Promise<BrowserTabState> {
     if (this.disposed) throw new Error('browser: runtime disposed')
@@ -271,19 +335,26 @@ export class BrowserRuntime {
       if (!this.pool.tryReserveTab()) {
         throw browserError('quota', 'browser: tab limit reached — close a tab first')
       }
-      return await this.createTab(url, signal)
+      try {
+        return await this.createTabReal(url, signal, undefined, 'user')
+      } catch (error) {
+        this.pool.releaseReservation()
+        throw error
+      }
     }
-    await this.pool.reserveTab(signal)
-    try {
-      return await this.createTab(url, signal)
-    } catch (error) {
-      this.pool.releaseReservation()
-      throw error
-    }
+    return await this.pool.withOperation('browser_open', async () => {
+      await this.pool.reserveTab(signal)
+      try {
+        return await this.createTabReal(url, signal, undefined, 'ai')
+      } catch (error) {
+        this.pool.releaseReservation()
+        throw error
+      }
+    }, signal)
   }
 
-  private async createTab(url: string | undefined, signal?: AbortSignal): Promise<BrowserTabState> {
-    const id = this.nextTabId++
+  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor): Promise<BrowserTabState> {
+    const id = fixedId ?? this.nextTabId++
     const view = this.adapter.createView(this.partition)
     const cdp = new CdpSession(view.webContents.cdp)
     try {
@@ -292,7 +363,7 @@ export class BrowserRuntime {
       try { view.destroy() } catch { /* teardown never throws */ }
       throw cause
     }
-    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', loading: false, disposers: [] }
+    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [] }
     this.tabs.set(id, tab)
     this.pool.registerTab(id, '', '')
 
@@ -314,6 +385,11 @@ export class BrowserRuntime {
       view.webContents.on('did-navigate', () => this.updateTabState(tab))
       view.webContents.on('did-navigate-in-page', () => this.updateTabState(tab))
       view.webContents.on('page-title-updated', () => this.updateTabState(tab))
+      view.webContents.on('page-favicon-updated', (_event: unknown, favicons: unknown) => {
+        const first = Array.isArray(favicons) ? favicons[0] : undefined
+        tab.favicon = typeof first === 'string' ? first : ''
+        this.emitAll('tab-meta')
+      })
       const wc = view.webContents
       view.webContents.on('render-process-gone', () => {
         const target = tab.url
@@ -327,13 +403,13 @@ export class BrowserRuntime {
       tab.disposers.push(installPermissionGuard(session))
       tab.disposers.push(this.guard.installDownloadGuard(session, (summary) => {
         this.record('browser_download', id, summary)
-      }, this.downloadRecorder(), '', this.actor(), this.options.downloadDir))
+      }, this.downloadRecorder(), '', actor, this.options.downloadDir))
 
       if (url !== undefined && url !== '') {
-        await this.navigateInternal(id, url, 'domcontentloaded', 'ai')
+        await this.navigateInternal(id, url, 'domcontentloaded', actor)
       }
       this.updateTabState(tab)
-      this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url)
+      this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url, false, actor)
       void signal
       return this.tabState(id)
     } catch (cause) {
@@ -364,7 +440,7 @@ export class BrowserRuntime {
     }
   }
 
-  /** Re-layout tabs (active one visible) + place the interception mask on top. */
+  /** Re-layout tabs (active one visible) + place the AI overlay on top. */
   private relayout(): void {
     const bounds = this.contentBounds()
     const active = this.pool.activeTab
@@ -377,24 +453,68 @@ export class BrowserRuntime {
     if (visibleTab !== undefined && this.window !== null && !this.window.isDestroyed()) {
       visibleTab.view.moveToTop(this.window)
     }
-    this.applyMask()
+    this.applyOverlay()
   }
 
-  /** Mask shows while the AI drives (any session) and the user has NOT taken over. */
-  private shouldMaskShow(): boolean {
-    if (this.pool.controlled) return false
-    return this.pool.isBusy()
+  /** Effective overlay mode: while the AI drives (and the user has NOT taken
+   * over) the overlay covers the content as an interception mask with the
+   * 「AI 操作中 · 点击让我接管」pill; otherwise it shows the user-selected UI. */
+  private effectiveOverlayMode(): OverlayMode | 'mask' {
+    if (this.pool.controlled) return this.overlayMode
+    if (this.pool.isBusy()) return 'mask'
+    return this.overlayMode
   }
 
-  private applyMask(): void {
-    if (this.mask === null) return
+  /** Overlay view bounds per mode. The view is always attached (z-top); its
+   * rectangle defines what it owns/intercepts — outside it the page receives
+   * input. */
+  private overlayBounds(mode: OverlayMode | 'mask'): { x: number; y: number; width: number; height: number } {
+    const size = this.window?.getContentSize() ?? { width: 0, height: 0 }
+    const w = Math.max(0, size.width)
+    const h = Math.max(0, size.height)
+    switch (mode) {
+      case 'mask':
+      case 'viewer':
+        return { x: 0, y: BROWSER_SHELL_TOOLBAR_HEIGHT, width: w, height: Math.max(0, h - BROWSER_SHELL_TOOLBAR_HEIGHT) }
+      case 'panel':
+        return { x: Math.max(0, w - 340), y: 0, width: 340, height: h }
+      case 'menu':
+        // 6 items + separator: keep the rect short so the empty lower area
+        // does not dead-block page clicks below the menu.
+        return { x: Math.max(0, w - 240), y: BROWSER_SHELL_TOOLBAR_HEIGHT, width: 224, height: 244 }
+      case 'capsule':
+      default:
+        // Compact capsule: right-aligned inside its own view, 16px from the
+        // window edges; kept narrow so it blocks as little page as possible.
+        return { x: Math.max(0, w - 188), y: Math.max(0, h - 50), width: 172, height: 34 }
+    }
+  }
+
+  private applyOverlay(): void {
+    if (this.overlay === null) return
     if (this.window === null || this.window.isDestroyed()) return
-    this.mask.setBounds(this.contentBounds())
-    this.mask.moveToTop(this.window)
-    this.mask.setVisible(this.shouldMaskShow())
+    const mode = this.effectiveOverlayMode()
+    this.overlay.setBounds(this.overlayBounds(mode))
+    this.overlay.moveToTop(this.window)
+  }
+
+  /** User-driven overlay mode switch (panel/menu/viewer/capsule). The mode is
+   * recorded and takes effect once the AI stops driving (or immediately when
+   * the user controls the window). */
+  setOverlayMode(mode: OverlayMode): void {
+    if (mode !== 'capsule' && mode !== 'panel' && mode !== 'menu' && mode !== 'viewer') return
+    this.overlayMode = mode
+    this.applyOverlay()
+    this.emitAll('state')
+    // Leaving a floating surface (menu/viewer) hands the keyboard back to the
+    // shell toolbar so Ctrl+L/T/W/R keep working after overlay interactions.
+    if (mode === 'capsule' && this.window !== null && !this.window.isDestroyed()) {
+      this.window.focusPage()
+    }
   }
 
   async ensureWindow(origin?: string): Promise<NativeBrowserWindow> {
+    this.materializePendingTabs()
     if (this.window !== null && !this.window.isDestroyed()) {
       this.window.show()
       return this.window
@@ -402,22 +522,22 @@ export class BrowserRuntime {
     const win = this.adapter.createBrowserWindow()
     win.show()
     this.window = win
-    const mask = this.adapter.createMaskView(this.partition)
-    this.mask = mask
-    mask.attach(win, this.contentBounds())
+    const overlay = this.adapter.createMaskView(this.partition)
+    this.overlay = overlay
+    overlay.attach(win, this.overlayBounds('capsule'))
     if (origin !== undefined) {
       void win.loadURL(`${origin}/browser-shell`).catch((cause: unknown) => {
         void win.loadURL(`${origin}/browser-shell`).catch(() => {
           console.error('[dsh-browser] shell page failed to load', cause)
         })
       })
-      void mask.webContents.loadURL(`${origin}/browser-mask`).catch((cause: unknown) => {
-        void mask.webContents.loadURL(`${origin}/browser-mask`).catch(() => {
-          console.error('[dsh-browser] mask page failed to load', cause)
+      void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch((cause: unknown) => {
+        void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch(() => {
+          console.error('[dsh-browser] overlay page failed to load', cause)
         })
       })
     }
-    this.applyMask()
+    this.applyOverlay()
     this.windowResizeDisposer = win.onResize(() => { this.relayout() })
     this.windowClosedDisposer = win.onClosed(() => {
       for (const tab of this.tabs.values()) {
@@ -429,7 +549,8 @@ export class BrowserRuntime {
         }
       }
       this.tabs.clear()
-      this.mask = null
+      this.pool.clear()
+      this.overlay = null
       this.windowResizeDisposer?.()
       this.windowClosedDisposer?.()
       this.windowResizeDisposer = null
@@ -445,6 +566,7 @@ export class BrowserRuntime {
       this.relayout()
       return
     }
+    this.materializePendingTabs()
     this.window.show()
     this.relayout()
   }
@@ -456,7 +578,7 @@ export class BrowserRuntime {
 
   // ------------------------------------------------------------------- state
 
-  private record(tool: string, tab: number, summary: string, failed = false): void {
+  private record(tool: string, tab: number, summary: string, failed = false, actor: RecordActor = 'ai'): void {
     const tabEntry = this.tabs.get(tab)
     this.ops.push({
       seq: ++this.opSeq,
@@ -465,7 +587,7 @@ export class BrowserRuntime {
       tab,
       group: '',
       session: tabEntry?.ownerSession ?? '',
-      actor: 'ai',
+      actor,
       summary: maskBrowserSummary(summary),
       failed,
     })
@@ -475,12 +597,21 @@ export class BrowserRuntime {
 
   private tab(id: number): BrowserTab {
     const tab = this.tabs.get(id)
-    if (tab === undefined) throw browserError('not-found', `browser: unknown tab ${id}`)
+    if (tab === undefined) {
+      // A ledger-restored tab whose view was not materialized yet (lazy
+      // restore): kick materialization and ask the caller to retry.
+      if (this.pool.has(id)) {
+        this.materializePendingTabs()
+        throw browserError('not-found', `browser: tab ${id} is being restored — retry the operation`)
+      }
+      throw browserError('not-found', `browser: unknown tab ${id}`)
+    }
     return tab
   }
 
   /** Resolve a tab id: explicit (must exist) or the pool's active tab. */
   resolveTab(tabId: number | undefined): number {
+    if (this.pendingLedgerTabs.length > 0) this.materializePendingTabs()
     if (tabId !== undefined) {
       if (!this.pool.has(tabId)) throw browserError('not-found', `browser: unknown tab ${tabId}`)
       return tabId
@@ -492,7 +623,20 @@ export class BrowserRuntime {
 
   tabState(id: number): BrowserTabState {
     const tab = this.tab(id)
-    return { id: tab.id, url: tab.url, title: tab.title, loading: tab.loading, visible: tab.id === this.pool.activeTab }
+    return this.projectTabState(tab)
+  }
+
+  private projectTabState(tab: BrowserTab): BrowserTabState {
+    return {
+      id: tab.id,
+      url: tab.url,
+      title: tab.title,
+      loading: tab.loading,
+      visible: tab.id === this.pool.activeTab,
+      favicon: tab.favicon,
+      canGoBack: tab.canGoBack,
+      canGoForward: tab.canGoForward,
+    }
   }
 
   private updateTabState(tab: BrowserTab): void {
@@ -501,8 +645,23 @@ export class BrowserRuntime {
     tab.url = wc.getURL()
     tab.title = wc.getTitle() || tab.url || ''
     tab.loading = wc.isLoading()
+    try {
+      tab.canGoBack = wc.canGoBack()
+      tab.canGoForward = wc.canGoForward()
+    } catch {
+      // history introspection is best-effort
+    }
     this.pool.updateTabMeta(tab.id, tab.url, tab.title)
     this.emitAll('tab-meta')
+    this.refreshWindowTitle(tab)
+  }
+
+  /** Follow the active tab's page title in the native window caption. */
+  private refreshWindowTitle(tab: BrowserTab): void {
+    if (this.window === null || this.window.isDestroyed()) return
+    if (tab.id !== this.pool.activeTab) return
+    const title = tab.title !== '' ? tab.title : 'PicoAide 浏览器'
+    this.window.setTitle(title === 'PicoAide 浏览器' ? title : `${title} — PicoAide 浏览器`)
   }
 
   private releaseTabDisposers(id: number): void {
@@ -512,10 +671,6 @@ export class BrowserRuntime {
       try { dispose() } catch { /* 守卫释放失败不阻断关闭 */ }
     }
     tab.disposers.length = 0
-  }
-
-  private actor(userActor = false): RecordActor {
-    return userActor ? 'user' : 'ai'
   }
 
   /** Run one agent operation under the global serial mutex (user gate aware). */
@@ -562,12 +717,14 @@ export class BrowserRuntime {
         throw browserError('network', 'browser: navigation failed to load')
       }
     }
-    if (waitUntil === 'networkidle') {
+    if (waitUntil !== 'domcontentloaded') {
+      // 'load' settles on did-finish-load (or immediately when already done);
+      // 'networkidle' waits a quiet window (800ms) after the last load event.
       const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
-      await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
+      await this.waitForLoad(wc, waitUntil)(Math.min(budget, Math.max(0, this.options.loadTimeoutMs)))
     }
     this.updateTabState(tab)
-    this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`)
+    this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`, false, actor)
     this.store.addHistory({
       time: Date.now(),
       url,
@@ -583,32 +740,39 @@ export class BrowserRuntime {
       const deadline = Date.now() + Math.max(0, budgetMs)
       await new Promise<void>((resolve) => {
         let settled = false
+        let idleTimer: ReturnType<typeof setTimeout> | undefined
         const settle = (): void => {
           if (settled) return
           settled = true
           cleanup()
           resolve()
         }
+        const scheduleIdle = (): void => {
+          if (idleTimer !== undefined) return
+          idleTimer = setTimeout(settle, NETWORK_IDLE_TICK_MS)
+          idleTimer.unref?.()
+        }
         const cleanup = (): void => {
           wc.removeListener('dom-ready', onDomReady)
           wc.removeListener('did-finish-load', onFinish)
           clearTimeout(timer)
+          if (idleTimer !== undefined) clearTimeout(idleTimer)
         }
         const onDomReady = (): void => {
           if (waitUntil === 'domcontentloaded') settle()
         }
         const onFinish = (): void => {
           if (waitUntil === 'load') settle()
-          if (waitUntil === 'networkidle') {
-            const idle = setTimeout(settle, 800)
-            idle.unref?.()
-          }
+          if (waitUntil === 'networkidle') scheduleIdle()
         }
         wc.on('dom-ready', onDomReady)
         wc.on('did-finish-load', onFinish)
         const timer = setTimeout(settle, Math.max(0, deadline - Date.now()))
         timer.unref?.()
-        if (waitUntil !== 'domcontentloaded' && !wc.isLoading()) settle()
+        if (waitUntil !== 'domcontentloaded' && !wc.isLoading()) {
+          if (waitUntil === 'networkidle') scheduleIdle()
+          else settle()
+        }
         if (waitUntil === 'domcontentloaded' && wc.isLoading() === false) settle()
       })
     }
@@ -622,6 +786,7 @@ export class BrowserRuntime {
       wc.reload()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
+      this.record('browser_reload', tabId, `reload tab ${tabId}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
     return await this.agentRun('browser_reload', body, signal)
@@ -635,6 +800,7 @@ export class BrowserRuntime {
       wc.goBack()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
+      this.record('browser_go_back', tabId, `back to ${tab.url}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
     return await this.agentRun('browser_go_back', body, signal)
@@ -648,6 +814,7 @@ export class BrowserRuntime {
       wc.goForward()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
+      this.record('browser_go_forward', tabId, `forward to ${tab.url}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
     return await this.agentRun('browser_go_forward', body, signal)
@@ -656,9 +823,12 @@ export class BrowserRuntime {
   /** Switch the pool's active tab. */
   async switchTab(tabId: number, user = false, signal?: AbortSignal): Promise<void> {
     const body = async (): Promise<void> => {
+      this.materializePendingTabs()
       this.pool.setActiveTab(tabId)
       this.relayout()
-      this.record('browser_switch_tab', tabId, `switch to tab ${tabId}`)
+      const switched = this.tabs.get(tabId)
+      if (switched !== undefined) this.refreshWindowTitle(switched)
+      this.record('browser_switch_tab', tabId, `switch to tab ${tabId}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
     return await this.agentRun('browser_switch_tab', body, signal)
@@ -668,7 +838,7 @@ export class BrowserRuntime {
     const body = async (): Promise<void> => {
       this.destroyTab(tabId)
       this.relayout()
-      this.record('browser_close_tab', tabId, `close tab ${tabId}`)
+      this.record('browser_close_tab', tabId, `close tab ${tabId}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
     return await this.agentRun('browser_close_tab', body, signal)
@@ -676,24 +846,31 @@ export class BrowserRuntime {
 
   private destroyTab(id: number): void {
     const tab = this.tabs.get(id)
-    if (tab === undefined) return
-    try {
-      tab.cdp.detach()
-      tab.view.detach()
-      tab.view.destroy()
-    } catch { /* teardown never throws */ }
-    this.releaseTabDisposers(id)
-    this.tabs.delete(id)
+    if (tab !== undefined) {
+      try {
+        tab.cdp.detach()
+        tab.view.detach()
+        tab.view.destroy()
+      } catch { /* teardown never throws */ }
+      this.releaseTabDisposers(id)
+      this.tabs.delete(id)
+    }
+    // Drop the registry entry even when no view exists (restored ledger tabs
+    // in a failed-materialization state must never become un-closable).
     this.pool.removeTab(id)
   }
 
   /** Close everything (session switch / shell 清除). */
   async closeAll(user = false): Promise<void> {
     const body = async (): Promise<void> => {
+      // Cancel in-flight ledger materialization (a previous user's restore
+      // must not resurrect tabs after the pool was cleared).
+      this.materializeEpoch++
+      this.pendingLedgerTabs = []
       for (const id of [...this.tabs.keys()]) this.destroyTab(id)
       this.pool.clear()
       this.relayout()
-      this.record('browser_close', 0, 'close browser (all tabs)')
+      this.record('browser_close', 0, 'close browser (all tabs)', false, user ? 'user' : 'ai')
       this.hideWindow()
     }
     if (user) {
@@ -744,6 +921,9 @@ export class BrowserRuntime {
   async eval(tabId: number, expression: string, frame?: number, signal?: AbortSignal): Promise<string> {
     if (!this.options.evalEnabled) {
       throw browserError('policy', 'browser: browser_eval is disabled in this deployment')
+    }
+    if (typeof frame === 'number' && frame < 0) {
+      throw browserError('not-found', 'browser: frame index must be >= 0')
     }
     validateEvalExpression(expression)
     const resolved = this.resolveTab(tabId)
@@ -1021,8 +1201,17 @@ export class BrowserRuntime {
     return outcome
   }
 
-  /** Upload files through CDP (no native dialog). */
-  async uploadFile(tabId: number, paths: string[], signal?: AbortSignal): Promise<{ uploaded: number }> {
+  /** Upload files through CDP (no native dialog). Every path is vetted
+   * against the allowed directories (downloads dir + session workspace) —
+   * arbitrary local file uploads are refused. */
+  async uploadFile(tabId: number, paths: string[], signal?: AbortSignal, allowedDirs?: string[]): Promise<{ uploaded: number }> {
+    if (allowedDirs === undefined || allowedDirs.length === 0) {
+      throw browserError('policy', 'browser: upload_file is not allowed in this deployment (no allowed directories)')
+    }
+    if (!Array.isArray(paths) || paths.length === 0) {
+      throw browserError('policy', 'browser: upload_file requires at least one path')
+    }
+    const vetted = paths.map((p) => this.assertAllowedUploadPath(p, allowedDirs))
     const resolved = this.resolveTab(tabId)
     const outcome = await this.agentRun('browser_upload_file', async () => {
       const tab = this.tab(resolved)
@@ -1031,17 +1220,42 @@ export class BrowserRuntime {
       if (rootId === undefined) throw browserError('not-found', 'browser: cannot resolve document')
       const query = await tab.cdp.send<{ nodeId?: number }>('DOM.querySelector', { nodeId: rootId, selector: 'input[type=file]' })
       if (query.nodeId === undefined) throw browserError('not-found', 'browser: no file input found on this page')
-      await tab.cdp.send('DOM.setFileInputFiles', { nodeId: query.nodeId, files: paths })
-      return { uploaded: paths.length }
+      await tab.cdp.send('DOM.setFileInputFiles', { nodeId: query.nodeId, files: vetted })
+      return { uploaded: vetted.length }
     }, signal)
-    this.record('browser_upload_file', resolved, `upload ${paths.length} file(s)`)
+    this.record('browser_upload_file', resolved, `upload ${vetted.length} file(s)`)
     return outcome
+  }
+
+  /** Canonicalize + verify one upload path against the allowed directories
+   * (realpath when the file exists; symlinks are resolved). */
+  private assertAllowedUploadPath(path: string, allowedDirs: string[]): string {
+    if (typeof path !== 'string' || path.trim() === '') {
+      throw browserError('policy', 'browser: upload path must be a non-empty string')
+    }
+    let absolute: string
+    try {
+      absolute = realpathSync(path)
+    } catch {
+      absolute = resolve(path)
+    }
+    for (const dir of allowedDirs) {
+      if (typeof dir !== 'string' || dir.trim() === '') continue
+      let dirAbs: string
+      try {
+        dirAbs = realpathSync(dir)
+      } catch {
+        dirAbs = resolve(dir)
+      }
+      if (absolute === dirAbs || absolute.startsWith(dirAbs + sep)) return absolute
+    }
+    throw browserError('policy', 'browser: upload path is outside the allowed directories (downloads dir + session workspace)')
   }
 
   /** Wait for a page condition. */
   async waitFor(tabId: number, options: WaitForOptions, signal?: AbortSignal): Promise<{ ok: boolean; reason: string }> {
     const resolved = this.resolveTab(tabId)
-    const timeout = options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000)
+    const timeout = Math.min(options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000), 120_000)
     const deadline = Date.now() + timeout
     return await this.agentRun('browser_wait_for', async () => {
       const tab = this.tab(resolved)
@@ -1051,7 +1265,7 @@ export class BrowserRuntime {
         if (signal !== undefined && signal.aborted) throw browserError('interrupted', 'browser: wait aborted')
         try {
           const state = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-            expression: evalExpressionFor(options),
+            expression: evalExpressionFor(options, startUrl),
             returnByValue: true,
           })
           if (state.result?.value === true) {
@@ -1071,35 +1285,38 @@ export class BrowserRuntime {
   }
 
   /** Wait-for CDP expression builder (pure, testable). */
-  static waitExpression(options: WaitForOptions): string {
-    return evalExpressionFor(options)
+  static waitExpression(options: WaitForOptions, startUrl = ''): string {
+    return evalExpressionFor(options, startUrl)
   }
 
   // -------------------------------------------------------------- user gate
 
-  /** User takeover / release (whole window). */
-  setUserControl(active: boolean): void {
+  /** User takeover / release (whole window). Actor: 'user' on shell/button
+   * paths, 'ai' for the browser_takeover/browser_release tools. No-op changes
+   * are not recorded (the gate is idempotent). */
+  setUserControl(active: boolean, actor: RecordActor = 'user'): void {
+    const was = this.pool.controlled
+    this.pool.setUserControl(active)
+    if (was === this.pool.controlled) return
     if (active) {
-      this.pool.setUserControl(true)
-      this.record('browser_takeover', 0, 'user took over the browser')
+      this.record('browser_takeover', 0, 'user took over the browser', false, actor)
     } else {
-      this.pool.setUserControl(false)
-      this.record('browser_release', 0, 'user released browser control')
+      this.record('browser_release', 0, 'user released browser control', false, actor)
     }
   }
 
   // ------------------------------------------------------------- data (P1)
 
-  addBookmark(tabId: number, title?: string): { id: number; url: string; title: string } {
+  addBookmark(tabId: number, title?: string, actor: RecordActor = 'ai'): { id: number; url: string; title: string } {
     const resolved = this.resolveTab(tabId)
     const tab = this.tab(resolved)
     const entry = this.store.addBookmark({
       url: tab.url,
       title: title ?? tab.title,
-      actor: this.actor(),
+      actor,
       group: '',
     })
-    this.record('browser_bookmarks_add', resolved, `bookmark ${entry.title}`)
+    this.record('browser_bookmarks_add', resolved, `bookmark ${entry.title}`, false, actor)
     return { id: entry.id, url: entry.url, title: entry.title }
   }
 
@@ -1111,8 +1328,9 @@ export class BrowserRuntime {
     return this.store.removeBookmark(id)
   }
 
-  history(filter: { q?: string | undefined; limit?: number | undefined } = {}): HistoryEntry[] {
-    return this.store.queryHistory({ ...filter, group: undefined })
+  history(filter: { q?: string | undefined; limit?: number | undefined; group?: string | undefined } = {}): HistoryEntry[] {
+    const { group, ...rest } = filter
+    return this.store.queryHistory({ ...rest, group: group !== undefined && group !== '' ? group : undefined })
   }
 
   downloads(filter: { status?: DownloadEntry['status'] | undefined; limit?: number | undefined } = {}): DownloadEntry[] {
@@ -1121,6 +1339,18 @@ export class BrowserRuntime {
 
   removeDownload(id: number): boolean {
     return this.store.removeDownload(id)
+  }
+
+  /** Open a downloaded file with the OS default handler (downloads viewer). */
+  async openDownloadPath(id: number): Promise<{ ok: boolean; error?: string }> {
+    const entry = this.store.queryDownloads({ limit: 500 }).find((d) => d.id === id)
+    if (entry === undefined) throw browserError('not-found', 'browser: unknown download')
+    if (entry.path === '' || entry.status !== 'done') {
+      throw browserError('not-found', 'browser: this download has no finished file to open')
+    }
+    const result = await this.adapter.openPath(entry.path)
+    this.record('browser_download_open', 0, `open download: ${entry.path}`)
+    return result.error === undefined ? { ok: true } : { ok: false, error: result.error }
   }
 
   /** Download recorder adapter for guard events. */
@@ -1139,6 +1369,9 @@ export class BrowserRuntime {
 
   /** Trigger a programmatic download of a URL. */
   async downloadUrl(url: string, signal?: AbortSignal): Promise<void> {
+    if (!this.guard.allowNavigation(url)) {
+      throw browserError('navigation-blocked', `browser: download denied — ${url.slice(0, 200)}`)
+    }
     const active = this.pool.activeTab
     if (active === undefined) throw browserError('not-found', 'browser: no tab open in the browser')
     await this.agentRun('browser_download', async () => {
@@ -1174,6 +1407,8 @@ export class BrowserRuntime {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.materializeEpoch++
+    this.pendingLedgerTabs = []
     for (const tab of this.tabs.values()) {
       try {
         tab.cdp.detach()
@@ -1187,14 +1422,16 @@ export class BrowserRuntime {
     this.windowClosedDisposer?.()
     if (this.window !== null && !this.window.isDestroyed()) this.window.close()
     this.window = null
-    this.mask = null
+    this.overlay = null
     this.pool.dispose()
     this.listeners.clear()
   }
 }
 
-/** Build the wait-for evaluation expression (pure function). */
-function evalExpressionFor(options: WaitForOptions): string {
+/** Build the wait-for evaluation expression (pure function). The `startUrl`
+ * is the URL captured when the wait began — `url-change` compares against it
+ * so the condition only succeeds on an ACTUAL navigation. */
+function evalExpressionFor(options: WaitForOptions, startUrl = ''): string {
   const sel = options.selector !== undefined ? JSON.stringify(options.selector) : 'null'
   const text = options.text !== undefined ? JSON.stringify(options.text) : 'null'
   switch (options.condition) {
@@ -1205,9 +1442,12 @@ function evalExpressionFor(options: WaitForOptions): string {
     case 'text-appear':
       return `(() => (document.body ? document.body.innerText : '').includes(${text}))()`
     case 'url-change':
-      return `(() => location.href.length > 0)()`
+      // TRUE only when the page actually navigated away from the captured URL.
+      return `(() => location.href !== ${JSON.stringify(startUrl)})()`
     case 'network-idle':
-      return `(() => performance.getEntriesByType('resource').length > 0 || true)()`
+      // TRUE once the last resource has been quiet for at least 800ms (or the
+      // document is already complete with no resource entries at all).
+      return `(() => { const rs = performance.getEntriesByType('resource'); if (rs.length === 0) return document.readyState === 'complete'; const last = rs[rs.length - 1]; return performance.now() - (last.responseEnd || 0) > ${String(NETWORK_IDLE_TICK_MS)}; })()`
     case 'settled':
       return `(() => document.readyState === 'complete')()`
     default:

@@ -45,6 +45,7 @@ const WRITE_APIS = new Set([
   'sendBeacon',
   'setItem',
   'write',
+  'writeln',
   'submit',
   'open',
   'alert',
@@ -54,7 +55,14 @@ const WRITE_APIS = new Set([
   'pushState',
   'replaceState',
   'assign',
+  'replace',
   'reload',
+  'back',
+  'forward',
+  'go',
+  'close',
+  'reset',
+  'requestSubmit',
   'postMessage',
   'setTimeout',
   'setInterval',
@@ -80,6 +88,29 @@ const WRITE_APIS = new Set([
   'scrollTo',
   'scrollBy',
   'execCommand',
+  // in-place array mutation (page state survives eval)
+  'push',
+  'pop',
+  'shift',
+  'unshift',
+  'splice',
+  'sort',
+  'reverse',
+  'fill',
+  'copyWithin',
+  // object/reflection writes
+  'defineProperty',
+  'defineProperties',
+  'setPrototypeOf',
+  'deleteProperty',
+  'set',
+  'delete',
+  // media / presentation side effects
+  'play',
+  'pause',
+  'lock',
+  'requestFullscreen',
+  'exitFullscreen',
 ])
 
 interface AnyNode {
@@ -127,14 +158,19 @@ function findViolation(node: AnyNode, source: string): string | null {
     }
     if (type === 'CallExpression') {
       const callee = current.callee as AnyNode | undefined
-      const name = memberName(callee)
-      if (name !== null && WRITE_APIS.has(name)) {
+      const name = callTargetName(callee)
+      if (name === undefined) {
+        return 'dynamic call target is not allowed (read-only eval)'
+      }
+      if (name !== null && (WRITE_APIS.has(name) || name === 'eval' || name === 'Function')) {
         return `call to ${name} is not allowed (read-only eval)`
       }
     }
     if (type === 'MemberExpression') {
       const name = memberName(current)
-      if (name !== null && WRITE_APIS.has(name)) {
+      if (name === undefined) {
+        // Non-literal computed READ is allowed (data access like data[key]).
+      } else if (name !== null && WRITE_APIS.has(name)) {
         return `access to ${name} is not allowed (read-only eval)`
       }
     }
@@ -167,13 +203,43 @@ function isNode(value: unknown): value is AnyNode {
   return typeof value === 'object' && value !== null && typeof (value as { type?: unknown }).type === 'string'
 }
 
-/** Resolve the dotted member name of a callee/member (a.b.c → 'c'), null if computed. */
-function memberName(node: AnyNode | undefined): string | null {
+/** Resolve the fixed call-target name of a callee, or `undefined` when the
+ * callee cannot be statically proven to be a fixed name (dynamic computed
+ * access, sequence/conditional callees, optional chains, …) — such calls are
+ * rejected rather than risk executing an un-vetted side-effect API. */
+function callTargetName(callee: AnyNode | undefined): string | null | undefined {
+  if (callee === undefined) return null
+  let node = callee
+  if (node.type === 'ChainExpression') {
+    node = (node as unknown as { expression?: AnyNode }).expression as AnyNode
+  }
+  if (node === undefined) return undefined
+  if (node.type === 'Identifier') return (node as { name?: string }).name ?? null
+  if (node.type === 'MemberExpression') return memberName(node)
+  // A pure arrow IIFE is self-contained: its body is walked by the AST
+  // validator (side-effect APIs inside are rejected), so the call itself
+  // needs no target-name check.
+  if (node.type === 'ArrowFunctionExpression') return null
+  return undefined
+}
+
+/** Resolve the dotted member name of a callee/member (a.b.c → 'c').
+ * String-literal computed access (`window['fetch']`) resolves to its value;
+ * non-literal computed access yields `undefined` (unverifiable); non-member
+ * callees yield `null`. */
+function memberName(node: AnyNode | undefined): string | null | undefined {
   if (node === undefined) return null
   if (node.type === 'Identifier') return (node as { name?: string }).name ?? null
-  if (node.type === 'MemberExpression' && (node as { computed?: boolean }).computed !== true) {
+  if (node.type === 'MemberExpression') {
     const property = (node as { property?: AnyNode }).property
-    if (property !== undefined && property.type === 'Identifier') return (property as { name?: string }).name ?? null
+    if ((node as { computed?: boolean }).computed !== true) {
+      if (property !== undefined && property.type === 'Identifier') return (property as { name?: string }).name ?? null
+      return null
+    }
+    if (property !== undefined && property.type === 'Literal' && typeof property.value === 'string') {
+      return property.value
+    }
+    return undefined
   }
   return null
 }
@@ -213,7 +279,9 @@ export function wrapEvalExpression(expression: string): string {
   })()`
 }
 
-/** Redact secret-shaped string values inside an arbitrary JSON value (deep). */
+/** Redact secret-shaped string values inside an arbitrary JSON value (deep).
+ * Values under secret-shaped KEYS are masked regardless of the value's own
+ * text (a session id value need not contain the word "token"). */
 export function maskEvalResult(value: unknown, depth = 0): unknown {
   if (depth > MAX_EVAL_RESULT_DEPTH) return '[depth-limit]'
   if (typeof value === 'string') return maskString(value)
@@ -226,7 +294,9 @@ export function maskEvalResult(value: unknown, depth = 0): unknown {
       if (count >= 128) { out['…'] = '[truncated]'; break }
       count++
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      out[key] = maskEvalResult((value as Record<string, unknown>)[key], depth + 1)
+      const inner = (value as Record<string, unknown>)[key]
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      out[key] = SECRET_VALUE.test(key) ? MASK : maskEvalResult(inner, depth + 1)
     }
     return out
   }

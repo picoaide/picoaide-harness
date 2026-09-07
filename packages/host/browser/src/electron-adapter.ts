@@ -58,6 +58,8 @@ export interface NativeWebContents {
   goBack(): void
   goForward(): void
   reload(): void
+  canGoBack(): boolean
+  canGoForward(): boolean
   capturePage(rect?: NativeBounds): Promise<NativeImage>
   getURL(): string
   getTitle(): string
@@ -128,6 +130,9 @@ export interface NativeBrowserWindow {
   onResize(listener: () => void): () => void
   /** Observe the window being destroyed (agent close or app quit). */
   onClosed(listener: () => void): () => void
+  /** Focus the window's own webContents (toolbar shell page) — hands keyboard
+   * shortcuts back after the overlay view releases focus. */
+  focusPage(): void
 }
 
 /**
@@ -140,6 +145,8 @@ export interface ElectronAdapter {
   createMaskView(partition?: string): NativeView
   createBrowserWindow(): NativeBrowserWindow
   showSaveDialog(options: { title: string; defaultPath: string }): Promise<{ canceled: boolean; filePath?: string }>
+  /** Open a local path with the OS default handler (downloads viewer). */
+  openPath(path: string): Promise<{ error?: string }>
 }
 
 /**
@@ -185,8 +192,11 @@ export const BROWSER_PARTITION = browserPartitionFor(null)
 /** Height (DIP) of the control-shell toolbar area overlaid by tab views. */
 export const BROWSER_SHELL_TOOLBAR_HEIGHT = 66
 
-/** Default browser window size (DIP). */
-const BROWSER_WINDOW_DEFAULT = { width: 1100, height: 780 }
+/** Default browser window size (DIP) — matches the PicoAide main window
+ * defaults so the browser opens at the same footprint (2026-09-07 用户反馈). */
+const BROWSER_WINDOW_DEFAULT = { width: 1280, height: 840 }
+/** Browser window minimums (mirror the main window 900×640). */
+const BROWSER_WINDOW_MIN = { width: 900, height: 640 }
 
 /** Lazy real adapter over Electron (imported only on first browser start). */
 export function createRealElectronAdapter(): ElectronAdapter {
@@ -238,6 +248,8 @@ export function createRealElectronAdapter(): ElectronAdapter {
         goBack: () => wc.goBack(),
         goForward: () => wc.goForward(),
         reload: () => wc.reload(),
+        canGoBack: () => wc.navigationHistory.canGoBack(),
+        canGoForward: () => wc.navigationHistory.canGoForward(),
         capturePage: (rect) => wc.capturePage(rect),
         getURL: () => wc.getURL(),
         getTitle: () => wc.getTitle(),
@@ -318,6 +330,8 @@ export function createRealElectronAdapter(): ElectronAdapter {
           goBack: () => wc.goBack(),
           goForward: () => wc.goForward(),
           reload: () => wc.reload(),
+          canGoBack: () => false,
+          canGoForward: () => false,
           capturePage: (rect) => wc.capturePage(rect),
           getURL: () => wc.getURL(),
           getTitle: () => wc.getTitle(),
@@ -345,6 +359,8 @@ export function createRealElectronAdapter(): ElectronAdapter {
       const win = new BrowserWindow({
         width: BROWSER_WINDOW_DEFAULT.width,
         height: BROWSER_WINDOW_DEFAULT.height,
+        minWidth: BROWSER_WINDOW_MIN.width,
+        minHeight: BROWSER_WINDOW_MIN.height,
         title: 'PicoAide 浏览器',
         show: true,
         backgroundColor: '#f2f3f5',
@@ -425,11 +441,21 @@ export function createRealElectronAdapter(): ElectronAdapter {
             closedListeners.delete(listener)
           }
         },
+        focusPage: () => {
+          if (win.isDestroyed()) return
+          win.focus()
+          win.webContents.focus()
+        },
       }
     },
     showSaveDialog: async (options) => {
       const result = await dialog.showSaveDialog(options)
       return { canceled: result.canceled, filePath: result.filePath }
+    },
+    openPath: async (path) => {
+      const { shell } = electron
+      const error = await shell.openPath(path)
+      return error === '' ? {} : { error }
     },
   }
 }

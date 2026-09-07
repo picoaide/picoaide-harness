@@ -39,23 +39,3 @@ export class BrowserError extends Error {
 export function browserError(code: BrowserErrorCode, message: string): BrowserError {
   return new BrowserError(code, message)
 }
-
-/** Map an arbitrary thrown value to a BrowserError (unknown → not-found is
- * wrong semantically; unknown → `not-found` is used only when the thrower was
- * an element/selector failure). For unknown values, wrap as `not-found` is NOT
- * allowed — use `interrupted`? No: unknown failures stay `network`? The
- * conservative mapping: unknown → `timeout` would lie too. Use a generic
- * `policy`-free fallback: map unknown to `not-found` only when message matches
- * element patterns; otherwise rethrow. */
-export function asBrowserError(cause: unknown): BrowserError {
-  if (cause instanceof BrowserError) return cause
-  if (cause instanceof Error) {
-    const message = cause.message
-    if (message.includes('not found')) return new BrowserError('not-found', message)
-    if (message.includes('navigation denied')) return new BrowserError('navigation-blocked', message)
-    if (message.includes('timeout')) return new BrowserError('timeout', message)
-    if (message.includes('Network')) return new BrowserError('network', message)
-    return new BrowserError('timeout', message)
-  }
-  return new BrowserError('timeout', String(cause))
-}
