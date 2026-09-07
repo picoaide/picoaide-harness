@@ -204,6 +204,7 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     postErr('navigate', { url: normalized })
   }
   $('addr').addEventListener('keydown', (e) => {
+    if (!state.controlled) return // masked: only 我来操作 unlocks the window
     if (e.key === 'Enter') {
       e.preventDefault()
       go()
@@ -214,6 +215,8 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   $('menu-btn').addEventListener('click', () => post('overlay', { mode: state.uiMode === 'menu' ? 'capsule' : 'menu' }))
 
   document.addEventListener('keydown', (e) => {
+    // While masked the whole window is locked (我来操作 is the only entry).
+    if (!state.controlled && e.key !== 'Escape') return
     if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); $('addr').focus(); $('addr').select() }
     if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); postErr('open') }
     if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); const t = state.tabs.find((x) => x.visible); if (t) post('close-tab', { tab: t.id }).then(refresh) }
@@ -456,11 +459,23 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   function applyMode(next) {
     mode = next
     document.body.dataset.mode = mode
-    if (mode === 'mask') {
-      $('txt').textContent = 'AI 正在操作' + (state.busyTool ? ' · ' + labelOf(state.busyTool) : '')
-    }
+    if (mode === 'mask') renderMask()
     if (mode === 'menu') renderMenu()
     if (mode === 'viewer') renderViewer(viewerKind, $('viewer-search').value || '')
+  }
+
+  /** Mask pill: the ONLY browser entry while masked — 我来操作 unlocks the
+   * window; the pill narrates the current AI state (busy tool / idle). */
+  function renderMask() {
+    const txt = $('txt')
+    const hint = $('hint')
+    if (state.busy) {
+      txt.textContent = 'AI 正在操作 · ' + labelOf(state.busyTool)
+      hint.textContent = '点击让我接管'
+    } else {
+      txt.textContent = 'AI 空闲'
+      hint.textContent = '点击我来操作'
+    }
   }
 
   async function refresh() {
@@ -470,6 +485,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       state.busy = next.busy === true
       state.busyTool = next.busyTool || ''
       if (next.ui && next.ui.mode && next.ui.mode !== mode) applyModeInner(next.ui.mode)
+      else if (mode === 'mask') renderMask()
       renderCapsule()
       renderStream()
     } catch { /* keep last state */ }
@@ -555,7 +571,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       const b = document.createElement('button')
       b.className = 'mi' + (item.danger ? ' danger' : '')
       b.textContent = item.label
-      b.addEventListener('click', () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); item.action() })
+      b.addEventListener('click', () => { post('overlay', { mode: 'capsule' }); item.action() })
       menu.appendChild(b)
     }
     menu.classList.add('open')
@@ -634,10 +650,14 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   // (after panel/menu/viewer interactions) so Ctrl+T/W/R keep working; Ctrl+L
   // closes the overlay surface (the host then focuses the shell address bar).
   document.addEventListener('keydown', (e) => {
+    // While masked the window is locked: only the 我来操作 pill unlocks it —
+    // no shortcut may bypass the mask.
     if (e.key === 'Escape') {
-      if (state.controlled) { post('takeover', { active: false }) }
+      if (state.controlled) post('takeover', { active: false })
       post('overlay', { mode: 'capsule' })
+      return
     }
+    if (!state.controlled) return
     if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); post('overlay', { mode: 'capsule' }) }
     if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); post('open').then(refresh) }
     if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); fetch('/api/pico/browser/state').then((r) => r.json()).then((s) => { const t = (s.tabs || []).find((x) => x.visible); if (t) post('close-tab', { tab: t.id }).then(refresh) }) }
