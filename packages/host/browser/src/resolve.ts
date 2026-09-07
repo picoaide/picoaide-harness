@@ -1,34 +1,84 @@
 /**
- * Session → group identity resolution (v4 §3): every browser tool resolves
- * the calling session's group key before touching tabs. Subagents inherit
- * their top-level parent session's group through an explicit lineage table
- * (fed by session-creation events; a missing entry falls back to the agent's
- * own id — safe, never privileges-crossing).
+ * Project-scoped group identity (v4.1, 2026-09-07 修正): the browser groups
+ * by PROJECT (workspace), not by chat session — one project = one tab group;
+ * the group name IS the project name. Sessions of the same project share the
+ * group (parallel driving is serialized inside the group); different projects
+ * are fully isolated (foreign-tab). Subagents inherit their parent session's
+ * cwd (fork lineage), so project resolution needs no lineage walk.
  * @module @picoaide/dsh-browser
  */
 
 /** Opaque session identity (DSH SessionId string). */
 export type SessionId = string
 
-/** Group key = top-level session id. */
-export type GroupKey = SessionId
+/** Group key = project identity (canonical cwd, or a session fallback). */
+export type GroupKey = string
 
-/** Badge/label source priority: explicit rename > session title > short id. */
-export function groupLabelFrom(title: string | undefined, sessionId: SessionId): string {
-  if (title !== undefined && title.trim() !== '') return title.trim()
-  return `会话 ${sessionId.slice(0, 6)}`
+/** Project key prefix for the session-level fallback (no cwd available). */
+export const SESSION_KEY_PREFIX = 'session:'
+
+/** The live agent shape we inspect for project info (structural, defensive —
+ * the declared Agent interface carries `id`; session internals are reached
+ * through runtime-augmented fields that vary across DSH versions). */
+export interface AgentProjectInfo {
+  id: SessionId
+  session?: {
+    header?: { cwd?: string }
+    meta?: { cwd?: string }
+    cwd?: string
+  }
+}
+
+/** Canonicalize a cwd path into a stable group key (no trailing slash). */
+export function canonicalProjectKey(cwd: string): string {
+  let path = cwd
+  try {
+    path = path.trim().replace(/\\/g, '/')
+  } catch {
+    /* raw string fallback */
+  }
+  while (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1)
+  return `proj:${path}`
+}
+
+/** Session-level fallback key (used only when no cwd is resolvable). */
+export function sessionFallbackKey(sessionId: SessionId): GroupKey {
+  return `${SESSION_KEY_PREFIX}${sessionId}`
 }
 
 /**
- * Lineage registry: sessionId → top-level parent session id. Populated from
- * session-creation metadata (meta.parentSession + origin:'subagent'); the
- * resolver walks the chain to the root and caches every hop.
+ * Resolve the project group key for a tool call: prefer the agent session's
+ * working directory (the project); fall back to a per-session group when no
+ * cwd exists. `undefined` when no agent identity is available (callers throw
+ * `no-session`).
+ */
+export function projectKeyFrom(agent: AgentProjectInfo | undefined): GroupKey | undefined {
+  if (agent === undefined || typeof agent.id !== 'string' || agent.id === '') return undefined
+  const cwd = agent.session?.header?.cwd ?? agent.session?.meta?.cwd ?? agent.session?.cwd
+  if (typeof cwd === 'string' && cwd.trim() !== '') return canonicalProjectKey(cwd)
+  return sessionFallbackKey(agent.id)
+}
+
+/** Group display name: title first, then the directory name, then a default. */
+export function projectLabelFrom(title: string | undefined, cwd: string | undefined): string {
+  if (title !== undefined && title.trim() !== '') return title.trim()
+  if (cwd !== undefined && cwd.trim() !== '') {
+    const parts = cwd.trim().replace(/\\/g, '/').split('/').filter(Boolean)
+    const last = parts.at(-1)
+    if (last !== undefined && last !== '') return last
+  }
+  return '未命名项目'
+}
+
+/**
+ * Lineage registry (kept for session-level bookkeeping and future use):
+ * sessionId → top-level parent session id. Subagent project resolution does
+ * NOT depend on this (cwd is inherited), but session/oplog attribution does.
  */
 export class SessionLineage {
   private readonly parents = new Map<SessionId, SessionId>()
-  private readonly roots = new Map<SessionId, GroupKey>()
+  private readonly roots = new Map<SessionId, SessionId>()
 
-  /** Record a parent link (non-authoritative: unknown parents are ignored). */
   registerLineage(child: SessionId, parent: SessionId): void {
     if (child === parent || child === '' || parent === '') return
     this.parents.set(child, parent)
@@ -36,55 +86,41 @@ export class SessionLineage {
     this.roots.delete(parent)
   }
 
-  /** Remove a session's entries (session destroyed / group recycled). */
   forget(sessionId: SessionId): void {
     this.parents.delete(sessionId)
     this.roots.delete(sessionId)
   }
 
-  /** Resolve a session id to its top-level group key; returns the id itself
-   * when it is a root or no lineage is known (safe fallback: own group). */
-  resolve(sessionId: SessionId): GroupKey {
+  resolve(sessionId: SessionId): SessionId {
     const cached = this.roots.get(sessionId)
     if (cached !== undefined) return cached
+    // Walk up the chain (cycle-safe); CACHE EVERY HOP so mutually-recursive
+    // registrations resolve to one consistent root from either direction.
     const chain: SessionId[] = []
-    let current = sessionId
-    const seen = new Set<SessionId>()
-    while (true) {
-      if (seen.has(current)) break // defensive: cycle guard
-      seen.add(current)
+    let current: SessionId | undefined = sessionId
+    while (current !== undefined) {
+      if (chain.includes(current)) break
       chain.push(current)
-      const parent = this.parents.get(current)
-      if (parent === undefined || seen.has(parent)) break
-      current = parent
+      current = this.parents.get(current)
     }
-    const root = current
+    const root = chain.at(-1) ?? sessionId
     for (const hop of chain) this.roots.set(hop, root)
     return root
   }
 
-  /** All known root keys (for registry cleanup). */
-  rootsOf(): Set<GroupKey> {
-    const keys = new Set<GroupKey>(this.roots.values())
-    for (const [child, parent] of this.parents) {
-      keys.add(this.resolve(child))
-      void parent
-    }
+  rootsOf(): Set<SessionId> {
+    const keys = new Set<SessionId>(this.roots.values())
+    for (const child of this.parents.keys()) keys.add(this.resolve(child))
     return keys
   }
 
-  /** Size diagnostics (tests). */
   get size(): number {
     return this.parents.size + this.roots.size
   }
 }
 
-/**
- * Resolve the group key for a tool call. `agentId` is the calling session
- * (`exec.agent.id`); missing it (non-agent context) is an error at the tool
- * layer (no-session), handled by callers — this resolver never throws.
- */
+/** Legacy convenience kept for back-compat tests: resolve via lineage only. */
 export function resolveGroupKey(lineage: SessionLineage, agentId: string | undefined): GroupKey | undefined {
   if (agentId === undefined || agentId === '') return undefined
-  return lineage.resolve(agentId)
+  return sessionFallbackKey(lineage.resolve(agentId))
 }

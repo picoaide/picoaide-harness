@@ -1,25 +1,23 @@
 /**
- * Embedded agent-driven browser for PicoAide Harness (v4): owns the
- * WebContentsView tab pool (session-grouped), the CDP sessions, the
- * `browser_*` tool suite (32), the loopback shell API + SSE push, and the
- * local stores (bookmarks/history/downloads/group ledger).
+ * Embedded agent-driven browser for PicoAide Harness (v4.2 single pool):
+ * owns the WebContentsView tab pool, the CDP sessions, the `browser_*` tool
+ * suite, the loopback shell API + SSE push, the programmatic download path,
+ * the AI interception mask page, and the local stores.
  *
  * HTTP API (loopback, same-origin fenced):
- *   GET  /api/pico/browser/state          -> groups + window + control
+ *   GET  /api/pico/browser/state          -> tabs + window + busy + control
  *   GET  /api/pico/browser/ops            -> recent op log
  *   GET  /api/pico/browser/stream         -> SSE (state-change signals)
- *   POST /api/pico/browser/open           -> { url? } (foreground/user group)
- *   POST /api/pico/browser/navigate       -> { url } (foreground group)
- *   POST /api/pico/browser/reload|back|forward -> (foreground active tab)
+ *   POST /api/pico/browser/open           -> { url? } (user new tab)
+ *   POST /api/pico/browser/navigate       -> { url } (user address bar)
+ *   POST /api/pico/browser/reload|back|forward -> (active tab)
  *   POST /api/pico/browser/switch-tab     -> { tab }
- *   POST /api/pico/browser/switch-group   -> { group }
  *   POST /api/pico/browser/close-tab      -> { tab }
- *   POST /api/pico/browser/close-group    -> { group }
  *   POST /api/pico/browser/show|hide|takeover|clear-data
- *   GET  /api/pico/browser/bookmarks [+ POST {url,title} / DELETE ?id=]
- *   GET  /api/pico/browser/history        -> ?q=&group=&limit=
- *   GET  /api/pico/browser/downloads [DELETE ?id=]
- *   GET  /browser-shell                   -> the browser window shell (v4)
+ *   GET  /api/pico/browser/bookmarks [+ POST / DELETE ?id=]
+ *   GET  /api/pico/browser/history        -> ?q=&limit=
+ *   GET  /api/pico/browser/downloads      [DELETE ?id=]
+ *   GET  /browser-shell | /browser-mask   -> shell + interception mask pages
  * @module @picoaide/dsh-browser
  */
 
@@ -33,19 +31,16 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
-import { GroupRegistry, type GroupLedger } from './registry.ts'
-import { SessionLineage } from './resolve.ts'
+import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
 import { applyBrowserTools, parseToolGroups } from './tools.ts'
-import { BROWSER_SHELL_HTML } from './shell-pages.ts'
+import { BROWSER_SHELL_HTML, BROWSER_MASK_HTML } from './shell-pages.ts'
 import type { CredentialResolver } from './types.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
-    'pico/session-archived'(session: { id?: string; username?: string } | null): void
-    'pico/session-reopened'(session: { id?: string; username?: string } | null): void
   }
 }
 
@@ -65,13 +60,8 @@ export interface Config {
   textLimit?: number
   screenshotMaxWidth?: number
   screenshotQuality?: number
-  maxGroups?: number
-  maxTabsPerGroup?: number
-  maxTabsTotal?: number
   waitTimeoutMs?: number
-  archiveRetentionMs?: number
   downloadDir?: string
-  /** Tool groups to enable (navigate/interact/read/memory/artifacts/control); default all. */
   toolGroups?: string[]
 }
 
@@ -84,11 +74,7 @@ export const Config: z<Config> = z.object({
   textLimit: z.number(),
   screenshotMaxWidth: z.number(),
   screenshotQuality: z.number(),
-  maxGroups: z.number(),
-  maxTabsPerGroup: z.number(),
-  maxTabsTotal: z.number(),
   waitTimeoutMs: z.number(),
-  archiveRetentionMs: z.number(),
   downloadDir: z.string(),
   toolGroups: z.array(z.string()),
 })
@@ -140,14 +126,14 @@ function resolveUserDataDir(): string | undefined {
 }
 
 /**
- * Register the embedded browser plugin (v4).
+ * Register the embedded browser plugin (v4.2 single pool).
  * @param ctx - Cordis context carrying webServer/tools/systemPrompt/attachments.
  * @param config - runtime caps and enablement.
  */
 export function apply(ctx: Context, config: Config = {}): void {
   // 2026-08-26 product decision: browser actions run with no user-approval
   // prompt; browser use is granted through the workspace permission and the
-  // browser window shows every live action (v4: activity panel).
+  // browser window shows every live action (mask + activity panel).
 
   const currentUser = (): string | null => {
     try {
@@ -174,7 +160,6 @@ export function apply(ctx: Context, config: Config = {}): void {
           ...password !== undefined ? { password } : {},
         }
       }
-      // List credential ids + usernames (no secrets) through the user-scope dir.
       resolveCredentials.list = async (): Promise<Array<{ id: string; username?: string }>> => {
         try {
           const { userScopePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
@@ -212,66 +197,32 @@ export function apply(ctx: Context, config: Config = {}): void {
       ? join(userDataDir, 'browser-store', encodePartitionSegment(usernameForStore))
       : join(process.cwd(), '.browser-store', encodePartitionSegment(usernameForStore)),
   })
-  const registry = new GroupRegistry({
-    ...(config.maxGroups !== undefined ? { maxGroups: config.maxGroups } : {}),
-    ...(config.maxTabsPerGroup !== undefined || config.maxTabs !== undefined ? { maxTabsPerGroup: config.maxTabsPerGroup ?? config.maxTabs } : {}),
-    ...(config.maxTabsTotal !== undefined ? { maxTabsTotal: config.maxTabsTotal } : {}),
+  const pool = new TabPool({
+    ...(config.maxTabs !== undefined ? { maxTabs: config.maxTabs } : {}),
     ...(config.waitTimeoutMs !== undefined ? { waitTimeoutMs: config.waitTimeoutMs } : {}),
-    ...(config.archiveRetentionMs !== undefined ? { archiveRetentionMs: config.archiveRetentionMs } : {}),
   })
-  const lineage = new SessionLineage()
   const runtime = new BrowserRuntime(
     createRealElectronAdapter(),
     config,
     credentialResolver,
     browserPartitionFor(currentUser()),
-    { registry, lineage, store, currentUsername: currentUser },
+    { pool, store, currentUsername: currentUser },
   )
   runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
-  // Restore persisted group ledger (archived until reopened, v4 §10).
+  // Restore the persisted tab ledger; keep it fresh on every change.
   runtime.restoreLedger()
-  const saveLedger = (): void => {
-    registry.saveLedger = (ledger: GroupLedger) => { store.saveGroupLedger(ledger) }
-  }
-  saveLedger()
-  registry.onChange(() => saveLedger())
+  runtime.onAny(() => runtime.saveLedger())
 
-  // User switch: close every tab (old user's pages/login state), point new
-  // tabs at the new user's partition, swap the store to the new user.
+  // User switch: close every tab, point new tabs at the new user's partition.
   ctx.on('pico/session-changed', (next) => {
     const username = (next as { username?: string } | null)?.username ?? null
     void (async () => {
-      await runtime.closeAllGroups()
+      await runtime.closeAll(true)
       runtime.setPartition(browserPartitionFor(username))
     })().catch((cause: unknown) => {
       ctx.logger?.error('pico-browser: session change handling failed', cause)
     })
   })
-
-  // Session archived → archive its group (24h retention); reopened → restore.
-  ctx.on('pico/session-archived', (session) => {
-    const id = (session as { id?: string } | null)?.id
-    if (id === undefined) return
-    void runtime.archiveFor(id).catch((cause: unknown) => {
-      ctx.logger?.error('pico-browser: session archive handling failed', cause)
-    })
-  })
-  ctx.on('pico/session-reopened', (session) => {
-    const id = (session as { id?: string } | null)?.id
-    if (id === undefined) return
-    void runtime.reactivateFor(id).catch((cause: unknown) => {
-      ctx.logger?.error('pico-browser: session reopen handling failed', cause)
-    })
-  })
-  // Lineage: subagent sessions inherit their top-level parent's group.
-  const captureLineage = (sessionEvent: { id?: string; parentSession?: string; origin?: string } | null): void => {
-    const id = sessionEvent?.id
-    const parent = sessionEvent?.parentSession
-    if (id !== undefined && parent !== undefined && sessionEvent?.origin === 'subagent') {
-      lineage.registerLineage(id, parent)
-    }
-  }
-  ctx.on('session/created' as never, captureLineage as never)
 
   applyBrowserTools(ctx, runtime, parseToolGroups(config.toolGroups))
 
@@ -290,10 +241,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
     }
 
-    const foregroundRequired = (): string => {
-      const fg = runtime.foreground
-      if (fg === undefined) throw new Error('browser: no session group — open a tab first')
-      return fg
+    const activeTab = (): number => {
+      const tab = runtime.currentTabId()
+      if (tab === undefined) throw new Error('browser: no tab open — use ＋ to open one first')
+      return tab
     }
 
     const handleAction = async (actionName: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -320,70 +271,49 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         case 'open': {
           const url = typeof body.url === 'string' ? body.url : undefined
-          // Shell `+`: the USER's surface — bypass the takeover mutex.
-          const tab = await runtime.userOpen(url)
+          // Shell `+`: the USER's surface — bypasses the agent mutex.
+          const tab = await runtime.open(url, undefined, true)
           json(res, 200, { tab })
           return
         }
         case 'navigate': {
           const url = typeof body.url === 'string' ? body.url : ''
-          await runtime.navigateUser(url)
+          if (url.trim() === '') return json(res, 400, { error: 'url is required' })
+          await runtime.navigateUser(url.trim())
           json(res, 200, { ok: true })
           return
         }
         case 'reload': {
-          const fg = foregroundRequired()
-          const tab = runtime.registry.activeTabOf(fg)
-          if (tab !== undefined) await runtime.reloadFor(fg, tab, undefined, true)
+          if (runtime.currentTabId() !== undefined) await runtime.reload(activeTab(), undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'back': {
-          const fg = foregroundRequired()
-          const tab = runtime.registry.activeTabOf(fg)
-          if (tab !== undefined) await runtime.goBackFor(fg, tab, undefined, true)
+          if (runtime.currentTabId() !== undefined) await runtime.goBack(activeTab(), undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'forward': {
-          const fg = foregroundRequired()
-          const tab = runtime.registry.activeTabOf(fg)
-          if (tab !== undefined) await runtime.goForwardFor(fg, tab, undefined, true)
+          if (runtime.currentTabId() !== undefined) await runtime.goForward(activeTab(), undefined, true)
           json(res, 200, { ok: true })
           return
         }
         case 'switch-tab': {
-          const fg = foregroundRequired()
           const tab = typeof body.tab === 'number' ? body.tab : undefined
           if (tab === undefined) return json(res, 400, { error: 'tab is required' })
-          await runtime.switchTabFor(fg, tab, undefined)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'switch-group': {
-          const group = typeof body.group === 'string' ? body.group : undefined
-          if (group === undefined) return json(res, 400, { error: 'group is required' })
-          runtime.switchGroup(group)
+          await runtime.switchTab(tab, true)
           json(res, 200, { ok: true })
           return
         }
         case 'close-tab': {
-          const fg = foregroundRequired()
-          const tab = typeof body.tab === 'number' ? body.tab : runtime.registry.activeTabOf(fg)
+          const tab = typeof body.tab === 'number' ? body.tab : runtime.currentTabId()
           if (tab === undefined) return json(res, 400, { error: 'tab is required' })
-          await runtime.closeTabFor(fg, tab, undefined, true)
-          json(res, 200, { ok: true })
-          return
-        }
-        case 'close-group': {
-          const group = typeof body.group === 'string' ? body.group : undefined
-          if (group === undefined) return json(res, 400, { error: 'group is required' })
-          await runtime.closeGroup(group)
+          await runtime.closeTab(tab, true)
           json(res, 200, { ok: true })
           return
         }
         case 'clear-data': {
-          await runtime.clearDataFor(foregroundRequired(), 'all-data')
+          await runtime.clearData(true)
           json(res, 200, { ok: true })
           return
         }
@@ -420,9 +350,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const heartbeat = setInterval(() => {
         res.write(': ping\n\n')
       }, 15_000)
-      const timer = heartbeat
       res.on('close', () => {
-        clearInterval(timer)
+        clearInterval(heartbeat)
         off()
       })
     }
@@ -430,35 +359,35 @@ export function apply(ctx: Context, config: Config = {}): void {
     const bookmarksGet: JsonHandler = (req, res) => {
       if (!guard(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
-      json(res, 200, { bookmarks: runtime.listBookmarksFor({ q: url.searchParams.get('q') ?? undefined, limit: num(url.searchParams.get('limit'), 200) }) })
+      json(res, 200, {
+        bookmarks: runtime.listBookmarks({
+          q: url.searchParams.get('q') ?? undefined,
+          limit: num(url.searchParams.get('limit'), 200),
+        }),
+      })
     }
     const bookmarksPost: JsonHandler = async (req, res) => {
       if (!guard(req, res)) return
-      const raw = await readJson(req)
-      const body = (raw ?? {}) as { url?: string; label?: string }
-      const fg = runtime.foreground
-      if (fg === undefined) return json(res, 400, { error: 'no session group to attribute the bookmark to' })
-      const tab = runtime.registry.activeTabOf(fg)
-      if (tab === undefined) return json(res, 400, { error: 'no tab open in the foreground session' })
-      // Bookmark for the foreground group (user-side add).
-      const entry = runtime.addBookmarkFor(fg, tab, body.label)
-      json(res, 200, { id: entry.id, url: entry.url, title: body.label ?? entry.title })
+      const body = await readJson(req) as { title?: string } | null
+      const tab = runtime.currentTabId()
+      if (tab === undefined) return json(res, 400, { error: 'no tab open to bookmark' })
+      const entry = runtime.addBookmark(tab, body?.title)
+      json(res, 200, { id: entry.id, url: entry.url, title: body?.title ?? entry.title })
     }
     const bookmarksDelete: JsonHandler = (req, res) => {
       if (!guard(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       const id = num(url.searchParams.get('id'), undefined)
       if (id === undefined) return json(res, 400, { error: 'id is required' })
-      json(res, 200, { ok: runtime.removeBookmarkFor(id) })
+      json(res, 200, { ok: runtime.removeBookmark(id) })
     }
 
     const historyGet: JsonHandler = (req, res) => {
       if (!guard(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       json(res, 200, {
-        entries: runtime.historyFor({
+        entries: runtime.history({
           q: url.searchParams.get('q') ?? undefined,
-          group: url.searchParams.get('group') ?? undefined,
           limit: num(url.searchParams.get('limit'), 100),
         }),
       })
@@ -469,7 +398,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const status = url.searchParams.get('status')
       json(res, 200, {
-        downloads: runtime.downloadsFor({
+        downloads: runtime.downloads({
           status: status !== null && ['in-progress', 'done', 'cancelled', 'rejected'].includes(status) ? status as 'done' : undefined,
           limit: num(url.searchParams.get('limit'), 100),
         }),
@@ -480,7 +409,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const id = num(url.searchParams.get('id'), undefined)
       if (id === undefined) return json(res, 400, { error: 'id is required' })
-      json(res, 200, { ok: runtime.removeDownloadFor(id) })
+      json(res, 200, { ok: runtime.removeDownload(id) })
     }
 
     const html = (content: string): JsonHandler => (_req, res) => {
@@ -493,21 +422,22 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/ops', handler: ops }),
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/stream', handler: stream }),
       ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser', handler: action }),
-      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/bookmarks', handler: bookmarksGet }),
-      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser/bookmarks', handler: (req, res) => {
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/bookmarks', handler: (req, res) => {
         void (async () => {
+          if (req.method === 'GET') return bookmarksGet(req, res)
           if (req.method === 'POST') return await bookmarksPost(req, res)
           if (req.method === 'DELETE') return bookmarksDelete(req, res)
           json(res, 405, { error: 'method not allowed' })
         })().catch((cause: unknown) => json(res, 400, { error: cause instanceof Error ? cause.message : String(cause) }))
       } }),
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/history', handler: historyGet }),
-      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/downloads', handler: downloadsGet }),
-      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/browser/downloads', handler: (req, res) => {
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/downloads', handler: (req, res) => {
+        if (req.method === 'GET') return downloadsGet(req, res)
         if (req.method === 'DELETE') return downloadsDelete(req, res)
         json(res, 405, { error: 'method not allowed' })
       } }),
       ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: html(BROWSER_SHELL_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-mask', handler: html(BROWSER_MASK_HTML) }),
     ]
     return () => {
       for (const dispose of disposers) dispose()

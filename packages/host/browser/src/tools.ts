@@ -16,7 +16,6 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { BrowserRuntime, type WaitForOptions } from './runtime.ts'
 import { browserError } from './errors.ts'
-import type { GroupKey } from './resolve.ts'
 import type { BrowserWaitUntil } from './types.ts'
 
 /** Cooperative tool-call timeout budget for every browser tool (ms). */
@@ -29,23 +28,22 @@ const WAIT_CONDITIONS = ['element-present', 'element-visible', 'text-appear', 'u
 
 /** Tool guidance band shown to the model (v4 wording). */
 const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rules:
-1. Your session has its own group of tabs — you can only see and control YOUR group (browser_open first).
-2. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
-3. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
-4. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval is READ-ONLY (single expression; assignments and write APIs are rejected).
-5. The user may take over at any time (buttons: 我来操作). Your queued actions then wait; release continues them — do not fight the user.
-6. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
-7. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
-8. Close tabs you no longer need with browser_close_tab.`
+1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
+2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
+3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval is READ-ONLY (single expression; assignments and write APIs are rejected).
+4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; release continues them — do not fight the user.
+5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
+6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
+7. Close tabs you no longer need with browser_close_tab. Tabs are GLOBAL: every session and the user share one tab pool.`
 
 /** Resolve `target` (snapshot number or CSS selector) to a selector. */
-async function resolveTarget(runtime: BrowserRuntime, groupKey: GroupKey, tabId: number, target: number | string, signal?: AbortSignal): Promise<string> {
+async function resolveTarget(runtime: BrowserRuntime, tabId: number, target: number | string, signal?: AbortSignal): Promise<string> {
   if (typeof target === 'string') {
     if (target.trim() === '') throw new Error('target selector must not be empty')
     return target.trim()
   }
   if (!Number.isInteger(target) || target < 1) throw new Error('target number must be a positive integer')
-  const snapshot = await runtime.snapshotFor(groupKey, tabId, signal)
+  const snapshot = await runtime.snapshot(tabId, signal)
   const entry = snapshot.find((item) => item.index === target)
   if (entry === undefined) {
     throw browserError('not-found', `browser: no snapshot element ${target} — call browser_get_snapshot first (${snapshot.length} elements)`)
@@ -63,13 +61,10 @@ function metaFrom(value: JsonValue): JsonValue {
   return value
 }
 
-/** Throw no-session when the call has no agent identity. */
-function groupOf(runtime: BrowserRuntime, agentId: string | undefined): GroupKey {
-  const key = runtime.groupKeyFor(agentId)
-  if (key === undefined) {
-    throw browserError('no-session', 'browser: tool call has no agent identity')
-  }
-  return key
+/** Snapshot the calling agent's identity (oplog attribution). */
+function noteAgent(runtime: BrowserRuntime, agent: unknown): void {
+  const id = (agent as { id?: string } | undefined)?.id
+  runtime.setAgentContext(id)
 }
 
 /**
@@ -91,16 +86,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     text: BROWSER_GUIDANCE,
   })
 
-  const tabOf = async (groupKey: GroupKey, tab: number | undefined): Promise<number> => {
-    if (tab !== undefined) {
-      runtime.registry.assertOwner(groupKey, tab)
-      return tab
-    }
-    const active = runtime.registry.activeTabOf(groupKey)
-    if (active === undefined) {
-      throw browserError('group-not-found', 'browser: no tab open in this session — call browser_open first')
-    }
-    return active
+  const tabOf = async (tab: number | undefined): Promise<number> => {
+    return runtime.resolveTab(tab)
   }
 
   // ----------------------------------------------------------- Navigate (8)
@@ -125,8 +112,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Open browser'),
     async execute(args, exec) {
       const { url } = args as { url?: string }
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tab = await runtime.openFor(groupKey, url, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tab = await runtime.open(url, exec.signal)
       exec.signal.throwIfAborted()
       return { tab: tab.id, url: tab.url, title: tab.title }
     },
@@ -155,9 +142,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { tab, url, waitUntil } = args as { tab?: number; url: string; waitUntil?: BrowserWaitUntil }
       if (typeof url !== 'string' || url.trim() === '') throw new Error('url must be a non-empty string')
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      await runtime.navigateFor(groupKey, tabId, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      await runtime.navigate(tabId, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
       return { url: state.url, title: state.title, loading: state.loading }
@@ -176,9 +163,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Reload page'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      await runtime.reloadFor(groupKey, tabId, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      await runtime.reload(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -196,9 +183,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Go back'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      await runtime.goBackFor(groupKey, tabId, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      await runtime.goBack(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -216,9 +203,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Go forward'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      await runtime.goForwardFor(groupKey, tabId, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      await runtime.goForward(tabId, exec.signal)
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -267,17 +254,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => true,
     presentCall: present('List tabs'),
     async execute(_args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabs = runtime.listTabs(groupKey)
-      const group = runtime.registry.get(groupKey)
+      noteAgent(runtime, exec.agent)
+      const tabs = runtime.listTabs()
       return {
-        group: {
-          label: group?.label ?? '',
-          status: group?.status ?? 'archived',
-          busy: runtime.registry.isBusy(groupKey),
-          busyTool: runtime.registry.busyToolOf(groupKey),
-          foreground: runtime.foreground === groupKey,
-        },
         tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, loading: t.loading, active: t.visible })),
       }
     },
@@ -295,9 +274,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Switch tab'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
+      noteAgent(runtime, exec.agent)
       const tabId = (args as { tab: number }).tab
-      await runtime.switchTabFor(groupKey, tabId, exec.signal)
+      await runtime.switchTab(tabId, false, exec.signal)
       exec.signal.throwIfAborted()
       return { tab: tabId, url: runtime.tabState(tabId).url }
     },
@@ -315,9 +294,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Close tab'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      await runtime.closeTabFor(groupKey, tabId, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      await runtime.closeTab(tabId, false, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -329,15 +308,15 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     name: string
     title: string
     description: string
-    run: (r: BrowserRuntime, g: GroupKey, id: number, sel: string, signal: AbortSignal | undefined, args: Record<string, unknown>) => Promise<unknown> | unknown
+    run: (r: BrowserRuntime, id: number, sel: string, signal: AbortSignal | undefined, args: Record<string, unknown>) => Promise<unknown> | unknown
   }> = [
-    { name: 'browser_click', title: 'Click', description: '[交互] Click an element of your tab (snapshot number or CSS selector).', run: (r, g, id, sel, signal) => (async () => {
-      const point = await r.locateFor(g, id, sel, signal)
-      await r.clickFor(g, id, point, signal)
+    { name: 'browser_click', title: 'Click', description: '[交互] Click an element of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal) => (async () => {
+      const point = await r.locateElement(id, sel, signal)
+      await r.clickAt(id, point, signal)
       return { ok: true }
     })() },
-    { name: 'browser_type', title: 'Type', description: '[交互] Type text into an input of your tab (snapshot number or CSS selector); clears the field first by default.', run: (r, g, id, sel, signal, args) => r.typeFor(g, id, sel, String((args as { text: string }).text), (args as { clear?: boolean }).clear !== false, signal) },
-    { name: 'browser_select', title: 'Select option', description: '[交互] Select an option in a dropdown of your tab (snapshot number or CSS selector).', run: (r, g, id, sel, signal, args) => r.selectFor(g, id, sel, (args as { value: string }).value, signal) },
+    { name: 'browser_type', title: 'Type', description: '[交互] Type text into an input of your tab (snapshot number or CSS selector); clears the field first by default.', run: (r, id, sel, signal, args) => r.typeInto(id, sel, String((args as { text: string }).text), (args as { clear?: boolean }).clear !== false, signal) },
+    { name: 'browser_select', title: 'Select option', description: '[交互] Select an option in a dropdown of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal, args) => r.selectOption(id, sel, (args as { value: string }).value, signal) },
   ]
   for (const spec of interactSpecs) {
     register(defineTool({
@@ -357,10 +336,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       isConcurrencySafe: () => false,
       presentCall: present(spec.title),
       async execute(args, exec) {
-        const groupKey = groupOf(runtime, exec.agent?.id)
-        const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-        const selector = await resolveTarget(runtime, groupKey, tabId, (args as { target: number | string }).target, exec.signal)
-        await spec.run(runtime, groupKey, tabId, selector, exec.signal, args)
+        noteAgent(runtime, exec.agent)
+        const tabId = await tabOf((args as { tab?: number }).tab)
+        const selector = await resolveTarget(runtime, tabId, (args as { target: number | string }).target, exec.signal)
+        await spec.run(runtime, tabId, selector, exec.signal, args)
         exec.signal.throwIfAborted()
         return { ok: true }
       },
@@ -384,9 +363,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { tab, key } = args as { tab?: number; key: string }
       if (typeof key !== 'string' || key.length === 0) throw new Error('key must be a non-empty string')
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      await runtime.pressFor(groupKey, tabId, key, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      await runtime.pressKey(tabId, key, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -409,10 +388,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Scroll'),
     async execute(args, exec) {
       const { tab, deltaY, target } = args as { tab?: number; deltaY?: number; target?: number | string }
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      const selector = target === undefined ? undefined : await resolveTarget(runtime, groupKey, tabId, target, exec.signal)
-      await runtime.scrollFor(groupKey, tabId, deltaY ?? 0, selector, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      const selector = target === undefined ? undefined : await resolveTarget(runtime, tabId, target, exec.signal)
+      await runtime.scroll(tabId, deltaY ?? 0, selector, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },
@@ -451,9 +430,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       for (const f of fields) {
         if (typeof f?.field !== 'string' || typeof f?.value !== 'string') throw new Error('each field must have string field and value')
       }
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      return await runtime.fillFormFor(groupKey, tabId, fields, submit === true, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      return await runtime.fillForm(tabId, fields, submit === true, exec.signal)
     },
   }))
 
@@ -474,9 +453,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { tab, paths } = args as { tab?: number; paths: string[] }
       if (!Array.isArray(paths) || paths.length === 0) throw new Error('paths must be a non-empty array of absolute paths')
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      return await runtime.uploadFor(groupKey, tabId, paths, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      return await runtime.uploadFile(tabId, paths, exec.signal)
     },
   }))
 
@@ -519,9 +498,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Page snapshot'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      const elements = await runtime.snapshotFor(groupKey, tabId, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      const elements = await runtime.snapshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
       return { elements, url: state.url, title: state.title }
@@ -545,9 +524,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Page text'),
     async execute(args, exec) {
       const { tab, selector } = args as { tab?: number; selector?: string }
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      const text = await runtime.textFor(groupKey, tabId, selector, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      const text = await runtime.text(tabId, selector, exec.signal)
       exec.signal.throwIfAborted()
       return { text, truncated: text.length >= runtime.options.textLimit }
     },
@@ -589,9 +568,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Screenshot'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      const dataUrl = await runtime.screenshotFor(groupKey, tabId, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      const dataUrl = await runtime.screenshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
       const data = Buffer.from(base64, 'base64')
@@ -632,9 +611,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       if (condition === 'text-appear' && (text === undefined || text === '')) {
         throw new Error('text is required for text-appear')
       }
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      return await runtime.waitFor(groupKey, tabId, { condition, selector, text, timeoutMs }, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      return await runtime.waitFor(tabId, { condition, selector, text, timeoutMs }, exec.signal)
     },
   }))
 
@@ -657,9 +636,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { tab, expression, frame } = args as { tab?: number; expression: string; frame?: number }
       if (typeof expression !== 'string' || expression.trim() === '') throw new Error('expression is required')
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      const result = await runtime.evalFor(groupKey, tabId, expression, frame, exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      const result = await runtime.eval(tabId, expression, frame, exec.signal)
       exec.signal.throwIfAborted()
       return { result }
     },
@@ -682,9 +661,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Bookmark page'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, (args as { tab?: number }).tab)
-      return runtime.addBookmarkFor(groupKey, tabId, (args as { title?: string }).title)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf((args as { tab?: number }).tab)
+      return runtime.addBookmark(tabId, (args as { title?: string }).title)
     },
   }))
 
@@ -721,9 +700,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => true,
     presentCall: present('List bookmarks'),
     async execute(args, exec) {
-      void groupOf(runtime, exec.agent?.id)
+      noteAgent(runtime, exec.agent)
       const { q, limit } = args as { q?: string; limit?: number }
-      return { bookmarks: runtime.listBookmarksFor({ q, limit }).map((b) => ({ id: b.id, url: b.url, title: b.title, createdAt: b.createdAt })) }
+      return { bookmarks: runtime.listBookmarks({ q, limit }).map((b) => ({ id: b.id, url: b.url, title: b.title, createdAt: b.createdAt })) }
     },
   }))
 
@@ -739,8 +718,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Remove bookmark'),
     async execute(args, exec) {
-      void groupOf(runtime, exec.agent?.id)
-      return { ok: runtime.removeBookmarkFor((args as { id: number }).id) }
+      noteAgent(runtime, exec.agent)
+      return { ok: runtime.removeBookmark((args as { id: number }).id) }
     },
   }))
 
@@ -779,9 +758,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => true,
     presentCall: present('Search history'),
     async execute(args, exec) {
-      void groupOf(runtime, exec.agent?.id)
-      const { q, group, limit } = args as { q?: string; group?: string; limit?: number }
-      return { entries: runtime.historyFor({ q, group, limit }).map((h) => ({ time: h.time, url: h.url, title: h.title, actor: h.actor, group: h.group })) }
+      noteAgent(runtime, exec.agent)
+      const { q, limit } = args as { q?: string; limit?: number }
+      return { entries: runtime.history({ q, limit }).map((h) => ({ time: h.time, url: h.url, title: h.title, actor: h.actor, group: h.group })) }
     },
   }))
 
@@ -803,8 +782,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { url } = args as { url: string }
       if (typeof url !== 'string' || url.trim() === '') throw new Error('url is required')
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      await runtime.downloadUrl(groupKey, url.trim(), exec.signal)
+      noteAgent(runtime, exec.agent)
+      await runtime.downloadUrl(url.trim(), exec.signal)
       exec.signal.throwIfAborted()
       return { started: true }
     },
@@ -846,9 +825,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => true,
     presentCall: present('List downloads'),
     async execute(args, exec) {
-      void groupOf(runtime, exec.agent?.id)
+      noteAgent(runtime, exec.agent)
       const { status, limit } = args as { status?: 'in-progress' | 'done' | 'cancelled' | 'rejected'; limit?: number }
-      return { downloads: runtime.downloadsFor({ status, limit }).map((d) => ({ id: d.id, url: d.url, fileName: d.fileName, path: d.path, size: d.size, status: d.status, createdAt: d.createdAt })) }
+      return { downloads: runtime.downloads({ status, limit }).map((d) => ({ id: d.id, url: d.url, fileName: d.fileName, path: d.path, size: d.size, status: d.status, createdAt: d.createdAt })) }
     },
   }))
 
@@ -864,8 +843,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Remove download'),
     async execute(args, exec) {
-      void groupOf(runtime, exec.agent?.id)
-      return { ok: runtime.removeDownloadFor((args as { id: number }).id) }
+      noteAgent(runtime, exec.agent)
+      return { ok: runtime.removeDownload((args as { id: number }).id) }
     },
   }))
 
@@ -883,7 +862,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Hand control to user'),
     async execute(_args, exec) {
-      void groupOf(runtime, exec.agent?.id)
+      noteAgent(runtime, exec.agent)
       runtime.setUserControl(true)
       exec.signal.throwIfAborted()
       return { ok: true }
@@ -902,7 +881,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Release control'),
     async execute(_args, exec) {
-      void groupOf(runtime, exec.agent?.id)
+      noteAgent(runtime, exec.agent)
       runtime.setUserControl(false)
       exec.signal.throwIfAborted()
       return { ok: true }
@@ -936,9 +915,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       if (typeof connectorId !== 'string' || connectorId.trim() === '') {
         throw new Error('connectorId must be a non-empty string')
       }
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const tabId = await tabOf(groupKey, tab)
-      return await runtime.fillCredentialsFor(groupKey, tabId, connectorId.trim(), exec.signal)
+      noteAgent(runtime, exec.agent)
+      const tabId = await tabOf(tab)
+      return await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal)
     },
   }))
 
@@ -970,8 +949,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => true,
     presentCall: present('List credentials'),
     async execute(_args, exec) {
-      void groupOf(runtime, exec.agent?.id)
-      const list = await runtime.credentialsListFor()
+      noteAgent(runtime, exec.agent)
+      const list = await runtime.credentialsList()
       return { credentials: list }
     },
   }))
@@ -990,9 +969,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Clear browsing data'),
     async execute(args, exec) {
-      const groupKey = groupOf(runtime, exec.agent?.id)
-      const scope = (args as { scope?: string }).scope === 'all-data' ? 'all-data' : 'group'
-      await runtime.clearDataFor(groupKey, scope)
+      noteAgent(runtime, exec.agent)
+      await runtime.clearData((args as { scope?: string }).scope === 'all-data')
       exec.signal.throwIfAborted()
       return { ok: true }
     },
