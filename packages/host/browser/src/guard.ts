@@ -16,7 +16,6 @@
 
 import type { BrowserNavigationVerdict } from './types.ts'
 import type { ElectronAdapter, NativeDownloadItem, NativeSession } from './electron-adapter.ts'
-import type { GroupKey } from './resolve.ts'
 import type { DownloadEntry, RecordActor } from './store.ts'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join, dirname, basename, extname } from 'node:path'
@@ -104,6 +103,11 @@ export interface DownloadRecorder {
 export class BrowserGuard {
   constructor(_adapter: ElectronAdapter) {}
 
+  /** Sessions that already have the download guard installed. Tabs sharing
+   * one partition share one Session — installing a listener per tab would
+   * duplicate every download record. Guard installs are idempotent. */
+  private readonly guardedSessions = new WeakSet<object>()
+
   /** Decide a navigation: `true` lets it proceed. */
   allowNavigation(rawUrl: string): boolean {
     return classifyNavigation(rawUrl) === 'allow'
@@ -119,10 +123,12 @@ export class BrowserGuard {
     session: NativeSession,
     onDownload: (summary: string) => void,
     record?: DownloadRecorder,
-    groupKey?: GroupKey,
+    groupKey?: string,
     actor?: RecordActor,
     downloadsDir = DEFAULT_DOWNLOAD_DIR,
   ): () => void {
+    if (this.guardedSessions.has(session as object)) return () => {}
+    this.guardedSessions.add(session as object)
     const listener = (_event: unknown, item: NativeDownloadItem): void => {
       const filename = item.getFilename() || 'download'
       let received = 0
@@ -151,10 +157,34 @@ export class BrowserGuard {
         return
       }
       void (async () => {
-        const target = resolveDownloadPath(downloadsDir, filename)
-        item.setSavePath(target)
+        let target: string
+        try {
+          target = resolveDownloadPath(downloadsDir, filename)
+        } catch (cause) {
+          // Download dir unusable: never block the UI; reject loudly and
+          // record the failure so downloads_list is not stuck at in-progress.
+          rejected = true
+          item.cancel()
+          onDownload(`download failed (target dir unusable): ${filename}`)
+          if (recordId !== undefined) record?.update(recordId, { status: 'rejected', size: received })
+          void cause
+          return
+        }
+        try {
+          item.setSavePath(target)
+        } catch (cause) {
+          rejected = true
+          item.cancel()
+          onDownload(`download failed (save path rejected): ${filename}`)
+          if (recordId !== undefined) record?.update(recordId, { status: 'rejected', size: received })
+          void cause
+          return
+        }
         onDownload(`download saved to ${target}: ${filename}`)
         item.on?.('done', (event, state) => {
+          // A size-rejected or failed download must keep 'rejected' — the
+          // later 'cancelled' done-event must not overwrite the verdict.
+          if (rejected) return
           const status = state === 'completed' ? 'done' : state === 'cancelled' ? 'cancelled' : 'rejected'
           if (record !== undefined && recordId !== undefined) {
             record.update(recordId, {

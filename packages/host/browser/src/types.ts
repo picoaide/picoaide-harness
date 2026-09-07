@@ -15,6 +15,12 @@ export interface BrowserTabState {
   readonly loading: boolean
   /** Whether this tab is the visible one. */
   readonly visible: boolean
+  /** Page favicon URL (empty before the page reports one). */
+  readonly favicon: string
+  /** Whether the tab's navigation history has a previous entry. */
+  readonly canGoBack: boolean
+  /** Whether the tab's navigation history has a next entry. */
+  readonly canGoForward: boolean
 }
 
 /** Window visibility of the dedicated browser window. */
