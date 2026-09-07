@@ -110,7 +110,9 @@ fn read_mem_stats() -> (f64, f64, f64) {
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
     let rss_mb = rss_kb * 4.0 / 1024.0; // page size 4096 → KB
-    (rss_mb, rss_mb, system_mb)
+    // Go round1 语义: 一位小数(前端展示风格一致)。
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+    (round1(rss_mb), round1(rss_mb), round1(system_mb))
 }
 
 /// read_disk 读 path 所在文件系统统计（libc statfs）。
@@ -570,6 +572,12 @@ pub async fn dispatch_admin(
     // ---- server-info ----
     if path == "/api/server/admin/server-info" && method == Method::GET {
         // 目标: 与 Go sysinfo 输出结构一致(字段名对齐); 运行时值取本进程真实值。
+        // 2026-09: runtime=rust 标识,前端据以切换「Go 运行时」标签 → 「Rust 运行时」。
+        // rustc 版本由 build.rs 编译期注入(OUT_DIR/rustc_version.txt)。
+        static RUSTC_VER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let rustc_ver = RUSTC_VER.get_or_init(|| {
+            include_str!(concat!(env!("OUT_DIR"), "/rustc_version.txt")).trim().to_string()
+        });
         static START: std::sync::OnceLock<std::time::SystemTime> = std::sync::OnceLock::new();
         let start = *START.get_or_init(std::time::SystemTime::now);
         let up = std::time::SystemTime::now()
@@ -579,7 +587,8 @@ pub async fn dispatch_admin(
         let up_h = human_duration(up);
         let ver = std::env::var("DSH_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         let num_cpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let gomaxprocs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        // tokio 工作线程数: 默认 = 可用并行线程数(等价 GOMAXPROCS 语义)。
+        let tokio_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let load_avg = read_load_avg();
         let mem = read_mem_stats();
         let disk = read_disk("/data");
@@ -587,10 +596,14 @@ pub async fn dispatch_admin(
         return Ok(Json(serde_json::json!({
             "uptime_sec": up,
             "uptime_human": up_h,
-            "go_version": format!("rustc {}", env!("CARGO_PKG_VERSION")),
+            "runtime": "rust",
+            "runtime_version": rustc_ver.clone(),
+            // 兼容旧 key(Go 前端字段名): 保留 go_version,但值填 Rust 版本。
+            "go_version": rustc_ver.clone(),
             "num_cpu": num_cpu,
-            "gomaxprocs": gomaxprocs,
+            "gomaxprocs": tokio_threads,
             "goroutines": 0,
+            "tokio_threads": tokio_threads,
             "mem": {
                 "allocated_mb": mem.0,
                 "total_system_mb": mem.1,

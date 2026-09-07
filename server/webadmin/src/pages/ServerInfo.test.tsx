@@ -126,4 +126,25 @@ describe('ServerInfo update check', () => {
     await waitFor(() => expect(screen.getByText(/2\.5\.1/)).toBeInTheDocument())
     expect(screen.queryByText(/模型并发/)).not.toBeInTheDocument()
   })
+
+  it('shows Rust runtime labels when runtime=rust (2026-09)', async () => {
+    mockRequest.mockResolvedValue({
+      ...baseInfo,
+      version: '2.6.7-beta.2',
+      runtime: 'rust',
+      runtime_version: 'rustc 1.98.1 (48a229cea 2026-09-01)',
+      tokio_threads: 8,
+      update_check: null,
+    })
+
+    render(<ServerInfo />)
+
+    expect(await screen.findByText(/Rust 运行时/)).toBeInTheDocument()
+    expect(screen.getByText(/rustc 1\.98\.1/)).toBeInTheDocument()
+    expect(screen.getByText(/Tokio 工作线程/)).toBeInTheDocument()
+    expect(screen.getByText('8')).toBeInTheDocument()
+    expect(screen.getByText(/内存 \(Rust 进程\)/)).toBeInTheDocument()
+    expect(screen.queryByText(/Go 运行时/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Goroutines/)).not.toBeInTheDocument()
+  })
 })
