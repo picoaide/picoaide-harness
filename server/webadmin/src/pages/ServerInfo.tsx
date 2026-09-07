@@ -13,6 +13,10 @@ interface SysInfo {
   num_cpu: number
   gomaxprocs: number
   goroutines: number
+  // 2026-09: Rust 服务端字段(runtime=rust 时前端切换标签为 Rust 语义)。
+  runtime?: 'go' | 'rust'
+  runtime_version?: string
+  tokio_threads?: number
   mem: { allocated_mb: number; total_system_mb: number; system_memory_mb: number }
   load_avg: [number, number, number]
   disk: { data_path: string; total_gb: number; used_gb: number; free_gb: number; used_pct: number }
@@ -134,7 +138,7 @@ export default function ServerInfo() {
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <StatCard icon={<Activity className="h-4 w-4" />} label="运行时长" value={info.uptime_human} sub={`版本 ${info.version}`} />
             <StatCard icon={<Cpu className="h-4 w-4" />} label="CPU / 负载" value={`${info.num_cpu} 核`} sub={`负载 ${info.load_avg[0].toFixed(2)} / ${info.load_avg[1].toFixed(2)} / ${info.load_avg[2].toFixed(2)} · GOMAXPROCS ${info.gomaxprocs}`} />
-            <StatCard icon={<MemoryStick className="h-4 w-4" />} label="内存 (Go 堆)" value={`${info.mem.allocated_mb} MB`} sub={`系统 ${info.mem.system_memory_mb} MB · 进程占用 ${info.mem.total_system_mb} MB`} />
+            <StatCard icon={<MemoryStick className="h-4 w-4" />} label={info.runtime === 'rust' ? '内存 (Rust 进程)' : '内存 (Go 堆)'} value={`${info.mem.allocated_mb} MB`} sub={`系统 ${info.mem.system_memory_mb} MB · 进程占用 ${info.mem.total_system_mb} MB`} />
             <StatCard icon={<HardDrive className="h-4 w-4" />} label="磁盘占用" value={`${info.disk.used_gb} / ${info.disk.total_gb} GB`} sub={`使用率 ${info.disk.used_pct}% · 剩余 ${info.disk.free_gb} GB`} />
           </div>
 
@@ -146,9 +150,19 @@ export default function ServerInfo() {
                 <CardDescription>运行时与数据库引擎信息</CardDescription>
               </CardHeader>
               <CardContent>
-                <InfoRow label="Go 运行时" value={info.go_version} />
-                <InfoRow label="Goroutines" value={info.goroutines} />
-                <InfoRow label="GOMAXPROCS" value={info.gomaxprocs} />
+                {info.runtime === 'rust' ? (
+                  <>
+                    <InfoRow label="Rust 运行时" value={info.runtime_version ?? info.go_version} />
+                    <InfoRow label="Tokio 工作线程" value={info.tokio_threads ?? info.gomaxprocs} />
+                    <InfoRow label="并行线程 (GOMAXPROCS)" value={info.gomaxprocs} />
+                  </>
+                ) : (
+                  <>
+                    <InfoRow label="Go 运行时" value={info.go_version} />
+                    <InfoRow label="Goroutines" value={info.goroutines} />
+                    <InfoRow label="GOMAXPROCS" value={info.gomaxprocs} />
+                  </>
+                )}
                 <InfoRow label="数据库引擎" value={info.db.driver === 'pg' ? 'PostgreSQL' : 'SQLite'} />
                 <InfoRow label="数据库大小" value={`${info.db.disk_human} (${info.db.disk_bytes.toLocaleString()} B)`} />
                 <InfoRow label="Schema 迁移版本" value={info.db.schema_migrations} />
