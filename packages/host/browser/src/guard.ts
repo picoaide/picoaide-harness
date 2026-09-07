@@ -16,9 +16,37 @@
 
 import type { BrowserNavigationVerdict } from './types.ts'
 import type { ElectronAdapter, NativeDownloadItem, NativeSession } from './electron-adapter.ts'
+import type { GroupKey } from './resolve.ts'
+import type { DownloadEntry, RecordActor } from './store.ts'
+import { existsSync, mkdirSync } from 'node:fs'
+import { join, dirname, basename, extname } from 'node:path'
 
 /** Maximum accepted download size in bytes (100 MB). */
 export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+
+/** Default downloads directory (overridden by the runtime wiring). */
+export const DEFAULT_DOWNLOAD_DIR = '.picoaide-downloads'
+
+/** Resolve a conflict-free absolute path inside `dir` for `filename`. */
+export function resolveDownloadPath(dir: string, filename: string): string {
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    // dir may be created by the save itself; best effort.
+  }
+  const safeName = basename(filename || 'download').replace(/[\\/:*?"<>|]/g, '_')
+  const ext = extname(safeName)
+  const stem = safeName.slice(0, safeName.length - ext.length)
+  let candidate = join(dir, safeName)
+  let n = 1
+  while (existsSync(candidate)) {
+    candidate = join(dir, `${stem}-${n}${ext}`)
+    n++
+    if (n > 999) return join(dir, `${stem}-${Date.now()}${ext}`)
+  }
+  void dirname
+  return candidate
+}
 
 /** Schemes the embedded browser may navigate to. */
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'about:'])
@@ -61,6 +89,12 @@ export function navigationDenyReason(rawUrl: string): string {
   }
 }
 
+/** Store recorder contract for download auditing (create + update by id). */
+export interface DownloadRecorder {
+  add(entry: Omit<DownloadEntry, 'id' | 'createdAt'>): number
+  update(id: number, patch: Partial<Pick<DownloadEntry, 'status' | 'path' | 'size'>>): void
+}
+
 /**
  * Guard bundle bound to one plugin lifetime. The download and permission
  * hooks are bound to the browser session by the runtime. There is no
@@ -68,7 +102,7 @@ export function navigationDenyReason(rawUrl: string): string {
  * decision 2026-08-26).
  */
 export class BrowserGuard {
-  constructor(private readonly adapter: ElectronAdapter) {}
+  constructor(_adapter: ElectronAdapter) {}
 
   /** Decide a navigation: `true` lets it proceed. */
   allowNavigation(rawUrl: string): boolean {
@@ -76,25 +110,37 @@ export class BrowserGuard {
   }
 
   /**
-   * Install the download interception on a session: every download is either
-   * routed to a user-chosen save path (bounded size) or cancelled. The user
-   * participates through the native save dialog, so no approval prompt is
-   * needed — but the outcome lands in the op log.
+   * Install the programmatic download interception (v4 §11.6): every download
+   * is saved into the configured downloads directory (auto-renamed on
+   * conflict, bounded size, no native dialogs — an AI-driven flow must never
+   * block on a dialog), recorded in the store for downloads_list.
    */
-  installDownloadGuard(session: NativeSession, onDownload: (summary: string) => void): () => void {
+  installDownloadGuard(
+    session: NativeSession,
+    onDownload: (summary: string) => void,
+    record?: DownloadRecorder,
+    groupKey?: GroupKey,
+    actor?: RecordActor,
+    downloadsDir = DEFAULT_DOWNLOAD_DIR,
+  ): () => void {
     const listener = (_event: unknown, item: NativeDownloadItem): void => {
       const filename = item.getFilename() || 'download'
-      // P3-8: getTotalBytes() is -1 for unknown-size downloads, which used to
-      // bypass the cap. Count received bytes on 'updated' instead and cancel
-      // once the limit is exceeded; a zero-sized file is allowed through.
       let received = 0
       let rejected = false
+      const recordId = record !== undefined
+        ? record.add({ url: item.getURL(), fileName: filename, path: '', size: 0, status: 'in-progress', group: groupKey ?? 'unknown', actor: actor ?? 'ai' })
+        : undefined
       const onUpdated = (): void => {
         received = item.getReceivedBytes()
         if (received > MAX_DOWNLOAD_BYTES && !rejected) {
           rejected = true
           item.cancel()
           onDownload(`download rejected (>100MB): ${filename}`)
+          if (recordId !== undefined) {
+            record?.update(recordId, { size: received, status: 'rejected' })
+          }
+        } else if (recordId !== undefined) {
+          record?.update(recordId, { size: received, status: 'in-progress' })
         }
       }
       item.on?.('updated', onUpdated)
@@ -105,17 +151,20 @@ export class BrowserGuard {
         return
       }
       void (async () => {
-        const result = await this.adapter.showSaveDialog({
-          title: 'Save download',
-          defaultPath: filename,
+        const target = resolveDownloadPath(downloadsDir, filename)
+        item.setSavePath(target)
+        onDownload(`download saved to ${target}: ${filename}`)
+        item.on?.('done', (event, state) => {
+          const status = state === 'completed' ? 'done' : state === 'cancelled' ? 'cancelled' : 'rejected'
+          if (record !== undefined && recordId !== undefined) {
+            record.update(recordId, {
+              status,
+              path: status === 'done' ? target : '',
+              size: item.getTotalBytes() > 0 ? item.getTotalBytes() : received,
+            })
+          }
+          void event
         })
-        if (result.canceled || result.filePath === undefined || result.filePath === '') {
-          item.cancel()
-          onDownload(`download cancelled by user: ${filename}`)
-          return
-        }
-        item.setSavePath(result.filePath)
-        onDownload(`download saved to ${result.filePath}: ${filename}`)
       })().catch(() => {
         item.cancel()
       })

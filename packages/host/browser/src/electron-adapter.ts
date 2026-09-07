@@ -53,6 +53,8 @@ export interface NativeBounds {
 export interface NativeWebContents {
   readonly cdp: CdpTransport
   loadURL(url: string): Promise<void>
+  /** Trigger a download of a URL through this webContents (programmatic path). */
+  downloadURL(url: string): void
   goBack(): void
   goForward(): void
   reload(): void
@@ -80,7 +82,7 @@ export interface NativeSession {
   setPermissionRequestHandler(handler: (wc: unknown, permission: string, callback: (grant: boolean) => void) => void): void
   on(event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void
   removeListener(event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void
-  clearStorageData(): Promise<void>
+  clearStorageData(options?: { storages?: string[] }): Promise<void>
   clearCache(): Promise<void>
 }
 
@@ -181,7 +183,7 @@ export function browserPartitionFor(username: string | null | undefined): string
 export const BROWSER_PARTITION = browserPartitionFor(null)
 
 /** Height (DIP) of the control-shell toolbar area overlaid by tab views. */
-export const BROWSER_SHELL_TOOLBAR_HEIGHT = 84
+export const BROWSER_SHELL_TOOLBAR_HEIGHT = 66
 
 /** Default browser window size (DIP). */
 const BROWSER_WINDOW_DEFAULT = { width: 1100, height: 780 }
@@ -232,6 +234,7 @@ export function createRealElectronAdapter(): ElectronAdapter {
       webContents: {
         cdp: wc.debugger,
         loadURL: (url) => wc.loadURL(url),
+        downloadURL: (url) => wc.downloadURL(url),
         goBack: () => wc.goBack(),
         goForward: () => wc.goForward(),
         reload: () => wc.reload(),
@@ -311,6 +314,7 @@ export function createRealElectronAdapter(): ElectronAdapter {
         webContents: {
           cdp: wc.debugger,
           loadURL: (url) => wc.loadURL(url),
+        downloadURL: (url) => wc.downloadURL(url),
           goBack: () => wc.goBack(),
           goForward: () => wc.goForward(),
           reload: () => wc.reload(),
