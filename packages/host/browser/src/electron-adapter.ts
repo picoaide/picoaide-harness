@@ -136,7 +136,7 @@ export interface NativeBrowserWindow {
  */
 export interface ElectronAdapter {
   createView(partition?: string): NativeView
-  /** The AI-control mask view (local translucent page with the takeover button). */
+  /** The AI interception mask view (transparent, z-top; clicks hand control to the user). */
   createMaskView(partition?: string): NativeView
   createBrowserWindow(): NativeBrowserWindow
   showSaveDialog(options: { title: string; defaultPath: string }): Promise<{ canceled: boolean; filePath?: string }>

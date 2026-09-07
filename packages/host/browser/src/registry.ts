@@ -178,13 +178,21 @@ export class GroupRegistry {
     return this.groups.get(key)
   }
 
+  /** Rename a group (display name = project name). */
+  rename(key: GroupKey, label: string): void {
+    const group = this.groups.get(key)
+    if (group === undefined || label.trim() === '') return
+    group.label = label.trim()
+    this.emit('group')
+  }
+
   /** Create (or return existing) group without quota wait. */
   ensure(key: GroupKey, label?: string): Group {
     let group = this.groups.get(key)
     if (group === undefined) {
       group = {
         key,
-        label: label ?? `会话 ${key.slice(0, 6)}`,
+        label: label ?? '未命名项目',
         status: 'active',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
@@ -587,7 +595,7 @@ export class GroupRegistry {
       for (const t of item.tabs ?? []) tabs.set(t.tabId, { tabId: t.tabId, url: t.url ?? '', title: t.title ?? '' })
       const g: Group = {
         key: item.key,
-        label: item.label ?? `会话 ${item.key.slice(0, 6)}`,
+        label: item.label ?? '未命名项目',
         status: 'archived',
         createdAt: item.createdAt ?? Date.now(),
         lastActiveAt: item.lastActiveAt ?? Date.now(),
