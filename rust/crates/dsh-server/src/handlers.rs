@@ -182,10 +182,11 @@ pub async fn handle_client_usage(
 }
 
 /// handle_admin_login 管理端登录（本地 admin；成功创建 admin session + CSRF）。
+/// 与 Go issueAdminSession 一致：下发 HttpOnly cookie，响应带 user + csrf_token。
 pub async fn handle_admin_login(
     State(state): State<Arc<AppState>>,
     payload: Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     let username = payload.get("username").and_then(|v| v.as_str()).unwrap_or("");
     let password = payload.get("password").and_then(|v| v.as_str()).unwrap_or("");
     if username.is_empty() || password.is_empty() {
@@ -203,7 +204,37 @@ pub async fn handle_admin_login(
     let (session, csrf) = picoaide_dsh_auth::create_admin_session(&state.pool, user.id)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(error_body("INTERNAL", "会话创建失败"))))?;
-    Ok(Json(serde_json::json!({ "session_id": session.id, "csrf_token": csrf, "user": { "username": info.username } })))
+    // Secure cookie（生产走 Caddy HTTPS；与 Go secureCookieFor 默认一致）。
+    let secure = true;
+    let mut resp = axum::response::Response::new(axum::body::Body::from(
+        serde_json::to_vec(&serde_json::json!({
+            "csrf_token": csrf,
+            "user": {
+                "username": info.username,
+                "id": user.id,
+                "display_name": user.display_name,
+                "email": user.email,
+                "is_admin": user.is_admin,
+                "role": user.role,
+            },
+            "must_change_password": user.password_must_change,
+        })).unwrap_or_default(),
+    ));
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let max_age = picoaide_dsh_auth::admin_session::ADMIN_SESSION_TTL_SECS;
+    let cookie = format!(
+        "picoaide_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
+        session.id,
+        if secure { "; Secure" } else { "" },
+    );
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&cookie).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(error_body("INTERNAL", "会话创建失败"))))?,
+    );
+    Ok(resp)
 }
 
 /// handle_market_skills 市场技能列表（授权制）。
