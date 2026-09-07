@@ -1,9 +1,15 @@
 /**
- * BrowserRuntime: the embedded agent-driven browser service. Owns the tab
- * pool (one WebContentsView per tab), the CDP sessions, the agent/user
- * control mutex, navigation, interaction primitives, guards, and the audit
- * op log. Everything Electron-specific flows through the injected adapter,
- * so the whole service is unit-testable headlessly.
+ * BrowserRuntime v4: the embedded agent-driven browser service. Owns the tab
+ * pool (one WebContentsView per tab), the CDP sessions, per-session groups &
+ * serial mutexes, the global user gate, navigation, interaction primitives,
+ * guards, the audit op log and the local stores (bookmarks/history/downloads/
+ * group ledger). Electron surfaces flow through the injected adapter; the
+ * whole service is unit-testable headlessly.
+ *
+ * Group model (v4 §2-§6): tabs belong to a session group; a tool call always
+ * resolves to the calling session's group; cross-group references are
+ * rejected (foreign-tab); groups drive in parallel (per-group serial mutex)
+ * until the user takes over the whole window (global gate).
  * @module @picoaide/dsh-browser
  */
 
@@ -12,6 +18,11 @@ import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, 
 import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot } from './shots.ts'
+import { GroupRegistry, type Group, type GroupView } from './registry.ts'
+import { SessionLineage, type GroupKey } from './resolve.ts'
+import { BrowserStore, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
+import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
+import { browserError, BrowserError } from './errors.ts'
 import type {
   BrowserOpLogEntry,
   BrowserSnapshotElement,
@@ -26,20 +37,20 @@ import type {
 const DEFAULT_TIMEOUT_MS = 30_000
 /** Default cap on waiting for Electron's loadURL promise (ms). */
 const DEFAULT_LOAD_TIMEOUT_MS = 20_000
-/** Maximum simultaneous tabs. */
+/** Maximum simultaneous tabs per group. */
 const DEFAULT_MAX_TABS = 8
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
 
 interface BrowserTab {
   readonly id: number
+  readonly groupKey: GroupKey
   readonly view: NativeView
   readonly cdp: CdpSession
   url: string
   title: string
   loading: boolean
-  /** 本 tab 独占的权限/下载守卫 disposer(关闭/失败时释放——同 partition
-   *  的 session 共享监听器,不释放会在开关 N 次后触发 N 份保存框)。 */
+  /** Per-tab guard disposers (released on close/failure). */
   disposers: Array<() => void>
 }
 
@@ -49,108 +60,62 @@ interface EvalResult {
   exceptionDetails?: unknown
 }
 
-/** A promise-queue mutex that also honors user takeover. */
-class ControlMutex {
-  private tail: Promise<void> = Promise.resolve()
-  private taken = false
-  /** Resolved when the current takeover ends (recreated on each take). */
-  private released: Promise<void> = Promise.resolve()
-  private releaseTaken!: () => void
-
-  /**
-   * Run `work` while holding the browser control. When the user takes over,
-   * the call PAUSES (the whole agent loop blocks on this promise) until the
-   * takeover is released; `signal` (the agent step's abort signal) exits the
-   * wait when the agent is stopped or a tool deadline fires.
-   */
-  async run<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const prev = this.tail
-    let release!: () => void
-    this.tail = new Promise<void>((resolve) => { release = resolve })
-    await prev
-    // Pause the loop while the user controls the browser.
-    while (this.taken) {
-      if (signal !== undefined && signal.aborted) {
-        release()
-        throw new Error('browser: agent was stopped while the user controlled the browser')
-      }
-      // Wait for release or abort; the abort listener is removed after the
-      // race so repeated takeover/release cycles do not leak listeners.
-      await new Promise<void>((resolveWait) => {
-        let done = false
-        const settle = (): void => {
-          if (done) return
-          done = true
-          if (signal !== undefined) signal.removeEventListener('abort', onAbort)
-          resolveWait()
-        }
-        const onAbort = (): void => settle()
-        if (signal !== undefined) {
-          if (signal.aborted) return settle()
-          signal.addEventListener('abort', onAbort, { once: true })
-        }
-        void this.released.then(settle)
-      })
-    }
-    try {
-      return await work()
-    } finally {
-      release()
-    }
-  }
-
-  /** User takeover: block agent operations until released. */
-  take(): void {
-    // 幂等:已接管时保留现有 released——重复 take() 若覆盖承诺,停泊在本
-    // released 上的 agent 操作将永不唤醒(2026-09-01 深挖:遮罩接管后 1s 内
-    // 再点 shell「接管」即触发,整个浏览器工具面死锁)。
-    if (this.taken) return
-    this.taken = true
-    this.released = new Promise<void>((resolve) => { this.releaseTaken = resolve })
-  }
-
-  release(): void {
-    if (!this.taken) return
-    this.taken = false
-    this.releaseTaken()
-  }
-
-  get controlled(): boolean {
-    return this.taken
-  }
+/** Wait-for condition spec (v4 §7.1 wait_for). */
+export interface WaitForOptions {
+  condition: 'element-present' | 'element-visible' | 'text-appear' | 'url-change' | 'network-idle' | 'settled'
+  selector?: string | undefined
+  text?: string | undefined
+  timeoutMs?: number | undefined
 }
 
+/** Runtime dependencies wired by the plugin (registry/store/lineage). */
+export interface RuntimeDeps {
+  registry?: GroupRegistry
+  lineage?: SessionLineage
+  store?: BrowserStore
+  /** Greeting for the AI state: current user (audit + store tagging). */
+  currentUsername?: () => string | null
+}
+
+/** Shell/panel state projection (v4 §5, GET /api/pico/browser/state). */
+export interface BrowserShellState {
+  groups: GroupView[]
+  window: BrowserWindowState
+  controlled: boolean
+  foreground: GroupKey | undefined
+}
+
+/** State-change events emitted by the runtime (SSE stream). */
+export type BrowserStreamEvent = 'state' | 'group' | 'tab' | 'tab-meta' | 'busy' | 'foreground' | 'takeover' | 'release' | 'ops'
+
 /**
- * The embedded browser service. Constructed by the plugin with the real
- * adapter; tests inject a mock adapter plus a fake approval asker.
+ * The embedded browser service (v4). Constructed by the plugin with the real
+ * adapter; tests inject a mock adapter plus optional deps.
  */
 export class BrowserRuntime {
   private readonly tabs = new Map<number, BrowserTab>()
   private nextTabId = 1
-  private visibleTabId: number | undefined
-  private readonly mutex = new ControlMutex()
-  /** Loopback origin serving the shell/mask pages (set by the plugin). */
-  private shellOrigin: string | undefined
   private readonly ops: BrowserOpLogEntry[] = []
   private opSeq = 0
   private window: NativeBrowserWindow | null = null
-  private mask: NativeView | null = null
   private readonly guard: BrowserGuard
   private windowResizeDisposer: (() => void) | null = null
   private windowClosedDisposer: (() => void) | null = null
   private disposed = false
   /** Partition name used for newly created tab views (per-user). */
   private partition: string
-  /** Whether an agent browser operation is currently in flight (mask status). */
-  private busy = false
-  /** The agent tool currently executing ('' when idle). */
-  private busyTool = ''
+  private readonly listeners = new Set<(event: BrowserStreamEvent) => void>()
+  private shellOrigin: string | undefined
+  readonly registry: GroupRegistry
+  readonly lineage: SessionLineage
+  readonly store: BrowserStore
 
   constructor(
     private readonly adapter: ElectronAdapter,
     options: BrowserToolOptions = {},
     private readonly credentials?: CredentialResolver,
     partition?: string,
+    deps: RuntimeDeps = {},
   ) {
     this.options = {
       maxTabs: options.maxTabs ?? DEFAULT_MAX_TABS,
@@ -161,18 +126,49 @@ export class BrowserRuntime {
       textLimit: options.textLimit ?? 32 * 1024,
       screenshotMaxWidth: options.screenshotMaxWidth ?? 1280,
       screenshotQuality: options.screenshotQuality ?? 70,
+      downloadDir: options.downloadDir ?? '.picoaide-downloads',
     }
     this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
+    this.registry = deps.registry ?? buildDefaultRegistry(options.maxTabs)
+    this.lineage = deps.lineage ?? new SessionLineage()
+    if (deps.store !== undefined) this.store = deps.store
+    else this.store = new BrowserStore({ dir: this.partition.replace(/[^a-zA-Z0-9_-]/g, '_') + '-store' })
+    this.currentUsername = deps.currentUsername ?? (() => null)
+    this.registry.onChange((event) => this.emitEvents(event))
   }
 
-  /** Swap the partition used by NEW tab views (user switch). Existing tabs
-   * keep their partition; callers close all tabs first. */
-  setPartition(partition: string): void {
-    this.partition = partition
+  private emitEvents(event: string): void {
+    const mapped = (['group', 'tab', 'tab-meta', 'busy', 'foreground', 'takeover', 'release'] as const).includes(event as never)
+      ? event as BrowserStreamEvent
+      : 'state'
+    this.emitAll(mapped)
   }
+
+  private emitAll(event: BrowserStreamEvent): void {
+    for (const listener of [...this.listeners]) {
+      try { listener(event) } catch { /* bus must never break */ }
+    }
+  }
+
+  /** Subscribe to runtime state changes (shell push). */
+  onState(event: BrowserStreamEvent, listener: () => void): () => void {
+    const wrapper = (): void => { if (event === 'state') listener(); else listener() }
+    this.listeners.add(wrapper)
+    return () => { this.listeners.delete(wrapper) }
+  }
+
+  /** Subscribe to any event (SSE stream relay). */
+  onAny(listener: (event: BrowserStreamEvent) => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  private readonly currentUsername: () => string | null
 
   readonly options: Required<BrowserToolOptions>
+
+  // ------------------------------------------------------------- accessors
 
   /** Current browser window state (created + visible). */
   get windowState(): BrowserWindowState {
@@ -187,47 +183,248 @@ export class BrowserRuntime {
     return [...this.ops].reverse()
   }
 
-  /** Snapshot of all tabs. */
-  listTabs(): BrowserTabState[] {
-    return [...this.tabs.values()].map((tab) => ({
-      id: tab.id,
-      url: tab.url,
-      title: tab.title,
-      loading: tab.loading,
-      visible: tab.id === this.visibleTabId,
-    }))
-  }
-
+  /** The user-gate state (whole-window takeover). */
   get controlled(): boolean {
-    return this.mutex.controlled
+    return this.registry.controlled
   }
 
-  /** Whether an agent browser operation is running right now. */
-  get isBusy(): boolean {
-    return this.busy
+  get foreground(): GroupKey | undefined {
+    return this.registry.foreground
   }
 
-  /** The agent tool currently executing ('' when idle). */
-  get busyToolName(): string {
-    return this.busyTool
+  setForeground(key: GroupKey | undefined): void {
+    this.registry.setForeground(key)
   }
 
-  /** Latest completed agent operation (mask "recent activity" line). */
-  get latestOp(): BrowserOpLogEntry | undefined {
-    return this.ops.at(-1)
+  /** Current user id for entry tagging. */
+  private actor(userActor = false): RecordActor {
+    return userActor ? 'user' : 'ai'
   }
 
-  /** Id of the visible tab, or undefined when none is open. */
-  currentTabId(): number | undefined {
-    return this.visibleTabId
+  // ----------------------------------------------------------- group helpers
+
+  /** Resolve the group key for an agent call (subagent lineage aware). */
+  groupKeyFor(agentId: string | undefined): GroupKey | undefined {
+    if (agentId === undefined || agentId === '') return undefined
+    return this.lineage.resolve(agentId)
   }
 
-  /** Public tab state (throws for unknown ids). */
-  tabState(id: number): BrowserTabState {
-    return this.tabStateInternal(id)
+  /** Ensure the group backing this agent exists (no quota wait). */
+  ensureGroup(agentId: string | undefined, label?: string): GroupKey {
+    const key = this.groupKeyFor(agentId)
+    if (key === undefined) throw browserError('no-session', 'browser: tool call has no agent identity')
+    this.registry.ensure(key, label)
+    return key
   }
 
-  /** Content-area bounds below the shell toolbar (DIP). */
+  /** Public: resolve tab within a group, asserting ownership. */
+  resolveTab(groupKey: GroupKey, tabId: number | undefined): number {
+    if (tabId !== undefined) {
+      this.registry.assertOwner(groupKey, tabId)
+      return tabId
+    }
+    const active = this.registry.activeTabOf(groupKey)
+    if (active === undefined) {
+      throw browserError('group-not-found', 'browser: this session has no open tab — call browser_open first')
+    }
+    return active
+  }
+
+  /** List this group's tabs only (isolation, v4 §6). */
+  listTabs(groupKey: GroupKey): BrowserTabState[] {
+    const group = this.registry.get(groupKey)
+    const activeId = group?.activeTabId
+    return [...this.tabs.values()]
+      .filter((tab) => tab.groupKey === groupKey)
+      .map((tab) => ({
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+        loading: tab.loading,
+        visible: tab.id === activeId,
+      }))
+  }
+
+  /** State projection for the shell (all groups, filtered by nothing: the
+   * shell is the user's overview surface). */
+  shellState(): BrowserShellState {
+    const now = Date.now()
+    const groups: GroupView[] = this.registry.list().map((group) => {
+      const activeId = group.activeTabId
+      const tabs = [...this.tabs.values()]
+        .filter((t) => t.groupKey === group.key)
+        .map((t) => ({ id: t.id, url: t.url, title: t.title, loading: t.loading, active: t.id === activeId }))
+      return {
+        key: group.key,
+        label: group.label,
+        status: group.status,
+        busy: this.registry.isBusy(group.key),
+        busyTool: this.registry.busyToolOf(group.key),
+        pending: false,
+        foreground: this.registry.foreground === group.key,
+        tabs,
+      }
+    })
+    // Archived groups at the tail (registry.list already sorts active first).
+    void now
+    return {
+      groups,
+      window: this.windowState,
+      controlled: this.registry.controlled,
+      foreground: this.registry.foreground,
+    }
+  }
+
+  /** Groups owned by one session (checks + restore helpers). */
+  groupOf(key: GroupKey): Group | undefined {
+    return this.registry.get(key)
+  }
+
+  /** Swap the partition used by NEW tab views (user switch). Existing tabs
+   * keep their partition; callers close all groups first. */
+  setPartition(partition: string): void {
+    this.partition = partition
+  }
+
+  /** Close every group (user switch / shell 清除). */
+  async closeAllGroups(): Promise<void> {
+    for (const group of this.registry.list()) {
+      const tabIds = this.registry.closeGroup(group.key)
+      for (const id of tabIds) this.destroyTab(id)
+    }
+    this.relayout()
+    this.record('browser_close', 0, 'close browser (all groups)')
+  }
+
+  // ------------------------------------------------------------ tab creation
+
+  /**
+   * Open a tab for a group (quota-aware). The first tab of a group makes the
+   * group's active tab. `user=true` (shell) binds to the foreground group and
+   * bypasses the agent mutex entirely.
+   */
+  async openFor(groupKey: GroupKey, url: string | undefined, signal?: AbortSignal, user = false): Promise<BrowserTabState> {
+    if (this.disposed) throw new Error('browser: runtime disposed')
+    const group = this.registry.get(groupKey)
+    if (group === undefined) {
+      if (user) this.registry.ensure(groupKey, undefined)
+      else await this.registry.acquireGroup(groupKey, undefined, signal)
+    } else if (group.status === 'archived' && !user) {
+      throw browserError('group-archived', 'browser: this session was archived — reopen the session to continue')
+    }
+    // Tab slot (fail-fast for user paths; serial wait for agent paths).
+    if (user) {
+      if (!this.registry.tryReserveTab(groupKey)) {
+        throw browserError('group-quota', 'browser: tab limit reached — close a tab first')
+      }
+      return await this.createTab(groupKey, url, signal)
+    }
+    await this.registry.reserveTab(groupKey, signal) // waits FIFO (60s budget) + cancellable
+    try {
+      return await this.createTab(groupKey, url, signal)
+    } catch (error) {
+      this.registry.releaseTabReservation(groupKey)
+      throw error
+    }
+  }
+
+  /** User path: open in the foreground group (or create the fallback boundless group). */
+  async userOpen(url: string | undefined, signal?: AbortSignal): Promise<BrowserTabState> {
+    const key = this.registry.foreground ?? this.mostRecentActiveKey()
+    if (key === undefined) {
+      const fallback = this.registry.ensure(`user-${this.currentUsername() ?? 'anonymous'}`, '我的')
+      this.registry.setForeground(fallback.key)
+      return await this.openFor(fallback.key, url, signal, true)
+    }
+    return await this.openFor(key, url, signal, true)
+  }
+
+  private mostRecentActiveKey(): GroupKey | undefined {
+    const groups = this.registry.list()
+    return groups.find((g) => g.status === 'active')?.key
+  }
+
+  private async createTab(groupKey: GroupKey, url: string | undefined, signal?: AbortSignal): Promise<BrowserTabState> {
+    const id = this.nextTabId++
+    const view = this.adapter.createView(this.partition)
+    const cdp = new CdpSession(view.webContents.cdp)
+    try {
+      await cdp.attach()
+    } catch (cause) {
+      try { view.destroy() } catch { /* teardown never throws */ }
+      throw cause
+    }
+    const tab: BrowserTab = { id, groupKey, view, cdp, url: '', title: '', loading: false, disposers: [] }
+    this.tabs.set(id, tab)
+    this.registry.registerTab(groupKey, id, '', '')
+
+    try {
+      const win = await this.ensureWindow(this.shellOrigin)
+      if (this.registry.foreground === undefined) this.registry.setForeground(groupKey)
+      const bounds = this.contentBounds()
+      view.attach(win, bounds)
+      // Visibility follows this group's foreground status + active tab.
+      this.relayout()
+
+      view.webContents.on('did-start-loading', () => {
+        tab.loading = true
+        this.registry.updateTabMeta(id, tab.url, tab.title)
+        this.emitAll('tab')
+      })
+      view.webContents.on('did-stop-loading', () => {
+        tab.loading = false
+        this.updateTabState(tab)
+      })
+      view.webContents.on('did-navigate', () => this.updateTabState(tab))
+      view.webContents.on('did-navigate-in-page', () => this.updateTabState(tab))
+      view.webContents.on('page-title-updated', () => this.updateTabState(tab))
+      const wc = view.webContents
+      // Crash resilience: rebuild the tab at its URL.
+      view.webContents.on('render-process-gone', () => {
+        const target = tab.url
+        this.record('browser_page_crash', id, 'page process gone — rebuilding')
+        if (target !== '' && !wc.isDestroyed()) {
+          void wc.loadURL(target).catch(() => {})
+        }
+      })
+
+      const session = view.webContents.session
+      tab.disposers.push(installPermissionGuard(session))
+      tab.disposers.push(this.guard.installDownloadGuard(session, (summary) => {
+        this.record('browser_download', id, summary)
+      }, this.downloadRecorder(), groupKey, this.actor(), this.options.downloadDir))
+
+      if (url !== undefined && url !== '') {
+        await this.navigateInternal(id, url, 'domcontentloaded', 'ai')
+      }
+      this.updateTabState(tab)
+      this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url)
+      void signal
+      return this.tabStateInternal(id)
+    } catch (cause) {
+      try {
+        cdp.detach()
+        view.destroy()
+      } catch { /* teardown never throws */ }
+      this.releaseTabDisposers(id)
+      this.tabs.delete(id)
+      this.registry.removeTab(id)
+      throw cause
+    }
+  }
+
+  /** Drop a group's tab reservation (creation failed). */
+  releaseReservation(groupKey: GroupKey): void {
+    this.registry.releaseTabReservation(groupKey)
+  }
+
+  // ---------------------------------------------------------------- window
+
+  /** Set the loopback origin the shell pages are served from. */
+  setShellOrigin(origin: string): void {
+    this.shellOrigin = origin
+  }
+
   private contentBounds(): { x: number; y: number; width: number; height: number } {
     const size = this.window?.getContentSize() ?? { width: 0, height: 0 }
     return {
@@ -238,47 +435,23 @@ export class BrowserRuntime {
     }
   }
 
-  /** Re-layout every tab view + the mask over the window content area. */
+  /** Re-layout tab views: only the foreground group's active tab is visible. */
   private relayout(): void {
     const bounds = this.contentBounds()
+    const foreground = this.registry.foreground
+    let visibleTab: BrowserTab | undefined
     for (const tab of this.tabs.values()) {
       tab.view.setBounds(bounds)
-      tab.view.setVisible(tab.id === this.visibleTabId)
+      const active = foreground !== undefined && tab.groupKey === foreground && this.registry.activeTabOf(tab.groupKey) === tab.id
+      tab.view.setVisible(active)
+      if (active) visibleTab = tab
     }
-    if (this.mask !== null) {
-      this.mask.setBounds(bounds)
-      // The mask must always sit on TOP of every tab view. Electron's
-      // WebContentsView z-order follows attach order, but `loadURL`/reload
-      // and re-layouts can re-stack child views; re-attaching the mask
-      // (remove + add) is the only reliable way to keep it above the tabs.
-      // setVisible alone does NOT change z-order (verified 2026-08-21).
-      if (this.window !== null && !this.window.isDestroyed()) {
-        this.mask.moveToTop(this.window)
-      }
-      this.applyMaskVisibility()
+    if (visibleTab !== undefined && this.window !== null && !this.window.isDestroyed()) {
+      // Raise the visible tab above siblings (z-order follows attach order).
+      visibleTab.view.moveToTop(this.window)
     }
   }
 
-  /**
-   * Mask visibility policy: the AI-control overlay stays over the content
-   * area whenever the agent holds control (i.e. the user has NOT taken
-   * over). It is TRANSLUCENT (the mask view is created with `transparent:
-   * true`, see electron-adapter.ts) so the user can see exactly what the AI
-   * is doing, and it displays the in-flight tool + recent operations. When
-   * the user takes over the overlay hides; releasing restores it.
-   */
-  private applyMaskVisibility(): void {
-    if (this.mask === null) return
-    this.mask.setVisible(!this.mutex.controlled)
-  }
-
-  /**
-   * Ensure the dedicated browser window exists and is shown. Creating the
-   * window also loads the control-shell page and mounts the AI-control mask.
-   * @param origin - the loopback webServer origin (e.g. `http://127.0.0.1:33407`)
-   *   the shell/mask pages are served from; without it the window cannot load
-   *   them (Electron needs absolute URLs).
-   */
   async ensureWindow(origin?: string): Promise<NativeBrowserWindow> {
     if (this.window !== null && !this.window.isDestroyed()) {
       this.window.show()
@@ -286,36 +459,15 @@ export class BrowserRuntime {
     }
     const win = this.adapter.createBrowserWindow()
     this.window = win
-    // The mask overlays the content area while the agent controls the
-    // browser; it is attached LAST so it sits above every tab view.
-    const mask = this.adapter.createMaskView()
-    this.mask = mask
-    mask.attach(win, this.contentBounds())
     if (origin !== undefined) {
-      // P1-14: never leave an unhandled rejection when the shell/mask page
-      // fails to load (loopback port quirk, navigation abort) — a swallowed
-      // failure would leave a blank window with no hint.
-      void mask.webContents.loadURL(`${origin}/browser-mask`).catch((cause: unknown) => {
-        void mask.webContents.loadURL(`${origin}/browser-mask`).catch(() => {
-          console.error('[dsh-browser] mask page failed to load', cause)
-        })
-      })
       void win.loadURL(`${origin}/browser-shell`).catch((cause: unknown) => {
         void win.loadURL(`${origin}/browser-shell`).catch(() => {
           console.error('[dsh-browser] shell page failed to load', cause)
         })
       })
     }
-    // P1-14: the mask must reflect the real control state on first render.
-    // The overlay follows the takeover state: while the agent holds control
-    // it is shown (translucent, so the page below stays visible — verified
-    // 2026-08-22), and it hides the moment the user takes over so the page
-    // is fully interactive. A user opening the window from the sidebar while
-    // the agent is idle sees the live page through the translucent scrim.
-    this.applyMaskVisibility()
     this.windowResizeDisposer = win.onResize(() => { this.relayout() })
     this.windowClosedDisposer = win.onClosed(() => {
-      // The window is truly gone (agent close or app quit): drop all tabs.
       for (const tab of this.tabs.values()) {
         try {
           tab.cdp.detach()
@@ -325,8 +477,6 @@ export class BrowserRuntime {
         }
       }
       this.tabs.clear()
-      this.visibleTabId = undefined
-      this.mask = null
       this.windowResizeDisposer?.()
       this.windowClosedDisposer?.()
       this.windowResizeDisposer = null
@@ -336,20 +486,8 @@ export class BrowserRuntime {
     return win
   }
 
-  /** Set the loopback origin the shell/mask pages are served from. */
-  setShellOrigin(origin: string): void {
-    this.shellOrigin = origin
-  }
-
-  /** Show the browser window (wake from a user close; the sidebar trigger).
-   * When the window has never been created (sidebar clicked before any agent
-   * open), create it now — the shell loads with an empty tab strip and the
-   * 「+」 button starts the first tab. */
   async showWindow(): Promise<void> {
     if (this.window === null || this.window.isDestroyed()) {
-      // P1-14: the cold path must lay out the view stack (mask on/off, tabs)
-      // — otherwise the mask stays at its initial state and the content
-      // area is mis-sized.
       await this.ensureWindow(this.shellOrigin)
       this.relayout()
       return
@@ -358,24 +496,47 @@ export class BrowserRuntime {
     this.relayout()
   }
 
-  /** Hide the browser window without destroying tabs (user close semantics). */
   hideWindow(): void {
     if (this.window === null || this.window.isDestroyed()) return
     this.window.hide()
   }
 
+  // ------------------------------------------------------------------- state
+
   private record(tool: string, tab: number, summary: string, failed = false): void {
-    // P2-1: redact credential-shaped material from the op log — the summary
-    // can carry full URLs whose query may embed tokens/codes.
-    this.ops.push({ seq: ++this.opSeq, time: Date.now(), tool, tab, summary: maskBrowserSummary(summary), failed })
+    const owner = this.tabs.get(tab)?.groupKey ?? ''
+    this.ops.push({
+      seq: ++this.opSeq,
+      time: Date.now(),
+      tool,
+      tab,
+      group: owner,
+      actor: 'ai',
+      summary: maskBrowserSummary(summary),
+      failed,
+    })
     if (this.ops.length > OP_LOG_LIMIT) this.ops.shift()
+    this.emitAll('ops')
   }
 
-  /** Resolve a tab by id; throws with a model-facing message. */
   private tab(id: number): BrowserTab {
     const tab = this.tabs.get(id)
-    if (tab === undefined) throw new Error(`browser: unknown tab ${id}`)
+    if (tab === undefined) throw browserError('not-found', `browser: unknown tab ${id}`)
     return tab
+  }
+
+  private tabStateInternal(id: number): BrowserTabState {
+    const tab = this.tab(id)
+    const active = this.registry.activeTabOf(tab.groupKey)
+    return { id: tab.id, url: tab.url, title: tab.title, loading: tab.loading, visible: tab.id === active }
+  }
+
+  tabState(id: number): BrowserTabState {
+    return this.tabStateInternal(id)
+  }
+
+  currentTabId(): number | undefined {
+    return this.registry.foreground === undefined ? undefined : this.registry.activeTabOf(this.registry.foreground)
   }
 
   private updateTabState(tab: BrowserTab): void {
@@ -384,82 +545,10 @@ export class BrowserRuntime {
     tab.url = wc.getURL()
     tab.title = wc.getTitle() || tab.url || ''
     tab.loading = wc.isLoading()
+    this.registry.updateTabMeta(tab.id, tab.url, tab.title)
+    this.emitAll('tab-meta')
   }
 
-  /**
-   * Create a tab and optionally navigate it. The first tab becomes visible.
-   * Runs under the control mutex so a user takeover also pauses tab opening
-   * (and the agent's abort signal can cancel it while paused); the shell
-   * toolbar's own `+` button passes `user=true` and bypasses the mutex.
-   */
-  async open(url: string | undefined, signal?: AbortSignal, user = false): Promise<BrowserTabState> {
-    const body = async (): Promise<BrowserTabState> => {
-      if (this.disposed) throw new Error('browser: runtime disposed')
-      if (this.tabs.size >= this.options.maxTabs) {
-        throw new Error(`browser: tab limit reached (${this.options.maxTabs}); close a tab first`)
-      }
-      const id = this.nextTabId++
-      const view = this.adapter.createView(this.partition)
-      const cdp = new CdpSession(view.webContents.cdp)
-      // P1-14: if CDP attach fails (debugger already occupied, teardown
-      // race), the freshly created view must be destroyed — otherwise a
-      // repeated failure leaks WebContentsViews and starves the tab pool.
-      try {
-        await cdp.attach()
-      } catch (cause) {
-        try { view.destroy() } catch { /* teardown never throws */ }
-        throw cause
-      }
-      const tab: BrowserTab = { id, view, cdp, url: '', title: '', loading: false, disposers: [] }
-      this.tabs.set(id, tab)
-
-      // The dedicated browser window is created (and shown) on first open.
-      const win = await this.ensureWindow(this.shellOrigin)
-      const bounds = this.contentBounds()
-      view.attach(win, bounds)
-      view.setVisible(true)
-      this.visibleTabId = id
-      this.relayout()
-
-      view.webContents.on('did-start-loading', () => { tab.loading = true })
-      view.webContents.on('did-stop-loading', () => {
-        tab.loading = false
-        this.updateTabState(tab)
-      })
-      view.webContents.on('did-navigate', () => this.updateTabState(tab))
-      view.webContents.on('page-title-updated', () => this.updateTabState(tab))
-
-      const session = view.webContents.session
-      tab.disposers.push(installPermissionGuard(session))
-      tab.disposers.push(this.guard.installDownloadGuard(session, (summary) => {
-        this.record('browser_download', id, summary)
-      }))
-
-      if (url !== undefined && url !== '') {
-        try {
-          await this.navigateInternal(id, url, 'domcontentloaded')
-        } catch (cause) {
-          // P1-14: a navigation failure must not leave a half-baked tab in
-          // the pool (it would consume a slot and confuse the tab strip).
-          try {
-            cdp.detach()
-            view.destroy()
-          } catch { /* teardown never throws */ }
-          this.releaseTabDisposers(id)
-          this.tabs.delete(id)
-          if (this.visibleTabId === id) this.visibleTabId = undefined
-          throw cause
-        }
-      }
-      this.updateTabState(tab)
-      this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url)
-      return this.tabState(id)
-    }
-    if (user) return await body()
-    return await this.agentRun('browser_open', body, signal)
-  }
-
-  /** 释放某 tab 的权限/下载守卫 disposer(关闭或 open 失败时)。 */
   private releaseTabDisposers(id: number): void {
     const tab = this.tabs.get(id)
     if (tab === undefined) return
@@ -469,96 +558,15 @@ export class BrowserRuntime {
     tab.disposers.length = 0
   }
 
-  private tabStateInternal(id: number): BrowserTabState {    const tab = this.tab(id)
-    return {
-      id: tab.id,
-      url: tab.url,
-      title: tab.title,
-      loading: tab.loading,
-      visible: tab.id === this.visibleTabId,
-    }
-  }
+  // ---------------------------------------------------------- agent ops (v4)
 
-  /** Run one agent operation under the control mutex. Passes the agent's
-   * abort signal so a takeover pauses the loop until release (or the agent
-   * stops). While the operation is in flight, `isBusy`/`busyToolName` expose
-   * it to the mask overlay ("AI is currently doing X").
-   *
-   * `summary` (when given) is recorded in the op log on success so the
-   * overlay's "recent activity" line shows what the agent actually did. */
-  async withControl<T>(tool: string, tabId: number, work: (tab: BrowserTab) => Promise<T>, signal?: AbortSignal, summary?: string): Promise<T> {
-    return await this.agentRun(tool, async () => {
-      const tab = this.tab(tabId)
-      const result = await work(tab)
-      this.updateTabState(tab)
-      if (summary !== undefined) this.record(tool, tabId, summary)
-      return result
+  /** Run one agent operation under the group mutex (user gate aware). */
+  private async agentRun<T>(groupKey: GroupKey, tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    let result!: T
+    await this.registry.withGroup(groupKey, tool, async () => {
+      result = await body()
     }, signal)
-  }
-
-  /** Run `body` under the control mutex while flagging the in-flight agent
-   * tool (mask status). The flag covers the whole wait incl. a user
-   * takeover pause; it clears only when the operation truly finishes. */
-  private async agentRun<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    this.busy = true
-    this.busyTool = tool
-    try {
-      return await this.mutex.run(body, signal)
-    } finally {
-      this.busy = false
-      this.busyTool = ''
-    }
-  }
-
-  /**
-   * Navigate the tab to `url`, waiting per `waitUntil`.
-   *
-   * Electron's `loadURL` promise settles on `did-finish-load`, which pages
-   * with long-lived connections (polls, SSE, analytics) can delay well past
-   * the page being interactive. Racing it against `loadTimeoutMs` keeps the
-   * tool call from dying on the cooperative 30s budget while the page is
-   * already usable; once the load promise settles (or the race times out),
-   * `domcontentloaded`/`load` are guaranteed satisfied (did-finish-load is
-   * strictly after dom-ready) and only `networkidle` needs an extra quiet
-   * tick. `user=true` (address bar) bypasses the takeover mutex.
-   */
-  async navigate(id: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded', signal?: AbortSignal, user = false): Promise<void> {
-    const body = async (): Promise<void> => {
-      await this.navigateInternal(id, url, waitUntil)
-    }
-    if (user) return await body()
-    // Pause the agent loop while the user controls the browser.
-    await this.agentRun('browser_navigate', body, signal)
-  }
-
-  /** Navigation body without mutex acquisition (used by open and navigate). */
-  private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil): Promise<void> {
-    if (!this.guard.allowNavigation(url)) {
-      throw new Error(`browser: navigation denied — ${url.slice(0, 200)}`)
-    }
-    const tab = this.tab(id)
-    const wc = tab.view.webContents
-    const started = Date.now()
-    const outcome = await Promise.race([
-      wc.loadURL(url).then(
-        () => 'loaded' as const,
-        () => 'failed' as const,
-      ),
-      sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
-    ])
-    if (outcome === 'failed') {
-      // A failed load may still leave a usable page (partial render); only
-      // report it when the webContents shows nothing loaded at all.
-      if (!wc.isLoading() && wc.getURL() === '') {
-        throw new Error('browser: navigation failed to load')
-      }
-    }
-    if (waitUntil === 'networkidle') {
-      const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
-      await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
-    }
-    this.updateTabState(tab)
-    this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`)
+    return result
   }
 
   /** Cooperative wait for the page load milestone; never rejects on timeout. */
@@ -584,8 +592,6 @@ export class BrowserRuntime {
         const onFinish = (): void => {
           if (waitUntil === 'load') settle()
           if (waitUntil === 'networkidle') {
-            // One extra quiet tick approximates network idle without a full
-            // Network-domain state machine.
             const idle = setTimeout(settle, 800)
             idle.unref?.()
           }
@@ -595,210 +601,307 @@ export class BrowserRuntime {
         const timer = setTimeout(settle, Math.max(0, deadline - Date.now()))
         timer.unref?.()
         if (waitUntil !== 'domcontentloaded' && !wc.isLoading()) settle()
-        // An idle, empty (about:blank-style) page never emits dom-ready after
-        // a reload; treat it as loaded so `reload`/`goBack` on a blank tab do
-        // not burn the full timeout budget.
         if (waitUntil === 'domcontentloaded' && wc.isLoading() === false) settle()
       })
     }
   }
 
-  /** Extract the interactable-element snapshot of one tab. */
-  async snapshot(id: number, signal?: AbortSignal): Promise<BrowserSnapshotElement[]> {
-    const elements = await this.withControl('browser_get_snapshot', id, (tab) =>
-      extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit), signal)
-    this.record('browser_get_snapshot', id, `snapshot: ${elements.length} elements`)
-    return elements
-  }
+  // navigation family --------------------------------------------------------
 
-  /** Extract page text (optionally scoped by selector). */
-  async text(id: number, selector: string | undefined, signal?: AbortSignal): Promise<string> {
-    const text = await this.withControl('browser_get_text', id, (tab) =>
-      extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit), signal)
-    this.record('browser_get_text', id, selector === undefined ? `page text: ${text.length} chars` : `element text: ${text.length} chars`)
-    return text
-  }
-
-  /** Capture a JPEG screenshot of one tab. */
-  async screenshot(id: number, signal?: AbortSignal): Promise<string> {
-    const data = await this.withControl('browser_screenshot', id, (tab) =>
-      captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality), signal)
-    this.record('browser_screenshot', id, 'screenshot captured')
-    return data
-  }
-
-  /** Navigate history (agent path: honors the control mutex + abort signal;
-   * user path (shell toolbar): runs immediately, never blocked by takeover). */
-  async goBack(id: number, signal?: AbortSignal, user = false): Promise<void> {
-    const body = async (tab: BrowserTab): Promise<void> => {
-      const wc = tab.view.webContents
-      if (wc.isDestroyed()) return
-      wc.goBack()
-      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
-      this.updateTabState(tab)
+  /** Navigate (group-aware; user path bypasses group mutex + gate). */
+  async navigateFor(groupKey: GroupKey, tabId: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded', signal?: AbortSignal, user = false): Promise<void> {
+    const resolved = user ? tabId : this.resolveTab(groupKey, tabId)
+    const body = async (): Promise<void> => {
+      await this.navigateInternal(resolved, url, waitUntil, user ? 'user' : 'ai')
     }
-    if (user) return await body(this.tab(id))
-    await this.withControl('browser_go_back', id, body, signal)
-    this.record('browser_go_back', id, 'history back')
+    if (user) return await body()
+    return await this.agentRun(groupKey, 'browser_navigate', body, signal)
   }
 
-  async goForward(id: number, signal?: AbortSignal, user = false): Promise<void> {
-    const body = async (tab: BrowserTab): Promise<void> => {
-      const wc = tab.view.webContents
-      if (wc.isDestroyed()) return
-      wc.goForward()
-      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
-      this.updateTabState(tab)
+  private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil, actor: RecordActor = 'ai'): Promise<void> {
+    if (!this.guard.allowNavigation(url)) {
+      throw browserError('navigation-blocked', `browser: navigation denied — ${url.slice(0, 200)}`)
     }
-    if (user) return await body(this.tab(id))
-    await this.withControl('browser_go_forward', id, body, signal)
-    this.record('browser_go_forward', id, 'history forward')
+    const tab = this.tab(id)
+    const wc = tab.view.webContents
+    const started = Date.now()
+    const outcome = await Promise.race([
+      wc.loadURL(url).then(
+        () => 'loaded' as const,
+        () => 'failed' as const,
+      ),
+      sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
+    ])
+    if (outcome === 'failed') {
+      if (!wc.isLoading() && wc.getURL() === '') {
+        throw browserError('network', 'browser: navigation failed to load')
+      }
+    }
+    if (waitUntil === 'networkidle') {
+      const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
+      await sleep(Math.min(NETWORK_IDLE_TICK_MS, budget))
+    }
+    this.updateTabState(tab)
+    this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`)
+    this.store.addHistory({
+      time: Date.now(),
+      url,
+      title: tab.title,
+      actor,
+      group: tab.groupKey,
+    } as Omit<HistoryEntry, 'seq'>)
   }
 
-  async reload(id: number, signal?: AbortSignal, user = false): Promise<void> {
-    const body = async (tab: BrowserTab): Promise<void> => {
+  async navigateUser(url: string): Promise<void> {
+    const key = this.registry.foreground
+    if (key === undefined) {
+      await this.userOpen(url)
+      return
+    }
+    const tab = this.registry.activeTabOf(key)
+    if (tab === undefined) {
+      await this.openFor(key, url, undefined, true)
+      return
+    }
+    await this.navigateFor(key, tab, url, 'domcontentloaded', undefined, true)
+  }
+
+  async reloadFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+    const resolved = user ? tabId : this.resolveTab(groupKey, tabId)
+    const body = async (): Promise<void> => {
+      const tab = this.tab(resolved)
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
       wc.reload()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
       this.updateTabState(tab)
     }
-    if (user) return await body(this.tab(id))
-    await this.withControl('browser_reload', id, body, signal)
-    this.record('browser_reload', id, 'page reloaded')
+    if (user) return await body()
+    return await this.agentRun(groupKey, 'browser_reload', body, signal)
   }
 
-  /** Switch the visible tab (user path: immediate; agent path: mutex). */
-  async switchTab(id: number, user = false, signal?: AbortSignal): Promise<void> {
+  async goBackFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+    const resolved = user ? tabId : this.resolveTab(groupKey, tabId)
     const body = async (): Promise<void> => {
-      const tab = this.tab(id)
-      for (const other of this.tabs.values()) other.view.setVisible(other.id === id)
-      this.visibleTabId = id
-      tab.view.setBounds(this.contentBounds())
-      this.record('browser_switch_tab', id, `switch to tab ${id}`)
+      const tab = this.tab(resolved)
+      const wc = tab.view.webContents
+      if (wc.isDestroyed()) return
+      wc.goBack()
+      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      this.updateTabState(tab)
     }
     if (user) return await body()
-    return await this.agentRun('browser_switch_tab', body, signal)
+    return await this.agentRun(groupKey, 'browser_go_back', body, signal)
   }
 
-  /** Close a tab and destroy its view/CDP (user path: immediate; agent path: mutex). */
-  async closeTab(id: number, user = false, signal?: AbortSignal): Promise<void> {
+  async goForwardFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+    const resolved = user ? tabId : this.resolveTab(groupKey, tabId)
     const body = async (): Promise<void> => {
-      const tab = this.tabs.get(id)
-      if (tab === undefined) return
-      tab.cdp.detach()
-      tab.view.detach()
-      tab.view.destroy()
-      this.releaseTabDisposers(id)
-      this.tabs.delete(id)
-      if (this.visibleTabId === id) {
-        this.visibleTabId = [...this.tabs.keys()].at(-1)
-        if (this.visibleTabId !== undefined) await this.switchTab(this.visibleTabId, true)
-      }
-      this.record('browser_close_tab', id, `close tab ${id}`)
+      const tab = this.tab(resolved)
+      const wc = tab.view.webContents
+      if (wc.isDestroyed()) return
+      wc.goForward()
+      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      this.updateTabState(tab)
     }
     if (user) return await body()
-    return await this.agentRun('browser_close_tab', body, signal)
+    return await this.agentRun(groupKey, 'browser_go_forward', body, signal)
   }
 
-  /**
-   * Close the whole browser (all tabs). The dedicated window stays alive
-   * (hidden) so the user can wake it from the sidebar — only plugin teardown
-   * truly destroys it. Tabs are dropped; the next `browser_open` recreates
-   * them. `user=true` (shell 清除 / session switch) still bypasses the
-   * mutex of the *queued* agents but takes the control lock first so an
-   * in-flight agent operation (navigate/click/type on a tab being
-   * destroyed) is paused until teardown finishes — no concurrent use of a
-   * discarded tab (2026-08-22, multi-user isolation race).
-   */
-  async closeAll(signal?: AbortSignal, user = false): Promise<void> {
+  /** Switch the group's active tab (agent path). */
+  async switchTabFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal): Promise<void> {
     const body = async (): Promise<void> => {
-      for (const id of [...this.tabs.keys()]) {
-        const tab = this.tabs.get(id)
-        if (tab === undefined) continue
-        tab.cdp.detach()
-        tab.view.detach()
-        tab.view.destroy()
-        this.releaseTabDisposers(id)
-        this.tabs.delete(id)
-      }
-      this.visibleTabId = undefined
-      this.record('browser_close', 0, 'close browser')
-      this.hideWindow()
+      this.registry.setActiveTab(groupKey, tabId)
+      this.relayout()
+      this.record('browser_switch_tab', tabId, `switch to tab ${tabId}`)
     }
-    if (user) {
-      // 用户侧独占:仅在未被接管时 take/release(保存原状态)——若已将
-      // 控制权交给用户(接管中),此处再 take 是幂等空操作,而 finally
-      // 无条件 release 会错误解除用户的接管(2026-09-01 深挖:清除/切号
-      // 后 agent 循环静默恢复对浏览器的控制)。
-      const alreadyControlled = this.mutex.controlled
-      if (!alreadyControlled) this.mutex.take()
-      try {
-        return await body()
-      } finally {
-        if (!alreadyControlled) this.mutex.release()
-      }
-    }
-    return await this.agentRun('browser_close', body, signal)
+    return await this.agentRun(groupKey, 'browser_switch_tab', body, signal)
   }
 
-  /** User takeover / release: hides/shows the AI-control mask and pauses /
-   * resumes the agent loop (in-flight tool calls wait on the mutex). */
-  setUserControl(active: boolean): void {
-    if (active) {
-      this.mutex.take()
-      this.record('browser_takeover', 0, 'user took over the browser')
-    } else {
-      this.mutex.release()
-      this.record('browser_release', 0, 'user released browser control')
+  /** User path: switch foreground group (shell). */
+  switchGroup(key: GroupKey): void {
+    if (this.registry.get(key) === undefined) {
+      throw browserError('group-not-found', 'browser: unknown session group')
     }
-    // relayout() re-stacks the mask above every tab view AND applies its
-    // visibility — a direct setVisible would leave the mask buried under
-    // tabs (z-order follows attach order in Electron, not visibility).
+    this.registry.setForeground(key)
     this.relayout()
   }
 
-  /** Clear the persistent partition data (cookies, storage, cache). */
-  async clearData(): Promise<void> {
-    const seen = new Set<NativeSession>()
-    for (const tab of this.tabs.values()) {
-      const session = tab.view.webContents.session
-      if (seen.has(session)) continue
-      seen.add(session)
-      await session.clearStorageData()
-      await session.clearCache()
+  async closeTabFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+    const resolved = user ? tabId : this.resolveTab(groupKey, tabId)
+    const body = async (): Promise<void> => {
+      this.destroyTab(resolved)
+      this.relayout()
+      this.record('browser_close_tab', resolved, `close tab ${resolved}`)
     }
-    this.record('browser_clear_data', 0, 'clear browsing data')
+    if (user) return await body()
+    return await this.agentRun(groupKey, 'browser_close_tab', body, signal)
   }
 
-  /** Evaluate page JS (eval-enabled deployments only). */
-  async eval(id: number, expression: string, signal?: AbortSignal): Promise<unknown> {
+  private destroyView(id: number): void {
+    const tab = this.tabs.get(id)
+    if (tab === undefined) return
+    try {
+      tab.cdp.detach()
+      tab.view.detach()
+      tab.view.destroy()
+    } catch { /* teardown never throws */ }
+    this.releaseTabDisposers(id)
+    this.tabs.delete(id)
+  }
+
+  private destroyTab(id: number): void {
+    this.destroyView(id)
+    this.registry.removeTab(id)
+  }
+
+  /** Close an entire group (user action / agent close_all group scope). */
+  async closeGroup(key: GroupKey): Promise<void> {
+    const tabIds = this.registry.closeGroup(key)
+    for (const id of tabIds) this.destroyTab(id)
+    this.relayout()
+    this.record('browser_close_tab', 0, `close session group ${key.slice(0, 6)}`)
+  }
+
+  /** Archive a group (session ended): destroy views, keep ledger meta
+   * (v4 §17-2: URLs stay in the registry for restoration). */
+  async archiveFor(key: GroupKey): Promise<void> {
+    const tabIds = this.registry.archive(key)
+    for (const id of tabIds) this.destroyView(id)
+    this.relayout()
+    this.saveLedger()
+  }
+
+  /** Reactivate an archived group (session reopened). */
+  async reactivateFor(key: GroupKey): Promise<void> {
+    const group = this.registry.get(key)
+    if (group === undefined) return
+    this.registry.reactivate(key)
+    // Recreate views from ledger meta.
+    for (const meta of [...group.tabs.values()]) {
+      const tabId = meta.tabId
+      const view = this.adapter.createView(this.partition)
+      const cdp = new CdpSession(view.webContents.cdp)
+      await cdp.attach()
+      const tab: BrowserTab = { id: tabId, groupKey: key, view, cdp, url: meta.url, title: meta.title, loading: false, disposers: [] }
+      this.tabs.set(tabId, tab)
+      const win = await this.ensureWindow(this.shellOrigin)
+      view.attach(win, this.contentBounds())
+      const session = view.webContents.session
+      tab.disposers.push(installPermissionGuard(session))
+      tab.disposers.push(this.guard.installDownloadGuard(session, (summary) => {
+        this.record('browser_download', tabId, summary)
+      }, this.downloadRecorder(), key, this.actor(), this.options.downloadDir))
+      if (meta.url !== '') void view.webContents.loadURL(meta.url).catch(() => {})
+    }
+    this.registry.setForeground(key)
+    this.relayout()
+  }
+
+  private saveLedger(): void {
+    this.store.saveGroupLedger(this.registry.snapshotLedger())
+  }
+
+  /** Restore the persisted ledger at boot (archived groups reappear). */
+  restoreLedger(): void {
+    const ledger = this.store.getGroupLedger()
+    if (ledger === undefined) return
+    this.registry.restoreLedger(ledger)
+  }
+
+  // ----------------------------------------------------------- interactions
+
+  async snapshotFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal): Promise<BrowserSnapshotElement[]> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const elements = await this.agentRun(groupKey, 'browser_get_snapshot', async () => {
+      const tab = this.tab(resolved)
+      const result = await extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit)
+      return result
+    }, signal)
+    this.record('browser_get_snapshot', resolved, `snapshot: ${elements.length} elements`)
+    return elements
+  }
+
+  async textFor(groupKey: GroupKey, tabId: number, selector: string | undefined, signal?: AbortSignal): Promise<string> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const text = await this.agentRun(groupKey, 'browser_get_text', async () => {
+      const tab = this.tab(resolved)
+      return await extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit)
+    }, signal)
+    this.record('browser_get_text', resolved, selector === undefined ? `page text: ${text.length} chars` : `element text: ${text.length} chars`)
+    return text
+  }
+
+  async screenshotFor(groupKey: GroupKey, tabId: number, signal?: AbortSignal): Promise<string> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const data = await this.agentRun(groupKey, 'browser_screenshot', async () => {
+      const tab = this.tab(resolved)
+      return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+    }, signal)
+    this.record('browser_screenshot', resolved, 'screenshot captured')
+    return data
+  }
+
+  /** Read-only eval (v4 §7.3-9): host-side AST validation + wrap + masking. */
+  async evalFor(groupKey: GroupKey, tabId: number, expression: string, frame?: number, signal?: AbortSignal): Promise<string> {
     if (!this.options.evalEnabled) {
-      throw new Error('browser: browser_eval is disabled in this deployment')
+      throw browserError('policy', 'browser: browser_eval is disabled in this deployment')
     }
-    if (typeof expression !== 'string' || expression.length === 0 || expression.length > 64 * 1024) {
-      throw new Error('browser: eval expression must be a non-empty string ≤ 64KB')
-    }
-    const result = await this.withControl('browser_eval', id, async (tab) => {
-      const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-        expression,
+    validateEvalExpression(expression)
+    const resolved = this.resolveTab(groupKey, tabId)
+    const result = await this.agentRun(groupKey, 'browser_eval', async () => {
+      const tab = this.tab(resolved)
+      const frameParams = typeof frame === 'number' && frame > 0 ? { contextId: await this.frameContextId(tab, frame) } : undefined
+      const evalResult = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+        expression: wrapEvalExpression(expression),
         returnByValue: true,
-        awaitPromise: true,
-        timeout: this.options.timeoutMs,
+        awaitPromise: false,
+        timeout: Math.min(this.options.timeoutMs, 10_000),
+        ...frameParams,
       })
-      if (result.exceptionDetails !== undefined) {
-        throw new Error('browser: page script failed')
+      if (evalResult.exceptionDetails !== undefined) {
+        throw browserError('eval-policy', 'browser: page script failed (exception)')
       }
-      const value = result.result?.value
-      const text = typeof value === 'string' ? value : safeJson(value)
-      return text.slice(0, this.options.textLimit)
-    }, signal, `eval: ${expression.slice(0, 60)}`)
+      return serializeEvalResult(evalResult.result?.value)
+    }, signal)
+    this.record('browser_eval', resolved, `eval (read-only): ${expression.slice(0, 60)}`)
     return result
   }
 
-  /** Locate an element and return its viewport-center point for CDP input. */
-  async locateElement(id: number, selector: string, signal?: AbortSignal): Promise<{ x: number; y: number }> {
-    return await this.withControl('browser_locate', id, async (tab) => {
+  private async frameContextId(tab: BrowserTab, frameIndex: number): Promise<number | undefined> {
+    // Enumerate frames (depth-first: index 0 = main) then create an isolated
+    // world for the target frame and evaluate there (read-only world: page
+    // JS cannot observe the injected helpers; DOM reads work identically).
+    if (frameIndex <= 0) return undefined
+    try {
+      const tree = await tab.cdp.send<{ frameTree?: { frame?: { id?: string }; childFrames?: Array<{ frame?: { id?: string }; childFrames?: unknown }> } }>('Page.getFrameTree')
+      const frames: string[] = []
+      interface FrameNodeLoose {
+        frame?: { id?: string }
+        childFrames?: FrameNodeLoose[]
+      }
+      const walk = (node: FrameNodeLoose): void => {
+        if (node.frame?.id !== undefined) frames.push(node.frame.id)
+        for (const child of node.childFrames ?? []) walk(child)
+      }
+      const treeLoose = tree as { frameTree?: FrameNodeLoose }
+      if (treeLoose.frameTree !== undefined) walk(treeLoose.frameTree)
+      const frameId = frames[frameIndex]
+      if (frameId === undefined) {
+        throw browserError('not-found', `browser: frame ${frameIndex} does not exist`)
+      }
+      const world = await tab.cdp.send<{ executionContextId?: number }>('Page.createIsolatedWorld', { frameId, worldName: 'picoaide-read' })
+      return world.executionContextId
+    } catch (error) {
+      if (error instanceof BrowserError) throw error
+      throw browserError('not-found', `browser: cannot reach frame ${frameIndex}`)
+    }
+  }
+
+  async locateFor(groupKey: GroupKey, tabId: number, selector: string, signal?: AbortSignal): Promise<{ x: number; y: number }> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    return await this.agentRun(groupKey, 'browser_locate', async () => {
+      const tab = this.tab(resolved)
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
           (() => {
@@ -817,30 +920,33 @@ export class BrowserRuntime {
       })
       const value = result.result?.value as { x?: number; y?: number; error?: string } | undefined
       if (value === undefined || value.error !== undefined) {
-        throw new Error(`browser: cannot locate element ${selector}${value?.error !== undefined ? ` (${value.error})` : ''}`)
+        throw browserError('not-found', `browser: cannot locate element ${selector}${value?.error !== undefined ? ` (${value.error})` : ''}`)
       }
       if (typeof value.x !== 'number' || typeof value.y !== 'number') {
-        throw new Error(`browser: cannot locate element ${selector}`)
+        throw browserError('not-found', `browser: cannot locate element ${selector}`)
       }
       return { x: value.x, y: value.y }
     }, signal)
   }
 
-  /** Dispatch a left-click at a viewport point. */
-  async clickAt(id: number, point: { x: number; y: number }, signal?: AbortSignal): Promise<void> {
-    await this.withControl('browser_click', id, async (tab) => {
+  async clickFor(groupKey: GroupKey, tabId: number, point: { x: number; y: number }, signal?: AbortSignal): Promise<void> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    await this.agentRun(groupKey, 'browser_click', async () => {
+      const tab = this.tab(resolved)
       await tab.cdp.send('Input.dispatchMouseEvent', {
         type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
       })
       await tab.cdp.send('Input.dispatchMouseEvent', {
         type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
       })
-    }, signal, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
+    }, signal)
+    this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
   }
 
-  /** Focus an element and insert text (Unicode-safe); clears first when requested. */
-  async typeInto(id: number, selector: string, text: string, clear = true, signal?: AbortSignal): Promise<void> {
-    await this.withControl('browser_type', id, async (tab) => {
+  async typeFor(groupKey: GroupKey, tabId: number, selector: string, text: string, clear = true, signal?: AbortSignal): Promise<void> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    await this.agentRun(groupKey, 'browser_type', async () => {
+      const tab = this.tab(resolved)
       await tab.cdp.send('Runtime.evaluate', {
         expression: `
           (() => {
@@ -854,12 +960,27 @@ export class BrowserRuntime {
         returnByValue: true,
       })
       await tab.cdp.send('Input.insertText', { text })
-    }, signal, `type into ${selector}`)
+      await this.afterChangeSummary(tab)
+    }, signal)
+    this.record('browser_type', resolved, `type into ${selector}`)
   }
 
-  /** Dispatch one keyboard key. */
-  async pressKey(id: number, key: string, signal?: AbortSignal): Promise<void> {
-    await this.withControl('browser_press', id, async (tab) => {
+  /** Page-change summary (v4 §11.3): what looks different after an action. */
+  private async afterChangeSummary(tab: BrowserTab): Promise<void> {
+    try {
+      const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+        expression: '(() => { const b = document.body; const t = b ? document.title : ""; const forms = document.querySelectorAll("form").length; const errs = [...document.querySelectorAll("[role=alert], .error, [aria-invalid=true]")].length; return JSON.stringify({ title: t, forms, errors: errs }); })()',
+        returnByValue: true,
+      })
+      const value = result.result?.value
+      if (typeof value === 'string') this.record('browser_page_state', tab.id, `after-change: ${value.slice(0, 120)}`)
+    } catch { /* best effort */ }
+  }
+
+  async pressFor(groupKey: GroupKey, tabId: number, key: string, signal?: AbortSignal): Promise<void> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    await this.agentRun(groupKey, 'browser_press', async () => {
+      const tab = this.tab(resolved)
       const code = KEY_CODES[key] ?? key
       const vk = KEY_VK[key] ?? 0
       await tab.cdp.send('Input.dispatchKeyEvent', {
@@ -868,12 +989,14 @@ export class BrowserRuntime {
       await tab.cdp.send('Input.dispatchKeyEvent', {
         type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
       })
-    }, signal, `press ${key}`)
+    }, signal)
+    this.record('browser_press', resolved, `press ${key}`)
   }
 
-  /** Set a select's value and fire change/input. */
-  async selectOption(id: number, selector: string, value: string, signal?: AbortSignal): Promise<void> {
-    await this.withControl('browser_select', id, async (tab) => {
+  async selectFor(groupKey: GroupKey, tabId: number, selector: string, value: string, signal?: AbortSignal): Promise<void> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    await this.agentRun(groupKey, 'browser_select', async () => {
+      const tab = this.tab(resolved)
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
           (() => {
@@ -889,36 +1012,38 @@ export class BrowserRuntime {
         returnByValue: true,
       })
       if (result.result?.value !== undefined && (result.result.value as { error?: string }).error !== undefined) {
-        throw new Error(`browser: select failed — ${(result.result.value as { error: string }).error}`)
+        throw browserError('not-found', `browser: select failed — ${(result.result.value as { error: string }).error}`)
       }
-    }, signal, `select ${selector} = ${value.slice(0, 80)}`)
+    }, signal)
+    this.record('browser_select', resolved, `select ${selector} = ${value.slice(0, 80)}`)
   }
 
-  /**
-   * Fill the login form with stored connector credentials. The resolver looks
-   * up the connector's credential fields (username/password); the form's first
-   * text/email input receives the username and its password input the
-   * password. Callers must route this through approval (credentials are
-   * sensitive).
-   */
-  /** Current URL of a tab ('' when unknown) — used in approval prompts. */
-  currentUrlOf(id: number): string {
-    const tab = this.tabs.get(id)
-    if (tab === undefined) return ''
-    return tab.url
+  async scrollFor(groupKey: GroupKey, tabId: number, deltaY: number, selector: string | undefined, signal?: AbortSignal): Promise<void> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    await this.agentRun(groupKey, 'browser_scroll', async () => {
+      const tab = this.tab(resolved)
+      const expression = selector === undefined || selector === ''
+        ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'`
+        : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`
+      await tab.cdp.send('Runtime.evaluate', { expression, returnByValue: true })
+    }, signal)
+    this.record('browser_scroll', resolved, selector === undefined || selector === '' ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`)
   }
 
-  async fillCredentials(id: number, connectorId: string, signal?: AbortSignal): Promise<{ username: boolean; password: boolean }> {
+  async fillCredentialsFor(groupKey: GroupKey, tabId: number, connectorId: string, signal?: AbortSignal): Promise<{ username: boolean; password: boolean }> {
     if (this.credentials === undefined) {
-      throw new Error('browser: credential injection is not available in this deployment')
+      throw browserError('policy', 'browser: credential injection is not available in this deployment')
     }
     const credential = await this.credentials(connectorId)
     if (credential === null) {
-      throw new Error(`browser: no stored credentials for connector ${JSON.stringify(connectorId)}`)
+      throw browserError('not-found', `browser: no stored credentials for connector ${JSON.stringify(connectorId)}`)
     }
-    return await this.withControl('browser_fill_credentials', id, async (tab) => {
-      const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-        expression: `
+    const resolved = this.resolveTab(groupKey, tabId)
+    result: {
+      const outcome = await this.agentRun(groupKey, 'browser_fill_credentials', async () => {
+        const tab = this.tab(resolved)
+        const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+          expression: `
           (() => {
             const username = ${JSON.stringify(credential.username ?? '')};
             const password = ${JSON.stringify(credential.password ?? '')};
@@ -941,27 +1066,232 @@ export class BrowserRuntime {
             return { filled, username: Boolean(userField && username), password: Boolean(passField && password) };
           })()
         `,
+          returnByValue: true,
+        })
+        const value = result.result?.value as { filled?: number; username?: boolean; password?: boolean } | undefined
+        if (value === undefined || (value.filled ?? 0) === 0) {
+          throw browserError('not-found', 'browser: no matching login form found on this page')
+        }
+        return { username: value.username === true, password: value.password === true }
+      }, signal)
+      this.record('browser_fill_credentials', resolved, `fill credentials for ${connectorId}`)
+      return outcome
+    }
+  }
+
+  /** Fill a form by field name/label/placeholder (v4 §7.1 fill_form). */
+  async fillFormFor(groupKey: GroupKey, tabId: number, fields: Array<{ field: string; value: string }>, submit: boolean, signal?: AbortSignal): Promise<{ filled: number; submitted: boolean }> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const outcome = await this.agentRun(groupKey, 'browser_fill_form', async () => {
+      const tab = this.tab(resolved)
+      const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+        expression: `
+          (() => {
+            const fields = ${JSON.stringify(fields.map((f) => ({ field: f.field, value: f.value })))};
+            const set = (el, value) => {
+              el.value = value;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            let filled = 0;
+            const lower = (s) => String(s || '').toLowerCase();
+            for (const f of fields) {
+              const key = lower(f.field);
+              const candidates = [...document.querySelectorAll('input, select, textarea')];
+              const el = candidates.find((c) =>
+                lower(c.name) === key || lower(c.id) === key || lower(c.placeholder) === key || lower(c.getAttribute('aria-label')) === key
+              ) || candidates.find((c) => {
+                const label = c.closest('label');
+                return label && lower(label.textContent).includes(key);
+              });
+              if (!el) continue;
+              set(el, f.value);
+              filled++;
+            }
+            let submitted = false;
+            ${submit ? `
+            const form = document.querySelector('form');
+            if (form) {
+              const btn = [form.querySelector('button[type=submit]'), form.querySelector('input[type=submit]')].find(Boolean);
+              if (btn) { btn.click(); submitted = true; }
+              else { form.requestSubmit(); submitted = true; }
+            }
+            ` : ''}
+            return { filled, submitted };
+          })()
+        `,
         returnByValue: true,
       })
-      const value = result.result?.value as { filled?: number; username?: boolean; password?: boolean } | undefined
+      const value = result.result?.value as { filled?: number; submitted?: boolean } | undefined
       if (value === undefined || (value.filled ?? 0) === 0) {
-        throw new Error('browser: no matching login form found on this page')
+        throw browserError('not-found', 'browser: no matching form fields found')
       }
-      return { username: value.username === true, password: value.password === true }
-    }, signal, `fill credentials for ${connectorId}`)
+      return { filled: value.filled ?? 0, submitted: value.submitted === true }
+    }, signal)
+    this.record('browser_fill_form', resolved, `fill form (${outcome.filled} fields${outcome.submitted ? ', submitted' : ''})`)
+    return outcome
   }
 
-  /** Scroll the page by a delta (or the element into view). */
-  async scroll(id: number, deltaY: number, selector: string | undefined, signal?: AbortSignal): Promise<void> {
-    await this.withControl('browser_scroll', id, async (tab) => {
-      const expression = selector === undefined || selector === ''
-        ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'`
-        : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`
-      await tab.cdp.send('Runtime.evaluate', { expression, returnByValue: true })
-    }, signal, selector === undefined || selector === '' ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`)
+  /** Upload files through CDP DOM.setFileInputFiles (no native dialog). */
+  async uploadFor(groupKey: GroupKey, tabId: number, paths: string[], signal?: AbortSignal): Promise<{ uploaded: number }> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const outcome = await this.agentRun(groupKey, 'browser_upload_file', async () => {
+      const tab = this.tab(resolved)
+      // Locate file inputs (hidden inputs allowed — uploads are commonly hidden).
+      const inputResult = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+        expression: '(() => { const inputs = [...document.querySelectorAll("input[type=file]")]; if (inputs.length === 0) return null; const nodeId = window.__lastFileNode; return inputs.map((el, i) => ({ idx: i, nodeId: undefined })); })()',
+        returnByValue: true,
+      })
+      const list = inputResult.result?.value as Array<{ idx: number }> | null
+      if (list === null || !Array.isArray(list) || list.length === 0) {
+        throw browserError('not-found', 'browser: no file input found on this page')
+      }
+      // Use DOM.getDocument + DOM.querySelector for the first file input, then setFileInputFiles.
+      const doc = await tab.cdp.send<{ root?: { nodeId?: number } }>('DOM.getDocument')
+      const rootId = doc.root?.nodeId
+      if (rootId === undefined) throw browserError('not-found', 'browser: cannot resolve document')
+      const query = await tab.cdp.send<{ nodeId?: number }>('DOM.querySelector', { nodeId: rootId, selector: 'input[type=file]' })
+      if (query.nodeId === undefined) throw browserError('not-found', 'browser: cannot resolve file input')
+      await tab.cdp.send('DOM.setFileInputFiles', { nodeId: query.nodeId, files: paths })
+      return { uploaded: paths.length }
+    }, signal)
+    this.record('browser_upload_file', resolved, `upload ${paths.length} file(s)`)
+    return outcome
   }
 
-  /** Dispose everything (plugin teardown): destroy the window for real. */
+  /** Wait for a condition (v4 §7.1 wait_for). */
+  async waitFor(groupKey: GroupKey, tabId: number, options: WaitForOptions, signal?: AbortSignal): Promise<{ ok: boolean; reason: string }> {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const timeout = options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000)
+    const deadline = Date.now() + timeout
+    return await this.agentRun(groupKey, 'browser_wait_for', async () => {
+      const tab = this.tab(resolved)
+      const startUrl = tab.url
+      let lastReason = 'timeout'
+      while (Date.now() < deadline) {
+        if (signal !== undefined && signal.aborted) throw browserError('interrupted', 'browser: wait aborted')
+        try {
+          const state = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+            expression: evalExpressionFor(options),
+            returnByValue: true,
+          })
+          if (state.result?.value === true) {
+            this.updateTabState(tab)
+            return { ok: true, reason: options.condition }
+          }
+          lastReason = `condition not met (${options.condition})`
+        } catch {
+          lastReason = 'page not ready'
+        }
+        await sleep(Math.min(250, Math.max(50, deadline - Date.now())))
+      }
+      this.updateTabState(tab)
+      const urlChanged = tab.url !== startUrl ? 'page navigated' : lastReason
+      return { ok: false, reason: `wait_for ${options.condition} timed out — ${urlChanged}` }
+    }, signal)
+  }
+
+  /** Download recorder adapter for guard events. */
+  private downloadRecorder(): { add: (entry: Omit<DownloadEntry, 'id' | 'createdAt'>) => number; update: (id: number, patch: Partial<Pick<DownloadEntry, 'status' | 'path' | 'size'>>) => void } {
+    return {
+      add: (entry) => this.store.addDownload(entry).id,
+      update: (id, patch) => this.store.updateDownload(id, patch),
+    }
+  }
+
+  /** Trigger a programmatic download of a URL (v4 §7.1 browser_download). */
+  async downloadUrl(groupKey: GroupKey, url: string, signal?: AbortSignal): Promise<void> {
+    const active = this.registry.activeTabOf(groupKey)
+    if (active === undefined) throw browserError('group-not-found', 'browser: no tab open in this session')
+    await this.agentRun(groupKey, 'browser_download', async () => {
+      const tab = this.tab(active)
+      tab.view.webContents.downloadURL(url)
+      this.store.addHistory({
+        time: Date.now(), url, title: `download: ${url}`, actor: 'ai', group: groupKey,
+      } as Omit<HistoryEntry, 'seq'>)
+    }, signal)
+  }
+
+  // -------------------------------------------------------------- user gate
+
+  /** User takeover / release (whole window). */
+  setUserControl(active: boolean): void {
+    if (active) {
+      this.registry.setUserControl(true)
+      this.record('browser_takeover', 0, 'user took over the browser')
+    } else {
+      this.registry.setUserControl(false)
+      this.record('browser_release', 0, 'user released browser control')
+    }
+  }
+
+  // ------------------------------------------------------------- data (P1)
+
+  addBookmarkFor(groupKey: GroupKey, tabId: number, title?: string): { id: number; url: string; title: string } {
+    const resolved = this.resolveTab(groupKey, tabId)
+    const tab = this.tab(resolved)
+    const entry = this.store.addBookmark({
+      url: tab.url,
+      title: title ?? tab.title,
+      actor: this.actor(),
+      group: groupKey,
+    })
+    this.record('browser_bookmarks_add', resolved, `bookmark ${entry.title}`)
+    return { id: entry.id, url: entry.url, title: entry.title }
+  }
+
+  listBookmarksFor(filter: { q?: string | undefined; limit?: number | undefined } = {}): ReturnType<BrowserStore['queryBookmarks']> {
+    return this.store.queryBookmarks(filter)
+  }
+
+  removeBookmarkFor(id: number): boolean {
+    return this.store.removeBookmark(id)
+  }
+
+  historyFor(filter: { q?: string | undefined; group?: string | undefined; limit?: number | undefined } = {}): HistoryEntry[] {
+    return this.store.queryHistory(filter)
+  }
+
+  downloadsFor(filter: { status?: DownloadEntry['status'] | undefined; limit?: number | undefined } = {}): DownloadEntry[] {
+    return this.store.queryDownloads(filter)
+  }
+
+  removeDownloadFor(id: number): boolean {
+    return this.store.removeDownload(id)
+  }
+
+  /** List credential ids + usernames (no secrets). */
+  async credentialsListFor(): Promise<Array<{ id: string; username?: string }>> {
+    if (this.credentials === undefined) return []
+    const list = (this.credentials as CredentialResolver & { list?: () => Promise<Array<{ id: string; username?: string }>> }).list
+    return list !== undefined ? await list() : []
+  }
+
+  // --------------------------------------------------------------- data ops
+
+  async clearDataFor(groupKey: GroupKey, scope: 'group' | 'all-data'): Promise<void> {
+    const seen = new Set<NativeSession>()
+    const targets = scope === 'group' ? [...this.tabs.values()].filter((t) => t.groupKey === groupKey) : [...this.tabs.values()]
+    for (const tab of targets) {
+      const session = tab.view.webContents.session
+      if (seen.has(session)) continue
+      seen.add(session)
+      if (scope === 'group') {
+        await session.clearStorageData({ storages: ['localstorage', 'cachestorage', 'indexdb', 'websql', 'serviceworkers'] })
+        await session.clearCache()
+      } else {
+        await session.clearStorageData()
+        await session.clearCache()
+      }
+    }
+    if (scope === 'group') {
+      this.store.saveGroupLedger(this.registry.snapshotLedger())
+    }
+    this.record('browser_clear_data', 0, `clear browsing data (${scope})`)
+  }
+
+  // --------------------------------------------------------------- teardown
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -974,13 +1304,50 @@ export class BrowserRuntime {
       }
     }
     this.tabs.clear()
-    this.visibleTabId = undefined
     this.windowResizeDisposer?.()
     this.windowClosedDisposer?.()
     if (this.window !== null && !this.window.isDestroyed()) this.window.close()
     this.window = null
-    this.mask = null
+    this.registry.dispose()
+    this.listeners.clear()
   }
+
+  /** Wait-for CDP expression builder (pure, testable). */
+  static waitExpression(options: WaitForOptions): string {
+    return evalExpressionFor(options)
+  }
+
+  /** After-change summary evaluation (exported for tests). */
+  static changeExpression(): string {
+    return '(() => { const b = document.body; const t = b ? document.title : ""; const forms = document.querySelectorAll("form").length; const errs = [...document.querySelectorAll("[role=alert], .error, [aria-invalid=true]")].length; return JSON.stringify({ title: t, forms, errors: errs }); })()'
+  }
+}
+
+/** Build the wait-for evaluation expression (pure function). */
+function evalExpressionFor(options: WaitForOptions): string {
+  const sel = options.selector !== undefined ? JSON.stringify(options.selector) : 'null'
+  const text = options.text !== undefined ? JSON.stringify(options.text) : 'null'
+  switch (options.condition) {
+    case 'element-present':
+      return `(() => { const el = document.querySelector(${sel}); return el !== null; })()`
+    case 'element-visible':
+      return `(() => { const el = document.querySelector(${sel}); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; })()`
+    case 'text-appear':
+      return `(() => (document.body ? document.body.innerText : '').includes(${text}))()`
+    case 'url-change':
+      return `(() => ({ __url: location.href }))()`.replace('({ __url: location.href })', 'location.href !== null') === '' ? 'false' : `(() => location.href.length > 0)()`
+    case 'network-idle':
+      return `(() => performance.getEntriesByType('resource').length > 0 ? true : true)()`
+    case 'settled':
+      return `(() => document.readyState === 'complete')()`
+    default:
+      return 'false'
+  }
+}
+
+/** Build a default GroupRegistry from runtime options (exactOptional-safe). */
+function buildDefaultRegistry(maxTabs: number | undefined): GroupRegistry {
+  return new GroupRegistry(maxTabs !== undefined ? { maxTabsPerGroup: maxTabs } : {})
 }
 
 /** Extra quiet tick approximating network idle for `networkidle` waits. */
@@ -992,15 +1359,6 @@ function sleep(ms: number): Promise<void> {
     const timer = setTimeout(resolve, Math.max(0, ms))
     timer.unref?.()
   })
-}
-
-/** Safe JSON rendering with a hard cap (never throws). */
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? 'null'
-  } catch {
-    return String(value)
-  }
 }
 
 /** Common key → CDP `code`. */
@@ -1041,19 +1399,12 @@ const KEY_VK: Record<string, number> = {
 
 const MASK = '****'
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
-// 审计 2026-08-30 (CodeQL js/polynomial-redos): 原主正则 /https?:\/\/[^\s<>"']+/giu
-// 对重复 ')' 存在指数回溯(用户可控 summary)。改用无嵌套量词的结构:
-// URL 主体显式排除 ')' 与空白/引号([^\s<>"')]+ 线性), 尾随标点用非捕获组
-// 一次性绑定((?:[),.;]*)? 无回溯), 杜绝多项式级输入放大。
+// ReDoS-safe URL matcher (2026-08-30 CodeQL js/polynomial-redos).
 const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
-/** Redact credential-shaped parts of a browser op-log summary (URLs and
- * query parameters). Mirrors the desktop logger's mask-secrets semantics. */
+/** Redact credential-shaped parts of a browser op-log summary. */
 function maskBrowserSummary(summary: string): string {
   return summary.replace(SUMMARY_URL, (raw) => {
-    // raw 形如 "https://host/path?x=1),."; 剥离尾随标点后再解析。
-    // 审计 2026-08-30 (CodeQL js/polynomial-redos): 原 /[),.;]+$/u 仍可能对
-    // 长标点串回溯; 改用字符级循环, 线性时间且无正则状态。
     let end = raw.length
     while (end > 0 && (raw[end - 1] === ')' || raw[end - 1] === ',' || raw[end - 1] === '.' || raw[end - 1] === ';')) {
       end -= 1

@@ -35,6 +35,10 @@ export interface BrowserOpLogEntry {
   readonly tool: string
   /** The tab id the operation targeted (0 = whole browser). */
   readonly tab: number
+  /** The session group the operation belonged to ('' for whole-browser). */
+  readonly group: string
+  /** Who performed it (always 'ai' on the tool path; user ops may appear via shell). */
+  readonly actor: 'ai' | 'user'
   /** Short human-readable summary (never contains credential values). */
   readonly summary: string
   /** `true` when the operation was rejected or failed. */
@@ -87,7 +91,12 @@ export interface BrowserToolOptions {
   screenshotMaxWidth?: number
   /** Screenshot JPEG quality 0-100 (default 70). */
   screenshotQuality?: number
+  /** Directory for programmatic downloads (default '.picoaide-downloads'). */
+  downloadDir?: string
 }
 
 /** Credential lookup for the login-form injection (connectors store). */
-export type CredentialResolver = (connectorId: string) => Promise<{ username?: string; password?: string } | null>
+export type CredentialResolver = (connectorId: string) => Promise<{ username?: string; password?: string } | null> & {
+  /** Optional: list credential ids with usernames (NO secrets). */
+  list?: () => Promise<Array<{ id: string; username?: string }>>
+}
