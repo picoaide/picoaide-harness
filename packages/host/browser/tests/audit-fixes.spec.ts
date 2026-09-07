@@ -379,6 +379,46 @@ describe('audit fixes: op-log actor + store switching', () => {
     cleanup()
   })
 
+// ------------------------------------------------- always-on mask
+
+describe('audit fixes: always-on mask (我来操作 is the only entry)', () => {
+  it('mask is the default state; only takeover unlocks; release re-arms', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    // Idle + not controlled => mask (locked), covering the FULL window.
+    let state = runtime.shellState()
+    expect(state.ui.mode).toBe('mask')
+    let overlay = adapter.overlays.at(-1)!
+    expect(overlay.bounds).toEqual({ x: 0, y: 0, width: 1100, height: 780 })
+    // Takeover unlocks (capsule).
+    runtime.setUserControl(true, 'user')
+    state = runtime.shellState()
+    expect(state.ui.mode).toBe('capsule')
+    // Release re-arms the mask immediately — even while idle.
+    runtime.setUserControl(false, 'user')
+    state = runtime.shellState()
+    expect(state.ui.mode).toBe('mask')
+    overlay = adapter.overlays.at(-1)!
+    expect(overlay.bounds).toEqual({ x: 0, y: 0, width: 1100, height: 780 })
+    cleanup()
+  })
+  it('busy does not change the lock (mask while idle AND busy)', async () => {
+    const { runtime, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    const id = runtime.currentTabId()!
+    const p = runtime.waitFor(id, { condition: 'element-present', selector: '#zzz', timeoutMs: 200 })
+    // during waitFor the pool is busy
+    await sleep(30)
+    expect(runtime.shellState().ui.mode).toBe('mask')
+    runtime.setUserControl(true, 'user')
+    expect(runtime.shellState().ui.mode).toBe('capsule')
+    runtime.setUserControl(false, 'user')
+    expect(runtime.shellState().ui.mode).toBe('mask')
+    await p
+    cleanup()
+  })
+})
+
 // ------------------------------------------------- round-3 UX state
 
 describe('audit fixes: round-3 UX state (favicon/history buttons/window title)', () => {

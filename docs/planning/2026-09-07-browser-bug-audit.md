@@ -219,3 +219,21 @@ phase B: wait_for busy=true busyTool=browser_wait_for      ← 忙态正常
 - browser check 全绿（**160 单测**：新增 favicon/history 标志暴露、窗口标题跟随、openDownloadPath 正/反例）
 - 真机 E2E 扩展至 **20 项全绿**（新增：真实 favicon、按钮置灰、Ctrl+Tab、中键关闭、历史行导航、被拒导航 toast）
 - 一个测试方法教训：地址栏对无 `://` 输入自动加 https:// 前缀，`javascript:alert(1)` 会变 `https://javascript:…` 走 Chromium 错误页而非守卫拒绝——toast 断言用例须用 `file://`（含 `://` 不加前缀、必被守卫拒绝）
+
+---
+
+## 第四轮：蒙版常驻产品语义（2026-09-07，用户拍板）
+
+**用户定案**：蒙版默认全程常驻（含空闲）；整个浏览器只有「我来操作」一个入口，其他都不允许操作；点击「交给AI」后立即重新加蒙版，任意位置（含工具栏）都不允许操作；**哪怕空闲，只要没有明确点击「我来操作」，蒙版都不消失**。
+
+### 实现
+- `runtime.effectiveOverlayMode()`：`controlled ? overlayMode : 'mask'`——蒙版成为默认态（原「仅忙时」逻辑废弃）；`overlayBounds('mask')` = **整窗**（0,0,w,h，含 66px 工具栏）。
+- 蒙版 pill 双态文案：忙=`AI 正在操作 · <工具> / 点击让我接管`；空闲=`AI 空闲 / 点击我来操作`（overlay `renderMask()`，随 state 刷新）。
+- 键盘锁：shell/overlay 的快捷键与地址栏 Enter 全部在 `!state.controlled` 时忽略（蒙版是唯一入口，快捷键不得绕过）；Escape 语义保留（受控时=交给AI）。
+- 菜单项点击不再合成 Escape 关菜单（否则触发「受控时 Esc=释放」的回归）——直接 `post overlay capsule` 再执行动作。
+
+### 验证
+- 单测 +2（`tests/audit-fixes.spec.ts`「always-on mask」）：空闲即 mask 且 bounds=整窗；接管→capsule；释放→mask 立即恢复（含忙态场景）。
+- 真机 E2E 22/22 全绿（新增：空闲蒙版常驻断言、我来操作解锁、释放后蒙版立即恢复、再次解锁面板恢复）。
+- 复现探针（`temp/repro-release-mask.mjs`）双场景确认：忙时释放→mask 立即恢复；**空闲时释放→mask 常驻 + pill「AI 空闲 · 点击我来操作」**（用户报告场景根因闭环）。
+- 期间修出一个回归并定位：菜单项点击合成 Escape 关菜单 → 新 Escape 语义（受控=交给AI）误释放控制权（E2E Ctrl+L 步骤 host controlled=false 诊断实锤）。
