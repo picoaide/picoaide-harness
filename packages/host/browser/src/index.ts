@@ -17,7 +17,7 @@
  *   GET  /api/pico/browser/bookmarks [+ POST / DELETE ?id=]
  *   GET  /api/pico/browser/history        -> ?q=&limit=
  *   GET  /api/pico/browser/downloads      [DELETE ?id=]
- *   GET  /browser-shell | /browser-mask   -> shell + interception mask pages
+ *   GET  /browser-shell | /browser-overlay -> toolbar shell + AI UI overlay pages
  * @module @picoaide/dsh-browser
  */
 
@@ -34,8 +34,10 @@ import { BrowserRuntime } from './runtime.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
 import { applyBrowserTools, parseToolGroups } from './tools.ts'
-import { BROWSER_SHELL_HTML, BROWSER_MASK_HTML } from './shell-pages.ts'
+import { BROWSER_SHELL_HTML, BROWSER_OVERLAY_HTML } from './shell-pages.ts'
 import type { CredentialResolver } from './types.ts'
+import type { DownloadEntry } from './store.ts'
+type DownloadEntryStatus = DownloadEntry['status']
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
 declare module '@deepseek-ai/cordis' {
@@ -192,33 +194,51 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const userDataDir = resolveUserDataDir()
   const usernameForStore = currentUser() ?? 'anonymous'
-  const store = new BrowserStore({
-    dir: userDataDir !== undefined
-      ? join(userDataDir, 'browser-store', encodePartitionSegment(usernameForStore))
-      : join(process.cwd(), '.browser-store', encodePartitionSegment(usernameForStore)),
-  })
+  const storeDirFor = (username: string): string => userDataDir !== undefined
+    ? join(userDataDir, 'browser-store', encodePartitionSegment(username))
+    : join(process.cwd(), '.browser-store', encodePartitionSegment(username))
+  let store = new BrowserStore({ dir: storeDirFor(usernameForStore) })
   const pool = new TabPool({
     ...(config.maxTabs !== undefined ? { maxTabs: config.maxTabs } : {}),
     ...(config.waitTimeoutMs !== undefined ? { waitTimeoutMs: config.waitTimeoutMs } : {}),
   })
   const runtime = new BrowserRuntime(
     createRealElectronAdapter(),
-    config,
+    {
+      ...config,
+      downloadDir: config.downloadDir ?? (userDataDir !== undefined ? join(userDataDir, 'downloads') : join(process.cwd(), '.picoaide-downloads')),
+    },
     credentialResolver,
     browserPartitionFor(currentUser()),
     { pool, store, currentUsername: currentUser },
   )
   runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
-  // Restore the persisted tab ledger; keep it fresh on every change.
+  // Restore the persisted tab ledger; keep it fresh on every tab change (ops/
+  // busy events never change the ledger — persisting on them would sync-write
+  // the file on every operation).
   runtime.restoreLedger()
-  runtime.onAny(() => runtime.saveLedger())
+  runtime.onAny((event) => {
+    if (event === 'tab' || event === 'tab-meta') runtime.saveLedger()
+  })
 
-  // User switch: close every tab, point new tabs at the new user's partition.
+  const switchStoreForUser = (username: string | null): void => {
+    const name = username ?? 'anonymous'
+    store = new BrowserStore({ dir: storeDirFor(name) })
+    runtime.setStore(store)
+    runtime.restoreLedger()
+    // Persist the freshly restored ledger immediately (the pool may be empty).
+    runtime.saveLedger()
+  }
+
+  // User switch: close every tab, point new tabs at the new user's partition
+  // and swap the per-user browser store (bookmarks/history/downloads/ledger).
   ctx.on('pico/session-changed', (next) => {
     const username = (next as { username?: string } | null)?.username ?? null
+    const user = username !== null && username !== undefined && username.length > 0 ? username : null
     void (async () => {
       await runtime.closeAll(true)
-      runtime.setPartition(browserPartitionFor(username))
+      runtime.setPartition(browserPartitionFor(user))
+      switchStoreForUser(user)
     })().catch((cause: unknown) => {
       ctx.logger?.error('pico-browser: session change handling failed', cause)
     })
@@ -266,6 +286,15 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         case 'takeover': {
           runtime.setUserControl(body.active === true)
+          json(res, 200, { ok: true })
+          return
+        }
+        case 'overlay': {
+          const mode = typeof body.mode === 'string' ? body.mode : undefined
+          if (mode === undefined || !['capsule', 'panel', 'menu', 'viewer'].includes(mode)) {
+            return json(res, 400, { error: 'mode must be one of capsule/panel/menu/viewer' })
+          }
+          runtime.setOverlayMode(mode as 'capsule' | 'panel' | 'menu' | 'viewer')
           json(res, 200, { ok: true })
           return
         }
@@ -371,7 +400,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const body = await readJson(req) as { title?: string } | null
       const tab = runtime.currentTabId()
       if (tab === undefined) return json(res, 400, { error: 'no tab open to bookmark' })
-      const entry = runtime.addBookmark(tab, body?.title)
+      const entry = runtime.addBookmark(tab, body?.title, 'user')
       json(res, 200, { id: entry.id, url: entry.url, title: body?.title ?? entry.title })
     }
     const bookmarksDelete: JsonHandler = (req, res) => {
@@ -396,10 +425,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     const downloadsGet: JsonHandler = (req, res) => {
       if (!guard(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
-      const status = url.searchParams.get('status')
+      const rawStatus = url.searchParams.get('status')
+      const status = rawStatus !== null && ['in-progress', 'done', 'cancelled', 'rejected'].includes(rawStatus)
+        ? rawStatus as DownloadEntryStatus
+        : undefined
       json(res, 200, {
         downloads: runtime.downloads({
-          status: status !== null && ['in-progress', 'done', 'cancelled', 'rejected'].includes(status) ? status as 'done' : undefined,
+          status,
           limit: num(url.searchParams.get('limit'), 100),
         }),
       })
@@ -436,8 +468,22 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (req.method === 'DELETE') return downloadsDelete(req, res)
         json(res, 405, { error: 'method not allowed' })
       } }),
+      ctx.webServer.register({ kind: 'exact', path: '/api/pico/browser/downloads/open', handler: (req, res) => {
+        void (async () => {
+          if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
+          const body = await readJson(req) as { id?: number } | null
+          const id = body !== null && typeof body.id === 'number' ? body.id : undefined
+          if (id === undefined) return json(res, 400, { error: 'id is required' })
+          try {
+            json(res, 200, await runtime.openDownloadPath(id))
+          } catch (cause) {
+            json(res, 400, { error: cause instanceof Error ? cause.message : String(cause) })
+          }
+        })().catch((cause: unknown) => json(res, 400, { error: cause instanceof Error ? cause.message : String(cause) }))
+      } }),
       ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: html(BROWSER_SHELL_HTML) }),
-      ctx.webServer.register({ kind: 'exact', path: '/browser-mask', handler: html(BROWSER_MASK_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-overlay', handler: html(BROWSER_OVERLAY_HTML) }),
     ]
     return () => {
       for (const dispose of disposers) dispose()
