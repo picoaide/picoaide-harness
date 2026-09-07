@@ -19,6 +19,7 @@ export type BrowserErrorCode =
   | 'group-not-found'
   | 'group-archived'
   | 'group-quota'
+  | 'quota'
   | 'window-controlled'
   | 'eval-policy'
   | 'policy'

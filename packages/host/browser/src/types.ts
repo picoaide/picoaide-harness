@@ -37,6 +37,8 @@ export interface BrowserOpLogEntry {
   readonly tab: number
   /** The session group the operation belonged to ('' for whole-browser). */
   readonly group: string
+  /** The originating session id ('' for whole-browser). */
+  readonly session: string
   /** Who performed it (always 'ai' on the tool path; user ops may appear via shell). */
   readonly actor: 'ai' | 'user'
   /** Short human-readable summary (never contains credential values). */
