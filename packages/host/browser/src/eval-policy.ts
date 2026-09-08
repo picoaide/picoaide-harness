@@ -9,10 +9,11 @@
  *   declarations, `new`, `await`/`yield`, `Function`/`eval` calls,
  *   `with`, Super, TaggedTemplate, Import/Export;
  * - forbidden writes/side-effect APIs (called or member-accessed):
- *   fetch, XMLHttpRequest, sendBeacon, WebSocket constructor, setItem
- *   (storage), document.write, form submit, window.open, alerts, print,
- *   crypto.subtle? no — subtle is read-only; history/replaceState,
- *   location assignment, cookie assignment, focus? allowed.
+ *   setItem (storage), document.write, form submit, window.open, alerts,
+ *   print, history/replaceState, location assignment, cookie assignment,
+ *   DOM mutation, in-place array/object mutation, media/presentation side
+ *   effects. Network-outbound APIs (fetch/XMLHttpRequest/WebSocket/
+ *   EventSource/sendBeacon) are NOT forbidden (2026-09-08 product decision).
  * - a whitelist of read-only helper globals is injected into the executed
  *   expression (readText/readAttr/readJson/readVar) and must not be shadowed.
  *
@@ -36,13 +37,17 @@ export const MAX_EVAL_RESULT_DEPTH = 6
 /** Read-only helper globals injected into the eval sandbox expression. */
 export const EVAL_HELPERS = ['readText', 'readAttr', 'readJson', 'readVar'] as const
 
-/** Member base names treated as side-effect/write entry points. */
+/** Member base names treated as side-effect/write entry points.
+ *
+ * NOTE (2026-09-08 product decision): network-outbound APIs (fetch,
+ * XMLHttpRequest, WebSocket, EventSource, sendBeacon) are REMOVED from this
+ * set. The AI already has full browser control plus a shell tool; banning
+ * fetch in eval only forces it to re-implement the same request through
+ * navigate/click/fill_form or a shell script — it does not stop data egress,
+ * it just makes it less legible. What remains here are code-execution,
+ * DOM/presentation and page-state writes (assignment-style side effects).
+ */
 const WRITE_APIS = new Set([
-  'fetch',
-  'XMLHttpRequest',
-  'WebSocket',
-  'EventSource',
-  'sendBeacon',
   'setItem',
   'write',
   'writeln',
@@ -63,7 +68,6 @@ const WRITE_APIS = new Set([
   'close',
   'reset',
   'requestSubmit',
-  'postMessage',
   'setTimeout',
   'setInterval',
   'requestAnimationFrame',

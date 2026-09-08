@@ -30,7 +30,7 @@ const WAIT_CONDITIONS = ['element-present', 'element-visible', 'text-appear', 'u
 const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rules:
 1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
 2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
-3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval is READ-ONLY (single expression; assignments and write APIs are rejected).
+3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval is a single expression (no statements/assignments; eval/Function and DOM-write APIs rejected; network fetch/XHR allowed).
 4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; release continues them — do not fight the user.
 5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
 6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
@@ -639,10 +639,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[读取] READ-ONLY evaluate one JavaScript expression in your tab (single expression; assignments/write APIs rejected) and return its JSON result — for non-explicit page data (SSR globals, hidden fields, datasets).',
+    description: '[读取/请求] Evaluate one JavaScript expression in your tab (single expression; no statements/assignments; code-execution APIs like eval/Function and DOM-write APIs rejected — network requests like fetch/XHR are allowed) and return its JSON result — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
-      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
+      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
       frame: { type: 'integer', description: 'Frame index (0 = main frame, default).' },
     },
     output: {
