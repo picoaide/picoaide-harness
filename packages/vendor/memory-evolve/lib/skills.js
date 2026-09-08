@@ -172,7 +172,23 @@ export function approvePendingSkill(pendingDir, skillDir, name) {
     // Cross-device move (e.g. memoryDir on D: → ~/.agents/skills on C: on
     // Windows): rename(2) cannot cross filesystems. Fall back to copy + delete
     // so a pending skill on another volume can still be adopted.
-    if (error?.code === 'EXDEV') {
+    // EBUSY/EPERM/EACCES (Windows: target dir locked by a watcher/AV/indexer,
+    // or an empty stub dir already exists): rename is not legal here either —
+    // fall back to the same copy + delete so adoption still succeeds.
+    if (
+      error?.code === 'EXDEV' ||
+      error?.code === 'EBUSY' ||
+      error?.code === 'EPERM' ||
+      error?.code === 'EACCES'
+    ) {
+      // If a live skill with the same name already exists (stub dir or real),
+      // refuse — the check above only verified SKILL.md; the rename may have
+      // failed because a directory already occupies the destination. Do not
+      // clobber an existing skill directory.
+      if (existsSync(join(to, 'SKILL.md'))) {
+        return { ok: false, message: smt('skillmsg.alreadyInLib', { name }) }
+      }
+      rmSync(to, { recursive: true, force: true })
       cpSync(from, to, { recursive: true })
       rmSync(from, { recursive: true, force: true })
     } else {

@@ -332,3 +332,44 @@ test('skillReviewEnabled true lets create land directly in the live dir', async 
   assert.equal(readFileSync(join(dir, 'direct-skill', 'SKILL.md'), 'utf8'), GOOD_BODY('direct-skill', '直接创建'))
   clean(dir)
 })
+
+test('approvePendingSkill falls back to copy+delete when the destination is a busy/occupied dir (Windows EBUSY)', () => {
+  const dir = tempDir()
+  const pendingDir = join(dir, 'pending-skills')
+  const skillDir = join(dir, 'skills')
+  const name = 'busy-dir-skill'
+  const body = GOOD_BODY(name, 'busy dir test')
+  // Stage the pending skill.
+  mkdirSync(join(pendingDir, name), { recursive: true })
+  writeFileSync(join(pendingDir, name, 'SKILL.md'), body)
+  // Simulate the Windows EBUSY condition: a destination directory already
+  // exists (e.g. a stub dir left by a previous failed rename or a watcher
+  // holds it). renameSync(to) would throw EBUSY/EPERM — the copy+delete
+  // fallback must still adopt the skill without clobbering a LIVE skill.
+  mkdirSync(join(skillDir, name), { recursive: true })
+
+  const outcome = approvePendingSkill(pendingDir, skillDir, name)
+  assert.equal(outcome.ok, true, `expected adopt, got ${JSON.stringify(outcome)}`)
+  assert.equal(existsSync(join(pendingDir, name)), false, 'pending source removed')
+  assert.equal(readFileSync(join(skillDir, name, 'SKILL.md'), 'utf8'), body, 'skill lands in live dir')
+  clean(dir)
+})
+
+test('approvePendingSkill refuses to clobber a live skill when the destination already has SKILL.md', () => {
+  const dir = tempDir()
+  const pendingDir = join(dir, 'pending-skills')
+  const skillDir = join(dir, 'skills')
+  const name = 'clobber-skill'
+  const body = GOOD_BODY(name, 'clobber test')
+  mkdirSync(join(pendingDir, name), { recursive: true })
+  writeFileSync(join(pendingDir, name, 'SKILL.md'), body)
+  // A live skill with the same name already exists — must NOT be overwritten.
+  mkdirSync(join(skillDir, name), { recursive: true })
+  writeFileSync(join(skillDir, name, 'SKILL.md'), '---\nname: clobber-skill\ndescription: existing\n---\n# existing\n')
+
+  const outcome = approvePendingSkill(pendingDir, skillDir, name)
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.message, /已存在/)
+  assert.equal(readFileSync(join(skillDir, name, 'SKILL.md'), 'utf8').includes('existing'), true, 'live skill untouched')
+  clean(dir)
+})

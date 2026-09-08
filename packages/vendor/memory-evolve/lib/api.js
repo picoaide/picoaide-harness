@@ -778,7 +778,14 @@ export function installApi(ctx, deps) {
       if (req.method === 'POST' && path === '/memory-evolve/api/pending-skills/approve') {
         const body = await readBody(req)
         const name = String(body?.name ?? '').trim()
-        const outcome = approvePendingSkill(pendingSkillDir(deps), deps.config.skillDir, name)
+        let outcome
+        try {
+          outcome = await Promise.resolve(approvePendingSkill(pendingSkillDir(deps), deps.config.skillDir, name))
+        } catch (error) {
+          // EBUSY/EPERM/EACCES 等文件系统错误不应把原始堆栈甩给前端;
+          // 降级为友好错误信息,用户可重试或手动处理。
+          throw new Error(`采纳失败（${error?.code ?? 'unknown'}）: ${error?.message ?? String(error)}`)
+        }
         if (!outcome.ok) throw new Error(outcome.message)
         sendJson(res, 200, outcome)
         return

