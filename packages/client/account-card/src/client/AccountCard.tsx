@@ -358,23 +358,6 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
 
   return createPortal(
     <div style={CARD}>
-      <div style={HEAD}>
-        <div style={USER}>
-          <span style={AVATAR}>{initial(username)}</span>
-          <span style={USERNAME} title={username}>{username}</span>
-        </div>
-        <button
-          type="button"
-          style={LOGOUT}
-          onMouseEnter={(e) => { Object.assign(e.currentTarget.style, LOGOUT_HOVER) }}
-          onMouseLeave={(e) => { Object.assign(e.currentTarget.style, LOGOUT) }}
-          disabled={loggingOut}
-          onClick={() => { void logout() }}
-        >
-          {loggingOut ? t('account.loggingOut') : t('account.logout')}
-        </button>
-      </div>
-      <div style={DIVIDER} />
       {stale ? (
         <div style={BALANCE_ROW}>
           <span style={{ ...BALANCE_AMOUNT, color: 'var(--dsw-alias-label-secondary)' }}>—</span>
@@ -426,6 +409,24 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
           onClick={() => { void refreshNow() }}
         >
           {refreshing ? '…' : `↻ ${t('account.refresh')}`}
+        </button>
+      </div>
+      <div style={DIVIDER} />
+      {/* 用户信息行:用户名 + 退出登录 置于卡片底部(刷新按钮之下) */}
+      <div style={HEAD}>
+        <div style={USER}>
+          <span style={AVATAR}>{initial(username)}</span>
+          <span style={USERNAME} title={username}>{username}</span>
+        </div>
+        <button
+          type="button"
+          style={LOGOUT}
+          onMouseEnter={(e) => { Object.assign(e.currentTarget.style, LOGOUT_HOVER) }}
+          onMouseLeave={(e) => { Object.assign(e.currentTarget.style, LOGOUT) }}
+          disabled={loggingOut}
+          onClick={() => { void logout() }}
+        >
+          {loggingOut ? t('account.loggingOut') : t('account.logout')}
         </button>
       </div>
     </div>,
