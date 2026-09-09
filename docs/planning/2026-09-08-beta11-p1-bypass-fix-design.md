@@ -327,3 +327,27 @@ const arrowParams = new Set<string>()
 | 黑板副本（本流水线） | `PLAN.md` / `IMPLEMENTATION.md`（黑板目录） | 流水线约定 |
 
 > 规划期只读业务代码，**未修改仓库任何文件**；原型全部落在 `/tmp/` 与黑板 `probe/`。
+
+#### 4.5.2 运行时计算键（R3-P0）的拒绝边界（2026-09-09 修复轮 4 实测）
+
+第 3 轮把常量折叠接进 `memberName()` 后，**可折叠**的键（`window['ev'+'al']`、`` window[`ev${'a'}l`] ``）已收口；**不可折叠**的键仍可绕过：`memberName()` 返回 `undefined`（"不可判定"），而值位置分支把 `undefined` 一律当作"放行"。
+
+判定用的新概念：**键的求值形式**是否"由页面在运行时算出"。凡键表达式本身含**成员访问 / 调用 / 展开**（即不是纯标识符、字面量、算术、纯常量拼接），其解析出的属性名在**校验期不可证明**：
+
+| 键形态（实测） | 类别 | 为何不可静态证明 |
+|---|---|---|
+| `String.fromCharCode(101,118,97,108)` / `String.fromCodePoint(…)` | 调用 | 结果由页面计算，等价于任意字符串 |
+| `atob('ZXZhbA==')` / `decodeURIComponent('ev%61l')` | 调用 | 同上 |
+| `['e','v','a','l'].join('')` / `…reverse().join('')` | 成员调用 | 拼接结果由页面计算 |
+| `'ev'.concat('al')` / `'xeval'.slice(1)` / `.substring()` / `.replace()` / `.split().join()` | 成员调用 | 字符串方法组合，无上界 |
+| `'EVAL'.toLowerCase()` / `.normalize()` / `.trim()` / `.padEnd()` / `.valueOf()` / `.toString()` | 成员调用 | 同上 |
+| `(101).toString(36)+'val'` / `String.raw({raw:['eval']})` | 成员调用 / 调用 | 同上 |
+| `({x:'eval'}).x` / `this.k` / `obj.prop` | 成员读 | 值是运行时的 |
+| `[...['e','v','a','l']]` / `Reflect.get(o, ...['eval'])` | 展开 | 元素个数与内容在运行时装配 |
+| `(() => 'eval')()` / `Number('1')` | 调用 | 调用结果不可证明 |
+| `true ? 'eval' : …` / `('eval', k)` | 复合 | 递归含上述任一即不可证明 |
+
+**放行的边界（不误伤）**：纯动态键——`data[key]`、`window[key]`、`obj[key].items[0]`、`data[0]`、`data[i]`、`arr[idx]`、`fetch('u', { body: data[key] })`、`({[key]: 1})`、`(({[key]: x}) => x)(obj)`、`Reflect.get(o, key)`、`((f = data[key]) => f)()`——**全部仍放行**（键表达式是标识符/字面量/数值，不含成员访问或调用）。
+
+> 拒绝是**基对象无关**的（延续 D6）：`window[String.fromCharCode(…)]`、`globalThis[…]`、`[window][0][…]`、`((w)=>w)(window)[…]` 同样被拒，别名/容器洗白无法绕过。拒绝仅作用于**计算键本身**，不涉及"该成员是否被消费"，因此纯读 `window[key]` 与回调位 `[1].map(window[key])` 均保持放行。
+

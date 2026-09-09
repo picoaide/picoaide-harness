@@ -88,3 +88,16 @@
 
 > 连带拒绝清单的回归口径：清单内 9 类**变 ACCEPT 即视为安全回归**（黑名单被削弱）；合法集（AC3c/AC3d）**变 REJECT 即视为过度修复**。两侧都有测试守护。
 
+
+## 8. 修复轮 4 追加定案（agent-coder，2026-09-09）
+
+> 依据 `FINAL-ROUND3.md` §6 `R3-P0` 与 `REVIEW-CONFIRMED-ROUND3.md` 的 `NEW-P0` 残余。**只修该残余**。
+
+| # | 决策点 | 定案 | 理由 |
+|---|---|---|---|
+| D13 | `memberName()` 的 `undefined` 该不该继续等于"放行" | **拆成两种语义**：`undefined` 仍表示"键不可判定"（纯读 `data[key]` 放行）；但键表达式**含成员访问/调用/展开**时，该键即"运行时计算键"，**一律拒绝** | R3-P0 根因：`undefined` 同时表示"动态键（合法读）"与"不可证明的键（危险）"，值位置分支把两者都当放行。实测 `[1].map(window[String.fromCharCode(101,118,97,108)])` 在 vm 内执行读 cookie / 外发 |
+| D14 | 是否用"键构建器白名单"（只拒 fromCharCode 等已知构造器） | **不采用**；采用结构判定（含成员访问/调用/展开即拒） | 白名单可被组合绕过（`'ev'.concat('al')`、`['e','v'].join('')`、`(101).toString(36)+'val'` 等 27 种实测形态同族）；结构判定无枚举上界 |
+| D15 | 拒绝粒度：整个成员访问 vs 仅键 | **仅键** | 若拒整个访问，`window[key]`、`data[key]` 等 AC3 合法读会被误伤（第 3 轮复核已明确 `data[key]` 是 beta.11 合法用法）。仅键判定使 `data[key]`/`obj[key].items[0]`/`({[key]: 1})`/`Reflect.get(o, key)` 全部保持放行 |
+| D16 | 拒绝是否只作用于"值位置" | **不区分位置** | 同一 `window[String.fromCharCode(…)]` 无论出现在回调、实参、属性值、模板插值、计算模式键还是绑定默认值，语义都是"取到 `window.eval`"；按位置分档会留下免费通道（实测 `((f = window[String.fromCharCode(…)])=>…)()` 与 `({[window[String.fromCharCode(…))]]: x}) => …` 均可达 RCE）。纯读位置不消费该值，故天然不受影响 |
+
+> 回归口径（双向）：`data[key]` 系列**变 REJECT 即过度修复**；`window[String.fromCharCode(…)]` 系列**变 ACCEPT 即安全回归**。两侧均有测试守护（AC4c/AC4d 拒绝侧，AC3e 放行侧）。
