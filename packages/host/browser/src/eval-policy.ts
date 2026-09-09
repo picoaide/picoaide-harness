@@ -304,6 +304,12 @@ function findViolation(node: AnyNode, source: string): string | null {
         if (name !== undefined && name !== null && WRITE_APIS.has(name)) {
           return `access to ${name} is not allowed (read-only eval)`
         }
+        // R3-P0: a computed key whose name cannot be resolved at validation
+        // time is fine for a plain READ (`data[key]`) but must never hand its
+        // member VALUE to a consumer (callback/argument/property value/…):
+        // `window[String.fromCharCode(101,118,97,108)]` IS `window.eval`.
+        const unverifiable = unverifiableComputedKey(node)
+        if (unverifiable !== null) return unverifiable
         return null
       }
       case 'CallExpression': {
@@ -312,9 +318,19 @@ function findViolation(node: AnyNode, source: string): string | null {
         const calleeName = callTargetName((node as { callee?: AnyNode }).callee)
         if (calleeName === 'get' || calleeName === 'getOwnPropertyDescriptor') {
           for (const argument of ((node as { arguments?: AnyNode[] }).arguments ?? [])) {
-            const literal = constantStringValue(argument)
-            if (literal !== undefined && (WRITE_APIS.has(literal) || DANGEROUS_MEMBERS.has(literal))) {
-              return `access to ${literal} is not allowed (read-only eval)`
+            // `Reflect.get(window, ...['eval'])` SPREADS the name argument, so
+            // the effective name is the spread source's elements, not the array.
+            const nameNodes = reflectiveNameNodes(argument)
+            if (nameNodes === null) return UNVERIFIABLE_KEY_REASON
+            for (const nameNode of nameNodes) {
+              const literal = constantStringValue(nameNode)
+              if (literal !== undefined && (WRITE_APIS.has(literal) || DANGEROUS_MEMBERS.has(literal))) {
+                return `access to ${literal} is not allowed (read-only eval)`
+              }
+              // R3-P0: the name argument can also be computed at runtime
+              // (`Reflect.get(window, String.fromCharCode(101,118,97,108))`).
+              const unverifiable = unverifiableKeyExpression(nameNode)
+              if (unverifiable !== null) return unverifiable
             }
           }
         }
@@ -632,6 +648,9 @@ function dangerousPatternValue(value: AnyNode | undefined): string | null {
     if (name !== undefined && name !== null && WRITE_APIS.has(name)) {
       return `access to ${name} is not allowed (read-only eval)`
     }
+    // R3-P0: `((f = window[String.fromCharCode(101,118,97,108)]) => f('…'))()`.
+    const unverifiable = unverifiableComputedKey(node)
+    if (unverifiable !== null) return unverifiable
   }
   return null
 }
@@ -662,6 +681,10 @@ function patternKeyViolation(pattern: AnyNode): string | null {
         if (keyName !== undefined && keyName !== null && (DANGEROUS_MEMBERS.has(keyName) || WRITE_APIS.has(keyName))) {
           return `binding pattern key ${keyName} is not allowed (read-only eval)`
         }
+        // R3-P0: a COMPUTED pattern key can also be a member read whose name is
+        // only known at runtime (`({[window[String.fromCharCode(101,118,97,108)]]: x}) => …`).
+        const unverifiable = unverifiableKeyExpression((property as { key?: AnyNode }).key)
+        if (unverifiable !== null) return unverifiable
         const reason = patternKeyViolation((property as { value?: AnyNode }).value as AnyNode)
         if (reason !== null) return reason
       } else {
@@ -783,6 +806,108 @@ function memberName(node: AnyNode | undefined): string | null | undefined {
       return null
     }
     return constantStringValue(property)
+  }
+  return null
+}
+
+/** True when a property-key expression is computed at RUNTIME through a member
+ * read, so the resolved property name cannot be proven at validation time.
+ *
+ * This is the R3-P0 discriminator. `memberName()` returns `undefined` both for
+ * a plain dynamic key (`data[key]`, `window[0]`) and for a key whose VALUE is
+ * only known at run time (`window[String.fromCharCode(101,118,97,108)]`), and
+ * the value-position branches historically treated both as "allow". The first
+ * kind is the documented legit read (AC3); the second kind can spell ANY
+ * blacklisted name without a constant, so it is denied wherever the member
+ * VALUE is consumed.
+ *
+ * Every runtime key builder is the same class — `String.fromCharCode`,
+ * `String.fromCodePoint`, `atob`, `decodeURIComponent`, `Array.join`,
+ * `String.concat`, `slice`/`substring`/`replace`/`split`, `toLowerCase`,
+ * `String.raw`, a bare property read (`obj.prop`), a spread, … — because each
+ * one is a MEMBER READ or CALL whose result is computed by the page. No
+ * allow-list of "safe builders" is possible: an attacker composes two of them,
+ * and the validator cannot evaluate them. The check is therefore structural and
+ * base-agnostic (DECIDED D6): a computed key expression that contains a member
+ * access, a call or a spread is unverifiable, whatever the base object is.
+ * Plain expressions (identifiers, literals, arithmetic) stay allowed. */
+function keyIsRuntimeComputed(keyNode: AnyNode | undefined, depth = 0): boolean {
+  if (keyNode === undefined || depth > 6) return false
+  const key = unwrapChain(keyNode)
+  if (key === undefined) return false
+  switch (key.type) {
+    case 'MemberExpression':
+      // `obj.prop`, `String.fromCharCode`, `['e','v'].join`
+      return true
+    case 'CallExpression':
+      // `atob('…')`, `decodeURIComponent('…')`, `String(x)`, an inline IIFE —
+      // a call result is computed by the page and cannot be proven here.
+      return true
+    case 'SpreadElement':
+      // `window[[...['eval']]]` / `Reflect.get(o, ...['eval'])`: a spread key
+      // is assembled at runtime from an unknown number of elements.
+      return true
+    case 'SequenceExpression':
+    case 'ConditionalExpression':
+    case 'LogicalExpression':
+    case 'BinaryExpression':
+    case 'TemplateLiteral':
+    case 'UnaryExpression':
+    case 'ArrayExpression': {
+      let computed = false
+      forEachChild(key, (child) => {
+        if (!computed && keyIsRuntimeComputed(child, depth + 1)) computed = true
+      })
+      return computed
+    }
+    default:
+      return false
+  }
+}
+
+/** True when ANY link of a member chain is keyed by a runtime-computed
+ * expression. `window[String.fromCharCode(101,118,97,108)].valueOf` reaches the
+ * banned function through a harmless-looking outer name, so the check must
+ * cover the whole chain, not only the outermost link. */
+function chainHasRuntimeComputedKey(member: AnyNode | undefined): boolean {
+  let link = member
+  while (link !== undefined && link.type === 'MemberExpression') {
+    if ((link as { computed?: boolean }).computed === true
+      && keyIsRuntimeComputed((link as { property?: AnyNode }).property)) return true
+    link = unwrapChain((link as { object?: AnyNode }).object)
+  }
+  return false
+}
+
+/** Reason when a computed member access (or a reflective read) is keyed by a
+ * runtime-computed expression, or null. Because the rule fires only on the KEY
+ * of a computed access, `data[key]`, `obj[key].items[0]`, `({[key]: 1})`,
+ * `Reflect.get(o, key)` and `fetch('u', { body: data[key] })` stay allowed. */
+const UNVERIFIABLE_KEY_REASON = 'computed key whose name cannot be statically resolved is not allowed (read-only eval)'
+
+/** Member-expression entry: a chain whose every computed key folds to a
+ * constant (or is a plain expression) is always resolvable. */
+function unverifiableComputedKey(member: AnyNode | undefined): string | null {
+  return chainHasRuntimeComputedKey(member) ? UNVERIFIABLE_KEY_REASON : null
+}
+
+/** Bare key-expression entry (binding-pattern keys, `Reflect.get` name args). */
+function unverifiableKeyExpression(keyNode: AnyNode | undefined): string | null {
+  return keyIsRuntimeComputed(keyNode) ? UNVERIFIABLE_KEY_REASON : null
+}
+
+/** Name expressions a `Reflect.get` / `getOwnPropertyDescriptor` argument
+ * contributes: the argument itself, or the elements of a spread source
+ * (`Reflect.get(o, ...['eval'])` spreads one name). Returns null when the
+ * spread source is not an inline array (unknown number of names). */
+function reflectiveNameNodes(argument: AnyNode): AnyNode[] | null {
+  if (argument.type !== 'SpreadElement') return [argument]
+  const source = unwrapChain((argument as { argument?: AnyNode }).argument)
+  if (source === undefined) return null
+  if (source.type === 'ArrayExpression') {
+    const elements = ((source as { elements?: (AnyNode | null)[] }).elements ?? [])
+      .filter((element): element is AnyNode => element !== null && element !== undefined)
+    return elements.length === (source as { elements?: (AnyNode | null)[] }).elements?.length ? elements : null
   }
   return null
 }
