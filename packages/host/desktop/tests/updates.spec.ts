@@ -226,6 +226,42 @@ describe('desktop update Host plugin', () => {
     expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Available')
   })
 
+  it('keeps the precise download failure category instead of collapsing to network (P2-63)', async () => {
+    vi.useFakeTimers()
+    const harness = await createHarness({
+      request: async () => versionResponse('2.1.0'),
+      confirmDownload: async () => true,
+      downloadAndOpen: async () => {
+        throw Object.assign(new Error('digest mismatch'), { code: 'checksum-mismatch' })
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
+    await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => {
+      const last = harness.publishedStates.mock.calls.at(-1)?.[0] as { lastError?: string } | undefined
+      expect(last?.lastError).toBe('checksum-mismatch')
+    })
+    await harness.dispose()
+  })
+
+  it('maps an unclassified download failure to network (P2-63)', async () => {
+    vi.useFakeTimers()
+    const harness = await createHarness({
+      request: async () => versionResponse('2.1.0'),
+      confirmDownload: async () => true,
+      downloadAndOpen: async () => { throw new Error('socket hang up') },
+    })
+
+    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
+    await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => {
+      const last = harness.publishedStates.mock.calls.at(-1)?.[0] as { lastError?: string } | undefined
+      expect(last?.lastError).toBe('network')
+    })
+    await harness.dispose()
+  })
+
   it('treats a manual available-version selection as a fresh confirmation', async () => {
     const confirmDownload = vi.fn()
       .mockResolvedValueOnce(false)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -80,7 +81,7 @@ var issuerURLRe = regexp.MustCompile(`^(https)://[A-Za-z0-9.\-]+(:\d+)?(/[^\s]*)
 // 生产 nil 走真实网络)。
 var ldapProbeDialHook func(url string) (ldapConn, error)
 
-// RegisterAdminRoutes mounts /api/admin/* with session+CSRF protection and
+// RegisterAdminRoutes mounts /api/server/admin/* with session+CSRF protection and
 // RBAC permission checks (design v3b: every protected route declares its
 // permission through AdminRoute; me/logout require only a valid session).
 // 双轨镜像,handler/中间件与 /api 完全共享,只能增加不能减少)。
@@ -232,15 +233,22 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 	}
 	// 双桶限流(审计 2026-08-25 F-02):ip|username 防单 IP 爆破;
 	// username 桶防反代坍缩/分布式下的账号级 DoS。
-	if !adminLoginLimiter().allow(loginKey(c, req.Username)) || !adminLoginLimiter().allow("u:"+req.Username) {
+	// 2026-09-08 P1-3:只有失败尝试计数(allow 不再记账),成功即清空。
+	lim := adminLoginLimiter()
+	ipKey, userKey := loginKey(c, req.Username), "u:"+req.Username
+	if !lim.allow(ipKey) || !lim.allow(userKey) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
 	}
 	u, err := AuthenticateConfiguredAdmin(a.DB, req.Username, req.Password)
 	if err != nil || !u.HasManagementAccess() {
+		lim.record(ipKey)
+		lim.record(userKey)
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
+	lim.reset(ipKey)
+	lim.reset(userKey)
 	// 0057: MFA 已开启 → 不建会话, 签发 5 分钟一次性挑战, 前端进入两步登录。
 	if u.TotpEnabled {
 		ticket, err := createMFAChallenge(a.DB, u.ID, "login", "", mfaTicketTTL)
@@ -842,8 +850,10 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 	// 权限敏感变更:改密 / 降权(role 降级或取消管理员) / 禁用 → 吊销全部
 	// API token,旧凭证立即失效(防已登录客户端继续以旧权限访问)。
 	// 与用户更新同事务(审计2026-L16):更新成功但吊销失败不再留下旧凭证
-	demoted := wasRole != serverstore.RoleUser && u.Role == serverstore.RoleUser
-	demote := (req.Password != nil && *req.Password != "") || demoted ||
+	// 2026-09-08 P1-17:任何角色变更都吊销(user→auditor 此前不吊销,
+	// 审计角色可继续用旧 token 访问员工面)。
+	roleChanged := wasRole != u.Role
+	demote := (req.Password != nil && *req.Password != "") || roleChanged ||
 		(req.Status != nil && *req.Status != 1 && wasStatus == 1)
 	if demote {
 		if err := serverstore.UpdateUserRevokingTokens(a.DB, u); err != nil {
@@ -962,7 +972,7 @@ func (a *AdminAPI) revokeToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// usageDefaultWindowDays 是 /api/admin/usage 缺省 from/to 时的默认回溯窗口
+// usageDefaultWindowDays 是 /api/server/admin/usage 缺省 from/to 时的默认回溯窗口
 // (天),防止无界全表聚合(审计中2)。
 const usageDefaultWindowDays = 90
 
@@ -1233,8 +1243,15 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	// 保存各类配置(独立,互不清空——切到 ldap 不清 openid,反之亦然)
 	_ = upsert("ldap.server_url", strings.TrimSpace(req.LDAP.ServerURL))
 	_ = upsert("ldap.bind_dn", strings.TrimSpace(req.LDAP.BindDN))
+	// 2026-09-08 P1-1:IdP 凭据与上游 API key 同口径 AES-GCM 落库(此前明文,
+	// 违反 AGENTS.md §3.5;GET /auth 的掩码不改变落库形态)。空串 = 清空。
 	if req.LDAP.BindPassword != MaskSecret {
-		_ = upsert("ldap.bind_password", req.LDAP.BindPassword)
+		sealed, err := encryptSettingSecret(req.LDAP.BindPassword)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
+			return
+		}
+		_ = upsert("ldap.bind_password", sealed)
 	}
 	_ = upsert("ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN))
 	_ = upsert("ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter))
@@ -1244,13 +1261,23 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	_ = upsert("oidc.issuer", strings.TrimSpace(req.OIDC.Issuer))
 	_ = upsert("oidc.client_id", strings.TrimSpace(req.OIDC.ClientID))
 	if req.OIDC.ClientSecret != MaskSecret {
-		_ = upsert("oidc.client_secret", req.OIDC.ClientSecret)
+		sealed, err := encryptSettingSecret(req.OIDC.ClientSecret)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
+			return
+		}
+		_ = upsert("oidc.client_secret", sealed)
 	}
 	_ = upsert("oidc.redirect_url", strings.TrimSpace(req.OIDC.RedirectURL))
 	_ = upsert("openid.issuer", strings.TrimSpace(req.OpenID.Issuer))
 	_ = upsert("openid.client_id", strings.TrimSpace(req.OpenID.ClientID))
 	if req.OpenID.ClientSecret != MaskSecret {
-		_ = upsert("openid.client_secret", req.OpenID.ClientSecret)
+		sealed, err := encryptSettingSecret(req.OpenID.ClientSecret)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
+			return
+		}
+		_ = upsert("openid.client_secret", sealed)
 	}
 	_ = upsert("openid.redirect_url", strings.TrimSpace(req.OpenID.RedirectURL))
 	if req.HideLocal != nil {
@@ -1628,7 +1655,8 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		password := req.LDAP.BindPassword
 		if password == "" || password == MaskSecret {
 			if saved, ok, err := serverstore.GetSetting(a.DB, "ldap.bind_password"); err == nil && ok {
-				password = saved
+				// 2026-09-08 P1-1:落库值已加密,回读时必须解密。
+				password = decryptSettingSecret(saved)
 			}
 		}
 		prov := &LDAPProvider{
@@ -1648,7 +1676,9 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			"group_filter": req.LDAP.GroupFilter, "group_attr": req.LDAP.GroupAttr,
 		}); err != nil {
 			results["ok"] = false
-			results["message"] = "配置不完整: " + err.Error()
+			// 脱敏(2026-09-08 P3):不回传原始错误(可能含目录地址/DN/内部主机名)。
+			log.Printf("auth test ldap config: %v", err)
+			results["message"] = "配置不完整(必填项缺失或格式错误)"
 			break
 		}
 		// 目录探测(bind + 用户/组统计 + 前 5 样例):替代只 bind 的旧测试。
@@ -1658,8 +1688,10 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		}
 		report, err := prov.ProbeDirectory()
 		if err != nil {
+			// 脱敏:详情只进服务端日志(避免回传目录内部信息)。
+			log.Printf("auth test ldap probe: %v", err)
 			results["ok"] = false
-			results["message"] = err.Error()
+			results["message"] = "LDAP 连接失败,请检查地址/凭据/过滤器(详情见服务端日志)"
 			break
 		}
 		results["ok"] = true
@@ -1696,8 +1728,9 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		r, err := client.Get(iu.String() + "/.well-known/openid-configuration")
 		if err != nil {
+			log.Printf("auth test oidc discovery: %v", err)
 			results["ok"] = false
-			results["message"] = "无法连接 Issuer: " + err.Error()
+			results["message"] = "无法连接 Issuer(详情见服务端日志)"
 			break
 		}
 		defer r.Body.Close()

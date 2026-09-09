@@ -1,6 +1,13 @@
 /**
- * Read-only eval policy (v4 §7.3-9): `browser_eval` accepts exactly ONE
+ * `browser_eval` guardrail (v4 §7.3-9): `browser_eval` accepts exactly ONE
  * expression, validated as an AST on the host side before execution.
+ *
+ * IMPORTANT (2026-09-08 product decision): this validator is a **heuristic
+ * misuse guardrail, NOT a security boundary**. The AI is allowed to operate
+ * every part of the browser (fetch/XHR/WebSocket and arbitrary JS included);
+ * the rules below only keep a single call legible and refuse obvious
+ * hand-fumble side effects. They are bypassable by design (e.g. `.constructor`)
+ * and no isolation guarantee rests on them.
  *
  * Validation rules:
  * - the expression must parse as `Expression` (no statements, declarations,
@@ -14,7 +21,7 @@
  *   DOM mutation, in-place array/object mutation, media/presentation side
  *   effects. Network-outbound APIs (fetch/XMLHttpRequest/WebSocket/
  *   EventSource/sendBeacon) are NOT forbidden (2026-09-08 product decision).
- * - a whitelist of read-only helper globals is injected into the executed
+ * - a whitelist of read helper globals is injected into the executed
  *   expression (readText/readAttr/readJson/readVar) and must not be shadowed.
  *
  * Result post-processing (execution side): JSON-serialize with size/depth
@@ -143,7 +150,7 @@ function findViolation(node: AnyNode, source: string): string | null {
     const current = stack.pop()!
     const type = current.type
     if (type === 'AssignmentExpression' || type === 'UpdateExpression') {
-      return 'assignment/update is not allowed (read-only eval)'
+      return 'assignment/update is not allowed (single expression guardrail)'
     }
     if (type === 'VariableDeclaration' || type === 'FunctionDeclaration' || type === 'ClassDeclaration'
       || type === 'ClassExpression' || type === 'FunctionExpression') {
@@ -164,10 +171,10 @@ function findViolation(node: AnyNode, source: string): string | null {
       const callee = current.callee as AnyNode | undefined
       const name = callTargetName(callee)
       if (name === undefined) {
-        return 'dynamic call target is not allowed (read-only eval)'
+        return 'dynamic call target is not allowed (guardrail: single expression, literal callee)'
       }
       if (name !== null && (WRITE_APIS.has(name) || name === 'eval' || name === 'Function')) {
-        return `call to ${name} is not allowed (read-only eval)`
+        return `call to ${name} is not allowed (guardrail: code-execution/side-effect API)`
       }
     }
     if (type === 'MemberExpression') {
@@ -175,7 +182,7 @@ function findViolation(node: AnyNode, source: string): string | null {
       if (name === undefined) {
         // Non-literal computed READ is allowed (data access like data[key]).
       } else if (name !== null && WRITE_APIS.has(name)) {
-        return `access to ${name} is not allowed (read-only eval)`
+        return `access to ${name} is not allowed (guardrail: side-effect API)`
       }
     }
     if (type === 'Identifier') {
@@ -268,7 +275,7 @@ export function validateEvalExpression(expression: string): void {
 }
 
 /**
- * Wrap a validated expression for page execution: prepend the read-only
+ * Wrap a validated expression for page execution: prepend the read
  * helper definitions (self-contained, no globals leaked) so `read*` helpers
  * work in the page context without template injection.
  */
@@ -310,10 +317,33 @@ export function maskEvalResult(value: unknown, depth = 0): unknown {
 const SECRET_VALUE = /(?:token|secret|password|passwd|authorization|api[_-]?key|session[_-]?id|access[_-]?key|refresh[_-]?token|bearer|private[_-]?key)/iu
 const MASK = '****'
 
+/** One `name=value` cookie pair (value may be quoted; empty values allowed). */
+const COOKIE_PAIR = /([A-Za-z0-9_.#$%&*+\-^|~]{1,64})=(?:"[^"]*"|[^;\s]*)/gu
+/** Cookie names that carry a session/CSRF credential on their own. */
+const SESSION_COOKIE_NAME = /^(?:sid|s|session|sessionid|jsessionid|phpsessid|connect\.sid|csrftoken|xsrf-token|xsrf|_csrf|_session_id|auth|authorization)$/iu
+
+/**
+ * Detect a cookie/`Set-Cookie` header shape: `k=v; k2=v2` (two or more
+ * `;`-separated pairs), or a single session/CSRF cookie pair (`sid=…`).
+ * Cookie values are opaque credentials and cookie names are not secret-shaped,
+ * so keyword matching alone never fired (P1-18) — the whole string is masked
+ * rather than one fragment.
+ */
+function looksLikeCookieString(value: string): boolean {
+  const trimmed = value.trim()
+  if (trimmed.length < 3) return false
+  const pairs = trimmed.match(COOKIE_PAIR)
+  if (pairs === null || pairs.length === 0) return false
+  if (pairs.length >= 2 && trimmed.includes(';')) return true
+  const first = pairs[0]!
+  return SESSION_COOKIE_NAME.test(first.slice(0, first.indexOf('=')))
+}
+
 function maskString(value: string): string {
   if (value.length === 0) return value
   if (value.length > 4096) return `${value.slice(0, 4096)}…`
   if (SECRET_VALUE.test(value) && value.length >= 6) return MASK
+  if (looksLikeCookieString(value)) return MASK
   return value
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import type { ISpec } from '@visactor/vchart'
 import { ChartLazy } from '../../components/chart-lazy'
@@ -10,7 +10,7 @@ import { Skeleton } from '../../components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { PageHeader } from '../../components/page-header'
 import { ArrowLeft } from 'lucide-react'
-import { RangeFilter, defaultRange, fetchUsageList, chatTokens, sumRows, downloadCsv, fmtY, type UsageRow, type UsageRequestRow, type UserInfo } from './common'
+import { RangeFilter, defaultRange, fetchUsageList, chatTokens, sumRows, downloadCsv, effectiveQuotaMoney, effectiveQuotaTokens, fmtY, type UsageRow, type UsageRequestRow, type UserInfo } from './common'
 import { fmtTokens, fmtFull, fmtMoney } from '../../lib/format'
 
 // 成员详情(独立二级页):该成员近30天趋势 + 模型构成 + 最近请求 + 导出
@@ -25,8 +25,11 @@ export default function UsageMemberDetail() {
   const [requests, setRequests] = useState<UsageRequestRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // P2-46: 请求序号防乱序——快速切换区间/连续查询时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (f: string, t: string) => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
@@ -36,14 +39,16 @@ export default function UsageMemberDetail() {
         fetchUsageList({ group: 'model', username, from: f, to: t }),
         request<{ rows: UsageRequestRow[] }>(`${ADMIN_API}/usage/requests?username=${encodeURIComponent(username)}&from=${f}&to=${t}&size=5`),
       ])
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
       setUser((ul.users ?? []).find((u) => u.username === username) ?? null)
       setTrend(tr)
       setModels(mo)
       setRequests(rq.rows ?? [])
     } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
       setError(e.message || '查询失败')
     } finally {
-      setLoading(false)
+      if (current === loadSeq.current) setLoading(false)
     }
   }, [username])
 
@@ -86,8 +91,9 @@ export default function UsageMemberDetail() {
             <Badge variant="outline">部门: {(user.groups ?? []).filter((g) => g !== '全员').join(', ') || '未分配'}</Badge>
             <Badge variant="secondary">本月消耗 {fmtY(user.monthly_cost)}</Badge>
             <Badge variant="secondary">本月 tokens {fmtTokens(user.monthly_usage)}</Badge>
-            <Badge variant="outline">金额配额 {user.quota_money ? fmtY(user.quota_money) : '不限'}</Badge>
-            <Badge variant="outline">token 配额 {user.quota_tokens ? fmtTokens(user.quota_tokens) : '不限'}</Badge>
+            {/* P2-45: 生效配额(服务端折算;跟随全局默认的用户此前被误报「不限」) */}
+            <Badge variant="outline">金额配额 {effectiveQuotaMoney(user) ? fmtY(effectiveQuotaMoney(user)!) : '不限'}</Badge>
+            <Badge variant="outline">token 配额 {effectiveQuotaTokens(user) ? fmtTokens(effectiveQuotaTokens(user)!) : '不限'}</Badge>
           </>
         ) : loading ? <Skeleton className="h-6 w-48" /> : null}
       </div>

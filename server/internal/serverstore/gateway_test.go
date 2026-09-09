@@ -491,3 +491,110 @@ func TestListAdminModelsIncludesDisabledProvider(t *testing.T) {
 		t.Fatalf("model rows = %d (%v), want 1", n, err)
 	}
 }
+
+// TestSyncProviderModelPreservesDefaultParams 覆盖 P2-18:渠道同步不得覆盖
+// 管理员配置的 default_params(与 input_modalities 同语义)。
+func TestSyncProviderModelPreservesDefaultParams(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-sync", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 首次同步建行:写入同步参数
+	if err := SyncProviderModel(db, pid, "sync-model", `{"context_length":128000}`); err != nil {
+		t.Fatal(err)
+	}
+	var params, display string
+	if err := db.QueryRow(`SELECT default_params, display_name FROM models WHERE name = 'sync-model'`).Scan(&params, &display); err != nil {
+		t.Fatal(err)
+	}
+	if params != `{"context_length":128000}` {
+		t.Fatalf("首次同步 default_params = %s", params)
+	}
+	// 管理员改配置
+	if _, err := db.Exec(`UPDATE models SET default_params = ? WHERE name = 'sync-model'`, `{"concurrency_target":4}`); err != nil {
+		t.Fatal(err)
+	}
+	// 再次同步(上游参数变化)→ 不得覆盖管理员的 default_params
+	if err := SyncProviderModel(db, pid, "sync-model", `{"context_length":256000}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT default_params, display_name FROM models WHERE name = 'sync-model'`).Scan(&params, &display); err != nil {
+		t.Fatal(err)
+	}
+	if params != `{"concurrency_target":4}` {
+		t.Fatalf("同步覆盖了管理员 default_params: %s", params)
+	}
+	if display != "sync-model" {
+		t.Fatalf("display_name = %q, want 同步更新", display)
+	}
+}
+
+// P1-8 同类(2026-09-08):渠道同步删行必须同步移除 provider JSON 里的名字,
+// 否则该名仍可路由而 models 表无价 → 可调用且 cost=0。
+func TestRemoveMissingProviderModelsStripsProviderJSON(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-prune", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_providers SET models = ? WHERE id = ?`, `["m1","m2"]`, pid); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"m1", "m2"} {
+		if err := SyncProviderModel(db, pid, name, `{}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := RemoveMissingProviderModels(db, pid, []string{"m2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT models FROM gateway_providers WHERE id = ?`, pid).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw != `["m2"]` {
+		t.Fatalf("provider JSON = %s, want [\"m2\"] (stale name must be pruned)", raw)
+	}
+}
+
+// P1-8 同类(2026-09-08):模型改名必须把 provider JSON 的旧名换成新名。
+func TestUpdateModelRenameSyncsProviderJSON(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-rename", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_providers SET models = ? WHERE id = ?`, `["old-name"]`, pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, pid, "old-name", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM models WHERE name = 'old-name'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	m, err := GetModel(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Name = "new-name"
+	if err := UpdateModel(db, m); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT models FROM gateway_providers WHERE id = ?`, pid).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw != `["new-name"]` {
+		t.Fatalf("provider JSON = %s, want [\"new-name\"]", raw)
+	}
+}

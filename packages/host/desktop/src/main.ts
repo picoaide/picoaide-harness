@@ -11,7 +11,7 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
-import { DSH_HOME_ENV, resolveDshHome } from './desktop-home.ts'
+import { DSH_HOME_ENV, dshHomeSafe, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import {
   ElectronStderrLogger,
@@ -232,7 +232,12 @@ async function start(): Promise<void> {
     if (arg.startsWith('picoaide://')) runtime.receiveDeepLink(arg)
   }
   if (process.platform === 'win32') app.setAppUserModelId('ai.deepseek.dsh.desktop')
-  if (app.isPackaged && process.cwd() === '/') process.chdir(app.getPath('home'))
+  // P2-34: a packaged app must never keep a filesystem root or a system
+  // directory as its working directory (desktop-entry `Path=`, a shortcut with
+  // a wrong "start in", a service manager). The old `=== '/'` check only saw
+  // the POSIX root, so `C:\`, `C:\Windows` and Program Files slipped through
+  // and relative product files landed there.
+  if (app.isPackaged && isSystemWorkingDirectory(process.cwd())) process.chdir(app.getPath('home'))
   const shellEnvironmentResolution = await resolveDesktopShellEnvironment({
     environment: process.env,
     home: app.getPath('home'),
@@ -243,7 +248,11 @@ async function start(): Promise<void> {
   // Product-owned home: `~/.picoaide-harness` unless DSH_HOME is explicitly
   // set. Writing it back makes every downstream consumer (child processes,
   // sibling plugins resolving DSH_HOME) agree on the same location.
-  const homeDir = resolveDshHome()
+  // P2-33: use the GUARDED entry point — an injected DSH_HOME pointing at a
+  // system directory must abort startup (the surrounding try/catch logs it and
+  // exits 1) instead of silently writing user data there. This is the same
+  // `isSafeDshHome` check the enterprise installers enforce.
+  const homeDir = dshHomeSafe()
   process.env[DSH_HOME_ENV] = homeDir
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
     { label: 'application install', path: process.execPath },

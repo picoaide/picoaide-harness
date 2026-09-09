@@ -14,50 +14,24 @@
  * may contain `/`, `..`, or OS-reserved characters, so it is never used raw.
  */
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 
-/** Environment variable that overrides the product home. */
-export const DSH_HOME_ENV = 'DSH_HOME'
+// P2-36: the DSH-home constants/resolution used to be inlined copies of
+// `dsh-plugin-desktop/desktop-home` (the single authority). Re-export them
+// instead, exactly like `@picoaide/dsh-cron`'s dsh-home module. tsdown bundles
+// the module into this package's lib, so consumers still need no runtime
+// dependency on the desktop package.
+export {
+  DSH_HOME_ENV,
+  PRODUCT_DSH_HOME_DIR,
+  DEFAULT_DSH_HOME_DISPLAY,
+  expandHomePath,
+  resolveDshHome,
+  dshHome,
+  dshHomePath,
+} from 'dsh-plugin-desktop/desktop-home'
 
-/** Directory name of the product default Harness home under the OS home. */
-export const PRODUCT_DSH_HOME_DIR = '.picoaide-harness'
-
-/** Expand a leading ~ (or ~user) in a path, platform-style. */
-export function expandHomePath(path: string, home: string = homedir()): string {
-  if (path === '~') return home
-  if (path.startsWith('~/') || path.startsWith('~\\')) return join(home, path.slice(2))
-  return path
-}
-
-/**
- * Resolve the single-root product Harness home.
- *
- * Precedence, highest first: an explicit configured path, `$DSH_HOME`, then
- * `~/.picoaide-harness`. Mirrors `dsh-plugin-desktop/desktop-home`
- * (duplicated here to keep this module dependency-free for consumers that
- * must not pull the desktop package at runtime).
- */
-export function resolveDshHome(
-  configured?: string,
-  env: Record<string, string | undefined> = process.env,
-  home: string = homedir(),
-): string {
-  const fromEnv = env[DSH_HOME_ENV]
-  const selected = configured
-    ?? (fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(home, PRODUCT_DSH_HOME_DIR))
-  return resolve(expandHomePath(selected, home))
-}
-
-/** Join path segments onto the resolved product Harness home. */
-export function dshHomePath(...segments: string[]): string {
-  return join(resolveDshHome(), ...segments)
-}
-
-/** Resolve the product home from the live environment. */
-export function dshHome(): string {
-  return resolveDshHome()
-}
+import { resolveDshHome } from 'dsh-plugin-desktop/desktop-home'
 
 /**
  * Filesystem-safe encoding of a username for a directory segment. Hex-encodes

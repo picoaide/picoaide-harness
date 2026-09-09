@@ -30,28 +30,7 @@ func ConfigureProviders(db *sql.DB) ([]PasswordProvider, []BrowserProvider) {
 	if mode == "" {
 		mode = "local"
 	}
-	enabledRaw := settings["auth.enabled"]
-	var enabled []string
-	if strings.TrimSpace(enabledRaw) != "" {
-		for _, p := range strings.Split(enabledRaw, ",") {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				enabled = append(enabled, p)
-			}
-		}
-	} else {
-		// 向后兼容:由 auth.mode 推导
-		switch mode {
-		case "ldap", "both":
-			enabled = []string{"local", "ldap"}
-		case "oidc":
-			enabled = []string{"local", "oidc"}
-		case "openid":
-			enabled = []string{"local", "openid"}
-		default:
-			enabled = []string{"local"}
-		}
-	}
+	enabled := enabledProviderNames(settings)
 	has := func(name string) bool {
 		for _, e := range enabled {
 			if e == name {
@@ -116,6 +95,42 @@ func stripPrefix(m map[string]string, prefix string) map[string]string {
 	return out
 }
 
+// enabledProviderNames resolves auth.enabled (falling back to auth.mode).
+// Single source for both ConfigureProviders and the client login order
+// (2026-09-08 P1-5).
+func enabledProviderNames(settings map[string]string) []string {
+	if raw := strings.TrimSpace(settings["auth.enabled"]); raw != "" {
+		out := make([]string, 0, 4)
+		for _, p := range strings.Split(raw, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	// 向后兼容:由 auth.mode 推导
+	switch settings["auth.mode"] {
+	case "ldap", "both":
+		return []string{"local", "ldap"}
+	case "oidc":
+		return []string{"local", "oidc"}
+	case "openid":
+		return []string{"local", "openid"}
+	default:
+		return []string{"local"}
+	}
+}
+
+// EnabledProviderNames reads the enabled provider list from settings (used to
+// pin the client-surface login order).
+func EnabledProviderNames(db *sql.DB) []string {
+	settings, err := serverstore.GetAllSettings(db)
+	if err != nil {
+		return nil
+	}
+	return enabledProviderNames(settings)
+}
+
 // ConfiguredAPI bundles the auth API with its configured browser providers.
 type ConfiguredAPI struct {
 	API      *API
@@ -130,5 +145,8 @@ func NewConfiguredAPI(db *sql.DB) *ConfiguredAPI {
 	for _, p := range pwds {
 		api.RegisterProvider(p)
 	}
+	// 客户端登录只允许 auth.enabled 里的密码方式(2026-09-08 P1-5);
+	// local provider 仍注册,供管理后台回退(AuthenticateConfiguredAdmin)。
+	api.SetEnabledProviders(EnabledProviderNames(db))
 	return &ConfiguredAPI{API: api, Browsers: browsers}
 }

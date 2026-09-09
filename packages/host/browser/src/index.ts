@@ -25,6 +25,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createRequire } from 'node:module'
 import { readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -194,9 +195,24 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const userDataDir = resolveUserDataDir()
   const usernameForStore = currentUser() ?? 'anonymous'
-  const storeDirFor = (username: string): string => userDataDir !== undefined
-    ? join(userDataDir, 'browser-store', encodePartitionSegment(username))
-    : join(process.cwd(), '.browser-store', encodePartitionSegment(username))
+  // P2-38b: with no Electron userData dir (headless loader smoke, tests) the
+  // store must NOT fall back to a cwd-relative `<cwd>/.browser-store` — that
+  // silently writes untracked files into whatever directory the process
+  // started in. Use the product DSH home instead (same source as downloadDir),
+  // resolved through the shared connectors user-scope module.
+  const fallbackDataRoot = (): string => {
+    try {
+      const require = createRequire(import.meta.url)
+      const { dshHomePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
+      return dshHomePath()
+    } catch {
+      return join(homedir(), '.picoaide-harness')
+    }
+  }
+  const storeDirFor = (username: string): string => join(
+    userDataDir !== undefined ? join(userDataDir, 'browser-store') : join(fallbackDataRoot(), 'browser-store'),
+    encodePartitionSegment(username),
+  )
   let store = new BrowserStore({ dir: storeDirFor(usernameForStore) })
   const pool = new TabPool({
     ...(config.maxTabs !== undefined ? { maxTabs: config.maxTabs } : {}),
@@ -206,7 +222,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     createRealElectronAdapter(),
     {
       ...config,
-      downloadDir: config.downloadDir ?? (userDataDir !== undefined ? join(userDataDir, 'downloads') : join(process.cwd(), '.picoaide-downloads')),
+      downloadDir: config.downloadDir ?? (userDataDir !== undefined ? join(userDataDir, 'downloads') : join(fallbackDataRoot(), 'downloads')),
     },
     credentialResolver,
     browserPartitionFor(currentUser()),
@@ -236,15 +252,27 @@ export function apply(ctx: Context, config: Config = {}): void {
     const username = (next as { username?: string } | null)?.username ?? null
     const user = username !== null && username !== undefined && username.length > 0 ? username : null
     void (async () => {
+      // Login switch / logout destroys background tabs (2026-09-08 product
+      // decision), then prewarms the new user's browser HIDDEN so the agent
+      // keeps a live CDP surface without any user action.
       await runtime.closeAll(true)
+      // P1-19: the op log (hosts, paths, token-bearing URLs) is per-account —
+      // the new user must never read the previous account's trail via the
+      // activity panel or GET /ops.
+      runtime.clearOps()
       runtime.setPartition(browserPartitionFor(user))
       switchStoreForUser(user)
+      await runtime.prewarm()
     })().catch((cause: unknown) => {
       ctx.logger?.error('pico-browser: session change handling failed', cause)
     })
   })
 
-  applyBrowserTools(ctx, runtime, parseToolGroups(config.toolGroups))
+  // P2-29: the tool registrations are released with the plugin fiber.
+  ctx.effect(
+    () => applyBrowserTools(ctx, runtime, parseToolGroups(config.toolGroups)),
+    'pico-browser: tool suite',
+  )
 
   ctx.effect(() => {
     const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
@@ -489,6 +517,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       for (const dispose of disposers) dispose()
     }
   }, 'pico browser: panel api')
+
+  // Boot prewarm (2026-09-08 product decision): the browser window, the
+  // restored ledger tabs and their CDP sessions come up at client start —
+  // HIDDEN. The agent can therefore drive the browser with no user action,
+  // and the shell's 浏览器 button merely shows the already-running window.
+  void runtime.prewarm().catch((cause: unknown) => {
+    ctx.logger?.warn('pico-browser: prewarm failed', cause)
+  })
 
   ctx.effect(() => {
     return () => {

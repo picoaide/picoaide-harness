@@ -49,7 +49,7 @@ PicoAide Harness 是一个「桌面客户端 + 企业服务端」的一体化平
 
 ## 数据库
 
-- PostgreSQL（PG-only，内置容器或外部实例），迁移 `migrations-pg/` 0001–0048；
+- PostgreSQL（PG-only，内置容器或外部实例），迁移 `migrations-pg/` 0001–0059；
 - usage 明细按月原生分区（保留 N 月可配，默认 6），日/月账本永久保留（历史统计 10 年不丢）；
 - 共享技能 / Agent 归档直存 DB；品牌快照、审计哈希链（防篡改）、RBAC 角色。
 

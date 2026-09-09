@@ -32,7 +32,7 @@ bash -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 ```
 
 `deploy.sh` 使用**单一 compose 文件**（`docker-compose.yml`，含 caddy+server+postgres 三服务），所有子命令直接作用于它，无需切换文件或手传 `-f`：
-- `install`：网段/端口预检 → DNS/CDN 校验（auto 模式）→ 证书准备 → 生成最小 `.env`（4 键）→ 拉镜像启动 → 等待 `/healthz` 就绪；
+- `install`：网段/端口预检 → DNS/CDN 校验（auto 模式）→ 证书准备 → 生成最小 `.env`（6 键：DOMAIN/TLS_MODE/ADMIN_USER/PICOAI_ADMIN_PASSWORD/PG_PASSWORD/TZ）→ 拉镜像启动 → 等待 `/healthz` 就绪；
 - `update`：拉新镜像重建（数据目录不变，容器依次重建先后短暂停机；迁移自动按序执行）；
 - `backup`：打包 `picoaide-data`（应用数据 + master.key）+ auto 模式 Caddy 证书库 + PostgreSQL `pg_dump`；
 

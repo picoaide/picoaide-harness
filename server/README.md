@@ -25,8 +25,6 @@ curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/se
 - 数据库：**固定内置 PostgreSQL 18 容器**（单 compose 文件 caddy+server+postgres），PG-only，SQLite 已下线。
 - 部署目录默认 `/data/picoaide/deploy`（可用 `INSTALL_DIR` 覆盖；兼容旧版 `DEPLOY_DIR`）；依赖自动安装可用 `SKIP_DEPS=1` 跳过；Docker 安装可用 `DOCKER_MIRROR` 指定镜像源。
 - 已有部署时提示改用 `./deploy.sh update`（升级）或 `REINSTALL=yes`（清除重装）。
-- 部署目录默认 `/data/picoaide/deploy`（可用 `INSTALL_DIR` 覆盖；兼容旧版 `DEPLOY_DIR`）；依赖自动安装可用 `SKIP_DEPS=1` 跳过；Docker 安装可用 `DOCKER_MIRROR` 指定镜像源。
-- 已有部署时提示改用 `./deploy.sh update`（升级）或 `REINSTALL=yes`（清除重装）。
 
 ### 1. 服务端（Go 1.26+）
 
@@ -50,11 +48,12 @@ PICOAI_ADMIN_PASSWORD=admin123 bin/picoaide-server \
 | [docs/02-build-deploy.md](docs/02-build-deploy.md) | 构建 / 部署 / 镜像 / CI |
 | [docs/03-api-reference.md](docs/03-api-reference.md) | 全部 HTTP 端点（管理面 + 客户端面 + 网关） |
 | [docs/04-auth.md](docs/04-auth.md) | 认证体系（local / LDAP / OIDC / token / 管理端 CSRF） |
-| [docs/06-database.md](docs/06-database.md) | PostgreSQL 表结构 / 迁移（0001–0048） / 分区账本 |
+| [docs/05-agent-system.md](docs/05-agent-system.md) | 客户端 Agent 引擎（历史存档） |
+| [docs/06-database.md](docs/06-database.md) | PostgreSQL 表结构 / 迁移（0001–0060） / 分区账本 |
 | [docs/07-marketplace.md](docs/07-marketplace.md) | 技能商城 / 授权 / 共享内容 |
-| [docs/08-agent-share.md](docs/08-agent-share.md) | 共享 Agent（上传 / 审核 / 授权 / 双门制） |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | 容器化部署（compose 私有网段、Caddy、备份恢复） |
 | [docs/08-development.md](docs/08-development.md) | 开发指南 / TDD / 契约 |
+| [docs/09-agent-share.md](docs/09-agent-share.md) | 共享 Agent（上传 / 审核 / 授权 / 双门制） |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | 容器化部署（compose 私有网段、Caddy、备份恢复） |
 
 ## License
 

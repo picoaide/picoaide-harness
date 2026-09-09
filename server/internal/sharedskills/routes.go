@@ -48,6 +48,8 @@ var (
 	ErrNoSkillMarkdown = errors.New("archive has no SKILL.md at its root")
 	// ErrUnsafeArchive: entry path escapes or is a link.
 	ErrUnsafeArchive = errors.New("unsafe archive")
+	// ErrDuplicateArchive: the archive repeats an entry (case-insensitive).
+	ErrDuplicateArchive = errors.New("archive has duplicate entries")
 )
 
 // archiveLimits: 归档校验边界(与 archiveutil 共享常量语义;zip/tar.gz 双格式)。
@@ -74,7 +76,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("/:name/:version/archive", download(db, cacheDir, false))
 }
 
-// RegisterAdminRoutes mounts /api/admin/shared-skills (AdminAuth + RBAC v3b).
+// RegisterAdminRoutes mounts /api/server/admin/shared-skills (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	base := "/api/server/admin/shared-skills"
 	g := r.Group(base, serverauth.AdminAuth(db))
@@ -345,8 +347,12 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			return
 		}
 		_ = serverstore.DeleteSharedSkillArchive(db, name, version)
-		// 硬删行后必须清理全部授权(资源级联;旧授权不得复活重建的资源)。
-		_ = serverstore.DeleteSharedResourceGrants(db, serverstore.SharedSkillGrantTable, name)
+		// 授权清理:授权按 name 生效(同名多版本共享),因此只有该 name 下
+		// **已无其它未删版本**时才清空——P2-10:此前删一个历史版本即静默
+		// 撤销全员对剩余版本的访问。计数失败时保守跳过(不误撤销)。
+		if n, err := serverstore.SharedSkillVersionCount(db, name); err == nil && n == 0 {
+			_ = serverstore.DeleteSharedResourceGrants(db, serverstore.SharedSkillGrantTable, name)
+		}
 		// path-injection 防护(审计 2026-08-30 CodeQL go/path-injection):
 		// name/version 来自 URL 参数, safeName 只做字符串拼接; 此处补一道
 		// SafePathSegment 校验, 非法段直接跳过文件删除(DB 行删除不受影响)。
@@ -726,6 +732,8 @@ func ValidateSkillArchive(data []byte) (string, error) {
 		return "", ErrNoSkillMarkdown
 	case errors.Is(err, archiveutil.ErrUnsafe):
 		return "", ErrUnsafeArchive
+	case errors.Is(err, archiveutil.ErrDuplicateEntry):
+		return "", ErrDuplicateArchive
 	case errors.Is(err, archiveutil.ErrInvalid), errors.Is(err, archiveutil.ErrTooMany):
 		return "", ErrArchiveInvalid
 	default:
@@ -745,6 +753,8 @@ func archiveErrorMessage(err error) string {
 		return "归档缺少 SKILL.md"
 	case errors.Is(err, ErrUnsafeArchive):
 		return "归档内容不安全(路径越界或链接文件)"
+	case errors.Is(err, ErrDuplicateArchive):
+		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
 	case errors.Is(err, ErrArchiveInvalid):
 		return "归档过大或结构非法"
 	default:

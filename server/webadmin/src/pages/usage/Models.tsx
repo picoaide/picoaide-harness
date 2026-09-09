@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ISpec } from '@visactor/vchart'
 import { ChartLazy } from '../../components/chart-lazy'
 import { request, ADMIN_API } from '../../api'
@@ -19,8 +19,11 @@ export default function UsageModels() {
   const [models, setModels] = useState<ModelInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // P2-46: 请求序号防乱序——快速切换区间时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (f: string, t: string) => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
@@ -29,13 +32,15 @@ export default function UsageModels() {
         fetchUsageList({ group: 'provider', from: f, to: t }),
         request<{ models: ModelInfo[] }>(`${ADMIN_API}/models`),
       ])
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
       setRows(mr)
       setProviders(pr)
       setModels((ml.models ?? []).slice().sort((a, b) => (a.name < b.name ? -1 : 1)))
     } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
       setError(e.message || '查询失败')
     } finally {
-      setLoading(false)
+      if (current === loadSeq.current) setLoading(false)
     }
   }, [])
 

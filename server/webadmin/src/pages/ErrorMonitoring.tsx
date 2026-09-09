@@ -7,6 +7,7 @@ import { Switch } from '../components/ui/switch'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { PageHeader } from '../components/page-header'
+import { useFlash } from '../lib/use-flash'
 
 /**
  * 客户端错误监控配置(决策 2026-08):从「网关」页拆分为独立页面。
@@ -23,7 +24,8 @@ export default function ErrorMonitoring() {
   })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [okMsg, setOkMsg] = useState('')
+  // P3: flash 定时器由 useFlash 统一清理。
+  const [okMsg, setOkMsg] = useFlash(3000)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -73,7 +75,6 @@ export default function ErrorMonitoring() {
       })
       setError('')
       setOkMsg('已保存')
-      setTimeout(() => setOkMsg(''), 3000)
     } catch (err: any) {
       setError(err.message)
     } finally {

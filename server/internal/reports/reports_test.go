@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -77,6 +78,7 @@ func TestGenerateMonthlyReport(t *testing.T) {
 }
 
 func TestPushWebhook(t *testing.T) {
+	allowLocalWebhooks(t)
 	got := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -119,6 +121,7 @@ func reqJSON(t *testing.T, r http.Handler, method, path, body, session, csrf str
 }
 
 func TestSubscriptionAPI(t *testing.T) {
+	allowLocalWebhooks(t)
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef")
@@ -201,6 +204,7 @@ func TestSubscriptionAPI(t *testing.T) {
 }
 
 func TestDispatchAll(t *testing.T) {
+	allowLocalWebhooks(t)
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -229,5 +233,146 @@ func TestDispatchAll(t *testing.T) {
 		if s.ID == id && s.LastRunAt == nil {
 			t.Fatal("last_run_at not updated")
 		}
+	}
+}
+
+// allowLocalWebhooks 测试放行回环 webhook 目标(生产恒拒,见 validateHookURL)。
+func allowLocalWebhooks(t *testing.T) {
+	t.Helper()
+	prev := allowPrivateHookHosts
+	allowPrivateHookHosts = true
+	t.Cleanup(func() { allowPrivateHookHosts = prev })
+}
+
+// P2-19 回归:webhook 目标不得是回环/私网/链路本地地址(SSRF)。
+func TestValidateHookURLRejectsPrivateTargets(t *testing.T) {
+	bad := []string{
+		"http://127.0.0.1/hook",
+		"http://127.0.0.1:8080/hook",
+		"http://localhost/hook",
+		"http://10.1.2.3/hook",
+		"http://172.16.0.9/hook",
+		"http://192.168.1.10/hook",
+		"http://169.254.169.254/latest/meta-data/", // 云元数据
+		"http://100.64.0.1/hook",                   // CGNAT
+		"http://0.0.0.0/hook",
+		"http://[::1]/hook",
+		"http://[fd00::1]/hook",
+		"ftp://1.1.1.1/hook",
+		"not-a-url",
+		"http:///nohost",
+	}
+	for _, u := range bad {
+		if err := validateHookURL(u); err == nil {
+			t.Fatalf("validateHookURL(%q) = nil, want error", u)
+		}
+	}
+	// 公网字面量 IP 放行(无需 DNS)。
+	for _, u := range []string{"http://1.1.1.1/hook", "https://8.8.8.8:8443/hook"} {
+		if err := validateHookURL(u); err != nil {
+			t.Fatalf("validateHookURL(%q) = %v, want nil", u, err)
+		}
+	}
+}
+
+func TestHookHostAllowed(t *testing.T) {
+	blocked := []string{"127.0.0.1", "10.0.0.1", "192.168.0.1", "172.20.1.1", "169.254.169.254",
+		"100.64.0.1", "0.0.0.0", "224.0.0.1", "240.0.0.1", "::1", "fc00::1", "fe80::1", "::"}
+	for _, s := range blocked {
+		if hookHostAllowed(net.ParseIP(s)) {
+			t.Fatalf("hookHostAllowed(%s) = true, want false", s)
+		}
+	}
+	for _, s := range []string{"1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:4700::1111"} {
+		if !hookHostAllowed(net.ParseIP(s)) {
+			t.Fatalf("hookHostAllowed(%s) = false, want true", s)
+		}
+	}
+	if hookHostAllowed(nil) {
+		t.Fatal("hookHostAllowed(nil) = true")
+	}
+}
+
+// 推送阶段同样拒绝内网目标(库中存量订阅 / 绕过建单校验的调用)。
+func TestPushWebhookRejectsPrivateTarget(t *testing.T) {
+	hit := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case hit <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	err := PushWebhook(context.Background(), srv.URL, &ReportBody{Type: TypeMonthly, Period: "2026-08"})
+	if err == nil {
+		t.Fatal("PushWebhook to loopback = nil, want error")
+	}
+	select {
+	case <-hit:
+		t.Fatal("loopback webhook was called")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// P2-19 回归:302 不得被跟随(重定向可把请求引向内网目标)。
+func TestPushWebhookDoesNotFollowRedirect(t *testing.T) {
+	allowLocalWebhooks(t)
+	targetHits := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case targetHits <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(200)
+	}))
+	defer target.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/inner", http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	err := PushWebhook(context.Background(), redirect.URL, &ReportBody{Type: TypeMonthly, Period: "2026-08"})
+	if err == nil {
+		t.Fatal("PushWebhook through 302 = nil, want error (redirect must not be followed)")
+	}
+	select {
+	case <-targetHits:
+		t.Fatal("redirect target was reached (302 followed)")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// 建单校验:私网 hook_url 直接 400(不入库)。
+func TestCreateRejectsPrivateHookURL(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef")
+	uid, _ := serverstore.CreateUser(db, &serverstore.User{Username: "boss2", Source: "local", Status: 1, Role: serverstore.RoleSuperAdmin})
+	sess, csrf, err := serverauth.CreateAdminSession(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	reg := r.Group("/api/server/admin", serverauth.AdminAuth(db))
+	h := NewHandlers(db)
+	reg.POST("/report-subscriptions", h.Create)
+
+	for _, u := range []string{"http://127.0.0.1:9000/hook", "http://10.0.0.5/hook", "http://169.254.169.254/latest"} {
+		w := reqJSON(t, r, "POST", "/api/server/admin/report-subscriptions",
+			`{"name":"ssrf","hook_url":"`+u+`","enabled":true}`, sess.ID, csrf)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("create %s = %d %s, want 400", u, w.Code, w.Body.String())
+		}
+	}
+	subs, err := serverstore.ListReportSubscriptions(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != 0 {
+		t.Fatalf("subscriptions = %d, want 0 (rejected targets must not persist)", len(subs))
 	}
 }

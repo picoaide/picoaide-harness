@@ -20,8 +20,10 @@ export interface BrowserLedger {
   savedAt: number
 }
 
-/** Actor of a record. */
-export type RecordActor = 'ai' | 'user'
+/** Actor of a record. `restore` = a tab re-materialized from the persisted
+ * ledger at boot/session switch (neither a fresh AI action nor a user click;
+ * it must not surface the window or claim the agent's attribution). */
+export type RecordActor = 'ai' | 'user' | 'restore'
 
 export interface HistoryEntry {
   seq: number
@@ -241,6 +243,10 @@ export class BrowserStore {
       existing.actor = entry.actor
       existing.group = entry.group
       existing.createdAt = Date.now()
+      // Idempotent hits must reach disk too (P2-27): the in-memory record was
+      // updated but the file kept the old title/actor, so a restart reverted
+      // the bookmark to its first stamp.
+      this.rewrite('bookmarks', this.bookmarks)
       return existing
     }
     const record: BookmarkEntry = { ...entry, id: ++this.bookmarkSeq, createdAt: Date.now(), url }

@@ -16,7 +16,8 @@
 #   ADMIN_USER        超管用户名(默认 admin)
 #   ADMIN_PASS        超管密码(默认随机生成;兼容 PICOAI_ADMIN_PASSWORD)
 #   TLS_MODE          证书模式: manual(默认,自签占位+提示替换) | auto(Let's Encrypt) | internal(本地自签)
-#   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest)
+#   SERVER_IMAGE      服务端镜像(默认 ghcr.io/picoaide/picoaide-harness-server:latest;
+#                     生产建议固定版本,如 ...:v2.6.7 —— :latest 不可复现/回滚无锚点,P2-59)
 #   REINSTALL=yes     已存在部署时清除重装(默认安全退出)
 #   SKIP_DEPS=1       跳过依赖自动安装(仅检查已装命令,缺失即提示并退出)
 #   SKIP_IMAGE_CHECK=1 跳过"镜像是否含 -db-driver 支持"探测
@@ -259,6 +260,15 @@ step4_config() {
 
   # 数据库:固定内置 PostgreSQL(单一 compose 文件,caddy+server+postgres)
   log "  数据库: PostgreSQL(内置容器,PG-only)"
+  # P2-59: 默认 :latest 会让生产一键部署随镜像漂移(不可复现、回滚无锚点)。
+  # 不改默认行为(首次安装要能一键跑通),但显式警告并给出固定版本写法。
+  case "$SERVER_IMAGE" in
+    *:latest)
+      warn "SERVER_IMAGE 使用 :latest —— 生产环境建议固定版本以可复现/可回滚:"
+      warn "  SERVER_IMAGE=ghcr.io/picoaide/picoaide-harness-server:v2.6.7 bash scripts/install-server.sh"
+      warn "  (可用版本见 https://github.com/picoaide/picoaide-harness/releases)"
+      ;;
+  esac
   if [ -z "$PG_PASSWORD" ] && [ -t 0 ]; then
     read -r -p "请输入内置 PostgreSQL 密码(回车则随机生成): " PG_PASSWORD < /dev/tty || true
   fi

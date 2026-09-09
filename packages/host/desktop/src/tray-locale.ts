@@ -8,12 +8,7 @@ export type DesktopTrayLabelKey =
   | 'downloadingUpdate'
   | 'exportDiagnostics'
   | 'openDesktop'
-  | 'openTerminal'
-  | 'profile'
   | 'quit'
-  | 'switchToAdvanced'
-  | 'switchToCompatibility'
-  | 'unavailableForDesktop'
   | 'updateAvailable'
 
 const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string) => string>> = {
@@ -23,12 +18,7 @@ const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string) 
     downloadingUpdate: version => `Downloading PicoAide Harness ${version}…`,
     exportDiagnostics: () => 'Export Diagnostics…',
     openDesktop: productName => `Open ${productName}`,
-    openTerminal: () => 'Open DSH Terminal',
-    profile: profileName => `Profile: ${profileName}`,
     quit: () => 'Quit',
-    switchToAdvanced: () => 'Switch to Advanced Mode',
-    switchToCompatibility: () => 'Switch to Compatibility Mode',
-    unavailableForDesktop: profileName => `${profileName} (Unavailable for Desktop)`,
     updateAvailable: version => `PicoAide Harness ${version} Available`,
   },
   zh: {
@@ -37,12 +27,7 @@ const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string) 
     downloadingUpdate: version => `正在下载 PicoAide Harness ${version}…`,
     exportDiagnostics: () => '导出诊断信息…',
     openDesktop: productName => `打开 ${productName}`,
-    openTerminal: () => '打开 DSH 终端',
-    profile: profileName => `配置文件：${profileName}`,
     quit: () => '退出',
-    switchToAdvanced: () => '切换到高级模式',
-    switchToCompatibility: () => '切换到兼容模式',
-    unavailableForDesktop: profileName => `${profileName}（不可用于桌面端）`,
     updateAvailable: version => `PicoAide Harness ${version} 可用`,
   },
 }

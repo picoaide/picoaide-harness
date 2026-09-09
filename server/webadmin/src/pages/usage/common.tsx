@@ -58,9 +58,31 @@ export interface UserInfo {
   status: number
   quota_tokens: number | null
   quota_money: number | null
+  /** 生效配额(服务端 users 列表下发;跟随全局默认时已折算,0 = 不限)。 */
+  effective_quota_tokens?: number | null
+  effective_quota_money?: number | null
   monthly_usage: number
   monthly_cost: number
   groups: string[]
+}
+
+/** 生效金额配额(P2-45):服务端已按「用户覆盖 → 全局默认」折算下发,
+ *  直接用 effective_quota_money;缺失(旧服务端)才回退用户覆盖值。
+ *  0 = 不限(与 moneyPercent/moneyOver 口径一致,调用方按 null 处理即可)。 */
+export function effectiveQuotaMoney(u: UserInfo): number | null {
+  return u.effective_quota_money ?? u.quota_money ?? null
+}
+
+/** 生效 token 配额(P2-45),口径同上。 */
+export function effectiveQuotaTokens(u: UserInfo): number | null {
+  return u.effective_quota_tokens ?? u.quota_tokens ?? null
+}
+
+/** 员工数文案(P3):服务端 total 含超管且无角色过滤,不可假设「仅一名超管」。
+ *  单页取全量时按实际员工行数;超过单页时给下限 + 搜索提示。 */
+export function employeeCountText(employees: UserInfo[], rawCount: number, total: number): string {
+  if (rawCount < total) return `共 ${employees.length}+ 名员工(列表展示前 ${employees.length},搜索可缩小范围)`
+  return `共 ${employees.length} 名员工`
 }
 
 export interface ModelInfo {

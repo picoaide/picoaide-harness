@@ -147,3 +147,46 @@ func TestAppMarketProjection(t *testing.T) {
 		t.Fatalf("Skill 投影 = %+v err=%v", s, err)
 	}
 }
+
+// TestUpsertAppAndCreateReleaseAtomic 覆盖 P2-3:占名 + 建版本必须原子。
+// CreateRelease 失败时不得留下「占名无版本」的悬挂 App。
+func TestUpsertAppAndCreateReleaseAtomic(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	// 1) 版本插入失败(status 违反 CHECK 约束)→ 占名也必须回滚
+	_, err := UpsertAppAndCreateRelease(db, &App{
+		Kind: AppKindSkill, AppID: "ghost", Title: "ghost", Owner: "alice", Channel: AppChannelOrg, Enabled: 1,
+	}, &Release{Kind: AppKindSkill, AppID: "ghost", Version: "1.0.0", Publisher: "alice", Status: "bogus"})
+	if err == nil {
+		t.Fatal("want release insert error, got nil")
+	}
+	if _, err := GetApp(db, AppKindSkill, "ghost"); err != ErrNotFound {
+		t.Fatalf("dangling app left after rollback (err=%v)", err)
+	}
+	// 2) 成功路径:App 与版本都在
+	if _, err := UpsertAppAndCreateRelease(db, &App{
+		Kind: AppKindSkill, AppID: "atomic", Title: "atomic", Owner: "alice", Channel: AppChannelOrg, Enabled: 1,
+	}, &Release{Kind: AppKindSkill, AppID: "atomic", Version: "1.0.0", Publisher: "alice"}); err != nil {
+		t.Fatalf("atomic publish: %v", err)
+	}
+	if _, err := GetApp(db, AppKindSkill, "atomic"); err != nil {
+		t.Fatalf("app missing after atomic publish: %v", err)
+	}
+	if _, err := GetRelease(db, AppKindSkill, "atomic", "1.0.0"); err != nil {
+		t.Fatalf("release missing after atomic publish: %v", err)
+	}
+	// 3) 版本唯一冲突 → 占名侧的标题更新一并回滚
+	_, err = UpsertAppAndCreateRelease(db, &App{
+		Kind: AppKindSkill, AppID: "atomic", Title: "改了标题", Owner: "alice", Channel: AppChannelOrg, Enabled: 1,
+	}, &Release{Kind: AppKindSkill, AppID: "atomic", Version: "1.0.0", Publisher: "alice"})
+	if !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("err = %v, want ErrDuplicate", err)
+	}
+	app, err := GetApp(db, AppKindSkill, "atomic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Title != "atomic" {
+		t.Fatalf("app title = %q, want unchanged (事务回滚)", app.Title)
+	}
+}

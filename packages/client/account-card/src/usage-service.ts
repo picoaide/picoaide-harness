@@ -26,7 +26,6 @@ export interface UsagePayload {
   yesterday_cost: number
   total_usage: number
   total_cost: number
-  dept_budgets: { name: string; budget: number; used: number }[]
 }
 
 /** Refresh lifecycle of the snapshot. */
@@ -44,20 +43,34 @@ export interface UsageSnapshot {
 /** Empty snapshot shown before the first successful fetch. */
 export const EMPTY_SNAPSHOT: UsageSnapshot = { data: null, fetchedAt: 0, state: 'idle', error: null }
 
-/** fetchJSON-compatible gateway caller (test-injectable). */
-export type UsageFetcher = (serverURL: string, path: string, opts: { token?: string }) => Promise<UsagePayload>
+/** fetchJSON-compatible gateway caller (test-injectable). `signal` lets the
+ * service abort a request that belongs to a session the user just left. */
+export type UsageFetcher = (serverURL: string, path: string, opts: { token?: string; signal?: AbortSignal }) => Promise<UsagePayload>
 
 const DEFAULT_DEBOUNCE_MS = 300
+
+/** Identity of the account a request belongs to (server + user + token). */
+function sessionKey(session: Session): string {
+  return `${session.serverURL}\u0000${session.username ?? ''}\u0000${session.token}`
+}
 
 /**
  * Coalescing usage fetcher. `refresh()` debounces (bursts of loop-complete
  * notifications collapse into one call); `refreshNow()` bypasses the debounce
  * and is single-flight (concurrent callers share the in-flight request).
  * Failures keep the previous snapshot and flip `state` to `error`.
+ *
+ * P2-22: a request is bound to the account that issued it. `clear()` (logout /
+ * user switch) aborts the in-flight request and bumps an epoch, so its result
+ * can never be written into the next account's snapshot, and a caller for a
+ * DIFFERENT account never joins (or receives) the previous account's request.
  */
 export class UsageService {
   private snapshot: UsageSnapshot = EMPTY_SNAPSHOT
   private inflight: Promise<UsageSnapshot> | null = null
+  private inflightKey: string | null = null
+  private controller: AbortController | null = null
+  private epoch = 0
   private debounceTimer: NodeJS.Timeout | null = null
   private readonly debounceMs: number
   private fetch: UsageFetcher
@@ -85,12 +98,18 @@ export class UsageService {
     }, this.debounceMs)
   }
 
-  /** Drop the cached snapshot immediately (logout/user switch). */
+  /** Drop the cached snapshot immediately (logout/user switch) and cancel any
+   * in-flight request so its result cannot land in the next account's cache. */
   clear(): void {
     if (this.debounceTimer !== null) {
       clearTimeout(this.debounceTimer)
       this.debounceTimer = null
     }
+    this.epoch++
+    this.controller?.abort()
+    this.controller = null
+    this.inflight = null
+    this.inflightKey = null
     this.snapshot = EMPTY_SNAPSHOT
   }
 
@@ -100,27 +119,58 @@ export class UsageService {
    */
   async refreshNow(session: Session | null): Promise<UsageSnapshot> {
     if (session === null) return this.snapshot
-    if (this.inflight !== null) return this.inflight
+    const key = sessionKey(session)
+    if (this.inflight !== null) {
+      // Same account: share the in-flight request (single flight).
+      if (this.inflightKey === key) return this.inflight
+      // Different account: never hand the previous account's request (or its
+      // result) to this one — abort it and start a fresh request.
+      this.controller?.abort()
+      this.inflight = null
+      this.inflightKey = null
+    }
+    const epoch = this.epoch
+    const controller = new AbortController()
+    this.controller = controller
     this.snapshot = { ...this.snapshot, state: 'loading', error: null }
-    this.inflight = (async (): Promise<UsageSnapshot> => {
+    let request!: Promise<UsageSnapshot>
+    request = (async (): Promise<UsageSnapshot> => {
       try {
-        const data = await this.fetch(session.serverURL, '/api/client/v2/auth/usage', { token: session.token })
-        this.snapshot = { data, fetchedAt: Date.now(), state: 'idle', error: null }
+        const data = await this.fetch(session.serverURL, '/api/client/v2/auth/usage', {
+          token: session.token,
+          signal: controller.signal,
+        })
+        // Epoch + ownership check: a logout/login during the request must not
+        // write the previous account's data into the new snapshot, and a
+        // superseded request (replaced by another account's) must not publish
+        // its aborted error over the newer request's state (P2-22).
+        if (epoch === this.epoch && this.inflight === request) {
+          this.snapshot = { data, fetchedAt: Date.now(), state: 'idle', error: null }
+        }
       } catch (cause) {
         // 401/auth-expired surfaces here too: the route layer maps it to a
         // 401 response so the card can hide; the previous snapshot is kept
         // so a transient network blip never blanks the balance.
-        this.snapshot = {
-          ...this.snapshot,
-          state: 'error',
-          error: cause instanceof Error ? cause.message : String(cause),
+        if (epoch === this.epoch && this.inflight === request) {
+          this.snapshot = {
+            ...this.snapshot,
+            state: 'error',
+            error: cause instanceof Error ? cause.message : String(cause),
+          }
         }
       } finally {
-        this.inflight = null
+        // Only the request that still owns the slot may clear it.
+        if (this.inflight === request) {
+          this.inflight = null
+          this.inflightKey = null
+          this.controller = null
+        }
       }
       return this.snapshot
     })()
-    return this.inflight
+    this.inflight = request
+    this.inflightKey = key
+    return request
   }
 
   /** Cancel any pending debounced refresh (plugin teardown). */
@@ -129,5 +179,7 @@ export class UsageService {
       clearTimeout(this.debounceTimer)
       this.debounceTimer = null
     }
+    this.controller?.abort()
+    this.controller = null
   }
 }

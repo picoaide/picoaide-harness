@@ -2,6 +2,10 @@
  * Same-origin route serving the loop-notification click-to-jump request:
  * the Host plugin records the session id when it raises a loop notification,
  * the renderer polls this endpoint and opens the session.
+ *
+ * The GET CONSUMES the pending request (read-then-clear, P2-24): a request
+ * that is never cleared would be re-delivered on every poll and on every
+ * renderer reload, re-opening a session the user already visited.
  * @module dsh-plugin-desktop/loop-notify-route
  */
 
@@ -14,12 +18,12 @@ function finishJson(res: ServerResponse, statusCode: number, value: object): voi
   res.end(JSON.stringify(value))
 }
 
-/** Serve the pending click-to-jump session request to the renderer. */
+/** Serve (and consume) the pending click-to-jump session request. */
 export async function handleDesktopLoopNotifySessionRequest(
   req: IncomingMessage,
   res: ServerResponse,
   expectedOrigin: string,
-  read: () => DesktopLoopNotifySessionResponse,
+  consume: () => DesktopLoopNotifySessionResponse,
 ): Promise<void> {
   if (req.method !== 'GET') return finishJson(res, 405, { error: 'method not allowed' })
   // Same-origin GET in Chromium carries no Origin header; strict equality
@@ -27,5 +31,5 @@ export async function handleDesktopLoopNotifySessionRequest(
   if (req.headers.origin !== undefined && req.headers.origin !== expectedOrigin) {
     return finishJson(res, 403, { error: 'forbidden' })
   }
-  finishJson(res, 200, read())
+  finishJson(res, 200, consume())
 }

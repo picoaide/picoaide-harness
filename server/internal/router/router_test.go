@@ -1,6 +1,7 @@
 package router
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -180,4 +181,117 @@ func isLegacyPath(p string) bool {
 		return true
 	}
 	return false
+}
+
+// P2-17 回归:生产路由树上 1MB 请求体上限对客户端登录与管理面登录都生效
+// (此前只有测试镜像挂了这层中间件,生产可推 8MB JSON)。
+func TestProductionBodyLimitRejectsOversizedJSON(t *testing.T) {
+	r := buildTestRouter(t)
+	huge := strings.Repeat("a", 8<<20) // 8MB body
+	for _, path := range []string{
+		"/api/client/v2/auth/login",
+		"/api/server/admin/login",
+		"/api/server/admin/login/mfa",
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"username":"`+huge+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s with 8MB body = %d, want 400 (body limit)", path, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), `"error"`) {
+			t.Fatalf("%s body = %s, want JSON error envelope", path, w.Body.String())
+		}
+	}
+	// 网关命名空间(/v1/*)自带 16MB 上限,不受 1MB 中间件影响:未认证仍是 401
+	// (而不是被 1MB 中间件拦成 400)。
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"x","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("/v1/chat/completions = %d, want 401 (bearer before body limit)", w.Code)
+	}
+}
+
+// 中间件行为单测:上限内放行、超限拒绝;自带更大上限的上传路由必须豁免
+// (否则外层 1MB 先触发,内层 24MB/4MB 上限失效)。
+func TestBodyLimitMiddlewareBoundsAndExempts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	g := r.Group("/api/server", bodyLimitMiddleware())
+	g.POST("/admin/login", func(c *gin.Context) {
+		if _, err := io.ReadAll(c.Request.Body); err != nil {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	g.POST("/admin/skills/:name/archive", func(c *gin.Context) {
+		if _, err := io.ReadAll(c.Request.Body); err != nil {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	send := func(path, body string) int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if got := send("/api/server/admin/login", `{"username":"alice"}`); got != http.StatusOK {
+		t.Fatalf("small body = %d, want 200", got)
+	}
+	if got := send("/api/server/admin/login", strings.Repeat("a", 2<<20)); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("2MB body = %d, want 413", got)
+	}
+	// 归档上传豁免:2MB > 1MB 仍放行(handler 内部自限 24MB)。
+	if got := send("/api/server/admin/skills/demo/archive", strings.Repeat("a", 2<<20)); got != http.StatusOK {
+		t.Fatalf("archive upload 2MB = %d, want 200 (exempt from 1MB limit)", got)
+	}
+}
+
+// 豁免表必须与实际自带更大上限的路由一一对应。
+func TestLargeBodyRoutesExemptions(t *testing.T) {
+	for _, key := range []string{
+		"POST " + NamespaceServer + "/admin/skills/:name/archive",
+		"POST " + NamespaceServer + "/admin/agents/:name/archive",
+		"POST " + NamespaceServer + "/admin/brand/logo",
+		"POST " + NamespaceClientV2 + "/shared-skills",
+		"POST " + NamespaceClientV2 + "/agent-presets",
+	} {
+		m, p := splitKey(key)
+		if !bodyLimitExempt(m, p) {
+			t.Fatalf("%s must be exempt from the 1MB body limit", key)
+		}
+	}
+	for _, key := range []string{
+		"POST " + NamespaceServer + "/admin/login",
+		"POST " + NamespaceClientV2 + "/auth/login",
+		"PUT " + NamespaceServer + "/admin/gateway",
+		"POST " + NamespaceClientV2 + "/telemetry/skill-call",
+	} {
+		m, p := splitKey(key)
+		if bodyLimitExempt(m, p) {
+			t.Fatalf("%s must NOT be exempt from the 1MB body limit", key)
+		}
+	}
+}
+
+// 豁免表必须对应真实注册的路由(防路径写错导致豁免失效 → 上传被 1MB 拦)。
+func TestLargeBodyRoutesExist(t *testing.T) {
+	r := buildTestRouter(t)
+	routes := map[string]bool{}
+	for _, rt := range r.Routes() {
+		routes[rt.Method+" "+rt.Path] = true
+	}
+	for key := range largeBodyRoutes {
+		if !routes[key] {
+			t.Fatalf("exempt route not registered in production tree: %s", key)
+		}
+	}
 }

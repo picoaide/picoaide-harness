@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ISpec } from '@visactor/vchart'
 import { ChartLazy } from '../../components/chart-lazy'
 import { request, ADMIN_API } from '../../api'
@@ -23,9 +23,13 @@ export default function UsageDepartments() {
   const [detail, setDetail] = useState<{ trend: UsageRow[]; members: UsageRow[]; models: UsageRow[] } | null>(null)
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
   const [error, setError] = useState('')
+  // P2-46: 请求序号防乱序——快速切换区间时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (f: string, t: string) => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
@@ -33,12 +37,14 @@ export default function UsageDepartments() {
         request<{ departments: DeptInfo[] }>(`${ADMIN_API}/departments`),
         fetchUsageList({ group: 'dept', from: f, to: t }),
       ])
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
       setDepts(d.departments ?? [])
       setDeptRows(rows)
-      setLoading(false)
     } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
       setError(e.message || '查询失败')
-      setLoading(false)
+    } finally {
+      if (current === loadSeq.current) setLoading(false)
     }
   }, [])
 
@@ -70,6 +76,7 @@ export default function UsageDepartments() {
     setSelected(name)
     setDetailLoading(true)
     setDetail(null)
+    setDetailError('')
     try {
       const [trend, members, models] = await Promise.all([
         fetchUsageList({ group: 'day', dept: name, from, to }),
@@ -77,8 +84,10 @@ export default function UsageDepartments() {
         fetchUsageList({ group: 'model', dept: name, from, to }),
       ])
       setDetail({ trend, members: members.slice(0, 10), models })
-    } catch {
+    } catch (e: any) {
+      // P3: 原来静默 catch → 点击部门后空白无提示,用户以为「没有数据」。
       setDetail(null)
+      setDetailError(e?.message || '部门明细查询失败')
     } finally {
       setDetailLoading(false)
     }
@@ -176,6 +185,8 @@ export default function UsageDepartments() {
           <CardContent>
             {detailLoading ? (
               <Skeleton className="h-72 w-full" />
+            ) : detailError !== '' ? (
+              <div className="flex h-72 items-center justify-center text-sm text-destructive">{detailError}</div>
             ) : !selected ? (
               <div className="flex h-72 items-center justify-center text-muted-foreground">选择部门查看消耗明细</div>
             ) : detail ? (

@@ -13,6 +13,10 @@ import (
 
 // loginRateLimit bounds login attempts per key (ip+username).
 // Sliding window: maxAttempts per window; bounded table with lazy cleanup.
+//
+// 2026-09-08 P1-3:只对**失败**尝试计数(allow 不再记账;认证失败后调
+// record,成功后 reset)。此前成功登录也占配额,正常用户 5 分钟内第 11 次
+// 登录会被 429,而未认证者 10 次错密即可把任意账号(含 super_admin)锁死。
 type loginLimiter struct {
 	mu          sync.Mutex
 	attempts    map[string][]time.Time
@@ -21,6 +25,10 @@ type loginLimiter struct {
 	window      time.Duration
 	lastSweep   time.Time
 }
+
+// callbackLimiterMaxAttempts:OIDC 回调按来源 IP 限流(独立桶,阈值高于
+// 登录——同一出口 NAT 下的整个办公室共用 IP,且只对失败回调计数)。
+const callbackLimiterMaxAttempts = 60
 
 func newLoginLimiter() *loginLimiter {
 	// PICOAI_LOGIN_MAX_ATTEMPTS overrides the default 10/5min for test
@@ -31,15 +39,30 @@ func newLoginLimiter() *loginLimiter {
 			max = n
 		}
 	}
+	return newRateLimiter(max)
+}
+
+// newCallbackLimiter bounds OIDC callback attempts per IP only (2026-09-08
+// P0-2): the callback previously shared the per-username login bucket with the
+// fixed pseudo-user "oidc-callback", so every SSO login in the deployment
+// consumed one global 10-per-5min budget and the 11th callback anywhere got
+// 429.
+func newCallbackLimiter() *loginLimiter {
+	return newRateLimiter(callbackLimiterMaxAttempts)
+}
+
+func newRateLimiter(maxAttempts int) *loginLimiter {
 	return &loginLimiter{
 		attempts:    map[string][]time.Time{},
 		maxEntries:  10000,
-		maxAttempts: max,
+		maxAttempts: maxAttempts,
 		window:      5 * time.Minute,
 	}
 }
 
-// allow records an attempt; it reports whether the attempt may proceed.
+// allow reports whether the attempt may proceed. It does NOT record the
+// attempt — callers record failures with record() and clear the window with
+// reset() after a successful authentication.
 // When the table is full, the key with the oldest window start is evicted
 // (a sweep of distinct usernames must not DoS login for everyone).
 // 清扫摊销:每次调用只清理当前 key;全局过期清扫每分钟至多一次(审计2026-M9:
@@ -90,8 +113,26 @@ func (l *loginLimiter) allow(key string) bool {
 		}
 		delete(l.attempts, victim)
 	}
-	l.attempts[key] = append(kept, now)
+	if len(kept) == 0 {
+		delete(l.attempts, key)
+	} else {
+		l.attempts[key] = kept
+	}
 	return true
+}
+
+// record notes one failed attempt against the key.
+func (l *loginLimiter) record(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.attempts[key] = append(l.attempts[key], time.Now())
+}
+
+// reset clears the key's history after a successful authentication.
+func (l *loginLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.attempts, key)
 }
 
 // loginKey builds a rate-limit key from the connection IP and username.
@@ -107,6 +148,15 @@ func loginKey(c *gin.Context, username string) string {
 	return host + "|" + username
 }
 
+// clientIPKey is the IP-only rate-limit key (OIDC callbacks).
+func clientIPKey(c *gin.Context) string {
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		host = c.Request.RemoteAddr
+	}
+	return "ip:" + host
+}
+
 // loginAllowed guards one login attempt through BOTH buckets: ip|username
 // (安全默认,防单 IP 爆破) and username (防账号级 DoS——反代坍缩/分布式
 // 爆破下,同一用户名跨 IP 的尝试总数仍受限)。审计 2026-08-25 F-02。
@@ -120,4 +170,37 @@ func (a *API) loginAllowed(c *gin.Context, username string) bool {
 		return false
 	}
 	return true
+}
+
+// loginFailed records a failed authentication against both login buckets.
+func (a *API) loginFailed(c *gin.Context, username string) {
+	a.limiter.record(loginKey(c, username))
+	a.limiter.record("u:" + username)
+}
+
+// loginSucceeded clears both login buckets after a successful authentication
+// (a legitimate login must not consume the failure budget).
+func (a *API) loginSucceeded(c *gin.Context, username string) {
+	a.limiter.reset(loginKey(c, username))
+	a.limiter.reset("u:" + username)
+}
+
+// oidcCallbackAllowed guards one OIDC callback through a dedicated IP-only
+// bucket (P0-2). Failures are recorded by the caller; success resets it.
+func (a *API) oidcCallbackAllowed(c *gin.Context) bool {
+	if !a.callbackLimiter.allow(clientIPKey(c)) {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
+		return false
+	}
+	return true
+}
+
+// oidcCallbackFailed records one failed callback attempt (IP bucket).
+func (a *API) oidcCallbackFailed(c *gin.Context) {
+	a.callbackLimiter.record(clientIPKey(c))
+}
+
+// oidcCallbackSucceeded clears the callback bucket for this IP.
+func (a *API) oidcCallbackSucceeded(c *gin.Context) {
+	a.callbackLimiter.reset(clientIPKey(c))
 }

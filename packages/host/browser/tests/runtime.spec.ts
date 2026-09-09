@@ -17,6 +17,8 @@ import { join } from 'node:path'
 
 class MockTransport implements CdpTransport {
   attached = false
+  /** When true, sendCommand never settles (wedged-renderer simulation). */
+  hang = false
   readonly sent: Array<{ method: string; params: Record<string, unknown> }> = []
   handler: ((method: string, params: Record<string, unknown>) => unknown) | undefined
   isAttached(): boolean { return this.attached }
@@ -24,6 +26,7 @@ class MockTransport implements CdpTransport {
   detach(): void { this.attached = false }
   sendCommand(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.sent.push({ method, params })
+    if (this.hang) return new Promise(() => {})
     return Promise.resolve(this.handler?.(method, params) ?? {})
   }
   on(): void {}
@@ -202,7 +205,7 @@ class MockAdapter implements ElectronAdapter {
   }
 }
 
-function makeRuntime(options: { maxTabs?: number; evalEnabled?: boolean } = {}) {
+function makeRuntime(options: { maxTabs?: number; evalEnabled?: boolean; timeoutMs?: number } = {}) {
   const adapter = new MockAdapter()
   const dir = join(process.cwd(), 'tests', `.rt-store-${Math.random().toString(36).slice(2)}`)
   mkdirSync(dir, { recursive: true })
@@ -215,14 +218,61 @@ function makeRuntime(options: { maxTabs?: number; evalEnabled?: boolean } = {}) 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 describe('BrowserRuntime v4.2 — flat pool', () => {
-  it('open creates a tab, marks it active, and listTabs sees it', async () => {
+  it('agent open creates a tab without popping the window to the front', async () => {
     const { adapter, runtime, cleanup } = makeRuntime()
     const tab = await runtime.open('https://example.com')
     expect(tab.id).toBe(1)
     expect(runtime.listTabs()).toHaveLength(1)
     expect(runtime.listTabs()[0]?.visible).toBe(true)
     expect(runtime.listTabs()[0]?.url).toBe('https://example.com')
+    // 2026-09-08: the agent never surfaces the window (the user may have just
+    // closed it); only user paths show it.
+    expect(adapter.windows[0]?.visible).toBe(false)
+    cleanup()
+  })
+
+  it('user open and showWindow surface the window; hideWindow only hides it', async () => {
+    const { adapter, runtime, cleanup } = makeRuntime()
+    await runtime.open('https://example.com', undefined, true)
     expect(adapter.windows[0]?.visible).toBe(true)
+    runtime.hideWindow()
+    expect(adapter.windows[0]?.visible).toBe(false)
+    expect(runtime.windowState.created).toBe(true)
+    expect(runtime.listTabs()).toHaveLength(1)
+    await runtime.showWindow()
+    expect(adapter.windows[0]?.visible).toBe(true)
+    cleanup()
+  })
+
+  it('prewarm brings the window up hidden with restored tabs and no pop-up', async () => {
+    const { runtime, store, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    await runtime.open('https://b.example')
+    runtime.saveLedger()
+    const adapter2 = new MockAdapter()
+    const runtime2 = new BrowserRuntime(adapter2 as never, {}, undefined, undefined, { store })
+    runtime2.restoreLedger()
+    await runtime2.prewarm()
+    await sleep(60)
+    expect(adapter2.windows.length).toBe(1)
+    expect(adapter2.windows[0]?.visible).toBe(false)
+    expect(runtime2.listTabs().length).toBe(2)
+    // An agent tab open after prewarm still must not surface the window.
+    await runtime2.open('https://c.example')
+    expect(adapter2.windows[0]?.visible).toBe(false)
+    cleanup()
+    runtime2.dispose()
+  })
+
+  it('a wedged CDP call times out and releases the global mutex (P0-4)', async () => {
+    const { adapter, runtime, cleanup } = makeRuntime({ timeoutMs: 60 })
+    await runtime.open('https://a.example')
+    const view = adapter.lastView()
+    view.transport.hang = true
+    await expect(runtime.eval(1, 'document.title')).rejects.toMatchObject({ code: 'timeout' })
+    // The mutex must be free again: the next operation proceeds normally.
+    view.transport.hang = false
+    await expect(runtime.eval(1, 'document.title')).resolves.toBe('null')
     cleanup()
   })
 

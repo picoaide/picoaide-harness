@@ -17,7 +17,6 @@ const PAYLOAD: UsagePayload = {
   yesterday_cost: 0.8,
   total_usage: 500_000,
   total_cost: 40.1,
-  dept_budgets: [],
 }
 
 function makeFetcher(impl?: UsageFetcher): { fn: UsageFetcher } & { calls: () => number } {

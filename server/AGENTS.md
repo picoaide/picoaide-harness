@@ -76,8 +76,8 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 ### 7.1 REST 错误
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
 - **bootstrap**:`{default_model, models, skills, web, connectors}`(接入方对 skills/web 缺省值兜底;connectors 为服务端连接器目录,0042 起)
-- **员工用量接口**:`GET /api/client/v2/auth/usage` → `{quota_tokens, quota_money, remaining_tokens/money(不限=null), today/yesterday/monthly/total usage+cost, dept_budgets[]}`(余额与统计展示数据源)
-- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0048(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0047 brand 快照、0048 审计哈希链)
+- **员工用量接口**:`GET /api/client/v2/auth/usage` → `{quota_tokens, quota_money, remaining_tokens/money(不限=null), today/yesterday/monthly/total usage+cost}`(余额与统计展示数据源)
+- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0060(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0047 brand 快照、0048 审计哈希链)
 - **审计契约**:`GET /api/server/admin/audit?page=&size=&action=&username=`(敏感操作留痕;默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链防篡改)
 - **费用/配额口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;配额链 = 员工 token → 员工金额 → 部门预算(归属+祖先,树内 SUM(cost));剩余 = 配额 − 本月已用(不限=null)
 

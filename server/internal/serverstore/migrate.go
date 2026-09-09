@@ -1,6 +1,7 @@
 package serverstore
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -72,9 +73,28 @@ func init() {
 	}
 }
 
+// migrationLockKey 迁移互斥的 PG advisory lock key(固定常量,跨实例共享)。
+const migrationLockKey = int64(0x5069636D) // "Picm"
+
 // ApplyMigrations creates the schema_migrations table and applies all pending
 // migrations, each in its own transaction. It is idempotent.
+// P2-2:整个迁移循环用会话级 pg_advisory_lock 包住——多实例并发启动时,
+// 「查已应用 → 逐条 Begin/Commit」的竞态会让两个实例同时执行同一条迁移
+// (CREATE TABLE 竞态、schema_migrations 唯一键冲突、半套 schema)。
+// 锁持有在专用连接上,defer 释放(连接归还池前解锁)。
 func ApplyMigrations(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migration lock conn: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock(?)", migrationLockKey); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock(?)", migrationLockKey)
+	}()
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		applied_at ` + TimestampType() + ` DEFAULT (` + NowExpr() + `)

@@ -198,4 +198,4 @@ interface CapabilityItem {
 - **保留旧路由而非重命名**：`/api/client/v2/shared-skills` 等内容语义仍准确（「共享」描述的是组织内分发机制），重命名收益低、破坏 host 代理与第三方接入方；新词只落在界面与聚合面上。
 - **「专业」的词性**：词表内把它固定为「等级」语义（市场定价层），全产品内不复用为别的含义，避免再次单维度化命名；组织库质量标记另起「官方/精选」词表。
 - **强制 force 的边界**：`?force=1` 只豁免「同名目录已存在」这一项检查；归档安全校验、大小上限、拒绝符号链接等**永远不会**因 force 豁免。
-- **0037 双后端**：本项目 sqlite 与 pg 迁移目录并存（`migrations/` 与 `migrations-pg/`），任何表结构改动必须双落地，否则 pg 部署失步。
+- **0037 双后端（已过时，2026-08-27 PG-only 迁移后修正）**：当时 sqlite 与 pg 迁移目录并存（`migrations/` 与 `migrations-pg/`），需双落地。**现在 PostgreSQL 是唯一后端**：旧 `migrations/` 与 SQLite 驱动已整体删除，表结构改动只需落在 `server/internal/serverstore/migrations-pg/`（当前 0001–0059）。

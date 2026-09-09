@@ -154,7 +154,7 @@ Built into the product (vendored community plugin **dsh-memory-evolve**), this i
 
 - Upgrade source: GitHub Releases API (`releases/latest`); parses `tag_name` and strips the `v` prefix;
 - **SHA-256 verification**: downloads `SHA256SUMS.txt` and checks each installer against it (compatible with the `./` prefix); on failure, the package is **not installed**;
-- Platform assets: macOS universal DMG (compatible with Intel and Apple Silicon), Windows NSIS installer, Linux AppImage (`x86_64`) + deb; **Linux does not auto-download installers** (update download is macOS / Windows only) — Linux users download the new installer manually;
+- Platform assets: macOS DMG (arm64), Windows NSIS installer, Linux AppImage (`x86_64`) + deb; **Linux auto-downloads too** (`update-download.ts` picks `-x86_64.AppImage` per platform), then `chmod +x` and shows a dialog asking the user to replace the current AppImage and restart (AppImage has no silent self-install);
 - Interaction: background checks don't block startup; network errors, non-200 responses, invalid versions, and versions not newer than the installed one stay silent; a new version asks for confirmation before downloading; cancelling never hits the counted download endpoint; a download/install failure doesn't break the current version (under network fluctuation, continues downloading the confirmed version);
 - Tray **Check for Updates…** is a manual check: shows a result even when already current, and asks to retry when the check fails;
 - Unsigned note: Windows/Linux installers are auto-published unsigned by CI (macOS release builds are signed + notarized); Windows SmartScreen may warn about an "unknown publisher" — verify against the SHA256SUMS.txt shipped in the Release.

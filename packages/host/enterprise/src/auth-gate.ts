@@ -18,6 +18,7 @@ import {
   validateSkillName,
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import { brandMarkSvg } from './brand-geometry.ts'
 import type { Session } from './server-connector/config.ts'
 
 /** 上传 body 上限(审计 2026-08-25 P2-2):本地 upload body 实际只含元数据
@@ -149,7 +150,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   // 品牌兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
   // 花括号 1.25x 放大)。任何 logo 兜底都必须与 logo.svg 一致,禁止字母 P 等
   // 编造图形(旧版 P 字 logo 已退役)。
-  var BRACE_MARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" width="100%" height="100%" fill="none" aria-hidden="true"><g transform="translate(627 627) scale(1.25) translate(-627 -627)"><path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></g></svg>'
+  var BRACE_MARK_SVG = ${JSON.stringify(brandMarkSvg('#FFFFFF'))}
 
   // ---- Step1 → Step2: 并行探测 brand + methods(任一成功进 Step2) ----
   f1.addEventListener('submit', async function (e) {
@@ -238,12 +239,17 @@ const LOGIN_HTML = `<!DOCTYPE html>
     var only = methods.length === 1
     if (only) { methodsBox.innerHTML = ''; return }
     methodsBox.innerHTML = methods.map(function (m) {
-      var label = ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[m.name] || m.name
+      // 安全(2026-09-08 P1-7):m.name 来自网关 /auth/methods 响应,可被
+      // 恶意/被劫持的网关控制;此前未转义直接拼进属性,可在本地登录页
+      // origin 注入属性/事件处理器。label 同理(未知方式回退到 m.name)。
+      var rawName = String(m.name == null ? '' : m.name)
+      var label = ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[rawName] || rawName
+      var name = esc(rawName)
       var configured = m.configured !== false
-      return '<button type="button" data-method="' + m.name + '" class="method' +
-        (m.name === currentMethod ? ' active' : '') +
+      return '<button type="button" data-method="' + name + '" class="method' +
+        (rawName === currentMethod ? ' active' : '') +
         (configured ? '' : ' disabled') + '"' +
-        (configured ? '' : ' title="该方式未配置"') + '>' + label + '</button>'
+        (configured ? '' : ' title="该方式未配置"') + '>' + esc(label) + '</button>'
     }).join('')
     methodsBox.querySelectorAll('.method').forEach(function (b) {
       b.addEventListener('click', function () {

@@ -5,7 +5,7 @@ description: PicoAide Harness 常见问题：与 DeepSeek Harness 的关系、�
 
 ## PicoAide Harness 与 DeepSeek Harness 是什么关系？
 
-PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（当前 pin `0.1.1-rc.2`）构建。上游提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务管理与企业级后台。**上游源码原样运行，不魔改**——升级只跟随版本号，不破坏本地扩展。
+PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（当前 pin `0.1.2-rc.1`）构建。上游提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务管理与企业级后台。**上游源码原样运行，不魔改**——升级只跟随版本号，不破坏本地扩展。
 
 ## 这是 DeepSeek 官方产品吗？
 
@@ -25,7 +25,7 @@ PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/dee
 
 ## 支持哪些操作系统？
 
-Windows x64、macOS（universal DMG，兼容 Apple 芯片与 Intel）、Linux x64（AppImage + deb）。
+Windows x64、macOS（arm64 / Apple 芯片，DMG）、Linux x64（AppImage + deb）。
 
 ## 安装包为什么没签名？
 
