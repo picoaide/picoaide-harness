@@ -245,6 +245,26 @@ const arrowParams = new Set<string>()
 | **不**往 `WRITE_APIS` 加回网络类 | beta.11 产品决策（D3） |
 | **不**禁所有成员链 | `data[key]`、`window.__NEXT_DATA__`、`a.b.c` 合法读全部保留 |
 
+#### 4.5.1 属性名复用连带拒绝清单（D-2，2026-09-09 修复轮 3 实测）
+
+黑名单是**属性名制**（D6），因此凡是**复用**了黑名单属性名的惯用法都会被一并拒绝——这是"按名拦截"的必然代价，不是缺陷，但必须显式登记，避免被后续轮次当成回归来"修"。以下 9 类惯用法**全部被拒**（本表由 `validateEvalExpression` 实测生成，非推演）：
+
+| # | 被连带拒绝的惯用法 | 实际拒绝原因 | 替代写法 / 代价 |
+|---|---|---|---|
+| 1 | `Object.prototype.hasOwnProperty.call({}, 'x')` | `call` 在黑名单（调用蹦床） | 用 `Object.hasOwn(o,'x')` |
+| 2 | `Array.prototype.slice.call([1,2])` | 同上 | 直接 `[1,2].slice()` |
+| 3 | `''.constructor.name` | `constructor` 在黑名单（构造链） | eval 内无法取类型名 |
+| 4 | `[].constructor` / `[1,2].constructor` | 同上 | 同上 |
+| 5 | `fn.apply(null, [1])` / `fn.bind(null)` | `apply`/`bind` 在黑名单（调用蹦床） | 直接 `fn(1)` |
+| 6 | `Object.getOwnPropertyDescriptor({}, 'x')` | 该 API 整体禁用（`.value` 可直达 `Function`，D7） | eval 内无法读属性描述符 |
+| 7 | `x?.constructor` | `constructor` 在黑名单，可选链不豁免 | 同上 |
+| 8 | `Object.prototype.toString.call({})`、`Object.prototype.hasOwnProperty` | `prototype` + `call` 双双命中 | 无法用 `Object.prototype.*` |
+| 9 | `({}).__proto__` | `__proto__` 在黑名单 | 用 `Object.getPrototypeOf({})`（**允许**） |
+
+**未受影响（仍然放行）**：`Object.keys({})`、`Array.isArray([])`、`Object.getPrototypeOf({})`、`JSON.parse('{}')`、`[1,2].slice(1)`、`Object.freeze({})`、`x instanceof Object`、`typeof x`、`data[key]`、`window['__NEXT'+'_DATA__']`。
+
+> **回归判定口径**：以上 9 类若在后续修复中变成 ACCEPT，说明黑名单被削弱，属**安全回归**需重新评估；只要仍被拒，就是设计内取舍。反向守护见 `tests/eval-policy-p1-bypass.spec.ts` 的 AC3c/AC3d 合法集。
+
 ---
 
 ## 5. 验证计划
