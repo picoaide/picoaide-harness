@@ -2,7 +2,6 @@
  * Cron plugin UI copy: zh is the key source, en mirrors the full key set.
  */
 export const zh = {
-  'settings.title': '定时任务',
   'settings.enabled': '启用定时任务',
   'settings.enabledDesc': '关闭后调度器停止触发，已配置的任务保留。',
   'settings.announce': '向 Agent 公告插件能力',
@@ -21,7 +20,6 @@ export const zh = {
   'job.disabled': '已停用',
   'job.nextRun': '下次运行',
   'job.notScheduled': '未调度',
-  'job.lastTriggered': '上次触发',
   'job.never': '从未',
   'job.delete': '删除',
   'job.run': '立即执行',
@@ -63,7 +61,6 @@ export const zh = {
 export type CronKey = keyof typeof zh
 
 export const en: Record<CronKey, string> = {
-  'settings.title': 'Scheduled jobs',
   'settings.enabled': 'Enable scheduled jobs',
   'settings.enabledDesc': 'Disabling stops the scheduler; configured jobs are kept.',
   'settings.announce': 'Announce to agents',
@@ -82,7 +79,6 @@ export const en: Record<CronKey, string> = {
   'job.disabled': 'Disabled',
   'job.nextRun': 'Next run',
   'job.notScheduled': 'Not scheduled',
-  'job.lastTriggered': 'Last triggered',
   'job.never': 'Never',
   'job.delete': 'Delete',
   'job.run': 'Run now',

@@ -94,6 +94,21 @@ export interface DownloadRecorder {
   update(id: number, patch: Partial<Pick<DownloadEntry, 'status' | 'path' | 'size'>>): void
 }
 
+/** Recorder context a download guard uses at fire time (latest tab wins). */
+interface DownloadGuardContext {
+  onDownload: (summary: string) => void
+  record: DownloadRecorder | undefined
+  groupKey: string | undefined
+  actor: RecordActor | undefined
+  downloadsDir: string
+}
+
+interface DownloadGuardEntry {
+  refs: number
+  context: DownloadGuardContext
+  dispose: () => void
+}
+
 /**
  * Guard bundle bound to one plugin lifetime. The download and permission
  * hooks are bound to the browser session by the runtime. There is no
@@ -103,10 +118,13 @@ export interface DownloadRecorder {
 export class BrowserGuard {
   constructor(_adapter: ElectronAdapter) {}
 
-  /** Sessions that already have the download guard installed. Tabs sharing
-   * one partition share one Session — installing a listener per tab would
-   * duplicate every download record. Guard installs are idempotent. */
-  private readonly guardedSessions = new WeakSet<object>()
+  /** Sessions that already have the download guard installed, ref-counted per
+   * tab. Tabs sharing one partition share one Session — installing a listener
+   * per tab would duplicate every download record, but the listener must
+   * survive until the LAST tab releases it: before 2026-09-08 closing the
+   * first tab removed the shared listener and silently disabled download
+   * interception for every remaining tab (audit P0-5). */
+  private readonly guardedSessions = new WeakMap<object, DownloadGuardEntry>()
 
   /** Decide a navigation: `true` lets it proceed. */
   allowNavigation(rawUrl: string): boolean {
@@ -118,6 +136,9 @@ export class BrowserGuard {
    * is saved into the configured downloads directory (auto-renamed on
    * conflict, bounded size, no native dialogs — an AI-driven flow must never
    * block on a dialog), recorded in the store for downloads_list.
+   *
+   * The returned disposer releases ONE tab's reference; the listener is
+   * removed only when the last reference goes away.
    */
   installDownloadGuard(
     session: NativeSession,
@@ -127,9 +148,19 @@ export class BrowserGuard {
     actor?: RecordActor,
     downloadsDir = DEFAULT_DOWNLOAD_DIR,
   ): () => void {
-    if (this.guardedSessions.has(session as object)) return () => {}
-    this.guardedSessions.add(session as object)
+    const key = session as object
+    const context: DownloadGuardContext = { onDownload, record, groupKey, actor, downloadsDir }
+    const existing = this.guardedSessions.get(key)
+    if (existing !== undefined) {
+      existing.refs++
+      // A download carries no tab identity (session-level event); attribute
+      // it to the most recent registration rather than the first tab forever.
+      existing.context = context
+      return () => { this.releaseDownloadGuard(key) }
+    }
+    const entry: DownloadGuardEntry = { refs: 1, context, dispose: () => {} }
     const listener = (_event: unknown, item: NativeDownloadItem): void => {
+      const { onDownload, record, groupKey, actor, downloadsDir } = entry.context
       const filename = item.getFilename() || 'download'
       let received = 0
       let rejected = false
@@ -200,9 +231,19 @@ export class BrowserGuard {
       })
     }
     session.on('will-download', listener)
-    return () => {
-      session.removeListener('will-download', listener)
-    }
+    entry.dispose = () => { session.removeListener('will-download', listener) }
+    this.guardedSessions.set(key, entry)
+    return () => { this.releaseDownloadGuard(key) }
+  }
+
+  /** Drop one tab's reference; the shared listener goes away at zero. */
+  private releaseDownloadGuard(key: object): void {
+    const entry = this.guardedSessions.get(key)
+    if (entry === undefined) return
+    entry.refs--
+    if (entry.refs > 0) return
+    entry.dispose()
+    this.guardedSessions.delete(key)
   }
 }
 

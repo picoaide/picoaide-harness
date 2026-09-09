@@ -1,5 +1,5 @@
 import {
-  appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, unlinkSync,
+  appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, unlinkSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import type { LogType } from './log-level.ts'
@@ -7,6 +7,12 @@ import { isErrorType } from './log-level.ts'
 import { maskSecrets } from './mask-secrets.ts'
 
 const OWNED_LOG_FILE = /^dsh-\d{4}-\d{2}-\d{2}(?:\.error)?(?:\.\d+)?\.log$/u
+
+/** Owner-only directory mode for the diagnostic log directory (P2-35). */
+const LOG_DIR_MODE = 0o700
+/** Owner-only file mode for every log file (P2-35). Secrets are masked, but a
+ * log still carries paths, host names and tool payloads. */
+const LOG_FILE_MODE = 0o600
 
 /** Return whether a leaf name belongs to the desktop diagnostic log set. */
 export function isDesktopLogFileName(name: string): boolean {
@@ -67,6 +73,8 @@ export class LogFileSink {
   private allSegment = 0
   private errorSegment = 0
   private directoryBytes: number
+  /** Paths already tightened to 0600 in this process (one chmod per file). */
+  private readonly chmodded = new Set<string>()
 
   constructor(directory: string, options: LogFileSinkOptions) {
     this.directory = directory
@@ -75,13 +83,31 @@ export class LogFileSink {
     if (this.maxFileBytes < 2 || this.maxDirectoryBytes < 1) {
       throw new Error('dsh-plugin-desktop: log size limits must be positive')
     }
-    if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
+    if (!existsSync(directory)) mkdirSync(directory, { recursive: true, mode: LOG_DIR_MODE })
     const directoryStats = lstatSync(directory)
     if (directoryStats.isSymbolicLink()) {
       throw new Error('dsh-plugin-desktop: refusing linked log directory')
     }
     if (!directoryStats.isDirectory()) {
       throw new Error('dsh-plugin-desktop: log path is not a directory')
+    }
+    // P2-35: tighten an existing (pre-upgrade) directory to owner-only. Best
+    // effort — a foreign-owned dir or a platform without POSIX modes must not
+    // break startup.
+    try {
+      chmodSync(directory, LOG_DIR_MODE)
+    } catch {
+      // keep the platform default
+    }
+    // Existing files written by an older version may still be 0644: tighten
+    // them once here so the very first read of a legacy log dir is safe.
+    for (const entry of this.ownedFiles()) {
+      try {
+        chmodSync(entry.path, LOG_FILE_MODE)
+        this.chmodded.add(entry.path)
+      } catch {
+        // best effort
+      }
     }
     this.directoryBytes = this.measureDirectoryBytes()
   }
@@ -211,6 +237,18 @@ export class LogFileSink {
       path = join(this.directory, logFileName(this.currentDate!, !isAll, segment))
     }
     appendFileSync(path, `${renderedLine}\n`)
+    // P2-35: owner-only. Once per file per process — covers a file created by
+    // an older version (0644) and the appendFileSync default umask mode
+    // without a chmod syscall on every log line.
+    if (!this.chmodded.has(path)) {
+      this.chmodded.add(path)
+      try {
+        chmodSync(path, LOG_FILE_MODE)
+      } catch {
+        // Best effort (platform without POSIX modes / foreign-owned file).
+        this.chmodded.delete(path)
+      }
+    }
     this.directoryBytes += lineBytes
     const nextBytes = bytes + lineBytes
     if (isAll) {

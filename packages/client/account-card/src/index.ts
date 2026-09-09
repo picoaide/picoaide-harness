@@ -82,6 +82,14 @@ export function apply(ctx: Context): void {
       if (url.searchParams.has('refresh')) {
         await service.refreshNow(s)
       }
+      // P2-22: bind the response to the account that asked for it. A login
+      // switch while the gateway round-trip was in flight must not serve the
+      // previous account's snapshot to the new one — answer 401 so the card
+      // hides and the renderer refetches under the new session.
+      const current = session()
+      if (current === null || current.username !== s.username || current.serverURL !== s.serverURL) {
+        return json(res, 401, { error: 'session changed' })
+      }
       const snapshot = service.get()
       json(res, 200, {
         data: snapshot.data,

@@ -30,6 +30,7 @@ import type {
   UpdateDownloadProgressSnapshot,
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
+import { parseDesktopDeepLink } from './deep-link.ts'
 import { formatDesktopExitCode, type DesktopLogger } from './desktop-logger.ts'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
@@ -321,13 +322,21 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /**
-   * Receive a `picoaide://` deep link: deliver to the installed handler, or
-   * queue it when the profile tree has not mounted yet.
+   * Receive a `picoaide://` deep link: validate it against the allow-list
+   * (P2-62), then deliver to the installed handler — or queue it when the
+   * profile tree has not mounted yet.
    */
   receiveDeepLink(url: string): void {
+    const parsed = parseDesktopDeepLink(url)
+    if (parsed === null) {
+      // Strict gate: a merely prefix-matching string must not reach Host
+      // consumers (the enterprise auth callback trusts the event).
+      this.logError(`dsh-plugin-desktop: ignoring malformed deep link: ${url.slice(0, 200)}`)
+      return
+    }
     if (this.deepLinkHandler !== undefined) {
       try {
-        this.deepLinkHandler(url)
+        this.deepLinkHandler(parsed.url)
       } catch (cause) {
         this.logError(`dsh-plugin-desktop: deep link handler failed: ${cause instanceof Error ? cause.message : String(cause)}`)
       }
@@ -335,7 +344,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     // Startup race: profile plugins (enterprise deep-link listener) are not
     // mounted yet. Keep the link; setDeepLinkHandler flushes on install.
-    this.pendingDeepLinks.push(url)
+    this.pendingDeepLinks.push(parsed.url)
   }
 
   /** @inheritdoc */
@@ -783,12 +792,25 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 }
 
 /**
- * P1-3: renderer crash / load-failure fallback. Reload once; if the reload
- * also fails (or the process is gone a second time), show an in-window
+ * P1-3 / P1-12: renderer crash / load-failure fallback. Reload once; if the
+ * reload also fails (or the process is gone a second time), show an in-window
  * error page with a manual reload button so the user is never stuck on a
- * dead white window. A per-window retry flag prevents reload loops.
+ * dead white window.
+ *
+ * The fallback page must NEVER auto-navigate back to the app URL: the old
+ * `did-finish-load` handler reloaded the app immediately after the error page
+ * rendered, so a deterministic crash looped error-page → app → crash forever
+ * (the per-window flag only suppressed the *reload*, not the bounce back).
+ * The button now navigates explicitly, which re-enters the normal crash path
+ * (one reload, then the error page again) without a loop.
  */
 const crashRetried = new WeakMap<BrowserWindow, boolean>()
+
+/** Embed a URL in an inline `<script>`: JSON-escaped and `<` neutralized so a
+ * page URL containing `</script>` cannot break out of the block. */
+function inlineScriptUrl(url: string): string {
+  return JSON.stringify(url).replace(/</gu, '\\u003c')
+}
 
 async function reloadOrShowCrashFallback(runtime: { log(message: string): void }, window: BrowserWindow): Promise<void> {
   if (window.isDestroyed()) return
@@ -804,14 +826,12 @@ async function reloadOrShowCrashFallback(runtime: { log(message: string): void }
   }
   try {
     const current = window.webContents.getURL()
-    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>PicoAide Harness</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button onclick="location.reload()">重新加载</button></div></body></html>`)}`
+    const retryTarget = current.startsWith('http') ? current : ''
+    const retryScript = retryTarget === ''
+      ? ''
+      : `<script>document.getElementById('retry').addEventListener('click',function(){location.href=${inlineScriptUrl(retryTarget)}})</script>`
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>PicoAide Harness</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
     await window.loadURL(errorPage)
-    window.webContents.once('did-finish-load', () => {
-      if (current.startsWith('http')) {
-        // A reload button on the error page re-enters the app URL.
-        void window.loadURL(current).catch(() => { /* keep the error page */ })
-      }
-    })
   } catch {
     runtime.log('dsh-plugin-desktop: crash fallback page failed to load')
   }

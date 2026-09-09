@@ -158,7 +158,9 @@ export async function packMacApp(
   // The workspace check includes the package build and repository-layout gate. Signing
   // material is withheld from every build, test, Loader smoke, and layout subprocess.
   if (!switches.skipGates) {
-    options.run('yarn', ['run', 'check'], resolve(options.desktopRoot, '..', '..'), buildEnvironment)
+    // 2026-09-08:仓库根在 desktopRoot 上溯 3 级(packages/host/desktop → 仓库根);
+    // 此前只上溯 2 级到 packages/,靠 Yarn 向上找 workspace 根侥幸可用。
+    options.run('yarn', ['run', 'check'], resolve(options.desktopRoot, '..', '..', '..'), buildEnvironment)
   }
   options.resetOutput()
   options.prepareRuntime()

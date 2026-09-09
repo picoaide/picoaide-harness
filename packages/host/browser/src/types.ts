@@ -45,8 +45,9 @@ export interface BrowserOpLogEntry {
   readonly group: string
   /** The originating session id ('' for whole-browser). */
   readonly session: string
-  /** Who performed it (always 'ai' on the tool path; user ops may appear via shell). */
-  readonly actor: 'ai' | 'user'
+  /** Who performed it ('ai' on the tool path; 'user' via shell; 'restore' for
+   * a tab re-materialized from the persisted ledger). */
+  readonly actor: 'ai' | 'user' | 'restore'
   /** Short human-readable summary (never contains credential values). */
   readonly summary: string
   /** `true` when the operation was rejected or failed. */

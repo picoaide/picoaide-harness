@@ -55,6 +55,29 @@ describe('session-service', () => {
     // 给足 30s。
   }, 30000)
 
+  it('degrades with a warning instead of an unhandled rejection when the token file is unwritable (P1-13)', async () => {
+    const { ctx, emit } = stubCtx()
+    const warn = (ctx.logger as unknown as { warn: ReturnType<typeof vi.fn> }).warn
+    const service = new SessionService(ctx, { tokenFile: '/nonexistent-picoaide-dir-xyz/session.json' })
+    const rejections: unknown[] = []
+    const onRejection = (reason: unknown): void => { rejections.push(reason) }
+    process.on('unhandledRejection', onRejection)
+    try {
+      service.setSession(SAMPLE_SESSION)
+      await vi.waitFor(() => { expect(warn).toHaveBeenCalled() })
+      // Give the rejection path a chance to surface if the write were still
+      // fire-and-forget: a rejected persist() must never reach the process.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(rejections).toEqual([])
+      // Degraded, not dropped: the session stays usable for this run.
+      expect(service.getSession()).toEqual(SAMPLE_SESSION)
+      expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, SAMPLE_SESSION)
+      expect(String(warn.mock.calls[0]?.[0])).toContain('could not be persisted')
+    } finally {
+      process.off('unhandledRejection', onRejection)
+    }
+  })
+
   it('never lets an async restore overwrite an already-set session', async () => {
     const { ctx, emit } = stubCtx()
     const service = new SessionService(ctx, { tokenFile: '/tmp/unused-session.json' })

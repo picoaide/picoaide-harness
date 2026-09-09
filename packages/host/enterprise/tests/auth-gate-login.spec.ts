@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { brandMarkSvg } from '../src/brand-geometry.ts'
 
 // 回归测试(2026-09):LOGIN_HTML 是 TS 模板字符串,内联 <script> 里的正则
 // `\/` 会被模板转义(cooked)成 `/`(输出 `//$` = 空正则+行注释)导致浏览器
@@ -20,8 +21,9 @@ function renderedLoginHTML(): string {
   const raw = m![1]!
   // LOGIN_HTML 至今不含 ${...} / \` / \$ / \\ 序列;若未来出现,这里会抛错,
   // 提示按真实模板语义处理(与编译产物 tsdown 保持模板原样一致)。
-  const fn = new Function(`return \`${raw}\``) // eslint-disable-line no-new-func
-  return fn()
+  // 模板现在插值 ${brandMarkSvg('#FFFFFF')}(P2-39:几何单一来源),求值需注入。
+  const fn = new Function('brandMarkSvg', `return \`${raw}\``) // eslint-disable-line no-new-func
+  return fn(brandMarkSvg)
 }
 
 /** 从求值后的 HTML 提取首个内联 <script> 内容。 */
@@ -51,6 +53,21 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     // 模板里保留占位符,由 apply() 在开局替换(带斜杠的默认地址由 trimServer 兜底)。
     const html = renderedLoginHTML()
     expect(html).toContain('__DEFAULT_SERVER__')
+  })
+
+  it('escapes gateway-controlled method names and labels (P1-7)', () => {
+    const script = loginScript()
+    // m.name 来自网关 /auth/methods 响应(可被恶意/被劫持的网关控制),
+    // 必须经 esc() 才能拼进属性/文案;不得再出现裸拼写法。
+    expect(script).toContain('data-method="\' + name + \'"')
+    expect(script).toContain("'>' + esc(label) + '</button>'")
+    expect(script).not.toContain('data-method="\' + m.name + \'"')
+    expect(script).not.toContain("+ '>' + label + '</button>'")
+    // esc 本体必须转义属性注入所需字符(& < > ")。
+    const escSrc = script.match(/function esc\(s\) \{[\s\S]*?\n  \}/)
+    expect(escSrc, 'esc() must be findable').not.toBeNull()
+    const esc = new Function(`${escSrc![0]}; return esc`)() as (v: unknown) => string
+    expect(esc('"><img src=x onerror=alert(1)>')).toBe('&quot;&gt;&lt;img src=x onerror=alert(1)&gt;')
   })
 })
 

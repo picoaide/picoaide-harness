@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   applyLoopNotifyClient,
   fetchLoopNotifySession,
+  readLoopNotifySeenAt,
 } from '../src/client/loop-notify.tsx'
 
 function validResponse(sessionId: string | null, requestedAt: number): Response {
@@ -49,5 +50,40 @@ describe('desktop loop-notify client', () => {
     // A duplicate fetch for the same requestedAt must not reopen.
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the consumed timestamp in sessionStorage (P2-24)', async () => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('sessionStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value) },
+    })
+    const request = vi.fn(async () => validResponse('session-persist', 777))
+    const open = vi.fn()
+    const ctx = {
+      sessions: { open },
+      effect: (register: () => () => void) => {
+        const dispose = register()
+        return () => dispose()
+      },
+    } as unknown as Parameters<typeof applyLoopNotifyClient>[0]
+    vi.stubGlobal('window', { fetch: request, setInterval: vi.fn(() => 1), clearInterval: vi.fn() })
+
+    applyLoopNotifyClient(ctx)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(readLoopNotifySeenAt()).toBe(777)
+
+    // A reloaded renderer (fresh poller, same storage) must not reopen it.
+    const openAfterReload = vi.fn()
+    applyLoopNotifyClient({
+      sessions: { open: openAfterReload },
+      effect: (register: () => () => void) => {
+        const dispose = register()
+        return () => dispose()
+      },
+    } as unknown as Parameters<typeof applyLoopNotifyClient>[0])
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(openAfterReload).not.toHaveBeenCalled()
   })
 })

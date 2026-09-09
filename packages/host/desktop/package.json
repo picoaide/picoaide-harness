@@ -325,7 +325,8 @@
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "extraResources": [],
     "electronFuses": {
-      "runAsNode": true
+      "runAsNode": true,
+      "onlyLoadAppFromAsar": true
     },
     "directories": {
       "output": "dist",

@@ -1,9 +1,11 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -31,6 +33,32 @@ describe('logFileName', () => {
     expect(logFileName('2026-08-16', false, 0)).toBe('dsh-2026-08-16.log')
     expect(logFileName('2026-08-16', true, 0)).toBe('dsh-2026-08-16.error.log')
     expect(logFileName('2026-08-16', false, 2)).toBe('dsh-2026-08-16.2.log')
+  })
+})
+
+describe('LogFileSink permissions (P2-35)', () => {
+  it('creates the log directory 0700 and every log file 0600', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-log-mode-'))
+    const target = join(dir, 'logs')
+    const s = new LogFileSink(target, { maxFileBytes: 10 * 1024 * 1024, maxDirectoryBytes: 200 * 1024 * 1024 })
+    s.write('info', 'hello')
+    expect(statSync(target).mode & 0o777).toBe(0o700)
+    const file = join(target, logFileName(todaySuffix(), false, 0))
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+
+  it('tightens a pre-existing directory and file left by an older version', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-log-mode-legacy-'))
+    const target = join(dir, 'logs')
+    mkdirSync(target, { recursive: true, mode: 0o755 })
+    chmodSync(target, 0o755)
+    const file = join(target, logFileName(todaySuffix(), false, 0))
+    writeFileSync(file, 'old line\n', { mode: 0o644 })
+    chmodSync(file, 0o644)
+    const s = new LogFileSink(target, { maxFileBytes: 10 * 1024 * 1024, maxDirectoryBytes: 200 * 1024 * 1024 })
+    s.write('info', 'new line')
+    expect(statSync(target).mode & 0o777).toBe(0o700)
+    expect(statSync(file).mode & 0o777).toBe(0o600)
   })
 })
 

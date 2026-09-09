@@ -4,7 +4,7 @@
  * serially under a global mutex with a whole-window user gate (我来操作);
  * a transparent interception mask blocks stray clicks while the AI drives;
  * the AI panel shows the live action stream. All v4 capabilities remain
- * (read-only eval, wait_for, fill_form, upload_file, programmatic downloads,
+ * (eval guardrail, wait_for, fill_form, upload_file, programmatic downloads,
  * stores, crash rebuild, per-frame eval).
  * @module @picoaide/dsh-browser
  */
@@ -206,9 +206,24 @@ export class BrowserRuntime {
     return this.pool.activeTab
   }
 
-  /** Record the calling session id (oplog attribution). */
+  /** Record the calling session id (oplog attribution).
+   *
+   * NOTE: this runs BEFORE the operation acquires the global mutex, so the
+   * value is only a hint — `agentRun` snapshots it at call time and restores
+   * it inside the critical section (a queued tool must never attribute its
+   * ops to another agent that called `setAgentContext` in the meantime). */
   setAgentContext(agentId: string | undefined): void {
     this.lastAgentId = agentId ?? ''
+  }
+
+  /** Drop the op log (user switch / logout): a new account must never see the
+   * previous account's browsing trail (host names, paths, token-bearing URLs).
+   * The sequence counter resets too so the UI's "newest op" logic cannot keep
+   * a stale high-water mark. */
+  clearOps(): void {
+    this.ops.length = 0
+    this.opSeq = 0
+    this.emitAll('ops')
   }
 
   listTabs(): BrowserTabState[] {
@@ -260,10 +275,13 @@ export class BrowserRuntime {
   }
 
   /** Materialize pending ledger tabs into real views (idempotent). Triggered
-   * when the browser actually opens; runs under the serial mutex so agent
-   * operations never interleave with restoration. A session switch / closeAll
-   * bumps the epoch, cancelling any in-flight materialization so a previous
-   * user's tabs can never resurrect under the new user's partition. */
+   * when the browser actually opens. Each restored tab goes through the SAME
+   * serial mutex and tab-slot reservation as an agent `browser_open` (P2-26):
+   * restoring must never bypass `maxTabs` or interleave with a live operation.
+   * Restored tabs are attributed to `'restore'` (not `'ai'`) so they neither
+   * steal the agent's attribution nor surface the window. A session switch /
+   * closeAll bumps the epoch, cancelling any in-flight materialization so a
+   * previous user's tabs can never resurrect under the new user's partition. */
   materializePendingTabs(): void {
     if (this.materializing) return
     const pending = this.pendingLedgerTabs
@@ -279,14 +297,30 @@ export class BrowserRuntime {
             continue
           }
           try {
-            await this.createTabReal(item.url, undefined, item.tabId, 'ai')
+            // Quota semantics: restore consumes a tab slot like any other open
+            // (tryReserveTab = fail-fast, no queue). When the pool is full the
+            // remaining tabs STAY PENDING and are retried on the next
+            // materialization attempt — restore never exceeds maxTabs.
+            const created = await this.pool.withOperation('browser_restore', async () => {
+              if (!this.pool.tryReserveTab()) return false
+              try {
+                await this.createTabReal(item.url, undefined, item.tabId, 'restore')
+                return true
+              } catch (error) {
+                this.pool.releaseReservation()
+                throw error
+              }
+            })
+            if (!created) return
             if (epoch === this.materializeEpoch) {
               this.pendingLedgerTabs = this.pendingLedgerTabs.filter((p) => p.tabId !== item.tabId)
             }
-          } catch {
+          } catch (cause) {
             // A restored tab that fails to load is dropped (createTabReal's
-            // error path already cleans view + registry meta).
+            // error path already cleans view + registry meta). A user takeover
+            // aborts materialization: the remaining tabs stay pending.
             this.pendingLedgerTabs = this.pendingLedgerTabs.filter((p) => p.tabId !== item.tabId)
+            if (cause instanceof BrowserError && cause.code === 'window-controlled') return
           }
         }
       } finally {
@@ -342,7 +376,7 @@ export class BrowserRuntime {
         throw error
       }
     }
-    return await this.pool.withOperation('browser_open', async () => {
+    return await this.withAgentAttribution('browser_open', async () => {
       await this.pool.reserveTab(signal)
       try {
         return await this.createTabReal(url, signal, undefined, 'ai')
@@ -356,7 +390,9 @@ export class BrowserRuntime {
   private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor): Promise<BrowserTabState> {
     const id = fixedId ?? this.nextTabId++
     const view = this.adapter.createView(this.partition)
-    const cdp = new CdpSession(view.webContents.cdp)
+    // Every CDP command is bounded by the tool budget: a wedged renderer
+    // rejects the call instead of holding the global mutex forever (P0-4).
+    const cdp = new CdpSession(view.webContents.cdp, { timeoutMs: this.options.timeoutMs })
     try {
       await cdp.attach()
     } catch (cause) {
@@ -368,10 +404,30 @@ export class BrowserRuntime {
     this.pool.registerTab(id, '', '')
 
     try {
-      const win = await this.ensureWindow(this.shellOrigin)
+      // User-created tabs (shell ＋) surface the window; agent-created tabs
+      // and ledger restore keep it hidden (2026-09-08 product decision).
+      const win = await this.ensureWindow(this.shellOrigin, actor === 'user')
       const bounds = this.contentBounds()
       view.attach(win, bounds)
       this.relayout()
+
+      // `target=_blank` / window.open must not silently vanish (P2-30): open
+      // the URL as a new tab through the normal agent path (quota, gate,
+      // navigation policy, op log) and deny the native popup. A denied or
+      // failed open is recorded as a failed op so the activity panel shows it.
+      view.webContents.setWindowOpenHandler((details) => {
+        const target = typeof details?.url === 'string' ? details.url : ''
+        if (target === '' || !this.guard.allowNavigation(target)) {
+          this.record('browser_window_open', id, `window.open denied: ${target}`, true)
+          return { action: 'deny' }
+        }
+        this.record('browser_window_open', id, `window.open → new tab: ${target}`)
+        void this.open(target).catch((cause: unknown) => {
+          const message = cause instanceof Error ? cause.message : String(cause)
+          this.record('browser_window_open', id, `window.open failed: ${message}`, true)
+        })
+        return { action: 'deny' }
+      })
 
       view.webContents.on('did-start-loading', () => {
         tab.loading = true
@@ -401,8 +457,11 @@ export class BrowserRuntime {
 
       const session = view.webContents.session
       tab.disposers.push(installPermissionGuard(session))
+      // Downloads are a session-level event with no tab identity: attribute
+      // the op to whichever tab is active when it fires (falling back to the
+      // registering tab). The guard itself is ref-counted per tab (P0-5).
       tab.disposers.push(this.guard.installDownloadGuard(session, (summary) => {
-        this.record('browser_download', id, summary)
+        this.record('browser_download', this.pool.activeTab ?? id, summary)
       }, this.downloadRecorder(), '', actor, this.options.downloadDir))
 
       if (url !== undefined && url !== '') {
@@ -516,14 +575,20 @@ export class BrowserRuntime {
     }
   }
 
-  async ensureWindow(origin?: string): Promise<NativeBrowserWindow> {
+  /**
+   * Create (or return) the browser window. `show` is opt-in (2026-09-08
+   * product decision): agent paths — boot prewarm, ledger restore, AI tab
+   * creation — must never pop the window to the front after the user closed
+   * it; only user paths (shell 浏览器 button, user-created tab) show it.
+   */
+  async ensureWindow(origin?: string, show = false): Promise<NativeBrowserWindow> {
     this.materializePendingTabs()
     if (this.window !== null && !this.window.isDestroyed()) {
-      this.window.show()
+      if (show) this.window.show()
       return this.window
     }
     const win = this.adapter.createBrowserWindow()
-    win.show()
+    if (show) win.show()
     this.window = win
     const overlay = this.adapter.createMaskView(this.partition)
     this.overlay = overlay
@@ -545,6 +610,10 @@ export class BrowserRuntime {
     this.windowClosedDisposer = win.onClosed(() => {
       for (const tab of this.tabs.values()) {
         try {
+          // Release the per-tab guards first: a real window close destroys
+          // the views, so the ref-counted download guard must drop its refs
+          // (P2-28) instead of leaking the session listener.
+          this.releaseTabDisposers(tab.id)
           tab.cdp.detach()
           tab.view.destroy()
         } catch {
@@ -565,12 +634,26 @@ export class BrowserRuntime {
 
   async showWindow(): Promise<void> {
     if (this.window === null || this.window.isDestroyed()) {
-      await this.ensureWindow(this.shellOrigin)
+      await this.ensureWindow(this.shellOrigin, true)
       this.relayout()
       return
     }
     this.materializePendingTabs()
     this.window.show()
+    this.relayout()
+  }
+
+  /**
+   * Boot / session-switch prewarm (2026-09-08 product decision): bring the
+   * browser up HIDDEN — window, restored ledger tabs and their CDP sessions —
+   * so the agent can drive it before the user ever opens it, and so a user
+   * close (which only hides the window) leaves a fully working background
+   * browser. Never shows the window.
+   */
+  async prewarm(): Promise<void> {
+    if (this.disposed) return
+    await this.ensureWindow(this.shellOrigin, false)
+    this.materializePendingTabs()
     this.relayout()
   }
 
@@ -678,7 +761,27 @@ export class BrowserRuntime {
 
   /** Run one agent operation under the global serial mutex (user gate aware). */
   private async agentRun<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return await this.pool.withOperation(tool, body, signal)
+    return await this.withAgentAttribution(tool, body, signal)
+  }
+
+  /**
+   * Serial-mutex runner that keeps per-call agent attribution correct (P3):
+   * `noteAgent` runs before the call, but a queued operation only acquires
+   * the mutex later — by then another tool may have overwritten the global
+   * `lastAgentId`. Snapshot the id at call time and restore it inside the
+   * critical section so ops/tabs are attributed to the agent that issued them.
+   */
+  private async withAgentAttribution<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const callerAgent = this.lastAgentId
+    return await this.pool.withOperation(tool, async () => {
+      const previous = this.lastAgentId
+      this.lastAgentId = callerAgent
+      try {
+        return await body()
+      } finally {
+        this.lastAgentId = previous
+      }
+    }, signal)
   }
 
   // navigation family --------------------------------------------------------
@@ -912,15 +1015,26 @@ export class BrowserRuntime {
 
   async screenshot(tabId: number, signal?: AbortSignal): Promise<string> {
     const resolved = this.resolveTab(tabId)
-    const data = await this.agentRun('browser_screenshot', async () => {
-      const tab = this.tab(resolved)
-      return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
-    }, signal)
+    let data: string
+    try {
+      data = await this.agentRun('browser_screenshot', async () => {
+        const tab = this.tab(resolved)
+        return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+      }, signal)
+    } catch (cause) {
+      // An empty capture (hidden window / background tab / zero-sized view)
+      // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
+      const message = cause instanceof Error ? cause.message : String(cause)
+      this.record('browser_screenshot', resolved, `screenshot failed: ${message}`, true)
+      throw cause
+    }
     this.record('browser_screenshot', resolved, 'screenshot captured')
     return data
   }
 
-  /** Read-only eval (v4 AST policy + masking). */
+  /** Eval guardrail (heuristic AST policy + result masking). The validator is
+   * a misuse guardrail, NOT a security boundary: the AI is allowed to operate
+   * every part of the browser (fetch/XHR/arbitrary JS included). */
   async eval(tabId: number, expression: string, frame?: number, signal?: AbortSignal): Promise<string> {
     if (!this.options.evalEnabled) {
       throw browserError('policy', 'browser: browser_eval is disabled in this deployment')
@@ -936,7 +1050,13 @@ export class BrowserRuntime {
       const evalResult = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: wrapEvalExpression(expression),
         returnByValue: true,
-        awaitPromise: false,
+        // awaitPromise: true — a Promise result (fetch/XHR/async expression)
+        // must be awaited by the renderer and serialized as its resolved value
+        // (P1-20). With `false` CDP returned `{}` for every promise, so the AI
+        // could issue requests but never read a response. The page-side
+        // `timeout` below and the CDP transport timeout (P0-4) bound a never-
+        // settling promise.
+        awaitPromise: true,
         timeout: Math.min(this.options.timeoutMs, 10_000),
         ...frameParams,
       })
@@ -945,7 +1065,7 @@ export class BrowserRuntime {
       }
       return serializeEvalResult(evalResult.result?.value)
     }, signal)
-    this.record('browser_eval', resolved, `eval (read-only): ${expression.slice(0, 60)}`)
+    this.record('browser_eval', resolved, `eval: ${expression.slice(0, 60)}`)
     return result
   }
 
@@ -1077,7 +1197,11 @@ export class BrowserRuntime {
             const el = document.querySelector(${JSON.stringify(String(selector))});
             if (!el) return { error: 'element not found' };
             if (el.tagName !== 'SELECT') return { error: 'not a select element' };
-            el.value = ${JSON.stringify(value)};
+            const wanted = ${JSON.stringify(value)};
+            el.value = wanted;
+            // Assigning an unknown value silently falls back to '' (or the
+            // first option). Report it instead of claiming success (P2-32).
+            if (el.value !== wanted) return { error: 'option not found: ' + wanted };
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             return {};
@@ -1394,15 +1518,31 @@ export class BrowserRuntime {
       const session = tab.view.webContents.session
       if (seen.has(session)) continue
       seen.add(session)
-      if (all) {
-        await session.clearStorageData()
-        await session.clearCache()
-      } else {
-        await session.clearStorageData({ storages: ['localstorage', 'cachestorage', 'indexdb', 'websql', 'serviceworkers'] })
-        await session.clearCache()
+      await this.clearSessionData(session, all)
+    }
+    if (seen.size === 0) {
+      // No tab has materialized yet (lazy restore / never opened): the
+      // partition still holds cookies+storage from previous runs, so a silent
+      // no-op here is a lie (P2-28). Clear the known partition through the
+      // adapter when it can resolve a session; otherwise fail loudly.
+      const session = this.adapter.getSession?.(this.partition)
+      if (session === undefined) {
+        throw browserError('not-found', 'browser: no browser session yet — open a tab first, then clear data')
       }
+      seen.add(session)
+      await this.clearSessionData(session, all)
     }
     this.record('browser_clear_data', 0, `clear browsing data (${all ? '全部' : '站点'})`)
+  }
+
+  private async clearSessionData(session: NativeSession, all: boolean): Promise<void> {
+    if (all) {
+      await session.clearStorageData()
+      await session.clearCache()
+      return
+    }
+    await session.clearStorageData({ storages: ['localstorage', 'cachestorage', 'indexdb', 'websql', 'serviceworkers'] })
+    await session.clearCache()
   }
 
   // --------------------------------------------------------------- teardown
@@ -1412,12 +1552,19 @@ export class BrowserRuntime {
     this.disposed = true
     this.materializeEpoch++
     this.pendingLedgerTabs = []
-    for (const tab of this.tabs.values()) {
-      try {
-        tab.cdp.detach()
-        tab.view.destroy()
-      } catch {
-        // Teardown must never throw.
+    for (const id of [...this.tabs.keys()]) {
+      // Releasing the per-tab disposers (permission guard + ref-counted
+      // download guard) matters: a dropped ref-count keeps the download
+      // listener installed forever (P2-28).
+      this.releaseTabDisposers(id)
+      const tab = this.tabs.get(id)
+      if (tab !== undefined) {
+        try {
+          tab.cdp.detach()
+          tab.view.destroy()
+        } catch {
+          // Teardown must never throw.
+        }
       }
     }
     this.tabs.clear()

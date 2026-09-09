@@ -205,7 +205,14 @@ export function apply(ctx: Context, config: Config): void {
         req,
         res,
         rendererOrigin,
-        () => loopNotifySession,
+        // GET consumes the request (P2-24): return the pending jump and clear
+        // it, so the next poll (or a renderer reload) cannot re-open a session
+        // the user already visited.
+        () => {
+          const pending = loopNotifySession
+          loopNotifySession = emptyDesktopLoopNotifySession()
+          return pending
+        },
       ),
     }),
     'dsh-plugin-desktop: loop-notify session jump route',

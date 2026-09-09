@@ -122,3 +122,33 @@ describe('CdpSession with real Transport shape (vi mock)', () => {
     expect(detach).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('CdpSession — command timeout / cancellation (2026-09-08 P0-4)', () => {
+  it('rejects with a timeout when the transport never settles', async () => {
+    const transport = new MockTransport()
+    transport.sendCommand = () => new Promise(() => {})
+    const session = new CdpSession(transport, { timeoutMs: 30 })
+    await expect(session.send('Page.navigate', { url: 'https://x' })).rejects.toMatchObject({ code: 'timeout' })
+  })
+
+  it('rejects immediately when the signal aborts, even before the timeout', async () => {
+    const transport = new MockTransport()
+    transport.sendCommand = () => new Promise(() => {})
+    const session = new CdpSession(transport, { timeoutMs: 10_000 })
+    const controller = new AbortController()
+    const pending = session.send('Page.navigate', {}, { signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'interrupted' })
+  })
+
+  it('a per-call timeout overrides the session default and does not leak timers', async () => {
+    const transport = new MockTransport()
+    let resolveLate: ((value: unknown) => void) | undefined
+    transport.sendCommand = () => new Promise((resolve) => { resolveLate = resolve })
+    const session = new CdpSession(transport, { timeoutMs: 10_000 })
+    await expect(session.send('Page.navigate', {}, { timeoutMs: 25 })).rejects.toMatchObject({ code: 'timeout' })
+    // A late transport reply after the local timeout must not throw or re-settle.
+    resolveLate?.({ ok: true })
+    await Promise.resolve()
+  })
+})

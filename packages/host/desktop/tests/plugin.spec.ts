@@ -392,6 +392,17 @@ describe('desktop Host plugin', () => {
       sessionId: 'session-abc',
       requestedAt: expect.any(Number),
     })
+
+    // P2-24: the GET consumes the request — the next poll must not re-open it.
+    let secondBody = ''
+    const secondRes = {
+      statusCode: 200,
+      setHeader: vi.fn(),
+      end: vi.fn((value?: string) => { secondBody = value ?? '' }),
+    } as unknown as ServerResponse
+    await route?.handler(req, secondRes)
+    expect(secondRes.statusCode).toBe(200)
+    expect(JSON.parse(secondBody)).toEqual({ sessionId: null, requestedAt: 0 })
   })
 
   it('rejects cross-origin session-open route requests', async () => {

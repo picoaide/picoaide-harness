@@ -30,7 +30,7 @@ const WAIT_CONDITIONS = ['element-present', 'element-visible', 'text-appear', 'u
 const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rules:
 1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
 2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
-3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval is a single expression (no statements/assignments; eval/Function and DOM-write APIs rejected; network fetch/XHR allowed).
+3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval runs one expression (a heuristic guardrail rejects statements/assignments and eval/Function; fetch/XHR and any page JS are allowed) and returns its resolved value — promise results are awaited.
 4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; release continues them — do not fight the user.
 5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
 6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
@@ -89,21 +89,26 @@ function uploadAllowDirs(runtime: BrowserRuntime, session: AgentProjectInfo['ses
 /**
  * Register the full browser tool suite (v4, 32 tools).
  * @param ctx - context whose `tools` and `systemPrompt` registries receive the
- *   registrations; both are effect-scoped and unregister on plugin dispose.
+ *   registrations.
  * @param runtime - the grouped embedded browser runtime.
+ * @returns a disposer that unregisters every tool + the guidance section. The
+ *   caller MUST run it from the plugin fiber (`ctx.effect`): the registry's
+ *   own disposers are not effect-scoped here, so dropping them left 32 tools
+ *   registered against a disposed runtime (P2-29).
  */
-export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabledGroups: ReadonlySet<string> = DEFAULT_GROUPS): void {
+export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabledGroups: ReadonlySet<string> = DEFAULT_GROUPS): () => void {
+  const disposers: Array<() => void> = []
   // Dedicated helper so per-group enablement (enterprise policy, P2) filters
   // registrations without changing the tool definitions.
   const register = (definition: ReturnType<typeof defineTool>): void => {
     const group = GROUP_OF[definition.name] ?? 'control'
-    if (enabledGroups.has(group)) ctx.tools.register(definition)
+    if (enabledGroups.has(group)) disposers.push(ctx.tools.register(definition))
   }
-  ctx.systemPrompt.section({
+  disposers.push(ctx.systemPrompt.section({
     name: 'tool:browser',
     order: 111,
     text: BROWSER_GUIDANCE,
-  })
+  }))
 
   const tabOf = async (tab: number | undefined): Promise<number> => {
     return runtime.resolveTab(tab)
@@ -239,17 +244,6 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         type: 'object',
         additionalProperties: false,
         properties: {
-          group: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              label: { type: 'string' },
-              status: { type: 'string' },
-              busy: { type: 'boolean' },
-              busyTool: { type: 'string' },
-              foreground: { type: 'boolean' },
-            },
-          },
           tabs: {
             type: 'array',
             items: {
@@ -639,7 +633,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[读取/请求] Evaluate one JavaScript expression in your tab (single expression; no statements/assignments; code-execution APIs like eval/Function and DOM-write APIs rejected — network requests like fetch/XHR are allowed) and return its JSON result — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests.',
+    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed. It is a misuse guardrail, not a security boundary.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
@@ -652,7 +646,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     },
     timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
     isConcurrencySafe: () => false,
-    presentCall: present('Evaluate JS (read-only)'),
+    presentCall: present('Evaluate JS'),
     async execute(args, exec) {
       const { tab, expression, frame } = args as { tab?: number; expression: string; frame?: number }
       if (typeof expression !== 'string' || expression.trim() === '') throw new Error('expression is required')
@@ -748,7 +742,6 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     description: '[记忆] Search the shared visit history (your session + the user\'s), newest first.',
     parameters: {
       q: { type: 'string', description: 'Search text in url/title.' },
-      group: { type: 'string', description: 'Optional session group label/key filter.' },
       limit: { type: 'integer', description: 'Max entries (default 100).' },
     },
     output: {
@@ -779,8 +772,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Search history'),
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
-      const { q, limit, group } = args as { q?: string; limit?: number; group?: string }
-      return { entries: runtime.history({ q, limit, group }).map((h) => ({ time: h.time, url: h.url, title: h.title, actor: h.actor, group: h.group })) }
+      const { q, limit } = args as { q?: string; limit?: number }
+      return { entries: runtime.history({ q, limit }).map((h) => ({ time: h.time, url: h.url, title: h.title, actor: h.actor, group: h.group })) }
     },
   }))
 
@@ -1001,6 +994,12 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       return { ok: true }
     },
   }))
+
+  // P2-29: the tool registry disposers are collected and returned so the
+  // plugin fiber can unregister all 32 tools (+ the guidance section) when the
+  // browser plugin is disposed — otherwise they keep pointing at a disposed
+  // runtime.
+  return () => { for (const dispose of disposers) dispose() }
 }
 
 // ------------------------------------------------------------------ formats
@@ -1045,14 +1044,10 @@ function formatText(value: unknown): string {
 }
 
 function formatTabs(value: unknown): string {
-  const v = value as { group?: { label?: string; status?: string; busy?: boolean; busyTool?: string; foreground?: boolean }; tabs?: Array<{ id: number; url: string; title: string; loading: boolean; active: boolean }> }
+  const v = value as { tabs?: Array<{ id: number; url: string; title: string; loading: boolean; active: boolean }> }
   const tabs = v.tabs ?? []
-  const group = v.group
-  if (tabs.length === 0) return 'No tabs open in this session.'
-  const head = group !== undefined
-    ? `Session "${String(group.label ?? '')}" (${String(group.status ?? '')}${group.busy === true ? `, running ${String(group.busyTool ?? '')}` : ''}${group.foreground === true ? ', shown in window' : ''})\n`
-    : ''
-  return head + tabs.map((t) => `${t.id}: ${t.title || t.url}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}`).join('\n')
+  if (tabs.length === 0) return 'No tabs open in this window.'
+  return tabs.map((t) => `${t.id}: ${t.title || t.url}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}`).join('\n')
 }
 
 function formatFillForm(value: unknown): string {
@@ -1101,7 +1096,7 @@ function formatCredentials(value: unknown): string {
 }
 
 /** Tool → group map used by the enterprise toolGroups policy (P2 §15). */
-const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'memory' | 'artifacts' | 'control'> = {
+const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'write' | 'memory' | 'artifacts' | 'control'> = {
   browser_open: 'navigate', browser_navigate: 'navigate', browser_reload: 'navigate',
   browser_go_back: 'navigate', browser_go_forward: 'navigate', browser_list_tabs: 'navigate',
   browser_switch_tab: 'navigate', browser_close_tab: 'navigate',
@@ -1109,7 +1104,10 @@ const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'memory' | 'ar
   browser_select: 'interact', browser_scroll: 'interact', browser_fill_form: 'interact',
   browser_upload_file: 'interact',
   browser_get_snapshot: 'read', browser_get_text: 'read', browser_screenshot: 'read',
-  browser_wait_for: 'read', browser_eval: 'read',
+  browser_wait_for: 'read',
+  // `browser_eval` runs arbitrary JS (including fetch/XHR) — it is a write /
+  // eval capability, not a read inspection tool (2026-09-08).
+  browser_eval: 'write',
   browser_bookmarks_add: 'memory', browser_bookmarks_list: 'memory',
   browser_bookmarks_remove: 'memory', browser_history_search: 'memory',
   browser_download: 'artifacts', browser_downloads_list: 'artifacts', browser_downloads_remove: 'artifacts',
@@ -1118,12 +1116,12 @@ const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'memory' | 'ar
 }
 
 /** Default: every tool group enabled. */
-export const DEFAULT_GROUPS: ReadonlySet<string> = new Set(['navigate', 'interact', 'read', 'memory', 'artifacts', 'control'])
+export const DEFAULT_GROUPS: ReadonlySet<string> = new Set(['navigate', 'interact', 'read', 'write', 'memory', 'artifacts', 'control'])
 
 /** Parse a toolGroups config value into a set (unknown values ignored). */
 export function parseToolGroups(value: string[] | undefined): ReadonlySet<string> {
   if (value === undefined) return DEFAULT_GROUPS
-  const allowed = new Set(['navigate', 'interact', 'read', 'memory', 'artifacts', 'control'])
+  const allowed = new Set(['navigate', 'interact', 'read', 'write', 'memory', 'artifacts', 'control'])
   const set = new Set<string>()
   for (const item of value) if (allowed.has(item)) set.add(item)
   return set.size === 0 ? DEFAULT_GROUPS : set

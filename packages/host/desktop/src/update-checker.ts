@@ -1,11 +1,13 @@
 /** Headless version checks against the public GitHub Releases API. */
 
-/** GitHub repository owning public client releases. */
-export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
+import { DESKTOP_RELEASE_LATEST_API, DESKTOP_RELEASE_LIST_API, DESKTOP_RELEASE_REPOSITORY } from './desktop-release.ts'
+
+// Single authority (P2-64): the repository and endpoint constants live in
+// ./desktop-release.ts and are re-exported here for existing importers.
+export { DESKTOP_RELEASE_REPOSITORY }
 
 /** Public endpoint returning the latest stable PicoAide Harness release. */
-export const DESKTOP_VERSION_ENDPOINT =
-  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
+export const DESKTOP_VERSION_ENDPOINT = DESKTOP_RELEASE_LATEST_API
 
 /**
  * Public endpoint listing recent published releases (newest first) for the
@@ -13,8 +15,7 @@ export const DESKTOP_VERSION_ENDPOINT =
  * and prerelease — and offers the SemVer-maximum one, so a prerelease build
  * tracks newer prereleases of the same line and any newer stable release.
  */
-export const DESKTOP_RELEASES_LIST_ENDPOINT =
-  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases?per_page=30`
+export const DESKTOP_RELEASES_LIST_ENDPOINT = DESKTOP_RELEASE_LIST_API
 
 /**
  * Maximum response body bytes accepted from the release service.

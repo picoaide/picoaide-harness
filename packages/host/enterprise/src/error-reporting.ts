@@ -85,14 +85,15 @@ export async function initSentry(dsn: string, release: string, level = 'error'):
 
 /** Apply: watch session changes and keep Sentry in sync with the server DSN. */
 export function apply(ctx: Context): void {
-  // 诊断日志(联调 2026-08-27):确认插件挂载与 session 事件触发
-  console.log('[error-reporting] plugin applied')
+  // 诊断日志走 logger(2026-09-08 P2-40:三条 console.log 是发货插件里的调试
+  // 残留,会污染用户控制台;降级为 debug 级)。
+  ctx.logger?.debug('error-reporting: plugin applied')
   // release 用桌面客户端包版本(粗粒度够用;sourcemap 可按需细化)。
   // 编译期由 tsdown define 注入;缺省回退 "0.1.0"(与 enterprise package.json 一致)。
   const release = `picoaide-desktop@${DESKTOP_VERSION}`
 
   const sync = async (session: Session | null): Promise<void> => {
-    console.log('[error-reporting] session-changed:', session ? session.username : 'null')
+    ctx.logger?.debug('error-reporting: session-changed', session?.username ?? null)
     if (session === null) {
       await initSentry('', release)
       return
@@ -102,7 +103,7 @@ export function apply(ctx: Context): void {
       const web = config.web
       // 开关(2026-08):服务端关闭则不初始化上报;等级阈值传 init 过滤
       const enabled = web?.error_reporting_enabled === true
-      console.log('[error-reporting] dsn from bootstrap:', enabled && web?.error_reporting_dsn ? web.error_reporting_dsn.slice(0, 30) + '...' : '(disabled/empty)')
+      ctx.logger?.debug('error-reporting: dsn from bootstrap', enabled && web?.error_reporting_dsn ? 'configured' : 'disabled/empty')
       if (!enabled) {
         await initSentry('', release)
         return

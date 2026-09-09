@@ -74,7 +74,7 @@ describe('macOS release command boundary', () => {
     expect(calls[0]).toEqual({
       command: 'yarn',
       args: ['run', 'check'],
-      cwd: resolve('/repo/packages/host/desktop', '..', '..'),
+      cwd: resolve('/repo/packages/host/desktop', '..', '..', '..'),
       env: { PATH: '/usr/bin', SAFE_BUILD_VALUE: 'kept' },
     })
     // 第一步:仅打包+签名(dir 目标,关闭公证)
@@ -237,7 +237,8 @@ describe('macOS release command boundary', () => {
     await expect(releaseMac(options)).rejects.toThrow('headless check failed')
     expect(calls).toHaveLength(1)
     expect(calls[0]?.args).toEqual(['run', 'check'])
-    expect(calls[0]?.cwd).toBe(resolve('/repo/packages/host/desktop', '..', '..'))
+    // 仓库根 = desktopRoot 上溯 3 级(P2:此前只上溯 2 级到 packages/)。
+    expect(calls[0]?.cwd).toBe(resolve('/repo/packages/host/desktop', '..', '..', '..'))
     expect(resetOutput).not.toHaveBeenCalled()
   })
 })

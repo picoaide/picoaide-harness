@@ -9,8 +9,11 @@
 
 import type { BrowserSnapshotElement } from './types.ts'
 
-/** Cap on snapshot entries per call. */
+/** Default cap on snapshot entries per call. */
 const SNAPSHOT_LIMIT = 200
+/** Hard safety cap on snapshot entries (a deployment may raise the limit up to
+ * this bound; the probe itself is bounded so a hostile page cannot flood). */
+const SNAPSHOT_MAX_LIMIT = 2_000
 /** Cap on extracted text characters per call. */
 const TEXT_LIMIT = 32 * 1024
 
@@ -18,12 +21,15 @@ const TEXT_LIMIT = 32 * 1024
  * Probe script: collect interactable elements in DOM order. The page can see
  * and influence this code, so it must (a) produce plain JSON only, (b) never
  * touch anything outside the page, and (c) fail softly on every element.
+ * The entry cap is injected (`__MAX__`) so a configured `snapshotLimit` above
+ * the default actually reaches the page instead of being silently clamped to
+ * 200 (P3).
  */
 const SNAPSHOT_PROBE = `
 (() => {
   const out = [];
   const seen = new Set();
-  const MAX = 200;
+  const MAX = __MAX__;
   const kindOf = (el) => {
     const tag = el.tagName.toLowerCase();
     if (tag === 'a' && el.href) return 'link';
@@ -105,8 +111,9 @@ export async function extractSnapshot(
   send: <T>(method: string, params?: Record<string, unknown>) => Promise<T>,
   snapshotLimit = SNAPSHOT_LIMIT,
 ): Promise<BrowserSnapshotElement[]> {
+  const limit = Math.max(1, Math.min(snapshotLimit, SNAPSHOT_MAX_LIMIT))
   const result = await send<{ result?: { value?: unknown }, exceptionDetails?: unknown }>('Runtime.evaluate', {
-    expression: SNAPSHOT_PROBE,
+    expression: SNAPSHOT_PROBE.replace('__MAX__', String(limit)),
     returnByValue: true,
     awaitPromise: false,
   })
@@ -115,7 +122,6 @@ export async function extractSnapshot(
   }
   const raw = result.result?.value
   if (!Array.isArray(raw)) return []
-  const limit = Math.max(1, Math.min(snapshotLimit, SNAPSHOT_LIMIT))
   const out: BrowserSnapshotElement[] = []
   for (const entry of raw.slice(0, limit)) {
     if (typeof entry !== 'object' || entry === null) continue
