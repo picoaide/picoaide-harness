@@ -14,8 +14,8 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-function ledger(options: { dshHomeDir?: string } = {}): HostCronLedger {
-  return new HostCronLedger({ dshHomeDir: options.dshHomeDir ?? dir })
+function ledger(options: { dshHomeDir?: string, owner?: () => string | null } = {}): HostCronLedger {
+  return new HostCronLedger({ dshHomeDir: options.dshHomeDir ?? dir, owner: options.owner })
 }
 
 const CREATE = {
@@ -71,6 +71,22 @@ describe('HostCronLedger', () => {
     second.applyRequest('r1', CREATE)
     expect(second.state().jobs).toHaveLength(1)
     second.dispose()
+  })
+
+  // 2026-09-08 P2-14:授权失败后重试不能被当成"重复请求"吞掉。此前指纹缓存
+  // 先于 owner 校验写入,越权重试永远拿不到 403。
+  it('records the idempotency fingerprint only after the owner check passes', () => {
+    let owner = 'alice'
+    const host = ledger({ owner: () => owner })
+    host.applyRequest('r1', CREATE)
+    // bob 试图禁用 alice 的任务:必须抛错,且不得把 r1 记成已应用。
+    owner = 'bob'
+    expect(() => host.applyRequest('r2', { kind: 'disable', jobId: 'job-1' })).toThrow(/another account/)
+    // 用同一 requestId 重试(alice 本人)必须真正生效,而不是"重复请求"直接返回。
+    owner = 'alice'
+    host.applyRequest('r2', { kind: 'disable', jobId: 'job-1' })
+    expect(host.state().jobs[0]!.enabled).toBe(false)
+    host.dispose()
   })
 
   it('isolates corrupt documents and starts empty with a visible error', () => {

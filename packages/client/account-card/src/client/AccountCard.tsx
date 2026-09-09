@@ -23,7 +23,6 @@ interface UsageResponse {
     remaining_money: number | null
     today_usage: number
     today_cost: number
-    dept_budgets: { name: string; budget: number; used: number }[]
   } | null
   fetchedAt: number
   state: 'idle' | 'loading' | 'error'

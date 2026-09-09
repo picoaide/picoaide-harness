@@ -21,7 +21,7 @@ Plugins are extension packages that add capabilities to DSH — models, tools, i
 
 ## Client Plugins
 
-Client plugins are built with the **`clientBundle` preset** (tsdown), aligning external dependencies with the platform module table (`PLATFORM_MODULES` — react-dom, react-dom/client, `@deepseek-ai/dsh-client-web-react`, `dsh-client-ui-primitives`, `dsh-client-ui-attachment`, `dsh-client-ui-schema-form`) and the **client packages actually imported**.
+Client plugins are built with the **`clientBundle` preset** (tsdown), aligning external dependencies with the platform module table (`PLATFORM_MODULES` — authoritative source `scripts/platform-modules.mjs`, identical to upstream `packages/client/web/src/platform.ts`: `react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`, `@deepseek-ai/cordis`, `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`, `@deepseek-ai/dsh-client-ui-primitives`) and the **client packages actually imported**.
 
 - **Client-side cross-package imports are forbidden**: the source package injects via `ctx.slots.inject` inside `ctx.effect`, and the target package registers via `ctx.slots.register` in its own client;
 - The type-check `tsconfig.client.json` needs `skipLibCheck: true` (to avoid internal type errors in the upstream `dsh-client-ui-sidebar` d.ts);

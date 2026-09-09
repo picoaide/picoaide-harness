@@ -1,11 +1,16 @@
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { URL } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
+  BrowserGuard,
   classifyNavigation,
   MAX_DOWNLOAD_BYTES,
   navigationDenyReason,
 } from '../src/guard.ts'
+import type { DownloadRecorder } from '../src/guard.ts'
+import type { NativeDownloadItem, NativeSession } from '../src/electron-adapter.ts'
 
 describe('navigation policy', () => {
   it('allows https and http', () => {
@@ -65,5 +70,67 @@ describe('no browser approval seam (product decision 2026-08-26)', () => {
     const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
     expect(source).not.toContain("ctx.get('approval')")
     expect(source).not.toContain('dsh-user-approval')
+  })
+})
+
+describe('download guard ref counting (2026-09-08 P0-5)', () => {
+  const dirs: string[] = []
+  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+
+  function fakeSession() {
+    const listeners: Array<(event: unknown, item: NativeDownloadItem) => void> = []
+    return {
+      listeners,
+      on(_event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void {
+        listeners.push(listener)
+      },
+      removeListener(_event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void {
+        const idx = listeners.indexOf(listener)
+        if (idx >= 0) listeners.splice(idx, 1)
+      },
+      emit(item: NativeDownloadItem): void {
+        for (const listener of [...listeners]) listener({}, item)
+      },
+    }
+  }
+
+  function fakeItem(): NativeDownloadItem {
+    return {
+      getFilename: () => 'report.txt',
+      getURL: () => 'https://example.com/report.txt',
+      getReceivedBytes: () => 0,
+      getTotalBytes: () => 10,
+      setSavePath: () => {},
+      cancel: () => {},
+      on: () => {},
+    } as unknown as NativeDownloadItem
+  }
+
+  it('keeps the shared session listener until the LAST tab releases it', () => {
+    const guard = new BrowserGuard({} as never)
+    const session = fakeSession()
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-downloads-'))
+    dirs.push(dir)
+    const added: Array<{ fileName: string, actor?: string }> = []
+    const recorder: DownloadRecorder = {
+      add: (entry) => { added.push(entry); return added.length },
+      update: () => {},
+    }
+    const native = session as unknown as NativeSession
+    const disposeFirst = guard.installDownloadGuard(native, () => {}, recorder, '', 'user', dir)
+    const disposeSecond = guard.installDownloadGuard(native, () => {}, recorder, '', 'ai', dir)
+    expect(session.listeners).toHaveLength(1)
+    // Closing the first tab must NOT disable interception for the rest.
+    disposeFirst()
+    expect(session.listeners).toHaveLength(1)
+    session.emit(fakeItem())
+    expect(added).toHaveLength(1)
+    // The most recent registration owns the recorder context (a download has
+    // no tab identity, so first-tab-forever attribution was wrong).
+    expect(added[0]?.actor).toBe('ai')
+    disposeSecond()
+    expect(session.listeners).toHaveLength(0)
+    session.emit(fakeItem())
+    expect(added).toHaveLength(1)
   })
 })

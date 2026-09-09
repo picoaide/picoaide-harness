@@ -3,6 +3,7 @@ package serverstore
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1205,8 +1206,10 @@ func TestRecordUsageCacheFallsBackToInput(t *testing.T) {
 	}
 }
 
-// 命中数超过总输入:防御钳制,按总输入计费。
-func TestRecordUsageCacheClamp(t *testing.T) {
+// 命中数超过总输入:防御只作用于 miss(不为负),命中部分照价计费。
+// P1-9:旧实现把 cacheTokens 钳到 promptTokens(10 万),等于按输入价少收;
+// 新口径按 cache 价全额计,miss=0。
+func TestRecordUsageCacheOverflowNoNegativeCost(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
@@ -1218,7 +1221,7 @@ func TestRecordUsageCacheClamp(t *testing.T) {
 	if _, err := AddModel(db, &Model{Name: "clamp-model", ProviderID: pid, InputPricePer1M: ptrFloat(2.0), OutputPricePer1M: ptrFloat(8.0), CacheInputPricePer1M: &cachePtr}); err != nil {
 		t.Fatal(err)
 	}
-	// 输入 10 万,命中 100 万(异常)→ 钳制为 10 万命中,费用 = 0.1*1 = 0.1
+	// 输入 10 万,命中 100 万(异常)→ miss 钳为 0,费用 = 1M × 1 元/1M = 1.0
 	id, err := RecordUsageKindCached(db, uid, "clamp-model", 100_000, 0, 1_000_000, "chat")
 	if err != nil {
 		t.Fatal(err)
@@ -1227,8 +1230,49 @@ func TestRecordUsageCacheClamp(t *testing.T) {
 	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
 		t.Fatal(err)
 	}
-	if cost != 0.1 {
-		t.Fatalf("clamp cost = %v, want 0.1", cost)
+	if cost != 1.0 {
+		t.Fatalf("overflow cost = %v, want 1.0 (100 万命中 × 1 元/1M, miss 不产生负费用)", cost)
+	}
+}
+
+// TestRecordUsageAnthropicCacheBilling 覆盖 P1-9 的计费口径:
+// Anthropic usage 的 input_tokens 不含缓存部分,总输入 = input + cache_read +
+// cache_creation;cache_read 按缓存价、cache_creation 按输入价。
+// 价目:输入 1 元/1M、输出 3 元/1M、缓存 0.1 元/1M;
+// 8 input + 1000 cache_read + 500 cache_creation + 2 output →
+//
+//	500 × 1e-6 + 1000 × 0.1e-6 + 8 × 1e-6 + 2 × 3e-6 = 6.14e-4
+//
+// (旧口径只取 cache_read 且被钳到 8:8 × 0.1e-6 + 6e-6 ≈ 6.8e-6,少收 ~99%)
+func TestRecordUsageAnthropicCacheBilling(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	cachePtr := 0.1
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "prov-anthropic", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddModel(db, &Model{Name: "claude-x", ProviderID: pid, InputPricePer1M: ptrFloat(1.0), OutputPricePer1M: ptrFloat(3.0), CacheInputPricePer1M: &cachePtr}); err != nil {
+		t.Fatal(err)
+	}
+	const input, cacheRead, cacheCreation, output = 8, 1000, 500, 2
+	prompt := int64(input + cacheRead + cacheCreation) // messages.go 的 prompt 口径
+	id, err := RecordUsageKindCached(db, uid, "claude-x", prompt, output, cacheRead, "search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	var pt, ct int64
+	if err := db.QueryRow("SELECT cost, prompt_tokens, cache_prompt_tokens FROM usage WHERE id = ?", id).Scan(&cost, &pt, &ct); err != nil {
+		t.Fatal(err)
+	}
+	if pt != 1508 || ct != 1000 {
+		t.Fatalf("prompt/cache = %d/%d, want 1508/1000", pt, ct)
+	}
+	const want = 6.14e-4
+	if diff := cost - want; diff > 1e-12 || diff < -1e-12 {
+		t.Fatalf("anthropic cache cost = %v, want %v", cost, want)
 	}
 }
 
@@ -1289,4 +1333,92 @@ func effBudgetsHasSmaller(budgets map[string]float64, limit float64) bool {
 		}
 	}
 	return false
+}
+
+// TestUserDayUsageCostBeijingDayBoundary 覆盖 P2-5:今日/昨日按北京时间日界,
+// 与服务器本地时区无关。旧实现取 day.Location()(服务器本地日界),UTC 容器
+// 与北京差 8 小时 → 每日 00:00-08:00(北京)的用量被算到前一天。
+func TestUserDayUsageCostBeijingDayBoundary(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	// 记账时刻 = 北京 2026-03-11 02:00(= UTC 2026-03-10 18:00)
+	billAt := time.Date(2026, 3, 10, 18, 0, 0, 0, time.UTC)
+	if err := ensureUsagePartition(db, billAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordUsageKindAt(db, uid, "m", 7, 0, "chat", billAt); err != nil {
+		t.Fatal(err)
+	}
+	// 传入 UTC 2026-03-10 20:00(北京 3/11 04:00)→ 属于北京 3/11 → 命中
+	usage, _, err := UserDayUsageCost(db, uid, time.Date(2026, 3, 10, 20, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != 7 {
+		t.Fatalf("北京 3/11 用量 = %d, want 7 (旧实现按服务器本地日界会算到 3/10)", usage)
+	}
+	// 北京 3/10 当天 → 不含该行
+	usage, _, err = UserDayUsageCost(db, uid, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != 0 {
+		t.Fatalf("北京 3/10 用量 = %d, want 0", usage)
+	}
+}
+
+// explainPlan 返回 EXPLAIN 的文本行(测试用)。
+func explainPlan(t *testing.T, db *sql.DB, q string, args ...any) string {
+	t.Helper()
+	rows, err := db.Query("EXPLAIN "+q, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestUsageRangePredicatePrunesPartitions 覆盖 P2-15:范围比较直接与
+// ?::date 比较(会话时区已固定 Asia/Shanghai),不得用
+// `created_at AT TIME ZONE 'Asia/Shanghai'` 包裹分区键——包裹后 PG 无法
+// 分区裁剪,退化成全分区扫描(EXPLAIN 证据:Subplans Removed vs 全扫)。
+func TestUsageRangePredicatePrunesPartitions(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	now := time.Now()
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	to := from.AddDate(0, 1, 0)
+	target := "usage_" + from.Format("200601")
+	prev := "usage_" + from.AddDate(0, -1, 0).Format("200601")
+	next := "usage_" + from.AddDate(0, 1, 0).Format("200601")
+
+	plan := explainPlan(t, db, `SELECT COUNT(*) FROM usage WHERE created_at >= $1::date AND created_at < $2::date`,
+		from.Format("2006-01-02"), to.Format("2006-01-02"))
+	if !strings.Contains(plan, "Subplans Removed") {
+		t.Fatalf("分区未被裁剪(缺 Subplans Removed):\n%s", plan)
+	}
+	if !strings.Contains(plan, target) {
+		t.Fatalf("目标分区 %s 未出现:\n%s", target, plan)
+	}
+	for _, other := range []string{prev, next} {
+		if strings.Contains(plan, other) {
+			t.Fatalf("分区 %s 未被裁剪:\n%s", other, plan)
+		}
+	}
+	// 对照组:旧写法(AT TIME ZONE 包裹)全分区扫 —— 证明上面的断言有区分度
+	wrapped := explainPlan(t, db, `SELECT COUNT(*) FROM usage WHERE created_at AT TIME ZONE 'Asia/Shanghai' >= $1::date AND created_at AT TIME ZONE 'Asia/Shanghai' < $2::date`,
+		from.Format("2006-01-02"), to.Format("2006-01-02"))
+	if !strings.Contains(wrapped, next) || !strings.Contains(wrapped, prev) {
+		t.Fatalf("对照组应全分区扫(证明包裹写法不可裁剪):\n%s", wrapped)
+	}
 }

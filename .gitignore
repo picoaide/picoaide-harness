@@ -87,3 +87,6 @@ temp/xdgcache/
 # Dead-code/knip analysis artifacts (rebuild per scan round; not source)
 .scan/
 server/.scan-staticcheck.txt
+
+# 浏览器 store 回退目录（无 Electron userData 时的兜底;审计 2026-09-08 P2-38b）
+.browser-store/

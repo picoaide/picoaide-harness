@@ -167,6 +167,16 @@ func DeleteSharedSkill(db *sql.DB, name, version string) error {
 	return SoftDeleteRelease(db, AppKindSkill, name, version)
 }
 
+// SharedSkillVersionCount 返回该 name 下剩余的未软删版本数。
+// P2-10:授权按 name 生效(同名多版本共享),版本级删除只有在最后一个版本
+// 也消失时才应清理 name 级授权。
+func SharedSkillVersionCount(db *sql.DB, name string) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM app_releases
+		WHERE kind = ? AND app_id = ? AND deleted_at IS NULL`, AppKindSkill, name).Scan(&n)
+	return n, err
+}
+
 // DeleteSharedSkillArchive 清空某版本的归档字节(版本行与审核记录保留)。
 func DeleteSharedSkillArchive(db *sql.DB, name, version string) error {
 	_, err := db.Exec(`UPDATE app_releases SET archive = NULL, size = 0, updated_at = `+NowExpr()+`

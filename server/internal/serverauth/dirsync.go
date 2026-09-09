@@ -183,6 +183,15 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 		}
 	}
 	res.Groups = len(groupSeen)
+	// 2026-09-08 P1-4:记录本轮目录"见过"的用户名,停用对账只针对这些用户名
+	// (OIDC 用户同为 Source=external,不得被 LDAP 同步误停用)。
+	syncedNames := make([]string, 0, len(seen))
+	for name := range seen {
+		syncedNames = append(syncedNames, name)
+	}
+	if err := serverstore.MarkLDAPSynced(db, syncedNames); err != nil {
+		return res, err
+	}
 	// 目录中已不存在的外部用户:停用 + 吊销令牌(离职即失效)
 	deact, err := deactivateMissingExternalUsers(db, seen)
 	if err != nil {
@@ -194,19 +203,28 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 
 // deactivateMissingExternalUsers 停用 keep 中不存在的外部用户并吊销其
 // 全部 token,返回停用数量。本地账号/管理员不受影响。
+// 2026-09-08 P1-4:只停用**曾由 LDAP 同步见过**的用户名(ldap_synced_users),
+// 否则同为 Source=external 的 OIDC 用户会被 LDAP 对账每小时误停用一次。
 func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) (int, error) {
+	synced, err := serverstore.LDAPSyncedUsers(db)
+	if err != nil {
+		return 0, err
+	}
 	users, _, err := serverstore.ListUsers(db, 0, 100000, "")
 	if err != nil {
 		return 0, err
 	}
 	count := 0
 	for _, u := range users {
-		if u.Source != "external" || keep[u.Username] || u.Status != 1 {
+		if u.Source != "external" || keep[u.Username] || u.Status != 1 || !synced[u.Username] {
 			continue
 		}
 		upd := u
 		upd.Status = 0
 		if err := serverstore.UpdateUserRevokingTokens(db, &upd); err != nil {
+			return count, err
+		}
+		if err := serverstore.UnmarkLDAPSynced(db, u.Username); err != nil {
 			return count, err
 		}
 		count++

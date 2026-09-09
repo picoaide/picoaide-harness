@@ -19,7 +19,7 @@ import (
 // ~1KB; a generous ceiling keeps admin forms honest).
 const maxDefinitionBytes = 64 << 10
 
-// RegisterAdminRoutes mounts /api/admin/connectors (AdminAuth + RBAC v3b).
+// RegisterAdminRoutes mounts /api/server/admin/connectors (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	base := "/api/server/admin/connectors"
 	g := r.Group(base, serverauth.AdminAuth(db))

@@ -5,8 +5,10 @@ import {
   PRODUCT_DSH_HOME_DIR,
   DEFAULT_DSH_HOME_DISPLAY,
   dshHomePath,
+  dshHomeSafe,
   expandHomePath,
   isSafeDshHome,
+  isSystemWorkingDirectory,
   resolveDshHome,
 } from '../src/desktop-home.ts'
 
@@ -77,5 +79,49 @@ describe('isSafeDshHome (审计 P2-3 系统目录拒绝)', () => {
     expect(isSafeDshHome('/var/lib/picoaide')).toBe(false)
     expect(isSafeDshHome('/dev/shm')).toBe(false)
     expect(isSafeDshHome('/proc/self')).toBe(false)
+  })
+})
+
+describe('dshHomeSafe (P2-33: the launcher uses the guarded entry point)', () => {
+  it('returns a safe home', () => {
+    expect(dshHomeSafe({ env: { DSH_HOME: '/tmp/dsh-home' } })).toBe('/tmp/dsh-home')
+  })
+
+  it('throws for an injected system-directory home instead of using it', () => {
+    expect(() => dshHomeSafe({ env: { DSH_HOME: '/etc' } })).toThrow(/unsafe DSH_HOME/u)
+    expect(() => dshHomeSafe({ configured: '/' })).toThrow(/unsafe DSH_HOME/u)
+  })
+})
+
+describe('isSystemWorkingDirectory (P2-34: packaged cwd guard)', () => {
+  it('flags filesystem roots of both path flavours', () => {
+    expect(isSystemWorkingDirectory('/')).toBe(true)
+    expect(isSystemWorkingDirectory('C:\\')).toBe(true)
+    expect(isSystemWorkingDirectory('')).toBe(true)
+  })
+
+  it('flags POSIX system directories and their children', () => {
+    expect(isSystemWorkingDirectory('/usr')).toBe(true)
+    expect(isSystemWorkingDirectory('/usr/bin')).toBe(true)
+    expect(isSystemWorkingDirectory('/etc/systemd')).toBe(true)
+    expect(isSystemWorkingDirectory('/var/log')).toBe(true)
+  })
+
+  it('flags the Windows system root and Program Files from the environment', () => {
+    const env = {
+      SystemRoot: 'C:\\Windows',
+      ProgramFiles: 'C:\\Program Files',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+      ProgramData: 'C:\\ProgramData',
+    }
+    expect(isSystemWorkingDirectory('C:\\Windows\\System32', env)).toBe(true)
+    expect(isSystemWorkingDirectory('C:\\Program Files\\PicoAide', env)).toBe(true)
+    expect(isSystemWorkingDirectory('C:\\ProgramData\\PicoAide', env)).toBe(true)
+  })
+
+  it('allows ordinary project directories', () => {
+    expect(isSystemWorkingDirectory('/data/picoaide-harness')).toBe(false)
+    expect(isSystemWorkingDirectory('/home/user/projects/app')).toBe(false)
+    expect(isSystemWorkingDirectory('/tmp/workspace')).toBe(false)
   })
 })

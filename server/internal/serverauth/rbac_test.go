@@ -12,7 +12,7 @@ import (
 
 // ---------------------------------------------------------------------------
 // 路由表完整性: 服务端强制 RBAC 的 fall-open 防护。
-// 断言每个 /api/admin/* 受保护路由都通过 AdminRoute 注册并声明了权限点
+// 断言每个 /api/server/admin/* 受保护路由都通过 AdminRoute 注册并声明了权限点
 // (或明确为空=仅需有效管理会话的 me/logout), 防止「漏挂权限 → 任意
 // 管理会话可越权」。
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ func TestPermissionsOfRoles(t *testing.T) {
 		no   []string
 	}{
 		{serverstore.RoleSuperAdmin, []string{PermUserWrite, PermAuthWrite, PermAuditRetention, PermBrandWrite, PermPortalWrite}, []string{}},
-		{serverstore.RoleAuditor, []string{PermAuditRead, PermUsageRead, PermUserRead}, []string{PermUserWrite, PermAuthWrite, PermBrandWrite, PermGatewayWrite, PermRoleAssign}},
+		{serverstore.RoleAuditor, []string{PermAuditRead, PermUsageRead, PermUserRead}, []string{PermUserWrite, PermAuthWrite, PermBrandWrite, PermGatewayWrite}},
 		{serverstore.RoleUser, []string{}, []string{PermAuditRead, PermUserRead, PermUsageRead, PermAuthWrite}},
 	}
 	for _, tc := range cases {

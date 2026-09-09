@@ -239,6 +239,12 @@ jobs:
           Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
           sleep 2
           yarn workspace dsh-plugin-desktop e2e:client
+      # P2-51: 报告/截图复制必须独立成 step 且 if: always()——原先紧跟 e2e 命令
+      # 同一 step 且在其后,`bash -e` 下 e2e 失败即跳过复制,导致 always() 的
+      # upload-artifact 上传空目录(与决策文档「失败也留证据」矛盾)。
+      - name: Collect E2E report & screenshots
+        if: always()
+        run: |
           # upload-artifact v4+ 不收录点开头文件/目录(.e2e-report.md/.e2e-shots),
           # 复制并重命名为非点名称再上传(2026-09-06 两轮实测缺失)。
           mkdir -p packages/host/desktop/e2e-results
@@ -448,7 +454,8 @@ jobs:
         run: |
           cd release-artifacts
           # 审计 D-4:显式清单防 glob 吞入残留产物;空目录时 xargs 报错,先保护。
-          if ! find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) | grep -q .; then
+          # P2-50: deb 必须参与发布(官网宣称「AppImage + deb」,此前被排除)。
+          if ! find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' \) | grep -q .; then
             echo "::error::no release artifacts found";
             exit 1
           fi
@@ -456,7 +463,7 @@ jobs:
           # 而客户端 update-download 用裸文件名严格匹配 → v2.2.0 起 SHA256SUMS
           # 永远 checksum-missing(升级提示后下载静默失败)。%f\0 保留 D-4 显式清单
           # 健壮性,同时恢复裸文件名兼容全部客户端版本。
-          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -printf '%f\0' \
+          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' \) -printf '%f\0' \
             | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       # 变更说明优先读取仓库内 docs/releases/<tag>.md(由发布者随版本提交,
@@ -500,14 +507,14 @@ jobs:
             gh release upload "${TAG}" \
               --repo "${REPO}" \
               --clobber \
-              release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+              release-artifacts/*.AppImage release-artifacts/*.deb release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
           else
             gh release create "${TAG}" \
               --repo "${REPO}" \
               --title "PicoAide Harness ${TAG}" \
               ${NOTES_FLAG} \
               ${PRERELEASE} \
-              release-artifacts/*.AppImage release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+              release-artifacts/*.AppImage release-artifacts/*.deb release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
           fi
         env:
           GH_TOKEN: ${{ github.token }}

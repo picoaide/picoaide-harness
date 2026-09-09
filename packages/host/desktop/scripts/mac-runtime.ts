@@ -1,19 +1,32 @@
 /** Shared preparation and verification inventory for arm64 macOS packages. */
 
-import { chmodSync, existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { chmodSync, existsSync, readdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 
 export type MacArch = 'arm64'
 
+/** One required native file; `match` handles dependency-version drift. */
+export interface MacNativeEntry {
+  readonly arch: MacArch
+  readonly path: string
+  /** Optional filename pattern. `@img/sharp-*` embeds the dependency version in
+   * the file name (`sharp-darwin-arm64-0.35.3.node`, `libvips-cpp.8.18.3.dylib`),
+   * so a patch upgrade changes it; the resolver picks the installed file
+   * instead of hardcoding the version (audit P2-24). */
+  readonly match?: RegExp
+}
+
 /** Thin native files that must be present inside app.asar.unpacked. */
-export const MACOS_ARM64_NATIVE_ENTRIES = [
+export const MACOS_ARM64_NATIVE_ENTRIES: readonly MacNativeEntry[] = [
   {
     arch: 'arm64',
     path: 'node_modules/@img/sharp-darwin-arm64/lib/sharp-darwin-arm64-0.35.3.node',
+    match: /^sharp-darwin-arm64-.*\.node$/u,
   },
   {
     arch: 'arm64',
-    path: 'node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips-cpp.8.18.3.dylib',
+    path: 'node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips-cpp.*.dylib',
+    match: /^libvips-cpp\..*\.dylib$/u,
   },
   {
     arch: 'arm64',
@@ -35,7 +48,34 @@ export const MACOS_ARM64_NATIVE_ENTRIES = [
     arch: 'arm64',
     path: 'node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
   },
-] as const satisfies readonly { readonly arch: MacArch; readonly path: string }[]
+]
+
+/**
+ * Resolve the concrete file for one entry. Version-free entries return their
+ * literal path; entries with `match` scan the containing directory and pick the
+ * installed file, so a sharp/libvips patch upgrade does not break packaging
+ * (P2-24). When the directory is absent (Linux CI) the literal path is kept, so
+ * the caller's existing missing-file diagnostics are unchanged.
+ * @param root - unpacked runtime root.
+ * @param entry - required native entry.
+ * @param readdir - injectable directory listing (tests).
+ */
+export function resolveNativeEntry(
+  root: string,
+  entry: MacNativeEntry,
+  readdir: (dir: string) => readonly string[] = dir => readdirSync(dir),
+): string {
+  const literal = join(root, entry.path)
+  if (entry.match === undefined) return literal
+  const dir = dirname(literal)
+  try {
+    const found = readdir(dir).find(name => entry.match?.test(name) === true)
+    if (found !== undefined) return join(dir, found)
+  } catch {
+    // Directory absent (non-macOS host): keep the literal path.
+  }
+  return literal
+}
 
 /** Generated host-architecture files that must never shadow the prebuilt. */
 export const FORBIDDEN_MACOS_NATIVE_ENTRIES = [
@@ -61,7 +101,7 @@ export function prepareMacArm64Runtime(
 ): void {
   const root = resolve(options.desktopRoot)
   const missing = MACOS_ARM64_NATIVE_ENTRIES
-    .map(entry => join(root, entry.path))
+    .map(entry => resolveNativeEntry(root, entry))
     .filter(path => !options.exists(path))
   if (missing.length > 0) {
     throw new Error(
@@ -71,7 +111,7 @@ export function prepareMacArm64Runtime(
 
   for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
     if (entry.path.endsWith('/spawn-helper')) {
-      options.chmod(join(root, entry.path), 0o755)
+      options.chmod(resolveNativeEntry(root, entry), 0o755)
     }
   }
 }

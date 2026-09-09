@@ -54,11 +54,27 @@ console.log(`[e2e] workDir=${workDir} home=${HOME_DIR} port=${cdpPort}`)
 
 const DISPLAY = process.env.DISPLAY ?? ':99'
 
+/**
+ * True for the application's own renderer targets. Since the embedded browser
+ * is prewarmed at client start (2026-09-08), /json/list also carries the
+ * browser's own page targets (/browser-shell, /browser-overlay); selecting one
+ * of those instead of the app UI makes every assertion fail while the app is
+ * actually healthy.
+ */
+const isAppPageTarget = (t) => t.type === 'page' && !/\/browser-(shell|overlay)(\?|$)/.test(t.url)
+
+/** Pick the app renderer: post-login URL first, then the pre-login root page. */
+function pickAppTarget(list) {
+  const apps = list.filter(isAppPageTarget)
+  return apps.find(t => t.url.includes('dsh-desktop-mode'))
+    ?? apps.find(t => /^http:\/\/127\.0\.0\.1:\d+\/?$/.test(t.url))
+    ?? apps[0]
+}
+
 /** Minimal CDP client bound to the main application target. */
 async function connectMain(port) {
   const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
-  const main = list.find(t => t.type === 'page' && t.url.includes('dsh-desktop-mode'))
-    ?? list.find(t => t.type === 'page')
+  const main = pickAppTarget(list)
   if (!main) throw new Error('no page target')
   const ws = new WebSocket(main.webSocketDebuggerUrl)
   let id = 0
@@ -171,7 +187,7 @@ async function main() {
   let ready = false
   try {
     const list = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()
-    ready = list.some(t => t.type === 'page')
+    ready = list.some(isAppPageTarget)
   } catch { /* launch below */ }
   if (!ready) {
     // 断言语料是中文 UI(连接/能力中心/关闭等 marker),--lang 强制 Chromium
@@ -197,7 +213,7 @@ async function main() {
   for (let i = 0; i < 60; i += 1) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()
-      if (list.some(t => t.type === 'page')) { ready = true; break }
+      if (list.some(isAppPageTarget)) { ready = true; break }
     } catch { /* retry */ }
     await wait(500)
   }
@@ -343,7 +359,12 @@ async function run() {
   try {
     await main()
   } catch (cause) {
-    console.error('e2e-client fatal:', cause instanceof Error ? cause.message : String(cause))
+    // A fatal error must fail the run: reporting only to stderr let the
+    // script print "全部通过" and exit 0 when the app never came up
+    // (2026-09-08 audit P0-1).
+    const message = cause instanceof Error ? cause.message : String(cause)
+    console.error('e2e-client fatal:', message)
+    reportStep('e2e 致命错误（应用未就绪）', false, message)
   } finally {
     await cleanup()
     const failed = results.filter(r => !r.ok)

@@ -194,26 +194,31 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 	}
 
 	owner := req.Publisher
-	if appErr == nil && existingApp.Owner != "" {
-		owner = existingApp.Owner
+	if appErr == nil {
+		switch {
+		case existingApp.Official == 1:
+			// P2-21:官方归属恒为「官方」(owner=''),管理员给官方 App 发版
+			// 不得把归属改写成发布者(否则蓝标消失、员工端变成个人维护)。
+			owner = ""
+		case existingApp.Owner != "":
+			owner = existingApp.Owner
+		}
 	}
 	enabled := 1
 	if appErr == nil {
 		enabled = existingApp.Enabled
 	}
-	if err := serverstore.UpsertApp(db, &serverstore.App{
-		Kind: req.Kind, AppID: req.AppID, Title: req.Manifest.Title,
-		Description: req.Manifest.Description, Owner: owner, Channel: req.Channel, Enabled: enabled,
-	}); err != nil {
-		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "保存失败")
-	}
-
 	status := serverstore.ReleaseStatusPending
 	if req.AdminPublish {
 		// 管理后台上架 = 已审核(与旧市场语义一致:上架即可分发)。
 		status = serverstore.ReleaseStatusApproved
 	}
-	if _, err := serverstore.CreateRelease(db, &serverstore.Release{
+	// P2-3:占名 + 建版本在同一事务内完成,CreateRelease 失败不会留下
+	// 「占名无版本」的悬挂 App(名称被永久占用却无任何版本)。
+	if _, err := serverstore.UpsertAppAndCreateRelease(db, &serverstore.App{
+		Kind: req.Kind, AppID: req.AppID, Title: req.Manifest.Title,
+		Description: req.Manifest.Description, Owner: owner, Channel: req.Channel, Enabled: enabled,
+	}, &serverstore.Release{
 		Kind: req.Kind, AppID: req.AppID, Version: req.Manifest.Version,
 		Title: req.Manifest.Title, Description: req.Manifest.Description,
 		Changelog: req.Manifest.Changelog, Category: req.Manifest.Category,
@@ -256,6 +261,15 @@ func VisibleReleases(db *sql.DB, kind, username string, groups []string, isAdmin
 			granted[n] = true
 		}
 	}
+	// P2-10:一次取回该 kind 的全部版本并按 App 分组(此前逐 App 查询 = N+1)。
+	allReleases, err := serverstore.ListReleasesByKind(db, kind)
+	if err != nil {
+		return nil, nil, err
+	}
+	releasesByApp := map[string][]serverstore.Release{}
+	for _, r := range allReleases {
+		releasesByApp[r.AppID] = append(releasesByApp[r.AppID], r)
+	}
 	byID := map[string]serverstore.App{}
 	out := []serverstore.Release{}
 	for _, a := range apps {
@@ -266,11 +280,7 @@ func VisibleReleases(db *sql.DB, kind, username string, groups []string, isAdmin
 		if a.Enabled != 1 && !isAdmin {
 			continue
 		}
-		releases, err := serverstore.ListReleases(db, a.Kind, a.AppID)
-		if err != nil {
-			return nil, nil, err
-		}
-		best := pickDisplayRelease(releases, isAdmin || own)
+		best := pickDisplayRelease(releasesByApp[a.AppID], isAdmin || own)
 		if best == nil {
 			continue
 		}

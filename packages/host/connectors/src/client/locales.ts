@@ -21,7 +21,6 @@ export const zh = {
   'action.submit': '提交',
   'action.connecting': '连接中…',
   'action.disconnecting': '断开中…',
-  'action.cancel': '取消连接',
   'action.cancelling': '取消中…',
   'action.stop': '停止连接',
   'action.cancelHint': '连接进行中：点击停止并结束本次授权',
@@ -30,7 +29,6 @@ export const zh = {
   'auth.authorizeOpened': '授权页已在浏览器中打开；若未弹出请点击：',
   'auth.authorizeLink': '点击打开授权页',
   'auth.waiting': '等待授权完成…',
-  'auth.downloading': '正在下载命令行工具（仅首次连接需要），请稍候…',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -52,7 +50,6 @@ export const en: Record<keyof typeof zh, string> = {
   'action.submit': 'Submit',
   'action.connecting': 'Connecting…',
   'action.disconnecting': 'Disconnecting…',
-  'action.cancel': 'Cancel connection',
   'action.cancelling': 'Cancelling…',
   'action.stop': 'Stop connection',
   'action.cancelHint': 'Connection in progress: click to stop and cancel this authorization',
@@ -61,7 +58,6 @@ export const en: Record<keyof typeof zh, string> = {
   'auth.authorizeOpened': 'The authorization page was opened; if not, click here:',
   'auth.authorizeLink': 'Click to open the authorization page',
   'auth.waiting': 'Waiting for authorization…',
-  'auth.downloading': 'Downloading the CLI tool (first connect only), please wait…',
 }
 
 export type ConnectorsKey = keyof typeof zh

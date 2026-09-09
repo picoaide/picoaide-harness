@@ -46,6 +46,22 @@ var streamIdleTimeout = STREAM_IDLE_TIMEOUT
 // arrived within the idle window.
 var errStreamIdleTimeout = errors.New("upstream stream idle timeout")
 
+// maxStreamLineBytes caps a single upstream SSE line (P2-8): a stream line has
+// no newline until the upstream decides to send one, so an unterminated line
+// must not be buffered unboundedly (实测 24MiB 无换行行 → +18MiB 堆). On
+// overflow the stream is terminated instead of growing the buffer.
+// Test-injectable.
+var maxStreamLineBytes = 1 << 20
+
+// errStreamLineTooLong is returned when one upstream stream line exceeds
+// maxStreamLineBytes; the caller must terminate that stream.
+var errStreamLineTooLong = errors.New("upstream stream line too long")
+
+// deptMemberIDsFn fetches the member ids of one department subtree
+// (test-injectable: P2-6 asserts it is called at most once per budget per
+// request).
+var deptMemberIDsFn = serverstore.DeptMemberIDs
+
 // API holds gateway dependencies.
 type API struct {
 	DB     *sql.DB
@@ -455,6 +471,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
 	idleTimedOut := false
+	lineTooLong := false
 	lineEOF := false
 	backfilled := false // usage row received real tokens (must not be dropped)
 
@@ -463,6 +480,8 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	// 活跃 timer 下显著退化——实测服务端每流 26s→52s,吞吐腰斩)。
 	// 改为:单读 goroutine 常驻循环读行(零 per-line goroutine),
 	// idle 超时用一个共享 ticker 每 1s 检查(零 per-line timer)。
+	// P2-8:读行走 readLineBounded——单行累积超过 maxStreamLineBytes 立即
+	// 返回 errStreamLineTooLong,不把无换行超长行读进内存。
 	type lineRes struct {
 		line string
 		err  error
@@ -472,7 +491,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	go func() {
 		defer close(readGone)
 		for {
-			l, e := br.ReadString('\n')
+			l, e := readLineBounded(br, maxStreamLineBytes)
 			select {
 			case lines <- lineRes{l, e}:
 			case <-c.Request.Context().Done():
@@ -522,8 +541,18 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 					fl.Flush()
 				}
 			}
-			if r.err != nil { // EOF / 上游关闭
-				lineEOF = true
+			if r.err != nil {
+				if errors.Is(r.err, errStreamLineTooLong) {
+					// P2-8: 单行超过上限——不回传半行,直接中断该流。
+					lineTooLong = true
+					log.Printf("gateway: upstream stream line exceeds %d bytes, terminating", maxStreamLineBytes)
+					fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应单行过大"}}`)
+					if fl != nil {
+						fl.Flush()
+					}
+				} else { // EOF / 上游关闭
+					lineEOF = true
+				}
 			}
 		case <-idleTick.C:
 			if time.Since(lastLineAt) > streamIdleTimeout {
@@ -537,7 +566,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 		case <-c.Request.Context().Done():
 			clientGone = true
 		}
-		if clientGone || idleTimedOut || lineEOF {
+		if clientGone || idleTimedOut || lineTooLong || lineEOF {
 			break
 		}
 	}
@@ -546,11 +575,37 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	case <-readGone:
 	case <-time.After(time.Second):
 	}
-	// idle 超时与客户端断开时,从未回填的 pending 行必须清除(否则计量虚增
-	// 一小时);已回填真实 token 的行不得删除,否则真实用量从统计中丢失。
-	if (clientGone || idleTimedOut) && usageID > 0 && !backfilled {
+	// idle 超时、客户端断开、单行超限,以及**上游正常结束但从未回传 usage**
+	// 时,未回填的 pending 行必须清除(否则计量虚增一小时;2026-09-08 P2-11
+	// 补上 lineEOF 分支)。已回填真实 token 的行不得删除,否则真实用量丢失。
+	if (clientGone || idleTimedOut || lineTooLong || lineEOF) && usageID > 0 && !backfilled {
 		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 			log.Printf("gateway: delete pending usage: %v", err)
+		}
+	}
+}
+
+// readLineBounded reads one '\n'-terminated line, accumulating at most max
+// bytes; exceeding max returns errStreamLineTooLong with an empty line so a
+// caller can never be handed a partially buffered oversized line (P2-8).
+// It reads through bufio.ReadSlice, so the in-flight buffer stays bounded by
+// max + bufio buffer size regardless of how many bytes the upstream sends
+// without a newline.
+func readLineBounded(br *bufio.Reader, max int) (string, error) {
+	var buf []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		buf = append(buf, chunk...)
+		if len(buf) > max {
+			return "", errStreamLineTooLong
+		}
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue // 行内还有数据,继续读下一块
+		case err != nil:
+			return string(buf), err
+		default:
+			return string(buf), nil
 		}
 	}
 }
@@ -562,9 +617,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 // 开销极大(400 万次分配)。缓冲 channel 复用——但 bufio 阻塞读仍需 goroutine;
 // 见 serveStream 的 readLineCh 单 goroutine 模式批量读行(原实现保留此函数
 // 供 messages 路径等使用,其行频率低)。
+// P2-8:内部走 readLineBounded,单行超过 maxStreamLineBytes 时返回
+// errStreamLineTooLong(调用方中断该流),不再无上限累积。
 func readLineWithIdle(br *bufio.Reader, idle time.Duration) (string, error) {
 	if idle <= 0 {
-		return br.ReadString('\n')
+		return readLineBounded(br, maxStreamLineBytes)
 	}
 	type lineRes struct {
 		line string
@@ -572,7 +629,7 @@ func readLineWithIdle(br *bufio.Reader, idle time.Duration) (string, error) {
 	}
 	ch := make(chan lineRes, 1)
 	go func() {
-		l, e := br.ReadString('\n')
+		l, e := readLineBounded(br, maxStreamLineBytes)
 		ch <- lineRes{l, e}
 	}()
 	timer := time.NewTimer(idle)
@@ -644,6 +701,8 @@ const moneyEpsilon = 0.005
 // 故障若放行超限请求,后台可能被刷出无限费用;改为拒绝并记日志。
 // 2026-08-31 查询优化:原实现 6 次串行 DB 查询(部门成员+预算+用户用量×3),
 // 改为 1 次 MonthUsageByUsers 批量取用户+部门成员用量,减少热路径 DB 往返。
+// P2-6:部门成员 id 每个预算只查一次(deptMemberIDsFn),同一请求内复用
+// ——此前步骤 2 与步骤 3 各查一次,预算数为 N 时是 2N 次查询。
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	if user.IsAdmin {
 		return false, ""
@@ -656,14 +715,16 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 		return true, "部门预算校验暂不可用,请稍后再试"
 	}
 
-	// 2) 收集需要查用量的用户集合:本人 + 各部门树成员(用户与部门共用一次查询)
+	// 2) 每个预算部门取一次成员 id(本请求内复用),并集 + 本人用于批量查用量
+	idsByGroup := make(map[int64][]int64, len(budgets))
 	memberIDs := map[int64]bool{user.ID: true}
 	for _, b := range budgets {
-		ids, err := serverstore.DeptMemberIDs(a.DB, b.GroupID)
+		ids, err := deptMemberIDsFn(a.DB, b.GroupID)
 		if err != nil {
 			log.Printf("gateway: dept member lookup error (fail-closed): %v", err)
 			return true, "部门预算校验暂不可用,请稍后再试"
 		}
+		idsByGroup[b.GroupID] = ids
 		for _, id := range ids {
 			memberIDs[id] = true
 		}
@@ -678,15 +739,10 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 		return true, "配额校验暂不可用,请稍后再试"
 	}
 
-	// 3) 部门预算:任一部门树内成本合计超限即拦截
+	// 3) 部门预算:任一部门树内成本合计超限即拦截(复用步骤 2 的成员 id)
 	for _, b := range budgets {
 		total := 0.0
-		ids, err := serverstore.DeptMemberIDs(a.DB, b.GroupID)
-		if err != nil {
-			log.Printf("gateway: dept member lookup error (fail-closed): %v", err)
-			return true, "部门预算校验暂不可用,请稍后再试"
-		}
-		for _, id := range ids {
+		for _, id := range idsByGroup[b.GroupID] {
 			total += usages[id].Cost
 		}
 		if total >= b.Budget-moneyEpsilon {

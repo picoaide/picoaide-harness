@@ -15,7 +15,7 @@ import (
 
 // TestAllAuthMethodsEndToEnd:四种方式(local/ldap/openid/oidc)并存时的路由级
 // 端到端验证——五类断言:
-// 1. /api/admin/auth/methods 返回全部 4 种(local 恒在,其余按配置);
+// 1. /api/server/admin/auth/methods 返回全部 4 种(local 恒在,其余按配置);
 // 2. local 密码登录成功;
 // 3. ldap 密码登录(经 LDAP provider);
 // 4. oidc 浏览器流:login→fakeIdP→callback 深链 token+server+user;
@@ -66,7 +66,7 @@ func TestAllAuthMethodsEndToEnd(t *testing.T) {
 	api.RegisterOIDC(openid)                   // openid
 	r := gin.New()
 	api.RegisterRoutes(r)
-	RegisterAdminRoutes(r, db) // /api/admin/auth/methods(公开无认证)
+	RegisterAdminRoutes(r, db) // /api/server/admin/auth/methods(公开无认证)
 
 	// ---------- 1. methods ----------
 	methods := getMethods(t, r)

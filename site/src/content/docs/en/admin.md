@@ -14,12 +14,14 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 | Users | `/users` | Accounts, roles, status, quotas |
 | Departments | `/departments` | Department tree, members, budgets |
 | Auth | `/auth` | Login-mode configuration (local / LDAP / OIDC) |
+| Brand | `/brand` | Login/client branding, portal configuration and snapshots |
 | Gateway | `/gateway` | Upstream providers, default model, rate limiting, peak windows |
-| Usage | `/usage` | Cost, request counts, token detail, charts |
-| Marketplace · Skills | `/marketplace` | Marketplace skill management, tiering and grants |
-| Capability Hub | `/capabilities` | Unified approval queue for shared skills/agents (Official/Featured marking, grants) |
-| Audit | `/audit` | Full trace of key operations |
+| Error monitoring | `/error-monitoring` | Client error reporting and the GlitchTip connector preset |
+| Usage Hub | `/usage` | Cost, request counts, token detail, charts (includes quotas & budgets, report subscriptions) |
+| Capability Hub | `/capabilities` | Three tabs — Skills / Agents / Approvals (Official/Featured marking, grants); the old `/marketplace` redirects here |
+| Connectors | `/connectors` | Connector catalog and delivery switches |
 | Server Info | `/server-info` | Version, database driver, build info |
+| Audit | `/audit` | Full trace of key operations |
 
 ## Users
 

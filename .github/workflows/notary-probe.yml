@@ -27,25 +27,36 @@ jobs:
       - name: Submission history
         run: |
           echo "== notarytool history =="
+          # P3: 去掉 `|| echo` —— 探针失败必须让 step 红(GitHub bash 默认 -e)。
           xcrun notarytool history \
             --key "$RUNNER_TEMP/notary/AuthKey.p8" \
             --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER" --output-format json || echo "history failed"
+            --issuer "$APPLE_API_ISSUER" --output-format json
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       - name: Logs for known submissions
         run: |
+          # P3: 逐个查询,失败不再 `|| echo` 静默吞掉 —— 记 ::error:: 并让 step 退出非零,
+          # 但仍继续查询其余 submission(单条失败不掩盖其它条日志)。
+          failed=0
           for ID in \
             2195f54c-fdac-4fd5-8999-065e92f04125 \
             b5cfdbed-230b-41bd-8d8a-9cc46e3e1cfb; do
             if [ -z "$ID" ]; then continue; fi
             echo "== notarytool log $ID =="
-            xcrun notarytool log "$ID" \
+            if ! xcrun notarytool log "$ID" \
               --key "$RUNNER_TEMP/notary/AuthKey.p8" \
               --key-id "$APPLE_API_KEY_ID" \
-              --issuer "$APPLE_API_ISSUER" || echo "log $ID failed (maybe still processing)"
+              --issuer "$APPLE_API_ISSUER"; then
+              echo "::error::notarytool log $ID failed (maybe still processing)"
+              failed=$((failed + 1))
+            fi
           done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed submission log(s) failed"
+            exit 1
+          fi
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}

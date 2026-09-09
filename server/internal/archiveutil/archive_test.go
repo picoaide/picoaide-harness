@@ -214,3 +214,70 @@ func TestErrorText(t *testing.T) {
 		t.Fatal("no default message")
 	}
 }
+
+// zipSeqEntry 按顺序写 zip 条目(map 无法表达重复名)。
+type zipSeqEntry struct {
+	name    string
+	content []byte
+}
+
+func makeZipSeq(t *testing.T, entries []zipSeqEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range entries {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: e.name, Method: zip.Deflate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(e.content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestRejectsDuplicateEntries 覆盖 P2-11:重复条目(含大小写碰撞)必须被拒。
+// 服务端此前取第一个匹配条目、客户端按序写盘最后一个生效 → 审核看到的内容
+// 可能 ≠ 员工安装的内容(双 SKILL.md 夹带)。
+func TestRejectsDuplicateEntries(t *testing.T) {
+	dup := makeZipSeq(t, []zipSeqEntry{
+		{"SKILL.md", []byte("name: a\n")},
+		{"SKILL.md", []byte("name: b\n")},
+	})
+	if _, err := Validate(dup, testLim); !errors.Is(err, ErrDuplicateEntry) {
+		t.Fatalf("Validate(dup) = %v, want ErrDuplicateEntry", err)
+	}
+	if _, _, err := ListContents(dup, testLim, 4096); !errors.Is(err, ErrDuplicateEntry) {
+		t.Fatalf("ListContents(dup) = %v, want ErrDuplicateEntry", err)
+	}
+	if _, _, _, _, _, err := ExtractFileContent(dup, "SKILL.md", 4096); !errors.Is(err, ErrDuplicateEntry) {
+		t.Fatalf("ExtractFileContent(dup) = %v, want ErrDuplicateEntry", err)
+	}
+
+	// 大小写碰撞同样拒绝(客户端文件系统大小写不敏感 → 后者覆盖前者)
+	caseDup := makeZipSeq(t, []zipSeqEntry{
+		{"SKILL.md", []byte("name: a\n")},
+		{"skill.md", []byte("name: b\n")},
+	})
+	if _, err := Validate(caseDup, testLim); !errors.Is(err, ErrDuplicateEntry) {
+		t.Fatalf("Validate(case dup) = %v, want ErrDuplicateEntry", err)
+	}
+
+	// 单条目 / 目录条目 + 同名文件(目录不携带内容)不受影响
+	ok := makeZipSeq(t, []zipSeqEntry{{"SKILL.md", []byte("name: a\n")}})
+	if _, err := Validate(ok, testLim); err != nil {
+		t.Fatalf("Validate(single) = %v, want nil", err)
+	}
+	dirPlusFile := makeZipSeq(t, []zipSeqEntry{
+		{"SKILL.md", []byte("name: a\n")},
+		{"sub/", nil},
+		{"sub/x.md", []byte("x")},
+	})
+	if _, err := Validate(dirPlusFile, testLim); err != nil {
+		t.Fatalf("Validate(dir+file) = %v, want nil", err)
+	}
+}

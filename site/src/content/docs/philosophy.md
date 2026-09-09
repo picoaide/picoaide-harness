@@ -24,7 +24,7 @@ PicoAide Harness 的目标不是重新实现 Harness，而是把同一个运行�
 
 DeepSeek Harness 的核心是一个可组合的 agent harness：agent、模型、工具、会话、Web UI 全部通过 Cordis 插件机制组合。PicoAide Harness 没有另起炉灶重写，而是**把整个产品也当成一个插件**——桌面壳（窗口、托盘、更新、固定 desktop profile）本身就是一个合法的 DSH 插件，与第三方插件走同一条组合路径：
 
-- 上游 DeepSeek Harness 以**固定版本原样运行**（当前 pin `0.1.1-rc.2`），任何产品能力都不修改上游源码；
+- 上游 DeepSeek Harness 以**固定版本原样运行**（当前 pin `0.1.2-rc.1`），任何产品能力都不修改上游源码；
 - 官方生态里的插件可以直接安装使用；
 - 自研的业务能力（能力中心、连接器、定时任务、浏览器、企业登录）与第三方插件**对等组合**，通过同一个 slot 机制注入界面、通过同一个 service contract 提供能力；
 - 升级只跟随上游版本号，不破坏本地扩展。

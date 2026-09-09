@@ -37,8 +37,9 @@ const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
 
 /**
  * Sidebar foot action waking the dedicated browser window. The browser lives
- * in its own OS window (created on first agent open); the sidebar button
- * shows it again after a user close. The window itself carries the tab strip
+ * in its own OS window, created HIDDEN at client start so the agent can drive
+ * it in the background; the sidebar button shows that window, and a user close
+ * only hides it. The window itself carries the tab strip
  * and control buttons; no modal panel is rendered in the main window.
  * @param props - sidebar column state from the foot slot owner.
  */

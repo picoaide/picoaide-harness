@@ -2,6 +2,8 @@ package serverstore
 
 import (
 	"database/sql"
+	"net/url"
+	"sync"
 	"testing"
 )
 
@@ -175,5 +177,67 @@ func TestMigration0028AuditCleanupOldDB(t *testing.T) {
 	}
 	if old != 0 {
 		t.Fatal("kb_audit_logs should be dropped after migration")
+	}
+}
+
+// newFreshDB 建一个**未跑迁移**的临时库(并发迁移测试专用;NewTestDB 会先
+// 应用迁移,测不出竞态)。用后 DROP。
+func newFreshDB(t *testing.T) *sql.DB {
+	t.Helper()
+	adminDSN := PgTestDSN()
+	admin := requireTestPG(t, adminDSN)
+	u, err := url.Parse(adminDSN)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("parse test dsn: %v", err)
+	}
+	dbName := "picoaide_test_fresh_" + randomSuffix(6)
+	adminURL := *u
+	adminURL.Path = "/postgres"
+	if _, err := admin.Exec("CREATE DATABASE " + dbName); err != nil {
+		admin.Close()
+		t.Fatalf("create fresh db: %v", err)
+	}
+	u.Path = "/" + dbName
+	db, err := Open(DBConfig{Driver: DriverPG, DSN: u.String()})
+	if err != nil {
+		admin.Close()
+		t.Fatalf("open fresh db: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+		_, _ = admin.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
+		admin.Close()
+	})
+	return db
+}
+
+// TestApplyMigrationsConcurrent 覆盖 P2-2:两个实例并发启动时必须由
+// advisory lock 互斥,迁移只执行一次且不报竞态错误。
+func TestApplyMigrationsConcurrent(t *testing.T) {
+	db := newFreshDB(t)
+	const n = 2
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- ApplyMigrations(db)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ApplyMigrations: %v", err)
+		}
+	}
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if want := len(migrationsFor()); rows != want {
+		t.Fatalf("schema_migrations rows = %d, want %d (每条迁移只执行一次)", rows, want)
 	}
 }

@@ -93,7 +93,15 @@ export default class SessionService extends Service {
 
   setSession(session: Session): void {
     this.session = session
-    void persist(this.tokenFile, session)
+    // P1-13: a failed token write ($DSH_HOME read-only / ENOSPC / ROFS / a
+    // missing parent dir) must never become an unhandled rejection — the
+    // desktop fail-loud handler treats those as fatal and exits the whole app.
+    // Degrade: keep the in-memory session for this run, warn once per failure,
+    // and let the next successful login persist again.
+    void persist(this.tokenFile, session).catch((cause: unknown) => {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      this.ctx.logger?.warn(`[pico] session token could not be persisted (${this.tokenFile}): ${message}`)
+    })
     this.ctx.emit(SESSION_CHANGED_EVENT, session)
   }
 

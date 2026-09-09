@@ -7,7 +7,7 @@ package serverauth
 // 权限: 声明式权限点常量 + 角色→权限映射(Go 内存表,不落 DB——权限集合
 // 稳定、变更需发版,内表简单可测无 JOIN;未来需要运行时自定义角色时再演进)。
 //
-// 服务端强制: RequirePermission 中间件在所有 /api/admin/* 路由上执行,
+// 服务端强制: RequirePermission 中间件在所有 /api/server/admin/* 路由上执行,
 // 前端隐藏菜单只是体验层;权限判定在服务端 403,不可绕过。
 //
 
@@ -20,10 +20,9 @@ import (
 
 // 权限点清单。命名规范: <域>:<动作>。
 const (
-	PermUserRead        = "user:read"   // 用户列表
-	PermUserWrite       = "user:write"  // 增改删用户、配额
-	PermRoleAssign      = "role:assign" // 角色分配/提权降权
-	PermDeptRead        = "dept:read"   // 部门
+	PermUserRead        = "user:read"  // 用户列表
+	PermUserWrite       = "user:write" // 增改删用户、配额、角色分配(2026-09-08:删除零消费的 role:assign)
+	PermDeptRead        = "dept:read"  // 部门
 	PermDeptWrite       = "dept:write"
 	PermAuthRead        = "auth:read"    // 认证配置(脱敏)
 	PermAuthWrite       = "auth:write"   // 认证配置(含 client_secret)
@@ -31,7 +30,6 @@ const (
 	PermGatewayWrite    = "gateway:write"
 	PermUsageRead       = "usage:read"       // 用量报表
 	PermReportWrite     = "report:write"     // 报表订阅管理(2026-09 P1)
-	PermQuotaWrite      = "quota:write"      // 配额/部门预算
 	PermMarketRead      = "market:read"      // 市场技能
 	PermMarketWrite     = "market:write"     // 技能审批/授权
 	PermCapabilityRead  = "capability:read"  // 能力中心
@@ -44,24 +42,23 @@ const (
 	PermBrandWrite      = "brand:write"
 	PermPortalRead      = "portal:read" // 门户首页
 	PermPortalWrite     = "portal:write"
-	PermServerInfoRead  = "server-info:read"      // 服务器信息
-	PermErrorMonRead    = "error-monitoring:read" // 错误监控
+	PermServerInfoRead  = "server-info:read" // 服务器信息(含错误监控配置面,2026-09-08:删除零消费的 error-monitoring:read)
 )
 
 // AllPermissions is the full permission set (super_admin).
 var AllPermissions = []string{
-	PermUserRead, PermUserWrite, PermRoleAssign,
+	PermUserRead, PermUserWrite,
 	PermDeptRead, PermDeptWrite,
 	PermAuthRead, PermAuthWrite,
 	PermGatewayRead, PermGatewayWrite,
-	PermUsageRead, PermReportWrite, PermQuotaWrite,
+	PermUsageRead, PermReportWrite,
 	PermMarketRead, PermMarketWrite,
 	PermCapabilityRead, PermCapabilityWrite,
 	PermConnectorRead, PermConnectorWrite,
 	PermAuditRead, PermAuditRetention,
 	PermBrandRead, PermBrandWrite,
 	PermPortalRead, PermPortalWrite,
-	PermServerInfoRead, PermErrorMonRead,
+	PermServerInfoRead,
 }
 
 // AuditorPermissions is the read-only triple allowed to the auditor role.
@@ -118,7 +115,7 @@ func RequirePermission(perm string) gin.HandlerFunc {
 }
 
 // ---------------------------------------------------------------------------
-// 路由表收敛: 全部 /api/admin/* 路由必须通过 AdminRoute 注册, 显式声明
+// 路由表收敛: 全部 /api/server/admin/* 路由必须通过 AdminRoute 注册, 显式声明
 // 权限点, 杜绝「漏挂权限 → fall-open 越权」。请求序列:
 //   AdminAuth(会话+CSRF) → RequirePermission(perm) → handler
 //
@@ -135,7 +132,7 @@ type adminRoutePerm struct {
 
 // adminRoutes is the in-memory registry of every AdminRoute registration;
 // the integrity test compares it against gin's actual route table to prove
-// no /api/admin/* route can exist without an explicit permission (fall-open
+// no /api/server/admin/* route can exist without an explicit permission (fall-open
 // protection). Routes registered here are also visible via Routes().
 var adminRoutes []adminRoutePerm
 

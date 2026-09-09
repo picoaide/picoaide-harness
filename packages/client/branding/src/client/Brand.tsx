@@ -1,4 +1,13 @@
 import { createElement } from 'react'
+import {
+  BRAND_CONNECTOR,
+  BRAND_MARK_BRACES,
+  BRAND_MARK_STROKE_WIDTH,
+  BRAND_MARK_TRANSFORM,
+  BRAND_NODES,
+  BRAND_TILE_RADIUS_RATIO,
+  BRAND_TILE_VIEWBOX,
+} from './brand-geometry.ts'
 
 // build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
 // node types,声明最小面的 process 占位。
@@ -23,8 +32,8 @@ declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
  * braces sit on a full-bleed rounded square and are enlarged 1.25× around
  * the canvas center (translate/scale/translate of the source paths).
  */
-const BRACE_TILE_VIEWBOX = '0 0 1254 1254'
-const BRACE_TILE_RADIUS_RATIO = 180 / 1254
+const BRACE_TILE_VIEWBOX = BRAND_TILE_VIEWBOX
+const BRACE_TILE_RADIUS_RATIO = BRAND_TILE_RADIUS_RATIO
 
 /** Braces + connector + nodes in brands/official/logo.svg coordinates, enlarged 1.25×. */
 function BraceGlyph() {
@@ -40,22 +49,30 @@ function BraceGlyph() {
     },
     createElement(
       'g',
-      { transform: 'translate(627 627) scale(1.25) translate(-627 -627)' },
-      createElement('path', {
-        d: 'M334 409 C300 409 273 431 273 466 V548 C273 582 254 607 220 620 C254 633 273 658 273 692 V775 C273 810 300 843 334 843',
-        strokeWidth: 40,
+      { transform: BRAND_MARK_TRANSFORM },
+      ...BRAND_MARK_BRACES.map(brace => createElement('path', {
+        key: brace,
+        d: brace,
+        strokeWidth: BRAND_MARK_STROKE_WIDTH,
         strokeLinecap: 'round',
         strokeLinejoin: 'round',
-      }),
-      createElement('path', {
-        d: 'M920 409 C954 409 981 431 981 466 V548 C981 582 1000 607 1034 620 C1000 633 981 658 981 692 V775 C981 810 954 843 920 843',
-        strokeWidth: 40,
+      })),
+      createElement('line', {
+        x1: BRAND_CONNECTOR.x1,
+        y1: BRAND_CONNECTOR.y1,
+        x2: BRAND_CONNECTOR.x2,
+        y2: BRAND_CONNECTOR.y2,
+        strokeWidth: BRAND_CONNECTOR.strokeWidth,
         strokeLinecap: 'round',
-        strokeLinejoin: 'round',
       }),
-      createElement('line', { x1: 435, y1: 627, x2: 817, y2: 627, strokeWidth: 20, strokeLinecap: 'round' }),
-      createElement('circle', { cx: 435, cy: 627, r: 65, fill: 'currentColor', stroke: 'none' }),
-      createElement('circle', { cx: 817, cy: 627, r: 65, fill: 'currentColor', stroke: 'none' }),
+      ...BRAND_NODES.map(node => createElement('circle', {
+        key: `${node.cx}-${node.cy}`,
+        cx: node.cx,
+        cy: node.cy,
+        r: node.r,
+        fill: 'currentColor',
+        stroke: 'none',
+      })),
     ),
   )
 }

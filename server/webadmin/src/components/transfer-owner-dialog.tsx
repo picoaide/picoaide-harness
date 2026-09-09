@@ -68,20 +68,21 @@ export function TransferOwnerDialog({
     }
   }
 
-  // 打开时重置并拉取初始候选(空查询 = 前 200 名用户);查询输入防抖服务端搜索。
-  const [lastOpen, setLastOpen] = useState(false)
-  if (open !== lastOpen) {
-    setLastOpen(open)
-    if (open) {
-      setOwner('')
-      setToOfficial(false)
-      setQuery('')
-      setError('')
-      setBusy(false)
-      setListOpen(false)
-      void loadUsers('')
-    }
-  }
+  // P2-44: 原来在 render 体内 setState + void loadUsers('')(渲染期副作用;
+  // StrictMode 双渲染会重复发请求、状态更新时机不可预测)。改为 open 变化时
+  // 在 effect 内重置并拉取初始候选(空查询 = 前 200 名用户)。
+  useEffect(() => {
+    if (!open) return
+    setOwner('')
+    setToOfficial(false)
+    setQuery('')
+    setError('')
+    setBusy(false)
+    setListOpen(false)
+    void loadUsers('')
+    // loadUsers 内部以 seq 丢弃过期响应,仅依赖 open 即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   const onQueryChange = (value: string) => {
     setQuery(value)
@@ -213,7 +214,9 @@ export function TransferOwnerDialog({
         {error !== '' && <div className="text-sm text-destructive">{error}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="outline" onClick={onClose}>取消</Button>
-          <Button disabled={busy || owner === '' || owner === currentOwner} onClick={() => { void transfer() }}>
+          {/* P2-41: 归属官方的分支不选用户(owner 恒空),原判定未按 toOfficial 豁免
+              → 「归属官方」永远点不动,而 transfer() 本身是允许的。 */}
+          <Button disabled={busy || (!toOfficial && (owner === '' || owner === currentOwner))} onClick={() => { void transfer() }}>
             {busy ? '处理中…' : '确认转移'}
           </Button>
         </div>

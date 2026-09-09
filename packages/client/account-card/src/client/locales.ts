@@ -5,7 +5,6 @@
  * the zh key source directly so components stay dependency-free.
  */
 export const zh = {
-  'account.balance': '余额',
   'account.budget': '本月预算',
   'account.usedThisMonth': '本月已用',
   'account.today': '今日',
@@ -22,7 +21,6 @@ export const zh = {
 }
 
 export const en: Record<keyof typeof zh, string> = {
-  'account.balance': 'Balance',
   'account.budget': 'Monthly budget',
   'account.usedThisMonth': 'Used this month',
   'account.today': 'Today',

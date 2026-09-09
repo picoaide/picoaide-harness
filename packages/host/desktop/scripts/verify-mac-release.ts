@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MACOS_ARM64_NATIVE_ENTRIES } from './mac-runtime.ts'
+import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
 
 /** Injectable filesystem and command boundaries for release verification. */
 export interface MacReleaseVerificationOptions {
@@ -98,7 +98,7 @@ export function verifyMacRelease(
       ? join(appPath, 'Contents', 'Resources', 'app.asar.unpacked')
       : join(appPath, 'Contents', 'Resources', 'app')
     for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
-      options.run('lipo', [join(unpackedRoot, entry.path), '-verify_arch', entry.arch])
+      options.run('lipo', [resolveNativeEntry(unpackedRoot, entry), '-verify_arch', entry.arch])
     }
     options.run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath])
     // spctl/stapler 只对已公证+staple 的产物有意义;预发只签名不公证传

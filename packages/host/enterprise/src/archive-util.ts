@@ -101,7 +101,23 @@ function posixNormalize(raw: string): string {
   return parts.join('/')
 }
 
-/** Scan a zip buffer: size bounds, path safety, link refusal. */
+/**
+ * Refuse a duplicate archive path (P2-11). Two entries with the same path —
+ * or paths that collide only by case, which overwrite each other on the
+ * case-insensitive filesystems macOS/Windows use — let a "which SKILL.md
+ * wins?" archive differ between the reviewer (server takes the FIRST match)
+ * and the installer (last write wins). Rejecting keeps both sides aligned.
+ * @param seen - lowercased path set accumulated by the caller.
+ * @param path - the normalized path of the current entry.
+ * @param raw - the original entry name (for the error message).
+ */
+function assertNoDuplicateEntry(seen: Set<string>, path: string, raw: string): void {
+  const key = path.toLowerCase()
+  if (seen.has(key)) throw new Error(`duplicate entry in archive: ${raw}`)
+  seen.add(key)
+}
+
+/** Scan a zip buffer: size bounds, path safety, link refusal, duplicate paths. */
 function scanZip(archive: Buffer): void {
   let z: AdmZip
   try {
@@ -111,13 +127,15 @@ function scanZip(archive: Buffer): void {
   }
   let total = 0
   let entries = 0
+  const seen = new Set<string>()
   for (const entry of z.getEntries()) {
     entries++
     if (entries > MAX_ENTRIES) {
       throw new Error(`archive has too many entries (${entries} > ${MAX_ENTRIES})`)
     }
-    assertSafeZipEntry(entry)
+    const safePath = assertSafeZipEntry(entry)
     if (!entry.isDirectory) {
+      assertNoDuplicateEntry(seen, safePath, entry.entryName)
       total += entry.header.size
       if (total > MAX_UNPACKED_BYTES) {
         throw new Error(`unpacked archive too large (${total} bytes)`)
@@ -128,7 +146,8 @@ function scanZip(archive: Buffer): void {
 
 /**
  * Refuse an archive whose entries are unsafe: absolute paths, `..` traversal,
- * empty paths, symbolic/hard links, or an unpacked tree over the bound.
+ * empty paths, symbolic/hard links, duplicate (or case-colliding) paths, or
+ * an unpacked tree over the bound.
  * zip 条目由 AdmZip 内存扫描;仅 tar.gz 需要落盘给 node-tar 的 listing reader。
  * @param archive - the raw archive bytes (zip or gzipped tar).
  * @throws Error naming the first violation.
@@ -144,6 +163,7 @@ export async function assertArchiveSafe(archive: Buffer): Promise<void> {
     await writeFile(archiveFile, archive, { mode: 0o600 })
     let total = 0
     let violation: string | null = null
+    const seen = new Set<string>()
     await tar.t({
       file: archiveFile,
       onentry: (entry) => {
@@ -158,6 +178,9 @@ export async function assertArchiveSafe(archive: Buffer): Promise<void> {
           if (LINK_TYPES.has(entry.type)) {
             throw new Error(`link entry refused in archive: ${safePath}`)
           }
+          // P2-11: duplicate/case-colliding paths would let the reviewer's
+          // first-match view differ from the installer's last-write-wins one.
+          assertNoDuplicateEntry(seen, safePath, entry.path)
           total += entry.size ?? 0
           if (total > MAX_UNPACKED_BYTES) {
             throw new Error(`unpacked archive too large (${total} bytes)`)

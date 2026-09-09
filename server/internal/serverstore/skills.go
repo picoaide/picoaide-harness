@@ -3,9 +3,9 @@ package serverstore
 import (
 	"database/sql"
 	"errors"
-	"strconv"
-	"strings"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
 
 // Skill is a marketplace skill row.
@@ -62,7 +62,7 @@ func currentRelease(db *sql.DB, kind, appID string, withArchive bool) (*Release,
 		if r.DeletedAt != nil || r.Status != ReleaseStatusApproved {
 			continue
 		}
-		if best == nil || compareVersionStrings(r.Version, best.Version) > 0 {
+		if best == nil || skillmanifest.CompareVersions(r.Version, best.Version) > 0 {
 			best = &list[i]
 		}
 	}
@@ -73,25 +73,6 @@ func currentRelease(db *sql.DB, kind, appID string, withArchive bool) (*Release,
 		return GetRelease(db, kind, appID, best.Version)
 	}
 	return best, nil
-}
-
-// compareVersionStrings 数值感知比较(与 skillmanifest.CompareVersions 同规则;
-// serverstore 不依赖上层包,故在此保留一份小实现)。
-func compareVersionStrings(a, b string) int {
-	as, bs := strings.Split(strings.SplitN(a, "-", 2)[0], "."), strings.Split(strings.SplitN(b, "-", 2)[0], ".")
-	for i := 0; i < 3; i++ {
-		var av, bv int
-		if i < len(as) {
-			av, _ = strconv.Atoi(as[i])
-		}
-		if i < len(bs) {
-			bv, _ = strconv.Atoi(bs[i])
-		}
-		if av != bv {
-			return av - bv
-		}
-	}
-	return strings.Compare(a, b)
 }
 
 // appToSkill 把 App + 展示版本投影成旧 Skill DTO。

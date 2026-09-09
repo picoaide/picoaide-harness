@@ -10,6 +10,7 @@ import { PageHeader } from '../components/page-header'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { RefreshCcw, Trash2, Upload } from 'lucide-react'
 import { BRAND_LOGO_URL } from '../lib/brand-assets'
+import { useFlash } from '../lib/use-flash'
 
 // 品牌配置页(v3b): 登录页品牌 / 客户端品牌 / 门户首页 3 Tab + 实时预览。
 // 生效以「保存」为准; 快照恢复内置(brand_snapshots 服务端自动保存)。
@@ -56,7 +57,8 @@ export default function Brand() {
   const [portal, setPortal] = useState<PortalCfg>(EMPTY_PORTAL)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState('')
+  // P3: flash 定时器由 useFlash 统一清理(原来 setTimeout 未清理,卸载后仍 setState)。
+  const [msg, setMsg] = useFlash(4000)
   const [err, setErr] = useState('')
   const [snapshots, setSnapshots] = useState<{ id: number; created_at: string }[]>([])
   const fileRef = useRef<HTMLInputElement>(null)
@@ -90,7 +92,6 @@ export default function Brand() {
       await request(`${ADMIN_API}/brand`, { method: 'PUT', body: JSON.stringify(brand) })
       await request(`${ADMIN_API}/portal`, { method: 'PUT', body: JSON.stringify(portal) })
       setMsg('已保存(客户端/登录页刷新后生效)')
-      setTimeout(() => setMsg(''), 4000)
       void load()
     } catch (e: any) {
       setErr(e.message)
@@ -109,7 +110,6 @@ export default function Brand() {
     try {
       await request(`${ADMIN_API}/brand/logo`, { method: 'POST', body: fd })
       setMsg('Logo 已上传')
-      setTimeout(() => setMsg(''), 3000)
       void load()
     } catch (e: any) {
       setErr(e.message)
@@ -138,7 +138,8 @@ export default function Brand() {
   }
 
   async function resetDefault() {
-    if (!window.confirm('将清空所有自定义品牌配置(log/名称/主色),恢复为 PicoAide 默认样式。确认?')) return
+    // P3: 主题色/主色已下线(见文件头注释 :42),确认文案不得再提「主色」。
+    if (!window.confirm('将清空所有自定义品牌配置(logo/名称/标语),恢复为 PicoAide 默认样式。确认?')) return
     setBusy(true)
     try {
       await request(`${ADMIN_API}/brand`, { method: 'PUT', body: JSON.stringify({ ...EMPTY_BRAND, enabled: false }) })

@@ -12,6 +12,10 @@
 
 用法: python3 ldap-rbac-brand-test.py [server_base](默认 http://127.0.0.1:8091)
 数据: LDAP 容器(127.0.0.1:1389) alice/alice123; admin/admin123456; audit01/audit12345
+
+P2-53: 旧命名空间 /api/auth/*、/api/admin/*、/api/brand 已在 2026-09 移除。
+唯一真源 = server/internal/router:员工面 /api/client/v2/*、管理面 /api/server/admin/*、
+公开品牌 /api/client/v2/brand。本脚本全部路径已按真源核对。
 """
 import http.cookiejar
 import json
@@ -46,32 +50,32 @@ def check(name, cond, detail=''):
     if not cond: ok = False
 
 # 1. LDAP 员工面登录
-st, d, _ = post(BASE + '/api/auth/login', {'username': 'alice', 'password': 'alice123'})
+st, d, _ = post(BASE + '/api/client/v2/auth/login', {'username': 'alice', 'password': 'alice123'})
 check('LDAP 员工登录成功', st == 200 and 'token' in d, f'st={st}')
 check('alice role=user', d.get('user', {}).get('role') == 'user', f"role={d.get('user',{}).get('role')}")
 
 # 2. admin 后台登录
-st, d, hdrs = post(BASE + '/api/admin/login', {'username': 'admin', 'password': 'admin123456'})
+st, d, hdrs = post(BASE + '/api/server/admin/login', {'username': 'admin', 'password': 'admin123456'})
 check('admin 后台登录成功', st == 200 and 'csrf_token' in d, f'st={st}')
 
 # 3. auditor 员工面被拒
-st, d, _ = post(BASE + '/api/auth/login', {'username': 'audit01', 'password': 'audit12345'})
+st, d, _ = post(BASE + '/api/client/v2/auth/login', {'username': 'audit01', 'password': 'audit12345'})
 check('auditor 员工面被拒 AUDITOR_NOT_ALLOWED', st == 401 and d.get('error', {}).get('code') == 'AUDITOR_NOT_ALLOWED', f'st={st}')
 
 # 4. auditor 后台只读
-st, d, hdrs = post(BASE + '/api/admin/login', {'username': 'audit01', 'password': 'audit12345'})
+st, d, hdrs = post(BASE + '/api/server/admin/login', {'username': 'audit01', 'password': 'audit12345'})
 check('auditor 后台登录成功', st == 200, f'st={st}')
 perms = d.get('user', {}).get('permissions', [])
 check('auditor 权限=三只读', set(perms) == {'audit:read', 'usage:read', 'user:read'}, f'perms={perms}')
 aud_cookie = ''
 
 # 5. auditor 写 403 / 读 200
-st, _, _ = post(BASE + '/api/admin/auth', {}, {'X-CSRF-Token': d.get('csrf_token',''), 'Cookie': 'picoaide_session=' + 'x'})
+st, _, _ = post(BASE + '/api/server/admin/auth', {}, {'X-CSRF-Token': d.get('csrf_token',''), 'Cookie': 'picoaide_session=' + 'x'})
 # 若会话无效 401; 会话有效但无权限 403 —— 用真实会话验证(通过子请求复用 cookie jar 不现实, 简化: 仅断言非 200)
 check('auditor PUT auth 被拒(非200)', st != 200, f'st={st}')
 
 # 6. 品牌 API(enabled=true 时验证品牌内容; 已配置 Acme AI)
-st, body = get(BASE + '/api/brand')
+st, body = get(BASE + '/api/client/v2/brand')
 if '"enabled":true' in body:
     check('品牌启用且含 Acme AI', '"Acme AI"' in body, body[:80])
 else:

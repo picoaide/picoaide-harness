@@ -3,11 +3,49 @@ package serverauth
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
+
+// P1-4:OIDC 用户同为 Source=external,但不在 ldap_synced_users 中,LDAP
+// 对账不得停用他们(此前每小时把全部 OIDC 用户 status=0 并吊销 token)。
+func TestSyncDirectoryDoesNotDeactivateOIDCUsers(t *testing.T) {
+	db := mustDB(t)
+	p, _ := fakeDir(t)
+	if _, err := SyncDirectoryRun(db, p); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟一次 OIDC 登录创建的外部用户(不在 LDAP 目录里)。
+	id, err := serverstore.CreateUser(db, &serverstore.User{
+		Username: "oidc-user", DisplayName: "OIDC User", Source: "external", Status: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateToken(db, id, "raw-oidc-token", time.Now().AddDate(0, 0, 1)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := SyncDirectoryRun(db, p)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if res.Deact != 0 {
+		t.Fatalf("deactivated = %d, want 0 (OIDC users must survive LDAP reconciliation)", res.Deact)
+	}
+	u, err := serverstore.GetUserByID(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Status != 1 {
+		t.Fatalf("oidc user status = %d, want 1", u.Status)
+	}
+	if _, err := serverstore.GetTokenByHash(db, serverstore.TokenHash("raw-oidc-token")); err != nil {
+		t.Fatalf("oidc token must be kept: %v", err)
+	}
+}
 
 // dirUser 构造一个目录用户条目(uid + cn + mail)。
 func dirUser(dn, uid, cn, mail string) *ldap.Entry {

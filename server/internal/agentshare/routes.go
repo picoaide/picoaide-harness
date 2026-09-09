@@ -188,7 +188,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("/:name/:version/archive", downloadVersioned(db, cacheDir, false))
 }
 
-// RegisterAdminRoutes mounts /api/admin/agent-presets (AdminAuth + RBAC v3b).
+// RegisterAdminRoutes mounts /api/server/admin/agent-presets (AdminAuth + RBAC v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	base := "/api/server/admin/agent-presets"
 	g := r.Group(base, serverauth.AdminAuth(db))
@@ -407,6 +407,10 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 // decide approves or rejects one row (admin only). Legacy single-param form
 // addresses the name's LATEST row (审计 2026-08-25 D-1:保留旧 UI/代理兼容,
 // 但「最新」经 GetAgentPreset 的 semver 语义解析,非字符串排序)。
+// P1-11:目标版本必须是「最高版本的非 approved 行」——已上架 1.0.0 + 待审
+// 2.0.0 时,旧实现(GetAgentPreset = 最高 approved)会把 1.0.0 置 rejected
+// (已上架版本从员工目录消失)而 2.0.0 仍 pending。按版本精确审核请用
+// /:name/:version/{approve,reject}。
 func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
@@ -414,7 +418,7 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
 			return
 		}
-		p, err := serverstore.GetAgentPreset(db, name)
+		p, err := serverstore.GetAgentPresetForReview(db, name)
 		if err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
@@ -843,6 +847,8 @@ func archiveErrorMessage(err error) string {
 		return "归档缺少 agent.cordis.yml"
 	case errors.Is(err, ErrEntryLimit):
 		return "归档条目过多"
+	case errors.Is(err, ErrDuplicateEntry):
+		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
 	default:
 		return "归档校验失败"
 	}

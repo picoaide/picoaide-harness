@@ -385,3 +385,32 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestPublishKeepsOfficialOwnership 覆盖 P2-21:管理员给「官方」App 发版后,
+// 归属仍是官方(owner=”),不得被改写成发布者。
+func TestPublishKeepsOfficialOwnership(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	official := req("official-keep", "1.0.0", "c1", "admin")
+	official.Channel = serverstore.AppChannelMarket
+	official.AdminPublish = true
+	if _, err := Publish(db, official); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "official-keep", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	next := req("official-keep", "2.0.0", "c2", "admin")
+	next.Channel = serverstore.AppChannelMarket
+	next.AdminPublish = true
+	if _, err := Publish(db, next); err != nil {
+		t.Fatalf("admin publish official v2: %v", err)
+	}
+	app, err := serverstore.GetApp(db, serverstore.AppKindSkill, "official-keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Official != 1 || app.Owner != "" {
+		t.Fatalf("after admin publish: official=%d owner=%q, want official=1 owner=''", app.Official, app.Owner)
+	}
+}

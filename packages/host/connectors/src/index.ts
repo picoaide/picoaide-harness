@@ -202,6 +202,28 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     states.clear()
   }
 
+  /**
+   * Serialize the two lifecycle entry points (P2-23): the boot restore and
+   * every session change used to run concurrently, so an in-flight restore for
+   * the previous user could register MCP servers AFTER the new user's
+   * teardown — leaking connections and duplicating tools. Tasks run strictly
+   * in order and only the NEWEST enqueued task survives: an older queued task
+   * is superseded (its epoch no longer matches) because the newest transition
+   * already carries the full desired state.
+   */
+  let lifecycleEpoch = 0
+  let lifecycleQueue: Promise<void> = Promise.resolve()
+  const runLifecycle = (task: () => Promise<void>): Promise<void> => {
+    const epoch = ++lifecycleEpoch
+    const run = lifecycleQueue.then(async () => {
+      if (epoch !== lifecycleEpoch) return
+      await task()
+    })
+    // Keep the chain alive after a failure; the caller still sees the error.
+    lifecycleQueue = run.then(() => {}, () => {})
+    return run
+  }
+
   /** Rebuild per-user store/runtime after a login/logout/switch. */
   const reconfigureUser = (): void => {
     const username = currentUser()
@@ -216,12 +238,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // catalog is synced from bootstrap FIRST so the restore registers the
   // current server directory (defs are server-issued now).
   ctx.on('pico/session-changed', (next: unknown) => {
-    void (async () => {
+    void runLifecycle(async () => {
       await teardownAll()
       await syncServerDefs()
       reconfigureUser()
       if (next !== null) await restoreAll()
-    })().catch((cause: unknown) => {
+    }).catch((cause: unknown) => {
       ctx.logger?.error('pico-connectors: session change handling failed', cause)
     })
   })
@@ -289,6 +311,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         { inject: ['tools'], apply: applyMcpClient, name: 'mcp-client' },
         config,
       )
+      // P2-23: re-registering the same server key must retire the previous
+      // registration first — the old `set()` overwrote the disposer, leaving
+      // the first fiber (and its tools) alive forever.
+      const previous = mcpDisposers.get(server.serverName)
+      if (previous !== undefined) {
+        try { previous() } catch { /* teardown never throws */ }
+        mcpDisposers.delete(server.serverName)
+      }
       mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
     }
   }
@@ -424,7 +454,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   ctx.effect(() => {
     return () => {
+      // Supersede any queued/running lifecycle task: a restore that resolves
+      // after teardown must not re-register MCP servers (P2-23).
+      lifecycleEpoch++
       for (const dispose of mcpDisposers.values()) dispose()
+      mcpDisposers.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
       // lingering OAuth/device flow would keep the callback server up and
       // (on a later disconnect) could write back credentials after teardown.
@@ -593,12 +627,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // Initial restore: wait for the bootstrap def sync (the directory is the
   // source now), then restore — startup with an empty defs list would skip
   // every registered credential. The session listener above handles later
-  // changes; this covers the startup path.
-  void syncServerDefs()
-    .then(() => restoreAll())
-    .catch((cause: unknown) => {
-      ctx.logger?.error('pico-connectors: initial restore failed', cause)
-    })
+  // changes; this covers the startup path. P2-23: it goes through the same
+  // serialized lifecycle queue so a login that lands during boot supersedes
+  // this restore instead of racing it.
+  void runLifecycle(async () => {
+    await syncServerDefs()
+    await restoreAll()
+  }).catch((cause: unknown) => {
+    ctx.logger?.error('pico-connectors: initial restore failed', cause)
+  })
 }
 
 export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types.ts'

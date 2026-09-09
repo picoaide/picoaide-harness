@@ -18,9 +18,22 @@ export interface DesktopUpdateStateResponse {
   readonly currentVersion: string
   /** Current download progress (bytes) while downloading; undefined otherwise. */
   readonly downloadProgress: UpdateDownloadProgressState | undefined
-  /** Last user-visible check failure category; undefined when the last check succeeded. */
-  readonly lastError: 'network' | 'release-missing' | 'unsupported' | undefined
+  /** Last user-visible check/download failure category; undefined when the last
+   * check succeeded. Download failures keep their precise cause instead of
+   * collapsing into `network` (P2-63). */
+  readonly lastError: DesktopUpdateErrorCategory | undefined
 }
+
+/** Failure categories surfaced to the user for update checks and downloads.
+ * `checksum-*`/`invalid-artifact` are download-time causes that used to be
+ * flattened into `network` (P2-63). */
+export type DesktopUpdateErrorCategory =
+  | 'network'
+  | 'release-missing'
+  | 'unsupported'
+  | 'checksum-mismatch'
+  | 'checksum-missing'
+  | 'invalid-artifact'
 
 /** Byte-level download progress served to the renderer badge. */
 interface UpdateDownloadProgressState {

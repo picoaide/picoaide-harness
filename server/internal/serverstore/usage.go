@@ -160,18 +160,21 @@ func offpeakFactor(now time.Time, discount float64, windows []PeakWindow) float6
 // windows (0023). Unpriced models (0,0) yield 0 cost.
 // 缓存计费(0029/0030):cacheTokens(命中的输入 token)按 cacheInputPer1M 计费
 // (未配置则回退输入价),其余输入按 inputPer1M,输出按 outputPer1M。
+// promptTokens 是**含缓存部分的总输入**;P1-9:不再把 cacheTokens 钳到
+// promptTokens(该钳制会把 Anthropic 的 cache_read 压到 input_tokens,少收
+// 约 99.9%),改为相加口径 + 只对 miss 做非负防御。
 func costOfAt(now time.Time, promptTokens, completionTokens, cacheTokens int64, inputPer1M, outputPer1M, cacheInputPer1M, offpeak float64, windows []PeakWindow) float64 {
 	if cacheTokens < 0 {
 		cacheTokens = 0
-	}
-	if cacheTokens > promptTokens {
-		cacheTokens = promptTokens // 防御:命中数不超过总输入
 	}
 	cachePrice := cacheInputPer1M
 	if cachePrice <= 0 {
 		cachePrice = inputPer1M // 未配置缓存价:命中按输入价计
 	}
 	missTokens := promptTokens - cacheTokens
+	if missTokens < 0 {
+		missTokens = 0 // 防御:异常输入不产生负费用
+	}
 	base := float64(missTokens)/1e6*inputPer1M +
 		float64(cacheTokens)/1e6*cachePrice +
 		float64(completionTokens)/1e6*outputPer1M
@@ -297,20 +300,16 @@ func UserMonthlyUsage(db *sql.DB, userID int64) (int64, error) {
 
 // UserMonthlyUsageBatch returns a map of user_id → tokens used this calendar
 // month for a bounded set of users (one query, no N+1).
+// P2-7:成员集合以数组参数传入(= ANY),避免上万成员拼 IN(?,?,…) 撞 PG
+// 65535 参数上限(触发后配额校验 fail-closed → 全员 429)。
 func UserMonthlyUsageBatch(db *sql.DB, userIDs []int64) (map[int64]int64, error) {
 	out := map[int64]int64{}
 	if len(userIDs) == 0 {
 		return out, nil
 	}
-	placeholders := strings.Repeat("?,", len(userIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(userIDs)+1)
-	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
-	for _, id := range userIDs {
-		args = append(args, id)
-	}
 	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t
-		FROM usage WHERE created_at >= ? AND user_id IN (`+placeholders+`) GROUP BY user_id`, args...)
+		FROM usage WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(userIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -373,17 +372,12 @@ func MonthUsageByUsers(db *sql.DB, userIDs []int64) (map[int64]MonthUsageByUser,
 	if len(userIDs) == 0 {
 		return out, nil
 	}
-	placeholders := strings.Repeat("?,", len(userIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(userIDs)+1)
-	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
-	for _, id := range userIDs {
-		args = append(args, id)
-	}
+	// P2-7:数组参数,见 UserMonthlyUsageBatch 注释。
 	rows, err := db.Query(`SELECT user_id,
 		COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t,
 		COALESCE(SUM(cost),0) AS c
-		FROM usage WHERE created_at >= ? AND user_id IN (`+placeholders+`) GROUP BY user_id`, args...)
+		FROM usage WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(userIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -406,15 +400,10 @@ func UserMonthlyCostBatch(db *sql.DB, userIDs []int64) (map[int64]float64, error
 	if len(userIDs) == 0 {
 		return out, nil
 	}
-	placeholders := strings.Repeat("?,", len(userIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(userIDs)+1)
-	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
-	for _, id := range userIDs {
-		args = append(args, id)
-	}
+	// P2-7:数组参数,见 UserMonthlyUsageBatch 注释。
 	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(cost),0) AS c
-		FROM usage WHERE created_at >= ? AND user_id IN (`+placeholders+`) GROUP BY user_id`, args...)
+		FROM usage WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(userIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -564,22 +553,22 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	}
 	// 部门过滤:子树成员集合(2026-09 用量中心,与预算 enforcement 同口径)
 	var deptFilter string
-	var deptIDs []int64
+	var deptGroupIDs []int64
 	if q.Dept != "" {
-		ids, err := DeptUserIDsByName(db, q.Dept)
+		sub, err := deptSubtreeIDs(db, q.Dept)
 		if err != nil {
 			if err == ErrNotFound {
 				return []UsageAggregateRow{}, nil // 部门不存在 = 空结果
 			}
 			return nil, err
 		}
-		if len(ids) == 0 {
+		if len(sub) == 0 {
 			return []UsageAggregateRow{}, nil
 		}
-		ph := strings.Repeat("?,", len(ids))
-		ph = ph[:len(ph)-1]
-		deptFilter = " AND usage.user_id IN (" + ph + ")"
-		deptIDs = ids
+		// P2-7:子树 group id 以数组参数传入(= ANY),避免上万成员拼
+		// IN(?,?,…) 撞 PG 65535 参数上限(否则部门视图直接 500)。
+		deptFilter = " AND usage.user_id IN (SELECT user_id FROM user_groups WHERE group_id = ANY(?::bigint[]))"
+		deptGroupIDs = sub
 	}
 	switch group {
 	case "day":
@@ -608,13 +597,15 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		FROM usage` + join + ` WHERE 1=1`
 	var args []any
 	if !from.IsZero() {
-		qstr += " AND " + DateCompareExpr("usage.created_at") + " >= ?"
+		// P2-15:直接与 ?::date 比较(会话时区固定 Asia/Shanghai,见 pg.go),
+		// 不包裹 created_at AT TIME ZONE —— 包裹会让分区键失效、退化成全分区扫。
+		qstr += " AND usage.created_at >= ?::date"
 		args = append(args, from.Format("2006-01-02"))
 	}
 	if !to.IsZero() {
 		// AddDate(0,0,1) 日历下一天,避免 Add(24h) 在 DST 切换日跳到后天
 		// (审计2026-E3 P1-3)
-		qstr += " AND " + DateCompareExpr("usage.created_at") + " < ?"
+		qstr += " AND usage.created_at < ?::date"
 		args = append(args, to.AddDate(0, 0, 1).Format("2006-01-02"))
 	}
 	if q.Username != "" {
@@ -631,9 +622,7 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	}
 	if q.Dept != "" {
 		qstr += deptFilter
-		for _, id := range deptIDs {
-			args = append(args, id)
-		}
+		args = append(args, pgInt64Array(deptGroupIDs))
 	}
 	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
 	rows, err := db.Query(qstr, args...)
@@ -671,10 +660,12 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	return out, nil
 }
 
-// UserDayUsageCost 返回指定日(按服务器本地时区,day 所在日 00:00 起)
-// 的 tokens 与费用(SUM(cost))。与 monthStart 同口径:日期边界按本地时区。
+// UserDayUsageCost 返回指定日(按北京时间日界,day 所在的北京日历日)
+// 的 tokens 与费用(SUM(cost))。P2-5:此前用服务器本地时区取日界——UTC 容器
+// 与北京差 8 小时,「今日/昨日」会整体错位;统一按 Asia/Shanghai 与分区/
+// 其它查询口径一致。
 func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cost float64, err error) {
-	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, day.Location())
+	start := beijingDay(day)
 	end := start.AddDate(0, 0, 1)
 	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cost),0)

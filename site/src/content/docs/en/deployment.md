@@ -32,7 +32,7 @@ bash -c "$(curl -fsSL .../server/scripts/install-server.sh)"
 ```
 
 `deploy.sh` uses a **single compose file** (`docker-compose.yml` with the caddy+server+postgres services); all subcommands act on it directly — no file switching or manual `-f`:
-- `install`: subnet/port preflight → DNS/CDN validation (auto mode) → certificate preparation → generate a minimal `.env` (4 keys) → pull images and start → wait for `/healthz` readiness;
+- `install`: subnet/port preflight → DNS/CDN validation (auto mode) → certificate preparation → generate a minimal `.env` (6 keys: DOMAIN/TLS_MODE/ADMIN_USER/PICOAI_ADMIN_PASSWORD/PG_PASSWORD/TZ) → pull images and start → wait for `/healthz` readiness;
 - `update`: pull new images and rebuild (data directory unchanged, brief downtime as containers are recreated in sequence; migrations run automatically in order);
 - `backup`: package `picoaide-data` (application data + master.key) + the Caddy certificate store in auto mode + a PostgreSQL `pg_dump`;
 

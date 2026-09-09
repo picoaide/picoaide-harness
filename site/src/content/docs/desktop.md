@@ -154,7 +154,7 @@ Agent 驱动的内嵌浏览器位于**独立浏览器窗口**（2026-08-20 窗�
 
 - 升级源：GitHub Releases API（`releases/latest`），解析 `tag_name` 并去 `v` 前缀；
 - **SHA-256 校验**：下载 `SHA256SUMS.txt` 并与安装包逐项核对（兼容 `./` 前缀），校验失败**不安装**；
-- 平台资产：macOS 通用 DMG（universal，兼容 Intel 与 Apple Silicon）、Windows NSIS 安装器、Linux AppImage（`x86_64`）+ deb；**Linux 不自动下载安装包**（更新下载仅 macOS / Windows），Linux 用户需手动下载新版本安装包；
+- 平台资产：macOS DMG（arm64）、Windows NSIS 安装器、Linux AppImage（`x86_64`）+ deb；**Linux 同样自动下载**（`update-download.ts` 按平台选 `-x86_64.AppImage`），下载后 `chmod +x` 并弹窗提示用户替换当前 AppImage 后重启（AppImage 无静默自安装）；
 - 交互：后台检查不阻塞启动；网络错误、非 200、非法版本或服务端版本不新时保持静默；发现新版本先征得确认才下载；用户取消不会访问计数下载入口；下载/安装失败不破坏当前版本（网络波动时仍使用已确认版本继续下载）；
 - 托盘 **Check for Updates…** 是手动检查：即使已是当前版本也显示结果，检查失败提示稍后重试；
 - 未签名说明：Windows / Linux 安装包 CI 自动发布未签名（macOS 正式版签名 + 公证）；Windows SmartScreen 可能提示「未知发布者」，请先核对 Release 附带的 SHA256SUMS.txt。

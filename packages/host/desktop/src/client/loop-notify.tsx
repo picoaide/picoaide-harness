@@ -57,24 +57,56 @@ async function pollLoopNotifySession(
 }
 
 /**
+ * sessionStorage key for the last consumed jump timestamp. The poller's
+ * in-memory `seenAt` dies with the renderer; without persistence a reload
+ * re-opens the session the user just visited (P2-24).
+ */
+export const LOOP_NOTIFY_SEEN_AT_KEY = 'pico.desktop.loop-notify.seenAt'
+
+/** Read the persisted high-water mark (0 when storage is unavailable). */
+export function readLoopNotifySeenAt(): number {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(LOOP_NOTIFY_SEEN_AT_KEY)
+    const value = raw === null || raw === undefined ? 0 : Number(raw)
+    return Number.isFinite(value) && value > 0 ? value : 0
+  } catch {
+    return 0
+  }
+}
+
+/** Persist the high-water mark (best effort; private mode may throw). */
+export function writeLoopNotifySeenAt(value: number): void {
+  try {
+    globalThis.sessionStorage?.setItem(LOOP_NOTIFY_SEEN_AT_KEY, String(value))
+  } catch {
+    // Storage unavailable — the Host-side consume still prevents re-delivery.
+  }
+}
+
+/**
  * Register the click-to-jump poller. Runs inside `ctx.effect`; the poller
- * tracks the last processed timestamp so a refresh-safe duplicate fetch never
- * re-opens the same session.
+ * tracks the last processed timestamp (persisted in sessionStorage) so a
+ * refresh-safe duplicate fetch never re-opens the same session.
  */
 export function applyLoopNotifyClient(ctx: ClientContext): void {
   ctx.effect(() => {
     let cancelled = false
-    let seenAt = 0
+    let seenAt = readLoopNotifySeenAt()
+    const markSeen = (requestedAt: number): void => {
+      if (requestedAt <= seenAt) return
+      seenAt = requestedAt
+      writeLoopNotifySeenAt(seenAt)
+    }
     const consume = (next: DesktopLoopNotifySessionResponse | null): void => {
       if (cancelled || next === null) return
       if (next.sessionId === null) {
         // The Host cleared the request (stale); remember the timestamp so an
         // older queued response cannot reopen a consumed session.
-        if (next.requestedAt > seenAt) seenAt = next.requestedAt
+        markSeen(next.requestedAt)
         return
       }
       if (next.requestedAt <= seenAt) return
-      seenAt = next.requestedAt
+      markSeen(next.requestedAt)
       // The desktop package compiles client and Host faces into one program:
       // `ctx.sessions` merges to the Host `SessionStore` face here, while the
       // browser runtime actually provides the `ISessions` face with `open()`.

@@ -23,20 +23,57 @@ const CtxTokenKey = "auth_token"
 
 // API holds auth handler dependencies.
 type API struct {
-	DB        *sql.DB
-	limiter   *loginLimiter
-	providers map[string]PasswordProvider
-	browsers  map[string]BrowserProvider
+	DB      *sql.DB
+	limiter *loginLimiter
+	// callbackLimiter:OIDC 回调专用 IP 桶(2026-09-08 P0-2)。
+	callbackLimiter *loginLimiter
+	providers       map[string]PasswordProvider
+	browsers        map[string]BrowserProvider
+	// enabledProviders:客户端员工面允许的密码方式(auth.enabled;2026-09-08
+	// P1-5)。local 仍注册在 providers 里供管理后台回退,但不在此集合时
+	// 客户端登录不得使用。
+	enabledProviders map[string]bool
 }
 
 // New creates the auth API.
 func New(db *sql.DB) *API {
 	return &API{
-		DB:        db,
-		limiter:   newLoginLimiter(),
-		providers: map[string]PasswordProvider{},
-		browsers:  map[string]BrowserProvider{},
+		DB:               db,
+		limiter:          newLoginLimiter(),
+		callbackLimiter:  newCallbackLimiter(),
+		providers:        map[string]PasswordProvider{},
+		browsers:         map[string]BrowserProvider{},
+		enabledProviders: map[string]bool{},
 	}
+}
+
+// SetEnabledProviders records the client-facing provider set (auth.enabled).
+func (a *API) SetEnabledProviders(names []string) {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	a.enabledProviders = set
+}
+
+// clientPasswordOrder returns the provider names the CLIENT surface may use.
+// auth.enabled is authoritative (2026-09-08 P1-5): the local provider stays
+// registered for the admin surface, but a deployment that enables ldap/oidc
+// only must not accept local passwords on the employee surface. An empty set
+// (API built without ConfigureProviders, e.g. unit tests) keeps the legacy
+// order so existing behaviour is preserved.
+func (a *API) clientPasswordOrder() []string {
+	if len(a.enabledProviders) == 0 {
+		return []string{"ldap", "local"}
+	}
+	order := make([]string, 0, 2)
+	if a.enabledProviders["ldap"] {
+		order = append(order, "ldap")
+	}
+	if a.enabledProviders["local"] {
+		order = append(order, "local")
+	}
+	return order
 }
 
 // RegisterProvider adds a password provider (local/ldap).
@@ -167,11 +204,16 @@ func (a *API) handleLogin(c *gin.Context) {
 	}
 	ui, err := a.authenticate(req.Username, req.Password)
 	if err != nil {
+		// 2026-09-08 P1-3:只有失败尝试才计入限流预算(此前成功也计数,
+		// 正常用户第 11 次登录会被 429)。
+		a.loginFailed(c, req.Username)
 		// v3b 审计: 登录失败留痕(合规要求; 含来源 IP)。
 		_ = serverstore.AuditLog(a.DB, req.Username, "login_fail", "ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误")
 		return
 	}
+	// 认证成功即清空该账号的失败预算。
+	a.loginSucceeded(c, req.Username)
 
 	user, err := a.provisionUser(ui)
 	if err != nil {
@@ -183,7 +225,7 @@ func (a *API) handleLogin(c *gin.Context) {
 		return
 	}
 	// v3b: 审计账号禁止使用客户端——员工面登录一律拒绝(审计员仅可经
-	// /api/admin/login cookie 会话进 webadmin 只读工作台)。服务端强制,
+	// /api/server/admin/login cookie 会话进 webadmin 只读工作台)。服务端强制,
 	// 客户端即使收到 200 也不会被放行(无 token 可签发)。
 	if user.Role == serverstore.RoleAuditor {
 		writeError(c, http.StatusUnauthorized, "AUDITOR_NOT_ALLOWED", "审计账号不可登录客户端,请使用管理后台")
@@ -289,10 +331,11 @@ func (a *API) resolvePasswordProvider() PasswordProvider {
 	return nil
 }
 
-// authenticate tries providers in order (ldap first in "both" mode, then local).
+// authenticate tries providers in the order the client surface is allowed to
+// use (auth.enabled; ldap first in "both" mode, then local).
 // LDAP provider 每次登录实时构建(见 ldapProvider)——配置热生效。
 func (a *API) authenticate(username, password string) (UserInfo, error) {
-	order := []string{"ldap", "local"}
+	order := a.clientPasswordOrder()
 	var lastErr error
 	for _, name := range order {
 		var p PasswordProvider
@@ -426,21 +469,8 @@ func (a *API) handleUsageSummary(c *gin.Context) {
 	if quotaMoney > 0 {
 		remainingMoney = quotaMoney - s.MonthlyCost
 	}
-	// 部门预算链(归属部门+祖先,含预算与树费用)
-	budgets, err := serverstore.EffectiveDeptBudget(a.DB, u.ID)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "部门预算查询失败")
-		return
-	}
-	deptBudgets := make([]gin.H, 0, len(budgets))
-	for _, b := range budgets {
-		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "部门预算查询失败")
-			return
-		}
-		deptBudgets = append(deptBudgets, gin.H{"name": b.Name, "budget": b.Budget, "used": used})
-	}
+	// 2026-09-08 P2-13:移除死字段 dept_budgets —— 客户端从不渲染,而每次刷新
+	// 都要为每个归属部门跑 EffectiveDeptBudget + DeptMonthlyCost(树内 SUM)。
 	c.JSON(http.StatusOK, gin.H{
 		"is_admin":         u.IsAdmin,
 		"quota_tokens":     quotaTokens,
@@ -455,7 +485,6 @@ func (a *API) handleUsageSummary(c *gin.Context) {
 		"yesterday_cost":   s.YesterdayCost,
 		"total_usage":      s.TotalUsage,
 		"total_cost":       s.TotalCost,
-		"dept_budgets":     deptBudgets,
 	})
 }
 

@@ -9,6 +9,7 @@ import AdmZip from 'adm-zip'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
   MACOS_ARM64_NATIVE_ENTRIES,
+  resolveNativeEntry,
 } from './mac-runtime.ts'
 
 /** AfterPack fields consumed without importing Electron Builder's incomplete declaration graph. */
@@ -62,11 +63,14 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
 const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // process.dlopen (native .node) and child_process.execFile (binaries) land here.
   // smartUnpack unpacks whole package dirs containing them.
+  // P2-52: 路径必须与真实产物一致(2026-09-08 在 dist/linux-unpacked 上逐条核对)。
+  // 原清单 7 条里 3 条不存在(koffi 少一层 linux_x64/、require-builtin 少
+  // prebuilt/、node-pty 的 spawn-helper 只存在于 darwin prebuilds),
+  // 而旧实现只要求「至少一项存在」→ afterPack 门禁空转。
   'node_modules/node-pty/prebuilds/linux-x64/pty.node',
-  'node_modules/node-pty/prebuilds/linux-x64/spawn-helper',
   'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.3.node',
-  'node_modules/@koromix/koffi-linux-x64/build/koffi-linux-x64.node',
-  'node_modules/node-addon-require-builtin-linux-x64-gnu/build/Release/addon.node',
+  'node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node',
+  'node_modules/node-addon-require-builtin-linux-x64-gnu/prebuilt/linux-x64-gnu-napi-v9.node',
   'node_modules/@vscode/ripgrep-linux-x64/bin/rg',
   // The landlock-run launcher is spawned (never dlopen'd) by the process
   // sandbox. Electron cannot spawn a virtual asar path (only execFile is
@@ -430,7 +434,7 @@ export function verifyPackagedRuntime(
   const requiredPhysicalEntries = context.electronPlatformName === 'win32'
     ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES]
     : context.electronPlatformName === 'darwin' && context.arch === 4
-      ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_MACOS_UNIVERSAL_ENTRIES]
+      ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => resolveNativeEntry(unpackedRoot, entry))]
       : REQUIRED_UNPACKED_RUNTIME_ENTRIES
   // Electron (asar-archives): only native binaries need to stay physical
   // (process.dlopen / child_process.execFile). Pure JS must live inside app.asar.
@@ -438,6 +442,18 @@ export function verifyPackagedRuntime(
   if (physicalEntries.length === 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} has no native unpacked entries`,
+    )
+  }
+  // P2-52: 逐条断言——旧实现只判断「至少一项存在」,清单里写错或漏打的路径会被
+  // 静默过滤掉(afterPack 门禁形同空转)。某原生包目录存在时,该包清单内每条必需
+  // 文件都必须存在;整包不存在 = 平台不适用(例如 Windows 产物里的 linux-x64 包),跳过。
+  const missingNativeEntries = requiredPhysicalEntries.filter((entry) => {
+    if (!exists(join(unpackedRoot, unpackedPackageDir(entry)))) return false
+    return !exists(join(unpackedRoot, entry))
+  })
+  if (missingNativeEntries.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing required native unpacked entries: ${missingNativeEntries.join(', ')}`,
     )
   }
   const unpackedJs = listUnpackedUnsafeJs(unpackedRoot)
@@ -456,6 +472,24 @@ export function verifyPackagedRuntime(
     }
   }
   verifyUnpackedPackageResolution(asarPath, asarEntries)
+}
+
+/**
+ * Resolve the npm package directory an unpacked entry belongs to
+ * (`node_modules/pkg/...` or `node_modules/@scope/pkg/...`). Used to decide
+ * whether a missing native entry means "this package is not shipped on this
+ * platform" (skip) or "the package is shipped but a required file is gone"
+ * (fail loud).
+ * @param entry - unpacked-relative entry path using forward slashes.
+ * @returns The package directory path, or the entry itself when it is not
+ *   under `node_modules` (so the entry is then always required).
+ */
+function unpackedPackageDir(entry: string): string {
+  const parts = entry.split('/')
+  if (parts[0] !== 'node_modules') return entry
+  return parts[1]?.startsWith('@') === true
+    ? `${parts[0]}/${parts[1]}/${parts[2] ?? ''}`
+    : `${parts[0]}/${parts[1] ?? ''}`
 }
 
 /**

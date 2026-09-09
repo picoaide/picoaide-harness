@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -679,4 +680,82 @@ func TestPresetFileContent(t *testing.T) {
 			t.Fatalf("escape = %d", w.Code)
 		}
 	})
+}
+
+// TestLegacyRejectTargetsLatestPending 覆盖 P1-11:已上架 1.0.0 + 待审 2.0.0 时,
+// legacy(name 级)reject 必须打 2.0.0,而不是把已上架的 1.0.0 置 rejected。
+func TestLegacyRejectTargetsLatestPending(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+
+	upload := func(version, checksum string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/client/v2/agent-presets", strings.NewReader(
+			uploadBody("legacy-decide", "", "", makeArchive(t, map[string]string{
+				"agent.cordis.yml": testComposition,
+				"preset.yml":       presetMeta("遗留审核", version) + "changelog: " + checksum + "\n",
+			}))))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range userHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("upload %s = %d %s", version, w.Code, w.Body.String())
+		}
+	}
+	adminPost := func(path, body string) int {
+		t.Helper()
+		w := httptest.NewRecorder()
+		var rdr io.Reader
+		if body == "" {
+			rdr = nil
+		} else {
+			rdr = strings.NewReader(body)
+		}
+		req := httptest.NewRequest("POST", path, rdr)
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	upload("1.0.0", "v1")
+	if code := adminPost("/api/server/admin/agent-presets/legacy-decide/approve", ""); code != http.StatusOK {
+		t.Fatalf("approve v1 = %d", code)
+	}
+	upload("2.0.0", "v2")
+
+	if code := adminPost("/api/server/admin/agent-presets/legacy-decide/reject", rejectBody("不合规")); code != http.StatusOK {
+		t.Fatalf("legacy reject = %d", code)
+	}
+	v1, err := serverstore.GetAgentPresetByVersion(db, "legacy-decide", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1.Status != serverstore.AgentPresetApproved {
+		t.Fatalf("v1 status = %s, want approved (legacy reject 不得打已上架版本)", v1.Status)
+	}
+	v2, err := serverstore.GetAgentPresetByVersion(db, "legacy-decide", "2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2.Status != serverstore.AgentPresetRejected {
+		t.Fatalf("v2 status = %s, want rejected", v2.Status)
+	}
+	if v2.Reason != "不合规" {
+		t.Fatalf("v2 reason = %q", v2.Reason)
+	}
+	// legacy approve 同样打最新非 approved 行(3.0.0)
+	upload("3.0.0", "v3")
+	if code := adminPost("/api/server/admin/agent-presets/legacy-decide/approve", ""); code != http.StatusOK {
+		t.Fatalf("legacy approve = %d", code)
+	}
+	v3, _ := serverstore.GetAgentPresetByVersion(db, "legacy-decide", "3.0.0")
+	if v3.Status != serverstore.AgentPresetApproved {
+		t.Fatalf("v3 status = %s, want approved", v3.Status)
+	}
 }

@@ -377,7 +377,8 @@ export class HostCronLedger {
       // with the current state (a rerun in flight is not re-opened).
       return { state: this.state() }
     }
-    this.cache.set(requestId, { fingerprint })
+    // 2026-09-08 P2-14:指纹缓存必须在所有校验/授权之后写入。此前先写缓存再
+    // 校验 owner,授权失败后重试会被当成"重复请求"吞掉(永远拿不到 403)。
 
     // Owner enforcement for target actions: an owner-scoped job may only be
     // mutated by its creating account. Legacy (owner-less) jobs stay
@@ -486,6 +487,9 @@ export class HostCronLedger {
           return false
       }
     })
+
+    // 全部校验/授权/变更都成功后,才登记该 requestId 的指纹(重放才会去重)。
+    this.cache.set(requestId, { fingerprint })
 
     return {
       state: this.state(),

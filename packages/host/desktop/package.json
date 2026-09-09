@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.6.7-beta.11",
+  "version": "2.6.7-beta.12",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -325,7 +325,8 @@
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "extraResources": [],
     "electronFuses": {
-      "runAsNode": true
+      "runAsNode": true,
+      "onlyLoadAppFromAsar": true
     },
     "directories": {
       "output": "dist",

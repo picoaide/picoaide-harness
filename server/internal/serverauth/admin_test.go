@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 func TestAdminSession(t *testing.T) {
@@ -482,6 +483,52 @@ func mustDB(t *testing.T) *sql.DB {
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 	return db
+}
+
+// P1-17:任何角色变更都必须吊销存量 API token。此前只有"降为 user"才吊销,
+// user→auditor(或 super_admin→auditor)后旧 token 仍可访问员工面。
+func TestAdminRoleChangeRevokesTokens(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	w, out := doJSON(t, r, "POST", "/api/server/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	csrf := out["csrf_token"].(string)
+	sess := ""
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+
+	id, err := createUserDB(db, "employee", "pw123456", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "raw-employee-token"
+
+	for _, tc := range []struct{ role, want string }{
+		{"auditor", serverstore.RoleAuditor},
+		{"user", serverstore.RoleUser},
+	} {
+		if _, err := serverstore.CreateToken(db, id, raw, time.Now().AddDate(0, 0, 1)); err != nil {
+			t.Fatal(err)
+		}
+		w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/server/admin/users/%d", id), `{"role":"`+tc.role+`"}`, hdr)
+		if w.Code != http.StatusOK {
+			t.Fatalf("set role %s: %d %s", tc.role, w.Code, w.Body.String())
+		}
+		u, err := serverstore.GetUserByID(db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.Role != tc.want {
+			t.Fatalf("role = %q, want %q", u.Role, tc.want)
+		}
+		if _, err := serverstore.GetTokenByHash(db, serverstore.TokenHash(raw)); err == nil {
+			t.Fatalf("token must be revoked on role change to %s", tc.role)
+		}
+	}
 }
 
 func createUserDB(db *sql.DB, username, password string, admin bool) (int64, error) {
@@ -1360,6 +1407,8 @@ func TestAdminDeptBudget(t *testing.T) {
 
 // auth 配置审计:mode 切换语义 + 密码掩码保持/清空 + 未启用模式字段清理。
 func TestAdminAuthConfig(t *testing.T) {
+	// P1-1:IdP 凭据现在用 master key 加密落库,测试需初始化 master key。
+	ensureTestMasterKey(t)
 	r, db := adminRouter(t)
 	defer db.Close()
 
@@ -1396,6 +1445,14 @@ func TestAdminAuthConfig(t *testing.T) {
 	ld := a["ldap"].(map[string]any)
 	if ld["server_url"].(string) != "ldap://x:389" || ld["bind_password"].(string) != MaskSecret {
 		t.Fatalf("ldap = %v (password must be masked)", ld)
+	}
+	// P1-1:落库值必须是 AES-GCM 密文,且能解回原文(此前明文入库)。
+	if saved, ok, err := serverstore.GetSetting(db, "ldap.bind_password"); err != nil || !ok {
+		t.Fatalf("read stored bind_password: ok=%v err=%v", ok, err)
+	} else if !strings.HasPrefix(saved, util.EncPrefix) {
+		t.Fatalf("bind_password stored in plaintext: %q", saved)
+	} else if got := decryptSettingSecret(saved); got != "s3cret" {
+		t.Fatalf("decryptSettingSecret = %q, want s3cret", got)
 	}
 
 	// 2. 掩码回传 = 保持密码;改 base_dn 后密码不变

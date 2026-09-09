@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { SecretInput } from '../components/secret-input'
 import { PageHeader } from '../components/page-header'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
+import { useFlash } from '../lib/use-flash'
 
 // 认证配置页(v3b): Tab 分区 + 启用绑定配置 + hide_local。
 // 登录面矩阵: 客户端 = 全部已启用方式(local 可被 hide_local 隐藏);
@@ -65,7 +66,8 @@ export default function Auth() {
   const [enabled, setEnabled] = useState<string[]>(['local'])
   const [minPasswordLength, setMinPasswordLength] = useState(10)
   const [authErr, setAuthErr] = useState('')
-  const [authMsg, setAuthMsg] = useState('')
+  // P3: flash 定时器由 useFlash 统一清理。
+  const [authMsg, setAuthMsg] = useFlash(4000)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState('local')
@@ -193,7 +195,6 @@ export default function Auth() {
       await request(`${ADMIN_API}/auth`, { method: 'PUT', body: JSON.stringify(body) })
       setAuthMsg('认证配置已保存(重启服务端后生效)')
       setClearedSecrets({})
-      setTimeout(() => setAuthMsg(''), 4000)
       void load()
     } catch (err: any) {
       setAuthErr(err.message)
@@ -382,7 +383,9 @@ function SecretField(props: {
   onChange: (v: string) => void
   onClear?: () => void
 }) {
-  const id = `auth-secret-${Math.random().toString(36).slice(2, 8)}`
+  // P2-48: 原来用 Math.random() 生成 id → 每次渲染都变,Label htmlFor 与 Input id 失联
+  // (无障碍关联断链,点击标签不聚焦、屏幕阅读器读不出)。useId 在单次挂载内稳定。
+  const id = `auth-secret-${useId()}`
   const preset = props.preset ?? 'unset'
   // 已设置且未输入新值: 显示「已配置」徽标, 输入框留空(不显示 ***,
   // 避免用户把 *** 当密码; 留空 + 已设置 = 服务端保持现值)。
