@@ -639,10 +639,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[读取/请求] Evaluate one JavaScript expression in your tab (single expression; no statements/assignments; code-execution APIs like eval/Function and DOM-write APIs rejected — network requests like fetch/XHR are allowed) and return its JSON result — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests.',
+    description: '[读取/请求] Evaluate one JavaScript expression in your tab (single expression; no statements/assignments; code-execution APIs like eval/Function and DOM-write APIs rejected — network requests like fetch/XHR are allowed) and return its JSON result — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. Also rejected as code-execution paths: constructor/prototype/__proto__, reflection APIs (getOwnPropertyDescriptor, __lookupGetter__/__lookupSetter__) and call/apply/bind/construct on a member chain — including computed keys (x["con"+"structor"]) and aliases laundered through destructuring, defaults, property values or callback arguments.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
-      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
+      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function, constructor/prototype chains, reflection APIs and call/apply/bind/construct rejected; no aliasing a banned API through destructuring, defaults, property values or callback arguments). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
       frame: { type: 'integer', description: 'Frame index (0 = main frame, default).' },
     },
     output: {
