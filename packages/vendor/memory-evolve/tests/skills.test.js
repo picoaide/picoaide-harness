@@ -373,3 +373,30 @@ test('approvePendingSkill refuses to clobber a live skill when the destination a
   assert.equal(readFileSync(join(skillDir, name, 'SKILL.md'), 'utf8').includes('existing'), true, 'live skill untouched')
   clean(dir)
 })
+
+test('AC4 approvePendingSkill merges into a non-empty target dir (no clobber)', () => {
+  const dir = tempDir()
+  const pendingDir = join(dir, 'pending-skills')
+  const skillDir = join(dir, 'skills')
+  const name = 'merge-skill'
+  const body = GOOD_BODY(name, 'merge test')
+  mkdirSync(join(pendingDir, name), { recursive: true })
+  writeFileSync(join(pendingDir, name, 'SKILL.md'), body)
+  // Destination holds USER DATA but no SKILL.md → the pre-fix fallback's
+  // rmSync(to) destroyed it. Merge semantics must keep every file.
+  mkdirSync(join(skillDir, name, 'sub'), { recursive: true })
+  writeFileSync(join(skillDir, name, 'notes.md'), 'USER DATA')
+  writeFileSync(join(skillDir, name, 'sub', 'keep.txt'), 'USER DATA')
+
+  // Force the copy fallback deterministically on every platform by making the
+  // rename target a non-empty dir (POSIX: ENOTEMPTY → now in the degrade
+  // table; Windows: EBUSY/EPERM/EACCES). See skills-fault.test.js for the
+  // injected-errno variant.
+  const outcome = approvePendingSkill(pendingDir, skillDir, name)
+  assert.equal(outcome.ok, true, `expected adopt, got ${JSON.stringify(outcome)}`)
+  assert.equal(existsSync(join(skillDir, name, 'notes.md')), true, 'user notes.md must survive')
+  assert.equal(existsSync(join(skillDir, name, 'sub', 'keep.txt')), true, 'user sub/keep.txt must survive')
+  assert.equal(readFileSync(join(skillDir, name, 'SKILL.md'), 'utf8'), body, 'skill lands')
+  assert.equal(existsSync(join(pendingDir, name)), false, 'pending source removed')
+  clean(dir)
+})
