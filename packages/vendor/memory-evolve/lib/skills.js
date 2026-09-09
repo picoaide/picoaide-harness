@@ -179,16 +179,21 @@ export function approvePendingSkill(pendingDir, skillDir, name) {
       error?.code === 'EXDEV' ||
       error?.code === 'EBUSY' ||
       error?.code === 'EPERM' ||
-      error?.code === 'EACCES'
+      error?.code === 'EACCES' ||
+      error?.code === 'ENOTEMPTY'
     ) {
       // If a live skill with the same name already exists (stub dir or real),
       // refuse — the check above only verified SKILL.md; the rename may have
       // failed because a directory already occupies the destination. Do not
       // clobber an existing skill directory.
+      //
+      // MERGE semantics: never remove `to` first. A pre-existing destination
+      // directory may hold user data (notes, attachments) that an
+      // unconditional rmSync(to) destroyed. cpSync overlays the pending skill
+      // and leaves every other file in place.
       if (existsSync(join(to, 'SKILL.md'))) {
         return { ok: false, message: smt('skillmsg.alreadyInLib', { name }) }
       }
-      rmSync(to, { recursive: true, force: true })
       cpSync(from, to, { recursive: true })
       rmSync(from, { recursive: true, force: true })
     } else {
