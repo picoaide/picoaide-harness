@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ISpec } from '@visactor/vchart'
 import { ChartLazy } from '../../components/chart-lazy'
 import { request, ADMIN_API } from '../../api'
@@ -21,19 +21,8 @@ export default function UsageOverview() {
   const [balances, setBalances] = useState<Record<number, ProviderBalance | 'loading' | 'error'>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-
-  const loadOverview = useCallback(async (f: string, t: string) => {
-    setLoading(true)
-    setError('')
-    try {
-      const d = await request<OverviewData>(`${ADMIN_API}/usage/overview?from=${f}&to=${t}`)
-      setData(d)
-    } catch (e: any) {
-      setError(e.message || '查询失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // P2-46: 请求序号防乱序——快速切换区间时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
 
   const loadBalance = useCallback(async (id: number) => {
     setBalances((prev) => ({ ...prev, [id]: 'loading' }))
@@ -46,15 +35,28 @@ export default function UsageOverview() {
   }, [])
 
   const load = useCallback(async (f: string, t: string) => {
-    await loadOverview(f, t)
+    const current = ++loadSeq.current
+    setLoading(true)
+    setError('')
+    try {
+      const d = await request<OverviewData>(`${ADMIN_API}/usage/overview?from=${f}&to=${t}`)
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
+      setData(d)
+    } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
+      setError(e.message || '查询失败')
+    } finally {
+      if (current === loadSeq.current) setLoading(false)
+    }
     try {
       const pl = await request<{ providers: ProviderInfo[] }>(`${ADMIN_API}/providers`)
+      if (current !== loadSeq.current) return
       const list = (pl.providers ?? []) as ProviderInfo[]
       setProviders(list)
       setBalances({})
       list.forEach((p) => void loadBalance(p.id))
     } catch { /* 渠道余额失败不阻塞总览 */ }
-  }, [loadOverview, loadBalance])
+  }, [loadBalance])
 
   useEffect(() => { void load(from, to) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 

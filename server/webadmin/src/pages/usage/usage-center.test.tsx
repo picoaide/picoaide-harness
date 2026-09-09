@@ -19,8 +19,8 @@ vi.mock('../../components/chart-lazy', () => ({
 const mockRequest = vi.mocked(request)
 
 const USERS = [
-  { id: 1, username: 'alice', display_name: '', role: 'user', status: 1, is_admin: false, quota_tokens: null, quota_money: 100, monthly_usage: 1000, monthly_cost: 12.34, groups: ['研发部'] },
-  { id: 2, username: 'bob', display_name: 'Bob', role: 'user', status: 1, is_admin: false, quota_tokens: 500000, quota_money: null, monthly_usage: 90000, monthly_cost: 3.21, groups: [] },
+  { id: 1, username: 'alice', display_name: '', role: 'user', status: 1, is_admin: false, quota_tokens: null, quota_money: 100, effective_quota_tokens: 0, effective_quota_money: 50, monthly_usage: 1000, monthly_cost: 12.34, groups: ['研发部'] },
+  { id: 2, username: 'bob', display_name: 'Bob', role: 'user', status: 1, is_admin: false, quota_tokens: 500000, quota_money: null, effective_quota_tokens: 200000, effective_quota_money: 20, monthly_usage: 90000, monthly_cost: 3.21, groups: [] },
   { id: 3, username: 'boss', display_name: '', role: 'super_admin', status: 1, is_admin: true, quota_tokens: null, quota_money: null, monthly_usage: 0, monthly_cost: 0, groups: [] },
 ]
 
@@ -112,6 +112,11 @@ describe('用量中心 · 成员用量', () => {
     expect(screen.getByText('研发部')).toBeInTheDocument() // 部门列
     expect(screen.getByText('¥12.34')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /alice/ })).toHaveAttribute('href', '/usage/members/alice')
+    // P2-45: 金额配额列用服务端折算后的生效配额(alice 覆盖值 100,生效值 50)
+    expect(screen.getByText('¥50.00')).toBeInTheDocument()
+    expect(screen.queryByText('¥100.00')).not.toBeInTheDocument()
+    // P3: 员工数不再假设「仅一名超管」——3 个账号 1 个超管 → 2 名员工
+    expect(screen.getByText('共 2 名员工')).toBeInTheDocument()
   })
 
   it('个人详情:徽章 + 趋势 + 模型构成 + 最近请求', async () => {
@@ -123,6 +128,9 @@ describe('用量中心 · 成员用量', () => {
     expect(screen.getByText('最近请求')).toBeInTheDocument()
     expect(screen.getByText(/2026-09-02 10:00:00/)).toBeInTheDocument()
     expect(screen.getAllByTestId('chart-mock').length).toBeGreaterThanOrEqual(1)
+    // P2-45: 徽章用生效配额(alice 生效金额 50 / 生效 token 0=不限),不再用覆盖值
+    expect(screen.getByText('金额配额 ¥50.00')).toBeInTheDocument()
+    expect(screen.getByText('token 配额 不限')).toBeInTheDocument()
   })
 })
 
@@ -216,6 +224,13 @@ describe('用量中心 · 报表订阅', () => {
 })
 
 describe('用量中心 · 配额与预算', () => {
+  it('部门预算为只读展示,编辑入口唯一 = 部门管理页(P2-47 死弹窗已删除)', async () => {
+    renderAt('/usage', <Quota />)
+    expect(await screen.findByText('部门预算')).toBeInTheDocument()
+    expect(screen.queryByText(/设置部门预算/)).not.toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: '去部门管理' }).length).toBeGreaterThan(0)
+  })
+
   it('保存全局默认配额走 gateway 端点', async () => {
     renderAt('/usage', <Quota />)
     await screen.findByText('全局默认配额')

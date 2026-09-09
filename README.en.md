@@ -53,13 +53,15 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 
 ## Download and install
 
-Current release installers support Windows x64, macOS (universal DMG, both Apple Silicon and Intel), and Linux x64. Ordinary users do not need to install Node.js, pnpm, or DSH separately.
+Current release installers support Windows x64, macOS (Apple Silicon), and Linux x64 (AppImage and deb). Ordinary users do not need to install Node.js, pnpm, or DSH separately.
+
+> Downloads link to the [latest Release](https://github.com/picoaide/picoaide-harness/releases/latest): asset names embed the version (`PicoAide-Harness-<version>-…`), so a hardcoded-version direct link breaks as soon as the next release ships (P2-55).
 
 | Platform | Download | Installation |
 | --- | --- | --- |
-| Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x64-Setup.exe) | Run the NSIS installer and follow its prompts |
-| macOS | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-mac.dmg) | Open the DMG and drag PicoAide Harness into Applications |
-| Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest/download/PicoAide-Harness-2.4.6-x86_64.AppImage) | Grant execute permission and run |
+| Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest) (asset `PicoAide-Harness-<version>-x64-Setup.exe`) | Run the NSIS installer and follow its prompts |
+| macOS | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest) (asset `PicoAide-Harness-<version>-mac.dmg`) | Open the DMG and drag PicoAide Harness into Applications |
+| Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest) (asset `PicoAide-Harness-<version>-x86_64.AppImage`, or `PicoAide-Harness-<version>-amd64.deb`) | Grant execute permission and run (install deb with `sudo dpkg -i`) |
 
 Installers and SHA-256 digests are also available from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) (each release ships a `SHA256SUMS.txt`; verifying before install is recommended). The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [Desktop Client](https://www.picoaide.com/en/docs/desktop/) and [FAQ](https://www.picoaide.com/en/docs/faq/) on the official wiki for plugin commands, platform details, and troubleshooting.
 

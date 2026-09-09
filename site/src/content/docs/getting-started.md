@@ -10,8 +10,8 @@ description: 10 分钟上手 PicoAide Harness：下载、首次启动、登录�
 | 平台 | 安装方式 |
 |---|---|
 | Windows x64 | 运行 NSIS 安装程序（`PicoAide-Harness-<v>-x64-Setup.exe`） |
-| macOS | 打开 DMG（universal，Apple 芯片与 Intel 均可），把 PicoAide Harness 拖入 Applications |
-| Linux x64 | 授予执行权限后运行 AppImage（`-x86_64.AppImage`）；也提供 deb |
+| macOS | 打开 DMG（arm64 / Apple 芯片），把 PicoAide Harness 拖入 Applications |
+| Linux x64 | 授予执行权限后运行 AppImage（`-x86_64.AppImage`）；另提供 deb（`-amd64.deb`，`sudo dpkg -i` 安装） |
 
 > **安装前建议校验**：每个 Release 附带 `SHA256SUMS.txt`。Windows/Linux 安装包由 CI 自动发布、**暂未签名**，SmartScreen 可能提示「未知发布者」——请先在 Releases 下载并核对 SHA-256 摘要后再运行。
 

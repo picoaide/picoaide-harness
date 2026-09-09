@@ -14,6 +14,7 @@ import { PageHeader } from '../components/page-header'
 import { SecretInput } from '../components/secret-input'
 import { Lock } from 'lucide-react'
 import { isModelPriced } from '../lib/format'
+import { useFlash } from '../lib/use-flash'
 
 interface Provider {
   id: number
@@ -125,8 +126,9 @@ export default function Gateway() {
   const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
-  const [okMsg, setOkMsg] = useState('')
-  const [syncMsg, setSyncMsg] = useState('')
+  // P3: flash 定时器由 useFlash 统一清理。
+  const [okMsg, setOkMsg] = useFlash(2000)
+  const [syncMsg, setSyncMsg] = useFlash(4000)
   const [loading, setLoading] = useState(true) // 审计修复 L2
   // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
   const [busy, setBusy] = useState<string | null>(null)
@@ -170,7 +172,6 @@ export default function Gateway() {
 
   function flash(msg: string) {
     setOkMsg(msg)
-    setTimeout(() => setOkMsg(''), 2000)
   }
 
   async function saveGateway() {
@@ -232,7 +233,6 @@ export default function Gateway() {
       setError('')
       if (sync?.error) {
         setSyncMsg(`已保存,但模型同步失败:${sync.error}(可稍后点"立即同步"重试)`)
-        setTimeout(() => setSyncMsg(''), 4000)
       } else if (sync && sync.added > 0) {
         flash(`已上架 ${sync.added} 个模型(移除 ${sync.removed ?? 0})`)
       } else if (sync) {
@@ -497,7 +497,6 @@ export default function Gateway() {
       if (summary.length) parts.push(summary.join('; '))
       if (skipped > 0) parts.push(`${skipped} 个手动型上游跳过`)
       setSyncMsg(parts.join('; ') || '同步完成,无变化')
-      setTimeout(() => setSyncMsg(''), 4000)
       setError('')
       load()
     } catch (err: any) {

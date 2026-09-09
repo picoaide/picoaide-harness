@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request, ADMIN_API } from '../../api'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
@@ -8,7 +8,7 @@ import { Input } from '../../components/ui/input'
 import { Button } from '../../components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { PageHeader } from '../../components/page-header'
-import { fmtY, type UserInfo } from './common'
+import { employeeCountText, effectiveQuotaMoney, fmtY, type UserInfo } from './common'
 import { fmtTokens, moneyPercent, moneyOver } from '../../lib/format'
 import { cn } from '../../lib/utils'
 
@@ -16,21 +16,29 @@ import { cn } from '../../lib/utils'
 export default function UsageMembers() {
   const [users, setUsers] = useState<UserInfo[]>([])
   const [total, setTotal] = useState(0)
+  const [rawCount, setRawCount] = useState(0)
   const [q, setQ] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // P2-46: 请求序号防乱序——快速查询/连续输入时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
 
   const load = async (query: string) => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
       const d = await request<{ users: UserInfo[]; total: number }>(`${ADMIN_API}/users?size=200${query ? `&q=${encodeURIComponent(query)}` : ''}`)
-      setUsers((d.users ?? []).filter((u) => !u.role || u.role !== 'super_admin'))
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
+      const all = d.users ?? []
+      setUsers(all.filter((u) => !u.role || u.role !== 'super_admin'))
+      setRawCount(all.length)
       setTotal(d.total ?? 0)
     } catch (e: any) {
+      if (current !== loadSeq.current) return
       setError(e.message || '查询失败')
     } finally {
-      setLoading(false)
+      if (current === loadSeq.current) setLoading(false)
     }
   }
 
@@ -56,7 +64,7 @@ export default function UsageMembers() {
         </CardHeader>
         <CardContent>
           {error && <div className="mb-2 text-sm text-destructive">{error}</div>}
-          <div className="mb-2 text-xs text-muted-foreground">共 {Math.max(0, total - 1)} 名员工{total > 200 ? '(列表展示前 200,搜索可缩小范围)' : ''}</div>
+          <div className="mb-2 text-xs text-muted-foreground">{employeeCountText(users, rawCount, total)}</div>
           {loading ? <Skeleton className="h-72 w-full" /> : (
             <Table>
               <TableHeader>
@@ -72,8 +80,10 @@ export default function UsageMembers() {
               </TableHeader>
               <TableBody>
                 {users.map((u) => {
-                  const pct = moneyPercent(u.monthly_cost, u.quota_money)
-                  const over = moneyOver(u.monthly_cost, u.quota_money)
+                  // P2-45: 用服务端折算后的生效配额,否则跟随全局默认的用户被误报「不限」
+                  const mq = effectiveQuotaMoney(u)
+                  const pct = moneyPercent(u.monthly_cost, mq)
+                  const over = moneyOver(u.monthly_cost, mq)
                   return (
                     <TableRow key={u.id} className="cursor-pointer hover:bg-accent">
                       <TableCell>
@@ -84,7 +94,7 @@ export default function UsageMembers() {
                       <TableCell className="text-muted-foreground">{(u.groups ?? []).filter((g) => g !== '全员').join(', ') || '—'}</TableCell>
                       <TableCell className="text-right tabular-nums">{fmtY(u.monthly_cost)}</TableCell>
                       <TableCell className="text-right tabular-nums">{fmtTokens(u.monthly_usage)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{u.quota_money ? fmtY(u.quota_money) : '不限'}</TableCell>
+                      <TableCell className="text-right tabular-nums">{mq ? fmtY(mq) : '不限'}</TableCell>
                       <TableCell className="text-right tabular-nums">
                         {pct === null ? '—' : (
                           <span className={cn(over && 'font-semibold text-destructive', !over && (pct ?? 0) >= 90 && 'text-amber-600')}>{pct}%</span>

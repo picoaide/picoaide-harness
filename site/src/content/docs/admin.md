@@ -14,12 +14,14 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 | 用户 | `/users` | 账号、角色、状态、配额 |
 | 部门 | `/departments` | 部门树、成员、预算 |
 | 认证 | `/auth` | 本地 / LDAP / OIDC 登录方式配置 |
+| 品牌 | `/brand` | 登录页/客户端品牌、门户配置与快照 |
 | 网关 | `/gateway` | 上游供应商、默认模型、限流、高峰时段 |
-| 用量 | `/usage` | 费用、请求数、Token 明细、图表 |
-| 市场 · 技能 | `/marketplace` | 商城技能管理、分级与授权 |
-| 能力中心 | `/capabilities` | 共享技能/智能体统一审批队列（官方/精选标记、授权） |
-| 审计 | `/audit` | 关键操作全程留痕 |
+| 错误监控 | `/error-monitoring` | 客户端错误上报与 GlitchTip 连接器预填 |
+| 用量中心 | `/usage` | 费用、请求数、Token 明细、图表（含配额与预算、报表订阅） |
+| 能力中心 | `/capabilities` | 技能 / 智能体 / 审批三个 Tab（官方/精选标记、授权）；旧 `/marketplace` 已重定向至此 |
+| 连接器 | `/connectors` | 连接器目录与下发开关 |
 | 服务器信息 | `/server-info` | 版本、数据库驱动、构建信息 |
+| 审计日志 | `/audit` | 关键操作全程留痕 |
 
 ## 用户管理
 

@@ -21,7 +21,7 @@ description: 如何为 PicoAide Harness 开发插件：一切皆插件、客户�
 
 ## 客户端插件
 
-客户端插件使用 **`clientBundle` 预设**构建（tsdown），外部依赖对齐平台模块表（`PLATFORM_MODULES`——react-dom、react-dom/client、`@deepseek-ai/dsh-client-web-react`、`dsh-client-ui-primitives`、`dsh-client-ui-attachment`、`dsh-client-ui-schema-form`）与**实际 import 的 client 包**。
+客户端插件使用 **`clientBundle` 预设**构建（tsdown），外部依赖对齐平台模块表（`PLATFORM_MODULES`，权威源 `scripts/platform-modules.mjs`，与上游 `packages/client/web/src/platform.ts` 逐字一致：`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`）与**实际 import 的 client 包**。
 
 - **跨包客户端 import 禁止**：源包在 `ctx.effect` 内 `ctx.slots.inject` 注入，目标包在自己的 client 里 `ctx.slots.register` 注册；
 - 类型检查 `tsconfig.client.json` 需 `skipLibCheck: true`（规避上游 `dsh-client-ui-sidebar` d.ts 内部类型错误）；

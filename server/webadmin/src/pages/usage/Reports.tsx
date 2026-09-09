@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../../api'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
@@ -31,16 +31,22 @@ export default function UsageReports() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [resultMsg, setResultMsg] = useState('')
 
+  // P2-46: 请求序号防乱序——保存/删除/测试推送后重拉时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
+
   const load = useCallback(async () => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
       const d = await request<{ subscriptions: Subscription[] }>(`${ADMIN_API}/report-subscriptions`)
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
       setSubs(d.subscriptions ?? [])
     } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
       setError(e.message || '查询失败')
     } finally {
-      setLoading(false)
+      if (current === loadSeq.current) setLoading(false)
     }
   }, [])
 
@@ -164,8 +170,8 @@ export default function UsageReports() {
                         <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void testPush(s)}>
                           <Send className="h-3.5 w-3.5" /> {busy === `test:${s.id}` ? '推送中…' : '测试'}
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => openEdit(s)}><Pencil className="h-3.5 w-3.5" /></Button>
-                        <Button size="sm" variant="outline" onClick={() => void remove(s)}><Trash2 className="h-3.5 w-3.5" /></Button>
+                        <Button size="sm" variant="outline" onClick={() => openEdit(s)} title="编辑订阅" aria-label="编辑订阅"><Pencil className="h-3.5 w-3.5" /></Button>
+                        <Button size="sm" variant="outline" onClick={() => void remove(s)} title="删除订阅" aria-label="删除订阅"><Trash2 className="h-3.5 w-3.5" /></Button>
                       </div>
                     </TableCell>
                   </TableRow>

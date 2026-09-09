@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { PageHeader } from '../components/page-header'
 import { useSearchParams } from 'react-router-dom'
@@ -8,20 +7,21 @@ import Capabilities from './Capabilities'
 
 /**
  * 能力中心·统一管理面(2026-09-04 IA 定案):
- * 技能与智能体是两个独立的东西——三个一级 Tab:
  *   技能  = 技能市场(官方技能蓝标 / 员工上传技能, 独立页面组件)
  *   智能体 = 智能体市场(官方智能体蓝标 / 员工上传智能体, 独立页面组件)
  *   审批  = 唯一交叉点:统一审批队列(技能+智能体, 类型筛选)
  * 兼容:?tab=market(旧)→技能、?kind=agent→智能体、?tab=org→审批。
+ *
+ * P3: tab 由 URL 派生(单一真源)——原来用 useState(initial) 只在挂载时读一次,
+ * 浏览器前进/后退或站内链接改 ?tab=/?kind= 后,Tab 高亮与实际内容不同步。
  */
 export default function CapabilityCenter() {
   const [params, setParams] = useSearchParams()
-  const initial = params.get('tab') === 'org'
+  const tab: 'skill' | 'agent' | 'org' = params.get('tab') === 'org'
     ? 'org'
     : params.get('kind') === 'agent'
       ? 'agent'
       : 'skill'
-  const [tab, setTab] = useState<'skill' | 'agent' | 'org'>(initial)
 
   return (
     <div className="space-y-4">
@@ -33,7 +33,6 @@ export default function CapabilityCenter() {
         value={tab}
         onValueChange={(v) => {
           const next = (v === 'agent' || v === 'org' ? v : 'skill') as 'skill' | 'agent' | 'org'
-          setTab(next)
           setParams(next === 'org' ? { tab: 'org' } : { tab: 'market', kind: next }, { replace: true })
         }}
       >

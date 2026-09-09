@@ -142,6 +142,28 @@ describe('Connectors 连接器目录页', () => {
     })
   })
 
+  it('编辑已停用连接器:回传原 enabled:false,不得静默重新启用(P2-42)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/connectors') {
+        return { connectors: [{ ...ROWS[1], enabled: false }] }
+      }
+      return {}
+    })
+    render(<Connectors />)
+    await screen.findByText('glitchtip')
+    fireEvent.click(screen.getAllByTitle('编辑')[0]!)
+    const nameInput = await screen.findByLabelText('名称')
+    fireEvent.change(nameInput, { target: { value: 'GlitchTip v2' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => {
+      const call = mockRequest.mock.calls.find(([p]) => p === '/api/server/admin/connectors/glitchtip')
+      expect(call).toBeTruthy()
+      const body = JSON.parse((call![1] as RequestInit).body as string)
+      expect(body.enabled).toBe(false)
+      expect(body.name).toBe('GlitchTip v2')
+    })
+  })
+
   it('删除:确认后调用 DELETE', async () => {
     render(<Connectors />)
     await screen.findByText('Moka HR 智能体')

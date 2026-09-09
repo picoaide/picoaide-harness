@@ -2,10 +2,13 @@
 """Dex SSO 集成测试 — 完整 OIDC 授权码流(模拟浏览器)。
 
 验证:
-1. 服务端 /api/auth/oidc/login 302 → Dex(state cookie)
+1. 服务端 /api/client/v2/auth/oidc/login 302 → Dex(state cookie)
 2. Dex 登录表单提交 → 授权码
-3. 服务端 /api/auth/oidc/callback 换 token → picoaide:// 深链
-4. 深链 token 可调用 /api/auth/me(员工面登录成功)
+3. 服务端 /api/client/v2/auth/oidc/callback 换 token → picoaide:// 深链
+4. 深链 token 可调用 /api/client/v2/auth/me(员工面登录成功)
+
+P2-53: 旧命名空间 /api/auth/* 已在 2026-09 移除(唯一真源 server/internal/router
+的 NamespaceClientV2),此处必须用 /api/client/v2/* 否则必然 404。
 
 用法: python3 dex-sso-test.py [server_base] (默认 http://127.0.0.1:8091)
 """
@@ -46,11 +49,14 @@ def main():
     # 1. 启动 OIDC 登录: 不跟随 → 拿 state cookie + Location 到 Dex
     cj = http.cookiejar.CookieJar()
     op = make_opener(cj, follow=False)
-    st, url, body, hdrs = fetch(op, BASE + '/api/auth/oidc/login')
+    st, url, body, hdrs = fetch(op, BASE + '/api/client/v2/auth/oidc/login')
     loc = hdrs.get('Location', '')
     print(f'[1] oidc/login -> {st} Location={loc[:70]}')
     if st != 302 or loc == '':
-        print('  FAIL: 未 302'); ok = False; return
+        # P2-54: 原来这里 return 跳过末尾的 sys.exit → 首个失败分支反而退出码 0(全挂也绿)。
+        print('  FAIL: 未 302')
+        print('RESULT: FAIL')
+        sys.exit(1)
     # 2. 直接访问服务端 302 的 Location(完整参数: state/code_challenge)
     op2 = make_opener(cj, follow=True)
     st, url, body, hdrs = fetch(op2, loc)
@@ -77,9 +83,9 @@ def main():
     if 'picoaide://' in url:
         token = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get('token', [''])[0]
         print(f'  OK: 深链 token 长度={len(token)}')
-        # 6. 用 token 调 /api/auth/me
-        st, url, body, hdrs = fetch(op2, BASE + '/api/auth/me', headers={'Authorization': 'Bearer ' + token})
-        print(f'[6] /api/auth/me -> {st} {body[:120]}')
+        # 6. 用 token 调 /api/client/v2/auth/me
+        st, url, body, hdrs = fetch(op2, BASE + '/api/client/v2/auth/me', headers={'Authorization': 'Bearer ' + token})
+        print(f'[6] /api/client/v2/auth/me -> {st} {body[:120]}')
         if st != 200 or 'admin@example.com' not in body and 'admin' not in body:
             print('  FAIL: me 校验'); ok = False
     else:
