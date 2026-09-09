@@ -10,6 +10,7 @@
  */
 
 import { browserError } from './errors.ts'
+import type { BrowserError } from './errors.ts'
 
 /** One tab's registry metadata (shell rendering + persistence). */
 export interface PoolTabMeta {
@@ -56,8 +57,10 @@ class PoolMutex {
     const prev = this.tail
     let release!: () => void
     this.tail = new Promise<void>((resolve) => { release = resolve })
-    await prev
     try {
+      // Waiting for the previous operation must be cancellable too: a wedged
+      // predecessor used to block every later call forever (2026-09-08 P0-4).
+      await raceAbort(prev, gate, signal)
       while (gate()) {
         if (signal !== undefined && signal.aborted) {
           throw browserError('window-controlled', 'browser: agent was stopped while you control the browser')
@@ -69,6 +72,31 @@ class PoolMutex {
       release()
     }
   }
+}
+
+/** Await a promise, rejecting as soon as `signal` aborts. The rejection code
+ * mirrors the gate loop: an abort while the user holds the browser reports
+ * `window-controlled`, otherwise the operation was merely queued (`interrupted`). */
+function raceAbort(promise: Promise<void>, gate: () => boolean, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return promise
+  const abortError = (): BrowserError => gate()
+    ? browserError('window-controlled', 'browser: agent was stopped while you control the browser')
+    : browserError('interrupted', 'browser: operation aborted while queued')
+  if (signal.aborted) return Promise.reject(abortError())
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      reject(abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      () => { if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); resolve() } },
+      (error: unknown) => { if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); reject(error) } },
+    )
+  })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -89,6 +117,10 @@ export class TabPool {
   private busyTool = ''
   private busyDepth = 0
   private reserved = 0
+  /** Restored ledger ids whose view is not materialized yet. They appear in
+   * `tabs` (the shell lists them) but must NOT consume a live-view slot until
+   * they materialize (P2-26 quota semantics). */
+  private readonly pendingIds = new Set<number>()
   private tabWaiters: QueueTicket[] = []
   disposed = false
 
@@ -160,9 +192,17 @@ export class TabPool {
 
   // ------------------------------------------------------------- tabs
 
+  /** Live (materialized) tab count: restored-but-unmaterialized ledger
+   * entries are listed but do not occupy a view slot yet. */
+  private liveTabs(): number {
+    let pending = 0
+    for (const id of this.pendingIds) if (this.tabs.has(id)) pending++
+    return this.tabs.size - pending
+  }
+
   /** Reserve a tab slot (flat cap; waits FIFO, cancellable, timed). */
   async reserveTab(signal?: AbortSignal): Promise<void> {
-    if (this.tabs.size + this.reserved < this.options.maxTabs) {
+    if (this.liveTabs() + this.reserved < this.options.maxTabs) {
       this.reserved++
       return
     }
@@ -196,13 +236,13 @@ export class TabPool {
 
   /** Fail-fast reservation (user paths): true when a slot is free. */
   tryReserveTab(): boolean {
-    if (this.tabs.size + this.reserved >= this.options.maxTabs) return false
+    if (this.liveTabs() + this.reserved >= this.options.maxTabs) return false
     this.reserved++
     return true
   }
 
   private pumpWaiters(): void {
-    while (this.tabs.size + this.reserved < this.options.maxTabs && this.tabWaiters.length > 0) {
+    while (this.liveTabs() + this.reserved < this.options.maxTabs && this.tabWaiters.length > 0) {
       const ticket = this.tabWaiters.shift()!
       ticket.settled = true
       if (ticket.timer !== undefined) clearTimeout(ticket.timer)
@@ -221,6 +261,8 @@ export class TabPool {
    * pool's active tab (browser convention; the shell/tools may switch). */
   registerTab(tabId: number, url: string, title: string): void {
     this.tabs.set(tabId, { tabId, url, title })
+    // The view now exists: the restored entry consumes a live slot.
+    this.pendingIds.delete(tabId)
     this.activeTabId = tabId
     this.releaseReservation()
     this.emit('tab')
@@ -237,6 +279,7 @@ export class TabPool {
   /** Remove a tab; returns the ids left (the active tab shifts). */
   removeTab(tabId: number): void {
     this.tabs.delete(tabId)
+    this.pendingIds.delete(tabId)
     if (this.activeTabId === tabId) {
       this.activeTabId = [...this.tabs.keys()].at(-1)
     }
@@ -278,6 +321,7 @@ export class TabPool {
     for (const item of ledger.tabs) {
       if (typeof item.tabId !== 'number' || this.tabs.has(item.tabId)) continue
       this.tabs.set(item.tabId, { tabId: item.tabId, url: item.url ?? '', title: item.title ?? '' })
+      this.pendingIds.add(item.tabId)
     }
     if (ledger.activeTabId !== undefined && this.tabs.has(ledger.activeTabId)) {
       this.activeTabId = ledger.activeTabId
@@ -289,6 +333,7 @@ export class TabPool {
 
   clear(): void {
     this.tabs.clear()
+    this.pendingIds.clear()
     this.activeTabId = undefined
     this.reserved = 0
     for (const ticket of this.tabWaiters) {

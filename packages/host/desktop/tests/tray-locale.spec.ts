@@ -21,25 +21,24 @@ describe('desktopLocaleFromLanguageTag', () => {
 describe('desktopTrayLabel', () => {
   it('renders the en locale labels with interpolation', () => {
     expect(desktopTrayLabel('en', 'openDesktop', 'PicoAide Harness')).toBe('Open PicoAide Harness')
-    expect(desktopTrayLabel('en', 'profile', 'default')).toBe('Profile: default')
     expect(desktopTrayLabel('en', 'updateAvailable', '2.5.9')).toBe('PicoAide Harness 2.5.9 Available')
     expect(desktopTrayLabel('en', 'downloadingUpdate', '2.5.9')).toBe('Downloading PicoAide Harness 2.5.9…')
-    expect(desktopTrayLabel('en', 'unavailableForDesktop', 'default')).toBe('default (Unavailable for Desktop)')
+    expect(desktopTrayLabel('en', 'exportDiagnostics')).toBe('Export Diagnostics…')
   })
 
   it('renders the zh locale labels with interpolation', () => {
     expect(desktopTrayLabel('zh', 'openDesktop', 'PicoAide Harness')).toBe('打开 PicoAide Harness')
-    expect(desktopTrayLabel('zh', 'profile', 'default')).toBe('配置文件：default')
     expect(desktopTrayLabel('zh', 'updateAvailable', '2.5.9')).toBe('PicoAide Harness 2.5.9 可用')
     expect(desktopTrayLabel('zh', 'downloadingUpdate', '2.5.9')).toBe('正在下载 PicoAide Harness 2.5.9…')
-    expect(desktopTrayLabel('zh', 'unavailableForDesktop', 'default')).toBe('default（不可用于桌面端）')
+    expect(desktopTrayLabel('zh', 'exportDiagnostics')).toBe('导出诊断信息…')
   })
 
   it('covers the full key set for both locales', () => {
+    // P3: the dead tray keys (openTerminal/profile/switchTo*/unavailableForDesktop)
+    // were removed from the typed key set — keep this list in sync with it.
     const keys = [
       'checkForUpdates', 'checkingForUpdates', 'downloadingUpdate', 'exportDiagnostics',
-      'openDesktop', 'openTerminal', 'profile', 'quit', 'switchToAdvanced',
-      'switchToCompatibility', 'unavailableForDesktop', 'updateAvailable',
+      'openDesktop', 'quit', 'updateAvailable',
     ] as const
     for (const key of keys) {
       expect(desktopTrayLabel('en', key)).not.toBe('')

@@ -7,7 +7,7 @@
  * probe runs only for entries that are actually symlinks, so levels without
  * links stay as cheap as before.
  */
-import { opendir, stat } from 'node:fs/promises'
+import { lstat, opendir, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { SidebarError } from './wire.ts'
 
@@ -150,6 +150,48 @@ export function isWithin(base: string, target: string, platform: NodeJS.Platform
     return lt === lb || lt.startsWith(`${lb}/`)
   }
   return t === b || t.startsWith(`${b}/`)
+}
+
+/**
+ * Whether `target` really lies inside `base` after resolving symlinks (P2-25).
+ *
+ * `isWithin` is purely lexical: a symlink inside the workspace pointing at
+ * `/etc` (or at `../../outside/secret.txt`) passes it, so the read/write/media
+ * routes could touch files outside the session workspace. This variant
+ * resolves both sides with `fs.realpath` first:
+ * - `base` is resolved too (the workspace itself may be reached through a link);
+ * - a target that does not exist yet (write path) is resolved through its
+ *   deepest existing ancestor, so a symlinked parent directory cannot escape;
+ * - with `rejectSymlink`, a final component that IS a symlink is refused
+ *   outright (writing through a link would clobber its target).
+ * @param base - session working directory.
+ * @param target - absolute candidate path.
+ * @param options - `rejectSymlink` for write paths; `platform` for tests.
+ */
+export async function isWithinReal(
+  base: string,
+  target: string,
+  options: { rejectSymlink?: boolean; platform?: NodeJS.Platform } = {},
+): Promise<boolean> {
+  const platform = options.platform ?? process.platform
+  const realBase = await realpath(base).catch(() => base)
+  const resolved = await resolveRealPath(target)
+  if (!isWithin(realBase, resolved, platform)) return false
+  if (options.rejectSymlink === true) {
+    const info = await lstat(target).catch(() => undefined)
+    if (info?.isSymbolicLink() === true) return false
+  }
+  return true
+}
+
+/** Real path of `target`, or of its deepest existing ancestor + remainder. */
+async function resolveRealPath(target: string): Promise<string> {
+  const direct = await realpath(target).catch(() => undefined)
+  if (direct !== undefined) return direct
+  const parent = dirname(target)
+  if (parent === target) return target
+  const realParent = await resolveRealPath(parent)
+  return join(realParent, basename(target))
 }
 
 /** Message text of an unknown thrown value. */

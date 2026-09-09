@@ -557,21 +557,34 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   function renderMenu() {
     const menu = $('menu')
     menu.textContent = ''
+    // Each item issues exactly the POST(s) it needs, in order: the previous
+    // "close menu then act" pair fired two racing POSTs whose arrival order was
+    // unspecified (a viewer could open and then be immediately reset to the
+    // capsule). post() returns the fetch promise, so awaiting it serializes
+    // the calls.
     const items = [
-      { label: '浏览历史', action: () => { viewerKind = 'history'; post('overlay', { mode: 'viewer' }) } },
-      { label: '书签', action: () => { viewerKind = 'bookmarks'; post('overlay', { mode: 'viewer' }) } },
-      { label: '下载', action: () => { viewerKind = 'downloads'; post('overlay', { mode: 'viewer' }) } },
+      { label: '浏览历史', action: async () => { viewerKind = 'history'; await post('overlay', { mode: 'viewer' }) } },
+      { label: '书签', action: async () => { viewerKind = 'bookmarks'; await post('overlay', { mode: 'viewer' }) } },
+      { label: '下载', action: async () => { viewerKind = 'downloads'; await post('overlay', { mode: 'viewer' }) } },
       { sep: true },
-      { label: '清除数据…', danger: true, action: () => { if (confirm('清除全部浏览数据（含登录状态）？')) post('clear-data') } },
-      { label: '隐藏窗口', action: () => post('hide') },
-      { label: '关闭', action: () => post('overlay', { mode: 'capsule' }) },
+      {
+        label: '清除数据…',
+        danger: true,
+        action: async () => {
+          if (!confirm('清除全部浏览数据（含登录状态）？')) return
+          await post('clear-data')
+          await post('overlay', { mode: 'capsule' })
+        },
+      },
+      { label: '隐藏窗口', action: async () => { await post('overlay', { mode: 'capsule' }); await post('hide') } },
+      { label: '关闭', action: async () => { await post('overlay', { mode: 'capsule' }) } },
     ]
     for (const item of items) {
       if (item.sep) { const sep = document.createElement('div'); sep.className = 'sep'; menu.appendChild(sep); continue }
       const b = document.createElement('button')
       b.className = 'mi' + (item.danger ? ' danger' : '')
       b.textContent = item.label
-      b.addEventListener('click', () => { post('overlay', { mode: 'capsule' }); item.action() })
+      b.addEventListener('click', () => { void item.action() })
       menu.appendChild(b)
     }
     menu.classList.add('open')

@@ -6,6 +6,8 @@
  * @module @picoaide/dsh-browser
  */
 
+import { browserError } from './errors.ts'
+
 /**
  * The Electron Debugger surface this adapter needs. Type-only import keeps
  * the module loadable under plain Node (unit tests inject a mock).
@@ -19,13 +21,28 @@ export interface CdpTransport {
   removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown
 }
 
+/**
+ * Default per-command timeout. A wedged/crashed renderer must never hold the
+ * global browser mutex forever — before 2026-09-08 a single never-settling
+ * `sendCommand` left every later browser_* call hanging (audit P0-4).
+ */
+export const CDP_CALL_TIMEOUT_MS = 30_000
+
+export interface CdpSessionOptions {
+  /** Per-command timeout in ms (default CDP_CALL_TIMEOUT_MS). */
+  timeoutMs?: number
+}
+
 /** One established CDP session over a transport. */
 export class CdpSession {
   private readonly listeners = new Map<string, Set<(params: unknown) => void>>()
   private readonly messageListener: (event: unknown, method: string, params: unknown) => void
   private closed = false
 
-  constructor(private readonly transport: CdpTransport) {
+  constructor(
+    private readonly transport: CdpTransport,
+    private readonly options: CdpSessionOptions = {},
+  ) {
     this.messageListener = (_event, method, params) => {
       const set = this.listeners.get(method)
       if (set === undefined) return
@@ -47,10 +64,20 @@ export class CdpSession {
     this.closed = false
   }
 
-  /** Send one CDP command; rejects when the session is closed or the command fails. */
-  async send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  /**
+   * Send one CDP command; rejects when the session is closed, the command
+   * fails, the per-call timeout elapses, or `signal` aborts. A timeout/abort
+   * rejects locally — the transport promise is abandoned, so a wedged renderer
+   * can never keep the caller (and the global browser mutex) waiting forever.
+   */
+  async send<T>(
+    method: string,
+    params: Record<string, unknown> = {},
+    callOptions: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<T> {
     if (this.closed) throw new Error(`browser: CDP session closed (${method})`)
-    return await this.transport.sendCommand(method, params) as T
+    const timeoutMs = callOptions.timeoutMs ?? this.options.timeoutMs ?? CDP_CALL_TIMEOUT_MS
+    return await withTimeout(this.transport.sendCommand(method, params), timeoutMs, method, callOptions.signal) as T
   }
 
   /** Subscribe to one CDP method; returns a disposer. */
@@ -80,4 +107,44 @@ export class CdpSession {
       }
     }
   }
+}
+
+/** Race a transport promise against a timeout and an optional abort signal. */
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  method: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const onAbort = (): void => finish(() => reject(browserError('interrupted', `browser: ${method} aborted`)))
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const finish = (settle: () => void): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      settle()
+    }
+    timer = setTimeout(
+      () => finish(() => reject(browserError('timeout', `browser: ${method} did not respond within ${timeoutMs}ms`))),
+      Math.max(1, timeoutMs),
+    )
+    timer.unref?.()
+    if (signal !== undefined) {
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    promise.then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
+    )
+  })
 }

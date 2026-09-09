@@ -77,6 +77,7 @@ const electron = vi.hoisted(() => {
   }
   const webContents = {
     getZoomLevel: vi.fn(() => zoomLevel),
+    getURL: vi.fn(() => ''),
     on: vi.fn(),
     off: vi.fn(),
     setZoomLevel: vi.fn((level: number) => { zoomLevel = level }),
@@ -361,6 +362,39 @@ describe('Electron compatibility runtime', () => {
     expect(logger.error).toHaveBeenCalledWith(
       'dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: -1073741819 / 0xc0000005)',
     )
+    await release()
+  })
+
+  it('crash fallback shows the error page and never bounces back to the app URL (P1-12)', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    const gone = electron.browserWindows[0]?.webContents.on.mock.calls
+      .find(([event]) => event === 'render-process-gone')?.[1]
+    expect(gone).toEqual(expect.any(Function))
+    electron.webContents.getURL.mockReturnValue('http://127.0.0.1:43120/')
+    // mountScheduled already loaded the app URL; count only crash-driven loads.
+    electron.loadURL.mockClear()
+
+    // First crash: reload the app URL once (the documented single retry).
+    gone({}, { reason: 'crashed', exitCode: 1 })
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(1) })
+    expect(electron.loadURL).toHaveBeenLastCalledWith('http://127.0.0.1:43120/')
+
+    // Second crash: the error page with an explicit retry button.
+    gone({}, { reason: 'crashed', exitCode: 1 })
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(2) })
+    const errorPage = String(electron.loadURL.mock.calls[1]?.[0])
+    expect(errorPage.startsWith('data:text/html;charset=utf-8,')).toBe(true)
+    const html = decodeURIComponent(errorPage.slice('data:text/html;charset=utf-8,'.length))
+    expect(html).toContain('id="retry"')
+    expect(html).toContain('http://127.0.0.1:43120/')
+
+    // No did-finish-load auto-navigation: a deterministic crash must not loop.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(electron.loadURL).toHaveBeenCalledTimes(2)
     await release()
   })
 
@@ -942,6 +976,21 @@ describe('Electron compatibility runtime', () => {
     // 后续链接直接投递
     runtime.receiveDeepLink('picoaide://auth?token=later')
     expect(links).toContain('picoaide://auth?token=later')
+  })
+
+  it('drops deep links that are not allow-listed picoaide:// actions (P2-62)', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const links: string[] = []
+    runtime.receiveDeepLink('picoaide://evil?token=stolen')
+    runtime.receiveDeepLink('https://auth?token=stolen')
+    runtime.receiveDeepLink('picoaide://')
+    runtime.receiveDeepLink('not a url')
+    runtime.setDeepLinkHandler((url) => links.push(url))
+    // Nothing queued before the handler: every candidate was rejected.
+    expect(links).toEqual([])
+    runtime.receiveDeepLink('picoaide://auth?token=ok')
+    expect(links).toEqual(['picoaide://auth?token=ok'])
   })
 
   it('does not re-deliver a deep link after the handler is replaced', async () => {

@@ -6,6 +6,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
 import type { UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
+import type { DesktopUpdateErrorCategory } from './desktop-update-contract.ts'
 import {
   checkForChannelUpdate,
   parseSemVer,
@@ -20,6 +21,25 @@ export const inject = ['desktopRuntime']
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_STATE_BYTES = 4 * 1024
+
+/** Download failure codes that survive to the UI unchanged (P2-63). */
+const DOWNLOAD_ERROR_CATEGORIES: ReadonlySet<string> = new Set([
+  'network',
+  'release-missing',
+  'checksum-mismatch',
+  'checksum-missing',
+  'invalid-artifact',
+])
+
+/** Map a thrown download failure to its user-visible category. The downloader
+ * attaches a stable `code`; anything else (and an aborted download) reads as
+ * `network`. */
+function downloadErrorCategory(cause: unknown): DesktopUpdateErrorCategory {
+  const code = (cause as { code?: unknown } | null | undefined)?.code
+  return typeof code === 'string' && DOWNLOAD_ERROR_CATEGORIES.has(code)
+    ? code as DesktopUpdateErrorCategory
+    : 'network'
+}
 
 /** Scheduled update policy. */
 export interface Config {
@@ -61,7 +81,7 @@ export function apply(ctx: Context, config: Config): void {
     let availableVersion: string | undefined
     let downloadingVersion: string | undefined
     let downloadProgress: UpdateDownloadProgressSnapshot | undefined
-    let lastError: 'network' | 'release-missing' | 'unsupported' | undefined
+    let lastError: DesktopUpdateErrorCategory | undefined
     let state: UpdateStateV2 = EMPTY_STATE
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     let requestTimer: ReturnType<typeof setTimeout> | undefined
@@ -196,8 +216,11 @@ export function apply(ctx: Context, config: Config): void {
             downloadProgress = progress
             publishState()
           })
-        } catch {
-          lastError = 'network'
+        } catch (cause) {
+          // P2-63: keep the precise download cause (checksum mismatch/missing,
+          // release-missing, invalid artifact) instead of collapsing every
+          // failure into `network`, which hid actionable diagnostics.
+          lastError = downloadErrorCategory(cause)
           refreshTray()
           publishState()
         } finally {

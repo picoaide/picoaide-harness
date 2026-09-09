@@ -165,3 +165,30 @@ describe('TabPool — ledger', () => {
     expect(pool.list()).toEqual([])
   })
 })
+
+describe('TabPool — mutex cancellation (2026-09-08 P0-4)', () => {
+  it('aborts a queued operation while the previous one is still running', async () => {
+    const pool = new TabPool()
+    let releaseFirst!: () => void
+    const first = pool.withOperation('first', () => new Promise<void>((resolve) => { releaseFirst = resolve }))
+    const controller = new AbortController()
+    const second = pool.withOperation('second', async () => 'ran', controller.signal)
+    await sleep(20)
+    controller.abort()
+    await expect(second).rejects.toMatchObject({ code: 'interrupted' })
+    releaseFirst()
+    await first
+    // The mutex tail must still be released so later calls proceed.
+    await expect(pool.withOperation('third', async () => 'ok')).resolves.toBe('ok')
+    expect(pool.isBusy()).toBe(false)
+  })
+
+  it('rejects immediately when the signal is already aborted', async () => {
+    const pool = new TabPool()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(pool.withOperation('queued', async () => 'ran', controller.signal))
+      .rejects.toMatchObject({ code: 'interrupted' })
+    expect(pool.isBusy()).toBe(false)
+  })
+})

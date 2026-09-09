@@ -18,7 +18,7 @@
  * environment agrees on one location.
  */
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, parse, resolve, win32 } from 'node:path'
 
 /** Environment variable that overrides the product home. */
 export const DSH_HOME_ENV = 'DSH_HOME'
@@ -108,6 +108,39 @@ export function dshHomeSafe(options: { configured?: string; env?: Record<string,
  */
 export function dshHomePath(...segments: string[]): string {
   return join(resolveDshHome(), ...segments)
+}
+
+/** POSIX system directories a packaged app must never use as a cwd. */
+const POSIX_SYSTEM_DIRS = ['/usr', '/etc', '/var', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys', '/lib', '/lib64', '/opt']
+
+/**
+ * Is `cwd` a filesystem root or a system directory (P2-34)? A packaged app
+ * launched with such a working directory (desktop-entry `Path=`, a Windows
+ * shortcut with a wrong "start in", a service manager) would create project
+ * files, `.browser-store` or relative logs there, which is either impossible
+ * or harmful. The old check only compared against the POSIX `/`, so Windows
+ * `C:\`, `C:\Windows` and Program Files slipped through.
+ *
+ * Root detection covers both path flavours explicitly: `parse` uses the host
+ * flavour, so a Windows-style `C:\` is only recognized through `win32.parse`
+ * when the check runs on Linux (and vice versa for tests).
+ * @param cwd - candidate working directory.
+ * @param env - environment used to locate the Windows system roots (test seam).
+ */
+export function isSystemWorkingDirectory(cwd: string, env: Record<string, string | undefined> = process.env): boolean {
+  const raw = cwd.trim()
+  if (raw === '') return true
+  // Root detection covers both path flavours and runs on the RAW value:
+  // `resolve('C:\\')` on Linux would rewrite the drive path away. `parse`
+  // follows the host flavour, so `C:\` is only recognized through win32.parse.
+  if (parse(raw).root === raw || win32.parse(raw).root === raw) return true
+  const target = resolve(raw).replace(/[\\/]+$/u, '').replace(/\\/gu, '/').toLowerCase()
+  for (const base of [env.SystemRoot, env.windir, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData]) {
+    if (base === undefined || base.trim() === '') continue
+    const root = resolve(base).replace(/[\\/]+$/u, '').replace(/\\/gu, '/').toLowerCase()
+    if (target === root || target.startsWith(`${root}/`)) return true
+  }
+  return POSIX_SYSTEM_DIRS.some(dir => target === dir || target.startsWith(`${dir}/`))
 }
 
 /** Resolve the product home from the live environment. */

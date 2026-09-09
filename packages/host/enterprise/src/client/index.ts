@@ -96,7 +96,9 @@ export function apply(ctx: ClientContext): void {
   // 服务端品牌同步(登录后拉取 /api/brand; 登出回退默认)。
   ctx.effect(
     () => {
-      startBrandStore(ctx)
+      // 2026-09-08 P2-18:只启动一次(此前第 99 行先启动一次并丢弃 disposer,
+      // 第 112 行又启动一次 → 双订阅,首个 disposer 永不释放)。
+      const offStore = startBrandStore(ctx)
       // v3b §4.2: hero CSS 变量注入(品牌变化时更新)。
       // 注意: --pico-hero-headline/--pico-hero-tagline 被 BRAND_CSS 的
       // `content: var(…)` 消费, content 只接受字符串字面量, 值必须带引号
@@ -109,7 +111,6 @@ export function apply(ctx: ClientContext): void {
         }
       }
       applyVars(readBrandSync())
-      const offStore = startBrandStore(ctx)
       // 品牌变更驱动 hero 变量(与 brand-store 同事件;此处仅应用 CSS 变量)。
       const off = ctx.on('pico/brand-changed', (brand) => applyVars(brand))
       return () => { off(); offStore() }

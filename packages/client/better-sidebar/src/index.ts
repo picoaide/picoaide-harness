@@ -28,7 +28,7 @@ import {
   type SidebarConfig,
   type SidebarPrefs,
 } from './config.ts'
-import { isWithin, parentOf, requireAbsolute, listDirectory, rootLabel } from './fs-tree.ts'
+import { isWithinReal, parentOf, requireAbsolute, listDirectory, rootLabel } from './fs-tree.ts'
 import { searchFiles } from './fs-search.ts'
 import { decodeHtmlUrl } from './html-route.ts'
 import { extractFrameAncestors } from './browser-probe.ts'
@@ -236,10 +236,11 @@ function buildApi(
       // Relative paths are git-derived (status/diff report repo-root-relative
       // names; the untracked diff view reads the file through this route).
       const path = await resolveGitPath(cwd, requireString(payload, 'path'))
-      // P1-16: the resolved path must stay inside the session workspace even
-      // after git-root resolution (symlinks/.. can escape) — the media/html
-      // routes already enforce this; fs.read must not be a wider hole.
-      if (!isWithin(cwd, path)) {
+      // P1-16 + P2-25: the resolved path must stay inside the session
+      // workspace even after git-root resolution AND after resolving symlinks
+      // (a workspace link to /etc used to pass the lexical check) — the
+      // media/html routes already enforce this; fs.read must not be a wider hole.
+      if (!await isWithinReal(cwd, path)) {
         throw new SidebarError('fs-error', `path escapes the workspace: ${path}`, 400)
       }
       const { content, truncated, binary, size, head } = await readText(path, resolved.readLimit)
@@ -249,9 +250,11 @@ function buildApi(
     'fs.write': async (payload) => {
       const { cwd } = cwdOf(payload)
       const path = requireAbsolute(requireString(payload, 'path'))
-      // P1-16: the target must stay inside the session workspace (the editor
-      // UI is trusted, but a compromised/naive caller must not write anywhere).
-      if (!isWithin(cwd, path)) {
+      // P1-16 + P2-25: the target must stay inside the session workspace (the
+      // editor UI is trusted, but a compromised/naive caller must not write
+      // anywhere) and must not be reached through a symlink — writing through
+      // one would clobber its target outside the workspace.
+      if (!await isWithinReal(cwd, path, { rejectSymlink: true })) {
         throw new SidebarError('fs-error', `path escapes the workspace: ${path}`, 400)
       }
       const content = requireString(payload, 'content')
@@ -661,11 +664,12 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         if (sessionId === null || raw === null) throw new SidebarError('bad-request', 'sessionId and path are required')
         const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
         const path = requireAbsolute(raw)
-        if (!isWithin(cwd, path)) {
+        if (!await isWithinReal(cwd, path)) {
           // Only files under the session cwd are served as media (the editor
           // opens images from the explorer; produced files go through read).
-          // isWithin (not a raw startsWith) so case-mismatched Windows paths
-          // and mixed separators cannot be misclassified.
+          // isWithinReal (not a raw startsWith, and not the lexical isWithin)
+          // so case-mismatched Windows paths, mixed separators AND symlinks
+          // pointing outside the workspace cannot be misclassified (P2-25).
           throw new SidebarError('fs-error', 'media path outside the session working directory', 403)
         }
         const info = await stat(path)
@@ -726,7 +730,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         // semantics as the media route's fallback).
         const cwd = sessionCwdOf(ctx, sessionId)
         const absolute = requireAbsolute(path)
-        if (!isWithin(cwd, absolute)) {
+        if (!await isWithinReal(cwd, absolute)) {
           throw new SidebarError('fs-error', 'html path outside the session working directory', 403)
         }
         const info = await stat(absolute)

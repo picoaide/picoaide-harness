@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MACOS_ARM64_NATIVE_ENTRIES } from './mac-runtime.ts'
+import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
 
 /** Injectable filesystem and command boundaries for smoke verification. */
 export interface MacSmokeVerificationOptions {
@@ -144,7 +144,7 @@ export function verifyMacSmoke(
       ? `${appAsarPath}.unpacked`
       : join(appPath, 'Contents', 'Resources', 'app')
     for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
-      const nativePath = join(unpackedRoot, entry.path)
+      const nativePath = resolveNativeEntry(unpackedRoot, entry)
       if (!options.exists(nativePath)) {
         throw new Error(`arm64 application is missing ${nativePath}`)
       }

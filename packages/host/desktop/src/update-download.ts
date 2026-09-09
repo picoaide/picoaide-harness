@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
+import { DESKTOP_RELEASE_LATEST_API, DESKTOP_RELEASE_TAG_API, DESKTOP_RELEASE_REPOSITORY } from './desktop-release.ts'
 import { parseSemVer } from './update-checker.ts'
 
 /** Desktop platforms with a fixed GitHub release asset convention. */
@@ -16,16 +17,14 @@ export interface UpdateDownloadProgress {
   readonly totalBytes: number | undefined
 }
 
-/** GitHub repository owning public client releases. */
-export const DESKTOP_RELEASE_REPOSITORY = 'picoaide/picoaide-harness'
+// Single authority (P2-64): repository + endpoints come from ./desktop-release.ts.
+export { DESKTOP_RELEASE_REPOSITORY }
 
 /** Public endpoint returning the latest stable PicoAide Harness release metadata. */
-export const DESKTOP_RELEASE_API_URL =
-  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`
+export const DESKTOP_RELEASE_API_URL = DESKTOP_RELEASE_LATEST_API
 
 /** Prefix of the by-tag release endpoint used for prerelease installers. */
-export const DESKTOP_RELEASE_TAG_API_URL =
-  `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/tags/`
+export const DESKTOP_RELEASE_TAG_API_URL = DESKTOP_RELEASE_TAG_API
 
 /** Release asset carrying SHA-256 digests for every installer artifact. */
 export const RELEASE_CHECKSUM_ASSET_NAME = 'SHA256SUMS.txt'

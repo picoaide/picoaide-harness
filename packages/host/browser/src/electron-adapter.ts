@@ -147,6 +147,14 @@ export interface ElectronAdapter {
   showSaveDialog(options: { title: string; defaultPath: string }): Promise<{ canceled: boolean; filePath?: string }>
   /** Open a local path with the OS default handler (downloads viewer). */
   openPath(path: string): Promise<{ error?: string }>
+  /**
+   * Resolve an existing session for a partition without creating a view.
+   * Used by `clearData` when no tab has materialized yet (P2-28): the
+   * partition's cookies/storage still exist on disk, so "clear" must reach
+   * them instead of silently doing nothing. Optional so test adapters and
+   * non-Electron hosts can omit it (the runtime then fails loudly).
+   */
+  getSession?(partition: string): NativeSession | undefined
 }
 
 /**
@@ -198,10 +206,20 @@ const BROWSER_WINDOW_DEFAULT = { width: 1280, height: 840 }
 /** Browser window minimums (mirror the main window 900×640). */
 const BROWSER_WINDOW_MIN = { width: 900, height: 640 }
 
+/** The Electron surface this adapter consumes; injectable so unit tests can
+ * assert the webPreferences/lifecycle contract without an Electron runtime. */
+export interface ElectronModuleLike {
+  WebContentsView: typeof import('electron').WebContentsView
+  BrowserWindow: typeof import('electron').BrowserWindow
+  dialog: typeof import('electron').dialog
+  shell: typeof import('electron').shell
+  session: typeof import('electron').session
+}
+
 /** Lazy real adapter over Electron (imported only on first browser start). */
-export function createRealElectronAdapter(): ElectronAdapter {
+export function createRealElectronAdapter(electronModule?: ElectronModuleLike): ElectronAdapter {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const electron = require('electron') as typeof import('electron')
+  const electron = electronModule ?? (require('electron') as ElectronModuleLike)
   const { WebContentsView, BrowserWindow, dialog } = electron
 
   const createView = (partition: string = BROWSER_PARTITION): NativeView => {
@@ -211,6 +229,14 @@ export function createRealElectronAdapter(): ElectronAdapter {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        // 2026-09-08 product decision: the AI keeps driving tabs after the user
+        // closes the browser window, and tabs that are not the active one are
+        // `setVisible(false)`. Chromium's default background throttling clamps
+        // page timers to 1 Hz (and 1/min after ~5 min) in both cases —
+        // measured 30 → 3 ticks per 3s — which breaks SPA polling/debounce on
+        // the very tabs the agent is operating. Keep every browser renderer at
+        // full speed while it is backgrounded.
+        backgroundThrottling: false,
       },
     })
     const wc = view.webContents
@@ -293,6 +319,9 @@ export function createRealElectronAdapter(): ElectronAdapter {
           nodeIntegration: false,
           sandbox: true,
           transparent: true,
+          // Overlay UI (pill/panel/menu/viewer) must keep animating and
+          // polling while the browser window is hidden — see createView.
+          backgroundThrottling: false,
         },
       })
       const wc = view.webContents
@@ -362,12 +391,19 @@ export function createRealElectronAdapter(): ElectronAdapter {
         minWidth: BROWSER_WINDOW_MIN.width,
         minHeight: BROWSER_WINDOW_MIN.height,
         title: 'PicoAide 浏览器',
-        show: true,
+        // 2026-09-08 product decision: the browser is created at client boot
+        // but stays HIDDEN — the agent operates it in the background and the
+        // shell's 浏览器 button shows it on demand. Creation must therefore
+        // never flash a window on screen.
+        show: false,
         backgroundColor: '#f2f3f5',
         webPreferences: {
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
+          // The shell toolbar/overlay keep working while the window is hidden
+          // (user closed it): no background timer throttling.
+          backgroundThrottling: false,
         },
       })
       win.setMenuBarVisibility(false)
@@ -456,6 +492,14 @@ export function createRealElectronAdapter(): ElectronAdapter {
       const { shell } = electron
       const error = await shell.openPath(path)
       return error === '' ? {} : { error }
+    },
+    // P2-28: resolve an existing partition session without creating a view,
+    // so `clearData` can still clear cookies/storage when no tab has been
+    // materialized yet. Electron's Session satisfies NativeSession.
+    getSession: (partition) => {
+      const sessions = (electron as { session?: typeof import('electron').session }).session
+      if (sessions === undefined || typeof sessions.fromPartition !== 'function') return undefined
+      return sessions.fromPartition(partition) as unknown as NativeSession
     },
   }
 }

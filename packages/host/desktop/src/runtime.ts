@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
+import type { DesktopUpdateErrorCategory } from './desktop-update-contract.ts'
 import type { UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 
 /** Electron platforms supported by the PicoAide Harness native adapter. */
@@ -107,8 +108,9 @@ export interface DesktopUpdateSnapshot {
   readonly currentVersion: string
   /** Current download progress (bytes) while downloading; undefined otherwise. */
   readonly downloadProgress: UpdateDownloadProgressSnapshot | undefined
-  /** Last user-visible check failure category; undefined when the last check succeeded. */
-  readonly lastError: 'network' | 'release-missing' | 'unsupported' | undefined
+  /** Last user-visible check/download failure category; undefined when the last
+   * check succeeded (P2-63: download causes are kept distinct). */
+  readonly lastError: DesktopUpdateErrorCategory | undefined
 }
 
 /** Progress snapshot published to the renderer (percent derived client-side). */

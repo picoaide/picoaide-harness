@@ -217,7 +217,11 @@ describe('published package surface', () => {
       '**/prebuilds/**/*.conpty_console_list*',
     ])
     expect(manifest.build?.asar).toEqual({ smartUnpack: false })
-    expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
+    // P2-61: onlyLoadAppFromAsar blocks loading app code from outside the
+    // asar. `runAsNode` MUST stay true: connectors spawn stdio MCP servers
+    // through ELECTRON_RUN_AS_NODE (connectors/src/index.ts), so disabling it
+    // would break every stdio MCP connector.
+    expect(manifest.build?.electronFuses).toEqual({ runAsNode: true, onlyLoadAppFromAsar: true })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/app-icon-mac.png',

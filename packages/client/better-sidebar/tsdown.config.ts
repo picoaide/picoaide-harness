@@ -81,6 +81,24 @@ const CSS_VIRTUAL_SUFFIX = '.mjs'
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('.', import.meta.url))
 
+/**
+ * Virtual id -> absolute source path. The id itself must be REPOSITORY-RELATIVE
+ * (P3): rolldown emits `//#region <id>` comments into the bundle, so an
+ * absolute id leaked the build machine's checkout path
+ * (`\0dsh-css:/data/picoaide-harness/...`) into the shipped client.js.
+ */
+const CSS_SOURCES = new Map<string, string>()
+let cssOutsideRepoSeq = 0
+
+/** Stable, machine-independent virtual id for one CSS source file. */
+function cssVirtualId(abs: string): string {
+  const rel = relative(REPOSITORY_ROOT, abs).replace(/\\/g, '/')
+  const label = rel.startsWith('..') ? `external/${cssOutsideRepoSeq++}-${basename(abs)}` : rel
+  const id = CSS_VIRTUAL_PREFIX + label + CSS_VIRTUAL_SUFFIX
+  CSS_SOURCES.set(id, abs)
+  return id
+}
+
 /** The style-injection prologue shared by module css and plain css loads. */
 function injectTag(pluginId: string, fileId: string, cssText: string): string {
   const tagId = `${pluginId}/${basename(fileId)}`
@@ -280,11 +298,12 @@ function makeCssPlugin(pluginId: string): BuildPlugin {
       } else {
         abs = require.resolve(source)
       }
-      return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      return cssVirtualId(abs)
     },
     async load(virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = CSS_SOURCES.get(virtualId)
+      if (fileId === undefined) return null
       this.addWatchFile(fileId)
       const source = await readFile(fileId)
       // CSS Modules (x.module.css) become hashed class maps; plain css
