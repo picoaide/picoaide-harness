@@ -117,9 +117,53 @@ const WRITE_APIS = new Set([
   'exitFullscreen',
 ])
 
+/** Member property names that make a member chain a code-execution path.
+ *
+ * Checked at EVERY link of a member chain (not just the outermost property):
+ * `('').constructor.constructor` must be rejected at the first `constructor`.
+ * Name-based (base-agnostic) on purpose: `Reflect.construct`,
+ * `Reflect['construct']`, `Reflect?.construct` and any other `.construct`
+ * are all covered by one rule, and aliasing the base object cannot evade it.
+ *
+ * - constructor/prototype/__proto__: constructor-chain code execution (P1-1)
+ * - eval/Function: code-execution primitives reachable as member values
+ * - call/apply/bind/construct: call trampolines + Reflect construction (P1-2)
+ * - getOwnPropertyDescriptor(s)/__lookupGetter__/__lookupSetter__: reflection
+ *   APIs whose result carries `.value`/getter straight to `Function`.
+ *   NOTE: `Object.getPrototypeOf` is deliberately NOT listed — the resulting
+ *   value's `.constructor` is already caught by this same chain rule.
+ */
+const DANGEROUS_MEMBERS = new Set([
+  'constructor', 'prototype', '__proto__',
+  'eval', 'Function',
+  'call', 'apply', 'bind', 'construct',
+  'getOwnPropertyDescriptor', 'getOwnPropertyDescriptors',
+  '__lookupGetter__', '__lookupSetter__',
+])
+
 interface AnyNode {
   type: string
   [key: string]: unknown
+}
+
+/** Keys that carry acorn bookkeeping rather than child AST nodes. */
+const NON_CHILD_KEYS = new Set(['type', 'start', 'end', 'loc', 'raw', 'range'])
+
+/** Visit every direct child AST node of `node` (single walk implementation
+ * shared by the pre-scan and the main traversal). */
+function forEachChild(node: AnyNode, fn: (child: AnyNode, key: string, index: number | null) => void): void {
+  for (const key of Object.keys(node)) {
+    if (NON_CHILD_KEYS.has(key)) continue
+    const value = node[key]
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const item = value[i]
+        if (isNode(item)) fn(item, key, i)
+      }
+    } else if (isNode(value)) {
+      fn(value, key, null)
+    }
+  }
 }
 
 /** Parse `source`; returns the single Expression node or throws eval-policy. */
@@ -136,69 +180,559 @@ function parseExpression(source: string): AnyNode {
   }
 }
 
-/** Walk the AST; returns the first violation reason or null. */
+/** Walk the AST; returns the first violation reason or null.
+ *
+ * Scope-aware (FIX-3): `arrowBindings` maps each arrow function to the names
+ * its parameter patterns bind, and the recursion carries the chain of
+ * enclosing arrows. A bare-identifier call is an unverifiable alias only when
+ * the callee name is bound by an ENCLOSING arrow AND the value that reaches
+ * that binding is not statically provable to be harmless. The previous version
+ * collected every parameter name into one global set, so
+ * `[() => 1].map(f => f())` was rejected for an unrelated arrow's `f`.
+ *
+ * Bindings are unwrapped through EVERY parameter form (FIX-1): Identifier,
+ * ObjectPattern (nested / renamed / computed keys), ArrayPattern,
+ * AssignmentPattern (defaults) and RestElement.
+ */
 function findViolation(node: AnyNode, source: string): string | null {
-  const stack: AnyNode[] = [node]
-  while (stack.length > 0) {
-    const current = stack.pop()!
-    const type = current.type
-    if (type === 'AssignmentExpression' || type === 'UpdateExpression') {
-      return 'assignment/update is not allowed (read-only eval)'
-    }
-    if (type === 'VariableDeclaration' || type === 'FunctionDeclaration' || type === 'ClassDeclaration'
-      || type === 'ClassExpression' || type === 'FunctionExpression') {
-      return 'declarations are not allowed (single expression only)'
-    }
-    if (type === 'NewExpression') return '`new` is not allowed'
-    if (type === 'AwaitExpression' || type === 'YieldExpression') return 'await/yield is not allowed'
-    if (type === 'WithStatement' || type === 'ForStatement' || type === 'ForInStatement' || type === 'ForOfStatement'
-      || type === 'WhileStatement' || type === 'DoWhileStatement' || type === 'SwitchStatement' || type === 'IfStatement'
-      || type === 'TryStatement' || type === 'ThrowStatement' || type === 'ReturnStatement' || type === 'LabeledStatement') {
-      return 'statements are not allowed (single expression only)'
-    }
-    if (type === 'TaggedTemplateExpression') return 'tagged templates are not allowed'
-    if (type === 'ImportExpression' || type === 'MetaProperty' || type === 'Super') {
-      return 'import/meta/super are not allowed'
-    }
-    if (type === 'CallExpression') {
-      const callee = current.callee as AnyNode | undefined
-      const name = callTargetName(callee)
-      if (name === undefined) {
-        return 'dynamic call target is not allowed (read-only eval)'
-      }
-      if (name !== null && (WRITE_APIS.has(name) || name === 'eval' || name === 'Function')) {
-        return `call to ${name} is not allowed (read-only eval)`
-      }
-    }
-    if (type === 'MemberExpression') {
-      const name = memberName(current)
-      if (name === undefined) {
-        // Non-literal computed READ is allowed (data access like data[key]).
-      } else if (name !== null && WRITE_APIS.has(name)) {
-        return `access to ${name} is not allowed (read-only eval)`
-      }
-    }
-    if (type === 'Identifier') {
-      if ((current as { name?: string }).name === 'eval' || (current as { name?: string }).name === 'Function') {
-        return 'eval/Function is not allowed'
-      }
-    }
-    if (type === 'TemplateLiteral') {
-      // Template literals are fine (string building only).
-    }
-    // Append children.
-    for (const key of Object.keys(current)) {
-      if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'raw' || key === 'range') continue
-      const value = current[key]
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          if (isNode(item)) stack.push(item)
+  // Pre-scan: per-arrow parameter bindings + parent links (needed to resolve
+  // where an arrow's parameters actually receive their values) + the node
+  // kinds that can hand a value back out of a sub-expression.
+  const arrowBindings = new Map<AnyNode, Set<string>>()
+  const parents = new Map<AnyNode, { parent: AnyNode; key: string; index: number | null }>()
+  /** Arrow functions nested inside a value expression (indexed by container). */
+  const nestedArrows = new Map<AnyNode, AnyNode[]>()
+  /** Identifiers bound under a dangerous pattern key (`{a: [c]}` → c). */
+  const taintedBindings = new Set<string>()
+  {
+    const walk: AnyNode[] = [node]
+    while (walk.length > 0) {
+      const cur = walk.pop()!
+      if (cur.type === 'ArrowFunctionExpression') {
+        const names = new Set<string>()
+        for (const param of ((cur as { params?: AnyNode[] }).params ?? [])) {
+          collectPatternNames(param, names)
+          // A non-Identifier binding form yields a piece of an aggregate whose
+          // contents are not statically provable → calls through it are denied.
+          if (param.type !== 'Identifier') collectTaintedNames(param, taintedBindings)
         }
-      } else if (isNode(value)) {
-        stack.push(value)
+        arrowBindings.set(cur, names)
+      }
+      const arrows: AnyNode[] = []
+      forEachChild(cur, (child, key, index) => {
+        parents.set(child, { parent: cur, key, index })
+        if (child.type === 'ArrowFunctionExpression') arrows.push(child)
+        walk.push(child)
+      })
+      if (arrows.length > 0) nestedArrows.set(cur, arrows)
+    }
+  }
+  // Enclosing arrow chain (innermost last) for the node being visited.
+  const arrowAncestors: AnyNode[] = []
+  const enclosingBinding = (name: string): AnyNode | null => {
+    for (let i = arrowAncestors.length - 1; i >= 0; i--) {
+      const arrow = arrowAncestors[i]!
+      if (arrowBindings.get(arrow)?.has(name) === true) return arrow
+    }
+    return null
+  }
+  const boundInEnclosingArrow = (name: string): boolean => enclosingBinding(name) !== null
+
+  /** Values that can flow into an arrow's parameters, when statically known. */
+  const incomingValues = (arrow: AnyNode): AnyNode[] | null => {
+    const link = parents.get(arrow)
+    if (link === undefined) return null
+    const { parent, key } = link
+    if (parent.type === 'CallExpression' && key === 'callee') {
+      return ((parent as { arguments?: AnyNode[] }).arguments ?? [])
+    }
+    if (parent.type === 'CallExpression' && key === 'arguments') {
+      const callee = (parent as { callee?: AnyNode }).callee
+      if (callee !== undefined && callee.type === 'MemberExpression') {
+        const receiver = unwrapChain((callee as { object?: AnyNode }).object)
+        if (receiver !== undefined && receiver.type === 'ArrayExpression') {
+          return ((receiver as { elements?: (AnyNode | null)[] }).elements ?? [])
+            .filter((element): element is AnyNode => element !== null && element !== undefined)
+        }
+      }
+      return null
+    }
+    return null
+  }
+  /** A bare alias call is allowed only when every incoming value is provably
+   * inert (literal / inline arrow / literal aggregate): `[() => 1].map(f => f())`
+   * passes, while `(f => f('alert(1)'))(setTimeout)` and
+   * `Object.values(window).map(v => v('x'))` do not. */
+  const aliasBindingProvablySafe = (arrow: AnyNode): boolean => {
+    const values = incomingValues(arrow)
+    if (values === null) return false
+    return values.every((value) => isProvablySafeValue(value))
+  }
+
+  /** Reason when a VALUE position carries a banned/dangerous reference.
+   * Recurses through composite value expressions so an identifier cannot be
+   * smuggled inside an array/object/sequence (`[setTimeout].map(f => f('1'))`,
+   * `[1].map((0, alert))`). */
+  const dangerousValue = (value: AnyNode | undefined | null): string | null => {
+    const node = unwrapChain(value ?? undefined)
+    if (node === undefined) return null
+    switch (node.type) {
+      case 'Identifier': {
+        const name = (node as { name?: string }).name
+        if (name === undefined) return null
+        if (name === 'eval' || name === 'Function') return 'eval/Function is not allowed'
+        if (DANGEROUS_MEMBERS.has(name) || WRITE_APIS.has(name)) {
+          return `access to ${name} is not allowed (read-only eval)`
+        }
+        return null
+      }
+      case 'MemberExpression': {
+        const chain = firstDangerousChainLink(node)
+        if (chain !== null) return chain
+        const name = memberName(node)
+        if (name !== undefined && name !== null && WRITE_APIS.has(name)) {
+          return `access to ${name} is not allowed (read-only eval)`
+        }
+        return null
+      }
+      case 'CallExpression': {
+        // Reflective read that resolves to a banned member value:
+        // `Reflect.get(window, 'open')` IS the banned API as a value.
+        const calleeName = callTargetName((node as { callee?: AnyNode }).callee)
+        if (calleeName === 'get' || calleeName === 'getOwnPropertyDescriptor') {
+          for (const argument of ((node as { arguments?: AnyNode[] }).arguments ?? [])) {
+            const literal = constantStringValue(argument)
+            if (literal !== undefined && (WRITE_APIS.has(literal) || DANGEROUS_MEMBERS.has(literal))) {
+              return `access to ${literal} is not allowed (read-only eval)`
+            }
+          }
+        }
+        return null
+      }
+      case 'ArrayExpression':
+        for (const element of ((node as { elements?: (AnyNode | null)[] }).elements ?? [])) {
+          if (element === null || element === undefined) continue
+          const reason = dangerousValue(element.type === 'SpreadElement' ? (element as { argument?: AnyNode }).argument : element)
+          if (reason !== null) return reason
+        }
+        return null
+      case 'ObjectExpression':
+        for (const property of ((node as { properties?: AnyNode[] }).properties ?? [])) {
+          if (property.type !== 'Property') return 'dynamic call target is not allowed (read-only eval)'
+          const reason = dangerousValue((property as { value?: AnyNode }).value)
+          if (reason !== null) return reason
+        }
+        return null
+      case 'SequenceExpression': {
+        for (const expression of ((node as { expressions?: AnyNode[] }).expressions ?? [])) {
+          const reason = dangerousValue(expression)
+          if (reason !== null) return reason
+        }
+        return null
+      }
+      case 'ConditionalExpression':
+        return dangerousValue((node as { consequent?: AnyNode }).consequent)
+          ?? dangerousValue((node as { alternate?: AnyNode }).alternate)
+      case 'LogicalExpression':
+        return dangerousValue((node as { left?: AnyNode }).left)
+          ?? dangerousValue((node as { right?: AnyNode }).right)
+      case 'BinaryExpression':
+        return dangerousValue((node as { left?: AnyNode }).left)
+          ?? dangerousValue((node as { right?: AnyNode }).right)
+      case 'TemplateLiteral':
+        for (const expression of ((node as { expressions?: AnyNode[] }).expressions ?? [])) {
+          const reason = dangerousValue(expression)
+          if (reason !== null) return reason
+        }
+        return null
+      case 'UnaryExpression':
+        return dangerousValue((node as { argument?: AnyNode }).argument)
+      case 'SpreadElement':
+        return dangerousValue((node as { argument?: AnyNode }).argument)
+      case 'AssignmentExpression':
+        return dangerousValue((node as { right?: AnyNode }).right)
+      default:
+        return null
+    }
+  }
+
+  /** Reason when a member-access call target's VALUE is not provably inert.
+   * `({a:1}).a()` and `({g: () => 1}).g()` pass; `({f: setTimeout}).f('1')`
+   * and `((o) => o.g('x'))({g: window[k]})` do not. */
+  const memberTargetReason = (callee: AnyNode | undefined): string | null => {
+    const node = unwrapChain(callee)
+    if (node === undefined || node.type !== 'MemberExpression') return null
+    const keyName = memberName(node)
+    if (keyName === undefined || keyName === null) return null
+    let target = unwrapChain((node as { object?: AnyNode }).object)
+    if (target !== undefined && target.type === 'Identifier') {
+      const name = (target as { name?: string }).name
+      if (name === undefined || !boundInEnclosingArrow(name)) return null
+      const arrow = enclosingBinding(name)
+      const values = arrow === null ? null : incomingValues(arrow)
+      if (values === null || values.length !== 1) return null
+      target = unwrapChain(values[0])
+    }
+    if (target === undefined || target.type !== 'ObjectExpression') return null
+    for (const property of ((target as { properties?: AnyNode[] }).properties ?? [])) {
+      if (property.type !== 'Property') return `dynamic call target is not allowed (read-only eval)`
+      if (propertyKeyName((property as { key?: AnyNode }).key) !== keyName) continue
+      if (!isProvablySafeValue((property as { value?: AnyNode }).value)) {
+        return `call to ${keyName} is not allowed (read-only eval)`
+      }
+      return null
+    }
+    return null
+  }
+
+  const visit = (current: AnyNode): string | null => {
+    const type = current.type
+    const isArrow = type === 'ArrowFunctionExpression'
+    if (isArrow) arrowAncestors.push(current)
+    try {
+      if (type === 'AssignmentExpression' || type === 'UpdateExpression') {
+        return 'assignment/update is not allowed (read-only eval)'
+      }
+      if (type === 'VariableDeclaration' || type === 'FunctionDeclaration' || type === 'ClassDeclaration'
+        || type === 'ClassExpression' || type === 'FunctionExpression') {
+        return 'declarations are not allowed (single expression only)'
+      }
+      if (type === 'NewExpression') return '`new` is not allowed'
+      if (type === 'AwaitExpression' || type === 'YieldExpression') return 'await/yield is not allowed'
+      if (type === 'WithStatement' || type === 'ForStatement' || type === 'ForInStatement' || type === 'ForOfStatement'
+        || type === 'WhileStatement' || type === 'DoWhileStatement' || type === 'SwitchStatement' || type === 'IfStatement'
+        || type === 'TryStatement' || type === 'ThrowStatement' || type === 'ReturnStatement' || type === 'LabeledStatement') {
+        return 'statements are not allowed (single expression only)'
+      }
+      if (type === 'TaggedTemplateExpression') return 'tagged templates are not allowed'
+      if (type === 'ImportExpression' || type === 'MetaProperty' || type === 'Super') {
+        return 'import/meta/super are not allowed'
+      }
+      if (type === 'CallExpression') {
+        const callee = current.callee as AnyNode | undefined
+        const name = callTargetName(callee)
+        if (name === undefined) {
+          return 'dynamic call target is not allowed (read-only eval)'
+        }
+        if (name !== null && DANGEROUS_MEMBERS.has(name)) {
+          return `call to ${name} is not allowed (read-only eval)`
+        }
+        if (name !== null && (WRITE_APIS.has(name) || name === 'eval' || name === 'Function')) {
+          return `call to ${name} is not allowed (read-only eval)`
+        }
+        if (name !== null && boundInEnclosingArrow(name)) {
+          const arrow = enclosingBinding(name)
+          // Destructured / defaulted / rest bindings hold an unprovable piece
+          // of an aggregate; only a plain parameter bound to provably inert
+          // values may be called.
+          if (taintedBindings.has(name) || arrow === null || !aliasBindingProvablySafe(arrow)) {
+            return `call to alias ${name} is not allowed (read-only eval)`
+          }
+        }
+        const targetReason = memberTargetReason(callee)
+        if (targetReason !== null) return targetReason
+        // FIX-2: a dangerous reference handed over as an ARGUMENT
+        // (`[1].map(alert)`, `Promise.resolve(1).then(setTimeout)`) launders
+        // the banned API through a harmless callee name.
+        for (const argument of ((current as { arguments?: AnyNode[] }).arguments ?? [])) {
+          const reason = dangerousValue(argument)
+          if (reason !== null) return reason
+        }
+      }
+      if (type === 'MemberExpression') {
+        // Walk the WHOLE base chain: `a.b.c` must be checked at every link,
+        // not just the outermost property (`('').constructor.constructor`).
+        const chainReason = firstDangerousChainLink(current)
+        if (chainReason !== null) return chainReason
+        const name = memberName(current)
+        if (name === undefined) {
+          // Non-literal computed READ is allowed (data access like data[key]).
+        } else if (name !== null && WRITE_APIS.has(name)) {
+          return `access to ${name} is not allowed (read-only eval)`
+        }
+      }
+      if (type === 'Property') {
+        // FIX-2: `({f: setTimeout}).f('…')` launders the value via a property.
+        // ObjectPattern properties bind names, not values — skip those.
+        const parent = parents.get(current)?.parent
+        if (parent === undefined || parent.type !== 'ObjectPattern') {
+          const reason = dangerousValue((current as { value?: AnyNode }).value)
+          if (reason !== null) return reason
+        }
+      }
+      if (type === 'ArrayExpression') {
+        // FIX-2: `[setTimeout].map(f => f('x'))` smuggles the API in a value.
+        for (const element of ((current as { elements?: (AnyNode | null)[] }).elements ?? [])) {
+          if (element === null || element === undefined || element.type === 'SpreadElement') continue
+          const reason = dangerousValue(element)
+          if (reason !== null) return reason
+        }
+      }
+      if (type === 'ArrowFunctionExpression') {
+        // An arrow body that EVALUATES to a banned value hands it to whoever
+        // collects the result (`[1].map(x => setTimeout).at(0)('alert(1)')`).
+        // Inline arrows are the FIX-3 whitelist, so this stays scoped to
+        // banned identifiers/member chains and never fires on `() => 1`.
+        const reason = dangerousValue((current as { body?: AnyNode }).body)
+        if (reason !== null) return reason
+      }
+      if (type === 'ObjectPattern' || type === 'ArrayPattern' || type === 'AssignmentPattern' || type === 'RestElement') {
+        // FIX-1: a binding pattern whose key names a dangerous member is a
+        // rename of that member (`({constructor: c}) => …`).
+        const reason = patternKeyViolation(current)
+        if (reason !== null) return reason
+      }
+      if (type === 'Identifier') {
+        const name = (current as { name?: string }).name
+        if (name === 'eval' || name === 'Function') return 'eval/Function is not allowed'
+      }
+      let reason: string | null = null
+      forEachChild(current, (child) => {
+        if (reason !== null) return
+        reason = visit(child)
+      })
+      return reason
+    } finally {
+      if (isArrow) arrowAncestors.pop()
+    }
+  }
+  void source
+  return visit(node)
+}
+
+/** Unwrap an optional-chain wrapper so callers can look at the real node. */
+function unwrapChain(node: AnyNode | undefined): AnyNode | undefined {
+  let current = node
+  while (current !== undefined && current.type === 'ChainExpression') {
+    current = (current as { expression?: AnyNode }).expression
+  }
+  return current
+}
+
+/** True when a value expression is statically provable to be inert: a
+ * literal, an inline arrow (its body is itself validated), or an aggregate of
+ * such values. Anything whose runtime value cannot be proven is NOT safe. */
+function isProvablySafeValue(node: AnyNode | undefined | null): boolean {
+  if (node === undefined || node === null) return false
+  switch (node.type) {
+    case 'Literal':
+    case 'ArrowFunctionExpression':
+      return true
+    case 'TemplateLiteral':
+      return ((node as { expressions?: AnyNode[] }).expressions ?? []).every((expression) => isProvablySafeValue(expression))
+    case 'ArrayExpression':
+      return ((node as { elements?: (AnyNode | null)[] }).elements ?? [])
+        .every((element) => element === null || element === undefined || isProvablySafeValue(element))
+    case 'ObjectExpression':
+      return ((node as { properties?: AnyNode[] }).properties ?? []).every((property) => {
+        if (property.type !== 'Property') return false
+        const key = propertyKeyName((property as { key?: AnyNode }).key)
+        if (key === undefined) return false
+        return isProvablySafeValue((property as { value?: AnyNode }).value)
+      })
+    case 'UnaryExpression':
+      return isProvablySafeValue((node as { argument?: AnyNode }).argument)
+    case 'BinaryExpression':
+      return isProvablySafeValue((node as { left?: AnyNode }).left)
+        && isProvablySafeValue((node as { right?: AnyNode }).right)
+    case 'ConditionalExpression':
+      return isProvablySafeValue((node as { test?: AnyNode }).test)
+        && isProvablySafeValue((node as { consequent?: AnyNode }).consequent)
+        && isProvablySafeValue((node as { alternate?: AnyNode }).alternate)
+    default:
+      return false
+  }
+}
+
+/** Recursively collect every identifier a binding pattern introduces. */
+function collectPatternNames(pattern: AnyNode | undefined | null, out: Set<string>): void {
+  if (pattern === undefined || pattern === null) return
+  switch (pattern.type) {
+    case 'Identifier': {
+      const name = (pattern as { name?: string }).name
+      if (name !== undefined) out.add(name)
+      return
+    }
+    case 'ObjectPattern':
+      for (const property of ((pattern as { properties?: AnyNode[] }).properties ?? [])) {
+        collectPatternNames(property, out)
+      }
+      return
+    case 'ArrayPattern':
+      for (const element of ((pattern as { elements?: (AnyNode | null)[] }).elements ?? [])) {
+        collectPatternNames(element, out)
+      }
+      return
+    case 'AssignmentPattern':
+      collectPatternNames((pattern as { left?: AnyNode }).left, out)
+      return
+    case 'RestElement':
+      collectPatternNames((pattern as { argument?: AnyNode }).argument, out)
+      return
+    case 'Property':
+      collectPatternNames((pattern as { value?: AnyNode }).value, out)
+      return
+    default:
+      return
+  }
+}
+
+/** Collect identifiers bound by a NON-trivial binding form (destructuring /
+ * default / rest). Their runtime value is a piece of an aggregate that cannot
+ * be proven inert, so a call through such an alias is rejected:
+ * `(({a: [c]}) => c('…'))({a: [(x=>x)]})`. */
+function collectTaintedNames(pattern: AnyNode | undefined | null, out: Set<string>): void {
+  if (pattern === undefined || pattern === null) return
+  switch (pattern.type) {
+    case 'Identifier': {
+      const name = (pattern as { name?: string }).name
+      if (name !== undefined) out.add(name)
+      return
+    }
+    case 'ObjectPattern':
+      for (const property of ((pattern as { properties?: AnyNode[] }).properties ?? [])) {
+        collectTaintedNames(property, out)
+      }
+      return
+    case 'ArrayPattern':
+      for (const element of ((pattern as { elements?: (AnyNode | null)[] }).elements ?? [])) {
+        collectTaintedNames(element, out)
+      }
+      return
+    case 'AssignmentPattern':
+      collectTaintedNames((pattern as { left?: AnyNode }).left, out)
+      return
+    case 'RestElement':
+      collectTaintedNames((pattern as { argument?: AnyNode }).argument, out)
+      return
+    case 'Property':
+      collectTaintedNames((pattern as { value?: AnyNode }).value, out)
+      return
+    default:
+      return
+  }
+}
+
+/** Reason when a binding pattern's DEFAULT VALUE is a banned/dangerous
+ * reference (`((f = setTimeout) => f('1'))()`), or null. */
+function dangerousPatternValue(value: AnyNode | undefined): string | null {
+  const node = unwrapChain(value)
+  if (node === undefined) return null
+  if (node.type === 'Identifier') {
+    const name = (node as { name?: string }).name
+    if (name === undefined) return null
+    if (name === 'eval' || name === 'Function') return 'eval/Function is not allowed'
+    if (DANGEROUS_MEMBERS.has(name) || WRITE_APIS.has(name)) {
+      return `access to ${name} is not allowed (read-only eval)`
+    }
+    return null
+  }
+  if (node.type === 'MemberExpression') {
+    const chain = firstDangerousChainLink(node)
+    if (chain !== null) return chain
+    const name = memberName(node)
+    if (name !== undefined && name !== null && WRITE_APIS.has(name)) {
+      return `access to ${name} is not allowed (read-only eval)`
+    }
+  }
+  return null
+}
+
+/** Reason when a binding pattern renames a dangerous member or defaults to a
+ * dangerous value, or null. */
+function patternKeyViolation(pattern: AnyNode): string | null {
+  if (pattern.type === 'AssignmentPattern') {
+    // `((f = setTimeout) => f('1'))()` — the default value IS the banned API.
+    const defaultValue = dangerousPatternValue((pattern as { right?: AnyNode }).right)
+    if (defaultValue !== null) return defaultValue
+    return patternKeyViolation((pattern as { left?: AnyNode }).left as AnyNode)
+  }
+  if (pattern.type === 'RestElement') return patternKeyViolation((pattern as { argument?: AnyNode }).argument as AnyNode)
+  if (pattern.type === 'ArrayPattern') {
+    for (const element of ((pattern as { elements?: (AnyNode | null)[] }).elements ?? [])) {
+      if (element !== null && element !== undefined) {
+        const reason = patternKeyViolation(element)
+        if (reason !== null) return reason
       }
     }
-    void source
+    return null
+  }
+  if (pattern.type === 'ObjectPattern') {
+    for (const property of ((pattern as { properties?: AnyNode[] }).properties ?? [])) {
+      if (property.type === 'Property') {
+        const keyName = propertyKeyName((property as { key?: AnyNode }).key)
+        if (keyName !== undefined && keyName !== null && (DANGEROUS_MEMBERS.has(keyName) || WRITE_APIS.has(keyName))) {
+          return `binding pattern key ${keyName} is not allowed (read-only eval)`
+        }
+        const reason = patternKeyViolation((property as { value?: AnyNode }).value as AnyNode)
+        if (reason !== null) return reason
+      } else {
+        const reason = patternKeyViolation(property)
+        if (reason !== null) return reason
+      }
+    }
+    return null
+  }
+  return null
+}
+
+/** Resolve a property key node to a constant name when statically provable. */
+function propertyKeyName(key: AnyNode | undefined): string | null | undefined {
+  if (key === undefined) return null
+  if (key.type === 'Identifier') return (key as { name?: string }).name ?? null
+  if (key.type === 'Literal') return typeof key.value === 'string' ? key.value : null
+  return constantStringValue(key)
+}
+
+/** Constant-fold a pure string expression (literal / template / concatenation).
+ * Returns `undefined` when the value cannot be proven statically. */
+function constantStringValue(node: AnyNode | undefined): string | undefined {
+  if (node === undefined) return undefined
+  if (node.type === 'Literal') return typeof node.value === 'string' ? node.value : undefined
+  if (node.type === 'TemplateLiteral') {
+    const expressions = ((node as { expressions?: AnyNode[] }).expressions ?? [])
+    const quasis = ((node as { quasis?: AnyNode[] }).quasis ?? [])
+    let out = ''
+    for (let i = 0; i < quasis.length; i++) {
+      const cooked = (quasis[i] as { value?: { cooked?: string } }).value?.cooked
+      if (typeof cooked !== 'string') return undefined
+      out += cooked
+      const expression = expressions[i]
+      if (expression !== undefined) {
+        const inner = constantStringValue(expression)
+        if (inner === undefined) return undefined
+        out += inner
+      }
+    }
+    return out
+  }
+  if (node.type === 'BinaryExpression' && (node as { operator?: string }).operator === '+') {
+    const left = constantStringValue((node as { left?: AnyNode }).left)
+    if (left === undefined) return undefined
+    const right = constantStringValue((node as { right?: AnyNode }).right)
+    if (right === undefined) return undefined
+    return left + right
+  }
+  return undefined
+}
+
+/** Walk the whole member base chain; returns the first dangerous link reason.
+ *
+ * FIX-4: a dynamic computed link (`x[expr]`) no longer aborts the walk — the
+ * link name is unverifiable, but the links BELOW it must still be checked, so
+ * `('')['con'+'structor']` is caught by constant folding and `x[k].constructor`
+ * still trips on the outer `constructor`. */
+function firstDangerousChainLink(current: AnyNode): string | null {
+  let link: AnyNode | undefined = current
+  while (link !== undefined && link.type === 'MemberExpression') {
+    const linkName = memberName(link)
+    if (linkName !== undefined && linkName !== null && DANGEROUS_MEMBERS.has(linkName)) {
+      return `access to ${linkName} is not allowed (read-only eval)`
+    }
+    link = (link as { object?: AnyNode }).object
+    if (link !== undefined && link.type === 'ChainExpression') {
+      link = (link as unknown as { expression?: AnyNode }).expression
+    }
   }
   return null
 }
