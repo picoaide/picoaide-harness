@@ -54,7 +54,7 @@ func (p *LDAPProvider) Name() string { return "ldap" }
 func (p *LDAPProvider) Configure(cfg map[string]string) error {
 	p.ServerURL = cfg["server_url"]
 	p.BindDN = cfg["bind_dn"]
-	p.BindPassword = cfg["bind_password"]
+	p.BindPassword = decryptSettingSecret(cfg["bind_password"])
 	p.BaseDN = cfg["base_dn"]
 	p.UserFilter = cfg["user_filter"]
 	if p.UserFilter == "" {

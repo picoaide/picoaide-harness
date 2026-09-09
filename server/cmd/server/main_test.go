@@ -43,6 +43,9 @@ func buildRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	// 与生产同序(P1-2):中间件必须在路由注册之前安装,否则 panic 不返回
+	// JSON 信封、也没有访问日志。
+	installAPIMiddleware(r)
 	router.Register(r, router.Deps{
 		DB:         nil,
 		Auth:       serverauth.New(nil).Handlers(),
@@ -174,7 +177,9 @@ func TestAPIJSONContract(t *testing.T) {
 	// panic 场景: 中间件必须把 panic 恢复为 JSON 信封。
 	t.Run("panic recovers to JSON", func(t *testing.T) {
 		panicRouter := gin.New()
-		mountAPIGuards(panicRouter, nil, fileServer, dist)
+		// 生产顺序:先装中间件,再注册路由(P1-2)。此前的测试先 mount 后
+		// 注册,恒绿,掩盖了生产路由无 Recovery 的真实缺陷。
+		installAPIMiddleware(panicRouter)
 		panicRouter.GET("/boom", func(c *gin.Context) { panic("boom") })
 		w := httptest.NewRecorder()
 		panicRouter.ServeHTTP(w, httptest.NewRequest("GET", "/boom", nil))
@@ -195,6 +200,37 @@ func TestAPIJSONContract(t *testing.T) {
 }
 
 // TestV2RealDB(真实 PG): 新命名空间公开端点用真实 DB 验证登录闭环。
+// TestPortalEscaping: 门户页对品牌名做 HTML 转义(2026-09-08 P1-6)且带基础
+// 安全头。品牌名由 super_admin 可设,门户对未认证访客开放 → 未转义即存储型 XSS。
+func TestPortalEscaping(t *testing.T) {
+	if os.Getenv("PG_DSN_TEST") == "" {
+		t.Skip("PG_DSN_TEST not set; skipping real-DB test")
+	}
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	if err := serverstore.SetSetting(db, "brand.login.display_name", `<script>alert(1)</script>`); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/", func(c *gin.Context) { servePortal(c, db) })
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("portal = %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatal("portal must not contain the raw brand name (stored XSS)")
+	}
+	if !strings.Contains(body, "<title>&lt;script&gt;alert(1)&lt;/script&gt;</title>") {
+		t.Fatalf("portal title not escaped; body=%s", body)
+	}
+	if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Content-Security-Policy") == "" {
+		t.Fatalf("portal must carry baseline security headers, got %v", w.Header())
+	}
+}
+
 // 依赖 PG_DSN_TEST, 无 PG 时跳过。
 func TestV2RealDB(t *testing.T) {
 	if os.Getenv("PG_DSN_TEST") == "" {

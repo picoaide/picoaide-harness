@@ -171,16 +171,12 @@ func DeptMonthlyCost(db *sql.DB, groupID int64) (float64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
-	for _, id := range ids {
-		args = append(args, id)
-	}
+	// P2-7:成员集合以数组参数传入(= ANY),避免上万成员拼 IN(?,?,…) 撞 PG
+	// 65535 参数上限(此前触发后配额校验 fail-closed → 全员 429)。
 	var total float64
 	err = db.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage
-		WHERE created_at >= ? AND user_id IN (`+placeholders+`)`, args...).Scan(&total)
+		WHERE created_at >= ? AND user_id = ANY(?::bigint[])`,
+		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(ids)).Scan(&total)
 	return total, err
 }
 
@@ -210,15 +206,10 @@ func DeptMonthlyCostBatch(db *sql.DB, groupIDs []int64) (map[int64]float64, erro
 	if len(ids) == 0 {
 		return out, nil
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, monthStart(time.Now()).Format(pgTimeFmt))
-	for _, id := range ids {
-		args = append(args, id)
-	}
+	// P2-7:数组参数(= ANY),避免成员总数上万时撞 PG 参数上限。
 	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(cost),0) FROM usage
-		WHERE created_at >= ? AND user_id IN (`+placeholders+`) GROUP BY user_id`, args...)
+		WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(ids))
 	if err != nil {
 		return nil, err
 	}

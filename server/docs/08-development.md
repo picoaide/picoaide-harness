@@ -44,7 +44,7 @@ PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data -db-driver 
 go run scripts/mock-upstream.go    # 假上游(无外网验证网关)
 # 桌面客户端(Yarn workspace,见仓库根 README):
 corepack yarn workspace dsh-plugin-desktop dev   # 开发
-corepack yarn ws dsh-plugin-desktop test         # 单测(等)
+corepack yarn workspace dsh-plugin-desktop test  # 单测(等)
 ```
 
 ## 5. 测试约定
@@ -61,7 +61,7 @@ corepack yarn ws dsh-plugin-desktop test         # 单测(等)
 - REST 错误信封:`{"error":{"code","message"}}`;code 见 03-api-reference.md §1。
 - bootstrap:`{default_model, models, skills, web, connectors}` 服务端 ↔ 客户端 `BootstrapConfig` 严格对齐。
 - 命名空间:全部路由经 `internal/router.Register` 集中声明(唯一真源),禁止业务包自行 `r.Group()` 注册生产路由。
-- DB:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/`(0001–0048)——见 06-database.md。
+- DB:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/`(0001–0060)——见 06-database.md。
 - 客户端侧(桌面)契约见仓库根 `docs/plugin-development.md` 与 `packages/host/desktop/docs/plugin-services.md`。
 
 ## 8. 客户端本地配置(桌面侧,见仓库根文档)

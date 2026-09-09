@@ -8,8 +8,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -40,8 +43,120 @@ const (
 	PushTimeout = 10 * time.Second
 )
 
-// pushClient 推送 HTTP 客户端(测试可替换)。
-var pushClient = &http.Client{Timeout: PushTimeout}
+// pushClient 推送 HTTP 客户端(测试可替换)。P2-19:
+//   - 禁止跟随重定向(302/303 可把请求引向内网目标,绕过建单时的校验);
+//   - 连接阶段按解析出的 IP 复检(防 DNS rebinding:建单时公网、发送时内网)。
+var pushClient = &http.Client{
+	Timeout:       PushTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Transport:     newPushTransport(),
+}
+
+// allowPrivateHookHosts 允许 webhook 指向回环/私网地址(仅测试注入;生产恒 false)。
+var allowPrivateHookHosts = false
+
+// blockedHookCIDRs 不得作为 webhook 目标的内网/保留网段(SSRF 防护)。
+// 覆盖:未指定/回环/私网/链路本地/CGNAT/文档与基准测试网段/组播/保留。
+var blockedHookCIDRs = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+		"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+	} {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
+// hookHostAllowed 判定一个 IP 是否可作为 webhook 目标(仅公网地址)。
+func hookHostAllowed(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	for _, n := range blockedHookCIDRs {
+		if n.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// newPushTransport 构造带 SSRF 复检的推送传输层。
+func newPushTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	t := base.Clone()
+	t.DialContext = safeHookDialContext
+	return t
+}
+
+// safeHookDialContext 在建立连接时复检目标 IP(防 DNS rebinding)。
+func safeHookDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, ipa := range ips {
+		if !allowPrivateHookHosts && !hookHostAllowed(ipa.IP) {
+			lastErr = fmt.Errorf("webhook 目标地址不可访问")
+			continue
+		}
+		d := &net.Dialer{Timeout: PushTimeout}
+		conn, derr := d.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
+		if derr == nil {
+			return conn, nil
+		}
+		lastErr = derr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("webhook 目标无法解析")
+	}
+	return nil, lastErr
+}
+
+// validateHookURL 校验 webhook 目标:http(s) + 主机可解析 + 每个解析结果都是
+// 公网地址(拒绝回环/私网/链路本地,SSRF)。测试通过 allowPrivateHookHosts 放行。
+func validateHookURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("URL 解析失败")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("必须是 http(s) URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("缺少主机名")
+	}
+	if allowPrivateHookHosts {
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if err != nil || len(ips) == 0 {
+		return fmt.Errorf("主机名无法解析")
+	}
+	for _, ipa := range ips {
+		if !hookHostAllowed(ipa.IP) {
+			return fmt.Errorf("不允许指向内网/回环地址")
+		}
+	}
+	return nil
+}
 
 // GenerateMonthlyReport 生成上一个月(month 为任意时刻,取其上月)的用量汇总。
 // 口径与用量中心一致:费用=按模型定价折算(含 embedding),部门=当前归属树内合计。
@@ -97,7 +212,11 @@ func topByCost(rows []serverstore.UsageAggregateRow, n int) []serverstore.UsageA
 }
 
 // PushWebhook 推送报表到订阅地址(非 2xx = 错误)。
+// P2-19:发送前再次校验目标(拒绝内网/回环),且不跟随重定向。
 func PushWebhook(ctx context.Context, hookURL string, body *ReportBody) error {
+	if err := validateHookURL(hookURL); err != nil {
+		return fmt.Errorf("hook_url 不合法: %w", err)
+	}
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err

@@ -350,8 +350,9 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	if out["total_usage"].(float64) != 1_500_000 || out["total_cost"].(float64) != 3.0 {
 		t.Fatalf("total = %v/%v", out["total_usage"], out["total_cost"])
 	}
-	if _, ok := out["dept_budgets"]; !ok {
-		t.Fatal("dept_budgets missing (want [])")
+	// 2026-09-08 P2-13:死字段已移除(客户端从不渲染,服务端不再白算)。
+	if _, ok := out["dept_budgets"]; ok {
+		t.Fatal("dept_budgets must be removed (dead field)")
 	}
 
 	// 未登录 → 401

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -115,6 +114,11 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// 2026-09-08 P1-2:Logger/Recovery 必须在任何路由注册之前挂载。gin 在
+	// 注册路由时快照当前中间件链,此前 mountAPIGuards 在 router.Register 之后
+	// 才 r.Use(...),导致 162 条 API 路由 panic 时不返回 JSON 信封(直接断连)
+	// 且零访问日志(违反 server/AGENTS.md §7.0)。
+	installAPIMiddleware(r)
 	// 可信代理(审计 2026-08-25 F-02):信任 loopback + 默认 compose
 	// 私有网段中的 Caddy(172.28.0.2),使 gin.ClientIP 解析 X-Forwarded-For
 	// 得到真实客户端 IP,登录限流键不再坍缩为单一代理 IP(否则 10 次错
@@ -235,7 +239,8 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	loginName := settings["brand.login.display_name"]
 	tagline := settings["brand.login.tagline"]
 	welcome := settings["portal.welcome"]
-	subtitle := settings["portal.subtitle"]
+	// 注:portal.subtitle 目前没有渲染位(历史 payload JSON 已删,见 P1-6 附带),
+	// 保留设置项但不读取,避免未使用变量。
 	// 下载链接: 三平台独立 URL;兼容旧单链接 client_download_url(未拆分时
 	// 三个平台都指向它, 方便从旧配置平滑迁移)。
 	dlLinux := settings["portal.client_download_linux"]
@@ -274,19 +279,14 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	if dlWin == "" {
 		dlWin = defaultDL
 	}
-	// 内嵌 JSON 注入(仅静态文本, 无用户输入直接进 HTML——安全)。
-	payload, _ := json.Marshal(map[string]any{
-		"name": loginName, "tagline": tagline, "logo": logoURL,
-		"welcome": welcome, "subtitle": subtitle,
-		"download_linux": dlLinux, "download_mac": dlMac, "download_win": dlWin,
-		"download_note": dlNote, "admin_url": "/admin/",
-	})
+	// 门户页全部走 __NAME__ 之类的占位符替换(逐项 htmlEscape);此前遗留的
+	// payload JSON 只被 `_ = payload` 消费,已删除(2026-09-08 审计 P1-6 附带)。
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>` + loginName + `</title>
+<title>` + htmlEscape(loginName) + `</title>
 <style>
   :root{--accent:#4176E6}
   body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#F9FAFB;color:#1a1d24}
@@ -356,8 +356,12 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	html = repl(html, "__DL_MAC__", htmlEscape(dlMac))
 	html = repl(html, "__DL_WIN__", htmlEscape(dlWin))
 	html = repl(html, "__NOTE__", htmlEscape(dlNote))
-	_ = payload
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	// 2026-09-08 P3:门户是唯一对未认证访客开放的 HTML 面,补基础安全头。
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Referrer-Policy", "no-referrer")
+	c.Header("X-Frame-Options", "DENY")
+	c.Header("Content-Security-Policy", "default-src 'none'; img-src 'self' data: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }
 
@@ -367,18 +371,23 @@ func htmlEscape(s string) string {
 	return r.Replace(s)
 }
 
-// mountAPIGuards 装配 API JSON 契约的两个护栏(审计 2026-09):
-//
-//  1. CustomRecovery:panic 时返回 JSON 错误信封,替换 gin 默认 Recovery
-//     的无 body 500 text/plain —— 客户端/第三方进程绝不拿到 HTML 或空文本。
-//  2. NoRoute:凡 /api/、/v1/ 前缀(含 405 落 NoRoute 场景)一律 JSON 信封;
-//     HTML 面仅保留 /、/portal、/admin/*(产品页面)。
-//
-// 单独成函数以便 cmd/server 集成测试用与生产完全一致的逻辑断言契约。
-func mountAPIGuards(r *gin.Engine, db *sql.DB, fileServer http.Handler, dist fs.FS) {
+// installAPIMiddleware installs the JSON-contract middleware that must be
+// registered BEFORE any route (gin snapshots the middleware chain per route):
+// access logging + panic recovery into the standard error envelope.
+func installAPIMiddleware(r *gin.Engine) {
 	r.Use(gin.Logger(), gin.CustomRecoveryWithWriter(gin.DefaultErrorWriter, func(c *gin.Context, _ any) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "服务端内部错误")
 	}))
+}
+
+// mountAPIGuards 装配 API JSON 契约的 NoRoute 护栏(审计 2026-09)。
+// 中间件由 installAPIMiddleware 在路由注册前安装(P1-2)。
+//
+//	NoRoute:凡 /api/、/v1/ 前缀(含 405 落 NoRoute 场景)一律 JSON 信封;
+//	HTML 面仅保留 /、/portal、/admin/*(产品页面)。
+//
+// 单独成函数以便 cmd/server 集成测试用与生产完全一致的逻辑断言契约。
+func mountAPIGuards(r *gin.Engine, db *sql.DB, fileServer http.Handler, dist fs.FS) {
 	r.NoRoute(func(c *gin.Context) {
 		p := c.Request.URL.Path
 		// 契约(审计 2026-09): 凡客户端/第三方进程 API 前缀(/api/、/v1/),

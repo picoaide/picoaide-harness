@@ -12,6 +12,7 @@ package router
 
 import (
 	"database/sql"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 
@@ -58,8 +59,11 @@ type Deps struct {
 
 // Register 集中装配两个命名空间分组下的全部路由。
 func Register(r *gin.Engine, deps Deps) {
-	cli := r.Group(NamespaceClientV2)
-	srv := r.Group(NamespaceServer)
+	// P2-17: 两个业务命名空间统一挂 1MB 请求体上限(未认证的 /auth/login、
+	// /admin/login 同样覆盖)。此前只有测试镜像(serverauth.RegisterAdminRoutes)
+	// 挂了这层,生产路由树没有,客户端可推超大 JSON 致 OOM。
+	cli := r.Group(NamespaceClientV2, bodyLimitMiddleware())
+	srv := r.Group(NamespaceServer, bodyLimitMiddleware())
 
 	// ================= 客户端面 /api/client/v2 =================
 	registerClientV2(cli, deps)
@@ -69,6 +73,42 @@ func Register(r *gin.Engine, deps Deps) {
 
 	// ================= DeepSeek 兼容 LLM 网关 /v1(独立命名空间) =================
 	registerGatewayV1(r, deps)
+}
+
+// maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限
+// (1MB 足够全部管理表单与客户端 JSON 请求)。
+const maxJSONBody = 1 << 20
+
+// largeBodyRoutes 自带更大请求体上限的路由(method + gin 路由模板):
+// 归档上传 24MB(base64 膨胀)、品牌 logo 多图为 ≤4MB multipart。
+// 这些路由由 handler 内部的 MaxBytesReader/multipart 解析限体;外层再套 1MB
+// 会使内层上限失效(outer 先返回 body too large),故显式豁免。
+var largeBodyRoutes = map[string]struct{}{
+	"POST " + NamespaceServer + "/admin/skills/:name/archive": {}, // marketplace 24MB
+	"POST " + NamespaceServer + "/admin/agents/:name/archive": {}, // agentshare 24MB
+	"POST " + NamespaceServer + "/admin/brand/logo":           {}, // multipart ≤4MB
+	"POST " + NamespaceClientV2 + "/shared-skills":            {}, // sharedskills 24MB
+	"POST " + NamespaceClientV2 + "/agent-presets":            {}, // agentshare 24MB
+}
+
+// bodyLimitExempt 判定某路由是否自带更大的请求体上限。
+// 中间件在 gin 路由匹配之后执行,c.FullPath() 已是路由模板(如
+// "/api/server/admin/skills/:name/archive")。
+func bodyLimitExempt(method, fullPath string) bool {
+	_, ok := largeBodyRoutes[method+" "+fullPath]
+	return ok
+}
+
+// bodyLimitMiddleware 统一限制两个业务命名空间的请求体大小(P2-17)。
+// 超限时 ShouldBindJSON 会读到 "http: request body too large",由各 handler
+// 统一回 400 VALIDATION(不新增响应形态)。
+func bodyLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil && !bodyLimitExempt(c.Request.Method, c.FullPath()) {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONBody)
+		}
+		c.Next()
+	}
 }
 
 // registerClientV2 客户端员工面全部端点。

@@ -3,6 +3,8 @@ package serverstore
 import (
 	"errors"
 	"testing"
+
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
 
 func TestSkills(t *testing.T) {
@@ -137,5 +139,35 @@ func TestSkillUpdateKeepsArchive(t *testing.T) {
 	s, _ = GetSkill(db, "up2")
 	if s.Description != "edited" || string(s.Archive) != string(blob) {
 		t.Fatalf("after update = %+v", s)
+	}
+}
+
+// TestCurrentReleasePrereleaseOrder 覆盖 P2-9:版本比较统一用
+// skillmanifest.CompareVersions —— 1.0.0-rc.1 < 1.0.0。旧的本地副本
+// compareVersionStrings 前三段相等后按整串字典序,会把 rc.1 判为更大,
+// 与发布内核(Publish 的递增校验)相反。
+func TestCurrentReleasePrereleaseOrder(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	if err := UpsertApp(db, &App{Kind: AppKindSkill, AppID: "pre", Title: "pre",
+		Channel: AppChannelMarket, Enabled: 1, Owner: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"1.0.0-rc.1", "1.0.0"} {
+		if _, err := CreateRelease(db, &Release{Kind: AppKindSkill, AppID: "pre", Version: v,
+			Status: ReleaseStatusApproved, Publisher: "alice"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := currentMarketRelease(db, "pre", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Version != "1.0.0" {
+		t.Fatalf("展示版本 = %s, want 1.0.0 (1.0.0-rc.1 是预发布版)", r.Version)
+	}
+	// 预发布序号按数值比较:rc.10 > rc.2
+	if skillmanifest.CompareVersions("1.0.0-rc.10", "1.0.0-rc.2") <= 0 {
+		t.Fatal("rc.10 必须大于 rc.2")
 	}
 }

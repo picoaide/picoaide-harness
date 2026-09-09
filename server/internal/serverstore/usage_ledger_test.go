@@ -170,3 +170,200 @@ func monthlyRequests(t *testing.T, db *sql.DB, uid int64, model, month string) i
 	}
 	return n
 }
+
+// TestUsageAggregateWithLedgerSumsAcrossRetention 覆盖 P1-10:跨保留期时
+// 账本负责 [from, cutoff) 的整日、明细负责 [cutoff, to],两段必须按维度**相加**。
+// 旧实现账本查整窗口、明细只查 [cutoff,to] 再按 label 覆盖 → 早于 cutoff 的
+// 历史整条丢失(实测 330 → 220)。
+func TestUsageAggregateWithLedgerSumsAcrossRetention(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	if err := SetSetting(db, RetentionMonthsSetting, "6"); err != nil {
+		t.Fatal(err)
+	}
+	uid := mustUserID(t, db)
+
+	// 8 个月前 110 tokens:明细分区已过期(这里用 DELETE 模拟 DROP),仅账本有
+	now := time.Now()
+	oldMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -8, 0)
+	if err := ensureUsagePartition(db, oldMonth); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordUsageKindAt(db, uid, "m-old", 110, 0, "chat", oldMonth.AddDate(0, 0, 2).Add(10*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// 1 个月前 220 tokens:仍在保留窗口内(明细)
+	recent := now.AddDate(0, -1, 0)
+	if err := ensureUsagePartition(db, recent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordUsageKindAt(db, uid, "m-recent", 220, 0, "chat", recent); err != nil {
+		t.Fatal(err)
+	}
+	// 账本生成后删掉 8 个月前的明细(等价于 CleanupUsageRetention DROP 分区)
+	if err := RebuildUsageLedger(db, oldMonth, oldMonth.AddDate(0, 1, -1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DELETE FROM usage WHERE model = 'm-old'"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := UsageAggregateWithLedger(db, oldMonth, now, "user")
+	if err != nil {
+		t.Fatalf("UsageAggregateWithLedger: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want exactly 1 user row", rows)
+	}
+	if rows[0].PromptTokens != 330 {
+		t.Fatalf("group=user tokens = %d, want 330 (110 账本 + 220 明细,相加而非覆盖)", rows[0].PromptTokens)
+	}
+}
+
+// TestUsageAggregateWithLedgerModelAndWeek 覆盖 P1-16:账本回退时
+// group=model 必须按模型分组(旧实现默认分支 col=month → 所有模型合并成
+// 「每月一行」)、group=week 必须按周一分桶(旧实现退化成逐日)。
+func TestUsageAggregateWithLedgerModelAndWeek(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	if err := SetSetting(db, RetentionMonthsSetting, "1"); err != nil {
+		t.Fatal(err)
+	}
+	uid := mustUserID(t, db)
+
+	// 固定 2026-03:3/2(周一)与 3/10(周二,所在周周一 = 3/9)
+	marStart := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	if err := ensureUsagePartition(db, marStart); err != nil {
+		t.Fatal(err)
+	}
+	d1 := time.Date(2026, 3, 2, 10, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC)
+	if _, err := recordUsageKindAt(db, uid, "m1", 100, 0, "chat", d1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordUsageKindAt(db, uid, "m2", 200, 0, "chat", d2); err != nil {
+		t.Fatal(err)
+	}
+	if err := RebuildUsageLedger(db, marStart, time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟明细分区已过期:只留账本
+	if _, err := db.Exec("DELETE FROM usage"); err != nil {
+		t.Fatal(err)
+	}
+	marEnd := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+
+	modelRows, err := UsageAggregateWithLedger(db, marStart, marEnd, "model")
+	if err != nil {
+		t.Fatalf("model: %v", err)
+	}
+	byModel := map[string]int64{}
+	for _, r := range modelRows {
+		byModel[r.Label] = r.PromptTokens
+	}
+	if len(byModel) != 2 || byModel["m1"] != 100 || byModel["m2"] != 200 {
+		t.Fatalf("group=model ledger rows = %+v, want m1=100 m2=200 (不得合并成每月一行)", modelRows)
+	}
+
+	weekRows, err := UsageAggregateWithLedger(db, marStart, marEnd, "week")
+	if err != nil {
+		t.Fatalf("week: %v", err)
+	}
+	byWeek := map[string]int64{}
+	for _, r := range weekRows {
+		byWeek[r.Label] = r.PromptTokens
+	}
+	if len(byWeek) != 2 || byWeek["2026-03-02"] != 100 || byWeek["2026-03-09"] != 200 {
+		t.Fatalf("group=week ledger rows = %+v, want 2026-03-02=100 2026-03-09=200 (按周一)", weekRows)
+	}
+}
+
+// TestUsageAggregateDeptFilterArrayParam 覆盖 P2-7 的 SQL 形状:部门过滤
+// 不再拼 IN(?,?,…),而是子查询 + 数组参数(见 pgInt64Array);此处验证
+// 大规模成员集合能正常聚合(旧实现 66000 个占位参数会撞 PG 65535 上限)。
+func TestUsageAggregateManyMembersArrayParam(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	uid := mustUserID(t, db)
+	dept := mustDept(t, db, "大部门", 0)
+	if _, err := RecordUsage(db, uid, "m1", 42, 0); err != nil {
+		t.Fatal(err)
+	}
+	// 6.6 万个成员(user_groups 无外键,批量插入即可)
+	if _, err := db.Exec(`INSERT INTO user_groups (user_id, group_id)
+		SELECT g + 1000000, $1 FROM generate_series(1, 66000) g`, dept); err != nil {
+		t.Fatal(err)
+	}
+	// 真实成员也在部门内(过滤命中该用户)
+	if _, err := db.Exec(`INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)`, uid, dept); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := DeptMemberIDs(db, dept)
+	if err != nil {
+		t.Fatalf("DeptMemberIDs: %v", err)
+	}
+	if len(ids) != 66001 {
+		t.Fatalf("members = %d, want 66001", len(ids))
+	}
+	// 1) 部门成本(旧实现:1 + 66001 个占位参数 > 65535 → 直接报错)
+	if _, err := DeptMonthlyCost(db, dept); err != nil {
+		t.Fatalf("DeptMonthlyCost with 66001 members: %v", err)
+	}
+	// 2) 批量用户用量(配额校验热路径)
+	got, err := MonthUsageByUsers(db, ids)
+	if err != nil {
+		t.Fatalf("MonthUsageByUsers with 66001 members: %v", err)
+	}
+	if got[uid].Tokens != 42 {
+		t.Fatalf("MonthUsageByUsers[uid] = %+v, want 42 tokens", got[uid])
+	}
+	// 3) 部门聚合过滤(展示层 WithDept)
+	rows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "model", WithDept("大部门"))
+	if err != nil {
+		t.Fatalf("UsageAggregate WithDept with 66001 members: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PromptTokens != 42 {
+		t.Fatalf("WithDept rows = %+v, want m1 42 tokens", rows)
+	}
+}
+
+// TestUsageAggregateWithLedgerWindowOutsideRetention 窗口整体早于保留边界:
+// 只走账本,且不得把窗口外的数据带进来(账本段上界 = min(cutoff-1, to))。
+func TestUsageAggregateWithLedgerWindowOutsideRetention(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	if err := SetSetting(db, RetentionMonthsSetting, "6"); err != nil {
+		t.Fatal(err)
+	}
+	uid := mustUserID(t, db)
+	now := time.Now()
+	monthStartOf := func(off int) time.Time {
+		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, off, 0)
+	}
+	m8, m7, m1 := monthStartOf(-8), monthStartOf(-7), monthStartOf(-1)
+	for _, tc := range []struct {
+		month time.Time
+		tok   int64
+	}{{m8, 110}, {m7, 220}, {m1, 330}} {
+		if err := ensureUsagePartition(db, tc.month); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := recordUsageKindAt(db, uid, "m", tc.tok, 0, "chat", tc.month.AddDate(0, 0, 2).Add(10*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RebuildUsageLedger(db, m8, m7.AddDate(0, 1, -1)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := UsageAggregateWithLedger(db, m8, m8.AddDate(0, 1, -1), "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PromptTokens != 110 {
+		t.Fatalf("rows = %+v, want 仅 8 个月前 110 tokens", rows)
+	}
+}

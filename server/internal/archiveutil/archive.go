@@ -42,7 +42,43 @@ var (
 	ErrNoRequired = errors.New("archive has no required file at its root")
 	// ErrTooMany: too many entries in the archive.
 	ErrTooMany = errors.New("archive has too many entries")
+	// ErrDuplicateEntry: the archive contains the same (normalized,
+	// case-insensitive) entry path more than once. 服务端取第一个匹配条目、
+	// 客户端按序写盘最后一个生效 → 审核看到的内容 ≠ 员工安装的内容,
+	// 双 SKILL.md 可夹带(P2-11),因此一律拒绝。
+	ErrDuplicateEntry = errors.New("archive has duplicate entries")
 )
+
+// dupEntrySet 记录已见条目名(小写归一:大小写碰撞同样视为重复)。
+type dupEntrySet map[string]bool
+
+// add 记录一个条目名;重复(含仅大小写不同)返回 ErrDuplicateEntry。
+func (s dupEntrySet) add(name string) error {
+	key := strings.ToLower(name)
+	if s[key] {
+		return ErrDuplicateEntry
+	}
+	s[key] = true
+	return nil
+}
+
+// checkZipDuplicates 扫描 zip 条目头,拒绝重复的非目录条目(不解压)。
+func checkZipDuplicates(zr *zip.Reader) error {
+	seen := dupEntrySet{}
+	for _, zf := range zr.File {
+		if strings.HasSuffix(zf.Name, "/") {
+			continue // 目录条目不携带内容
+		}
+		name, err := NormalizePath(zf.Name)
+		if err != nil || name == "" {
+			continue // 越界/空名交由各路径原有的 ErrUnsafe 处理
+		}
+		if err := seen.add(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Format returns "zip" or "tar.gz" for a payload whose magic bytes match,
 // "" otherwise (callers then treat it as invalid).
@@ -143,8 +179,16 @@ func walkZip(data []byte, lim Limits, fn zipWalk) error {
 }
 
 func validateZip(data []byte, lim Limits) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return ErrInvalid
+	}
+	// P2-11:重复条目(含大小写碰撞)一律拒绝
+	if err := checkZipDuplicates(zr); err != nil {
+		return err
+	}
 	hasRequired := false
-	err := walkZip(data, lim, func(zf *zip.File, name string, isDir bool, mode fs.FileMode) (bool, error) {
+	err = walkZip(data, lim, func(zf *zip.File, name string, isDir bool, mode fs.FileMode) (bool, error) {
 		if isDir {
 			return true, nil
 		}
@@ -172,6 +216,11 @@ func zipList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, "", ErrInvalid
+	}
+	// P2-11:重复条目(含大小写碰撞)一律拒绝——否则「列表/预览」与
+	// 客户端按序解压的最后一个条目可能不是同一个文件。
+	if err := checkZipDuplicates(zr); err != nil {
+		return nil, "", err
 	}
 	set := map[string]bool{}
 	var required string
@@ -220,6 +269,11 @@ func zipExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return "", 0, false, false, false, ErrInvalid
+	}
+	// P2-11:重复条目(含大小写碰撞)一律拒绝,不取「第一个匹配」——
+	// 客户端按序解压最后一个生效,审核内容必须与安装内容一致。
+	if err := checkZipDuplicates(zr); err != nil {
+		return "", 0, false, false, false, err
 	}
 	for _, zf := range zr.File {
 		if zf.Mode()&fs.ModeSymlink != 0 {
@@ -446,6 +500,8 @@ func ErrorText(err error, requiredName string, maxArchiveMB int) string {
 		return "归档内容不安全(路径越界或链接文件)"
 	case errors.Is(err, ErrTooMany):
 		return "归档条目过多"
+	case errors.Is(err, ErrDuplicateEntry):
+		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
 	case errors.Is(err, ErrInvalid):
 		return fmt.Sprintf("归档过大或结构非法(上限 %dMB)", maxArchiveMB)
 	default:

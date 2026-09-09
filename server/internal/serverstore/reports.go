@@ -85,12 +85,15 @@ func DeleteReportSubscription(db *sql.DB, id int64) error {
 	return nil
 }
 
-// MarkReportRun 记录一次推送结果(成功=last_run_at;失败=last_error)。
+// MarkReportRun 记录一次推送结果(成功=last_run_at + 清空 last_error)。
+// P2-4:失败同样写 last_run_at——ShouldRunMonthly 只看 last_run_at 的月份,
+// 失败只写 last_error 会让调度器每小时重算整月报表并重发(设计语义:
+// 同一月份只跑一次,失败下月再试,见 reports.ShouldRunMonthly 注释)。
 func MarkReportRun(db *sql.DB, id int64, ok bool, errMsg string) error {
 	if ok {
 		_, err := db.Exec(`UPDATE report_subscriptions SET last_run_at = now(), last_error = '', updated_at = now() WHERE id = ?`, id)
 		return err
 	}
-	_, err := db.Exec(`UPDATE report_subscriptions SET last_error = ?, updated_at = now() WHERE id = ?`, errMsg, id)
+	_, err := db.Exec(`UPDATE report_subscriptions SET last_run_at = now(), last_error = ?, updated_at = now() WHERE id = ?`, errMsg, id)
 	return err
 }

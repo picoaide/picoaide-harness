@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +27,9 @@ import (
 
 // balanceHTTPClient 余额查询客户端(测试可替换:httptest 本地地址)。
 var balanceHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// maxBalanceBody 上限余额响应体(P3:上游异常/被投毒时不得无限读进内存)。
+const maxBalanceBody = 1 << 20
 
 // balanceSupports 是否支持余额查询(DeepSeek 官方协议)。
 func balanceSupports(baseURL, name string) bool {
@@ -63,7 +67,7 @@ func fetchDeepSeekBalance(baseURL, apiKey string) (bool, []balanceInfo, error) {
 		IsAvailable  bool          `json:"is_available"`
 		BalanceInfos []balanceInfo `json:"balance_infos"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBalanceBody)).Decode(&body); err != nil {
 		return false, nil, err
 	}
 	return body.IsAvailable, body.BalanceInfos, nil

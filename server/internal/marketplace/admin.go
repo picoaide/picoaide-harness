@@ -22,7 +22,7 @@ import (
 	"github.com/picoaide/picoaide/internal/util"
 )
 
-// RegisterAdminRoutes mounts /api/admin/skills* behind AdminAuth + RBAC
+// RegisterAdminRoutes mounts /api/server/admin/skills* behind AdminAuth + RBAC
 // (v3b). cacheDir is the skill repo/archive cache, invalidated when a
 // skill's source changes (C-6).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
@@ -250,7 +250,7 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 // the metadata inside, otherwise the client install fails cleanly).
 func uploadSkillArchiveAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	// 归档以 base64 JSON 上传(base64 膨胀 ~33%):16MB 原始 → ≤24MB body。
-	// marketplace 自建 /api/admin 组,不受 serverauth 1MB 中间件覆盖,此处
+	// marketplace 自建 /api/server/admin 组,不受 serverauth 1MB 中间件覆盖,此处
 	// 显式限体(与 sharedskills.MaxBodyBytes 同值)。
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 24<<20)
 	name := c.Param("name")

@@ -77,7 +77,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("", listCapabilities(db, cacheDir))
 }
 
-// RegisterAdminRoutes mounts /api/admin/capabilities (AdminAuth + RBAC v3b):
+// RegisterAdminRoutes mounts /api/server/admin/capabilities (AdminAuth + RBAC v3b):
 // the unified approval queue over shared-skills + agent-presets.
 // 仅测试自建路由树使用;生产路由由 internal/router 集中声明,
 // 实际路径为 /api/server/admin/capabilities/approvals。
@@ -648,7 +648,7 @@ type ApprovalRow struct {
 // listApprovals 归并 shared-skills 与 agent-presets 的列表(默认 pending,
 // ?status=all|pending|approved|rejected 过滤,type= 过滤 kind),返回统一行
 // 以便管理端单列表操作。BasePath/PreviewPath 指向 /api/server/admin 命名
-// 空间下的原域端点(2026-09 工程化重构后前缀,勿回退旧 /api/admin)。
+// 空间下的原域端点(2026-09 工程化重构后前缀,勿回退旧 /api/server/admin)。
 func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		status := c.Query("status")

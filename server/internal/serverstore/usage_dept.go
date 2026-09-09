@@ -172,6 +172,10 @@ func userIDToDepts(db *sql.DB, nodes []groupNode) (map[int64][]string, error) {
 	}
 	defer rows.Close()
 	out := map[int64][]string{}
+	// P1-15:去重集合必须按用户持有——此前 seen 声明在 rows.Next() 内,每行重置,
+	// 用户同时归属两个子部门(共享祖先)时祖先部门名会被追加两次,
+	// group=dept 聚合因此把祖先部门用量重复累加(与预算口径不一致)。
+	seenByUser := map[int64]map[string]bool{}
 	for rows.Next() {
 		var uid, gid int64
 		if err := rows.Scan(&uid, &gid); err != nil {
@@ -180,7 +184,11 @@ func userIDToDepts(db *sql.DB, nodes []groupNode) (map[int64][]string, error) {
 		if _, ok := byID[gid]; !ok {
 			continue
 		}
-		seen := map[string]bool{}
+		seen := seenByUser[uid]
+		if seen == nil {
+			seen = map[string]bool{}
+			seenByUser[uid] = seen
+		}
 		for _, name := range ancestors(gid) {
 			if !seen[name] {
 				seen[name] = true

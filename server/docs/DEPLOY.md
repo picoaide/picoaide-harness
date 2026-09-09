@@ -275,7 +275,7 @@ PICOAI_ADMIN_PASSWORD='强密码' \
 # 或手动: docker compose pull && docker compose up -d
 ```
 
-兼容性:DB 迁移按顺序执行(0001→0048),升级前建议 backup;降级**不保证**兼容(数据迁移不可逆),回滚=备份恢复。
+兼容性:DB 迁移按顺序执行(0001→0060),升级前建议 backup;降级**不保证**兼容(数据迁移不可逆),回滚=备份恢复。
 
 ### 6.2 备份(重要:master.key 与数据库同备)
 

@@ -52,8 +52,8 @@ func orEmpty(v string) string {
 	return v
 }
 
-// RegisterAdminRoutes mounts /api/admin/providers, /api/admin/models and
-// /api/admin/gateway behind AdminAuth + RBAC permission checks (v3b).
+// RegisterAdminRoutes mounts /api/server/admin/providers, /api/server/admin/models
+// and /api/server/admin/gateway behind AdminAuth + RBAC permission checks (v3b).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	base := "/api/server/admin"
 	g := r.Group(base, serverauth.AdminAuth(db))

@@ -26,8 +26,7 @@ func DateMonthExpr(col string) string {
 	return fmt.Sprintf("to_char(%s AT TIME ZONE '%s', 'YYYY-MM')", col, pgTZ)
 }
 
-// DateCompareExpr wraps a column so range comparisons (>= ?, < ?) align with
-// the "day" semantics (PG TIMESTAMPTZ vs formatted date string argument).
-func DateCompareExpr(col string) string {
-	return fmt.Sprintf("%s AT TIME ZONE '%s'", col, pgTZ)
-}
+// 注(P2-15):此前的 DateCompareExpr(col) = "col AT TIME ZONE 'Asia/Shanghai'"
+// 用于范围比较,包裹分区键 created_at 会让 PG 无法分区裁剪/用索引(EXPLAIN
+// 全分区扫)。范围比较一律直接写 "col >= ?::date" / "col < ?::date"
+// ——会话时区已固定 Asia/Shanghai(见 pg.go),语义等价且可裁剪。

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -839,5 +840,128 @@ func TestCapabilityLock(t *testing.T) {
 	// 重复解锁 → 404。
 	if code, _ := admin("DELETE", "/api/server/admin/capability-locks/skill/org-official", ""); code != 404 {
 		t.Fatalf("重复解锁 = %d, want 404", code)
+	}
+}
+
+// TestDeleteVersionKeepsGrantsWhileOthersRemain 覆盖 P2-10:版本级 DELETE 只
+// 有在该 name 已无其它未删版本时才清空 name 级授权;删一个历史版本不得静默
+// 撤销全员对剩余版本的访问。
+func TestDeleteVersionKeepsGrantsWhileOthersRemain(t *testing.T) {
+	r, db, adminHdr, userHdr, _ := setup(t)
+	defer db.Close()
+
+	upload := func(version string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
+			strings.NewReader(skillUpload(t, "multi-grant", version, "")))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range userHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("upload %s = %d %s", version, w.Code, w.Body.String())
+		}
+	}
+	admin := func(method, path, body string) int {
+		t.Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, rdr)
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	upload("1.0.0")
+	if code := admin("POST", "/api/server/admin/shared-skills/multi-grant/1.0.0/approve", ""); code != 200 {
+		t.Fatalf("approve v1 = %d", code)
+	}
+	upload("2.0.0")
+	if code := admin("POST", "/api/server/admin/shared-skills/multi-grant/2.0.0/approve", ""); code != 200 {
+		t.Fatalf("approve v2 = %d", code)
+	}
+	if code := admin("PUT", "/api/server/admin/shared-skills/multi-grant/grants", `{"groups":["全员"]}`); code != 200 {
+		t.Fatalf("grant = %d", code)
+	}
+
+	// 删历史版本 → 授权保留(2.0.0 仍可被授权用户访问)
+	if code := admin("DELETE", "/api/server/admin/shared-skills/multi-grant/1.0.0", ""); code != 200 {
+		t.Fatalf("delete v1 = %d", code)
+	}
+	grants, err := serverstore.ListSharedResourceGrants(db, serverstore.SharedSkillGrantTable, "multi-grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("grants after deleting one version = %+v, want 1 (剩余版本仍需授权)", grants)
+	}
+	// 删最后一个版本 → 授权清空
+	if code := admin("DELETE", "/api/server/admin/shared-skills/multi-grant/2.0.0", ""); code != 200 {
+		t.Fatalf("delete v2 = %d", code)
+	}
+	grants, err = serverstore.ListSharedResourceGrants(db, serverstore.SharedSkillGrantTable, "multi-grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("grants after deleting last version = %+v, want empty", grants)
+	}
+}
+
+// makeSkillArchiveSeq 按顺序写 zip(重复条目用 map 表达不了)。
+func makeSkillArchiveSeq(t *testing.T, entries []struct {
+	name    string
+	content string
+}) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range entries {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: e.name, Method: zip.Deflate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(e.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestUploadRejectsDuplicateArchiveEntries 覆盖 P2-11(API 面):含重复
+// SKILL.md 的归档在上传时被拒(422 ARCHIVE_INVALID + 明确文案)。
+func TestUploadRejectsDuplicateArchiveEntries(t *testing.T) {
+	r, db, _, userHdr, _ := setup(t)
+	defer db.Close()
+	archive := makeSkillArchiveSeq(t, []struct {
+		name    string
+		content string
+	}{
+		{"SKILL.md", skillMd("dup-entries", "1.0.0")},
+		{"SKILL.md", skillMd("dup-entries", "1.0.0")},
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/client/v2/shared-skills",
+		strings.NewReader(uploadBody("dup-entries", "1.0.0", "", archive)))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range userHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("dup upload = %d %s, want 422", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "重复条目") {
+		t.Fatalf("body = %s, want 重复条目 提示", w.Body.String())
 	}
 }
