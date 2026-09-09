@@ -276,6 +276,17 @@ function findViolation(node: AnyNode, source: string): string | null {
   const dangerousValue = (value: AnyNode | undefined | null): string | null => {
     const node = unwrapChain(value ?? undefined)
     if (node === undefined) return null
+    /** Composite expressions whose danger is exactly "some child is
+     * dangerous" share ONE child walk (D-1) instead of a hand-written
+     * per-node property list. */
+    const anyChildDangerous = (current: AnyNode): string | null => {
+      let reason: string | null = null
+      forEachChild(current, (child) => {
+        if (reason !== null) return
+        reason = dangerousValue(child)
+      })
+      return reason
+    }
     switch (node.type) {
       case 'Identifier': {
         const name = (node as { name?: string }).name
@@ -309,13 +320,6 @@ function findViolation(node: AnyNode, source: string): string | null {
         }
         return null
       }
-      case 'ArrayExpression':
-        for (const element of ((node as { elements?: (AnyNode | null)[] }).elements ?? [])) {
-          if (element === null || element === undefined) continue
-          const reason = dangerousValue(element.type === 'SpreadElement' ? (element as { argument?: AnyNode }).argument : element)
-          if (reason !== null) return reason
-        }
-        return null
       case 'ObjectExpression':
         for (const property of ((node as { properties?: AnyNode[] }).properties ?? [])) {
           if (property.type !== 'Property') return 'dynamic call target is not allowed (read-only eval)'
@@ -323,30 +327,14 @@ function findViolation(node: AnyNode, source: string): string | null {
           if (reason !== null) return reason
         }
         return null
-      case 'SequenceExpression': {
-        for (const expression of ((node as { expressions?: AnyNode[] }).expressions ?? [])) {
-          const reason = dangerousValue(expression)
-          if (reason !== null) return reason
-        }
-        return null
-      }
+      case 'ArrayExpression':
+      case 'SequenceExpression':
       case 'ConditionalExpression':
-        return dangerousValue((node as { consequent?: AnyNode }).consequent)
-          ?? dangerousValue((node as { alternate?: AnyNode }).alternate)
       case 'LogicalExpression':
-        return dangerousValue((node as { left?: AnyNode }).left)
-          ?? dangerousValue((node as { right?: AnyNode }).right)
       case 'BinaryExpression':
-        return dangerousValue((node as { left?: AnyNode }).left)
-          ?? dangerousValue((node as { right?: AnyNode }).right)
       case 'TemplateLiteral':
-        for (const expression of ((node as { expressions?: AnyNode[] }).expressions ?? [])) {
-          const reason = dangerousValue(expression)
-          if (reason !== null) return reason
-        }
-        return null
       case 'UnaryExpression':
-        return dangerousValue((node as { argument?: AnyNode }).argument)
+        return anyChildDangerous(node)
       case 'SpreadElement':
         return dangerousValue((node as { argument?: AnyNode }).argument)
       case 'AssignmentExpression':
@@ -539,6 +527,16 @@ function isProvablySafeValue(node: AnyNode | undefined | null): boolean {
       return isProvablySafeValue((node as { test?: AnyNode }).test)
         && isProvablySafeValue((node as { consequent?: AnyNode }).consequent)
         && isProvablySafeValue((node as { alternate?: AnyNode }).alternate)
+    case 'SequenceExpression': {
+      // D-1: "every child is inert" via the shared child walk. A sequence's
+      // value is its last expression, but all of them are evaluated, so the
+      // whole node is inert exactly when every element is.
+      let safe = true
+      forEachChild(node, (child) => {
+        if (!isProvablySafeValue(child)) safe = false
+      })
+      return safe
+    }
     default:
       return false
   }
@@ -762,9 +760,19 @@ function callTargetName(callee: AnyNode | undefined): string | null | undefined 
 }
 
 /** Resolve the dotted member name of a callee/member (a.b.c → 'c').
- * String-literal computed access (`window['fetch']`) resolves to its value;
- * non-literal computed access yields `undefined` (unverifiable); non-member
- * callees yield `null`. */
+ *
+ * This is the SINGLE name-resolution entry for `WRITE_APIS` /
+ * `DANGEROUS_MEMBERS` / member-chain decisions, so the computed branch must
+ * constant-fold exactly like `propertyKeyName()` does (NEW-P0): when folding
+ * lived only in the pattern-key and `Reflect.get` paths, `window['ev'+'al']`
+ * resolved to `undefined` (unverifiable) while `window['eval']` resolved to
+ * `'eval'`, so the same chain passed or failed purely on how the key was
+ * spelled — and a folded `eval` could be handed over as a callback.
+ *
+ * String-literal / folded-string computed access (`window['fetch']`,
+ * `window['ev'+'al']`, ``window[`ev${'a'}l`]``) resolves to its value;
+ * genuinely dynamic computed access (`data[key]`, `window[0]`) yields
+ * `undefined` (unverifiable); non-member callees yield `null`. */
 function memberName(node: AnyNode | undefined): string | null | undefined {
   if (node === undefined) return null
   if (node.type === 'Identifier') return (node as { name?: string }).name ?? null
@@ -774,10 +782,7 @@ function memberName(node: AnyNode | undefined): string | null | undefined {
       if (property !== undefined && property.type === 'Identifier') return (property as { name?: string }).name ?? null
       return null
     }
-    if (property !== undefined && property.type === 'Literal' && typeof property.value === 'string') {
-      return property.value
-    }
-    return undefined
+    return constantStringValue(property)
   }
   return null
 }
