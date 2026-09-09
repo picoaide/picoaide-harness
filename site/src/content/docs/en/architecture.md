@@ -49,7 +49,7 @@ Employee clients / third-party integrations ──HTTPS + Bearer token──▶
 
 ## Database
 
-- PostgreSQL only (built-in container or external instance), migrations `migrations-pg/` 0001–0048;
+- PostgreSQL only (built-in container or external instance), migrations `migrations-pg/` 0001–0059;
 - usage detail partitioned by month (retention configurable, default 6 months); daily/monthly ledgers kept forever (10-year history never lost);
 - Shared skill/agent archives stored directly in the DB; brand snapshots, audit hash chain (tamper-evident), RBAC roles.
 

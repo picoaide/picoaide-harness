@@ -1,10 +1,12 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
-import { Users, Settings2, KeyRound, BarChart3, Store, LogOut, Globe, ScrollText, Network, ShieldCheck, ChevronRight, SearchX, Server, Bug, Plug, Menu, X, Palette, Lock, Eye } from 'lucide-react'
+import { LogOut, Globe, ShieldCheck, KeyRound, ChevronRight, SearchX, Menu, X, Lock, Eye } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized, ADMIN_API, CLIENT_API } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
 import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
+// P2-43: 导航声明与可见性过滤收敛到 lib/nav(按服务端 permissions 过滤)。
+import { visibleNav as visibleNavFor, landingPath as landingPathFor } from './lib/nav'
 import { PasswordDialog } from './components/password-dialog'
 import { MFASettingsDialog } from './components/mfa-settings-dialog'
 import { BRAND_LOGO_URL } from './lib/brand-assets'
@@ -35,44 +37,6 @@ const UsageModels = lazy(() => import('./pages/usage/Models'))
 const UsageLogs = lazy(() => import('./pages/usage/Logs'))
 const UsageQuota = lazy(() => import('./pages/usage/Quota'))
 const UsageReports = lazy(() => import('./pages/usage/Reports'))
-
-// 权限点常量(与服务端 serverauth/rbac.go 对齐; 前端仅作导航可见性)。
-const PERM_AUTH_READ = 'auth:read'
-const PERM_BRAND_READ = 'brand:read'
-const PERM_GATEWAY_READ = 'gateway:read'
-const PERM_ERRMON_READ = 'error-monitoring:read'
-const PERM_USAGE_READ = 'usage:read'
-const PERM_MARKET_READ = 'market:read'
-const PERM_CAP_READ = 'capability:read'
-const PERM_CONNECTOR_READ = 'connector:read'
-const PERM_SERVERINFO_READ = 'server-info:read'
-const PERM_AUDIT_READ = 'audit:read'
-
-interface NavEntry {
-  to: string
-  label: string
-  icon: any
-  section: '管理' | '运维' | '审计'
-  perms?: string[]
-}
-
-const nav: NavEntry[] = [
-  // 管理分区(super_admin 专属; auditor 无这些权限)
-  { to: '/users', label: '用户', icon: Users, section: '管理' },
-  { to: '/departments', label: '部门', icon: Network, section: '管理' },
-  { to: '/auth', label: '认证', icon: KeyRound, section: '管理', perms: [PERM_AUTH_READ] },
-  { to: '/brand', label: '品牌', icon: Palette, section: '管理', perms: [PERM_BRAND_READ] },
-  // 运维分区(super_admin)
-  { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
-  { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },
-  { to: '/usage', label: '用量中心', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
-  // 2026-09-02:合并「市场 · 技能」与「能力中心」为单入口(客户端同构)。
-  { to: '/capabilities', label: '能力中心', icon: Store, section: '运维', perms: [PERM_MARKET_READ, PERM_CAP_READ] },
-  { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
-  { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
-  // 审计分区(auditor + super_admin 只读)
-  { to: '/audit', label: '审计日志', icon: ScrollText, section: '审计', perms: [PERM_AUDIT_READ] },
-]
 
 // 审计 A5-L7: 页面运行时异常不再白屏整树卸载,展示错误与重载入口
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -181,15 +145,11 @@ export default function App() {
     )
   }, [])
 
-  // 可见 nav: 按角色权限过滤(体验层; 服务端 RequirePermission 为护栏)。
-  const visibleNav = nav.filter((n) => {
-    if (meUser?.role === 'super_admin') return true
-    if (meUser?.role === 'auditor') return n.section === '审计'
-    return false
-  })
+  // 可见 nav: 按服务端下发的 permissions 过滤(P2-43;体验层,服务端 RequirePermission 为护栏)。
+  const visibleNav = visibleNavFor(meUser)
 
-  // 落地页: 角色第一个有权限的分区。
-  const landingPath = meUser?.role === 'auditor' ? '/audit' : nav[0]?.to ?? '/users'
+  // 落地页: 第一个有权限的页面(审计员优先审计日志)。
+  const landingPath = landingPathFor(meUser)
 
   useEffect(() => {
     if (!authed) return

@@ -10,8 +10,8 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 | Platform | How to install |
 |---|---|
 | Windows x64 | Run the NSIS installer (`PicoAide-Harness-<v>-x64-Setup.exe`) |
-| macOS | Open the DMG (universal, both Apple silicon and Intel) and drag PicoAide Harness into Applications |
-| Linux x64 | Grant execute permission and run the AppImage (`-x86_64.AppImage`); a deb is also provided |
+| macOS | Open the DMG (arm64 / Apple silicon) and drag PicoAide Harness into Applications |
+| Linux x64 | Grant execute permission and run the AppImage (`-x86_64.AppImage`); a deb (`-amd64.deb`, install with `sudo dpkg -i`) is also provided |
 
 > **Recommended before installing**: every Release ships a `SHA256SUMS.txt`. The Windows/Linux installers are published by CI automatically and are **not yet signed**; SmartScreen may warn about an "unknown publisher" — download and verify the SHA-256 digest from Releases before running.
 

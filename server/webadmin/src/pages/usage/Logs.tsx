@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../../api'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
@@ -34,8 +34,11 @@ export default function UsageLogs() {
   const [stats, setStats] = useState<{ cost: number; tokens: number; requests: number } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // P2-46: 请求序号防乱序——快速翻页/改筛选时只有最新请求的响应能写 state。
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (p: number) => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
@@ -44,17 +47,19 @@ export default function UsageLogs() {
       if (model) qs.set('model', model)
       if (kind) qs.set('kind', kind)
       const d = await request<{ rows: UsageRequestRow[]; total: number }>(`${ADMIN_API}/usage/requests?${qs}`)
-      setRows(d.rows ?? [])
-      setTotal(d.total ?? 0)
       // 统计徽标:区间聚合(与过滤条件一致)
       // G9: 统计徽标携带与明细一致的 model/kind 过滤
       const agg: any = await fetchUsageList({ group: 'day', from, to, ...(username ? { username } : {}), ...(model ? { model } : {}), ...(kind ? { kind } : {}) })
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
+      setRows(d.rows ?? [])
+      setTotal(d.total ?? 0)
       const s = sumRows(agg)
       setStats({ cost: s.cost, tokens: s.tokens, requests: s.requests })
     } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
       setError(e.message || '查询失败')
     } finally {
-      setLoading(false)
+      if (current === loadSeq.current) setLoading(false)
     }
   }, [from, to, username, model, kind])
 

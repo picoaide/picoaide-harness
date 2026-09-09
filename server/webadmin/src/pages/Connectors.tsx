@@ -13,6 +13,7 @@ import { Label } from '../components/ui/label'
 import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Plus, RefreshCw, Trash2, Pencil, Plug, Copy, ClipboardPaste, Wand2 } from 'lucide-react'
+import { useFlash } from '../lib/use-flash'
 
 /**
  * 连接器目录管理页(图形化)。
@@ -315,7 +316,10 @@ export default function Connectors() {
   // 高级区:JSON 预览(只读,实时生成)与 JSON 整体导入
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
-  const [copied, setCopied] = useState(false)
+  // P3: flash 定时器由 useFlash 统一清理(原来 setTimeout 未清理)。
+  const [copiedMsg, flashCopied] = useFlash(1500)
+  const copied = copiedMsg !== ''
+  const setCopied = (v: boolean) => { flashCopied(v ? '已复制' : '') }
 
   const definition = useMemo(() => buildDefinition(form), [form])
 
@@ -387,7 +391,6 @@ export default function Connectors() {
     try {
       await navigator.clipboard.writeText(definition)
       setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
     } catch {
       setFormError('复制失败,请手动选择复制')
     }
@@ -431,7 +434,10 @@ export default function Connectors() {
           description: form.description.trim(),
           auth_mode: form.authMode,
           definition,
-          enabled: true,
+          // P2-42: 原来恒发 enabled:true,而编辑表单没有该字段 → 保存一次就把已停用的
+          // 连接器静默重新下发。表单不含该字段,故编辑时回传原值(服务端 PUT 是整体
+          // 替换,enabled 缺省即 true,不能省略);新建仍默认启用(与开关默认一致)。
+          enabled: isNew ? true : editing.enabled,
         }),
       })
       setEditing(null)
@@ -523,10 +529,10 @@ export default function Connectors() {
                     <TableCell className="text-muted-foreground">{fmtTime(row.updated_at)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => openEdit(row)} title="编辑">
+                        <Button variant="ghost" size="sm" onClick={() => openEdit(row)} title="编辑" aria-label="编辑">
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setConfirmDel(row)} title="删除">
+                        <Button variant="ghost" size="sm" onClick={() => setConfirmDel(row)} title="删除" aria-label="删除">
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>

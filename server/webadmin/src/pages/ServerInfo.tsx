@@ -149,7 +149,9 @@ export default function ServerInfo() {
                 <InfoRow label="Go 运行时" value={info.go_version} />
                 <InfoRow label="Goroutines" value={info.goroutines} />
                 <InfoRow label="GOMAXPROCS" value={info.gomaxprocs} />
-                <InfoRow label="数据库引擎" value={info.db.driver === 'pg' ? 'PostgreSQL' : 'SQLite'} />
+                {/* P3: SQLite 已下线(2026-08-27 PG-only),原 `driver==='pg'?'PostgreSQL':'SQLite'`
+                    分支的 else 永不成立且误导——直接展示 PostgreSQL,驱动字段非 pg 时原样回显。 */}
+                <InfoRow label="数据库引擎" value={info.db.driver === 'pg' ? 'PostgreSQL' : info.db.driver} />
                 <InfoRow label="数据库大小" value={`${info.db.disk_human} (${info.db.disk_bytes.toLocaleString()} B)`} />
                 <InfoRow label="Schema 迁移版本" value={info.db.schema_migrations} />
                 <InfoRow label="数据目录" value={<span className="font-mono text-xs">{info.disk.data_path}</span>} />

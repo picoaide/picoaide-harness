@@ -8,10 +8,9 @@ web:
 staticClients:
   - id: picoaide-test
     redirectURIs:
+      # P2-53: 旧命名空间 /api/auth/* 已移除;回调唯一真源 = /api/client/v2/auth/<provider>/callback
       - 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback'
       - 'http://127.0.0.1:8091/api/client/v2/auth/openid/callback'
-      - 'http://127.0.0.1:8091/api/auth/oidc/callback'
-      - 'http://127.0.0.1:8091/api/auth/openid/callback'
     name: PicoAide Test
     secret: test-secret
 enablePasswordDB: true

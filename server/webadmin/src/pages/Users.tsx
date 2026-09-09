@@ -640,7 +640,9 @@ export default function Users() {
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">生效 token 配额</div>
-                <div className="font-mono text-base">{quotaUser?.effective_quota_tokens ?? 0 === 0 ? '不限' : fmtTokens(quotaUser?.effective_quota_tokens ?? 0)}</div>
+                {/* P2-40: `??` 优先级低于 `===`,`a ?? 0 === 0` 解析为 `a ?? false` → 恒真「不限」。
+                    必须先算出生效值再判 0(0 = 不限,与服务端 effective_quota_tokens 口径一致)。 */}
+                <div className="font-mono text-base">{(quotaUser?.effective_quota_tokens ?? 0) === 0 ? '不限' : fmtTokens(quotaUser?.effective_quota_tokens ?? 0)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">生效金额配额</div>

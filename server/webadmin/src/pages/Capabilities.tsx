@@ -317,16 +317,16 @@ export default function Capabilities() {
                         </Button>
                         <Button variant="ghost" size="sm"
                           onClick={() => { window.open(`${row.base_path}/archive`, '_blank') }}
-                          title="下载归档核查">
+                          title="下载归档核查" aria-label="下载归档核查">
                           <Download className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="sm" disabled={isBusy}
                           onClick={() => { setTransferRow(row) }}
-                          title="转移归属(负责人)">
+                          title="转移归属(负责人)" aria-label="转移归属(负责人)">
                           <UserCog className="h-4 w-4" />
                         </Button>
                         {row.status === 'approved' && (
-                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setGrantName(row.name); setGrantBase(row.grants_base) }} title="授权">
+                          <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setGrantName(row.name); setGrantBase(row.grants_base) }} title="授权" aria-label="授权">
                             <ShieldCheck className="h-4 w-4" />
                           </Button>
                         )}

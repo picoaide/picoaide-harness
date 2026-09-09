@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../../api'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { PageHeader } from '../../components/page-header'
 import { useSearchParams, Link } from 'react-router-dom'
-import { fmtY, type UserInfo, type DeptInfo } from './common'
+import { employeeCountText, fmtY, type UserInfo, type DeptInfo } from './common'
 import { fmtTokens, moneyPercent, moneyOver } from '../../lib/format'
 import { cn } from '../../lib/utils'
 
@@ -39,6 +39,7 @@ function preview(current: number | null | undefined, mode: AdjustMode, val: stri
 export default function UsageQuota() {
   const [users, setUsers] = useState<UserInfo[]>([])
   const [total, setTotal] = useState(0)
+  const [rawCount, setRawCount] = useState(0)
   const [depts, setDepts] = useState<DeptInfo[]>([])
   const [defToken, setDefToken] = useState('')
   const [defMoney, setDefMoney] = useState('')
@@ -50,10 +51,14 @@ export default function UsageQuota() {
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [adjust, setAdjust] = useState<AdjustState | null>(null)
-  const [budgetDept, setBudgetDept] = useState<DeptInfo | null>(null)
-  const [budgetVal, setBudgetVal] = useState('')
+  // P2-46: 请求序号防乱序(Users/Audit 同款)。
+  const loadSeq = useRef(0)
+  // P2-47: 部门预算弹窗(dead code)已删除——G8 收敛后部门预算唯一编辑入口
+  // = 部门管理页(下方部门表只读展示 + 「去部门管理」链接),setBudgetDept
+  // 从未以非 null 调用,预算弹窗/saveBudget 永不可达。
 
   const load = useCallback(async (query: string) => {
+    const current = ++loadSeq.current
     setLoading(true)
     setError('')
     try {
@@ -62,15 +67,19 @@ export default function UsageQuota() {
         request<{ departments: DeptInfo[] }>(`${ADMIN_API}/departments`),
         request<any>(`${ADMIN_API}/gateway`),
       ])
-      setUsers((ul.users ?? []).filter((u) => u.role !== 'super_admin'))
+      if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
+      const all = ul.users ?? []
+      setUsers(all.filter((u) => u.role !== 'super_admin'))
+      setRawCount(all.length)
       setTotal(ul.total ?? 0)
       setDepts(dl.departments ?? [])
       setDefToken(gw?.monthly_quota === undefined || gw?.monthly_quota === null || gw?.monthly_quota === '' ? '' : String(gw.monthly_quota))
       setDefMoney(gw?.monthly_quota_money === undefined || gw?.monthly_quota_money === null || gw?.monthly_quota_money === '' ? '' : String(gw.monthly_quota_money))
     } catch (e: any) {
+      if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
       setError(e.message || '查询失败')
     } finally {
-      setLoading(false)
+      if (current === loadSeq.current) setLoading(false)
     }
   }, [])
 
@@ -132,27 +141,12 @@ export default function UsageQuota() {
     }
   }
 
-  const saveBudget = async () => {
-    if (!budgetDept) return
-    setSaving(true)
-    setError('')
-    try {
-      const payload: Record<string, unknown> = {
-        name: budgetDept.name,
-        parent_id: budgetDept.parent_id,
-        budget_money: budgetVal === '' ? null : Number(budgetVal),
-      }
-      await request(`${ADMIN_API}/departments/${budgetDept.id}`, { method: 'PUT', body: JSON.stringify(payload) })
-      setBudgetDept(null)
-      setSaving(false)
-      await load(q)
-    } catch (e: any) {
-      setError(e.message || '保存失败')
-      setSaving(false)
-    }
-  }
+  // P2-47: saveBudget 已删除(部门预算唯一编辑入口 = 部门管理页,见 Departments.tsx)。
 
+  // 生效配额:优先服务端折算值(P2-45 同口径),缺失时回退「用户覆盖 → 全局默认」。
   const effective = (u: UserInfo, kind: 'token' | 'money') => {
+    const server = kind === 'token' ? u.effective_quota_tokens : u.effective_quota_money
+    if (server !== null && server !== undefined) return server
     const mine = kind === 'token' ? u.quota_tokens : u.quota_money
     if (mine !== null && mine !== undefined) return mine
     const d = kind === 'token' ? defToken : defMoney
@@ -199,7 +193,7 @@ export default function UsageQuota() {
         <CardContent>
           {loading ? <Skeleton className="h-72 w-full" /> : (
             <>
-              <div className="mb-2 text-xs text-muted-foreground">共 {Math.max(0, total - 1)} 名员工{total > 200 ? '(展示前 200,搜索可缩小范围)' : ''} · 超额/临近按「金额 或 token」任一维度</div>
+              <div className="mb-2 text-xs text-muted-foreground">{employeeCountText(users, rawCount, total)} · 超额/临近按「金额 或 token」任一维度</div>
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -341,20 +335,7 @@ export default function UsageQuota() {
         </DialogContent>
       </Dialog>
 
-      {/* 部门预算设置弹窗 */}
-      <Dialog open={!!budgetDept} onOpenChange={(o) => { if (!o) setBudgetDept(null) }}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>设置部门预算 · {budgetDept?.name}</DialogTitle>
-            <DialogDescription>月度金额预算(元);留空或 0 = 不限(清除),超限后该部门成员调用返回 429</DialogDescription>
-          </DialogHeader>
-          <Input type="number" min={0} step="0.01" value={budgetVal} onChange={(e) => setBudgetVal(e.target.value)} placeholder="1000" />
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={() => setBudgetDept(null)}>取消</Button>
-            <Button size="sm" onClick={saveBudget} disabled={saving}>{saving ? '保存中…' : '保存'}</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* P2-47: 部门预算弹窗已删除(死代码——唯一入口是部门管理页,见部门表「去部门管理」)。 */}
     </div>
   )
 }
