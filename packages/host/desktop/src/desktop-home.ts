@@ -114,6 +114,17 @@ export function dshHomePath(...segments: string[]): string {
 const POSIX_SYSTEM_DIRS = ['/usr', '/etc', '/var', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys', '/lib', '/lib64', '/opt']
 
 /**
+ * Strip trailing path separators and normalize to forward slashes without a
+ * backtracking regex (`/[\\/]+$/` is polynomial on uncontrolled input —
+ * CodeQL js/polynomial-redos).
+ */
+function normalizePathForCompare(value: string): string {
+  let end = value.length
+  while (end > 0 && (value[end - 1] === '/' || value[end - 1] === '\\')) end--
+  return value.slice(0, end).split('\\').join('/').toLowerCase()
+}
+
+/**
  * Is `cwd` a filesystem root or a system directory (P2-34)? A packaged app
  * launched with such a working directory (desktop-entry `Path=`, a Windows
  * shortcut with a wrong "start in", a service manager) would create project
@@ -134,10 +145,10 @@ export function isSystemWorkingDirectory(cwd: string, env: Record<string, string
   // `resolve('C:\\')` on Linux would rewrite the drive path away. `parse`
   // follows the host flavour, so `C:\` is only recognized through win32.parse.
   if (parse(raw).root === raw || win32.parse(raw).root === raw) return true
-  const target = resolve(raw).replace(/[\\/]+$/u, '').replace(/\\/gu, '/').toLowerCase()
+  const target = normalizePathForCompare(resolve(raw))
   for (const base of [env.SystemRoot, env.windir, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData]) {
     if (base === undefined || base.trim() === '') continue
-    const root = resolve(base).replace(/[\\/]+$/u, '').replace(/\\/gu, '/').toLowerCase()
+    const root = normalizePathForCompare(resolve(base))
     if (target === root || target.startsWith(`${root}/`)) return true
   }
   return POSIX_SYSTEM_DIRS.some(dir => target === dir || target.startsWith(`${dir}/`))
