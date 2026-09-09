@@ -300,7 +300,25 @@ wait_ready() {
     [ "$code" = "200" ] && { log "  ✓ 服务就绪(https://$DOMAIN/healthz → 200)"; return 0; }
     sleep 3
   done
-  warn "服务可能仍在启动,稍后访问确认: https://$DOMAIN/admin/"
+  # P2-56: 超时原来只 warn → 调用方仍打印「部署完成/升级完成」(假绿)。
+  # 改为非零返回(set -e 下直接中止,不再输出完成语)。
+  warn "服务未在 90s 内就绪(https://$DOMAIN/healthz 非 200)"
+  log "  排查: $COMPOSE logs --tail=100;或 ./deploy.sh status"
+  return 1
+}
+
+# P2-56: 拉取失败不再一律 warn 继续——镜像本地不存在时后续 up -d 必然失败,
+# 必须立即非零退出;仅当镜像已存在本地(离线/内网镜像)才降级为警告。
+pull_image_or_fail() {
+  local image="$1" purpose="$2"
+  if $COMPOSE pull; then
+    return 0
+  fi
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    warn "拉取失败($purpose),但本地已有镜像 $image —— 继续使用本地镜像"
+    return 0
+  fi
+  fail "拉取镜像失败且本地不存在 $image($purpose)。请检查网络/镜像仓库权限,或先手动 docker pull $image"
 }
 
 # ============================================================
@@ -326,7 +344,7 @@ cmd_install() {
   write_env
 
   log "▶ 拉取镜像并启动"
-  $COMPOSE pull 2>/dev/null || warn "镜像拉取失败(网络/权限),尝试直接启动"
+  pull_image_or_fail "$SERVER_IMAGE" "install"
   $COMPOSE up -d
   wait_ready
   log "========== 部署完成 =========="
@@ -363,7 +381,7 @@ cmd_update() {
   完成后本目录数据将落在 pg-data/18/docker/ 下再执行 update。"
   fi
   log "▶ 拉取新镜像($SERVER_IMAGE)"
-  $COMPOSE pull || warn "拉取失败(可能已是最新/无网络),尝试直接重建"
+  pull_image_or_fail "$SERVER_IMAGE" "update"
   log "▶ 重建并重启容器(数据卷不变,数据不丢)"
   $COMPOSE up -d
   wait_ready

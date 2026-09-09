@@ -30,6 +30,8 @@ var (
 	ErrNoComposition = errors.New("archive has no agent.cordis.yml at its root")
 	// ErrEntryLimit: too many entries in the archive.
 	ErrEntryLimit = errors.New("archive has too many entries")
+	// ErrDuplicateEntry: the archive repeats an entry (case-insensitive).
+	ErrDuplicateEntry = errors.New("archive has duplicate entries")
 )
 
 // presetLimits: 校验边界(zip 推荐 / tar.gz 兼容)。
@@ -53,6 +55,8 @@ func ValidatePresetArchive(data []byte) (string, error) {
 		return "", ErrUnsafeArchive
 	case errors.Is(err, archiveutil.ErrTooMany):
 		return "", ErrEntryLimit
+	case errors.Is(err, archiveutil.ErrDuplicateEntry):
+		return "", ErrDuplicateEntry
 	case errors.Is(err, archiveutil.ErrInvalid):
 		return "", ErrArchiveTooLarge
 	default:

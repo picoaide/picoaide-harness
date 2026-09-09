@@ -2,7 +2,10 @@
 // environments without a real LLM key. It listens on :8081 and returns fixed
 // JSON (non-stream) and SSE (stream) /chat/completions responses.
 //
-// Usage: go run scripts/mock-upstream.go [addr]   (default :8081)
+// Usage: go run scripts/mock-upstream.go [-addr :8081] [:port]
+//
+// P3: 位置参数此前被静默忽略——Go 的 flag 包只解析到第一个非 flag 参数,
+// 于是 `go run scripts/mock-upstream.go :9090` 仍监听 :8081。现在显式支持。
 package main
 
 import (
@@ -29,6 +32,20 @@ type chatReq struct {
 func main() {
 	addr := flag.String("addr", ":8081", "listen address")
 	flag.Parse()
+	// P3: 兼容位置参数写法 `go run scripts/mock-upstream.go :9090`。
+	// -addr 显式给出时以 flag 为准;多余参数打印警告而不是静默丢弃。
+	addrExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "addr" {
+			addrExplicit = true
+		}
+	})
+	if !addrExplicit && flag.NArg() > 0 && flag.Arg(0) != "" {
+		*addr = flag.Arg(0)
+	}
+	if flag.NArg() > 1 {
+		log.Printf("warning: ignoring extra arguments: %v", flag.Args()[1:])
+	}
 
 	http.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		var req chatReq

@@ -283,10 +283,13 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 }
 
 // SyncProviderModel upsert 一个模型的 display_name 与 default_params(幂等)。
+// P2-18:已存在的行只更新 display_name——default_params 与 input_modalities
+// 同语义,是管理员配置(如 concurrency_target),渠道同步不得覆盖清空;
+// 只有新行才写入同步给出的默认参数。
 func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string) error {
 	_, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)
 		VALUES (?, ?, ?, ?)
-		ON CONFLICT(provider_id, name) DO UPDATE SET display_name=excluded.display_name, default_params=excluded.default_params`,
+		ON CONFLICT(provider_id, name) DO UPDATE SET display_name=excluded.display_name`,
 		name, providerID, name, defaultParams)
 	if err == nil {
 		InvalidateModelConfig()
@@ -332,6 +335,11 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 	deletedDefault := false
 	for _, r := range doomed {
 		if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.id); err != nil {
+			return 0, err
+		}
+		// 2026-09-08(P1-8 同类):渠道同步删行时也必须从 provider 的 models JSON
+		// 移除该名,否则路由仍匹配到它而 models 表无价 → 可调用且 cost=0。
+		if err := removeProviderModelName(tx, providerID, r.name); err != nil {
 			return 0, err
 		}
 		var dm string
@@ -526,7 +534,23 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 // UpdateModel updates a model row.
 func UpdateModel(db *sql.DB, m *Model) error {
 	modalitiesJSON, _ := json.Marshal(NormalizeInputModalities(m.InputModalities))
-	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_modalities=?, input_price_per_1m=?, output_price_per_1m=?, cache_input_price_per_1m=?, offpeak_discount=?
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// 2026-09-08(P1-8 同类):改名时把旧名从 provider JSON 移除、新名加入,
+	// 否则旧名仍可路由而 models 表无价 → cost=0。
+	var oldName string
+	var oldProvider int64
+	err = tx.QueryRow("SELECT name, provider_id FROM models WHERE id = ?", m.ID).Scan(&oldName, &oldProvider)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_modalities=?, input_price_per_1m=?, output_price_per_1m=?, cache_input_price_per_1m=?, offpeak_discount=?
 		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams, string(modalitiesJSON),
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
 	if err != nil {
@@ -539,9 +563,48 @@ func UpdateModel(db *sql.DB, m *Model) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	if oldName != m.Name || oldProvider != m.ProviderID {
+		if err := removeProviderModelName(tx, oldProvider, oldName); err != nil {
+			return err
+		}
+		if err := addProviderModelName(tx, m.ProviderID, m.Name); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	InvalidateModelConfig()
 	InvalidateModelsChanged()
 	return nil
+}
+
+// addProviderModelName appends a model name to the provider's JSON list when
+// missing (idempotent; keeps first-seen order).
+func addProviderModelName(tx *sql.Tx, providerID int64, name string) error {
+	var raw string
+	err := tx.QueryRow("SELECT models FROM gateway_providers WHERE id = ?", providerID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return nil
+	}
+	for _, n := range names {
+		if n == name {
+			return nil
+		}
+	}
+	buf, err := json.Marshal(append(names, name))
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec("UPDATE gateway_providers SET models = ? WHERE id = ?", string(buf), providerID)
+	return err
 }
 
 // ModelHasUsage reports whether the model name has recorded usage rows.
@@ -554,6 +617,9 @@ func ModelHasUsage(db *sql.DB, name string) (bool, error) {
 
 // DeleteModel removes a model;若被删模型是 gateway.default_model,重置为空串
 // (与 RemoveMissingProviderModels 同口径,防 bootstrap 悬空指向已删模型)。
+// P1-8:同时从 gateway_providers.models JSON 中移除该模型名——上游路由用
+// mergeModelNames(provider JSON, models 表),只删 models 行会让模型仍被路由
+// 匹配到(ModelPrices 查不到行 → cost=0,平台付费零计量)。
 func DeleteModel(db *sql.DB, id int64) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -561,11 +627,15 @@ func DeleteModel(db *sql.DB, id int64) error {
 	}
 	defer tx.Rollback()
 	var name string
-	err = tx.QueryRow("SELECT name FROM models WHERE id = ?", id).Scan(&name)
+	var providerID int64
+	err = tx.QueryRow("SELECT name, provider_id FROM models WHERE id = ?", id).Scan(&name, &providerID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
+		return err
+	}
+	if err := removeProviderModelName(tx, providerID, name); err != nil {
 		return err
 	}
 	res, err := tx.Exec("DELETE FROM models WHERE id = ?", id)
@@ -586,6 +656,41 @@ func DeleteModel(db *sql.DB, id int64) error {
 	InvalidateSettings()
 	InvalidateModelsChanged()
 	return nil
+}
+
+// removeProviderModelName 从 gateway_providers.models JSON 数组里移除 name
+// (事务内执行)。名字不存在 / JSON 损坏时不报错:models 行的删除本身仍应成功。
+func removeProviderModelName(tx *sql.Tx, providerID int64, name string) error {
+	var raw string
+	err := tx.QueryRow("SELECT models FROM gateway_providers WHERE id = ?", providerID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return nil
+	}
+	kept := make([]string, 0, len(names))
+	changed := false
+	for _, n := range names {
+		if n == name {
+			changed = true
+			continue
+		}
+		kept = append(kept, n)
+	}
+	if !changed {
+		return nil
+	}
+	buf, err := json.Marshal(kept)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec("UPDATE gateway_providers SET models = ? WHERE id = ?", string(buf), providerID)
+	return err
 }
 
 // clearDefaultModelIf 把指向指定模型名的 gateway.default_model 置空(事务内)。

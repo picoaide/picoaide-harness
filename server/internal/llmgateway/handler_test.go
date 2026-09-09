@@ -1133,3 +1133,24 @@ func TestServeStreamRedactsErrorBody(t *testing.T) {
 		t.Fatalf("secret leaked in error body: %s", body)
 	}
 }
+
+// P2-11(2026-09-08):上游正常结束但从未回传 usage 时,pending 行也必须清除
+// (此前只处理 clientGone/idle/lineTooLong,正常 EOF 会留下 0 token 的悬挂行)。
+func TestProxyStreamNormalEOFWithoutUsageCleansPendingRow(t *testing.T) {
+	f := newFakeUpstream(t)
+	// 只发普通内容行,不含 usage,然后正常结束(EOF)。
+	f.streamResp = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+	r, db, token := newGateway(t, f)
+	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	w := doPost(t, r, "/v1/chat/completions", body, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("usage rows = %d, want 0 (pending row cleaned up on normal EOF without usage)", n)
+	}
+}

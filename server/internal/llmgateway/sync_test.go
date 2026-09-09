@@ -198,7 +198,7 @@ func TestSyncExcludedModelNotResurrected(t *testing.T) {
 	if _, err := SyncOnce(db, fetchFn); err != nil {
 		t.Fatal(err)
 	}
-	// 管理端删除 deepseek-v4-flash(等价于 DELETE /api/admin/models 记入排除名单)
+	// 管理端删除 deepseek-v4-flash(等价于 DELETE /api/server/admin/models 记入排除名单)
 	p, _ := serverstore.ListGatewayProviders(db)
 	if err := serverstore.AddExcludedModel(db, p[0].ID, "deepseek-v4-flash"); err != nil {
 		t.Fatal(err)

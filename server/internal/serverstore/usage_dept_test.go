@@ -121,3 +121,54 @@ func TestDeptGrouping(t *testing.T) {
 		t.Fatalf("unknown dept: %v %v, want empty", empty, err)
 	}
 }
+
+// TestDeptGroupingSharedAncestorCountedOnce 覆盖 P1-15:用户同时归属两个子部门
+// (共享祖先)时,祖先部门只能计一次。旧实现把 seen 声明在 rows.Next() 内,
+// 每行重置 → 祖先被重复累加(200 vs 100),与预算 enforcement 口径不一致。
+func TestDeptGroupingSharedAncestorCountedOnce(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+
+	var everyoneID int64
+	if err := db.QueryRow(`SELECT id FROM groups WHERE name = ?`, "全员").Scan(&everyoneID); err != nil {
+		t.Fatalf("everyone group: %v", err)
+	}
+	rootID, err := CreateDepartment(db, "总部", everyoneID, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "A组", rootID, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "B组", rootID, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := CreateUser(db, &User{Username: "multi-dept", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncUserGroups(db, uid, []string{"A组", "B组"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordUsage(db, uid, "m1", 100, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "dept")
+	if err != nil {
+		t.Fatalf("UsageAggregateWithLedger(dept): %v", err)
+	}
+	byName := map[string]int64{}
+	for _, r := range rows {
+		byName[r.Label] = r.PromptTokens
+	}
+	if got := byName["总部"]; got != 100 {
+		t.Fatalf("共享祖先 总部 = %d, want 100 (不得因多部门归属重复累加)", got)
+	}
+	if got := byName["A组"]; got != 100 {
+		t.Fatalf("A组 = %d, want 100", got)
+	}
+	if got := byName["B组"]; got != 100 {
+		t.Fatalf("B组 = %d, want 100", got)
+	}
+}

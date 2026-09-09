@@ -80,6 +80,15 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		if req.Official != nil {
+			// P2-21:official 语义是「归属官方」的一次性转移,只接受 true。
+			// 此前 `{"official":false}` 也被当作归属官方处理(反而置 official=1
+			// 并清空 owner)——调用方想取消官方归属却被反向改写。取消官方归属
+			// 必须显式指定新负责人({owner:...}),避免出现无主 App。
+			if !*req.Official {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+					"official 只接受 true;取消官方归属请用 owner 指定新负责人")
+				return
+			}
 			// 归属官方: official=1, owner 清空(展示「官方」)。
 			if app.Official == 1 && app.Owner == "" {
 				c.JSON(http.StatusOK, gin.H{"ok": true, "official": true})

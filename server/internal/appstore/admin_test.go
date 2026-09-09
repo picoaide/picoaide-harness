@@ -191,3 +191,37 @@ func kindIf(skill, agent, kind string) string {
 	}
 	return skill
 }
+
+// TestTransferOwnerOfficialFalseRejected 覆盖 P2-21:{"official":false} 不得被
+// 反向解释成「归属官方」(旧实现会置 official=1 并清空 owner),必须拒绝。
+func TestTransferOwnerOfficialFalseRejected(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	if _, err := serverstore.CreateUserWithPassword(db, "alice", "alice123456"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(db, req("false-flag", "1.0.0", "y1", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h := NewHandlers(db)
+	r.PUT("/apps/:kind/:app_id/owner", func(c *gin.Context) {
+		c.Set("admin_user", &serverstore.User{Username: "admin"})
+		h.TransferOwner(c)
+	})
+	w := httptest.NewRecorder()
+	reqHTTP := httptest.NewRequest(http.MethodPut, "/apps/skill/false-flag/owner", strings.NewReader(`{"official":false}`))
+	reqHTTP.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, reqHTTP)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("official:false = %d %s, want 400", w.Code, w.Body.String())
+	}
+	app, err := serverstore.GetApp(db, serverstore.AppKindSkill, "false-flag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Official != 0 || app.Owner != "alice" {
+		t.Fatalf("app mutated by official:false: official=%d owner=%q", app.Official, app.Owner)
+	}
+}

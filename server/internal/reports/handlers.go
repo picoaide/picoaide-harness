@@ -52,6 +52,10 @@ func (r *subReq) validate() (string, string) {
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return "", "hook_url 必须是 http(s) URL"
 	}
+	// P2-19: SSRF——拒绝回环/私网/链路本地目标(解析结果逐 IP 校验)。
+	if err := validateHookURL(url); err != nil {
+		return "", "hook_url 不合法: " + err.Error()
+	}
 	return name, ""
 }
 

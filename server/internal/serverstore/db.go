@@ -6,11 +6,33 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// pgInt64Array 把 []int64 编码成 PG 数组字面量("{1,2,3}"),配合 SQL 侧
+// `= ANY(?::bigint[])` 使用(P2-7:成员集合走数组参数,避免拼 IN(?,?,…)
+// 撞 PG 65535 参数上限 → 配额校验 fail-closed 全员 429)。
+// 为什么传文本字面量而不是 []int64:database/sql 默认参数转换器不认识切片,
+// 而 pgx 的切片编码又被 rewrite 包装层挡在 CheckNamedValue 之外
+// ("unsupported type []int64");字符串参数走 pgx 的 text 编码,
+// 由 SQL 的显式 ::bigint[] 转换解析。
+func pgInt64Array(ids []int64) string {
+	var b strings.Builder
+	b.Grow(len(ids)*8 + 2)
+	b.WriteByte('{')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatInt(id, 10))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
 
 // DriverName identifies the underlying SQL backend (PostgreSQL only.
 // SQLite support was removed in the PG-only migration).

@@ -14,11 +14,14 @@ test:
 	go test ./... -count=1
 
 # CI 门禁(审计 2026-08-25 G2):必须覆盖全部业务包——agentshare/sharedskills
-# 曾是两个游离于自动化之外的新商城包,其越权/多版本缺陷零拦截。这里显式
-# 枚举全部包,避免将来新增包再次漏跑。
+# 曾是两个游离于自动化之外的新商城包,其越权/多版本缺陷零拦截。
 # 2026-08-31:加入 updatecheck(版本检查)。
+# 2026-09-08(P2-49):改为目录通配——此前手工枚举 9 个包,漏跑 10 个含
+# _test.go 的包(appstore/archiveutil/brand/capabilities/connectors/reports/
+# router/skillmanifest/telemetry/cmd/server),新增包也会再次漏跑。
+# 与 CI 的 `go test ./...` 同义(internal/ + cmd/ 即全部业务包;scripts/ 无测试)。
 test-server:
-	go test ./internal/serverauth/... ./internal/llmgateway/... ./internal/marketplace/... ./internal/serverstore/... ./internal/agentshare/... ./internal/sharedskills/... ./internal/bootstrap/... ./internal/util/... ./internal/updatecheck/... -count=1
+	go test ./internal/... ./cmd/... -count=1
 
 # webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
 build-server: webadmin

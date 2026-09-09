@@ -82,7 +82,7 @@ func (p *OIDCProvider) Configure(cfg map[string]string) error {
 	}
 	p.cfg = oauth2.Config{
 		ClientID:     clientID,
-		ClientSecret: cfg["client_secret"],
+		ClientSecret: decryptSettingSecret(cfg["client_secret"]),
 		RedirectURL:  redirect,
 		Endpoint:     provider.Endpoint(),
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
@@ -267,24 +267,28 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			Secure:   secureCookieFor(c, a.DB),
 		})
 		// v3b §2.6: OIDC 回调限流(按来源 IP; 防 IdP 妥协后暴力回调)。
-		if !a.loginAllowed(c, "oidc-callback") {
+		// 2026-09-08 P0-2:改用独立 IP 桶(不再占用全局 u:oidc-callback 登录桶,
+		// 否则全组织 SSO 每 5 分钟只能登录 10 次),且只对失败回调计数。
+		if !a.oidcCallbackAllowed(c) {
 			_ = serverstore.AuditLog(a.DB, "oidc-callback", "login_fail", "rate_limited ip="+c.ClientIP())
-			writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 			return
 		}
 		// 先取出 returnServer(HandleCallback 会删除 state,state 单次使用)
 		rs := returnServerOf(p, state)
 		ui, err := p.HandleCallback(code, state)
 		if errors.Is(err, errOIDCState) {
+			a.oidcCallbackFailed(c)
 			writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
 			return
 		}
 		if err != nil {
+			a.oidcCallbackFailed(c)
 			// v3b 审计: OIDC 失败留痕。
 			_ = serverstore.AuditLog(a.DB, "oidc", "login_fail", "ip="+c.ClientIP())
 			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "OIDC 认证失败")
 			return
 		}
+		a.oidcCallbackSucceeded(c)
 		user, err := a.provisionUser(ui)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "用户创建失败")

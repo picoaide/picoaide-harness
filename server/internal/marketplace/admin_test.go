@@ -232,7 +232,7 @@ func makeTarGz(t *testing.T, entries map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// TestAdminSkillUploadArchive: POST /api/admin/skills/:name/archive switches
+// TestAdminSkillUploadArchive: POST /api/server/admin/skills/:name/archive switches
 // the skill to upload mode — the archive is stored in the DB row, the git
 // source is cleared, and the employee download serves the DB bytes + counts.
 // skillMd builds a SKILL.md satisfying the strict publish contract

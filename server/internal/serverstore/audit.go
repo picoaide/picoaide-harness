@@ -26,9 +26,28 @@ type AuditLogEntry struct {
 // (0048): the entry's hash = sha256(prev_hash | username | action | detail
 // | created_at), and prev_hash carries the previous entry's hash. Mutating
 // any row breaks every subsequent chain link.
+// auditChainLockKey 审计哈希链写入的 PG advisory lock key(固定常量,
+// 同一数据库内的所有实例共享):串行化「读最后一行 → 计算 → 插入」。
+const auditChainLockKey = int64(0x5069636F) // "Pico"
+
+// AuditLog appends an audit entry with a tamper-evident hash chain
+// (0048): the entry's hash = sha256(prev_hash | username | action | detail
+// | created_at), and prev_hash carries the previous entry's hash. Mutating
+// any row breaks every subsequent chain link.
+// P2-1:链的写入必须串行——并发插入若都读到同一个 prev_hash,后写者即形成
+// 分叉链(VerifyAuditChain 报断链)。事务 + pg_advisory_xact_lock 让
+// 「读尾 + 插入」原子且跨实例互斥(事务结束自动释放锁)。
 func AuditLog(db *sql.DB, username, action, detail string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("SELECT pg_advisory_xact_lock(?)", auditChainLockKey); err != nil {
+		return err
+	}
 	var prevHash string
-	if err := db.QueryRow("SELECT hash FROM audit_logs ORDER BY id DESC LIMIT 1").Scan(&prevHash); err != nil {
+	if err := tx.QueryRow("SELECT hash FROM audit_logs ORDER BY id DESC LIMIT 1").Scan(&prevHash); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -38,9 +57,11 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 	payload := prevHash + "|" + username + "|" + action + "|" + detail + "|" + now
 	sum := sha256.Sum256([]byte(payload))
 	hash := hex.EncodeToString(sum[:])
-	_, err := db.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-		username, action, detail, prevHash, hash, now)
-	return err
+	if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		username, action, detail, prevHash, hash, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // auditHashPayload mirrors the payload used at write time (same layout).
@@ -52,6 +73,9 @@ func auditHashPayload(prevHash, username, action, detail, createdAt string) stri
 // every hash link. Returns the first broken entry id (or 0 if intact).
 // Rows written before the 0048 migration have hash=” and are skipped
 // (the chain starts at the first post-migration entry).
+// P2-1:保留策略清理后,链的起点是 PurgeOldAuditLogs 保留的「锚」(其
+// prev_hash 指向已删除的更早条目),故第一个条目只校验自身哈希、不校验
+// 链尾衔接;其后每条仍必须与上一条 hash 严格衔接。
 func VerifyAuditChain(db *sql.DB) (int64, error) {
 	rows, err := db.Query("SELECT id, username, action, detail, prev_hash, hash, created_at FROM audit_logs ORDER BY id ASC")
 	if err != nil {
@@ -59,6 +83,7 @@ func VerifyAuditChain(db *sql.DB) (int64, error) {
 	}
 	defer rows.Close()
 	prevHash := ""
+	first := true
 	for rows.Next() {
 		var id int64
 		var username, action, detail, rowPrev, rowHash, created string
@@ -77,7 +102,9 @@ func VerifyAuditChain(db *sql.DB) (int64, error) {
 		if rowHash == "" {
 			continue
 		}
-		if rowPrev != prevHash {
+		if first {
+			first = false // 链起点(可能是清理后的锚):只校验自身哈希
+		} else if rowPrev != prevHash {
 			return id, errors.New("audit chain broken at entry")
 		}
 		sum := sha256.Sum256([]byte(auditHashPayload(rowPrev, username, action, detail, created)))
@@ -172,7 +199,13 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 
 // PurgeOldAuditLogs deletes audit entries older than cutoff (audit
 // retention housekeeping, run at startup; 90 days by default).
+// P2-1:保留被删批次中**最新的一条**作为「锚」——链中下一行的 prev_hash 指向
+// 它,整批删掉会让 VerifyAuditChain 在保留边界处必然报断链。锚行自身的哈希
+// 仍会被校验,锚之前的条目(超出保留期)才真正消失。
 func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
-	_, err := db.Exec("DELETE FROM audit_logs WHERE created_at < ?", cutoff.Format(pgTimeFmt))
+	_, err := db.Exec(`DELETE FROM audit_logs a
+		WHERE a.created_at < ? AND EXISTS (
+			SELECT 1 FROM audit_logs b WHERE b.created_at < ? AND b.id > a.id)`,
+		cutoff.Format(pgTimeFmt), cutoff.Format(pgTimeFmt))
 	return err
 }

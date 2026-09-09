@@ -331,6 +331,60 @@ var reOnAttr = regexp.MustCompile(`(?i)\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+
 var reScriptTag = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
 var reJsURL = regexp.MustCompile(`(?i)(href|xlink:href)\s*=\s*("|')javascript:`)
 
+// reCharRef 匹配 XML 字符引用/命名实体(&#x6a; / &#106; / &amp; …)。
+var reCharRef = regexp.MustCompile(`(?i)&(#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);`)
+
+// decodeCharRefs 按 XML 规则解码字符引用(最多 5 轮,覆盖 &amp;#x3c; 多层编码)。
+// 属性值里的引用会被 XML 解析器还原成真实字符,所以只查原串会被绕过。
+func decodeCharRefs(s string) string {
+	for i := 0; i < 5; i++ {
+		out := reCharRef.ReplaceAllStringFunc(s, func(m string) string {
+			body := m[1 : len(m)-1]
+			lower := strings.ToLower(body)
+			switch {
+			case strings.HasPrefix(lower, "#x"):
+				if n, err := strconv.ParseInt(lower[2:], 16, 32); err == nil && n > 0 && n < 0x110000 {
+					return string(rune(n))
+				}
+			case strings.HasPrefix(lower, "#"):
+				if n, err := strconv.ParseInt(lower[1:], 10, 32); err == nil && n > 0 && n < 0x110000 {
+					return string(rune(n))
+				}
+			default:
+				switch lower {
+				case "lt":
+					return "<"
+				case "gt":
+					return ">"
+				case "amp":
+					return "&"
+				case "quot":
+					return `"`
+				case "apos":
+					return "'"
+				case "colon":
+					return ":"
+				}
+			}
+			return m
+		})
+		if out == s {
+			break
+		}
+		s = out
+	}
+	return s
+}
+
+// svgDangerous 判定解码后的文本是否仍含脚本/事件/JS URL。
+func svgDangerous(s string) bool {
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "<script") || strings.Contains(lower, "javascript:") {
+		return true
+	}
+	return reOnAttr.MatchString(s)
+}
+
 func sanitizeSVG(raw []byte) ([]byte, bool) {
 	// 先做 XML 结构校验(解析失败即拒绝), 保证是合法 XML/SVG。
 	var v struct{}
@@ -341,6 +395,11 @@ func sanitizeSVG(raw []byte) ([]byte, bool) {
 	s = reScriptTag.ReplaceAllString(s, "")
 	s = reOnAttr.ReplaceAllString(s, "")
 	s = reJsURL.ReplaceAllString(s, "$1=$2#")
+	// 实体编码绕过(P3):剥离后按 XML 规则解码再复检,命中即拒绝——例如
+	// xlink:href="&#x6a;avascript:alert(1)" 会被浏览器还原成 javascript:。
+	if svgDangerous(decodeCharRefs(s)) {
+		return nil, false
+	}
 	return []byte(s), true
 }
 

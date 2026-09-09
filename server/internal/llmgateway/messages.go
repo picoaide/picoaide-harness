@@ -65,10 +65,13 @@ func anthropicUsage(raw []byte) (pt, ct, cache int64, ok bool, err error) {
 	if u == nil {
 		return 0, 0, 0, false, nil
 	}
-	// Anthropic cache credit: cache_read 按缓存命中的输入价计费(与 OpenAI
-	// prompt_cache_hit_tokens 同语义);cache_creation 按输入价计费,两者不叠加。
+	// Anthropic 计费口径(P1-9):input_tokens 本身不含缓存部分,故总输入 =
+	// input + cache_read + cache_creation;cache_read 按缓存价计费,其余
+	// (含 cache_creation)按输入价——与 costOfAt 的「prompt 是含 cache 的
+	// 总量」口径对齐。此前只取 cache_read 且丢弃 cache_creation,导致
+	// cache_creation 完全不计费、cache_read 又被钳到 input_tokens。
 	cache = u.CacheReadInputTokens
-	return u.InputTokens, u.OutputTokens, cache, true, nil
+	return u.InputTokens + cache + u.CacheCreationInputTokens, u.OutputTokens, cache, true, nil
 }
 
 // serveAnthropicJSON passes a non-stream Anthropic Messages response through
@@ -154,6 +157,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
+	ended := false
 	idleTimedOut := false
 	backfilled := false
 	var pt, ct, cache int64
@@ -204,11 +208,14 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				if fl != nil {
 					fl.Flush()
 				}
+			} else {
+				// 2026-09-08 P2-11:上游正常结束(或读取错误)也算流结束。
+				ended = true
 			}
 			break
 		}
 	}
-	if (clientGone || idleTimedOut) && usageID > 0 && !backfilled {
+	if (clientGone || idleTimedOut || ended) && usageID > 0 && !backfilled {
 		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 			log.Printf("gateway: delete pending anthropic usage: %v", err)
 		}

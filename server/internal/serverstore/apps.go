@@ -119,13 +119,18 @@ func scanRelease(row interface{ Scan(...any) error }, withArchive bool) (*Releas
 // UpsertApp 建立或更新一个 App 身份(幂等)。渠道一经确定不再变更——跨渠道
 // 迁移属于人工决策,不应由一次发布静默改写。
 func UpsertApp(db *sql.DB, a *App) error {
+	return upsertApp(db, a)
+}
+
+// upsertApp 是 UpsertApp 的 executor 版本(可传入 *sql.Tx,供原子发布复用)。
+func upsertApp(ex queryer, a *App) error {
 	if a.Kind != AppKindSkill && a.Kind != AppKindAgent {
 		return errors.New("invalid app kind")
 	}
 	if a.Channel != AppChannelMarket && a.Channel != AppChannelOrg {
 		return errors.New("invalid app channel")
 	}
-	_, err := db.Exec(`INSERT INTO apps (kind, app_id, title, description, owner, channel, enabled)
+	_, err := ex.Exec(`INSERT INTO apps (kind, app_id, title, description, owner, channel, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (kind, app_id) DO UPDATE SET
 			title = excluded.title, description = excluded.description,
@@ -133,6 +138,29 @@ func UpsertApp(db *sql.DB, a *App) error {
 			updated_at = `+NowExpr(),
 		a.Kind, a.AppID, a.Title, a.Description, a.Owner, a.Channel, a.Enabled)
 	return err
+}
+
+// UpsertAppAndCreateRelease 在同一事务内「占名 + 建版本」(P2-3)。
+// 此前 appstore.Publish 先 UpsertApp 再 CreateRelease,两步之间失败会留下
+// 「占名无版本」的悬挂 App(名称被永久占用、员工无法再发布、管理员须手工清理)。
+// 返回新版本行 id;任一步失败整体回滚。
+func UpsertAppAndCreateRelease(db *sql.DB, a *App, r *Release) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err := upsertApp(tx, a); err != nil {
+		return 0, err
+	}
+	id, err := createRelease(tx, r)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // GetApp 按 (kind, app_id) 取 App;不存在返回 ErrNotFound。
@@ -241,6 +269,11 @@ func SetAppEnabled(db *sql.DB, kind, appID string, enabled bool) error {
 // (kind, app_id, version) 唯一约束兜底并发判重:竞争窗口内先落库者赢,
 // 后者返回 ErrDuplicate(B7,2026-09-01——此前直接吞成 INTERNAL 500)。
 func CreateRelease(db *sql.DB, r *Release) (int64, error) {
+	return createRelease(db, r)
+}
+
+// createRelease 是 CreateRelease 的 executor 版本(可传入 *sql.Tx)。
+func createRelease(ex queryer, r *Release) (int64, error) {
 	tags := "[]"
 	if len(r.Tags) > 0 {
 		if b, err := json.Marshal(r.Tags); err == nil {
@@ -250,12 +283,13 @@ func CreateRelease(db *sql.DB, r *Release) (int64, error) {
 	if r.Status == "" {
 		r.Status = ReleaseStatusPending
 	}
-	id, err := InsertID(db, `INSERT INTO app_releases
+	var id int64
+	err := ex.QueryRow(`INSERT INTO app_releases
 		(kind, app_id, version, title, description, changelog, category, tags, author, publisher,
 		 checksum, size, archive, status, reason, quality)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		r.Kind, r.AppID, r.Version, r.Title, r.Description, r.Changelog, r.Category, tags,
-		r.Author, r.Publisher, r.Checksum, int64(len(r.Archive)), r.Archive, r.Status, r.Reason, r.Quality)
+		r.Author, r.Publisher, r.Checksum, int64(len(r.Archive)), r.Archive, r.Status, r.Reason, r.Quality).Scan(&id)
 	if err != nil && isUniqueViolation(err) {
 		return 0, ErrDuplicate
 	}
@@ -277,6 +311,18 @@ func GetRelease(db *sql.DB, kind, appID, version string) (*Release, error) {
 func ListReleases(db *sql.DB, kind, appID string) ([]Release, error) {
 	rows, err := db.Query(`SELECT `+releaseListColumns+` FROM app_releases
 		WHERE kind = ? AND app_id = ? ORDER BY created_at`, kind, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectReleases(rows)
+}
+
+// ListReleasesByKind 列出某 kind 的全部版本(按 app_id, created_at 排序),
+// 供 VisibleReleases 一次取回后分组,替代逐 App 的 N+1 查询(2026-09-08 P2-10)。
+func ListReleasesByKind(db *sql.DB, kind string) ([]Release, error) {
+	rows, err := db.Query(`SELECT `+releaseListColumns+` FROM app_releases
+		WHERE kind = ? ORDER BY app_id, created_at`, kind)
 	if err != nil {
 		return nil, err
 	}

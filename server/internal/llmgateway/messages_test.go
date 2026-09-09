@@ -165,7 +165,7 @@ func TestMessagesNonStream(t *testing.T) {
 		t.Fatalf("anthropic-version not passed: %q", h)
 	}
 
-	// usage must be metered with kind=search
+	// usage must be metered with kind=search;prompt = input + cache_read + cache_creation
 	var uid int64
 	var mname string
 	var pt, ct, cache int64
@@ -174,11 +174,43 @@ func TestMessagesNonStream(t *testing.T) {
 	if err := row.Scan(&uid, &mname, &pt, &ct, &cache, &kind); err != nil {
 		t.Fatalf("usage row missing: %v", err)
 	}
-	if pt != 8 || ct != 3 || cache != 2 {
-		t.Fatalf("usage = %d/%d/%d", pt, ct, cache)
+	if pt != 10 || ct != 3 || cache != 2 {
+		t.Fatalf("usage = %d/%d/%d (want 10/3/2: input 8 + cache_read 2)", pt, ct, cache)
 	}
 	if kind != "search" {
 		t.Fatalf("usage kind = %q, want search", kind)
+	}
+}
+
+// TestMessagesBillsCacheCreation 端到端覆盖 P1-9:Anthropic 的 cache_creation
+// 必须按输入价计费、cache_read 按缓存价,且 prompt 记为 input+read+creation。
+// 价目 1 / 3 / 0.1 元每 1M;8 input + 1000 read + 500 creation + 2 output
+// → 500×1e-6 + 1000×0.1e-6 + 8×1e-6 + 2×3e-6 = 6.14e-4 元。
+func TestMessagesBillsCacheCreation(t *testing.T) {
+	f := newFakeAnthropicUpstream(t)
+	f.nonStream = `{"id":"msg_x","type":"message","role":"assistant","model":"deepseek-v4-flash","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":8,"output_tokens":2,"cache_read_input_tokens":1000,"cache_creation_input_tokens":500}}`
+	r, db, token := newMessagesGateway(t, f)
+	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 1, output_price_per_1m = 3, cache_input_price_per_1m = 0.1 WHERE name = 'deepseek-v4-flash'`); err != nil {
+		t.Fatal(err)
+	}
+	serverstore.InvalidateModelConfig()
+
+	body := `{"model":"deepseek-v4-flash","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"search"}]}]}`
+	w := doMessagesPost(t, r, body, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var pt, ct, cache int64
+	var cost float64
+	if err := db.QueryRow(`SELECT prompt_tokens, completion_tokens, cache_prompt_tokens, cost FROM usage`).Scan(&pt, &ct, &cache, &cost); err != nil {
+		t.Fatalf("usage row: %v", err)
+	}
+	if pt != 1508 || ct != 2 || cache != 1000 {
+		t.Fatalf("usage tokens = %d/%d/%d, want 1508/2/1000", pt, ct, cache)
+	}
+	const want = 6.14e-4
+	if diff := cost - want; diff > 1e-12 || diff < -1e-12 {
+		t.Fatalf("cost = %v, want %v (cache_creation 必须按输入价计费)", cost, want)
 	}
 }
 
@@ -261,9 +293,15 @@ func TestMessagesIgnoresOpenAIOnlyModel(t *testing.T) {
 }
 
 func TestAnthropicUsageParser(t *testing.T) {
+	// P1-9:prompt = input_tokens + cache_read + cache_creation(input 不含缓存)
 	pt, ct, cache, ok, err := anthropicUsage([]byte(`{"type":"message","usage":{"input_tokens":8,"output_tokens":3,"cache_read_input_tokens":2}}`))
-	if err != nil || !ok || pt != 8 || ct != 3 || cache != 2 {
-		t.Fatalf("got %d/%d/%d ok=%v err=%v", pt, ct, cache, ok, err)
+	if err != nil || !ok || pt != 10 || ct != 3 || cache != 2 {
+		t.Fatalf("got %d/%d/%d ok=%v err=%v (want 10/3/2)", pt, ct, cache, ok, err)
+	}
+	// cache_creation 计入总输入、但不算缓存命中(cache 只含 cache_read)
+	pt, ct, cache, ok, err = anthropicUsage([]byte(`{"type":"message","usage":{"input_tokens":8,"output_tokens":2,"cache_read_input_tokens":1000,"cache_creation_input_tokens":500}}`))
+	if err != nil || !ok || pt != 1508 || ct != 2 || cache != 1000 {
+		t.Fatalf("cache_creation got %d/%d/%d ok=%v err=%v (want 1508/2/1000)", pt, ct, cache, ok, err)
 	}
 	// SSE line shape
 	pt, ct, cache, ok, err = anthropicUsage([]byte(`data: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":5}}`))

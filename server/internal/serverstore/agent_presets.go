@@ -3,6 +3,8 @@ package serverstore
 import (
 	"database/sql"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
 
 // AgentPresetStatus is the review state of one shared agent preset.
@@ -78,7 +80,7 @@ func latestPresetRelease(db *sql.DB, name string) (*Release, error) {
 		if r.Status != ReleaseStatusApproved {
 			continue
 		}
-		if best == nil || compareVersionStrings(r.Version, best.Version) > 0 {
+		if best == nil || skillmanifest.CompareVersions(r.Version, best.Version) > 0 {
 			best = &list[i]
 		}
 	}
@@ -143,6 +145,34 @@ func GetAgentPreset(db *sql.DB, name string) (*AgentPreset, error) {
 		return nil, err
 	}
 	out := releaseToPreset(*r)
+	return &out, nil
+}
+
+// GetAgentPresetForReview 返回 legacy(name 级)审核接口的目标版本:
+// 优先**最高版本的非 approved 行**(待审/被拒);没有非 approved 行时回退到
+// 展示版本(最高 approved),保持旧「审核最新版本」的幂等语义。
+// P1-11:legacy approve/reject 此前用 GetAgentPreset(最高 approved)定位——
+// 已上架 1.0.0 + 待审 2.0.0 时「拒绝」会把 1.0.0 置 rejected(已上架版本从
+// 员工目录消失)而 2.0.0 仍 pending,「通过」则静默无效。
+func GetAgentPresetForReview(db *sql.DB, name string) (*AgentPreset, error) {
+	list, err := ListReleases(db, AppKindAgent, name)
+	if err != nil {
+		return nil, err
+	}
+	var best *Release
+	for i := range list {
+		r := list[i]
+		if r.DeletedAt != nil || r.Status == ReleaseStatusApproved {
+			continue
+		}
+		if best == nil || skillmanifest.CompareVersions(r.Version, best.Version) > 0 {
+			best = &list[i]
+		}
+	}
+	if best == nil {
+		return GetAgentPreset(db, name)
+	}
+	out := releaseToPreset(*best)
 	return &out, nil
 }
 
