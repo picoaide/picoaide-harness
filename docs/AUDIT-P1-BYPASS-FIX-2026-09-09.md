@@ -1,15 +1,17 @@
 # AUDIT-P1-BYPASS-FIX-2026-09-09.md
 
 > 主题：beta.11 三个 P1 缺陷（browser_eval 构造函数链 / `Reflect.construct` / memory-evolve clobber）修复轮次的**汇总与合入门禁判定**
-> 汇总者：领队 / 汇总者（会话 `ddcf2713-0942-4ab0-92b9-20a96f2c49dd`）
-> 日期：2026-09-09
-> 分支：`fix/eval-policy-p1-bypasses`（HEAD `b624840e62`，**改动仍未提交**）
-> 上游产物：`PLAN.md` / `DECIDED.md` / `IMPLEMENTATION.md` / `TASKS.md` / `REVIEW-browser-eval-policy.md` / `REVIEW-memory-evolve.md` / `REVIEW-CONFIRMED.md`（流水线黑板）
+> 汇总者：第 1 轮领队（会话 `ddcf2713-0942-4ab0-92b9-20a96f2c49dd`）；**第 3 轮领队（会话 `e9de0c7d-6114-41bb-ae5c-3710a5abdb96`）补充最终结论（§8）**
+> 日期：2026-09-09（第 3 轮更新）
+> 分支：`fix/eval-policy-p1-bypasses`（**第 3 轮 HEAD `fa73caa1de`，4 个提交已落地，tracked 工作区干净**；第 1 轮时为 `b624840e62` 未提交）
+> 上游产物：`PLAN.md` / `DECIDED.md` / `IMPLEMENTATION.md` / `TASKS.md` / `REVIEW-browser-eval-policy.md` / `REVIEW-memory-evolve.md` / `REVIEW-CONFIRMED.md` / `REVIEW-CONFIRMED-ROUND3.md` / `FINAL.md` / `FINAL-ROUND3.md`（流水线黑板）
 > 需求与审计来源：[`AUDIT-BETA11-CHANGES-2026-09-08.md`](AUDIT-BETA11-CHANGES-2026-09-08.md)、[拍板摘要](decisions/2026-09-08-beta11-p1-bypass-fix.md)、[设计蓝图](planning/2026-09-08-beta11-p1-bypass-fix-design.md)、[实施计划](planning/2026-09-08-beta11-p1-bypass-fix-implementation.md)
 
 ---
 
 ## 0. 一句话结论
+
+> **最新结论（第 3 轮，2026-09-09）见 [§8](#8-第-3-轮最终结论领队独立复验2026-09-09)。**
 
 **`[需修复]` —— 声明门禁 5/5 全绿，但安全目标未达成：审计与复核指出的残余绕过经领队独立复现全部成立（VM 沙箱内实测读到页面 cookie、外发、弹窗）。不建议合入 master，需再修一轮。**
 
@@ -141,3 +143,94 @@ FIX-9（按建议拆分提交，**交付前置**）、D-1（预扫描与主遍�
 - 执行过一次 `corepack yarn install --immutable`（补齐 `node_modules`）；已核实 `yarn.lock`/`package.json` 未被修改，`eval-policy.ts`/`skills.js` 的 md5 前后一致（`7b81f3d4…` / `f6af7238…`）。
 - 基线对照全部使用 `git archive HEAD` 解到 `/tmp`，**未使用 `git stash`/`checkout`**，零仓库扰动。
 - 所有结论来自亲自执行的命令输出；与上游不一致处已在 §5 逐条标注。
+
+---
+
+## 8. 第 3 轮最终结论（领队独立复验，2026-09-09）
+
+> 领队：会话 `e9de0c7d-6114-41bb-ae5c-3710a5abdb96`（分支 `fix/eval-policy-p1-bypasses`，HEAD `fa73caa1de`）
+> 完整报告：黑板目录 `multiagent-eval-p1/FINAL-ROUND3.md`（仓库外，`/mnt/md0/junhua_work/multiagent-eval-p1/`）；复核报告：同目录 `REVIEW-CONFIRMED-ROUND3.md`
+> 证据原则：本节所有数字与判定均为领队**亲自执行**的命令输出，不采信上游自述。
+
+### 8.1 第 1 轮 16 项遗留的最终处置
+
+| 轮次 | 处置 |
+|---|---|
+| 第 1 轮 P0×3（FIX-1/FIX-2/FIX-4） | ✅ **已修复**（第 2 轮落地，第 3 轮领队逐条基线对照复验：`BASE=ACCEPT → HEAD=REJECT`） |
+| 第 1 轮 P1×2（FIX-3/FIX-5） | ✅ **已修复**（FIX-3 误拒消除，3/3 合法式恢复 `ACCEPT`；FIX-5 矩阵 45 → 97 例，`getPrototypeOf` 拒绝用例已补） |
+| 第 1 轮 P2×2（FIX-7/FIX-8） | ✅ **已修复**（实施文档 935 行回写；`tools.ts:642`/`:645` 描述同步） |
+| 第 1 轮 P3×9（FIX-9 + D-1…D-8） | 部分：FIX-9 已落 4 个提交；D-2/D-4/D-5/D-7/D-8 仍为遗留（见 §8.4） |
+
+### 8.2 第 3 轮新增 P0（阻断）：值位置的「计算键」未收口 → RCE
+
+`eval-policy.ts:768-783`（`memberName()` computed 分支只认 `Literal` 字符串）是 `WRITE_APIS` 与 `DANGEROUS_MEMBERS` 判定的**唯一名字解析入口**；第 2 轮新增的 `constantStringValue()` 只接到 `propertyKeyName()`（`:684`）与 `Reflect.get` 分支（`:304`），**未接到 `memberName()`**。于是「同一条链、同一个值位置，只把键写法从 `x["eval"]` 换成 `x["ev"+"al"]` / `` x[`eval`] `` / `x[String.fromCharCode(...)]`」即可整体放行。
+
+领队在 `vm` 沙箱（`wrapEvalExpression` + 真实执行）复现的**三形态 / 8 条载荷**：
+
+| 形态 | 载荷 | validator | 端到端实测 |
+|---|---|---|---|
+| A 拼接折叠键 | `[1].map(window["ev"+"al"])` | ACCEPT | `["globalThis.PWN=document.cookie"].forEach(window["ev"+"al"])` → **读页面 cookie**；`fetch` 载荷 → **外发 cookie**；`while(true)` → **渲染进程冻结**；`window["op"+"en"]` → `window.open(1)`；`localStorage["set"+"Item"]` → `setItem(k,0)` |
+| B 模板字面量键 | `` [1].map(window[`eval`]) `` / `` window[`ev${"a"}l`] `` | ACCEPT | `` ["globalThis.T=document.cookie"].forEach(window[`eval`]) `` → **读页面 cookie** |
+| C 不可折叠动态键 | `window[String.fromCharCode(101,118,97,108)]` / `window[["e","v","a","l"].join("")]` | ACCEPT | 两条均 → **读页面 cookie** |
+
+**判别实验**（隔离根因）：字面量键配 5 种包装形式（裸 / 序列 / 条件 / 数组元素 / 属性值）**全 REJECT**；仅把键换成折叠或动态求值，**5/5 全 ACCEPT** —— 唯一变量是**键的求值形式**。
+
+**最小修复动作的充分性实测**（领队在 `packages/host/browser` 副本上应用 `memberName()` computed 分支 → `constantStringValue(property)`）：
+
+| 载荷 | 最小修复后 |
+|---|---|
+| 形态 A（拼接折叠） | ✅ `REJECT` |
+| 形态 B（模板字面量） | ✅ `REJECT` |
+| 形态 C（`fromCharCode` / `join`） | ❌ **仍 `ACCEPT` + 端到端 RCE** |
+| 合法集 7 例 + browser 265 测试 | ✅ 无误伤、无回归 |
+
+> **结论：最小修复必要但不充分**——第 4 轮需追加「值位置 + 不可静态证明的计算键 + 宿主全局链根」的 deny-by-default（同时保留 `data[key]` 等非全局根对象读）。
+
+### 8.3 第 3 轮门禁矩阵（领队亲自执行）
+
+| # | 门禁项 | 判定 | 实测结果 |
+|---|---|---|---|
+| ① | 单元测试（browser 全量） | ✅ | `Test Files 11 passed` / `Tests 265 passed (265)`，`BROWSER_EXIT=0` |
+| ① | 单元测试（memory-evolve 目标三文件） | ✅ | `tests 40 / pass 40 / fail 0`，`ME_EXIT=0` |
+| ② | 类型检查（仓库全量门禁） | ✅ | `corepack yarn install --immutable` → `corepack yarn check`：`REAL_GATE_EXIT=0` |
+| ② | 类型检查（browser 包） | ✅ | `BROWSER_CHECK_EXIT=0` |
+| ③ | 对抗性测试有效性（AC5 双向） | ⚠️ 有效性 ✅ / 覆盖 ❌ | 基线 `b624840e62`：`47 failed / 50 passed (97)` → HEAD：`97 passed`；**值位置计算键族 0 覆盖** |
+| ④ | 故障注入（AC6 双向） | ✅ | 基线 `pass 0 / fail 5` → HEAD `pass 5 / fail 0` |
+| ⑤ | **残余绕过验证**（独立变体集） | ❌ **失败** | 8 条载荷 `ACCEPT` + 端到端真实执行（见 §8.2） |
+| ⑥ | 回归（memory-evolve 全量 784） | ⚠️ 预存 | `tests 784 / pass 741 / fail 43`（`update` 39 + `search-docs` 3 + `advisor-api` 1 偶发；改动集不含这些文件） |
+
+**通过率**：任务要求的 5 项 = **3 ✅ / 1 ⚠️ / 1 ❌（3/5，60%）**；含 ⑥ 的 6 项 = **3/6（50%）**。
+
+> **门禁全绿 ≠ 可合入**（第三次同构印证）：①–④、⑥ 全绿，⑤ 仍实测 RCE。AC5 的「已知 97 条在修复前失败」证明的是**测试有信号**，不是**修复不可绕过**。
+
+### 8.4 遗留清单（第 3 轮，共 9 项）
+
+| 级别 | ID | 项 |
+|---|---|---|
+| 🔴 P0 | **R3-P0** | 值位置计算键未收口（三形态，实测 RCE）；修法见 §8.2 |
+| 🟠 P1 | **R3-P1** | AC5 矩阵补「值位置 × 键形式」≥8 例 + `scripts/verify-bidirectional.mjs` 双向证据自动化 |
+| 🟡 P2 | D-2 | 连带拒绝清单（9 类惯用法）补进设计/决策文档（当前 0 命中） |
+| 🟡 P2 | D-4 | `toString`/`valueOf`/`Symbol.toPrimitive` 入黑名单（纵深防御） |
+| 🟡 P2 | D-5 | merge 覆盖**同名**辅助文件：领队实测 pending 同名 `references.md` 覆盖目标用户文件（目标独有文件保留）；属 DECIDED 决策 3 语义，**需文档化声明** |
+| 🔵 P3 | D-1 | 节点分派重复实现（`constantStringValue`/`dangerousValue`/`isProvablySafeValue`） |
+| 🔵 P3 | D-6 | 采纳技能时源目录符号链接原样带入（实测可读库外 `TOPSECRET`） |
+| 🔵 P3 | D-7 | 故障注入子进程不清理临时目录（`child-approve.mjs:11` 无 `rmSync`） |
+| 🔵 P3 | D-8 | 双向证据无自动化守护（同 R3-P1） |
+
+> 信息项：memory-evolve 预存失败数在 42↔43 间抖动（`advisor-api.test.js` 偶发 0↔1），不计入 9 项。
+
+### 8.5 是否可合入 master？—— **否**
+
+1. **安全目标未达成**：`browser_eval` 任意代码执行通道在 HEAD 上仍可端到端复现，且该工具默认开启（`runtime.ts:138 evalEnabled ?? true`，唯一校验点 `runtime.ts:931`）。
+2. **验收未闭环**：AC5 覆盖维度缺失是 P0 漏出的直接原因。
+3. **修复收口不完整**：`constantStringValue` 未接到唯一名字解析入口 `memberName()`——属同一修复的半接状态。
+
+**第 4 轮最小范围（建议顺序）**：① `memberName()` computed 分支接 `constantStringValue`；② 值位置「不可证明计算键 + 宿主全局链根」deny-by-default；③ AC5 补值位置键形式族 + 双向脚本；④ 收尾 D-2/D-4/D-5 文档与黑名单；⑤ 合入前复跑全部门禁，**§8.3 的 ⑤ 项必须转为 ✅**。
+
+### 8.6 第 3 轮领队自证
+
+- 未修改任何业务代码；仓库内仅更新本文件；`eval-policy.ts`（`36ea24d3…`）/`skills.js`（`f6af7238…`）md5 与复核报告逐字一致。
+- 执行过一次 `corepack yarn install --immutable`；`yarn.lock`/`package.json` 相对 `b624840e62` 无差异；tracked 工作区全程干净（HEAD `fa73caa1de`）。
+- 基线对照使用 `git archive b624840e62` 解到 `/tmp/lead3-base`、`/tmp/lead3-me`，**未使用 `git stash`/`checkout`**；所有探针落在 `/tmp/lead3-probe`、`/tmp/lead3-fix`。
+- 第 3 轮审计报告（`REVIEW-ROUND3-*.md`）**缺位**，本次由复核员自建扫描 + 领队正交扫描/执行证明补位；建议后续为第 3 轮单独派审计员。
+
