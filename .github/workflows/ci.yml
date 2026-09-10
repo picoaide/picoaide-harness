@@ -507,7 +507,7 @@ jobs:
             exit 1
           fi
           echo "channel=${CH}" >> "$GITHUB_OUTPUT"
-          echo "渠道 = ${CH}(tag ${TAG})" "
+          echo "渠道 = ${CH}(tag ${TAG})"
 
       - name: Assemble client assets into the image build context
         env:
@@ -539,7 +539,7 @@ jobs:
           {
             echo '{'
             echo '  "schema": 1,'
-            echo "  \"channel_id\": \"${CH}\",
+            echo "  \"channel_id\": \"${CH}\","
             echo '  "client": {'
             echo "    \"version\": \"${VER}\","
             echo '    "assets": {'
@@ -677,7 +677,7 @@ jobs:
           #   unzip -p <归档> image.tar | docker load
           # sha256 一并产出供更新服务器 SHA256SUMS 与人工校验。
           # 注意:zip 对已压缩内容(docker 层)无法再压,用 -1 快速模式避免白耗 CPU。
-          docker save "picoaide-harness-server:$VER" -o image.tar
+          docker save "picoaide-harness-server:v${VER}" -o image.tar
           zip -1 -q "$ARCHIVE" image.tar
           rm -f image.tar
           sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS
