@@ -437,7 +437,7 @@ echo "$OLD" > VERSION
 | 报网段冲突 | 改 `.env` 的 `NETWORK_SUBNET` 与三个固定 IP |
 | postgres 启动即退出且日志提 `OLD_DATABASES`/`unused mount` | PG16→18 旧布局问题，见 §6.2，需 dump/restore 迁移 |
 | 忘记超管密码 | 用另一个 super_admin 在 webadmin 重置；或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
-| webadmin「发现新版本」不出现 | 检查 `docker exec picoaide-server env \| grep PICOAI_UPDATE_ENDPOINT`；默认官方渠道地址；服务端有 6 小时缓存，属正常延迟 |
+| webadmin「发现新版本」不出现 | 先看启动日志的 `channel resolved: … (update endpoint …)`：端点为空说明更新检查被关（显式设了 `off`）；端点正常则再看 `manifest channel … != …`。**服务端有 6 小时缓存**，刚发版时等待属正常延迟 |
 
 常用查看命令：
 
@@ -472,11 +472,28 @@ PICOAI_UPDATE_ENDPOINT=https://release.picoaide.com/<channel-id>/latest.json # �
 
 | 现象 | 原因 |
 |---|---|
-| webadmin 一直不显示"发现新版本" | 三者不一致（最常见：改了 `PICOAI_CHANNEL` 却没改端点，或反之）。`docker compose logs server` 会打印 `manifest channel "official" != this server's channel "acme"` |
-| 升级后品牌没了 | **不应该发生**。若发生说明渠道校验被绕过，立即停止升级并排查 |
+| webadmin 一直不显示"发现新版本" | 三者不一致（最常见：改了 `PICOAI_CHANNEL` 却没改端点，或反之）。`docker compose logs server` 会打印 `manifest channel "official" != this server's channel "acme"`。也可能是 `PICOAI_UPDATE_ENDPOINT` 被显式设成了 `off` |
+| 容器启动即退出并打印 `渠道配置非法…` | `PICOAI_CHANNEL`（或镜像内的渠道标记）不是合法渠道 id。**服务端不会回落到 official** —— 回落会让渠道部署接受官方清单、把品牌洗掉，所以直接拒绝启动。修好拼写或去掉覆盖 |
+| 容器启动即退出并打印 `渠道不一致…` | 镜像里的渠道内容（`channels/<id>/channel.json`）与本进程按的渠道不同，典型成因是 `.env`/compose 覆盖了镜像自带的渠道声明。去掉 `PICOAI_CHANNEL` 覆盖，或改成与镜像一致的值 |
+| 升级后品牌没了 | 正常路径下**不应该发生**（启动期两道校验 + 清单渠道比对）。若发生说明有人手工指定了错误的镜像/清单，立即停止升级并排查 |
 
-便利性：`PICOAI_CHANNEL` 与 `PICOAI_UPDATE_ENDPOINT` **都留空**时，服务端会**从端点路径首段
-推导渠道**（`.../acme/latest.json` → `acme`），两者都不给才回落官方渠道 —— 这是最不容易配错的用法。
+**渠道由镜像自带，不需要在 `.env` 里配**（2026-09-10 改）：
+
+```
+镜像构建 --build-arg CHANNEL=acme
+        ├─ ENV PICOAI_CHANNEL=acme
+        ├─ /opt/picoaide/CHANNEL          ← 权威声明（部署侧不配也生效）
+        └─ /opt/picoaide/channel/         ← 渠道内容（品牌/文案/logo）
+```
+
+- `PICOAI_CHANNEL` **留空即可**；填了就必须与镜像内的渠道一致，否则拒绝启动。
+  （compose 默认不再写死 `official` —— 那会覆盖镜像渠道，正是"品牌被洗掉"的入口。）
+- `PICOAI_UPDATE_ENDPOINT` **留空 = 用本渠道的默认目录**
+  （`release.picoaide.com/<channel>/latest.json`）。**留空不等于关闭**；
+  要关闭请显式写 `off` / `none` / `-` / `disabled`。
+- 从端点路径推导渠道只在**既没有 env、也没有镜像标记**时才生效（本地开发）。
+  镜像部署一律以镜像标记为准 —— 否则"把端点指向哪个目录就变成哪个渠道"，
+  渠道校验会自我实现、形同虚设。
 
 `PICOAI_UPDATE_ENDPOINT` 设为 `off` / `none` / `-` 可关闭更新检查（纯内网、不希望检查时使用）。
 

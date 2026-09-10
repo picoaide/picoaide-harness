@@ -2,9 +2,11 @@ package updatecheck
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -174,6 +176,11 @@ func TestDevCurrentNeverUpdates(t *testing.T) {
 }
 
 // 端点解析:PICOAI_UPDATE_ENDPOINT 覆盖默认值;关闭值返回空(不启用检查)。
+//
+// 2026-09-10 语义修正:**空串 = 未设置**,不是"关闭"。仓库自带的
+// docker-compose.yml 用 `${PICOAI_UPDATE_ENDPOINT:-}` 传值,未配置时容器里
+// 就是空串;旧语义把空串当关闭,导致默认部署永远不检查更新(fail-silent)。
+// 要关闭必须显式写 off / none / - / disabled。
 func TestResolveEndpoint(t *testing.T) {
 	cases := []struct {
 		name string
@@ -181,9 +188,10 @@ func TestResolveEndpoint(t *testing.T) {
 		val  string
 		want string
 	}{
-		{"default when unset", false, "", DefaultEndpoint},
+		{"default when unset", false, "", DefaultEndpointFor("acme")},
+		{"default follows the resolved channel", false, "", DefaultEndpointFor("acme")},
 		{"channel override", true, "https://release.picoaide.com/acme/latest.json", "https://release.picoaide.com/acme/latest.json"},
-		{"empty disables", true, "", ""},
+		{"empty means unset, not disabled", true, "", DefaultEndpointFor("acme")},
 		{"off disables", true, "off", ""},
 		{"dash disables", true, "-", ""},
 		{"none disables", true, "NONE", ""},
@@ -200,10 +208,21 @@ func TestResolveEndpoint(t *testing.T) {
 					t.Fatalf("Unsetenv: %v", err)
 				}
 			}
-			if got := ResolveEndpoint(); got != tc.want {
-				t.Fatalf("ResolveEndpoint() = %q, want %q", got, tc.want)
+			// 用 acme 作探针:默认值必须跟着渠道走,而不是永远指官方目录。
+			if got := ResolveEndpoint("acme"); got != tc.want {
+				t.Fatalf("ResolveEndpoint(acme) = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// 默认端点按渠道取目录:渠道化部署因此默认检查自己的目录。
+func TestDefaultEndpointFor(t *testing.T) {
+	if got := DefaultEndpointFor(OfficialChannel); got != DefaultEndpoint {
+		t.Fatalf("DefaultEndpointFor(official) = %q, want %q", got, DefaultEndpoint)
+	}
+	if got := DefaultEndpointFor(BetaChannel); got != "https://release.picoaide.com/beta/latest.json" {
+		t.Fatalf("DefaultEndpointFor(beta) = %q", got)
 	}
 }
 
@@ -376,36 +395,100 @@ func TestIsChannelID(t *testing.T) {
 	}
 }
 
-// ResolveChannel:显式 env 优先;否则从端点路径推导;都不成立回落官方。
+// ResolveChannel:env > 镜像内标记文件 > 端点路径推导 > 官方;
+// 显式配置但非法时 ok=false(fail-loud,绝不回落 official)。
 func TestResolveChannel(t *testing.T) {
 	cases := []struct {
 		name     string
 		channel  string
 		endpoint string
+		marker   string
 		want     string
+		wantOK   bool
 	}{
-		{"explicit channel wins", "acme", "https://release.picoaide.com/official/latest.json", "acme"},
-		{"derive from endpoint path", "", "https://release.picoaide.com/acme/latest.json", "acme"},
-		{"derive beta from path", "", "https://release.picoaide.com/beta/latest.json", "beta"},
-		{"invalid explicit falls back to official", "ACME!", "", OfficialChannel},
-		{"no config defaults official", "", "", OfficialChannel},
-		{"endpoint without channel segment", "", "https://example.test/latest.json", OfficialChannel},
+		{"explicit channel wins", "acme", "https://release.picoaide.com/official/latest.json", "", "acme", true},
+		{"derive from endpoint path", "", "https://release.picoaide.com/acme/latest.json", "", "acme", true},
+		{"derive beta from path", "", "https://release.picoaide.com/beta/latest.json", "", "beta", true},
+		{"no config defaults official", "", "", "", OfficialChannel, true},
+		{"endpoint without channel segment", "", "https://example.test/latest.json", "", OfficialChannel, true},
+		// 2026-09-10:显式设了非法值不再静默变官方 —— 那是"渠道部署被官方清单
+		// 升级、品牌被洗掉"的入口,必须让调用方 fail-loud。
+		{"invalid explicit is unresolvable", "ACME!", "", "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(ChannelEnv, tc.channel)
 			t.Setenv(EndpointEnv, tc.endpoint)
-			got := ResolveChannel()
-			if tc.name == "endpoint without channel segment" {
-				// 路径首段不是合法渠道 id 时不应把它当渠道 —— 这里断言回落官方
-				if got != OfficialChannel {
-					t.Fatalf("ResolveChannel() = %q, want %q", got, OfficialChannel)
+			// 标记文件走临时目录:测试机上不存在 /opt/picoaide/CHANNEL。
+			marker := filepath.Join(t.TempDir(), "CHANNEL")
+			if tc.marker != "" {
+				if err := os.WriteFile(marker, []byte(tc.marker), 0o644); err != nil {
+					t.Fatalf("write marker: %v", err)
 				}
-				return
 			}
-			if got != tc.want {
+			restore := ChannelFile
+			ChannelFile = marker
+			t.Cleanup(func() { ChannelFile = restore })
+
+			got, ok := ResolveChannel()
+			if ok != tc.wantOK {
+				t.Fatalf("ResolveChannel() ok = %v, want %v (channel %q)", ok, tc.wantOK, got)
+			}
+			if ok && got != tc.want {
 				t.Fatalf("ResolveChannel() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// 镜像内标记文件(由 Dockerfile 写入,此前只写不读)是渠道的权威声明:
+// 部署侧只留空 env 时,它必须决定渠道,且**优先于**端点路径推导 ——
+// 后者是自我实现的(指向哪个目录就变成哪个渠道),一旦能覆盖镜像声明,
+// 隔离校验就形同虚设。
+func TestResolveChannelPrefersImageMarker(t *testing.T) {
+	t.Setenv(ChannelEnv, "")
+	t.Setenv(EndpointEnv, "https://release.picoaide.com/official/latest.json")
+	marker := filepath.Join(t.TempDir(), "CHANNEL")
+	if err := os.WriteFile(marker, []byte("acme\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	restore := ChannelFile
+	ChannelFile = marker
+	t.Cleanup(func() { ChannelFile = restore })
+
+	got, ok := ResolveChannel()
+	if !ok || got != "acme" {
+		t.Fatalf("ResolveChannel() = (%q, %v), want (acme, true)", got, ok)
+	}
+}
+
+// 镜像标记文件内容非法同样 fail-loud(构建参数写错时立即暴露)。
+func TestResolveChannelRejectsInvalidMarker(t *testing.T) {
+	t.Setenv(ChannelEnv, "")
+	t.Setenv(EndpointEnv, "")
+	marker := filepath.Join(t.TempDir(), "CHANNEL")
+	if err := os.WriteFile(marker, []byte("Acme Corp\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	restore := ChannelFile
+	ChannelFile = marker
+	t.Cleanup(func() { ChannelFile = restore })
+
+	if _, ok := ResolveChannel(); ok {
+		t.Fatal("invalid marker must be unresolvable, not silently official")
+	}
+}
+
+// 渠道无法确定时,检查必须报"不可用"而不是回落官方目录去比对。
+func TestCheckFailsLoudOnUnresolvableChannel(t *testing.T) {
+	t.Setenv(ChannelEnv, "ACME!")
+	t.Setenv(EndpointEnv, "")
+	restore := ChannelFile
+	ChannelFile = filepath.Join(t.TempDir(), "absent")
+	t.Cleanup(func() { ChannelFile = restore })
+
+	_, err := New().Check(context.Background(), "2.5.1")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Check() error = %v, want ErrUnavailable", err)
 	}
 }

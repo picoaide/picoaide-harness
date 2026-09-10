@@ -78,11 +78,18 @@ services:
       PICOAI_ADMIN_PASSWORD: ${PICOAI_ADMIN_PASSWORD:-}
       # 主密钥:留空则由服务端首次启动自动生成于 data/master.key(请备份)
       PICOAI_MASTER_KEY: ${PICOAI_MASTER_KEY:-}
-      # 本部署所属更新渠道(beta / official / 品牌渠道 id)。
-      # 服务端只接受 channel_id 与它相等的版本清单 —— 渠道隔离是正确性要求:
-      # 品牌部署若被官方清单升级,品牌与渠道配置会一起丢失。
-      PICOAI_CHANNEL: ${PICOAI_CHANNEL:-official}
-      # 更新清单地址;留空则按渠道推导官方目录。指向别的渠道目录会被拒绝(见上)。
+      # 本部署所属渠道(beta / official / 品牌渠道 id)。
+      #
+      # **默认不设置**(`:-` 后面为空):渠道由**镜像自带的**声明决定
+      # (Dockerfile 的 ARG CHANNEL → ENV PICOAI_CHANNEL + /opt/picoaide/CHANNEL)。
+      # 这里若写死 `:-official`,就会覆盖镜像里的渠道 —— 渠道化镜像会被当成
+      # 官方部署,进而接受官方清单把自己的品牌洗掉(最严重的一类错)。
+      # 只有确实要覆盖镜像声明时才在 .env 里显式设置,且服务端会校验它与
+      # 镜像内的渠道内容一致,不一致直接拒绝启动。
+      PICOAI_CHANNEL: ${PICOAI_CHANNEL:-}
+      # 更新清单地址。**留空 = 用本渠道的默认目录**
+      # (release.picoaide.com/<channel>/latest.json),不是"关闭检查"。
+      # 要关闭更新检查请显式写 off / none / - / disabled。
       PICOAI_UPDATE_ENDPOINT: ${PICOAI_UPDATE_ENDPOINT:-}
       # 可信反向代理(审计 2026-08-25 F-02):Caddy 固定 IP 默认 172.28.0.2,
       # 使登录限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS
