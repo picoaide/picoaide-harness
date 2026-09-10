@@ -8,7 +8,7 @@ import type { UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
 import type { DesktopUpdateErrorCategory } from './desktop-update-contract.ts'
 import {
-  checkForChannelUpdate,
+  checkForUpdate,
   parseSemVer,
   type UpdateCheckResult,
 } from './update-checker.ts'
@@ -27,7 +27,6 @@ const DOWNLOAD_ERROR_CATEGORIES: ReadonlySet<string> = new Set([
   'network',
   'release-missing',
   'checksum-mismatch',
-  'checksum-missing',
   'invalid-artifact',
 ])
 
@@ -51,6 +50,16 @@ export interface Config {
   intervalMs: number
   /** Maximum duration of one version request before caller-owned cancellation. */
   requestTimeoutMs: number
+  /**
+   * 渠道更新面 base（末尾斜杠容错）。空串 = 按 `channel` 推导
+   * （`https://release.picoaide.com/<channel>`）。
+   */
+  baseURL: string
+  /**
+   * 渠道 id 覆盖；空串 = 用适配器报告的安装渠道（推荐）。
+   * 品牌/预发构建由 profile composition 注入，与 baseURL 必须自洽。
+   */
+  channel: string
 }
 
 /** Validated scheduled update policy. */
@@ -59,6 +68,8 @@ export const Config: z<Config> = z.object({
   initialDelayMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(60_000),
   intervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(6 * 60 * 60 * 1000),
   requestTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
+  baseURL: z.string().default(''),
+  channel: z.string().default(''),
 })
 
 interface UpdateStateV2 {
@@ -147,10 +158,15 @@ export function apply(ctx: Context, config: Config): void {
       const task = (async () => {
         requestTimer = setTimeout(() => { controller.abort() }, config.requestTimeoutMs)
         try {
-          return await checkForChannelUpdate({
+          // 渠道隔离:适配器报告本安装所属渠道(官方构建为 official,品牌构建
+          // 为其渠道 id),检查结果必须来自同一渠道 —— 混渠道会让品牌客户端
+          // 被官方清单升级成官方版。baseURL 留空即按渠道推导。
+          return await checkForUpdate({
             currentVersion: adapter.currentVersion,
+            channel: config.channel === '' ? adapter.channel : config.channel,
             signal: controller.signal,
             request: adapter.request,
+            ...(config.baseURL === '' ? {} : { baseURL: config.baseURL }),
           })
         } catch {
           return null

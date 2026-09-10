@@ -32,7 +32,6 @@ export type DesktopUpdateErrorCategory =
   | 'release-missing'
   | 'unsupported'
   | 'checksum-mismatch'
-  | 'checksum-missing'
   | 'invalid-artifact'
 
 /** Byte-level download progress served to the renderer badge. */

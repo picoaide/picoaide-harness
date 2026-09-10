@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { DESKTOP_UPDATE_BASE_URL } from '../src/desktop-release.ts'
 import type {
   DesktopNotification,
   DesktopRuntime,
@@ -11,23 +12,39 @@ import type {
 import type { UpdateCheckResult } from '../src/update-checker.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
 
+// 测试统一用官方渠道;渠道隔离本身由桌面 src 与服务端 updatecheck 单测覆盖
+const CHANNEL = 'official'
+
+
 const testConfig: UpdateConfig = {
+  channel: CHANNEL,
   enabled: true,
   initialDelayMs: 10,
   intervalMs: 1000,
   requestTimeoutMs: 1000,
+  // 空串 = 官方渠道默认更新面(见 src/updates.ts 的 Config 说明)。
+  baseURL: '',
 }
 
-function versionResponse(version: unknown): Response {
-  return Response.json({ tag_name: version, draft: false, prerelease: false })
-}
+const OFFICIAL_MANIFEST_URL = `${DESKTOP_UPDATE_BASE_URL}/latest.json`
 
-function releaseListResponse(versions: readonly string[]): Response {
-  return Response.json(versions.map(version => ({
-    tag_name: version,
-    draft: false,
-    prerelease: version.includes('-'),
-  })))
+/** 渠道版本清单:更新源唯一入口,最新版本由 client.version 决定。 */
+function manifestResponse(version: unknown): Response {
+  const releases = `${DESKTOP_UPDATE_BASE_URL}/releases/${String(version)}`
+  const digest = 'a'.repeat(64)
+  return Response.json({
+    schema: 1,
+    channel_id: 'official',
+    server: { version: String(version), image_tag: `v${String(version)}` },
+    client: {
+      version,
+      assets: {
+        'mac-universal': { url: `${releases}/PicoAide-Harness-${String(version)}-mac.dmg`, sha256: digest, size: 0 },
+        'win-x64': { url: `${releases}/PicoAide-Harness-${String(version)}-x64-Setup.exe`, sha256: digest, size: 0 },
+        'linux-x64': { url: `${releases}/PicoAide-Harness-${String(version)}-x86_64.AppImage`, sha256: digest, size: 0 },
+      },
+    },
+  })
 }
 
 interface Harness {
@@ -79,7 +96,7 @@ async function createHarness(options: {
     currentVersion: options.currentVersion ?? '2.0.0',
     statePath,
     canDownload: options.canDownload ?? true,
-    request: options.request ?? (async () => versionResponse('2.0.0')),
+    request: options.request ?? (async () => manifestResponse('2.0.0')),
     confirmDownload,
     showManualCheckResult,
     downloadAndOpen,
@@ -134,9 +151,35 @@ describe('desktop update Host plugin', () => {
       initialDelayMs: 60_000,
       intervalMs: 21_600_000,
       requestTimeoutMs: 15_000,
+      baseURL: '',
+      channel: '',
     })
     expect(() => Config({ intervalMs: 0 } as UpdateConfig)).toThrow()
     expect(() => Config({ requestTimeoutMs: 0 } as UpdateConfig)).toThrow()
+  })
+
+  it.each([
+    ['', OFFICIAL_MANIFEST_URL],
+    ['https://enterprise.test/updates', 'https://enterprise.test/updates/latest.json'],
+    ['https://enterprise.test/updates/', 'https://enterprise.test/updates/latest.json'],
+  ])('checks the manifest of channel base %s', async (baseURL, expectedURL) => {
+    // 空串 = 官方渠道默认;非空 = 构建期注入的渠道更新面。
+    const calls: string[] = []
+    const request = vi.fn(async (url: string) => {
+      calls.push(url)
+      return manifestResponse('2.1.0')
+    })
+    const harness = await createHarness({
+      packaged: false,
+      request,
+      config: { ...testConfig, baseURL },
+    })
+
+    await harness.tray.invoke()
+
+    expect(calls).toEqual([expectedURL])
+    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
+    await harness.dispose()
   })
 
   it('renders the update tray command in the active native locale', async () => {
@@ -152,7 +195,7 @@ describe('desktop update Host plugin', () => {
     { packaged: true, enabled: false },
   ])('reports a manual up-to-date result while automatic polling is disabled: %#', async ({ packaged, enabled }) => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => versionResponse('2.0.0'))
+    const request = vi.fn(async () => manifestResponse('2.0.0'))
     const harness = await createHarness({
       packaged,
       request,
@@ -177,7 +220,7 @@ describe('desktop update Host plugin', () => {
 
   it('prompts once for a background update and persists only state v2 prompt history', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => versionResponse('2.1.0'))
+    const request = vi.fn(async () => manifestResponse('2.1.0'))
     const harness = await createHarness({ request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
@@ -206,7 +249,7 @@ describe('desktop update Host plugin', () => {
     let resolveDownload!: () => void
     const download = new Promise<void>(resolve => { resolveDownload = resolve })
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => download,
     })
@@ -229,7 +272,7 @@ describe('desktop update Host plugin', () => {
   it('keeps the precise download failure category instead of collapsing to network (P2-63)', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => {
         throw Object.assign(new Error('digest mismatch'), { code: 'checksum-mismatch' })
@@ -248,7 +291,7 @@ describe('desktop update Host plugin', () => {
   it('maps an unclassified download failure to network (P2-63)', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => { throw new Error('socket hang up') },
     })
@@ -268,7 +311,7 @@ describe('desktop update Host plugin', () => {
       .mockResolvedValueOnce(true)
     const harness = await createHarness({
       packaged: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload,
     })
 
@@ -285,8 +328,8 @@ describe('desktop update Host plugin', () => {
 
   it('rechecks the version after confirmation and skips a rotated download', async () => {
     const request = vi.fn()
-      .mockResolvedValueOnce(versionResponse('2.1.0'))
-      .mockResolvedValueOnce(versionResponse('2.2.0'))
+      .mockResolvedValueOnce(manifestResponse('2.1.0'))
+      .mockResolvedValueOnce(manifestResponse('2.2.0'))
     const harness = await createHarness({
       packaged: false,
       request,
@@ -304,7 +347,7 @@ describe('desktop update Host plugin', () => {
 
   it('still downloads the confirmed version when the post-confirm re-check fails', async () => {
     const request = vi.fn()
-      .mockResolvedValueOnce(versionResponse('2.1.0'))
+      .mockResolvedValueOnce(manifestResponse('2.1.0'))
       .mockRejectedValueOnce(new TypeError('offline'))
     const downloadAndOpen = vi.fn(async () => {})
     const harness = await createHarness({
@@ -321,7 +364,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it.each([
-    ['up-to-date', async () => versionResponse('2.0.0')],
+    ['up-to-date', async () => manifestResponse('2.0.0')],
     ['failed', async () => new Response('unavailable', { status: 503 })],
   ] as const)('keeps an automatic %s result silent', async (_case, request) => {
     vi.useFakeTimers()
@@ -337,14 +380,16 @@ describe('desktop update Host plugin', () => {
   })
 
   it.each([
-    ['same version', async () => versionResponse('2.0.0'), {
+    ['same version', async () => manifestResponse('2.0.0'), {
       status: 'up-to-date', currentVersion: '2.0.0', latestVersion: '2.0.0',
     }],
-    ['older version', async () => versionResponse('1.9.9'), {
+    ['older version', async () => manifestResponse('1.9.9'), {
       status: 'up-to-date', currentVersion: '2.0.0', latestVersion: '1.9.9',
     }],
-    ['invalid version', async () => new Response('{"tag_name":"2.01.0"}'), null],
+    ['non-canonical manifest version', async () => manifestResponse('2.01.0'), null],
+    ['manifest without an installer', async () => Response.json({ schema: 1, client: { version: '2.1.0' } }), null],
     ['service unavailable', async () => new Response('unavailable', { status: 503 }), null],
+    ['manifest redirect', async () => { throw new TypeError('Failed to fetch') }, null],
     ['network failure', async () => { throw new TypeError('offline') }, null],
   ] as const)('reports a manual %s result without prompting or downloading', async (_case, request, expected) => {
     const harness = await createHarness({ packaged: false, request })
@@ -362,7 +407,7 @@ describe('desktop update Host plugin', () => {
   it('silently resets legacy state and does not use it as an available version cache', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       state: JSON.stringify({
         version: 1,
         checkedVersion: '2.0.0',
@@ -392,7 +437,7 @@ describe('desktop update Host plugin', () => {
     const harness = await createHarness({
       packaged: false,
       canDownload: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
     })
 
     await harness.tray.invoke()
@@ -413,7 +458,7 @@ describe('desktop update Host plugin', () => {
     const download = new Promise<void>((_resolve, reject) => { rejectDownload = reject })
     const harness = await createHarness({
       packaged: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => download,
     })
@@ -453,7 +498,7 @@ describe('desktop update Host plugin', () => {
     let downloadSignal: AbortSignal | undefined
     const downloading = await createHarness({
       packaged: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async (_version, signal) => new Promise<void>((_resolve, reject) => {
         downloadSignal = signal
@@ -517,7 +562,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('publishes renderer snapshots on initial state and observable transitions', async () => {
-    const request = vi.fn(async () => versionResponse('2.3.0'))
+    const request = vi.fn(async () => manifestResponse('2.3.0'))
     const harness = await createHarness({ request })
     // Initial static facts are published as soon as the state machine mounts.
     expect(harness.publishedStates).toHaveBeenCalled()
@@ -539,7 +584,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('installs the renderer check trigger and connects it to the manual flow', async () => {
-    const request = vi.fn(async () => versionResponse('2.3.0'))
+    const request = vi.fn(async () => manifestResponse('2.3.0'))
     const harness = await createHarness({ request })
     expect(typeof harness.checkNow).toBe('function')
     // The trigger drives the same manual check (confirm dialog appears).
@@ -549,10 +594,12 @@ describe('desktop update Host plugin', () => {
 })
 
 
-describe('desktop update test channel (prerelease installs)', () => {
-  it('checks the release list and prompts prerelease installs for a newer prerelease', async () => {
+describe('desktop update channel from the manifest (prerelease installs)', () => {
+  it('prompts a prerelease install for the newer prerelease published in the manifest', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => releaseListResponse(['v2.0.0', 'v2.1.0-rc.1', 'v2.1.0-rc.2']))
+    // 渠道由清单内容决定:预发布版本写进 latest.json 就是预发布渠道,
+    // 客户端不再按已装版本分流到不同的 GitHub 端点。
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.2'))
     const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
@@ -571,7 +618,7 @@ describe('desktop update test channel (prerelease installs)', () => {
 
   it('accepts prerelease prompt history and does not prompt for it again', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => releaseListResponse(['v2.1.0-rc.1', 'v2.1.0-rc.2']))
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.2'))
     const harness = await createHarness({
       currentVersion: '2.1.0-rc.1',
       request,
@@ -589,9 +636,26 @@ describe('desktop update test channel (prerelease installs)', () => {
     await harness.dispose()
   })
 
+  it('reports no update while the manifest still publishes the installed prerelease', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.1'))
+    const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
+
+    await harness.tray.invoke()
+
+    expect(harness.showManualCheckResult).toHaveBeenCalledWith({
+      status: 'up-to-date',
+      currentVersion: '2.1.0-rc.1',
+      latestVersion: '2.1.0-rc.1',
+    })
+    expect(harness.confirmDownload).not.toHaveBeenCalled()
+
+    await harness.dispose()
+  })
+
   it('still runs a stable check when the installed version is stable', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => versionResponse('2.0.0'))
+    const request = vi.fn(async () => manifestResponse('2.0.0'))
     const harness = await createHarness({ request })
 
     await harness.tray.invoke()

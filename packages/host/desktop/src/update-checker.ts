@@ -1,27 +1,18 @@
-/** Headless version checks against the public GitHub Releases API. */
+/** Headless version checks against the PicoAide update server. */
 
-import { DESKTOP_RELEASE_LATEST_API, DESKTOP_RELEASE_LIST_API, DESKTOP_RELEASE_REPOSITORY } from './desktop-release.ts'
+import {
+  channelBaseURL,
+  parseReleaseManifest,
+  updateManifestURL,
+  type DesktopReleaseManifest,
+} from './desktop-release.ts'
 
-// Single authority (P2-64): the repository and endpoint constants live in
-// ./desktop-release.ts and are re-exported here for existing importers.
-export { DESKTOP_RELEASE_REPOSITORY }
-
-/** Public endpoint returning the latest stable PicoAide Harness release. */
-export const DESKTOP_VERSION_ENDPOINT = DESKTOP_RELEASE_LATEST_API
-
-/**
- * Public endpoint listing recent published releases (newest first) for the
- * test channel. The test channel compares every published release — stable
- * and prerelease — and offers the SemVer-maximum one, so a prerelease build
- * tracks newer prereleases of the same line and any newer stable release.
- */
-export const DESKTOP_RELEASES_LIST_ENDPOINT = DESKTOP_RELEASE_LIST_API
+export { DESKTOP_UPDATE_BASE_URL, channelBaseURL } from './desktop-release.ts'
 
 /**
- * Maximum response body bytes accepted from the release service.
- * 2026-09-06 实测修复:per_page=30 的发布列表响应体 ~287KB,超过旧上限
- * 256KB 会被 readLimitedBody 拒绝 → 测试通道(beta/rc)永远返回 null、
- * 预发构建收不到任何更新提示(P0)。1MB 同时容纳列表膨胀空间。
+ * Maximum response body bytes accepted from the update service.
+ * 2026-09-06 实测修复沿用:响应体超限会被 readLimitedBody 拒绝并静默降级,
+ * 1MB 足以容纳清单及其后续扩展字段。
  */
 export const MAX_VERSION_RESPONSE_BYTES = 1024 * 1024
 
@@ -44,7 +35,7 @@ export interface ParsedSemVer {
 /** Fetch-compatible request function used by the headless checker. */
 export type UpdateRequest = (url: string, init: RequestInit) => Promise<Response>
 
-/** Inputs for one channel version check. */
+/** Inputs for one version check. */
 export interface UpdateCheckOptions {
   /** Installed application version, expressed as canonical SemVer. */
   readonly currentVersion: string
@@ -52,9 +43,22 @@ export interface UpdateCheckOptions {
   readonly signal?: AbortSignal
   /** Optional fetch implementation for a host adapter or test. */
   readonly request?: UpdateRequest
+  /**
+   * 渠道更新面 base（末尾斜杠容错）。
+   * 缺省按 `channel` 推导；品牌渠道由构建期渠道配置注入自己的更新面。
+   */
+  readonly baseURL?: string
+  /**
+   * 本安装所属渠道（`beta` / `official` / 品牌渠道 id），**必填**。
+   *
+   * 双重作用:①推导默认 base(`channelBaseURL(channel)`);
+   * ②校验清单的 `channel_id` 必须精确相等 —— 渠道隔离是正确性要求,
+   * 缺失或不匹配一律当作"检查失败"(不提示更新),绝不放行跨渠道升级。
+   */
+  readonly channel: string
 }
 
-/** Successful comparison returned by the channel version service. */
+/** Successful comparison returned by the version service. */
 export type UpdateCheckResult = {
   /** Whether the service reports a version newer than the installed application. */
   readonly status: 'up-to-date' | 'update-available'
@@ -104,68 +108,27 @@ export function compareSemVerVersions(left: string, right: string): number | nul
 }
 
 /**
- * Check the fixed GitHub Releases endpoint for a newer stable release.
- * @param options - installed version, caller-owned signal, and optional request adapter.
+ * Check the update server for a newer client release.
+ *
+ * 单一模式:GET `<baseURL>/latest.json` 得到版本清单,再按严格 SemVer 比较。
+ * 发布渠道由清单内容决定(写预发布进去就是预发布渠道),不再有 GitHub 的
+ * `releases/latest` 与"发布列表取最大版本"两条分叉逻辑。
+ * @param options - installed version, caller-owned signal, request adapter, and channel base.
  * @returns a successful comparison, or null when any request or validation step fails.
  */
-export async function checkForStableUpdate(
-  options: UpdateCheckOptions,
-): Promise<UpdateCheckResult | null> {
-  const current = parseCanonicalStableVersion(options.currentVersion)
-  if (current === null) return null
-  const latest = await fetchLatestReleasedVersion(
-    DESKTOP_VERSION_ENDPOINT,
-    options.request ?? defaultRequest,
-    options.signal,
-    parseStableReleaseTag,
-  )
-  if (latest === null) return null
-  return {
-    status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
-    currentVersion: current.version,
-    latestVersion: latest.version,
-  }
-}
-
-/**
- * Check the update channel implied by the installed version: stable builds
- * query the latest-stable endpoint (prerelease releases are never offered),
- * while prerelease builds query the published-release list and are offered
- * the SemVer-maximum release — newer prereleases of the same line first, and
- * a newer stable release once one ships.
- * @param options - installed version, caller-owned signal, and optional request adapter.
- * @returns a successful channel comparison, or null when any step fails.
- */
-export async function checkForChannelUpdate(
-  options: UpdateCheckOptions,
-): Promise<UpdateCheckResult | null> {
-  const parsed = parseSemVer(options.currentVersion)
-  if (parsed === null || parsed.version !== options.currentVersion) return null
-  return parsed.prerelease.length > 0
-    ? checkForTestChannelUpdate(options)
-    : checkForStableUpdate(options)
-}
-
-/**
- * Check the test channel: the newest published release of any kind
- * (prerelease or stable) that outranks the installed prerelease version.
- * @param options - installed prerelease version, caller-owned signal, and optional request adapter.
- * @returns a successful comparison, or null when any request or validation step fails.
- */
-export async function checkForTestChannelUpdate(
+export async function checkForUpdate(
   options: UpdateCheckOptions,
 ): Promise<UpdateCheckResult | null> {
   const current = parseSemVer(options.currentVersion)
-  if (current === null || current.version !== options.currentVersion || current.prerelease.length === 0) {
-    return null
-  }
-  const latest = await fetchLatestReleasedVersion(
-    DESKTOP_RELEASES_LIST_ENDPOINT,
-    options.request ?? defaultRequest,
-    options.signal,
-    parseReleaseListBestTag,
-  )
-  if (latest === null) return null
+  // 本地构建(如 "dev")不是合法 SemVer:不提示更新,也不发请求。
+  if (current === null || current.version !== options.currentVersion) return null
+
+  const manifest = await fetchReleaseManifest(options)
+  if (manifest === null) return null
+
+  const latest = parseSemVer(manifest.clientVersion)
+  if (latest === null || latest.version !== manifest.clientVersion) return null
+
   return {
     status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
     currentVersion: current.version,
@@ -174,31 +137,30 @@ export async function checkForTestChannelUpdate(
 }
 
 /**
- * Request one version document and select its newest released version.
- * @param url - fixed endpoint returning one release object or a release array.
- * @param request - fetch-compatible boundary.
- * @param signal - caller-owned cancellation.
- * @param select - parser turning the bounded response body into the newest version.
- * @returns the newest released version, or null on any request/validation failure.
+ * 拉取并严格解析渠道版本清单(更新检查与安装包下载共用的唯一入口)。
+ * @param options - base URL, request adapter, and caller-owned cancellation.
+ * @returns 解析后的清单,或 null(网络/状态码/结构/超限任一失败)。
  */
-async function fetchLatestReleasedVersion(
-  url: string,
-  request: UpdateRequest,
-  signal: AbortSignal | undefined,
-  select: (body: string) => ParsedSemVer | null,
-): Promise<ParsedSemVer | null> {
+export async function fetchReleaseManifest(
+  options: Pick<UpdateCheckOptions, 'baseURL' | 'request' | 'signal' | 'channel'>,
+): Promise<DesktopReleaseManifest | null> {
+  const url = updateManifestURL(options.baseURL ?? channelBaseURL(options.channel))
   const init: RequestInit = {
     method: 'GET',
     headers: { Accept: 'application/json' },
     cache: 'no-store',
+    // 更新服务器必须直接返回 200:跳转属于配置错误(见 R2 手册 §3.1),
+    // 静默跟随会把"通道断了"伪装成"没有新版本"。
     redirect: 'error',
-    ...(signal === undefined ? {} : { signal }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
   }
 
   let response: Response
   try {
-    response = await request(url, init)
-  } catch {
+    response = await (options.request ?? defaultRequest)(url, init)
+  } catch (cause) {
+    // 主动取消必须向上传播:吞掉会让"用户点了取消"显示成"网络错误"。
+    if (options.signal?.aborted === true || isAbortFailure(cause)) throw cause
     return null
   }
   if (response.status !== 200) return null
@@ -209,7 +171,28 @@ async function fetchLatestReleasedVersion(
   } catch {
     return null
   }
-  return select(body)
+
+  let value: unknown
+  try {
+    value = JSON.parse(body)
+  } catch {
+    return null
+  }
+  // 渠道校验:清单声明的渠道必须与调用方所属渠道一致,否则视为失败。
+  return parseReleaseManifest(value, options.channel)
+}
+
+/**
+ * 判定一个失败是否来自调用方取消(abort)。
+ * 与 update-download 的同名判定保持同一语义:标准 AbortError 或错误码为
+ * 'aborted' 的下载错误;用于把"取消"与"网络失败"区分开。
+ * @param value - 捕获到的异常值。
+ * @returns 是取消类失败时为 true。
+ */
+export function isAbortFailure(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  if (!('name' in value)) return false
+  return (value as { name?: unknown }).name === 'AbortError'
 }
 
 async function defaultRequest(url: string, init: RequestInit): Promise<Response> {
@@ -244,57 +227,6 @@ async function readLimitedBody(response: Response): Promise<string> {
   } finally {
     reader.releaseLock()
   }
-}
-
-function parseStableReleaseTag(body: string): ParsedSemVer | null {
-  let value: unknown
-  try {
-    value = JSON.parse(body)
-  } catch {
-    return null
-  }
-  // GitHub's release payload exposes the canonical version as a `v`-prefixed
-  // tag while drafts and prereleases are strictly excluded by the latest
-  // endpoint. The tag prefix is stripped before strict SemVer validation.
-  if (!isRecord(value) || typeof value.tag_name !== 'string') return null
-  return parseCanonicalStableVersion(value.tag_name.replace(/^v/u, ''))
-}
-
-/**
- * Select the SemVer-maximum published release from a release-list response.
- * Drafts never count; entries whose tag is absent or not strict SemVer are
- * ignored. Equal tags collapse to the first occurrence.
- * @param body - JSON release-list response body.
- * @returns the newest released version, or null when no entry qualifies.
- */
-function parseReleaseListBestTag(body: string): ParsedSemVer | null {
-  let value: unknown
-  try {
-    value = JSON.parse(body)
-  } catch {
-    return null
-  }
-  if (!Array.isArray(value)) return null
-
-  let best: ParsedSemVer | null = null
-  const seenTags = new Set<string>()
-  for (const entry of value) {
-    if (!isRecord(entry) || entry.draft === true || typeof entry.tag_name !== 'string') continue
-    const tag = entry.tag_name.replace(/^v/u, '')
-    if (seenTags.has(tag)) continue
-    seenTags.add(tag)
-    const parsed = parseSemVer(tag)
-    if (parsed === null || parsed.version !== tag) continue
-    if (best === null || compareParsedSemVer(parsed, best) > 0) best = parsed
-  }
-  return best
-}
-
-function parseCanonicalStableVersion(input: string): ParsedSemVer | null {
-  const parsed = parseSemVer(input)
-  return parsed !== null && parsed.prerelease.length === 0 && parsed.version === input
-    ? parsed
-    : null
 }
 
 function compareParsedSemVer(left: ParsedSemVer, right: ParsedSemVer): number {
@@ -335,8 +267,4 @@ function isNumeric(identifier: string): boolean {
 
 function hasLeadingZero(identifier: string): boolean {
   return identifier.length > 1 && identifier.startsWith('0')
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

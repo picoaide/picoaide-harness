@@ -1,13 +1,21 @@
-/** Headless, confirmation-gated downloads for PicoAide Harness GitHub release installers. */
+/** Headless, confirmation-gated downloads for PicoAide Harness installers. */
+
+// 更新源 = 我方更新服务器(见 ./desktop-release.ts);GitHub Releases 通道已于
+// 2026-09-10 移除。安装包地址与 SHA-256 均来自版本清单 `latest.json`,
+// 不再有 GitHub 的资产名匹配与独立 SHA256SUMS 旁路。
 
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
-import { DESKTOP_RELEASE_LATEST_API, DESKTOP_RELEASE_TAG_API, DESKTOP_RELEASE_REPOSITORY } from './desktop-release.ts'
-import { parseSemVer } from './update-checker.ts'
+import {
+  DESKTOP_UPDATE_BASE_URL,
+  releaseAssetFor,
+  type DesktopReleasePlatform,
+} from './desktop-release.ts'
+import { fetchReleaseManifest, isAbortFailure as isStandardAbort, parseSemVer } from './update-checker.ts'
 
-/** Desktop platforms with a fixed GitHub release asset convention. */
-export type DesktopDownloadPlatform = 'darwin' | 'win32' | 'linux'
+/** Desktop platforms with a fixed release asset convention. */
+export type DesktopDownloadPlatform = DesktopReleasePlatform
 
 /** Progress of one confirmed update download (bytes). */
 export interface UpdateDownloadProgress {
@@ -17,32 +25,16 @@ export interface UpdateDownloadProgress {
   readonly totalBytes: number | undefined
 }
 
-// Single authority (P2-64): repository + endpoints come from ./desktop-release.ts.
-export { DESKTOP_RELEASE_REPOSITORY }
-
-/** Public endpoint returning the latest stable PicoAide Harness release metadata. */
-export const DESKTOP_RELEASE_API_URL = DESKTOP_RELEASE_LATEST_API
-
-/** Prefix of the by-tag release endpoint used for prerelease installers. */
-export const DESKTOP_RELEASE_TAG_API_URL = DESKTOP_RELEASE_TAG_API
-
-/** Release asset carrying SHA-256 digests for every installer artifact. */
-export const RELEASE_CHECKSUM_ASSET_NAME = 'SHA256SUMS.txt'
+// Single authority: base URL + manifest parsing come from ./desktop-release.ts.
+export { DESKTOP_UPDATE_BASE_URL }
 
 /** Maximum accepted installer size, in bytes. */
 export const MAX_UPDATE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
-
-/** Maximum accepted release metadata response bytes. */
-export const MAX_RELEASE_METADATA_BYTES = 256 * 1024
-
-/** Maximum accepted checksum manifest bytes. */
-export const MAX_CHECKSUM_MANIFEST_BYTES = 64 * 1024
 
 /** Failure categories exposed to the update coordinator. */
 export type UpdateDownloadErrorCode =
   | 'aborted'
   | 'checksum-mismatch'
-  | 'checksum-missing'
   | 'empty-body'
   | 'http-status'
   | 'invalid-artifact'
@@ -58,7 +50,7 @@ export type UpdateArtifactRequest = (url: string, init: RequestInit) => Promise<
 export interface DownloadDesktopUpdateOptions {
   /** Host platform selecting the fixed asset convention. */
   readonly platform: DesktopDownloadPlatform
-  /** Stable release version matched against the release tag and asset name. */
+  /** Canonical release version the manifest must report. */
   readonly version: string
   /** Absolute Electron user-data directory that owns update artifacts. */
   readonly userDataPath: string
@@ -68,6 +60,15 @@ export interface DownloadDesktopUpdateOptions {
   readonly signal?: AbortSignal
   /** Optional progress callback (bytes received / declared total). */
   readonly onProgress?: (progress: UpdateDownloadProgress) => void
+  /**
+   * 渠道更新面 base（末尾斜杠容错）。缺省按 `channel` 推导。
+   */
+  readonly baseURL?: string
+  /**
+   * 本安装所属渠道，**必填**：清单的 `channel_id` 必须与它精确相等，
+   * 否则拒绝下载（跨渠道升级 = 品牌被洗掉 / 装到别人的定制版）。
+   */
+  readonly channel: string
 }
 
 /** Typed failure from installer request, validation, or cancellation. */
@@ -98,7 +99,6 @@ export class UpdateDownloadError extends Error {
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
 const DECIMAL_BYTES = /^(0|[1-9][0-9]*)$/u
-const SHA256_PATTERN = /^[0-9a-f]{64}[ \t]+[^\r\n]+$/u
 const DMG_TRAILER_BYTES = 512
 const DMG_TRAILER_MAGIC = Buffer.from('koly', 'ascii')
 const DOS_HEADER_BYTES = 64
@@ -108,11 +108,6 @@ const PE_MAGIC = Buffer.from([0x50, 0x45, 0x00, 0x00])
 const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46])
 const APPIMAGE_MAGIC_INDEX = 8
 const APPIMAGE_MAGIC = Buffer.from('AI\x02', 'ascii')
-
-interface ReleaseAsset {
-  readonly name: string
-  readonly browser_download_url: string
-}
 
 interface DownloadPaths {
   readonly directory: string
@@ -131,14 +126,13 @@ interface DownloadManifest {
 /**
  * Download one installer after its caller has obtained user confirmation.
  *
- * The release metadata endpoint is queried first to locate the platform
- * installer asset and its SHA-256 digest from the companion checksum asset.
- * The artifact is then streamed, verified against the digest, validated for
- * the platform, and atomically renamed into place.
+ * 先取版本清单(`<baseURL>/latest.json`)定位本平台安装包的下载地址与 SHA-256,
+ * 再流式下载、按清单哈希校验、按平台魔数校验,最后原子重命名就位。
  * @param options - Fixed platform, release version, private storage, request, and cancellation inputs.
  * @returns Absolute path to the completely written and validated installer.
  * @throws {UpdateDownloadError} For invalid inputs, transport failures, rejected responses,
- *   missing releases, missing digests, digest mismatches, cancellation, and invalid installers.
+ *   missing releases/platform assets, version mismatches, digest mismatches, cancellation,
+ *   and invalid installers.
  */
 export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOptions): Promise<string> {
   const platform = validatedPlatform(options.platform)
@@ -147,7 +141,14 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   const paths = await prepareDownloadPaths(userDataPath, platform, version)
   throwIfAborted(options.signal)
 
-  const manifest = await resolveDownloadManifest(platform, version, options.request, options.signal)
+  const manifest = await resolveDownloadManifest(
+    platform,
+    version,
+    options.request,
+    options.signal,
+    options.baseURL,
+    options.channel,
+  )
   throwIfAborted(options.signal)
 
   let response: Response
@@ -219,20 +220,6 @@ function validatedVersion(version: string): string {
   return version
 }
 
-/**
- * Select the release-metadata endpoint for one version: prerelease versions
- * (test channel) address the release by its exact tag; stable versions use
- * the latest-stable endpoint.
- * @param version - canonical version (no `v` prefix).
- * @returns the fixed metadata endpoint the release is published under.
- */
-function releaseMetadataEndpoint(version: string): string {
-  const parsed = parseSemVer(version)
-  return parsed !== null && parsed.prerelease.length > 0
-    ? `${DESKTOP_RELEASE_TAG_API_URL}${encodeURIComponent(`v${version}`)}`
-    : DESKTOP_RELEASE_API_URL
-}
-
 function validatedUserDataPath(userDataPath: string): string {
   if (userDataPath.length === 0 || /[\0\r\n]/u.test(userDataPath) || !isAbsolute(userDataPath)) {
     throw new UpdateDownloadError('invalid-options', 'The update user-data path must be an absolute path.')
@@ -296,193 +283,72 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
 }
 
 /**
- * Fetch one release's metadata (channel endpoint), locate the platform
- * asset, and resolve its digest from the same release's checksum asset.
+ * 从渠道版本清单里取出本平台安装包的下载地址与 SHA-256。
+ *
+ * 清单是唯一权威:地址与哈希都来自它,不再有 GitHub 的资产名模板匹配,
+ * 也不再需要单独下载 SHA256SUMS.txt(GitHub 没有可查哈希,才需要那个旁路)。
  * @param platform - selected installer family.
- * @param version - release version the asset name must embed.
+ * @param version - release version the manifest must report.
  * @param request - network boundary.
  * @param signal - caller-owned cancellation.
+ * @param baseURL - 渠道更新面 base(缺省按 channel 推导)。
+ * @param channel - 本安装所属渠道;清单 channel_id 必须与它相等。
  * @returns resolved download manifest for the matched artifact.
+ * @throws {UpdateDownloadError} 清单不可达、版本不符、或该平台未发布安装包。
  */
 async function resolveDownloadManifest(
   platform: DesktopDownloadPlatform,
   version: string,
   request: UpdateArtifactRequest,
   signal: AbortSignal | undefined,
+  baseURL: string | undefined,
+  channel: string,
 ): Promise<DownloadManifest> {
-  const metadata = await fetchJson<ReleaseMetadata>(
-    request,
-    releaseMetadataEndpoint(version),
-    signal,
-  )
-  if (metadata === null) {
-    throw new UpdateDownloadError('network', 'The release metadata could not be fetched.')
+  let manifest
+  try {
+    manifest = await fetchReleaseManifest({
+      request,
+      channel,
+      ...(signal === undefined ? {} : { signal }),
+      ...(baseURL === undefined ? {} : { baseURL }),
+    })
+  } catch (cause) {
+    // 取消 → 'aborted'(调用方需能区分"用户取消"与"网络故障")
+    if (signal?.aborted === true || isAbortFailure(cause)) {
+      throw new UpdateDownloadError('aborted', 'The update manifest request was aborted.', { cause })
+    }
+    throw new UpdateDownloadError('network', 'The update manifest could not be fetched.', { cause })
   }
-  if (!isRecord(metadata) || !Array.isArray(metadata.assets)) {
-    throw new UpdateDownloadError('release-missing', 'The release has no asset manifest.')
+  if (manifest === null) {
+    throw new UpdateDownloadError('network', 'The update manifest could not be fetched.')
   }
+
+  // 清单版本必须与请求版本一致:否则会把"检查到的新版本"换成另一个版本下载
+  // (清单是固定 URL 的可覆盖对象,理论上两次请求之间可能刚好发布新版本)。
   const normalizedVersion = version.replace(/^v/u, '')
-  const expectedName = platform === 'darwin'
-    ? `PicoAide-Harness-${normalizedVersion}-mac.dmg`
-    : platform === 'win32'
-      ? `PicoAide-Harness-${normalizedVersion}-x64-Setup.exe`
-      : `PicoAide-Harness-${normalizedVersion}-x86_64.AppImage`
-  const asset = metadata.assets.find(
-    (entry: unknown): entry is ReleaseAsset =>
-      isRecord(entry)
-      && typeof entry.name === 'string'
-      && typeof entry.browser_download_url === 'string'
-      && entry.name === expectedName,
-  )
+  if (manifest.clientVersion.replace(/^v/u, '') !== normalizedVersion) {
+    throw new UpdateDownloadError(
+      'release-missing',
+      `The update manifest reports ${manifest.clientVersion}, expected ${normalizedVersion}.`,
+    )
+  }
+
+  const asset = releaseAssetFor(manifest, platform)
   if (asset === undefined) {
     throw new UpdateDownloadError(
       'release-missing',
-      `The release has no ${expectedName} asset.`,
+      `The manifest has no installer for platform ${platform}.`,
     )
   }
 
-  const checksumAsset = metadata.assets.find(
-    (entry: unknown): entry is ReleaseAsset =>
-      isRecord(entry)
-      && typeof entry.name === 'string'
-      && typeof entry.browser_download_url === 'string'
-      && entry.name === RELEASE_CHECKSUM_ASSET_NAME,
-  )
-  const checksum = checksumAsset === undefined
-    ? undefined
-    : await resolveChecksum(request, checksumAsset.browser_download_url, expectedName, signal)
-  if (checksum === undefined) {
-    throw new UpdateDownloadError('checksum-missing', 'The release has no checksum manifest.')
-  }
   const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
   const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
   return {
-    assetName: expectedName,
-    downloadUrl: asset.browser_download_url,
-    checksum,
+    assetName: `PicoAide-Harness-${normalizedVersion}-${assetBase}.${extension}`,
+    downloadUrl: asset.url,
+    checksum: asset.sha256,
     extension,
     completedFilename: `PicoAide-Harness-${normalizedVersion}-${assetBase}.${extension}`,
-  }
-}
-
-/**
- * Download the companion checksum manifest and extract the digest for one asset.
- * @param request - network boundary.
- * @param checksumAssetUrl - download URL of the release's SHA-256 manifest asset.
- * @param assetName - expected asset name inside the manifest.
- * @param signal - caller-owned cancellation.
- * @returns lowercase hexadecimal SHA-256 digest, or undefined when the manifest is absent.
- * @throws {UpdateDownloadError} When the manifest download fails or the entry is missing.
- */
-async function resolveChecksum(
-  request: UpdateArtifactRequest,
-  checksumAssetUrl: string,
-  assetName: string,
-  signal: AbortSignal | undefined,
-): Promise<string | undefined> {
-  let response: Response
-  try {
-    response = await request(checksumAssetUrl, {
-      method: 'GET',
-      cache: 'no-store',
-      redirect: 'follow',
-      ...(signal === undefined ? {} : { signal }),
-    })
-  } catch (cause) {
-    if (signal?.aborted === true || isAbortFailure(cause)) throw aborted(cause)
-    throw new UpdateDownloadError('network', 'The checksum manifest could not be downloaded.', { cause })
-  }
-  if (response.status !== 200) {
-    throw new UpdateDownloadError(
-      'http-status',
-      `The checksum service returned HTTP ${String(response.status)}.`,
-      { status: response.status },
-    )
-  }
-
-  let text: string
-  try {
-    text = await readLimitedBody(response, MAX_CHECKSUM_MANIFEST_BYTES)
-  } catch (cause) {
-    if (cause instanceof UpdateDownloadError) throw cause
-    throw new UpdateDownloadError('response-too-large', 'The checksum manifest is too large.', { cause })
-  }
-
-  for (const line of text.split(/\r?\n/u)) {
-    const trimmed = line.trim()
-    if (trimmed === '' || trimmed.startsWith('#')) continue
-    const match = SHA256_PATTERN.exec(trimmed)
-    if (match === null) continue
-    const digest = trimmed.slice(0, 64).toLowerCase()
-    // 发布清单文件名为 `find … | xargs sha256sum` 等工具输出,可能带 `./`
-    // 前缀(如 `./PicoAide-Harness-2.2.0-x64-Setup.exe`);规范化为裸文件名后
-    // 再与资产名严格匹配,否则 v2.2.0 起 CI 产出的清单会永远 checksum-missing。
-    const entryName = trimmed.slice(64).trim().replace(/^\.\//u, '')
-    if (entryName === assetName) return digest
-  }
-  throw new UpdateDownloadError('checksum-missing', `The checksum manifest has no digest for ${assetName}.`)
-}
-
-/** Fetch one bounded JSON release document from the fixed API endpoint. */
-async function fetchJson<T>(
-  request: UpdateArtifactRequest,
-  url: string,
-  signal: AbortSignal | undefined,
-): Promise<T | null> {
-  let response: Response
-  try {
-    response = await request(url, {
-      method: 'GET',
-      headers: { Accept: 'application/vnd.github+json' },
-      cache: 'no-store',
-      redirect: 'error',
-      ...(signal === undefined ? {} : { signal }),
-    })
-  } catch (cause) {
-    if (signal?.aborted === true || isAbortFailure(cause)) throw aborted(cause)
-    return null
-  }
-  if (response.status !== 200) return null
-  let text: string
-  try {
-    text = await readLimitedBody(response, MAX_RELEASE_METADATA_BYTES)
-  } catch {
-    return null
-  }
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return null
-  }
-}
-
-async function readLimitedBody(response: Response, limit: number): Promise<string> {
-  const declaredLength = response.headers.get('content-length')
-  if (declaredLength !== null
-    && /^[0-9]+$/u.test(declaredLength)
-    && BigInt(declaredLength) > BigInt(limit)) {
-    throw new UpdateDownloadError('response-too-large', 'The response body is too large.')
-  }
-
-  if (response.body === null) return ''
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder('utf-8', { fatal: true })
-  let bytesRead = 0
-  let body = ''
-  try {
-    while (true) {
-      const chunk = await reader.read()
-      if (chunk.done) break
-      bytesRead += chunk.value.byteLength
-      if (bytesRead > limit) {
-        await reader.cancel().catch(() => undefined)
-        throw new UpdateDownloadError('response-too-large', 'The response body is too large.')
-      }
-      body += decoder.decode(chunk.value, { stream: true })
-    }
-    return body + decoder.decode()
-  } finally {
-    reader.releaseLock()
   }
 }
 
@@ -630,13 +496,15 @@ function aborted(cause: unknown): UpdateDownloadError {
   return new UpdateDownloadError('aborted', 'The update installer download was cancelled.', { cause })
 }
 
+/**
+ * 取消类失败的判定:标准 AbortError(update-checker 的判定)或下载层已归一的
+ * `aborted` 错误。两者都要认,否则"用户取消"会被后续 catch 重新归类成网络错误。
+ * @param value - 捕获到的异常值。
+ * @returns 是取消类失败时为 true。
+ */
 function isAbortFailure(value: unknown): boolean {
-  return value instanceof UpdateDownloadError
-    ? value.code === 'aborted'
-    : typeof value === 'object'
-      && value !== null
-      && 'name' in value
-      && value.name === 'AbortError'
+  if (value instanceof UpdateDownloadError && value.code === 'aborted') return true
+  return isStandardAbort(value)
 }
 
 async function unlinkIfPresent(filename: string): Promise<void> {
@@ -645,14 +513,6 @@ async function unlinkIfPresent(filename: string): Promise<void> {
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-interface ReleaseMetadata {
-  readonly assets?: readonly unknown[]
 }
 
 function randomId(): string {

@@ -39,6 +39,7 @@ import {
   desktopLocaleFromLanguageTag,
   desktopTrayLabel,
 } from './tray-locale.ts'
+import { CHANNEL_ID_PATTERN, OFFICIAL_CHANNEL } from './desktop-release.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
@@ -71,6 +72,19 @@ function isZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | undefin
   return undefined
 }
 
+/**
+ * 本安装所属的更新渠道。
+ *
+ * 由构建期注入 `DSH_CHANNEL`（品牌/预发构建在打包时写入）；缺省为官方渠道。
+ * 渠道隔离是正确性要求：客户端只会接受 `channel_id` 与它相等的版本清单，
+ * 因此品牌客户端不会被官方清单"洗"成官方版，反之亦然。
+ * @returns 渠道 id（非法值回落到官方渠道，绝不静默放行未知渠道）。
+ */
+function currentChannel(): string {
+  const raw = process.env.DSH_CHANNEL ?? ''
+  return CHANNEL_ID_PATTERN.test(raw) ? raw : OFFICIAL_CHANNEL
+}
+
 /** Native adapter used by the PicoAide Harness launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
@@ -78,6 +92,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     get isPackaged() { return app.isPackaged },
     get canDownload() { return app.isPackaged },
     get currentVersion() { return PRODUCT_VERSION },
+    get channel() { return currentChannel() },
     get statePath() { return join(app.getPath('userData'), 'updates', 'state.json') },
     request: (url, init) => net.fetch(url, init),
     confirmDownload: version => this.confirmUpdateDownload(version),
@@ -497,6 +512,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const artifactPath = await downloadDesktopUpdate({
       platform: this.platform,
       version,
+      channel: currentChannel(),
       userDataPath: app.getPath('userData'),
       request: (url, init) => net.fetch(url, init),
       signal,

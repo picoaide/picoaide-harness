@@ -129,6 +129,13 @@ export interface DesktopUpdateAdapter {
   readonly canDownload: boolean
   /** Installed desktop product version. */
   readonly currentVersion: string
+  /**
+   * 本安装所属的更新渠道（`beta` / `official` / 品牌渠道 id）。
+   *
+   * 渠道隔离是正确性要求：清单里的 `channel_id` 必须与它精确相等才接受，
+   * 否则会出现「品牌客户端被官方清单升级成官方版、品牌丢失」或反向串渠道。
+   */
+  readonly channel: string
   /** Private file used for update-prompt history. */
   readonly statePath: string
   /** Request adapter backed by Electron's native network session. */

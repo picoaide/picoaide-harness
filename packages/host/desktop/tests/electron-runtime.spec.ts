@@ -784,6 +784,9 @@ describe('Electron compatibility runtime', () => {
     expect(updater.download).toHaveBeenCalledWith({
       platform: 'darwin',
       version: '2.1.0',
+      // 渠道随下载请求一并传递给下载器:清单 channel_id 必须与它相等,
+      // 否则品牌客户端会被官方清单升级成官方版(渠道隔离)
+      channel: 'official',
       userDataPath: '/tmp/dsh-desktop-user-data',
       request: expect.any(Function),
       signal: controller.signal,
