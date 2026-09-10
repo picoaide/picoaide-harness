@@ -49,6 +49,43 @@ WORKDIR /app
 COPY --from=build /out/picoaide-server /app/picoaide-server
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+# --- 交付面自包含:镜像内自带整套部署栈文件 ---
+# 客户侧不需要仓库、不需要外网拉配置:一个 docker run 就能把
+# compose + Caddyfile + .env.example + VERSION 导到部署目录。
+# (这些是编排文件,只被 entrypoint 拷出,与 webadmin 的 go:embed 无关。)
+COPY docker-compose.yml Caddyfile.internal Caddyfile.autocert Caddyfile.manual .env.example /opt/picoaide/deploy/
+# 编译期注入的版本号:entrypoint 落客户端资产路径、updatecheck 比对、运维核对三处共用
+# 注意:ARG 不跨 stage 继承,必须在 Stage 3 重新声明(否则此处 VERSION 为空,写出空 VERSION 文件)
+ARG VERSION=dev
+RUN echo "$VERSION" > /opt/picoaide/VERSION
+
+# 本镜像所属渠道:官方镜像构建时为 official。服务端 updatecheck 据此校验清单的
+# channel_id(PICOAI_CHANNEL 可在部署 .env 覆盖为品牌渠道)。
+# 三者必须自洽:渠道、PICOAI_UPDATE_ENDPOINT 指向的目录、清单里的 channel_id ——
+# 不一致会被 updatecheck 判为"检查不可用"(fail-loud,不静默跨渠道升级)。
+ARG CHANNEL=official
+RUN echo "$CHANNEL" > /opt/picoaide/CHANNEL
+ENV PICOAI_CHANNEL=$CHANNEL
+
+# --- 客户端安装包随镜像分发(单包交付的核心) ---
+# 客户端资产由 CI 三平台 job 产出后经命名上下文 clientassets 输入(目录结构:
+# client/<文件名> + CLIENT-RELEASE.json)。客户端与服务端**同版本同包**发布,
+# 服务端启动后由 entrypoint 落到 /data/releases/<version>/client/,再经
+# /api/client/v2/updates/manifest 与 /updates/client/<file> 对员工下发——
+# 版本配套因此在结构上不可能错位。
+#
+# 构建上下文契约(两处都必须遵守):
+#   clientassets/client/        目录必须**存在**(可为空)
+#   clientassets/CLIENT-RELEASE.json  可选
+# 实测(2026-09-10):必须用**目录形式** `client/` —— 写成 `client/*` 通配时,
+# 源目录为空会直接构建失败("lstat /client: no such file or directory"),
+# 而目录形式对空目录是允许的。占位文件方案因此不必要。
+COPY --from=clientassets client/ /opt/picoaide/client/
+# 清单用通配:本地构建没有该文件,`json*` 匹配不到时不报错
+COPY --from=clientassets CLIENT-RELEASE.json* /opt/picoaide/
+# 占位文件若存在(某些构建脚本会放)不进最终镜像影响展示
+RUN rm -f /opt/picoaide/client/.keep
 # 以 root 启动 entrypoint(修正挂载卷所有权)→ su-exec 降权到 picoaide 运行
 USER root
 VOLUME ["/data"]

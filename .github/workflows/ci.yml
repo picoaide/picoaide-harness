@@ -135,11 +135,12 @@ jobs:
       - run: npm test
         working-directory: server/webadmin
       - run: make build-server
-      - name: Deploy script syntax checks
-        # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
-        # 否则实际变为 server/server/scripts/...(文件不存在, exit 127)。
+      - name: Deployment asset syntax checks
+        # 部署脚本(deploy.sh / install-server.sh)已于 2026-09-10 移除,此处只校验
+        # 仍然发货的部署资产:镜像 entrypoint 的 shell 语法 + compose 配置。
+        # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀。
         run: |
-          bash -n scripts/install-server.sh scripts/deploy.sh
+          bash -n docker/entrypoint.sh
           if command -v docker >/dev/null 2>&1; then
             # 单 compose 文件(caddy+server+postgres):PG_PASSWORD 强必填,
             # 注入后验证语法
@@ -420,19 +421,32 @@ jobs:
           path: packages/host/desktop/dist/mac-smoke/*.dmg
           if-no-files-found: error
 
+  # 发布(2026-09-10 改版):GitHub Release **仍然发布**,但内容物从"客户端安装包"
+  # 改为"服务端镜像压缩包"。两条分发面分工见
+  # docs/planning/2026-09-10-r2-update-server-runbook.md §0.1:
+  #   - 更新服务器(R2 release.picoaide.com):热分发面,只留最近 3 个版本,服务端
+  #     updatecheck 与客户部署从这里取;
+  #   - GitHub Release(本 job):冷存档 + 变更记录,永久保留全部历史版本镜像,
+  #     审计/查变更/取更老版本镜像时用。
+  # 客户端安装包不再单独发布:它已经在镜像里,由服务端自行下发。
   release:
-    name: Release
+    name: Release (server image archive)
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
+      packages: write      # 推镜像到 GHCR(客户端资产只有这里拿得到,故构建点在本 job)
+    outputs:
+      # 渠道传递给 publish-update-server:两个 job 必须写同一个渠道目录,
+      # 否则会出现"镜像传 official、清单传 beta"的错配。
+      channel: ${{ steps.channel.outputs.channel }}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      # 只取三平台安装包(gate 的 workspace-build / server 二进制不参与发布)。
+      # 三平台安装包仍需先构建:它们要打进镜像(客户端随镜像分发)。
       - uses: actions/download-artifact@v7
         with:
           pattern: desktop-*
@@ -443,33 +457,154 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      # 审计 2026-08-25 D-2:发布前强制校验 tag == 两处 package.json version
-      # (update-checker 剥 v 后匹配资产名;版本号只改一处 = 发布成功但用户
-      # 升级源永久失效)。不一致直接 fail-loud。用 scripts/version.mjs 统一
-      # 校验(git tag 权威源;set 子命令可一键同步两处)。
+      # 发布前强制校验 tag == 两处 package.json version(scripts/version.mjs 是
+      # 唯一真源;版本号只改一处会让发布成功但升级源永久对不上)。不一致 fail-loud。
       - name: Verify tag matches package versions
         run: |
           node scripts/version.mjs check "$GITHUB_REF_NAME"
-      - name: Compute SHA-256 digests
+
+      # 渠道解析(2026-09-10):三种渠道类型互不升级,发布面必须分开。
+      #   beta     = 预发布 tag(含 `-`,如 v2.7.0-beta.1),我们自己内测
+      #   official = 正式 tag(vX.Y.Z)
+      #   品牌渠道 = workflow_dispatch 显式指定(wf_channel 输入)
+      # 渠道值贯穿:客户端清单 channel_id、镜像 label、R2 上传目录、
+      # latest.json.channel_id。写错 = 客户端/服务端跨渠道升级。
+      - name: Resolve release channel
+        id: channel
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          cd release-artifacts
-          # 审计 D-4:显式清单防 glob 吞入残留产物;空目录时 xargs 报错,先保护。
-          # P2-50: deb 必须参与发布(官网宣称「AppImage + deb」,此前被排除)。
-          if ! find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' \) | grep -q .; then
-            echo "::error::no release artifacts found";
+          set -euo pipefail
+          # 渠道由 tag 形态决定,且**只支持 beta / official**:
+          #   beta     = 预发布 tag(含 `-`,如 v2.7.0-beta.1),我们自己内测
+          #   official = 正式 tag(vX.Y.Z)
+          #
+          # 品牌渠道**故意在这里 fail-loud**(2026-09-10):它需要独立的渠道配置包
+          # (品牌名/图标/appId/默认服务器地址/更新源)与按渠道矩阵化的打包,
+          # 见 docs/planning/2026-09-04-enterprise-channel-branding.md。
+          # 在渠道管线落地前,任何看似品牌渠道的 tag 都必须停下 —— 静默按 official
+          # 发布会让品牌客户端被官方清单升级、品牌被"洗掉"(最严重的一类错)。
+          if [[ "${TAG}" == *-* ]]; then
+            # 预发布:再区分是不是品牌渠道标记(约定品牌 tag 形如 v2.7.0-<channel-id>.N)
+            case "${TAG}" in
+              *-beta.*|*-beta|*-rc.*|*-rc|*-alpha.*|*-alpha)
+                CH=beta ;;
+              *)
+                echo "::error::无法从 tag ${TAG} 判定渠道:品牌渠道发布需要渠道配置包与渠道化打包管线(尚未实施)。"
+                echo "::error::请改用 vX.Y.Z(官方)或 vX.Y.Z-beta.N(预发)形态的 tag。"
+                exit 1 ;;
+            esac
+          else
+            CH=official
+          fi
+          # 与客户端 CHANNEL_ID_PATTERN / 服务端 IsChannelID 同源的形状校验,
+          # 防畸形路径注入到 R2 key 与清单
+          if ! printf '%s' "$CH" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$'; then
+            echo "::error::非法渠道 id: ${CH}(期望 ^[a-z0-9][a-z0-9-]{0,31}$)"
             exit 1
           fi
-          # 修复 2026-08-25:旧版 sha256sum * 无 ./ 前缀,find|xargs 产出 ./ 前缀,
-          # 而客户端 update-download 用裸文件名严格匹配 → v2.2.0 起 SHA256SUMS
-          # 永远 checksum-missing(升级提示后下载静默失败)。%f\0 保留 D-4 显式清单
-          # 健壮性,同时恢复裸文件名兼容全部客户端版本。
-          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' \) -printf '%f\0' \
-            | xargs -0 sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-      # 变更说明优先读取仓库内 docs/releases/<tag>.md(由发布者随版本提交,
-      # 保持与 GitHub Release Body 一致),保证每个版本都有完整、可审阅的说明;
-      # 文件缺失时降级为 GitHub 原生 --generate-notes(按版本区间提交自动生成),
-      # 避免再次出现「版本发布但 Release 无变更说明」的占位文案。
+          echo "channel=${CH}" >> "$GITHUB_OUTPUT"
+          echo "渠道 = ${CH}(tag ${TAG})" "
+
+      - name: Assemble client assets into the image build context
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VER="${VERSION#v}"    # 本 step 独立取版本(不跨 step 复用变量)
+          # 客户端资产平铺在一个目录:entrypoint 落盘后由服务端按文件名下发。
+          # 目录必须存在(Dockerfile 用目录形式 COPY;缺目录会构建失败)。
+          mkdir -p client-assets/client
+          cp release-artifacts/*.exe   client-assets/client/ 2>/dev/null || true
+          cp release-artifacts/*.dmg   client-assets/client/ 2>/dev/null || true
+          cp release-artifacts/*.AppImage client-assets/client/ 2>/dev/null || true
+          cp release-artifacts/*.deb   client-assets/client/ 2>/dev/null || true
+          if [ -z "$(ls -A client-assets/client)" ]; then
+            echo "::error::no client installers found in release-artifacts"
+            exit 1
+          fi
+          ls -lh client-assets/client/
+          # 客户端资产清单:镜像内携带,服务端据此生成
+          # GET /api/client/v2/updates/manifest。
+          # 必须用 **client.version / client.assets** 结构:客户端解析器
+          # (packages/host/desktop/src/desktop-release.ts 的 parseReleaseManifest)
+          # 只认这一种形状,且强制 url 绝对 https、sha256 为 64 位小写 hex。
+          # 这里 url 用官方基址占位;服务端对外下发时会按自身地址重写
+          # (客户端因此始终从自己登录的服务器取包)。
+          CH="${{ steps.channel.outputs.channel }}"
+          BASE="https://release.picoaide.com/${CH}/releases/${VER}"
+          {
+            echo '{'
+            echo '  "schema": 1,'
+            echo "  \"channel_id\": \"${CH}\",
+            echo '  "client": {'
+            echo "    \"version\": \"${VER}\","
+            echo '    "assets": {'
+            first=1
+            add() { # $1=清单键 $2=文件名
+              [ -f "client-assets/client/$2" ] || return 0
+              [ "$first" = 1 ] || echo ','
+              first=0
+              printf '      "%s": { "file": "%s", "url": "%s/%s", "sha256": "%s", "size": %s }' \
+                "$1" "$2" "$BASE" "$2" \
+                "$(sha256sum "client-assets/client/$2" | cut -d' ' -f1)" \
+                "$(stat -c%s "client-assets/client/$2")"
+            }
+            add mac-universal "$(basename "$(ls client-assets/client/*.dmg | head -1)" 2>/dev/null || echo -)"
+            add win-x64       "$(basename "$(ls client-assets/client/*.exe | head -1)" 2>/dev/null || echo -)"
+            add linux-x64     "$(basename "$(ls client-assets/client/*.AppImage | head -1)" 2>/dev/null || echo -)"
+            echo
+            echo '    }'
+            echo '  }'
+            echo '}'
+          } > client-assets/CLIENT-RELEASE.json
+          node -e "JSON.parse(require('fs').readFileSync('client-assets/CLIENT-RELEASE.json','utf8')); console.log('CLIENT-RELEASE.json 合法')"
+          cat client-assets/CLIENT-RELEASE.json
+
+      - name: Build server image for the release tag
+        env:
+          VERSION: ${{ github.ref_name }}
+          IMAGE: ghcr.io/picoaide/picoaide-harness-server
+        run: |
+          set -euo pipefail
+          VER="${VERSION#v}"
+          # 本 job 是镜像的**唯一构建点**:只有这里同时拿得到三平台客户端资产
+          # (gate 的 workspace-build + 三个 desktop-* artifact)与发布上下文。
+          # build-context root 提供 brands/official(webadmin 编译期品牌源)。
+          # org.opencontainers.image.source label 是 GHCR 包归属本仓库的凭证,
+          # 缺了会 write_package 被拒(2026-08-26 踩坑)。
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg VERSION="$VER" \
+            --build-arg CHANNEL="${{ steps.channel.outputs.channel }}" \
+            --build-context root=. \
+            --build-context clientassets=./client-assets \
+            --label "org.opencontainers.image.source=https://github.com/picoaide/picoaide-harness" \
+            --label "org.opencontainers.image.version=$VER" \
+            --tag "${IMAGE}:v${VER}" \
+            --load \
+            server
+          # 推 GHCR:docker.yml 随后从 GHCR 取回并补推 latest/vX.Y 宽标签,
+          # 避免第二处构建配置漂移(镜像只构建一次)。
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${IMAGE}:v${VER}"
+
+      - name: Export compressed image archive
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VER="${VERSION#v}"
+          ARCHIVE="picoaide-server-${VER}-amd64.tar.zst"
+          # 先 docker save 到临时 tar,再用 zstd 压成发布物;sha256 一并产出供
+          # 更新服务器 SHA256SUMS 与人工校验使用(解压:zstd -d < file | docker load)
+          docker save "picoaide-harness-server:$VER" -o image.tar
+          zstd -T0 -3 -q image.tar -o "$ARCHIVE"
+          rm -f image.tar
+          sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS
+          ls -lh "$ARCHIVE" SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -481,43 +616,118 @@ jobs:
             echo "::warning::docs/releases/${TAG}.md not found — falling back to GitHub auto-generated notes"
             NOTES_FLAG="--generate-notes"
           fi
-          # Pre-release tag(带 prerelease 段,如 v2.7.0-beta.1,version.mjs check
-          # 已保证是合法 semver,不含 + 元数据)按 GitHub 官方语义以
-          # Pre-release 发布:Releases 页面可见(带 Pre-release 徽章),但
-          # releases/latest 与客户端 update-checker/update-download 都排除
-          # prerelease,正式用户不会收到更新。正式 tag(纯 vX.Y.Z,Latest)
-          # 发布为普通 release,才推送给用户(默认成为 Latest;若已有更新的
-          # 正式版,GitHub 自动降为 None)。
+          # prerelease tag(含 prerelease 段)按 GitHub 语义以 Pre-release 发布:
+          # 可见但不会被当成 Latest。正式 tag 发布为普通 release。
           PRERELEASE=""
           if [[ "${TAG}" == *-* ]]; then
             PRERELEASE="--prerelease"
-            echo "Releasing ${TAG} as a prerelease (visible on Releases page; stable clients will not see it)"
+            echo "Releasing ${TAG} as a prerelease"
           fi
-          # 幂等(2026-09-06):同 tag 重跑/重推时 release 已存在会 422——先查,
-          # 存在则 edit(标题/说明/Pre-release 标记)+ 强制覆盖上传资产(旧资产
-          # 是上次运行产物,必须刷新为本次构建);不存在则 create。两种情况
-          # 下 releases/<tag> 页面都完整可见。
+          # 幂等(2026-09-06):同 tag 重跑时 release 已存在会 422 —— 先查再决定
+          # create/edit,并用 --clobber 覆盖旧资产(旧资产是上次运行的产物)。
           if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — updating title/notes/flags and clobbering assets"
-            gh release edit "${TAG}" \
-              --repo "${REPO}" \
-              --title "PicoAide Harness ${TAG}" \
-              ${NOTES_FLAG} \
-              ${PRERELEASE}
-            gh release upload "${TAG}" \
-              --repo "${REPO}" \
-              --clobber \
-              release-artifacts/*.AppImage release-artifacts/*.deb release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+            gh release edit "${TAG}" --repo "${REPO}" \
+              --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE}
+            gh release upload "${TAG}" --repo "${REPO}" --clobber \
+              *.tar.zst SHA256SUMS
           else
-            gh release create "${TAG}" \
-              --repo "${REPO}" \
-              --title "PicoAide Harness ${TAG}" \
-              ${NOTES_FLAG} \
-              ${PRERELEASE} \
-              release-artifacts/*.AppImage release-artifacts/*.deb release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+            gh release create "${TAG}" --repo "${REPO}" \
+              --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE} \
+              *.tar.zst SHA256SUMS
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # 更新服务器(R2)上传:需要 R2 secrets,尚未配置时**跳过而非失败**,保证
+  # Release 本身可用。配置好 R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID /
+  # R2_SECRET_ACCESS_KEY 后自动启用。上传细节与保留策略见
+  # docs/planning/2026-09-10-r2-update-server-runbook.md §5。
+  publish-update-server:
+    name: Publish to update server (R2)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check R2 credentials
+        id: creds
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          if [ -z "${R2_ACCOUNT_ID}" ]; then
+            echo "::warning::R2 secrets 未配置 —— 跳过更新服务器上传(不影响 GitHub Release)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.creds.outputs.skip == 'false'
+      - name: Download release archive
+        if: steps.creds.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo picoaide/picoaide-harness \
+            --pattern '*.tar.zst' --pattern 'SHA256SUMS' --dir release-bundle
+          ls -lh release-bundle
+      - name: Generate latest.json
+        if: steps.creds.outputs.skip == 'false'
+        env:
+          VERSION: ${{ github.ref_name }}
+          CHANNEL: ${{ needs.release.outputs.channel }}
+        run: |
+          set -euo pipefail
+          VER="${VERSION#v}"; CH="${CHANNEL}"
+          # schema 权威定义见 R2 手册 §6;client.assets 当前不填(客户端包在镜像里)
+          cat > release-bundle/latest.json <<JSON
+          {
+            "schema": 1,
+            "channel_id": "${CH}",
+            "server": {
+              "version": "${VER}",
+              "image_tag": "v${VER}",
+              "image_ref": "ghcr.io/picoaide/picoaide-harness-server:v${VER}",
+              "image_asset": "https://release.picoaide.com/${CH}/releases/${VER}/picoaide-server-${VER}-amd64.tar.zst"
+            },
+            "client": { "version": "${VER}" },
+            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+          cat release-bundle/latest.json
+      - name: Upload to R2 and prune old versions
+        if: steps.creds.outputs.skip == 'false'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          VERSION: ${{ github.ref_name }}
+          CHANNEL: ${{ needs.release.outputs.channel }}
+        run: |
+          set -euo pipefail
+          aws="aws --endpoint-url https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          VER="${VERSION#v}"; CH="${CHANNEL}"; BASE="s3://${R2_BUCKET}/${CH}"
+          IMMUTABLE='public, max-age=31536000, immutable'
+
+          # 1) 版本化资产(不可变、长缓存)
+          $aws s3 cp release-bundle/*.tar.zst "$BASE/releases/${VER}/" \
+            --content-type application/zstd --cache-control "$IMMUTABLE"
+          $aws s3 cp release-bundle/SHA256SUMS "$BASE/releases/${VER}/SHA256SUMS" \
+            --content-type text/plain --cache-control "$IMMUTABLE"
+
+          # 2) 清理到最近 3 个版本(版本序 sort -V,不能字典序:2.10.0 > 2.9.0)
+          $aws s3 ls "$BASE/releases/" | awk '{print $2}' | sed 's#/##' \
+            | sort -rV | tail -n +4 | while read -r old; do
+                echo "prune $CH/releases/$old"
+                $aws s3 rm "$BASE/releases/$old/" --recursive
+              done
+
+          # 3) 版本指针最后覆盖(短缓存,新版本才能立即可见)
+          $aws s3 cp release-bundle/latest.json "$BASE/latest.json" \
+            --content-type application/json --cache-control 'no-cache'
 
   # PR 场景:把本次提交的编译产物汇总评论到 PR(fork 分支 token 只读,跳过)。
   pr-summary:
