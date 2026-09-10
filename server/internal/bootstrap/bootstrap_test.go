@@ -77,6 +77,12 @@ func TestBootstrap(t *testing.T) {
 	if out["default_model"] != "deepseek-chat" {
 		t.Fatalf("default_model = %v", out["default_model"])
 	}
+	// server_version:客户端据此发现"服务端已升级、本机客户端是旧版"。
+	// 服务端与客户端同包发版(客户端安装包随镜像发布),两者版本必须一致,
+	// 所以这个字段是版本错配的唯一可见信号,不能缺。
+	if got := out["server_version"]; got != serverauth.BuildVersion() {
+		t.Fatalf("server_version = %v, want %q", got, serverauth.BuildVersion())
+	}
 	models := out["models"].([]any)
 	if len(models) != 1 {
 		t.Fatalf("models = %v", models)

@@ -39,7 +39,7 @@ if [ -n "$UNPACK" ]; then
   mkdir -p "$UNPACK" 2>/dev/null || true
   cp -a /opt/picoaide/deploy/. "$UNPACK"/ 2>/dev/null || true
   cp -a /opt/picoaide/VERSION "$UNPACK"/VERSION 2>/dev/null || true
-  # 客户端资产(镜像内已含;服务端启动后由 entrypoint 落到 /data/releases/)
+  # 客户端资产(镜像内已含,服务端直接对外提供;这里只是给离线部署顺手导出)
   if [ -d /opt/picoaide/client ]; then
     mkdir -p "$UNPACK/client" 2>/dev/null || true
     cp -a /opt/picoaide/client/. "$UNPACK"/client/ 2>/dev/null || true

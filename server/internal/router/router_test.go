@@ -14,6 +14,7 @@ import (
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -30,20 +31,21 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	Register(r, Deps{
-		DB:         nil,
-		Auth:       serverauth.New(nil).Handlers(),
-		Admin:      (&serverauth.AdminAPI{}).Handlers(),
-		Appstore:   appstore.NewHandlers(nil),
-		Bootstrap:  bootstrap.NewHandlers(nil),
-		Brand:      brand.NewHandlers(nil, "/tmp/nonexistent"),
-		Market:     marketplace.NewHandlers(nil, "/tmp/nonexistent"),
-		Agentshare: agentshare.NewHandlers(nil, "/tmp/nonexistent"),
-		Shared:     sharedskills.NewHandlers(nil, "/tmp/nonexistent"),
-		Capability: capabilities.NewHandlers(nil, "/tmp/nonexistent"),
-		Connector:  connectors.NewHandlers(nil),
-		Telemetry:  telemetry.NewHandlers(nil),
-		Gateway:    llmgateway.NewHandlers(nil),
-		Reports:    reports.NewHandlers(nil),
+		DB:            nil,
+		Auth:          serverauth.New(nil).Handlers(),
+		Admin:         (&serverauth.AdminAPI{}).Handlers(),
+		Appstore:      appstore.NewHandlers(nil),
+		Bootstrap:     bootstrap.NewHandlers(nil),
+		Brand:         brand.NewHandlers(nil, "/tmp/nonexistent"),
+		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
+		Market:        marketplace.NewHandlers(nil, "/tmp/nonexistent"),
+		Agentshare:    agentshare.NewHandlers(nil, "/tmp/nonexistent"),
+		Shared:        sharedskills.NewHandlers(nil, "/tmp/nonexistent"),
+		Capability:    capabilities.NewHandlers(nil, "/tmp/nonexistent"),
+		Connector:     connectors.NewHandlers(nil),
+		Telemetry:     telemetry.NewHandlers(nil),
+		Gateway:       llmgateway.NewHandlers(nil),
+		Reports:       reports.NewHandlers(nil),
 	})
 	return r
 }

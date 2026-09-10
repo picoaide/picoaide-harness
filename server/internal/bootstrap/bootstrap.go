@@ -52,6 +52,10 @@ type Response struct {
 	// 每项 = 客户端 ConnectorDef 对齐的 JSON(definition 字段内嵌),
 	// 服务端管理员经 webadmin 管理;客户端凭证仍只存本地,不随下发。
 	Connectors []ConnectorItem `json:"connectors"`
+	// ServerVersion 服务端版本(编译期注入)。
+	// 客户端据此发现"服务端已升级、本机客户端是旧版"并提示升级 —— 服务端与
+	// 客户端同包发版(客户端安装包随镜像发布),所以两者版本必须一致。
+	ServerVersion string `json:"server_version"`
 }
 
 // ConnectorItem 是下发到客户端的连接器定义(与客户端 ConnectorDef 对齐)。
@@ -188,11 +192,12 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	}
 
 	return &Response{
-		DefaultModel: defaultModel,
-		Models:       models,
-		Skills:       skillItems,
-		Web:          web,
-		Connectors:   connectorItems,
+		DefaultModel:  defaultModel,
+		Models:        models,
+		Skills:        skillItems,
+		Web:           web,
+		Connectors:    connectorItems,
+		ServerVersion: serverauth.BuildVersion(),
 	}, nil
 }
 

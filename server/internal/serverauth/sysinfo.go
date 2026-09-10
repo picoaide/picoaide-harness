@@ -133,6 +133,9 @@ var buildVersion = "dev"
 // SetBuildVersion 注入运行时版本(main 启动时调用一次)。
 func SetBuildVersion(v string) { buildVersion = v }
 
+// BuildVersion 返回当前运行时版本(bootstrap 下发、门户页脚等处共用单一来源)。
+func BuildVersion() string { return buildVersion }
+
 // defaultUpdateChecker 是生产用包级缓存 checker(单例,跨请求共享缓存)。
 var defaultUpdateCheckOnce sync.Once
 var defaultUpdateCheckVal *updatecheck.CachedChecker

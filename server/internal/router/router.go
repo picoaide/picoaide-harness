@@ -21,6 +21,7 @@ import (
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -42,19 +43,21 @@ const (
 type Deps struct {
 	DB *sql.DB
 
-	Auth       *serverauth.ClientHandlers
-	Admin      *serverauth.AdminHandlers
-	Appstore   *appstore.Handlers
-	Bootstrap  *bootstrap.Handlers
-	Brand      *brand.Handlers
-	Market     *marketplace.Handlers
-	Agentshare *agentshare.Handlers
-	Shared     *sharedskills.Handlers
-	Capability *capabilities.Handlers
-	Connector  *connectors.Handlers
-	Telemetry  *telemetry.Handlers
-	Gateway    *llmgateway.Handlers
-	Reports    *reports.Handlers
+	Auth      *serverauth.ClientHandlers
+	Admin     *serverauth.AdminHandlers
+	Appstore  *appstore.Handlers
+	Bootstrap *bootstrap.Handlers
+	Brand     *brand.Handlers
+	// ClientRelease 客户端安装包下发(随镜像发布,见 internal/clientrelease)。
+	ClientRelease *clientrelease.Handlers
+	Market        *marketplace.Handlers
+	Agentshare    *agentshare.Handlers
+	Shared        *sharedskills.Handlers
+	Capability    *capabilities.Handlers
+	Connector     *connectors.Handlers
+	Telemetry     *telemetry.Handlers
+	Gateway       *llmgateway.Handlers
+	Reports       *reports.Handlers
 }
 
 // Register 集中装配两个命名空间分组下的全部路由。
@@ -73,6 +76,14 @@ func Register(r *gin.Engine, deps Deps) {
 
 	// ================= DeepSeek 兼容 LLM 网关 /v1(独立命名空间) =================
 	registerGatewayV1(r, deps)
+
+	// ================= 客户端安装包下载(根路径,非 API) =================
+	// 不走 /api 命名空间:这是大文件下载,与 /api 的强制 JSON 契约无关
+	// (与归档下载同属"文件语义"例外)。挂根路径也让地址简短稳定:
+	// https://<服务端>/updates/client/<文件名>
+	// ServeFile 自带 Range/断点续传,无需额外中间件。
+	r.GET("/updates/client/*file", deps.ClientRelease.File)
+	r.HEAD("/updates/client/*file", deps.ClientRelease.File)
 }
 
 // maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限
@@ -130,6 +141,11 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 
 	// 启动配置
 	cli.GET("/config/bootstrap", serverauth.BearerAuth(d.DB), d.Bootstrap.Bootstrap)
+
+	// 客户端安装包(公开:员工首次安装与升级都要能取,登录前也要能拿)
+	// 清单地址故意放在 /api/client/v2/updates/manifest,与更新服务器上的
+	// latest.json 同形状 —— 客户端一套解析逻辑走两种来源。
+	cli.GET("/updates/manifest", d.ClientRelease.Manifest)
 
 	// 品牌/门户(公开)
 	cli.GET("/brand", d.Brand.PublicBrand)
