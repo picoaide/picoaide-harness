@@ -106,9 +106,11 @@ describe('channel-sync built-in brand (未登录/服务端不可达时的显示�
     expect(emitted).toEqual([DEFAULT_CHANNEL])
   })
 
-  it('uses the neutral content when the injected channel brand is empty', () => {
-    // 有渠道包但品牌为空 = 注入链断了:中性占位,绝不冒充官方。
-    expect(brandChannel({})).toEqual(NEUTRAL_CHANNEL)
+  it('treats a materialized empty brand object as no channel brand', () => {
+    // schemastery 物化出的 `{}` 不是渠道品牌:判成渠道会让官方构建改名
+    // (2026-09-10 官方 E2E 标题变 "Harness")。中性占位由 desktop-channel.ts
+    // 在注入前就写好。
+    expect(brandChannel({})).toEqual(DEFAULT_CHANNEL)
   })
 
   it('keeps short_name through the logo-URL absolutization', () => {

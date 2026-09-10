@@ -16,6 +16,17 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { packagedProductName } from './channel-build.ts'
+
+/** 本次打包产物声明的产品名（渠道构建下即渠道名；见 channel-build.ts）。 */
+const PRODUCT_NAME = packagedProductName()
+
+/**
+ * 厂商品牌（官方渠道的品牌名）。
+ *
+ * 只用于"渠道构建下不得出现"这条反向断言 —— 官方构建里它就是合法文案。
+ */
+const OFFICIAL_BRAND_NAME = 'PicoAide'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const GATEWAY_PORT = 34567
@@ -246,7 +257,25 @@ async function main() {
   await wait(400)
   await clickLabel(cdp, '登录', 7000)
   const title = await evalSafe(cdp, 'document.title')
-  reportStep('登录成功（mock gateway）', title.includes('PicoAide'), `title=${title}`)
+  // 断言对齐**本次构建声明的产品名**（渠道构建下是客户名），不硬编码厂商名:
+  // 旧写法把厂商名直接写进断言,渠道构建的 E2E 于是永远红。
+  const titleOk = title.includes(PRODUCT_NAME)
+  // 白标不变量(2026-09-10):渠道构建下**界面上不得出现厂商品牌**。这条断言让
+  // E2E 自己成为白标的门禁 —— 侧边栏/标题/托盘文案任何一处漏出厂商名,这里就红
+  // (此前只在人工探针里查,CI 无从发现)。官方构建的品牌本来就是厂商名,跳过。
+  let brandLeak = ''
+  // `E2E_FORCE_BRAND_LEAK_CHECK=1` 只给"证明这条门禁真的会红"用:官方构建里
+  // 厂商名是合法文案,强制开启后应当失败(自测门禁本身)。
+  const channelBuild = !PRODUCT_NAME.toLowerCase().includes(OFFICIAL_BRAND_NAME.toLowerCase())
+  if (channelBuild || process.env.E2E_FORCE_BRAND_LEAK_CHECK === '1') {
+    const text = await evalSafe(cdp, `document.body.innerText + ' ' + document.title`)
+    if (typeof text === 'string' && text.includes(OFFICIAL_BRAND_NAME)) brandLeak = 'body/title contains the vendor brand'
+  }
+  reportStep(
+    '登录成功（mock gateway）',
+    titleOk && brandLeak === '',
+    `title=${title} expected=${PRODUCT_NAME}${brandLeak === '' ? '' : ` leak=${brandLeak}`}`,
+  )
   await screenshot(cdp, '01-login-main')
 
   // 4.5 Boot graph completeness: the host composes window.__DSH_BOOT__ from

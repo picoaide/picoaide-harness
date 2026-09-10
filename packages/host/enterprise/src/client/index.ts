@@ -25,7 +25,8 @@ import { BraceMark, BrandName, BrandBadge } from './Channel.tsx'
 import { applyUpdateSection } from './UpdateSection.tsx'
 import { buildChannelCSSVars } from './channel-vars.ts'
 import { installFavicon } from './favicon.ts'
-import { startChannelStore, readChannelSync } from './channel-store.ts'
+import { channelTitle } from '../channel-content.ts'
+import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
 import { en, type EnterpriseKey, zh } from './locales.ts'
 
@@ -113,7 +114,9 @@ export function apply(ctx: ClientContext): void {
       applyVars(readChannelSync())
       // 渠道变更驱动 hero 变量(与 channel-store 同事件;此处仅应用 CSS 变量)。
       const off = ctx.on('pico/channel-changed', (channel) => applyVars(channel))
-      return () => { off(); offStore() }
+      // 播种(本地)同样要驱动变量:否则 hero 标题停在回落文案上。
+      const offStoreValue = subscribeChannel((channel) => applyVars(channel))
+      return () => { off(); offStoreValue(); offStore() }
     },
     'enterprise: channel store',
   )
@@ -192,27 +195,48 @@ export function apply(ctx: ClientContext): void {
   // 保留会话标题前缀, 不做无条件重写(避免与上游会话标题投影打架)。
   ctx.effect(() => {
     const UPSTREAM_PRODUCT_TITLE = 'DeepSeek Harness'
-    const productTitle = (channel: ChannelConfig | null): string =>
-      channel?.title ? channel.title : 'PicoAide Harness'
+    // 标题名与侧边栏同源(channel-content 的 channelTitle):渠道构建下不可能
+    // 回落厂商名 —— 页面标题是窗口/任务栏标题的来源。
+    const productTitle = (channel: ChannelConfig | null): string => channelTitle(channel)
     const current = (): string => document.title
+    /**
+     * 上一次**我们**写进标题的产品名。
+     *
+     * 归一化必须对自己写过的值也成立:渠道内容(随包品牌播种)比上游的 React
+     * effect 晚到,第一遍只能按"当时已知的"产品名写(未播种时是内置官方名),
+     * 播种后必须能把它**再改一次**成渠道名。只认上游字面量的话,第二遍就会
+     * 因为"标题已不是 DeepSeek Harness"而放弃 —— 实测表现为:侧边栏已是渠道名,
+     * 窗口/taskbar 标题还停在厂商名。
+     */
+    let writtenProduct: string | undefined
     const apply = (channel: ChannelConfig | null): void => {
       const product = productTitle(channel)
       const t = current()
+      const known = writtenProduct === undefined
+        ? [UPSTREAM_PRODUCT_TITLE]
+        : [UPSTREAM_PRODUCT_TITLE, writtenProduct]
+      const bare = known.find(candidate => t === candidate)
+      const prefixed = known.find(candidate => t.endsWith(` — ${candidate}`))
       let next: string
-      if (t === UPSTREAM_PRODUCT_TITLE) {
+      if (bare !== undefined) {
         next = product
-      } else if (t.endsWith(` — ${UPSTREAM_PRODUCT_TITLE}`)) {
-        next = `${t.slice(0, -(UPSTREAM_PRODUCT_TITLE.length + 3))} — ${product}`
+      } else if (prefixed !== undefined) {
+        next = `${t.slice(0, -(prefixed.length + 3))} — ${product}`
       } else {
         next = t
       }
-      if (next !== t) document.title = next
+      if (next !== t) {
+        document.title = next
+        writtenProduct = product
+      }
     }
     apply(readChannelSync())
     const off = ctx.on('pico/channel-changed', (channel) => apply(channel))
+    // 随包品牌的播种不经过 Host 事件,必须直接订阅 store 的值变化。
+    const offStoreValue = subscribeChannel((channel) => apply(channel))
     const observer = new MutationObserver(() => apply(readChannelSync()))
     observer.observe(document.head, { childList: true, subtree: true, characterData: true })
-    return () => { off(); observer.disconnect() }
+    return () => { off(); offStoreValue(); observer.disconnect() }
   }, 'enterprise: document channel title')
 
   ctx.effect(() => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseDesktopChannelProfile } from 'dsh-plugin-desktop/desktop-channel'
-import { brandChannel, DEFAULT_CHANNEL, NEUTRAL_CHANNEL } from '../src/channel-content.ts'
+import { asChannelPayload, brandChannel, channelTitle, DEFAULT_CHANNEL, mergeChannel, NEUTRAL_CHANNEL } from '../src/channel-content.ts'
 
 /**
  * 渠道包（`channels/<id>/channel.json`）→ 客户端内置兜底内容。
@@ -39,15 +39,28 @@ describe('brandChannel', () => {
     expect(brandChannel(undefined)).toEqual(DEFAULT_CHANNEL)
   })
 
-  it('uses the neutral content when a channel package carries no brand', () => {
-    // 有渠道包但品牌为空 = 注入链断了:中性占位,绝不冒充官方。
-    expect(brandChannel({})).toEqual(NEUTRAL_CHANNEL)
-    expect(JSON.stringify(brandChannel({}))).not.toContain('PicoAide')
+  it('treats a materialized empty brand object as "no channel brand"', () => {
+    // schemastery 会把未注入的 brand 物化成 `{}` —— 那不是"渠道没写品牌",
+    // 而是"根本没注入渠道品牌"。判成渠道会让官方构建改名成中性占位
+    // (2026-09-10 实测:官方 E2E 标题变成 "Harness")。
+    expect(brandChannel({})).toEqual(DEFAULT_CHANNEL)
   })
 
-  it('treats whitespace-only fields as absent', () => {
+  it('gets its neutral fallback from the packaged-brand layer, not from here', () => {
+    // 渠道构建里"包里没写品牌"已经由 desktop-channel.ts 落成中性名再注入,
+    // 所以这一层只需要逐字段覆盖。用真实解析链验证:只写 channel_id 的包
+    // 不会漏出厂商名。
+    const bare = parseDesktopChannelProfile({ channel_id: 'acme' })
+    expect(bare?.brand.client.displayName).toBe('Harness')
+    const mapped = brandChannel(bare?.brand)
+    expect(mapped.client?.display_name).toBe('Harness')
+    expect(mapped.login?.display_name).toBe('Harness')
+    expect(JSON.stringify(mapped)).not.toContain('PicoAide')
+  })
+
+  it('treats whitespace-only fields as absent (official base)', () => {
     const out = brandChannel({ title: '   ', login: { displayName: '', tagline: '  ' }, client: { displayName: ' ' } })
-    expect(out.login?.display_name).toBe('Harness')
+    expect(out.login?.display_name).toBe(DEFAULT_CHANNEL.login?.display_name)
     expect(out.client?.tagline).toBe('')
   })
 
@@ -57,5 +70,111 @@ describe('brandChannel', () => {
     expect(Object.keys(out).sort()).toEqual(['client', 'login', 'title'])
     expect(Object.keys(out.login ?? {}).sort()).toEqual(['display_name', 'tagline', 'welcome'])
     expect(Object.keys(out.client ?? {}).sort()).toEqual(['display_name', 'short_name', 'tagline'])
+  })
+})
+
+/**
+ * 服务端下发 **叠在** 随包品牌之上。
+ *
+ * 这条是白标的最后一道防线:服务端那份内容缺字段时(旧服务端、渠道配置没打进
+ * 镜像、字段被清空),消费方绝不能回落到内置的**厂商**文案 —— 渠道客户会看到
+ * PicoAide,而链路上一处报错都没有。
+ */
+describe('mergeChannel', () => {
+  const packaged = brandChannel({
+    title: 'Zephyr AI',
+    login: { displayName: 'Zephyr', shortName: 'Zephyr', tagline: '员工统一入口', welcome: '欢迎' },
+    client: { displayName: 'Zephyr AI', shortName: 'Zephyr', tagline: '企业内部平台' },
+  })
+
+  it('keeps server values when the server supplies them', () => {
+    const merged = mergeChannel(packaged, {
+      title: 'Zephyr 门户',
+      login: { display_name: 'Zephyr 登录' },
+      client: { display_name: 'Zephyr 工作台' },
+    })
+    expect(merged.title).toBe('Zephyr 门户')
+    expect(merged.login?.display_name).toBe('Zephyr 登录')
+    expect(merged.client?.display_name).toBe('Zephyr 工作台')
+  })
+
+  it('fills missing/empty server fields from the packaged brand', () => {
+    // 空串与缺失同义:两者都不能让消费方回落内置厂商文案。
+    const merged = mergeChannel(packaged, {
+      title: '',
+      login: { display_name: '', tagline: '', welcome: '' },
+      client: { display_name: '', short_name: '', tagline: '' },
+    })
+    expect(merged.title).toBe('Zephyr AI')
+    expect(merged.login?.display_name).toBe('Zephyr')
+    expect(merged.client?.short_name).toBe('Zephyr')
+    expect(JSON.stringify(merged)).not.toContain('PicoAide')
+  })
+
+  it('never drops the server-only asset fields', () => {
+    const merged = mergeChannel(packaged, {
+      login: { logo_url: 'https://srv/login.svg' },
+      client: { logo_url: 'https://srv/client.svg' },
+      favicon_url: 'https://srv/favicon.svg',
+      accent: '#123456',
+    })
+    expect(merged.login?.logo_url).toBe('https://srv/login.svg')
+    expect(merged.client?.logo_url).toBe('https://srv/client.svg')
+    expect(merged.favicon_url).toBe('https://srv/favicon.svg')
+    expect(merged.accent).toBe('#123456')
+  })
+
+  it('is a no-op for the official channel', () => {
+    // 官方渠道:base 就是官方内置内容,叠加结果与改造前一致。
+    const merged = mergeChannel(DEFAULT_CHANNEL, { title: '', login: {}, client: {} })
+    expect(merged.title).toBe(DEFAULT_CHANNEL.title)
+    expect(merged.client?.display_name).toBe(DEFAULT_CHANNEL.client?.display_name)
+  })
+})
+
+describe('channelTitle', () => {
+  it('prefers the channel title, then the client name, then the built-in title', () => {
+    expect(channelTitle({ title: 'Zephyr 门户' })).toBe('Zephyr 门户')
+    expect(channelTitle({ client: { display_name: 'Zephyr AI' } })).toBe('Zephyr AI')
+    expect(channelTitle(null)).toBe(DEFAULT_CHANNEL.title)
+    expect(channelTitle({ title: '' })).toBe(DEFAULT_CHANNEL.title)
+  })
+})
+
+/**
+ * 载荷结构校验:`/api/pico/channel` 回来的东西**必须像渠道内容**才能进 store。
+ *
+ * 2026-09-10 实测事故链(E2E 抓到):mock/旧服务端对未知路由回 `{ok:true}`,
+ * 客户端把它当渠道内容存下 → 每个品牌字段取不到值 → 侧边栏与窗口标题回落到
+ * 内置的**厂商**文案;而链路上零报错(12/13 通过,只有品牌断言红)。
+ */
+describe('asChannelPayload', () => {
+  it('accepts a real channel payload', () => {
+    const payload = { title: 'Zephyr AI', login: { display_name: 'Zephyr' }, client: { display_name: 'Zephyr AI' } }
+    expect(asChannelPayload(payload)).toEqual(payload)
+  })
+
+  it('accepts a payload that carries only the server-only logo fields', () => {
+    // logo 也是品牌内容:有它就说明这是渠道端点回的。
+    expect(asChannelPayload({ login: { logo_url: '/api/client/v2/channel/logo' } })).toBeDefined()
+    expect(asChannelPayload({ client: { logo_url: '/api/client/v2/channel/logo' } })).toBeDefined()
+  })
+
+  it('rejects a payload that carries only a favicon (no name, no logo)', () => {
+    // 只有 favicon 的载荷没有"名字":采纳它等于把品牌字段留空,消费方照样
+    // 回落到内置厂商文案 —— 宁可当作没有,让调用方用随包品牌兜底。
+    expect(asChannelPayload({ favicon_url: '/favicon.ico' })).toBeUndefined()
+  })
+
+  it.each([
+    ['a gateway fallback object', { ok: true }],
+    ['an error envelope', { error: { code: 'NOT_FOUND', message: 'not found' } }],
+    ['an empty object', {}],
+    ['a brand-less but shaped object', { title: '', login: { display_name: '' }, client: { display_name: '' } }],
+    ['a string', 'ok'],
+    ['an array', []],
+    ['null', null],
+  ])('rejects %s', (_case, value) => {
+    expect(asChannelPayload(value)).toBeUndefined()
   })
 })

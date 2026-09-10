@@ -18,6 +18,10 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
+import { packagedProductName } from './channel-build.ts'
+
+/** 本次打包产物声明的产品名（渠道构建下即渠道名；见 channel-build.ts）。 */
+const PRODUCT_NAME = packagedProductName()
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const args = process.argv.slice(2)
@@ -129,7 +133,7 @@ try {
   await wait(500)
   await clickLabel('登录', 9000)
   const title = await ev('document.title')
-  reportStep('真实环境登录成功', title.includes('PicoAide'), `title=${title}`)
+  reportStep('真实环境登录成功', title.includes(PRODUCT_NAME), `title=${title} expected=${PRODUCT_NAME}`)
   await wait(4000)
 
   // 2. Snapshot the approval surface: any visible dialog / overlay?

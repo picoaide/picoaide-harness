@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import { readChannelSync, startChannelStore } from '../src/client/channel-store.ts'
+import { readChannelSync, startChannelStore, subscribeChannel } from '../src/client/channel-store.ts'
 import type { ChannelConfig } from '../src/channel-content.ts'
 
 const CHANNEL: ChannelConfig = {
@@ -125,5 +125,38 @@ describe('channel store packaged-brand seed', () => {
     expect(readChannelSync()).toBeNull()
     cancel2()
     vi.unstubAllGlobals()
+  })
+})
+
+describe('channel store value subscriptions', () => {
+  it('notifies value subscribers on seed and on host events', async () => {
+    // 标题归一化/hero 变量这类非 React 消费方靠它:播种不经过 Host 事件,
+    // 只订阅 pico/channel-changed 会一直拿旧值(实测:侧边栏已是渠道名、
+    // 窗口标题还是厂商名)。
+    const seen: Array<unknown> = []
+    const off = subscribeChannel((channel) => seen.push(channel))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ title: 'Zephyr AI', client: { display_name: 'Zephyr AI', short_name: 'Zephyr' } }),
+    }))
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit(null)
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(seen.some(entry => (entry as { title?: string } | null)?.title === 'Zephyr AI')).toBe(true)
+    cancel()
+    off()
+    vi.unstubAllGlobals()
+  })
+
+  it('stops notifying after unsubscribe', () => {
+    const seen: Array<unknown> = []
+    const off = subscribeChannel((channel) => seen.push(channel))
+    off()
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit(null)
+    expect(seen).toHaveLength(0)
+    cancel()
   })
 })

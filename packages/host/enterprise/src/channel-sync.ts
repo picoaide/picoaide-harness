@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { brandChannel, DEFAULT_CHANNEL, type BrandConfig, type ChannelConfig } from './channel-content.ts'
+import { brandChannel, DEFAULT_CHANNEL, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import { fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
@@ -8,7 +8,7 @@ import type { Session } from './server-connector/config.ts'
 // 类型与内置值住在 channel-content.ts（纯数据，客户端面也能值导入）；
 // 这里**转出**它们，保持 `@picoaide/dsh-enterprise/channel-sync` 这个既有入口
 // 的对外形状不变（消费方与测试都在用）。
-export { brandChannel, DEFAULT_CHANNEL, type BrandConfig, type ChannelConfig }
+export { brandChannel, DEFAULT_CHANNEL, mergeChannel, type BrandConfig, type ChannelConfig }
 
 export interface Config {
   brand?: BrandConfig
@@ -97,7 +97,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     try {
       const channel = await fetchJSON(session.serverURL, '/api/client/v2/channel', { token: session.token })
-      ctx.emit('pico/channel-changed', (channel as ChannelConfig) ? absolutizeURLs(channel as ChannelConfig, session.serverURL) : builtIn)
+      // 服务端内容**叠在**随包品牌之上:服务端缺的字段由随包品牌补齐,消费方
+      // 就不会回落到内置的厂商文案(渠道构建下那是白标事故)。
+      ctx.emit('pico/channel-changed', (channel as ChannelConfig)
+        ? mergeChannel(builtIn, absolutizeURLs(channel as ChannelConfig, session.serverURL))
+        : builtIn)
     } catch {
       // Unreachable server: keep the packaged brand (never the vendor's).
       ctx.emit('pico/channel-changed', builtIn)
