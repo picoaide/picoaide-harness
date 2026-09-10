@@ -410,20 +410,40 @@ BASE_URL=https://release.picoaide.com ./temp/r2-verify.sh acme 2.7.0
 
 ## 10. 客户端那条链路（与 R2 无关，但要知道出口在哪）
 
-> ⚠️ **实现状态（2026-09-10 核实）：契约已定，服务端侧尚未实现。**
-> 镜像里的客户端资产（Dockerfile `COPY --from=clientassets`）✅ 已有；
-> 但 entrypoint 落盘 `/data/releases/<v>/client/`（目前只有注释）、
-> `GET /api/client/v2/updates/manifest`、`GET /updates/client/<file>` 三处 **✗ 尚未实现**。
-> 在补齐之前，"客户端跟着服务端升级"这条链**走不通**。
+> ✅ **实现状态（2026-09-10 晚复核）：已上线。**
+> 镜像里的客户端资产（Dockerfile `COPY --from=clientassets` → `/opt/picoaide/client/`）
+> 与两条路由均已实现：`GET /api/client/v2/updates/manifest`（`internal/clientrelease`
+> 的 `Manifest`）与 `GET /updates/client/<file>`（同包的 `File`，公开、自带 Range）。
+> 早期"清单放错目录 → 这条链整条是死的"那个坑已修（`d9b511a230`），现在由
+> `scripts/ci-build-channel-images.sh` 的 `verify_image()` 在镜像内断言
+> `/opt/picoaide/client/CLIENT-RELEASE.json` 存在。
 
-服务端升级完成后，客户端怎么拿到新包：镜像里的客户端资产由 `entrypoint.sh` 落到持久卷，服务端从卷上直读并对外提供：
+服务端升级完成后，客户端怎么拿到新包：**镜像里的客户端资产直接对外提供**（不落持久卷，镜像层本身就是版本锚点）：
 
 ```
-GET /api/client/v2/updates/manifest   → { client.version, assets{ file, sha256, size } }
+GET /api/client/v2/updates/manifest   → { client.version, assets{ url, sha256, size } }
 GET /updates/client/<asset>           → http.ServeFile（自带 Range 断点续传）
 ```
 
+`url` 由服务端**按请求来源重写**（`PICOAI_PUBLIC_BASE_URL` 优先，其次
+`X-Forwarded-Proto` / TLS；只接受 https 与回环 http）——镜像内清单里那串
+`https://release.picoaide.com/<channel>/…` 只是占位。客户端强制 https，因此服务端
+推不出安全地址时**不下发 client 段**并给出原因，而不是发一个会被客户端静默丢弃的
+http 链接（那会表现为"永远显示已是最新"）。
+
 客户端把 base 换成**它登录的服务器**（官方渠道和企业渠道一致）——所以客户端代码里不需要知道 R2 存在，也就没有"R2 挂了客户端就升不了级"的风险。
+
+### 10.1 品牌渠道的安装包怎么进镜像（R2 私密中转）
+
+tag 运行时三平台 job 各自产出安装包，release job 汇总后构建镜像。**品牌渠道的
+安装包不经公开 GitHub artifact**（artifact 对任何登录账号可下载，而渠道目录名、
+文件名与包内 `defaults.server_url` 都是客户身份）：它们由
+`scripts/ci-channel-transfer.sh` 经 R2 临时前缀
+`_transfer/<run-id>-<HMAC(R2 密钥, run-id)>/ch-<index>/` 中转，release job 取回后
+由 `clean` 步骤立即销毁。官方/beta 照旧走 artifact（品牌本来就公开）。
+
+由此有一条硬约束：**R2 凭据缺失 + 本次含品牌渠道 = 流水线直接失败**（中转与发布
+脚本都会拦），因为 R2 是品牌渠道唯一的分发面；静默跳过等于"客户零交付而全绿"。
 
 ---
 

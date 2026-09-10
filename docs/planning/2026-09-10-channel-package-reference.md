@@ -163,6 +163,22 @@ picoaide/channels  (私有仓)
 观感事故 —— 这类事故只能在构建期拦住。本地开发（没有渠道包）走的是官方内置
 文案，行为与渠道化改造前一致。
 
+**品牌渠道（official/beta 之外）另有三个编译期字段是硬性必填**（2026-09-10 审计
+后加严，同样是构建期中止）：
+
+| 字段 | 缺了会怎样 |
+|---|---|
+| `desktop.slug` | 安装包名回落 `PicoAide-Harness-…` —— **交付物上直接出现厂商品牌** |
+| `desktop.app_id` | bundle id / AppUserModelId 回落厂商值 —— 两个渠道的客户端在系统里变成"同一个 app" |
+| `desktop.deep_link_scheme` | 回落 `picoaide` —— 浏览器 SSO 回调的确认框里出现厂商名 |
+
+`ci-channels.sh` 同时做字段形状校验（slug 纯 ASCII、app_id 反向域名、
+scheme 合法、`defaults.server_url` 必须 https 或回环 http）与**素材存在性/几何
+校验**：`assets.*` 里声明的文件名必须在渠道目录里真实存在（否则服务端不下发
+URL、客户端拿到死链），`app-icon.png` 必须是 **1024×1024、16 位 RGBA、内嵌 ICC**
+（mac 图标管线的硬要求，见 `generate-mac-app-icon.mjs`）—— 这两项在打包时才炸，
+而打包要跑三个平台，所以在拉取渠道包的阶段就拦。
+
 **侧边栏短名**：服务端不下发 `short_name`（`GET /api/client/v2/channel` 没有这个
 字段），所以它来自随包品牌；渠道没配短名时回落到显示名，不回落任何具体品牌。
 
@@ -213,19 +229,31 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 | `desktop.shortcut_name` | `nsis.shortcutName` | `package.json build.nsis.shortcutName` |
 | `desktop.maintainer` / `synopsis` | `linux.maintainer` / `linux.synopsis` | `package.json build.linux.*` |
 | `desktop.deep_link_scheme` / `deep_link_name` | `protocols[0].schemes[0]` / `protocols[0].name` | `picoaide` / `<产品名> Deep Link` |
-| 渠道目录里的 `logo.svg` / `app-icon.png` | `directories.buildResources` 下的图标 | `brands/official/` |
+| 渠道目录里的 `logo.svg` / `app-icon.png` | 打包脚本调 `prepareChannelPackaging()` 派生到 `build/`（electron-builder 的 `directories.buildResources`）后再打包 | `brands/official/` |
 
 规则：
 
 - **官方渠道不做任何覆盖**（`channelBuilderConfigArgs()` 返回空数组），产物与
   渠道化改造前一致；`tests/channel-build.spec.ts` 用**漂移断言**把
   `channel-build.ts` 里的官方默认值与 `package.json build` 块钉死。
+- **位图必须走 `prepareChannelPackaging()`**（`scripts/channel-prepare.ts`）：
+  它按渠道派生 `build/` 下的 app 图标/托盘位图并就位 `build/channel.json`。
+  2026-09-10 审计发现的 P0 是"这条链没人调用"——`brand-prepare` 只挂在 desktop 的
+  `build` 脚本里，而 CI 打包一律 `--no-prebuild`（构建产物来自 gate job），于是
+  **渠道包带着官方图标出厂**，而本地打包（会经 prebuild 触发）却看不出问题。
+  五个打包入口（linux/win/win-portable/mac-smoke/mac-release/dir）现在都显式调用。
 - 渠道目录里缺的素材**逐文件回落** `brands/official/`：渠道只换 logo 是合法的。
-- 渠道 logo 必须由 `brands/official/logo.svg` 派生（几何单一权威，见 `AGENTS.md`）。
+- 渠道 logo 必须由 `brands/official/logo.svg` 派生（几何单一权威，见 `AGENTS.md`）；
+  渠道 `app-icon.png` 必须 1024×1024 / RGBA16 / 带 ICC（见 §4 的构建期校验）。
 - `slug` 必须是纯 ASCII（它进安装包名与可执行名）；`app_id` 必须是反向域名形状。
   两者非法即**抛错**，不产出错误渠道的包。
 - 打包后的验证脚本（`verify-win-installer.ts` / `verify-win-portable.ts` /
   `release-mac.ts`）从同一上下文推导期望文件名，不再硬编码厂商名。
+- **打包后还有一条白标门禁**（`scripts/verify-channel-package.ts`，由
+  `scripts/ci-package-clients.sh` 每渠道调用）：现场按本渠道重新派生一遍位图并
+  逐字节比对、断言 `channel.json` 的 `channel_id`，给了 `--app-dir` 时再拆开
+  `app.asar` 确认"随包分发"真的生效（官方构建则断言**没有**渠道包残留）。
+  它同时进了 `yarn check`（`verify:channel`）。
 
 仍未渠道化：
 
@@ -262,3 +290,30 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
   仅用于在 webadmin 提醒管理员。清单的 `channel_id` 必须等于本部署渠道，
   不一致报"检查不可用"（fail-loud，不是"无更新"）。
 - R2 上**只放镜像**；客户端安装包在镜像里，由服务端下发。
+
+## 7. 品牌渠道产物不进公开面（2026-09-10 审计定案）
+
+**问题**：tag 运行时三平台 job 会把每个渠道的安装包归集到 `client-assets/<channel>/`
+再上传为 artifact。artifact 名是中性了，但**内容是客户身份**：目录名就是渠道 id、
+文件名由渠道 slug 决定（`Acme-AI-…-Setup.exe`）、包内还带着随包 `channel.json`
+（含 `defaults.server_url`）。公开仓的 artifact 对任何登录账号可下载，而
+`::add-mask::` 只作用于日志 —— 与"品牌渠道绝不公开"的定策直接冲突。
+
+**做法**（`scripts/ci-channel-transfer.sh`）：
+
+```
+官方/beta  → 照旧走 artifact（它们的品牌本来就公开，GitHub Release 也发它们）
+品牌渠道   → 三平台 job 上传到 R2 临时前缀 → release job 取回后立即删除
+```
+
+前缀形如 `s3://<bucket>/_transfer/<run-id>-<HMAC(R2 密钥, run-id)>/ch-<index>/`：
+
+- `ch-<index>` 用渠道列表行号，**路径里没有渠道 id**；
+- token 是 HMAC 派生的，桶虽然公开读（`release.picoaide.com` 是 R2 自定义域），
+  但没有 R2 凭据就算不出对象地址，无法按 run id 猜；
+- 上传/下载都用 `--only-show-errors`，避免 aws 回显含品牌文件名的对象键；
+- **R2 凭据缺失 + 存在品牌渠道 = 直接失败**（`ci-channel-transfer.sh` 与
+  `ci-publish-update-server.sh` 都是），因为 R2 是品牌渠道唯一的分发面，
+  静默跳过等于"客户零交付而流水线全绿"。
+
+官方/beta 仍可缺 R2 凭据（只告警跳过），它们另有 GitHub Release 兜底。
