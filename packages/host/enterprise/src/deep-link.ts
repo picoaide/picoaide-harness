@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { DEFAULT_DEEP_LINK_SCHEME, readDesktopChannelProfile } from 'dsh-plugin-desktop/desktop-channel'
 import { assertServerURLAllowed, AuthError, fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -10,11 +11,12 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
- * picoaide:// deep link handler — completes OIDC/OpenID browser login.
+ * Deep link handler — completes OIDC/OpenID browser login.
  *
  * The server OIDC callback redirects the system browser to
- * `picoaide://auth?token=<t>[&server=<url>&user=<name>]`; the desktop shell
- * forwards it here as the 'pico/deep-link' event. We parse it, validate the
+ * `<scheme>://auth?token=<t>[&server=<url>&user=<name>]`; the desktop shell
+ * forwards it here as the 'pico/deep-link' event. scheme 由渠道包决定
+ * (desktop-channel):渠道构建用它自己的 scheme,浏览器确认框里不出现厂商名。 We parse it, validate the
  * server URL (https or loopback http), and store the session — the login
  * page's `/api/pico/auth/state` poll then flips to loggedIn and reloads.
  *
@@ -23,14 +25,17 @@ declare module '@deepseek-ai/cordis' {
  * the token verifies against that server (verified on next bootstrap fetch;
  * an attacker-crafted link just fails the fetch).
  */
-export function parseAuthDeepLink(url: string): Session | null {
+export function parseAuthDeepLink(
+  url: string,
+  scheme: string = DEFAULT_DEEP_LINK_SCHEME,
+): Session | null {
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
     return null
   }
-  if (parsed.protocol !== 'picoaide:') return null
+  if (parsed.protocol !== `${scheme}:`) return null
   if (parsed.hostname !== 'auth') return null
   const token = parsed.searchParams.get('token')
   if (!token) return null
@@ -48,9 +53,11 @@ export function parseAuthDeepLink(url: string): Session | null {
 
 /** Install the deep-link listener; used by SessionService on construction. */
 export function installDeepLinkListener(ctx: Context, applySession: (session: Session) => void): () => void {
+  // scheme 在监听器安装时定一次:它跟着安装包走,运行期不会变。
+  const scheme = readDesktopChannelProfile()?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
   return ctx.on('pico/deep-link', (url: unknown) => {
     if (typeof url !== 'string') return
-    const session = parseAuthDeepLink(url)
+    const session = parseAuthDeepLink(url, scheme)
     if (session === null) {
       ctx.logger?.warn('pico-deep-link: ignored malformed deep link')
       return

@@ -15,9 +15,9 @@
       "types": "./lib/types/auth-gate.d.ts",
       "default": "./lib/auth-gate.js"
     },
-    "./brand-sync": {
-      "types": "./lib/types/brand-sync.d.ts",
-      "default": "./lib/brand-sync.js"
+    "./channel-sync": {
+      "types": "./lib/types/channel-sync.d.ts",
+      "default": "./lib/channel-sync.js"
     },
     "./gateway-model": {
       "types": "./lib/types/gateway-model.d.ts",
@@ -83,7 +83,7 @@
     "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run",
-    "check": "yarn run build && yarn run typecheck && yarn run test"
+    "check": "yarn run build && yarn run test"
   },
   "dependencies": {
     "@deepseek-ai/dsh-credentials": "0.1.2-rc.1",

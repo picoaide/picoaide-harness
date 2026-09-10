@@ -12,11 +12,13 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/channel"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/sharedskills"
@@ -30,20 +32,22 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	Register(r, Deps{
-		DB:         nil,
-		Auth:       serverauth.New(nil).Handlers(),
-		Admin:      (&serverauth.AdminAPI{}).Handlers(),
-		Appstore:   appstore.NewHandlers(nil),
-		Bootstrap:  bootstrap.NewHandlers(nil),
-		Brand:      brand.NewHandlers(nil, "/tmp/nonexistent"),
-		Market:     marketplace.NewHandlers(nil, "/tmp/nonexistent"),
-		Agentshare: agentshare.NewHandlers(nil, "/tmp/nonexistent"),
-		Shared:     sharedskills.NewHandlers(nil, "/tmp/nonexistent"),
-		Capability: capabilities.NewHandlers(nil, "/tmp/nonexistent"),
-		Connector:  connectors.NewHandlers(nil),
-		Telemetry:  telemetry.NewHandlers(nil),
-		Gateway:    llmgateway.NewHandlers(nil),
-		Reports:    reports.NewHandlers(nil),
+		DB:            nil,
+		Auth:          serverauth.New(nil).Handlers(),
+		Admin:         (&serverauth.AdminAPI{}).Handlers(),
+		Appstore:      appstore.NewHandlers(nil),
+		Bootstrap:     bootstrap.NewHandlers(nil),
+		Channel:       channel.NewHandlers(),
+		PortalAdmin:   portal.NewAdminHandlers(nil),
+		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
+		Market:        marketplace.NewHandlers(nil, "/tmp/nonexistent"),
+		Agentshare:    agentshare.NewHandlers(nil, "/tmp/nonexistent"),
+		Shared:        sharedskills.NewHandlers(nil, "/tmp/nonexistent"),
+		Capability:    capabilities.NewHandlers(nil, "/tmp/nonexistent"),
+		Connector:     connectors.NewHandlers(nil),
+		Telemetry:     telemetry.NewHandlers(nil),
+		Gateway:       llmgateway.NewHandlers(nil),
+		Reports:       reports.NewHandlers(nil),
 	})
 	return r
 }
@@ -82,7 +86,15 @@ func TestNamespaces(t *testing.T) {
 	for _, want := range []string{
 		"POST " + nsClient + "/auth/login",
 		"GET " + nsClient + "/config/bootstrap",
-		"GET " + nsClient + "/brand",
+		"GET " + nsClient + "/channel",
+		// 素材三个独立端点(浅色 logo / 暗色 logo / favicon);
+		// HEAD 与 GET 同挂(浏览器/图床探测会发 HEAD)。
+		"GET " + nsClient + "/channel/logo",
+		"HEAD " + nsClient + "/channel/logo",
+		"GET " + nsClient + "/channel/logo-dark",
+		"HEAD " + nsClient + "/channel/logo-dark",
+		"GET " + nsClient + "/channel/favicon",
+		"HEAD " + nsClient + "/channel/favicon",
 		"GET " + nsClient + "/marketplace/skills",
 		"GET " + nsClient + "/shared-skills",
 		"GET " + nsClient + "/agent-presets",
@@ -94,7 +106,7 @@ func TestNamespaces(t *testing.T) {
 		"PUT " + nsServer + "/admin/audit/settings",
 		"GET " + nsServer + "/admin/agents",
 		"POST " + nsServer + "/admin/agents",
-		"GET " + nsServer + "/admin/brand",
+		"GET " + nsServer + "/admin/portal",
 		"GET " + nsServer + "/admin/connectors",
 		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)
 		"GET " + nsServer + "/admin/concurrency",
@@ -260,7 +272,6 @@ func TestLargeBodyRoutesExemptions(t *testing.T) {
 	for _, key := range []string{
 		"POST " + NamespaceServer + "/admin/skills/:name/archive",
 		"POST " + NamespaceServer + "/admin/agents/:name/archive",
-		"POST " + NamespaceServer + "/admin/brand/logo",
 		"POST " + NamespaceClientV2 + "/shared-skills",
 		"POST " + NamespaceClientV2 + "/agent-presets",
 	} {

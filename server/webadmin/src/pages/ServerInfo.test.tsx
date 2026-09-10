@@ -42,7 +42,8 @@ describe('ServerInfo update check', () => {
         current: '2.5.1',
         latest: '2.6.0',
         update_available: true,
-        release_url: 'https://github.com/picoaide/picoaide-harness/releases/tag/v2.6.0',
+        image_tag: 'v2.6.0',
+        manifest_url: 'https://release.picoaide.com/official/latest.json',
         checked_at: '2026-08-31T02:00:00Z',
       },
     })
@@ -51,9 +52,11 @@ describe('ServerInfo update check', () => {
 
     expect(await screen.findByText(/发现新版本 2\.6\.0/)).toBeInTheDocument()
     expect(screen.getByText(/当前 v2\.5\.1/)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /查看发行说明/ })).toHaveAttribute(
+    // 升级目标镜像 tag 必须展示(运维据此执行升级)
+    expect(screen.getByText('v2.6.0')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /查看更新信息/ })).toHaveAttribute(
       'href',
-      'https://github.com/picoaide/picoaide-harness/releases/tag/v2.6.0',
+      'https://release.picoaide.com/official/latest.json',
     )
   })
 
@@ -65,7 +68,8 @@ describe('ServerInfo update check', () => {
         current: '2.6.0',
         latest: '2.6.0',
         update_available: false,
-        release_url: 'https://github.com/picoaide/picoaide-harness/releases/tag/v2.6.0',
+        image_tag: 'v2.6.0',
+        manifest_url: 'https://release.picoaide.com/official/latest.json',
         checked_at: '2026-08-31T02:00:00Z',
       },
     })

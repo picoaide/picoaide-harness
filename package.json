@@ -1,6 +1,6 @@
 {
   "name": "picoaide-harness",
-  "version": "2.6.8",
+  "version": "2.6.9-beta.1",
   "private": true,
   "description": "PicoAide Harness product workspace",
   "license": "MIT",
@@ -55,8 +55,11 @@
     "typecheck": "yarn workspace @picoaide/dsh-enterprise typecheck && yarn workspace dsh-plugin-desktop typecheck",
     "test": "yarn workspace @picoaide/dsh-enterprise test && yarn workspace dsh-plugin-desktop test",
     "check:layout": "node scripts/verify-layout.mjs",
+    "check:workflows": "node scripts/check-workflows.mjs",
+    "check:ci-scripts": "node scripts/verify-ci-scripts.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
-    "check": "yarn check:layout && yarn workspace dsh-plugin-desktop check && yarn workspace dsh-better-sidebar check && yarn workspace @picoaide/dsh-connectors check && yarn workspace @picoaide/dsh-enterprise check && yarn workspace @picoaide/dsh-account-card check && yarn workspace @picoaide/dsh-branding check && yarn workspace @picoaide/dsh-browser check && yarn workspace @picoaide/dsh-cron check && yarn workspace dsh-community-fabric check",
+    "check": "node scripts/check-workspaces.mjs",
+    "check:fast": "node scripts/check-workspaces.mjs --changed",
     "dev": "yarn workspace dsh-plugin-desktop dev",
     "start": "yarn workspace dsh-plugin-desktop start",
     "package:dir": "yarn workspace dsh-plugin-desktop package:dir",
@@ -74,5 +77,8 @@
     "version": "node scripts/version.mjs",
     "version:set": "node scripts/version.mjs set",
     "version:check": "node scripts/version.mjs check"
+  },
+  "devDependencies": {
+    "yaml": "^2.9.0"
   }
 }

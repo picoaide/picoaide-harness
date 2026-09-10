@@ -31,6 +31,9 @@ function options(calls: CommandCall[], logs: string[] = []): WindowsPackageOptio
     builderCli: 'C:\\repo\\node_modules\\electron-builder\\cli.js',
     verifier: 'C:\\repo\\dsh-plugin-desktop\\scripts\\verify-win-installer.ts',
     nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+    // 官方渠道:不做 electron-builder 覆盖(渠道化由 channel-build.ts 负责)
+    channelConfigArgs: [],
+    channelId: 'official',
     run: (command, args, cwd, env) => {
       calls.push({ command, args: [...args], cwd, env: { ...env } })
     },
@@ -142,5 +145,33 @@ describe('Windows x64 installer packaging', () => {
 
     expect(() => packageWindowsInstaller(value)).toThrow('headless check failed')
     expect(calls).toHaveLength(1)
+  })
+})
+
+describe('channel build overrides', () => {
+  it('appends the channel electron-builder overrides after the fixed flags', () => {
+    // 渠道化打包靠 CLI 覆盖实现:渠道参数必须原样出现在 electron-builder 命令行,
+    // 且排在固定开关之后(后者不能把渠道值盖掉)。
+    const calls: CommandCall[] = []
+    const base = options(calls)
+    packageWindowsInstaller({
+      ...base,
+      channelId: 'acme',
+      channelConfigArgs: [
+        '--config.productName=Acme AI',
+        '--config.appId=com.acme.ai',
+        '--config.nsis.shortcutName=Acme AI',
+      ],
+    })
+
+    const builder = calls.find(call => call.args.includes('--win'))
+    expect(builder).toBeDefined()
+    const args = [...builder!.args]
+    expect(args).toContain('--config.productName=Acme AI')
+    expect(args).toContain('--config.appId=com.acme.ai')
+    expect(args).toContain('--config.nsis.shortcutName=Acme AI')
+    // 固定开关仍在,且渠道覆盖在其后
+    expect(args.indexOf('--config.npmRebuild=false'))
+      .toBeLessThan(args.indexOf('--config.productName=Acme AI'))
   })
 })

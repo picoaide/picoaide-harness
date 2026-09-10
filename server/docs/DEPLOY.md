@@ -1,7 +1,12 @@
 # PicoAide 服务端容器化部署文档
 
-> 适用版本:服务端 Docker 镜像 `ghcr.io/picoaide/picoaide-harness-server`(linux/amd64)。
-> 本文覆盖:镜像来源与发布、私有网段+固定 IP 的 Compose 部署、手动/自动两种证书模式、自动化脚本、升级/备份/恢复/卸载、安全清单与 FAQ。
+> **2026-09-10 变更**：本仓库的部署脚本（`scripts/deploy.sh`、`scripts/install-server.sh`）
+> 与 `make release-export` **已全部移除**。部署与升级改为**一份给 AI 代理/运维执行的说明**
+> 驱动，交付物只有一个容器镜像（镜像内自带 compose、Caddyfile、客户端安装包）。
+>
+> 👉 **部署/升级/回滚/排障一律看 [`docs/deploy/AI-DEPLOY.md`](../../docs/deploy/AI-DEPLOY.md)**
+>
+> 本文保留仍然有效的设计说明（架构、证书模式、固定 IP、数据目录、FAQ），不再描述任何脚本用法。
 
 ## 0. 架构总览
 
@@ -24,7 +29,7 @@
 - 私有网段:自定义 bridge `picoaide-net`,默认子网 `172.28.0.0/24`(`.env` 的 `NETWORK_SUBNET` 可改)。
 - 固定 IP:容器 `ipv4_address` 锁定,`docker compose up -d` 重建/升级后 IP 不变,Caddyfile 的 `reverse_proxy server:8080` 恒可达。
 - server 不映射宿主机端口,外部流量只能经 Caddy 进入(内网隔离 + 攻击面收敛)。
-- **所有持久化数据均用 `./` 当前目录 bind mount,不使用命名卷**:`picoaide-data/`(应用数据+主密钥)、`caddy-data/`(Caddy 自动证书库)、`caddy-config/`(Caddy 配置)+ `certs/`(手动证书);pg 模式另加 `pg-data/`(内置 postgres 数据,挂载到容器 `/var/lib/postgresql`)。备份 = 直接拷走部署目录或 `deploy.sh backup`。
+- **所有持久化数据均用 `./` 当前目录 bind mount,不使用命名卷**:`picoaide-data/`(应用数据+主密钥)、`caddy-data/`(Caddy 自动证书库)、`caddy-config/`(Caddy 配置)+ `certs/`(手动证书);pg 模式另加 `pg-data/`(内置 postgres 数据,挂载到容器 `/var/lib/postgresql`)。备份 = 直接拷走部署目录，或按部署说明打包 `picoaide-data/` + `pg_dump`。
 
 ### 0.1 数据库后端:PostgreSQL(唯一形态,内置容器)
 
@@ -73,286 +78,48 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 - 服务端首次启动自动应用 `migrations-pg` 建表(幂等,空库即建);
 - usage 明细按月原生分区(保留 N 月可配,默认 6),日/月账本永久保留(见 docs/06-database.md)。
 
-## 1. 镜像来源与发布(编译 → 验证 → 推送)
+## 1. 证书模式（三选一，由 `.env` 的 `TLS_MODE` 决定挂载哪个模板）
 
-镜像仓库:`ghcr.io/picoaide/picoaide-harness-server`(GitHub Container Registry,与 picoaide-harness 同 org)。
+compose 按 `./Caddyfile.${TLS_MODE:-manual}` 挂载模板，三种模式命名统一：
 
-### 1.1 发布流程(CI 自动)
+| 模式 | `TLS_MODE` | 模板 | 行为 | 前置条件 |
+|---|---|---|---|---|
+| 本地自签 | `internal` | `Caddyfile.internal` | `tls internal`（Caddy 本地 CA 签发） | 无；客户端首次连接需信任 Caddy 本地 CA |
+| 自动证书 | `auto` | `Caddyfile.autocert` | Caddy 自动申请/续期 Let's Encrypt | **域名直接解析到本机**（非 CDN），80/443 对公网开放；不支持 IP |
+| 手动证书 | `manual` | `Caddyfile.manual` | `tls /certs/server.crt /certs/server.key` | 部署者提供 PEM；无证书时可用 openssl 生成自签占位 |
 
-```bash
-git tag v2.4.6 && git push origin v2.4.6
-```
+> **2026-09-10 修复**：此前 compose 拼接的是 `./Caddyfile.internal`，而 internal 模式的模板
+> 文件名实际是 `Caddyfile` —— `TLS_MODE=internal` 从未真正可用（挂载源不存在，caddy 容器
+> 创建即失败，且 Docker 会在宿主上创建一个同名**目录**）。现三种模式统一为 `Caddyfile.<mode>`。
 
-`.github/workflows/docker.yml` 在 `push tags v*` 时自动:
+## 2. 数据目录（升级不丢，备份清单）
 
-1. buildx 单平台构建 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟;Dockerfile 两阶段:webadmin 先构建,Go 交叉编译);
-2. 注入版本:`--build-arg VERSION=2.4.6` → 镜像内 `picoaide-server --version` 输出 `2.4.6`(与 tag 强一致;push tag 时经 `scripts/version.mjs check` 与 root package.json 同源校验);
-3. 推送标签:`v2.4.6`(精确)/ `v2.4`(minor)/ `latest`(仅默认分支);
-4. 附注 SBOM 与构建证明(provenance mode=max);构建缓存 type=gha;
-5. 最后 `imagetools inspect` 校验 amd64 manifest 存在。
+全部用 `./` 当前目录 bind mount，**不使用命名卷**：
 
-也可手动重发:Actions → Docker image → Run workflow → 填版本号(`workflow_dispatch`)。
-
-### 1.2 本地构建 / 离线导出(无 registry / 内网部署)
-
-```bash
-make docker-image                        # 本地单平台构建(带 git describe 版本注入)
-make docker-image TAG=v2.4.6             # 指定版本(与 CI 相同注入)
-make release-export TAG=v2.4.6           # 导出 dist/picoaide-server-v2.4.6.tar
-# 目标机(内网,无外网)导入:
-docker load < dist/picoaide-server-v2.4.6.tar
-# 然后 .env 的 SERVER_IMAGE 改成本地标签,或用 tar 镜像直接 compose up
-```
-
-注:镜像 tag 规范见 §1.3;`make docker-image` 默认 `VERSION=$(git describe --tags --always | sed 's/^v//')`,与 Makefile 顶部覆盖变量一致。
-
-### 1.3 镜像验证清单(发布/升级前必须过)
-
-| 检查 | 命令 | 预期 |
+| 目录 | 内容 | 备注 |
 |---|---|---|
-| 版本注入 | `docker run --rm <image> --version` | 输出构建时注入的版本号(非 `dev`) |
-| 非 root | `docker run --rm --entrypoint id <image>` | `uid=10001(picoaide)` |
-| 健康端点 | 起容器后 `curl http://127.0.0.1:8080/healthz` | `200 {"ok":true}` |
-| 架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | `linux/amd64`(arm64 已移除) |
-| 数据持久化 | 写入数据 → 重启容器 → 数据仍在 | 卷挂载生效 |
+| `picoaide-data/` | 应用数据 + **`master.key`** | 丢失 = 数据库内加密的上游密钥**永久不可解**，必须备份 |
+| `pg-data/` | 内置 PostgreSQL 18 数据 | 挂载到容器 `/var/lib/postgresql`（PG18 起数据落 `18/docker/` 子目录） |
+| `caddy-data/` `caddy-config/` | Caddy 证书库与配置 | `auto` 模式必须备份（否则重新签发） |
+| `certs/` | 手动证书 | 仅 `manual` 模式 |
+| `deploy-backup/` | 备份输出 | 由部署说明中的备份步骤写入 |
 
-## 2. 手动部署(Compose)
+备份/恢复命令见 [`docs/deploy/AI-DEPLOY.md`](../../docs/deploy/AI-DEPLOY.md) §6.3 与 §7。
 
-### 2.1 前置条件
+## 3. 固定 IP 与私有网段
 
-- Linux 主机,Docker Engine 24+ 与 Compose v2 插件(安装:`curl -fsSL https://get.docker.com | sh`);
-- 80/443 端口空闲(手动证书且换端口时另见 §5 FAQ);
-- 域名解析:DNS 指向本机或加入 hosts(内网自签模式客户端需信任 CA)。
+- 容器 IP 由 compose `ipam` + `ipv4_address` 声明式锁定：caddy `172.28.0.2`、
+  server `172.28.0.3`、postgres `172.28.0.4`，`docker compose up -d` 重建后不变；
+- server 经 compose DNS（服务名 `server`）被 Caddy 反代，**无需写死 IP**；
+- `PICOAI_TRUSTED_PROXIES` 默认 `172.28.0.2`，使登录限流键解析真实客户端 IP；
+- 与宿主机其他网段/容器冲突时改 `.env` 的 `NETWORK_SUBNET` 与三个固定 IP。
 
-### 2.2 步骤
+## 4. 常见问题
 
-```bash
-git clone https://github.com/picoaide/picoaide-harness.git
-cd server
-
-# 1. 配置(必改密码与域名;仅 4 个键)
-cp .env.example .env
-vi .env            # DOMAIN / PICOAI_ADMIN_PASSWORD / PG_PASSWORD 必改;TLS_MODE 按 §3 决策
-
-# 2. 证书(compose 按 TLS_MODE 自动挂载对应 Caddyfile 模板,无需手工 cp)
-#    manual 且 certs/ 为空时,先生成自签占位(部署脚本 install 会自动生成):
-mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout certs/server.key -out certs/server.crt \
-  -subj "/CN=<域名>" -addext "subjectAltName=DNS:<域名>"   # IP 用 subjectAltName=IP:<IP>
-chmod 600 certs/server.key
-
-# 3. 启动(单 compose 文件,含 caddy+server+postgres)
-docker compose up -d
-
-# 4. 验证
-docker compose ps                 # server healthy
-curl -sk https://<域名>/healthz   # 200
-docker inspect picoaide-server -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'  # 172.28.0.3
-```
-
-## 3. 证书模式(重点)
-
-| 模式 | TLS_MODE | Caddyfile | 行为 | 使用场景 | 前置 |
-|---|---|---|---|---|---|
-| **manual 手动证书** | `manual` | `Caddyfile.manual` | `tls /certs/server.crt /certs/server.key`;无证书时用 openssl 生成 **10 年自签占位**,部署后提示**正式证书替换路径** | 企业 CA/已购证书/内网 IP/CDN 后 | openssl(缺失脚本提示安装并退出) |
-| **auto 自动证书** | `auto` | `Caddyfile.autocert` | Caddy 自动申请/续期 Let's Encrypt(**无 tls 指令即默认自动 HTTPS**) | 公网域名直连 | **域名直接解析到本机**(非 CDN);80/443 对外开放 |
-| **internal 本地自签** | `internal` | `Caddyfile`(仓库默认模板) | `tls internal`(Caddy 本地 CA 签发) | 纯内网/无公网域名/测试 | 客户端首次连接需信任 Caddy 本地 CA |
-
-### 3.1 auto 模式域名校验(脚本内置)
-
-1. `dig +short A/AAAA <域名>`(或 nslookup 兜底)取解析记录;
-2. `curl https://api.ipify.org`(或 ifconfig.me)取本机公网出口 IP;
-3. **解析包含本机 IP → 直连判定通过**,自动申请证书;
-4. **解析不包含本机 IP(CDN/代理/记录不完整)→ 停下要求人工确认**:
-   - 交互:提示"是否确认 CDN/代理会将 HTTP-01 验证转发到本机? [y/N]",确认后继续,拒绝则中止并提示改用手动证书;
-   - 无人值守:`CONFIRM_CDN=yes` 直接继续(仅在你明确确认真实流量会到本机时使用)。
-5. 注意:Let's Encrypt 不支持纯 IP 域名;IP 访问请用 manual/internal。
-
-### 3.2 证书切换与更新
-
-```bash
-# 从 manual 换 auto: 改 .env TLS_MODE=auto → docker compose up -d
-#   (compose 按 TLS_MODE 自动切换挂载的 Caddyfile 模板,无需手工 cp)
-# 换正式证书(manual): 覆盖 certs/server.crt + certs/server.key(0600) → docker compose restart caddy
-# Caddy 自动续期(auto): Caddy 自动处理,无需干预;备份见 §6
-```
-
-## 4. 自动化部署
-
-### 4.0 oh-my-zsh 式一键安装(推荐,单命令)
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
-```
-
-> 注意:必须用 `bash` 执行(脚本使用 bash 专属语法);`sh -c`(Debian/Ubuntu 上 `/bin/sh`=dash)会解析失败。
-
-**一条命令全自动完成**:自检提权(非 root + tty 自动走 sudo;无 tty 提示用 `sudo bash`)→ 按发行版探测包管理器(apt/dnf/yum/apk/zypper)→ **自动安装缺失依赖**(docker 官方安装脚本 + `DOCKER_MIRROR` 可指定镜像源;curl/jq/openssl/dns 工具按包管理器装)→ 交互(或环境变量)收集配置(域名/证书模式)→ 下载/复制部署资产(单 `docker-compose.yml`(caddy+server+postgres)+ Caddyfile 三模板(manual/auto/internal)+ .env.example + deploy.sh)→ 转发 `deploy.sh install`(网段/端口预检、证书、.env、镜像启动、健康等待)→ 打印部署摘要。
-
-非交互(无人值守,需 root/sudo):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
-  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
-```
-
-| 安装器环境变量 | 默认 | 说明 |
-|---|---|---|
-| `DOMAIN` | - | 对外域名或 IP(生产必改;交互时询问,非交互必填) |
-| `INSTALL_DIR` | /data/picoaide/deploy | 部署目录(兼容旧版 `DEPLOY_DIR`) |
-| `PG_PASSWORD` | 随机生成 | 内置 postgres 容器密码 |
-| `ADMIN_USER` / `ADMIN_PASS` | admin / 随机生成 | 超管账号/密码(兼容 `PICOAI_ADMIN_PASSWORD`) |
-| `TLS_MODE` | manual | manual / auto / internal(本地自签,内网开箱即用) |
-| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry;当前所有发布镜像均为 PG 模式 |
-| `SKIP_DEPS=1` | 空 | 跳过依赖自动安装(仅检查,缺失即提示并退出) |
-| `DOCKER_MIRROR` | 空 | docker 安装镜像源(如清华 `https://mirrors.tuna.tsinghua.edu.cn/docker-ce`) |
-| `MIRROR_URL` | 空 | 通用镜像加速提示(apt 源需自行改) |
-| `DEPLOY_BASE_URL` | harness master/server | 资产下载基址(可指向 tag 路径固定版本) |
-| `SKIP_IMAGE_CHECK=1` | 空 | 跳过镜像 `-db-driver` 探测 |
-| `REINSTALL=yes` | 空 | `.env` 已存在时清除重装(默认安全退出) |
-| `NO_DEPS` | 空 | 同 `SKIP_DEPS`(兼容) |
-
-旧命令(克隆仓库后直接脚本)同样可用:
-
-```bash
-cd server
-./scripts/install-server.sh
-# 或(兼容 curl 一键): DOMAIN=picoaide.example.com ./scripts/install-server.sh
-```
-
-### 4.1 子命令(single compose)
-
-| 子命令 | 说明 |
+| 现象 | 原因与处理 |
 |---|---|
-| `install` | 首次部署:命令检查 → 网段/端口预检 → DNS/CDN 校验(auto)→ 证书准备(manual 自签)→ 生成最小 .env(4 键)→ 拉镜像启动 → 等就绪 → 打印账号密码与替换证书指引 |
-| `update` | 拉新镜像 → 重建重启(数据目录不变;容器依次重建,短暂停机) |
-| `status` | 容器状态 + 健康检查 + 固定 IP 一览 |
-| `logs [-t]` | 查看日志(--tail=200;`-t` 跟踪) |
-| `backup` | 打包 `picoaide-data`(含 master.key)+ auto 模式 `caddy-data` + PostgreSQL `pg_dump` |
-| `uninstall [--volumes]` | 停容器;`--volumes` 连数据目录一并删除(需确认,交互或 `UNINSTALL_VOLUMES=yes`) |
-
-所有子命令直接作用于单 `docker-compose.yml`(caddy+server+postgres),无需手工指定 `-f` 或切换文件。
-
-### 4.2 环境变量(非交互)
-
-```bash
-DOMAIN=picoaide.example.com TLS_MODE=manual \
-PICOAI_ADMIN_PASSWORD='强密码' \
-./scripts/deploy.sh install
-```
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `DOMAIN` | picoaide.example.com | 对外域名或 IP(生产必改) |
-| `TLS_MODE` | manual | manual / auto / internal(本地自签,内网开箱即用) |
-| `ADMIN_USER` / `PICOAI_ADMIN_PASSWORD` | admin / 随机生成 | 首次启动创建超管;已有 admin 后密码可清空 |
-| `SERVER_IMAGE` | ghcr.io/picoaide/picoaide-harness-server:latest | 可换私有 registry |
-| `NETWORK_SUBNET` / `CADDY_IP` / `SERVER_IP` | 172.28.0.0/24 / .2 / .3 | 私有网段与固定 IP |
-| `PG_PASSWORD` | 随机生成 | 内置 postgres 容器密码(compose 强必填) |
-| `PG_IMAGE` | postgres:18-alpine | 内置镜像(可换内网镜像) |
-| `PG_IP` | 172.28.0.4 | postgres 容器固定 IP(需在 NETWORK_SUBNET 内) |
-| `CONFIRM_CDN` | 空 | auto 模式非直连时 `yes` 跳过人工确认 |
-| `REINSTALL` | 空 | `.env` 已存在时 `yes` 清除重装(否则安全退出) |
-| `INSTALL_DIR`(install-server.sh) | /data/picoaide/deploy | 部署目录(旧版 INSTALL_DIR 兼容) |
-
-### 4.3 命令存在性检查(内置,缺失即提示安装并退出)
-
-`docker` / `docker compose` 插件 / `curl` / `jq` / `openssl` / `dig`(或 nslookup)/ `ss`(或 lsof)逐条 `command -v` 检查,缺失输出对应安装包提示(如 `apt-get install -y dnsutils`),**不静默降级**。`backup`/`status` 等子命令只要求各自最小命令集(backup 仅需 docker)。**依赖自动安装由 `install-server.sh` 负责**(§4.0);直接运行 `deploy.sh` 需先自行安装上述命令。
-
-## 5. 固定 IP 说明
-
-- 容器 IP 由 compose 网络 `ipam` + `ipv4_address` 声明式锁定;`docker compose up -d` 重建(Caddyfile/环境变更)后 IP 不变。
-- 修改网段:`.env` 改 `NETWORK_SUBNET`/`CADDY_IP`/`SERVER_IP` 后 `docker compose down && docker compose up -d`(网络重建)。
-- 若 `picoaide-net` 已存在且子网与配置不符,脚本会报错并提示清除网络(或 `docker network rm picoaide-net` 后重试)。
-- server 通过 compose DNS(服务名)访问即可;**无需在 Caddyfile 写死 IP**(写死 IP 与固定 IP 二选一,推荐服务名)。
-
-## 6. 升级 / 备份 / 恢复 / 卸载
-
-### 6.1 升级
-
-```bash
-./scripts/deploy.sh update          # 拉新镜像重建;数据目录不变
-# 或手动: docker compose pull && docker compose up -d
-```
-
-兼容性:DB 迁移按顺序执行(0001→0060),升级前建议 backup;降级**不保证**兼容(数据迁移不可逆),回滚=备份恢复。
-
-### 6.2 备份(重要:master.key 与数据库同备)
-
-```bash
-./scripts/deploy.sh backup
-# 产物: deploy-backup/picoaide-data-<时间>.tar.gz(应用数据 + master.key;数据库在 PostgreSQL,另行 pg_dump)
-#      deploy-backup/caddy-data-<时间>.tar.gz(auto 模式 Caddy 证书库)
-#      deploy-backup/pg-data-<时间>.dump(pg 模式:pg_dump 自定义格式,含 schema+数据)
-```
-
-**master.key 丢失 = 已加密的上游密钥/商城凭证不可解密(永久失效)**。离线备份:直接 `cp -a picoaide-data/ 备份目录`(key + 应用数据,先 `docker compose stop server` 或直接冷备)。
-
-### 6.3 数据保留与账本(PG-only)
-
-> SQLite → PostgreSQL 历史迁移工具(deploy.sh migrate/migrate-sqlite-pg)已于
-> 2026-08 全面下线(PG-only 起删除)。老 SQLite 用户如需升级,请先在本仓库
-> 历史版本(如 967c950d2e 之前)完成 migrate 后再升级本版本。
-
-PG 部署后数据保留说明:
-
-- **usage 明细**:按月原生分区,保留 N 个月(settings `usage.retention_months`,
-  默认 6,0=永久,1~120),超出保留期的整分区被自动 DROP(先校验日账生成);
-- **usage_daily 日账 / usage_monthly 月账**:永久保留,由 `RebuildUsageLedger`
-  从明细生成(幂等可重算,启动时补算近 N 个月 + 每日任务);
-- 用量统计 API:保留窗口内查明细(分区裁剪),窗口外查账本——历史统计 10 年不丢。
-
-## 7. 安全清单
-
-- [ ] `.env` 权限 0600(生成脚本已处理;`chmod 600 .env`);**.env 不进 git**(已 .gitignore)。
-- [ ] `PICOAI_ADMIN_PASSWORD` 强密码;首次启动后可在 .env 置空并 `docker compose up -d`(已存在 admin 幂等跳过)。
-- [ ] `certs/server.key` 0600;正式证书走企业 CA 渠道时按密钥管理规定存放。
-- [ ] server 仅 `expose` 8080(非 root uid 10001);**不要**给 server 加 `ports:` 映射。
-- [ ] `PICOAI_MASTER_KEY` 若不显式设置,备份 `picoaide-data/master.key`(0700)。
-- [ ] 防火墙:仅放行 80/443(或自定义端口);Caddy 网络被 cap_drop ALL + cap_add NET_BIND_SERVICE 收紧。
-- [ ] 日志轮转:json-file 50MB×3(compose 已配);长期留存建议对接外部日志。
-- [ ] 定期执行 `deploy.sh backup`;迁移数据库前先验证备份可恢复。
-
-## 8. FAQ
-
-**Q1:无公网域名,只有内网 IP?**
-→ 用 `TLS_MODE=manual`(自签占位;或已购内网 CA 证书直接放 certs/)。`auto` 不支持 IP。
-
-**Q2:域名走了 CDN,auto 证书失败?**
-→ 脚本会检测非直连并要求确认;即使确认,ACME HTTP-01 需 CDN 将验证流量转发回源(且 80 端口可被外部访问)。更稳妥:CDN 后源站用 manual(源站证书由企业 CA 签),CDN 边缘用其自管证书。
-
-**Q3:换域名了怎么改?**
-→ 改 .env 的 DOMAIN → `docker compose up -d`;若用 manual,同时重新生成 certs(或自签新域名)→ restart caddy。
-
-**Q4:前端一定要 Caddy 吗?其他反代(Nginx/Ingress)?**
-→ 架构建议 Caddy(自动证书+反代一体);若用 Nginx:证书与转发照旧,注意传 `X-Forwarded-Proto` 与 WebSocket upgrade;本项目 Caddyfile 已含 websocket(默认支持)。
-
-**Q5:升级失败/回滚?**
-→ 先 `deploy.sh backup`;失败时 `docker compose down` → 恢复数据 → 用旧镜像 tag(改 .env SERVER_IMAGE)→ up。DB 迁移向前兼容**不向后兼容**,降级仅保证代码启动,数据完整性以备份为准。
-
-**Q6:端口被占(80/443)?**
-→ 改 compose 的 `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT`(如 8080/8443 并在防火墙放行),Caddyfile 域名块不变;`ss -tln` 查占用。
-
-**Q7:buildx 镜像构建在哪跑?**
-→ CI(GitHub Actions)默认;本地需 `docker buildx create --use`(或 Docker Desktop 自带);`make docker-image` 即可(单 amd64)。
-
-**Q8:镜像拉不下来(GHCR 网络)?**
-→ 配置镜像加速/代理;或 `make release-export` 导出 tar 到内网 `docker load`(见 §1.2)。
-
-**Q9:webadmin 如何登录?**
-→ `https://<域名>/admin/`(SPA 内嵌于服务端二进制;未构建时返回"webadmin 未构建",用发布镜像无此问题)。
-
-**Q10:怎么查看当前版本?**
-→ `docker exec picoaide-server /app/picoaide-server --version`(输出镜像构建注入的版本号)。
-
-**Q11:PG 模式需要什么镜像?**
-→ 服务端镜像须含 `-db-driver`(安装器以 `docker run <img> -h` 探测 `db-driver` 字样;`SKIP_IMAGE_CHECK=1` 可跳过)。
-
-**Q12:用量明细/历史统计保留多久?**
-→ 明细默认保留 6 个月(可配 0=永久);日账/月账统计永久保留,窗口外查询自动走账本(§6.3)。
-
-**Q13:内置 postgres 容器安全吗?**
-→ 不发布宿主机端口(仅 picoaide-net 内网);`PG_PASSWORD` 在 .env(600);建议企业内网同时限制到 pg 容器的网络(防火墙/iptables 只放行宿主机 80/443)。
-
-**Q14:pg-data 目录权限/备份?**
-→ postgres 官方镜像 entrypoint 自动处理 bind mount 目录所有权,勿手工 chown;备份用 `./deploy.sh backup`(pg_dump 运行中安全),冷备=停服后拷 `pg-data/`。注意 PG18 起容器内数据实际落 `pg-data/18/docker/`(挂载点 `/var/lib/postgresql`),冷备拷整个 `pg-data/` 目录即可。
+| caddy 容器创建失败，报 `not a directory` | 挂载源 `Caddyfile.<mode>` 不存在（旧版 internal 模式的坑）；确认 `.env` 的 `TLS_MODE` 与仓库内模板名匹配 |
+| postgres 启动即退出，日志提 `OLD_DATABASES` / `unused mount` | PG16→18 旧数据布局；需 dump/restore 迁移，见 AI-DEPLOY §6.2 |
+| healthz 一直非 200 | 首次启动要跑 60+ 条迁移并建用量分区，等 1–2 分钟；仍失败看 `docker compose logs server` |
+| 镜像拉取失败 | GHCR 不可达时从更新服务器下载镜像包后 `docker load`（AI-DEPLOY §6.4） |
+| 忘了超管密码 | 另一个 super_admin 在 webadmin 重置，或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |

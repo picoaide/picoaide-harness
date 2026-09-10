@@ -57,8 +57,8 @@ description: PicoAide Harness 服务端 HTTP API 参考：认证、LLM 网关、
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/client/v2/brand` | 登录页 / 客户端品牌配置（logo、名称、欢迎语） |
-| GET/HEAD | `/api/client/v2/brand/logo/:name` | logo 文件（`login` / `client` / `favicon`） |
+| GET | `/api/client/v2/channel` | 渠道内容（名称、标语、欢迎语、主题色；来自渠道配置） |
+| GET/HEAD | `/api/client/v2/channel/logo` | 渠道 logo（来自渠道配置目录） |
 | GET | `/api/client/v2/portal` | 门户首页配置（欢迎语 + 三平台客户端下载链接） |
 
 ## 市场与共享内容（员工面）

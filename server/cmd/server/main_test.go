@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,17 +25,20 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/channel"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
+	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -47,20 +51,22 @@ func buildRouter(t *testing.T) *gin.Engine {
 	// JSON 信封、也没有访问日志。
 	installAPIMiddleware(r)
 	router.Register(r, router.Deps{
-		DB:         nil,
-		Auth:       serverauth.New(nil).Handlers(),
-		Admin:      (&serverauth.AdminAPI{}).Handlers(),
-		Appstore:   appstore.NewHandlers(nil),
-		Bootstrap:  bootstrap.NewHandlers(nil),
-		Brand:      brand.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Market:     marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Agentshare: agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Shared:     sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Capability: capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Connector:  connectors.NewHandlers(nil),
-		Telemetry:  telemetry.NewHandlers(nil),
-		Gateway:    llmgateway.NewHandlers(nil),
-		Reports:    reports.NewHandlers(nil),
+		DB:            nil,
+		Auth:          serverauth.New(nil).Handlers(),
+		Admin:         (&serverauth.AdminAPI{}).Handlers(),
+		Appstore:      appstore.NewHandlers(nil),
+		Bootstrap:     bootstrap.NewHandlers(nil),
+		Channel:       channel.NewHandlers(),
+		PortalAdmin:   portal.NewAdminHandlers(nil),
+		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
+		Market:        marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Agentshare:    agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Shared:        sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Capability:    capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Connector:     connectors.NewHandlers(nil),
+		Telemetry:     telemetry.NewHandlers(nil),
+		Gateway:       llmgateway.NewHandlers(nil),
+		Reports:       reports.NewHandlers(nil),
 	})
 	return r
 }
@@ -200,34 +206,44 @@ func TestAPIJSONContract(t *testing.T) {
 }
 
 // TestV2RealDB(真实 PG): 新命名空间公开端点用真实 DB 验证登录闭环。
-// TestPortalEscaping: 门户页对品牌名做 HTML 转义(2026-09-08 P1-6)且带基础
-// 安全头。品牌名由 super_admin 可设,门户对未认证访客开放 → 未转义即存储型 XSS。
+// TestPortalEscaping: 门户页对其渲染的渠道内容做 HTML 转义且带基础安全头。
+//
+// 2026-09-10 变更:门户的名称/标语/欢迎语来源从 webadmin 设置(brand.login.*)
+// 改为**渠道配置**(镜像内 channels/<id>/channel.json,由私有仓在构建期注入)。
+// 该内容现在是编译期可信的,不再由管理员在线编辑;但转义要求不变 ——
+// 渠道内容是文本,任何 < > " 都必须转义,否则渠道配置里一个尖括号就能
+// 在未认证访客的门户页上注入脚本。
+//
+// 同时验证门户**不再读取**数据库里的 brand.* 设置(旧来源已下线)。
 func TestPortalEscaping(t *testing.T) {
 	if os.Getenv("PG_DSN_TEST") == "" {
 		t.Skip("PG_DSN_TEST not set; skipping real-DB test")
 	}
 	db, cleanup := serverstore.NewTestDB(t)
 	defer cleanup()
+	// 旧来源:即便有人在 settings 里塞了脚本,门户也不再读它
 	if err := serverstore.SetSetting(db, "brand.login.display_name", `<script>alert(1)</script>`); err != nil {
 		t.Fatal(err)
 	}
+
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/", func(c *gin.Context) { servePortal(c, db) })
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/", w.Body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("portal = %d", w.Code)
 	}
 	body := w.Body.String()
-	if strings.Contains(body, "<script>alert(1)</script>") {
-		t.Fatal("portal must not contain the raw brand name (stored XSS)")
-	}
-	if !strings.Contains(body, "<title>&lt;script&gt;alert(1)&lt;/script&gt;</title>") {
-		t.Fatalf("portal title not escaped; body=%s", body)
+	if strings.Contains(body, "<script") {
+		t.Fatalf("门户不得包含任何 <script(零脚本页面): %s", body)
 	}
 	if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Content-Security-Policy") == "" {
 		t.Fatalf("portal must carry baseline security headers, got %v", w.Header())
+	}
+	// 门户对外是纯 HTML+CSS:CSP 不放开 script-src
+	if csp := w.Header().Get("Content-Security-Policy"); strings.Contains(csp, "script-src") {
+		t.Fatalf("CSP 不应放开 script-src(零脚本页面): %s", csp)
 	}
 }
 
@@ -247,20 +263,22 @@ func TestV2RealDB(t *testing.T) {
 	}
 	authCfg := serverauth.NewConfiguredAPI(db)
 	router.Register(r, router.Deps{
-		DB:         db,
-		Auth:       authCfg.API.Handlers(),
-		Admin:      (&serverauth.AdminAPI{DB: db}).Handlers(),
-		Appstore:   appstore.NewHandlers(db),
-		Bootstrap:  bootstrap.NewHandlers(db),
-		Brand:      brand.NewHandlers(db, t.TempDir()),
-		Market:     marketplace.NewHandlers(db, t.TempDir()),
-		Agentshare: agentshare.NewHandlers(db, t.TempDir()),
-		Shared:     sharedskills.NewHandlers(db, t.TempDir()),
-		Capability: capabilities.NewHandlers(db, t.TempDir()),
-		Connector:  connectors.NewHandlers(db),
-		Telemetry:  telemetry.NewHandlers(db),
-		Gateway:    llmgateway.NewHandlers(db),
-		Reports:    reports.NewHandlers(db),
+		DB:            db,
+		Auth:          authCfg.API.Handlers(),
+		Admin:         (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Appstore:      appstore.NewHandlers(db),
+		Bootstrap:     bootstrap.NewHandlers(db),
+		Channel:       channel.NewHandlers(),
+		PortalAdmin:   portal.NewAdminHandlers(nil),
+		ClientRelease: clientrelease.NewHandlers(func() string { return "dev" }, "official"),
+		Market:        marketplace.NewHandlers(db, t.TempDir()),
+		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
+		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
+		Capability:    capabilities.NewHandlers(db, t.TempDir()),
+		Connector:     connectors.NewHandlers(db),
+		Telemetry:     telemetry.NewHandlers(db),
+		Gateway:       llmgateway.NewHandlers(db),
+		Reports:       reports.NewHandlers(db),
 	})
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
@@ -288,5 +306,243 @@ func TestV2RealDB(t *testing.T) {
 	r.ServeHTTP(w2, meReq)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("client me = %d, want 200; body=%s", w2.Code, w2.Body.String())
+	}
+}
+
+// ---- 渠道启动校验(2026-09-10) ----
+//
+// 审计发现的两个入口都在**启动期**挡:①显式配置了渠道却解析不出来,回落
+// official 会让渠道部署接受官方清单、把品牌洗掉;②镜像内的渠道内容与本进程
+// 按的渠道不一致,典型成因是 .env/compose 覆盖了镜像自带的渠道声明
+// (仓库自带 compose 曾把 PICOAI_CHANNEL 默认写死 official,正是这条)。
+
+// ---- 缺陷 4 回归(2026-09-10):非官方渠道漏配 deep_link_scheme 必须启动期报错 ----
+//
+// DeepLinkScheme() 在缺字段/畸形时回落厂商 scheme(picoaide)—— 官方/beta 是
+// 向后兼容;但品牌渠道漏配意味着客户在浏览器"打开 picoaide?"确认框里看到
+// 厂商名(白标失败),必须在启动期 fail-loud。
+
+// writeChannelDirRaw 造一个内容自定的渠道目录(带 desktop 段等)。
+func writeChannelDirRaw(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "channel.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write channel.json: %v", err)
+	}
+	return dir
+}
+
+// pointChannelMarker 造镜像标记文件(进程按哪个渠道跑)。
+func pointChannelMarker(t *testing.T, dir, channelID string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "CHANNEL"), []byte(channelID+"\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+}
+
+func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
+	cases := []struct {
+		name      string
+		channelID string
+		config    string // channel.json 内容(空=只有 identity)
+		wantErr   bool
+	}{
+		{
+			name:      "官方缺字段通过",
+			channelID: "official",
+			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
+		},
+		{
+			name:      "beta 缺字段通过",
+			channelID: "beta",
+			config:    `{"schema":1,"channel_id":"beta","identity":{"display_name":"X"}}`,
+		},
+		{
+			name:      "品牌渠道缺字段报错",
+			channelID: "acme",
+			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"}}`,
+			wantErr:   true,
+		},
+		{
+			name:      "品牌渠道畸形 scheme 报错",
+			channelID: "acme",
+			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"Acme AI"}}`,
+			wantErr:   true,
+		},
+		{
+			name:      "品牌渠道合法值通过",
+			channelID: "acme",
+			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"acme-ai"}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeChannelDirRaw(t, tc.config)
+			pointChannelDir(t, dir)
+			pointChannelMarker(t, dir, tc.channelID)
+			t.Setenv(updatecheck.ChannelEnv, "")
+			t.Setenv(updatecheck.EndpointEnv, "")
+
+			got, err := resolveStartupChannel()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("渠道 %s 漏配/畸形 deep_link_scheme 必须拒绝启动(实际通过,渠道 %q)", tc.channelID, got)
+				}
+				if !strings.Contains(err.Error(), "deep_link_scheme") {
+					t.Fatalf("错误信息应点名 deep_link_scheme: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveStartupChannel() error = %v", err)
+			}
+			if got != tc.channelID {
+				t.Fatalf("channel = %q, want %q", got, tc.channelID)
+			}
+		})
+	}
+}
+
+// ---- 缺陷 1 回归(2026-09-10):门户下载入口与更新清单同一口径 ----
+//
+// 门户的内置下载地址只在能给出安全(https)来源时显示;否则不显示入口并把
+// 原因写进下载区(运维据此配置 PICOAI_PUBLIC_BASE_URL)。管理员配置的
+// portal.client_download_* 覆盖地址不受影响。
+
+// withPortalReleaseDir 造一个带三平台资产的客户端资产目录。
+func withPortalReleaseDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	info := `{"schema":1,"channel_id":"official","client":{"version":"2.7.0","assets":{
+      "win-x64":{"file":"Setup.exe","sha256":"a","size":1},
+      "mac-universal":{"file":"App.dmg","sha256":"b","size":2},
+      "linux-x64":{"file":"App.AppImage","sha256":"c","size":3}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "CLIENT-RELEASE.json"), []byte(info), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := clientrelease.Dir
+	clientrelease.Dir = dir
+	t.Cleanup(func() { clientrelease.Dir = prev })
+}
+
+func TestPortalDownloadsRequireSecureOrigin(t *testing.T) {
+	withPortalReleaseDir(t)
+	t.Setenv(clientrelease.PublicBaseURLEnv, "")
+
+	serve := func(host, xfp string, settings map[string]string) ([]portal.Platform, string) {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/portal", nil)
+		c.Request.Host = host
+		if xfp != "" {
+			c.Request.Header.Set("X-Forwarded-Proto", xfp)
+		}
+		return portalDownloads(c, settings)
+	}
+
+	t.Run("安全来源显示内置入口", func(t *testing.T) {
+		items, note := serve("ai.example.com", "https", nil)
+		if note != "" {
+			t.Fatalf("安全来源不该有说明: %q", note)
+		}
+		for i, want := range []string{"/updates/client/Setup.exe", "/updates/client/App.dmg", "/updates/client/App.AppImage"} {
+			if items[i].URL != want {
+				t.Errorf("%s url = %q, want %q", items[i].Name, items[i].URL, want)
+			}
+		}
+	})
+
+	t.Run("不安全来源不显示入口并说明原因", func(t *testing.T) {
+		items, note := serve("10.0.0.9", "", nil)
+		for _, p := range items {
+			if p.URL != "" {
+				t.Errorf("%s 不该有下载地址: %q", p.Name, p.URL)
+			}
+			if !strings.Contains(p.Meta, "暂无可用安装包") {
+				t.Errorf("%s meta = %q", p.Name, p.Meta)
+			}
+		}
+		if !strings.Contains(note, clientrelease.PublicBaseURLEnv) {
+			t.Fatalf("说明应提示配置 %s: %q", clientrelease.PublicBaseURLEnv, note)
+		}
+	})
+
+	t.Run("管理员配置的自有地址仍然生效", func(t *testing.T) {
+		items, _ := serve("10.0.0.9", "", map[string]string{
+			"portal.client_download_win": "https://cdn.example.com/win.exe",
+		})
+		if items[0].URL != "https://cdn.example.com/win.exe" {
+			t.Errorf("管理员配置应优先: %q", items[0].URL)
+		}
+		if items[1].URL != "" {
+			t.Errorf("未配置的平台不该有地址: %q", items[1].URL)
+		}
+	})
+}
+
+// writeChannelDir 造一个只含 channel.json 的渠道目录。
+func writeChannelDir(t *testing.T, channelID string) string {
+	t.Helper()
+	return writeChannelDirRaw(t, `{"schema":1,"channel_id":"`+channelID+`","identity":{"display_name":"X"}}`)
+}
+
+// pointChannelDir 把渠道目录与镜像标记文件都指到临时目录(不碰 /opt)。
+func pointChannelDir(t *testing.T, dir string) {
+	t.Helper()
+	restoreDir := channel.Dir
+	channel.Dir = dir
+	restoreFile := updatecheck.ChannelFile
+	updatecheck.ChannelFile = filepath.Join(dir, "CHANNEL")
+	t.Cleanup(func() {
+		channel.Dir = restoreDir
+		updatecheck.ChannelFile = restoreFile
+	})
+}
+
+func TestResolveStartupChannelAcceptsMatchingImageChannel(t *testing.T) {
+	// 品牌渠道必须自带 deep_link_scheme(见 TestResolveStartupChannelDeepLinkScheme)
+	dir := writeChannelDirRaw(t, `{"schema":1,"channel_id":"acme","identity":{"display_name":"X"},
+      "desktop":{"deep_link_scheme":"acme"}}`)
+	pointChannelDir(t, dir)
+	t.Setenv(updatecheck.ChannelEnv, "")
+	t.Setenv(updatecheck.EndpointEnv, "")
+	pointChannelMarker(t, dir, "acme")
+
+	got, err := resolveStartupChannel()
+	if err != nil {
+		t.Fatalf("resolveStartupChannel() error = %v", err)
+	}
+	if got != "acme" {
+		t.Fatalf("resolveStartupChannel() = %q, want acme", got)
+	}
+}
+
+// 这条就是 compose 覆盖场景:镜像是 acme,而部署侧(旧的 compose 默认值)
+// 把 PICOAI_CHANNEL 设成了 official —— 必须拒绝启动,而不是按 official 跑。
+func TestResolveStartupChannelRejectsDeployOverride(t *testing.T) {
+	dir := writeChannelDir(t, "acme")
+	pointChannelDir(t, dir)
+	t.Setenv(updatecheck.ChannelEnv, "official")
+	t.Setenv(updatecheck.EndpointEnv, "")
+
+	_, err := resolveStartupChannel()
+	if err == nil {
+		t.Fatal("镜像渠道 acme + 部署覆盖 official 必须拒绝启动")
+	}
+	if !strings.Contains(err.Error(), "渠道不一致") {
+		t.Fatalf("error = %v, want 渠道不一致", err)
+	}
+}
+
+// 渠道非法(拼写错误)→ 拒绝启动,绝不静默回落 official。
+func TestResolveStartupChannelRejectsInvalidChannel(t *testing.T) {
+	dir := writeChannelDir(t, "acme")
+	pointChannelDir(t, dir)
+	t.Setenv(updatecheck.ChannelEnv, "Acme Corp")
+	t.Setenv(updatecheck.EndpointEnv, "")
+
+	if _, err := resolveStartupChannel(); err == nil {
+		t.Fatal("非法渠道 id 必须拒绝启动")
 	}
 }

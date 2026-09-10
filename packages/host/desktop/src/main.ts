@@ -11,6 +11,7 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import { DEFAULT_DEEP_LINK_SCHEME, readDesktopChannelProfile } from './desktop-channel.ts'
 import { DSH_HOME_ENV, dshHomeSafe, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import {
@@ -52,7 +53,25 @@ import {
 } from './windows-volume-diagnostics.ts'
 
 const BIN_NAME = 'dsh-plugin-desktop'
-const PRODUCT_NAME = 'PicoAide Harness'
+/**
+ * 应用名（通知发送者、日志头、`app.setName` 决定的数据目录）。
+ *
+ * 渠道构建读随包分发的渠道包（`build/channel.json`）；缺失时回落厂商名 ——
+ * 官方构建与改造前逐字节一致。渠道化打包时 electron-builder 的
+ * `--config.productName` 也必须给同一个值（见 scripts/channel-build.ts），
+ * 否则安装后的应用名与运行时的 `app.setName` 会打架。
+ */
+const PRODUCT_NAME = readDesktopChannelProfile()?.productName ?? 'PicoAide Harness'
+
+/**
+ * 本安装的深链 scheme(OIDC/OpenID 浏览器回调把 token 交回客户端用的那个)。
+ *
+ * 由渠道包决定:浏览器在跳回客户端时会弹"打开 <scheme>?"的确认框,渠道客户
+ * 不该在这里看到厂商名。官方构建未配置时回落 `picoaide` —— 行为不变。
+ * **必须与 electron-builder 的 `protocols`(scripts/channel-build.ts)以及
+ * 服务端 OIDC 回调拼出的 scheme 三者一致**,否则浏览器回调打不开客户端。
+ */
+const DEEP_LINK_SCHEME = readDesktopChannelProfile()?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
 
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
@@ -200,36 +219,36 @@ async function start(): Promise<void> {
 
   app.on('second-instance', (_event, argv) => {
     runtime.show()
-    // Windows/Linux: the second instance carries the picoaide:// link in argv.
+    // Windows/Linux: the second instance carries the deep link in argv.
     for (const arg of argv) {
-      if (arg.startsWith('picoaide://')) runtime.receiveDeepLink(arg)
+      if (arg.startsWith(`${DEEP_LINK_SCHEME}://`)) runtime.receiveDeepLink(arg)
     }
   })
   // macOS: deep links are delivered through open-url (may fire before ready).
   app.on('open-url', (event, url) => {
     event.preventDefault()
-    if (url.startsWith('picoaide://')) runtime.receiveDeepLink(url)
+    if (url.startsWith(`${DEEP_LINK_SCHEME}://`)) runtime.receiveDeepLink(url)
   })
   await app.whenReady()
-  // Protocol registration: `picoaide://` deep links open (or focus) the app.
+  // Protocol registration: deep links open (or focus) the app.
   // Best-effort — Linux needs a packaged .desktop entry, dev builds hint only.
   try {
     if (process.platform === 'darwin') {
-      app.setAsDefaultProtocolClient('picoaide')
+      app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME)
     } else if (process.platform === 'win32') {
-      app.setAsDefaultProtocolClient('picoaide', process.execPath, [])
+      app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [])
     } else {
       // Linux: the packaged AppImage/deb registers via electron-builder
       // `protocols`; attempting setAsDefaultProtocolClient without a desktop
       // entry is a no-op — register only when packaged with argv hints.
-      if (app.isPackaged) app.setAsDefaultProtocolClient('picoaide', process.execPath, [])
+      if (app.isPackaged) app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [])
     }
   } catch (cause) {
     electronLogger.error(`${BIN_NAME}: protocol registration failed: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
   // Cold-start argv may already carry a deep link (launched from a browser).
   for (const arg of process.argv) {
-    if (arg.startsWith('picoaide://')) runtime.receiveDeepLink(arg)
+    if (arg.startsWith(`${DEEP_LINK_SCHEME}://`)) runtime.receiveDeepLink(arg)
   }
   if (process.platform === 'win32') app.setAppUserModelId('ai.deepseek.dsh.desktop')
   // P2-34: a packaged app must never keep a filesystem root or a system

@@ -26,13 +26,15 @@ export interface DesktopUpdateStateResponse {
 
 /** Failure categories surfaced to the user for update checks and downloads.
  * `checksum-*`/`invalid-artifact` are download-time causes that used to be
- * flattened into `network` (P2-63). */
+ * flattened into `network` (P2-63). `not-signed-in` 是"还没有可问的服务端"——
+ * 客户端只从登录的那台服务端取更新，未登录不是网络故障，不能报成网络错误。 */
 export type DesktopUpdateErrorCategory =
   | 'network'
+  | 'not-signed-in'
   | 'release-missing'
+  | 'server-unavailable'
   | 'unsupported'
   | 'checksum-mismatch'
-  | 'checksum-missing'
   | 'invalid-artifact'
 
 /** Byte-level download progress served to the renderer badge. */

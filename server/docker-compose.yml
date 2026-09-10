@@ -14,7 +14,10 @@
 # 证书模式(由 .env 的 TLS_MODE 决定挂载哪个 Caddyfile 模板):
 #   manual   → Caddyfile.manual   (自签占位/企业 CA;支持 IP)
 #   auto     → Caddyfile.autocert (Let's Encrypt 自动;需公网域名直连)
-#   internal → Caddyfile          (Caddy 本地 CA;纯内网开箱即用)
+#   internal → Caddyfile.internal (Caddy 本地 CA;纯内网开箱即用)
+# 2026-09-10 修复:此前 compose 拼接的是 ./Caddyfile.internal,而仓库里 internal
+# 模式的模板文件名是 Caddyfile —— TLS_MODE=internal 从未真正可用(挂载源不存在,
+# caddy 容器创建即失败)。三种模式现统一为 Caddyfile.<mode> 命名。
 #
 # 服务与固定 IP(容器重建后不变):
 #   caddy(172.28.0.2)  唯一对外入口,HTTPS 反代 + TLS 终结
@@ -63,7 +66,7 @@ services:
         max-file: "3"
 
   server:
-    image: ${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-harness-server:latest}
+    image: ${SERVER_IMAGE:-picoaide-harness-server:latest}
     container_name: picoaide-server
     restart: unless-stopped
     # 仅内网可达(经 Caddy),不发布宿主机端口
@@ -75,6 +78,19 @@ services:
       PICOAI_ADMIN_PASSWORD: ${PICOAI_ADMIN_PASSWORD:-}
       # 主密钥:留空则由服务端首次启动自动生成于 data/master.key(请备份)
       PICOAI_MASTER_KEY: ${PICOAI_MASTER_KEY:-}
+      # 本部署所属渠道(beta / official / 品牌渠道 id)。
+      #
+      # **默认不设置**(`:-` 后面为空):渠道由**镜像自带的**声明决定
+      # (Dockerfile 的 ARG CHANNEL → ENV PICOAI_CHANNEL + /opt/picoaide/CHANNEL)。
+      # 这里若写死 `:-official`,就会覆盖镜像里的渠道 —— 渠道化镜像会被当成
+      # 官方部署,进而接受官方清单把自己的品牌洗掉(最严重的一类错)。
+      # 只有确实要覆盖镜像声明时才在 .env 里显式设置,且服务端会校验它与
+      # 镜像内的渠道内容一致,不一致直接拒绝启动。
+      PICOAI_CHANNEL: ${PICOAI_CHANNEL:-}
+      # 更新清单地址。**留空 = 用本渠道的默认目录**
+      # (release.picoaide.com/<channel>/latest.json),不是"关闭检查"。
+      # 要关闭更新检查请显式写 off / none / - / disabled。
+      PICOAI_UPDATE_ENDPOINT: ${PICOAI_UPDATE_ENDPOINT:-}
       # 可信反向代理(审计 2026-08-25 F-02):Caddy 固定 IP 默认 172.28.0.2,
       # 使登录限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS
       PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-172.28.0.2}

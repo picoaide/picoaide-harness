@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 
 const WINDOWS_SIGNING_KEYS = [
   'CSC_IDENTITY_AUTO_DISCOVERY',
@@ -36,6 +38,13 @@ export interface WindowsPackageOptions {
   readonly verifier: string
   /** Node executable used to run package-local scripts. */
   readonly nodeExecutable: string
+  /**
+   * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
+   * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   */
+  readonly channelConfigArgs: readonly string[]
+  /** 本次构建的渠道 id（日志与验证脚本用）。 */
+  readonly channelId: string
   /** Execute one packaging command. */
   readonly run: (
     command: string,
@@ -82,6 +91,8 @@ export function createWindowsPackageOptions(verifier = './verify-win-installer.t
   const workspaceRoot = resolve(desktopRoot, '..', '..')
   const require = createRequire(import.meta.url)
   const windowsRoot = process.env.SystemRoot ?? process.env.WINDIR
+  // 渠道在**解析选项时**定下来（同步）：verifier 也要用它推导安装包名。
+  const channel = resolveChannelBuildContext()
   return {
     env: process.env,
     platform: process.platform,
@@ -95,6 +106,8 @@ export function createWindowsPackageOptions(verifier = './verify-win-installer.t
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL(verifier, import.meta.url)),
     nodeExecutable: process.execPath,
+    channelConfigArgs: prepareChannelBuilderOverrides(channel),
+    channelId: channel.channelId,
     run,
     log: message => console.log(message),
   }
@@ -159,6 +172,7 @@ export function packageWindowsArtifact(
       'never',
       '--config.win.signExecutable=false',
       '--config.npmRebuild=false',
+      ...options.channelConfigArgs,
     ],
     options.desktopRoot,
     {
@@ -193,6 +207,10 @@ if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.m
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
       prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
     }
+    // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json)。CI 打包走
+    // --no-prebuild,brand-prepare 不会经 prebuild 触发 —— 少了这一步,渠道包
+    // 会带官方图标出厂(见 channel-prepare.ts)。
+    await prepareChannelPackaging()
     packageWindowsInstaller(undefined, { skipGates: process.argv.includes('--no-gates') })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

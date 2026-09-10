@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
 import { afterEach, describe, expect, it } from 'vitest'
-import { verifyWindowsPortable } from '../scripts/verify-win-portable.ts'
+import {
+  verifyWindowsPortable,
+  type WindowsPortableVerificationOptions,
+} from '../scripts/verify-win-portable.ts'
 
 const temporaryRoots: string[] = []
 
@@ -32,17 +35,32 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
+/**
+ * 官方渠道的期望名与固定版本。
+ *
+ * 渠道化改造后便携包名/可执行名来自渠道包（channel-build.ts），官方渠道的值
+ * 与改造前逐字节一致 —— 这里显式写死，保证官方构建的回归不放松。
+ */
+function OFFICIAL_OPTIONS(desktopRoot: string): WindowsPortableVerificationOptions {
+  return {
+    desktopRoot,
+    version: '2.0.0',
+    archiveName: 'PicoAide-Harness-2.0.0-x64-Portable.zip',
+    executableName: 'PicoAide Harness.exe',
+  }
+}
+
 describe('Windows portable artifact verification', () => {
   it('accepts the exact versioned portable ZIP archive', () => {
     const value = fixture()
 
-    expect(verifyWindowsPortable({ desktopRoot: value.root, version: '2.0.0' })).toBe(value.portable)
+    expect(verifyWindowsPortable(OFFICIAL_OPTIONS(value.root))).toBe(value.portable)
   })
 
   it('rejects a stale portable archive from a different version', () => {
     const value = fixture('1.9.0')
 
-    expect(() => verifyWindowsPortable({ desktopRoot: value.root, version: '2.0.0' }))
+    expect(() => verifyWindowsPortable(OFFICIAL_OPTIONS(value.root)))
       .toThrow('PicoAide-Harness-2.0.0-x64-Portable.zip')
   })
 
@@ -55,7 +73,7 @@ describe('Windows portable artifact verification', () => {
     archive.addFile('resources/app.asar', Buffer.from('asar'))
     archive.writeZip(value.portable)
 
-    expect(() => verifyWindowsPortable({ desktopRoot: value.root, version: '2.0.0' }))
+    expect(() => verifyWindowsPortable(OFFICIAL_OPTIONS(value.root)))
       .toThrow('does not have a Windows PE header')
   })
 })

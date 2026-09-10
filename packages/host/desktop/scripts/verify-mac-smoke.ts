@@ -1,11 +1,12 @@
 /** Verify the unsigned application structure sealed inside one macOS smoke DMG. */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
+import { packagedProductName } from './channel-build.ts'
 
 /** Injectable filesystem and command boundaries for smoke verification. */
 export interface MacSmokeVerificationOptions {
@@ -48,13 +49,10 @@ function run(command: string, args: readonly string[]): void {
 
 function defaultOptions(): MacSmokeVerificationOptions {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-  const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
-    readonly build?: { readonly productName?: unknown }
-  }
-  const productName = manifest.build?.productName
-  if (typeof productName !== 'string' || productName.length === 0) {
-    throw new Error('package.json build.productName must be a non-empty string')
-  }
+  // 产品名对齐**本次构建声明的渠道内容**(随包 build/channel.json;渠道构建下
+  // 即渠道名)。此前只读 package.json:官方名对,渠道构建会去找错名字的 .app
+  // —— 渠道矩阵的 mac 验证要么误报要么卡死(2026-09-10)。
+  const productName = packagedProductName()
   return {
     distDir: process.argv[2] === undefined
       ? join(packageRoot, 'dist', 'mac-smoke')

@@ -18,7 +18,7 @@ export default defineConfig([
       index: 'src/index.ts',
       invariant: 'src/invariant.ts',
       'auth-gate': 'src/auth-gate.ts',
-      'brand-sync': 'src/brand-sync.ts',
+      'channel-sync': 'src/channel-sync.ts',
       'gateway-model': 'src/gateway-model.ts',
       'error-reporting': 'src/error-reporting.ts',
       'skill-telemetry': 'src/skill-telemetry.ts',
@@ -77,7 +77,7 @@ export default defineConfig([
     // "process is not defined" at factory execution.
     define: {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
-      // 品牌名旁的产品版本标签(见 src/client/Brand.tsx BrandName)
+      // 品牌名旁的产品版本标签(见 src/client/Channel.tsx BrandName)
       'process.env.PICOAI_PRODUCT_VERSION': JSON.stringify(PRODUCT_VERSION),
     },
     outputOptions: {

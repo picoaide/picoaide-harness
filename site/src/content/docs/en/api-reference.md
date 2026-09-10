@@ -57,8 +57,8 @@ description: 'PicoAide Harness server HTTP API reference: auth, LLM gateway, mar
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/client/v2/brand` | Login-page / client brand config (logo, name, welcome) |
-| GET/HEAD | `/api/client/v2/brand/logo/:name` | Logo files (`login` / `client` / `favicon`) |
+| GET | `/api/client/v2/channel` | Channel content (name, tagline, welcome, accent; from the channel config) |
+| GET/HEAD | `/api/client/v2/channel/logo` | Channel logo (from the channel config directory) |
 | GET | `/api/client/v2/portal` | Portal config (welcome + three-platform client download links) |
 
 ## Marketplace and shared content (employee surface)

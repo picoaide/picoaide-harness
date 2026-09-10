@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { prepareChannelBuilderOverrides } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 
 const require = createRequire(import.meta.url)
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -13,8 +15,14 @@ const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
 prebuildWorkspaceDeps(packageRoot)
 
+// 渠道化准备（图标 + 随包 channel.json），见 channel-prepare.ts。
+const channel = await prepareChannelPackaging()
 const builderCli = require.resolve('electron-builder/cli.js')
-const result = spawnSync(process.execPath, [builderCli, '--dir'], {
+const result = spawnSync(process.execPath, [
+  builderCli,
+  '--dir',
+  ...prepareChannelBuilderOverrides(channel),
+], {
   cwd: packageRoot,
   env: {
     ...process.env,

@@ -2,7 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { verifyWindowsInstaller } from '../scripts/verify-win-installer.ts'
+import {
+  verifyWindowsInstaller,
+  type WindowsInstallerVerificationOptions,
+} from '../scripts/verify-win-installer.ts'
 
 const temporaryRoots: string[] = []
 
@@ -35,11 +38,26 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
+/**
+ * 官方渠道的期望名与固定版本。
+ *
+ * 渠道化改造后安装包名/可执行名来自渠道包（channel-build.ts），官方渠道
+ * 的值与改造前逐字节一致 —— 这里显式写死，保证官方构建的回归不放松。
+ */
+function OFFICIAL_OPTIONS(desktopRoot: string): WindowsInstallerVerificationOptions {
+  return {
+    desktopRoot,
+    version: '2.0.0',
+    installerName: 'PicoAide-Harness-2.0.0-x64-Setup.exe',
+    applicationName: 'PicoAide Harness.exe',
+  }
+}
+
 describe('Windows installer artifact verification', () => {
   it('accepts the exact versioned NSIS installer and unpacked application', () => {
     const value = fixture()
 
-    expect(verifyWindowsInstaller({ desktopRoot: value.root, version: '2.0.0' })).toEqual({
+    expect(verifyWindowsInstaller(OFFICIAL_OPTIONS(value.root))).toEqual({
       installerPath: value.installer,
       applicationPath: value.application,
     })
@@ -48,7 +66,7 @@ describe('Windows installer artifact verification', () => {
   it('rejects a stale installer from a different version', () => {
     const value = fixture('1.9.0')
 
-    expect(() => verifyWindowsInstaller({ desktopRoot: value.root, version: '2.0.0' }))
+    expect(() => verifyWindowsInstaller(OFFICIAL_OPTIONS(value.root)))
       .toThrow('PicoAide-Harness-2.0.0-x64-Setup.exe')
   })
 
@@ -58,7 +76,7 @@ describe('Windows installer artifact verification', () => {
     invalid.write('NO', 0, 'ascii')
     writeFileSync(value.installer, invalid)
 
-    expect(() => verifyWindowsInstaller({ desktopRoot: value.root, version: '2.0.0' }))
+    expect(() => verifyWindowsInstaller(OFFICIAL_OPTIONS(value.root)))
       .toThrow('does not have a Windows PE header')
   })
 
@@ -68,7 +86,7 @@ describe('Windows installer artifact verification', () => {
     invalid.fill(0, 128, 132)
     writeFileSync(value.application, invalid)
 
-    expect(() => verifyWindowsInstaller({ desktopRoot: value.root, version: '2.0.0' }))
+    expect(() => verifyWindowsInstaller(OFFICIAL_OPTIONS(value.root)))
       .toThrow('does not have a Windows PE signature')
   })
 })

@@ -6,7 +6,7 @@
 
 ## 1. 项目是什么(一句话)
 
-**企业内网 AI 办公智能体的服务端与管理系统**:Go 服务端提供认证、LLM 网关(密钥不出服务端、按用户计量计费)、技能商城、共享内容与全部管理接口;webadmin 管理端(shadcn SPA,内嵌进服务端二进制)负责用户/部门/网关/用量/商城/能力中心/品牌门户等全部配置。
+**企业内网 AI 办公智能体的服务端与管理系统**:Go 服务端提供认证、LLM 网关(密钥不出服务端、按用户计量计费)、技能商城、共享内容与全部管理接口;webadmin 管理端(shadcn SPA,内嵌进服务端二进制)负责用户/部门/网关/用量/商城/能力中心/门户等全部配置（对外文案与标识来自渠道配置，不在管理端编辑）。
 
 ## 2. 第一性原理(设计为什么是这样,改设计前先过一遍)
 
@@ -24,6 +24,8 @@
 4. **每任务结束必须 commit**,提交信息 `feat:|fix:|test:|docs:|chore:` 单行 ≤72 字符。
 5. **安全边界不得绕过**:凭证 AES-GCM 加密、API token 只存哈希、TOFU 证书校验(客户端接入方)、限流/审计——一律不许为省事而移除。
 6. **管理端 HTTP 走 `/api/server/admin/*`(session + CSRF)**:错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`。
+7. **对外内容只走渠道配置(2026-09-10)**:客户端登录页/界面与服务端门户看到的一切（名称、标语、欢迎语、标识、主题色）来自**渠道配置**（镜像内 `/opt/picoaide/channel/`，构建时由私有仓 `picoaide/channels` 注入，见 `internal/channel`）。**不要再新增在线编辑这些内容的接口** —— 改内容 = 改渠道配置并重新构建镜像，这样内容可审计。旧的 `internal/brand`（上传/快照/开关）与 `brand:*` 权限已删除。
+8. **镜像只从更新服务器分发**：不经任何镜像仓库（GHCR 已下线）。客户端安装包随服务端镜像发布，由服务端自身下发（`internal/clientrelease`）。
 
 ## 4. 架构总览
 
@@ -34,7 +36,7 @@
   ├─ bootstrap:/api/client/v2/config/bootstrap(默认模型+建议清单+connectors[])
   ├─ 商城/共享:/api/client/v2/marketplace|shared-skills|agent-presets|capabilities(授权制/双门制)
   ├─ 审计:/api/server/admin/audit(用户/部门/技能等敏感操作留痕)
-  └─ 管理端 webadmin(go:embed 内嵌,/admin/):用户/部门/网关/用量/商城/能力中心/品牌/门户 —— 全部配置入口
+  └─ 管理端 webadmin(go:embed 内嵌,/admin/):用户/部门/网关/用量/商城/能力中心/门户 —— 全部配置入口
 ```
 
 ## 5. 技术栈
@@ -47,10 +49,10 @@
 ```
 cmd/server/            # 服务端入口(--bootstrap-admin/-addr/-data/-db-driver/-pg-dsn/门户页渲染)
 internal/              # router(路由唯一真源)/serverauth/llmgateway/marketplace/agentshare/sharedskills/
-                       # capabilities/connectors/brand/bootstrap/telemetry/serverstore/util
+                       # capabilities/connectors/channel/clientrelease/portal/bootstrap/telemetry/serverstore/util
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/                  # 服务端文档(01-09/DEPLOY;superpowers/ 为历史设计文档)
-scripts/               # install-server.sh / deploy.sh(一键部署)+ mock-upstream.go(假上游)
+scripts/               # mock-upstream.go(假上游);部署脚本已于 2026-09-10 移除
 data/                  # 服务端运行时数据(0700,gitignore);数据库在 PostgreSQL(单 compose 内置 postgres 容器)
 ```
 
@@ -59,8 +61,8 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 ### 7.0 API 命名空间与强制 JSON(2026-09 工程化重构)
 
 - **命名空间唯一真源**:`internal/router` 包(常量 `NamespaceServer` / `NamespaceClientV2`)。
-  - `/api/server/*` — 服务端管理面(webadmin/运维/审计: 用户/部门/网关/品牌等)。
-  - `/api/client/v2/*` — 客户端员工面(桌面客户端/员工接入: auth/bootstrap/marketplace/共享/能力中心/品牌/门户等)。
+  - `/api/server/*` — 服务端管理面(webadmin/运维/审计: 用户/部门/网关/门户配置等)。
+  - `/api/client/v2/*` — 客户端员工面(桌面客户端/员工接入: auth/bootstrap/channel/marketplace/共享/能力中心/门户等)。
   - `/v1/*` — LLM 网关独立命名空间(OpenAI/Anthropic 兼容,含官方原生无 `/v1` 变体),`BearerAuth` 保护。
   - 旧命名空间(`/api/*`、`/v2/api/*`、`/v2/v1/*`)已迁移移除,禁止新增旧前缀路由。
 - **路由集中声明**:所有路由必须经 `internal/router.Register(r, Deps)` 集中声明(分组/认证中间件/权限申报),业务包**不得**自行 `r.Group()` 注册生产路由(仅测试自建路由树例外);业务包通过 `handlers.go` 的 `NewHandlers(db, ...)` 暴露 gin.HandlerFunc 集合。
@@ -71,13 +73,13 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
   - 404(NoRoute) 与 panic(Recovery) 也必须 JSON 信封——`mountAPIGuards` 已统一;
   - 例外(产品 HTML 面,非 API):`/` `/portal`(门户首页)、`/admin/*`(webadmin SPA)、`/healthz`(JSON 探针);SSE(`text/event-stream`)与二进制归档下载(application/gzip)是流式/文件语义,不适用 JSON 约束。
 - **认证与权限**:客户端面 Bearer(`serverauth.BearerAuth`);管理面会话+CSRF + RBAC(`serverauth.AdminAuth` + `AdminRoute` 权限申报,fall-open 防护)。
-- **客户端调用面**:桌面客户端(enterprise)调 `/api/client/v2/*`;webadmin 调 `/api/server/admin/*` 与公开 `/api/client/v2/brand`。新增/修改端点时两端必须同步(见 §8 检查)。
+- **客户端调用面**:桌面客户端(enterprise)调 `/api/client/v2/*`;webadmin 调 `/api/server/admin/*` 与公开 `/api/client/v2/channel`。新增/修改端点时两端必须同步(见 §8 检查)。
 
 ### 7.1 REST 错误
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
 - **bootstrap**:`{default_model, models, skills, web, connectors}`(接入方对 skills/web 缺省值兜底;connectors 为服务端连接器目录,0042 起)
 - **员工用量接口**:`GET /api/client/v2/auth/usage` → `{quota_tokens, quota_money, remaining_tokens/money(不限=null), today/yesterday/monthly/total usage+cost}`(余额与统计展示数据源)
-- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0060(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0047 brand 快照、0048 审计哈希链)
+- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0060(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链)
 - **审计契约**:`GET /api/server/admin/audit?page=&size=&action=&username=`(敏感操作留痕;默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链防篡改)
 - **费用/配额口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;配额链 = 员工 token → 员工金额 → 部门预算(归属+祖先,树内 SUM(cost));剩余 = 配额 − 本月已用(不限=null)
 
@@ -85,15 +87,19 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 
 ```bash
 make test              # go test ./... -count=1(服务端全量;不依赖数据库,无 PG 时 DB 用例自动 Skip,设 PG_DSN_TEST 则全量)
-make test-server       # 服务端各业务域测试(显式枚举全部包)
+make test-server       # 服务端各业务域测试(目录通配 internal/... + cmd/...;-p $(TEST_PARALLEL) 默认 4)
+make test-server-fast  # 同 test-server 但不带 -count=1 → 无改动时整轮命中 go test 结果缓存(实测全仓 0.3s)
 make webadmin          # cd webadmin && npm run build(产物内嵌进服务端二进制)
 make build-server      # make webadmin + go build -o bin/picoaide-server
-make docker-image      # 服务端 Docker 镜像(ghcr.io/picoaide/picoaide-harness-server)
-make release-export    # 离线导出镜像 tar
-make check             # gofmt + go vet + test-server + webadmin 测试与构建
+make docker-image      # 本地构建服务端镜像(发布镜像走更新服务器,不经镜像仓库)
+make check             # gofmt + go vet + test-server + webadmin 测试与构建(发布门禁)
+make check-fast        # 开发循环:gofmt + vet + test-server-fast + webadmin 单测(不建 webadmin 产物,实测 15.6s)
+# 测试库:每个 DB 用例从模板库 picoaide_tmpl_<迁移哈希> 克隆(见 internal/serverstore/dbtest.go),
+#   不再逐用例重放 52 个迁移(单用例固定开销 1.5s → ~0.1s);换迁移/跨月会自动生成新模板库,
+#   模板不可用时自动回落到"空库 + 全量迁移"。提速实测见 ../../docs/decisions/2026-09-10-verification-speedup.md。
 PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
 go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证网关
-bash scripts/install-server.sh         # 生产一键部署(oh-my-zsh 式单命令,自动装依赖;域名/账号/密码,见 docs/02-build-deploy.md)
+# 生产部署:按 ../../docs/deploy/AI-DEPLOY.md 执行(脚本已下线,交付物=一个镜像)
 # 数据库: PostgreSQL 唯一。-db-driver 仅接受 pg(默认;pg-external 为历史兼容别名,部署层已不用),-pg-dsn 必填;
 #   迁移 DDL 见 internal/serverstore/migrations-pg/(迁移自动应用)。SQLite 与 migrate-sqlite-pg 已下线,
 #   老数据需先在历史版本完成迁移。
@@ -103,4 +109,4 @@ bash scripts/install-server.sh         # 生产一键部署(oh-my-zsh 式单命�
 
 - 架构设计:docs/superpowers/specs/2026-08-01-picoaide-next-architecture-design.md(ADR、安全设计、错误边界;历史设计文档)
 - 实施计划:docs/superpowers/plans/2026-08-01-picoaide-next-full-implementation.md(阶段 1 服务端网关仍有效;阶段 2/3 客户端相关已下线)
-- 部署:docs/02-build-deploy.md(服务端构建、systemd 裸二进制 + Caddy、install-server.sh)与 docs/DEPLOY.md(容器化 compose)
+- 部署:../../docs/deploy/AI-DEPLOY.md(唯一部署说明:首次部署/升级/回滚/排障)与 docs/DEPLOY.md(容器化设计说明)、docs/02-build-deploy.md(构建、systemd、CI)

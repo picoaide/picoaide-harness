@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { brandMarkSvg } from '../src/brand-geometry.ts'
+import { brandMarkSvg } from '../src/channel-geometry.ts'
 
 // 回归测试(2026-09):LOGIN_HTML 是 TS 模板字符串,内联 <script> 里的正则
 // `\/` 会被模板转义(cooked)成 `/`(输出 `//$` = 空正则+行注释)导致浏览器
@@ -41,6 +41,30 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     expect(() => { new Function(script) }).not.toThrow()
   })
 
+  it('never starts a statement line with a left paren (ASI hazard)', () => {
+    const script = loginScript()
+    // 本脚本是无分号(ASI)风格:紧跟在一个调用语句之后的左圆括号不会触发自动
+    // 分号插入,解析器会把上一行读成"调用那个函数的返回值"。2026-09-10 实测:
+    // 一个行首为 `(async function autoConnect(){...})()` 的 IIFE 让 `#f2` 登录
+    // 表单的提交处理**从未注册**,点「登录」只是原生提交并刷新回 Step1 ——
+    // 客户端 E2E 从 13/13 掉到 5/13。它语法合法,所以 new Function 解析测试与
+    // tsc 都抓不到,只能在这里静态拦住。
+    // 只在与**上一行构成两个语句**时才危险:如果上一行本身以运算符结尾
+    // (+, &&, =, 逗号 …),那个 '(' 只是同一个表达式的续行,合法且常见。
+    const lines = script.split('\n').map(line => line.trim())
+    const offenders = []
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!lines[index].startsWith('(')) continue
+      let previous = index - 1
+      while (previous >= 0 && (lines[previous] === '' || lines[previous].startsWith('//'))) previous -= 1
+      if (previous < 0) continue
+      const tail = lines[previous].slice(-1)
+      if ('+,-=*/%&|?:<>!('.includes(tail)) continue
+      offenders.push({ line: lines[index], number: index + 1, after: lines[previous] })
+    }
+    expect(offenders, `行首左括号会让上一行被解析成函数调用: ${JSON.stringify(offenders)}`).toEqual([])
+  })
+
   it('rendered login page keeps the server-URL slash stripping valid', () => {
     const script = loginScript()
     // trimServer 必须以纯字符串实现(无 `\/` 正则):若实现退化回正则转义,
@@ -53,6 +77,16 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     // 模板里保留占位符,由 apply() 在开局替换(带斜杠的默认地址由 trimServer 兜底)。
     const html = renderedLoginHTML()
     expect(html).toContain('__DEFAULT_SERVER__')
+  })
+
+  it('reads channel content from the login-page channel proxy (brand config retired)', () => {
+    const script = loginScript()
+    // 数据来源是渠道配置(服务端 /api/client/v2/channel, 经本地 /api/pico/channel 代理)。
+    expect(script).toContain("fetch('/api/pico/channel?server='")
+    expect(script).not.toContain('/api/pico/brand')
+    expect(script).toContain('renderChannel(currentChannel)')
+    // 渠道内容总是生效: 不再有 enabled 开关判定。
+    expect(script).not.toMatch(/\.enabled/u)
   })
 
   it('escapes gateway-controlled method names and labels (P1-7)', () => {
@@ -68,6 +102,41 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     expect(escSrc, 'esc() must be findable').not.toBeNull()
     const esc = new Function(`${escSrc![0]}; return esc`)() as (v: unknown) => string
     expect(esc('"><img src=x onerror=alert(1)>')).toBe('&quot;&gt;&lt;img src=x onerror=alert(1)&gt;')
+  })
+
+  it('skips the server-address step when the channel package preconfigured a domain', () => {
+    const script = loginScript()
+    // 渠道包预置域名 → 直接进登录,员工第一眼就是账号密码(或一次点击的浏览器
+    // SSO),而不是"请输入你公司的地址"。
+    expect(script).toContain('function connect(server)')
+    expect(script).toContain('autoConnect')
+    // 判据必须是**服务端写的标记**,不是"输入框有值":浏览器 reload 会恢复表单值,
+    // 用"有值"判断会让未渠道化的构建在登录后重新触发自动连接、把页面拽回登录流程
+    // (2026-09-10 实测:客户端 E2E 从 13/13 掉到 5/13 的根因)。
+    expect(script).toContain("getAttribute('data-default-server') !== '1'")
+    // 自动连接必须走"函数声明 + void 调用",不能把 IIFE 写在行首:
+    // 本脚本是无分号风格,行首左圆括号会被解析成"调用上一行的返回值",
+    // 一执行就抛错并让后面所有语句(含 #f2 登录处理)不再注册。
+    expect(script).toContain('async function autoConnect()')
+    expect(script).toContain('void autoConnect()')
+    expect(script).not.toMatch(/^\s*\(async function autoConnect/m)
+    // 提交与自动连接必须走同一条探测路径,不能各写一份。
+    expect(script).toContain("f1.addEventListener('submit'")
+  })
+
+  it('escapes the channel-provided default domain before inlining it into the attribute', () => {
+    // 预置域名由 apply() 在服务端替换进 value="…":必须经属性转义,
+    // 否则一个带引号的地址就能从属性里逃逸(登录页是认证前唯一的 HTML 面)。
+    const src = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
+    expect(src).toContain('escapeHtmlAttribute(configuredServer)')
+    expect(src).toContain("(config.defaultServer ?? '').trim()")
+    expect(src).not.toContain("replaceAll('__DEFAULT_SERVER__', config.defaultServer ?? '')")
+    const fn = src.match(/function escapeHtmlAttribute\(value: string\): string \{[\s\S]*?\n\}/)
+    expect(fn, 'escapeHtmlAttribute must be findable').not.toBeNull()
+    const escape = new Function(
+      `${fn![0].replace(/: string/g, '')}; return escapeHtmlAttribute`,
+    )() as (v: string) => string
+    expect(escape('https://a.test"><img src=x>')).toBe('https://a.test&quot;&gt;&lt;img src=x&gt;')
   })
 })
 
