@@ -15,7 +15,7 @@
  ┌──────────────┐   检查更新    ┌────────────────┐   拉镜像   ┌──────────┐
  │     R2       │ ←─────────── │  客户服务器     │ ────────→ │ 客户服务器│
  │ latest.json  │              │ updatecheck    │  tar或     │ 升级完成  │
- │ image.tar.zst│              │ webadmin 提示   │  docker pull└──────────┘
+ │ image.tar│              │ webadmin 提示   │  docker pull└──────────┘
  └──────────────┘              └────────────────┘
 
  ② 企业渠道客户端链路（R2 不参与）
@@ -197,11 +197,11 @@ r2://<bucket>/
     latest.json                                   # ← 服务端检查更新的唯一入口（可覆盖）
     releases/
       2.7.0/
-        picoaide-server-2.7.0-amd64.tar.zst       # ~500MB，内含客户端包的服务端镜像
+        picoaide-server-2.7.0-amd64.zip       # ~500MB，内含客户端包的服务端镜像
         SHA256SUMS                                # 上面这个 tar 的哈希（离线交付手工校验）
   acme/                                           # 定制渠道：与官方**结构完全相同**
     latest.json
-    releases/2.7.0/picoaide-server-2.7.0-acme.tar.zst
+    releases/2.7.0/picoaide-server-2.7.0-acme.zip
 ```
 
 **tar 文件名带版本号** → 天然 cache key，可设 `immutable` 长缓存，永不复用同一 URL 的不同内容。
@@ -252,7 +252,7 @@ r2://<bucket>/
 | 路径 | 命令 | 适用 |
 |---|---|---|
 | 在线 | `docker pull <image>:<tag>`（GHCR，或客户自己的 registry） | 客户服务器能出网且 GHCR 可达 |
-| 离线 | `curl` 下 R2 的 tar → `zstd -d \| docker load` | GHCR 不可达（国内常见），或客户用客户自建 registry |
+| 离线 | `curl` 下 R2 的 tar → `zip -d \| docker load` | GHCR 不可达（国内常见），或客户用客户自建 registry |
 
 R2 的 tar 是**离线路径的权威来源**，也是"镜像分发"的真正答案。
 
@@ -265,7 +265,7 @@ Cloudflare 对**未知扩展名**的 200 响应有默认边缘缓存（数小时
 | 对象 | Content-Type | Cache-Control | 理由 |
 |---|---|---|---|
 | `latest.json` | `application/json` | `no-cache` | 有 ETag，可缓存但每次回源校验 → 新版本立即可见；别用 `no-store`（丢掉条件请求） |
-| `*.tar.zst` | `application/zstd` | `public, max-age=31536000, immutable` | 文件名含版本号，天然 cache key |
+| `*.zip` | `application/zip` | `public, max-age=31536000, immutable` | 文件名含版本号，天然 cache key |
 | `SHA256SUMS` | `text/plain` | 同上 | — |
 
 叠加效应：`updatecheck.go` 自身还有 **6 小时 TTL** 缓存。所以最坏情况是"发布后最多 6 小时 webadmin 才提示"——这对运维属可接受；若想更快，把 `CacheTTL` 调小即可（`updatecheck.go` 常量）。
@@ -309,9 +309,9 @@ aws="aws --endpoint-url $R2_ENDPOINT"
 CH=official ; VER=2.7.0 ; DIR=release-bundle/
 
 # 1) 镜像（不可变、长缓存）
-$aws s3 cp "$DIR/picoaide-server-$VER-amd64.tar.zst" \
-  "s3://$R2_BUCKET/$CH/releases/$VER/picoaide-server-$VER-amd64.tar.zst" \
-  --content-type application/zstd \
+$aws s3 cp "$DIR/picoaide-server-$VER-amd64.zip" \
+  "s3://$R2_BUCKET/$CH/releases/$VER/picoaide-server-$VER-amd64.zip" \
+  --content-type application/zip \
   --cache-control 'public, max-age=31536000, immutable'
 
 $aws s3 cp "$DIR/SHA256SUMS" "s3://$R2_BUCKET/$CH/releases/$VER/SHA256SUMS" \
@@ -353,7 +353,7 @@ $aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
     "image_tag": "v2.7.0",          // webadmin 展示的升级目标
     "image_ref": "ghcr.io/picoaide/picoaide-harness-server:v2.7.0",
     // 离线部署路径的镜像 tar（AI-DEPLOY.md §6.4 的 curl 目标）
-    "image_asset": "https://release.picoaide.com/official/releases/2.7.0/picoaide-server-2.7.0-amd64.tar.zst"
+    "image_asset": "https://release.picoaide.com/official/releases/2.7.0/picoaide-server-2.7.0-amd64.zip"
   },
   "client": {
     // 镜像内配套的客户端版本。R2 只放服务端镜像,**不承担客户端分发**;

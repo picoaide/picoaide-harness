@@ -121,10 +121,10 @@ docker pull ${IMAGE}:v2.7.0
 
 # 来源 B（内网 / GHCR 不可达）：从更新服务器下载镜像包再导入
 VER=2.7.0
-curl -fL -o /tmp/pa.tar.zst \
-  "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.tar.zst"
-zstd -d < /tmp/pa.tar.zst | docker load
-# 无 zstd 时：apt-get install -y zstd
+curl -fL -o /tmp/pa.zip \
+  "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+unzip -p /tmp/pa.zip image.tar | docker load
+# unzip 缺失时：apt-get install -y unzip（或 yum install -y unzip）
 ```
 
 ### 3.3 导出部署文件到目标目录
@@ -340,9 +340,9 @@ IMAGE=ghcr.io/picoaide/picoaide-harness-server
 
 docker pull ${IMAGE}:v${VER} \
   || { echo "GHCR 不可达，改用更新服务器镜像包"; \
-       curl -fL -o /tmp/pa.tar.zst \
-         "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.tar.zst" \
-       && zstd -d < /tmp/pa.tar.zst | docker load; }
+       curl -fL -o /tmp/pa.zip \
+         "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip" \
+       && unzip -p /tmp/pa.zip image.tar | docker load; }
 ```
 
 ### 6.5 切换版本并重启

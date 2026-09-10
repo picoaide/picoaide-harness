@@ -34,7 +34,7 @@
 | 只带 win / mac | ~200–250 MB | 估计值（NSIS/DMG 与 AppImage 同量级） |
 | **三平台全带（推荐默认）** | **~500 MB** | 一个镜像覆盖所有客户端 |
 
-**要澄清的误判**：安装包本身已是压缩产物（zstd/xz），再套 zstd 收益极小；也不需要把镜像切碎（切碎只增加失败面，分片的唯一理由是断点续传）。**对隔离网客户，这不是 15MB 而是 0.5GB 的 U 盘拷贝 —— 这是真实成本，必须让客户知道并可选更小的形态。**
+**要澄清的误判**：安装包本身已是压缩产物（zip/xz），再套 zip 收益极小；也不需要把镜像切碎（切碎只增加失败面，分片的唯一理由是断点续传）。**对隔离网客户，这不是 15MB 而是 0.5GB 的 U 盘拷贝 —— 这是真实成本，必须让客户知道并可选更小的形态。**
 
 → 结论：**默认发 `-all`（500MB，最省心），同时提供按平台裁剪的镜像**：
 
@@ -53,7 +53,7 @@ ghcr.io/picoaide/picoaide-harness-server:v2.7.0-linux  # ~165MB
 | 事实 | 实测值 | 影响 |
 |---|---|---|
 | 服务端镜像 `docker save` tar | **15 MB**（v2.5.16；v2.4.0=23MB） | 基础镜像极小，加减客户端是唯一变量 |
-| 同 tar 过 gzip -6 / zstd-19 | 14.1 MB / 15 MB | 压缩算法在此量级无意义 |
+| 同 tar 过 gzip -6 / zip-19 | 14.1 MB / 15 MB | 压缩算法在此量级无意义 |
 | linux AppImage / deb | **150 MB / 115 MB** | 客户端才是体积主体 |
 | `/app` 内容 | `picoaide-server` + `entrypoint.sh` | 镜像结构极简，加目录零成本 |
 | 服务端 `CGO_ENABLED=0` 静态二进制 | 42 MB（构建产物） | 可退化为「分发二进制」，但见 §4 判断 |
@@ -71,7 +71,7 @@ ghcr.io/picoaide/picoaide-harness-server:v2.7.0-linux  # ~165MB
  │ update.      │  latest.json    │ updatecheck.go │                  │ 新镜像跑  │
  │ picoaide.com │                 │ webadmin 提示   │                  │ 起来      │
  │ 只有镜像 tar │  ─────────────→ └────────────────┘                  └──────────┘
- └──────────────┘   下发 image.tar.zst
+ └──────────────┘   下发 image.tar
 
  ② 客户端更新链路 —— R2 完全不参与
  ┌────────────────┐  检查更新 + 下载  ┌──────────────┐
@@ -92,7 +92,7 @@ ghcr.io/picoaide/picoaide-harness-server:v2.7.0-linux  # ~165MB
           + /opt/picoaide/client/<平台>/安装包
           + CLIENT-RELEASE.json（资产名 + sha256）
         ↓
-  docker save | zstd  →  R2（latest.json + image.tar.zst）
+  docker save | zip  →  R2（latest.json + image.tar）
                       →  GHCR（在线 pull 路径）
 ```
 
@@ -239,7 +239,7 @@ P0–P2 ≈ 1.5 周闭环（客户能自己升），P3 才让客户端自动跟�
 
 1. **客户端包不能在容器内构建**（mac 只能原生）→ CI 依赖链必须重排，别指望单 job 搞定。
 2. **别把客户端 `go:embed` 进二进制**（实测：150MB 资产 → 151.8MB 二进制；三平台 ≈450MB）。机制与 webadmin 相同、先例成立，但 webadmin dist 只有 2.4MB —— 量级差 60 倍时下游代价（升级重写体积、tar 无压缩余量、artifact/层膨胀、企业杀软扫描）全部放大 10 倍。走卷 + `http.ServeFile` 反而代码更少。
-3. **`docker save` 的 tar 是未压缩的**（15MB 是因为内容本身小，不是压缩）：带客户端后 tar ≈ 500MB，`zstd` 能压到 ~480MB，收益有限但别不做。
+3. **`docker save` 的 tar 是未压缩的**（15MB 是因为内容本身小，不是压缩）：带客户端后 tar ≈ 500MB，`zip` 能压到 ~480MB，收益有限但别不做。
 4. **`latest` tag 不可复现**（`install-server.sh` 自己就警告过）：升级与配套都必须钉死 `vX.Y.Z`。
 5. **新增路由必须走 `internal/router` 集中声明**（仓库硬规则），别在各业务包私建前缀。
 6. **断点续传靠 `http.ServeFile` 的 Range 支持**，别自己实现。

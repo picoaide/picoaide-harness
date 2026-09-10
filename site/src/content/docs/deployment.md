@@ -74,7 +74,7 @@ docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
 - 镜像：`ghcr.io/picoaide/picoaide-harness-server`（linux/amd64，附 SBOM + provenance 证明）；
 - 标签：`latest` + `vX.Y.Z` + `vX.Y`；推送版本 tag 后 CI 自动构建发布（`--build-arg VERSION` 注入，`picoaide-server --version` 与 tag 强一致）；
 - **版本线说明**：服务端镜像与桌面客户端同属一个产品线，共用同一 `v*` tag（如 `v2.4.x`，与仓库根 `package.json` 同源）；CI 在 push tag 时用 `scripts/version.mjs check` 校验镜像版本与 root `package.json` 一致，`picoaide-server --version` 与 tag 强一致；
-- 内网无外网？从更新服务器下载镜像包（`releases/<版本>/picoaide-server-<版本>-amd64.tar.zst`）后 `zstd -d < 包 | docker load`；本地构建用 `make docker-image`。
+- 内网无外网？从更新服务器下载镜像包（`releases/<版本>/picoaide-server-<版本>-amd64.zip`）后 `unzip -p 包 image.tar | docker load`；本地构建用 `make docker-image`。
 
 ## 配置网关
 
@@ -101,7 +101,7 @@ docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
 - **管理端**：session 12h（硬上限 + 60min 空闲滑动过期）+ CSRF（HMAC 时间窗 ±1h）；登录双桶限流（10 次/5 分钟/键，不信任 X-Forwarded-For）；错误统一信封；`/healthz` 无认证探针（DB Ping，503=DB 不可用）；
 - **证书**：三模式——`manual`（企业 CA/自签占位，支持 IP）、`auto`（Let's Encrypt 自动续期，仅公网域名直连，内置直连/IP 校验）、`internal`（Caddy 本地 CA，内网开箱即用）；员工客户端登录拒绝非 HTTPS 地址（TOFU）；
 - **备份与恢复**：部署说明里的备份步骤一次打包应用数据 + **master.key**（丢失=已加密密钥不可解）+ Caddy 证书库（+ pg_dump）；恢复 = 停服解包 → `up -d`；升级依次重建容器（短暂停机），降级不保证兼容；
-- **离线部署**：从更新服务器（或 GitHub Release 附件）取镜像压缩包 → `zstd -d < 包 | docker load` → 按部署说明启动。
+- **离线部署**：从更新服务器（或 GitHub Release 附件）取镜像压缩包 → `unzip -p 包 image.tar | docker load` → 按部署说明启动。
 
 ## 深入资料
 

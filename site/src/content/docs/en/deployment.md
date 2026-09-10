@@ -81,7 +81,7 @@ Employee clients / browsers
 - Image: `ghcr.io/picoaide/picoaide-harness-server` (linux/amd64, with SBOM + provenance attestation);
 - Tags: `latest` + `vX.Y.Z` + `vX.Y`; after pushing a version tag CI automatically builds and releases (injected via `--build-arg VERSION`, so `picoaide-server --version` matches the tag exactly);
 - **Version-line note**: the server image belongs to the same product line as the desktop client and shares the same `v*` tag (e.g. `v2.4.x`, same source as the repo-root `package.json`); on tag push, CI runs `scripts/version.mjs check` to verify the image version matches the root `package.json`, so `picoaide-server --version` matches the tag exactly;
-- No outbound internet in the intranet? Download the image archive from the update server (`releases/<version>/picoaide-server-<version>-amd64.tar.zst`) and run `zstd -d < archive | docker load`; build locally with `make docker-image`.
+- No outbound internet in the intranet? Download the image archive from the update server (`releases/<version>/picoaide-server-<version>-amd64.zip`) and run `unzip -p archive image.tar | docker load`; build locally with `make docker-image`.
 
 ## Configure the gateway
 
@@ -108,7 +108,7 @@ After deployment, log in to the Admin Console at `/admin/` and go to the **Gatew
 - **Admin side**: session 12h (hard TTL + 60-min idle sliding expiry) + CSRF (HMAC time window ±1h); login dual-bucket rate limiting (10 attempts / 5 minutes / key, no trust in X-Forwarded-For); unified error envelope; `/healthz` unauthenticated probe (DB ping, 503 = DB unavailable);
 - **Certificates**: three modes — `manual` (enterprise CA / self-signed placeholder, supports IPs), `auto` (Let's Encrypt automatic renewal, direct-connect public domain only, with built-in direct-connect/IP validation), `internal` (Caddy local CA, works out of the box in the intranet); employee client logins reject non-HTTPS addresses (TOFU);
 - **Backup and recovery**: the deployment guide's backup steps package the app data + **master.key** in one shot (if lost, encrypted keys are unrecoverable) + the Caddy certificate store (+ `pg_dump`); recovery = stop the service and unpack → `up -d`; upgrades recreate containers in sequence (brief downtime), downgrades are not guaranteed compatible;
-- **Offline deployment**: fetch the image archive from the update server (or the GitHub Release attachment), then `zstd -d < archive | docker load` and follow the deployment guide.
+- **Offline deployment**: fetch the image archive from the update server (or the GitHub Release attachment), then `unzip -p archive image.tar | docker load` and follow the deployment guide.
 
 ## Further reading
 
