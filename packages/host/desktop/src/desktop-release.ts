@@ -172,6 +172,21 @@ export function parseReleaseManifest(
   }
 }
 
+/**
+ * 读取清单里的"服务端给不出下载地址"说明（`client_unavailable`）。
+ *
+ * 服务端在**推不出安全（https）对外地址**时不下发 `client` 段，而是给一个原因
+ * （见 server 的 `internal/clientrelease`）—— 那与"没有新版本"是两件事：前者要
+ * 提示用户/管理员去修配置，后者才是"已是最新"。只认非空字符串，其余一律 undefined。
+ * @param input - 清单 JSON（`JSON.parse` 之后）。
+ * @returns 原因文本，或 undefined。
+ */
+export function readClientUnavailableReason(input: unknown): string | undefined {
+  if (!isRecord(input)) return undefined
+  const reason = input.client_unavailable
+  return typeof reason === 'string' && reason.trim() !== '' ? reason.trim() : undefined
+}
+
 function isHttpsURL(value: string): boolean {
   try {
     return new URL(value).protocol === 'https:'

@@ -13,7 +13,7 @@ import {
   serverManifestURL,
 } from './desktop-release.ts'
 import {
-  checkForUpdate,
+  checkForUpdateDetailed,
   parseSemVer,
   type UpdateCheckResult,
 } from './update-checker.ts'
@@ -286,7 +286,7 @@ export function apply(ctx: Context, config: Config): void {
         try {
           // 清单请求先发:渠道探测只是可选对账,与它并行即可,绝不排在它前面
           // (排在前面会把探测的耗时算进本就很紧的请求超时预算)。
-          const pending = checkForUpdate({
+          const pending = checkForUpdateDetailed({
             currentVersion: adapter.currentVersion,
             manifestURL,
             signal: controller.signal,
@@ -295,10 +295,13 @@ export function apply(ctx: Context, config: Config): void {
             ...(expectedChannel === undefined ? {} : { expectedChannel }),
           })
           startChannelProbe()
-          const result = await pending
-          return result === null
-            ? { kind: 'failed', error: 'network' }
-            : { kind: 'ok', result }
+          const outcome = await pending
+          if (outcome.kind === 'result') return { kind: 'ok', result: outcome.result }
+          // 服务端能连上、清单也拿到了,只是它给不出安全的下载地址(部署没配
+          // 对外 https 地址)——必须与"网络不可达""已是最新"区分开,否则界面
+          // 显示"已是最新"而升级链路其实是断的(2026-09-10 审计)。
+          if (outcome.kind === 'unavailable') return { kind: 'failed', error: 'server-unavailable' }
+          return { kind: 'failed', error: 'network' }
         } catch {
           return { kind: 'failed', error: 'network' }
         }

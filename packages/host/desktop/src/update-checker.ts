@@ -2,6 +2,7 @@
 
 import {
   parseReleaseManifest,
+  readClientUnavailableReason,
   type DesktopReleaseManifest,
 } from './desktop-release.ts'
 
@@ -107,6 +108,18 @@ export function compareSemVerVersions(left: string, right: string): number | nul
 }
 
 /**
+ * 版本检查的完整结果。
+ *
+ * `unavailable` 与"没有新版本"必须分开：服务端推不出安全的对外地址时会**明确**
+ * 说明原因（`client_unavailable`，见 server 的 `internal/clientrelease`）。把它
+ * 当成"已是最新"就是审计里那条"界面永远显示已是最新、而链路其实断了"的静默故障。
+ */
+export type UpdateCheckOutcome =
+  | { readonly kind: 'result'; readonly result: UpdateCheckResult }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'invalid' }
+
+/**
  * Check the signed-in server for a newer client release.
  *
  * 单一模式:GET 服务端的 `/api/client/v2/updates/manifest` 得到版本清单,
@@ -118,22 +131,43 @@ export function compareSemVerVersions(left: string, right: string): number | nul
 export async function checkForUpdate(
   options: UpdateCheckOptions,
 ): Promise<UpdateCheckResult | null> {
+  const outcome = await checkForUpdateDetailed(options)
+  return outcome.kind === 'result' ? outcome.result : null
+}
+
+/**
+ * 同 `checkForUpdate()`,但保留"服务端明确说给不出下载地址"这一分支。
+ * @param options - installed version, manifest URL, caller-owned signal, and request adapter.
+ * @returns 区分成功 / 服务端不可用(带原因) / 其它失败的完整结果。
+ */
+export async function checkForUpdateDetailed(
+  options: UpdateCheckOptions,
+): Promise<UpdateCheckOutcome> {
   const current = parseSemVer(options.currentVersion)
   // 本地构建(如 "dev")不是合法 SemVer:不提示更新,也不发请求。
-  if (current === null || current.version !== options.currentVersion) return null
+  if (current === null || current.version !== options.currentVersion) return { kind: 'invalid' }
 
-  const manifest = await fetchReleaseManifest(options)
-  if (manifest === null) return null
+  const outcome = await fetchReleaseManifestDetailed(options)
+  if (outcome.kind !== 'manifest') return outcome
 
-  const latest = parseSemVer(manifest.clientVersion)
-  if (latest === null || latest.version !== manifest.clientVersion) return null
+  const latest = parseSemVer(outcome.manifest.clientVersion)
+  if (latest === null || latest.version !== outcome.manifest.clientVersion) return { kind: 'invalid' }
 
   return {
-    status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
-    currentVersion: current.version,
-    latestVersion: latest.version,
+    kind: 'result',
+    result: {
+      status: compareParsedSemVer(latest, current) > 0 ? 'update-available' : 'up-to-date',
+      currentVersion: current.version,
+      latestVersion: latest.version,
+    },
   }
 }
+
+/** 清单拉取的完整结果（内部类型：把"服务端说给不出地址"与"拉取失败"分开）。 */
+type ManifestOutcome =
+  | { readonly kind: 'manifest'; readonly manifest: DesktopReleaseManifest }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'invalid' }
 
 /**
  * 拉取并严格解析服务端版本清单(更新检查与安装包下载共用的唯一入口)。
@@ -143,6 +177,18 @@ export async function checkForUpdate(
 export async function fetchReleaseManifest(
   options: Pick<UpdateCheckOptions, 'manifestURL' | 'request' | 'signal' | 'expectedChannel'>,
 ): Promise<DesktopReleaseManifest | null> {
+  const outcome = await fetchReleaseManifestDetailed(options)
+  return outcome.kind === 'manifest' ? outcome.manifest : null
+}
+
+/**
+ * `fetchReleaseManifest()` 的详细版:多一个"服务端明确给不出下载地址"的出口。
+ * @param options - manifest URL, request adapter, and caller-owned cancellation.
+ * @returns 清单 / 不可用原因 / 其它失败。
+ */
+export async function fetchReleaseManifestDetailed(
+  options: Pick<UpdateCheckOptions, 'manifestURL' | 'request' | 'signal' | 'expectedChannel'>,
+): Promise<ManifestOutcome> {
   const url = options.manifestURL
   const init: RequestInit = {
     method: 'GET',
@@ -160,26 +206,31 @@ export async function fetchReleaseManifest(
   } catch (cause) {
     // 主动取消必须向上传播:吞掉会让"用户点了取消"显示成"网络错误"。
     if (options.signal?.aborted === true || isAbortFailure(cause)) throw cause
-    return null
+    return { kind: 'invalid' }
   }
-  if (response.status !== 200) return null
+  if (response.status !== 200) return { kind: 'invalid' }
 
   let body: string
   try {
     body = await readLimitedBody(response)
   } catch {
-    return null
+    return { kind: 'invalid' }
   }
 
   let value: unknown
   try {
     value = JSON.parse(body)
   } catch {
-    return null
+    return { kind: 'invalid' }
   }
   // 渠道校验:清单声明的渠道必须与服务端自报的渠道一致(拿不到服务端渠道
   // 内容时省略该比对,但清单仍必须自带非空 channel_id)。
-  return parseReleaseManifest(value, options.expectedChannel)
+  const manifest = parseReleaseManifest(value, options.expectedChannel)
+  if (manifest !== null) return { kind: 'manifest', manifest }
+  // 解析不出清单时,**服务端明确说明的原因**优先于"结构不符":这是
+  // "部署没配对外地址"与"清单坏了"两种完全不同的故障。
+  const reason = readClientUnavailableReason(value)
+  return reason === undefined ? { kind: 'invalid' } : { kind: 'unavailable', reason }
 }
 
 /**
