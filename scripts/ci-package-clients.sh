@@ -11,7 +11,7 @@
 #
 # 用法:
 #   scripts/ci-package-clients.sh --list channels.list --stage-dir client-assets \
-#     --patterns '*.AppImage *.deb' --verify-app-dir dist/linux-unpacked \
+#     --patterns '*.AppImage' --verify-app-dir dist/linux-unpacked \
 #     -- yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
 #
 # 参数:

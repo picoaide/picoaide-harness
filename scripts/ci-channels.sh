@@ -183,12 +183,16 @@ for id in "${SELECTED[@]}"; do
       if (str(cfg?.desktop?.app_id) === undefined) missing.push("desktop.app_id")
       if (str(cfg?.desktop?.deep_link_scheme) === undefined) missing.push("desktop.deep_link_scheme")
     }
+    // 非法字段**只报字段名,不回显取值** —— 渠道包里 slug/app_id/scheme 的值就是
+    // 客户品牌(Acme-AI / com.acme.ai / acmeai),而这一步的输出进公开 Actions 日志。
+    // 2026-09-10 审计当场发现:早先版本把值打进了错误信息,等于给品牌渠道装了条
+    // 泄密通道(`::add-mask::` 只掩码渠道 id,掩不到这些值)。
     const slug = str(cfg?.desktop?.slug)
-    if (slug !== undefined && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(slug)) invalid.push("desktop.slug(" + slug + ")")
+    if (slug !== undefined && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(slug)) invalid.push("desktop.slug(须为 ASCII 字母/数字/连字符)")
     const appId = str(cfg?.desktop?.app_id)
-    if (appId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(appId)) invalid.push("desktop.app_id(" + appId + ")")
+    if (appId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(appId)) invalid.push("desktop.app_id(须为反向域名形状)")
     const scheme = str(cfg?.desktop?.deep_link_scheme)
-    if (scheme !== undefined && !/^[a-z][a-z0-9+.-]{1,31}$/.test(scheme)) invalid.push("desktop.deep_link_scheme(" + scheme + ")")
+    if (scheme !== undefined && !/^[a-z][a-z0-9+.-]{1,31}$/.test(scheme)) invalid.push("desktop.deep_link_scheme(须为小写 RFC 3986 scheme)")
     const serverUrl = str(cfg?.defaults?.server_url)
     if (serverUrl !== undefined) {
       let parsed
@@ -209,7 +213,13 @@ for id in "${SELECTED[@]}"; do
       if (key === "accent" || key.startsWith("_")) continue
       const name = str(value)
       if (name === undefined) continue
-      if (!KNOWN_ASSET_KEYS.includes(key)) { warnings.push("assets." + key + "(未知素材字段,已忽略)"); continue }
+      // 只回显**字段名形状**的键(如 logoo);含空格/非 ASCII 的键可能是注解文案,
+      // 那里面会带客户品牌,不进公开日志(只报数量)。
+      if (!KNOWN_ASSET_KEYS.includes(key)) {
+        if (/^[A-Za-z0-9_.-]{1,32}$/.test(key)) warnings.push("assets." + key + "(未知素材字段,已忽略)")
+        else warnings.push("assets.<非字段名形状的键,不打印>(未知素材字段,已忽略)")
+        continue
+      }
       if (name.includes("/") || name.includes("\\")) { invalid.push("assets." + key + "(必须是单段文件名)"); continue }
       if (!fs.existsSync(path.join(dir, name))) invalid.push("assets." + key + "(渠道目录里没有这个文件)")
     }

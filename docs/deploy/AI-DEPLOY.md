@@ -81,6 +81,17 @@
 | `TLS_MODE` | 证书模式，见 §2.3 | `internal` / `auto` / `manual` |
 | `PICOAI_ADMIN_PASSWORD` | 初始超管密码（≥10 位） | 由你生成强密码 |
 
+另外有一个**强烈建议一并确认**的变量（不确认也能跑，但反代场景下会踩坑）：
+
+| 变量 | 含义 | 何时必须配 |
+|---|---|---|
+| `PICOAI_PUBLIC_BASE_URL` | 本服务端对外的**绝对 https 地址** | 宿主机已有别的反代（附录 A）、或反代不设 `X-Forwarded-Proto`、或服务端判断不出协议时 |
+
+> 为什么重要：客户端更新清单里的下载地址必须是**绝对 https**（客户端会整份丢弃非
+> https 的清单）。服务端推不出安全地址时会**按设计拒发** `client` 段并给出
+> `client_unavailable` 原因 —— 用户看到的表现是"检查更新永远说已是最新"。
+> 2026-09-10 在测试环境实测踩到（容器前面是宿主机共享 Caddy），配了该变量即恢复。
+
 ### 2.3 证书模式怎么选（选错会连不上）
 
 | 模式 | 用 Caddyfile | 适用 | 前提 |
@@ -116,16 +127,24 @@ free -g | head -2 ; df -h /opt | tail -1
 **唯一来源 = 更新服务器**（2026-09-10 起不再使用任何镜像仓库）：
 
 ```bash
-VER=2.7.0
+# 先从清单里读版本号(权威):server.version / server.image_tag
+curl -fsS https://release.picoaide.com/official/latest.json | grep -E '"(version|image_tag)"'
+VER=2.7.0                     # ← 用上面读到的 server.version(不带 v)
 curl -fL -o /tmp/pa.zip \
-  "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+  "https://release.picoaide.com/${CHANNEL}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
 unzip -p /tmp/pa.zip image.tar | docker load
 # unzip 缺失时：apt-get install -y unzip（或 yum install -y unzip）
 ```
 
-导入后镜像名固定为 `picoaide-harness-server:<版本>`（下面的示例都用它）。
-**注意**：文件名里的版本号必须与你打算部署的版本一致；从 `latest.json` 读到的
-`server.version` 就是它，不要凭记忆写。
+导入后的镜像名：**`picoaide-harness-server:<VER>`**，同时存在**带 v 的等价 tag**
+`picoaide-harness-server:v<VER>`（CI 打的第一个 tag 是带 v 的，部署示例用不带 v 的，
+所以镜像 tar 里两个都带，`docker load` 后都能用 —— 2026-09-10 修：此前只带 v 形式，
+照本文档敲 `docker run ${IMAGE}:${VER}` 会去 docker.io 拉取而在隔离网/镜像代理下 403）。
+
+> **下载慢（跨境）**：实测单流 75–260 KB/s（616MB ≈ 40–90 分钟），**8 路并行分块可到
+> ~2 MB/s（约 5 分钟）**，做法与坑（某些 Range 请求会被 CDN 忽略、返回整份）见
+> [`r2-update-server-runbook.md` §11](../planning/2026-09-10-r2-update-server-runbook.md)。
+> 下完**务必用同目录的 `SHA256SUMS` 校验**再 `docker load`。
 
 ### 3.3 导出部署文件到目标目录
 
@@ -135,6 +154,11 @@ VER=2.7.0
 mkdir -p /opt/picoaide
 docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out ${IMAGE}:${VER}
 ls -1 /opt/picoaide     # 应看到 docker-compose.yml / Caddyfile* / .env.example / VERSION / client/
+ls -1 /opt/picoaide/client
+#   CLIENT-RELEASE.json + 三平台安装包：
+#   Windows *-Setup.exe / macOS *.dmg / Linux *.AppImage
+#   （Linux 只带 AppImage —— deb 与它是同一个应用的两种打包，员工装一个即可，
+#    2026-09-10 定案：deb 不再进镜像，给每个渠道省 ~115MB）
 ```
 
 ### 3.4 记录当前版本（升级时要靠它比对）
@@ -192,6 +216,10 @@ ADMIN_USER=admin
 PICOAI_ADMIN_PASSWORD=<刚生成的超管密码>
 PG_PASSWORD=<刚生成的数据库密码>
 TZ=Asia/Shanghai
+# 对外绝对地址(§2.2):反代场景必配,否则客户端更新清单拒发下载链接
+PICOAI_PUBLIC_BASE_URL=https://<确认过的域名>
+# 仅测试环境建议放开登录失败上限,免得反复登录锁死管理员账号
+# PICOAI_LOGIN_MAX_ATTEMPTS=100000
 EOF
 chmod 600 .env
 ```
@@ -347,12 +375,16 @@ unzip -p /tmp/pa.zip image.tar | docker load
 
 ```bash
 cd /opt/picoaide
+# SERVER_IMAGE 用 latest.json 里的 server.image_tag(权威,形如 v2.7.0);
+# 镜像里 v2.7.0 与 2.7.0 两个 tag 都在,写哪个都能起来(§3.2)。
 sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${VER}|" .env
 grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${VER}" >> .env
 docker compose up -d
 ```
 
 > `docker compose up -d` 只重建变化的容器；`picoaide-data` / `pg-data` / `caddy-data` 是 bind mount，**数据不受影响**。
+> **宿主机已有反代时**（附录 A）：只重建本产品容器 `docker compose up -d postgres server`，
+> 别把共享反代牵进来。
 
 ### 6.6 升级后验证（三项全过才算成功）
 
@@ -502,6 +534,66 @@ PICOAI_UPDATE_ENDPOINT=https://release.picoaide.com/<channel-id>/latest.json # �
 
 ---
 
+## 附录 A：宿主机已有反向代理（80/443 被别的服务占用）
+
+**什么时候看这一节**：`ss -tlnp | grep -E ':(80|443)\b'` 发现 80/443 已被别的容器占用
+（典型：这台机器上还跑着 glitchtip / 别的站点，由一个共享 Caddy 或 nginx 统一反代）。
+
+**原则：不要抢端口，也不要停别人的反代。** 栈内自带的 caddy 只服务本产品，而共享反代
+已经持有证书与多站点配置 —— 正确做法是让本产品的 server 容器**并入现有反代的上游**：
+
+```bash
+cd /opt/picoaide
+# 1) 不启动栈内 caddy:只拉起 server + postgres
+# 2) 把 server 发布到共享反代能访问到的宿主机地址(与现有 vhost 的 upstream 同址)
+cat > docker-compose.override.yml <<'EOF'
+services:
+  server:
+    environment:
+      # 反代场景必配(§2.2):给不出 https 地址时客户端清单会拒发下载链接
+      PICOAI_PUBLIC_BASE_URL: ${PICOAI_PUBLIC_BASE_URL:-https://ai.example.com}
+    ports:
+      # 与现有 vhost 的 upstream 一致(例:共享 Caddy 里写的是 172.20.0.1:8082)
+      - "172.20.0.1:8082:8080"
+EOF
+docker compose up -d postgres server      # 注意:不写 caddy
+```
+
+`.env` 里还要把**可信代理**改成共享反代连过来的地址（默认值只认栈内 caddy 的
+`172.28.0.2`；宿主机共享反代通常是 docker 网桥网关，如 `172.20.0.1`）：
+
+```bash
+PICOAI_TRUSTED_PROXIES=172.20.0.1
+```
+
+现有 vhost **不需要改动**（upstream 地址保持原样），例如共享 Caddy 里：
+
+```
+picoaide-harness.example.cn {
+    encode gzip zstd
+    reverse_proxy 172.20.0.1:8082      # ← 以前指向 systemd 二进制,现在指向容器,同一个地址
+}
+```
+
+**从 systemd 二进制迁到容器**（同一台机器换部署形态）的推荐顺序：
+
+1. 备份：`pg_dump` + 打包应用数据目录（含 `master.key`）——见 §6.3 与 §1 铁律 3；
+2. 老库导入新栈的内置 PG：`gunzip -c dump.sql.gz | docker exec -i picoaide-postgres psql -U picoaide -d picoaide`；
+   **老库容器保持原样不动**（它是数据库回滚锚点）；
+3. `master.key` 等应用数据复制进 `/opt/picoaide/picoaide-data/`（**哈希核对一致**；
+   丢了 master.key，库里所有加密的上游密钥永久无法解密）；
+4. 先让容器监听一个**临时端口**（如 `172.20.0.1:8085`），健康检查 + 渠道自证
+   （`/api/client/v2/channel`）+ 客户端清单（`/api/client/v2/updates/manifest`）全过；
+5. `systemctl stop` + `disable` 旧服务（**保留 unit 与二进制**做回滚锚点），把容器改回
+   原端口并 `docker compose up -d server`；
+6. 经**真实域名**复验：`/healthz`、`/admin/`、`/api/client/v2/channel`、
+   `/api/client/v2/updates/manifest`、`/updates/client/<安装包>`（range 请求 206）。
+
+2026-09-10 在测试环境（101.42.228.128）按上述步骤完成过一次真实切换，现场记录模板见
+部署目录里的 `DEPLOY-NOTES-<host>.md`（含备份路径、回滚命令、与文档的偏差说明）。
+
+---
+
 ## §10 执行清单（AI 自检用）
 
 首次部署：
@@ -512,9 +604,12 @@ PICOAI_UPDATE_ENDPOINT=https://release.picoaide.com/<channel-id>/latest.json # �
 - [ ] 网段与端口无冲突（§4.1）
 - [ ] `.env` 已创建、权限 600、`DOMAIN`/`TLS_MODE` 经用户确认（§4.3）
 - [ ] `manual` 模式证书就位（§4.4）
-- [ ] `docker compose up -d` 后三容器 Up（§4.5）
+- [ ] `docker compose up -d` 后三容器 Up（§4.5）；**宿主机已有反代时只起 server+postgres**（附录 A）
 - [ ] **healthz 返回 200**（§4.6）
+- [ ] `/api/client/v2/updates/manifest` 里有 `client.assets` 且 url 是**绝对 https**
+      （反代场景必查；出现 `client_unavailable` = `PICOAI_PUBLIC_BASE_URL` 没配，§2.2）
 - [ ] `picoaide-data/master.key` 存在（§4.7）
+- [ ] 客户端安装包可下载：`/updates/client/<平台包>` 返回 206（§5）
 - [ ] 已向用户报告地址/账号/密码，并提示 master.key 必须备份（§4.7）
 
 升级：
@@ -526,6 +621,7 @@ PICOAI_UPDATE_ENDPOINT=https://release.picoaide.com/<channel-id>/latest.json # �
 - [ ] `.env` 的 `SERVER_IMAGE` 指向新版本（§6.5）
 - [ ] **healthz 200 + `--version` == 目标版本 + 数据可查**（§6.6）
 - [ ] 本地 `VERSION` 文件已更新（§6.7）
+- [ ] 客户端安装包与 `CLIENT-RELEASE.json` 版本已随镜像更新（`/api/client/v2/updates/manifest`）
 
 失败时：
 

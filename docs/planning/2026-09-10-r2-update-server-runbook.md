@@ -471,12 +471,46 @@ tag 运行时三平台 job 各自产出安装包，release job 汇总后构建�
 
 **不要用 `*.r2.dev` 开发域名做生产**：有限速、无 CDN 行为、随时可能变。
 
-### 国内可达性（必须实测，不要推断）
+### 国内可达性（**已实测**，2026-09-10）
 
 `release.picoaide.com` 走 Cloudflare 网络 → 大陆访问默认路由**境外节点**。
 
+**实测数据**（测试环境 101.42.228.128，目标包 616,752,285 B）：
+
+| 取法 | 速度 | 616MB 耗时 |
+|---|---|---|
+| 单流 curl | 75 – 263 KB/s（随网络波动） | **40 – 90 分钟** |
+| **8 路分块并行** | **~2.2 MB/s**（峰值 5.8 MB/s） | **约 5 分钟** |
+
+结论：**能跑，但必须并行取**。部署时的姿势（可直接粘给 AI 代理执行）：
+
+```bash
+BASE="https://release.picoaide.com/<channel>/releases/<ver>"
+ZIP="picoaide-server-<ver>-amd64.zip"
+TOTAL=$(curl -fsSI "$BASE/$ZIP" | awk 'BEGIN{IGNORECASE=1}/^content-length:/{gsub(/\r/,"");print $2}')
+N=8; CHUNK=$(( (TOTAL + N - 1) / N ))
+rm -rf /tmp/pa-parts && mkdir -p /tmp/pa-parts
+for i in $(seq 0 $((N-1))); do
+  start=$((i*CHUNK)); end=$((start+CHUNK-1)); [ "$end" -ge "$TOTAL" ] && end=$((TOTAL-1))
+  ( curl -fsS --retry 10 --retry-delay 3 --retry-all-errors -r "${start}-${end}" \
+      -o "/tmp/pa-parts/part.$i" "$BASE/$ZIP" ) &
+done
+wait
+cat /tmp/pa-parts/part.* > /tmp/pa.zip
+# 收口:必须用同目录的 SHA256SUMS 校验(见下面的坑 1)
+curl -fsSL -o /tmp/pa.sums "$BASE/SHA256SUMS"
+( cd /tmp && sha256sum -c <(sed 's#  .*#  pa.zip#' /tmp/pa.sums) )
+```
+
+**两个必须知道的坑**（2026-09-10 当场踩到）：
+
+1. **CDN 会忽略某些 Range 请求**：请求尾段（`start-EOF`）时实测拿到 **200 + 整份响应体**，
+   于是那个分片文件远超预期大小。**分块取包必须校验**：分片大小对不对得上区间，以及最终
+   `sha256sum -c` 通过；校验不过就退回单流 `curl -C -` 续传（慢但稳）。
+2. **不要用 `pkill -f "curl.*pa-parts"` 之类模式收尾** —— 它会匹配到你自己这条命令行，
+   把正在跑的脚本一起杀掉（现场实测：后续校验步骤整段没执行，还以为是命令没生效）。
+
 - **压力比想象小得多**：全公司 200 台员工机器**不碰 R2**（只跟自己的服务端说话），碰 R2 的只有**客户那一台服务器**、且只在升级时。所以跨境链路只承担"一次 500MB"。
-- **仍需实测**：从国内典型办公网络 `curl -o /dev/null -w '%{time_total} %{speed_download}'` 拉一次 tar，确认可接受。**这是上线前必须做的实测。**
 - **ICP**：域名解析到境外节点，**不需要**备案；若日后走 CF 中国网络（需企业版 + 备案域名）或迁 OSS/COS，**只改一个 env**。
 - **已明确不做**：CF 自选优选 IP 之类的"玄学加速"——违反 CF 条款，用在交付链路上会变成事故。
 

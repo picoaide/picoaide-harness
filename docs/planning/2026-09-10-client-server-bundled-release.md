@@ -19,7 +19,7 @@
 
 | 平台 | 安装包 | Linux 容器内可构建？ |
 |---|---|---|
-| linux | AppImage 150MB / deb 115MB | ✅ 可以 |
+| linux | AppImage 150MB（deb 115MB **不进镜像**，2026-09-10 定案） | ✅ 可以 |
 | win | NSIS `-Setup.exe` | ⚠️ 需 wine，脆弱 |
 | mac | universal DMG | ❌ 不可能（electron-builder mac 目标只能在 macOS 上产出） |
 
@@ -54,7 +54,7 @@ ghcr.io/picoaide/picoaide-harness-server:v2.7.0-linux  # ~165MB
 |---|---|---|
 | 服务端镜像 `docker save` tar | **15 MB**（v2.5.16；v2.4.0=23MB） | 基础镜像极小，加减客户端是唯一变量 |
 | 同 tar 过 gzip -6 / zip-19 | 14.1 MB / 15 MB | 压缩算法在此量级无意义 |
-| linux AppImage / deb | **150 MB / 115 MB** | 客户端才是体积主体 |
+| linux AppImage（deb 不进镜像） | **150 MB** | 客户端才是体积主体 |
 | `/app` 内容 | `picoaide-server` + `entrypoint.sh` | 镜像结构极简，加目录零成本 |
 | 服务端 `CGO_ENABLED=0` 静态二进制 | 42 MB（构建产物） | 可退化为「分发二进制」，但见 §4 判断 |
 | compose 依赖 | caddy:2-alpine + postgres:18-alpine + server | 离线交付需一并覆盖 |
@@ -265,7 +265,7 @@ P0–P2 ≈ 1.5 周闭环（客户能自己升），P3 才让客户端自动跟�
 | 4 | agent 部署先做「人工贴一行命令」 | `upgrade.sh` + `DEPLOY.md` + `AGENT-DEPLOY.md`（本地确定性脚本优先） |
 | 5 | 强制 `client.version == server.version` | CI 用 `scripts/version.mjs check` 同源断言，防「镜像里的客户端」与「镜像版本」漂移 |
 | 6 | 客户端资产走文件 + `http.ServeFile`，不 embed | §3.2 实测：150MB 资产 → 151.8MB 二进制，三平台 ≈450MB |
-| 7 | **镜像带全部三平台客户端（含 linux 的 deb + AppImage）** | 所有客户端只有一个来源，产品逻辑最干净；代价 +265MB |
+| 7 | **镜像带三平台客户端（Linux 只放 AppImage；deb 不入镜像）** | 所有客户端只有一个来源，产品逻辑最干净；deb 与 AppImage 是同一应用的两种打包，员工装一个即可，去掉它给每个渠道省 ~115MB |
 | 8 | **默认只发 `-all` tag**（~500MB） | 客户不用选也不会选错；弱网/单平台客户可另选裁剪 tag（按需再加） |
 
 **遗留项（不影响 P0–P2 开工）**：
