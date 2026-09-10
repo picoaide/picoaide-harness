@@ -74,8 +74,8 @@ func TestPermissionsOfRoles(t *testing.T) {
 		has  []string
 		no   []string
 	}{
-		{serverstore.RoleSuperAdmin, []string{PermUserWrite, PermAuthWrite, PermAuditRetention, PermBrandWrite, PermPortalWrite}, []string{}},
-		{serverstore.RoleAuditor, []string{PermAuditRead, PermUsageRead, PermUserRead}, []string{PermUserWrite, PermAuthWrite, PermBrandWrite, PermGatewayWrite}},
+		{serverstore.RoleSuperAdmin, []string{PermUserWrite, PermAuthWrite, PermAuditRetention, PermPortalWrite}, []string{}},
+		{serverstore.RoleAuditor, []string{PermAuditRead, PermUsageRead, PermUserRead}, []string{PermUserWrite, PermAuthWrite, PermGatewayWrite}},
 		{serverstore.RoleUser, []string{}, []string{PermAuditRead, PermUserRead, PermUsageRead, PermAuthWrite}},
 	}
 	for _, tc := range cases {

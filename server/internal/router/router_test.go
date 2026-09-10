@@ -12,12 +12,13 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/sharedskills"
@@ -36,7 +37,8 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 		Admin:         (&serverauth.AdminAPI{}).Handlers(),
 		Appstore:      appstore.NewHandlers(nil),
 		Bootstrap:     bootstrap.NewHandlers(nil),
-		Brand:         brand.NewHandlers(nil, "/tmp/nonexistent"),
+		Channel:       channel.NewHandlers(),
+		PortalAdmin:   portal.NewAdminHandlers(nil),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
 		Market:        marketplace.NewHandlers(nil, "/tmp/nonexistent"),
 		Agentshare:    agentshare.NewHandlers(nil, "/tmp/nonexistent"),
@@ -84,7 +86,7 @@ func TestNamespaces(t *testing.T) {
 	for _, want := range []string{
 		"POST " + nsClient + "/auth/login",
 		"GET " + nsClient + "/config/bootstrap",
-		"GET " + nsClient + "/brand",
+		"GET " + nsClient + "/channel",
 		"GET " + nsClient + "/marketplace/skills",
 		"GET " + nsClient + "/shared-skills",
 		"GET " + nsClient + "/agent-presets",
@@ -96,7 +98,7 @@ func TestNamespaces(t *testing.T) {
 		"PUT " + nsServer + "/admin/audit/settings",
 		"GET " + nsServer + "/admin/agents",
 		"POST " + nsServer + "/admin/agents",
-		"GET " + nsServer + "/admin/brand",
+		"GET " + nsServer + "/admin/portal",
 		"GET " + nsServer + "/admin/connectors",
 		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)
 		"GET " + nsServer + "/admin/concurrency",
@@ -262,7 +264,6 @@ func TestLargeBodyRoutesExemptions(t *testing.T) {
 	for _, key := range []string{
 		"POST " + NamespaceServer + "/admin/skills/:name/archive",
 		"POST " + NamespaceServer + "/admin/agents/:name/archive",
-		"POST " + NamespaceServer + "/admin/brand/logo",
 		"POST " + NamespaceClientV2 + "/shared-skills",
 		"POST " + NamespaceClientV2 + "/agent-presets",
 	} {

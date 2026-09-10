@@ -13,11 +13,14 @@ PicoAide Harness 平台的企业管控面：Go 服务端提供认证（local / L
 （镜像里自带 compose、Caddyfile、客户端安装包）：
 
 ```bash
-# 1) 取镜像（可出网）或从更新服务器下载镜像包后 docker load
-docker pull ghcr.io/picoaide/picoaide-harness-server:v2.7.0
+# 1) 从更新服务器下载镜像包并导入（唯一来源，不经任何镜像仓库）
+VER=2.7.0
+curl -fL -o /tmp/pa.zip \
+  "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+unzip -p /tmp/pa.zip image.tar | docker load
 # 2) 把部署文件导到部署目录（镜像自带，无需仓库/外网）
 docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
-  ghcr.io/picoaide/picoaide-harness-server:v2.7.0
+  picoaide-harness-server:${VER}
 # 3) 之后按说明写 .env → docker compose up -d → 校验 /healthz
 ```
 

@@ -8,7 +8,7 @@
 // RequirePermission 才是护栏);某条目声明多个权限点时命中任一即可见。
 // 未声明 perms 的条目 fail-closed(仅超管可见),防止以后新增页面漏声明。
 import {
-  Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug, Palette,
+  Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug,
   type LucideIcon,
 } from 'lucide-react'
 import type { MeUser } from './rbac'
@@ -17,7 +17,6 @@ import type { MeUser } from './rbac'
 export const PERM_USER_READ = 'user:read'
 export const PERM_DEPT_READ = 'dept:read'
 export const PERM_AUTH_READ = 'auth:read'
-export const PERM_BRAND_READ = 'brand:read'
 export const PERM_GATEWAY_READ = 'gateway:read'
 export const PERM_ERRMON_READ = 'error-monitoring:read'
 export const PERM_USAGE_READ = 'usage:read'
@@ -41,7 +40,6 @@ export const NAV_ENTRIES: NavEntry[] = [
   { to: '/users', label: '用户', icon: Users, section: '管理', perms: [PERM_USER_READ] },
   { to: '/departments', label: '部门', icon: Network, section: '管理', perms: [PERM_DEPT_READ] },
   { to: '/auth', label: '认证', icon: KeyRound, section: '管理', perms: [PERM_AUTH_READ] },
-  { to: '/brand', label: '品牌', icon: Palette, section: '管理', perms: [PERM_BRAND_READ] },
   // 运维分区(super_admin; auditor 仅有 usage:read)
   { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
   { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },

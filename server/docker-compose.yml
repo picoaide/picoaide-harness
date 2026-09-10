@@ -66,7 +66,7 @@ services:
         max-file: "3"
 
   server:
-    image: ${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-harness-server:latest}
+    image: ${SERVER_IMAGE:-picoaide-harness-server:latest}
     container_name: picoaide-server
     restart: unless-stopped
     # 仅内网可达(经 Caddy),不发布宿主机端口
