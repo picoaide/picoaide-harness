@@ -63,9 +63,9 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 | macOS | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest)（资产 `PicoAide-Harness-<版本>-mac.dmg`） | 打开 DMG，将 PicoAide Harness 拖入 Applications |
 | Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest)（资产 `PicoAide-Harness-<版本>-x86_64.AppImage`，另有 `PicoAide-Harness-<版本>-amd64.deb`） | 授予执行权限后运行（deb 用 `sudo dpkg -i` 安装） |
 
-也可以从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 获取安装包和 SHA-256 摘要（每个 Release 附 `SHA256SUMS.txt`，安装前建议校验）。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见官网 [桌面客户端](https://www.picoaide.com/docs/desktop/)与[常见问题](https://www.picoaide.com/docs/faq/)。
+客户端升级与首次安装也可以直接问**它登录的那台服务端**要包（`GET /api/client/v2/updates/manifest`）——企业部署下员工机器因此不需要访问任何外网。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见官网 [桌面客户端](https://www.picoaide.com/docs/desktop/)与[常见问题](https://www.picoaide.com/docs/faq/)。
 
-> 说明：CI 自动发布的 Windows 安装程序与 Linux 安装包暂未签名（macOS 正式发布版经签名/公证）。首次运行 Windows 安装包时 SmartScreen 可能提示"未知发布者"，请先在 Releases 下载 `SHA256SUMS.txt` 核对后再运行；Linux 安装包同理。
+> 说明：Windows 安装程序与 Linux 安装包暂未签名（macOS 正式发布版经签名/公证）。首次运行 Windows 安装包时 SmartScreen 可能提示"未知发布者"，请先在 Releases 下载 `SHA256SUMS.txt` 核对后再运行；Linux 安装包同理。
 
 ## 核心优势
 
