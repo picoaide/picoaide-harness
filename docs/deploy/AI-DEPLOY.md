@@ -154,7 +154,7 @@ VER=2.7.0
 mkdir -p /opt/picoaide
 docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out ${IMAGE}:${VER}
 ls -1 /opt/picoaide     # 应看到 docker-compose.yml / Caddyfile* / .env.example / VERSION / client/
-ls -1 /opt/picoaide/client
+ls -1 /opt/picoaide/client   # 每次导出都会先清旧文件,不会残留上一版本
 #   CLIENT-RELEASE.json + 三平台安装包：
 #   Windows *-Setup.exe / macOS *.dmg / Linux *.AppImage
 #   （Linux 只带 AppImage —— deb 与它是同一个应用的两种打包，员工装一个即可，
@@ -383,6 +383,11 @@ docker compose up -d
 ```
 
 > `docker compose up -d` 只重建变化的容器；`picoaide-data` / `pg-data` / `caddy-data` 是 bind mount，**数据不受影响**。
+>
+> **重新导出部署文件是「替换」语义**（2026-09-10 修）：`client/`、`VERSION`、
+> `docker-compose.yml`、`Caddyfile.*`、`.env.example` 会先清掉旧的再写入 ——
+> 否则升级后 `client/` 里会同时留着两个版本的安装器（实测踩到）。
+> **`.env`、`picoaide-data/`、`pg-data/`、`caddy-data/`、`certs/` 一律不动。**
 > **宿主机已有反代时**（附录 A）：只重建本产品容器 `docker compose up -d postgres server`，
 > 别把共享反代牵进来。
 
