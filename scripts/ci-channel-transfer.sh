@@ -112,17 +112,21 @@ for id in "${CHANNELS[@]}"; do
       [ -d "$STAGE/$id" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 没有可中转的产物目录" >&2; exit 1; }
       [ -n "$(ls -A "$STAGE/$id" 2>/dev/null)" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 的产物目录为空" >&2; exit 1; }
       # --only-show-errors:aws 默认会回显每个对象的 key(含品牌文件名)。
-      aws_cmd s3 cp --recursive --only-show-errors "$STAGE/$id" "$BASE/ch-$INDEX" >/dev/null
+      # 路径形态一律用**规范写法**:本地目录源不带 `/.`,S3 侧统一尾斜杠前缀。
+      # 反例是 `s3://bucket/prefix/.` —— 真实 aws CLI 把它当字面前缀列出、匹配不到
+      # 任何对象(桩会"好心"修正,于是本地全绿、正式发布才炸),回归门禁因此连
+      # 命令形态一起断言(见 verify-ci-scripts.mjs)。
+      aws_cmd s3 cp --recursive --only-show-errors "$STAGE/$id" "$BASE/ch-$INDEX/" >/dev/null
       # 从公开 artifact 的暂存目录里删掉 —— 后面的 upload-artifact 就看不到品牌产物了。
       rm -rf "$STAGE/$id"
       ;;
     pull)
       mkdir -p "$TO/$id"
-      aws_cmd s3 cp --recursive --only-show-errors "$BASE/ch-$INDEX/." "$TO/$id/" >/dev/null
+      aws_cmd s3 cp --recursive --only-show-errors "$BASE/ch-$INDEX/" "$TO/$id/" >/dev/null
       [ -n "$(ls -A "$TO/$id" 2>/dev/null)" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 的中转产物为空(上传失败?)" >&2; exit 1; }
       ;;
     clean)
-      aws_cmd s3 rm --recursive --only-show-errors "$BASE/ch-$INDEX" >/dev/null 2>&1 || true
+      aws_cmd s3 rm --recursive --only-show-errors "$BASE/ch-$INDEX/" >/dev/null 2>&1 || true
       ;;
   esac
 done
