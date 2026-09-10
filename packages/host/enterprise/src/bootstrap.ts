@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import { SESSION_CHANGED_EVENT } from './session-service.ts'
+import { subscribeSession } from './session-service.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import { AuthError } from './server-connector/auth.ts'
 import { TOKEN_ENV } from './gateway-model.ts'
@@ -114,5 +114,9 @@ export function apply(ctx: Context): void {
     }
   }
 
-  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
+  // subscribeSession 而不是裸 ctx.on：`restore()` 在 SessionService 构造期就启动，
+  // 完成时机与插件装载顺序无关 —— 恢复型启动下首个会话事件可能早于本插件 apply，
+  // 裸订阅会整个漏掉它（2026-09-05 现场：旧会话下视觉模型缺 inputModalities、
+  // 上传图片被拒，重新登录即恢复，根因就是这次同步没跑）。
+  subscribeSession(ctx, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
 }

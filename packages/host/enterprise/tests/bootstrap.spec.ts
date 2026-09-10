@@ -25,7 +25,7 @@ const VISION_BOOTSTRAP = {
   ],
 }
 
-function stubCtx(): {
+function stubCtx(restored?: Session | null): {
   ctx: Context
   settings: { update: ReturnType<typeof vi.fn>; replace: ReturnType<typeof vi.fn> }
   onHandler: (s: Session | null) => Promise<void>
@@ -36,7 +36,13 @@ function stubCtx(): {
   const on = vi.fn((_event: string, handler: (s: Session | null) => Promise<void>) => { registered = handler })
   const ctx = {
     settings: { update, replace },
-    picoSession: { clear: vi.fn() },
+    // subscribeSession 用 isRestored() 判断"启动时那次会话事件是否已经错过"。
+    // 不传 restored = 恢复还在进行（事件随后必到）。
+    picoSession: {
+      clear: vi.fn(),
+      isRestored: () => restored !== undefined,
+      getSession: () => restored ?? null,
+    },
     logger: { error: vi.fn() },
     on,
   } as unknown as Context
@@ -94,6 +100,32 @@ describe('bootstrap sync', () => {
       await onHandler(SAMPLE_SESSION)
       await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() })
 
+      expect(settings.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        models: [
+          { id: 'deepseek-chat', name: 'DeepSeek Chat', maxTokens: 8192 },
+          { id: 'deepseek-v4-flash-vision-exp', name: '视觉', inputModalities: ['text', 'image'] },
+        ],
+      }))
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+
+  it('syncs immediately for a session restored before the plugin was applied', async () => {
+    // 2026-09-05 现场：升级后旧会话下视觉模型缺 inputModalities、上传图片被拒，
+    // **重新登录即恢复** —— 因为 restore() 在 SessionService 构造期就跑完了，
+    // 它 emit 的那次会话事件早于本插件 apply，裸 ctx.on 整个漏掉，启动后一次
+    // bootstrap 同步都没发生。subscribeSession 必须把这第一次补上。
+    const { ctx, settings } = stubCtx(SAMPLE_SESSION)
+    const origFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(VISION_BOOTSTRAP), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+    try {
+      applyBootstrap(ctx)
+      // 没有任何 onHandler 触发：全靠 apply 时的补发。
+      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() })
       expect(settings.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
         models: [
           { id: 'deepseek-chat', name: 'DeepSeek Chat', maxTokens: 8192 },

@@ -32,6 +32,38 @@ export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
 /** Cordis event emitted whenever the session is set, restored, or cleared. */
 export const SESSION_CHANGED_EVENT = 'pico/session-changed'
 
+/**
+ * 订阅会话变更，并**补发启动时那一次**。
+ *
+ * 为什么不能只用 `ctx.on(SESSION_CHANGED_EVENT, …)`：`restore()` 在
+ * `SessionService` 的**构造期**就启动了（见构造函数），而它完成得比后续插件的
+ * `apply` 早还是晚，取决于动态 import（electron）与文件读的耗时 —— 与插件装载
+ * 顺序无关。于是"应用重启后带着有效会话"这一最常见的启动路径上，首个事件经常在
+ * 消费方订阅**之前**就发完了：消费方要等到下一次登录/登出才同步。
+ *
+ * 现场证据（2026-09-05，v2.6.4）：升级后旧会话下视觉模型缺 `inputModalities`、
+ * 上传图片被拒，重新登录即恢复（bootstrap 的同步就这么被跳过了）。
+ * 2026-09-10 同一根因又表现为白标 logo 裂图：客户端 store 的首次播种拿到的是本地
+ * 端点的载荷，而服务端驱动的渠道内容（绝对化的 logo/名称/主题色）一直没到。
+ *
+ * 判据用现成的 `isRestored()`：它在 `restore()` 的 `finally` 里置位，而事件是在那
+ * 之前 `emit` 的。所以 `isRestored() === false` ⇒ 那次 emit 还没发生（后续必然收到），
+ * `=== true` ⇒ 已经错过（这里立即补一次）。两个方向都不重不漏。
+ * @param ctx - 宿主插件上下文（需注入 `picoSession`）。
+ * @param listener - 收到会话（或 null）时的回调。
+ * @returns 取消订阅的函数。
+ */
+export function subscribeSession(
+  ctx: Context,
+  listener: (session: Session | null) => void,
+): () => void {
+  const off = ctx.on(SESSION_CHANGED_EVENT, listener)
+  // 补发只针对"恢复完成"那一刻的状态；此刻 session 可能是 null（没有持久化会话），
+  // 那也是消费方必须知道的状态（等于"未登录"），与事件语义一致。
+  if (ctx.picoSession.isRestored()) listener(ctx.picoSession.getSession())
+  return off
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     picoSession: SessionService

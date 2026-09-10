@@ -1,4 +1,4 @@
-import { createElement } from 'react'
+import { createElement, useState, type ReactElement } from 'react'
 import {
   BRAND_CONNECTOR,
   BRAND_MARK_BRACES,
@@ -75,6 +75,34 @@ function BraceGlyph() {
 }
 
 /**
+ * 渠道 logo 图（服务端下发，指向客户自己的服务器）。
+ *
+ * **加载失败必须回落**（2026-09-10）：服务端地址不可达（离线/内网 VPN 未连/
+ * 服务端换域名）时，`<img>` 会留一个裂图图标 —— 品牌位是渠道客户第一眼看到的
+ * 东西，宁可显示内置的花括号 mark，也不要一个破图。登录页早有同款兜底
+ * （auth-gate 的 `onerror` 隐藏 img 换成 fallback），客户端这两处此前没有。
+ *
+ * 失败状态按 **URL** 记（不是布尔）：渠道内容换了新 logo 就该重试，而不是把
+ * 上一次的失败一直带下去。
+ */
+function ChannelLogo({ url, size, alt, radius, fallback }: {
+  url: string
+  size: number
+  alt: string
+  radius: number
+  fallback: () => ReactElement | null
+}): ReactElement | null {
+  const [failedUrl, setFailedUrl] = useState<string | undefined>(undefined)
+  if (url === failedUrl) return fallback()
+  return createElement('img', {
+    src: url,
+    alt,
+    onError: () => { setFailedUrl(url) },
+    style: { width: size, height: size, objectFit: 'contain', borderRadius: radius },
+  })
+}
+
+/**
  * The brace-mark tile; `className` rides along (upstream slot geometry).
  * When a server logo_url is provided (dynamic channel content), an <img> is
  * rendered instead of the brace artwork; failures fall back to the brace.
@@ -83,24 +111,10 @@ export function BraceMark({ size, className }: { size: number; className?: strin
   const channel = useChannel()
   const logoUrl = resolveClientLogo(channel)
   const name = resolveClientName(channel)
-  if (logoUrl) {
-    return createElement('span', {
-      className,
-      style: {
-        display: 'inline-flex',
-        flex: 'none',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: size,
-        height: size,
-      },
-    }, createElement('img', {
-      src: logoUrl,
-      alt: name,
-      style: { width: size, height: size, objectFit: 'contain', borderRadius: Math.max(4, Math.round(size * BRAND_TILE_RADIUS_RATIO)) },
-    }))
-  }
-  return createElement(
+  const radius = Math.max(4, Math.round(size * BRAND_TILE_RADIUS_RATIO))
+  // 内置品牌图形（权威 brands/official/logo.svg 的几何，见 channel-geometry.ts）：
+  // 既是"渠道没配 logo"时的显示内容，也是 logo 加载失败时的兜底 —— 两者同款。
+  const tile = createElement(
     'span',
     {
       className,
@@ -111,13 +125,24 @@ export function BraceMark({ size, className }: { size: number; className?: strin
         justifyContent: 'center',
         width: size,
         height: size,
-        borderRadius: Math.max(4, Math.round(size * BRAND_TILE_RADIUS_RATIO)),
+        borderRadius: radius,
         backgroundColor: 'var(--dsw-alias-fg-primary, #000000)',
         color: 'var(--dsw-alias-bg-base, #ffffff)',
       },
     },
     BraceGlyph(),
   )
+  if (logoUrl !== undefined) {
+    return createElement(
+      'span',
+      {
+        className,
+        style: { display: 'inline-flex', flex: 'none', alignItems: 'center', justifyContent: 'center', width: size, height: size },
+      },
+      createElement(ChannelLogo, { url: logoUrl, size, alt: name, radius, fallback: () => tile }),
+    )
+  }
+  return tile
 }
 
 export function BrandName() {
@@ -156,7 +181,8 @@ export function BrandBadge() {
   return createElement(
     'span',
     { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-fg-secondary, #666)', opacity: 0.85 } },
-    logo ? createElement('img', { src: logo, alt: '', style: { width: 16, height: 16, objectFit: 'contain', borderRadius: 3 } }) : null,
+    // 加载失败只是不显示这张小图（名字还在），不占位破图。
+    logo ? createElement(ChannelLogo, { url: logo, size: 16, alt: '', radius: 3, fallback: () => null }) : null,
     name,
   )
 }

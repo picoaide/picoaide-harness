@@ -342,6 +342,12 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   const runDir = tempDir('ci-package-run-')
   const stage = join(runDir, 'stage')
   const list = join(runDir, 'ch.list')
+  // 产物目录落在 runDir 下,假打包器与脚本都不得碰仓库里真实的
+  // packages/host/desktop/dist —— 脚本每个渠道开头就 `rm -rf "$DIST"`,缺省值是
+  // **真实** dist,跑一次 `yarn check` 就会把刚打好的包删掉(2026-09-11 实测:
+  // yarn check 后 dist/linux-unpacked 整个消失,后面的 E2E 报 app binary not found)。
+  const distDir = join(runDir, 'dist')
+  mkdirSync(distDir, { recursive: true })
   writeFileSync(list, 'official\nexample-brand\n')
 
   // 假打包器:回显渠道名并产出两种文件;渠道名出现在**输出**里,
@@ -349,9 +355,9 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   const stub = join(runDir, 'stub.sh')
   writeFileSync(stub, `#!/usr/bin/env bash
  echo "building for \${DSH_BUILD_CHANNEL}"
- mkdir -p "${root}/packages/host/desktop/dist"
- echo x > "${root}/packages/host/desktop/dist/App-\${DSH_BUILD_CHANNEL}.AppImage"
- echo y > "${root}/packages/host/desktop/dist/App-\${DSH_BUILD_CHANNEL}.deb"
+ mkdir -p "${distDir}"
+ echo x > "${distDir}/App-\${DSH_BUILD_CHANNEL}.AppImage"
+ echo y > "${distDir}/App-\${DSH_BUILD_CHANNEL}.deb"
 `)
   execFileSync('chmod', ['+x', stub])
 
@@ -361,8 +367,13 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   writeFileSync(verifyStub, `console.log(\`verify stub: \${process.env.DSH_BUILD_CHANNEL} \${process.argv.slice(2).join(' ')}\`)
 `)
 
+  // --dist：必须指到 runDir,否则脚本的缺省产物目录是**仓库里真实的**
+  // packages/host/desktop/dist,而它每个渠道开头就 `rm -rf "$DIST"` ——
+  // 跑一次 `yarn check` 就会把开发机/CI 上刚打好的包删掉(2026-09-11 实测踩到:
+  // yarn check 之后 dist/linux-unpacked 整个消失,E2E 报"app binary not found")。
   const ok = spawnSync('bash', [
-    packageScript, '--list', list, '--stage-dir', stage, '--patterns', '*.AppImage *.deb', '--', stub,
+    packageScript, '--list', list, '--stage-dir', stage, '--dist', distDir,
+    '--patterns', '*.AppImage *.deb', '--', stub,
   ], { cwd: root, encoding: 'utf8', env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyStub } })
   check(ok.status === 0, `逐渠道打包应成功,实际退出 ${String(ok.status)}`)
   check((ok.stdout ?? '').includes('building for official'), '官方渠道必须保留完整日志(排障基准)')
@@ -401,13 +412,14 @@ if [ "\${DSH_BUILD_CHANNEL}" != "official" ]; then
   echo "\${DSH_BUILD_CHANNEL}" >&2
   exit 3
 fi
-mkdir -p "${root}/packages/host/desktop/dist"
-echo x > "${root}/packages/host/desktop/dist/App.AppImage"
+mkdir -p "${distDir}"
+echo x > "${distDir}/App.AppImage"
 `)
   execFileSync('chmod', ['+x', failStub])
   const stage2 = join(runDir, 'stage2')
   const failed = spawnSync('bash', [
-    packageScript, '--list', list, '--stage-dir', stage2, '--patterns', '*.AppImage', '--', failStub,
+    packageScript, '--list', list, '--stage-dir', stage2, '--dist', distDir,
+    '--patterns', '*.AppImage', '--', failStub,
   ], { cwd: root, encoding: 'utf8' })
   check(failed.status !== 0, '渠道打包失败必须让步骤失败')
   // `::add-mask::<id>` 这一行本身含渠道 id —— 那是掩码指令(GitHub 不会把它

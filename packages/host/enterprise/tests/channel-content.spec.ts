@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { parseDesktopChannelProfile } from 'dsh-plugin-desktop/desktop-channel'
-import { asChannelPayload, brandChannel, channelTitle, DEFAULT_CHANNEL, mergeChannel, NEUTRAL_CHANNEL } from '../src/channel-content.ts'
+import {
+  absolutizeChannelAssets,
+  asChannelPayload,
+  brandChannel,
+  channelTitle,
+  DEFAULT_CHANNEL,
+  mergeChannel,
+  NEUTRAL_CHANNEL,
+  stripRelativeAssetURLs,
+  type ChannelConfig,
+} from '../src/channel-content.ts'
 
 /**
  * 渠道包（`channels/<id>/channel.json`）→ 客户端内置兜底内容。
@@ -124,6 +134,20 @@ describe('mergeChannel', () => {
     expect(merged.accent).toBe('#123456')
   })
 
+  it('carries the dark logo through too', () => {
+    // 服务端配了 assets.logo_dark 才下发 login.logo_url_dark；此前这里的 login
+    // 对象只带亮色 logo，暗色那条数据链被静默掐断（2026-09-10 与绝对化同轮发现）。
+    const merged = mergeChannel(packaged, {
+      login: { logo_url: 'https://srv/login.svg', logo_url_dark: 'https://srv/login-dark.svg' },
+    })
+    expect(merged.login?.logo_url_dark).toBe('https://srv/login-dark.svg')
+  })
+
+  it('does not invent a dark logo when the server has none', () => {
+    const merged = mergeChannel(packaged, { login: { logo_url: 'https://srv/login.svg' } })
+    expect(merged.login).not.toHaveProperty('logo_url_dark')
+  })
+
   it('is a no-op for the official channel', () => {
     // 官方渠道:base 就是官方内置内容,叠加结果与改造前一致。
     const merged = mergeChannel(DEFAULT_CHANNEL, { title: '', login: {}, client: {} })
@@ -176,5 +200,80 @@ describe('asChannelPayload', () => {
     ['null', null],
   ])('rejects %s', (_case, value) => {
     expect(asChannelPayload(value)).toBeUndefined()
+  })
+})
+
+/**
+ * 素材 URL 绝对化/丢弃：**裂图的直接原因就在这一层**（2026-09-10）。
+ *
+ * 服务端下发的 logo_url/favicon_url 是相对路径（`/api/client/v2/channel/logo`），
+ * 而消费它的是 `<img src>` —— 在 Electron 渲染层相对路径会打到**本地** webServer
+ * （那里没有服务端命名空间的路由）→ 404 → 界面上就是一张裂图。所以：有服务端地址
+ * 就拼成绝对 URL，没有就**丢掉**（让消费方回落到内置品牌图形），绝不把相对地址
+ * 交给渲染层。
+ */
+describe('absolutizeChannelAssets', () => {
+  const RELATIVE: ChannelConfig = {
+    channel_id: 'acme',
+    login: { display_name: 'Acme', tagline: '', welcome: '', logo_url: '/api/client/v2/channel/logo', logo_url_dark: '/api/client/v2/channel/logo-dark' },
+    client: { display_name: 'Acme AI', short_name: 'Acme', tagline: '', logo_url: '/api/client/v2/channel/logo' },
+    favicon_url: '/api/client/v2/channel/favicon',
+    accent: '#2563eb',
+  }
+
+  it('resolves every asset URL against the server address', () => {
+    const out = absolutizeChannelAssets(RELATIVE, 'https://ai.example.com/')
+    expect(out.login?.logo_url).toBe('https://ai.example.com/api/client/v2/channel/logo')
+    expect(out.login?.logo_url_dark).toBe('https://ai.example.com/api/client/v2/channel/logo-dark')
+    expect(out.client?.logo_url).toBe('https://ai.example.com/api/client/v2/channel/logo')
+    expect(out.favicon_url).toBe('https://ai.example.com/api/client/v2/channel/favicon')
+  })
+
+  it('keeps the non-URL fields untouched', () => {
+    const out = absolutizeChannelAssets(RELATIVE, 'https://ai.example.com')
+    expect(out.channel_id).toBe('acme')
+    expect(out.client?.short_name).toBe('Acme')
+    expect(out.accent).toBe('#2563eb')
+  })
+
+  it('leaves already-absolute URLs alone', () => {
+    const out = absolutizeChannelAssets(
+      { client: { logo_url: 'https://cdn.example.com/logo.svg' } },
+      'https://ai.example.com',
+    )
+    expect(out.client?.logo_url).toBe('https://cdn.example.com/logo.svg')
+  })
+
+  it('does not mutate its input', () => {
+    const input: ChannelConfig = { client: { logo_url: '/api/logo' } }
+    absolutizeChannelAssets(input, 'https://ai.example.com')
+    expect(input.client?.logo_url).toBe('/api/logo')
+  })
+
+  it('drops relative URLs when there is no server address to resolve them', () => {
+    const out = absolutizeChannelAssets(RELATIVE, '')
+    expect(out.login).not.toHaveProperty('logo_url')
+    expect(out.login).not.toHaveProperty('logo_url_dark')
+    expect(out.client).not.toHaveProperty('logo_url')
+    expect(out).not.toHaveProperty('favicon_url')
+    // 其余字段照旧（丢了素材不能顺手把白标也丢了）。
+    expect(out.client?.short_name).toBe('Acme')
+    expect(out.channel_id).toBe('acme')
+  })
+})
+
+describe('stripRelativeAssetURLs', () => {
+  it('removes relative asset URLs but keeps absolute ones', () => {
+    const out = stripRelativeAssetURLs({
+      login: { logo_url: '/api/client/v2/channel/logo', logo_url_dark: 'https://cdn.example.com/dark.svg' },
+      client: { display_name: 'Acme AI', logo_url: '/api/client/v2/channel/logo' },
+      favicon_url: '/api/client/v2/channel/favicon',
+      accent: '#2563eb',
+    })
+    expect(out.login).not.toHaveProperty('logo_url')
+    expect(out.login?.logo_url_dark).toBe('https://cdn.example.com/dark.svg')
+    expect(out.client).not.toHaveProperty('logo_url')
+    expect(out.client?.display_name).toBe('Acme AI')
+    expect(out).not.toHaveProperty('favicon_url')
   })
 })

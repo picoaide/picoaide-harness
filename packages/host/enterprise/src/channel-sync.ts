@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { brandChannel, DEFAULT_CHANNEL, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
-import { SESSION_CHANGED_EVENT } from './session-service.ts'
+import { absolutizeChannelAssets, brandChannel, DEFAULT_CHANNEL, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
+import { subscribeSession } from './session-service.ts'
 import { fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -57,27 +57,10 @@ export const inject = ['picoSession']
  * 而 404 —— 这里解析为绝对 URL(拼 session.serverURL, 保持 https/回环校验)。
  */
 function absolutizeURLs(channel: ChannelConfig, serverURL: string): ChannelConfig {
-  // 2026-09-06 CodeQL js/polynomial-redos:尾部斜杠剥离改为无正则形式
-  // (原 /\/+$/ 被保守标为多项式回溯;while 循环语义等价)。
-  let server = serverURL
-  while (server.endsWith('/')) server = server.slice(0, -1)
-  const abs = (u?: string): string | undefined =>
-    u === undefined || u === '' ? undefined : u.startsWith('http') ? u : server + u
-  // exactOptionalPropertyTypes: 可选属性不可显式置 undefined——
-  // 用条件展开保留/删除, 不产生 {attr: undefined}。
-  const loginLogo = abs(channel.login?.logo_url)
-  const clientLogo = abs(channel.client?.logo_url)
-  const favicon = abs(channel.favicon_url)
-  return {
-    ...(channel.channel_id !== undefined ? { channel_id: channel.channel_id } : {}),
-    title: channel.title ?? '',
-    ...(channel.login ? { login: { display_name: channel.login.display_name ?? '', tagline: channel.login.tagline ?? '', welcome: channel.login.welcome ?? '', ...(loginLogo !== undefined ? { logo_url: loginLogo } : {}) } } : {}),
-    // short_name 必须原样带过去:侧边栏用它,而它**不来自服务端**
-    // (服务端没有这个字段),是随包品牌补进去的 —— 这里丢掉就等于白标丢失。
-    ...(channel.client ? { client: { display_name: channel.client.display_name ?? '', ...(channel.client.short_name !== undefined ? { short_name: channel.client.short_name } : {}), tagline: channel.client.tagline ?? '', ...(clientLogo !== undefined ? { logo_url: clientLogo } : {}) } } : {}),
-    ...(favicon !== undefined ? { favicon_url: favicon } : {}),
-    ...(channel.accent !== undefined ? { accent: channel.accent } : {}),
-  }
+  // 单一实现见 channel-content.ts 的 absolutizeChannelAssets:同一份口径被
+  // 本地端点(/api/pico/channel)与这里共用,避免"两处各拼一次、其中一处漏字段"
+  // (2026-09-10:该函数此前重建 client 对象时丢掉了 logo_url_dark)。
+  return absolutizeChannelAssets(channel, serverURL)
 }
 
 /** 导出供测试: 相对 URL 绝对化(服务端下发 logo_url 的契约, 勿内联)。 */
@@ -108,5 +91,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch(() => undefined) })
-}
+  // subscribeSession 而不是裸 ctx.on：恢复型启动（重启后带着有效会话）下首个
+  // 会话事件可能早于本插件 apply，裸订阅会整个漏掉它 —— 服务端驱动的渠道内容
+  // （绝对化的 logo、改过的名称/主题色）要等到下次登录才生效（2026-09-10 实测：
+  // 侧边栏品牌图裂着，重新登录就好了）。
+  subscribeSession(ctx, (session) => { void sync(session).catch(() => undefined) })}

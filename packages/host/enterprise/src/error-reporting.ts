@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createRequire } from 'node:module'
-import { SESSION_CHANGED_EVENT } from './session-service.ts'
+import { subscribeSession } from './session-service.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import type { Session } from './server-connector/config.ts'
 // 静态 import @sentry/node(external,运行时加载节点模块;动态 import 会被
@@ -123,43 +123,10 @@ export function apply(ctx: Context): void {
       // logger 不可用（极端环境/已关闭 context）时静默:错误上报失败不阻断主机。
     }
   }
-  ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch(reportFailure) })
-  // 兜底(联调 2026-08-27):UI 登录可能在事件注册后但 getSession 尚未
-  // 赋值时发生;1s 间隔轮询当前 session(最多 60s),发现登录即同步。
-  // 与 auth-gate 相同,直接使用注入的 ctx.picoSession(TS 声明已提供,
-  // 此前误用类型断言导致访问到未注入实例返回 null)。
-  // CI 修复(2026-08-27):定时器必须跟随 context 生命周期清理,避免
-  // context 关闭后回调访问 picoSession 抛 "inactive context" 崩溃。
-  if (!ctx.picoSession) {
-    console.warn('[error-reporting] picoSession 服务不可用,仅事件驱动')
-  } else {
-    let polls = 0
-    let finished = false
-    const timer = setInterval(() => {
-      if (finished) return
-      polls += 1
-      try {
-        const session = ctx.picoSession.getSession()
-        if (session) {
-          finished = true
-          clearInterval(timer)
-          void sync(session).catch(reportFailure)
-        } else if (polls >= 60) {
-          finished = true
-          clearInterval(timer)
-        }
-      } catch {
-        // context 已关闭等异常:停止轮询,不再崩溃
-        finished = true
-        clearInterval(timer)
-      }
-    }, 1000)
-    // context 生命周期清理:插件卸载时停掉轮询(effect,与 try/catch 双重防护)
-    ctx.effect(() => {
-      return () => {
-        finished = true
-        clearInterval(timer)
-      }
-    })
-  }
+  // subscribeSession 而不是裸 ctx.on + 轮询兜底（2026-08-27 联调时加的 1s×60
+  // 轮询）：那次"登录态看不见"的根因是 `restore()` 在 SessionService 构造期就跑完，
+  // 它 emit 的会话事件可能早于本插件 apply —— 裸订阅整个漏掉，只能靠轮询补。
+  // 根因已在 session-service 侧修掉（subscribeSession 补发启动时那一次），轮询随之
+  // 删除：它每次启动都要挂 60 秒定时器，还会与事件路径重复初始化一次 Sentry。
+  subscribeSession(ctx, (session) => { void sync(session).catch(reportFailure) })
 }

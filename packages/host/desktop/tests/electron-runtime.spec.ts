@@ -1016,4 +1016,37 @@ describe('Electron compatibility runtime', () => {
     expect(first).toEqual(['picoaide://auth?token=a'])
     expect(second).toEqual(['picoaide://auth?token=b'])
   })
+
+  it('lets the window load channel logos served by the customer gateway (img-src)', async () => {
+    // 2026-09-10 实测：渠道 logo/favicon 由客户自己的服务器下发，渲染层拿到的是
+    // 跨源绝对 URL。`img-src 'self' data: blob:` 会把它直接拦掉（微实验复现
+    // `violates the following Content Security Policy directive: "img-src 'self'
+    // data: blob:"`，naturalWidth=0）—— 界面上就是"品牌图裂了"，而服务端一切正常。
+    // 这条测试钉住指令表，避免有人"顺手收紧 CSP"时白标再次静默失效。
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    const listener = electron.webContents.session.webRequest.onHeadersReceived.mock.calls[0]?.[0] as
+      | ((details: { url: string }, cb: (response: { responseHeaders?: Record<string, string[]> }) => void) => void)
+      | undefined
+    expect(listener, 'mount 必须安装 CSP 响应头处理器').toBeDefined()
+
+    let headers: Record<string, string[]> | undefined
+    listener!({ url: 'http://127.0.0.1:43120/' }, (response) => { headers = response.responseHeaders })
+    const csp = headers?.['Content-Security-Policy']?.[0]
+    expect(csp).toBeDefined()
+    expect(csp).toContain("img-src 'self' data: blob: http: https:")
+    // 收紧的部分不能被顺手放开：脚本仍限本地。
+    expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval'")
+    expect(csp).toContain("default-src 'self' data: blob: ws:")
+
+    // 非 http(s)/file 协议不注入 CSP（与改动前一致：原样放行，不加头）。
+    let other: { responseHeaders?: Record<string, string[]> } | undefined
+    listener!({ url: 'data:text/html,x' }, (response) => { other = response })
+    expect(other?.responseHeaders?.['Content-Security-Policy']).toBeUndefined()
+
+    await release()
+  })
 })

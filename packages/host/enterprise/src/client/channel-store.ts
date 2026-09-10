@@ -4,7 +4,7 @@
 // that call useChannel()).
 import { useEffect, useState } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import { asChannelPayload, type ChannelConfig } from '../channel-content.ts'
+import { asChannelPayload, stripRelativeAssetURLs, type ChannelConfig } from '../channel-content.ts'
 
 // 声明 Host 侧事件(客户端编译面不加载 channel-sync 的 module 声明)。
 declare module '@deepseek-ai/cordis' {
@@ -53,7 +53,10 @@ async function seedFromPackagedBrand(): Promise<void> {
     // 结构校验:不是渠道内容的载荷(网关兜底 {ok:true}、错误体…)一律不采纳 ——
     // 存进去会让所有品牌字段取不到值,消费方回落到内置厂商文案。
     const channel = asChannelPayload(data)
-    if (current === null && channel !== undefined) set(channel)
+    // 相对素材 URL 一律丢弃(见 stripRelativeAssetURLs):本端点的载荷可能来自
+    // 服务端代理,而服务端的 logo_url 是相对路径 —— 交给 <img> 会打到本地
+    // webServer 而 404,界面上就是裂图(2026-09-10 实测)。丢弃后退回内置品牌图形。
+    if (current === null && channel !== undefined) set(stripRelativeAssetURLs(channel))
   } catch { /* endpoint absent / offline: keep DEFAULT_CHANNEL */ }
 }
 
