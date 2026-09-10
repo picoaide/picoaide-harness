@@ -19,7 +19,7 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
-import { asChannelPayload, type BrandConfig } from './channel-content.ts'
+import { absolutizeChannelAssets, asChannelPayload, type BrandConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
 
 // 品牌文案类型定义在 channel-content.ts（纯数据模块，客户端面也能值导入），
@@ -1007,7 +1007,13 @@ export function apply(ctx: Context, config: Config): void {
             // 上游必须是**像渠道内容**的载荷:否则原样透传会让客户端把垃圾当
             // 渠道内容存进 store,每个字段取不到值 → 回落内置厂商文案(白标事故,
             // 且零报错)。见 channel-content.ts 的 asChannelPayload。
-            json(res, 200, asChannelPayload(data) ?? builtInChannel(config.brand))
+            const payload = asChannelPayload(data)
+            // 出口统一绝对化:本端点的返回值会被客户端 store 直接存下并交给 <img>
+            // 渲染,而服务端下发的 logo_url/favicon_url 是相对路径 —— 相对路径在
+            // 渲染层会打到本地 webServer 而 404,页面上就是裂图(2026-09-10 实测)。
+            json(res, 200, payload === undefined
+              ? builtInChannel(config.brand)
+              : absolutizeChannelAssets(payload, serverURL))
           } catch {
             // 服务端不可达:给随包品牌而不是空载荷 —— 空载荷会让界面回落
             // 内置的厂商文案,那正是白标要防的。

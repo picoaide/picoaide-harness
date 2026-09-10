@@ -22,10 +22,84 @@
 export interface ChannelConfig {
   channel_id?: string
   title?: string
-  login?: { logo_url?: string; display_name?: string; tagline?: string; welcome?: string }
+  login?: {
+    logo_url?: string
+    /** 暗色主题用的 logo（服务端只在渠道配了 `assets.logo_dark` 时下发）。 */
+    logo_url_dark?: string
+    display_name?: string
+    tagline?: string
+    welcome?: string
+  }
   client?: { logo_url?: string; display_name?: string; short_name?: string; tagline?: string }
   favicon_url?: string
   accent?: string
+}
+
+/**
+ * 把服务端渠道载荷里的**相对素材 URL 拼成绝对地址**（返回新对象，不改入参）。
+ *
+ * 服务端下发的 `logo_url` / `favicon_url` 是相对路径（如
+ * `/api/client/v2/channel/logo`，命名空间真源在 `internal/router`）。谁消费谁负责
+ * 拼服务端地址，而客户端本地端点 `/api/pico/channel` 的返回值**会被直接存进
+ * store 交给 `<img>` 渲染** —— 相对路径在 Electron 渲染层会打到本地 webServer 而
+ * 404，页面上就是一个裂图（2026-09-10 实测：服务端开始下发 `client.logo_url`
+ * 之后暴露出来）。因此该端点在出口处统一绝对化。
+ *
+ * 已是绝对 http(s) URL 的原样保留；`serverURL` 为空时**丢弃**相对 URL ——
+ * 宁可让消费方回落到内置品牌图形，也不要渲染一个必然 404 的相对地址。
+ * @param channel - 待处理的渠道内容。
+ * @param serverURL - 本会话的服务端地址（`scheme://host[:port]`）。
+ * @returns 处理后的渠道内容。
+ */
+export function absolutizeChannelAssets(channel: ChannelConfig, serverURL: string): ChannelConfig {
+  // 尾部斜杠剥离用无正则形式（CodeQL js/polynomial-redos，与 channel-sync 同款）。
+  let server = serverURL
+  while (server.endsWith('/')) server = server.slice(0, -1)
+  const abs = (value: string | undefined): string | undefined => {
+    const url = nonEmpty(value)
+    if (url === undefined) return undefined
+    if (url.startsWith('http://') || url.startsWith('https://')) return url
+    return server === '' ? undefined : server + url
+  }
+  // **先删后写**，不要写成 `{ ...client, ...(logo === undefined ? {} : { logo }) }`：
+  // 素材被**丢弃**时那半截展开不会出现，原对象里的相对地址就被 spread 原样带回来了
+  // —— 2026-09-10 实测踩到（"丢弃相对 URL" 实际一条都没丢，测试才发现）。
+  const out: ChannelConfig = { ...channel }
+  delete out.favicon_url
+  const favicon = abs(channel.favicon_url)
+  if (favicon !== undefined) out.favicon_url = favicon
+  if (channel.login !== undefined) {
+    const source = channel.login
+    const login: NonNullable<ChannelConfig['login']> = { ...source }
+    delete login.logo_url
+    delete login.logo_url_dark
+    const logo = abs(source.logo_url)
+    const logoDark = abs(source.logo_url_dark)
+    if (logo !== undefined) login.logo_url = logo
+    if (logoDark !== undefined) login.logo_url_dark = logoDark
+    out.login = login
+  }
+  if (channel.client !== undefined) {
+    const source = channel.client
+    const client: NonNullable<ChannelConfig['client']> = { ...source }
+    delete client.logo_url
+    const logo = abs(source.logo_url)
+    if (logo !== undefined) client.logo_url = logo
+    out.client = client
+  }
+  return out
+}
+
+/**
+ * 丢弃载荷里的**相对**素材 URL（绝对 http(s) 原样保留）。
+ *
+ * 给"手上没有服务端地址可比对"的消费方用：相对路径交给渲染层必然 404（打到本地
+ * webServer），不如当作"渠道未配置"处理，让消费方回落到内置品牌图形。
+ * @param channel - 待处理的渠道内容。
+ * @returns 去掉相对素材 URL 的渠道内容。
+ */
+export function stripRelativeAssetURLs(channel: ChannelConfig): ChannelConfig {
+  return absolutizeChannelAssets(channel, '')
 }
 
 /**
@@ -159,6 +233,9 @@ export function mergeChannel(base: ChannelConfig, override: ChannelConfig): Chan
   // logo_url / favicon_url / accent 只可能来自服务端(随包素材不进这个端点),
   // 因此原样保留:有值就带上,没有就不产生 undefined 属性。
   const loginLogo = nonEmpty(override.login?.logo_url)
+  // 暗色 logo 与亮色同源(服务端配了 assets.logo_dark 才下发):同样原样保留 ——
+  // 此前这里只带亮色,通道被静默掐断(2026-09-10 与 logo_url 绝对化同一轮发现)。
+  const loginLogoDark = nonEmpty(override.login?.logo_url_dark)
   const clientLogo = nonEmpty(override.client?.logo_url)
   const favicon = nonEmpty(override.favicon_url)
   const accent = nonEmpty(override.accent)
@@ -166,7 +243,11 @@ export function mergeChannel(base: ChannelConfig, override: ChannelConfig): Chan
   return {
     ...(channelId === undefined ? {} : { channel_id: channelId }),
     title: nonEmpty(override.title) ?? base.title ?? '',
-    login: { ...login, ...(loginLogo === undefined ? {} : { logo_url: loginLogo }) },
+    login: {
+      ...login,
+      ...(loginLogo === undefined ? {} : { logo_url: loginLogo }),
+      ...(loginLogoDark === undefined ? {} : { logo_url_dark: loginLogoDark }),
+    },
     client: { ...client, ...(clientLogo === undefined ? {} : { logo_url: clientLogo }) },
     ...(favicon === undefined ? {} : { favicon_url: favicon }),
     ...(accent === undefined ? {} : { accent }),

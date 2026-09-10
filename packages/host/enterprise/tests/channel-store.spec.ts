@@ -126,6 +126,44 @@ describe('channel store packaged-brand seed', () => {
     cancel2()
     vi.unstubAllGlobals()
   })
+
+  it('drops relative asset URLs from the seed payload', async () => {
+    // 2026-09-10 实测的裂图根因：服务端下发的 logo_url 是相对路径
+    // (/api/client/v2/channel/logo)，而 <img src> 在 Electron 渲染层会打到
+    // **本地** webServer（那里没有服务端命名空间的路由）→ 404 → 界面上一张裂图。
+    // 播种是"手上没有服务端地址可比对"的路径（端点出口已绝对化，这里是第二道
+    // 保险）：相对地址一律丢弃，让消费方回落到内置品牌图形，别渲染必然 404 的地址。
+    stubChannelEndpoint({
+      ...PACKAGED,
+      client: { display_name: 'Acme AI', short_name: 'Acme', tagline: '', logo_url: '/api/client/v2/channel/logo' },
+      favicon_url: '/api/client/v2/channel/favicon',
+    })
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit(null)
+    await settle()
+    const seeded = readChannelSync()
+    expect(seeded?.client?.logo_url).toBeUndefined()
+    expect(seeded?.favicon_url).toBeUndefined()
+    // 名字/短名等非素材字段照常保留（否则等于把白标一起丢了）。
+    expect(seeded?.client?.short_name).toBe('Acme')
+    cancel()
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps absolute asset URLs from the seed payload', async () => {
+    stubChannelEndpoint({
+      ...PACKAGED,
+      client: { display_name: 'Acme AI', short_name: 'Acme', tagline: '', logo_url: 'https://ai.example.com/api/client/v2/channel/logo' },
+    })
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit(null)
+    await settle()
+    expect(readChannelSync()?.client?.logo_url).toBe('https://ai.example.com/api/client/v2/channel/logo')
+    cancel()
+    vi.unstubAllGlobals()
+  })
 })
 
 describe('channel store value subscriptions', () => {
