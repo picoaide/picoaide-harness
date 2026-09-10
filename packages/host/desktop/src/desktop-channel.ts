@@ -6,13 +6,16 @@
  * `/opt/picoaide/channel/`；客户端构建则把它打进应用资源，于是同一个渠道的
  * 客户端与服务端来自**同一份**配置，不会各说各话。
  *
- * 客户端需要在**登录之前**就知道两件事，所以它们必须随包而非随服务端下发
- * （服务端地址是鸡生蛋问题，登录前拿不到；窗口标题与产品名在登录页出现时
+ * 客户端需要在**登录之前**就知道三件事，所以它们必须随包而非随服务端下发
+ * （服务端地址是鸡生蛋问题，登录前拿不到；窗口标题与品牌文案在登录页出现时
  * 就已经可见）：
  *
  *   1. 服务端地址（`defaults.server_url`）—— 配了就让客户端开机直连，
  *      用户不必手输自己公司的地址；
- *   2. 产品名/窗口标题（`desktop.product_name` / `desktop.window_title`）。
+ *   2. 产品名/窗口标题（`desktop.product_name` / `desktop.window_title`）；
+ *   3. 品牌文案（`identity.*` / `copy.*`）—— 登录页品牌区、侧边栏与关于页。
+ *      取值链与服务端 `channel.go` 的 `applyDefaults` **同序**，避免"登录页
+ *      一个名、登录后另一个名"。
  *
  * 文件缺失（本地开发、未渠道化的构建）时返回 undefined，调用方沿用原有
  * 行为 —— 渠道化是增量，不是新的必填项。
@@ -33,6 +36,38 @@ const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 
 /** 官方渠道的深链 scheme(改造前的硬编码值)。 */
 export const DEFAULT_DEEP_LINK_SCHEME = 'picoaide'
+
+/**
+ * 渠道包没配品牌时的中性占位（与服务端 `fallbackBrandName` 同值）。
+ *
+ * 刻意**不含厂商品牌**：这条路径只在"包里没有品牌内容"时走到，而在渠道构建里
+ * 那等于注入链断了 —— 显示一个中性名，好过把厂商名显示给渠道客户（那正是白标
+ * 要防的事故）。正常渠道构建到不了这里：`ci-channels.sh` 强制每个渠道必须写
+ * `identity.display_name`，缺了直接中止构建。
+ */
+export const NEUTRAL_BRAND_NAME = 'Harness'
+
+/**
+ * 渠道包在客户端侧生效的品牌文案（登录前就要用，所以必须随包）。
+ *
+ * 与 `ChannelConfig`（服务端下发）**同形但不是同一来源**：这份是构建期随包
+ * 分发的兜底内容，服务端可达时以后者为准。两者字段口径一致，客户端合并时
+ * 逐字段覆盖即可。空串表示"渠道没配这一项"，消费方自行决定是否显示。
+ *
+ * `displayName` 一定有值（缺失时是中性占位 `NEUTRAL_BRAND_NAME`，绝不是厂商
+ * 品牌）；`shortName`/`tagline` 允许是空串 —— 它们是**提示**，消费方拿不到就
+ * 回落到显示名或不显示。
+ */
+export interface ChannelBrand {
+  /** 渠道 id（仅供排查/对账）。 */
+  readonly channelId: string
+  /** 页面标题用的名字（登录页/恢复页，避免无处可读时露出厂商名）。 */
+  readonly title: string
+  /** 登录页品牌区。 */
+  readonly login: { readonly displayName: string; readonly shortName: string; readonly tagline: string; readonly welcome: string }
+  /** 客户端界面品牌区（侧边栏/顶栏/关于）。 */
+  readonly client: { readonly displayName: string; readonly shortName: string; readonly tagline: string }
+}
 
 /**
  * 深链 scheme 合法形状(RFC 3986 scheme):字母开头,后跟字母/数字/+/-/.。
@@ -60,6 +95,14 @@ export interface DesktopChannelProfile {
   readonly deepLinkScheme: string
   /** 深链在操作系统里的注册名（Protocols 显示名）；未配置时为 undefined。 */
   readonly deepLinkName: string | undefined
+  /**
+   * 随包分发的品牌文案（登录页/客户端界面用）。
+   *
+   * 登录页在**认证之前**就渲染品牌区，那一刻还没有服务端可问（服务端地址可能
+   * 正是用户要输入的东西），所以品牌文案必须随包。渠道包没写品牌时这里是中性
+   * 占位，绝不是厂商品牌。
+   */
+  readonly brand: ChannelBrand
 }
 
 /**
@@ -94,6 +137,13 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
+/** 取对象（数组/null/标量一律当空对象——渠道包是不可信输入）。 */
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
 /**
  * 严格解析渠道包内容。任何结构不符都返回 undefined（调用方沿用默认行为）。
  * @param input - `JSON.parse` 之后的对象。
@@ -110,17 +160,15 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
   const defaults = record.defaults
   const desktop = record.desktop
   const identity = record.identity
+  const copy = record.copy
   const defaultServerURL = normalizeDefaultServerURL(
     typeof defaults === 'object' && defaults !== null
       ? (defaults as Record<string, unknown>).server_url
       : undefined,
   )
-  const desktopRecord = typeof desktop === 'object' && desktop !== null && !Array.isArray(desktop)
-    ? desktop as Record<string, unknown>
-    : {}
-  const identityRecord = typeof identity === 'object' && identity !== null && !Array.isArray(identity)
-    ? identity as Record<string, unknown>
-    : {}
+  const desktopRecord = asRecord(desktop)
+  const identityRecord = asRecord(identity)
+  const copyRecord = asRecord(copy)
   const productName = nonEmptyString(desktopRecord.product_name)
     ?? nonEmptyString(identityRecord.display_name)
   const windowTitle = nonEmptyString(desktopRecord.window_title) ?? productName
@@ -132,6 +180,33 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     : DEFAULT_DEEP_LINK_SCHEME
   const deepLinkName = nonEmptyString(desktopRecord.deep_link_name) ?? productName
 
+  // 品牌文案的取值链必须与服务端 channel.go 的 applyDefaults **同序**：
+  // 同一个渠道包在客户端自带兜底与服务端下发之间不能给出不同名字，否则
+  // 登录页会出现"标题一个名、登录后另一个名"。服务端缺省链见
+  // server/internal/channel/channel.go 的 applyDefaults。
+  const shortName = nonEmptyString(identityRecord.short_name)
+  const displayName = nonEmptyString(identityRecord.display_name)
+  const tagline = nonEmptyString(identityRecord.tagline)
+  const brand: ChannelBrand = {
+    channelId,
+    title: nonEmptyString(identityRecord.title) ?? displayName ?? NEUTRAL_BRAND_NAME,
+    login: {
+      displayName: nonEmptyString(copyRecord.login_display_name) ?? shortName ?? NEUTRAL_BRAND_NAME,
+      // 短名是**提示字段**（消费方拿不到就回落到显示名），所以缺失时留空串而不是
+      // 填中性名 —— 填了中性名会让"渠道只配了 display_name"的侧边栏显示
+      // "Harness" 而不是渠道名（消费方无法区分"提示"与"内容"）。
+      shortName: shortName ?? '',
+      // 标语/欢迎语允许为空：渠道没配就不显示，而不是编一句。
+      tagline: nonEmptyString(copyRecord.login_tagline) ?? tagline ?? '',
+      welcome: nonEmptyString(copyRecord.login_welcome) ?? '',
+    },
+    client: {
+      displayName: nonEmptyString(copyRecord.client_display_name) ?? displayName ?? NEUTRAL_BRAND_NAME,
+      shortName: shortName ?? '',
+      tagline: nonEmptyString(copyRecord.client_tagline) ?? tagline ?? '',
+    },
+  }
+
   return {
     channelId,
     defaultServerURL,
@@ -139,6 +214,7 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     windowTitle,
     deepLinkScheme,
     deepLinkName,
+    brand,
   }
 }
 

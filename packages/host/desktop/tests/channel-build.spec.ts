@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,7 @@ import {
   readChannelDesktopBranding,
   resolveBuildChannelId,
   resolveChannelBuildContext,
+  stageChannelProfile,
 } from '../scripts/channel-build.ts'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -216,5 +217,120 @@ describe('channel build validation (fail loud)', () => {
   it('rejects a channel package that is not valid JSON', () => {
     const root = channelRepo('acme', '{ not json')
     expect(() => readChannelDesktopBranding(join(root, 'channels', 'acme'))).toThrow(/不是合法 JSON/u)
+  })
+})
+
+/**
+ * 运行期渠道包的就位（`build/channel.json`）。
+ *
+ * 这是"渠道客户端直连自家域名 / 登录页显示渠道品牌"的**唯一来源**：
+ * `src/desktop-channel.ts` 在运行时读的就是这个文件。2026-09-10 实测发现整个
+ * 仓库此前没有任何地方写它 —— 客户端渠道化在这一环是断的（与
+ * `CLIENT-RELEASE.json` 放错目录同类：链路缺一环但不报错）。这些测试钉住
+ * 两个方向：**渠道构建必须写**、**官方构建必须清**（残留会把渠道品牌带给
+ * 下一次本地/官方构建，比"没生效"更糟）。
+ */
+describe('stageChannelProfile', () => {
+  function channelDir(manifest: unknown): { repoRoot: string, buildDir: string, channelDir: string } {
+    const root = mkdtempSync(join(tmpdir(), 'channel-build-stage-'))
+    const dir = join(root, 'channels', 'acme')
+    const buildDir = join(root, 'packages', 'host', 'desktop', 'build')
+    mkdirSync(dir, { recursive: true })
+    mkdirSync(buildDir, { recursive: true })
+    if (manifest !== undefined) {
+      writeFileSync(join(dir, 'channel.json'),
+        typeof manifest === 'string' ? manifest : JSON.stringify(manifest))
+    }
+    return { repoRoot: root, buildDir, channelDir: dir }
+  }
+
+  it('stages the channel package so the runtime can read it', () => {
+    const { repoRoot, buildDir } = channelDir({
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI' },
+      defaults: { server_url: 'https://ai.acme.example.com' },
+      desktop: { deep_link_scheme: 'acmeai' },
+    })
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    const target = stageChannelProfile(context, buildDir)
+    expect(target).toBe(join(buildDir, 'channel.json'))
+    // 原样复制：运行期解析器与构建期读的是**同一份**字节。
+    expect(JSON.parse(readFileSync(join(buildDir, 'channel.json'), 'utf8'))).toMatchObject({
+      channel_id: 'acme',
+      defaults: { server_url: 'https://ai.acme.example.com' },
+      desktop: { deep_link_scheme: 'acmeai' },
+    })
+  })
+
+  it('deletes a stale package on an official build', () => {
+    // 残留 = 下一次官方/本地构建继承别的渠道的品牌,必须清掉。
+    const { repoRoot, buildDir } = channelDir({
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI', short_name: 'Acme' },
+    })
+    writeFileSync(join(buildDir, 'channel.json'), JSON.stringify({ channel_id: 'acme' }))
+    const official = resolveChannelBuildContext({ env: {}, repoRoot })
+    expect(stageChannelProfile(official, buildDir)).toBeUndefined()
+    expect(existsSync(join(buildDir, 'channel.json'))).toBe(false)
+  })
+
+  it('deletes a stale package when the channel directory has no manifest', () => {
+    // 本地开发(有渠道目录但没写 channel.json)同样不能留着上一次的。
+    const { repoRoot, buildDir } = channelDir(undefined)
+    writeFileSync(join(buildDir, 'channel.json'), '{"channel_id":"other"}')
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    expect(stageChannelProfile(context, buildDir)).toBeUndefined()
+    expect(existsSync(join(buildDir, 'channel.json'))).toBe(false)
+  })
+
+  it('refuses a package whose channel_id disagrees with the build channel', () => {
+    // 目录名与 channel_id 不一致 = 渠道包放错了位置:装出来的客户端会声称自己
+    // 是另一个渠道(服务端镜像按 channel_id 对账,两边各说各话)。
+    const { repoRoot, buildDir } = channelDir({ channel_id: 'other', identity: { display_name: 'Other' } })
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    expect(() => stageChannelProfile(context, buildDir)).toThrow(/channel_id/)
+    expect(existsSync(join(buildDir, 'channel.json'))).toBe(false)
+  })
+
+  it('refuses malformed JSON and oversized manifests', () => {
+    // 畸形内容在**解析构建上下文**时就该炸(比就位更早):一路 fail-loud。
+    const broken = channelDir('{ not json')
+    expect(() => resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: broken.repoRoot }))
+      .toThrow(/不是合法 JSON/u)
+
+    const huge = channelDir({ channel_id: 'acme', pad: 'x'.repeat(70 * 1024) })
+    // 运行期解析器对 >64KB 一律当"没有渠道包",构建期必须更早、更响地拦住。
+    expect(() => resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: huge.repoRoot }))
+      .toThrow(/64KB/u)
+  })
+
+  it('guards malformed content again at staging time', () => {
+    // 上下文解析被绕过时(手工构造 context / 未来新增入口)就位这一步仍须 fail-loud,
+    // 而不是把一份坏包写进应用资源。
+    const broken = channelDir('{ not json')
+    const context = {
+      ...resolveChannelBuildContext({ env: {}, repoRoot: broken.repoRoot }),
+      channelId: 'acme',
+      official: false,
+      // 手工构造的上下文:就位这一步必须自己再校验一遍内容。
+      channelDir: broken.channelDir,
+    }
+    expect(() => stageChannelProfile(context, broken.buildDir)).toThrow(/不是合法 JSON/u)
+    expect(existsSync(join(broken.buildDir, 'channel.json'))).toBe(false)
+  })
+
+  it('is wired into every packaging path (prepareChannelBuilderOverrides)', () => {
+    // 打包入口全部只经这一个函数拿渠道参数:就位动作挂在这里才不会漏。
+    const { repoRoot, buildDir } = channelDir({ channel_id: 'acme', identity: { display_name: 'Acme AI' } })
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    prepareChannelBuilderOverrides(context, buildDir)
+    expect(existsSync(join(buildDir, 'channel.json'))).toBe(true)
+  })
+
+  it('ships the staged file (electron-builder files list)', () => {
+    // 就位了但没进 electron-builder 的 files = 还是白干:运行期读的是 asar 里的
+    // 副本。2026-09-10 实测:条目此前只在 npm 的 files 里(electron-builder 用
+    // build.files,两者不是一回事),渠道包因此从未进包。
+    expect(build.files).toContain('build/channel.json')
   })
 })

@@ -1,28 +1,36 @@
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { brandChannel, DEFAULT_CHANNEL, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
 import { fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 
-/**
- * Client-facing channel configuration (mirrors the server
- * `GET /api/client/v2/channel` payload). 渠道内容总是生效——没有开关字段,
- * 每个字段都可能缺失(渠道未配置该项), 消费方沿用 `?? ''` + 内置兜底。
- */
-export interface ChannelConfig {
-  channel_id?: string
-  title?: string
-  login?: { logo_url?: string; display_name?: string; tagline?: string; welcome?: string }
-  client?: { logo_url?: string; display_name?: string; tagline?: string }
-  favicon_url?: string
-  accent?: string
+// 类型与内置值住在 channel-content.ts（纯数据，客户端面也能值导入）；
+// 这里**转出**它们，保持 `@picoaide/dsh-enterprise/channel-sync` 这个既有入口
+// 的对外形状不变（消费方与测试都在用）。
+export { brandChannel, DEFAULT_CHANNEL, type BrandConfig, type ChannelConfig }
+
+export interface Config {
+  brand?: BrandConfig
 }
 
-/** Built-in channel content used when the server has none (未登录/不可达). */
-export const DEFAULT_CHANNEL: ChannelConfig = {
-  login: { display_name: 'PicoAide', tagline: 'Enterprise AI Gateway', welcome: '' },
-  client: { display_name: 'PicoAide Harness', tagline: '' },
-  title: 'PicoAide Harness',
-}
+/** 组装期注入的品牌文案（`profile.ts` 从渠道包读取后写入本行 config）。 */
+export const Config: z<Config> = z.object({
+  brand: z.object({
+    title: z.string(),
+    login: z.object({
+      displayName: z.string(),
+      shortName: z.string(),
+      tagline: z.string(),
+      welcome: z.string(),
+    }),
+    client: z.object({
+      displayName: z.string(),
+      shortName: z.string(),
+      tagline: z.string(),
+    }),
+  }),
+})
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
@@ -64,7 +72,9 @@ function absolutizeURLs(channel: ChannelConfig, serverURL: string): ChannelConfi
     ...(channel.channel_id !== undefined ? { channel_id: channel.channel_id } : {}),
     title: channel.title ?? '',
     ...(channel.login ? { login: { display_name: channel.login.display_name ?? '', tagline: channel.login.tagline ?? '', welcome: channel.login.welcome ?? '', ...(loginLogo !== undefined ? { logo_url: loginLogo } : {}) } } : {}),
-    ...(channel.client ? { client: { display_name: channel.client.display_name ?? '', tagline: channel.client.tagline ?? '', ...(clientLogo !== undefined ? { logo_url: clientLogo } : {}) } } : {}),
+    // short_name 必须原样带过去:侧边栏用它,而它**不来自服务端**
+    // (服务端没有这个字段),是随包品牌补进去的 —— 这里丢掉就等于白标丢失。
+    ...(channel.client ? { client: { display_name: channel.client.display_name ?? '', ...(channel.client.short_name !== undefined ? { short_name: channel.client.short_name } : {}), tagline: channel.client.tagline ?? '', ...(clientLogo !== undefined ? { logo_url: clientLogo } : {}) } } : {}),
     ...(favicon !== undefined ? { favicon_url: favicon } : {}),
     ...(channel.accent !== undefined ? { accent: channel.accent } : {}),
   }
@@ -73,18 +83,24 @@ function absolutizeURLs(channel: ChannelConfig, serverURL: string): ChannelConfi
 /** 导出供测试: 相对 URL 绝对化(服务端下发 logo_url 的契约, 勿内联)。 */
 export const resolveChannelLogoURLs = absolutizeURLs
 
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config = {}): void {
+  // 随包品牌(渠道构建下由 profile.ts 从 channel.json 注入)是**未登录/服务端
+  // 不可达**时的显示内容。此前这两种情况发 null,客户端各自回落到硬编码的官方
+  // 文案 —— 渠道客户于是看到厂商名。现在回落的是"本渠道"内容:官方构建下
+  // brandChannel(undefined) 与 DEFAULT_CHANNEL 逐字段等值,行为不变。
+  const builtIn = config.brand === undefined ? DEFAULT_CHANNEL : brandChannel(config.brand)
+
   const sync = async (session: Session | null): Promise<void> => {
     if (session === null) {
-      ctx.emit('pico/channel-changed', null)
+      ctx.emit('pico/channel-changed', builtIn)
       return
     }
     try {
       const channel = await fetchJSON(session.serverURL, '/api/client/v2/channel', { token: session.token })
-      ctx.emit('pico/channel-changed', (channel as ChannelConfig) ? absolutizeURLs(channel as ChannelConfig, session.serverURL) : null)
+      ctx.emit('pico/channel-changed', (channel as ChannelConfig) ? absolutizeURLs(channel as ChannelConfig, session.serverURL) : builtIn)
     } catch {
-      // Unreachable server: fall back to default (client keeps the built-in channel content).
-      ctx.emit('pico/channel-changed', null)
+      // Unreachable server: keep the packaged brand (never the vendor's).
+      ctx.emit('pico/channel-changed', builtIn)
     }
   }
 

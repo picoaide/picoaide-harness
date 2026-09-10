@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { ChannelConfig } from '../channel-sync.ts'
+import type { ChannelConfig } from '../channel-content.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {

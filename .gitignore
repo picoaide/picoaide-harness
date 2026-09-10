@@ -21,9 +21,13 @@ packages/host/desktop/build/app-icon.png
 packages/host/desktop/build/app-icon-mac.png
 packages/host/desktop/build/tray-icon*.png
 packages/host/desktop/build/assistedMessages.yml
-# 渠道包(私有仓 picoaide/channels/<id>/channel.json)由 CI 在打包前复制进
-# build/,随应用资源分发;内容是客户品牌,绝不入库。
+# 渠道包(私有仓 picoaide/channels/<id>/channel.json)由**打包脚本**在打包前
+# 就位到 build/(scripts/channel-build.ts 的 stageChannelProfile),随应用资源
+# 分发;内容是客户品牌,绝不入库。
 packages/host/desktop/build/channel.json
+# 渠道构建专用的 electron-builder 配置(同样由打包脚本生成,含渠道名/appId/
+# 协议 scheme)。
+packages/host/desktop/build/channel-electron-builder.cjs
 # CI 渠道脚本的中间产物(scripts/ci-channels.sh 等本地跑时会产生)
 channels.list
 channels-context/

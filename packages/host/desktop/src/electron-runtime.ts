@@ -368,12 +368,15 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       ? 'Unknown client plugin'
       : report.plugins.map(plugin => `- ${plugin}`).join('\n')
     const error = report.error === undefined ? 'The client Loader did not provide an error message.' : report.error
+    // 产品名取自 profile 组装配置（渠道构建下即渠道自己的名字）—— 失败弹窗
+    // 是渠道客户最可能看到的"厂商品牌露出"位置之一。
+    const product = this.productName()
     const result = await dialog.showMessageBox({
       type: 'error',
       title: 'Plugin Recovery',
-      message: 'PicoAide Harness could not load all plugins.',
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart PicoAide Harness after resolving the failing plugin.`,
-      buttons: ['Restart PicoAide Harness', 'Dismiss'],
+      message: `${product} could not load all plugins.`,
+      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart ${product} after resolving the failing plugin.`,
+      buttons: [`Restart ${product}`, 'Dismiss'],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -718,14 +721,20 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       // the load once; if the reload also fails, show a native error surface
       // with a manual reload entry instead of silently logging.
       if (details.reason !== 'clean-exit' && details.reason !== 'killed') {
-        void reloadOrShowCrashFallback({ log: (message) => this.logError(message) }, window)
+        void reloadOrShowCrashFallback(
+          { log: (message) => this.logError(message), productName: () => this.productName() },
+          window,
+        )
       }
     })
     window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
       // P1-3: a failed navigation (not abort) offers a recovery UI.
       if (errorCode === -3 /* ABORTED - expected during navigation */) return
       this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)
-      void reloadOrShowCrashFallback({ log: (message) => this.logError(message) }, window)
+      void reloadOrShowCrashFallback(
+        { log: (message) => this.logError(message), productName: () => this.productName() },
+        window,
+      )
     })
     window.webContents.setWindowOpenHandler(({ url }) => {
       try {
@@ -816,7 +825,15 @@ function inlineScriptUrl(url: string): string {
   return JSON.stringify(url).replace(/</gu, '\\u003c')
 }
 
-async function reloadOrShowCrashFallback(runtime: { log(message: string): void }, window: BrowserWindow): Promise<void> {
+/** Escape text for an HTML text position (the failure page's `<title>`). */
+function escapeHtmlText(value: string): string {
+  return value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;')
+}
+
+async function reloadOrShowCrashFallback(
+  runtime: { log(message: string): void; productName(): string },
+  window: BrowserWindow,
+): Promise<void> {
   if (window.isDestroyed()) return
   const retried = crashRetried.get(window) ?? false
   if (!retried) {
@@ -834,7 +851,9 @@ async function reloadOrShowCrashFallback(runtime: { log(message: string): void }
     const retryScript = retryTarget === ''
       ? ''
       : `<script>document.getElementById('retry').addEventListener('click',function(){location.href=${inlineScriptUrl(retryTarget)}})</script>`
-    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>PicoAide Harness</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
+    // 失败页是窗口标题的来源（页面 <title> 会盖掉 BrowserWindow 的 title），
+    // 所以它同样必须是渠道自己的产品名。
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName())}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
     await window.loadURL(errorPage)
   } catch {
     runtime.log('dsh-plugin-desktop: crash fallback page failed to load')

@@ -5,7 +5,7 @@
 // `JSON.stringify` 写入(带引号的 token 流), 若直接写裸词流(如
 // `PicoAide Harness`)整条声明非法, content 计算值为 none, hero 标题与
 // 徽章文字事实上永远不可见。
-import type { ChannelConfig } from '../channel-sync.ts'
+import type { ChannelConfig } from '../channel-content.ts'
 
 /** hero headline / tagline 默认值(渠道未配置该项时)。 */
 export const DEFAULT_HERO_HEADLINE = 'PicoAide Harness'
