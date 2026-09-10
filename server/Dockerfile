@@ -94,6 +94,11 @@ RUN rm -f /opt/picoaide/client/.keep
 # 目录位置固定,服务端直接读(无需 entrypoint 落盘:镜像层里读文件是只读、
 # 一次性、随镜像升级而更新,正是我们要的语义)。
 ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
+# 下载地址来源:客户端只接受**绝对 https** 地址(见 packages/host/desktop 的
+# desktop-release.ts)。反代(Caddy)设了 X-Forwarded-Proto: https 就无需配置;
+# 否则在此显式声明对外地址(如 PICOAI_PUBLIC_BASE_URL=https://ai.example.com,
+# 允许带子路径),否则清单不下发 client 段并给出 client_unavailable 原因。
+# ENV PICOAI_PUBLIC_BASE_URL=https://ai.example.com
 
 # --- 渠道配置随镜像分发(服务端对外内容的唯一来源) ---
 # CI 构建前把仓库 channels/<channel-id>/ (配置 + logo 等素材)复制成

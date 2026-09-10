@@ -87,6 +87,14 @@ func TestNamespaces(t *testing.T) {
 		"POST " + nsClient + "/auth/login",
 		"GET " + nsClient + "/config/bootstrap",
 		"GET " + nsClient + "/channel",
+		// 素材三个独立端点(浅色 logo / 暗色 logo / favicon);
+		// HEAD 与 GET 同挂(浏览器/图床探测会发 HEAD)。
+		"GET " + nsClient + "/channel/logo",
+		"HEAD " + nsClient + "/channel/logo",
+		"GET " + nsClient + "/channel/logo-dark",
+		"HEAD " + nsClient + "/channel/logo-dark",
+		"GET " + nsClient + "/channel/favicon",
+		"HEAD " + nsClient + "/channel/favicon",
 		"GET " + nsClient + "/marketplace/skills",
 		"GET " + nsClient + "/shared-skills",
 		"GET " + nsClient + "/agent-presets",

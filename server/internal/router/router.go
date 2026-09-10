@@ -149,6 +149,13 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	cli.GET("/channel", d.Channel.PublicChannel)
 	cli.GET("/channel/logo", d.Channel.Logo)
 	cli.HEAD("/channel/logo", d.Channel.Logo)
+	// 暗色 logo 与 favicon 各自独立端点(未配置时 404 JSON 信封):
+	// 曾把三张图都指向 /channel/logo 且恒发浅色版,导致 favicon 与暗色
+	// logo 的字节永远下发不了。
+	cli.GET("/channel/logo-dark", d.Channel.LogoDark)
+	cli.HEAD("/channel/logo-dark", d.Channel.LogoDark)
+	cli.GET("/channel/favicon", d.Channel.Favicon)
+	cli.HEAD("/channel/favicon", d.Channel.Favicon)
 
 	// 客户端安装包(公开:员工首次安装与升级都要能取,登录前也要能拿)
 	// 清单地址故意放在 /api/client/v2/updates/manifest,与更新服务器上的

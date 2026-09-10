@@ -316,15 +316,175 @@ func TestV2RealDB(t *testing.T) {
 // 按的渠道不一致,典型成因是 .env/compose 覆盖了镜像自带的渠道声明
 // (仓库自带 compose 曾把 PICOAI_CHANNEL 默认写死 official,正是这条)。
 
-// writeChannelDir 造一个只含 channel.json 的渠道目录。
-func writeChannelDir(t *testing.T, channelID string) string {
+// ---- 缺陷 4 回归(2026-09-10):非官方渠道漏配 deep_link_scheme 必须启动期报错 ----
+//
+// DeepLinkScheme() 在缺字段/畸形时回落厂商 scheme(picoaide)—— 官方/beta 是
+// 向后兼容;但品牌渠道漏配意味着客户在浏览器"打开 picoaide?"确认框里看到
+// 厂商名(白标失败),必须在启动期 fail-loud。
+
+// writeChannelDirRaw 造一个内容自定的渠道目录(带 desktop 段等)。
+func writeChannelDirRaw(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
-	body := `{"schema":1,"channel_id":"` + channelID + `","identity":{"display_name":"X"}}`
 	if err := os.WriteFile(filepath.Join(dir, "channel.json"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write channel.json: %v", err)
 	}
 	return dir
+}
+
+// pointChannelMarker 造镜像标记文件(进程按哪个渠道跑)。
+func pointChannelMarker(t *testing.T, dir, channelID string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "CHANNEL"), []byte(channelID+"\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+}
+
+func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
+	cases := []struct {
+		name      string
+		channelID string
+		config    string // channel.json 内容(空=只有 identity)
+		wantErr   bool
+	}{
+		{
+			name:      "官方缺字段通过",
+			channelID: "official",
+			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
+		},
+		{
+			name:      "beta 缺字段通过",
+			channelID: "beta",
+			config:    `{"schema":1,"channel_id":"beta","identity":{"display_name":"X"}}`,
+		},
+		{
+			name:      "品牌渠道缺字段报错",
+			channelID: "acme",
+			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"}}`,
+			wantErr:   true,
+		},
+		{
+			name:      "品牌渠道畸形 scheme 报错",
+			channelID: "acme",
+			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"Acme AI"}}`,
+			wantErr:   true,
+		},
+		{
+			name:      "品牌渠道合法值通过",
+			channelID: "acme",
+			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"acme-ai"}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeChannelDirRaw(t, tc.config)
+			pointChannelDir(t, dir)
+			pointChannelMarker(t, dir, tc.channelID)
+			t.Setenv(updatecheck.ChannelEnv, "")
+			t.Setenv(updatecheck.EndpointEnv, "")
+
+			got, err := resolveStartupChannel()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("渠道 %s 漏配/畸形 deep_link_scheme 必须拒绝启动(实际通过,渠道 %q)", tc.channelID, got)
+				}
+				if !strings.Contains(err.Error(), "deep_link_scheme") {
+					t.Fatalf("错误信息应点名 deep_link_scheme: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveStartupChannel() error = %v", err)
+			}
+			if got != tc.channelID {
+				t.Fatalf("channel = %q, want %q", got, tc.channelID)
+			}
+		})
+	}
+}
+
+// ---- 缺陷 1 回归(2026-09-10):门户下载入口与更新清单同一口径 ----
+//
+// 门户的内置下载地址只在能给出安全(https)来源时显示;否则不显示入口并把
+// 原因写进下载区(运维据此配置 PICOAI_PUBLIC_BASE_URL)。管理员配置的
+// portal.client_download_* 覆盖地址不受影响。
+
+// withPortalReleaseDir 造一个带三平台资产的客户端资产目录。
+func withPortalReleaseDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	info := `{"schema":1,"channel_id":"official","client":{"version":"2.7.0","assets":{
+      "win-x64":{"file":"Setup.exe","sha256":"a","size":1},
+      "mac-universal":{"file":"App.dmg","sha256":"b","size":2},
+      "linux-x64":{"file":"App.AppImage","sha256":"c","size":3}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "CLIENT-RELEASE.json"), []byte(info), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := clientrelease.Dir
+	clientrelease.Dir = dir
+	t.Cleanup(func() { clientrelease.Dir = prev })
+}
+
+func TestPortalDownloadsRequireSecureOrigin(t *testing.T) {
+	withPortalReleaseDir(t)
+	t.Setenv(clientrelease.PublicBaseURLEnv, "")
+
+	serve := func(host, xfp string, settings map[string]string) ([]portal.Platform, string) {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/portal", nil)
+		c.Request.Host = host
+		if xfp != "" {
+			c.Request.Header.Set("X-Forwarded-Proto", xfp)
+		}
+		return portalDownloads(c, settings)
+	}
+
+	t.Run("安全来源显示内置入口", func(t *testing.T) {
+		items, note := serve("ai.example.com", "https", nil)
+		if note != "" {
+			t.Fatalf("安全来源不该有说明: %q", note)
+		}
+		for i, want := range []string{"/updates/client/Setup.exe", "/updates/client/App.dmg", "/updates/client/App.AppImage"} {
+			if items[i].URL != want {
+				t.Errorf("%s url = %q, want %q", items[i].Name, items[i].URL, want)
+			}
+		}
+	})
+
+	t.Run("不安全来源不显示入口并说明原因", func(t *testing.T) {
+		items, note := serve("10.0.0.9", "", nil)
+		for _, p := range items {
+			if p.URL != "" {
+				t.Errorf("%s 不该有下载地址: %q", p.Name, p.URL)
+			}
+			if !strings.Contains(p.Meta, "暂无可用安装包") {
+				t.Errorf("%s meta = %q", p.Name, p.Meta)
+			}
+		}
+		if !strings.Contains(note, clientrelease.PublicBaseURLEnv) {
+			t.Fatalf("说明应提示配置 %s: %q", clientrelease.PublicBaseURLEnv, note)
+		}
+	})
+
+	t.Run("管理员配置的自有地址仍然生效", func(t *testing.T) {
+		items, _ := serve("10.0.0.9", "", map[string]string{
+			"portal.client_download_win": "https://cdn.example.com/win.exe",
+		})
+		if items[0].URL != "https://cdn.example.com/win.exe" {
+			t.Errorf("管理员配置应优先: %q", items[0].URL)
+		}
+		if items[1].URL != "" {
+			t.Errorf("未配置的平台不该有地址: %q", items[1].URL)
+		}
+	})
+}
+
+// writeChannelDir 造一个只含 channel.json 的渠道目录。
+func writeChannelDir(t *testing.T, channelID string) string {
+	t.Helper()
+	return writeChannelDirRaw(t, `{"schema":1,"channel_id":"`+channelID+`","identity":{"display_name":"X"}}`)
 }
 
 // pointChannelDir 把渠道目录与镜像标记文件都指到临时目录(不碰 /opt)。
@@ -341,13 +501,13 @@ func pointChannelDir(t *testing.T, dir string) {
 }
 
 func TestResolveStartupChannelAcceptsMatchingImageChannel(t *testing.T) {
-	dir := writeChannelDir(t, "acme")
+	// 品牌渠道必须自带 deep_link_scheme(见 TestResolveStartupChannelDeepLinkScheme)
+	dir := writeChannelDirRaw(t, `{"schema":1,"channel_id":"acme","identity":{"display_name":"X"},
+      "desktop":{"deep_link_scheme":"acme"}}`)
 	pointChannelDir(t, dir)
 	t.Setenv(updatecheck.ChannelEnv, "")
 	t.Setenv(updatecheck.EndpointEnv, "")
-	if err := os.WriteFile(filepath.Join(dir, "CHANNEL"), []byte("acme\n"), 0o644); err != nil {
-		t.Fatalf("write marker: %v", err)
-	}
+	pointChannelMarker(t, dir, "acme")
 
 	got, err := resolveStartupChannel()
 	if err != nil {

@@ -75,10 +75,16 @@ var deepLinkSchemePattern = regexp.MustCompile(`^[a-z][a-z0-9+.-]{1,31}$`)
 // 一个畸形 scheme 会让浏览器回调彻底打不开客户端。
 func DeepLinkScheme() string {
 	scheme := strings.TrimSpace(Load().Desktop.DeepLinkScheme)
-	if !deepLinkSchemePattern.MatchString(scheme) {
+	if !ValidDeepLinkScheme(scheme) {
 		return DefaultDeepLinkScheme
 	}
 	return scheme
+}
+
+// ValidDeepLinkScheme 报告 s 是否是合法的深链 scheme 形状(RFC 3986 scheme:
+// 与客户端 desktop-channel.ts 的校验同源)。启动期校验与运行时回落共用它。
+func ValidDeepLinkScheme(s string) bool {
+	return deepLinkSchemePattern.MatchString(strings.TrimSpace(s))
 }
 
 // Dir 渠道目录(测试可改)。
@@ -143,6 +149,9 @@ func setIfEmpty(dst *string, v string) {
 
 // Response 是 GET /api/client/v2/channel 的响应体。
 // 字段名与客户端消费方(enterprise 的 channel-sync)对齐。
+//
+// 字段全部 omitempty:客户端的契约是"缺字段 = 不采纳" —— 素材没配时给一个
+// 会 404 的链接比不给更糟(登录页会显示破图)。
 type Response struct {
 	ChannelID string `json:"channel_id"`
 	Title     string `json:"title"`
@@ -150,19 +159,35 @@ type Response struct {
 		DisplayName string `json:"display_name"`
 		Tagline     string `json:"tagline"`
 		Welcome     string `json:"welcome"`
-		LogoURL     string `json:"logo_url,omitempty"`
+		// LogoURL 浅色 logo(登录页背景是亮色)。
+		LogoURL string `json:"logo_url,omitempty"`
+		// LogoURLDark 暗色 logo;仅渠道配置了 assets.logo_dark 时才下发。
+		LogoURLDark string `json:"logo_url_dark,omitempty"`
 	} `json:"login"`
 	Client struct {
 		DisplayName string `json:"display_name"`
 		Tagline     string `json:"tagline"`
+		// LogoURL 客户端界面用的浅色 logo(客户端读的就是这个字段)。
+		LogoURL string `json:"logo_url,omitempty"`
 	} `json:"client"`
 	FaviconURL string `json:"favicon_url,omitempty"`
 	Accent     string `json:"accent,omitempty"`
 }
 
+// 素材下发地址(相对路径;客户端按自己的 serverURL 绝对化)。
+// 三个端点各发各的字节 —— 曾被合并成一个(logo 端点恒发浅色 logo),
+// 导致 favicon 与暗色 logo 永远下发不了。
+const (
+	// LogoURLPath 浅色 logo。
+	LogoURLPath = "/api/client/v2/channel/logo"
+	// LogoDarkURLPath 暗色 logo。
+	LogoDarkURLPath = "/api/client/v2/channel/logo-dark"
+	// FaviconURLPath 站点图标。
+	FaviconURLPath = "/api/client/v2/channel/favicon"
+)
+
 // BuildResponse 由渠道配置构造下发内容。
-// logo_url / favicon_url 是相对路径,客户端按自己的 serverURL 绝对化
-// (与旧 brand 下发的契约一致,客户端侧无需改动绝对化逻辑)。
+// 每项 URL 只在**渠道目录里真有对应文件**时才给(避免 404 的图片链接)。
 func BuildResponse(cfg Config) Response {
 	var r Response
 	r.ChannelID = cfg.ChannelID
@@ -173,12 +198,15 @@ func BuildResponse(cfg Config) Response {
 	r.Client.DisplayName = cfg.Copy.ClientDisplayName
 	r.Client.Tagline = cfg.Copy.ClientTagline
 	r.Accent = cfg.Assets.Accent
-	// 仅当渠道目录里真有对应文件时才给 URL(避免 404 的图片链接)
-	if cfg.Assets.Logo != "" && assetExists(cfg.Assets.Logo) {
-		r.Login.LogoURL = "/api/client/v2/channel/logo"
+	if assetPath(cfg.Assets.Logo) != "" {
+		r.Login.LogoURL = LogoURLPath
+		r.Client.LogoURL = LogoURLPath
 	}
-	if cfg.Assets.Favicon != "" && assetExists(cfg.Assets.Favicon) {
-		r.FaviconURL = "/api/client/v2/channel/logo"
+	if assetPath(cfg.Assets.LogoDark) != "" {
+		r.Login.LogoURLDark = LogoDarkURLPath
+	}
+	if assetPath(cfg.Assets.Favicon) != "" {
+		r.FaviconURL = FaviconURLPath
 	}
 	return r
 }
@@ -201,6 +229,18 @@ func LogoPath(dark bool) string {
 	if dark && cfg.Assets.LogoDark != "" {
 		name = cfg.Assets.LogoDark
 	}
+	return assetPath(name)
+}
+
+// LogoDarkPath 返回暗色版 logo 的绝对路径;渠道未配置 logo_dark 时返回空
+// (不回落浅色版 —— 端点语义就是"暗色版",没做暗色版的渠道该 404)。
+func LogoDarkPath() string { return assetPath(Load().Assets.LogoDark) }
+
+// FaviconPath 返回站点图标(favicon)的绝对路径;未配置或文件不存在时返回空。
+func FaviconPath() string { return assetPath(Load().Assets.Favicon) }
+
+// assetPath 把渠道目录内的素材名解析成绝对路径(不存在/非法名返回空)。
+func assetPath(name string) string {
 	if !assetExists(name) {
 		return ""
 	}

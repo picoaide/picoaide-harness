@@ -188,10 +188,10 @@ func TestResolveEndpoint(t *testing.T) {
 		val  string
 		want string
 	}{
-		{"default when unset", false, "", DefaultEndpointFor("acme")},
-		{"default follows the resolved channel", false, "", DefaultEndpointFor("acme")},
-		{"channel override", true, "https://release.picoaide.com/acme/latest.json", "https://release.picoaide.com/acme/latest.json"},
-		{"empty means unset, not disabled", true, "", DefaultEndpointFor("acme")},
+		{"default when unset", false, "", DefaultEndpointFor("example-brand")},
+		{"default follows the resolved channel", false, "", DefaultEndpointFor("example-brand")},
+		{"channel override", true, "https://release.picoaide.com/example-brand/latest.json", "https://release.picoaide.com/example-brand/latest.json"},
+		{"empty means unset, not disabled", true, "", DefaultEndpointFor("example-brand")},
 		{"off disables", true, "off", ""},
 		{"dash disables", true, "-", ""},
 		{"none disables", true, "NONE", ""},
@@ -208,9 +208,9 @@ func TestResolveEndpoint(t *testing.T) {
 					t.Fatalf("Unsetenv: %v", err)
 				}
 			}
-			// 用 acme 作探针:默认值必须跟着渠道走,而不是永远指官方目录。
-			if got := ResolveEndpoint("acme"); got != tc.want {
-				t.Fatalf("ResolveEndpoint(acme) = %q, want %q", got, tc.want)
+			// 用 example-brand 作探针:默认值必须跟着渠道走,而不是永远指官方目录。
+			if got := ResolveEndpoint("example-brand"); got != tc.want {
+				t.Fatalf("ResolveEndpoint(example-brand) = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -339,7 +339,7 @@ func TestCheckRejectsForeignChannel(t *testing.T) {
 	srv := manifestServer(t, `{"schema":1,"channel_id":"official","server":{"version":"9.9.9","image_tag":"v9.9.9"}}`)
 	defer srv.Close()
 
-	c := &Checker{Client: srv.Client(), Endpoint: srv.URL, ExpectedChannel: "acme"}
+	c := &Checker{Client: srv.Client(), Endpoint: srv.URL, ExpectedChannel: "example-brand"}
 	_, err := c.Check(context.Background(), "2.5.1")
 	if err == nil {
 		t.Fatal("品牌渠道服务端接受了官方渠道的清单 —— 跨渠道升级未被拦住")
@@ -347,7 +347,7 @@ func TestCheckRejectsForeignChannel(t *testing.T) {
 	if !strings.Contains(err.Error(), ErrUnavailable.Error()) {
 		t.Errorf("error %v should wrap ErrUnavailable", err)
 	}
-	if !strings.Contains(err.Error(), "acme") || !strings.Contains(err.Error(), "official") {
+	if !strings.Contains(err.Error(), "example-brand") || !strings.Contains(err.Error(), "official") {
 		t.Errorf("错误信息应同时点出双方渠道,便于定位: %v", err)
 	}
 }
@@ -383,9 +383,9 @@ func TestIsChannelID(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"official", true}, {"beta", true}, {"acme", true}, {"acme-corp", true},
-		{"a1", true}, {"", false}, {"Official", false}, {"-acme", false},
-		{"acme-", false}, {"acme corp", false}, {"acme_corp", false},
+		{"official", true}, {"beta", true}, {"example-brand", true}, {"example-brand", true},
+		{"a1", true}, {"", false}, {"Official", false}, {"-example-brand", false},
+		{"example-brand-", false}, {"example-brand corp", false}, {"example-brand_corp", false},
 		{"a", true}, {strings.Repeat("a", 32), true}, {strings.Repeat("a", 33), false},
 	}
 	for _, tc := range cases {
@@ -406,14 +406,14 @@ func TestResolveChannel(t *testing.T) {
 		want     string
 		wantOK   bool
 	}{
-		{"explicit channel wins", "acme", "https://release.picoaide.com/official/latest.json", "", "acme", true},
-		{"derive from endpoint path", "", "https://release.picoaide.com/acme/latest.json", "", "acme", true},
+		{"explicit channel wins", "example-brand", "https://release.picoaide.com/official/latest.json", "", "example-brand", true},
+		{"derive from endpoint path", "", "https://release.picoaide.com/example-brand/latest.json", "", "example-brand", true},
 		{"derive beta from path", "", "https://release.picoaide.com/beta/latest.json", "", "beta", true},
 		{"no config defaults official", "", "", "", OfficialChannel, true},
 		{"endpoint without channel segment", "", "https://example.test/latest.json", "", OfficialChannel, true},
 		// 2026-09-10:显式设了非法值不再静默变官方 —— 那是"渠道部署被官方清单
 		// 升级、品牌被洗掉"的入口,必须让调用方 fail-loud。
-		{"invalid explicit is unresolvable", "ACME!", "", "", "", false},
+		{"invalid explicit is unresolvable", "EXAMPLE!", "", "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,7 +449,7 @@ func TestResolveChannelPrefersImageMarker(t *testing.T) {
 	t.Setenv(ChannelEnv, "")
 	t.Setenv(EndpointEnv, "https://release.picoaide.com/official/latest.json")
 	marker := filepath.Join(t.TempDir(), "CHANNEL")
-	if err := os.WriteFile(marker, []byte("acme\n"), 0o644); err != nil {
+	if err := os.WriteFile(marker, []byte("example-brand\n"), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
 	restore := ChannelFile
@@ -457,8 +457,8 @@ func TestResolveChannelPrefersImageMarker(t *testing.T) {
 	t.Cleanup(func() { ChannelFile = restore })
 
 	got, ok := ResolveChannel()
-	if !ok || got != "acme" {
-		t.Fatalf("ResolveChannel() = (%q, %v), want (acme, true)", got, ok)
+	if !ok || got != "example-brand" {
+		t.Fatalf("ResolveChannel() = (%q, %v), want (example-brand, true)", got, ok)
 	}
 }
 
@@ -467,7 +467,7 @@ func TestResolveChannelRejectsInvalidMarker(t *testing.T) {
 	t.Setenv(ChannelEnv, "")
 	t.Setenv(EndpointEnv, "")
 	marker := filepath.Join(t.TempDir(), "CHANNEL")
-	if err := os.WriteFile(marker, []byte("Acme Corp\n"), 0o644); err != nil {
+	if err := os.WriteFile(marker, []byte("Example Corp\n"), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
 	restore := ChannelFile
@@ -481,7 +481,7 @@ func TestResolveChannelRejectsInvalidMarker(t *testing.T) {
 
 // 渠道无法确定时,检查必须报"不可用"而不是回落官方目录去比对。
 func TestCheckFailsLoudOnUnresolvableChannel(t *testing.T) {
-	t.Setenv(ChannelEnv, "ACME!")
+	t.Setenv(ChannelEnv, "EXAMPLE!")
 	t.Setenv(EndpointEnv, "")
 	restore := ChannelFile
 	ChannelFile = filepath.Join(t.TempDir(), "absent")
