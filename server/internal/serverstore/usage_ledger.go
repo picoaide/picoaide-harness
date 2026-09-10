@@ -38,6 +38,10 @@ func yearKey(t time.Time) string {
 // when the partition is actually missing — correct across databases, unlike a
 // process-global month cache (each test uses its own temp database).
 func ensureUsagePartition(db *sql.DB, month time.Time) error {
+	// 归一到北京月:写入路径传的是"真实瞬时"(2026-09-10 时区缺陷修复前按
+	// 进程 TZ 取月,UTC 容器在北京每月 1 日 00:00-08:00 会去建/查上个月分区,
+	// 当月分区缺失 → INSERT 报 "no partition of relation usage found for row")。
+	month = BeijingMonth(month)
 	key := monthKey(month)
 	var existing sql.NullString
 	if err := db.QueryRow(`SELECT to_regclass('usage_' || ?)::text`, key).Scan(&existing); err == nil && existing.Valid && existing.String != "" {
@@ -45,8 +49,12 @@ func ensureUsagePartition(db *sql.DB, month time.Time) error {
 	}
 	start := dayKey(month)
 	end := start.AddDate(0, 1, 0)
+	// 分区边界用**显式 UTC 偏移**的瞬时字面量:分区范围(timestamptz)不随 PG
+	// 会话时区漂移(裸日期 '2026-09-01' 会被按会话时区解析,UTC 会话下建出的
+	// 分区范围与北京月错开 8 小时)。
 	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS usage_%s PARTITION OF usage
-		FOR VALUES FROM ('%s') TO ('%s')`, key, start.Format("2006-01-02"), end.Format("2006-01-02"))
+		FOR VALUES FROM ('%s') TO ('%s')`, key,
+		pgInstantArg(BeijingDayInstant(start)), pgInstantArg(BeijingDayInstant(end)))
 	_, err := db.Exec(stmt)
 	return err
 }
@@ -74,6 +82,12 @@ func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 	if from.IsZero() || to.IsZero() || from.After(to) {
 		return nil
 	}
+	// 归一到北京日期值(调用方常传 time.Now() 之类的瞬时):日界/月界一律走
+	// BeijingDay,不掺入进程 TZ。
+	from, to = normalizeDayRange(from, to)
+	if from.After(to) {
+		return nil
+	}
 	// 建好涉及月份/年份的分区
 	for m := dayKey(from); !m.After(dayKey(to)); m = m.AddDate(0, 1, 0) {
 		if err := ensureUsagePartition(db, m); err != nil {
@@ -85,15 +99,16 @@ func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 	}
 	// 日账:按 (user_id, model, day) 聚合明细;UPSERT 覆盖(幂等)。
 	// PG 用 ON CONFLICT (user_id, model, day) DO UPDATE。
+	// 日桶与边界都走固定 +8h(北京墙钟)与绝对瞬时(会话时区无关),见 beijing.go。
 	if _, err := db.Exec(`
 		INSERT INTO usage_daily (user_id, model, day, prompt_tokens, completion_tokens, cache_prompt_tokens, requests, cost)
-		SELECT user_id, model, (created_at AT TIME ZONE 'Asia/Shanghai')::date AS day,
+		SELECT user_id, model, (`+bjWallExpr("created_at")+`)::date AS day,
 		       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_prompt_tokens),
 		       COUNT(*), SUM(cost)
 		FROM usage
 		WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
-		  AND (created_at AT TIME ZONE 'Asia/Shanghai')::date >= ?::date
-		  AND (created_at AT TIME ZONE 'Asia/Shanghai')::date <= ?::date
+		  AND (`+bjWallExpr("created_at")+`)::date >= ?::date
+		  AND (`+bjWallExpr("created_at")+`)::date <= ?::date
 		GROUP BY user_id, model, day
 		ON CONFLICT (user_id, model, day) DO UPDATE SET
 		  prompt_tokens = EXCLUDED.prompt_tokens,
@@ -101,8 +116,8 @@ func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 		  cache_prompt_tokens = EXCLUDED.cache_prompt_tokens,
 		  requests = EXCLUDED.requests,
 		  cost = EXCLUDED.cost`,
-		from.Format("2006-01-02"), to.AddDate(0, 0, 1).Format("2006-01-02"),
-		from.Format("2006-01-02"), to.Format("2006-01-02")); err != nil {
+		dayStartArg(from), dayEndArgInclusive(to),
+		from.Format(dateFmt), to.Format(dateFmt)); err != nil {
 		return fmt.Errorf("rebuild usage_daily: %w", err)
 	}
 	// 月账:从日账按月份聚合(只用本窗口覆盖的月,避免全量重扫)。
@@ -127,7 +142,7 @@ func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 		  cache_prompt_tokens = EXCLUDED.cache_prompt_tokens,
 		  requests = EXCLUDED.requests,
 		  cost = EXCLUDED.cost`,
-		from.Format("2006-01-02"), to.Format("2006-01-02")); err != nil {
+		from.Format(dateFmt), to.Format(dateFmt)); err != nil {
 		return fmt.Errorf("rebuild usage_monthly: %w", err)
 	}
 	return nil
@@ -162,7 +177,7 @@ func ParseRetentionMonths(v string) (int, error) {
 }
 
 // CleanupUsageRetention DROP 过期月份分区(先校验该月日账已生成,防丢账)。
-// 保留 N 个月 = 删除 created_at 早于"当前月 - N 个月"的整分区。
+// 保留 N 个月 = 删除 created_at 早于"当前北京月 - N 个月"的整分区。
 func CleanupUsageRetention(db *sql.DB) error {
 	n, err := EffectiveRetentionMonths(db)
 	if err != nil {
@@ -171,8 +186,10 @@ func CleanupUsageRetention(db *sql.DB) error {
 	if n == 0 {
 		return nil // 永不删除
 	}
-	cutoff := time.Now().AddDate(0, -n, 0) // 该月及以后保留
-	cutoffMonth := dayKey(cutoff)
+	// 保留 N 个月 = 删除 created_at 早于"当前北京月 - N 个月"的整分区。
+	// 北京月界(不依赖进程 TZ:UTC 容器在每月 1 日 00:00-08:00 会把 cutoff
+	// 算到上一个月,导致多删一个月的明细)。
+	cutoffMonth := BeijingMonth(time.Now()).AddDate(0, -n, 0)
 	for m := cutoffMonth.AddDate(0, -1, 0); ; m = m.AddDate(0, -1, 0) {
 		// 早于 cutoff 的分区(monthKey < cutoffKey)且其日账已存在才 DROP;
 		// 若日账缺失则重建(幂等)后再删,避免删明细前丢账。
@@ -202,12 +219,7 @@ func CleanupUsageRetention(db *sql.DB) error {
 	return nil
 }
 
-// beijingDay 返回 t 的北京时间当日 00:00(UTC+8 固定偏移,不依赖 tzdata;
-// 返回值的日期分量即北京日期,与 SQL 侧的 Asia/Shanghai 日界口径一致)。
-func beijingDay(t time.Time) time.Time {
-	bj := t.UTC().Add(8 * time.Hour)
-	return time.Date(bj.Year(), bj.Month(), bj.Day(), 0, 0, 0, 0, time.UTC)
-}
+// BeijingDay(北京日/月口径的唯一真源)见 beijing.go。
 
 // UsageAggregateWithLedger 在保留窗口内查询 usage 明细(分区裁剪),
 // 窗口外(早于保留期)回退到永久账本 usage_daily——
@@ -231,6 +243,9 @@ func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts
 		// 无起始边界:直接查账本(覆盖全部历史,明细窗口内已并入日账)
 		return UsageAggregateFromLedger(db, from, to, group, opts...)
 	}
+	// from/to 归一到北京日期值(允许调用方传瞬时):cutoff 比较与明细/账本
+	// 分段都建立在同一套日口径上(2026-09-10 时区缺陷修复)。
+	from, to = normalizeDayRange(from, to)
 	retention, err := EffectiveRetentionMonths(db)
 	if err != nil {
 		return nil, err
@@ -240,7 +255,9 @@ func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts
 		// 避免与账本重复计数。
 		return UsageAggregate(db, from, to, group, opts...)
 	}
-	cutoffDay := beijingDay(time.Now().AddDate(0, -retention, 0))
+	// 保留边界 = 北京"今天"往前 N 个月的同一北京日(等价旧口径但不受进程 TZ
+	// 影响:旧写法先对瞬时做 AddDate,UTC 容器下会差一天)。
+	cutoffDay := BeijingDay(time.Now()).AddDate(0, -retention, 0)
 	if !from.Before(cutoffDay) {
 		// 窗口整体在保留期内:明细完整,无需账本
 		return UsageAggregate(db, from, to, group, opts...)
@@ -273,6 +290,8 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 	for _, o := range opts {
 		o(&q)
 	}
+	// usage_daily.day 是 DATE 列(北京日期值),归一后与明细侧的日口径一致。
+	from, to = normalizeDayRange(from, to)
 	usernameFilter := ""
 	args := []any{}
 	if q.Username != "" {
@@ -322,12 +341,13 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 	}
 	qstr += " WHERE 1=1"
 	if !from.IsZero() {
+		// day 是 DATE 列(无时区语义):?::date 参数与 PG 会话时区无关,安全。
 		qstr += " AND ue.day >= ?::date"
-		args = append(args, from.Format("2006-01-02"))
+		args = append(args, from.Format(dateFmt))
 	}
 	if !to.IsZero() {
 		qstr += " AND ue.day <= ?::date"
-		args = append(args, to.Format("2006-01-02"))
+		args = append(args, to.Format(dateFmt))
 	}
 	if q.Dept != "" {
 		qstr += deptFilter

@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -60,7 +59,8 @@ func TestAdminUsageDept(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	today := time.Now().Format("2006-01-02")
+	// 今日 = 北京日(唯一真源):本机日期在 UTC 容器下会指向前一天。
+	today := serverstore.BeijingNow().Format("2006-01-02")
 
 	// group=dept:整体
 	w1, out := doJSON(t, r, "GET", "/api/server/admin/usage?group=dept&from="+today+"&to="+today, "", hdr)
@@ -133,7 +133,8 @@ func TestAdminUsageProvider(t *testing.T) {
 	if _, err := serverstore.RecordUsage(db, 1, "no-map-model", 3, 3); err != nil {
 		t.Fatal(err)
 	}
-	today := time.Now().Format("2006-01-02")
+	// 今日 = 北京日(唯一真源):本机日期在 UTC 容器下会指向前一天。
+	today := serverstore.BeijingNow().Format("2006-01-02")
 	_, out := doJSON(t, r, "GET", "/api/server/admin/usage?group=provider&from="+today+"&to="+today, "", hdr)
 	rows := out["rows"].([]any)
 	if len(rows) != 2 {
@@ -161,7 +162,8 @@ func TestAdminUsageRequests(t *testing.T) {
 	if _, err := serverstore.RecordUsageKind(db, 1, "m1", 20, 0, "embedding"); err != nil {
 		t.Fatal(err)
 	}
-	today := time.Now().Format("2006-01-02")
+	// 今日 = 北京日(唯一真源):本机日期在 UTC 容器下会指向前一天。
+	today := serverstore.BeijingNow().Format("2006-01-02")
 
 	w, out := doJSON(t, r, "GET", "/api/server/admin/usage/requests?from="+today+"&to="+today+"&size=2", "", hdr)
 	if w.Code != http.StatusOK {
@@ -194,7 +196,8 @@ func TestAdminUsageOverview(t *testing.T) {
 	if _, err := serverstore.RecordUsageKind(db, 1, "m1", 10, 5, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	today := time.Now().Format("2006-01-02")
+	// 今日 = 北京日(唯一真源):本机日期在 UTC 容器下会指向前一天。
+	today := serverstore.BeijingNow().Format("2006-01-02")
 	w, out := doJSON(t, r, "GET", "/api/server/admin/usage/overview?from="+today+"&to="+today, "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("overview: %d %s", w.Code, w.Body.String())

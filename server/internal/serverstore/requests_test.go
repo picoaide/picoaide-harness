@@ -2,7 +2,6 @@ package serverstore
 
 import (
 	"testing"
-	"time"
 )
 
 func TestListUsageRequests(t *testing.T) {
@@ -30,8 +29,9 @@ func TestListUsageRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	from := time.Now().AddDate(0, 0, -1)
-	to := time.Now().AddDate(0, 0, 1)
+	// 北京日边界(from 含昨天,to 为次日 00:00 排他):与进程 TZ 无关。
+	from := bjDay(1)
+	to := bjDay(-1)
 
 	// 1) 全量分页
 	rows, total, err := ListUsageRequests(db, from, to, "", "", "", 1, 100)
@@ -88,7 +88,7 @@ func TestListUsageRequests(t *testing.T) {
 	}
 
 	// 5) 区间外 = 空
-	rows, total, err = ListUsageRequests(db, time.Now().AddDate(0, 0, -30), time.Now().AddDate(0, 0, -20), "", "", "", 1, 100)
+	rows, total, err = ListUsageRequests(db, bjDay(30), bjDay(20), "", "", "", 1, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

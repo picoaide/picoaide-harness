@@ -283,16 +283,16 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "m1", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
-	// 今日记录(恒在本月)
+	// 北京日口径:夹具与"今日/昨日"边界同源(进程 TZ=UTC 时北京 00:00-08:00
+	// 也不会把今日算成昨日)。
 	id, _ := serverstore.RecordUsage(db, uid, "m1", 1_000_000, 0)
-	setUsageAt(t, db, id, now.Format("2006-01-02")+" 09:00:00")
-	// 昨日记录(可能跨月:8/31 23:00)
+	setUsageAt(t, db, id, fixtureAt(0, 9))
+	// 昨日记录(可能跨月:北京 8/31 23:00)
 	id2, _ := serverstore.RecordUsage(db, uid, "m1", 500_000, 0)
-	setUsageAt(t, db, id2, now.AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+	setUsageAt(t, db, id2, fixtureAt(1, 23))
 
-	yesterday := now.AddDate(0, 0, -1)
-	sameMonth := yesterday.Year() == now.Year() && yesterday.Month() == now.Month()
+	today, yesterday := bjDay(0), bjDay(1)
+	sameMonth := yesterday.Year() == today.Year() && yesterday.Month() == today.Month()
 	// 跨月时:月度统计不含昨日记录(它属于上月)
 	monthlyUsage := int64(1_000_000)
 	monthlyCost := 2.0
@@ -405,9 +405,26 @@ func mustUID(t *testing.T, db *sql.DB, username string) int64 {
 	return u.ID
 }
 
-func setUsageAt(t *testing.T, db *sql.DB, id int64, ts string) {
+// ---------------------------------------------------------------------------
+// 时区安全用量夹具(2026-09-10 修复时区依赖缺陷):
+// 一律以"北京日"为基准构造**绝对瞬时**,不再用 time.Now().Format("2006-01-02")
+// 这类"本机日期"(本机日 ≠ 北京日时用例必然查空:每天 8 小时窗口)。
+// ---------------------------------------------------------------------------
+
+// bjToday 返回北京日期值(今天)。
+func bjToday() time.Time { return serverstore.BeijingDay(time.Now()) }
+
+// bjDay 返回"北京日(今天 - daysAgo)"的日期值(查询边界用)。
+func bjDay(daysAgo int) time.Time { return bjToday().AddDate(0, 0, -daysAgo) }
+
+// fixtureAt 返回"北京日(今天 - daysAgo)的 hour:00"对应的绝对瞬时(写库夹具用)。
+func fixtureAt(daysAgo, hour int) time.Time { return serverstore.BeijingDayAt(bjDay(daysAgo), hour) }
+
+// setUsageAt 把用量行的 created_at 回填为给定绝对瞬时(timestamptz 参数,
+// 与 PG 会话时区无关)。
+func setUsageAt(t *testing.T, db *sql.DB, id int64, at time.Time) {
 	t.Helper()
-	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", ts, id); err != nil {
+	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", at, id); err != nil {
 		t.Fatal(err)
 	}
 }

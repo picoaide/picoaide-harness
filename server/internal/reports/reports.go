@@ -160,8 +160,10 @@ func validateHookURL(raw string) error {
 
 // GenerateMonthlyReport 生成上一个月(month 为任意时刻,取其上月)的用量汇总。
 // 口径与用量中心一致:费用=按模型定价折算(含 embedding),部门=当前归属树内合计。
+// 月份按**北京月**取(serverstore.BeijingMonth):旧实现用 month.Location() 的
+// 本机月界,UTC 容器在北京每月 1 日 00:00-08:00 会把报表算成上上个月。
 func GenerateMonthlyReport(db *sql.DB, month time.Time) (*ReportBody, error) {
-	start := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, month.Location())
+	start := serverstore.BeijingMonth(month)
 	prev := start.AddDate(0, -1, 0)
 	from := prev
 	// 聚合层 to 语义为"截止日含当天"(内部 +1 天);报表需要严格的上月闭区间:
@@ -263,11 +265,14 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 }
 
 // ShouldRunMonthly 判断是否应补跑上月报表:
-// lastRunAt 为空,或 lastRunAt 所在月份早于 now 所在月份(停机跨月/新部署补跑)。
+// lastRunAt 为空,或 lastRunAt 所在**北京月**早于 now 所在北京月(停机跨月/
+// 新部署补跑)。与 GenerateMonthlyReport 同一套月口径(见 serverstore.BeijingMonth);
+// 旧实现比较两个 time.Time 的 Year()/Month() 分量 —— 那是**各自 Location 的**
+// 本地月,UTC 容器在北京每月 1 日 00:00-08:00 会把两个月算成同一个月 → 漏跑。
 // 幂等:同一月份只会跑一次(成功或失败都记 last_run_at/last_error;失败下月再试)。
 func ShouldRunMonthly(now time.Time, lastRunAt *time.Time) bool {
 	if lastRunAt == nil {
 		return true
 	}
-	return lastRunAt.Year() < now.Year() || (lastRunAt.Year() == now.Year() && lastRunAt.Month() < now.Month())
+	return serverstore.BeijingMonth(*lastRunAt).Before(serverstore.BeijingMonth(now))
 }
