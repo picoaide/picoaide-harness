@@ -8,7 +8,7 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 
 # 客户端已下线(2026-08):仓库只保留服务端接口 + webadmin 管理端。
 # 测试/构建入口收敛为:test-server / webadmin / build-server / docker-image / check。
-.PHONY: test test-server build-server webadmin docker-image release-export check
+.PHONY: test test-server build-server webadmin docker-image check
 
 test:
 	go test ./... -count=1
@@ -40,15 +40,9 @@ docker-image:
 	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
 
-# 离线导出镜像 tar(内网无 registry 部署用):docker load < picoaide-server-<TAG>.tar
-# 用法:make release-export TAG=v0.4.0(默认导出 ./dist/picoaide-server-latest.tar)
-RELEASE_EXPORT ?= dist/picoaide-server-$(TAG).tar
-release-export:
-	@echo "  导出离线镜像 $(IMAGE):$(TAG) → $(RELEASE_EXPORT)"
-	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
-	docker image save $(IMAGE):$(TAG) -o $(RELEASE_EXPORT)
-	@echo "  已导出: $(RELEASE_EXPORT)"
-	@echo "  目标机导入: docker load < $(RELEASE_EXPORT)"
+# 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,
+# 客户侧按 docs/deploy/AI-DEPLOY.md 从更新服务器下载后 docker load。
+# (原 release-export 目标于 2026-09-10 随部署脚本一并移除)
 
 check:
 	@if [ -n "$$(gofmt -l cmd internal)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal; exit 1; fi

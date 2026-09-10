@@ -1,10 +1,17 @@
 name: Publish server image
 
-# 发布版本时自动构建服务端 Docker 镜像并推送 GHCR(契约见 server/docs/02-build-deploy.md §3.3):
-#   - push tag v*:版本号 = tag 去 v 前缀(与 GitHub Release 流程同源,同一 tag 触发)
-#   - workflow_dispatch:手动填版本号(填 v2.3.0 或 2.3.0 均可),默认分支选择 release 来源
-# 镜像标签规则:latest + vX.Y.Z + vX.Y;单平台 linux/amd64(2026-08-26 起移除
-# arm64——QEMU 模拟构建过慢且镜像体积翻倍;如后续需要可加回并启用原生 ARM runner)。
+# 服务端镜像标签补全(2026-09-10 改版):
+# 镜像由 **ci.yml 的 release job 唯一构建**(那里才同时有三平台客户端资产,
+# 客户端随镜像分发),并推送 ghcr.io/picoaide/picoaide-harness-server:vX.Y.Z。
+# 本 workflow 负责把该镜像补推成完整标签面:
+#   - push tag v*:从 GHCR 取回 vX.Y.Z,补推 latest + vX.Y(正式版)
+#     / 仅 vX.Y.Z(预发布版,不污染 latest)
+#   - workflow_dispatch:从源码构建任意版本号(冷启动/手工补镜像时的逃生通道)
+# 单平台 linux/amd64(2026-08-26 起移除 arm64——QEMU 模拟构建过慢且镜像体积
+# 翻倍;如后续需要可加回并启用原生 ARM runner)。
+#
+# 为什么不在这里构建:客户端安装包只有 ci.yml 的 desktop-* artifact 拿得到,
+# 两处各建一次会带来构建配置漂移(镜像内容不一致),且 tag 触发时白跑一遍。
 on:
   push:
     tags:
@@ -115,6 +122,52 @@ jobs:
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "Composed tags: $TAGS"
 
+      # tag 触发:镜像已由 ci.yml 的 release job 构建并推送,这里只需取回、
+      # 按本 workflow 的标签规则重新打标,不再从源码重建(避免两处构建漂移)。
+      - name: Adopt the release-built image from GHCR
+        if: github.event_name == 'push'
+        env:
+          IMAGE_NAME: ${{ env.IMAGE }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          SRC="${IMAGE_NAME}:v${VERSION}"
+          # 同一个 tag 会并发触发 ci.yml(构建并推送该镜像)与本 workflow:
+          # 本步骤可能先于对方推完就开跑。轮询等待最多 10 分钟(30×20s),
+          # 全部重试都失败再报错 —— 不静默跳过,否则 latest 永远不更新。
+          ok=0
+          for i in $(seq 1 30); do
+            if docker pull --platform linux/amd64 "$SRC" >/dev/null 2>&1; then ok=1; break; fi
+            echo "等待 ci.yml release job 推送 $SRC ... (${i}/30)"
+            sleep 20
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::$SRC 在 10 分钟内未出现 —— ci.yml 的 release job 是否失败或未触发?"
+            exit 1
+          fi
+          # TAGS 是逗号分隔的目标标签列表(Compose image tags 已按正式/预发布算好)
+          IFS=',' read -ra LIST <<< "$TAGS"
+          for t in "${LIST[@]}"; do docker tag "$SRC" "$t"; done
+          echo "已取回 $SRC 并打标: $TAGS"
+
+      # tag 触发:推本 workflow 的完整标签面(latest + vX.Y / 预发布仅 vX.Y.Z)。
+      # 镜像内容与 ci.yml release job 构建的 vX.Y.Z 完全一致(同一个镜像 ID 重新打标)。
+      - name: Push retagged image
+        if: github.event_name == 'push'
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra LIST <<< "$TAGS"
+          for t in "${LIST[@]}"; do
+            docker push "$t"
+            echo "pushed $t"
+          done
+
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
@@ -138,7 +191,9 @@ jobs:
             prefix=
             suffix=
 
-      - name: Build and push
+      # 仅 workflow_dispatch(手工补镜像/冷启动)从源码构建;tag 触发走上面的取回路径
+      - name: Build and push (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
         uses: docker/build-push-action@v7
         with:
           # context=server:server/.dockerignore 生效,Dockerfile 内相对路径不变;
