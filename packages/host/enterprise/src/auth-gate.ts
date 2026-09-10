@@ -19,7 +19,7 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
-import type { BrandConfig } from './channel-content.ts'
+import { asChannelPayload, type BrandConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
 
 // 品牌文案类型定义在 channel-content.ts（纯数据模块，客户端面也能值导入），
@@ -470,7 +470,11 @@ interface ResolvedBrand {
  * 那正是白标要防的事故。
  */
 const OFFICIAL_BRAND: ResolvedBrand = {
-  title: 'PicoAide',
+  // 文档/窗口标题用的是**产品名**(与 desktop-shell 的 windowTitle、内置
+  // DEFAULT_CHANNEL.title 同值);登录页品牌区用的是 login.displayName
+  // (官方渠道为短名 'PicoAide')。两者不可混用 —— 混了官方构建的窗口标题
+  // 会从 "PicoAide Harness" 变成 "PicoAide"。
+  title: 'PicoAide Harness',
   login: { displayName: 'PicoAide', shortName: 'PicoAide', tagline: 'Enterprise AI Gateway', welcome: '' },
   client: { displayName: 'PicoAide Harness', shortName: 'PicoAide', tagline: '' },
 }
@@ -492,7 +496,15 @@ function nonEmpty(value: string | undefined): string | undefined {
  * @returns 每个字段都有确定值的品牌文案。
  */
 function resolveBrand(brand: BrandConfig | undefined): ResolvedBrand {
-  if (brand === undefined) return OFFICIAL_BRAND
+  // "没有渠道品牌"的判据是**没有任何非空名字**，而不是"对象不存在"：
+  // schema 会把未注入的 brand 物化成 `{}`（见 channel-content.ts 的说明），
+  // 只判 undefined 会让官方构建显示中性占位。
+  if (brand === undefined
+    || (nonEmpty(brand.login?.displayName) === undefined
+      && nonEmpty(brand.title) === undefined
+      && nonEmpty(brand.client?.displayName) === undefined)) {
+    return OFFICIAL_BRAND
+  }
   const login = brand.login
   const client = brand.client
   const loginName = nonEmpty(login?.displayName) ?? nonEmpty(brand.title) ?? NEUTRAL_NAME
@@ -992,7 +1004,10 @@ export function apply(ctx: Context, config: Config): void {
           try {
             assertServerURLAllowed(serverURL)
             const data = await fetchJSON(serverURL, '/api/client/v2/channel')
-            json(res, 200, data)
+            // 上游必须是**像渠道内容**的载荷:否则原样透传会让客户端把垃圾当
+            // 渠道内容存进 store,每个字段取不到值 → 回落内置厂商文案(白标事故,
+            // 且零报错)。见 channel-content.ts 的 asChannelPayload。
+            json(res, 200, asChannelPayload(data) ?? builtInChannel(config.brand))
           } catch {
             // 服务端不可达:给随包品牌而不是空载荷 —— 空载荷会让界面回落
             // 内置的厂商文案,那正是白标要防的。

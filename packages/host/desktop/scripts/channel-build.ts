@@ -303,6 +303,31 @@ export function prepareChannelBuilderOverrides(
 }
 
 /**
+ * 本次打包产物**声明**的产品名 —— 打包、验证、E2E 共用的唯一解析。
+ *
+ * 真源与运行期完全一致：随包 `build/channel.json` 的
+ * `desktop.product_name ?? identity.display_name`；没有渠道包（官方/本地）时
+ * 用官方默认值。
+ *
+ * **为什么验证脚本必须走它**：窗口标题/应用名是白标最直观的一面，历史上
+ * 多处验证脚本硬编码 `'PicoAide Harness'` 或只读 `package.json` —— 渠道构建下
+ * 那是客户的名字，于是这些"门禁"要么永远红（渠道矩阵被卡死），要么把厂商名
+ * 反向锁进发布链。断言应当对齐"这次构建声明了什么"，而不是某个具体品牌。
+ * @param buildDir - `packages/host/desktop/build` 目录（默认仓库内该目录）。
+ * @returns 非空产品名。
+ * @throws 渠道包存在但不可解析时抛错（验证期 fail-loud，不猜）。
+ */
+export function packagedProductName(buildDir?: string): string {
+  const dir = buildDir ?? join(defaultRepoRoot(), 'packages/host/desktop', 'build')
+  if (existsSync(join(dir, 'channel.json'))) {
+    // 与运行期同源:同一个文件名、同一套解析(readChannelDesktopBranding)。
+    const name = readChannelDesktopBranding(dir).productName
+    if (name !== undefined) return name
+  }
+  return OFFICIAL_BUILD_DEFAULTS.productName
+}
+
+/**
  * 把渠道包就位到客户端应用资源里（`build/channel.json`）。
  *
  * **为什么必须有这一步**：`src/desktop-channel.ts` 的 `readDesktopChannelProfile()`

@@ -56,17 +56,25 @@ describe('auth-gate login page brand', () => {
   })
 
   it('keeps the official brand when no channel brand is injected', () => {
+    // 登录页标题用的是**产品名**(与窗口标题同值);品牌区用短名 'PicoAide'。
     const html = serveLoginPage({})
-    expect(html).toContain('<title>PicoAide 登录</title>')
+    expect(html).toContain('<title>PicoAide Harness 登录</title>')
     expect(JSON.parse(brandLiteral(html))).toEqual({
-      title: 'PicoAide',
+      title: 'PicoAide Harness',
       login: { displayName: 'PicoAide', shortName: 'PicoAide', tagline: 'Enterprise AI Gateway', welcome: '' },
     })
   })
 
-  it('uses a neutral name when the channel brand is empty (never the vendor name)', () => {
-    // 注入链断了（渠道包存在但品牌为空）：中性占位，绝不冒充官方。
+  it('treats an empty brand object as "no channel brand" (official)', () => {
+    // schemastery 把未注入的 brand 物化成 `{}`：那不是渠道品牌。判成渠道会让
+    // 官方构建显示中性占位（2026-09-10 实测）。
     const html = serveLoginPage({ brand: {} })
+    expect(JSON.parse(brandLiteral(html)).login.displayName).toBe('PicoAide')
+  })
+
+  it('still shows a channel neutral placeholder when the package had no brand', () => {
+    // 渠道包里没写品牌 → desktop-channel.ts 注入中性名,登录页显示它而不是厂商名。
+    const html = serveLoginPage({ brand: { login: { displayName: 'Harness' }, client: { displayName: 'Harness' } } })
     expect(JSON.parse(brandLiteral(html)).login.displayName).toBe('Harness')
     expect(html).not.toContain('PicoAide')
   })

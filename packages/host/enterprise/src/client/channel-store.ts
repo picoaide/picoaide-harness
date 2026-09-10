@@ -4,7 +4,7 @@
 // that call useChannel()).
 import { useEffect, useState } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type { ChannelConfig } from '../channel-content.ts'
+import { asChannelPayload, type ChannelConfig } from '../channel-content.ts'
 
 // 声明 Host 侧事件(客户端编译面不加载 channel-sync 的 module 声明)。
 declare module '@deepseek-ai/cordis' {
@@ -15,12 +15,22 @@ declare module '@deepseek-ai/cordis' {
 
 let current: ChannelConfig | null = null
 let listeners = new Set<() => void>()
+/**
+ * 订阅**值**的监听者(与 React 的 re-render 通知分开):文档标题归一化、hero
+ * CSS 变量这类非 React 消费方要拿到内容本身。
+ *
+ * 为什么需要:随包品牌的播种发生在客户端本地(`seedFromPackagedBrand`),不会
+ * 经过 Host 事件 —— 只订阅 `pico/channel-changed` 的消费方会一直拿着旧值,
+ * 于是标题停在回落文案上(2026-09-10 实测:侧边栏已是渠道名、窗口标题还是厂商名)。
+ */
+const valueListeners = new Set<(channel: ChannelConfig | null) => void>()
 let started = false
 let cancel: (() => void) | undefined
 
 function set(channel: ChannelConfig | null) {
   current = channel
   listeners.forEach((l) => l())
+  valueListeners.forEach((l) => l(channel))
 }
 
 /**
@@ -39,10 +49,11 @@ async function seedFromPackagedBrand(): Promise<void> {
   try {
     const res = await fetch('/api/pico/channel', { headers: { accept: 'application/json' } })
     if (!res.ok) return
-    const data = await res.json() as ChannelConfig | null
-    if (current === null && data !== null && typeof data === 'object' && Object.keys(data).length > 0) {
-      set(data)
-    }
+    const data = await res.json() as unknown
+    // 结构校验:不是渠道内容的载荷(网关兜底 {ok:true}、错误体…)一律不采纳 ——
+    // 存进去会让所有品牌字段取不到值,消费方回落到内置厂商文案。
+    const channel = asChannelPayload(data)
+    if (current === null && channel !== undefined) set(channel)
   } catch { /* endpoint absent / offline: keep DEFAULT_CHANNEL */ }
 }
 
@@ -80,4 +91,14 @@ export function useChannel(): ChannelConfig | null {
 /** 同步读取当前渠道配置(供 effect 初始化时用, 非 React)。 */
 export function readChannelSync(): ChannelConfig | null {
   return current
+}
+
+/**
+ * Subscribe to channel-content changes (value-carrying, non-React consumers).
+ * @param listener - called with the current content on every change.
+ * @returns unsubscribe function.
+ */
+export function subscribeChannel(listener: (channel: ChannelConfig | null) => void): () => void {
+  valueListeners.add(listener)
+  return () => { valueListeners.delete(listener) }
 }

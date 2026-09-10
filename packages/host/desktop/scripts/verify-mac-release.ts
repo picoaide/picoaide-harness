@@ -1,11 +1,12 @@
 /** Verify the signed application sealed inside one macOS release DMG. */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
+import { packagedProductName } from './channel-build.ts'
 
 /** Injectable filesystem and command boundaries for release verification. */
 export interface MacReleaseVerificationOptions {
@@ -45,15 +46,13 @@ function run(command: string, args: readonly string[]): void {
 
 function defaultOptions(): MacReleaseVerificationOptions {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-  // 审计 2026-08-25 C-05:此前硬编码 'PicoAide Harness'——品牌改名即验证
-  // 失效/误报。与 verify-mac-smoke.ts 对齐,从 package.json build.productName 读。
-  const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
-    readonly build?: { readonly productName?: unknown }
-  }
-  const productName = manifest.build?.productName
-  if (typeof productName !== 'string' || productName.length === 0) {
-    throw new Error('package.json build.productName must be a non-empty string')
-  }
+  // 审计 2026-08-25 C-05:此前硬编码厂商名——品牌改名即验证失效/误报。
+  // 2026-09-10:改为读**本次构建声明的**产品名(随包 channel.json → 渠道名;
+  // 官方/本地 → 官方默认)。只读 package.json 在渠道构建下会去找错名字的 .app。
+  // 产品名对齐**本次构建声明的渠道内容**(随包 build/channel.json;渠道构建下
+  // 即渠道名)。此前只读 package.json:官方名对,渠道构建会去找错名字的 .app
+  // —— 渠道矩阵的 mac 验证要么误报要么卡死(2026-09-10)。
+  const productName = packagedProductName()
   return {
     distDir: process.argv[2] === undefined
       ? join(packageRoot, 'dist', 'mac-release')
