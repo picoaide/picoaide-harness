@@ -32,6 +32,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
+	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/webadmin"
 )
@@ -268,8 +269,10 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	if tagline == "" {
 		tagline = "Enterprise AI Gateway"
 	}
-	// 默认单链接指向官方 Releases(未配置任何平台链接时)。
-	defaultDL := "https://github.com/picoaide/picoaide-harness/releases/latest"
+	// 默认链接指向官方渠道的客户端安装包目录(未配置任何平台链接时)。
+	// 2026-09-10 起客户端分发不再依赖 GitHub Releases(见 internal/updatecheck
+	// 包注释):官方渠道资产由我方更新服务器承载,企业渠道由服务端自身下发。
+	defaultDL := updatecheck.DefaultClientDownloadsURL
 	if dlLinux == "" {
 		dlLinux = defaultDL
 	}

@@ -25,12 +25,16 @@ interface SysInfo {
     schema_migrations: number
   }
   version: string
-  // 2026-08-31: 实时版本检查(服务端代理 GitHub Releases;失败为 null 静默降级)
+  // 2026-09-10: 实时版本检查(服务端代理我方更新服务器 release.picoaide.com;
+  // 失败为 null 静默降级)。更新源已从 GitHub Releases 迁到 R2 静态 manifest。
   update_check?: {
     current: string
     latest: string
     update_available: boolean
-    release_url: string
+    /** 升级目标镜像 tag(如 v2.7.0);老版本服务端可能缺该字段 */
+    image_tag?: string
+    /** 应答的更新清单地址(渠道归因/排查用) */
+    manifest_url?: string
     checked_at: string
   } | null
 }
@@ -105,8 +109,9 @@ export default function ServerInfo() {
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
-      {/* 版本升级提示(2026-08-31):有更新且服务端可达时显示;静默降级。
-          链接跳转 GitHub Releases(管理员手动升级,不自动执行)。 */}
+      {/* 版本升级提示(2026-08-31;2026-09-10 改指更新服务器):
+          有更新且更新服务器可达时显示;静默降级。
+          链接指向更新清单(渠道归因),升级仍由管理员在服务器上手动执行。 */}
       {info?.update_check?.update_available && (
         <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-600/10 text-[#1E40AF]">
@@ -117,14 +122,18 @@ export default function ServerInfo() {
               发现新版本 {info.update_check.latest}(当前 v{info.version})
             </div>
             <div className="mt-0.5 text-xs text-blue-700">
-              请查看发行说明并在服务器上执行 <code className="rounded bg-blue-100 px-1 font-mono text-[11px]">./deploy.sh update</code> 升级(数据不丢)。
+              按部署说明执行升级{info.update_check.image_tag
+                ? <> 到 <code className="rounded bg-blue-100 px-1 font-mono text-[11px]">{info.update_check.image_tag}</code></>
+                : null}(数据不丢;升级前会先做备份)。
             </div>
           </div>
-          <a href={info.update_check.release_url} target="_blank" rel="noreferrer">
-            <Button size="sm" variant="outline" className="shrink-0 border-blue-300 bg-white text-blue-700 hover:bg-blue-100 hover:text-blue-900">
-              <ExternalLink className="h-3.5 w-3.5" /> 查看发行说明
-            </Button>
-          </a>
+          {info.update_check.manifest_url && (
+            <a href={info.update_check.manifest_url} target="_blank" rel="noreferrer">
+              <Button size="sm" variant="outline" className="shrink-0 border-blue-300 bg-white text-blue-700 hover:bg-blue-100 hover:text-blue-900">
+                <ExternalLink className="h-3.5 w-3.5" /> 查看更新信息
+              </Button>
+            </a>
+          )}
         </div>
       )}
 
