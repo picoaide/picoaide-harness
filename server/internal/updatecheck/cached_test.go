@@ -48,7 +48,7 @@ func TestCheckerBadRequestConstruction(t *testing.T) {
 // (bounded memory) even when the server responds 200.
 func TestCheckerResponseTooLarge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9","pad":"` + strings.Repeat("x", maxResponseBody) + `"}`))
+		_, _ = w.Write([]byte(`{"channel_id":"official","server":{"version":"9.9.9"},"pad":"` + strings.Repeat("x", maxResponseBody) + `"}`))
 	}))
 	defer srv.Close()
 
@@ -79,7 +79,7 @@ func TestCheckerInvalidJSON(t *testing.T) {
 // update even when the latest tag is newer.
 func TestCheckerDevCurrent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9","html_url":"https://x"}`))
+		_, _ = w.Write([]byte(`{"channel_id":"official","server":{"version":"9.9.9"}}`))
 	}))
 	defer srv.Close()
 
@@ -105,7 +105,7 @@ func TestCachedCheckerTTL(t *testing.T) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
-		_, _ = w.Write([]byte(`{"tag_name":"v2.6.0"}`))
+		_, _ = w.Write([]byte(`{"channel_id":"official","schema":1,"server":{"version":"2.6.0"},"client":{"version":"2.6.0"}}`))
 	}))
 	defer srv.Close()
 
@@ -141,7 +141,7 @@ func TestCachedCheckerConcurrentSingleflight(t *testing.T) {
 		hits++
 		mu.Unlock()
 		time.Sleep(30 * time.Millisecond) // widen the race window
-		_, _ = w.Write([]byte(`{"tag_name":"v2.6.0"}`))
+		_, _ = w.Write([]byte(`{"channel_id":"official","schema":1,"server":{"version":"2.6.0"},"client":{"version":"2.6.0"}}`))
 	}))
 	defer srv.Close()
 
@@ -221,7 +221,7 @@ func TestCachedCheckerFailureIsNotCached(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		if hits == 1 {
-			_, _ = w.Write([]byte(`{"tag_name":"v2.6.0"}`))
+			_, _ = w.Write([]byte(`{"channel_id":"official","schema":1,"server":{"version":"2.6.0"},"client":{"version":"2.6.0"}}`))
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)

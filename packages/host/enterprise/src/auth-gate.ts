@@ -18,8 +18,13 @@ import {
   validateSkillName,
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
-import { brandMarkSvg } from './brand-geometry.ts'
+import { brandMarkSvg } from './channel-geometry.ts'
+import { asChannelPayload, type BrandConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
+
+// 品牌文案类型定义在 channel-content.ts（纯数据模块，客户端面也能值导入），
+// 这里转出以保持 auth-gate 既有入口形状。
+export type { BrandConfig }
 
 /** 上传 body 上限(审计 2026-08-25 P2-2):本地 upload body 实际只含元数据
  * (archive 由 pack 后经 fetchJSON 出站);24MB 与服务端 MaxBodyBytes 对齐,
@@ -41,7 +46,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PicoAide 登录</title>
+<title>__BRAND_NAME__ 登录</title>
 <style>
   :root {
     --bg: #ffffff;
@@ -74,7 +79,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 4px; text-align: left; }
   .hint { color: var(--fg); opacity: 0.7; font-size: 12px; margin-top: 8px; }
   .back { background: transparent; color: var(--accent); border: none; font-size: 12px; cursor: pointer; padding: 6px 12px; margin: 0 0 14px; width: auto; }
-  /* Step2 品牌区 */
+  /* Step2 渠道区(名称/标语/logo 来自服务端 /api/client/v2/channel) */
   .brand { margin-bottom: 18px; min-height: 92px; }
   .brand img, .brand .fallback { width: 64px; height: 64px; border-radius: 14px; object-fit: contain; margin-bottom: 8px; }
   .brand .fallback { display: inline-flex; align-items: center; justify-content: center; background: #0f1115; color: #fff; font-size: 28px; font-weight: 700; }
@@ -96,7 +101,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     <h1>连接服务端</h1>
     <div class="tagline">输入服务端地址以确认登录方式</div>
     <form id="f1">
-      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" autocomplete="off" spellcheck="false" required>
+      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" __DEFAULT_SERVER_MARK__ autocomplete="off" spellcheck="false" required>
       <button type="submit" id="next-btn">下一步</button>
       <div class="err" id="err-step1"></div>
     </form>
@@ -136,7 +141,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   var brandArea = document.getElementById('brand-area')
   var currentMethod = 'local'
   var currentMethods = []
-  var currentBrand = null
+  var currentChannel = null
   var pollTimer = null
   // 去除服务端地址尾部一个或多个斜杠(兼容带/不带 / 的用户输入)。
   // 纯字符串实现,禁用带反斜杠的正则:正斜杠转义(如 replace(反斜杠+/+$))
@@ -147,37 +152,41 @@ const LOGIN_HTML = `<!DOCTYPE html>
     while (s.charAt(s.length - 1) === '/') s = s.slice(0, -1)
     return s
   }
-  // 品牌兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
+  // 渠道兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
   // 花括号 1.25x 放大)。任何 logo 兜底都必须与 logo.svg 一致,禁止字母 P 等
   // 编造图形(旧版 P 字 logo 已退役)。
   var BRACE_MARK_SVG = ${JSON.stringify(brandMarkSvg('#FFFFFF'))}
 
-  // ---- Step1 → Step2: 并行探测 brand + methods(任一成功进 Step2) ----
-  f1.addEventListener('submit', async function (e) {
-    e.preventDefault()
+  // 随包分发的品牌文案(channel.json 的 identity/copy,由 profile 组装期注入)。
+  // 登录页要在这里就显示品牌 —— 此刻还没有服务端可问。__BRAND_JSON__ 由
+  // apply() 替换成安全的 JS 字面量;缺失时用中性占位,绝不写厂商名。
+  var BRAND = __BRAND_JSON__
+
+  // ---- Step1 → Step2: 并行探测 channel + methods(任一成功进 Step2) ----
+  async function connect(server) {
     err1.textContent = ''
-    var server = document.getElementById('server').value.trim()
-    if (!server) { err1.textContent = '请填写服务端地址'; return }
+    if (!server) { err1.textContent = '请填写服务端地址'; return false }
     document.getElementById('next-btn').disabled = true
     document.getElementById('next-btn').textContent = '连接中…'
     try {
       var results = await Promise.allSettled([
-        fetch('/api/pico/brand?server=' + encodeURIComponent(server)),
+        fetch('/api/pico/channel?server=' + encodeURIComponent(server)),
         fetch('/api/pico/auth/methods?server=' + encodeURIComponent(server)),
       ])
-      var brandOk = results[0].status === 'fulfilled' && results[0].value.ok
+      var channelOk = results[0].status === 'fulfilled' && results[0].value.ok
       var methodsOk = results[1].status === 'fulfilled' && results[1].value.ok
-      if (!brandOk && !methodsOk) {
+      if (!channelOk && !methodsOk) {
         err1.textContent = '无法连接服务端，请检查地址与网络'
-        return
+        return false
       }
-      if (brandOk) {
+      if (channelOk) {
         try {
-          var b = await results[0].value.json()
-          currentBrand = b.enabled ? b : null
-        } catch (e2) { currentBrand = null }
+          var c = await results[0].value.json()
+          // 渠道内容总是生效(无 enabled 开关):有内容即用, 空载荷回退内置兜底。
+          currentChannel = c && (c.login || c.client || c.title) ? c : null
+        } catch (e2) { currentChannel = null }
       } else {
-        currentBrand = null
+        currentChannel = null
       }
       var ms = [{ name: 'local', configured: true, browser: false }]
       if (methodsOk) {
@@ -187,16 +196,55 @@ const LOGIN_HTML = `<!DOCTYPE html>
         } catch (e3) { /* keep default */ }
       }
       showStep2(ms)
+      return true
     } finally {
       document.getElementById('next-btn').disabled = false
       document.getElementById('next-btn').textContent = '下一步'
     }
+  }
+
+  f1.addEventListener('submit', async function (e) {
+    e.preventDefault()
+    await connect(document.getElementById('server').value.trim())
   })
+
+  // 渠道包预置了服务端域名 → 跳过"输入服务端地址"这一步,直接进登录:
+  // 员工看到的第一个界面就是账号密码(或点一下就用浏览器 SSO 登录),
+  // 而不是"请输入你公司的地址"。
+  //
+  // 判据是**服务端写的标记**(data-default-server),不是"输入框有值":浏览器
+  // 在 reload 时会恢复表单值,用"有值"判断会让未渠道化的构建也触发自动连接。
+  //
+  // 写法注意:这里刻意用"函数声明 + void 调用",而不是把 IIFE 直接写在行首。
+  // 本脚本是无分号(ASI)风格,而紧跟在一个调用语句之后的左圆括号不会触发自动
+  // 分号插入 —— 解析器会把上一行读成"调用那个函数的返回值",一执行就抛
+  // TypeError,后面所有语句(包括 #f2 登录表单的提交处理)全部不注册。
+  // 症状极具迷惑性:Step1→Step2 正常(它注册在前面),点「登录」却只是原生提交、
+  // 页面刷新回 Step1。2026-09-10 客户端 E2E 从 13/13 掉到 5/13 就是这个原因,
+  // 而"脚本能被 new Function 解析"的语法测试**抓不到**(它语法上是合法的)。
+  async function autoConnect() {
+    var serverInput = document.getElementById('server')
+    if (serverInput.getAttribute('data-default-server') !== '1') return
+    if (serverInput.value.trim() === '') return
+    var ok = await connect(serverInput.value.trim())
+    if (!ok) return
+    // 只有浏览器方式可用(纯 OIDC/OpenID 部署)时直接发起跳转,员工不必再点一次。
+    var hasPassword = currentMethods.some(function (m) {
+      return m.name === 'local' || m.name === 'ldap'
+    })
+    if (!hasPassword && currentMethods.length > 0 && browserBtn.style.display !== 'none') {
+      browserBtn.click()
+    } else {
+      var username = document.getElementById('username')
+      if (username && username.style.display !== 'none') username.focus()
+    }
+  }
+  void autoConnect()
 
   function showStep2(methods) {
     currentMethods = methods.filter(function (m) { return !m.hidden })
-    // 品牌区
-    brandArea.innerHTML = renderBrand(currentBrand)
+    // 渠道区
+    brandArea.innerHTML = renderChannel(currentChannel)
     // 方式选择器
     currentMethod = pickDefault(currentMethods)
     renderMethodButtons(currentMethods)
@@ -205,23 +253,27 @@ const LOGIN_HTML = `<!DOCTYPE html>
     document.getElementById('step2').classList.add('active')
   }
 
-  function renderBrand(b) {
-    if (!b) {
+  function renderChannel(ch) {
+    if (!ch) {
       // 兜底:官方花括号 mark(与 logo.svg 一致), 而非字母/编造图形。
+      // 文案取随包品牌(渠道构建下即渠道自己的名字)。
       var fallback = '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
-      return fallback + '<div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
+      var fbTag = BRAND.login.tagline ? '<div class="brand-tag">' + esc(BRAND.login.tagline) + '</div>' : ''
+      return fallback + '<div class="brand-name">' + esc(BRAND.login.displayName) + '</div>' + fbTag
     }
-    var login = b.login || {}
-    // logo_url 是相对路径(/api/client/v2/brand/logo/login): 在 Host 登录页需拼服务端地址。
+    var login = ch.login || {}
+    // logo_url 是相对路径(/api/client/v2/channel/logo): 在 Host 登录页需拼服务端地址。
     // 先统一去尾斜杠(trimServer),避免拼出 //api/client/v2/... 双斜杠路径。
     var server = trimServer(document.getElementById('server').value.trim())
     var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
-    // logo 加载失败时保留花括号兜底(与无品牌时同款)。
+    // logo 加载失败时保留花括号兜底(与无渠道内容时同款)。
     // 安全:logoUrl 来自网关数据(管理员可控),仍须属性转义——旧实现直接拼
     // <img src="...">,网关被劫持/注入时可在登录页(认证前)形成 XSS(2026-09-01 审计)。
     var logo = logoUrl ? '<img src="' + esc(logoUrl) + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
-    var name = login.display_name || 'PicoAide'
-    var tag = login.tagline ? '<div class="brand-tag">' + esc(login.tagline) + '</div>' : ''
+    // 服务端没给名字时用随包品牌:同一个渠道包驱动镜像与客户端,两者同名。
+    var name = login.display_name || BRAND.login.displayName
+    var tagline = login.tagline || BRAND.login.tagline
+    var tag = tagline ? '<div class="brand-tag">' + esc(tagline) + '</div>' : ''
     var welcome = login.welcome ? '<div class="welcome">' + esc(login.welcome) + '</div>' : ''
     return logo + '<div class="brand-name">' + esc(name) + '</div>' + tag + welcome
   }
@@ -398,10 +450,114 @@ const LOGIN_HTML = `<!DOCTYPE html>
 
 export interface Config {
   defaultServer?: string
+  brand?: BrandConfig
+}
+
+/**
+ * 解析后的品牌文案（每个字段都非空/有确定值，页面直接渲染）。
+ */
+interface ResolvedBrand {
+  title: string
+  login: { displayName: string; shortName: string; tagline: string; welcome: string }
+  client: { displayName: string; shortName: string; tagline: string }
+}
+
+/**
+ * 官方渠道文案：**没有渠道包**时（本地开发、未注入）的兜底。
+ *
+ * 与"渠道包存在但字段为空"必须区分开：后者是注入链断了，用中性占位
+ * （`channel-content.ts` 的 `NEUTRAL_CHANNEL`），绝不能拿官方文案冒充渠道 ——
+ * 那正是白标要防的事故。
+ */
+const OFFICIAL_BRAND: ResolvedBrand = {
+  // 文档/窗口标题用的是**产品名**(与 desktop-shell 的 windowTitle、内置
+  // DEFAULT_CHANNEL.title 同值);登录页品牌区用的是 login.displayName
+  // (官方渠道为短名 'PicoAide')。两者不可混用 —— 混了官方构建的窗口标题
+  // 会从 "PicoAide Harness" 变成 "PicoAide"。
+  title: 'PicoAide Harness',
+  login: { displayName: 'PicoAide', shortName: 'PicoAide', tagline: 'Enterprise AI Gateway', welcome: '' },
+  client: { displayName: 'PicoAide Harness', shortName: 'PicoAide', tagline: '' },
+}
+
+/** 未配置品牌时的中性名（与 desktop-channel.ts / 服务端同值）。 */
+const NEUTRAL_NAME = 'Harness'
+
+/** 非空字符串（'' 是"渠道没配这一项"，等同于缺失）。 */
+function nonEmpty(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value : undefined
+}
+
+/**
+ * 把可缺字段的品牌配置解析成可直接渲染的文案。
+ *
+ * 兜底基座由**有没有渠道包**决定（见 `OFFICIAL_BRAND` 的注释），而不是由
+ * 字段有没有值决定。
+ * @param brand - 组装期注入的品牌配置（可缺）。
+ * @returns 每个字段都有确定值的品牌文案。
+ */
+function resolveBrand(brand: BrandConfig | undefined): ResolvedBrand {
+  // "没有渠道品牌"的判据是**没有任何非空名字**，而不是"对象不存在"：
+  // schema 会把未注入的 brand 物化成 `{}`（见 channel-content.ts 的说明），
+  // 只判 undefined 会让官方构建显示中性占位。
+  if (brand === undefined
+    || (nonEmpty(brand.login?.displayName) === undefined
+      && nonEmpty(brand.title) === undefined
+      && nonEmpty(brand.client?.displayName) === undefined)) {
+    return OFFICIAL_BRAND
+  }
+  const login = brand.login
+  const client = brand.client
+  const loginName = nonEmpty(login?.displayName) ?? nonEmpty(brand.title) ?? NEUTRAL_NAME
+  const clientName = nonEmpty(client?.displayName) ?? loginName
+  return {
+    title: nonEmpty(brand.title) ?? loginName,
+    login: {
+      displayName: loginName,
+      shortName: nonEmpty(login?.shortName) ?? loginName,
+      // 标语允许为空：渠道没配就不显示，而不是编一句。
+      tagline: nonEmpty(login?.tagline) ?? '',
+      welcome: nonEmpty(login?.welcome) ?? '',
+    },
+    client: {
+      displayName: clientName,
+      shortName: nonEmpty(client?.shortName) ?? clientName,
+      tagline: nonEmpty(client?.tagline) ?? '',
+    },
+  }
+}
+
+/**
+ * 把品牌文案渲染成可安全内联进 `<script>` 的 JS 字面量。
+ *
+ * `JSON.stringify` 不转义 `<`，渠道名里一个 `</script>` 就能从字符串里逃逸出来
+ * 改写登录页 —— 登录页是认证前唯一的 HTML 面，这里按不可信输入处理（渠道包是
+ * 自家产物，但注入链路过 profile 组装，口径统一按不可信）。
+ * @param brand - 已解析的品牌文案。
+ * @returns 形如 `{"title":"…","login":{…}}` 的安全字面量。
+ */
+function brandScriptLiteral(brand: ResolvedBrand): string {
+  return JSON.stringify({
+    title: brand.title,
+    login: brand.login,
+  }).replace(/</gu, '\\u003c')
 }
 
 export const Config: z<Config> = z.object({
   defaultServer: z.string(),
+  brand: z.object({
+    title: z.string(),
+    login: z.object({
+      displayName: z.string(),
+      shortName: z.string(),
+      tagline: z.string(),
+      welcome: z.string(),
+    }),
+    client: z.object({
+      displayName: z.string(),
+      shortName: z.string(),
+      tagline: z.string(),
+    }),
+  }),
 })
 
 // 0057 强制改密页: 登录后被管理员重置密码(必须改密才能使用)时展示。
@@ -483,7 +639,7 @@ const RESTORING_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>PicoAide</title>
+<title>__BRAND_NAME__</title>
 <style>
   body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #fff; color: #616267; }
 </style>
@@ -502,13 +658,72 @@ export const name = 'auth-gate'
 export const inject = ['webServer', 'picoSession']
 
 /**
+ * 把渠道包预置的域名安全地放进 `value="…"` 属性。
+ *
+ * 只转义 HTML 元字符(属性值语义),不做 URL 编解码 —— 地址本身由
+ * auth-gate 的 assertServerURLAllowed 在使用时再校验一次(https/回环)。
+ * @param value - 渠道包或 profile 提供的域名。
+ * @returns 可安全内联进 HTML 属性的字符串。
+ */
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;')
+}
+
+/**
  * Client-owned login surface served as the main window's first page when no
  * session exists. The user fills the server address and logs in through the
  * client's local API, which calls the gateway; on success the page reloads
  * into the DSH Web app in the same window.
  */
+/**
+ * 组装期注入的品牌 → `/api/client/v2/channel` 形态的响应体。
+ *
+ * 字段名与服务端 `channel.Response` 对齐（客户端 `channel-sync` 直吃这份），
+ * 这样"服务端可达"与"不可达"两条路径给客户端的是同一种结构，消费方不需要
+ * 分支。`assets` 不在这里：随包素材由 electron-builder 打进应用资源，不走
+ * 这个端点（`favicon_url`/`logo_url` 留给服务端下发）。
+ * @param brand - 组装期注入的品牌配置（可缺，缺省即官方文案）。
+ * @returns 与 `GET /api/client/v2/channel` 同形的对象。
+ */
+function builtInChannel(brand: BrandConfig | undefined): Record<string, unknown> {
+  const b = resolveBrand(brand)
+  return {
+    title: b.title,
+    login: { display_name: b.login.displayName, tagline: b.login.tagline, welcome: b.login.welcome },
+    client: {
+      display_name: b.client.displayName,
+      // 侧边栏要短名(官方渠道是 "PicoAide" 而非 "PicoAide Harness"):
+      // 服务端不下发这一项,所以由随包品牌补上。
+      short_name: b.client.shortName,
+      tagline: b.client.tagline,
+    },
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
-  const loginHTML = LOGIN_HTML.replaceAll('__DEFAULT_SERVER__', config.defaultServer ?? '')
+  // 预置域名来自渠道包(随包分发的 build/channel.json)或 profile 组装配置,
+  // 会直接落进 `value="…"` 属性 —— 必须做属性转义,否则一个带引号的地址就能
+  // 从属性里逃逸。渠道包是自家产物,但登录页是认证前唯一的 HTML 面,
+  // 这里按不可信输入处理(与页面内 esc() 同一口径)。
+  const configuredServer = (config.defaultServer ?? '').trim()
+  const defaultServer = escapeHtmlAttribute(configuredServer)
+  // 品牌名进 `<title>` 是 HTML 文本位,进页面脚本是 JS 字面量位 —— 两种上下文
+  // 各用各自的转义。渠道名里一个 `</title>` / `</script>` 都能逃逸,所以
+  // 不共用同一个字符串。
+  const brand = resolveBrand(config.brand)
+  const brandTitle = escapeHtmlAttribute(brand.title)
+  const loginHTML = LOGIN_HTML
+    .replaceAll('__DEFAULT_SERVER__', defaultServer)
+    // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
+    .replaceAll('__DEFAULT_SERVER_MARK__', configuredServer === '' ? '' : 'data-default-server="1"')
+    .replaceAll('__BRAND_NAME__', brandTitle)
+    .replaceAll('__BRAND_JSON__', brandScriptLiteral(brand))
+  const restoringHTML = RESTORING_HTML.replaceAll('__BRAND_NAME__', brandTitle)
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -620,7 +835,7 @@ export function apply(ctx: Context, config: Config): void {
       // P1-11: while the persisted session is still restoring, serve a
       // lightweight "loading" page that re-requests the index once ready —
       // never flash the login form over an existing valid session.
-      if (!ctx.picoSession.isRestored()) return RESTORING_HTML
+      if (!ctx.picoSession.isRestored()) return restoringHTML
       const restored = ctx.picoSession.getSession()
       // 0057: 会话带强制改密标记(管理员重置密码) → 一律回强制改密页,
       // 即使应用重启后仍在(业务 API 在改密完成前也被服务端 403)。
@@ -770,10 +985,12 @@ export function apply(ctx: Context, config: Config): void {
         },
       }),
 
-      // v3b: 登录页品牌代理(公开, 无需 token): ?server=<url> 转发服务端
-      // /api/brand; 未传 server 且无 session 时回退默认(登录页回退本地品牌)。
+      // v3b: 登录页渠道代理(公开, 无需 token): ?server=<url> 转发服务端
+      // /api/client/v2/channel; 未传 server 且无 session 时回退**随包品牌**
+      // (builtInChannel()) —— 登录页与客户端界面在服务端不可达时也得显示
+      // 渠道自己的名字,而不是厂商名。
       ctx.webServer.register({
-        kind: 'exact', path: '/api/pico/brand',
+        kind: 'exact', path: '/api/pico/channel',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
@@ -783,13 +1000,18 @@ export function apply(ctx: Context, config: Config): void {
             serverParam = new URL(req.url ?? '/', 'http://localhost').searchParams.get('server') ?? ''
           } catch { /* ignore malformed query */ }
           const serverURL: string = serverParam || s?.serverURL || ''
-          if (serverURL === '') return json(res, 200, { enabled: false })
+          if (serverURL === '') return json(res, 200, builtInChannel(config.brand))
           try {
             assertServerURLAllowed(serverURL)
-            const data = await fetchJSON(serverURL, '/api/client/v2/brand')
-            json(res, 200, data)
+            const data = await fetchJSON(serverURL, '/api/client/v2/channel')
+            // 上游必须是**像渠道内容**的载荷:否则原样透传会让客户端把垃圾当
+            // 渠道内容存进 store,每个字段取不到值 → 回落内置厂商文案(白标事故,
+            // 且零报错)。见 channel-content.ts 的 asChannelPayload。
+            json(res, 200, asChannelPayload(data) ?? builtInChannel(config.brand))
           } catch {
-            json(res, 200, { enabled: false })
+            // 服务端不可达:给随包品牌而不是空载荷 —— 空载荷会让界面回落
+            // 内置的厂商文案,那正是白标要防的。
+            json(res, 200, builtInChannel(config.brand))
           }
         },
       }),

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.6.8",
+  "version": "2.6.9-beta.1",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -71,11 +71,16 @@
       "types": "./lib/types/loop-notify-contract.d.ts",
       "default": "./lib/loop-notify-contract.js"
     },
+    "./desktop-channel": {
+      "types": "./lib/types/desktop-channel.d.ts",
+      "default": "./lib/desktop-channel.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "build/app-icon.png",
     "build/app-icon-mac.png",
+    "build/channel.json",
     "build/tray-icon*.png",
     "cordis.patch.yml",
     "docs/**",
@@ -105,13 +110,15 @@
   "scripts": {
     "build": "node scripts/brand-prepare.mjs && node scripts/clean.mjs && tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
     "verify:loader": "node scripts/verify-loader-boot.mjs",
     "verify:profile": "node scripts/verify-profile-boot.mjs",
     "verify:licenses": "node scripts/verify-licenses.mjs",
     "verify:notices": "node scripts/verify-licenses.mjs --notices THIRD_PARTY_NOTICES.md",
-    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile && yarn run verify:licenses",
+    "verify:channel": "node scripts/verify-channel-package.ts",
+    "check": "yarn run build && yarn run typecheck:tests && yarn run test && yarn run verify:channel && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile && yarn run verify:licenses",
     "check:win-package": "yarn run typecheck && vitest run tests/package.spec.ts tests/package-win.spec.ts tests/update-checker.spec.ts tests/update-download.spec.ts tests/verify-win-installer.spec.ts tests/verify-win-portable.spec.ts tests/verify-packaged-runtime.spec.ts tests/windows-agent-presets.spec.ts tests/windows-pwsh-sandbox.spec.ts tests/windows-volume-diagnostics.spec.ts tests/window-options.spec.ts && yarn run verify:closure",
     "check:mac-package": "yarn run -T check",
     "prebuild": "node scripts/prebuild-workspace-deps.ts",
@@ -334,6 +341,7 @@
     },
     "files": [
       "build/app-icon.png",
+      "build/channel.json",
       "build/app-icon-mac.png",
       "build/tray-icon*.png",
       "cordis.patch.yml",

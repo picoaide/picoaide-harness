@@ -5,6 +5,8 @@ import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 import { withoutMacReleaseSecrets } from './release-preflight.ts'
 import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
 
@@ -34,6 +36,11 @@ export interface MacSmokePackageOptions {
   readonly verifier: string
   /** Node executable used to run package-local scripts. */
   readonly nodeExecutable: string
+  /**
+   * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
+   * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   */
+  readonly channelConfigArgs: readonly string[]
   /** Execute one packaging command. */
   readonly run: (
     command: string,
@@ -69,6 +76,8 @@ function defaultOptions(): MacSmokePackageOptions {
   const workspaceRoot = resolve(desktopRoot, '..', '..')
   const require = createRequire(import.meta.url)
   const outputDir = resolve(desktopRoot, 'dist', 'mac-smoke')
+  // 渠道在解析选项时定下来：验证脚本也要用它推导 DMG 名。
+  const channel = resolveChannelBuildContext()
   return {
     env: process.env,
     platform: process.platform,
@@ -82,6 +91,7 @@ function defaultOptions(): MacSmokePackageOptions {
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL('./verify-mac-smoke.ts', import.meta.url)),
     nodeExecutable: process.execPath,
+    channelConfigArgs: prepareChannelBuilderOverrides(channel),
     run,
     log: message => console.log(message),
   }
@@ -139,6 +149,7 @@ export function packageMacSmoke(
       '--config.mac.notarize=false',
       '--config.npmRebuild=false',
       `--config.directories.output=${options.outputDir}`,
+      ...options.channelConfigArgs,
     ],
     options.desktopRoot,
     {
@@ -162,6 +173,8 @@ if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.m
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
       prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
     }
+    // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json),必须在打包之前。
+    await prepareChannelPackaging()
     packageMacSmoke(undefined, { skipGates: process.argv.includes('--no-gates') })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

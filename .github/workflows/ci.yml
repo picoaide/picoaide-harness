@@ -135,11 +135,12 @@ jobs:
       - run: npm test
         working-directory: server/webadmin
       - run: make build-server
-      - name: Deploy script syntax checks
-        # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀,
-        # 否则实际变为 server/server/scripts/...(文件不存在, exit 127)。
+      - name: Deployment asset syntax checks
+        # 部署脚本(deploy.sh / install-server.sh)已于 2026-09-10 移除,此处只校验
+        # 仍然发货的部署资产:镜像 entrypoint 的 shell 语法 + compose 配置。
+        # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀。
         run: |
-          bash -n scripts/install-server.sh scripts/deploy.sh
+          bash -n docker/entrypoint.sh
           if command -v docker >/dev/null 2>&1; then
             # 单 compose 文件(caddy+server+postgres):PG_PASSWORD 强必填,
             # 注入后验证语法
@@ -228,7 +229,43 @@ jobs:
           [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
           [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
       # 构建产物来自 gate(同一次提交),此处不重复编译(--no-prebuild)。
-      - run: yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+      #
+      # 渠道化(2026-09-10):逐个渠道打包,产物归集到 client-assets/<channel>/。
+      # **渠道构建不输出日志**(用户定策)——官方构建跑同一套代码路径与打包脚本,
+      # 排障看官方那一份;渠道 id 全程 ::add-mask::。列表由 ci-channels.sh 从
+      # 私有渠道仓解析(正式 tag 发全部渠道 / beta tag 只发 beta / 非 tag 只发官方)。
+      - name: Fetch channel packages (private repo)
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+      # --official-last:官方最后构建,于是 dist/ 留下的是**官方**产物 ——
+      # 紧随其后的 E2E 与人工排查都对着官方那一份(渠道产物已归集到 client-assets/)。
+      - name: Package client installers for every selected channel
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        run: |
+          bash scripts/ci-package-clients.sh --official-last \
+            --list channels.list --stage-dir client-assets \
+            --patterns '*.AppImage *.deb' \
+            --verify-app-dir dist/linux-unpacked \
+            -- yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+      # 品牌渠道的产物**不进公开 artifact**(artifact 对任何登录账号可取,而渠道
+      # 目录名/文件名/包内品牌都是客户身份):改经 R2 临时前缀中转,release job 取回。
+      # 官方/beta 不在中转范围内(它们的品牌本来就公开)。
+      - name: Transfer brand-channel installers over R2 (not via public artifacts)
+        if: ${{ !github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
+      # fork PR 拿不到 secret(渠道仓读不到)——回落到只构建官方,而不是让 PR 失败。
+      - name: Package the official client only (fork PR without channel access)
+        if: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+          mkdir -p client-assets/official
+          cp packages/host/desktop/dist/*.AppImage packages/host/desktop/dist/*.deb client-assets/official/
       # 客户端 E2E(2026-09-06 接入,G3 缺口):在打包产物上跑 13 项断言
       # (mock gateway + Xvfb + CDP),报告与截图随后上传。
       - name: Client E2E (packaged app, Xvfb)
@@ -250,12 +287,14 @@ jobs:
           mkdir -p packages/host/desktop/e2e-results
           cp packages/host/desktop/.e2e-report.md packages/host/desktop/e2e-results/e2e-report.md 2>/dev/null || true
           cp -r packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/shots 2>/dev/null || true
+      # artifact 名保持**中性**(不含渠道名):公开仓的 artifact 列表是匿名可读的
+      # (实测),名字里带渠道 id 就等于公开客户名。
+      # 2026-09-10 审计后**内容也不再含品牌渠道**:品牌渠道的安装包经 R2 私密中转
+      # (见下面的 transfer 步骤),这里只剩 official/beta —— 它们的品牌本来就公开。
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
-          path: |
-            packages/host/desktop/dist/*.AppImage
-            packages/host/desktop/dist/*.deb
+          path: client-assets/**
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: always()
@@ -303,11 +342,52 @@ jobs:
       # 构建产物来自 gate,不重复编译(--no-prebuild);门禁在 gate 已跑,
       # 不再内嵌 check:win-package(--no-gates),但打包后 verify-win-installer
       # 仍在脚本内执行。
-      - run: yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
+      #
+      # 渠道化:逐个渠道打包(--official-last 让官方最后构建,便于排障),
+      # 渠道构建不输出日志、渠道 id 全程掩码(见 scripts/ci-package-clients.sh)。
+      - name: Fetch channel packages (private repo)
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        shell: bash
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+      - name: Package client installers for every selected channel
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        shell: bash
+        run: |
+          bash scripts/ci-package-clients.sh --official-last \
+            --list channels.list --stage-dir client-assets \
+            --patterns '*Setup*.exe' \
+            --verify-app-dir dist/win-unpacked \
+            -- yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
+      # 品牌渠道产物经 R2 中转,不进公开 artifact(与 linux job 同策)。
+      # Windows 镜像不保证自带 aws CLI(ubuntu 有),缺了就装 —— 这条链失败
+      # 等于品牌渠道零交付,不能让它悬在"环境碰巧有没有"上。
+      - name: Ensure AWS CLI for the brand-channel transfer
+        if: ${{ !github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: command -v aws >/dev/null 2>&1 || choco install awscli -y --no-progress
+      - name: Transfer brand-channel installers over R2 (not via public artifacts)
+        if: ${{ !github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
+      # fork PR 拿不到 secret(渠道仓读不到)——回落到只构建官方,而不是让 PR 失败。
+      - name: Package the official client only (fork PR without channel access)
+        if: ${{ github.event.pull_request.head.repo.fork }}
+        shell: bash
+        run: |
+          yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
+          mkdir -p client-assets/official
+          cp packages/host/desktop/dist/*Setup*.exe client-assets/official/
+      # artifact 名中性(公开仓的 artifact 列表匿名可读,名字带渠道 id 即泄露客户名)。
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Windows-installer
-          path: packages/host/desktop/dist/*Setup*.exe
+          path: client-assets/**
           if-no-files-found: error
 
   # macOS 单 job 三态:正式 tag(纯 vX.Y.Z)打包+签名+公证(可重试);预发 tag
@@ -407,11 +487,52 @@ jobs:
       - name: Build unsigned smoke DMG
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: yarn workspace dsh-plugin-desktop dist:mac-smoke --no-prebuild --no-gates
+      # ==== 渠道化(tag 时):官方已由上面三步构建完毕,这里只做品牌渠道 ====
+      #
+      # 渠道用**签名但不公证**(--sign-only + dmg),与预发 tag 同一条既有路径:
+      # 公证每次排队 1–5 小时,渠道数一多必然撞穿本 job 的 330 分钟上限;渠道客户端
+      # 由客户自己的服务端下发,首次打开与预发版同样需要右键打开。官方渠道仍然是
+      # 完整签名+公证,那条链一步没动。
+      #
+      # 渠道构建**不输出日志**(用户定策),渠道 id 全程 ::add-mask::;排障看官方
+      # 那一份 —— 渠道与官方跑同一套打包脚本,只换 DSH_BUILD_CHANNEL。
+      - name: Fetch channel packages (private repo)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+      - name: Stage the official DMG for the release image
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          mkdir -p client-assets/official
+          cp packages/host/desktop/dist/mac-release/*.dmg client-assets/official/
+          ls -1 client-assets/official/
+      - name: Package brand-channel DMGs (quiet)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          bash scripts/ci-package-clients.sh --skip-official \
+            --dist packages/host/desktop/dist/mac-release \
+            --list channels.list --stage-dir client-assets --patterns '*.dmg' \
+            -- bash -c 'yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates --sign-only \
+                 && yarn workspace dsh-plugin-desktop dist:mac:dmg --no-prebuild'
+      - name: Transfer brand-channel DMGs over R2 (not via public artifacts)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
+      # artifact 名中性;品牌渠道产物已由上面的中转步骤移出 client-assets(tag 时)。
       - uses: actions/upload-artifact@v7
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: desktop-macOS
-          path: packages/host/desktop/dist/mac-release/*.dmg
+          path: client-assets/**
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -420,19 +541,30 @@ jobs:
           path: packages/host/desktop/dist/mac-smoke/*.dmg
           if-no-files-found: error
 
+  # 发布(2026-09-10 改版):GitHub Release **仍然发布**,但内容物从"客户端安装包"
+  # 改为"服务端镜像压缩包"。两条分发面分工见
+  # docs/planning/2026-09-10-r2-update-server-runbook.md §0.1:
+  #   - 更新服务器(R2 release.picoaide.com):热分发面,只留最近 3 个版本,服务端
+  #     updatecheck 与客户部署从这里取;
+  #   - GitHub Release(本 job):冷存档 + 变更记录,永久保留全部历史版本镜像,
+  #     审计/查变更/取更老版本镜像时用。
+  # 客户端安装包不再单独发布:它已经在镜像里,由服务端自行下发。
   release:
-    name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Release (server image archive)
+    # 只对 beta 与 official 发布到 GitHub Release(2026-09-10 定案):
+    # 品牌渠道是客户定制交付,不进公开 Releases(客户从更新服务器自己的渠道目录取)。
+    # 渠道由 tag 形态决定,与 resolve 步骤同源。
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || !contains(github.ref_name, '-'))
     needs: [server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      # 只取三平台安装包(gate 的 workspace-build / server 二进制不参与发布)。
+      # 三平台安装包仍需先构建:它们要打进镜像(客户端随镜像分发)。
       - uses: actions/download-artifact@v7
         with:
           pattern: desktop-*
@@ -443,33 +575,59 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      # 审计 2026-08-25 D-2:发布前强制校验 tag == 两处 package.json version
-      # (update-checker 剥 v 后匹配资产名;版本号只改一处 = 发布成功但用户
-      # 升级源永久失效)。不一致直接 fail-loud。用 scripts/version.mjs 统一
-      # 校验(git tag 权威源;set 子命令可一键同步两处)。
+      # 发布前强制校验 tag == 两处 package.json version(scripts/version.mjs 是
+      # 唯一真源;版本号只改一处会让发布成功但升级源永久对不上)。不一致 fail-loud。
       - name: Verify tag matches package versions
         run: |
           node scripts/version.mjs check "$GITHUB_REF_NAME"
-      - name: Compute SHA-256 digests
+
+      # 渠道发现 + 逐渠道构建(2026-09-10 定案):
+      #   正式 tag vX.Y.Z → 发**全部**渠道;beta tag → 只发 beta;非 tag → 只发官方。
+      #   品牌渠道**只进 R2**,绝不进公开 GitHub Release(见下面的 Release 步骤)。
+      #
+      # **渠道构建不输出日志**(用户定策):只有 official 保留完整构建输出,渠道 id
+      # 全程 ::add-mask::。渠道与官方共用同一套 Dockerfile / 打包脚本,只换
+      # --build-arg CHANNEL,排障看官方那一份。
+      - name: Fetch channel packages (private repo)
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+
+      # 品牌渠道的客户端产物走 R2 中转(见 desktop-linux job 的说明),这里取回。
+      # 前缀由 run id + HMAC(R2 密钥)派生,渠道名从不出现在任何键或日志里。
+      - name: Fetch brand-channel installers from the R2 transfer prefix
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh pull --list channels.list --to release-artifacts
+
+      - name: Build one server image per channel
+        id: images
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          cd release-artifacts
-          # 审计 D-4:显式清单防 glob 吞入残留产物;空目录时 xargs 报错,先保护。
-          # P2-50: deb 必须参与发布(官网宣称「AppImage + deb」,此前被排除)。
-          if ! find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' \) | grep -q .; then
-            echo "::error::no release artifacts found";
-            exit 1
-          fi
-          # 修复 2026-08-25:旧版 sha256sum * 无 ./ 前缀,find|xargs 产出 ./ 前缀,
-          # 而客户端 update-download 用裸文件名严格匹配 → v2.2.0 起 SHA256SUMS
-          # 永远 checksum-missing(升级提示后下载静默失败)。%f\0 保留 D-4 显式清单
-          # 健壮性,同时恢复裸文件名兼容全部客户端版本。
-          find . -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' \) -printf '%f\0' \
-            | xargs -0 sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-      # 变更说明优先读取仓库内 docs/releases/<tag>.md(由发布者随版本提交,
-      # 保持与 GitHub Release Body 一致),保证每个版本都有完整、可审阅的说明;
-      # 文件缺失时降级为 GitHub 原生 --generate-notes(按版本区间提交自动生成),
-      # 避免再次出现「版本发布但 Release 无变更说明」的占位文案。
+          bash scripts/ci-build-channel-images.sh \
+            --list channels.list --artifacts release-artifacts --out release-bundle
+
+      # 更新服务器(R2)上传:每个渠道写自己的目录 `release.picoaide.com/<channel>/`,
+      # 品牌渠道也走这里 —— R2 是它们的**唯一**分发面。R2 secrets 未配置时跳过而非
+      # 失败,保证 GitHub Release 本身可用(上传细节与保留策略见
+      # docs/planning/2026-09-10-r2-update-server-runbook.md §5)。
+      #
+      # 逻辑在脚本里(scripts/ci-publish-update-server.sh)并带本地回归门禁:
+      # 布局/清单/保留策略/缓存头出错都是静默的,只能发版时才发现,所以它必须
+      # 能在本地用假的 aws 断言(scripts/verify-ci-scripts.mjs)。
+      - name: Upload every channel image to the update server (R2)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          VERSION: ${{ github.ref_name }}
+        run: bash scripts/ci-publish-update-server.sh --list channels.list
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -481,43 +639,44 @@ jobs:
             echo "::warning::docs/releases/${TAG}.md not found — falling back to GitHub auto-generated notes"
             NOTES_FLAG="--generate-notes"
           fi
-          # Pre-release tag(带 prerelease 段,如 v2.7.0-beta.1,version.mjs check
-          # 已保证是合法 semver,不含 + 元数据)按 GitHub 官方语义以
-          # Pre-release 发布:Releases 页面可见(带 Pre-release 徽章),但
-          # releases/latest 与客户端 update-checker/update-download 都排除
-          # prerelease,正式用户不会收到更新。正式 tag(纯 vX.Y.Z,Latest)
-          # 发布为普通 release,才推送给用户(默认成为 Latest;若已有更新的
-          # 正式版,GitHub 自动降为 None)。
+          # prerelease tag(含 prerelease 段)按 GitHub 语义以 Pre-release 发布:
+          # 可见但不会被当成 Latest。正式 tag 发布为普通 release。
           PRERELEASE=""
           if [[ "${TAG}" == *-* ]]; then
             PRERELEASE="--prerelease"
-            echo "Releasing ${TAG} as a prerelease (visible on Releases page; stable clients will not see it)"
+            echo "Releasing ${TAG} as a prerelease"
           fi
-          # 幂等(2026-09-06):同 tag 重跑/重推时 release 已存在会 422——先查,
-          # 存在则 edit(标题/说明/Pre-release 标记)+ 强制覆盖上传资产(旧资产
-          # 是上次运行产物,必须刷新为本次构建);不存在则 create。两种情况
-          # 下 releases/<tag> 页面都完整可见。
+          # 幂等(2026-09-06):同 tag 重跑时 release 已存在会 422 —— 先查再决定
+          # create/edit,并用 --clobber 覆盖旧资产(旧资产是上次运行的产物)。
+          # **只发公开渠道**(官方/beta)那一张 zip:品牌渠道是客户定制交付,
+          # 只进 R2 自己的目录,绝不进公开 Release(2026-09-10 定案)。
+          PUBLIC="${{ steps.images.outputs.public_channel }}"
+          test -n "${PUBLIC}" || { echo "::error::未解析出公开渠道"; exit 1; }
+          test -f "release-bundle/${PUBLIC}/picoaide-server-${TAG#v}-amd64.zip" \
+            || { echo "::error::公开渠道的镜像包不存在,拒绝发布空 Release"; exit 1; }
           if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — updating title/notes/flags and clobbering assets"
-            gh release edit "${TAG}" \
-              --repo "${REPO}" \
-              --title "PicoAide Harness ${TAG}" \
-              ${NOTES_FLAG} \
-              ${PRERELEASE}
-            gh release upload "${TAG}" \
-              --repo "${REPO}" \
-              --clobber \
-              release-artifacts/*.AppImage release-artifacts/*.deb release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+            gh release edit "${TAG}" --repo "${REPO}" \
+              --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE}
+            gh release upload "${TAG}" --repo "${REPO}" --clobber \
+              "release-bundle/${PUBLIC}/"*.zip "release-bundle/${PUBLIC}/SHA256SUMS"
           else
-            gh release create "${TAG}" \
-              --repo "${REPO}" \
-              --title "PicoAide Harness ${TAG}" \
-              ${NOTES_FLAG} \
-              ${PRERELEASE} \
-              release-artifacts/*.AppImage release-artifacts/*.deb release-artifacts/*.exe release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt
+            gh release create "${TAG}" --repo "${REPO}" \
+              --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE} \
+              "release-bundle/${PUBLIC}/"*.zip "release-bundle/${PUBLIC}/SHA256SUMS"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+      # 取回即销毁:中转对象只应存在几分钟(R2 桶是公开读的,虽然前缀不可猜,
+      # 也没有理由让客户产物在公网多停留)。失败也执行,避免残留。
+      - name: Destroy the R2 transfer prefix
+        if: always()
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh clean --list channels.list
 
   # PR 场景:把本次提交的编译产物汇总评论到 PR(fork 分支 token 只读,跳过)。
   pr-summary:

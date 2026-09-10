@@ -18,7 +18,7 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>PicoAide 浏览器</title>
+<title>AI 浏览器</title>
 <style>
   :root {
     --surface: #f4f5f7;

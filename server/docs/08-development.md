@@ -9,7 +9,7 @@ internal/              # router(路由唯一真源)/serverauth(认证/管理端/
                        # capabilities(能力中心聚合)/connectors/brand(品牌门户)/
                        # bootstrap/telemetry/serverstore(DAO+PG 迁移)/util(crypto 等)
 webadmin/              # Vite React + shadcn,pages/(Login/Users/Departments/Auth/Brand/Gateway/Usage/Marketplace/Capabilities/Connectors/Audit/ErrorMonitoring/ServerInfo)
-scripts/               # install-server.sh(一键部署)+ deploy.sh(容器化生命周期)+ mock-upstream.go
+scripts/               # mock-upstream.go;部署脚本已于 2026-09-10 移除(部署走 ../../docs/deploy/AI-DEPLOY.md)
 docs/                  # 本文档集(superpowers/ 为历史设计文档)
 ```
 

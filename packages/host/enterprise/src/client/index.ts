@@ -13,19 +13,20 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { BrandConfig } from '../brand-sync.ts'
+import type { ChannelConfig } from '../channel-content.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
-    'pico/brand-changed'(brand: BrandConfig | null): void
+    'pico/channel-changed'(channel: ChannelConfig | null): void
   }
 }
 import { AccountSection } from './AccountSection.tsx'
-import { BraceMark, BrandName, BrandBadge } from './Brand.tsx'
+import { BraceMark, BrandName, BrandBadge } from './Channel.tsx'
 import { applyUpdateSection } from './UpdateSection.tsx'
-import { buildBrandCSSVars } from './brand-vars.ts'
+import { buildChannelCSSVars } from './channel-vars.ts'
 import { installFavicon } from './favicon.ts'
-import { startBrandStore, readBrandSync } from './brand-store.ts'
+import { channelTitle } from '../channel-content.ts'
+import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
 import { en, type EnterpriseKey, zh } from './locales.ts'
 
@@ -93,29 +94,31 @@ const BRAND_CSS = `
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
-  // 服务端品牌同步(登录后拉取 /api/brand; 登出回退默认)。
+  // 服务端渠道配置同步(登录后拉取 /api/client/v2/channel; 登出回退默认)。
   ctx.effect(
     () => {
       // 2026-09-08 P2-18:只启动一次(此前第 99 行先启动一次并丢弃 disposer,
       // 第 112 行又启动一次 → 双订阅,首个 disposer 永不释放)。
-      const offStore = startBrandStore(ctx)
-      // v3b §4.2: hero CSS 变量注入(品牌变化时更新)。
+      const offStore = startChannelStore(ctx)
+      // v3b §4.2: hero CSS 变量注入(渠道配置变化时更新)。
       // 注意: --pico-hero-headline/--pico-hero-tagline 被 BRAND_CSS 的
       // `content: var(…)` 消费, content 只接受字符串字面量, 值必须带引号
-      // 写入(buildBrandCSSVars 内 JSON.stringify), 否则整条声明非法、
-      // hero 标题文字不可见(2026-09 实测)。品牌色已下线(2026-09 决策)。
-      const applyVars = (brand: BrandConfig | null): void => {
+      // 写入(buildChannelCSSVars 内 JSON.stringify), 否则整条声明非法、
+      // hero 标题文字不可见(2026-09 实测)。渠道色已下线(2026-09 决策)。
+      const applyVars = (channel: ChannelConfig | null): void => {
         const root = document.documentElement
-        for (const [k, v] of Object.entries(buildBrandCSSVars(brand))) {
+        for (const [k, v] of Object.entries(buildChannelCSSVars(channel))) {
           root.style.setProperty(k, v)
         }
       }
-      applyVars(readBrandSync())
-      // 品牌变更驱动 hero 变量(与 brand-store 同事件;此处仅应用 CSS 变量)。
-      const off = ctx.on('pico/brand-changed', (brand) => applyVars(brand))
-      return () => { off(); offStore() }
+      applyVars(readChannelSync())
+      // 渠道变更驱动 hero 变量(与 channel-store 同事件;此处仅应用 CSS 变量)。
+      const off = ctx.on('pico/channel-changed', (channel) => applyVars(channel))
+      // 播种(本地)同样要驱动变量:否则 hero 标题停在回落文案上。
+      const offStoreValue = subscribeChannel((channel) => applyVars(channel))
+      return () => { off(); offStoreValue(); offStore() }
     },
-    'enterprise: brand store',
+    'enterprise: channel store',
   )
 
   // Enterprise client dictionaries (zh key source, en mirror).
@@ -184,36 +187,57 @@ export function apply(ctx: ClientContext): void {
     'enterprise: account section',
   )
 
-  // v3b §4.2: document.title 跟随品牌(brand.title), 品牌变化时更新。
+  // v3b §4.2: document.title 跟随渠道配置(channel.title), 渠道变化时更新。
   // 2026-09-05: 上游 dsh-client-ui-renderer 的 DocumentTitle 把 productTitle
   // 硬编码为 "DeepSeek Harness", 其 React useEffect 在本面插件 apply 之后
   // 运行, 会把标题盖回来(且带会话标题投影: `<会话名> — <产品名>`)。
-  // 这里在品牌标题之上加 MutationObserver 归一化: 仅替换产品名片段、
+  // 这里在渠道标题之上加 MutationObserver 归一化: 仅替换产品名片段、
   // 保留会话标题前缀, 不做无条件重写(避免与上游会话标题投影打架)。
   ctx.effect(() => {
     const UPSTREAM_PRODUCT_TITLE = 'DeepSeek Harness'
-    const productTitle = (brand: BrandConfig | null): string =>
-      brand?.enabled && brand.title ? brand.title : 'PicoAide Harness'
+    // 标题名与侧边栏同源(channel-content 的 channelTitle):渠道构建下不可能
+    // 回落厂商名 —— 页面标题是窗口/任务栏标题的来源。
+    const productTitle = (channel: ChannelConfig | null): string => channelTitle(channel)
     const current = (): string => document.title
-    const apply = (brand: BrandConfig | null): void => {
-      const product = productTitle(brand)
+    /**
+     * 上一次**我们**写进标题的产品名。
+     *
+     * 归一化必须对自己写过的值也成立:渠道内容(随包品牌播种)比上游的 React
+     * effect 晚到,第一遍只能按"当时已知的"产品名写(未播种时是内置官方名),
+     * 播种后必须能把它**再改一次**成渠道名。只认上游字面量的话,第二遍就会
+     * 因为"标题已不是 DeepSeek Harness"而放弃 —— 实测表现为:侧边栏已是渠道名,
+     * 窗口/taskbar 标题还停在厂商名。
+     */
+    let writtenProduct: string | undefined
+    const apply = (channel: ChannelConfig | null): void => {
+      const product = productTitle(channel)
       const t = current()
+      const known = writtenProduct === undefined
+        ? [UPSTREAM_PRODUCT_TITLE]
+        : [UPSTREAM_PRODUCT_TITLE, writtenProduct]
+      const bare = known.find(candidate => t === candidate)
+      const prefixed = known.find(candidate => t.endsWith(` — ${candidate}`))
       let next: string
-      if (t === UPSTREAM_PRODUCT_TITLE) {
+      if (bare !== undefined) {
         next = product
-      } else if (t.endsWith(` — ${UPSTREAM_PRODUCT_TITLE}`)) {
-        next = `${t.slice(0, -(UPSTREAM_PRODUCT_TITLE.length + 3))} — ${product}`
+      } else if (prefixed !== undefined) {
+        next = `${t.slice(0, -(prefixed.length + 3))} — ${product}`
       } else {
         next = t
       }
-      if (next !== t) document.title = next
+      if (next !== t) {
+        document.title = next
+        writtenProduct = product
+      }
     }
-    apply(readBrandSync())
-    const off = ctx.on('pico/brand-changed', (brand) => apply(brand))
-    const observer = new MutationObserver(() => apply(readBrandSync()))
+    apply(readChannelSync())
+    const off = ctx.on('pico/channel-changed', (channel) => apply(channel))
+    // 随包品牌的播种不经过 Host 事件,必须直接订阅 store 的值变化。
+    const offStoreValue = subscribeChannel((channel) => apply(channel))
+    const observer = new MutationObserver(() => apply(readChannelSync()))
     observer.observe(document.head, { childList: true, subtree: true, characterData: true })
-    return () => { off(); observer.disconnect() }
-  }, 'enterprise: document brand title')
+    return () => { off(); offStoreValue(); observer.disconnect() }
+  }, 'enterprise: document channel title')
 
   ctx.effect(() => {
     const style = document.createElement('style')

@@ -11,24 +11,32 @@ export type DesktopTrayLabelKey =
   | 'quit'
   | 'updateAvailable'
 
-const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string) => string>> = {
+/**
+ * 官方渠道产品名：**没有渠道包**时（本地开发）的兜底。
+ *
+ * 托盘/通知文案里的产品名必须走参数（渠道构建下是渠道自己的名字）——渠道客户
+ * 不该在系统托盘里看到厂商名。
+ */
+const OFFICIAL_PRODUCT_NAME = 'PicoAide Harness'
+
+const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string, product: string) => string>> = {
   en: {
     checkForUpdates: () => 'Check for Updates…',
     checkingForUpdates: () => 'Checking for Updates…',
-    downloadingUpdate: version => `Downloading PicoAide Harness ${version}…`,
+    downloadingUpdate: (version, product) => `Downloading ${product} ${version}…`,
     exportDiagnostics: () => 'Export Diagnostics…',
     openDesktop: productName => `Open ${productName}`,
     quit: () => 'Quit',
-    updateAvailable: version => `PicoAide Harness ${version} Available`,
+    updateAvailable: (version, product) => `${product} ${version} Available`,
   },
   zh: {
     checkForUpdates: () => '检查更新…',
     checkingForUpdates: () => '正在检查更新…',
-    downloadingUpdate: version => `正在下载 PicoAide Harness ${version}…`,
+    downloadingUpdate: (version, product) => `正在下载 ${product} ${version}…`,
     exportDiagnostics: () => '导出诊断信息…',
     openDesktop: productName => `打开 ${productName}`,
     quit: () => '退出',
-    updateAvailable: version => `PicoAide Harness ${version} 可用`,
+    updateAvailable: (version, product) => `${product} ${version} 可用`,
   },
 }
 
@@ -62,13 +70,20 @@ export function desktopLocaleFromLanguageTag(languageTag: string): DesktopLocale
   return /^zh(?:[-_]|$)/i.test(languageTag) ? 'zh' : 'en'
 }
 
-/** Resolve one native tray label in the active desktop locale. */
+/**
+ * Resolve one native tray label in the active desktop locale.
+ * @param locale - active desktop locale.
+ * @param key - label key.
+ * @param value - version (or, for `openDesktop`, the product name).
+ * @param product - resolved product name（渠道构建下即渠道名）;空值回落官方。
+ */
 export function desktopTrayLabel(
   locale: DesktopLocale,
   key: DesktopTrayLabelKey,
   value = '',
+  product = '',
 ): string {
-  return labels[locale][key](value)
+  return labels[locale][key](value, product === '' ? OFFICIAL_PRODUCT_NAME : product)
 }
 
 /** Resolve the native privacy confirmation shown before diagnostics export. */

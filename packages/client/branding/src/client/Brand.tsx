@@ -7,7 +7,7 @@ import {
   BRAND_NODES,
   BRAND_TILE_RADIUS_RATIO,
   BRAND_TILE_VIEWBOX,
-} from './brand-geometry.ts'
+} from './channel-geometry.ts'
 
 // build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
 // node types,声明最小面的 process 占位。
@@ -20,7 +20,7 @@ declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
  * `conversation.hero.brand.mark`) as a single declarative occupant.
  *
  * NOTE: this component is intentionally duplicated from
- * `packages/host/enterprise/src/client/Brand.tsx` (same artwork, same tokens):
+ * `packages/host/enterprise/src/client/Channel.tsx` (same artwork, same tokens):
  * the web profile deploys this package standalone and cross-package client
  * imports are disallowed by the plugin convention. Keep both in sync.
  *

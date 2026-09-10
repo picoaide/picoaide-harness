@@ -59,6 +59,6 @@ cmd/server/            # 服务端入口(--bootstrap-admin 等)
 internal/              # router(路由唯一真源)/serverauth/llmgateway/marketplace/agentshare/sharedskills/capabilities/connectors/brand/bootstrap/telemetry/serverstore/util
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/superpowers/      # 历史设计文档(2026-08 前)
-scripts/               # install-server.sh(oh-my-zsh 式一键部署)+ deploy.sh(容器化部署生命周期)+ mock-upstream.go(假上游)
+scripts/               # mock-upstream.go(假上游);部署脚本已于 2026-09-10 移除,部署走 ../../docs/deploy/AI-DEPLOY.md
 data/                  # 服务端运行时数据(0700,gitignore)
 ```

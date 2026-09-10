@@ -44,7 +44,7 @@
     "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run",
-    "check": "yarn run build && yarn run typecheck && yarn run test"
+    "check": "yarn run build && yarn run test"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.2"

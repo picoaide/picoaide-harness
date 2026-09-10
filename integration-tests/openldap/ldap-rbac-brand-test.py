@@ -15,7 +15,7 @@
 
 P2-53: 旧命名空间 /api/auth/*、/api/admin/*、/api/brand 已在 2026-09 移除。
 唯一真源 = server/internal/router:员工面 /api/client/v2/*、管理面 /api/server/admin/*、
-公开品牌 /api/client/v2/brand。本脚本全部路径已按真源核对。
+公开渠道内容 /api/client/v2/channel(2026-09-10:原 /brand 已由渠道配置取代)。本脚本全部路径已按真源核对。
 """
 import http.cookiejar
 import json
@@ -75,7 +75,7 @@ st, _, _ = post(BASE + '/api/server/admin/auth', {}, {'X-CSRF-Token': d.get('csr
 check('auditor PUT auth 被拒(非200)', st != 200, f'st={st}')
 
 # 6. 品牌 API(enabled=true 时验证品牌内容; 已配置 Acme AI)
-st, body = get(BASE + '/api/client/v2/brand')
+st, body = get(BASE + '/api/client/v2/channel')
 if '"enabled":true' in body:
     check('品牌启用且含 Acme AI', '"Acme AI"' in body, body[:80])
 else:

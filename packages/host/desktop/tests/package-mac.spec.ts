@@ -39,6 +39,8 @@ function options(calls: CommandCall[], logs: string[] = []): MacSmokePackageOpti
     builderCli: '/repo/node_modules/electron-builder/cli.js',
     verifier: '/repo/packages/host/desktop/scripts/verify-mac-smoke.ts',
     nodeExecutable: '/usr/local/bin/node',
+    // 官方渠道:不做 electron-builder 覆盖(渠道化由 channel-build.ts 负责)
+    channelConfigArgs: [],
     run: (command, args, cwd, env) => {
       calls.push({ command, args: [...args], cwd, env: { ...env } })
     },

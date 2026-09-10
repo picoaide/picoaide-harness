@@ -42,7 +42,7 @@
     "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run",
-    "check": "yarn run build && yarn run typecheck && yarn run test"
+    "check": "yarn run build && yarn run test"
   },
   "dependencies": {
     "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",

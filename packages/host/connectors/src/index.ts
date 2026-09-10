@@ -43,6 +43,11 @@ export interface ConnectorsOptions {
   connectors?: ConnectorDef[]
   /** Override the token store directory (tests). */
   storeBaseDir?: string
+  /**
+   * OAuth 客户端名（客户 IdP 授权同意页上显示的名字）。
+   * 渠道化时由 profile.ts 从渠道包注入；缺省为中性名。
+   */
+  clientName?: string
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -361,6 +366,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         onRequest: emitRequest,
         signal: controller.signal,
         ...(existing?.fields ? { fields: existing.fields } : {}),
+        ...(options.clientName === undefined ? {} : { clientName: options.clientName }),
       })
       // Token-form flows finish on auth-submit; runAuth only emitted the fields.
       if (def.authMode === 'token') {

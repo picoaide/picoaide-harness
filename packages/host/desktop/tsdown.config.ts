@@ -13,6 +13,7 @@ export default defineConfig([
       'asar-file-system': 'src/asar-file-system.ts',
       'asar-guidance': 'src/asar-guidance.ts',
       'desktop-home': 'src/desktop-home.ts',
+      'desktop-channel': 'src/desktop-channel.ts',
       profile: 'src/profile.ts',
       'desktop-plugins': 'src/desktop-plugins.ts',
       diagnostics: 'src/diagnostics.ts',

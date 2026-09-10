@@ -24,6 +24,34 @@ set -- "$@"
 if [ "$(id -u)" = "0" ]; then
   mkdir -p "$DATA_DIR" 2>/dev/null || true
   chown -R picoaide:picoaide "$DATA_DIR" 2>/dev/null || true
+fi
+
+# ---- 部署栈文件导出(交付面无外网/无仓库时的唯一来源) ----
+# 用法:
+#   docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out <image>
+# 把镜像内的 compose + Caddyfile + .env.example + VERSION 落到宿主目录,
+# 使「一个镜像」自包含整套部署所需文件——部署说明(AI 文档)只需引用它们。
+UNPACK="${PICOAI_UNPACK_STACK:-}"
+if [ -n "$UNPACK" ]; then
+  if [ ! -d /opt/picoaide/deploy ]; then
+    echo "错误: 镜像内缺少 /opt/picoaide/deploy" >&2; exit 1
+  fi
+  mkdir -p "$UNPACK" 2>/dev/null || true
+  cp -a /opt/picoaide/deploy/. "$UNPACK"/ 2>/dev/null || true
+  cp -a /opt/picoaide/VERSION "$UNPACK"/VERSION 2>/dev/null || true
+  # 客户端资产(镜像内已含,服务端直接对外提供;这里只是给离线部署顺手导出)
+  if [ -d /opt/picoaide/client ]; then
+    mkdir -p "$UNPACK/client" 2>/dev/null || true
+    cp -a /opt/picoaide/client/. "$UNPACK"/client/ 2>/dev/null || true
+  fi
+  # 导出目录可能由 root 拥有(宿主挂载),显式放开读权限便于后续 compose 读取
+  chmod -R a+rX "$UNPACK" 2>/dev/null || true
+  echo "已导出部署栈 → $UNPACK"
+  ls -1 "$UNPACK" 2>/dev/null | sed 's/^/  /'
+  exit 0
+fi
+
+if [ "$(id -u)" = "0" ]; then
   exec su-exec picoaide /app/picoaide-server "$@"
 fi
 exec /app/picoaide-server "$@"

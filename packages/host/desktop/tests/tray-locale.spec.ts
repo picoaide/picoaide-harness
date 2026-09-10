@@ -72,3 +72,32 @@ describe('desktopDiagnosticsPrivacyCopy', () => {
     expect(zh.detail).toMatch(/脱敏/)
   })
 })
+
+/**
+ * 渠道构建下托盘/通知里不得出现厂商名。
+ *
+ * 这些文案是**系统级**可见的（托盘菜单、通知中心），渠道客户最容易在这里看到
+ * 厂商品牌；产品名必须由 runtime 面传入（渠道构建下即渠道名）。
+ */
+describe('desktop tray labels use the resolved product name', () => {
+  it('renders the channel product name in update copy', () => {
+    expect(desktopTrayLabel('zh', 'updateAvailable', '2.7.0', 'Acme AI')).toBe('Acme AI 2.7.0 可用')
+    expect(desktopTrayLabel('zh', 'downloadingUpdate', '2.7.0', 'Acme AI')).toBe('正在下载 Acme AI 2.7.0…')
+    expect(desktopTrayLabel('en', 'updateAvailable', '2.7.0', 'Acme AI')).toBe('Acme AI 2.7.0 Available')
+    expect(desktopTrayLabel('en', 'downloadingUpdate', '2.7.0', 'Acme AI')).toBe('Downloading Acme AI 2.7.0…')
+  })
+
+  it('never leaks a vendor name for a channel build', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      for (const key of ['updateAvailable', 'downloadingUpdate'] as const) {
+        expect(desktopTrayLabel(locale, key, '9.9.9', 'Zephyr AI')).not.toContain('PicoAide')
+      }
+    }
+  })
+
+  it('falls back to the official product name when the caller passes none', () => {
+    // 本地开发/未渠道化构建:与改造前逐字节一致。
+    expect(desktopTrayLabel('zh', 'updateAvailable', '2.7.0')).toBe('PicoAide Harness 2.7.0 可用')
+    expect(desktopTrayLabel('en', 'downloadingUpdate', '2.7.0', '')).toBe('Downloading PicoAide Harness 2.7.0…')
+  })
+})

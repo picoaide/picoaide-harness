@@ -121,6 +121,19 @@ export interface UpdateDownloadProgressSnapshot {
   readonly totalBytes: number | undefined
 }
 
+/**
+ * 一次更新检查/下载使用的更新源。
+ *
+ * **客户端只从它登录的那台服务端取更新**（2026-09-10 定案）：更新源不是一个
+ * 内置常量，而是随会话变化的运行时值，由更新协调器从已登录会话推导后传下来。
+ */
+export interface DesktopUpdateSource {
+  /** 服务端版本清单的绝对地址（`serverManifestURL(session.serverURL)`）。 */
+  readonly manifestURL: string
+  /** 服务端自报的渠道 id（`GET /api/client/v2/channel`）；拿不到时省略。 */
+  readonly expectedChannel: string | undefined
+}
+
 /** Electron capabilities used by the headless update plugin. */
 export interface DesktopUpdateAdapter {
   /** Whether the running executable came from an Electron package. */
@@ -139,9 +152,10 @@ export interface DesktopUpdateAdapter {
   showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
   /**
    * Download and hand one confirmed update to the platform installer.
+   * @param source - 本次下载使用的更新源（服务端清单地址 + 期望渠道）。
    * @param onProgress - optional byte-progress callback while streaming.
    */
-  downloadAndOpen(version: string, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<void>
+  downloadAndOpen(version: string, source: DesktopUpdateSource, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
   /**
@@ -185,6 +199,14 @@ export interface DesktopRuntime {
 
   /** Locale currently used for native tray contributions. */
   readonly locale: DesktopLocale
+
+  /**
+   * Product name for native copy (tray/notification/dialog).
+   *
+   * 渠道构建下就是渠道自己的名字（来自随包 channel.json 的产品名）——
+   * native 文案不得硬编码厂商名。
+   */
+  readonly productName: string
 
   /** Native network, update-download, and notification adapter. */
   readonly updates: DesktopUpdateAdapter

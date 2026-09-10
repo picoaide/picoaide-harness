@@ -4,14 +4,32 @@ import { open } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
-import type { UpdateDownloadProgressSnapshot } from './runtime.ts'
+import type { DesktopUpdateSource, UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
 import type { DesktopUpdateErrorCategory } from './desktop-update-contract.ts'
 import {
-  checkForChannelUpdate,
+  CHANNEL_ID_PATTERN,
+  serverChannelURL,
+  serverManifestURL,
+} from './desktop-release.ts'
+import {
+  checkForUpdateDetailed,
   parseSemVer,
   type UpdateCheckResult,
 } from './update-checker.ts'
+
+/**
+ * 会话变化事件（由 `@picoaide/dsh-enterprise` 的 session-service 发出）。
+ *
+ * 这里自行声明而不是 import enterprise 的类型:本包的 tsconfig 只包含
+ * `src/*.ts`，不引入 enterprise 的类型，因此同名增强不会冲突；运行时契约
+ * 靠事件名字符串，与 `packages/host/cron/src/index.ts` 的既有做法同源。
+ */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'pico/session-changed'(session: { serverURL?: string } | null): void
+  }
+}
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-updates'
@@ -27,7 +45,6 @@ const DOWNLOAD_ERROR_CATEGORIES: ReadonlySet<string> = new Set([
   'network',
   'release-missing',
   'checksum-mismatch',
-  'checksum-missing',
   'invalid-artifact',
 ])
 
@@ -69,6 +86,17 @@ interface UpdateStateV2 {
 const EMPTY_STATE: UpdateStateV2 = { version: 2 }
 
 /**
+ * 一次更新检查的结果。
+ *
+ * 用三态而不是 `UpdateCheckResult | null`:「未登录」与「检查失败」必须能被
+ * UI 区分 —— 把两者都报成"网络不可达"会让人去查网络，而真因是还没登录
+ * （审计 2026-09-10 点名的误导项）。
+ */
+type CheckOutcome =
+  | { readonly kind: 'ok'; readonly result: UpdateCheckResult }
+  | { readonly kind: 'failed'; readonly error: DesktopUpdateErrorCategory }
+
+/**
  * Register effect-scoped update polling and its dynamic tray command.
  * @param ctx - Host context carrying the desktop native adapter.
  * @param config - validated polling and timeout values.
@@ -86,11 +114,103 @@ export function apply(ctx: Context, config: Config): void {
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     let requestTimer: ReturnType<typeof setTimeout> | undefined
     let requestController: AbortController | undefined
+    let channelController: AbortController | undefined
     let downloadController: AbortController | undefined
-    let inFlight: Promise<UpdateCheckResult | null> | undefined
+    let inFlight: Promise<CheckOutcome> | undefined
     let manualTask: Promise<void> | undefined
     let downloadTask: Promise<void> | undefined
     let refreshTray = (): void => {}
+
+    /**
+     * 当前登录的服务端地址（`null` = 未登录）。
+     *
+     * 更新源随会话变化:登录/切换服务端/登出都必须让缓存失效，否则会把
+     * 上一台服务端的版本当成这一台的。
+     */
+    let serverURL: string | null = null
+    /** 服务端自报的渠道 id（`GET /api/client/v2/channel`），每次会话变化重取。 */
+    let expectedChannel: string | undefined
+    /** 渠道内容是否已为本会话取过（失败也标记，避免每次检查都重试）。 */
+    let channelResolved = false
+
+    /** 从会话载荷里取服务端地址（防御式:事件来自别的包，字段可能缺失）。 */
+    const serverURLOf = (session: unknown): string | null => {
+      if (typeof session !== 'object' || session === null) return null
+      const value = (session as { serverURL?: unknown }).serverURL
+      return typeof value === 'string' && value !== '' ? value : null
+    }
+
+    /**
+     * 会话变化：重置更新状态并重新解析渠道。
+     *
+     * 换服务端等于换更新源 —— 上一台的"有新版本"必须清掉，否则会把 A 服务端
+     * 的版本提示成 B 服务端可升级。
+     */
+    const onSessionChanged = (session: unknown): void => {
+      // 事件监听器里的异常会冒泡进 Cordis 的事件派发,而桌面壳把它当致命错误
+      // (整树重启/应用退出)。更新状态只是展示层,绝不该因为会话切换而拖垮宿主。
+      try {
+        const next = serverURLOf(session)
+        if (next === serverURL) return
+        serverURL = next
+        expectedChannel = undefined
+        channelResolved = false
+        availableVersion = undefined
+        lastError = undefined
+        refreshTray()
+        publishState()
+      } catch {
+        // 会话切换时的状态重置失败不影响宿主;下一次检查会重新推导更新源。
+      }
+    }
+
+    /**
+     * 取服务端自报的渠道 id（公开端点，无需令牌）。
+     *
+     * 这是**可选的对账**,不是检查的前置条件:
+     *   - 必须与清单请求**并行**,绝不阻塞它 —— 否则一次慢探测会吃掉整个
+     *     请求超时预算,把"检查更新"拖成"检查更新失败";
+     *   - 失败不影响更新检查:拿不到就省略渠道比对(清单自带非空
+     *     `channel_id` 仍是硬要求)。取到了则用于校验清单声明的渠道与服务端
+     *     对外宣称的渠道一致 —— 服务端配置出错(镜像里的渠道内容与声明的
+     *     渠道对不上)时立即暴露,而不是静默放行。
+     */
+    const startChannelProbe = (): void => {
+      if (channelResolved || serverURL === null || disposed) return
+      // 每个会话只探一次:拿不到就算了,不为此反复发请求。
+      channelResolved = true
+      const target = serverURL
+      const controller = new AbortController()
+      channelController = controller
+      void (async () => {
+        try {
+          const response = await adapter.request(serverChannelURL(target), {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+            redirect: 'error',
+            signal: controller.signal,
+          })
+          if (response.status !== 200) return
+          const payload: unknown = await response.json()
+          if (typeof payload !== 'object' || payload === null) return
+          const id = (payload as { channel_id?: unknown }).channel_id
+          // 取回期间会话可能已经切换:过期的结果必须丢弃。
+          if (typeof id === 'string' && CHANNEL_ID_PATTERN.test(id) && serverURL === target) {
+            expectedChannel = id
+          }
+        } catch {
+          // 渠道内容取不到不是失败:省略比对即可。
+        } finally {
+          if (channelController === controller) channelController = undefined
+        }
+      })()
+    }
+
+    /** 当前更新源;未登录时为 null（没有可问的服务端就没有更新源）。 */
+    const currentSource = (): DesktopUpdateSource | null => serverURL === null
+      ? null
+      : { manifestURL: serverManifestURL(serverURL), expectedChannel }
 
     /** Push the current observable update state to the renderer bridge. */
     const publishState = (): void => {
@@ -108,6 +228,19 @@ export function apply(ctx: Context, config: Config): void {
         // The badge bridge is optional; state transitions must never fail the update flow.
       }
     }
+
+    // 更新源随会话变化:登录后才有服务端可问,登出/切换服务端必须让缓存失效。
+    // `picoSession` 由 enterprise 的 session-service 提供;这里防御式读取 ——
+    // 没有会话服务的组装(纯桌面冒烟)等同于"未登录",而不是崩溃。
+    const sessionService = ctx.get('picoSession') as
+      | { getSession?: () => unknown }
+      | undefined
+    try {
+      onSessionChanged(sessionService?.getSession?.() ?? null)
+    } catch {
+      onSessionChanged(null)
+    }
+    ctx.on('pico/session-changed', onSessionChanged)
 
     const persistState = async (): Promise<void> => {
       try {
@@ -137,23 +270,40 @@ export function apply(ctx: Context, config: Config): void {
       await persistState()
     }
 
-    const startCheck = (): Promise<UpdateCheckResult | null> => {
+    const startCheck = (): Promise<CheckOutcome> => {
       if (inFlight !== undefined) return inFlight
       checking = true
       refreshTray()
       const controller = new AbortController()
       requestController = controller
 
-      const task = (async () => {
+      const task = (async (): Promise<CheckOutcome> => {
         requestTimer = setTimeout(() => { controller.abort() }, config.requestTimeoutMs)
+        // 未登录 = 没有更新源。客户端只从它登录的那台服务端取更新
+        // (2026-09-10 定案),所以这里不是失败而是"还没有可问的对象"。
+        if (serverURL === null) return { kind: 'failed', error: 'not-signed-in' }
+        const manifestURL = serverManifestURL(serverURL)
         try {
-          return await checkForChannelUpdate({
+          // 清单请求先发:渠道探测只是可选对账,与它并行即可,绝不排在它前面
+          // (排在前面会把探测的耗时算进本就很紧的请求超时预算)。
+          const pending = checkForUpdateDetailed({
             currentVersion: adapter.currentVersion,
+            manifestURL,
             signal: controller.signal,
             request: adapter.request,
+            // 期望渠道用**当前已知**的值(探测结果从下一次检查开始生效)。
+            ...(expectedChannel === undefined ? {} : { expectedChannel }),
           })
+          startChannelProbe()
+          const outcome = await pending
+          if (outcome.kind === 'result') return { kind: 'ok', result: outcome.result }
+          // 服务端能连上、清单也拿到了,只是它给不出安全的下载地址(部署没配
+          // 对外 https 地址)——必须与"网络不可达""已是最新"区分开,否则界面
+          // 显示"已是最新"而升级链路其实是断的(2026-09-10 审计)。
+          if (outcome.kind === 'unavailable') return { kind: 'failed', error: 'server-unavailable' }
+          return { kind: 'failed', error: 'network' }
         } catch {
-          return null
+          return { kind: 'failed', error: 'network' }
         }
       })().finally(() => {
         if (requestTimer !== undefined) clearTimeout(requestTimer)
@@ -167,15 +317,16 @@ export function apply(ctx: Context, config: Config): void {
       return task
     }
 
-    const observeResult = (result: UpdateCheckResult | null): string | undefined => {
+    const observeResult = (outcome: CheckOutcome): string | undefined => {
       if (disposed) return undefined
-      if (result === null) {
-        // 检查失败(网络/限流/超时):保留此前可用版本,但记录错误供 UI 提示。
-        if (availableVersion === undefined) lastError = 'network'
+      if (outcome.kind === 'failed') {
+        // 检查失败(未登录/网络/超时):保留此前可用版本,但记录错误供 UI 提示。
+        if (availableVersion === undefined) lastError = outcome.error
         refreshTray()
         publishState()
         return undefined
       }
+      const result = outcome.result
       lastError = undefined
       availableVersion = result.status === 'update-available' && adapter.canDownload
         ? result.latestVersion
@@ -211,8 +362,16 @@ export function apply(ctx: Context, config: Config): void {
         downloadProgress = undefined
         refreshTray()
         publishState()
+        // 更新源在下载发生的这一刻重新取:会话可能已经变化(换服务端/登出)。
+        const source = currentSource()
+        if (source === null) {
+          lastError = 'not-signed-in'
+          refreshTray()
+          publishState()
+          return
+        }
         try {
-          await adapter.downloadAndOpen(version, controller.signal, (progress) => {
+          await adapter.downloadAndOpen(version, source, controller.signal, (progress) => {
             downloadProgress = progress
             publishState()
           })
@@ -251,14 +410,14 @@ export function apply(ctx: Context, config: Config): void {
           await offerDownload(availableVersion, false)
           return
         }
-        const result = await startCheck()
+        const outcome = await startCheck()
         if (disposed) return
-        const version = observeResult(result)
+        const version = observeResult(outcome)
         if (version !== undefined) {
           await offerDownload(version, false)
           return
         }
-        await adapter.showManualCheckResult(result)
+        await adapter.showManualCheckResult(outcome.kind === 'ok' ? outcome.result : null)
       })().catch(() => undefined).finally(() => { manualTask = undefined })
       return manualTask
     }
@@ -288,8 +447,13 @@ export function apply(ctx: Context, config: Config): void {
       label: () => downloadingVersion === undefined
         ? availableVersion === undefined
           ? desktopTrayLabel(ctx.desktopRuntime.locale, checking ? 'checkingForUpdates' : 'checkForUpdates')
-          : desktopTrayLabel(ctx.desktopRuntime.locale, 'updateAvailable', availableVersion)
-        : desktopTrayLabel(ctx.desktopRuntime.locale, 'downloadingUpdate', downloadingVersion),
+          : desktopTrayLabel(
+            ctx.desktopRuntime.locale, 'updateAvailable', availableVersion, ctx.desktopRuntime.productName,
+          )
+        // 渠道构建下托盘里显示的必须是渠道名:产品名经 runtime 面取,不硬编码。
+        : desktopTrayLabel(
+          ctx.desktopRuntime.locale, 'downloadingUpdate', downloadingVersion, ctx.desktopRuntime.productName,
+        ),
       invoke: runManualCheck,
     })
     refreshTray = registration.refresh
@@ -309,6 +473,7 @@ export function apply(ctx: Context, config: Config): void {
       if (pollTimer !== undefined) clearTimeout(pollTimer)
       if (requestTimer !== undefined) clearTimeout(requestTimer)
       requestController?.abort()
+      channelController?.abort()
       downloadController?.abort()
       registration.dispose()
       // Native dialogs are not cancellable. Await only file state and the abortable version request.

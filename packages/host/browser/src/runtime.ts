@@ -58,6 +58,14 @@ interface EvalResult {
 }
 
 /** Wait-for condition spec. */
+/**
+ * 浏览器窗口/标签标题的中性缺省值。
+ *
+ * 刻意不含厂商品牌：仓库里不留任何品牌描述。渠道构建下窗口标题应显示渠道名，
+ * 由渠道包注入（迁移见 docs/planning/2026-09-10-channel-package-reference.md）。
+ */
+export const BROWSER_DEFAULT_TITLE = 'AI 浏览器'
+
 export interface WaitForOptions {
   condition: 'element-present' | 'element-visible' | 'text-appear' | 'url-change' | 'network-idle' | 'settled'
   selector?: string | undefined
@@ -746,8 +754,8 @@ export class BrowserRuntime {
   private refreshWindowTitle(tab: BrowserTab): void {
     if (this.window === null || this.window.isDestroyed()) return
     if (tab.id !== this.pool.activeTab) return
-    const title = tab.title !== '' ? tab.title : 'PicoAide 浏览器'
-    this.window.setTitle(title === 'PicoAide 浏览器' ? title : `${title} — PicoAide 浏览器`)
+    const title = tab.title !== '' ? tab.title : BROWSER_DEFAULT_TITLE
+    this.window.setTitle(title === BROWSER_DEFAULT_TITLE ? title : `${title} — ${BROWSER_DEFAULT_TITLE}`)
   }
 
   private releaseTabDisposers(id: number): void {

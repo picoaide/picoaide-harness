@@ -10,7 +10,6 @@ make test-server       # 服务端各业务域测试(显式枚举全部包,见 M
 make build-server      # make webadmin + go build -o bin/picoaide-server
 make webadmin          # cd webadmin && npm run build(产物嵌入服务端二进制)
 make docker-image      # 服务端 Docker 镜像(ghcr.io/picoaide/picoaide-harness-server)
-make release-export    # 离线导出镜像 tar(内网 docker load)
 make check             # gofmt 校验 + go vet + make test-server + webadmin 测试与构建
 ```
 
@@ -48,10 +47,10 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 ### 生产建议
 
 - 服务端放在企业内网,前置 HTTPS(反向代理终结 TLS);登录页拒绝非 HTTPS 远程地址。
-- 迁移/备份:PG 数据在 pg-data/,备份用 `deploy.sh backup`(含 pg_dump)+ picoaide-data/ master key;
-  PostgreSQL 后端用 `deploy.sh backup`(pg_dump)或外部 PG 运维策略。
+- 迁移/备份:PG 数据在 pg-data/;备份 = 打包 picoaide-data/(master key)+ pg_dump,步骤见 ../../docs/deploy/AI-DEPLOY.md §6.3;
+  外部 PG 用企业既有备份策略。
 - 假上游联调:无外网/无 key 环境 `go run scripts/mock-upstream.go` 起 mock 上游,验证网关链路。
-- **容器化部署(推荐)**:见 [docs/DEPLOY.md](DEPLOY.md)(compose 私有网段+固定 IP、Caddy 双证书模式、deploy.sh 自动化、PG 后端、升级/备份/恢复)。
+- **容器化部署(推荐)**:见 [../../docs/deploy/AI-DEPLOY.md](../../docs/deploy/AI-DEPLOY.md)(唯一部署说明);设计细节(compose 私有网段+固定 IP、Caddy 三证书模式、数据目录)见 [docs/DEPLOY.md](DEPLOY.md)。
 
 ## 3. Docker 镜像构建与发布
 
@@ -66,7 +65,6 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 ```bash
 make docker-image                 # 本地单平台(版本=VERSION,默认 git describe)
 make docker-image TAG=v2.4.6      # 指定版本
-make release-export TAG=v2.4.6    # 离线导出 tar(内网 docker load)
 docker buildx build --platform linux/amd64 \
   --build-arg VERSION=2.4.6 -t ghcr.io/picoaide/picoaide-harness-server:v2.4.6 --push .
 ```

@@ -4,8 +4,7 @@ import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { User, Lock, Loader2, KeyRound, ShieldCheck } from 'lucide-react'
-import { CLIENT_API } from '../api'
-import { BRAND_LOGO_URL } from '../lib/brand-assets'
+import { NEUTRAL_ADMIN_TITLE, useChannel } from '../lib/channel'
 
 // 管理后台登录页 — v3b: 仅本地账号密码。
 // SSO(OIDC/OpenID)与 LDAP 一律不进管理后台: 后台是本地账户唯一入口,
@@ -20,14 +19,11 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  // v3b §5.2: 登录页品牌跟随(公开端点)。
-  const [brand, setBrand] = useState<{ display_name?: string; logo_url?: string; tagline?: string } | null>(null)
-
-  useEffect(() => {
-    fetch(`${CLIENT_API}/brand`).then((r) => r.json()).then((d: any) => {
-      if (d?.enabled && d.login) setBrand(d.login)
-    }).catch(() => { /* default */ })
-  }, [])
+  // 登录页跟随渠道内容(公开端点 /api/client/v2/channel)。
+  // 旧的 /api/client/v2/brand 已随运行时品牌体系删除,此前这里 404 后一直
+  // 回落到硬编码的厂商名(审计 2026-09-10)。
+  const channel = useChannel()
+  const brand = channel?.login ?? null
 
   useEffect(() => {
     // 管理后台只允许本地账户: 无方式选择器, 直接聚焦用户名。
@@ -74,20 +70,19 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
   }
 
-  // 兜底图形: 编译期从 brands/official/logo.svg 注入(见 ../lib/brand-assets),
-  // 与客户端/门户同源; 禁止手写 SVG 几何或字母 P 等编造图形(旧版已退役)。
+  // logo 一律来自渠道内容(与服务端门户/客户端同源)。渠道未配 logo 时**不画图** ——
+  // 绝不回落厂商图形:管理后台是渠道客户的界面,出现厂商标识即白标失败
+  // (审计 2026-09-10)。
   const logo = brand?.logo_url ? (
     <img src={brand.logo_url} alt="logo" className="mx-auto mb-4 h-14 w-14 rounded-lg object-contain" />
-  ) : (
-    <img src={BRAND_LOGO_URL} alt="logo" className="mx-auto mb-4 h-14 w-14 object-contain" draggable={false} />
-  )
+  ) : null
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#F9FAFB] p-4">
       <div className="w-full max-w-[420px] rounded-xl border border-border bg-white p-6 shadow-[0_8px_30px_rgba(15,17,21,0.06)] sm:p-8">
         <div className="mb-6 text-center">
           {logo}
-          <h1 className="text-[22px] font-bold tracking-tight text-foreground">{brand?.display_name || 'PicoAide'} 管理后台</h1>
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">{brand?.display_name || NEUTRAL_ADMIN_TITLE}</h1>
           <p className="mt-1.5 text-[13px] text-muted-foreground">Enterprise AI Gateway · Admin Console</p>
           {step === 'password' ? (
             <p className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
@@ -151,7 +146,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           </form>
         )}
 
-        <p className="mt-6 text-center text-[11px] text-muted-foreground">© 2026 PicoAide · Enterprise Internal Deployment</p>
+        <p className="mt-6 text-center text-[11px] text-muted-foreground">企业内部部署</p>
       </div>
     </div>
   )

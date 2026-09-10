@@ -21,6 +21,23 @@ packages/host/desktop/build/app-icon.png
 packages/host/desktop/build/app-icon-mac.png
 packages/host/desktop/build/tray-icon*.png
 packages/host/desktop/build/assistedMessages.yml
+# 渠道包(私有仓 picoaide/channels/<id>/channel.json)由**打包脚本**在打包前
+# 就位到 build/(scripts/channel-build.ts 的 stageChannelProfile),随应用资源
+# 分发;内容是客户品牌,绝不入库。
+packages/host/desktop/build/channel.json
+# 渠道构建专用的 electron-builder 配置(同样由打包脚本生成,含渠道名/appId/
+# 协议 scheme)。
+packages/host/desktop/build/channel-electron-builder.cjs
+# CI 渠道脚本的中间产物(scripts/ci-channels.sh 等本地跑时会产生)
+channels.list
+channels-context/
+client-assets/
+release-bundle/
+release-artifacts/
+transfer-out/
+image.tar
+# E2E 报告/截图(CI 收集后上传为 artifact;本地跑 e2e:client 也会生成)
+packages/host/desktop/e2e-results/
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/
@@ -90,3 +107,7 @@ server/.scan-staticcheck.txt
 
 # 浏览器 store 回退目录（无 Electron userData 时的兜底;审计 2026-09-08 P2-38b）
 .browser-store/
+
+# 渠道配置来自私有仓 picoaide/channels(CI 检出覆盖;本目录只保留 README)
+channels/*
+!channels/README.md

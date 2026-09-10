@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+import { readDesktopChannelProfile, type DesktopChannelProfile } from './desktop-channel.ts'
 import {
   composeEntries,
   healProfilesModuleFallback,
@@ -83,6 +84,55 @@ const ADVANCED_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
  * @deprecated The desktop shell is fixed to advanced mode; this API is kept
  * for backward compatibility and always returns 'advanced'.
  */
+/**
+ * 渠道包 → 各行 patch（纯函数，无文件 I/O；`readDesktopChannelProfile` 的结果由
+ * 调用方传入，于是这条注入链可以脱离真实 `build/channel.json` 单测）。
+ *
+ * 为什么必须是**组装期**而不是运行时下发：登录页在认证之前就渲染品牌区，那一刻
+ * 服务端地址可能正是用户要输入的东西（问服务端要它自己是鸡生蛋），窗口标题与
+ * 品牌名在用户敲第一个键之前就已可见。
+ *
+ * 官方构建（没有渠道包）返回空数组 —— 行为与渠道化改造前逐字节一致。
+ * @param channelProfile - 随包分发的渠道内容（缺失=未渠道化）。
+ * @param rows - 已被前面的 patch 触及的行 id 集合（只注入确实存在的行）。
+ * @returns 追加到组合结果尾部的 patch 列表。
+ */
+export function channelProfilePatches(
+  channelProfile: DesktopChannelProfile | undefined,
+  rows: ReadonlySet<string> | ReadonlyMap<string, unknown>,
+): Array<Record<string, unknown>> {
+  if (channelProfile === undefined) return []
+  const out: Array<Record<string, unknown>> = []
+  // 服务端地址与品牌文案合成**一次** patch：同一行 patch 两次时后一条会整体
+  // 覆盖前一条的 config（丢域名或多丢品牌）。
+  if (rows.has('picoaide-auth-gate')) {
+    out.push({
+      id: 'picoaide-auth-gate',
+      config: {
+        ...(channelProfile.defaultServerURL === undefined ? {} : { defaultServer: channelProfile.defaultServerURL }),
+        brand: channelProfile.brand,
+      },
+    })
+  }
+  // 客户端界面（侧边栏/顶栏/登录后品牌）的随包兜底：服务端可达时以服务端下发的
+  // 渠道内容为准，不可达/未登录时用它 —— 绝不回落厂商品牌。
+  if (rows.has('picoaide-channel-sync')) {
+    out.push({
+      id: 'picoaide-channel-sync',
+      config: { brand: channelProfile.brand },
+    })
+  }
+  // 连接器 OAuth 的客户端名会显示在**客户自己的 IdP 授权同意页**上，
+  // 渠道构建下必须是该渠道的产品名（缺省是中性名，绝不含厂商品牌）。
+  if (channelProfile.productName !== undefined && rows.has('pico-connectors')) {
+    out.push({
+      id: 'pico-connectors',
+      config: { clientName: `${channelProfile.productName} Connector` },
+    })
+  }
+  return out
+}
+
 export function parseDesktopShellMode(value: unknown): DesktopShellMode {
   if (value === undefined) return DEFAULT_DESKTOP_SHELL_MODE
   if (value === 'advanced' || value === 'compatibility') return 'advanced'
@@ -593,6 +643,10 @@ export async function prepareDesktopProfile(
   if (desktopShell === undefined) {
     throw new Error(`${BIN_NAME}: desktop profile has no desktop-shell row`)
   }
+  // 渠道包（随包分发的 channels/<id>/channel.json）在**组装期**生效：
+  // 产品名/窗口标题在登录页出现时就已经可见，服务端地址更是登录前就要用
+  // （问服务端要它自己是鸡生蛋），所以两者都必须来自包内配置而非运行时下发。
+  const channelProfile = readDesktopChannelProfile()
   patches.push({
     id: 'desktop-shell',
     disabled: false,
@@ -600,8 +654,11 @@ export async function prepareDesktopProfile(
       ...rowConfig(desktopShell),
       mode,
       port,
+      ...(channelProfile?.productName === undefined ? {} : { productName: channelProfile.productName }),
+      ...(channelProfile?.windowTitle === undefined ? {} : { windowTitle: channelProfile.windowTitle }),
     },
   })
+  patches.push(...channelProfilePatches(channelProfile, rows))
   return {
     homeDir: home,
     profile,

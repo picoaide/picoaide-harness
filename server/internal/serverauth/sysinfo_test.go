@@ -39,7 +39,8 @@ func TestHandleServerInfoUpdateCheck(t *testing.T) {
 	a := &AdminAPI{DB: db, UpdateChecker: &fakeChecker{res: &updatecheck.Result{
 		Latest:          "2.6.0",
 		UpdateAvailable: true,
-		ReleaseURL:      "https://github.com/picoaide/picoaide-harness/releases/tag/v2.6.0",
+		ImageTag:        "v2.6.0",
+		ManifestURL:     "https://release.picoaide.com/official/latest.json",
 		CheckedAt:       "2026-08-31T00:00:00Z",
 	}}}
 	r := gin.New()
@@ -56,7 +57,8 @@ func TestHandleServerInfoUpdateCheck(t *testing.T) {
 		UpdateCheck *struct {
 			Latest          string `json:"latest"`
 			UpdateAvailable bool   `json:"update_available"`
-			ReleaseURL      string `json:"release_url"`
+			ImageTag        string `json:"image_tag"`
+			ManifestURL     string `json:"manifest_url"`
 		} `json:"update_check"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -73,6 +75,13 @@ func TestHandleServerInfoUpdateCheck(t *testing.T) {
 	}
 	if resp.UpdateCheck.Latest != "2.6.0" {
 		t.Errorf("latest = %q", resp.UpdateCheck.Latest)
+	}
+	// 升级目标与清单来源必须透传到管理端(运维据此执行升级)
+	if resp.UpdateCheck.ImageTag != "v2.6.0" {
+		t.Errorf("image_tag = %q, want v2.6.0", resp.UpdateCheck.ImageTag)
+	}
+	if resp.UpdateCheck.ManifestURL != "https://release.picoaide.com/official/latest.json" {
+		t.Errorf("manifest_url = %q", resp.UpdateCheck.ManifestURL)
 	}
 }
 

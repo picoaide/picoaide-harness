@@ -1,5 +1,13 @@
 /** Electron implementation of the launcher-provided desktop runtime capability. */
 
+/**
+ * 官方渠道产品名：没有渠道包时（本地开发）的兜底。
+ *
+ * native 文案（托盘/通知/弹窗/失败页）一律经 `this.productName`，渠道构建下
+ * 那里是渠道自己的名字。
+ */
+const OFFICIAL_PRODUCT_NAME = 'PicoAide Harness'
+
 import {
   app,
   BrowserWindow,
@@ -27,6 +35,7 @@ import type {
   DesktopTrayItemGroup,
   DesktopTrayItemRegistration,
   DesktopUpdateAdapter,
+  DesktopUpdateSource,
   UpdateDownloadProgressSnapshot,
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
@@ -82,7 +91,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     request: (url, init) => net.fetch(url, init),
     confirmDownload: version => this.confirmUpdateDownload(version),
     showManualCheckResult: result => this.showManualUpdateCheckResult(result),
-    downloadAndOpen: (version, signal, onProgress) => this.downloadAndOpenUpdate(version, signal, onProgress),
+    downloadAndOpen: (version, source, signal, onProgress) => this.downloadAndOpenUpdate(version, source, signal, onProgress),
     notify: notification => { this.showNotification(notification) },
   }
 
@@ -104,9 +113,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** Session-open handler installed by the desktop-shell plugin (notification click). */
   private sessionOpenHandler: ((sessionId: string) => void) | undefined
 
-  /** Product name for native menus, trays, and update notifications (falls back while unscheduled). */
-  private productName(): string {
-    return this.scheduled?.productName ?? 'PicoAide Harness'
+  /**
+   * Product name for native menus, trays, and update notifications.
+   *
+   * 渠道构建下由 profile 组装置为渠道产品名；未调度/未渠道化时回落官方名。
+   */
+  get productName(): string {
+    return this.scheduled?.productName ?? OFFICIAL_PRODUCT_NAME
   }
 
   constructor(
@@ -367,12 +380,15 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       ? 'Unknown client plugin'
       : report.plugins.map(plugin => `- ${plugin}`).join('\n')
     const error = report.error === undefined ? 'The client Loader did not provide an error message.' : report.error
+    // 产品名取自 profile 组装配置（渠道构建下即渠道自己的名字）—— 失败弹窗
+    // 是渠道客户最可能看到的"厂商品牌露出"位置之一。
+    const product = this.productName
     const result = await dialog.showMessageBox({
       type: 'error',
       title: 'Plugin Recovery',
-      message: 'PicoAide Harness could not load all plugins.',
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart PicoAide Harness after resolving the failing plugin.`,
-      buttons: ['Restart PicoAide Harness', 'Dismiss'],
+      message: `${product} could not load all plugins.`,
+      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart ${product} after resolving the failing plugin.`,
+      buttons: [`Restart ${product}`, 'Dismiss'],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -435,8 +451,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private async confirmUpdateDownload(version: string): Promise<boolean> {
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName()} Update Available`,
-      message: `${this.productName()} ${version} is available.`,
+      title: `${this.productName} Update Available`,
+      message: `${this.productName} ${version} is available.`,
       detail: 'Download this update now?',
       buttons: ['Download', 'Later'],
       defaultId: 1,
@@ -452,7 +468,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       await dialog.showMessageBox({
         type: 'warning',
         title: 'Unable to Check for Updates',
-        message: `${this.productName()} could not check for updates.`,
+        message: `${this.productName} could not check for updates.`,
         detail: 'Please try again later.',
         buttons: ['OK'],
         defaultId: 0,
@@ -464,8 +480,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (result.status === 'up-to-date') {
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName()} Is Up to Date`,
-        message: `No newer version of ${this.productName()} is available.`,
+        title: `${this.productName} Is Up to Date`,
+        message: `No newer version of ${this.productName} is available.`,
         detail: `Installed version: ${result.currentVersion}`,
         buttons: ['OK'],
         defaultId: 0,
@@ -476,8 +492,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName()} Update Available`,
-      message: `${this.productName()} ${result.latestVersion} is available.`,
+      title: `${this.productName} Update Available`,
+      message: `${this.productName} ${result.latestVersion} is available.`,
       detail: 'Installer downloads are unavailable in this build.',
       buttons: ['OK'],
       defaultId: 0,
@@ -488,6 +504,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** Download a confirmed installer and hand it to the native installation flow. */
   private async downloadAndOpenUpdate(
     version: string,
+    source: DesktopUpdateSource,
     signal: AbortSignal,
     onProgress?: (progress: UpdateDownloadProgressSnapshot) => void,
   ): Promise<void> {
@@ -497,9 +514,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const artifactPath = await downloadDesktopUpdate({
       platform: this.platform,
       version,
+      manifestURL: source.manifestURL,
       userDataPath: app.getPath('userData'),
       request: (url, init) => net.fetch(url, init),
       signal,
+      ...(source.expectedChannel === undefined ? {} : { expectedChannel: source.expectedChannel }),
       ...(onProgress === undefined ? {} : { onProgress }),
     })
     signal.throwIfAborted()
@@ -510,8 +529,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       signal.throwIfAborted()
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName()} Update Downloaded`,
-        message: `${this.productName()} ${version} is ready to install.`,
+        title: `${this.productName} Update Downloaded`,
+        message: `${this.productName} ${version} is ready to install.`,
         detail: `新版本 AppImage 已下载到: ${artifactPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
         buttons: ['OK'],
         defaultId: 0,
@@ -526,9 +545,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       signal.throwIfAborted()
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName()} Update Downloaded`,
-        message: `${this.productName()} ${version} is ready to install.`,
-        detail: `The disk image has opened. Replace ${this.productName()} in Applications, then reopen it.`,
+        title: `${this.productName} Update Downloaded`,
+        message: `${this.productName} ${version} is ready to install.`,
+        detail: `The disk image has opened. Replace ${this.productName} in Applications, then reopen it.`,
         buttons: ['OK'],
         defaultId: 0,
         noLink: true,
@@ -538,9 +557,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName()} Update Downloaded`,
-      message: `${this.productName()} ${version} is ready to install.`,
-      detail: `Restart ${this.productName()} and run the installer now?`,
+      title: `${this.productName} Update Downloaded`,
+      message: `${this.productName} ${version} is ready to install.`,
+      detail: `Restart ${this.productName} and run the installer now?`,
       buttons: ['Restart and Install', 'Later'],
       defaultId: 1,
       cancelId: 1,
@@ -605,7 +624,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const profiles = this.contributedTrayItems('profiles')
     const status = this.contributedTrayItems('status')
     const template: Electron.MenuItemConstructorOptions[] = [
-      { label: desktopTrayLabel(this.locale, 'openDesktop', spec.productName), click: show },
+          { label: desktopTrayLabel(this.locale, 'openDesktop', spec.productName), click: show },
     ]
     if (tools.length > 0) template.push({ type: 'separator' }, ...tools)
     if (profiles.length > 0) template.push({ type: 'separator' }, ...profiles)
@@ -714,14 +733,20 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       // the load once; if the reload also fails, show a native error surface
       // with a manual reload entry instead of silently logging.
       if (details.reason !== 'clean-exit' && details.reason !== 'killed') {
-        void reloadOrShowCrashFallback({ log: (message) => this.logError(message) }, window)
+        void reloadOrShowCrashFallback(
+          { log: (message) => this.logError(message), productName: this.productName },
+          window,
+        )
       }
     })
     window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
       // P1-3: a failed navigation (not abort) offers a recovery UI.
       if (errorCode === -3 /* ABORTED - expected during navigation */) return
       this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)
-      void reloadOrShowCrashFallback({ log: (message) => this.logError(message) }, window)
+      void reloadOrShowCrashFallback(
+        { log: (message) => this.logError(message), productName: this.productName },
+        window,
+      )
     })
     window.webContents.setWindowOpenHandler(({ url }) => {
       try {
@@ -812,7 +837,15 @@ function inlineScriptUrl(url: string): string {
   return JSON.stringify(url).replace(/</gu, '\\u003c')
 }
 
-async function reloadOrShowCrashFallback(runtime: { log(message: string): void }, window: BrowserWindow): Promise<void> {
+/** Escape text for an HTML text position (the failure page's `<title>`). */
+function escapeHtmlText(value: string): string {
+  return value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;')
+}
+
+async function reloadOrShowCrashFallback(
+  runtime: { log(message: string): void; productName: string },
+  window: BrowserWindow,
+): Promise<void> {
   if (window.isDestroyed()) return
   const retried = crashRetried.get(window) ?? false
   if (!retried) {
@@ -830,7 +863,9 @@ async function reloadOrShowCrashFallback(runtime: { log(message: string): void }
     const retryScript = retryTarget === ''
       ? ''
       : `<script>document.getElementById('retry').addEventListener('click',function(){location.href=${inlineScriptUrl(retryTarget)}})</script>`
-    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>PicoAide Harness</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
+    // 失败页是窗口标题的来源（页面 <title> 会盖掉 BrowserWindow 的 title），
+    // 所以它同样必须是渠道自己的产品名。
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
     await window.loadURL(errorPage)
   } catch {
     runtime.log('dsh-plugin-desktop: crash fallback page failed to load')

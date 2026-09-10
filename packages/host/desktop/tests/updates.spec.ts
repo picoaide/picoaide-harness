@@ -3,13 +3,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { serverManifestURL } from '../src/desktop-release.ts'
 import type {
   DesktopNotification,
   DesktopRuntime,
   DesktopTrayItem,
+  DesktopUpdateSource,
 } from '../src/runtime.ts'
-import type { UpdateCheckResult } from '../src/update-checker.ts'
+import type { UpdateCheckResult, UpdateRequest } from '../src/update-checker.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
+
+// 客户端只从**它登录的那台服务端**取更新(2026-09-10 定案):每个检查用例都
+// 必须先有一个会话,否则状态是"请先登录"而不是"检查失败"。
+const SERVER = 'https://server.test'
 
 const testConfig: UpdateConfig = {
   enabled: true,
@@ -18,16 +24,68 @@ const testConfig: UpdateConfig = {
   requestTimeoutMs: 1000,
 }
 
-function versionResponse(version: unknown): Response {
-  return Response.json({ tag_name: version, draft: false, prerelease: false })
+const OFFICIAL_MANIFEST_URL = serverManifestURL(SERVER)
+
+/**
+ * 只统计**版本清单**请求。
+ *
+ * 会话内第一次检查会并行探一次服务端渠道内容(拿渠道 id 做一致性校验),
+ * 那是每次会话一次的内部请求,不属于"检查了几次"的语义 —— 断言用这个过滤
+ * 后的列表,才对得上被测行为。
+ */
+function manifestRequests(request: { readonly mock: { readonly calls: readonly unknown[][] } }): string[] {
+  return request.mock.calls
+    .map(call => String(call[0]))
+    .filter(url => url === OFFICIAL_MANIFEST_URL)
 }
 
-function releaseListResponse(versions: readonly string[]): Response {
-  return Response.json(versions.map(version => ({
-    tag_name: version,
-    draft: false,
-    prerelease: version.includes('-'),
-  })))
+/** 既能当 request 用、又能查调用记录的替身。 */
+type RequestSpy = UpdateRequest & { readonly mock: { readonly calls: readonly unknown[][] } }
+
+/** 服务端渠道内容响应(渠道探测读的就是它)。 */
+function channelResponse(channelId = 'official'): Response {
+  return Response.json({ channel_id: channelId, title: 'Server' })
+}
+
+/**
+ * 按调用顺序依次返回清单响应的 request 替身。
+ *
+ * 不能直接用 `mockResolvedValueOnce` 队列:渠道探测会插进来打一次
+ * `/api/client/v2/channel`,把队列里的第一个响应吃掉。这里按 URL 分流,
+ * 队列只服务于清单请求。
+ */
+function sequencedManifestRequest(
+  ...responses: readonly (Response | Error)[]
+): RequestSpy {
+  let index = 0
+  const spy = vi.fn(async (url: string) => {
+    if (String(url).endsWith('/api/client/v2/channel')) return channelResponse()
+    const next = responses[Math.min(index, responses.length - 1)]
+    index += 1
+    if (next instanceof Error) throw next
+    if (next === undefined) throw new Error('no manifest response queued')
+    return next
+  })
+  return spy as unknown as RequestSpy
+}
+
+/** 渠道版本清单:更新源唯一入口,最新版本由 client.version 决定。 */
+function manifestResponse(version: unknown): Response {
+  const releases = `${SERVER}/updates/client/${String(version)}`
+  const digest = 'a'.repeat(64)
+  return Response.json({
+    schema: 1,
+    channel_id: 'official',
+    server: { version: String(version), image_tag: `v${String(version)}` },
+    client: {
+      version,
+      assets: {
+        'mac-universal': { url: `${releases}/PicoAide-Harness-${String(version)}-mac.dmg`, sha256: digest, size: 0 },
+        'win-x64': { url: `${releases}/PicoAide-Harness-${String(version)}-x64-Setup.exe`, sha256: digest, size: 0 },
+        'linux-x64': { url: `${releases}/PicoAide-Harness-${String(version)}-x86_64.AppImage`, sha256: digest, size: 0 },
+      },
+    },
+  })
 }
 
 interface Harness {
@@ -42,6 +100,8 @@ interface Harness {
   readonly registrationDispose: ReturnType<typeof vi.fn>
   readonly publishedStates: ReturnType<typeof vi.fn>
   readonly checkNow: (() => void) | undefined
+  /** 模拟会话变化(登录/切换服务端/登出)。 */
+  emitSession(next: { serverURL?: string } | null): void
   dispose(): Promise<void>
 }
 
@@ -53,10 +113,12 @@ async function createHarness(options: {
   readonly request?: DesktopRuntime['updates']['request']
   readonly confirmDownload?: (version: string) => Promise<boolean>
   readonly showManualCheckResult?: (result: UpdateCheckResult | null) => Promise<void>
-  readonly downloadAndOpen?: (version: string, signal: AbortSignal) => Promise<void>
+  readonly downloadAndOpen?: (version: string, source: DesktopUpdateSource, signal: AbortSignal) => Promise<void>
   readonly notify?: (notification: DesktopNotification) => void
   readonly locale?: DesktopRuntime['locale']
   readonly state?: string
+  /** 会话里的服务端地址;`null` = 未登录(默认 SERVER)。 */
+  readonly serverURL?: string | null
 } = {}): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-updates-'))
   const statePath = join(root, 'private', 'state.json')
@@ -79,7 +141,7 @@ async function createHarness(options: {
     currentVersion: options.currentVersion ?? '2.0.0',
     statePath,
     canDownload: options.canDownload ?? true,
-    request: options.request ?? (async () => versionResponse('2.0.0')),
+    request: options.request ?? (async () => manifestResponse('2.0.0')),
     confirmDownload,
     showManualCheckResult,
     downloadAndOpen,
@@ -95,12 +157,26 @@ async function createHarness(options: {
       return { refresh, dispose: registrationDispose }
     },
   } as unknown as DesktopRuntime
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+  let session: { serverURL?: string } | null = options.serverURL === null
+    ? null
+    : { serverURL: options.serverURL ?? SERVER }
   const ctx = {
     desktopRuntime: runtime,
     logger: { warn: (...args: unknown[]) => { warnings.push(args) } },
     effect: (register: () => (() => void | Promise<void>)) => {
       disposer = register()
       return disposer
+    },
+    // 会话服务由 enterprise 提供;这里给最小替身,让插件能读到服务端地址。
+    get: (name: string) => name === 'picoSession'
+      ? { getSession: () => session }
+      : undefined,
+    on: (event: string, handler: (...args: unknown[]) => void) => {
+      const set = listeners.get(event) ?? new Set()
+      set.add(handler)
+      listeners.set(event, set)
+      return () => { set.delete(handler) }
     },
   } as unknown as Context
 
@@ -118,6 +194,10 @@ async function createHarness(options: {
     registrationDispose,
     publishedStates,
     checkNow: updatesAdapter.checkNow,
+    emitSession: (next: { serverURL?: string } | null) => {
+      session = next
+      for (const handler of listeners.get('pico/session-changed') ?? []) handler(next)
+    },
     dispose: async () => { await disposer?.() },
   }
 }
@@ -139,6 +219,56 @@ describe('desktop update Host plugin', () => {
     expect(() => Config({ requestTimeoutMs: 0 } as UpdateConfig)).toThrow()
   })
 
+  it('checks the manifest of the signed-in server', async () => {
+    const calls: string[] = []
+    const request = vi.fn(async (url: string) => {
+      calls.push(url)
+      return manifestResponse('2.1.0')
+    })
+    const harness = await createHarness({ packaged: false, request })
+
+    await harness.tray.invoke()
+
+    // 第一个请求是服务端渠道内容(取渠道 id),第二个才是版本清单 ——
+    // 更新源始终是登录的那台服务端(2026-09-10 定案)。
+    // 清单请求先发,渠道探测与它并行(绝不排在前面吃掉超时预算)。
+    expect(calls[0]).toBe(OFFICIAL_MANIFEST_URL)
+    expect(calls).toContain(`${SERVER}/api/client/v2/channel`)
+    expect(calls.every(url => url.startsWith(SERVER))).toBe(true)
+    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
+    await harness.dispose()
+  })
+
+  it('reports "not signed in" instead of a network failure when there is no session', async () => {
+    const request = vi.fn(async () => manifestResponse('2.1.0'))
+    const harness = await createHarness({ packaged: false, request, serverURL: null })
+
+    await harness.tray.invoke()
+
+    // 未登录 = 没有更新源。必须报成"请先登录",而不是让用户去查网络。
+    expect(request).not.toHaveBeenCalled()
+    expect(harness.publishedStates).toHaveBeenCalledWith(expect.objectContaining({
+      lastError: 'not-signed-in',
+    }))
+    await harness.dispose()
+  })
+
+  it('drops the previous server state when the session changes', async () => {
+    const request = vi.fn(async () => manifestResponse('2.1.0'))
+    const harness = await createHarness({ packaged: false, request })
+
+    await harness.tray.invoke()
+    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
+
+    // 切换服务端(或登出)必须清掉上一台的"有新版本",否则会把 A 服务端的
+    // 版本提示成 B 服务端可升级。
+    harness.emitSession(null)
+    expect(harness.publishedStates).toHaveBeenLastCalledWith(expect.objectContaining({
+      availableVersion: undefined,
+    }))
+    await harness.dispose()
+  })
+
   it('renders the update tray command in the active native locale', async () => {
     const harness = await createHarness({ packaged: false, locale: 'zh' })
 
@@ -152,7 +282,7 @@ describe('desktop update Host plugin', () => {
     { packaged: true, enabled: false },
   ])('reports a manual up-to-date result while automatic polling is disabled: %#', async ({ packaged, enabled }) => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => versionResponse('2.0.0'))
+    const request = vi.fn(async () => manifestResponse('2.0.0'))
     const harness = await createHarness({
       packaged,
       request,
@@ -163,7 +293,7 @@ describe('desktop update Host plugin', () => {
     expect(request).not.toHaveBeenCalled()
     expect(harness.tray.label()).toBe('Check for Updates…')
     await harness.tray.invoke()
-    expect(request).toHaveBeenCalledOnce()
+    expect(manifestRequests(request)).toHaveLength(1)
     expect(harness.showManualCheckResult).toHaveBeenCalledWith({
       status: 'up-to-date',
       currentVersion: '2.0.0',
@@ -177,7 +307,7 @@ describe('desktop update Host plugin', () => {
 
   it('prompts once for a background update and persists only state v2 prompt history', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => versionResponse('2.1.0'))
+    const request = vi.fn(async () => manifestResponse('2.1.0'))
     const harness = await createHarness({ request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
@@ -195,7 +325,7 @@ describe('desktop update Host plugin', () => {
     }
 
     await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
-    await vi.waitFor(() => { expect(request).toHaveBeenCalledTimes(2) })
+    await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(2) })
     expect(harness.confirmDownload).toHaveBeenCalledOnce()
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
@@ -206,15 +336,17 @@ describe('desktop update Host plugin', () => {
     let resolveDownload!: () => void
     const download = new Promise<void>(resolve => { resolveDownload = resolve })
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => download,
     })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
     await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
-    const [version, signal] = harness.downloadAndOpen.mock.calls[0] as [string, AbortSignal]
+    const [version, source, signal] = harness.downloadAndOpen.mock.calls[0] as [string, { manifestURL: string }, AbortSignal]
     expect(version).toBe('2.1.0')
+    // 更新源 = 登录的那台服务端(2026-09-10 定案),随下载请求下传。
+    expect(source.manifestURL).toBe(OFFICIAL_MANIFEST_URL)
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(signal.aborted).toBe(false)
     expect(harness.tray.label()).toBe('Downloading PicoAide Harness 2.1.0…')
@@ -229,7 +361,7 @@ describe('desktop update Host plugin', () => {
   it('keeps the precise download failure category instead of collapsing to network (P2-63)', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => {
         throw Object.assign(new Error('digest mismatch'), { code: 'checksum-mismatch' })
@@ -248,7 +380,7 @@ describe('desktop update Host plugin', () => {
   it('maps an unclassified download failure to network (P2-63)', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => { throw new Error('socket hang up') },
     })
@@ -268,7 +400,7 @@ describe('desktop update Host plugin', () => {
       .mockResolvedValueOnce(true)
     const harness = await createHarness({
       packaged: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload,
     })
 
@@ -284,9 +416,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('rechecks the version after confirmation and skips a rotated download', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(versionResponse('2.1.0'))
-      .mockResolvedValueOnce(versionResponse('2.2.0'))
+    const request = sequencedManifestRequest(manifestResponse('2.1.0'), manifestResponse('2.2.0'))
     const harness = await createHarness({
       packaged: false,
       request,
@@ -295,7 +425,7 @@ describe('desktop update Host plugin', () => {
 
     await harness.tray.invoke()
 
-    expect(request).toHaveBeenCalledTimes(2)
+    expect(manifestRequests(request)).toHaveLength(2)
     expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
     expect(harness.downloadAndOpen).not.toHaveBeenCalled()
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
@@ -303,9 +433,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('still downloads the confirmed version when the post-confirm re-check fails', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(versionResponse('2.1.0'))
-      .mockRejectedValueOnce(new TypeError('offline'))
+    const request = sequencedManifestRequest(manifestResponse('2.1.0'), new TypeError('offline'))
     const downloadAndOpen = vi.fn(async () => {})
     const harness = await createHarness({
       packaged: false,
@@ -317,19 +445,19 @@ describe('desktop update Host plugin', () => {
     await harness.tray.invoke()
 
     // The user confirmed 2.1.0; a flaky re-check must not turn Download into a no-op.
-    expect(harness.downloadAndOpen).toHaveBeenCalledWith('2.1.0', expect.any(AbortSignal), expect.any(Function))
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith('2.1.0', expect.objectContaining({ manifestURL: OFFICIAL_MANIFEST_URL }), expect.any(AbortSignal), expect.any(Function))
   })
 
   it.each([
-    ['up-to-date', async () => versionResponse('2.0.0')],
+    ['up-to-date', async () => manifestResponse('2.0.0')],
     ['failed', async () => new Response('unavailable', { status: 503 })],
   ] as const)('keeps an automatic %s result silent', async (_case, request) => {
     vi.useFakeTimers()
-    const requestSpy = vi.fn(request)
+    const requestSpy = vi.fn(request) as unknown as RequestSpy
     const harness = await createHarness({ request: requestSpy })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(requestSpy).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(manifestRequests(requestSpy)).toHaveLength(1) })
 
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
     expect(harness.confirmDownload).not.toHaveBeenCalled()
@@ -337,14 +465,16 @@ describe('desktop update Host plugin', () => {
   })
 
   it.each([
-    ['same version', async () => versionResponse('2.0.0'), {
+    ['same version', async () => manifestResponse('2.0.0'), {
       status: 'up-to-date', currentVersion: '2.0.0', latestVersion: '2.0.0',
     }],
-    ['older version', async () => versionResponse('1.9.9'), {
+    ['older version', async () => manifestResponse('1.9.9'), {
       status: 'up-to-date', currentVersion: '2.0.0', latestVersion: '1.9.9',
     }],
-    ['invalid version', async () => new Response('{"tag_name":"2.01.0"}'), null],
+    ['non-canonical manifest version', async () => manifestResponse('2.01.0'), null],
+    ['manifest without an installer', async () => Response.json({ schema: 1, client: { version: '2.1.0' } }), null],
     ['service unavailable', async () => new Response('unavailable', { status: 503 }), null],
+    ['manifest redirect', async () => { throw new TypeError('Failed to fetch') }, null],
     ['network failure', async () => { throw new TypeError('offline') }, null],
   ] as const)('reports a manual %s result without prompting or downloading', async (_case, request, expected) => {
     const harness = await createHarness({ packaged: false, request })
@@ -362,7 +492,7 @@ describe('desktop update Host plugin', () => {
   it('silently resets legacy state and does not use it as an available version cache', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       state: JSON.stringify({
         version: 1,
         checkedVersion: '2.0.0',
@@ -392,7 +522,7 @@ describe('desktop update Host plugin', () => {
     const harness = await createHarness({
       packaged: false,
       canDownload: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
     })
 
     await harness.tray.invoke()
@@ -413,7 +543,7 @@ describe('desktop update Host plugin', () => {
     const download = new Promise<void>((_resolve, reject) => { rejectDownload = reject })
     const harness = await createHarness({
       packaged: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
       downloadAndOpen: async () => download,
     })
@@ -453,9 +583,9 @@ describe('desktop update Host plugin', () => {
     let downloadSignal: AbortSignal | undefined
     const downloading = await createHarness({
       packaged: false,
-      request: async () => versionResponse('2.1.0'),
+      request: async () => manifestResponse('2.1.0'),
       confirmDownload: async () => true,
-      downloadAndOpen: async (_version, signal) => new Promise<void>((_resolve, reject) => {
+      downloadAndOpen: async (_version, _source, signal) => new Promise<void>((_resolve, reject) => {
         downloadSignal = signal
         signal.addEventListener('abort', () => {
           reject(new DOMException('disposed', 'AbortError'))
@@ -503,7 +633,7 @@ describe('desktop update Host plugin', () => {
 
     const first = harness.tray.invoke()
     const second = harness.tray.invoke()
-    await vi.waitFor(() => { expect(request).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(1) })
     expect(harness.tray.label()).toBe('Checking for Updates…')
     await vi.advanceTimersByTimeAsync(testConfig.requestTimeoutMs)
     await Promise.all([first, second])
@@ -517,7 +647,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('publishes renderer snapshots on initial state and observable transitions', async () => {
-    const request = vi.fn(async () => versionResponse('2.3.0'))
+    const request = vi.fn(async () => manifestResponse('2.3.0'))
     const harness = await createHarness({ request })
     // Initial static facts are published as soon as the state machine mounts.
     expect(harness.publishedStates).toHaveBeenCalled()
@@ -539,7 +669,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('installs the renderer check trigger and connects it to the manual flow', async () => {
-    const request = vi.fn(async () => versionResponse('2.3.0'))
+    const request = vi.fn(async () => manifestResponse('2.3.0'))
     const harness = await createHarness({ request })
     expect(typeof harness.checkNow).toBe('function')
     // The trigger drives the same manual check (confirm dialog appears).
@@ -549,10 +679,12 @@ describe('desktop update Host plugin', () => {
 })
 
 
-describe('desktop update test channel (prerelease installs)', () => {
-  it('checks the release list and prompts prerelease installs for a newer prerelease', async () => {
+describe('desktop update channel from the manifest (prerelease installs)', () => {
+  it('prompts a prerelease install for the newer prerelease published in the manifest', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => releaseListResponse(['v2.0.0', 'v2.1.0-rc.1', 'v2.1.0-rc.2']))
+    // 渠道由清单内容决定:预发布版本写进 latest.json 就是预发布渠道,
+    // 客户端不再按已装版本分流到不同的 GitHub 端点。
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.2'))
     const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
@@ -571,7 +703,7 @@ describe('desktop update test channel (prerelease installs)', () => {
 
   it('accepts prerelease prompt history and does not prompt for it again', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => releaseListResponse(['v2.1.0-rc.1', 'v2.1.0-rc.2']))
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.2'))
     const harness = await createHarness({
       currentVersion: '2.1.0-rc.1',
       request,
@@ -589,13 +721,30 @@ describe('desktop update test channel (prerelease installs)', () => {
     await harness.dispose()
   })
 
+  it('reports no update while the manifest still publishes the installed prerelease', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.1'))
+    const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
+
+    await harness.tray.invoke()
+
+    expect(harness.showManualCheckResult).toHaveBeenCalledWith({
+      status: 'up-to-date',
+      currentVersion: '2.1.0-rc.1',
+      latestVersion: '2.1.0-rc.1',
+    })
+    expect(harness.confirmDownload).not.toHaveBeenCalled()
+
+    await harness.dispose()
+  })
+
   it('still runs a stable check when the installed version is stable', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => versionResponse('2.0.0'))
+    const request = vi.fn(async () => manifestResponse('2.0.0'))
     const harness = await createHarness({ request })
 
     await harness.tray.invoke()
-    expect(request).toHaveBeenCalledOnce()
+    expect(manifestRequests(request)).toHaveLength(1)
     expect(harness.showManualCheckResult).toHaveBeenCalledWith({
       status: 'up-to-date',
       currentVersion: '2.0.0',
