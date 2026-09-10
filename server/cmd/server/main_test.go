@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
+	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -304,5 +306,83 @@ func TestV2RealDB(t *testing.T) {
 	r.ServeHTTP(w2, meReq)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("client me = %d, want 200; body=%s", w2.Code, w2.Body.String())
+	}
+}
+
+// ---- 渠道启动校验(2026-09-10) ----
+//
+// 审计发现的两个入口都在**启动期**挡:①显式配置了渠道却解析不出来,回落
+// official 会让渠道部署接受官方清单、把品牌洗掉;②镜像内的渠道内容与本进程
+// 按的渠道不一致,典型成因是 .env/compose 覆盖了镜像自带的渠道声明
+// (仓库自带 compose 曾把 PICOAI_CHANNEL 默认写死 official,正是这条)。
+
+// writeChannelDir 造一个只含 channel.json 的渠道目录。
+func writeChannelDir(t *testing.T, channelID string) string {
+	t.Helper()
+	dir := t.TempDir()
+	body := `{"schema":1,"channel_id":"` + channelID + `","identity":{"display_name":"X"}}`
+	if err := os.WriteFile(filepath.Join(dir, "channel.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write channel.json: %v", err)
+	}
+	return dir
+}
+
+// pointChannelDir 把渠道目录与镜像标记文件都指到临时目录(不碰 /opt)。
+func pointChannelDir(t *testing.T, dir string) {
+	t.Helper()
+	restoreDir := channel.Dir
+	channel.Dir = dir
+	restoreFile := updatecheck.ChannelFile
+	updatecheck.ChannelFile = filepath.Join(dir, "CHANNEL")
+	t.Cleanup(func() {
+		channel.Dir = restoreDir
+		updatecheck.ChannelFile = restoreFile
+	})
+}
+
+func TestResolveStartupChannelAcceptsMatchingImageChannel(t *testing.T) {
+	dir := writeChannelDir(t, "acme")
+	pointChannelDir(t, dir)
+	t.Setenv(updatecheck.ChannelEnv, "")
+	t.Setenv(updatecheck.EndpointEnv, "")
+	if err := os.WriteFile(filepath.Join(dir, "CHANNEL"), []byte("acme\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	got, err := resolveStartupChannel()
+	if err != nil {
+		t.Fatalf("resolveStartupChannel() error = %v", err)
+	}
+	if got != "acme" {
+		t.Fatalf("resolveStartupChannel() = %q, want acme", got)
+	}
+}
+
+// 这条就是 compose 覆盖场景:镜像是 acme,而部署侧(旧的 compose 默认值)
+// 把 PICOAI_CHANNEL 设成了 official —— 必须拒绝启动,而不是按 official 跑。
+func TestResolveStartupChannelRejectsDeployOverride(t *testing.T) {
+	dir := writeChannelDir(t, "acme")
+	pointChannelDir(t, dir)
+	t.Setenv(updatecheck.ChannelEnv, "official")
+	t.Setenv(updatecheck.EndpointEnv, "")
+
+	_, err := resolveStartupChannel()
+	if err == nil {
+		t.Fatal("镜像渠道 acme + 部署覆盖 official 必须拒绝启动")
+	}
+	if !strings.Contains(err.Error(), "渠道不一致") {
+		t.Fatalf("error = %v, want 渠道不一致", err)
+	}
+}
+
+// 渠道非法(拼写错误)→ 拒绝启动,绝不静默回落 official。
+func TestResolveStartupChannelRejectsInvalidChannel(t *testing.T) {
+	dir := writeChannelDir(t, "acme")
+	pointChannelDir(t, dir)
+	t.Setenv(updatecheck.ChannelEnv, "Acme Corp")
+	t.Setenv(updatecheck.EndpointEnv, "")
+
+	if _, err := resolveStartupChannel(); err == nil {
+		t.Fatal("非法渠道 id 必须拒绝启动")
 	}
 }
