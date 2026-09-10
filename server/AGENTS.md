@@ -50,7 +50,7 @@ internal/              # router(路由唯一真源)/serverauth/llmgateway/market
                        # capabilities/connectors/brand/bootstrap/telemetry/serverstore/util
 webadmin/              # 管理端(Vite React + shadcn,dist 内嵌进服务端二进制)
 docs/                  # 服务端文档(01-09/DEPLOY;superpowers/ 为历史设计文档)
-scripts/               # install-server.sh / deploy.sh(一键部署)+ mock-upstream.go(假上游)
+scripts/               # mock-upstream.go(假上游);部署脚本已于 2026-09-10 移除
 data/                  # 服务端运行时数据(0700,gitignore);数据库在 PostgreSQL(单 compose 内置 postgres 容器)
 ```
 
@@ -89,11 +89,10 @@ make test-server       # 服务端各业务域测试(显式枚举全部包)
 make webadmin          # cd webadmin && npm run build(产物内嵌进服务端二进制)
 make build-server      # make webadmin + go build -o bin/picoaide-server
 make docker-image      # 服务端 Docker 镜像(ghcr.io/picoaide/picoaide-harness-server)
-make release-export    # 离线导出镜像 tar
 make check             # gofmt + go vet + test-server + webadmin 测试与构建
 PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
 go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证网关
-bash scripts/install-server.sh         # 生产一键部署(oh-my-zsh 式单命令,自动装依赖;域名/账号/密码,见 docs/02-build-deploy.md)
+# 生产部署:按 ../../docs/deploy/AI-DEPLOY.md 执行(脚本已下线,交付物=一个镜像)
 # 数据库: PostgreSQL 唯一。-db-driver 仅接受 pg(默认;pg-external 为历史兼容别名,部署层已不用),-pg-dsn 必填;
 #   迁移 DDL 见 internal/serverstore/migrations-pg/(迁移自动应用)。SQLite 与 migrate-sqlite-pg 已下线,
 #   老数据需先在历史版本完成迁移。
@@ -103,4 +102,4 @@ bash scripts/install-server.sh         # 生产一键部署(oh-my-zsh 式单命�
 
 - 架构设计:docs/superpowers/specs/2026-08-01-picoaide-next-architecture-design.md(ADR、安全设计、错误边界;历史设计文档)
 - 实施计划:docs/superpowers/plans/2026-08-01-picoaide-next-full-implementation.md(阶段 1 服务端网关仍有效;阶段 2/3 客户端相关已下线)
-- 部署:docs/02-build-deploy.md(服务端构建、systemd 裸二进制 + Caddy、install-server.sh)与 docs/DEPLOY.md(容器化 compose)
+- 部署:../../docs/deploy/AI-DEPLOY.md(唯一部署说明:首次部署/升级/回滚/排障)与 docs/DEPLOY.md(容器化设计说明)、docs/02-build-deploy.md(构建、systemd、CI)

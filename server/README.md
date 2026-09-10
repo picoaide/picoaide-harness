@@ -6,25 +6,29 @@ PicoAide Harness 平台的企业管控面：Go 服务端提供认证（local / L
 
 ## 快速开始
 
-### 0. 一键部署（oh-my-zsh 式，单命令）
+### 0. 生产部署（AI 执行版说明）
+
+部署与升级**不再有安装脚本**（`install-server.sh` / `deploy.sh` 已于 2026-09-10 移除）。
+唯一交付物是**一份给 AI 代理或运维执行的说明**，交付物本身只有一个容器镜像
+（镜像里自带 compose、Caddyfile、客户端安装包）：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh)"
+# 1) 取镜像（可出网）或从更新服务器下载镜像包后 docker load
+docker pull ghcr.io/picoaide/picoaide-harness-server:v2.7.0
+# 2) 把部署文件导到部署目录（镜像自带，无需仓库/外网）
+docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
+  ghcr.io/picoaide/picoaide-harness-server:v2.7.0
+# 3) 之后按说明写 .env → docker compose up -d → 校验 /healthz
 ```
 
-> 注意:必须用 `bash` 执行(脚本使用 bash 专属语法);`sh -c`(Debian/Ubuntu 上
-> `/bin/sh`=dash)会解析失败。交互运行时会询问域名(必填,生产前必须设置为真实
-> 域名/IP);也可非交互指定(需 root/sudo):
-
-```bash
-# 指定域名 + 管理员密码（内置 PostgreSQL 容器）
-curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-harness/master/server/scripts/install-server.sh | \
-  sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
-```
+完整步骤（首次部署 / 升级 / 回滚 / 排障 / 四条数据安全铁律）见
+[`docs/deploy/AI-DEPLOY.md`](../docs/deploy/AI-DEPLOY.md) —— 那份文档同时是交付给客户的运维说明。
 
 - 数据库：**固定内置 PostgreSQL 18 容器**（单 compose 文件 caddy+server+postgres），PG-only，SQLite 已下线。
-- 部署目录默认 `/data/picoaide/deploy`（可用 `INSTALL_DIR` 覆盖；兼容旧版 `DEPLOY_DIR`）；依赖自动安装可用 `SKIP_DEPS=1` 跳过；Docker 安装可用 `DOCKER_MIRROR` 指定镜像源。
-- 已有部署时提示改用 `./deploy.sh update`（升级）或 `REINSTALL=yes`（清除重装）。
+- 部署目录约定 `/opt/picoaide`（`picoaide-data/` 存 master.key，`pg-data/` 存数据库）。
+- 升级：服务端通过 `PICOAI_UPDATE_ENDPOINT`（默认官方渠道
+  `https://release.picoaide.com/official/latest.json`）检查新版本，webadmin「服务器信息」页会提示；
+  管理员按说明执行升级，**升级前必须备份**。
 
 ### 1. 服务端（Go 1.26+）
 
