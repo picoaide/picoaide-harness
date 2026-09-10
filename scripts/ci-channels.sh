@@ -172,6 +172,7 @@ for id in "${SELECTED[@]}"; do
     const publicChannel = id === "official" || id === "beta"
     const missing = []
     const invalid = []
+    const warnings = []
     // identity.display_name 是客户端**所有**名字的最终兜底(登录页/界面/门户),
     // short_name 是登录页与服务端 applyDefaults 的直接来源:两者缺一,渠道构建
     // 就会在某个可见位置显示中性占位。
@@ -198,10 +199,17 @@ for id in "${SELECTED[@]}"; do
       }
     }
     // 声明的素材文件必须存在(否则客户端/服务端会拿到死链或被忽略的配置)。
+    //
+    // 只校验**已知的素材字段**:渠道包里允许写 `_note` 这类注解(私有仓实际就这么
+    // 用),也允许将来新增字段 —— 拿"所有非 accent 的键都是文件名"去套,
+    // 会把注解误判成非法文件名而中止整条发布(2026-09-10 CI 实测踩到)。
+    // 未知字段只告警(很可能是把 logo 拼错成 logoo),不拦发布。
+    const KNOWN_ASSET_KEYS = ["logo", "logo_dark", "favicon"]
     for (const [key, value] of Object.entries(cfg?.assets ?? {})) {
-      if (key === "accent") continue
+      if (key === "accent" || key.startsWith("_")) continue
       const name = str(value)
       if (name === undefined) continue
+      if (!KNOWN_ASSET_KEYS.includes(key)) { warnings.push("assets." + key + "(未知素材字段,已忽略)"); continue }
       if (name.includes("/") || name.includes("\\")) { invalid.push("assets." + key + "(必须是单段文件名)"); continue }
       if (!fs.existsSync(path.join(dir, name))) invalid.push("assets." + key + "(渠道目录里没有这个文件)")
     }
@@ -230,6 +238,9 @@ for id in "${SELECTED[@]}"; do
         }
         if (!hasIcc) invalid.push("app-icon.png(必须内嵌 ICC 色彩配置)")
       }
+    }
+    if (warnings.length > 0) {
+      console.error("::warning::渠道包里有未知素材字段(已忽略,可能是拼写错误): " + warnings.join(", "))
     }
     if (missing.length > 0 || invalid.length > 0) {
       if (missing.length > 0) {
