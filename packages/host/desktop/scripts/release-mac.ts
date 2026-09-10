@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { channelBuilderConfigArgs, resolveChannelBuildContext } from './channel-build.ts'
 import {
   adaptMacReleaseEnvironment,
   assertMacReleaseReady,
@@ -23,8 +24,13 @@ export interface MacReleaseOptions {
   readonly desktopRoot: string
   /** Dedicated signed-release output directory, isolated from historical artifacts. */
   readonly outputDir: string
-  /** Product name shown by the packaged application (build.productName). */
+  /** Product name shown by the packaged application（官方=package.json，渠道=渠道包）。 */
   readonly productName: string
+  /**
+   * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
+   * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   */
+  readonly channelConfigArgs: readonly string[]
   /** Remove only the dedicated generated release output before packaging. */
   readonly resetOutput: () => void
   /** Read code-signing identities with a credential-free environment. */
@@ -77,16 +83,21 @@ function defaultReleaseOptions(): MacReleaseOptions {
   const manifest = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8')) as {
     readonly build?: { readonly productName?: unknown }
   }
-  const productName = manifest.build?.productName
-  if (typeof productName !== 'string' || productName.length === 0) {
+  const fromManifest = manifest.build?.productName
+  if (typeof fromManifest !== 'string' || fromManifest.length === 0) {
     throw new Error('package.json build.productName must be a non-empty string')
   }
+  // 渠道构建用渠道包里的产品名（app 路径 `<productName>.app` 必须与打包结果一致）；
+  // 官方渠道沿用 package.json —— 见 tests/channel-build.spec.ts 的漂移断言。
+  const channel = resolveChannelBuildContext()
+  const productName = channel.official ? fromManifest : channel.productName
   return {
     env: process.env,
     platform: process.platform,
     desktopRoot,
     outputDir,
     productName,
+    channelConfigArgs: channelBuilderConfigArgs(channel),
     resetOutput: () => rmSync(outputDir, { recursive: true, force: true }),
     listCodeSigningIdentities,
     run,
@@ -178,6 +189,7 @@ export async function packMacApp(
     '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
+    ...options.channelConfigArgs,
     `--config.directories.output=${options.outputDir}`,
   ], options.desktopRoot, releaseEnvironment)
   // A fresh build invalidates any previous submission: the notarization state
@@ -208,6 +220,7 @@ export async function buildMacDmgWithoutNotarization(
     '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
+    ...options.channelConfigArgs,
     `--config.directories.output=${options.outputDir}`,
   ], options.desktopRoot, releaseEnvironment)
   options.run(
@@ -242,6 +255,7 @@ export async function notarizeAndPackageMacDmg(
     '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
+    ...options.channelConfigArgs,
     `--config.directories.output=${options.outputDir}`,
   ], options.desktopRoot, releaseEnvironment)
   options.run(

@@ -31,6 +31,9 @@ function options(calls: CommandCall[], logs: string[] = []): WindowsPackageOptio
     builderCli: 'C:\\repo\\node_modules\\electron-builder\\cli.js',
     verifier: 'C:\\repo\\dsh-plugin-desktop\\scripts\\verify-win-installer.ts',
     nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+    // 官方渠道:不做 electron-builder 覆盖(渠道化由 channel-build.ts 负责)
+    channelConfigArgs: [],
+    channelId: 'official',
     run: (command, args, cwd, env) => {
       calls.push({ command, args: [...args], cwd, env: { ...env } })
     },
