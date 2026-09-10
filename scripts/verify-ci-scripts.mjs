@@ -609,11 +609,15 @@ case "$cmd" in
     src="\${args[2]}"; dst="\${args[3]}"
     record "cp $src $dst recursive=$recursive"
     if [ "$recursive" = 1 ]; then
+      # 模拟真实 aws CLI 的前缀语义:s3 侧的路径就是**字面前缀**,尾斜杠即"目录"。
+      # 刻意不特判 "/." —— 真实 CLI 不认它(当作字面前缀,匹配不到对象),
+      # 桩要是把它"修正"了,就测不出那种路径形态的错误(2026-09-10 教训)。
       if [[ "$src" == s3://* ]]; then
-        key="\${src#s3://*/}"; key="\${key%/.}"
-        mkdir -p "$dst"; cp -a "$store/$key/." "$dst/"
+        key="\${src#s3://*/}"; key="\${key%/}"
+        mkdir -p "$dst"
+        [ -d "$store/$key" ] && cp -a "$store/$key/." "$dst/"
       else
-        key="\${dst#s3://*/}"
+        key="\${dst#s3://*/}"; key="\${key%/}"
         mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
       fi
     else
@@ -657,6 +661,12 @@ esac
 
   const transferLog = readFileSync(log, 'utf8')
   check((transferLog.match(/recursive=1/g) ?? []).length === 1, '只应中转品牌渠道(官方/beta 不上传)')
+  // S3 路径形态(2026-09-10 教训):s3 侧必须是**标准前缀**(尾斜杠),
+  // 不能写成 `prefix/.` —— 真实 aws CLI 当字面前缀处理,匹配不到任何对象,
+  // 而桩会"好心"修正它,于是本地全绿、正式发布时才炸。这里把形态钉死。
+  const pushCp = transferLog.split('\n').find(line => line.startsWith('cp ')) ?? ''
+  check(/^cp \S+ s3:\/\/\S+\/ch-3\/ recursive=1$/u.test(pushCp), `中转上传应是"目录源 → 前缀/"形态,实际:${pushCp}`)
+  check(!transferLog.includes('/.'), '中转命令里不得出现 prefix/. 形态(真实 CLI 匹配不到对象)')
   const keys = readdirSync(join(store, '_transfer')).sort()
   check(keys.length === 1 && !keys[0].includes('example-brand'), '中转前缀不得含渠道 id')
   check(keys[0].startsWith('4242-1-'), '中转前缀应按 run 派生')
