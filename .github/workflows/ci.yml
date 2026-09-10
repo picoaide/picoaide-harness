@@ -581,11 +581,29 @@ jobs:
             echo "::error::请创建一个只读该仓 Contents 的 fine-grained PAT,并添加为仓库 secret"
             exit 1
           fi
-          rm -rf channels
+          # 先克隆到临时目录再就位:仓库里已有 channels/README.md(git 不跟踪的
+          # 占位说明),而 `git clone` 到**非空目录**会直接失败 —— 若先 rm 再裸克隆,
+          # 克隆失败时会留下"上一轮的残留内容",后续步骤照样跑完并发错镜像。
+          # 这里克隆失败即中止,不留下可被误用的半成品。
+          rm -rf .channels-clone channels
           git clone --depth 1 \
             "https://x-access-token:${CHANNELS_REPO_TOKEN}@github.com/picoaide/channels.git" \
-            channels
-          echo "已检出渠道仓(commit $(git -C channels rev-parse --short HEAD))"
+            .channels-clone
+          # 校验:这确实是一个含 channels/ 的渠道仓
+          if [ ! -d .channels-clone/channels ]; then
+            echo "::error::picoaide/channels 里没有 channels/ 目录(仓库结构不符)"
+            exit 1
+          fi
+          # 只把仓库里的 channels/ 内容搬到工作区 channels/。
+          # 注意路径层数:渠道仓自身的结构是 `<repo>/channels/<id>/`(便于单独 clone
+          # 阅读),而工作区要的是 `channels/<id>/` —— 直接 mv 整个 clone 会多一层,
+          # 变成 channels/channels/<id>/,后面的 channels/<id>/channel.json 就找不到。
+          COMMIT="$(git -C .channels-clone rev-parse --short HEAD)"
+          rm -rf channels
+          mkdir -p channels
+          cp -a .channels-clone/channels/. channels/
+          rm -rf .channels-clone
+          echo "已检出渠道仓(commit ${COMMIT})"
           ls -1 channels/
 
       # 把选定渠道复制成镜像构建上下文,并校验配置自洽。
