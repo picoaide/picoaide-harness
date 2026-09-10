@@ -19,7 +19,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -199,6 +199,20 @@ echo x > "${root}/packages/host/desktop/dist/App.AppImage"
   check(!failureLines.includes('SECRET-CHANNEL-DETAIL'), '失败时不得回显渠道构建的输出')
   check(!failureLines.includes('acme-corp'), '失败信息里不得出现渠道名')
   check(failureLines.includes('官方构建'), '失败信息应指引去看官方构建的日志')
+}
+
+// ---- 6. 所有 CI shell 脚本必须能通过 bash -n ----
+// 2026-09-10 的教训:两处未闭合引号让整个 release job 跑不起来,而 YAML 本身
+// 完全合法 —— 只有 bash 解析整段脚本时才会发现。这里把 scripts/ 下的 shell
+// 脚本全部过一遍,避免同类错误再次静默进入发布链。
+{
+  const scriptDir = join(root, 'scripts')
+  const shells = readdirSync(scriptDir).filter(name => name.endsWith('.sh'))
+  check(shells.length > 0, 'scripts/ 下应有 CI shell 脚本')
+  for (const name of shells) {
+    const result = spawnSync('bash', ['-n', join(scriptDir, name)], { encoding: 'utf8' })
+    check(result.status === 0, `scripts/${name} 未通过 bash -n: ${(result.stderr ?? '').trim()}`)
+  }
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })

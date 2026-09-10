@@ -229,7 +229,23 @@ jobs:
           [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
           [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
       # 构建产物来自 gate(同一次提交),此处不重复编译(--no-prebuild)。
-      - run: yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+      #
+      # 渠道化(2026-09-10):逐个渠道打包,产物归集到 client-assets/<channel>/。
+      # **渠道构建不输出日志**(用户定策)——官方构建跑同一套代码路径与打包脚本,
+      # 排障看官方那一份;渠道 id 全程 ::add-mask::。列表由 ci-channels.sh 从
+      # 私有渠道仓解析(正式 tag 发全部渠道 / beta tag 只发 beta / 非 tag 只发官方)。
+      - name: Fetch channel packages (private repo)
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+      # --official-last:官方最后构建,于是 dist/ 留下的是**官方**产物 ——
+      # 紧随其后的 E2E 与人工排查都对着官方那一份(渠道产物已归集到 client-assets/)。
+      - name: Package client installers for every selected channel
+        run: |
+          bash scripts/ci-package-clients.sh --official-last \
+            --list channels.list --stage-dir client-assets \
+            --patterns '*.AppImage *.deb' \
+            -- yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
       # 客户端 E2E(2026-09-06 接入,G3 缺口):在打包产物上跑 13 项断言
       # (mock gateway + Xvfb + CDP),报告与截图随后上传。
       - name: Client E2E (packaged app, Xvfb)
@@ -251,12 +267,13 @@ jobs:
           mkdir -p packages/host/desktop/e2e-results
           cp packages/host/desktop/.e2e-report.md packages/host/desktop/e2e-results/e2e-report.md 2>/dev/null || true
           cp -r packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/shots 2>/dev/null || true
+      # artifact 名保持**中性**(不含渠道名):公开仓的 artifact 列表是匿名可读的
+      # (实测),名字里带渠道 id 就等于公开客户名。渠道产物装在
+      # client-assets/<channel>/ 子目录里(内容需登录才可取)。
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
-          path: |
-            packages/host/desktop/dist/*.AppImage
-            packages/host/desktop/dist/*.deb
+          path: client-assets/**
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: always()
@@ -304,11 +321,26 @@ jobs:
       # 构建产物来自 gate,不重复编译(--no-prebuild);门禁在 gate 已跑,
       # 不再内嵌 check:win-package(--no-gates),但打包后 verify-win-installer
       # 仍在脚本内执行。
-      - run: yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
+      #
+      # 渠道化:逐个渠道打包(--official-last 让官方最后构建,便于排障),
+      # 渠道构建不输出日志、渠道 id 全程掩码(见 scripts/ci-package-clients.sh)。
+      - name: Fetch channel packages (private repo)
+        shell: bash
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+      - name: Package client installers for every selected channel
+        shell: bash
+        run: |
+          bash scripts/ci-package-clients.sh --official-last \
+            --list channels.list --stage-dir client-assets \
+            --patterns '*Setup*.exe' \
+            -- yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
+      # artifact 名中性(公开仓的 artifact 列表匿名可读,名字带渠道 id 即泄露客户名)。
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Windows-installer
-          path: packages/host/desktop/dist/*Setup*.exe
+          path: client-assets/**
           if-no-files-found: error
 
   # macOS 单 job 三态:正式 tag(纯 vX.Y.Z)打包+签名+公证(可重试);预发 tag
@@ -408,11 +440,45 @@ jobs:
       - name: Build unsigned smoke DMG
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: yarn workspace dsh-plugin-desktop dist:mac-smoke --no-prebuild --no-gates
+      # ==== 渠道化(tag 时):官方已由上面三步构建完毕,这里只做品牌渠道 ====
+      #
+      # 渠道用**签名但不公证**(--sign-only + dmg),与预发 tag 同一条既有路径:
+      # 公证每次排队 1–5 小时,渠道数一多必然撞穿本 job 的 330 分钟上限;渠道客户端
+      # 由客户自己的服务端下发,首次打开与预发版同样需要右键打开。官方渠道仍然是
+      # 完整签名+公证,那条链一步没动。
+      #
+      # 渠道构建**不输出日志**(用户定策),渠道 id 全程 ::add-mask::;排障看官方
+      # 那一份 —— 渠道与官方跑同一套打包脚本,只换 DSH_BUILD_CHANNEL。
+      - name: Fetch channel packages (private repo)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh
+      - name: Stage the official DMG for the release image
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          mkdir -p client-assets/official
+          cp packages/host/desktop/dist/mac-release/*.dmg client-assets/official/
+          ls -1 client-assets/official/
+      - name: Package brand-channel DMGs (quiet)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          bash scripts/ci-package-clients.sh --skip-official \
+            --dist packages/host/desktop/dist/mac-release \
+            --list channels.list --stage-dir client-assets --patterns '*.dmg' \
+            -- bash -c 'yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates --sign-only \
+                 && yarn workspace dsh-plugin-desktop dist:mac:dmg --no-prebuild'
+      # artifact 名中性;品牌渠道产物在 client-assets/<channel>/ 下(tag 时)。
       - uses: actions/upload-artifact@v7
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: desktop-macOS
-          path: packages/host/desktop/dist/mac-release/*.dmg
+          path: client-assets/**
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -440,11 +506,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
-      packages: write      # 推镜像到 GHCR(客户端资产只有这里拿得到,故构建点在本 job)
-    outputs:
-      # 渠道传递给 publish-update-server:两个 job 必须写同一个渠道目录,
-      # 否则会出现"镜像传 official、清单传 beta"的错配。
-      channel: ${{ steps.channel.outputs.channel }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -466,222 +527,87 @@ jobs:
         run: |
           node scripts/version.mjs check "$GITHUB_REF_NAME"
 
-      # 渠道解析(2026-09-10):三种渠道类型互不升级,发布面必须分开。
-      #   beta     = 预发布 tag(含 `-`,如 v2.7.0-beta.1),我们自己内测
-      #   official = 正式 tag(vX.Y.Z)
-      #   品牌渠道 = workflow_dispatch 显式指定(wf_channel 输入)
-      # 渠道值贯穿:客户端清单 channel_id、镜像 label、R2 上传目录、
-      # latest.json.channel_id。写错 = 客户端/服务端跨渠道升级。
-      - name: Resolve release channel
-        id: channel
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          # 渠道由 tag 形态决定,且**只支持 beta / official**:
-          #   beta     = 预发布 tag(含 `-`,如 v2.7.0-beta.1),我们自己内测
-          #   official = 正式 tag(vX.Y.Z)
-          #
-          # 品牌渠道**故意在这里 fail-loud**(2026-09-10):它需要独立的渠道配置包
-          # (品牌名/图标/appId/默认服务器地址/更新源)与按渠道矩阵化的打包,
-          # 见 docs/planning/2026-09-04-enterprise-channel-branding.md。
-          # 在渠道管线落地前,任何看似品牌渠道的 tag 都必须停下 —— 静默按 official
-          # 发布会让品牌客户端被官方清单升级、品牌被"洗掉"(最严重的一类错)。
-          if [[ "${TAG}" == *-* ]]; then
-            # 预发布:再区分是不是品牌渠道标记(约定品牌 tag 形如 v2.7.0-<channel-id>.N)
-            case "${TAG}" in
-              *-beta.*|*-beta|*-rc.*|*-rc|*-alpha.*|*-alpha)
-                CH=beta ;;
-              *)
-                echo "::error::无法从 tag ${TAG} 判定渠道:品牌渠道发布需要渠道配置包与渠道化打包管线(尚未实施)。"
-                echo "::error::请改用 vX.Y.Z(官方)或 vX.Y.Z-beta.N(预发)形态的 tag。"
-                exit 1 ;;
-            esac
-          else
-            CH=official
-          fi
-          # 与客户端 CHANNEL_ID_PATTERN / 服务端 IsChannelID 同源的形状校验,
-          # 防畸形路径注入到 R2 key 与清单
-          if ! printf '%s' "$CH" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$'; then
-            echo "::error::非法渠道 id: ${CH}(期望 ^[a-z0-9][a-z0-9-]{0,31}$)"
-            exit 1
-          fi
-          echo "channel=${CH}" >> "$GITHUB_OUTPUT"
-          echo "渠道 = ${CH}(tag ${TAG})"
-
-      - name: Assemble client assets into the image build context
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          VER="${VERSION#v}"    # 本 step 独立取版本(不跨 step 复用变量)
-          # 客户端资产平铺在一个目录:entrypoint 落盘后由服务端按文件名下发。
-          # 目录必须存在(Dockerfile 用目录形式 COPY;缺目录会构建失败)。
-          mkdir -p client-assets/client
-          cp release-artifacts/*.exe   client-assets/client/ 2>/dev/null || true
-          cp release-artifacts/*.dmg   client-assets/client/ 2>/dev/null || true
-          cp release-artifacts/*.AppImage client-assets/client/ 2>/dev/null || true
-          cp release-artifacts/*.deb   client-assets/client/ 2>/dev/null || true
-          if [ -z "$(ls -A client-assets/client)" ]; then
-            echo "::error::no client installers found in release-artifacts"
-            exit 1
-          fi
-          ls -lh client-assets/client/
-          # 客户端资产清单:镜像内携带,服务端据此生成
-          # GET /api/client/v2/updates/manifest。
-          # 必须用 **client.version / client.assets** 结构:客户端解析器
-          # (packages/host/desktop/src/desktop-release.ts 的 parseReleaseManifest)
-          # 只认这一种形状,且强制 url 绝对 https、sha256 为 64 位小写 hex。
-          # 这里 url 用官方基址占位;服务端对外下发时会按自身地址重写
-          # (客户端因此始终从自己登录的服务器取包)。
-          CH="${{ steps.channel.outputs.channel }}"
-          BASE="https://release.picoaide.com/${CH}/releases/${VER}"
-          {
-            echo '{'
-            echo '  "schema": 1,'
-            echo "  \"channel_id\": \"${CH}\","
-            echo '  "client": {'
-            echo "    \"version\": \"${VER}\","
-            echo '    "assets": {'
-            first=1
-            add() { # $1=清单键 $2=文件名
-              [ -f "client-assets/client/$2" ] || return 0
-              [ "$first" = 1 ] || echo ','
-              first=0
-              printf '      "%s": { "file": "%s", "url": "%s/%s", "sha256": "%s", "size": %s }' \
-                "$1" "$2" "$BASE" "$2" \
-                "$(sha256sum "client-assets/client/$2" | cut -d' ' -f1)" \
-                "$(stat -c%s "client-assets/client/$2")"
-            }
-            add mac-universal "$(basename "$(ls client-assets/client/*.dmg | head -1)" 2>/dev/null || echo -)"
-            add win-x64       "$(basename "$(ls client-assets/client/*.exe | head -1)" 2>/dev/null || echo -)"
-            add linux-x64     "$(basename "$(ls client-assets/client/*.AppImage | head -1)" 2>/dev/null || echo -)"
-            echo
-            echo '    }'
-            echo '  }'
-            echo '}'
-          } > client-assets/CLIENT-RELEASE.json
-          node -e "JSON.parse(require('fs').readFileSync('client-assets/CLIENT-RELEASE.json','utf8')); console.log('CLIENT-RELEASE.json 合法')"
-          cat client-assets/CLIENT-RELEASE.json
-
-      # 渠道配置来自**私有仓** picoaide/channels:客户可见的名称/文案/标识不在
-      # 公开仓里,不同渠道的内容彼此隔离。检出到 channels/(与本地开发同路径,
-      # 后续构建步骤与 Dockerfile 无需感知来源)。
+      # 渠道发现 + 逐渠道构建(2026-09-10 定案):
+      #   正式 tag vX.Y.Z → 发**全部**渠道;beta tag → 只发 beta;非 tag → 只发官方。
+      #   品牌渠道**只进 R2**,绝不进公开 GitHub Release(见下面的 Release 步骤)。
       #
-      # 需要 repo secret CHANNELS_REPO_TOKEN:一个能读该私有仓的令牌
-      # (fine-grained PAT 只给 picoaide/channels 的 Contents:Read 即可)。
-      # 缺少时**直接失败**:静默回落到公开占位内容会让客户看到错的品牌。
-      - name: Check out channel content (private repo)
+      # **渠道构建不输出日志**(用户定策):只有 official 保留完整构建输出,渠道 id
+      # 全程 ::add-mask::。渠道与官方共用同一套 Dockerfile / 打包脚本,只换
+      # --build-arg CHANNEL,排障看官方那一份。
+      - name: Fetch channel packages (private repo)
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${CHANNELS_REPO_TOKEN}" ]; then
-            echo "::error::缺少 secret CHANNELS_REPO_TOKEN —— 无法读取私有渠道仓 picoaide/channels"
-            echo "::error::请创建一个只读该仓 Contents 的 fine-grained PAT,并添加为仓库 secret"
-            exit 1
-          fi
-          # 先克隆到临时目录再就位:仓库里已有 channels/README.md(git 不跟踪的
-          # 占位说明),而 `git clone` 到**非空目录**会直接失败 —— 若先 rm 再裸克隆,
-          # 克隆失败时会留下"上一轮的残留内容",后续步骤照样跑完并发错镜像。
-          # 这里克隆失败即中止,不留下可被误用的半成品。
-          rm -rf .channels-clone channels
-          git clone --depth 1 \
-            "https://x-access-token:${CHANNELS_REPO_TOKEN}@github.com/picoaide/channels.git" \
-            .channels-clone
-          # 校验:这确实是一个含 channels/ 的渠道仓
-          if [ ! -d .channels-clone/channels ]; then
-            echo "::error::picoaide/channels 里没有 channels/ 目录(仓库结构不符)"
-            exit 1
-          fi
-          # 只把仓库里的 channels/ 内容搬到工作区 channels/。
-          # 注意路径层数:渠道仓自身的结构是 `<repo>/channels/<id>/`(便于单独 clone
-          # 阅读),而工作区要的是 `channels/<id>/` —— 直接 mv 整个 clone 会多一层,
-          # 变成 channels/channels/<id>/,后面的 channels/<id>/channel.json 就找不到。
-          COMMIT="$(git -C .channels-clone rev-parse --short HEAD)"
-          rm -rf channels
-          mkdir -p channels
-          cp -a .channels-clone/channels/. channels/
-          rm -rf .channels-clone
-          echo "已检出渠道仓(commit ${COMMIT})"
-          ls -1 channels/
+        run: bash scripts/ci-channels.sh
 
-      # 把选定渠道复制成镜像构建上下文,并校验配置自洽。
-      - name: Assemble channel config into the image build context
-        env:
-          CHANNEL: ${{ steps.channel.outputs.channel }}
-        run: |
-          set -euo pipefail
-          if [ ! -f "channels/${CHANNEL}/channel.json" ]; then
-            echo "::error::私有渠道仓里没有 channels/${CHANNEL}/channel.json"
-            test "$CHANNEL" = official || echo "::error::品牌渠道需先在该仓创建 channels/${CHANNEL}/(复制 channels/official/)"
-            exit 1
-          fi
-          # 目录名 = 渠道 id:镜像构建用 --build-arg CHANNEL=<id> 选择要打进镜像的渠道
-          mkdir -p "channels-context/${CHANNEL}"
-          cp -a "channels/${CHANNEL}/." "channels-context/${CHANNEL}/" 
-          # 校验:JSON 合法 + channel_id 与目录名一致(不一致会让服务端下发错的渠道标识,
-          # 也会让 updatecheck 的渠道隔离判为不可用)。用 env 传值,避免 shell 注入。
-          CHANNEL_ID="$CHANNEL" node -e "
-            const fs=require('fs');
-            const id=process.env.CHANNEL_ID;
-            const p='channels-context/'+id+'/channel.json';
-            const c=JSON.parse(fs.readFileSync(p,'utf8'));
-            if(c.channel_id!==id){
-              console.error('::error::channel.json 的 channel_id='+c.channel_id+' 与渠道 '+id+' 不一致');
-              process.exit(1);
-            }
-            fs.writeFileSync('channels-context/'+id+'/VERSION', process.env.GITHUB_REF_NAME||'');
-            console.log('渠道配置校验通过:', id);
-          "
-          ls -la "channels-context/${CHANNEL}/" 
-
-      - name: Build server image for the release tag
+      - name: Build one server image per channel
+        id: images
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          set -euo pipefail
-          VER="${VERSION#v}"
-          IMAGE="picoaide-harness-server"   # 仅本地构建 tag,不推任何仓库
-          # 本 job 是镜像的**唯一构建点**:只有这里同时拿得到三平台客户端资产
-          # (gate 的 workspace-build + 三个 desktop-* artifact)与发布上下文。
-          # channels 提供渠道内容(名称/文案/标识);webadmin 不再编译期注入
-          # 任何品牌素材(2026-09-10 审计:仓库里不留品牌描述)。
-          docker buildx build \
-            --platform linux/amd64 \
-            --build-arg VERSION="$VER" \
-            --build-arg CHANNEL="${{ steps.channel.outputs.channel }}" \
-            --build-context clientassets=./client-assets \
-            --build-context channelassets=./channels-context \
-            --label "org.opencontainers.image.source=https://github.com/picoaide/picoaide-harness" \
-            --label "org.opencontainers.image.version=$VER" \
-            --tag "${IMAGE}:v${VER}" \
-            --load \
-            server
-          # 不再推送任何镜像仓库(2026-09-10:GHCR 已下线)。
-          # 镜像的唯一分发面是更新服务器 release.picoaide.com(R2):
-          # 下面 export 出来的 zip 由 publish-update-server job 上传,客户从这里取。
-          # 本地 tag 仅用于紧接着的 export 步骤。
+          bash scripts/ci-build-channel-images.sh \
+            --list channels.list --artifacts release-artifacts --out release-bundle
 
-      - name: Export compressed image archive
+      # 更新服务器(R2)上传:每个渠道写自己的目录 `release.picoaide.com/<channel>/`,
+      # 品牌渠道也走这里 —— R2 是它们的**唯一**分发面。R2 secrets 未配置时跳过而非
+      # 失败,保证 GitHub Release 本身可用(上传细节与保留策略见
+      # docs/planning/2026-09-10-r2-update-server-runbook.md §5)。
+      - name: Upload every channel image to the update server (R2)
         env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${R2_BUCKET}" ]; then
+            echo "::warning::R2 secrets 未配置 —— 跳过更新服务器上传(不影响 GitHub Release)"
+            exit 0
+          fi
           VER="${VERSION#v}"
-          ARCHIVE="picoaide-server-${VER}-amd64.zip"
-          # 先 docker save 到临时 tar,再打成 zip(2026-09-10:按部署要求改用 zip,
-          # 不用 zstd —— zip 在任何运维环境都开箱可用,不依赖额外安装 zstd)。
-          # 归档内是单个 image.tar;导入方式:
-          #   unzip -p <归档> image.tar | docker load
-          # sha256 一并产出供更新服务器 SHA256SUMS 与人工校验。
-          # 注意:zip 对已压缩内容(docker 层)无法再压,用 -1 快速模式避免白耗 CPU。
-          docker save "picoaide-harness-server:v${VER}" -o image.tar
-          zip -1 -q "$ARCHIVE" image.tar
-          rm -f image.tar
-          sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS
-          ls -lh "$ARCHIVE" SHA256SUMS
-          cat SHA256SUMS
+          aws="aws --endpoint-url https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          IMMUTABLE='public, max-age=31536000, immutable'
+
+          while IFS= read -r channel; do
+            [ -n "$channel" ] || continue
+            # 本步骤自己再掩码一次:掩码是"从发出那一刻起"生效的,跨步骤不假设。
+            printf '::add-mask::%s\n' "$channel"
+            base="s3://${R2_BUCKET}/${channel}"
+
+            # 1) 版本化资产(不可变、长缓存)
+            $aws s3 cp "release-bundle/${channel}/picoaide-server-${VER}-amd64.zip" \
+              "$base/releases/${VER}/" \
+              --content-type application/zip --cache-control "$IMMUTABLE"
+            $aws s3 cp "release-bundle/${channel}/SHA256SUMS" \
+              "$base/releases/${VER}/SHA256SUMS" \
+              --content-type text/plain --cache-control "$IMMUTABLE"
+
+            # 2) 清理到最近 3 个版本(版本序 sort -V,不能字典序:2.10.0 > 2.9.0)
+            $aws s3 ls "$base/releases/" | awk '{print $2}' | sed 's#/##' \
+              | sort -rV | tail -n +4 | while read -r old; do
+                  echo "prune old release (channel ${channel:0:0})"
+                  $aws s3 rm "$base/releases/$old/" --recursive
+                done
+
+            # 3) 版本指针最后覆盖(短缓存,新版本才能立即可见)
+            cat > latest.json <<JSON
+          {
+            "schema": 1,
+            "channel_id": "${channel}",
+            "server": {
+              "version": "${VER}",
+              "image_tag": "v${VER}",
+              "image_asset": "https://release.picoaide.com/${channel}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+            },
+            "client": { "version": "${VER}" },
+            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+            $aws s3 cp latest.json "$base/latest.json" \
+              --content-type application/json --cache-control 'no-cache'
+          done < channels.list
+          echo "update server publish done (all selected channels)"
 
       - name: Create GitHub Release
         run: |
@@ -703,108 +629,25 @@ jobs:
           fi
           # 幂等(2026-09-06):同 tag 重跑时 release 已存在会 422 —— 先查再决定
           # create/edit,并用 --clobber 覆盖旧资产(旧资产是上次运行的产物)。
+          # **只发公开渠道**(官方/beta)那一张 zip:品牌渠道是客户定制交付,
+          # 只进 R2 自己的目录,绝不进公开 Release(2026-09-10 定案)。
+          PUBLIC="${{ steps.images.outputs.public_channel }}"
+          test -n "${PUBLIC}" || { echo "::error::未解析出公开渠道"; exit 1; }
+          test -f "release-bundle/${PUBLIC}/picoaide-server-${TAG#v}-amd64.zip" \
+            || { echo "::error::公开渠道的镜像包不存在,拒绝发布空 Release"; exit 1; }
           if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — updating title/notes/flags and clobbering assets"
             gh release edit "${TAG}" --repo "${REPO}" \
               --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE}
             gh release upload "${TAG}" --repo "${REPO}" --clobber \
-              *.zip SHA256SUMS
+              "release-bundle/${PUBLIC}/"*.zip "release-bundle/${PUBLIC}/SHA256SUMS"
           else
             gh release create "${TAG}" --repo "${REPO}" \
               --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE} \
-              *.zip SHA256SUMS
+              "release-bundle/${PUBLIC}/"*.zip "release-bundle/${PUBLIC}/SHA256SUMS"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
-
-  # 更新服务器(R2)上传:需要 R2 secrets,尚未配置时**跳过而非失败**,保证
-  # Release 本身可用。配置好 R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID /
-  # R2_SECRET_ACCESS_KEY 后自动启用。上传细节与保留策略见
-  # docs/planning/2026-09-10-r2-update-server-runbook.md §5。
-  publish-update-server:
-    name: Publish to update server (R2)
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Check R2 credentials
-        id: creds
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        run: |
-          if [ -z "${R2_ACCOUNT_ID}" ]; then
-            echo "::warning::R2 secrets 未配置 —— 跳过更新服务器上传(不影响 GitHub Release)"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/checkout@v7
-        if: steps.creds.outputs.skip == 'false'
-      - name: Download release archive
-        if: steps.creds.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download "${GITHUB_REF_NAME}" \
-            --repo picoaide/picoaide-harness \
-            --pattern '*.zip' --pattern 'SHA256SUMS' --dir release-bundle
-          ls -lh release-bundle
-      - name: Generate latest.json
-        if: steps.creds.outputs.skip == 'false'
-        env:
-          VERSION: ${{ github.ref_name }}
-          CHANNEL: ${{ needs.release.outputs.channel }}
-        run: |
-          set -euo pipefail
-          VER="${VERSION#v}"; CH="${CHANNEL}"
-          # schema 权威定义见 R2 手册 §6;client.assets 当前不填(客户端包在镜像里)
-          cat > release-bundle/latest.json <<JSON
-          {
-            "schema": 1,
-            "channel_id": "${CH}",
-            "server": {
-              "version": "${VER}",
-              "image_tag": "v${VER}",
-              "image_asset": "https://release.picoaide.com/${CH}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
-            },
-            "client": { "version": "${VER}" },
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          JSON
-          cat release-bundle/latest.json
-      - name: Upload to R2 and prune old versions
-        if: steps.creds.outputs.skip == 'false'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          VERSION: ${{ github.ref_name }}
-          CHANNEL: ${{ needs.release.outputs.channel }}
-        run: |
-          set -euo pipefail
-          aws="aws --endpoint-url https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          VER="${VERSION#v}"; CH="${CHANNEL}"; BASE="s3://${R2_BUCKET}/${CH}"
-          IMMUTABLE='public, max-age=31536000, immutable'
-
-          # 1) 版本化资产(不可变、长缓存)
-          $aws s3 cp release-bundle/*.zip "$BASE/releases/${VER}/" \
-            --content-type application/zip --cache-control "$IMMUTABLE"
-          $aws s3 cp release-bundle/SHA256SUMS "$BASE/releases/${VER}/SHA256SUMS" \
-            --content-type text/plain --cache-control "$IMMUTABLE"
-
-          # 2) 清理到最近 3 个版本(版本序 sort -V,不能字典序:2.10.0 > 2.9.0)
-          $aws s3 ls "$BASE/releases/" | awk '{print $2}' | sed 's#/##' \
-            | sort -rV | tail -n +4 | while read -r old; do
-                echo "prune $CH/releases/$old"
-                $aws s3 rm "$BASE/releases/$old/" --recursive
-              done
-
-          # 3) 版本指针最后覆盖(短缓存,新版本才能立即可见)
-          $aws s3 cp release-bundle/latest.json "$BASE/latest.json" \
-            --content-type application/json --cache-control 'no-cache'
 
   # PR 场景:把本次提交的编译产物汇总评论到 PR(fork 分支 token 只读,跳过)。
   pr-summary:
