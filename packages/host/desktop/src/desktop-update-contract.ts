@@ -32,6 +32,7 @@ export type DesktopUpdateErrorCategory =
   | 'network'
   | 'not-signed-in'
   | 'release-missing'
+  | 'server-unavailable'
   | 'unsupported'
   | 'checksum-mismatch'
   | 'invalid-artifact'

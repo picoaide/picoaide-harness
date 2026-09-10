@@ -54,7 +54,12 @@ function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
           ? '检查更新失败：网络不可达，请检查网络后重试'
           : lastError === 'release-missing'
             ? '检查更新失败：最新版本缺少可下载安装包'
-            : '已是最新版本'
+            : lastError === 'server-unavailable'
+              // 服务端连得上、清单也拿到了,只是它推不出安全的对外地址:
+              // 这是部署配置问题(需管理员配 PICOAI_PUBLIC_BASE_URL 或反代的
+              // X-Forwarded-Proto),不能显示成"已是最新"把故障藏起来。
+              ? '检查更新失败：服务端未配置对外可用的 https 地址，请联系管理员'
+              : '已是最新版本'
 
   return createElement(
     'div',

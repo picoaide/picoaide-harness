@@ -15,7 +15,7 @@ interface UpdateState {
   readonly isPackaged: boolean
   readonly canDownload: boolean
   readonly currentVersion: string
-  readonly lastError?: 'network' | 'not-signed-in' | 'release-missing' | 'unsupported' | undefined
+  readonly lastError?: 'network' | 'not-signed-in' | 'release-missing' | 'server-unavailable' | 'unsupported' | undefined
 }
 
 /** 拉取宿主更新快照(与设置「关于」页共用;2026-09-01 审计消除重复轮询)。 */

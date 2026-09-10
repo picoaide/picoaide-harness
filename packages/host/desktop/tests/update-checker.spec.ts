@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   CHANNEL_ID_PATTERN,
   parseReleaseManifest,
+  readClientUnavailableReason,
   releaseAssetFor,
   serverChannelURL,
   serverManifestURL,
@@ -10,6 +11,7 @@ import {
 import {
   MAX_VERSION_RESPONSE_BYTES,
   checkForUpdate,
+  checkForUpdateDetailed,
   compareSemVerVersions,
   fetchReleaseManifest,
   parseSemVer,
@@ -239,6 +241,52 @@ describe('release manifest parsing', () => {
     ['a number', 1],
   ])('rejects %s as the manifest root', (_case, value) => {
     expect(parseReleaseManifest(value)).toBeNull()
+  })
+})
+
+describe('服务端给不出安全下载地址（client_unavailable）', () => {
+  it('把"服务端明说给不出地址"与"没有新版本"分开', async () => {
+    const request: UpdateRequest = async () => Response.json({
+      schema: 1,
+      channel_id: 'official',
+      server: { version: '2.10.0' },
+      client_unavailable: 'server origin is not https; set PICOAI_PUBLIC_BASE_URL',
+    })
+
+    await expect(checkForUpdateDetailed({
+      manifestURL: MANIFEST_URL,
+      currentVersion: '2.9.9',
+      request,
+    })).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'server origin is not https; set PICOAI_PUBLIC_BASE_URL',
+    })
+    // 老的布尔式 API 仍然返回 null(兼容既有调用方与测试)。
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL, currentVersion: '2.9.9', request }))
+      .resolves.toBeNull()
+  })
+
+  it('正常清单仍然走 result 分支', async () => {
+    const request: UpdateRequest = async () => manifestResponse('2.10.0')
+    await expect(checkForUpdateDetailed({ manifestURL: MANIFEST_URL, currentVersion: '2.9.9', request }))
+      .resolves.toEqual({
+        kind: 'result',
+        result: { status: 'update-available', currentVersion: '2.9.9', latestVersion: '2.10.0' },
+      })
+  })
+
+  it('既没有 client 段也没有原因时是 invalid（不是 unavailable）', async () => {
+    const request: UpdateRequest = async () => Response.json({ schema: 1, channel_id: 'official' })
+    await expect(checkForUpdateDetailed({ manifestURL: MANIFEST_URL, currentVersion: '2.9.9', request }))
+      .resolves.toEqual({ kind: 'invalid' })
+  })
+
+  it('readClientUnavailableReason 只认非空字符串', () => {
+    expect(readClientUnavailableReason({ client_unavailable: ' x ' })).toBe('x')
+    expect(readClientUnavailableReason({ client_unavailable: '' })).toBeUndefined()
+    expect(readClientUnavailableReason({ client_unavailable: 42 })).toBeUndefined()
+    expect(readClientUnavailableReason(null)).toBeUndefined()
+    expect(readClientUnavailableReason([])).toBeUndefined()
   })
 })
 
@@ -553,9 +601,9 @@ describe('channel isolation', () => {
     // 不校验渠道时结构本身是合法的
     expect(parseReleaseManifest(foreign)).not.toBeNull()
     // 品牌渠道必须拒绝官方清单
-    expect(parseReleaseManifest(foreign, 'acme')).toBeNull()
+    expect(parseReleaseManifest(foreign, 'example-brand')).toBeNull()
     // 官方渠道也必须拒绝品牌清单(反向串渠道)
-    expect(parseReleaseManifest({ ...foreign, channel_id: 'acme' }, 'official')).toBeNull()
+    expect(parseReleaseManifest({ ...foreign, channel_id: 'example-brand' }, 'official')).toBeNull()
     // 同渠道放行
     expect(parseReleaseManifest(foreign, 'official')).not.toBeNull()
   })
@@ -578,14 +626,14 @@ describe('channel isolation', () => {
       calls.push(String(url))
       return Response.json({
         schema: 1,
-        channel_id: 'acme',
-        client: { version: '2.8.0', assets: { 'mac-universal': { url: `${SERVER}/updates/client/acme.dmg`, sha256: RELEASE_SHA256 } } },
+        channel_id: 'example-brand',
+        client: { version: '2.8.0', assets: { 'mac-universal': { url: `${SERVER}/updates/client/example-brand.dmg`, sha256: RELEASE_SHA256 } } },
       })
     }
 
     await expect(checkForUpdate({
       manifestURL: MANIFEST_URL,
-      expectedChannel: 'acme',
+      expectedChannel: 'example-brand',
       currentVersion: '2.7.0',
       request,
     })).resolves.toMatchObject({ status: 'update-available', latestVersion: '2.8.0' })
@@ -600,10 +648,10 @@ describe('channel isolation', () => {
       client: { version: '9.9.9', assets: { 'mac-universal': { url: `${SERVER}/updates/client/x.dmg`, sha256: RELEASE_SHA256 } } },
     })
 
-    // 服务端自报 acme,清单却声明 official:必须"无更新",绝不提示跨渠道升级
+    // 服务端自报 example-brand,清单却声明 official:必须"无更新",绝不提示跨渠道升级
     await expect(checkForUpdate({
       manifestURL: MANIFEST_URL,
-      expectedChannel: 'acme',
+      expectedChannel: 'example-brand',
       currentVersion: '1.0.0',
       request,
     })).resolves.toBeNull()
@@ -612,10 +660,10 @@ describe('channel isolation', () => {
   it('validates channel ids by shape', () => {
     expect(CHANNEL_ID_PATTERN.test('official')).toBe(true)
     expect(CHANNEL_ID_PATTERN.test('beta')).toBe(true)
-    expect(CHANNEL_ID_PATTERN.test('acme-corp')).toBe(true)
+    expect(CHANNEL_ID_PATTERN.test('example-brand')).toBe(true)
     expect(CHANNEL_ID_PATTERN.test('Official')).toBe(false)
-    expect(CHANNEL_ID_PATTERN.test('-acme')).toBe(false)
-    expect(CHANNEL_ID_PATTERN.test('acme_')).toBe(false)
+    expect(CHANNEL_ID_PATTERN.test('-example-brand')).toBe(false)
+    expect(CHANNEL_ID_PATTERN.test('example-brand_')).toBe(false)
     expect(CHANNEL_ID_PATTERN.test('a'.repeat(33))).toBe(false)
   })
 })
