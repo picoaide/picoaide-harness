@@ -69,6 +69,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const runtime: DesktopRuntime = {
     platform,
     locale: 'en',
+    // native 文案(托盘/通知)的产品名:渠道构建下由 profile 组装成渠道名。
+    productName: 'PicoAide Harness',
     updates: {
       isPackaged: false,
       canDownload: platform === 'darwin' || platform === 'win32',
