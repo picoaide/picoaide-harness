@@ -43,14 +43,33 @@ if [ -z "$VERSION" ]; then
 fi
 VER="${VERSION#v}"
 
-if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ]; then
-  echo "::warning::R2 secrets 未配置 —— 跳过更新服务器上传(不影响 GitHub Release)"
-  exit 0
-fi
-
 if [ ! -f "$LIST" ]; then
   echo "::error::渠道列表不存在:${LIST}" >&2
   exit 2
+fi
+
+# 先看这次要发哪些渠道。品牌渠道**只能**从这里分发(R2 是它们唯一的分发面:
+# 公开 artifact 与 GitHub Release 都不带它们),所以凭据缺失时不能静默跳过 ——
+# 那等于"客户什么也拿不到,而流水线全绿"。官方/beta 缺凭据只告警(它们另有
+# GitHub Release 兜底)。列表本身不回显渠道名。
+BRAND_CHANNELS=0
+while IFS= read -r channel; do
+  [ -n "$channel" ] || continue
+  case "$channel" in
+    official|beta) ;;
+    *) BRAND_CHANNELS=$((BRAND_CHANNELS + 1)) ;;
+  esac
+done < "$LIST"
+
+if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ]; then
+  if [ "$BRAND_CHANNELS" -gt 0 ]; then
+    echo "::error::本次发布含品牌渠道,但 R2 凭据未配置(R2_ACCOUNT_ID / R2_BUCKET)。" >&2
+    echo "::error::品牌渠道的镜像只经更新服务器分发,跳过即客户零交付且无任何信号。" >&2
+    echo "::error::请配置 R2 secrets,或不要把品牌渠道放进本次发布。" >&2
+    exit 1
+  fi
+  echo "::warning::R2 secrets 未配置 —— 跳过更新服务器上传(不影响 GitHub Release)"
+  exit 0
 fi
 
 ENDPOINT="${R2_ENDPOINT:-https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com}"

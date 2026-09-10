@@ -33,7 +33,11 @@ channels.list
 channels-context/
 client-assets/
 release-bundle/
+release-artifacts/
+transfer-out/
 image.tar
+# E2E 报告/截图(CI 收集后上传为 artifact;本地跑 e2e:client 也会生成)
+packages/host/desktop/e2e-results/
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/

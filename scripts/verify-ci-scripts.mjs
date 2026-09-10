@@ -22,6 +22,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
+import { crc32, deflateSync } from 'node:zlib'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -31,6 +32,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const channelsScript = join(root, 'scripts', 'ci-channels.sh')
 const packageScript = join(root, 'scripts', 'ci-package-clients.sh')
 const publishScript = join(root, 'scripts', 'ci-publish-update-server.sh')
+const transferScript = join(root, 'scripts', 'ci-channel-transfer.sh')
 const failures = []
 const scratch = []
 
@@ -51,17 +53,55 @@ function tempDir(prefix) {
   return dir
 }
 
+/** PNG 块(长度 + 类型 + 数据 + CRC)。 */
+function pngChunk(type, data) {
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length)
+  const typeBuffer = Buffer.from(type, 'ascii')
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])) >>> 0)
+  return Buffer.concat([length, typeBuffer, data, crc])
+}
+
+/** 造一张最小 PNG(用于测构建期的图标几何校验,不引入 sharp 依赖)。 */
+function tinyPng(width, height, bitDepth, colorType) {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = bitDepth
+  ihdr[9] = colorType
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(Buffer.alloc(width * height * 4))),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
 /** 造一个假的私有渠道仓:`<root>/channels/<id>/channel.json`。 */
 function fakeChannelRepo(ids, options = {}) {
   const dir = tempDir('ci-channels-repo-')
   for (const id of ids) {
     mkdirSync(join(dir, 'channels', id), { recursive: true })
     // 品牌字段是**必需**的(ci-channels.sh 里 fail-loud):客户端在登录之前就要
-    // 显示品牌,包里没写就回落中性占位。夹具默认带上,另有用例专测缺失时的中止。
+    // 显示品牌,包里没写就回落中性占位。品牌渠道的编译期字段(slug/app_id/
+    // deep_link_scheme)同样必需 —— 缺 slug 安装包名回落厂商品牌、缺 app_id 两个
+    // 渠道的客户端在系统里变成同一个 app。夹具默认给全,另有用例专测缺失时的中止。
+    const publicChannel = id === 'official' || id === 'beta'
     writeFileSync(join(dir, 'channels', id, 'channel.json'), JSON.stringify({
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
+      ...(publicChannel
+        ? {}
+        : {
+            desktop: {
+              product_name: `${id} AI`,
+              slug: `${id}-AI`,
+              app_id: `com.example.${id.replaceAll('-', '')}`,
+              deep_link_scheme: `${id.replaceAll('-', '')}link`,
+            },
+          }),
     }))
   }
   for (const extra of options.extraDirectories ?? []) {
@@ -98,11 +138,11 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
 
 // ---- 1. tag → 渠道集策略 ----
 {
-  const source = fakeChannelRepo(['official', 'beta', 'acme-corp', 'zeta'])
+  const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'zeta'])
   const repoTag = runChannels({ source, refName: 'v2.7.0', dest: 'channels', list: 'a.list' })
   check(repoTag.status === 0, '正式 tag 应成功')
   check(
-    JSON.stringify(repoTag.selected) === JSON.stringify(['official', 'acme-corp', 'beta', 'zeta']),
+    JSON.stringify(repoTag.selected) === JSON.stringify(['official', 'beta', 'example-brand', 'zeta']),
     `正式 tag 应发全部渠道且 official 置顶,实际 ${JSON.stringify(repoTag.selected)}`,
   )
 
@@ -121,16 +161,16 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
 
 // ---- 2. 掩码 / 跳过不合规目录 / 不回显名字 ----
 {
-  const source = fakeChannelRepo(['official', 'acme-corp'], { extraDirectories: ['README', 'Bad_Name'] })
+  const source = fakeChannelRepo(['official', 'example-brand'], { extraDirectories: ['README', 'Bad_Name'] })
   const result = runChannels({ source, refName: 'v2.7.0', dest: 'channels', list: 'd.list' })
   check(result.status === 0, '含不合规目录时仍应成功(跳过而非失败)')
-  check(result.stdout.includes('::add-mask::acme-corp'), '每个渠道 id 都必须 add-mask')
+  check(result.stdout.includes('::add-mask::example-brand'), '每个渠道 id 都必须 add-mask')
   check(result.stdout.includes('::add-mask::official'), 'official 也必须 add-mask')
   check(!result.stdout.includes('README'), '被跳过的目录名不得出现在输出里')
   check(!result.stdout.includes('Bad_Name'), '不合规目录名不得出现在输出里')
   check(result.stderr.includes('已跳过'), '跳过不合规目录时应给出计数告警')
   check(
-    JSON.stringify(result.selected) === JSON.stringify(['official', 'acme-corp']),
+    JSON.stringify(result.selected) === JSON.stringify(['official', 'example-brand']),
     `不合规目录不得进入构建列表,实际 ${JSON.stringify(result.selected)}`,
   )
 }
@@ -161,13 +201,13 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   mkdirSync(join(branded, 'channels', 'official'), { recursive: true })
   writeFileSync(join(branded, 'channels', 'official', 'channel.json'),
     '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
-  mkdirSync(join(branded, 'channels', 'acme-corp'), { recursive: true })
-  writeFileSync(join(branded, 'channels', 'acme-corp', 'channel.json'), '{"schema":1,"channel_id":"acme-corp"}')
+  mkdirSync(join(branded, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(branded, 'channels', 'example-brand', 'channel.json'), '{"schema":1,"channel_id":"example-brand"}')
   const noBrand = runChannels({ source: branded, refName: 'v2.7.0', dest: 'channels', list: 'h.list' })
   check(noBrand.status !== 0, '渠道包缺品牌字段时必须失败')
   check(noBrand.stderr.includes('品牌字段'), '失败信息应指明缺的是品牌字段')
   check(noBrand.stderr.includes('identity.display_name'), '失败信息应列出缺失的具体字段')
-  check(!noBrand.stderr.includes('acme-corp'), '品牌缺失的报错不得回显渠道名')
+  check(!noBrand.stderr.includes('example-brand'), '品牌缺失的报错不得回显渠道名')
 
   // 只有 display_name、没有 short_name 也要中止(登录页名字的直接来源)
   const halfBranded = tempDir('ci-channels-brand-half-')
@@ -177,6 +217,74 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   const half = runChannels({ source: halfBranded, refName: 'v2.7.0', dest: 'channels', list: 'i.list' })
   check(half.status !== 0, '只配 display_name 也必须失败')
   check(half.stderr.includes('identity.short_name'), '失败信息应点明缺 short_name')
+
+  // 品牌渠道缺**编译期**字段 → 必须中止:缺 desktop.slug 时安装包名回落
+  // `PicoAide-Harness-…`(交付物上的厂商品牌),缺 app_id 时 bundle id 回落厂商值
+  // (两个渠道的客户端在系统里变成同一个 app)。
+  const noCompile = tempDir('ci-channels-compile-')
+  mkdirSync(join(noCompile, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(noCompile, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+  mkdirSync(join(noCompile, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(noCompile, 'channels', 'example-brand', 'channel.json'),
+    '{"schema":1,"channel_id":"example-brand","identity":{"display_name":"Example","short_name":"Example"}}')
+  const compile = runChannels({ source: noCompile, refName: 'v2.7.0', dest: 'channels', list: 'j.list' })
+  check(compile.status !== 0, '品牌渠道缺编译期字段时必须失败')
+  check(compile.stderr.includes('desktop.slug') && compile.stderr.includes('desktop.app_id'),
+    '失败信息应列出缺的编译期字段')
+  check(!compile.stderr.includes('example-brand'), '编译期字段报错不得回显渠道名')
+
+  // channel.json 字段形状不对(slug 含空格、scheme 非法)→ 构建期拦
+  const badShape = tempDir('ci-channels-shape-')
+  mkdirSync(join(badShape, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(badShape, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+  mkdirSync(join(badShape, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(badShape, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example', short_name: 'Example' },
+    desktop: { slug: 'Example AI', app_id: 'com.example.brand', deep_link_scheme: 'Example!' },
+  }))
+  const shape = runChannels({ source: badShape, refName: 'v2.7.0', dest: 'channels', list: 'k.list' })
+  check(shape.status !== 0, '字段形状非法时必须失败')
+  check(shape.stderr.includes('desktop.slug') && shape.stderr.includes('deep_link_scheme'),
+    '失败信息应指出非法字段')
+
+  // app-icon.png 不符合 mac 图标管线要求(1024×1024 RGBA16 + ICC)→ 构建期拦,
+  // 而不是等到三平台打包时才炸(mac 图标由 sharp 派生,要求极严)。
+  const badIcon = tempDir('ci-channels-icon-')
+  mkdirSync(join(badIcon, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(badIcon, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+  mkdirSync(join(badIcon, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(badIcon, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example', short_name: 'Example' },
+    desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand' },
+  }))
+  writeFileSync(join(badIcon, 'channels', 'example-brand', 'app-icon.png'), tinyPng(256, 256, 8, 6))
+  const icon = runChannels({ source: badIcon, refName: 'v2.7.0', dest: 'channels', list: 'l.list' })
+  check(icon.status !== 0, 'app-icon.png 尺寸不符时必须失败')
+  check(icon.stderr.includes('app-icon.png'), '失败信息应点名 app-icon.png')
+
+  // 声明的素材文件不存在 → 构建期拦(否则服务端不下发 URL、客户端拿到死链)
+  const missingAsset = tempDir('ci-channels-asset-')
+  mkdirSync(join(missingAsset, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(missingAsset, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+  mkdirSync(join(missingAsset, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(missingAsset, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example', short_name: 'Example' },
+    desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand' },
+    assets: { logo: 'logo.svg' },
+  }))
+  const asset = runChannels({ source: missingAsset, refName: 'v2.7.0', dest: 'channels', list: 'm.list' })
+  check(asset.status !== 0, '声明的素材文件不存在时必须失败')
+  check(asset.stderr.includes('assets.logo'), '失败信息应点名缺哪个素材')
 
   // 空白字符串不算配置(与客户端 nonEmpty 口径一致)
   const blank = tempDir('ci-channels-brand-blank-')
@@ -192,27 +300,55 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   const runDir = tempDir('ci-package-run-')
   const stage = join(runDir, 'stage')
   const list = join(runDir, 'ch.list')
-  writeFileSync(list, 'official\nacme-corp\n')
+  writeFileSync(list, 'official\nexample-brand\n')
 
   // 假打包器:回显渠道名并产出两种文件;渠道名出现在**输出**里,
   // 真实 CI 中会被 ::add-mask:: 抹掉,这里只断言"渠道构建不输出"这一层。
   const stub = join(runDir, 'stub.sh')
   writeFileSync(stub, `#!/usr/bin/env bash
-echo "building for \${DSH_BUILD_CHANNEL}"
-mkdir -p "${root}/packages/host/desktop/dist"
-echo x > "${root}/packages/host/desktop/dist/App-\${DSH_BUILD_CHANNEL}.AppImage"
-echo y > "${root}/packages/host/desktop/dist/App-\${DSH_BUILD_CHANNEL}.deb"
+ echo "building for \${DSH_BUILD_CHANNEL}"
+ mkdir -p "${root}/packages/host/desktop/dist"
+ echo x > "${root}/packages/host/desktop/dist/App-\${DSH_BUILD_CHANNEL}.AppImage"
+ echo y > "${root}/packages/host/desktop/dist/App-\${DSH_BUILD_CHANNEL}.deb"
 `)
   execFileSync('chmod', ['+x', stub])
 
+  // 白标门禁桩:真实脚本要读 build/ 与私有渠道仓,回归测试里换成"永远通过"的桩。
+  // (桩自身也在测:门禁是**在打包之后、归集之前**被调用的。)
+  const verifyStub = join(runDir, 'verify-ok.mjs')
+  writeFileSync(verifyStub, `console.log(\`verify stub: \${process.env.DSH_BUILD_CHANNEL} \${process.argv.slice(2).join(' ')}\`)
+`)
+
   const ok = spawnSync('bash', [
     packageScript, '--list', list, '--stage-dir', stage, '--patterns', '*.AppImage *.deb', '--', stub,
-  ], { cwd: root, encoding: 'utf8' })
+  ], { cwd: root, encoding: 'utf8', env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyStub } })
   check(ok.status === 0, `逐渠道打包应成功,实际退出 ${String(ok.status)}`)
   check((ok.stdout ?? '').includes('building for official'), '官方渠道必须保留完整日志(排障基准)')
-  check(!(ok.stdout ?? '').includes('building for acme-corp'), '渠道构建的输出不得出现在日志里')
+  check(!(ok.stdout ?? '').includes('building for example-brand'), '渠道构建的输出不得出现在日志里')
   check(existsSync(join(stage, 'official', 'App-official.AppImage')), '官方产物应归集到 client-assets/<channel>/')
-  check(existsSync(join(stage, 'acme-corp', 'App-acme-corp.deb')), '渠道产物应归集到自己的目录')
+  check(existsSync(join(stage, 'example-brand', 'App-example-brand.deb')), '渠道产物应归集到自己的目录')
+  check((ok.stdout ?? '').includes('verify stub: official'), '官方渠道必须跑白标门禁')
+  check(!(ok.stdout ?? '').includes('verify stub: example-brand'), '渠道的白标门禁输出也必须被抑制')
+
+  // 白标门禁失败 → 报中性信息(不回显渠道名/门禁输出),且不许把产物当成功归集
+  const verifyFail = join(runDir, 'verify-fail.mjs')
+  writeFileSync(verifyFail, `if (process.env.DSH_BUILD_CHANNEL !== 'official') {
+  console.log('VERIFY-SECRET-DETAIL')
+  process.exit(4)
+}
+`)
+  const stageGate = join(runDir, 'stage-gate')
+  const gate = spawnSync('bash', [
+    packageScript, '--list', list, '--stage-dir', stageGate, '--patterns', '*.AppImage *.deb', '--', stub,
+  ], { cwd: root, encoding: 'utf8', env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyFail } })
+  check(gate.status !== 0, '渠道白标门禁失败必须让步骤失败')
+  const gateLines = `${gate.stdout ?? ''}${gate.stderr ?? ''}`
+    .split('\n')
+    .filter(line => !line.startsWith('::add-mask::'))
+    .join('\n')
+  check(!gateLines.includes('VERIFY-SECRET-DETAIL'), '门禁失败不得回显门禁输出')
+  check(!gateLines.includes('example-brand'), '门禁失败信息里不得出现渠道名')
+  check(!existsSync(join(stageGate, 'example-brand')), '门禁失败的渠道不得被归集为可用产物')
 
   // 渠道构建失败 → 只报中性信息,不回显渠道名与命令输出
   // 秘密标记只在**渠道**那一轮打印:官方轮是允许输出日志的。
@@ -239,7 +375,7 @@ echo x > "${root}/packages/host/desktop/dist/App.AppImage"
     .filter(line => !line.startsWith('::add-mask::'))
     .join('\n')
   check(!failureLines.includes('SECRET-CHANNEL-DETAIL'), '失败时不得回显渠道构建的输出')
-  check(!failureLines.includes('acme-corp'), '失败信息里不得出现渠道名')
+  check(!failureLines.includes('example-brand'), '失败信息里不得出现渠道名')
   check(failureLines.includes('官方构建'), '失败信息应指引去看官方构建的日志')
 }
 
@@ -263,7 +399,7 @@ echo x > "${root}/packages/host/desktop/dist/App.AppImage"
   const bundle = join(work, 'release-bundle')
   const list = join(work, 'channels.list')
   const store = join(work, 'store')
-  writeFileSync(list, 'official\nbeta\nacme-corp\n')
+  writeFileSync(list, 'official\nbeta\nexample-brand\n')
 
   // 假 aws:把 s3 cp/ls/rm 变成对本地目录的操作,并把参数记进日志,便于断言。
   const log = join(work, 'aws.log')
@@ -315,7 +451,7 @@ esac
   execFileSync('chmod', ['+x', fakeAws])
 
   // 每个渠道造一份"已构建"的镜像包。
-  for (const channel of ['official', 'beta', 'acme-corp']) {
+  for (const channel of ['official', 'beta', 'example-brand']) {
     mkdirSync(join(bundle, channel), { recursive: true })
     writeFileSync(join(bundle, channel, 'picoaide-server-2.7.0-amd64.zip'), `zip-${channel}`)
     writeFileSync(join(bundle, channel, 'SHA256SUMS'), `sum-${channel}`)
@@ -337,13 +473,13 @@ esac
     },
   })
   check(run.status === 0, `R2 发布应成功,实际退出 ${String(run.status)}: ${run.stderr ?? ''}`)
-  check(run.stdout.includes('::add-mask::acme-corp'), '发布步骤必须自己再掩码渠道 id')
+  check(run.stdout.includes('::add-mask::example-brand'), '发布步骤必须自己再掩码渠道 id')
   // 掩码行本身必然含渠道名(GitHub 从这一刻起把它抹成 ***);除此之外不得出现。
   const visible = run.stdout.split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n')
-  check(!visible.includes('acme-corp'), '渠道名不得出现在发布日志里(掩码行除外)')
+  check(!visible.includes('example-brand'), '渠道名不得出现在发布日志里(掩码行除外)')
 
   // 每个渠道一套独立目录 + 版本化资产 + 清单。
-  for (const channel of ['official', 'beta', 'acme-corp']) {
+  for (const channel of ['official', 'beta', 'example-brand']) {
     const dir = join(store, channel)
     check(existsSync(join(dir, 'releases', '2.7.0', 'picoaide-server-2.7.0-amd64.zip')), `${channel}: 应上传 zip`)
     check(existsSync(join(dir, 'releases', '2.7.0', 'SHA256SUMS')), `${channel}: 应上传 SHA256SUMS`)
@@ -375,8 +511,23 @@ esac
   const firstManifest = lines.findIndex(line => line.includes('latest.json'))
   check(firstAsset !== -1 && firstManifest > firstAsset, '清单应在资产之后写入(避免指向空目录)')
 
-  // 缺 R2 secrets → 跳过而不是失败(GitHub Release 仍要可用)。
-  const skipped = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+  // 缺 R2 secrets 且**这次要发品牌渠道** → 必须失败(品牌渠道只有 R2 一个分发面,
+  // 静默跳过 = 客户零交付而流水线全绿)。
+  const brandNoCreds = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: { PATH: `${work}:${process.env.PATH ?? ''}`, HOME: process.env.HOME ?? '', VERSION: 'v2.7.0' },
+  })
+  check(brandNoCreds.status !== 0, '含品牌渠道时缺 R2 凭据必须失败')
+  check(
+    `${brandNoCreds.stderr ?? ''}`.includes('品牌渠道'),
+    '失败信息应说明品牌渠道只经更新服务器分发',
+  )
+
+  // 只有官方/beta → 跳过而不是失败(GitHub Release 仍要可用)。
+  const publicList = join(work, 'public-channels.list')
+  writeFileSync(publicList, 'official\nbeta\n')
+  const skipped = spawnSync('bash', [publishScript, '--list', publicList, '--bundle', bundle], {
     cwd: work,
     encoding: 'utf8',
     env: { PATH: `${work}:${process.env.PATH ?? ''}`, HOME: process.env.HOME ?? '', VERSION: 'v2.7.0' },
@@ -409,10 +560,160 @@ esac
   check(noVersion.status !== 0, '缺 VERSION 时必须失败')
 }
 
+// ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
+{
+  const work = tempDir('ci-transfer-')
+  const stage = join(work, 'client-assets')
+  const out = join(work, 'release-artifacts')
+  const list = join(work, 'channels.list')
+  const store = join(work, 'store')
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  writeFileSync(list, 'official\nbeta\nexample-brand\n')
+
+  // 假 aws:recursive cp/rm 落到本地目录,并记录调用参数。
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+log="${log}"
+store="${store}"
+record() { printf '%s\\n' "$*" >> "$log"; }
+args=(); recursive=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) recursive=1; shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+cmd="\${args[0]:-} \${args[1]:-}"
+case "$cmd" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    record "cp $src $dst recursive=$recursive"
+    if [ "$recursive" = 1 ]; then
+      if [[ "$src" == s3://* ]]; then
+        key="\${src#s3://*/}"; key="\${key%/.}"
+        mkdir -p "$dst"; cp -a "$store/$key/." "$dst/"
+      else
+        key="\${dst#s3://*/}"
+        mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+      fi
+    else
+      key="\${dst#s3://*/}"
+      mkdir -p "$(dirname "$store/$key")"; cp "$src" "$store/$key"
+    fi
+    ;;
+  "s3 rm")
+    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
+    record "rm $prefix"
+    rm -rf "$store/$key"
+    ;;
+esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+
+  /** 跑一次中转脚本。 */
+  const transfer = (mode, extra = [], env = {}) => spawnSync('bash', [transferScript, mode, '--list', list, ...extra], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ID: '4242',
+      GITHUB_RUN_ATTEMPT: '1',
+      ...env,
+    },
+  })
+  const r2 = { R2_ACCOUNT_ID: 'acct', R2_BUCKET: 'bucket', R2_SECRET_ACCESS_KEY: 'secret' }
+
+  // 造三平台产物:官方/beta 留 artifact,品牌渠道必须被中转走并从暂存目录删除。
+  for (const id of ['official', 'beta', 'example-brand']) {
+    mkdirSync(join(stage, id), { recursive: true })
+    writeFileSync(join(stage, id, `App-${id}.AppImage`), 'x')
+  }
+  const pushed = transfer('push', ['--stage', stage], r2)
+  check(pushed.status === 0, `品牌渠道中转 push 应成功,实际退出 ${String(pushed.status)}`)
+  check(existsSync(join(stage, 'official')), '官方产物必须留在公开 artifact 暂存目录里')
+  check(existsSync(join(stage, 'beta')), 'beta 产物必须留在公开 artifact 暂存目录里')
+  check(!existsSync(join(stage, 'example-brand')), '品牌渠道产物必须从公开 artifact 暂存目录里删除')
+
+  const transferLog = readFileSync(log, 'utf8')
+  check((transferLog.match(/recursive=1/g) ?? []).length === 1, '只应中转品牌渠道(官方/beta 不上传)')
+  const keys = readdirSync(join(store, '_transfer')).sort()
+  check(keys.length === 1 && !keys[0].includes('example-brand'), '中转前缀不得含渠道 id')
+  check(keys[0].startsWith('4242-1-'), '中转前缀应按 run 派生')
+  const token = keys[0].replace(/^4242-1-/, '')
+  check(token.length === 16 && /^[0-9a-f]{16}$/u.test(token), '前缀 token 应是 HMAC 派生(不可猜测)')
+  check(
+    existsSync(join(store, '_transfer', keys[0], 'ch-3', 'App-example-brand.AppImage')),
+    '品牌渠道产物应落在 ch-<index> 目录(索引与渠道列表行号一致)',
+  )
+
+  // 公开日志(剔除 ::add-mask:: 指令行)里不得出现渠道名。
+  const pushLines = `${pushed.stdout ?? ''}${pushed.stderr ?? ''}`
+    .split('\n')
+    .filter(line => !line.startsWith('::add-mask::'))
+    .join('\n')
+  check(!pushLines.includes('example-brand'), '中转的公开日志里不得出现渠道名')
+
+  // 缺 R2 凭据 + 存在品牌渠道 → 必须失败(静默跳过 = 品牌渠道零交付)
+  const noCreds = transfer('push', ['--stage', stage], { R2_ACCOUNT_ID: '', R2_BUCKET: '', R2_SECRET_ACCESS_KEY: '' })
+  check(noCreds.status !== 0, '存在品牌渠道却没有 R2 凭据时必须失败')
+  check((noCreds.stderr ?? '').includes('_transfer') || (noCreds.stderr ?? '').includes('不经过公开 artifact'),
+    '失败信息应说明品牌渠道不经公开 artifact')
+
+  // 只有公开渠道时不依赖 R2
+  const publicOnly = join(work, 'public.list')
+  writeFileSync(publicOnly, 'official\nbeta\n')
+  const publicRun = spawnSync('bash', [transferScript, 'push', '--list', publicOnly, '--stage', stage], {
+    cwd: work,
+    encoding: 'utf8',
+    env: { PATH: `${work}:${process.env.PATH ?? ''}`, HOME: process.env.HOME ?? '' },
+  })
+  check(publicRun.status === 0, '只有官方/beta 时不应要求 R2 凭据')
+
+  // pull:release job 取回自己的品牌产物
+  const pulled = transfer('pull', ['--to', out], r2)
+  check(pulled.status === 0, `品牌渠道中转 pull 应成功,实际退出 ${String(pulled.status)}`)
+  check(existsSync(join(out, 'example-brand', 'App-example-brand.AppImage')), 'pull 应把品牌产物还原到 release-artifacts/<channel>/')
+
+  // clean:取回后立即销毁中转对象
+  const cleaned = transfer('clean', [], r2)
+  check(cleaned.status === 0, 'clean 应成功')
+  check(!existsSync(join(store, '_transfer', keys[0], 'ch-3')), 'clean 必须删掉中转对象')
+}
+
+// ---- 8. 敏感路径不得入库(忽略规则是唯一防线,补一条硬守卫) ----
+{
+  const tracked = execFileSync('git', ['ls-files', '--full-name'], { cwd: root, encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean)
+  for (const prefix of [
+    'channels.list',
+    'channels/',
+    'channels-context/',
+    'client-assets/',
+    'release-artifacts/',
+    'release-bundle/',
+    'image.tar',
+    'packages/host/desktop/build/channel.json',
+    'packages/host/desktop/build/channel-electron-builder.cjs',
+    'packages/host/desktop/e2e-results/',
+  ]) {
+    check(
+      !tracked.some(file => (file === prefix || file.startsWith(prefix))
+        && file !== 'channels/README.md'),
+      `${prefix} 不得被 git 跟踪(渠道内容/打包产物只应留在本地,或经 R2 私密中转)`,
+    )
+  }
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/品牌必填/日志抑制/产物归集/R2 发布全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/品牌必填/日志抑制/白标门禁/产物归集/品牌渠道 R2 中转/R2 发布全部符合预期\n')

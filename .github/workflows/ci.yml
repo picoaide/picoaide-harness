@@ -247,7 +247,18 @@ jobs:
           bash scripts/ci-package-clients.sh --official-last \
             --list channels.list --stage-dir client-assets \
             --patterns '*.AppImage *.deb' \
+            --verify-app-dir dist/linux-unpacked \
             -- yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+      # 品牌渠道的产物**不进公开 artifact**(artifact 对任何登录账号可取,而渠道
+      # 目录名/文件名/包内品牌都是客户身份):改经 R2 临时前缀中转,release job 取回。
+      # 官方/beta 不在中转范围内(它们的品牌本来就公开)。
+      - name: Transfer brand-channel installers over R2 (not via public artifacts)
+        if: ${{ !github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
       # fork PR 拿不到 secret(渠道仓读不到)——回落到只构建官方,而不是让 PR 失败。
       - name: Package the official client only (fork PR without channel access)
         if: ${{ github.event.pull_request.head.repo.fork }}
@@ -277,8 +288,9 @@ jobs:
           cp packages/host/desktop/.e2e-report.md packages/host/desktop/e2e-results/e2e-report.md 2>/dev/null || true
           cp -r packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/shots 2>/dev/null || true
       # artifact 名保持**中性**(不含渠道名):公开仓的 artifact 列表是匿名可读的
-      # (实测),名字里带渠道 id 就等于公开客户名。渠道产物装在
-      # client-assets/<channel>/ 子目录里(内容需登录才可取)。
+      # (实测),名字里带渠道 id 就等于公开客户名。
+      # 2026-09-10 审计后**内容也不再含品牌渠道**:品牌渠道的安装包经 R2 私密中转
+      # (见下面的 transfer 步骤),这里只剩 official/beta —— 它们的品牌本来就公开。
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-Linux
@@ -346,7 +358,23 @@ jobs:
           bash scripts/ci-package-clients.sh --official-last \
             --list channels.list --stage-dir client-assets \
             --patterns '*Setup*.exe' \
+            --verify-app-dir dist/win-unpacked \
             -- yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
+      # 品牌渠道产物经 R2 中转,不进公开 artifact(与 linux job 同策)。
+      # Windows 镜像不保证自带 aws CLI(ubuntu 有),缺了就装 —— 这条链失败
+      # 等于品牌渠道零交付,不能让它悬在"环境碰巧有没有"上。
+      - name: Ensure AWS CLI for the brand-channel transfer
+        if: ${{ !github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: command -v aws >/dev/null 2>&1 || choco install awscli -y --no-progress
+      - name: Transfer brand-channel installers over R2 (not via public artifacts)
+        if: ${{ !github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
       # fork PR 拿不到 secret(渠道仓读不到)——回落到只构建官方,而不是让 PR 失败。
       - name: Package the official client only (fork PR without channel access)
         if: ${{ github.event.pull_request.head.repo.fork }}
@@ -492,7 +520,14 @@ jobs:
             --list channels.list --stage-dir client-assets --patterns '*.dmg' \
             -- bash -c 'yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates --sign-only \
                  && yarn workspace dsh-plugin-desktop dist:mac:dmg --no-prebuild'
-      # artifact 名中性;品牌渠道产物在 client-assets/<channel>/ 下(tag 时)。
+      - name: Transfer brand-channel DMGs over R2 (not via public artifacts)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
+      # artifact 名中性;品牌渠道产物已由上面的中转步骤移出 client-assets(tag 时)。
       - uses: actions/upload-artifact@v7
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         with:
@@ -557,6 +592,15 @@ jobs:
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
         run: bash scripts/ci-channels.sh
+
+      # 品牌渠道的客户端产物走 R2 中转(见 desktop-linux job 的说明),这里取回。
+      # 前缀由 run id + HMAC(R2 密钥)派生,渠道名从不出现在任何键或日志里。
+      - name: Fetch brand-channel installers from the R2 transfer prefix
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh pull --list channels.list --to release-artifacts
 
       - name: Build one server image per channel
         id: images
@@ -623,6 +667,16 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+      # 取回即销毁:中转对象只应存在几分钟(R2 桶是公开读的,虽然前缀不可猜,
+      # 也没有理由让客户产物在公网多停留)。失败也执行,避免残留。
+      - name: Destroy the R2 transfer prefix
+        if: always()
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: bash scripts/ci-channel-transfer.sh clean --list channels.list
 
   # PR 场景:把本次提交的编译产物汇总评论到 PR(fork 分支 token 只读,跳过)。
   pr-summary:
