@@ -13043,6 +13043,8 @@ __metadata:
 "picoaide-harness@workspace:.":
   version: 0.0.0-use.local
   resolution: "picoaide-harness@workspace:."
+  dependencies:
+    yaml: "npm:^2.9.0"
   dependenciesMeta:
     "@deepseek-ai/dsh-subprocess-local":
       built: true
