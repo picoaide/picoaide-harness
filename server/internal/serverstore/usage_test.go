@@ -23,20 +23,8 @@ func mustUserID(t *testing.T, db *sql.DB) int64 {
 	return id
 }
 
-// setCreatedAt backdates a usage row so day aggregation is deterministic.
-// 分区表:string 日期回填到历史月份时,必须确保目标月分区存在
-// (分区键 created_at 的 UPDATE 路由要求分区存在)。
-func setCreatedAt(t *testing.T, db *sql.DB, id int64, ts string) {
-	t.Helper()
-	if tm, err := time.Parse("2006-01-02 15:04:05", ts); err == nil {
-		if err := ensureUsagePartition(db, tm); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", ts, id); err != nil {
-		t.Fatal(err)
-	}
-}
+// setCreatedAt / setCreatedAtAt / fixtureAt / beijingWall 等时区安全夹具见
+// testhelp_test.go(2026-09-10 修复时区依赖缺陷后统一到北京日绝对瞬时)。
 
 func TestRecordUsageReturnsID(t *testing.T) {
 	db, cleanup := newUsageDB(t)
@@ -90,7 +78,7 @@ func TestCleanupPendingUsage(t *testing.T) {
 	setCreatedAt(t, db, keptPending, "2026-08-02 09:00:00")
 	setCreatedAt(t, db, complete, "2026-07-01 09:00:00")
 
-	cutoff := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
+	cutoff := beijingWall(t, "2026-08-01")
 	if err := CleanupPendingUsage(db, cutoff); err != nil {
 		t.Fatal(err)
 	}
@@ -134,8 +122,8 @@ func TestUserMonthlyUsage(t *testing.T) {
 	defer cleanup()
 	uid := mustUserID(t, db)
 
-	thisMonth := monthStart(time.Now()).AddDate(0, 0, 5)
-	lastMonth := monthStart(time.Now()).AddDate(0, -1, 15)
+	thisMonth := bjMonth(0).AddDate(0, 0, 5)
+	lastMonth := bjMonth(1).AddDate(0, 0, 15)
 
 	for _, ts := range []time.Time{thisMonth, thisMonth, lastMonth} {
 		id, _ := RecordUsage(db, uid, "m", 10, 5)
@@ -159,7 +147,7 @@ func TestUserMonthlyUsageBatch(t *testing.T) {
 	defer cleanup()
 	a := mustUserID(t, db)
 	b := mustUserID(t, db)
-	thisMonth := monthStart(time.Now()).AddDate(0, 0, 5)
+	thisMonth := bjMonth(0).AddDate(0, 0, 5)
 
 	id, _ := RecordUsage(db, a, "m", 10, 5)
 	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
@@ -266,8 +254,8 @@ func TestUsageAggregateUserJoinsUsername(t *testing.T) {
 
 	// date range + user group must not hit an ambiguous created_at (users
 	// table also has created_at after the LEFT JOIN)
-	from := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
-	to := time.Date(2026, 8, 31, 0, 0, 0, 0, time.Local)
+	from := bjDate(t, "2026-08-01")
+	to := bjDate(t, "2026-08-31")
 	rows, err = UsageAggregate(db, from, to, "user")
 	if err != nil {
 		t.Fatalf("user group with date filter: %v", err)
@@ -313,8 +301,8 @@ func TestUsageAggregateZeroFill(t *testing.T) {
 		id, _ := RecordUsage(db, uid, "m", 10, 5)
 		setCreatedAt(t, db, id, ts)
 	}
-	from := time.Date(2026, 8, 10, 0, 0, 0, 0, time.Local)
-	to := time.Date(2026, 8, 12, 0, 0, 0, 0, time.Local)
+	from := bjDate(t, "2026-08-10")
+	to := bjDate(t, "2026-08-12")
 	rows, err := UsageAggregate(db, from, to, "day")
 	if err != nil {
 		t.Fatal(err)
@@ -347,8 +335,8 @@ func TestUsageAggregateWeekMonth(t *testing.T) {
 		id, _ := RecordUsage(db, uid, "m", 10, 5)
 		setCreatedAt(t, db, id, ts)
 	}
-	from := time.Date(2026, 8, 10, 0, 0, 0, 0, time.Local)
-	to := time.Date(2026, 8, 20, 0, 0, 0, 0, time.Local)
+	from := bjDate(t, "2026-08-10")
+	to := bjDate(t, "2026-08-20")
 
 	rows, err := UsageAggregate(db, from, to, "week")
 	if err != nil {
@@ -364,8 +352,8 @@ func TestUsageAggregateWeekMonth(t *testing.T) {
 		t.Fatalf("week aggregation wrong: %+v", rows)
 	}
 
-	fromM := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
-	toM := time.Date(2026, 9, 15, 0, 0, 0, 0, time.Local)
+	fromM := bjDate(t, "2026-07-01")
+	toM := bjDate(t, "2026-09-15")
 	rows, err = UsageAggregate(db, fromM, toM, "month")
 	if err != nil {
 		t.Fatal(err)
@@ -421,8 +409,8 @@ func TestUsageAggregateMonthOverflow(t *testing.T) {
 	id, _ = RecordUsage(db, uid, "m", 20, 5)
 	setCreatedAt(t, db, id, "2026-09-15 09:00:00")
 
-	from := time.Date(2026, 8, 31, 0, 0, 0, 0, time.Local)
-	to := time.Date(2026, 9, 15, 0, 0, 0, 0, time.Local)
+	from := bjDate(t, "2026-08-31")
+	to := bjDate(t, "2026-09-15")
 	rows, err := UsageAggregate(db, from, to, "month")
 	if err != nil {
 		t.Fatal(err)
@@ -570,7 +558,7 @@ func TestUserMonthlyCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setCreatedAt(t, db, id2, time.Now().Format("2006-01-02")+" 09:00:00") // 本月
+	setCreatedAtAt(t, db, id2, fixtureAt(0, 9)) // 本月(北京日)
 
 	cost, err := UserMonthlyCost(db, uid)
 	if err != nil {
@@ -996,11 +984,11 @@ func TestDeptBudgetCost(t *testing.T) {
 	uid3, _ := CreateUser(db, &User{Username: "a3", Source: "local", Status: 1})
 
 	id, _ := RecordUsage(db, uid1, "priced-model", 1_000_000, 0) // 2 元
-	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
 	id2, _ := RecordUsage(db, uid2, "priced-model", 500_000, 0) // 1 元
-	setCreatedAt(t, db, id2, time.Now().Format("2006-01-02")+" 09:00:00")
+	setCreatedAtAt(t, db, id2, fixtureAt(0, 9))
 	id3, _ := RecordUsage(db, uid3, "priced-model", 1_000_000, 0) // 2 元,不计
-	setCreatedAt(t, db, id3, time.Now().Format("2006-01-02")+" 09:00:00")
+	setCreatedAtAt(t, db, id3, fixtureAt(0, 9))
 
 	cost, err := DeptMonthlyCost(db, rd)
 	if err != nil {
@@ -1028,7 +1016,7 @@ func TestDeptBudgetCostBatch(t *testing.T) {
 	uid1, _ := CreateUser(db, &User{Username: "a1", Source: "local", Status: 1})
 	_ = AddUserGroup(db, uid1, qd)
 	id, _ := RecordUsage(db, uid1, "priced-model", 1_000_000, 0)
-	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
 
 	costs, err := DeptMonthlyCostBatch(db, []int64{rd, qd, 9999})
 	if err != nil {
@@ -1056,15 +1044,16 @@ func TestUserDayUsageCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
 	// 昨天 23:00:500K prompt → cost 1
 	id2, err := RecordUsage(db, uid, "priced-model", 500_000, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setCreatedAt(t, db, id2, time.Now().AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+	setCreatedAtAt(t, db, id2, fixtureAt(1, 23))
 
-	now := time.Now()
+	// 查询边界用北京日(bjDay):"今天/昨天"与夹具同源,不受进程 TZ 影响。
+	now := bjDay(0)
 	usage, cost, err := UserDayUsageCost(db, uid, now)
 	if err != nil {
 		t.Fatal(err)
@@ -1072,7 +1061,7 @@ func TestUserDayUsageCost(t *testing.T) {
 	if usage != 1_000_000 || cost != 2.0 {
 		t.Fatalf("today usage=%d cost=%v, want 1000000/2.0", usage, cost)
 	}
-	u2, c2, err := UserDayUsageCost(db, uid, now.AddDate(0, 0, -1))
+	u2, c2, err := UserDayUsageCost(db, uid, bjDay(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1111,16 +1100,16 @@ func TestUserUsageSummary(t *testing.T) {
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
-	now := time.Now()
-	// 今天
+	// 北京日口径:夹具("今天 09:00"/"昨天 23:00")与"今天/昨天"边界同源,
+	// 进程 TZ 为 UTC 时(北京 00:00-08:00)也不会错位。
 	id, _ := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
-	setCreatedAt(t, db, id, now.Format("2006-01-02")+" 09:00:00")
+	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
 	// 昨天(可能跨月:8/31 23:00)
 	id2, _ := RecordUsage(db, uid, "priced-model", 500_000, 0)
-	setCreatedAt(t, db, id2, now.AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+	setCreatedAtAt(t, db, id2, fixtureAt(1, 23))
 
-	yesterday := now.AddDate(0, 0, -1)
-	sameMonth := yesterday.Year() == now.Year() && yesterday.Month() == now.Month()
+	today, yesterday := bjDay(0), bjDay(1)
+	sameMonth := yesterday.Year() == today.Year() && yesterday.Month() == today.Month()
 	monthlyUsage := int64(1_000_000)
 	monthlyCost := 2.0
 	if sameMonth {
@@ -1388,25 +1377,23 @@ func explainPlan(t *testing.T, db *sql.DB, q string, args ...any) string {
 	return b.String()
 }
 
-// TestUsageRangePredicatePrunesPartitions 覆盖 P2-15:范围比较直接与
-// ?::date 比较(会话时区已固定 Asia/Shanghai),不得用
-// `created_at AT TIME ZONE 'Asia/Shanghai'` 包裹分区键——包裹后 PG 无法
-// 分区裁剪,退化成全分区扫描(EXPLAIN 证据:Subplans Removed vs 全扫)。
+// TestUsageRangePredicatePrunesPartitions 覆盖 P2-15:范围比较直接把瞬时参数
+// 写在分区键 created_at 一侧(`created_at >= ?::timestamptz`,参数为北京日边界
+// 的显式 UTC 偏移瞬时),不得用 `created_at AT TIME ZONE 'Asia/Shanghai'` 包裹
+// 分区键——包裹后 PG 无法分区裁剪,退化成全分区扫描(EXPLAIN 证据:
+// Subplans Removed vs 全扫)。
 func TestUsageRangePredicatePrunesPartitions(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	defer cleanup()
-	now := time.Now()
-	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	to := from.AddDate(0, 1, 0)
-	target := "usage_" + from.Format("200601")
-	prev := "usage_" + from.AddDate(0, -1, 0).Format("200601")
-	next := "usage_" + from.AddDate(0, 1, 0).Format("200601")
+	// 窗口按北京月取(唯一真源,不依赖进程 TZ)。
+	month := BeijingMonthNow()
+	from, to := month, month.AddDate(0, 1, -1)
+	target := "usage_" + month.Format("200601")
+	prev := "usage_" + month.AddDate(0, -1, 0).Format("200601")
+	next := "usage_" + month.AddDate(0, 1, 0).Format("200601")
 
-	plan := explainPlan(t, db, `SELECT COUNT(*) FROM usage WHERE created_at >= $1::date AND created_at < $2::date`,
-		from.Format("2006-01-02"), to.Format("2006-01-02"))
-	if !strings.Contains(plan, "Subplans Removed") {
-		t.Fatalf("分区未被裁剪(缺 Subplans Removed):\n%s", plan)
-	}
+	plan := explainPlan(t, db, `SELECT COUNT(*) FROM usage WHERE created_at >= $1::timestamptz AND created_at < $2::timestamptz`,
+		dayStartArg(from), dayEndArgInclusive(to))
 	if !strings.Contains(plan, target) {
 		t.Fatalf("目标分区 %s 未出现:\n%s", target, plan)
 	}
@@ -1415,10 +1402,116 @@ func TestUsageRangePredicatePrunesPartitions(t *testing.T) {
 			t.Fatalf("分区 %s 未被裁剪:\n%s", other, plan)
 		}
 	}
+	// 裁剪生效的两种表现:常量谓词在**规划期**直接消掉其他分区(无 Append),
+	// 或运行时裁剪(Append + Subplans Removed)。两者都说明分区键未被包裹。
+	if strings.Contains(plan, "Append") && !strings.Contains(plan, "Subplans Removed") {
+		t.Fatalf("分区未被裁剪(Append 且无 Subplans Removed):\n%s", plan)
+	}
 	// 对照组:旧写法(AT TIME ZONE 包裹)全分区扫 —— 证明上面的断言有区分度
-	wrapped := explainPlan(t, db, `SELECT COUNT(*) FROM usage WHERE created_at AT TIME ZONE 'Asia/Shanghai' >= $1::date AND created_at AT TIME ZONE 'Asia/Shanghai' < $2::date`,
-		from.Format("2006-01-02"), to.Format("2006-01-02"))
+	wrapped := explainPlan(t, db, `SELECT COUNT(*) FROM usage WHERE created_at AT TIME ZONE 'Asia/Shanghai' >= $1::timestamptz AND created_at AT TIME ZONE 'Asia/Shanghai' < $2::timestamptz`,
+		dayStartArg(from), dayEndArgInclusive(to))
 	if !strings.Contains(wrapped, next) || !strings.Contains(wrapped, prev) {
 		t.Fatalf("对照组应全分区扫(证明包裹写法不可裁剪):\n%s", wrapped)
+	}
+}
+
+// TestUsageDayWindowIndependentOfTimezone 覆盖 2026-09-10 时区依赖缺陷:
+// 「日窗口」只由**绝对瞬时**决定,既不依赖进程 TZ,也不依赖 PG 会话时区。
+//
+//  1. 同一绝对时刻在不同进程时区下表达(UTC / UTC+8 / UTC+14 / UTC-11)
+//     → BeijingDay 推出的边界与查询结果必须一致;
+//  2. 同一批数据在 PG 会话时区 UTC 与 Asia/Shanghai 下聚合 → 结果必须一致
+//     (旧实现用 ?::date,会话时区不同窗口相差 8 小时:CI 的 PG 为 UTC 而
+//     compose 的 PG 为 Asia/Shanghai,北京 00:00-08:00 聚合全空)。
+func TestUsageDayWindowIndependentOfTimezone(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+
+	// 北京"今天 00:30"与"今天 23:30":日界两侧的极值点,最容易被时区错切。
+	idEarly, _ := RecordUsage(db, uid, "m", 11, 0)
+	setCreatedAtAt(t, db, idEarly, fixtureAt(0, 0).Add(30*time.Minute))
+	idLate, _ := RecordUsage(db, uid, "m", 22, 0)
+	setCreatedAtAt(t, db, idLate, fixtureAt(0, 23).Add(30*time.Minute))
+	// 北京"昨天 23:30"与"明天 00:30":必须落在别的日窗口
+	idPrev, _ := RecordUsage(db, uid, "m", 100, 0)
+	setCreatedAtAt(t, db, idPrev, fixtureAt(1, 23).Add(30*time.Minute))
+	idNext, _ := RecordUsage(db, uid, "m", 200, 0)
+	setCreatedAtAt(t, db, idNext, fixtureAt(-1, 0).Add(30*time.Minute))
+
+	// 1) 进程 TZ 维度:把"同一绝对时刻"用不同时区表达,窗口必须一致。
+	instant := time.Now()
+	zones := []*time.Location{
+		time.UTC,
+		time.FixedZone("CST", 8*3600),
+		time.FixedZone("UTC+14", 14*3600),
+		time.FixedZone("UTC-11", -11*3600),
+	}
+	var wantUsage int64
+	for i, loc := range zones {
+		day := BeijingDay(instant.In(loc))
+		if day != BeijingDay(instant.In(zones[0])) {
+			t.Fatalf("BeijingDay 依赖进程时区: %s → %s", loc, day)
+		}
+		usage, _, err := UserDayUsageCost(db, uid, instant.In(loc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			wantUsage = usage
+			if wantUsage != 33 { // 11 + 22
+				t.Fatalf("今日用量 = %d, want 33(北京 00:30 + 23:30 两条)", wantUsage)
+			}
+		} else if usage != wantUsage {
+			t.Fatalf("进程时区 %s 下今日用量 = %d, want %d(窗口不得依赖进程 TZ)", loc, usage, wantUsage)
+		}
+	}
+
+	// 2) PG 会话时区维度:同一批数据、同一 from/to,UTC 与 Asia/Shanghai 结果一致。
+	type window struct {
+		name     string
+		from, to time.Time
+		wantTok  int64
+		wantReq  int64
+	}
+	windows := []window{
+		{"今天", bjDay(0), bjDay(0), 33, 2},   // 11 + 22
+		{"昨天", bjDay(1), bjDay(1), 100, 1},  // 前一天 23:30
+		{"近4天", bjDay(3), bjDay(0), 133, 3}, // 100 + 33(明天 00:30 不计)
+		{"空窗口", bjDay(30), bjDay(20), 0, 0}, // 无数据的窗口:两边都必须为 0
+	}
+	var ref []UsageAggregateRow
+	for i, tz := range []string{"UTC", "Asia/Shanghai"} {
+		h := openTestDBWithSessionTZ(t, db, tz)
+		got := make([]UsageAggregateRow, 0, len(windows))
+		for _, w := range windows {
+			rows, err := UsageAggregate(h, w.from, w.to, "day")
+			if err != nil {
+				t.Fatalf("会话时区 %s 窗口 %s 聚合失败: %v", tz, w.name, err)
+			}
+			var tok, req int64
+			for _, r := range rows {
+				tok += r.PromptTokens + r.CompletionTokens
+				req += r.Requests
+			}
+			if tok != w.wantTok || req != w.wantReq {
+				t.Fatalf("会话时区 %s 窗口 %s = %d tokens/%d req, want %d/%d(日窗口不得依赖 PG 会话时区)",
+					tz, w.name, tok, req, w.wantTok, w.wantReq)
+			}
+			got = append(got, rows...)
+		}
+		if i == 0 {
+			ref = got
+			continue
+		}
+		if len(got) != len(ref) {
+			t.Fatalf("会话时区 %s 返回 %d 行,UTC 会话返回 %d 行(分桶/补零口径不一致)", tz, len(got), len(ref))
+		}
+		for j := range got {
+			if got[j] != ref[j] {
+				t.Fatalf("会话时区 %s 第 %d 行 %+v ≠ UTC 会话的 %+v(日窗口/分桶不得依赖 PG 会话时区)",
+					tz, j, got[j], ref[j])
+			}
+		}
 	}
 }

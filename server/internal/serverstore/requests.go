@@ -34,6 +34,8 @@ var UsageRequestKind = map[string]bool{
 
 // ListUsageRequests 分页返回请求级明细(按 id 倒序)。
 // from/to 为闭开区间 [from, to);username/model/kind 为空 = 不过滤。
+// 边界是北京日边界的**绝对瞬时**(显式 UTC 偏移),与 PG 会话时区/进程 TZ 无关
+// (旧实现传裸墙钟字符串,会话时区为 UTC 时整窗口偏 8 小时)。
 func ListUsageRequests(db *sql.DB, from, to time.Time, username, model, kind string, page, size int) ([]UsageRequestRow, int64, error) {
 	if page < 1 {
 		page = 1
@@ -44,12 +46,12 @@ func ListUsageRequests(db *sql.DB, from, to time.Time, username, model, kind str
 	var where []string
 	var args []any
 	if !from.IsZero() {
-		where = append(where, "u.created_at >= ?")
-		args = append(args, from.Format(pgTimeFmt))
+		where = append(where, "u.created_at >= ?::timestamptz")
+		args = append(args, dayStartArg(from))
 	}
 	if !to.IsZero() {
-		where = append(where, "u.created_at < ?")
-		args = append(args, to.Format(pgTimeFmt))
+		where = append(where, "u.created_at < ?::timestamptz")
+		args = append(args, dayStartArg(to))
 	}
 	if username != "" {
 		where = append(where, "u.user_id = (SELECT id FROM users WHERE username = ?)")

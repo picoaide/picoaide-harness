@@ -200,7 +200,9 @@ func TestAdminUsage(t *testing.T) {
 	recordUsage(t, db, 1, "deepseek-chat", 10, 20)
 	recordUsage(t, db, 1, "deepseek-chat", 30, 40)
 
-	w, out = doJSON(t, r, "GET", "/api/server/admin/usage?group=day&from="+time.Now().Format("2006-01-02")+"&to="+time.Now().Format("2006-01-02"), "", hdr)
+	// 今日 = 北京日(唯一真源):本机日期在 UTC 容器下会指向前一天。
+	todayBJ := serverstore.BeijingNow().Format("2006-01-02")
+	w, out = doJSON(t, r, "GET", "/api/server/admin/usage?group=day&from="+todayBJ+"&to="+todayBJ, "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage: %d %s", w.Code, w.Body.String())
 	}

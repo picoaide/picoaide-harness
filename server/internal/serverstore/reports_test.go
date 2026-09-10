@@ -33,8 +33,10 @@ func TestMarkReportRunFailureRecordsLastRunAt(t *testing.T) {
 		t.Fatalf("last_error = %q", s.LastError)
 	}
 	now := time.Now()
-	if s.LastRunAt.Year() != now.Year() || s.LastRunAt.Month() != now.Month() {
-		t.Fatalf("last_run_at = %v, want 本月", s.LastRunAt)
+	// 月口径 = 北京月(唯一真源):last_run_at 由 SQL now() 写入(绝对瞬时),
+	// 进程 TZ=UTC 时其"本机月"会与北京月错开(每月 00:00-08:00)。
+	if !BeijingMonth(*s.LastRunAt).Equal(BeijingMonth(now)) {
+		t.Fatalf("last_run_at = %v, want 北京本月(%v)", s.LastRunAt, BeijingMonth(now))
 	}
 	// 成功路径:last_run_at 更新且 last_error 清空
 	if err := MarkReportRun(db, id, true, ""); err != nil {
