@@ -26,6 +26,7 @@ import (
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -47,20 +48,21 @@ func buildRouter(t *testing.T) *gin.Engine {
 	// JSON 信封、也没有访问日志。
 	installAPIMiddleware(r)
 	router.Register(r, router.Deps{
-		DB:         nil,
-		Auth:       serverauth.New(nil).Handlers(),
-		Admin:      (&serverauth.AdminAPI{}).Handlers(),
-		Appstore:   appstore.NewHandlers(nil),
-		Bootstrap:  bootstrap.NewHandlers(nil),
-		Brand:      brand.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Market:     marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Agentshare: agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Shared:     sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Capability: capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Connector:  connectors.NewHandlers(nil),
-		Telemetry:  telemetry.NewHandlers(nil),
-		Gateway:    llmgateway.NewHandlers(nil),
-		Reports:    reports.NewHandlers(nil),
+		DB:            nil,
+		Auth:          serverauth.New(nil).Handlers(),
+		Admin:         (&serverauth.AdminAPI{}).Handlers(),
+		Appstore:      appstore.NewHandlers(nil),
+		Bootstrap:     bootstrap.NewHandlers(nil),
+		Brand:         brand.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
+		Market:        marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Agentshare:    agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Shared:        sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Capability:    capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Connector:     connectors.NewHandlers(nil),
+		Telemetry:     telemetry.NewHandlers(nil),
+		Gateway:       llmgateway.NewHandlers(nil),
+		Reports:       reports.NewHandlers(nil),
 	})
 	return r
 }
@@ -247,20 +249,21 @@ func TestV2RealDB(t *testing.T) {
 	}
 	authCfg := serverauth.NewConfiguredAPI(db)
 	router.Register(r, router.Deps{
-		DB:         db,
-		Auth:       authCfg.API.Handlers(),
-		Admin:      (&serverauth.AdminAPI{DB: db}).Handlers(),
-		Appstore:   appstore.NewHandlers(db),
-		Bootstrap:  bootstrap.NewHandlers(db),
-		Brand:      brand.NewHandlers(db, t.TempDir()),
-		Market:     marketplace.NewHandlers(db, t.TempDir()),
-		Agentshare: agentshare.NewHandlers(db, t.TempDir()),
-		Shared:     sharedskills.NewHandlers(db, t.TempDir()),
-		Capability: capabilities.NewHandlers(db, t.TempDir()),
-		Connector:  connectors.NewHandlers(db),
-		Telemetry:  telemetry.NewHandlers(db),
-		Gateway:    llmgateway.NewHandlers(db),
-		Reports:    reports.NewHandlers(db),
+		DB:            db,
+		Auth:          authCfg.API.Handlers(),
+		Admin:         (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Appstore:      appstore.NewHandlers(db),
+		Bootstrap:     bootstrap.NewHandlers(db),
+		Brand:         brand.NewHandlers(db, t.TempDir()),
+		ClientRelease: clientrelease.NewHandlers(func() string { return "dev" }, "official"),
+		Market:        marketplace.NewHandlers(db, t.TempDir()),
+		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
+		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
+		Capability:    capabilities.NewHandlers(db, t.TempDir()),
+		Connector:     connectors.NewHandlers(db),
+		Telemetry:     telemetry.NewHandlers(db),
+		Gateway:       llmgateway.NewHandlers(db),
+		Reports:       reports.NewHandlers(db),
 	})
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))

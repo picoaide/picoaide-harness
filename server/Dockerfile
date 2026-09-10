@@ -69,23 +69,22 @@ RUN echo "$CHANNEL" > /opt/picoaide/CHANNEL
 ENV PICOAI_CHANNEL=$CHANNEL
 
 # --- 客户端安装包随镜像分发(单包交付的核心) ---
-# 客户端资产由 CI 三平台 job 产出后经命名上下文 clientassets 输入(目录结构:
-# client/<文件名> + CLIENT-RELEASE.json)。客户端与服务端**同版本同包**发布,
-# 服务端启动后由 entrypoint 落到 /data/releases/<version>/client/,再经
-# /api/client/v2/updates/manifest 与 /updates/client/<file> 对员工下发——
-# 版本配套因此在结构上不可能错位。
+# 客户端资产由 CI 三平台 job 产出后经命名上下文 clientassets 输入,目录里直接是
+# CLIENT-RELEASE.json(资产清单)+ 各平台安装包。服务端把 /opt/picoaide/client
+# 这个目录对外提供(GET /api/client/v2/updates/manifest 与 /updates/client/<file>),
+# 于是客户端从**它登录的这台服务端**取包、版本天然与服务端配套。
 #
-# 构建上下文契约(两处都必须遵守):
-#   clientassets/client/        目录必须**存在**(可为空)
-#   clientassets/CLIENT-RELEASE.json  可选
-# 实测(2026-09-10):必须用**目录形式** `client/` —— 写成 `client/*` 通配时,
-# 源目录为空会直接构建失败("lstat /client: no such file or directory"),
-# 而目录形式对空目录是允许的。占位文件方案因此不必要。
+# 构建上下文契约:
+#   clientassets/client/               目录必须**存在**(可为空 → 镜像不带客户端)
+#   clientassets/CLIENT-RELEASE.json*  可选(本地构建没有)
+# 实测:必须用**目录形式** `client/` —— 写成 `client/*` 通配时源目录为空会直接
+# 构建失败("lstat /client: no such file or directory"),目录形式对空目录是允许的。
 COPY --from=clientassets client/ /opt/picoaide/client/
-# 清单用通配:本地构建没有该文件,`json*` 匹配不到时不报错
 COPY --from=clientassets CLIENT-RELEASE.json* /opt/picoaide/
-# 占位文件若存在(某些构建脚本会放)不进最终镜像影响展示
 RUN rm -f /opt/picoaide/client/.keep
+# 目录位置固定,服务端直接读(无需 entrypoint 落盘:镜像层里读文件是只读、
+# 一次性、随镜像升级而更新,正是我们要的语义)。
+ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 # 以 root 启动 entrypoint(修正挂载卷所有权)→ su-exec 降权到 picoaide 运行
 USER root
 VOLUME ["/data"]

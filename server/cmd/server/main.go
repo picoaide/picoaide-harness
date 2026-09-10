@@ -23,6 +23,7 @@ import (
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -160,20 +161,23 @@ func main() {
 	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
 	// /v2/api、/v2/v1)迁移后不再注册。
 	router.Register(r, router.Deps{
-		DB:         db,
-		Auth:       auth.Handlers(),
-		Admin:      (&serverauth.AdminAPI{DB: db}).Handlers(),
-		Appstore:   appstore.NewHandlers(db),
-		Bootstrap:  bootstrap.NewHandlers(db),
-		Brand:      brand.NewHandlers(db, *dataDir),
-		Market:     marketplace.NewHandlers(db, *dataDir+"/skills-cache"),
-		Agentshare: agentshare.NewHandlers(db, *dataDir+"/agent-presets-cache"),
-		Shared:     sharedskills.NewHandlers(db, *dataDir+"/shared-skills-cache"),
-		Capability: capabilities.NewHandlers(db, *dataDir+"/skills-cache"),
-		Connector:  connectors.NewHandlers(db),
-		Telemetry:  telemetry.NewHandlers(db),
-		Gateway:    llmgateway.NewHandlers(db),
-		Reports:    reports.NewHandlers(db),
+		DB:        db,
+		Auth:      auth.Handlers(),
+		Admin:     (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Appstore:  appstore.NewHandlers(db),
+		Bootstrap: bootstrap.NewHandlers(db),
+		Brand:     brand.NewHandlers(db, *dataDir),
+		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
+		// (GET /api/client/v2/updates/manifest 与 /updates/client/<file>)。
+		ClientRelease: clientrelease.NewHandlers(func() string { return version }, updatecheck.ResolveChannel()),
+		Market:        marketplace.NewHandlers(db, *dataDir+"/skills-cache"),
+		Agentshare:    agentshare.NewHandlers(db, *dataDir+"/agent-presets-cache"),
+		Shared:        sharedskills.NewHandlers(db, *dataDir+"/shared-skills-cache"),
+		Capability:    capabilities.NewHandlers(db, *dataDir+"/skills-cache"),
+		Connector:     connectors.NewHandlers(db),
+		Telemetry:     telemetry.NewHandlers(db),
+		Gateway:       llmgateway.NewHandlers(db),
+		Reports:       reports.NewHandlers(db),
 	})
 	// 固定探针(不属于两命名空间)。
 	r.GET("/healthz", bootstrap.NewHandlers(db).Health)
