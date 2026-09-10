@@ -235,7 +235,9 @@ var page = template.Must(template.New("portal").Funcs(template.FuncMap{
   </section>
 
   <footer class="rise" style="--d:.68s">
-    <span>PicoAide Harness{{if .Version}} · v{{.Version}}{{end}}</span>
+    {{/* 页脚站点名来自渠道配置(.Name),不再硬编码厂商名 —— 门户是未认证访客
+         都能看到的公开页,渠道客户在这里看到厂商名就等于白标失败。 */}}
+    <span>{{.Name}}{{if .Version}} · v{{.Version}}{{end}}</span>
     {{if .Channel}}<span>渠道 <code>{{.Channel}}</code></span>{{end}}
     <span class="sp"></span>
     <span>安装包由本服务端直接提供</span>

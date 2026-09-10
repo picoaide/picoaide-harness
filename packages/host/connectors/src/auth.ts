@@ -22,6 +22,12 @@ export interface AuthRunOptions {
   callbackHost?: string
   /** Pre-connect settings already collected from the user. */
   fields?: Record<string, string>
+  /**
+   * OAuth 客户端名（客户 IdP 的授权同意页上显示的名字）。
+   * 渠道化时由渠道包注入（profile.ts → ConnectorsOptions.clientName）；
+   * 缺省是中性名 —— 仓库里不留厂商品牌描述。
+   */
+  clientName?: string
 }
 
 /**
@@ -61,17 +67,26 @@ function pkce(): { verifier: string; challenge: string } {
   return { verifier, challenge }
 }
 
+/**
+ * OAuth 客户端名的中性缺省值。
+ *
+ * 刻意不含厂商品牌：仓库里不留任何品牌描述，渠道化时由渠道包注入自己的名字
+ * （客户在自家 IdP 的授权同意页上应该看到自己公司的产品名）。
+ */
+export const DEFAULT_OAUTH_CLIENT_NAME = 'Enterprise AI Connector'
+
 /** RFC 7591 dynamic client registration; returns the issued client id. */
 async function registerClient(
   auth: OAuthAuthConfig,
   redirectUri: string,
   registrationEndpoint: string,
+  clientName: string,
 ): Promise<string> {
   const response = await fetch(registrationEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      client_name: 'PicoAide Harness Connector',
+      client_name: clientName,
       redirect_uris: [redirectUri],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
@@ -236,7 +251,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   const redirectUri = `http://${callbackHost}:${port}/callback`
   const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
   const clientId = registrationEndpoint
-    ? await registerClient(auth, redirectUri, registrationEndpoint)
+    ? await registerClient(auth, redirectUri, registrationEndpoint, options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME)
     : auth.clientId || ''
   if (!clientId) throw new Error('OAuth 服务器不支持动态客户端注册，且未配置固定 clientId')
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined

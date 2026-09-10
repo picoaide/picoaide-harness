@@ -14,6 +14,7 @@
  * @module @picoaide/dsh-browser
  */
 
+import { BROWSER_DEFAULT_TITLE } from './runtime.ts'
 import type { CdpTransport } from './cdp.ts'
 
 /** The minimal native view surface the browser runtime drives. */
@@ -390,7 +391,7 @@ export function createRealElectronAdapter(electronModule?: ElectronModuleLike): 
         height: BROWSER_WINDOW_DEFAULT.height,
         minWidth: BROWSER_WINDOW_MIN.width,
         minHeight: BROWSER_WINDOW_MIN.height,
-        title: 'PicoAide 浏览器',
+        title: BROWSER_DEFAULT_TITLE,
         // 2026-09-08 product decision: the browser is created at client boot
         // but stays HIDDEN — the agent operates it in the background and the
         // shell's 浏览器 button shows it on demand. Creation must therefore
