@@ -1,44 +1,66 @@
 /**
- * Single authority for the PicoAide update server surface.
+ * Single authority for the desktop update source.
  *
- * 2026-09-10 起更新源**只有**我方更新服务器（Cloudflare R2 静态对象，经
- * https://release.picoaide.com 对外），GitHub Releases 更新通道已彻底移除：
- * 匿名 API 限流（60 次/小时/IP，企业出口共用一个 IP 必然触发）与国内不可达
- * 是两个绕不过去的硬伤。
+ * 2026-09-10 定案（用户拍板）：**客户端只从它登录的那台服务端取更新**，
+ * 不直接访问 `release.picoaide.com`。
  *
- * 客户端有两类渠道：
- *   - 官方渠道：base = https://release.picoaide.com/official（本文件默认值）
- *   - 企业渠道：base = 渠道自己的更新面（客户自部署服务端 / 渠道专属目录），
- *     由构建期注入渠道配置覆盖 `resolveUpdateBaseURL`。
+ * 为什么不能直连分发面（这是本文件的核心约束，改设计前先读完）：
+ *   - **渠道版本错乱**：分发面按渠道分目录（`<channel>/latest.json`），客户端
+ *     一旦直连就必须自带渠道身份；而渠道身份只能靠构建期注入，注入错了、
+ *     漏了或畸形，客户端就变成另一个渠道的客户端，会被别的渠道的清单升级
+ *     并"洗"成那个渠道（最严重的一类错）。
+ *   - **内网/隔离网部署**：产品的主要形态是企业内网部署，员工机器不该、
+ *     也常常不能访问任何外网。
+ *   - 改走服务端后，「客户端属于哪个渠道」由**它登录的服务端**在结构上决定，
+ *     客户端不需要（也不再）知道自己属于哪个渠道 —— 错乱不可能发生。
  *
- * 协议见 docs/planning/2026-09-10-r2-update-server-runbook.md §6。
+ * 于是本文件只保留两件事：①服务端更新清单的地址拼装；②清单结构的严格校验。
+ * 分发面（R2）只服务端自己的"检查更新"用（给管理员提示），与客户端无关，
+ * 因此不在本模块表达。
+ *
+ * 服务端的清单端点与服务端自己的检查同形状（`GET /api/client/v2/updates/manifest`
+ * 与 R2 上的 `latest.json` 字段一致），所以解析逻辑只有一份。
  * @module dsh-plugin-desktop/desktop-release
  */
-
-/** 官方渠道 id（稳定版）。 */
-export const OFFICIAL_CHANNEL = 'official'
-
-/** 预发渠道 id（我们自己内测；与官方渠道**互不升级**）。 */
-export const BETA_CHANNEL = 'beta'
 
 /** 渠道 id 合法形状：小写字母/数字/连字符，1–32 位（与品牌文件夹命名同源）。 */
 export const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 
-/** 默认更新服务器 base（官方渠道目录）。 */
-export const DESKTOP_UPDATE_BASE_URL = 'https://release.picoaide.com/official'
+/** 服务端下发客户端安装包清单的路径（公开端点，登录前也可取）。 */
+export const SERVER_UPDATE_MANIFEST_PATH = '/api/client/v2/updates/manifest'
+
+/** 服务端下发渠道内容（渠道 id / 名称 / 标语）的路径（公开端点）。 */
+export const SERVER_CHANNEL_PATH = '/api/client/v2/channel'
 
 /**
- * 组装某渠道的更新面 base。
- * @param channel - 渠道 id（`beta` / `official` / 品牌渠道 id）。
- * @returns 该渠道在更新服务器上的目录地址；非法渠道回落到官方目录。
+ * 去掉 URL 末尾的斜杠（兼容写入时带斜杠的服务端地址）。
+ * 不用正则：尾斜杠剥离曾被 CodeQL 标为多项式回溯（见 channel-sync 同款注释）。
+ * @param value - 原始地址。
+ * @returns 去掉尾部斜杠的地址。
  */
-export function channelBaseURL(channel: string = OFFICIAL_CHANNEL): string {
-  const id = CHANNEL_ID_PATTERN.test(channel) ? channel : OFFICIAL_CHANNEL
-  return `https://release.picoaide.com/${id}`
+function trimTrailingSlashes(value: string): string {
+  let trimmed = value
+  while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1)
+  return trimmed
 }
 
-/** 版本清单文件名（更新服务器上的固定入口，内容随版本覆盖）。 */
-export const UPDATE_MANIFEST_FILE = 'latest.json'
+/**
+ * 组装服务端的版本清单地址。
+ * @param serverURL - 已登录的服务端地址（调用方负责 https/回环校验）。
+ * @returns 绝对 URL。
+ */
+export function serverManifestURL(serverURL: string): string {
+  return `${trimTrailingSlashes(serverURL)}${SERVER_UPDATE_MANIFEST_PATH}`
+}
+
+/**
+ * 组装服务端的渠道内容地址（用于交叉校验清单声明的渠道）。
+ * @param serverURL - 已登录的服务端地址。
+ * @returns 绝对 URL。
+ */
+export function serverChannelURL(serverURL: string): string {
+  return `${trimTrailingSlashes(serverURL)}${SERVER_CHANNEL_PATH}`
+}
 
 /** 清单协议版本；不匹配即拒绝，避免旧客户端误读新结构。 */
 export const UPDATE_MANIFEST_SCHEMA = 1
@@ -92,15 +114,6 @@ export function releaseAssetFor(
   platform: DesktopReleasePlatform,
 ): DesktopReleaseAsset | undefined {
   return manifest.assets[PLATFORM_ASSET_KEYS[platform]]
-}
-
-/**
- * 组装版本清单地址。
- * @param baseURL - 渠道更新面 base（末尾斜杠容错）；缺省为官方渠道。
- * @returns 绝对 URL。
- */
-export function updateManifestURL(baseURL: string = DESKTOP_UPDATE_BASE_URL): string {
-  return `${baseURL.replace(/\/+$/u, '')}/${UPDATE_MANIFEST_FILE}`
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/u

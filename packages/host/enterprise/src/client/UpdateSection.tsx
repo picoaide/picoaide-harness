@@ -42,11 +42,15 @@ function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
     ? `正在下载 ${downloading}…${percent !== undefined ? ` ${percent}` : ''}`
     : available !== undefined
       ? `发现新版本 ${available}，点击「检查更新」开始下载`
-      : lastError === 'network'
-        ? '检查更新失败：网络不可达，请检查网络后重试'
-        : lastError === 'release-missing'
-          ? '检查更新失败：最新版本缺少可下载安装包'
-          : '已是最新版本'
+      : lastError === 'not-signed-in'
+        // 客户端只从它登录的那台服务端取更新:未登录就没有更新源。
+        // 这不是网络故障,不能误导用户去排查网络(审计 2026-09-10)。
+        ? '请先登录后再检查更新'
+        : lastError === 'network'
+          ? '检查更新失败：网络不可达，请检查网络后重试'
+          : lastError === 'release-missing'
+            ? '检查更新失败：最新版本缺少可下载安装包'
+            : '已是最新版本'
 
   return createElement(
     'div',

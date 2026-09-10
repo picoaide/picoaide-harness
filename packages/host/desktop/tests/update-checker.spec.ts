@@ -1,13 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  BETA_CHANNEL,
   CHANNEL_ID_PATTERN,
-  DESKTOP_UPDATE_BASE_URL,
-  OFFICIAL_CHANNEL,
-  channelBaseURL,
   parseReleaseManifest,
   releaseAssetFor,
-  updateManifestURL,
+  serverChannelURL,
+  serverManifestURL,
   type DesktopReleaseManifest,
 } from '../src/desktop-release.ts'
 import {
@@ -19,15 +16,17 @@ import {
   type UpdateRequest,
 } from '../src/update-checker.ts'
 
-// 测试统一用官方渠道;渠道隔离本身由桌面 src 与服务端 updatecheck 单测覆盖
-const CHANNEL = 'official'
-
+// 客户端只从**它登录的那台服务端**取更新(2026-09-10 定案):测试里的更新源
+// 一律是服务端清单地址,不再是任何分发面目录;渠道隔离改由 expectedChannel
+// (服务端自报的渠道 id)覆盖。
+const SERVER = 'https://server.test'
+const MANIFEST_URL = serverManifestURL(SERVER)
 
 const RELEASE_SHA256 = 'a'.repeat(64)
 
-/** 官方渠道清单里的三平台安装包(地址与哈希都是合法形态)。 */
+/** 清单里的三平台安装包(地址与哈希都是合法形态)。 */
 function platformAssets(version: string): Record<string, { url: string, sha256: string, size: number }> {
-  const releases = `${DESKTOP_UPDATE_BASE_URL}/releases/${version}`
+  const releases = `${SERVER}/updates/client/${version}`
   return {
     'mac-universal': {
       url: `${releases}/PicoAide-Harness-${version}-mac.dmg`,
@@ -147,7 +146,7 @@ describe('release manifest parsing', () => {
     const manifest = requireManifest(parseReleaseManifest(manifestValue('2.7.0')))
 
     expect(releaseAssetFor(manifest, 'darwin')?.url).toBe(
-      `${DESKTOP_UPDATE_BASE_URL}/releases/2.7.0/PicoAide-Harness-2.7.0-mac.dmg`,
+      `${SERVER}/updates/client/2.7.0/PicoAide-Harness-2.7.0-mac.dmg`,
     )
     expect(releaseAssetFor(manifest, 'win32')?.url).toContain('-x64-Setup.exe')
     expect(releaseAssetFor(manifest, 'linux')?.url).toContain('-x86_64.AppImage')
@@ -252,7 +251,7 @@ describe('public Desktop version check', () => {
       return manifestResponse('2.10.0')
     }
 
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.9.9',
       signal: controller.signal,
       request,
@@ -263,8 +262,10 @@ describe('public Desktop version check', () => {
     })
 
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe(`${DESKTOP_UPDATE_BASE_URL}/latest.json`)
-    expect(calls[0]?.url).toBe('https://release.picoaide.com/official/latest.json')
+    expect(calls[0]?.url).toBe(MANIFEST_URL)
+    expect(calls[0]?.url).toBe('https://server.test/api/client/v2/updates/manifest')
+    // 客户端不再直连任何分发面(2026-09-10 定案):请求里绝不能出现它。
+    expect(calls[0]?.url).not.toContain('release.picoaide.com')
     expect(calls[0]?.url).not.toContain('api.github.com')
     expect(calls[0]?.init).toMatchObject({
       method: 'GET',
@@ -277,31 +278,37 @@ describe('public Desktop version check', () => {
     expect(headers.has('if-none-match')).toBe(false)
   })
 
-  it.each([
-    ['https://enterprise.test/updates', 'https://enterprise.test/updates/latest.json'],
-    ['https://enterprise.test/updates/', 'https://enterprise.test/updates/latest.json'],
-    ['https://enterprise.test/updates///', 'https://enterprise.test/updates/latest.json'],
-  ])('requests the manifest of channel base %s', async (baseURL, expectedURL) => {
-    // 企业渠道只换 base,协议与文件名不变(构建期注入渠道更新面)。
+  it('builds the manifest URL from the signed-in server, tolerating trailing slashes', () => {
+    expect(serverManifestURL('https://server.test')).toBe(
+      'https://server.test/api/client/v2/updates/manifest',
+    )
+    expect(serverManifestURL('https://server.test/')).toBe(
+      'https://server.test/api/client/v2/updates/manifest',
+    )
+    expect(serverManifestURL('https://server.test///')).toBe(
+      'https://server.test/api/client/v2/updates/manifest',
+    )
+    // 子路径部署(反代挂在 /picoaide 下)必须原样保留前缀。
+    expect(serverManifestURL('https://server.test/picoaide')).toBe(
+      'https://server.test/picoaide/api/client/v2/updates/manifest',
+    )
+    expect(serverChannelURL('https://server.test/')).toBe(
+      'https://server.test/api/client/v2/channel',
+    )
+  })
+
+  it('reports a newer client version from the server manifest', async () => {
     const calls: string[] = []
     const request: UpdateRequest = async (url) => {
       calls.push(String(url))
       return manifestResponse('2.1.0')
     }
 
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
-      baseURL,
       request,
     })).resolves.toMatchObject({ status: 'update-available', latestVersion: '2.1.0' })
-    expect(calls).toEqual([expectedURL])
-  })
-
-  it('builds the manifest URL from the shared release authority', () => {
-    expect(updateManifestURL()).toBe('https://release.picoaide.com/official/latest.json')
-    expect(updateManifestURL('https://enterprise.test/updates/')).toBe(
-      'https://enterprise.test/updates/latest.json',
-    )
+    expect(calls).toEqual([MANIFEST_URL])
   })
 
   it.each([
@@ -309,7 +316,7 @@ describe('public Desktop version check', () => {
     ['2.0.1', '2.0.0'],
     ['2.0.0+installed', '2.0.0+release'],
   ])('reports no update for installed %s and manifest %s', async (currentVersion, latestVersion) => {
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion,
       request: async () => manifestResponse(latestVersion),
     })).resolves.toEqual({
@@ -320,7 +327,7 @@ describe('public Desktop version check', () => {
   })
 
   it('compares manifest versions without overflowing JavaScript numbers', async () => {
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '9007199254740992.0.0',
       request: async () => manifestResponse('10000000000000000.0.0'),
     })).resolves.toMatchObject({ status: 'update-available' })
@@ -333,7 +340,7 @@ describe('public Desktop version check', () => {
     ['2.7.0', '2.7.0-rc.2', 'up-to-date'],
   ])('compares installed %s with manifest %s as %s', async (currentVersion, latestVersion, status) => {
     // 渠道由清单内容决定:预发布版本写进清单就是预发布渠道,客户端不再分流。
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion,
       request: async () => manifestResponse(latestVersion),
     })).resolves.toMatchObject({ status, currentVersion, latestVersion })
@@ -345,7 +352,7 @@ describe('public Desktop version check', () => {
     ['a non-string version', 2],
   ])('silently ignores a manifest reporting %s', async (_case, version) => {
     await expect(checkForUpdate({
-      channel: CHANNEL,
+      manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => Response.json({
         schema: 1,
@@ -372,32 +379,32 @@ describe('public Desktop version check', () => {
       },
     }],
   ])('silently ignores a manifest with %s', async (_case, value) => {
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => Response.json(value),
     })).resolves.toBeNull()
   })
 
   it('silently ignores 404, non-JSON bodies, and non-200 statuses', async () => {
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response('not found', { status: 404 }),
     })).resolves.toBeNull()
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response('{'),
     })).resolves.toBeNull()
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response('<html>maintenance</html>', {
         headers: { 'content-type': 'text/html' },
       }),
     })).resolves.toBeNull()
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response('unavailable', { status: 503 }),
     })).resolves.toBeNull()
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response(null, { status: 304 }),
     })).resolves.toBeNull()
@@ -413,13 +420,13 @@ describe('public Desktop version check', () => {
       throw new TypeError('Failed to fetch')
     }
 
-    await expect(checkForUpdate({ channel: CHANNEL, currentVersion: '2.0.0', request })).resolves.toBeNull()
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL, currentVersion: '2.0.0', request })).resolves.toBeNull()
     expect(calls).toHaveLength(1)
     expect(calls[0]?.init).toMatchObject({ redirect: 'error' })
   })
 
   it('silently ignores network failure', async () => {
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => { throw new TypeError('offline') },
     })).resolves.toBeNull()
@@ -430,7 +437,7 @@ describe('public Desktop version check', () => {
   it('propagates caller cancellation instead of reporting no update', async () => {
     const controller = new AbortController()
     controller.abort()
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       signal: controller.signal,
       request: async () => { throw new DOMException('cancelled', 'AbortError') },
@@ -438,7 +445,7 @@ describe('public Desktop version check', () => {
 
     // 请求进行中被取消(信号未预先 abort)同样要传播
     const live = new AbortController()
-    const promise = checkForUpdate({ channel: CHANNEL,
+    const promise = checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       signal: live.signal,
       request: async () => {
@@ -450,13 +457,13 @@ describe('public Desktop version check', () => {
   })
 
   it('silently ignores declared and streamed oversized responses', async () => {
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response('{}', {
         headers: { 'content-length': String(MAX_VERSION_RESPONSE_BYTES + 1) },
       }),
     })).resolves.toBeNull()
-    await expect(checkForUpdate({ channel: CHANNEL,
+    await expect(checkForUpdate({ manifestURL: MANIFEST_URL,
       currentVersion: '2.0.0',
       request: async () => new Response('x'.repeat(MAX_VERSION_RESPONSE_BYTES + 1)),
     })).resolves.toBeNull()
@@ -473,26 +480,25 @@ describe('public Desktop version check', () => {
       // 本地构建(如 "dev")不是合法 SemVer:不提示更新,也不发请求。
       const request = vi.fn(async () => manifestResponse('2.1.0'))
 
-      await expect(checkForUpdate({ channel: CHANNEL, currentVersion, request })).resolves.toBeNull()
+      await expect(checkForUpdate({ manifestURL: MANIFEST_URL, currentVersion, request })).resolves.toBeNull()
       expect(request).not.toHaveBeenCalled()
     },
   )
 })
 
 describe('fetchReleaseManifest', () => {
-  it('returns the parsed manifest from the channel base', async () => {
+  it('returns the parsed manifest fetched from the server manifest URL', async () => {
     const calls: string[] = []
     const request: UpdateRequest = async (url) => {
       calls.push(String(url))
       return manifestResponse('2.7.0')
     }
 
-    const manifest = requireManifest(await fetchReleaseManifest({ channel: CHANNEL,
-      baseURL: 'https://enterprise.test/updates',
+    const manifest = requireManifest(await fetchReleaseManifest({ manifestURL: MANIFEST_URL,
       request,
     }))
 
-    expect(calls).toEqual(['https://enterprise.test/updates/latest.json'])
+    expect(calls).toEqual([MANIFEST_URL])
     expect(manifest).toEqual({
       schema: 1,
       channelId: 'official',
@@ -502,18 +508,18 @@ describe('fetchReleaseManifest', () => {
   })
 
   it('returns null for unreachable, non-200, and invalid manifests', async () => {
-    await expect(fetchReleaseManifest({ channel: CHANNEL, request: async () => { throw new TypeError('offline') } }))
+    await expect(fetchReleaseManifest({ manifestURL: MANIFEST_URL, request: async () => { throw new TypeError('offline') } }))
       .resolves.toBeNull()
-    await expect(fetchReleaseManifest({ channel: CHANNEL, request: async () => new Response('', { status: 500 }) }))
+    await expect(fetchReleaseManifest({ manifestURL: MANIFEST_URL, request: async () => new Response('', { status: 500 }) }))
       .resolves.toBeNull()
-    await expect(fetchReleaseManifest({ channel: CHANNEL, request: async () => Response.json({ schema: 1 }) }))
+    await expect(fetchReleaseManifest({ manifestURL: MANIFEST_URL, request: async () => Response.json({ schema: 1 }) }))
       .resolves.toBeNull()
   })
 
   it('passes the caller signal through to the manifest request', async () => {
     const controller = new AbortController()
     const signals: Array<AbortSignal | null | undefined> = []
-    await fetchReleaseManifest({ channel: CHANNEL,
+    await fetchReleaseManifest({ manifestURL: MANIFEST_URL,
       signal: controller.signal,
       request: async (_url, init) => {
         signals.push(init.signal)
@@ -566,44 +572,44 @@ describe('channel isolation', () => {
     })).toBeNull()
   })
 
-  it('checks the manifest of the installed channel by default', async () => {
+  it('accepts the manifest whose channel matches what the server advertises', async () => {
     const calls: string[] = []
     const request: UpdateRequest = async url => {
-      calls.push(url)
+      calls.push(String(url))
       return Response.json({
         schema: 1,
-        channel_id: BETA_CHANNEL,
-        client: { version: '2.8.0', assets: { 'mac-universal': { url: 'https://release.picoaide.com/mac.dmg', sha256: RELEASE_SHA256 } } },
+        channel_id: 'acme',
+        client: { version: '2.8.0', assets: { 'mac-universal': { url: `${SERVER}/updates/client/acme.dmg`, sha256: RELEASE_SHA256 } } },
       })
     }
 
-    await expect(checkForUpdate({ channel: BETA_CHANNEL, currentVersion: '2.7.0', request }))
-      .resolves.toMatchObject({ status: 'update-available', latestVersion: '2.8.0' })
-    // 默认 base 由渠道推导,而不是写死官方目录
-    expect(calls).toEqual([`${channelBaseURL(BETA_CHANNEL)}/latest.json`])
-    expect(calls[0]).toContain('/beta/')
+    await expect(checkForUpdate({
+      manifestURL: MANIFEST_URL,
+      expectedChannel: 'acme',
+      currentVersion: '2.7.0',
+      request,
+    })).resolves.toMatchObject({ status: 'update-available', latestVersion: '2.8.0' })
+    // 更新源始终是登录的那台服务端,与渠道 id 无关
+    expect(calls).toEqual([MANIFEST_URL])
   })
 
-  it('reports no update (not a cross-channel upgrade) when the manifest channel differs', async () => {
+  it('reports no update when the manifest channel differs from the server channel', async () => {
     const request: UpdateRequest = async () => Response.json({
       schema: 1,
-      channel_id: OFFICIAL_CHANNEL,
-      client: { version: '9.9.9', assets: { 'mac-universal': { url: 'https://release.picoaide.com/mac.dmg', sha256: RELEASE_SHA256 } } },
+      channel_id: 'official',
+      client: { version: '9.9.9', assets: { 'mac-universal': { url: `${SERVER}/updates/client/x.dmg`, sha256: RELEASE_SHA256 } } },
     })
 
-    // 品牌构建遇到官方清单:必须"无更新",绝不提示跨渠道升级
-    await expect(checkForUpdate({ channel: 'acme', currentVersion: '1.0.0', request })).resolves.toBeNull()
+    // 服务端自报 acme,清单却声明 official:必须"无更新",绝不提示跨渠道升级
+    await expect(checkForUpdate({
+      manifestURL: MANIFEST_URL,
+      expectedChannel: 'acme',
+      currentVersion: '1.0.0',
+      request,
+    })).resolves.toBeNull()
   })
 
-  it('builds channel base URLs and rejects malformed channel ids', () => {
-    expect(channelBaseURL()).toBe(DESKTOP_UPDATE_BASE_URL)
-    expect(channelBaseURL(OFFICIAL_CHANNEL)).toBe('https://release.picoaide.com/official')
-    expect(channelBaseURL(BETA_CHANNEL)).toBe('https://release.picoaide.com/beta')
-    expect(channelBaseURL('acme-corp')).toBe('https://release.picoaide.com/acme-corp')
-    // 非法渠道回落到官方目录,不会拼出畸形 URL
-    expect(channelBaseURL('Acme!')).toBe('https://release.picoaide.com/official')
-    expect(channelBaseURL('')).toBe('https://release.picoaide.com/official')
-
+  it('validates channel ids by shape', () => {
     expect(CHANNEL_ID_PATTERN.test('official')).toBe(true)
     expect(CHANNEL_ID_PATTERN.test('beta')).toBe(true)
     expect(CHANNEL_ID_PATTERN.test('acme-corp')).toBe(true)

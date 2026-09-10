@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  DESKTOP_UPDATE_BASE_URL,
+  serverManifestURL,
   MAX_UPDATE_DOWNLOAD_BYTES,
   UpdateDownloadError,
   downloadDesktopUpdate,
@@ -12,12 +12,9 @@ import {
   type UpdateArtifactRequest,
 } from '../src/update-download.ts'
 
-// 测试统一用官方渠道;渠道隔离本身由桌面 src 与服务端 updatecheck 单测覆盖
-const CHANNEL = 'official'
-
-
-/** 官方渠道清单入口:下载器只读这一个地址。 */
-const MANIFEST_URL = `${DESKTOP_UPDATE_BASE_URL}/latest.json`
+// 下载器只从**登录的那台服务端**取清单(2026-09-10 定案)。
+const SERVER = 'https://server.test'
+const MANIFEST_URL = serverManifestURL(SERVER)
 
 const temporaryRoots: string[] = []
 
@@ -96,19 +93,25 @@ function platformManifest(
   })
 }
 
-/** 下载完成后的安装器路径(与源码的私有目录布局一致)。 */
-function completedPath(
-  userDataPath: string,
-  version: string,
-  platform: DesktopDownloadPlatform,
-): string {
-  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
-  const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
-  return join(userDataPath, 'updates', version, `PicoAide-Harness-${version}-${assetBase}.${extension}`)
+/**
+ * 下载完成后的安装器路径(与源码的私有目录布局一致)。
+ *
+ * 文件名由源码从**清单里的下载地址**推导(渠道化打包下每个渠道的产物名不同,
+ * 写死模板既会泄露厂商品牌也会与实际产物不符),所以这里同样按 URL 末段推导。
+ */
+function completedPath(userDataPath: string, version: string, artifactURL: string): string {
+  return join(userDataPath, 'updates', version, artifactURL.slice(artifactURL.lastIndexOf('/') + 1))
 }
 
 async function updateDirectoryEntries(userDataPath: string, version: string): Promise<string[]> {
-  return readdir(join(userDataPath, 'updates', version))
+  // 清单拉取失败时不会创建版本目录(本地目标只在拿到清单后才准备),
+  // 这里把"目录不存在"与"目录为空"一视同仁:两者都表示没有残留文件。
+  try {
+    return await readdir(join(userDataPath, 'updates', version))
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw cause
+  }
 }
 
 async function expectFailure(
@@ -151,18 +154,18 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    const result = await downloadDesktopUpdate({ channel: CHANNEL,
+    const result = await downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.1.0',
       userDataPath,
       request,
     })
 
-    expect(result).toBe(completedPath(userDataPath, '2.1.0', 'darwin'))
+    expect(result).toBe(completedPath(userDataPath, '2.1.0', 'https://artifacts.test/mac.dmg'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     // 清单请求必须走官方渠道的固定入口,且禁止跳转(见 desktop-release.ts)。
     expect(calls[0]?.url).toBe(MANIFEST_URL)
-    expect(calls[0]?.url).toBe('https://release.picoaide.com/official/latest.json')
+    expect(calls[0]?.url).toBe('https://server.test/api/client/v2/updates/manifest')
     expect(calls[0]?.init).toEqual({
       method: 'GET',
       headers: { Accept: 'application/json' },
@@ -175,11 +178,11 @@ describe('desktop update installer download', () => {
     await expectNoPartialFiles(userDataPath, '2.1.0')
   })
 
-  it('reads the manifest of a configured channel base', async () => {
+  it('reads the manifest from the signed-in server URL', async () => {
     const userDataPath = await temporaryUserData()
     const artifact = dmgArtifact()
     const calls: string[] = []
-    const channelManifestURL = 'https://enterprise.test/updates/latest.json'
+    const channelManifestURL = MANIFEST_URL
     const request: UpdateArtifactRequest = async (url) => {
       calls.push(String(url))
       if (url === channelManifestURL) {
@@ -191,15 +194,14 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    const result = await downloadDesktopUpdate({ channel: CHANNEL,
+    const result = await downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.1.1',
       userDataPath,
       request,
-      baseURL: 'https://enterprise.test/updates/',
     })
 
-    expect(result).toBe(completedPath(userDataPath, '2.1.1', 'darwin'))
+    expect(result).toBe(completedPath(userDataPath, '2.1.1', 'https://artifacts.test/mac.dmg'))
     expect(calls[0]).toBe(channelManifestURL)
   })
 
@@ -217,14 +219,14 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    const result = await downloadDesktopUpdate({ channel: CHANNEL,
+    const result = await downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'win32',
       version: '2.2.0',
       userDataPath,
       request,
     })
 
-    expect(result).toBe(completedPath(userDataPath, '2.2.0', 'win32'))
+    expect(result).toBe(completedPath(userDataPath, '2.2.0', 'https://artifacts.test/setup.exe'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     await expectNoPartialFiles(userDataPath, '2.2.0')
   })
@@ -243,14 +245,14 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    const result = await downloadDesktopUpdate({ channel: CHANNEL,
+    const result = await downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'linux',
       version: '2.2.1',
       userDataPath,
       request,
     })
 
-    expect(result).toBe(completedPath(userDataPath, '2.2.1', 'linux'))
+    expect(result).toBe(completedPath(userDataPath, '2.2.1', 'https://artifacts.test/appimage'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     await expectNoPartialFiles(userDataPath, '2.2.1')
   })
@@ -268,19 +270,15 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    const result = await downloadDesktopUpdate({ channel: CHANNEL,
+    const result = await downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.8.0+build',
       userDataPath,
       request,
     })
 
-    expect(result).toBe(join(
-      userDataPath,
-      'updates',
-      '2.8.0+build',
-      'PicoAide-Harness-2.8.0+build-mac.dmg',
-    ))
+    // 落地文件名取自清单里的下载地址(渠道化打包下不再有固定模板)。
+    expect(result).toBe(completedPath(userDataPath, '2.8.0+build', 'https://artifacts.test/mac.dmg'))
   })
 
   it.each([
@@ -302,7 +300,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform,
       version: '2.3.0',
       userDataPath,
@@ -330,7 +328,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.4.0',
       userDataPath,
@@ -361,7 +359,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.5.0',
       userDataPath,
@@ -398,7 +396,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.6.0',
       userDataPath,
@@ -422,7 +420,7 @@ describe('desktop update installer download', () => {
       }
       throw new DOMException('cancelled', 'AbortError')
     }
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.7.0',
       userDataPath,
@@ -437,7 +435,7 @@ describe('desktop update installer download', () => {
       }
       throw new TypeError('socket hang up')
     }
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.7.1',
       userDataPath,
@@ -454,7 +452,7 @@ describe('desktop update installer download', () => {
       calls.push(String(url))
       return new Response('not found', { status: 404 })
     }
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.7.2',
       userDataPath,
@@ -467,7 +465,7 @@ describe('desktop update installer download', () => {
       calls2.push(String(url))
       throw new TypeError('offline')
     }
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.7.3',
       userDataPath,
@@ -487,7 +485,7 @@ describe('desktop update installer download', () => {
       return chunkedResponse([dmgArtifact()])
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.7.4',
       userDataPath,
@@ -512,7 +510,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.8.0',
       userDataPath,
@@ -539,7 +537,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    const result = await downloadDesktopUpdate({ channel: CHANNEL,
+    const result = await downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'linux',
       version: '2.8.0-rc.1',
       userDataPath,
@@ -547,7 +545,7 @@ describe('desktop update installer download', () => {
     })
 
     expect(result).toBe(
-      join(userDataPath, 'updates', '2.8.0-rc.1', 'PicoAide-Harness-2.8.0-rc.1-x86_64.AppImage'),
+      completedPath(userDataPath, '2.8.0-rc.1', 'https://artifacts.test/appimage-rc'),
     )
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     // 预发布版本同样只读版本清单,不再有"latest 排除预发布"的分支。
@@ -568,7 +566,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.9.0',
       userDataPath,
@@ -591,7 +589,7 @@ describe('desktop update installer download', () => {
       throw new Error(`unexpected URL ${url}`)
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.9.1',
       userDataPath,
@@ -610,7 +608,7 @@ describe('desktop update installer download', () => {
   ])('rejects platform %s and version %s before requesting', async (platform, version) => {
     const userDataPath = await temporaryUserData()
     let requested = false
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: platform as DesktopDownloadPlatform,
       version,
       userDataPath,
@@ -629,7 +627,7 @@ describe('desktop update installer download', () => {
       return chunkedResponse([dmgArtifact()])
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.9.0',
       userDataPath: 'relative',
@@ -649,7 +647,7 @@ describe('desktop update installer download', () => {
       return chunkedResponse([dmgArtifact()])
     }
 
-    await expectFailure(downloadDesktopUpdate({ channel: CHANNEL,
+    await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
       platform: 'darwin',
       version: '2.9.0',
       userDataPath: linked,
