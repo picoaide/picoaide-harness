@@ -1,7 +1,7 @@
 /**
  * Brand-geometry drift guard (audit 2026-09-08 P2-39).
  *
- * `src/client/brand-geometry.ts` is the ONLY place the client surfaces read
+ * `src/client/channel-geometry.ts` is the ONLY place the client surfaces read
  * the mark's numbers from. This test parses the single authority
  * (`brands/official/logo.svg`) and fails on any divergence, so a change to the
  * brand folder cannot leave the shipped React surface drawing the old artwork.
@@ -17,7 +17,7 @@ import {
   BRAND_TILE_RADIUS,
   BRAND_TILE_SIZE,
   BRAND_TILE_VIEWBOX,
-} from '../src/client/brand-geometry.ts'
+} from '../src/client/channel-geometry.ts'
 
 const REPO_ROOT = new URL('../../../..', import.meta.url)
 const svg = readFileSync(new URL('brands/official/logo.svg', REPO_ROOT), 'utf8')

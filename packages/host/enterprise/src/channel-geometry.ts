@@ -5,9 +5,9 @@
  * hand-draw, never copy geometry from memory). The desktop assembly does NOT
  * include `@picoaide/dsh-branding` (web-only), and client bundles must not
  * import another package's client code, so this package keeps its own parsed
- * copy — `tests/brand-geometry.spec.ts` parses the SVG and fails on any drift
+ * copy — `tests/channel-geometry.spec.ts` parses the SVG and fails on any drift
  * (audit 2026-09-08 P2-39).
- * @module @picoaide/dsh-enterprise/brand-geometry
+ * @module @picoaide/dsh-enterprise/channel-geometry
  */
 
 /** Canvas size of the authoritative artwork (square). */

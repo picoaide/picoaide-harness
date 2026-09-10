@@ -10,7 +10,7 @@
  * so this module carries the favicon surface for the desktop client.
  */
 
-import { brandTileSvg } from '../brand-geometry.ts'
+import { brandTileSvg } from '../channel-geometry.ts'
 
 const FAVICON_SVG = brandTileSvg()
 
