@@ -1,4 +1,10 @@
-# syntax=docker/dockerfile:1
+# 注意:本文件**不写 `# syntax=docker/dockerfile:1`**。
+# 那条指令会让每次构建都先去 Docker Hub 解析前端镜像 —— 2026-09-10 实测
+# Docker Hub 不可达时整条发布链直接死在这里(ERROR: failed to resolve source
+# metadata for docker.io/docker/dockerfile:1),而本文件用到的特性(命名构建
+# 上下文 `COPY --from=<name>`、通配 COPY)在当前 BuildKit 的内置前端里都支持。
+# 去掉它 = 发布链少一个外部单点。
+#
 
 # PicoAide 服务端多阶段构建(架构设计 §2 目录、计划 Task 4.6)
 # 运行镜像含 /data 挂载卷;密钥/数据库落在 /data,部署时以 volume 持久化。
@@ -78,7 +84,12 @@ ENV PICOAI_CHANNEL=$CHANNEL
 # 实测:必须用**目录形式** `client/` —— 写成 `client/*` 通配时源目录为空会直接
 # 构建失败("lstat /client: no such file or directory"),目录形式对空目录是允许的。
 COPY --from=clientassets client/ /opt/picoaide/client/
-COPY --from=clientassets CLIENT-RELEASE.json* /opt/picoaide/
+# 清单必须放进**资产目录内**:服务端从 PICOAI_CLIENT_RELEASE_DIR 里读它
+# (internal/clientrelease 的 LoadInfo 读 <dir>/CLIENT-RELEASE.json)。
+# 2026-09-10 实测:原先 COPY 到 /opt/picoaide/(上一级),LoadInfo 永远返回 nil,
+# 于是 /api/client/v2/updates/manifest 里没有 client 段、门户下载区全空 ——
+# "客户端随镜像分发"这条链路整个是死的,而且没有任何报错。
+COPY --from=clientassets CLIENT-RELEASE.json* /opt/picoaide/client/
 RUN rm -f /opt/picoaide/client/.keep
 # 目录位置固定,服务端直接读(无需 entrypoint 落盘:镜像层里读文件是只读、
 # 一次性、随镜像升级而更新,正是我们要的语义)。

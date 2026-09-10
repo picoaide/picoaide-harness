@@ -108,6 +108,10 @@ for channel in "${CHANNELS[@]}"; do
   # 4) 构建镜像 + 导出 zip。渠道轮静默。
   ARCHIVE="picoaide-server-${VER}-amd64.zip"
   mkdir -p "$OUT/$channel"
+  # 每一步都显式 `|| return 1`:调用方在 `if ! build` 这类**条件语境**里调用时,
+  # bash 会抑制函数体内的 set -e(条件语境的抑制会继承进函数/子 shell),于是
+  # docker build 失败后还会继续跑 docker save / zip,并把最终状态伪装成成功。
+  # 不能依赖 set -e,必须显式短路。
   build() {
     local img_tar="$REPO_ROOT/image.tar"
     docker buildx build \
@@ -120,11 +124,25 @@ for channel in "${CHANNELS[@]}"; do
       --label "org.opencontainers.image.version=$VER" \
       --tag "${IMAGE}:v${VER}" \
       --load \
-      server
-    docker save "${IMAGE}:v${VER}" -o "$img_tar"
-    ( cd "$OUT/$channel" && zip -1 -q "$ARCHIVE" "$img_tar" -j )
+      server || return 1
+    docker save "${IMAGE}:v${VER}" -o "$img_tar" || return 1
+    ( cd "$OUT/$channel" && zip -1 -q "$ARCHIVE" "$img_tar" -j ) || return 1
     rm -f "$img_tar"
-    ( cd "$OUT/$channel" && sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS )
+    ( cd "$OUT/$channel" && sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS ) || return 1
+  }
+
+  # 5) 构建后**在镜像内**断言服务端契约:清单必须落在服务端读取的位置。
+  #    2026-09-10 实测踩到:清单被 COPY 到上一级目录,LoadInfo 永远返回 nil,
+  #    更新清单里没有 client 段、门户下载区全空 —— 链路整个死掉且零报错。
+  #    这类"路径对不上"的错误只有真去镜像里看才能发现。
+  verify_image() {
+    docker run --rm --entrypoint sh "${IMAGE}:v${VER}" -c '
+      set -e
+      test -s /opt/picoaide/client/CLIENT-RELEASE.json || { echo "MISSING /opt/picoaide/client/CLIENT-RELEASE.json" >&2; exit 1; }
+      test -s /opt/picoaide/channel/channel.json || { echo "MISSING /opt/picoaide/channel/channel.json" >&2; exit 1; }
+      test -s "/opt/picoaide/CHANNEL" || { echo "MISSING /opt/picoaide/CHANNEL" >&2; exit 1; }
+      ls /opt/picoaide/client/ | grep -q . || { echo "client dir empty" >&2; exit 1; }
+    '
   }
 
   if [ "$channel" = "official" ]; then
@@ -133,14 +151,17 @@ for channel in "${CHANNELS[@]}"; do
       echo "::error::官方渠道镜像构建失败(日志见上)" >&2
       exit 1
     fi
+  elif ! build > "$LOG_DIR/$INDEX.log" 2>&1; then
+    echo "::error::渠道 ${INDEX}/${TOTAL} 镜像构建失败。" >&2
+    echo "::error::渠道与官方共用同一套 Dockerfile 与构建脚本,只换 --build-arg CHANNEL;" >&2
+    echo "::error::请用官方构建复现排障(本步骤按定策不输出渠道日志)" >&2
+    exit 1
   else
     echo "building image ${INDEX}/${TOTAL} (quiet)"
-    if ! build > "$LOG_DIR/$INDEX.log" 2>&1; then
-      echo "::error::渠道 ${INDEX}/${TOTAL} 镜像构建失败。" >&2
-      echo "::error::渠道与官方共用同一套 Dockerfile 与构建脚本,只换 --build-arg CHANNEL;" >&2
-      echo "::error::请用官方构建复现排障(本步骤按定策不输出渠道日志)" >&2
-      exit 1
-    fi
+  fi
+  if ! verify_image; then
+    echo "::error::渠道 ${INDEX}/${TOTAL} 的镜像缺少服务端契约要求的文件(见上)" >&2
+    exit 1
   fi
   ls -lh "$OUT/$channel/$ARCHIVE"
 done
