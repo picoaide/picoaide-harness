@@ -34,9 +34,9 @@ const (
 
 // DefaultEndpoint 是官方渠道的更新清单地址。
 //
-// 品牌渠道通过 PICOAI_UPDATE_ENDPOINT 指向自己的目录
-// (如 https://release.picoaide.com/acme/latest.json),
-// 并用 PICOAI_CHANNEL 声明自身渠道以启用隔离校验。
+// 其它渠道用 DefaultEndpointFor(channel) 取自己的目录
+// (如 https://release.picoaide.com/acme/latest.json)。仍保留本常量是因为
+// 官方目录是唯一需要被硬编码引用的那一个(历史版本与文档都在用它)。
 const DefaultEndpoint = "https://release.picoaide.com/official/latest.json"
 
 // EndpointEnv 是覆盖更新清单地址的环境变量名。
@@ -117,47 +117,108 @@ func newHTTPClient() *http.Client {
 	}
 }
 
-// ResolveEndpoint 返回生效的更新清单地址:PICOAI_UPDATE_ENDPOINT 优先,
-// 缺省使用官方渠道地址;显式设为 "-"/"off"/"none" 可关闭更新检查。
-func ResolveEndpoint() string {
-	if v, ok := os.LookupEnv(EndpointEnv); ok {
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "", "-", "off", "none", "disabled":
-			return ""
-		default:
-			return strings.TrimSpace(v)
-		}
+// resolveEndpointOverride 读取 PICOAI_UPDATE_ENDPOINT 的**显式**取值。
+//
+// 语义(2026-09-10 修正):**空串 = 未设置**,不是"关闭"。
+// 仓库自带的 docker-compose.yml 用 `${PICOAI_UPDATE_ENDPOINT:-}` 传值,
+// 未配置时容器里就是空串;旧语义把空串当"关闭更新检查",于是默认部署永远
+// 不检查更新(fail-silent)。要关闭请显式写 off / none / - / disabled。
+// @returns 显式端点(可能为空)与是否被显式关闭。
+func resolveEndpointOverride() (endpoint string, disabled bool) {
+	v, ok := os.LookupEnv(EndpointEnv)
+	if !ok {
+		return "", false
 	}
-	return DefaultEndpoint
+	trimmed := strings.TrimSpace(v)
+	switch strings.ToLower(trimmed) {
+	case "":
+		return "", false
+	case "-", "off", "none", "disabled":
+		return "", true
+	default:
+		return trimmed, false
+	}
 }
 
-// ResolveChannel 返回本服务端所属渠道:
-// PICOAI_CHANNEL 优先;否则从 PICOAI_UPDATE_ENDPOINT 的路径首段推导
-// (https://release.picoaide.com/acme/latest.json → acme);都不成立则官方渠道。
+// DefaultEndpointFor 返回某渠道在更新服务器上的清单地址。
 //
-// 推导让"指向哪个目录"与"属于哪个渠道"默认自洽,避免两处配置不一致时
-// 静默接受别的渠道的清单。
-func ResolveChannel() string {
-	if v := strings.TrimSpace(os.Getenv(ChannelEnv)); v != "" {
-		if IsChannelID(v) {
-			return v
+// 渠道目录就是渠道 id:`release.picoaide.com/<channel>/latest.json`。
+// @param channel - 已确定的渠道 id。
+// @returns 该渠道的默认清单地址。
+func DefaultEndpointFor(channel string) string {
+	return fmt.Sprintf("https://release.picoaide.com/%s/latest.json", channel)
+}
+
+// ResolveEndpoint 返回生效的更新清单地址。
+//
+// 显式覆盖优先;未覆盖时按**本部署渠道**取默认目录(渠道化部署因此默认
+// 检查自己的目录,而不是官方的)。
+// @param channel - 已确定的渠道 id(见 ResolveChannel)。
+// @returns 清单地址;显式关闭更新检查时返回空串。
+func ResolveEndpoint(channel string) string {
+	if endpoint, disabled := resolveEndpointOverride(); disabled {
+		return ""
+	} else if endpoint != "" {
+		return endpoint
+	}
+	return DefaultEndpointFor(channel)
+}
+
+// ChannelFile 镜像内渠道标记文件的路径。
+//
+// 由 Dockerfile 写入(`ARG CHANNEL` → `RUN echo "$CHANNEL" > /opt/picoaide/CHANNEL`),
+// 是**镜像自带的**渠道声明:随镜像一起构建、不依赖部署时的 .env。它此前只被
+// 写、从未被读,于是部署侧一个字符的笔误就能让渠道部署变成官方部署。
+const ChannelFileEnv = "PICOAI_CHANNEL_FILE"
+
+// defaultChannelFile 渠道标记文件默认位置(与 Dockerfile 一致)。
+const defaultChannelFile = "/opt/picoaide/CHANNEL"
+
+// ChannelFile 返回渠道标记文件路径(测试可改)。
+var ChannelFile = func() string {
+	if v := strings.TrimSpace(os.Getenv(ChannelFileEnv)); v != "" {
+		return v
+	}
+	return defaultChannelFile
+}()
+
+// ResolveChannel 返回本部署所属渠道,以及"渠道是否可确定"。
+//
+// 优先级(高 → 低):
+//  1. `PICOAI_CHANNEL` —— 部署侧的显式声明;
+//  2. 镜像内标记文件 `/opt/picoaide/CHANNEL` —— 渠道化镜像自带,不依赖 .env;
+//  3. 从 `PICOAI_UPDATE_ENDPOINT` 的路径首段推导 —— 只服务本地开发;
+//  4. 都没有 → 官方渠道(本地开发)。
+//
+// **第二返回值为 false 表示"显式配置了渠道但无法确定"**,调用方必须 fail-loud
+// (报检查不可用 / 拒绝启动),绝不能回落 official —— 那正是"渠道部署接受官方
+// 清单、品牌被洗掉"这条最严重错误的入口。第 3 条被刻意排在镜像标记之后:
+// 指向哪个目录就能把自己变成哪个渠道的推导是自我实现的,一旦它能覆盖镜像
+// 声明,隔离校验就形同虚设。
+// @returns 渠道 id 与是否可确定。
+func ResolveChannel() (string, bool) {
+	if v, ok := os.LookupEnv(ChannelEnv); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			// 显式设了就必须合法:拼错一个字符也不能变成官方部署。
+			return trimmed, IsChannelID(trimmed)
 		}
-		return OfficialChannel
 	}
-	endpoint := ResolveEndpoint()
-	if endpoint == "" {
-		return OfficialChannel
+	if raw, err := os.ReadFile(ChannelFile); err == nil {
+		if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+			// 镜像自带的声明同样必须合法(构建参数写错时立即暴露)。
+			return trimmed, IsChannelID(trimmed)
+		}
 	}
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return OfficialChannel
+	if endpoint, disabled := resolveEndpointOverride(); !disabled && endpoint != "" {
+		if u, err := url.Parse(endpoint); err == nil {
+			// 路径形如 /<channel>/latest.json
+			segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if len(segments) >= 1 && IsChannelID(segments[0]) {
+				return segments[0], true
+			}
+		}
 	}
-	// 路径形如 /<channel>/latest.json
-	segments := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(segments) >= 1 && IsChannelID(segments[0]) {
-		return segments[0]
-	}
-	return OfficialChannel
+	return OfficialChannel, true
 }
 
 // IsChannelID 报告 s 是否是合法渠道 id(小写字母/数字/连字符,1–32 位)。
@@ -247,9 +308,22 @@ func (c *CachedChecker) Check(ctx context.Context, current string) (*Result, err
 // current is the running server version; a non-SemVer value such as "dev"
 // is reported as not updated (local builds should not nag operators).
 func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
+	// 渠道先定,端点再按渠道取其默认目录 —— 渠道化部署因此默认检查自己的
+	// 目录,而不是官方的。
+	expected := c.ExpectedChannel
+	if expected == "" {
+		resolved, ok := ResolveChannel()
+		if !ok {
+			// 显式配置了渠道却无法解析:这是配置错误,必须让人看见。
+			// 回落 official 会让渠道部署接受官方清单并把品牌洗掉。
+			return nil, fmt.Errorf("%w: 渠道配置非法(%s=%q,镜像标记文件 %s)",
+				ErrUnavailable, ChannelEnv, os.Getenv(ChannelEnv), ChannelFile)
+		}
+		expected = resolved
+	}
 	endpoint := c.Endpoint
 	if endpoint == "" {
-		endpoint = ResolveEndpoint()
+		endpoint = ResolveEndpoint(expected)
 	}
 	if endpoint == "" {
 		return nil, ErrNoEndpoint
@@ -294,10 +368,6 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 	// 渠道隔离:清单声明的渠道必须与本服务端所属渠道一致。
 	// 不匹配一律当作"检查不可用"(而不是"无更新"):这通常意味着端点配置
 	// 指向了别的渠道目录,必须让人看见并修,绝不能静默跨渠道升级。
-	expected := c.ExpectedChannel
-	if expected == "" {
-		expected = ResolveChannel()
-	}
 	if payload.ChannelID == "" {
 		return nil, fmt.Errorf("%w: manifest has no channel_id", ErrUnavailable)
 	}

@@ -142,6 +142,26 @@ func main() {
 	if _, err := util.EnsureMasterKey(*dataDir); err != nil {
 		log.Fatalf("master key: %v", err)
 	}
+	// 渠道在启动时**解析一次**并贯穿全局(清单、门户页脚、渠道一致性校验):
+	// 三处各解析一次会让同一台服务器对外报出不同的渠道身份。
+	//
+	// 两道 fail-loud 都在启动期挡(而不是运行时降级):
+	//  1) 显式配置了渠道却解析不出来 —— 回落 official 会让渠道部署接受官方
+	//     清单、把品牌洗掉(最严重的一类错),宁可起不来;
+	//  2) 镜像内的渠道内容(channel.json)与解析出的渠道不一致 —— 典型成因是
+	//     部署侧用 .env / compose 覆盖了镜像自带的渠道声明。
+	channelID, channelOK := updatecheck.ResolveChannel()
+	if !channelOK {
+		log.Fatalf("渠道配置非法:%s=%q 不是合法渠道 id(期望 ^[a-z0-9][a-z0-9-]{0,31}$);也不会回落到 official——"+
+			"渠道部署被官方清单升级会把品牌洗掉,因此这里直接拒绝启动", updatecheck.ChannelEnv, os.Getenv(updatecheck.ChannelEnv))
+	}
+	if configured := channel.Load().ChannelID; configured != "" && configured != channelID {
+		log.Fatalf("渠道不一致:镜像内的渠道内容是 %q,而本进程按 %q 运行(%s=%q)。"+
+			"请去掉对 %s 的覆盖(镜像自带渠道声明),或改成与镜像一致的值",
+			configured, channelID, updatecheck.ChannelEnv, os.Getenv(updatecheck.ChannelEnv), updatecheck.ChannelEnv)
+	}
+	log.Printf("channel resolved: %s (update endpoint %s)", channelID, updatecheck.ResolveEndpoint(channelID))
+	resolvedChannel = channelID
 	// Upstream API keys are AES-GCM encrypted with the master key (Task 1.12).
 	llmgateway.DecryptSecret = func(s string) (string, error) {
 		key, err := util.GetMasterKey()
@@ -169,7 +189,7 @@ func main() {
 		Bootstrap: bootstrap.NewHandlers(db),
 		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
 		// (GET /api/client/v2/updates/manifest 与 /updates/client/<file>)。
-		ClientRelease: clientrelease.NewHandlers(func() string { return version }, updatecheck.ResolveChannel()),
+		ClientRelease: clientrelease.NewHandlers(func() string { return version }, channelID),
 		// 渠道内容随镜像发布(channels/<id>/ → /opt/picoaide/channel/),服务端读文件下发。
 		Channel: channel.NewHandlers(),
 		// 门户页配置:只管"是否公开 / 下载地址覆盖 / 说明文字"。
@@ -237,6 +257,13 @@ func main() {
 	}
 }
 
+// resolvedChannel 是启动时解析并校验过的本部署渠道。
+//
+// 为什么是包级变量:门户渲染是独立的 handler 函数,而渠道必须在**启动时**
+// 解析一次并做 fail-loud 校验(见 main 里的两道检查)。运行时再解析一次会
+// 让清单、门户、渠道内容三处可能报出不同身份 —— 这正是审计里 F4 的成因。
+var resolvedChannel = updatecheck.OfficialChannel
+
 // servePortal 渲染公开门户页(/ 与 /portal):站点名 + 欢迎语 + 客户端下载。
 //
 // 2026-09-10 重构:门户内容**全部来自渠道配置**(镜像内 channels/<id>/channel.json),
@@ -264,7 +291,7 @@ func servePortal(c *gin.Context, db *sql.DB) {
 		AdminURL:     "/admin/",
 		DownloadNote: settings["portal.client_download_note"],
 		Version:      version,
-		Channel:      updatecheck.ResolveChannel(),
+		Channel:      resolvedChannel,
 		Downloads:    portalDownloads(settings),
 	}
 
