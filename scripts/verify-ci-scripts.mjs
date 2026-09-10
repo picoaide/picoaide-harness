@@ -33,6 +33,7 @@ const channelsScript = join(root, 'scripts', 'ci-channels.sh')
 const packageScript = join(root, 'scripts', 'ci-package-clients.sh')
 const publishScript = join(root, 'scripts', 'ci-publish-update-server.sh')
 const transferScript = join(root, 'scripts', 'ci-channel-transfer.sh')
+const imagesScript = join(root, 'scripts', 'ci-build-channel-images.sh')
 const failures = []
 const scratch = []
 
@@ -284,6 +285,31 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   const unknown = runChannels({ source: unknownAsset, refName: 'v2.7.0', dest: 'channels', list: 'n.list' })
   check(unknown.status === 0, '未知素材字段不应中止发布(只告警)')
   check(unknown.stderr.includes('logoo'), '未知素材字段应给出告警并点名')
+
+  // 报错**不得回显品牌取值**:slug/app_id/scheme 的值就是客户品牌
+  // (Acme-AI / com.acme.ai / acmeai),而这一步的输出去公开 Actions 日志。
+  // 2026-09-10 审计当场发现早先版本把值拼进了错误信息 —— ::add-mask:: 只掩码
+  // 渠道 id,掩不到这些值,所以必须由脚本自己保证。
+  const leaky = tempDir('ci-channels-leak-')
+  mkdirSync(join(leaky, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(leaky, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+  mkdirSync(join(leaky, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(leaky, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Secret Brand', short_name: 'Secret' },
+    // 三个字段都**非法**:非法值才是会被拼进早先版本错误信息的东西
+    desktop: { slug: 'TOP SECRET BRAND', app_id: 'com.secret brand', deep_link_scheme: 'SECRET!' },
+  }))
+  const leak = runChannels({ source: leaky, refName: 'v2.7.0', dest: 'channels', list: 'o.list' })
+  const leakOut = `${leak.stdout ?? ''}${leak.stderr ?? ''}`
+  check(leak.status !== 0, '非法编译期字段必须中止构建')
+  check(leak.stderr.includes('desktop.slug'), '失败信息仍须指明是哪个字段不合法')
+  check(leak.stderr.includes('desktop.deep_link_scheme'), '失败信息应列出全部非法字段')
+  check(!leakOut.includes('TOP SECRET BRAND'), '报错不得回显 slug 取值(那是客户品牌)')
+  check(!leakOut.includes('com.secret brand'), '报错不得回显 app_id 取值')
+  check(!leakOut.includes('SECRET!'), '报错不得回显 scheme 取值')
 
   // 声明的素材文件不存在 → 构建期拦(否则服务端不下发 URL、客户端拿到死链)
   const missingAsset = tempDir('ci-channels-asset-')
@@ -736,10 +762,85 @@ esac
   }
 }
 
+// ---- 9. 镜像装配:Linux 只放 AppImage、镜像双 tag、清单与产物中性 ----
+{
+  const work = tempDir('ci-images-')
+  const list = join(work, 'channels.list')
+  const artifacts = join(work, 'release-artifacts')
+  const out = join(work, 'release-bundle')
+  const log = join(work, 'docker.log')
+  writeFileSync(log, '')
+  writeFileSync(list, 'official\nbeta\n')
+  for (const id of ['official', 'beta']) {
+    mkdirSync(join(work, 'channels', id), { recursive: true })
+    writeFileSync(join(work, 'channels', id, 'channel.json'), JSON.stringify({
+      schema: 1, channel_id: id, identity: { display_name: `${id} AI`, short_name: id },
+    }))
+    // 三平台安装包:Linux 侧刻意同时给 AppImage 与 deb(镜像只该带走前者)
+    mkdirSync(join(artifacts, id), { recursive: true })
+    for (const name of ['App.AppImage', 'App.deb', 'App.dmg', 'App.exe']) {
+      writeFileSync(join(artifacts, id, name), 'x')
+    }
+  }
+  // 假 docker:只记录调用并按需造出 image.tar(镜像装配逻辑与 tag 形态是断言对象)
+  const fakeDocker = join(work, 'docker')
+  writeFileSync(fakeDocker, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "${log}"
+case "\${1:-}" in
+  buildx) exit 0 ;;
+  tag) exit 0 ;;
+  save)
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-o" ]; then : > "$a"; fi
+      prev="$a"
+    done
+    exit 0 ;;
+  run) exit 0 ;;
+esac
+exit 0
+`)
+  execFileSync('chmod', ['+x', fakeDocker])
+
+  const run = spawnSync('bash', [
+    imagesScript, '--list', list, '--artifacts', artifacts, '--out', out,
+  ], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      CI_IMAGE_BUILD_ROOT: work,
+      VERSION: 'v9.9.9',
+    },
+  })
+  check(run.status === 0, `镜像装配应成功,实际退出 ${String(run.status)}: ${(run.stderr ?? '').slice(0, 300)}`)
+
+  const clientDir = join(work, 'client-assets', 'client')
+  check(existsSync(join(clientDir, 'App.AppImage')), '镜像应带 Linux AppImage')
+  check(!existsSync(join(clientDir, 'App.deb')), 'Linux deb 不得进镜像(已定案:镜像只放 AppImage)')
+  const manifest = JSON.parse(readFileSync(join(work, 'client-assets', 'CLIENT-RELEASE.json'), 'utf8'))
+  check(manifest.client.assets['linux-x64'].file.endsWith('.AppImage'), '清单 linux-x64 必须指向 AppImage')
+  check(!JSON.stringify(manifest).includes('.deb'), '清单里不得出现 deb')
+  check(manifest.channel_id === 'beta' || manifest.channel_id === 'official', '清单须声明本渠道')
+
+  const dockerLog = readFileSync(log, 'utf8')
+  check(
+    dockerLog.includes('tag picoaide-harness-server:v9.9.9 picoaide-harness-server:9.9.9'),
+    '镜像必须同时带 vX.Y.Z 与 X.Y.Z 两个 tag(部署文档与 latest.json 用的形式不同)',
+  )
+  check(
+    /save .*picoaide-harness-server:v9\.9\.9 .*picoaide-harness-server:9\.9\.9/u.test(dockerLog),
+    'docker save 必须带上两个 tag(否则 docker load 后少一个)',
+  )
+  check(existsSync(join(out, 'official', 'picoaide-server-9.9.9-amd64.zip')), '产物名应中性(不含渠道 id)')
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/品牌必填/日志抑制/白标门禁/产物归集/品牌渠道 R2 中转/R2 发布全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码(取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/镜像装配(无 deb+双 tag)/R2 中转/R2 发布全部符合预期\n')

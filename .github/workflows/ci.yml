@@ -246,9 +246,11 @@ jobs:
         run: |
           bash scripts/ci-package-clients.sh --official-last \
             --list channels.list --stage-dir client-assets \
-            --patterns '*.AppImage *.deb' \
+            --patterns '*.AppImage' \
             --verify-app-dir dist/linux-unpacked \
             -- yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
+      # 注:Linux 只归集 AppImage(镜像与发布面都不要 deb)。dist:linux 仍会产出 deb,
+      # 它作为本次运行的中间产物留在 runner 上,不进入任何交付面。
       # 品牌渠道的产物**不进公开 artifact**(artifact 对任何登录账号可取,而渠道
       # 目录名/文件名/包内品牌都是客户身份):改经 R2 临时前缀中转,release job 取回。
       # 官方/beta 不在中转范围内(它们的品牌本来就公开)。
@@ -265,7 +267,7 @@ jobs:
         run: |
           yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
           mkdir -p client-assets/official
-          cp packages/host/desktop/dist/*.AppImage packages/host/desktop/dist/*.deb client-assets/official/
+          cp packages/host/desktop/dist/*.AppImage client-assets/official/
       # 客户端 E2E(2026-09-06 接入,G3 缺口):在打包产物上跑 13 项断言
       # (mock gateway + Xvfb + CDP),报告与截图随后上传。
       - name: Client E2E (packaged app, Xvfb)
@@ -700,7 +702,7 @@ jobs:
               '',
               '本次提交的门禁（gate + server + 三平台打包）全部通过，可下载产物：',
               '',
-              `- Desktop (Linux): \`desktop-Linux\` — AppImage + deb（含 \`e2e-report\` 客户端 E2E 结果）`,
+              `- Desktop (Linux): \`desktop-Linux\` — AppImage（含 \`e2e-report\` 客户端 E2E 结果）`,
               `- Desktop (Windows): \`desktop-Windows-installer\` — NSIS Setup`,
               `- Desktop (macOS): \`desktop-macOS\` — DMG`,
               `- Server: \`picoaide-server-linux-amd64\` — Go 服务端二进制`,
