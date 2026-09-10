@@ -15,8 +15,12 @@ import (
 type Handlers struct {
 	// PublicChannel GET /api/client/v2/channel —— 下发渠道内容(登录页/客户端/门户共用)
 	PublicChannel gin.HandlerFunc
-	// Logo GET /api/client/v2/channel/logo —— 下发渠道 logo(来自镜像内渠道目录)
+	// Logo GET /api/client/v2/channel/logo —— 下发浅色 logo(来自镜像内渠道目录)
 	Logo gin.HandlerFunc
+	// LogoDark GET /api/client/v2/channel/logo-dark —— 下发暗色 logo(未配置即 404)
+	LogoDark gin.HandlerFunc
+	// Favicon GET /api/client/v2/channel/favicon —— 下发站点图标(未配置即 404)
+	Favicon gin.HandlerFunc
 }
 
 // NewHandlers 构造端点集合。
@@ -27,19 +31,25 @@ func NewHandlers() *Handlers {
 			c.Header("Cache-Control", "no-cache")
 			c.JSON(http.StatusOK, BuildResponse(Load()))
 		},
-		Logo: func(c *gin.Context) {
-			path := LogoPath(false)
-			if path == "" {
-				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
-					"code":    "NOT_FOUND",
-					"message": "渠道未配置 logo",
-				}})
-				return
-			}
-			// 渠道 logo 随镜像固定 → 可长缓存;ServeFile 处理条件请求与 Range
-			c.Header("Cache-Control", "public, max-age=86400")
-			http.ServeFile(c.Writer, c.Request, path)
-		},
+		Logo:     serveAsset(LogoPath(false), "渠道未配置 logo"),
+		LogoDark: serveAsset(LogoDarkPath(), "渠道未配置暗色 logo"),
+		Favicon:  serveAsset(FaviconPath(), "渠道未配置 favicon"),
+	}
+}
+
+// serveAsset 是三个素材端点的公共实现:路径为空(= 未配置或文件不存在)时
+// 404 JSON 信封,否则长缓存下发(素材随镜像固定,ServeFile 处理条件请求与 Range)。
+func serveAsset(path, missingMessage string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if path == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
+				"code":    "NOT_FOUND",
+				"message": missingMessage,
+			}})
+			return
+		}
+		c.Header("Cache-Control", "public, max-age=86400")
+		http.ServeFile(c.Writer, c.Request, path)
 	}
 }
 

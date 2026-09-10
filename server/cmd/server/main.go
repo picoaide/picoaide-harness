@@ -247,12 +247,14 @@ func main() {
 
 // resolveStartupChannel 解析并校验本部署渠道,失败即返回错误(绝不含糊)。
 //
-// 两道 fail-loud 都在启动期挡,而不是运行时降级:
+// 三道 fail-loud 都在启动期挡,而不是运行时降级:
 //  1. 显式配置了渠道却解析不出来 —— 回落 official 会让渠道部署接受官方清单、
 //     把品牌洗掉(最严重的一类错),宁可起不来;
 //  2. 镜像内的渠道内容(channel.json)与解析出的渠道不一致 —— 典型成因是
 //     部署侧用 .env / compose 覆盖了镜像自带的渠道声明,而这正是第 1 类错的
-//     入口(镜像里的品牌还是 acme,清单却按 official 比对)。
+//     入口(镜像里的品牌还是 acme,清单却按 official 比对);
+//  3. 品牌渠道漏配客户端深链 scheme —— 运行时会回落厂商 scheme(picoaide),
+//     客户在浏览器"打开 picoaide?"确认框里看到厂商名(白标失败)。
 //
 // 抽成函数是为了可测:main 里的 log.Fatalf 无法在测试中观察。
 // @returns 校验通过的渠道 id,或错误。
@@ -268,7 +270,31 @@ func resolveStartupChannel() (string, error) {
 			"请去掉对 %s 的覆盖(镜像自带渠道声明),或改成与镜像一致的值",
 			configured, channelID, updatecheck.ChannelEnv, os.Getenv(updatecheck.ChannelEnv), updatecheck.ChannelEnv)
 	}
+	if err := validateDeepLinkScheme(channelID); err != nil {
+		return "", err
+	}
 	return channelID, nil
+}
+
+// validateDeepLinkScheme 校验品牌渠道必须自带合法的客户端深链 scheme。
+//
+// 深链 scheme 出现在浏览器"打开 <scheme>?"确认框与 OIDC 回调里:缺字段时
+// channel.DeepLinkScheme() 会回落厂商 scheme(picoaide),渠道客户就会看到
+// 厂商名 —— 这正是白标要消除的东西。官方/beta 是保留渠道,缺字段仍按现状
+// 回落(向后兼容:既有官方部署不改配置也能升级)。
+// @returns 配置缺失或畸形时的明确错误。
+func validateDeepLinkScheme(channelID string) error {
+	if channelID == updatecheck.OfficialChannel || channelID == updatecheck.BetaChannel {
+		return nil
+	}
+	configured := channel.Load().Desktop.DeepLinkScheme
+	if !channel.ValidDeepLinkScheme(configured) {
+		return fmt.Errorf("渠道 %q 未配置合法的客户端深链 scheme:请在镜像内的 channel.json 里设置 "+
+			"desktop.deep_link_scheme(期望 ^[a-z][a-z0-9+.-]{1,31}$,当前 %q)。"+
+			"缺字段会回落厂商 scheme,客户从浏览器跳回客户端时会看到厂商名",
+			channelID, strings.TrimSpace(configured))
+	}
+	return nil
 }
 
 // resolvedChannel 是启动时解析并校验过的本部署渠道。
@@ -297,16 +323,24 @@ func servePortal(c *gin.Context, db *sql.DB) {
 	}
 
 	ch := channel.Load()
+	downloads, downloadNote := portalDownloads(c, settings)
+	if downloadNote != "" {
+		if note := strings.TrimSpace(settings["portal.client_download_note"]); note != "" {
+			downloadNote = note + " " + downloadNote
+		}
+	} else {
+		downloadNote = settings["portal.client_download_note"]
+	}
 	view := portal.View{
 		Name:         ch.Identity.DisplayName,
 		Tagline:      ch.Identity.Tagline,
 		Welcome:      ch.Copy.PortalWelcome,
 		LogoURL:      channelLogoURL(),
 		AdminURL:     "/admin/",
-		DownloadNote: settings["portal.client_download_note"],
+		DownloadNote: downloadNote,
 		Version:      version,
 		Channel:      resolvedChannel,
-		Downloads:    portalDownloads(settings),
+		Downloads:    downloads,
 	}
 
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -327,13 +361,19 @@ func channelLogoURL() string {
 	return "/api/client/v2/channel/logo"
 }
 
-// portalDownloads 组装三平台下载项。
+// portalDownloads 组装三平台下载项与下载区说明。
 //
-// 默认地址指向**本服务端**的安装包(随镜像发布,见 internal/clientrelease);
+// 默认地址指向**本服务端的**安装包(随镜像发布,见 internal/clientrelease);
 // 管理员配置了 portal.client_download_* 时以配置为准(可指向自有 CDN)。
 // 两者都没有时该平台显示为不可用(而不是给一个坏链接)。
-func portalDownloads(settings map[string]string) []portal.Platform {
+//
+// 内置地址与更新清单**同一口径**(clientrelease.RequestOrigin):客户端只从
+// https 来源装包,来源不安全时门户也不显示内置入口,并把原因写进下载区
+// (运维据此配置 PICOAI_PUBLIC_BASE_URL),而不是让下载区静默空着。
+// @returns 下载项与补充说明(无补充说明时为空串)。
+func portalDownloads(c *gin.Context, settings map[string]string) ([]portal.Platform, string) {
 	legacy := settings["portal.client_download_url"]
+	origin := clientrelease.RequestOrigin(c)
 
 	pick := func(configured string) string {
 		if configured != "" {
@@ -343,6 +383,9 @@ func portalDownloads(settings map[string]string) []portal.Platform {
 	}
 	// 内置地址:/updates/client/<文件名>(文件由 clientrelease 从镜像目录下发)
 	builtin := func(assetKey string) string {
+		if !origin.OK() {
+			return ""
+		}
 		info := clientrelease.LoadInfo()
 		if info == nil {
 			return ""
@@ -365,11 +408,20 @@ func portalDownloads(settings map[string]string) []portal.Platform {
 		return portal.Platform{Name: name, Meta: meta, URL: url}
 	}
 
-	return []portal.Platform{
+	platforms := []portal.Platform{
 		item("Windows", "x64 · .exe 安装程序", settings["portal.client_download_win"], "win-x64"),
 		item("macOS", "Universal · .dmg 磁盘映像", settings["portal.client_download_mac"], "mac-universal"),
 		item("Linux", "x64 · .AppImage / .deb", settings["portal.client_download_linux"], "linux-x64"),
 	}
+
+	// 有平台因来源不安全而失去内置入口(且管理员没配自有地址)→ 说明原因。
+	note := ""
+	if !origin.OK() && (pick(settings["portal.client_download_win"]) == "" ||
+		pick(settings["portal.client_download_mac"]) == "" ||
+		pick(settings["portal.client_download_linux"]) == "") {
+		note = "本服务端当前无法提供安全(https)的安装包地址:" + origin.Reason + "。"
+	}
+	return platforms, note
 }
 
 // htmlEscape escapes a string for safe embedding in HTML text/attributes.

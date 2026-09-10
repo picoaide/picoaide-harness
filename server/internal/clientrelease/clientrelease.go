@@ -13,10 +13,14 @@ package clientrelease
 
 import (
 	"encoding/json"
+	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
@@ -73,22 +77,31 @@ func NewHandlers(version func() string, channel string) *Handlers {
 
 // manifest 处理 GET /api/client/v2/updates/manifest。
 func manifest(c *gin.Context, serverVersion, channel string) {
-	// 下载地址按请求来源拼出,不写死 —— 官方 HTTPS 与内网自签/非 443 端口都对。
-	base := requestOrigin(c)
-
 	resp := gin.H{
 		"schema":     1,
 		"channel_id": channel,
 		"server":     gin.H{"version": serverVersion},
 	}
-	if info := LoadInfo(); info != nil {
+	// 下载地址按请求来源拼出,不写死 —— 官方 HTTPS 与内网自签/非 443 端口都对。
+	// 但客户端只接受**绝对 https** 地址(见 packages/host/desktop 的
+	// desktop-release.ts):给不出安全地址时宁可明说不可用,也不下发一个会被
+	// 整份丢弃、客户端静默显示"已是最新"的 http 链接。
+	origin := RequestOrigin(c)
+	info := LoadInfo()
+	switch {
+	case info == nil:
+		// 镜像没带客户端资产:没有下载地址可给,不属于错误。
+	case !origin.OK():
+		warnOriginUnavailable(origin.Reason)
+		resp["client_unavailable"] = origin.Reason
+	default:
 		assets := make(map[string]gin.H, len(info.Client.Assets))
 		for key, a := range info.Client.Assets {
 			if a.File == "" {
 				continue
 			}
 			assets[key] = gin.H{
-				"url":    base + "/updates/client/" + a.File,
+				"url":    origin.Base + "/updates/client/" + a.File,
 				"sha256": a.SHA256,
 				"size":   a.Size,
 			}
@@ -101,20 +114,171 @@ func manifest(c *gin.Context, serverVersion, channel string) {
 }
 
 // file 处理 GET /updates/client/*file。
+//
+// 只服务资产目录下的**普通安装包文件**:目录里除了安装包还有
+// CLIENT-RELEASE.json 等文件,而 http.ServeFile 对目录会直接返回目录列表
+// (name=".." 曾实测可列出资产目录的父目录文件名 —— 未认证的目录探测)。
 func file(c *gin.Context) {
 	name := strings.TrimPrefix(c.Param("file"), "/")
-	if name == "" || strings.ContainsAny(name, `/\`) {
+	if name == "" || strings.ContainsAny(name, `/\`) ||
+		strings.Contains(name, "..") || !allowedAssetName(name) {
 		writeNotFound(c)
 		return
 	}
 	full := filepath.Join(Dir, name)
-	if _, err := os.Stat(full); err != nil {
+	st, err := os.Stat(full)
+	if err != nil || !st.Mode().IsRegular() {
 		writeNotFound(c)
 		return
 	}
 	// 文件名含版本号 → 内容固定,可长缓存;ServeFile 自带 Range/断点续传。
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(c.Writer, c.Request, full)
+}
+
+// allowedAssetExts 可对外下发的安装包扩展名白名单(小写比较)。
+//
+// 白名单而非黑名单:任何新格式都必须显式加入,避免把目录里的任意文件
+// (清单 json、将来可能出现的密钥/配置)意外下发出去。
+var allowedAssetExts = []string{".dmg", ".exe", ".appimage", ".deb", ".zip", ".tar.gz", ".msi", ".pkg"}
+
+// allowedAssetName 判定文件名扩展名是否在白名单内(大小写不敏感)。
+func allowedAssetName(name string) bool {
+	lower := strings.ToLower(name)
+	for _, ext := range allowedAssetExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// PublicBaseURLEnv 显式声明本服务端对外可达地址的环境变量(如
+// https://ai.example.com,允许带子路径)。配置后是下载地址的**唯一权威来源**。
+const PublicBaseURLEnv = "PICOAI_PUBLIC_BASE_URL"
+
+// originUnavailableReason 是"给不出安全下载地址"时的兜底原因说明
+// (下发给客户端/体现在服务端日志里,供运维定位)。
+const originUnavailableReason = "server origin is not https; set " + PublicBaseURLEnv
+
+// Origin 是客户端可达的绝对来源解析结果。
+type Origin struct {
+	// Base 形如 https://ai.example.com[/sub];不可用时为空。
+	Base string
+	// Reason 不可用的原因(不含任何链接,可直接展示给运维);可用时为空。
+	Reason string
+}
+
+// OK 报告是否拿到了可下发的安全来源。
+func (o Origin) OK() bool { return o.Base != "" }
+
+// 来源告警出口与"只告警一次"闸(测试可替换/重置)。
+var (
+	logWarn      = log.Printf
+	originWarnMu sync.Mutex
+	originWarned bool
+)
+
+// warnOriginUnavailable 每个进程只告警一次(来源不安全是部署配置问题,
+// 每个请求都刷屏只会把日志淹掉)。
+func warnOriginUnavailable(reason string) {
+	originWarnMu.Lock()
+	defer originWarnMu.Unlock()
+	if originWarned {
+		return
+	}
+	originWarned = true
+	logWarn("clientrelease: %s", reason)
+}
+
+// RequestOrigin 解析本请求下客户端可达的绝对来源。
+// 门户页与清单用**同一个**判定口径(见 cmd/server 的 portalDownloads)。
+func RequestOrigin(c *gin.Context) Origin {
+	return resolveOrigin(originInput{
+		ForwardedProto: c.GetHeader("X-Forwarded-Proto"),
+		TLS:            c.Request.TLS != nil,
+		Host:           c.Request.Host,
+	})
+}
+
+// originInput 是来源判定所需的请求事实(与 gin 解耦,便于表驱动测试)。
+type originInput struct {
+	// ForwardedProto 反代声明的协议(X-Forwarded-Proto)。
+	ForwardedProto string
+	// TLS 是否 TLS 直连。
+	TLS bool
+	// Host 请求 Host(含端口)。
+	Host string
+}
+
+// resolveOrigin 判定客户端可达来源。
+//
+// 优先级:显式配置(PICOAI_PUBLIC_BASE_URL,配了就是唯一权威)→ XFP:https
+// → TLS → 回环 Host(http,本地开发)→ 无法提供安全地址。
+func resolveOrigin(in originInput) Origin {
+	if raw := strings.TrimSpace(os.Getenv(PublicBaseURLEnv)); raw != "" {
+		base, ok := normalizeBaseURL(raw)
+		if !ok {
+			return Origin{Reason: PublicBaseURLEnv + " is invalid: expect an absolute http(s) URL without query or fragment"}
+		}
+		if !isSecureBase(base) {
+			return Origin{Reason: PublicBaseURLEnv + " must be https (the client rejects non-https download URLs)"}
+		}
+		return Origin{Base: base}
+	}
+	if in.Host == "" {
+		return Origin{Reason: originUnavailableReason}
+	}
+	if in.ForwardedProto == "https" || in.TLS {
+		return Origin{Base: "https://" + in.Host}
+	}
+	if isLoopbackHost(in.Host) {
+		return Origin{Base: "http://" + in.Host}
+	}
+	return Origin{Reason: originUnavailableReason}
+}
+
+// normalizeBaseURL 规范化显式配置的对外地址:去掉尾斜杠(允许子路径),
+// 拒绝 query/fragment、相对地址与非 http(s) scheme。
+func normalizeBaseURL(raw string) (string, bool) {
+	if strings.ContainsAny(raw, "?#") {
+		return "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", false
+	}
+	return strings.TrimRight(raw, "/"), true
+}
+
+// isSecureBase 判定来源是否安全:https 恒安全;http 仅回环(本地开发)可接受。
+func isSecureBase(base string) bool {
+	u, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	return isLoopbackHost(u.Host)
+}
+
+// isLoopbackHost 判定 host(可含端口,IPv6 可带方括号)是否为本机回环。
+func isLoopbackHost(host string) bool {
+	switch hostOnly(host) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
+}
+
+// hostOnly 去掉端口与 IPv6 方括号(如 "127.0.0.1:8080" → "127.0.0.1")。
+func hostOnly(hostport string) string {
+	h := strings.TrimSpace(hostport)
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	return strings.Trim(strings.ToLower(h), "[]")
 }
 
 // LoadInfo 读并解析资产清单;不存在或损坏时返回 nil(镜像可不带客户端)。
@@ -129,23 +293,6 @@ func LoadInfo() *Info {
 		return nil
 	}
 	return &info
-}
-
-// requestOrigin 拼出客户端可达的绝对来源(如 https://ai.example.com)。
-// 优先用反代声明的 X-Forwarded-Proto(Caddy 已配置),否则按连接判断。
-func requestOrigin(c *gin.Context) string {
-	proto := c.GetHeader("X-Forwarded-Proto")
-	if proto != "https" {
-		proto = "http"
-		if c.Request.TLS != nil {
-			proto = "https"
-		}
-	}
-	host := c.Request.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	return proto + "://" + host
 }
 
 func writeNotFound(c *gin.Context) {
