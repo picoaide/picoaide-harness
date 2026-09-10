@@ -37,6 +37,14 @@ if [ -n "$UNPACK" ]; then
     echo "错误: 镜像内缺少 /opt/picoaide/deploy" >&2; exit 1
   fi
   mkdir -p "$UNPACK" 2>/dev/null || true
+  # 先清掉**上一次导出**的生成物:cp -a 是合并语义,不清就会把旧版本一起留下——
+  # 2026-09-10 升级实测:client/ 里同时存在两个版本的 dmg/exe/AppImage 与已下架的
+  # deb(服务端会把它们当普通文件对外提供,虽然不在清单里)。
+  # 只清本产品导出的**固定名字**,绝不碰用户数据与证书:
+  #   .env / picoaide-data / pg-data / caddy-data / caddy-config / certs
+  rm -rf "$UNPACK/client" 2>/dev/null || true
+  rm -f "$UNPACK/VERSION" "$UNPACK/docker-compose.yml" "$UNPACK/.env.example" 2>/dev/null || true
+  rm -f "$UNPACK"/Caddyfile.* 2>/dev/null || true
   cp -a /opt/picoaide/deploy/. "$UNPACK"/ 2>/dev/null || true
   cp -a /opt/picoaide/VERSION "$UNPACK"/VERSION 2>/dev/null || true
   # 客户端资产(镜像内已含,服务端直接对外提供;这里只是给离线部署顺手导出)
