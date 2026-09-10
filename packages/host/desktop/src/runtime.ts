@@ -121,6 +121,19 @@ export interface UpdateDownloadProgressSnapshot {
   readonly totalBytes: number | undefined
 }
 
+/**
+ * 一次更新检查/下载使用的更新源。
+ *
+ * **客户端只从它登录的那台服务端取更新**（2026-09-10 定案）：更新源不是一个
+ * 内置常量，而是随会话变化的运行时值，由更新协调器从已登录会话推导后传下来。
+ */
+export interface DesktopUpdateSource {
+  /** 服务端版本清单的绝对地址（`serverManifestURL(session.serverURL)`）。 */
+  readonly manifestURL: string
+  /** 服务端自报的渠道 id（`GET /api/client/v2/channel`）；拿不到时省略。 */
+  readonly expectedChannel: string | undefined
+}
+
 /** Electron capabilities used by the headless update plugin. */
 export interface DesktopUpdateAdapter {
   /** Whether the running executable came from an Electron package. */
@@ -129,13 +142,6 @@ export interface DesktopUpdateAdapter {
   readonly canDownload: boolean
   /** Installed desktop product version. */
   readonly currentVersion: string
-  /**
-   * 本安装所属的更新渠道（`beta` / `official` / 品牌渠道 id）。
-   *
-   * 渠道隔离是正确性要求：清单里的 `channel_id` 必须与它精确相等才接受，
-   * 否则会出现「品牌客户端被官方清单升级成官方版、品牌丢失」或反向串渠道。
-   */
-  readonly channel: string
   /** Private file used for update-prompt history. */
   readonly statePath: string
   /** Request adapter backed by Electron's native network session. */
@@ -146,9 +152,10 @@ export interface DesktopUpdateAdapter {
   showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
   /**
    * Download and hand one confirmed update to the platform installer.
+   * @param source - 本次下载使用的更新源（服务端清单地址 + 期望渠道）。
    * @param onProgress - optional byte-progress callback while streaming.
    */
-  downloadAndOpen(version: string, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<void>
+  downloadAndOpen(version: string, source: DesktopUpdateSource, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
   /**

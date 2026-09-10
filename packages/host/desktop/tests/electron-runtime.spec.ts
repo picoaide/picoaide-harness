@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { DesktopShellSpec } from '../src/runtime.ts'
+import type { DesktopShellSpec, DesktopUpdateSource } from '../src/runtime.ts'
+
+/** 下载用例共用的更新源:客户端只从登录的那台服务端取包。 */
+const UPDATE_SOURCE: DesktopUpdateSource = {
+  manifestURL: 'https://server.test/api/client/v2/updates/manifest',
+  expectedChannel: 'official',
+}
 
 // 产品版本来自 package.json 单一真值(scripts/version.mjs 同步),测试断言
 // 亦应动态读取,避免每次发版都要改测试(曾连续两个版本因硬编码 2.3.0 踩坑)。
@@ -780,13 +786,14 @@ describe('Electron compatibility runtime', () => {
     electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 0, checkboxChecked: false })
     await expect(runtime.updates.confirmDownload('2.1.0')).resolves.toBe(true)
     const controller = new AbortController()
-    await runtime.updates.downloadAndOpen('2.1.0', controller.signal)
+    await runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, controller.signal)
     expect(updater.download).toHaveBeenCalledWith({
       platform: 'darwin',
       version: '2.1.0',
-      // 渠道随下载请求一并传递给下载器:清单 channel_id 必须与它相等,
-      // 否则品牌客户端会被官方清单升级成官方版(渠道隔离)
-      channel: 'official',
+      // 更新源随下载请求一并传下去:客户端只从登录的那台服务端取包
+      // (2026-09-10 定案),清单地址与期望渠道都由会话推导。
+      manifestURL: UPDATE_SOURCE.manifestURL,
+      expectedChannel: UPDATE_SOURCE.expectedChannel,
       userDataPath: '/tmp/dsh-desktop-user-data',
       request: expect.any(Function),
       signal: controller.signal,
@@ -852,7 +859,7 @@ describe('Electron compatibility runtime', () => {
     const runtime = new ElectronDesktopRuntime(async () => {})
     runtime.schedule({ ...spec, requestQuit })
 
-    const pending = runtime.updates.downloadAndOpen('2.1.0', new AbortController().signal)
+    const pending = runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal)
     await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() })
     expect(childProcess.spawn).toHaveBeenCalledWith(
       'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe',
@@ -880,7 +887,7 @@ describe('Electron compatibility runtime', () => {
     const runtime = new ElectronDesktopRuntime(async () => {})
     runtime.schedule({ ...spec, requestQuit })
 
-    const pending = runtime.updates.downloadAndOpen('2.1.0', new AbortController().signal)
+    const pending = runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal)
     await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() })
     childProcess.emit('error', new Error('blocked'))
 
@@ -896,7 +903,7 @@ describe('Electron compatibility runtime', () => {
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
 
-    await runtime.updates.downloadAndOpen('2.1.0', new AbortController().signal)
+    await runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal)
 
     expect(childProcess.spawn).not.toHaveBeenCalled()
   })
@@ -908,7 +915,7 @@ describe('Electron compatibility runtime', () => {
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
 
-    await expect(runtime.updates.downloadAndOpen('2.1.0', new AbortController().signal))
+    await expect(runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal))
       .rejects.toThrow('Launch Services rejected the image')
     expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
   })
@@ -924,7 +931,7 @@ describe('Electron compatibility runtime', () => {
     const runtime = new ElectronDesktopRuntime(async () => {})
     const controller = new AbortController()
 
-    const pending = runtime.updates.downloadAndOpen('2.1.0', controller.signal)
+    const pending = runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, controller.signal)
     await vi.waitFor(() => { expect(electron.shell.openPath).toHaveBeenCalledOnce() })
     controller.abort()
     finishOpen('')

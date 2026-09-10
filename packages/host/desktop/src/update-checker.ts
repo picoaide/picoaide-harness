@@ -1,13 +1,11 @@
-/** Headless version checks against the PicoAide update server. */
+/** Headless version checks against the server the user is signed in to. */
 
 import {
-  channelBaseURL,
   parseReleaseManifest,
-  updateManifestURL,
   type DesktopReleaseManifest,
 } from './desktop-release.ts'
 
-export { DESKTOP_UPDATE_BASE_URL, channelBaseURL } from './desktop-release.ts'
+export { serverChannelURL, serverManifestURL } from './desktop-release.ts'
 
 /**
  * Maximum response body bytes accepted from the update service.
@@ -39,23 +37,24 @@ export type UpdateRequest = (url: string, init: RequestInit) => Promise<Response
 export interface UpdateCheckOptions {
   /** Installed application version, expressed as canonical SemVer. */
   readonly currentVersion: string
+  /**
+   * 服务端版本清单的绝对地址（`serverManifestURL(session.serverURL)`）。
+   * 调用方必须先确认已登录 —— 没有登录的服务端就没有更新源。
+   */
+  readonly manifestURL: string
   /** Caller-owned cancellation signal; the checker does not create its own timeout. */
   readonly signal?: AbortSignal
   /** Optional fetch implementation for a host adapter or test. */
   readonly request?: UpdateRequest
   /**
-   * 渠道更新面 base（末尾斜杠容错）。
-   * 缺省按 `channel` 推导；品牌渠道由构建期渠道配置注入自己的更新面。
-   */
-  readonly baseURL?: string
-  /**
-   * 本安装所属渠道（`beta` / `official` / 品牌渠道 id），**必填**。
+   * 期望的渠道 id：**由服务端自己声明**（`GET /api/client/v2/channel` 的
+   * `channel_id`），而不是客户端构建期注入的值。
    *
-   * 双重作用:①推导默认 base(`channelBaseURL(channel)`);
-   * ②校验清单的 `channel_id` 必须精确相等 —— 渠道隔离是正确性要求,
-   * 缺失或不匹配一律当作"检查失败"(不提示更新),绝不放行跨渠道升级。
+   * 作用:校验清单声明的渠道与该服务端对外宣称的渠道一致 —— 服务端配置出错
+   * (镜像里的渠道内容与声明的渠道对不上)时立即失败,而不是静默放行。
+   * 拿不到服务端渠道内容时省略(清单仍必须自带非空 `channel_id`)。
    */
-  readonly channel: string
+  readonly expectedChannel?: string
 }
 
 /** Successful comparison returned by the version service. */
@@ -108,12 +107,12 @@ export function compareSemVerVersions(left: string, right: string): number | nul
 }
 
 /**
- * Check the update server for a newer client release.
+ * Check the signed-in server for a newer client release.
  *
- * 单一模式:GET `<baseURL>/latest.json` 得到版本清单,再按严格 SemVer 比较。
- * 发布渠道由清单内容决定(写预发布进去就是预发布渠道),不再有 GitHub 的
- * `releases/latest` 与"发布列表取最大版本"两条分叉逻辑。
- * @param options - installed version, caller-owned signal, request adapter, and channel base.
+ * 单一模式:GET 服务端的 `/api/client/v2/updates/manifest` 得到版本清单,
+ * 再按严格 SemVer 比较。更新源是**它登录的那台服务端**,不是任何分发面 ——
+ * 「客户端属于哪个渠道」由服务端在结构上决定,错乱不可能发生。
+ * @param options - installed version, manifest URL, caller-owned signal, and request adapter.
  * @returns a successful comparison, or null when any request or validation step fails.
  */
 export async function checkForUpdate(
@@ -137,19 +136,19 @@ export async function checkForUpdate(
 }
 
 /**
- * 拉取并严格解析渠道版本清单(更新检查与安装包下载共用的唯一入口)。
- * @param options - base URL, request adapter, and caller-owned cancellation.
+ * 拉取并严格解析服务端版本清单(更新检查与安装包下载共用的唯一入口)。
+ * @param options - manifest URL, request adapter, and caller-owned cancellation.
  * @returns 解析后的清单,或 null(网络/状态码/结构/超限任一失败)。
  */
 export async function fetchReleaseManifest(
-  options: Pick<UpdateCheckOptions, 'baseURL' | 'request' | 'signal' | 'channel'>,
+  options: Pick<UpdateCheckOptions, 'manifestURL' | 'request' | 'signal' | 'expectedChannel'>,
 ): Promise<DesktopReleaseManifest | null> {
-  const url = updateManifestURL(options.baseURL ?? channelBaseURL(options.channel))
+  const url = options.manifestURL
   const init: RequestInit = {
     method: 'GET',
     headers: { Accept: 'application/json' },
     cache: 'no-store',
-    // 更新服务器必须直接返回 200:跳转属于配置错误(见 R2 手册 §3.1),
+    // 清单必须直接返回 200:跳转属于配置错误(服务端/反代把清单做了重定向),
     // 静默跟随会把"通道断了"伪装成"没有新版本"。
     redirect: 'error',
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -178,8 +177,9 @@ export async function fetchReleaseManifest(
   } catch {
     return null
   }
-  // 渠道校验:清单声明的渠道必须与调用方所属渠道一致,否则视为失败。
-  return parseReleaseManifest(value, options.channel)
+  // 渠道校验:清单声明的渠道必须与服务端自报的渠道一致(拿不到服务端渠道
+  // 内容时省略该比对,但清单仍必须自带非空 channel_id)。
+  return parseReleaseManifest(value, options.expectedChannel)
 }
 
 /**

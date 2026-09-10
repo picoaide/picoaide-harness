@@ -1,14 +1,14 @@
 /** Headless, confirmation-gated downloads for PicoAide Harness installers. */
 
-// 更新源 = 我方更新服务器(见 ./desktop-release.ts);GitHub Releases 通道已于
-// 2026-09-10 移除。安装包地址与 SHA-256 均来自版本清单 `latest.json`,
+// 更新源 = **用户登录的那台服务端**(见 ./desktop-release.ts);客户端到任何
+// 分发面的直连路径已于 2026-09-10 移除。安装包地址与 SHA-256 均来自服务端
+// 下发的版本清单(GET /api/client/v2/updates/manifest),
 // 不再有 GitHub 的资产名匹配与独立 SHA256SUMS 旁路。
 
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import {
-  DESKTOP_UPDATE_BASE_URL,
   releaseAssetFor,
   type DesktopReleasePlatform,
 } from './desktop-release.ts'
@@ -25,8 +25,8 @@ export interface UpdateDownloadProgress {
   readonly totalBytes: number | undefined
 }
 
-// Single authority: base URL + manifest parsing come from ./desktop-release.ts.
-export { DESKTOP_UPDATE_BASE_URL }
+// Single authority: manifest URL assembly + parsing come from ./desktop-release.ts.
+export { serverManifestURL } from './desktop-release.ts'
 
 /** Maximum accepted installer size, in bytes. */
 export const MAX_UPDATE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
@@ -61,14 +61,15 @@ export interface DownloadDesktopUpdateOptions {
   /** Optional progress callback (bytes received / declared total). */
   readonly onProgress?: (progress: UpdateDownloadProgress) => void
   /**
-   * 渠道更新面 base（末尾斜杠容错）。缺省按 `channel` 推导。
+   * 服务端版本清单的绝对地址（`serverManifestURL(session.serverURL)`）。
+   * 下载与检查共用同一份清单,所以地址由调用方从已登录会话推导。
    */
-  readonly baseURL?: string
+  readonly manifestURL: string
   /**
-   * 本安装所属渠道，**必填**：清单的 `channel_id` 必须与它精确相等，
-   * 否则拒绝下载（跨渠道升级 = 品牌被洗掉 / 装到别人的定制版）。
+   * 期望的渠道 id：由**服务端自己声明**（`GET /api/client/v2/channel`）。
+   * 给了就要求清单的 `channel_id` 与它精确相等,否则拒绝下载。
    */
-  readonly channel: string
+  readonly expectedChannel?: string
 }
 
 /** Typed failure from installer request, validation, or cancellation. */
@@ -116,18 +117,17 @@ interface DownloadPaths {
 }
 
 interface DownloadManifest {
-  readonly assetName: string
   readonly downloadUrl: string
   readonly checksum: string
-  readonly extension: string
   readonly completedFilename: string
 }
 
 /**
  * Download one installer after its caller has obtained user confirmation.
  *
- * 先取版本清单(`<baseURL>/latest.json`)定位本平台安装包的下载地址与 SHA-256,
- * 再流式下载、按清单哈希校验、按平台魔数校验,最后原子重命名就位。
+ * 先取服务端版本清单(`/api/client/v2/updates/manifest`)定位本平台安装包的
+ * 下载地址与 SHA-256,再流式下载、按清单哈希校验、按平台魔数校验,
+ * 最后原子重命名就位。
  * @param options - Fixed platform, release version, private storage, request, and cancellation inputs.
  * @returns Absolute path to the completely written and validated installer.
  * @throws {UpdateDownloadError} For invalid inputs, transport failures, rejected responses,
@@ -138,17 +138,24 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   const platform = validatedPlatform(options.platform)
   const version = validatedVersion(options.version)
   const userDataPath = validatedUserDataPath(options.userDataPath)
-  const paths = await prepareDownloadPaths(userDataPath, platform, version)
+  // 本地目标先校验、再联网:畸形/符号链接的 user-data 路径必须在发出任何
+  // 请求之前就被拒(否则会先建立网络连接再报"参数非法",也给了探测面)。
+  await assertRealUserDataDirectory(userDataPath)
   throwIfAborted(options.signal)
 
+  // 清单先取:落地文件名由清单里的下载地址决定(渠道化打包下每个渠道的
+  // 安装包名跟随该渠道的产品名,写死模板会既泄露厂商品牌又与产物不符)。
   const manifest = await resolveDownloadManifest(
     platform,
     version,
     options.request,
     options.signal,
-    options.baseURL,
-    options.channel,
+    options.manifestURL,
+    options.expectedChannel,
   )
+  throwIfAborted(options.signal)
+
+  const paths = await prepareDownloadPaths(userDataPath, version, manifest.completedFilename)
   throwIfAborted(options.signal)
 
   let response: Response
@@ -227,16 +234,18 @@ function validatedUserDataPath(userDataPath: string): string {
   return resolve(userDataPath)
 }
 
-async function prepareDownloadPaths(
-  userDataPath: string,
-  platform: DesktopDownloadPlatform,
-  version: string,
-): Promise<DownloadPaths> {
+async function assertRealUserDataDirectory(userDataPath: string): Promise<void> {
   const userDataStat = await lstat(userDataPath)
   if (!userDataStat.isDirectory() || userDataStat.isSymbolicLink()) {
     throw new UpdateDownloadError('invalid-options', 'The update user-data path must be a real directory.')
   }
+}
 
+async function prepareDownloadPaths(
+  userDataPath: string,
+  version: string,
+  filename: string,
+): Promise<DownloadPaths> {
   const updatesDirectory = join(userDataPath, 'updates')
   const directory = join(updatesDirectory, version)
   if (resolve(directory) !== directory) {
@@ -245,10 +254,11 @@ async function prepareDownloadPaths(
   await preparePrivateDirectory(updatesDirectory)
   await preparePrivateDirectory(directory)
 
-  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
-  const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
-  const filename = `PicoAide-Harness-${version}-${assetBase}.${extension}`
   const completed = join(directory, filename)
+  // 文件名来自清单(远端输入):必须仍然是目标目录内的单段普通文件。
+  if (resolve(completed) !== completed || dirname(completed) !== directory) {
+    throw new UpdateDownloadError('invalid-options', 'The update file name escaped the destination directory.')
+  }
   const completedStat = await lstatOptional(completed)
   if (completedStat !== undefined) {
     if (!completedStat.isFile() || completedStat.isSymbolicLink()) {
@@ -283,7 +293,7 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
 }
 
 /**
- * 从渠道版本清单里取出本平台安装包的下载地址与 SHA-256。
+ * 从服务端版本清单里取出本平台安装包的下载地址与 SHA-256。
  *
  * 清单是唯一权威:地址与哈希都来自它,不再有 GitHub 的资产名模板匹配,
  * 也不再需要单独下载 SHA256SUMS.txt(GitHub 没有可查哈希,才需要那个旁路)。
@@ -291,8 +301,8 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
  * @param version - release version the manifest must report.
  * @param request - network boundary.
  * @param signal - caller-owned cancellation.
- * @param baseURL - 渠道更新面 base(缺省按 channel 推导)。
- * @param channel - 本安装所属渠道;清单 channel_id 必须与它相等。
+ * @param manifestURL - 服务端清单的绝对地址。
+ * @param expectedChannel - 服务端自报的渠道 id;给了就要求清单与它一致。
  * @returns resolved download manifest for the matched artifact.
  * @throws {UpdateDownloadError} 清单不可达、版本不符、或该平台未发布安装包。
  */
@@ -301,16 +311,16 @@ async function resolveDownloadManifest(
   version: string,
   request: UpdateArtifactRequest,
   signal: AbortSignal | undefined,
-  baseURL: string | undefined,
-  channel: string,
+  manifestURL: string,
+  expectedChannel: string | undefined,
 ): Promise<DownloadManifest> {
   let manifest
   try {
     manifest = await fetchReleaseManifest({
       request,
-      channel,
+      manifestURL,
       ...(signal === undefined ? {} : { signal }),
-      ...(baseURL === undefined ? {} : { baseURL }),
+      ...(expectedChannel === undefined ? {} : { expectedChannel }),
     })
   } catch (cause) {
     // 取消 → 'aborted'(调用方需能区分"用户取消"与"网络故障")
@@ -324,7 +334,7 @@ async function resolveDownloadManifest(
   }
 
   // 清单版本必须与请求版本一致:否则会把"检查到的新版本"换成另一个版本下载
-  // (清单是固定 URL 的可覆盖对象,理论上两次请求之间可能刚好发布新版本)。
+  // (清单内容随发布更新,理论上两次请求之间可能刚好发布新版本)。
   const normalizedVersion = version.replace(/^v/u, '')
   if (manifest.clientVersion.replace(/^v/u, '') !== normalizedVersion) {
     throw new UpdateDownloadError(
@@ -341,15 +351,47 @@ async function resolveDownloadManifest(
     )
   }
 
-  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
-  const assetBase = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'x64-Setup' : 'x86_64'
   return {
-    assetName: `PicoAide-Harness-${normalizedVersion}-${assetBase}.${extension}`,
     downloadUrl: asset.url,
     checksum: asset.sha256,
-    extension,
-    completedFilename: `PicoAide-Harness-${normalizedVersion}-${assetBase}.${extension}`,
+    completedFilename: installerFileName(asset.url, normalizedVersion, platform),
   }
+}
+
+/**
+ * 从清单里的下载地址推导落地文件名。
+ *
+ * 不能用固定模板:渠道化打包下每个渠道的安装包名跟随该渠道的产品名,
+ * 写死模板既会把厂商品牌留在用户看到的文件名上,也会与实际产物名不符。
+ * 清单里的 URL 是权威来源 —— 服务端下发的就是它自己镜像里那个文件。
+ * @param downloadURL - 清单里的绝对下载地址(解析器已保证是绝对 https)。
+ * @param version - 规范版本号(回退命名用)。
+ * @param platform - 目标平台(回退命名用)。
+ * @returns 安全的单段文件名。
+ */
+function installerFileName(
+  downloadURL: string,
+  version: string,
+  platform: DesktopDownloadPlatform,
+): string {
+  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : 'AppImage'
+  let candidate = ''
+  try {
+    const pathname = new URL(downloadURL).pathname
+    candidate = decodeURIComponent(pathname.slice(pathname.lastIndexOf('/') + 1))
+  } catch {
+    candidate = ''
+  }
+  // 只接受单段、非隐藏、无路径分隔符、无上跳的文件名;否则回退到中性名。
+  if (candidate === ''
+    || candidate.length > 128
+    || candidate.startsWith('.')
+    || candidate.includes('/')
+    || candidate.includes('\\')
+    || candidate.includes('..')) {
+    return `update-${version}-${platform}.${extension}`
+  }
+  return candidate
 }
 
 function assertDeclaredSize(response: Response): void {
