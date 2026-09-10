@@ -80,7 +80,9 @@ else
     exit 1
   fi
   stage_from "$CLONE"
-  echo "channel packages fetched (commit $(git -C "$CLONE" rev-parse --short HEAD))"
+  # 刻意**不打印**私有仓的 commit SHA:它是私有仓的指纹(能对上"哪次改动进了哪个
+  # 发布"),而这里的一切都会进公开仓的 Actions 日志。只需要知道取到了内容。
+  echo "channel packages fetched"
 fi
 
 # 枚举渠道目录并**逐个掩码**。
@@ -150,18 +152,93 @@ for id in "${SELECTED[@]}"; do
   fi
   # 用 node 解析而不是 grep:channel.json 允许任意缩进/键序,正则匹配字段名会在
   # 嵌套结构上误判(例如 copy.login_display_name 与别处的同名键)。
-  if ! node -e '
+  #
+  # 2026-09-10 审计后加严的部分:
+  #   - 品牌渠道(official/beta 之外)**必须**给 desktop.slug / desktop.app_id:
+  #     缺 slug 时安装包名回落 `PicoAide-Harness-…`,缺 app_id 时 bundle id /
+  #     AppUserModelId 回落厂商值 —— 前者是交付物上的厂商品牌,后者会让两个渠道的
+  #     客户端在系统里变成"同一个 app";
+  #   - deep_link_scheme 必须是合法 scheme(它进浏览器确认框,还会与 electron-builder
+  #     的 protocols 以及服务端 OIDC 回调三处联动);
+  #   - assets 里声明的素材文件必须真的存在,且 app-icon.png 必须符合 mac 图标
+  #     管线要求(1024×1024 RGBA16 + ICC):这两个在打包时才炸,而打包要跑三平台。
+  if ! CHANNEL_ID="$id" node -e '
     const fs = require("node:fs")
+    const path = require("node:path")
+    const dir = path.dirname(process.argv[1])
+    const id = process.env.CHANNEL_ID
     const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
     const str = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined)
+    const publicChannel = id === "official" || id === "beta"
     const missing = []
+    const invalid = []
     // identity.display_name 是客户端**所有**名字的最终兜底(登录页/界面/门户),
     // short_name 是登录页与服务端 applyDefaults 的直接来源:两者缺一,渠道构建
     // 就会在某个可见位置显示中性占位。
     if (str(cfg?.identity?.display_name) === undefined) missing.push("identity.display_name")
     if (str(cfg?.identity?.short_name) === undefined) missing.push("identity.short_name")
-    if (missing.length > 0) {
-      console.error("::error::渠道包缺少品牌字段: " + missing.join(", ") + " —— 客户端登录页/侧边栏在服务端不可达时会回落中性占位,请补齐后重新发布")
+    if (!publicChannel) {
+      if (str(cfg?.desktop?.slug) === undefined) missing.push("desktop.slug")
+      if (str(cfg?.desktop?.app_id) === undefined) missing.push("desktop.app_id")
+      if (str(cfg?.desktop?.deep_link_scheme) === undefined) missing.push("desktop.deep_link_scheme")
+    }
+    const slug = str(cfg?.desktop?.slug)
+    if (slug !== undefined && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(slug)) invalid.push("desktop.slug(" + slug + ")")
+    const appId = str(cfg?.desktop?.app_id)
+    if (appId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(appId)) invalid.push("desktop.app_id(" + appId + ")")
+    const scheme = str(cfg?.desktop?.deep_link_scheme)
+    if (scheme !== undefined && !/^[a-z][a-z0-9+.-]{1,31}$/.test(scheme)) invalid.push("desktop.deep_link_scheme(" + scheme + ")")
+    const serverUrl = str(cfg?.defaults?.server_url)
+    if (serverUrl !== undefined) {
+      let parsed
+      try { parsed = new URL(serverUrl) } catch { invalid.push("defaults.server_url(不是合法 URL)") }
+      if (parsed !== undefined && parsed.protocol !== "https:") {
+        const loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(parsed.hostname)
+        if (!loopback) invalid.push("defaults.server_url(必须 https,只有回环地址允许 http)")
+      }
+    }
+    // 声明的素材文件必须存在(否则客户端/服务端会拿到死链或被忽略的配置)。
+    for (const [key, value] of Object.entries(cfg?.assets ?? {})) {
+      if (key === "accent") continue
+      const name = str(value)
+      if (name === undefined) continue
+      if (name.includes("/") || name.includes("\\")) { invalid.push("assets." + key + "(必须是单段文件名)"); continue }
+      if (!fs.existsSync(path.join(dir, name))) invalid.push("assets." + key + "(渠道目录里没有这个文件)")
+    }
+    // mac 图标管线要求:1024×1024、RGBA16、带 ICC(见 generate-mac-app-icon.mjs)。
+    const iconPath = path.join(dir, "app-icon.png")
+    if (fs.existsSync(iconPath)) {
+      const buf = fs.readFileSync(iconPath)
+      const png = buf.length > 33 && buf.readUInt32BE(0) === 0x89504e47
+      if (!png) invalid.push("app-icon.png(不是 PNG)")
+      else {
+        const width = buf.readUInt32BE(16)
+        const height = buf.readUInt32BE(20)
+        const bitDepth = buf[24]
+        const colorType = buf[25]
+        if (width !== 1024 || height !== 1024) invalid.push("app-icon.png(必须是 1024×1024,实际 " + width + "×" + height + ")")
+        if (bitDepth !== 16 || colorType !== 6) invalid.push("app-icon.png(必须是 16 位 RGBA,实际 depth=" + bitDepth + " colorType=" + colorType + ")")
+        // iCCP chunk:扫描 PNG 块目录(不引入 sharp 依赖)。
+        let offset = 8
+        let hasIcc = false
+        while (offset + 8 <= buf.length) {
+          const length = buf.readUInt32BE(offset)
+          const type = buf.toString("ascii", offset + 4, offset + 8)
+          if (type === "iCCP") { hasIcc = true; break }
+          if (type === "IEND") break
+          offset += 12 + length
+        }
+        if (!hasIcc) invalid.push("app-icon.png(必须内嵌 ICC 色彩配置)")
+      }
+    }
+    if (missing.length > 0 || invalid.length > 0) {
+      if (missing.length > 0) {
+        console.error("::error::渠道包缺少品牌字段: " + missing.join(", ") + " —— 客户端登录页/侧边栏在服务端不可达时会回落中性占位/厂商名,请补齐后重新发布")
+      }
+      if (invalid.length > 0) {
+        console.error("::error::渠道包字段不合法: " + invalid.join(", "))
+      }
+      console.error("::error::这些字段错在客户机器上才发现就晚了,因此构建期硬拦(字段清单见 docs/planning/2026-09-10-channel-package-reference.md)")
       process.exit(1)
     }
   ' "$manifest"; then
