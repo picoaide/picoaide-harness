@@ -20,7 +20,7 @@
 import { copyFile, mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assetExists, resolveChannelBuildContext } from './channel-build.ts'
+import { assetExists, resolveChannelBuildContext, stageChannelProfile } from './channel-build.ts'
 import { generateMacAppIcon } from './generate-mac-app-icon.mjs'
 import { generateTrayIcons } from './generate-tray-icons.mjs'
 
@@ -107,7 +107,13 @@ export async function prepareBrandAssets(options = {}) {
 
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
-  const { channelId, files } = await prepareBrandAssets()
+  // 这一步与 channel-prepare.ts 的 prepareChannelPackaging() 是同一件事的两半：
+  // `yarn build` 必须让 build/ 与**本次渠道**自洽 —— 官方构建要删掉上一次渠道
+  // 构建留下的 channel.json（残留会把客户品牌染进官方包），渠道构建要就位它。
+  // 少了这一步，`yarn check` 里的 verify:channel 会在残留时失败（那正是它要抓的）。
+  const context = resolveChannelBuildContext()
+  stageChannelProfile(context, buildRoot)
+  const { channelId, files } = await prepareBrandAssets({ context })
   console.log(`brand-prepare: 渠道 ${channelId} 的品牌素材 → build/`)
   for (const file of files) console.log(`  ✓ ${file}`)
 }

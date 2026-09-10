@@ -5,6 +5,7 @@ import { readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 import {
   adaptMacReleaseEnvironment,
   assertMacReleaseReady,
@@ -298,6 +299,12 @@ if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.m
     const phase = process.argv[2]
     const options = defaultReleaseOptions()
     const switches = { skipGates: noGates, signOnly: process.argv.includes('--sign-only') }
+    // 打包分支才需要渠道化准备(图标素材 + 随包 channel.json):--notarize/--dmg
+    // 面对的是**已经打好**的 app,重新派生素材只会白跑一遍 sharp(见
+    // channel-prepare.ts)。CI 走 --no-prebuild,这一步不能被 prebuild 代替。
+    if (phase === '--pack' || phase === undefined) {
+      await prepareChannelPackaging()
+    }
     if (phase === '--pack') {
       await packMacApp(options, switches)
     } else if (phase === '--notarize') {

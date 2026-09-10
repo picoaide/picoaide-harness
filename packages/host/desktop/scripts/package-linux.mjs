@@ -9,7 +9,8 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelBuilderOverrides } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 
 const require = createRequire(import.meta.url)
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -20,7 +21,10 @@ if (!process.argv.includes('--no-prebuild')) {
   prebuildWorkspaceDeps(packageRoot)
 }
 
-const channel = resolveChannelBuildContext()
+// 渠道化准备（按渠道派生图标素材 + 就位随包 channel.json）：**必须在
+// electron-builder 之前**。CI 打包一律 `--no-prebuild`（构建产物来自 gate job），
+// brand-prepare 不会经 prebuild 被触发 —— 少了这一步，渠道包会带官方图标出厂。
+const channel = await prepareChannelPackaging()
 console.log(`package-linux: 渠道 ${channel.channelId}`)
 
 const builderCli = require.resolve('electron-builder/cli.js')
