@@ -24,6 +24,12 @@ packages/host/desktop/build/assistedMessages.yml
 # 渠道包(私有仓 picoaide/channels/<id>/channel.json)由 CI 在打包前复制进
 # build/,随应用资源分发;内容是客户品牌,绝不入库。
 packages/host/desktop/build/channel.json
+# CI 渠道脚本的中间产物(scripts/ci-channels.sh 等本地跑时会产生)
+channels.list
+channels-context/
+client-assets/
+release-bundle/
+image.tar
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/
