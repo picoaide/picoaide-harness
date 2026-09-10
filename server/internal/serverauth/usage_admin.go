@@ -25,7 +25,10 @@ const (
 )
 
 // usageDateRange 解析并校验 from/to(YYYY-MM-DD),失败时已写响应,返回 ok=false。
-// 缺省窗口 = 近 useDefaultWindowDays 天(与 usage() 原逻辑一致)。
+// 缺省窗口 = 近 usageDefaultWindowDays 天(与 usage() 原逻辑一致)。
+// 返回值是**北京日期值**(from/to 均归一到北京日,见 serverstore.BeijingDay):
+// 旧实现用 time.Now()/now.Location() 取"本机日期",UTC 容器下(北京 00:00-08:00)
+// 「今天」会指向前一天 → 聚合查空(2026-09-10 CI 实测)。
 func usageDateRange(c *gin.Context) (from, to time.Time, ok bool) {
 	fromRaw := c.DefaultQuery("from", "")
 	toRaw := c.DefaultQuery("to", "")
@@ -47,12 +50,12 @@ func usageDateRange(c *gin.Context) (from, to time.Time, ok bool) {
 		return from, to, false
 	}
 	if from.IsZero() && to.IsZero() {
-		to = time.Now()
+		to = serverstore.BeijingNow()
 		from = to.AddDate(0, 0, -usageDefaultWindowDays+1)
 	} else if from.IsZero() {
-		from = to.AddDate(0, 0, -usageDefaultWindowDays+1)
+		from = serverstore.BeijingDay(to).AddDate(0, 0, -usageDefaultWindowDays+1)
 	} else if to.IsZero() {
-		to = from.AddDate(0, 0, usageDefaultWindowDays-1)
+		to = serverstore.BeijingDay(from).AddDate(0, 0, usageDefaultWindowDays-1)
 	}
 	return from, to, true
 }
@@ -82,15 +85,16 @@ func (a *AdminAPI) usageOverview(c *gin.Context) {
 		top = top[:10]
 	}
 
-	now := time.Now()
-	monthFrom := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	// 本月/今日窗口走北京日/月口径(唯一真源);旧实现用 now.Location()
+	// 取"本机日期",UTC 容器下会与北京日相差 8 小时。
+	now := serverstore.BeijingNow()
+	monthFrom := serverstore.BeijingMonth(now)
 	monthRows, err := serverstore.UsageAggregateWithLedger(a.DB, monthFrom, now, "day")
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return
 	}
-	todayFrom := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	todayRows, err := serverstore.UsageAggregateWithLedger(a.DB, todayFrom, now, "day")
+	todayRows, err := serverstore.UsageAggregateWithLedger(a.DB, now, now, "day")
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return

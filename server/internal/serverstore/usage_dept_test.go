@@ -2,7 +2,6 @@ package serverstore
 
 import (
 	"testing"
-	"time"
 )
 
 func TestDeptGrouping(t *testing.T) {
@@ -70,7 +69,7 @@ func TestDeptGrouping(t *testing.T) {
 	}
 
 	// 2) 聚合 group=dept:全员 = u1+u2, 研发部 = u1+u2, 前研一组 = u2
-	rows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "dept")
+	rows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "dept")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +97,7 @@ func TestDeptGrouping(t *testing.T) {
 	}
 
 	// 3) WithDept 过滤 + 模型分组:研发部 → m1 只含 u1+u2
-	mrows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "model", WithDept("研发部"))
+	mrows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "model", WithDept("研发部"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +106,7 @@ func TestDeptGrouping(t *testing.T) {
 	}
 
 	// 4) WithDept + group=user
-	urows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "user", WithDept("前研一组"))
+	urows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "user", WithDept("前研一组"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +115,7 @@ func TestDeptGrouping(t *testing.T) {
 	}
 
 	// 5) 部门不存在 → 空结果(不 500)
-	empty, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "user", WithDept("幽灵部门"))
+	empty, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "user", WithDept("幽灵部门"))
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("unknown dept: %v %v, want empty", empty, err)
 	}
@@ -154,7 +153,7 @@ func TestDeptGroupingSharedAncestorCountedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "dept")
+	rows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "dept")
 	if err != nil {
 		t.Fatalf("UsageAggregateWithLedger(dept): %v", err)
 	}

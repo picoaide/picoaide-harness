@@ -45,15 +45,10 @@ func TestRebuildUsageLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 把第三条回拨到上月(分区需先建)
-	lastMonth := time.Now().AddDate(0, -1, 0)
-	if err := ensureUsagePartition(db, lastMonth); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", lastMonth.Format("2006-01-02")+" 12:00:00", 3); err != nil {
-		t.Fatal(err)
-	}
-	// 重建账本(近 2 月)
-	if err := RebuildUsageLedger(db, time.Now().AddDate(0, -1, 0).Truncate(24*time.Hour), time.Now()); err != nil {
+	lastMonthAt := BeijingDayAt(bjMonth(1), 12) // 北京上月 1 日 12:00(必属上月)
+	setCreatedAtAt(t, db, 3, lastMonthAt)
+	// 重建账本(近 2 月;边界用北京日)
+	if err := RebuildUsageLedger(db, bjDay(60), bjDay(0)); err != nil {
 		t.Fatalf("RebuildUsageLedger: %v", err)
 	}
 	var dRows int
@@ -87,20 +82,14 @@ func TestCleanupUsageRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid := mustUserID(t, db)
-	// 上月一条(会被保留 1 个月 = 不删);上月-1 一条(会删)
-	// 月份归一化到每月 1 号:AddDate(0,-2,0) 在月末(如 8/31 → 6/31→7/1)会
-	// 因天数溢出折进保留月,导致日期相关 flake(2026-08-31 实测复现)。
-	now := time.Now()
-	older := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -2, 0)
-	if err := ensureUsagePartition(db, older); err != nil {
+	// 上月-1(北京 2 个月前)一条:保留 1 个月 → 该月分区会被 DROP。
+	// bjMonth 直接取北京月首(不依赖进程 TZ,也不会像 AddDate 在月末溢出)。
+	older := bjMonth(2)
+	id, err := RecordUsage(db, uid, "m-old", 1, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, uid, "m-old", 1, 1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("UPDATE usage SET created_at = $1 WHERE user_id = $2", older.Format("2006-01-02")+" 10:00:00", uid); err != nil {
-		t.Fatal(err)
-	}
+	setCreatedAtAt(t, db, id, BeijingDayAt(older, 10))
 	if err := CleanupUsageRetention(db); err != nil {
 		t.Fatalf("CleanupUsageRetention: %v", err)
 	}
@@ -185,8 +174,7 @@ func TestUsageAggregateWithLedgerSumsAcrossRetention(t *testing.T) {
 	uid := mustUserID(t, db)
 
 	// 8 个月前 110 tokens:明细分区已过期(这里用 DELETE 模拟 DROP),仅账本有
-	now := time.Now()
-	oldMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -8, 0)
+	oldMonth := bjMonth(8)
 	if err := ensureUsagePartition(db, oldMonth); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +182,7 @@ func TestUsageAggregateWithLedgerSumsAcrossRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 1 个月前 220 tokens:仍在保留窗口内(明细)
-	recent := now.AddDate(0, -1, 0)
+	recent := bjMonth(1)
 	if err := ensureUsagePartition(db, recent); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +197,7 @@ func TestUsageAggregateWithLedgerSumsAcrossRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := UsageAggregateWithLedger(db, oldMonth, now, "user")
+	rows, err := UsageAggregateWithLedger(db, oldMonth, bjDay(0), "user")
 	if err != nil {
 		t.Fatalf("UsageAggregateWithLedger: %v", err)
 	}
@@ -321,7 +309,7 @@ func TestUsageAggregateManyMembersArrayParam(t *testing.T) {
 		t.Fatalf("MonthUsageByUsers[uid] = %+v, want 42 tokens", got[uid])
 	}
 	// 3) 部门聚合过滤(展示层 WithDept)
-	rows, err := UsageAggregateWithLedger(db, time.Now().AddDate(0, 0, -1), time.Now(), "model", WithDept("大部门"))
+	rows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "model", WithDept("大部门"))
 	if err != nil {
 		t.Fatalf("UsageAggregate WithDept with 66001 members: %v", err)
 	}
@@ -340,10 +328,7 @@ func TestUsageAggregateWithLedgerWindowOutsideRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid := mustUserID(t, db)
-	now := time.Now()
-	monthStartOf := func(off int) time.Time {
-		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, off, 0)
-	}
+	monthStartOf := func(off int) time.Time { return bjMonth(-off) }
 	m8, m7, m1 := monthStartOf(-8), monthStartOf(-7), monthStartOf(-1)
 	for _, tc := range []struct {
 		month time.Time

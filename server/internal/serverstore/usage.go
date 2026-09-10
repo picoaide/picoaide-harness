@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// pgTimeFmt 是**北京墙钟**("2006-01-02 15:04:05")格式:仅用于测试夹具把
+// 北京墙钟字面量转成绝对瞬时(见 *_test.go 的 setCreatedAt)。生产查询一律用
+// beijing.go 的 BeijingDay/pgInstantArg —— 裸墙钟字符串会被 PG 按会话时区
+// 解释(2026-09-10 时区缺陷),不得再进入 SQL 参数。
 const pgTimeFmt = "2006-01-02 15:04:05"
 
 // MonthlyQuotaSetting is the settings key for the default per-user monthly
@@ -275,26 +279,24 @@ func DeleteUsage(db *sql.DB, id int64) error {
 // CleanupPendingUsage deletes zero-token chat/search rows older than cutoff
 // (stale pending rows left by interrupted streaming requests). Run at server
 // startup. 0043: search(kind='search') 的流式残留行同样清理。
+// cutoff 是绝对瞬时,按会话时区无关的瞬时字面量比较(裸墙钟字符串会被按
+// PG 会话时区解释 → 进程 TZ 与会话时区不同时差 8 小时)。
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
-	_, err := db.Exec(`DELETE FROM usage WHERE kind IN ('chat','search') AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?`,
-		cutoff.Format(pgTimeFmt))
+	_, err := db.Exec(`DELETE FROM usage WHERE kind IN ('chat','search') AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?::timestamptz`,
+		pgInstantArg(cutoff))
 	return err
-}
-
-// monthStart returns the first instant of the current calendar month in the
-// same location SQLite stores created_at in (localtime).
-func monthStart(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 }
 
 // UserMonthlyUsage returns the user's total tokens used in the current
 // calendar month. Zero-token pending rows contribute nothing, so interrupted
 // streams never inflate the counter.
+// 月窗口 = **北京月**(BeijingMonthInstant),与进程 TZ/PG 会话时区无关:
+// 旧实现按服务器本地月界,UTC 容器的"本月"会比北京晚 8 小时重置。
 func UserMonthlyUsage(db *sql.DB, userID int64) (int64, error) {
 	var total int64
 	err := db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)
-		FROM usage WHERE user_id = ? AND created_at >= ?`,
-		userID, monthStart(time.Now()).Format(pgTimeFmt)).Scan(&total)
+		FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz`,
+		userID, pgInstantArg(BeijingMonthInstant(time.Now()))).Scan(&total)
 	return total, err
 }
 
@@ -308,8 +310,8 @@ func UserMonthlyUsageBatch(db *sql.DB, userIDs []int64) (map[int64]int64, error)
 		return out, nil
 	}
 	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t
-		FROM usage WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
-		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(userIDs))
+		FROM usage WHERE created_at >= ?::timestamptz AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		pgInstantArg(BeijingMonthInstant(time.Now())), pgInt64Array(userIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -349,11 +351,12 @@ func EffectiveQuota(db *sql.DB, user *User) (int64, error) {
 }
 
 // UserMonthlyCost returns the user's total cost (yuan) in the current
-// calendar month (SUM of denormalized usage.cost, 0022).
+// calendar month (SUM of denormalized usage.cost, 0022). 月窗口同
+// UserMonthlyUsage(北京月界,与环境时区无关)。
 func UserMonthlyCost(db *sql.DB, userID int64) (float64, error) {
 	var total float64
-	err := db.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ? AND created_at >= ?`,
-		userID, monthStart(time.Now()).Format(pgTimeFmt)).Scan(&total)
+	err := db.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz`,
+		userID, pgInstantArg(BeijingMonthInstant(time.Now()))).Scan(&total)
 	return total, err
 }
 
@@ -376,8 +379,8 @@ func MonthUsageByUsers(db *sql.DB, userIDs []int64) (map[int64]MonthUsageByUser,
 	rows, err := db.Query(`SELECT user_id,
 		COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t,
 		COALESCE(SUM(cost),0) AS c
-		FROM usage WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
-		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(userIDs))
+		FROM usage WHERE created_at >= ?::timestamptz AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		pgInstantArg(BeijingMonthInstant(time.Now())), pgInt64Array(userIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -402,8 +405,8 @@ func UserMonthlyCostBatch(db *sql.DB, userIDs []int64) (map[int64]float64, error
 	}
 	// P2-7:数组参数,见 UserMonthlyUsageBatch 注释。
 	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(cost),0) AS c
-		FROM usage WHERE created_at >= ? AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
-		monthStart(time.Now()).Format(pgTimeFmt), pgInt64Array(userIDs))
+		FROM usage WHERE created_at >= ?::timestamptz AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
+		pgInstantArg(BeijingMonthInstant(time.Now())), pgInt64Array(userIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -542,6 +545,9 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	for _, o := range opts {
 		o(&q)
 	}
+	// from/to 先归一到北京日期值:允许调用方传瞬时(如 time.Now()),避免
+	// "本机日期"混进窗口(见 beijing.go)。
+	from, to = normalizeDayRange(from, to)
 	var selectExpr, groupExpr string
 	join := ""
 	fill := zeroFiller(nil)
@@ -597,16 +603,17 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		FROM usage` + join + ` WHERE 1=1`
 	var args []any
 	if !from.IsZero() {
-		// P2-15:直接与 ?::date 比较(会话时区固定 Asia/Shanghai,见 pg.go),
-		// 不包裹 created_at AT TIME ZONE —— 包裹会让分区键失效、退化成全分区扫。
-		qstr += " AND usage.created_at >= ?::date"
-		args = append(args, from.Format("2006-01-02"))
+		// 瞬时比较(2026-09-10 时区缺陷修复):北京日边界的绝对瞬时(显式 UTC
+		// 偏移)作为参数,PG 任何会话时区下语义一致;此前用 ?::date,会话时区
+		// 为 UTC 时整窗口偏 8 小时(北京 00:00-08:00 的用量查不到)。
+		// 仍只写在分区键 created_at 一侧,不加 AT TIME ZONE 包裹 → 分区裁剪不受影响。
+		qstr += " AND usage.created_at >= ?::timestamptz"
+		args = append(args, dayStartArg(from))
 	}
 	if !to.IsZero() {
-		// AddDate(0,0,1) 日历下一天,避免 Add(24h) 在 DST 切换日跳到后天
-		// (审计2026-E3 P1-3)
-		qstr += " AND usage.created_at < ?::date"
-		args = append(args, to.AddDate(0, 0, 1).Format("2006-01-02"))
+		// 截止日含当天 → 右边界 = 次日北京 00:00(半开区间)
+		qstr += " AND usage.created_at < ?::timestamptz"
+		args = append(args, dayEndArgInclusive(to))
 	}
 	if q.Username != "" {
 		qstr += usernameFilter
@@ -662,15 +669,14 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 
 // UserDayUsageCost 返回指定日(按北京时间日界,day 所在的北京日历日)
 // 的 tokens 与费用(SUM(cost))。P2-5:此前用服务器本地时区取日界——UTC 容器
-// 与北京差 8 小时,「今日/昨日」会整体错位;统一按 Asia/Shanghai 与分区/
-// 其它查询口径一致。
+// 与北京差 8 小时,「今日/昨日」会整体错位;统一走 BeijingDay(唯一真源,
+// 见 beijing.go),不再依赖进程 TZ。边界用绝对瞬时参数(显式 UTC 偏移),
+// 也不再依赖 PG 会话时区(2026-09-10 时区缺陷修复)。
 func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cost float64, err error) {
-	start := beijingDay(day)
-	end := start.AddDate(0, 0, 1)
 	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cost),0)
-		FROM usage WHERE user_id = ? AND created_at >= ? AND created_at < ?`,
-		userID, start.Format(pgTimeFmt), end.Format(pgTimeFmt)).Scan(&usage, &cost)
+		FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz AND created_at < ?::timestamptz`,
+		userID, dayStartArg(day), dayEndArgInclusive(day)).Scan(&usage, &cost)
 	return usage, cost, err
 }
 
