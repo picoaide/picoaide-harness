@@ -64,8 +64,11 @@ var Dir = func() string {
 
 // Load 读取渠道配置。
 //
-// 配置缺失或损坏时返回内置兜底值(名称 PicoAide),而不是报错:渠道目录缺失
-// 意味着"镜像没带渠道配置"(本地构建),此时服务端仍应可用。
+// 配置缺失或损坏时返回**中性**兜底值(不含任何厂商品牌),而不是报错:渠道目录
+// 缺失意味着"镜像没带渠道配置"(本地开发构建),此时服务端仍应可用。
+// 兜底值刻意不带厂商名 —— 仓库里不留任何品牌描述,一切对外文案必须来自渠道包;
+// 缺配置的**发行镜像**属交付事故,由 CI 在构建期强制该文件存在(见 ci.yml),
+// 启动期另有一致性校验(见 cmd/server 的 resolveStartupChannel)。
 func Load() Config {
 	raw, err := os.ReadFile(filepath.Join(Dir, "channel.json"))
 	if err != nil || len(raw) > maxConfigBytes {
@@ -79,13 +82,16 @@ func Load() Config {
 	return cfg
 }
 
+// fallbackBrandName 渠道配置缺失时的中性占位(刻意不含厂商品牌)。
+const fallbackBrandName = "Harness"
+
 func fallback() Config {
 	cfg := Config{Schema: 1, ChannelID: "official"}
-	cfg.Identity.DisplayName = "PicoAide Harness"
-	cfg.Identity.ShortName = "PicoAide"
-	cfg.Identity.Title = "PicoAide Harness"
-	cfg.Copy.LoginDisplayName = "PicoAide"
-	cfg.Copy.ClientDisplayName = "PicoAide Harness"
+	cfg.Identity.DisplayName = fallbackBrandName
+	cfg.Identity.ShortName = fallbackBrandName
+	cfg.Identity.Title = fallbackBrandName
+	cfg.Copy.LoginDisplayName = fallbackBrandName
+	cfg.Copy.ClientDisplayName = fallbackBrandName
 	cfg.Assets.Accent = "#2563eb"
 	return cfg
 }

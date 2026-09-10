@@ -7,9 +7,9 @@ import { cn } from './lib/utils'
 import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
 // P2-43: 导航声明与可见性过滤收敛到 lib/nav(按服务端 permissions 过滤)。
 import { visibleNav as visibleNavFor, landingPath as landingPathFor } from './lib/nav'
+import { NEUTRAL_ADMIN_TITLE, adminLogoURL, adminSiteName, useChannel } from './lib/channel'
 import { PasswordDialog } from './components/password-dialog'
 import { MFASettingsDialog } from './components/mfa-settings-dialog'
-import { BRAND_LOGO_URL } from './lib/brand-assets'
 import Login from './pages/Login'
 
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
@@ -107,6 +107,11 @@ export default function App() {
   const [baseURL, setBaseURL] = useState('')
   const [adminName, setAdminName] = useState('')
   const [meUser, setMeUser] = useState<MeUser | null>(null)
+  // 侧边栏品牌来自渠道内容(与门户/客户端同一份配置);渠道未配名称时用中性文案,
+  // 绝不回落厂商品牌(审计 2026-09-10)。
+  const channel = useChannel()
+  const sidebarName = adminSiteName(channel) || NEUTRAL_ADMIN_TITLE
+  const sidebarLogo = adminLogoURL(channel)
   // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
   const [mobileNav, setMobileNav] = useState(false)
   // 0057 密码/MFA 自助管理
@@ -177,10 +182,13 @@ export default function App() {
           )}
         >
           <div className="flex items-center gap-3 px-4 pb-4 pt-5">
-            {/* 品牌 mark: 编译期注入 brands/official/logo.svg(黑 tile + 白花括号) */}
-            <img src={BRAND_LOGO_URL} alt="logo" className="h-9 w-9 shrink-0 object-contain" draggable={false} />
+            {/* 品牌 mark: 来自渠道内容(与服务端门户/客户端同一份配置);
+                渠道未配 logo 时不画图 —— 绝不回落厂商图形。 */}
+            {sidebarLogo !== '' && (
+              <img src={sidebarLogo} alt="logo" className="h-9 w-9 shrink-0 object-contain" draggable={false} />
+            )}
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">PicoAide</div>
+              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">{sidebarName}</div>
               <div className="text-[10px] font-medium text-muted-foreground">Admin Console</div>
             </div>
             {/* 移动端关闭按钮 */}
@@ -296,8 +304,10 @@ export default function App() {
               <Menu className="h-5 w-5" />
             </button>
             <div className="flex items-center gap-2">
-              <img src={BRAND_LOGO_URL} alt="logo" className="h-6 w-6 object-contain" draggable={false} />
-              <span className="text-[15px] font-bold">PicoAide 管理</span>
+              {sidebarLogo !== '' && (
+                <img src={sidebarLogo} alt="logo" className="h-6 w-6 object-contain" draggable={false} />
+              )}
+              <span className="text-[15px] font-bold">{sidebarName}</span>
             </div>
           </div>
           <div className="mx-auto w-full max-w-[1440px] flex-1 p-4 sm:p-6 lg:p-7">

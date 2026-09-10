@@ -645,13 +645,12 @@ jobs:
           IMAGE="picoaide-harness-server"   # 仅本地构建 tag,不推任何仓库
           # 本 job 是镜像的**唯一构建点**:只有这里同时拿得到三平台客户端资产
           # (gate 的 workspace-build + 三个 desktop-* artifact)与发布上下文。
-          # build-context root 提供 brands/official(webadmin 编译期品牌源);
-          # channels 提供渠道内容(名称/文案/标识)。
+          # channels 提供渠道内容(名称/文案/标识);webadmin 不再编译期注入
+          # 任何品牌素材(2026-09-10 审计:仓库里不留品牌描述)。
           docker buildx build \
             --platform linux/amd64 \
             --build-arg VERSION="$VER" \
             --build-arg CHANNEL="${{ steps.channel.outputs.channel }}" \
-            --build-context root=. \
             --build-context clientassets=./client-assets \
             --build-context channelassets=./channels-context \
             --label "org.opencontainers.image.source=https://github.com/picoaide/picoaide-harness" \

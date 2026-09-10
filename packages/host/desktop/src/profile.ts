@@ -617,6 +617,14 @@ export async function prepareDesktopProfile(
       config: { defaultServer: channelProfile.defaultServerURL },
     })
   }
+  // 连接器 OAuth 的客户端名会显示在**客户自己的 IdP 授权同意页**上，
+  // 渠道构建下必须是该渠道的产品名（缺省是中性名，绝不含厂商品牌）。
+  if (channelProfile?.productName !== undefined && rows.has('pico-connectors')) {
+    patches.push({
+      id: 'pico-connectors',
+      config: { clientName: `${channelProfile.productName} Connector` },
+    })
+  }
   return {
     homeDir: home,
     profile,

@@ -3,10 +3,12 @@ package serverauth
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/pquerna/otp/totp"
 
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
 )
@@ -22,14 +24,29 @@ const (
 )
 
 // mfaTOTPIssuer 是 otpauth:// URL 的 issuer 参数(验证器显示名称)。
-const mfaTOTPIssuer = "PicoAide"
+//
+// **必须跟随渠道**:管理员在手机验证器里看到的是"哪个产品要求绑定动态码",
+// 渠道客户不该在这里看到厂商名 —— 这是整个白标面里唯一逃出应用之外的一处
+// (审计 2026-09-10)。渠道名来自镜像内的渠道配置,与门户/登录页同一份。
+func mfaTOTPIssuer() string {
+	if name := strings.TrimSpace(channel.Load().Identity.DisplayName); name != "" {
+		return name
+	}
+	return channelFallbackIssuer
+}
+
+// channelFallbackIssuer 渠道配置缺失时的中性兜底。
+//
+// 刻意**不含厂商品牌**:缺渠道配置属交付事故(CI 在构建期强制 channel.json
+// 存在),此时宁可显示中性名,也不要把厂商名贴到客户管理员的验证器里。
+const channelFallbackIssuer = "Harness"
 
 // ---- TOTP 工具(pquerna/otp: SHA1/6 位/30s 周期/±1 步容差默认) ----
 
 // genTOTPSecret 生成新的 TOTP 密钥与 otpauth:// URL。accountName 通常为
 // 管理员用户名(验证器中可辨识)。明文密钥仅此一次返回给前端(enable 响应)。
 func genTOTPSecret(accountName string) (secret, otpauthURL string, err error) {
-	key, err := totp.Generate(totp.GenerateOpts{Issuer: mfaTOTPIssuer, AccountName: accountName})
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: mfaTOTPIssuer(), AccountName: accountName})
 	if err != nil {
 		return "", "", err
 	}
