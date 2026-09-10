@@ -147,15 +147,21 @@ export function apply(ctx: Context, config: Config): void {
      * 的版本提示成 B 服务端可升级。
      */
     const onSessionChanged = (session: unknown): void => {
-      const next = serverURLOf(session)
-      if (next === serverURL) return
-      serverURL = next
-      expectedChannel = undefined
-      channelResolved = false
-      availableVersion = undefined
-      lastError = undefined
-      refreshTray()
-      publishState()
+      // 事件监听器里的异常会冒泡进 Cordis 的事件派发,而桌面壳把它当致命错误
+      // (整树重启/应用退出)。更新状态只是展示层,绝不该因为会话切换而拖垮宿主。
+      try {
+        const next = serverURLOf(session)
+        if (next === serverURL) return
+        serverURL = next
+        expectedChannel = undefined
+        channelResolved = false
+        availableVersion = undefined
+        lastError = undefined
+        refreshTray()
+        publishState()
+      } catch {
+        // 会话切换时的状态重置失败不影响宿主;下一次检查会重新推导更新源。
+      }
     }
 
     /**
