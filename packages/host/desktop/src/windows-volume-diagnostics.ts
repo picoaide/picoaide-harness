@@ -94,7 +94,9 @@ function concernForPath(
     return {
       ...entry,
       ...info,
-      reason: `${info.fileSystem} does not provide the NTFS-style ACL and junction behavior PicoAide Harness relies on`,
+      // 这里是**诊断原因文本**,会进用户可见的告警:产品名由上层拼,避免在
+      // 纯函数里硬编码厂商名(渠道构建下应是渠道名)。
+      reason: `${info.fileSystem} does not provide the NTFS-style ACL and junction behavior this product relies on`,
     }
   }
   if (info.driveType === REMOVABLE_DRIVE) {

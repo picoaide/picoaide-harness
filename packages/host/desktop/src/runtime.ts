@@ -200,6 +200,14 @@ export interface DesktopRuntime {
   /** Locale currently used for native tray contributions. */
   readonly locale: DesktopLocale
 
+  /**
+   * Product name for native copy (tray/notification/dialog).
+   *
+   * 渠道构建下就是渠道自己的名字（来自随包 channel.json 的产品名）——
+   * native 文案不得硬编码厂商名。
+   */
+  readonly productName: string
+
   /** Native network, update-download, and notification adapter. */
   readonly updates: DesktopUpdateAdapter
 

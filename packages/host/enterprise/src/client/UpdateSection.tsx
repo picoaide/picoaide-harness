@@ -3,6 +3,8 @@
 import { createElement, useState } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { DEFAULT_CHANNEL } from '../channel-content.ts'
+import { useChannel } from './channel-store.ts'
 import { useUpdateState } from './UpdateIndicator.tsx'
 
 const UPDATE_CHECK_ROUTE = '/api/pico/desktop/update/check'
@@ -28,6 +30,8 @@ const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 
  *  复用 UpdateIndicator 的 useUpdateState(5s 轮询),消除同一路口两份订阅。 */
 function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
   const state = useUpdateState(POLL_MS)
+  // 渠道内容(渠道构建下即渠道名):hooks 必须在组件顶层无条件调用。
+  const channel = useChannel()
   const [checking, setChecking] = useState(false)
 
   const available = state?.availableVersion
@@ -56,7 +60,12 @@ function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
     'div',
     { style: ROW },
     createElement('p', { style: LABEL }, '关于'),
-    createElement('p', { style: VALUE }, `PicoAide Harness v${state?.currentVersion ?? ''}`),
+    // 「关于」里的产品名走渠道内容(渠道构建下即渠道名),不在文案里硬编码厂商名。
+    createElement(
+      'p',
+      { style: VALUE },
+      `${channel?.client?.display_name || DEFAULT_CHANNEL.client?.display_name || ''} v${state?.currentVersion ?? ''}`,
+    ),
     createElement('p', { style: LABEL }, status),
     createElement(
       'button',

@@ -24,7 +24,8 @@ describe('desktop directory picker client bridge', () => {
     await expect(requestDesktopDirectory(async () => new Response('{}')))
       .rejects.toThrow('invalid response')
     await expect(requestDesktopDirectory(async () => new Response('', { status: 500 })))
-      .rejects.toThrow('could not open the system folder picker')
+      // 文案刻意不含产品名:客户端错误提示不该携带品牌(渠道构建下会露厂商名)。
+      .rejects.toThrow('Could not open the system folder picker')
   })
 
   it('installs and restores the window bridge consumed by the browse panel', async () => {

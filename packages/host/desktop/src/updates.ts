@@ -444,8 +444,13 @@ export function apply(ctx: Context, config: Config): void {
       label: () => downloadingVersion === undefined
         ? availableVersion === undefined
           ? desktopTrayLabel(ctx.desktopRuntime.locale, checking ? 'checkingForUpdates' : 'checkForUpdates')
-          : desktopTrayLabel(ctx.desktopRuntime.locale, 'updateAvailable', availableVersion)
-        : desktopTrayLabel(ctx.desktopRuntime.locale, 'downloadingUpdate', downloadingVersion),
+          : desktopTrayLabel(
+            ctx.desktopRuntime.locale, 'updateAvailable', availableVersion, ctx.desktopRuntime.productName,
+          )
+        // 渠道构建下托盘里显示的必须是渠道名:产品名经 runtime 面取,不硬编码。
+        : desktopTrayLabel(
+          ctx.desktopRuntime.locale, 'downloadingUpdate', downloadingVersion, ctx.desktopRuntime.productName,
+        ),
       invoke: runManualCheck,
     })
     refreshTray = registration.refresh
