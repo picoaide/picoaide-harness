@@ -14,7 +14,7 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 - Build the desktop package with `corepack yarn build`.
 - Run unit tests with `corepack yarn test`.
 - Run type checking with `corepack yarn typecheck`.
-- Run the complete headless gate with `corepack yarn check` (2026-09-06 重排：`dsh-plugin-desktop check` 最先——一次构建产出 desktop `lib/`+`lib/types/`，其余包的 tsc 依赖它——随后 `dsh-better-sidebar check` 与各包 `check`；全程每包只构建一次，本地 `yarn check` 与 CI gate job 完全同义。`yarn prebuild` = `prebuildWorkspaceDeps` 一键构建全部 8 个 workspace 包）。
+- Run the complete headless gate with `corepack yarn check`（2026-09-10 重构为 `scripts/check-workspaces.mjs`：**受构建依赖约束的并行编排**，不再是 10 个包串行 `&&`——阶段 1 跑 `dsh-plugin-desktop check` + 三个根守卫，阶段 2 按依赖图调度其余包：`enterprise`/`connectors`/`cron` 的 tsc 依赖 desktop 的 `lib/types`，`account-card` 依赖 `enterprise`（其 tsdown `clean:true` 会清 `lib/`，并发读取会踩空 → 必须串行），`browser` 依赖 `connectors`；依赖失败的包直接跳过并说明原因，不产生级联噪音。并发默认 `min(4, CPU)`，`CHECK_CONCURRENCY` 可覆盖。`yarn check:fast` = 只跑本次改动影响的包（`git status`/`git diff` 映射到包，顶层文件改动自动升格为全量）。本地 `yarn check` 与 CI gate job 完全同义。`yarn prebuild` = `prebuildWorkspaceDeps` 一键构建全部 8 个 workspace 包，**已增量**：某包产物不早于其输入（`src/`、包配置、依赖包产物）即跳过重建，`DSH_PREBUILD=force` 强制全量。门禁提速实测与设计见 docs/decisions/2026-09-10-verification-speedup.md）。
 - Run the client E2E automation with `corepack yarn workspace dsh-plugin-desktop e2e:client` (see GUI E2E below; works against a packaged build and Xvfb, produces `.e2e-report.md` + `.e2e-shots/`). Real-service verification uses `e2e:real` (`REAL_SERVER/REAL_USER/REAL_PASS` env; produces `.real-env-report.md` + `.real-env-shots/`).
 - Run upstream operations through the root scripts, such as `corepack yarn upstream:build`.
 
