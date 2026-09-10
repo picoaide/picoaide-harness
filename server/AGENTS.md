@@ -87,11 +87,16 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 
 ```bash
 make test              # go test ./... -count=1(服务端全量;不依赖数据库,无 PG 时 DB 用例自动 Skip,设 PG_DSN_TEST 则全量)
-make test-server       # 服务端各业务域测试(显式枚举全部包)
+make test-server       # 服务端各业务域测试(目录通配 internal/... + cmd/...;-p $(TEST_PARALLEL) 默认 4)
+make test-server-fast  # 同 test-server 但不带 -count=1 → 无改动时整轮命中 go test 结果缓存(实测全仓 0.3s)
 make webadmin          # cd webadmin && npm run build(产物内嵌进服务端二进制)
 make build-server      # make webadmin + go build -o bin/picoaide-server
 make docker-image      # 本地构建服务端镜像(发布镜像走更新服务器,不经镜像仓库)
-make check             # gofmt + go vet + test-server + webadmin 测试与构建
+make check             # gofmt + go vet + test-server + webadmin 测试与构建(发布门禁)
+make check-fast        # 开发循环:gofmt + vet + test-server-fast + webadmin 单测(不建 webadmin 产物,实测 15.6s)
+# 测试库:每个 DB 用例从模板库 picoaide_tmpl_<迁移哈希> 克隆(见 internal/serverstore/dbtest.go),
+#   不再逐用例重放 52 个迁移(单用例固定开销 1.5s → ~0.1s);换迁移/跨月会自动生成新模板库,
+#   模板不可用时自动回落到"空库 + 全量迁移"。提速实测见 ../../docs/decisions/2026-09-10-verification-speedup.md。
 PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
 go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证网关
 # 生产部署:按 ../../docs/deploy/AI-DEPLOY.md 执行(脚本已下线,交付物=一个镜像)
