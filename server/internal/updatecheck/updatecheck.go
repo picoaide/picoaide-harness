@@ -1,7 +1,10 @@
-// Package updatecheck checks the public GitHub Releases API for a newer
-// stable server version, mirroring the desktop client logic
-// (packages/host/desktop/src/update-checker.ts) so both surfaces agree on
-// the same release source and the same strict SemVer comparison rules.
+// Package updatecheck checks our own update server (Cloudflare R2 behind
+// https://release.picoaide.com) for a newer stable server version.
+//
+// 2026-09-10 起更新源**只有** R2 静态 manifest,不再查询 GitHub Releases:
+// 国内网络对 api.github.com 不可达且匿名限流(60 次/小时/IP,企业出口共用
+// 一个 IP 时必然被限流),已整体弃用。manifest 格式见
+// docs/planning/2026-09-10-r2-update-server-runbook.md §6。
 package updatecheck
 
 import (
@@ -11,57 +14,176 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
-// ReleaseRepository is the GitHub repository owning public releases.
-const ReleaseRepository = "picoaide/picoaide-harness"
+// 渠道 id:官方(稳定)与 beta(我们自己内测)是保留渠道,其余为品牌渠道。
+//
+// **渠道隔离是正确性要求**:服务端只接受 channel_id 与自身渠道相等的清单 ——
+// 否则品牌服务端会被官方清单升级成官方版、品牌与渠道配置丢失。
+const (
+	// OfficialChannel 稳定版渠道。
+	OfficialChannel = "official"
+	// BetaChannel 预发渠道(与官方渠道互不升级)。
+	BetaChannel = "beta"
+)
 
-// VersionEndpoint is the public endpoint returning the latest stable release.
-const VersionEndpoint = "https://api.github.com/repos/" + ReleaseRepository + "/releases/latest"
+// DefaultEndpoint 是官方渠道的更新清单地址。
+//
+// 品牌渠道通过 PICOAI_UPDATE_ENDPOINT 指向自己的目录
+// (如 https://release.picoaide.com/acme/latest.json),
+// 并用 PICOAI_CHANNEL 声明自身渠道以启用隔离校验。
+const DefaultEndpoint = "https://release.picoaide.com/official/latest.json"
 
-// maxResponseBody caps the release JSON payload accepted from the service
-// (mirrors the desktop client MAX_VERSION_RESPONSE_BYTES).
+// DefaultClientDownloadsURL 是官方渠道的客户端安装包目录。
+// 门户页在管理员未配置任何平台下载链接时回落到这里 —— 客户端分发已不再
+// 依赖 GitHub Releases(弃用原因见包注释)。
+const DefaultClientDownloadsURL = "https://release.picoaide.com/official/releases"
+
+// EndpointEnv 是覆盖更新清单地址的环境变量名。
+const EndpointEnv = "PICOAI_UPDATE_ENDPOINT"
+
+// ChannelEnv 是本服务端所属渠道的环境变量名(beta / official / 品牌 id)。
+// 未设置时按端点 URL 推导(路径首段),推导不出则回落官方渠道。
+const ChannelEnv = "PICOAI_CHANNEL"
+
+// maxResponseBody caps the manifest JSON payload accepted from the service.
 const maxResponseBody = 256 * 1024
 
 // httpClientTimeout bounds the whole request (DNS + TLS + headers + body).
 const httpClientTimeout = 8 * time.Second
 
-// ErrUnavailable wraps any failure to obtain or parse the release info so
-// callers can degrade silently (nobody dies because a version check failed).
+// ErrUnavailable wraps any failure to obtain or parse the manifest so callers
+// can degrade silently (nobody dies because a version check failed).
 var ErrUnavailable = errors.New("version check unavailable")
 
-// Result is one successful check against the release service.
+// ErrNoEndpoint 表示既没有默认端点也没有配置环境变量——按"未启用更新检查"
+// 处理(不是故障):本地开发构建与不接更新服务器的部署都会命中这条。
+var ErrNoEndpoint = errors.New("no update endpoint configured")
+
+// Result is one successful check against the update server.
 type Result struct {
 	// Current is the canonical version the server is running (may be "dev").
 	Current string `json:"current"`
-	// Latest is the canonical latest stable release version.
+	// Latest is the canonical latest version published on the update server.
 	Latest string `json:"latest"`
 	// UpdateAvailable is true when Latest > Current (strict SemVer).
 	UpdateAvailable bool `json:"update_available"`
-	// ReleaseURL links to the GitHub release page for operators.
-	ReleaseURL string `json:"release_url"`
+	// ImageTag is the container tag carrying Latest (e.g. "v2.7.0"), so
+	// operators and the webadmin page can show the exact upgrade target.
+	ImageTag string `json:"image_tag,omitempty"`
+	// ManifestURL is the endpoint that answered (support/debugging anchor).
+	ManifestURL string `json:"manifest_url,omitempty"`
 	// CheckedAt is the RFC3339 timestamp of the check (server time).
 	CheckedAt string `json:"checked_at"`
+}
+
+// manifest 是更新服务器 latest.json 的结构(节选:只取服务端需要的字段)。
+type manifest struct {
+	Schema    int    `json:"schema"`
+	ChannelID string `json:"channel_id"`
+	Server    struct {
+		Version  string `json:"version"`
+		ImageTag string `json:"image_tag"`
+	} `json:"server"`
+	Client struct {
+		Version string `json:"version"`
+	} `json:"client"`
 }
 
 // Checker performs checks with an injectable client (tests use a local
 // httptest server; nil uses the production client with a hard timeout).
 type Checker struct {
 	Client *http.Client
-	// Endpoint overrides VersionEndpoint (tests).
+	// Endpoint overrides the resolved endpoint (tests).
 	Endpoint string
+	// ExpectedChannel 覆盖本服务端所属渠道(测试);空则用 ResolveChannel()。
+	ExpectedChannel string
 }
 
 // New returns a Checker using the production timeout-bounded client.
 func New() *Checker {
-	return &Checker{Client: &http.Client{Timeout: httpClientTimeout}}
+	return &Checker{Client: newHTTPClient()}
+}
+
+// newHTTPClient 构造生产客户端:硬超时 + **拒绝重定向**。
+// 更新服务器必须直接返回 200(见 R2 手册 §3.1);默认的"跟随重定向"会把
+// 配置错误伪装成成功,这里让它暴露成 ErrUnavailable。
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: httpClientTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// ResolveEndpoint 返回生效的更新清单地址:PICOAI_UPDATE_ENDPOINT 优先,
+// 缺省使用官方渠道地址;显式设为 "-"/"off"/"none" 可关闭更新检查。
+func ResolveEndpoint() string {
+	if v, ok := os.LookupEnv(EndpointEnv); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "-", "off", "none", "disabled":
+			return ""
+		default:
+			return strings.TrimSpace(v)
+		}
+	}
+	return DefaultEndpoint
+}
+
+// ResolveChannel 返回本服务端所属渠道:
+// PICOAI_CHANNEL 优先;否则从 PICOAI_UPDATE_ENDPOINT 的路径首段推导
+// (https://release.picoaide.com/acme/latest.json → acme);都不成立则官方渠道。
+//
+// 推导让"指向哪个目录"与"属于哪个渠道"默认自洽,避免两处配置不一致时
+// 静默接受别的渠道的清单。
+func ResolveChannel() string {
+	if v := strings.TrimSpace(os.Getenv(ChannelEnv)); v != "" {
+		if IsChannelID(v) {
+			return v
+		}
+		return OfficialChannel
+	}
+	endpoint := ResolveEndpoint()
+	if endpoint == "" {
+		return OfficialChannel
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return OfficialChannel
+	}
+	// 路径形如 /<channel>/latest.json
+	segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segments) >= 1 && IsChannelID(segments[0]) {
+		return segments[0]
+	}
+	return OfficialChannel
+}
+
+// IsChannelID 报告 s 是否是合法渠道 id(小写字母/数字/连字符,1–32 位)。
+// 与客户端 CHANNEL_ID_PATTERN 同源。
+func IsChannelID(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '-' && i > 0 && i < len(s)-1:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // CacheTTL 是缓存结果的有效期:版本检查是低频、低频变化的数据,
-// 缓存 6 小时足以让"每次打开服务器信息页"都不打外网 API(无外网环境
+// 缓存 6 小时足以让"每次打开服务器信息页"都不打外网(无外网环境
 // 尤其重要——首次失败后会周期性重试,而不是每次请求都卡 8 秒)。
 const CacheTTL = 6 * time.Hour
 
@@ -126,17 +248,20 @@ func (c *CachedChecker) Check(ctx context.Context, current string) (*Result, err
 	return res, err
 }
 
-// Check queries the release endpoint and compares it against current.
+// Check queries the update manifest and compares it against current.
 // current is the running server version; a non-SemVer value such as "dev"
 // is reported as not updated (local builds should not nag operators).
 func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 	endpoint := c.Endpoint
 	if endpoint == "" {
-		endpoint = VersionEndpoint
+		endpoint = ResolveEndpoint()
+	}
+	if endpoint == "" {
+		return nil, ErrNoEndpoint
 	}
 	client := c.Client
 	if client == nil {
-		client = &http.Client{Timeout: httpClientTimeout}
+		client = newHTTPClient()
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -151,6 +276,11 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// 3xx 不会走到这里(Go 客户端默认跟随重定向,除非超过上限),但
+		// 更新服务器前置任何跳转都属于配置错误,显式提示便于定位。
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return nil, fmt.Errorf("%w: update server redirected (http %d) — 检查 URL 必须直接返回 200", ErrUnavailable, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("%w: http %d", ErrUnavailable, resp.StatusCode)
 	}
 
@@ -162,24 +292,41 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 		return nil, fmt.Errorf("%w: response too large", ErrUnavailable)
 	}
 
-	var payload struct {
-		TagName string `json:"tag_name"`
-		HTMLURL string `json:"html_url"`
-	}
+	var payload manifest
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	latest := ParseCanonicalStable(payload.TagName)
+	// 渠道隔离:清单声明的渠道必须与本服务端所属渠道一致。
+	// 不匹配一律当作"检查不可用"(而不是"无更新"):这通常意味着端点配置
+	// 指向了别的渠道目录,必须让人看见并修,绝不能静默跨渠道升级。
+	expected := c.ExpectedChannel
+	if expected == "" {
+		expected = ResolveChannel()
+	}
+	if payload.ChannelID == "" {
+		return nil, fmt.Errorf("%w: manifest has no channel_id", ErrUnavailable)
+	}
+	if payload.ChannelID != expected {
+		return nil, fmt.Errorf("%w: manifest channel %q != this server's channel %q",
+			ErrUnavailable, payload.ChannelID, expected)
+	}
+
+	// 版本号用完整 SemVer 解析(接受 2.7.0-rc.1 这类预发布):发布渠道过去
+	// 用 GitHub Releases 的 latest 端点天然排除预发布,现在由"谁写了
+	// latest.json"决定——写预发布进去就是预发布渠道。
+	latest := NormalizeVersion(payload.Server.Version)
 	if latest == "" {
-		return nil, fmt.Errorf("%w: invalid tag %q", ErrUnavailable, payload.TagName)
+		return nil, fmt.Errorf("%w: invalid server.version %q", ErrUnavailable, payload.Server.Version)
 	}
 
 	res := &Result{
-		Current:    current,
-		Latest:     latest,
-		ReleaseURL: payload.HTMLURL,
-		CheckedAt:  time.Now().UTC().Format(time.RFC3339),
+		Current:     current,
+		Latest:      latest,
+		ImageTag:    payload.Server.ImageTag,
+		ManifestURL: endpoint,
+		CheckedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
+	// 版本比较按 core(M.m.p)判断是否需要升级;预发布只影响目标版本展示。
 	if cur, ok := ParseCanonicalStableValid(current); ok {
 		res.UpdateAvailable = CompareSemVer(latest, cur) > 0
 	}
@@ -188,7 +335,7 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 
 // ParseCanonicalStable parses a canonical stable SemVer with an optional
 // lowercase "v" prefix; the prefix is stripped. Prerelease/build versions
-// are rejected (the releases/latest endpoint never returns them anyway).
+// are rejected.
 func ParseCanonicalStable(tag string) string {
 	v := strings.TrimPrefix(tag, "v")
 	if !IsStableSemVer(v) {
@@ -203,28 +350,95 @@ func ParseCanonicalStableValid(v string) (string, bool) {
 	return canonical, canonical != ""
 }
 
-// IsStableSemVer reports whether v is strict stable SemVer (M.m.p) with
-// prerelease/build metadata stripped before validation being allowed.
+// IsStableSemVer reports whether v is strict stable SemVer (M.m.p).
 func IsStableSemVer(v string) bool {
+	// prerelease present → not stable(在任何其它校验之前判定,避免与
+	// normalizeCore 的剥离顺序产生分歧)
+	if strings.Contains(strings.TrimPrefix(strings.TrimSpace(v), "v"), "-") {
+		return false
+	}
+	return normalizeCore(v) != ""
+}
+
+// NormalizeVersion 把 manifest 里的版本号规范化为"无 v 前缀"的完整 SemVer
+// (可含预发布段,如 2.7.0-rc.1);非法返回空串。
+func NormalizeVersion(v string) string {
+	v = strings.TrimSpace(v)
+	trimmed := strings.TrimPrefix(v, "v")
+	if !IsSemVer(trimmed) {
+		return ""
+	}
+	return trimmed
+}
+
+// IsSemVer reports whether v is SemVer 2.0.0 (M.m.p with optional
+// -prerelease and +build). "v" prefix is NOT accepted here.
+func IsSemVer(v string) bool {
+	// v 前缀由 NormalizeVersion 负责剥离;这里严格要求无前缀,
+	// 否则 "v2.5.1" 会被 normalizeCore 悄悄放行,契约与实现不一致。
+	if v == "" || strings.HasPrefix(v, "v") {
+		return false
+	}
+	// 拆出 build metadata 与 prerelease
+	core := v
+	if i := strings.IndexByte(core, '+'); i >= 0 {
+		build := core[i+1:]
+		if build == "" || !isDotSeparatedIdentifiers(build, true) {
+			return false
+		}
+		core = core[:i]
+	}
+	if i := strings.IndexByte(core, '-'); i >= 0 {
+		pre := core[i+1:]
+		if pre == "" || !isDotSeparatedIdentifiers(pre, false) {
+			return false
+		}
+		core = core[:i]
+	}
+	return normalizeCore(core) != ""
+}
+
+// isDotSeparatedIdentifiers 校验 prerelease/build 的点分段标识符。
+// allowLeadingZero 为 true 时(build)允许纯数字带前导零。
+func isDotSeparatedIdentifiers(s string, allowLeadingZero bool) bool {
+	for _, part := range strings.Split(s, ".") {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			switch {
+			case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '-':
+			default:
+				return false
+			}
+		}
+		if !allowLeadingZero && isNumeric(part) && len(part) > 1 && part[0] == '0' {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeCore 校验并返回 M.m.p 核心段;非法返回空串。
+func normalizeCore(v string) string {
 	core := v
 	if i := strings.IndexByte(core, '+'); i >= 0 {
 		core = core[:i]
 	}
 	core = strings.TrimPrefix(core, "v")
 	if i := strings.IndexByte(core, '-'); i >= 0 {
-		// prerelease present → not stable
-		return false
+		core = core[:i]
 	}
 	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
-		return false
+		return ""
 	}
 	for _, p := range parts {
 		if !isNumeric(p) || (len(p) > 1 && p[0] == '0') {
-			return false
+			return ""
 		}
 	}
-	return true
+	return core
 }
 
 func isNumeric(s string) bool {
@@ -239,18 +453,17 @@ func isNumeric(s string) bool {
 	return true
 }
 
-// CompareSemVer returns -1/0/1 for left vs right using strict SemVer
-// precedence on the core M.m.p triple (numeric, no leading-zero overflow).
-// Both inputs must be canonical stable SemVer (no v prefix, no prerelease);
-// invalid inputs are treated as equal (0).
+// CompareSemVer returns -1/0/1 for left vs right using SemVer precedence on
+// the core M.m.p triple (numeric, no leading-zero overflow). v 前缀与
+// 预发布段都按核心段比较:预发布不影响"是否值得升级"的判定(2.7.0-rc.1 与
+// 2.7.0 视为同一目标版本),否则 latest 写预发布时运维永远看不到升级提示。
+// 非法输入视为相等(0)。
 func CompareSemVer(left, right string) int {
-	lc, lok := ParseCanonicalStableValid(left)
-	rc, rok := ParseCanonicalStableValid(right)
+	lt, lok := parseCore(left)
+	rt, rok := parseCore(right)
 	if !lok || !rok {
 		return 0
 	}
-	lt := strings.Split(lc, ".")
-	rt := strings.Split(rc, ".")
 	for i := 0; i < 3; i++ {
 		l, r := lt[i], rt[i]
 		if len(l) != len(r) {
@@ -267,4 +480,17 @@ func CompareSemVer(left, right string) int {
 		}
 	}
 	return 0
+}
+
+// parseCore 解析版本的核心 M.m.p 三段(容忍 v 前缀与预发布/build 段),
+// 返回三段的原始字符串以支持无损数值比较。
+func parseCore(v string) ([3]string, bool) {
+	var out [3]string
+	core := normalizeCore(v)
+	if core == "" {
+		return out, false
+	}
+	parts := strings.Split(core, ".")
+	copy(out[:], parts)
+	return out, true
 }
