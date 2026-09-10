@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 import { withoutMacReleaseSecrets } from './release-preflight.ts'
 import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
 
@@ -172,6 +173,8 @@ if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.m
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
       prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
     }
+    // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json),必须在打包之前。
+    await prepareChannelPackaging()
     packageMacSmoke(undefined, { skipGates: process.argv.includes('--no-gates') })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelPackaging } from './channel-prepare.ts'
 
 const WINDOWS_SIGNING_KEYS = [
   'CSC_IDENTITY_AUTO_DISCOVERY',
@@ -206,6 +207,10 @@ if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.m
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
       prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
     }
+    // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json)。CI 打包走
+    // --no-prebuild,brand-prepare 不会经 prebuild 触发 —— 少了这一步,渠道包
+    // 会带官方图标出厂(见 channel-prepare.ts)。
+    await prepareChannelPackaging()
     packageWindowsInstaller(undefined, { skipGates: process.argv.includes('--no-gates') })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

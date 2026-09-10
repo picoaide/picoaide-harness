@@ -328,6 +328,19 @@ export function packagedProductName(buildDir?: string): string {
 }
 
 /**
+ * 清掉"上一次渠道构建"在应用资源目录里留下的渠道化产物。
+ *
+ * 两样东西都必须清:随包渠道配置（`channel.json`，会决定客户端的品牌/默认域名）
+ * 与生成的 electron-builder 配置（`channel-electron-builder.cjs`，含渠道名/appId/
+ * 协议 scheme）。官方构建继承任何一样都属于"官方包带上客户品牌"，比"没生效"更糟。
+ * @param buildDir - `packages/host/desktop/build` 目录。
+ */
+export function clearChannelResidue(buildDir: string): void {
+  rmSync(join(buildDir, 'channel.json'), { force: true })
+  rmSync(join(buildDir, 'channel-electron-builder.cjs'), { force: true })
+}
+
+/**
  * 把渠道包就位到客户端应用资源里（`build/channel.json`）。
  *
  * **为什么必须有这一步**：`src/desktop-channel.ts` 的 `readDesktopChannelProfile()`
@@ -358,7 +371,7 @@ export function stageChannelProfile(
   const source = join(context.channelDir, 'channel.json')
   if (context.official || !existsSync(source)) {
     // 本地开发（没有渠道目录）走这里:必须清掉残留，否则会用错品牌。
-    rmSync(target, { force: true })
+    clearChannelResidue(buildDir)
     return undefined
   }
   const raw = readFileSync(source, 'utf8')
