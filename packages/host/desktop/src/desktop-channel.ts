@@ -31,6 +31,15 @@ const CHANNEL_PROFILE_FILE = new URL('../build/channel.json', import.meta.url)
 /** 渠道 id 合法形状：与客户端 CHANNEL_ID_PATTERN / 服务端 IsChannelID 同源。 */
 const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 
+/** 官方渠道的深链 scheme(改造前的硬编码值)。 */
+export const DEFAULT_DEEP_LINK_SCHEME = 'picoaide'
+
+/**
+ * 深链 scheme 合法形状(RFC 3986 scheme):字母开头,后跟字母/数字/+/-/.。
+ * 长度另限 2–32,避免病态值。
+ */
+const DEEP_LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]{1,31}$/u
+
 /** 渠道包在客户端侧生效的那部分内容。 */
 export interface DesktopChannelProfile {
   /** 渠道 id（与镜像、R2 目录、服务端渠道内容同源）。 */
@@ -41,6 +50,16 @@ export interface DesktopChannelProfile {
   readonly productName: string | undefined
   /** 桌面窗口标题（未配置时回落到 productName）。 */
   readonly windowTitle: string | undefined
+  /**
+   * 深链 scheme（OIDC/OpenID 浏览器回调把 token 交回客户端用的那个）。
+   *
+   * 渠道构建必须用它自己的 scheme:浏览器在跳回客户端时会弹出
+   * "打开 <scheme>?" 的确认框,渠道客户不该在这里看到 `picoaide`。
+   * 未配置时回落官方 scheme —— 官方行为逐字节不变。
+   */
+  readonly deepLinkScheme: string
+  /** 深链在操作系统里的注册名（Protocols 显示名）；未配置时为 undefined。 */
+  readonly deepLinkName: string | undefined
 }
 
 /**
@@ -105,8 +124,22 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
   const productName = nonEmptyString(desktopRecord.product_name)
     ?? nonEmptyString(identityRecord.display_name)
   const windowTitle = nonEmptyString(desktopRecord.window_title) ?? productName
+  const rawScheme = nonEmptyString(desktopRecord.deep_link_scheme)
+  // 形状不对就回落官方 scheme:一个畸形 scheme 会让浏览器回调彻底打不开客户端,
+  // 静默降级成"官方 scheme"至少还能用(官方构建本来就是这个值)。
+  const deepLinkScheme = rawScheme !== undefined && DEEP_LINK_SCHEME_PATTERN.test(rawScheme)
+    ? rawScheme
+    : DEFAULT_DEEP_LINK_SCHEME
+  const deepLinkName = nonEmptyString(desktopRecord.deep_link_name) ?? productName
 
-  return { channelId, defaultServerURL, productName, windowTitle }
+  return {
+    channelId,
+    defaultServerURL,
+    productName,
+    windowTitle,
+    deepLinkScheme,
+    deepLinkName,
+  }
 }
 
 /**

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { channelBuilderConfigArgs, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 
 const WINDOWS_SIGNING_KEYS = [
   'CSC_IDENTITY_AUTO_DISCOVERY',
@@ -105,7 +105,7 @@ export function createWindowsPackageOptions(verifier = './verify-win-installer.t
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL(verifier, import.meta.url)),
     nodeExecutable: process.execPath,
-    channelConfigArgs: channelBuilderConfigArgs(channel),
+    channelConfigArgs: prepareChannelBuilderOverrides(channel),
     channelId: channel.channelId,
     run,
     log: message => console.log(message),

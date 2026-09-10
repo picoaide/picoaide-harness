@@ -20,8 +20,8 @@
  * @module dsh-plugin-desktop/scripts/channel-build
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** 选择渠道的环境变量（CI 渠道矩阵注入）。 */
@@ -32,6 +32,9 @@ const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 
 /** 安装包名里的 slug：ASCII 字母数字与连字符，避免各平台文件名编码差异。 */
 const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u
+
+/** 深链 scheme 合法形状（RFC 3986）：字母开头，后跟字母/数字/+/-/.。 */
+const DEEP_LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]{1,31}$/u
 
 /** 应用 id（bundle id / AppUserModelId）：反向域名形状。 */
 const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]*$/u
@@ -44,6 +47,7 @@ export const OFFICIAL_BUILD_DEFAULTS = {
   shortcutName: 'PicoAide Harness',
   linuxMaintainer: 'picoaide',
   linuxSynopsis: 'PicoAide Harness',
+  deepLinkScheme: 'picoaide',
 } as const
 
 /** 安装包名模板：`${version}`/`${arch}`/`${ext}` 由 electron-builder 展开。 */
@@ -76,6 +80,10 @@ export interface ChannelBuildContext {
   readonly shortcutName: string
   readonly linuxMaintainer: string
   readonly linuxSynopsis: string
+  /** 深链 scheme（OIDC 回调跳回客户端；渠道构建用它自己的）。 */
+  readonly deepLinkScheme: string
+  /** 深链在操作系统里的注册名（Protocols 显示名）。 */
+  readonly deepLinkName: string
   readonly artifactNames: ChannelArtifactNames
 }
 
@@ -116,6 +124,8 @@ export interface ChannelDesktopBranding {
   readonly shortcutName?: string
   readonly linuxMaintainer?: string
   readonly linuxSynopsis?: string
+  readonly deepLinkScheme?: string
+  readonly deepLinkName?: string
 }
 
 /**
@@ -152,6 +162,8 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
     shortcutName?: string
     linuxMaintainer?: string
     linuxSynopsis?: string
+    deepLinkScheme?: string
+    deepLinkName?: string
   } = {}
   if (productName !== undefined) result.productName = productName
   if (slug !== undefined) result.slug = slug
@@ -162,6 +174,10 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
   if (shortcutName !== undefined) result.shortcutName = shortcutName
   const synopsis = text(desktop.synopsis) ?? productName
   if (synopsis !== undefined) result.linuxSynopsis = synopsis
+  const deepLinkScheme = text(desktop.deep_link_scheme)
+  if (deepLinkScheme !== undefined) result.deepLinkScheme = deepLinkScheme
+  const deepLinkName = text(desktop.deep_link_name)
+  if (deepLinkName !== undefined) result.deepLinkName = deepLinkName
   return result
 }
 
@@ -202,6 +218,16 @@ export function resolveChannelBuildContext(
       + '（期望 ASCII 字母/数字/连字符）—— 它决定安装包名与可执行名，必须是纯 ASCII',
     )
   }
+  // 构建期对畸形 scheme **fail-loud**(与 slug/appId 同规格):畸形 scheme 会让
+  // 浏览器回调打不开客户端,这种包不该被生产出来。运行期(desktop-channel.ts)
+  // 则回落官方值 —— 那里没有"拒绝构建"这个选项,能用比报错好。
+  const deepLinkScheme = branding.deepLinkScheme ?? OFFICIAL_BUILD_DEFAULTS.deepLinkScheme
+  if (!DEEP_LINK_SCHEME_PATTERN.test(deepLinkScheme)) {
+    throw new Error(
+      `channel-build: 渠道 ${channelId} 的 desktop.deep_link_scheme=${JSON.stringify(deepLinkScheme)} 非法`
+      + '（期望 RFC 3986 scheme：字母开头，后跟字母/数字/+/-/.）—— 畸形 scheme 会让浏览器回调打不开客户端',
+    )
+  }
   const appId = branding.appId ?? OFFICIAL_BUILD_DEFAULTS.appId
   if (!APP_ID_PATTERN.test(appId)) {
     throw new Error(`channel-build: 渠道 ${channelId} 的 desktop.app_id=${JSON.stringify(appId)} 非法`)
@@ -222,6 +248,8 @@ export function resolveChannelBuildContext(
     shortcutName: branding.shortcutName ?? OFFICIAL_BUILD_DEFAULTS.shortcutName,
     linuxMaintainer: branding.linuxMaintainer ?? OFFICIAL_BUILD_DEFAULTS.linuxMaintainer,
     linuxSynopsis: branding.linuxSynopsis ?? OFFICIAL_BUILD_DEFAULTS.linuxSynopsis,
+    deepLinkScheme,
+    deepLinkName: branding.deepLinkName ?? `${branding.productName ?? OFFICIAL_BUILD_DEFAULTS.productName} Deep Link`,
     artifactNames: artifactNames(slug),
   }
 }
@@ -233,20 +261,80 @@ export function resolveChannelBuildContext(
  * @param context - `resolveChannelBuildContext()` 的结果。
  * @returns 追加到 electron-builder 命令行的参数。
  */
-export function channelBuilderConfigArgs(context: ChannelBuildContext): string[] {
+export function channelBuilderConfigArgs(
+  context: ChannelBuildContext,
+  configFilePath?: string,
+): string[] {
   if (context.official) return []
+  if (configFilePath === undefined) {
+    throw new Error('channel-build: 渠道构建需要生成的 electron-builder 配置文件路径')
+  }
+  // 全部覆盖都放进配置文件:标量本可以用 `--config.x=y`,但 protocols 这类
+  // 数组**只能**走配置文件(CLI 点号覆盖不支持数组下标,见
+  // writeChannelBuilderConfig 的说明),混用两套来源只会增加出错面。
+  return ['--config', configFilePath]
+}
+
+/**
+ * 打包脚本的统一入口:按渠道生成配置文件并返回要追加的 electron-builder 参数。
+ *
+ * 官方渠道返回 `[]`(不做任何覆盖,产物与改造前一致),也不会写任何文件。
+ * @param context - 渠道上下文。
+ * @param workDir - 生成文件写到哪里(缺省 package 根的 build/)。
+ * @returns 追加到 electron-builder 命令行的参数。
+ */
+export function prepareChannelBuilderOverrides(
+  context: ChannelBuildContext,
+  workDir?: string,
+): string[] {
+  if (context.official) return []
+  const target = join(workDir ?? join(defaultRepoRoot(), 'packages/host/desktop/build'), 'channel-electron-builder.cjs')
+  return channelBuilderConfigArgs(context, writeChannelBuilderConfig(context, target))
+}
+
+/**
+ * 生成渠道构建专用 electron-builder 配置文件。
+ *
+ * **为什么不用 `--config.protocols[0].schemes[0]=…`**:2026-09-10 实测,
+ * electron-builder 的 CLI 点号覆盖**不支持数组下标** —— 它把 `protocols[0]`
+ * 当成一个顶层属性名,直接以
+ * `configuration has an unknown property 'protocols[0]'` 拒绝整次构建。
+ * 数组型字段(protocols)只能走配置文件。
+ *
+ * 配置对象 = package.json 的 build 块 **深展开** + 渠道覆盖,因此无论
+ * electron-builder 把 `--config <file>` 当作"替换"还是"合并",结果都一致。
+ * @param context - 渠道上下文。
+ * @param outputPath - 写到哪里(相对仓库根或绝对路径)。
+ * @returns 写出的绝对路径。
+ */
+export function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: string): string {
+  if (context.official) {
+    throw new Error('channel-build: 官方渠道不需要生成配置文件(不做任何覆盖)')
+  }
+  const manifest = JSON.parse(
+    readFileSync(join(defaultRepoRoot(), 'packages/host/desktop/package.json'), 'utf8'),
+  ) as { build?: Record<string, unknown> }
   const names = context.artifactNames
-  return [
-    `--config.productName=${context.productName}`,
-    `--config.appId=${context.appId}`,
-    `--config.mac.artifactName=${names.mac}`,
-    `--config.win.artifactName=${names.win}`,
-    `--config.nsis.artifactName=${names.nsis}`,
-    `--config.nsis.shortcutName=${context.shortcutName}`,
-    `--config.linux.artifactName=${names.linux}`,
-    `--config.linux.maintainer=${context.linuxMaintainer}`,
-    `--config.linux.synopsis=${context.linuxSynopsis}`,
-  ]
+  const config = {
+    ...manifest.build,
+    productName: context.productName,
+    appId: context.appId,
+    // 数组整体替换:CLI 下标覆盖不可用(见上),配置文件里直接给完整数组。
+    protocols: [{ name: context.deepLinkName, schemes: [context.deepLinkScheme] }],
+    mac: { ...record(manifest.build?.mac), artifactName: names.mac },
+    win: { ...record(manifest.build?.win), artifactName: names.win },
+    nsis: { ...record(manifest.build?.nsis), artifactName: names.nsis, shortcutName: context.shortcutName },
+    linux: {
+      ...record(manifest.build?.linux),
+      artifactName: names.linux,
+      maintainer: context.linuxMaintainer,
+      synopsis: context.linuxSynopsis,
+    },
+  }
+  const target = isAbsolute(outputPath) ? outputPath : join(defaultRepoRoot(), outputPath)
+  writeFileSync(target, `// 由 scripts/channel-build.ts 生成 —— 渠道 ${context.channelId} 的打包配置。
+module.exports = ${JSON.stringify(config, null, 2)}\n`)
+  return target
 }
 
 /** 展开安装包名模板。 */

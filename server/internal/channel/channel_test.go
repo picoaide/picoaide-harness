@@ -132,3 +132,46 @@ func TestLogoPathPicksDarkVariant(t *testing.T) {
 		t.Errorf("LogoPath(true) = %q", got)
 	}
 }
+
+// ---- 深链 scheme（OIDC 回调跳回客户端用的那个）----
+//
+// 浏览器从 IdP 回调跳回客户端时会弹"打开 <scheme>?"的确认框 —— 渠道客户不该
+// 在这里看到厂商名。三处必须一致：客户端打包时的 protocols、客户端解析
+// (desktop-channel.ts)、以及服务端这里拼串。
+
+func TestDeepLinkSchemeFollowsChannel(t *testing.T) {
+	withDir(t, map[string]string{"channel.json": `{
+      "schema": 1, "channel_id": "acme",
+      "identity": {"display_name": "Acme AI"},
+      "desktop": {"deep_link_scheme": "acmeai"}
+    }`})
+	if got := DeepLinkScheme(); got != "acmeai" {
+		t.Fatalf("DeepLinkScheme() = %q, want acmeai", got)
+	}
+}
+
+func TestDeepLinkSchemeDefaultsToOfficial(t *testing.T) {
+	// 渠道配置没写这一项 → 官方值（行为与改造前完全一致）。
+	withDir(t, map[string]string{"channel.json": officialJSON})
+	if got := DeepLinkScheme(); got != DefaultDeepLinkScheme {
+		t.Fatalf("DeepLinkScheme() = %q, want %q", got, DefaultDeepLinkScheme)
+	}
+	// 渠道目录整个缺失（本地开发）同样回落官方值。
+	withDir(t, nil)
+	if got := DeepLinkScheme(); got != DefaultDeepLinkScheme {
+		t.Fatalf("DeepLinkScheme() with no config = %q, want %q", got, DefaultDeepLinkScheme)
+	}
+}
+
+func TestDeepLinkSchemeRejectsMalformed(t *testing.T) {
+	// 畸形 scheme 会让浏览器回调彻底打不开客户端；回落官方值至少还能用。
+	for _, bad := range []string{"ACME", "acme ai", "1acme", "-acme", ""} {
+		withDir(t, map[string]string{"channel.json": `{
+          "schema": 1, "channel_id": "acme",
+          "desktop": {"deep_link_scheme": "` + bad + `"}
+        }`})
+		if got := DeepLinkScheme(); got != DefaultDeepLinkScheme {
+			t.Fatalf("DeepLinkScheme() with %q = %q, want %q", bad, got, DefaultDeepLinkScheme)
+		}
+	}
+}

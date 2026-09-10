@@ -135,6 +135,7 @@ electron-builder 通过 `files` 把它打进应用资源。
 | `desktop.slug` | `mac/win/nsis/linux.artifactName` | `PicoAide-Harness-*` |
 | `desktop.shortcut_name` | `nsis.shortcutName` | `package.json build.nsis.shortcutName` |
 | `desktop.maintainer` / `synopsis` | `linux.maintainer` / `linux.synopsis` | `package.json build.linux.*` |
+| `desktop.deep_link_scheme` / `deep_link_name` | `protocols[0].schemes[0]` / `protocols[0].name` | `picoaide` / `<产品名> Deep Link` |
 | 渠道目录里的 `logo.svg` / `app-icon.png` | `directories.buildResources` 下的图标 | `brands/official/` |
 
 规则：
@@ -151,9 +152,28 @@ electron-builder 通过 `files` 把它打进应用资源。
 
 仍未渠道化：
 
-- 协议 scheme（`picoaide://`）—— 服务端 OIDC 回调也硬编码同一 scheme，
-  改动是跨端联动的，见 `server/internal/serverauth/oidc.go`。
 - macOS 签名统一用**厂商证书**（2026-09-10 定案，后续不更换）。
+
+### 5.1 深链 scheme：三处必须一致
+
+`desktop.deep_link_scheme` 决定浏览器从 IdP 回调跳回客户端时的 scheme ——
+确认框里显示的就是它，渠道客户不该在这里看到厂商名。**三处必须同源**：
+
+| 位置 | 作用 | 真源 |
+|---|---|---|
+| electron-builder `protocols` | 操作系统级注册（`x-scheme-handler/<scheme>`） | `scripts/channel-build.ts` 生成的配置文件 |
+| 客户端解析 | `main.ts` / `src/deep-link.ts` / `enterprise/src/deep-link.ts` | `src/desktop-channel.ts` 读随包 `channel.json` |
+| 服务端 OIDC 回调 | 拼 `<scheme>://auth?token=…` | `server/internal/channel` 的 `DeepLinkScheme()` |
+
+校验口径：构建期（`channel-build.ts`）遇到畸形 scheme **fail-loud**；运行期
+（`desktop-channel.ts` / 服务端）**回落官方值** —— 那里没有"拒绝启动/构建"这个
+选项，能用比报错好。
+
+> **实现坑（2026-09-10 实测）**：`protocols` 是数组，**不能**用
+> `--config.protocols[0].schemes[0]=…` 覆盖 —— electron-builder 的 CLI 点号覆盖
+> 不支持数组下标，会以 `configuration has an unknown property 'protocols[0]'`
+> 拒绝整次构建。渠道覆盖必须走 `--config <生成的配置文件>`
+> （`writeChannelBuilderConfig()`，里面深展开 package.json 的 build 块）。
 
 ## 6. 更新源（客户端不碰分发面）
 

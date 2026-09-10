@@ -5,7 +5,7 @@ import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { channelBuilderConfigArgs, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 import { withoutMacReleaseSecrets } from './release-preflight.ts'
 import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
 
@@ -90,7 +90,7 @@ function defaultOptions(): MacSmokePackageOptions {
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL('./verify-mac-smoke.ts', import.meta.url)),
     nodeExecutable: process.execPath,
-    channelConfigArgs: channelBuilderConfigArgs(channel),
+    channelConfigArgs: prepareChannelBuilderOverrides(channel),
     run,
     log: message => console.log(message),
   }

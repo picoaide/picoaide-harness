@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { channelBuilderConfigArgs, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 import {
   adaptMacReleaseEnvironment,
   assertMacReleaseReady,
@@ -97,7 +97,7 @@ function defaultReleaseOptions(): MacReleaseOptions {
     desktopRoot,
     outputDir,
     productName,
-    channelConfigArgs: channelBuilderConfigArgs(channel),
+    channelConfigArgs: prepareChannelBuilderOverrides(channel),
     resetOutput: () => rmSync(outputDir, { recursive: true, force: true }),
     listCodeSigningIdentities,
     run,

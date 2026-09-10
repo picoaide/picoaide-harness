@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
 
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
@@ -313,7 +314,10 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		// 桌面客户端深链:携带 token + 发起 server + username(客户端拿到
 		// 后直接构造 session,无需再调 /api/auth/me)。server 为 login 时
 		// 记录的 returnServer;为空时客户端用其登录页输入的 server 兜底。
-		ret := fmt.Sprintf("picoaide://auth?token=%s", url.QueryEscape(token))
+		// scheme 跟随渠道(见 channel.DeepLinkScheme):渠道构建用它自己的 scheme,
+		// 浏览器跳回客户端时的确认框里不出现厂商名。三处必须一致 —— 客户端
+		// protocols(打包)、客户端解析、以及这里。
+		ret := fmt.Sprintf("%s://auth?token=%s", channel.DeepLinkScheme(), url.QueryEscape(token))
 		if rs != "" {
 			ret += fmt.Sprintf("&server=%s", url.QueryEscape(rs))
 		}

@@ -22,6 +22,9 @@ describe('desktop channel profile', () => {
       defaultServerURL: 'https://ai.acme.example.com',
       productName: 'Acme AI',
       windowTitle: 'Acme AI',
+      // 未配置深链 scheme → 回落官方值(行为不变)
+      deepLinkScheme: 'picoaide',
+      deepLinkName: 'Acme AI',
     })
   })
 
@@ -33,7 +36,29 @@ describe('desktop channel profile', () => {
       defaultServerURL: 'https://ai.acme.example.com',
       productName: 'Acme Assistant',
       windowTitle: 'Acme 助手',
+      deepLinkScheme: 'picoaide',
+      deepLinkName: 'Acme Assistant',
     })
+  })
+
+  it('uses the channel deep-link scheme when configured', () => {
+    // 浏览器回调跳回客户端时的确认框里就是它 —— 渠道客户不该看到厂商名。
+    const profile = parseDesktopChannelProfile(channelValue({
+      desktop: { deep_link_scheme: 'acmeai', deep_link_name: 'Acme AI Link' },
+    }))
+    expect(profile?.deepLinkScheme).toBe('acmeai')
+    expect(profile?.deepLinkName).toBe('Acme AI Link')
+  })
+
+  it.each([
+    ['uppercase', 'ACME'],
+    ['a space', 'acme ai'],
+    ['starting with a digit', '1acme'],
+    ['empty', ''],
+    ['too long', `a${'b'.repeat(40)}`],
+  ])('falls back to the official scheme for a malformed one (%s)', (_case, scheme) => {
+    const profile = parseDesktopChannelProfile(channelValue({ desktop: { deep_link_scheme: scheme } }))
+    expect(profile?.deepLinkScheme).toBe('picoaide')
   })
 
   it('leaves the server URL unset when the channel config omits it', () => {
