@@ -113,13 +113,9 @@ free -g | head -2 ; df -h /opt | tail -1
 
 ### 3.2 导入镜像
 
-**两个来源二选一**（`IMAGE` = `ghcr.io/picoaide/picoaide-harness-server`）：
+**唯一来源 = 更新服务器**（2026-09-10 起不再使用任何镜像仓库）：
 
 ```bash
-# 来源 A（推荐，服务器可出网）：直接拉取
-docker pull ${IMAGE}:v2.7.0
-
-# 来源 B（内网 / GHCR 不可达）：从更新服务器下载镜像包再导入
 VER=2.7.0
 curl -fL -o /tmp/pa.zip \
   "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
@@ -127,10 +123,14 @@ unzip -p /tmp/pa.zip image.tar | docker load
 # unzip 缺失时：apt-get install -y unzip（或 yum install -y unzip）
 ```
 
+导入后镜像名固定为 `picoaide-harness-server:<版本>`（下面的示例都用它）。
+**注意**：文件名里的版本号必须与你打算部署的版本一致；从 `latest.json` 读到的
+`server.version` 就是它，不要凭记忆写。
+
 ### 3.3 导出部署文件到目标目录
 
 ```bash
-IMAGE=ghcr.io/picoaide/picoaide-harness-server
+IMAGE=picoaide-harness-server
 VER=2.7.0
 mkdir -p /opt/picoaide
 docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out ${IMAGE}:${VER}
@@ -336,21 +336,19 @@ ls -lh "$OUT" | tail -5
 
 ```bash
 VER=<6.1 得到的版本>
-IMAGE=ghcr.io/picoaide/picoaide-harness-server
+IMAGE=picoaide-harness-server
 
-docker pull ${IMAGE}:v${VER} \
-  || { echo "GHCR 不可达，改用更新服务器镜像包"; \
-       curl -fL -o /tmp/pa.zip \
-         "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip" \
-       && unzip -p /tmp/pa.zip image.tar | docker load; }
+curl -fL -o /tmp/pa.zip \
+  "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+unzip -p /tmp/pa.zip image.tar | docker load
 ```
 
 ### 6.5 切换版本并重启
 
 ```bash
 cd /opt/picoaide
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:v${VER}|" .env
-grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:v${VER}" >> .env
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${VER}" >> .env
 docker compose up -d
 ```
 
@@ -385,7 +383,7 @@ cd /opt/picoaide
 echo "$VER" > VERSION                       # 更新本地版本记录
 docker compose ps                           # 三容器 Up
 # 旧镜像先留着（回滚锚点）；确认稳定运行 1～2 天后再清理：
-# docker image rm ghcr.io/picoaide/picoaide-harness-server:v<旧版本>
+# docker image rm picoaide-harness-server:<旧版本>
 ```
 
 客户端会在下次检查时看到新版本并提示员工升级（升级源就是这台服务器）。
@@ -400,10 +398,10 @@ docker compose ps                           # 三容器 Up
 ```bash
 cd /opt/picoaide
 OLD=<升级前的版本>
-IMAGE=ghcr.io/picoaide/picoaide-harness-server
+IMAGE=picoaide-harness-server
 
 # 1) 切回旧镜像
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:v${OLD}|" .env
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${OLD}|" .env
 docker compose up -d
 
 # 2) 验证旧版本健康

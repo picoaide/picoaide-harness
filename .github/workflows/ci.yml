@@ -431,7 +431,10 @@ jobs:
   # 客户端安装包不再单独发布:它已经在镜像里,由服务端自行下发。
   release:
     name: Release (server image archive)
-    if: startsWith(github.ref, 'refs/tags/v')
+    # 只对 beta 与 official 发布到 GitHub Release(2026-09-10 定案):
+    # 品牌渠道是客户定制交付,不进公开 Releases(客户从更新服务器自己的渠道目录取)。
+    # 渠道由 tag 形态决定,与 resolve 步骤同源。
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || !contains(github.ref_name, '-'))
     needs: [server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -561,33 +564,87 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('client-assets/CLIENT-RELEASE.json','utf8')); console.log('CLIENT-RELEASE.json 合法')"
           cat client-assets/CLIENT-RELEASE.json
 
+      # 渠道配置来自**私有仓** picoaide/channels:客户可见的名称/文案/标识不在
+      # 公开仓里,不同渠道的内容彼此隔离。检出到 channels/(与本地开发同路径,
+      # 后续构建步骤与 Dockerfile 无需感知来源)。
+      #
+      # 需要 repo secret CHANNELS_REPO_TOKEN:一个能读该私有仓的令牌
+      # (fine-grained PAT 只给 picoaide/channels 的 Contents:Read 即可)。
+      # 缺少时**直接失败**:静默回落到公开占位内容会让客户看到错的品牌。
+      - name: Check out channel content (private repo)
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CHANNELS_REPO_TOKEN}" ]; then
+            echo "::error::缺少 secret CHANNELS_REPO_TOKEN —— 无法读取私有渠道仓 picoaide/channels"
+            echo "::error::请创建一个只读该仓 Contents 的 fine-grained PAT,并添加为仓库 secret"
+            exit 1
+          fi
+          rm -rf channels
+          git clone --depth 1 \
+            "https://x-access-token:${CHANNELS_REPO_TOKEN}@github.com/picoaide/channels.git" \
+            channels
+          echo "已检出渠道仓(commit $(git -C channels rev-parse --short HEAD))"
+          ls -1 channels/
+
+      # 把选定渠道复制成镜像构建上下文,并校验配置自洽。
+      - name: Assemble channel config into the image build context
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "channels/${CHANNEL}/channel.json" ]; then
+            echo "::error::私有渠道仓里没有 channels/${CHANNEL}/channel.json"
+            test "$CHANNEL" = official || echo "::error::品牌渠道需先在该仓创建 channels/${CHANNEL}/(复制 channels/official/)"
+            exit 1
+          fi
+          # 目录名 = 渠道 id:镜像构建用 --build-arg CHANNEL=<id> 选择要打进镜像的渠道
+          mkdir -p "channels-context/${CHANNEL}"
+          cp -a "channels/${CHANNEL}/." "channels-context/${CHANNEL}/" 
+          # 校验:JSON 合法 + channel_id 与目录名一致(不一致会让服务端下发错的渠道标识,
+          # 也会让 updatecheck 的渠道隔离判为不可用)。用 env 传值,避免 shell 注入。
+          CHANNEL_ID="$CHANNEL" node -e "
+            const fs=require('fs');
+            const id=process.env.CHANNEL_ID;
+            const p='channels-context/'+id+'/channel.json';
+            const c=JSON.parse(fs.readFileSync(p,'utf8'));
+            if(c.channel_id!==id){
+              console.error('::error::channel.json 的 channel_id='+c.channel_id+' 与渠道 '+id+' 不一致');
+              process.exit(1);
+            }
+            fs.writeFileSync('channels-context/'+id+'/VERSION', process.env.GITHUB_REF_NAME||'');
+            console.log('渠道配置校验通过:', id);
+          "
+          ls -la "channels-context/${CHANNEL}/" 
+
       - name: Build server image for the release tag
         env:
           VERSION: ${{ github.ref_name }}
-          IMAGE: ghcr.io/picoaide/picoaide-harness-server
         run: |
           set -euo pipefail
           VER="${VERSION#v}"
+          IMAGE="picoaide-harness-server"   # 仅本地构建 tag,不推任何仓库
           # 本 job 是镜像的**唯一构建点**:只有这里同时拿得到三平台客户端资产
           # (gate 的 workspace-build + 三个 desktop-* artifact)与发布上下文。
-          # build-context root 提供 brands/official(webadmin 编译期品牌源)。
-          # org.opencontainers.image.source label 是 GHCR 包归属本仓库的凭证,
-          # 缺了会 write_package 被拒(2026-08-26 踩坑)。
+          # build-context root 提供 brands/official(webadmin 编译期品牌源);
+          # channels 提供渠道内容(名称/文案/标识)。
           docker buildx build \
             --platform linux/amd64 \
             --build-arg VERSION="$VER" \
             --build-arg CHANNEL="${{ steps.channel.outputs.channel }}" \
             --build-context root=. \
             --build-context clientassets=./client-assets \
+            --build-context channelassets=./channels-context \
             --label "org.opencontainers.image.source=https://github.com/picoaide/picoaide-harness" \
             --label "org.opencontainers.image.version=$VER" \
             --tag "${IMAGE}:v${VER}" \
             --load \
             server
-          # 推 GHCR:docker.yml 随后从 GHCR 取回并补推 latest/vX.Y 宽标签,
-          # 避免第二处构建配置漂移(镜像只构建一次)。
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "${IMAGE}:v${VER}"
+          # 不再推送任何镜像仓库(2026-09-10:GHCR 已下线)。
+          # 镜像的唯一分发面是更新服务器 release.picoaide.com(R2):
+          # 下面 export 出来的 zip 由 publish-update-server job 上传,客户从这里取。
+          # 本地 tag 仅用于紧接着的 export 步骤。
 
       - name: Export compressed image archive
         env:
@@ -692,7 +749,6 @@ jobs:
             "server": {
               "version": "${VER}",
               "image_tag": "v${VER}",
-              "image_ref": "ghcr.io/picoaide/picoaide-harness-server:v${VER}",
               "image_asset": "https://release.picoaide.com/${CH}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
             },
             "client": { "version": "${VER}" },
