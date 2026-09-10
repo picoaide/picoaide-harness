@@ -203,9 +203,11 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 // 它,整批删掉会让 VerifyAuditChain 在保留边界处必然报断链。锚行自身的哈希
 // 仍会被校验,锚之前的条目(超出保留期)才真正消失。
 func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
+	// cutoff 是绝对瞬时:用会话时区无关的瞬时字面量(裸墙钟字符串会被按 PG
+	// 会话时区解释,进程 TZ 与会话时区不同时保留边界会偏 8 小时)。
 	_, err := db.Exec(`DELETE FROM audit_logs a
-		WHERE a.created_at < ? AND EXISTS (
-			SELECT 1 FROM audit_logs b WHERE b.created_at < ? AND b.id > a.id)`,
-		cutoff.Format(pgTimeFmt), cutoff.Format(pgTimeFmt))
+		WHERE a.created_at < ?::timestamptz AND EXISTS (
+			SELECT 1 FROM audit_logs b WHERE b.created_at < ?::timestamptz AND b.id > a.id)`,
+		pgInstantArg(cutoff), pgInstantArg(cutoff))
 	return err
 }

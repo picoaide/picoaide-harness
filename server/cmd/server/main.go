@@ -100,7 +100,8 @@ func main() {
 	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等),随后清理
 	// 超出保留期的明细分区(先校验对应月日账已生成,防删明细丢账)。
 	if n, rerr := serverstore.EffectiveRetentionMonths(db); rerr == nil {
-		from := time.Now().AddDate(0, -max(n, 6), 0)
+		// 北京日口径(不依赖容器 TZ);RebuildUsageLedger 内部亦会归一。
+		from := serverstore.BeijingDay(time.Now()).AddDate(0, -max(n, 6), 0)
 		if lerr := serverstore.RebuildUsageLedger(db, from, time.Now()); lerr != nil {
 			log.Printf("startup rebuild usage ledger: %v", lerr)
 		}

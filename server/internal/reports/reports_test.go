@@ -19,21 +19,37 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
+// bjAt 返回"北京 Y-M-D hour:00"对应的绝对瞬时:报表月口径夹具不依赖进程 TZ
+// (2026-09-10 时区缺陷修复后,ShouldRunMonthly/GenerateMonthlyReport 都按北京月)。
+func bjAt(y int, m time.Month, d, hour int) time.Time {
+	return serverstore.BeijingDayAt(time.Date(y, m, d, 0, 0, 0, 0, time.UTC), hour)
+}
+
 func TestShouldRunMonthly(t *testing.T) {
-	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.Local)
+	now := bjAt(2026, 9, 2, 10)
 	cases := []struct {
 		last *time.Time
 		want bool
 	}{
 		{nil, true},
-		{ptr(time.Date(2026, 8, 31, 23, 0, 0, 0, time.Local)), true}, // 上月
-		{ptr(time.Date(2025, 12, 5, 0, 0, 0, 0, time.Local)), true},  // 跨年
-		{ptr(time.Date(2026, 9, 1, 9, 0, 0, 0, time.Local)), false},  // 本月已跑
+		{ptr(bjAt(2026, 8, 31, 23)), true}, // 上月(北京)
+		{ptr(bjAt(2025, 12, 5, 0)), true},  // 跨年
+		{ptr(bjAt(2026, 9, 1, 9)), false},  // 本月已跑
 	}
 	for _, c := range cases {
 		if got := ShouldRunMonthly(now, c.last); got != c.want {
 			t.Fatalf("ShouldRunMonthly(%v) = %v, want %v", c.last, got, c.want)
 		}
+	}
+	// 北京月边界(旧实现按各自 Location 的本地月比较,UTC 容器下这两个瞬时同属
+	// "8 月" → 9 月报表被漏跑;必须按北京月切开)。
+	sep1 := bjAt(2026, 9, 1, 0).Add(30 * time.Minute) // 北京 9/1 00:30
+	aug31 := bjAt(2026, 8, 31, 23)                    // 北京 8/31 23:00
+	if !ShouldRunMonthly(sep1, &aug31) {
+		t.Fatal("北京月边界:8/31 23:00 的 last_run 必须触发 9 月报表")
+	}
+	if ShouldRunMonthly(sep1, &sep1) {
+		t.Fatal("同一北京月不应重复跑")
 	}
 }
 
@@ -41,8 +57,10 @@ func ptr(v time.Time) *time.Time { return &v }
 
 func recordUsage(t *testing.T, db *sql.DB, userID int64, model string, pt, ct int64, at time.Time) {
 	t.Helper()
+	// created_at 直接绑绝对瞬时(timestamptz 参数):不再把裸墙钟字符串交给 PG
+	// 按会话时区解释(那会让夹具随进程 TZ/会话时区漂移 8 小时)。
 	_, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at)
-		VALUES (?, ?, ?, ?, 0, 'chat', 0.1, ?)`, userID, model, pt, ct, at.Format("2006-01-02 15:04:05"))
+		VALUES (?, ?, ?, ?, 0, 'chat', 0.1, ?)`, userID, model, pt, ct, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,11 +73,11 @@ func TestGenerateMonthlyReport(t *testing.T) {
 	u1, _ := serverstore.CreateUser(db, &serverstore.User{Username: "r1", Source: "local", Status: 1})
 	u2, _ := serverstore.CreateUser(db, &serverstore.User{Username: "r2", Source: "local", Status: 1})
 	// 上月内两条(2026-08)、本月一条(2026-09,不应计入)
-	recordUsage(t, db, u1, "m1", 1000, 100, time.Date(2026, 8, 15, 10, 0, 0, 0, time.Local))
-	recordUsage(t, db, u2, "m1", 2000, 200, time.Date(2026, 8, 16, 10, 0, 0, 0, time.Local))
-	recordUsage(t, db, u1, "m2", 99999, 0, time.Date(2026, 9, 1, 10, 0, 0, 0, time.Local))
+	recordUsage(t, db, u1, "m1", 1000, 100, bjAt(2026, 8, 15, 10))
+	recordUsage(t, db, u2, "m1", 2000, 200, bjAt(2026, 8, 16, 10))
+	recordUsage(t, db, u1, "m2", 99999, 0, bjAt(2026, 9, 1, 10))
 
-	body, err := GenerateMonthlyReport(db, time.Date(2026, 9, 5, 0, 0, 0, 0, time.Local))
+	body, err := GenerateMonthlyReport(db, bjAt(2026, 9, 5, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
