@@ -32,7 +32,9 @@ done
 [ -n "$LIST" ] && [ -f "$LIST" ] || { echo "::error::缺少 --list <渠道列表>" >&2; exit 2; }
 [ -n "${VERSION:-}" ] || { echo "::error::缺少 VERSION(如 v2.7.0)" >&2; exit 2; }
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${CI_IMAGE_BUILD_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# CI_IMAGE_BUILD_ROOT 只给**本地回归门禁**用(把脚本指向临时目录,避免污染工作树里的
+# client-assets/ channels-context/ image.tar);CI 里不设置,行为与之前完全一致。
 # 一切相对路径(client-assets / channels / channels-context / server 构建上下文)
 # 都以仓库根为基准 —— 调用方的工作目录不影响结果。
 cd "$REPO_ROOT"
@@ -56,13 +58,20 @@ for channel in "${CHANNELS[@]}"; do
 
   # 1) 客户端资产:该渠道的三平台安装包 + 清单(镜像内携带)。
   #    目录必须存在:server/Dockerfile 用目录形式 COPY(缺目录会构建失败)。
+  #
+  #    **Linux 只放 AppImage,不放 .deb**(2026-09-10 定案):两者是同一个应用的两种
+  #    打包,员工装一个就够;deb 常年没人下载,却给每个渠道的镜像白加 ~115MB。
+  #    CI 仍会把 deb 作为构建产物上传(开发者本地/PR 可用),只是不进镜像。
   rm -rf client-assets
   mkdir -p client-assets/client
   if [ -d "$ARTIFACTS/$channel" ]; then
     cp -a "$ARTIFACTS/$channel/." client-assets/client/
+    rm -f client-assets/client/*.deb
   fi
   if [ -z "$(ls -A client-assets/client)" ]; then
-    echo "::error::渠道 ${INDEX}/${TOTAL} 没有任何客户端安装包(artifacts/${channel} 为空)" >&2
+    # 只报序号,不回显渠道 id 与路径 —— 不依赖 ::add-mask:: 兜底(掩码是"从发出
+    # 那一刻起"生效的,消息里少写一个 id 就少一层依赖)。
+    echo "::error::渠道 ${INDEX}/${TOTAL} 没有任何客户端安装包(该渠道的 artifacts 目录为空)" >&2
     echo "::error::客户端随镜像分发是单包交付的核心;缺客户端说明桌面 job 没有产出" >&2
     exit 1
   fi
@@ -125,7 +134,11 @@ for channel in "${CHANNELS[@]}"; do
       --tag "${IMAGE}:v${VER}" \
       --load \
       server || return 1
-    docker save "${IMAGE}:v${VER}" -o "$img_tar" || return 1
+    # 双 tag:tar 里同时带 vX.Y.Z 与 X.Y.Z。CI 内部与 latest.json 的 image_tag 用
+    # 带 v 的形式,而部署文档 §3/§6 的示例用不带 v 的形式 —— 只打一个,照文档敲的
+    # 人就会去 docker.io 拉取(隔离网/镜像代理下直接 403,2026-09-10 实测)。
+    docker tag "${IMAGE}:v${VER}" "${IMAGE}:${VER}" || return 1
+    docker save "${IMAGE}:v${VER}" "${IMAGE}:${VER}" -o "$img_tar" || return 1
     ( cd "$OUT/$channel" && zip -1 -q "$ARCHIVE" "$img_tar" -j ) || return 1
     rm -f "$img_tar"
     ( cd "$OUT/$channel" && sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS ) || return 1

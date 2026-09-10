@@ -92,8 +92,20 @@ services:
       # 要关闭更新检查请显式写 off / none / - / disabled。
       PICOAI_UPDATE_ENDPOINT: ${PICOAI_UPDATE_ENDPOINT:-}
       # 可信反向代理(审计 2026-08-25 F-02):Caddy 固定 IP 默认 172.28.0.2,
-      # 使登录限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS
+      # 使登录限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS。
+      # 宿主机已有别的反代(共享 Caddy/nginx)时,改成它连过来的地址(通常是
+      # docker 网桥网关,如 172.20.0.1)。
       PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-172.28.0.2}
+      # 本服务端对外可达地址(如 https://ai.example.com)。**配了就是唯一权威**;
+      # 留空则按请求推导(X-Forwarded-Proto: https → TLS → 回环 http)。
+      # 为什么要配:客户端更新清单里的下载地址必须是**绝对 https**,而客户端会
+      # 丢弃非 https 的整份清单。若前面挂的是不设 X-Forwarded-Proto 的反代,
+      # 或服务端在反代后面判断不出协议,清单会按设计拒发 client 段
+      # (`client_unavailable`),表现为"检查更新永远说已是最新"。
+      PICOAI_PUBLIC_BASE_URL: ${PICOAI_PUBLIC_BASE_URL:-}
+      # 单账号登录失败上限(留空 = 服务端默认)。**仅测试环境**建议调大,
+      # 免得反复登录把管理员账号锁死。
+      PICOAI_LOGIN_MAX_ATTEMPTS: ${PICOAI_LOGIN_MAX_ATTEMPTS:-}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./picoaide-data:/data
