@@ -38,6 +38,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { parse as parseYaml } from 'yaml'
 
 const root = resolve(import.meta.dirname, '..')
 const workflowDirectory = join(root, '.github', 'workflows')
@@ -195,6 +196,34 @@ export function checkWorkflow(name) {
   // YAML 缩进不允许 tab;这类错误会让整个文件失效,先单独拦一道。
   if (/^\t|:\s*\t|\s\t/u.test(text)) {
     failures.push({ name, line: 0, detail: 'YAML 缩进中不允许出现 tab 字符' })
+  }
+
+  // 结构解析(2026-09-10 补):bash -n 只看得见 shell 语法,看不见 YAML 语义。
+  // 实测踩过一次:`- name: ... (fork PR: no channel access)` 里的 `: ` 让 YAML
+  // 把它当成嵌套映射,整个 workflow 直接失效 —— 而所有 run 块的 bash -n 全绿。
+  // 这类错误必须在本地拦住,否则要等 push 之后由 GitHub 报"invalid workflow"。
+  let document
+  try {
+    document = parseYaml(text)
+  } catch (cause) {
+    const line = typeof cause?.linePos?.[0]?.line === 'number' ? cause.linePos[0].line : 0
+    failures.push({ name, line, detail: `YAML 解析失败: ${cause?.message ?? String(cause)}` })
+    return { failures, checked: 0 }
+  }
+  if (typeof document !== 'object' || document === null || typeof document.jobs !== 'object' || document.jobs === null) {
+    failures.push({ name, line: 0, detail: 'YAML 顶层缺少 jobs 映射' })
+    return { failures, checked: 0 }
+  }
+  for (const [jobId, job] of Object.entries(document.jobs)) {
+    if (!Array.isArray(job?.steps) || job.steps.length === 0) {
+      failures.push({ name, line: 0, detail: `job ${jobId} 没有 steps` })
+      continue
+    }
+    for (const step of job.steps) {
+      if (typeof step?.run === 'string' && typeof step.uses === 'string') {
+        failures.push({ name, line: 0, detail: `job ${jobId} 的某个 step 同时有 run 与 uses` })
+      }
+    }
   }
 
   const blocks = extractRunBlocks(text)

@@ -76,5 +76,8 @@
     "version": "node scripts/version.mjs",
     "version:set": "node scripts/version.mjs set",
     "version:check": "node scripts/version.mjs check"
+  },
+  "devDependencies": {
+    "yaml": "^2.9.0"
   }
 }
