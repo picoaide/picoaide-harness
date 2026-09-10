@@ -24,12 +24,13 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
@@ -53,7 +54,8 @@ func buildRouter(t *testing.T) *gin.Engine {
 		Admin:         (&serverauth.AdminAPI{}).Handlers(),
 		Appstore:      appstore.NewHandlers(nil),
 		Bootstrap:     bootstrap.NewHandlers(nil),
-		Brand:         brand.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Channel:       channel.NewHandlers(),
+		PortalAdmin:   portal.NewAdminHandlers(nil),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
 		Market:        marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
 		Agentshare:    agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
@@ -202,34 +204,44 @@ func TestAPIJSONContract(t *testing.T) {
 }
 
 // TestV2RealDB(真实 PG): 新命名空间公开端点用真实 DB 验证登录闭环。
-// TestPortalEscaping: 门户页对品牌名做 HTML 转义(2026-09-08 P1-6)且带基础
-// 安全头。品牌名由 super_admin 可设,门户对未认证访客开放 → 未转义即存储型 XSS。
+// TestPortalEscaping: 门户页对其渲染的渠道内容做 HTML 转义且带基础安全头。
+//
+// 2026-09-10 变更:门户的名称/标语/欢迎语来源从 webadmin 设置(brand.login.*)
+// 改为**渠道配置**(镜像内 channels/<id>/channel.json,由私有仓在构建期注入)。
+// 该内容现在是编译期可信的,不再由管理员在线编辑;但转义要求不变 ——
+// 渠道内容是文本,任何 < > " 都必须转义,否则渠道配置里一个尖括号就能
+// 在未认证访客的门户页上注入脚本。
+//
+// 同时验证门户**不再读取**数据库里的 brand.* 设置(旧来源已下线)。
 func TestPortalEscaping(t *testing.T) {
 	if os.Getenv("PG_DSN_TEST") == "" {
 		t.Skip("PG_DSN_TEST not set; skipping real-DB test")
 	}
 	db, cleanup := serverstore.NewTestDB(t)
 	defer cleanup()
+	// 旧来源:即便有人在 settings 里塞了脚本,门户也不再读它
 	if err := serverstore.SetSetting(db, "brand.login.display_name", `<script>alert(1)</script>`); err != nil {
 		t.Fatal(err)
 	}
+
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/", func(c *gin.Context) { servePortal(c, db) })
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/", w.Body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("portal = %d", w.Code)
 	}
 	body := w.Body.String()
-	if strings.Contains(body, "<script>alert(1)</script>") {
-		t.Fatal("portal must not contain the raw brand name (stored XSS)")
-	}
-	if !strings.Contains(body, "<title>&lt;script&gt;alert(1)&lt;/script&gt;</title>") {
-		t.Fatalf("portal title not escaped; body=%s", body)
+	if strings.Contains(body, "<script") {
+		t.Fatalf("门户不得包含任何 <script(零脚本页面): %s", body)
 	}
 	if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Content-Security-Policy") == "" {
 		t.Fatalf("portal must carry baseline security headers, got %v", w.Header())
+	}
+	// 门户对外是纯 HTML+CSS:CSP 不放开 script-src
+	if csp := w.Header().Get("Content-Security-Policy"); strings.Contains(csp, "script-src") {
+		t.Fatalf("CSP 不应放开 script-src(零脚本页面): %s", csp)
 	}
 }
 
@@ -254,7 +266,8 @@ func TestV2RealDB(t *testing.T) {
 		Admin:         (&serverauth.AdminAPI{DB: db}).Handlers(),
 		Appstore:      appstore.NewHandlers(db),
 		Bootstrap:     bootstrap.NewHandlers(db),
-		Brand:         brand.NewHandlers(db, t.TempDir()),
+		Channel:       channel.NewHandlers(),
+		PortalAdmin:   portal.NewAdminHandlers(nil),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "dev" }, "official"),
 		Market:        marketplace.NewHandlers(db, t.TempDir()),
 		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),

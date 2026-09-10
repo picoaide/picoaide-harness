@@ -25,7 +25,6 @@ describe('导航权限过滤(P2-43)', () => {
     expect(visible).not.toContain('/departments')
     expect(visible).not.toContain('/gateway')
     expect(visible).not.toContain('/auth')
-    expect(visible).not.toContain('/brand')
     expect(visible).not.toContain('/connectors')
     expect(visible).not.toContain('/server-info')
   })

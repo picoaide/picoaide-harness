@@ -38,9 +38,7 @@ const (
 	PermConnectorWrite  = "connector:write"
 	PermAuditRead       = "audit:read"            // 审计日志
 	PermAuditRetention  = "audit:retention:write" // 审计保留策略(仅 super_admin)
-	PermBrandRead       = "brand:read"            // 品牌
-	PermBrandWrite      = "brand:write"
-	PermPortalRead      = "portal:read" // 门户首页
+	PermPortalRead      = "portal:read"           // 门户首页
 	PermPortalWrite     = "portal:write"
 	PermServerInfoRead  = "server-info:read" // 服务器信息(含错误监控配置面,2026-09-08:删除零消费的 error-monitoring:read)
 )
@@ -56,7 +54,6 @@ var AllPermissions = []string{
 	PermCapabilityRead, PermCapabilityWrite,
 	PermConnectorRead, PermConnectorWrite,
 	PermAuditRead, PermAuditRetention,
-	PermBrandRead, PermBrandWrite,
 	PermPortalRead, PermPortalWrite,
 	PermServerInfoRead,
 }

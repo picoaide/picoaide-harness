@@ -19,12 +19,13 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/sharedskills"
@@ -47,17 +48,20 @@ type Deps struct {
 	Admin     *serverauth.AdminHandlers
 	Appstore  *appstore.Handlers
 	Bootstrap *bootstrap.Handlers
-	Brand     *brand.Handlers
 	// ClientRelease 客户端安装包下发(随镜像发布,见 internal/clientrelease)。
 	ClientRelease *clientrelease.Handlers
-	Market        *marketplace.Handlers
-	Agentshare    *agentshare.Handlers
-	Shared        *sharedskills.Handlers
-	Capability    *capabilities.Handlers
-	Connector     *connectors.Handlers
-	Telemetry     *telemetry.Handlers
-	Gateway       *llmgateway.Handlers
-	Reports       *reports.Handlers
+	// Channel 渠道内容下发(登录页/客户端界面/门户共用一份渠道配置)。
+	Channel *channel.Handlers
+	// PortalAdmin 门户页配置(公开面的名称/欢迎语来自渠道;此处只管分发与开关)。
+	PortalAdmin *portal.AdminHandlers
+	Market      *marketplace.Handlers
+	Agentshare  *agentshare.Handlers
+	Shared      *sharedskills.Handlers
+	Capability  *capabilities.Handlers
+	Connector   *connectors.Handlers
+	Telemetry   *telemetry.Handlers
+	Gateway     *llmgateway.Handlers
+	Reports     *reports.Handlers
 }
 
 // Register 集中装配两个命名空间分组下的全部路由。
@@ -97,7 +101,6 @@ const maxJSONBody = 1 << 20
 var largeBodyRoutes = map[string]struct{}{
 	"POST " + NamespaceServer + "/admin/skills/:name/archive": {}, // marketplace 24MB
 	"POST " + NamespaceServer + "/admin/agents/:name/archive": {}, // agentshare 24MB
-	"POST " + NamespaceServer + "/admin/brand/logo":           {}, // multipart ≤4MB
 	"POST " + NamespaceClientV2 + "/shared-skills":            {}, // sharedskills 24MB
 	"POST " + NamespaceClientV2 + "/agent-presets":            {}, // agentshare 24MB
 }
@@ -142,16 +145,17 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	// 启动配置
 	cli.GET("/config/bootstrap", serverauth.BearerAuth(d.DB), d.Bootstrap.Bootstrap)
 
+	// 渠道内容(公开:客户端登录页在未登录时就要拿名称/标语/logo)
+	cli.GET("/channel", d.Channel.PublicChannel)
+	cli.GET("/channel/logo", d.Channel.Logo)
+	cli.HEAD("/channel/logo", d.Channel.Logo)
+
 	// 客户端安装包(公开:员工首次安装与升级都要能取,登录前也要能拿)
 	// 清单地址故意放在 /api/client/v2/updates/manifest,与更新服务器上的
 	// latest.json 同形状 —— 客户端一套解析逻辑走两种来源。
 	cli.GET("/updates/manifest", d.ClientRelease.Manifest)
 
-	// 品牌/门户(公开)
-	cli.GET("/brand", d.Brand.PublicBrand)
-	cli.GET("/brand/logo/:name", d.Brand.Logo)
-	cli.HEAD("/brand/logo/:name", d.Brand.Logo)
-	cli.GET("/portal", d.Brand.PublicPortal)
+	// 门户(公开;站点名/欢迎语来自渠道配置,见 internal/channel)
 
 	// 技能商城
 	mg := cli.Group("/marketplace", serverauth.BearerAuth(d.DB))
@@ -358,13 +362,8 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "DELETE", "/connectors/:id", serverauth.PermConnectorWrite, d.Connector.Remove)
 	serverauth.AdminRoute(authed, "PUT", "/connectors/:id/enabled", serverauth.PermConnectorWrite, d.Connector.SetEnabled)
 
-	// 品牌/门户管理
-	serverauth.AdminRoute(authed, "GET", "/brand", serverauth.PermBrandRead, d.Brand.AdminBrand)
-	serverauth.AdminRoute(authed, "PUT", "/brand", serverauth.PermBrandWrite, d.Brand.PutAdminBrand)
-	serverauth.AdminRoute(authed, "POST", "/brand/logo", serverauth.PermBrandWrite, d.Brand.UploadLogo)
-	serverauth.AdminRoute(authed, "DELETE", "/brand/logo", serverauth.PermBrandWrite, d.Brand.DeleteLogo)
-	serverauth.AdminRoute(authed, "GET", "/brand/snapshots", serverauth.PermBrandRead, d.Brand.ListSnapshots)
-	serverauth.AdminRoute(authed, "POST", "/brand/restore", serverauth.PermBrandWrite, d.Brand.RestoreSnapshot)
-	serverauth.AdminRoute(authed, "GET", "/portal", serverauth.PermPortalRead, d.Brand.AdminPortal)
-	serverauth.AdminRoute(authed, "PUT", "/portal", serverauth.PermPortalWrite, d.Brand.PutAdminPortal)
+	// 门户管理(2026-09-10:品牌管理面已删除 —— 名称/文案/标识来自渠道配置,
+	// 改内容 = 改渠道配置并重新构建镜像,因此没有在线编辑端点)
+	serverauth.AdminRoute(authed, "GET", "/portal", serverauth.PermPortalRead, d.PortalAdmin.Get)
+	serverauth.AdminRoute(authed, "PUT", "/portal", serverauth.PermPortalWrite, d.PortalAdmin.Put)
 }

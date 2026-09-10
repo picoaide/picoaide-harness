@@ -85,6 +85,19 @@ RUN rm -f /opt/picoaide/client/.keep
 # 目录位置固定,服务端直接读(无需 entrypoint 落盘:镜像层里读文件是只读、
 # 一次性、随镜像升级而更新,正是我们要的语义)。
 ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
+
+# --- 渠道配置随镜像分发(服务端对外内容的唯一来源) ---
+# CI 构建前把仓库 channels/<channel-id>/ (配置 + logo 等素材)复制成
+# channels-context/channel/,这里直接放进镜像。服务端读它下发
+# GET /api/client/v2/channel:门户页、客户端登录页与界面用的是**同一份**内容,
+# 因此改渠道内容 = 改配置 → 重新构建镜像,内容始终可审计、可追溯。
+# 本地构建不带该上下文时源目录为空 → 渠道目录缺文件,服务端回落内置文案
+# (channel.Load 的兜底),不影响启动。
+# 渠道由构建参数选定(CI 传 --build-arg CHANNEL=<id>;本地默认 official),
+# 构建上下文 channels-context/<id>/ 由 CI 从私有渠道仓检出后暂存。
+# 渠道化因此发生在**构建期**:同一个 Dockerfile,参数不同 → 不同渠道的镜像。
+COPY --from=channelassets ${CHANNEL}/ /opt/picoaide/channel/
+ENV PICOAI_CHANNEL_DIR=/opt/picoaide/channel
 # 以 root 启动 entrypoint(修正挂载卷所有权)→ su-exec 降权到 picoaide 运行
 USER root
 VOLUME ["/data"]

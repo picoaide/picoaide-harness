@@ -30,6 +30,16 @@ var Dir = func() string {
 	return "/opt/picoaide/client"
 }()
 
+// Asset 单个平台安装包(CLIENT-RELEASE.json 里的一条)。
+type Asset struct {
+	// File 文件名(相对镜像内资产目录);下载地址由请求来源拼出。
+	File string `json:"file"`
+	// SHA256 安装包摘要(小写十六进制);客户端据此校验完整性。
+	SHA256 string `json:"sha256"`
+	// Size 字节数(清单未提供时为 0)。
+	Size int64 `json:"size"`
+}
+
 // Info 是 CLIENT-RELEASE.json 的结构(CI 的 release job 生成)。
 // 用 client.* 嵌套与客户端清单(最新版 latest.json 的 client 段)保持同形状,
 // 少一层翻译;schema/channel_id 供排查与将来演进。
@@ -37,8 +47,8 @@ type Info struct {
 	Schema    int    `json:"schema"`
 	ChannelID string `json:"channel_id"`
 	Client    struct {
-		Version string                     `json:"version"`
-		Assets  map[string]json.RawMessage `json:"assets"`
+		Version string           `json:"version"`
+		Assets  map[string]Asset `json:"assets"`
 	} `json:"client"`
 }
 
@@ -71,15 +81,10 @@ func manifest(c *gin.Context, serverVersion, channel string) {
 		"channel_id": channel,
 		"server":     gin.H{"version": serverVersion},
 	}
-	if info := loadInfo(); info != nil {
+	if info := LoadInfo(); info != nil {
 		assets := make(map[string]gin.H, len(info.Client.Assets))
-		for key, raw := range info.Client.Assets {
-			var a struct {
-				File   string `json:"file"`
-				SHA256 string `json:"sha256"`
-				Size   int64  `json:"size"`
-			}
-			if json.Unmarshal(raw, &a) != nil || a.File == "" {
+		for key, a := range info.Client.Assets {
+			if a.File == "" {
 				continue
 			}
 			assets[key] = gin.H{
@@ -112,8 +117,9 @@ func file(c *gin.Context) {
 	http.ServeFile(c.Writer, c.Request, full)
 }
 
-// loadInfo 读并解析资产清单;不存在或损坏时返回 nil(镜像可不带客户端)。
-func loadInfo() *Info {
+// LoadInfo 读并解析资产清单;不存在或损坏时返回 nil(镜像可不带客户端)。
+// 门户页据此生成下载入口,与 /api/client/v2/updates/manifest 同源。
+func LoadInfo() *Info {
 	raw, err := os.ReadFile(filepath.Join(Dir, "CLIENT-RELEASE.json"))
 	if err != nil {
 		return nil

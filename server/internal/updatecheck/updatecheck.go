@@ -39,11 +39,6 @@ const (
 // 并用 PICOAI_CHANNEL 声明自身渠道以启用隔离校验。
 const DefaultEndpoint = "https://release.picoaide.com/official/latest.json"
 
-// DefaultClientDownloadsURL 是官方渠道的客户端安装包目录。
-// 门户页在管理员未配置任何平台下载链接时回落到这里 —— 客户端分发已不再
-// 依赖 GitHub Releases(弃用原因见包注释)。
-const DefaultClientDownloadsURL = "https://release.picoaide.com/official/releases"
-
 // EndpointEnv 是覆盖更新清单地址的环境变量名。
 const EndpointEnv = "PICOAI_UPDATE_ENDPOINT"
 

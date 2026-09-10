@@ -21,12 +21,13 @@ import (
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/brand"
 	"github.com/picoaide/picoaide/internal/capabilities"
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
+	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
@@ -166,18 +167,22 @@ func main() {
 		Admin:     (&serverauth.AdminAPI{DB: db}).Handlers(),
 		Appstore:  appstore.NewHandlers(db),
 		Bootstrap: bootstrap.NewHandlers(db),
-		Brand:     brand.NewHandlers(db, *dataDir),
 		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
 		// (GET /api/client/v2/updates/manifest 与 /updates/client/<file>)。
 		ClientRelease: clientrelease.NewHandlers(func() string { return version }, updatecheck.ResolveChannel()),
-		Market:        marketplace.NewHandlers(db, *dataDir+"/skills-cache"),
-		Agentshare:    agentshare.NewHandlers(db, *dataDir+"/agent-presets-cache"),
-		Shared:        sharedskills.NewHandlers(db, *dataDir+"/shared-skills-cache"),
-		Capability:    capabilities.NewHandlers(db, *dataDir+"/skills-cache"),
-		Connector:     connectors.NewHandlers(db),
-		Telemetry:     telemetry.NewHandlers(db),
-		Gateway:       llmgateway.NewHandlers(db),
-		Reports:       reports.NewHandlers(db),
+		// 渠道内容随镜像发布(channels/<id>/ → /opt/picoaide/channel/),服务端读文件下发。
+		Channel: channel.NewHandlers(),
+		// 门户页配置:只管"是否公开 / 下载地址覆盖 / 说明文字"。
+		// 站点名与欢迎语来自渠道配置(上一行),因此没有在线编辑名称的入口。
+		PortalAdmin: portal.NewAdminHandlers(db),
+		Market:      marketplace.NewHandlers(db, *dataDir+"/skills-cache"),
+		Agentshare:  agentshare.NewHandlers(db, *dataDir+"/agent-presets-cache"),
+		Shared:      sharedskills.NewHandlers(db, *dataDir+"/shared-skills-cache"),
+		Capability:  capabilities.NewHandlers(db, *dataDir+"/skills-cache"),
+		Connector:   connectors.NewHandlers(db),
+		Telemetry:   telemetry.NewHandlers(db),
+		Gateway:     llmgateway.NewHandlers(db),
+		Reports:     reports.NewHandlers(db),
 	})
 	// 固定探针(不属于两命名空间)。
 	r.GET("/healthz", bootstrap.NewHandlers(db).Health)
@@ -232,144 +237,98 @@ func main() {
 	}
 }
 
-// servePortal renders the public portal page (v3b): brand login config +
-// portal welcome + client download URL, served at / and /portal.
+// servePortal 渲染公开门户页(/ 与 /portal):站点名 + 欢迎语 + 客户端下载。
+//
+// 2026-09-10 重构:门户内容**全部来自渠道配置**(镜像内 channels/<id>/channel.json),
+// 不再读 webadmin 的 brand.* / portal.welcome 设置 —— 改内容 = 改渠道配置 → 重新
+// 构建镜像,因此内容可审计、可追溯。模板与动效样式在 internal/portal
+// (纯 HTML+CSS,零脚本)。
+//
+// 下载链接默认指向**本服务端**:安装包随服务端镜像发布,由
+// GET /updates/client/<file> 下发,门户因此不需要任何外网地址;
+// 管理员仍可用 portal.client_download_* 覆盖为自有分发地址。
 func servePortal(c *gin.Context, db *sql.DB) {
 	settings, _ := serverstore.GetAllSettings(db)
-	// §9: portal.public=false 时门户不对外开放, 跳转管理后台登录。
+	// portal.public=false 时门户不对外开放, 跳转管理后台登录。
 	if settings["portal.public"] == "false" {
 		c.Redirect(http.StatusFound, "/admin/")
 		return
 	}
-	loginName := settings["brand.login.display_name"]
-	tagline := settings["brand.login.tagline"]
-	welcome := settings["portal.welcome"]
-	// 注:portal.subtitle 目前没有渲染位(历史 payload JSON 已删,见 P1-6 附带),
-	// 保留设置项但不读取,避免未使用变量。
-	// 下载链接: 三平台独立 URL;兼容旧单链接 client_download_url(未拆分时
-	// 三个平台都指向它, 方便从旧配置平滑迁移)。
-	dlLinux := settings["portal.client_download_linux"]
-	dlMac := settings["portal.client_download_mac"]
-	dlWin := settings["portal.client_download_win"]
-	legacyDL := settings["portal.client_download_url"]
-	if dlLinux == "" {
-		dlLinux = legacyDL
+
+	ch := channel.Load()
+	view := portal.View{
+		Name:         ch.Identity.DisplayName,
+		Tagline:      ch.Identity.Tagline,
+		Welcome:      ch.Copy.PortalWelcome,
+		LogoURL:      channelLogoURL(),
+		AdminURL:     "/admin/",
+		DownloadNote: settings["portal.client_download_note"],
+		Version:      version,
+		Channel:      updatecheck.ResolveChannel(),
+		Downloads:    portalDownloads(settings),
 	}
-	if dlMac == "" {
-		dlMac = legacyDL
-	}
-	if dlWin == "" {
-		dlWin = legacyDL
-	}
-	dlNote := settings["portal.client_download_note"]
-	enabled := settings["brand.enabled"] == "true"
-	logoURL := ""
-	if enabled && settings["brand.login.logo"] != "" {
-		logoURL = "/api/client/v2/brand/logo/login"
-	}
-	if loginName == "" {
-		loginName = "PicoAide"
-	}
-	if tagline == "" {
-		tagline = "Enterprise AI Gateway"
-	}
-	// 默认链接指向官方渠道的客户端安装包目录(未配置任何平台链接时)。
-	// 2026-09-10 起客户端分发不再依赖 GitHub Releases(见 internal/updatecheck
-	// 包注释):官方渠道资产由我方更新服务器承载,企业渠道由服务端自身下发。
-	defaultDL := updatecheck.DefaultClientDownloadsURL
-	if dlLinux == "" {
-		dlLinux = defaultDL
-	}
-	if dlMac == "" {
-		dlMac = defaultDL
-	}
-	if dlWin == "" {
-		dlWin = defaultDL
-	}
-	// 门户页全部走 __NAME__ 之类的占位符替换(逐项 htmlEscape);此前遗留的
-	// payload JSON 只被 `_ = payload` 消费,已删除(2026-09-08 审计 P1-6 附带)。
-	html := `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>` + htmlEscape(loginName) + `</title>
-<style>
-  :root{--accent:#4176E6}
-  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#F9FAFB;color:#1a1d24}
-  .card{max-width:520px;width:90%;text-align:center;padding:48px 32px;background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(15,17,21,.06)}
-  .logo{width:72px;height:72px;border-radius:16px;background:#0f1115;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:30px;font-weight:700}
-  .logo img{width:100%;height:100%;object-fit:contain;border-radius:16px}
-  h1{margin:16px 0 4px;font-size:26px;font-weight:700}
-  .tag{color:#6b7280;font-size:14px}
-  .welcome{margin-top:12px;font-size:14px;color:#374151;white-space:pre-wrap}
-  .actions{margin-top:28px;display:grid;gap:12px}
-  .btn{display:block;padding:12px;border-radius:10px;font-size:15px;font-weight:600;text-decoration:none}
-  .btn-primary{background:var(--accent);color:#fff}
-  .btn-outline{border:1px solid #d0d5dd;color:#1a1d24}
-  .downloads{margin-top:20px;display:grid;gap:10px}
-  .downloads .dl-label{font-size:12px;color:#6b7280;text-align:left}
-  .dl-row{display:flex;align-items:center;gap:10px}
-  .dl-row .btn{flex:1;padding:10px}
-  .dl-icon{font-size:16px;line-height:1}
-  .note{margin-top:10px;font-size:12px;color:#6b7280}
-  footer{margin-top:24px;font-size:12px;color:#9ca3af}
-</style>
-</head>
-<body>
-<div class="card">
-  __LOGO__
-  <h1>__NAME__</h1>
-  <div class="tag">__TAGLINE__</div>
-  <div class="welcome">__WELCOME__</div>
-  <div class="actions">
-    <a class="btn btn-primary" href="__ADMIN__">管理后台</a>
-  </div>
-  <div class="downloads">
-    <div class="dl-label">客户端下载</div>
-    <div class="dl-row">
-      <span class="dl-icon">🐧</span>
-      <a class="btn btn-outline" href="__DL_LINUX__">Linux</a>
-    </div>
-    <div class="dl-row">
-      <span class="dl-icon">🍎</span>
-      <a class="btn btn-outline" href="__DL_MAC__">macOS</a>
-    </div>
-    <div class="dl-row">
-      <span class="dl-icon">🪟</span>
-      <a class="btn btn-outline" href="__DL_WIN__">Windows</a>
-    </div>
-  </div>
-  <div class="note">__NOTE__</div>
-  <footer>PicoAide Harness</footer>
-</div>
-</body>
-</html>`
-	// 兜底图形必须与 brands/official/logo.svg 几何一致(黑 tile + 白 brace
-	// mark, 1.25x 放大)——禁止字母 P 等编造图形(AGENTS.md 单一权威规则)。
-	logoHTML := `<span class="logo"><svg viewBox="0 0 1254 1254" width="100%" height="100%" aria-hidden="true"><rect x="0" y="0" width="1254" height="1254" rx="180" fill="#000000"/><g transform="translate(627 627) scale(1.25) translate(-627 -627)"><path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/><line x1="435" y1="627" x2="817" y2="627" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/><circle cx="435" cy="627" r="65" fill="#FFFFFF"/><circle cx="817" cy="627" r="65" fill="#FFFFFF"/></g></svg></span>`
-	if logoURL != "" {
-		logoHTML = `<span class="logo"><img src="` + logoURL + `" alt="logo"></span>`
-	}
-	repl := func(s, k, v string) string {
-		return strings.ReplaceAll(s, k, v)
-	}
-	html = repl(html, "__LOGO__", logoHTML)
-	html = repl(html, "__NAME__", htmlEscape(loginName))
-	html = repl(html, "__TAGLINE__", htmlEscape(tagline))
-	html = repl(html, "__WELCOME__", htmlEscape(welcome))
-	html = repl(html, "__ADMIN__", "/admin/")
-	html = repl(html, "__DL_LINUX__", htmlEscape(dlLinux))
-	html = repl(html, "__DL_MAC__", htmlEscape(dlMac))
-	html = repl(html, "__DL_WIN__", htmlEscape(dlWin))
-	html = repl(html, "__NOTE__", htmlEscape(dlNote))
+
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	// 2026-09-08 P3:门户是唯一对未认证访客开放的 HTML 面,补基础安全头。
+	// 门户是唯一对未认证访客开放的 HTML 面,补基础安全头。
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Frame-Options", "DENY")
+	// 零脚本页面:不放开 script-src(没有 JS 也就没有脚本注入面)。
 	c.Header("Content-Security-Policy", "default-src 'none'; img-src 'self' data: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(portal.Render(view)))
+}
+
+// channelLogoURL 返回渠道 logo 的下发地址;渠道未配 logo 时返回空(模板改用文字标识)。
+func channelLogoURL() string {
+	if channel.LogoPath(false) == "" {
+		return ""
+	}
+	return "/api/client/v2/channel/logo"
+}
+
+// portalDownloads 组装三平台下载项。
+//
+// 默认地址指向**本服务端**的安装包(随镜像发布,见 internal/clientrelease);
+// 管理员配置了 portal.client_download_* 时以配置为准(可指向自有 CDN)。
+// 两者都没有时该平台显示为不可用(而不是给一个坏链接)。
+func portalDownloads(settings map[string]string) []portal.Platform {
+	legacy := settings["portal.client_download_url"]
+
+	pick := func(configured string) string {
+		if configured != "" {
+			return configured
+		}
+		return legacy
+	}
+	// 内置地址:/updates/client/<文件名>(文件由 clientrelease 从镜像目录下发)
+	builtin := func(assetKey string) string {
+		info := clientrelease.LoadInfo()
+		if info == nil {
+			return ""
+		}
+		a, ok := info.Client.Assets[assetKey]
+		if !ok || a.File == "" {
+			return ""
+		}
+		return "/updates/client/" + a.File
+	}
+
+	item := func(name, meta, configured, assetKey string) portal.Platform {
+		url := pick(configured)
+		if url == "" {
+			url = builtin(assetKey)
+		}
+		if url == "" {
+			meta = "该平台暂无可用安装包"
+		}
+		return portal.Platform{Name: name, Meta: meta, URL: url}
+	}
+
+	return []portal.Platform{
+		item("Windows", "x64 · .exe 安装程序", settings["portal.client_download_win"], "win-x64"),
+		item("macOS", "Universal · .dmg 磁盘映像", settings["portal.client_download_mac"], "mac-universal"),
+		item("Linux", "x64 · .AppImage / .deb", settings["portal.client_download_linux"], "linux-x64"),
+	}
 }
 
 // htmlEscape escapes a string for safe embedding in HTML text/attributes.

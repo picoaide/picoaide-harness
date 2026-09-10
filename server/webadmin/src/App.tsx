@@ -1,7 +1,7 @@
 import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
 import { LogOut, Globe, ShieldCheck, KeyRound, ChevronRight, SearchX, Menu, X, Lock, Eye } from 'lucide-react'
-import { me, logout, request, setOnUnauthorized, ADMIN_API, CLIENT_API } from './api'
+import { me, logout, request, setOnUnauthorized, ADMIN_API } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
 import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
@@ -24,7 +24,6 @@ const ServerInfo = lazy(() => import('./pages/ServerInfo'))
 // 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
 const CapabilityCenter = lazy(() => import('./pages/CapabilityCenter'))
 const Connectors = lazy(() => import('./pages/Connectors'))
-const Brand = lazy(() => import('./pages/Brand'))
 
 // Usage 相关页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)。
 // 用量中心(2026-09 重构):子导航布局 + 6 个二级页。
@@ -108,8 +107,6 @@ export default function App() {
   const [baseURL, setBaseURL] = useState('')
   const [adminName, setAdminName] = useState('')
   const [meUser, setMeUser] = useState<MeUser | null>(null)
-  // v3b §5.2: webadmin 自身品牌跟随(登录后从 /api/brand 拉取)。
-  const [brand, setBrand] = useState<{ login?: { display_name?: string; logo_url?: string; tagline?: string }; client?: { display_name?: string; tagline?: string } } | null>(null)
   // 移动端侧栏抽屉开关(< lg 断点;桌面 lg 固定展开)
   const [mobileNav, setMobileNav] = useState(false)
   // 0057 密码/MFA 自助管理
@@ -135,11 +132,6 @@ export default function App() {
         setAdminName(u?.display_name || u?.username || '管理员')
         // 0057: 管理员重置密码后强制改密拦截(完成前业务端点均被 403)。
         if (u?.password_must_change) setForceChange(true)
-        // 品牌跟随: 公开端点(登录前也可用), 失败忽略(默认品牌)。
-        try {
-          const b = await request(`${CLIENT_API}/brand`) as { enabled?: boolean; login?: { display_name?: string; logo_url?: string; tagline?: string } }
-          setBrand(b?.enabled ? b : null)
-        } catch { /* default brand */ }
       },
       () => setAuthed(false)
     )
@@ -188,7 +180,7 @@ export default function App() {
             {/* 品牌 mark: 编译期注入 brands/official/logo.svg(黑 tile + 白花括号) */}
             <img src={BRAND_LOGO_URL} alt="logo" className="h-9 w-9 shrink-0 object-contain" draggable={false} />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">{brand?.login?.display_name || 'PicoAide'}</div>
+              <div className="truncate text-[15px] font-bold tracking-tight text-foreground">PicoAide</div>
               <div className="text-[10px] font-medium text-muted-foreground">Admin Console</div>
             </div>
             {/* 移动端关闭按钮 */}
@@ -317,7 +309,6 @@ export default function App() {
                   <Route path="/departments" element={<Departments />} />
                   <Route path="/gateway" element={<Gateway />} />
                   <Route path="/auth" element={<Auth />} />
-                  <Route path="/brand" element={<Brand />} />
                   <Route path="/error-monitoring" element={<ErrorMonitoring />} />
                   <Route path="/usage" element={<UsageLayout />}>
                     <Route index element={<UsageOverview />} />
