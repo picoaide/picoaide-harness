@@ -7,7 +7,7 @@ import {
   CHANNEL_ENV,
   OFFICIAL_BUILD_DEFAULTS,
   channelArtifactName,
-  channelBuilderConfigArgs,
+  prepareChannelBuilderOverrides,
   readChannelDesktopBranding,
   resolveBuildChannelId,
   resolveChannelBuildContext,
@@ -25,8 +25,19 @@ const build = (JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8'
     win: { artifactName: string }
     nsis: { artifactName: string, shortcutName: string }
     linux: { artifactName: string, maintainer: string, synopsis: string }
+    files: unknown[]
+    asar: unknown
   }
 }).build
+
+/** 解析生成的 electron-builder 配置文件(去掉注释行与 module.exports 前缀)。 */
+function readGeneratedConfig(path: string): Record<string, any> {
+  return JSON.parse(
+    readFileSync(path, 'utf8')
+      .replace(/^\/\/[^\n]*\n/u, '')
+      .replace(/^module\.exports = /u, ''),
+  ) as Record<string, any>
+}
 
 /** 造一个只含 channel.json 的临时渠道仓。 */
 function channelRepo(channelId: string, channel: unknown): string {
@@ -50,6 +61,8 @@ function acmeChannel(): Record<string, unknown> {
       app_id: 'com.acme.ai',
       maintainer: 'acme',
       synopsis: 'Acme 企业内部助手',
+      deep_link_scheme: 'acmeai',
+      deep_link_name: 'Acme AI Link',
     },
   }
 }
@@ -82,7 +95,7 @@ describe('official channel is a no-op', () => {
     expect(context.channelId).toBe('official')
     expect(context.brandDir).toBe(join(repoRoot, 'brands', 'official'))
     // 空数组 = 产物与渠道化改造前逐字节一致。
-    expect(channelBuilderConfigArgs(context)).toEqual([])
+    expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-off-')))).toEqual([])
   })
 
   it('expands the official artifact names as before', () => {
@@ -106,13 +119,25 @@ describe('channel build context', () => {
     expect(channelArtifactName(context, 'nsis', { version: '2.7.0', arch: 'x64', ext: 'exe' }))
       .toBe('Acme-AI-2.7.0-x64-Setup.exe')
 
-    const args = channelBuilderConfigArgs(context)
-    expect(args).toContain('--config.productName=Acme AI 助手')
-    expect(args).toContain('--config.appId=com.acme.ai')
-    expect(args).toContain('--config.nsis.shortcutName=Acme AI 助手')
-    expect(args).toContain('--config.linux.maintainer=acme')
-    // 每一个覆盖项都必须是 --config. 形式（否则会被 electron-builder 当子命令）
-    expect(args.every(arg => arg.startsWith('--config.'))).toBe(true)
+    // 覆盖走**生成的配置文件**,而不是 `--config.x=y` 命令行开关:
+    // electron-builder 的 CLI 点号覆盖不支持数组下标(protocols),实测直接以
+    // "unknown property 'protocols[0]'" 拒绝整次构建。
+    const workDir = mkdtempSync(join(tmpdir(), 'dsh-channel-cfg-'))
+    const args = prepareChannelBuilderOverrides(context, workDir)
+    expect(args[0]).toBe('--config')
+    const config = readGeneratedConfig(args[1]!)
+    expect(config.productName).toBe('Acme AI 助手')
+    expect(config.appId).toBe('com.acme.ai')
+    expect(config.nsis.shortcutName).toBe('Acme AI 助手')
+    expect(config.nsis.artifactName).toBe('Acme-AI-${version}-${arch}-Setup.${ext}')
+    expect(config.linux.maintainer).toBe('acme')
+    // OS 级协议注册必须跟着渠道:浏览器回调靠它跳回客户端,
+    // 确认框里的 scheme 就是渠道客户会看到的东西。
+    expect(config.protocols).toEqual([{ name: 'Acme AI Link', schemes: ['acmeai'] }])
+    // 生成的配置必须**完整继承** package.json 的 build 块(无论 electron-builder
+    // 把 --config 当替换还是合并,结果都要一致)。
+    expect(config.files).toEqual(build.files)
+    expect(config.asar).toEqual(build.asar)
   })
 
   it('falls back to the official brand folder when the channel ships no assets', () => {
@@ -130,7 +155,7 @@ describe('channel build context', () => {
     expect(context.productName).toBe(OFFICIAL_BUILD_DEFAULTS.productName)
     expect(context.brandDir).toBe(join(repoRoot, 'brands', 'official'))
     // 仍然带上覆盖参数（appId/productName 用官方值），产物可复现。
-    expect(channelBuilderConfigArgs(context)).not.toEqual([])
+    expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-fb-')))).not.toEqual([])
   })
 
   it('uses identity.display_name when the channel omits a desktop section', () => {
@@ -138,6 +163,36 @@ describe('channel build context', () => {
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root })
     expect(context.productName).toBe('Acme')
     expect(context.shortcutName).toBe('Acme')
+  })
+})
+
+describe('deep link scheme', () => {
+  it('defaults to the official scheme and emits no override at all for official', () => {
+    const context = resolveChannelBuildContext({ env: {}, repoRoot })
+    expect(context.deepLinkScheme).toBe('picoaide')
+    // 官方渠道连配置文件都不生成 —— 产物与改造前一致。
+    expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-none-')))).toEqual([])
+  })
+
+  it('uses the channel scheme and registers it with the OS', () => {
+    const root = channelRepo('acme', acmeChannel())
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root })
+    expect(context.deepLinkScheme).toBe('acmeai')
+    const workDir = mkdtempSync(join(tmpdir(), 'dsh-scheme-'))
+    const args = prepareChannelBuilderOverrides(context, workDir)
+    expect(readGeneratedConfig(args[1]!).protocols).toEqual([{ name: 'Acme AI Link', schemes: ['acmeai'] }])
+  })
+
+  it('fails the build on a malformed channel scheme', () => {
+    // 构建期 fail-loud:畸形 scheme 会让浏览器回调打不开客户端,这种包不该产出。
+    // (运行期 desktop-channel.ts 则回落官方值 —— 那里没有"拒绝构建"这个选项。)
+    const root = channelRepo('acme', { schema: 1, channel_id: 'acme', desktop: { deep_link_scheme: 'ACME AI' } })
+    expect(() => resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root }))
+      .toThrow(/deep_link_scheme/u)
+  })
+
+  it('rejects a malformed official default (template drift guard)', () => {
+    expect(OFFICIAL_BUILD_DEFAULTS.deepLinkScheme).toBe('picoaide')
   })
 })
 

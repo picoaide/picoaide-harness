@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { channelBuilderConfigArgs, resolveChannelBuildContext } from './channel-build.ts'
+import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 
 const require = createRequire(import.meta.url)
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -19,7 +19,7 @@ const builderCli = require.resolve('electron-builder/cli.js')
 const result = spawnSync(process.execPath, [
   builderCli,
   '--dir',
-  ...channelBuilderConfigArgs(channel),
+  ...prepareChannelBuilderOverrides(channel),
 ], {
   cwd: packageRoot,
   env: {

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -52,6 +53,32 @@ type Config struct {
 		Favicon  string `json:"favicon"`
 		Accent   string `json:"accent"`
 	} `json:"assets"`
+	// Desktop 是随包分发给**客户端**的那部分渠道配置。服务端只读其中一项:
+	// OIDC 回调要拼的深链 scheme —— 它必须与客户端注册/解析的 scheme 一致。
+	Desktop struct {
+		DeepLinkScheme string `json:"deep_link_scheme"`
+	} `json:"desktop"`
+}
+
+// DefaultDeepLinkScheme 未配置时的深链 scheme(= 改造前的硬编码值)。
+const DefaultDeepLinkScheme = "picoaide"
+
+// deepLinkSchemePattern 与客户端 desktop-channel.ts 的校验同源(RFC 3986 scheme)。
+var deepLinkSchemePattern = regexp.MustCompile(`^[a-z][a-z0-9+.-]{1,31}$`)
+
+// DeepLinkScheme 返回本渠道客户端使用的深链 scheme。
+//
+// 浏览器从 IdP 回调跳回客户端时会弹出"打开 <scheme>?"的确认框 —— 渠道客户
+// 不该在这里看到厂商名,所以渠道构建必须用自己的 scheme。**三处必须一致**:
+// 客户端打包时的 protocols(scripts/channel-build.ts)、客户端解析
+// (desktop-channel.ts)、以及本处服务端回调拼串。形状不合法时回落官方值:
+// 一个畸形 scheme 会让浏览器回调彻底打不开客户端。
+func DeepLinkScheme() string {
+	scheme := strings.TrimSpace(Load().Desktop.DeepLinkScheme)
+	if !deepLinkSchemePattern.MatchString(scheme) {
+		return DefaultDeepLinkScheme
+	}
+	return scheme
 }
 
 // Dir 渠道目录(测试可改)。
