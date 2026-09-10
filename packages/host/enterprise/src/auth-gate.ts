@@ -18,7 +18,7 @@ import {
   validateSkillName,
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
-import { brandMarkSvg } from './brand-geometry.ts'
+import { brandMarkSvg } from './channel-geometry.ts'
 import type { Session } from './server-connector/config.ts'
 
 /** 上传 body 上限(审计 2026-08-25 P2-2):本地 upload body 实际只含元数据
@@ -74,7 +74,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 4px; text-align: left; }
   .hint { color: var(--fg); opacity: 0.7; font-size: 12px; margin-top: 8px; }
   .back { background: transparent; color: var(--accent); border: none; font-size: 12px; cursor: pointer; padding: 6px 12px; margin: 0 0 14px; width: auto; }
-  /* Step2 品牌区 */
+  /* Step2 渠道区(名称/标语/logo 来自服务端 /api/client/v2/channel) */
   .brand { margin-bottom: 18px; min-height: 92px; }
   .brand img, .brand .fallback { width: 64px; height: 64px; border-radius: 14px; object-fit: contain; margin-bottom: 8px; }
   .brand .fallback { display: inline-flex; align-items: center; justify-content: center; background: #0f1115; color: #fff; font-size: 28px; font-weight: 700; }
@@ -136,7 +136,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   var brandArea = document.getElementById('brand-area')
   var currentMethod = 'local'
   var currentMethods = []
-  var currentBrand = null
+  var currentChannel = null
   var pollTimer = null
   // 去除服务端地址尾部一个或多个斜杠(兼容带/不带 / 的用户输入)。
   // 纯字符串实现,禁用带反斜杠的正则:正斜杠转义(如 replace(反斜杠+/+$))
@@ -147,12 +147,12 @@ const LOGIN_HTML = `<!DOCTYPE html>
     while (s.charAt(s.length - 1) === '/') s = s.slice(0, -1)
     return s
   }
-  // 品牌兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
+  // 渠道兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
   // 花括号 1.25x 放大)。任何 logo 兜底都必须与 logo.svg 一致,禁止字母 P 等
   // 编造图形(旧版 P 字 logo 已退役)。
   var BRACE_MARK_SVG = ${JSON.stringify(brandMarkSvg('#FFFFFF'))}
 
-  // ---- Step1 → Step2: 并行探测 brand + methods(任一成功进 Step2) ----
+  // ---- Step1 → Step2: 并行探测 channel + methods(任一成功进 Step2) ----
   f1.addEventListener('submit', async function (e) {
     e.preventDefault()
     err1.textContent = ''
@@ -162,22 +162,23 @@ const LOGIN_HTML = `<!DOCTYPE html>
     document.getElementById('next-btn').textContent = '连接中…'
     try {
       var results = await Promise.allSettled([
-        fetch('/api/pico/brand?server=' + encodeURIComponent(server)),
+        fetch('/api/pico/channel?server=' + encodeURIComponent(server)),
         fetch('/api/pico/auth/methods?server=' + encodeURIComponent(server)),
       ])
-      var brandOk = results[0].status === 'fulfilled' && results[0].value.ok
+      var channelOk = results[0].status === 'fulfilled' && results[0].value.ok
       var methodsOk = results[1].status === 'fulfilled' && results[1].value.ok
-      if (!brandOk && !methodsOk) {
+      if (!channelOk && !methodsOk) {
         err1.textContent = '无法连接服务端，请检查地址与网络'
         return
       }
-      if (brandOk) {
+      if (channelOk) {
         try {
-          var b = await results[0].value.json()
-          currentBrand = b.enabled ? b : null
-        } catch (e2) { currentBrand = null }
+          var c = await results[0].value.json()
+          // 渠道内容总是生效(无 enabled 开关):有内容即用, 空载荷回退内置兜底。
+          currentChannel = c && (c.login || c.client || c.title) ? c : null
+        } catch (e2) { currentChannel = null }
       } else {
-        currentBrand = null
+        currentChannel = null
       }
       var ms = [{ name: 'local', configured: true, browser: false }]
       if (methodsOk) {
@@ -195,8 +196,8 @@ const LOGIN_HTML = `<!DOCTYPE html>
 
   function showStep2(methods) {
     currentMethods = methods.filter(function (m) { return !m.hidden })
-    // 品牌区
-    brandArea.innerHTML = renderBrand(currentBrand)
+    // 渠道区
+    brandArea.innerHTML = renderChannel(currentChannel)
     // 方式选择器
     currentMethod = pickDefault(currentMethods)
     renderMethodButtons(currentMethods)
@@ -205,18 +206,18 @@ const LOGIN_HTML = `<!DOCTYPE html>
     document.getElementById('step2').classList.add('active')
   }
 
-  function renderBrand(b) {
-    if (!b) {
+  function renderChannel(ch) {
+    if (!ch) {
       // 兜底:官方花括号 mark(与 logo.svg 一致), 而非字母/编造图形。
       var fallback = '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
       return fallback + '<div class="brand-name">PicoAide</div><div class="brand-tag">Enterprise AI Gateway</div>'
     }
-    var login = b.login || {}
-    // logo_url 是相对路径(/api/client/v2/brand/logo/login): 在 Host 登录页需拼服务端地址。
+    var login = ch.login || {}
+    // logo_url 是相对路径(/api/client/v2/channel/logo): 在 Host 登录页需拼服务端地址。
     // 先统一去尾斜杠(trimServer),避免拼出 //api/client/v2/... 双斜杠路径。
     var server = trimServer(document.getElementById('server').value.trim())
     var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
-    // logo 加载失败时保留花括号兜底(与无品牌时同款)。
+    // logo 加载失败时保留花括号兜底(与无渠道内容时同款)。
     // 安全:logoUrl 来自网关数据(管理员可控),仍须属性转义——旧实现直接拼
     // <img src="...">,网关被劫持/注入时可在登录页(认证前)形成 XSS(2026-09-01 审计)。
     var logo = logoUrl ? '<img src="' + esc(logoUrl) + '" alt="logo" onerror="this.style.display=&quot;none&quot;;this.nextElementSibling.style.display=&quot;inline-flex&quot;"><span class="fallback" style="display:none">' + BRACE_MARK_SVG + '</span>' : '<span class="fallback">' + BRACE_MARK_SVG + '</span>'
@@ -770,10 +771,11 @@ export function apply(ctx: Context, config: Config): void {
         },
       }),
 
-      // v3b: 登录页品牌代理(公开, 无需 token): ?server=<url> 转发服务端
-      // /api/brand; 未传 server 且无 session 时回退默认(登录页回退本地品牌)。
+      // v3b: 登录页渠道代理(公开, 无需 token): ?server=<url> 转发服务端
+      // /api/client/v2/channel; 未传 server 且无 session 时回退空载荷
+      // (登录页回退内置兜底图形与文案)。
       ctx.webServer.register({
-        kind: 'exact', path: '/api/pico/brand',
+        kind: 'exact', path: '/api/pico/channel',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
@@ -783,13 +785,13 @@ export function apply(ctx: Context, config: Config): void {
             serverParam = new URL(req.url ?? '/', 'http://localhost').searchParams.get('server') ?? ''
           } catch { /* ignore malformed query */ }
           const serverURL: string = serverParam || s?.serverURL || ''
-          if (serverURL === '') return json(res, 200, { enabled: false })
+          if (serverURL === '') return json(res, 200, {})
           try {
             assertServerURLAllowed(serverURL)
-            const data = await fetchJSON(serverURL, '/api/client/v2/brand')
+            const data = await fetchJSON(serverURL, '/api/client/v2/channel')
             json(res, 200, data)
           } catch {
-            json(res, 200, { enabled: false })
+            json(res, 200, {})
           }
         },
       }),

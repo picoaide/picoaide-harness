@@ -1,7 +1,7 @@
 /**
  * Brand-geometry drift guard (audit 2026-09-08 P2-39).
  *
- * `src/brand-geometry.ts` is the ONLY place the enterprise surfaces read the
+ * `src/channel-geometry.ts` is the ONLY place the enterprise surfaces read the
  * mark's numbers from. This test parses the single authority
  * (`brands/official/logo.svg`) and fails on any divergence, so a change to the
  * brand folder cannot leave the shipped client drawing the old artwork.
@@ -19,7 +19,7 @@ import {
   BRAND_TILE_VIEWBOX,
   brandMarkSvg,
   brandTileSvg,
-} from '../src/brand-geometry.ts'
+} from '../src/channel-geometry.ts'
 
 const REPO_ROOT = new URL('../../../..', import.meta.url)
 const svg = readFileSync(new URL('brands/official/logo.svg', REPO_ROOT), 'utf8')

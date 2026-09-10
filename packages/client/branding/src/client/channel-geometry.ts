@@ -4,9 +4,9 @@
  * The single authority is `brands/official/logo.svg` (see AGENTS.md: never
  * hand-draw, never copy geometry from memory). This module holds the parsed
  * numbers ONCE so the React surfaces do not each re-transcribe the paths
- * (audit 2026-09-08 P2-39 counted 4 hand-copied sites). `tests/brand-geometry.spec.ts`
+ * (audit 2026-09-08 P2-39 counted 4 hand-copied sites). `tests/channel-geometry.spec.ts`
  * parses the SVG and fails if any constant drifts from it.
- * @module @picoaide/dsh-branding/brand-geometry
+ * @module @picoaide/dsh-branding/channel-geometry
  */
 
 /** Canvas size of the authoritative artwork (square). */

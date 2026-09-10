@@ -7,9 +7,9 @@ import {
   BRAND_NODES,
   BRAND_TILE_RADIUS_RATIO,
   BRAND_TILE_VIEWBOX,
-} from '../brand-geometry.ts'
-import type { BrandConfig } from '../brand-sync.ts'
-import { useBrand } from './brand-store.ts'
+} from '../channel-geometry.ts'
+import type { ChannelConfig } from '../channel-sync.ts'
+import { useChannel } from './channel-store.ts'
 import { UpdateIndicator, useUpdateState } from './UpdateIndicator.tsx'
 
 // build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
@@ -32,7 +32,7 @@ declare const process: { env: { PICOAI_PRODUCT_VERSION?: string } }
  * braces take the base surface, so the tile flips with the skin system.
  */
 /** Braces + connector + nodes in brands/official/logo.svg coordinates, enlarged 1.25×.
- * The numbers come from ../brand-geometry.ts (drift-guarded against the SVG). */
+ * The numbers come from ../channel-geometry.ts (drift-guarded against the SVG). */
 function BraceGlyph() {
   return createElement(
     'svg',
@@ -76,13 +76,13 @@ function BraceGlyph() {
 
 /**
  * The brace-mark tile; `className` rides along (upstream slot geometry).
- * When a server logo_url is provided (dynamic server brand), an <img> is
+ * When a server logo_url is provided (dynamic channel content), an <img> is
  * rendered instead of the brace artwork; failures fall back to the brace.
  */
 export function BraceMark({ size, className }: { size: number; className?: string | undefined }) {
-  const brand = useBrand()
-  const logoUrl = resolveClientLogo(brand)
-  const name = resolveClientName(brand)
+  const channel = useChannel()
+  const logoUrl = resolveClientLogo(channel)
+  const name = resolveClientName(channel)
   if (logoUrl) {
     return createElement('span', {
       className,
@@ -121,10 +121,10 @@ export function BraceMark({ size, className }: { size: number; className?: strin
 }
 
 export function BrandName() {
-  const brand = useBrand()
+  const channel = useChannel()
   const version = process.env.PICOAI_PRODUCT_VERSION as string | undefined
   const updateState = useUpdateState()
-  const name = resolveClientName(brand) === 'PicoAide Harness' ? 'PicoAide' : resolveClientName(brand)
+  const name = resolveClientName(channel) === 'PicoAide Harness' ? 'PicoAide' : resolveClientName(channel)
   return createElement(
     'span',
     { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 700, letterSpacing: '0.3px' } },
@@ -150,10 +150,9 @@ export function BrandName() {
 
 /** Right-top brand badge (conversation.session.header.actions slot). */
 export function BrandBadge() {
-  const brand = useBrand()
-  const logo = resolveClientLogo(brand)
-  const name = resolveClientName(brand)
-  if (!logo && !brand?.enabled) return null
+  const channel = useChannel()
+  const logo = resolveClientLogo(channel)
+  const name = resolveClientName(channel)
   return createElement(
     'span',
     { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-fg-secondary, #666)', opacity: 0.85 } },
@@ -162,12 +161,12 @@ export function BrandBadge() {
   )
 }
 
-/** Resolve the client-side display name from a brand config (or default). */
-function resolveClientName(brand: BrandConfig | null | undefined): string {
-  return brand?.client?.display_name && brand.client.display_name !== '' ? brand.client.display_name : 'PicoAide Harness'
+/** Resolve the client-side display name from a channel config (or default). */
+function resolveClientName(channel: ChannelConfig | null | undefined): string {
+  return channel?.client?.display_name && channel.client.display_name !== '' ? channel.client.display_name : 'PicoAide Harness'
 }
 
-/** Resolve the client logo URL from a brand config. */
-function resolveClientLogo(brand: BrandConfig | null | undefined): string | undefined {
-  return brand?.enabled ? brand.client?.logo_url : undefined
+/** Resolve the client logo URL from a channel config. */
+function resolveClientLogo(channel: ChannelConfig | null | undefined): string | undefined {
+  return channel?.client?.logo_url
 }

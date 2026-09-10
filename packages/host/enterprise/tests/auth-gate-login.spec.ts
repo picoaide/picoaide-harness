@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { brandMarkSvg } from '../src/brand-geometry.ts'
+import { brandMarkSvg } from '../src/channel-geometry.ts'
 
 // 回归测试(2026-09):LOGIN_HTML 是 TS 模板字符串,内联 <script> 里的正则
 // `\/` 会被模板转义(cooked)成 `/`(输出 `//$` = 空正则+行注释)导致浏览器
@@ -53,6 +53,16 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     // 模板里保留占位符,由 apply() 在开局替换(带斜杠的默认地址由 trimServer 兜底)。
     const html = renderedLoginHTML()
     expect(html).toContain('__DEFAULT_SERVER__')
+  })
+
+  it('reads channel content from the login-page channel proxy (brand config retired)', () => {
+    const script = loginScript()
+    // 数据来源是渠道配置(服务端 /api/client/v2/channel, 经本地 /api/pico/channel 代理)。
+    expect(script).toContain("fetch('/api/pico/channel?server='")
+    expect(script).not.toContain('/api/pico/brand')
+    expect(script).toContain('renderChannel(currentChannel)')
+    // 渠道内容总是生效: 不再有 enabled 开关判定。
+    expect(script).not.toMatch(/\.enabled/u)
   })
 
   it('escapes gateway-controlled method names and labels (P1-7)', () => {
