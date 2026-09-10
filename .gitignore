@@ -21,6 +21,9 @@ packages/host/desktop/build/app-icon.png
 packages/host/desktop/build/app-icon-mac.png
 packages/host/desktop/build/tray-icon*.png
 packages/host/desktop/build/assistedMessages.yml
+# 渠道包(私有仓 picoaide/channels/<id>/channel.json)由 CI 在打包前复制进
+# build/,随应用资源分发;内容是客户品牌,绝不入库。
+packages/host/desktop/build/channel.json
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/

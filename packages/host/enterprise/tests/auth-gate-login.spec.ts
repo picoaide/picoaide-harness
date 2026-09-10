@@ -79,6 +79,32 @@ describe('auth-gate LOGIN_HTML inline script', () => {
     const esc = new Function(`${escSrc![0]}; return esc`)() as (v: unknown) => string
     expect(esc('"><img src=x onerror=alert(1)>')).toBe('&quot;&gt;&lt;img src=x onerror=alert(1)&gt;')
   })
+
+  it('skips the server-address step when the channel package preconfigured a domain', () => {
+    const script = loginScript()
+    // 渠道包预置域名(落进 #server 的 value)→ 直接进登录,员工第一眼就是
+    // 账号密码(或一次点击的浏览器 SSO),而不是"请输入你公司的地址"。
+    expect(script).toContain('function connect(server)')
+    expect(script).toContain('autoConnect')
+    // 判据是"输入框已有值":模板占位符为空时输入框为空 → 仍走原两步流程。
+    expect(script).toMatch(/autoConnect[\s\S]*?getElementById\('server'\)\.value\.trim\(\) === ''/)
+    // 提交与自动连接必须走同一条探测路径,不能各写一份。
+    expect(script).toContain("f1.addEventListener('submit'")
+  })
+
+  it('escapes the channel-provided default domain before inlining it into the attribute', () => {
+    // 预置域名由 apply() 在服务端替换进 value="…":必须经属性转义,
+    // 否则一个带引号的地址就能从属性里逃逸(登录页是认证前唯一的 HTML 面)。
+    const src = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
+    expect(src).toContain("escapeHtmlAttribute(config.defaultServer ?? '')")
+    expect(src).not.toContain("replaceAll('__DEFAULT_SERVER__', config.defaultServer ?? '')")
+    const fn = src.match(/function escapeHtmlAttribute\(value: string\): string \{[\s\S]*?\n\}/)
+    expect(fn, 'escapeHtmlAttribute must be findable').not.toBeNull()
+    const escape = new Function(
+      `${fn![0].replace(/: string/g, '')}; return escapeHtmlAttribute`,
+    )() as (v: string) => string
+    expect(escape('https://a.test"><img src=x>')).toBe('https://a.test&quot;&gt;&lt;img src=x&gt;')
+  })
 })
 
 // ---- 0057 强制改密页模板(CHANGE_PASSWORD_HTML) ----

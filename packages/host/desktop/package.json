@@ -71,11 +71,16 @@
       "types": "./lib/types/loop-notify-contract.d.ts",
       "default": "./lib/loop-notify-contract.js"
     },
+    "./desktop-channel": {
+      "types": "./lib/types/desktop-channel.d.ts",
+      "default": "./lib/desktop-channel.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "build/app-icon.png",
     "build/app-icon-mac.png",
+    "build/channel.json",
     "build/tray-icon*.png",
     "cordis.patch.yml",
     "docs/**",
