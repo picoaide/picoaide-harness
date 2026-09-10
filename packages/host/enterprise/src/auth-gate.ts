@@ -96,7 +96,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     <h1>连接服务端</h1>
     <div class="tagline">输入服务端地址以确认登录方式</div>
     <form id="f1">
-      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" autocomplete="off" spellcheck="false" required>
+      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" __DEFAULT_SERVER_MARK__ autocomplete="off" spellcheck="false" required>
       <button type="submit" id="next-btn">下一步</button>
       <div class="err" id="err-step1"></div>
     </form>
@@ -200,11 +200,23 @@ const LOGIN_HTML = `<!DOCTYPE html>
 
   // 渠道包预置了服务端域名 → 跳过"输入服务端地址"这一步,直接进登录:
   // 员工看到的第一个界面就是账号密码(或点一下就用浏览器 SSO 登录),
-  // 而不是"请输入你公司的地址"。输入框有值就代表渠道包配过(模板占位符为空时
-  // 输入框为空,走原来的两步流程)。
-  (async function autoConnect() {
-    if (document.getElementById('server').value.trim() === '') return
-    var ok = await connect(document.getElementById('server').value.trim())
+  // 而不是"请输入你公司的地址"。
+  //
+  // 判据是**服务端写的标记**(data-default-server),不是"输入框有值":浏览器
+  // 在 reload 时会恢复表单值,用"有值"判断会让未渠道化的构建也触发自动连接。
+  //
+  // 写法注意:这里刻意用"函数声明 + void 调用",而不是把 IIFE 直接写在行首。
+  // 本脚本是无分号(ASI)风格,而紧跟在一个调用语句之后的左圆括号不会触发自动
+  // 分号插入 —— 解析器会把上一行读成"调用那个函数的返回值",一执行就抛
+  // TypeError,后面所有语句(包括 #f2 登录表单的提交处理)全部不注册。
+  // 症状极具迷惑性:Step1→Step2 正常(它注册在前面),点「登录」却只是原生提交、
+  // 页面刷新回 Step1。2026-09-10 客户端 E2E 从 13/13 掉到 5/13 就是这个原因,
+  // 而"脚本能被 new Function 解析"的语法测试**抓不到**(它语法上是合法的)。
+  async function autoConnect() {
+    var serverInput = document.getElementById('server')
+    if (serverInput.getAttribute('data-default-server') !== '1') return
+    if (serverInput.value.trim() === '') return
+    var ok = await connect(serverInput.value.trim())
     if (!ok) return
     // 只有浏览器方式可用(纯 OIDC/OpenID 部署)时直接发起跳转,员工不必再点一次。
     var hasPassword = currentMethods.some(function (m) {
@@ -216,7 +228,8 @@ const LOGIN_HTML = `<!DOCTYPE html>
       var username = document.getElementById('username')
       if (username && username.style.display !== 'none') username.focus()
     }
-  })()
+  }
+  void autoConnect()
 
   function showStep2(methods) {
     currentMethods = methods.filter(function (m) { return !m.hidden })
@@ -554,8 +567,12 @@ export function apply(ctx: Context, config: Config): void {
   // 会直接落进 `value="…"` 属性 —— 必须做属性转义,否则一个带引号的地址就能
   // 从属性里逃逸。渠道包是自家产物,但登录页是认证前唯一的 HTML 面,
   // 这里按不可信输入处理(与页面内 esc() 同一口径)。
-  const defaultServer = escapeHtmlAttribute(config.defaultServer ?? '')
-  const loginHTML = LOGIN_HTML.replaceAll('__DEFAULT_SERVER__', defaultServer)
+  const configuredServer = (config.defaultServer ?? '').trim()
+  const defaultServer = escapeHtmlAttribute(configuredServer)
+  const loginHTML = LOGIN_HTML
+    .replaceAll('__DEFAULT_SERVER__', defaultServer)
+    // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
+    .replaceAll('__DEFAULT_SERVER_MARK__', configuredServer === '' ? '' : 'data-default-server="1"')
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
