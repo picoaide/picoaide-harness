@@ -90,3 +90,7 @@ server/.scan-staticcheck.txt
 
 # 浏览器 store 回退目录（无 Electron userData 时的兜底;审计 2026-09-08 P2-38b）
 .browser-store/
+
+# 渠道配置来自私有仓 picoaide/channels(CI 检出覆盖;本目录只保留 README)
+channels/*
+!channels/README.md

@@ -1,5 +1,11 @@
 # CI 与分支整体规划说明（2026-09-06）
 
+> ⚠️ **部分内容已被后续变更取代（2026-09-10）**：服务端镜像**不再使用任何镜像仓库**
+> （GHCR 已下线，`docker.yml` 与 `ghcr-cleanup.yml` 已删除）。现在 tag 时由
+> `ci.yml` 的 `release` job 构建镜像 → 导出 `picoaide-server-<v>-amd64.zip` →
+> 挂 GitHub Release（只对 beta/official）→ `publish-update-server` job 上传 R2
+> `release.picoaide.com/<channel>/`。下文涉及 `docker.yml`/GHCR 的描述仅作历史记录。
+
 > 维护者视角。设计决策溯源：[CI 流程重设计](decisions/2026-09-06-ci-pipeline-redesign.md)；问题清单：[审计报告](planning/2026-09-06-ci-pipeline-audit.md)。
 > 一句话总结：**主分支常绿、功能走分支 + PR、每次提交都有可下载产物、构建只做一次（gate）、平台只负责打包、发布独立于日常门禁。**
 
