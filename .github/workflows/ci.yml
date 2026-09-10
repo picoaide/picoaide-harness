@@ -570,6 +570,10 @@ jobs:
       # 品牌渠道也走这里 —— R2 是它们的**唯一**分发面。R2 secrets 未配置时跳过而非
       # 失败,保证 GitHub Release 本身可用(上传细节与保留策略见
       # docs/planning/2026-09-10-r2-update-server-runbook.md §5)。
+      #
+      # 逻辑在脚本里(scripts/ci-publish-update-server.sh)并带本地回归门禁:
+      # 布局/清单/保留策略/缓存头出错都是静默的,只能发版时才发现,所以它必须
+      # 能在本地用假的 aws 断言(scripts/verify-ci-scripts.mjs)。
       - name: Upload every channel image to the update server (R2)
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -578,55 +582,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           VERSION: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${R2_BUCKET}" ]; then
-            echo "::warning::R2 secrets 未配置 —— 跳过更新服务器上传(不影响 GitHub Release)"
-            exit 0
-          fi
-          VER="${VERSION#v}"
-          aws="aws --endpoint-url https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          IMMUTABLE='public, max-age=31536000, immutable'
-
-          while IFS= read -r channel; do
-            [ -n "$channel" ] || continue
-            # 本步骤自己再掩码一次:掩码是"从发出那一刻起"生效的,跨步骤不假设。
-            printf '::add-mask::%s\n' "$channel"
-            base="s3://${R2_BUCKET}/${channel}"
-
-            # 1) 版本化资产(不可变、长缓存)
-            $aws s3 cp "release-bundle/${channel}/picoaide-server-${VER}-amd64.zip" \
-              "$base/releases/${VER}/" \
-              --content-type application/zip --cache-control "$IMMUTABLE"
-            $aws s3 cp "release-bundle/${channel}/SHA256SUMS" \
-              "$base/releases/${VER}/SHA256SUMS" \
-              --content-type text/plain --cache-control "$IMMUTABLE"
-
-            # 2) 清理到最近 3 个版本(版本序 sort -V,不能字典序:2.10.0 > 2.9.0)
-            $aws s3 ls "$base/releases/" | awk '{print $2}' | sed 's#/##' \
-              | sort -rV | tail -n +4 | while read -r old; do
-                  echo "prune old release (channel ${channel:0:0})"
-                  $aws s3 rm "$base/releases/$old/" --recursive
-                done
-
-            # 3) 版本指针最后覆盖(短缓存,新版本才能立即可见)
-            cat > latest.json <<JSON
-          {
-            "schema": 1,
-            "channel_id": "${channel}",
-            "server": {
-              "version": "${VER}",
-              "image_tag": "v${VER}",
-              "image_asset": "https://release.picoaide.com/${channel}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
-            },
-            "client": { "version": "${VER}" },
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          JSON
-            $aws s3 cp latest.json "$base/latest.json" \
-              --content-type application/json --cache-control 'no-cache'
-          done < channels.list
-          echo "update server publish done (all selected channels)"
+        run: bash scripts/ci-publish-update-server.sh --list channels.list
 
       - name: Create GitHub Release
         run: |

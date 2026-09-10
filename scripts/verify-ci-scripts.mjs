@@ -13,6 +13,9 @@
  *   3. 缺 token / 渠道仓结构不符 / 缺 channel.json → fail-loud
  *   4. 逐渠道打包:官方保留完整日志、渠道输出被抑制、失败只报中性信息
  *   5. 产物归集到 client-assets/<channel>/,没产出即失败
+ *   6. 更新服务器(R2)发布:每渠道独立目录、清单内容、保留最近 3 版、
+ *      缓存头(资产 immutable / 清单 no-cache)、清单最后写、缺 secrets 跳过、
+ *      产物不全 fail-loud —— 这些出错都是静默的,只能在发版时才发现
  *
  * 用法:node scripts/verify-ci-scripts.mjs
  * 退出码:0 全部通过;1 有断言失败。
@@ -27,6 +30,7 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const channelsScript = join(root, 'scripts', 'ci-channels.sh')
 const packageScript = join(root, 'scripts', 'ci-package-clients.sh')
+const publishScript = join(root, 'scripts', 'ci-publish-update-server.sh')
 const failures = []
 const scratch = []
 
@@ -253,10 +257,162 @@ echo x > "${root}/packages/host/desktop/dist/App.AppImage"
   }
 }
 
+// ---- 6. 更新服务器(R2)发布:布局 / 清单 / 保留策略 / 缓存头 ----
+{
+  const work = tempDir('ci-publish-')
+  const bundle = join(work, 'release-bundle')
+  const list = join(work, 'channels.list')
+  const store = join(work, 'store')
+  writeFileSync(list, 'official\nbeta\nacme-corp\n')
+
+  // 假 aws:把 s3 cp/ls/rm 变成对本地目录的操作,并把参数记进日志,便于断言。
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+log="${log}"
+store="${store}"
+record() { printf '%s\\n' "$*" >> "$log"; }
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+cmd="\${args[0]:-} \${args[1]:-}"
+case "$cmd" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    extra=("\${args[@]:4}")
+    record "cp $src $dst \${extra[*]:-}"
+    key="\${dst#s3://*/}"
+    if [[ "$dst" == */ ]]; then
+      # 目录目标:对象键 = 前缀 + 源文件名(与 aws s3 cp 语义一致)
+      dest="$store/\${key}$(basename "$src")"
+    else
+      dest="$store/\${key}"
+    fi
+    mkdir -p "$(dirname "$dest")"
+    cp "$src" "$dest"
+    ;;
+  "s3 ls")
+    prefix="\${args[2]}"
+    key="\${prefix#s3://*/}"
+    record "ls $prefix"
+    if [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
+    ;;
+  "s3 rm")
+    target="\${args[2]}"
+    key="\${target#s3://*/}"
+    record "rm $target"
+    rm -rf "$store/$key"
+    ;;
+  *) record "other $*" ;;
+esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+
+  // 每个渠道造一份"已构建"的镜像包。
+  for (const channel of ['official', 'beta', 'acme-corp']) {
+    mkdirSync(join(bundle, channel), { recursive: true })
+    writeFileSync(join(bundle, channel, 'picoaide-server-2.7.0-amd64.zip'), `zip-${channel}`)
+    writeFileSync(join(bundle, channel, 'SHA256SUMS'), `sum-${channel}`)
+  }
+  // 早于保留窗口的旧版本(应被清掉)与较新版本(应保留)。
+  mkdirSync(join(store, 'official', 'releases', '2.5.0'), { recursive: true })
+  mkdirSync(join(store, 'official', 'releases', '2.6.0'), { recursive: true })
+  mkdirSync(join(store, 'official', 'releases', '2.6.1'), { recursive: true })
+
+  const run = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: 'v2.7.0',
+    },
+  })
+  check(run.status === 0, `R2 发布应成功,实际退出 ${String(run.status)}: ${run.stderr ?? ''}`)
+  check(run.stdout.includes('::add-mask::acme-corp'), '发布步骤必须自己再掩码渠道 id')
+  // 掩码行本身必然含渠道名(GitHub 从这一刻起把它抹成 ***);除此之外不得出现。
+  const visible = run.stdout.split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n')
+  check(!visible.includes('acme-corp'), '渠道名不得出现在发布日志里(掩码行除外)')
+
+  // 每个渠道一套独立目录 + 版本化资产 + 清单。
+  for (const channel of ['official', 'beta', 'acme-corp']) {
+    const dir = join(store, channel)
+    check(existsSync(join(dir, 'releases', '2.7.0', 'picoaide-server-2.7.0-amd64.zip')), `${channel}: 应上传 zip`)
+    check(existsSync(join(dir, 'releases', '2.7.0', 'SHA256SUMS')), `${channel}: 应上传 SHA256SUMS`)
+    const manifestPath = join(dir, 'latest.json')
+    check(existsSync(manifestPath), `${channel}: 应写 latest.json`)
+    if (!existsSync(manifestPath)) continue
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    check(manifest.channel_id === channel, `${channel}: 清单 channel_id 必须指向自己(渠道独立)`)
+    check(manifest.server.version === '2.7.0' && manifest.server.image_tag === 'v2.7.0', `${channel}: 清单版本应为 2.7.0`)
+    check(
+      manifest.server.image_asset === `https://release.picoaide.com/${channel}/releases/2.7.0/picoaide-server-2.7.0-amd64.zip`,
+      `${channel}: 清单里的下载地址必须指向**本渠道**目录,实际 ${manifest.server.image_asset}`,
+    )
+    check(typeof manifest.published_at === 'string' && manifest.published_at.endsWith('Z'), `${channel}: 清单需要 UTC 发布时间`)
+  }
+
+  // 保留策略:最近 3 个版本(2.6.0/2.6.1/2.7.0),最旧的 2.5.0 被清掉。
+  check(!existsSync(join(store, 'official', 'releases', '2.5.0')), '超出保留窗口的旧版本应被清理')
+  check(existsSync(join(store, 'official', 'releases', '2.6.0')), '保留窗口内的版本不得误删')
+  check(existsSync(join(store, 'official', 'releases', '2.6.1')), '保留窗口内的版本不得误删')
+
+  // 缓存头:资产不可变长缓存、指针 no-cache(否则新版本不生效)。
+  const awsLog = readFileSync(log, 'utf8')
+  if (process.env.DEBUG_PUBLISH === '1') process.stderr.write(`--- aws.log ---\n${awsLog}\n--- store ---\n${execFileSync('find', [store, '-type', 'f']).toString()}\n`)
+  check(awsLog.includes('max-age=31536000, immutable'), '版本化资产必须带 immutable 长缓存')
+  check(/latest\.json.*no-cache/.test(awsLog), 'latest.json 必须 no-cache(否则客户端拿不到新版本)')
+  const lines = awsLog.split('\n').filter(line => line !== '')
+  const firstAsset = lines.findIndex(line => line.includes('official/SHA256SUMS'))
+  const firstManifest = lines.findIndex(line => line.includes('latest.json'))
+  check(firstAsset !== -1 && firstManifest > firstAsset, '清单应在资产之后写入(避免指向空目录)')
+
+  // 缺 R2 secrets → 跳过而不是失败(GitHub Release 仍要可用)。
+  const skipped = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: { PATH: `${work}:${process.env.PATH ?? ''}`, HOME: process.env.HOME ?? '', VERSION: 'v2.7.0' },
+  })
+  check(skipped.status === 0, 'R2 secrets 未配置时应跳过而非失败')
+  check(`${skipped.stdout ?? ''}${skipped.stderr ?? ''}`.includes('跳过'), '跳过时应给出告警')
+
+  // 产物缺失 → fail-loud(绝不发布不完整版本)。
+  rmSync(join(bundle, 'beta', 'SHA256SUMS'))
+  const incomplete = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: 'v2.7.0',
+    },
+  })
+  check(incomplete.status !== 0, '缺 SHA256SUMS 时必须失败')
+  check((incomplete.stderr ?? '').includes('缺失'), '失败信息应说明缺什么')
+
+  // 缺 VERSION → fail-loud。
+  const noVersion = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: { PATH: `${work}:${process.env.PATH ?? ''}`, HOME: process.env.HOME ?? '', R2_ACCOUNT_ID: 'a', R2_BUCKET: 'b' },
+  })
+  check(noVersion.status !== 0, '缺 VERSION 时必须失败')
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/品牌必填/日志抑制/产物归集全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/品牌必填/日志抑制/产物归集/R2 发布全部符合预期\n')
