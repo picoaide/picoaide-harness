@@ -153,11 +153,9 @@ const LOGIN_HTML = `<!DOCTYPE html>
   var BRACE_MARK_SVG = ${JSON.stringify(brandMarkSvg('#FFFFFF'))}
 
   // ---- Step1 → Step2: 并行探测 channel + methods(任一成功进 Step2) ----
-  f1.addEventListener('submit', async function (e) {
-    e.preventDefault()
+  async function connect(server) {
     err1.textContent = ''
-    var server = document.getElementById('server').value.trim()
-    if (!server) { err1.textContent = '请填写服务端地址'; return }
+    if (!server) { err1.textContent = '请填写服务端地址'; return false }
     document.getElementById('next-btn').disabled = true
     document.getElementById('next-btn').textContent = '连接中…'
     try {
@@ -169,7 +167,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
       var methodsOk = results[1].status === 'fulfilled' && results[1].value.ok
       if (!channelOk && !methodsOk) {
         err1.textContent = '无法连接服务端，请检查地址与网络'
-        return
+        return false
       }
       if (channelOk) {
         try {
@@ -188,11 +186,37 @@ const LOGIN_HTML = `<!DOCTYPE html>
         } catch (e3) { /* keep default */ }
       }
       showStep2(ms)
+      return true
     } finally {
       document.getElementById('next-btn').disabled = false
       document.getElementById('next-btn').textContent = '下一步'
     }
+  }
+
+  f1.addEventListener('submit', async function (e) {
+    e.preventDefault()
+    await connect(document.getElementById('server').value.trim())
   })
+
+  // 渠道包预置了服务端域名 → 跳过"输入服务端地址"这一步,直接进登录:
+  // 员工看到的第一个界面就是账号密码(或点一下就用浏览器 SSO 登录),
+  // 而不是"请输入你公司的地址"。输入框有值就代表渠道包配过(模板占位符为空时
+  // 输入框为空,走原来的两步流程)。
+  (async function autoConnect() {
+    if (document.getElementById('server').value.trim() === '') return
+    var ok = await connect(document.getElementById('server').value.trim())
+    if (!ok) return
+    // 只有浏览器方式可用(纯 OIDC/OpenID 部署)时直接发起跳转,员工不必再点一次。
+    var hasPassword = currentMethods.some(function (m) {
+      return m.name === 'local' || m.name === 'ldap'
+    })
+    if (!hasPassword && currentMethods.length > 0 && browserBtn.style.display !== 'none') {
+      browserBtn.click()
+    } else {
+      var username = document.getElementById('username')
+      if (username && username.style.display !== 'none') username.focus()
+    }
+  })()
 
   function showStep2(methods) {
     currentMethods = methods.filter(function (m) { return !m.hidden })
@@ -503,13 +527,35 @@ export const name = 'auth-gate'
 export const inject = ['webServer', 'picoSession']
 
 /**
+ * 把渠道包预置的域名安全地放进 `value="…"` 属性。
+ *
+ * 只转义 HTML 元字符(属性值语义),不做 URL 编解码 —— 地址本身由
+ * auth-gate 的 assertServerURLAllowed 在使用时再校验一次(https/回环)。
+ * @param value - 渠道包或 profile 提供的域名。
+ * @returns 可安全内联进 HTML 属性的字符串。
+ */
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;')
+}
+
+/**
  * Client-owned login surface served as the main window's first page when no
  * session exists. The user fills the server address and logs in through the
  * client's local API, which calls the gateway; on success the page reloads
  * into the DSH Web app in the same window.
  */
 export function apply(ctx: Context, config: Config): void {
-  const loginHTML = LOGIN_HTML.replaceAll('__DEFAULT_SERVER__', config.defaultServer ?? '')
+  // 预置域名来自渠道包(随包分发的 build/channel.json)或 profile 组装配置,
+  // 会直接落进 `value="…"` 属性 —— 必须做属性转义,否则一个带引号的地址就能
+  // 从属性里逃逸。渠道包是自家产物,但登录页是认证前唯一的 HTML 面,
+  // 这里按不可信输入处理(与页面内 esc() 同一口径)。
+  const defaultServer = escapeHtmlAttribute(config.defaultServer ?? '')
+  const loginHTML = LOGIN_HTML.replaceAll('__DEFAULT_SERVER__', defaultServer)
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })

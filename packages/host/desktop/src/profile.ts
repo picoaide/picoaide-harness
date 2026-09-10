@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+import { readDesktopChannelProfile } from './desktop-channel.ts'
 import {
   composeEntries,
   healProfilesModuleFallback,
@@ -593,6 +594,10 @@ export async function prepareDesktopProfile(
   if (desktopShell === undefined) {
     throw new Error(`${BIN_NAME}: desktop profile has no desktop-shell row`)
   }
+  // 渠道包（随包分发的 channels/<id>/channel.json）在**组装期**生效：
+  // 产品名/窗口标题在登录页出现时就已经可见，服务端地址更是登录前就要用
+  // （问服务端要它自己是鸡生蛋），所以两者都必须来自包内配置而非运行时下发。
+  const channelProfile = readDesktopChannelProfile()
   patches.push({
     id: 'desktop-shell',
     disabled: false,
@@ -600,8 +605,18 @@ export async function prepareDesktopProfile(
       ...rowConfig(desktopShell),
       mode,
       port,
+      ...(channelProfile?.productName === undefined ? {} : { productName: channelProfile.productName }),
+      ...(channelProfile?.windowTitle === undefined ? {} : { windowTitle: channelProfile.windowTitle }),
     },
   })
+  // 渠道包配了服务端域名 → 登录页直接进"账号密码/员工登录"，不再要求用户
+  // 手输自己公司的地址。没配就保持原样（输入框 + 下一步）。
+  if (channelProfile?.defaultServerURL !== undefined && rows.has('picoaide-auth-gate')) {
+    patches.push({
+      id: 'picoaide-auth-gate',
+      config: { defaultServer: channelProfile.defaultServerURL },
+    })
+  }
   return {
     homeDir: home,
     profile,
