@@ -11,6 +11,7 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import { readDesktopChannelProfile } from './desktop-channel.ts'
 import { DSH_HOME_ENV, dshHomeSafe, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import {
@@ -52,7 +53,15 @@ import {
 } from './windows-volume-diagnostics.ts'
 
 const BIN_NAME = 'dsh-plugin-desktop'
-const PRODUCT_NAME = 'PicoAide Harness'
+/**
+ * 应用名（通知发送者、日志头、`app.setName` 决定的数据目录）。
+ *
+ * 渠道构建读随包分发的渠道包（`build/channel.json`）；缺失时回落厂商名 ——
+ * 官方构建与改造前逐字节一致。渠道化打包时 electron-builder 的
+ * `--config.productName` 也必须给同一个值（见 scripts/channel-build.ts），
+ * 否则安装后的应用名与运行时的 `app.setName` 会打架。
+ */
+const PRODUCT_NAME = readDesktopChannelProfile()?.productName ?? 'PicoAide Harness'
 
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(

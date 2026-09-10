@@ -1,0 +1,286 @@
+/**
+ * 渠道化打包上下文：把渠道包翻译成 electron-builder 的覆盖参数与素材目录。
+ *
+ * 渠道编译期品牌的**唯一出口**。此前这些值全部硬编码在
+ * `packages/host/desktop/package.json` 的 `build` 块里（productName / appId /
+ * 四个 artifactName / nsis.shortcutName / linux maintainer+synopsis），
+ * 而图标固定读 `brands/official/` —— 于是"渠道客户端"必然带着厂商品牌。
+ *
+ * 现在：
+ *   - 渠道由环境变量 `DSH_BUILD_CHANNEL` 选择（CI 的渠道矩阵注入）；
+ *   - 缺省 `official`，此时**全部输出与改造前一致**（官方默认值见下表）。
+ *
+ * 为什么用 `--config.*` CLI 覆盖而不是改 package.json：仓库里的一份
+ * package.json 要同时服务官方与所有渠道，只有 CLI 覆盖才能让同一个检出
+ * 产出不同渠道的包；也因此构建门禁里对官方值的断言继续有效。
+ *
+ * 运行时品牌（窗口标题 / 登录页 / 界面文案 / 默认域名）走
+ * `src/desktop-channel.ts`，与本模块共用同一份 channel.json；两者必须自洽。
+ *
+ * @module dsh-plugin-desktop/scripts/channel-build
+ */
+
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/** 选择渠道的环境变量（CI 渠道矩阵注入）。 */
+export const CHANNEL_ENV = 'DSH_BUILD_CHANNEL'
+
+/** 渠道 id 合法形状（与客户端 CHANNEL_ID_PATTERN / 服务端 IsChannelID 同源）。 */
+const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
+
+/** 安装包名里的 slug：ASCII 字母数字与连字符，避免各平台文件名编码差异。 */
+const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u
+
+/** 应用 id（bundle id / AppUserModelId）：反向域名形状。 */
+const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]*$/u
+
+/** 官方渠道的编译期默认值 = 改造前 package.json build 块里的字面量。 */
+export const OFFICIAL_BUILD_DEFAULTS = {
+  productName: 'PicoAide Harness',
+  appId: 'ai.deepseek.dsh.desktop',
+  slug: 'PicoAide-Harness',
+  shortcutName: 'PicoAide Harness',
+  linuxMaintainer: 'picoaide',
+  linuxSynopsis: 'PicoAide Harness',
+} as const
+
+/** 安装包名模板：`${version}`/`${arch}`/`${ext}` 由 electron-builder 展开。 */
+export interface ChannelArtifactNames {
+  readonly mac: string
+  readonly win: string
+  readonly nsis: string
+  readonly linux: string
+}
+
+function artifactNames(slug: string): ChannelArtifactNames {
+  return {
+    mac: `${slug}-\${version}-mac.\${ext}`,
+    win: `${slug}-\${version}-\${arch}-Portable.\${ext}`,
+    nsis: `${slug}-\${version}-\${arch}-Setup.\${ext}`,
+    linux: `${slug}-\${version}-\${arch}.\${ext}`,
+  }
+}
+
+/** 本次构建的渠道上下文。 */
+export interface ChannelBuildContext {
+  readonly channelId: string
+  /** 是否官方渠道（官方 = 不做任何覆盖，产物与改造前一致）。 */
+  readonly official: boolean
+  /** 图标/安装器文案的素材目录。 */
+  readonly brandDir: string
+  readonly productName: string
+  readonly appId: string
+  readonly slug: string
+  readonly shortcutName: string
+  readonly linuxMaintainer: string
+  readonly linuxSynopsis: string
+  readonly artifactNames: ChannelArtifactNames
+}
+
+/** 取非空字符串，否则 undefined。 */
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/** 从任意 JSON 值里取对象（缺省空对象）。 */
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+/**
+ * 解析渠道 id（环境变量）。
+ * @param env - 进程环境。
+ * @returns 渠道 id；非法即抛错（构建期 fail-loud，不产出错误渠道的包）。
+ */
+export function resolveBuildChannelId(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = text(env[CHANNEL_ENV])
+  if (raw === undefined) return 'official'
+  if (!CHANNEL_ID_PATTERN.test(raw)) {
+    throw new Error(
+      `channel-build: ${CHANNEL_ENV}=${JSON.stringify(raw)} 不是合法渠道 id`
+      + '（期望 ^[a-z0-9][a-z0-9-]{0,31}$）',
+    )
+  }
+  return raw
+}
+
+/** 渠道包里与编译期品牌相关的字段（全部可选）。 */
+export interface ChannelDesktopBranding {
+  readonly productName?: string
+  readonly slug?: string
+  readonly appId?: string
+  readonly shortcutName?: string
+  readonly linuxMaintainer?: string
+  readonly linuxSynopsis?: string
+}
+
+/**
+ * 读取渠道包里与**编译期品牌**相关的字段。
+ * @param channelDir - `channels/<id>/` 目录（不存在时返回空对象：本地开发）。
+ * @returns 覆盖值；缺失字段一律 undefined，由调用方回落官方默认。
+ * @throws 渠道包存在但不可解析时抛错（构建期 fail-loud）。
+ */
+export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBranding {
+  const file = join(channelDir, 'channel.json')
+  if (!existsSync(file)) return {}
+  const raw = readFileSync(file, 'utf8')
+  if (raw.length > 64 * 1024) throw new Error(`channel-build: ${file} 超过 64KB`)
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch (cause) {
+    throw new Error(`channel-build: ${file} 不是合法 JSON: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`channel-build: ${file} 必须是对象`)
+  }
+  const root = record(value)
+  const desktop = record(root.desktop)
+  const identity = record(root.identity)
+  const productName = text(desktop.product_name) ?? text(identity.display_name)
+  const slug = text(desktop.slug)
+  const appId = text(desktop.app_id)
+  const maintainer = text(desktop.maintainer)
+  const result: {
+    productName?: string
+    slug?: string
+    appId?: string
+    shortcutName?: string
+    linuxMaintainer?: string
+    linuxSynopsis?: string
+  } = {}
+  if (productName !== undefined) result.productName = productName
+  if (slug !== undefined) result.slug = slug
+  if (appId !== undefined) result.appId = appId
+  if (maintainer !== undefined) result.linuxMaintainer = maintainer
+  // 快捷方式名/发行版描述缺省跟随产品名：渠道只写一个名字也应该处处一致。
+  const shortcutName = text(desktop.shortcut_name) ?? productName
+  if (shortcutName !== undefined) result.shortcutName = shortcutName
+  const synopsis = text(desktop.synopsis) ?? productName
+  if (synopsis !== undefined) result.linuxSynopsis = synopsis
+  return result
+}
+
+/** `resolveChannelBuildContext` 的可覆盖输入（测试用）。 */
+export interface ChannelBuildOptions {
+  readonly env?: NodeJS.ProcessEnv
+  readonly repoRoot?: string
+}
+
+/** 仓库根（本文件位于 packages/host/desktop/scripts/）。 */
+function defaultRepoRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
+}
+
+/**
+ * 解析本次构建的渠道上下文。
+ *
+ * 官方渠道（未设 `DSH_BUILD_CHANNEL`）返回的全是官方默认值，且 `brandDir`
+ * 指向 `brands/official/` —— 与改造前一致。
+ * @param options - 环境与仓库根（测试可覆盖）。
+ * @returns 渠道 id、素材目录与 electron-builder 覆盖参数。
+ * @throws 渠道 id 非法、或渠道包里的 slug/appId 形状不对时抛错。
+ */
+export function resolveChannelBuildContext(
+  options: ChannelBuildOptions = {},
+): ChannelBuildContext {
+  const env = options.env ?? process.env
+  const repoRoot = options.repoRoot ?? defaultRepoRoot()
+  const channelId = resolveBuildChannelId(env)
+  const official = channelId === 'official'
+  const channelDir = join(repoRoot, 'channels', channelId)
+  const branding = official ? {} : readChannelDesktopBranding(channelDir)
+
+  const slug = branding.slug ?? OFFICIAL_BUILD_DEFAULTS.slug
+  if (!SLUG_PATTERN.test(slug)) {
+    throw new Error(
+      `channel-build: 渠道 ${channelId} 的 desktop.slug=${JSON.stringify(slug)} 非法`
+      + '（期望 ASCII 字母/数字/连字符）—— 它决定安装包名与可执行名，必须是纯 ASCII',
+    )
+  }
+  const appId = branding.appId ?? OFFICIAL_BUILD_DEFAULTS.appId
+  if (!APP_ID_PATTERN.test(appId)) {
+    throw new Error(`channel-build: 渠道 ${channelId} 的 desktop.app_id=${JSON.stringify(appId)} 非法`)
+  }
+
+  // 渠道目录里没有 channel.json（本地开发）时回落官方素材，而不是构建失败。
+  const brandDir = official || !existsSync(join(channelDir, 'channel.json'))
+    ? join(repoRoot, 'brands', 'official')
+    : channelDir
+
+  return {
+    channelId,
+    official,
+    brandDir,
+    productName: branding.productName ?? OFFICIAL_BUILD_DEFAULTS.productName,
+    appId,
+    slug,
+    shortcutName: branding.shortcutName ?? OFFICIAL_BUILD_DEFAULTS.shortcutName,
+    linuxMaintainer: branding.linuxMaintainer ?? OFFICIAL_BUILD_DEFAULTS.linuxMaintainer,
+    linuxSynopsis: branding.linuxSynopsis ?? OFFICIAL_BUILD_DEFAULTS.linuxSynopsis,
+    artifactNames: artifactNames(slug),
+  }
+}
+
+/**
+ * 把渠道上下文翻译成 electron-builder 的 `--config.*` 覆盖参数。
+ *
+ * 官方渠道返回**空数组**：不做任何覆盖，产物与改造前一致。
+ * @param context - `resolveChannelBuildContext()` 的结果。
+ * @returns 追加到 electron-builder 命令行的参数。
+ */
+export function channelBuilderConfigArgs(context: ChannelBuildContext): string[] {
+  if (context.official) return []
+  const names = context.artifactNames
+  return [
+    `--config.productName=${context.productName}`,
+    `--config.appId=${context.appId}`,
+    `--config.mac.artifactName=${names.mac}`,
+    `--config.win.artifactName=${names.win}`,
+    `--config.nsis.artifactName=${names.nsis}`,
+    `--config.nsis.shortcutName=${context.shortcutName}`,
+    `--config.linux.artifactName=${names.linux}`,
+    `--config.linux.maintainer=${context.linuxMaintainer}`,
+    `--config.linux.synopsis=${context.linuxSynopsis}`,
+  ]
+}
+
+/** 展开安装包名模板。 */
+export interface ArtifactNameValues {
+  readonly version: string
+  readonly arch: string
+  readonly ext: string
+}
+
+/**
+ * 本次构建的安装包文件名（post-pack 校验脚本用）。
+ *
+ * 与 package.json 里的模板同源：`${version}`/`${arch}`/`${ext}` 展开。
+ * @param context - 渠道上下文。
+ * @param kind - `mac` / `win` / `nsis` / `linux`。
+ * @param values - 展开值。
+ * @returns 展开后的文件名。
+ */
+export function channelArtifactName(
+  context: ChannelBuildContext,
+  kind: keyof ChannelArtifactNames,
+  values: ArtifactNameValues,
+): string {
+  return context.artifactNames[kind]
+    .replaceAll('${version}', values.version)
+    .replaceAll('${arch}', values.arch)
+    .replaceAll('${ext}', values.ext)
+}
+
+/** 判断路径是否是可读的普通文件（brand-prepare 的逐文件回落用）。 */
+export function assetExists(path: string): boolean {
+  try {
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}

@@ -31,6 +31,8 @@ function baseOptions(
     desktopRoot: '/repo/packages/host/desktop',
     outputDir: '/repo/packages/host/desktop/dist/mac-release',
     productName: 'PicoAide Harness',
+    // 官方渠道:不做 electron-builder 覆盖(渠道化由 channel-build.ts 负责)
+    channelConfigArgs: [],
     resetOutput: () => undefined,
     listCodeSigningIdentities: identityEnv => {
       identityEnvironments.push({ ...identityEnv })

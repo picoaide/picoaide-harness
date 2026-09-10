@@ -3,6 +3,7 @@
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { channelArtifactName, resolveChannelBuildContext } from './channel-build.ts'
 
 /** Verify a complete in-memory Windows PE image. */
 export function assertPortableExecutableBuffer(data: Buffer, label: string, source: string): void {
@@ -32,6 +33,13 @@ export interface WindowsInstallerVerificationOptions {
   readonly desktopRoot: string
   /** Product version embedded in the expected artifact name. */
   readonly version: string
+  /**
+   * 期望的安装包文件名（渠道化：名字来自渠道包，不再是固定的 PicoAide 模板）。
+   * 缺省按 `DSH_BUILD_CHANNEL` 推导。
+   */
+  readonly installerName: string
+  /** 期望的 unpacked 可执行文件名（= 产品名，渠道化后随渠道）。 */
+  readonly applicationName: string
 }
 
 function readVersion(desktopRoot: string): string {
@@ -73,9 +81,14 @@ function assertPortableExecutable(path: string, label: string): void {
 
 function defaultOptions(): WindowsInstallerVerificationOptions {
   const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const channel = resolveChannelBuildContext()
   return {
     desktopRoot,
     version: readVersion(desktopRoot),
+    installerName: channelArtifactName(channel, 'nsis', {
+      version: readVersion(desktopRoot), arch: 'x64', ext: 'exe',
+    }),
+    applicationName: `${channel.productName}.exe`,
   }
 }
 
@@ -88,11 +101,8 @@ export function verifyWindowsInstaller(
   options: WindowsInstallerVerificationOptions = defaultOptions(),
 ): WindowsInstallerArtifacts {
   const distDir = join(options.desktopRoot, 'dist')
-  const installerPath = join(
-    distDir,
-    `PicoAide-Harness-${options.version}-x64-Setup.exe`,
-  )
-  const applicationPath = join(distDir, 'win-unpacked', 'PicoAide Harness.exe')
+  const installerPath = join(distDir, options.installerName)
+  const applicationPath = join(distDir, 'win-unpacked', options.applicationName)
 
   assertPortableExecutable(installerPath, 'Windows NSIS installer')
   assertPortableExecutable(applicationPath, 'unpacked Windows application')

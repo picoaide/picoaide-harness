@@ -99,7 +99,13 @@ electron-builder 通过 `files` 把它打进应用资源。
   },
   "desktop": {
     "product_name": "Acme AI",               // 可选;覆盖 identity.display_name
-    "window_title": "Acme AI"                // 可选;缺省 = product_name
+    "window_title": "Acme AI",               // 可选;缺省 = product_name
+    // ↓ 编译期品牌(打包时由 electron-builder 落地,见 §5)
+    "slug": "Acme-AI",                       // 可选;安装包名/可执行名的 ASCII 段
+    "app_id": "com.acme.ai",                 // 可选;bundle id / AppUserModelId
+    "shortcut_name": "Acme AI",              // 可选;缺省 = product_name
+    "maintainer": "acme",                    // 可选;deb/Linux 软件中心
+    "synopsis": "Acme 企业内部助手"           // 可选;缺省 = product_name
   }
 }
 ```
@@ -110,21 +116,44 @@ electron-builder 通过 `files` 把它打进应用资源。
 |---|---|---|
 | `defaults.server_url` | `profile.ts` → `picoaide-auth-gate` 的 `defaultServer` | 登录页跳过 Step1 直连服务端；若只配了浏览器 SSO 方式(纯 OIDC/OpenID),直接发起跳转 |
 | `desktop.product_name` / `window_title` | `profile.ts` → `desktop-shell` 行配置 | 窗口标题 / 托盘 / 通知文案 |
+| `desktop.product_name` | `src/main.ts` 的 `PRODUCT_NAME` | 通知发送者 / `app.setName` 数据目录 |
 | `channel_id` | 供排查与将来对账 | — |
 
 文件缺失（本地开发、未渠道化的构建）时所有字段按"未配置"处理，沿用原有行为
 —— 渠道化是增量能力，缺失不能变成启动失败。
 
-## 5. 尚未渠道化（编译期品牌，待 CI 渠道矩阵落地）
+## 5. 编译期品牌（渠道矩阵在打包时落地）
 
-以下由 electron-builder 在**打包时**决定，运行时读文件来不及改，属于 CI
-渠道矩阵的参数（`docs/planning/2026-09-04-enterprise-channel-branding.md`）：
+以下由 electron-builder 在**打包时**决定，运行时读文件来不及改。渠道由环境变量
+`DSH_BUILD_CHANNEL=<id>` 选择，`scripts/channel-build.ts` 把它翻译成
+`--config.*` 覆盖参数：
 
-- `appId`、协议 scheme、安装包名（`artifactName`）、NSIS 快捷方式名、
-  Linux `maintainer`/`synopsis`、应用图标（`brand-prepare.mjs` 目前固定读
-  `brands/official/`）。
+| 字段 | electron-builder 覆盖 | 缺省（官方渠道） |
+|---|---|---|
+| `desktop.product_name` | `productName` | `package.json build.productName` |
+| `desktop.app_id` | `appId` | `ai.deepseek.dsh.desktop` |
+| `desktop.slug` | `mac/win/nsis/linux.artifactName` | `PicoAide-Harness-*` |
+| `desktop.shortcut_name` | `nsis.shortcutName` | `package.json build.nsis.shortcutName` |
+| `desktop.maintainer` / `synopsis` | `linux.maintainer` / `linux.synopsis` | `package.json build.linux.*` |
+| 渠道目录里的 `logo.svg` / `app-icon.png` | `directories.buildResources` 下的图标 | `brands/official/` |
 
-macOS 签名统一用**厂商证书**（2026-09-10 定案，后续不更换）。
+规则：
+
+- **官方渠道不做任何覆盖**（`channelBuilderConfigArgs()` 返回空数组），产物与
+  渠道化改造前一致；`tests/channel-build.spec.ts` 用**漂移断言**把
+  `channel-build.ts` 里的官方默认值与 `package.json build` 块钉死。
+- 渠道目录里缺的素材**逐文件回落** `brands/official/`：渠道只换 logo 是合法的。
+- 渠道 logo 必须由 `brands/official/logo.svg` 派生（几何单一权威，见 `AGENTS.md`）。
+- `slug` 必须是纯 ASCII（它进安装包名与可执行名）；`app_id` 必须是反向域名形状。
+  两者非法即**抛错**，不产出错误渠道的包。
+- 打包后的验证脚本（`verify-win-installer.ts` / `verify-win-portable.ts` /
+  `release-mac.ts`）从同一上下文推导期望文件名，不再硬编码厂商名。
+
+仍未渠道化：
+
+- 协议 scheme（`picoaide://`）—— 服务端 OIDC 回调也硬编码同一 scheme，
+  改动是跨端联动的，见 `server/internal/serverauth/oidc.go`。
+- macOS 签名统一用**厂商证书**（2026-09-10 定案，后续不更换）。
 
 ## 6. 更新源（客户端不碰分发面）
 

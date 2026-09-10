@@ -5,6 +5,7 @@ import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { channelBuilderConfigArgs, resolveChannelBuildContext } from './channel-build.ts'
 import { withoutMacReleaseSecrets } from './release-preflight.ts'
 import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
 
@@ -34,6 +35,11 @@ export interface MacSmokePackageOptions {
   readonly verifier: string
   /** Node executable used to run package-local scripts. */
   readonly nodeExecutable: string
+  /**
+   * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
+   * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   */
+  readonly channelConfigArgs: readonly string[]
   /** Execute one packaging command. */
   readonly run: (
     command: string,
@@ -69,6 +75,8 @@ function defaultOptions(): MacSmokePackageOptions {
   const workspaceRoot = resolve(desktopRoot, '..', '..')
   const require = createRequire(import.meta.url)
   const outputDir = resolve(desktopRoot, 'dist', 'mac-smoke')
+  // 渠道在解析选项时定下来：验证脚本也要用它推导 DMG 名。
+  const channel = resolveChannelBuildContext()
   return {
     env: process.env,
     platform: process.platform,
@@ -82,6 +90,7 @@ function defaultOptions(): MacSmokePackageOptions {
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL('./verify-mac-smoke.ts', import.meta.url)),
     nodeExecutable: process.execPath,
+    channelConfigArgs: channelBuilderConfigArgs(channel),
     run,
     log: message => console.log(message),
   }
@@ -139,6 +148,7 @@ export function packageMacSmoke(
       '--config.mac.notarize=false',
       '--config.npmRebuild=false',
       `--config.directories.output=${options.outputDir}`,
+      ...options.channelConfigArgs,
     ],
     options.desktopRoot,
     {
