@@ -595,11 +595,15 @@ jobs:
         run: |
           set -euo pipefail
           VER="${VERSION#v}"
-          ARCHIVE="picoaide-server-${VER}-amd64.tar.zst"
-          # 先 docker save 到临时 tar,再用 zstd 压成发布物;sha256 一并产出供
-          # 更新服务器 SHA256SUMS 与人工校验使用(解压:zstd -d < file | docker load)
+          ARCHIVE="picoaide-server-${VER}-amd64.zip"
+          # 先 docker save 到临时 tar,再打成 zip(2026-09-10:按部署要求改用 zip,
+          # 不用 zstd —— zip 在任何运维环境都开箱可用,不依赖额外安装 zstd)。
+          # 归档内是单个 image.tar;导入方式:
+          #   unzip -p <归档> image.tar | docker load
+          # sha256 一并产出供更新服务器 SHA256SUMS 与人工校验。
+          # 注意:zip 对已压缩内容(docker 层)无法再压,用 -1 快速模式避免白耗 CPU。
           docker save "picoaide-harness-server:$VER" -o image.tar
-          zstd -T0 -3 -q image.tar -o "$ARCHIVE"
+          zip -1 -q "$ARCHIVE" image.tar
           rm -f image.tar
           sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS
           ls -lh "$ARCHIVE" SHA256SUMS
@@ -630,11 +634,11 @@ jobs:
             gh release edit "${TAG}" --repo "${REPO}" \
               --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE}
             gh release upload "${TAG}" --repo "${REPO}" --clobber \
-              *.tar.zst SHA256SUMS
+              *.zip SHA256SUMS
           else
             gh release create "${TAG}" --repo "${REPO}" \
               --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE} \
-              *.tar.zst SHA256SUMS
+              *.zip SHA256SUMS
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -670,7 +674,7 @@ jobs:
         run: |
           gh release download "${GITHUB_REF_NAME}" \
             --repo picoaide/picoaide-harness \
-            --pattern '*.tar.zst' --pattern 'SHA256SUMS' --dir release-bundle
+            --pattern '*.zip' --pattern 'SHA256SUMS' --dir release-bundle
           ls -lh release-bundle
       - name: Generate latest.json
         if: steps.creds.outputs.skip == 'false'
@@ -689,7 +693,7 @@ jobs:
               "version": "${VER}",
               "image_tag": "v${VER}",
               "image_ref": "ghcr.io/picoaide/picoaide-harness-server:v${VER}",
-              "image_asset": "https://release.picoaide.com/${CH}/releases/${VER}/picoaide-server-${VER}-amd64.tar.zst"
+              "image_asset": "https://release.picoaide.com/${CH}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
             },
             "client": { "version": "${VER}" },
             "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -713,8 +717,8 @@ jobs:
           IMMUTABLE='public, max-age=31536000, immutable'
 
           # 1) 版本化资产(不可变、长缓存)
-          $aws s3 cp release-bundle/*.tar.zst "$BASE/releases/${VER}/" \
-            --content-type application/zstd --cache-control "$IMMUTABLE"
+          $aws s3 cp release-bundle/*.zip "$BASE/releases/${VER}/" \
+            --content-type application/zip --cache-control "$IMMUTABLE"
           $aws s3 cp release-bundle/SHA256SUMS "$BASE/releases/${VER}/SHA256SUMS" \
             --content-type text/plain --cache-control "$IMMUTABLE"
 
