@@ -215,6 +215,36 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 `packages/host/desktop/tests/verification-brand-agnostic.spec.ts`：验证脚本里
 出现品牌字面量标题断言、或从 `package.json` 取产品名，直接红。
 
+### 4.2 渠道素材 URL 的客户端契约（2026-09-10：一次"裂图"复盘）
+
+服务端下发的 `login.logo_url` / `client.logo_url` / `favicon_url` 是**相对路径**
+（`/api/client/v2/channel/logo`，命名空间真源在 `server/internal/router`），而消费
+它们的是渲染层的 `<img src>`。这一层有三个坑，任意一个没堵住，渠道客户看到的就是
+一张裂图（2026-09-10 测试环境实测）：
+
+| 环节 | 规则 | 位置 |
+|---|---|---|
+| 谁拼服务端地址 | `/api/pico/channel` 在**出口**统一绝对化；没有服务端地址就**丢弃**相对 URL（宁可回落内置品牌图形，也不渲染必然 404 的地址） | `enterprise/src/channel-content.ts` 的 `absolutizeChannelAssets` |
+| store 播种 | 该端点的载荷可能来自旧版本代码，播种前再丢一次相对素材 URL | `enterprise/src/client/channel-store.ts` 的 `stripRelativeAssetURLs` |
+| 窗口 CSP | `img-src` 必须放行 `http:` / `https:` —— 渠道 logo 来自**客户自己的服务器**，打包期不可能知道它的地址；只写 `'self' data: blob:` 会被 CSP 直接拦掉（微实验复现：`violates the following Content Security Policy directive: "img-src 'self' data: blob:"`，`naturalWidth=0`） | `desktop/src/electron-runtime.ts` 的 `APP_CONTENT_SECURITY_POLICY` |
+
+另外三条配套约束：
+
+- **相对路径在本地 origin 下必然 404**：桌面渲染层的 origin 是本地 webServer
+  （`http://127.0.0.1:<port>`），那里没有 `/api/client/v2/*` 路由（那是服务端命名
+  空间）。所以"服务端下发相对路径 → 直接塞给 `<img>`"在任何版本里都不成立。
+- **加载失败要能回落**：侧边栏/英雄区品牌图在服务端不可达（离线、未连内网）时，
+  `<img>` 的 `onError` 必须换回内置花括号 mark，而不是留一个破图图标；登录页早就
+  是这么做的（`auth-gate` 的 `onerror`），客户端两处（`client/Channel.tsx` 的
+  `BraceMark` / `BrandBadge`）2026-09-10 才补上。
+- **拼装顺序**：素材 URL 一律"先删后写"—— `{ ...client, ...(logo ? { logo_url: logo } : {}) }`
+  在 logo **被丢弃**时不会覆盖原值，原对象里的相对地址会被 spread 原样带回来
+  （2026-09-10 实测踩到：`stripRelativeAssetURLs` 实际一条都没丢，测试才发现）。
+
+排障提示：`logo_url_dark` 目前只有服务端在发，客户端没有消费面（暗色用的是
+`currentColor` 花括号 mark）。它曾被 `mergeChannel` 丢掉一轮，现已保留 —— 将来做
+暗色素材时别再踩。
+
 ## 5. 编译期品牌（渠道矩阵在打包时落地）
 
 以下由 electron-builder 在**打包时**决定，运行时读文件来不及改。渠道由环境变量

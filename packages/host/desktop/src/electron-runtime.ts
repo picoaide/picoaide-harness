@@ -68,6 +68,28 @@ const PRODUCT_VERSION = desktopProductVersion()
 const MIN_ZOOM_LEVEL = -4
 const MAX_ZOOM_LEVEL = 4
 
+/**
+ * 应用窗口的 CSP（P1-4 起生效；导出仅为让测试钉住指令表 —— 漏一条指令的后果
+ * 是运行时静默失效，页面上只表现为"图裂了"）。
+ *
+ * `img-src` 必须放行 `http:`/`https:`（2026-09-10 实测）：渠道 logo/favicon 由
+ * **客户自己的服务器**下发（`/api/client/v2/channel/logo`），其地址在打包期未知，
+ * 渲染层拿到的是绝对 URL —— 只写 `'self' data: blob:` 会被这条指令直接拦掉
+ * （微实验复现：`violates the following Content Security Policy directive:
+ * "img-src 'self' data: blob:"`，`naturalWidth=0`，界面上就是裂图；登录页那张
+ * logo 同理，它有 `onerror` 兜底所以只是"看不见"）。这不构成新的外泄面：同一条
+ * 策略的 `connect-src` 早已放行 `http: https:`，被注入的脚本本来就能把数据
+ * POST 出去，放行图片不增加能力。
+ */
+export const APP_CONTENT_SECURITY_POLICY = [
+  "default-src 'self' data: blob: ws:",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: http: https:",
+  "font-src 'self' data:",
+  "connect-src 'self' ws: wss: http: https:",
+].join('; ')
+
 function clampedZoomLevel(level: number): number {
   return Math.min(MAX_ZOOM_LEVEL, Math.max(MIN_ZOOM_LEVEL, level))
 }
@@ -676,16 +698,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         callback({})
         return
       }
-      const csp = [
-        "default-src 'self' data: blob: ws:",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-        "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data: blob:",
-        "font-src 'self' data:",
-        "connect-src 'self' ws: wss: http: https:",
-      ].join('; ')
       const headers = { ...details.responseHeaders }
-      headers['Content-Security-Policy'] = [csp]
+      headers['Content-Security-Policy'] = [APP_CONTENT_SECURITY_POLICY]
       callback({ responseHeaders: headers })
     }
     window.webContents.session.webRequest.onHeadersReceived(cspOnHeaders)
