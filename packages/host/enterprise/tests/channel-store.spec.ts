@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { readChannelSync, startChannelStore } from '../src/client/channel-store.ts'
-import type { ChannelConfig } from '../src/channel-sync.ts'
+import type { ChannelConfig } from '../src/channel-content.ts'
 
 const CHANNEL: ChannelConfig = {
   name: 'PicoAide',
@@ -65,5 +65,65 @@ describe('channel store', () => {
     cancel()
     emit(CHANNEL)
     expect(readChannelSync()).toBeNull()
+  })
+})
+
+describe('channel store packaged-brand seed', () => {
+  const PACKAGED: ChannelConfig = {
+    title: 'Acme 门户',
+    login: { display_name: 'Acme AI', tagline: '', welcome: '' },
+    client: { display_name: 'Acme AI', short_name: 'Acme', tagline: '' },
+  }
+
+  /** flush the pending seed fetch (one microtask + one macrotask). */
+  const settle = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
+
+  function stubChannelEndpoint(payload: unknown, ok = true): void {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok, json: async () => payload }))
+  }
+
+  it('seeds the packaged brand when the store is still empty', async () => {
+    // 登录后到服务端下发之间有一段时间,界面要在这段时间就显示渠道自己的品牌。
+    stubChannelEndpoint(PACKAGED)
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit(null)
+    await settle()
+    expect(readChannelSync()).toEqual(PACKAGED)
+    cancel()
+    vi.unstubAllGlobals()
+  })
+
+  it('never overwrites content the server already delivered', async () => {
+    // 并发竞态:随包请求后到时会盖掉服务端的权威内容(渠道改了服务端配置,
+    // 客户端却显示旧名)。
+    stubChannelEndpoint(PACKAGED)
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit({ client: { display_name: '服务端权威名' } })
+    await settle()
+    expect(readChannelSync()?.client?.display_name).toBe('服务端权威名')
+    cancel()
+    vi.unstubAllGlobals()
+  })
+
+  it('ignores an empty payload and a failed request', async () => {
+    stubChannelEndpoint({})
+    const { ctx, emit } = ctxWithEvent()
+    const cancel = startChannelStore(ctx)
+    emit(null)
+    await settle()
+    expect(readChannelSync()).toBeNull()
+    cancel()
+    vi.unstubAllGlobals()
+
+    stubChannelEndpoint({}, false)
+    const second = ctxWithEvent()
+    const cancel2 = startChannelStore(second.ctx)
+    second.emit(null)
+    await settle()
+    expect(readChannelSync()).toBeNull()
+    cancel2()
+    vi.unstubAllGlobals()
   })
 })

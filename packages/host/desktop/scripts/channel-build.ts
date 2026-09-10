@@ -20,7 +20,7 @@
  * @module dsh-plugin-desktop/scripts/channel-build
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -72,7 +72,9 @@ export interface ChannelBuildContext {
   readonly channelId: string
   /** 是否官方渠道（官方 = 不做任何覆盖，产物与改造前一致）。 */
   readonly official: boolean
-  /** 图标/安装器文案的素材目录。 */
+  /** `channels/<id>/`：渠道包（channel.json 与素材）所在目录。 */
+  readonly channelDir: string
+  /** 图标/安装器文案的素材目录（渠道缺素材时逐文件回落官方）。 */
   readonly brandDir: string
   readonly productName: string
   readonly appId: string
@@ -241,6 +243,7 @@ export function resolveChannelBuildContext(
   return {
     channelId,
     official,
+    channelDir,
     brandDir,
     productName: branding.productName ?? OFFICIAL_BUILD_DEFAULTS.productName,
     appId,
@@ -287,9 +290,73 @@ export function prepareChannelBuilderOverrides(
   context: ChannelBuildContext,
   workDir?: string,
 ): string[] {
+  // 应用资源目录 = 生成的配置文件与**随包分发的渠道包**共同的落点。两者必须
+  // 同进同出:工作目录是测试/临时构建的覆盖点(见各打包脚本的 channelConfigArgs)。
+  const appDir = workDir ?? join(defaultRepoRoot(), 'packages/host/desktop', 'build')
+  // 先就位**运行期**渠道包，再谈编译期覆盖:两者缺一，渠道构建就是半成品
+  // (见 stageChannelProfile 的说明)。官方渠道也要走一遍 —— 它的作用是**清掉**
+  // 上一次渠道构建留下的文件。
+  stageChannelProfile(context, appDir)
   if (context.official) return []
-  const target = join(workDir ?? join(defaultRepoRoot(), 'packages/host/desktop/build'), 'channel-electron-builder.cjs')
+  const target = join(appDir, 'channel-electron-builder.cjs')
   return channelBuilderConfigArgs(context, writeChannelBuilderConfig(context, target))
+}
+
+/**
+ * 把渠道包就位到客户端应用资源里（`build/channel.json`）。
+ *
+ * **为什么必须有这一步**：`src/desktop-channel.ts` 的 `readDesktopChannelProfile()`
+ * 在**运行时**读的就是这个文件，它决定登录前才知道的东西 —— 默认服务端地址
+ * （配了就让客户端开机直连，用户不必手输自家域名）、产品名/窗口标题、登录页与
+ * 侧边栏的品牌文案、深链 scheme。这些**不能**由 electron-builder 的编译期参数
+ * 决定（那是另一套：appId/图标/安装包名），只能随包分发。
+ *
+ * 2026-09-10 实测发现这条链此前是**死的**：整个仓库没有任何地方写这个文件，
+ * 于是渠道构建里 `readDesktopChannelProfile()` 永远返回 undefined —— 客户端
+ * 不直连渠道域名、窗口标题回落厂商品牌、登录页显示厂商名。与此前
+ * `CLIENT-RELEASE.json` 放错目录（服务端清单缺 client 块）是同一类事故：
+ * 链路缺一环，但不报错。
+ *
+ * **官方渠道必须走删除分支**：渠道构建写下的文件若残留，下一次本地/官方构建
+ * 会继承那个渠道的品牌 —— 比"没生效"更糟。所以这里不做"存在才写"，
+ * 而是每次构建都明确二选一。
+ * @param context - 渠道上下文。
+ * @param buildDir - `packages/host/desktop/build` 目录。
+ * @returns 就位后的文件路径；官方渠道（或渠道无包）返回 undefined。
+ * @throws 渠道包缺失/不可解析/`channel_id` 与所选渠道不一致时抛错。
+ */
+export function stageChannelProfile(
+  context: ChannelBuildContext,
+  buildDir: string,
+): string | undefined {
+  const target = join(buildDir, 'channel.json')
+  const source = join(context.channelDir, 'channel.json')
+  if (context.official || !existsSync(source)) {
+    // 本地开发（没有渠道目录）走这里:必须清掉残留，否则会用错品牌。
+    rmSync(target, { force: true })
+    return undefined
+  }
+  const raw = readFileSync(source, 'utf8')
+  if (raw.length > 64 * 1024) {
+    throw new Error(`channel-build: ${source} 超过 64KB（客户端侧上限，见 desktop-channel.ts）`)
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch (cause) {
+    throw new Error(`channel-build: ${source} 不是合法 JSON: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+  const declared = text(record(value).channel_id)
+  // 目录名与 channel_id 不一致 = 渠道包放错了位置:装出来的客户端会声称自己是
+  // 另一个渠道（服务端镜像按 channel_id 对账，两边就此各说各话）。
+  if (declared !== context.channelId) {
+    throw new Error(
+      `channel-build: ${source} 的 channel_id=${JSON.stringify(declared)} 与构建渠道 ${context.channelId} 不一致`,
+    )
+  }
+  mkdirSync(buildDir, { recursive: true })
+  writeFileSync(target, raw)
+  return target
 }
 
 /**

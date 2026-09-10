@@ -83,15 +83,44 @@ picoaide/channels  (私有仓)
 
 ## 4. 客户端读取的字段（随包分发的 `channel.json`）
 
-客户端在**登录之前**就要用到的两项必须随包分发（不能等服务端下发：
-服务端地址是鸡生蛋，产品名/窗口标题在登录页出现时已可见）。CI 在打包前把
-`channels/<id>/channel.json` 复制到 `packages/host/desktop/build/channel.json`，
-electron-builder 通过 `files` 把它打进应用资源。
+客户端在**登录之前**就要用到的三项必须随包分发（不能等服务端下发：
+服务端地址是鸡生蛋，产品名/窗口标题/品牌文案在登录页出现时已可见）。
+
+**就位机制**（2026-09-10 修正，此前文档描述与实际不符）：`scripts/channel-build.ts`
+的 `stageChannelProfile()` 在**每个打包入口**（各 `package-*.mjs/ts` 都会调用的
+`prepareChannelBuilderOverrides()`）把 `channels/<id>/channel.json` 复制到
+`packages/host/desktop/build/channel.json`；electron-builder 的 **`build.files`**
+里有这一项，于是它进 asar，运行时 `src/desktop-channel.ts` 用
+`new URL('../build/channel.json', import.meta.url)` 读回。
+
+三条硬性约束（都踩过）：
+
+1. **官方/本地构建必须清掉残留**：`stageChannelProfile()` 每次构建都明确二选一
+   （有渠道包→覆盖写；没有→删除）。留一个上轮的渠道包会让官方构建继承别的渠道
+   的品牌 —— 比"没生效"更糟。
+2. **`channel_id` 必须与所选渠道一致**：不一致说明渠道包放错了位置（目录名、
+   R2 目录、镜像内 `channel_id` 三处对账就此各说各话），构建期直接中止。
+3. **entry 必须写进 `build.files`，不是 npm 的 `files`**：两者不是一回事，
+   写错了文件不会进 asar —— 而运行时"读不到"是按"没有渠道包"静默降级的，
+   于是客户端不直连渠道域名、登录页显示厂商名，全程零报错（2026-09-10 实测
+   发现的断链）。
 
 ```jsonc
 {
   "channel_id": "acme",                      // 必填,形状校验
-  "identity": { "display_name": "Acme AI" }, // 缺省产品名来源
+  "identity": {
+    "display_name": "Acme AI",               // 必填(CI 拦住);产品名与界面名的兜底
+    "short_name": "Acme",                    // 必填(CI 拦住);登录页名字、侧边栏短名
+    "tagline": "企业内部 AI 平台",            // 可选
+    "title": "Acme AI"                       // 可选;缺省 = display_name
+  },
+  "copy": {
+    "login_display_name": "Acme",            // 可选;缺省 = identity.short_name
+    "login_tagline": "企业内部 AI 平台",      // 可选
+    "login_welcome": "…",                    // 可选
+    "client_display_name": "Acme AI",        // 可选;缺省 = identity.display_name
+    "client_tagline": "…"                    // 可选
+  },
   "defaults": {
     // 配了 → 客户端开机直接进登录(跳过"输入服务端地址"这一步);
     // 必须是 https,或 http+回环(本机调试)。其它一律忽略并保留两步流程。
@@ -115,9 +144,27 @@ electron-builder 通过 `files` 把它打进应用资源。
 | 字段 | 生效位置 | 效果 |
 |---|---|---|
 | `defaults.server_url` | `profile.ts` → `picoaide-auth-gate` 的 `defaultServer` | 登录页跳过 Step1 直连服务端；若只配了浏览器 SSO 方式(纯 OIDC/OpenID),直接发起跳转 |
-| `desktop.product_name` / `window_title` | `profile.ts` → `desktop-shell` 行配置 | 窗口标题 / 托盘 / 通知文案 |
+| `desktop.product_name` / `window_title` | `profile.ts` → `desktop-shell` 行配置 | 窗口标题 / 托盘 / 通知文案 / 插件加载失败弹窗 / 渲染失败页 |
 | `desktop.product_name` | `src/main.ts` 的 `PRODUCT_NAME` | 通知发送者 / `app.setName` 数据目录 |
+| `identity.*` / `copy.*`（品牌文案） | `profile.ts` → `picoaide-auth-gate` + `picoaide-channel-sync` 的 `brand` | 登录页标题与品牌区、客户端侧边栏/顶栏、服务端不可达时的兜底内容 |
 | `channel_id` | 供排查与将来对账 | — |
+
+**为什么品牌文案必须随包**（而不是等服务端下发）：登录页是**认证之前**的界面，
+那一刻服务端地址可能正是用户要输入的东西（问服务端要它自己是鸡生蛋）。窗口
+标题、登录页标题、品牌区在用户敲第一个键之前就已可见 —— 它们只能来自包内配置。
+
+品牌取值链**与服务端 `channel.go` 的 `applyDefaults` 同序**：`copy.login_display_name`
+→ `identity.short_name`、`copy.client_display_name` → `identity.display_name`。
+顺序不一致会出现"登录页一个名、登录后另一个名"。
+
+**品牌字段是 CI 硬性要求**：`identity.display_name` 与 `identity.short_name` 缺一
+即中止构建（`scripts/ci-channels.sh`）。因为包里没有品牌时客户端回落的是**中性
+占位**（`Harness`，绝不含厂商品牌），交付出去就是"渠道客户看到中性名/厂商名"的
+观感事故 —— 这类事故只能在构建期拦住。本地开发（没有渠道包）走的是官方内置
+文案，行为与渠道化改造前一致。
+
+**侧边栏短名**：服务端不下发 `short_name`（`GET /api/client/v2/channel` 没有这个
+字段），所以它来自随包品牌；渠道没配短名时回落到显示名，不回落任何具体品牌。
 
 文件缺失（本地开发、未渠道化的构建）时所有字段按"未配置"处理，沿用原有行为
 —— 渠道化是增量能力，缺失不能变成启动失败。

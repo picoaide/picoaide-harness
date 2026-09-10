@@ -8,7 +8,7 @@ import {
   BRAND_TILE_RADIUS_RATIO,
   BRAND_TILE_VIEWBOX,
 } from '../channel-geometry.ts'
-import type { ChannelConfig } from '../channel-sync.ts'
+import { DEFAULT_CHANNEL, type ChannelConfig } from '../channel-content.ts'
 import { useChannel } from './channel-store.ts'
 import { UpdateIndicator, useUpdateState } from './UpdateIndicator.tsx'
 
@@ -124,7 +124,7 @@ export function BrandName() {
   const channel = useChannel()
   const version = process.env.PICOAI_PRODUCT_VERSION as string | undefined
   const updateState = useUpdateState()
-  const name = resolveClientName(channel) === 'PicoAide Harness' ? 'PicoAide' : resolveClientName(channel)
+  const name = resolveClientShortName(channel)
   return createElement(
     'span',
     { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 700, letterSpacing: '0.3px' } },
@@ -161,9 +161,32 @@ export function BrandBadge() {
   )
 }
 
-/** Resolve the client-side display name from a channel config (or default). */
+/**
+ * Resolve the client-side display name from a channel config (or default).
+ *
+ * 兜底是**内置官方内容**（`DEFAULT_CHANNEL`）：渠道构建下走不到这里 ——
+ * 组装期注入的随包品牌先落地（`channel-store` 的 seed），服务端可达后再覆盖。
+ */
 function resolveClientName(channel: ChannelConfig | null | undefined): string {
-  return channel?.client?.display_name && channel.client.display_name !== '' ? channel.client.display_name : 'PicoAide Harness'
+  return nonEmpty(channel?.client?.display_name) ?? DEFAULT_CHANNEL.client?.display_name ?? ''
+}
+
+/**
+ * Resolve the sidebar/短名 from a channel config.
+ *
+ * 侧边栏空间窄，用的是短名（`identity.short_name`，官方渠道即官方短名）；
+ * 服务端不下发这一项，所以它来自随包品牌，缺省回落到显示名。
+ */
+function resolveClientShortName(channel: ChannelConfig | null | undefined): string {
+  return nonEmpty(channel?.client?.short_name)
+    ?? nonEmpty(channel?.client?.display_name)
+    ?? DEFAULT_CHANNEL.client?.short_name
+    ?? ''
+}
+
+/** 非空字符串（'' 是"渠道没配这一项"，等同于缺失）。 */
+function nonEmpty(value: string | undefined): string | undefined {
+  return value !== undefined && value !== '' ? value : undefined
 }
 
 /** Resolve the client logo URL from a channel config. */

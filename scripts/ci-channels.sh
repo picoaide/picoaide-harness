@@ -134,10 +134,37 @@ case "$REF_NAME" in
     SELECTED=("official") ;;
 esac
 
-# 断言:要发的渠道必须在渠道仓里真实存在(缺失 = 配置事故,不是"跳过")。
+# 断言:要发的渠道必须在渠道仓里真实存在(缺失 = 配置事故,不是"跳过"),
+# 且**必须带品牌内容**。
+#
+# 为什么品牌是硬性要求(2026-09-10):客户端在登录之前就要显示品牌(登录页标题、
+# 品牌区、侧边栏),那一刻问不到服务端 —— 文案只能随包。包里没写品牌时,
+# 客户端回落的是中性占位(Harness),交付出去就是"渠道客户看到中性名/厂商名"
+# 的观感事故。这类事故在构建期可拦,且**只能**在构建期拦:装到客户机器上之后
+# 再发现就晚了。缺字段的报错刻意不回显渠道名(渠道 CI 不输出渠道信息)。
 for id in "${SELECTED[@]}"; do
-  if [ ! -f "$DEST/$id/channel.json" ]; then
+  manifest="$DEST/$id/channel.json"
+  if [ ! -f "$manifest" ]; then
     echo "::error::渠道仓里缺少该渠道的 channel.json(渠道目录或配置缺失)" >&2
+    exit 1
+  fi
+  # 用 node 解析而不是 grep:channel.json 允许任意缩进/键序,正则匹配字段名会在
+  # 嵌套结构上误判(例如 copy.login_display_name 与别处的同名键)。
+  if ! node -e '
+    const fs = require("node:fs")
+    const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const str = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined)
+    const missing = []
+    // identity.display_name 是客户端**所有**名字的最终兜底(登录页/界面/门户),
+    // short_name 是登录页与服务端 applyDefaults 的直接来源:两者缺一,渠道构建
+    // 就会在某个可见位置显示中性占位。
+    if (str(cfg?.identity?.display_name) === undefined) missing.push("identity.display_name")
+    if (str(cfg?.identity?.short_name) === undefined) missing.push("identity.short_name")
+    if (missing.length > 0) {
+      console.error("::error::渠道包缺少品牌字段: " + missing.join(", ") + " —— 客户端登录页/侧边栏在服务端不可达时会回落中性占位,请补齐后重新发布")
+      process.exit(1)
+    }
+  ' "$manifest"; then
     exit 1
   fi
 done

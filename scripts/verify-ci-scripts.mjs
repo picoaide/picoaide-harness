@@ -52,7 +52,13 @@ function fakeChannelRepo(ids, options = {}) {
   const dir = tempDir('ci-channels-repo-')
   for (const id of ids) {
     mkdirSync(join(dir, 'channels', id), { recursive: true })
-    writeFileSync(join(dir, 'channels', id, 'channel.json'), JSON.stringify({ schema: 1, channel_id: id }))
+    // 品牌字段是**必需**的(ci-channels.sh 里 fail-loud):客户端在登录之前就要
+    // 显示品牌,包里没写就回落中性占位。夹具默认带上,另有用例专测缺失时的中止。
+    writeFileSync(join(dir, 'channels', id, 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: id,
+      identity: { display_name: `${id} AI`, short_name: id },
+    }))
   }
   for (const extra of options.extraDirectories ?? []) {
     mkdirSync(join(dir, 'channels', extra), { recursive: true })
@@ -139,10 +145,42 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   // 正式 tag 选中的渠道在仓里缺 channel.json → 必须失败(不是"跳过")
   const missingConfig = tempDir('ci-channels-missing-')
   mkdirSync(join(missingConfig, 'channels', 'official'), { recursive: true })
-  writeFileSync(join(missingConfig, 'channels', 'official', 'channel.json'), '{"schema":1,"channel_id":"official"}')
+  writeFileSync(join(missingConfig, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
   mkdirSync(join(missingConfig, 'channels', 'beta'), { recursive: true }) // 无 channel.json
   const missing = runChannels({ source: missingConfig, refName: 'v2.7.0', dest: 'channels', list: 'g.list' })
   check(missing.status !== 0, '选中渠道缺 channel.json 时必须失败')
+
+  // 渠道包缺品牌字段 → 必须**中止构建**:客户端登录页/侧边栏在服务端不可达时
+  // 回落中性占位,交付出去就是观感事故,而这类事故只能在构建期拦。
+  const branded = tempDir('ci-channels-brand-')
+  mkdirSync(join(branded, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(branded, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+  mkdirSync(join(branded, 'channels', 'acme-corp'), { recursive: true })
+  writeFileSync(join(branded, 'channels', 'acme-corp', 'channel.json'), '{"schema":1,"channel_id":"acme-corp"}')
+  const noBrand = runChannels({ source: branded, refName: 'v2.7.0', dest: 'channels', list: 'h.list' })
+  check(noBrand.status !== 0, '渠道包缺品牌字段时必须失败')
+  check(noBrand.stderr.includes('品牌字段'), '失败信息应指明缺的是品牌字段')
+  check(noBrand.stderr.includes('identity.display_name'), '失败信息应列出缺失的具体字段')
+  check(!noBrand.stderr.includes('acme-corp'), '品牌缺失的报错不得回显渠道名')
+
+  // 只有 display_name、没有 short_name 也要中止(登录页名字的直接来源)
+  const halfBranded = tempDir('ci-channels-brand-half-')
+  mkdirSync(join(halfBranded, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(halfBranded, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official"}}')
+  const half = runChannels({ source: halfBranded, refName: 'v2.7.0', dest: 'channels', list: 'i.list' })
+  check(half.status !== 0, '只配 display_name 也必须失败')
+  check(half.stderr.includes('identity.short_name'), '失败信息应点明缺 short_name')
+
+  // 空白字符串不算配置(与客户端 nonEmpty 口径一致)
+  const blank = tempDir('ci-channels-brand-blank-')
+  mkdirSync(join(blank, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(blank, 'channels', 'official', 'channel.json'),
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"   ","short_name":"Official"}}')
+  const blankRun = runChannels({ source: blank, refName: 'v2.7.0', dest: 'channels', list: 'j.list' })
+  check(blankRun.status !== 0, '空白品牌名必须视为缺失')
 }
 
 // ---- 4/5. 逐渠道打包:日志抑制、失败中性、产物归集 ----
@@ -221,4 +259,4 @@ if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/日志抑制/产物归集全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码/策略/品牌必填/日志抑制/产物归集全部符合预期\n')

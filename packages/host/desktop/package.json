@@ -339,6 +339,7 @@
     },
     "files": [
       "build/app-icon.png",
+      "build/channel.json",
       "build/app-icon-mac.png",
       "build/tray-icon*.png",
       "cordis.patch.yml",
