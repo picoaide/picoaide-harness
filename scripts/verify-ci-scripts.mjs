@@ -92,6 +92,9 @@ function fakeChannelRepo(ids, options = {}) {
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
+      // 私有仓的渠道包里真实存在这样的注解字段:校验必须忽略 `_` 前缀的键,
+      // 否则整条发布会被一条注释拦下(2026-09-10 CI 实测)。
+      assets: { _note: '注解:渠道素材说明,不是文件名/路径' },
       ...(publicChannel
         ? {}
         : {
@@ -268,6 +271,19 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   const icon = runChannels({ source: badIcon, refName: 'v2.7.0', dest: 'channels', list: 'l.list' })
   check(icon.status !== 0, 'app-icon.png 尺寸不符时必须失败')
   check(icon.stderr.includes('app-icon.png'), '失败信息应点名 app-icon.png')
+
+  // 未知素材字段(很可能是拼错)→ 只告警,不中止发布
+  const unknownAsset = tempDir('ci-channels-unknown-asset-')
+  mkdirSync(join(unknownAsset, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(unknownAsset, 'channels', 'official', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'official',
+    identity: { display_name: 'Official', short_name: 'Official' },
+    assets: { _note: '注解', logoo: 'logo.svg' },
+  }))
+  const unknown = runChannels({ source: unknownAsset, refName: 'v2.7.0', dest: 'channels', list: 'n.list' })
+  check(unknown.status === 0, '未知素材字段不应中止发布(只告警)')
+  check(unknown.stderr.includes('logoo'), '未知素材字段应给出告警并点名')
 
   // 声明的素材文件不存在 → 构建期拦(否则服务端不下发 URL、客户端拿到死链)
   const missingAsset = tempDir('ci-channels-asset-')
