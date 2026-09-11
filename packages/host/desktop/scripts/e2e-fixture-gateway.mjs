@@ -19,17 +19,26 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ methods: [{ name: 'local', configured: true }] }))
     return
   }
-  if (url.pathname === '/api/client/v2/auth/me' || url.pathname === '/api/client/v2/auth/usage') {
+  if (url.pathname === '/api/client/v2/auth/me') {
+    res.end(JSON.stringify({ username: 'admin', id: 1, department: 'dev', token: 'mock-token-123' }))
+    return
+  }
+  if (url.pathname === '/api/client/v2/auth/usage') {
+    // 真实契约(server handleUsageSummary):**直接字段**,没有 data 外壳。
+    // account-card 的 UsageService 直接使用该响应作为 snapshot.data;
+    // 旧 fixture 包了一层 data,导致 remaining_money/monthly_cost 等字段
+    // 实际全是 undefined(账户卡静默显示空态,测试却"通过")——按真实形状返回。
     res.end(JSON.stringify({
-      username: 'admin', id: 1, department: 'dev', token: 'mock-token-123',
-      // Usage envelope expected by the account card (`/api/pico/account/usage`
-      // passes it through): data.remaining_money/monthly_cost/today_cost must
-      // be numbers or formatMoney crashes and the sidebar slot fails.
-      data: {
-        quota_tokens: null, quota_money: null,
-        remaining_tokens: null, remaining_money: 100,
-        today_cost: 0.5, monthly_cost: 12.3, total_cost: 25.6,
-      },
+      is_admin: false,
+      quota_tokens: 0, quota_money: 0,
+      monthly_usage: 1234, monthly_cost: 12.3,
+      remaining_tokens: null, remaining_money: 100,
+      today_usage: 0, today_cost: 0.5,
+      yesterday_usage: 0, yesterday_cost: 0,
+      total_usage: 0, total_cost: 25.6,
+      // 0061 余额:客户端账户卡在 balance_enabled 时以余额为主数字。
+      balance_money: 88.5, balance_enabled: true,
+      balance_monthly: 100, balance_mode: 'add',
     }))
     return
   }
