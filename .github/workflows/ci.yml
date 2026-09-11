@@ -41,6 +41,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      # 正式 tag 必须有策展发布说明(2026-09-11 定案):GitHub Release 页是**公开面**,
+      # 缺 docs/releases/<tag>.md 时 release job 会回退自动生成的 PR 列表 —— 版本页
+      # 变成 CI 日志(v2.7.0 的实际情况)。这条检查放在 gate 的第一步:tag 打错时
+      # 1 分钟内就报,不必等三平台构建 40 分钟才在最后一步失败。预发 tag 允许缺失。
+      - name: Require curated release notes for stable tags
+        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+        run: |
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "::error::正式版缺少发布说明 docs/releases/${GITHUB_REF_NAME}.md(模板见 docs/releases/TEMPLATE.md)"
+            exit 1
+          }
+          echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
       # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false
       # 且会重排 PATH——corepack enable 必须在 setup-node 之后执行,否则
       # Windows 上 yarn shim 被覆盖,install 落到全局 Yarn 1.22(实测报错)。
@@ -696,12 +708,20 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           REPO="picoaide/picoaide-harness"
-          NOTES_FLAG="--notes-file docs/releases/${TAG}.md"
-          if [ -f "docs/releases/${TAG}.md" ]; then
-            echo "Using curated release notes from docs/releases/${TAG}.md"
-          else
-            echo "::warning::docs/releases/${TAG}.md not found — falling back to GitHub auto-generated notes"
+          # 说明(**公开发布面**,2026-09-11 定案):正式 tag 必须有策展发布说明
+          # (docs/releases/<tag>.md,模板 TEMPLATE.md);缺失即失败,绝不静默回退
+          # 自动生成的 PR 列表 —— 版本页是给客户与运维看的,不是 CI 日志。
+          # 预发 tag 允许缺失(beta/rc 面向内测),回退自动变更日志并告警。
+          NOTES="docs/releases/${TAG}.md"
+          if [ -f "${NOTES}" ]; then
+            echo "Using curated release notes from ${NOTES}"
+            NOTES_FLAG="--notes-file ${NOTES}"
+          elif [[ "${TAG}" == *-* ]]; then
+            echo "::warning::${NOTES} not found — prerelease falls back to GitHub auto-generated notes"
             NOTES_FLAG="--generate-notes"
+          else
+            echo "::error::正式版 ${TAG} 缺少发布说明 ${NOTES}(模板见 docs/releases/TEMPLATE.md)"
+            exit 1
           fi
           # prerelease tag(含 prerelease 段)按 GitHub 语义以 Pre-release 发布:
           # 可见但不会被当成 Latest。正式 tag 发布为普通 release。
@@ -718,15 +738,19 @@ jobs:
           test -n "${PUBLIC}" || { echo "::error::未解析出公开渠道"; exit 1; }
           test -f "release-bundle/${PUBLIC}/picoaide-server-${TAG#v}-amd64.zip" \
             || { echo "::error::公开渠道的镜像包不存在,拒绝发布空 Release"; exit 1; }
+          # Release 名 = tag 本身,不加产品名前缀(2026-09-11 定案):Releases 页左侧
+          # 列表宽度固定,"PicoAide Harness v2.6.9-beta.5" 会被截断成
+          # "PicoAide Harness v2.6…" —— 一页十几个版本号全都看不见,只剩重复前缀。
+          # 产品名由仓库与页面标题承载,Release 名只回答"是哪个版本"。
           if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — updating title/notes/flags and clobbering assets"
             gh release edit "${TAG}" --repo "${REPO}" \
-              --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE}
+              --title "${TAG}" ${NOTES_FLAG} ${PRERELEASE}
             gh release upload "${TAG}" --repo "${REPO}" --clobber \
               "release-bundle/${PUBLIC}/"*.zip "release-bundle/${PUBLIC}/SHA256SUMS"
           else
             gh release create "${TAG}" --repo "${REPO}" \
-              --title "PicoAide Harness ${TAG}" ${NOTES_FLAG} ${PRERELEASE} \
+              --title "${TAG}" ${NOTES_FLAG} ${PRERELEASE} \
               "release-bundle/${PUBLIC}/"*.zip "release-bundle/${PUBLIC}/SHA256SUMS"
           fi
         env:
