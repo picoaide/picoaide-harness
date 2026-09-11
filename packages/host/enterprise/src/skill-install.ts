@@ -17,14 +17,13 @@
  */
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { precheckSkillPackage } from './manifest-precheck.ts'
-import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
+import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
 /** Skill names must be a single safe directory segment. */
 export const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u
@@ -218,18 +217,15 @@ export async function synthesizeSkillFrontmatter(dir: string, fallbackName: stri
   await writeFile(skillMdPath, `---\n${frontmatter}\n---\n${raw}`)
 }
 
-/** Resolve the user skill root from the environment (product home default). */
+/**
+ * Resolve the user skill root from the environment (product home default).
+ *
+ * 2026-09-11:缺省值走共享的 `dshHomeSafe()`(数据目录唯一权威) —— 数据根随渠道,
+ * 自己抄一份 `~/.picoaide-harness` 会在改渠道目录时漏掉,技能就落回官方目录。
+ */
 export function resolveSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
-  const home = env.DSH_HOME?.trim()
-  if (home !== undefined && home.length > 0) {
-    // 审计 2026-08-25 P2-3:DSH_HOME 不得指向系统关键目录(同机注入面)。
-    const resolved = join(home, 'skills')
-    if (!isSafeDshHome(home)) {
-      throw new Error(`unsafe DSH_HOME: ${home} resolves into a system directory`)
-    }
-    return resolved
-  }
-  return join(process.env.HOME ?? tmpdir(), '.picoaide-harness', 'skills')
+  // 审计 2026-08-25 P2-3:DSH_HOME 不得指向系统关键目录(同机注入面)。
+  return join(dshHomeSafe({ env }), 'skills')
 }
 
 /**

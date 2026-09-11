@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   DSH_HOME_ENV,
   PRODUCT_DSH_HOME_DIR,
   DEFAULT_DSH_HOME_DISPLAY,
+  channelDshHomeDir,
   dshHomePath,
   dshHomeSafe,
   expandHomePath,
   isSafeDshHome,
+  isSafeDshHomeDirName,
   isSystemWorkingDirectory,
   resolveDshHome,
 } from '../src/desktop-home.ts'
@@ -37,6 +40,54 @@ describe('resolveDshHome (product home)', () => {
 
   it('normalizes the result with path.resolve', () => {
     expect(resolveDshHome('/a/../b', {}, '/home/user')).toBe('/b')
+  })
+
+  it('uses the channel data directory when no explicit home is configured', () => {
+    // 渠道构建的数据根：官方目录是常量，渠道用 `channelDshHomeDir` 派生的那一段。
+    expect(resolveDshHome(undefined, {}, '/home/user', '.acme-harness')).toBe(join('/home/user', '.acme-harness'))
+    // 显式覆盖（DSH_HOME / configured，e2e 与便携安装用）永远优先于渠道缺省
+    expect(resolveDshHome(undefined, { [DSH_HOME_ENV]: '/custom/home' }, '/home/user', '.acme-harness'))
+      .toBe('/custom/home')
+    expect(resolveDshHome('/configured', {}, '/home/user', '.acme-harness')).toBe('/configured')
+  })
+})
+
+describe('channelDshHomeDir (渠道数据隔离的唯一派生点)', () => {
+  it('keeps the official directory for the official channel', () => {
+    expect(channelDshHomeDir('official')).toBe(PRODUCT_DSH_HOME_DIR)
+    // 官方渠道下即使渠道包写了别的值也不采纳（官方构建不随包分发渠道包）
+    expect(channelDshHomeDir('official', { homeDir: '.other' })).toBe(PRODUCT_DSH_HOME_DIR)
+  })
+
+  it('prefers the explicit channel value, then the slug, then the channel id', () => {
+    expect(channelDshHomeDir('acme', { homeDir: '.acme-data', slug: 'Acme-Harness' })).toBe('.acme-data')
+    expect(channelDshHomeDir('acme', { slug: 'Acme-Harness' })).toBe('.acme-harness')
+    // 没有 slug 的渠道（如 beta：复用官方品牌）也不能落到官方目录
+    expect(channelDshHomeDir('beta')).toBe(`${PRODUCT_DSH_HOME_DIR}-beta`)
+  })
+
+  it('never returns the official directory for a non-official channel', () => {
+    for (const options of [
+      {},
+      { homeDir: 'plain' },
+      { homeDir: '../escape' },
+      { homeDir: '/abs' },
+      { homeDir: '.UPPER' },
+      { homeDir: PRODUCT_DSH_HOME_DIR },
+      { slug: 'PicoAide-Harness' },
+      { slug: '../../etc' },
+      { slug: 42 },
+    ]) {
+      expect(channelDshHomeDir('acme', options)).not.toBe(PRODUCT_DSH_HOME_DIR)
+    }
+  })
+
+  it('accepts only single-segment dot-prefixed lowercase names', () => {
+    expect(isSafeDshHomeDirName('.acme-harness')).toBe(true)
+    expect(isSafeDshHomeDirName('.a')).toBe(true)
+    for (const bad of ['.', '..', '.UPPER', 'plain', '.with/slash', '.with\\slash', '.white space', '', undefined, 42, `.${'a'.repeat(64)}`]) {
+      expect(isSafeDshHomeDirName(bad)).toBe(false)
+    }
   })
 })
 
@@ -85,6 +136,10 @@ describe('isSafeDshHome (审计 P2-3 系统目录拒绝)', () => {
 describe('dshHomeSafe (P2-33: the launcher uses the guarded entry point)', () => {
   it('returns a safe home', () => {
     expect(dshHomeSafe({ env: { DSH_HOME: '/tmp/dsh-home' } })).toBe('/tmp/dsh-home')
+  })
+
+  it('honors the channel data directory passed by the launcher', () => {
+    expect(dshHomeSafe({ env: {}, productDir: '.acme-harness' })).toBe(join(homedir(), '.acme-harness'))
   })
 
   it('throws for an injected system-directory home instead of using it', () => {

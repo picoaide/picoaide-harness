@@ -10,6 +10,8 @@
  * 断言三层：
  *   1. `build/` 与本次渠道自洽 —— 渠道构建必须有 `channel.json` 且 `channel_id`
  *      等于所选渠道；官方构建**必须没有**（残留会把客户品牌染进官方包）；
+ *      随包配置解析出的**数据目录**必须是本渠道专属（不得回落官方目录，
+ *      2026-09-11 加：共用一个数据根 = 跨渠道共享登录态/会话）；
  *   2. 位图确实是按**本次渠道**派生的 —— 现场重新派生到临时目录逐字节比对
  *      （`app-icon.png` / `app-icon-mac.png` / 托盘位图）。比对的是"与渠道自洽"，
  *      而不是某个具体品牌，因此官方与渠道共用同一条门禁；
@@ -32,6 +34,8 @@ import { fileURLToPath } from 'node:url'
 import { prepareBrandAssets } from './brand-prepare.mjs'
 import { defaultChannelAppDir } from './channel-prepare.ts'
 import { resolveChannelBuildContext } from './channel-build.ts'
+import { parseDesktopChannelProfile } from '../src/desktop-channel.ts'
+import { PRODUCT_DSH_HOME_DIR } from '../src/desktop-home.ts'
 
 /** 必须逐字节与"按本渠道重新派生"一致的文件。 */
 const DERIVED_ASSETS = [
@@ -49,8 +53,8 @@ function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
-/** 断言，失败即抛（自带上下文，便于 CI 一眼定位）。 */
-function assert(condition: boolean, message: string): void {
+/** 断言，失败即抛（自带上下文，便于 CI 一眼定位；`asserts` 让调用方继续窄化类型）。 */
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new ChannelPackageError(message)
 }
 
@@ -114,6 +118,25 @@ export async function verifyChannelPackage(options: {
     assert(
       staged.channel_id === context.channelId,
       `${stagedPath} 的 channel_id=${JSON.stringify(staged.channel_id)} 与构建渠道 ${context.channelId} 不一致`,
+    )
+    // 数据根只属于本渠道（2026-09-11）：用**运行期的解析器**读同一份随包配置，
+    // 断言客户端这次装完会把数据放在哪个目录 —— 白标客户端与官方客户端共用一个
+    // 数据根会共享登录 token/settings/会话（跨租户），还会互相顶掉单实例锁。
+    // 官方构建走上面"不该有渠道包"的分支，因此天然不受影响。
+    const stagedProfile = parseDesktopChannelProfile(staged)
+    assert(
+      stagedProfile !== undefined,
+      `${stagedPath} 不能被运行期解析器识别（渠道 id 形状/结构不符）—— 客户端会当成"没有渠道包"`,
+    )
+    assert(
+      stagedProfile.homeDir === context.homeDir,
+      `${stagedPath} 的数据目录 ${stagedProfile.homeDir} 与本次构建的 ${context.homeDir} 不一致`
+      + '（构建期与运行期必须同源，否则升级一次就换数据根）',
+    )
+    assert(
+      stagedProfile.homeDir !== PRODUCT_DSH_HOME_DIR,
+      `渠道 ${context.channelId} 的数据目录回落到了官方目录 ${PRODUCT_DSH_HOME_DIR} —— `
+      + '与官方客户端共用数据根会跨渠道共享登录态/会话，必须在渠道包 desktop.home_dir 里显式声明自己的目录。',
     )
     checked.push('build/channel.json')
   }

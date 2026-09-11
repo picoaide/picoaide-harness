@@ -182,6 +182,23 @@ for id in "${SELECTED[@]}"; do
       if (str(cfg?.desktop?.slug) === undefined) missing.push("desktop.slug")
       if (str(cfg?.desktop?.app_id) === undefined) missing.push("desktop.app_id")
       if (str(cfg?.desktop?.deep_link_scheme) === undefined) missing.push("desktop.deep_link_scheme")
+      // 数据目录(2026-09-11):客户端里官方目录名是编译期常量,渠道不显式声明就
+      // 只能共用官方目录 —— 两个渠道共用一个数据根会共享登录 token/settings/会话
+      // (跨租户),并互相顶掉 Electron 的单实例锁。只能在构建期拦:装到客户机器上
+      // 时数据已经共享了。
+      if (str(cfg?.desktop?.home_dir) === undefined) missing.push("desktop.home_dir")
+    }
+    // 数据目录名形状:`~` 下的**单段**目录名(点开头 + 小写字母/数字/连字符)。
+    // 允许分隔符等于让渠道包把数据根挪到任意位置;大写会让同一个渠道在 Linux 与
+    // Windows/macOS 上落进两个不同目录。
+    const homeDir = str(cfg?.desktop?.home_dir)
+    if (homeDir !== undefined && !/^\.[a-z0-9][a-z0-9-]{0,62}$/.test(homeDir)) {
+      invalid.push("desktop.home_dir(须为点开头的单段小写目录名,如 .acme-harness)")
+    }
+    // 非官方渠道的数据目录**绝不能**等于官方目录 —— 那正是"与官方共用数据根"。
+    // beta 渠道复用官方品牌但必须有自己的数据目录(它在 R2 上是独立分发面)。
+    if (id !== "official" && homeDir === ".picoaide-harness") {
+      invalid.push("desktop.home_dir(不能与官方渠道的数据目录相同)")
     }
     // 非法字段**只报字段名,不回显取值** —— 渠道包里 slug/app_id/scheme 的值就是
     // 客户品牌(Acme-AI / com.acme.ai / acmeai),而这一步的输出进公开 Actions 日志。
