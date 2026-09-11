@@ -348,6 +348,15 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   // yarn check 后 dist/linux-unpacked 整个消失,后面的 E2E 报 app binary not found)。
   const distDir = join(runDir, 'dist')
   mkdirSync(distDir, { recursive: true })
+  // 哨兵文件：下面几个用例都调 ci-package-clients.sh，而它每个渠道开头就
+  // `rm -rf "$DIST"`，缺省的 DIST 是**仓库里真实的** packages/host/desktop/dist ——
+  // 少传一次 `--dist` 就会把开发机/CI 刚打好的包删掉（2026-09-11 实测：
+  // `yarn check` 之后 dist/ 变空，随后的 e2e 报 app binary not found）。
+  // 用例跑完在这里断言哨兵还在，把"漏传 --dist"变成红灯而不是静默删产物。
+  const realDist = join(root, 'packages', 'host', 'desktop', 'dist')
+  const sentinel = join(realDist, '.verify-ci-scripts-sentinel')
+  mkdirSync(realDist, { recursive: true })
+  writeFileSync(sentinel, 'keep')
   writeFileSync(list, 'official\nexample-brand\n')
 
   // 假打包器:回显渠道名并产出两种文件;渠道名出现在**输出**里,
@@ -392,7 +401,8 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
 `)
   const stageGate = join(runDir, 'stage-gate')
   const gate = spawnSync('bash', [
-    packageScript, '--list', list, '--stage-dir', stageGate, '--patterns', '*.AppImage *.deb', '--', stub,
+    packageScript, '--list', list, '--stage-dir', stageGate, '--dist', distDir,
+    '--patterns', '*.AppImage *.deb', '--', stub,
   ], { cwd: root, encoding: 'utf8', env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyFail } })
   check(gate.status !== 0, '渠道白标门禁失败必须让步骤失败')
   const gateLines = `${gate.stdout ?? ''}${gate.stderr ?? ''}`
@@ -431,6 +441,10 @@ echo x > "${distDir}/App.AppImage"
   check(!failureLines.includes('SECRET-CHANNEL-DETAIL'), '失败时不得回显渠道构建的输出')
   check(!failureLines.includes('example-brand'), '失败信息里不得出现渠道名')
   check(failureLines.includes('官方构建'), '失败信息应指引去看官方构建的日志')
+
+  // 三个打包用例都不许动仓库里真实的 dist/（哨兵法：被 `rm -rf "$DIST"` 连目录一起删掉）。
+  check(existsSync(sentinel), '打包脚本用例不得删除仓库里真实的 packages/host/desktop/dist（漏传 --dist）')
+  rmSync(sentinel, { force: true })
 }
 
 // ---- 6. 所有 CI shell 脚本必须能通过 bash -n ----
