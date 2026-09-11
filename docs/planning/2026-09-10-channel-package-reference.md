@@ -172,6 +172,17 @@ picoaide/channels  (私有仓)
 | `desktop.app_id` | bundle id / AppUserModelId 回落厂商值 —— 两个渠道的客户端在系统里变成"同一个 app" |
 | `desktop.deep_link_scheme` | 回落 `picoaide` —— 浏览器 SSO 回调的确认框里出现厂商名 |
 
+**渠道 logo 的格式约束**（`desktop/scripts/generate-tray-icons.mjs`）：托盘位图是
+**把方块色字符串替换成托盘变体色**渲染的，所以渠道 `logo.svg` 必须
+
+- 用**平坦的十六进制色 `<rect fill="#RRGGBB">`** 画方块（渐变 / `url(#…)` 替换不到，
+  会得到一个颜色没归一的托盘图标）；
+- 全部内联属性，**不能有 `<style>`**（样式表里的颜色替换不到）。
+
+这条约束以前是"必须恰好是官方黑 `#000000`"，于是渠道用自己的品牌色画 logo 会直接
+打包失败（报错还只说"必须用 #000000"）—— 2026-09-11 改成按方块自身的颜色替换，
+官方路径逐字节不变。`channels/moka/` 是第一个用品牌色（`#006AFF`）的渠道。
+
 `ci-channels.sh` 同时做字段形状校验（slug 纯 ASCII、app_id 反向域名、
 scheme 合法、`defaults.server_url` 必须 https 或回环 http）与**素材存在性/几何
 校验**：`assets.*` 里声明的文件名必须在渠道目录里真实存在（否则服务端不下发
@@ -227,6 +238,7 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 | 谁拼服务端地址 | `/api/pico/channel` 在**出口**统一绝对化；没有服务端地址就**丢弃**相对 URL（宁可回落内置品牌图形，也不渲染必然 404 的地址） | `enterprise/src/channel-content.ts` 的 `absolutizeChannelAssets` |
 | store 播种 | 该端点的载荷可能来自旧版本代码，播种前再丢一次相对素材 URL | `enterprise/src/client/channel-store.ts` 的 `stripRelativeAssetURLs` |
 | 窗口 CSP | `img-src` 必须放行 `http:` / `https:` —— 渠道 logo 来自**客户自己的服务器**，打包期不可能知道它的地址；只写 `'self' data: blob:` 会被 CSP 直接拦掉（微实验复现：`violates the following Content Security Policy directive: "img-src 'self' data: blob:"`，`naturalWidth=0`） | `desktop/src/electron-runtime.ts` 的 `APP_CONTENT_SECURITY_POLICY` |
+| 服务端不可达 / 旧版服务端 | 渠道目录里的 logo 由 `stageChannelProfile()` **内联成 `data:` URI** 写进随包 `channel.json`（`assets.logo_inline` / `logo_dark_inline`），随包品牌因此自带标识 —— 否则客户端只能回落编译期内置的**官方**花括号 mark，白标客户的登录页上出现厂商图形（2026-09-11 在 moka 渠道线上实测） | `desktop/scripts/channel-build.ts` → `desktop-channel.ts` 的 `brand.logoURL` → `brandChannel()` |
 
 另外三条配套约束：
 

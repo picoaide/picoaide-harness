@@ -44,6 +44,29 @@ describe('brandChannel', () => {
     expect(JSON.stringify(out)).not.toContain('PicoAide')
   })
 
+  it('carries the packaged logo so the UI never falls back to the vendor mark', () => {
+    // 随包 logo（组装期内联的 data: URI）：服务端不可达、或服务端还是旧版
+    // （没有 /api/client/v2/channel）时，登录页与侧边栏显示的就是它。没有它，
+    // 客户端只能回落编译期内置的官方花括号 mark —— 白标客户在登录页看到厂商图形
+    // （2026-09-11 在 moka 渠道线上实测到）。
+    const content = brandChannel({
+      login: { displayName: 'Acme', shortName: 'Acme' },
+      client: { displayName: 'Acme AI' },
+      logoURL: 'data:image/svg+xml;base64,PHN2Zy8+',
+      logoDarkURL: 'data:image/svg+xml;base64,REFSSw==',
+    })
+    expect(content.login?.logo_url).toBe('data:image/svg+xml;base64,PHN2Zy8+')
+    expect(content.login?.logo_url_dark).toBe('data:image/svg+xml;base64,REFSSw==')
+    expect(content.client?.logo_url).toBe('data:image/svg+xml;base64,PHN2Zy8+')
+  })
+
+  it('omits the logo keys entirely when the channel brings none', () => {
+    const content = brandChannel({ login: { displayName: 'Acme' } })
+    expect(content.login).not.toHaveProperty('logo_url')
+    expect(content.client).not.toHaveProperty('logo_url')
+    expect(content.login).not.toHaveProperty('logo_url_dark')
+  })
+
   it('uses the official content only when there is no channel package at all', () => {
     // 本地开发/官方构建:没有渠道包 → 官方内容(与改造前逐字节一致)。
     expect(brandChannel(undefined)).toEqual(DEFAULT_CHANNEL)
@@ -248,6 +271,20 @@ describe('absolutizeChannelAssets', () => {
     const input: ChannelConfig = { client: { logo_url: '/api/logo' } }
     absolutizeChannelAssets(input, 'https://ai.example.com')
     expect(input.client?.logo_url).toBe('/api/logo')
+  })
+
+  it('keeps data: URIs untouched (they are complete URLs, not paths)', () => {
+    // 随包内联 logo 走的就是 data:：既不能拼服务端地址，也不能当"相对路径"丢掉
+    // （丢了等于白标 logo 在播种那一步被抹掉）。
+    const out = absolutizeChannelAssets(
+      { login: { logo_url: 'data:image/svg+xml;base64,PHN2Zy8+' }, client: { logo_url: 'data:image/svg+xml;base64,PHN2Zy8+' } },
+      'https://ai.example.com',
+    )
+    expect(out.login?.logo_url).toBe('data:image/svg+xml;base64,PHN2Zy8+')
+    expect(out.client?.logo_url).toBe('data:image/svg+xml;base64,PHN2Zy8+')
+    // 没有服务端地址时同样保留（服务端不可达正是它要顶上的场景）。
+    const offline = stripRelativeAssetURLs({ login: { logo_url: 'data:image/svg+xml;base64,PHN2Zy8+' } })
+    expect(offline.login?.logo_url).toBe('data:image/svg+xml;base64,PHN2Zy8+')
   })
 
   it('drops relative URLs when there is no server address to resolve them', () => {

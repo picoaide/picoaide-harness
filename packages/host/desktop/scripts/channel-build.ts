@@ -393,8 +393,45 @@ export function stageChannelProfile(
     )
   }
   mkdirSync(buildDir, { recursive: true })
-  writeFileSync(target, raw)
+  // **就位时把渠道 logo 内联进配置**（2026-09-11）：
+  // `build/channel.json` 是渠道客户端运行时唯一保证随包的渠道内容（图标那几份由
+  // electron-builder 从 buildResources 取，不进 asar）。渠道自己的 logo 若不内联，
+  // 客户端在"服务端不可达 / 服务端还是旧版（没有 /api/client/v2/channel）"时就只能
+  // 回落到**编译期内置的官方花括号 mark** —— 白标客户的登录页上出现厂商图形。
+  // 实测：moka 渠道的登录页在客户线上（旧版服务端）就是这个问题。
+  // 内联成 data: URI 后，随包品牌自带 logo，登录页/侧边栏在任何服务端版本下都显
+  // 客户自己的标识；服务端可达时仍以服务端下发为准（mergeChannel 逐字段覆盖）。
+  writeFileSync(target, JSON.stringify(inlineChannelAssets(value, context.channelDir), null, 2) + '\n')
   return target
+}
+
+/** 渠道包 `assets` 里允许内联进随包配置的素材（文件名键 → 内联键）。 */
+const INLINE_ASSETS = [['logo', 'logo_inline'], ['logo_dark', 'logo_dark_inline']] as const
+
+/**
+ * 把渠道目录里的 logo 素材读成 `data:` URI 塞进渠道包副本（只改副本，不动私有仓原文）。
+ *
+ * 单文件上限 32KB：logo 是矢量图，正常在 1–3KB；超限说明配错了（比如把 PNG 位图
+ * 塞进 SVG 字段），宁可忽略内联（回落到服务端下发）也不把 64KB 的配置上限吃满。
+ * @param value - 已解析的渠道包内容。
+ * @param channelDir - 渠道目录（素材所在处）。
+ * @returns 内联后的渠道包内容（原对象不变）。
+ */
+function inlineChannelAssets(value: unknown, channelDir: string): Record<string, unknown> {
+  const config = record(value)
+  const assets = record(config.assets)
+  const inline: Record<string, unknown> = { ...assets }
+  for (const [fileKey, inlineKey] of INLINE_ASSETS) {
+    const name = text(assets[fileKey])
+    if (name === undefined || name.includes('/') || name.includes('\\')) continue
+    const file = join(channelDir, name)
+    if (!existsSync(file)) continue
+    const content = readFileSync(file)
+    if (content.byteLength > 32 * 1024) continue
+    const mime = name.endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+    inline[inlineKey] = `data:${mime};base64,${content.toString('base64')}`
+  }
+  return { ...config, assets: inline }
 }
 
 /**

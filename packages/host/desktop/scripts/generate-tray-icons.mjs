@@ -18,8 +18,24 @@ const repoRoot = resolve(packageRoot, '..', '..', '..')
 const brandRoot = join(repoRoot, 'brands', 'official')
 const buildRoot = join(packageRoot, 'build')
 
-/** Brand tile fill color that tray sources must use (fixed brand color). */
+/** 托盘位图的固定渲染色（macOS 模板图 / Windows 固定黑；下面变体表里的 color 即它）。 */
 const BRAND_COLOR = '#000000'
+
+/**
+ * 取源 SVG 里**托盘方块**的填充色：第一个带 6 位十六进制 `fill` 的 `<rect>`。
+ *
+ * 为什么不能硬要求 `fill="#000000"`（2026-09-11 实测踩到）：托盘位图是把**方块色
+ * 替换成变体色**渲染出来的，真正的前提只是"方块用一个平坦的十六进制色"。官方
+ * logo 恰好是黑色，早先实现就把它写成了硬性要求 —— 于是**渠道用自己的品牌色画
+ * logo 时直接打包失败**（报错只说"必须用 #000000"，看不出是托盘派生的限制）。
+ * 现在按方块自身的颜色替换：官方路径逐字节不变（#000000 → 变体色），渠道品牌色
+ * 也能正常派生。
+ * @param {string} source - logo SVG 源文本。
+ * @returns {string | undefined} 形如 `#006AFF` 的方块色；没有平坦方块时为 undefined。
+ */
+function tileFillColor(source) {
+  return /<rect\b[^>]*\bfill="(#[0-9A-Fa-f]{6})"/u.exec(source)?.[1]
+}
 
 /** @typedef {{ file: string, size: number, color?: string }} TrayVariant */
 
@@ -44,15 +60,17 @@ export async function generateTrayIcons(options = {}) {
   const variants = options.variants ?? DEFAULT_VARIANTS
 
   const source = await readFile(sourcePath, 'utf8')
-  if (!source.includes(`fill="${BRAND_COLOR}"`) || /<style\b/iu.test(source)) {
+  const tileColor = tileFillColor(source)
+  if (tileColor === undefined || /<style\b/iu.test(source)) {
     throw new Error(
-      `generate-tray-icons: source must use the fixed brand color ${BRAND_COLOR} and inline attributes (no <style>)`,
+      'generate-tray-icons: source must draw the tile as <rect fill="#RRGGBB"> with inline attributes (no <style>)',
     )
   }
 
   const rendered = []
   await Promise.all(variants.map(async ({ file, size, color }) => {
-    const tinted = source.replaceAll(BRAND_COLOR, color)
+    // 方块色 → 变体色（官方源是 #000000，逐字节与改造前一致）。
+    const tinted = source.replaceAll(tileColor, color)
     await sharp(Buffer.from(tinted))
       .resize({ width: size, height: size, fit: 'contain' })
       .png({ compressionLevel: 9 })

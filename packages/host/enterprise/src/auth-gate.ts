@@ -265,7 +265,12 @@ const LOGIN_HTML = `<!DOCTYPE html>
     // logo_url 是相对路径(/api/client/v2/channel/logo): 在 Host 登录页需拼服务端地址。
     // 先统一去尾斜杠(trimServer),避免拼出 //api/client/v2/... 双斜杠路径。
     var server = trimServer(document.getElementById('server').value.trim())
-    var logoUrl = login.logo_url ? (login.logo_url.indexOf('http') === 0 ? login.logo_url : server + login.logo_url) : ''
+    // logo_url 可能是三种形态：绝对 http(s)、相对路径（服务端下发，需拼服务端地址）、
+    // 或**随包内联的 data: URI**（渠道构建；服务端不可达/旧版服务端时显示客户自己的
+    // 标识）。只有相对路径才拼服务端地址 —— 把 data: 拼上去会变成一个取不到的地址，
+    // 于是白标客户的登录页又回到厂商兜底图形（2026-09-11 实测）。
+    var rawLogo = login.logo_url || ''
+    var logoUrl = rawLogo === '' ? '' : (/^(https?:|data:)/.test(rawLogo) ? rawLogo : server + rawLogo)
     // logo 加载失败时保留花括号兜底(与无渠道内容时同款)。
     // 安全:logoUrl 来自网关数据(管理员可控),仍须属性转义——旧实现直接拼
     // <img src="...">,网关被劫持/注入时可在登录页(认证前)形成 XSS(2026-09-01 审计)。
@@ -560,6 +565,9 @@ export const Config: z<Config> = z.object({
       shortName: z.string(),
       tagline: z.string(),
     }),
+    // 随包 logo（data: URI）——渠道构建注入；官方构建没有这两个键。
+    logoURL: z.string(),
+    logoDarkURL: z.string(),
   }),
 })
 
