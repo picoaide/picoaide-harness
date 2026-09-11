@@ -3,25 +3,30 @@ title: System Architecture
 description: 'PicoAide Harness system architecture: client/server layering, the LLM gateway and metering, quota tiers, and security design.'
 ---
 
-PicoAide Harness is a platform combining a **desktop client** and an **enterprise server**. This page is the architecture overview for administrators and integrators; the full endpoint list is in [API Reference](./api-reference), and public interfaces follow the actual code.
+PicoAide Harness is a platform combining a **desktop client** and an **enterprise server**. This page is the architecture overview for administrators and integrators; the full endpoint list is in [API Reference](/en/api-reference/), and public interfaces follow the actual code.
 
 ## Overall shape
 
 ```
 Employee clients / third-party integrations ──HTTPS + Bearer token──▶
 ┌────────────────────────────────────────────────────────────┐
-│ Go server (gin + PostgreSQL)                            │
-│   ├─ Auth: local / LDAP / OIDC + api_tokens (90-day hashed)│
-│   ├─ AI gateway: /v1/* proxy + per-user rate limit + usage │
-│   ├─ Bootstrap: /api/client/v2/config/bootstrap            │
-│   ├─ Marketplace & shared content (grant-based, two gates) │
-│   └─ Admin webadmin (go:embed, /admin/)                    │
+│ Go server (gin + PostgreSQL)                                │
+│   ├─ Auth: local / LDAP / OIDC + api_tokens (90-day hashed)  │
+│   ├─ AI gateway: /v1/* proxy + per-user rate limit + usage metering (cost/peak-off-peak)│
+│   ├─ Bootstrap: /api/client/v2/config/bootstrap              │
+│   ├─ Marketplace & sharing: skill marketplace / shared skills / shared agents (grant-based, two gates)│
+│   ├─ Channel content: /api/client/v2/channel (brand/copy, injected with the image)│
+│   ├─ Client delivery: /api/client/v2/updates/manifest + /updates/client/*│
+│   └─ Admin webadmin (embedded via go:embed, /admin/) + public portal (/)│
 └────────────────────────────────────────────────────────────┘
 ```
 
-- The **server** is the single control plane: upstream keys (AES-GCM), model pricing, quotas, grants, and approvals all live server-side;
+- The **server** is the single control plane: upstream keys (AES-GCM encrypted), model pricing, quotas, grants, and approvals all live server-side;
 - The **desktop client** owns the experience (chat, Capability Hub, connectors, scheduled jobs, browser) and connects through `/api/client/v2/*` and `/v1/*`;
-- The **admin console** (webadmin) covers users, departments, gateway, usage, marketplace, Capability Hub, brand, and portal — employees never touch it.
+  client installers and update packages are **delivered by the server** (they ship with the server image), so the client version naturally follows the server version;
+- The **Admin Console** (webadmin) covers users, departments, authentication, gateway, usage, Capability Hub, connectors, audit, and server information — employees never touch it;
+- **Brand and copy** (client sign-in page, client UI, Admin Console sidebar, portal page) come from **channel content**:
+  a read-only configuration baked into the image at build time, and the Admin Console offers no online editing entry point.
 
 ## Data flow
 
@@ -36,7 +41,8 @@ Employee clients / third-party integrations ──HTTPS + Bearer token──▶
   1. Employee token quota (`quota_tokens`: NULL = global default, 0 = unlimited);
   2. Employee money quota (`quota_money`);
   3. Department budget (`budget_money`; owned department + ancestor chain all apply; tree SUM(cost)).
-- **Self-query**: `GET /api/client/v2/auth/usage` returns remaining quota (quota − month-to-date used; null = unlimited) plus today/yesterday/month/total tokens and costs, and the department budget chain.
+- **Self-query**: `GET /api/client/v2/auth/usage` returns the balance (quota − month-to-date used; unlimited = null) plus today/yesterday/month/total tokens and costs, and the department budget chain.
+- **Stored balance (optional gate)**: `users.balance_money` is a stored amount (in CNY) orthogonal to the monthly quota; once the gate is enabled, calls with a balance ≤ 0 get a 429 at the gateway, and spending is deducted at micro-unit precision **in the same transaction** as the usage write; administrators can adjust it manually, and it can also be granted automatically per Beijing month (idempotent across instances/restarts).
 
 ## Security design
 
@@ -49,12 +55,15 @@ Employee clients / third-party integrations ──HTTPS + Bearer token──▶
 
 ## Database
 
-- PostgreSQL only (built-in container or external instance), migrations `migrations-pg/` 0001–0059;
-- usage detail partitioned by month (retention configurable, default 6 months); daily/monthly ledgers kept forever (10-year history never lost);
-- Shared skill/agent archives stored directly in the DB; brand snapshots, audit hash chain (tamper-evident), RBAC roles.
+- PostgreSQL only (PG-only; the deployment form is the container built into compose, and the binary also accepts an external instance via `-pg-dsn`),
+  with migrations under `migrations-pg/` (numbered 0001–0061; some numbers were dropped historically, hence the gaps);
+- usage details are natively partitioned by month (retention configurable in months, default 6), while the daily/monthly ledgers are kept forever (10 years of historical statistics never lost);
+- Shared skill / agent archives are stored directly in the DB; audit hash chain (tamper-evident), RBAC roles, balance-grant idempotency anchor.
+
+> The database schema is migrated automatically when the server starts; before upgrading, back up first as described in [Upgrade, backup & rollback](/en/deployment/upgrade/).
 
 ## Further reading
 
-- [API Reference](./api-reference) — all HTTP endpoints
-- [Private Deployment](./deployment) — containerized deployment, backup/restore, offline install
-- [Admin Console](./admin) — webadmin guide
+- [API Reference](/en/api-reference/) — all HTTP endpoints
+- [Private Deployment](/en/deployment/) — containerized deployment, backup/restore, offline install
+- [Admin Console](/en/admin/) — webadmin guide

@@ -25,15 +25,23 @@ PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/dee
 
 ## 支持哪些操作系统？
 
-Windows x64、macOS（arm64 / Apple 芯片，DMG）、Linux x64（AppImage + deb）。
+Windows x64（NSIS 安装程序）、macOS（Apple 芯片 / arm64，DMG）、Linux x64（AppImage）。
+企业交付面不含 Linux deb（deb 只在本地构建时产出）。
 
 ## 安装包为什么没签名？
 
-CI 自动发布的 Windows 安装程序与 Linux 安装包**暂未签名**（macOS 正式发布版已签名/公证）。Windows SmartScreen 可能提示「未知发布者」——请先在 Releases 下载 `SHA256SUMS.txt` 核对后再运行；Linux 同理。
+Windows 安装程序与 Linux AppImage **暂未签名**（macOS 正式发布版已签名 + 公证）。
+Windows SmartScreen 可能提示「未知发布者」——向管理员索取安装包时一并核对 SHA-256 摘要后再运行。
 
 ## 应用如何更新？
 
-后台检查 GitHub Releases（`releases/latest`），发现新版本先征得确认才下载；下载安装包并核对 **SHA-256 摘要**（兼容 `./` 前缀），校验失败不安装。下载/安装失败不破坏当前版本。会话头部右上角有升级徽章，托盘菜单同步升级状态。
+**升级源是客户端登录的那台服务端**（`GET /api/client/v2/updates/manifest`）：启动 60 秒后首次检查、
+之后每 6 小时一次，托盘与「设置 → 关于」可手动检查。清单里的 SHA-256 会在下载时流式校验，
+校验失败不安装；下载/安装失败不破坏当前版本。**因此客户端升级的正确做法是升级服务端**——
+服务端升级后客户端包自动跟着换新，员工端无需操作。未连接服务端时客户端不做任何外发更新检查。
+
+升级方式：Windows 走安装程序，macOS 打开 DMG 覆盖安装，Linux AppImage 下载完成后由用户替换当前文件
+（AppImage 无静默自安装）。
 
 ## 连接器为什么只有两家？
 
@@ -57,4 +65,11 @@ CLI 直接 spawn 的「CLI 即 skill」方案（自动安装 dws/wecom-cli 等�
 
 ## 在哪里下载和报告问题？
 
-从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 下载安装包。遇到问题先看[桌面客户端](./desktop)的排查部分，仍无法解决再提交 [GitHub Issue](https://github.com/picoaide/picoaide-harness/issues)，并附上操作系统、应用版本、复现步骤与错误信息。
+客户端安装包**随服务端镜像发布**，不单独挂在下载站：
+
+- 企业员工：从企业服务器的门户页下载（`https://<企业域名>/`），或直接向管理员索取；
+- 想先试用：取官方镜像包后导出 `client/` 目录即可获得三平台安装包，步骤见[快速开始](/getting-started/)。
+
+服务端部署与升级方式见[私有化部署](/deployment/)。遇到问题先看[桌面客户端](/desktop/)的排查部分，
+仍无法解决再提交 [GitHub Issue](https://github.com/picoaide/picoaide-harness/issues)，
+并附上操作系统、应用版本、复现步骤与错误信息。

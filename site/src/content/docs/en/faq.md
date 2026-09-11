@@ -25,15 +25,19 @@ No separate Node.js or Harness core download is required. The installer is large
 
 ## Which operating systems are supported?
 
-Windows x64, macOS (arm64 / Apple silicon, DMG), and Linux x64 (AppImage + deb).
+Windows x64 (NSIS installer), macOS (Apple silicon / arm64, DMG), and Linux x64 (AppImage).
+The enterprise delivery surface does not include the Linux deb (the deb is only produced by local builds).
 
 ## Why are the installers unsigned?
 
-The CI-published Windows and Linux installers are **not yet signed** (the official macOS release is signed/notarized). Windows SmartScreen may warn about an "unknown publisher" — download `SHA256SUMS.txt` from Releases and verify it before running; the same applies on Linux.
+The Windows installer and the Linux AppImage are **not yet signed** (official macOS releases are signed + notarized).
+Windows SmartScreen may warn about an "unknown publisher" — when asking your administrator for the installer, verify the SHA-256 digest at the same time before running it.
 
 ## How does the app update?
 
-In the background it checks GitHub Releases (`releases/latest`); when a new version is found it asks for confirmation before downloading. It downloads the installer and verifies the **SHA-256 digest** (tolerating a `./` prefix), and refuses to install on a failed check. A failed download/install does not break the current version. There is an upgrade badge at the top right of the session header, and the tray menu mirrors the update status.
+**The update source is the server the client signs in to** (`GET /api/client/v2/updates/manifest`): the first check runs 60 seconds after launch and then once every 6 hours; you can also check manually from the tray and from Settings → About. The SHA-256 in the manifest is verified while streaming the download, and a failed check means no install; a failed download/install does not break the current version. **So the correct way to upgrade clients is to upgrade the server** — after the server is upgraded, the client packages automatically follow, with no action needed on the employee side. When not connected to a server, the client performs no outbound update checks.
+
+Upgrade method: Windows uses the installer, macOS opens the DMG and installs over the existing app, and on Linux the AppImage is replaced by the user once the download finishes (AppImage has no silent self-install).
 
 ## Why are there only two connectors?
 
@@ -57,4 +61,9 @@ The app runs the fixed `desktop` profile; there is no `web` profile default and 
 
 ## Where do I download and report issues?
 
-Download installers from [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest). If you run into a problem, first read the troubleshooting section of [Desktop Client](./desktop); if it's still unresolved, file a [GitHub Issue](https://github.com/picoaide/picoaide-harness/issues) and include your OS, app version, reproduction steps, and error messages.
+Client installers **ship with the server image** and are not posted on a standalone download site:
+
+- Enterprise employees: download from your enterprise server's portal page (`https://<enterprise-domain>/`), or simply ask your administrator;
+- Want to try it first: fetch the official image package and export the `client/` directory to get the installers for all three platforms — see [Getting Started](/en/getting-started/).
+
+For how to deploy and upgrade the server, see [Private Deployment](/en/deployment/). If you run into a problem, first read the troubleshooting section of [Desktop Client](/en/desktop/); if it's still unresolved, file a [GitHub Issue](https://github.com/picoaide/picoaide-harness/issues) and include your OS, app version, reproduction steps, and error messages.

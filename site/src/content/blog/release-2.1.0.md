@@ -9,6 +9,9 @@ tags:
   - 产品
 ---
 
+> 注：本发布说明为历史快照。文中「客户端升级源 = GitHub Releases」的链路已于 2026-09 被替换 ——
+> 客户端现在只从**它登录的那台服务端**取更新。当前交付方式见[交付方式说明](/blog/delivery-model/)。
+
 PicoAide Harness 2.1.0 正式发布。本版本带来以下变化：
 
 ## 升级源切换至 GitHub Releases
