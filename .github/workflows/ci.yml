@@ -259,6 +259,13 @@ jobs:
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # aws CLI 走标准 AWS_* 凭据(脚本只把 R2_* 用作端点/桶/HMAC 种子)。
+          # 2026-09-11 v2.7.0 首次正式 tag 实测:漏了这两行 → 三个平台 job 全部
+          # 在"Transfer brand-channel installers"步骤以 "Unable to locate
+          # credentials" 失败,品牌渠道零交付(release job 因 needs 失败被跳过)。
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
       # fork PR 拿不到 secret(渠道仓读不到)——回落到只构建官方,而不是让 PR 失败。
@@ -375,6 +382,13 @@ jobs:
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # aws CLI 走标准 AWS_* 凭据(脚本只把 R2_* 用作端点/桶/HMAC 种子)。
+          # 2026-09-11 v2.7.0 首次正式 tag 实测:漏了这两行 → 三个平台 job 全部
+          # 在"Transfer brand-channel installers"步骤以 "Unable to locate
+          # credentials" 失败,品牌渠道零交付(release job 因 needs 失败被跳过)。
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
       # fork PR 拿不到 secret(渠道仓读不到)——回落到只构建官方,而不是让 PR 失败。
@@ -527,6 +541,13 @@ jobs:
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # aws CLI 走标准 AWS_* 凭据(脚本只把 R2_* 用作端点/桶/HMAC 种子)。
+          # 2026-09-11 v2.7.0 首次正式 tag 实测:漏了这两行 → 三个平台 job 全部
+          # 在"Transfer brand-channel installers"步骤以 "Unable to locate
+          # credentials" 失败,品牌渠道零交付(release job 因 needs 失败被跳过)。
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: bash scripts/ci-channel-transfer.sh push --list channels.list --stage client-assets
       # artifact 名中性;品牌渠道产物已由上面的中转步骤移出 client-assets(tag 时)。
@@ -601,6 +622,13 @@ jobs:
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # aws CLI 走标准 AWS_* 凭据(脚本只把 R2_* 用作端点/桶/HMAC 种子)。
+          # 2026-09-11 v2.7.0 首次正式 tag 实测:漏了这两行 → 三个平台 job 全部
+          # 在"Transfer brand-channel installers"步骤以 "Unable to locate
+          # credentials" 失败,品牌渠道零交付(release job 因 needs 失败被跳过)。
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: bash scripts/ci-channel-transfer.sh pull --list channels.list --to release-artifacts
 
@@ -677,6 +705,13 @@ jobs:
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # aws CLI 走标准 AWS_* 凭据(脚本只把 R2_* 用作端点/桶/HMAC 种子)。
+          # 2026-09-11 v2.7.0 首次正式 tag 实测:漏了这两行 → 三个平台 job 全部
+          # 在"Transfer brand-channel installers"步骤以 "Unable to locate
+          # credentials" 失败,品牌渠道零交付(release job 因 needs 失败被跳过)。
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: bash scripts/ci-channel-transfer.sh clean --list channels.list
 

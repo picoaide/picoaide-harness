@@ -18,12 +18,14 @@
 # release.picoaide.com 的 R2 自定义域)。`<index>` 是 channels.list 里的行号:
 # 中转路径不含渠道 id,渠道身份全程不出现在任何公开处。
 #
-# 用法:
-#   R2_ACCOUNT_ID=… R2_BUCKET=… ci-channel-transfer.sh push  --list channels.list --stage client-assets
-#   R2_ACCOUNT_ID=… R2_BUCKET=… ci-channel-transfer.sh pull  --list channels.list --to release-artifacts
-#   R2_ACCOUNT_ID=… R2_BUCKET=… ci-channel-transfer.sh clean --list channels.list
+# 用法(两组凭据都要给:aws CLI 认 AWS_*,R2_* 用于端点/桶名与 HMAC 种子):
+#   R2_ACCOUNT_ID=… R2_BUCKET=… R2_SECRET_ACCESS_KEY=… \
+#   AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_DEFAULT_REGION=auto \
+#     ci-channel-transfer.sh push  --list channels.list --stage client-assets
+#   … pull  --list channels.list --to release-artifacts
+#   … clean --list channels.list
 #
-# 退出码:0 成功;非 0 失败(缺 R2 凭据且存在品牌渠道时必须失败 —— 静默跳过会让
+# 退出码:0 成功;非 0 失败(缺凭据且存在品牌渠道时必须失败 —— 静默跳过会让
 # 品牌渠道"零交付"且没有任何信号)。
 set -euo pipefail
 
@@ -78,6 +80,20 @@ if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ] || [ -z "${R2_SECRET_A
   echo "::error::存在品牌渠道,但 R2 凭据不完整(R2_ACCOUNT_ID / R2_BUCKET / R2_SECRET_ACCESS_KEY)。" >&2
   echo "::error::品牌渠道的客户端产物**不经过公开 artifact**,必须经 R2 私密中转;" >&2
   echo "::error::请配置 R2 secrets,或不要在本次发布里包含品牌渠道。" >&2
+  exit 1
+fi
+
+# aws CLI 的凭据是**另一组**环境变量:上面那三个 R2_* 只喂端点、桶名与中转前缀的
+# HMAC 种子,aws 自己不认它们。
+# 2026-09-11 v2.7.0 首次正式 tag 实测:调用点只传了 R2_* → 三个平台 job 全部在
+# 这一步以 aws 的 "Unable to locate credentials" 失败(报错还指不到病根),
+# 品牌渠道零交付、release job 因 needs 失败被跳过。这里提前 fail-loud,
+# 让"缺凭据"自己说明缺什么。
+if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  echo "::error::存在品牌渠道,但 aws 凭据不完整(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)。" >&2
+  echo "::error::调用点须传 AWS_ACCESS_KEY_ID=secrets.R2_ACCESS_KEY_ID 与" >&2
+  echo "::error::AWS_SECRET_ACCESS_KEY=secrets.R2_SECRET_ACCESS_KEY(AWS_DEFAULT_REGION=auto);" >&2
+  echo "::error::R2_* 那组只用于端点/桶名/HMAC 种子,aws CLI 不认。" >&2
   exit 1
 fi
 
