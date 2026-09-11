@@ -9,7 +9,8 @@ import type { DesktopLayoutState } from './layout-state.ts'
  * collide with the desktop's own root registration), so the desktop shell is
  * the `layout` service provider: ui-sidebar/ui-chat inject 'layout' and drive
  * panel transitions through this face. DesktopLayoutState implements the
- * upstream ILayout contract (toggleSidebar/openDetails/closeDetails).
+ * rc.2 ILayout contract (selectPanel/beginNavigation/toggleSidebar/
+ * openRightbar/closeRightbar).
  * @param ctx - active browser Cordis context.
  * @param layout - desktop-owned layout implementation.
  * @returns disposer for the service registration.

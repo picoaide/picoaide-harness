@@ -563,7 +563,7 @@ export async function prepareDesktopProfile(
       // Advanced desktop owns the root frame itself: ui-layout's client row
       // is disabled so its AppFrame/child-slot declarations and `layout`
       // service provider never activate (0.1.2 forbids a second declaration
-      // of the sidebar/conversation/details slots and a duplicate service).
+      // of the sidebar/main/rightbar slots and a duplicate service).
       // The desktop shell provides the `layout` service and registers the
       // root frame with the child declarations instead (advanced-shell.ts).
       { id: 'ui-layout', disabled: true },
