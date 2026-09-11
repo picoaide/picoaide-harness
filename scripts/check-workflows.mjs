@@ -36,6 +36,10 @@
  * "Unable to locate credentials" 失败、品牌渠道零交付,release job 因 needs
  * 失败被跳过。这类"PR/分支全绿、发版才炸"的缺口只能靠静态策略门禁拦。
  *
+ * 同日晚些时候再补两条**发布面**策略(Release 名与发布说明,见 checkWorkflow 内注释):
+ * Release 名必须是 tag 本身(长名会被 Releases 页左侧列表截断,同页版本号全看不见),
+ * 且正式 tag 缺 `docs/releases/<tag>.md` 时必须 exit 1(不静默回退自动生成的 PR 列表)。
+ *
  * 用法:node scripts/check-workflows.mjs
  * 退出码:0 = 全部通过;1 = 有块解析失败或扫描器退化。
  */
@@ -295,6 +299,33 @@ export function checkWorkflow(name) {
             line: 0,
             detail: `job ${jobId} 的渠道 DMG 打包 step 没有调用 dist:mac:notarize`
               + '(只 sign-only 的渠道包没有公证票据,客户 Mac 首次打开会被 Gatekeeper 拦下)',
+          })
+        }
+      }
+      // GitHub Release 的「名字」与「说明」(2026-09-11 定案):
+      //   - Release 名必须是 tag 本身。Releases 页左侧列表宽度固定,
+      //     "PicoAide Harness v2.6.9-beta.5" 会被截断成 "PicoAide Harness v2.6…",
+      //     一页十几个版本号全都看不见 —— 只剩重复的产品名前缀。
+      //   - 正式 tag 缺 docs/releases/<tag>.md 必须 fail-loud:回退自动生成的 PR
+      //     列表等于把公开版本页变成 CI 日志(v2.7.0 的实际情况)。
+      // 这两条都只在 tag 触发时才有感觉(PR/分支全绿、发版才发现),只能靠静态检查拦。
+      if (typeof step?.run === 'string' && step.run.includes('gh release create')) {
+        if (!step.run.includes('--title "${TAG}"')) {
+          failures.push({
+            name,
+            line: 0,
+            detail: `job ${jobId} 的 gh release 步骤没有把 Release 名设为 tag 本身`
+              + '(长名会被 Releases 页左侧列表截断,同页版本号全部不可见;请用 --title "${TAG}")',
+          })
+        }
+        const notesPolicy = ['docs/releases/${TAG}.md', '--notes-file', '--generate-notes', 'exit 1']
+        const missingPolicy = notesPolicy.filter(fragment => !step.run.includes(fragment))
+        if (missingPolicy.length > 0) {
+          failures.push({
+            name,
+            line: 0,
+            detail: `job ${jobId} 的 gh release 步骤缺少发布说明策略: ${missingPolicy.join(', ')}`
+              + '(正式 tag 必须用 docs/releases/${TAG}.md;缺失时 exit 1,不静默回退自动变更日志;模板 docs/releases/TEMPLATE.md)',
           })
         }
       }

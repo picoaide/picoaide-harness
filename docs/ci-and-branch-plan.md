@@ -81,7 +81,7 @@ master（唯一常绿主干，合并即发布候选）
 └─────────────────────────────────────────────────────────────┘
 ┌─ release (仅 tag) ── needs 四 job ──────────────────────────┐
 │ 下载 desktop-* 三平台包 → tag==版本校验 → SHA256SUMS         │
-│ → gh release（docs/releases/<tag>.md 优先，否则自动生成）    │
+│ → gh release（名=tag；正式 tag 必须有 docs/releases/<tag>.md）│
 └─────────────────────────────────────────────────────────────┘
 ┌─ pr-summary (仅 PR, 非 fork) ───────────────────────────────┐
 │ 在 PR 评论本次产物入口（Artifacts 链接），重复推送自动刷新   │
@@ -92,6 +92,8 @@ master（唯一常绿主干，合并即发布候选）
 
 **客户端（前端 + 桌面）**——`gate`：
 
+- **正式 tag 的发布说明存在性**（`docs/releases/<tag>.md`，第一步就查；缺失即失败——tag 打错了
+  1 分钟内就知道，不必等三平台构建 40 分钟）；
 - `check:layout`（workspace 拓扑/包管理器 pin 校验）；
 - `dsh-plugin-desktop check`（build + typecheck 4 份 tsconfig + **452+ 测试** + verify:closure/loader/profile/licenses 无头冒烟）；
 - `dsh-better-sidebar check`（build + typecheck + consumer-types 声明面检查）；
@@ -128,7 +130,9 @@ master（唯一常绿主干，合并即发布候选）
 
 ### 2.6 发布规划
 
-- **客户端发布（正式与预发同一链路）**：`master` 上 bump 版本（root + desktop 两处 `package.json`，`scripts/version.mjs` 一键同步）→ 推 tag → CI 全量构建三平台 → `release` job 校验 tag==版本、生成 `SHA256SUMS.txt`（裸文件名，客户端升级源严格匹配）、创建 GitHub Release（`docs/releases/<tag>.md` 优先，缺失回退自动 changelog）。**Release job 幂等**：同 tag 重跑/重推时已存在 release → edit（标题/说明/Pre-release 标记）+ `--clobber` 刷新资产，不会 422；
+- **客户端发布（正式与预发同一链路）**：`master` 上 bump 版本（root + desktop 两处 `package.json`，`scripts/version.mjs` 一键同步）+ 写发布说明 `docs/releases/<tag>.md` → 推 tag → CI 全量构建三平台 → `release` job 校验 tag==版本、生成 `SHA256SUMS.txt`（裸文件名，客户端升级源严格匹配）、创建 GitHub Release（**名 = tag 本身**，正文用 `docs/releases/<tag>.md`）。**Release job 幂等**：同 tag 重跑/重推时已存在 release → edit（标题/说明/Pre-release 标记）+ `--clobber` 刷新资产，不会 422；
+- **发布说明是硬性要求（2026-09-11 定案）**：正式 tag 缺 `docs/releases/<tag>.md` → `gate` 第一步失败（release job 再拦一道），**不静默回退自动生成的 PR 列表**——Releases 页是公开面，v2.7.0 就是因为缺文件把版本页变成了 CI 日志。预发 tag 允许缺失（回退自动变更日志 + warning）。模板与写作口径见 `docs/releases/TEMPLATE.md`；
+- **Release 名 = tag（2026-09-11 定案）**：此前用 `PicoAide Harness <tag>`，而 Releases 页左侧列表宽度固定，`PicoAide Harness v2.6.9-beta.5` 被截断成 `PicoAide Harness v2.6…`——一页十几个版本号全都看不见。产品名由仓库与页面标题承载，Release 名只回答"是哪个版本"；两条都由 `scripts/check-workflows.mjs` 静态门禁守着；
 - **正式版 `vX.Y.Z`**：GitHub Release（Latest 语义，推送给全部客户端）+ mac 签名与公证（pack/notarize 可重试、公证 submission 状态续等）+ 镜像 `latest + vX.Y.Z + vX.Y`；
 - **预发 `vX.Y.Z-rc.N` / `-beta.N`**：**同样打 tag、同样出 GitHub Release 页面（Pre-release 徽章，资产可下载）**，只是：客户端升级源（`releases/latest`）与正式用户不收推；镜像只打 `vX.Y.Z-…` 具体 tag，不打 `latest`/宽版本 tag；
 - **服务端镜像**：`docker.yml` 独立 workflow（同 tag 触发 + 手动 dispatch）：`ghcr.io/picoaide/picoaide-harness-server`，构建后真实启动验 `/healthz`（PG 容器）与 `--version` 注入、manifest 单 amd64 断言。镜像版本与 `version.mjs` 同源校验；
