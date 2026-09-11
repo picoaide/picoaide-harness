@@ -138,7 +138,8 @@
     "dist:mac:pack": "node scripts/release-mac.ts --pack",
     "dist:mac:notarize": "node scripts/release-mac.ts --notarize",
     "dist:mac:dmg": "node scripts/release-mac.ts --dmg",
-    "verify:session": "node scripts/verify-session-restart.mjs"
+    "verify:session": "node scripts/verify-session-restart.mjs",
+    "e2e:sidebar": "node scripts/e2e-right-sidebar.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.2",
