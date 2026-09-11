@@ -48,7 +48,15 @@ const wait = ms => new Promise(r => setTimeout(r, ms))
 
 // --- CDP client ---
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-const main = list.find(t => t.type === 'page' && t.url.includes('dsh-desktop-mode')) ?? list.find(t => t.type === 'page')
+// The AI browser plugin prewarms its own WebContentsViews, so /json/list carries
+// `browser-shell` and `browser-overlay` page targets. Picking the first page
+// target attached this script to the browser shell (title 「AI 浏览器」) and every
+// surface assertion failed against the wrong document — e2e-client already
+// carries the same exclusion.
+const main = list.find(t => t.type === 'page'
+    && !t.url.includes('browser-shell') && !t.url.includes('browser-overlay')
+    && t.url.includes('dsh-desktop-mode'))
+  ?? list.find(t => t.type === 'page' && !t.url.includes('browser-shell') && !t.url.includes('browser-overlay'))
 if (!main) { console.error('no page target'); process.exit(1) }
 const ws = new WebSocket(main.webSocketDebuggerUrl)
 let id = 0
@@ -80,6 +88,23 @@ async function screenshot(name) {
   writeFileSync(join(shotsDir, `${name}.png`), Buffer.from(s.data, 'base64'))
 }
 
+/**
+ * Poll an expression until it is truthy.
+ * @param expression - browser expression returning a boolean.
+ * @param timeoutMs - how long to keep polling.
+ * @param intervalMs - poll interval.
+ * @returns whether the expression became truthy in time.
+ */
+async function waitFor(expression, timeoutMs = 30000, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const value = await ev(expression)
+    if (value === true) return true
+    await wait(intervalMs)
+  }
+  return false
+}
+
 async function clickLabel(label, waitMs = 2500) {
   const r = await ev(`(() => {
     const els = [...document.querySelectorAll('button')].filter(b => b.textContent?.trim() === ${esc(label)} && b.offsetParent)
@@ -93,14 +118,22 @@ async function clickLabel(label, waitMs = 2500) {
 
 /** Clear persisted auth (settings/session) then reload so the login form shows. */
 async function resetToLogin() {
-  await ev(`(() => {
-    try { localStorage.clear() } catch {}
-    try { sessionStorage.clear() } catch {}
-    const keys = Object.keys(localStorage)
-    return keys
-  })()`)
+  // Sign out through the product's own control. Two wrong turns are recorded
+  // here so nobody repeats them: clearing Web Storage alone leaves the
+  // cookie-authenticated session alive (the form never appears), while
+  // `Network.clearBrowserCookies` also drops the app's own process-token
+  // cookie and locks the window out with "dsh web authentication required;
+  // reopen the URL printed by dsh web." — a state only an app restart clears.
+  if (await ev(`!!document.getElementById('f1')`)) return
+  if (await ev(`!!document.querySelector('.dshDesktopConversationSurface')`)) {
+    await clickLabel('退出登录', 2500)
+    if (await waitFor(`!!document.getElementById('f1')`, 20000)) return
+  }
+  await ev(`(() => { try { localStorage.clear(); sessionStorage.clear() } catch {} })()`)
   await send('Page.reload', { ignoreCache: true })
-  await wait(4000)
+  if (!await waitFor(`!!document.getElementById('f1')`, 20000)) {
+    console.log('[real-env] login form did not appear after sign-out; continuing')
+  }
 }
 
 async function bodyText() {
@@ -112,25 +145,40 @@ try {
   await resetToLogin()
   await screenshot('r00-login')
 
-  // 2. Fill real server + credentials and submit
-  const filled = await ev(`(() => {
+  // 2. Fill the real server, advance to the method form, then submit. The
+  // auth-gate login is TWO steps (server → /auth/methods probe → local form);
+  // setting every field at once and clicking 登录 left the run on step 1 — it
+  // only ever worked when a previous manual session happened to be signed in.
+  const filledServer = await ev(`(() => {
     const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
-    return set('server', ${esc(SERVER)}) && set('username', ${esc(USER)}) && set('password', ${esc(PASS)})
+    return set('server', ${esc(SERVER)})
   })()`)
-  reportStep('登录表单已填写（真实服务器）', filled === true, `server=${SERVER} user=${USER}`)
+  await wait(400)
+  await clickLabel('下一步', 2000)
+  const step2 = await waitFor(`!!document.getElementById('f2')?.offsetParent`, 20000)
+  const filledCreds = step2 && await ev(`(() => {
+    const set = (id, v) => { const el = document.getElementById(id); if (!el) return false; const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); return true }
+    return set('username', ${esc(USER)}) && set('password', ${esc(PASS)})
+  })()`)
+  reportStep('登录表单已填写（真实服务器，两步）', filledServer === true && filledCreds === true,
+    `server=${SERVER} user=${USER} step2=${step2}`)
   await wait(500)
-  await clickLabel('登录', 9000)
+  await clickLabel('登录', 3000)
+  // The auth-gate serves a plain login page (no client bundle) until the session
+  // exists, and a cold first boot of the client graph takes seconds. Asserting on
+  // the document title passed on the login page itself — the product name is in
+  // that title too ("<brand> 登录"), which made this the same false green as the
+  // composer assertion in e2e-client. Wait for the desktop shell instead.
+  const shellUp = await waitFor(`!!document.querySelector('.dshDesktopConversationSurface')`, 60000)
   const title = await ev('document.title')
-  // 产品名取自本次构建声明的渠道内容（官方=官方名），不硬编码品牌。
-  reportStep('真实环境登录成功', title.includes(PRODUCT_NAME), `title=${title} expected=${PRODUCT_NAME}`)
+  reportStep('真实环境登录成功（客户端外壳已挂载）', shellUp, `shell=${shellUp} title=${title}`)
   await screenshot('r01-login-success')
 
   // 3. Boot graph completeness
-  const boot = await ev(`(() => {
-    const b = window.__DSH_BOOT__
-    if (!b || !Array.isArray(b.entries)) return { entries: -1, ids: [] }
-    return { entries: b.entries.length, ids: b.entries.map(e => e.id) }
-  })()`)
+  const bootUp = await waitFor(`!!(window.__DSH_BOOT__ && Array.isArray(window.__DSH_BOOT__.entries))`, 30000)
+  const boot = bootUp
+    ? await ev(`({ entries: window.__DSH_BOOT__.entries.length, ids: window.__DSH_BOOT__.entries.map(e => e.id) })`)
+    : { entries: -1, ids: [] }
   reportStep('客户端插件图已装载', (boot?.entries ?? 0) > 0, `entries=${boot?.entries}`)
   await wait(3000)
 
@@ -140,10 +188,11 @@ try {
   reportStep('主界面侧边栏导航完整（真实）', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 12).join(',')}`)
   await screenshot('r02-main')
 
-  // 5. Workspace picker (real data)
-  await clickLabel('选择工作区', 3000)
-  const wsText = await bodyText()
-  reportStep('工作区选择器可打开（真实）', !!wsText || true, 'opened')
+  // 5. Workspace picker (real data). The previous form of this check was
+  // `!!wsText || true` — a tautology that reported PASS even with no dialog.
+  await clickLabel('选择工作区', 1500)
+  const pickerOpen = await waitFor(`document.body.textContent?.includes('选择工作区目录') ?? false`, 10000)
+  reportStep('工作区选择器可打开（真实）', pickerOpen, `dialog=${pickerOpen}`)
   await screenshot('r03-workspaces')
   await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`).catch(() => {})
   await wait(1000)
@@ -179,9 +228,13 @@ try {
   await ev(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 
-  // 8. Chat input
-  const chatOk = await ev(`!!document.querySelector('textarea, [contenteditable=true]')`)
-  reportStep('聊天输入区可用（真实）', chatOk === true)
+  // 8. Chat input, scoped to the conversation column: a document-wide selector
+  // matched the sidebar's search box (the same false green e2e-client had).
+  const chatSelector = '.dshDesktopConversationSurface textarea, '
+    + '.dshDesktopConversationSurface [contenteditable="true"], '
+    + '.dshDesktopConversationSurface [role="textbox"]'
+  const chatOk = await waitFor(`!!document.querySelector(${esc(chatSelector)})`, 15000)
+  reportStep('聊天输入区可用（真实，限会话列）', chatOk, `selector=${chatSelector.slice(0, 40)}…`)
   await screenshot('r09-chat')
 
   // 9. Browser panel
