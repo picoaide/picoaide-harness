@@ -133,6 +133,7 @@ master（唯一常绿主干，合并即发布候选）
 - **预发 `vX.Y.Z-rc.N` / `-beta.N`**：**同样打 tag、同样出 GitHub Release 页面（Pre-release 徽章，资产可下载）**，只是：客户端升级源（`releases/latest`）与正式用户不收推；镜像只打 `vX.Y.Z-…` 具体 tag，不打 `latest`/宽版本 tag；
 - **服务端镜像**：`docker.yml` 独立 workflow（同 tag 触发 + 手动 dispatch）：`ghcr.io/picoaide/picoaide-harness-server`，构建后真实启动验 `/healthz`（PG 容器）与 `--version` 注入、manifest 单 amd64 断言。镜像版本与 `version.mjs` 同源校验；
 - **mac 预发签名（2026-09-06 已实施）**：预发 tag（beta/rc）走 **Developer ID 签名但不公证**（`--sign-only` → preflight 免公证元组，产物经 `dist:mac:dmg` 出 DMG + `verify-mac-release --unnotarized` 验证，跳过 spctl/stapler 两步）——Releases 页面可见、真机可装（首次打开右键绕过 Gatekeeper），免去每次 1-5 小时公证排队。正式 tag 维持完整签名+公证；非 tag 分支维持未签名冒烟。mac job 三态：**正式=签名+公证，预发=签名（不公证），PR/分支=未签名冒烟**。
+- **品牌渠道客户端同样签名+公证（2026-09-11 修复）**：正式 tag（纯 `vX.Y.Z`）上渠道 DMG 与官方走同一条 `dist:mac:pack` + `dist:mac:notarize`（含 staple）链，逐渠道 3 次重试；预发 tag 的渠道列表只有 `beta`，维持只签名不公证。此前渠道借用预发那条 sign-only 路径，客户 Mac 上首次打开被 Gatekeeper 拦成「Apple 无法验证」——交付物不该要求客户手动放行。渠道公证与官方共享同一个 mac job 预算（`timeout-minutes: 360`，GitHub 托管上限），渠道数增长后需按序号矩阵拆 job。
 
 ### 2.7 运维与后续
 
@@ -182,7 +183,7 @@ master（唯一常绿主干，合并即发布候选）
 | E2E 进 CI | ✅ linux job 接入 |
 | server 门禁补齐 | ✅ gofmt + webadmin 109 测试 |
 | 预发发布链路 | ✅ beta/rc = 打 tag + Pre-release（Release 页面可见、资产可下载）+ 客户端升级源排除；release job 幂等（已存在则更新，2026-09-06 修复） |
-| mac 预发签名 | ✅ 预发 = Developer ID 签名（不公证，`--sign-only` + `dist:mac:dmg`）；正式 = 签名+公证；PR/分支 = 未签名冒烟 |
+| mac 预发签名 | ✅ 预发 = Developer ID 签名（不公证，`--sign-only` + `dist:mac:dmg`）；正式 = 签名+公证（**含品牌渠道**，2026-09-11 修复）；PR/分支 = 未签名冒烟 |
 | Workflow 命名规范 | ✅ 已实施（§2.8）：CI / Publish server image / Ops · GHCR cleanup / Ops · Notary probe；CodeQL 为 GitHub Default setup 托管条目（命名固定） |
 | master 分支保护 | ⚠️ **未开启**（当前可直推；建议按 §1.3 开 PR+必填检查保护） |
 | 常用 tag 规范 | ✅ 已有（`vX.Y.Z` 正式 / `-rc`/`-beta` 预发），`version.mjs` 强校验 |
