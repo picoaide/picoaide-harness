@@ -30,6 +30,12 @@
  * 防退化:任何 workflow 解析出 0 个 run 块都会被判为失败 —— 扫描器一旦失效
  * (格式变化/正则走样),门禁必须响,而不是静默放行。
  *
+ * 2026-09-11 补一条**策略**检查(不只是语法):调用 `scripts/ci-channel-transfer.sh`
+ * 的 step 必须带齐 R2_* 与 AWS_* 两组凭据环境变量。当天 v2.7.0 正式 tag 上,
+ * 五处中转 step 只传了 R2_*,而 aws CLI 只认 AWS_* —— 三个平台 job 全部以
+ * "Unable to locate credentials" 失败、品牌渠道零交付,release job 因 needs
+ * 失败被跳过。这类"PR/分支全绿、发版才炸"的缺口只能靠静态策略门禁拦。
+ *
  * 用法:node scripts/check-workflows.mjs
  * 退出码:0 = 全部通过;1 = 有块解析失败或扫描器退化。
  */
@@ -52,6 +58,15 @@ const BLOCK_SCALAR = /^(\s*)run:\s*([|>])[-+]?\s*$/u
 const INLINE_RUN = /^(\s*)run:\s*(\S.*)$/u
 /** `shell: <名字>`。 */
 const SHELL_KEY = /^(\s*)shell:\s*(\S+)\s*$/u
+/** 中转脚本需要的凭据环境变量(aws CLI 认 AWS_*,R2_* 供端点/桶名/HMAC 种子)。 */
+const TRANSFER_REQUIRED_ENV = [
+  'R2_ACCOUNT_ID',
+  'R2_BUCKET',
+  'R2_SECRET_ACCESS_KEY',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+]
+
 /** `defaults:` 下的 `run:` 分组(job 级默认 shell 的父键)。 */
 const JOB_KEY = /^ {2}([A-Za-z_][\w-]*):\s*$/u
 const STEP_KEY = /^ {6}- /u
@@ -223,6 +238,21 @@ export function checkWorkflow(name) {
       if (typeof step?.run === 'string' && typeof step.uses === 'string') {
         failures.push({ name, line: 0, detail: `job ${jobId} 的某个 step 同时有 run 与 uses` })
       }
+      if (typeof step?.run === 'string' && step.run.includes('ci-channel-transfer.sh')) {
+        const env = typeof step.env === 'object' && step.env !== null ? step.env : {}
+        const missing = TRANSFER_REQUIRED_ENV.filter(name => {
+          const value = env[name]
+          return typeof value !== 'string' || value.trim() === ''
+        })
+        if (missing.length > 0) {
+          failures.push({
+            name,
+            line: 0,
+            detail: `job ${jobId} 的 ci-channel-transfer.sh step 缺少凭据环境变量: ${missing.join(', ')}`
+              + '(aws CLI 只认 AWS_*,R2_* 是端点/桶名/HMAC 种子;2026-09-11 因漏 AWS_* 三个平台零交付)',
+          })
+        }
+      }
     }
   }
 
@@ -265,10 +295,10 @@ function main() {
   if (failures.length > 0) {
     for (const failure of failures) {
       const where = failure.line === 0 ? failure.name : `${failure.name}:${failure.line}`
-      process.stderr.write(`\ncheck-workflows: ${where} 的 run 块无法解析\n`)
+      process.stderr.write(`\ncheck-workflows: ${where}\n`)
       process.stderr.write(`${failure.detail.split('\n').map(line => `  ${line}`).join('\n')}\n`)
     }
-    process.stderr.write(`\ncheck-workflows: ${failures.length} 个 run 块未通过(共检查 ${total} 个)\n`)
+    process.stderr.write(`\ncheck-workflows: ${failures.length} 项未通过(共检查 ${total} 个 run 块)\n`)
     process.exit(1)
   }
 

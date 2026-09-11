@@ -755,7 +755,17 @@ esac
       ...env,
     },
   })
-  const r2 = { R2_ACCOUNT_ID: 'acct', R2_BUCKET: 'bucket', R2_SECRET_ACCESS_KEY: 'secret' }
+  // 两组凭据都要:aws CLI 只认 AWS_*(R2_* 是端点/桶名/HMAC 种子)。
+  // 2026-09-11 v2.7.0 真实事故:夹具只给 R2_* 时脚本"本地全绿",正式 tag 上
+  // 三个平台 job 全部以 aws 的 "Unable to locate credentials" 失败、品牌渠道零交付。
+  const r2 = {
+    R2_ACCOUNT_ID: 'acct',
+    R2_BUCKET: 'bucket',
+    R2_SECRET_ACCESS_KEY: 'secret',
+    AWS_ACCESS_KEY_ID: 'keyid',
+    AWS_SECRET_ACCESS_KEY: 'secret',
+    AWS_DEFAULT_REGION: 'auto',
+  }
 
   // 造三平台产物:官方/beta 留 artifact,品牌渠道必须被中转走并从暂存目录删除。
   for (const id of ['official', 'beta', 'example-brand']) {
@@ -798,6 +808,14 @@ esac
   check(noCreds.status !== 0, '存在品牌渠道却没有 R2 凭据时必须失败')
   check((noCreds.stderr ?? '').includes('_transfer') || (noCreds.stderr ?? '').includes('不经过公开 artifact'),
     '失败信息应说明品牌渠道不经公开 artifact')
+
+  // R2_* 齐了但 aws 凭据没给 → 同样必须 fail-loud,且要点名缺的是 AWS_*
+  // (真实事故的报错是 aws 自己的 "Unable to locate credentials",指不到病根)
+  const noAws = transfer('push', ['--stage', stage], {
+    R2_ACCOUNT_ID: 'acct', R2_BUCKET: 'bucket', R2_SECRET_ACCESS_KEY: 'secret',
+  })
+  check(noAws.status !== 0, '存在品牌渠道却没有 aws 凭据时必须失败(不能只在真实发布时才炸)')
+  check((noAws.stderr ?? '').includes('AWS_ACCESS_KEY_ID'), '失败信息应点名缺 AWS_ACCESS_KEY_ID')
 
   // 只有公开渠道时不依赖 R2
   const publicOnly = join(work, 'public.list')
