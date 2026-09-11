@@ -118,7 +118,7 @@
     "verify:licenses": "node scripts/verify-licenses.mjs",
     "verify:notices": "node scripts/verify-licenses.mjs --notices THIRD_PARTY_NOTICES.md",
     "verify:channel": "node scripts/verify-channel-package.ts",
-    "check": "yarn run build && yarn run typecheck:tests && yarn run test && yarn run verify:channel && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile && yarn run verify:licenses",
+    "check": "yarn run build && yarn run typecheck:tests && yarn run test && yarn run verify:channel && yarn run verify:closure && yarn run verify:loader && yarn run verify:profile && yarn run verify:session && yarn run verify:licenses",
     "check:win-package": "yarn run typecheck && vitest run tests/package.spec.ts tests/package-win.spec.ts tests/update-checker.spec.ts tests/update-download.spec.ts tests/verify-win-installer.spec.ts tests/verify-win-portable.spec.ts tests/verify-packaged-runtime.spec.ts tests/windows-agent-presets.spec.ts tests/windows-pwsh-sandbox.spec.ts tests/windows-volume-diagnostics.spec.ts tests/window-options.spec.ts && yarn run verify:closure",
     "check:mac-package": "yarn run -T check",
     "prebuild": "node scripts/prebuild-workspace-deps.ts",
@@ -137,7 +137,8 @@
     "e2e:real-cron-flow": "node scripts/real-env-cron-flow.mjs",
     "dist:mac:pack": "node scripts/release-mac.ts --pack",
     "dist:mac:notarize": "node scripts/release-mac.ts --notarize",
-    "dist:mac:dmg": "node scripts/release-mac.ts --dmg"
+    "dist:mac:dmg": "node scripts/release-mac.ts --dmg",
+    "verify:session": "node scripts/verify-session-restart.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.2",

@@ -456,6 +456,32 @@ export function verifyPackagedRuntime(
       `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing required native unpacked entries: ${missingNativeEntries.join(', ')}`,
     )
   }
+  // 2026-09-11: 上面那条按「包名 + 精确路径」判定,而整包不存在时会跳过 —— 0.1.5 把
+  // `@deepseek-ai/node-addon-landlock-run*` 改名为 `.../node-addon-system*` 时,条目
+  // 被当成"平台不适用"放过,门禁在沙箱启动器缺失的情况下依然全绿(运行期 ENOTDIR)。
+  // 这里对**真实产物**再按家族前缀断言一次(真实 afterPack 的 unpackedRoot 一定存在于
+  // 磁盘;单测用的是注入探针 + 不存在的伪路径,因此不受影响):目标平台的 node-addon-system
+  // 平台包必须在,且 POSIX 侧必须带 landlock-run 启动器(它没有扩展名,只有显式
+  // asarUnpack 规则能把它解包出来)。
+  if (existsSync(unpackedRoot)) {
+    const addonScope = join(unpackedRoot, 'node_modules', '@deepseek-ai')
+    const family = existsSync(addonScope)
+      ? readdirSync(addonScope).filter(name => name.startsWith('node-addon-system-'))
+      : []
+    if (family.length === 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} ships no @deepseek-ai/node-addon-system-* platform package `
+        + '(the sandbox launcher and the flock module the session writer leases through)',
+      )
+    }
+    if (context.electronPlatformName === 'linux'
+      && !family.some(name => existsSync(join(addonScope, name, 'bin', 'landlock-run')))) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} has no physical landlock-run launcher `
+        + `(checked ${family.join(', ')}); verify the build.asarUnpack glob names the current package family`,
+      )
+    }
+  }
   const unpackedJs = listUnpackedUnsafeJs(unpackedRoot)
   if (unpackedJs.length > 0) {
     throw new Error(
