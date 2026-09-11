@@ -64,20 +64,33 @@ test('defaultRoots：始终包含主目录；darwin 包含 /Volumes', () => {
   const roots = defaultRoots('darwin')
   assert.ok(roots.length >= 1)
   assert.ok(roots.includes(homedir()))
-  // darwin 上真实 /Volumes 存在
-  assert.ok(existsSync('/Volumes'))
+  // /Volumes 是真实 darwin 才有的挂载点:仅在本机 darwin 上断言,
+  // 其它平台跳过(测试可通过 platform 参数模拟,但文件系统无法模拟)。
+  if (process.platform === 'darwin') {
+    assert.ok(existsSync('/Volumes'))
+    assert.ok(roots.some((root) => root.startsWith('/Volumes')))
+  }
   const winRoots = defaultRoots('win32')
-  assert.ok(winRoots.includes(homedir()))
+  // PR #32（全盘搜索卡死修复）：win32 只收集「探测存在」的盘符——home 所在
+  // 盘只扫 homedir（不含 C:\Windows 等系统目录），其余盘加盘符根。macOS
+  // 上探测无盘符 → 空数组；Windows 实机上 home 所在盘必存在 → 必含 homedir。
+  assert.ok(winRoots.length === 0 || winRoots.includes(homedir()))
 })
 
-test('resolveProviders：auto 按平台排序并探测（本机 darwin → mdfind 优先）', () => {
-  const chain = resolveProviders(baseConfig(), 'darwin')
+test('resolveProviders：auto 按平台排序并探测', () => {
+  const chain = resolveProviders(baseConfig(), process.platform)
   const names = chain.map((p) => p.name)
-  assert.ok(names[0] === 'mdfind', `期望 mdfind 优先，实际 ${names.join(',')}`)
+  // probe 依赖本机真实命令(非 mac 上没有 mdfind),darwin 优先序才可断言。
+  if (process.platform === 'darwin') {
+    assert.ok(names[0] === 'mdfind', `期望 mdfind 优先，实际 ${names.join(',')}`)
+  }
   assert.ok(names.includes('walk'))
-  // 显式顺序
-  const explicit = resolveProviders(baseConfig({ searchDocsProviders: ['rg', 'walk'] }), 'darwin')
-  assert.deepEqual(explicit.map((p) => p.name), ['rg', 'walk'])
+  // 显式顺序:probe 不可用的 provider 会被过滤,但显式顺序必须保持
+  // (非 mac 上 rg 可能未安装 → 只留 walk;断言"顺序保持"而非硬编码列表)。
+  const explicit = resolveProviders(baseConfig({ searchDocsProviders: ['rg', 'walk'] }), process.platform)
+  const explicitNames = explicit.map((p) => p.name)
+  assert.ok(explicitNames.includes('walk'))
+  assert.deepEqual(explicitNames, ['rg', 'walk'].filter((n) => explicitNames.includes(n)))
   // 未知 provider 报错
   assert.throws(() => resolveProviders(baseConfig({ searchDocsProviders: ['nope'] }), 'darwin'))
 })
@@ -216,7 +229,10 @@ test('控制器：启用注册、禁用注销、状态', () => {
   assert.equal(registered?.name, 'memory_evolve_search_local_files', '启用后注册工具')
   const status = ctrl.status()
   assert.equal(status.enabled, true)
-  assert.deepEqual(status.providers, ['mdfind', 'rg', 'walk'])
+  assert.ok(status.providers.includes('walk'), `providers 至少含 walk：${status.providers.join(',')}`)
+  if (process.platform === 'darwin') {
+    assert.deepEqual(status.providers, ['mdfind', 'rg', 'walk'])
+  }
   enabled = false
   ctrl.sync()
   assert.equal(registered, null, '禁用后注销工具')

@@ -6,6 +6,35 @@ All version changes for this repository, in reverse chronological order.
 
 ---
 
+## 2026-09-09
+
+### Fixed
+
+- **"Memory write watchdog" toggle in Memory Evolve Settings reverted after saving and refreshing**: `MemoryQueueView.saveConfig()` hand-builds a fixed patch object for the host, and that key list is hard-coded — `perTurnWriteGuard` (the watchdog toggle) and `writeGuardThreshold` (its threshold) have controls and are bound to `draft` (the checkbox flips immediately), but were never added to the patch. The POST body therefore carried neither key, the host's `updateRuntime()` never saw them, nothing was persisted to `plugin-state.json`, and the next `GET /api/config` returned the default `false`. Because the panel renders the local draft, the save even reported success — the loss only surfaced after a refresh. Fix: both keys are now sent (TypeScript source plus a rebuilt `lib/client.js` artifact), with a regression test `tests/client-config-save.test.js` pinning the contract "every draft-bound panel key is sent by saveConfig" (and asserting the source and artifact key sets match, guarding against "source edited but artifact not rebuilt"). Verified to fail when the fix is reverted.
+
+---
+
+## 2026-09-08
+
+### Fixed
+
+- **Memory-tab sub-navigation hidden and unclickable after widening the conversation (issue #40)**: since DSH 0.1.2-rc the conversation column renders width-drag handles (absolute full-height `col-resize` strips carrying `data-width-handle`, z-index 8, width `min(40px, (100% - --dsh-chat-content-width)/2 - 48px)`). Plugin tabs are full-column-width panels that do not follow `--dsh-chat-content-width`, so after widening the chat the strips land exactly on the tab's top sub-navigation row (Guide / global rules AGENTS.md …), blocking both visibility and clicks. The fix mirrors DSH's own treatment of full-bleed overlay views (`.root:has([data-conversation-composer-overlay]) .widthHandle{display:none}` in `ConversationRoot.module.css`): `[data-phase]:has(...) [data-width-handle] { display: none }` now covers the root containers of **all eleven tabs** (`.mt-panel` memory/skills/todos/settings/models/sync, `.me-panel` UI settings/version/guide, `.coi-root`, `.bb-pane`, `.pm-root`, `.bm-panel`). The handles hide while any plugin tab is mounted and come back on the conversation view; the stored width preference is untouched.
+- **Subagent snapshots no longer carry the dtodo turn-end hint (issue #43)**: `snap.todoHint` ("at turn end call dtodo list to check what is due … remind the user at the end of your reply") is a user-facing duty. Subagents do not deliver to the user directly and must not remind on the parent session's behalf; the hint only nudged them into one extra pointless dtodo call. Every other turn-end duty (review counter, write watchdog, turn-end heading, write wording) was already downgraded via `isSubagent` — this one was the missing exemption. A regression test was added and verified to fail when the fix is reverted.
+- **Per-turn "turn-stopping 处理失败: Cannot read properties of undefined (reading 'length')" (issue #42)**: DSH 0.1.2-alpha.4+ no longer exposes `Session.events`; reading it yields `undefined` and `.length` throws, which the turn-stopping serial dispatch surfaced as a non-fatal warning. Now `agent.session.ownEvents?.() ?? agent.session.events ?? []` (older hosts fall back to `.events`). The fix had only lived on the development track — **this release is the first to ship it**; users on the previous release tag still see the warning.
+- **headless profile failed to load (issue #35)**: `workspaceRegistry` (a web-only service) is no longer a hard `inject` dependency; it is read lazily through `ctx.get`.
+- **Session bookmarks broken on DSH 0.1.1-rc.2+ (issue #39)**: adapted to the upstream `data-chat-anchor-key` rework (`node:{seq}` → `{kind.length}:{kind}{id}`) across star injection, list, jump and branch; legacy records fall back to seq. Also fixed the fork-seed seq-hole overrun that turned mid-turn branches into full copies.
+- **Full-disk `dir` search hang (external PR #32)**: Windows system directories added to `WALK_IGNORE`, pending queue cleared after `maxFiles` truncation, drive-letter dedup in `defaultRoots`.
+- **Windows cross-drive skill adoption**: `renameSync` EXDEV between `memoryDir` and `skillDir` now degrades to `cpSync + rmSync`.
+- **Mobile "Memory Evolve settings" overflow (issue #31)**: long unbroken text wrapped, controls capped at `max-width: 100%`, and the missing `.me-todo-select` full-width rule added.
+
+### Added
+
+- **Manual entries in the MEMORY.md / USER.md tabs (issue #30)**: previously only the project KEY.md tab had an add box, while the global long-term memory and user profile were read-only. New `POST /memory-evolve/api/memory/memory` and `/user` endpoints (same timestamped append as KEY) plus an add box at the top of both tabs, with per-file drafts that survive tab switches.
+
+> This release also contains the "memory write watchdog" and "broadcast delivery wake" additions dated **2026-09-04** (see below).
+
+---
+
 ## 2026-08-17
 
 ### Fixed
