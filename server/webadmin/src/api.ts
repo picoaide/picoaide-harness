@@ -40,7 +40,31 @@ function fallbackMessage(status: number): string {
   return `请求失败(${status})`
 }
 
-export async function request<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+// refreshCsrf 重新拉取会话绑定的 CSRF token(F1 自愈,单飞防并发风暴)。
+// 服务端 CSRF token 现在与会话同寿命,但页面长时间挂起、session 重建等
+// 边界仍可能让内存 token 失效;收到 CSRF_EXPIRED 时静默续期并重试一次,
+// 用户不再看到"没有权限"的假象。
+let csrfRefreshing: Promise<void> | null = null
+async function refreshCsrf(): Promise<void> {
+  if (csrfRefreshing === null) {
+    csrfRefreshing = (async () => {
+      try {
+        const res = await fetch(`${ADMIN_API}/me`, { headers: { accept: 'application/json' } })
+        if (res.ok) {
+          const body = await res.json()
+          if (body?.csrf_token) setCsrf(body.csrf_token)
+        }
+      } catch {
+        /* 续期失败保持旧 token,由调用方报原错误 */
+      } finally {
+        csrfRefreshing = null
+      }
+    })()
+  }
+  return csrfRefreshing
+}
+
+export async function request<T = any>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers: Record<string, string> = { ...(init.headers as Record<string, string>) }
   if (!(init.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json'
@@ -63,6 +87,11 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
       // 审计 A5-L5: 任何页面(含 /admin/)收到 401 都走同一回调回登录态,
       // 不再区分 pathname —— 行为一致,由 App 决定如何呈现
       unauthorizedHandler?.()
+    }
+    // F1: CSRF 过期 → 自动续期 + 原请求重试一次(仅一次,防死循环)。
+    if (res.status === 403 && code === 'CSRF_EXPIRED' && !retried && csrfToken) {
+      await refreshCsrf()
+      return request<T>(path, init, true)
     }
     throw new ApiError(res.status, code, message)
   }

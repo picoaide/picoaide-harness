@@ -52,7 +52,11 @@ export function parseAuthDeepLink(
 }
 
 /** Install the deep-link listener; used by SessionService on construction. */
-export function installDeepLinkListener(ctx: Context, applySession: (session: Session) => void): () => void {
+export function installDeepLinkListener(
+  ctx: Context,
+  applySession: (session: Session) => void,
+  getCurrent?: () => Session | null,
+): () => void {
   // scheme 在监听器安装时定一次:它跟着安装包走,运行期不会变。
   const scheme = readDesktopChannelProfile()?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
   return ctx.on('pico/deep-link', (url: unknown) => {
@@ -84,6 +88,15 @@ export function installDeepLinkListener(ctx: Context, applySession: (session: Se
         // 日志消毒:serverURL/username 来自链接参数(攻击者可控),
         // JSON.stringify 剥离换行/控制符,防日志注入(2026-09-01 审计)。
         ctx.logger?.warn(`pico-deep-link: token rejected by ${JSON.stringify(session.serverURL)}: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      // F12(审计 2026-09-11):已登录时拒绝把活动会话静默切换到**另一台
+      // 服务端** —— 任意本机进程都能触发该 scheme,配合攻击者服务器与
+      // 自签 token 可完成会话劫持(此前仅预验证目标可达,无法证明可信)。
+      // 单服务端产品语义下,切换服务器必须先显式登出。
+      const existing = getCurrent?.() ?? null
+      if (existing !== null && existing.serverURL !== session.serverURL) {
+        ctx.logger?.warn(`pico-deep-link: refused server switch while signed in; sign out first (${JSON.stringify(session.serverURL)})`)
         return
       }
       ctx.logger?.info(`pico-deep-link: logged in as ${JSON.stringify(session.username)}`)

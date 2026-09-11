@@ -76,6 +76,14 @@ func SetSetting(db *sql.DB, key, value string) error {
 	return err
 }
 
+// SetSettingTx 在调用方事务内 upsert(不主动失效缓存;提交后调用方须
+// 调用 InvalidateSettings)。
+func SetSettingTx(tx *sql.Tx, key, value string) error {
+	_, err := tx.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
 // GetSetting returns the value and whether it exists.
 func GetSetting(db *sql.DB, key string) (string, bool, error) {
 	if v := settingsCache.get(db, "s:"+key); v != nil {

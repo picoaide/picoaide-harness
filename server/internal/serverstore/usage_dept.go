@@ -149,20 +149,26 @@ func deptSubtreeIDs(db *sql.DB, dept string) ([]int64, error) {
 // userIDToDepts 用户 → 部门名集合(成员归属祖先链展开, 去重)。
 func userIDToDepts(db *sql.DB, nodes []groupNode) (map[int64][]string, error) {
 	byID := map[int64]groupNode{}
-	children := map[int64][]int64{}
 	for _, n := range nodes {
 		byID[n.id] = n
-		children[n.parent] = append(children[n.parent], n.id)
 	}
+	// F3: 环保护(与 ancestorsOf 同口径)——迁移/手工数据造环时,授权与
+	// 报表解析不得死循环。
 	ancestors := func(id int64) []string {
 		out := []string{}
+		seen := map[int64]bool{}
 		cur := byID[id]
 		for cur.id != 0 {
-			out = append(out, cur.name)
-			cur = byID[cur.parent]
-			if cur.id == 0 {
+			if seen[cur.id] {
 				break
 			}
+			seen[cur.id] = true
+			out = append(out, cur.name)
+			next, ok := byID[cur.parent]
+			if !ok {
+				break
+			}
+			cur = next
 		}
 		return out
 	}
@@ -202,23 +208,34 @@ func userIDToDepts(db *sql.DB, nodes []groupNode) (map[int64][]string, error) {
 // preOrderNodes 树先序(根在前, 其子按 id)。
 func preOrderNodes(nodes []groupNode) []groupNode {
 	children := map[int64][]int64{}
-	rootID := int64(0)
-	for _, n := range nodes {
-		children[n.parent] = append(children[n.parent], n.id)
-	}
-	// 根 = 无父(或父不存在)的节点
 	byID := map[int64]groupNode{}
 	for _, n := range nodes {
 		byID[n.id] = n
+		children[n.parent] = append(children[n.parent], n.id)
+	}
+	// F20: 部门树可以是**森林**(多个顶级部门,parent_id=0 或父不存在)。
+	// 旧实现只保留"最后一个无父节点"作 root,其余顶级部门的子树不参与
+	// 排序。此处收集全部根并按 id 升序,保证每棵子树都进入前序。
+	var roots []int64
+	for _, n := range nodes {
 		if _, ok := byID[n.parent]; !ok {
-			rootID = n.id
+			roots = append(roots, n.id)
 		}
 	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
+	visited := map[int64]bool{}
 	out := []groupNode{}
-	stack := []int64{rootID}
+	stack := make([]int64, 0, len(roots))
+	for i := len(roots) - 1; i >= 0; i-- {
+		stack = append(stack, roots[i])
+	}
 	for len(stack) > 0 {
 		curID := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+		if visited[curID] {
+			continue // F3: 环保护
+		}
+		visited[curID] = true
 		if n, ok := byID[curID]; ok {
 			out = append(out, n)
 			// 逆序压栈保证子部门按 id 正序弹出

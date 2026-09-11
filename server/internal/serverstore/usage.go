@@ -221,9 +221,23 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	}
 	// created_at 显式 = now(请求时刻):与 cost 计费时点同源,回填时使用该
 	// 时刻折价(审计修复 2026-P M4:跨高峰/空闲边界的流式请求按发起时点计价)。
-	id, err := InsertID(db, `INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now)
+	//
+	// 0061: usage 落账与余额扣减在同一事务 —— 「记了账一定扣了钱」,
+	// 崩溃/并发下不会出现费用已入账而余额未扣(或反之)的半提交。
+	tx, err := db.Begin()
 	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var id int64
+	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now).Scan(&id); err != nil {
+		return 0, err
+	}
+	if err := deductBalance(tx, userID, cost); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -250,9 +264,11 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 // 时刻插入),而非回填时刻 time.Now()——跨高峰/空闲边界的流式请求不再因
 // 流结束时点计价,与「低谷窗口按记录时刻判定」的设计一致。
 func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, now time.Time) error {
+	var userID int64
 	var model string
+	var oldCost float64
 	var createdAt any
-	if err := db.QueryRow("SELECT model, created_at FROM usage WHERE id = ?", id).Scan(&model, &createdAt); err != nil {
+	if err := db.QueryRow("SELECT user_id, model, cost, created_at FROM usage WHERE id = ?", id).Scan(&userID, &model, &oldCost, &createdAt); err != nil {
 		return err
 	}
 	// created_at(SQLite localtime 字符串 / PG TIMESTAMPTZ)解析回本地时刻;
@@ -264,9 +280,21 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
 	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
-	_, err := db.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ? WHERE id = ?",
-		promptTokens, completionTokens, cacheTokens, cost, id)
-	return err
+	// 0061: 回填与余额扣减同事务,只扣差额(pending 行旧 cost 通常为 0;
+	// 重复回填/修正时不会重复扣款)。
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ? WHERE id = ?",
+		promptTokens, completionTokens, cacheTokens, cost, id); err != nil {
+		return err
+	}
+	if err := deductBalance(tx, userID, cost-oldCost); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteUsage removes a usage row. Used to drop pending rows that can never

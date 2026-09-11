@@ -30,6 +30,20 @@ type loginLimiter struct {
 // 登录——同一出口 NAT 下的整个办公室共用 IP,且只对失败回调计数)。
 const callbackLimiterMaxAttempts = 60
 
+// sharedLoginLimiter 是**全服务端共享**的登录失败限流器(F17,审计
+// 2026-09-11):此前客户端面与管理面各持一个实例,同一账号可从两个入口
+// 各消耗一份失败预算(实际阈值翻倍)。PICOAI_LOGIN_MAX_ATTEMPTS 仍在首次
+// 创建时读取(惰性单例,测试可先 t.Setenv)。
+var sharedLoginLimiterOnce sync.Once
+var sharedLoginLimiterVal *loginLimiter
+
+func sharedLoginLimiter() *loginLimiter {
+	sharedLoginLimiterOnce.Do(func() {
+		sharedLoginLimiterVal = newLoginLimiter()
+	})
+	return sharedLoginLimiterVal
+}
+
 func newLoginLimiter() *loginLimiter {
 	// PICOAI_LOGIN_MAX_ATTEMPTS overrides the default 10/5min for test
 	// environments (dev-env/E2E login repeatedly as the same user).

@@ -106,6 +106,13 @@ function sessionCwdOf(ctx: Context, sessionId: string, clientCwd?: string): stri
   const headerCwd = session?.header.cwd
   if (headerCwd !== undefined && headerCwd !== '') return headerCwd
   if (clientCwd !== undefined && clientCwd !== '') {
+    // F5(审计 2026-09-11):cwd 覆盖只对**已注册的会话**生效。旧实现允许
+    // 任意调用方用 ?cwd=/ 把读取范围从工作区扩到整机(配合媒体路由的
+    // .html 同源执行形成本地 XSS→RCE)。会话未挂载时拒绝覆盖,回退到
+    // process.cwd()(调用方仍能用会话自身的 cwd 正常工作)。
+    if (session === undefined) {
+      throw new SidebarError('fs-error', 'session is not attached; cwd override refused', 403)
+    }
     try {
       return requireAbsolute(clientCwd)
     } catch {
@@ -677,11 +684,25 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
           throw new SidebarError('fs-error', 'not a file or too large', 400)
         }
         const type = mediaTypeForPath(path)
+        const ext = extname(path).toLowerCase()
         const body = await readFile(path)
         // Raw bytes either way (binary-safe); ?download=1 switches the
         // disposition so the browser saves the file instead of showing it.
         const headers: Record<string, string> = { 'content-type': type, 'cache-control': 'no-cache' }
-        if (url.searchParams.get('download') === '1') {
+        // F5(审计 2026-09-11):本路由此前会把 .html/.svg 作为**同源可执行
+        // 内容**直接返回(无 sandbox、无 nosniff),工作区里的恶意文件或
+        // ?cwd= 组合即可形成同源 XSS → 调 /sidebar/api(文件读写/终端)。
+        // 规则:html/htm 强制下载(预览必须走 /sidebar/html 的 sandbox 路由);
+        // svg 作为图片加 sandbox CSP + nosniff,直接导航也不执行脚本。
+        if (ext === '.html' || ext === '.htm') {
+          headers['content-type'] = 'application/octet-stream'
+          headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`
+          headers['x-content-type-options'] = 'nosniff'
+        } else if (ext === '.svg') {
+          headers['x-content-type-options'] = 'nosniff'
+          headers['content-security-policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'"
+        }
+        if (url.searchParams.get('download') === '1' && ext !== '.html' && ext !== '.htm') {
           headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`
         }
         res.writeHead(200, headers)

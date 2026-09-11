@@ -20,6 +20,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
+	"github.com/picoaide/picoaide/internal/balance"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
@@ -170,10 +171,14 @@ func main() {
 	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明——
 	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
 	// /v2/api、/v2/v1)迁移后不再注册。
+	// F2(审计 2026-09-11):认证配置保存后热重建运行中的 provider 集合
+	// (启用 LDAP 立即生效、禁用 LDAP 立即失效,无需重启)。
+	adminAPI := &serverauth.AdminAPI{DB: db}
+	adminAPI.ReloadAuth = func() error { return auth.ReloadProviders(db) }
 	router.Register(r, router.Deps{
 		DB:        db,
 		Auth:      auth.Handlers(),
-		Admin:     (&serverauth.AdminAPI{DB: db}).Handlers(),
+		Admin:     adminAPI.Handlers(),
 		Appstore:  appstore.NewHandlers(db),
 		Bootstrap: bootstrap.NewHandlers(db),
 		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
@@ -232,6 +237,16 @@ func main() {
 	defer stop()
 	// 月度报表推送调度(2026-09 P1):每小时检查补跑上月报表。
 	reports.NewScheduler(db, time.Hour, nil).Start(ctx)
+	// 月度余额发放调度(0061):每小时检查当月是否已发放,未发则按配置
+	// 发放(add 累加 / cover 覆盖);幂等锚在 balance_grants.month。
+	balance.NewScheduler(db, time.Hour, nil).Start(ctx)
+	// F9 启动自检:历史大小写重复用户名会让 NOCASE 唯一约束无法建立,
+	// 这里显式告警(不阻断启动),提示管理员人工合并。
+	if conflicts, cerr := serverstore.CheckUsernameCaseConflicts(db); cerr != nil {
+		log.Printf("startup username case check: %v", cerr)
+	} else if len(conflicts) > 0 {
+		log.Printf("WARNING: users with case-insensitive duplicate usernames: %v (please merge manually)", conflicts)
+	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
