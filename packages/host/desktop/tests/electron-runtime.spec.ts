@@ -1051,7 +1051,7 @@ describe('Electron compatibility runtime', () => {
   })
 
   it('validates deep links against the channel scheme, not the vendor default', async () => {
-    // 2026-09-11 真机复现：渠道构建（scheme=mokahr-harness/probeharness 之类）的
+    // 2026-09-11 真机复现：渠道构建（scheme=acmeai/probeharness 之类）的
     // 浏览器 SSO 回调在 shell 的严格闸门被当成畸形链接丢掉，因为 receiveDeepLink
     // 用的是模块缺省 `picoaide`。scheme 必须由 main.ts 传进来。
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')

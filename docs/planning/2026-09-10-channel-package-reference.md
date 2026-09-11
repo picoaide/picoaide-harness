@@ -178,8 +178,9 @@ picoaide/channels  (私有仓)
 
 **`desktop.home_dir`（数据根）是新的硬性必填字段**（2026-09-11 加，见 §4.4）：
 它不是编译期品牌，而是运行期数据隔离 —— 品牌渠道缺了就与官方客户端共用数据根
-（共享登录 token/settings/会话）。**beta 不强制**（缺省派生出 `.picoaide-harness-beta`，
-仍与 official 分离），但建议显式给：显式值不会因为将来改 `slug` 而挪动数据目录。
+（共享登录 token/settings/会话）。**beta 不强制**，实践上**显式写官方目录**
+`.picoaide-harness`（公共渠道刻意与 official 共用一个数据根：beta 环境要经常跑
+测试，共用现成的登录态与设置更省事；CI 对公共渠道放行、对品牌渠道拦）。
 official 不需要（官方构建不随包分发渠道包，写了也不生效）。
 
 **渠道 logo 的格式约束**（`desktop/scripts/generate-tray-icons.mjs`）：托盘位图是
@@ -191,7 +192,7 @@ official 不需要（官方构建不随包分发渠道包，写了也不生效�
 
 这条约束以前是"必须恰好是官方黑 `#000000`"，于是渠道用自己的品牌色画 logo 会直接
 打包失败（报错还只说"必须用 #000000"）—— 2026-09-11 改成按方块自身的颜色替换，
-官方路径逐字节不变。`channels/moka/` 是第一个用品牌色（`#006AFF`）的渠道。
+官方路径逐字节不变。品牌渠道可以用自己的品牌色（用平坦十六进制色画方块，见上一段）。
 
 `ci-channels.sh` 同时做字段形状校验（slug 纯 ASCII、app_id 反向域名、
 scheme 合法、`defaults.server_url` 必须 https 或回环 http）与**素材存在性/几何
@@ -248,7 +249,7 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 | 谁拼服务端地址 | `/api/pico/channel` 在**出口**统一绝对化；没有服务端地址就**丢弃**相对 URL（宁可回落内置品牌图形，也不渲染必然 404 的地址） | `enterprise/src/channel-content.ts` 的 `absolutizeChannelAssets` |
 | store 播种 | 该端点的载荷可能来自旧版本代码，播种前再丢一次相对素材 URL | `enterprise/src/client/channel-store.ts` 的 `stripRelativeAssetURLs` |
 | 窗口 CSP | `img-src` 必须放行 `http:` / `https:` —— 渠道 logo 来自**客户自己的服务器**，打包期不可能知道它的地址；只写 `'self' data: blob:` 会被 CSP 直接拦掉（微实验复现：`violates the following Content Security Policy directive: "img-src 'self' data: blob:"`，`naturalWidth=0`） | `desktop/src/electron-runtime.ts` 的 `APP_CONTENT_SECURITY_POLICY` |
-| 服务端不可达 / 旧版服务端 | 渠道目录里的 logo 由 `stageChannelProfile()` **内联成 `data:` URI** 写进随包 `channel.json`（`assets.logo_inline` / `logo_dark_inline`），随包品牌因此自带标识 —— 否则客户端只能回落编译期内置的**官方**花括号 mark，白标客户的登录页上出现厂商图形（2026-09-11 在 moka 渠道线上实测） | `desktop/scripts/channel-build.ts` → `desktop-channel.ts` 的 `brand.logoURL` → `brandChannel()` |
+| 服务端不可达 / 旧版服务端 | 渠道目录里的 logo 由 `stageChannelProfile()` **内联成 `data:` URI** 写进随包 `channel.json`（`assets.logo_inline` / `logo_dark_inline`），随包品牌因此自带标识 —— 否则客户端只能回落编译期内置的**官方**花括号 mark，白标客户的登录页上出现厂商图形（2026-09-11 在 acme 渠道线上实测） | `desktop/scripts/channel-build.ts` → `desktop-channel.ts` 的 `brand.logoURL` → `brandChannel()` |
 
 另外三条配套约束：
 
@@ -297,8 +298,8 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 
 | 数据根 | 官方 | 渠道 | 里面是什么 |
 |---|---|---|---|
-| Harness home（`~/.<目录名>`） | `~/.picoaide-harness` | `desktop.home_dir`（如 `~/.moka-harness`） | 账户 token（`session.json`）、`.credentials.yaml`、`settings.yaml`（含服务端地址）、`sessions/`、`storages/`、`profiles/`、`users/<用户名>/connectors/`（连接器凭据）、cron ledger、browser store |
-| Electron userData（`appData/<产品名>`） | `~/.config/PicoAide Harness` | 渠道产品名（如 `~/.config/Moka Harness`） | 日志、更新状态、插件管理状态、崩溃取证、**单实例锁** |
+| Harness home（`~/.<目录名>`） | `~/.picoaide-harness` | `desktop.home_dir`（如 `~/.acme-harness`） | 账户 token（`session.json`）、`.credentials.yaml`、`settings.yaml`（含服务端地址）、`sessions/`、`storages/`、`profiles/`、`users/<用户名>/connectors/`（连接器凭据）、cron ledger、browser store |
+| Electron userData（`appData/<产品名>`） | `~/.config/PicoAide Harness` | 渠道产品名（如 `~/.config/Acme Harness`） | 日志、更新状态、插件管理状态、崩溃取证、**单实例锁** |
 
 **为什么必须分开**（不是"目录名好不好看"）：
 - 共用 home ⇒ 渠道客户端启动时会恢复**官方那台**的登录 token 并连上官方服务端
@@ -313,12 +314,13 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 ```
 official                          → .picoaide-harness        （逐字节不变，存量数据不搬）
 显式 home_dir                     → 原值（须匹配 ^\.[a-z0-9][a-z0-9-]{0,62}$）
-没有 home_dir，有 slug            → "." + slug 小写（Moka-Harness → .moka-harness）
+没有 home_dir，有 slug            → "." + slug 小写（Acme-Harness → .acme-harness）
 都没有（beta 这类复用官方品牌的）  → .picoaide-harness-<channel id>
 ```
 
-**任何情况下都不会回落官方目录**：显式值写成 `.picoaide-harness`、slug 恰好等于
-官方 slug，都会被忽略并退到下一档 —— 共用数据根比"目录名多一截"糟得多。
+**派生/回落路径永不撞上官方目录**（slug 恰好等于官方 slug 会被忽略并退档），
+但**显式声明一律照办** —— 包括显式写 `.picoaide-harness`（beta 就是这么配的）；
+品牌渠道写官方目录由 `ci-channels.sh` 在构建期拦下。
 `$DSH_HOME` / 显式配置仍然优先（e2e、便携安装、多 profile 依赖它）。
 
 **userData 目录名**（真源 `src/desktop-user-data.ts` 的
@@ -327,8 +329,8 @@ official                          → .picoaide-harness        （逐字节不�
 品牌，不消歧就会与 official 撞在同一个 userData 上（单实例锁互斥）。
 
 **校验与门禁**：
-- `scripts/ci-channels.sh`：`desktop.home_dir` 形状校验；**品牌渠道必填**（beta 与
-  official 不强制，见 §4 的说明）且不得等于 `.picoaide-harness`；
+- `scripts/ci-channels.sh`：`desktop.home_dir` 形状校验；**品牌渠道必填**且不得等于
+  `.picoaide-harness`（公共渠道 official/beta 不受此限，beta 正是显式共用官方目录）；
 - `scripts/verify-channel-package.ts`：用**运行期解析器**读随包 `channel.json`，
   断言这次装出来的数据目录就是本渠道的（`yarn check` 的 `verify:channel` 会跑）；
 - `tests/desktop-home.spec.ts` / `desktop-channel.spec.ts` / `desktop-user-data.spec.ts`：

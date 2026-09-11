@@ -36,7 +36,7 @@ export function desktopUserDataDirectoryName(
 ): string {
   if (channelId === OFFICIAL_CHANNEL_ID) return productName
   // 只有"和官方重名"这一种情况需要消歧：其余渠道的产品名就是它自己的品牌，
-  // 拿它当目录名又干净又能自查（`~/.config/Moka Harness`）。
+  // 拿它当目录名又干净又能自查（`~/.config/Acme Harness`）。
   return productName === OFFICIAL_PRODUCT_NAME ? `${productName} (${channelId})` : productName
 }
 

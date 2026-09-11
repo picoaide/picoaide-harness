@@ -63,8 +63,8 @@ export function isSafeDshHomeDirName(value: unknown): value is string {
  *
  * 取值链：
  *   1. 官方渠道 → `PRODUCT_DSH_HOME_DIR`（**逐字节不变**，存量用户数据不动）；
- *   2. 渠道包显式配置的 `desktop.home_dir`；
- *   3. 由 `desktop.slug` 小写派生（`Moka-Harness` → `.moka-harness`）；
+ *   2. 渠道包显式配置的 `desktop.home_dir`（含官方目录 —— beta 就是显式共用官方目录）；
+ *   3. 由 `desktop.slug` 小写派生（`Acme-Harness` → `.acme-harness`）；
  *   4. 兜底 `<PRODUCT_DSH_HOME_DIR>-<channelId>`（如 beta：复用官方品牌、没有
  *      自己的 slug）—— 兜底刻意**不回落官方目录**：白标客户端与官方客户端共用
  *      一个数据根会共享登录 token/settings/会话（跨租户），也会互相顶掉单实例锁，
@@ -78,9 +78,11 @@ export function channelDshHomeDir(
   options: { readonly homeDir?: unknown; readonly slug?: unknown } = {},
 ): string {
   if (channelId === OFFICIAL_CHANNEL_ID) return PRODUCT_DSH_HOME_DIR
-  // 显式值里官方目录名同样不采纳：那等于"本渠道与官方共用数据根"（CI 对渠道包
-  // 也会拦，这里是运行期的兜底 —— 客户端拿到的是不可信输入）。
-  if (isSafeDshHomeDirName(options.homeDir) && options.homeDir !== PRODUCT_DSH_HOME_DIR) return options.homeDir
+  // 显式声明的目录**一律采纳**，包括官方目录本身：beta 这类公共渠道刻意与官方
+  // 共用一个数据根（2026-09-11 定案 —— beta 环境要经常跑测试，共用现成的登录态与
+  // 设置更省事）。品牌渠道写官方目录由 CI 在构建期拦（ci-channels.sh），运行期
+  // 不再多一道判定：客户端要能照渠道包说的做。
+  if (isSafeDshHomeDirName(options.homeDir)) return options.homeDir
   if (typeof options.slug === 'string') {
     const derived = `.${options.slug.toLowerCase()}`
     // 派生结果等于官方目录名时**不采纳**（渠道把 slug 写成官方 slug 就等于

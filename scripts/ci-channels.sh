@@ -195,10 +195,11 @@ for id in "${SELECTED[@]}"; do
     if (homeDir !== undefined && !/^\.[a-z0-9][a-z0-9-]{0,62}$/.test(homeDir)) {
       invalid.push("desktop.home_dir(须为点开头的单段小写目录名,如 .acme-harness)")
     }
-    // 非官方渠道的数据目录**绝不能**等于官方目录 —— 那正是"与官方共用数据根"。
-    // beta 渠道复用官方品牌但必须有自己的数据目录(它在 R2 上是独立分发面)。
-    if (id !== "official" && homeDir === ".picoaide-harness") {
-      invalid.push("desktop.home_dir(不能与官方渠道的数据目录相同)")
+    // 品牌渠道的数据目录**不能**等于官方目录 —— 那是"与官方共用数据根"(跨租户)。
+    // 公共渠道(official/beta)不受此限:beta 刻意与官方共用(2026-09-11 定案,
+    // beta 环境要经常跑测试,共用现成的登录态与设置)。
+    if (!publicChannel && homeDir === ".picoaide-harness") {
+      invalid.push("desktop.home_dir(品牌渠道不能与官方渠道共用数据目录)")
     }
     // 非法字段**只报字段名,不回显取值** —— 渠道包里 slug/app_id/scheme 的值就是
     // 客户品牌(Acme-AI / com.acme.ai / acmeai),而这一步的输出进公开 Actions 日志。

@@ -133,8 +133,11 @@ export async function verifyChannelPackage(options: {
       `${stagedPath} 的数据目录 ${stagedProfile.homeDir} 与本次构建的 ${context.homeDir} 不一致`
       + '（构建期与运行期必须同源，否则升级一次就换数据根）',
     )
+    // 品牌渠道不得与官方共用一个数据根（跨渠道共享登录态/会话）；公共渠道
+    // （official/beta）显式声明官方目录是**刻意**的（beta 环境要经常跑测试）。
+    const publicChannel = context.channelId === 'official' || context.channelId === 'beta'
     assert(
-      stagedProfile.homeDir !== PRODUCT_DSH_HOME_DIR,
+      publicChannel || stagedProfile.homeDir !== PRODUCT_DSH_HOME_DIR,
       `渠道 ${context.channelId} 的数据目录回落到了官方目录 ${PRODUCT_DSH_HOME_DIR} —— `
       + '与官方客户端共用数据根会跨渠道共享登录态/会话，必须在渠道包 desktop.home_dir 里显式声明自己的目录。',
     )
