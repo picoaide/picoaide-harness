@@ -253,6 +253,48 @@ try {
       const cronText = await evaluate(`(document.querySelector('[data-slot="rightbar.session"] [data-dsh-cron-panel]')?.textContent ?? '').slice(0, 120)`)
       console.log('[probe] cron tab text:', JSON.stringify(cronText))
     }
+
+    // 6. Panel interactions. The chrome controls carry stable aria-labels
+    // (分栏 / 全屏 / 收起右侧边栏), and the presentation itself is asserted
+    // through the desktop frame's own data-rightbar-* attributes — those are
+    // ours, so a regression cannot silently pass by matching dockkit internals.
+    const frameHas = (attribute) =>
+      `document.querySelector('.dshDesktopFrame')?.hasAttribute(${JSON.stringify(attribute)}) ?? false`
+    const clickControl = (label) => evaluate(`(() => {
+      const panel = document.querySelector('[data-slot="rightbar.session"]')
+      if (!panel) return false
+      const button = [...panel.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === ${JSON.stringify(label)})
+      if (!button) return false
+      button.click()
+      return true
+    })()`)
+    const paneCount = () => evaluate(`document.querySelectorAll('[data-slot="rightbar.session"] [class*="pane"]').length`)
+
+    const fullscreenClicked = await clickControl('全屏')
+    const fullscreenOn = fullscreenClicked && await waitFor(frameHas('data-rightbar-fullscreen'), 8000)
+    check('右栏全屏：frame 报告 data-rightbar-fullscreen', fullscreenOn, `clicked=${fullscreenClicked}`)
+    if (fullscreenOn) {
+      await wait(600)
+      await shoot('06-rightbar-fullscreen')
+      await clickControl('全屏')
+      await wait(900)
+    }
+
+    const panesBefore = await paneCount()
+    const splitClicked = await clickControl('分栏')
+    await wait(1000)
+    const panesAfter = await paneCount()
+    check('右栏分栏：dock pane 数增加', splitClicked && panesAfter > panesBefore, `${panesBefore} → ${panesAfter}`)
+    if (splitClicked) await shoot('07-rightbar-split')
+
+    // Collapsing releases the frame track but keeps the occupant's content tree
+    // mounted (upstream preserves per-session tab state), so the assertion is on
+    // the frame's own presentation attribute — not on the subtree unmounting.
+    const collapseClicked = await clickControl('收起右侧边栏')
+    const collapsed = collapseClicked && await waitFor(frameHas('data-rightbar-collapsed'), 8000)
+    const subtreeKept = await evaluate(`!!document.querySelector('[data-slot="rightbar.session"]')`)
+    check('收起右侧栏：frame 释放列宽（内容树按上游语义保留）', collapsed,
+      `clicked=${collapseClicked} subtreeKept=${subtreeKept}`)
   }
 } catch (cause) {
   check('探针执行完成', false, cause instanceof Error ? cause.message : String(cause))
