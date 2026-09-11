@@ -268,6 +268,16 @@ func updateUserBalance(db *sql.DB, userID int64, apply func(old float64) (float6
 	return next, nil
 }
 
+// BalanceBillingEnabled 报告当前是否处于"消费扣余额"状态(仅闸门开启时)。
+//
+// 复核修正(2026-09-11 高视角):未启用期间余额是纯充值池,不随消费变动。
+// 否则默认关闭数周后管理员首次启用闸门,全员余额已被历史消费扣成负数,
+// 会在一瞬间被全部拦截(必须先用覆盖模式发钱),是一个隐蔽的运营事故。
+func BalanceBillingEnabled(db *sql.DB) bool {
+	s, err := GetBalanceSettings(db)
+	return err == nil && s.Enabled
+}
+
 // deductBalance 扣减余额(允许透支为负;仅网关计费路径调用)。
 // 接受 tx 以便与 usage 写入同事务,保证「记了账一定扣了钱」。
 func deductBalance(tx *sql.Tx, userID int64, amount float64) error {

@@ -82,3 +82,35 @@
 - 自签名服务端：客户端默认因系统 CA 不信任而拒绝；用 `PICOAI_TLS_PINS="host:port=sha256hex,..."`
   带外分发指纹，或把企业 CA 装入系统信任库。
 - 历史大小写重复用户名不会被自动合并：启动日志会给出列表，请管理员人工处理后再建唯一索引。
+
+## 五、高视角复核修正（2026-09-11 第二轮）
+
+对第一轮修复做独立复核（"测试全绿 ≠ 无问题"），发现并修复 3 个遗漏/新风险：
+
+1. **F9 遗漏**：用户授权比较（`app_grants.grantee_type='user'`）仍是大小写敏感，与已改为
+   NOCASE 的登录/创建口径不一致（授权给 `Alice`、登录 `alice` 会失配）。已统一
+   `lower(grantee)=lower(?)`，删除用户授权路径同步修正。
+2. **F10 遗漏**：模型同步（`channels.HTTPFetch`）与渠道余额查询使用独立 HTTP client，
+   绕过了 provider 请求侧的 Dial 复检（DNS rebinding 防护有空隙）。新增
+   `internal/util/netguard`（`IsBlockedOutboundIP/Host`、`SafeOutboundTransport`），
+   保存校验与全部出站 client（网关转发/模型同步/余额查询）共用同一口径。
+3. **新风险（余额语义）**：第一轮实现里余额在闸门**关闭**期间也随消费扣减。默认关闭
+   数周后管理员首次开启闸门时，全员余额已被历史消费扣成负数，会在一瞬间被全部拦截
+   （必须先用覆盖模式发钱才能恢复）。修正为：**仅闸门开启时扣费**（关闭期间余额是纯
+   充值池）；并且保存"开启 + 额度 > 0"时**自动补发本月**（`balance_grants.month`
+   幂等，已发不重复），消除从保存到调度器下一个 tick（最长 1 小时）之间的 0 余额窗口。
+   前端在自动发放后同步刷新用户列表（否则余额列看起来"没生效"）。
+
+### 第二轮补的回归测试
+
+| 覆盖 | 位置 |
+| --- | --- |
+| F15 fence：Host 伪造 loopback + 远程 socket 必须拒绝、trustedHosts 放行 | better-sidebar `tests/trust-fence.spec.ts`（6 例） |
+| F12：已登录拒绝切换服务器 / 未登录接受 / 同服务器刷新 token 接受 | enterprise `tests/deep-link-listener.spec.ts`（3 例） |
+| F13：系统 CA 放行（verificationResult=0）、PICOAI_TLS_PINS 生效、畸形 pin 忽略 | enterprise `tests/tls.spec.ts` |
+| F7：clear() 后在途异步 persist 不得复活 token 文件 | enterprise `tests/session-service.spec.ts` |
+| F16：60 并发审计后哈希链完整无断链 | serverstore `audit_test.go` |
+| F8：未启用不扣余额 / 启用后扣减 | serverstore `balance_test.go` |
+| F8：保存开启闸门自动补发本月且重复保存不重复加钱 | serverauth `admin_test.go` |
+| F1：会话绑定 CSRF 可用、篡改/错会话拒绝 | serverauth `admin_test.go` |
+| F10：链路本地/metadata IP 拦截、私网/环回放行、metadata 主机名识别 | util `netguard_test.go` |

@@ -1050,35 +1050,8 @@ func modelEnabledByDB(db *sql.DB, name string) bool {
 //   - 无法解析的主机名(保存时即失败,而不是请求时才报错)。
 // ---------------------------------------------------------------------------
 
-// metadataIPv4 是已知云 metadata 的 IPv4 地址。
-var metadataIPv4 = []string{"169.254.169.254", "169.254.170.2", "100.100.100.200"}
-
-// metadataHosts 是已知 metadata 主机名(解析后仍会走 IP 检查,双保险)。
-var metadataHosts = map[string]bool{
-	"metadata": true, "metadata.google.internal": true, "metadata.goog": true,
-	"instance-data": true, "metadata.azure.com": true,
-}
-
-func isBlockedUpstreamIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	for _, s := range metadataIPv4 {
-		if m := net.ParseIP(s); m != nil && m.Equal(ip) {
-			return true
-		}
-	}
-	// AWS IPv6 metadata (fd00:ec2::254 / fd00:ec2::/64 实例元数据前缀)
-	if ip.To16() != nil && ip.To4() == nil {
-		if _, cidr, err := net.ParseCIDR("fd00:ec2::/64"); err == nil && cidr.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+// isBlockedUpstreamIP 委托到 util 的统一出站护栏(保存时与运行期同一口径)。
+func isBlockedUpstreamIP(ip net.IP) bool { return util.IsBlockedOutboundIP(ip) }
 
 // validateUpstreamBaseURL 校验 provider 上游地址(F10)。
 func validateUpstreamBaseURL(raw string) error {
@@ -1100,7 +1073,7 @@ func validateUpstreamBaseURL(raw string) error {
 	if host == "" {
 		return errors.New("base_url 缺少主机名")
 	}
-	if metadataHosts[strings.ToLower(host)] {
+	if util.IsBlockedOutboundHost(host) {
 		return errors.New("base_url 不允许指向云 metadata 服务")
 	}
 	// 字面 IP:直接判定,不解析。
