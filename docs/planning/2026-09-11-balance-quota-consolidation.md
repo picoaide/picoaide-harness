@@ -171,6 +171,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_activated_at TIMESTAMPTZ;
    历史月份不回填（无实际影响：调度器只对当月补发）。
 4. 不删除 `quota_money` / `usage.monthly_quota_money`（兼容保留，见 §6.3）。
 
+**回填顺序（有测试钉住，见 §9 `migration_0062_test.go`）**：
+
+1. 先按当月 `balance_grants` 批次补逐人锚，且只补 `users.created_at <= balance_grants.created_at` 的启用员工
+   —— 批次执行时"在场"的人补锚（**不会被重复发放**），批次之后入职的人不补（**会被下一轮正常补发**，这正是逐人锚的意义）；
+2. 再回填账本：当期有锚 A、余额 B 的用户写 `adjust(B−A)` + `grant(A)`（期初 + 当月发放，合计 = B）；
+   无锚用户只写 `adjust(B)`；B=0 且无锚（未入账的新人）不写流水 → 保持"未开通"；
+3. 最后置开通位（有流水即已开通）。
+
 ---
 
 ## 5. 语义规则（服务端唯一实现点）
@@ -326,7 +334,7 @@ is_admin, monthly_usage, monthly_cost, today_*, yesterday_*, total_*
 
 | 层 | 用例 |
 |---|---|
-| serverstore | I1 账本守恒（发放/调整/消费/回补后 `SUM(amount) == balance_money`）；I2 逐人发放幂等与跨月补发；cover 的 reset 可见；`set 0` / `clear` / 残值清零；quantize 输出 |
+| serverstore | I1 账本守恒（发放/调整/消费/回补后 `SUM(amount) == balance_money`）；I2 逐人发放幂等与跨月补发；cover 的 reset 可见；`set 0` / `clear` / 残值清零；quantize 输出；**0062 存量库回填**（`migration_0062_test.go`：期初+当月发放解释、批次后入职者不补锚且被正常补发、升级后不重复发放、重放幂等） |
 | llmgateway | **余额闸门 429**（新，`balance_gate_test.go`）：已开通且余额 0 → `BALANCE_EXHAUSTED`；余额 0.004（显示 ¥0.00）→ 拦、0.006 → 放行；未开通 → 放行；闸门关闭 → 不拦但照扣；管理员豁免；embedding 路径同样受闸门约束；发放后即可调用 |
 | serverauth | ledger 分页与权限；`/balance` 汇总字段；审计明细精度；**契约键集合与 `usage-contract.ts` 集合相等**（`usage_contract_test.go`） |
 | webadmin | 额度页发放策略卡片；users 页无残留；清零按钮；审计筛选含余额动作 |
@@ -381,8 +389,10 @@ is_admin, monthly_usage, monthly_cost, today_*, yesterday_*, total_*
 ### 数据层
 - `server/internal/serverstore/migrations-pg/0062_balance_ledger.sql`：
   `balance_ledger`(账本)、`balance_grant_items`(逐人·月幂等锚)、`users.balance_activated_at`(开通位)；
-  回填用**单条 UNION ALL 语句**保证 `SUM(ledger.amount) == users.balance_money`（未发放者只写期初、
-  本月已发放者写 `期初(B-A) + 发放(A)`），并把当月批次补成逐人锚，避免升级后重复发放。
+  回填分三步:先按当月批次补逐人锚(仅 `created_at <= 批次时间` 的启用员工),再用**单条 UNION ALL 语句**
+  写账本(`期初(B-A) + 发放(A)`,合计 = B = I1),最后置开通位。
+  实证:`migration_0062_test.go` 在真实的"0061 旧库 + 存量余额 + 当月批次 + 批次后入职新人"上验证
+  ——升级后老员工**不重复发放**、新人被正常补发、I1 成立、重放幂等。
 - `serverstore/balance.go` 重写：`settleUsageCostTx`(按 usage 行结算差额，支持回补)、
   `adjustBalanceTx`(唯一入账口，首次入账即开通)、`GrantMonthlyBalance`(逐人锚 + 分批入账 + 批次台账)、
   `BalanceLedgerPage/Sum`、`BalanceBlocked`、`GetGrantStatus`、`QuantizeMoney`。
