@@ -696,6 +696,18 @@ esac
   writeFileSync(log, '')
   writeFileSync(list, 'official\nbeta\nexample-brand\n')
 
+  // 渠道包:品牌串(slug/显示名)的真源。2026-09-11 泄漏事故里进公开日志的是
+  // **由 slug 派生的产物文件名**,而当时只掩了渠道 id —— 所以夹具必须同时有
+  // channel.json 与 slug 形态的文件名,否则这条回归测不出东西。
+  mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example Brand', short_name: 'Example' },
+    desktop: { product_name: 'Example Brand', slug: 'Example-Brand' },
+  }))
+  const brandArtifact = 'Example-Brand-2.7.0-x64-Setup.exe'
+
   // 假 aws:recursive cp/rm 落到本地目录,并记录调用参数。
   const fakeAws = join(work, 'aws')
   writeFileSync(fakeAws, `#!/usr/bin/env bash
@@ -717,6 +729,19 @@ case "$cmd" in
   "s3 cp")
     src="\${args[2]}"; dst="\${args[3]}"
     record "cp $src $dst recursive=$recursive"
+    # 真实 aws 失败时的形态(2026-09-11 泄漏来源):把源/目标对象键原样回显 ——
+    # 目标键里就是由 slug 派生的文件名。
+    if [ -n "\${FAKE_AWS_FAIL:-}" ]; then
+      # 真实 aws 的失败信息回显的是**对象键**(目录上传时 = 前缀 + 文件名),
+      # 而文件名由渠道包的 slug 派生 —— 这就是 2026-09-11 泄漏的原始形态。
+      if [ "$recursive" = 1 ] && [[ "$src" != s3://* ]]; then
+        first="$(ls "$src" 2>/dev/null | head -1)"
+        echo "upload failed: $src/$first to \${dst}$first Unable to locate credentials" >&2
+      else
+        echo "upload failed: $src to $dst Unable to locate credentials" >&2
+      fi
+      exit 1
+    fi
     if [ "$recursive" = 1 ]; then
       # 模拟真实 aws CLI 的前缀语义:s3 侧的路径就是**字面前缀**,尾斜杠即"目录"。
       # 刻意不特判 "/." —— 真实 CLI 不认它(当作字面前缀,匹配不到对象),
@@ -770,7 +795,8 @@ esac
   // 造三平台产物:官方/beta 留 artifact,品牌渠道必须被中转走并从暂存目录删除。
   for (const id of ['official', 'beta', 'example-brand']) {
     mkdirSync(join(stage, id), { recursive: true })
-    writeFileSync(join(stage, id, `App-${id}.AppImage`), 'x')
+    // 品牌渠道的产物名由 slug 派生(与真实安装包一致:<slug>-2.7.0-x64-Setup.exe)。
+    writeFileSync(join(stage, id, id === 'example-brand' ? brandArtifact : `App-${id}.AppImage`), 'x')
   }
   const pushed = transfer('push', ['--stage', stage], r2)
   check(pushed.status === 0, `品牌渠道中转 push 应成功,实际退出 ${String(pushed.status)}`)
@@ -792,7 +818,7 @@ esac
   const token = keys[0].replace(/^4242-1-/, '')
   check(token.length === 16 && /^[0-9a-f]{16}$/u.test(token), '前缀 token 应是 HMAC 派生(不可猜测)')
   check(
-    existsSync(join(store, '_transfer', keys[0], 'ch-3', 'App-example-brand.AppImage')),
+    existsSync(join(store, '_transfer', keys[0], 'ch-3', brandArtifact)),
     '品牌渠道产物应落在 ch-<index> 目录(索引与渠道列表行号一致)',
   )
 
@@ -830,7 +856,26 @@ esac
   // pull:release job 取回自己的品牌产物
   const pulled = transfer('pull', ['--to', out], r2)
   check(pulled.status === 0, `品牌渠道中转 pull 应成功,实际退出 ${String(pulled.status)}`)
-  check(existsSync(join(out, 'example-brand', 'App-example-brand.AppImage')), 'pull 应把品牌产物还原到 release-artifacts/<channel>/')
+  check(existsSync(join(out, 'example-brand', brandArtifact)), 'pull 应把品牌产物还原到 release-artifacts/<channel>/')
+
+  // 失败输出脱敏(2026-09-11 v2.7.0 真实泄漏):aws 的失败信息会回显对象键,
+  // 而文件名由 slug 派生 —— 只掩渠道 id 掩不到它,于是客户品牌进了公开日志。
+  mkdirSync(join(stage, 'example-brand'), { recursive: true })
+  writeFileSync(join(stage, 'example-brand', brandArtifact), 'x')
+  const failedPush = transfer('push', ['--stage', stage], { ...r2, FAKE_AWS_FAIL: '1' })
+  const failedRaw = `${failedPush.stdout ?? ''}${failedPush.stderr ?? ''}`
+  // 只看**公开日志**部分:剔掉 ::add-mask:: 指令行(GitHub 不展示其取值,
+  // 与上面"公开日志里不得出现渠道名"的既有口径一致)。
+  const failedOut = failedRaw.split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n')
+  check(failedPush.status !== 0, 'aws 失败时中转必须失败(不能静默丢产物)')
+  // 前置条件:桩确实按真实 aws 的形态回显了对象键(否则后面的"不得出现品牌"
+  // 会变成"因为压根没打印路径所以通过"的假绿)。
+  check(/upload failed: \S+ to \S*\/\*\*\*/u.test(failedOut),
+    '失败输出应保留 aws 的对象键形态、但把文件名脱敏成 ***')
+  check(!failedOut.includes('Example-Brand'), '失败输出不得回显 slug 派生的文件名(客户品牌)')
+  check(!failedOut.includes('example-brand'), '失败输出不得回显渠道 id')
+  check(failedOut.includes('***'), '失败输出应把品牌串替换成 ***')
+  check(failedRaw.includes('add-mask::Example-Brand'), 'slug 也必须登记进 GitHub 掩码')
 
   // clean:取回后立即销毁中转对象
   const cleaned = transfer('clean', [], r2)
