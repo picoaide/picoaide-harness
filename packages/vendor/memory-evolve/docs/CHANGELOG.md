@@ -6,6 +6,44 @@
 
 ---
 
+## 2026-09-09
+
+### 修复
+
+- **「Memory Evolve 设置」里勾选「记忆写入看门狗」保存后刷新即失效**：`MemoryQueueView.saveConfig()` 手工拼了一个固定 patch 对象发给宿主，键列表是**手写**的——`perTurnWriteGuard`（看门狗开关）与 `writeGuardThreshold`（阈值）有控件、`draft` 绑定也在（勾选立即变化），却没进 patch，于是 POST body 里根本没有这两个键，宿主 `updateRuntime()` 收不到、`plugin-state.json` 不落盘，刷新后 GET 回显仍是默认 `false`；因为界面读的是本地 draft，保存瞬间还显示「配置已保存」，问题只在刷新后才暴露。修复：把两个键补进保存 payload（TS 源码 + 构建产物 `lib/client.js` 同步重建），并新增回归测试 `tests/client-config-save.test.js` 钉住「面板 draft 绑定键 ⊆ saveConfig 发送键」这条契约（同时断言源码与产物键集合一致，防「改了源码没重建」），已验证还原修复后该测试必失败。
+
+---
+
+## 2026-09-08
+
+### 修复
+
+- **记忆 Tab 子导航被 DSH 宽度手柄遮挡、部分元素无法点击（issue #40）**：DSH 0.1.2-rc 起会话列两侧渲染「拉宽」用的宽度手柄（absolute 全高、z-index 8、拦截点击的 col-resize 竖条，元素带 `data-width-handle`，宽度 `min(40px, (100% - --dsh-chat-content-width)/2 - 48px)`）。插件的管理 Tab 是**占满整列宽**的面板（不随 `--dsh-chat-content-width` 收窄），把对话框拉宽后手柄条正好压住顶部子导航行（指南 / 全局规则 AGENTS.md …），元素被遮挡、点击被手柄拦截。修复思路与 DSH 官方对全宽 overlay 视图的先例一致（官方在 `ConversationRoot.module.css` 用 `.root:has([data-conversation-composer-overlay]) .widthHandle{display:none}` 关掉手柄），插件侧新增 `[data-phase]:has(...) [data-width-handle] { display: none }`，**一次覆盖全部 11 个 Tab 的根容器**（`.mt-panel` 记忆/技能/待办/设置/模型/同步、`.me-panel` UI 设置/版本/指南、`.coi-root` COI、`.bb-pane` 广播、`.pm-root` 提示词、`.bm-panel` 书签）——任一插件 Tab 挂载期间隐藏手柄，切回会话等视图自动恢复；拉宽偏好（`--dsh-chat-user-width`）本身不受影响，回会话 Tab 仍可拖拽。选择器用 `[data-phase]` 属性而非 CSS-module 哈希类名（`.root` 被哈希化选不中），该属性在 DSH 里非唯一但其它持有者不含上述根容器，不会误伤。
+- **子代理快照不再注入 dtodo 收尾提示（issue #43）**：`snap.todoHint`（「收尾时调用 dtodo list 检查到期……有到期未完成项就在回复末尾提醒用户」）是**面向真人会话**的职责——子代理不向用户直接交付（结果回父会话），也不该替父会话提醒待办，注入只会诱导它多调一次 dtodo 白烧 token。同一函数内 review 计数、写入看门狗、收尾标题、写入文案早已按 `isSubagent` 降级，唯独此处漏了豁免。补齐后子代理快照不含任何 dtodo 收尾指导（头部工具清单的事实陈述保留：dtodo 工具对子代理确实注册可用）。新增回归测试，已验证「还原修复后测试必失败」。
+- **review 每回合报「turn-stopping 处理失败：Cannot read properties of undefined (reading 'length')」（issue #42）**：DSH 0.1.2-alpha.4+ 的 Session 不再暴露 `.events` 数组，旧代码读取得到 `undefined` 后取 `.length` 抛 TypeError，经 `turn-stopping` 的 serial dispatch 冒泡，被插件的 try/catch 隔离成一条不影响回合的告警。改用 `agent.session.ownEvents?.() ?? agent.session.events ?? []` 三档兜底（老宿主回退 `.events`）。该修复此前只存在于开发轨，**本版本首次随发布交付**——只更新到上一个发布 tag（v26082401）的用户仍会看到这条报错。
+- **headless profile 无法加载：依赖仅 web 运行时提供的 workspaceRegistry 服务（issue #35）**：该服务从硬性 `inject` 列表移除，改为 `ctx.get` 按需读取 + 局部注入，headless profile 不再因缺服务加载失败。
+- **会话书签星标在 DSH 0.1.1-rc.2+ 全站失效（issue #39）**：官方重构了 `data-chat-anchor-key`（`node:{seq}` → `{kind.length}:{kind}{id}`，key 不再携带 seq），星标注入/列表/跳转/分支全链路失效。改为按锚点原文通用切分 kind/id（不硬编码 kind 名）+ 会话事件日志反查 `{seq, turn}`，旧记录按 seq 回退兼容；顺带修复 fork seed 的 seq 空洞越界（seq≠数组下标导致中间轮分支退化为全量复制）。
+- **全盘 dir 搜索卡死（外部 PR #32）**：WALK_IGNORE 补 Windows 系统目录、maxFiles 截断后清空 pending 队列（防数千微任务级联）、defaultRoots 盘符去重。
+- **Windows 下技能采纳跨盘失败**：`memoryDir`（D:）与 `skillDir`（C:）跨盘时 `renameSync` 抛 EXDEV，降级为 `cpSync + rmSync`，其余错误照抛。
+- **移动端「Memory Evolve 设置」页长文本/控件溢出（issue #31）**：配置说明等无空格长串加 `overflow-wrap: anywhere`、控件加 `max-width: 100%` + `box-sizing: border-box`（不依赖移动通道，普通移动浏览器同样修复），并补上移动通道漏掉的 `.me-todo-select` 全宽规则。
+
+### 新增
+
+- **MEMORY.md / USER.md 页签支持手动新建记忆条目（issue #30）**：此前各文件页签中只有项目关键记忆 KEY.md 有手动添加框，用户最想随手记的长期记忆（MEMORY.md）与用户档案（USER.md）是纯只读——想让 AI 记住某条偏好/环境只能靠反复口头交代或等自动沉淀。新增 `POST /memory-evolve/api/memory/memory` 与 `/memory-evolve/api/memory/user` 端点（与 KEY 同款 `store.add` 盖戳追加，日期前缀由程序生成），前端 MEMORY.md / USER.md 页签顶部渲染同款添加框，草稿按文件分桶（切页签不丢内容），保存后清空草稿、刷新列表并提示。
+
+> 本版本还包含 **2026-09-04** 记录的「记忆写入看门狗」与「广播投递即唤醒（wake 参数）」两项新增（见下）。
+
+---
+
+## 2026-09-04
+
+### 新增
+
+- **记忆写入看门狗（长会话防遗忘，吸收 PR #37 特性一）**：长会话中模型对「每轮收尾写 daily/project」的固定提示词逐渐失效（指令稀释），连续多轮不写记忆且程序侧毫无反馈，遗漏被静默吞掉。新增程序侧合规追踪：按会话统计「连续完成多少个用户回合未写任何 daily/project 记忆」（`writeGapCounter`，`agent/turn-stopping` 计数、subagent 不计、进程内存态），缺口达到阈值（`writeGuardThreshold`，默认 2，可在「Memory Evolve 设置 → 配置」调整）时快照注入置顶 ⚠️ 提醒，粘性直到下一次成功写入即消（key 轨确认队列不算——看门狗只盯每轮进展日志）。提醒文案刻意静态（不嵌实时计数）+ 按实际启用的写入轨参数化（单轨关闭不命令写已关轨）。**独立开关 `perTurnWriteGuard`，默认关**（用户拍板 2026-09-04：根源是模型指令遵循能力，强遵循模型不需要；打开才启用）。
+- **广播投递即唤醒（de_broadcast send wake 参数，吸收 PR #37 特性二）**：研究「为什么广播有时能唤醒会话、有时不能」——根因在 DSH 核心的投递原语：广播投递一律用 `inject`（不唤醒），接收方 **running 时同回合可见（像被唤醒）**、**idle 时消息停在收件箱直到下次自然驱动（没动静）**、**offline 直接跳过**——三种状态三种观感。新增 `wake: true`（send 可选参数，默认 false 行为不变）：idle 接收方改走 `followup` 唤醒（投递到下一回合并启动驱动，等价替用户发消息，与 de_session wake / COI wakeOnComplete 同款机制；消息体带「发送方唤醒了你」标记）；running 接收方仍 inject（不打断）；offline 跳过（收件箱 + 回来补投兜底）。回执**始终**附「已唤醒 N 个空闲接收方」计数（含 0）。投递按接收方独立容错 + Set 去重（房间/项目/显式接收者重叠不重复投递、单点失败不中断）。经 Codex 独立评审与本地 DSH 0.1.2 源码实锚验证（Agent.followup/status/wakeDriver 语义成立）后合入。
+
+---
+
 ## 2026-08-17
 
 ### 修复

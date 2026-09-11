@@ -80,13 +80,47 @@ const DEFAULTS = {
 /** Sensitive query params stripped before persistence (mirrors runtime mask). */
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
 
-/** Strip sensitive query parameters from a URL (never throws). */
+/** Mask secret-shaped `k=v` pairs inside a URL fragment. OAuth implicit flows
+ * carry `#access_token=…`/`#code=…` there, and a query-only scrub left them in
+ * cleartext on disk. Non-sensitive pairs and plain route fragments are kept
+ * byte-identical (the `?`/`/` prefixes are not part of the key pattern). */
+function maskSensitiveFragment(fragment: string): string {
+  const body = fragment.startsWith('#') ? fragment.slice(1) : fragment
+  if (body === '' || !body.includes('=')) return fragment
+  // 线性扫描替换(CodeQL js/polynomial-redos):原正则 /([^&#=?]+)=([^&]*)/gu
+  // 在大量重复字符的 fragment 上会多项式回溯。逐 & 段解析,语义与原正则对齐:
+  //   - key = 本段最后一个 ?/# 之后到第一个 = 之前(原正则不允许 key 含 & # = ?);
+  //   - value = 段内剩余部分(可含 '='),命中敏感 key 时整段 value 打码;
+  //   - key 为空/无 '=' 的段原样保留。
+  const parts = body.split('&')
+  let changed = false
+  const maskedParts = parts.map((part) => {
+    const eq = part.indexOf('=')
+    if (eq < 0) return part
+    const keyStart = Math.max(part.lastIndexOf('?', eq - 1), part.lastIndexOf('#', eq - 1)) + 1
+    const rawKey = part.slice(keyStart, eq)
+    if (rawKey === '') return part
+    let key = rawKey
+    try { key = decodeURIComponent(rawKey) } catch { /* keep the raw key */ }
+    if (!SENSITIVE_QUERY_KEY.test(key)) return part
+    changed = true
+    return `${part.slice(0, keyStart)}${rawKey}=****`
+  })
+  return changed ? `#${maskedParts.join('&')}` : fragment
+}
+
+/** Strip sensitive URL parts before persistence (never throws): credential
+ * query parameters, userinfo (`user:pass@host`) and secret-shaped fragment
+ * pairs. Mirrors the runtime op-log masking (runtime maskBrowserSummary). */
 export function stripSensitiveUrl(raw: string): string {
   try {
     const url = new URL(raw)
-    for (const name of url.searchParams.keys()) {
+    if (url.username !== '') url.username = '****'
+    if (url.password !== '') url.password = '****'
+    for (const name of [...url.searchParams.keys()]) {
       if (SENSITIVE_QUERY_KEY.test(name)) url.searchParams.set(name, '****')
     }
+    if (url.hash !== '') url.hash = maskSensitiveFragment(url.hash)
     return url.href
   } catch {
     return raw
@@ -343,8 +377,17 @@ export class BrowserStore {
   }
 
   saveGroupLedger(ledger: BrowserLedger): void {
-    this.ledger = ledger
-    this.writeLedger(ledger)
+    // Tab URLs reach this file verbatim from `wc.getURL()`; an OAuth callback
+    // (`?code=` / `#access_token=`) must not sit in cleartext on disk when the
+    // very same URL is masked in history. A restored token-bearing tab then
+    // opens the masked URL — acceptable: those URLs are single-use anyway.
+    // A ledger without tab urls is stored untouched (shape preserved).
+    const ledgerTabs: BrowserLedger['tabs'] | undefined = Array.isArray(ledger.tabs) ? ledger.tabs : undefined
+    const sanitized: BrowserLedger = ledgerTabs !== undefined && ledgerTabs.length > 0
+      ? { ...ledger, tabs: ledgerTabs.map((tab) => ({ ...tab, url: stripSensitiveUrl(tab.url) })) }
+      : ledger
+    this.ledger = sanitized
+    this.writeLedger(sanitized)
   }
 
   // ---------------------------------------------------------------- internals

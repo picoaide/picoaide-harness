@@ -420,17 +420,24 @@ export class BrowserRuntime {
       this.relayout()
 
       // `target=_blank` / window.open must not silently vanish (P2-30): open
-      // the URL as a new tab through the normal agent path (quota, gate,
-      // navigation policy, op log) and deny the native popup. A denied or
-      // failed open is recorded as a failed op so the activity panel shows it.
+      // the URL as a new tab through the normal path (quota, gate, navigation
+      // policy, op log) and deny the native popup. A denied or failed open is
+      // recorded as a failed op so the activity panel shows it.
+      //
+      // While the USER holds control (我来操作) no agent operation can be
+      // running, so a popup at that moment is user-initiated: it MUST take the
+      // user path — routing it through the agent path parked it behind the
+      // user's own gate forever (the tab only appeared after 交给 AI, as a
+      // burst; 2026-09-11 fix).
       view.webContents.setWindowOpenHandler((details) => {
         const target = typeof details?.url === 'string' ? details.url : ''
+        const userInitiated = this.pool.controlled
         if (target === '' || !this.guard.allowNavigation(target)) {
           this.record('browser_window_open', id, `window.open denied: ${target}`, true)
           return { action: 'deny' }
         }
-        this.record('browser_window_open', id, `window.open → new tab: ${target}`)
-        void this.open(target).catch((cause: unknown) => {
+        this.record('browser_window_open', id, `window.open → new tab: ${target}`, false, userInitiated ? 'user' : 'ai')
+        void this.open(target, undefined, userInitiated).catch((cause: unknown) => {
           const message = cause instanceof Error ? cause.message : String(cause)
           this.record('browser_window_open', id, `window.open failed: ${message}`, true)
         })

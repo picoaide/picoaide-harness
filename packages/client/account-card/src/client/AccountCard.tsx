@@ -23,6 +23,9 @@ interface UsageResponse {
     remaining_money: number | null
     today_usage: number
     today_cost: number
+    /** 0061 员工余额(元)与闸门开关。 */
+    balance_money?: number
+    balance_enabled?: boolean
   } | null
   fetchedAt: number
   state: 'idle' | 'loading' | 'error'
@@ -317,6 +320,11 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   const remainingMoney = data !== null && isMoney(data.remaining_money) ? data.remaining_money : null
   const remainingTokens = data !== null && isMoney(data.remaining_tokens) ? data.remaining_tokens : null
   const admin = data?.is_admin === true
+  // 0061:余额闸门开启时,主数字展示**账户余额**(存量),与月度配额(流量
+  // 上限)语义不同。字段缺失/非法一律按未启用处理,保持旧卡片行为。
+  const balanceMoney = data !== null && data.balance_enabled === true && isMoney(data.balance_money)
+    ? data.balance_money
+    : null
 
   let amount: string | null = null
   let quota: number | null = null
@@ -367,6 +375,18 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
           <span style={{ ...BALANCE_AMOUNT, color: 'var(--dsw-alias-label-secondary)' }}>…</span>
           <span style={BALANCE_CAPTION}>{t('account.loading')}</span>
         </div>
+      ) : balanceMoney !== null ? (
+        <>
+          <div style={BALANCE_ROW}>
+            <span style={{ ...BALANCE_AMOUNT, color: balanceMoney <= 0 ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-primary)' }}>
+              {formatMoney(balanceMoney)}
+            </span>
+            <span style={BALANCE_CAPTION}>{t('account.balance')}</span>
+          </div>
+          {balanceMoney <= 0 && (
+            <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{t('account.lowBalance')}</div>
+          )}
+        </>
       ) : admin || amount === null ? (
         <div style={BALANCE_ROW}>
           <span style={BALANCE_AMOUNT}>{t('account.unlimited')}</span>

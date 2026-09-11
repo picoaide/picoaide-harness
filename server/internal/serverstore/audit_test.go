@@ -132,3 +132,37 @@ func TestPurgeOldAuditLogsKeepsAnchor(t *testing.T) {
 		t.Fatal("chain must detect tampering of the anchor row")
 	}
 }
+
+// 复核回归(F16):并发审计写入在多 worker/批量路径下哈希链必须保持完整
+// (每一行的 prev_hash 都衔接上一行,VerifyAuditChain 无断链)。
+func TestAuditLogConcurrentChainIntact(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	const n = 60
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := AuditLog(db, fmt.Sprintf("user-%d", i), "concurrent", "payload"); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent AuditLog: %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != n {
+		t.Fatalf("audit rows = %d, want %d", count, n)
+	}
+	if broken, err := VerifyAuditChain(db); err != nil || broken != 0 {
+		t.Fatalf("chain broken at %d (err=%v)", broken, err)
+	}
+}

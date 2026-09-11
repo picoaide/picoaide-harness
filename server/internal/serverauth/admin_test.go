@@ -1640,3 +1640,138 @@ func TestAdminUsageAggregateModelKindFilter(t *testing.T) {
 		t.Fatalf("kind filter rows = %v, want empty", rows3)
 	}
 }
+
+// 复核回归(F8):开启闸门并首次保存额度时,必须**自动补发本月** —— 否则
+// 从保存到调度器下一个 tick(最长 1 小时)之间全员 0 余额会被闸门拦截。
+func TestPutBalanceAutoGrantsCurrentMonth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := mustDB(t)
+	adminID, err := createUserDB(db, "boss", "pw123456", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empID, err := createUserDB(db, "emp", "pw123456", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := serverstore.GetUserByID(db, adminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &AdminAPI{DB: db}
+	call := func() map[string]any {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/server/admin/balance",
+			strings.NewReader(`{"enabled":true,"monthly_amount":66,"monthly_mode":"cover"}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("admin_user", admin)
+		a.putBalance(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("putBalance status=%d body=%s", w.Code, w.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	body := call()
+	if body["auto_grant"] != true {
+		t.Fatalf("first save should auto-grant, body=%v", body)
+	}
+	u, _ := serverstore.GetUserByID(db, empID)
+	if u.BalanceMoney != 66 {
+		t.Fatalf("employee balance = %v, want 66", u.BalanceMoney)
+	}
+	// 第二次保存:本月已发 → 不再重复加钱。
+	body2 := call()
+	if body2["auto_grant"] != false {
+		t.Fatalf("second save must not auto-grant again, body=%v", body2)
+	}
+	u2, _ := serverstore.GetUserByID(db, empID)
+	if u2.BalanceMoney != 66 {
+		t.Fatalf("balance changed on repeat save = %v, want 66", u2.BalanceMoney)
+	}
+}
+
+// 复核回归(F1):会话绑定 CSRF token 在任意时刻都可用,而与小时窗口无关;
+// 错误 token/错误会话必须拒绝。
+func TestSessionBoundCSRF(t *testing.T) {
+	sess, csrf, err := CreateAdminSession(mustDB(t), 1)
+	if err != nil {
+		// user 1 可能不存在(测试库独立):直接构造 key 校验纯函数。
+		key := "k"
+		tok := IssueSessionCSRF(key, "sid")
+		if !VerifySessionCSRF(key, "sid", tok) {
+			t.Fatal("session-bound token rejected")
+		}
+		if VerifySessionCSRF(key, "other", tok) {
+			t.Fatal("session-bound token accepted for another session")
+		}
+		if VerifySessionCSRF(key, "sid", "bad") {
+			t.Fatal("bad token accepted")
+		}
+		return
+	}
+	_ = sess
+	if !VerifySessionCSRF(sess.CSRFKey, sess.ID, csrf) {
+		t.Fatal("issued session-bound CSRF rejected")
+	}
+	if VerifySessionCSRF(sess.CSRFKey, sess.ID, csrf+"x") {
+		t.Fatal("tampered session-bound CSRF accepted")
+	}
+}
+
+type fakeBrowserProvider struct{ name string }
+
+func (f *fakeBrowserProvider) Name() string { return f.name }
+func (f *fakeBrowserProvider) AuthURL(state, returnServer string) (string, error) {
+	return "https://idp.example/auth?state=" + state, nil
+}
+func (f *fakeBrowserProvider) HandleCallback(code, state string) (UserInfo, error) {
+	return UserInfo{}, nil
+}
+func (f *fakeBrowserProvider) Configure(map[string]string) error { return nil }
+
+// F2 回归(复核):OIDC/openid 路由必须**请求时动态解析** provider,
+// 未配置返回 404 JSON;注册/热更新后立即生效,无需重启。
+func TestBrowserLoginDynamicResolution(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	api := New(mustDB(t))
+
+	call := func(name string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/client/v2/auth/"+name+"/login", nil)
+		api.browserLoginHandler(name)(c)
+		return w
+	}
+	if w := call("oidc"); w.Code != http.StatusNotFound {
+		t.Fatalf("unconfigured oidc login status = %d, want 404 (%s)", w.Code, w.Body.String())
+	}
+	// 运行时注册(等价于 ReloadProviders 热更新后的状态)→ 立即生效
+	api.RegisterBrowser(&fakeBrowserProvider{name: "oidc"})
+	if w := call("oidc"); w.Code != http.StatusFound {
+		t.Fatalf("configured oidc login status = %d, want 302", w.Code)
+	}
+	if loc := call("oidc").Header().Get("Location"); !strings.Contains(loc, "https://idp.example/auth") {
+		t.Fatalf("redirect location = %q", loc)
+	}
+	// openid 仍未配置 → 404(按名称隔离)
+	if w := call("openid"); w.Code != http.StatusNotFound {
+		t.Fatalf("openid login status = %d, want 404", w.Code)
+	}
+}
+
+// F17 回归(复核):客户端面与管理面必须共享同一个登录失败限流器,
+// 否则同一账号可从两个入口各消耗一份失败预算(实际阈值翻倍)。
+func TestLoginLimiterSharedAcrossSurfaces(t *testing.T) {
+	api := New(mustDB(t))
+	if api.limiter != adminLoginLimiter() {
+		t.Fatal("client and admin login surfaces must share one limiter")
+	}
+	if api.limiter != sharedLoginLimiter() {
+		t.Fatal("client limiter must be the shared singleton")
+	}
+}

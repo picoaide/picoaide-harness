@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // ---------------------------------------------------------------------------
@@ -57,10 +58,10 @@ func NewHandlers(db *sql.DB) *Handlers {
 		DB: db,
 		// 非流式:仅约束响应头到达(ResponseHeaderTimeout),body 单独限时读取——
 		// 全量 Timeout 会截断长报告生成(审计2026-M11)
-		client: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
+		client: &http.Client{Transport: newUpstreamTransport()},
 		// streaming client: headers (first byte) must arrive within the same
 		// window as the non-stream client, but the body streams unbounded.
-		sse:  &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
+		sse:  &http.Client{Transport: newUpstreamTransport()},
 		rl:   newRateLimiter(),
 		conc: newConcurrencyMeter(),
 	}
@@ -92,4 +93,15 @@ func NewHandlers(db *sql.DB) *Handlers {
 			concurrencyStatus(c, db, api.conc)
 		},
 	}
+}
+
+// newUpstreamTransport 返回网关上游 HTTP transport(F10,审计 2026-09-11)。
+// 保存时域名解析失败会放行(离线/内网 DNS 抖动),因此连接阶段必须复检:
+// 解析出的任一候选 IP 若属于链路本地/云 metadata 段直接拒绝(防 DNS
+// rebinding 把 provider API key 发往 metadata 服务);私网/环回允许 ——
+// 企业内网自建 LLM 网关是本产品的主要场景。
+func newUpstreamTransport() *http.Transport {
+	t := util.SafeOutboundTransport()
+	t.ResponseHeaderTimeout = 120 * time.Second
+	return t
 }

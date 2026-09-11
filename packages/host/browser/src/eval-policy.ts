@@ -341,9 +341,12 @@ function looksLikeCookieString(value: string): boolean {
 
 function maskString(value: string): string {
   if (value.length === 0) return value
-  if (value.length > 4096) return `${value.slice(0, 4096)}…`
+  // Detect BEFORE truncating: a >4 KB value (a routine cookie jar, a long
+  // response body) used to be sliced and returned with its credential in the
+  // clear — the P1-18 cookie-shape detector never ran (2026-09-11 audit).
   if (SECRET_VALUE.test(value) && value.length >= 6) return MASK
   if (looksLikeCookieString(value)) return MASK
+  if (value.length > 4096) return `${value.slice(0, 4096)}…`
   return value
 }
 

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import SessionService, { Config, SESSION_CHANGED_EVENT } from '../src/session-service.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
@@ -121,4 +124,20 @@ describe('maxOutputFromDefaultParams', () => {
     expect(maxOutputFromDefaultParams('not-json')).toBeUndefined()
     expect(maxOutputFromDefaultParams(undefined)).toBeUndefined()
   })
+})
+
+
+describe('session persist 竞态 (F7 复核)', () => {
+  it('clear() 之后在途的异步 persist 不得复活 token 文件', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-session-race-'))
+    const file = join(dir, 'session.json')
+    const { ctx } = stubCtx()
+    const service = new SessionService(ctx, { tokenFile: file })
+    // 登录后立即登出:persist 仍在 await 动态 import,clear 已同步删除文件。
+    service.setSession(SAMPLE_SESSION)
+    service.clear()
+    await new Promise((r) => setTimeout(r, 80))
+    expect(existsSync(file)).toBe(false)
+    expect(service.isLoggedIn()).toBe(false)
+  }, 30000)
 })

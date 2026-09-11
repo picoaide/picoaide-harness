@@ -285,7 +285,7 @@ func TestProxyStream(t *testing.T) {
 	}
 }
 
-func TestProxyStreamClientDisconnectKeepsPendingRow(t *testing.T) {
+func TestProxyStreamClientDisconnectStillMeters(t *testing.T) {
 	f := newFakeUpstream(t)
 	f.firstDelay = 100 * time.Millisecond // give the client time to disconnect mid-stream
 	r, db, token := newGateway(t, f)
@@ -304,13 +304,18 @@ func TestProxyStreamClientDisconnectKeepsPendingRow(t *testing.T) {
 	cancel() // simulate client disconnect
 	<-done
 
-	// C-9: a client-disconnected stream must not leak a pending usage row
+	// F4(2026-09-11): 客户端断开不再免费 —— 服务端继续 drain 上游直到拿到
+	// usage chunk,或按已转发字节估算回填;pending 行保留且 tokens 落账。
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
+	var tokens int64
+	if err := db.QueryRow("SELECT COUNT(*), COALESCE(MAX(prompt_tokens+completion_tokens),0) FROM usage").Scan(&n, &tokens); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("usage rows = %d, want 0 (pending row cleaned up on disconnect)", n)
+	if n != 1 {
+		t.Fatalf("usage rows = %d, want 1 (disconnect must still be metered)", n)
+	}
+	if tokens <= 0 {
+		t.Fatalf("usage tokens = %d, want > 0 (real usage or estimated backfill)", tokens)
 	}
 }
 
@@ -1134,9 +1139,10 @@ func TestServeStreamRedactsErrorBody(t *testing.T) {
 	}
 }
 
-// P2-11(2026-09-08):上游正常结束但从未回传 usage 时,pending 行也必须清除
-// (此前只处理 clientGone/idle/lineTooLong,正常 EOF 会留下 0 token 的悬挂行)。
-func TestProxyStreamNormalEOFWithoutUsageCleansPendingRow(t *testing.T) {
+// F4(2026-09-11):上游正常结束但从未回传 usage 时,pending 行不能留 0 token
+// 悬挂行,也不能直接删除(客户端/上游已产生的用量会全部免费)。新语义:
+// 按已转发字节估算 completion tokens 回填,行保留且 tokens > 0。
+func TestProxyStreamNormalEOFWithoutUsageEstimatesTokens(t *testing.T) {
 	f := newFakeUpstream(t)
 	// 只发普通内容行,不含 usage,然后正常结束(EOF)。
 	f.streamResp = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
@@ -1147,10 +1153,14 @@ func TestProxyStreamNormalEOFWithoutUsageCleansPendingRow(t *testing.T) {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
+	var ct int64
+	if err := db.QueryRow("SELECT COUNT(*), COALESCE(MAX(completion_tokens),0) FROM usage").Scan(&n, &ct); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("usage rows = %d, want 0 (pending row cleaned up on normal EOF without usage)", n)
+	if n != 1 {
+		t.Fatalf("usage rows = %d, want 1 (estimated backfill, not deletion)", n)
+	}
+	if ct <= 0 {
+		t.Fatalf("completion_tokens = %d, want > 0 (estimated from forwarded bytes)", ct)
 	}
 }

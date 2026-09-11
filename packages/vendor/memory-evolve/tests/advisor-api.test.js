@@ -210,11 +210,29 @@ function setupSession(rig, sessionId = 'session-1', userText = '帮我写个函�
   return { agent, session, events }
 }
 
+/**
+ * 轮询等待条件成立（替代固定 setTimeout(20) 等 drain —— 全量并发跑测试时
+ * 20ms 不够,records 尚未落盘导致 flaky;等待条件而不是等待时间）。
+ */
+function waitForAdvisor(predicate, timeoutMs = 3000, stepMs = 10) {
+  const start = Date.now()
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      let ok = false
+      try { ok = predicate() } catch { ok = false }
+      if (ok) return resolve()
+      if (Date.now() - start > timeoutMs) return reject(new Error('waitForAdvisor timeout'))
+      setTimeout(tick, stepMs)
+    }
+    tick()
+  })
+}
+
 test('装配：启用后 agent/created 建运行时，turn/end 触发评审并 steer', async (t) => {
   const rig = rigFor(t)
   const { agent } = setupSession(rig)
-  // 等 drain
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  // 等 drain 真正完成(以 records 落盘为条件,而非固定 20ms 延时)。
+  await waitForAdvisor(() => rig.ctrl.queryRecords({ sessionId: 'session-1' }).records.length === 1)
   // 状态
   const status = rig.ctrl.status('session-1')
   assert.equal(status.effectiveEnabled, true)

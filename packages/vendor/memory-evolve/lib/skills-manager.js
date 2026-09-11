@@ -846,6 +846,49 @@ export function installSkillsManager(ctx, options = {}) {
 
     skillCtx.inject(['webServer', 'workspaceRegistry'], (webCtx) => {
       const handler = async (req, res) => {
+        // F6(审计 2026-09-11)+复核增强:技能管理 API 与 /sidebar、/api/pico
+        // 同类,此前没有任何本地信任栅栏 —— DNS rebinding 页面或同机进程可直接
+        // 读技能文件、写文本、添加管理目录。栅栏口径与 cron/browser 插件一致:
+        //   1) Host 自称 loopback 时,socket 必须也是 loopback(伪造 Host 拒绝);
+        //   2) Host 非 loopback 时,必须是 webRuntime.trustedHosts 中已声明
+        //      的权威(局域网 `dsh web --host 0.0.0.0` 的正常访问);
+        //   3) sec-fetch-site=cross-site 拒绝;带 Origin 时必须与 Host 同源;
+        //   4) 无 Origin 的本机脚本/CLI 放行(浏览器跨站请求必带 Origin)。
+        const remote = String(req.socket?.remoteAddress ?? '')
+        const loopbackRemote = remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote)
+        const hostHeader = req.headers?.host
+        const hostIsLoopback = typeof hostHeader === 'string' &&
+          /^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)
+        let trustedHosts = []
+        try {
+          const runtime = webCtx.get?.('webRuntime')
+          if (runtime && Array.isArray(runtime.trustedHosts)) trustedHosts = runtime.trustedHosts
+        } catch { /* 非 web 载体没有 webRuntime 服务 */ }
+        const hostTrusted = typeof hostHeader === 'string' && trustedHosts.some((entry) => {
+          const value = String(entry)
+          return value === hostHeader || value === hostHeader.replace(/:\d+$/, '')
+        })
+        if (!hostIsLoopback && !hostTrusted) {
+          sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        if (hostIsLoopback && !loopbackRemote) {
+          sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        if (String(req.headers?.['sec-fetch-site'] ?? '') === 'cross-site') {
+          sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        const originHeader = req.headers?.origin
+        if (typeof originHeader === 'string') {
+          let originHost = ''
+          try { originHost = new URL(originHeader).host } catch { originHost = '' }
+          if (originHost !== hostHeader) {
+            sendJson(res, 403, { error: 'forbidden' })
+            return
+          }
+        }
         const url = new URL(req.url ?? '/', 'http://localhost')
         const pathname = url.pathname
         const query = url.searchParams

@@ -35,6 +35,8 @@ export interface SidebarHttpRequest {
   url?: string
   method?: string
   headers: Record<string, string | string[] | undefined>
+  /** Socket peer address (node IncomingMessage.socket.remoteAddress). */
+  socket?: { remoteAddress?: string | undefined } | undefined
   [Symbol.asyncIterator](): AsyncIterator<string | Uint8Array>
 }
 

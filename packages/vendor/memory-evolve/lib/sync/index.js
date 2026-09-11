@@ -296,7 +296,10 @@ function provenanceTrackProject(dir) {
 /** 本地 git 查询辅助（同步，毫秒级；快照渲染与命令共用）。 */
 function runGitSync(dir, args) {
   try {
-    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'pipe'] })
+    const r = spawnSync('git', args, {
+      cwd: dir, encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+    })
     if (r.error || r.status !== 0) return null
     return String(r.stdout ?? '').trim()
   } catch {

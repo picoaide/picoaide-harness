@@ -83,6 +83,15 @@ export interface NativeImage {
 /** Native session (cookies/storage + permission/download hooks). */
 export interface NativeSession {
   setPermissionRequestHandler(handler: (wc: unknown, permission: string, callback: (grant: boolean) => void) => void): void
+  /**
+   * Permission CHECK handler (synchronous). Electron requires BOTH handlers
+   * for a complete policy: most web APIs run a check first and only raise a
+   * request when the check is DENIED, and with no check handler installed the
+   * check reports granted — which silently defeats a deny-all request handler
+   * (2026-09-11 audit: the embedded browser's deny-all was dead code while the
+   * main window installed both, see desktop electron-runtime.ts).
+   */
+  setPermissionCheckHandler(handler: (wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void
   on(event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void
   removeListener(event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void
   clearStorageData(options?: { storages?: string[] }): Promise<void>

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,6 +39,108 @@ const auditChainLockKey = int64(0x5069636F) // "Pico"
 // 分叉链(VerifyAuditChain 报断链)。事务 + pg_advisory_xact_lock 让
 // 「读尾 + 插入」原子且跨实例互斥(事务结束自动释放锁)。
 func AuditLog(db *sql.DB, username, action, detail string) error {
+	// F16(审计 2026-09-11):审计写路径改为**每 DB 单 worker 串行 + 批量**。
+	// 旧实现每次审计都单独开事务、取全局 advisory lock、读链尾、插入、提交;
+	// 高并发登录/管理操作会在这把全局锁上排队,把请求延迟整体拉高。
+	// 现在请求仍同步等待结果(错误语义不变),但 N 条审计合并为一个事务、
+	// 一次锁获取,DB 往返与锁竞争降为 1/N;worker 空闲 60s 自动退出,
+	// 测试的多临时库不会积累常驻 goroutine。
+	w := auditWorkerFor(db)
+	req := auditRequest{username: username, action: action, detail: detail, done: make(chan error, 1)}
+	enqueue := func(worker *auditWorker) bool {
+		select {
+		case worker.ch <- req:
+			return true
+		case <-time.After(5 * time.Second):
+			return false
+		}
+	}
+	if !enqueue(w) {
+		// worker 可能恰在空闲退出;重取(必要时新建)后重试一次。
+		if !enqueue(auditWorkerFor(db)) {
+			return errors.New("audit queue timeout")
+		}
+	}
+	select {
+	case err := <-req.done:
+		return err
+	case <-time.After(15 * time.Second):
+		return errors.New("audit write timeout")
+	}
+}
+
+// ---- F16: 审计写入 worker ----
+
+type auditRequest struct {
+	username, action, detail string
+	done                     chan error
+}
+
+type auditWorker struct {
+	db *sql.DB
+	ch chan auditRequest
+}
+
+var auditWorkers sync.Map // *sql.DB -> *auditWorker
+
+func auditWorkerFor(db *sql.DB) *auditWorker {
+	if v, ok := auditWorkers.Load(db); ok {
+		return v.(*auditWorker)
+	}
+	w := &auditWorker{db: db, ch: make(chan auditRequest, 256)}
+	actual, loaded := auditWorkers.LoadOrStore(db, w)
+	if loaded {
+		return actual.(*auditWorker)
+	}
+	go w.run()
+	return w
+}
+
+// run 串行消费审计请求;攒批(最多 20 条或 2ms)后一次事务写入。
+func (w *auditWorker) run() {
+	idle := time.NewTimer(60 * time.Second)
+	defer idle.Stop()
+	for {
+		select {
+		case req := <-w.ch:
+			batch := []auditRequest{req}
+			// 攒批:等待极短窗口吸收并发请求(不引入可感知延迟)。
+		collect:
+			for len(batch) < 20 {
+				t := time.NewTimer(2 * time.Millisecond)
+				select {
+				case r := <-w.ch:
+					batch = append(batch, r)
+					t.Stop()
+				case <-t.C:
+					break collect
+				}
+			}
+			err := writeAuditBatch(w.db, batch)
+			for _, r := range batch {
+				r.done <- err
+			}
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(60 * time.Second)
+		case <-idle.C:
+			// 空闲退出:先从注册表摘除;若已被并发重取(CompareAndDelete
+			// 失败)说明有新请求指向我们,继续服务。
+			if auditWorkers.CompareAndDelete(w.db, w) {
+				return
+			}
+			idle.Reset(60 * time.Second)
+		}
+	}
+}
+
+// writeAuditBatch 在一个事务内串行追加一批审计条目,保持哈希链不分叉。
+// advisory lock 仍保留(跨实例互斥),但每批只获取一次。
+func writeAuditBatch(db *sql.DB, batch []auditRequest) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -53,13 +156,16 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 		}
 		prevHash = ""
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	payload := prevHash + "|" + username + "|" + action + "|" + detail + "|" + now
-	sum := sha256.Sum256([]byte(payload))
-	hash := hex.EncodeToString(sum[:])
-	if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-		username, action, detail, prevHash, hash, now); err != nil {
-		return err
+	for _, r := range batch {
+		now := time.Now().UTC().Format(time.RFC3339)
+		payload := prevHash + "|" + r.username + "|" + r.action + "|" + r.detail + "|" + now
+		sum := sha256.Sum256([]byte(payload))
+		hash := hex.EncodeToString(sum[:])
+		if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			r.username, r.action, r.detail, prevHash, hash, now); err != nil {
+			return err
+		}
+		prevHash = hash
 	}
 	return tx.Commit()
 }
