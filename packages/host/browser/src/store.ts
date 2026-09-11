@@ -87,16 +87,26 @@ const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signatu
 function maskSensitiveFragment(fragment: string): string {
   const body = fragment.startsWith('#') ? fragment.slice(1) : fragment
   if (body === '' || !body.includes('=')) return fragment
-  try {
-    const masked = body.replace(/([^&#=?]+)=([^&]*)/gu, (match, rawKey: string) => {
-      let key = rawKey
-      try { key = decodeURIComponent(rawKey) } catch { /* keep the raw key */ }
-      return SENSITIVE_QUERY_KEY.test(key) ? `${rawKey}=****` : match
-    })
-    return `#${masked}`
-  } catch {
-    return fragment
-  }
+  // 线性扫描替换(CodeQL js/polynomial-redos):原正则 /([^&#=?]+)=([^&]*)/gu
+  // 在大量重复字符的 fragment 上会多项式回溯。逐 & 段解析,语义与原正则对齐:
+  //   - key = 本段最后一个 ?/# 之后到第一个 = 之前(原正则不允许 key 含 & # = ?);
+  //   - value = 段内剩余部分(可含 '='),命中敏感 key 时整段 value 打码;
+  //   - key 为空/无 '=' 的段原样保留。
+  const parts = body.split('&')
+  let changed = false
+  const maskedParts = parts.map((part) => {
+    const eq = part.indexOf('=')
+    if (eq < 0) return part
+    const keyStart = Math.max(part.lastIndexOf('?', eq - 1), part.lastIndexOf('#', eq - 1)) + 1
+    const rawKey = part.slice(keyStart, eq)
+    if (rawKey === '') return part
+    let key = rawKey
+    try { key = decodeURIComponent(rawKey) } catch { /* keep the raw key */ }
+    if (!SENSITIVE_QUERY_KEY.test(key)) return part
+    changed = true
+    return `${part.slice(0, keyStart)}${rawKey}=****`
+  })
+  return changed ? `#${maskedParts.join('&')}` : fragment
 }
 
 /** Strip sensitive URL parts before persistence (never throws): credential
