@@ -352,6 +352,29 @@ async function main() {
   await clickLabel(cdp, '账号', 2000).catch(() => {})
   const account = await bodyText(cdp)
   reportStep('账号页可打开（设置内）', account.includes('账号') || account.includes('user'), `len=${account.length}`)
+  // 0061 余额:mock gateway 返回 balance_enabled=true + 88.5,侧边栏账户卡的
+  // 主数字应显示余额,防止 account-card 余额渲染回归(等一拍轮询/刷新完成)。
+  await wait(600)
+  // 0061:先验证数据链路(mock gateway → enterprise session → account-card host
+  // service → 本地端点),两个字段必须完整透传。
+  let usageProbe = null
+  try {
+    const probe = await cdp.send('Runtime.evaluate', {
+      expression: `fetch('/api/pico/account/usage').then(r=>r.json()).then(j=>({balance:j?.data?.balance_money ?? null, enabled:j?.data?.balance_enabled === true}))`,
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    usageProbe = probe?.result?.value ?? null
+  } catch { usageProbe = null }
+  reportStep('账户卡余额数据链路（balance=88.5/enabled）',
+    usageProbe?.enabled === true && usageProbe?.balance === 88.5, JSON.stringify(usageProbe))
+  // 再验证渲染:账户卡在宽布局(sidebar.footer wide seat)下以余额为主数字。
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }).catch(() => {})
+  await wait(800)
+  const accountWithCard = await bodyText(cdp)
+  const balanceRendered = accountWithCard.includes('账户余额') && accountWithCard.includes('88.5')
+  reportStep('账户卡渲染余额主数字（宽布局）', balanceRendered,
+    `hasLabel=${accountWithCard.includes('账户余额')} hasAmount=${accountWithCard.includes('88.5')}`)
   await screenshot(cdp, '10-account')
   await clickLabel(cdp, '关闭', 800).catch(() => {})
 

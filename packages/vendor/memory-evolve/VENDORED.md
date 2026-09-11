@@ -31,6 +31,9 @@
    致命拉取错误（本环境实测复现并修复）。
 8. **`tests/search-docs.test.js`**：平台断言自适应（`/Volumes`、`mdfind` 优先序、
    provider 链）在非 darwin 环境跳过/放宽，不再让测试套件依赖 mac 物理机。
+9. **`tests/advisor-api.test.js`**：把"等 drain"的固定 `setTimeout(20)` 改为按
+   records 落盘条件的轮询（`waitForAdvisor`）。全量并发跑 811 个用例时 20ms
+   不够，曾偶发 records=0 的 flaky（连续两轮全量已验证稳定）。
 
 ## 验证
 
