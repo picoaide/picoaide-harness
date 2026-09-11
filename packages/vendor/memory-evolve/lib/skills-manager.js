@@ -854,16 +854,16 @@ export function installSkillsManager(ctx, options = {}) {
         // 无 Origin 的本机脚本/CLI 放行(浏览器跨站请求必带 Origin)。
         const remote = String(req.socket?.remoteAddress ?? '')
         if (!(remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote))) {
-          console.error('GUARD_'+'A_remote'); sendJson(res, 403, { error: 'forbidden' })
+          sendJson(res, 403, { error: 'forbidden' })
           return
         }
         const hostHeader = req.headers?.host
         if (typeof hostHeader !== 'string' || !/^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)) {
-          console.error('GUARD_'+'B_host'); sendJson(res, 403, { error: 'forbidden' })
+          sendJson(res, 403, { error: 'forbidden' })
           return
         }
         if (String(req.headers?.['sec-fetch-site'] ?? '') === 'cross-site') {
-          console.error('GUARD_'+'C_sfs'); sendJson(res, 403, { error: 'forbidden' })
+          sendJson(res, 403, { error: 'forbidden' })
           return
         }
         const originHeader = req.headers?.origin
@@ -871,7 +871,7 @@ export function installSkillsManager(ctx, options = {}) {
           let originHost = ''
           try { originHost = new URL(originHeader).host } catch { originHost = '' }
           if (originHost !== hostHeader) {
-            console.error('GUARD_'+'D_origin'); sendJson(res, 403, { error: 'forbidden' })
+            sendJson(res, 403, { error: 'forbidden' })
             return
           }
         }

@@ -511,6 +511,31 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* ── 长文本防溢出（issue #31，2026-09-04）────────────────────────
+ * 移动端（~400px 视口）「Memory Evolve 设置」页会被拉长溢出：配置项
+ * 说明（me-field-hint）、版本号（me-field-value，无空格长串如
+ * dsh-v0.1.2-rc.1）等在 flex 行内不换行、撑破父容器，最后一项把整个
+ * 页面顶出视口。给文本面加「任意位置断词 + 词内换行」，任何视口都
+ * 安全（桌面文本长度不变，窄屏自动换行为多行）；控件限宽 100%，
+ * 避免固定宽度 input/select 在窄屏溢出（原规则只依赖 data-dsh-mobile
+ * 通道，未装 dsh-android-edapp 的移动端浏览器不生效——此规则通用）。 */
+.me-field-label,
+.me-field-hint,
+.me-field-sub,
+.me-field-value,
+.me-heading,
+.me-help {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.me-input,
+.me-select,
+.me-todo-select,
+.me-todo-date {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 /* 次级开关行（子功能开关，如 ws-coord 的快照/硬拦截）：缩进 + 弱化，
    视觉上与主开关（模块总开关）区分 */
 .me-field-sub {
@@ -655,6 +680,37 @@
 }
 
 /* ---- memory tab (conversation.view) ---- */
+
+/* DSH 0.1.2-rc 起，会话列两侧渲染「拉宽」用的宽度手柄：absolute 全高、
+ * z-index 8、拦截点击的 col-resize 竖条，元素带 [data-width-handle]
+ * （ConversationRoot.tsx 的 .widthHandle，位于 .body 内）。插件的管理 Tab
+ * 都是**占满整列宽**的面板（不随 --dsh-chat-content-width 收窄），把对话
+ * 框拉宽后手柄条贴近面板边缘，正好压住顶部子导航行（指南 / 全局规则
+ * AGENTS.md …），导致遮挡、无法点击（issue #40）。
+ *
+ * 处理方式与 DSH 官方对全宽 overlay 视图的先例一致——官方在
+ * ConversationRoot.module.css 用
+ * .root:has([data-conversation-composer-overlay]) .widthHandle{display:none}
+ * 关掉手柄。这里对插件的全宽视图做同等处理：任一插件 Tab 挂载期间隐藏
+ * 手柄，切回会话等其它视图时自动恢复。拉宽偏好（--dsh-chat-user-width）
+ * 本身不受影响，回会话 Tab 仍可继续拖拽。
+ *
+ * 选择器用 [data-phase] 属性而非 CSS-module 哈希类名（.root 被哈希化，
+ * 选不中）；[data-phase] 在 DSH 里非唯一（ConnectionIndicator/InputBar
+ * 也有），但它们不含下列根容器，不会误伤。
+ *
+ * 覆盖清单 = 插件全部 conversation.view 视图的根容器类名：
+ *   .mt-panel  记忆 / 技能 / 待办 / 设置 / 模型 / 同步
+ *   .me-panel  UI 设置 / 版本 / 指南
+ *   .coi-root  COI 调度      .bb-pane  会话广播
+ *   .pm-root   提示词库      .bm-panel 会话书签
+ * ⚠ 新增 Tab 若使用新的根容器类名，需同步加入此列表，否则该 Tab 仍会被
+ *   手柄遮挡。
+ */
+[data-phase]:has(.mt-panel, .me-panel, .coi-root, .bb-pane, .pm-root, .bm-panel) [data-width-handle] {
+  display: none;
+}
+
 .mt-panel {
   display: flex;
   flex-direction: column;

@@ -260,6 +260,7 @@ function runGit(args, cwd) {
   try {
     const result = spawnSync('git', args, {
       cwd, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
     })
     if (result.error || result.status !== 0) return undefined
     const out = String(result.stdout ?? '').trim()
