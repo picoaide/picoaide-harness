@@ -137,9 +137,12 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	ag.POST("/password", serverauth.BearerAuth(d.DB), d.Auth.ChangePassword)
 	// 公开发现: 登录方式(客户端登录页未登录时探测; 与 /api/server/admin 同 handler)。
 	ag.GET("/methods", d.Admin.PublicMethods)
-	for _, ro := range d.Auth.OIDC {
-		ag.GET("/"+ro.Name+"/login", ro.Login)
-		ag.GET("/"+ro.Name+"/callback", ro.Callback)
+	// F2(审计 2026-09-11): 固定注册 oidc/openid 两条路由,provider 在**请求时**
+	// 从当前认证配置动态解析 —— webadmin 保存认证配置后立即生效,不再需要
+	// 重启(旧实现把启动时快照的 provider 闭包写死在路由表里)。
+	for _, name := range []string{"oidc", "openid"} {
+		ag.GET("/"+name+"/login", d.Auth.BrowserLogin(name))
+		ag.GET("/"+name+"/callback", d.Auth.BrowserCallback(name))
 	}
 
 	// 启动配置
@@ -252,6 +255,11 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "DELETE", "/departments/:id", serverauth.PermDeptWrite, d.Admin.DeleteDept)
 	serverauth.AdminRoute(authed, "GET", "/users/:id/tokens", serverauth.PermUserRead, d.Admin.ListUserTokens)
 	serverauth.AdminRoute(authed, "POST", "/tokens/:id/revoke", serverauth.PermUserWrite, d.Admin.RevokeToken)
+	// 0061 员工余额(存量):单人手动调整 + 月度发放配置/手动发放。
+	serverauth.AdminRoute(authed, "POST", "/users/:id/balance", serverauth.PermUserWrite, d.Admin.AdjustBalance)
+	serverauth.AdminRoute(authed, "GET", "/balance", serverauth.PermUserRead, d.Admin.GetBalance)
+	serverauth.AdminRoute(authed, "PUT", "/balance", serverauth.PermUserWrite, d.Admin.PutBalance)
+	serverauth.AdminRoute(authed, "POST", "/balance/grant", serverauth.PermUserWrite, d.Admin.GrantBalance)
 	serverauth.AdminRoute(authed, "GET", "/usage", serverauth.PermUsageRead, d.Admin.Usage)
 	// 用量中心(2026-09 重构):总览聚合 + 请求级明细
 	serverauth.AdminRoute(authed, "GET", "/usage/overview", serverauth.PermUsageRead, d.Admin.UsageOverview)

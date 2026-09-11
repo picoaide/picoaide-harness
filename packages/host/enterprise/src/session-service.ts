@@ -92,6 +92,10 @@ export default class SessionService extends Service {
   private session: Session | null = null
   private readonly tokenFile: string
   private restoreDone = false
+  // F7(审计 2026-09-11):持久化代际 —— persist 是异步的(先 await 动态
+  // import),若期间 clear()/setSession() 已发生,迟到的写入会让已登出的
+  // token 在磁盘"复活"。每次会话变化递增,persist 写盘前校验代际。
+  private persistEpoch = 0
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'picoSession')
@@ -101,7 +105,7 @@ export default class SessionService extends Service {
     // reloads into the app (login page poll sees loggedIn).
     installDeepLinkListener(ctx, (session) => {
       this.setSession(session)
-    })
+    }, () => this.getSession())
     void this.restore().finally(() => { this.restoreDone = true })
   }
 
@@ -125,12 +129,13 @@ export default class SessionService extends Service {
 
   setSession(session: Session): void {
     this.session = session
+    const epoch = ++this.persistEpoch
     // P1-13: a failed token write ($DSH_HOME read-only / ENOSPC / ROFS / a
     // missing parent dir) must never become an unhandled rejection — the
     // desktop fail-loud handler treats those as fatal and exits the whole app.
     // Degrade: keep the in-memory session for this run, warn once per failure,
     // and let the next successful login persist again.
-    void persist(this.tokenFile, session).catch((cause: unknown) => {
+    void persist(this.tokenFile, session, () => epoch === this.persistEpoch).catch((cause: unknown) => {
       const message = cause instanceof Error ? cause.message : String(cause)
       this.ctx.logger?.warn(`[pico] session token could not be persisted (${this.tokenFile}): ${message}`)
     })
@@ -139,6 +144,7 @@ export default class SessionService extends Service {
 
   clear(): void {
     this.session = null
+    this.persistEpoch++ // F7: 使所有在途 persist 失效,不再复活旧 token
     try { unlinkSync(this.tokenFile) } catch { /* absent is fine */ }
     this.ctx.emit(SESSION_CHANGED_EVENT, null)
   }
@@ -192,8 +198,9 @@ function isBasicTextBackend(ss: { getSelectedStorageBackend?: () => string }): b
   return typeof ss.getSelectedStorageBackend === 'function' && ss.getSelectedStorageBackend() === 'basic_text'
 }
 
-async function persist(tokenFile: string, s: Session): Promise<void> {
+async function persist(tokenFile: string, s: Session, stillCurrent: () => boolean): Promise<void> {
   const mod = await loadElectronModule()
+  if (!stillCurrent()) return // F7: 期间已登出/换号,丢弃过期写入
   const ss = mod?.safeStorage
   if (!ss || !ss.isEncryptionAvailable() || isBasicTextBackend(ss)) {
     // P1-10 fallback: owner-only plaintext. The token is an opaque bearer
@@ -201,10 +208,12 @@ async function persist(tokenFile: string, s: Session): Promise<void> {
     // guard available without a keyring. Warn once so the operator knows
     // the dependency (gnome-keyring/kwallet) would harden this.
     console.warn('[pico] token persisted as 0600 plaintext: no safeStorage keyring available')
+    if (!stillCurrent()) return // F7(二次校验:await 之后仍可能变化)
     writeFileSync(tokenFile, JSON.stringify(s), { mode: TOKEN_FILE_MODE })
     return
   }
   // Owner-only mode: the encrypted token must not be readable by other
   // local users even if the home directory permissions are loose.
+  if (!stillCurrent()) return // F7
   writeFileSync(tokenFile, ss.encryptString(JSON.stringify(s)), { mode: TOKEN_FILE_MODE })
 }

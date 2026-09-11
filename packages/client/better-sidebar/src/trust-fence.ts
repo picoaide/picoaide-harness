@@ -12,6 +12,8 @@ import type { IncomingHttpHeaders } from 'node:http'
 /** The request facts the fence reads (structural subset of IncomingMessage). */
 interface ApiTrustRequest {
   headers: IncomingHttpHeaders
+  /** Socket peer address (node IncomingMessage.socket.remoteAddress). */
+  socket?: { remoteAddress?: string | undefined } | undefined
 }
 
 function header(headers: IncomingHttpHeaders, name: string): string | undefined {
@@ -37,6 +39,15 @@ export function isLoopbackHostname(hostname: string): boolean {
     && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
 
+/** Whether a socket peer address is loopback (127/8, ::1, IPv4-mapped). */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (address === undefined) return false
+  const normalized = address.toLowerCase()
+  if (normalized === '::1') return true
+  if (normalized.startsWith('::ffff:')) return isLoopbackHostname(normalized.slice('::ffff:'.length))
+  return isLoopbackHostname(normalized)
+}
+
 /** Canonical authority form: hostname, or hostname:port when a port was written. */
 function canonicalAuthority(entry: string, entryUrl: URL): string {
   const port = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
@@ -59,13 +70,24 @@ function isTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): bool
  * @param request - node HTTP request facts (headers).
  * @param trustedHosts - non-loopback authorities this deployment serves.
  * @returns true when the Host is ours (loopback or trusted) and browser markers are same-origin.
+ *
+ * F15(审计 2026-09-11):`Host: 127.0.0.1` 只对**loopback socket**生效 ——
+ * 旧实现只信 Host 头,在 `dsh web --host 0.0.0.0` 等非 loopback 绑定下,
+ * 任何能建立 TCP 的客户端手写 Host 头即可穿越。显式配置的 trustedHosts
+ * 仍允许(局域网访问 web UI 的正常场景)。socket.remoteAddress 缺失时保持
+ * 旧行为(纯函数单测/结构桩)。
  */
 export function isTrustedApiRequest(request: ApiTrustRequest, trustedHosts: readonly string[]): boolean {
   const host = header(request.headers, 'host')
   if (host === undefined) return false
   const hostUrl = parseAuthority(host)
   if (hostUrl === undefined) return false
-  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
+  if (isLoopbackHostname(hostUrl.hostname)) {
+    const remote = request.socket?.remoteAddress
+    if (remote !== undefined && !isLoopbackAddress(remote)) return false
+  } else if (!isTrustedAuthority(hostUrl, trustedHosts)) {
+    return false
+  }
   if (header(request.headers, 'sec-fetch-site') === 'cross-site') return false
   const origin = header(request.headers, 'origin')
   if (origin === undefined) return true

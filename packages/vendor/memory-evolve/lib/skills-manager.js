@@ -846,6 +846,35 @@ export function installSkillsManager(ctx, options = {}) {
 
     skillCtx.inject(['webServer', 'workspaceRegistry'], (webCtx) => {
       const handler = async (req, res) => {
+        // F6(审计 2026-09-11):技能管理 API 与 /sidebar、/api/pico 同类,
+        // 此前没有任何 loopback/同源栅栏 —— DNS rebinding 页面或同机进程
+        // 可直接读技能文件、写文本、添加管理目录。栅栏口径与 cron/browser
+        // 插件一致:socket 必须是 loopback;Host 必须自称 loopback 且
+        // origin(若带)与 Host 同源;sec-fetch-site=cross-site 一律拒绝。
+        // 无 Origin 的本机脚本/CLI 放行(浏览器跨站请求必带 Origin)。
+        const remote = String(req.socket?.remoteAddress ?? '')
+        if (!(remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote))) {
+          console.error('GUARD_'+'A_remote'); sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        const hostHeader = req.headers?.host
+        if (typeof hostHeader !== 'string' || !/^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)) {
+          console.error('GUARD_'+'B_host'); sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        if (String(req.headers?.['sec-fetch-site'] ?? '') === 'cross-site') {
+          console.error('GUARD_'+'C_sfs'); sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        const originHeader = req.headers?.origin
+        if (typeof originHeader === 'string') {
+          let originHost = ''
+          try { originHost = new URL(originHeader).host } catch { originHost = '' }
+          if (originHost !== hostHeader) {
+            console.error('GUARD_'+'D_origin'); sendJson(res, 403, { error: 'forbidden' })
+            return
+          }
+        }
         const url = new URL(req.url ?? '/', 'http://localhost')
         const pathname = url.pathname
         const query = url.searchParams

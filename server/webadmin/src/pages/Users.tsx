@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../api'
 import { fmtTokens, fmtMoney, usageRate, moneyRate } from '../lib/format'
-import { deptTreeOptions } from '../lib/utils'
+import { deptTreeOptions, cn } from '../lib/utils'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -10,10 +10,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Card } from '../components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { Switch } from '../components/ui/switch'
 import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { Link } from 'react-router-dom'
-import { Search, Users as UsersIcon } from 'lucide-react'
+import { Search, Users as UsersIcon, Wallet, Coins, Gift, Check, Loader2 } from 'lucide-react'
 
 interface User {
   id: number
@@ -35,6 +36,8 @@ interface User {
   password_must_change?: boolean
   password_changed_at?: string
   mfa_enabled?: boolean
+  /** 0061 员工余额(元,存量);0/负 = 余额不足,启用闸门后会被网关 429。 */
+  balance_money?: number
 }
 
 function roleBadge(u: { is_admin: boolean; role?: string }): React.ReactNode {
@@ -98,6 +101,25 @@ function moneyQuotaLabel(q: number | null | undefined, effective?: number): stri
   if (q === 0) return '不限'
   return `¥${fmtMoney(q)} / 月`
 }
+
+interface BalanceGrant {
+  month: string
+  mode: string
+  amount: number
+  affected: number
+  actor: string
+  created_at: string
+}
+
+interface BalanceSummaryView {
+  settings: { enabled: boolean; monthly_amount: number; monthly_mode: 'add' | 'cover' }
+  last_grant: BalanceGrant | null
+  month_grant: BalanceGrant | null
+  users: number
+  total_balance: number
+}
+
+type BalanceMode = 'add' | 'deduct' | 'set'
 
 export default function Users() {
   const [users, setUsers] = useState<User[]>([])
@@ -359,13 +381,141 @@ export default function Users() {
     }
   }
 
+  // ---- 0061 员工余额 ----
+  const [balanceDialogUser, setBalanceDialogUser] = useState<User | null>(null)
+  const [balMode, setBalMode] = useState<BalanceMode>('add')
+  const [balAmount, setBalAmount] = useState('')
+  const [balReason, setBalReason] = useState('')
+  const [balErr, setBalErr] = useState('')
+  const [balBusy, setBalBusy] = useState(false)
+  const [balSummary, setBalSummary] = useState<BalanceSummaryView | null>(null)
+  const [balDraftEnabled, setBalDraftEnabled] = useState(false)
+  const [balDraftMode, setBalDraftMode] = useState<'add' | 'cover'>('add')
+  const [balDraftAmount, setBalDraftAmount] = useState('')
+  const [balSettingErr, setBalSettingErr] = useState('')
+  const [balSaving, setBalSaving] = useState(false)
+  const [balNotice, setBalNotice] = useState('')
+  const [grantOpen, setGrantOpen] = useState(false)
+  const [grantBusy, setGrantBusy] = useState(false)
+
+  const loadBalance = useCallback(async () => {
+    try {
+      const data: BalanceSummaryView = await request(`${ADMIN_API}/balance`)
+      setBalSummary(data)
+      setBalDraftEnabled(data.settings.enabled)
+      setBalDraftMode(data.settings.monthly_mode)
+      // 额度为 0 时不预填 "0",避免管理员误以为必须保留;留空更直观。
+      setBalDraftAmount(data.settings.monthly_amount > 0 ? String(data.settings.monthly_amount) : '')
+    } catch {
+      /* 余额卡片加载失败不阻断用户列表 */
+    }
+  }, [])
+  useEffect(() => { void loadBalance() }, [loadBalance])
+
+  function openBalance(u: User) {
+    setBalanceDialogUser(u)
+    setBalMode('add')
+    setBalAmount('')
+    setBalReason('')
+    setBalErr('')
+  }
+
+  const parsedAmount = (() => {
+    const n = Number(balAmount)
+    return balAmount.trim() !== '' && Number.isFinite(n) ? Math.round(n * 100) / 100 : NaN
+  })()
+  const previewBalance = (() => {
+    if (balanceDialogUser === null || Number.isNaN(parsedAmount)) return null
+    const cur = balanceDialogUser.balance_money ?? 0
+    if (balMode === 'add') return cur + parsedAmount
+    if (balMode === 'deduct') return cur - parsedAmount
+    return parsedAmount
+  })()
+  const previewNegative = previewBalance !== null && previewBalance < 0
+  const previewText = previewBalance === null
+    ? '—'
+    : previewBalance < 0
+      ? `-¥${fmtMoney(Math.abs(previewBalance))}`
+      : `¥${fmtMoney(previewBalance)}`
+  const balValid = !Number.isNaN(parsedAmount) && (
+    balMode === 'set' ? parsedAmount >= 0 : parsedAmount > 0
+  ) && (balMode !== 'deduct' || (previewBalance ?? -1) >= 0) && Number.isFinite(parsedAmount)
+
+  async function saveBalance() {
+    if (balanceDialogUser === null || balBusy) return
+    if (Number.isNaN(parsedAmount)) { setBalErr('请输入有效金额'); return }
+    if (balMode === 'set' ? parsedAmount < 0 : parsedAmount <= 0) {
+      setBalErr(balMode === 'set' ? '金额不能为负数' : '金额必须大于 0')
+      return
+    }
+    if (balMode === 'deduct' && (previewBalance ?? -1) < 0) { setBalErr('扣减金额不能超过当前余额'); return }
+    setBalBusy(true)
+    setBalErr('')
+    try {
+      await request(`${ADMIN_API}/users/${balanceDialogUser.id}/balance`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: balMode, amount: parsedAmount, reason: balReason.trim() }),
+      })
+      const label = balMode === 'add' ? '充值' : balMode === 'deduct' ? '扣减' : '设置'
+      setBalNotice(`已为 ${balanceDialogUser.username} ${label} ¥${parsedAmount.toFixed(2)}`)
+      setBalanceDialogUser(null)
+      load(page, q)
+      void loadBalance()
+    } catch (err: any) {
+      setBalErr(err.message)
+    } finally {
+      setBalBusy(false)
+    }
+  }
+
+  async function saveBalanceSettings() {
+    if (balSaving) return
+    const n = balDraftAmount.trim() === '' ? 0 : Number(balDraftAmount)
+    if (!Number.isFinite(n) || n < 0) { setBalSettingErr('月度额度必须是不小于 0 的数字'); return }
+    if (balDraftEnabled && n <= 0) { setBalSettingErr('启用余额闸门时必须配置大于 0 的月度额度(否则员工余额耗尽后无法自动恢复)'); return }
+    setBalSaving(true)
+    setBalSettingErr('')
+    try {
+      await request(`${ADMIN_API}/balance`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: balDraftEnabled, monthly_amount: n, monthly_mode: balDraftMode }),
+      })
+      setBalNotice('月度余额发放设置已保存')
+      void loadBalance()
+    } catch (err: any) {
+      setBalSettingErr(err.message)
+    } finally {
+      setBalSaving(false)
+    }
+  }
+
+  async function grantNow() {
+    if (grantBusy) return
+    setGrantBusy(true)
+    setBalSettingErr('')
+    try {
+      const r = await request(`${ADMIN_API}/balance/grant`, { method: 'POST' })
+      setGrantOpen(false)
+      setBalNotice(r.already
+        ? `本月已发放过(${r.grant?.month ?? ''}),未重复发放`
+        : `已发放 ${r.grant?.affected ?? 0} 人,每人 ¥${Number(r.grant?.amount ?? 0).toFixed(2)}`)
+      load(page, q)
+      void loadBalance()
+    } catch (err: any) {
+      setGrantOpen(false)
+      setBalSettingErr(err.message)
+    } finally {
+      setGrantBusy(false)
+    }
+  }
+
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="用户管理"
-        desc="企业成员账号、部门归属、流量配额与登录令牌"
+        desc="企业成员账号、余额、部门归属、流量配额与登录令牌"
         actions={
           <>
             <div className="relative">
@@ -384,6 +534,68 @@ export default function Users() {
         }
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
+      {balNotice && <div className="text-sm text-emerald-600">{balNotice}</div>}
+
+      {/* 0061 月度余额发放设置:启用闸门 / 发放方式 / 额度 / 立即发放 */}
+      <Card className="p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg bg-emerald-50 p-2 text-emerald-700"><Coins className="h-5 w-5" /></div>
+            <div>
+              <div className="font-medium">月度余额发放</div>
+              <div className="text-sm text-muted-foreground">
+                余额是员工的可用金额。开启闸门后,余额耗尽的员工调用 AI 会被网关拦截;每月 1 日(北京时间)自动向全部启用员工发放,每月仅一次。
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setGrantOpen(true)} disabled={(balSummary?.settings?.monthly_amount ?? 0) <= 0}>
+              <Gift className="mr-1 h-4 w-4" />立即发放本月
+            </Button>
+            <Button onClick={() => void saveBalanceSettings()} disabled={balSaving}>
+              {balSaving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}保存设置
+            </Button>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-3">
+          <div className="rounded-md border p-3">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="bal-enabled" className="text-sm font-medium">余额闸门</Label>
+              <Switch id="bal-enabled" checked={balDraftEnabled} onCheckedChange={setBalDraftEnabled} />
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">{balDraftEnabled ? '开启:余额 ≤ 0 的员工调用 AI 时被 429 拦截。' : '关闭:仅记账不拦截,适合先观察再启用。'}</p>
+          </div>
+          <div className="rounded-md border p-3">
+            <div className="text-sm font-medium">每月发放方式</div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setBalDraftMode('add')} className={cn('rounded-md border p-2 text-left text-xs', balDraftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}>
+                <div className="text-sm font-medium">增加</div>
+                <div className="text-muted-foreground">当前余额 + 月额度</div>
+              </button>
+              <button type="button" onClick={() => setBalDraftMode('cover')} className={cn('rounded-md border p-2 text-left text-xs', balDraftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}>
+                <div className="text-sm font-medium">覆盖</div>
+                <div className="text-muted-foreground">重置为月额度</div>
+              </button>
+            </div>
+          </div>
+          <div className="rounded-md border p-3">
+            <Label htmlFor="bal-amount" className="text-sm font-medium">每人每月额度(元)</Label>
+            <Input id="bal-amount" className="mt-2" inputMode="decimal" placeholder="例如 100" value={balDraftAmount} onChange={(e) => setBalDraftAmount(e.target.value)} />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {[50, 100, 200, 500].map((v) => (
+                <Button key={v} type="button" size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => setBalDraftAmount(String(v))}>¥{v}</Button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span>{balSummary?.month_grant ? `本月已发放:${balSummary.month_grant.affected} 人 × ¥${fmtMoney(balSummary.month_grant.amount)}` : '本月尚未发放'}</span>
+          <span>发放范围:{balSummary?.users ?? '—'} 名启用员工</span>
+          <span>当前余额合计:¥{fmtMoney(balSummary?.total_balance ?? 0)}</span>
+          {balSummary?.last_grant && <span>最近发放:{balSummary.last_grant.month}({balSummary.last_grant.mode === 'cover' ? '覆盖' : '增加'} ¥{fmtMoney(balSummary.last_grant.amount)} / {balSummary.last_grant.affected} 人)</span>}
+        </div>
+        {balSettingErr && <div className="mt-2 text-sm text-destructive">{balSettingErr}</div>}
+      </Card>
 
       <Card>
         <Table>
@@ -395,6 +607,7 @@ export default function Users() {
               <TableHead>角色</TableHead>
               <TableHead>状态</TableHead>
               <TableHead className="min-w-0">本月流量</TableHead>
+              <TableHead className="min-w-0">余额</TableHead>
               <TableHead className="min-w-0">上次改密</TableHead>
               <TableHead className="w-1 text-right">操作</TableHead>
             </TableRow>
@@ -448,6 +661,11 @@ export default function Users() {
                     </div>
                   )}
                 </TableCell>
+                <TableCell className="font-mono text-xs">
+                  <span className={cn('font-medium', (u.balance_money ?? 0) <= 0 ? 'text-destructive' : 'text-emerald-600')}>
+                    ¥{fmtMoney(u.balance_money ?? 0)}
+                  </span>
+                </TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {/* 0057: 上次改密时间; 未改密(NULL)= 创建时初始密码 */}
                   {u.password_changed_at ? fmtTime(u.password_changed_at) : '初始密码'}
@@ -458,6 +676,9 @@ export default function Users() {
                   <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
                   {/* L9:管理员豁免配额,禁用配额按钮避免无效设置 */}
                   <Button size="sm" variant="outline" disabled={u.is_admin} title={u.is_admin ? '管理员不受配额限制' : undefined} onClick={() => openQuota(u)}>配额</Button>
+                  <Button size="sm" variant="outline" title="调整余额 / 充值" onClick={() => openBalance(u)}>
+                    <Wallet className="mr-1 h-3.5 w-3.5" />余额
+                  </Button>
                   <Button size="sm" variant="outline" title="修改角色(G3)" onClick={() => openRoleEdit(u)}>角色</Button>
                   {/* 0057: 重置密码(local 用户; external 由 IdP 管理) */}
                   <Button
@@ -481,7 +702,7 @@ export default function Users() {
           ))}
           {users.length === 0 && (
             <TableRow>
-              <TableCell colSpan={8} className="border-0 p-0">
+              <TableCell colSpan={9} className="border-0 p-0">
                 <EmptyState
                   icon={<UsersIcon className="h-5 w-5 text-muted-foreground" />}
                   title="暂无匹配用户"
@@ -704,6 +925,88 @@ export default function Users() {
               </TableBody>
             </Table>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 员工余额调整:增加 / 扣减 / 设为;数字键盘 + 快捷金额 + 实时预览 */}
+      <Dialog open={!!balanceDialogUser} onOpenChange={(open) => { if (!open) setBalanceDialogUser(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>调整余额 · {balanceDialogUser?.username}</DialogTitle>
+            <DialogDescription>
+              当前余额 ¥{fmtMoney(balanceDialogUser?.balance_money ?? 0)}。调整立即生效并写入审计日志。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>操作</Label>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {([['add', '增加', '充值到余额'], ['deduct', '扣减', '从余额扣除'], ['set', '设为', '重置为指定值']] as const).map(([m, label, hint]) => (
+                  <button key={m} type="button" onClick={() => { setBalMode(m); setBalErr('') }} className={cn('rounded-md border p-2 text-left text-xs', balMode === m ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}>
+                    <div className="text-sm font-medium">{label}</div>
+                    <div className="text-muted-foreground">{hint}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="bal-dialog-amount">金额(元)</Label>
+              <Input
+                id="bal-dialog-amount"
+                autoFocus
+                inputMode="decimal"
+                className="mt-2 text-base"
+                placeholder={balMode === 'set' ? '例如 0' : '例如 100'}
+                value={balAmount}
+                onChange={(e) => setBalAmount(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && balValid && !balBusy) void saveBalance() }}
+              />
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {[10, 50, 100, 500].map((v) => (
+                  <Button key={v} type="button" size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => setBalAmount(String(v))}>
+                    {balMode === 'deduct' ? '-' : balMode === 'set' ? '设为 ' : '+'}¥{v}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            <div className={cn('flex items-center justify-between rounded-md px-3 py-2 text-sm', previewNegative ? 'bg-destructive/10 text-destructive' : 'bg-muted/50')}>
+              <span>调整后余额</span>
+              <span className="font-mono font-medium">
+                {previewText}
+                {previewNegative && ' (扣减超过当前余额)'}
+              </span>
+            </div>
+            <div>
+              <Label htmlFor="bal-reason">备注(可选,写入审计)</Label>
+              <Input id="bal-reason" className="mt-2" maxLength={200} placeholder="例如:9 月充值 / 项目冲刺追加" value={balReason} onChange={(e) => setBalReason(e.target.value)} />
+            </div>
+            {balErr && <div className="text-sm text-destructive">{balErr}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setBalanceDialogUser(null)}>取消</Button>
+              <Button disabled={!balValid || balBusy} onClick={() => void saveBalance()}>
+                {balBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Wallet className="mr-1 h-4 w-4" />}确认调整
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 立即发放确认(幂等:本月已发不会重复加钱) */}
+      <Dialog open={grantOpen} onOpenChange={setGrantOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>立即发放本月余额</DialogTitle>
+            <DialogDescription>
+              将按「{balSummary?.settings?.monthly_mode === 'cover' ? '覆盖' : '增加'}」方式,向 {balSummary?.users ?? 0} 名启用员工每人发放 ¥{fmtMoney(balSummary?.settings?.monthly_amount ?? 0)}。
+              {balSummary?.month_grant ? ' 本月已发放过,重复点击不会重复加钱。' : ' 本月尚未发放,确认后立即执行。'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setGrantOpen(false)}>取消</Button>
+            <Button disabled={grantBusy} onClick={() => void grantNow()}>
+              {grantBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Gift className="mr-1 h-4 w-4" />}确认发放
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

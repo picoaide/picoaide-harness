@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,16 +23,19 @@ const CtxUserKey = "auth_user"
 const CtxTokenKey = "auth_token"
 
 // API holds auth handler dependencies.
+//
+// F2(审计 2026-09-11): providers/browsers/enabledProviders 必须能在
+// webadmin 保存认证配置后**热替换**(此前只在启动时构建一次:启用 LDAP
+// 不生效、禁用 LDAP 后仍可登录)。所有读写经 mu 保护。
 type API struct {
 	DB      *sql.DB
 	limiter *loginLimiter
 	// callbackLimiter:OIDC 回调专用 IP 桶(2026-09-08 P0-2)。
 	callbackLimiter *loginLimiter
-	providers       map[string]PasswordProvider
-	browsers        map[string]BrowserProvider
-	// enabledProviders:客户端员工面允许的密码方式(auth.enabled;2026-09-08
-	// P1-5)。local 仍注册在 providers 里供管理后台回退,但不在此集合时
-	// 客户端登录不得使用。
+
+	mu               sync.RWMutex
+	providers        map[string]PasswordProvider
+	browsers         map[string]BrowserProvider
 	enabledProviders map[string]bool
 }
 
@@ -39,7 +43,7 @@ type API struct {
 func New(db *sql.DB) *API {
 	return &API{
 		DB:               db,
-		limiter:          newLoginLimiter(),
+		limiter:          sharedLoginLimiter(),
 		callbackLimiter:  newCallbackLimiter(),
 		providers:        map[string]PasswordProvider{},
 		browsers:         map[string]BrowserProvider{},
@@ -53,7 +57,37 @@ func (a *API) SetEnabledProviders(names []string) {
 	for _, name := range names {
 		set[name] = true
 	}
+	a.mu.Lock()
 	a.enabledProviders = set
+	a.mu.Unlock()
+}
+
+// ReloadProviders 用当前 settings 重建全部 provider/浏览器方式(F2)。
+// 管理端保存认证配置后调用;GetAllSettings 失败时**保留旧集合**(不能把
+// 一次 DB 抖动变成"所有登录方式消失")。
+func (a *API) ReloadProviders(db *sql.DB) error {
+	if _, err := serverstore.GetAllSettings(db); err != nil {
+		return err
+	}
+	pwds, browsers := ConfigureProviders(db)
+	providers := make(map[string]PasswordProvider, len(pwds))
+	for _, p := range pwds {
+		providers[p.Name()] = p
+	}
+	bs := make(map[string]BrowserProvider, len(browsers))
+	for _, b := range browsers {
+		bs[b.Name()] = b
+	}
+	enabled := make(map[string]bool)
+	for _, n := range EnabledProviderNames(db) {
+		enabled[n] = true
+	}
+	a.mu.Lock()
+	a.providers = providers
+	a.browsers = bs
+	a.enabledProviders = enabled
+	a.mu.Unlock()
+	return nil
 }
 
 // clientPasswordOrder returns the provider names the CLIENT surface may use.
@@ -63,6 +97,8 @@ func (a *API) SetEnabledProviders(names []string) {
 // (API built without ConfigureProviders, e.g. unit tests) keeps the legacy
 // order so existing behaviour is preserved.
 func (a *API) clientPasswordOrder() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if len(a.enabledProviders) == 0 {
 		return []string{"ldap", "local"}
 	}
@@ -78,17 +114,39 @@ func (a *API) clientPasswordOrder() []string {
 
 // RegisterProvider adds a password provider (local/ldap).
 func (a *API) RegisterProvider(p PasswordProvider) {
+	a.mu.Lock()
+	if a.providers == nil {
+		a.providers = map[string]PasswordProvider{}
+	}
 	a.providers[p.Name()] = p
+	a.mu.Unlock()
 }
 
 // RegisterOIDC adds a browser provider (legacy name, kept for compat).
-func (a *API) RegisterOIDC(p BrowserProvider) {
-	a.browsers[p.Name()] = p
-}
+func (a *API) RegisterOIDC(p BrowserProvider) { a.RegisterBrowser(p) }
 
 // RegisterBrowser adds a browser provider by its Name (oidc/openid).
 func (a *API) RegisterBrowser(p BrowserProvider) {
+	a.mu.Lock()
+	if a.browsers == nil {
+		a.browsers = map[string]BrowserProvider{}
+	}
 	a.browsers[p.Name()] = p
+	a.mu.Unlock()
+}
+
+// browserProvider 返回指定名称的浏览器登录 provider(nil = 未配置)。
+func (a *API) browserProvider(name string) BrowserProvider {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.browsers[name]
+}
+
+// passwordProvider 返回已注册的密码 provider(仅用于内部读取)。
+func (a *API) passwordProvider(name string) PasswordProvider {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.providers[name]
 }
 
 // WriteError writes the standard error envelope (contract §0.4.1).
@@ -304,12 +362,12 @@ func (a *API) handleChangePassword(c *gin.Context) {
 //     仅当 auth.enabled 含 ldap(或兼容 mode=ldap/both)时返回,绝不使
 //     未启用的 LDAP 配置意外生效。
 func (a *API) ldapProvider() PasswordProvider {
-	if p, ok := a.providers["ldap"]; ok {
-		return p
-	}
 	if a.DB == nil {
 		return nil
 	}
+	// F2: 以**当前 settings** 为准(禁用后即使注册表里还有旧实例也不得
+	// 再登录),启用且未注册时按需构建并注册(兼容不走 ReloadProviders
+	// 的调用方;GetAllSettings 有 30s TTL + 写失效,不会造成热路径压力)。
 	settings, err := serverstore.GetAllSettings(a.DB)
 	if err != nil {
 		return nil
@@ -317,12 +375,18 @@ func (a *API) ldapProvider() PasswordProvider {
 	if !ldapEnabled(settings) {
 		return nil
 	}
+	if p := a.passwordProvider("ldap"); p != nil {
+		return p
+	}
+	// 不缓存:每次按当前 settings 构建(配置被清空/写坏时立即返回 nil,
+	// 不会像缓存实例那样沿用旧配置)。对象本身很轻,真正的连接在
+	// Authenticate 时才建立。
 	return ldapFromSettings(settings)
 }
 
 // resolvePasswordProvider returns the configured password provider.
 func (a *API) resolvePasswordProvider() PasswordProvider {
-	if p, ok := a.providers["local"]; ok {
+	if p := a.passwordProvider("local"); p != nil {
 		return p
 	}
 	if p := a.ldapProvider(); p != nil {
@@ -341,8 +405,8 @@ func (a *API) authenticate(username, password string) (UserInfo, error) {
 		var p PasswordProvider
 		if name == "ldap" {
 			p = a.ldapProvider()
-		} else if p0, ok := a.providers[name]; ok {
-			p = p0
+		} else {
+			p = a.passwordProvider(name)
 		}
 		if p != nil {
 			ui, err := p.Authenticate(username, password)
@@ -471,7 +535,15 @@ func (a *API) handleUsageSummary(c *gin.Context) {
 	}
 	// 2026-09-08 P2-13:移除死字段 dept_budgets —— 客户端从不渲染,而每次刷新
 	// 都要为每个归属部门跑 EffectiveDeptBudget + DeptMonthlyCost(树内 SUM)。
+	balanceSettings, _ := serverstore.GetBalanceSettings(a.DB)
+
 	c.JSON(http.StatusOK, gin.H{
+		// 0061 余额:存量口径(与 quota_money 的"月上限"正交);balance_enabled
+		// 表示网关是否以余额为硬闸门,客户端据此展示提示文案。
+		"balance_money":    u.BalanceMoney,
+		"balance_enabled":  balanceSettings.Enabled,
+		"balance_monthly":  balanceSettings.MonthlyAmount,
+		"balance_mode":     balanceSettings.MonthlyMode,
 		"is_admin":         u.IsAdmin,
 		"quota_tokens":     quotaTokens,
 		"quota_money":      quotaMoney,
@@ -511,6 +583,8 @@ func userJSON(u *serverstore.User) gin.H {
 		"status":       u.Status,
 		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
 		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
+		// 0061 员工余额(元,存量):webadmin 用户列表/详情展示的数据源。
+		"balance_money": u.BalanceMoney,
 		// 0057 密码/MFA: source 供客户端判断改密入口; password_changeable =
 		// 本地认证且启用的账号; password_must_change = 下次登录强制改密;
 		// mfa_enabled 供 webadmin 列表控制「重置 MFA」按钮。

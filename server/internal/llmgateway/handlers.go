@@ -1,7 +1,10 @@
 package llmgateway
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"net"
 	"net/http"
 	"time"
 
@@ -57,10 +60,10 @@ func NewHandlers(db *sql.DB) *Handlers {
 		DB: db,
 		// 非流式:仅约束响应头到达(ResponseHeaderTimeout),body 单独限时读取——
 		// 全量 Timeout 会截断长报告生成(审计2026-M11)
-		client: &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
+		client: &http.Client{Transport: newUpstreamTransport()},
 		// streaming client: headers (first byte) must arrive within the same
 		// window as the non-stream client, but the body streams unbounded.
-		sse:  &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}},
+		sse:  &http.Client{Transport: newUpstreamTransport()},
 		rl:   newRateLimiter(),
 		conc: newConcurrencyMeter(),
 	}
@@ -90,6 +93,44 @@ func NewHandlers(db *sql.DB) *Handlers {
 		SyncAllAdmin:      func(c *gin.Context) { syncAllAdmin(c, db) },
 		ConcurrencyStatus: func(c *gin.Context) {
 			concurrencyStatus(c, db, api.conc)
+		},
+	}
+}
+
+// newUpstreamTransport 返回网关上游 HTTP transport(F10,审计 2026-09-11)。
+// 保存时域名解析失败会放行(离线/内网 DNS 抖动),因此连接阶段必须复检:
+// 解析出的任一候选 IP 若属于链路本地/云 metadata 段直接拒绝(防 DNS
+// rebinding 把 provider API key 发往 metadata 服务);私网/环回允许 ——
+// 企业内网自建 LLM 网关是本产品的主要场景。
+func newUpstreamTransport() *http.Transport {
+	return &http.Transport{
+		ResponseHeaderTimeout: 120 * time.Second,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			var lastErr error
+			for _, ipa := range ips {
+				if isBlockedUpstreamIP(ipa.IP) {
+					lastErr = errors.New("upstream address is link-local/metadata and blocked")
+					continue
+				}
+				d := &net.Dialer{Timeout: 30 * time.Second}
+				conn, derr := d.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
+				if derr == nil {
+					return conn, nil
+				}
+				lastErr = derr
+			}
+			if lastErr == nil {
+				lastErr = errors.New("upstream host has no usable address")
+			}
+			return nil, lastErr
 		},
 	}
 }

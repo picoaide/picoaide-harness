@@ -30,8 +30,12 @@ type User struct {
 	// nil = follow the global default (usage.monthly_quota_money), 0 = unlimited,
 	// >0 = capped. Admins are always unlimited regardless of this value.
 	QuotaMoney *float64
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// BalanceMoney is the prepaid balance in yuan (0061): admin-adjustable,
+	// monthly-grant target, and deducted by usage.cost. When balance.enabled
+	// is on, a non-positive balance blocks gateway requests.
+	BalanceMoney float64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	// PasswordChangedAt is the last password set/reset time (0057).
 	// Zero = never changed (created with an initial password).
 	PasswordChangedAt time.Time
@@ -64,7 +68,7 @@ func IsAdminRole(role string) bool {
 }
 
 // userCols is the canonical user column list (kept in sync with scanUser).
-const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled"
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled, balance_money"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -108,10 +112,10 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var isAdmin, status int
 	var displayName, email, passwordHash, role, totpSecret sql.NullString
 	var quota sql.NullInt64
-	var quotaMoney sql.NullFloat64
+	var quotaMoney, balanceMoney sql.NullFloat64
 	var createdAt, updatedAt, passwordChangedAt any
 	var mustChange, totpEnabled int
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled, &balanceMoney); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -137,6 +141,9 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	}
 	if quotaMoney.Valid {
 		u.QuotaMoney = &quotaMoney.Float64
+	}
+	if balanceMoney.Valid {
+		u.BalanceMoney = balanceMoney.Float64
 	}
 	u.PasswordChangedAt = parseSQLTime(passwordChangedAt)
 	u.PasswordMustChange = mustChange == 1
@@ -167,12 +174,26 @@ func resolveRole(role string, isAdmin bool) string {
 }
 
 // CreateUser inserts a user row and returns its id.
+// CreateUser inserts a user row and returns its id.
+// 用户名大小写不敏感唯一(F9):先按 lower(username) 查重(干净库另有唯一索引
+// 兜底并发),LDAP/本地同名异大小写不再产生影子账号。
 func CreateUser(db *sql.DB, u *User) (int64, error) {
+	username := strings.TrimSpace(u.Username)
+	if username == "" {
+		return 0, ErrValidation
+	}
+	var exists int
+	if err := db.QueryRow(`SELECT 1 FROM users WHERE lower(username) = lower(?) LIMIT 1`, username).Scan(&exists); err == nil {
+		return 0, ErrDuplicate
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
 	role := resolveRole(u.Role, u.IsAdmin)
-	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, role, status, quota_tokens, quota_money)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		u.Username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		u.Source, boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney))
+	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, role, status, quota_tokens, quota_money, balance_money)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
+		u.Source, boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney),
+		roundMoney(u.BalanceMoney))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -183,14 +204,35 @@ func CreateUser(db *sql.DB, u *User) (int64, error) {
 }
 
 // GetUserByUsername returns the user or ErrNotFound.
+// F9: 大小写不敏感(与 groups 的 NOCASE 口径一致);LIMIT 1 + id 排序在历史
+// 脏数据(大小写重复行)下保持确定性,新数据由应用检查 + 唯一索引保证唯一。
 func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 	row := db.QueryRow(`SELECT `+userCols+`
-		FROM users WHERE username = ?`, username)
+FROM users WHERE lower(username) = lower(?) ORDER BY id LIMIT 1`, strings.TrimSpace(username))
 	u, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return u, err
+}
+
+// CheckUsernameCaseConflicts 返回大小写重复的用户名组(启动告警用)。
+// 干净库上恒为空;历史脏数据需管理员人工合并。
+func CheckUsernameCaseConflicts(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT lower(username) FROM users GROUP BY lower(username) HAVING COUNT(*) > 1 ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 func GetUserByID(db *sql.DB, id int64) (*User, error) {
