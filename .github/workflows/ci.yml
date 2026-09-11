@@ -409,13 +409,17 @@ jobs:
   # macOS 单 job 三态:正式 tag(纯 vX.Y.Z)打包+签名+公证(可重试);预发 tag
   # (vX.Y.Z-*,如 beta/rc)只签名不公证——Releases 页面可见、真机可装(首次
   # 右键打开),免去每次 1-5 小时公证排队;其他(PR/分支)只做未签名冒烟。
+  # 渠道包跟随同一判据(2026-09-11):正式 tag 的渠道 DMG 也签名+公证+staple,
+  # 预发 tag 的 beta 渠道维持只签名。
   # 合并而非互斥 job:Release job 的 needs 需要稳定的 mac 依赖(两颗互斥 job
   # 会让 Release 因 needs 里某颗被 skip 而连带 skip,2026-09-05 beta.1 实测)。
   desktop-macos:
     name: Desktop (macOS)
     needs: gate
     runs-on: macos-15
-    timeout-minutes: 330
+    # 330 → 360(GitHub 托管 runner 上限):正式 tag 上官方与每个渠道各自排队公证,
+    # 共享同一份 job 预算(渠道数一多就要改成按序号矩阵拆 job,见 release runbook)。
+    timeout-minutes: 360
     permissions:
       contents: read
       actions: write
@@ -505,10 +509,15 @@ jobs:
         run: yarn workspace dsh-plugin-desktop dist:mac-smoke --no-prebuild --no-gates
       # ==== 渠道化(tag 时):官方已由上面三步构建完毕,这里只做品牌渠道 ====
       #
-      # 渠道用**签名但不公证**(--sign-only + dmg),与预发 tag 同一条既有路径:
-      # 公证每次排队 1–5 小时,渠道数一多必然撞穿本 job 的 330 分钟上限;渠道客户端
-      # 由客户自己的服务端下发,首次打开与预发版同样需要右键打开。官方渠道仍然是
-      # 完整签名+公证,那条链一步没动。
+      # 正式 tag 上渠道与官方走**同一条签名+公证+staple 链**(2026-09-11 修复)。
+      # 此前渠道只做 --sign-only(借预发 tag 那条路径),交付到客户 Mac 上首次打开
+      # 被 Gatekeeper 拦成「Apple 无法验证 / 未能验证开发者」——渠道包是**交付物**,
+      # 不能要求客户去"右键打开/系统设置里放行"。实测证据(2026-09-11,2.7.0 渠道包):
+      # 已公证的官方 DMG 里 app 带 staple 票据(Contents/CodeResources,s8ch 头 +
+      # Apple Software Ticket Signing 链),而 sign-only 的渠道 DMG 里没有。
+      #
+      # 预发 tag(名字含 '-')的渠道列表只有 beta,维持只签名不公证:公证排队
+      # 1–5 小时的代价不该压在每次内测上(与官方预发同策,见上面三步的分支)。
       #
       # 渠道构建**不输出日志**(用户定策),渠道 id 全程 ::add-mask::;排障看官方
       # 那一份 —— 渠道与官方跑同一套打包脚本,只换 DSH_BUILD_CHANNEL。
@@ -524,18 +533,43 @@ jobs:
           mkdir -p client-assets/official
           cp packages/host/desktop/dist/mac-release/*.dmg client-assets/official/
           ls -1 client-assets/official/
-      - name: Package brand-channel DMGs (quiet)
+      - name: Package brand-channel DMGs (quiet, signed + notarized)
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          # 公证三元组:正式 tag 的渠道包必须公证(见上方注释)。预发 tag 走
+          # --sign-only 分支,preflight 允许 absence(notarizationOptional)。
+          APPLE_API_KEY: ${{ runner.temp }}/notary/AuthKey.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          # 纯 vX.Y.Z(正式 tag)=签名+公证+staple;含 '-' 的预发 tag=只签名。
+          # 判据与上面官方三条 step 的 if 完全一致,只有一个真源。
+          CHANNEL_NOTARIZE: ${{ !contains(github.ref_name, '-') }}
         run: |
           bash scripts/ci-package-clients.sh --skip-official \
             --dist packages/host/desktop/dist/mac-release \
             --list channels.list --stage-dir client-assets --patterns '*.dmg' \
-            -- bash -c 'yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates --sign-only \
-                 && yarn workspace dsh-plugin-desktop dist:mac:dmg --no-prebuild'
+            -- bash -c '
+              set -euo pipefail
+              if [ "${CHANNEL_NOTARIZE}" = "true" ]; then
+                yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates
+                # 公证可重试:submission id 由 release-mac.ts 持久化在
+                # dist/mac-release/.notary-submission.json(下次 pack 才清),
+                # 重试续等同一提交,不重复排队(与官方那条 3 次重试同语义)。
+                for attempt in 1 2 3; do
+                  echo "channel notarize attempt ${attempt}/3"
+                  if yarn workspace dsh-plugin-desktop dist:mac:notarize --no-prebuild; then
+                    exit 0
+                  fi
+                  if [ "${attempt}" -lt 3 ]; then sleep 60; fi
+                done
+                exit 1
+              fi
+              yarn workspace dsh-plugin-desktop dist:mac:pack --no-prebuild --no-gates --sign-only
+              yarn workspace dsh-plugin-desktop dist:mac:dmg --no-prebuild
+            '
       - name: Transfer brand-channel DMGs over R2 (not via public artifacts)
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
