@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { apply, type Config } from '../src/auth-gate.ts'
 import { brandMarkSvg } from '../src/channel-geometry.ts'
 
 // 回归测试(2026-09):LOGIN_HTML 是 TS 模板字符串,内联 <script> 里的正则
@@ -162,5 +163,57 @@ describe('auth-gate CHANGE_PASSWORD_HTML inline script', () => {
     expect(html).toContain('/api/pico/auth/password')
     expect(html).toContain('old_password: oldpw')
     expect(html).toContain("location.replace('/login'")
+  })
+})
+
+/**
+ * 内置服务端地址时不提供"返回修改服务端地址"。
+ *
+ * 渠道包把地址写死之后，员工不该被要求、也不该被诱导去改它；界面留一个"改地址"
+ * 的入口既是多余的步骤，也给"把凭据发到别的地址"留了路。
+ * 这里按**服务端实际吐出的 HTML** 断言（模板 + apply() 的替换一起测），
+ * 而不是只看模板源码。
+ */
+function servedLoginPage(config: Config): string {
+  let index: ((html: string) => string) | undefined
+  const ctx = {
+    effect: (fn: () => unknown) => { fn() },
+    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
+    webServer: {
+      tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },
+      register: () => () => {},
+    },
+  }
+  apply(ctx as never, config)
+  expect(index, 'auth-gate must tap the index route').toBeDefined()
+  return index!('<!DOCTYPE html><html><head></head><body></body></html>')
+}
+
+describe('auth-gate login page: 内置地址后不再提供"修改服务端地址"', () => {
+  it('渠道包内置了地址 → 页面上没有返回入口，但仍带自动连接标记', () => {
+    const html = servedLoginPage({ defaultServer: 'https://harness.mokahr.vip' })
+    expect(html).toContain('data-default-server="1"')
+    expect(html).toContain('value="https://harness.mokahr.vip"')
+    // 断言的是**标记**：脚本里始终有 `getElementById('back-btn')`（判空守卫），
+    // 所以这里查的是按钮元素与它的可见文案。
+    expect(html).not.toContain('id="back-btn"')
+    expect(html).not.toContain('修改服务端地址')
+  })
+
+  it('没有内置地址（官方/本地构建）→ 返回入口照旧', () => {
+    const html = servedLoginPage({})
+    expect(html).toContain('id="back-btn"')
+    expect(html).toContain('修改服务端地址')
+    expect(html).not.toContain('data-default-server="1"')
+  })
+
+  it('脚本对"按钮不存在"是安全的（否则后面的登录处理全都注册不上）', () => {
+    // 按钮缺失时若直接 getElementById(...).addEventListener 会在这一行抛
+    // TypeError，后续语句（含 #f2 登录表单提交）全部不注册 —— 症状是
+    // "点登录只是页面刷新"，与 2026-09-10 那次 ASI 事故同类。
+    const script = loginScript()
+    const guard = script.match(/var backBtn = document\.getElementById\('back-btn'\)\n\s*if \(backBtn\) backBtn\.addEventListener/)
+    expect(guard, 'back-btn 的监听必须先判空').not.toBeNull()
+    expect(script).not.toMatch(/^\s*document\.getElementById\('back-btn'\)\.addEventListener/m)
   })
 })
