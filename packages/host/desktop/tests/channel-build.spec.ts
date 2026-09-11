@@ -13,6 +13,7 @@ import {
   resolveChannelBuildContext,
   stageChannelProfile,
 } from '../scripts/channel-build.ts'
+import { PRODUCT_DSH_HOME_DIR } from '../src/desktop-home.ts'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -64,6 +65,7 @@ function acmeChannel(): Record<string, unknown> {
       synopsis: 'Acme 企业内部助手',
       deep_link_scheme: 'acmeai',
       deep_link_name: 'Acme AI Link',
+      home_dir: '.acme-harness',
     },
   }
 }
@@ -95,6 +97,8 @@ describe('official channel is a no-op', () => {
     expect(context.official).toBe(true)
     expect(context.channelId).toBe('official')
     expect(context.brandDir).toBe(join(repoRoot, 'brands', 'official'))
+    // 官方数据目录逐字节不变（存量用户数据不搬家）
+    expect(context.homeDir).toBe(PRODUCT_DSH_HOME_DIR)
     // 空数组 = 产物与渠道化改造前逐字节一致。
     expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-off-')))).toEqual([])
   })
@@ -109,6 +113,23 @@ describe('official channel is a no-op', () => {
 })
 
 describe('channel build context', () => {
+  it('derives a channel-only data directory when the package omits one', () => {
+    // 渠道包没写 desktop.home_dir（CI 对品牌渠道硬性要求，这里是本地/漏配路径）：
+    // 由 slug 小写派生；没有 slug（如 beta）则退到 `.picoaide-harness-<渠道 id>`。
+    // 两种都**不回落官方目录** —— 共用数据根会跨渠道共享登录态/会话。
+    const withSlug = resolveChannelBuildContext({
+      env: { [CHANNEL_ENV]: 'acme' },
+      repoRoot: channelRepo('acme', { schema: 1, channel_id: 'acme', desktop: { slug: 'Acme-Harness' } }),
+    })
+    expect(withSlug.homeDir).toBe('.acme-harness')
+
+    const withoutSlug = resolveChannelBuildContext({
+      env: { [CHANNEL_ENV]: 'acme' },
+      repoRoot: channelRepo('acme', { schema: 1, channel_id: 'acme', identity: { display_name: 'Acme AI' } }),
+    })
+    expect(withoutSlug.homeDir).toBe(`${PRODUCT_DSH_HOME_DIR}-acme`)
+  })
+
   it('turns a channel package into electron-builder overrides', () => {
     const root = channelRepo('acme', acmeChannel())
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root })
@@ -116,6 +137,8 @@ describe('channel build context', () => {
     expect(context.official).toBe(false)
     expect(context.productName).toBe('Acme AI 助手')
     expect(context.appId).toBe('com.acme.ai')
+    // 数据目录随渠道（账户 token/settings/会话都在里面，绝不与官方共用）
+    expect(context.homeDir).toBe('.acme-harness')
     expect(context.brandDir).toBe(join(root, 'channels', 'acme'))
     expect(channelArtifactName(context, 'nsis', { version: '2.7.0', arch: 'x64', ext: 'exe' }))
       .toBe('Acme-AI-2.7.0-x64-Setup.exe')
@@ -212,6 +235,16 @@ describe('channel build validation (fail loud)', () => {
     const root = channelRepo('acme', { schema: 1, channel_id: 'acme', desktop: { app_id: 'com acme ai' } })
     expect(() => resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root }))
       .toThrow(/app_id/u)
+  })
+
+  it('rejects a malformed data directory name', () => {
+    // 数据目录名会被拼进 `~` 下的路径:畸形值(分隔符/绝对路径/大写)必须构建期拦,
+    // 而不是等到装到客户机器上才发现数据落到了别处。
+    for (const homeDir of ['../escape', '/abs', '.UPPER', '.']) {
+      const root = channelRepo('acme', { schema: 1, channel_id: 'acme', desktop: { home_dir: homeDir } })
+      expect(() => resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root }))
+        .toThrow(/home_dir/u)
+    }
   })
 
   it('rejects a channel package that is not valid JSON', () => {
