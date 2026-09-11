@@ -45,7 +45,23 @@ CREATE TABLE IF NOT EXISTS balance_grant_items (
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_activated_at TIMESTAMPTZ;
 
--- 回填:给"尚无流水"的用户建立期初余额,并补记当月已发生的发放。
+-- 回填 1:当月已有发放批次 → 为**该批次执行时就已存在**的启用员工补逐人锚,
+-- 避免升级后调度器把当月额度再发一次(真实加钱事故)。
+-- 用 users.created_at <= balance_grants.created_at 界定"当时在场":批次之后入职
+-- 的人不补锚 → 会被下一轮正常补发(这正是逐人锚要解决的新员工可用性);
+-- 批次覆盖到的人补锚 → 不会被重复发放。
+-- 必须在账本回填之前:下面的账本要按这些锚把"当月发放"记成独立的 grant 流水。
+-- 历史月份不回填(调度器只补当月)。
+INSERT INTO balance_grant_items (user_id, month, amount, mode, actor)
+SELECT u.id, g.month, g.amount, g.mode, 'migration'
+FROM users u
+CROSS JOIN balance_grants g
+WHERE u.status = 1 AND u.role = 'user'
+  AND u.created_at <= g.created_at
+  AND g.month = to_char(now() AT TIME ZONE 'UTC' + interval '8 hours', 'YYYYMM')
+ON CONFLICT (user_id, month) DO NOTHING;
+
+-- 回填 2:给"尚无流水"的用户建立期初余额,并补记当月已发生的发放。
 -- 单条语句内两个分支各自看到同一快照(NOT EXISTS 不会看到本语句新插入的行),
 -- 因此对"当月已发放 A、当前余额 B"的用户会写入两条流水:
 --   adjust(B-A, balance_after=B-A) + grant(A, balance_after=B)  → 合计 B = I1 ✓
@@ -69,16 +85,6 @@ JOIN balance_grant_items i
  AND i.month = to_char(now() AT TIME ZONE 'UTC' + interval '8 hours', 'YYYYMM')
 WHERE NOT EXISTS (SELECT 1 FROM balance_ledger l WHERE l.user_id = u.id)
   AND i.amount <> 0;
-
--- 回填 2:当月已有发放批次 → 为该批次覆盖范围内、且本月尚无逐人锚的用户补锚,
--- 避免升级后调度器把当月额度再发一次。(历史月份不回填:调度器只补当月。)
-INSERT INTO balance_grant_items (user_id, month, amount, mode, actor)
-SELECT u.id, g.month, g.amount, g.mode, 'migration'
-FROM users u
-CROSS JOIN balance_grants g
-WHERE u.status = 1 AND u.role = 'user'
-  AND g.month = to_char(now() AT TIME ZONE 'UTC' + interval '8 hours', 'YYYYMM')
-ON CONFLICT (user_id, month) DO NOTHING;
 
 -- 开通态:有流水(即入过账)的用户即为已开通。
 UPDATE users SET balance_activated_at = now()
