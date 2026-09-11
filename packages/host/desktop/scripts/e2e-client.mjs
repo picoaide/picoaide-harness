@@ -328,10 +328,16 @@ async function main() {
   await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 
-  // 8. Chat input availability. Upstream 0.1.2 rebuilt the composer around a
-  // plain input element (textarea-refactor), so accept input/role=textbox too.
-  const chatOk = await evalSafe(cdp, `!!document.querySelector('textarea, [contenteditable=true], input[placeholder], [role="textbox"]')`)
-  reportStep('聊天输入区可用', !!chatOk, `hasTextarea=${Boolean(chatOk)}`)
+  // 8. Chat input availability, SCOPED to the conversation column. Upstream
+  // 0.1.2 rebuilt the composer around a plain input element (textarea-refactor),
+  // so accept input/role=textbox too — but a document-wide querySelector matched
+  // the sidebar search box instead, which made this step (and step 12) green
+  // while the composer stayed empty (2026-09-08 audit; visible in 11-input.png).
+  const composerSelector = '.dshDesktopConversationSurface textarea, '
+    + '.dshDesktopConversationSurface [contenteditable="true"], '
+    + '.dshDesktopConversationSurface [role="textbox"]'
+  const chatOk = await evalSafe(cdp, `!!document.querySelector(${JSON.stringify(composerSelector)})`)
+  reportStep('聊天输入区可用（限会话列）', !!chatOk, `hasComposer=${Boolean(chatOk)}`)
   await screenshot(cdp, '08-chat')
 
   // 9. Advanced mode marker.
@@ -393,24 +399,24 @@ async function main() {
   await screenshot(cdp, '10-account')
   await clickLabel(cdp, '关闭', 800).catch(() => {})
 
-  // 12. Textarea input + send affordance.
+  // 12. Composer input, scoped to the conversation column and verified by
+  // reading the value back: "an element was found" is exactly the false green
+  // this step used to report.
+  const PROBE_TEXT = 'e2e 消息'
   const typed = await evalSafe(cdp, `(() => {
-    const ta = document.querySelector('textarea, [contenteditable=true], input[placeholder], [role="textbox"]')
-    if (!ta) return false
-    if (ta.tagName === 'TEXTAREA') {
-      const s = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-      s.call(ta, 'e2e 消息')
+    const ta = document.querySelector(${JSON.stringify(composerSelector)})
+    if (!ta) return { ok: false, reason: 'composer not found in the conversation column' }
+    if (ta.tagName === 'TEXTAREA' || ta.tagName === 'INPUT') {
+      const proto = ta.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(ta, ${JSON.stringify(PROBE_TEXT)})
       ta.dispatchEvent(new Event('input', { bubbles: true }))
-    } else if (ta.tagName === 'INPUT') {
-      const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
-      s.call(ta, 'e2e 消息')
-      ta.dispatchEvent(new Event('input', { bubbles: true }))
-    } else {
-      ta.textContent = 'e2e 消息'
+      return { ok: ta.value === ${JSON.stringify(PROBE_TEXT)}, reason: 'value=' + JSON.stringify(ta.value) }
     }
-    return true
+    ta.textContent = ${JSON.stringify(PROBE_TEXT)}
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    return { ok: (ta.textContent ?? '').includes(${JSON.stringify(PROBE_TEXT)}), reason: 'text=' + JSON.stringify(ta.textContent) }
   })()`)
-  reportStep('会话输入区可输入消息', !!typed, `typed=${typed}`)
+  reportStep('会话输入区可输入消息（限会话列，回读校验）', !!typed?.ok, `${typed?.reason ?? 'no result'}`)
   await screenshot(cdp, '11-input')
 
   cdp.ws.close()
