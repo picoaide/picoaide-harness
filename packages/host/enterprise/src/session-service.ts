@@ -73,7 +73,7 @@ declare module '@deepseek-ai/cordis' {
  * Session service configuration.
  *
  * `tokenFile` defaults to `$DSH_HOME/session.json`. `deepLinkScheme` 由桌面壳在
- * 组装期注入（渠道构建是客户自己的 scheme，如 `mokahr-harness`）；缺省官方值。
+ * 组装期注入（渠道构建是客户自己的 scheme，如 `acmeai`）；缺省官方值。
  */
 export interface Config {
   tokenFile?: string

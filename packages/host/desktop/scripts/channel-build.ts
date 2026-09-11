@@ -431,7 +431,7 @@ export function stageChannelProfile(
   // electron-builder 从 buildResources 取，不进 asar）。渠道自己的 logo 若不内联，
   // 客户端在"服务端不可达 / 服务端还是旧版（没有 /api/client/v2/channel）"时就只能
   // 回落到**编译期内置的官方花括号 mark** —— 白标客户的登录页上出现厂商图形。
-  // 实测：moka 渠道的登录页在客户线上（旧版服务端）就是这个问题。
+  // 实测：acme 渠道的登录页在客户线上（旧版服务端）就是这个问题。
   // 内联成 data: URI 后，随包品牌自带 logo，登录页/侧边栏在任何服务端版本下都显
   // 客户自己的标识；服务端可达时仍以服务端下发为准（mergeChannel 逐字段覆盖）。
   writeFileSync(target, JSON.stringify(inlineChannelAssets(value, context.channelDir), null, 2) + '\n')

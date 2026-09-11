@@ -381,7 +381,8 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
     check(bad.stderr.includes('desktop.home_dir'), `desktop.home_dir(${why})的失败信息应点名该字段`)
   }
 
-  // beta 复用官方品牌,但它是独立分发面 —— 数据目录也必须与官方不同
+  // beta 是公共渠道:显式声明官方目录是**刻意**的(2026-09-11 定案,beta 环境要经常
+  // 跑测试,共用现成的登录态与设置)—— 必须通过,而不是像品牌渠道那样被拦。
   const betaShared = tempDir('ci-channels-beta-home-')
   mkdirSync(join(betaShared, 'channels', 'beta'), { recursive: true })
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), JSON.stringify({
@@ -391,7 +392,7 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
     desktop: { home_dir: '.picoaide-harness' },
   }))
   const betaRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
-  check(betaRun.status !== 0, 'beta 的数据目录等于官方目录时必须失败')
+  check(betaRun.status === 0, 'beta 显式共用官方数据目录必须通过（公共渠道）')
 }
 
 // ---- 4/5. 逐渠道打包:日志抑制、失败中性、产物归集 ----

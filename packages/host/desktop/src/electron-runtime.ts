@@ -152,7 +152,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     /**
      * 本安装的深链 scheme（渠道包决定，由 main.ts 传入）。
      *
-     * **必须显式传**：渠道客户端的 scheme 是客户自己的（如 `mokahr-harness`），
+     * **必须显式传**：渠道客户端的 scheme 是客户自己的（如 `acmeai`），
      * 缺省官方值会把渠道深链在 `receiveDeepLink` 的严格闸门直接丢掉 —— 浏览器
      * SSO 回调永远进不来，而日志只有一行 malformed（2026-09-11 真机复现）。
      */

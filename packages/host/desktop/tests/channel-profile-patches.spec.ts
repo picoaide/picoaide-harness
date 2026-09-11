@@ -64,7 +64,7 @@ describe('channel package → row config', () => {
   })
 
   it('injects the deep-link scheme into the session row (channel SSO callback)', () => {
-    // 渠道客户端的浏览器 SSO 回调用的是客户自己的 scheme（如 mokahr-harness）。
+    // 渠道客户端的浏览器 SSO 回调用的是客户自己的 scheme（如 acmeai）。
     // 会话服务**不能**自己读随包 channel.json（enterprise 的 lib 是 tsdown 内联
     // 产物，那条相对路径在包里不存在），scheme 只能由桌面壳在组装期注入。
     expect(configOf(channelProfilePatches(acmeProfile(), ALL_ROWS), 'picoaide-session'))

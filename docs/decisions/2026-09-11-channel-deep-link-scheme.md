@@ -8,7 +8,7 @@
 
 ## 问题
 
-渠道客户端（如 moka，scheme `mokahr-harness`）的**浏览器 SSO/OIDC 回调登录完全
+渠道客户端（如 acme，scheme `acmeai`）的**浏览器 SSO/OIDC 回调登录完全
 不可用**：回调链接在桌面壳的严格闸门处被当成畸形链接丢掉，日志只有一行 warning。
 
 真机复现（假渠道 `probe`，scheme `probeharness`，Xvfb + 独立 HOME，第二实例转发

@@ -66,14 +66,20 @@ describe('channelDshHomeDir (渠道数据隔离的唯一派生点)', () => {
     expect(channelDshHomeDir('beta')).toBe(`${PRODUCT_DSH_HOME_DIR}-beta`)
   })
 
-  it('never returns the official directory for a non-official channel', () => {
+  it('honors an explicitly declared official directory (public channels share it)', () => {
+    // beta 刻意与官方共用数据根(2026-09-11 定案):显式值一律照办,包括官方目录本身。
+    expect(channelDshHomeDir('beta', { homeDir: PRODUCT_DSH_HOME_DIR })).toBe(PRODUCT_DSH_HOME_DIR)
+  })
+
+  it('never *derives* the official directory for a non-official channel', () => {
+    // 派生/回落路径仍不许撞上官方目录(那是"漏配"而不是"刻意共用"):
+    // 经销商渠道由 CI 强制显式声明,运行期只在没有显式值时才走到这里。
     for (const options of [
       {},
       { homeDir: 'plain' },
       { homeDir: '../escape' },
       { homeDir: '/abs' },
       { homeDir: '.UPPER' },
-      { homeDir: PRODUCT_DSH_HOME_DIR },
       { slug: 'PicoAide-Harness' },
       { slug: '../../etc' },
       { slug: 42 },

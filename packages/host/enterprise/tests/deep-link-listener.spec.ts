@@ -27,7 +27,7 @@ function stubCtx() {
 
 const A: Session = { serverURL: 'https://a.example', username: 'alice', token: 'tok-a' }
 
-// 深链 scheme 由**桌面壳按渠道注入**（渠道构建是客户自己的，如 mokahr-harness）：
+// 深链 scheme 由**桌面壳按渠道注入**（渠道构建是客户自己的，如 acmeai）：
 // 监听器不再自己读随包 channel.json —— enterprise 的 lib 是 tsdown 内联产物，
 // `../build/channel.json` 在那里指向不存在的路径，读到的永远是 undefined。
 const SCHEME = 'acmebrand'
@@ -77,7 +77,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
   })
 
   it('接受注入的渠道 scheme，而不是永远按官方 scheme 校验', async () => {
-    // 2026-09-11 真机复现的缺陷：渠道客户端（mokahr-harness）的浏览器 SSO 回调
+    // 2026-09-11 真机复现的缺陷：渠道客户端（acmeai）的浏览器 SSO 回调
     // 被当成畸形链接丢掉。scheme 必须来自桌面壳注入的 config。
     stubFetchOk()
     const { ctx, warns, fire } = stubCtx()

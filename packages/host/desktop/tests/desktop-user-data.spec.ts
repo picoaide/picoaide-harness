@@ -13,7 +13,7 @@ describe('desktopUserDataDirectoryName (随渠道的第二份数据根)', () => 
 
   it('keeps the brand channel product name as-is', () => {
     // 品牌渠道的产品名就是它自己的品牌：目录名干净且能自查。
-    expect(desktopUserDataDirectoryName('Moka Harness', 'moka')).toBe('Moka Harness')
+    expect(desktopUserDataDirectoryName('Acme Harness', 'acme')).toBe('Acme Harness')
   })
 
   it('disambiguates a channel that reuses the official product name', () => {
@@ -24,7 +24,7 @@ describe('desktopUserDataDirectoryName (随渠道的第二份数据根)', () => 
   })
 
   it('never returns an empty or path-like name for a channel', () => {
-    for (const id of ['moka', 'beta', 'acme-2']) {
+    for (const id of ['acme', 'beta', 'acme-2']) {
       const name = desktopUserDataDirectoryName(OFFICIAL_PRODUCT_NAME, id)
       expect(name.length).toBeGreaterThan(0)
       expect(name).not.toContain('/')
@@ -45,8 +45,8 @@ describe('defaultDesktopUserDataDirectory (无 Electron 的等价实现)', () =>
 
   it('uses the channel-specific name when one is given', () => {
     // 渠道构建的 userData 必须与官方不同（否则单实例锁互相顶掉）。
-    expect(defaultDesktopUserDataDirectory('linux', { XDG_CONFIG_HOME: '/home/example/.config' }, '/home/example', 'Moka Harness'))
-      .toBe('/home/example/.config/Moka Harness')
+    expect(defaultDesktopUserDataDirectory('linux', { XDG_CONFIG_HOME: '/home/example/.config' }, '/home/example', 'Acme Harness'))
+      .toBe('/home/example/.config/Acme Harness')
   })
 
   it('fails loudly when Windows has no APPDATA', () => {
