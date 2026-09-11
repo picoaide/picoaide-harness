@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/picoaide/picoaide/internal/util"
 	"io"
 	"net/http"
 	"sort"
@@ -54,7 +55,8 @@ func HTTPFetch(ctx context.Context, url, apiKey string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	client := &http.Client{Timeout: 120 * time.Second}
+	// F10: 同步路径同样安装出站护栏(保存时校验挡不住 DNS rebinding)。
+	client := &http.Client{Timeout: 120 * time.Second, Transport: util.SafeOutboundTransport()}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

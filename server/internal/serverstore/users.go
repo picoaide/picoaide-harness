@@ -549,7 +549,7 @@ func DeleteUser(db *sql.DB, id int64) error {
 		}
 	}
 	// 同名用户重建不得继承旧授权(权限体系:用户级授权随用户删除级联)
-	if _, err := tx.Exec("DELETE FROM app_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
+	if _, err := tx.Exec("DELETE FROM app_grants WHERE grantee_type = 'user' AND lower(grantee) = lower(?)", username); err != nil {
 		return err
 	}
 	// 审计修复 2026-P (H1): 0036 共享资源授权表同样随用户删除级联——

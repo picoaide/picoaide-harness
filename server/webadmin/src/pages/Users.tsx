@@ -476,12 +476,18 @@ export default function Users() {
     setBalSaving(true)
     setBalSettingErr('')
     try {
-      await request(`${ADMIN_API}/balance`, {
+      const saved = await request(`${ADMIN_API}/balance`, {
         method: 'PUT',
         body: JSON.stringify({ enabled: balDraftEnabled, monthly_amount: n, monthly_mode: balDraftMode }),
       })
-      setBalNotice('月度余额发放设置已保存')
+      // 保存后服务端会在"闸门开启 + 本月未发放"时自动补发一次(幂等),
+      // 避免从保存到下一个调度 tick 之间全员 0 余额被拦。
+      setBalNotice(saved?.auto_grant
+        ? `设置已保存,并已自动发放本月(每人 ¥${Number(saved.grant?.amount ?? 0).toFixed(2)},共 ${saved.grant?.affected ?? 0} 人)`
+        : '月度余额发放设置已保存')
       void loadBalance()
+      // 自动发放会改变用户余额列,必须同步刷新列表(否则管理员以为没生效)。
+      if (saved?.auto_grant) load(page, q)
     } catch (err: any) {
       setBalSettingErr(err.message)
     } finally {

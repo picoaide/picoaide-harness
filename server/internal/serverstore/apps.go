@@ -464,7 +464,7 @@ func ListAppGrants(db *sql.DB, kind, appID string) ([]Grant, error) {
 // 严格默认:未授权即不可见(与旧三域一致)。
 func AccessibleAppIDs(db *sql.DB, kind, username string, groups []string) ([]string, error) {
 	q := `SELECT DISTINCT app_id FROM app_grants WHERE kind = ? AND (
-			(grantee_type = 'user' AND grantee = ?)`
+			(grantee_type = 'user' AND lower(grantee) = lower(?))`
 	args := []any{kind, username}
 	if len(groups) > 0 {
 		q += ` OR (grantee_type = 'group' AND lower(grantee) IN (` + qmarks(len(groups)) + `))`

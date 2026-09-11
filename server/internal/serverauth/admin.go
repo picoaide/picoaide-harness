@@ -1961,7 +1961,25 @@ func (a *AdminAPI) putBalance(c *gin.Context) {
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "balance_settings",
 		fmt.Sprintf("enabled=%v amount=%.2f mode=%s", req.Enabled, req.MonthlyAmount, req.MonthlyMode))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "settings": s2})
+	// 复核修正(2026-09-11):保存后若闸门开启、额度 > 0 且**本月尚未发放**,
+	// 立即补发一次 —— 否则从保存到调度器下一个 tick(最长 1 小时)之间,
+	// 全员余额为 0 会被刚开启的闸门直接拦截。GrantMonthlyBalance 以
+	// balance_grants.month 幂等,本月已发放时自动 no-op,不会重复加钱。
+	autoGranted := false
+	var grant *serverstore.BalanceGrant
+	if req.Enabled && req.MonthlyAmount > 0 {
+		actor := currentAdminUsername(c)
+		g, ok, gerr := serverstore.GrantMonthlyBalance(a.DB, req.MonthlyMode, req.MonthlyAmount, actor, time.Now())
+		if gerr != nil {
+			log.Printf("balance settings saved but auto-grant failed: %v", gerr)
+		} else if ok {
+			autoGranted = true
+			grant = g
+			_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
+				fmt.Sprintf("auto month=%s mode=%s amount=%.2f affected=%d", g.Month, g.Mode, g.Amount, g.Affected))
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "settings": s2, "auto_grant": autoGranted, "grant": grant})
 }
 
 // grantBalance 手动执行一次本月发放(幂等:当月已发放则返回 already=true,

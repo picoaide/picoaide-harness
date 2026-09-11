@@ -164,6 +164,10 @@ func TestUsageDeductsBalance(t *testing.T) {
 	defer cleanup()
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "bal-model", 1, 1) // 1 元 / 100 万 token
+	// 复核修正(F8):只有闸门开启时消费才扣余额。
+	if err := SaveBalanceSettings(db, BalanceSettings{Enabled: true, MonthlyAmount: 0, MonthlyMode: BalanceModeAdd}); err != nil {
+		t.Fatal(err)
+	}
 
 	// 充值 10 元
 	if _, err := SetUserBalance(db, uid, 10); err != nil {
@@ -275,5 +279,36 @@ func TestUpdateDepartmentInvalidatesTreeForCycleCheck(t *testing.T) {
 	// B → A 必须被环检测拒绝(F3 前:缓存仍是旧树,检测不到 A 已是 B 的子)
 	if err := UpdateDepartment(db, bID, "cyc-y", aID, 0, ""); !errors.Is(err, ErrValidation) {
 		t.Fatalf("cycle reparent err = %v, want ErrValidation", err)
+	}
+}
+
+// 复核修正(F8,F10 高视角):未启用余额闸门时消费不扣余额 —— 否则默认关闭
+// 数周后首次启用闸门,全员会被历史消费扣成负余额并一次性全部拦截。
+func TestBalanceNotDeductedWhenDisabled(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "bal-off-model", 1, 1)
+
+	if _, err := SetUserBalance(db, uid, 10); err != nil {
+		t.Fatal(err)
+	}
+	// 未启用:消费不扣
+	if _, err := RecordUsage(db, uid, "bal-off-model", 1_000_000, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 10 {
+		t.Fatalf("disabled billing changed balance = %v, want 10", u.BalanceMoney)
+	}
+	// 启用后:消费扣减
+	if err := SaveBalanceSettings(db, BalanceSettings{Enabled: true, MonthlyAmount: 0, MonthlyMode: BalanceModeAdd}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordUsage(db, uid, "bal-off-model", 1_000_000, 0); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := GetUserByID(db, uid)
+	if want := 9.0; u.BalanceMoney < want-1e-6 || u.BalanceMoney > want+1e-6 {
+		t.Fatalf("enabled billing balance = %v, want %v", u.BalanceMoney, want)
 	}
 }

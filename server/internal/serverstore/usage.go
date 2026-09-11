@@ -234,8 +234,12 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now).Scan(&id); err != nil {
 		return 0, err
 	}
-	if err := deductBalance(tx, userID, cost); err != nil {
-		return 0, err
+	// 复核修正:未启用余额闸门时不扣余额(余额=纯充值池);启用后消费才
+	// 与账务联动,避免"启用瞬间全员负余额"。
+	if BalanceBillingEnabled(db) {
+		if err := deductBalance(tx, userID, cost); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -291,8 +295,11 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 		promptTokens, completionTokens, cacheTokens, cost, id); err != nil {
 		return err
 	}
-	if err := deductBalance(tx, userID, cost-oldCost); err != nil {
-		return err
+	// 复核修正:同上 —— 仅闸门开启时流式回填才扣余额差额。
+	if BalanceBillingEnabled(db) {
+		if err := deductBalance(tx, userID, cost-oldCost); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

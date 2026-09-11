@@ -1,16 +1,14 @@
 package llmgateway
 
 import (
-	"context"
 	"database/sql"
-	"errors"
-	"net"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,34 +101,7 @@ func NewHandlers(db *sql.DB) *Handlers {
 // rebinding 把 provider API key 发往 metadata 服务);私网/环回允许 ——
 // 企业内网自建 LLM 网关是本产品的主要场景。
 func newUpstreamTransport() *http.Transport {
-	return &http.Transport{
-		ResponseHeaderTimeout: 120 * time.Second,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			var lastErr error
-			for _, ipa := range ips {
-				if isBlockedUpstreamIP(ipa.IP) {
-					lastErr = errors.New("upstream address is link-local/metadata and blocked")
-					continue
-				}
-				d := &net.Dialer{Timeout: 30 * time.Second}
-				conn, derr := d.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
-				if derr == nil {
-					return conn, nil
-				}
-				lastErr = derr
-			}
-			if lastErr == nil {
-				lastErr = errors.New("upstream host has no usable address")
-			}
-			return nil, lastErr
-		},
-	}
+	t := util.SafeOutboundTransport()
+	t.ResponseHeaderTimeout = 120 * time.Second
+	return t
 }

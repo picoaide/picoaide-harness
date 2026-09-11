@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { installCertificateVerification, sha256Fingerprint } from '../src/server-connector/tls.ts'
+import { applyPinnedFingerprintsFromEnv, installCertificateVerification, sha256Fingerprint } from '../src/server-connector/tls.ts'
 
 /** Minimal Electron-session-like shim with a controllable verify proc. */
 function mockSession() {
@@ -83,5 +83,48 @@ describe('installCertificateVerification (TOFU hardening, P1-3)', () => {
     let result: number | null = null
     session.invoke({ hostname: '', port: 443, certificate: fakeCert() }, (r) => { result = r })
     expect(result).toBe(-2)
+  })
+})
+
+
+describe('TLS 接线复核 (F13)', () => {
+  it('系统 CA 验证通过(verificationResult=0)直接放行,不查指纹库', async () => {
+    const store = tmpStore()
+    const session = mockSession()
+    const unknown: string[] = []
+    await installCertificateVerification(store, {
+      getSession: () => session,
+      onUnknownFingerprint: (host) => { unknown.push(host) },
+    })
+    let result: number | null = null
+    session.invoke(
+      { hostname: 'official.example.com', port: 443, certificate: fakeCert(), verificationResult: 0 },
+      (r) => { result = r },
+    )
+    expect(result).toBe(0)
+    expect(unknown).toHaveLength(0)
+  })
+
+  it('PICOAI_TLS_PINS 预置指纹后,自签名证书按 pin 放行', async () => {
+    const store = tmpStore()
+    const cert = fakeCert()
+    const fp = sha256Fingerprint(Buffer.from(cert.data, 'base64'))
+    const applied = applyPinnedFingerprintsFromEnv(store, {
+      PICOAI_TLS_PINS: `self.example.com:8443=${fp}`,
+    } as NodeJS.ProcessEnv)
+    expect(applied).toBe(1)
+    const session = mockSession()
+    await installCertificateVerification(store, { getSession: () => session })
+    let result: number | null = null
+    session.invoke({ hostname: 'self.example.com', port: 8443, certificate: cert }, (r) => { result = r })
+    expect(result).toBe(0)
+  })
+
+  it('畸形/过短的 PICOAI_TLS_PINS 被忽略', () => {
+    const store = tmpStore()
+    const applied = applyPinnedFingerprintsFromEnv(store, {
+      PICOAI_TLS_PINS: 'host-only, bad=xyz, =nofp',
+    } as NodeJS.ProcessEnv)
+    expect(applied).toBe(0)
   })
 })
