@@ -1,19 +1,44 @@
 ---
 title: 快速开始
-description: 10 分钟上手 PicoAide Harness：下载、首次启动、登录与四个核心入口。
+description: 10 分钟上手 PicoAide Harness：拿到客户端、首次启动、登录与四个核心入口。
 ---
 
-## 安装客户端
+## 先选择你的路径
 
-从 [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases/latest) 下载对应平台安装包：
-
-| 平台 | 安装方式 |
+| 你是 | 怎么拿到产品 |
 |---|---|
-| Windows x64 | 运行 NSIS 安装程序（`PicoAide-Harness-<v>-x64-Setup.exe`） |
-| macOS | 打开 DMG（arm64 / Apple 芯片），把 PicoAide Harness 拖入 Applications |
-| Linux x64 | 授予执行权限后运行 AppImage（`-x86_64.AppImage`）；另提供 deb（`-amd64.deb`，`sudo dpkg -i` 安装） |
+| **企业员工** | 向管理员要企业访问地址，打开 `https://<企业域名>/` 下载对应平台安装包（或直接向同事拷安装包） |
+| **企业管理员** | 先按[私有化部署](/deployment/)部署服务端；客户端安装包随服务端镜像发布，部署完成后由这台服务器对员工提供 |
+| **想先试用** | 官方渠道的客户端安装包在**服务端镜像**里：取官方镜像包后一条命令即可导出三平台安装包（见下） |
 
-> **安装前建议校验**：每个 Release 附带 `SHA256SUMS.txt`。Windows/Linux 安装包由 CI 自动发布、**暂未签名**，SmartScreen 可能提示「未知发布者」——请先在 Releases 下载并核对 SHA-256 摘要后再运行。
+## 客户端安装包
+
+| 平台 | 安装包 | 说明 |
+|---|---|---|
+| Windows x64 | `.exe`（NSIS 安装程序） | 未签名，SmartScreen 可能提示「未知发布者」 |
+| macOS（Apple 芯片 / arm64） | `.dmg` | 正式发布版已签名 + 公证 |
+| Linux x64 | `.AppImage` | 授予执行权限后运行 |
+
+客户端安装包**随服务端镜像发布**（而不是单独挂在某个下载站），所以只有两个来源：
+
+1. **企业服务器**（推荐）：部署完成后打开 `https://<企业域名>/`，门户页直接列出三平台下载入口；
+2. **官方镜像包**（试用 / 单机）：从更新服务器或
+   [GitHub Release](https://github.com/picoaide/picoaide-harness/releases) 取官方镜像包，解出安装包：
+
+```bash
+VER=2.7.0        # 以 latest.json 里的 server.version 为准
+# 正式渠道是 official，预发布渠道是 beta，按需替换
+curl -fL -O "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+curl -fL -O "https://release.picoaide.com/official/releases/${VER}/SHA256SUMS"
+sha256sum -c SHA256SUMS
+unzip -p picoaide-server-${VER}-amd64.zip image.tar | docker load
+mkdir -p ./picoaide-stack
+docker run --rm -v "$PWD/picoaide-stack:/out" -e PICOAI_UNPACK_STACK=/out \
+  picoaide-harness-server:${VER}
+ls -1 ./picoaide-stack/client    # 三平台安装包 + CLIENT-RELEASE.json
+```
+
+完整说明见[容器化部署](/deployment/compose/)与[离线部署](/deployment/offline/)。
 
 ## 首次启动
 
@@ -34,7 +59,9 @@ dsh-desktop:
 
 ## 登录
 
-- **企业版（服务端模式）**：填写服务端地址、账号密码登录（local / LDAP / OIDC，登录方式由服务端配置）；账号由管理员在管理后台创建，配额与额度由服务端决定；
+- **企业版（服务端模式）**：填写服务端地址（企业管理员提供，如 `https://ai.example.com`）与账号密码登录（local / LDAP / OIDC，登录方式由服务端配置）；账号由管理员在管理后台创建，配额与余额由服务端决定；
+- **客户端升级源就是这台服务端**：登录后客户端会定期向它检查新版本（见[客户端分发与升级](/deployment/client-delivery/)）；未连接服务端时不做任何外发更新检查；
+- `internal`（内网自签）模式下首次连接需要信任本部署的 Caddy 本地 CA；
 - 退出登录即解除全部会话（连接器、浏览器、定时任务令牌）。
 
 ## 开始使用：四个核心入口
@@ -46,6 +73,6 @@ dsh-desktop:
 
 ## 下一步
 
-- 想理解产品设计理念，读[产品哲学](./philosophy)；
-- 想深入每个界面，读[桌面客户端](./desktop)；
-- 企业管理员请读[管理后台](./admin)与[私有化部署](./deployment)。
+- 想理解产品设计理念，读[产品哲学](/philosophy/)；
+- 想深入每个界面，读[桌面客户端](/desktop/)；
+- 企业管理员请读[管理后台](/admin/)与[私有化部署](/deployment/)。

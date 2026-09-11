@@ -1,56 +1,84 @@
 ---
-title: 企业私有化部署指南
-description: 了解 PicoAide Harness 的企业内网部署形态：容器化服务端(PostgreSQL)、LDAP/OIDC 接入与运维。
+title: 部署总览
+description: PicoAide Harness 企业私有化部署总览：交付物、分发面、容器架构、证书模式与数据安全铁律。
 ---
 
-本文介绍 PicoAide Harness 在企业内网中的部署形态，从环境准备到接入成员。
+PicoAide Harness 面向**企业内网**交付：一台服务器跑服务端，员工装客户端，数据与密钥都在企业自己的机器上。
+本页说明部署形态与交付物；具体操作见本节其余页面。
 
-## 部署形态
+> 仓库内的 [`docs/deploy/AI-DEPLOY.md`](https://github.com/picoaide/picoaide-harness/blob/master/docs/deploy/AI-DEPLOY.md)
+> 是**唯一权威的部署说明**（首次部署 / 升级 / 回滚 / 排障 + 四条数据安全铁律），可以直接交给 AI 代理执行。
+> 本 Wiki 是面向人的同一套流程，两者出现偏差时以仓库文档与代码为准。
 
-| 形态 | 适用 | 说明 |
-|---|---|---|
-| **单机桌面部署** | 个人 / 小团队 | 员工安装桌面客户端，客户端自动启动本地 Harness 服务并创建默认 `desktop` profile，数据留在本机 |
-| **企业内网部署** | 组织全员 | 在内网服务器运行 Go 服务端 + 管理后台（webadmin），员工用客户端或浏览器访问；账号、配额、计费、审批集中管控 |
+## 三种部署形态
+
+| 形态 | 适用 | 说明 | 入口 |
+|---|---|---|---|
+| **单机桌面** | 个人 / 小团队 | 只装桌面客户端。客户端自带本地 Harness 运行时并在本机启动服务，会话与凭据留在本机，无需服务器 | [桌面客户端](/desktop/) |
+| **企业内网容器化**（推荐） | 组织全员 | 内网服务器跑 `caddy + server + postgres` 三个容器；账号、网关、配额、计费、审批集中在服务端 | [容器化部署](/deployment/compose/) |
+| **并入已有反代 / 单二进制** | 已有统一入口的机房 | 80/443 已被共享 Caddy/nginx 占用时只起 `server + postgres` 并入现有 vhost；也支持单二进制 + 外部 PostgreSQL（含从 systemd 迁移） | [运维与排障](/deployment/operations/) |
+
+## 交付物：一个镜像 + 一份说明
+
+服务端**只有一种发布物**：一个容器镜像。镜像里已经装好部署需要的一切，不需要克隆仓库、不需要外网拉配置、
+也没有任何安装脚本。
+
+```
+发布物 = 一个容器镜像
+  ├─ 服务端二进制（含内嵌 webadmin 管理后台）
+  ├─ 三平台客户端安装包 + CLIENT-RELEASE.json   ← 员工从这里下载
+  ├─ docker-compose.yml + Caddyfile.{internal,autocert,manual} + .env.example
+  ├─ VERSION / CHANNEL                          ← 本部署的版本与渠道
+  └─ channel/                                   ← 品牌与文案（渠道内容）
+```
+
+一条命令即可把部署文件导出到部署目录（镜像自带的 `PICOAI_UNPACK_STACK` 入口）：
+
+```sh
+mkdir -p /opt/picoaide
+docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
+  picoaide-harness-server:<版本>
+ls -1 /opt/picoaide   # docker-compose.yml / Caddyfile.* / .env.example / VERSION / client/
+```
+
+导出是**替换语义**：`docker-compose.yml`、`Caddyfile.*`、`.env.example`、`client/`、`VERSION` 会先清旧再写；
+`.env`、`picoaide-data/`、`pg-data/`、`caddy-data/`、`certs/` 一律不动。
+
+## 从哪里取镜像
+
+**不经任何镜像仓库**（GHCR 已下线）。所有渠道的镜像都从更新服务器取，每个渠道一个独立目录：
+
+```
+https://release.picoaide.com/<渠道>/latest.json                         ← 版本清单（服务端升级检查也读它）
+https://release.picoaide.com/<渠道>/releases/<版本>/picoaide-server-<版本>-amd64.zip
+https://release.picoaide.com/<渠道>/releases/<版本>/SHA256SUMS          ← 下载后务必校验
+```
+
+`latest.json` 的关键字段：
+
+| 字段 | 含义 |
+|---|---|
+| `channel_id` | 该清单属于哪个渠道（服务端会强制比对，见[渠道与白标](/deployment/channels/)） |
+| `server.version` | 目标版本（不带 `v`，如 `2.7.0`） |
+| `server.image_tag` | 镜像 tag（带 `v`，如 `v2.7.0`）；导入后 `2.7.0` 与 `v2.7.0` 两个 tag 都在 |
+| `server.image_asset` | 镜像压缩包下载地址 |
+| `client.version` | 随该版本镜像发布的客户端版本（与服务端同源） |
+
+- 更新服务器**只保留最近 3 个版本**；更早的版本从 GitHub Release 取（公开渠道的完整历史存档）；
+- GitHub Release **只发公开渠道**（官方 / 预发布）的镜像包与 `SHA256SUMS`；品牌渠道是客户定制交付，不经公开 Release；
+- 无外网环境见[离线部署](/deployment/offline/)。
 
 ## 环境要求
 
-- **桌面客户端**：Windows 10+ x64 / macOS 12+（Apple 芯片）/ Linux x64（AppImage + deb）；无需 Node.js、pnpm 或 DSH；
-- **服务端**：Linux x64 服务器；单二进制即可运行（`picoaide-server`，gin），也支持 Docker Compose 容器化（Caddy 反代、私有网段固定 IP、非 root uid 10001、数据 bind mount）；
-- **数据库**：**内置 PostgreSQL 18**（Compose 内 postgres:18-alpine 容器，`DB_MODE=pg` 已删除，只有这一个形态）；
+| 项目 | 要求 |
+|---|---|
+| 服务器 | Linux x64；Docker ≥ 24 与 Compose v2（`docker compose`，不是 `docker-compose`）、`openssl`、`curl`、`unzip` |
+| 资源 | 建议 ≥ 4 核 / 8GB 内存 / 50GB 可用磁盘（`pg-data/` 会持续增长） |
+| 网络 | 服务器需要能访问 `https://release.picoaide.com`（检查更新 + 下载镜像）；**员工电脑不需要访问任何外网** |
+| 端口 | Caddy 占用宿主机 80/443（可改 `CADDY_HTTP_PORT` / `CADDY_HTTPS_PORT`） |
+| 客户端 | Windows 10+ x64 / macOS 12+（Apple 芯片）/ Linux x64；无需 Node.js、pnpm 或 DSH |
 
-
-## 部署方式
-
-### 部署说明（AI 执行版）
-
-服务端交付物是**一个容器镜像**，镜像里自带部署所需的一切（compose、Caddyfile、客户端安装包），
-部署与升级由一份**说明文档**驱动，不再有安装脚本：
-
-```sh
-# 1) 取镜像（可出网）或从更新服务器下载镜像包后 docker load
-docker pull ghcr.io/picoaide/picoaide-harness-server:<版本>
-# 2) 把部署文件导到部署目录（镜像自带，无需仓库、无需外网拉配置）
-docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
-  ghcr.io/picoaide/picoaide-harness-server:<版本>
-# 3) 按说明写 .env → docker compose up -d → 校验健康检查
-```
-
-- 部署说明：[`docs/deploy/AI-DEPLOY.md`](https://github.com/picoaide/picoaide-harness/blob/master/docs/deploy/AI-DEPLOY.md)
-  —— 含首次部署、升级、回滚、排障与四条数据安全铁律，可直接交给 AI 代理执行；
-- 单 compose 文件（`docker-compose.yml`，caddy + server + postgres 三服务），三种证书模式
-  （`internal` 本地自签 / `auto` Let's Encrypt / `manual` 企业证书）通过 `.env` 的 `TLS_MODE` 切换；
-- **数据永远在 bind mount 目录里**：`picoaide-data/`（应用数据 + `master.key`）与 `pg-data/`（数据库），
-  升级只换镜像、不动数据；
-- 升级前必须备份：`master.key` 丢失会导致数据库内加密的上游密钥**永久无法解密**。
-
-### 服务端升级
-
-服务端默认从我方更新服务器检查新版本（环境变量 `PICOAI_UPDATE_ENDPOINT`，缺省
-`https://release.picoaide.com/official/latest.json`），webadmin「服务器信息」页会显示"发现新版本"。
-管理员按部署说明执行升级；升级后**员工客户端会跟着升级**（客户端包随服务端镜像分发，客户端从这台
-服务器取包），因此不存在"客户端升了、服务端没升"的版本错配。
-
-### Docker Compose 架构
+## 容器架构
 
 ```
 员工客户端 / 浏览器
@@ -59,53 +87,54 @@ docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
    Caddy 2（反代 + TLS 终结，固定 IP 172.28.0.2）
       │ HTTP:8080（仅 compose 私有网段）
       ▼
-   Go 服务端（非 root uid 10001，expose 8080，固定 IP 172.28.0.3）
+   Go 服务端（非 root uid 10001，固定 IP 172.28.0.3）
       │
       ▼
    PostgreSQL 18（内置容器，固定 IP 172.28.0.4，数据 ./pg-data）
 ```
 
-- 私有网段自定义 bridge（默认 `172.28.0.0/24`，`NETWORK_SUBNET` 可改）；固定 IP 容器重建后不变；
-- server 不映射宿主机端口，外部流量只能经 Caddy 进入（内网隔离 + 攻击面收敛）；
-- **所有持久化数据用 `./` bind mount，不使用命名卷**：`picoaide-data/`（master.key + 应用数据）、`caddy-data/`、`caddy-config/`、`certs/`（手动证书）、`pg-data/`（挂载到容器内 `/var/lib/postgresql`）；备份 = 直接拷走部署目录，或按部署说明打包 `picoaide-data/` + `pg_dump`。
+- 自定义 bridge 私有网段（默认 `172.28.0.0/24`，`NETWORK_SUBNET` 可改），容器 IP 固定在 compose 里声明，
+  重建/升级后不变；
+- **server 不映射宿主机端口**，外部流量只能经 Caddy 进入（内网隔离 + 攻击面收敛）；
+- **全部持久化数据用 `./` bind mount，不使用命名卷**：
 
-### 镜像与版本
+| 目录 | 内容 | 备注 |
+|---|---|---|
+| `picoaide-data/` | 应用数据 + **`master.key`** | 丢失 = 数据库内加密的上游密钥**永久不可解**，必须备份 |
+| `pg-data/` | 内置 PostgreSQL 18 数据 | 挂载到容器 `/var/lib/postgresql`（PG18 起数据落 `18/docker/` 子目录） |
+| `caddy-data/` `caddy-config/` | Caddy 证书库与配置 | `auto` 模式必须备份，否则重新签发 |
+| `certs/` | 手动证书 | 仅 `manual` 模式 |
+| `deploy-backup/` | 备份输出 | 备份步骤写入 |
 
-- 镜像：`ghcr.io/picoaide/picoaide-harness-server`（linux/amd64，附 SBOM + provenance 证明）；
-- 标签：`latest` + `vX.Y.Z` + `vX.Y`；推送版本 tag 后 CI 自动构建发布（`--build-arg VERSION` 注入，`picoaide-server --version` 与 tag 强一致）；
-- **版本线说明**：服务端镜像与桌面客户端同属一个产品线，共用同一 `v*` tag（如 `v2.4.x`，与仓库根 `package.json` 同源）；CI 在 push tag 时用 `scripts/version.mjs check` 校验镜像版本与 root `package.json` 一致，`picoaide-server --version` 与 tag 强一致；
-- 内网无外网？从更新服务器下载镜像包（`releases/<版本>/picoaide-server-<版本>-amd64.zip`）后 `unzip -p 包 image.tar | docker load`；本地构建用 `make docker-image`。
+## 证书模式（三选一）
 
-## 配置网关
+由 `.env` 的 `TLS_MODE` 决定挂载哪个 Caddyfile 模板：
 
-部署完成后登录管理后台 `/admin/`，在**网关配置**页：
+| 模式 | 模板 | 适用 | 前提 |
+|---|---|---|---|
+| `internal` | `Caddyfile.internal` | **纯内网 / 无公网域名**（最常见） | 无；客户端首次连接需信任 Caddy 本地 CA |
+| `auto` | `Caddyfile.autocert` | 有公网域名且**直连**本机 | 域名 A 记录指向本机公网 IP、80/443 对公网开放；**经 CDN 会失败**，不接受 IP |
+| `manual` | `Caddyfile.manual` | 企业已有正式证书（支持 IP） | 提供 `certs/server.crt` + `certs/server.key` |
 
-1. 添加**上游供应商**：渠道（如 deepseek）、base URL、API key、模型列表；
-2. 设置**默认模型**与 per-user **限流**；
-3. 配置**高峰时段**（北京时间多段窗口 + 每周几）与模型 `offpeak_discount`；
-4. 配置**模型定价**（input/output 单价，元/M tokens；留空 = 未定价或按输入价计费）；DeepSeek 缓存命中按缓存价计费；
-5. 设置**登录模式**：local / LDAP / OIDC / both（LDAP 与 OIDC 字段见[管理后台](./admin)）。
+判断方法：域名解析到公网且能直连 → `auto`；否则 → `internal`。IP 部署一律 `internal` 或 `manual`。
 
-> 计费记录时定价：改价/改窗口只影响之后产生的费用；配额链（员工 token → 员工金额 → 部门预算，任一超限 429 `QUOTA_EXCEEDED`，admin 豁免）。
+## 四条铁律（违反会造成不可恢复的数据损失）
 
-## 接入成员
+| # | 禁止 | 原因 |
+|---|---|---|
+| 1 | **绝不执行** `docker compose down -v`、`docker volume prune`、`docker system prune --volumes` | `-v` / `prune` 会删数据卷与镜像层，数据库和 `master.key` 一起没；数据在 bind mount 目录里，`down`（不带 `-v`）不会删 |
+| 2 | **绝不用 `latest` 标签** | 不可复现、无法回滚锚定；一律用 `vX.Y.Z` 具体版本 |
+| 3 | **升级前必须备份**，且确认备份文件非空 | `picoaide-data`（含 `master.key`）+ `pg_dump`；`master.key` 丢了，库里所有加密的上游密钥永久无法解密 |
+| 4 | **不得用 `.env` 覆盖已有部署目录** | 部署目录已有 `.env` 说明部署过，那是**升级**场景，走升级流程而不是重装 |
 
-1. 在**用户管理**创建用户（用户名 + 密码 + 角色：super_admin / auditor / user），或配置 LDAP/OIDC 后由外部身份源接入；
-2. 分配部门与预算；设置用户配额（token / 金额）或跟随全局默认；
-3. 员工登录客户端/浏览器后即可使用对话、能力中心、连接器、定时任务等能力；
-4. 管理员在**能力中心**审批员工上传的技能/智能体并授权（用户/部门）——共享内容才可见可装。
+补充：不要在健康检查通过前删旧镜像（它是回滚锚点）；不要为让服务起来而改 compose 里的固定 IP / 网段；
+数据库迁移不可逆，回滚镜像**不能**把数据库降回旧结构。
 
-## 安全与运维要点
+## 接下来
 
-- **密钥**：上游供应商密钥 **AES-GCM 加密存储**（`enc:v1:`，master key 文件，0600），永不落明文；API token 只存 SHA-256 哈希（90 天过期），改密/降权/禁用自动吊销全部令牌（同事务）；
-- **管理端**：session 12h（硬上限 + 60min 空闲滑动过期）+ CSRF（HMAC 时间窗 ±1h）；登录双桶限流（10 次/5 分钟/键，不信任 X-Forwarded-For）；错误统一信封；`/healthz` 无认证探针（DB Ping，503=DB 不可用）；
-- **证书**：三模式——`manual`（企业 CA/自签占位，支持 IP）、`auto`（Let's Encrypt 自动续期，仅公网域名直连，内置直连/IP 校验）、`internal`（Caddy 本地 CA，内网开箱即用）；员工客户端登录拒绝非 HTTPS 地址（TOFU）；
-- **备份与恢复**：部署说明里的备份步骤一次打包应用数据 + **master.key**（丢失=已加密密钥不可解）+ Caddy 证书库（+ pg_dump）；恢复 = 停服解包 → `up -d`；升级依次重建容器（短暂停机），降级不保证兼容；
-- **离线部署**：从更新服务器（或 GitHub Release 附件）取镜像压缩包 → `unzip -p 包 image.tar | docker load` → 按部署说明启动。
-
-## 深入资料
-
-- [系统架构](./architecture) — 服务端分层、数据流、安全设计
-- [API 参考](./api-reference) — 健康探针、认证与网关端点
-- [管理后台](./admin) — webadmin 操作指南
-- 仓库内完整运维手册：[`docs/deploy/AI-DEPLOY.md`](https://github.com/picoaide/picoaide-harness/blob/master/docs/deploy/AI-DEPLOY.md)（部署/升级/回滚/排障）与 `server/docs/02-build-deploy.md`（构建、systemd、CI）
+1. [容器化部署](/deployment/compose/) —— 从取镜像到健康检查的完整首次部署
+2. [升级、备份与回滚](/deployment/upgrade/) —— 版本检查、备份、切换与回退
+3. [客户端分发与升级](/deployment/client-delivery/) —— 客户端随服务端发布，员工零外网
+4. [渠道与白标](/deployment/channels/) —— 官方 / 预发布 / 企业定制渠道
+5. [离线部署](/deployment/offline/) —— 服务器不能出网时的旁路取包
+6. [运维与排障](/deployment/operations/) —— 反代、证书、备份恢复、常见故障

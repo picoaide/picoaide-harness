@@ -15,9 +15,9 @@ PicoAide Harness is an **enterprise-grade DeepSeek Harness all-in-one platform**
 
 ## Reading path
 
-- To understand why the product is designed this way: [Product Philosophy](./philosophy) (recommended first)
-- To get started quickly: [Getting Started](./getting-started)
-- To explore each interface in depth: [Desktop Client](./desktop) / [Admin Console](./admin)
-- Enterprise administrators: [Private Deployment Guide](./deployment)
-- To develop plugins: [Plugin Development](./plugin-development)
-- Common questions: [FAQ](./faq)
+- To understand why the product is designed this way: [Product Philosophy](/en/philosophy/) (recommended first)
+- To get started quickly: [Getting Started](/en/getting-started/)
+- To explore each interface in depth: [Desktop Client](/en/desktop/) / [Admin Console](/en/admin/)
+- Enterprise administrators: [Private Deployment Guide](/en/deployment/)
+- To develop plugins: [Plugin Development](/en/plugin-development/)
+- Common questions: [FAQ](/en/faq/)
