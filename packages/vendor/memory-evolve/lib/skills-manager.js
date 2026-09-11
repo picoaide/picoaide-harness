@@ -846,19 +846,33 @@ export function installSkillsManager(ctx, options = {}) {
 
     skillCtx.inject(['webServer', 'workspaceRegistry'], (webCtx) => {
       const handler = async (req, res) => {
-        // F6(审计 2026-09-11):技能管理 API 与 /sidebar、/api/pico 同类,
-        // 此前没有任何 loopback/同源栅栏 —— DNS rebinding 页面或同机进程
-        // 可直接读技能文件、写文本、添加管理目录。栅栏口径与 cron/browser
-        // 插件一致:socket 必须是 loopback;Host 必须自称 loopback 且
-        // origin(若带)与 Host 同源;sec-fetch-site=cross-site 一律拒绝。
-        // 无 Origin 的本机脚本/CLI 放行(浏览器跨站请求必带 Origin)。
+        // F6(审计 2026-09-11)+复核增强:技能管理 API 与 /sidebar、/api/pico
+        // 同类,此前没有任何本地信任栅栏 —— DNS rebinding 页面或同机进程可直接
+        // 读技能文件、写文本、添加管理目录。栅栏口径与 cron/browser 插件一致:
+        //   1) Host 自称 loopback 时,socket 必须也是 loopback(伪造 Host 拒绝);
+        //   2) Host 非 loopback 时,必须是 webRuntime.trustedHosts 中已声明
+        //      的权威(局域网 `dsh web --host 0.0.0.0` 的正常访问);
+        //   3) sec-fetch-site=cross-site 拒绝;带 Origin 时必须与 Host 同源;
+        //   4) 无 Origin 的本机脚本/CLI 放行(浏览器跨站请求必带 Origin)。
         const remote = String(req.socket?.remoteAddress ?? '')
-        if (!(remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote))) {
+        const loopbackRemote = remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote)
+        const hostHeader = req.headers?.host
+        const hostIsLoopback = typeof hostHeader === 'string' &&
+          /^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)
+        let trustedHosts = []
+        try {
+          const runtime = webCtx.get?.('webRuntime')
+          if (runtime && Array.isArray(runtime.trustedHosts)) trustedHosts = runtime.trustedHosts
+        } catch { /* 非 web 载体没有 webRuntime 服务 */ }
+        const hostTrusted = typeof hostHeader === 'string' && trustedHosts.some((entry) => {
+          const value = String(entry)
+          return value === hostHeader || value === hostHeader.replace(/:\d+$/, '')
+        })
+        if (!hostIsLoopback && !hostTrusted) {
           sendJson(res, 403, { error: 'forbidden' })
           return
         }
-        const hostHeader = req.headers?.host
-        if (typeof hostHeader !== 'string' || !/^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)) {
+        if (hostIsLoopback && !loopbackRemote) {
           sendJson(res, 403, { error: 'forbidden' })
           return
         }

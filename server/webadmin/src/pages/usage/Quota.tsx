@@ -156,6 +156,10 @@ export default function UsageQuota() {
   return (
     <div className="space-y-6">
       <PageHeader title="配额与预算" desc="三层配额集中配置:全局默认 → 用户覆盖 → 部门预算(任一超限网关 429,自然月口径)" />
+      <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+        这里的 token / 金额 / 部门预算是「请求前校验」的<strong>软上限</strong>:并发很高或流式长请求下可能有小幅越界。
+        需要严格硬预算,请在「用户管理 → 月度余额发放」开启<strong>余额闸门</strong>并配置月度额度 —— 余额按实际消费与 usage 同事务原子扣减,余额耗尽立即 429。
+      </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
 
       {/* 全局默认配额(从网关设置迁入) */}
