@@ -456,10 +456,15 @@ describe('published package surface', () => {
     expect(covered).toBeGreaterThan(0)
 
     // The required-entry oracle must name the same family, or a missing
-    // launcher would be filtered out as "platform not applicable".
-    const required = readFileSync(new URL('../scripts/verify-packaged-runtime.ts', import.meta.url), 'utf8')
-    expect(required).toContain('@deepseek-ai/node-addon-system')
-    expect(required).not.toContain('@deepseek-ai/node-addon-landlock-run')
+    // launcher would be filtered out as "platform not applicable". Read the
+    // quoted path literals only: the file's comments legitimately mention the
+    // retired package name when explaining the rename.
+    const source = readFileSync(new URL('../scripts/verify-packaged-runtime.ts', import.meta.url), 'utf8')
+    // Whole-line path literals only: pairing quotes across the file would let a
+    // comment that mentions the retired name leak into the extracted set.
+    const entryLiterals = [...source.matchAll(/^\s*'([^']*node-addon[^']*)',?\s*$/gmu)].map(match => match[1] ?? '')
+    expect(entryLiterals.some(entry => entry.includes('node-addon-system'))).toBe(true)
+    expect(entryLiterals.every(entry => !entry.includes('node-addon-landlock-run'))).toBe(true)
   })
 
   it('starts restricted Windows shells with a hidden console show state', () => {
