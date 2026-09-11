@@ -87,6 +87,28 @@ export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
   'node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll',
 ] as const
 
+/**
+ * What the POSIX native addon must look like in a packaged tree.
+ *
+ * `@deepseek-ai/node-addon-system` publishes platform packages for darwin and
+ * linux only — its optionalDependencies list has no win32 member, and its
+ * `flock` entry throws on Windows by design. Windows session locking lives in
+ * the persistence package itself (kernel32 named semaphores through koffi), so
+ * a Windows package legitimately ships no family directory at all.
+ */
+export type NativeAddonRequirement = 'family-and-launcher' | 'family' | 'none'
+
+/**
+ * Resolve the native-addon requirement for one Electron platform.
+ * @param electronPlatformName - Electron's `process.platform` value.
+ * @returns the requirement the packaged tree must satisfy.
+ */
+export function nativeAddonRequirement(electronPlatformName: string): NativeAddonRequirement {
+  if (electronPlatformName === 'linux') return 'family-and-launcher'
+  if (electronPlatformName === 'darwin') return 'family'
+  return 'none'
+}
+
 /** CPU-specific runtime assets that must coexist in a universal macOS application. */
 export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
   ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => entry.path),
@@ -463,7 +485,8 @@ export function verifyPackagedRuntime(
   // 磁盘;单测用的是注入探针 + 不存在的伪路径,因此不受影响):目标平台的 node-addon-system
   // 平台包必须在,且 POSIX 侧必须带 landlock-run 启动器(它没有扩展名,只有显式
   // asarUnpack 规则能把它解包出来)。
-  if (existsSync(unpackedRoot)) {
+  const addonRequirement = nativeAddonRequirement(context.electronPlatformName)
+  if (addonRequirement !== 'none' && existsSync(unpackedRoot)) {
     const addonScope = join(unpackedRoot, 'node_modules', '@deepseek-ai')
     const family = existsSync(addonScope)
       ? readdirSync(addonScope).filter(name => name.startsWith('node-addon-system-'))
@@ -471,10 +494,10 @@ export function verifyPackagedRuntime(
     if (family.length === 0) {
       throw new Error(
         `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} ships no @deepseek-ai/node-addon-system-* platform package `
-        + '(the sandbox launcher and the flock module the session writer leases through)',
+        + '(the POSIX sandbox launcher and the flock module the session writer leases through)',
       )
     }
-    if (context.electronPlatformName === 'linux'
+    if (addonRequirement === 'family-and-launcher'
       && !family.some(name => existsSync(join(addonScope, name, 'bin', 'landlock-run')))) {
       throw new Error(
         `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} has no physical landlock-run launcher `
