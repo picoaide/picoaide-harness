@@ -27,6 +27,18 @@ describe('stripSensitiveUrl', () => {
     expect(stripSensitiveUrl('https://example.com/p?q=hello&id=2')).toBe('https://example.com/p?q=hello&id=2')
   })
 
+  it('masks userinfo credentials and fragment tokens (2026-09-11)', () => {
+    expect(stripSensitiveUrl('https://alice:s3cret@example.com/cb')).toBe('https://****:****@example.com/cb')
+    expect(stripSensitiveUrl('https://example.com/cb#access_token=eyJhbGci&state=x')).toBe(
+      'https://example.com/cb#access_token=****&state=x',
+    )
+    expect(stripSensitiveUrl('https://example.com/cb#/route?code=abc&q=1')).toBe(
+      'https://example.com/cb#/route?code=****&q=1',
+    )
+    // Plain route fragments carry no pairs and stay untouched.
+    expect(stripSensitiveUrl('https://example.com/#/inbox/42')).toBe('https://example.com/#/inbox/42')
+  })
+
   it('returns invalid input unchanged (never throws)', () => {
     expect(stripSensitiveUrl('not a url')).toBe('not a url')
     expect(stripSensitiveUrl('')).toBe('')
@@ -274,6 +286,25 @@ describe('BrowserStore group ledger + persistence', () => {
       expect(store.getGroupLedger()).toBeUndefined()
       store.saveGroupLedger(ledger)
       expect(store.getGroupLedger()).toEqual(ledger)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('masks token-bearing tab urls in the persisted ledger (2026-09-11)', () => {
+    const dir = freshDir()
+    try {
+      const store = new BrowserStore({ dir })
+      store.saveGroupLedger({
+        version: 1,
+        activeTabId: 7,
+        tabs: [{ tabId: 7, url: 'https://example.com/cb?code=abc#access_token=eyJhbGci', title: 'cb' }],
+        savedAt: 12345,
+      })
+      const expected = 'https://example.com/cb?code=****#access_token=****'
+      expect(store.getGroupLedger()?.tabs[0]?.url).toBe(expected)
+      const reloaded = new BrowserStore({ dir })
+      expect(reloaded.getGroupLedger()?.tabs[0]?.url).toBe(expected)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

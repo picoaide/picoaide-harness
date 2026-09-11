@@ -40,6 +40,7 @@ class MockSession implements NativeSession {
   clearStorageData = vi.fn(async () => {})
   clearCache = vi.fn(async () => {})
   setPermissionRequestHandler = vi.fn()
+  setPermissionCheckHandler = vi.fn()
   on(event: 'will-download', listener: (event: unknown, item: NativeDownloadItem) => void): void {
     if (event === 'will-download') this.downloadListeners.push(listener)
   }
