@@ -29,6 +29,9 @@ export const Config: z<Config> = z.object({
       shortName: z.string(),
       tagline: z.string(),
     }),
+    // 随包 logo（data: URI，渠道构建注入）：服务端不可达/旧版服务端时显示客户标识。
+    logoURL: z.string(),
+    logoDarkURL: z.string(),
   }),
 })
 

@@ -74,6 +74,36 @@ describe('channel package → row config', () => {
     expect(gate.brand).toBeDefined()
   })
 
+  it('carries the packaged logo to both brand consumers', () => {
+    // 随包 logo 必须在 auth-gate（登录页）与 channel-sync（客户端界面）两份 config
+    // 里都到位：只有一处有 = 另一个界面在服务端不可达时又回到官方兜底图形。
+    const profile = parseDesktopChannelProfile({
+      schema: 1,
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI', short_name: 'Acme' },
+      assets: { logo_inline: 'data:image/svg+xml;base64,PHN2Zy8+', logo_dark_inline: 'data:image/svg+xml;base64,PHN2Zy8+' },
+      desktop: { deep_link_scheme: 'acmeai' },
+    })
+    const patches = channelProfilePatches(profile, ALL_ROWS)
+    for (const id of ['picoaide-auth-gate', 'picoaide-channel-sync']) {
+      const brand = configOf(patches, id).brand as Record<string, unknown>
+      expect(brand.logoURL).toBe('data:image/svg+xml;base64,PHN2Zy8+')
+      expect(brand.logoDarkURL).toBe('data:image/svg+xml;base64,PHN2Zy8+')
+    }
+  })
+
+  it('ignores a non-data logo (a channel package must not steer requests at will)', () => {
+    const profile = parseDesktopChannelProfile({
+      schema: 1,
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI' },
+      assets: { logo_inline: 'https://tracker.example.com/pixel.svg' },
+      desktop: { deep_link_scheme: 'acmeai' },
+    })
+    const brand = configOf(channelProfilePatches(profile, ALL_ROWS), 'picoaide-channel-sync').brand as Record<string, unknown>
+    expect(brand).not.toHaveProperty('logoURL')
+  })
+
   it('skips rows the profile does not have', () => {
     // web 组装没有 auth-gate/channel-sync 行:注入不存在的行会被 loader 拒绝。
     const patches = channelProfilePatches(acmeProfile(), new Set(['pico-connectors']))

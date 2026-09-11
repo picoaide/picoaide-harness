@@ -262,6 +262,48 @@ describe('stageChannelProfile', () => {
     })
   })
 
+  it('把渠道 logo 内联进随包配置（服务端不可达时也能显示客户标识）', () => {
+    const { repoRoot, buildDir, channelDir: dir } = channelDir({
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI' },
+      assets: { logo: 'logo.svg', logo_dark: 'logo-dark.svg' },
+      desktop: { deep_link_scheme: 'acmeai' },
+    })
+    writeFileSync(join(dir, 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8" fill="#106040"/></svg>')
+    writeFileSync(join(dir, 'logo-dark.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8" fill="#FFFFFF"/></svg>')
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    stageChannelProfile(context, buildDir)
+
+    const staged = JSON.parse(readFileSync(join(buildDir, 'channel.json'), 'utf8')) as {
+      assets: Record<string, string>
+      channel_id?: string
+    }
+    // 私有仓原文不动（`logo` 仍是文件名），内联值另开两个键。
+    expect(staged.assets.logo).toBe('logo.svg')
+    expect(staged.assets.logo_inline).toMatch(/^data:image\/svg\+xml;base64,/)
+    expect(staged.assets.logo_dark_inline).toMatch(/^data:image\/svg\+xml;base64,/)
+    expect(Buffer.from(String(staged.assets.logo_inline).split(',')[1]!, 'base64').toString('utf8'))
+      .toContain('fill="#106040"')
+    // 其余字段照旧（内联只加键，不改内容）。
+    expect(staged.channel_id).toBe('acme')
+    // 源文件（私有仓里那份）没有被改写。
+    expect(JSON.parse(readFileSync(join(dir, 'channel.json'), 'utf8'))).not.toHaveProperty('assets.logo_inline')
+  })
+
+  it('素材缺失或不是单段文件名时不内联（不影响其余字段）', () => {
+    const { repoRoot, buildDir } = channelDir({
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI' },
+      assets: { logo: 'missing.svg', logo_dark: '../escape.svg' },
+      desktop: { deep_link_scheme: 'acmeai' },
+    })
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    stageChannelProfile(context, buildDir)
+    const staged = JSON.parse(readFileSync(join(buildDir, 'channel.json'), 'utf8')) as { assets: Record<string, string> }
+    expect(staged.assets).not.toHaveProperty('logo_inline')
+    expect(staged.assets).not.toHaveProperty('logo_dark_inline')
+  })
+
   it('deletes a stale package on an official build', () => {
     // 残留 = 下一次官方/本地构建继承别的渠道的品牌,必须清掉。
     const { repoRoot, buildDir } = channelDir({
