@@ -57,7 +57,7 @@
 | F10 | provider base_url 无校验(SSRF/密钥外泄) | 保存时 scheme/userinfo/metadata 校验；运行时 Dial 复检拦截 link-local/metadata(私网自建上游仍允许) |
 | F11 | usage 分区 DETACH/DROP 错误被吞、孤儿表使当月写入 500 | relispartition 区分真分区/孤儿表；DETACH 失败复检后上抛；孤儿表直接清理；ensureUsagePartition 识别孤儿并报明确错误 |
 | F12 | deep link 可静默切换会话到攻击者服务器 | 已登录且目标 server 不同 → 拒绝并提示先登出 |
-| F13 | TOFU 证书校验是死代码，且接管后会让系统 CA 全部失败 | auth-gate 接线；系统 CA 验证通过(verificationResult=0)直接放行；自签名需 `PICOAI_TLS_PINS` 或历史 pin，未知/不匹配拒绝并告警 |
+| F13 | TOFU 证书校验是死代码，且接管后会让系统 CA 全部失败 | auth-gate 接线；**2026-09-11 修正**：没有任何 pin 时**不安装**校验钩子（纯 Electron 默认校验）；有 pin 时先放行平台已信任的证书（`verificationResult === 'net::OK'`，见下），自签名需 `PICOAI_TLS_PINS` 或历史 pin，未知/不匹配拒绝并告警 |
 | F14 | setAuthConfig 非事务 + 20+ 处吞错 → 半套配置 | 全部设置键单事务写入，失败回滚；校验/加密前移 |
 | F15 | better-sidebar fence 只信 Host 头 | Host 自称 loopback 时必须 socket 也是 loopback；显式 trustedHosts 仍放行 |
 | F16 | 审计哈希链全局 advisory lock 写放大 | 每 DB 单 worker 串行 + 批量(≤20 条/2ms)合并事务，锁每次批量获取一次；调用方仍同步等待结果 |
@@ -80,6 +80,19 @@
 
 - 月度 token/金额配额仍是"检查后消费"的软上限；需要硬预算时启用余额闸门。
 - 自签名服务端：客户端默认因系统 CA 不信任而拒绝；用 `PICOAI_TLS_PINS="host:port=sha256hex,..."`
+
+> **2026-09-11 v2.7.0 线上事故与修正（重要）**：F13 的实现把 Electron 的
+> `request.verificationResult` 当成**数字 0** 判断，而它在 Electron 43 里是
+> **字符串**（实测受信任时为 `"net::OK"`，不受信任时形如
+> `"net::CERT_AUTHORITY_INVALID"`）。于是"平台已信任就放行"这条快路径**从未
+> 命中**：所有 HTTPS（公网 CA、客户前置 Caddy 发的正规证书、连 Chromium 自己
+> 的 `redirector.gvt1.com`）都掉进指纹库，未 pin 一律 `-2` 拒绝 —— 渠道客户端
+> 登录直接 `net::ERR_FAILED`，而证书本身完全正常（`knownRoot=true`）。
+> 修正两点：①按真实形状判定（并保留数字 0 的兼容分支）；②**没有 pin 就不装
+> 钩子**（用户定案："TLS 用默认的就行，前面还套了一层 Caddy"），把"是否偏离
+> 默认校验"这件事收敛成"管理员显式 pin 过"。回归测试钉在
+> `packages/host/enterprise/tests/tls.spec.ts`（`'net::OK'` 直接放行 +
+> 空库不安装钩子）。
   带外分发指纹，或把企业 CA 装入系统信任库。
 - 历史大小写重复用户名不会被自动合并：启动日志会给出列表，请管理员人工处理后再建唯一索引。
 
@@ -107,7 +120,7 @@
 | --- | --- |
 | F15 fence：Host 伪造 loopback + 远程 socket 必须拒绝、trustedHosts 放行 | better-sidebar `tests/trust-fence.spec.ts`（6 例） |
 | F12：已登录拒绝切换服务器 / 未登录接受 / 同服务器刷新 token 接受 | enterprise `tests/deep-link-listener.spec.ts`（3 例） |
-| F13：系统 CA 放行（verificationResult=0）、PICOAI_TLS_PINS 生效、畸形 pin 忽略 | enterprise `tests/tls.spec.ts` |
+| F13：平台已信任直接放行（`'net::OK'` 字符串 + 数字兼容）、无 pin 不安装钩子、PICOAI_TLS_PINS 生效、畸形 pin 忽略 | enterprise `tests/tls.spec.ts` |
 | F7：clear() 后在途异步 persist 不得复活 token 文件 | enterprise `tests/session-service.spec.ts` |
 | F16：60 并发审计后哈希链完整无断链 | serverstore `audit_test.go` |
 | F8：未启用不扣余额 / 启用后扣减 | serverstore `balance_test.go` |
