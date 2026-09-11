@@ -114,3 +114,15 @@
 | F8：保存开启闸门自动补发本月且重复保存不重复加钱 | serverauth `admin_test.go` |
 | F1：会话绑定 CSRF 可用、篡改/错会话拒绝 | serverauth `admin_test.go` |
 | F10：链路本地/metadata IP 拦截、私网/环回放行、metadata 主机名识别 | util `netguard_test.go` |
+
+### 第二轮补充：共享限流器的三个配套修正（F17）
+
+复核过程中由"跨入口共享预算"的回归测试连带发现：
+
+1. F17 的初版修复曾在一次文件恢复中被回退（管理端仍是独立 limiter），新回归测试
+   `TestLoginLimiterSharedAcrossSurfaces` 抓到后重新落地；
+2. 共享单例的限流键按 **DB 实例**加 scope：生产单 DB 下客户端面/管理面真正共享
+   同一失败预算，测试的每个临时库互不污染（否则共享单例会跨测试互相限流）；
+3. `PICOAI_LOGIN_MAX_ATTEMPTS` 改为**每次判定实时读取**：共享单例不能在创建时
+   固话阈值，否则某个测试的临时 env 会永久影响后续用例（阈值过大 → 限流测试
+   永不触发；过小 → 正常登录被误伤）。

@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -47,15 +46,10 @@ func secureCookieFor(c *gin.Context, db *sql.DB) bool {
 // password is not brute-forceable without rate limiting.
 // 延迟到首次登录调用时创建(惰性单例):newLoginLimiter 在包 init 时读
 // PICOAI_LOGIN_MAX_ATTEMPTS,若包级立即初始化,测试 t.Setenv 来不及生效,
-// 多用例登录同一用户会互相限流(审计2026-M10 后新增用例触发)。
-var adminLoginLimiterOnce sync.Once
-var adminLoginLimiterVal *loginLimiter
-
 func adminLoginLimiter() *loginLimiter {
-	adminLoginLimiterOnce.Do(func() {
-		adminLoginLimiterVal = newLoginLimiter()
-	})
-	return adminLoginLimiterVal
+	// F17(复核修正):与客户端面共享同一个限流器 —— 此前两个入口各持一份
+	// 失败预算,同一账号实际可尝试 2 倍次数(且可交替入口规避 429)。
+	return sharedLoginLimiter()
 }
 
 // UpdateChecker 接口是版本检查的最小依赖(生产用 updatecheck.CachedChecker,

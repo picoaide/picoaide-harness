@@ -312,3 +312,34 @@ func TestBalanceNotDeductedWhenDisabled(t *testing.T) {
 		t.Fatalf("enabled billing balance = %v, want %v", u.BalanceMoney, want)
 	}
 }
+
+// F9 回归(复核):用户维度授权必须与用户名字大小写口径一致 —— 授权给
+// "alice" 后,以 "Alice" 登录(或反之)仍应命中。
+func TestGrantUserCaseInsensitive(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	if _, err := CreateUser(db, &User{Username: "Alice", Source: "local", Status: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "demo-skill", "alice", GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	names, err := AccessibleSkillNames(db, "Alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "demo-skill" {
+		t.Fatalf("case-insensitive user grant = %v, want [demo-skill]", names)
+	}
+	// 反向:授权存 "Bob" → 查询 "bob" 也命中。
+	if _, err := CreateUser(db, &User{Username: "bob", Source: "local", Status: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "other-skill", "Bob", GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	names2, _ := AccessibleSkillNames(db, "bob", nil)
+	if len(names2) != 1 || names2[0] != "other-skill" {
+		t.Fatalf("reverse case-insensitive grant = %v, want [other-skill]", names2)
+	}
+}
