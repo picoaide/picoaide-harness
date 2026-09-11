@@ -228,6 +228,31 @@ try {
     console.log('[probe] rightbar.session text:', JSON.stringify(panelText))
     const tabs = await evaluate(`[...document.querySelectorAll('[data-slot="sidebar.right.pane.tab"], [role="tab"], [class*="chip"]')].map(el => (el.textContent ?? '').trim()).filter(Boolean).slice(0, 10)`)
     console.log('[probe] right sidebar chips:', JSON.stringify(tabs))
+
+    // 5. Open OUR migrated tab (cron's scheduled jobs) from the guide and prove
+    // its body renders inside the official panel. The guide entry is a button
+    // whose text is the tab title.
+    // Scope to the official panel: the left sidebar's footer also has a
+    // 「定时任务」 button, and that one opens the main-area center instead.
+    const cronEntryClicked = await evaluate(`(() => {
+      const panel = document.querySelector('[data-slot="rightbar.session"]')
+      if (!panel) return false
+      const entry = [...panel.querySelectorAll('button, [role="button"]')]
+        .find(b => (b.textContent ?? '').includes('定时任务'))
+      if (!entry) return false
+      entry.click()
+      return true
+    })()`)
+    const cronRendered = cronEntryClicked
+      ? await waitFor(`!!document.querySelector('[data-slot="rightbar.session"] [data-dsh-cron-panel]')`, 12000)
+      : false
+    check('点开「定时任务」后 cron 面板在官方右栏内渲染', cronRendered, `clicked=${cronEntryClicked}`)
+    if (cronRendered) {
+      await wait(800)
+      await shoot('05-cron-tab')
+      const cronText = await evaluate(`(document.querySelector('[data-slot="rightbar.session"] [data-dsh-cron-panel]')?.textContent ?? '').slice(0, 120)`)
+      console.log('[probe] cron tab text:', JSON.stringify(cronText))
+    }
   }
 } catch (cause) {
   check('探针执行完成', false, cause instanceof Error ? cause.message : String(cause))
