@@ -19,7 +19,7 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
-import { absolutizeChannelAssets, asChannelPayload, type BrandConfig } from './channel-content.ts'
+import { absolutizeChannelAssets, asChannelPayload, brandChannel, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
 
 // 品牌文案类型定义在 channel-content.ts（纯数据模块，客户端面也能值导入），
@@ -520,7 +520,10 @@ function resolveBrand(brand: BrandConfig | undefined): ResolvedBrand {
     },
     client: {
       displayName: clientName,
-      shortName: nonEmpty(client?.shortName) ?? clientName,
+      // 与 channel-content.ts 的 brandChannel() **同序**:client 短名缺失时回落到
+      // login 短名,再回落到显示名。两份映射必须给同一个答案(侧边栏拿的是
+      // channel 那份,登录页拿的是这份)。
+      shortName: nonEmpty(client?.shortName) ?? nonEmpty(login?.shortName) ?? clientName,
       tagline: nonEmpty(client?.tagline) ?? '',
     },
   }
@@ -690,19 +693,13 @@ function escapeHtmlAttribute(value: string): string {
  * @param brand - 组装期注入的品牌配置（可缺，缺省即官方文案）。
  * @returns 与 `GET /api/client/v2/channel` 同形的对象。
  */
-function builtInChannel(brand: BrandConfig | undefined): Record<string, unknown> {
-  const b = resolveBrand(brand)
-  return {
-    title: b.title,
-    login: { display_name: b.login.displayName, tagline: b.login.tagline, welcome: b.login.welcome },
-    client: {
-      display_name: b.client.displayName,
-      // 侧边栏要短名(官方渠道是 "PicoAide" 而非 "PicoAide Harness"):
-      // 服务端不下发这一项,所以由随包品牌补上。
-      short_name: b.client.shortName,
-      tagline: b.client.tagline,
-    },
-  }
+function builtInChannel(brand: BrandConfig | undefined): ChannelConfig {
+  // 映射只有一份:channel-content.ts 的 brandChannel()（channel-sync 用的也是它）。
+  // 此前这里自己又写了一遍,两份在"渠道只配了 login.short_name、没配
+  // client.short_name"时给出不同的短名 —— 侧边栏于是显示成显示名并折行
+  // （2026-09-11 由测试发现）。官方构建下 brandChannel() 就是 DEFAULT_CHANNEL,
+  // 与原来的 OFFICIAL_BRAND 逐字段等值。
+  return brandChannel(brand)
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -1008,12 +1005,17 @@ export function apply(ctx: Context, config: Config): void {
             // 渠道内容存进 store,每个字段取不到值 → 回落内置厂商文案(白标事故,
             // 且零报错)。见 channel-content.ts 的 asChannelPayload。
             const payload = asChannelPayload(data)
-            // 出口统一绝对化:本端点的返回值会被客户端 store 直接存下并交给 <img>
-            // 渲染,而服务端下发的 logo_url/favicon_url 是相对路径 —— 相对路径在
-            // 渲染层会打到本地 webServer 而 404,页面上就是裂图(2026-09-10 实测)。
+            // 出口做两件事,顺序不能反:
+            //  1) **绝对化**:服务端下发的 logo_url/favicon_url 是相对路径,而本端点
+            //     的返回值会被客户端 store 直接存下交给 <img> 渲染 —— 相对路径在
+            //     渲染层会打到本地 webServer 而 404,界面上就是裂图(2026-09-10 实测)。
+            //  2) **逐字段叠加随包品牌**(mergeChannel,与 channel-sync 同一口径):
+            //     服务端**不下发** `client.short_name`(侧边栏要的正是它),只透传服务端
+            //     载荷会让这个字段整条丢失,侧边栏回落到显示名 "PicoAide Harness"
+            //     在 184px 的行里换行成两行(2026-09-11 实测)。
             json(res, 200, payload === undefined
               ? builtInChannel(config.brand)
-              : absolutizeChannelAssets(payload, serverURL))
+              : mergeChannel(builtInChannel(config.brand), absolutizeChannelAssets(payload, serverURL)))
           } catch {
             // 服务端不可达:给随包品牌而不是空载荷 —— 空载荷会让界面回落
             // 内置的厂商文案,那正是白标要防的。

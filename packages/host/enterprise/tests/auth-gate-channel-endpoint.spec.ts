@@ -100,6 +100,49 @@ describe('auth-gate /api/pico/channel asset URL contract', () => {
     expect(JSON.stringify(body)).not.toContain('"/api/')
   })
 
+  it('fills the packaged-only short_name the server never sends', async () => {
+    // 侧边栏要的是**短名**（"PicoAide"），而服务端下发的载荷里没有 `client.short_name`
+    // —— 它是随包品牌独有的字段。此前本端点把服务端载荷原样透传，短名整条丢失，
+    // 侧边栏于是回落到显示名 "PicoAide Harness"，在 184px 的定高行里折成两行
+    // （2026-09-11 现场）。出口必须以随包品牌为底做逐字段叠加。
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => UPSTREAM,
+      text: async () => JSON.stringify(UPSTREAM),
+    }))
+    // 无渠道包 = 官方构建：随包兜底就是内置官方内容（短名 "PicoAide"）。
+    const handler = channelHandler({ brand: undefined }, { serverURL: 'https://ai.example.com', token: 't' })
+    const { res, read } = fakeResponse()
+    await handler(fakeRequest(), res)
+
+    const body = read().body as { client: { display_name?: string, short_name?: string }, title?: string }
+    expect(body.client.short_name).toBe('PicoAide')
+    // 服务端的显示名仍然胜出（叠加不是替换）。
+    expect(body.client.display_name).toBe('Acme AI')
+    expect(body.title).toBe('Acme 门户')
+  })
+
+  it('takes the short name from the packaged channel brand, not the vendor one', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => UPSTREAM,
+      text: async () => JSON.stringify(UPSTREAM),
+    }))
+    const handler = channelHandler(
+      { brand: { login: { displayName: 'Acme', shortName: 'Acme' }, client: { displayName: 'Acme AI' } } },
+      { serverURL: 'https://ai.example.com', token: 't' },
+    )
+    const { res, read } = fakeResponse()
+    await handler(fakeRequest(), res)
+    const body = read().body as { client: { short_name?: string, display_name?: string } }
+    expect(body.client.short_name).toBe('Acme')
+    expect(JSON.stringify(body)).not.toContain('PicoAide')
+  })
+
   it('keeps already-absolute asset URLs untouched', async () => {
     const absolute = {
       ...UPSTREAM,

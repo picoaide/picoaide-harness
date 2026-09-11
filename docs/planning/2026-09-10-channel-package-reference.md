@@ -245,6 +245,29 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 `currentColor` 花括号 mark）。它曾被 `mergeChannel` 丢掉一轮，现已保留 —— 将来做
 暗色素材时别再踩。
 
+### 4.3 服务端不下发的字段（`short_name`）与侧边栏品牌名（2026-09-11）
+
+`client.short_name` 是**随包品牌独有**的字段：服务端 `channel.Response` 里没有它，
+侧边栏却只用它（"PicoAide" 而不是 "PicoAide Harness"）。所以**每一个把渠道内容交给
+客户端的出口都必须以随包品牌为底做逐字段叠加**（`mergeChannel`），只透传服务端载荷
+就会让这个字段整条消失：
+
+| 出口 | 叠加 | 位置 |
+|---|---|---|
+| `/api/pico/channel`（登录页与客户端 store 的播种源） | `mergeChannel(builtInChannel(brand), 绝对化后的服务端载荷)` | `enterprise/src/auth-gate.ts` |
+| `pico/channel-changed`（登录后的服务端同步） | `mergeChannel(builtIn, 绝对化的服务端载荷)` | `enterprise/src/channel-sync.ts` |
+
+两个出口的"随包品牌 → 渠道内容"映射只允许有一份实现：`channel-content.ts` 的
+`brandChannel()`（`auth-gate` 曾自己写第二份，两份在"只配了 `login.short_name`"时
+给出不同短名 —— 2026-09-11 由测试发现）。
+
+**侧边栏那一行是定高的**：上游 `ui-sidebar` 的 `.brandName` 是 18px 字号、**24px**
+高的行；名字长了必须**截断**而不是折行（折行会把行撑到 48px，整个侧边栏头部错位，
+2026-09-11 现场截图）。所以 `client/Channel.tsx` 的 `BrandName` 固定
+`white-space: nowrap` + `text-overflow: ellipsis`（父级 `min-width: 0` 才让 flex 项
+肯收缩），全名挂 `title`。判空口径也只有一份：`channel-content.ts` 的 `nonEmpty`
+（`'   '` 算缺失 —— 客户端曾有一份不 trim 的副本，会让侧边栏渲染成空白）。
+
 ## 5. 编译期品牌（渠道矩阵在打包时落地）
 
 以下由 electron-builder 在**打包时**决定，运行时读文件来不及改。渠道由环境变量
