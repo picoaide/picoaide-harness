@@ -289,26 +289,14 @@ func TestUsageAggregateManyMembersArrayParam(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)`, uid, dept); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := DeptMemberIDs(db, dept)
+	ids, err := DeptUserIDsByName(db, "大部门")
 	if err != nil {
-		t.Fatalf("DeptMemberIDs: %v", err)
+		t.Fatalf("DeptUserIDsByName: %v", err)
 	}
 	if len(ids) != 66001 {
 		t.Fatalf("members = %d, want 66001", len(ids))
 	}
-	// 1) 部门成本(旧实现:1 + 66001 个占位参数 > 65535 → 直接报错)
-	if _, err := DeptMonthlyCost(db, dept); err != nil {
-		t.Fatalf("DeptMonthlyCost with 66001 members: %v", err)
-	}
-	// 2) 批量用户用量(配额校验热路径)
-	got, err := MonthUsageByUsers(db, ids)
-	if err != nil {
-		t.Fatalf("MonthUsageByUsers with 66001 members: %v", err)
-	}
-	if got[uid].Tokens != 42 {
-		t.Fatalf("MonthUsageByUsers[uid] = %+v, want 42 tokens", got[uid])
-	}
-	// 3) 部门聚合过滤(展示层 WithDept)
+	// 部门聚合过滤(展示层 WithDept;成员集合走数组参数,不撞 PG 参数上限)
 	rows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "model", WithDept("大部门"))
 	if err != nil {
 		t.Fatalf("UsageAggregate WithDept with 66001 members: %v", err)

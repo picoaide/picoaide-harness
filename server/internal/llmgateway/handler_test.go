@@ -668,120 +668,6 @@ func TestGatewayRateLimiterEvictsOldestWhenFull(t *testing.T) {
 	}
 }
 
-// setUserQuota sets alice's (user id 1) monthly quota and optionally their
-// admin flag, then seeds the given monthly usage.
-func setUserQuota(t *testing.T, db *sql.DB, quota int64, admin bool, used int64) {
-	t.Helper()
-	u, err := serverstore.GetUserByID(db, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := quota
-	u.QuotaTokens = &q
-	u.IsAdmin = admin
-	if err := serverstore.UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	if used > 0 {
-		if _, err := serverstore.RecordUsage(db, 1, "deepseek-chat", used, 0); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestQuotaBlocksOverLimit(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserQuota(t, db, 100, false, 100) // used == quota → blocked
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", w.Code)
-	}
-	var out map[string]any
-	json.Unmarshal(w.Body.Bytes(), &out)
-	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
-		t.Fatalf("code = %v", code)
-	}
-	if n := f.requests.Load(); n != 0 {
-		t.Fatalf("upstream calls = %d, want 0 (blocked before forwarding)", n)
-	}
-}
-
-func TestQuotaBoundaryBlocks(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserQuota(t, db, 100, false, 99) // 99 < 100 → passes
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("under quota status = %d, want 200", w.Code)
-	}
-	setUserQuota(t, db, 100, false, 100) // 100 == 100 → blocked
-	w = doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("at quota status = %d, want 429", w.Code)
-	}
-}
-
-func TestQuotaStreamBlocked(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserQuota(t, db, 50, false, 60)
-
-	w := doPost(t, r, "/v1/chat/completions",
-		`{"model":"deepseek-chat","messages":[],"stream":true}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", w.Code)
-	}
-	if n := f.requests.Load(); n != 0 {
-		t.Fatalf("upstream calls = %d, want 0", n)
-	}
-	// no pending usage row must be left behind
-	var rows int
-	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	if rows != 1 { // the seeded 60-token row
-		t.Fatalf("usage rows = %d, want 1", rows)
-	}
-}
-
-func TestQuotaAdminExempt(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserQuota(t, db, 1, true, 100000) // admin, tiny quota, huge usage
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
-	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1", n)
-	}
-}
-
-func TestQuotaGlobalDefault(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	// global default quota 100 via settings; user has no override (nil)
-	if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, "100"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := serverstore.RecordUsage(db, 1, "deepseek-chat", 100, 0); err != nil {
-		t.Fatal(err)
-	}
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429 (global default enforced)", w.Code)
-	}
-	// user override 0 = unlimited wins over the global default
-	setUserQuota(t, db, 0, false, 0)
-	w = doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (override unlimited)", w.Code)
-	}
-}
-
 // 审计修复:流式响应的 usage 已回填后客户端才断连,真实计量必须保留
 // (回退前无条件 DeleteUsage 会把已回填的真实用量删掉 → 统计丢失)。
 func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
@@ -867,170 +753,6 @@ func (r *stepReader) Read(p []byte) (int, error) {
 	s := r.steps[r.idx]
 	r.idx++
 	return copy(p, s), nil
-}
-
-// setUserMoneyQuota 设置 alice(用户 1)的金额配额与本月已用金额
-// (直接插 usage.cost 行,模拟已发生的费用)。
-func setUserMoneyQuota(t *testing.T, db *sql.DB, quota float64, admin bool, used float64) {
-	t.Helper()
-	u, err := serverstore.GetUserByID(db, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := quota
-	u.QuotaMoney = &q
-	u.IsAdmin = admin
-	if err := serverstore.UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	if used > 0 {
-		if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost)
-			VALUES (1, 'deepseek-chat', ?, 0, 'chat', ?)`, int64(used*1e6), used); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestQuotaMoneyBlocksOverLimit(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserMoneyQuota(t, db, 100, false, 100) // used == quota → blocked
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", w.Code)
-	}
-	var out map[string]any
-	json.Unmarshal(w.Body.Bytes(), &out)
-	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
-		t.Fatalf("code = %v", code)
-	}
-	if n := f.requests.Load(); n != 0 {
-		t.Fatalf("upstream calls = %d, want 0", n)
-	}
-}
-
-func TestQuotaMoneyUnderLimit(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserMoneyQuota(t, db, 100, false, 50) // 50 < 100 → passes
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-}
-
-func TestQuotaMoneyAdminExempt(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setUserMoneyQuota(t, db, 1, true, 100000) // admin, tiny quota, huge usage
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
-	}
-}
-
-func TestQuotaMoneyGlobalDefault(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, "100"); err != nil {
-		t.Fatal(err)
-	}
-	setUserMoneyQuota(t, db, 0, false, 0) // 个人无值? 这里显式 0 = 不限,先验证默认不拦截
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("override unlimited status = %d, want 200", w.Code)
-	}
-	// 无个人覆盖(NULL)→ 走全局默认 100,已用 100 → 拦截
-	u, err := serverstore.GetUserByID(db, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u.QuotaMoney = nil
-	if err := serverstore.UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost)
-		VALUES (1, 'deepseek-chat', 0, 0, 'chat', 100)`); err != nil {
-		t.Fatal(err)
-	}
-	w = doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("global default status = %d, want 429", w.Code)
-	}
-}
-
-// setDeptBudgetForUser 创建部门并挂用户,设置部门预算与已用费用。
-func setDeptBudgetForUser(t *testing.T, db *sql.DB, budget float64, used float64) {
-	t.Helper()
-	gid, err := serverstore.CreateDepartment(db, "研发部", 0, 0, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.SetDeptBudget(db, gid, budget); err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.AddUserGroup(db, 1, gid); err != nil {
-		t.Fatal(err)
-	}
-	if used > 0 {
-		if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost)
-			VALUES (1, 'deepseek-chat', ?, 0, 'chat', ?)`, int64(used*1e6), used); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestQuotaDeptBudgetBlocksOverLimit(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setDeptBudgetForUser(t, db, 100, 100) // 部门树已用 == 预算 → 拦截
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", w.Code)
-	}
-	var out map[string]any
-	json.Unmarshal(w.Body.Bytes(), &out)
-	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
-		t.Fatalf("code = %v", code)
-	}
-	if n := f.requests.Load(); n != 0 {
-		t.Fatalf("upstream calls = %d, want 0", n)
-	}
-}
-
-func TestQuotaDeptBudgetUnderLimit(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setDeptBudgetForUser(t, db, 100, 50) // 50 < 100 → 放行
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-}
-
-func TestQuotaDeptBudgetAdminExempt(t *testing.T) {
-	f := newFakeUpstream(t)
-	r, db, token := newGateway(t, f)
-	setDeptBudgetForUser(t, db, 1, 100000) // 部门预算 1,已用 10 万;admin 豁免
-
-	u, err := serverstore.GetUserByID(db, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u.IsAdmin = true
-	if err := serverstore.UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
-	}
 }
 
 // 上游回显官方 key 时,客户端响应(体+头,含 4xx 错误路径)必须脱敏。
@@ -1164,3 +886,17 @@ func TestProxyStreamNormalEOFWithoutUsageEstimatesTokens(t *testing.T) {
 		t.Fatalf("completion_tokens = %d, want > 0 (estimated from forwarded bytes)", ct)
 	}
 }
+
+// 2026-09-11 删除(配额/部门预算下线,唯一闸门=余额;余额闸门用例见 balance_gate_test.go):
+//   - TestQuotaBlocksOverLimit
+//   - TestQuotaBoundaryBlocks
+//   - TestQuotaStreamBlocked
+//   - TestQuotaAdminExempt
+//   - TestQuotaGlobalDefault
+//   - TestQuotaMoneyBlocksOverLimit
+//   - TestQuotaMoneyUnderLimit
+//   - TestQuotaMoneyAdminExempt
+//   - TestQuotaMoneyGlobalDefault
+//   - TestQuotaDeptBudgetBlocksOverLimit
+//   - TestQuotaDeptBudgetUnderLimit
+//   - TestQuotaDeptBudgetAdminExempt

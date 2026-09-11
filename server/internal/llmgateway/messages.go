@@ -257,7 +257,7 @@ func (a *API) handleMessages(c *gin.Context) {
 		return
 	}
 	if blocked, msg := a.quotaBlocked(user); blocked {
-		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
+		serverauth.WriteError(c, http.StatusTooManyRequests, "BALANCE_EXHAUSTED", msg)
 		return
 	}
 

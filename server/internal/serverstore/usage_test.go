@@ -173,61 +173,8 @@ func TestUserMonthlyUsageBatch(t *testing.T) {
 	}
 }
 
-// TestEffectiveQuota: admin exempt; per-user override wins; else global
-// default; missing/invalid global setting → unlimited.
-func TestEffectiveQuota(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-
-	adminID := mustUserID(t, db)
-	u, _ := GetUserByID(db, adminID)
-	u.IsAdmin = true
-	if err := UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-
-	uid := mustUserID(t, db)
-	uu, _ := GetUserByID(db, uid)
-
-	// no global setting, no override → unlimited
-	if q, err := EffectiveQuota(db, uu); err != nil || q != 0 {
-		t.Fatalf("default quota = %d err=%v, want 0 (unlimited)", q, err)
-	}
-	// admin always unlimited
-	if q, err := EffectiveQuota(db, u); err != nil || q != 0 {
-		t.Fatalf("admin quota = %d err=%v, want 0", q, err)
-	}
-	// global default
-	if err := SetSetting(db, MonthlyQuotaSetting, "5000"); err != nil {
-		t.Fatal(err)
-	}
-	if q, _ := EffectiveQuota(db, uu); q != 5000 {
-		t.Fatalf("global default quota = %d, want 5000", q)
-	}
-	// invalid global value → unlimited
-	if err := SetSetting(db, MonthlyQuotaSetting, "abc"); err != nil {
-		t.Fatal(err)
-	}
-	if q, _ := EffectiveQuota(db, uu); q != 0 {
-		t.Fatalf("invalid global quota = %d, want 0", q)
-	}
-	// per-user override wins over global
-	if err := SetSetting(db, MonthlyQuotaSetting, "5000"); err != nil {
-		t.Fatal(err)
-	}
-	qq := int64(300)
-	uu.QuotaTokens = &qq
-	if q, _ := EffectiveQuota(db, uu); q != 300 {
-		t.Fatalf("override quota = %d, want 300", q)
-	}
-	// admin with explicit low quota is still unlimited
-	uu2, _ := GetUserByID(db, adminID)
-	qq = 1
-	uu2.QuotaTokens = &qq
-	if q, _ := EffectiveQuota(db, uu2); q != 0 {
-		t.Fatalf("admin override quota = %d, want 0 (exempt)", q)
-	}
-}
+// 2026-09-11:员工 token 配额(EffectiveQuota)与金额配额(EffectiveMoneyQuota)
+// 已下线 —— 网关唯一闸门是账户余额,原用例随实现删除;余额语义见 balance_test.go。
 
 // TestUsageAggregateUserJoinsUsername: group=user labels the username (from
 // the users table), falling back to the numeric id for deleted users.
@@ -591,79 +538,7 @@ func TestUserMonthlyCostBatch(t *testing.T) {
 	}
 }
 
-// TestEffectiveMoneyQuota: admin 豁免 → 个人覆盖 → 全局默认;0=不限。
-func TestEffectiveMoneyQuota(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	mustUserID(t, db) // uid1 = 普通用户
-
-	// 无个人值且无全局默认 → 不限
-	u, err := GetUserByID(db, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q, err := EffectiveMoneyQuota(db, u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q != 0 {
-		t.Fatalf("no setting quota = %v, want 0 (unlimited)", q)
-	}
-
-	// 全局默认 100
-	if err := SetSetting(db, MonthlyMoneyQuotaSetting, "100"); err != nil {
-		t.Fatal(err)
-	}
-	q, err = EffectiveMoneyQuota(db, u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q != 100 {
-		t.Fatalf("global default quota = %v, want 100", q)
-	}
-
-	// 个人覆盖 50
-	m := 50.0
-	u.QuotaMoney = &m
-	if err := UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	q, err = EffectiveMoneyQuota(db, u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q != 50 {
-		t.Fatalf("override quota = %v, want 50", q)
-	}
-
-	// 个人 0 = 不限,覆盖全局默认
-	z := 0.0
-	u.QuotaMoney = &z
-	if err := UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	q, err = EffectiveMoneyQuota(db, u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q != 0 {
-		t.Fatalf("override zero quota = %v, want 0", q)
-	}
-
-	// admin 恒豁免
-	u.IsAdmin = true
-	u.QuotaMoney = nil
-	if err := UpdateUser(db, u); err != nil {
-		t.Fatal(err)
-	}
-	q, err = EffectiveMoneyQuota(db, u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q != 0 {
-		t.Fatalf("admin quota = %v, want 0", q)
-	}
-}
+// 2026-09-11:金额配额(EffectiveMoneyQuota)已下线,原用例随实现删除。
 
 // TestUsageAggregateCost: 聚合行携带 cost(该桶费用合计),补零桶 cost=0。
 func TestUsageAggregateCost(t *testing.T) {
@@ -871,163 +746,6 @@ func mustDept(t *testing.T, db *sql.DB, name string, parent int64) int64 {
 		t.Fatal(err)
 	}
 	return id
-}
-
-// TestDeptBudgetEffective: 员工生效预算 = 归属部门 + 祖先链(最近配置者胜)。
-func TestDeptBudgetEffective(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	// 树:研发(预算 1000)→ 前端(无)→ 前端A组(预算 500)
-	rd := mustDept(t, db, "研发部", 0)
-	qd := mustDept(t, db, "前端部", rd)
-	qa := mustDept(t, db, "前端A组", qd)
-	if err := SetDeptBudget(db, rd, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetDeptBudget(db, qa, 500); err != nil {
-		t.Fatal(err)
-	}
-
-	// 普通成员挂前端A组:链上全部预算生效(研发 1000 是子树封顶,A组 500 更严)
-	uid, err := CreateUser(db, &User{Username: "alice", Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AddUserGroup(db, uid, qa); err != nil {
-		t.Fatal(err)
-	}
-	eff, err := EffectiveDeptBudget(db, uid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(eff) != 2 || eff[0].Budget != 1000 || eff[0].Name != "研发部" || eff[1].Budget != 500 || eff[1].Name != "前端A组" {
-		t.Fatalf("alice effective budget = %+v, want [研发部 1000, 前端A组 500]", eff)
-	}
-
-	// 挂前端部(祖先链 研发1000, 前端无):最近配置 = 研发 1000
-	uid2, err := CreateUser(db, &User{Username: "bob", Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AddUserGroup(db, uid2, qd); err != nil {
-		t.Fatal(err)
-	}
-	eff2, err := EffectiveDeptBudget(db, uid2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(eff2) != 1 || eff2[0].Budget != 1000 {
-		t.Fatalf("bob effective budget = %+v, want [研发部 1000]", eff2)
-	}
-
-	// 无部门:无部门预算
-	uid3, err := CreateUser(db, &User{Username: "carl", Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	eff3, err := EffectiveDeptBudget(db, uid3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(eff3) != 0 {
-		t.Fatalf("carl effective budget = %+v, want none", eff3)
-	}
-}
-
-// TestDeptBudgetChainMultiBudget: 一条链上多级配置预算 → 全部生效(都需守住)。
-func TestDeptBudgetChainMultiBudget(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	rd := mustDept(t, db, "研发部", 0)
-	qd := mustDept(t, db, "前端部", rd)
-	qa := mustDept(t, db, "前端A组", qd)
-	if err := SetDeptBudget(db, rd, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetDeptBudget(db, qd, 600); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetDeptBudget(db, qa, 500); err != nil {
-		t.Fatal(err)
-	}
-	uid, err := CreateUser(db, &User{Username: "alice", Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AddUserGroup(db, uid, qa); err != nil {
-		t.Fatal(err)
-	}
-	eff, err := EffectiveDeptBudget(db, uid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 3 级预算全部生效(排序:祖先 → 自己)
-	if len(eff) != 3 || eff[0].Budget != 1000 || eff[1].Budget != 600 || eff[2].Budget != 500 {
-		t.Fatalf("chain budgets = %+v", eff)
-	}
-}
-
-// TestDeptBudgetCost: 部门当月费用 = 树内全部成员 SUM(cost)。
-func TestDeptBudgetCost(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	rd := mustDept(t, db, "研发部", 0)
-	qd := mustDept(t, db, "前端部", rd)
-	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
-
-	// 研发直属成员 + 前端部成员
-	uid1, _ := CreateUser(db, &User{Username: "a1", Source: "local", Status: 1})
-	_ = AddUserGroup(db, uid1, rd)
-	uid2, _ := CreateUser(db, &User{Username: "a2", Source: "local", Status: 1})
-	_ = AddUserGroup(db, uid2, qd)
-	// 无部门用户(不计入)
-	uid3, _ := CreateUser(db, &User{Username: "a3", Source: "local", Status: 1})
-
-	id, _ := RecordUsage(db, uid1, "priced-model", 1_000_000, 0) // 2 元
-	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
-	id2, _ := RecordUsage(db, uid2, "priced-model", 500_000, 0) // 1 元
-	setCreatedAtAt(t, db, id2, fixtureAt(0, 9))
-	id3, _ := RecordUsage(db, uid3, "priced-model", 1_000_000, 0) // 2 元,不计
-	setCreatedAtAt(t, db, id3, fixtureAt(0, 9))
-
-	cost, err := DeptMonthlyCost(db, rd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost != 3.0 { // 研发树 = a1 2 + a2 1(前端是子树)
-		t.Fatalf("dept monthly cost = %v, want 3.0", cost)
-	}
-	cost, err = DeptMonthlyCost(db, qd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost != 1.0 {
-		t.Fatalf("sub dept monthly cost = %v, want 1.0", cost)
-	}
-}
-
-// TestDeptBudgetCostBatch: 批量部门费用(部门列表页 N+1 防护)。
-func TestDeptBudgetCostBatch(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	rd := mustDept(t, db, "研发部", 0)
-	qd := mustDept(t, db, "前端部", rd)
-	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
-	uid1, _ := CreateUser(db, &User{Username: "a1", Source: "local", Status: 1})
-	_ = AddUserGroup(db, uid1, qd)
-	id, _ := RecordUsage(db, uid1, "priced-model", 1_000_000, 0)
-	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
-
-	costs, err := DeptMonthlyCostBatch(db, []int64{rd, qd, 9999})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if costs[rd] != 2.0 || costs[qd] != 2.0 {
-		t.Fatalf("batch costs = %+v, want rd=qd=2.0", costs)
-	}
-	if costs[9999] != 0 {
-		t.Fatalf("missing dept cost = %v, want 0", costs[9999])
-	}
 }
 
 // ---- 员工用量概览(日/昨日/总计) ----
@@ -1267,53 +985,6 @@ func TestRecordUsageAnthropicCacheBilling(t *testing.T) {
 
 func ptrFloat(v float64) *float64 { return &v }
 
-// TestDeptBudgetMultiMembership: 用户同时归属多个部门(2026-09 本地用户
-// 多部门支持)——EffectiveDeptBudget 返回全部所属部门 + 各自祖先链(去重),
-// 预算语义 = 全部同时生效,任一超限即拦截(≠ 取最高)。
-func TestDeptBudgetMultiMembership(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	rd := mustDept(t, db, "研发部", 0)
-	mk := mustDept(t, db, "市场部", 0)
-	if err := SetDeptBudget(db, rd, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetDeptBudget(db, mk, 500); err != nil {
-		t.Fatal(err)
-	}
-
-	// 用户同时挂 研发部(祖先链自身1000) 与 市场部(500)
-	uid, err := CreateUser(db, &User{Username: "multi", Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := SyncUserGroups(db, uid, []string{"研发部", "市场部"}); err != nil {
-		t.Fatal(err)
-	}
-	eff, err := EffectiveDeptBudget(db, uid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 期望:研发部 1000 + 市场部 500(祖先→自身排序,去重)
-	// 注意 groups 按名称排序(市场部 < 研发部A组,中文排序),预算链迭代
-	// memberIDs 顺序 → 结果排序与名称相关;此处只校验集合。
-	budgets := map[string]float64{}
-	for _, b := range eff {
-		budgets[b.Name] = b.Budget
-	}
-	if len(eff) != 2 {
-		t.Fatalf("eff = %+v, want 2 budgets (研发1000 + 市场500)", eff)
-	}
-	if budgets["研发部"] != 1000 || budgets["市场部"] != 500 {
-		t.Fatalf("budgets = %v, want 研发部:1000 市场部:500", budgets)
-	}
-	// 任一超限即拦:市场部 500 更小,超限时用户被拦(即使研发部未超)
-	if effBudgetsHasSmaller(budgets, 500) {
-		// 验证市场部预算确实参与(不是只取最高的研发 1000)
-		t.Logf("multi-membership budgets: %v (市场部 500 参与,任一超限即拦)", budgets)
-	}
-}
-
 // effBudgetsHasSmaller 检查任意预算 ≤ 给定值(证明不是只取最高)。
 func effBudgetsHasSmaller(budgets map[string]float64, limit float64) bool {
 	for _, v := range budgets {
@@ -1515,3 +1186,10 @@ func TestUsageDayWindowIndependentOfTimezone(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 删除:部门预算已下线,原以下用例随实现移除:
+//   - TestDeptBudgetEffective
+//   - TestDeptBudgetChainMultiBudget
+//   - TestDeptBudgetCost
+//   - TestDeptBudgetCostBatch
+//   - TestDeptBudgetMultiMembership
