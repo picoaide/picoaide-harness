@@ -16,7 +16,7 @@
 | `UPSTREAM` | 502 | 上游 LLM 错误 |
 | `RATE_LIMITED` | 429 | 触发限流 |
 | `PASSWORD_CHANGE_REQUIRED` | 403 | 密码被管理员重置后强制改密:改密完成前仅放行改密/me/logout(0057) |
-| `QUOTA_EXCEEDED` | 429 | 员工本月 token 或金额配额已用尽(admin 豁免;每用户配额见 users.quota_tokens / users.quota_money,全局默认见 usage.monthly_quota / usage.monthly_quota_money) |
+| `BALANCE_EXHAUSTED` | 429 | 员工账户余额已用尽(2026-09-11 起唯一的额度闸门;admin 豁免,未开通余额账户的员工不受约束) |
 | `INTERNAL` | 500 | 内部错误 |
 
 ## 2. 鉴权方式
@@ -58,9 +58,9 @@
 | POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
 | PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认;改密/降权/禁用自动吊销 token) |
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
-| PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。预算 = 全部所属部门+祖先链同时生效,任一超限即拦(429) |
+| PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。授权 = 全部所属部门+祖先链同时生效 |
 | GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
-| GET/PUT | `/api/server/admin/departments`、`/departments/:id` | 部门树 CRUD(含预算 `budget_money`、parent/leader) |
+| GET/PUT | `/api/server/admin/departments`、`/departments/:id` | 部门树 CRUD(parent/leader;`budget_money` 已随部门预算下线,请求体里该字段被忽略) |
 | GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |
 | POST | `/api/server/admin/tokens/:id/revoke` | 吊销指定 token |
 | GET | `/api/server/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
@@ -97,7 +97,7 @@
 
 ### POST `/v1/chat/completions`
 
-OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`|`anthropic`|`both`,0043/0044)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折;缓存命中输入 token 按 `cache_input_price_per_1m`,0029);转发前按**月度 token 配额 / 金额配额 / 部门预算**检查(`EffectiveQuota` / `EffectiveMoneyQuota` / `EffectiveDeptBudget`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
+OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`|`anthropic`|`both`,0043/0044)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折;缓存命中输入 token 按 `cache_input_price_per_1m`,0029);转发前按**账户余额闸门**检查:已开通余额账户(`balance_activated_at` 非空)且余额分位口径 ≤0 时返回 429 `BALANCE_EXHAUSTED`(admin 豁免;未开通者不受约束)。2026-09-11 起月度 token 配额、金额配额与部门预算已下线。
 
 ### POST `/v1/messages`(0043,Anthropic 兼容——web_search 服务端代理)
 
