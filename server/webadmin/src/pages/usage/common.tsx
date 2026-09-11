@@ -46,8 +46,6 @@ export interface DeptInfo {
   parent_id: number
   leader_name?: string
   member_count: number
-  budget_money: number | null
-  monthly_cost: number
 }
 
 export interface UserInfo {
@@ -56,26 +54,13 @@ export interface UserInfo {
   display_name?: string
   role: string
   status: number
-  quota_tokens: number | null
-  quota_money: number | null
-  /** 生效配额(服务端 users 列表下发;跟随全局默认时已折算,0 = 不限)。 */
-  effective_quota_tokens?: number | null
-  effective_quota_money?: number | null
+  /** 账户余额(元,存量,已按分位下发)。2026-09-11 起员工唯一可花的钱。 */
+  balance_money?: number
+  /** 是否已开通余额账户(首次入账置位);未开通不受余额闸门约束。 */
+  balance_activated?: boolean
   monthly_usage: number
   monthly_cost: number
   groups: string[]
-}
-
-/** 生效金额配额(P2-45):服务端已按「用户覆盖 → 全局默认」折算下发,
- *  直接用 effective_quota_money;缺失(旧服务端)才回退用户覆盖值。
- *  0 = 不限(与 moneyPercent/moneyOver 口径一致,调用方按 null 处理即可)。 */
-export function effectiveQuotaMoney(u: UserInfo): number | null {
-  return u.effective_quota_money ?? u.quota_money ?? null
-}
-
-/** 生效 token 配额(P2-45),口径同上。 */
-export function effectiveQuotaTokens(u: UserInfo): number | null {
-  return u.effective_quota_tokens ?? u.quota_tokens ?? null
 }
 
 /** 员工数文案(P3):服务端 total 含超管且无角色过滤,不可假设「仅一名超管」。
