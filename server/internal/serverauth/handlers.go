@@ -118,61 +118,63 @@ type AdminHandlers struct {
 	ListUserTokens gin.HandlerFunc
 	RevokeToken    gin.HandlerFunc
 	// 0061 员工余额:调整单人 / 读取配置总览 / 保存配置 / 手动发放当月。
-	AdjustBalance    gin.HandlerFunc
-	GetBalance       gin.HandlerFunc
-	PutBalance       gin.HandlerFunc
-	GrantBalance     gin.HandlerFunc
-	Usage            gin.HandlerFunc
-	UsageOverview    gin.HandlerFunc // GET /usage/overview(2026-09 用量中心总览)
-	UsageRequests    gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
-	ServerInfo       gin.HandlerFunc
-	ListAuditLogs    gin.HandlerFunc
-	GetAuditSettings gin.HandlerFunc // GET /audit/settings 审计保留策略(G13)
-	PutAuditSettings gin.HandlerFunc // PUT /audit/settings 审计保留策略(仅 super_admin)
-	GetAuthConfig    gin.HandlerFunc
-	SetAuthConfig    gin.HandlerFunc
-	TestConn         gin.HandlerFunc
+	AdjustBalance     gin.HandlerFunc
+	UserBalanceLedger gin.HandlerFunc
+	GetBalance        gin.HandlerFunc
+	PutBalance        gin.HandlerFunc
+	GrantBalance      gin.HandlerFunc
+	Usage             gin.HandlerFunc
+	UsageOverview     gin.HandlerFunc // GET /usage/overview(2026-09 用量中心总览)
+	UsageRequests     gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
+	ServerInfo        gin.HandlerFunc
+	ListAuditLogs     gin.HandlerFunc
+	GetAuditSettings  gin.HandlerFunc // GET /audit/settings 审计保留策略(G13)
+	PutAuditSettings  gin.HandlerFunc // PUT /audit/settings 审计保留策略(仅 super_admin)
+	GetAuthConfig     gin.HandlerFunc
+	SetAuthConfig     gin.HandlerFunc
+	TestConn          gin.HandlerFunc
 }
 
 // AdminHandlers 返回服务端管理面 handler 集合(供 router 包集中声明路由)。
 func (a *AdminAPI) Handlers() *AdminHandlers {
 	return &AdminHandlers{
-		Login:            a.handleLogin,
-		LoginMFA:         a.handleLoginMFA,
-		PublicMethods:    a.getPublicAuthMethods,
-		Me:               a.handleMe,
-		Logout:           a.handleLogout,
-		MePassword:       a.handleMePassword,
-		GetMyMFA:         a.getMyMFA,
-		EnableMyMFA:      a.enableMyMFA,
-		VerifyMyMFA:      a.verifyMyMFA,
-		DisableMyMFA:     a.disableMyMFA,
-		ResetUserMFA:     a.resetUserMFA,
-		ListUsers:        a.listUsers,
-		CreateUser:       a.createUser,
-		UpdateUser:       a.updateUser,
-		DeleteUser:       a.deleteUser,
-		GetUserGroups:    a.getUserGroups,
-		SetUserDept:      a.setUserDepartment,
-		ListDepts:        a.listDepartments,
-		CreateDept:       a.createDepartment,
-		UpdateDept:       a.updateDepartment,
-		DeleteDept:       a.deleteDepartment,
-		ListUserTokens:   a.listUserTokens,
-		RevokeToken:      a.revokeToken,
-		AdjustBalance:    a.adjustUserBalance,
-		GetBalance:       a.getBalance,
-		PutBalance:       a.putBalance,
-		GrantBalance:     a.grantBalance,
-		Usage:            a.usage,
-		UsageOverview:    a.usageOverview,
-		UsageRequests:    a.usageRequests,
-		ServerInfo:       a.handleServerInfo,
-		ListAuditLogs:    a.listAuditLogs,
-		GetAuditSettings: a.getAuditSettings,
-		PutAuditSettings: a.putAuditSettings,
-		GetAuthConfig:    a.getAuthConfig,
-		SetAuthConfig:    a.setAuthConfig,
-		TestConn:         a.testAuthConnection,
+		Login:             a.handleLogin,
+		LoginMFA:          a.handleLoginMFA,
+		PublicMethods:     a.getPublicAuthMethods,
+		Me:                a.handleMe,
+		Logout:            a.handleLogout,
+		MePassword:        a.handleMePassword,
+		GetMyMFA:          a.getMyMFA,
+		EnableMyMFA:       a.enableMyMFA,
+		VerifyMyMFA:       a.verifyMyMFA,
+		DisableMyMFA:      a.disableMyMFA,
+		ResetUserMFA:      a.resetUserMFA,
+		ListUsers:         a.listUsers,
+		CreateUser:        a.createUser,
+		UpdateUser:        a.updateUser,
+		DeleteUser:        a.deleteUser,
+		GetUserGroups:     a.getUserGroups,
+		SetUserDept:       a.setUserDepartment,
+		ListDepts:         a.listDepartments,
+		CreateDept:        a.createDepartment,
+		UpdateDept:        a.updateDepartment,
+		DeleteDept:        a.deleteDepartment,
+		ListUserTokens:    a.listUserTokens,
+		RevokeToken:       a.revokeToken,
+		AdjustBalance:     a.adjustUserBalance,
+		UserBalanceLedger: a.userBalanceLedger,
+		GetBalance:        a.getBalance,
+		PutBalance:        a.putBalance,
+		GrantBalance:      a.grantBalance,
+		Usage:             a.usage,
+		UsageOverview:     a.usageOverview,
+		UsageRequests:     a.usageRequests,
+		ServerInfo:        a.handleServerInfo,
+		ListAuditLogs:     a.listAuditLogs,
+		GetAuditSettings:  a.getAuditSettings,
+		PutAuditSettings:  a.putAuditSettings,
+		GetAuthConfig:     a.getAuthConfig,
+		SetAuthConfig:     a.setAuthConfig,
+		TestConn:          a.testAuthConnection,
 	}
 }

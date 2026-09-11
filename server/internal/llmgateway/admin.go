@@ -779,14 +779,6 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	if rateLimit == "" {
 		rateLimit = "60"
 	}
-	monthlyQuota := settings[serverstore.MonthlyQuotaSetting]
-	if monthlyQuota == "" {
-		monthlyQuota = "0"
-	}
-	monthlyQuotaMoney := settings[serverstore.MonthlyMoneyQuotaSetting]
-	if monthlyQuotaMoney == "" {
-		monthlyQuotaMoney = "0"
-	}
 	retention := settings[serverstore.RetentionMonthsSetting]
 	if retention == "" {
 		retention = fmt.Sprintf("%d", serverstore.DefaultRetentionMonths)
@@ -794,8 +786,6 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":           settings["gateway.default_model"],
 		"rate_limit":              rateLimit,
-		"monthly_quota":           monthlyQuota,                             // default per-user monthly tokens (0 = unlimited)
-		"monthly_quota_money":     monthlyQuotaMoney,                        // default per-user monthly yuan (0 = unlimited)
 		"peak_windows":            settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
 		"retention_months":        retention,                                // usage 明细保留月数(0=永久,默认 6)
 		"error_reporting_dsn":     settings["web.error_reporting_dsn"],
@@ -849,8 +839,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
 		DefaultModel          *string         `json:"default_model"`
 		RateLimit             *FlexibleString `json:"rate_limit"`
-		MonthlyQuota          *FlexibleString `json:"monthly_quota"`
-		MonthlyQuotaMoney     *FlexibleString `json:"monthly_quota_money"`
 		PeakWindows           *string         `json:"peak_windows"`
 		RetentionMonths       *string         `json:"retention_months"`
 		ErrorReportingDSN     *string         `json:"error_reporting_dsn"`
@@ -883,18 +871,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
-	if req.MonthlyQuota != nil && *req.MonthlyQuota != "" {
-		if n, err := strconv.Atoi(string(*req.MonthlyQuota)); err != nil || n < 0 {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "monthly_quota 必须是非负整数")
-			return
-		}
-	}
-	if req.MonthlyQuotaMoney != nil && *req.MonthlyQuotaMoney != "" {
-		if n, err := strconv.ParseFloat(string(*req.MonthlyQuotaMoney), 64); err != nil || n < 0 {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "monthly_quota_money 必须是非负数字")
-			return
-		}
-	}
 	if req.RetentionMonths != nil {
 		if n, err := serverstore.ParseRetentionMonths(*req.RetentionMonths); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "retention_months 必须是 0~120 的整数(0=永不删除)")
@@ -904,9 +880,10 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
-	// 审计(2026-09 P1):字段级变更明细捕获 + 默认配额专属动作。
+	// 审计(2026-09 P1):字段级变更明细捕获。
+	// 2026-09-11:默认 token/金额配额已下线(网关唯一闸门 = 余额),不再有
+	// quota_default_change 动作。
 	changes := []string{}
-	quotaChanges := []string{}
 	if req.DefaultModel != nil {
 		old, _, _ := serverstore.GetSetting(db, "gateway.default_model")
 		if old != *req.DefaultModel {
@@ -919,26 +896,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if req.RateLimit != nil {
 		if err := auditSetSetting(db, "gateway.rate_limit", "每用户限流", string(*req.RateLimit), &changes); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
-			return
-		}
-	}
-	if req.MonthlyQuota != nil {
-		old, _, _ := serverstore.GetSetting(db, serverstore.MonthlyQuotaSetting)
-		if old != string(*req.MonthlyQuota) {
-			quotaChanges = append(quotaChanges, "默认token配额:"+orEmpty(old)+"→"+orEmpty(string(*req.MonthlyQuota)))
-		}
-		if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, string(*req.MonthlyQuota)); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
-			return
-		}
-	}
-	if req.MonthlyQuotaMoney != nil {
-		old, _, _ := serverstore.GetSetting(db, serverstore.MonthlyMoneyQuotaSetting)
-		if old != string(*req.MonthlyQuotaMoney) {
-			quotaChanges = append(quotaChanges, "默认金额配额:"+orEmpty(old)+"→"+orEmpty(string(*req.MonthlyQuotaMoney)))
-		}
-		if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, string(*req.MonthlyQuotaMoney)); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -1020,9 +977,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if len(changes) > 0 {
 		_ = serverstore.AuditLog(db, auditActor(c), "gateway_config", strings.Join(changes, ", "))
-	}
-	if len(quotaChanges) > 0 {
-		_ = serverstore.AuditLog(db, auditActor(c), "quota_default_change", strings.Join(quotaChanges, ", "))
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

@@ -1,19 +1,12 @@
 package serverstore
 
 import (
+	"database/sql"
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
-
-func newBalanceTestUser(t *testing.T, db interface {
-	QueryRow(string, ...any) *sqlRowLike
-}, name string) int64 {
-	t.Helper()
-	return 0
-}
-
-type sqlRowLike = interface{}
 
 func TestBalanceSettingsRoundtrip(t *testing.T) {
 	db, cleanup := newTestDB(t)
@@ -38,174 +31,368 @@ func TestBalanceSettingsRoundtrip(t *testing.T) {
 	}
 }
 
-func TestAdjustUserBalance(t *testing.T) {
-	db, cleanup := newTestDB(t)
-	defer cleanup()
-	uid, err := CreateUser(db, &User{Username: "bal-adjust", Source: "local", Status: 1})
+// mustBalanceUser 建一个普通员工并返回 id。
+func mustBalanceUser(t *testing.T, db *sql.DB, name string) int64 {
+	t.Helper()
+	id, err := CreateUser(db, &User{Username: name, Source: "local", Status: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return id
+}
 
-	// 初次余额 0
-	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 0 {
-		t.Fatalf("initial balance = %v", u.BalanceMoney)
+// assertLedgerInvariant 断言 I1:余额 == 流水合计(账本唯一真源)。
+func assertLedgerInvariant(t *testing.T, db *sql.DB, uid int64) {
+	t.Helper()
+	u, err := GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 增加
-	next, err := AdjustUserBalance(db, uid, 100.555)
+	sum, err := BalanceLedgerSum(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(u.BalanceMoney-roundMicro(sum)) > 1e-9 {
+		t.Fatalf("I1 违反: balance=%v ledger_sum=%v", u.BalanceMoney, sum)
+	}
+}
+
+func TestAdjustUserBalance(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	uid := mustBalanceUser(t, db, "bal-adjust")
+
+	// 初次余额 0 且未开通
+	u0, _ := GetUserByID(db, uid)
+	if u0.BalanceMoney != 0 || !u0.BalanceActivatedAt.IsZero() {
+		t.Fatalf("initial = %v activated=%v, want 0 / 未开通", u0.BalanceMoney, u0.BalanceActivatedAt)
+	}
+	// 增加(入账即开通)
+	next, err := AdjustUserBalance(db, uid, 100.555, "充值", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next != 100.56 { // 四舍五入到分
 		t.Fatalf("after add = %v, want 100.56", next)
 	}
+	u1, _ := GetUserByID(db, uid)
+	if u1.BalanceActivatedAt.IsZero() {
+		t.Fatal("首次入账必须置开通位")
+	}
+	assertLedgerInvariant(t, db, uid)
+
 	// 扣减
-	next, err = AdjustUserBalance(db, uid, -30.56)
+	next, err = AdjustUserBalance(db, uid, -30.56, "", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next != 70 {
 		t.Fatalf("after deduct = %v, want 70", next)
 	}
-	// 超扣 → ErrValidation 且余额不变
-	if _, err := AdjustUserBalance(db, uid, -1000); !errors.Is(err, ErrValidation) {
+	// 扣减超过展示余额 → ErrValidation(防误输),余额不变
+	if _, err := AdjustUserBalance(db, uid, -1000, "", "admin"); !errors.Is(err, ErrValidation) {
 		t.Fatalf("over-deduct err = %v, want ErrValidation", err)
 	}
 	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 70 {
 		t.Fatalf("balance changed after failed deduct = %v", u.BalanceMoney)
 	}
-	// set 覆盖
-	next, err = SetUserBalance(db, uid, 12.345)
-	if err != nil {
-		t.Fatal(err)
+	// set:允许 0(清零),此前服务端一律拒绝 amount<=0 → 界面「设为 0」必然失败
+	if next, err = SetUserBalance(db, uid, 0, "清零", "admin"); err != nil || next != 0 {
+		t.Fatalf("set 0 = %v err=%v, want 0/nil", next, err)
 	}
-	if next != 12.35 {
-		t.Fatalf("set = %v, want 12.35", next)
+	if next, err = SetUserBalance(db, uid, 12.345, "", "admin"); err != nil || next != 12.35 {
+		t.Fatalf("set 12.345 = %v err=%v", next, err)
 	}
-	// 未知用户
-	if _, err := AdjustUserBalance(db, 999999, 1); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unknown user err = %v, want ErrNotFound", err)
+	if _, err := AdjustUserBalance(db, 999999, 1, "", "admin"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing user err = %v, want ErrNotFound", err)
 	}
+	assertLedgerInvariant(t, db, uid)
 }
 
-func TestGrantMonthlyBalanceAddCoverAndIdempotent(t *testing.T) {
+// 残值清零:微元记账 + 分位展示的历史死角 —— 余额 0.004(显示 ¥0.00)时
+// 扣 0.01 会被拒,但 set 0 必须把它清干净。
+func TestClearSubCentResidue(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()
+	uid := mustBalanceUser(t, db, "bal-residue")
+	if _, err := SetUserBalance(db, uid, 0.004, "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AdjustUserBalance(db, uid, -0.01, "", "admin"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("deduct 0.01 from 0.004 = %v, want ErrValidation", err)
+	}
+	next, err := SetUserBalance(db, uid, 0, "清零", "admin")
+	if err != nil || next != 0 {
+		t.Fatalf("clear residue = %v err=%v, want 0/nil", next, err)
+	}
+	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 0 {
+		t.Fatalf("residue not cleared: %v", u.BalanceMoney)
+	}
+	assertLedgerInvariant(t, db, uid)
+}
 
-	uid, err := CreateUser(db, &User{Username: "bal-grant-user", Role: RoleUser, Source: "local", Status: 1})
-	if err != nil {
+// 逐人·月锚:add 发放幂等、跨月再发、新员工被下一轮补齐(不再"月中入职没额度")。
+func TestGrantMonthlyBalancePerUserAndBackfill(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	u1 := mustBalanceUser(t, db, "grant-a")
+	u2 := mustBalanceUser(t, db, "grant-b")
+	adminID := mustBalanceUser(t, db, "grant-admin")
+	admin, _ := GetUserByID(db, adminID)
+	admin.Role = RoleSuperAdmin
+	admin.IsAdmin = true
+	if err := UpdateUser(db, admin); err != nil {
 		t.Fatal(err)
 	}
-	adminID, err := CreateUser(db, &User{Username: "bal-grant-admin", Role: RoleSuperAdmin, Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	disabledID, err := CreateUser(db, &User{Username: "bal-grant-off", Role: RoleUser, Source: "local", Status: 0})
-	if err != nil {
+	disabled := mustBalanceUser(t, db, "grant-disabled")
+	if _, err := db.Exec(`UPDATE users SET status = 0 WHERE id = ?`, disabled); err != nil {
 		t.Fatal(err)
 	}
 
-	sep := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
-	g, granted, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "tester", sep)
+	sep := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	run, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "tester", sep, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !granted || g.Affected != 1 {
-		t.Fatalf("grant = %+v granted=%v, want affected=1", g, granted)
+	if run.Granted != 2 || run.Month != "202609" {
+		t.Fatalf("run = %+v, want granted=2 month=202609", run)
 	}
-	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 100 {
-		t.Fatalf("user balance = %v, want 100", u.BalanceMoney)
+	if u, _ := GetUserByID(db, u1); u.BalanceMoney != 100 {
+		t.Fatalf("u1 = %v, want 100", u.BalanceMoney)
 	}
-	// 管理员/禁用用户不发放
+	if u, _ := GetUserByID(db, u2); u.BalanceMoney != 100 {
+		t.Fatalf("u2 = %v, want 100", u.BalanceMoney)
+	}
 	if u, _ := GetUserByID(db, adminID); u.BalanceMoney != 0 {
-		t.Fatalf("admin balance = %v, want 0", u.BalanceMoney)
+		t.Fatalf("admin = %v, want 0(管理员豁免发放)", u.BalanceMoney)
 	}
-	if u, _ := GetUserByID(db, disabledID); u.BalanceMoney != 0 {
-		t.Fatalf("disabled balance = %v, want 0", u.BalanceMoney)
+	if u, _ := GetUserByID(db, disabled); u.BalanceMoney != 0 {
+		t.Fatalf("disabled = %v, want 0", u.BalanceMoney)
 	}
-	// 幂等:同月第二次不发放
-	g2, granted2, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "tester", sep)
+	// 幂等:同一月再次全体发放 → 无可发对象
+	run2, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "tester", sep, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if granted2 {
-		t.Fatalf("second grant should be no-op: %+v", g2)
+	if run2.Granted != 0 || run2.Skipped != 2 {
+		t.Fatalf("second run = %+v, want granted=0 skipped=2", run2)
 	}
-	if g2 == nil || g2.Month != "202609" {
-		t.Fatalf("existing grant = %+v", g2)
-	}
-	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 100 {
+	if u, _ := GetUserByID(db, u1); u.BalanceMoney != 100 {
 		t.Fatalf("idempotent grant changed balance = %v", u.BalanceMoney)
 	}
-	// 下月 cover:重置为固定额度
-	oct := time.Date(2026, 10, 2, 1, 0, 0, 0, time.UTC)
-	g3, granted3, err := GrantMonthlyBalance(db, BalanceModeCover, 30, "tester", oct)
-	if err != nil || !granted3 {
-		t.Fatalf("cover grant = %+v granted=%v err=%v", g3, granted3, err)
+	// 月中新入职:下一轮自动补齐(这是 0061 单月锚做不到的)
+	newbie := mustBalanceUser(t, db, "grant-newbie")
+	run3, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "", sep, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 30 {
-		t.Fatalf("cover balance = %v, want 30", u.BalanceMoney)
+	if run3.Granted != 1 {
+		t.Fatalf("backfill run = %+v, want granted=1", run3)
 	}
-	// 下月 add:累加
-	nov := time.Date(2026, 11, 2, 1, 0, 0, 0, time.UTC)
-	if _, granted, err := GrantMonthlyBalance(db, BalanceModeAdd, 5, "tester", nov); err != nil || !granted {
-		t.Fatalf("add grant err=%v granted=%v", err, granted)
+	if u, _ := GetUserByID(db, newbie); u.BalanceMoney != 100 {
+		t.Fatalf("newbie = %v, want 100", u.BalanceMoney)
 	}
-	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 35 {
-		t.Fatalf("add balance = %v, want 35", u.BalanceMoney)
+	// 单用户补发(新建/启用即时发放)
+	run4, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "", sep, u1)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 额度 <= 0 拒绝
-	if _, _, err := GrantMonthlyBalance(db, BalanceModeAdd, 0, "tester", sep); !errors.Is(err, ErrValidation) {
-		t.Fatalf("zero amount err = %v", err)
+	if run4.Granted != 0 || run4.Skipped != 1 {
+		t.Fatalf("single-user rerun = %+v, want granted=0 skipped=1", run4)
+	}
+	// 跨月
+	oct := time.Date(2026, 10, 1, 0, 30, 0, 0, time.UTC)
+	run5, err := GrantMonthlyBalance(db, BalanceModeAdd, 100, "", oct, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run5.Granted != 3 {
+		t.Fatalf("oct run = %+v, want granted=3", run5)
+	}
+	if u, _ := GetUserByID(db, u1); u.BalanceMoney != 200 {
+		t.Fatalf("u1 after oct = %v, want 200", u.BalanceMoney)
+	}
+	assertLedgerInvariant(t, db, u1)
+	assertLedgerInvariant(t, db, u2)
+	assertLedgerInvariant(t, db, newbie)
+}
+
+// cover:清零差额必须记 reset 流水(手工充值被抹掉这件事在账本里可见),
+// 且余额恰好等于额度。
+func TestCoverModeRecordsReset(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	uid := mustBalanceUser(t, db, "cover-user")
+	if _, err := AdjustUserBalance(db, uid, 500, "手工充值", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	sep := time.Date(2026, 9, 5, 3, 0, 0, 0, time.UTC)
+	if _, err := GrantMonthlyBalance(db, BalanceModeCover, 100, "tester", sep, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 100 {
+		t.Fatalf("cover balance = %v, want 100", u.BalanceMoney)
+	}
+	items, total, err := BalanceLedgerPage(db, uid, "", 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 { // adjust +500 / reset -500 / grant +100
+		t.Fatalf("ledger entries = %d (%+v), want 3", total, items)
+	}
+	var sawReset bool
+	for _, e := range items {
+		if e.Kind == LedgerKindReset && e.Amount == -500 {
+			sawReset = true
+		}
+	}
+	if !sawReset {
+		t.Fatalf("cover 未记录清零流水(手工充值被静默抹掉): %+v", items)
+	}
+	assertLedgerInvariant(t, db, uid)
+}
+
+// 消费扣减:已开通用户**无论闸门开关**都扣(闸门只决定拦不拦),
+// 未开通用户不扣不记(I5)。
+func TestUsageDeductsActivatedBalanceOnly(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	mustPricedModel(t, db, "bal-model2", 1, 1)
+
+	activated := mustBalanceUser(t, db, "bal-on")
+	untouched := mustBalanceUser(t, db, "bal-off")
+	if _, err := SetUserBalance(db, activated, 10, "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// 闸门关闭(默认):已开通用户照扣
+	if _, err := RecordUsage(db, activated, "bal-model2", 1_000_000, 0); err != nil { // 1 元
+		t.Fatal(err)
+	}
+	if u, _ := GetUserByID(db, activated); math.Abs(u.BalanceMoney-9) > 1e-9 {
+		t.Fatalf("activated balance = %v, want 9", u.BalanceMoney)
+	}
+	assertLedgerInvariant(t, db, activated)
+	// 未开通用户:不扣不记
+	if _, err := RecordUsage(db, untouched, "bal-model2", 1_000_000, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := GetUserByID(db, untouched); u.BalanceMoney != 0 {
+		t.Fatalf("未开通用户被扣款 = %v", u.BalanceMoney)
+	}
+	if sum, _ := BalanceLedgerSum(db, untouched); sum != 0 {
+		t.Fatalf("未开通用户产生流水 = %v", sum)
 	}
 }
 
-func TestUsageDeductsBalance(t *testing.T) {
+// 流式回填按差额结算:重复回填不重复扣,费用下调自动记 refund 回补。
+func TestUsageBackfillDeltaAndRefund(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
-	uid := mustUserID(t, db)
-	mustPricedModel(t, db, "bal-model", 1, 1) // 1 元 / 100 万 token
-	// 复核修正(F8):只有闸门开启时消费才扣余额。
-	if err := SaveBalanceSettings(db, BalanceSettings{Enabled: true, MonthlyAmount: 0, MonthlyMode: BalanceModeAdd}); err != nil {
+	mustPricedModel(t, db, "bal-model3", 1, 1)
+	uid := mustBalanceUser(t, db, "bal-backfill")
+	if _, err := SetUserBalance(db, uid, 10, "", "admin"); err != nil {
 		t.Fatal(err)
 	}
-
-	// 充值 10 元
-	if _, err := SetUserBalance(db, uid, 10); err != nil {
-		t.Fatal(err)
-	}
-	// 非流式落账 1000+500 token:cost = 0.001+0.0005 = 0.0015
-	if _, err := RecordUsage(db, uid, "bal-model", 1000, 500); err != nil {
-		t.Fatal(err)
-	}
-	var cost0 float64
-	if err := db.QueryRow("SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ?", uid).Scan(&cost0); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("sum cost = %v balance-read = %v", cost0, func() float64 { uu, _ := GetUserByID(db, uid); return uu.BalanceMoney }())
-	u, _ := GetUserByID(db, uid)
-	if want := 10 - 0.0015; u.BalanceMoney < want-1e-6 || u.BalanceMoney > want+1e-6 {
-		t.Fatalf("balance after usage = %v, want %v", u.BalanceMoney, want)
-	}
-	// 流式 pending 回填:先 0 cost,回填后按差额扣一次
-	pend, err := RecordUsage(db, uid, "bal-model", 0, 0)
+	pend, err := RecordUsage(db, uid, "bal-model3", 0, 0) // pending, cost 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, _ := GetUserByID(db, uid)
-	if err := UpdateUsageTokens(db, pend, 1000, 0); err != nil {
+	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil { // 1 元
 		t.Fatal(err)
 	}
-	after, _ := GetUserByID(db, uid)
-	if after.BalanceMoney >= before.BalanceMoney {
-		t.Fatalf("backfill did not deduct: before=%v after=%v", before.BalanceMoney, after.BalanceMoney)
+	if u, _ := GetUserByID(db, uid); math.Abs(u.BalanceMoney-9) > 1e-9 {
+		t.Fatalf("after backfill = %v, want 9", u.BalanceMoney)
 	}
-	// 重复回填(同值)不再扣
-	if err := UpdateUsageTokens(db, pend, 1000, 0); err != nil {
+	// 重复回填同一结果:不再扣
+	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil {
 		t.Fatal(err)
 	}
-	again, _ := GetUserByID(db, uid)
-	if again.BalanceMoney != after.BalanceMoney {
-		t.Fatalf("idempotent backfill deducted again: %v -> %v", after.BalanceMoney, again.BalanceMoney)
+	if u, _ := GetUserByID(db, uid); math.Abs(u.BalanceMoney-9) > 1e-9 {
+		t.Fatalf("重复回填重复扣款: %v, want 9", u.BalanceMoney)
+	}
+	// 向下修正(估算回填 100 万 → 真实 50 万):回补 0.5 元
+	if err := UpdateUsageTokens(db, pend, 500_000, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := GetUserByID(db, uid); math.Abs(u.BalanceMoney-9.5) > 1e-9 {
+		t.Fatalf("费用下调未回补: %v, want 9.5", u.BalanceMoney)
+	}
+	items, _, err := BalanceLedgerPage(db, uid, "", 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refunds int
+	for _, e := range items {
+		if e.Kind == LedgerKindRefund {
+			refunds++
+		}
+	}
+	if refunds != 1 {
+		t.Fatalf("refund 流水 = %d (%+v), want 1", refunds, items)
+	}
+	assertLedgerInvariant(t, db, uid)
+}
+
+// 闸门判定:已开通 + 分位余额 <= 0 → 拦;未开通 → 不拦;闸门关 → 不拦。
+func TestBalanceBlocked(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	uid := mustBalanceUser(t, db, "gate-user")
+	u, _ := GetUserByID(db, uid)
+
+	// 闸门关闭:即使余额 0 也不拦
+	if blocked, _ := BalanceBlocked(db, u); blocked {
+		t.Fatal("闸门关闭时不应拦截")
+	}
+	if err := SaveBalanceSettings(db, BalanceSettings{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// 未开通:不拦
+	if blocked, _ := BalanceBlocked(db, u); blocked {
+		t.Fatal("未开通余额账户不应被余额闸门拦截")
+	}
+	// 开通后余额 0 → 拦
+	if _, err := SetUserBalance(db, uid, 1, "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetUserBalance(db, uid, 0, "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if blocked, _ := BalanceBlocked(db, u); !blocked {
+		t.Fatal("已开通且余额为 0 应拦截")
+	}
+	// 残值 0.004(展示 ¥0.00)→ 分位口径下同样拦
+	if _, err := db.Exec(`UPDATE users SET balance_money = 0.004 WHERE id = ?`, uid); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if blocked, _ := BalanceBlocked(db, u); !blocked {
+		t.Fatal("余额 0.004(显示 ¥0.00)应与展示一致地被拦截")
+	}
+	// 0.006(展示 ¥0.01)→ 放行
+	if _, err := db.Exec(`UPDATE users SET balance_money = 0.006 WHERE id = ?`, uid); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = GetUserByID(db, uid)
+	if blocked, _ := BalanceBlocked(db, u); blocked {
+		t.Fatal("余额 0.006(显示 ¥0.01)不应被拦截")
+	}
+}
+
+func TestBalanceEmptyDatabaseGrant(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
+	run, err := GrantMonthlyBalance(db, BalanceModeAdd, 50, "", now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Granted != 0 || run.Month != "202609" {
+		t.Fatalf("empty run = %+v", run)
+	}
+	if _, err := GrantMonthlyBalance(db, BalanceModeAdd, 0, "", now, 0); !errors.Is(err, ErrValidation) {
+		t.Fatalf("amount 0 err = %v, want ErrValidation", err)
 	}
 }
 
@@ -256,11 +443,10 @@ func TestPreOrderNodesForest(t *testing.T) {
 }
 
 // F3 回归:部门更新后必须失效组织树缓存,否则第二次 reparent 会基于旧树
-// 通过环检测(A.parent=B 后 B.parent=A 形成环),网关配额热路径会死循环。
+// 通过环检测(A.parent=B 后 B.parent=A 形成环)。
 func TestUpdateDepartmentInvalidatesTreeForCycleCheck(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()
-	// 先填充缓存(模拟真实流量里已发生的读取)。
 	InvalidateGroupTree()
 	if _, err := loadGroupTree(db); err != nil {
 		t.Fatal(err)
@@ -282,39 +468,7 @@ func TestUpdateDepartmentInvalidatesTreeForCycleCheck(t *testing.T) {
 	}
 }
 
-// 复核修正(F8,F10 高视角):未启用余额闸门时消费不扣余额 —— 否则默认关闭
-// 数周后首次启用闸门,全员会被历史消费扣成负余额并一次性全部拦截。
-func TestBalanceNotDeductedWhenDisabled(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	uid := mustUserID(t, db)
-	mustPricedModel(t, db, "bal-off-model", 1, 1)
-
-	if _, err := SetUserBalance(db, uid, 10); err != nil {
-		t.Fatal(err)
-	}
-	// 未启用:消费不扣
-	if _, err := RecordUsage(db, uid, "bal-off-model", 1_000_000, 0); err != nil {
-		t.Fatal(err)
-	}
-	if u, _ := GetUserByID(db, uid); u.BalanceMoney != 10 {
-		t.Fatalf("disabled billing changed balance = %v, want 10", u.BalanceMoney)
-	}
-	// 启用后:消费扣减
-	if err := SaveBalanceSettings(db, BalanceSettings{Enabled: true, MonthlyAmount: 0, MonthlyMode: BalanceModeAdd}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := RecordUsage(db, uid, "bal-off-model", 1_000_000, 0); err != nil {
-		t.Fatal(err)
-	}
-	u, _ := GetUserByID(db, uid)
-	if want := 9.0; u.BalanceMoney < want-1e-6 || u.BalanceMoney > want+1e-6 {
-		t.Fatalf("enabled billing balance = %v, want %v", u.BalanceMoney, want)
-	}
-}
-
-// F9 回归(复核):用户维度授权必须与用户名字大小写口径一致 —— 授权给
-// "alice" 后,以 "Alice" 登录(或反之)仍应命中。
+// F9 回归(复核):用户维度授权必须与用户名字大小写口径一致。
 func TestGrantUserCaseInsensitive(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()

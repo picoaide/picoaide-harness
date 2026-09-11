@@ -255,8 +255,9 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "DELETE", "/departments/:id", serverauth.PermDeptWrite, d.Admin.DeleteDept)
 	serverauth.AdminRoute(authed, "GET", "/users/:id/tokens", serverauth.PermUserRead, d.Admin.ListUserTokens)
 	serverauth.AdminRoute(authed, "POST", "/tokens/:id/revoke", serverauth.PermUserWrite, d.Admin.RevokeToken)
-	// 0061 员工余额(存量):单人手动调整 + 月度发放配置/手动发放。
+	// 0061/0062 员工余额(存量):单人调整/清零 + 流水账本 + 月度发放配置。
 	serverauth.AdminRoute(authed, "POST", "/users/:id/balance", serverauth.PermUserWrite, d.Admin.AdjustBalance)
+	serverauth.AdminRoute(authed, "GET", "/users/:id/balance/ledger", serverauth.PermUserRead, d.Admin.UserBalanceLedger)
 	serverauth.AdminRoute(authed, "GET", "/balance", serverauth.PermUserRead, d.Admin.GetBalance)
 	serverauth.AdminRoute(authed, "PUT", "/balance", serverauth.PermUserWrite, d.Admin.PutBalance)
 	serverauth.AdminRoute(authed, "POST", "/balance/grant", serverauth.PermUserWrite, d.Admin.GrantBalance)
