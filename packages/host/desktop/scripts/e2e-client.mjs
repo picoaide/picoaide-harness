@@ -338,6 +338,21 @@ async function main() {
   const mode = await evalSafe(cdp, `document.body.dataset.dshDesktopMode ?? ''`)
   reportStep('高级模式固定生效', mode === 'advanced', `mode=${mode}`)
 
+  // 9b. rc.2 root-slot vocabulary. 0.1.5 renamed the frame's children
+  // (`conversation` → `main` keyed, `details` → `rightbar`) and the failure
+  // mode is SILENT: with the old names every upstream occupant waits forever on
+  // an undeclared slot, so the window renders with an empty center and no
+  // console error. Assert the live slot tree, not just that the app booted.
+  const slotTree = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('[data-slot]')].map(el => el.getAttribute('data-slot')))]`)
+  const slots = Array.isArray(slotTree) ? slotTree : []
+  const slotErrors = await evalSafe(cdp, `document.querySelectorAll('[data-slot-error]').length`)
+  reportStep(
+    'rc.2 根槽位已声明(main/rightbar，details 已消失)',
+    slots.includes('main') && slots.includes('rightbar') && !slots.includes('details'),
+    `slots=${slots.slice(0, 12).join(',')}`,
+  )
+  reportStep('会话主区已挂载且无槽位装配错误', slots.includes('main.conversation') && !slotErrors, `slotErrors=${slotErrors}`)
+
   // 10. Workspace picker (native dialog path).
   const wsClicked = await clickLabel(cdp, '选择工作区', 2500)
   const wsOpen = await evalSafe(cdp, `document.body.textContent?.includes('Selection') || document.body.textContent?.includes('选择工作区')`).catch(() => false)

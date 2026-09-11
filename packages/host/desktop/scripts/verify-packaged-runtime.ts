@@ -76,7 +76,7 @@ const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // sandbox. Electron cannot spawn a virtual asar path (only execFile is
   // patched), so it must stay physical — the desktop asar-spawn rewrite
   // resolves the virtual path to this twin at spawn time.
-  'node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64/bin/landlock-run',
+  'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run',
 ] as const
 
 /** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
@@ -527,7 +527,7 @@ const NATIVE_UNPACKED_PACKAGE_PREFIXES = [
   'node_modules/@koromix',
   'node_modules/@vscode',
   'node_modules/node-addon-require-builtin',
-  'node_modules/@deepseek-ai/node-addon-landlock-run',
+  'node_modules/@deepseek-ai/node-addon-system',
   'node_modules/koffi',
 ]
 

@@ -1,37 +1,15 @@
-/** Sidebar geometry passed by the desktop root slot. */
-interface DesktopSidebarOwnerProps {
-  /** Whether the sidebar is showing its compact rail. */
-  collapsed: boolean
-  /** Current rendered sidebar width. */
-  width: number
-}
-
-/** Public panel transitions consumed by conversation and sidebar plugins. */
-interface DesktopLayoutService {
-  /** Toggle the sidebar between wide and compact presentation. */
-  toggleSidebar(): void
-  /** Open the current session's details panel. */
-  openDetails(): void
-  /** Close the details panel. */
-  closeDetails(): void
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    /** Desktop-owned layout service in advanced mode. */
-    layout: DesktopLayoutService
-  }
-}
-
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    /** Upstream sidebar hosted by the desktop advanced frame. */
-    'sidebar': { kind: 'single'; scope: 'root'; owner: DesktopSidebarOwnerProps }
-    /** Unchanged upstream conversation surface. */
-    'conversation': { kind: 'single'; scope: 'session-maybe'; owner: Record<never, never> }
-    /** Unchanged upstream details surface. */
-    'details': { kind: 'single'; scope: 'session'; owner: Record<never, never> }
-    /** Frame-wide additive overlays. */
-    'shell.overlay': { kind: 'list'; scope: 'root' }
-  }
-}
+/**
+ * Type convergence for the advanced desktop frame.
+ *
+ * rc.2's `ui-layout` owns the root slot vocabulary (`sidebar` / `main` /
+ * `rightbar` / `shell.overlay`), the `ctx.layout` contract, and the
+ * `usePanelInfo` root standard source. The advanced profile keeps that row
+ * disabled and this shell is the registrant, so the declarations are imported
+ * rather than restated: a second `SlotMap` or `Context.layout` declaration
+ * either collides with upstream (TS2717 wherever `skipLibCheck` is off) or
+ * silently drifts from the contract the shipped client plugins register
+ * against — the 0.1.2 → 0.1.5 rename (`conversation` → `main`, `details` →
+ * `rightbar`) is exactly that drift, and it fails at runtime with no error.
+ */
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-slots'

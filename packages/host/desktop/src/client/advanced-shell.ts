@@ -19,7 +19,7 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
     throw new Error(`dsh-plugin-desktop: advanced shell received mode ${JSON.stringify(environment.mode)}`)
   }
 
-  const desktopLayout = new DesktopLayoutState()
+  const desktopLayout = new DesktopLayoutState(window.innerWidth)
   // ui-layout is disabled in the advanced desktop profile (profile.ts), so
   // this shell is the single `layout` service provider and the single root
   // registrant; the child-slot declarations (sidebar/conversation/details/
@@ -51,12 +51,37 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
     }
   }, 'desktop: theme presenter')
 
+  // The sidebar surfaces read their selection through the root standard source
+  // (`usePanelInfo`); ui-layout owns that source upstream, and its row is
+  // disabled here, so this shell publishes it instead.
+  ctx.effect(
+    () => ctx.slots.provideRoot({ hooks: { panelInfo: desktopLayout.panelInfo } }),
+    'desktop: panel info root source',
+  )
+
+  // `selectPanel` must reject a key that is not registered, and a panel that
+  // disappears must not stay selected: mirror ui-layout's retention of the live
+  // `main` key set.
+  ctx.effect(() => {
+    const retain = (): void => {
+      desktopLayout.retainMainPanels(ctx.slots.entries('main').flatMap(entry =>
+        entry.options.key === undefined ? [] : [entry.options.key]))
+    }
+    const dispose = ctx.slots.subscribe('main', retain)
+    retain()
+    return dispose
+  }, 'desktop: main panel retention')
+
+  // rc.2 vocabulary: `sidebar` (root column), `main` (keyed root panel set —
+  // the Conversation lives under the reserved `conversation` key), `rightbar`
+  // (root right column, occupied by the official right Sidebar) and the
+  // frame-wide `shell.overlay` list.
   ctx.effect(() => ctx.slots.register({
     name: 'root',
     children: {
       'sidebar': { kind: 'single', scope: 'root' },
-      'conversation': { kind: 'single', scope: 'session-maybe' },
-      'details': { kind: 'single', scope: 'session' },
+      'main': { kind: 'keyed', scope: 'root' },
+      'rightbar': { kind: 'single', scope: 'root' },
       'shell.overlay': { kind: 'list', scope: 'root' },
     },
     inject: () => ({ layout: desktopLayout, platform: environment.platform }),
