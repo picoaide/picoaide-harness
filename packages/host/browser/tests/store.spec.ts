@@ -364,3 +364,22 @@ describe('BrowserStore group ledger + persistence', () => {
     }
   })
 })
+
+describe('stripSensitiveUrl 线性解析（CodeQL js/polynomial-redos 回归）', () => {
+  it('fragment 掩码不再依赖回溯正则:大量重复字符快速返回', () => {
+    // 命中敏感 key 时的正常掩码语义保持不变
+    expect(stripSensitiveUrl('https://example.com/cb#access_token=abc')).toBe('https://example.com/cb#access_token=****')
+    // ?/# 前缀不属于 key,前缀原样保留(与原正则行为一致)
+    expect(stripSensitiveUrl('https://example.com/cb#/route?token=abc&q=1')).toBe('https://example.com/cb#/route?token=****&q=1')
+    // 非敏感 key 不改写
+    const big = `https://example.com/cb#${'a'.repeat(200_000)}`
+    const started = Date.now()
+    expect(stripSensitiveUrl(big)).toBe(big)
+    expect(Date.now() - started).toBeLessThan(500)
+    // 大量重复 '"' + '=' 的恶意形态必须快速返回,而不是多项式回溯
+    const evil = `https://example.com/cb#${'"'.repeat(20_000)}=${'"'.repeat(20_000)}`
+    const t0 = Date.now()
+    stripSensitiveUrl(evil)
+    expect(Date.now() - t0).toBeLessThan(500)
+  })
+})
