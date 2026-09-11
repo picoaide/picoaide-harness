@@ -27,6 +27,7 @@ class MockSession implements NativeSession {
   clearStorageData = vi.fn(async () => {})
   clearCache = vi.fn(async () => {})
   setPermissionRequestHandler = vi.fn()
+  setPermissionCheckHandler = vi.fn()
   on(event: string, listener: (...args: never[]) => void): void {
     const arr = this.handlers.get(event) ?? []
     arr.push(listener as never)

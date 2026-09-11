@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   BrowserGuard,
   classifyNavigation,
+  installPermissionGuard,
   MAX_DOWNLOAD_BYTES,
   navigationDenyReason,
 } from '../src/guard.ts'
@@ -70,6 +71,34 @@ describe('no browser approval seam (product decision 2026-08-26)', () => {
     const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
     expect(source).not.toContain("ctx.get('approval')")
     expect(source).not.toContain('dsh-user-approval')
+  })
+})
+
+describe('permission guard installs BOTH Electron handlers (2026-09-11)', () => {
+  it('denies permission checks as well as permission requests', () => {
+    const requestHandlers: Array<(wc: unknown, permission: string, callback: (grant: boolean) => void) => void> = []
+    let check: ((wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean) | undefined
+    const session = {
+      setPermissionRequestHandler(handler: (wc: unknown, permission: string, callback: (grant: boolean) => void) => void) {
+        requestHandlers.push(handler)
+      },
+      setPermissionCheckHandler(handler: (wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean) {
+        check = handler
+      },
+    } as unknown as NativeSession
+
+    const dispose = installPermissionGuard(session)
+    expect(requestHandlers).toHaveLength(1)
+    // Electron's check handler defaults to GRANTING when unset, and Chromium
+    // only reaches the request handler when the check is denied — a request
+    // handler alone is dead code.
+    expect(check).toBeTypeOf('function')
+    expect(check?.({}, 'media', 'https://evil.example', {})).toBe(false)
+    expect(check?.({}, 'geolocation', 'https://evil.example', {})).toBe(false)
+    let granted: boolean | undefined
+    requestHandlers[0]?.({}, 'media', (value) => { granted = value })
+    expect(granted).toBe(false)
+    dispose()
   })
 })
 

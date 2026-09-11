@@ -80,13 +80,37 @@ const DEFAULTS = {
 /** Sensitive query params stripped before persistence (mirrors runtime mask). */
 const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
 
-/** Strip sensitive query parameters from a URL (never throws). */
+/** Mask secret-shaped `k=v` pairs inside a URL fragment. OAuth implicit flows
+ * carry `#access_token=…`/`#code=…` there, and a query-only scrub left them in
+ * cleartext on disk. Non-sensitive pairs and plain route fragments are kept
+ * byte-identical (the `?`/`/` prefixes are not part of the key pattern). */
+function maskSensitiveFragment(fragment: string): string {
+  const body = fragment.startsWith('#') ? fragment.slice(1) : fragment
+  if (body === '' || !body.includes('=')) return fragment
+  try {
+    const masked = body.replace(/([^&#=?]+)=([^&]*)/gu, (match, rawKey: string) => {
+      let key = rawKey
+      try { key = decodeURIComponent(rawKey) } catch { /* keep the raw key */ }
+      return SENSITIVE_QUERY_KEY.test(key) ? `${rawKey}=****` : match
+    })
+    return `#${masked}`
+  } catch {
+    return fragment
+  }
+}
+
+/** Strip sensitive URL parts before persistence (never throws): credential
+ * query parameters, userinfo (`user:pass@host`) and secret-shaped fragment
+ * pairs. Mirrors the runtime op-log masking (runtime maskBrowserSummary). */
 export function stripSensitiveUrl(raw: string): string {
   try {
     const url = new URL(raw)
-    for (const name of url.searchParams.keys()) {
+    if (url.username !== '') url.username = '****'
+    if (url.password !== '') url.password = '****'
+    for (const name of [...url.searchParams.keys()]) {
       if (SENSITIVE_QUERY_KEY.test(name)) url.searchParams.set(name, '****')
     }
+    if (url.hash !== '') url.hash = maskSensitiveFragment(url.hash)
     return url.href
   } catch {
     return raw
@@ -343,8 +367,17 @@ export class BrowserStore {
   }
 
   saveGroupLedger(ledger: BrowserLedger): void {
-    this.ledger = ledger
-    this.writeLedger(ledger)
+    // Tab URLs reach this file verbatim from `wc.getURL()`; an OAuth callback
+    // (`?code=` / `#access_token=`) must not sit in cleartext on disk when the
+    // very same URL is masked in history. A restored token-bearing tab then
+    // opens the masked URL — acceptable: those URLs are single-use anyway.
+    // A ledger without tab urls is stored untouched (shape preserved).
+    const ledgerTabs: BrowserLedger['tabs'] | undefined = Array.isArray(ledger.tabs) ? ledger.tabs : undefined
+    const sanitized: BrowserLedger = ledgerTabs !== undefined && ledgerTabs.length > 0
+      ? { ...ledger, tabs: ledgerTabs.map((tab) => ({ ...tab, url: stripSensitiveUrl(tab.url) })) }
+      : ledger
+    this.ledger = sanitized
+    this.writeLedger(sanitized)
   }
 
   // ---------------------------------------------------------------- internals

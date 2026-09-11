@@ -36,6 +36,7 @@ class MockSession implements NativeSession {
   clearStorageData = vi.fn(async () => {})
   clearCache = vi.fn(async () => {})
   setPermissionRequestHandler = vi.fn()
+  setPermissionCheckHandler = vi.fn()
   on(event: string, listener: (...args: never[]) => void): void {
     const arr = this.handlers.get(event) ?? []
     arr.push(listener as never)
@@ -337,6 +338,23 @@ describe('P2-30 window.open opens a tab instead of failing silently', () => {
     expect(handler?.({ url: 'https://popup.example/x' })).toEqual({ action: 'deny' })
     await vi.waitFor(() => { expect(runtime.listTabs()).toHaveLength(2) })
     expect(runtime.opLog.some((op) => op.tool === 'browser_window_open')).toBe(true)
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('opens immediately (user path) when the USER controls the browser (2026-09-11)', async () => {
+    const { runtime, adapter, dir } = makeRuntime()
+    await runtime.open('https://a.example')
+    const handler = adapter.lastView().windowOpenHandler
+    // The user holds control, so no agent operation can be running: a popup at
+    // this moment is user-initiated. Routing it through the agent path parked
+    // it behind the user's own gate forever (`target=_blank` links appeared
+    // only after 交给 AI, in a burst).
+    runtime.setUserControl(true, 'user')
+    expect(handler?.({ url: 'https://popup.example/user' })).toEqual({ action: 'deny' })
+    await vi.waitFor(() => { expect(runtime.listTabs()).toHaveLength(2) })
+    const op = runtime.opLog.find((entry) => entry.tool === 'browser_window_open')
+    expect(op?.actor).toBe('user')
+    runtime.setUserControl(false, 'user')
     runtime.dispose(); rmSync(dir, { recursive: true, force: true })
   })
 })
