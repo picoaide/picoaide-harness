@@ -16,14 +16,13 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { computeSkillContentHash, PROVENANCE_DIR, writeProvenance } from './skill-install.ts'
-import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
+import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
 /** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
 const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
@@ -51,17 +50,15 @@ export function validatePresetId(id: string): string {
   return id
 }
 
-/** Resolve the local preset root: `$DSH_HOME/.agent-presets`, else `~/.picoaide-harness/.agent-presets`. */
+/**
+ * Resolve the local preset root: `$DSH_HOME/.agent-presets`（缺省=产品数据根）。
+ *
+ * 2026-09-11:缺省值走共享的 `dshHomeSafe()`(数据目录唯一权威) —— 数据根随渠道,
+ * 自己抄一份 `~/.picoaide-harness` 会在改渠道目录时漏掉。
+ */
 export function resolvePresetsDir(env: NodeJS.ProcessEnv = process.env): string {
-  const home = env.DSH_HOME?.trim()
-  if (home !== undefined && home.length > 0) {
-    // 审计 2026-08-25 P2-3:DSH_HOME 不得指向系统关键目录(同机注入面)。
-    if (!isSafeDshHome(home)) {
-      throw new Error(`unsafe DSH_HOME: ${home} resolves into a system directory`)
-    }
-    return join(home, '.agent-presets')
-  }
-  return join(process.env.HOME ?? tmpdir(), '.picoaide-harness', '.agent-presets')
+  // 审计 2026-08-25 P2-3:DSH_HOME 不得指向系统关键目录(同机注入面)。
+  return join(dshHomeSafe({ env }), '.agent-presets')
 }
 
 /**

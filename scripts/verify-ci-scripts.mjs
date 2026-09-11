@@ -86,8 +86,9 @@ function fakeChannelRepo(ids, options = {}) {
     mkdirSync(join(dir, 'channels', id), { recursive: true })
     // 品牌字段是**必需**的(ci-channels.sh 里 fail-loud):客户端在登录之前就要
     // 显示品牌,包里没写就回落中性占位。品牌渠道的编译期字段(slug/app_id/
-    // deep_link_scheme)同样必需 —— 缺 slug 安装包名回落厂商品牌、缺 app_id 两个
-    // 渠道的客户端在系统里变成同一个 app。夹具默认给全,另有用例专测缺失时的中止。
+    // deep_link_scheme/home_dir)同样必需 —— 缺 slug 安装包名回落厂商品牌、缺
+    // app_id 两个渠道的客户端在系统里变成同一个 app、缺 home_dir 两个渠道共用
+    // 一个数据根(跨渠道共享登录态/会话)。
     const publicChannel = id === 'official' || id === 'beta'
     writeFileSync(join(dir, 'channels', id, 'channel.json'), JSON.stringify({
       schema: 1,
@@ -104,6 +105,7 @@ function fakeChannelRepo(ids, options = {}) {
               slug: `${id}-AI`,
               app_id: `com.example.${id.replaceAll('-', '')}`,
               deep_link_scheme: `${id.replaceAll('-', '')}link`,
+              home_dir: `.${id}-harness`,
             },
           }),
     }))
@@ -335,6 +337,61 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
     '{"schema":1,"channel_id":"official","identity":{"display_name":"   ","short_name":"Official"}}')
   const blankRun = runChannels({ source: blank, refName: 'v2.7.0', dest: 'channels', list: 'j.list' })
   check(blankRun.status !== 0, '空白品牌名必须视为缺失')
+
+  // 数据目录(desktop.home_dir):渠道客户端的数据根 —— 账户 token、settings、
+  // 会话、连接器凭据都在里面。缺了/写错/写回官方目录都必须中止构建:
+  // 装到客户机器上才发现就是"两个渠道共用一份登录态"(跨租户)。
+  const brandOnly = (homeDirValue) => {
+    const root = tempDir('ci-channels-home-')
+    mkdirSync(join(root, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(root, 'channels', 'official', 'channel.json'),
+      '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    mkdirSync(join(root, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(root, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example', short_name: 'Example' },
+      desktop: {
+        slug: 'Example-AI',
+        app_id: 'com.example.brand',
+        deep_link_scheme: 'examplebrand',
+        ...(homeDirValue === undefined ? {} : { home_dir: homeDirValue }),
+      },
+    }))
+    return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'p.list' })
+  }
+
+  const noHome = brandOnly(undefined)
+  check(noHome.status !== 0, '品牌渠道缺 desktop.home_dir 时必须失败')
+  check(noHome.stderr.includes('desktop.home_dir'), '失败信息应点明缺 desktop.home_dir')
+
+  const sharedHome = brandOnly('.picoaide-harness')
+  check(sharedHome.status !== 0, '渠道数据目录写成官方目录时必须失败(那是共用数据根)')
+  check(sharedHome.stderr.includes('desktop.home_dir'), '失败信息应点明是 desktop.home_dir 的问题')
+
+  for (const [value, why] of [
+    ['../escape', '带路径分隔符'],
+    ['/abs', '绝对路径'],
+    ['Acme-Harness', '缺前导点/含大写'],
+    ['.', '只有一个点'],
+    ['', '空串'],
+  ]) {
+    const bad = brandOnly(value)
+    check(bad.status !== 0, `desktop.home_dir 是${why}时必须失败`)
+    check(bad.stderr.includes('desktop.home_dir'), `desktop.home_dir(${why})的失败信息应点名该字段`)
+  }
+
+  // beta 复用官方品牌,但它是独立分发面 —— 数据目录也必须与官方不同
+  const betaShared = tempDir('ci-channels-beta-home-')
+  mkdirSync(join(betaShared, 'channels', 'beta'), { recursive: true })
+  writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'beta',
+    identity: { display_name: 'PicoAide Harness', short_name: 'PicoAide' },
+    desktop: { home_dir: '.picoaide-harness' },
+  }))
+  const betaRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
+  check(betaRun.status !== 0, 'beta 的数据目录等于官方目录时必须失败')
 }
 
 // ---- 4/5. 逐渠道打包:日志抑制、失败中性、产物归集 ----

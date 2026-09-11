@@ -22,6 +22,10 @@ describe('desktop channel profile', () => {
       defaultServerURL: 'https://ai.acme.example.com',
       productName: 'Acme AI',
       windowTitle: 'Acme AI',
+      // 没配 desktop.home_dir / slug → 兜底到 `.picoaide-harness-<渠道 id>`：
+      // 兜底**不回落官方目录**（那会与官方客户端共用 token/settings/会话）。
+      homeDir: '.picoaide-harness-acme',
+      appId: undefined,
       // 未配置深链 scheme → 回落官方值(行为不变)
       deepLinkScheme: 'picoaide',
       deepLinkName: 'Acme AI',
@@ -45,6 +49,8 @@ describe('desktop channel profile', () => {
       defaultServerURL: 'https://ai.acme.example.com',
       productName: 'Acme Assistant',
       windowTitle: 'Acme 助手',
+      homeDir: '.picoaide-harness-acme',
+      appId: undefined,
       deepLinkScheme: 'picoaide',
       deepLinkName: 'Acme Assistant',
       brand: {
@@ -121,6 +127,43 @@ describe('desktop channel profile', () => {
     }))
     expect(profile?.deepLinkScheme).toBe('acmeai')
     expect(profile?.deepLinkName).toBe('Acme AI Link')
+  })
+
+  it('scopes the data directory to the channel (never the vendor default)', () => {
+    // 2026-09-11:两个渠道共用一个数据根 = 共享登录 token/settings/会话(跨租户),
+    // 并互相顶掉 Electron 的单实例锁。三种取值链都要落在**本渠道**的目录上。
+    const explicit = parseDesktopChannelProfile(channelValue({
+      desktop: { home_dir: '.acme-harness' },
+    }))
+    expect(explicit?.homeDir).toBe('.acme-harness')
+
+    // 没写 home_dir 时由 slug 小写派生
+    const derived = parseDesktopChannelProfile(channelValue({
+      desktop: { slug: 'Acme-Harness' },
+    }))
+    expect(derived?.homeDir).toBe('.acme-harness')
+
+    // 畸形 home_dir 不生效,但**绝不回落官方目录**:换 slug 派生,再退到渠道 id
+    for (const bad of ['../escape', '/abs', '.', '.UPPER', 'plain', '', 42]) {
+      const profile = parseDesktopChannelProfile(channelValue({ desktop: { home_dir: bad } }))
+      expect(profile?.homeDir).toBe('.picoaide-harness-acme')
+    }
+
+    // slug 恰好等于官方 slug = "声明我和官方是同一个应用" → 不采纳,退到渠道 id
+    const vendorSlug = parseDesktopChannelProfile(channelValue({
+      desktop: { slug: 'PicoAide-Harness' },
+    }))
+    expect(vendorSlug?.homeDir).toBe('.picoaide-harness-acme')
+  })
+
+  it('reads the channel app id used as the Windows AppUserModelId', () => {
+    // 必须与 electron-builder 写进快捷方式的 app_id 一致,否则渠道客户端的
+    // 通知在 Windows 上对不上身份(不弹/不归组);畸形值回落官方。
+    const profile = parseDesktopChannelProfile(channelValue({
+      desktop: { app_id: 'com.acme.ai' },
+    }))
+    expect(profile?.appId).toBe('com.acme.ai')
+    expect(parseDesktopChannelProfile(channelValue({ desktop: { app_id: 'not an id' } }))?.appId).toBeUndefined()
   })
 
   it.each([

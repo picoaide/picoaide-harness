@@ -11,8 +11,9 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
-import { DEFAULT_DEEP_LINK_SCHEME, readDesktopChannelProfile } from './desktop-channel.ts'
+import { DEFAULT_DEEP_LINK_SCHEME, OFFICIAL_PRODUCT_NAME, readDesktopChannelProfile } from './desktop-channel.ts'
 import { DSH_HOME_ENV, dshHomeSafe, isSystemWorkingDirectory } from './desktop-home.ts'
+import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import {
   ElectronStderrLogger,
@@ -54,14 +55,22 @@ import {
 
 const BIN_NAME = 'dsh-plugin-desktop'
 /**
- * 应用名（通知发送者、日志头、`app.setName` 决定的数据目录）。
+ * 随包分发的渠道包（`build/channel.json`），**读一次**给下面几个常量共用。
  *
- * 渠道构建读随包分发的渠道包（`build/channel.json`）；缺失时回落厂商名 ——
- * 官方构建与改造前逐字节一致。渠道化打包时 electron-builder 的
- * `--config.productName` 也必须给同一个值（见 scripts/channel-build.ts），
- * 否则安装后的应用名与运行时的 `app.setName` 会打架。
+ * 官方构建（以及本地开发）没有这个文件 → undefined，所有取值回落官方默认，
+ * 行为与渠道化改造前逐字节一致；渠道构建由 CI 保证它存在（`ci-channels.sh`
+ * 硬性校验品牌字段，`verify-channel-package.ts` 校验它真的进了 asar）。
  */
-const PRODUCT_NAME = readDesktopChannelProfile()?.productName ?? 'PicoAide Harness'
+const CHANNEL_PROFILE = readDesktopChannelProfile()
+
+/**
+ * 应用名（通知发送者、日志头）。
+ *
+ * 渠道构建读渠道包的 `desktop.product_name`；缺失时回落厂商名。渠道化打包时
+ * electron-builder 的 `--config.productName` 也必须给同一个值（见
+ * scripts/channel-build.ts），否则安装后的应用名与运行时的 `app.setName` 会打架。
+ */
+const PRODUCT_NAME = CHANNEL_PROFILE?.productName ?? OFFICIAL_PRODUCT_NAME
 
 /**
  * 本安装的深链 scheme(OIDC/OpenID 浏览器回调把 token 交回客户端用的那个)。
@@ -71,7 +80,7 @@ const PRODUCT_NAME = readDesktopChannelProfile()?.productName ?? 'PicoAide Harne
  * **必须与 electron-builder 的 `protocols`(scripts/channel-build.ts)以及
  * 服务端 OIDC 回调拼出的 scheme 三者一致**,否则浏览器回调打不开客户端。
  */
-const DEEP_LINK_SCHEME = readDesktopChannelProfile()?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
+const DEEP_LINK_SCHEME = CHANNEL_PROFILE?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
 
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
@@ -201,7 +210,7 @@ async function start(): Promise<void> {
     restartRequested = true
     nativeExit.requestRelaunch()
     await shutdown.request(0)
-  }, () => {}, electronLogger)
+  }, () => {}, electronLogger, DEEP_LINK_SCHEME)
   const finalExit = (code: number): void => { nativeExit.finish(code) }
   shutdown = createDesktopShutdown(
     async () => {
@@ -250,7 +259,10 @@ async function start(): Promise<void> {
   for (const arg of process.argv) {
     if (arg.startsWith(`${DEEP_LINK_SCHEME}://`)) runtime.receiveDeepLink(arg)
   }
-  if (process.platform === 'win32') app.setAppUserModelId('ai.deepseek.dsh.desktop')
+  // Windows 的 AppUserModelId 决定通知身份(不弹/不归组多半是这里对不上快捷方式)。
+  // 渠道构建必须用渠道自己的 app_id —— electron-builder 写进快捷方式的就是它,
+  // 硬编码厂商值会让渠道客户端的通知在 Windows 上认不出自己。
+  if (process.platform === 'win32') app.setAppUserModelId(CHANNEL_PROFILE?.appId ?? 'ai.deepseek.dsh.desktop')
   // P2-34: a packaged app must never keep a filesystem root or a system
   // directory as its working directory (desktop-entry `Path=`, a shortcut with
   // a wrong "start in", a service manager). The old `=== '/'` check only saw
@@ -264,14 +276,15 @@ async function start(): Promise<void> {
     platform: process.platform,
   })
   for (const [name, value] of Object.entries(shellEnvironmentResolution.updates)) process.env[name] = value
-  // Product-owned home: `~/.picoaide-harness` unless DSH_HOME is explicitly
-  // set. Writing it back makes every downstream consumer (child processes,
-  // sibling plugins resolving DSH_HOME) agree on the same location.
+  // Product-owned home — 官方 `~/.picoaide-harness`，渠道客户端用**自己的**
+  // 目录（渠道包 `desktop.home_dir`，见 desktop-home.ts 的 channelDshHomeDir）；
+  // 除非 DSH_HOME 被显式设置（e2e/便携安装，优先级最高）。写回环境变量让所有
+  // 下游消费者（子进程、读 DSH_HOME 的兄弟插件）落在同一个位置。
   // P2-33: use the GUARDED entry point — an injected DSH_HOME pointing at a
   // system directory must abort startup (the surrounding try/catch logs it and
   // exits 1) instead of silently writing user data there. This is the same
   // `isSafeDshHome` check the enterprise installers enforce.
-  const homeDir = dshHomeSafe()
+  const homeDir = dshHomeSafe({ productDir: CHANNEL_PROFILE?.homeDir })
   process.env[DSH_HOME_ENV] = homeDir
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
     { label: 'application install', path: process.execPath },
@@ -360,6 +373,15 @@ async function start(): Promise<void> {
 
 async function run(): Promise<void> {
   app.setName(PRODUCT_NAME)
+  // 第二份"随渠道"的数据根（第一份是 Harness home）：日志、更新状态、插件管理
+  // 状态、崩溃取证与 **Electron 单实例锁** 都落在 userData 里；`setName` 只在
+  // 产品名与官方不同时才天然分流（beta 复用官方品牌 → 会与 official 撞在同一
+  // 个目录并互相顶掉启动），所以这里显式 setPath。必须在 app ready 之前设置
+  // （后面第一次 getPath('userData') 就在 start() 里）。
+  app.setPath(
+    'userData',
+    join(app.getPath('appData'), desktopUserDataDirectoryName(PRODUCT_NAME, CHANNEL_PROFILE?.channelId)),
+  )
   if (process.argv.includes('--export-diagnostics')) {
     try {
       await app.whenReady()

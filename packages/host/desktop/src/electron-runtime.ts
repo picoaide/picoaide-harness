@@ -40,6 +40,7 @@ import type {
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
 import { parseDesktopDeepLink } from './deep-link.ts'
+import { DEFAULT_DEEP_LINK_SCHEME } from './desktop-channel.ts'
 import { formatDesktopExitCode, type DesktopLogger } from './desktop-logger.ts'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
@@ -148,6 +149,14 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     private readonly restart: () => Promise<void>,
     private readonly onRendererBoot: (report: RendererBootReport) => void = () => {},
     private readonly logger: DesktopLogger | undefined = undefined,
+    /**
+     * 本安装的深链 scheme（渠道包决定，由 main.ts 传入）。
+     *
+     * **必须显式传**：渠道客户端的 scheme 是客户自己的（如 `mokahr-harness`），
+     * 缺省官方值会把渠道深链在 `receiveDeepLink` 的严格闸门直接丢掉 —— 浏览器
+     * SSO 回调永远进不来，而日志只有一行 malformed（2026-09-11 真机复现）。
+     */
+    private readonly deepLinkScheme: string = DEFAULT_DEEP_LINK_SCHEME,
   ) {
     if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: unsupported Electron platform ${process.platform}`)
@@ -362,7 +371,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
    * profile tree has not mounted yet.
    */
   receiveDeepLink(url: string): void {
-    const parsed = parseDesktopDeepLink(url)
+    // scheme 必须用**本安装**的那个（渠道包决定）：用缺省官方值会把渠道
+    // 深链判成 malformed，浏览器 SSO 回调在闸门处静默消失。
+    const parsed = parseDesktopDeepLink(url, this.deepLinkScheme)
     if (parsed === null) {
       // Strict gate: a merely prefix-matching string must not reach Host
       // consumers (the enterprise auth callback trusts the event).

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { installDeepLinkListener } from '../src/deep-link.ts'
-import { readDesktopChannelProfile } from 'dsh-plugin-desktop/desktop-channel'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
 
@@ -28,8 +27,10 @@ function stubCtx() {
 
 const A: Session = { serverURL: 'https://a.example', username: 'alice', token: 'tok-a' }
 
-// 监听器按随包渠道决定深链 scheme(构建渠道可为 moka 等白标),测试对齐。
-const SCHEME = readDesktopChannelProfile()?.deepLinkScheme ?? 'picoaide'
+// 深链 scheme 由**桌面壳按渠道注入**（渠道构建是客户自己的，如 mokahr-harness）：
+// 监听器不再自己读随包 channel.json —— enterprise 的 lib 是 tsdown 内联产物，
+// `../build/channel.json` 在那里指向不存在的路径，读到的永远是 undefined。
+const SCHEME = 'acmebrand'
 
 function stubFetchOk() {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"user":{"username":"alice"}}', {
@@ -43,7 +44,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     stubFetchOk()
     const { ctx, warns, fire } = stubCtx()
     const applied: Session[] = []
-    installDeepLinkListener(ctx, (s) => applied.push(s), () => A)
+    installDeepLinkListener(ctx, (s) => applied.push(s), () => A, SCHEME)
     fire(`${SCHEME}://auth?token=attacker&server=` + encodeURIComponent('https://evil.example') + '&user=eve')
     await new Promise((r) => setTimeout(r, 30))
     expect(applied).toHaveLength(0)
@@ -55,7 +56,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     stubFetchOk()
     const { ctx, fire } = stubCtx()
     const applied: Session[] = []
-    installDeepLinkListener(ctx, (s) => applied.push(s), () => null)
+    installDeepLinkListener(ctx, (s) => applied.push(s), () => null, SCHEME)
     fire(`${SCHEME}://auth?token=tok-b&server=` + encodeURIComponent('https://b.example') + '&user=bob')
     await new Promise((r) => setTimeout(r, 30))
     expect(applied).toHaveLength(1)
@@ -67,11 +68,34 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     stubFetchOk()
     const { ctx, fire } = stubCtx()
     const applied: Session[] = []
-    installDeepLinkListener(ctx, (s) => applied.push(s), () => A)
+    installDeepLinkListener(ctx, (s) => applied.push(s), () => A, SCHEME)
     fire(`${SCHEME}://auth?token=tok-new&server=` + encodeURIComponent('https://a.example') + '&user=alice')
     await new Promise((r) => setTimeout(r, 30))
     expect(applied).toHaveLength(1)
     expect(applied[0]!.token).toBe('tok-new')
+    vi.unstubAllGlobals()
+  })
+
+  it('接受注入的渠道 scheme，而不是永远按官方 scheme 校验', async () => {
+    // 2026-09-11 真机复现的缺陷：渠道客户端（mokahr-harness）的浏览器 SSO 回调
+    // 被当成畸形链接丢掉。scheme 必须来自桌面壳注入的 config。
+    stubFetchOk()
+    const { ctx, warns, fire } = stubCtx()
+    const applied: Session[] = []
+    installDeepLinkListener(ctx, (s) => applied.push(s), () => null, SCHEME)
+    fire(`${SCHEME}://auth?token=tok-c&server=` + encodeURIComponent('https://c.example') + '&user=carol')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(applied).toHaveLength(1)
+    expect(warns.join(' ')).not.toContain('malformed')
+
+    // 反向：不注入（缺省官方值）时，渠道 scheme 的回调进不来 —— 这正是缺陷形态。
+    const fallback = stubCtx()
+    const rejected: Session[] = []
+    installDeepLinkListener(fallback.ctx, (s) => rejected.push(s), () => null)
+    fallback.fire(`${SCHEME}://auth?token=tok-d&server=` + encodeURIComponent('https://d.example') + '&user=dave')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(rejected).toHaveLength(0)
+    expect(fallback.warns.join(' ')).toContain('malformed')
     vi.unstubAllGlobals()
   })
 })

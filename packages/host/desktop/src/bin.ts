@@ -2,10 +2,10 @@
 
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { posix, resolve, win32 } from 'node:path'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
+import { defaultDesktopUserDataDirectory, desktopUserDataDirectoryName } from './desktop-user-data.ts'
 
 /** Parsed launcher action. */
 export type DesktopCliAction = 'export-diagnostics' | 'help' | 'version' | 'launch'
@@ -41,24 +41,11 @@ function packageVersion(): string {
   return manifest.version
 }
 
-/** Resolve the Electron user-data location without importing Electron. */
-export function defaultDesktopUserDataDirectory(
-  platform: NodeJS.Platform = process.platform,
-  environment: NodeJS.ProcessEnv = process.env,
-  homeDirectory: string = homedir(),
-): string {
-  const path = platform === 'win32' ? win32 : posix
-  if (platform === 'win32') {
-    const appData = environment.APPDATA
-    if (appData === undefined || appData.length === 0) {
-      throw new Error('APPDATA is unavailable; cannot locate PicoAide Harness diagnostics')
-    }
-    return path.join(appData, 'PicoAide Harness')
-  }
-  if (platform === 'darwin') return path.join(homeDirectory, 'Library', 'Application Support', 'PicoAide Harness')
-  const config = environment.XDG_CONFIG_HOME
-  return path.join(config === undefined || config.length === 0 ? path.join(homeDirectory, '.config') : config, 'PicoAide Harness')
-}
+/**
+ * Electron 用户数据目录的唯一口径在 `desktop-user-data.ts`（渠道也要用同一份，
+ * 见那里的说明）；这里 re-export，保持 npm 启动器的既有导出面。
+ */
+export { defaultDesktopUserDataDirectory, desktopUserDataDirectoryName }
 
 export interface DesktopCliOptions {
   /** Override used by focused tests and recovery tooling with a non-default data root. */

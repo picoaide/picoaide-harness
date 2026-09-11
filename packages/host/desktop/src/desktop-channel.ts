@@ -27,6 +27,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { channelDshHomeDir } from './desktop-home.ts'
 
 /** 渠道包在应用资源里的位置（随包分发，构建时由 CI 从渠道仓复制）。 */
 const CHANNEL_PROFILE_FILE = new URL('../build/channel.json', import.meta.url)
@@ -36,6 +37,12 @@ const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 
 /** 官方渠道的深链 scheme(改造前的硬编码值)。 */
 export const DEFAULT_DEEP_LINK_SCHEME = 'picoaide'
+
+/** 官方产品名（没有渠道包时的内置兜底；渠道构建必须由渠道包给出）。 */
+export const OFFICIAL_PRODUCT_NAME = 'PicoAide Harness'
+
+/** 应用 id（bundle id / AppUserModelId）形状：反向域名。 */
+const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]*$/u
 
 /**
  * 渠道包没配品牌时的中性占位（与服务端 `fallbackBrandName` 同值）。
@@ -95,6 +102,22 @@ export interface DesktopChannelProfile {
   readonly productName: string | undefined
   /** 桌面窗口标题（未配置时回落到 productName）。 */
   readonly windowTitle: string | undefined
+  /**
+   * 数据目录名（`~` 下的那一段）—— **本次渠道构建的隔离标识**。
+   *
+   * 渠道包没写 `desktop.home_dir` 时由 `desktop.slug` 派生、再退到
+   * `.picoaide-harness-<channelId>`；**任何情况下都不会等于官方目录**
+   * （见 desktop-home.ts 的 `channelDshHomeDir`）。官方构建没有渠道包，
+   * 走调用方的官方缺省，行为不变。
+   */
+  readonly homeDir: string
+  /**
+   * 应用 id（`desktop.app_id`）：Windows 的 AppUserModelId 用它。
+   *
+   * 必须与 electron-builder 写进快捷方式的那个值一致，否则渠道客户端的
+   * 通知在 Windows 上对不上身份（不弹/不归组）；未配置时为 undefined。
+   */
+  readonly appId: string | undefined
   /**
    * 深链 scheme（OIDC/OpenID 浏览器回调把 token 交回客户端用的那个）。
    *
@@ -200,6 +223,16 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     ? rawScheme
     : DEFAULT_DEEP_LINK_SCHEME
   const deepLinkName = nonEmptyString(desktopRecord.deep_link_name) ?? productName
+  // 数据目录名：渠道包显式配的家目录（形状校验）> slug 派生 > `.picoaide-harness-<id>`。
+  // 运行期**不**因为畸形值而拒绝启动：渠道化是增量能力，最差也要落到一个
+  // 只属于本渠道的目录（回落官方目录才是不可接受的 —— 那是跨租户共享）。
+  const declaredHomeDir = nonEmptyString(desktopRecord.home_dir)
+  const homeDir = channelDshHomeDir(channelId, {
+    homeDir: declaredHomeDir,
+    slug: nonEmptyString(desktopRecord.slug),
+  })
+  const rawAppId = nonEmptyString(desktopRecord.app_id)
+  const appId = rawAppId !== undefined && APP_ID_PATTERN.test(rawAppId) ? rawAppId : undefined
 
   // 品牌文案的取值链必须与服务端 channel.go 的 applyDefaults **同序**：
   // 同一个渠道包在客户端自带兜底与服务端下发之间不能给出不同名字，否则
@@ -241,6 +274,8 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     defaultServerURL,
     productName,
     windowTitle,
+    homeDir,
+    appId,
     deepLinkScheme,
     deepLinkName,
     brand,
