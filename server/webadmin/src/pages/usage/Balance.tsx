@@ -14,7 +14,7 @@ import { PageHeader } from '../../components/page-header'
 import { employeeCountText, fmtY, type UserInfo } from './common'
 import { fmtTokens } from '../../lib/format'
 import { cn } from '../../lib/utils'
-import { Coins, Gift, Check, Loader2, Wallet, ScrollText, RotateCcw } from 'lucide-react'
+import { Coins, Gift, Check, Loader2, Wallet, ScrollText } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
 // 余额(2026-09-11 收敛)—— 员工"钱"的唯一页面。
@@ -525,9 +525,7 @@ export default function UsageBalance() {
             </Table>
           )}
           <div className="flex justify-end">
-            <Button variant="outline" onClick={() => setLedgerUser(null)}>
-              <RotateCcw className="mr-1 h-4 w-4" />关闭
-            </Button>
+            <Button variant="outline" onClick={() => setLedgerUser(null)}>关闭</Button>
           </div>
         </DialogContent>
       </Dialog>
