@@ -8,7 +8,7 @@ import {
   BRAND_TILE_RADIUS_RATIO,
   BRAND_TILE_VIEWBOX,
 } from '../channel-geometry.ts'
-import { DEFAULT_CHANNEL, type ChannelConfig } from '../channel-content.ts'
+import { DEFAULT_CHANNEL, nonEmpty, type ChannelConfig } from '../channel-content.ts'
 import { useChannel } from './channel-store.ts'
 import { UpdateIndicator, useUpdateState } from './UpdateIndicator.tsx'
 
@@ -145,6 +145,40 @@ export function BraceMark({ size, className }: { size: number; className?: strin
   return tile
 }
 
+/**
+ * 侧边栏品牌名的**行**样式（导出仅为让测试钉住：这几个值决定它折不折行）。
+ *
+ * 上游槽位（`ui-sidebar` 的 `.brandName`）是 18px 字号、**24px 定高**的行：
+ * 名字一折行就把行撑到 48px，整个侧边栏头部跟着错位（2026-09-11 实测）。
+ * `minWidth: 0` 是因为 flex 项默认 `min-width: auto` 不肯收缩 —— 不写它，
+ * 内层 `text-overflow: ellipsis` 永远没机会生效。
+ */
+export const BRAND_NAME_ROW_STYLE = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '6px',
+  fontWeight: 700,
+  letterSpacing: '0.3px',
+  minWidth: 0,
+  maxWidth: '100%',
+} as const
+
+/** 品牌名**文本**样式：永远单行，放不下就省略号（全名挂在 `title` 上）。 */
+export const BRAND_NAME_TEXT_STYLE = {
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+} as const
+
+/**
+ * 侧边栏品牌名（`sidebar.brand.name` 槽）。
+ *
+ * 两条约束，缺一个就出事（2026-09-11 现场）：
+ *  1. **用短名**（`client.short_name`）—— 服务端不下发这一项，它是随包品牌独有的
+ *     字段（`/api/pico/channel` 出口会把它叠回来）；拿不到就会回落到显示名
+ *     "PicoAide Harness"，在 184px 的行里折成两行。
+ *  2. **不折行**：见上面两个样式常量。
+ */
 export function BrandName() {
   const channel = useChannel()
   const version = process.env.PICOAI_PRODUCT_VERSION as string | undefined
@@ -152,11 +186,12 @@ export function BrandName() {
   const name = resolveClientShortName(channel)
   return createElement(
     'span',
-    { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 700, letterSpacing: '0.3px' } },
-    name,
+    { title: name, style: BRAND_NAME_ROW_STYLE },
+    createElement('span', { style: BRAND_NAME_TEXT_STYLE }, name),
     version != null && version !== ''
       ? createElement('span', {
           style: {
+            flex: 'none',
             fontSize: 10,
             fontWeight: 600,
             lineHeight: 1,
@@ -201,18 +236,15 @@ function resolveClientName(channel: ChannelConfig | null | undefined): string {
  * Resolve the sidebar/短名 from a channel config.
  *
  * 侧边栏空间窄，用的是短名（`identity.short_name`，官方渠道即官方短名）；
- * 服务端不下发这一项，所以它来自随包品牌，缺省回落到显示名。
+ * 服务端不下发这一项，所以它来自随包品牌（`/api/pico/channel` 出口叠加），
+ * 缺省回落到显示名 —— 宁可显示长名字（截断），也不显示别人家的短名。
+ * 导出供测试（`tests/channel-brand-name.spec.ts`）。
  */
-function resolveClientShortName(channel: ChannelConfig | null | undefined): string {
+export function resolveClientShortName(channel: ChannelConfig | null | undefined): string {
   return nonEmpty(channel?.client?.short_name)
     ?? nonEmpty(channel?.client?.display_name)
     ?? DEFAULT_CHANNEL.client?.short_name
     ?? ''
-}
-
-/** 非空字符串（'' 是"渠道没配这一项"，等同于缺失）。 */
-function nonEmpty(value: string | undefined): string | undefined {
-  return value !== undefined && value !== '' ? value : undefined
 }
 
 /** Resolve the client logo URL from a channel config. */
