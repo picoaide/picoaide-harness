@@ -1722,3 +1722,56 @@ func TestSessionBoundCSRF(t *testing.T) {
 		t.Fatal("tampered session-bound CSRF accepted")
 	}
 }
+
+type fakeBrowserProvider struct{ name string }
+
+func (f *fakeBrowserProvider) Name() string { return f.name }
+func (f *fakeBrowserProvider) AuthURL(state, returnServer string) (string, error) {
+	return "https://idp.example/auth?state=" + state, nil
+}
+func (f *fakeBrowserProvider) HandleCallback(code, state string) (UserInfo, error) {
+	return UserInfo{}, nil
+}
+func (f *fakeBrowserProvider) Configure(map[string]string) error { return nil }
+
+// F2 回归(复核):OIDC/openid 路由必须**请求时动态解析** provider,
+// 未配置返回 404 JSON;注册/热更新后立即生效,无需重启。
+func TestBrowserLoginDynamicResolution(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	api := New(mustDB(t))
+
+	call := func(name string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/client/v2/auth/"+name+"/login", nil)
+		api.browserLoginHandler(name)(c)
+		return w
+	}
+	if w := call("oidc"); w.Code != http.StatusNotFound {
+		t.Fatalf("unconfigured oidc login status = %d, want 404 (%s)", w.Code, w.Body.String())
+	}
+	// 运行时注册(等价于 ReloadProviders 热更新后的状态)→ 立即生效
+	api.RegisterBrowser(&fakeBrowserProvider{name: "oidc"})
+	if w := call("oidc"); w.Code != http.StatusFound {
+		t.Fatalf("configured oidc login status = %d, want 302", w.Code)
+	}
+	if loc := call("oidc").Header().Get("Location"); !strings.Contains(loc, "https://idp.example/auth") {
+		t.Fatalf("redirect location = %q", loc)
+	}
+	// openid 仍未配置 → 404(按名称隔离)
+	if w := call("openid"); w.Code != http.StatusNotFound {
+		t.Fatalf("openid login status = %d, want 404", w.Code)
+	}
+}
+
+// F17 回归(复核):客户端面与管理面必须共享同一个登录失败限流器,
+// 否则同一账号可从两个入口各消耗一份失败预算(实际阈值翻倍)。
+func TestLoginLimiterSharedAcrossSurfaces(t *testing.T) {
+	api := New(mustDB(t))
+	if api.limiter != adminLoginLimiter() {
+		t.Fatal("client and admin login surfaces must share one limiter")
+	}
+	if api.limiter != sharedLoginLimiter() {
+		t.Fatal("client limiter must be the shared singleton")
+	}
+}

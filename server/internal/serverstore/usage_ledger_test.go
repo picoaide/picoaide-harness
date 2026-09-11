@@ -352,3 +352,39 @@ func TestUsageAggregateWithLedgerWindowOutsideRetention(t *testing.T) {
 		t.Fatalf("rows = %+v, want 仅 8 个月前 110 tokens", rows)
 	}
 }
+
+// F11 回归(复核):上次 DETACH 成功但 DROP 失败留下的**孤儿表**必须被清理,
+// 而不是让清理循环静默 continue 卡死(旧实现把所有 DETACH 错误都当"已删过")。
+func TestCleanupUsageRetentionDropsOrphanDetachedTable(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	if err := SetSetting(db, RetentionMonthsSetting, "1"); err != nil {
+		t.Fatal(err)
+	}
+	uid := mustUserID(t, db)
+	older := bjMonth(2)
+	id, err := RecordUsage(db, uid, "m-orphan", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAtAt(t, db, id, BeijingDayAt(older, 10))
+	// 先按真实顺序生成日账(清理会在 DROP 前校验/重建账本)。
+	if err := RebuildUsageLedger(db, older, older.AddDate(0, 1, -1)); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟孤儿:分区被 DETACH 但 DROP 失败。
+	if _, err := db.Exec("ALTER TABLE usage DETACH PARTITION usage_" + older.Format("200601")); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	if err := CleanupUsageRetention(db); err != nil {
+		t.Fatalf("CleanupUsageRetention with orphan table: %v", err)
+	}
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_class WHERE relname = ?)`, "usage_"+older.Format("200601")).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatalf("orphan detached table usage_%s still exists after cleanup", older.Format("200601"))
+	}
+}
