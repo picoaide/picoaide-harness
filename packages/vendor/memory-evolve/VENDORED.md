@@ -12,8 +12,11 @@
 
 1. **`package.json`**：`dsh.client.inject` 改为 `@deepseek-ai/dsh-client-store`
    （桌面宿主 DSH 导出名与上游 `dsh-client-runtime` 不同，提交 346fdfb017）。
-2. **`lib/skills-manager.js`**：`/skills-manager` 路由加 loopback+Host+Origin 栅栏
-   （F6 审计：此前没有任何本地信任边界）。
+2. **`lib/skills-manager.js`**：`/skills-manager` 路由加本地信任栅栏
+   （F6 审计：此前没有任何本地信任边界）。复核增强：除 loopback socket+Host+
+   Origin 外，支持 `webRuntime.trustedHosts` 中已声明的局域网权威（`dsh web
+   --host 0.0.0.0` 模式），伪造 loopback Host 仍拒绝；配套测试见
+   `tests/skills-manager.test.js` 的 trustedHosts 用例。
 3. **`lib/skills.js`**：技能采纳的 Windows `EBUSY/EPERM/EACCES/ENOTEMPTY` 降级为
    复制+删除，且**合并语义**（不覆盖目标目录既有用户数据），提交 b81b62d174/a26191b9b7。
 4. **`lib/api.js`**：pending-skills approve 路由把文件系统错误包装为友好提示
