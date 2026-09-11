@@ -39,7 +39,7 @@ flowchart LR
 
 ## Profile 与服务边界
 
-Launcher 只管理一个固定的 `desktop` profile，无 profile 选择器与 `web` 默认项；插件管理走官方 `dsh plugin --profile desktop` 语义（系统 shell 执行）。
+Launcher 只管理一个固定的 `desktop` profile，无 profile 选择器与 `web` 默认项。上游 0.1.5 起 `dsh --profile desktop` 与 `dsh plugin --profile desktop` 都会被 CLI 拒绝（"managed exclusively by the Electron application"），第三方插件改由 profile 的补丁层加入：把 row 写进 `~/.picoaide-harness/cordis.patch.yml`（launcher 每次启动都会合并该用户层）。
 
 Launcher 私有的 `desktopRuntime`、`desktopPlugins`（profile bundle 禁用预览/执行）、Electron executable、Node helper 和 ABI 环境不是第三方 API。公开 contract 见 [`dsh-plugin-desktop/docs/plugin-services.md`](../packages/host/desktop/docs/plugin-services.md)。
 

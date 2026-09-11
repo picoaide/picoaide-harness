@@ -15,7 +15,6 @@ import { applyUpdateBadge } from './desktop-update.tsx'
 import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
 import { applyLoopNotifyClient } from './loop-notify.tsx'
-import { applySidebarBrowserPolicy } from './sidebar-policy.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export {
@@ -50,13 +49,6 @@ export function apply(ctx: ClientContext): void {
       'dsh-plugin-desktop: native directory picker bridge',
     )
   }
-  // Composition-layer policy: the vendored sidebar's iframe browser tab is
-  // disabled by default (the product browser modal is the browser surface).
-  ctx.effect(() => {
-    applySidebarBrowserPolicy()
-    return () => { /* one-shot boot policy; nothing to dispose */ }
-  }, 'desktop: sidebar browser policy')
-
   applyLoopNotifyClient(ctx)
   if (environment.mode === 'advanced') {
     applyAdvancedShell(ctx, environment)

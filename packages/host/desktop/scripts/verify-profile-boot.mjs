@@ -15,7 +15,7 @@ import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 
 // 产物清理(2026-09): 依赖包 lib/ 不再入库, fresh checkout 下 profile smoke
-// 需要先构建全部 workspace 依赖(better-sidebar/cron/connectors/browser 等),
+// 需要先构建全部 workspace 依赖(cron/connectors/browser 等),
 // 否则临时 profile 的 node_modules 里缺 lib/index.js —— CI yarn check 失败根因。
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')

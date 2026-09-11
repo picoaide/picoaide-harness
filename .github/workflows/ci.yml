@@ -70,7 +70,7 @@ jobs:
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       # 根 check(2026-09-06 重排):desktop check 最前(一次构建产出桌面 lib/types,
-      # 其余包 tsc 依赖),随后 better-sidebar 与其余包 check,全程每包只构建一次。
+      # 其余包 tsc 依赖),随后其余包 check,全程每包只构建一次。
       - run: yarn check
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
@@ -81,7 +81,6 @@ jobs:
             packages/host/enterprise/lib packages/host/connectors/lib \
             packages/host/browser/lib packages/host/cron/lib \
             packages/client/account-card/lib packages/client/branding/lib \
-            packages/client/better-sidebar/lib
       - name: Upload workspace build products (one build, three platforms)
         uses: actions/upload-artifact@v7
         with:

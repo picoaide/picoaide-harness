@@ -21,10 +21,14 @@ describe('desktop advanced shell', () => {
   })
 
   it('owns a default-width layout before any resize interaction', () => {
-    const layout = new DesktopLayoutState()
-    const snapshot = layout.getSnapshot()
-    expect(snapshot.sidebar).toBe(SIDEBAR_DEFAULT)
-    expect(snapshot.details).toBe(0)
-    expect(snapshot.narrow).toBe(false)
+    const layout = new DesktopLayoutState(1440)
+    const { layoutInfo, panelInfo } = layout.getSnapshot()
+    expect(layoutInfo.sidebar).toBe(SIDEBAR_DEFAULT)
+    // rc.2 right column: nothing is reserved and nothing is shown until the
+    // occupant reports through ctx.layout.openRightbar.
+    expect(layoutInfo.rightbar).toBeNull()
+    expect(layoutInfo.rightbarShown).toBe(false)
+    expect(layoutInfo.rightbarTrack).toBe(false)
+    expect(panelInfo.activePanelId).toBeNull()
   })
 })
