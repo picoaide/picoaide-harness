@@ -58,7 +58,9 @@ export function absolutizeChannelAssets(channel: ChannelConfig, serverURL: strin
   const abs = (value: string | undefined): string | undefined => {
     const url = nonEmpty(value)
     if (url === undefined) return undefined
-    if (url.startsWith('http://') || url.startsWith('https://')) return url
+    // `data:`（随包内联 logo）本身就是完整的 URL：既不能拼服务端地址，也不能
+    // 当作"相对路径"丢掉 —— 丢了等于白标 logo 在播种那一步被抹掉。
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) return url
     return server === '' ? undefined : server + url
   }
   // **先删后写**，不要写成 `{ ...client, ...(logo === undefined ? {} : { logo }) }`：
@@ -112,6 +114,17 @@ export interface BrandConfig {
   title?: string
   login?: { displayName?: string; shortName?: string; tagline?: string; welcome?: string }
   client?: { displayName?: string; shortName?: string; tagline?: string }
+  /**
+   * 随包 logo（`data:` URI，组装期由 desktop-channel 从渠道包内联进来）。
+   *
+   * 服务端可达时以服务端下发的 URL 为准；服务端不可达、或服务端还是旧版（没有
+   * `/api/client/v2/channel`）时，登录页与侧边栏显示的就是它。没有它，客户端只能
+   * 回落到编译期内置的**官方**花括号 mark —— 白标客户在登录页上看到厂商图形
+   * （2026-09-11 在 moka 渠道的线上环境实测到）。
+   */
+  logoURL?: string
+  /** 深色场景的随包 logo（`assets.logo_dark`），同一来源。 */
+  logoDarkURL?: string
 }
 
 /**
@@ -192,12 +205,18 @@ export function brandChannel(brand: BrandConfig | undefined): ChannelConfig {
   const base = NEUTRAL_CHANNEL
   const loginName = nonEmpty(login?.displayName) ?? nonEmpty(brand.title) ?? base.login?.display_name ?? ''
   const clientName = nonEmpty(client?.displayName) ?? loginName
+  // 随包 logo（data: URI）：登录页与界面在"服务端不可达/旧版服务端"时靠它显示
+  // **客户自己的**标识，而不是内置的官方图形。
+  const logoURL = nonEmpty(brand.logoURL)
+  const logoDarkURL = nonEmpty(brand.logoDarkURL)
   return {
     title: nonEmpty(brand.title) ?? loginName,
     login: {
       display_name: loginName,
       tagline: nonEmpty(login?.tagline) ?? base.login?.tagline ?? '',
       welcome: nonEmpty(login?.welcome) ?? '',
+      ...(logoURL === undefined ? {} : { logo_url: logoURL }),
+      ...(logoDarkURL === undefined ? {} : { logo_url_dark: logoDarkURL }),
     },
     client: {
       display_name: clientName,
@@ -205,6 +224,7 @@ export function brandChannel(brand: BrandConfig | undefined): ChannelConfig {
       // 所以缺省直接回落到显示名 —— 宁可长一点，也不显示一个对不上的名字。
       short_name: nonEmpty(client?.shortName) ?? nonEmpty(login?.shortName) ?? clientName,
       tagline: nonEmpty(client?.tagline) ?? '',
+      ...(logoURL === undefined ? {} : { logo_url: logoURL }),
     },
   }
 }

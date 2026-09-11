@@ -67,6 +67,16 @@ export interface ChannelBrand {
   readonly login: { readonly displayName: string; readonly shortName: string; readonly tagline: string; readonly welcome: string }
   /** 客户端界面品牌区（侧边栏/顶栏/关于）。 */
   readonly client: { readonly displayName: string; readonly shortName: string; readonly tagline: string }
+  /**
+   * 随包 logo（`data:` URI，来自渠道目录的 `assets.logo`）。
+   *
+   * 服务端可达时以服务端下发的 URL 为准；服务端不可达、或服务端还是旧版（没有
+   * `/api/client/v2/channel`）时，客户端与登录页显示的就是它 —— 没有它就只能回落
+   * 到编译期内置的**官方**花括号 mark（白标客户看到厂商图形）。2026-09-11 实测。
+   */
+  readonly logoURL?: string
+  /** 深色场景的随包 logo（`assets.logo_dark`），同上。 */
+  readonly logoDarkURL?: string
 }
 
 /**
@@ -137,6 +147,17 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
+/**
+ * 只接受 `data:` URI（渠道包是不可信输入：远程 URL 会被当成"客户端开机就请求任意
+ * 地址"的能力，因此一律忽略）。
+ * @param value - `assets.*_inline` 的取值。
+ * @returns 合法的 data URI，或 undefined。
+ */
+function dataURI(value: unknown): string | undefined {
+  const raw = nonEmptyString(value)
+  return raw !== undefined && raw.startsWith('data:') ? raw : undefined
+}
+
 /** 取对象（数组/null/标量一律当空对象——渠道包是不可信输入）。 */
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -187,6 +208,12 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
   const shortName = nonEmptyString(identityRecord.short_name)
   const displayName = nonEmptyString(identityRecord.display_name)
   const tagline = nonEmptyString(identityRecord.tagline)
+  // 随包 logo：`stageChannelProfile()` 把渠道目录里的 logo 内联成 data: URI。
+  // 只认 data: 前缀 —— 渠道包是不可信输入，别让它往 <img src> 里塞远程地址
+  // （那等于给渠道包一个"客户端开机就请求任意 URL"的能力）。
+  const assetsRecord = asRecord(record.assets)
+  const logoURL = dataURI(assetsRecord.logo_inline)
+  const logoDarkURL = dataURI(assetsRecord.logo_dark_inline)
   const brand: ChannelBrand = {
     channelId,
     title: nonEmptyString(identityRecord.title) ?? displayName ?? NEUTRAL_BRAND_NAME,
@@ -205,6 +232,8 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
       shortName: shortName ?? '',
       tagline: nonEmptyString(copyRecord.client_tagline) ?? tagline ?? '',
     },
+    ...(logoURL === undefined ? {} : { logoURL }),
+    ...(logoDarkURL === undefined ? {} : { logoDarkURL }),
   }
 
   return {

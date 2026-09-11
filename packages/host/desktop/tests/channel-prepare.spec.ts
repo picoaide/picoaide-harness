@@ -160,3 +160,65 @@ describe('prepareChannelPackaging', () => {
     expect(sha256(join(appDir, 'tray-icon-blue.png'))).toBe(sha256(join(official, 'tray-icon-blue.png')))
   })
 })
+
+describe('generateTrayIcons', () => {
+  /** 一份"渠道用自己的品牌色"的 logo：平坦 #006AFF 方块 + 白 mark。 */
+  function brandColorLogo(color = '#006AFF'): string {
+    const path = join(tempDir('dsh-tray-src-'), 'logo.svg')
+    writeFileSync(path, `<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254">`
+      + `<rect width="1254" height="1254" rx="180" fill="${color}"/>`
+      + '<path d="M300 900 L500 300 L627 700 L754 300 L954 900 Z" fill="#FFFFFF"/></svg>')
+    return path
+  }
+
+  it('渠道用自己的品牌色画 logo 也能派生托盘位图（不再硬要求 #000000）', async () => {
+    // 2026-09-11 实测：托盘派生此前硬性要求源文件里出现 fill="#000000"，
+    // 于是"渠道 logo 用客户的品牌色"直接打包失败，报错还只说"必须用 #000000"。
+    const out = tempDir('dsh-tray-out-')
+    await generateTrayIcons({ source: brandColorLogo(), buildRoot: out })
+
+    const meta = await sharp(join(out, 'tray-icon-blue@2x.png')).metadata()
+    expect(meta.width).toBe(32)
+    // 方块被换成托盘变体色（固定黑），mark 仍是白色 —— 证明替换的是方块自身颜色。
+    const { data, info } = await sharp(join(out, 'tray-icon-blue@2x.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    let dark = 0
+    let white = 0
+    for (let i = 0; i < data.length; i += info.channels) {
+      const [r, g, b, a] = [data[i]!, data[i + 1]!, data[i + 2]!, data[i + 3]!]
+      if (a < 40) continue
+      if (r < 60 && g < 60 && b < 60) dark += 1
+      if (r > 200 && g > 200 && b > 200) white += 1
+    }
+    expect(dark).toBeGreaterThan(500)
+    expect(white).toBeGreaterThan(0)
+  })
+
+  it('官方 logo 的产物与"替换 #000000"的旧行为逐字节一致', async () => {
+    // 改造只放宽了输入约束，官方路径的产物不能变一丝一毫。
+    const out = tempDir('dsh-tray-official-')
+    await generateTrayIcons({ source: officialLogo, buildRoot: out })
+    const source = readFileSync(officialLogo, 'utf8')
+    for (const [file, size] of [['tray-iconTemplate.png', 16], ['tray-icon-blue@2x.png', 32]] as const) {
+      const legacy = await sharp(Buffer.from(source.replaceAll('#000000', '#000000')))
+        .resize({ width: size, height: size, fit: 'contain' })
+        .png({ compressionLevel: 9 })
+        .toBuffer()
+      expect(readFileSync(join(out, file)).equals(legacy)).toBe(true)
+    }
+  })
+
+  it('没有平坦方块（渐变/样式表）时给出可读的失败', async () => {
+    const gradient = join(tempDir('dsh-tray-bad-'), 'logo.svg')
+    writeFileSync(gradient, '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+      + '<defs><linearGradient id="g"><stop offset="0" stop-color="#006AFF"/></linearGradient></defs>'
+      + '<rect width="24" height="24" fill="url(#g)"/></svg>')
+    await expect(generateTrayIcons({ source: gradient, buildRoot: tempDir('dsh-tray-bad-out-') }))
+      .rejects.toThrow(/flat|rect/iu)
+
+    const styled = join(tempDir('dsh-tray-bad2-'), 'logo.svg')
+    writeFileSync(styled, '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><style>.t{fill:#000000}</style>'
+      + '<rect class="t" width="24" height="24"/></svg>')
+    await expect(generateTrayIcons({ source: styled, buildRoot: tempDir('dsh-tray-bad2-out-') }))
+      .rejects.toThrow(/style/iu)
+  })
+})
