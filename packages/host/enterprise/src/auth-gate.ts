@@ -109,7 +109,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
 
   <!-- Step 2: 品牌 + 登录方式 -->
   <div id="step2" class="stage">
-    <button type="button" class="back" id="back-btn">← 修改服务端地址</button>
+    __BACK_BUTTON__
     <div class="brand" id="brand-area"></div>
     <div id="methods" class="methods"></div>
     <form id="f2" style="display:none">
@@ -344,8 +344,10 @@ const LOGIN_HTML = `<!DOCTYPE html>
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   }
 
-  // 返回 Step1
-  document.getElementById('back-btn').addEventListener('click', function () {
+  // 返回 Step1(内置了服务端地址的构建不渲染这个按钮,所以要判空 ——
+  // 不判空会在脚本这行抛 TypeError,后面所有语句(含登录表单处理)全部不注册)
+  var backBtn = document.getElementById('back-btn')
+  if (backBtn) backBtn.addEventListener('click', function () {
     document.getElementById('step2').classList.remove('active')
     document.getElementById('step1').classList.add('active')
     err2.textContent = ''
@@ -710,6 +712,17 @@ function builtInChannel(brand: BrandConfig | undefined): ChannelConfig {
   return brandChannel(brand)
 }
 
+/**
+ * Step2 顶部的"返回修改服务端地址"按钮。
+ *
+ * **只在没有内置服务端地址时才渲染**（`apply()` 按 `config.defaultServer` 决定）：
+ * 渠道包把地址写死之后，员工不该被要求、也不该被诱导去改它 —— 客户端只跟一家
+ * 服务端说话；界面上留一个"改地址"的入口，既是多余的步骤，也给"把凭据发到别的
+ * 地址"留了路。地址连不上时页面**仍停在 Step1**（那里可以改地址重试），所以
+ * 真出问题时不会把人困住。
+ */
+const BACK_BUTTON_HTML = '<button type="button" class="back" id="back-btn">← 修改服务端地址</button>'
+
 export function apply(ctx: Context, config: Config): void {
   // 预置域名来自渠道包(随包分发的 build/channel.json)或 profile 组装配置,
   // 会直接落进 `value="…"` 属性 —— 必须做属性转义,否则一个带引号的地址就能
@@ -726,6 +739,8 @@ export function apply(ctx: Context, config: Config): void {
     .replaceAll('__DEFAULT_SERVER__', defaultServer)
     // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
     .replaceAll('__DEFAULT_SERVER_MARK__', configuredServer === '' ? '' : 'data-default-server="1"')
+    // 内置了地址就不再提供"返回修改服务端地址"（见 BACK_BUTTON_HTML 的说明）。
+    .replaceAll('__BACK_BUTTON__', configuredServer === '' ? BACK_BUTTON_HTML : '')
     .replaceAll('__BRAND_NAME__', brandTitle)
     .replaceAll('__BRAND_JSON__', brandScriptLiteral(brand))
   const restoringHTML = RESTORING_HTML.replaceAll('__BRAND_NAME__', brandTitle)
