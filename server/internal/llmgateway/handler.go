@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -320,7 +321,14 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 	if stream {
 		client = a.sse
 	}
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(raw))
+	// F4: 流式请求的 context 与客户端断开解耦 —— 客户端断线后 serveStream
+	// 仍会 drain 上游直到拿到 usage chunk,否则按已转发内容估算计费;若沿用
+	// 客户端 context,取消会让上游停止、用量永远拿不到(免费漏洞)。
+	reqCtx := c.Request.Context()
+	if stream {
+		reqCtx = context.WithoutCancel(reqCtx)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -441,6 +449,10 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 // final chunk's "usage" field. Rows that can never be backfilled are deleted
 // (C-9): upstream 4xx, client disconnect, write failure. secrets: 上游官方
 // key,用于响应行/头脱敏。
+// streamDrainTimeout 是客户端断开后继续 drain 上游的最长时间(F4):
+// 在拿到真实 usage chunk 与不过度占用上游资源之间折中。
+const streamDrainTimeout = 2 * time.Minute
+
 func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
@@ -474,27 +486,25 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	lineTooLong := false
 	lineEOF := false
 	backfilled := false // usage row received real tokens (must not be dropped)
+	var forwardedBytes int64
 
-	// 2026-08-31 性能优化:原 readLineWithIdle 每行创建 goroutine+channel+
-	// NewTimer(2000 并发流 × 2000 行/流 ≈ 800 万次分配,timer 调度在万级
-	// 活跃 timer 下显著退化——实测服务端每流 26s→52s,吞吐腰斩)。
-	// 改为:单读 goroutine 常驻循环读行(零 per-line goroutine),
-	// idle 超时用一个共享 ticker 每 1s 检查(零 per-line timer)。
-	// P2-8:读行走 readLineBounded——单行累积超过 maxStreamLineBytes 立即
-	// 返回 errStreamLineTooLong,不把无换行超长行读进内存。
+	// 读行 goroutine(单 goroutine 常驻,零 per-line 分配)。stopRead 用于
+	// 主循环提前退出时解除阻塞;客户端断开**不**停止读取(F4:继续 drain
+	// 上游直到拿到 usage chunk,否则按已转发内容估算,不允许白嫖)。
 	type lineRes struct {
 		line string
 		err  error
 	}
 	lines := make(chan lineRes, 64)
 	readGone := make(chan struct{})
+	stopRead := make(chan struct{})
 	go func() {
 		defer close(readGone)
 		for {
 			l, e := readLineBounded(br, maxStreamLineBytes)
 			select {
 			case lines <- lineRes{l, e}:
-			case <-c.Request.Context().Done():
+			case <-stopRead:
 				return
 			}
 			if e != nil {
@@ -502,17 +512,22 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 			}
 		}
 	}()
-	// idle 检查:每 1s 看一次"距上次收到行的间隔",超过 streamIdleTimeout 即超时。
-	// 复用全局 ticker 不可行(每流独立计时应复位),用每流单 ticker(仅 1 个/流,
-	// 非每行) + lastLineAt 判定。
+	defer close(stopRead)
+
+	// idle 检查:每 1s 看一次"距上次收到行的间隔",超过 streamIdleTimeout
+	// 即超时(上游挂死保护,客户端断开后的 drain 也受此约束)。
 	idleTick := time.NewTicker(time.Second)
 	defer idleTick.Stop()
 	lastLineAt := time.Now()
+	// F4:客户端断开后的 drain 上限,防止上游长时间占资源。
+	drainDeadline := time.Time{}
 
 	for {
-		// 5#9/5#10: stop pumping once the client context is gone
-		if c.Request.Context().Err() != nil {
+		if !clientGone && c.Request.Context().Err() != nil {
 			clientGone = true
+			drainDeadline = time.Now().Add(streamDrainTimeout)
+		}
+		if clientGone && !drainDeadline.IsZero() && time.Now().After(drainDeadline) {
 			break
 		}
 		select {
@@ -533,12 +548,14 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 						}
 					}
 				}
-				if _, werr := c.Writer.WriteString(line); werr != nil {
-					clientGone = true
-					break
-				}
-				if fl != nil {
-					fl.Flush()
+				forwardedBytes += int64(len(line))
+				if !clientGone {
+					if _, werr := c.Writer.WriteString(line); werr != nil {
+						clientGone = true
+						drainDeadline = time.Now().Add(streamDrainTimeout)
+					} else if fl != nil {
+						fl.Flush()
+					}
 				}
 			}
 			if r.err != nil {
@@ -546,9 +563,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 					// P2-8: 单行超过上限——不回传半行,直接中断该流。
 					lineTooLong = true
 					log.Printf("gateway: upstream stream line exceeds %d bytes, terminating", maxStreamLineBytes)
-					fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应单行过大"}}`)
-					if fl != nil {
-						fl.Flush()
+					if !clientGone {
+						fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应单行过大"}}`)
+						if fl != nil {
+							fl.Flush()
+						}
 					}
 				} else { // EOF / 上游关闭
 					lineEOF = true
@@ -558,15 +577,20 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 			if time.Since(lastLineAt) > streamIdleTimeout {
 				idleTimedOut = true
 				log.Printf("gateway: stream idle timeout after %v, terminating", streamIdleTimeout)
-				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
-				if fl != nil {
-					fl.Flush()
+				if !clientGone {
+					fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
+					if fl != nil {
+						fl.Flush()
+					}
 				}
 			}
 		case <-c.Request.Context().Done():
-			clientGone = true
+			if !clientGone {
+				clientGone = true
+				drainDeadline = time.Now().Add(streamDrainTimeout)
+			}
 		}
-		if clientGone || idleTimedOut || lineTooLong || lineEOF {
+		if lineEOF || idleTimedOut || lineTooLong {
 			break
 		}
 	}
@@ -575,22 +599,26 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	case <-readGone:
 	case <-time.After(time.Second):
 	}
-	// idle 超时、客户端断开、单行超限,以及**上游正常结束但从未回传 usage**
-	// 时,未回填的 pending 行必须清除(否则计量虚增一小时;2026-09-08 P2-11
-	// 补上 lineEOF 分支)。已回填真实 token 的行不得删除,否则真实用量丢失。
-	if (clientGone || idleTimedOut || lineTooLong || lineEOF) && usageID > 0 && !backfilled {
-		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+	// 结算:
+	//   - 已回填真实 usage → 保留(计费已完成);
+	//   - 未回填但已向下游/上游读过内容 → 按输出字节估算 completion tokens
+	//     并回填(F4:客户端中途断开不再免费;输入 token 无法得知,保守为 0);
+	//   - 完全没有任何内容(连接失败/4xx 分支之外) → 删除 pending。
+	if usageID > 0 && !backfilled {
+		if forwardedBytes > 0 {
+			estimated := forwardedBytes / 4 // 约 4 字节/token(保守下限)
+			if estimated > 0 {
+				if err := serverstore.UpdateUsageTokensCached(a.DB, usageID, 0, estimated, 0); err != nil {
+					log.Printf("gateway: estimated backfill: %v", err)
+				}
+			} else if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+				log.Printf("gateway: delete pending usage: %v", err)
+			}
+		} else if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 			log.Printf("gateway: delete pending usage: %v", err)
 		}
 	}
 }
-
-// readLineBounded reads one '\n'-terminated line, accumulating at most max
-// bytes; exceeding max returns errStreamLineTooLong with an empty line so a
-// caller can never be handed a partially buffered oversized line (P2-8).
-// It reads through bufio.ReadSlice, so the in-flight buffer stays bounded by
-// max + bufio buffer size regardless of how many bytes the upstream sends
-// without a newline.
 func readLineBounded(br *bufio.Reader, max int) (string, error) {
 	var buf []byte
 	for {
@@ -706,6 +734,16 @@ const moneyEpsilon = 0.005
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	if user.IsAdmin {
 		return false, ""
+	}
+	// 0) 员工余额闸门(0061):balance.enabled=1 时余额 <= 0 直接拒绝。
+	// 余额是**存量**语义(与月度配额"流量上限"不同):管理员手动调整 +
+	// 每月发放,消费按 usage.cost 原子扣减(与落账同事务,见 serverstore)。
+	// 默认关闭 —— 存量部署升级后余额全为 0,若默认开启会全员 429。
+	if bs, err := serverstore.GetBalanceSettings(a.DB); err != nil {
+		log.Printf("gateway: balance settings lookup error (fail-closed): %v", err)
+		return true, "余额校验暂不可用,请稍后再试"
+	} else if bs.Enabled && user.BalanceMoney <= moneyEpsilon {
+		return true, "账户余额不足,请联系管理员充值"
 	}
 
 	// 1) 部门预算链路(仅需 groupID/name/budget,不查用量)

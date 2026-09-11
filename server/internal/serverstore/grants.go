@@ -194,7 +194,7 @@ func AccessibleSharedResourceNames(db *sql.DB, table SharedGrantableTable, usern
 		sb.WriteString("kind = ? AND ")
 		args = append(args, extra...)
 	}
-	sb.WriteString("((grantee_type = 'user' AND grantee = ?)")
+	sb.WriteString("((grantee_type = 'user' AND lower(grantee) = lower(?))")
 	args = append(args, username)
 	if len(groups) > 0 {
 		sb.WriteString(" OR (grantee_type = 'group' AND (")

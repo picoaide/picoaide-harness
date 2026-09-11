@@ -183,6 +183,20 @@ describe('serializeEvalResult: secret masking', () => {
     expect(serializeEvalResult([1, 'two', null, true])).toBe('[1,"two",null,true]')
     expect(serializeEvalResult(undefined)).toBe('null')
   })
+
+  it('masks a secret-shaped string longer than the 4 KB truncation cap (2026-09-11)', () => {
+    // Regression: truncation used to return BEFORE the detectors, so a large
+    // cookie jar (or any long credential-bearing body) came back in the clear.
+    const cookie = 'SID=OPAQUESECRETVALUE; theme=dark; pad=' + 'y'.repeat(4200)
+    expect(serializeEvalResult(cookie)).toBe('"****"')
+    const longToken = 'prefix ' + 'y'.repeat(4200) + ' token=super-secret-value'
+    expect(serializeEvalResult(longToken)).toBe('"****"')
+    // A long, harmless string is still truncated (with the ellipsis marker).
+    const harmless = 'plain text '.repeat(500)
+    const out = serializeEvalResult(harmless)
+    expect(out.startsWith('"plain text')).toBe(true)
+    expect(out.endsWith('…"')).toBe(true)
+  })
 })
 
 describe('serializeEvalResult: size / depth / key caps', () => {

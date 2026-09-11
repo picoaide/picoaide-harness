@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ApiError, AuthError, assertServerURLAllowed, changePassword, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
+import { applyPinnedFingerprintsFromEnv, defaultTlsStorePath, installCertificateVerification } from './server-connector/tls.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import {
   computeSkillContentHash,
@@ -724,6 +725,27 @@ function builtInChannel(brand: BrandConfig | undefined): ChannelConfig {
 const BACK_BUTTON_HTML = '<button type="button" class="back" id="back-btn">← 修改服务端地址</button>'
 
 export function apply(ctx: Context, config: Config): void {
+  // F13(审计 2026-09-11):接线 TLS 校验 —— 系统 CA 信任的证书直接放行;
+  // 自签名/私有 CA 只有在 PICOAI_TLS_PINS 预置或历史 pin 指纹匹配时才接受,
+  // 未知/不匹配一律拒绝(此前该模块从未被调用,文档宣称的 TOFU 保护是死代码)。
+  const tlsStore = defaultTlsStorePath()
+  try {
+    const pinned = applyPinnedFingerprintsFromEnv(tlsStore)
+    if (pinned > 0) ctx.logger?.info?.(`pico: applied ${pinned} pinned TLS fingerprint(s)`)
+  } catch (cause) {
+    ctx.logger?.warn?.(`pico: pinned TLS fingerprints ignored: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+  void installCertificateVerification(tlsStore, {
+    onUnknownFingerprint: (host, fingerprint) => {
+      ctx.logger?.warn?.(`pico: TLS certificate for ${JSON.stringify(host)} is not trusted and not pinned (sha256=${fingerprint}); set PICOAI_TLS_PINS to trust it`)
+    },
+    onMismatchFingerprint: (host, fingerprint) => {
+      ctx.logger?.error?.(`pico: TLS certificate mismatch for ${JSON.stringify(host)} (sha256=${fingerprint}); connection refused`)
+    },
+  }).catch((cause: unknown) => {
+    ctx.logger?.warn?.(`pico: TLS verification install failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+  })
+
   // 预置域名来自渠道包(随包分发的 build/channel.json)或 profile 组装配置,
   // 会直接落进 `value="…"` 属性 —— 必须做属性转义,否则一个带引号的地址就能
   // 从属性里逃逸。渠道包是自家产物,但登录页是认证前唯一的 HTML 面,

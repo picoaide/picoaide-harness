@@ -210,7 +210,20 @@ func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	users, _, err := serverstore.ListUsers(db, 0, 100000, "")
+	// F18(审计 2026-09-11):分页拉取全部用户(旧实现硬上限 10 万,超出部分
+	// 永远不会被停用 —— 大规模目录的离职用户 token 不会吊销)。
+	const pageSize = 1000
+	var users []serverstore.User
+	for offset := 0; ; offset += pageSize {
+		batch, total, err := serverstore.ListUsers(db, offset, pageSize, "")
+		if err != nil {
+			return 0, err
+		}
+		users = append(users, batch...)
+		if len(batch) == 0 || int64(len(users)) >= total {
+			break
+		}
+	}
 	if err != nil {
 		return 0, err
 	}

@@ -6,6 +6,7 @@ import (
 )
 
 // Effective groups 解析(金字塔权限继承):
+// 注:组织树读取有 30s TTL 缓存,写路径通过 InvalidateGroupTree 主动失效。
 //
 //	用户有效组 = 归属部门 + 祖先链(授权给祖先部门 → 覆盖子孙部门成员)
 //	             + 该用户任主管的部门及其全部子部门(主管向上兼容)
@@ -17,6 +18,12 @@ import (
 const groupTreeTTL = 30 * time.Second
 
 var groupTreeCache = newTTLCache(groupTreeTTL)
+
+// InvalidateGroupTree 使组织树缓存立即失效。
+// 部门/组/成员关系写入后必须调用(F3):环检测、配额预算链、用量归并都读
+// 这棵树,只靠 30s TTL 会让权限与预算口径在窗口内使用旧结构,甚至让
+// 「把父部门改到后代下」的误操作绕过环检测(审计 2026-09-11)。
+func InvalidateGroupTree() { groupTreeCache.invalidateAll() }
 
 type groupNode struct {
 	id     int64

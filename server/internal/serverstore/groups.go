@@ -43,6 +43,9 @@ func GetOrCreateGroup(db queryer, name string) (int64, error) {
 	// RETURNING id via QueryRow; SQLite uses Exec + LastInsertId).
 	var insErr error
 	insErr = db.QueryRow("INSERT INTO groups (name) VALUES (?) RETURNING id", name).Scan(&id)
+	if insErr == nil {
+		InvalidateGroupTree() // F3: 新组立即进入组织树
+	}
 	if insErr != nil {
 		// concurrent insert or a historical casing variant; re-read nocase
 		if err2 := db.QueryRow("SELECT id FROM groups WHERE "+CaseInsensitiveCmp("name"), name).Scan(&id); err2 == nil {
@@ -124,7 +127,11 @@ func SyncUserGroups(db *sql.DB, userID int64, names []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateGroupTree() // F3: 成员归属变更立即影响授权/预算链
+	return nil
 }
 
 // AddUserGroup adds a single group membership (department assignment),
@@ -134,6 +141,9 @@ func AddUserGroup(db *sql.DB, userID, groupID int64) error {
 		return err
 	}
 	stmt := "INSERT INTO user_groups (user_id, group_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
-	_, err := db.Exec(stmt, userID, groupID)
-	return err
+	if _, err := db.Exec(stmt, userID, groupID); err != nil {
+		return err
+	}
+	InvalidateGroupTree() // F3
+	return nil
 }

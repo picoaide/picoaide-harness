@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -246,6 +248,10 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "名称和 base_url 必填")
 		return
 	}
+	if err := validateUpstreamBaseURL(req.BaseURL); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
 	// 渠道型上游的 key 是同步的刚需:无 key 创建必然同步失败(审计修复 L4)
 	if channel != "" && req.APIKey == "" {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "渠道型上游必须填写 API Key")
@@ -324,6 +330,10 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.BaseURL != "" {
+		if err := validateUpstreamBaseURL(req.BaseURL); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
 		p.BaseURL = req.BaseURL
 	}
 	wasChannel := p.Channel
@@ -1023,4 +1033,67 @@ func modelEnabledByDB(db *sql.DB, name string) bool {
 		return false
 	}
 	return ModelEnabled(models, name)
+}
+
+// ---------------------------------------------------------------------------
+// F10(审计 2026-09-11):provider base_url 安全校验。
+//
+// 背景:上游地址是管理员可控输入,服务端会对它发起请求并附带该 provider 的
+// API key。不校验时,被攻破的管理会话可把 key 发往云 metadata(169.254.169.254
+// / 100.100.100.200 / fd00:ec2::254)窃取云凭据,或指向任意非 http 协议。
+//
+// 与 reports webhook 的"禁止私网"不同:企业内网自建 LLM 网关是本产品的
+// 主要场景,**允许私网**;这里只拦截:
+//   - 非 http/https scheme、带 userinfo 的 URL;
+//   - 链路本地/云 metadata 地址(IPv4 169.254.0.0/16、IPv6 fe80::/10、
+//     阿里云 100.100.100.200、AWS IPv6 fd00:ec2::254);
+//   - 无法解析的主机名(保存时即失败,而不是请求时才报错)。
+// ---------------------------------------------------------------------------
+
+// isBlockedUpstreamIP 委托到 util 的统一出站护栏(保存时与运行期同一口径)。
+func isBlockedUpstreamIP(ip net.IP) bool { return util.IsBlockedOutboundIP(ip) }
+
+// validateUpstreamBaseURL 校验 provider 上游地址(F10)。
+func validateUpstreamBaseURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("base_url 不能为空")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("base_url 不是合法 URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("base_url 只支持 http/https")
+	}
+	if u.User != nil {
+		return errors.New("base_url 不允许携带用户名/密码")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("base_url 缺少主机名")
+	}
+	if util.IsBlockedOutboundHost(host) {
+		return errors.New("base_url 不允许指向云 metadata 服务")
+	}
+	// 字面 IP:直接判定,不解析。
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedUpstreamIP(ip) {
+			return errors.New("base_url 不允许指向链路本地/云 metadata 地址")
+		}
+		return nil
+	}
+	// 域名:解析成功则检查任一结果(防解析到 metadata)。解析失败**放行**
+	// (离线部署/内网 DNS 短暂不可用是常态;运行时还有 Dial 复检兜底),
+	// 但保存时的字面 IP 与已知 metadata 域名仍拦截。
+	ips, lerr := net.LookupIP(host)
+	if lerr != nil || len(ips) == 0 {
+		return nil
+	}
+	for _, ip := range ips {
+		if isBlockedUpstreamIP(ip) {
+			return errors.New("base_url 解析到了链路本地/云 metadata 地址")
+		}
+	}
+	return nil
 }

@@ -234,8 +234,9 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); post('forward').then(refresh) }
     if (e.ctrlKey && e.key.toLowerCase() === 'a' && e.shiftKey) { e.preventDefault(); post('overlay', { mode: state.uiMode === 'panel' ? 'capsule' : 'panel' }) }
     if (e.key === 'Escape') {
+      // Close the floating surface only — Esc never releases control to the AI
+      // (the 交给 AI button is the single way back; 2026-09-11).
       post('overlay', { mode: 'capsule' })
-      if (state.controlled) post('takeover', { active: false })
     }
   })
 
@@ -258,8 +259,10 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 
 /** The AI overlay page. Rendered inside the transparent always-on-top view;
  * the view's bounds (host-controlled per mode) define the viewport — each
- * surface fills 100% of it. Modes: capsule (AI 指示), panel (活动面板),
- * menu (⋮ 菜单), viewer (书签/历史/下载), mask (AI 操作中拦截遮罩). */
+ * surface fills 100% of it. Modes: capsule (AI 指示 + 交给 AI), panel
+ * (活动面板), menu (⋮ 菜单), viewer (书签/历史/下载), mask (AI 操作中拦截遮罩,
+ * 其中只有 pill 上的「我来操作」按钮可交互 — 点遮罩其他地方不会夺取控制权).
+ * The 我来操作 / 交给 AI button is the ONE control toggle in both directions. */
 export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -325,9 +328,9 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   .s-capsule .dot.busy { background: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
   .s-capsule .dot.paused { background: var(--warning); }
   .s-capsule .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .s-capsule .take { flex: none; height: 24px; padding: 0 10px; font-size: 12px; background: var(--warning); border-color: var(--warning); color: #fff; }
-  .s-capsule:hover .take { display: inline-flex; align-items: center; }
-  .s-capsule:not(:hover) .take { display: none; }
+  /* The toggle is ALWAYS visible (never hover-revealed): 我来操作 / 交给 AI is
+     the single control for handing the browser over and taking it back. */
+  .s-capsule .take { flex: none; display: inline-flex; align-items: center; height: 24px; padding: 0 10px; font-size: 12px; background: var(--warning); border-color: var(--warning); color: #fff; }
 
   /* ---------- panel (AI 活动) ---------- */
   .s-panel { flex-direction: column; background: var(--surface-raised); border-left: 1px solid var(--border); box-shadow: -8px 0 28px rgba(0,0,0,.10); }
@@ -363,14 +366,15 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   #viewer-search { margin-left: auto; width: 220px; height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-raised); color: var(--text); }
 
   /* ---------- mask (AI 操作中拦截) ---------- */
-  .s-mask { align-items: flex-end; justify-content: center; padding: 0 0 14px; background: rgba(10, 12, 16, 0.08); cursor: pointer; user-select: none; -webkit-user-select: none; }
+  .s-mask { align-items: flex-end; justify-content: center; padding: 0 0 14px; background: rgba(10, 12, 16, 0.08); user-select: none; -webkit-user-select: none; }
   @media (prefers-color-scheme: dark) {
     .s-mask { background: rgba(0, 0, 0, 0.14); }
   }
   #pill { display: flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 999px; background: rgba(30, 34, 42, 0.86); color: #fff; box-shadow: 0 4px 16px rgba(0,0,0,.22); max-width: 80%; overflow: hidden; white-space: nowrap; }
   #pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #4f83ff; animation: breathe 1.6s ease-in-out infinite; }
-  #pill #txt { overflow: hidden; text-overflow: ellipsis; }
-  #pill #hint { color: rgba(255,255,255,.75); font-weight: 500; }
+  #pill #txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #pill #pill-take { flex: none; height: 24px; padding: 0 12px; font-size: 12px; font-weight: 500; color: #fff; background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .42); }
+  #pill #pill-take:hover { background: rgba(255, 255, 255, .26); }
 
   @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 </style>
@@ -389,7 +393,6 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     <h2>AI 活动 <button class="close" id="panel-close">×</button></h2>
     <div id="stream"></div>
     <div id="panel-bottom">
-      <button id="take-btn">我来操作</button>
       <button id="hide-btn">隐藏窗口</button>
     </div>
   </div>
@@ -403,12 +406,14 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     <div id="viewer-list" class="list"></div>
   </div>
 
-  <!-- mask -->
+  <!-- mask: the scrim is INERT — the pill's button is the only entry while
+       the window is locked (whole-window click takeover was removed
+       2026-09-11: a stray click anywhere used to steal the browser). -->
   <div class="surface s-mask" id="mask">
     <div id="pill">
       <span class="dot"></span>
       <span id="txt">AI 正在操作</span>
-      <span id="hint">点击让我接管</span>
+      <button id="pill-take" type="button">我来操作</button>
     </div>
   </div>
 
@@ -464,18 +469,15 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     if (mode === 'viewer') renderViewer(viewerKind, $('viewer-search').value || '')
   }
 
-  /** Mask pill: the ONLY browser entry while masked — 我来操作 unlocks the
-   * window; the pill narrates the current AI state (busy tool / idle). */
+  /** Mask pill: the pill BUTTON is the ONLY browser entry while masked —
+   * granting control here (我来操作) and returning it (交给 AI, the same
+   * button in the capsule) are the one and only control toggle. The scrim
+   * itself is inert: clicking elsewhere must never steal the browser. */
   function renderMask() {
-    const txt = $('txt')
-    const hint = $('hint')
-    if (state.busy) {
-      txt.textContent = 'AI 正在操作 · ' + labelOf(state.busyTool)
-      hint.textContent = '点击让我接管'
-    } else {
-      txt.textContent = 'AI 空闲'
-      hint.textContent = '点击我来操作'
-    }
+    $('txt').textContent = state.busy ? 'AI 正在操作 · ' + labelOf(state.busyTool) : 'AI 空闲'
+    const take = $('pill-take')
+    take.textContent = '我来操作'
+    take.title = state.busy ? '暂停 AI，自己操作' : '自己操作浏览器'
   }
 
   async function refresh() {
@@ -498,24 +500,25 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
 
   function renderCapsule() {
     const dot = $('ai-dot')
+    const take = $('ai-take')
     if (state.controlled) {
       dot.className = 'dot paused'
       $('ai-label').textContent = '你正在操作'
-      const t = $('ai-take')
-      t.textContent = '交给 AI'
-      t.style.background = 'var(--accent)'; t.style.borderColor = 'var(--accent)'
+      take.textContent = '交给 AI'
+      take.title = '交回给 AI 继续操作'
+      take.style.background = 'var(--accent)'; take.style.borderColor = 'var(--accent)'
     } else if (state.busy) {
       dot.className = 'dot busy'
       $('ai-label').textContent = 'AI 操作中 · ' + labelOf(state.busyTool)
-      const t = $('ai-take')
-      t.textContent = '我来操作'
-      t.style.background = ''; t.style.borderColor = ''
+      take.textContent = '我来操作'
+      take.title = '暂停 AI，自己操作'
+      take.style.background = ''; take.style.borderColor = ''
     } else {
       dot.className = 'dot'
       $('ai-label').textContent = 'AI'
-      const t = $('ai-take')
-      t.textContent = '我来操作'
-      t.style.background = ''; t.style.borderColor = ''
+      take.textContent = '我来操作'
+      take.title = '自己操作浏览器'
+      take.style.background = ''; take.style.borderColor = ''
     }
   }
 
@@ -542,15 +545,6 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       const who = op.actor === 'user' ? '<span class="who">你</span>' : ''
       line.innerHTML = '<span class="time">' + fmtTime(op.time) + '</span>' + who + '<div class="what"><span class="' + cls + '">' + esc(labelOf(op.tool)) + '</span> ' + esc(op.summary) + '</div>'
       stream.appendChild(line)
-    }
-    const take = $('take-btn')
-    if (state.controlled) {
-      take.textContent = '交给 AI'; take.style.background = 'var(--accent)'; take.style.borderColor = 'var(--accent)'; take.style.color = '#fff'
-      take.title = '让 AI 继续操作 (Esc)'
-    } else {
-      take.textContent = '我来操作'
-      take.style.background = ''; take.style.borderColor = ''; take.style.color = ''
-      take.title = '暂停 AI，自己操作'
     }
   }
 
@@ -647,30 +641,42 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     refresh()
   })
   $('ai-take').addEventListener('click', (e) => { e.stopPropagation(); toggleControl() })
-  $('take-btn').addEventListener('click', toggleControl)
+  // ONE control toggle, both directions: the mask pill's 我来操作 and the
+  // capsule's 交给 AI are the same button in its two states. No sidebar /
+  // panel / Esc path may hand the browser back to the AI (2026-09-11).
   function toggleControl() {
     const active = !state.controlled
     post('takeover', { active }).then(() => refresh())
   }
+  $('pill-take').addEventListener('click', (e) => {
+    e.stopPropagation()
+    post('takeover', { active: true }).then(() => refresh())
+  })
   $('panel-close').addEventListener('click', () => post('overlay', { mode: 'capsule' }))
   $('hide-btn').addEventListener('click', () => post('hide'))
   $('viewer-close').addEventListener('click', () => post('overlay', { mode: 'capsule' }))
   $('viewer-search').addEventListener('input', (e) => renderViewer(viewerKind, e.target.value))
-  // Mask interception: any click during AI operation hands control to the user.
-  $('mask').addEventListener('click', () => post('takeover', { active: true }).then(() => refresh()))
+  // The mask scrim is deliberately INERT: only #pill-take grants control.
 
   // Forward the browser shortcuts when keyboard focus lives in the overlay
   // (after panel/menu/viewer interactions) so Ctrl+T/W/R keep working; Ctrl+L
   // closes the overlay surface (the host then focuses the shell address bar).
   document.addEventListener('keydown', (e) => {
-    // While masked the window is locked: only the 我来操作 pill unlocks it —
-    // no shortcut may bypass the mask.
+    // Escape only closes the floating surface. It must NEVER hand the browser
+    // back to the AI: control changes only via the 我来操作/交给 AI button.
     if (e.key === 'Escape') {
-      if (state.controlled) post('takeover', { active: false })
       post('overlay', { mode: 'capsule' })
       return
     }
-    if (!state.controlled) return
+    // While masked the window is locked and the pill button is the only entry;
+    // Enter/Space mirror it for keyboard users.
+    if (!state.controlled) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        post('takeover', { active: true }).then(() => refresh())
+      }
+      return
+    }
     if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); post('overlay', { mode: 'capsule' }) }
     if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); post('open').then(refresh) }
     if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); fetch('/api/pico/browser/state').then((r) => r.json()).then((s) => { const t = (s.tabs || []).find((x) => x.visible); if (t) post('close-tab', { tab: t.id }).then(refresh) }) }

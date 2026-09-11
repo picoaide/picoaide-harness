@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -113,6 +113,8 @@ async function bootSkillsManager(overrides = {}) {
       },
     },
     workspaceRegistry: overrides.workspaceRegistry ?? { list: () => [] },
+    // F6 复核:局域网 web 模式把 webRuntime.trustedHosts 注入 fake ctx。
+    webRuntime: overrides.webRuntime,
     logger: { warn: () => {} },
     inject(deps, cb) {
       for (const dep of deps) assert.ok(ctx[dep] !== undefined, `missing fake service ${dep}`)
@@ -141,8 +143,29 @@ async function bootSkillsManager(overrides = {}) {
     const data = await res.json().catch(() => ({}))
     return { status: res.status, data }
   }
+  // 覆写 Host 头的请求(模拟局域网客户端 / 伪造 loopback Host;连接始终到 127.0.0.1)。
+  const requestWithHost = (method, path, hostHeader, body) => new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port: server.address().port,
+      path,
+      method,
+      headers: { host: hostHeader, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    }, (res) => {
+      let data = ''
+      res.on('data', (chunk) => { data += chunk })
+      res.on('end', () => {
+        let parsed = {}
+        try { parsed = JSON.parse(data) } catch { /* non-JSON */ }
+        resolve({ status: res.statusCode, data: parsed })
+      })
+    })
+    req.on('error', reject)
+    if (body !== undefined) req.write(JSON.stringify(body))
+    req.end()
+  })
   return {
-    base, catalog, put, bravo, stateFile, changeListeners, providerCtl, request,
+    base, catalog, put, bravo, stateFile, changeListeners, providerCtl, request, requestWithHost,
     lastListCwd: () => lastListCwd,
     lastListScope: () => lastListScope,
     close: () => new Promise((resolve) => server.close(resolve)),
@@ -563,6 +586,42 @@ test('skills-manager: stale disables migrate to frontmatter on boot (issue #6)',
     } finally {
       await sm.close()
       sm.cleanup()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('skills-manager: trustedHosts 放行已声明的局域网权威,伪造/未声明 Host 拒绝 (F6 复核)', async () => {
+  const dir = tempDir()
+  try {
+    // 场景 1:webRuntime 声明了 10.9.9.9:3456 → 该 Host 放行;其它非 loopback 拒绝。
+    const sm1 = await bootSkillsManager({
+      stateFile: join(dir, 's1.json'),
+      webRuntime: { trustedHosts: ['10.9.9.9:3456'] },
+    })
+    try {
+      const ok = await sm1.requestWithHost('GET', '/skills-manager/api/skills', '10.9.9.9:3456')
+      assert.equal(ok.status, 200, `declared LAN authority must pass, got ${ok.status}`)
+      const other = await sm1.requestWithHost('GET', '/skills-manager/api/skills', '10.9.9.9:9999')
+      assert.equal(other.status, 403, 'undeclared LAN authority must be refused')
+      // 伪造 loopback Host:连接 socket 是 loopback,但 Host 声明为 loopback 且
+      // 该请求来自真实 loopback —— 仍应放行(桌面本机场景);伪造的判定依赖
+      // socket,这里验证声明机制不误伤本机。
+      const local = await sm1.request('GET', '/skills-manager/api/skills')
+      assert.equal(local.status, 200)
+    } finally {
+      await sm1.close()
+      sm1.cleanup()
+    }
+    // 场景 2:无 webRuntime → 非 loopback Host 一律拒绝。
+    const sm2 = await bootSkillsManager({ stateFile: join(dir, 's2.json') })
+    try {
+      const denied = await sm2.requestWithHost('GET', '/skills-manager/api/skills', '10.0.0.7:8080')
+      assert.equal(denied.status, 403, 'LAN Host without webRuntime must be refused')
+    } finally {
+      await sm2.close()
+      sm2.cleanup()
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })

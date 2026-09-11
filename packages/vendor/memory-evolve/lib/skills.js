@@ -172,9 +172,6 @@ export function approvePendingSkill(pendingDir, skillDir, name) {
     // Cross-device move (e.g. memoryDir on D: → ~/.agents/skills on C: on
     // Windows): rename(2) cannot cross filesystems. Fall back to copy + delete
     // so a pending skill on another volume can still be adopted.
-    // EBUSY/EPERM/EACCES (Windows: target dir locked by a watcher/AV/indexer,
-    // or an empty stub dir already exists): rename is not legal here either —
-    // fall back to the same copy + delete so adoption still succeeds.
     if (
       error?.code === 'EXDEV' ||
       error?.code === 'EBUSY' ||

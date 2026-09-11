@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -43,9 +44,22 @@ func ensureUsagePartition(db *sql.DB, month time.Time) error {
 	// 当月分区缺失 → INSERT 报 "no partition of relation usage found for row")。
 	month = BeijingMonth(month)
 	key := monthKey(month)
-	var existing sql.NullString
-	if err := db.QueryRow(`SELECT to_regclass('usage_' || ?)::text`, key).Scan(&existing); err == nil && existing.Valid && existing.String != "" {
-		return nil
+	// F11(审计 2026-09-11):探测必须区分「真分区」与「同名孤儿表」。
+	// 旧实现只看 to_regclass:若某月分区被 DETACH 成功但 DROP 失败,孤儿表
+	// 仍在 catalog 中,探测会误判"已存在"而不再建分区,该月所有计量写入
+	// 直接报 "no partition of relation usage found for row"。
+	var relispartition sql.NullBool
+	probeErr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&relispartition)
+	if probeErr == nil && relispartition.Valid {
+		if relispartition.Bool {
+			return nil
+		}
+		return fmt.Errorf("usage_%s exists but is not a partition (stale detached table); drop it manually", key)
+	}
+	if probeErr != nil && !errors.Is(probeErr, sql.ErrNoRows) {
+		return probeErr
 	}
 	start := dayKey(month)
 	end := start.AddDate(0, 1, 0)
@@ -191,46 +205,55 @@ func CleanupUsageRetention(db *sql.DB) error {
 	// 算到上一个月,导致多删一个月的明细)。
 	cutoffMonth := BeijingMonth(time.Now()).AddDate(0, -n, 0)
 	for m := cutoffMonth.AddDate(0, -1, 0); ; m = m.AddDate(0, -1, 0) {
-		// 早于 cutoff 的分区(monthKey < cutoffKey)且其日账已存在才 DROP;
-		// 若日账缺失则重建(幂等)后再删,避免删明细前丢账。
 		key := monthKey(m)
 		if key >= monthKey(cutoffMonth) {
 			continue
 		}
-		// 确认该月分区存在
-		var one int
-		if err := db.QueryRow("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'usage_' || $1", key).Scan(&one); err != nil || one == 0 {
-			break // 更早月份无分区(DROP 已到边界)
+		// F11(审计 2026-09-11):
+		//   - 用 pg_class.relispartition 区分「真分区」与「孤儿表」;
+		//   - DETACH 失败不再静默 continue(旧实现把所有错误当"已删过",
+		//     锁冲突/权限错误会被吞掉,分区清理永远停摆);
+		//   - 上次 DETACH 成功但 DROP 失败留下的孤儿表直接清掉并继续,
+		//     不再让它卡住后续月份(否则该表所在月的新写入会 500)。
+		var isPartition sql.NullBool
+		perr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&isPartition)
+		if errors.Is(perr, sql.ErrNoRows) {
+			break // 更早月份已没有表(DROP 已到边界)
 		}
-		// 重建该月日账/月账(幂等,防止明细删除后账本丢)
+		if perr != nil {
+			return perr
+		}
+		if isPartition.Valid && !isPartition.Bool {
+			// 孤儿 detached 表:DROP 后继续清理更早月份。
+			if _, derr := db.Exec("DROP TABLE IF EXISTS usage_" + key); derr != nil {
+				return derr
+			}
+			continue
+		}
+		// 先重建该月日账/月账(幂等,防明细删除后账本丢)。
 		monthStartT := m
 		if err := RebuildUsageLedger(db, monthStartT, monthStartT.AddDate(0, 1, -1)); err != nil {
 			return err
 		}
-		// DROP 分区(先 DETACH 解除主表绑定,再 DROP 整表秒删)
-		if _, err := db.Exec("ALTER TABLE usage DETACH PARTITION usage_" + key); err != nil {
-			// 若该分区已被删过(幂等),忽略
-			continue
+		if _, derr := db.Exec("ALTER TABLE usage DETACH PARTITION usage_" + key); derr != nil {
+			// 复检:并发清理/重复执行时可能已经不是分区 → 继续 DROP;
+			// 仍是分区说明 DETACH 真失败 → 上抛,不静默跳过。
+			var again sql.NullBool
+			rerr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&again)
+			if rerr != nil || !again.Valid || again.Bool {
+				return fmt.Errorf("detach usage_%s: %w", key, derr)
+			}
 		}
-		if _, err := db.Exec("DROP TABLE IF EXISTS usage_" + key); err != nil {
-			return err
+		if _, derr := db.Exec("DROP TABLE IF EXISTS usage_" + key); derr != nil {
+			return derr
 		}
 	}
 	return nil
 }
-
-// BeijingDay(北京日/月口径的唯一真源)见 beijing.go。
-
-// UsageAggregateWithLedger 在保留窗口内查询 usage 明细(分区裁剪),
-// 窗口外(早于保留期)回退到永久账本 usage_daily——
-// 保证"明细已删"的历史聚合仍可查(10 年数据不丢)。
-// group: day|week|month|model|user|dept;opts 支持 WithUsername/WithDept。
-// group=dept 是展示层归并:以 group=user 聚合行为基础,按部门树(归属+祖先链,
-// 与预算 enforcement 同口径)在内存归并(树小,避免 N 个部门 N 条 SQL)。
-//
-// 跨保留边界(P1-10):账本负责 [from, cutoffDay) 的整日,明细负责
-// [cutoffDay, to],两段按天严格不相交 → 按维度**相加**(而非旧实现的
-// 按 label 覆盖,后者会丢掉早于 cutoff 的历史:实测 330 → 220)。
 func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts ...UsageAggregateOption) ([]UsageAggregateRow, error) {
 	if group == "dept" {
 		rows, err := UsageAggregateWithLedger(db, from, to, "user", opts...)

@@ -126,6 +126,7 @@ func CreateDepartment(db *sql.DB, name string, parentID, leaderID int64, descrip
 		}
 		return 0, err
 	}
+	InvalidateGroupTree() // F3: 新部门立即进入组织树(环检测/授权/预算链)
 	return id, nil
 }
 
@@ -217,7 +218,11 @@ func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateGroupTree() // F3: 改名/改父级/换主管立即生效
+	return nil
 }
 
 // DeleteDepartment removes a department. Guard: departments with members,
@@ -253,7 +258,11 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	if _, err := tx.Exec("DELETE FROM groups WHERE id = ?", id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateGroupTree() // F3: 删除后立刻从树中移除
+	return nil
 }
 
 // subtreeGroupIDs returns the department id plus all descendant ids
@@ -269,12 +278,18 @@ func subtreeGroupIDs(db *sql.DB, rootID int64) ([]int64, error) {
 	for _, n := range nodes {
 		children[n.parent] = append(children[n.parent], n.id)
 	}
+	// visited 兜底(F3):迁移/手工数据可能留下环,绝不让配额热路径死循环。
+	seen := map[int64]bool{rootID: true}
 	out := []int64{rootID}
 	stack := []int64{rootID}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		for _, c := range children[cur] {
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
 			out = append(out, c)
 			stack = append(stack, c)
 		}

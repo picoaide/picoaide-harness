@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -47,15 +46,10 @@ func secureCookieFor(c *gin.Context, db *sql.DB) bool {
 // password is not brute-forceable without rate limiting.
 // 延迟到首次登录调用时创建(惰性单例):newLoginLimiter 在包 init 时读
 // PICOAI_LOGIN_MAX_ATTEMPTS,若包级立即初始化,测试 t.Setenv 来不及生效,
-// 多用例登录同一用户会互相限流(审计2026-M10 后新增用例触发)。
-var adminLoginLimiterOnce sync.Once
-var adminLoginLimiterVal *loginLimiter
-
 func adminLoginLimiter() *loginLimiter {
-	adminLoginLimiterOnce.Do(func() {
-		adminLoginLimiterVal = newLoginLimiter()
-	})
-	return adminLoginLimiterVal
+	// F17(复核修正):与客户端面共享同一个限流器 —— 此前两个入口各持一份
+	// 失败预算,同一账号实际可尝试 2 倍次数(且可交替入口规避 429)。
+	return sharedLoginLimiter()
 }
 
 // UpdateChecker 接口是版本检查的最小依赖(生产用 updatecheck.CachedChecker,
@@ -70,6 +64,9 @@ type AdminAPI struct {
 	// UpdateChecker 是版本检查器(2026-08-31);nil 时 handler 用包级
 	// 默认缓存 checker(生产),测试可注入 mock 避免打外网。
 	UpdateChecker UpdateChecker
+	// ReloadAuth 让运行中的客户端认证 API 按新配置重建 provider(F2)。
+	// main 注入;测试自建路由树为 nil 时跳过(仅启动时快照)。
+	ReloadAuth func() error
 }
 
 // issuerURLRe 校验测试连接 issuer(§1.2 SSRF; CodeQL regexp barrier):
@@ -130,6 +127,11 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	AdminRoute(authed, "DELETE", "/departments/:id", PermDeptWrite, a.deleteDepartment)
 	AdminRoute(authed, "GET", "/users/:id/tokens", PermUserRead, a.listUserTokens)
 	AdminRoute(authed, "POST", "/tokens/:id/revoke", PermUserWrite, a.revokeToken)
+	// 0061 员工余额(与 router 包镜像,测试自建路由树同路径同权限)。
+	AdminRoute(authed, "POST", "/users/:id/balance", PermUserWrite, a.adjustUserBalance)
+	AdminRoute(authed, "GET", "/balance", PermUserRead, a.getBalance)
+	AdminRoute(authed, "PUT", "/balance", PermUserWrite, a.putBalance)
+	AdminRoute(authed, "POST", "/balance/grant", PermUserWrite, a.grantBalance)
 	AdminRoute(authed, "GET", "/usage", PermUsageRead, a.usage)
 	// 用量中心(2026-09 重构):总览聚合 + 请求级明细(与 router 包镜像)。
 	AdminRoute(authed, "GET", "/usage/overview", PermUsageRead, a.usageOverview)
@@ -175,8 +177,11 @@ func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 		c.Set("admin_session", cookie)
 		if c.Request.Method != "GET" && c.Request.Method != "HEAD" {
 			sess, err := GetAdminSession(a.DB, cookie)
-			if err != nil || !VerifyCSRF(sess.CSRFKey, c.GetHeader("X-CSRF-Token"), time.Now()) {
-				writeError(c, http.StatusForbidden, "FORBIDDEN", "CSRF 校验失败")
+			token := c.GetHeader("X-CSRF-Token")
+			if err != nil || !(VerifySessionCSRF(sess.CSRFKey, cookie, token) || VerifyCSRF(sess.CSRFKey, token, time.Now())) {
+				// F1: 独立错误码让 webadmin 自动刷新 token 并重试一次,
+				// 而不是把 CSRF 过期伪装成「没有权限」。
+				writeError(c, http.StatusForbidden, "CSRF_EXPIRED", "CSRF 校验失败,请刷新页面重试")
 				return
 			}
 		}
@@ -340,7 +345,7 @@ func (a *AdminAPI) handleMe(c *gin.Context) {
 	csrf := ""
 	if s, ok := sid.(string); ok {
 		if sess, err := GetAdminSession(a.DB, s); err == nil {
-			csrf = IssueCSRF(sess.CSRFKey, time.Now())
+			csrf = IssueSessionCSRF(sess.CSRFKey, s)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u), "csrf_token": csrf})
@@ -704,9 +709,27 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "role 必须是 super_admin/auditor/user")
 		return
 	}
-	id, err := serverstore.CreateUserWithPassword(a.DB, req.Username, req.Password)
+	// F19(审计 2026-09-11):密码哈希 + 角色/状态在**一次 INSERT** 内落库。
+	// 旧实现先建默认 user 行、再单独 UpdateUser 改角色,UpdateUser 失败会
+	// 留下半创建账号(重试又撞"用户名已存在")。
+	hash, herr := util.HashPassword(req.Password)
+	if herr != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	id, err := serverstore.CreateUser(a.DB, &serverstore.User{
+		Username:     req.Username,
+		PasswordHash: hash,
+		Source:       "local",
+		Role:         role,
+		Status:       status,
+	})
 	if errors.Is(err, serverstore.ErrDuplicate) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名已存在")
+		return
+	}
+	if errors.Is(err, serverstore.ErrValidation) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名不能为空")
 		return
 	}
 	if err != nil {
@@ -717,15 +740,6 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
-	}
-	if role != serverstore.RoleUser || status != 1 {
-		u.Role = role
-		u.IsAdmin = role == serverstore.RoleSuperAdmin
-		u.Status = status
-		if err := serverstore.UpdateUser(a.DB, u); err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-			return
-		}
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_create", u.Username)
 	c.JSON(http.StatusCreated, gin.H{"user": userJSON(u)}) // L6:创建返回 201
@@ -1216,9 +1230,14 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 		}
 		seen[p] = true
 	}
-	// 本地 admin 恒启用:enabled 里没有 local 也要强制加(admin 回退)
-	// (不写回 auth.enabled,仅运行时生效——配置展示保持用户原意)
-	upsert := func(key, val string) error { return serverstore.SetSetting(a.DB, key, val) }
+	// min_password_length 校验必须在写库前(F14:不允许写一半再 400)。
+	if req.MinPasswordLength != nil {
+		if *req.MinPasswordLength < serverstore.MinPasswordLengthLower || *req.MinPasswordLength > serverstore.MinPasswordLengthUpper {
+			writeError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("min_password_length 必须在 %d~%d 之间", serverstore.MinPasswordLengthLower, serverstore.MinPasswordLengthUpper))
+			return
+		}
+	}
 	// v3b redirect_url 安全(§1.5):浏览器跳转方式的 redirect_url 必须
 	// https(或 loopback http), 防 open redirect / 任意回调劫持。
 	validateRedirect := func(prefix, value string) bool {
@@ -1238,59 +1257,91 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			return
 		}
 	}
-	_ = upsert("auth.mode", req.Mode)
-	_ = upsert("auth.enabled", enabled)
-	// 保存各类配置(独立,互不清空——切到 ldap 不清 openid,反之亦然)
-	_ = upsert("ldap.server_url", strings.TrimSpace(req.LDAP.ServerURL))
-	_ = upsert("ldap.bind_dn", strings.TrimSpace(req.LDAP.BindDN))
-	// 2026-09-08 P1-1:IdP 凭据与上游 API key 同口径 AES-GCM 落库(此前明文,
-	// 违反 AGENTS.md §3.5;GET /auth 的掩码不改变落库形态)。空串 = 清空。
+	// 凭据先加密(纯计算,失败时尚未动 DB)。
+	ldapSecret, oidcSecret, openIDSecret := "", "", ""
 	if req.LDAP.BindPassword != MaskSecret {
 		sealed, err := encryptSettingSecret(req.LDAP.BindPassword)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
 			return
 		}
-		_ = upsert("ldap.bind_password", sealed)
+		ldapSecret = sealed
 	}
-	_ = upsert("ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN))
-	_ = upsert("ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter))
-	_ = upsert("ldap.user_attr", strings.TrimSpace(req.LDAP.UserAttr))
-	_ = upsert("ldap.group_filter", strings.TrimSpace(req.LDAP.GroupFilter))
-	_ = upsert("ldap.group_attr", strings.TrimSpace(req.LDAP.GroupAttr))
-	_ = upsert("oidc.issuer", strings.TrimSpace(req.OIDC.Issuer))
-	_ = upsert("oidc.client_id", strings.TrimSpace(req.OIDC.ClientID))
 	if req.OIDC.ClientSecret != MaskSecret {
 		sealed, err := encryptSettingSecret(req.OIDC.ClientSecret)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
 			return
 		}
-		_ = upsert("oidc.client_secret", sealed)
+		oidcSecret = sealed
 	}
-	_ = upsert("oidc.redirect_url", strings.TrimSpace(req.OIDC.RedirectURL))
-	_ = upsert("openid.issuer", strings.TrimSpace(req.OpenID.Issuer))
-	_ = upsert("openid.client_id", strings.TrimSpace(req.OpenID.ClientID))
 	if req.OpenID.ClientSecret != MaskSecret {
 		sealed, err := encryptSettingSecret(req.OpenID.ClientSecret)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
 			return
 		}
-		_ = upsert("openid.client_secret", sealed)
+		openIDSecret = sealed
 	}
-	_ = upsert("openid.redirect_url", strings.TrimSpace(req.OpenID.RedirectURL))
+	// F14(审计 2026-09-11):全部设置键在**同一事务**内落库,任一失败整体
+	// 回滚。此前 20+ 个 `_ = upsert(...)` 静默吞错,DB 抖动会留下半套配置
+	// (例如 client_secret 未落库而 enabled 已改)却返回"保存成功"。
+	tx, err := a.DB.Begin()
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	defer tx.Rollback()
+	txSet := func(key, val string) error { return serverstore.SetSettingTx(tx, key, val) }
+	pairs := [][2]string{
+		{"auth.mode", req.Mode},
+		{"auth.enabled", enabled},
+		{"ldap.server_url", strings.TrimSpace(req.LDAP.ServerURL)},
+		{"ldap.bind_dn", strings.TrimSpace(req.LDAP.BindDN)},
+		{"ldap.base_dn", strings.TrimSpace(req.LDAP.BaseDN)},
+		{"ldap.user_filter", strings.TrimSpace(req.LDAP.UserFilter)},
+		{"ldap.user_attr", strings.TrimSpace(req.LDAP.UserAttr)},
+		{"ldap.group_filter", strings.TrimSpace(req.LDAP.GroupFilter)},
+		{"ldap.group_attr", strings.TrimSpace(req.LDAP.GroupAttr)},
+		{"oidc.issuer", strings.TrimSpace(req.OIDC.Issuer)},
+		{"oidc.client_id", strings.TrimSpace(req.OIDC.ClientID)},
+		{"oidc.redirect_url", strings.TrimSpace(req.OIDC.RedirectURL)},
+		{"openid.issuer", strings.TrimSpace(req.OpenID.Issuer)},
+		{"openid.client_id", strings.TrimSpace(req.OpenID.ClientID)},
+		{"openid.redirect_url", strings.TrimSpace(req.OpenID.RedirectURL)},
+	}
+	if req.LDAP.BindPassword != MaskSecret {
+		pairs = append(pairs, [2]string{"ldap.bind_password", ldapSecret})
+	}
+	if req.OIDC.ClientSecret != MaskSecret {
+		pairs = append(pairs, [2]string{"oidc.client_secret", oidcSecret})
+	}
+	if req.OpenID.ClientSecret != MaskSecret {
+		pairs = append(pairs, [2]string{"openid.client_secret", openIDSecret})
+	}
 	if req.HideLocal != nil {
-		// v3b: 仅客户端登录页隐藏本地账号入口; 管理后台恒本地登录不受影响。
-		_ = upsert("auth.hide_local", strconv.FormatBool(*req.HideLocal))
+		pairs = append(pairs, [2]string{"auth.hide_local", strconv.FormatBool(*req.HideLocal)})
 	}
 	if req.MinPasswordLength != nil {
-		if *req.MinPasswordLength < serverstore.MinPasswordLengthLower || *req.MinPasswordLength > serverstore.MinPasswordLengthUpper {
-			writeError(c, http.StatusBadRequest, "VALIDATION",
-				fmt.Sprintf("min_password_length 必须在 %d~%d 之间", serverstore.MinPasswordLengthLower, serverstore.MinPasswordLengthUpper))
+		pairs = append(pairs, [2]string{serverstore.AuthMinPasswordLengthSetting, strconv.Itoa(*req.MinPasswordLength)})
+	}
+	for _, kv := range pairs {
+		if err := txSet(kv[0], kv[1]); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
-		_ = upsert(serverstore.AuthMinPasswordLengthSetting, strconv.Itoa(*req.MinPasswordLength))
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	serverstore.InvalidateSettings()
+	// F2: 让运行中的认证 API 立即按新配置重建 providers/browsers/enabled,
+	// 而不是等下一次重启(否则"启用 LDAP 不生效 / 禁用 LDAP 后仍可登录")。
+	if a.ReloadAuth != nil {
+		if rerr := a.ReloadAuth(); rerr != nil {
+			log.Printf("auth config saved but provider reload failed: %v", rerr)
+		}
 	}
 	// v3b 字段级审计(§2.5):记录本次变更的键集合(值脱敏, 不落密钥)。
 	var changed []string
@@ -1332,10 +1383,6 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
-
-// getPublicAuthMethods 返回登录页可用的认证方式(无认证要求):
-// enabled 列表 + 各方式是否已配置(browser provider 需要配置齐全才可用)。
-// 仅返回元信息,不含任何密码/密钥/URL 等敏感值。
 func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 	s, err := serverstore.GetAllSettings(a.DB)
 	if err != nil {
@@ -1796,4 +1843,162 @@ func quotaMoneyLabel(v *float64) string {
 		return "0(不限)"
 	}
 	return fmt.Sprintf("%.2f", *v)
+}
+
+// ---------------------------------------------------------------------------
+// 员工余额管理(0061)
+//
+// 语义:余额是**存量**(充值/发放/消费/手动调整),与 quota_* 的"月度流量
+// 上限"正交。balance.enabled 决定网关是否以余额为硬闸门。
+// ---------------------------------------------------------------------------
+
+// balanceReq 手动调整余额(mode: add | deduct | set)。
+type balanceReq struct {
+	Mode   string  `json:"mode"`
+	Amount float64 `json:"amount"`
+	Reason string  `json:"reason"`
+}
+
+// maxBalanceAmount 单次调整/配置额度上限(1 亿元,防误输天文数字)。
+const maxBalanceAmount = 1e8
+
+func (a *AdminAPI) adjustUserBalance(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	var req balanceReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	u, err := serverstore.GetUserByID(a.DB, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	}
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if req.Amount <= 0 || req.Amount > maxBalanceAmount {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "金额必须大于 0 且不超过 1 亿元")
+		return
+	}
+	if len([]rune(req.Reason)) > 200 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "备注最多 200 字")
+		return
+	}
+	old := u.BalanceMoney
+	var next float64
+	switch req.Mode {
+	case "add", "":
+		next, err = serverstore.AdjustUserBalance(a.DB, id, req.Amount)
+	case "deduct":
+		next, err = serverstore.AdjustUserBalance(a.DB, id, -req.Amount)
+	case "set":
+		next, err = serverstore.SetUserBalance(a.DB, id, req.Amount)
+	default:
+		writeError(c, http.StatusBadRequest, "VALIDATION", "mode 只能是 add/deduct/set")
+		return
+	}
+	if errors.Is(err, serverstore.ErrValidation) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "扣减金额超过当前余额")
+		return
+	}
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "余额调整失败")
+		return
+	}
+	detail := fmt.Sprintf("%s: %.2f→%.2f mode=%s", u.Username, old, next, req.Mode)
+	if req.Reason != "" {
+		detail += " reason=" + req.Reason
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "balance_adjust", detail)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "user_id": id, "balance_money": next})
+}
+
+// getBalance 管理端余额总览:配置 + 最近/当月发放 + 人数与余额合计。
+func (a *AdminAPI) getBalance(c *gin.Context) {
+	s2, err := serverstore.GetBalanceSummary(a.DB, time.Now())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	c.JSON(http.StatusOK, s2)
+}
+
+// putBalance 保存月度余额发放配置。
+func (a *AdminAPI) putBalance(c *gin.Context) {
+	var req struct {
+		Enabled       bool    `json:"enabled"`
+		MonthlyAmount float64 `json:"monthly_amount"`
+		MonthlyMode   string  `json:"monthly_mode"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	if req.MonthlyAmount < 0 || req.MonthlyAmount > maxBalanceAmount {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "月度额度必须在 0 ~ 1 亿元之间")
+		return
+	}
+	if req.MonthlyMode != serverstore.BalanceModeAdd && req.MonthlyMode != serverstore.BalanceModeCover {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "发放模式只能是 add 或 cover")
+		return
+	}
+	s2 := serverstore.BalanceSettings{Enabled: req.Enabled, MonthlyAmount: req.MonthlyAmount, MonthlyMode: req.MonthlyMode}
+	if err := serverstore.SaveBalanceSettings(a.DB, s2); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "balance_settings",
+		fmt.Sprintf("enabled=%v amount=%.2f mode=%s", req.Enabled, req.MonthlyAmount, req.MonthlyMode))
+	// 复核修正(2026-09-11):保存后若闸门开启、额度 > 0 且**本月尚未发放**,
+	// 立即补发一次 —— 否则从保存到调度器下一个 tick(最长 1 小时)之间,
+	// 全员余额为 0 会被刚开启的闸门直接拦截。GrantMonthlyBalance 以
+	// balance_grants.month 幂等,本月已发放时自动 no-op,不会重复加钱。
+	autoGranted := false
+	var grant *serverstore.BalanceGrant
+	if req.Enabled && req.MonthlyAmount > 0 {
+		actor := currentAdminUsername(c)
+		g, ok, gerr := serverstore.GrantMonthlyBalance(a.DB, req.MonthlyMode, req.MonthlyAmount, actor, time.Now())
+		if gerr != nil {
+			log.Printf("balance settings saved but auto-grant failed: %v", gerr)
+		} else if ok {
+			autoGranted = true
+			grant = g
+			_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
+				fmt.Sprintf("auto month=%s mode=%s amount=%.2f affected=%d", g.Month, g.Mode, g.Amount, g.Affected))
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "settings": s2, "auto_grant": autoGranted, "grant": grant})
+}
+
+// grantBalance 手动执行一次本月发放(幂等:当月已发放则返回 already=true,
+// 不会重复加钱)。定时任务与手动按钮共用同一幂等锚 balance_grants.month。
+func (a *AdminAPI) grantBalance(c *gin.Context) {
+	settings, err := serverstore.GetBalanceSettings(a.DB)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if settings.MonthlyAmount <= 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请先配置大于 0 的月度额度")
+		return
+	}
+	actor := currentAdminUsername(c)
+	grant, granted, err := serverstore.GrantMonthlyBalance(a.DB, settings.MonthlyMode, settings.MonthlyAmount, actor, time.Now())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "发放失败")
+		return
+	}
+	if !granted {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "already": true, "grant": grant})
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
+		fmt.Sprintf("month=%s mode=%s amount=%.2f affected=%d", grant.Month, grant.Mode, grant.Amount, grant.Affected))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "already": false, "grant": grant})
 }

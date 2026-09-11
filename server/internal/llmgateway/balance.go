@@ -14,6 +14,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // balanceHTTPClient 余额查询客户端(测试可替换:httptest 本地地址)。
-var balanceHTTPClient = &http.Client{Timeout: 10 * time.Second}
+var balanceHTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: util.SafeOutboundTransport()}
 
 // maxBalanceBody 上限余额响应体(P3:上游异常/被投毒时不得无限读进内存)。
 const maxBalanceBody = 1 << 20

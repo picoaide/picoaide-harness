@@ -247,12 +247,21 @@ export class BrowserGuard {
   }
 }
 
-/** Default permission stance: everything is denied unless the user grants it. */
+/**
+ * Default permission stance: everything is denied unless a future product
+ * decision grants it. BOTH Electron handlers are required — Chromium checks a
+ * permission first and only raises a request when the check is denied, and
+ * Electron's check handler defaults to GRANTING when none is installed, so a
+ * request handler alone never runs (2026-09-11 audit: an untrusted page in the
+ * agent browser could silently obtain camera/microphone/geolocation). The main
+ * window installs the same pair (desktop electron-runtime.ts P1-4).
+ */
 export function installPermissionGuard(session: NativeSession): () => void {
   session.setPermissionRequestHandler((_wc, _permission, callback) => {
     callback(false)
   })
-  // No removal API for the handler; returning a no-op disposer keeps the
+  session.setPermissionCheckHandler(() => false)
+  // No removal API for either handler; returning a no-op disposer keeps the
   // interface uniform (a new handler overwrites on reinstall).
   return () => {}
 }

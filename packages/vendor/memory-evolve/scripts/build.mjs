@@ -74,6 +74,14 @@ const banner = [
 ].join('\n')
 const footer = 'return module.exports; } });'
 
+// ⚠ 产物格式敏感点（2026-09-08 实测，esbuild 0.28.1，issue #40 修复时踩到）：
+// text loader 把每个 CSS 文件内联成字符串时，会在「模板字符串（真实换行，
+// 可读、仓库现状）」与「双引号字符串（\n 转义、整体一行）」两种格式间按
+// 内容自动切换——当被内联的 CSS **含超过 2 个反引号** 时改用双引号格式，
+// 于是 lib/client.js 整体重排（约 2150 行 diff，功能等价但提交噪声极大、
+// 与仓库历史产物不再可比）。src/client/styles.css 目前正好只有 2 个反引号
+// （首行注释里的 `me-`）：**新增 CSS 注释请勿再引入反引号**（用普通引号或
+// 直接写类名即可）；若哪天必须超过 2 个，请连同重建后的产物一起提交并说明。
 await esbuild.build({
   entryPoints: [join(ROOT, 'src/client/index.ts')],
   outfile: join(ROOT, 'lib/client.js'),

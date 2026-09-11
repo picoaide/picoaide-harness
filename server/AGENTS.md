@@ -83,6 +83,14 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 - **审计契约**:`GET /api/server/admin/audit?page=&size=&action=&username=`(敏感操作留痕;默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链防篡改)
 - **费用/配额口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;配额链 = 员工 token → 员工金额 → 部门预算(归属+祖先,树内 SUM(cost));剩余 = 配额 − 本月已用(不限=null)
 
+- **员工余额(0061,2026-09-11)**:`users.balance_money` 是**存量余额**(元),与 `quota_money` 的"月度流量上限"正交。
+  - 消费:`RecordUsage*`/`UpdateUsageTokens*` 在写入 usage 的**同一事务**内按 cost 原子扣减余额(微元精度,不按分抹零);
+  - 闸门:`settings balance.enabled=true` 时余额 ≤ 0 的请求在网关 429 `QUOTA_EXCEEDED`(管理员豁免);默认关闭,避免存量部署升级后全员被拦;
+  - 管理:`POST /api/server/admin/users/:id/balance {mode:add|deduct|set,amount,reason}`(审计 `balance_adjust`)、`GET/PUT /api/server/admin/balance`(配置:enabled/monthly_amount/monthly_mode=add|cover)、`POST /api/server/admin/balance/grant`(手动发放,幂等);
+  - 月度发放:`internal/balance` 调度器每小时检查,每北京月首次达到条件即按配置向全部启用普通员工发放一次;幂等锚 `balance_grants.month` 主键,跨实例/重启/重入不重复加钱;停机跨月后自动补发;
+  - 员工侧:`GET /api/client/v2/auth/usage` 返回 `balance_money/balance_enabled/balance_monthly/balance_mode`,账户卡在启用时以余额为主数字。
+  - 审计修复(2026-09-11)见 `docs/decisions/2026-09-11-balance-and-audit-fixes.md`。
+
 ## 8. 常用命令
 
 ```bash

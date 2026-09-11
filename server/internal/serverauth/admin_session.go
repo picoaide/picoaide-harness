@@ -50,7 +50,7 @@ func CreateAdminSession(db *sql.DB, userID int64) (*AdminSession, string, error)
 		id, userID, csrfKey, s.ExpiresAt.UTC().Format(time.RFC3339), s.LastUsedAt.UTC().Format(time.RFC3339)); err != nil {
 		return nil, "", err
 	}
-	return s, IssueCSRF(csrfKey, time.Now()), nil
+	return s, IssueSessionCSRF(csrfKey, id), nil
 }
 
 // GetAdminSession loads a session row.
@@ -115,6 +115,24 @@ func IssueCSRF(key string, at time.Time) string {
 	mac := hmac.New(sha256.New, []byte(key))
 	mac.Write([]byte(window))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// IssueSessionCSRF 是与会话同寿命的 CSRF token(F1,审计 2026-09-11):
+// HMAC(CSRFKey, "session:"+sessionID)。旧的小时窗口 token 最多活 2 小时,
+// 而管理会话 12 小时、webadmin 又只在挂载时取一次 token —— 长开页签的
+// 写操作必然 403。绑定会话后 token 在会话有效期内一直可用。
+func IssueSessionCSRF(key, sessionID string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte("session:" + sessionID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifySessionCSRF 常量时间校验会话绑定 token。
+func VerifySessionCSRF(key, sessionID, token string) bool {
+	if token == "" || sessionID == "" {
+		return false
+	}
+	return hmac.Equal([]byte(IssueSessionCSRF(key, sessionID)), []byte(token))
 }
 
 // VerifyCSRF accepts tokens from the current or previous window.

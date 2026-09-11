@@ -23,7 +23,7 @@ import { dirname, join, resolve } from 'node:path'
 import { ArchiveStore, MemoryStore, SuggestionQueue, extractEntryDate, gitBranch, gitBranchList, parseEntryBranches, parseEntryDshOnly, parseEntrySummary, autoSummary, stripEntrySummary, todayStamp } from './store.js'
 import { stripEntryId, extractEntryId, legacyIdFor } from './sync/entryid.js'
 import { readAliases } from './aliases.js'
-import { reviewCommand, reviewStatusTool, reviewTurnCounter, enqueueSuggestion, suggestToolDefinition } from './review.js'
+import { reviewCommand, reviewStatusTool, reviewTurnCounter, writeGapCounter, enqueueSuggestion, suggestToolDefinition } from './review.js'
 import { skillManageTool } from './skills.js'
 import { installApi } from './api.js'
 import { installSkillsManager } from './skills-manager.js'
@@ -60,8 +60,9 @@ export const name = 'dsh-memory-evolve'
 // tools/systemPrompt 是历史声明；agents 于 2026-08-09 加入——会话编排
 // 模块（de_session）需要它创建/唤醒会话（曾用 ctx.inject(['agents'])
 // 动态注入导致工具未注册，改为声明式注入后与 tools 同款可靠）；
-// workspace 同批加入——spawn 需要把新会话 attach 到工作区（左侧会话
-// 列表的"项目"分组，否则新会话落在「未分组」）；
+// workspaceRegistry 刻意不做插件级硬依赖：headless bundle 不提供该
+// web-only 服务，而默认的记忆工具与提示词注入并不需要它。需要工作区的
+// 可选能力通过 ctx.get() / 局部 ctx.inject() 读取并明确降级。
 // sessionTitle 同日加入——de_session rename 改会话名称（左侧列表标题）。
 // sessionPersistence 于 2026-08-11 加入——de_session wake 恢复离线会话时
 // 需读该会话 log 里自己最后使用的模型（request/header），否则恢复的
@@ -69,7 +70,7 @@ export const name = 'dsh-memory-evolve'
 // settings / llm 于 2026-08-11 加入——模型配置模块（de_models 工具 +
 // 「模型设置」Tab）需要读取模型目录（settings.get）与供应商/思考等级
 // 元数据（llm.listConfigurableProviders / resolveModelInfo）。
-export const inject = ['tools', 'systemPrompt', 'agents', 'workspaceRegistry', 'sessionTitle', 'sessionPersistence', 'settings', 'llm']
+export const inject = ['tools', 'systemPrompt', 'agents', 'sessionTitle', 'sessionPersistence', 'settings', 'llm']
 
 /** Plugin config defaults (conservative: review off, memory on). */
 export const DEFAULTS = {
@@ -80,6 +81,15 @@ export const DEFAULTS = {
   perTurnProjectWrites: true, // snapshot hint requires a per-turn project write check
   perTurnDailyWrites: true,   // snapshot hint requires a per-turn daily write check
   perTurnKeyWrites: true,     // snapshot hint: importance-gated project KEY writes (injected)
+  // 写入看门狗（2026-08-31 设计；用户拍板 2026-09-04：**默认关闭**）：
+  // 长会话指令稀释——固定提示词逐渐失效，模型连续多轮不写 daily/project
+  // 且程序侧毫无反馈，遗漏被静默吞掉（根源是模型指令遵循能力，强模型
+  // 不需要这个功能，故默认关、用户按需打开）。开启后程序按会话统计
+  // "连续完成多少个用户回合未写 daily/project"，缺口达到 writeGuardThreshold
+  // 时快照注入置顶提醒（粘性，写入即消）；threshold=2 意为容忍 1 轮遗漏、
+  // 第 2 轮起提醒。可在「Memory Evolve 设置 → 配置」打开。
+  perTurnWriteGuard: false,  // false（默认）= 不计数、不提醒；true = 启用看门狗
+  writeGuardThreshold: 2,    // 连续 N 轮未写入触发提醒（正整数，>=1）
   keyBranchFilter: true,      // static (config.yaml only): inject only KEY entries whose branch scope matches the session's git branch
   // key 轨渐进式披露（2026-08-15）：摘要注入减少 token，按需展开加载全文
   keyProgressiveDisclosure: 'off', // 'auto' | 'off' | 'on' — auto=小数据量全量注入、大数据量摘要注入；off=始终全量（默认）；on=始终摘要
@@ -258,6 +268,7 @@ export const DEFAULTS = {
 export const RUNTIME_KEYS = [
   'reviewEnabled', 'reviewInterval', 'reviewMode', 'skillReviewEnabled',
   'perTurnProjectWrites', 'perTurnDailyWrites', 'perTurnKeyWrites',
+  'perTurnWriteGuard', 'writeGuardThreshold',
   'keyProgressiveDisclosure', 'keyFullInjectThreshold', 'keyFullInjectCharLimit',
   'searchDocsEnabled', 'coiEnabled', 'broadcastEnabled', 'promptsEnabled',
   'sessionSearchEnabled', 'sessionEnabled', 'modelsEnabled', 'uiSettingsEnabled',
@@ -280,6 +291,7 @@ export function validateRuntimePatch(key, value) {
     case 'perTurnProjectWrites':
     case 'perTurnDailyWrites':
     case 'perTurnKeyWrites':
+    case 'perTurnWriteGuard':
     case 'searchDocsEnabled':
     case 'searchDocsMode':
       if (key === 'searchDocsMode') {
@@ -316,6 +328,11 @@ export function validateRuntimePatch(key, value) {
     case 'reviewInterval':
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) {
         throw new Error('dsh-memory-evolve: reviewInterval 必须 >= 1')
+      }
+      return
+    case 'writeGuardThreshold':
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+        throw new Error('dsh-memory-evolve: writeGuardThreshold 必须是 >= 1 的整数')
       }
       return
     case 'reviewMode':
@@ -388,7 +405,7 @@ function saveState(stateFile, state) {
 }
 
 const POSITIVE_NUMBER_KEYS = [
-  'snapshotOrder', 'reviewInterval', 'skillMaxBytes',
+  'snapshotOrder', 'reviewInterval', 'writeGuardThreshold', 'skillMaxBytes',
   'searchDocsCacheTtlMs', 'searchDocsTimeoutMs',
   'coiRetentionDays', 'coiTaskTimeoutMs', 'coiMaxLogBytes',
   'advisorCallTimeoutMs',
@@ -397,6 +414,7 @@ const BOOLEAN_KEYS = [
   'injectMemory', 'injectionScan', 'reviewEnabled', 'skillReviewEnabled',
   'entryDatePrefix', 'memoryTabEnabled', 'keyBranchFilter',
   'perTurnProjectWrites', 'perTurnDailyWrites', 'perTurnKeyWrites',
+  'perTurnWriteGuard',
   'searchDocsEnabled', 'coiEnabled', 'coiSummaryEnabled', 'coiSyncSkills',
   'promptsEnabled', 'sessionSearchEnabled', 'sessionEnabled', 'todoEnabled',
   'notifyEnabled', 'channelSendEnabled', 'broadcastImageEnabled',
@@ -435,6 +453,11 @@ export function resolveConfig(raw) {
     if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
       throw new Error(`dsh-memory-evolve: ${key} 必须是正数`)
     }
+  }
+  // writeGuardThreshold 额外要求整数（与运行时 validateRuntimePatch 口径
+  // 一致，评审 P2-1：静态配置 1.5 之类的小数必须拒绝——轮次计数不存在小数）。
+  if (!Number.isInteger(config.writeGuardThreshold)) {
+    throw new Error('dsh-memory-evolve: writeGuardThreshold 必须是 >= 1 的整数')
   }
   for (const key of BOOLEAN_KEYS) {
     if (typeof config[key] !== 'boolean') {
@@ -517,7 +540,7 @@ export function resolveConfig(raw) {
  *   会话名称显示用；不可用/未传时名称不显示——兼容降级）。
  * @returns {string} the snapshot text (empty when nothing is stored).
  */
-export function renderSnapshot(config, store, agent, counter, sessionTitleService = null) {
+export function renderSnapshot(config, store, agent, counter, sessionTitleService = null, writeGap = null) {
   const parts = []
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
   // AI 始终知道"我是谁"——广播消息判断 sender/recipients 谁是谁、回复时
@@ -639,9 +662,21 @@ export function renderSnapshot(config, store, agent, counter, sessionTitleServic
     : ''
   // 待办能力关闭时（todoEnabled=false）快照不注入 dtodo 指导行、头部也
   // 不提及 dtodo——模型看到工具清单里没有 dtodo，也不会被要求调用它。
+  //
+  // 修复（2026-09-08，issue #43）：dtodo 收尾提示同样要对子代理豁免。
+  // `snap.todoHint` 的语义是「收尾时调用 dtodo list 检查到期……有到期未
+  // 完成项就在回复末尾提醒用户」——这是**面向真人会话**的职责：子代理不
+  // 向用户直接交付（结果回父会话），也不该替父会话提醒待办，注入只会诱导
+  // 它多调一次 dtodo 白烧 token。同一函数内其它收尾职责早已按
+  // `isSubagent` 降级（review 计数与 due 提醒 index.js:646、写入看门狗
+  // index.js:718、收尾标题 subagentTurnEndHead、写入文案 subagentWrite），
+  // 唯独此处漏了豁免——补齐后子代理快照不再出现任何 dtodo 收尾指导。
+  // 头部 `snap.section` 保留 dtodo 字样：那是「本插件提供哪些工具」的事实
+  // 陈述（dtodo 工具对子代理确实注册可用），不是收尾指令，与本次修复无关。
   const todoEnabled = config.todoEnabled !== false
+  const todoHint = todoEnabled && !isSubagent ? `\n${st('snap.todoHint')}` : ''
   parts.push(`${todoEnabled ? st('snap.section') : st('snap.sectionNoTodo')}
-${st('snap.readHint')}${branchHint}${todoEnabled ? `\n${st('snap.todoHint')}` : ''}`)
+${st('snap.readHint')}${branchHint}${todoHint}`)
 
   // Turn-final duties, as one minimal checklist (write → review when the
   // snapshot says so). No per-turn status check: the program injects a
@@ -683,12 +718,28 @@ ${st('snap.readHint')}${branchHint}${todoEnabled ? `\n${st('snap.todoHint')}` : 
     const dueWarning = due
       ? st('snap.dueWarning', { interval: config.reviewInterval, mode: config.reviewMode })
       : ''
+    // 写入看门狗提醒：本会话连续 writeGuardThreshold 个用户回合未写
+    // daily/project（writeGapCounter 计数、写入即归零）→ 快照注入置顶
+    // 提醒，粘性直到下一次成功写入。文案刻意静态（不嵌实时计数）——
+    // 一次欠账最多产生两条尾部快照（出现 + 消失），与 dueWarning 同款
+    // 缓存代价；阈值从配置读取（随配置变化，不随回合变化）。
+    // ⚠️ P1-4 修复：文案按实际启用的写入轨参数化（writeTargets）——只开着
+    // 一轨时不允许命令模型补写已关闭的轨（否则违背 perTurn*Writes 配置）。
+    const writeGuardThreshold = config.writeGuardThreshold ?? 2
+    const writeGapDue = writeGap !== null
+      && !isSubagent
+      && writeTargets.length > 0
+      && config.perTurnWriteGuard !== false
+      && writeGap.gapOf(agent) >= writeGuardThreshold
+    const writeWarning = writeGapDue
+      ? st('snap.writeGuardWarning', { threshold: writeGuardThreshold, tracks: writeTargets.join(st('snap.and')) })
+      : ''
     const head = isSubagent
       ? st('snap.subagentTurnEndHead')
       : st('snap.turnEndHead')
     parts.push(`${head}
 ${steps.map((step) => `  ${step}`).join('\n')}
-${tail}${dueWarning}`)
+${tail}${dueWarning}${writeWarning}`)
   }
 
   // COI 状态通知（2026-08-13 用户拍板重构）：**不再注入快照列表**——
@@ -823,9 +874,12 @@ function outcomeOnly(result) {
  * @param {() => object} getRuntime - runtime config getter.
  * @param {ArchiveStore} archive - the archive store (archive action 用：
  *   主轨条目移动到对应归档文件）。
+ * @param {{gapOf?: (agent?: object) => number, noteWrite?: (agent?: object) => void}|null} [writeGap]
+ *   写入看门狗计数器（可选，兼容降级）：daily/project 写入成功后调
+ *   noteWrite 重置该会话的连续未写计数（见 review.js writeGapCounter）。
  * @returns {object} a ToolDefinition-shaped object.
  */
-export function memoryTool(ctx, config, store, queue, getRuntime, archive) {
+export function memoryTool(ctx, config, store, queue, getRuntime, archive, writeGap = null) {
   /**
    * 程序拼接【反馈】行（用户情绪反馈记录，2026-08-10 上线）。
    * sentiment 必填（positive/negative）；category/quote/note 可缺省
@@ -888,6 +942,12 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive) {
       return outcomeOnly(rest)
     }
     const addResult = store.add(target, finalContent, exec.agent)
+    // 写入看门狗：daily/project 写入成功即重置该会话的连续未写计数
+    // （memory/user/key 不算——看门狗盯的是每轮进展日志的欠账；key 走
+    // 确认队列、memory/user 是慢变轨，都不承载"本轮做了什么"）。
+    if (addResult.ok && (target === 'daily' || target === 'project')) {
+      writeGap?.noteWrite?.(exec?.agent)
+    }
     return outcomeOnly(addResult)
   }
 
@@ -1508,6 +1568,12 @@ export function apply(ctx, rawConfig = {}) {
   // and the memory_review_status tool. Zero-cost when review is disabled
   // (the settled listener returns early unless reviewEnabled).
   const counter = reviewTurnCounter(ctx, getRuntime)
+  // 写入看门狗计数器（2026-08-31）：按会话统计"连续完成多少个用户回合
+  // 未写 daily/project"（subagent 不计）；快照在缺口达到 writeGuardThreshold
+  // 时注入置顶提醒（renderSnapshot），memory 工具 addOne 写入成功即归零。
+  // 与 counter 同款一次性创建、全局共享；perTurnWriteGuard 关闭时计数器
+  // 早退（零成本），提醒渲染也独立复查开关（两半各自安全降级）。
+  const writeGap = writeGapCounter(ctx, () => getRuntime().perTurnWriteGuard !== false)
   const updateRuntime = (patch) => {
     const entries = Object.entries(patch)
     for (const [key, value] of entries) validateRuntimePatch(key, value)
@@ -1603,7 +1669,7 @@ export function apply(ctx, rawConfig = {}) {
             const runtime = getRuntime()
             // 记忆同步无快照状态行（2026-08-13 用户拍板：AI 不参与同步，见
             // renderSnapshot 内注释）
-            return renderSnapshot(runtime, store, context.agent, counter, ctx.sessionTitle)
+            return renderSnapshot(runtime, store, context.agent, counter, ctx.sessionTitle, writeGap)
           },
         })
       } catch (error) {
@@ -1622,7 +1688,7 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // 2. The memory tool (always registered; subagent writes are gated).
-  ctx.effect(() => ctx.tools.register(memoryTool(ctx, config, store, queue, getRuntime, archive)), 'dsh-memory-evolve: memory tool')
+  ctx.effect(() => ctx.tools.register(memoryTool(ctx, config, store, queue, getRuntime, archive, writeGap)), 'dsh-memory-evolve: memory tool')
 
   // 2b. The skill management tool (always registered: useful in ordinary
   //     sessions too — "把这个流程做成技能" — and required by the review

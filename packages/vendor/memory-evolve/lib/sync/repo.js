@@ -286,7 +286,14 @@ export async function stagePaths(dir, fileset = 'project', env) {
 export function runGit(dir, args, opts = {}) {
   const network = opts.network === true
   // opts.env：额外环境变量（如 GIT_INDEX_FILE 临时 index——Codex 二轮 P1-1）
-  const baseEnv = network ? { ...process.env, GIT_TERMINAL_PROMPT: '0' } : process.env
+  // LC_ALL/LANG=C:git 输出必须稳定为英文 —— worker.js 依赖
+  // "couldn't find remote ref" 判断"远端分支不存在";中文 locale 下 git
+  // 输出"无法找到远程引用"会让该分支判断失效,把首次推送/远端分支消失
+  // 误报为致命拉取错误(2026-09-11 复核实测)。
+  const gitLocale = { LC_ALL: 'C', LANG: 'C' }
+  const baseEnv = network
+    ? { ...process.env, GIT_TERMINAL_PROMPT: '0', ...gitLocale }
+    : { ...process.env, ...gitLocale }
   const env = opts.env ? { ...baseEnv, ...opts.env } : baseEnv
   return new Promise((resolve) => {
     const child = spawn('git', args, {

@@ -1,6 +1,8 @@
 package serverauth
 
 import (
+	"database/sql"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -22,24 +24,56 @@ type loginLimiter struct {
 	attempts    map[string][]time.Time
 	maxEntries  int
 	maxAttempts int
-	window      time.Duration
-	lastSweep   time.Time
+	// maxAttemptsFn 实时计算阈值(F17 复核):共享单例不能在创建时固话
+	// PICOAI_LOGIN_MAX_ATTEMPTS —— 否则第一个测试设置的临时值会永久影响
+	// 后续用例(阈值过大 → 限流测试永不触发;过小 → 正常登录被误伤)。
+	// 生产环境变量进程内不变,实时读取只是多一次 getenv。
+	maxAttemptsFn func() int
+	window        time.Duration
+	lastSweep     time.Time
+}
+
+// limit 返回当前生效的最大失败次数。
+func (l *loginLimiter) limit() int {
+	if l.maxAttemptsFn != nil {
+		return l.maxAttemptsFn()
+	}
+	return l.maxAttempts
 }
 
 // callbackLimiterMaxAttempts:OIDC 回调按来源 IP 限流(独立桶,阈值高于
 // 登录——同一出口 NAT 下的整个办公室共用 IP,且只对失败回调计数)。
 const callbackLimiterMaxAttempts = 60
 
+// sharedLoginLimiter 是**全服务端共享**的登录失败限流器(F17,审计
+// 2026-09-11):此前客户端面与管理面各持一个实例,同一账号可从两个入口
+// 各消耗一份失败预算(实际阈值翻倍)。PICOAI_LOGIN_MAX_ATTEMPTS 仍在首次
+// 创建时读取(惰性单例,测试可先 t.Setenv)。
+var sharedLoginLimiterOnce sync.Once
+var sharedLoginLimiterVal *loginLimiter
+
+func sharedLoginLimiter() *loginLimiter {
+	sharedLoginLimiterOnce.Do(func() {
+		sharedLoginLimiterVal = newLoginLimiter()
+	})
+	return sharedLoginLimiterVal
+}
+
 func newLoginLimiter() *loginLimiter {
 	// PICOAI_LOGIN_MAX_ATTEMPTS overrides the default 10/5min for test
 	// environments (dev-env/E2E login repeatedly as the same user).
-	max := 10
-	if v := os.Getenv("PICOAI_LOGIN_MAX_ATTEMPTS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			max = n
+	// 阈值在**每次判定时**读取(见 maxAttemptsFn),保证共享单例下测试
+	// 临时 env 不泄漏到其他用例。
+	l := newRateLimiter(10)
+	l.maxAttemptsFn = func() int {
+		if v := os.Getenv("PICOAI_LOGIN_MAX_ATTEMPTS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				return n
+			}
 		}
+		return 10
 	}
-	return newRateLimiter(max)
+	return l
 }
 
 // newCallbackLimiter bounds OIDC callback attempts per IP only (2026-09-08
@@ -97,7 +131,7 @@ func (l *loginLimiter) allow(key string) bool {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= l.maxAttempts {
+	if len(kept) >= l.limit() {
 		l.attempts[key] = kept
 		return false
 	}
@@ -148,6 +182,13 @@ func loginKey(c *gin.Context, username string) string {
 	return host + "|" + username
 }
 
+// dbLimiterScope 把限流键按 DB 实例隔离(F17 复核):生产单 DB 的
+// 客户端面/管理面共享同一失败预算;测试的每个临时库(以及同进程多租户)
+// 互不污染 —— 否则共享单例会让测试之间互相限流。
+func dbLimiterScope(db *sql.DB) string {
+	return fmt.Sprintf("db:%p|", db)
+}
+
 // clientIPKey is the IP-only rate-limit key (OIDC callbacks).
 func clientIPKey(c *gin.Context) string {
 	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
@@ -161,11 +202,12 @@ func clientIPKey(c *gin.Context) string {
 // (安全默认,防单 IP 爆破) and username (防账号级 DoS——反代坍缩/分布式
 // 爆破下,同一用户名跨 IP 的尝试总数仍受限)。审计 2026-08-25 F-02。
 func (a *API) loginAllowed(c *gin.Context, username string) bool {
-	if !a.limiter.allow(loginKey(c, username)) {
+	scope := dbLimiterScope(a.DB)
+	if !a.limiter.allow(scope + loginKey(c, username)) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return false
 	}
-	if !a.limiter.allow("u:" + username) {
+	if !a.limiter.allow(scope + "u:" + username) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return false
 	}
@@ -174,15 +216,17 @@ func (a *API) loginAllowed(c *gin.Context, username string) bool {
 
 // loginFailed records a failed authentication against both login buckets.
 func (a *API) loginFailed(c *gin.Context, username string) {
-	a.limiter.record(loginKey(c, username))
-	a.limiter.record("u:" + username)
+	scope := dbLimiterScope(a.DB)
+	a.limiter.record(scope + loginKey(c, username))
+	a.limiter.record(scope + "u:" + username)
 }
 
 // loginSucceeded clears both login buckets after a successful authentication
 // (a legitimate login must not consume the failure budget).
 func (a *API) loginSucceeded(c *gin.Context, username string) {
-	a.limiter.reset(loginKey(c, username))
-	a.limiter.reset("u:" + username)
+	scope := dbLimiterScope(a.DB)
+	a.limiter.reset(scope + loginKey(c, username))
+	a.limiter.reset(scope + "u:" + username)
 }
 
 // oidcCallbackAllowed guards one OIDC callback through a dedicated IP-only

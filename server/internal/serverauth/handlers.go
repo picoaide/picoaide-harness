@@ -1,6 +1,8 @@
 package serverauth
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,6 +23,10 @@ type ClientHandlers struct {
 	// OIDC 每套已配置 browser provider(oidc/openid)一条 login/callback。
 	// 由 Handlers() 预生成绑定 provider 的闭包; key 是 provider 名。
 	OIDC []OIDCRoute
+	// F2: 动态解析的浏览器登录入口(固定 oidc/openid 路由, provider
+	// 在请求时从当前配置读取);OIDC 快照仅保留给旧调用方。
+	BrowserLogin    func(name string) gin.HandlerFunc
+	BrowserCallback func(name string) gin.HandlerFunc
 }
 
 // OIDCRoute 一套 browser provider 的 login/callback handler 对。
@@ -34,8 +40,14 @@ type OIDCRoute struct {
 // Handlers 返回客户端认证面 handler 集合(供 router 包集中声明路由)。
 // 无状态: 每次调用返回指向同一 a 的引用集合; OIDC 闭包预生成绑定 provider。
 func (a *API) Handlers() *ClientHandlers {
-	oidc := make([]OIDCRoute, 0, len(a.browsers))
+	a.mu.RLock()
+	browsers := make([]BrowserProvider, 0, len(a.browsers))
 	for _, p := range a.browsers {
+		browsers = append(browsers, p)
+	}
+	a.mu.RUnlock()
+	oidc := make([]OIDCRoute, 0, len(browsers))
+	for _, p := range browsers {
 		oidc = append(oidc, OIDCRoute{
 			Name:     p.Name(),
 			Login:    a.handleOIDCLoginWith(p),
@@ -43,41 +55,73 @@ func (a *API) Handlers() *ClientHandlers {
 		})
 	}
 	return &ClientHandlers{
-		Login:          a.handleLogin,
-		Logout:         a.handleLogout,
-		Me:             a.handleMe,
-		Usage:          a.handleUsageSummary,
-		ChangePassword: a.handleChangePassword,
-		OIDC:           oidc,
+		Login:           a.handleLogin,
+		Logout:          a.handleLogout,
+		Me:              a.handleMe,
+		Usage:           a.handleUsageSummary,
+		ChangePassword:  a.handleChangePassword,
+		OIDC:            oidc,
+		BrowserLogin:    a.browserLoginHandler,
+		BrowserCallback: a.browserCallbackHandler,
+	}
+}
+
+// browserLoginHandler 返回按名称动态解析 provider 的登录 handler(F2)。
+// provider 未配置/已禁用 → 404 JSON(不泄露配置细节)。
+func (a *API) browserLoginHandler(name string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := a.browserProvider(name)
+		if p == nil {
+			WriteError(c, http.StatusNotFound, "NOT_FOUND", "该登录方式未配置或已禁用")
+			return
+		}
+		a.handleOIDCLoginWith(p)(c)
+	}
+}
+
+// browserCallbackHandler 同上,动态解析回调 provider。
+func (a *API) browserCallbackHandler(name string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := a.browserProvider(name)
+		if p == nil {
+			WriteError(c, http.StatusNotFound, "NOT_FOUND", "该登录方式未配置或已禁用")
+			return
+		}
+		a.handleOIDCCallbackWith(p)(c)
 	}
 }
 
 // AdminHandlers 服务端管理面(webadmin)handler 集合。
 // 含 RBAC 权限点位: 路径声明由 router 包集中, 权限由 AdminRoute 申报。
 type AdminHandlers struct {
-	Login            gin.HandlerFunc // 公开: 管理登录
-	LoginMFA         gin.HandlerFunc // 公开: 两步登录第二步(0057)
-	PublicMethods    gin.HandlerFunc // 公开: 登录方式发现
-	Me               gin.HandlerFunc
-	Logout           gin.HandlerFunc
-	MePassword       gin.HandlerFunc // POST /me/password 管理员改自己密码(0057)
-	GetMyMFA         gin.HandlerFunc // GET /me/mfa
-	EnableMyMFA      gin.HandlerFunc // POST /me/mfa/enable
-	VerifyMyMFA      gin.HandlerFunc // POST /me/mfa/verify
-	DisableMyMFA     gin.HandlerFunc // POST /me/mfa/disable
-	ResetUserMFA     gin.HandlerFunc // PUT /users/:id/mfa 重置他人 MFA
-	ListUsers        gin.HandlerFunc
-	CreateUser       gin.HandlerFunc
-	UpdateUser       gin.HandlerFunc
-	DeleteUser       gin.HandlerFunc
-	GetUserGroups    gin.HandlerFunc
-	SetUserDept      gin.HandlerFunc
-	ListDepts        gin.HandlerFunc
-	CreateDept       gin.HandlerFunc
-	UpdateDept       gin.HandlerFunc
-	DeleteDept       gin.HandlerFunc
-	ListUserTokens   gin.HandlerFunc
-	RevokeToken      gin.HandlerFunc
+	Login          gin.HandlerFunc // 公开: 管理登录
+	LoginMFA       gin.HandlerFunc // 公开: 两步登录第二步(0057)
+	PublicMethods  gin.HandlerFunc // 公开: 登录方式发现
+	Me             gin.HandlerFunc
+	Logout         gin.HandlerFunc
+	MePassword     gin.HandlerFunc // POST /me/password 管理员改自己密码(0057)
+	GetMyMFA       gin.HandlerFunc // GET /me/mfa
+	EnableMyMFA    gin.HandlerFunc // POST /me/mfa/enable
+	VerifyMyMFA    gin.HandlerFunc // POST /me/mfa/verify
+	DisableMyMFA   gin.HandlerFunc // POST /me/mfa/disable
+	ResetUserMFA   gin.HandlerFunc // PUT /users/:id/mfa 重置他人 MFA
+	ListUsers      gin.HandlerFunc
+	CreateUser     gin.HandlerFunc
+	UpdateUser     gin.HandlerFunc
+	DeleteUser     gin.HandlerFunc
+	GetUserGroups  gin.HandlerFunc
+	SetUserDept    gin.HandlerFunc
+	ListDepts      gin.HandlerFunc
+	CreateDept     gin.HandlerFunc
+	UpdateDept     gin.HandlerFunc
+	DeleteDept     gin.HandlerFunc
+	ListUserTokens gin.HandlerFunc
+	RevokeToken    gin.HandlerFunc
+	// 0061 员工余额:调整单人 / 读取配置总览 / 保存配置 / 手动发放当月。
+	AdjustBalance    gin.HandlerFunc
+	GetBalance       gin.HandlerFunc
+	PutBalance       gin.HandlerFunc
+	GrantBalance     gin.HandlerFunc
 	Usage            gin.HandlerFunc
 	UsageOverview    gin.HandlerFunc // GET /usage/overview(2026-09 用量中心总览)
 	UsageRequests    gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
@@ -116,6 +160,10 @@ func (a *AdminAPI) Handlers() *AdminHandlers {
 		DeleteDept:       a.deleteDepartment,
 		ListUserTokens:   a.listUserTokens,
 		RevokeToken:      a.revokeToken,
+		AdjustBalance:    a.adjustUserBalance,
+		GetBalance:       a.getBalance,
+		PutBalance:       a.putBalance,
+		GrantBalance:     a.grantBalance,
 		Usage:            a.usage,
 		UsageOverview:    a.usageOverview,
 		UsageRequests:    a.usageRequests,
