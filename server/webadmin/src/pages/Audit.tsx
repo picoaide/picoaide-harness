@@ -37,6 +37,10 @@ const ACTION_LABEL: Record<string, string> = {
   dept_create: '新建部门',
   dept_update: '更新部门',
   dept_delete: '删除部门',
+  // 余额(0061/0062):钱的每一次变动都必须可筛可读(审计员的核心诉求)
+  balance_adjust: '调整余额',
+  balance_grant: '余额发放',
+  balance_settings: '余额策略变更',
   // MCP 与知识库(MCP/KB)动作——生产环境写入,原名未映射时显示原始 id
   mcp_create: '新建MCP',
   mcp_update: 'MCP更新',
@@ -50,6 +54,8 @@ const ACTION_LABEL: Record<string, string> = {
   kb_grant: '知识库授权',
   kb_revoke: '知识库撤销授权',
 }
+// 注:quota_change / dept_budget_change / quota_default_change 随配额与部门预算
+// 下线一并移除(2026-09-11),不再有新数据产生。
 
 // M8: 筛选下拉的可选动作
 const FILTER_ACTIONS = Object.keys(ACTION_LABEL).sort()

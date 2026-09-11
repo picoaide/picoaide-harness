@@ -9,10 +9,10 @@ import { Button } from '../../components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { PageHeader } from '../../components/page-header'
 import { RangeFilter, defaultRange, fetchUsageList, chatTokens, downloadCsv, fmtY, type UsageRow, type DeptInfo } from './common'
-import { fmtTokens, moneyRate, moneyOver } from '../../lib/format'
+import { fmtTokens } from '../../lib/format'
 import { cn } from '../../lib/utils'
 
-// 部门用量:部门树总表(费用/预算/使用率/成员) + 选中部门详情(趋势/成员排行/模型拆分)
+// 部门用量:部门树总表(费用/成员) + 选中部门详情(趋势/成员排行/模型拆分)
 export default function UsageDepartments() {
   const init = defaultRange()
   const [from, setFrom] = useState(init.from)
@@ -116,7 +116,7 @@ export default function UsageDepartments() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="部门用量" desc="按部门维度查看消耗：预算使用率、成员排行、模型拆分（与部门预算 enforcement 同口径）" />
+      <PageHeader title="部门用量" desc="按部门维度查看消耗:本月/区间费用、成员排行、模型拆分" />
       <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={() => void load(from, to)} />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
@@ -124,7 +124,7 @@ export default function UsageDepartments() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">部门列表</CardTitle>
-            <CardDescription>本月费用为自然月口径 · 区间费用为所选范围</CardDescription>
+            <CardDescription>费用为所选区间口径(默认近 30 天)</CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? <Skeleton className="h-80 w-full" /> : (
@@ -132,17 +132,12 @@ export default function UsageDepartments() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>部门</TableHead>
-                    <TableHead className="text-right">本月费用</TableHead>
-                    <TableHead className="text-right">预算</TableHead>
-                    <TableHead className="text-right">使用率</TableHead>
+                    <TableHead className="text-right">区间费用</TableHead>
                     <TableHead className="text-right">成员</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {depts.map((d) => {
-                    const used = d.monthly_cost
-                    const over = moneyOver(used, d.budget_money)
-                    const rate = moneyRate(used, d.budget_money)
                     const rangeCost = rowOf.get(d.name)?.cost ?? 0
                     return (
                       <TableRow
@@ -153,21 +148,12 @@ export default function UsageDepartments() {
                         <TableCell>
                           <span style={{ paddingLeft: `${(depth.get(d.id) ?? 0) * 14}px` }} className="font-medium">{d.name}</span>
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          <div>{fmtY(used)}</div>
-                          <div className="text-[10px] text-muted-foreground">{fmtY(rangeCost)}</div>
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">{d.budget_money ? fmtY(d.budget_money) : '不限'}</TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {d.budget_money ? (
-                            <span className={cn(over && 'text-destructive font-semibold', !over && rate >= 90 && 'text-amber-600')}>{rate}%</span>
-                          ) : '—'}
-                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtY(rangeCost)}</TableCell>
                         <TableCell className="text-right tabular-nums">{d.member_count}</TableCell>
                       </TableRow>
                     )
                   })}
-                  {depts.length === 0 && <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">暂无部门</TableCell></TableRow>}
+                  {depts.length === 0 && <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">暂无部门</TableCell></TableRow>}
                 </TableBody>
               </Table>
             )}
@@ -214,7 +200,7 @@ export default function UsageDepartments() {
                           <TableCell className="text-right tabular-nums">{fmtY(r.cost ?? 0)}</TableCell>
                         </TableRow>
                       ))}
-                      {detail.members.length === 0 && <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground">无数据</TableCell></TableRow>}
+                      {detail.members.length === 0 && <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">无数据</TableCell></TableRow>}
                     </TableBody>
                   </Table>
                 </div>

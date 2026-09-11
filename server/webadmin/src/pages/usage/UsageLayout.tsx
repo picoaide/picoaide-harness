@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { cn } from '../../lib/utils'
-import { LayoutDashboard, Network, Users, Cpu, ScrollText, WalletCards, CalendarClock } from 'lucide-react'
+import { LayoutDashboard, Network, Users, Cpu, ScrollText, Wallet, CalendarClock } from 'lucide-react'
 
 const TABS = [
   { to: '/usage', label: '总览', icon: LayoutDashboard, end: true },
@@ -8,11 +8,11 @@ const TABS = [
   { to: '/usage/members', label: '成员用量', icon: Users },
   { to: '/usage/models', label: '模型分析', icon: Cpu },
   { to: '/usage/logs', label: '请求日志', icon: ScrollText },
-  { to: '/usage/quota', label: '配额与预算', icon: WalletCards },
+  { to: '/usage/balance', label: '余额', icon: Wallet },
   { to: '/usage/reports', label: '报表订阅', icon: CalendarClock },
 ]
 
-// 用量中心子导航:6 个二级页统一样式,每页只聚焦一个主题
+// 用量中心子导航:每页只聚焦一个主题(2026-09-11:配额/预算下线,只剩「余额」)
 export default function UsageLayout() {
   return (
     <div className="space-y-4">

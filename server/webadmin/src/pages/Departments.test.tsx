@@ -102,73 +102,8 @@ describe('Departments 部门管理页', () => {
   })
 })
 
-  it('部门预算:表格展示费用/预算进度条,编辑提交 budget_money', async () => {
-    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/server/admin/departments') {
-        return {
-          departments: [
-            { id: 1, name: '研发部', parent_id: 0, leader_id: 2, leader_name: 'alice', description: '', member_count: 1, child_count: 1, granted_count: 0, budget_money: 1000, monthly_cost: 800 },
-            { id: 2, name: '前端组', parent_id: 1, leader_id: 0, leader_name: '', description: '', member_count: 1, child_count: 0, granted_count: 0, budget_money: null, monthly_cost: 0 },
-          ],
-        }
-      }
-      if (path === '/api/server/admin/users?size=200') return { users: [{ id: 2, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] }], total: 1, page: 1, size: 200 }
-      if (path === '/api/server/admin/departments/1' && init?.method === 'PUT') return { ok: true }
-      return {}
-    })
-    render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
-    // 研发部预算 800/1000 = 80%;前端组无自身预算但受研发部预算约束(中6)
-    expect(await screen.findByText(/¥800/)).toBeInTheDocument()
-    expect(screen.getByText(/继承上级\(研发部/)).toBeInTheDocument()
 
-    // 编辑部门填预算
-    fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0])
-    const dialog = within(await screen.findByRole('dialog'))
-    const budgetInput = dialog.getByLabelText('月度金额预算(元,可选)')
-    fireEvent.change(budgetInput, { target: { value: '2000' } })
-    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/departments/1',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ name: '研发部', parent_id: 0, leader_id: 2, description: '', budget_money: 2000 }) }),
-    )
-  })
 
-  it('部门预算:留空保持现值,输入 0 清除预算', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
-    fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0])
-    const dialog = within(await screen.findByRole('dialog'))
-    const budgetInput = dialog.getByLabelText('月度金额预算(元,可选)')
-    fireEvent.change(budgetInput, { target: { value: '0' } })
-    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/departments/1',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ name: '研发部', parent_id: 0, leader_id: 2, description: '', budget_money: 0 }) }),
-    )
-  })
-
-  it('子部门无自身预算但祖先有预算:显示继承提示而非「不限」(中6)', async () => {
-    mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/server/admin/departments') {
-        return {
-          departments: [
-            { id: 1, name: '研发部', parent_id: 0, leader_id: 2, leader_name: 'alice', description: '', member_count: 1, child_count: 1, granted_count: 0, budget_money: 1000, monthly_cost: 800 },
-            { id: 2, name: '前端组', parent_id: 1, leader_id: 0, leader_name: '', description: '', member_count: 1, child_count: 0, granted_count: 0, budget_money: null, monthly_cost: 0 },
-            { id: 3, name: '人事部', parent_id: 0, leader_id: 0, leader_name: '', description: '', member_count: 0, child_count: 0, granted_count: 0, budget_money: null, monthly_cost: 0 },
-          ],
-        }
-      }
-      if (path === '/api/server/admin/users?size=200') return { users: [], total: 0, page: 1, size: 200 }
-      return {}
-    })
-    render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
-    // 前端组继承研发部预算
-    expect(await screen.findByText(/继承上级\(研发部/)).toBeInTheDocument()
-    // 人事部无任何祖先预算 → 不限
-    expect(screen.getAllByText('不限').length).toBeGreaterThanOrEqual(1)
-  })
 
   it('部门主管:从用户列表搜索选择(G10,服务端 q= 搜索)', async () => {
     mockRequest.mockImplementation(async (path: string) => {
