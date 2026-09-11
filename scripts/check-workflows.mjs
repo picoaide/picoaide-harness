@@ -67,6 +67,21 @@ const TRANSFER_REQUIRED_ENV = [
   'AWS_SECRET_ACCESS_KEY',
 ]
 
+/**
+ * 渠道 DMG 打包 step 必须带齐的公证三元组(2026-09-11 补的策略门禁)。
+ *
+ * 渠道包是交付给客户的安装包,正式 tag 上必须签名+公证+staple,否则客户 Mac
+ * 首次打开被 Gatekeeper 拦成「Apple 无法验证」。此前渠道 step 只传了签名证书、
+ * 走预发那条 `--sign-only` 路径,产物签名有效但没有票据 —— 这类"PR/分支全绿、
+ * 发版才在客户端炸"的缺口只能靠静态检查拦。step 内部允许按 tag 形态分支成
+ * sign-only(预发内测),但**公证凭据必须一直在 env 里**,否则分支一改就静默降级。
+ */
+const CHANNEL_DMG_NOTARIZE_REQUIRED_ENV = [
+  'APPLE_API_KEY',
+  'APPLE_API_KEY_ID',
+  'APPLE_API_ISSUER',
+]
+
 /** `defaults:` 下的 `run:` 分组(job 级默认 shell 的父键)。 */
 const JOB_KEY = /^ {2}([A-Za-z_][\w-]*):\s*$/u
 const STEP_KEY = /^ {6}- /u
@@ -250,6 +265,36 @@ export function checkWorkflow(name) {
             line: 0,
             detail: `job ${jobId} 的 ci-channel-transfer.sh step 缺少凭据环境变量: ${missing.join(', ')}`
               + '(aws CLI 只认 AWS_*,R2_* 是端点/桶名/HMAC 种子;2026-09-11 因漏 AWS_* 三个平台零交付)',
+          })
+        }
+      }
+      // 渠道 DMG 打包(ci-package-clients.sh + '*.dmg')必须带公证三元组。
+      if (
+        typeof step?.run === 'string'
+        && step.run.includes('ci-package-clients.sh')
+        && step.run.includes('*.dmg')
+      ) {
+        const env = typeof step.env === 'object' && step.env !== null ? step.env : {}
+        const missing = CHANNEL_DMG_NOTARIZE_REQUIRED_ENV.filter(name => {
+          const value = env[name]
+          return typeof value !== 'string' || value.trim() === ''
+        })
+        if (missing.length > 0) {
+          failures.push({
+            name,
+            line: 0,
+            detail: `job ${jobId} 的渠道 DMG 打包 step 缺少公证凭据: ${missing.join(', ')}`
+              + '(渠道包是客户交付物,正式 tag 必须签名+公证+staple;2026-09-11 客户 Mac 首次打开被拦)',
+          })
+        }
+        // 凭据齐了还要真的调公证:`--sign-only` 只签名不 staple,客户包会退回
+        // "无票据"状态(本次缺陷的形态),必须能在 run 里看到公证命令。
+        if (!step.run.includes('dist:mac:notarize')) {
+          failures.push({
+            name,
+            line: 0,
+            detail: `job ${jobId} 的渠道 DMG 打包 step 没有调用 dist:mac:notarize`
+              + '(只 sign-only 的渠道包没有公证票据,客户 Mac 首次打开会被 Gatekeeper 拦下)',
           })
         }
       }

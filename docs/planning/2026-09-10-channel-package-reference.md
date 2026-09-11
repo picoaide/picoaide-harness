@@ -386,6 +386,30 @@ official/beta），所以直接切换；官方渠道目录不变，存量用户�
 
 - macOS 签名统一用**厂商证书**（2026-09-10 定案，后续不更换）。
 
+### 5.0 渠道包的 mac 交付面：必须**签名 + 公证 + staple**（2026-09-11 修复）
+
+渠道包是**交付物**，不是内测包：客户在 Mac 上双击打开，Gatekeeper 必须直接放行。此前
+渠道走的是"预发 tag 那条" sign-only 路径（`dist:mac:pack --sign-only` + `dist:mac:dmg`），
+包**已用厂商 Developer ID 签名**（实测：`identifier=com.<渠道 app_id>`、`teamID=78W9HZYR6Q`、
+`flags=0x10000` hardened runtime、CMS 可验、链到 Apple Root CA），但**没有公证票据** ——
+首次打开被拦成「Apple 无法验证此 App 是否包含恶意软件 / 未能验证开发者」。
+
+判据（离线可查，不需要 macOS）：公证+staple 过的 app bundle 里有票据文件
+`Contents/CodeResources`（magic `s8ch`，signer 链 = Software Ticket Signing ← Apple
+System Integration CA 4 ← Apple Root CA - G3）；sign-only 的包没有这个文件。
+官方 2.6.7 DMG 有、渠道 2.7.0 DMG 没有 —— 这就是客户看到的差异。
+
+CI 现在的规则（`.github/workflows/ci.yml` 的 `desktop-macos`）：
+
+| tag | 官方/beta 客户端 | 品牌渠道客户端 |
+|---|---|---|
+| 正式 `vX.Y.Z` | 签名 + 公证 + staple | **签名 + 公证 + staple**（逐渠道 3 次重试，与官方同链） |
+| 预发 `vX.Y.Z-beta.N` | 只签名（不公证） | 不构建（预发 tag 的渠道列表只有 `beta`） |
+
+成本提示：公证排队 1–5 小时是**每个渠道各自**的，且与官方共享同一个 mac job 的
+360 分钟预算；渠道数变多后必须改成"按序号矩阵拆 job"（矩阵维度用序号，不用渠道 id，
+避免品牌名出现在 job 名里）。
+
 ### 5.1 深链 scheme：一处真源、四处生效（2026-09-11 修正）
 
 `desktop.deep_link_scheme` 决定浏览器从 IdP 回调跳回客户端时的 scheme ——
