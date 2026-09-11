@@ -15,9 +15,9 @@ PicoAide Harness 是**企业级 DeepSeek Harness 一体化平台**：桌面客�
 
 ## 阅读路径
 
-- 想理解产品为什么这么设计：[产品哲学](./philosophy)（推荐先读）
-- 想快速上手：[快速开始](./getting-started)
-- 想深入了解每个界面：[桌面客户端](./desktop) / [管理后台](./admin)
-- 企业管理员：[私有化部署指南](./deployment)
-- 想开发插件：[插件开发](./plugin-development)
-- 常见疑问：[常见问题](./faq)
+- 想理解产品为什么这么设计：[产品哲学](/philosophy/)（推荐先读）
+- 想快速上手：[快速开始](/getting-started/)
+- 想深入了解每个界面：[桌面客户端](/desktop/) / [管理后台](/admin/)
+- 企业管理员：[私有化部署指南](/deployment/)
+- 想开发插件：[插件开发](/plugin-development/)
+- 常见疑问：[常见问题](/faq/)

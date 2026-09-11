@@ -64,7 +64,7 @@ ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
 
 ## 更多资料
 
-- [插件生态倡议](./plugin-ecosystem) — 生态愿景与三条原则
+- [插件生态倡议](/plugin-ecosystem/) — 生态愿景与三条原则
 - [桌面插件服务 contract（仓库）](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs/plugin-services.zh.md) — 类型、生命周期与失败语义
 - [Community Fabric（社区互操作 RFC）](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/README.zh.md)
-- [系统架构](./architecture)
+- [系统架构](/architecture/)

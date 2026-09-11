@@ -18,14 +18,22 @@
 # release.picoaide.com 的 R2 自定义域)。`<index>` 是 channels.list 里的行号:
 # 中转路径不含渠道 id,渠道身份全程不出现在任何公开处。
 #
-# 用法:
-#   R2_ACCOUNT_ID=… R2_BUCKET=… ci-channel-transfer.sh push  --list channels.list --stage client-assets
-#   R2_ACCOUNT_ID=… R2_BUCKET=… ci-channel-transfer.sh pull  --list channels.list --to release-artifacts
-#   R2_ACCOUNT_ID=… R2_BUCKET=… ci-channel-transfer.sh clean --list channels.list
+# 用法(两组凭据都要给:aws CLI 认 AWS_*,R2_* 用于端点/桶名与 HMAC 种子):
+#   R2_ACCOUNT_ID=… R2_BUCKET=… R2_SECRET_ACCESS_KEY=… \
+#   AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_DEFAULT_REGION=auto \
+#     ci-channel-transfer.sh push  --list channels.list --stage client-assets
+#   … pull  --list channels.list --to release-artifacts
+#   … clean --list channels.list
 #
-# 退出码:0 成功;非 0 失败(缺 R2 凭据且存在品牌渠道时必须失败 —— 静默跳过会让
+# 退出码:0 成功;非 0 失败(缺凭据且存在品牌渠道时必须失败 —— 静默跳过会让
 # 品牌渠道"零交付"且没有任何信号)。
 set -euo pipefail
+
+# 公开日志里的品牌串脱敏:aws 的失败信息会回显对象键,而文件名带客户 slug
+# (2026-09-11 v2.7.0 实测泄漏)。共享实现见 scripts/ci-brand-mask.sh ——
+# 中转与发布两个脚本都用它,避免各写一份。
+# shellcheck source=scripts/ci-brand-mask.sh
+. "$(dirname "$0")/ci-brand-mask.sh"
 
 MODE="${1:-}"
 shift || true
@@ -81,6 +89,20 @@ if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ] || [ -z "${R2_SECRET_A
   exit 1
 fi
 
+# aws CLI 的凭据是**另一组**环境变量:上面那三个 R2_* 只喂端点、桶名与中转前缀的
+# HMAC 种子,aws 自己不认它们。
+# 2026-09-11 v2.7.0 首次正式 tag 实测:调用点只传了 R2_* → 三个平台 job 全部在
+# 这一步以 aws 的 "Unable to locate credentials" 失败(报错还指不到病根),
+# 品牌渠道零交付、release job 因 needs 失败被跳过。这里提前 fail-loud,
+# 让"缺凭据"自己说明缺什么。
+if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  echo "::error::存在品牌渠道,但 aws 凭据不完整(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)。" >&2
+  echo "::error::调用点须传 AWS_ACCESS_KEY_ID=secrets.R2_ACCESS_KEY_ID 与" >&2
+  echo "::error::AWS_SECRET_ACCESS_KEY=secrets.R2_SECRET_ACCESS_KEY(AWS_DEFAULT_REGION=auto);" >&2
+  echo "::error::R2_* 那组只用于端点/桶名/HMAC 种子,aws CLI 不认。" >&2
+  exit 1
+fi
+
 # 工具依赖:aws CLI 与 node 都必须有(后者用于派生不可猜的中转前缀 token)。
 # 缺了就明说 —— 这条链失败意味着品牌渠道零交付,不能含糊。
 if ! command -v aws >/dev/null 2>&1; then
@@ -102,11 +124,18 @@ printf '::add-mask::%s\n' "$TOKEN"
 BASE="s3://${R2_BUCKET}/_transfer/${RUN}-${TOKEN}"
 aws_cmd() { aws --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" "$@"; }
 
+aws_checked() {  # 输出先捕获、经脱敏后再打印(公开日志里不得出现品牌)
+  if ! brand_run_checked aws_cmd "$@"; then
+    echo "::error::R2 中转 ${MODE} 失败(渠道 ${INDEX}/${TOTAL})" >&2
+    exit 1
+  fi
+}
+
 INDEX=0
 for id in "${CHANNELS[@]}"; do
   INDEX=$((INDEX + 1))
   if is_public "$id"; then continue; fi
-  printf '::add-mask::%s\n' "$id"
+  brand_register_channel "$id" "$STAGE"
   case "$MODE" in
     push)
       [ -d "$STAGE/$id" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 没有可中转的产物目录" >&2; exit 1; }
@@ -116,17 +145,18 @@ for id in "${CHANNELS[@]}"; do
       # 反例是 `s3://bucket/prefix/.` —— 真实 aws CLI 把它当字面前缀列出、匹配不到
       # 任何对象(桩会"好心"修正,于是本地全绿、正式发布才炸),回归门禁因此连
       # 命令形态一起断言(见 verify-ci-scripts.mjs)。
-      aws_cmd s3 cp --recursive --only-show-errors "$STAGE/$id" "$BASE/ch-$INDEX/" >/dev/null
+      aws_checked s3 cp --recursive --only-show-errors "$STAGE/$id" "$BASE/ch-$INDEX/" 
       # 从公开 artifact 的暂存目录里删掉 —— 后面的 upload-artifact 就看不到品牌产物了。
       rm -rf "$STAGE/$id"
       ;;
     pull)
       mkdir -p "$TO/$id"
-      aws_cmd s3 cp --recursive --only-show-errors "$BASE/ch-$INDEX/" "$TO/$id/" >/dev/null
+      aws_checked s3 cp --recursive --only-show-errors "$BASE/ch-$INDEX/" "$TO/$id/" 
       [ -n "$(ls -A "$TO/$id" 2>/dev/null)" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 的中转产物为空(上传失败?)" >&2; exit 1; }
       ;;
     clean)
-      aws_cmd s3 rm --recursive --only-show-errors "$BASE/ch-$INDEX/" >/dev/null 2>&1 || true
+      # clean 是尽力而为:失败不阻断发布,但输出同样脱敏。
+      brand_run_best_effort aws_cmd s3 rm --recursive --only-show-errors "$BASE/ch-$INDEX/"
       ;;
   esac
 done
