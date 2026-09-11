@@ -15,8 +15,9 @@ vi.mock('@picoaide/dsh-enterprise/server-connector/auth', () => ({ fetchJSON: en
 
 function payload(monthly_cost: number): UsagePayload {
   return {
-    is_admin: false, quota_tokens: 0, quota_money: 0,
-    monthly_usage: 0, monthly_cost, remaining_tokens: null, remaining_money: 100,
+    balance_money: 88.5, balance_activated: true, balance_enabled: true,
+    balance_monthly: 100, balance_mode: 'add',
+    is_admin: false, monthly_usage: 0, monthly_cost,
     today_usage: 0, today_cost: 0, yesterday_usage: 0, yesterday_cost: 0,
     total_usage: 0, total_cost: 0,
   }

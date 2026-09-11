@@ -8,25 +8,11 @@
 
 import { fetchJSON } from '@picoaide/dsh-enterprise/server-connector/auth'
 import type { Session } from '@picoaide/dsh-enterprise/server-connector/config'
+import { parseUsagePayload, type UsagePayload } from './usage-contract.js'
 
-/** Server `GET /api/client/v2/auth/usage` payload (fields used by the card). */
-export interface UsagePayload {
-  is_admin: boolean
-  quota_tokens: number
-  quota_money: number
-  monthly_usage: number
-  monthly_cost: number
-  /** `null` = no token quota (unlimited) or zero quota (also unlimited). */
-  remaining_tokens: number | null
-  /** `null` = no money quota (unlimited) or zero quota (also unlimited). */
-  remaining_money: number | null
-  today_usage: number
-  today_cost: number
-  yesterday_usage: number
-  yesterday_cost: number
-  total_usage: number
-  total_cost: number
-}
+// 契约(类型 + 键集合 + 运行时校验)统一在 usage-contract.ts —— 唯一真源。
+export type { UsagePayload } from './usage-contract.js'
+export { USAGE_PAYLOAD_KEYS, parseUsagePayload } from './usage-contract.js'
 
 /** Refresh lifecycle of the snapshot. */
 export type SnapshotState = 'idle' | 'loading' | 'error'
@@ -136,16 +122,21 @@ export class UsageService {
     let request!: Promise<UsageSnapshot>
     request = (async (): Promise<UsageSnapshot> => {
       try {
-        const data = await this.fetch(session.serverURL, '/api/client/v2/auth/usage', {
+        const raw = await this.fetch(session.serverURL, '/api/client/v2/auth/usage', {
           token: session.token,
           signal: controller.signal,
         })
+        // 运行时校验:形状不符(旧服务端/字段改名/代理包了一层)时保持空态,
+        // 不把 undefined 漏进渲染层。
+        const data = parseUsagePayload(raw)
         // Epoch + ownership check: a logout/login during the request must not
         // write the previous account's data into the new snapshot, and a
         // superseded request (replaced by another account's) must not publish
         // its aborted error over the newer request's state (P2-22).
         if (epoch === this.epoch && this.inflight === request) {
-          this.snapshot = { data, fetchedAt: Date.now(), state: 'idle', error: null }
+          this.snapshot = data === null
+            ? { data: null, fetchedAt: Date.now(), state: 'error', error: 'unexpected usage payload' }
+            : { data, fetchedAt: Date.now(), state: 'idle', error: null }
         }
       } catch (cause) {
         // 401/auth-expired surfaces here too: the route layer maps it to a
