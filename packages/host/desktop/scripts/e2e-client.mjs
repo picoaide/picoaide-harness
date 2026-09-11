@@ -381,21 +381,23 @@ async function main() {
   let usageProbe = null
   try {
     const probe = await cdp.send('Runtime.evaluate', {
-      expression: `fetch('/api/pico/account/usage').then(r=>r.json()).then(j=>({balance:j?.data?.balance_money ?? null, enabled:j?.data?.balance_enabled === true}))`,
+      expression: `fetch('/api/pico/account/usage').then(r=>r.json()).then(j=>({balance:j?.data?.balance_money ?? null, activated:j?.data?.balance_activated === true, enabled:j?.data?.balance_enabled === true}))`,
       returnByValue: true,
       awaitPromise: true,
     })
     usageProbe = probe?.result?.value ?? null
   } catch { usageProbe = null }
-  reportStep('账户卡余额数据链路（balance=88.5/enabled）',
-    usageProbe?.enabled === true && usageProbe?.balance === 88.5, JSON.stringify(usageProbe))
+  reportStep('账户卡余额数据链路（balance=88.5/activated/enabled）',
+    usageProbe?.enabled === true && usageProbe?.activated === true && usageProbe?.balance === 88.5, JSON.stringify(usageProbe))
   // 再验证渲染:账户卡在宽布局(sidebar.footer wide seat)下以余额为主数字。
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }).catch(() => {})
   await wait(800)
   const accountWithCard = await bodyText(cdp)
-  const balanceRendered = accountWithCard.includes('账户余额') && accountWithCard.includes('88.5')
+  // 精确断言格式化结果(¥88.50):includes('88.5') 对 ¥88.5 / 88.5 / ¥88.500 都成立,
+  // 对"小数位回归"不敏感(2026-09-11 加固)。
+  const balanceRendered = accountWithCard.includes('账户余额') && accountWithCard.includes('¥88.50')
   reportStep('账户卡渲染余额主数字（宽布局）', balanceRendered,
-    `hasLabel=${accountWithCard.includes('账户余额')} hasAmount=${accountWithCard.includes('88.5')}`)
+    `hasLabel=${accountWithCard.includes('账户余额')} hasAmount=${accountWithCard.includes('¥88.50')}`)
   await screenshot(cdp, '10-account')
   await clickLabel(cdp, '关闭', 800).catch(() => {})
 

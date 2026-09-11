@@ -4,13 +4,14 @@ import { UsageService, type UsagePayload, type UsageFetcher } from './usage-serv
 const SESSION = { serverURL: 'https://gw.example.com', username: 'alice', token: 'tok-1' }
 
 const PAYLOAD: UsagePayload = {
+  balance_money: 90.8,
+  balance_activated: true,
+  balance_enabled: true,
+  balance_monthly: 100,
+  balance_mode: 'add',
   is_admin: false,
-  quota_tokens: 1_000_000,
-  quota_money: 100,
   monthly_usage: 120_000,
   monthly_cost: 9.2,
-  remaining_tokens: 880_000,
-  remaining_money: 90.8,
   today_usage: 4_000,
   today_cost: 0.35,
   yesterday_usage: 10_000,
@@ -52,7 +53,7 @@ describe('UsageService', () => {
     await new Promise(resolve => setTimeout(resolve, 120))
     expect(calls()).toBe(1)
     expect(service.get().state).toBe('idle')
-    expect(service.get().data?.remaining_money).toBe(90.8)
+    expect(service.get().data?.balance_money).toBe(90.8)
     expect(service.get().fetchedAt).toBeGreaterThan(0)
   })
 
@@ -67,7 +68,8 @@ describe('UsageService', () => {
     const third = service.refreshNow(SESSION)
     release()
     const [a, b, c] = await Promise.all([first, second, third])
-    expect(a.data).toBe(PAYLOAD)
+    // 契约解析会返回归一化后的新对象(运行时校验),比较形状而非引用。
+    expect(a.data).toStrictEqual(PAYLOAD)
     expect(b).toBe(a)
     expect(c).toBe(a)
   })
