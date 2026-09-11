@@ -26,6 +26,12 @@
 # 退出码:0 成功或按策略跳过;非 0 明确失败(缺文件/上传失败/清单写入失败)。
 set -euo pipefail
 
+# 公开日志里的品牌串脱敏:aws 失败信息会回显对象键。这里的 zip 名是中性的
+# (picoaide-server-<ver>-amd64.zip),但渠道目录/清单字段仍带渠道身份,且
+# 调用点的掩码一旦漏登记就是一次泄漏 —— 统一走共享库(scripts/ci-brand-mask.sh)。
+# shellcheck source=scripts/ci-brand-mask.sh
+. "$(dirname "$0")/ci-brand-mask.sh"
+
 LIST="channels.list"
 BUNDLE="release-bundle"
 while [ $# -gt 0 ]; do
@@ -82,10 +88,14 @@ NO_CACHE='no-cache'
 KEEP=3
 
 TOTAL=0
+INDEX=0
 while IFS= read -r channel; do
   [ -n "$channel" ] || continue
+  INDEX=$((INDEX + 1))
   # 本步骤自己再掩码一次:掩码"从发出那一刻起"生效,跨步骤不假设。
-  printf '::add-mask::%s\n' "$channel"
+  # brand_register_channel 额外登记 slug/显示名/产品名与产物文件名(2026-09-11
+  # 泄漏事故:只掩渠道 id 掩不到由 slug 派生的文件名)。
+  brand_register_channel "$channel" "$BUNDLE/$channel"
 
   zip="$BUNDLE/$channel/picoaide-server-${VER}-amd64.zip"
   sums="$BUNDLE/$channel/SHA256SUMS"
@@ -97,10 +107,16 @@ while IFS= read -r channel; do
   base="s3://${R2_BUCKET}/${channel}"
 
   # 1) 版本化资产:不可变 + 长缓存(同版本内容永不改)
-  aws s3 cp "$zip" "$base/releases/${VER}/" \
-    --content-type application/zip --cache-control "$IMMUTABLE" >/dev/null
-  aws s3 cp "$sums" "$base/releases/${VER}/SHA256SUMS" \
-    --content-type text/plain --cache-control "$IMMUTABLE" >/dev/null
+  if ! brand_run_checked aws s3 cp "$zip" "$base/releases/${VER}/" \
+    --content-type application/zip --cache-control "$IMMUTABLE"; then
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:上传版本资产;上方输出已脱敏)" >&2
+    exit 1
+  fi
+  if ! brand_run_checked aws s3 cp "$sums" "$base/releases/${VER}/SHA256SUMS" \
+    --content-type text/plain --cache-control "$IMMUTABLE"; then
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:上传校验和;上方输出已脱敏)" >&2
+    exit 1
+  fi
 
   # 2) 清理到最近 KEEP 个版本
   aws s3 ls "$base/releases/" | awk '{print $2}' | sed 's#/##' | grep -E '^[0-9]' \
@@ -108,7 +124,7 @@ while IFS= read -r channel; do
         [ -n "$old" ] || continue
         # 中性日志:渠道名不打印(只报版本号)。
         echo "prune old release (version ${old})"
-        aws s3 rm "$base/releases/$old/" --recursive >/dev/null
+        brand_run_best_effort aws s3 rm "$base/releases/$old/" --recursive
       done
 
   # 3) 版本指针**最后**写:先资产后指针,读者永远不会看到指向空目录的清单。
@@ -126,8 +142,12 @@ while IFS= read -r channel; do
   "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 JSON
-  aws s3 cp "$manifest" "$base/latest.json" \
-    --content-type application/json --cache-control "$NO_CACHE" >/dev/null
+  if ! brand_run_checked aws s3 cp "$manifest" "$base/latest.json" \
+    --content-type application/json --cache-control "$NO_CACHE"; then
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:写版本指针;上方输出已脱敏)" >&2
+    rm -f "$manifest"
+    exit 1
+  fi
   rm -f "$manifest"
   TOTAL=$((TOTAL + 1))
 done < "$LIST"

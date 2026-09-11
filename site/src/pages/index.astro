@@ -23,7 +23,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
   .slice(0, 3)
 ---
 
-<Layout title="PicoAide Harness - 企业级 AI 一体化平台" description="PicoAide Harness：桌面客户端、本地智能体引擎与管理后台，支持私有化部署的企业级 DeepSeek Harness 平台。">
+<Layout title="PicoAide Harness - 企业级 AI 一体化平台" description="PicoAide Harness：桌面客户端、本地智能体引擎与企业服务端一体化。一个镜像完成私有化部署，客户端随服务端发布，员工零外网。">
   <Header />
 
   <!-- Hero -->
@@ -35,14 +35,147 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       </div>
       <h1 class="hero__title">让每位员工拥有<br />自己的 AI 操作助手</h1>
       <p class="hero__sub">
-        PicoAide Harness 将桌面客户端、本地智能体引擎与管理后台整合为一个平台。
-        开箱即用，数据留在本机，适合企业内部署的 AI 工作底座。
+        PicoAide Harness 把桌面客户端、本地智能体引擎与企业服务端整合为一个平台。
+        交付物是一个容器镜像：服务端、内置 PostgreSQL、反向代理与三平台客户端安装包都在里面，
+        员工机器不需要访问任何外网。
       </p>
       <div class="hero__actions">
-        <a class="btn btn--primary" href="#features">了解产品</a>
+        <a class="btn btn--primary" href="/deployment/">私有化部署指南</a>
+        <a class="btn btn--ghost" href="/getting-started/">快速开始</a>
         <a class="btn btn--ghost" href="#screenshots">查看截图</a>
       </div>
       <Image class="hero__shot" src={mainShot} alt="PicoAide Harness 桌面主界面" width={1120} height={711} format="webp" quality={80} />
+    </div>
+  </section>
+
+  <!-- 部署与交付 -->
+  <section class="section section--soft" id="deployment">
+    <div class="container">
+      <h2 class="section__title">私有化部署：一个镜像，一份说明</h2>
+      <p class="section__sub">
+        没有安装脚本，不依赖镜像仓库，也不需要在部署机上访问 Git 仓库。
+        镜像自带部署所需的一切，按同一份说明即可完成首次部署、升级与回滚。
+      </p>
+
+      <div class="steps">
+        <div class="step">
+          <span class="step__num">1</span>
+          <h3>取镜像</h3>
+          <p>
+            从本渠道的更新服务器下载镜像包与 <code>SHA256SUMS</code>，校验后
+            <code>docker load</code>。不经任何镜像仓库，内网可完全离线旁路取包。
+          </p>
+        </div>
+        <div class="step">
+          <span class="step__num">2</span>
+          <h3>导出部署文件</h3>
+          <p>
+            一条命令把 <code>compose</code>、三种证书模式的 Caddyfile 与三平台客户端安装包
+            导出到部署目录，再按说明写 <code>.env</code>。
+          </p>
+        </div>
+        <div class="step">
+          <span class="step__num">3</span>
+          <h3>启动与自检</h3>
+          <p>
+            <code>docker compose up -d</code> 拉起 Caddy + 服务端 + 内置 PostgreSQL；
+            健康探针与客户端分发清单都有明确判据，通过才算部署成功。
+          </p>
+        </div>
+        <div class="step">
+          <span class="step__num">4</span>
+          <h3>交付全员</h3>
+          <p>
+            员工从企业服务器门户下载客户端并登录；客户端版本跟随服务端，
+            <strong>升级服务端即升级全员客户端</strong>。
+          </p>
+        </div>
+      </div>
+
+      <div class="codeblock">
+        <div class="codeblock__bar">
+          <span>部署机上执行（详细步骤见 <a href="/deployment/compose/">容器化部署</a>）</span>
+        </div>
+        <pre><code>{`# 1) 校验并导入镜像（版本以 latest.json 的 server.version 为准）
+curl -fL -O https://release.picoaide.com/official/releases/2.7.0/picoaide-server-2.7.0-amd64.zip
+unzip -p picoaide-server-2.7.0-amd64.zip image.tar | docker load
+
+# 2) 把部署文件导出到部署目录（镜像自带 compose / Caddyfile / 客户端安装包）
+docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \\
+  picoaide-harness-server:2.7.0
+
+# 3) 写 .env 后启动，并确认健康检查通过
+cd /opt/picoaide && docker compose up -d
+curl -k https://<你的域名>/healthz`}</code></pre>
+      </div>
+
+      <div class="notegrid">
+        <div class="note">
+          <h3>数据只在 bind mount 目录里</h3>
+          <p>
+            <code>picoaide-data/</code>（含 <code>master.key</code>）与 <code>pg-data/</code>
+            挂在部署目录下，升级只换镜像、不动数据，回滚只需切回旧镜像。
+          </p>
+        </div>
+        <div class="note">
+          <h3>三种证书模式</h3>
+          <p>
+            纯内网自签（Caddy 本地 CA）、公网域名自动签发（Let's Encrypt）、
+            企业正式证书三选一，只切换 <code>.env</code> 的 <code>TLS_MODE</code>。
+          </p>
+        </div>
+        <div class="note">
+          <h3>四道数据安全约定</h3>
+          <p>
+            不执行带 <code>-v</code> 的清理、不用 <code>latest</code> 标签、升级前必须备份且校验非空、
+            不覆盖已有部署目录的 <code>.env</code>。
+          </p>
+        </div>
+      </div>
+
+      <p class="section__more">
+        <a href="/deployment/">部署总览</a>
+        <span>·</span>
+        <a href="/deployment/upgrade/">升级、备份与回滚</a>
+        <span>·</span>
+        <a href="/deployment/offline/">离线部署</a>
+        <span>·</span>
+        <a href="/deployment/operations/">运维与排障</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- 客户端与渠道 -->
+  <section class="section" id="delivery">
+    <div class="container">
+      <h2 class="section__title">客户端交付与渠道白标</h2>
+      <p class="section__sub">客户端不是另一个下载站，而是服务端的一部分。</p>
+
+      <div class="features">
+        <div class="feature">
+          <h3>客户端随服务端发布</h3>
+          <p>
+            Windows / macOS / Linux 安装包打进服务端镜像，由企业服务器自己下发
+            （<code>/api/client/v2/updates/manifest</code> 与 <code>/updates/client/*</code>）。
+            版本错配在结构上不可能发生。
+          </p>
+        </div>
+        <div class="feature">
+          <h3>员工零外网</h3>
+          <p>
+            员工只访问企业域名：安装、登录、升级都由这台服务器完成。
+            断点续传与 SHA-256 校验内建，内网也能稳定分发上百 MB 的安装包。
+          </p>
+        </div>
+        <div class="feature">
+          <h3>渠道白标交付</h3>
+          <p>
+            名称、标语、欢迎语、标识与主题色来自随镜像交付的渠道内容，
+            客户端登录页、客户端界面、管理后台与门户页一处配置、全产品一致；
+            渠道之间互不升级，品牌不会被版本升级"洗掉"。
+          </p>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -50,20 +183,20 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
   <section class="section section--soft" id="features">
     <div class="container">
       <h2 class="section__title">企业级 AI 一体化平台</h2>
-      <p class="section__sub">桌面客户端、本地服务与管理后台三层协同，开箱即用。</p>
+      <p class="section__sub">桌面客户端、本地服务与企业管控面三层协同，开箱即用。</p>
 
       <div class="features">
         <div class="feature">
           <h3>桌面客户端</h3>
-          <p>原生窗口、系统托盘、终端与自动更新。对话、能力中心、连接器、定时任务、浏览器一站式完成，无需安装 Node.js。</p>
+          <p>原生窗口、系统托盘、终端与自动更新。对话、能力中心、连接器、定时任务、AI 浏览器一站式完成，无需安装 Node.js。</p>
         </div>
         <div class="feature">
           <h3>本地智能体引擎</h3>
           <p>自动启动、停止与恢复本地 Harness 服务，数据留在本机。上游 DeepSeek Harness 以固定版本原样运行，不魔改源码。</p>
         </div>
         <div class="feature">
-          <h3>管理后台</h3>
-          <p>Web 化管理台覆盖用户、部门、网关、用量、市场与能力中心审批。按用户按模型计费、限额与豁免，高峰时段自动分级计价。</p>
+          <h3>企业服务端与管理后台</h3>
+          <p>内嵌管理后台覆盖用户、部门、认证、网关、用量、能力中心审批与审计。按用户按模型计费、限额与豁免，高峰时段自动分级计价。</p>
         </div>
       </div>
     </div>
@@ -99,7 +232,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <div class="gallery">
         <figure>
           <Image src={adminUsersShot} alt="用户管理" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>用户管理：账号、部门、角色、配额与令牌</figcaption>
+          <figcaption>用户管理：账号、部门、角色、配额、余额与令牌</figcaption>
         </figure>
         <figure>
           <Image src={adminCapabilityShot} alt="能力中心审批" width={640} height={400} loading="lazy" format="webp" quality={75} />
@@ -107,7 +240,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </figure>
         <figure>
           <Image src={adminGatewayShot} alt="网关配置" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>网关配置：模型、限流、配额、高峰时段与认证</figcaption>
+          <figcaption>网关配置：模型、限流、配额、高峰时段与定价</figcaption>
         </figure>
         <figure>
           <Image src={adminUsageShot} alt="用量统计" width={640} height={400} loading="lazy" format="webp" quality={75} />
@@ -119,7 +252,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </figure>
         <figure>
           <Image src={adminServerShot} alt="服务器信息" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>服务器信息：运行状态、数据库驱动与迁移版本</figcaption>
+          <figcaption>服务器信息：运行版本、数据库与迁移、更新提示</figcaption>
         </figure>
       </div>
     </div>
@@ -133,47 +266,21 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       <div class="features features--4">
         <div class="feature">
           <h3>安全合规</h3>
-          <p>凭据以 0600/0700 权限原子写入，防符号链接与路径逃逸；OAuth state 校验；服务端操作审计全程留痕；上游密钥 AES-GCM 加密。</p>
+          <p>上游密钥 AES-GCM 加密存储，凭据以 0600/0700 权限原子写入，防符号链接与路径逃逸；管理操作全程审计、哈希链防篡改。</p>
         </div>
         <div class="feature">
           <h3>多用户隔离</h3>
-          <p>连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话；服务端令牌哈希存储、90 天过期、改密自动吊销。</p>
+          <p>连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话；服务端令牌只存哈希、90 天过期、改密自动吊销。</p>
         </div>
         <div class="feature">
           <h3>一切皆插件</h3>
           <p>核心智能体、Web UI、桌面外壳、连接器、定时任务、浏览器与记忆全部通过官方 Cordis 插件机制组合，可替换、可演进。</p>
         </div>
         <div class="feature">
-          <h3>私有化部署</h3>
-          <p>数据留在本机，企业内网部署，不依赖外部云服务，完全掌控自己的 AI 底座；PostgreSQL（PG-only）。</p>
+          <h3>可控的私有化</h3>
+          <p>一个镜像完成内网部署，数据与密钥都在企业自己的机器上；PostgreSQL 内置，升级只换镜像，员工机器不依赖任何外网服务。</p>
         </div>
       </div>
-    </div>
-  </section>
-
-  <!-- 私有化部署 -->
-  <section class="section" id="deployment">
-    <div class="container">
-      <h2 class="section__title">私有化部署</h2>
-      <p class="section__sub">PicoAide Harness 面向企业内网部署，开箱即用。</p>
-      <div class="steps">
-        <div class="step">
-          <span class="step__num">1</span>
-          <h3>准备环境</h3>
-          <p>安装桌面客户端，或在内网服务器运行服务端（Docker Compose / 单二进制，PostgreSQL）。</p>
-        </div>
-        <div class="step">
-          <span class="step__num">2</span>
-          <h3>配置网关</h3>
-          <p>配置模型网关、限流、配额、高峰时段定价与登录方式（local / LDAP / OIDC）。</p>
-        </div>
-        <div class="step">
-          <span class="step__num">3</span>
-          <h3>接入全员</h3>
-          <p>创建用户与部门，分配角色与配额；市场/共享内容经审批与授权后员工开箱即用。</p>
-        </div>
-      </div>
-      <p class="deployment__note">如需获取企业版部署方案，请前往 GitHub 仓库 <a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a> 提交 Issue。</p>
     </div>
   </section>
 
@@ -187,7 +294,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         {updates.map((update, index) => (
           <a href={`/blog/${update.id}/`} class="update">
             <div class="update__meta">
-              <span class="update__badge">v{update.data.version ?? ''}</span>
+              {update.data.version && <span class="update__badge">v{update.data.version}</span>}
               <time class="update__time" datetime={update.data.pubDate.toISOString()}>
                 {update.data.pubDate.toLocaleDateString('zh-CN')}
               </time>
@@ -200,6 +307,8 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
 
       <p class="updates__more">
         查看全部更新 <a href="/blog/">前往博客</a>
+        <span class="updates__sep">·</span>
+        历史版本与镜像归档 <a href="https://github.com/picoaide/picoaide-harness/releases" target="_blank" rel="noopener">GitHub Releases</a>
       </p>
     </div>
   </section>
@@ -211,15 +320,23 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
 
       <details class="faq">
         <summary>PicoAide Harness 与 DeepSeek Harness 的关系？</summary>
-        <p>上游 DeepSeek Harness 提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务与管理后台，基于固定版本构建，不魔改上游源码。</p>
+        <p>上游 DeepSeek Harness 提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务与企业服务端，基于固定版本构建，不魔改上游源码。</p>
       </details>
       <details class="faq">
         <summary>是否支持私有化部署？</summary>
-        <p>支持。数据留在本机，可部署于企业内网，不依赖外部云服务；PostgreSQL（PG-only），Docker Compose 容器化部署。</p>
+        <p>支持，且是主要形态。交付物是一个容器镜像（含服务端、内置 PostgreSQL、Caddy 与三平台客户端安装包），可选三种证书模式，数据全部落在部署目录的 bind mount 里。</p>
+      </details>
+      <details class="faq">
+        <summary>员工电脑需要访问外网吗？</summary>
+        <p>不需要。客户端从企业自己的服务器下载与升级，服务器只需要能访问更新服务器来检查与获取新版本镜像；完全隔离的环境可以离线旁路取包。</p>
+      </details>
+      <details class="faq">
+        <summary>客户端怎么升级？</summary>
+        <p>升级服务端即可。客户端安装包随服务端镜像发布，客户端定期向它登录的服务器检查新版本并按清单里的 SHA-256 校验后安装——不存在"客户端升了、服务端没升"的错配。</p>
       </details>
       <details class="faq">
         <summary>连接器与技能如何分发？</summary>
-        <p>遵循「技能 + MCP」两种标准形态：厂商 CLI 能力以 SKILL.md 经技能商店分发（审批 + 授权），MCP 能力走连接器框架（销售易、Moka 等），可审计、可审批、可卸载。</p>
+        <p>遵循「技能 + MCP」两种标准形态：厂商能力以 SKILL.md 经技能商店分发（审批 + 授权），MCP 能力走连接器框架（销售易、Moka 等），可审计、可审批、可卸载。</p>
       </details>
       <details class="faq">
         <summary>是否开源？</summary>
@@ -227,7 +344,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       </details>
       <details class="faq">
         <summary>支持哪些平台？</summary>
-        <p>支持 Windows x64、macOS Apple Silicon 与 Linux x64（AppImage + deb）。</p>
+        <p>Windows x64（NSIS 安装程序）、macOS（Apple 芯片，DMG）与 Linux x64（AppImage）；企业交付面不含 Linux deb。</p>
       </details>
     </div>
   </section>
@@ -270,7 +387,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
 
     .hero__sub {
       color: var(--ink-soft);
-      max-width: 620px;
+      max-width: 660px;
       margin: 0 auto 32px;
       font-size: 1.12rem;
     }
@@ -278,6 +395,7 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
     .hero__actions {
       display: flex;
       justify-content: center;
+      flex-wrap: wrap;
       gap: 14px;
       margin-bottom: 56px;
     }
@@ -320,6 +438,15 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       font-size: 0.96rem;
     }
 
+    .feature code,
+    .step code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-size: 0.88em;
+    }
+
     .gallery__group {
       margin: 40px 0 16px;
       font-size: 1.2rem;
@@ -327,15 +454,15 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
 
     .steps {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 24px;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
     }
 
     .step {
       background: #fff;
       border: 1px solid var(--line);
       border-radius: var(--radius);
-      padding: 28px 24px;
+      padding: 26px 22px;
       text-align: center;
     }
 
@@ -363,10 +490,89 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       font-size: 0.94rem;
     }
 
-    .deployment__note {
+    .codeblock {
+      margin: 32px 0 0;
+      border: 1px solid #1e293b;
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #0b1220;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .codeblock__bar {
+      padding: 10px 18px;
+      background: #111c30;
+      border-bottom: 1px solid #1e293b;
+      color: #94a3b8;
+      font-size: 0.86rem;
+    }
+
+    .codeblock__bar a {
+      color: #cbd5e1;
+      text-decoration: underline;
+    }
+
+    .codeblock pre {
+      margin: 0;
+      padding: 20px 18px;
+      overflow-x: auto;
+    }
+
+    .codeblock code {
+      color: #e2e8f0;
+      font-size: 0.86rem;
+      line-height: 1.7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+
+    .notegrid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-top: 24px;
+    }
+
+    .note {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--brand);
+      border-radius: var(--radius-sm);
+      padding: 20px 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .note h3 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+
+    .note p {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.93rem;
+    }
+
+    .note code {
+      background: var(--bg-soft);
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-size: 0.88em;
+    }
+
+    .section__more {
       text-align: center;
       color: var(--ink-soft);
-      margin-top: 36px;
+      margin: 36px 0 0;
+      font-size: 0.98rem;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .section__more span {
+      color: var(--ink-faint);
     }
 
     .container--narrow {
@@ -435,6 +641,11 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       font-size: 0.95rem;
     }
 
+    .updates__sep {
+      margin: 0 6px;
+      color: var(--ink-faint);
+    }
+
     .faq {
       border: 1px solid var(--line);
       border-radius: var(--radius-sm);
@@ -454,7 +665,20 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
       color: var(--ink-soft);
     }
 
-    @media (max-width: 860px) {
+    @media (max-width: 960px) {
+      .features,
+      .features--4 {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .steps {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .notegrid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
       .features,
       .features--4,
       .steps {

@@ -1,6 +1,6 @@
 ---
 title: Admin Console
-description: 'PicoAide Harness Admin Console (webadmin) feature guide: users and departments, gateway and rate limiting, usage and billing, marketplace and capability center, audit and server info.'
+description: 'PicoAide Harness Admin Console (webadmin) feature guide: users and departments, gateway and rate limiting, usage and billing, marketplace and Capability Hub, audit and server info.'
 ---
 
 The Admin Console (webadmin) is a single-page application embedded in the Go server, accessed via the browser at `/admin/`. It is responsible for **governance**: accounts, departments, the model gateway, metering and billing, marketplace and shared-content approvals, and audit. Employees never touch it — all governance decisions are made here.
@@ -9,26 +9,31 @@ The Admin Console (webadmin) is a single-page application embedded in the Go ser
 
 ## Navigation overview
 
-| Menu | Path | Responsibility |
-|---|---|---|
-| Users | `/users` | Accounts, roles, status, quotas |
-| Departments | `/departments` | Department tree, members, budgets |
-| Auth | `/auth` | Login-mode configuration (local / LDAP / OIDC) |
-| Brand | `/brand` | Login/client branding, portal configuration and snapshots |
-| Gateway | `/gateway` | Upstream providers, default model, rate limiting, peak windows |
-| Error monitoring | `/error-monitoring` | Client error reporting and the GlitchTip connector preset |
-| Usage Hub | `/usage` | Cost, request counts, token detail, charts (includes quotas & budgets, report subscriptions) |
-| Capability Hub | `/capabilities` | Three tabs — Skills / Agents / Approvals (Official/Featured marking, grants); the old `/marketplace` redirects here |
-| Connectors | `/connectors` | Connector catalog and delivery switches |
-| Server Info | `/server-info` | Version, database driver, build info |
-| Audit | `/audit` | Full trace of key operations |
+The sidebar is organized into three sections — Management / Operations / Audit — and entries appear according to the current account's RBAC permission points (`super_admin` sees everything; `auditor` only gets read-only views of the audit log, the usage center and the user list):
+
+| Section | Menu | Path | Responsibility |
+|---|---|---|---|
+| Management | Users | `/users` | Accounts, roles, status, quotas, **balance**, reset password / reset MFA, login tokens |
+| Management | Departments | `/departments` | Department tree, members (multi-department supported), budgets |
+| Management | Auth | `/auth` | Local / LDAP / OIDC login-mode configuration |
+| Operations | Gateway | `/gateway` | Upstream providers, default model, rate limiting, peak windows, model pricing and usage policy |
+| Operations | Error monitoring | `/error-monitoring` | Client error reporting and the GlitchTip connector preset |
+| Operations | Usage center | `/usage` | Overview, departments, members, models, detail, quotas & budgets, report subscriptions |
+| Operations | Capability Hub | `/capabilities` | Three tabs — Skills / Agents / Approvals (Official/Featured marking, grants) |
+| Operations | Connectors | `/connectors` | Connector catalog and delivery switches |
+| Operations | Server info | `/server-info` | Version and update notice, database and migrations, model concurrency |
+| Audit | Audit log | `/audit` | Full trace of key operations (including the retention policy) |
+
+> **Branding and copy are not edited in the Admin Console**: the names, taglines, welcome text, marks and accent color of the client login page, the client UI, the Admin Console sidebar and the portal page all come from **channel content** (read-only configuration injected into the image at build time). Changing the brand = rebuilding the image for that channel; see [Channels & white-label](/en/deployment/channels/). An administrator's own security settings (change password, MFA setup) live in the account menu in the top-right corner, not on the pages above.
 
 ## Users
 
-- **Create user**: username + password + role (`super_admin` / `auditor` / `user`); the current create/edit form exposes it through the compat alias `is_admin` (boolean), while the server already supports `role` (the RBAC role is the single source of truth since 0046; `is_admin` is a compatibility field);
+- **Create user**: username + password + role (`super_admin` / `auditor` / `user`); the RBAC role is the single source of truth (`is_admin` is a compatibility field);
 - **Status**: enabled / disabled — disabling **immediately revokes all API tokens for that user**, requiring the client to log in again (in the same transaction as the user update);
 - **Delete**: double confirmation (makes clear it wipes all API tokens, usage records and group membership, and is not recoverable);
 - **Quotas**: `quota_tokens` (monthly token cap: null = follow the global default, 0 = unlimited, >0 = monthly cap) and `quota_money` (monthly money cap, same semantics); the table shows the **resolved effective quota** (follow default = global value, admin = 0);
+- **Balance**: `balance_money` is a **stock amount** (CNY), orthogonal to the monthly quota. The in-row "Adjust balance / Top up" action supports add / deduct / set and writes an audit entry; the "Monthly balance grant" section at the top of the page configures the gate switch, the per-person monthly amount and the grant mode (add / cover), and can grant the current month immediately — with the gate on, an employee whose balance is ≤ 0 gets a 429 when calling AI (administrators are exempt); it is off by default, so that nobody is blocked the moment you upgrade;
+- **Reset password / reset MFA**: an administrator can reset the password of a local user (the user is forced to change it at the next login) and reset the TOTP code; a `super_admin` cannot reset their own MFA — another super admin or the ops CLI has to do it;
 - **Departments and roles**: users belong to departments (**multi-department supported**, see Departments), and department budgets take effect across **all** memberships + ancestor chains.
 
 ## Departments
@@ -85,6 +90,7 @@ Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved
 - **Approval actions**: approve / reject (reject requires a reason, shown to employees as "reason for rejection") / delete; **name conflicts**: when the name collides with a marketplace skill, a warning is shown and approve is blocked with 409 (you must first delete/rename the marketplace skill or reject the shared skill);
 - **Quality marking**: `quality` = Official (`official`) / Featured (`featured`) — **only settable when approved**; automatically cleared on reject/pending; mutually exclusive;
 - **Grant dialog**: reuses GrantDialog — even after approval, content must still be granted by user/department before it is visible and installable (**two-gate model**, same as the marketplace); admin always has full access;
+- **Statistics**: download/call counts (skills include `calls`) are shown alongside the approval queue;
 - Audit action names such as `skill_approve` / `*_qualify`.
 
 > Compatibility and history: the earlier standalone `/shared-skills` and `/agent-presets` routes are not preserved; the navigation and routes were merged into "Capability Hub" (2026-09).
@@ -97,10 +103,10 @@ Shared skills (`shared_skills`) and shared agents (`agent_presets`) are approved
 
 ## Server Info
 
-- Shows the current server version, database driver (PostgreSQL), build info; health-check status (`/healthz`) and a runtime environment summary.
-- Update notifications: the server automatically checks our update server (`release.picoaide.com`; override the channel with `PICOAI_UPDATE_ENDPOINT`) for the latest version. When a newer version exists, a banner appears at the top of the page showing the target image tag. Administrators upgrade by following the deployment guide (data preserved). Check failures degrade silently.
-- Model concurrency: per-model "current concurrency / 90-day peak / target". The target is configured in the model's `default_params.concurrency_target` (e.g. deepseek-v4-flash=2500, deepseek-v4-pro=500) and the UI shows peak utilization, highlighted in red when the target is reached — a quantitative basis for requesting capacity increases from the vendor. Current concurrency is a live in-memory snapshot (request start → end); peaks are sampled to the database every 15s (GREATEST accumulates, never rolls back).
+- Shows the current server version, database and migration versions, build info; health-check status (`/healthz`) and a runtime environment summary;
+- Version update notice: the server automatically checks the update directory of **its own channel** (default `release.picoaide.com/<channel>/latest.json`; override with `PICOAI_UPDATE_ENDPOINT` or set it to `off` to disable) for the latest version; when a newer version exists, a banner appears at the top of the page (including the upgrade target image tag), and administrators follow the [upgrade procedure](/en/deployment/upgrade/). Check results are cached for 6 hours; when the manifest's channel does not match this deployment it is treated as "check unavailable" (rather than being shown as "already up to date");
+- Model concurrency: per-model "current concurrency / 90-day peak / target". The target is configured in the model's `default_params.concurrency_target`; the UI shows peak utilization, highlighted in red when the target is reached — a quantitative basis for requesting capacity increases from the vendor. Current concurrency is a live in-memory snapshot (request start → end); peaks are sampled to the database every 15s (GREATEST accumulates, never rolls back).
 
 ## Deployment-related
 
-The server runs as a single binary, or via Docker Compose (Caddy reverse proxy + fixed IP on a private subnet + non-root + bind mount data directory); the database is PostgreSQL (built-in or external instance, PG-only). See the [Private Deployment guide](./deployment).
+The server is deployed as a container (one image = server + bundled PostgreSQL + Caddy + client installers); a single binary with an external PostgreSQL is also supported. Deployment, upgrades, backups, channels and troubleshooting are covered in the [Deployment](/en/deployment/) section; the database is PostgreSQL (PG-only).

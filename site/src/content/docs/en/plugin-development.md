@@ -64,10 +64,7 @@ The server is modularized under `server/internal/` (serverauth / llmgateway / ma
 
 ## More Resources
 
-- [Repository: full plugin development doc](../docs/plugin-development.md) (repo docs/)
-- [Plugin ecosystem manifesto](./plugin-ecosystem)
-- [Desktop plugin service contract (repo)](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs/plugin-services.md)
-- [Community Fabric RFC (repo)](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/README.md)
-- [System Architecture](./architecture)
-- [Architecture overview](../docs/architecture.md)
-- [Community Fabric (community interoperability RFC)](../community/fabric/README.zh.md)
+- [Plugin ecosystem manifesto](/en/plugin-ecosystem/) — the ecosystem vision and its three principles
+- [Desktop plugin service contract (repo)](https://github.com/picoaide/picoaide-harness/tree/master/packages/host/desktop/docs/plugin-services.md) — types, lifecycle and failure semantics
+- [Community Fabric (repo, community interoperability RFC)](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/README.md)
+- [System Architecture](/en/architecture/)

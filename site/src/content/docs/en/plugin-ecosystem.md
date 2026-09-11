@@ -41,7 +41,7 @@ The community market remains at the documentation stage with no usable page or i
 
 ## How to participate
 
-- Read [Plugin Development](./plugin-development) to learn how to write plugins.
+- Read [Plugin Development](/en/plugin-development/) to learn how to write plugins.
 - Read and comment on [Community Fabric RFC 0001](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/docs/rfcs).
-- See [Desktop Client](./desktop) for installing and managing plugins.
+- See [Desktop Client](/en/desktop/) for installing and managing plugins.
 - Raise your opinions through issues and discussions.

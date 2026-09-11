@@ -41,7 +41,7 @@ Fabric 的 capability 首先用于兼容判断、用户确认和审计，不会�
 
 ## 如何参与
 
-- 在[插件开发](./plugin-development)中了解插件如何编写。
+- 在[插件开发](/plugin-development/)中了解插件如何编写。
 - 阅读并评论 [Community Fabric RFC 0001](https://github.com/picoaide/picoaide-harness/tree/master/community/fabric/docs/rfcs)（中文：`0001-plugin-manifest-capabilities-events.zh.md`）。
-- 在[桌面客户端](./desktop)中了解如何安装和管理插件。
+- 在[桌面客户端](/desktop/)中了解如何安装和管理插件。
 - 通过 issue 和讨论区提出你对本倡议的意见。

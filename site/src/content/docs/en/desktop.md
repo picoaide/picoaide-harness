@@ -119,7 +119,7 @@ The agent-driven embedded browser lives in a **separate browser window** (2026-0
 
 - **Multiple tabs**: each tab is a WebContentsView with a persistent browser partition (stable session storage);
 - **Address bar**: the toolbar provides a URL input for manual navigation, back/forward/reload, and closing tabs (fixed from the 2026-08-21 audit P0);
-- **AI takeover**: when the agent calls a browser tool, the content area is covered by a **barrier page** showing the operation status; the user can **release control** from the toolbar at any time (releasing restores the barrier and the agent's control) — z-order and release logic were fixed after audit;
+- **Control ownership**: only the "Take over" pill in the bottom-right corner can acquire control; once acquired, the same pill becomes "Hand back to AI" and hands it back. The blank area of the mask, the activity panel and `Esc` **never** change control ownership — avoiding "one casual click snatching the browser away from the AI";
 - **Download control**: downloads default to a 100MB limit and are rejected over it; other downloads ask for a save location (user confirmation);
 - **Operation log**: an op log records every navigation, click, and download for audit;
 - **Close semantics**: the user closing the window only hides it; only the agent's `browser_close` actually destroys the window.
@@ -152,12 +152,13 @@ Built into the product (vendored community plugin **dsh-memory-evolve**), this i
 
 ## Update Mechanism
 
-- Upgrade source: GitHub Releases API (`releases/latest`); parses `tag_name` and strips the `v` prefix;
-- **SHA-256 verification**: downloads `SHA256SUMS.txt` and checks each installer against it (compatible with the `./` prefix); on failure, the package is **not installed**;
-- Platform assets: macOS DMG (arm64), Windows NSIS installer, Linux AppImage (`x86_64`) + deb; **Linux auto-downloads too** (`update-download.ts` picks `-x86_64.AppImage` per platform), then `chmod +x` and shows a dialog asking the user to replace the current AppImage and restart (AppImage has no silent self-install);
-- Interaction: background checks don't block startup; network errors, non-200 responses, invalid versions, and versions not newer than the installed one stay silent; a new version asks for confirmation before downloading; cancelling never hits the counted download endpoint; a download/install failure doesn't break the current version (under network fluctuation, continues downloading the confirmed version);
-- Tray **Check for Updates…** is a manual check: shows a result even when already current, and asks to retry when the check fails;
-- Unsigned note: Windows/Linux installers are auto-published unsigned by CI (macOS release builds are signed + notarized); Windows SmartScreen may warn about an "unknown publisher" — verify against the SHA256SUMS.txt shipped in the Release.
+- **There is only one upgrade source**: the server the client is logged into (`GET /api/client/v2/updates/manifest`). The client never contacts an update server or GitHub, and does not need to know which channel it belongs to — the channel identity is decided structurally by the server;
+- **When checks run**: the first check runs 60 seconds after startup, then once every 6 hours; the tray **Check for Updates…** and "Settings → About" allow a manual check (a manual check shows a result even when already up to date, and asks you to retry later when the check fails);
+- **Verification**: the manifest `schema` must be `1`, `channel_id` must match the server, and the download address must be absolute https; the installer is verified with a **streaming SHA-256** check against the manifest; if any step fails, nothing is installed;
+- **Platform assets**: Windows NSIS installer, macOS DMG (Apple silicon), Linux AppImage (`x86_64`). On Linux, the download is followed by `chmod +x` and a prompt asking the user to replace the current AppImage and restart (AppImage has no silent self-install);
+- **Failure never breaks the installed version**: network errors, non-200 responses, invalid versions or verification failures all stay silent and the installed version keeps working; when the server explicitly says it cannot provide a download address (`client_unavailable`), the UI says so honestly instead of pretending to be "already up to date";
+- **No update source when not connected to a server**: no outbound check is performed at all (standalone usage);
+- **Unsigned note**: the Windows installer and the Linux AppImage are unsigned (macOS release builds are signed + notarized); Windows SmartScreen may warn about an "unknown publisher".
 
 ## Terminal and Plugin Management
 
