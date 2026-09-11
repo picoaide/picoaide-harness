@@ -149,8 +149,14 @@ export const NEUTRAL_CHANNEL: ChannelConfig = {
   title: NEUTRAL_NAME,
 }
 
-/** 取非空字符串（'' 是"渠道没配这一项"，等同于缺失）。 */
-function nonEmpty(value: string | undefined): string | undefined {
+/**
+ * 取非空字符串（'' 与纯空白都是"渠道没配这一项"，等同于缺失）。
+ *
+ * 导出给客户端编译面复用：`client/Channel.tsx` 曾自己写了一份**不 trim** 的版本，
+ * 于是 `short_name: "   "` 会被当成有效值 → 侧边栏品牌名渲染成空白
+ * （2026-09-11 测试发现）。判空口径只能有一份。
+ */
+export function nonEmpty(value: string | undefined): string | undefined {
   return value !== undefined && value.trim() !== '' ? value : undefined
 }
 
