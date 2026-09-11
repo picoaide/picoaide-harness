@@ -23,6 +23,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { channelDshHomeDir, isSafeDshHomeDirName } from '../src/desktop-home.ts'
 
 /** 选择渠道的环境变量（CI 渠道矩阵注入）。 */
 export const CHANNEL_ENV = 'DSH_BUILD_CHANNEL'
@@ -86,6 +87,14 @@ export interface ChannelBuildContext {
   readonly deepLinkScheme: string
   /** 深链在操作系统里的注册名（Protocols 显示名）。 */
   readonly deepLinkName: string
+  /**
+   * 数据目录名（`~` 下的那一段，见 src/desktop-home.ts 的 `channelDshHomeDir`）。
+   *
+   * 它随 `build/channel.json` 进包、由运行期读回，决定**这次安装的数据根**：
+   * 账户 token、settings、会话、连接器凭据都在那里。官方渠道 = 官方目录（不变）；
+   * 渠道渠道 = 渠道自己的目录（**绝不与官方共用**）。
+   */
+  readonly homeDir: string
   readonly artifactNames: ChannelArtifactNames
 }
 
@@ -128,6 +137,8 @@ export interface ChannelDesktopBranding {
   readonly linuxSynopsis?: string
   readonly deepLinkScheme?: string
   readonly deepLinkName?: string
+  /** 数据目录名（`desktop.home_dir`）；畸形值在 `resolveChannelBuildContext` 抛错。 */
+  readonly homeDir?: string
 }
 
 /**
@@ -166,11 +177,24 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
     linuxSynopsis?: string
     deepLinkScheme?: string
     deepLinkName?: string
+    homeDir?: string
   } = {}
   if (productName !== undefined) result.productName = productName
   if (slug !== undefined) result.slug = slug
   if (appId !== undefined) result.appId = appId
   if (maintainer !== undefined) result.linuxMaintainer = maintainer
+  // 数据目录名：**只在这里做形状校验**（畸形值 fail-loud），取值链与运行期同源
+  // （`channelDshHomeDir`）——构建期与运行期给出不同目录等于"升级一次就换个数据根"。
+  const homeDir = text(desktop.home_dir)
+  if (homeDir !== undefined) {
+    if (!isSafeDshHomeDirName(homeDir)) {
+      throw new Error(
+        `channel-build: ${file} 的 desktop.home_dir=${JSON.stringify(homeDir)} 非法`
+        + '（期望 `~` 下的单段目录名：点开头 + 小写字母/数字/连字符，如 ".acme-harness"）',
+      )
+    }
+    result.homeDir = homeDir
+  }
   // 快捷方式名/发行版描述缺省跟随产品名：渠道只写一个名字也应该处处一致。
   const shortcutName = text(desktop.shortcut_name) ?? productName
   if (shortcutName !== undefined) result.shortcutName = shortcutName
@@ -253,6 +277,15 @@ export function resolveChannelBuildContext(
     linuxSynopsis: branding.linuxSynopsis ?? OFFICIAL_BUILD_DEFAULTS.linuxSynopsis,
     deepLinkScheme,
     deepLinkName: branding.deepLinkName ?? `${branding.productName ?? OFFICIAL_BUILD_DEFAULTS.productName} Deep Link`,
+    // 数据目录名与运行期**同源**（同一个函数、同一份 channel.json）：
+    // 构建期算一遍是为了让验证脚本能断言"这个包的数据根只属于本渠道"。
+    // 官方渠道（`resolveBuildChannelId` 的缺省）直接得到官方目录，行为不变。
+    homeDir: channelDshHomeDir(channelId, {
+      homeDir: branding.homeDir,
+      // 用**声明值**而不是回落后的 slug：渠道没写 slug 时不能凭官方缺省 slug
+      // 派生出官方目录（那等于与官方共用数据根）。
+      slug: branding.slug,
+    }),
     artifactNames: artifactNames(slug),
   }
 }

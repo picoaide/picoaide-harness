@@ -130,6 +130,17 @@ export function channelProfilePatches(
       config: { clientName: `${channelProfile.productName} Connector` },
     })
   }
+  // 深链 scheme 必须**注入**会话服务，不能让插件自己去读随包 channel.json：
+  // enterprise 的 lib 是 tsdown 内联产物，`desktop-channel.ts` 里的
+  // `../build/channel.json` 在那里指向不存在的路径（asar 里只有应用根的
+  // `/build/`），于是浏览器 SSO 回调永远按官方 scheme 校验、渠道客户端的登录
+  // 回调被当成畸形链接丢掉（2026-09-11 真机复现）。
+  if (rows.has('picoaide-session')) {
+    out.push({
+      id: 'picoaide-session',
+      config: { deepLinkScheme: channelProfile.deepLinkScheme },
+    })
+  }
   return out
 }
 

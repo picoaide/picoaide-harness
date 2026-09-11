@@ -134,7 +134,9 @@ picoaide/channels  (私有仓)
     "app_id": "com.acme.ai",                 // 可选;bundle id / AppUserModelId
     "shortcut_name": "Acme AI",              // 可选;缺省 = product_name
     "maintainer": "acme",                    // 可选;deb/Linux 软件中心
-    "synopsis": "Acme 企业内部助手"           // 可选;缺省 = product_name
+    "synopsis": "Acme 企业内部助手",          // 可选;缺省 = product_name
+    // ↓ 数据根(运行期;见 §4.4)。品牌渠道**必填**,beta 也必须给
+    "home_dir": ".acme-harness"              // 可选;`~` 下的单段目录名
   }
 }
 ```
@@ -147,6 +149,8 @@ picoaide/channels  (私有仓)
 | `desktop.product_name` / `window_title` | `profile.ts` → `desktop-shell` 行配置 | 窗口标题 / 托盘 / 通知文案 / 插件加载失败弹窗 / 渲染失败页 |
 | `desktop.product_name` | `src/main.ts` 的 `PRODUCT_NAME` | 通知发送者 / `app.setName` 数据目录 |
 | `identity.*` / `copy.*`（品牌文案） | `profile.ts` → `picoaide-auth-gate` + `picoaide-channel-sync` 的 `brand` | 登录页标题与品牌区、客户端侧边栏/顶栏、服务端不可达时的兜底内容 |
+| `desktop.home_dir` | `src/main.ts` 的 `dshHomeSafe({ productDir })` → `DSH_HOME` | **本次安装的数据根**（账户 token/settings/会话/连接器凭据）；见 §4.4 |
+| `desktop.app_id` | `src/main.ts` 的 `app.setAppUserModelId` | Windows 通知身份（必须与快捷方式的 AppUserModelId 一致） |
 | `channel_id` | 供排查与将来对账 | — |
 
 **为什么品牌文案必须随包**（而不是等服务端下发）：登录页是**认证之前**的界面，
@@ -171,6 +175,12 @@ picoaide/channels  (私有仓)
 | `desktop.slug` | 安装包名回落 `PicoAide-Harness-…` —— **交付物上直接出现厂商品牌** |
 | `desktop.app_id` | bundle id / AppUserModelId 回落厂商值 —— 两个渠道的客户端在系统里变成"同一个 app" |
 | `desktop.deep_link_scheme` | 回落 `picoaide` —— 浏览器 SSO 回调的确认框里出现厂商名 |
+
+**`desktop.home_dir`（数据根）是新的硬性必填字段**（2026-09-11 加，见 §4.4）：
+它不是编译期品牌，而是运行期数据隔离 —— 品牌渠道缺了就与官方客户端共用数据根
+（共享登录 token/settings/会话）。**beta 不强制**（缺省派生出 `.picoaide-harness-beta`，
+仍与 official 分离），但建议显式给：显式值不会因为将来改 `slug` 而挪动数据目录。
+official 不需要（官方构建不随包分发渠道包，写了也不生效）。
 
 **渠道 logo 的格式约束**（`desktop/scripts/generate-tray-icons.mjs`）：托盘位图是
 **把方块色字符串替换成托盘变体色**渲染的，所以渠道 `logo.svg` 必须
@@ -280,6 +290,54 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 肯收缩），全名挂 `title`。判空口径也只有一份：`channel-content.ts` 的 `nonEmpty`
 （`'   '` 算缺失 —— 客户端曾有一份不 trim 的副本，会让侧边栏渲染成空白）。
 
+### 4.4 渠道数据根（两份，都随渠道；2026-09-11）
+
+白标客户端是**独立产品**，不能和官方客户端（或另一个渠道）共用数据根。同一个
+用户目录下有两份数据根，两份都随渠道：
+
+| 数据根 | 官方 | 渠道 | 里面是什么 |
+|---|---|---|---|
+| Harness home（`~/.<目录名>`） | `~/.picoaide-harness` | `desktop.home_dir`（如 `~/.moka-harness`） | 账户 token（`session.json`）、`.credentials.yaml`、`settings.yaml`（含服务端地址）、`sessions/`、`storages/`、`profiles/`、`users/<用户名>/connectors/`（连接器凭据）、cron ledger、browser store |
+| Electron userData（`appData/<产品名>`） | `~/.config/PicoAide Harness` | 渠道产品名（如 `~/.config/Moka Harness`） | 日志、更新状态、插件管理状态、崩溃取证、**单实例锁** |
+
+**为什么必须分开**（不是"目录名好不好看"）：
+- 共用 home ⇒ 渠道客户端启动时会恢复**官方那台**的登录 token 并连上官方服务端
+  （跨租户）；连接器凭据、`settings.yaml` 也是同一个文件，last-writer-wins；
+- 共用 userData ⇒ 单实例锁互斥：先启动的那个客户端会把后启动的渠道客户端
+  "顶掉"（第二个进程直接退出并把窗口让给第一个）。
+- 白标：路径出现在文件管理器/诊断包里，不应带厂商名。
+
+**`desktop.home_dir` 取值规则**（真源 `src/desktop-home.ts` 的
+`channelDshHomeDir`，构建期与运行期同一个函数）：
+
+```
+official                          → .picoaide-harness        （逐字节不变，存量数据不搬）
+显式 home_dir                     → 原值（须匹配 ^\.[a-z0-9][a-z0-9-]{0,62}$）
+没有 home_dir，有 slug            → "." + slug 小写（Moka-Harness → .moka-harness）
+都没有（beta 这类复用官方品牌的）  → .picoaide-harness-<channel id>
+```
+
+**任何情况下都不会回落官方目录**：显式值写成 `.picoaide-harness`、slug 恰好等于
+官方 slug，都会被忽略并退到下一档 —— 共用数据根比"目录名多一截"糟得多。
+`$DSH_HOME` / 显式配置仍然优先（e2e、便携安装、多 profile 依赖它）。
+
+**userData 目录名**（真源 `src/desktop-user-data.ts` 的
+`desktopUserDataDirectoryName`）：官方 = 产品名（不变）；品牌渠道 = 产品名；
+**产品名与官方逐字相同的渠道（beta）= `<产品名> (<渠道 id>)`** —— beta 复用官方
+品牌，不消歧就会与 official 撞在同一个 userData 上（单实例锁互斥）。
+
+**校验与门禁**：
+- `scripts/ci-channels.sh`：`desktop.home_dir` 形状校验；**品牌渠道必填**（beta 与
+  official 不强制，见 §4 的说明）且不得等于 `.picoaide-harness`；
+- `scripts/verify-channel-package.ts`：用**运行期解析器**读随包 `channel.json`，
+  断言这次装出来的数据目录就是本渠道的（`yarn check` 的 `verify:channel` 会跑）；
+- `tests/desktop-home.spec.ts` / `desktop-channel.spec.ts` / `desktop-user-data.spec.ts`：
+  取值链、畸形值、以及"非官方渠道永不得到官方目录"的穷举断言。
+
+**没有迁移逻辑**：品牌渠道客户端在 2026-09-11 之前没有正式发布过（beta tag 只产
+official/beta），所以直接切换；官方渠道目录不变，存量用户无感。若某个渠道确实已
+经交付过、数据落在旧目录，需要单独做一次性搬运，**不要**用"回落官方目录"兜底。
+
 ## 5. 编译期品牌（渠道矩阵在打包时落地）
 
 以下由 electron-builder 在**打包时**决定，运行时读文件来不及改。渠道由环境变量
@@ -301,8 +359,10 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 - **官方渠道不做任何覆盖**（`channelBuilderConfigArgs()` 返回空数组），产物与
   渠道化改造前一致；`tests/channel-build.spec.ts` 用**漂移断言**把
   `channel-build.ts` 里的官方默认值与 `package.json build` 块钉死。
-- **位图必须走 `prepareChannelPackaging()`**（`scripts/channel-prepare.ts`）：
-  它按渠道派生 `build/` 下的 app 图标/托盘位图并就位 `build/channel.json`。
+- `desktop.home_dir` **不进** electron-builder 覆盖（它不影响安装包内容），但构建期
+  会按同一个 `channelDshHomeDir()` 算一遍（`ChannelBuildContext.homeDir`），供
+  `verify-channel-package.ts` 断言"这个包的数据根只属于本渠道"（见 §4.4）。
+- **位图必须走 `prepareChannelPackaging()`**（`scripts/channel-prepare.ts`）：  它按渠道派生 `build/` 下的 app 图标/托盘位图并就位 `build/channel.json`。
   2026-09-10 审计发现的 P0 是"这条链没人调用"——`brand-prepare` 只挂在 desktop 的
   `build` 脚本里，而 CI 打包一律 `--no-prebuild`（构建产物来自 gate job），于是
   **渠道包带着官方图标出厂**，而本地打包（会经 prebuild 触发）却看不出问题。
@@ -324,26 +384,36 @@ schemastery 会把未注入的 `brand` 物化成 `{}`，把它当渠道会让**�
 
 - macOS 签名统一用**厂商证书**（2026-09-10 定案，后续不更换）。
 
-### 5.1 深链 scheme：三处必须一致
+### 5.1 深链 scheme：一处真源、四处生效（2026-09-11 修正）
 
 `desktop.deep_link_scheme` 决定浏览器从 IdP 回调跳回客户端时的 scheme ——
-确认框里显示的就是它，渠道客户不该在这里看到厂商名。**三处必须同源**：
+确认框里显示的就是它，渠道客户不该在这里看到厂商名。**真源只有随包
+`channel.json` 一处**（`desktop-channel.ts` 解析），生效点有四个：
 
-| 位置 | 作用 | 真源 |
+| 位置 | 作用 | 取值方式 |
 |---|---|---|
 | electron-builder `protocols` | 操作系统级注册（`x-scheme-handler/<scheme>`） | `scripts/channel-build.ts` 生成的配置文件 |
-| 客户端解析 | `main.ts` / `src/deep-link.ts` / `enterprise/src/deep-link.ts` | `src/desktop-channel.ts` 读随包 `channel.json` |
+| 桌面壳的深链闸门 | argv/`open-url`/第二实例的严格校验（P2-62） | `main.ts` 的 `DEEP_LINK_SCHEME` → 构造 `ElectronDesktopRuntime` 时注入 |
+| 会话服务（企业插件） | 解析 `<scheme>://auth?token=…` 完成 SSO 登录 | 组装期由 `profile.ts` 的 `channelProfilePatches()` 注入 `picoaide-session` 行的 config（**不要**让它自己读 `channel.json`，见下） | 
 | 服务端 OIDC 回调 | 拼 `<scheme>://auth?token=…` | `server/internal/channel` 的 `DeepLinkScheme()` |
 
 校验口径：构建期（`channel-build.ts`）遇到畸形 scheme **fail-loud**；运行期
 （`desktop-channel.ts` / 服务端）**回落官方值** —— 那里没有"拒绝启动/构建"这个
 选项，能用比报错好。
 
-> **实现坑（2026-09-10 实测）**：`protocols` 是数组，**不能**用
+> **实现坑一（2026-09-10 实测）**：`protocols` 是数组，**不能**用
 > `--config.protocols[0].schemes[0]=…` 覆盖 —— electron-builder 的 CLI 点号覆盖
 > 不支持数组下标，会以 `configuration has an unknown property 'protocols[0]'`
 > 拒绝整次构建。渠道覆盖必须走 `--config <生成的配置文件>`
 > （`writeChannelBuilderConfig()`，里面深展开 package.json 的 build 块）。
+>
+> **实现坑二（2026-09-11 真机复现，曾让渠道客户端的浏览器 SSO 完全不可用）**：
+> 随包 `channel.json` 只能由**桌面包自己**读（`readDesktopChannelProfile()` 的
+> `../build/channel.json` 是相对模块位置算的）。企业插件被打进**自己的** lib，
+> 同样的代码在那里会指向 `@picoaide/dsh-enterprise/build/channel.json` —— 打包产物
+> 里不存在（asar 只有应用根的 `/build/`），于是静默回落官方 scheme；桌面壳的深链
+> 闸门当时也漏传 scheme，渠道回调在闸门处就被丢掉。**规则：跨包的渠道内容一律在
+> 组装期注入（`channelProfilePatches`），插件不得自行读随包文件。**
 
 ## 6. 更新源（客户端不碰分发面）
 

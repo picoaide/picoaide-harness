@@ -9,7 +9,7 @@ import { channelProfilePatches } from '../src/profile.ts'
  * 或"客户端连不上自家服务端"：登录页要能在认证前显示渠道品牌、客户端界面要有
  * 随包兜底、连接器 OAuth 的同意页要用渠道名。
  */
-const ALL_ROWS = new Set(['picoaide-auth-gate', 'picoaide-channel-sync', 'pico-connectors'])
+const ALL_ROWS = new Set(['picoaide-auth-gate', 'picoaide-channel-sync', 'pico-connectors', 'picoaide-session'])
 
 /** 一份完整的渠道包内容（与服务端镜像读的是同一个文件）。 */
 function acmeProfile(): ReturnType<typeof parseDesktopChannelProfile> {
@@ -61,6 +61,19 @@ describe('channel package → row config', () => {
     const patches = channelProfilePatches(acmeProfile(), ALL_ROWS)
     expect(configOf(patches, 'pico-connectors')).toEqual({ clientName: 'Acme AI Connector' })
     expect(JSON.stringify(patches)).not.toContain('PicoAide')
+  })
+
+  it('injects the deep-link scheme into the session row (channel SSO callback)', () => {
+    // 渠道客户端的浏览器 SSO 回调用的是客户自己的 scheme（如 mokahr-harness）。
+    // 会话服务**不能**自己读随包 channel.json（enterprise 的 lib 是 tsdown 内联
+    // 产物，那条相对路径在包里不存在），scheme 只能由桌面壳在组装期注入。
+    expect(configOf(channelProfilePatches(acmeProfile(), ALL_ROWS), 'picoaide-session'))
+      .toEqual({ deepLinkScheme: 'acmeai' })
+
+    // 渠道包没配 scheme → 官方值（与 electron-builder protocols / 服务端 OIDC 同序）
+    const bare = parseDesktopChannelProfile({ channel_id: 'acme', identity: { display_name: 'Acme AI' } })
+    expect(configOf(channelProfilePatches(bare, ALL_ROWS), 'picoaide-session'))
+      .toEqual({ deepLinkScheme: 'picoaide' })
   })
 
   it('omits the server URL but still injects the brand when the channel has none', () => {

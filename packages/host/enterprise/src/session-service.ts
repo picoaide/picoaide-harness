@@ -1,11 +1,10 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Session } from './server-connector/config.ts'
 import { loadElectronModule } from './server-connector/electron.ts'
-import { isSafeDshHome } from 'dsh-plugin-desktop/desktop-home'
+import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 import { installDeepLinkListener } from './deep-link.ts'
 
 /** Session token file permissions: owner read/write only. */
@@ -17,16 +16,13 @@ const TOKEN_FILE_MODE = 0o600
  * dropped there could be world-readable and bypasses the home's 0700).
  * 审计 2026-08-25 P2-3:DSH_HOME 若指向系统关键目录则拒绝(同机注入面,
  * bearer token 不得落到攻击者可读位置)。
+ *
+ * 2026-09-11:缺省值走共享的 `dshHomeSafe()`(数据目录唯一权威),不再自己拼
+ * `~/.picoaide-harness` —— 数据根随渠道(渠道客户端由主进程写 DSH_HOME),
+ * 这里抄一份常量就会在改渠道目录时漏掉,于是 token 落回官方目录。
  */
 export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
-  const home = env.DSH_HOME?.trim()
-  if (home !== undefined && home.length > 0) {
-    if (!isSafeDshHome(home)) {
-      throw new Error(`unsafe DSH_HOME: ${home} resolves into a system directory`)
-    }
-    return join(home, 'session.json')
-  }
-  return join(homedir(), '.picoaide-harness', 'session.json')
+  return join(dshHomeSafe({ env }), 'session.json')
 }
 
 /** Cordis event emitted whenever the session is set, restored, or cleared. */
@@ -73,13 +69,20 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Session service configuration; `tokenFile` defaults to `$DSH_HOME/session.json`. */
+/**
+ * Session service configuration.
+ *
+ * `tokenFile` defaults to `$DSH_HOME/session.json`. `deepLinkScheme` 由桌面壳在
+ * 组装期注入（渠道构建是客户自己的 scheme，如 `mokahr-harness`）；缺省官方值。
+ */
 export interface Config {
   tokenFile?: string
+  deepLinkScheme?: string
 }
 
 export const Config: z<Config> = z.object({
   tokenFile: z.string(),
+  deepLinkScheme: z.string(),
 })
 
 /**
@@ -103,9 +106,10 @@ export default class SessionService extends Service {
     // picoaide:// deep-link auth (OIDC/OpenID callback): store the session
     // when a valid link arrives. Emits pico/session-changed → auth-gate
     // reloads into the app (login page poll sees loggedIn).
+    // scheme 用桌面壳注入的本安装值（渠道构建是自己的），见 installDeepLinkListener。
     installDeepLinkListener(ctx, (session) => {
       this.setSession(session)
-    }, () => this.getSession())
+    }, () => this.getSession(), config.deepLinkScheme)
     void this.restore().finally(() => { this.restoreDone = true })
   }
 

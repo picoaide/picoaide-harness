@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { DEFAULT_DEEP_LINK_SCHEME, readDesktopChannelProfile } from 'dsh-plugin-desktop/desktop-channel'
+import { DEFAULT_DEEP_LINK_SCHEME } from 'dsh-plugin-desktop/desktop-channel'
 import { assertServerURLAllowed, AuthError, fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -15,8 +15,9 @@ declare module '@deepseek-ai/cordis' {
  *
  * The server OIDC callback redirects the system browser to
  * `<scheme>://auth?token=<t>[&server=<url>&user=<name>]`; the desktop shell
- * forwards it here as the 'pico/deep-link' event. scheme 由渠道包决定
- * (desktop-channel):渠道构建用它自己的 scheme,浏览器确认框里不出现厂商名。 We parse it, validate the
+ * forwards it here as the 'pico/deep-link' event. scheme 随渠道包（安装包级），由
+ * 桌面壳在组装期注入本插件（见 `installDeepLinkListener` 的说明）：渠道构建用它
+ * 自己的 scheme，浏览器确认框里不出现厂商名。We parse it, validate the
  * server URL (https or loopback http), and store the session — the login
  * page's `/api/pico/auth/state` poll then flips to loggedIn and reloads.
  *
@@ -51,14 +52,28 @@ export function parseAuthDeepLink(
   }
 }
 
-/** Install the deep-link listener; used by SessionService on construction. */
+/**
+ * Install the deep-link listener; used by SessionService on construction.
+ *
+ * scheme 由**桌面壳注入**（`picoaide-session` 行 config 的 `deepLinkScheme`，
+ * 见 desktop/src/profile.ts 的 `channelProfilePatches`），不在这里自己读随包
+ * `channel.json`：本文件会被 tsdown **内联**进 enterprise 的 lib，而
+ * `desktop-channel.ts` 里的路径是相对**它自己**的模块位置算的，于是
+ * `../build/channel.json` 会指向 `@picoaide/dsh-enterprise/build/channel.json`
+ * —— 那个文件在打包产物里不存在（asar 里只有应用根的 `/build/channel.json`），
+ * 结果永远回落官方 scheme，渠道客户端的浏览器 SSO 回调被当成畸形链接丢掉
+ * （2026-09-11 真机复现）。
+ * @param ctx - Host context (carries the `pico/deep-link` event).
+ * @param applySession - store a verified session.
+ * @param getCurrent - current session (cross-server switch guard).
+ * @param scheme - 本安装的深链 scheme（缺省官方值）。
+ */
 export function installDeepLinkListener(
   ctx: Context,
   applySession: (session: Session) => void,
   getCurrent?: () => Session | null,
+  scheme: string = DEFAULT_DEEP_LINK_SCHEME,
 ): () => void {
-  // scheme 在监听器安装时定一次:它跟着安装包走,运行期不会变。
-  const scheme = readDesktopChannelProfile()?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
   return ctx.on('pico/deep-link', (url: unknown) => {
     if (typeof url !== 'string') return
     const session = parseAuthDeepLink(url, scheme)

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { loadElectronModule } from './electron.ts'
+import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
 export function sha256Fingerprint(cert: Buffer | string): string {
   const der = typeof cert === 'string' ? pemToDer(cert) : cert
@@ -49,11 +49,9 @@ export interface InstallCertOptions {
   getSession?: () => unknown
 }
 
-/** 默认指纹库位置:$DSH_HOME/tls-fingerprints.json(0600)。 */
+/** 默认指纹库位置:$DSH_HOME/tls-fingerprints.json(0600;数据根随渠道)。 */
 export function defaultTlsStorePath(env: NodeJS.ProcessEnv = process.env): string {
-  const home = env.DSH_HOME?.trim()
-  if (home !== undefined && home.length > 0) return join(home, 'tls-fingerprints.json')
-  return join(homedir(), '.picoaide-harness', 'tls-fingerprints.json')
+  return join(dshHomeSafe({ env }), 'tls-fingerprints.json')
 }
 
 /**

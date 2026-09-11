@@ -1049,4 +1049,26 @@ describe('Electron compatibility runtime', () => {
 
     await release()
   })
+
+  it('validates deep links against the channel scheme, not the vendor default', async () => {
+    // 2026-09-11 真机复现：渠道构建（scheme=mokahr-harness/probeharness 之类）的
+    // 浏览器 SSO 回调在 shell 的严格闸门被当成畸形链接丢掉，因为 receiveDeepLink
+    // 用的是模块缺省 `picoaide`。scheme 必须由 main.ts 传进来。
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const logger = { error: vi.fn(), errorCause: vi.fn() }
+    const delivered: string[] = []
+
+    const channelRuntime = new ElectronDesktopRuntime(async () => {}, undefined, logger, 'acmebrand')
+    channelRuntime.setDeepLinkHandler(url => delivered.push(url))
+    channelRuntime.receiveDeepLink('acmebrand://auth?token=t&server=' + encodeURIComponent('https://acme.example') + '&user=alice')
+    expect(delivered).toHaveLength(1)
+    expect(logger.error).not.toHaveBeenCalled()
+
+    // 官方缺省（没注入）时同一个链接进不来 —— 缺陷形态本身。
+    const officialRuntime = new ElectronDesktopRuntime(async () => {}, undefined, logger)
+    officialRuntime.setDeepLinkHandler(url => delivered.push(url))
+    officialRuntime.receiveDeepLink('acmebrand://auth?token=t&server=' + encodeURIComponent('https://acme.example') + '&user=alice')
+    expect(delivered).toHaveLength(1)
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('ignoring malformed deep link'))
+  })
 })

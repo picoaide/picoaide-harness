@@ -4,6 +4,11 @@
  * The product owns its data directory: the default Harness home under the
  * OS home is `~/.picoaide-harness` instead of the upstream `~/.dsh`.
  *
+ * 该目录**随渠道**（2026-09-11）：官方渠道仍是 `~/.picoaide-harness`（逐字节
+ * 不变），渠道客户端用自己的目录（`channelDshHomeDir()` 是唯一派生点）。此前
+ * 所有渠道共用一个数据根，于是同一台机器上的两个渠道会共享登录 token、
+ * settings 与会话（跨租户），并互相顶掉单实例锁。
+ *
  * The resolution contract mirrors the official `@deepseek-ai/dsh-home-paths`
  * (packages/util/home-paths): precedence, highest first — an explicit
  * configured path, `$DSH_HOME`, then the product default. An empty or
@@ -29,6 +34,62 @@ export const PRODUCT_DSH_HOME_DIR = '.picoaide-harness'
 /** Stable user-facing display form for the default product home. */
 export const DEFAULT_DSH_HOME_DISPLAY = `~/${PRODUCT_DSH_HOME_DIR}`
 
+/** 官方渠道 id（渠道化构建之外的默认渠道）。 */
+export const OFFICIAL_CHANNEL_ID = 'official'
+
+/**
+ * 渠道数据目录名的合法形状：**单段**、点开头、小写 ASCII（字母/数字/连字符）。
+ *
+ * 限制成单段是为了它只能作为 `~` 下的一个目录名参与拼接 —— 渠道包是不可信
+ * 输入，一个带 `../` 或绝对路径的值会把整个数据根挪到别处。小写是为了跨平台
+ * 一致（Windows/macOS 默认大小写不敏感，Linux 敏感：同一个渠道在两个平台上
+ * 会得到两个目录名）。
+ */
+const DSH_HOME_DIR_NAME_PATTERN = /^\.[a-z0-9][a-z0-9-]{0,62}$/u
+
+/**
+ * 是否是合法的渠道数据目录名（`undefined`/`''`/畸形值一律 false）。
+ * @param value - 渠道包里的 `desktop.home_dir`（不可信输入）。
+ */
+export function isSafeDshHomeDirName(value: unknown): value is string {
+  return typeof value === 'string' && DSH_HOME_DIR_NAME_PATTERN.test(value)
+}
+
+/**
+ * 本次启动使用的数据目录名（`~` 下的那一段）。
+ *
+ * **这是"渠道数据隔离"的唯一派生点**：desktop 主进程、CI 校验与打包门禁都走它，
+ * 免得三处各写一套取值链（曾经就是这样把渠道包与官方包指到了同一个目录）。
+ *
+ * 取值链：
+ *   1. 官方渠道 → `PRODUCT_DSH_HOME_DIR`（**逐字节不变**，存量用户数据不动）；
+ *   2. 渠道包显式配置的 `desktop.home_dir`；
+ *   3. 由 `desktop.slug` 小写派生（`Moka-Harness` → `.moka-harness`）；
+ *   4. 兜底 `<PRODUCT_DSH_HOME_DIR>-<channelId>`（如 beta：复用官方品牌、没有
+ *      自己的 slug）—— 兜底刻意**不回落官方目录**：白标客户端与官方客户端共用
+ *      一个数据根会共享登录 token/settings/会话（跨租户），也会互相顶掉单实例锁，
+ *      这比"目录名多一截"糟得多。
+ * @param channelId - 渠道 id（调用方须已按渠道 id 形状校验）。
+ * @param options - 渠道包里的显式目录名与 slug（可以是原始未校验值）。
+ * @returns `~` 下的目录名（含前导点）。
+ */
+export function channelDshHomeDir(
+  channelId: string,
+  options: { readonly homeDir?: unknown; readonly slug?: unknown } = {},
+): string {
+  if (channelId === OFFICIAL_CHANNEL_ID) return PRODUCT_DSH_HOME_DIR
+  // 显式值里官方目录名同样不采纳：那等于"本渠道与官方共用数据根"（CI 对渠道包
+  // 也会拦，这里是运行期的兜底 —— 客户端拿到的是不可信输入）。
+  if (isSafeDshHomeDirName(options.homeDir) && options.homeDir !== PRODUCT_DSH_HOME_DIR) return options.homeDir
+  if (typeof options.slug === 'string') {
+    const derived = `.${options.slug.toLowerCase()}`
+    // 派生结果等于官方目录名时**不采纳**（渠道把 slug 写成官方 slug 就等于
+    // 声明"我和官方是同一个应用"——那正是要防的）。
+    if (isSafeDshHomeDirName(derived) && derived !== PRODUCT_DSH_HOME_DIR) return derived
+  }
+  return `${PRODUCT_DSH_HOME_DIR}-${channelId}`
+}
+
 /** Expand a leading ~ (or ~user) in a path, platform-style. */
 export function expandHomePath(path: string, home: string = homedir()): string {
   if (path === '~') return home
@@ -50,15 +111,19 @@ export function expandHomePath(path: string, home: string = homedir()): string {
  * @param configured - explicit harness-home override, highest precedence.
  * @param env - environment mapping used to read `DSH_HOME`.
  * @param home - platform home directory fallback (test seam).
+ * @param productDir - `~` 下的目录名（渠道构建传 `channelDshHomeDir(...)`；
+ *   缺省即官方目录，官方行为逐字节不变）。只在既没有配置也没有 `$DSH_HOME`
+ *   时参与取值 —— 显式覆盖（e2e/便携安装）永远优先。
  * @returns the normalized absolute product home path.
  */
 export function resolveDshHome(
   configured?: string,
   env: Record<string, string | undefined> = process.env,
   home: string = homedir(),
+  productDir: string = PRODUCT_DSH_HOME_DIR,
 ): string {
   const fromEnv = env[DSH_HOME_ENV]
-  const selected = configured ?? (fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(home, PRODUCT_DSH_HOME_DIR))
+  const selected = configured ?? (fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(home, productDir))
   return resolve(expandHomePath(selected, home))
 }
 
@@ -92,8 +157,15 @@ export function isSafeDshHome(resolved: string): boolean {
 }
 
 /** Resolve the product home and refuse an unsafe override (throws a clear error). */
-export function dshHomeSafe(options: { configured?: string; env?: Record<string, string | undefined> } = {}): string {
-  const resolved = resolveDshHome(options.configured, options.env)
+export function dshHomeSafe(
+  options: {
+    configured?: string
+    env?: Record<string, string | undefined>
+    /** 渠道数据目录名（见 `channelDshHomeDir`）；缺省官方目录。 */
+    productDir?: string | undefined
+  } = {},
+): string {
+  const resolved = resolveDshHome(options.configured, options.env, undefined, options.productDir)
   if (!isSafeDshHome(resolved)) {
     const source = options.env?.[DSH_HOME_ENV] ?? options.configured
     throw new Error(`unsafe DSH_HOME: ${String(source ?? resolved)} resolves into a system directory`)
