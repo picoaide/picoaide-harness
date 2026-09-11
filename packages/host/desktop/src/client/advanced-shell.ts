@@ -22,7 +22,7 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
   const desktopLayout = new DesktopLayoutState(window.innerWidth)
   // ui-layout is disabled in the advanced desktop profile (profile.ts), so
   // this shell is the single `layout` service provider and the single root
-  // registrant; the child-slot declarations (sidebar/conversation/details/
+  // registrant; the rc.2 child-slot declarations (sidebar/main/rightbar/
   // shell.overlay) ride this registration — a second declaration would be
   // fatal, which is exactly why the official frame row cannot stay enabled.
   ctx.effect(
