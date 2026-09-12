@@ -79,8 +79,9 @@ export function channelDshHomeDir(
 ): string {
   if (channelId === OFFICIAL_CHANNEL_ID) return PRODUCT_DSH_HOME_DIR
   // 显式声明的目录**一律采纳**，包括官方目录本身：beta 这类公共渠道刻意与官方
-  // 共用一个数据根（2026-09-11 定案 —— beta 环境要经常跑测试，共用现成的登录态与
-  // 设置更省事）。品牌渠道写官方目录由 CI 在构建期拦（ci-channels.sh），运行期
+  // 共用一个数据根（2026-09-11 定案，2026-09-12 二次确认 —— 预发版是正式版的前置
+  // 验证，换成独立目录会让已装预发版的用户升级后看不到既有会话）。品牌渠道写官方
+  // 目录由 CI 在构建期拦（ci-channels.sh），运行期
   // 不再多一道判定：客户端要能照渠道包说的做。
   if (isSafeDshHomeDirName(options.homeDir)) return options.homeDir
   if (typeof options.slug === 'string') {
