@@ -135,8 +135,8 @@ picoaide/channels  (私有仓)
     "shortcut_name": "Acme AI",              // 可选;缺省 = product_name
     "maintainer": "acme",                    // 可选;deb/Linux 软件中心
     "synopsis": "Acme 企业内部助手",          // 可选;缺省 = product_name
-    // ↓ 数据根(运行期;见 §4.4)。品牌渠道**必填**,beta 也必须给
-    "home_dir": ".acme-harness"              // 可选;`~` 下的单段目录名
+    // ↓ 数据根(运行期;见 §4.4)。**除 official 外每个渠道都必填**(2026-09-12 起)
+    "home_dir": ".acme-harness"              // `~` 下的单段目录名
   }
 }
 ```
@@ -176,12 +176,15 @@ picoaide/channels  (私有仓)
 | `desktop.app_id` | bundle id / AppUserModelId 回落厂商值 —— 两个渠道的客户端在系统里变成"同一个 app" |
 | `desktop.deep_link_scheme` | 回落 `picoaide` —— 浏览器 SSO 回调的确认框里出现厂商名 |
 
-**`desktop.home_dir`（数据根）是新的硬性必填字段**（2026-09-11 加，见 §4.4）：
-它不是编译期品牌，而是运行期数据隔离 —— 品牌渠道缺了就与官方客户端共用数据根
-（共享登录 token/settings/会话）。**beta 不强制**，实践上**显式写官方目录**
-`.picoaide-harness`（公共渠道刻意与 official 共用一个数据根：beta 环境要经常跑
-测试，共用现成的登录态与设置更省事；CI 对公共渠道放行、对品牌渠道拦）。
-official 不需要（官方构建不随包分发渠道包，写了也不生效）。
+**`desktop.home_dir`（数据根）是硬性必填字段**（2026-09-11 加；2026-09-12 扩到
+"除 official 外每个渠道"）：它不是编译期品牌，而是运行期数据隔离 —— 缺了就与官方
+客户端共用数据根（共享登录 token/settings/会话），而且两条渠道线的**会话格式世代
+可能不同**（正式线 v0 / 含上游 0.1.5-rc.2 的预发线 v3），共用会让两代客户端各写一份、
+旧版静默看不到新版会话并造成历史分叉（详见
+`docs/decisions/2026-09-11-channel-scoped-data-roots.md` 的 2026-09-12 修订）。
+**beta 也必须写自己的目录**（`.picoaide-harness-beta`），CI 对任何写成
+`.picoaide-harness` 的渠道一律拦下。official 不需要（官方构建不随包分发渠道包，
+写了也不生效）。
 
 **渠道 logo 的格式约束**（`desktop/scripts/generate-tray-icons.mjs`）：托盘位图是
 **把方块色字符串替换成托盘变体色**渲染的，所以渠道 `logo.svg` 必须

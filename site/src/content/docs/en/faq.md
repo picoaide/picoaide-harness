@@ -5,7 +5,7 @@ description: 'Frequently asked questions about PicoAide Harness: its relationshi
 
 ## What is the relationship between PicoAide Harness and DeepSeek Harness?
 
-PicoAide Harness is built on a fixed version of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (currently pinned at `0.1.2-rc.1`). Upstream provides the core agent, plugin system, and Web UI; this project provides the desktop packaging, local service management, and enterprise-grade console. **The upstream source runs unchanged, without modifications** — upgrades only follow the version number and don't break local extensions.
+PicoAide Harness is built on a fixed version of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (currently pinned at `dsh-v0.1.5-rc.2`). Upstream provides the core agent, plugin system, and Web UI; this project provides the desktop packaging, local service management, and enterprise-grade console. **The upstream source runs unchanged, without modifications** — upgrades only follow the version number and don't break local extensions.
 
 ## Is this an official DeepSeek product?
 
