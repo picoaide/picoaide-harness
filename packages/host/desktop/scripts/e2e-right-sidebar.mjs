@@ -180,10 +180,15 @@ try {
   // the single-occupancy brand seats; without the patch the sidebar shows the
   // vendor fish and the channel/brand story breaks. The 1.25× transform around
   // the canvas centre is unique to brands/official/logo.svg.
-  const brand = await evaluate(`(() => {
+  //
+  // 异步竞态(2026-09-12):品牌槽位内容要等 channel/brand 解析完才渲染,单次取样
+  // 会在"外壳已挂载、品牌还没画出来"的那一拍读到 svgCount=0 而误判(同一提交两次
+  // 流水一绿一红;该步在 tag 发布流水里同样执行,会直接卡发布)。改为**有界等待**
+  // 同一判据 —— 断言不放宽:超时后仍必须满足官方几何 + 单一占位。
+  const brandExpr = `(() => {
     const mark = document.querySelector('[data-slot="sidebar.brand.mark"]')
     const name = document.querySelector('[data-slot="sidebar.brand.name"]')
-    if (!mark) return { found: false }
+    if (!mark) return { found: false, ours: false, svgCount: 0, name: '' }
     const html = mark.innerHTML
     return {
       found: true,
@@ -191,9 +196,13 @@ try {
       svgCount: mark.querySelectorAll('svg').length,
       name: (name?.textContent ?? '').trim().slice(0, 40),
     }
-  })()`)
+  })()`
+  const brandOk = await waitFor(
+    `(() => { const r = ${brandExpr}; return r.found === true && r.ours === true && r.svgCount === 1 })()`,
+    15000, 300)
+  const brand = await evaluate(brandExpr)
   check('品牌补丁生效（侧栏为官方几何且单一占位）',
-    brand.found && brand.ours && brand.svgCount === 1,
+    brandOk && brand.found && brand.ours && brand.svgCount === 1,
     `found=${brand.found} ours=${brand.ours} svgs=${brand.svgCount} name=${JSON.stringify(brand.name)}`)
   await shoot('01b-brand')
 
