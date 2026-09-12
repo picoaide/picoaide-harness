@@ -353,11 +353,45 @@ describe('BrowserRuntime v4.2 — flat pool', () => {
     await runtime.open('https://a.example')
     const id = runtime.currentTabId()!
     adapter.lastView().transport.handler = (method) => {
-      if (method === 'Runtime.evaluate') return { result: { value: true } }
+      // CDP: the constant predicate runs against the page's global object.
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'page-global' } }
+      if (method === 'Runtime.callFunctionOn') return { result: { value: true } }
       return {}
     }
     const ok = await runtime.waitFor(id, { condition: 'settled', timeoutMs: 1000 })
     expect(ok.ok).toBe(true)
+    cleanup()
+  })
+
+  it('waitFor sends the condition as a CDP argument, never as page source', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    const id = runtime.currentTabId()!
+    const selector = `#x'); globalThis.__pwned = true; //`
+    adapter.lastView().transport.handler = (method) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'page-global' } }
+      if (method === 'Runtime.callFunctionOn') return { result: { value: false } }
+      return {}
+    }
+    const result = await runtime.waitFor(id, { condition: 'element-present', selector, timeoutMs: 50 })
+    expect(result.ok).toBe(false)
+
+    const sent = adapter.lastView().transport.sent
+    const evaluate = sent.filter(entry => entry.method === 'Runtime.evaluate')
+    // Runtime.evaluate is only used to resolve the page global object.
+    expect(evaluate.length).toBeGreaterThan(0)
+    for (const entry of evaluate) expect(entry.params.expression).toBe('globalThis')
+
+    const call = sent.find(entry => entry.method === 'Runtime.callFunctionOn')
+    expect(call).toBeDefined()
+    expect(String(call?.params.functionDeclaration)).not.toContain(selector)
+    expect(call?.params.arguments).toEqual([{ value: {
+      condition: 'element-present',
+      selector,
+      text: null,
+      startUrl: 'https://a.example',
+      networkIdleMs: 800,
+    } }])
     cleanup()
   })
 
