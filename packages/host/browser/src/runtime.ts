@@ -16,8 +16,9 @@ import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
-import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
+import { assertCredentialTabExpression, EVAL_EGRESS_BLOCKED_MARKER, validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { browserError, BrowserError } from './errors.ts'
+import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type {
@@ -67,6 +68,17 @@ interface BrowserTab {
    * dies with the tab (`destroyTab` drops the whole entry).
    */
   filledSecrets: string[]
+  /**
+   * Out-of-process (cross-origin) subframes of this tab, keyed by their flat
+   * CDP session id (R-4). Populated lazily by `ensureFrameTracking` and kept
+   * current by `Target.attachedToTarget` / `Target.detachedFromTarget`. The
+   * stored `tree` is the attach target's OWN `Page.getFrameTree`: the
+   * authoritative source for its frame id, its parent, and its own descendants
+   * (an OOPIF's same-process children never appear in the page session's tree).
+   */
+  oopifFrames: Map<string, { frameId: string; url: string; parentId: string | undefined; tree: RawFrameNode }>
+  /** Whether `Target.setAutoAttach` + the attach listeners are installed. */
+  frameTrackingReady: boolean
 }
 
 interface EvalResult {
@@ -424,7 +436,7 @@ export class BrowserRuntime {
       try { view.destroy() } catch { /* teardown never throws */ }
       throw cause
     }
-    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [] }
+    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [], oopifFrames: new Map(), frameTrackingReady: false }
     this.tabs.set(id, tab)
     this.pool.registerTab(id, '', '')
 
@@ -744,14 +756,31 @@ export class BrowserRuntime {
     return this.projectTabState(tab)
   }
 
+  /**
+   * Model/UI-facing projection of a tab (R-1, 2026-09-13).
+   *
+   * A tab's live `url`/`title`/`favicon` are raw by design (navigation needs
+   * them), but EVERY payload that leaves the runtime is built here: the
+   * `browser_list_tabs` / `browser_open` / `browser_navigate` /
+   * `browser_get_snapshot` envelopes, the shell's `/api/pico/browser/state`
+   * and its SSE `state` event. Before this the redaction was applied per call
+   * site and `browser_get_snapshot` shipped `state.url` in cleartext while the
+   * element text beside it read `****` (independent re-verification
+   * 2026-09-13). One projection, so a new accessor cannot miss it.
+   *
+   * Cost, stated on purpose: the shell address bar shows the masked URL for a
+   * credential-bearing address. Restoring a cleartext address bar needs a
+   * deliberately separate (un-redacted) shell-only channel — the unsafe
+   * default is not kept for convenience.
+   */
   private projectTabState(tab: BrowserTab): BrowserTabState {
     return {
       id: tab.id,
-      url: tab.url,
-      title: tab.title,
+      url: stripSensitiveUrl(tab.url),
+      title: stripSensitiveText(tab.title),
       loading: tab.loading,
       visible: tab.id === this.pool.activeTab,
-      favicon: tab.favicon,
+      favicon: stripSensitiveUrl(tab.favicon),
       canGoBack: tab.canGoBack,
       canGoForward: tab.canGoForward,
     }
@@ -843,7 +872,9 @@ export class BrowserRuntime {
 
   private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil, actor: RecordActor): Promise<void> {
     if (!this.guard.allowNavigation(url)) {
-      throw browserError('navigation-blocked', `browser: navigation denied — ${url.slice(0, 200)}`)
+      // R-1: the refusal text is model-facing (tool error) — echo the
+      // *redacted* URL, exactly like history/op-log do.
+      throw browserError('navigation-blocked', `browser: navigation denied — ${stripSensitiveUrl(url).slice(0, 200)}`)
     }
     const tab = this.tab(id)
     const wc = tab.view.webContents
@@ -1050,7 +1081,13 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const text = await this.agentRun('browser_get_text', async () => {
       const tab = this.tab(resolved)
-      return await extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit)
+      const raw = await extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit)
+      // R-1 (2026-09-13): page text is a model-facing exit too. innerText of a
+      // password input is empty, but a page that *echoes* what was typed
+      // ("your password abc123 is weak", a confirmation screen, a debug dump)
+      // hands the injected credential back verbatim. Same value-level redactor
+      // as the snapshot/eval funnels — one implementation, three exits.
+      return redactFilledSecretsText(tab, raw)
     }, signal)
     this.record('browser_get_text', resolved, selector === undefined ? `page text: ${text.length} chars` : `element text: ${text.length} chars`)
     return text
@@ -1117,15 +1154,21 @@ export class BrowserRuntime {
   }
 
   /**
-   * Eval guardrail (heuristic AST policy + result masking).
+   * Eval guardrail (heuristic AST policy + result masking + credential-tab
+   * egress gate).
    *
-   * The validator is a misuse guardrail, NOT a security boundary: the AI is
-   * allowed to operate every part of the browser (fetch/XHR/arbitrary JS
-   * included). Since FIX-03 the *returned* string is additionally passed
-   * through {@link redactFilledSecretsText}, so a value this tab received via
-   * `fillCredentials` is not handed back through the eval channel — but that
-   * only closes the incidental read-back path, never an active exfiltration by
-   * the evaluated code (see the honesty note inside).
+   * On an ordinary tab the validator stays a misuse guardrail, NOT a security
+   * boundary: the AI may operate every part of the browser (fetch/XHR/arbitrary
+   * JS included). Since FIX-03 the *returned* string additionally goes through
+   * {@link redactFilledSecretsText}.
+   *
+   * R-2 (2026-09-13) narrows that on the one tab class where value scrubbing is
+   * provably insufficient — a tab whose page holds credentials injected by
+   * `browser_fill_credentials`. There the expression (a) is refused statically
+   * when it names a network-write API, and (b) runs with those APIs disabled
+   * inside the page for the duration of the call, so a smuggled reference
+   * cannot reach the network either. Reads (including the `read*` helpers) keep
+   * working; the credential simply has no route out through `browser_eval`.
    */
   async eval(tabId: number, expression: string, frame?: number, signal?: AbortSignal): Promise<string> {
     if (!this.options.evalEnabled) {
@@ -1138,9 +1181,16 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const result = await this.agentRun('browser_eval', async () => {
       const tab = this.tab(resolved)
-      const frameParams = typeof frame === 'number' && frame > 0 ? { contextId: await this.frameContextId(tab, frame) } : undefined
+      // R-2: a tab holding injected credentials gets the strict eval: no
+      // model-named network-write API (static refusal) and no live one inside
+      // the page (the shim installed by `wrapEvalExpression`).
+      const credentialTab = tab.filledSecrets.length > 0
+      if (credentialTab) assertCredentialTabExpression(expression)
+      // R-4: `frame: N` is a DOM position. Resolve it through the reconciled
+      // index (same-process frames + out-of-process iframes) or refuse.
+      const target = typeof frame === 'number' && frame > 0 ? await this.resolveFrame(tab, frame) : undefined
       const evalResult = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-        expression: wrapEvalExpression(expression),
+        expression: wrapEvalExpression(expression, credentialTab ? { denyEgress: true } : {}),
         returnByValue: true,
         // awaitPromise: true — a Promise result (fetch/XHR/async expression)
         // must be awaited by the renderer and serialized as its resolved value
@@ -1150,9 +1200,18 @@ export class BrowserRuntime {
         // settling promise.
         awaitPromise: true,
         timeout: Math.min(this.options.timeoutMs, 10_000),
-        ...frameParams,
-      })
+        // A frame's default world is addressed by contextId (same-process);
+        // frame 0 passes neither and keeps the pre-existing default-world
+        // semantics. A cross-origin frame is addressed by its flat CDP session
+        // on the TRANSPORT (third argument), not as a command parameter.
+        ...(target?.contextId === undefined ? {} : { contextId: target.contextId }),
+      }, target?.sessionId === undefined ? {} : { sessionId: target.sessionId })
       if (evalResult.exceptionDetails !== undefined) {
+        // R-2: a blocked egress attempt is a policy outcome, not a page bug —
+        // report it as such instead of the generic "page script failed".
+        if (JSON.stringify(evalResult.exceptionDetails).includes(EVAL_EGRESS_BLOCKED_MARKER)) {
+          throw browserError('policy', `browser_eval: the expression tried to use a network API that is blocked on this tab — it received credentials through browser_fill_credentials, so an outbound request could carry them off the page. Read-only expressions and the read* helpers still work.`)
+        }
         throw browserError('eval-policy', 'browser: page script failed (exception)')
       }
       // FIX-03 (2026-09-12): `browser_eval` used to be the un-redacted sibling
@@ -1163,12 +1222,11 @@ export class BrowserRuntime {
       // `serializeEvalResult`'s keyword masking (a random password carries no
       // keyword for that mask to catch).
       //
-      // Honest boundary: this closes the *incidental read-back* channel only.
-      // As the doc comment above says, this validator is a misuse guardrail,
-      // not a security boundary — the expression may use fetch/XHR/WebSocket,
-      // so code that can read a value can still send it out. Value-level
-      // scrubbing cannot close that; only a product decision ("no eval on tabs
-      // holding injected credentials") could.
+      // This is the third layer of the credential-tab gate (R-2): even a
+      // read-only expression that happens to echo the credential gets masked.
+      // The egress half is enforced above; the honest boundary that remains is
+      // a page which cached its own `fetch` reference before the call — that
+      // route needs the stricter "no eval at all on credential tabs"口径.
       return redactFilledSecretsText(tab, serializeEvalResult(evalResult.result?.value))
     }, signal)
     this.record('browser_eval', resolved, `eval: ${expression.slice(0, 60)}`)
@@ -1193,33 +1251,202 @@ export class BrowserRuntime {
     return redactFilledSecretsText(tab, text)
   }
 
-  private async frameContextId(tab: BrowserTab, frameIndex: number): Promise<number | undefined> {
-    if (frameIndex <= 0) return undefined
-    try {
-      interface FrameNode {
-        frame?: { id?: string }
-        childFrames?: FrameNode[]
-      }
-      const tree = await tab.cdp.send<{ frameTree?: FrameNode }>('Page.getFrameTree')
-      const frames: string[] = []
-      const walk = (node: FrameNode): void => {
-        if (node.frame?.id !== undefined) frames.push(node.frame.id)
-        for (const child of node.childFrames ?? []) walk(child)
-      }
-      if (tree.frameTree !== undefined) walk(tree.frameTree)
-      const frameId = frames[frameIndex]
-      if (frameId === undefined) throw browserError('not-found', `browser: frame ${frameIndex} does not exist`)
-      const contextId = await defaultWorldContextId(tab, frameId)
-      // No silent fallback to an isolated world: that would restore the P1-7
-      // bug (page JS globals read as `undefined`) without any error.
-      if (contextId === undefined) {
-        throw browserError('not-found', `browser: cannot reach frame ${frameIndex} (its JavaScript world is not available)`)
-      }
-      return contextId
-    } catch (error) {
-      if (error instanceof BrowserError) throw error
-      throw browserError('not-found', `browser: cannot reach frame ${frameIndex}`)
+  /**
+   * Resolve the requested `frame: N` through the reconciled index.
+   *
+   * Out-of-range is a plain not-found listing the page's real frame count (the
+   * model can only fix its call if it knows how many frames exist); a page the
+   * index cannot prove 1:1 throws the explicit R-4 refusal instead.
+   */
+  private async resolveFrame(tab: BrowserTab, frameIndex: number): Promise<ResolvedFrame> {
+    const index = await this.frameIndex(tab)
+    const entry = index[frameIndex]
+    if (entry === undefined) {
+      throw browserError('not-found', `browser: frame ${frameIndex} does not exist (this page has ${index.length} frames: 0-${index.length - 1})`)
     }
+    return entry
+  }
+
+  /**
+   * Resolve `frame: N` into the JS world it actually means (R-4, 2026-09-13).
+   *
+   * The pre-2026-09-13 version indexed `Page.getFrameTree` directly. On a
+   * site-isolated page that array is NOT the DOM order the model sees: a
+   * cross-origin (out-of-process) iframe is absent from the page session's
+   * frame tree, so with the OOPIF first in the DOM and a same-process iframe
+   * second, `frame: 1` silently resolved to the *second* iframe. Verified on
+   * Electron 43.4.0 / Chromium 150 with real CDP
+   * (`tests/probes/frame-index-probe.mjs`, evidence `oopif-probe.json`).
+   *
+   * The index is now built from the page structure (DOM order of the
+   * `iframe`/`frame` owners) reconciled against everything CDP can reach —
+   * including out-of-process frames, which ARE reachable: Electron's debugger
+   * supports flat sessions, so `Target.setAutoAttach({flatten:true})` reports
+   * the OOPIF as an `iframe` target and `Runtime.evaluate` with its
+   * `sessionId` reads the frame's own globals (same probe). Any frame owner
+   * that cannot be paired 1:1 is refused with an explicit error instead of
+   * being pointed at a neighbouring frame.
+   */
+  private async frameIndex(tab: BrowserTab): Promise<ResolvedFrame[]> {
+    const attempt = async (): Promise<ResolvedFrame[] | FrameOrderProblem> => {
+      const tree = await tab.cdp.send<{ frameTree?: RawFrameNode }>('Page.getFrameTree')
+      if (tree.frameTree === undefined) throw browserError('not-found', 'browser: the page has no frame tree yet')
+      // One flat registry built from BOTH sources: the page session's frame tree
+      // (same-process frames) and every attached out-of-process target's own
+      // frame tree. An OOPIF's same-process children exist only in the latter,
+      // which is why indexing a single `Page.getFrameTree` silently dropped them.
+      interface RegisteredFrame {
+        frameId: string
+        url: string
+        parentId: string | undefined
+        sessionId: string | undefined
+      }
+      const registry = new Map<string, RegisteredFrame>()
+      const byParent = new Map<string | undefined, string[]>()
+      const addTree = (node: RawFrameNode, parentId: string | undefined, sessionId: string | undefined): string | undefined => {
+        const id = node.frame?.id
+        if (id === undefined) return undefined
+        for (const child of node.childFrames ?? []) addTree(child, id, sessionId)
+        registry.set(id, { frameId: id, url: node.frame?.url ?? '', parentId, sessionId })
+        const siblings = byParent.get(parentId)
+        if (siblings === undefined) byParent.set(parentId, [id])
+        else siblings.push(id)
+        return id
+      }
+      const rootId = addTree(tree.frameTree, undefined, undefined)
+      if (rootId === undefined) throw browserError('not-found', 'browser: the page has no frame tree yet')
+      // Out-of-process frames only need attaching when the document actually has
+      // frame owners: a page without any iframe must not pay for the round trips.
+      const rootOwners = await this.domFrameOwnerUrls(tab, {})
+      await this.ensureFrameTracking(tab, registry.size > 1 || rootOwners.length > 0)
+      for (const [sessionId, frame] of tab.oopifFrames) {
+        if (!registry.has(frame.frameId)) addTree(frame.tree, frame.parentId, sessionId)
+      }
+
+      const index: ResolvedFrame[] = []
+      const visit = async (frame: RegisteredFrame, depth: number, contextId: number | undefined): Promise<ResolvedFrame[] | FrameOrderProblem> => {
+        index.push({
+          frameId: frame.frameId,
+          url: frame.url,
+          depth,
+          ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }),
+          ...(contextId === undefined ? {} : { contextId }),
+        })
+        // This document's frame owners, read in ITS own world: the OOPIF session
+        // for a cross-origin frame, the default-world context otherwise (nothing
+        // at all for the main frame, whose world is the implicit default).
+        const domUrls = depth === 0 && contextId === undefined && frame.sessionId === undefined
+          ? rootOwners
+          : await this.domFrameOwnerUrls(tab, {
+            ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }),
+            ...(contextId === undefined ? {} : { contextId }),
+          })
+        const candidates: FrameCandidate[] = (byParent.get(frame.frameId) ?? []).map((id) => {
+          const child = registry.get(id)!
+          return { frameId: child.frameId, url: child.url, ...(child.sessionId === undefined ? {} : { sessionId: child.sessionId }) }
+        })
+        const ordered = orderFramesByDom(domUrls, candidates)
+        if (isFrameOrderProblem(ordered)) return { ...ordered, depth }
+        for (const child of ordered) {
+          const childNode = registry.get(child.frameId)
+          if (childNode === undefined) continue
+          let childContext: number | undefined
+          if (child.sessionId === undefined) {
+            childContext = await defaultWorldContextId(tab, child.frameId)
+            // No silent fallback to an isolated world: that would restore the
+            // P1-7 bug (page JS globals read as `undefined`) without any error.
+            if (childContext === undefined) {
+              return { domUrls, reachableUrls: [], reason: `frame ${child.url || child.frameId} has no default JavaScript world` }
+            }
+          }
+          const nested = await visit(childNode, depth + 1, childContext)
+          if (isFrameOrderProblem(nested)) return nested
+        }
+        return index
+      }
+      // The main frame is evaluated in its default world implicitly (no
+      // contextId), exactly like `frame: 0` always did.
+      return await visit(registry.get(rootId)!, 0, undefined)
+    }
+
+    let outcome = await attempt()
+    if (isFrameOrderProblem(outcome)) {
+      // A frame owner that appears a tick before its frame (insert before
+      // commit) is a real race, not a security event: settle once, then refuse.
+      await sleep(FRAME_INDEX_SETTLE_MS)
+      outcome = await attempt()
+      if (isFrameOrderProblem(outcome)) {
+        throw browserError('not-found', frameOrderErrorMessage(outcome))
+      }
+    }
+    return outcome
+  }
+
+  /** The `frame`/`iframe` owner URLs of one document, in DOM order (R-4). */
+  private async domFrameOwnerUrls(tab: BrowserTab, world: { contextId?: number; sessionId?: string }): Promise<string[]> {
+    const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+      expression: `[...document.querySelectorAll('iframe,frame')].map((el) => el.hasAttribute('srcdoc') ? ${JSON.stringify(SRCDOC_URL)} : (el.src || 'about:blank'))`,
+      returnByValue: true,
+      ...(world.contextId === undefined ? {} : { contextId: world.contextId }),
+    }, world.sessionId === undefined ? {} : { sessionId: world.sessionId })
+    const value = result.result?.value
+    if (!Array.isArray(value)) {
+      // Mid-navigation / detached: the caller turns this into a fail-loud
+      // refusal, because indexing an unknown layout is exactly the defect.
+      throw browserError('not-found', 'browser: the page frame layout is not readable right now (navigation in progress)')
+    }
+    return value.map((url) => String(url))
+  }
+
+  /**
+   * Install flat-session frame tracking for a tab (idempotent).
+   *
+   * `Target.setAutoAttach` reports existing out-of-process iframes once; the
+   * listeners keep {@link BrowserTab.oopifFrames} current afterwards, so a
+   * second `frame: N` call does not have to re-discover them. Detached targets
+   * remove their entry.
+   */
+  private async ensureFrameTracking(tab: BrowserTab, needed: boolean): Promise<void> {
+    if (tab.frameTrackingReady || !needed) return
+    tab.frameTrackingReady = true
+    const register = (sessionId: string, targetInfo: { url?: string } | undefined): void => {
+      // The frame id and parent come from the attached target's OWN frame tree
+      // (authoritative), not from URL guessing.
+      void tab.cdp.send<{ frameTree?: RawFrameNode }>('Page.getFrameTree', {}, { sessionId }).then((tree) => {
+        const frameTree = tree.frameTree
+        if (frameTree?.frame?.id === undefined) return
+        tab.oopifFrames.set(sessionId, {
+          frameId: frameTree.frame.id,
+          url: frameTree.frame.url ?? targetInfo?.url ?? '',
+          parentId: frameTree.frame.parentId,
+          tree: frameTree,
+        })
+        // Nested out-of-process frames: attach on the child session too, so a
+        // grandchild OOPIF registers itself the same way.
+        void tab.cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, { sessionId }).catch(() => { /* not an attachable target */ })
+      }).catch(() => { /* detached before it answered */ })
+    }
+    tab.disposers.push(tab.cdp.on('Target.attachedToTarget', (params) => {
+      const event = params as { sessionId?: string; targetInfo?: { type?: string; url?: string } }
+      if (event.sessionId === undefined || event.targetInfo?.type !== 'iframe') return
+      register(event.sessionId, event.targetInfo)
+    }))
+    tab.disposers.push(tab.cdp.on('Target.detachedFromTarget', (params) => {
+      const sessionId = (params as { sessionId?: string }).sessionId
+      if (sessionId !== undefined) tab.oopifFrames.delete(sessionId)
+    }))
+    try {
+      await tab.cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+    } catch {
+      // Older protocol / plain-Node mock: the index still works for
+      // same-process frames, and refuses when the DOM proves more frames exist.
+      return
+    }
+    // Let the already-existing iframe targets report in before the caller
+    // reconciles (the attach events race the setAutoAttach reply).
+    const deadline = Date.now() + FRAME_CONTEXT_WAIT_MS
+    while (Date.now() < deadline && tab.oopifFrames.size === 0) await sleep(FRAME_CONTEXT_POLL_MS)
+    await sleep(FRAME_CONTEXT_POLL_MS)
   }
 
   async locateElement(tabId: number, selector: string, signal?: AbortSignal): Promise<{ x: number; y: number }> {
@@ -1777,7 +2004,9 @@ export class BrowserRuntime {
       }
       this.updateTabState(tab)
       const urlChanged = tab.url !== startUrl ? 'page navigated' : lastReason
-      return { ok: false, reason: `wait_for ${options.condition} timed out — ${urlChanged}` }
+      // R-1: the reason is the tool's return value; a CDP failure text can carry
+      // the current URL, so the whole string goes through the text redactor.
+      return { ok: false, reason: stripSensitiveText(`wait_for ${options.condition} timed out — ${urlChanged}`) }
     }, signal)
   }
 
@@ -1873,7 +2102,7 @@ export class BrowserRuntime {
   /** Trigger a programmatic download of a URL. */
   async downloadUrl(url: string, signal?: AbortSignal): Promise<void> {
     if (!this.guard.allowNavigation(url)) {
-      throw browserError('navigation-blocked', `browser: download denied — ${url.slice(0, 200)}`)
+      throw browserError('navigation-blocked', `browser: download denied — ${stripSensitiveUrl(url).slice(0, 200)}`)
     }
     const active = this.pool.activeTab
     if (active === undefined) throw browserError('not-found', 'browser: no tab open in the browser')
@@ -2128,24 +2357,108 @@ function maskBrowserSummary(summary: string): string {
 }
 
 /**
- * Value-level redaction of the secrets this tab received through
- * `fillCredentials` (P0-A depth layer, extended to `browser_eval` by FIX-03).
- * Exact-value matching: a page string that merely *talks* about passwords is
- * untouched, while an injected secret can never leave through a snapshot or an
- * eval result — no matter which probe/field/expression produced it. A text
- * that is a truncated head of a longer secret (the probe caps text at 80
- * chars) is redacted as a whole.
+ * Shortest injected secret that may be redacted as a **substring** of a longer
+ * text (R-3, 2026-09-13).
  *
- * ONE implementation for both funnels: `redactFilledSecrets` (element list) and
- * the raw eval string both call this, so the snapshot and eval exits cannot
- * drift apart again.
+ * Below this length a bare `includes()` match is not evidence of a credential:
+ * `abc123` is also an order id, a SKU, a build number. The independent
+ * re-verification found the page text `order abc123 confirmed` rewritten to
+ * `order **** confirmed`, i.e. the redactor was *corrupting facts* the model
+ * needs in order to act — a false positive that is worse than the leak it
+ * prevents, because the leak (a short password echoed in prose) is ambiguous
+ * by construction while the corruption is certain.
+ *
+ * A short secret is therefore still redacted in the two shapes that are not
+ * ambiguous — the whole field, and a value-shaped occurrence (see
+ * {@link maskShortSecretOccurrences}) — and left alone inside prose.
+ */
+export const MIN_EMBEDDED_SECRET_LENGTH = 8
+
+/** Characters that make a short occurrence look like a *value* on its left. */
+const VALUE_LEFT = new Set(['=', ':', '(', '[', '{', ',', '"', "'"])
+/** Characters that make it look like a value on its right. `@` covers
+ * userinfo (`user:abc123@host`) — the left-hand `:` alone is not enough. */
+const VALUE_RIGHT = new Set(['"', "'", ')', ']', '}', ',', ';', '&', '@'])
+
+/** Characters skipped when looking for the delimiter next to an occurrence:
+ * whitespace, and the backslash that JSON string escaping puts in front of a
+ * quote (`serializeEvalResult` hands the redactor `"{\"pw\":\"abc123\"}"`, where
+ * the quote next to the value is escaped). */
+function isSkippable(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\\'
+}
+
+/** Nearest significant character index walking left from `from`, if any. */
+function nearestLeft(text: string, from: number): string | undefined {
+  for (let i = from; i >= 0; i--) {
+    const ch = text[i]!
+    if (!isSkippable(ch)) return ch
+  }
+  return undefined
+}
+
+/** Nearest significant character walking right from `from`, if any. */
+function nearestRight(text: string, from: number): string | undefined {
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i]!
+    if (!isSkippable(ch)) return ch
+  }
+  return undefined
+}
+
+/**
+ * Redact the occurrences of a SHORT secret that are *value-shaped*:
+ * `password=abc123`, `"pw":"abc123"`, `[abc123]`, `user:abc123@host`,
+ * `?token=abc123&x=1`. Prose keeps its text (`order abc123 confirmed`), and so
+ * does a longer word containing the value (`xabc123y`).
+ *
+ * The delimiter sets are deliberately narrow: every added delimiter widens the
+ * false-positive surface back toward the bug this fixes.
+ */
+function maskShortSecretOccurrences(text: string, secret: string): string {
+  const parts: string[] = []
+  let from = 0
+  for (;;) {
+    const at = text.indexOf(secret, from)
+    if (at < 0) {
+      parts.push(text.slice(from))
+      return parts.join('')
+    }
+    const left = at === 0 ? undefined : nearestLeft(text, at - 1)
+    const right = at + secret.length >= text.length ? undefined : nearestRight(text, at + secret.length)
+    const valueShaped = (left === undefined || VALUE_LEFT.has(left)) && (right === undefined || VALUE_RIGHT.has(right))
+    parts.push(text.slice(from, at), valueShaped ? MASK : secret)
+    from = at + secret.length
+  }
+}
+
+/**
+ * Value-level redaction of the secrets this tab received through
+ * `fillCredentials` (P0-A depth layer, extended to `browser_eval` by FIX-03,
+ * to `browser_get_text` and short-secret precision by R-1/R-3 on 2026-09-13).
+ * Exact-value matching: a page string that merely *talks* about passwords is
+ * untouched, while an injected secret can never leave through a snapshot, an
+ * eval result or the page text — no matter which probe/field/expression
+ * produced it. A text that is a truncated head of a longer secret (the probe
+ * caps text at 80 chars) is redacted as a whole.
+ *
+ * ONE implementation for all three funnels (`runtime.snapshot`,
+ * `runtime.eval`, `runtime.text`), so they cannot drift apart again.
  */
 function redactFilledSecretsText(tab: BrowserTab, text: string): string {
   if (tab.filledSecrets.length === 0) return text
   let out = text
   for (const secret of tab.filledSecrets) {
-    if (out.includes(secret)) out = out.split(secret).join(MASK)
-    else if (out.length >= 8 && secret.startsWith(out)) out = MASK
+    if (secret === '') continue
+    if (out === secret) { out = MASK; continue }
+    // A truncated head of a longer secret is unambiguous once it is long
+    // enough to not be an ordinary word.
+    if (out.length >= MIN_EMBEDDED_SECRET_LENGTH && secret.startsWith(out)) { out = MASK; continue }
+    if (secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
+      if (out.includes(secret)) out = out.split(secret).join(MASK)
+      continue
+    }
+    out = maskShortSecretOccurrences(out, secret)
   }
   return out
 }
@@ -2166,6 +2479,27 @@ function redactFilledSecrets(tab: BrowserTab, elements: BrowserSnapshotElement[]
  * them alongside the reply, but a slow renderer can lag). */
 const FRAME_CONTEXT_WAIT_MS = 500
 const FRAME_CONTEXT_POLL_MS = 10
+
+/** Extra settle time before refusing an index a dynamic page may still be
+ * committing (a frame owner inserted a tick before its frame exists). */
+const FRAME_INDEX_SETTLE_MS = 150
+
+/** One entry of the DOM-ordered frame index (`frame: N`). */
+interface ResolvedFrame {
+  frameId: string
+  url: string
+  depth: number
+  /** Flat CDP session of an out-of-process (cross-origin) frame. */
+  sessionId?: string
+  /** Default-world context of a same-process frame (absent for frame 0). */
+  contextId?: number
+}
+
+/** Raw `Page.getFrameTree` node shape. */
+interface RawFrameNode {
+  frame?: { id?: string; url?: string; parentId?: string }
+  childFrames?: RawFrameNode[]
+}
 
 /**
  * Execution context id of `frameId`'s DEFAULT world.
@@ -2189,7 +2523,7 @@ async function defaultWorldContextId(tab: BrowserTab, frameId: string): Promise<
     if (context?.id === undefined) return
     contexts.push({ id: context.id, frameId: context.auxData?.frameId, isDefault: context.auxData?.isDefault === true })
   })
-  try {
+  const look = async (): Promise<number | undefined> => {
     await tab.cdp.send('Runtime.enable')
     const deadline = Date.now() + FRAME_CONTEXT_WAIT_MS
     for (;;) {
@@ -2198,6 +2532,21 @@ async function defaultWorldContextId(tab: BrowserTab, frameId: string): Promise<
       if (Date.now() >= deadline) return undefined
       await new Promise((resolve) => setTimeout(resolve, FRAME_CONTEXT_POLL_MS))
     }
+  }
+  try {
+    const first = await look()
+    if (first !== undefined) return first
+    // Chromium does NOT re-announce the existing execution contexts on a second
+    // `Runtime.enable` — verified on Electron 43.4.0 with real CDP
+    // (`tests/probes/frame-index-probe.mjs`): after
+    // `Target.setAutoAttach({flatten:true})` (which the frame index needs for
+    // out-of-process frames) the next `Runtime.enable` reported nothing, while
+    // `Runtime.disable` + `Runtime.enable` reported every context again. Without
+    // this cycle the R-4 resolver would refuse every same-process subframe of a
+    // page that also has an OOPIF.
+    contexts.length = 0
+    try { await tab.cdp.send('Runtime.disable') } catch { /* not enabled */ }
+    return await look()
   } finally {
     dispose()
   }

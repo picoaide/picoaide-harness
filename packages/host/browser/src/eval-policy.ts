@@ -135,6 +135,100 @@ interface AnyNode {
   [key: string]: unknown
 }
 
+/** Marker thrown by the credential-tab egress shim (see {@link wrapEvalExpression}).
+ * Recognized by the runtime to turn a page exception into an explicit policy
+ * error instead of a generic "page script failed". */
+export const EVAL_EGRESS_BLOCKED_MARKER = 'PICOAI_EVAL_EGRESS_BLOCKED'
+
+/** Network-write surfaces that can carry a page value off the machine.
+ *
+ * 2026-09-13 (R-2): these stay ALLOWED on ordinary tabs (see the 2026-09-08
+ * decision above), but they are refused on a tab that received credentials
+ * through `browser_fill_credentials`. Value-level scrubbing cannot stop an
+ * active request — `fetch('/x?p='+document.querySelector('#pw').value)` handed
+ * the injected password to the network verbatim (re-verified on a real
+ * Electron renderer, `tests/probes/outlet-egress-probe.mjs`). The list is the
+ * *static* half of the gate; {@link wrapEvalExpression} is the enforcing half
+ * (it disables the same APIs inside the page for the duration of the call), so
+ * a smuggled reference (`this['fe'+'tch']`) hits a throwing shim instead of the
+ * real API. */
+const EGRESS_APIS = new Set([
+  'fetch',
+  'xmlhttprequest',
+  'sendbeacon',
+  'websocket',
+  'eventsource',
+  'worker',
+  'sharedworker',
+  'importscripts',
+  'serviceworker',
+  'rtcpeerconnection',
+  'rtcdatachannel',
+])
+
+/** Every fixed name this expression mentions (identifiers, member names and
+ * string-literal computed access), lower-cased. */
+function mentionedNames(node: AnyNode): Set<string> {
+  const names = new Set<string>()
+  const stack: AnyNode[] = [node]
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    if (current.type === 'Identifier') {
+      const name = (current as { name?: string }).name
+      if (name !== undefined) names.add(name.toLowerCase())
+    }
+    if (current.type === 'MemberExpression') {
+      const property = (current as { property?: AnyNode }).property
+      if ((current as { computed?: boolean }).computed !== true && property?.type === 'Identifier') {
+        const name = (property as { name?: string }).name
+        if (name !== undefined) names.add(name.toLowerCase())
+      }
+      if (property?.type === 'Literal' && typeof property.value === 'string') names.add(property.value.toLowerCase())
+    }
+    for (const key of Object.keys(current)) {
+      if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'raw' || key === 'range') continue
+      const value = current[key]
+      if (Array.isArray(value)) {
+        for (const item of value) if (isNode(item)) stack.push(item)
+      } else if (isNode(value)) {
+        stack.push(value)
+      }
+    }
+  }
+  return names
+}
+
+/**
+ * Credential-tab restriction (R-2, 2026-09-13).
+ *
+ * `browser_eval` on a tab that holds injected credentials may read the page,
+ * but may not use a network-write API: the credential is in that page's DOM and
+ * any outbound request can carry it out. Refusing the API by name is the
+ * legible half; the shim installed by {@link wrapEvalExpression} is the
+ * enforcing half.
+ *
+ * Known and accepted bypass surface (stated, not hidden): a page that cached a
+ * reference to `fetch` in its own module scope can still be driven through it.
+ * Closing that would require removing `browser_eval` from credential tabs
+ * altogether — the stricter product option A/B documented in
+ * docs/…/R-2. The default implemented here is the strict one *for the API
+ * surface the model can name*, plus page-side enforcement.
+ */
+export function assertCredentialTabExpression(expression: string): void {
+  const program = parseExpression(expression)
+  const names = mentionedNames(program)
+  for (const api of EGRESS_APIS) {
+    if (names.has(api)) {
+      throw browserError(
+        'policy',
+        `browser_eval: ${api} is blocked on this tab — it received credentials through browser_fill_credentials, and an outbound request can carry them off the page. Read-only expressions and the read* helpers still work; do page-authored requests in a tab without injected credentials.`,
+      )
+    }
+  }
+}
+
+
+
 /** Parse `source`; returns the single Expression node or throws eval-policy. */
 function parseExpression(source: string): AnyNode {
   try {
@@ -284,15 +378,56 @@ export function validateEvalExpression(expression: string): void {
  * Wrap a validated expression for page execution: prepend the read
  * helper definitions (self-contained, no globals leaked) so `read*` helpers
  * work in the page context without template injection.
+ *
+ * `denyEgress` (R-2, 2026-09-13) additionally disables the network-write APIs
+ * inside the page for the duration of this one evaluation and restores them in
+ * a `finally` — the enforcing half of the credential-tab gate. It is a shim,
+ * not a sandbox: it exists so a smuggled reference (`this['fe'+'tch']`) hits a
+ * thrower instead of the real API, and so the failure is a clear, marked error
+ * instead of a silent leak.
  */
-export function wrapEvalExpression(expression: string): string {
-  return `(() => {
+export function wrapEvalExpression(expression: string, options: { denyEgress?: boolean } = {}): string {
+  const helpers = `
     const __readText = (sel) => { const el = document.querySelector(sel); return el ? (el.innerText ?? el.textContent ?? '').slice(0, 4096) : null; };
     const __readAttr = (sel, name) => { const el = document.querySelector(sel); return el ? el.getAttribute(name) : null; };
     const __readJson = (sel) => { const el = document.querySelector(sel); if (!el) return null; try { return JSON.parse(el.textContent || 'null'); } catch { return null; } };
     const __readVar = (path) => { const parts = String(path).split('.'); let cur = globalThis; for (const p of parts) { cur = cur?.[p]; if (cur === undefined) return undefined; } try { return JSON.parse(JSON.stringify(cur)); } catch { return String(cur); } };
-    const readText = __readText, readAttr = __readAttr, readJson = __readJson, readVar = __readVar;
+    const readText = __readText, readAttr = __readAttr, readJson = __readJson, readVar = __readVar;`
+  if (options.denyEgress !== true) {
+    return `(() => {${helpers}
     return (${expression});
+  })()`
+  }
+  return `(() => {${helpers}
+    const __marker = ${JSON.stringify(EVAL_EGRESS_BLOCKED_MARKER)};
+    const __throwBlocked = (name) => { const err = new Error(__marker + ': ' + name + ' is disabled on this tab while injected credentials are present'); err.name = 'BrowserEvalEgressBlocked'; throw err; };
+    const __restores = [];
+    const __denyValue = (target, key, name, replacement) => {
+      if (target === undefined || target === null) return;
+      let previous;
+      let existed = false;
+      try { existed = Object.prototype.hasOwnProperty.call(target, key); previous = target[key]; } catch { return; }
+      try {
+        Object.defineProperty(target, key, { configurable: true, writable: true, enumerable: false, value: replacement ?? function () { return __throwBlocked(name); } });
+        __restores.push(() => { try { if (existed) Object.defineProperty(target, key, { configurable: true, writable: true, enumerable: true, value: previous }); else delete target[key]; } catch { /* frozen target */ } });
+      } catch { /* non-configurable */ }
+    };
+    for (const name of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker', 'SharedWorker', 'RTCPeerConnection', 'webkitRTCPeerConnection', 'Request']) {
+      __denyValue(globalThis, name, name);
+    }
+    __denyValue(globalThis.navigator, 'sendBeacon', 'sendBeacon');
+    __denyValue(globalThis.navigator, 'serviceWorker', 'serviceWorker');
+    __denyValue(globalThis, 'importScripts', 'importScripts');
+    for (const key of ['open', 'send']) {
+      __denyValue(globalThis.XMLHttpRequest && globalThis.XMLHttpRequest.prototype, key, 'XMLHttpRequest.' + key);
+    }
+    __denyValue(globalThis.HTMLFormElement && globalThis.HTMLFormElement.prototype, 'submit', 'form.submit');
+    __denyValue(globalThis.HTMLFormElement && globalThis.HTMLFormElement.prototype, 'requestSubmit', 'form.requestSubmit');
+    try {
+      return (${expression});
+    } finally {
+      for (let i = __restores.length - 1; i >= 0; i--) { try { __restores[i](); } catch { /* restore is best effort */ } }
+    }
   })()`
 }
 

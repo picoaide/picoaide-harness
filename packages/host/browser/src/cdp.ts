@@ -16,9 +16,14 @@ export interface CdpTransport {
   isAttached(): boolean
   attach(protocolVersion: string): void
   detach(): void
-  sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
-  on(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown
-  removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown
+  /** Send one command. `sessionId` addresses a flat (out-of-process iframe)
+   * session obtained through `Target.setAutoAttach({flatten:true})` — Electron's
+   * `Debugger.sendCommand(method, params, sessionId)` passes it through, and a
+   * mock transport that ignores the third argument simply never sees OOPIFs
+   * (the runtime then fails loud instead of guessing). */
+  sendCommand(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>
+  on(event: 'message', listener: (event: unknown, method: string, params: unknown, sessionId?: string) => void): unknown
+  removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown, sessionId?: string) => void): unknown
 }
 
 /**
@@ -73,11 +78,14 @@ export class CdpSession {
   async send<T>(
     method: string,
     params: Record<string, unknown> = {},
-    callOptions: { timeoutMs?: number; signal?: AbortSignal } = {},
+    callOptions: { timeoutMs?: number; signal?: AbortSignal; sessionId?: string } = {},
   ): Promise<T> {
     if (this.closed) throw new Error(`browser: CDP session closed (${method})`)
     const timeoutMs = callOptions.timeoutMs ?? this.options.timeoutMs ?? CDP_CALL_TIMEOUT_MS
-    return await withTimeout(this.transport.sendCommand(method, params), timeoutMs, method, callOptions.signal) as T
+    const wire = callOptions.sessionId === undefined
+      ? this.transport.sendCommand(method, params)
+      : this.transport.sendCommand(method, params, callOptions.sessionId)
+    return await withTimeout(wire, timeoutMs, method, callOptions.signal) as T
   }
 
   /** Subscribe to one CDP method; returns a disposer. */
