@@ -126,7 +126,12 @@ export interface ConnectorMcpApproval {
   command: string
   /** Argument vector as the definition declares it. */
   args: string[]
-  /** Env KEY names the definition declared (values are never shown here). */
+  /**
+   * EVERY environment-variable name the child process will receive — the
+   * definition's `mcp[].env`, the credential field names it declares and the
+   * framework's own keys. Values are never shown here, but a name the user was
+   * not shown must never be injected (residual A).
+   */
   envKeys: string[]
   /** MCP server names this approval covers. */
   servers: string[]

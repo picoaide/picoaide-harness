@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
-import { assertOutboundUrlAllowed } from './outbound.ts'
+import { assertOutboundUrlAllowed, OutboundUrlBlockedError, outboundFetch } from './outbound.ts'
 
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
@@ -84,9 +84,9 @@ async function registerClient(
   clientName: string,
 ): Promise<string> {
   // FIX-20: the registration endpoint may come from a remote discovery
-  // document — never POST client metadata to a host outside the policy.
-  assertOutboundUrlAllowed(registrationEndpoint, 'OAuth 客户端注册端点')
-  const response = await fetch(registrationEndpoint, {
+  // document — never POST client metadata to a host outside the policy, and
+  // never follow a redirect out of it (residual C).
+  const response = await outboundFetch(registrationEndpoint, 'OAuth 客户端注册端点', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -135,7 +135,7 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
   const mcp = assertOutboundUrlAllowed(mcpUrl, 'MCP 端点')
   const resource = mcp.origin + mcp.pathname.replace(/\/+$/, '')
 
-  const probe = await fetch(mcpUrl, {
+  const probe = await outboundFetch(mcpUrl, 'MCP 端点', {
     headers: { Accept: 'text/event-stream', 'MCP-Protocol-Version': '2025-06-18' },
   })
   if (probe.status >= 200 && probe.status < 300) return { publicMcp: true, resource }
@@ -154,7 +154,9 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
     // A blocked URL here is an active redirection attempt, not a typo to skip:
     // fail the flow instead of quietly trying the next candidate.
     assertOutboundUrlAllowed(metadataUrl, 'OAuth resource metadata')
-    const metadataResponse = await fetch(metadataUrl, { headers: { Accept: 'application/json' } })
+    const metadataResponse = await outboundFetch(metadataUrl, 'OAuth resource metadata', {
+      headers: { Accept: 'application/json' },
+    })
     if (!metadataResponse.ok) continue
     const resourceMetadata = (await metadataResponse.json()) as { authorization_servers?: string[] }
     const authorizationServer = resourceMetadata.authorization_servers?.[0]
@@ -162,7 +164,9 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
 
     const asUrl = assertOutboundUrlAllowed(authorizationServer, 'OAuth authorization server')
     asUrl.pathname = `${asUrl.pathname.replace(/\/+$/, '')}/.well-known/oauth-authorization-server`
-    const metadataResponse2 = await fetch(asUrl, { headers: { Accept: 'application/json' } })
+    const metadataResponse2 = await outboundFetch(asUrl.toString(), 'OAuth authorization server metadata', {
+      headers: { Accept: 'application/json' },
+    })
     if (!metadataResponse2.ok) continue
     const meta = (await metadataResponse2.json()) as OAuthServerMetadata
     if (!meta.authorization_endpoint || !meta.token_endpoint) continue
@@ -318,7 +322,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   })
   if (discovered?.resource) body.set('resource', discovered.resource)
   if (auth.pkce) body.set('code_verifier', verifier)
-  const response = await fetch(tokenUrl, {
+  const response = await outboundFetch(tokenUrl, 'OAuth token 端点', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
@@ -359,14 +363,23 @@ export async function refreshOAuthToken(
     tokenUrl = discovered.tokenEndpoint ?? ''
   }
   if (!tokenUrl) return null
-  // FIX-20: a refresh POSTs the refresh token — same policy as the exchange.
+  // FIX-20 / residual C: a refresh POSTs the refresh token — same policy as the
+  // exchange, including the redirect fence. A refused redirect is reported like
+  // any other failed refresh (null): the stored credential stays untouched and
+  // the connector keeps working with it.
   tokenUrl = assertOutboundUrlAllowed(tokenUrl, 'OAuth token 端点').toString()
-  const response = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-    signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
-  })
+  let response: Response
+  try {
+    response = await outboundFetch(tokenUrl, 'OAuth token 端点', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+    })
+  } catch (error) {
+    if (error instanceof OutboundUrlBlockedError) return null
+    throw error
+  }
   if (!response.ok) return null
   const data = (await response.json()) as Record<string, unknown>
   const accessToken = String(data.access_token ?? '')
