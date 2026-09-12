@@ -566,6 +566,21 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
               bytes: { type: 'integer', required: true },
               width: { type: 'integer', required: true },
               height: { type: 'integer', required: true },
+              // The store returns these two optional `ImageAttachmentRef`
+              // members for this tool's own input (`name` is always set from
+              // `browser-tab-<id>.jpg`), so declaring only the five required
+              // fields made the validator reject every successful capture with
+              // `"value.image.name" is not a declared property`
+              // (real-device report 2026-09-12).
+              name: { type: 'string' },
+              originalDimensions: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  width: { type: 'integer', required: true },
+                  height: { type: 'integer', required: true },
+                },
+              },
             },
           },
         },

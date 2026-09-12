@@ -53,6 +53,13 @@ export const EVAL_HELPERS = ['readText', 'readAttr', 'readJson', 'readVar'] as c
  * navigate/click/fill_form or a shell script — it does not stop data egress,
  * it just makes it less legible. What remains here are code-execution,
  * DOM/presentation and page-state writes (assignment-style side effects).
+ *
+ * `innerHTML` / `outerHTML` are deliberately ABSENT. They name readable data
+ * properties whose only write form is an assignment, and `AssignmentExpression`
+ * is rejected before this set is consulted — so listing them here blocked the
+ * read (`document.documentElement.outerHTML`) with a message that called a pure
+ * read a "side-effect API" (real-device report 2026-09-12). Do not re-add them:
+ * they protect nothing.
  */
 const WRITE_APIS = new Set([
   'setItem',
@@ -83,8 +90,6 @@ const WRITE_APIS = new Set([
   'removeEventListener',
   'insertAdjacentHTML',
   'insertAdjacentText',
-  'innerHTML',
-  'outerHTML',
   'setAttribute',
   'removeAttribute',
   'appendChild',
