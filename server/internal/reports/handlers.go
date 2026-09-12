@@ -206,7 +206,11 @@ func testPush(c *gin.Context, db *sql.DB) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), PushTimeout)
 	defer cancel()
 	if err := PushWebhook(ctx, target.HookURL, body); err != nil {
-		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "推送失败: "+err.Error())
+		// 审计 2026-09-13(三轮残留①):与 last_error 走**同一个**出口脱敏。
+		// net/http 的错误串自带目标 URL(`Post "https://…?key=SECRET": dial
+		// tcp …`),原样回显等于把刚脱敏的凭据从 502 响应体送到管理端错误横幅。
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM",
+			"推送失败: "+serverstore.SanitizeReportError(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "period": body.Period})

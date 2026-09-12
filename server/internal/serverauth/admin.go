@@ -1043,6 +1043,10 @@ func (a *AdminAPI) usage(c *gin.Context) {
 
 // listAuditLogs 返回分页审计日志(新→旧),支持 action / username 过滤
 // (审计 M8),总数一并返回用于分页。
+//
+// 审计 2026-09-13(三轮残留①):detail 在**读时**按查看者权限脱敏——不持
+// report:read 的查看者(如只读 auditor)看不到历史行里的凭据型 URL,持
+// report:read 者读原文;库内历史行与哈希链逐字节不动(见 audit_redact.go)。
 func (a *AdminAPI) listAuditLogs(c *gin.Context) {
 	_, size, offset := paginate(c, 50, 500)
 	logs, total, err := serverstore.ListAuditLogsPagedFiltered(a.DB, offset, size,
@@ -1054,6 +1058,7 @@ func (a *AdminAPI) listAuditLogs(c *gin.Context) {
 	if logs == nil {
 		logs = []serverstore.AuditLogEntry{}
 	}
+	redactAuditEntryDetails(logs, HasPermission(currentAdmin(c), PermReportRead))
 	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
 }
 
