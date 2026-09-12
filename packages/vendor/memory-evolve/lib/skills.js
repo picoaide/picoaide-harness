@@ -252,7 +252,12 @@ function writeSkill(dir, name, content) {
  * @returns {boolean} true when a read is proven by the log.
  */
 export function hasReadSkill(agent, toolName, name) {
-  const events = agent?.session?.events
+  // ⚠️ DSH 0.1.2-alpha.4+ 的 Session 不再暴露 `.events` 数组，只有 `ownEvents()`
+  // （同 lib/bookmarks.js / lib/review.js 的 2026-09-04 适配）。这里漏适配过一次：
+  // `agent.session.events` 恒为 undefined，read-before-write 于是变成"永远没读过"，
+  // `skill_manage action=patch` 在同一轮 read 成功之后仍被无条件拒绝
+  // （真机工具诊断报告 2026-09-12）。
+  const events = agent?.session?.ownEvents?.() ?? agent?.session?.events
   if (!Array.isArray(events)) return false
   for (const event of events) {
     if (event?.type !== 'tool/call') continue

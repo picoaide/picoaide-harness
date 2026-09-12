@@ -34,6 +34,15 @@ import type {
 const DEFAULT_TIMEOUT_MS = 30_000
 /** Default cap on waiting for Electron's loadURL promise (ms). */
 const DEFAULT_LOAD_TIMEOUT_MS = 20_000
+/**
+ * Cap on the native `capturePage()` attempt before the renderer-side fallback
+ * runs (ms). A hidden window can **hang** that call instead of rejecting it, and
+ * an unbounded hang consumed the whole tool budget so the fallback never ran
+ * (real-device report 2026-09-12: `tool call timed out after 30000ms`).
+ */
+const SCREENSHOT_PRIMARY_BUDGET_MS = 8_000
+/** Share of the call budget the renderer-side capture must keep in reserve (ms). */
+const SCREENSHOT_FALLBACK_RESERVE_MS = 5_000
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
 
@@ -1036,7 +1045,10 @@ export class BrowserRuntime {
         const tab = this.tab(resolved)
         let primary: string
         try {
-          return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+          return await withScreenshotBudget(
+            captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality),
+            this.screenshotPrimaryBudgetMs(),
+          )
         } catch (cause) {
           primary = cause instanceof Error ? cause.message : String(cause)
         }
@@ -1071,6 +1083,18 @@ export class BrowserRuntime {
     }
     this.record('browser_screenshot', resolved, 'screenshot captured')
     return data
+  }
+
+  /**
+   * Budget for the native capture attempt. The renderer-side fallback needs a
+   * real share of the call budget, so a deployment that shortens `timeoutMs`
+   * shortens this bound with it instead of letting the native path overrun.
+   */
+  private screenshotPrimaryBudgetMs(): number {
+    return Math.min(
+      SCREENSHOT_PRIMARY_BUDGET_MS,
+      Math.max(1_000, this.options.timeoutMs - SCREENSHOT_FALLBACK_RESERVE_MS),
+    )
   }
 
   /** Eval guardrail (heuristic AST policy + result masking). The validator is
@@ -1671,8 +1695,13 @@ export class BrowserRuntime {
             return { ok: true, reason: options.condition }
           }
           lastReason = `condition not met (${options.condition})`
-        } catch {
-          lastReason = 'page not ready'
+        } catch (cause) {
+          // Keep the underlying failure: a navigation destroys the execution
+          // context mid-poll, and swallowing that into a constant "page not
+          // ready" made a real-device timeout indistinguishable from "the URL
+          // never changed" (report 2026-09-12).
+          const message = cause instanceof Error ? cause.message : String(cause)
+          lastReason = `page not ready: ${message.slice(0, 200)}`
         }
         await sleep(Math.min(250, Math.max(50, deadline - Date.now())))
       }
@@ -1942,6 +1971,35 @@ async function pageGlobalObjectId(tab: BrowserTab): Promise<string> {
 }
 
 const NETWORK_IDLE_TICK_MS = 800
+
+/**
+ * Resolve `attempt`, or reject once `budgetMs` elapses without it settling.
+ *
+ * `webContents.capturePage()` can stay pending forever on a window with no viz
+ * surface rather than rejecting, so the caller's rejection-only fallback was
+ * unreachable and the tool reported a bare timeout. Losing the race is not a
+ * failure of the abandoned attempt: it keeps a rejection handler so a late
+ * failure can never surface as an unhandled rejection.
+ *
+ * @param attempt - the capture already in flight.
+ * @param budgetMs - how long it may take before the caller falls back.
+ * @returns the capture result when it settles in time.
+ */
+async function withScreenshotBudget(attempt: Promise<string>, budgetMs: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      attempt,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => { reject(new Error(`capture did not settle within ${budgetMs}ms`)) }, budgetMs)
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    attempt.catch(() => { /* superseded by the renderer-side fallback */ })
+  }
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
