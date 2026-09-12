@@ -487,6 +487,12 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
 
   // 渠道构建失败 → 只报中性信息,不回显渠道名与命令输出
   // 秘密标记只在**渠道**那一轮打印:官方轮是允许输出日志的。
+  //
+  // 白标门禁同样注入桩(2026-09-12):这个用例要验的是**打包失败**那条分支的文案,
+  // 而官方轮若跑真实门禁,结果取决于工作树里有没有 `packages/host/desktop/build/`
+  // 这份打包残留 —— 本地有(于是绿)、干净 checkout 没有(于是官方轮先因"品牌素材
+  // 不存在"失败,文案变成"官方渠道的白标门禁未通过",断言随即红)。注入桩之后
+  // 这条用例只依赖被测的失败路径本身,与工作树状态无关。
   const failStub = join(runDir, 'fail.sh')
   writeFileSync(failStub, `#!/usr/bin/env bash
 if [ "\${DSH_BUILD_CHANNEL}" != "official" ]; then
@@ -502,7 +508,7 @@ echo x > "${distDir}/App.AppImage"
   const failed = spawnSync('bash', [
     packageScript, '--list', list, '--stage-dir', stage2, '--dist', distDir,
     '--patterns', '*.AppImage', '--', failStub,
-  ], { cwd: root, encoding: 'utf8' })
+  ], { cwd: root, encoding: 'utf8', env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyStub } })
   check(failed.status !== 0, '渠道打包失败必须让步骤失败')
   // `::add-mask::<id>` 这一行本身含渠道 id —— 那是掩码指令(GitHub 不会把它
   // 回显进公开日志),比对时先剔除,只看真正的输出行。
