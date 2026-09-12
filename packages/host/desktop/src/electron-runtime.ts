@@ -121,11 +121,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     get isPackaged() { return app.isPackaged },
     get canDownload() { return app.isPackaged },
     get currentVersion() { return PRODUCT_VERSION },
+    get userDataPath() { return app.getPath('userData') },
     get statePath() { return join(app.getPath('userData'), 'updates', 'state.json') },
     request: (url, init) => net.fetch(url, init),
-    confirmDownload: version => this.confirmUpdateDownload(version),
     showManualCheckResult: result => this.showManualUpdateCheckResult(result),
-    downloadAndOpen: (version, source, signal, onProgress) => this.downloadAndOpenUpdate(version, source, signal, onProgress),
+    downloadUpdate: (version, source, signal, onProgress) => this.downloadUpdate(version, source, signal, onProgress),
+    announceUpdateReady: (version, path) => this.announceUpdateReady(version, path),
+    installUpdate: (version, path) => this.installUpdate(version, path),
     notify: notification => { this.showNotification(notification) },
   }
 
@@ -491,21 +493,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     nativeNotification.show()
   }
 
-  /** Ask before making the fixed download endpoint's counted request. */
-  private async confirmUpdateDownload(version: string): Promise<boolean> {
-    const result = await dialog.showMessageBox({
-      type: 'info',
-      title: `${this.productName} Update Available`,
-      message: `${this.productName} ${version} is available.`,
-      detail: 'Download this update now?',
-      buttons: ['Download', 'Later'],
-      defaultId: 1,
-      cancelId: 1,
-      noLink: true,
-    })
-    return result.response === 0
-  }
-
   /** Report one user-triggered check without exposing network or response details. */
   private async showManualUpdateCheckResult(result: UpdateCheckResult | null): Promise<void> {
     if (result === null) {
@@ -545,13 +532,23 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     })
   }
 
-  /** Download a confirmed installer and hand it to the native installation flow. */
-  private async downloadAndOpenUpdate(
+  /**
+   * Download one available installer into private storage and stop there.
+   *
+   * 后台静默下载走的就是这条路径:它不弹任何对话框、不打开任何东西,因此下载
+   * 不会打断用户;失败与重试由协调器负责(重试时续传)。
+   * @param version - canonical version the downloaded installer must match.
+   * @param source - update source (manifest URL + server-declared channel).
+   * @param signal - caller-owned cancellation.
+   * @param onProgress - optional byte-progress callback while streaming.
+   * @returns absolute path of the completed, verified installer.
+   */
+  private async downloadUpdate(
     version: string,
     source: DesktopUpdateSource,
     signal: AbortSignal,
     onProgress?: (progress: UpdateDownloadProgressSnapshot) => void,
-  ): Promise<void> {
+  ): Promise<string> {
     if (this.platform !== 'darwin' && this.platform !== 'win32' && this.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: updates are unavailable on ${this.platform}`)
     }
@@ -566,16 +563,53 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       ...(onProgress === undefined ? {} : { onProgress }),
     })
     signal.throwIfAborted()
-
     if (this.platform === 'linux') {
-      // AppImage 无静默自安装:下载完 chmod +x 并提示用户替换运行。
-      try { await chmod(artifactPath, 0o755) } catch { /* 非致命:提示仍展示 */ }
-      signal.throwIfAborted()
+      // AppImage 无静默自安装:先给出可执行位,安装提示里让用户直接替换。
+      try { await chmod(artifactPath, 0o755) } catch { /* 非致命:安装路径仍可用 */ }
+    }
+    return artifactPath
+  }
+
+  /**
+   * Tell the user once that a version finished downloading.
+   *
+   * 只通报"已下载好、可以装了",不安装、不退出:后台下载因此永远不会在用户
+   * 不知情时重启应用;真正的安装动作由用户在界面/托盘里点出来。
+   * @param version - canonical version whose installer is ready.
+   * @param installerPath - absolute path of the verified installer.
+   */
+  private async announceUpdateReady(version: string, installerPath: string): Promise<void> {
+    const detail = this.platform === 'linux'
+      ? `新版本 AppImage 已下载到: ${installerPath}\n\n在界面或托盘里点「安装更新」后,关闭本程序并用该文件替换当前 AppImage。`
+      : this.platform === 'darwin'
+        ? `The disk image will open when you install. Choose Install Update in the app or the tray menu to continue.`
+        : `Choose Install Update in the app or the tray menu to restart ${this.productName} and run the installer.`
+    await dialog.showMessageBox({
+      type: 'info',
+      title: `${this.productName} Update Ready`,
+      message: `${this.productName} ${version} is downloaded and ready to install.`,
+      detail,
+      buttons: ['OK'],
+      defaultId: 0,
+      noLink: true,
+    })
+  }
+
+  /**
+   * Hand an already-downloaded installer to the platform installation flow.
+   *
+   * Windows 启动下载好的 NSIS 安装包并退出;macOS 打开 DMG 让用户拖进
+   * Applications;Linux 只能提示用户手动替换 AppImage。
+   * @param version - canonical version being installed.
+   * @param installerPath - absolute path of the verified installer.
+   */
+  private async installUpdate(version: string, installerPath: string): Promise<void> {
+    if (this.platform === 'linux') {
       await dialog.showMessageBox({
         type: 'info',
         title: `${this.productName} Update Downloaded`,
         message: `${this.productName} ${version} is ready to install.`,
-        detail: `新版本 AppImage 已下载到: ${artifactPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
+        detail: `新版本 AppImage 已下载到: ${installerPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
         buttons: ['OK'],
         defaultId: 0,
         noLink: true,
@@ -584,9 +618,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
 
     if (this.platform === 'darwin') {
-      const openError = await shell.openPath(artifactPath)
+      const openError = await shell.openPath(installerPath)
       if (openError !== '') throw new Error(`dsh-plugin-desktop: failed to open update disk image: ${openError}`)
-      signal.throwIfAborted()
       await dialog.showMessageBox({
         type: 'info',
         title: `${this.productName} Update Downloaded`,
@@ -613,8 +646,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     const spec = this.scheduled
     if (spec === undefined) throw new Error('dsh-plugin-desktop: no active shell can exit for update installation')
-    signal.throwIfAborted()
-    await this.launchWindowsUpdateInstaller(artifactPath)
+    await this.launchWindowsUpdateInstaller(installerPath)
     this.quitting = true
     spec.requestQuit(0)
   }

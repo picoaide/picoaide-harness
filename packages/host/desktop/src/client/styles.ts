@@ -89,6 +89,14 @@ html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-re
   background: #e8871e;
   animation: dshDesktopUpdatePulse 1.2s ease-in-out infinite;
 }
+/* 已下载待安装:绿点 + 实心按钮,和"有新版本"明确区分(不再需要重新下载)。 */
+.dshDesktopUpdateBadge[data-state="ready"] {
+  border-color: #16a34a;
+  color: #15803d;
+}
+.dshDesktopUpdateBadge[data-state="ready"] .dshDesktopUpdateBadgeDot {
+  background: #16a34a;
+}
 @keyframes dshDesktopUpdatePulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }

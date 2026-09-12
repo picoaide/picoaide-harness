@@ -24,12 +24,14 @@ import { handleDesktopDirectoryPickerRequest } from './directory-picker-route.ts
 import {
   DESKTOP_UPDATE_PATH,
   DESKTOP_UPDATE_CHECK_PATH,
+  DESKTOP_UPDATE_INSTALL_PATH,
   emptyDesktopUpdateState,
   type DesktopUpdateStateResponse,
 } from './desktop-update-contract.ts'
 import {
   handleDesktopUpdateRequest,
   handleDesktopUpdateCheckRequest,
+  handleDesktopUpdateInstallRequest,
 } from './desktop-update-route.ts'
 import {
   DESKTOP_LOOP_NOTIFY_SESSION_PATH,
@@ -249,6 +251,19 @@ export function apply(ctx: Context, config: Config): void {
       ),
     }),
     'dsh-plugin-desktop: update badge check route',
+  )
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: DESKTOP_UPDATE_INSTALL_PATH,
+      handler: (req, res) => handleDesktopUpdateInstallRequest(
+        req,
+        res,
+        rendererOrigin,
+        () => { runtime.updates?.installNow?.() },
+      ),
+    }),
+    'dsh-plugin-desktop: update install route',
   )
   ctx.effect(
     () => ctx.webServer.register({
