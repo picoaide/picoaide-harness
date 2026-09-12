@@ -20,7 +20,7 @@
  */
 
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /**
  * 项目级文件集规格（memory=记忆格式文件、todo=TODO 格式文件、
@@ -259,6 +259,33 @@ function matchesFileset(path, fileset) {
   if (spec.memory.includes('daily') && DAILY_LOG_RE.test(path)) return true
   if (spec.todo.includes('daily') && DAILY_TODO_RE.test(path)) return true
   return false
+}
+
+/**
+ * **读侧/锁侧**落点断言（FIX-22 同源，唯一实现，2026-09-13 第四轮）。
+ *
+ * 与**写侧**（resolveSafeRepoTarget / assertSafeRepoTarget）共用同一份逐层
+ * lstat（hasSymlinkComponent），差别只有两点，都是读语义决定的：
+ *   - 不做 realpath 包含性断言：读不落盘，符号链接检查已足够；
+ *   - **容忍根目录尚不存在**：首次写入前 memoryDir 可能还没建，那是一次
+ *     ENOENT 空读，不是越界（写侧对不存在的根 fail closed 是对的——写必须
+ *     保证落点真实存在且在内）。
+ *
+ * 为什么读侧也要断言：共享记忆分支里一个 120000 条目就能让 checkout 把
+ * `KEY.md` / `KEY-archive.md` / `daily/` / `.memory.lock` 变成指向仓库外的真
+ * 符号链接；读侧若跟随，仓库外文件内容会被当成记忆**注入上下文**（信息外泄），
+ * 归档读侧还会把仓库外内容搬进仓库再推上共享分支；锁侧则永远拿不到锁
+ * （O_EXCL 对已存在的链接恒 EEXIST）而退化成 5s 超时假死。
+ *
+ * @param {string} rootDir - 记忆仓库根目录。
+ * @param {string} abs - 目标绝对路径。
+ * @returns {boolean} true = 路径链上无符号链接且未越界，可安全读/落锁。
+ */
+export function isSymlinkFreeRepoTarget(rootDir, abs) {
+  const root = resolve(rootDir)
+  const rel = relative(root, resolve(abs))
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false
+  return !hasSymlinkComponent(root, rel.split(sep).join('/'))
 }
 
 /**

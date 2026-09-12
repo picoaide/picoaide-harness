@@ -40,7 +40,7 @@ const tt = (key, params) => translate(TODO_DICT, key, params)
 const tmt = (key, params) => translate(TODO_MSG_DICT, key, params, getLocale())
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { ENTRY_DELIMITER, projectHash, safeStoreTarget, scanThreat, serializeEntries, symlinkRefusedError, todayStamp, withLock } from './store.js'
+import { ENTRY_DELIMITER, isSymlinkFreeRepoTarget, projectHash, safeStoreTarget, scanThreat, serializeEntries, symlinkRefusedError, todayStamp, withRepLock } from './store.js'
 
 /** The four todo tracks. */
 export const TODO_TARGETS = ['life', 'work', 'project', 'daily']
@@ -200,10 +200,19 @@ export class TodoStore {
     }
   }
 
-  /** Read one track's raw text; a missing file reads as the header only. */
+  /**
+   * Read one track's raw text; a missing file reads as the header only.
+   *
+   * FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界时**不读**
+   * （`TODOS.md` / `daily/<日期>.todo.md` 被共享分支的 120000 条目变成链接时，
+   * 跟随读会把仓库外文件内容当待办条目返回）。返回空 = 该轨无条目；写侧对
+   * 同一断言 fail-loud（write / withRepLock），两侧不冲突。
+   */
   readText(target, cwd, date) {
+    const path = this.fileOf(target, cwd, date)
+    if (!isSymlinkFreeRepoTarget(this.dir, path)) return ''
     try {
-      return readFileSync(this.fileOf(target, cwd, date), 'utf8')
+      return readFileSync(path, 'utf8')
     } catch (error) {
       if (error.code === 'ENOENT') return ''
       throw error
@@ -247,8 +256,12 @@ export class TodoStore {
    */
   pastItemsOf(today = todayStamp()) {
     let names = []
+    const dailyDir = join(this.dir, 'daily')
+    // `daily` 目录本身是符号链接时不枚举（读侧同源断言：枚举会把仓库外
+    // 文件名当成本机待办文件名）
+    if (!isSymlinkFreeRepoTarget(this.dir, dailyDir)) return []
     try {
-      names = readdirSync(join(this.dir, 'daily'))
+      names = readdirSync(dailyDir)
     } catch {
       return []
     }
@@ -309,7 +322,7 @@ export class TodoStore {
         doneAt: null,
       }, text),
     }
-    return withLock(dirname(this.fileOf(target, cwd ?? undefined)), () => {
+    return withRepLock(this.dir, dirname(this.fileOf(target, cwd ?? undefined)), () => {
       const items = this.itemsOf(target, cwd)
       items.push(item)
       this.write(target, cwd, items)
@@ -378,7 +391,7 @@ export class TodoStore {
       cat: patch.cat !== undefined ? patch.cat : meta.cat,
       doneAt,
     }, patch.content !== undefined ? patch.content : meta.text)
-    return withLock(dirname(this.fileOf(t, cwd, day)), () => {
+    return withRepLock(this.dir, dirname(this.fileOf(t, cwd, day)), () => {
       const current = this.itemsOf(t, cwd, day)
       const index = current.findIndex((entry) => entry.id === id)
       if (index === -1) return { ok: false, message: tmt('todomsg.gone'), target: t }
@@ -401,7 +414,7 @@ export class TodoStore {
       return { ok: false, message: tmt('todomsg.notFound', { id }), target: target ?? '?' }
     }
     const { target: t, day } = found
-    return withLock(dirname(this.fileOf(t, cwd, day)), () => {
+    return withRepLock(this.dir, dirname(this.fileOf(t, cwd, day)), () => {
       const current = this.itemsOf(t, cwd, day)
       const next = current.filter((entry) => entry.id !== id)
       if (next.length === current.length) {

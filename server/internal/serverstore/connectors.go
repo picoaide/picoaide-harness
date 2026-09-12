@@ -97,10 +97,10 @@ var (
 )
 
 // connectorEnvKeyAllowed: 与客户端 isDeniedEnvKey 同规则(Windows 环境变量名
-// 大小写不敏感,故统一大写比较;两侧都先 trim,否则 " NODE_OPTIONS " 就是
+// 大小写不敏感,故统一大写比较;两侧都先归一化,否则 " NODE_OPTIONS " 就是
 // 一条绕过路径)。
 func connectorEnvKeyAllowed(key string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(key))
+	upper := strings.ToUpper(connectorEnvKeyNormalize(key))
 	if upper == "" {
 		return false
 	}
@@ -113,6 +113,54 @@ func connectorEnvKeyAllowed(key string) bool {
 		}
 	}
 	return true
+}
+
+// connectorEnvKeyNormalize 把环境键归一化到与客户端可比较的形态(2026-09-13
+// N6,第三轮独立复核 §3.2):`\uFEFFNODE_OPTIONS` 曾被服务端放行、客户端拒收。
+//
+// 根因:Go 的 strings.TrimSpace 走 unicode.IsSpace,而 U+FEFF(BOM / 零宽不换行
+// 空格)**不是** Unicode White_Space;JS 的 String.trim() 剥的是 WhiteSpace +
+// LineTerminator,其中含 U+FEFF —— 客户端于是把 "\uFEFFNODE_OPTIONS" 归一成
+// "NODE_OPTIONS" 判拒、目录解析直接丢弃该连接器(管理端保存成功、客户端静默
+// 消失)。
+//
+// 归一化 = ①剥掉不可见格式字符(BOM / 零宽 / 双向控制,见
+// connectorEnvKeyInvisible);②按 Unicode 空白 trim。两个方向都安全:
+// 用户看得见的键名不受影响,而任何"看起来等于受保护键"的隐形变形都会落到
+// 同一个比较值上。
+func connectorEnvKeyNormalize(key string) string {
+	// 热路径:绝大多数键不含不可见字符,直接 trim(少一次扫描/分配)。
+	if !strings.ContainsFunc(key, connectorEnvKeyInvisible) {
+		return strings.TrimSpace(key)
+	}
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if connectorEnvKeyInvisible(r) {
+			return -1
+		}
+		return r
+	}, key))
+}
+
+// connectorEnvKeyInvisible 判定"不可见格式字符":这些码位本身不显示,插进
+// 受保护键里可以做出视觉上完全相同、比较上不同的键名(copy-paste 攻击面),
+// 所以归一化时整体剥掉。与客户端 normalizeEnvKey 的收紧目标集合一字不差:
+// U+00AD 软连字符、U+180E 蒙古文元音分隔符、U+200B..U+200F(ZWS*/LRM/RLM)、
+// U+202A..U+202E(双向嵌入/覆盖)、U+2060..U+2064(词连接符/不可见运算符)、
+// U+2066..U+206F(双向隔离符/弃用格式符)、U+FEFF(BOM / 零宽不换行空格)。
+func connectorEnvKeyInvisible(r rune) bool {
+	switch {
+	case r == '\u00AD' || r == '\u180E' || r == '\uFEFF':
+		return true
+	case r >= '\u200B' && r <= '\u200F':
+		return true
+	case r >= '\u202A' && r <= '\u202E':
+		return true
+	case r >= '\u2060' && r <= '\u2064':
+		return true
+	case r >= '\u2066' && r <= '\u206F':
+		return true
+	}
+	return false
 }
 
 // connectorCredentialFieldLists 是凭据字段声明的两个容器(客户端
@@ -152,6 +200,92 @@ func validateConnectorCredentialFields(probe map[string]any) error {
 	return nil
 }
 
+// connectorBlockedNetworks / connectorLoopbackNetworks 是客户端唯一策略源
+// packages/host/connectors/src/outbound.ts 的 buildBlockedList() /
+// buildLoopbackList() 的**逐条镜像**(顺序保持一致,便于人工对拍)。
+//
+// 2026-09-13 N5(第三轮独立复核 §3.3,P2):此前 Go 侧用 net.IP 的
+// IsPrivate/IsLinkLocal*/IsMulticast/IsUnspecified 拼规则,覆盖面比客户端窄
+// 一大截 —— CGNAT 100.64/10、0.0.0.0/8、192.0.0.0/24、192.0.2.0/24(文档段)、
+// 198.18/15(基准测试)、198.51.100/24、203.0.113/24、240/4、NAT64
+// 64:ff9b::/96、100::/64、2001:db8::/32 全部漏判。服务端比客户端宽 ⇒ 管理端
+// 能保存、客户端静默丢弃(「保存成功但连接器消失」)。
+//
+// 现在改为镜像表 + 语义判据(见 connectorBlockedIP);防漂移守卫
+// TestConnectorBlockedNetworksMatchClientOutbound 直接解析 outbound.ts 的
+// 段清单逐条比对,任一侧增删段而不同步即失败。
+var (
+	connectorBlockedNetworks = []string{
+		"0.0.0.0/8",      // 未指定/本网
+		"10.0.0.0/8",     // 私网
+		"100.64.0.0/10",  // CGNAT(RFC 6598)
+		"169.254.0.0/16", // 链路本地/云元数据
+		"172.16.0.0/12",  // 私网
+		"192.0.0.0/24",   // IETF 协议分配
+		"192.0.2.0/24",   // 文档段 TEST-NET-1
+		"192.168.0.0/16", // 私网
+		"198.18.0.0/15",  // 基准测试
+		"198.51.100.0/24",
+		"203.0.113.0/24", // 文档段 TEST-NET-3
+		"224.0.0.0/4",    // 组播
+		"240.0.0.0/4",    // 保留/广播
+		"::/128",         // IPv6 未指定
+		"64:ff9b::/96",   // NAT64
+		"100::/64",       // 丢弃前缀
+		"2001:db8::/32",  // 文档段
+		"fc00::/7",       // 唯一本地
+		"fe80::/10",      // 链路本地
+		"ff00::/8",       // 组播
+	}
+	connectorLoopbackNetworks = []string{
+		"127.0.0.0/8",
+		"::1/128",
+	}
+	connectorBlockedIPNets  = connectorMustParseCIDRs(connectorBlockedNetworks)
+	connectorLoopbackIPNets = connectorMustParseCIDRs(connectorLoopbackNetworks)
+)
+
+// connectorMustParseCIDRs 解析镜像表(常量,解析失败即编程错误 → panic)。
+func connectorMustParseCIDRs(cidrs []string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("serverstore: 非法出站策略镜像网段 " + c + ": " + err.Error())
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// connectorIPInAny 判定 IP 是否落在任一网段。net.IPNet.Contains 会先用
+// To4() 归一(v4-mapped `::ffff:10.0.0.1` 因此按 10/8 命中,与客户端显式
+// 重查 IPv4-mapped 的语义一致)。
+func connectorIPInAny(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// connectorIPIsLoopback:回环单独一张表(策略允许「回环 http」,见
+// connectorURLAllowed),与客户端 LOOPBACK_ADDRESSES 同口径。
+func connectorIPIsLoopback(ip net.IP) bool {
+	return connectorIPInAny(ip, connectorLoopbackIPNets)
+}
+
+// connectorBlockedIP: 非公网字面地址(私网/链路本地/元数据/多播/保留)。
+// 回环单独处理:策略允许"回环 http"(本地开发),故这里不拦回环。
+// 段清单与客户端 buildBlockedList() 逐条一致(见上)。
+func connectorBlockedIP(ip net.IP) bool {
+	if connectorIPIsLoopback(ip) {
+		return false
+	}
+	return connectorIPInAny(ip, connectorBlockedIPNets)
+}
+
 // connectorURLAllowed: 出站策略的 Go 侧镜像(https,或回环 http;
 // 拒绝私网/链路本地/元数据/保留段)。与客户端 assertOutboundUrlAllowed 同规则。
 func connectorURLAllowed(raw string) bool {
@@ -171,6 +305,18 @@ func connectorURLAllowed(raw string) bool {
 	if host == "" {
 		return false
 	}
+	// zone-id(IPv6 scope id)与主机名里的裸 '%' 一律拒绝(2026-09-13 N5):
+	//   - **真绕过**:`https://[fe80::1%25eth0]/mcp` —— net.ParseIP 遇到 `%zone`
+	//     返回 nil,不处理就会退化成"域名"被放行(链路本地地址直接可达);
+	//   - 剥掉 %zone 后它能被正确分类(链路本地/保留段 ⇒ 必拦),但**即便剥完
+	//     是公网地址也不能放行**:WHATWG URL 不支持 zone-id(客户端
+	//     `new URL()` 直接抛错,实测 `[2606:4700::1111%25eth0]` = false),
+	//     服务端放行只会造成"管理端保存成功、客户端静默丢弃"。
+	// 所以 zone-id 形态整体拒绝 —— 比"剥完放行公网"更严,且零可用性损失
+	// (客户端本来就无法表达)。
+	if strings.ContainsRune(host, '%') {
+		return false
+	}
 	// FQDN 根点归一(2026-09-13 审计 R3):`metadata.google.internal.` / `localhost.`
 	// 与不带点的写法解析到同一目标,不归一就能绕过下面的名单;与客户端
 	// classifyHost 的 `.replace(/\.$/,'')` 同口径。
@@ -183,13 +329,20 @@ func connectorURLAllowed(raw string) bool {
 	}
 	loopback := false
 	if ip := net.ParseIP(host); ip != nil {
-		loopback = ip.IsLoopback()
+		loopback = connectorIPIsLoopback(ip)
 		if connectorBlockedIP(ip) {
 			return false
 		}
 	} else if isObfuscatedIPv4(host) {
 		// url.Parse 不会把 0x7f.1 / 2130706433 / 0177.0.0.1 归一成点分十进制,
 		// 这类"看起来是 IP"的主机名一律拒绝(客户端侧 WHATWG URL 会归一)。
+		return false
+	} else if connectorLastLabelNumeric(host) {
+		// WHATWG 的"以数字结尾 ⇒ 必须是合法 IPv4"启发式(2026-09-13 N5):
+		// `1.2.3.4.5` / `example.123` / `123.456.789` 这些主机名客户端
+		// `new URL()` 直接抛错(无法表达),Go 的 url.Parse 却当普通域名放行 ——
+		// 又一个"保存成功、客户端静默丢弃"。上面已排除"能解析成 IP"与"标签
+		// 全是数字"两种情形,走到这里就是这类无法表达的主机,同口径拒绝。
 		return false
 	} else if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
 		loopback = true
@@ -198,16 +351,6 @@ func connectorURLAllowed(raw string) bool {
 		return false
 	}
 	return true
-}
-
-// connectorBlockedIP: 非公网字面地址(私网/链路本地/元数据/多播/保留)。
-// 回环单独处理:策略允许"回环 http"(本地开发),故这里不拦回环。
-func connectorBlockedIP(ip net.IP) bool {
-	if ip.IsLoopback() {
-		return false
-	}
-	return ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }
 
 // isObfuscatedIPv4: 主机名每个标签都是数字(十进制/0x 十六进制/0o 八进制)时,
@@ -222,6 +365,26 @@ func isObfuscatedIPv4(host string) bool {
 			return false
 		}
 		if _, err := strconv.ParseUint(label, 0, 64); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// connectorLastLabelNumeric: 主机名最后一个标签是否全为 ASCII 数字。
+// 与 WHATWG URL 的"以数字结尾"启发式同锚点(客户端会强制按 IPv4 解析,
+// 解析失败即整个 URL 非法);Go 的 url.Parse 不做这件事,故这里显式拒绝
+// 这类客户端无法表达的主机(见 connectorURLAllowed)。
+func connectorLastLabelNumeric(host string) bool {
+	label := host
+	if i := strings.LastIndexByte(host, '.'); i >= 0 {
+		label = host[i+1:]
+	}
+	if label == "" {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		if label[i] < '0' || label[i] > '9' {
 			return false
 		}
 	}

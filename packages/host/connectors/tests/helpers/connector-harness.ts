@@ -37,6 +37,7 @@ export interface CapturedConfig {
   env?: Record<string, string>
   cwd?: string
   url?: string
+  headers?: Record<string, string>
 }
 
 export interface Harness {
