@@ -7,7 +7,9 @@ import {
   afterPack,
   assertBrandAssetSvg,
   PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
+  PACKAGED_WEB_BRAND_ASSETS,
   PACKAGED_WEB_BRAND_FAVICON,
+  PACKAGED_WEB_BRAND_OFFICIAL,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
@@ -442,7 +444,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
     it('reads the favicon back out of the archive and rejects the upstream one', () => {
       const runtimeContext = context('/build', 'win32')
       const readEntry = vi.fn<PackageEntryReader>((_root, entry) =>
-        entry === PACKAGED_WEB_BRAND_FAVICON
+        (PACKAGED_WEB_BRAND_ASSETS as readonly string[]).includes(entry)
           ? BRAND_SVG
           : '<html/>')
       expect(() => verifyPackagedRuntime(
@@ -467,8 +469,11 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       )).toThrow(/上游鱼形路径坐标/)
     })
 
-    it('requires the favicon entry inside the package manifest', () => {
+    it('requires both brand geometry entries inside the package manifest', () => {
       expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toContain(PACKAGED_WEB_BRAND_FAVICON)
+      // P1-12:官方兜底也是运行时真的会读的一份(src/index.ts 的 officialLogoPath),
+      // 少了它打包态就没有兜底 —— 渠道图形不可信时标签页回落到上游厂商图形。
+      expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toContain(PACKAGED_WEB_BRAND_OFFICIAL)
     })
   })
 

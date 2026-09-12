@@ -119,8 +119,14 @@ function fakeChannelRepo(ids, options = {}) {
   return dir
 }
 
-/** 跑 ci-channels.sh。 */
-function runChannels({ source, refName = '', dest, list, env = {} }) {
+/**
+ * 跑 ci-channels.sh。
+ * @param options - `refName` 是 `GITHUB_REF_NAME`,`ref` 是 `GITHUB_REF`。
+ *   缺省把 refName 当成 tag(`refs/tags/<refName>`)—— 多数用例测的是 tag 策略;
+ *   分支用例显式传 `ref: 'refs/heads/…'`(`GITHUB_REF` 由 GitHub 注入,分支 push
+ *   上就是 `refs/heads/<分支名>`)。
+ */
+function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const cwd = tempDir('ci-channels-run-')
   const result = spawnSync('bash', [channelsScript, '--dest', dest, '--list', join(cwd, list)], {
     cwd,
@@ -130,6 +136,7 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
       HOME: process.env.HOME ?? '',
       ...(source === undefined ? {} : { CI_CHANNELS_SOURCE: source }),
       GITHUB_REF_NAME: refName,
+      GITHUB_REF: ref ?? (refName === '' ? '' : `refs/tags/${refName}`),
       ...env,
     },
   })
@@ -166,6 +173,75 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
     JSON.stringify(branch.selected) === JSON.stringify(['official']),
     `非 tag 应只发 official,实际 ${JSON.stringify(branch.selected)}`,
   )
+
+  // 渠道集必须按**真正的 ref 类型**判定,不能按名字形状(2026-09-12 审计 P1-1)。
+  //
+  // 为什么:分支 push 上 `GITHUB_REF_NAME` 等于**分支名**,而 `refs/heads/v2.7.2`
+  // 这种分支名会被裸 glob `v[0-9]*.[0-9]*.[0-9]*` 当成正式 tag ⇒ 构建**全部**渠道;
+  // 同一轮里把品牌产物搬出 `client-assets/` 的 transfer step 带 tag 守卫、分支上
+  // 被跳过 ⇒ 客户品牌安装包进了**匿名可读**的公开 artifact(`ci.yml` 的 upload
+  // 步骤当时没有守卫)。`GITHUB_REF` 的前缀是唯一无歧义的判据。
+  const branchNamedLikeTag = runChannels({
+    source, refName: 'v2.7.2', ref: 'refs/heads/v2.7.2', dest: 'channels', list: 'c2.list',
+  })
+  check(branchNamedLikeTag.status === 0, '名字像 tag 的分支仍应成功(回落 official,不是失败)')
+  check(
+    JSON.stringify(branchNamedLikeTag.selected) === JSON.stringify(['official']),
+    `refs/heads/v2.7.2 是**分支**不是 tag,必须只发 official,实际 ${JSON.stringify(branchNamedLikeTag.selected)}`,
+  )
+
+  // `-beta` 后缀分支同理:按名字匹配会"只发 beta",官方包整轮缺失(artifact 名与
+  // 内容不符,PR 评论仍宣称是常规产物)。
+  const betaBranch = runChannels({
+    source, refName: 'fix/login-beta', ref: 'refs/heads/fix/login-beta', dest: 'channels', list: 'c3.list',
+  })
+  check(
+    JSON.stringify(betaBranch.selected) === JSON.stringify(['official']),
+    `分支 fix/login-beta 不是 tag,必须只发 official,实际 ${JSON.stringify(betaBranch.selected)}`,
+  )
+
+  // 真 tag 判据不能只看"有没有 refs/"前缀:PR 的 `refs/pull/N/merge` 也不是 tag。
+  const pullRequest = runChannels({
+    source, refName: '42/merge', ref: 'refs/pull/42/merge', dest: 'channels', list: 'c4.list',
+  })
+  check(
+    JSON.stringify(pullRequest.selected) === JSON.stringify(['official']),
+    `refs/pull/42/merge 不是 tag,必须只发 official,实际 ${JSON.stringify(pullRequest.selected)}`,
+  )
+
+  // 缺 GITHUB_REF(本地直跑)时按**非 tag** 处理:安全缺省是"只发 official",
+  // 绝不能因为"名字像 tag"就把品牌渠道发出去。
+  const noRef = runChannels({ source, refName: 'v2.7.2', ref: '', dest: 'channels', list: 'c5.list' })
+  check(
+    JSON.stringify(noRef.selected) === JSON.stringify(['official']),
+    `缺 GITHUB_REF 时必须按非 tag 处理(只发 official),实际 ${JSON.stringify(noRef.selected)}`,
+  )
+
+  // "名字像 tag 但 ref 不是 tag"必须给一条**中性**告警:这类输入几乎总是误操作
+  // (把 tag 名当分支推了 / 从 tag 建了同名分支),静默会让"这轮少发渠道"很久以后
+  // 才被发现。告警本身不得回显分支名或渠道名(渠道 CI 不输出渠道侧字符串)。
+  {
+    const warned = runChannels({
+      source, refName: 'v2.7.2', ref: 'refs/heads/v2.7.2', dest: 'channels', list: 'c6.list',
+    })
+    check(warned.stderr.includes('::warning::') && warned.stderr.includes('refs/tags/'), '名字像 tag 的分支应给出中性告警')
+    check(!warned.stderr.includes('v2.7.2'), '告警不得回显 ref 名(可能带客户信息)')
+    check(!/\b(example-brand|zeta)\b/u.test(warned.stderr), '告警不得回显渠道 id')
+    check(warned.stdout.includes('::add-mask::'), '渠道 id 仍须逐个 add-mask')
+
+    // 普通的 PR/分支(名字不像 tag)不该被这条告警刷屏。
+    const quiet = runChannels({
+      source, refName: 'fix/login-header', ref: 'refs/heads/fix/login-header', dest: 'channels', list: 'c7.list',
+    })
+    check(!quiet.stderr.includes('::warning::'), '名字不像 tag 的分支不应产生该告警')
+    // 真 tag 上同样不该有这条告警(REF_NAME 没被清空)。
+    const tagged = runChannels({ source, refName: 'v2.7.0', ref: 'refs/tags/v2.7.0', dest: 'channels', list: 'c8.list' })
+    check(!tagged.stderr.includes('::warning::'), 'tag 上不应产生该告警')
+    check(
+      JSON.stringify(tagged.selected) === JSON.stringify(['official', 'beta', 'example-brand', 'zeta']),
+      `真 tag 仍须发全部渠道,实际 ${JSON.stringify(tagged.selected)}`,
+    )
+  }
 }
 
 // ---- 2. 掩码 / 跳过不合规目录 / 不回显名字 ----
@@ -384,6 +460,55 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
     check(bad.stderr.includes('desktop.home_dir'), `desktop.home_dir(${why})的失败信息应点名该字段`)
   }
 
+  // `desktop.product_name`(2026-09-12 审计 P1-13):它是 Electron userData 目录名
+  // 与 mac `.app` 目录名的输入(`desktop-user-data.ts` / `release-mac.ts`),却是这批
+  // 字段里唯一没有形状校验的。`../evil` 会把数据根挪出 `appData`;两个渠道取同一个
+  // 产品名会共用 userData(单实例锁互顶 + 状态互相污染)。只能在构建期拦。
+  const withProductName = productName => {
+    const root = tempDir('ci-channels-product-')
+    mkdirSync(join(root, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(root, 'channels', 'official', 'channel.json'),
+      '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    mkdirSync(join(root, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(root, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example Brand', short_name: 'Example' },
+      desktop: {
+        product_name: productName,
+        slug: 'Example-AI',
+        app_id: 'com.example.brand',
+        deep_link_scheme: 'examplebrand',
+        home_dir: '.example-harness',
+      },
+    }))
+    return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'pn.list' })
+  }
+  for (const [value, why] of [
+    ['../evil', '路径穿越'],
+    ['..', '父目录'],
+    ['Acme/../../x', '内嵌分隔符'],
+    ['Acme\\Harness', '反斜杠'],
+    ['Acme\u0000Harness', '控制字符'],
+    ['Acme.', '结尾是点(Windows 目录名非法)'],
+    ['A'.repeat(65), '超长'],
+  ]) {
+    const bad = withProductName(value)
+    check(bad.status !== 0, `desktop.product_name 是${why}时必须失败`)
+    check(bad.stderr.includes('desktop.product_name'), `desktop.product_name(${why})的失败信息应点名该字段`)
+  }
+  const goodProductName = withProductName('Example Brand')
+  check(
+    goodProductName.status === 0,
+    `合法的 desktop.product_name 必须通过,实际退出 ${String(goodProductName.status)}: ${goodProductName.stderr.slice(0, 200)}`,
+  )
+  // 失败信息不得回显取值:渠道包里它就是客户品牌,而这一步的输出进公开 Actions 日志。
+  const leakyProductName = withProductName('../SuperSecretBrand')
+  check(
+    !`${leakyProductName.stdout}${leakyProductName.stderr}`.includes('SuperSecretBrand'),
+    'desktop.product_name 的失败信息不得回显取值(客户品牌不进公开日志)',
+  )
+
   // beta(2026-09-12 用户定案):预发版是正式版的前置验证,数据根**必须**与官方
   // 正式版一致 —— 否则装预发版的用户升级后看不到既有会话与登录态(当天早些时候
   // 改成独立目录 `.picoaide-harness-beta` 就是这么炸的:用户报"所有对话都没了",
@@ -586,7 +711,11 @@ case "$cmd" in
     prefix="\${args[2]}"
     key="\${prefix#s3://*/}"
     record "ls $prefix"
-    if [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
+    # 与真实 aws 同语义:前缀命中**单个对象**时打印那一行,命中"目录"时逐个列目录,
+    # 都没有时**退出码 0 且无输出**(所以断言必须查"有没有输出",不能查退出码)。
+    if [ -f "$store/$key" ]; then
+      echo "2026-01-01 00:00:00          1 $key"
+    elif [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
     ;;
   "s3 rm")
     target="\${args[2]}"
@@ -1007,10 +1136,224 @@ exit 0
   check(existsSync(join(out, 'official', 'picoaide-server-9.9.9-amd64.zip')), '产物名应中性(不含渠道 id)')
 }
 
+// ---- 10. 保留策略:本次刚发布的版本**永不**参与淘汰(2026-09-12 审计 P1-2) ----
+//
+// 旧实现把"远端已存在的全部版本目录"排序后从第 KEEP+1 位起删除,而 `$VER` 上一
+// 步刚上传进这个集合 —— 于是它自己可能进待删集合;紧接着 latest.json 又把那个
+// 已被删掉的路径写成下载地址 ⇒ 客户/运维拿到的 `server.version` 与 `image_asset`
+// 指向 404,而流水线全绿。`sort -rV` 的语义(GNU version sort)让这件事在**正常
+// 发布序列**下就会发生:预发布被视为比正式版"更大"(`2.7.2-beta.6` > `2.7.2`),
+// 正式版一出就被自己的预发布挤到第 4 位。
+{
+  const work = tempDir('ci-prune-')
+  const bundle = join(work, 'release-bundle')
+  const store = join(work, 'store')
+  const log = join(work, 'aws.log')
+  const list = join(work, 'channels.list')
+  writeFileSync(log, '')
+  writeFileSync(list, 'beta\n')
+
+  // 假 aws:与 §6 同构(cp/ls/rm 落到本地目录,`s3 ls <对象键>` 命中时打印一行)。
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+log="${log}"
+store="${store}"
+record() { printf '%s\\n' "$*" >> "$log"; }
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+cmd="\${args[0]:-} \${args[1]:-}"
+case "$cmd" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    record "cp $src $dst"
+    key="\${dst#s3://*/}"
+    if [[ "$dst" == */ ]]; then dest="$store/\${key}$(basename "$src")"; else dest="$store/\${key}"; fi
+    mkdir -p "$(dirname "$dest")"; cp "$src" "$dest"
+    ;;
+  "s3 ls")
+    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
+    record "ls $prefix"
+    if [ -f "$store/$key" ]; then
+      echo "2026-01-01 00:00:00          1 $key"
+    elif [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
+    ;;
+  "s3 rm")
+    target="\${args[2]}"; key="\${target#s3://*/}"
+    record "rm $target"
+    rm -rf "$store/$key"
+    ;;
+  *) record "other $*" ;;
+esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+
+  /** 造出某渠道某版本的"已构建"资产,再跑一次发布。 */
+  const publish = (channel, ver) => {
+    mkdirSync(join(bundle, channel), { recursive: true })
+    writeFileSync(join(bundle, channel, `picoaide-server-${ver}-amd64.zip`), `zip-${channel}-${ver}`)
+    writeFileSync(join(bundle, channel, 'SHA256SUMS'), `sum-${channel}-${ver}`)
+    const result = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+      cwd: work,
+      encoding: 'utf8',
+      env: {
+        PATH: `${work}:${process.env.PATH ?? ''}`,
+        HOME: process.env.HOME ?? '',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_BUCKET: 'test-bucket',
+        VERSION: `v${ver}`,
+      },
+    })
+    check(result.status === 0, `发布 v${ver} 应成功,实际退出 ${String(result.status)}: ${(result.stderr ?? '').slice(0, 200)}`)
+    return result
+  }
+  const releasesDir = join(store, 'beta', 'releases')
+  const published = ver => existsSync(join(releasesDir, ver, `picoaide-server-${ver}-amd64.zip`))
+
+  // 场景 A(真实发布序列):beta 渠道目录里累积了预发布版,本次出**正式版** 2.7.2。
+  // `sort -rV` 把 `2.7.2-beta.6` 排在 `2.7.2` 之前 ⇒ 旧实现里刚上传的 2.7.2
+  // 落在第 4 位、被自己的保留策略删掉。
+  for (const old of ['2.7.0', '2.7.1', '2.7.2-beta.4', '2.7.2-beta.5', '2.7.2-beta.6']) {
+    mkdirSync(join(releasesDir, old), { recursive: true })
+  }
+  publish('beta', '2.7.2')
+  check(published('2.7.2'), '本次刚发布的 2.7.2 绝不能被保留策略删掉(旧实现会:预发布排在正式版之前)')
+  const afterA = readdirSync(releasesDir).sort()
+  check(afterA.length === 3, `保留窗口应仍是 3 个版本($VER + 2 个次新),实际 ${afterA.length}: ${afterA.join(', ')}`)
+  check(afterA.includes('2.7.2'), `保留窗口必须含本次版本,实际 ${afterA.join(', ')}`)
+  // latest.json 的下载地址必须指向**真实存在**的资产(旧实现指向刚被删掉的目录)。
+  const manifestA = JSON.parse(readFileSync(join(store, 'beta', 'latest.json'), 'utf8'))
+  const prefixA = 'https://release.picoaide.com/beta/releases/'
+  check(manifestA.server.version === '2.7.2', `latest.json 应声明本次版本,实际 ${String(manifestA.server.version)}`)
+  check(manifestA.server.image_asset.startsWith(prefixA), `latest.json 的地址应在本渠道目录下,实际 ${manifestA.server.image_asset}`)
+  const relativeA = manifestA.server.image_asset.slice(prefixA.length)
+  check(
+    existsSync(join(store, 'beta', 'releases', relativeA)) || existsSync(join(releasesDir, relativeA)),
+    `latest.json 指向的资产必须真实存在(否则客户取包 404): ${relativeA}`,
+  )
+
+  // 场景 B(补发/回滚旧版本):远端已有比本次更新的版本,旧实现会把刚上传的旧版本删掉。
+  for (const old of ['2.7.0', '2.7.1', '2.7.2', '2.7.3']) {
+    mkdirSync(join(releasesDir, old), { recursive: true })
+  }
+  publish('beta', '2.7.0')
+  check(published('2.7.0'), '补发旧版本时,本次刚上传的 2.7.0 也不能被删')
+  const afterB = readdirSync(releasesDir).sort()
+  check(afterB.length === 3, `保留窗口应仍是 3 个版本,实际 ${afterB.length}: ${afterB.join(', ')}`)
+  check(afterB.includes('2.7.0'), `保留窗口必须含本次版本,实际 ${afterB.join(', ')}`)
+}
+
+// ---- 11. 品牌渠道产物不得进入**无 tag 守卫**的公开 artifact(2026-09-12 审计 P1-1) ----
+//
+// artifact 对任何登录账号可下载(公开仓尤其匿名可读),所以"品牌渠道产物不进公开
+// artifact"是定策;唯一把品牌目录搬出 `client-assets/` 的 transfer step 带
+// `startsWith(github.ref, 'refs/tags/v')` 守卫 ⇒ **分支/PR 上它被跳过**。
+// 于是同一轮里 `upload-artifact` 成了唯一出口:它自己必须带同源守卫,且非 tag 时
+// 只上传 official。这条只能静态检查(本地跑不了 GitHub Actions),所以放在这里。
+{
+  const workflowPath = join(root, '.github', 'workflows', 'ci.yml')
+  const text = readFileSync(workflowPath, 'utf8')
+  const lines = text.split(/\r?\n/u)
+  // 手写扫描而不是引 YAML 依赖:根脚本只用 Node 内建模块(与 check-workflows.mjs
+  // 同口径)。只认 `steps:` 下的 step(`      - `),键收在缩进 8–12(`if:` 在 8,
+  // `with:` 的 `name:`/`path:` 在 10);最后一个同名键生效。
+  const jobs = new Map()
+  let jobId
+  let inSteps = false
+  let step
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const job = /^ {2}([A-Za-z0-9_-]+):\s*$/u.exec(line)
+    if (job !== null) {
+      jobId = job[1]
+      inSteps = false
+      step = undefined
+      jobs.set(jobId, [])
+      continue
+    }
+    if (jobId === undefined) continue
+    // job 级的键(`    runs-on:` / `    if:` …):只有 `    steps:` 之后才是 step 序列。
+    if (/^ {4}[A-Za-z_][\w-]*:/u.test(line)) {
+      inSteps = /^ {4}steps:\s*$/u.test(line)
+      step = undefined
+      continue
+    }
+    if (!inSteps) continue
+    if (/^ {6}- /u.test(line)) {
+      step = { line: index + 1, keys: new Map() }
+      jobs.get(jobId).push(step)
+      // `      - uses: …` 这种把键写在序列项同一行的形态。
+      const inline = /^ {6}- ([A-Za-z_][\w-]*):\s*(.*)$/u.exec(line)
+      if (inline !== null) step.keys.set(inline[1], inline[2])
+    }
+    if (step === undefined) continue
+    const key = /^ {8,12}([A-Za-z_][\w-]*):\s*(.*)$/u.exec(line)
+    if (key !== null) step.keys.set(key[1], key[2])
+  }
+
+  const tagGuarded = condition => condition.includes("startsWith(github.ref, 'refs/tags/v')")
+  const uploads = []
+  for (const [id, steps] of jobs) {
+    for (const candidate of steps) {
+      if (!(candidate.keys.get('uses') ?? '').startsWith('actions/upload-artifact')) continue
+      uploads.push({
+        job: id,
+        line: candidate.line,
+        path: candidate.keys.get('path') ?? '',
+        condition: candidate.keys.get('if') ?? '',
+      })
+    }
+  }
+  check(uploads.length >= 4, `未解析出 ci.yml 的 artifact 上传步骤(扫描器可能已失效),实际 ${uploads.length}`)
+
+  // 上传整份 client-assets/** 的步骤必须带 tag 守卫:非 tag 上传的只能是 official。
+  const brandFacing = uploads.filter(upload => upload.path.includes('client-assets/'))
+  check(brandFacing.length >= 3, `未解析出 client-assets 的 artifact 上传步骤(三个平台各一条),实际 ${brandFacing.length}`)
+  for (const upload of brandFacing) {
+    const officialOnly = upload.path.startsWith('client-assets/official/')
+    check(
+      officialOnly || tagGuarded(upload.condition),
+      `ci.yml:${upload.line} (job ${upload.job}) 把 client-assets/** 传进公开 artifact 却没有 tag 守卫`
+        + `(非 tag 时品牌渠道产物还在目录里 ⇒ 客户身份泄漏;if: ${upload.condition || '<无>'})`,
+    )
+    if (officialOnly) {
+      check(
+        upload.condition.includes('!startsWith(github.ref'),
+        `ci.yml:${upload.line} (job ${upload.job}) 只传 official 的 fallback 必须在**非 tag** 时生效(if: ${upload.condition || '<无>'})`,
+      )
+    }
+  }
+  // 三个平台各自都要有"tag 传全量 / 非 tag 传 official"这一对,缺一个平台就是一条泄漏面。
+  for (const artifact of ['desktop-Linux', 'desktop-Windows-installer']) {
+    const names = []
+    for (const [id, steps] of jobs) {
+      for (const candidate of steps) {
+        if (candidate.keys.get('name') === artifact) names.push({ job: id, keys: candidate.keys })
+      }
+    }
+    check(names.length >= 2, `${artifact} 应有 tag/非 tag 两个上传步骤(否则非 tag 上没有可下载产物),实际 ${names.length}`)
+    const guarded = names.filter(entry => tagGuarded(entry.keys.get('if') ?? ''))
+    check(guarded.length >= 1, `${artifact} 缺少带 tag 守卫的上传步骤`)
+    check(
+      guarded.some(entry => (entry.keys.get('path') ?? '').includes('client-assets/')),
+      `${artifact} 的 tag 上传必须覆盖 client-assets/(品牌产物由 transfer 搬走后剩下的 official/beta)`,
+    )
+    check(
+      names.some(entry => (entry.keys.get('path') ?? '').startsWith('client-assets/official/')),
+      `${artifact} 非 tag 时必须有一个只传 client-assets/official/** 的上传步骤(每个提交都要有可下载产物)`,
+    )
+  }
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — 渠道发现/掩码(取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/镜像装配(无 deb+双 tag)/R2 中转/R2 发布全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — 渠道发现(ref 类型判定)/掩码(取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/镜像装配(无 deb+双 tag)/R2 中转/R2 发布(本次版本必留)/公开 artifact 守卫全部符合预期\n')
