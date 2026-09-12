@@ -158,6 +158,24 @@ func offpeakFactor(now time.Time, discount float64, windows []PeakWindow) float6
 	return discount
 }
 
+// clampTokens 把上游回报的 token 计数钳到非负。
+// P0-B(审计 2026-09-12):上游响应体可控(第三方中转 / 明文 http 上游的
+// MITM),负 token 会让 costOfAt 算出**负费用**,结算侧再把它当成"费用向下
+// 修正"记成 refund → 员工余额凭空增加(且账本不变量 I1 仍自洽,事后审计
+// 看不出来)。计费入口与落库入口都走这里,负值既不进费用也不进库。
+func clampTokens(promptTokens, completionTokens, cacheTokens int64) (int64, int64, int64) {
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	if completionTokens < 0 {
+		completionTokens = 0
+	}
+	if cacheTokens < 0 {
+		cacheTokens = 0
+	}
+	return promptTokens, completionTokens, cacheTokens
+}
+
 // costOfAt computes the yuan cost for a usage row at time now from model
 // pricing (yuan per 1M tokens), applying the off-peak discount in non-peak
 // windows (0023). Unpriced models (0,0) yield 0 cost.
@@ -166,10 +184,10 @@ func offpeakFactor(now time.Time, discount float64, windows []PeakWindow) float6
 // promptTokens 是**含缓存部分的总输入**;P1-9:不再把 cacheTokens 钳到
 // promptTokens(该钳制会把 Anthropic 的 cache_read 压到 input_tokens,少收
 // 约 99.9%),改为相加口径 + 只对 miss 做非负防御。
+// P0-B(审计 2026-09-12):三个 token 计数入口先钳到非负 —— 这是**覆盖
+// chat/completions/responses/messages/embedding 全部计费路径**的唯一一处。
 func costOfAt(now time.Time, promptTokens, completionTokens, cacheTokens int64, inputPer1M, outputPer1M, cacheInputPer1M, offpeak float64, windows []PeakWindow) float64 {
-	if cacheTokens < 0 {
-		cacheTokens = 0
-	}
+	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	cachePrice := cacheInputPer1M
 	if cachePrice <= 0 {
 		cachePrice = inputPer1M // 未配置缓存价:命中按输入价计
@@ -211,6 +229,8 @@ func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, com
 
 // recordUsageKindAtCached 带缓存命中数的记录(时间注入)。
 func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, now time.Time) (int64, error) {
+	// P0-B:负 token 既不进费用也不落库(月用量/报表/对账都会被负数污染)。
+	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
 	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
@@ -265,6 +285,8 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 // 时刻插入),而非回填时刻 time.Now()——跨高峰/空闲边界的流式请求不再因
 // 流结束时点计价,与「低谷窗口按记录时刻判定」的设计一致。
 func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, now time.Time) error {
+	// P0-B:回填路径同样归零(流式 usage 行 / 估算回填都可能带负值)。
+	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	var userID int64
 	var model string
 	var createdAt any

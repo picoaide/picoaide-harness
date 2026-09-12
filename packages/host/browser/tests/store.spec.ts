@@ -47,6 +47,45 @@ describe('stripSensitiveUrl', () => {
   })
 })
 
+describe('stripSensitiveUrl 白名单缺口（P1-6，2026-09-12）', () => {
+  // 这 7 个键在 2026-09-12 之前是明文落盘（history/downloads/ledger 三处）。
+  const GAP_KEYS = ['session', 'sessionid', 'sid', 'jwt', 'bearer', 'ticket', 'SAMLResponse']
+
+  it('query 参数：7 个缺口键全部掩码', () => {
+    for (const key of GAP_KEYS) {
+      expect(stripSensitiveUrl(`https://h/cb?${key}=SECRET`), key).toBe(`https://h/cb?${key}=****`)
+    }
+  })
+
+  it('fragment 值对：同一份白名单生效（不再只有 query 生效）', () => {
+    for (const key of GAP_KEYS) {
+      expect(stripSensitiveUrl(`https://h/cb#${key}=SECRET&state=x`), key).toBe(`https://h/cb#${key}=****&state=x`)
+    }
+  })
+
+  it('复合/camelCase 形态照旧命中（子串语义，不是全词匹配）', () => {
+    expect(stripSensitiveUrl('https://h/cb?accessToken=SECRET')).toBe('https://h/cb?accessToken=****')
+    expect(stripSensitiveUrl('https://h/cb?id_token=SECRET')).toBe('https://h/cb?id_token=****')
+    expect(stripSensitiveUrl('https://h/cb?JSESSIONID=SECRET')).toBe('https://h/cb?JSESSIONID=****')
+    expect(stripSensitiveUrl('https://h/cb?X-Amz-Signature=SECRET')).toBe('https://h/cb?X-Amz-Signature=****')
+    expect(stripSensitiveUrl('https://h/cb?csrf_token=SECRET')).toBe('https://h/cb?csrf_token=****')
+    expect(stripSensitiveUrl('https://h/cb?apiKey=SECRET')).toBe('https://h/cb?apiKey=****')
+  })
+
+  it('普通参数不被误伤', () => {
+    expect(stripSensitiveUrl('https://h/p?q=hello&id=2&page=3&sort=desc&redirect=%2Fx')).toBe(
+      'https://h/p?q=hello&id=2&page=3&sort=desc&redirect=%2Fx',
+    )
+  })
+
+  it('已知的可接受过度脱敏：sessionIdle 这类前缀词一并掩码（安全方向）', () => {
+    // 为了让 JSESSIONID/PHPSESSID/sessionid/sessionId 全部命中，`session` 只能
+    // 用子串语义；代价是 `sessionIdle=30` 这类非机密参数也会被掩码——过度脱敏
+    // 是安全方向，显式固定在这里，避免以后被"优化"回缺口。
+    expect(stripSensitiveUrl('https://h/p?sessionIdle=30')).toBe('https://h/p?sessionIdle=****')
+  })
+})
+
 describe('BrowserStore history', () => {
   let dir: string
   let store: BrowserStore

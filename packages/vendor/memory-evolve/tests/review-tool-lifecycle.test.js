@@ -141,7 +141,12 @@ async function startApi(ctx) {
   const request = async (method, body) => {
     const response = await fetch(`${base}/memory-evolve/api/config`, {
       method,
-      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      // 统一同源守卫（lib/api.js 的 guardRequest，P1-11）：非 GET 请求必须
+      // 携带与 Host 同源的 Origin（浏览器对非 GET 一律附带，Node fetch 不
+      // 带）——测试客户端显式补上，与真实 Web UI 的请求形状一致。
+      headers: body === undefined
+        ? { 'origin': base }
+        : { 'content-type': 'application/json', 'origin': base },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
     return { status: response.status, body: await response.json() }
