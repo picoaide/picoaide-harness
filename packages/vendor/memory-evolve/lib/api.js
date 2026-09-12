@@ -24,6 +24,20 @@
  *   GET  /api/config                      → { config }
  *   POST /api/config                      { patch }      → { config }
  *
+ * Access policy (P1-11 hardening): every route below is classified by method,
+ * and `guardRequest` (the unified pre-guard inside `handler`) enforces it
+ * before dispatch:
+ *   - non-GET/HEAD (all writes: POST/PUT/DELETE) → Origin must match Host and
+ *     the body must be a JSON object (`application/json`); a bodiless write
+ *     (e.g. the GUI's alias DELETE) still requires Origin but may omit
+ *     Content-Type.
+ *   - GET/HEAD (all reads, incl. the deliberately public `/api/badge` the GUI
+ *     polls anonymously) → allowed; only browsers' explicit
+ *     `Sec-Fetch-Site: cross-site` is refused (GET carries no Origin).
+ * Route branches also pin their method (`req.method === 'POST'` / `'GET'`) so
+ * no read-only GET can drive a mutating handler — that was the other half of
+ * the missing-guard gap.
+ *
  * Zero runtime dependencies (node:http only).
  *
  * @module dsh-memory-evolve/api
@@ -47,8 +61,14 @@ function pendingSkillDir(deps) {
   return join(deps.config.memoryDir, 'pending-skills')
 }
 
+/** Cached request body: the unified pre-guard parses it once, routes reuse it. */
+const GUARDED_BODY = Symbol('memoryEvolveGuardedBody')
+
 /** Read the JSON request body (capped). */
 async function readBody(req, maxBytes = 64 * 1024) {
+  // 统一前置守卫（guardRequest）已解析过请求体 → 复用缓存：流已被消费，
+  // 再读会静默变成 {}（把「有体的写请求」变成空操作）。
+  if (req[GUARDED_BODY] !== undefined) return req[GUARDED_BODY]
   const chunks = []
   let total = 0
   for await (const chunk of req) {
@@ -65,19 +85,24 @@ async function readBody(req, maxBytes = 64 * 1024) {
 }
 
 /**
- * 同源校验（保护本地更新端点）：要求 Content-Type 精确为 JSON 媒体类型
+ * 同源校验（保护本地写端点）：要求 Content-Type 精确为 JSON 媒体类型
  * （子串匹配会放过 text/plain;charset=json 之类，CodeX 复审 P1-5）；
  * 写操作强制要求 Origin 头存在且 host 与 Host 一致——跨站表单/脚本
  * 无法构造 JSON 体、且同源 fetch 必然携带 Origin。返回错误文案或 null。
+ *
+ * @param {object} req - node http 请求。
+ * @param {object} body - 已解析的请求体（无体请求传 {}）。
+ * @param {boolean} [bodyless] - 请求确实没有体（如浏览器发的 DELETE 不带
+ *   Content-Type）时允许缺省 content-type；声明了就必须是 JSON。
  */
-function sameOriginGuard(req, body) {
+function sameOriginGuard(req, body, bodyless = false) {
   const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
-  if (contentType !== 'application/json') {
+  if (contentType !== 'application/json' && !(bodyless && contentType === '')) {
     return '请求必须为 application/json'
   }
   const host = String(req.headers.host ?? '')
   const origin = String(req.headers.origin ?? '')
-  if (origin === '') return '缺少 Origin 头，已拒绝（更新必须由 Web UI 发起）'
+  if (origin === '') return '缺少 Origin 头，已拒绝（写操作必须由 Web UI 发起）'
   let originHost = ''
   try {
     originHost = new URL(origin).host
@@ -88,6 +113,58 @@ function sameOriginGuard(req, body) {
   if (body === undefined || body === null || typeof body !== 'object' || Array.isArray(body)) {
     return '请求体必须是 JSON 对象'
   }
+  return null
+}
+
+/**
+ * handler 的**统一前置守卫**（P1-11）：在路由分发之前按方法分类处理，
+ * 覆盖本模块（lib/api.js）注册的全部 46 个 方法+路径 组合（13 GET +
+ * 31 POST + 1 PUT + 1 DELETE，共 45 条路由分支），而不是像以前那样只挂
+ * 在 1 个端点上。
+ *
+ *   - GET / HEAD（只读端点，含设计上公开的 /api/badge：GUI 轮询红点、
+ *     Tab 注册探测都要能匿名取到）：放行。CSRF 侧只拒绝浏览器明确标注
+ *     的跨站请求——GET 可能没有 Origin（不能用 Origin 判定同源），而
+ *     `Sec-Fetch-Site` 是浏览器必然携带的 Fetch Metadata 头；非浏览器
+ *     客户端不发该头 → 放行（同机进程不在权限边界内）。
+ *   - 其它方法（POST/PUT/DELETE…，全部是写操作）：必须同源 —— Origin
+ *     存在且与 Host 一致；有请求体时必须是 application/json 的 JSON 对象
+ *     （跨站表单只能发 urlencoded/multipart/text-plain，跨站 fetch 带
+ *     JSON 头会先触发预检且本服务无 CORS 许可）。
+ *
+ * 失败响应用 400 + `{ok:false, code:'bad-request'}`（与旧 /api/update
+ * 内联守卫的错误契约一致）。
+ *
+ * @param {object} req - node http 请求。
+ * @returns {Promise<{status: number, body: object} | null>} null = 放行。
+ */
+async function guardRequest(req) {
+  const method = String(req.method ?? 'GET').toUpperCase()
+  if (method === 'GET' || method === 'HEAD') {
+    const site = String(req.headers['sec-fetch-site'] ?? '').trim().toLowerCase()
+    if (site === 'cross-site') {
+      return { status: 403, body: { ok: false, code: 'cross-site', error: '跨站请求已拒绝' } }
+    }
+    return null
+  }
+  // 有体判定：Content-Length > 0 或 chunked（transfer-encoding）。无体请求
+  // （浏览器 DELETE 不带 Content-Type/体）跳过 JSON 体校验但**仍要求
+  // Origin**——浏览器对所有非 GET/HEAD 请求都附带 Origin，跨站的无体
+  // POST/DELETE 因此同样被挡下。
+  const declared = Number(req.headers['content-length'] ?? 0)
+  const hasBody = (Number.isFinite(declared) && declared > 0) || req.headers['transfer-encoding'] !== undefined
+  let body = {}
+  if (hasBody) {
+    try {
+      body = await readBody(req)
+    } catch (error) {
+      const detail = error instanceof Error && error.message === 'body too large' ? '请求体过大' : '请求体不是合法 JSON'
+      return { status: 400, body: { ok: false, code: 'bad-request', error: detail } }
+    }
+  }
+  const message = sameOriginGuard(req, body, !hasBody)
+  if (message !== null) return { status: 400, body: { ok: false, code: 'bad-request', error: message } }
+  if (hasBody) req[GUARDED_BODY] = body
   return null
 }
 
@@ -141,6 +218,13 @@ export function installApi(ctx, deps) {
     const path = url.pathname
     const segments = path.split('/').filter(Boolean)
     try {
+      // 统一前置守卫（P1-11）：先于任何路由判定执行——非 GET/HEAD 一律
+      // 要求同源 + JSON，GET/HEAD 放行但拒绝浏览器标注的跨站请求。
+      const denied = await guardRequest(req)
+      if (denied !== null) {
+        sendJson(res, denied.status, denied.body)
+        return
+      }
       // 会话别名：GET 全量（面板渲染用）/ PUT 设置 / DELETE 清除
       if (req.method === 'GET' && path === '/memory-evolve/api/aliases') {
         sendJson(res, 200, { aliases: aliases.all() })
@@ -200,7 +284,8 @@ export function installApi(ctx, deps) {
       }
       if (req.method === 'POST' && path === '/memory-evolve/api/update') {
         // 手动更新：必须携带用户看到的 expectedTag；JSON 体 + 同源校验
-        // 防跨站表单/脚本触发本地 git 写操作。
+        // 由 handler 的统一前置守卫（guardRequest，P1-11）完成——此前这里
+        // 是本文件唯一挂守卫的端点。
         if (!deps.updateOps) { sendJson(res, 422, { ok: false, code: 'unsupported', error: '版本检测模块未装配' }); return }
         let body
         try {
@@ -209,8 +294,6 @@ export function installApi(ctx, deps) {
           sendJson(res, 400, { ok: false, code: 'bad-request', error: '请求体不是合法 JSON' })
           return
         }
-        const guard = sameOriginGuard(req, body)
-        if (guard) { sendJson(res, 400, { ok: false, code: 'bad-request', error: guard }); return }
         const expectedTag = String(body?.expectedTag ?? '')
         try {
           const outcome = await deps.updateOps.update(expectedTag)
@@ -396,7 +479,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, status)
         return
       }
-      if (path === '/memory-evolve/memory-sync/setup') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/setup') {
         // 初始化（记忆同步 Tab）：POST { sessionId, url? }——无 url=模式 A
         // （复用主仓库 remote）；url=模式 B 私有记忆仓库
         const body = await readBody(req)
@@ -408,7 +491,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/sync') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/sync') {
         // 同步（记忆同步 Tab）：POST { sessionId, push? }——push=true 即用户
         // 显式同意推送（需求 #12：push 永远需用户同意，UI 点击即同意）
         const body = await readBody(req)
@@ -419,7 +502,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/off') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/off') {
         // 停用同步（记忆同步 Tab）：POST { sessionId }——**项目级停用**
         // （三层开关第 2 层：PROVENANCE.enabled=false，记忆全保留），
         // 不影响全局模块开关与其他项目
@@ -431,7 +514,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/project-enabled') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/project-enabled') {
         // 项目级同步开关（三层开关第 2 层）：POST { sessionId, enabled }
         //   enabled=true → 未初始化走 setup；已初始化写 PROVENANCE.enabled=true
         //   enabled=false → 项目停用（记忆保留）
@@ -443,7 +526,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/track') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/track') {
         // 轨级开关（三层开关第 3 层）：POST { sessionId, on }——一期唯一轨=
         // 项目记忆（KEY/日志/归档）；全局轨二期独立开关
         const body = await readBody(req)
@@ -454,7 +537,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/conflicts') {
+      if (req.method === 'GET' && path === '/memory-evolve/memory-sync/conflicts') {
         // 冲突列表（记忆同步 Tab）：GET ?sessionId=&fileset=
         // fileset 可选（2026-08-11 用户反馈：全局轨冲突也要能查/解决）：
         //   缺省 = project（项目轨）；memory-global/user-global/daily-global/
@@ -465,7 +548,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { conflicts: cwd ? deps.syncOps.conflicts(cwd, fileset) : [] })
         return
       }
-      if (path === '/memory-evolve/memory-sync/resolve') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/resolve') {
         // 解决冲突（记忆同步 Tab）：POST { sessionId, index, choice, fileset? }
         // fileset 语义同 /conflicts（缺省 project；全局轨传 *-global）
         const body = await readBody(req)
@@ -490,7 +573,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, status)
         return
       }
-      if (path === '/memory-evolve/memory-sync/global-track') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/global-track') {
         // 全局轨开关：POST { sessionId, track, on }——track ∈ memory/user/daily/todo
         const body = await readBody(req)
         const track = String(body?.track ?? '')
@@ -498,7 +581,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/global-sync') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/global-sync') {
         // 全局轨同步：POST { sessionId, push? }——push=true 即用户显式同意推送
         const body = await readBody(req)
         if (!deps.syncOps) { sendJson(res, 400, { ok: false, error: '同步模块未装配' }); return }
@@ -506,7 +589,7 @@ export function installApi(ctx, deps) {
         sendJson(res, 200, { ok: outcome.kind === 'success', text: outcome.text ?? '' })
         return
       }
-      if (path === '/memory-evolve/memory-sync/global-remote') {
+      if (req.method === 'POST' && path === '/memory-evolve/memory-sync/global-remote') {
         // 启用/停用共享记忆库（设备级，「共享记忆库」子 Tab）：POST
         // { url?, enabled? }——enabled=false 停用（数据保留）；enabled=true
         // 保存地址并启用（只初始化/绑定全局记忆仓库，不碰当前项目，

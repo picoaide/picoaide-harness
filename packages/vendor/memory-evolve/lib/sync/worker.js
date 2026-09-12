@@ -22,7 +22,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { isCanonical, isProjectSyncEnabled, parseEntries, serializeEntries, readProvenance } from '../store.js'
 import { genEntryId, extractEntryId, extractTodoId, TODO_ID_RE } from './entryid.js'
 import { mergeEntries } from './merge.js'
@@ -641,6 +641,16 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
   if (!isMemoryFile(target.file, fileset)) {
     return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
   }
+  // 落点包含性断言（P1-9 第二层）：白名单模式已锚定单层文件名，但侧车的
+  // file 字段来自**远端分支分发的 CONFLICTS.md**（可被手工/异常内容构造），
+  // 落盘前再用 resolve() 复核一次——即使将来白名单被放宽，也绝不可能写
+  // 到记忆仓库之外（旧实现把 `logs/../../victim/MEMORY.md` 判为合法，
+  // join 出仓库外路径并整文件重写）。
+  const rootDir = resolve(dir)
+  const abs = resolve(rootDir, target.file)
+  if (abs === rootDir || !abs.startsWith(rootDir + sep)) {
+    return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
+  }
 
   return asyncWithLock(dir, async () => {
     // ── 1. 写回目标文件（锁内；文件可能不存在如 logs/xxx.md → 建目录）──
@@ -650,8 +660,8 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
     // 会再把同一条目写一遍（重复数据）。现在 git 失败时侧车保留、写回
     // 幂等，重试安全。
     // TODO 文件用专用解析/序列化（P1-6：优先保留本机原 header）
-    const abs = join(dir, target.file)
-    mkdirSync(join(dir, dirname2(target.file)), { recursive: true })
+    // （abs 已在上方白名单/包含性校验处解析，全部落盘都走它）
+    mkdirSync(dirname(abs), { recursive: true })
     const isTodo = isTodoPath(target.file)
     const existingEntries = existsSync(abs)
       ? (isTodo ? parseTodoEntries(readFileSync(abs, 'utf8')) : parseEntries(readFileSync(abs, 'utf8')))
