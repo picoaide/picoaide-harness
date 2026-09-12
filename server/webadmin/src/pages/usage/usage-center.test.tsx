@@ -8,8 +8,7 @@ import Members from './Members'
 import MemberDetail from './MemberDetail'
 import Models from './Models'
 import Logs from './Logs'
-import Quota from './Quota'
-import Reports from './Reports'
+import Balance from './Balance'
 
 // 图表懒加载(VChart)在 jsdom 无 canvas:统一 mock 为占位
 vi.mock('../../components/chart-lazy', () => ({
@@ -19,14 +18,14 @@ vi.mock('../../components/chart-lazy', () => ({
 const mockRequest = vi.mocked(request)
 
 const USERS = [
-  { id: 1, username: 'alice', display_name: '', role: 'user', status: 1, is_admin: false, quota_tokens: null, quota_money: 100, effective_quota_tokens: 0, effective_quota_money: 50, monthly_usage: 1000, monthly_cost: 12.34, groups: ['研发部'] },
-  { id: 2, username: 'bob', display_name: 'Bob', role: 'user', status: 1, is_admin: false, quota_tokens: 500000, quota_money: null, effective_quota_tokens: 200000, effective_quota_money: 20, monthly_usage: 90000, monthly_cost: 3.21, groups: [] },
-  { id: 3, username: 'boss', display_name: '', role: 'super_admin', status: 1, is_admin: true, quota_tokens: null, quota_money: null, monthly_usage: 0, monthly_cost: 0, groups: [] },
+  { id: 1, username: 'alice', display_name: '', role: 'user', status: 1, is_admin: false, balance_money: 88.5, balance_activated: true, monthly_usage: 1000, monthly_cost: 12.34, groups: ['研发部'] },
+  { id: 2, username: 'bob', display_name: 'Bob', role: 'user', status: 1, is_admin: false, balance_money: 0, balance_activated: false, monthly_usage: 90000, monthly_cost: 3.21, groups: [] },
+  { id: 3, username: 'boss', display_name: '', role: 'super_admin', status: 1, is_admin: true, balance_money: 0, balance_activated: false, monthly_usage: 0, monthly_cost: 0, groups: [] },
 ]
 
 const DEPTS = [
-  { id: 1, name: '研发部', parent_id: 2, leader_name: 'alice', member_count: 2, budget_money: 500, monthly_cost: 15.55 },
-  { id: 2, name: '全员', parent_id: 0, leader_name: '', member_count: 3, budget_money: null, monthly_cost: 15.55 },
+  { id: 1, name: '研发部', parent_id: 2, leader_name: 'alice', member_count: 2 },
+  { id: 2, name: '全员', parent_id: 0, leader_name: '', member_count: 3 },
 ]
 
 const usageRow = (label: string, cost: number, requests = 1, pt = 100, ct = 50) => ({
@@ -58,7 +57,18 @@ beforeEach(() => {
     if (path.startsWith('/api/server/admin/usage?group=provider')) return { rows: [usageRow('DeepSeek', 14), usageRow('(未配置渠道)', 1)] }
     if (path.startsWith('/api/server/admin/usage/requests')) return { rows: [{ id: 9, time: '2026-09-02T10:00:00Z', user_id: 1, username: 'alice', model: 'deepseek-chat', kind: 'chat', prompt_tokens: 100, completion_tokens: 50, cache_tokens: 0, cost: 0.12 }], total: 1, page: 1, size: 20, kind: '' }
     if (path === '/api/server/admin/models') return { models: [{ id: 1, name: 'deepseek-chat', provider_id: 1, display_name: '', default_params: '{}', input_price_per_1m: 2, output_price_per_1m: 8, cache_input_price_per_1m: null, offpeak_discount: null }, { id: 2, name: 'embed-model', provider_id: 1, display_name: '', default_params: '{}', input_price_per_1m: null, output_price_per_1m: null, cache_input_price_per_1m: null, offpeak_discount: null }] }
-    if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', monthly_quota: '100000', monthly_quota_money: '50', peak_windows: '', server_base_url: '' }
+    if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', peak_windows: '', server_base_url: '' }
+    if (path === '/api/server/admin/balance') {
+      return {
+        settings: { enabled: true, monthly_amount: 100, monthly_mode: 'add' },
+        last_grant: { month: '202609', mode: 'add', amount: 100, affected: 2 },
+        month_grant: { month: '202609', mode: 'add', amount: 100, affected: 2 },
+        status: { month: '202609', eligible: 3, granted: 2, pending: 1, activated: 1 },
+        users: 3,
+        total_balance: 88.5,
+      }
+    }
+    if (path.includes('/balance/ledger')) return { items: [], total: 0, ledger_sum: 88.5, balance_money: 88.5 }
     if (path.startsWith('/api/server/admin/users')) return { users: USERS, total: 3 }
     return {}
   })
@@ -77,7 +87,7 @@ function renderAt(path: string, ui: React.ReactNode, routePath?: string) {
 describe('用量中心 · 总览', () => {
   it('渲染渠道余额卡、KPI 行、趋势与模型 TOP', async () => {
     renderAt('/usage', <Overview />)
-    expect(await screen.findByText('渠道余额')).toBeInTheDocument()
+    expect(await screen.findByText('上游账户余额')).toBeInTheDocument()
     expect(await screen.findByText('110.00')).toBeInTheDocument() // DeepSeek 余额
     expect(await screen.findByText('赠金 10.00')).toBeInTheDocument()
     expect(screen.getByTestId('overview-kpis')).toBeInTheDocument()
@@ -90,11 +100,11 @@ describe('用量中心 · 总览', () => {
 })
 
 describe('用量中心 · 部门用量', () => {
-  it('渲染部门表(预算/使用率)与部门详情下钻', async () => {
+  it('渲染部门表与部门详情下钻', async () => {
     renderAt('/usage', <Departments />)
     expect(await screen.findByText('研发部')).toBeInTheDocument()
-    // 预算 500 / 本月 15.55 → 使用率 3%
-    expect(await screen.findByText('3%')).toBeInTheDocument()
+    // 区间费用(部门预算已下线,列只剩区间费用与成员数)
+    expect((await screen.findAllByText('¥15.55')).length).toBeGreaterThanOrEqual(1)
     // 点击部门行 → 详情(成员排行 + 模型花费)
     fireEvent.click(screen.getByText('研发部'))
     expect(await screen.findByText('成员消费排行')).toBeInTheDocument()
@@ -112,9 +122,9 @@ describe('用量中心 · 成员用量', () => {
     expect(screen.getByText('研发部')).toBeInTheDocument() // 部门列
     expect(screen.getByText('¥12.34')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /alice/ })).toHaveAttribute('href', '/usage/members/alice')
-    // P2-45: 金额配额列用服务端折算后的生效配额(alice 覆盖值 100,生效值 50)
-    expect(screen.getByText('¥50.00')).toBeInTheDocument()
-    expect(screen.queryByText('¥100.00')).not.toBeInTheDocument()
+    // 账户余额列(alice 88.5 / bob 未开通;配额已下线)
+    expect(screen.getByText('¥88.50')).toBeInTheDocument()
+    expect(screen.getByText('未开通')).toBeInTheDocument()
     // P3: 员工数不再假设「仅一名超管」——3 个账号 1 个超管 → 2 名员工
     expect(screen.getByText('共 2 名员工')).toBeInTheDocument()
   })
@@ -128,9 +138,8 @@ describe('用量中心 · 成员用量', () => {
     expect(screen.getByText('最近请求')).toBeInTheDocument()
     expect(screen.getByText(/2026-09-02 10:00:00/)).toBeInTheDocument()
     expect(screen.getAllByTestId('chart-mock').length).toBeGreaterThanOrEqual(1)
-    // P2-45: 徽章用生效配额(alice 生效金额 50 / 生效 token 0=不限),不再用覆盖值
-    expect(screen.getByText('金额配额 ¥50.00')).toBeInTheDocument()
-    expect(screen.getByText('token 配额 不限')).toBeInTheDocument()
+    // 徽章用账户余额(配额已下线)
+    expect(screen.getByText('账户余额 ¥88.50')).toBeInTheDocument()
   })
 })
 
@@ -160,86 +169,28 @@ describe('用量中心 · 请求日志', () => {
   })
 })
 
-describe('用量中心 · 配额与预算', () => {
-  it('渲染三层配额配置,调整弹窗实时预览并提交', async () => {
-    renderAt('/usage', <Quota />)
-    // 全局默认(从网关页迁入)
-    expect(await screen.findByText('全局默认配额')).toBeInTheDocument()
-    const moneyInput = screen.getByLabelText('每用户默认月金额配额(元)')
-    expect((moneyInput as HTMLInputElement).value).toBe('50')
-    // 用户配额表(过滤掉 super_admin)
+describe('用量中心 · 余额', () => {
+  it('展示发放策略与员工余额,调整弹窗实时预览并提交', async () => {
+    renderAt('/usage', <Balance />)
+    // 发放策略卡
+    expect(await screen.findByText('按月发放余额')).toBeInTheDocument()
+    const amt = screen.getByLabelText('每人每月额度(元)')
+    expect((amt as HTMLInputElement).value).toBe('100')
+    // 员工余额表(过滤掉 super_admin)
     expect(await screen.findByText('alice')).toBeInTheDocument()
     expect(screen.queryByText('boss')).not.toBeInTheDocument()
-    // 部门预算表(全员隐藏)
-    expect(await screen.findByText('部门预算')).toBeInTheDocument()
-    expect(await screen.findByText('研发部')).toBeInTheDocument()
+    expect(await screen.findByText('未开通')).toBeInTheDocument()
     // 调整弹窗:预览 + 提交
-    fireEvent.click(screen.getAllByRole('button', { name: '调整' })[0]!)
+    fireEvent.click(screen.getAllByRole('button', { name: /调整/ })[0]!)
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toBeInTheDocument()
-    expect((await screen.findAllByText(/预览:/)).length).toBeGreaterThanOrEqual(2)
-    // 金额:覆盖为 20 → 预览 ¥20.00
-    const moneyVal = dialog.querySelector('input[placeholder*="金额"]')
-    fireEvent.change(moneyVal!, { target: { value: '20' } })
-    expect(await screen.findByText(/→ ¥20\.00/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    const amountInput = dialog.querySelector('input[inputmode="decimal"]')
+    fireEvent.change(amountInput!, { target: { value: '20' } })
+    expect(await screen.findByText('¥108.50')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /确认/ }))
     await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/users/1',
-      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"quota_money":20') }),
-    ))
-  })
-})
-
-describe('用量中心 · 报表订阅', () => {
-  it('列表/新建/测试推送/删除', async () => {
-    let created = 0
-    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/server/admin/report-subscriptions' && (!init || !init.method || init.method === 'GET')) {
-        return { subscriptions: [{ id: 1, name: '管理层月报群', enabled: true, hook_url: 'https://qyapi.weixin.qq.com/webhook?key=x', last_run_at: '2026-09-01T09:00:00Z', last_error: '' }] }
-      }
-      if (path === '/api/server/admin/report-subscriptions' && init?.method === 'POST') {
-        created += 1
-        return { id: 2 }
-      }
-      if (path === '/api/server/admin/report-subscriptions/1/test') {
-        return { ok: true, period: '2026-08' }
-      }
-      if (path.startsWith('/api/server/admin/report-subscriptions/')) return { ok: true }
-      return { subscriptions: [] }
-    })
-    renderAt('/usage/reports', <Reports />)
-    expect(await screen.findByText('管理层月报群')).toBeInTheDocument()
-    expect(screen.getByText(/2026-09-01 09:00/)).toBeInTheDocument()
-    // 新建
-    fireEvent.click(screen.getByRole('button', { name: /新建订阅/ }))
-    const dlg = await screen.findByRole('dialog')
-    fireEvent.change(dlg.querySelector('#rs-name')!, { target: { value: '研发群' } })
-    fireEvent.change(dlg.querySelector('#rs-url')!, { target: { value: 'https://oapi.dingtalk.com/robot/send?access_token=x' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
-    await waitFor(() => expect(created).toBe(1))
-    // 测试推送
-    fireEvent.click(screen.getAllByRole('button', { name: /测试/ })[0]!)
-    expect(await screen.findByText(/推送成功/)).toBeInTheDocument()
-  })
-})
-
-describe('用量中心 · 配额与预算', () => {
-  it('部门预算为只读展示,编辑入口唯一 = 部门管理页(P2-47 死弹窗已删除)', async () => {
-    renderAt('/usage', <Quota />)
-    expect(await screen.findByText('部门预算')).toBeInTheDocument()
-    expect(screen.queryByText(/设置部门预算/)).not.toBeInTheDocument()
-    expect(screen.getAllByRole('link', { name: '去部门管理' }).length).toBeGreaterThan(0)
-  })
-
-  it('保存全局默认配额走 gateway 端点', async () => {
-    renderAt('/usage', <Quota />)
-    await screen.findByText('全局默认配额')
-    const tokenInput = screen.getByLabelText('每用户默认月配额(token)')
-    fireEvent.change(tokenInput, { target: { value: '200000' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
-    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
-      '/api/server/admin/gateway',
-      expect.objectContaining({ method: 'PUT', body: expect.stringContaining('"monthly_quota":"200000"') }),
+      '/api/server/admin/users/1/balance',
+      expect.objectContaining({ method: 'POST', body: expect.stringContaining('"mode":"add"') }),
     ))
   })
 })

@@ -76,7 +76,7 @@ const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // sandbox. Electron cannot spawn a virtual asar path (only execFile is
   // patched), so it must stay physical — the desktop asar-spawn rewrite
   // resolves the virtual path to this twin at spawn time.
-  'node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64/bin/landlock-run',
+  'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run',
 ] as const
 
 /** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
@@ -86,6 +86,28 @@ export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
   'node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe',
   'node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll',
 ] as const
+
+/**
+ * What the POSIX native addon must look like in a packaged tree.
+ *
+ * `@deepseek-ai/node-addon-system` publishes platform packages for darwin and
+ * linux only — its optionalDependencies list has no win32 member, and its
+ * `flock` entry throws on Windows by design. Windows session locking lives in
+ * the persistence package itself (kernel32 named semaphores through koffi), so
+ * a Windows package legitimately ships no family directory at all.
+ */
+export type NativeAddonRequirement = 'family-and-launcher' | 'family' | 'none'
+
+/**
+ * Resolve the native-addon requirement for one Electron platform.
+ * @param electronPlatformName - Electron's `process.platform` value.
+ * @returns the requirement the packaged tree must satisfy.
+ */
+export function nativeAddonRequirement(electronPlatformName: string): NativeAddonRequirement {
+  if (electronPlatformName === 'linux') return 'family-and-launcher'
+  if (electronPlatformName === 'darwin') return 'family'
+  return 'none'
+}
 
 /** CPU-specific runtime assets that must coexist in a universal macOS application. */
 export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
@@ -456,6 +478,33 @@ export function verifyPackagedRuntime(
       `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing required native unpacked entries: ${missingNativeEntries.join(', ')}`,
     )
   }
+  // 2026-09-11: 上面那条按「包名 + 精确路径」判定,而整包不存在时会跳过 —— 0.1.5 把
+  // `@deepseek-ai/node-addon-landlock-run*` 改名为 `.../node-addon-system*` 时,条目
+  // 被当成"平台不适用"放过,门禁在沙箱启动器缺失的情况下依然全绿(运行期 ENOTDIR)。
+  // 这里对**真实产物**再按家族前缀断言一次(真实 afterPack 的 unpackedRoot 一定存在于
+  // 磁盘;单测用的是注入探针 + 不存在的伪路径,因此不受影响):目标平台的 node-addon-system
+  // 平台包必须在,且 POSIX 侧必须带 landlock-run 启动器(它没有扩展名,只有显式
+  // asarUnpack 规则能把它解包出来)。
+  const addonRequirement = nativeAddonRequirement(context.electronPlatformName)
+  if (addonRequirement !== 'none' && existsSync(unpackedRoot)) {
+    const addonScope = join(unpackedRoot, 'node_modules', '@deepseek-ai')
+    const family = existsSync(addonScope)
+      ? readdirSync(addonScope).filter(name => name.startsWith('node-addon-system-'))
+      : []
+    if (family.length === 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} ships no @deepseek-ai/node-addon-system-* platform package `
+        + '(the POSIX sandbox launcher and the flock module the session writer leases through)',
+      )
+    }
+    if (addonRequirement === 'family-and-launcher'
+      && !family.some(name => existsSync(join(addonScope, name, 'bin', 'landlock-run')))) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} has no physical landlock-run launcher `
+        + `(checked ${family.join(', ')}); verify the build.asarUnpack glob names the current package family`,
+      )
+    }
+  }
   const unpackedJs = listUnpackedUnsafeJs(unpackedRoot)
   if (unpackedJs.length > 0) {
     throw new Error(
@@ -527,7 +576,7 @@ const NATIVE_UNPACKED_PACKAGE_PREFIXES = [
   'node_modules/@koromix',
   'node_modules/@vscode',
   'node_modules/node-addon-require-builtin',
-  'node_modules/@deepseek-ai/node-addon-landlock-run',
+  'node_modules/@deepseek-ai/node-addon-system',
   'node_modules/koffi',
 ]
 

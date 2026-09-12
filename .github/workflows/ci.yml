@@ -70,7 +70,7 @@ jobs:
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       # 根 check(2026-09-06 重排):desktop check 最前(一次构建产出桌面 lib/types,
-      # 其余包 tsc 依赖),随后 better-sidebar 与其余包 check,全程每包只构建一次。
+      # 其余包 tsc 依赖),随后其余包 check,全程每包只构建一次。
       - run: yarn check
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
@@ -81,7 +81,6 @@ jobs:
             packages/host/enterprise/lib packages/host/connectors/lib \
             packages/host/browser/lib packages/host/cron/lib \
             packages/client/account-card/lib packages/client/branding/lib \
-            packages/client/better-sidebar/lib
       - name: Upload workspace build products (one build, three platforms)
         uses: actions/upload-artifact@v7
         with:
@@ -297,6 +296,10 @@ jobs:
           Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
           sleep 2
           yarn workspace dsh-plugin-desktop e2e:client
+          # 官方右侧栏的渲染 + 交互(2026-09-11 替换 better-sidebar 后新增):
+          # e2e:client 的 mock 会话列表恒空、从不建会话,而右栏展开入口在会话
+          # 作用域的会话头部 —— 只有这条 UI 路径能证明面板真的画出来。
+          yarn workspace dsh-plugin-desktop e2e:sidebar
       # P2-51: 报告/截图复制必须独立成 step 且 if: always()——原先紧跟 e2e 命令
       # 同一 step 且在其后,`bash -e` 下 e2e 失败即跳过复制,导致 always() 的
       # upload-artifact 上传空目录(与决策文档「失败也留证据」矛盾)。
@@ -308,6 +311,7 @@ jobs:
           mkdir -p packages/host/desktop/e2e-results
           cp packages/host/desktop/.e2e-report.md packages/host/desktop/e2e-results/e2e-report.md 2>/dev/null || true
           cp -r packages/host/desktop/.e2e-shots packages/host/desktop/e2e-results/shots 2>/dev/null || true
+          cp -r packages/host/desktop/.e2e-sidebar/shots packages/host/desktop/e2e-results/sidebar-shots 2>/dev/null || true
       # artifact 名保持**中性**(不含渠道名):公开仓的 artifact 列表是匿名可读的
       # (实测),名字里带渠道 id 就等于公开客户名。
       # 2026-09-10 审计后**内容也不再含品牌渠道**:品牌渠道的安装包经 R2 私密中转

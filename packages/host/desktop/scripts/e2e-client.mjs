@@ -328,15 +328,36 @@ async function main() {
   await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 
-  // 8. Chat input availability. Upstream 0.1.2 rebuilt the composer around a
-  // plain input element (textarea-refactor), so accept input/role=textbox too.
-  const chatOk = await evalSafe(cdp, `!!document.querySelector('textarea, [contenteditable=true], input[placeholder], [role="textbox"]')`)
-  reportStep('聊天输入区可用', !!chatOk, `hasTextarea=${Boolean(chatOk)}`)
+  // 8. Chat input availability, SCOPED to the conversation column. Upstream
+  // 0.1.2 rebuilt the composer around a plain input element (textarea-refactor),
+  // so accept input/role=textbox too — but a document-wide querySelector matched
+  // the sidebar search box instead, which made this step (and step 12) green
+  // while the composer stayed empty (2026-09-08 audit; visible in 11-input.png).
+  const composerSelector = '.dshDesktopConversationSurface textarea, '
+    + '.dshDesktopConversationSurface [contenteditable="true"], '
+    + '.dshDesktopConversationSurface [role="textbox"]'
+  const chatOk = await evalSafe(cdp, `!!document.querySelector(${JSON.stringify(composerSelector)})`)
+  reportStep('聊天输入区可用（限会话列）', !!chatOk, `hasComposer=${Boolean(chatOk)}`)
   await screenshot(cdp, '08-chat')
 
   // 9. Advanced mode marker.
   const mode = await evalSafe(cdp, `document.body.dataset.dshDesktopMode ?? ''`)
   reportStep('高级模式固定生效', mode === 'advanced', `mode=${mode}`)
+
+  // 9b. rc.2 root-slot vocabulary. 0.1.5 renamed the frame's children
+  // (`conversation` → `main` keyed, `details` → `rightbar`) and the failure
+  // mode is SILENT: with the old names every upstream occupant waits forever on
+  // an undeclared slot, so the window renders with an empty center and no
+  // console error. Assert the live slot tree, not just that the app booted.
+  const slotTree = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('[data-slot]')].map(el => el.getAttribute('data-slot')))]`)
+  const slots = Array.isArray(slotTree) ? slotTree : []
+  const slotErrors = await evalSafe(cdp, `document.querySelectorAll('[data-slot-error]').length`)
+  reportStep(
+    'rc.2 根槽位已声明(main/rightbar，details 已消失)',
+    slots.includes('main') && slots.includes('rightbar') && !slots.includes('details'),
+    `slots=${slots.slice(0, 12).join(',')}`,
+  )
+  reportStep('会话主区已挂载且无槽位装配错误', slots.includes('main.conversation') && !slotErrors, `slotErrors=${slotErrors}`)
 
   // 10. Workspace picker (native dialog path).
   const wsClicked = await clickLabel(cdp, '选择工作区', 2500)
@@ -360,42 +381,44 @@ async function main() {
   let usageProbe = null
   try {
     const probe = await cdp.send('Runtime.evaluate', {
-      expression: `fetch('/api/pico/account/usage').then(r=>r.json()).then(j=>({balance:j?.data?.balance_money ?? null, enabled:j?.data?.balance_enabled === true}))`,
+      expression: `fetch('/api/pico/account/usage').then(r=>r.json()).then(j=>({balance:j?.data?.balance_money ?? null, activated:j?.data?.balance_activated === true, enabled:j?.data?.balance_enabled === true}))`,
       returnByValue: true,
       awaitPromise: true,
     })
     usageProbe = probe?.result?.value ?? null
   } catch { usageProbe = null }
-  reportStep('账户卡余额数据链路（balance=88.5/enabled）',
-    usageProbe?.enabled === true && usageProbe?.balance === 88.5, JSON.stringify(usageProbe))
+  reportStep('账户卡余额数据链路（balance=88.5/activated/enabled）',
+    usageProbe?.enabled === true && usageProbe?.activated === true && usageProbe?.balance === 88.5, JSON.stringify(usageProbe))
   // 再验证渲染:账户卡在宽布局(sidebar.footer wide seat)下以余额为主数字。
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }).catch(() => {})
   await wait(800)
   const accountWithCard = await bodyText(cdp)
-  const balanceRendered = accountWithCard.includes('账户余额') && accountWithCard.includes('88.5')
+  // 精确断言格式化结果(¥88.50):includes('88.5') 对 ¥88.5 / 88.5 / ¥88.500 都成立,
+  // 对"小数位回归"不敏感(2026-09-11 加固)。
+  const balanceRendered = accountWithCard.includes('账户余额') && accountWithCard.includes('¥88.50')
   reportStep('账户卡渲染余额主数字（宽布局）', balanceRendered,
-    `hasLabel=${accountWithCard.includes('账户余额')} hasAmount=${accountWithCard.includes('88.5')}`)
+    `hasLabel=${accountWithCard.includes('账户余额')} hasAmount=${accountWithCard.includes('¥88.50')}`)
   await screenshot(cdp, '10-account')
   await clickLabel(cdp, '关闭', 800).catch(() => {})
 
-  // 12. Textarea input + send affordance.
+  // 12. Composer input, scoped to the conversation column and verified by
+  // reading the value back: "an element was found" is exactly the false green
+  // this step used to report.
+  const PROBE_TEXT = 'e2e 消息'
   const typed = await evalSafe(cdp, `(() => {
-    const ta = document.querySelector('textarea, [contenteditable=true], input[placeholder], [role="textbox"]')
-    if (!ta) return false
-    if (ta.tagName === 'TEXTAREA') {
-      const s = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-      s.call(ta, 'e2e 消息')
+    const ta = document.querySelector(${JSON.stringify(composerSelector)})
+    if (!ta) return { ok: false, reason: 'composer not found in the conversation column' }
+    if (ta.tagName === 'TEXTAREA' || ta.tagName === 'INPUT') {
+      const proto = ta.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(ta, ${JSON.stringify(PROBE_TEXT)})
       ta.dispatchEvent(new Event('input', { bubbles: true }))
-    } else if (ta.tagName === 'INPUT') {
-      const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
-      s.call(ta, 'e2e 消息')
-      ta.dispatchEvent(new Event('input', { bubbles: true }))
-    } else {
-      ta.textContent = 'e2e 消息'
+      return { ok: ta.value === ${JSON.stringify(PROBE_TEXT)}, reason: 'value=' + JSON.stringify(ta.value) }
     }
-    return true
+    ta.textContent = ${JSON.stringify(PROBE_TEXT)}
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    return { ok: (ta.textContent ?? '').includes(${JSON.stringify(PROBE_TEXT)}), reason: 'text=' + JSON.stringify(ta.textContent) }
   })()`)
-  reportStep('会话输入区可输入消息', !!typed, `typed=${typed}`)
+  reportStep('会话输入区可输入消息（限会话列，回读校验）', !!typed?.ok, `${typed?.reason ?? 'no result'}`)
   await screenshot(cdp, '11-input')
 
   cdp.ws.close()

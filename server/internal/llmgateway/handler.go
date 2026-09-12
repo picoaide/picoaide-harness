@@ -58,11 +58,6 @@ var maxStreamLineBytes = 1 << 20
 // maxStreamLineBytes; the caller must terminate that stream.
 var errStreamLineTooLong = errors.New("upstream stream line too long")
 
-// deptMemberIDsFn fetches the member ids of one department subtree
-// (test-injectable: P2-6 asserts it is called at most once per budget per
-// request).
-var deptMemberIDsFn = serverstore.DeptMemberIDs
-
 // API holds gateway dependencies.
 type API struct {
 	DB     *sql.DB
@@ -104,7 +99,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 	if blocked, msg := a.quotaBlocked(user); blocked {
-		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
+		serverauth.WriteError(c, http.StatusTooManyRequests, "BALANCE_EXHAUSTED", msg)
 		return
 	}
 
@@ -717,98 +712,21 @@ func (a *API) rateLimitPerMinute() int {
 	return n
 }
 
-// 审计修复 2026-P (M3): 金额比较容差——usage.cost 为 REAL(float64),
-// 多次累加存在分钱级舍入误差;临界点误拦(差几分钱即 429)或漏拦都用
-// 半厘(0.005 元)容差规避,与「计量即金钱」的记账边界一致。
-const moneyEpsilon = 0.005
-
-// quotaBlocked reports whether the user has exhausted their calendar-month
-// token, money, or department budget quota (429 QUOTA_EXCEEDED at the caller).
-// Admins are always exempt; 0 quota means unlimited.
-// 审计修复 2026-P (M1): 查询失败改为 fail-closed——计费强制路径上 DB 瞬时
-// 故障若放行超限请求,后台可能被刷出无限费用;改为拒绝并记日志。
-// 2026-08-31 查询优化:原实现 6 次串行 DB 查询(部门成员+预算+用户用量×3),
-// 改为 1 次 MonthUsageByUsers 批量取用户+部门成员用量,减少热路径 DB 往返。
-// P2-6:部门成员 id 每个预算只查一次(deptMemberIDsFn),同一请求内复用
-// ——此前步骤 2 与步骤 3 各查一次,预算数为 N 时是 2N 次查询。
+// quotaBlocked 报告该用户是否应被网关拦截,以及可解释的原因。
+//
+// 2026-09-11 收敛:唯一的"钱"闸门 = **账户余额**(存量、消费即扣、同事务)。
+// 部门预算 / 员工金额配额 / 员工 token 配额全部下线(设计文档
+// docs/planning/2026-09-11-balance-quota-consolidation.md):
+// 多套并行的额度机制互相打架(充了钱仍被配额拦住),且只有余额是可对账的。
+//
+// 规则(仅一条):闸门开启 且 已开通余额账户 且 分位口径余额 <= 0 → 拒绝。
+// 未开通余额账户的用户不受余额闸门约束(存量部署开启闸门不会误拦全员)。
+// 查询失败一律 fail-closed(计费强制路径上 DB 瞬时故障不得放行)。
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	if user.IsAdmin {
-		return false, ""
+		return false, "" // 管理员豁免
 	}
-	// 0) 员工余额闸门(0061):balance.enabled=1 时余额 <= 0 直接拒绝。
-	// 余额是**存量**语义(与月度配额"流量上限"不同):管理员手动调整 +
-	// 每月发放,消费按 usage.cost 原子扣减(与落账同事务,见 serverstore)。
-	// 默认关闭 —— 存量部署升级后余额全为 0,若默认开启会全员 429。
-	if bs, err := serverstore.GetBalanceSettings(a.DB); err != nil {
-		log.Printf("gateway: balance settings lookup error (fail-closed): %v", err)
-		return true, "余额校验暂不可用,请稍后再试"
-	} else if bs.Enabled && user.BalanceMoney <= moneyEpsilon {
-		return true, "账户余额不足,请联系管理员充值"
-	}
-
-	// 1) 部门预算链路(仅需 groupID/name/budget,不查用量)
-	budgets, err := serverstore.EffectiveDeptBudget(a.DB, user.ID)
-	if err != nil {
-		log.Printf("gateway: dept budget lookup error (fail-closed): %v", err)
-		return true, "部门预算校验暂不可用,请稍后再试"
-	}
-
-	// 2) 每个预算部门取一次成员 id(本请求内复用),并集 + 本人用于批量查用量
-	idsByGroup := make(map[int64][]int64, len(budgets))
-	memberIDs := map[int64]bool{user.ID: true}
-	for _, b := range budgets {
-		ids, err := deptMemberIDsFn(a.DB, b.GroupID)
-		if err != nil {
-			log.Printf("gateway: dept member lookup error (fail-closed): %v", err)
-			return true, "部门预算校验暂不可用,请稍后再试"
-		}
-		idsByGroup[b.GroupID] = ids
-		for _, id := range ids {
-			memberIDs[id] = true
-		}
-	}
-	ids := make([]int64, 0, len(memberIDs))
-	for id := range memberIDs {
-		ids = append(ids, id)
-	}
-	usages, err := serverstore.MonthUsageByUsers(a.DB, ids)
-	if err != nil {
-		log.Printf("gateway: usage lookup error (fail-closed): %v", err)
-		return true, "配额校验暂不可用,请稍后再试"
-	}
-
-	// 3) 部门预算:任一部门树内成本合计超限即拦截(复用步骤 2 的成员 id)
-	for _, b := range budgets {
-		total := 0.0
-		for _, id := range idsByGroup[b.GroupID] {
-			total += usages[id].Cost
-		}
-		if total >= b.Budget-moneyEpsilon {
-			return true, "部门「" + b.Name + "」本月费用预算已用尽"
-		}
-	}
-
-	// 4) 用户金额配额
-	moneyQuota, err := serverstore.EffectiveMoneyQuota(a.DB, user)
-	if err != nil {
-		log.Printf("gateway: money quota lookup error (fail-closed): %v", err)
-		return true, "金额配额校验暂不可用,请稍后再试"
-	}
-	myUsage := usages[user.ID]
-	if moneyQuota > 0 && myUsage.Cost >= moneyQuota-moneyEpsilon {
-		return true, "本月费用配额已用尽"
-	}
-
-	// 5) 用户 token 配额
-	quota, err := serverstore.EffectiveQuota(a.DB, user)
-	if err != nil {
-		log.Printf("gateway: quota lookup error (fail-closed): %v", err)
-		return true, "配额校验暂不可用,请稍后再试"
-	}
-	if quota > 0 && myUsage.Tokens >= quota {
-		return true, "本月流量配额已用尽"
-	}
-	return false, ""
+	return serverstore.BalanceBlocked(a.DB, user)
 }
 
 // rateLimiter is a per-user token bucket with bounded map and lazy cleanup.

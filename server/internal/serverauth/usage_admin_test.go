@@ -2,8 +2,6 @@ package serverauth
 
 import (
 	"net/http"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -213,74 +211,6 @@ func TestAdminUsageOverview(t *testing.T) {
 	}
 }
 
-// TestAdminQuotaChangeAudit:配额变更(用户)写 quota_change(2026-09 P1)。
-func TestAdminQuotaChangeAudit(t *testing.T) {
-	r, db := adminRouter(t)
-	defer db.Close()
-	hdr := adminSession(t, r)
-
-	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "qc", Source: "local", Status: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 设金额配额 60
-	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/users/"+strconv.FormatInt(uid, 10), `{"quota_money":60}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("set quota: %d", w.Code)
-	}
-	var detail string
-	if err := db.QueryRow(`SELECT detail FROM audit_logs WHERE action='quota_change' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(detail, "token 默认→默认") || !strings.Contains(detail, "money 默认→60.00") {
-		t.Fatalf("quota_change detail = %q", detail)
-	}
-	// 清除金额 + 设 token 1000
-	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/users/"+strconv.FormatInt(uid, 10), `{"quota_clear":true,"quota_tokens":1000,"quota_money":26.5}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("set quota2: %d", w.Code)
-	}
-	if err := db.QueryRow(`SELECT detail FROM audit_logs WHERE action='quota_change' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
-		t.Fatal(err)
-	}
-	// quota_clear 优先于 quota_tokens(语义:token 回默认);金额单独设为 26.5
-	if !strings.Contains(detail, "token 默认→默认") || !strings.Contains(detail, "money 60.00→26.50") {
-		t.Fatalf("quota_change detail2 = %q", detail)
-	}
-}
-
-// TestAdminDeptBudgetAudit:部门预算变更写 dept_budget_change(2026-09 P1)。
-func TestAdminDeptBudgetAudit(t *testing.T) {
-	r, db := adminRouter(t)
-	defer db.Close()
-	hdr := adminSession(t, r)
-
-	var everyone int64
-	if err := db.QueryRow(`SELECT id FROM groups WHERE name='全员'`).Scan(&everyone); err != nil {
-		t.Fatal(err)
-	}
-	w, out := doJSON(t, r, "POST", "/api/server/admin/departments", `{"name":"审计部","parent_id":`+strconv.FormatInt(everyone, 10)+`}`, hdr)
-	if w.Code != http.StatusCreated && w.Code != http.StatusOK {
-		t.Fatalf("create dept: %d", w.Code)
-	}
-	id := int64(out["department"].(map[string]any)["id"].(float64))
-	// 设预算 500
-	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/departments/"+strconv.FormatInt(id, 10), `{"name":"审计部","parent_id":`+strconv.FormatInt(everyone, 10)+`,"budget_money":500}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("set budget: %d", w.Code)
-	}
-	var detail string
-	if err := db.QueryRow(`SELECT detail FROM audit_logs WHERE action='dept_budget_change' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(detail, "审计部: 预算 unset→500.00") {
-		t.Fatalf("dept_budget_change detail = %q", detail)
-	}
-	// 改 800
-	if w, _ := doJSON(t, r, "PUT", "/api/server/admin/departments/"+strconv.FormatInt(id, 10), `{"name":"审计部","parent_id":`+strconv.FormatInt(everyone, 10)+`,"budget_money":800}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("set budget2: %d", w.Code)
-	}
-	if err := db.QueryRow(`SELECT detail FROM audit_logs WHERE action='dept_budget_change' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(detail, "500.00→800.00") {
-		t.Fatalf("dept_budget_change detail2 = %q", detail)
-	}
-}
+// 2026-09-11:quota_change / dept_budget_change 两个审计动作随配额与部门预算
+// 下线一并移除(网关唯一闸门 = 余额,审计动作 = balance_adjust/balance_grant/
+// balance_settings)。

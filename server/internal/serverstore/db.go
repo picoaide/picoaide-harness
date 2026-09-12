@@ -34,6 +34,22 @@ func pgInt64Array(ids []int64) string {
 	return b.String()
 }
 
+// pgFloat64Array 把 []float64 编码成 PG 数组字面量(配合 ::double precision[]),
+// 用于余额账本的批量流水写入(unnest 展开)。理由同 pgInt64Array。
+func pgFloat64Array(vals []float64) string {
+	var b strings.Builder
+	b.Grow(len(vals)*16 + 2)
+	b.WriteByte('{')
+	for i, v := range vals {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(roundMicro(v), 'f', -1, 64))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
 // DriverName identifies the underlying SQL backend (PostgreSQL only.
 // SQLite support was removed in the PG-only migration).
 type DriverName string

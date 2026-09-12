@@ -8,8 +8,8 @@ import { Input } from '../../components/ui/input'
 import { Button } from '../../components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { PageHeader } from '../../components/page-header'
-import { employeeCountText, effectiveQuotaMoney, fmtY, type UserInfo } from './common'
-import { fmtTokens, moneyPercent, moneyOver } from '../../lib/format'
+import { employeeCountText, fmtY, type UserInfo } from './common'
+import { fmtTokens } from '../../lib/format'
 import { cn } from '../../lib/utils'
 
 // 成员用量(本月维度):用户列表 + 搜索;行点击 → 个人详情二级页
@@ -73,17 +73,12 @@ export default function UsageMembers() {
                   <TableHead>部门</TableHead>
                   <TableHead className="text-right">本月费用</TableHead>
                   <TableHead className="text-right">本月 tokens</TableHead>
-                  <TableHead className="text-right">金额配额</TableHead>
-                  <TableHead className="text-right">使用率</TableHead>
+                  <TableHead className="text-right">账户余额</TableHead>
                   <TableHead className="w-16">状态</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {users.map((u) => {
-                  // P2-45: 用服务端折算后的生效配额,否则跟随全局默认的用户被误报「不限」
-                  const mq = effectiveQuotaMoney(u)
-                  const pct = moneyPercent(u.monthly_cost, mq)
-                  const over = moneyOver(u.monthly_cost, mq)
                   return (
                     <TableRow key={u.id} className="cursor-pointer hover:bg-accent">
                       <TableCell>
@@ -94,10 +89,11 @@ export default function UsageMembers() {
                       <TableCell className="text-muted-foreground">{(u.groups ?? []).filter((g) => g !== '全员').join(', ') || '—'}</TableCell>
                       <TableCell className="text-right tabular-nums">{fmtY(u.monthly_cost)}</TableCell>
                       <TableCell className="text-right tabular-nums">{fmtTokens(u.monthly_usage)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{mq ? fmtY(mq) : '不限'}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {pct === null ? '—' : (
-                          <span className={cn(over && 'font-semibold text-destructive', !over && (pct ?? 0) >= 90 && 'text-amber-600')}>{pct}%</span>
+                        {u.balance_activated ? (
+                          <span className={cn((u.balance_money ?? 0) <= 0 ? 'font-semibold text-destructive' : 'text-foreground')}>{fmtY(u.balance_money ?? 0)}</span>
+                        ) : (
+                          <span className="text-muted-foreground">未开通</span>
                         )}
                       </TableCell>
                       <TableCell>
@@ -106,7 +102,7 @@ export default function UsageMembers() {
                     </TableRow>
                   )
                 })}
-                {users.length === 0 && <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无成员</TableCell></TableRow>}
+                {users.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无成员</TableCell></TableRow>}
               </TableBody>
             </Table>
           )}

@@ -41,6 +41,13 @@ export const MACOS_ARM64_NATIVE_ENTRIES: readonly MacNativeEntry[] = [
     path: 'node_modules/node-addon-require-builtin-darwin-arm64/prebuilt/darwin-arm64-napi-v9.node',
   },
   {
+    // rc.2 renamed @deepseek-ai/node-addon-landlock-run* to
+    // @deepseek-ai/node-addon-system*; the darwin platform package ships the
+    // dlopen'd sandbox module (no landlock-run launcher, which is POSIX-only).
+    arch: 'arm64',
+    path: 'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+  },
+  {
     arch: 'arm64',
     path: 'node_modules/node-pty/prebuilds/darwin-arm64/pty.node',
   },

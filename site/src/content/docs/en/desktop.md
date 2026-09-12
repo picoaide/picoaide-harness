@@ -3,7 +3,7 @@ title: Desktop Client
 description: 'Complete feature and usage guide for the PicoAide Harness desktop client: chat, Capability Hub, connectors, scheduled jobs, browser, memory, and auto-updates.'
 ---
 
-The desktop client is the product surface employees use every day. It packages the official DeepSeek Harness local agent runtime into a native app: window, tray, terminal, auto-updates — **no need to install Node.js or run any commands**.
+The desktop client is the product surface employees use every day. It packages the official DeepSeek Harness local agent runtime into a native app: window, tray, auto-updates — **no need to install Node.js or run any commands**.
 
 ## Main Interface
 
@@ -124,7 +124,7 @@ The agent-driven embedded browser lives in a **separate browser window** (2026-0
 - **Operation log**: an op log records every navigation, click, and download for audit;
 - **Close semantics**: the user closing the window only hides it; only the agent's `browser_close` actually destroys the window.
 
-> The sidebar workbench (dsh-better-sidebar, a community plugin) has its own embedded browser tab, which has been disabled by product policy — it overlaps the product's full-screen browser and the latter gives a better experience; users can still enter the product browser from the "Browser" action at the bottom of the sidebar.
+> The right Sidebar is the official `ui-sidebar-right` (a per-session dock: draggable, splittable, floatable tab panes, with a shipped guide page, workspace file tree and document preview). It is a **preview and files** surface — no code editing, interactive terminal or Git panel. The product browser is still reached from the "Browser" action at the bottom of the sidebar.
 
 ## Memory (Five-Track Memory)
 
@@ -162,15 +162,19 @@ Built into the product (vendored community plugin **dsh-memory-evolve**), this i
 
 ## Terminal and Plugin Management
 
-Manage plugins from a **system shell** using ordinary `dsh plugin` commands — the app runs the fixed `desktop` profile and has no "Open DSH terminal / Switch Profile / mode switch" tray entry:
+The app runs the fixed `desktop` profile and has no "Open DSH terminal / Switch Profile / mode switch" tray entry.
+Since upstream 0.1.5 that profile name is **reserved**: both `dsh --profile desktop` and
+`dsh plugin --profile desktop` are rejected by the CLI (`profile "desktop" is managed exclusively
+by the Electron application`). Third-party plugins are added through the profile's user patch layer
+instead — append a row to `~/.picoaide-harness/cordis.patch.yml`, which the app merges on every boot:
 
-```sh
-dsh plugin --profile desktop add <plugin>     # install a plugin (always targets the desktop profile)
-dsh plugin --profile desktop remove <plugin>  # remove a plugin
-dsh plugin --profile desktop update           # update plugins
+```yaml
+- insert:
+    - id: my-plugin
+      name: my-plugin-package
 ```
 
-Use an explicit `--profile <name>` to target a profile. The app ships its own DSH dependencies and does not modify the system-wide PATH or shell config. After plugin changes, restart the app to enter the Loader composition.
+The app ships its own DSH dependencies and does not modify the system-wide PATH or shell config. After plugin changes, restart the app to enter the Loader composition.
 
 ## Troubleshooting
 

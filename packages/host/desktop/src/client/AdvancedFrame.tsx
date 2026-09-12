@@ -1,11 +1,11 @@
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from './contracts.ts'
 import type { DesktopClientPlatform } from './environment.ts'
 import {
   computeDesktopColumns, DesktopLayoutState, MACOS_SIDEBAR_COLLAPSED,
-  SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT,
+  SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED,
 } from './layout-state.ts'
 
 /** Private values assembled by the advanced-shell registration. */
@@ -18,49 +18,69 @@ interface AdvancedFrameInjected {
 
 /** Full advanced root slot props. */
 export type AdvancedFrameProps = PropsRuntime<'root'>
-  & PropsRenderSlots<'sidebar' | 'conversation' | 'details' | 'shell.overlay'>
+  & PropsRenderSlots<'sidebar' | 'main' | 'rightbar' | 'shell.overlay'>
   & AdvancedFrameInjected
 
-/** Desktop-owned transparent frame around the unchanged product surfaces. */
-export function AdvancedFrame({ layout, platform, renderSlot, useSessions, SessionProvider }: AdvancedFrameProps) {
+/**
+ * Desktop-owned transparent frame around the unchanged product surfaces.
+ *
+ * Mirrors the rc.2 `ui-layout` AppFrame solve: the left column holds the
+ * upstream sidebar, `main` renders the selected panel (the Conversation under
+ * the reserved `conversation` key), and the right column is a track the right
+ * Sidebar's occupant asks for through `ctx.layout.openRightbar`.
+ */
+export function AdvancedFrame({ layout, platform, renderSlot }: AdvancedFrameProps) {
   const subscribeLayout = useCallback((listener: () => void) => layout.subscribe(listener), [layout])
   const readLayout = useCallback(() => layout.getSnapshot(), [layout])
-  const panels = useSyncExternalStore(subscribeLayout, readLayout)
+  const state = useSyncExternalStore(subscribeLayout, readLayout)
+  const { layoutInfo, panelInfo } = state
   const frameRef = useRef<HTMLDivElement>(null)
-  const [viewport, setViewport] = useState(() => window.innerWidth)
-  const detailsSession = useSessions((state) => {
-    const current = state.current
-    return current !== undefined && state.byId[current]?.blank === false ? current : undefined
-  })
 
-  useEffect(() => {
+  // Track the frame's own box (not the window): rAF-throttled ResizeObserver.
+  useLayoutEffect(() => {
     const element = frameRef.current
     if (element === null) return
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry !== undefined && entry.contentRect.width > 0) setViewport(entry.contentRect.width)
+    let raf: number | null = null
+    let disposed = false
+    const measure = (): void => {
+      const width = element.getBoundingClientRect().width
+      if (width > 0) layout.setViewportWidth(width)
+    }
+    measure()
+    const observer = new ResizeObserver(() => {
+      if (disposed) return
+      raf ??= requestAnimationFrame(() => {
+        raf = null
+        measure()
+      })
     })
     observer.observe(element)
-    return () => { observer.disconnect() }
-  }, [])
-
-  const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
-  useEffect(() => { layout.setNarrow(narrow) }, [layout, narrow])
-
-  const previousSession = useRef(detailsSession)
-  useEffect(() => {
-    if (detailsSession !== undefined && previousSession.current !== undefined && previousSession.current !== detailsSession) {
-      layout.closeDetails()
+    return () => {
+      disposed = true
+      observer.disconnect()
+      if (raf !== null) cancelAnimationFrame(raf)
     }
-    previousSession.current = detailsSession
-  }, [detailsSession, layout])
+  }, [layout])
 
-  const collapsed = panels.narrow ? !panels.narrowExpanded : panels.sidebar === 0
-  const sidebarPreference = collapsed ? 0 : panels.sidebar === 0 ? SIDEBAR_DEFAULT : panels.sidebar
-  const columns = computeDesktopColumns(
+  const collapsedWidth = platform === 'darwin' ? MACOS_SIDEBAR_COLLAPSED : SIDEBAR_COLLAPSED
+  const viewport = layoutInfo.viewportWidth
+  const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
+  const sidebarCollapsed = layout.sidebarCollapsed()
+  const sidebarPreference = layout.sidebarPreference()
+  const rightbarPreference = layout.rightbarPreference()
+  // Opening on a narrow frame collapses the left sidebar. Eligibility must
+  // include that space before the occupant's first shown report arrives.
+  const normal = computeDesktopColumns(
+    viewport,
+    !layoutInfo.rightbarShown && narrow ? 0 : sidebarPreference,
+    rightbarPreference,
+    collapsedWidth,
+  )
+  const cols = computeDesktopColumns(
     viewport,
     sidebarPreference,
-    detailsSession === undefined ? 0 : panels.details,
-    platform === 'darwin' ? MACOS_SIDEBAR_COLLAPSED : SIDEBAR_COLLAPSED,
+    layoutInfo.rightbarTrack ? rightbarPreference : 0,
+    collapsedWidth,
   )
 
   return (
@@ -68,47 +88,56 @@ export function AdvancedFrame({ layout, platform, renderSlot, useSessions, Sessi
       ref={frameRef}
       className="dshDesktopFrame"
       data-desktop-platform={platform}
-      data-sidebar-collapsed={collapsed || undefined}
-      style={{ gridTemplateColumns: `${columns.sidebar}px minmax(0, 1fr) ${columns.details}px` }}
+      data-sidebar-collapsed={sidebarCollapsed || undefined}
+      data-rightbar-collapsed={cols.rightbar === 0 || undefined}
+      data-rightbar-fullscreen={layoutInfo.rightbarFullscreen || undefined}
+      data-rightbar-instant={layoutInfo.rightbarInstant || undefined}
+      style={{ gridTemplateColumns: `${cols.sidebar}px minmax(0, 1fr) ${cols.rightbar}px` }}
     >
       {platform === 'darwin' && <div className="dshDesktopMacCaptionRow" aria-hidden="true" />}
       {platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}
       <aside className="dshDesktopSidebarSurface">
         <div className="dshDesktopUpstreamSidebar">
-          {renderSlot('sidebar', { collapsed, width: columns.sidebar })}
+          {renderSlot('sidebar', { collapsed: sidebarCollapsed, width: cols.sidebar })}
         </div>
       </aside>
-      <main className="dshDesktopConversationSurface">{renderSlot('conversation', {})}</main>
-      {/* The details slot is strict-session scoped: the SessionProvider
-          scope wrapper withholds the occupant while no session is current
-          (a bare outlet would throw the scope-binding assembly error). */}
-      <aside className="dshDesktopDetailsSurface">
-        <SessionProvider>{renderSlot('details', {})}</SessionProvider>
+      <main className="dshDesktopConversationSurface">
+        {renderSlot('main', {}, { entryKey: panelInfo.activePanelId ?? 'conversation' })}
+      </main>
+      {/* The right column is root-scoped in rc.2: its occupant owns the Session
+          binding (the right Sidebar renders `rightbar.session` itself), so the
+          frame passes geometry only — no SessionProvider wrapper. */}
+      <aside className="dshDesktopRightbarSurface">
+        {renderSlot('rightbar', {
+          width: normal.rightbar,
+          viewportWidth: viewport,
+          canShow: normal.rightbar > 0,
+        })}
       </aside>
       <div className="dshDesktopOverlay" data-shell-overlay>
         {renderSlot('shell.overlay', {})}
       </div>
-      {!collapsed && (
+      {!sidebarCollapsed && (
         <ResizeHandle
           side="sidebar"
-          left={columns.sidebar}
-          size={columns.sidebar}
+          left={cols.sidebar}
+          size={cols.sidebar}
           onResize={(width) => { layout.setSidebar(width) }}
         />
       )}
-      {columns.details > 0 && (
+      {layoutInfo.rightbarShown && !layoutInfo.rightbarFullscreen && normal.rightbar > 0 && (
         <ResizeHandle
-          side="details"
-          left={viewport - columns.details}
-          size={columns.details}
-          onResize={(width) => { layout.setDetails(width) }}
+          side="rightbar"
+          left={viewport - normal.rightbar}
+          size={normal.rightbar}
+          onResize={(width) => { layout.setRightbar(width) }}
         />
       )}
     </div>
   )
 }
 
-function ResizeHandle(props: { side: 'sidebar' | 'details'; left: number; size: number; onResize: (width: number) => void }) {
+function ResizeHandle(props: { side: 'sidebar' | 'rightbar'; left: number; size: number; onResize: (width: number) => void }) {
   const origin = useRef(0)
   const base = useRef(0)
   const onPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
@@ -121,13 +150,17 @@ function ResizeHandle(props: { side: 'sidebar' | 'details'; left: number; size: 
     const delta = event.clientX - origin.current
     props.onResize(base.current + (props.side === 'sidebar' ? delta : -delta))
   }, [props])
+  const [dragging, setDragging] = useState(false)
   return (
     <div
       className="dshDesktopResizeHandle"
       data-side={props.side}
+      data-dragging={dragging || undefined}
       style={{ left: props.left }}
-      onPointerDown={onPointerDown}
+      onPointerDown={(event) => { setDragging(true); onPointerDown(event) }}
       onPointerMove={onPointerMove}
+      onPointerUp={() => { setDragging(false) }}
+      onPointerCancel={() => { setDragging(false) }}
     />
   )
 }

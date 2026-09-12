@@ -1,17 +1,14 @@
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 /**
  * Cron plugin client half: registers the settings card (settings.plugin.item
- * keyed 'cron') and, when dsh-better-sidebar is present, the scheduled-job
- * center tab. The sidebar dependency is soft: `ctx.inject(['betterSidebar'])`
- * mounts a child fiber only while the service exists, so the plugin works in
- * compositions without the sidebar and the tab unregisters on service loss.
+ * keyed 'cron'), the sidebar foot trigger, the main-area job center, and the
+ * scheduled-job tab in the official right Sidebar (rc.2 `sidebarRightTabs` +
+ * the keyed `sidebar.right.pane.tab` body seat).
  *
  * Client discipline: value imports are limited to the platform module table;
  * @deepseek-ai/* and sibling packages enter type-only. Cross-plugin
  * collaboration goes through cordis services and slots only.
  */
-import { createElement } from 'react'
-import type { Context } from '@deepseek-ai/cordis'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -19,6 +16,8 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the sidebar shell's footer slot declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the official right Sidebar's tab registry, seats, and `ctx.sidebarRight`.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 // Type-only: the keyed slot declaration (settings.plugin.item).
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
@@ -39,16 +38,20 @@ import { CronJobTab } from './CronJobTab.tsx'
 import { CronSettingsCard, CronSettingsCardController, type CronSettings } from './CronSettingsCard.tsx'
 import { CronTrigger } from './CronTrigger.tsx'
 import { mountCronPanel } from './panel-mount.tsx'
-import { en, zh } from './locales.ts'
-import type { BetterSidebarService } from './sidebar-face.ts'
+import { en, t, zh } from './locales.ts'
 
-export const inject = ['slots', 'settingsScope', 'locale', 'workspaces', 'connection', 'sessions']
+export const inject = ['slots', 'settingsScope', 'locale', 'workspaces', 'connection', 'sessions', 'sidebarRightTabs']
 
 /** Settings namespace this card edits (the Host half registers it). */
 const CRON_NS = 'cron'
 
 /** Locale namespace this plugin owns. */
 const LOCALE_NS = 'cron'
+
+/** Right-Sidebar tab type identity: the definition id (also the body's seat key). */
+const CRON_TAB_ID = 'pico:cron'
+/** Right-Sidebar tab kind: what `ctx.sidebarRight.openTab` names. */
+const CRON_TAB_KIND = 'pico-cron'
 
 /** Cordis service name of the browser cron face (sibling plugins consume). */
 const BROWSER_CRON_SERVICE = 'picoCronService'
@@ -110,18 +113,27 @@ export function apply(ctx: ClientContext): void {
     order: -10,
   }, CronTrigger))
   ctx.effect(() => mountCronPanel(controller, workspacesService, api, openSession), 'dsh-cron: main-area center')
-  // Scheduled-job center tab in the better-sidebar: a child fiber that lives
-  // exactly as long as the service. The tab shares the same controller as
-  // the sidebar entry, so both surfaces stay in sync.
-  ctx.inject(['betterSidebar'], (childCtx: Context) => {
-    const service = childCtx.get('betterSidebar') as BetterSidebarService | undefined
-    if (service === undefined) return
-    const disposeTab = service.registerTab({
-      id: 'pico:cron',
-      title: () => zh['job.listTitle'],
-      order: 30,
-      component: () => createElement(CronJobTab, { controller, ...(workspacesService === undefined ? {} : { workspaces: workspacesService }), ...(api === undefined ? {} : { api }), ...(openSession === undefined ? {} : { openSession }) }),
-    })
-    childCtx.effect(() => () => { disposeTab() }, 'dsh-cron: better-sidebar tab')
-  })
+  // Scheduled-job tab in the official right Sidebar (rc.2): the type
+  // definition carries the chip title and the guide entry, and the body is a
+  // keyed registration under the definition's own id. The tab shares the same
+  // controller as the sidebar foot entry and the main-area center, so all
+  // three surfaces stay in sync; per-session tab state belongs to the Sidebar.
+  const tabProps = {
+    controller,
+    ...(workspacesService === undefined ? {} : { workspaces: workspacesService }),
+    ...(api === undefined ? {} : { api }),
+    ...(openSession === undefined ? {} : { openSession }),
+  }
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: CRON_TAB_ID,
+    kind: CRON_TAB_KIND,
+    title: () => t('job.listTitle'),
+    guide: [{ order: 30, title: () => t('job.listTitle') }],
+  }), 'dsh-cron: right sidebar tab type')
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab',
+    key: CRON_TAB_ID,
+    locale: LOCALE_NS,
+    inject: () => tabProps,
+  }, CronJobTab)), 'dsh-cron: right sidebar tab body')
 }

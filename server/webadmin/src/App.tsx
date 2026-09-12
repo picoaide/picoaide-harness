@@ -34,7 +34,7 @@ const UsageMembers = lazy(() => import('./pages/usage/Members'))
 const UsageMemberDetail = lazy(() => import('./pages/usage/MemberDetail'))
 const UsageModels = lazy(() => import('./pages/usage/Models'))
 const UsageLogs = lazy(() => import('./pages/usage/Logs'))
-const UsageQuota = lazy(() => import('./pages/usage/Quota'))
+const UsageBalance = lazy(() => import('./pages/usage/Balance'))
 const UsageReports = lazy(() => import('./pages/usage/Reports'))
 
 // 审计 A5-L7: 页面运行时异常不再白屏整树卸载,展示错误与重载入口
@@ -327,7 +327,7 @@ export default function App() {
                     <Route path="members/:username" element={<UsageMemberDetail />} />
                     <Route path="models" element={<UsageModels />} />
                     <Route path="logs" element={<UsageLogs />} />
-                    <Route path="quota" element={<UsageQuota />} />
+                    <Route path="balance" element={<UsageBalance />} />
                     <Route path="reports" element={<UsageReports />} />
                   </Route>
                   <Route path="/marketplace" element={<Navigate to="/capabilities?tab=market" replace />} />

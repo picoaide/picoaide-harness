@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import sharp from 'sharp'
@@ -211,7 +211,7 @@ describe('published package surface', () => {
       '**/*.dylib',
       '**/bin/rg',
       '**/bin/rg.exe',
-      '**/node_modules/@deepseek-ai/node-addon-landlock-run-*/bin/landlock-run',
+      '**/node_modules/@deepseek-ai/node-addon-system-*/bin/landlock-run',
       '**/prebuilds/**/spawn-helper',
       '**/prebuilds/**/OpenConsole.exe',
       '**/prebuilds/**/*.conpty_console_list*',
@@ -423,10 +423,54 @@ describe('published package surface', () => {
     expect(installedCodeSign).toContain('"-k", keychainPassword, keychainFile')
   })
 
+  it('keeps the native sandbox glob matched to the installed addon package family', () => {
+    // 0.1.5 renamed @deepseek-ai/node-addon-landlock-run* to
+    // @deepseek-ai/node-addon-system*. The stale glob matched nothing, and the
+    // afterPack gate skips entries whose package directory is absent — so the
+    // package would have shipped without the sandbox launcher while every check
+    // stayed green. This pins the glob against the package names actually
+    // installed, which a rename cannot satisfy vacuously.
+    const globs = (manifest.build?.asarUnpack ?? []) as string[]
+    const familyGlob = globs.find(glob => glob.includes('node-addon-system'))
+    expect(familyGlob).toBeDefined()
+    const addonScope = new URL('node_modules/@deepseek-ai', packageRoot)
+    const installed = (existsSync(addonScope) ? readdirSync(addonScope) : [])
+      .filter(name => name.startsWith('node-addon-system-'))
+    expect(installed.length).toBeGreaterThan(0)
+    // Minimal glob → regex: `**/` is any directory prefix, `*` stays inside one
+    // path segment. Kept local so the assertion needs no glob dependency.
+    const pattern = (familyGlob as string)
+      .replace(/[.+^${}()|[\]\\]/gu, '\\$&')
+      // One pass: the replacement text of `**/` must not be re-scanned for `*`.
+      .replace(/\*\*\/|\*/gu, match => (match === '**/' ? '(?:[^/]+/)*' : '[^/]*'))
+    const matcher = new RegExp(`^${pattern}$`, 'u')
+    let covered = 0
+    for (const name of installed) {
+      const launcher = join('node_modules', '@deepseek-ai', name, 'bin', 'landlock-run')
+      // Only POSIX platform packages ship the launcher; the darwin packages
+      // carry the dlopen'd module instead.
+      if (!existsSync(new URL(`${launcher.replaceAll('\\', '/')}`, packageRoot))) continue
+      expect(matcher.test(launcher.replaceAll('\\', '/'))).toBe(true)
+      covered += 1
+    }
+    expect(covered).toBeGreaterThan(0)
+
+    // The required-entry oracle must name the same family, or a missing
+    // launcher would be filtered out as "platform not applicable". Read the
+    // quoted path literals only: the file's comments legitimately mention the
+    // retired package name when explaining the rename.
+    const source = readFileSync(new URL('../scripts/verify-packaged-runtime.ts', import.meta.url), 'utf8')
+    // Whole-line path literals only: pairing quotes across the file would let a
+    // comment that mentions the retired name leak into the extracted set.
+    const entryLiterals = [...source.matchAll(/^\s*'([^']*node-addon[^']*)',?\s*$/gmu)].map(match => match[1] ?? '')
+    expect(entryLiterals.some(entry => entry.includes('node-addon-system'))).toBe(true)
+    expect(entryLiterals.every(entry => !entry.includes('node-addon-landlock-run'))).toBe(true)
+  })
+
   it('starts restricted Windows shells with a hidden console show state', () => {
-    const patchResolution = 'patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.2-rc.1#./patches/dsh-win32-process@0.1.2-rc.1.patch'
+    const patchResolution = 'patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@0.1.5-rc.2.patch'
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
-    const patch = readFileSync(new URL('patches/dsh-win32-process@0.1.2-rc.1.patch', workspaceRoot), 'utf8')
+    const patch = readFileSync(new URL('patches/dsh-win32-process@0.1.5-rc.2.patch', workspaceRoot), 'utf8')
     const workspaceRequire = createRequire(new URL('package.json', packageRoot))
     const processManifest = workspaceRequire.resolve('@deepseek-ai/dsh-win32-process/package.json')
     const processLib = join(dirname(processManifest), 'lib')
@@ -434,10 +478,10 @@ describe('published package surface', () => {
     // Upstream 0.1.2 moved the spawn primitives (STARTUPINFOW incl.) into
     // dsh-win32-process; the hidden-console fix lives in that patch now.
     expect(workspaceManifest.resolutions).toMatchObject({
-      '@deepseek-ai/dsh-win32-process@npm:0.1.2-rc.1': patchResolution,
-      '@deepseek-ai/dsh-win32-process@npm:^0.1.2-rc.1': patchResolution,
+      '@deepseek-ai/dsh-win32-process@npm:0.1.5-rc.2': patchResolution,
+      '@deepseek-ai/dsh-win32-process@npm:^0.1.5-rc.2': patchResolution,
     })
-    expect(lockfile).toContain('@deepseek-ai/dsh-win32-process@patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.2-rc.1#./patches/dsh-win32-process@0.1.2-rc.1.patch')
+    expect(lockfile).toContain('@deepseek-ai/dsh-win32-process@patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@0.1.5-rc.2.patch')
     expect(patch.match(/^\+\s*dwFlags: 257,\r?$/gmu)).toHaveLength(2)
     expect(patch.match(/^\+\s*wShowWindow: 0,\r?$/gmu)).toHaveLength(2)
     const installedRuntime = readFileSync(join(processLib, 'index.js'), 'utf8')

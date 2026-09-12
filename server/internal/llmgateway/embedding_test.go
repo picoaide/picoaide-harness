@@ -76,23 +76,21 @@ func TestEmbeddingsRouteUnknownModel(t *testing.T) {
 	}
 }
 
-func TestEmbeddingsQuotaBlocked(t *testing.T) {
+// 2026-09-11:embedding 路径同样受**余额闸门**约束(配额已下线)。
+func TestEmbeddingsBalanceGateBlocked(t *testing.T) {
 	f := newFakeUpstream(t)
 	f.nonStream = `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"bge-m3","usage":{"prompt_tokens":4,"total_tokens":4}}`
 	r, db, token := newGateway(t, f)
 	defer db.Close()
 	seedEmbeddingModel(t, db, f)
 
-	u, err := serverstore.GetUserByID(db, 1)
-	if err != nil {
+	if err := serverstore.SaveBalanceSettings(db, serverstore.BalanceSettings{Enabled: true, MonthlyMode: serverstore.BalanceModeAdd}); err != nil {
 		t.Fatal(err)
 	}
-	q := int64(10)
-	u.QuotaTokens = &q
-	if err := serverstore.UpdateUser(db, u); err != nil {
+	if _, err := serverstore.SetUserBalance(db, 1, 1, "t", "tester"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.RecordUsage(db, 1, "bge-m3", 10, 0); err != nil {
+	if _, err := serverstore.SetUserBalance(db, 1, 0, "t", "tester"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +102,7 @@ func TestEmbeddingsQuotaBlocked(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
+	if code := out["error"].(map[string]any)["code"]; code != "BALANCE_EXHAUSTED" {
 		t.Fatalf("code = %v", code)
 	}
 	if n := f.requests.Load(); n != 0 {

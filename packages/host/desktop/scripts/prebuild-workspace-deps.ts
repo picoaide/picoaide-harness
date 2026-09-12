@@ -55,7 +55,6 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron' },
   { workspace: '@picoaide/dsh-connectors', dir: 'packages/host/connectors' },
   { workspace: '@picoaide/dsh-browser', dir: 'packages/host/browser' },
-  { workspace: 'dsh-better-sidebar', dir: 'packages/client/better-sidebar' },
 ]
 
 /** 执行一个 yarn 命令,失败即抛错。 */

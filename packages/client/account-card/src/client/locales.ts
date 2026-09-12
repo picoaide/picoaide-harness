@@ -5,36 +5,32 @@
  * the zh key source directly so components stay dependency-free.
  */
 export const zh = {
-  'account.budget': '本月预算',
   'account.usedThisMonth': '本月已用',
   'account.today': '今日',
-  'account.unlimited': '不限',
-  'account.noQuota': '无配额限制',
   'account.admin': '管理员',
+  'account.notActivated': '余额未开通',
+  'account.monthlyGrant': '每月发放',
   'account.logout': '退出登录',
   'account.loggingOut': '退出中…',
   'account.refresh': '刷新',
   'account.balance': '账户余额',
   'account.lowBalance': '余额不足',
   'account.stale': '余额获取失败',
-  'account.tokens': 'tokens',
   'account.loading': '加载中…',
 }
 
 export const en: Record<keyof typeof zh, string> = {
-  'account.budget': 'Monthly budget',
   'account.usedThisMonth': 'Used this month',
   'account.today': 'Today',
-  'account.unlimited': 'Unlimited',
-  'account.noQuota': 'No quota',
   'account.admin': 'Admin',
+  'account.notActivated': 'Balance not set up',
+  'account.monthlyGrant': 'Monthly grant',
   'account.logout': 'Log out',
   'account.loggingOut': 'Logging out…',
   'account.refresh': 'Refresh',
   'account.balance': 'Balance',
   'account.lowBalance': 'Low balance',
   'account.stale': 'Balance unavailable',
-  'account.tokens': 'tokens',
   'account.loading': 'Loading…',
 }
 
