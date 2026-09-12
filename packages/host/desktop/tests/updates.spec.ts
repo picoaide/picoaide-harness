@@ -27,6 +27,24 @@ const testConfig: UpdateConfig = {
 const OFFICIAL_MANIFEST_URL = serverManifestURL(SERVER)
 
 /**
+ * 请求是否发往 `base` 这台服务端。
+ *
+ * 按**解析后的 origin** 判断，不做子串匹配：`url.startsWith('https://server.test')`
+ * 会把 `https://server.test.evil.example/x` 也算成"同一台服务端"
+ * （CodeQL js/incomplete-url-substring-sanitization）。
+ * @param url - 被检查的请求地址。
+ * @param base - 允许的服务端地址。
+ * @returns 同源时为 true；无法解析的地址为 false。
+ */
+function sameOrigin(url: string, base: string): boolean {
+  try {
+    return new URL(url).origin === new URL(base).origin
+  } catch {
+    return false
+  }
+}
+
+/**
  * 只统计**版本清单**请求。
  *
  * 会话内第一次检查会并行探一次服务端渠道内容(拿渠道 id 做一致性校验),
@@ -234,7 +252,7 @@ describe('desktop update Host plugin', () => {
     // 清单请求先发,渠道探测与它并行(绝不排在前面吃掉超时预算)。
     expect(calls[0]).toBe(OFFICIAL_MANIFEST_URL)
     expect(calls).toContain(`${SERVER}/api/client/v2/channel`)
-    expect(calls.every(url => url.startsWith(SERVER))).toBe(true)
+    expect(calls.every(url => sameOrigin(url, SERVER))).toBe(true)
     expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
     await harness.dispose()
   })

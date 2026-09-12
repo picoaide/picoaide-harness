@@ -1,0 +1,49 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -32,10 +32,38 @@
+ * @param input - textual IPv4 or IPv6 address.
+ * @returns true only for a public unicast destination.
+ */
+-function isPublicIpAddress(input) {
++/**
++* Desktop patch(PicoAide Harness):地址守卫总开关。置 true 时**不拦截任何目标地址**
++* （2026-09-12 产品决策,见下方 isPublicIpAddress 的长注释）。
++*/
++const ADDRESS_POLICY_ALLOWS_ALL = true;
++/**
++* Return whether an address is globally reachable unicast. IPv4-mapped IPv6 is
++* classified by its embedded IPv4 address; transition and translation prefixes
++* remain blocked because their eventual IPv4 destination cannot be pinned here.
++*
++* Desktop patch(PicoAide Harness):**桌面客户端不做地址拦截**（2026-09-12 产品决策）。
++*
++* 上游用 `ipaddr.js` 的 `range() === "unicast"` 做 SSRF 守卫,并把解析结果钉死给传输层
++* (防 DNS rebinding)。代价是**本地代理 fake-IP 环境下全量误杀**:Clash / Surge 的
++* fake-IP 会把所有域名解析到 `198.18.0.0/15`(RFC 2544 benchmarking 段,ipaddr.js 归类为
++* `reserved`(旧版 ipaddr.js 归为 `benchmarking`)而非 `unicast`),于是 web_fetch 对**任何**网址都返回
++* `WEB_BLOCKED_URL … resolves to a non-public IP address` —— 真机实测 github.com /
++* baidu.com / api.deepseek.com 全部被拒,该工具在此环境下等于不可用(2026-09-12 用户报告)。
++*
++* 本模块只服务于**本机客户端**的 web_fetch:请求由本机用户/agent 发起,"隔离本机与内网"
++* 的收益在桌面场景并不成立,而地址钉死带来的损失是确定的。因此整段放行;
++* `proxyRouteFor` 的代理路由与 `createPinnedLookup` 的钉死机制本身保持不变
++* (fake-IP 下钉死到的地址正是本机代理自己的隧道地址,连接照常经过代理)。
++*
++* @param _input - 目标地址(文本 IPv4 / IPv6,可能带方括号)。
++* @returns 恒为 true(放行)。
++*/
++function isPublicIpAddress(_input) {
++	if (ADDRESS_POLICY_ALLOWS_ALL) return true;
+ 	let parsed;
+ 	try {
+-		parsed = ipaddr.parse(stripIpv6Brackets(input));
++		parsed = ipaddr.parse(stripIpv6Brackets(_input));
+ 	} catch {
+ 		return false;
+ 	}
+@@ -678,4 +706,4 @@
+ 	ctx.web.registerFetchProvider(new HttpFetchProvider(limits));
+ }
+ //#endregion
+-export { Config, DEFAULT_USER_AGENT, HttpFetchProvider, LOCAL_FETCH_PROVIDER_ID, apply, inject, name };
++export { Config, DEFAULT_USER_AGENT, HttpFetchProvider, LOCAL_FETCH_PROVIDER_ID, apply, inject, isPublicIpAddress, name };

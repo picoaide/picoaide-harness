@@ -21,6 +21,11 @@ packages/host/desktop/build/app-icon.png
 packages/host/desktop/build/app-icon-mac.png
 packages/host/desktop/build/tray-icon*.png
 packages/host/desktop/build/assistedMessages.yml
+# 浏览器面品牌资源（favicon 的**构建期**源文件）：官方构建 = brands/official/logo.svg
+# 的逐字节副本，渠道构建 = 该渠道 logo。运行期由桌面 host 的 exact 路由
+# `/favicon.svg` 与 `/manifest.webmanifest` 服务（src/brand-web-route.ts）读这份落盘文件；
+# 同样派生自品牌目录，不入库。
+packages/host/desktop/build/web-brand/
 # 渠道包(私有仓 picoaide/channels/<id>/channel.json)由**打包脚本**在打包前
 # 就位到 build/(scripts/channel-build.ts 的 stageChannelProfile),随应用资源
 # 分发;内容是客户品牌,绝不入库。

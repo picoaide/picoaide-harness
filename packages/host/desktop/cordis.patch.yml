@@ -27,9 +27,18 @@
 - id: ui-settings-plugins
   disabled: true
 
-# A desktop launch has no terminal operator waiting for the Web readiness line.
+# A desktop launch has no terminal operator waiting for the Web readiness line,
+# and the desktop already owns the visible window: the default-browser handoff
+# must stay OFF. Upstream's row injects `openBrowser: !!js ctx.webStartup.openBrowser`
+# (schema default true); this patch replaces the row's whole config, so omitting
+# the key silently restored `true` — every launch spawned a second Electron
+# process for the handoff (2026-09-12 打包版实测日志：
+# "dsh web: opening the default browser; pass --no-open to disable" +
+# "web-app: could not open the default browser because [FATAL: Running as root
+# without --no-sandbox …]")。浏览器不会真的打开，但那次 spawn 是白付的。
 - id: web-runtime
   config:
+    openBrowser: false
     printUrl: false
     surfaceContext: true
     trustedHosts: []

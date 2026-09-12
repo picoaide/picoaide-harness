@@ -18,11 +18,17 @@
     "@deepseek-ai/dsh-win32-process@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-client-ui-brand-official@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.5-rc.2#./patches/dsh-client-ui-brand-official@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-agent-presets@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-agent-presets@npm%3A0.1.5-rc.2#./patches/dsh-agent-presets@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-agent-presets@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-agent-presets@npm%3A0.1.5-rc.2#./patches/dsh-agent-presets@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm%3A0.1.5-rc.2#./patches/dsh-plugin-package-inventory-deepseek@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm%3A0.1.5-rc.2#./patches/dsh-plugin-package-inventory-deepseek@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-win32-process@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-subprocess-local@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-subprocess-local@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch",
-    "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.5-rc.2#./patches/dsh-client-ui-brand-official@0.1.5-rc.2.patch"
+    "@deepseek-ai/dsh-tool-fs-search@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-tool-fs-search@npm%3A0.1.5-rc.2#./patches/dsh-tool-fs-search@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-tool-fs-search@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-tool-fs-search@npm%3A0.1.5-rc.2#./patches/dsh-tool-fs-search@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.5-rc.2#./patches/dsh-client-ui-brand-official@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-web-fetch-http@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-web-fetch-http@npm%3A0.1.5-rc.2#./patches/dsh-web-fetch-http@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-web-fetch-http@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-web-fetch-http@npm%3A0.1.5-rc.2#./patches/dsh-web-fetch-http@0.1.5-rc.2.patch"
   },
   "dependenciesMeta": {
     "@deepseek-ai/dsh-subprocess-local": {
@@ -57,6 +63,9 @@
     "check:layout": "node scripts/verify-layout.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
     "check:ci-scripts": "node scripts/verify-ci-scripts.mjs",
+    "check:patch-resolutions": "node scripts/verify-patch-resolutions.mjs",
+    "check:patches": "node scripts/verify-patches.mjs",
+    "check:inventories": "node scripts/verify-inventories.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
     "check": "node scripts/check-workspaces.mjs",
     "check:fast": "node scripts/check-workspaces.mjs --changed",

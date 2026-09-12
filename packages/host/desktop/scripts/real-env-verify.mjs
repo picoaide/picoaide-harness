@@ -220,10 +220,22 @@ try {
   await screenshot('r07-account')
   await clickLabel('关闭', 1000).catch(() => {})
 
-  // 7. Cron panel (real data)
+  // 7. Cron panel (real data)。2026-09-12（P1-1）：只断言"元素存在"是假绿 ——
+  // 容器未激活时也在 DOM 里（样式表 display:none）。改为断言**可见且占满中列、
+  // 会话区已让位**（打包版真机复现过"面板与会话 407/407 分屏"的回归）。
   await clickLabel('定时任务', 3500)
-  const cronOk = await ev(`!!document.querySelector('[data-dsh-cron-view]')`)
-  reportStep('定时任务中心面板挂载（真实数据）', cronOk === true)
+  const cronOk = await waitFor(`(() => {
+    const view = document.querySelector('[data-dsh-cron-view]')
+    const surface = document.querySelector('.dshDesktopConversationSurface')
+    if (view === null || surface === null) return false
+    const v = view.getBoundingClientRect(); const s = surface.getBoundingClientRect()
+    if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
+    if (v.height < s.height * 0.9) return false
+    return [...surface.children]
+      .filter(el => !el.hasAttribute('data-dsh-cron-view'))
+      .every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
+  })()`, 15000)
+  reportStep('定时任务中心面板占满中列（真实数据，会话区已让位）', cronOk === true)
   await screenshot('r08-cron')
   await ev(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)

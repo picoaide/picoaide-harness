@@ -124,7 +124,7 @@ The agent-driven embedded browser lives in a **separate browser window** (2026-0
 - **Operation log**: an op log records every navigation, click, and download for audit;
 - **Close semantics**: the user closing the window only hides it; only the agent's `browser_close` actually destroys the window.
 
-> The right Sidebar is the official `ui-sidebar-right` (a per-session dock: draggable, splittable, floatable tab panes, with a shipped guide page, workspace file tree and document preview). It is a **preview and files** surface — no code editing, interactive terminal or Git panel. The product browser is still reached from the "Browser" action at the bottom of the sidebar.
+> The right Sidebar is the official `ui-sidebar-right` (a per-session dock: draggable, splittable, floatable tab panes, with a shipped guide page, workspace file tree and document preview). It is a **preview and files** surface — no code editing, interactive terminal or Git panel. The product browser is still reached from the "Browser" action at the bottom of the sidebar. Its tab layout is **memory-only**: a reload or client restart returns every session to the collapsed default (switching sessions keeps each dock where it was), so it is not a workspace layout that survives restarts.
 
 ## Memory (Five-Track Memory)
 

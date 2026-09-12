@@ -13,7 +13,7 @@ import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
-import { captureScreenshot } from './shots.ts'
+import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
@@ -1034,14 +1034,40 @@ export class BrowserRuntime {
     try {
       data = await this.agentRun('browser_screenshot', async () => {
         const tab = this.tab(resolved)
-        return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+        let primary: string
+        try {
+          return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+        } catch (cause) {
+          primary = cause instanceof Error ? cause.message : String(cause)
+        }
+        // 2026-09-12: the browser window is created hidden by design, and a
+        // hidden window has no viz surface — `capturePage()` then fails with
+        // "Current display surface not available for capture". The renderer-side
+        // CDP path composites the frame without a surface, so screenshots keep
+        // working for an agent-driven (never shown) window.
+        try {
+          const fallback = await captureScreenshotViaCdp(
+            (method, params) => tab.cdp.send(method, params),
+            this.options.screenshotMaxWidth,
+            this.options.screenshotQuality,
+          )
+          this.record('browser_screenshot', resolved, `capturePage unavailable (${primary.slice(0, 120)}); captured via CDP fromSurface:false`)
+          return fallback
+        } catch (cause) {
+          const secondary = cause instanceof Error ? cause.message : String(cause)
+          // Both reasons are kept: the primary one is what the P2-31 guard
+          // ("empty image (0x0)") and real-device diagnostics key on.
+          throw new Error(`${primary}; renderer-side fallback: ${secondary}`)
+        }
       }, signal)
     } catch (cause) {
       // An empty capture (hidden window / background tab / zero-sized view)
       // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
       const message = cause instanceof Error ? cause.message : String(cause)
       this.record('browser_screenshot', resolved, `screenshot failed: ${message}`, true)
-      throw cause
+      throw new Error(
+        `browser: screenshot failed — ${message}; the tab must be able to render (open the 浏览器 window if it is closed, then retry)`,
+      )
     }
     this.record('browser_screenshot', resolved, 'screenshot captured')
     return data
@@ -1143,14 +1169,85 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     await this.agentRun('browser_click', async () => {
       const tab = this.tab(resolved)
-      await tab.cdp.send('Input.dispatchMouseEvent', {
-        type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
-      })
-      await tab.cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
-      })
+      // 2026-09-12: synthesized OS-level input (CDP `Input.dispatchMouseEvent`)
+      // needs an input-visible RenderWidgetHost. The browser window is created
+      // hidden by design (2026-09-08 product decision), and on a hidden window
+      // those events are accepted by the protocol yet never delivered to the
+      // page — the tool reported success while nothing happened (real-device
+      // report: links did not navigate, submit buttons did not submit, while
+      // DOM-level tools such as fill_form/select kept working).
+      //
+      // So: real input when the window can receive it, DOM-level activation
+      // (elementFromPoint + a full bubbling event sequence) otherwise. The
+      // dispatch path is recorded in the op log so the difference stays visible.
+      if (this.windowCanReceiveInput()) {
+        await tab.cdp.send('Input.dispatchMouseEvent', {
+          type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
+        })
+        await tab.cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
+        })
+        this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
+        return
+      }
+      const target = await this.activateAtPoint(tab, point)
+      this.record(
+        'browser_click',
+        resolved,
+        target === 'none'
+          ? `click at (${Math.round(point.x)}, ${Math.round(point.y)}) hit no element (hidden window: DOM dispatch)`
+          : `click at (${Math.round(point.x)}, ${Math.round(point.y)}) via DOM dispatch (hidden window)`,
+        target === 'none',
+      )
+      if (target === 'none') {
+        throw browserError('not-found', `browser: nothing to click at (${Math.round(point.x)}, ${Math.round(point.y)}) — the point is outside any element`)
+      }
     }, signal)
-    this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
+  }
+
+  /** Whether the browser window currently has a surface that receives input. */
+  private windowCanReceiveInput(): boolean {
+    if (this.window === null || this.window.isDestroyed()) return false
+    return this.window.isVisible()
+  }
+
+  /**
+   * DOM-level activation of whatever sits at a viewport point, used when the
+   * window cannot deliver real input (hidden window). `elementFromPoint` is
+   * layout-based, so it works without a compositor, and the dispatched sequence
+   * is a full bubbling pointer/mouse/click chain so handlers that listen for any
+   * of those (and activation behavior such as link navigation, checkbox toggle
+   * or form submission) still fire.
+   *
+   * @returns `'element'` when something was hit, `'none'` for an empty point.
+   */
+  private async activateAtPoint(tab: BrowserTab, point: { x: number; y: number }): Promise<'element' | 'none'> {
+    const x = Number(point.x)
+    const y = Number(point.y)
+    const result = await tab.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+      expression: `
+        (() => {
+          const x = ${JSON.stringify(x)};
+          const y = ${JSON.stringify(y)};
+          const el = document.elementFromPoint(x, y);
+          if (!el) return 'none';
+          if (typeof el.focus === 'function') { try { el.focus({ preventScroll: true }); } catch {} }
+          const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, detail: 1 };
+          const Pointer = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+          const sequence = [
+            () => el.dispatchEvent(new Pointer('pointerdown', { ...base, buttons: 1, isPrimary: true, pointerId: 1, pointerType: 'mouse' })),
+            () => el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 })),
+            () => el.dispatchEvent(new Pointer('pointerup', { ...base, buttons: 0, isPrimary: true, pointerId: 1, pointerType: 'mouse' })),
+            () => el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 })),
+            () => el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 })),
+          ];
+          for (const dispatch of sequence) dispatch();
+          return 'element';
+        })()
+      `,
+      returnByValue: true,
+    })
+    return result.result?.value === 'element' ? 'element' : 'none'
   }
 
   async typeInto(tabId: number, selector: string, text: string, clear = true, signal?: AbortSignal): Promise<void> {
@@ -1403,11 +1500,19 @@ export class BrowserRuntime {
       const tab = this.tab(resolved)
       const startUrl = tab.url
       let lastReason = 'timeout'
+      // The condition spec travels as a CDP *argument*: the page-side source is
+      // the constant WAIT_FOR_FUNCTION_DECLARATION, so selector/text/URL values
+      // can never become page-side syntax (they are data, not code).
+      const payload = waitForPayload(options, startUrl)
       while (Date.now() < deadline) {
         if (signal !== undefined && signal.aborted) throw browserError('interrupted', 'browser: wait aborted')
         try {
-          const state = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-            expression: evalExpressionFor(options, startUrl),
+          const state = await tab.cdp.send<EvalResult>('Runtime.callFunctionOn', {
+            functionDeclaration: WAIT_FOR_FUNCTION_DECLARATION,
+            // Re-resolved every poll: a navigation destroys the old object (and
+            // with it the id), which is exactly the state `url-change` waits on.
+            objectId: await pageGlobalObjectId(tab),
+            arguments: [{ value: payload }],
             returnByValue: true,
           })
           if (state.result?.value === true) {
@@ -1426,9 +1531,15 @@ export class BrowserRuntime {
     }, signal)
   }
 
-  /** Wait-for CDP expression builder (pure, testable). */
-  static waitExpression(options: WaitForOptions, startUrl = ''): string {
-    return evalExpressionFor(options, startUrl)
+  /** Page-side wait predicate source. Constant by construction — the values
+   * arrive through `Runtime.callFunctionOn` `arguments` (see `waitPayload`). */
+  static waitFunctionDeclaration(): string {
+    return WAIT_FOR_FUNCTION_DECLARATION
+  }
+
+  /** Wait-for payload builder (pure, testable). */
+  static waitPayload(options: WaitForOptions, startUrl = ''): WaitForPayload {
+    return waitForPayload(options, startUrl)
   }
 
   // -------------------------------------------------------------- user gate
@@ -1593,31 +1704,90 @@ export class BrowserRuntime {
   }
 }
 
-/** Build the wait-for evaluation expression (pure function). The `startUrl`
- * is the URL captured when the wait began — `url-change` compares against it
- * so the condition only succeeds on an ACTUAL navigation. */
-function evalExpressionFor(options: WaitForOptions, startUrl = ''): string {
-  const sel = options.selector !== undefined ? JSON.stringify(options.selector) : 'null'
-  const text = options.text !== undefined ? JSON.stringify(options.text) : 'null'
-  switch (options.condition) {
-    case 'element-present':
-      return `(() => { const el = document.querySelector(${sel}); return el !== null; })()`
-    case 'element-visible':
-      return `(() => { const el = document.querySelector(${sel}); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; })()`
+/** Everything the page-side wait predicate needs, as **data**.
+ *
+ * The six conditions are evaluated by `WAIT_FOR_FUNCTION_DECLARATION` inside the
+ * page, with this object passed through CDP `Runtime.callFunctionOn`
+ * `arguments`. Nothing here is ever concatenated into page-side source: a
+ * selector/text/URL value can only ever be a string value, never a syntax node
+ * (`js/bad-code-sanitization`). */
+export interface WaitForPayload {
+  condition: WaitForOptions['condition']
+  /** `null` when the condition has no selector — `querySelector(null)` yields null. */
+  selector: string | null
+  text: string | null
+  startUrl: string
+  networkIdleMs: number
+}
+
+/** The page-side wait predicate: a **constant** function body.
+ *
+ * `payload.selector` / `payload.text` / `payload.startUrl` are looked up as
+ * values only; the source text of this function never changes with the input,
+ * so there is no code-construction point at all. Kept byte-stable so tests can
+ * evaluate it under `node:vm` together with `waitForPayload`.
+ *
+ * DO NOT interpolate anything into this string: an interpolated
+ * selector/text/URL would turn the AI's tool input back into page-side syntax
+ * (`js/bad-code-sanitization`, alerts #40/#41/#43/#44). Add a field to
+ * `WaitForPayload` instead. */
+const WAIT_FOR_FUNCTION_DECLARATION = `function (payload) {
+  switch (payload.condition) {
+    case 'element-present': {
+      const el = document.querySelector(payload.selector);
+      return el !== null;
+    }
+    case 'element-visible': {
+      const el = document.querySelector(payload.selector);
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+    }
     case 'text-appear':
-      return `(() => (document.body ? document.body.innerText : '').includes(${text}))()`
+      return (document.body ? document.body.innerText : '').includes(payload.text);
     case 'url-change':
       // TRUE only when the page actually navigated away from the captured URL.
-      return `(() => location.href !== ${JSON.stringify(startUrl)})()`
-    case 'network-idle':
-      // TRUE once the last resource has been quiet for at least 800ms (or the
-      // document is already complete with no resource entries at all).
-      return `(() => { const rs = performance.getEntriesByType('resource'); if (rs.length === 0) return document.readyState === 'complete'; const last = rs[rs.length - 1]; return performance.now() - (last.responseEnd || 0) > ${String(NETWORK_IDLE_TICK_MS)}; })()`
+      return location.href !== payload.startUrl;
+    case 'network-idle': {
+      // TRUE once the last resource has been quiet for at least
+      // payload.networkIdleMs (or the document is already complete with no
+      // resource entries at all).
+      const rs = performance.getEntriesByType('resource');
+      if (rs.length === 0) return document.readyState === 'complete';
+      const last = rs[rs.length - 1];
+      return performance.now() - (last.responseEnd || 0) > payload.networkIdleMs;
+    }
     case 'settled':
-      return `(() => document.readyState === 'complete')()`
+      return document.readyState === 'complete';
     default:
-      return 'false'
+      return false;
   }
+}`
+
+/** Build the wait-for payload (pure function). The `startUrl` is the URL
+ * captured when the wait began — `url-change` compares against it so the
+ * condition only succeeds on an ACTUAL navigation. */
+function waitForPayload(options: WaitForOptions, startUrl = ''): WaitForPayload {
+  return {
+    condition: options.condition,
+    selector: options.selector ?? null,
+    text: options.text ?? null,
+    startUrl,
+    networkIdleMs: NETWORK_IDLE_TICK_MS,
+  }
+}
+
+/** `objectId` of the page's global object, so the constant predicate can run in
+ * the page's own world via `Runtime.callFunctionOn`. */
+async function pageGlobalObjectId(tab: BrowserTab): Promise<string> {
+  const global = await tab.cdp.send<{ result?: { objectId?: string } }>('Runtime.evaluate', {
+    expression: 'globalThis',
+  })
+  const objectId = global.result?.objectId
+  if (objectId === undefined) {
+    throw browserError('not-found', 'browser: page has no global object to evaluate against')
+  }
+  return objectId
 }
 
 const NETWORK_IDLE_TICK_MS = 800

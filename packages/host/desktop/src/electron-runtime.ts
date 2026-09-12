@@ -81,10 +81,21 @@ const MAX_ZOOM_LEVEL = 4
  * logo 同理，它有 `onerror` 兜底所以只是"看不见"）。这不构成新的外泄面：同一条
  * 策略的 `connect-src` 早已放行 `http: https:`，被注入的脚本本来就能把数据
  * POST 出去，放行图片不增加能力。
+ *
+ * `worker-src` 必须显式放行 `blob:`（2026-09-12 打包版真机复现）：上游 0.1.5 的
+ * 附件上传（`@deepseek-ai/dsh-client-file-upload`）在生产路径上只用 **Blob-URL
+ * Worker** 传输（`runtime.ts:169-171/249-256`），右栏 PDF 预览同样 `new Worker(blob:…)`。
+ * CSP3 的 worker 回退链是 worker-src → child-src → script-src → default-src：
+ * `script-src` 一旦声明，`default-src` 里的 `blob:` 就永远轮不到 —— 控制台原文
+ * `Creating a worker from 'blob:…' violates … "script-src 'self' 'unsafe-inline'
+ * 'unsafe-eval'"; Note that 'worker-src' was not explicitly set, so 'script-src'
+ * is used as a fallback`，症状是「图片能发、PDF/zip/txt 附件必失败」。
+ * 放行的是 worker **来源**，不放开脚本求值面（`script-src` 未动）。
  */
 export const APP_CONTENT_SECURITY_POLICY = [
   "default-src 'self' data: blob: ws:",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "worker-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: http: https:",
   "font-src 'self' data:",

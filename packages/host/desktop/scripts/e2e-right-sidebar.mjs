@@ -210,6 +210,47 @@ try {
     `svgs=${brand.svgCount} imgs=${brand.imgCount} name=${JSON.stringify(brand.name)}${brandFailHint}`)
   await shoot('01b-brand')
 
+  // 1c. Hero 品牌槽（2026-09-12 补）：空白会话首屏的 `conversation.hero.brand.mark`
+  // 在上游是**带动画的 DeepSeek 鱼形 fallback**（EmptyHero 的 renderSlot fallback），
+  // 而此前的归属断言只覆盖 sidebar 两个槽 —— 鱼一旦露面没有任何自动化会发现。
+  // 归属标记 `data-brand-mark="app"` 只由我们的 BraceMark 携带。槽不在屏（已有会话）
+  // 时记 skipped，不算失败也不假装通过。
+  const heroExpr = `(() => {
+    const el = document.querySelector('[data-slot="conversation.hero.brand.mark"]')
+    if (el === null) return { present: false }
+    return {
+      present: true,
+      owned: el.querySelector('[data-brand-mark="app"]') !== null,
+      fishish: /48\\.8354|DeepSeek|deepseek-harness/i.test(el.innerHTML),
+      text: (el.textContent ?? '').trim().slice(0, 30),
+    }
+  })()`
+  const heroOk = await waitFor(`(() => { const r = ${heroExpr}; return r.present === false || (r.owned === true && r.fishish === false) })()`, 15000, 300)
+  const hero = await evaluate(heroExpr)
+  check('hero 品牌槽由本产品占用（排除上游鱼形兜底）',
+    heroOk && (hero.present === false || (hero.owned === true && hero.fishish === false)),
+    hero.present === false
+      ? 'skipped=hero-not-on-screen'
+      : `owned=${hero.owned} fishish=${hero.fishish} text=${JSON.stringify(hero.text)}`)
+
+  // 1d. 被服务的品牌静态资源（2026-09-12 修复项）：上游 dist 里那份 favicon 是鱼、
+  // manifest 写厂商名；桌面 host 用 exact 路由覆盖。这里在真机上验证覆盖真的生效。
+  const served = await evaluate(`(async () => {
+    const favicon = await fetch('/favicon.svg').then(r => r.ok ? r.text() : '').catch(() => '')
+    const manifest = await fetch('/manifest.webmanifest').then(r => r.ok ? r.json() : null).catch(() => null)
+    return {
+      ok: favicon.trimStart().startsWith('<svg'),
+      upstream: /48\\.8354|DeepSeek|deepseek-harness/i.test(favicon),
+      name: manifest === null ? null : manifest.name,
+      short: manifest === null ? null : manifest.short_name,
+    }
+  })()`)
+  check('被服务的 favicon/manifest 已白标（非上游鱼形/厂商名）',
+    served?.ok === true && served?.upstream === false
+      && typeof served?.name === 'string' && !/DeepSeek|DSH/u.test(served.name)
+      && String(served?.short ?? '') !== 'DSH',
+    `faviconSvg=${served?.ok} upstream=${served?.upstream} manifest=${JSON.stringify(served?.name)}/${JSON.stringify(served?.short)}`)
+
   // 2. Workspace + session. Rerunnable: a probe run against an app that already
   // has a conversation skips creation instead of clicking through a picker that
   // is no longer on screen (the first version failed on every second run).

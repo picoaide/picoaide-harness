@@ -91,3 +91,37 @@ SSO 回调通过桌面壳闸门并进入 token 预验证（探针期间临时清
 保留的兜底：即使某个渠道忘了写，运行期与构建期也会由 `slug`/渠道 id 派生出
 **只属于该渠道**的目录（绝不回落官方目录）；品牌渠道漏配仍会在 CI 阶段以中性信息
 中止（不回显渠道名）—— 数据根写错的代价（跨租户共享登录态）远大于一次构建失败。
+
+---
+
+## 修订（2026-09-12）：beta 不再与 official 共用数据根
+
+**结论**：`desktop.home_dir` 的**必填范围从"品牌渠道"扩到"除 official 之外的每个渠道"**；
+`beta` 恢复为**独立数据根** `.picoaide-harness-beta`；CI 不再给 `official || beta` 开豁免。
+
+**为什么推翻 2026-09-11 的"共用更省事"**：那次决定的隐含前提是"两条线跑同一份客户端"，
+但 DSH 升级到 0.1.5-rc.2 之后这个前提不成立了：
+
+- 正式线（官方 stable，pin `dsh-v0.1.2-rc.1`）会话格式 = **v0**；
+  预发线（含 0.1.5-rc.2，pin `dsh-v0.1.5-rc.2`）会话格式 = **v3**；
+- rc1 只认**无版本**文件名（`session.jsonl[.zstd]`），对 `session.vN.*` 世代**静默跳过**
+  （`session-persistence-jsonl` 读路径 `continue`），迁移又是**副本式**（源 v0 保留、
+  另发 v3）⇒ 同一台机器上两代客户端会各写一份：
+  - 预发期间新建的会话（只有 v3）对正式客户端**永久不可见**；
+  - 已经双边存在的会话，正式客户端继续往 v0 追加、预发客户端只认 v3
+    ⇒ **历史分叉**，且两边都不报错；
+- 两代客户端的 Electron userData 不同（`PicoAide Harness` vs `PicoAide Harness (beta)`）
+  ⇒ **单实例锁挡不住**，两个进程可以同时活着写同一个数据根。
+
+共用省下的是一次登录，代价是静默丢数据 —— 不划算，因此：
+
+1. `scripts/ci-channels.sh`：`desktop.home_dir` 对所有非 `official` 渠道必填；任何渠道
+   写成 `.picoaide-harness` 一律 fail-loud（错误信息不回显渠道名）。
+2. `scripts/verify-ci-scripts.mjs`：三条新用例 —— beta 写官方目录必须失败、beta 写
+   `.picoaide-harness-beta` 必须通过、beta 缺字段必须失败（原来的"beta 共用必须通过"
+   用例已删除）。
+3. `picoaide/channels`（私有）`channels/beta/channel.json`：`home_dir` →
+   `.picoaide-harness-beta`，`meta.description` 同步说明原因。
+4. **运维口径**：预发客户端升级后**不会**再看到正式客户端的登录态与历史会话（这是
+   目的，不是回归）；需要在预发环境复用数据时，请手动从 `~/.picoaide-harness`
+   复制到 `~/.picoaide-harness-beta`，且**不要**让两代客户端交替打开同一份拷贝。

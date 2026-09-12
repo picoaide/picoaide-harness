@@ -24,7 +24,7 @@ This is the first principle of the entire product line.
 
 DeepSeek Harness's core is a composable agent harness: agents, models, tools, sessions, and the Web UI are all composed through the Cordis plugin mechanism. Instead of rewriting from scratch, PicoAide Harness **treats the entire product as a plugin** too — the desktop shell (window, tray, updates, the fixed `desktop` profile) is itself a legitimate DSH plugin that runs through the same composition path as third-party plugins:
 
-- The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `0.1.2-rc.1`); no product capability modifies the upstream source;
+- The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `dsh-v0.1.5-rc.2`); no product capability modifies the upstream source;
 - Plugins from the official ecosystem can be installed and used directly;
 - Our own business capabilities (Capability Hub, connectors, scheduled jobs, browser, enterprise login) are combined **on equal footing** with third-party plugins — they inject interfaces through the same slot mechanism and provide capabilities through the same service contract;
 - Upgrades only follow the upstream version number and do not break local extensions.

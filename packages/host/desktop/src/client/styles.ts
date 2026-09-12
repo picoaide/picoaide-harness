@@ -24,7 +24,14 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopMacCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
 .dshDesktopMacCaptionRow::before { content: ""; position: absolute; top: 0; right: 0; left: 0; height: ${MACOS_DRAG_REGION_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
 .dshDesktopConversationSurface { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); }
-.dshDesktopRightbarSurface { grid-column: 3; grid-row: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--dsw-alias-bg-base); border-left: 1px solid var(--dsw-alias-border-l2); }
+/* The right column never clips (upstream ui-layout AppFrame.module.css
+   .rightbarCol): its occupant anchors a fixed-width panel to the column's right
+   edge and hangs over the centre from a zero-width track, so clipping here
+   would cut a shown panel down to the track. The closed panel
+   (translateX(100%)) stays off-screen through the frame's own overflow: the
+   column is static, so the panel's containing block is .dshDesktopFrame, and
+   every slot outlet wrapper is display: contents (no intermediate box). */
+.dshDesktopRightbarSurface { grid-column: 3; grid-row: 1; min-width: 0; min-height: 0; overflow: visible; background: var(--dsw-alias-bg-base); border-left: 1px solid var(--dsw-alias-border-l2); }
 .dshDesktopFrame[data-desktop-platform="win32"] { grid-template-rows: ${WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
 .dshDesktopFrame[data-desktop-platform="win32"] .dshDesktopSidebarSurface { grid-row: 1 / -1; }
 .dshDesktopFrame[data-desktop-platform="win32"] .dshDesktopConversationSurface,
