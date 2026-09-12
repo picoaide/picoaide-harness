@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1013,6 +1014,12 @@ func (a *AdminAPI) usage(c *gin.Context) {
 	}
 	rows, err := serverstore.UsageAggregateWithLedger(a.DB, from, to, aggGroup, opts...)
 	if err != nil {
+		// FIX-11:账本段无法兑现某个过滤条件时必须**明确报错**,而不是退回
+		// 500「统计失败」(用户看不出是自己把区间拉过了保留边界)。
+		if errors.Is(err, serverstore.ErrUnsupportedFilter) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return
 	}
@@ -1352,10 +1359,21 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			break
 		}
 	}
+	// actor 必须在这里取:本函数随即 c.JSON 返回,gin 会把 *gin.Context
+	// 回收进池,池化对象会被下一个请求 reset() 并复用。闭包若在 goroutine
+	// 里再调 currentAdminUsername(c)(= c.Get("admin_user")),读到的就是
+	// **另一个请求**的 c.Keys —— 审计条目会记到别人头上,或落到 reset() 后
+	// 的回退字面量 "admin"。审计 2026-09-12(CC-P1-1)实测:audit_logs
+	// action=ldap_sync 的 username 为 "admin",而真实发起人是 "boss"。
+	// 修法:在 go func() **之前**取值,闭包只捕获字符串。
+	actor := currentAdminUsername(c)
 	if ldapOn {
 		go func() {
 			if _, err := SyncDirectoryOnce(a.DB, nil); err != nil {
-				_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "ldap_sync", "failed: "+err.Error())
+				// 闭包内**禁止**再触碰 c(任何形式):这是上面那段注释的
+				// 可执行形式。SyncDirectoryOnce 是网络 IO,耗时不可控,
+				// 恰好是最容易跨越 gin.Context 生命周期的一类调用。
+				_ = serverstore.AuditLog(a.DB, actor, "ldap_sync", "failed: "+err.Error())
 			}
 		}()
 	}
@@ -1759,10 +1777,21 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 // balanceReq 手动调整余额(mode: add | deduct | set | clear)。
+//
+// FIX-08(审计 2026-09-12,P1):Amount 必须是**指针**。此前是 float64,
+// 「字段缺失」与「显式传 0」在 Go 侧不可区分 —— `{"mode":"set","amount":null}`
+// 与省略 amount 都解出 0,于是 set 分支被当成「清零」执行:HTTP 200 +
+// ok:true,12345.67 → 0(审计实测,不可逆)。
+//
+// 触发链路(webadmin `pages/usage/Balance.tsx`):输入框只判
+// `Number.isFinite(n)`,不判 `n*100`;用户输入 1e307 一类大数时 `n*100`
+// 溢出成 Infinity,`JSON.stringify(Infinity)` 产出 **null** → 服务端按 0 处理。
+// 客户端守卫(对最终值判上界)属于 webadmin 组;服务端这一侧必须用指针把
+// 「没给金额」和「金额就是 0」分开,缺字段即 400。
 type balanceReq struct {
-	Mode   string  `json:"mode"`
-	Amount float64 `json:"amount"`
-	Reason string  `json:"reason"`
+	Mode   string   `json:"mode"`
+	Amount *float64 `json:"amount"`
+	Reason string   `json:"reason"`
 }
 
 // maxBalanceAmount 单次调整/配置额度上限(1 亿元,防误输天文数字)。
@@ -1796,16 +1825,40 @@ func (a *AdminAPI) adjustUserBalance(c *gin.Context) {
 	if mode == "" {
 		mode = "add"
 	}
-	// set/clear 允许 0(清零是合法操作);add/deduct 必须为正数。
+	switch mode {
+	case "add", "deduct", "set", "clear":
+	default:
+		writeError(c, http.StatusBadRequest, "VALIDATION", "mode 只能是 add/deduct/set/clear")
+		return
+	}
+	// FIX-08:先判「金额有没有给」。clear 是唯一不需要 amount 的模式
+	// (它本身就是"清零"这个动作);其余三种模式下 amount 缺失/null 一律 400,
+	// 绝不能被当成 0 —— set + 缺字段 = 静默清零是这条审计的原始缺陷。
+	amount := 0.0
 	if mode == "clear" {
-		req.Amount = 0
-	} else if req.Amount > maxBalanceAmount {
+		// clear 的金额恒为 0,显式传入的值被忽略(与修复前一致)。
+	} else {
+		if req.Amount == nil {
+			writeError(c, http.StatusBadRequest, "VALIDATION",
+				"缺少 amount:若要清零请用 mode=clear,set 必须显式给出金额(0 也合法)")
+			return
+		}
+		amount = *req.Amount
+		// JSON 数字不可能解出 NaN/Inf,但客户端把 Infinity 序列化成 null →
+		// 已在上面被 nil 拦下;这里留一道纵深防御,拒绝一切非有限数。
+		if math.IsNaN(amount) || math.IsInf(amount, 0) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "金额必须是有限数值")
+			return
+		}
+	}
+	// set/clear 允许 0(清零是合法操作);add/deduct 必须为正数。
+	if mode != "clear" && amount > maxBalanceAmount {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "金额不能超过 1 亿元")
 		return
-	} else if mode != "set" && req.Amount <= 0 {
+	} else if mode != "set" && mode != "clear" && amount <= 0 {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "金额必须大于 0")
 		return
-	} else if mode == "set" && req.Amount < 0 {
+	} else if mode == "set" && amount < 0 {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "金额不能为负数")
 		return
 	}
@@ -1814,14 +1867,11 @@ func (a *AdminAPI) adjustUserBalance(c *gin.Context) {
 	var next float64
 	switch mode {
 	case "add":
-		next, err = serverstore.AdjustUserBalance(a.DB, id, req.Amount, req.Reason, actor)
+		next, err = serverstore.AdjustUserBalance(a.DB, id, amount, req.Reason, actor)
 	case "deduct":
-		next, err = serverstore.AdjustUserBalance(a.DB, id, -req.Amount, req.Reason, actor)
+		next, err = serverstore.AdjustUserBalance(a.DB, id, -amount, req.Reason, actor)
 	case "set", "clear":
-		next, err = serverstore.SetUserBalance(a.DB, id, req.Amount, req.Reason, actor)
-	default:
-		writeError(c, http.StatusBadRequest, "VALIDATION", "mode 只能是 add/deduct/set/clear")
-		return
+		next, err = serverstore.SetUserBalance(a.DB, id, amount, req.Reason, actor)
 	}
 	if errors.Is(err, serverstore.ErrValidation) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "扣减金额超过当前余额(如需归零请用「清零」)")

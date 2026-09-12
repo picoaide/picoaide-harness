@@ -18,6 +18,30 @@ import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { JobRecord } from './jobs.ts'
 
+/**
+ * Structural view of the live session a permission preset is applied to. The
+ * real value is a DSH `Session`; typing the narrow shape keeps this package
+ * free of a host-service type import.
+ */
+export interface CronSessionHandle {
+  readonly id: string
+}
+
+/**
+ * The slice of `ctx.permissionPresets` the executor drives. The service
+ * (`packages/interaction/permission-presets`) exposes exactly these members;
+ * `set()` writes the preset's sandbox + approval bundle onto a live session —
+ * the same call its `/permission` command handler makes.
+ */
+export interface CronPermissionPresets {
+  /** Switchable preset names (the roster a job's `permission` must name). */
+  readonly names: readonly string[]
+  /** Apply one preset to a live session. */
+  set(session: CronSessionHandle, name: string): void
+  /** Effective preset of a session; used to confirm the write took effect. */
+  current?(session: CronSessionHandle): string
+}
+
 /** Host collaborators the executor drives to launch one agent run. */
 export interface CronExecutorDeps {
   /** Session Remote owner: create/rename/prompt (host-side direct calls). */
@@ -26,10 +50,46 @@ export interface CronExecutorDeps {
   readonly workspaceRegistry: WorkspaceRegistry
   /** Agent preset roster (the desktop installs the Windows-guarded subclass). */
   readonly agentPresets: AgentPresets
+  /**
+   * Resolve the permission-preset service (FIX-17). Resolved lazily so a
+   * service composed after this plugin still applies; a missing service makes
+   * a job that pins `permission` FAIL instead of silently ignoring it.
+   */
+  readonly permissionPresets?: () => CronPermissionPresets | undefined
+  /** Resolve the session store: the freshly created session the preset lands on. */
+  readonly sessions?: () => { get(id: string): CronSessionHandle | undefined } | undefined
 }
 
 export class HostCronExecutor {
   constructor(private readonly deps: CronExecutorDeps) {}
+
+  /**
+   * Apply one pinned permission preset to a freshly created session (FIX-17).
+   *
+   * The previous implementation queued a `/permission <name>` chat line, but
+   * the `prompt` channel never parses slash commands (`SessionController.prompt`
+   * only accepts text; only `commands.execute()` dispatches commands), so the
+   * preset was silently dropped. Writing through the permission service is the
+   * same path the command handler takes, and the read-back makes a preset that
+   * failed to stick a failed run instead of a silent no-op.
+   */
+  private applyPermissionPreset(sessionId: string, preset: string): void {
+    const presets = this.deps.permissionPresets?.()
+    if (presets === undefined) {
+      throw new Error(`permission preset service unavailable, cannot apply "${preset}"`)
+    }
+    if (!presets.names.includes(preset)) {
+      throw new Error(`permission preset not found: ${preset}`)
+    }
+    const session = this.deps.sessions?.()?.get(sessionId)
+    if (session === undefined) {
+      throw new Error(`session not found for permission preset: ${sessionId}`)
+    }
+    presets.set(session, preset)
+    if (presets.current !== undefined && presets.current(session) !== preset) {
+      throw new Error(`permission preset did not take effect: ${preset}`)
+    }
+  }
 
   /**
    * Execute one job action. Resolves when the execution is settled (the
@@ -71,15 +131,9 @@ export class HostCronExecutor {
       try {
         await this.deps.sessionController.rename({ sessionId, title: job.name })
         if (job.action.permission !== undefined) {
-          // The 0.1.2 prompt receipt only confirms acceptance into the Agent
-          // inbox (no command-acknowledgement half), so the permission
-          // command is queued and settled by the session itself.
-          await this.deps.sessionController.prompt({
-            requestId: crypto.randomUUID() as SessionRequestId,
-            sessionId,
-            mode: 'queue',
-            content: [{ type: 'text', text: `/permission ${job.action.permission}` }],
-          }, runSignal)
+          // FIX-17: direct service call (no chat line), before the task prompt
+          // so the run starts under the pinned permission.
+          this.applyPermissionPreset(sessionId, job.action.permission)
         }
         await this.deps.sessionController.prompt({
           requestId: crypto.randomUUID() as SessionRequestId,

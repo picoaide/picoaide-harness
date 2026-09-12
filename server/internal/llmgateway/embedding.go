@@ -215,6 +215,14 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		return
 	}
 	if _, err := serverstore.RecordUsageKind(a.DB, user.ID, req.Model, tokens, 0, "embedding"); err != nil {
+		// FIX-05:embedding 走同一条结算事务(RecordUsageKind → settleUsageCostTx)。
+		// 余额不足时事务已回滚,必须在 c.JSON 交付向量之前拒绝 —— 否则向量
+		// 白拿、账上一分不扣。
+		if isBalanceSettlementFailure(err) {
+			log.Printf("gateway: insufficient balance, rejecting embedding before delivery: user=%d model=%s", user.ID, req.Model)
+			rejectBalanceSettlement(c)
+			return
+		}
 		log.Printf("gateway: record embed usage: %v", err)
 	}
 	c.JSON(http.StatusOK, gin.H{

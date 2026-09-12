@@ -20,16 +20,21 @@ import (
 
 // 权限点清单。命名规范: <域>:<动作>。
 const (
-	PermUserRead        = "user:read"  // 用户列表
-	PermUserWrite       = "user:write" // 增改删用户、配额、角色分配(2026-09-08:删除零消费的 role:assign)
-	PermDeptRead        = "dept:read"  // 部门
-	PermDeptWrite       = "dept:write"
-	PermAuthRead        = "auth:read"    // 认证配置(脱敏)
-	PermAuthWrite       = "auth:write"   // 认证配置(含 client_secret)
-	PermGatewayRead     = "gateway:read" // 网关/模型/渠道/价格
-	PermGatewayWrite    = "gateway:write"
-	PermUsageRead       = "usage:read"       // 用量报表
-	PermReportWrite     = "report:write"     // 报表订阅管理(2026-09 P1)
+	PermUserRead     = "user:read"  // 用户列表
+	PermUserWrite    = "user:write" // 增改删用户、配额、角色分配(2026-09-08:删除零消费的 role:assign)
+	PermDeptRead     = "dept:read"  // 部门
+	PermDeptWrite    = "dept:write"
+	PermAuthRead     = "auth:read"    // 认证配置(脱敏)
+	PermAuthWrite    = "auth:write"   // 认证配置(含 client_secret)
+	PermGatewayRead  = "gateway:read" // 网关/模型/渠道/价格
+	PermGatewayWrite = "gateway:write"
+	PermUsageRead    = "usage:read"   // 用量报表
+	PermReportWrite  = "report:write" // 报表订阅管理(2026-09 P1)
+	// PermReportRead 报表订阅**列表**的独立读权限(审计 2026-09-12 P1-4):
+	// 列表里的 hook_url 是凭据本体(企微/钉钉/飞书机器人地址带 key=…,谁拿到
+	// 谁就能往企业群里发任意内容),因此不能再挂在 usage:read 上——那会把
+	// hook_url 明文暴露给只读 auditor。**刻意不进 AuditorPermissions**。
+	PermReportRead      = "report:read"
 	PermMarketRead      = "market:read"      // 市场技能
 	PermMarketWrite     = "market:write"     // 技能审批/授权
 	PermCapabilityRead  = "capability:read"  // 能力中心
@@ -49,7 +54,7 @@ var AllPermissions = []string{
 	PermDeptRead, PermDeptWrite,
 	PermAuthRead, PermAuthWrite,
 	PermGatewayRead, PermGatewayWrite,
-	PermUsageRead, PermReportWrite,
+	PermUsageRead, PermReportWrite, PermReportRead,
 	PermMarketRead, PermMarketWrite,
 	PermCapabilityRead, PermCapabilityWrite,
 	PermConnectorRead, PermConnectorWrite,

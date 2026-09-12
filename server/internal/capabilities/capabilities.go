@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -121,22 +122,20 @@ func parseTypeFilter(c *gin.Context) typeFilter {
 		return typeFilter{skills: true, agents: true}
 	default:
 		// 容忍逗号列表 (skill,agent) 与全量回退。
-		seen := map[string]bool{}
-		part := ""
-		flush := func() {
+		//
+		// FIX-15(审计 2026-09-12,P1):此处原为手写循环逐**字符**
+		// `part += string(ch)` 累加。Go 字符串不可变,每次 `+=` 都要重新分配
+		// 并拷贝整个已累积前缀 ⇒ 整体 O(n²)。审计实测(真实 parseTypeFilter):
+		// 16 KB→114 ms、64 KB→795 ms、128 KB→3.71 s、256 KB→14.96 s,干净的
+		// 二次曲线;入口只有 BearerAuth 且无限流,单请求可烧掉约 500 CPU·秒。
+		// 改成 strings.Split + map:单遍线性、无字符串拼接。
+		// 语义与原先逐字符 flush 完全一致(空片段忽略,不做 trim)。
+		seen := make(map[string]bool, 4)
+		for _, part := range strings.Split(t, ",") {
 			if part != "" {
 				seen[part] = true
-				part = ""
 			}
 		}
-		for _, ch := range t {
-			if ch == ',' {
-				flush()
-				continue
-			}
-			part += string(ch)
-		}
-		flush()
 		return typeFilter{skills: seen["skill"], agents: seen["agent"]}
 	}
 }

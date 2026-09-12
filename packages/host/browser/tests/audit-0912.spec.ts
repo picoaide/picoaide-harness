@@ -272,6 +272,111 @@ describe('P0-A 快照不得回传注入的凭证密码', () => {
   })
 })
 
+// -------------------------------------------------- FIX-03 (2026-09-12)
+
+describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
+  // 同上：口令不含任何 secret 形状关键词 ⇒ 只有值级擦除能挡住。
+  const SECRET = 'hunter2-xyz9-quartz'
+
+  it('runtime.eval 的返回值擦除本 tab 注入过的凭证值（P0-A 的等价信道）', async () => {
+    const { runtime, adapter, dir } = makeRuntime(async (id) => (id === 'corp-sso' ? { username: 'alice', password: SECRET } : null))
+    opened.push({ runtime, dir })
+    await runtime.open('https://login.example')
+    adapter.lastView().transport.handler = (method, params) => {
+      if (method !== 'Runtime.evaluate') return {}
+      const expression = String(params?.expression ?? '')
+      if (expression.includes('passField')) return { result: { value: { filled: 2, username: true, password: true } } }
+      // Any other expression (the eval under test) resolves to the password:
+      // this is what `document.querySelector('#pw').value` really returns.
+      return { result: { value: SECRET } }
+    }
+    expect(await runtime.fillCredentials(1, 'corp-sso')).toEqual({ username: true, password: true })
+
+    const out = await runtime.eval(1, "document.querySelector('#pw').value")
+    expect(out).not.toContain(SECRET)
+    expect(out).toBe('"****"')
+  })
+
+  it('口令嵌在更大文本里也只擦该段（值级精确匹配，不误伤其它文本）', async () => {
+    const { runtime, adapter, dir } = makeRuntime(async (id) => (id === 'corp-sso' ? { password: SECRET } : null))
+    opened.push({ runtime, dir })
+    await runtime.open('https://login.example')
+    adapter.lastView().transport.handler = (method, params) => {
+      if (method !== 'Runtime.evaluate') return {}
+      const expression = String(params?.expression ?? '')
+      if (expression.includes('passField')) return { result: { value: { filled: 1, username: false, password: true } } }
+      return { result: { value: `logged in as alice with ${SECRET} at 12:00` } }
+    }
+    await runtime.fillCredentials(1, 'corp-sso')
+    const out = await runtime.eval(1, 'document.body.innerText')
+    expect(out).not.toContain(SECRET)
+    expect(out).toContain('logged in as alice with **** at 12:00')
+  })
+
+  it('没注入过凭证的 tab：eval 返回值原样（不误伤）', async () => {
+    const { runtime, adapter, dir } = makeRuntime(async () => ({ password: SECRET }))
+    opened.push({ runtime, dir })
+    await runtime.open('https://other.example')
+    adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: SECRET } } : {})
+    await expect(runtime.eval(1, 'window.__X__')).resolves.toBe(JSON.stringify(SECRET))
+  })
+
+  it('工具出口（browser_eval 返回值 + render 文本）都不含口令（纵深）', async () => {
+    const { runtime, adapter, dir } = makeRuntime(async (id) => (id === 'corp-sso' ? { username: 'alice', password: SECRET } : null))
+    opened.push({ runtime, dir })
+    await runtime.open('https://login.example')
+    adapter.lastView().transport.handler = (method, params) => {
+      if (method !== 'Runtime.evaluate') return {}
+      const expression = String(params?.expression ?? '')
+      if (expression.includes('passField')) return { result: { value: { filled: 2, username: true, password: true } } }
+      return { result: { value: `prefix ${SECRET} suffix` } }
+    }
+
+    const tools = new Map<string, { execute: (args: unknown, exec: unknown) => Promise<unknown>, output: { render: (args: unknown, value: unknown) => Array<{ type: string, text: string }> } }>()
+    const ctx = {
+      tools: { register: (definition: { name: string }) => { tools.set(definition.name, definition as never); return () => tools.delete(definition.name) } },
+      systemPrompt: { section: () => () => {} },
+    } as unknown as Parameters<typeof applyBrowserTools>[0]
+    const dispose = applyBrowserTools(ctx, runtime)
+    const exec = { agent: undefined, signal: new AbortController().signal }
+
+    await tools.get('browser_fill_credentials')!.execute({ connectorId: 'corp-sso' }, exec)
+    const evalTool = tools.get('browser_eval')!
+    const value = await evalTool.execute({ expression: "document.querySelector('#pw').value" }, exec)
+    const rendered = evalTool.output.render({}, value).map((part) => part.text).join('\n')
+
+    expect(JSON.stringify(value)).not.toContain(SECRET)
+    expect(rendered).not.toContain(SECRET)
+    expect(rendered).toContain('****')
+    dispose()
+  })
+})
+
+// -------------------------------------------------- FIX-06 (2026-09-12)
+
+describe('FIX-06 标题退化/下载标题在源头就脱敏', () => {
+  it('页面无标题时 tab.title 不是明文 URL（窗口标题 + ledger 都不再泄漏）', async () => {
+    const { runtime, dir } = makeRuntime()
+    opened.push({ runtime, dir })
+    await runtime.open('https://a.example')
+    const id = runtime.currentTabId()!
+    await runtime.navigate(id, 'https://h/cb?session=FAKESESSION789')
+    expect(runtime.tabState(id).title).toBe('https://h/cb?session=****')
+    // history 里同一行的 title 也不能有明文
+    expect(JSON.stringify(runtime.history({ limit: 5 }))).not.toContain('FAKESESSION789')
+  })
+
+  it('downloadUrl 的 `download: ${url}` 标题脱敏落库', async () => {
+    const { runtime, store, dir } = makeRuntime()
+    opened.push({ runtime, dir })
+    await runtime.open('https://a.example')
+    await runtime.downloadUrl('https://files.example.com/export?X-Amz-Signature=FAKESIG123&token=FAKETOKEN456')
+    const entry = store.queryHistory({ limit: 1 })[0]
+    expect(entry?.title).toBe('download: https://files.example.com/export?X-Amz-Signature=****&token=****')
+    expect(entry?.url).toBe('https://files.example.com/export?X-Amz-Signature=****&token=****')
+  })
+})
+
 // ------------------------------------------------------------------- P1-5
 
 describe('P1-5 op log 的 URL fragment 与 history 同款脱敏', () => {

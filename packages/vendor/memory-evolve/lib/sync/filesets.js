@@ -15,8 +15,12 @@
  * daily / todo-global，需求 #5 命名空间）与本地分支（refs/heads/<轨>），
  * 各轨互不干扰；仅共享记忆仓库（setup 带 url）可用。
  *
- * 纯函数零依赖（merge.js 等不引入仓库逻辑的地方可安全 import）。
+ * 纯路径逻辑（只 import node:fs/node:path 做本地符号链接探测；不引入仓库
+ * 逻辑，merge.js 等模块可安全 import）。
  */
+
+import { lstatSync } from 'node:fs'
+import { join } from 'node:path'
 
 /**
  * 项目级文件集规格（memory=记忆格式文件、todo=TODO 格式文件、
@@ -91,9 +95,32 @@ const LOGS_FILE_RE = /^logs\/[^/\\]+\.md$/
  *
  * @param {string} path - 仓库相对路径。
  * @param {string} [fileset='project'] - 文件集。
+ * @param {string} [rootDir] - 仓库根目录。给了就额外做**符号链接**校验
+ *   （FIX-22，2026-09-12）：仓库内已存在的符号链接路径直接拒收 ——
+ *   `logs -> <仓库外目录>` 这类条目（git 记录为 120000，clone/checkout 会
+ *   实体化成真符号链接）会让"路径字符串合法"的白名单写穿到仓库外。
+ *   远端树路径（本地不存在，readTreeFiles）不传即可，模式校验照旧。
  * @returns {boolean}
  */
-export function isMemoryFile(path, fileset = 'project') {
+export function isMemoryFile(path, fileset = 'project', rootDir) {
+  if (!matchesFileset(path, fileset)) return false
+  if (typeof rootDir !== 'string' || rootDir === '') return true
+  // 逐层检查已存在的路径组件（leaf + 各级祖先）：任何一层是符号链接即拒收。
+  // 不存在的组件（ENOENT）停止下钻——落点真实路径断言在 worker 侧还有一层。
+  let current = rootDir
+  for (const part of path.split('/')) {
+    current = join(current, part)
+    try {
+      if (lstatSync(current).isSymbolicLink()) return false
+    } catch {
+      break
+    }
+  }
+  return true
+}
+
+/** 纯路径模式校验（不含磁盘状态）。 */
+function matchesFileset(path, fileset) {
   const spec = filesetSpec(fileset)
   if (spec.memory.includes(path)) return true
   if (spec.todo.includes(path)) return true

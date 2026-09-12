@@ -322,6 +322,18 @@ func validateTar(data []byte, lim Limits) error {
 	}
 	defer zr.Close()
 	tr := tar.NewReader(zr)
+	// FIX-24(审计 2026-09-12,P1-6):tar.gz 分支此前**完全没有**重复条目检查,
+	// 而 zip 分支有(checkZipDuplicates,三个入口都调)。后果是同一份归档在
+	// 四个入口里给出**两个不同的 SKILL.md**:
+	//
+	//	Validate     → nil(审核通过)
+	//	ListContents → 预览 = benign(第一个命中)
+	//	tarExtract   → benign(命中即返回)
+	//	tarReadAll   → EVIL(末条覆盖 → 安装/重打包产物)
+	//
+	// 即「审核所见 ≠ 员工所装」。语义与 zip 完全对齐:同一(归一化、大小写
+	// 不敏感)路径出现两次即 ErrDuplicateEntry;目录条目不携带内容,不计入。
+	seen := dupEntrySet{}
 	var total int64
 	entries := 0
 	hasRequired := false
@@ -350,6 +362,9 @@ func validateTar(data []byte, lim Limits) error {
 		if name == "" {
 			return ErrUnsafe
 		}
+		if err := seen.add(name); err != nil {
+			return err
+		}
 		total += hdr.Size
 		if total > lim.MaxUnpackedBytes {
 			return ErrInvalid
@@ -372,6 +387,9 @@ func tarList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 	defer zr.Close()
 	tr := tar.NewReader(zr)
 	set := map[string]bool{}
+	// FIX-24:与 zipList 的 checkZipDuplicates 同语义 —— 重复条目一律拒绝,
+	// 不做"第一个生效"的静默挑选。四个入口必须给出一致的结论。
+	seen := dupEntrySet{}
 	var required string
 	var order []string
 	entries := 0
@@ -397,6 +415,9 @@ func tarList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 		if name == "" {
 			continue
 		}
+		if err := seen.add(name); err != nil {
+			return nil, "", err
+		}
 		if name == lim.RequiredFile && required == "" && hdr.Size <= maxPreview {
 			buf := make([]byte, hdr.Size)
 			if _, err := io.ReadFull(tr, buf); err != nil {
@@ -420,6 +441,21 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 	}
 	defer zr.Close()
 	tr := tar.NewReader(zr)
+	// FIX-24:与 zipExtract 的 checkZipDuplicates 同语义 —— 重复条目一律拒绝,
+	// 而不是"命中第一个就返回"。
+	//
+	// 注意必须**扫完整个归档**才能返回命中结果:tar 没有 zip 那种只读条目头
+	// 的廉价预扫,而"命中即 return"会让位于目标**之后**的重复条目逃过检查
+	// (双 SKILL.md 时预览 benign、tarReadAll 却是 EVIL —— 正是本条审计的
+	// 现场)。归档有 MaxEntries/MaxUnpackedBytes 上限,完整扫描代价可控。
+	seen := dupEntrySet{}
+	var (
+		outContent string
+		outSize    int64
+		outFound   bool
+		outBinary  bool
+		outTooBig  bool
+	)
 	for {
 		hdr, herr := tr.Next()
 		if herr == io.EOF {
@@ -435,23 +471,33 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		if nerr != nil || name == "" {
 			continue
 		}
-		if name != target {
+		if derr := seen.add(name); derr != nil {
+			return "", 0, false, false, false, derr
+		}
+		if name != target || outFound {
 			continue
 		}
 		size := hdr.Size
-		if size > maxPreview {
-			return "", size, true, false, true, nil
+		switch {
+		case size > maxPreview:
+			outSize, outFound, outTooBig = size, true, true
+		default:
+			buf := make([]byte, size)
+			if _, err := io.ReadFull(tr, buf); err != nil {
+				return "", size, true, false, false, ErrUnsafe
+			}
+			outSize, outFound = size, true
+			if !utf8.Valid(buf) {
+				outBinary = true
+			} else {
+				outContent = string(buf)
+			}
 		}
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(tr, buf); err != nil {
-			return "", size, true, false, false, ErrUnsafe
-		}
-		if !utf8.Valid(buf) {
-			return "", size, true, true, false, nil
-		}
-		return string(buf), size, true, false, false, nil
 	}
-	return "", 0, false, false, false, nil
+	if !outFound {
+		return "", 0, false, false, false, nil
+	}
+	return outContent, outSize, true, outBinary, outTooBig, nil
 }
 
 // NormalizePath normalizes an archive entry path and refuses absolute paths
@@ -572,6 +618,11 @@ func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	out := map[string][]byte{}
+	// FIX-24:重复条目一律拒绝。这是审计里"审核所见 ≠ 安装产物"的**直接**
+	// 现场 —— `out[name] = buf` 是末条覆盖,而 tarList/tarExtract 取第一条,
+	// 于是双 SKILL.md 的归档在审核页显示 benign、在 ReadAll(市场规范化重
+	// 打包)里是 EVIL。
+	seen := dupEntrySet{}
 	var total int64
 	entries := 0
 	for {
@@ -596,6 +647,9 @@ func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 		if name == "" || hdr.Typeflag == tar.TypeDir {
 			continue
 		}
+		if derr := seen.add(name); derr != nil {
+			return nil, derr
+		}
 		buf, rerr := io.ReadAll(io.LimitReader(tr, lim.MaxUnpackedBytes))
 		if rerr != nil {
 			return nil, ErrInvalid
@@ -604,7 +658,11 @@ func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 		if total > lim.MaxUnpackedBytes {
 			return nil, ErrInvalid
 		}
-		out[name] = buf
+		// first-wins:即使重复检查在将来被绕过(例如换成流式实现),落盘语义
+		// 也必须与 tarList/tarExtract 的"第一个命中"一致,不能是末条覆盖。
+		if _, exists := out[name]; !exists {
+			out[name] = buf
+		}
 	}
 	return out, nil
 }

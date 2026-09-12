@@ -38,6 +38,7 @@ const (
 	CodeInvocationInvalid   = "INVOCATION_INVALID"
 	CodeProvenanceForbidden = "PROVENANCE_FORBIDDEN"
 	CodeManifestMismatch    = "MANIFEST_MISMATCH"
+	CodeInputTooLarge       = "INPUT_TOO_LARGE"
 )
 
 // StatusFor maps a validation code to its HTTP status. 全部包内校验失败都是
@@ -47,7 +48,7 @@ func StatusFor(code string) int {
 	case CodeMissingField, CodeInvalidAppID, CodeInvalidVersion, CodeFieldTooLong,
 		CodeFieldTooShort, CodeInvalidType, CodeIdentityMismatch, CodeBOMDetected,
 		CodeFrontmatterInvalid, CodeBodyEmpty, CodeInvocationInvalid,
-		CodeProvenanceForbidden, CodeManifestMismatch:
+		CodeProvenanceForbidden, CodeManifestMismatch, CodeInputTooLarge:
 		return 422
 	default:
 		return 422
@@ -73,6 +74,162 @@ const (
 	MaxTagRunes  = 32
 	MinBodyRunes = 50
 )
+
+// 解析预算(审计 2026-09-12 FIX-01,P0:YAML 深度炸弹 → 进程级 OOM)。
+//
+// 背景:goccy/go-yaml v1.19.2 的**解析器**对嵌套集合没有深度/节点上限,
+// 内存随嵌套深度二次增长,且 `fatal error: out of memory` **不可 recover()**
+// ——一次上传即可打死整个服务端进程。实测(rlimit 3 GB,128 KB 输入):
+//
+//	`a: ` + `[`×200000  → runtime: out of memory / fatal error(exit 2)
+//	`a: ` + `[`×20000   → RSS 5 → 462 MiB
+//	`a: ` + `[`×131072  → OOM;`- `×65536 → OOM;`{`×65536 → 47 MiB
+//
+// 上游没有 MaxDepth 选项(内部 maxDecodeDepth=10000 只在 AST **建成之后**的
+// 解码阶段生效,拦不住解析期的爆炸),所以在把文本交给解析器之前必须先按字符
+// 统计把它挡掉。三层闸门,从最便宜到最贵:
+//
+//  1. MaxSkillMDBytes            —— O(1) 长度上限,兜住一切形态的输入规模;
+//  2. checkFrontmatterComplexity —— O(n) 单遍字符统计,零分配,先于解析器;
+//  3. yaml.Unmarshal             —— 只有通过上面两关的文本才会进解析器。
+//
+// 阈值不误伤的理由:合法的技能 frontmatter 是**扁平映射**(最多
+// `tags: [a, b, c]` 一层),嵌套深度 ≤ 2、流式集合 ≤ 2 个、块序列指示符
+// ≤ MaxTags(30) 个、锚点/别名/标签 0 个 —— 下面留了一个数量级的余量。
+const (
+	// MaxSkillMDBytes 是一份 SKILL.md / preset.yml 交给解析器的字节上限。
+	// 与 sharedskills/agentshare 的 maxFilePreviewBytes 同值:审核预览上限
+	// 之上的文件本来就读不出来,解析入口必须给出同一个边界。
+	MaxSkillMDBytes = 128 << 10
+
+	// MaxFrontmatterDepth 是流式集合与块序列指示符的嵌套深度上限。
+	MaxFrontmatterDepth = 32
+
+	// MaxFrontmatterCollections 是 '[' / '{' / ']' / '}' 的出现次数上限。
+	MaxFrontmatterCollections = 256
+
+	// MaxFrontmatterIndicators 是块序列指示符("- " / "-\t" / "-\n")的
+	// 出现次数上限。`- `×65536 与 `[`×65536 同样能打死进程,只统计 '['/'{'
+	// 会漏掉这一形态。
+	MaxFrontmatterIndicators = 256
+
+	// MaxFrontmatterReferences 是锚点/别名/标签('&' / '*' / '!')的出现
+	// 次数上限。单项开销远小于上面两类(实测 ~1.4 KB/个),阈值放宽到
+	// description 里写满 markdown 粗体也不会触发。
+	MaxFrontmatterReferences = 1024
+)
+
+// frontmatterBudget 是 scanFrontmatterComplexity 的统计结果。
+//
+// 三个计数器都是**原始字符计数,不做引号/注释感知**:任何有状态的扫描都可以
+// 被引号或注释骗过去,而原始计数不能。计数是硬保证(直接界定解析器的工作
+// 量),maxDepth 只是同一遍扫描顺带得到的、用于给出更准确报错的启发式。
+type frontmatterBudget struct {
+	collections int // '[' 与 '{' 的出现次数
+	indicators  int // 块序列指示符的出现次数
+	references  int // '&' / '*' / '!' 的出现次数
+	maxDepth    int // 观测到的最大嵌套深度(只可能高估)
+}
+
+// scanFrontmatterComplexity 单遍扫描 frontmatter 统计结构预算。
+//
+// 深度是启发式:遇到 '[' / '{' 与块序列指示符 +1,遇到 ']' / '}' 或行尾 -1
+// (块序列不跨行嵌套)。引号内的括号会一起计数——这是**故意**的:偏保守只会
+// 多拒一些畸形 frontmatter,而低估会放过炸弹。真正的安全边界是三个计数器,
+// 它们不依赖任何状态。
+func scanFrontmatterComplexity(front string) frontmatterBudget {
+	var b frontmatterBudget
+	depth := 0
+	bump := func() {
+		depth++
+		if depth > b.maxDepth {
+			b.maxDepth = depth
+		}
+	}
+	for i := 0; i < len(front); i++ {
+		switch front[i] {
+		case '[', '{':
+			b.collections++
+			bump()
+		case ']', '}':
+			// 闭合括号同样进 collections 计数:实测单行 `]`×51200 也能让
+			// 解析器多分配 40 MiB(线性但放大 ~0.8 KB/个)。合法 frontmatter
+			// 的开/闭括号一一对应且总数 ≤ 2,计数上限给的是同一个 256。
+			b.collections++
+			if depth > 0 {
+				depth--
+			}
+		case '&', '*', '!':
+			b.references++
+		case '-':
+			// 块序列指示符:后跟空格/制表符/换行(或位于文本末尾)。
+			// 纯 `-`(kebab-case 里的连字符、`---`)不计数。
+			if i+1 == len(front) {
+				b.indicators++
+				bump()
+				continue
+			}
+			switch front[i+1] {
+			case ' ', '\t', '\n':
+				b.indicators++
+				bump()
+			}
+		case '\n':
+			depth = 0
+		}
+	}
+	return b
+}
+
+// checkFrontmatterComplexity 在交给 YAML 解析器**之前**按字符统计拒绝深度
+// 炸弹。返回的第一条错误就足以说明问题,不做全量诊断。
+func checkFrontmatterComplexity(front, field string) error {
+	b := scanFrontmatterComplexity(front)
+	if b.maxDepth > MaxFrontmatterDepth {
+		return newErr(CodeFrontmatterInvalid, field,
+			"frontmatter 嵌套过深(深度 %d,上限 %d):技能元数据必须是扁平映射", b.maxDepth, MaxFrontmatterDepth)
+	}
+	if b.collections > MaxFrontmatterCollections {
+		return newErr(CodeFrontmatterInvalid, field,
+			"frontmatter 的流式集合过多([ { ] } 共 %d 个,上限 %d)", b.collections, MaxFrontmatterCollections)
+	}
+	if b.indicators > MaxFrontmatterIndicators {
+		return newErr(CodeFrontmatterInvalid, field,
+			"frontmatter 的列表项过多(- 共 %d 个,上限 %d)", b.indicators, MaxFrontmatterIndicators)
+	}
+	if b.references > MaxFrontmatterReferences {
+		return newErr(CodeFrontmatterInvalid, field,
+			"frontmatter 的锚点/别名/标签过多(& * ! 共 %d 个,上限 %d)", b.references, MaxFrontmatterReferences)
+	}
+	return nil
+}
+
+// checkManifestSize 是三层闸门里最便宜的一层(O(1))。
+func checkManifestSize(raw, field, what string) error {
+	if len(raw) > MaxSkillMDBytes {
+		return newErr(CodeInputTooLarge, field,
+			"%s 过大(%d 字节,上限 %d 字节):技能元数据应当只有几十行 frontmatter",
+			what, len(raw), MaxSkillMDBytes)
+	}
+	return nil
+}
+
+// parseManifestYAML 是 frontmatter / preset.yml 进入 YAML 解析器的**唯一
+// 入口**:先过长度上限与字符统计闸,再解析。Parse 与 ParseAgent 共用,
+// 避免以后新增解析路径时忘记加闸。
+func parseManifestYAML(raw, field, what string) (map[string]any, error) {
+	if err := checkManifestSize(raw, field, what); err != nil {
+		return nil, err
+	}
+	if err := checkFrontmatterComplexity(raw, field); err != nil {
+		return nil, err
+	}
+	var data map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &data); err != nil || data == nil {
+		return nil, newErr(CodeFrontmatterInvalid, field, "%s 不是合法的 YAML 映射", what)
+	}
+	return data, nil
+}
 
 // ProvenanceKey 是安装器写入的溯源块键名;包内自带即视为伪造归属。
 const ProvenanceKey = "picoaide"
@@ -254,7 +411,11 @@ func compareNumericStrings(a, b string) int {
 // 校验顺序遵循决策文档 5.5(先便宜后昂贵),只返回第一条错误,便于客户端
 // 预检与服务端给出同一个错误码。
 func Parse(entries []string, skillMD, declaredAppID string) (*Manifest, error) {
-	// 4. BOM 与 frontmatter。
+	// 4. 规模闸 + BOM + frontmatter。
+	// 长度上限放在最前:P0 深度炸弹的第一层边界(O(1),不分配内存)。
+	if serr := checkManifestSize(skillMD, "", "SKILL.md"); serr != nil {
+		return nil, serr
+	}
 	if strings.HasPrefix(skillMD, "\ufeff") {
 		return nil, newErr(CodeBOMDetected, "",
 			"SKILL.md 含 UTF-8 BOM,会导致技能被运行时忽略;请另存为「UTF-8 无 BOM」")
@@ -267,16 +428,19 @@ func Parse(entries []string, skillMD, declaredAppID string) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var data map[string]any
-	if uerr := yaml.Unmarshal([]byte(front), &data); uerr != nil || data == nil {
-		return nil, newErr(CodeFrontmatterInvalid, "",
-			"SKILL.md 的 frontmatter 不是合法 YAML 映射")
+	// 字符统计闸(零分配单遍)+ YAML 解析统一走 parseManifestYAML:
+	// `[`×65536 / `- `×65536 一类深度炸弹在这里被拒,不会进解析器。
+	data, derr := parseManifestYAML(front, "", "SKILL.md 的 frontmatter")
+	if derr != nil {
+		return nil, derr
 	}
 
 	// 5. 必填字段与格式。
 	m := &Manifest{}
 	var ferr error
-	if m.AppID, ferr = requiredString(data, "name", MaxAppIDLen); ferr != nil {
+	// FIX-16:name 是**上游运行时身份**,必须按 runtimeIdentityRule 校验
+	// (只收真字符串 + 首尾无空白)。宽松归一化 = 允许「上传成功但技能不存在」。
+	if m.AppID, ferr = requiredStringRule(data, "name", MaxAppIDLen, runtimeIdentityRule); ferr != nil {
 		return nil, ferr
 	}
 	if !IsAppID(m.AppID) {
@@ -289,7 +453,9 @@ func Parse(entries []string, skillMD, declaredAppID string) (*Manifest, error) {
 	if m.Title, ferr = requiredString(data, "title", MaxTitleRunes); ferr != nil {
 		return nil, ferr
 	}
-	if m.Description, ferr = requiredString(data, "description", MaxDescriptionRunes); ferr != nil {
+	// FIX-16:description 同样被上游 stringField 读取(非字符串 → undefined
+	// → 整份技能被忽略),所以只收真字符串;它的**内容**上游不校验,trim 安全。
+	if m.Description, ferr = requiredStringRule(data, "description", MaxDescriptionRunes, runtimeTextRule); ferr != nil {
 		return nil, ferr
 	}
 	if utf8.RuneCountInString(m.Description) < MinDescriptionRunes {
@@ -348,9 +514,45 @@ func splitFrontmatter(raw string) (front, body string, err error) {
 	return rest[:idx], rest[idx+len("\n---"):], nil
 }
 
+// stringRule 描述一个字段相对**上游运行时**的严格程度(FIX-16)。
+//
+// 背景(审计 2026-09-12,P1-8):本包对 name 的归一化比运行时宽松,于是
+// `name: " my-skill "` / `name: 123` / `name: true` 三种写法都能通过上传
+// (HTTP 201),而上游运行时把它们**整个丢掉**(只打一行 warn)——
+// 用户拿到的是「上传成功但技能不存在」。
+//
+// 上游契约(逐行核实):
+//   - skill-filesystem/src/index.ts:982-985 `stringField` =
+//     `typeof value === 'string' && value.length > 0 ? value : undefined`
+//     —— **不做 trim、非字符串一律 undefined**;
+//   - :810-818 `name === undefined || description === undefined` →
+//     `logger.warn(... requires name and description)` 后
+//     `return undefined`(整份技能被忽略);
+//   - skill/src/index.ts:21 `SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/`,
+//     :35 `isSkillName` 作用在**未 trim 的原值**上 ⇒ 首尾空白即非法。
+type stringRule struct {
+	// strictType:只接受真 string(数字/布尔拒绝)。对应上游 stringField。
+	strictType bool
+	// exactTrim:归一化必须是恒等(首尾空白即非法)。对应 isSkillName 作用
+	// 在未 trim 原值上。
+	exactTrim bool
+}
+
+// runtimeIdentityRule 用于 name:上游拿它当**运行时唯一身份**,三处(类型、
+// 首尾空白、kebab 正则)任何一处不一致都会让整个技能消失。
+var runtimeIdentityRule = stringRule{strictType: true, exactTrim: true}
+
+// runtimeTextRule 用于 description:上游同样只接受真字符串,但不校验内容
+// (只判 length > 0),所以 trim 是安全的。
+var runtimeTextRule = stringRule{strictType: true}
+
 // scalarString renders a YAML scalar as text. 数字/布尔标量一律转字符串,
 // 这样 `version: 1.0` 这类写法会落到 INVALID_VERSION 的精确报错上,
 // 而不是含糊的类型错误。
+//
+// 注意:这只适用于**本产品自己的元数据字段**(version/title/author/category/
+// changelog)。上游会解读的字段(name/description)必须走 stringRule.strictType
+// —— 见 stringRule 的注释。
 func scalarString(v any) (string, bool) {
 	switch t := v.(type) {
 	case string:
@@ -362,16 +564,40 @@ func scalarString(v any) (string, bool) {
 	}
 }
 
-func requiredString(data map[string]any, field string, maxRunes int) (string, error) {
+// scalarStringStrict 与 scalarString 相对:只接受真字符串。
+func scalarStringStrict(v any) (string, bool) {
+	s, ok := v.(string)
+	return s, ok
+}
+
+// requiredStringRule 是 requiredString 的可配置版本(FIX-16)。规则由调用方
+// 按「上游是否解读这个字段」选择:name/description 走运行时规则,本产品自有
+// 元数据保持宽松(不制造无谓的迁移负担)。
+func requiredStringRule(data map[string]any, field string, maxRunes int, rule stringRule) (string, error) {
 	raw, ok := data[field]
 	if !ok || raw == nil {
 		return "", newErr(CodeMissingField, field,
 			"缺少必填字段 %s,请在 SKILL.md 的 frontmatter 中补充", field)
 	}
-	s, ok := scalarString(raw)
-	if !ok {
+	var s string
+	if rule.strictType {
+		s, ok = scalarStringStrict(raw)
+		if !ok {
+			return "", newErr(CodeInvalidType, field,
+				"字段 %s 必须是字符串(上游只接受真字符串:数字/布尔会让**整个技能被运行时忽略**;"+
+					"若确实想写数字请加引号,如 %s: \"123\")", field, field)
+		}
+	} else {
+		s, ok = scalarString(raw)
+		if !ok {
+			return "", newErr(CodeInvalidType, field,
+				"字段 %s 必须是单值字符串(不能是列表或映射)", field)
+		}
+	}
+	if rule.exactTrim && strings.TrimSpace(s) != s {
 		return "", newErr(CodeInvalidType, field,
-			"字段 %s 必须是单值字符串(不能是列表或映射)", field)
+			"字段 %s 的首尾不能有空白(%q):上游用**未 trim** 的原值做运行时身份判定,"+
+				"首尾空白会让整个技能被忽略", field, s)
 	}
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -383,6 +609,10 @@ func requiredString(data map[string]any, field string, maxRunes int) (string, er
 			"字段 %s 超长(上限 %d 字)", field, maxRunes)
 	}
 	return s, nil
+}
+
+func requiredString(data map[string]any, field string, maxRunes int) (string, error) {
+	return requiredStringRule(data, field, maxRunes, stringRule{})
 }
 
 func optionalString(data map[string]any, field string, maxRunes int) (string, error) {
@@ -515,6 +745,11 @@ const PresetMetaFile = "preset.yml"
 // 但展示之外的元数据(版本/描述/作者/分类)同样必须来自包内——「包内即真相」
 // 对两类能力一致,否则智能体会退回「卡片显示目录名、版本永远兜底 1.0.0」。
 func ParseAgent(entries []string, presetYML, appID string) (*Manifest, error) {
+	// 与 Parse 同源的三层闸门:preset.yml 走的是同一个 YAML 解析器,同样
+	// 存在 `[`×65536 / `- `×65536 打死进程的形态(审计 FIX-01)。
+	if serr := checkManifestSize(presetYML, PresetMetaFile, PresetMetaFile); serr != nil {
+		return nil, serr
+	}
 	if strings.HasPrefix(presetYML, "\ufeff") {
 		return nil, newErr(CodeBOMDetected, "",
 			PresetMetaFile+" 含 UTF-8 BOM,请另存为「UTF-8 无 BOM」")
@@ -523,10 +758,9 @@ func ParseAgent(entries []string, presetYML, appID string) (*Manifest, error) {
 		return nil, newErr(CodeMissingField, PresetMetaFile,
 			"归档缺少 "+PresetMetaFile+":展示名/版本/描述/作者/分类必须写在包内")
 	}
-	var data map[string]any
-	if err := yaml.Unmarshal([]byte(presetYML), &data); err != nil || data == nil {
-		return nil, newErr(CodeFrontmatterInvalid, PresetMetaFile,
-			PresetMetaFile+" 不是合法的 YAML 映射")
+	data, derr := parseManifestYAML(presetYML, PresetMetaFile, PresetMetaFile)
+	if derr != nil {
+		return nil, derr
 	}
 
 	m := &Manifest{AppID: appID}

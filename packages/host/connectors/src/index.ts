@@ -8,7 +8,17 @@ import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
 import { runAuth, refreshOAuthToken } from './auth.ts'
 import { userScopePath } from './user-scope.ts'
-import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorState } from './types.ts'
+import { ConnectorApprovalStore } from './approvals.ts'
+import {
+  CONNECTOR_ID_PATTERN,
+  declaredCredentialKeys,
+  mcpDefinitionProblem,
+  mcpServerProblem,
+  sanitizeMcpEnv,
+  stdioApprovalFingerprint,
+  streamableHttpUrl,
+} from './policy.ts'
+import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorMcpApproval, ConnectorState } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
@@ -48,6 +58,14 @@ export interface ConnectorsOptions {
    * 渠道化时由 profile.ts 从渠道包注入；缺省为中性名。
    */
   clientName?: string
+  /**
+   * Headless confirmation hook for server-issued stdio commands (FIX-02).
+   * An interactive deployment leaves this undefined: the request then surfaces
+   * through the connector panel (`request.approval`) and is answered through
+   * the local `approve`/`deny` routes. Embedders and tests may answer
+   * programmatically — returning false denies the spawn.
+   */
+  requestApproval?: (request: ConnectorMcpApproval) => boolean | Promise<boolean>
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -66,14 +84,29 @@ export interface ServerConnectorItem {
  * row wins for id/name/description/authMode; the definition JSON contributes
  * the auth/tokenFields/examples/mcp payload. Invalid entries are dropped so a
  * single bad row never blanks the whole catalog.
+ *
+ * FIX-02: this is a TRUST BOUNDARY, not a convenience mapper. The row's id
+ * shape, the `mcp[]` entries (serverName/transport/command/args/env/url) are
+ * all validated here, so a definition that would hand `spawn` an unchecked
+ * executable, a protected env key, or a non-public URL never enters the
+ * catalog at all.
  */
 export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDef[] {
   const out: ConnectorDef[] = []
   for (const item of items) {
     if (!item?.id || !item.definition) continue
+    if (!CONNECTOR_ID_PATTERN.test(item.id)) {
+      console.warn(`[dsh-connectors] dropped connector with invalid id: ${JSON.stringify(item.id)}`)
+      continue
+    }
     try {
       const raw = JSON.parse(item.definition) as ConnectorDef
       if (!raw?.mcp?.length) continue
+      const problem = mcpDefinitionProblem(raw.mcp)
+      if (problem !== null) {
+        console.warn(`[dsh-connectors] dropped connector ${item.id}: ${problem}`)
+        continue
+      }
       let authMode = (item.auth_mode || raw.authMode || '') as ConnectorDef['authMode']
       if (!authMode) {
         // 回退推断:定义 JSON 的结构决定模式(tokenFields → token,
@@ -189,11 +222,30 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // registrations are disconnected first (server-side tokens stay on disk
   // per user, never shared across accounts).
   let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
+  // Per-user local-approval ledger for server-issued stdio commands (FIX-02).
+  let approvals = new ConnectorApprovalStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
   const states = new Map<string, ConnectorState>()
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
+  /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
+  const pendingApprovals = new Map<string, PendingApproval>()
   const mcpDisposers = new Map<string, () => void>()
   /** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
   const pendingFlows = new Map<string, AbortController>()
+
+  /**
+   * Register one connector's MCP servers. `pendingApproval` means nothing was
+   * spawned because a server-issued stdio command still needs local
+   * confirmation; `rejected` lists definitions/urls this plugin refuses.
+   */
+  interface McpRegistrationOutcome {
+    pendingApproval?: ConnectorMcpApproval
+    rejected: string[]
+  }
+
+  /** Pending local confirmation: the prompt plus every fingerprint it covers. */
+  interface PendingApproval extends ConnectorMcpApproval {
+    fingerprints: string[]
+  }
 
   /** Drop all MCP registrations and reset in-memory state (user switch). */
   const teardownAll = async (): Promise<void> => {
@@ -204,6 +256,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     for (const flow of pendingFlows.values()) flow.abort(new Error('用户已切换，连接流程中止'))
     pendingFlows.clear()
     pendingRequests.clear()
+    pendingApprovals.clear()
     states.clear()
   }
 
@@ -235,7 +288,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // Migrate legacy `~/.picoaide/connectors` once (first login after
     // upgrade): A's pre-upgrade credentials must not be lost silently.
     migrateLegacyStore(username)
-    if (!options.storeBaseDir) store = new ConnectorStore({ username })
+    if (!options.storeBaseDir) {
+      store = new ConnectorStore({ username })
+      approvals = new ConnectorApprovalStore({ username })
+    }
   }
 
   // Session lifecycle: disconnect registrations for the previous user, then
@@ -282,16 +338,103 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     return headers
   }
 
+  /**
+   * Child env for one stdio MCP server (FIX-19). Two whitelists apply:
+   * the definition's own env (protected bootstrap keys are dropped) and the
+   * credential fields (only the keys the connector declared in
+   * `tokenFields`/`settings` are injected — an arbitrary stored field must not
+   * reach the child). The framework's own keys are written last so a
+   * definition can never shadow them.
+   */
+  const buildStdioEnv = (
+    def: ConnectorDef,
+    server: ConnectorMcp,
+    credential: ConnectorCredential | null,
+  ): { declared: Record<string, string>; env: Record<string, string> } => {
+    const { env: declared } = sanitizeMcpEnv(server.env)
+    const env: Record<string, string> = { ...declared }
+    const declaredKeys = declaredCredentialKeys(def)
+    for (const [key, value] of Object.entries(credential?.fields ?? {})) {
+      if (!declaredKeys.has(key) || typeof value !== 'string') continue
+      env[key] = value
+    }
+    if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
+    if (credential?.accessToken) env.PICOAIDE_CONNECTOR_ACCESS_TOKEN = credential.accessToken
+    if (credential?.refreshToken) env.PICOAIDE_CONNECTOR_REFRESH_TOKEN = credential.refreshToken
+    return { declared, env }
+  }
+
+  /** Local-confirmation prompt for every stdio server of one connector. */
+  const checkStdioApproval = async (
+    def: ConnectorDef,
+    servers: ConnectorMcp[],
+  ): Promise<{ pending: ConnectorMcpApproval } | { denied: true } | null> => {
+    const unapproved: Array<{ server: ConnectorMcp; fingerprint: string; declared: Record<string, string> }> = []
+    for (const server of servers) {
+      // Shape problems are reported by the registration loop itself; the
+      // approval gate only covers structurally usable entries.
+      if (mcpServerProblem(server) !== null) continue
+      const { declared } = buildStdioEnv(def, server, null)
+      const fingerprint = stdioApprovalFingerprint(server.command ?? '', server.args ?? [], declared)
+      if (!(await approvals.isApproved(fingerprint))) unapproved.push({ server, fingerprint, declared })
+    }
+    if (unapproved.length === 0) return null
+    const first = unapproved[0]!
+    const prompt: ConnectorMcpApproval = {
+      fingerprint: first.fingerprint,
+      command: first.server.command ?? '',
+      args: first.server.args ?? [],
+      envKeys: Object.keys(first.declared).sort(),
+      servers: unapproved.map(item => item.server.serverName),
+    }
+    if (options.requestApproval !== undefined) {
+      const granted = await options.requestApproval(prompt)
+      if (!granted) return { denied: true }
+      for (const item of unapproved) {
+        await approvals.approve({
+          fingerprint: item.fingerprint,
+          command: item.server.command ?? '',
+          args: item.server.args ?? [],
+          envKeys: Object.keys(item.declared).sort(),
+        })
+      }
+      return null
+    }
+    // No headless hook: the request is answered through the local panel.
+    const pending: PendingApproval = {
+      ...prompt,
+      fingerprints: unapproved.map(item => item.fingerprint),
+    }
+    pendingApprovals.set(def.id, pending)
+    emitRequest({ connectorId: def.id, approval: prompt })
+    return { pending: prompt }
+  }
+
   /** Register the connector's MCP servers through the mcp-client plugin. */
-  const registerMcp = async (def: ConnectorDef): Promise<void> => {
+  const registerMcp = async (def: ConnectorDef): Promise<McpRegistrationOutcome> => {
     const credential = await store.readCredential(def.id)
+    const rejected: string[] = []
+    const stdioServers = def.mcp.filter(server => (server.transport ?? 'stdio') === 'stdio')
+    const gate = await checkStdioApproval(def, stdioServers)
+    if (gate !== null) {
+      if ('denied' in gate) return { rejected: ['用户拒绝了本地执行确认，未启动本地命令'] }
+      // Nothing is spawned while ANY stdio server of this connector is
+      // unapproved: a partially registered connector is harder to reason about
+      // than a row that simply waits for the user's decision.
+      return { pendingApproval: gate.pending, rejected }
+    }
     const { apply: applyMcpClient } = await import('@deepseek-ai/dsh-mcp-client')
     for (const server of def.mcp) {
+      const problem = mcpServerProblem(server)
+      if (problem !== null) {
+        rejected.push(`${server?.serverName ?? '?'}: ${problem}`)
+        continue
+      }
       const config = server.transport === 'streamable-http'
         ? {
             transport: 'streamable-http' as const,
             serverName: server.serverName,
-            url: server.url ?? '',
+            url: streamableHttpUrl(server).toString(),
             headers: renderHeaders(server, credential),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
@@ -301,13 +444,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             serverName: server.serverName,
             command: server.command ?? '',
             args: server.args ?? [],
-            env: {
-              ...(server.env ?? {}),
-              ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-              ...(credential?.accessToken ? { PICOAIDE_CONNECTOR_ACCESS_TOKEN: credential.accessToken } : {}),
-              ...(credential?.refreshToken ? { PICOAIDE_CONNECTOR_REFRESH_TOKEN: credential.refreshToken } : {}),
-              ...(credential?.fields ?? {}),
-            },
+            env: buildStdioEnv(def, server, credential).env,
             cwd: process.cwd(),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
@@ -326,6 +463,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       }
       mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
     }
+    return { rejected }
   }
 
   const unregisterMcp = async (def: ConnectorDef): Promise<void> => {
@@ -375,7 +513,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       }
       const current = await store.readCredential(id)
       await store.updateCredential(id, { ...current, ...patch })
-      await registerMcp(def)
+      const outcome = await registerMcp(def)
+      if (outcome.pendingApproval !== undefined) {
+        // FIX-02: the credential is stored, but the server-issued stdio
+        // command still needs a local decision — nothing was spawned and the
+        // confirmation request stays in `pendingRequests` for the panel.
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return
+      }
+      if (outcome.rejected.length > 0) {
+        pendingRequests.delete(id)
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        return
+      }
       setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined })
       // The flow reached a terminal success: the authorize URL in
       // pendingRequests is stale (the auth page was already opened and the
@@ -410,7 +560,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const current = await store.readCredential(id)
     await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
     if (def.authMode === 'token') {
-      await registerMcp(def)
+      const outcome = await registerMcp(def)
+      if (outcome.pendingApproval !== undefined) {
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return
+      }
+      if (outcome.rejected.length > 0) {
+        pendingRequests.delete(id)
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        return
+      }
       setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined })
       pendingRequests.delete(id)
       return
@@ -432,6 +591,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     await store.clearCredential(id)
     setState(id, { status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined })
     pendingRequests.delete(id)
+    pendingApprovals.delete(id)
   }
 
   /** Restore all connector MCP registrations for the CURRENT user. */
@@ -444,7 +604,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         const refreshed = await refreshOAuthToken(def, credential)
         const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
         if (effective.accessToken) {
-          await registerMcp(def)
+          const outcome = await registerMcp(def)
+          if (outcome.pendingApproval !== undefined) {
+            // FIX-02: an unapproved server-issued command never reaches spawn;
+            // the row waits for the user's local decision.
+            setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined })
+            continue
+          }
+          if (outcome.rejected.length > 0) {
+            setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+            continue
+          }
           setState(def.id, { status: 'connected', everConnected: true })
         }
       } catch (error) {
@@ -585,6 +755,54 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       json(res, 200, { ok: true })
     }
 
+    /**
+     * FIX-02 local confirmation: remember the pending command fingerprint(s)
+     * for this user and continue the registration. Nothing is spawned before
+     * this answer arrives.
+     */
+    const approve: JsonHandler = async (req, res) => {
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
+      const def = getDef(id)
+      if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
+      const pending = pendingApprovals.get(id)
+      if (pending === undefined) return json(res, 409, { error: 'no pending local approval' })
+      for (const fingerprint of pending.fingerprints) {
+        await approvals.approve({
+          fingerprint,
+          command: pending.command,
+          args: pending.args,
+          envKeys: pending.envKeys,
+        })
+      }
+      pendingApprovals.delete(id)
+      pendingRequests.delete(id)
+      const outcome = await registerMcp(def)
+      if (outcome.pendingApproval !== undefined) {
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return json(res, 409, { error: 'approval did not settle every pending command' })
+      }
+      if (outcome.rejected.length > 0) {
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        return json(res, 400, { error: outcome.rejected.join('; ') })
+      }
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      json(res, 200, { ok: true })
+    }
+
+    /** FIX-02 local confirmation: refuse the pending command (nothing spawned). */
+    const deny: JsonHandler = (req, res) => {
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
+      if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` })
+      pendingApprovals.delete(id)
+      pendingRequests.delete(id)
+      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: '本地执行确认被拒绝，未启动本地命令' })
+      json(res, 200, { ok: true })
+    }
+
     // Trust fence for every connector route: loopback socket + Host +
     // same-origin markers. State-changing endpoints below also enforce POST.
     const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
@@ -608,6 +826,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           'auth-submit': exact(authSubmit),
           state: exact(state),
           disconnect: exact(disconnectHandler),
+          approve: exact(approve),
+          deny: exact(deny),
         }
         if (!guard(req, res)) return
         const method = req.method ?? 'GET'
@@ -617,6 +837,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           'auth-submit': 'POST',
           state: 'GET',
           disconnect: 'POST',
+          approve: 'POST',
+          deny: 'POST',
         }
         const expected = action ? allowedMethods[action] : undefined
         if (expected !== undefined && method !== expected) {

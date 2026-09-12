@@ -112,6 +112,13 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 	body = redactSecrets(body, secrets)
 	if pt, ct, cache, ok, _ := anthropicUsage(body); ok {
 		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cache, "search"); err != nil {
+			// FIX-05:与 /v1/chat/completions 同源 —— 余额结算失败必须在交付
+			// 响应体之前 429 拒绝,不能 log 后继续 200(事务已回滚)。
+			if isBalanceSettlementFailure(err) {
+				log.Printf("gateway: insufficient balance, rejecting messages before delivery: user=%d model=%s", userID, model)
+				rejectBalanceSettlement(c)
+				return
+			}
 			log.Printf("gateway: record anthropic usage: %v", err)
 		}
 	}
@@ -188,6 +195,15 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 					}
 					if usageID > 0 {
 						if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cache); uerr != nil {
+							// FIX-05:流式回填结算失败 —— SSE 头已发,状态码改不了;
+							// 写一条 error 事件后终止,不能继续 200 泵内容。
+							if isBalanceSettlementFailure(uerr) {
+								log.Printf("gateway: insufficient balance, aborting messages stream: usage=%d", usageID)
+								if !clientGone {
+									abortBalanceSettlementStream(c, fl)
+								}
+								return
+							}
 							log.Printf("gateway: backfill anthropic usage: %v", uerr)
 						} else if pt+ct > 0 {
 							backfilled = true

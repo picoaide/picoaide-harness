@@ -313,13 +313,58 @@ function findExactIndex(entries, exact) {
 }
 
 /**
+ * 条目前置日期头（`[YYYY-MM-DD] …`，行首）。多条目疑似判定用。
+ */
+const DATE_HEAD_RE = /(?:^|\n)\[\d{4}-\d{2}-\d{2}/g
+/** 单条目内 ≥2 个行首日期头 = 疑似"漏写 § 的多条目文件"（FIX-25）。 */
+const SUSPECT_DATE_HEAD_COUNT = 2
+
+/** 数一个条目里行首日期头的个数（到阈值即短路）。 */
+function countDateHeads(entry) {
+  const re = new RegExp(DATE_HEAD_RE.source, 'g')
+  let count = 0
+  while (re.exec(entry) !== null) {
+    count += 1
+    if (count >= SUSPECT_DATE_HEAD_COUNT) return count
+  }
+  return count
+}
+
+/**
+ * 疑似"漏写 § 的多条目文件"判定（FIX-25，2026-09-12）。
+ *
+ * 记忆文件格式是"条目之间用独立一行 § 分隔"（ENTRY_DELIMITER）。手工编辑
+ * 漏写分隔符时，3 条事实会挤成 1 条（parseEntries 得到 1 条），而"单条多行"
+ * 本身是合法形态 ⇒ serialize(parse(text)) === text ⇒ {@link isCanonical}
+ * 放行；此时 remove("B") 删掉的是**唯一那条 = 全文**（A/C 一并消失），
+ * 且走 ok 分支 ⇒ 零备份、不可恢复（默认项目没有 git 历史兜底）。
+ *
+ * 判定：**任一条目**正文内行首 `[YYYY-MM-DD]` 出现 ≥2 次即疑似多条目
+ * （只看 length===1 会漏掉"4 条漏了 1 个 §"这种部分粘连）。命中后走既有
+ * drift 分支：备份 + 拒绝破坏性操作（remove/update/peek），提示用户先整理
+ * 文件。追加（add）走 reloadForAppend，不受影响。
+ * @param {string[]} entries - parseEntries 的结果。
+ * @returns {boolean}
+ */
+function suspectedMergedEntries(entries) {
+  return entries.some((entry) => countDateHeads(entry) >= SUSPECT_DATE_HEAD_COUNT)
+}
+
+/**
  * Whether raw text is the canonical serialization of its own entries.
  * Blank text counts as canonical (an empty store).
+ *
+ * FIX-25：往返相等**不再足够** —— 漏写 § 的多条目文件同样往返相等，见
+ * {@link suspectedMergedEntries}。疑似多条目一律判为非规范，走 drift
+ * 拒绝 + 备份分支，而不是让它进破坏性操作的 ok 分支。
  * @param {string} text - raw file content.
  * @returns {boolean} true when the file would round-trip through the parser.
  */
 export function isCanonical(text) {
-  return text.trim() === '' || serializeEntries(parseEntries(text)) === text
+  if (text.trim() === '') return true
+  const entries = parseEntries(text)
+  if (suspectedMergedEntries(entries)) return false
+  return serializeEntries(entries) === text
 }
 
 /** Blocking sleep used by the lock retry loop (synchronous). */
@@ -786,12 +831,23 @@ export class MemoryStore {
     // read back — e.g. a broken encoding). A whitespace-only file is a normal
     // empty store: rewriting it cannot wipe history.
     if (text === '' && size > 0) return { kind: 'read-failed' }
+    // FIX-25 第二道闸（纵深）：疑似"漏写 § 的多条目文件"必须在 ok 分支**之前**
+    // 强制备份并转 drift —— 破坏性操作（remove/update/peek）只认 ok 分支，
+    // 一旦放行就整文件重写且零备份。isCanonical 是第一道闸（同一判定），
+    // 这里再独立看一遍 parse 结果：即使将来 isCanonical 的往返语义被放宽，
+    // "删一条 = 删全文"的不可恢复路径也不会重新打开。
+    const entries = parseEntries(text)
+    if (suspectedMergedEntries(entries)) {
+      const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
+      writeFileSync(backup, text)
+      return { kind: 'drift', backup }
+    }
     if (!isCanonical(text)) {
       const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
       writeFileSync(backup, text)
       return { kind: 'drift', backup }
     }
-    return { kind: 'ok', entries: parseEntries(text) }
+    return { kind: 'ok', entries }
   }
 
   /** Atomically write entries to one target's file. */

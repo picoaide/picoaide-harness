@@ -23,6 +23,12 @@ var (
 	// 消费透支)。调用方必须回滚**整个事务**(usage 行与扣款同事务),不得
 	// 静默跳过 —— 与「未开通账户」的"不扣不记"语义严格区分。
 	ErrInsufficientBalance = errors.New("insufficient balance")
+	// ErrUnsupportedFilter is returned when an aggregate filter cannot be
+	// honoured by the data source it would have to read(审计 2026-09-12
+	// FIX-11:usage_daily 日账没有 kind 列,窗口跨保留边界时无法按
+	// chat|embedding|search 过滤)。**必须显式失败**而不是退化成不过滤 ——
+	// 后者会让统计徽标给出偏大的数字,与明细表口径不一致(静默错数)。
+	ErrUnsupportedFilter = errors.New("unsupported filter")
 )
 
 // ErrDepartmentInUse guards department deletion when members, children or

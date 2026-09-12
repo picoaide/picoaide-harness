@@ -1545,7 +1545,9 @@ export function apply(ctx, rawConfig = {}) {
   })
   const archive = new ArchiveStore(config.memoryDir, { projectDirResolver: makeProjectDirResolver(config) })
   const queue = new SuggestionQueue(config.suggestionsFile)
-  const todoStore = new TodoStore(config.memoryDir, makeProjectDirResolver(config))
+  // FIX-26：待办与记忆轨共用 injectionScan 开关（默认 true）——update 与 add
+  // 都过 scanThreat，注入文本不能借 update 进入每轮必读的默认视图。
+  const todoStore = new TodoStore(config.memoryDir, makeProjectDirResolver(config), { injectionScan: config.injectionScan })
   const stateFile = resolve(config.stateFile ?? join(config.memoryDir, 'plugin-state.json'))
   // 会话别名共享存储（aliases.json 单实例）：api 路由（/api/aliases）与
   // de_session rename 共用，避免多实例内存缓存互覆写

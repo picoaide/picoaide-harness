@@ -123,3 +123,34 @@ describe('parseActionEnvelope cron validation', () => {
     }))).toBeDefined()
   })
 })
+
+describe('FIX-17: permission 是枚举,不是自由文本', () => {
+  const create = (permission: unknown): unknown => envelope({
+    kind: 'create',
+    id: 'job-perm',
+    input: { name: 'x', cron: '* * * * *', action: { kind: 'agent', prompt: 'p', permission } },
+  })
+
+  it('rejects a permission that is not a known preset name', () => {
+    // The preset roster comes from ctx.permissionPresets.names.
+    const options = { permissions: ['read-only', 'workspace-write', 'danger-full-access'] }
+    expect(parseActionEnvelope(create('read-only'), options)).toBeDefined()
+    expect(parseActionEnvelope(create('custom'), options)).toBeUndefined()
+    expect(parseActionEnvelope(create('/permission read-only'), options)).toBeUndefined()
+    expect(parseActionEnvelope(create('read-only '), options)).toBeUndefined()
+    expect(parseActionEnvelope(create(''), options)).toBeUndefined()
+  })
+
+  it('rejects every permission when no preset service is composed', () => {
+    expect(parseActionEnvelope(create('workspace-write'), { permissions: [] })).toBeUndefined()
+  })
+
+  it('still accepts a job without a permission pin', () => {
+    const parsed = parseActionEnvelope(envelope({
+      kind: 'create',
+      id: 'job-perm',
+      input: { name: 'x', cron: '* * * * *', action: { kind: 'agent', prompt: 'p' } },
+    }), { permissions: ['read-only'] })
+    expect(parsed).toBeDefined()
+  })
+})

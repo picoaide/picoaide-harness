@@ -117,7 +117,7 @@ export default function UsageDepartments() {
   return (
     <div className="space-y-6">
       <PageHeader title="部门用量" desc="按部门维度查看消耗:本月/区间费用、成员排行、模型拆分" />
-      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={() => void load(from, to)} />
+      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={(f, t) => void load(f, t)} />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">

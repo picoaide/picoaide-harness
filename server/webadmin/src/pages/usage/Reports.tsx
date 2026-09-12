@@ -15,6 +15,7 @@ interface Subscription {
   id: number
   name: string
   enabled: boolean
+  /** 服务端不再回显明文:已配置时为哨兵 "***"(凭据本体,见 FIX-13)。 */
   hook_url: string
   last_run_at?: string
   last_error: string
@@ -60,14 +61,19 @@ export default function UsageReports() {
 
   const openEdit = (s: Subscription) => {
     setEditing(s)
-    setForm({ name: s.name, hook_url: s.hook_url, enabled: s.enabled })
+    // 审计 2026-09-12 P1-4:hook_url 是凭据本体(机器人地址自带 key=…),服务端
+    // 只回哨兵。**不预填**——照 Auth 页的密钥约定,留空 = 保持现值,避免把
+    // "***" 当新地址写回去。
+    setForm({ name: s.name, hook_url: '', enabled: s.enabled })
     setDialogOpen(true)
   }
 
   const save = async () => {
     if (busy) return
     if (form.name.trim() === '') { setError('订阅名称必填'); return }
-    if (!/^https?:\/\//.test(form.hook_url.trim())) { setError('推送地址必须是 http(s) URL'); return }
+    // 编辑时留空 = 保持现值(服务端不回显明文;与 /auth 密钥同一约定)。
+    const keepExistingURL = editing !== null && form.hook_url.trim() === ''
+    if (!keepExistingURL && !/^https?:\/\//.test(form.hook_url.trim())) { setError('推送地址必须是 http(s) URL'); return }
     setBusy('save')
     setError('')
     try {
@@ -147,7 +153,9 @@ export default function UsageReports() {
                 {subs.map((s) => (
                   <TableRow key={s.id}>
                     <TableCell className="font-medium">{s.name}</TableCell>
-                    <TableCell className="max-w-64 truncate font-mono text-xs text-muted-foreground" title={s.hook_url}>{s.hook_url}</TableCell>
+                    <TableCell className="max-w-64 truncate font-mono text-xs text-muted-foreground" title="为避免凭据泄漏,服务端不再回显完整地址">
+                      {s.hook_url ? '已配置(不回显)' : '—'}
+                    </TableCell>
                     <TableCell>
                       <Switch
                         checked={s.enabled}
@@ -156,7 +164,8 @@ export default function UsageReports() {
                           try {
                             await request(`${ADMIN_API}/report-subscriptions/${s.id}`, {
                               method: 'PUT',
-                              body: JSON.stringify({ name: s.name, hook_url: s.hook_url, enabled: v }),
+                              // hook_url 留空 = 服务端保持现值(列表不再回显明文)。
+                              body: JSON.stringify({ name: s.name, hook_url: '', enabled: v }),
                             })
                             await load()
                           } catch (e: any) { setError(e.message || '操作失败') }
@@ -202,6 +211,11 @@ export default function UsageReports() {
             <div className="space-y-1">
               <Label htmlFor="rs-url">推送地址(webhook URL)</Label>
               <Input id="rs-url" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." value={form.hook_url} onChange={(e) => setForm({ ...form, hook_url: e.target.value })} />
+              {editing && (
+                <p className="text-xs text-muted-foreground">
+                  留空 = 保持当前地址(地址含机器人密钥,服务端不回显明文;重新填写即覆盖)。
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} aria-label="启用订阅" />

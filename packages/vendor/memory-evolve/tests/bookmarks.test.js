@@ -67,12 +67,21 @@ function fakeReqRes(method, url, body) {
   res.writeHead = (status, headers) => { res.status = status; res.headers = headers }
   res.end = (text) => { res.body = text; res.ended = true }
   // 让 for await 能读 body（POST/PATCH/DELETE）。
-  const chunks = body !== undefined
-    ? [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body), 'utf8')]
-    : []
+  const raw = body !== undefined
+    ? Buffer.from(typeof body === 'string' ? body : JSON.stringify(body), 'utf8')
+    : undefined
+  const chunks = raw !== undefined ? [raw] : []
   const req = {
     method,
     url,
+    // FIX-04：注册点过统一同源守卫 —— 桩补齐浏览器形态的 headers（同源
+    // Origin + JSON content-type）。有体时同时声明 content-length，让守卫走
+    // 与真实浏览器一致的路径：预读请求体并缓存，路由侧 readBody 复用缓存。
+    headers: {
+      host: 'localhost',
+      origin: 'http://localhost',
+      ...(raw !== undefined ? { 'content-type': 'application/json', 'content-length': String(raw.length) } : {}),
+    },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },
@@ -633,7 +642,14 @@ test('installBookmarks: POST /fork 端点走 forkSession 并回 201', async () =
   const res = { status: 0, body: '', ended: false }
   res.writeHead = (status) => { res.status = status }
   res.end = (text) => { res.body = text; res.ended = true }
-  const req = { method: 'POST', url: '/memory-evolve/api/bookmarks/fork', on: () => {} }
+  // FIX-04：写端点过统一同源守卫 —— 补齐浏览器形态的头（同源 Origin +
+  // JSON content-type；无 content-length ⇒ 守卫不预读请求体，仍由 readBody 读）。
+  const req = {
+    method: 'POST',
+    url: '/memory-evolve/api/bookmarks/fork',
+    headers: { host: 'localhost', origin: 'http://localhost', 'content-type': 'application/json' },
+    on: () => {},
+  }
   // readBody 需要 async iterator；用简单对象代替。
   req[Symbol.asyncIterator] = async function* () {
     yield Buffer.from(JSON.stringify({ sessionId: 'session-src', seq: 2 }))
@@ -667,7 +683,12 @@ test('installBookmarks: POST / 带 anchorKey 由宿主端反查 seq/turn，无�
     const res = { status: 0, body: '', ended: false }
     res.writeHead = (status) => { res.status = status }
     res.end = (text) => { res.body = text; res.ended = true }
-    const req = { method: 'POST', url: '/memory-evolve/api/bookmarks', on: () => {} }
+    const req = {
+      method: 'POST',
+      url: '/memory-evolve/api/bookmarks',
+      headers: { host: 'localhost', origin: 'http://localhost', 'content-type': 'application/json' },
+      on: () => {},
+    }
     req[Symbol.asyncIterator] = async function* () { yield Buffer.from(JSON.stringify(body)) }
     await handler(req, res)
     return { status: res.status, body: JSON.parse(res.body) }

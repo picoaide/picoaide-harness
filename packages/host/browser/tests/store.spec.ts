@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { BrowserStore, stripSensitiveUrl } from '../src/store.ts'
+import { BrowserStore, stripSensitiveText, stripSensitiveUrl } from '../src/store.ts'
 
 /**
  * Each test gets a unique throwaway directory under tests/ (created via
@@ -420,5 +420,91 @@ describe('stripSensitiveUrl 线性解析（CodeQL js/polynomial-redos 回归）'
     const t0 = Date.now()
     stripSensitiveUrl(evil)
     expect(Date.now() - t0).toBeLessThan(500)
+  })
+})
+
+// -------------------------------------------------- FIX-06 (2026-09-12)
+
+describe('stripSensitiveText 文本级脱敏（FIX-06）', () => {
+  it('整体是 URL 的文本与 stripSensitiveUrl 同结果', () => {
+    expect(stripSensitiveText('https://h/p?X-Amz-Signature=FAKESIG123&token=FAKETOKEN456&id=1')).toBe(
+      'https://h/p?X-Amz-Signature=****&token=****&id=1',
+    )
+  })
+
+  it('URL 嵌在句子里时只擦该段', () => {
+    expect(stripSensitiveText('download: https://files.example.com/export?X-Amz-Signature=SIG&token=TOK')).toBe(
+      'download: https://files.example.com/export?X-Amz-Signature=****&token=****',
+    )
+    expect(stripSensitiveText('see https://h/cb?session=SESS for details')).toBe('see https://h/cb?session=**** for details')
+  })
+
+  it('句尾标点原样保留（不吞掉 ),.;）', () => {
+    expect(stripSensitiveText('(https://h/cb?token=T), next')).toBe('(https://h/cb?token=****), next')
+    expect(stripSensitiveText('go to https://h/cb?token=T.')).toBe('go to https://h/cb?token=****.')
+  })
+
+  it('非 URL 文本逐字节不变（不误伤普通标题）', () => {
+    for (const text of ['', 'Sign in — Corp SSO', 'a b c', 'notes about passwords', 'https://h/cb?q=hello&id=2']) {
+      expect(stripSensitiveText(text)).toBe(text)
+    }
+    expect(stripSensitiveText('https://h/cb?id_token=SECRET')).toBe('https://h/cb?id_token=****')
+  })
+})
+
+describe('FIX-06 history/bookmark 的 title 落盘前脱敏', () => {
+  const SIGNED = 'https://files.example.com/export?X-Amz-Signature=FAKESIG123&token=FAKETOKEN456'
+
+  let dir: string
+  let store: BrowserStore
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('addHistory：title 里的签名 URL 不落盘明文（tool 的 download: 形态）', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    store.addHistory({ time: Date.now(), url: SIGNED, title: `download: ${SIGNED}`, actor: 'ai', group: '' })
+
+    const onDisk = readFileSync(store.pathOf('history'), 'utf8')
+    expect(onDisk).not.toContain('FAKESIG123')
+    expect(onDisk).not.toContain('FAKETOKEN456')
+    expect(onDisk).toContain('title":"download: https://files.example.com/export?X-Amz-Signature=****&token=****')
+    // 内存记录同样干净（历史会被工具 1:1 投影给模型）
+    expect(store.queryHistory({ limit: 1 })[0]?.title).not.toContain('FAKESIG123')
+  })
+
+  it('addHistory：title 退化为裸 URL（页面无 <title>）时也不落明文', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const e = store.addHistory({ time: Date.now(), url: SIGNED, title: SIGNED, actor: 'restore', group: '' })
+    expect(e.title).toBe('https://files.example.com/export?X-Amz-Signature=****&token=****')
+  })
+
+  it('addBookmark：新建与幂等更新两条分支都脱敏（幂等分支还会 rewrite 落盘）', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const raw = 'https://files.example.com/cb?session=FAKESESSION789'
+    const first = store.addBookmark({ url: raw, title: raw, actor: 'ai', group: '' })
+    expect(first.title).toBe('https://files.example.com/cb?session=****')
+
+    // 幂等命中：同一（脱敏后）URL 再 bookmark，走 existing.title 分支
+    const second = store.addBookmark({ url: raw, title: `seen at ${raw}`, actor: 'user', group: '' })
+    expect(second.id).toBe(first.id)
+    expect(second.title).toBe('seen at https://files.example.com/cb?session=****')
+
+    const onDisk = readFileSync(store.pathOf('bookmarks'), 'utf8')
+    expect(onDisk).not.toContain('FAKESESSION789')
+    expect(onDisk).not.toContain(raw)
+  })
+
+  it('普通标题不受影响', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const h = store.addHistory({ time: Date.now(), url: 'https://example.com/a', title: 'Example — Home', actor: 'ai', group: '' })
+    const b = store.addBookmark({ url: 'https://example.com/a', title: 'Example — Home', actor: 'ai', group: '' })
+    expect(h.title).toBe('Example — Home')
+    expect(b.title).toBe('Example — Home')
   })
 })

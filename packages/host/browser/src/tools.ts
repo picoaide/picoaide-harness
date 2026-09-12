@@ -669,7 +669,14 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const tabId = await tabOf(tab)
       const result = await runtime.eval(tabId, expression, frame, exec.signal)
       exec.signal.throwIfAborted()
-      return { result }
+      // FIX-03 depth layer (2026-09-12): `runtime.eval` already runs its result
+      // through the value-level secret redactor. Re-applying the same reducer
+      // at the tool boundary is deliberately redundant: the model-facing exit
+      // stays scrubbed even if a future runtime path (or another caller)
+      // returns an unredacted value. It closes the read-back channel only —
+      // `browser_eval` may still `fetch` a value out (not a security boundary;
+      // see the tool description).
+      return { result: runtime.redactTabSecrets(tabId, result) }
     },
   }))
 

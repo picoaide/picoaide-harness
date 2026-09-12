@@ -233,6 +233,12 @@ func main() {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       120 * time.Second,
+		// FIX-15(审计 2026-09-12,P1,纵深):请求行与请求头合计上限。
+		// 此前沿用 Go 默认 1 MB —— 256 KB 的 `?type=` 查询串能被完整接收并
+		// 进入 O(n²) 解析(单请求 14.96 s / ~500 CPU·秒)。真实客户端的
+		// header 是几 KB 量级(Bearer token + 少量自定义头),16 KB 留了
+		// 一个数量级余量;超过即 431 拒绝,根本不进业务代码。
+		MaxHeaderBytes: 16 << 10,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -247,6 +253,22 @@ func main() {
 		log.Printf("startup username case check: %v", cerr)
 	} else if len(conflicts) > 0 {
 		log.Printf("WARNING: users with case-insensitive duplicate usernames: %v (please merge manually)", conflicts)
+	}
+	// FIX-12(审计 2026-09-12,P1):审计哈希链的**启动校验**。
+	// 此前 VerifyAuditChain 在生产代码里零调用 —— "链算法正确、但没有任何
+	// 运行路径会验证它"。这里在启动时跑一次:不阻断启动(单实例巡检不应
+	// 让整个服务起不来,且历史数据可能合法地存在 pre-0048 行),但**必须
+	// 留下可见的 ERROR**,让运维知道链在哪个条目断了。
+	// 运行期可随时在 GET /api/server/admin/server-info 的 audit 字段复查
+	// (chain_checked / chain_intact / chain_broken_id / write_failures /
+	// dropped_entries);不新增路由,避免与 router 的路由唯一真源失配。
+	if brokenID, verr := serverstore.RunAndRecordAuditChainCheck(db); verr != nil {
+		log.Printf("ERROR audit chain verify failed at startup: %v", verr)
+	} else if brokenID != 0 {
+		log.Printf("ERROR audit chain BROKEN at entry id=%d (tampering or external modification); "+
+			"inspect audit_logs around that id", brokenID)
+	} else {
+		log.Printf("audit chain verified: intact")
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

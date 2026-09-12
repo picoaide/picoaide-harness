@@ -15,6 +15,7 @@ import { SecretInput } from '../components/secret-input'
 import { Lock } from 'lucide-react'
 import { isModelPriced } from '../lib/format'
 import { useFlash } from '../lib/use-flash'
+import { uid } from '../lib/utils'
 
 interface Provider {
   id: number
@@ -68,23 +69,42 @@ const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日']
 // ALL_WEEKDAYS:全部 7 天(旧数据缺省 = 每天)。
 const ALL_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
 
-function parsePeakWindows(s: string): PeakWindowRow[] {
+/**
+ * 解析服务端存的高峰时段 JSON。
+ *
+ * 审计 2026-09-12 P1-2:旧实现在**任何**异常时都 `return []`,与「本来就没配
+ * 峰谷价」不可区分 —— 于是页面上任何一次「保存」都会把无法解析的
+ * `peak_windows` 写成空串(静默破坏计费口径,`flash('已保存')` 还说成功)。
+ * 现在把三种情形分开:空白 = 真的没配(合法空);合法数组 = 正常;其余 = 解析失败,
+ * 由 saveGateway 拒绝提交(见 peakParseFailed)。
+ */
+type PeakParse = { ok: true, rows: PeakWindowRow[] } | { ok: false }
+
+function parsePeakWindows(s: string): PeakParse {
+  // 空白 = 服务端本来就没配峰谷价(合法),不是解析失败。
+  if (s.trim() === '') return { ok: true, rows: [] }
+  let arr: unknown
   try {
-    const arr = JSON.parse(s)
-    if (!Array.isArray(arr)) return []
-    return arr
-      .filter((w: any) => w && typeof w.start === 'string' && typeof w.end === 'string')
-      .map((w: any) => ({
-        keyId: `pk-${crypto.randomUUID()}`,
-        start: w.start,
-        end: w.end,
-        weekdays: Array.isArray(w.weekdays) && w.weekdays.length > 0
-          ? w.weekdays.filter((d: any) => Number.isInteger(d) && d >= 1 && d <= 7)
-          : ALL_WEEKDAYS,
-      }))
+    arr = JSON.parse(s)
   } catch {
-    return []
+    return { ok: false }
   }
+  if (!Array.isArray(arr)) return { ok: false }
+  const rows = arr
+    .filter((w: any) => w && typeof w.start === 'string' && typeof w.end === 'string')
+    .map((w: any) => ({
+      // keyId 走共享 uid():crypto.randomUUID 在非安全源不存在。
+      keyId: `pk-${uid()}`,
+      start: w.start,
+      end: w.end,
+      weekdays: Array.isArray(w.weekdays) && w.weekdays.length > 0
+        ? w.weekdays.filter((d: any) => Number.isInteger(d) && d >= 1 && d <= 7)
+        : ALL_WEEKDAYS,
+    }))
+  // 非空数组却一行都没解析出来 = 结构已不是本页认得的形态(旧版本/手改),
+  // 同样按解析失败处理:不拿空列表去覆盖它。
+  if (arr.length > 0 && rows.length === 0) return { ok: false }
+  return { ok: true, rows }
 }
 
 function formatCaps(defaultParams: string): string {
@@ -125,6 +145,10 @@ export default function Gateway() {
   const [channels, setChannels] = useState<Channel[]>([])
   const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
+  // 审计 2026-09-12 P1-2:服务端存的 peak_windows 无法解析时为 true →
+  // 禁止把空列表当成「清空」写回去(那是静默破坏计费口径)。管理员显式
+  // 添加/预设出非空时段后即可正常保存(那次提交是有内容的新值,不是清空)。
+  const [peakParseFailed, setPeakParseFailed] = useState(false)
   const [error, setError] = useState('')
   // P3: flash 定时器由 useFlash 统一清理。
   const [okMsg, setOkMsg] = useFlash(2000)
@@ -157,7 +181,15 @@ export default function Gateway() {
       setProviders(p.providers ?? [])
       setModels(m.models ?? [])
       setCfg(g)
-      setPeakList(parsePeakWindows(g.peak_windows ?? ''))
+      const peak = parsePeakWindows(g.peak_windows ?? '')
+      if (peak.ok) {
+        setPeakList(peak.rows)
+        setPeakParseFailed(false)
+      } else {
+        // 不假装「没有峰谷价」:标红提示,并在保存时拒绝提交(见 saveGateway)。
+        setPeakList([])
+        setPeakParseFailed(true)
+      }
       setCfg(cfg => ({ ...cfg, retention_months: g.retention_months ?? '6' }))
       setChannels(ch.channels ?? [])
       setError('')
@@ -189,6 +221,13 @@ export default function Gateway() {
       if (!Number.isInteger(rm) || rm < 0 || rm > 120) { setError('明细保留必须 0-120 个月(0=永不删除)'); return }
     }
     if (cfg.server_base_url && !isHttpUrl(cfg.server_base_url)) { setError('对外访问地址必须是 http(s) URL'); return }
+    // 审计 2026-09-12 P1-2:服务端已存的 peak_windows 无法解析 + 本次编辑区为空
+    // ⇒ 提交等于用空串覆盖它(静默清空峰谷窗口、破坏计费口径)。拒绝提交,
+    // 而不是照旧写 `peak_windows: ''` 再弹「已保存」。
+    if (peakParseFailed && peakList.length === 0) {
+      setError('高峰时段配置无法解析(服务端存量不是本页认得的 JSON 数组):为避免静默清空计费口径,已拒绝保存。请用「添加时段」或预设按钮显式重建峰谷窗口后再保存。')
+      return
+    }
     if (peakList.some((w) => !w.start || !w.end || w.start >= w.end)) {
       setError('高峰时段每行的开始时间必须早于结束时间')
       return
@@ -533,12 +572,12 @@ export default function Gateway() {
     }
   }
 
-  const addPeak = () => setPeakList((l) => [...l, { keyId: `pk-${crypto.randomUUID()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
+  const addPeak = () => setPeakList((l) => [...l, { keyId: `pk-${uid()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
   const removePeak = (i: number) => setPeakList((l) => l.filter((_, idx) => idx !== i)) // keyId 保证 DOM 稳定,index 仅定位数据
   // DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间周一至周五 09:00-12:00、14:00-18:00。
   const presetPeak = () => setPeakList([
-    { keyId: `pk-${crypto.randomUUID()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
-    { keyId: `pk-${crypto.randomUUID()}`, start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
+    { keyId: `pk-${uid()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
+    { keyId: `pk-${uid()}`, start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
   ])
   const updatePeak = (i: number, field: 'start' | 'end', v: string) =>
     setPeakList((l) => l.map((w, idx) => (idx === i ? { ...w, [field]: v } : w)))
@@ -774,6 +813,12 @@ export default function Gateway() {
             <h3 className="text-sm font-medium text-muted-foreground">计费（峰谷折扣）</h3>
             <div className="space-y-2">
               <Label>高峰时段(北京时间)</Label>
+              {peakParseFailed && (
+                <div className="rounded border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  服务端已存的高峰时段配置无法解析(不是本页认得的 JSON 数组)。编辑区已置空,保存会被拒绝 ——
+                  直接用空列表覆盖会静默清空峰谷窗口、改变计费口径。请用下方「添加时段」或预设按钮显式重建后再保存。
+                </div>
+              )}
               {peakList.map((w, i) => (
                 <div key={w.keyId} className="flex flex-wrap items-center gap-2">
                   <Input

@@ -25,6 +25,17 @@ interface ConnectorEntry {
     userCode?: string
     message?: string
     fields?: { key: string; label: string; type: string; required?: boolean; defaultValue?: string }[]
+    /**
+     * FIX-02: server-issued stdio command awaiting a LOCAL decision. Nothing is
+     * spawned until the user answers through the approve/deny routes.
+     */
+    approval?: {
+      fingerprint: string
+      command: string
+      args: string[]
+      envKeys: string[]
+      servers: string[]
+    }
   } | null
 }
 
@@ -222,6 +233,22 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
     }
   }, [busy, entry.id, formValues, onChanged])
 
+  // FIX-02: the local execution decision. Both answers are same-origin POSTs
+  // to the host (the trust fence lives there, not in this component).
+  const decideApproval = useCallback(async (allow: boolean): Promise<void> => {
+    if (busy !== null) return
+    setError(null)
+    setBusy('submit')
+    try {
+      await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/${allow ? 'approve' : 'deny'}`, { method: 'POST' })
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }, [busy, entry.id, onChanged])
+
   const disconnect = useCallback(async (): Promise<void> => {
     if (busy !== null) return
     setError(null)
@@ -308,6 +335,29 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
         </div>
       )}
 
+      {entry.request?.approval && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10, borderRadius: 8, border: '1px solid var(--dsw-alias-state-warn-primary)' }}>
+          <p style={{ ...LABEL, color: 'var(--dsw-alias-state-warn-primary)', fontWeight: 600 }}>{t('approval.title')}</p>
+          <p style={LABEL}>{t('approval.hint', { target: entry.request.approval.servers.join(', ') })}</p>
+          <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.command')}<code>{entry.request.approval.command}</code></p>
+          {entry.request.approval.args.length > 0 && (
+            <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.args')}<code>{entry.request.approval.args.join(' ')}</code></p>
+          )}
+          {entry.request.approval.envKeys.length > 0 && (
+            <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.env')}<code>{entry.request.approval.envKeys.join(', ')}</code></p>
+          )}
+          <p style={LABEL}>{t('approval.once')}</p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" style={BUTTON} disabled={busy === 'submit'} onClick={() => { void decideApproval(true) }} aria-label={`${t('action.allow')} ${entry.name}`}>
+              {busy === 'submit' ? t('action.deciding') : t('action.allow')}
+            </button>
+            <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'submit'} onClick={() => { void decideApproval(false) }} aria-label={`${t('action.deny')} ${entry.name}`}>
+              {t('action.deny')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {downloading && entry.request?.message && <p style={LABEL}>{entry.request.message}</p>}
       {polling && <p style={LABEL}>{t('auth.waiting')}</p>}
       {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error)}</p>}
@@ -318,6 +368,10 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
           <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
             {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}
           </button>
+        ) : entry.request?.approval ? (
+          // FIX-02: the decision block above owns the actions; a generic
+          // "连接" button here would silently re-enter the same gate.
+          <span style={LABEL}>{t('status.unauthorized')}</span>
         ) : entry.status === 'connecting' ? (
           // P0-1: while an authorization flow is in flight the user must be
           // able to abort it — a "停止" button instead of a disabled "连接".

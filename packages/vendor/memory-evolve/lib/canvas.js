@@ -32,6 +32,7 @@ import { spawn as spawnProcess } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
+import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const ct2 = (key, params) => translate(MISC2_DICT, key, params, getLocale())
@@ -904,6 +905,9 @@ export function installCanvas(ctx, config, resolveCwd, resolveSessionName) {
       kind: 'prefix',
       path: base,
       handler: async (req, res) => {
+        // FIX-04：统一前置守卫。此前跨站页面能 POST /open、/open-dir
+        // 让系统默认程序打开本地文件、POST /migrate 改写画板数据。
+        if (await applyRequestGuard(req, res, 256 * 1024)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
         try {
@@ -1132,19 +1136,10 @@ function sendJson(res, status, body) {
   res.end(text)
 }
 
-/** 读取 JSON 请求体（上限 256KiB，画板整板保存够用）。 */
-async function readBody(req, maxBytes = 256 * 1024) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
+/** 读取 JSON 请求体（上限 256KiB，画板整板保存够用）。
+ *
+ * FIX-04：实现搬到共享守卫模块 `lib/http-guard.js`（守卫已解析的体会被缓存，
+ * 自带副本二次读流会静默拿到 `{}`）。
+ * @type {(req: import('node:http').IncomingMessage, maxBytes?: number) => Promise<object>}
+ */
+const readBody = (req, maxBytes = 256 * 1024) => sharedReadBody(req, maxBytes)
