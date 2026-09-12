@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
@@ -161,31 +162,78 @@ func updateUsageTokensSettled(db *sql.DB, id, promptTokens, completionTokens, ca
 	return err
 }
 
-// estimateStreamCompletionTokens 是流式「按转发字节估算」的**唯一实现**
-// (chat/completions/responses 与 anthropic messages 共用同一口径):
-// 约 4 字节/token,保守下限。输入侧无法从字节推算,由调用方决定传 0 或上游
-// 已回报的真实值。
-func estimateStreamCompletionTokens(forwardedBytes int64) int64 {
-	if forwardedBytes <= 0 {
+// estimatedBytesPerToken 是"按字节估算 token"的换算口径:约 4 字节/token,
+// 保守下限(与 2026-08 起的流式兜底口径一致)。
+const estimatedBytesPerToken = 4
+
+// estimateTokensFromBytes 是字节→token 估算的**唯一实现**
+// (chat/responses/completions 流式、非流式响应体、anthropic messages、
+// embedding 输入侧全部共用同一口径,不再有第二份换算)。
+func estimateTokensFromBytes(n int64) int64 {
+	if n <= 0 {
 		return 0
 	}
-	return forwardedBytes / 4
+	return n / estimatedBytesPerToken
+}
+
+// estimateEmbeddingPromptTokens 是 embedding 路径的输入侧估算(唯一实现):
+// 与 estimateTokensFromBytes 同一口径,但**向上取整到至少 1** —— embedding
+// 没有 completion 侧可估算,输入非空却落一条 0 token 的零费用行等于零落账。
+func estimateEmbeddingPromptTokens(texts []string) int64 {
+	var bytes int64
+	for _, t := range texts {
+		bytes += int64(len(t))
+	}
+	if bytes <= 0 {
+		return 0
+	}
+	if n := estimateTokensFromBytes(bytes); n > 0 {
+		return n
+	}
+	return 1
+}
+
+// fallbackCompletionTokens 是"补 completion 缺失那一半"的**唯一实现**:
+// 上游没有给出可用的 completion 侧(字段缺失、显式 0、负数)时,按**已交付
+// 字节**估算(同一个 estimateTokensFromBytes);已经上报的**正值原样保留**
+// —— 估算永远不会叠加到真实值上、也永远不会覆盖 prompt 侧(输入 token 无法
+// 由响应字节推知,宁可少收也不凭空多扣)。
+//
+// 饱和保护(G5a 同源):估算不得让 prompt+completion 越过 MaxInt64 ——
+// 落库列是 BIGINT,求和回绕/越界会让聚合与对账查询报错。
+func fallbackCompletionTokens(promptTokens, completionTokens, deliveredBytes int64) int64 {
+	if completionTokens > 0 {
+		return completionTokens
+	}
+	estimated := estimateTokensFromBytes(deliveredBytes)
+	if estimated <= 0 {
+		return 0
+	}
+	if promptTokens > 0 {
+		if room := int64(math.MaxInt64) - promptTokens; estimated > room {
+			if room <= 0 {
+				return 0
+			}
+			estimated = room
+		}
+	}
+	return estimated
 }
 
 // settleStreamFallback 是流式收尾兜底结算的**唯一实现**(G12,审计 2026-09-13)。
 //
-// 上游没有回报 usage、或只回报了输入侧(例如 Anthropic 流在 message_start 之后
-// 就断了)时,按**已经转发出去的字节数**估算 completion tokens 并回填 ——
-// 与 chat 流式 2026-08 起就有的口径完全同源(同一函数,不是第二份实现)。
-// 真实值优先:只补 completion 缺失的那一半(ct<=0 才填),不会把上游报的用量
-// 改大或改小;输入侧(cache/prompt)原样带出。
+// 上游没有回报 usage、或只回报了输入侧(例如 Anthropic 流在 message_start
+// 之后就断了;N1,审计 r3 第四轮:调用方的前置条件曾把「pt>0 且 ct==0」排除,
+// 于是 completion 永不估算)时,按**已经转发出去的字节数**估算 completion
+// tokens 并回填 —— 与 chat 流式 2026-08 起就有的口径完全同源(同一个
+// fallbackCompletionTokens,不是第二份实现)。真实值优先:只补 completion
+// 缺失的那一半(ct<=0 才填),不会把上游报的用量改大或改小;输入侧
+// (prompt/cache)原样带出,**绝不被估算覆盖**。
 //
 // 返回 settled=false 且 err==nil 表示这次流没有任何可计费内容(pending 行已删除)。
 // 返回 err != nil 时调用方必须 fail-closed(abortSettlementFailureStream)。
 func settleStreamFallback(db *sql.DB, usageID, forwardedBytes, promptTokens, completionTokens, cacheTokens int64) (bool, error) {
-	if completionTokens <= 0 {
-		completionTokens = estimateStreamCompletionTokens(forwardedBytes)
-	}
+	completionTokens = fallbackCompletionTokens(promptTokens, completionTokens, forwardedBytes)
 	if promptTokens <= 0 && completionTokens <= 0 && cacheTokens <= 0 {
 		// 一个字节都没转发(连接失败/空流):删除 pending 行,不留痕迹。
 		return false, serverstore.DeleteUsage(db, usageID)

@@ -80,7 +80,12 @@ const DENIED_ENV_PREFIXES: readonly string[] = ['DSH_', 'ELECTRON_', 'PICOAIDE_'
  * @returns the name without surrounding whitespace.
  */
 export function normalizeEnvKey(key: string): string {
-  return key.trim()
+  // 先剥"不可见格式字符"再 trim(2026-09-13 审计 R4,与 Go 侧 connectorEnvKeyNormalize
+  // 逐条对齐):`\uFEFFNODE_OPTIONS` / `NODE\u200B_OPTIONS` 这类键 JS 的 trim() 只剥
+  // 空白、Go 的 unicode.IsSpace 也不认 U+FEFF —— 两边口径不同就会出现"管理端保存
+  // 成功、客户端静默丢弃"(或反向放行)。集合与 Go 侧同一份:
+  // U+00AD / U+180E / U+200B–U+200F / U+202A–U+202E / U+2060–U+2064 / U+2066–U+206F / U+FEFF
+  return key.replace(/[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu, '').trim()
 }
 
 /**

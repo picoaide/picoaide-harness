@@ -115,6 +115,27 @@ export interface ConnectorState {
 }
 
 /**
+ * One stdio command inside a multi-server confirmation (audit R3, N1).
+ *
+ * A connector may declare several stdio servers; one answer approves all of
+ * them, so the disclosure has to name each command and each key set rather
+ * than the first one.
+ */
+export interface ConnectorMcpApprovalCommand {
+  /** `mcp[].serverName` this command belongs to. */
+  serverName: string
+  /** Executable this server asks to run. */
+  command: string
+  /** Argument vector as this server declares it. */
+  args: string[]
+  /**
+   * EVERY environment-variable name THIS server's child will (or may) receive
+   * — see {@link ConnectorMcpApproval.envKeys} for the "may" part.
+   */
+  envKeys: string[]
+}
+
+/**
  * Local confirmation of a server-issued stdio command (FIX-02 P0): the first
  * spawn of a `(command, args, env)` fingerprint must be approved on this
  * machine. The request carries everything the user needs to judge it.
@@ -122,19 +143,27 @@ export interface ConnectorState {
 export interface ConnectorMcpApproval {
   /** `sha256` of the spawn tuple; the key persisted once approved. */
   fingerprint: string
-  /** Executable the definition asks to run. */
+  /** Executable the definition asks to run (first pending server; see `commands`). */
   command: string
-  /** Argument vector as the definition declares it. */
+  /** Argument vector as the definition declares it (first pending server). */
   args: string[]
   /**
-   * EVERY environment-variable name the child process will receive — the
-   * definition's `mcp[].env`, the credential field names it declares and the
-   * framework's own keys. Values are never shown here, but a name the user was
-   * not shown must never be injected (residual A).
+   * EVERY environment-variable name ANY covered child process will or may
+   * receive — the definition's `mcp[].env`, the credential field names it
+   * declares (even before a value is stored: a later value must not inject an
+   * undisclosed name without a new prompt, audit R3 N2) and the framework's own
+   * keys. Values are never shown here, but a name the user was not shown must
+   * never be injected (residual A). This is the UNION over `commands`.
    */
   envKeys: string[]
   /** MCP server names this approval covers. */
   servers: string[]
+  /**
+   * Per-server detail of every command one answer approves (audit R3, N1):
+   * the single-answer UI renders this instead of only the first server.
+   * Optional so an already-serialized prompt stays readable.
+   */
+  commands?: ConnectorMcpApprovalCommand[]
 }
 
 /** Runtime callbacks the UI observes. */

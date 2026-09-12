@@ -47,6 +47,8 @@ type auditR3Upstream struct {
 	embed  string
 	calls  int
 	paths  []string
+	// statusCode != 0 时非流式分支按该状态码应答(4xx 上游错误体回归用)。
+	statusCode int
 }
 
 func newAuditR3Upstream(t *testing.T) *auditR3Upstream {
@@ -72,6 +74,12 @@ func newAuditR3Upstream(t *testing.T) *auditR3Upstream {
 			fmt.Fprint(w, u.get(&u.stream))
 		default:
 			w.Header().Set("Content-Type", "application/json")
+			u.mu.Lock()
+			code := u.statusCode
+			u.mu.Unlock()
+			if code != 0 {
+				w.WriteHeader(code)
+			}
 			fmt.Fprint(w, u.get(&u.non))
 		}
 	}))
@@ -379,8 +387,12 @@ func TestResponsesBillingCountsInputOutputTokens(t *testing.T) {
 
 	t.Run("非流式_缓存明细按缓存价计费", func(t *testing.T) {
 		u := newAuditR3Upstream(t)
-		u.setNon(`{"id":"r","object":"response","usage":{"input_tokens":1000000,"output_tokens":0,"input_tokens_details":{"cached_tokens":400000}}}`)
-		// 输入 1 元/1M、缓存 0.25 元/1M:600k miss × 1 + 400k cache × 0.25 = 0.7 元
+		// 注意(审计 r3 第四轮 N1/N2):completion 侧缺失**或为 0** 时按已交付
+		// 字节估算兜底,所以本用例显式给一个正的 output_tokens,把 subject 钉在
+		// 缓存明细的**计价**上(缓存命中 400k 走 0.25 元/1M,其余 miss 走输入价)。
+		u.setNon(`{"id":"r","object":"response","usage":{"input_tokens":1000000,"output_tokens":500,"input_tokens_details":{"cached_tokens":400000}}}`)
+		// 输入 1 元/1M、缓存 0.25 元/1M、输出 1 元/1M:
+		// 600k miss × 1 + 400k cache × 0.25 + 500 out × 1 = 0.7 + 0.0005 元
 		r, db, uid, token := newAuditR3Gateway(t, u, 100, 1, 1, 0.25)
 		w := doPost(t, r, "/v1/responses", `{"model":"r3-model","input":"hi"}`, token, nil)
 		s := auditR3Snapshot(t, db, uid)
@@ -388,11 +400,11 @@ func TestResponsesBillingCountsInputOutputTokens(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", w.Code)
 		}
-		if s.tokens != 1000000 {
-			t.Fatalf("tokens = %d, want 1000000", s.tokens)
+		if s.tokens != 1000500 {
+			t.Fatalf("tokens = %d, want 1000500", s.tokens)
 		}
-		if math.Abs(s.cost-0.7) > 1e-6 {
-			t.Fatalf("cost = %.6f, want 0.7(input_tokens_details.cached_tokens 未映射到缓存价)", s.cost)
+		if math.Abs(s.cost-0.7005) > 1e-6 {
+			t.Fatalf("cost = %.6f, want 0.7005(input_tokens_details.cached_tokens 未映射到缓存价)", s.cost)
 		}
 	})
 
@@ -744,8 +756,11 @@ func TestTransientSettlementErrorFailsClosedOnInsert(t *testing.T) {
 // 有限次重试 —— 一次瞬时失败不会把正常的流式请求误判成失败。
 func TestTransientSettlementErrorRetriedOnIdempotentBackfill(t *testing.T) {
 	u := newAuditR3Upstream(t)
+	// 用量两侧都给正值:本用例的 subject 是"回填路径的一次瞬时失败要重试",
+	// 不是"显式 0 的语义"(N1/N2 起 completion 为 0 会走字节估算兜底,数字
+	// 会随交付字节变化,与本用例无关)。
 	u.setStream("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
-		"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":0}}\n\n" +
+		"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":500}}\n\n" +
 		"data: [DONE]\n\n")
 	r, db, uid, token := newAuditR3Gateway(t, u, 100, 1, 1, 1)
 	failFirstLedgerInsert(t, db)
@@ -761,8 +776,8 @@ func TestTransientSettlementErrorRetriedOnIdempotentBackfill(t *testing.T) {
 	if !strings.Contains(body, "[DONE]") {
 		t.Fatalf("流应正常完成: %s", bodyHead(w))
 	}
-	if s.tokens != 1000000 || math.Abs(s.cost-1.0) > 1e-6 || math.Abs(s.balance-99.0) > 1e-6 {
-		t.Fatalf("重试后必须完成结算: tokens=%d cost=%.6f balance=%.6f (want 1000000 / 1.0 / 99.0)", s.tokens, s.cost, s.balance)
+	if s.tokens != 1000500 || math.Abs(s.cost-1.0005) > 1e-6 || math.Abs(s.balance-98.9995) > 1e-6 {
+		t.Fatalf("重试后必须完成结算: tokens=%d cost=%.6f balance=%.6f (want 1000500 / 1.0005 / 98.9995)", s.tokens, s.cost, s.balance)
 	}
 	checkLedgerInvariant(t, s, "G5b 瞬时错误(流式回填)")
 }

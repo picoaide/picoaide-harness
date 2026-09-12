@@ -1187,7 +1187,16 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
                 result = { ok: false, message: mt('msg.keyArchiveNeedsCwd'), target }
                 break
               }
-              let entries = archive.entriesOf(target, cwd)
+              let entries
+              try {
+                entries = archive.entriesOf(target, cwd)
+              } catch (error) {
+                // FIX-22 读侧断言（2026-09-13 第四轮）：归档落点是符号链接/越界时
+                // entriesOf fail-loud（不跟随链接读仓库外内容）——转成工具结果，
+                // 文案就是同一份 i18n（不新造第二套措辞）
+                result = { ok: false, message: error?.message ?? String(error), target }
+                break
+              }
               // 轻量过滤：filter 子串（大小写不敏感）、since/until 按时间戳
               // 前缀比较、recent 倒序、limit 截断——与主轨 list 语义对齐
               const q = String(args.filter ?? '').trim().toLowerCase()

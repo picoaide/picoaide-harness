@@ -113,7 +113,16 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 		return
 	}
 	body = redactSecrets(body, secrets)
-	if pt, ct, cache, ok, _ := anthropicUsage(body); ok {
+	// N2(审计 r3 第四轮):与 /v1/chat/completions 非流式**同源** —— usage 缺失/
+	// null/空对象时也必须落一行可对账的估算费用,不能 200 交付却零落账。
+	// 缺/0 的 completion 侧按已交付字节估算(与流式同一个 fallbackCompletionTokens);
+	// 4xx 错误体不是交付内容 → 不估算(只有上游确实上报了 usage 才落账)。
+	pt, ct, cache, ok, _ := anthropicUsage(body)
+	delivered := resp.StatusCode < 400
+	if delivered {
+		ct = fallbackCompletionTokens(pt, ct, int64(len(body)))
+	}
+	if delivered || ok {
 		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cache, "search"); err != nil {
 			// FIX-05 + G5b:与 /v1/chat/completions 同源 —— **任何**结算失败都
 			// 必须在交付响应体之前拒绝,不能 log 后继续 200(事务已回滚)。
@@ -236,13 +245,16 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	// 收尾结算(G12,审计 2026-09-13):此前这里**无条件删除** pending 行 ——
 	// 上游不报 usage 时整条流分文不取(客户端中途断开时同样白送)。现在与
 	// chat 流式的兜底口径同源(同一个 settleStreamFallback:按已转发字节估算
-	// completion,约 4 字节/token):上游一个 usage 值都没回报过时按估算回填,
-	// 回报过就尊重上游的真实值(不重复计、不改大改小);真的一个字节都没转发
-	// 才删行。结算失败一律 fail-closed(G5b)。
-	if usageID > 0 && pt == 0 && ct == 0 {
+	// completion,约 4 字节/token):只要**任一侧缺失/为 0**就走兜底(含
+	// message_start 报了 input_tokens、message_delta 之前就断流 —— N1,审计
+	// r3 第四轮:旧前置条件 `pt == 0 && ct == 0` 把这种流整段免单),由
+	// settleStreamFallback 内部只补 completion 那一半 —— 已上报的 pt/cache
+	// 原样带出,绝不被估算覆盖;真的一个字节都没转发才删行。结算失败一律
+	// fail-closed(G5b)。
+	if usageID > 0 && (pt <= 0 || ct <= 0) {
 		settled, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, pt, ct, cache)
-		log.Printf("gateway: anthropic stream without reported usage, byte-estimated settlement: usage=%d stop=%s forwarded=%d settled=%v err=%v",
-			usageID, stopReason, forwardedBytes, settled, serr)
+		log.Printf("gateway: anthropic stream with missing/zero usage side, fallback settlement: usage=%d stop=%s forwarded=%d pt=%d ct=%d settled=%v err=%v",
+			usageID, stopReason, forwardedBytes, pt, ct, settled, serr)
 		if serr != nil {
 			if !clientGone {
 				abortSettlementFailureStream(c, fl, serr, "anthropic stream fallback")
