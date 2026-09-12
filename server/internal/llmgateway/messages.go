@@ -72,9 +72,12 @@ func anthropicUsage(raw []byte) (pt, ct, cache int64, ok bool, err error) {
 	// cache_creation 完全不计费、cache_read 又被钳到 input_tokens。
 	// P0-B(审计 2026-09-12):逐项归零 —— 负 token 会让费用变负,结算侧记成
 	// refund → 余额凭空增加;逐项(而非求和后)归零可避免负值抵消正值。
+	// G5a(审计 2026-09-13):求和必须**饱和**(satAddTokensNonNeg),否则
+	// MaxInt64 + 1 回绕成 MinInt64 → 再被归零 ⇒ 巨额用量计费 0。
 	cache = clampTokensNonNeg(u.CacheReadInputTokens)
-	return clampTokensNonNeg(u.InputTokens) + cache + clampTokensNonNeg(u.CacheCreationInputTokens),
-		clampTokensNonNeg(u.OutputTokens), cache, true, nil
+	total := satAddTokensNonNeg(clampTokensNonNeg(u.InputTokens), cache)
+	total = satAddTokensNonNeg(total, clampTokensNonNeg(u.CacheCreationInputTokens))
+	return total, clampTokensNonNeg(u.OutputTokens), cache, true, nil
 }
 
 // serveAnthropicJSON passes a non-stream Anthropic Messages response through
@@ -112,14 +115,10 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 	body = redactSecrets(body, secrets)
 	if pt, ct, cache, ok, _ := anthropicUsage(body); ok {
 		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cache, "search"); err != nil {
-			// FIX-05:与 /v1/chat/completions 同源 —— 余额结算失败必须在交付
-			// 响应体之前 429 拒绝,不能 log 后继续 200(事务已回滚)。
-			if isBalanceSettlementFailure(err) {
-				log.Printf("gateway: insufficient balance, rejecting messages before delivery: user=%d model=%s", userID, model)
-				rejectBalanceSettlement(c)
-				return
-			}
-			log.Printf("gateway: record anthropic usage: %v", err)
+			// FIX-05 + G5b:与 /v1/chat/completions 同源 —— **任何**结算失败都
+			// 必须在交付响应体之前拒绝,不能 log 后继续 200(事务已回滚)。
+			rejectSettlementFailure(c, err, "anthropic json")
+			return
 		}
 	}
 	c.Status(resp.StatusCode)
@@ -167,14 +166,18 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
-	ended := false
-	idleTimedOut := false
-	backfilled := false
+	// stopReason 只用于收尾结算的日志(上游 EOF / 空闲超时 / 客户端断开)。
+	stopReason := "upstream_eof"
+	// pt/ct/cache 是上游**回报过的**用量(Anthropic 的 usage 分散在
+	// message_start=输入、message_delta=输出(累积),按行"非零覆盖"合并)。
+	// 三者全 0 = 上游从未回报任何 usage(G12 的形态)⇒ 收尾必须走字节估算兜底。
+	var forwardedBytes int64
 	var pt, ct, cache int64
 	for {
 		// 5#9/5#10: stop pumping once the client context is gone
 		if c.Request.Context().Err() != nil {
 			clientGone = true
+			stopReason = "client_gone"
 			break
 		}
 		line, err := readLineWithIdle(br, streamIdleTimeout)
@@ -194,25 +197,23 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 						cache = lcache
 					}
 					if usageID > 0 {
-						if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cache); uerr != nil {
-							// FIX-05:流式回填结算失败 —— SSE 头已发,状态码改不了;
-							// 写一条 error 事件后终止,不能继续 200 泵内容。
-							if isBalanceSettlementFailure(uerr) {
-								log.Printf("gateway: insufficient balance, aborting messages stream: usage=%d", usageID)
-								if !clientGone {
-									abortBalanceSettlementStream(c, fl)
-								}
-								return
+						if uerr := updateUsageTokensSettled(a.DB, usageID, pt, ct, cache); uerr != nil {
+							// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,状态码
+							// 改不了;写一条 error 事件后**终止泵送**。
+							if !clientGone {
+								abortSettlementFailureStream(c, fl, uerr, "anthropic stream backfill")
+							} else {
+								log.Printf("gateway: settlement failed after client gone: usage=%d err=%v", usageID, uerr)
 							}
-							log.Printf("gateway: backfill anthropic usage: %v", uerr)
-						} else if pt+ct > 0 {
-							backfilled = true
+							return
 						}
 					}
 				}
 			}
+			forwardedBytes += int64(len(line))
 			if _, werr := c.Writer.WriteString(line); werr != nil {
 				clientGone = true
+				stopReason = "client_write_failed"
 				break
 			}
 			if fl != nil {
@@ -221,22 +222,31 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 		}
 		if err != nil {
 			if errors.Is(err, errStreamIdleTimeout) {
-				idleTimedOut = true
+				stopReason = "idle_timeout"
 				log.Printf("gateway: anthropic stream idle timeout after %v, terminating", streamIdleTimeout)
 				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
 				if fl != nil {
 					fl.Flush()
 				}
-			} else {
-				// 2026-09-08 P2-11:上游正常结束(或读取错误)也算流结束。
-				ended = true
 			}
+			// 2026-09-08 P2-11:上游正常结束(或读取错误)也算流结束。
 			break
 		}
 	}
-	if (clientGone || idleTimedOut || ended) && usageID > 0 && !backfilled {
-		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
-			log.Printf("gateway: delete pending anthropic usage: %v", err)
+	// 收尾结算(G12,审计 2026-09-13):此前这里**无条件删除** pending 行 ——
+	// 上游不报 usage 时整条流分文不取(客户端中途断开时同样白送)。现在与
+	// chat 流式的兜底口径同源(同一个 settleStreamFallback:按已转发字节估算
+	// completion,约 4 字节/token):上游一个 usage 值都没回报过时按估算回填,
+	// 回报过就尊重上游的真实值(不重复计、不改大改小);真的一个字节都没转发
+	// 才删行。结算失败一律 fail-closed(G5b)。
+	if usageID > 0 && pt == 0 && ct == 0 {
+		settled, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, pt, ct, cache)
+		log.Printf("gateway: anthropic stream without reported usage, byte-estimated settlement: usage=%d stop=%s forwarded=%d settled=%v err=%v",
+			usageID, stopReason, forwardedBytes, settled, serr)
+		if serr != nil {
+			if !clientGone {
+				abortSettlementFailureStream(c, fl, serr, "anthropic stream fallback")
+			}
 		}
 	}
 }
@@ -300,11 +310,12 @@ func (a *API) handleMessages(c *gin.Context) {
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
 	// kind=search 与其他渠道区分,且被 CleanupPendingUsage 兜底清理。
+	// 写不进去就拒绝(不调用上游):usageID=0 一路跑下去整条流没有计量痕迹。
 	var usageID int64
 	if req.Stream {
-		usageID, err = serverstore.RecordUsageKind(a.DB, user.ID, req.Model, 0, 0, "search")
-		if err != nil {
-			log.Printf("gateway: record pending anthropic usage: %v", err)
+		var ok bool
+		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, "search"); !ok {
+			return
 		}
 	}
 

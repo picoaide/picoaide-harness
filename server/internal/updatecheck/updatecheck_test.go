@@ -245,8 +245,11 @@ func TestCompareSemVer(t *testing.T) {
 		{"2.6.0", "2.5.9", 1},
 		{"2.10.0", "2.9.0", 1}, // 位数不同:按长度比较,避免字典序陷阱
 		{"10.0.0", "9.99.99", 1},
-		{"dev", "2.0.0", 0},        // 非法输入视为相等
-		{"2.5.1-rc.1", "2.5.1", 0}, // 预发布不影响 core 比较
+		{"dev", "2.0.0", 0}, // 非法输入视为相等
+		// FIX-23-r3(审计 2026-09-13):预发布参与比较 —— 稳定版 > 同 core 预发布
+		// (旧断言 0 记录的是 core-only 语义,正是"同 core 预发布递增不提示"的病根)。
+		// 完整优先级表见 audit_r3_prerelease_test.go。
+		{"2.5.1-rc.1", "2.5.1", -1},
 	}
 	for _, tc := range cases {
 		if got := CompareSemVer(tc.left, tc.right); got != tc.want {
