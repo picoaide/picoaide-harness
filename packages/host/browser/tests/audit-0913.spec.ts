@@ -7,16 +7,20 @@
  * - **R-1** 出口统一脱敏：`browser_get_snapshot` 信封的 `url`/`title`、list_tabs、
  *   open/navigate、shellState、history/bookmark ledger、下载名、refusal 错误文本、
  *   页面文本。投影只有一处（`runtime.projectTabState` + store 写入路径）。
- * - **R-2** 注入了凭据的 tab 上 `browser_eval` 的网络写面被拒（静态）+ 页面内被
- *   禁用（shim）；普通 tab 不受影响；读完即还原页面 API。
- * - **R-3** 短口令不再误伤普通文本（词边界/长度判据），长口令仍然擦除。
- * - **R-4** `frame: N` 与 DOM 一一对应，OOPIF 纳入索引，对不上就 fail-loud。
+ * - **R-2**（第四轮起由 R-4 的凭据窗口接管）注入了凭据的 tab 上 `browser_eval`
+ *   整体被拒；R-2 的静态词表 + 页面内 shim 保留为模块 API 与回归锁。
+ * - **R-3** 短口令不再误伤普通文本（词边界/长度判据 + 键位词表），长口令仍然擦除。
+ * - **R-4** ①凭据活性窗口（fill 打开、主帧跨文档导航关闭，窗口内 eval/截图被拒）；
+ *   ②`key=value` 形态推广到任意文本（裸 title / 双重编码 / `;` 分隔 / 下载名）；
+ *   ③`frame: N` 与 DOM 一一对应，OOPIF（含其同进程子帧）纳入索引，对不上就 fail-loud。
+ *   每条都有真机证据：`tests/probes/credential-window-probe.mjs`
+ *   （`bash tests/probes/run-realmachine.sh [--pristine]`）。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserRuntime } from '../src/runtime.ts'
-import { BrowserStore, stripSensitiveUrl } from '../src/store.ts'
+import { BrowserStore, stripSensitiveText, stripSensitiveUrl } from '../src/store.ts'
 import { applyBrowserTools } from '../src/tools.ts'
 import { orderFramesByDom, isFrameOrderProblem, type FrameCandidate } from '../src/frames.ts'
 import { wrapEvalExpression, EVAL_EGRESS_BLOCKED_MARKER, assertCredentialTabExpression, validateEvalExpression } from '../src/eval-policy.ts'
@@ -29,7 +33,7 @@ class MockTransport implements CdpTransport {
   attached = false
   commands: Array<{ method: string; params?: Record<string, unknown>; sessionId?: string }> = []
   handler: (method: string, params?: Record<string, unknown>, sessionId?: string) => unknown = () => ({})
-  private readonly messageListeners: Array<(event: unknown, method: string, params: unknown) => void> = []
+  private readonly messageListeners: Array<(event: unknown, method: string, params: unknown, sessionId?: string) => void> = []
   isAttached(): boolean { return this.attached }
   attach(): void { this.attached = true }
   detach(): void { this.attached = false }
@@ -37,19 +41,19 @@ class MockTransport implements CdpTransport {
     this.commands.push({ method, ...(params === undefined ? {} : { params }), ...(sessionId === undefined ? {} : { sessionId }) })
     return this.handler(method, params, sessionId)
   }
-  on(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown {
+  on(event: 'message', listener: (event: unknown, method: string, params: unknown, sessionId?: string) => void): unknown {
     if (event === 'message') this.messageListeners.push(listener)
     return this
   }
-  removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown {
+  removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown, sessionId?: string) => void): unknown {
     if (event === 'message') {
       const idx = this.messageListeners.indexOf(listener)
       if (idx >= 0) this.messageListeners.splice(idx, 1)
     }
     return this
   }
-  emitNotification(method: string, params: unknown): void {
-    for (const listener of [...this.messageListeners]) listener(undefined, method, params)
+  emitNotification(method: string, params: unknown, sessionId?: string): void {
+    for (const listener of [...this.messageListeners]) listener(undefined, method, params, sessionId)
   }
   of(method: string): Array<{ params?: Record<string, unknown>; sessionId?: string }> {
     return this.commands.filter((command) => command.method === method)
@@ -290,27 +294,23 @@ describe('R-1 出口统一脱敏', () => {
 // -------------------------------------------------------------------- R-2
 
 describe('R-2 注入凭据的 tab：eval 网络写面收敛', () => {
-  it('命名了 fetch/XHR/sendBeacon/WebSocket/EventSource 的表达式被拒（静态闸），且一次都没下发', async () => {
+  it('凭据窗口内 browser_eval 整体被拒（fail-loud），且一次都没下发到页面', async () => {
     const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
     await h.runtime.open('https://app.example/login')
     await injectCredentials(h, 'corp', LONG_SECRET)
     const view = h.adapter.lastView()
     view.transport.commands.length = 0
-    // 刻意不用 `new`（那会先被通用 guardrail 以 eval-policy 拒掉，测不到凭据闸）
-    for (const expression of ["fetch('/x')", "typeof XMLHttpRequest", "typeof navigator.sendBeacon", "typeof WebSocket", "typeof EventSource"]) {
+    // R-4 口径：不再逐个 API 判——读侧变换（btoa/slice/join）与跨 realm 别名都被
+    // 真机证明挡不住，所以窗口内一律拒绝，读表达式也不例外。
+    for (const expression of ["fetch('/x')", 'typeof XMLHttpRequest', '1 + 1', "document.querySelectorAll('input').length", 'btoa(1)']) {
       const err = await h.runtime.eval(1, expression).catch((e: unknown) => e)
-      expect((err as { code?: string }).code).toBe('policy')
-      expect(String((err as Error).message)).toMatch(/blocked on this tab/u)
+      expect((err as { code?: string }).code, expression).toBe('policy')
+      expect(String((err as Error).message), expression).toMatch(/credential window/u)
+      expect(String((err as Error).message), expression).toMatch(/browser_fill_credentials/u)
     }
     expect(view.transport.of('Runtime.evaluate')).toHaveLength(0)
-  })
-
-  it('读表达式仍然放行，且包装里装了页面内的 egress shim（含还原）', async () => {
-    const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
-    await h.runtime.open('https://app.example/login')
-    await injectCredentials(h, 'corp', LONG_SECRET)
-    h.adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: 2 } } : {})
-    await expect(h.runtime.eval(1, "document.querySelectorAll('input').length")).resolves.toBe('2')
+    // R-2 的静态词表/页面内 shim 仍是模块 API（任何绕过窗口的新入口都得自己接上）。
+    expect(() => assertCredentialTabExpression("fetch('/x')")).toThrowError(/blocked on this tab/u)
     const wrapped = wrapEvalExpression("document.querySelectorAll('input').length", { denyEgress: true })
     expect(wrapped).toContain(EVAL_EGRESS_BLOCKED_MARKER)
     expect(wrapped).toContain('__restores')
@@ -318,20 +318,61 @@ describe('R-2 注入凭据的 tab：eval 网络写面收敛', () => {
     expect(wrapped).toContain("'XMLHttpRequest'")
     expect(wrapped).toContain("'sendBeacon'")
     expect(wrapped).toContain("'submit'")
-    // 未开启时包装保持原样（普通 tab 不受影响）
     expect(wrapEvalExpression('1 + 1')).not.toContain(EVAL_EGRESS_BLOCKED_MARKER)
   })
 
-  it('页面内的 shim 触发时给出策略错误（不是笼统的 page script failed）', async () => {
+  it('窗口内文本出口照常工作且值级擦除仍在（截图/eval 之外没有第二个明文出口）', async () => {
     const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
     await h.runtime.open('https://app.example/login')
     await injectCredentials(h, 'corp', LONG_SECRET)
     h.adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate'
-      ? { exceptionDetails: { text: 'Uncaught Error', exception: { description: `${EVAL_EGRESS_BLOCKED_MARKER}: fetch is disabled on this tab` } } }
+      ? { result: { value: `the stored value ${LONG_SECRET} is weak` } }
       : {})
-    const err = await h.runtime.eval(1, "window.__relay(document.querySelector('#pw').value)").catch((e: unknown) => e)
+    await expect(h.runtime.text(1, '#echo')).resolves.toBe('the stored value **** is weak')
+    const snapshot = await h.runtime.snapshot(1)
+    expect(JSON.stringify(snapshot)).not.toContain(LONG_SECRET)
+    expect(h.runtime.tabState(1).url).not.toContain(LONG_SECRET)
+  })
+
+  it('主帧跨文档导航退出窗口（eval/截图恢复），同文档/子帧导航不退出', async () => {
+    const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
+    await h.runtime.open('https://app.example/login')
+    await injectCredentials(h, 'corp', LONG_SECRET)
+    const view = h.adapter.lastView()
+    view.transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: 2 } } : {})
+    // 同文档导航（did-navigate-in-page）不算导航。
+    view.emit('did-navigate-in-page')
+    await expect(h.runtime.eval(1, '1 + 1')).rejects.toMatchObject({ code: 'policy' })
+    // 子帧导航（frameNavigated 带 parentId）不算主帧导航。
+    view.transport.emitNotification('Page.frameNavigated', { frame: { id: 'SUB', parentId: 'MAIN', url: 'https://ad.example' } })
+    await expect(h.runtime.eval(1, '1 + 1')).rejects.toMatchObject({ code: 'policy' })
+    // 主帧跨文档导航（CDP 事件）：窗口关闭、已注入值集合清空、eval 恢复。
+    view.transport.emitNotification('Page.frameNavigated', { frame: { id: 'MAIN', url: 'https://app.example/after' } })
+    await expect(h.runtime.eval(1, '1 + 1')).resolves.toBe('2')
+    expect(h.runtime.tab(1).filledSecrets).toEqual([])
+    expect(h.runtime.credentialWindowOpen(1)).toBe(false)
+    // 截图恢复（不再被凭据窗口以 policy 拒绝）
+    const shot = await h.runtime.screenshot(1).catch((e: unknown) => e)
+    expect((shot as { code?: string }).code).not.toBe('policy')
+  })
+
+  it('Electron 侧 did-navigate 同样退出窗口（真机双保险）', async () => {
+    const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
+    await h.runtime.open('https://app.example/login')
+    await injectCredentials(h, 'corp', LONG_SECRET)
+    h.adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: 1 } } : {})
+    h.adapter.lastView().emit('did-navigate')
+    await expect(h.runtime.eval(1, '1')).resolves.toBe('1')
+  })
+
+  it('窗口内截图被拒（图像通道无法脱敏），且给出可断言的文案', async () => {
+    const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
+    await h.runtime.open('https://app.example/login')
+    await injectCredentials(h, 'corp', LONG_SECRET)
+    const err = await h.runtime.screenshot(1).catch((e: unknown) => e)
     expect((err as { code?: string }).code).toBe('policy')
-    expect(String((err as Error).message)).toMatch(/network API that is blocked/u)
+    expect(String((err as Error).message)).toMatch(/credential window/u)
+    expect(String((err as Error).message)).toMatch(/browser_screenshot/u)
   })
 
   it('没注入凭据的 tab 依旧允许 fetch（不误伤正常流程）', async () => {
@@ -353,9 +394,8 @@ describe('R-3 短口令不误伤、长口令仍擦除', () => {
     await h.runtime.open('https://shop.example/order')
     await injectCredentials(h, 'corp', SHORT_SECRET)
     const view = h.adapter.lastView()
-    // 注意 eval 出口还有一层"关键词掩码"（serializeEvalResult.maskString）：任何含
-    // password/token/… 字样的**整串**会被整体打码，所以这里的用例刻意不含关键词，
-    // 测的是值级擦除本身。
+    // 观察口是文本出口（runtime.text）：窗口内 eval 已被整体拒绝，值级擦除只剩
+    // 文本/快照这两条路（R-4 口径）。
     const cases: Array<[string, string]> = [
       [`order ${SHORT_SECRET} confirmed`, `order ${SHORT_SECRET} confirmed`],
       [`x${SHORT_SECRET}y`, `x${SHORT_SECRET}y`],
@@ -365,13 +405,18 @@ describe('R-3 短口令不误伤、长口令仍擦除', () => {
       [`{"pw":"${SHORT_SECRET}"}`, '{"pw":"****"}'],
       [`value = ${SHORT_SECRET} `, 'value = **** '],
       [`user:${SHORT_SECRET}@host`, 'user:****@host'],
-      [`[${SHORT_SECRET}]`, '[****]'],
+      // R-4：括号/引号包裹的独立片段不再无条件打码（`Item (abc123) shipped` 与
+      // `Ref "abc123" noted` 是散文，上一轮口径把事实改写了）；只有键位词表在该
+      // 片段里命中时才算值位。
+      [`[${SHORT_SECRET}]`, `[${SHORT_SECRET}]`],
+      [`token=[${SHORT_SECRET}]`, 'token=[****]'],
+      [`password: (${SHORT_SECRET})`, 'password: (****)'],
+      // 真机页面形态：值后面直接换行（整页 innerText），右界是换行而不是行尾
+      [`password=${SHORT_SECRET}\nnext line`, 'password=****\nnext line'],
     ]
     for (const [input, expected] of cases) {
       view.transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: input } } : {})
-      // eval 出口把结果 JSON 序列化成字符串，解析回来比对原文。
-      const raw = await h.runtime.eval(1, 'document.body.innerText')
-      expect(JSON.parse(raw), input).toBe(expected)
+      await expect(h.runtime.text(1, '#probe'), input).resolves.toBe(expected)
     }
   })
 
@@ -381,7 +426,7 @@ describe('R-3 短口令不误伤、长口令仍擦除', () => {
     await injectCredentials(h, 'corp', LONG_SECRET)
     const view = h.adapter.lastView()
     view.transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: `the stored value ${LONG_SECRET} is weak` } } : {})
-    await expect(h.runtime.eval(1, 'document.body.innerText')).resolves.toBe('"the stored value **** is weak"')
+    await expect(h.runtime.text(1, undefined)).resolves.toBe('the stored value **** is weak')
     // 截断头（探针把元素文本截到 80 字符）在**快照漏斗**上按整值打码。
     view.transport.handler = (method) => (method === 'Runtime.evaluate'
       ? { result: { value: [{ kind: 'input', text: LONG_SECRET.slice(0, 12), selector: '#pw', visible: true, disabled: false }] } }
@@ -511,5 +556,191 @@ describe('R-4 frame 索引与 DOM 一一对应', () => {
     expect((ambiguous as { reason: string }).reason).toContain('cannot pair')
     // 数量不一致 → 拒绝
     expect(isFrameOrderProblem(orderFramesByDom(['https://x/a'], []))).toBe(true)
+  })
+})
+
+// -------------------------------------------------------------------- R-4
+// 第四轮（2026-09-13）：凭据活性窗口 + 文本出口推广 + 嵌套 OOPIF + 短口令残留误伤。
+
+const DEEP_URL = 'https://pay.example/deep'
+
+describe('R-4 文本出口：键=值形态从「必须含 ://」推广到任意文本', () => {
+  it('真机被漏掉的四种 title 形态都打码', () => {
+    expect(stripSensitiveText('token=T12')).toBe('token=****')
+    expect(stripSensitiveText('Sign in /cb?%73id=T11')).toBe('Sign in /cb?%73id=****')
+    expect(stripSensitiveText('Login failed: code=T14&state=x')).toBe('Login failed: code=****&state=x')
+    expect(stripSensitiveText('Sign in http://127.0.0.1:1/cb?token=T13')).toBe('Sign in http://127.0.0.1:1/cb?token=****')
+    // 句尾标点是散文，不是值
+    expect(stripSensitiveText('go to https://h/cb?token=T.')).toBe('go to https://h/cb?token=****.')
+    expect(stripSensitiveText('see token=T12.')).toBe('see token=****.')
+  })
+
+  it('双重编码（%2573id）与分号分隔（;token=）也命中，URL 字段同样处理', () => {
+    expect(stripSensitiveUrl('https://h/cb?%2573id=T3')).toBe('https://h/cb?%2573id=****')
+    expect(stripSensitiveUrl('https://h/?a=1;token=T4')).toBe('https://h/?a=1;token=****')
+    expect(stripSensitiveText('https://h/?a=1;token=T4')).toBe('https://h/?a=1;token=****')
+  })
+
+  it('干净文本/URL 逐字节不变（不误伤）', () => {
+    for (const clean of ['order 123 confirmed', 'a=1&b=2', 'see https://h/p?q=1&id=2', 'Item (abc123) shipped', '']) {
+      expect(stripSensitiveText(clean), clean).toBe(clean)
+      expect(stripSensitiveUrl(clean), clean).toBe(clean)
+    }
+  })
+
+  it('title 在 list_tabs / snapshot / history.jsonl 三处同一把尺子', async () => {
+    const h = track(makeHarness())
+    await h.runtime.open('https://app.example/a')
+    const view = h.adapter.lastView()
+    view.title = 'Login failed: code=T14&state=x'
+    h.runtime['updateTabState'](h.runtime['tab'](1))
+    await h.runtime.navigate(1, 'https://app.example/b')
+    view.title = 'Sign in /cb?%73id=T11'
+    h.runtime['updateTabState'](h.runtime['tab'](1))
+    await h.runtime.navigate(1, 'https://app.example/c')
+    const tabs = JSON.stringify(await h.call('browser_list_tabs'))
+    const snap = JSON.stringify(await h.call('browser_get_snapshot', { tab: 1 }))
+    const disk = readFileSync(join(h.dir, 'history.jsonl'), 'utf8')
+    for (const payload of [tabs, snap, disk]) {
+      expect(payload).not.toContain('T11')
+      expect(payload).not.toContain('T14')
+    }
+    expect(tabs).toContain('%73id=****')
+    expect(disk).toContain('code=****&state=x')
+  })
+})
+
+describe('R-4 下载名：percent-encoded 路径段不再绕过派生判定', () => {
+  it('URL 里是 %2D、getFilename() 给的是解码名 ⇒ fileName 仍打码', () => {
+    const h = track(makeHarness())
+    const entry = h.store.addDownload({
+      url: `https://files.example/dl/report%2DDLTOKEN999.zip?token=DLTOKEN999`,
+      fileName: 'report-DLTOKEN999.zip',
+      path: '.picoaide-downloads/report-DLTOKEN999.zip',
+      size: 3,
+      group: '',
+      actor: 'ai',
+    })
+    expect(entry.fileName).toBe('****')
+    expect(entry.url).toContain('token=****')
+    // 与凭据无关的下载名照旧
+    const plain = h.store.addDownload({ url: 'https://files.example/plain.zip', fileName: 'plain.zip', path: '.picoaide-downloads/plain.zip', size: 3, group: '', actor: 'ai' })
+    expect(plain.fileName).toBe('plain.zip')
+  })
+})
+
+describe('R-4 凭据活性窗口：只注入用户名也算窗口', () => {
+  it('filledSecrets 为空但窗口打开 ⇒ eval 照样被拒（窗口不是值列表的别名）', async () => {
+    const h = track(makeHarness(async () => ({ username: 'alice' })))
+    await h.runtime.open('https://app.example/login')
+    h.adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: { filled: 1, username: true, password: false } } } : {})
+    expect(await h.runtime.fillCredentials(1, 'corp')).toEqual({ username: true, password: false })
+    expect(h.runtime.credentialWindowOpen(1)).toBe(true)
+    expect(h.runtime.tab(1).filledSecrets).toEqual([])
+    await expect(h.runtime.eval(1, '1 + 1')).rejects.toMatchObject({ code: 'policy' })
+    const shot = await h.runtime.screenshot(1).catch((e: unknown) => e)
+    expect((shot as { code?: string }).code).toBe('policy')
+  })
+})
+
+/** A page whose cross-origin (out-of-process) iframe has a SAME-PROCESS child.
+ *  The child's execution context exists only in the OOPIF session — the shape
+ *  that made the whole frame index refuse (R-3 verdict, `bm-v5-result.json`). */
+function nestedFrameTransport(view: MockView): void {
+  view.transport.handler = (method, params, sessionId) => {
+    if (method === 'Page.getFrameTree') {
+      if (sessionId === 'OOPIF') {
+        return {
+          frameTree: {
+            frame: { id: 'OOPIF-FRAME', parentId: 'MAIN', url: OOPIF_URL },
+            childFrames: [{ frame: { id: 'DEEP', parentId: 'OOPIF-FRAME', url: DEEP_URL } }],
+          },
+        }
+      }
+      return { frameTree: { frame: { id: 'MAIN', url: 'https://app.example/' }, childFrames: [{ frame: { id: 'IFRAME-1', parentId: 'MAIN', url: FRAME_URL } }] } }
+    }
+    if (method === 'Target.setAutoAttach') {
+      if (sessionId === undefined) {
+        setTimeout(() => view.transport.emitNotification('Target.attachedToTarget', { sessionId: 'OOPIF', targetInfo: { type: 'iframe', url: OOPIF_URL } }), 5)
+      }
+      return {}
+    }
+    if (method === 'Runtime.enable') {
+      if (sessionId === undefined) {
+        setTimeout(() => view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 42, auxData: { frameId: 'IFRAME-1', isDefault: true } } }), 5)
+      } else {
+        setTimeout(() => {
+          // The DEEP frame's context belongs to the OOPIF session; the same
+          // frame id announced by the page session is cross-session noise that
+          // a session-blind lookup would happily use.
+          view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 99, auxData: { frameId: 'DEEP', isDefault: true } } })
+          view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 77, auxData: { frameId: 'DEEP', isDefault: true } } }, sessionId)
+        }, 5)
+      }
+      return {}
+    }
+    if (method === 'Runtime.evaluate') {
+      const expression = String(params?.['expression'] ?? '')
+      const owners = expression.includes("querySelectorAll('iframe,frame')")
+      const world = sessionId === 'OOPIF' ? (params?.['contextId'] === 77 ? 'deep' : 'oopif') : (params?.['contextId'] === 42 ? 'iframe' : 'main')
+      if (owners) {
+        return { result: { value: world === 'oopif' ? [DEEP_URL] : world === 'main' ? [OOPIF_URL, FRAME_URL] : [] } }
+      }
+      return { result: { value: world.toUpperCase() } }
+    }
+    return {}
+  }
+}
+
+describe('R-4 嵌套 OOPIF：同进程子帧回到所属 session 的 contextId', () => {
+  it('frame:N 按 DOM 顺序一一对应（不再整页拒绝），越界仍 fail-loud', async () => {
+    const h = track(makeHarness())
+    await h.runtime.open('https://app.example/')
+    const view = h.adapter.lastView()
+    nestedFrameTransport(view)
+    await expect(h.runtime.eval(1, 'window.__X__', 1)).resolves.toBe('"OOPIF"')
+    await expect(h.runtime.eval(1, 'window.__X__', 2)).resolves.toBe('"DEEP"')
+    await expect(h.runtime.eval(1, 'window.__X__', 3)).resolves.toBe('"IFRAME"')
+    const err = await h.runtime.eval(1, 'window.__X__', 9).catch((e: unknown) => e)
+    expect((err as { code?: string }).code).toBe('not-found')
+    expect((err as Error).message).toContain('4 frames: 0-3')
+  })
+
+  it('子帧求值确实带着 OOPIF session + 该 session 的 contextId（不是父文档默认世界）', async () => {
+    const h = track(makeHarness())
+    await h.runtime.open('https://app.example/')
+    const view = h.adapter.lastView()
+    nestedFrameTransport(view)
+    await h.runtime.eval(1, 'window.__X__', 2)
+    const deep = view.transport.of('Runtime.evaluate').find((command) => String(command.params?.['expression'] ?? '').includes('__X__'))
+    expect(deep?.sessionId).toBe('OOPIF')
+    expect(deep?.params?.['contextId']).toBe(77)
+    // 拿不到默认世界时仍然 fail-loud（不退回隔离世界、不用错 session）
+    const h2 = track(makeHarness())
+    await h2.runtime.open('https://app.example/')
+    const view2 = h2.adapter.lastView()
+    nestedFrameTransport(view2)
+    view2.transport.handler = (method, params, sessionId) => {
+      if (method === 'Runtime.enable') return {}
+      if (method === 'Page.getFrameTree') {
+        if (sessionId === 'OOPIF') return { frameTree: { frame: { id: 'OOPIF-FRAME', parentId: 'MAIN', url: OOPIF_URL }, childFrames: [{ frame: { id: 'DEEP', parentId: 'OOPIF-FRAME', url: DEEP_URL } }] } }
+        return { frameTree: { frame: { id: 'MAIN' }, childFrames: [{ frame: { id: 'IFRAME-1', parentId: 'MAIN', url: FRAME_URL } }] } }
+      }
+      if (method === 'Target.setAutoAttach') {
+        if (sessionId === undefined) setTimeout(() => view2.transport.emitNotification('Target.attachedToTarget', { sessionId: 'OOPIF', targetInfo: { type: 'iframe', url: OOPIF_URL } }), 5)
+        return {}
+      }
+      if (method === 'Runtime.evaluate') {
+        const world = sessionId === 'OOPIF' ? (params?.['contextId'] === 77 ? 'deep' : 'oopif') : (params?.['contextId'] === 42 ? 'iframe' : 'main')
+        return { result: { value: String(params?.['expression'] ?? '').includes("querySelectorAll('iframe,frame')") ? (world === 'oopif' ? [DEEP_URL] : world === 'main' ? [OOPIF_URL, FRAME_URL] : []) : world } }
+      }
+      return {}
+    }
+    // 只有跨 session 的噪声 context（或什么都没有）时，绝不用它去求值：整页
+    // fail-loud 而不是把模型指到父文档。
+    const err = await h2.runtime.eval(1, 'window.__X__', 2).catch((e: unknown) => e)
+    expect((err as { code?: string }).code).toBe('not-found')
+    expect((err as Error).message).toMatch(/has no default JavaScript world|frame index is not reliable/u)
+    expect(view2.transport.of('Runtime.evaluate').every((command) => command.params?.['contextId'] !== 99)).toBe(true)
   })
 })

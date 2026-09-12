@@ -117,8 +117,15 @@ export function maskSensitiveFragment(fragment: string): string {
  * `new URL().href` canonicalizes (`https://example.com` → `https://example.com/`,
  * adds `/` before `?`), and this function is now also the projection applied to
  * every tab state the runtime hands out — canonicalizing there would rewrite
- * ordinary URLs for no security gain. */
+ * ordinary URLs for no security gain.
+ *
+ * R-4 (2026-09-13) adds a second pass, {@link maskSensitiveKeyValueText}, over
+ * the structurally masked result. The URL parser only knows `&`/`?` pairs and
+ * decodes a key ONCE, so `?%2573id=T` (double-encoded `sid`) and
+ * `?a=1;token=T` (semicolon-separated) survived it; the text-level `key=value`
+ * scanner sees both. A clean URL is untouched by either pass. */
 export function stripSensitiveUrl(raw: string): string {
+  let structurally = raw
   try {
     const url = new URL(raw)
     let changed = false
@@ -131,17 +138,100 @@ export function stripSensitiveUrl(raw: string): string {
       const masked = maskSensitiveFragment(url.hash)
       if (masked !== url.hash) { url.hash = masked; changed = true }
     }
-    return changed ? url.href : raw
+    if (changed) structurally = url.href
   } catch {
-    return raw
+    // Not a URL: the text-level scanner below still gets a chance.
   }
+  return maskSensitiveKeyValueText(structurally)
+}
+
+/** Key characters of a `key=value` pair: URL/JSON-ish token characters plus
+ * `%`, so a percent-encoded key (`%2573id`) stays ONE token and can be decoded
+ * before the vocabulary test. */
+const KEY_CHAR = /[A-Za-z0-9_.\-[\]%]/u
+/** Characters that end a value. */
+const VALUE_STOP = new Set([' ', '\t', '\n', '\r', '"', "'", '<', '>', '&', ';', '#', ')', ']', '}', ',', '(', '{', '|', '\\'])
+/** Opening delimiters skipped between `=` and the value (`code="T"`). */
+const VALUE_OPEN = new Set(['"', "'", '(', '[', '{'])
+
+/** Decode a key repeatedly so `%2573id` → `%73id` → `sid` matches the
+ * vocabulary. Bounded (3 rounds) and best-effort: a malformed escape keeps the
+ * text it had. */
+function decodeKeyForMatch(raw: string): string {
+  let key = raw
+  for (let round = 0; round < 3 && key.includes('%'); round++) {
+    try {
+      const next = decodeURIComponent(key)
+      if (next === key) break
+      key = next
+    } catch {
+      break
+    }
+  }
+  return key
+}
+
+/**
+ * Mask credential-shaped `key=value` pairs in **arbitrary text** (R-4,
+ * 2026-09-13).
+ *
+ * The pre-fix rule only ran on strings that contained `://` and only through
+ * `new URL()`, so a page `<title>` — `token=T12`, `Sign in /cb?%73id=T11`,
+ * `Login failed: code=T14&state=x` — reached `list_tabs`, `browser_get_snapshot`
+ * and the JSONL files in cleartext; so did the double-encoded and
+ * semicolon-separated URL forms. This scanner is delimiter-driven instead:
+ *
+ * - a **key** is the maximal run of {@link KEY_CHAR} immediately before `=`,
+ *   matched against {@link SENSITIVE_KEY_PATTERN} after
+ *   {@link decodeKeyForMatch} (so `%2573id=` counts as `sid=`);
+ * - a **value** starts after an optional opening delimiter, ends at the first
+ *   {@link VALUE_STOP} character (or the end of the text) and must be non-empty;
+ *   sentence punctuation that only trails the text (`…token=T12.`) stays text;
+ * - only the value is replaced; keys, delimiters and the rest of the text stay
+ *   byte-identical, so a text with nothing to mask is returned unchanged.
+ *
+ * Deliberately fail-closed on prose that looks like an assignment (`see code=X
+ * below` masks `X`): the vocabulary hit is the same judgement the URL masking
+ * has always made, and a masked word is recoverable while a leaked credential
+ * is not.
+ */
+export function maskSensitiveKeyValueText(raw: string): string {
+  if (raw === '' || !raw.includes('=')) return raw
+  const parts: string[] = []
+  let cursor = 0
+  let index = 0
+  while (index < raw.length) {
+    if (raw[index] !== '=') { index++; continue }
+    let start = index
+    while (start > 0 && KEY_CHAR.test(raw[start - 1]!)) start--
+    if (start === index) { index++; continue }
+    if (!SENSITIVE_KEY_PATTERN.test(decodeKeyForMatch(raw.slice(start, index)))) { index++; continue }
+    let valueStart = index + 1
+    if (valueStart < raw.length && VALUE_OPEN.has(raw[valueStart]!)) valueStart++
+    let valueEnd = valueStart
+    while (valueEnd < raw.length && !VALUE_STOP.has(raw[valueEnd]!)) valueEnd++
+    // A value that runs to the end of the text may carry the sentence's full
+    // stop (`see token=T12.`): the punctuation is prose, so it stays.
+    let tail = valueEnd
+    if (valueEnd === raw.length) {
+      while (tail > valueStart + 1 && (raw[tail - 1] === '.' || raw[tail - 1] === ',' || raw[tail - 1] === '!' || raw[tail - 1] === '?')) tail--
+    }
+    if (tail === valueStart) { index++; continue }
+    parts.push(raw.slice(cursor, valueStart), '****')
+    cursor = tail
+    index = tail
+  }
+  if (cursor === 0) return raw
+  parts.push(raw.slice(cursor))
+  return parts.join('')
 }
 
 /** URL embedded in free text (a title, an op-log summary). Trailing sentence
  * punctuation is peeled off by {@link stripSensitiveText} and re-appended. */
 const TEXT_URL_RE = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
-/** Mask credential-shaped URLs **inside arbitrary text** (FIX-06, 2026-09-12).
+/** Mask credential-shaped URLs **inside arbitrary text** (FIX-06, 2026-09-12;
+ * generalized by R-4, 2026-09-13).
  *
  * `stripSensitiveUrl` only handles a string that *is* a URL. Titles and
  * summaries routinely embed one (`download: https://…`) or *are* a URL that no
@@ -150,16 +240,40 @@ const TEXT_URL_RE = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
  * value, two columns, one redacted. This is the single text-level redactor:
  * the store write path (`addHistory`/`addBookmark`) and the runtime op-log
  * (`runtime.maskBrowserSummary`) both call it, so no second copy can drift.
- * Non-URL text is returned byte-identical. */
+ *
+ * Two passes, in this order:
+ * 1. absolute URLs, through the URL parser (`stripSensitiveUrl`), which is the
+ *    only pass that can see userinfo and fragment structure and that knows to
+ *    peel a sentence's trailing punctuation off the URL tail
+ *    (`…?token=T.` → `…?token=****.`, the full stop is prose, not the value);
+ * 2. `key=value` pairs anywhere ({@link maskSensitiveKeyValueText}) — this is
+ *    what makes a bare `token=T12` title, a `%2573id=` double-encoded key and a
+ *    `;`-separated pair maskable; the old `://`-only early return let all three
+ *    through in cleartext (R-4, real-device evidence `bm-v3-result.json`).
+ * A text with nothing to mask is returned byte-identical. */
 export function stripSensitiveText(raw: string): string {
-  if (raw === '' || !raw.includes('://')) return raw
-  return raw.replace(TEXT_URL_RE, (match) => {
-    let end = match.length
-    while (end > 0 && (match[end - 1] === ')' || match[end - 1] === ',' || match[end - 1] === '.' || match[end - 1] === ';')) {
-      end -= 1
-    }
-    return `${stripSensitiveUrl(match.slice(0, end))}${match.slice(end)}`
-  })
+  if (raw === '') return raw
+  const urls = raw.includes('://')
+    ? raw.replace(TEXT_URL_RE, (match) => {
+      let end = match.length
+      while (end > 0 && (match[end - 1] === ')' || match[end - 1] === ',' || match[end - 1] === '.' || match[end - 1] === ';')) {
+        end -= 1
+      }
+      return `${stripSensitiveUrl(match.slice(0, end))}${match.slice(end)}`
+    })
+    : raw
+  return maskSensitiveKeyValueText(urls)
+}
+
+/** Percent-decode once for comparison purposes; a malformed escape returns the
+ * text as it was. Used to compare a decoded download name against the raw URL
+ * the browser reported (R-4). */
+function decodeUrlForCompare(raw: string): string {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
 }
 
 /** BrowserStore (see module doc). */
@@ -380,11 +494,18 @@ export class BrowserStore {
     // rule can recognize. When the name is demonstrably taken from that URL,
     // the name the model is shown is dropped.
     //
+    // R-4 (2026-09-13): the comparison decodes the raw URL first. `getName()`
+    // hands back the DECODED name while `getURL()` keeps the escaping, so
+    // `…/report%2DDLTOK1.zip` + name `report-DLTOK1.zip` made the old
+    // `entry.url.includes(fileName)` false and the credential reached
+    // `browser_downloads_list` right next to a `token=****` url.
+    //
     // `path` deliberately stays truthful: it is the handle `downloads_open`
     // and the file tools use to reach a real file on disk, and the same name is
     // visible by listing the downloads directory, so masking it here would
     // remove the capability without hiding the string. Recorded as a residual.
-    const fileNameFromCredentialUrl = url !== entry.url && fileName !== '' && entry.url.includes(fileName)
+    const fileNameFromCredentialUrl = url !== entry.url && fileName !== ''
+      && (entry.url.includes(fileName) || decodeUrlForCompare(entry.url).includes(fileName))
     if (fileNameFromCredentialUrl) fileName = '****'
     const record: DownloadEntry = {
       ...rest,

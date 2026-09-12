@@ -548,7 +548,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_screenshot',
-    description: '[读取] Capture the visible page of your tab as a JPEG image. Use sparingly — snapshots and text are cheaper.',
+    description: '[读取] Capture the visible page of your tab as a JPEG image. Use sparingly — snapshots and text are cheaper. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): a page can render an injected credential as text or a barcode, and no image redaction can undo that; the window ends on the next navigation of that tab.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -648,7 +648,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. IMPORTANT: on a tab that received credentials through browser_fill_credentials, network-write APIs (fetch/XMLHttpRequest/sendBeacon/WebSocket/EventSource/form.submit/Worker) are refused and disabled — reads and the read* helpers keep working. It is a misuse guardrail, not a security boundary.',
+    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): while the injected credential is still in the page any read-back can be a channel, so there is no eval at all until the tab navigates — submit the form with browser_click instead. It is a misuse guardrail, not a security boundary.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed except on credential tabs; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
@@ -925,7 +925,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_fill_credentials',
-    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically).',
+    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text (values stay redacted), submit with browser_click, and eval/screenshots resume automatically on the next document.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },

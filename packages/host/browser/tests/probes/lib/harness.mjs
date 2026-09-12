@@ -82,10 +82,20 @@ export async function makeRealRuntime({ credentials, workDir } = {}) {
   mkdirSync(downloads, { recursive: true })
   const runtime = new BrowserRuntime(adapter, { downloadDir: downloads }, credentials, undefined, { store })
   const tools = new Map()
+  // Captured images: `browser_screenshot` stores its JPEG through the
+  // attachment service, which is exactly what the model receives. The probe
+  // keeps the bytes so it can decode the model-facing exit instead of a
+  // side channel (a screenshot the model never got proves nothing).
+  const images = []
   const ctx = {
     tools: { register: (definition) => { tools.set(definition.name, definition); return () => {} } },
     systemPrompt: { section: () => () => {} },
-    attachments: { saveImages: async () => { throw new Error('probe: attachments not wired') } },
+    attachments: {
+      saveImages: async (items) => items.map((item) => {
+        images.push(item)
+        return { attachmentId: `probe-image-${images.length - 1}`, mediaType: item.mediaType, bytes: item.data.byteLength, name: item.name }
+      }),
+    },
   }
   applyBrowserTools(ctx, runtime)
   return {
@@ -93,6 +103,13 @@ export async function makeRealRuntime({ credentials, workDir } = {}) {
     tools,
     store,
     dir,
+    images,
+    /** The last captured image as a `data:` URL (JPEG), or null. */
+    lastImageDataUrl() {
+      const last = images.at(-1)
+      if (last === undefined) return null
+      return `data:${last.mediaType};base64,${Buffer.from(last.data).toString('base64')}`
+    },
     async call(name, args = {}, exec = { signal: new AbortController().signal, agent: undefined }) {
       const tool = tools.get(name)
       if (tool === undefined) throw new Error(`probe: no tool ${name}`)
