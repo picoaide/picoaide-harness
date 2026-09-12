@@ -11,7 +11,9 @@ import { userScopePath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
   CONNECTOR_ID_PATTERN,
+  credentialFieldProblem,
   declaredCredentialKeys,
+  isDeniedEnvKey,
   mcpDefinitionProblem,
   mcpServerProblem,
   sanitizeMcpEnv,
@@ -86,10 +88,11 @@ export interface ServerConnectorItem {
  * single bad row never blanks the whole catalog.
  *
  * FIX-02: this is a TRUST BOUNDARY, not a convenience mapper. The row's id
- * shape, the `mcp[]` entries (serverName/transport/command/args/env/url) are
- * all validated here, so a definition that would hand `spawn` an unchecked
- * executable, a protected env key, or a non-public URL never enters the
- * catalog at all.
+ * shape, the `mcp[]` entries (serverName/transport/command/args/env/url) and
+ * the credential-field declarations (`tokenFields`/`settings`, whose keys end
+ * up in the child environment) are all validated here, so a definition that
+ * would hand `spawn` an unchecked executable, a protected env key, or a
+ * non-public URL never enters the catalog at all.
  */
 export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDef[] {
   const out: ConnectorDef[] = []
@@ -102,7 +105,7 @@ export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDe
     try {
       const raw = JSON.parse(item.definition) as ConnectorDef
       if (!raw?.mcp?.length) continue
-      const problem = mcpDefinitionProblem(raw.mcp)
+      const problem = mcpDefinitionProblem(raw.mcp) ?? credentialFieldProblem(raw)
       if (problem !== null) {
         console.warn(`[dsh-connectors] dropped connector ${item.id}: ${problem}`)
         continue
@@ -339,44 +342,63 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
-   * Child env for one stdio MCP server (FIX-19). Two whitelists apply:
-   * the definition's own env (protected bootstrap keys are dropped) and the
-   * credential fields (only the keys the connector declared in
-   * `tokenFields`/`settings` are injected — an arbitrary stored field must not
-   * reach the child). The framework's own keys are written last so a
-   * definition can never shadow them.
+   * Child env for one stdio MCP server (FIX-19, residual A). Two whitelists
+   * apply: the definition's own env (protected bootstrap keys are dropped) and
+   * the credential fields (only the keys the connector declared in
+   * `tokenFields`/`settings` are injected — and only those whose name survives
+   * the same denylist, so a declared `NODE_OPTIONS`/`PATH` can never set a
+   * loader hook). The framework's own keys are written last so a definition can
+   * never shadow them.
+   *
+   * `declared` (the sanitized `mcp[].env`) and `credentialKeys` (the injectable
+   * field names) are the definition-controlled part of the approval
+   * fingerprint; `env` is the complete key set the child will receive, which is
+   * exactly what the local confirmation discloses.
    */
   const buildStdioEnv = (
     def: ConnectorDef,
     server: ConnectorMcp,
     credential: ConnectorCredential | null,
-  ): { declared: Record<string, string>; env: Record<string, string> } => {
+  ): { declared: Record<string, string>; credentialKeys: string[]; env: Record<string, string> } => {
     const { env: declared } = sanitizeMcpEnv(server.env)
     const env: Record<string, string> = { ...declared }
     const declaredKeys = declaredCredentialKeys(def)
     for (const [key, value] of Object.entries(credential?.fields ?? {})) {
       if (!declaredKeys.has(key) || typeof value !== 'string') continue
+      // INJECTION side of the same denylist: the declaration side already
+      // filtered, this re-check keeps a future caller from re-opening the hole.
+      if (isDeniedEnvKey(key)) continue
       env[key] = value
     }
     if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
     if (credential?.accessToken) env.PICOAIDE_CONNECTOR_ACCESS_TOKEN = credential.accessToken
     if (credential?.refreshToken) env.PICOAIDE_CONNECTOR_REFRESH_TOKEN = credential.refreshToken
-    return { declared, env }
+    return { declared, credentialKeys: [...declaredKeys].sort(), env }
   }
 
-  /** Local-confirmation prompt for every stdio server of one connector. */
+  /**
+   * Local-confirmation prompt for every stdio server of one connector.
+   *
+   * `envKeys` is the COMPLETE environment-key set the child will receive (the
+   * definition's own keys, the credential field names and the framework's own
+   * keys) — the confirmation is only meaningful if the user sees every name the
+   * server gets to set, not just the `mcp[].env` ones (residual A).
+   */
   const checkStdioApproval = async (
     def: ConnectorDef,
     servers: ConnectorMcp[],
+    credential: ConnectorCredential | null,
   ): Promise<{ pending: ConnectorMcpApproval } | { denied: true } | null> => {
-    const unapproved: Array<{ server: ConnectorMcp; fingerprint: string; declared: Record<string, string> }> = []
+    const unapproved: Array<{ server: ConnectorMcp; fingerprint: string; envKeys: string[] }> = []
     for (const server of servers) {
       // Shape problems are reported by the registration loop itself; the
       // approval gate only covers structurally usable entries.
       if (mcpServerProblem(server) !== null) continue
-      const { declared } = buildStdioEnv(def, server, null)
-      const fingerprint = stdioApprovalFingerprint(server.command ?? '', server.args ?? [], declared)
-      if (!(await approvals.isApproved(fingerprint))) unapproved.push({ server, fingerprint, declared })
+      const { declared, credentialKeys, env } = buildStdioEnv(def, server, credential)
+      const fingerprint = stdioApprovalFingerprint(server.command ?? '', server.args ?? [], declared, credentialKeys)
+      if (!(await approvals.isApproved(fingerprint))) {
+        unapproved.push({ server, fingerprint, envKeys: Object.keys(env).sort() })
+      }
     }
     if (unapproved.length === 0) return null
     const first = unapproved[0]!
@@ -384,7 +406,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       fingerprint: first.fingerprint,
       command: first.server.command ?? '',
       args: first.server.args ?? [],
-      envKeys: Object.keys(first.declared).sort(),
+      envKeys: first.envKeys,
       servers: unapproved.map(item => item.server.serverName),
     }
     if (options.requestApproval !== undefined) {
@@ -395,7 +417,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           fingerprint: item.fingerprint,
           command: item.server.command ?? '',
           args: item.server.args ?? [],
-          envKeys: Object.keys(item.declared).sort(),
+          envKeys: item.envKeys,
         })
       }
       return null
@@ -415,7 +437,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const credential = await store.readCredential(def.id)
     const rejected: string[] = []
     const stdioServers = def.mcp.filter(server => (server.transport ?? 'stdio') === 'stdio')
-    const gate = await checkStdioApproval(def, stdioServers)
+    const gate = await checkStdioApproval(def, stdioServers, credential)
     if (gate !== null) {
       if ('denied' in gate) return { rejected: ['用户拒绝了本地执行确认，未启动本地命令'] }
       // Nothing is spawned while ANY stdio server of this connector is
