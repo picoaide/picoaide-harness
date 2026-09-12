@@ -2785,11 +2785,14 @@ function isValueShaped(text: string, at: number, length: number): boolean {
  * redacted as a whole.
  *
  * `verbatim: true` (R-5) is for strings that cannot be prose: a URL, a download
- * name/path, a file name. There a short secret is masked on EVERY occurrence
- * rather than only in a value-shaped position — a page that chooses its own
- * parameter name (`?pw=…`) or none at all (`#…`) must not turn the value into
- * an ordinary-looking token. Titles, page text and eval results keep the
- * prose-preserving short-secret rule, because those strings really can be prose.
+ * name/path, a file name. Short secrets used to be masked on EVERY occurrence
+ * there — R7 (2026-09-13) narrowed that: the value set now lives for the whole
+ * tab (R-6), so a 4-character secret replaced everywhere corrupted unrelated
+ * pages (`/test-report` → `/****-report`). Length ≥
+ * {@link MIN_EMBEDDED_SECRET_LENGTH} still replaces verbatim; shorter values go
+ * through the same value-shaped rule as prose (`password=test` is masked,
+ * a standalone `test` in a URL path is not). `verbatim` is kept as the callers'
+ * intent marker for that long-value path.
  *
  * ONE implementation for every text funnel (`runtime.snapshot`,
  * `runtime.text`, `runtime.eval`'s result, the tab projection, history/ledger,
@@ -2814,7 +2817,12 @@ function redactSecretsText(secrets: readonly string[], text: string, options: { 
     // A truncated head of a longer secret is unambiguous once it is long
     // enough to not be an ordinary word.
     if (out.length >= MIN_EMBEDDED_SECRET_LENGTH && secret.startsWith(out)) { out = MASK; continue }
-    if (options.verbatim === true || secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
+    // R7（2026-09-13）：verbatim 语境（URL / 路径 / 文件名）曾对**任意长度**的值整串
+    // 替换，于是 4 字符口令 `test` 会把同 tab 之后所有页面的 `/test-report` 擦成
+    // `/****-report`（值集合现在按 tab 生命周期保留，污染面被放大）。这里统一口径：
+    // 只有 ≥ MIN_EMBEDDED_SECRET_LENGTH 的值才逐字替换，短值走"值形态"判定
+    // （`password=test` 仍擦、散文里的 `test` 不动）。
+    if (secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
       if (out.includes(secret)) out = out.split(secret).join(MASK)
       continue
     }
