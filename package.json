@@ -26,7 +26,9 @@
     "@deepseek-ai/dsh-subprocess-local@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-tool-fs-search@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-tool-fs-search@npm%3A0.1.5-rc.2#./patches/dsh-tool-fs-search@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-tool-fs-search@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-tool-fs-search@npm%3A0.1.5-rc.2#./patches/dsh-tool-fs-search@0.1.5-rc.2.patch",
-    "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.5-rc.2#./patches/dsh-client-ui-brand-official@0.1.5-rc.2.patch"
+    "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.5-rc.2#./patches/dsh-client-ui-brand-official@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-web-fetch-http@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-web-fetch-http@npm%3A0.1.5-rc.2#./patches/dsh-web-fetch-http@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-web-fetch-http@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-web-fetch-http@npm%3A0.1.5-rc.2#./patches/dsh-web-fetch-http@0.1.5-rc.2.patch"
   },
   "dependenciesMeta": {
     "@deepseek-ai/dsh-subprocess-local": {

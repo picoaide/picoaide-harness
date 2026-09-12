@@ -4032,7 +4032,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-web-fetch-http@npm:0.1.5-rc.2, @deepseek-ai/dsh-web-fetch-http@npm:^0.1.5-rc.2":
+"@deepseek-ai/dsh-web-fetch-http@npm:0.1.5-rc.2":
   version: 0.1.5-rc.2
   resolution: "@deepseek-ai/dsh-web-fetch-http@npm:0.1.5-rc.2"
   dependencies:
@@ -4045,6 +4045,22 @@ __metadata:
     "@deepseek-ai/dsh-timeout": ^0.1.5-rc.2
     "@deepseek-ai/dsh-web": ^0.1.5-rc.2
   checksum: 10c0/f9abc7ceda3c1d0688296042183acb7c6de024a0b7feac5ad2eb6f4198f87c74452bb82c9a8a423e12e4376f57483fcb5ee124f5ad93041299c76fb95ba79827
+  languageName: node
+  linkType: hard
+
+"@deepseek-ai/dsh-web-fetch-http@patch:@deepseek-ai/dsh-web-fetch-http@npm%3A0.1.5-rc.2#./patches/dsh-web-fetch-http@0.1.5-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
+  version: 0.1.5-rc.2
+  resolution: "@deepseek-ai/dsh-web-fetch-http@patch:@deepseek-ai/dsh-web-fetch-http@npm%3A0.1.5-rc.2#./patches/dsh-web-fetch-http@0.1.5-rc.2.patch::version=0.1.5-rc.2&hash=7228b9&locator=picoaide-harness%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/schemastery": "npm:^3.18.2"
+    ipaddr.js: "npm:^2.5.0"
+    undici: "npm:^8.10.0"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+    "@deepseek-ai/dsh-http-proxy": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-timeout": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-web": ^0.1.5-rc.2
+  checksum: 10c0/1808a98fe5ba8cf246dcd37d21de331773839f8322da79ea3380e81c6b9925605b6e3ecebf4ec9501d109cdfecd0edb597f20ab3d86606ac7b35d4bd1777e5ff
   languageName: node
   linkType: hard
 
