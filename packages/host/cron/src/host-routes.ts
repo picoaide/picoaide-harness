@@ -31,7 +31,15 @@ async function readBody(req: IncomingMessage, limit: number): Promise<{ raw: str
   return { raw, value: JSON.parse(raw) }
 }
 
-export function makeCronRoutes(service: HostCronService): WebRoute[] {
+/**
+ * Host-side collaborators of the routes. `permissions` returns the composed
+ * permission-preset roster for request validation (FIX-17).
+ */
+export interface CronRouteOptions {
+  permissions?: () => readonly string[]
+}
+
+export function makeCronRoutes(service: HostCronService, options: CronRouteOptions = {}): WebRoute[] {
   const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
     if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
     json(res, 403, { ok: false, error: 'forbidden' })
@@ -57,7 +65,7 @@ export function makeCronRoutes(service: HostCronService): WebRoute[] {
       }
       try {
         const body = await readBody(req, ACTION_LIMIT)
-        const parsed = parseActionEnvelope(body.value)
+        const parsed = parseActionEnvelope(body.value, { permissions: options.permissions?.() ?? [] })
         if (parsed === undefined) return json(res, 400, { ok: false, error: 'invalid-action' })
         json(res, 200, service.apply(parsed.requestId, parsed.action))
       } catch (error) {

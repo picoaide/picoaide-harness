@@ -29,6 +29,15 @@ export const zh = {
   'auth.authorizeOpened': '授权页已在浏览器中打开；若未弹出请点击：',
   'auth.authorizeLink': '点击打开授权页',
   'auth.waiting': '等待授权完成…',
+  'approval.title': '本地执行确认',
+  'approval.hint': '服务端下发的连接器要求在{target}执行以下本地命令，请确认来源可信后再允许：',
+  'approval.command': '命令：',
+  'approval.args': '参数：',
+  'approval.env': '环境变量：',
+  'approval.once': '允许后不会再重复询问；拒绝则不会启动该命令。',
+  'action.allow': '允许执行',
+  'action.deny': '拒绝',
+  'action.deciding': '处理中…',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -58,6 +67,15 @@ export const en: Record<keyof typeof zh, string> = {
   'auth.authorizeOpened': 'The authorization page was opened; if not, click here:',
   'auth.authorizeLink': 'Click to open the authorization page',
   'auth.waiting': 'Waiting for authorization…',
+  'approval.title': 'Local execution confirmation',
+  'approval.hint': 'A server-issued connector asks to run the following local command on {target}. Confirm the source is trustworthy before allowing it:',
+  'approval.command': 'Command:',
+  'approval.args': 'Arguments:',
+  'approval.env': 'Environment:',
+  'approval.once': 'Allowing it will not ask again; denying it will not run the command.',
+  'action.allow': 'Allow',
+  'action.deny': 'Deny',
+  'action.deciding': 'Working…',
 }
 
 export type ConnectorsKey = keyof typeof zh

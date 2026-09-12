@@ -91,6 +91,21 @@ export interface NewJobInput {
   enabled?: boolean
 }
 
+/**
+ * Roster used to validate a job action (FIX-17). The `permission` field names
+ * a preset of the composed permission service (`ctx.permissionPresets.names`);
+ * it was free text before, so every typo was accepted and then silently
+ * dropped by the executor.
+ */
+export interface CronActionOptions {
+  /**
+   * Known permission preset names. When provided — even as an empty array — a
+   * pinned `permission` must be a member. Omitted only by callers that do not
+   * know the roster (shape-only validation).
+   */
+  permissions?: readonly string[]
+}
+
 /** Fields a client may patch on an existing job. */
 export interface JobUpdatePatch {
   name?: string
@@ -102,7 +117,7 @@ export function isExecutionResult(value: unknown): value is ExecutionResult {
   return value === 'succeeded' || value === 'failed' || value === 'cancelled'
 }
 
-export function isCronJobAction(value: unknown): value is CronJobAction {
+export function isCronJobAction(value: unknown, options: CronActionOptions = {}): value is CronJobAction {
   if (typeof value !== 'object' || value === null) return false
   const action = value as Record<string, unknown>
   if (action.kind !== 'agent') return false
@@ -112,7 +127,12 @@ export function isCronJobAction(value: unknown): value is CronJobAction {
   if (typeof action.prompt !== 'string' || action.prompt.trim() === '') return false
   if (action.workspaceId !== undefined && typeof action.workspaceId !== 'string') return false
   if (action.agentPreset !== undefined && typeof action.agentPreset !== 'string') return false
-  if (action.permission !== undefined && typeof action.permission !== 'string') return false
+  if (action.permission !== undefined) {
+    if (typeof action.permission !== 'string' || action.permission.trim() === '') return false
+    // Enum member of the composed preset roster (FIX-17): an unknown name is a
+    // rejected job, never a job that quietly runs without its permission.
+    if (options.permissions !== undefined && !options.permissions.includes(action.permission)) return false
+  }
   return true
 }
 

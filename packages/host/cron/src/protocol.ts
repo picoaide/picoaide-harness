@@ -7,7 +7,7 @@
  * executable fields anywhere in the union. The browser never writes
  * scheduler-owned timestamps or execution results.
  */
-import { isCronJobAction, type JobRecord, type NewJobInput, type JobUpdatePatch } from './jobs.ts'
+import { isCronJobAction, type CronActionOptions, type JobRecord, type NewJobInput, type JobUpdatePatch } from './jobs.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
 
 export const CRON_SCHEMA_VERSION = 2 as const
@@ -74,13 +74,13 @@ function validCron(value: unknown): boolean {
   return nextRunAtMs(value, Date.now()) !== undefined
 }
 
-function validInput(value: unknown): value is NewJobInput {
+function validInput(value: unknown, options: CronActionOptions): value is NewJobInput {
   const input = record(value)
   if (input === undefined || !exactKeys(input, ['name', 'cron', 'action', 'enabled'])) return false
   if (typeof input.name !== 'string' || input.name === '') return false
   if (!validCron(input.cron)) return false
   if (!optionalBoolean(input.enabled)) return false
-  return isCronJobAction(input.action)
+  return isCronJobAction(input.action, options)
 }
 
 function validPatch(value: unknown): value is JobUpdatePatch {
@@ -91,7 +91,7 @@ function validPatch(value: unknown): value is JobUpdatePatch {
   return optionalBoolean(patch.enabled)
 }
 
-export function parseActionEnvelope(value: unknown): CronActionEnvelope | undefined {
+export function parseActionEnvelope(value: unknown, options: CronActionOptions = {}): CronActionEnvelope | undefined {
   const envelope = record(value)
   if (envelope === undefined || !exactKeys(envelope, ['requestId', 'action'])) return undefined
   if (typeof envelope.requestId !== 'string' || envelope.requestId.trim() === '' || envelope.requestId.length > 256) return undefined
@@ -101,7 +101,7 @@ export function parseActionEnvelope(value: unknown): CronActionEnvelope | undefi
   switch (action.kind) {
     case 'create':
       if (!exactKeys(action, ['kind', 'id', 'input'])) return undefined
-      return typeof action.id === 'string' && action.id !== '' && validInput(action.input)
+      return typeof action.id === 'string' && action.id !== '' && validInput(action.input, options)
         ? { requestId: envelope.requestId, action: action as unknown as Extract<CronAction, { kind: 'create' }> }
         : undefined
     case 'update':
