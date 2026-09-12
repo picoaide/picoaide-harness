@@ -65,16 +65,20 @@ function sha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-function chunkedResponse(chunks: readonly Uint8Array[], headers: HeadersInit = {}): Response {
-  let index = 0
-  return new Response(new ReadableStream<Uint8Array>({
-    pull(controller) {
-      const chunk = chunks[index]
-      index += 1
-      if (chunk === undefined) controller.close()
-      else controller.enqueue(chunk)
-    },
-  }), { status: 200, headers })
+/**
+ * 每次调用都返回**新的**整份响应。
+ *
+ * 响应体是一次性流:同一个 Response 对象被第二次 `getReader()` 读出来就是空,
+ * 而续传/重试路径会读第二次(2026-09-12 实测,表现为"下载成功但文件是空的")。
+ */
+function fullResponse(chunks: readonly Uint8Array[], headers: HeadersInit = {}): Response {
+  const body = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0))
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new Response(body, { status: 200, headers })
 }
 
 /** 渠道版本清单:`client.assets` 的键与服务端下发的一致。 */
@@ -96,15 +100,19 @@ const ASSET_KEYS: Readonly<Record<DesktopDownloadPlatform, string>> = {
   linux: 'linux-x64',
 }
 
-/** 只声明本次测试所用平台安装包的清单(其余平台视为未发布)。 */
+/**
+ * 只声明本次测试所用平台安装包的清单(其余平台视为未发布)。
+ * @param size - 声明长度;0 = 不声明(续传与"完成度"判断都要用到它)。
+ */
 function platformManifest(
   version: string,
   platform: DesktopDownloadPlatform,
   artifactURL: string,
   digest: string,
+  size = 0,
 ): Response {
   return manifestResponse(version, {
-    [ASSET_KEYS[platform]]: { url: artifactURL, sha256: digest, size: 0 },
+    [ASSET_KEYS[platform]]: { url: artifactURL, sha256: digest, size },
   })
 }
 
@@ -164,7 +172,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.1.0', 'darwin', 'https://artifacts.test/mac.dmg', digest)
       }
       if (url === 'https://artifacts.test/mac.dmg') {
-        return chunkedResponse([artifact.subarray(0, 333), artifact.subarray(333)])
+        return fullResponse([artifact.subarray(0, 333), artifact.subarray(333)])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -204,7 +212,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.1.1', 'darwin', 'https://artifacts.test/mac.dmg', sha256(artifact))
       }
       if (url === 'https://artifacts.test/mac.dmg') {
-        return chunkedResponse([artifact])
+        return fullResponse([artifact])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -229,7 +237,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.2.0', 'win32', 'https://artifacts.test/setup.exe', digest)
       }
       if (url === 'https://artifacts.test/setup.exe') {
-        return chunkedResponse([artifact])
+        return fullResponse([artifact])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -255,7 +263,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.2.1', 'linux', 'https://artifacts.test/appimage', digest)
       }
       if (url === 'https://artifacts.test/appimage') {
-        return chunkedResponse([artifact])
+        return fullResponse([artifact])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -280,7 +288,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.8.0+build', 'darwin', 'https://artifacts.test/mac.dmg', sha256(artifact))
       }
       if (url === 'https://artifacts.test/mac.dmg') {
-        return chunkedResponse([dmgArtifact()])
+        return fullResponse([dmgArtifact()])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -310,7 +318,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.3.0', platform, 'https://artifacts.test/artifact', digest)
       }
       if (url === 'https://artifacts.test/artifact') {
-        return chunkedResponse([artifact])
+        return fullResponse([artifact])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -328,7 +336,7 @@ describe('desktop update installer download', () => {
   it.each([
     ['an unsuccessful response', async () => new Response(null, { status: 503 }), 'http-status'],
     ['a missing response body', async () => new Response(null, { status: 200 }), 'empty-body'],
-    ['a zero-byte response body', async () => chunkedResponse([]), 'empty-body'],
+    ['a zero-byte response body', async () => fullResponse([]), 'empty-body'],
   ] as const)('rejects %s without leaving a partial file', async (_label, artifactResponse, code) => {
     const userDataPath = await temporaryUserData()
     const artifact = dmgArtifact()
@@ -497,7 +505,7 @@ describe('desktop update installer download', () => {
     let requested = false
     const request: UpdateArtifactRequest = async () => {
       requested = true
-      return chunkedResponse([dmgArtifact()])
+      return fullResponse([dmgArtifact()])
     }
 
     await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
@@ -520,7 +528,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.8.0', 'darwin', 'https://artifacts.test/mac.dmg', '0'.repeat(64))
       }
       if (url === 'https://artifacts.test/mac.dmg') {
-        return chunkedResponse([artifact])
+        return fullResponse([artifact])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -531,9 +539,11 @@ describe('desktop update installer download', () => {
       userDataPath,
       request,
     }), 'checksum-mismatch')
-    await expectNoPartialFiles(userDataPath, '2.8.0')
-    // 校验失败必须不留任何可见产物:安装器不得暴露给调用方。
-    expect(await updateDirectoryEntries(userDataPath, '2.8.0')).toEqual([])
+    // 校验和不符按"传输被截断"处理:字节留在隐藏的 .partial 里等下一次续传,
+    // 但**完成件位置绝不能出现任何文件**(调用方拿不到可安装的产物)。
+    const entries = await updateDirectoryEntries(userDataPath, '2.8.0')
+    expect(entries).toEqual(['.mac.dmg.partial', '.mac.dmg.partial.json'])
+    expect(entries.some(entry => entry === 'mac.dmg')).toBe(false)
   })
 
   it('downloads a prerelease (test channel) installer from its exact manifest version', async () => {
@@ -547,7 +557,7 @@ describe('desktop update installer download', () => {
         return platformManifest('2.8.0-rc.1', 'linux', 'https://artifacts.test/appimage-rc', digest)
       }
       if (url === 'https://artifacts.test/appimage-rc') {
-        return chunkedResponse([artifact])
+        return fullResponse([artifact])
       }
       throw new Error(`unexpected URL ${url}`)
     }
@@ -629,17 +639,96 @@ describe('desktop update installer download', () => {
       userDataPath,
       request: async () => {
         requested = true
-        return chunkedResponse([dmgArtifact()])
+        return fullResponse([dmgArtifact()])
       },
     }), 'invalid-options')
     expect(requested).toBe(false)
+  })
+
+  it('resumes an interrupted transfer with Range and completes it', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifact = dmgArtifact()
+    const digest = sha256(artifact)
+    const url = 'https://artifacts.test/mac.dmg'
+    const half = Math.floor(artifact.byteLength / 2)
+    const calls: Array<{ url: string, headers: Record<string, string> }> = []
+    let served = 0
+
+    const request: UpdateArtifactRequest = async (requestURL, init) => {
+      calls.push({
+        url: String(requestURL),
+        headers: (init.headers ?? {}) as Record<string, string>,
+      })
+      if (requestURL === MANIFEST_URL) {
+        return platformManifest('2.5.0', 'darwin', url, digest, artifact.byteLength)
+      }
+      served += 1
+      if (served === 1) {
+        // 第一次:服务端声明了完整长度,却在半个包处断流。
+        return new Response(Uint8Array.from(artifact.subarray(0, half)), {
+          status: 200,
+          headers: { 'content-length': String(artifact.byteLength), etag: '"release-1"' },
+        })
+      }
+      // 第二次:认得 Range,回 206 + 剩余字节。
+      return new Response(Uint8Array.from(artifact.subarray(half)), {
+        status: 206,
+        headers: {
+          'content-length': String(artifact.byteLength - half),
+          'content-range': `bytes ${half}-${artifact.byteLength - 1}/${artifact.byteLength}`,
+          etag: '"release-1"',
+        },
+      })
+    }
+
+    const options = { manifestURL: MANIFEST_URL, platform: 'darwin' as const, version: '2.5.0', userDataPath, request }
+    await expectFailure(downloadDesktopUpdate(options), 'network')
+    // 已收到的半个包必须留成可续传的残留(而不是被删掉从头再来)。
+    const partials = await updateDirectoryEntries(userDataPath, '2.5.0')
+    expect(partials.some(entry => entry.endsWith('.partial'))).toBe(true)
+    expect(partials.some(entry => entry.endsWith('.partial.json'))).toBe(true)
+
+    const result = await downloadDesktopUpdate(options)
+    expect(await readFile(result)).toEqual(Buffer.from(artifact))
+    // 续传请求带 Range 与 If-Range(内容变了就让服务端直接回整份)。
+    const resumeCall = calls.at(-1)
+    expect(resumeCall?.headers).toMatchObject({
+      Range: `bytes=${half}-`,
+      'If-Range': '"release-1"',
+    })
+    await expectNoPartialFiles(userDataPath, '2.5.0')
+  })
+
+  it('reuses a verified completed installer without transferring it again', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifact = dmgArtifact()
+    const digest = sha256(artifact)
+    const url = 'https://artifacts.test/mac.dmg'
+    const artifactRequests: string[] = []
+    const request: UpdateArtifactRequest = async (requestURL) => {
+      if (requestURL === MANIFEST_URL) {
+        return platformManifest('2.6.0', 'darwin', url, digest, artifact.byteLength)
+      }
+      artifactRequests.push(String(requestURL))
+      return fullResponse([artifact])
+    }
+
+    const options = { manifestURL: MANIFEST_URL, platform: 'darwin' as const, version: '2.6.0', userDataPath, request }
+    const first = await downloadDesktopUpdate(options)
+    expect(artifactRequests).toHaveLength(1)
+
+    // 第二次(典型场景:客户端重启后又检查到同一版本)必须直接复用磁盘上那份:
+    // 只重新取清单确认哈希,不再下载安装包。
+    const second = await downloadDesktopUpdate(options)
+    expect(second).toBe(first)
+    expect(artifactRequests).toHaveLength(1)
   })
 
   it('rejects a relative user-data path before requesting', async () => {
     let requested = false
     const request = async (): Promise<Response> => {
       requested = true
-      return chunkedResponse([dmgArtifact()])
+      return fullResponse([dmgArtifact()])
     }
 
     await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,
@@ -659,7 +748,7 @@ describe('desktop update installer download', () => {
     let requested = false
     const request = async (): Promise<Response> => {
       requested = true
-      return chunkedResponse([dmgArtifact()])
+      return fullResponse([dmgArtifact()])
     }
 
     await expectFailure(downloadDesktopUpdate({ manifestURL: MANIFEST_URL,

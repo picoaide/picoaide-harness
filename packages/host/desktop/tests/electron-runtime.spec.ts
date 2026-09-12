@@ -779,14 +779,10 @@ describe('Electron compatibility runtime', () => {
       buttons: ['OK'],
     }))
 
-    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
-    await expect(runtime.updates.confirmDownload('2.1.0')).resolves.toBe(false)
-    expect(updater.download).not.toHaveBeenCalled()
-
-    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 0, checkboxChecked: false })
-    await expect(runtime.updates.confirmDownload('2.1.0')).resolves.toBe(true)
+    // 下载与安装是两个动作:下载只落地文件,完成后才通报一次"可安装"。
     const controller = new AbortController()
-    await runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, controller.signal)
+    await expect(runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, controller.signal))
+      .resolves.toBe('/tmp/DSH-Desktop-2.1.0-mac.dmg')
     expect(updater.download).toHaveBeenCalledWith({
       platform: 'darwin',
       version: '2.1.0',
@@ -798,6 +794,14 @@ describe('Electron compatibility runtime', () => {
       request: expect.any(Function),
       signal: controller.signal,
     })
+    await runtime.updates.announceUpdateReady('2.1.0', '/tmp/DSH-Desktop-2.1.0-mac.dmg')
+    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({
+      title: 'PicoAide Harness Update Ready',
+      buttons: ['OK'],
+    }))
+    expect(electron.shell.openPath).not.toHaveBeenCalled()
+
+    await runtime.updates.installUpdate('2.1.0', '/tmp/DSH-Desktop-2.1.0-mac.dmg')
     expect(electron.shell.openPath).toHaveBeenCalledWith('/tmp/DSH-Desktop-2.1.0-mac.dmg')
     expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({
       title: 'PicoAide Harness Update Downloaded',
@@ -859,7 +863,8 @@ describe('Electron compatibility runtime', () => {
     const runtime = new ElectronDesktopRuntime(async () => {})
     runtime.schedule({ ...spec, requestQuit })
 
-    const pending = runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal)
+    await runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, new AbortController().signal)
+    const pending = runtime.updates.installUpdate('2.1.0', 'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')
     await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() })
     expect(childProcess.spawn).toHaveBeenCalledWith(
       'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe',
@@ -887,7 +892,8 @@ describe('Electron compatibility runtime', () => {
     const runtime = new ElectronDesktopRuntime(async () => {})
     runtime.schedule({ ...spec, requestQuit })
 
-    const pending = runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal)
+    await runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, new AbortController().signal)
+    const pending = runtime.updates.installUpdate('2.1.0', 'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')
     await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() })
     childProcess.emit('error', new Error('blocked'))
 
@@ -903,7 +909,8 @@ describe('Electron compatibility runtime', () => {
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
 
-    await runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal)
+    await runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, new AbortController().signal)
+    await runtime.updates.installUpdate('2.1.0', 'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')
 
     expect(childProcess.spawn).not.toHaveBeenCalled()
   })
@@ -915,28 +922,32 @@ describe('Electron compatibility runtime', () => {
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
 
-    await expect(runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, new AbortController().signal))
+    await expect(runtime.updates.installUpdate('2.1.0', '/tmp/DSH-Desktop-2.1.0-mac.dmg'))
       .rejects.toThrow('Launch Services rejected the image')
     expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
   })
 
-  it('does not show macOS completion after the update generation is cancelled', async () => {
+  it('does not reach the installer handoff when the download is cancelled', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
-    updater.download.mockResolvedValueOnce('/tmp/DSH-Desktop-2.1.0-mac.dmg')
-    let finishOpen!: (result: string) => void
-    electron.shell.openPath.mockImplementationOnce(async () => new Promise<string>(resolve => {
-      finishOpen = resolve
-    }))
+    updater.download.mockImplementationOnce(async (options: { signal?: AbortSignal }) => {
+      const signal = options.signal
+      return await new Promise<string>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          reject(new DOMException('cancelled', 'AbortError'))
+        }, { once: true })
+      })
+    })
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
     const controller = new AbortController()
 
-    const pending = runtime.updates.downloadAndOpen('2.1.0', UPDATE_SOURCE, controller.signal)
-    await vi.waitFor(() => { expect(electron.shell.openPath).toHaveBeenCalledOnce() })
+    const pending = runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, controller.signal)
+    await vi.waitFor(() => { expect(updater.download).toHaveBeenCalledOnce() })
     controller.abort()
-    finishOpen('')
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    // 取消发生在下载阶段:既不打开 DMG,也不弹"已下载完成"。
+    expect(electron.shell.openPath).not.toHaveBeenCalled()
     expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
   })
 
