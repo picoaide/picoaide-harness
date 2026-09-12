@@ -1254,6 +1254,8 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     await this.agentRun('browser_type', async () => {
       const tab = this.tab(resolved)
+      const before = await this.textFieldState(tab, selector)
+      if (before === null) throw browserError('not-found', `browser: cannot locate element ${selector}`)
       await tab.cdp.send('Runtime.evaluate', {
         expression: `
           (() => {
@@ -1267,9 +1269,106 @@ export class BrowserRuntime {
         returnByValue: true,
       })
       await tab.cdp.send('Input.insertText', { text })
+      // 2026-09-12: `Input.insertText` 与鼠标/键盘事件同属输入域，隐藏窗口下未必送达
+      // （真机自检报告把 browser_type 记成"返回成功"，但没验效果）。这里不做平台假设，
+      // 直接读回校验：内容没变就退到 DOM 写入（原生 setter + input/change，React 受控
+      // 组件也认），并把实际路径写进操作日志。
+      const after = await this.textFieldState(tab, selector)
+      if (this.contentChanged(before, after)) {
+        this.record('browser_type', resolved, `type into ${selector}`)
+        await this.afterChangeSummary(tab)
+        return
+      }
+      const outcome = await this.insertTextViaDom(tab, selector, text, clear)
+      this.record(
+        'browser_type',
+        resolved,
+        `type into ${selector} via DOM write (hidden window)${outcome === 'typed' ? '' : ` — ${outcome}`}`,
+        outcome !== 'typed',
+      )
+      if (outcome !== 'typed') {
+        throw browserError('not-found', `browser: cannot type into ${selector} (${outcome})`)
+      }
       await this.afterChangeSummary(tab)
     }, signal)
-    this.record('browser_type', resolved, `type into ${selector}`)
+  }
+
+  /** Read back a field's current content (`null` when the element is missing). */
+  private async textFieldState(tab: BrowserTab, selector: string): Promise<string | null> {
+    try {
+      const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+        expression: `
+          (() => {
+            const el = document.querySelector(${JSON.stringify(String(selector))});
+            if (!el) return null;
+            if (typeof el.value === 'string') return el.value;
+            if (el.isContentEditable) return el.textContent ?? '';
+            return '';
+          })()
+        `,
+        returnByValue: true,
+      })
+      const value = result.result?.value
+      return typeof value === 'string' ? value : value === null ? null : ''
+    } catch {
+      return null
+    }
+  }
+
+  /** Whether the readback shows the DOM write changed the field. */
+  private contentChanged(before: string | null, after: string | null): boolean {
+    if (after === null) return false
+    return after !== before
+  }
+
+  /**
+   * DOM-level text entry, used when the CDP input-domain write had no effect
+   * (hidden window). Prefers `execCommand('insertText')` — that is the path rich
+   * editors (contenteditable/Lexical) accept — and falls back to the element's
+   * native `value` setter plus `input`/`change` events, which is what React
+   * controlled inputs require.
+   *
+   * @returns `'typed'` on success, otherwise a short reason.
+   */
+  private async insertTextViaDom(
+    tab: BrowserTab,
+    selector: string,
+    text: string,
+    clear: boolean,
+  ): Promise<'typed' | 'unsupported' | 'not-found'> {
+    const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+      expression: `
+        (() => {
+          const el = document.querySelector(${JSON.stringify(String(selector))});
+          if (!el) return 'not-found';
+          el.focus();
+          const editable = el.isContentEditable === true || typeof el.value === 'string';
+          if (!editable) return 'unsupported';
+          if (${JSON.stringify(clear)}) {
+            if (el.isContentEditable) {
+              try { document.execCommand('selectAll', false, undefined); document.execCommand('delete', false, undefined); } catch {}
+            } else if (typeof el.select === 'function') {
+              el.select();
+            }
+          }
+          let inserted = false;
+          try { inserted = document.execCommand('insertText', false, ${JSON.stringify(text)}); } catch { inserted = false; }
+          if (!inserted && typeof el.value === 'string') {
+            const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+            const next = ${JSON.stringify(clear)} ? ${JSON.stringify(text)} : String(el.value ?? '') + ${JSON.stringify(text)};
+            if (descriptor !== undefined && typeof descriptor.set === 'function') descriptor.set.call(el, next);
+            else el.value = next;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            inserted = true;
+          }
+          return inserted ? 'typed' : 'unsupported';
+        })()
+      `,
+      returnByValue: true,
+    })
+    const value = result.result?.value
+    return value === 'typed' || value === 'unsupported' || value === 'not-found' ? value : 'unsupported'
   }
 
   private async afterChangeSummary(tab: BrowserTab): Promise<void> {
@@ -1289,14 +1388,66 @@ export class BrowserRuntime {
       const tab = this.tab(resolved)
       const code = KEY_CODES[key] ?? key
       const vk = KEY_VK[key] ?? 0
-      await tab.cdp.send('Input.dispatchKeyEvent', {
-        type: 'keyDown', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
-      })
-      await tab.cdp.send('Input.dispatchKeyEvent', {
-        type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
-      })
+      // 2026-09-12：与 browser_click 同源。键盘事件也属输入域，隐藏窗口下协议层接受、
+      // 页面收不到（真机自检报告把 browser_press 记成"返回成功"，但没有验证效果）。
+      if (this.windowCanReceiveInput()) {
+        await tab.cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyDown', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
+        })
+        await tab.cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
+        })
+        this.record('browser_press', resolved, `press ${key}`)
+        return
+      }
+      const outcome = await this.dispatchKeyViaDom(tab, key, code, vk)
+      this.record('browser_press', resolved, `press ${key} via DOM dispatch (hidden window) — ${outcome}`, outcome === 'none')
     }, signal)
-    this.record('browser_press', resolved, `press ${key}`)
+  }
+
+  /**
+   * DOM-level key dispatch for a window that cannot receive real input.
+   *
+   * Synthetic keyboard events do **not** trigger a browser's activation behavior,
+   * so the two shortcuts users actually depend on are applied explicitly:
+   * Enter inside a form submits it, and Enter/Space on a button, link, checkbox
+   * or radio activates it. Without that, "fill the field then press Enter" would
+   * silently do nothing in a hidden window.
+   *
+   * @returns a short outcome label for the op log.
+   */
+  private async dispatchKeyViaDom(tab: BrowserTab, key: string, code: string, vk: number): Promise<string> {
+    const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+      expression: `
+        (() => {
+          const key = ${JSON.stringify(key)};
+          const target = document.activeElement ?? document.body;
+          if (!target) return 'none';
+          const base = { key, code: ${JSON.stringify(code)}, keyCode: ${JSON.stringify(vk)}, which: ${JSON.stringify(vk)}, bubbles: true, cancelable: true, composed: true };
+          const down = new KeyboardEvent('keydown', base);
+          const allowed = target.dispatchEvent(down);
+          target.dispatchEvent(new KeyboardEvent('keypress', base));
+          target.dispatchEvent(new KeyboardEvent('keyup', base));
+          if (!allowed) return 'default-prevented';
+          if (key === 'Enter') {
+            const form = target.form ?? (typeof target.closest === 'function' ? target.closest('form') : null);
+            if (form !== null && form !== undefined && typeof form.requestSubmit === 'function') { form.requestSubmit(); return 'submitted-form'; }
+          }
+          const activatable = typeof target.closest === 'function'
+            ? target.closest('button, a[href], input[type=checkbox], input[type=radio], [role=button]')
+            : null;
+          const activating = key === 'Enter' || key === ' ' || key === 'Spacebar';
+          if (activating && activatable !== null && activatable !== undefined && typeof activatable.click === 'function') {
+            activatable.click();
+            return 'activated-element';
+          }
+          return 'dispatched';
+        })()
+      `,
+      returnByValue: true,
+    })
+    const value = result.result?.value
+    return typeof value === 'string' ? value : 'dispatched'
   }
 
   async selectOption(tabId: number, selector: string, value: string, signal?: AbortSignal): Promise<void> {

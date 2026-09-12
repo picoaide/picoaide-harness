@@ -215,6 +215,101 @@ describe('browser_click 在隐藏窗口下退到 DOM 激活', () => {
   })
 })
 
+// --------------------------------------- press / type: same input-domain rule
+
+describe('browser_press 与 browser_type 在隐藏窗口下同样兜底', () => {
+  it('press：窗口隐藏时不发键盘输入，改走 DOM 派发并显式处理回车提交', async () => {
+    const { runtime, adapter, dir } = makeRuntime()
+    await runtime.open('https://a.example')
+    const view = adapter.lastView()
+    let expression = ''
+    view.transport.handler = (method, params) => {
+      if (method === 'Runtime.evaluate') {
+        expression = String(params?.expression)
+        return { result: { value: 'submitted-form' } }
+      }
+      return {}
+    }
+
+    await runtime.pressKey(1, 'Enter')
+
+    expect(view.transport.commands.map((c) => c.method)).not.toContain('Input.dispatchKeyEvent')
+    expect(expression).toContain('KeyboardEvent')
+    expect(expression, '合成键盘事件不会触发表单隐式提交，必须显式补').toContain('requestSubmit')
+    const op = runtime.opLog.find((entry) => entry.tool === 'browser_press')
+    expect(op?.failed).toBeFalsy()
+    expect(op?.summary).toContain('via DOM dispatch')
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('press：窗口可见时仍然用 CDP 键盘事件', async () => {
+    const { runtime, adapter, dir } = makeRuntime()
+    await runtime.open('https://a.example')
+    adapter.lastWindow().visible = true
+    const view = adapter.lastView()
+
+    await runtime.pressKey(1, 'Enter')
+
+    const methods = view.transport.commands.map((c) => c.method)
+    expect(methods.filter((m) => m === 'Input.dispatchKeyEvent')).toHaveLength(2)
+    expect(methods).not.toContain('Runtime.evaluate')
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('type：CDP 写入没生效（隐藏窗口）时退到 DOM 写入并记日志', async () => {
+    const { runtime, adapter, dir } = makeRuntime()
+    await runtime.open('https://a.example')
+    const view = adapter.lastView()
+    let field = ''
+    const expressions: string[] = []
+    view.transport.handler = (method, params) => {
+      if (method === 'Input.insertText') return {} // 送达失败：字段不变
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression)
+        expressions.push(expression)
+        if (expression.includes('execCommand')) { field = 'dsh-tool-probe'; return { result: { value: 'typed' } } }
+        if (expression.includes('el.value')) return { result: { value: field } }
+        return { result: { value: {} } }
+      }
+      return {}
+    }
+
+    await runtime.typeInto(1, '#my-text', 'dsh-tool-probe')
+
+    expect(field).toBe('dsh-tool-probe')
+    expect(expressions.some((e) => e.includes('execCommand'))).toBe(true)
+    const op = runtime.opLog.find((entry) => entry.tool === 'browser_type')
+    expect(op?.failed).toBeFalsy()
+    expect(op?.summary).toContain('via DOM write')
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('type：CDP 写入生效时不做 DOM 兜底（优先真输入）', async () => {
+    const { runtime, adapter, dir } = makeRuntime()
+    await runtime.open('https://a.example')
+    const view = adapter.lastView()
+    let field = ''
+    const expressions: string[] = []
+    view.transport.handler = (method, params) => {
+      if (method === 'Input.insertText') { field = String((params as { text?: string }).text ?? ''); return {} }
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression)
+        expressions.push(expression)
+        if (expression.includes('el.value')) return { result: { value: field } }
+        return { result: { value: {} } }
+      }
+      return {}
+    }
+
+    await runtime.typeInto(1, '#my-text', 'typed-by-cdp')
+
+    expect(field).toBe('typed-by-cdp')
+    expect(expressions.some((e) => e.includes('execCommand'))).toBe(false)
+    expect(runtime.opLog.find((entry) => entry.tool === 'browser_type')?.summary).not.toContain('via DOM write')
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  })
+})
+
 // --------------------------------------------- screenshot: CDP fallback
 
 describe('browser_screenshot 在无渲染表面时退到 CDP fromSurface:false', () => {
