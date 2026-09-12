@@ -23,6 +23,14 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopSidebarSurface::before { content: ""; position: absolute; top: 0; right: 0; left: ${MACOS_TRAFFIC_LIGHT_SAFE_WIDTH}px; height: ${MACOS_DRAG_REGION_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
 .dshDesktopMacCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
 .dshDesktopMacCaptionRow::before { content: ""; position: absolute; top: 0; right: 0; left: 0; height: ${MACOS_DRAG_REGION_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
+/* The right panel is positioned against the frame (push) or the viewport
+   (fullscreen), never against its own column, so the caption band the grid
+   reserves for the native title bar has to be applied to it explicitly: the
+   panel's strip carries the surface's own controls, and without the band they
+   land under the platform's window buttons. A fullscreen panel still covers
+   the frame, so the band becomes its own top padding. */
+.dshDesktopFrame[data-desktop-platform="darwin"] [data-sidebar-right-panel="push"] { top: ${MACOS_TITLEBAR_HEIGHT}px; }
+.dshDesktopFrame[data-desktop-platform="darwin"] [data-sidebar-right-panel="fullscreen"] { padding-top: ${MACOS_TITLEBAR_HEIGHT}px; }
 .dshDesktopConversationSurface { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); }
 /* The right column never clips (upstream ui-layout AppFrame.module.css
    .rightbarCol): its occupant anchors a fixed-width panel to the column's right
@@ -38,6 +46,8 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopFrame[data-desktop-platform="win32"] .dshDesktopRightbarSurface { grid-row: 2; }
 .dshDesktopWindowsCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
 .dshDesktopWindowsCaptionRow::before { content: ""; position: absolute; inset: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH}px 0 0; user-select: none; -webkit-app-region: drag; }
+.dshDesktopFrame[data-desktop-platform="win32"] [data-sidebar-right-panel="push"] { top: ${WINDOWS_TITLEBAR_HEIGHT}px; }
+.dshDesktopFrame[data-desktop-platform="win32"] [data-sidebar-right-panel="fullscreen"] { padding-top: ${WINDOWS_TITLEBAR_HEIGHT}px; }
 .dshDesktopFrame[data-sidebar-collapsed] { transition: grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
 .dshDesktopFrame[data-rightbar-instant] { transition: none !important; }
 .dshDesktopOverlay { position: absolute; z-index: 1000; inset: 0; pointer-events: none; }

@@ -94,6 +94,18 @@ describe('advanced desktop layout', () => {
       expect(css).toMatch(/\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopConversationSurface,\s*\.dshDesktopFrame\[data-desktop-platform="win32"\] \.dshDesktopRightbarSurface \{ grid-row: 2; \}/)
       expect(css).toMatch(/\.dshDesktopWindowsCaptionRow \{[^}]*grid-column: 2 \/ -1;[^}]*grid-row: 1;/)
       expect(css).toMatch(new RegExp(`\\.dshDesktopWindowsCaptionRow::before \\{[^}]*inset: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH}px 0 0;[^}]*-webkit-app-region: drag;`))
+      // The right panel is positioned against the frame (push) or the viewport
+      // (fullscreen), never against its own column, so the reserved caption band
+      // reaches it as an explicit offset; without it the panel's strip and its
+      // 分栏 / 全屏 / 收起右侧边栏 controls render under the native window
+      // buttons (Windows draws those as a transparent overlay above the page).
+      expect(css).toMatch(new RegExp(`data-desktop-platform="darwin"\\] \\[data-sidebar-right-panel="push"\\] \\{ top: ${MACOS_TITLEBAR_HEIGHT}px; \\}`))
+      expect(css).toMatch(new RegExp(`data-desktop-platform="darwin"\\] \\[data-sidebar-right-panel="fullscreen"\\] \\{ padding-top: ${MACOS_TITLEBAR_HEIGHT}px; \\}`))
+      expect(css).toMatch(new RegExp(`data-desktop-platform="win32"\\] \\[data-sidebar-right-panel="push"\\] \\{ top: ${WINDOWS_TITLEBAR_HEIGHT}px; \\}`))
+      expect(css).toMatch(new RegExp(`data-desktop-platform="win32"\\] \\[data-sidebar-right-panel="fullscreen"\\] \\{ padding-top: ${WINDOWS_TITLEBAR_HEIGHT}px; \\}`))
+      // Linux has no native title bar inside the frame, so the panel keeps the
+      // upstream geometry there.
+      expect(css).not.toMatch(/data-desktop-platform="linux"\][^{]*data-sidebar-right-panel/)
       expect(css).not.toMatch(/data-desktop-platform="win32"[^{}]*header[^{}]*\{[^}]*padding-right/)
       expect(appendChild).toHaveBeenCalledWith(style)
       dispose()
