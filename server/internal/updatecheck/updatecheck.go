@@ -392,7 +392,27 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 		CheckedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	// 版本比较按 core(M.m.p)判断是否需要升级;预发布只影响目标版本展示。
-	if cur, ok := ParseCanonicalStableValid(current); ok {
+	//
+	// FIX-23(审计 2026-09-12,P1):此前这里用 ParseCanonicalStableValid(current),
+	// 而它**拒绝一切预发布**(IsStableSemVer 见到 "-" 即为 false)。于是当服务端
+	// 自己就是预发布版本时 ok=false,UpdateAvailable 永远是 false ——
+	// beta 渠道的"有新版本"提示永久失效。审计实测:
+	//
+	//	cur=2.7.2-beta.7, latest=2.8.0 → UpdateAvailable=false
+	//	cur=v2.7.1(稳定版对照)        → true
+	//
+	// CI 的 VERSION 取 github.ref_name(→ Dockerfile → main.version →
+	// SetBuildVersion → Check),所以 beta/official 渠道跑的**就是**预发布
+	// 版本号 —— 这不是边缘情况,是常规发布状态。
+	//
+	// 改用 NormalizeVersion(接受预发布),比较仍走 CompareSemVer 的 core 语义:
+	//   - 2.7.2-beta.7 → 2.8.0        : core 2.7.2 < 2.8.0 → true(正确提示)
+	//   - 2.7.2-beta.7 → 2.7.2-beta.8 : core 相等         → false(不提示)
+	//   - 2.7.1        → 2.7.1        : core 相等         → false
+	//   - 2.8.0        → 2.7.2-beta.7 : core 更大         → false(不提示降级)
+	// 解析不出来(本地 dev 构建的 "dev" 等)仍保持 false:版本号不可比时
+	// **不提示**是安全方向(否则开发机会变成"永远可升级")。
+	if cur := NormalizeVersion(current); cur != "" {
 		res.UpdateAvailable = CompareSemVer(latest, cur) > 0
 	}
 	return res, nil

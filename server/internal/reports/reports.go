@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -90,6 +91,12 @@ func hookHostAllowed(ip net.IP) bool {
 }
 
 // newPushTransport 构造带 SSRF 复检的推送传输层。
+//
+// FIX-09(审计 2026-09-12,P1):与 util.SafeOutboundTransport 同源 —— 只设
+// DialContext 的护栏在配了 HTTP(S)_PROXY 的部署里完全空转:走代理时
+// DialContext 连的是**代理**,目标只出现在请求行 / CONNECT 里,于是
+// `http://169.254.169.254/...` 这类 webhook 会被代理照常取回。
+// 修法:t.Proxy 换成代理感知包装,在选定代理**之前**复检真正的目标。
 func newPushTransport() *http.Transport {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -97,11 +104,98 @@ func newPushTransport() *http.Transport {
 	}
 	t := base.Clone()
 	t.DialContext = safeHookDialContext
+	t.Proxy = safeHookProxyFromEnvironment
 	return t
+}
+
+// safeHookProxyFromEnvironment 是 webhook 推送侧的代理感知包装。
+//
+// 这里额外解决一个**代理部署下合法 webhook 被整体打死**的问题:
+// hookHostAllowed 只放行公网地址,而 DialContext 复检的是代理的地址 ——
+// 企业内网代理(10.x/172.16.x)会被判为"不可访问",所有 webhook 永久失败。
+// 因此:
+//   - 目标复检挪到本函数(req.URL 才是真正的目标);
+//   - 代理自身地址由 safeHookDialContext 放行(见 hookIsEnvProxyAddr),
+//     代理是运维配置的部署事实,不是攻击者可控的目标;
+//   - 于是"私网目标 + 公网代理"仍然被拦,"公网目标 + 私网代理"恢复正常。
+func safeHookProxyFromEnvironment(req *http.Request) (*url.URL, error) {
+	proxyURL, err := http.ProxyFromEnvironment(req)
+	if err != nil || proxyURL == nil {
+		return proxyURL, err
+	}
+	if terr := checkHookTargetAllowed(req.Context(), req.URL.Hostname()); terr != nil {
+		return nil, terr
+	}
+	return proxyURL, nil
+}
+
+// checkHookTargetAllowed 复检一个 webhook 目标主机(与 safeHookDialContext
+// 同一套判定,但取"任一候选被拒即拒"的 fail-closed 口径:代理路径无法逐 IP
+// 重试)。
+func checkHookTargetAllowed(ctx context.Context, host string) error {
+	if allowPrivateHookHosts {
+		return nil
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("webhook 目标地址不可访问")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !hookHostAllowed(ip) {
+			return fmt.Errorf("webhook 目标地址不可访问")
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	for _, ipa := range ips {
+		if !hookHostAllowed(ipa.IP) {
+			return fmt.Errorf("webhook 目标地址不可访问")
+		}
+	}
+	return nil
+}
+
+// hookIsEnvProxyAddr 报告 addr(host:port)是否是当前环境变量配置的代理之一。
+//
+// 用途:走代理时 DialContext 拿到的地址是**代理**的地址,对它套用
+// hookHostAllowed(仅公网)会把企业内网代理整个打死。代理地址来自部署方的
+// HTTP(S)_PROXY,不是攻击者可控输入,因此这里放行直连。
+func hookIsEnvProxyAddr(addr string) bool {
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if addr == "" {
+		return false
+	}
+	for _, k := range []string{
+		"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+	} {
+		raw := strings.TrimSpace(os.Getenv(k))
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		if strings.ToLower(u.Host) == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // safeHookDialContext 在建立连接时复检目标 IP(防 DNS rebinding)。
 func safeHookDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// 走代理时这个 addr 是**代理**的地址(真正的 webhook 目标已在
+	// safeHookProxyFromEnvironment 里复检过)。代理由部署方通过
+	// HTTP(S)_PROXY 配置,套用"仅公网"判定会让内网代理下的 webhook 全部
+	// 失败,因此这里直接放行。
+	if hookIsEnvProxyAddr(addr) {
+		d := &net.Dialer{Timeout: PushTimeout}
+		return d.DialContext(ctx, network, addr)
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err

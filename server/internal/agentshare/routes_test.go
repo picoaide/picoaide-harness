@@ -22,7 +22,16 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
+
+// FIX-01(P0):审核预览上限同时是 preset.yml 进 YAML 解析器的输入边界。
+func TestMaxFilePreviewBytesMatchesManifestGate(t *testing.T) {
+	if maxFilePreviewBytes != skillmanifest.MaxSkillMDBytes {
+		t.Fatalf("maxFilePreviewBytes = %d, want skillmanifest.MaxSkillMDBytes = %d",
+			maxFilePreviewBytes, skillmanifest.MaxSkillMDBytes)
+	}
+}
 
 // makeArchive builds a zip with the given entries (path -> content).
 // A "SYMLINK" content marks a symlink entry (zip mode bits, fs.FileMode 位).

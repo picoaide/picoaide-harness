@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/updatecheck"
 )
 
@@ -36,6 +37,33 @@ type sysinfoResponse struct {
 	// UpdateCheck 是实时版本检查结果(2026-08-31 新增);服务不可达/非
 	// SemVer 时为 null,前端静默降级(绝不因版本检查失败打扰管理员)。
 	UpdateCheck *updatecheck.Result `json:"update_check"`
+	// Audit 是审计链与审计写入的健康状态(FIX-12,审计 2026-09-12 P1)。
+	//
+	// 为什么挂在这里而不是新开一个 admin 端点:审计写入失败以前**完全不可
+	// 见**(80 个调用点都是 `_ = serverstore.AuditLog`),而 VerifyAuditChain
+	// 在生产里零调用 —— "哈希链防篡改"是一条没有执行者的不变式。给它执行者
+	// 的同时**不能再引入新路由**(`internal/router` 是路由唯一真源,增删路由
+	// 会让 test mirror 与生产路由表失配,parity 测试直接红),所以复用**已
+	// 注册**的 server-info。
+	Audit auditHealth `json:"audit"`
+}
+
+// auditHealth 是审计子系统的健康快照(只读,不含任何审计内容)。
+type auditHealth struct {
+	// ChainChecked 为 false 表示本进程尚未做过链校验。
+	// 校验在启动时执行一次(cmd/server),结果由 serverstore 缓存。
+	ChainChecked bool `json:"chain_checked"`
+	// ChainIntact:链完整;ChainBrokenID:第一处断链/哈希不符的条目 id。
+	ChainIntact   bool  `json:"chain_intact"`
+	ChainBrokenID int64 `json:"chain_broken_id"`
+	// ChainCheckedAt 是启动校验的时刻(RFC3339)。
+	ChainCheckedAt string `json:"chain_checked_at"`
+	// WriteFailures / DroppedEntries / Retries 是**进程内**累计计数:
+	// dropped_entries 是彻底丢失、从未落库的审计条目数。两者非零即说明审计
+	// 有缺口,应立刻排查(日志里同时有 `ERROR audit: ...` 行)。
+	WriteFailures  int64 `json:"write_failures"`
+	DroppedEntries int64 `json:"dropped_entries"`
+	Retries        int64 `json:"retries"`
 }
 
 type memInfo struct {
@@ -103,6 +131,19 @@ func (a *AdminAPI) handleServerInfo(c *gin.Context) {
 		return
 	}
 	resp.DB = dbStats
+
+	// FIX-12:审计链校验结果(启动时由 cmd/server 执行并缓存)+ 进程内写入计数。
+	checked, intact, brokenID, checkedAt, _ := serverstore.AuditChainStatus()
+	failures, dropped, retries := serverstore.AuditWriteStats()
+	resp.Audit = auditHealth{
+		ChainChecked:   checked,
+		ChainIntact:    intact,
+		ChainBrokenID:  brokenID,
+		ChainCheckedAt: checkedAt,
+		WriteFailures:  failures,
+		DroppedEntries: dropped,
+		Retries:        retries,
+	}
 
 	// 实时版本检查(2026-08-31):查询 GitHub Releases latest,对比当前版本。
 	// 结果失败时留 nil(JSON null),前端静默降级——版本提示是增强体验,

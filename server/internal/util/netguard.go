@@ -11,8 +11,10 @@ package util
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -84,8 +86,17 @@ func SafeOutboundDialContext(ctx context.Context, network, addr string) (net.Con
 	return nil, lastErr
 }
 
-// SafeOutboundTransport 返回安装了 Dial 复检的 http.Transport(克隆标准库
+// SafeOutboundTransport 返回安装了目标复检的 http.Transport(克隆标准库
 // 默认参数:代理从环境读取、连接池、TLS 超时等)。
+//
+// FIX-09(审计 2026-09-12,P1):此前只设了 DialContext,而**配了
+// HTTP(S)_PROXY 的部署里 DialContext 拿到的是代理的地址**,复检因此对真正
+// 要访问的目标完全空转 —— 代理会照常收到
+// `GET http://169.254.169.254/latest/meta-data/...`(HTTP 形态)或
+// `CONNECT 169.254.169.254:443`(HTTPS 形态),审计实测双向都绕过。
+//
+// 修法:t.Proxy 换成代理感知包装,在选择代理**之前**先复检真正要访问的
+// 目标主机;没有代理时行为与修复前完全一致(由 DialContext 复检)。
 func SafeOutboundTransport() *http.Transport {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -93,5 +104,61 @@ func SafeOutboundTransport() *http.Transport {
 	}
 	t := base.Clone()
 	t.DialContext = SafeOutboundDialContext
+	t.Proxy = SafeOutboundProxyFromEnvironment
 	return t
+}
+
+// SafeOutboundProxyFromEnvironment 是 http.ProxyFromEnvironment 的代理感知
+// 包装。
+//
+// 为什么必须在**这一层**做:一旦请求走代理,net/http 只会用 DialContext 去连
+// **代理**,目标地址仅出现在请求行(HTTP)或 CONNECT 目标(HTTPS)里 ——
+// DialContext 里的安全检查永远看不到它。所以代理路径上的目标复检只能发生在
+// 这里:http.Transport 在决定使用代理时会调用本函数,拿到 *http.Request,
+// 目标主机就在 req.URL 里。
+//
+// 代理**自身**的地址不在这里拦:netguard 的既定策略是允许私网(企业内网上游
+// 是产品主场景),而 SafeOutboundDialContext 仍会对代理地址施加同一套链路
+// 本地/metadata 复检 —— 运维若把代理指向 169.254.169.254,连接阶段照样被拒。
+func SafeOutboundProxyFromEnvironment(req *http.Request) (*url.URL, error) {
+	proxyURL, err := http.ProxyFromEnvironment(req)
+	if err != nil || proxyURL == nil {
+		return proxyURL, err
+	}
+	if terr := CheckOutboundTarget(req.Context(), req.URL.Hostname()); terr != nil {
+		return nil, terr
+	}
+	return proxyURL, nil
+}
+
+// CheckOutboundTarget 解析主机名并复检**每一个**候选 IP。
+//
+// 与 SafeOutboundDialContext 的差异是有意的:直连路径会逐个尝试候选 IP、
+// 只跳过被拦的那些;代理路径上我们无法逐 IP 重试(代理只给一个地址),因此
+// 只要任一候选落在链路本地/metadata 段就整体拒绝。对安全闸门而言
+// fail-closed 才是正确方向(混合解析结果正是 DNS rebinding 的形态)。
+func CheckOutboundTarget(ctx context.Context, host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return errors.New("outbound host is empty")
+	}
+	if IsBlockedOutboundHost(host) {
+		return fmt.Errorf("outbound host %q is a known metadata service and blocked", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if IsBlockedOutboundIP(ip) {
+			return errors.New("outbound address is link-local/metadata and blocked")
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	for _, ipa := range ips {
+		if IsBlockedOutboundIP(ipa.IP) {
+			return errors.New("outbound address is link-local/metadata and blocked")
+		}
+	}
+	return nil
 }
