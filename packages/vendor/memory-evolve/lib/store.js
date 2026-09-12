@@ -345,7 +345,14 @@ const LOCK_JSON = () => JSON.stringify({ pid: process.pid, at: Date.now() })
 
 /**
  * stale 锁判断（导出供 worker 异步锁复用）：mtime 超时，或锁文件里的
- * pid 已不存活（进程被 kill/断电——残留锁立即清除，不用等 stale 超时）。
+ * pid **确定已死**（ESRCH——进程被 kill/断电，残留锁立即清除，不用等
+ * stale 超时）。
+ *
+ * 「确定」是刻意的（P1-10）：`process.kill(pid, 0)` 抛 EPERM 只说明
+ * **探测方无权发信号**（跨 uid / 容器 / NFS 共享同一记忆目录），持有者
+ * 可能活得好好的；把这种不可判定当 stale 会 rmSync 抢走活锁。除 ESRCH
+ * 外的失败一律保守视为「锁仍有效」。
+ *
  * @param {string} lockPath - 锁文件路径。
  * @returns {boolean}
  */
@@ -361,8 +368,14 @@ export function isStaleLock(lockPath) {
         try {
           process.kill(owner.pid, 0) // 信号 0 = 只探测存活
           return false // 持有者还活着 → 锁有效
-        } catch {
-          return true // 持有者已死（断电/中断残留）→ stale
+        } catch (error) {
+          // 只有 ESRCH（进程不存在）才是"持有者已死"。EPERM 等错误表示
+          // **不可判定**（跨 uid 共享记忆目录、容器/宿主共享挂载、NFS：
+          // 探测方无权给持有者发信号，但持有者进程活着）——此前把 EPERM
+          // 当"已死"会 rmSync 抢走活锁，两个进程同时进入临界区（P1-10）。
+          // 保守策略：不可判定 → 认为锁仍有效（不按 mtime 抢），等持有者
+          // 自己释放；确实卡死时由 withLock 的超时报错暴露，绝不静默互斥。
+          return error?.code === 'ESRCH'
         }
       }
     } catch {
@@ -1389,11 +1402,31 @@ export class ArchiveStore {
     }
   }
 
+  /**
+   * 归档轨的**唯一锁域**（P1-8）：锁文件所在目录 = 归档文件所在目录。
+   *
+   * 为什么不是 `this.dir`：key 归档文件在**项目目录**（`<projectDir>/
+   * KEY-archive.md`），主轨 KeyStore 的写/删/合并也都锁项目目录——归档
+   * 操作只有锁在同一目录才与主轨互斥（append 注释所述的原始设计）。
+   * 此前 `removeExact` 单独锁 `this.dir`（记忆根）：与 `append`/`remove`
+   * 是两把不同的锁，key 轨上「归档」与「删除归档条目」可真正并发，读-
+   * 改-写互相覆盖（双进程 5/5 轮丢更新）。三处统一走本方法。
+   *
+   * 非 key 轨（memory/user/todo-*）的归档文件就在 `this.dir` 下，dirname
+   * 恒等于 `this.dir`——行为与旧实现完全一致，只修 key 轨的不一致。
+   *
+   * @param {string} target - 归档轨（memory/user/key/todo-*）。
+   * @param {string} [cwd] - key 轨必需的会话工作目录。
+   * @returns {string} withLock 的锁目录。
+   */
+  archiveLockDir(target, cwd) {
+    return dirname(this.fileOf(target, cwd))
+  }
+
   /** Append one entry under the directory lock (atomic write). */
   append(target, content, cwd) {
     // 锁文件所在目录（key 归档=项目目录，与主轨写/合并互斥；全局归档=记忆根）
-    const lockDir = dirname(this.fileOf(target, cwd))
-    return withLock(lockDir, () => {
+    return withLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
       entries.push(content)
       const path = this.fileOf(target, cwd)
@@ -1407,8 +1440,7 @@ export class ArchiveStore {
 
   /** Remove the single entry containing the unique substring `match`. */
   remove(target, match, cwd) {
-    const lockDir = dirname(this.fileOf(target, cwd))
-    return withLock(lockDir, () => {
+    return withLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
       const matches = entries.filter((entry) => entry.includes(match))
       if (matches.length === 0) return { ok: false, message: stt('storetail.archiveNoMatch', { match }) }
@@ -1426,7 +1458,8 @@ export class ArchiveStore {
 
   /** Remove the entry that EXACTLY equals `content` (whole-entry match). */
   removeExact(target, content, cwd) {
-    return withLock(this.dir, () => {
+    // 与 append/remove 同一锁域（P1-8；此前误用 this.dir → key 轨丢更新）
+    return withLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
       const index = entries.indexOf(content)
       if (index === -1) {

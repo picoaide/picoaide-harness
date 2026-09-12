@@ -76,7 +76,10 @@ test('功能验证：Web 面板改 keyProgressiveDisclosure → 新会话快照�
   await route.handler({
     method: 'POST',
     url: '/memory-evolve/api/config',
-    headers: { 'content-type': 'application/json' },
+    // 统一同源守卫（lib/api.js 的 guardRequest，P1-11）：非 GET 请求必须
+    // 携带与 Host 同源的 Origin + JSON Content-Type——这里按真实 Web UI
+    // 的请求形状补齐（浏览器对非 GET 一律附带 Origin）。
+    headers: { 'content-type': 'application/json', host: 'localhost:3080', origin: 'http://localhost:3080' },
     [Symbol.asyncIterator]: bodyStream,
   }, res)
   assert.ok(res.body.includes('"keyProgressiveDisclosure":"on"'), 'config POST accepted: ' + res.body.slice(0, 120))

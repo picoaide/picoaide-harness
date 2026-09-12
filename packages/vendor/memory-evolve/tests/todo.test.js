@@ -597,7 +597,12 @@ async function bootTodoApi(runtime = {}) {
   const request = async (method, path, body) => {
     const res = await fetch(base + path, {
       method,
-      headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+      // 统一同源守卫（lib/api.js 的 guardRequest，P1-11）：非 GET 请求必须
+      // 携带与 Host 同源的 Origin（浏览器对非 GET 一律附带，Node fetch 不
+      // 带）——测试客户端显式补上，与真实 Web UI 的请求形状一致。
+      headers: body !== undefined
+        ? { 'content-type': 'application/json', origin: base }
+        : { origin: base },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
     const data = await res.json().catch(() => ({}))
