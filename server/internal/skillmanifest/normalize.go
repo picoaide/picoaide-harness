@@ -55,9 +55,18 @@ func NormalizeSkillMD(raw string, opts NormalizeOptions) (string, []string, erro
 		if idx := strings.Index(rest, "\n---"); idx >= 0 {
 			front := rest[:idx]
 			body = strings.TrimPrefix(rest[idx+len("\n---"):], "\n")
-			if err := yaml.Unmarshal([]byte(front), &data); err != nil || data == nil {
-				return "", nil, newErr(CodeFrontmatterInvalid, "", "frontmatter 不是合法 YAML,无法自动规范化")
+			// R-1(审计 2026-09-13):**唯一入口**必须是真的唯一入口 ——
+			// 这里此前裸 yaml.Unmarshal(front),是全包唯一零闸 YAML 入口:
+			// manifest.go 注释写着"parseManifestYAML 是唯一入口",实际
+			// 规范化路径(先用 archiveutil.ReadAll 取出完整 SKILL.md,单条
+			// 上限 64MB,再交到这里)可以带着深嵌套 frontmatter 直达解析器,
+			// goccy/go-yaml 解析期内存二次方增长且 OOM 不可 recover。
+			// 现在与 Parse/ParseAgent 共用同一套闸门(长度 → 字符统计 → 解析)。
+			parsed, perr := parseManifestYAML(front, "", "frontmatter")
+			if perr != nil {
+				return "", nil, perr
 			}
+			data = parsed
 		} else {
 			return "", nil, newErr(CodeFrontmatterInvalid, "", "frontmatter 缺少结束分隔符,无法自动规范化")
 		}
