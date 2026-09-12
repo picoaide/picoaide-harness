@@ -44,8 +44,27 @@ function loginHandler(
   session: Session | null,
   fence?: { requestRejection: (req: { headers: unknown }) => 401 | 403 | undefined },
 ): { handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>, setSession: ReturnType<typeof vi.fn>, warns: string[] } {
-  let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
+  const h = sessionHarness(session, fence)
+  return { handler: h.handler, setSession: h.setSession, warns: h.warns }
+}
+
+/**
+ * 会话变更类路由的公共 harness:注册**全部** auth-gate 路由(login/password/logout
+ * 都要被测),fence 为 undefined 表示组合里没有 connection 服务。
+ */
+function sessionHarness(
+  session: Session | null,
+  fence?: { requestRejection: (req: { headers: unknown }) => 401 | 403 | undefined },
+): {
+  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+  routes: Map<string, (req: IncomingMessage, res: ServerResponse) => Promise<void>>
+  setSession: ReturnType<typeof vi.fn>
+  clear: ReturnType<typeof vi.fn>
+  warns: string[]
+} {
+  const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => Promise<void>>()
   const setSession = vi.fn()
+  const clear = vi.fn()
   const warns: string[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
@@ -56,22 +75,28 @@ function loginHandler(
       isLoggedIn: () => session !== null,
       getSession: () => session,
       setSession,
-      clear: vi.fn(),
+      clear,
     },
     webServer: {
       tapIndex: () => () => {},
-      register: (route: { path: string, handler: typeof handler }) => {
-        if (route.path === '/api/pico/auth/login') handler = route.handler
+      register: (route: { path: string, handler: (req: IncomingMessage, res: ServerResponse) => Promise<void> }) => {
+        routes.set(route.path, route.handler)
         return () => {}
       },
     },
   }
   apply(ctx as never, {} as Config)
+  const handler = routes.get('/api/pico/auth/login')
   expect(handler, 'auth-gate 必须注册 /api/pico/auth/login').toBeDefined()
-  return { handler: handler!, setSession, warns }
+  return { handler: handler!, routes, setSession, clear, warns }
 }
 
 const CURRENT: Session = { serverURL: 'https://harness.example', username: 'alice', token: 'tok-1' }
+
+/** 真页面持有的 BrowserAuth cookie:持有性证明通过(用于验证围栏之外的产品逻辑)。 */
+function acceptingFence(): { requestRejection: (req: { headers: unknown }) => undefined } {
+  return { requestRejection: vi.fn(() => undefined) }
+}
 
 describe('loginServerSwitchConflict(纯函数)', () => {
   it('未登录时永不冲突', () => {
@@ -103,7 +128,9 @@ describe('POST /api/pico/auth/login:已登录时拒绝换服务端(FIX-18)', () 
       JSON.stringify({ token: 'attacker-token', user: { role: 'user' } }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     )))
-    const { handler, setSession, warns } = loginHandler(CURRENT)
+    // 这些用例考的是 409/200 判定本身 ⇒ 用"真页面持有 cookie"的围栏放行
+    // (围栏缺席的口径由下一组用例覆盖)。
+    const { handler, setSession, warns } = loginHandler(CURRENT, acceptingFence())
     const { res, read } = fakeResponse()
     await handler(fakeRequest({ server: 'https://evil.example', username: 'mallory', password: 'pw' }), res)
     expect(read().code).toBe(409)
@@ -117,7 +144,7 @@ describe('POST /api/pico/auth/login:已登录时拒绝换服务端(FIX-18)', () 
       JSON.stringify({ token: 'fresh-token', user: { role: 'user' } }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     )))
-    const { handler, setSession } = loginHandler(CURRENT)
+    const { handler, setSession } = loginHandler(CURRENT, acceptingFence())
     const { res, read } = fakeResponse()
     await handler(fakeRequest({ server: 'https://harness.example/', username: 'alice', password: 'pw' }), res)
     expect(read().code).toBe(200)
@@ -129,7 +156,7 @@ describe('POST /api/pico/auth/login:已登录时拒绝换服务端(FIX-18)', () 
       JSON.stringify({ token: 'tok', user: { role: 'user' } }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     )))
-    const { handler, setSession } = loginHandler(null)
+    const { handler, setSession } = loginHandler(null, acceptingFence())
     const { res, read } = fakeResponse()
     await handler(fakeRequest({ server: 'https://any.example', username: 'bob', password: 'pw' }), res)
     expect(read().code).toBe(200)
@@ -168,16 +195,74 @@ describe('会话变更类路由的持有性证明(FIX-18)', () => {
     expect(setSession).toHaveBeenCalledTimes(1)
   })
 
-  it('组合里没有 connection 服务 ⇒ 明确降级到 loopback 围栏并 warn(不锁死登录)', async () => {
+  it('组合里没有 connection 服务 ⇒ 高危会话变更 fail-closed(三轮残留②)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"token":"t","user":{}}', {
       status: 200, headers: { 'content-type': 'application/json' },
     })))
     const { handler, setSession, warns } = loginHandler(null, undefined)
     const { res, read } = fakeResponse()
     await handler(fakeRequest({ server: 'https://ok.example', username: 'u', password: 'p' }), res)
-    expect(read().code).toBe(200)
-    expect(setSession).toHaveBeenCalledTimes(1)
+    // 改前:200 + setSession(退回只有同源标记的 guard() = fail-open)。
+    expect(read().code).toBe(503)
+    expect(read().body.error).toBe('browser session proof unavailable')
+    expect(setSession).not.toHaveBeenCalled()
     expect(warns.some(w => w.includes('connection service unavailable'))).toBe(true)
+  })
+
+  it('connection 缺席 + 已登录换 server ⇒ 503 拒绝(留下的不再是 fail-open 窗口)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"token":"attacker-token","user":{}}', {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })))
+    const { handler, setSession, warns } = loginHandler(CURRENT, undefined)
+    const { res, read } = fakeResponse()
+    await handler(fakeRequest({ server: 'https://evil.example', username: 'mallory', password: 'pw' }), res)
+    expect(read().code).toBe(503)
+    expect(setSession).not.toHaveBeenCalled()
+    expect(warns.some(w => w.includes('fail-closed'))).toBe(true)
+  })
+
+  it('connection 在场时正常路径不回归:登录同 server / 登出 / 改密全部照常', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ token: 't', user: { role: 'user' } }),
+    }))
+    const fence = { requestRejection: vi.fn(() => undefined) }
+    const h = sessionHarness(CURRENT, fence)
+
+    // ① 登录(同一 server,换账号/重登)。
+    const login = fakeResponse()
+    await h.routes.get('/api/pico/auth/login')!(
+      fakeRequest({ server: 'https://harness.example', username: 'alice', password: 'pw' }), login.res)
+    expect(login.read().code).toBe(200)
+    expect(h.setSession).toHaveBeenCalledTimes(1)
+
+    // ② 改密(旧密码校验通过 ⇒ 服务端已吊销全部令牌 ⇒ 本地清会话)。
+    const pwd = fakeResponse()
+    await h.routes.get('/api/pico/auth/password')!(
+      fakeRequest({ old_password: 'old12345678', new_password: 'new12345678' }), pwd.res)
+    expect(pwd.read().code).toBe(200)
+    expect(h.clear).toHaveBeenCalledTimes(1)
+
+    // ③ 登出。
+    const out = fakeResponse()
+    await h.routes.get('/api/pico/auth/logout')!(fakeRequest({}), out.res)
+    expect(out.read().code).toBe(200)
+    expect(h.clear).toHaveBeenCalledTimes(2)
+
+    // 三条都真的问过持有性证明(不是靠 guard() 蒙过去的)。
+    expect(fence.requestRejection).toHaveBeenCalledTimes(3)
+  })
+
+  it('持有性证明校验器抛错 ⇒ 按拒绝处理(不泄漏成 500)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"token":"t","user":{}}', {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })))
+    const fence = { requestRejection: vi.fn(() => { throw new Error('host header missing') }) }
+    const { handler, setSession, warns } = loginHandler(null, fence)
+    const { res, read } = fakeResponse()
+    await handler(fakeRequest({ server: 'https://ok.example', username: 'u', password: 'p' }), res)
+    expect(read().code).toBe(403)
+    expect(setSession).not.toHaveBeenCalled()
+    expect(warns.some(w => w.includes('browser proof check failed'))).toBe(true)
   })
 })
 
@@ -227,33 +312,50 @@ describe('connection 服务查找(真 Cordis Context)', () => {
 })
 
 /** 非 desktop 组合(没有 connection 行的 web/base profile)下,`ctx.get` 必须是
- *  安全的 undefined 查询而不是抛错 —— 否则 apply() 当场炸掉整个插件。 */
+ *  安全的 undefined 查询而不是抛错 —— 否则 apply() 当场炸掉整个插件;
+ *  且高危会话变更必须 fail-closed(三轮残留②)。 */
 describe('connection 缺席(真 Cordis Context)', () => {
-  it('ctx.get("connection") 返回 undefined 且登录降级放行', async () => {
+  it('ctx.get("connection") 返回 undefined:登录/登出被拒绝,改密维持降级', async () => {
     const { Context } = await import('@deepseek-ai/cordis')
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"token":"t","user":{}}', {
       status: 200, headers: { 'content-type': 'application/json' },
     })))
     const root = new Context()
-    let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
+    const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => Promise<void>>()
     const setSession = vi.fn()
+    const clear = vi.fn()
     const ctx = root.extend({
       picoSession: {
         isRestored: () => true, isLoggedIn: () => false, getSession: () => null,
-        setSession, clear: vi.fn(),
+        setSession, clear,
       },
       webServer: {
         tapIndex: () => () => {},
-        register: (route: { path: string, handler: typeof handler }) => {
-          if (route.path === '/api/pico/auth/login') handler = route.handler
+        register: (route: { path: string, handler: (req: IncomingMessage, res: ServerResponse) => Promise<void> }) => {
+          routes.set(route.path, route.handler)
           return () => {}
         },
       },
     } as never)
     apply(ctx as never, {} as Config)
-    const { res, read } = fakeResponse()
-    await handler!(fakeRequest({ server: 'https://ok.example', username: 'u', password: 'p' }), res)
-    expect(read().code).toBe(200)
-    expect(setSession).toHaveBeenCalledTimes(1)
+
+    // ① 登录(换 server ⇒ 高危):503,绝不 setSession。
+    const login = fakeResponse()
+    await routes.get('/api/pico/auth/login')!(
+      fakeRequest({ server: 'https://ok.example', username: 'u', password: 'p' }), login.res)
+    expect(login.read().code).toBe(503)
+    expect(setSession).not.toHaveBeenCalled()
+
+    // ② 登出(强制踢出 ⇒ 高危):503,绝不 clear。
+    const logout = fakeResponse()
+    await routes.get('/api/pico/auth/logout')!(fakeRequest({}), logout.res)
+    expect(logout.read().code).toBe(503)
+    expect(clear).not.toHaveBeenCalled()
+
+    // ③ 改密:必须先交出旧密码 ⇒ 低危,维持既有降级(不把这条锁死)。
+    const login2 = fakeResponse()
+    await routes.get('/api/pico/auth/password')!(
+      fakeRequest({ old_password: 'old-pass', new_password: 'new-pass' }), login2.res)
+    expect(login2.read().code).toBe(401) // 未登录(本用例 session=null),不是 503
   })
 })
