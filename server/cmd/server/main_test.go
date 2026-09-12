@@ -546,3 +546,36 @@ func TestResolveStartupChannelRejectsInvalidChannel(t *testing.T) {
 		t.Fatal("非法渠道 id 必须拒绝启动")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 访问日志脱敏(审计 2026-09-12):OIDC/OpenID 回调把 IdP 授权码与 login-CSRF
+// state 放在查询串上。gin.Logger() 记录的是 RequestURI(path+query),等于把
+// 授权码写进容器日志。accessLogger() 必须只记 path。
+// ---------------------------------------------------------------------------
+
+func TestAccessLoggerDropsQueryString(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	var buf strings.Builder
+	r.Use(accessLoggerTo(&buf))
+	r.GET("/api/client/v2/auth/oidc/callback", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	w := httptest.NewRecorder()
+	// 凭据模拟真实回调:授权码 + state。
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/client/v2/auth/oidc/callback?code=SECRET-AUTH-CODE&state=SECRET-STATE", nil)
+	r.ServeHTTP(w, req)
+
+	logged := buf.String()
+	if !strings.Contains(logged, "/api/client/v2/auth/oidc/callback") {
+		t.Fatalf("path must still be logged (排障需要), got: %q", logged)
+	}
+	if strings.Contains(logged, "SECRET-AUTH-CODE") || strings.Contains(logged, "SECRET-STATE") {
+		t.Fatalf("query credentials leaked into access log: %q", logged)
+	}
+	if strings.Contains(logged, "?") {
+		t.Fatalf("query separator must not appear in access log: %q", logged)
+	}
+}

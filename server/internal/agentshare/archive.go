@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/picoaide/picoaide/internal/archiveutil"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // Archive limits: the raw archive a client may upload, and the total
@@ -86,6 +87,19 @@ func ExtractFileContent(data []byte, target string) (content string, size int64,
 // where both segments are already validated single path segments. 注意:
 // 旧磁盘回退文件与 pre-0041 行沿用 tar.gz 名;zip 存档下载时由调用方按
 // 格式嗅探生成 <name>-<version>.zip 响应名。
+//
+// 审计 2026-09-12(纵深防御):本函数此前无条件拼接两个入参,只靠"调用方已
+// 校验 / 值来自 DB"这一约定 —— 与姊妹实现 sharedskills.safeName 的显式校验
+// 不对称。约定一旦在某条新路径上失守,拼出的就是可越出 cacheDir 的路径
+// (filepath.Join(cacheDir, "../../etc/passwd-1.tar.gz"))。
+//
+// 这里补上与 sharedskills 同级的守卫:非法段返回空串,调用方 os.ReadFile("")
+// 直接失败 → 404/500,而不是读到目录外的文件。纯读路径(3 处 Download/
+// Preview)行为不变:`..` 段在到达本函数前已被 presetIDRe/versionRe 拒绝,
+// 且任何情况下 DB 里的 name/version 都通过了同一套正则。
 func safeName(name, version string) string {
+	if !util.SafePathSegment(name) || !util.SafePathSegment(version) {
+		return ""
+	}
 	return fmt.Sprintf("%s-%s.tar.gz", name, version)
 }
