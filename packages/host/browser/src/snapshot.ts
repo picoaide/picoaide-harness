@@ -48,7 +48,16 @@ const SNAPSHOT_PROBE = `
   };
   const textOf = (el) => {
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      return (el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.value || '').slice(0, 80);
+      const placeholder = el.getAttribute('placeholder') || el.getAttribute('aria-label') || '';
+      // A password field's DOM property holds the real credential: unlike the
+      // browser UI (dots), the property is plaintext, and the host itself puts
+      // connector credentials there via browser_fill_credentials. Never read
+      // it — keep the element (it must stay clickable/typeable by number) and
+      // label it with the page's own placeholder, or a neutral marker.
+      if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password') {
+        return (placeholder || '(password field)').slice(0, 80);
+      }
+      return (placeholder || el.value || '').slice(0, 80);
     }
     if (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) {
       return (el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 80);

@@ -15,8 +15,9 @@ import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { TabPool } from './pool.ts'
-import { BrowserStore, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
+import { BrowserStore, maskSensitiveFragment, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
+import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
 import { browserError, BrowserError } from './errors.ts'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
@@ -59,6 +60,14 @@ interface BrowserTab {
   canGoBack: boolean
   canGoForward: boolean
   disposers: Array<() => void>
+  /**
+   * Credential values handed to this tab by `fillCredentials` (P0-A depth
+   * layer). The snapshot probe never reads a password field's value anymore;
+   * this list is the second, value-exact line of defence: whatever source a
+   * future probe adds, a known injected secret can never reach the model. It
+   * dies with the tab (`destroyTab` drops the whole entry).
+   */
+  filledSecrets: string[]
 }
 
 interface EvalResult {
@@ -416,7 +425,7 @@ export class BrowserRuntime {
       try { view.destroy() } catch { /* teardown never throws */ }
       throw cause
     }
-    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [] }
+    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [] }
     this.tabs.set(id, tab)
     this.pool.registerTab(id, '', '')
 
@@ -1021,7 +1030,13 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const elements = await this.agentRun('browser_get_snapshot', async () => {
       const tab = this.tab(resolved)
-      return await extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit)
+      const snapshot = await extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit)
+      // P0-A depth layer: scrub values this tab received through credential
+      // injection, whatever source produced the text (the probe today, a future
+      // field/attribute dump tomorrow). Value-exact matching keeps ordinary page
+      // text untouched. Placed in the runtime funnel — not only in tools.ts —
+      // so every `runtime.snapshot` caller is covered.
+      return redactFilledSecrets(tab, snapshot)
     }, signal)
     this.record('browser_get_snapshot', resolved, `snapshot: ${elements.length} elements`)
     return elements
@@ -1150,8 +1165,13 @@ export class BrowserRuntime {
       if (tree.frameTree !== undefined) walk(tree.frameTree)
       const frameId = frames[frameIndex]
       if (frameId === undefined) throw browserError('not-found', `browser: frame ${frameIndex} does not exist`)
-      const world = await tab.cdp.send<{ executionContextId?: number }>('Page.createIsolatedWorld', { frameId, worldName: 'picoaide-read' })
-      return world.executionContextId
+      const contextId = await defaultWorldContextId(tab, frameId)
+      // No silent fallback to an isolated world: that would restore the P1-7
+      // bug (page JS globals read as `undefined`) without any error.
+      if (contextId === undefined) {
+        throw browserError('not-found', `browser: cannot reach frame ${frameIndex} (its JavaScript world is not available)`)
+      }
+      return contextId
     } catch (error) {
       if (error instanceof BrowserError) throw error
       throw browserError('not-found', `browser: cannot reach frame ${frameIndex}`)
@@ -1555,6 +1575,12 @@ export class BrowserRuntime {
       const value = result.result?.value as { filled?: number; username?: boolean; password?: boolean } | undefined
       if (value === undefined || (value.filled ?? 0) === 0) {
         throw browserError('not-found', 'browser: no matching login form found on this page')
+      }
+      // Remember what this tab was given (P0-A depth layer: runtime.snapshot
+      // redacts these values even if a future probe source reads them back).
+      if (value.password === true && typeof credential.password === 'string' && credential.password !== ''
+        && !tab.filledSecrets.includes(credential.password)) {
+        tab.filledSecrets.push(credential.password)
       }
       return { username: value.username === true, password: value.password === true }
     }, signal)
@@ -2045,10 +2071,13 @@ const KEY_VK: Record<string, number> = {
 }
 
 const MASK = '****'
-const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
 const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
-/** Redact credential-shaped parts of a browser op-log summary. */
+/** Redact credential-shaped parts of a browser op-log summary. Mirrors
+ * `store.stripSensitiveUrl` (userinfo + sensitive query parameters + fragment
+ * pairs) so the same URL never reads `****` in history and cleartext in the op
+ * log / activity panel (P1-5). The fragment branch reuses
+ * `store.maskSensitiveFragment` on purpose: two implementations had drifted. */
 function maskBrowserSummary(summary: string): string {
   return summary.replace(SUMMARY_URL, (raw) => {
     let end = raw.length
@@ -2062,11 +2091,75 @@ function maskBrowserSummary(summary: string): string {
       if (url.username !== '') url.username = MASK
       if (url.password !== '') url.password = MASK
       for (const name of url.searchParams.keys()) {
-        if (SENSITIVE_QUERY_KEY.test(name)) url.searchParams.set(name, MASK)
+        if (SENSITIVE_KEY_PATTERN.test(name)) url.searchParams.set(name, MASK)
       }
+      if (url.hash !== '') url.hash = maskSensitiveFragment(url.hash)
       return `${url.href}${trailing}`
     } catch {
       return raw
     }
   })
+}
+
+/**
+ * Redact credential values this tab received through `fillCredentials` (P0-A
+ * depth layer). Exact-value matching: a page string that merely *talks* about
+ * passwords is untouched, while an injected secret can never leave through a
+ * snapshot — no matter which probe/field produced it. A text that is a
+ * truncated head of a longer secret (the probe caps text at 80 chars) is
+ * redacted as a whole.
+ */
+function redactFilledSecrets(tab: BrowserTab, elements: BrowserSnapshotElement[]): BrowserSnapshotElement[] {
+  if (tab.filledSecrets.length === 0) return elements
+  return elements.map((element) => {
+    let text = element.text
+    for (const secret of tab.filledSecrets) {
+      if (text.includes(secret)) text = text.split(secret).join(MASK)
+      else if (text.length >= 8 && secret.startsWith(text)) text = MASK
+    }
+    return text === element.text ? element : { ...element, text }
+  })
+}
+
+/** How long to wait for `Runtime.enable` to re-report existing execution
+ * contexts, and the re-check interval (the enable response and the
+ * `executionContextCreated` notifications race on the wire; Chromium reports
+ * them alongside the reply, but a slow renderer can lag). */
+const FRAME_CONTEXT_WAIT_MS = 500
+const FRAME_CONTEXT_POLL_MS = 10
+
+/**
+ * Execution context id of `frameId`'s DEFAULT world.
+ *
+ * `frame: 0` evaluates in the default world implicitly (no `contextId` is
+ * passed) and `frame: N > 0` must mean exactly the same thing: the tool
+ * advertises reading page-owned data ("SSR globals, hidden fields, datasets").
+ * `Page.createIsolatedWorld` — used here before 2026-09-12 — shares the DOM but
+ * NOT the page's JS globals by design, so `window.__APP__` silently read as
+ * `undefined` in every frame but the main one (P1-7). The default-world context
+ * of a frame can only be learned from `Runtime.executionContextCreated`
+ * (`auxData.frameId` + `auxData.isDefault`), which `Runtime.enable` re-emits for
+ * every existing context.
+ */
+async function defaultWorldContextId(tab: BrowserTab, frameId: string): Promise<number | undefined> {
+  const contexts: Array<{ id: number; frameId: string | undefined; isDefault: boolean }> = []
+  const dispose = tab.cdp.on('Runtime.executionContextCreated', (params) => {
+    const context = (params as {
+      context?: { id?: number; auxData?: { frameId?: string; isDefault?: boolean } }
+    }).context
+    if (context?.id === undefined) return
+    contexts.push({ id: context.id, frameId: context.auxData?.frameId, isDefault: context.auxData?.isDefault === true })
+  })
+  try {
+    await tab.cdp.send('Runtime.enable')
+    const deadline = Date.now() + FRAME_CONTEXT_WAIT_MS
+    for (;;) {
+      const hit = contexts.find((context) => context.frameId === frameId && context.isDefault)
+      if (hit !== undefined) return hit.id
+      if (Date.now() >= deadline) return undefined
+      await new Promise((resolve) => setTimeout(resolve, FRAME_CONTEXT_POLL_MS))
+    }
+  } finally {
+    dispose()
+  }
 }

@@ -10,6 +10,7 @@
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
+import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
 
 /** Persisted tab ledger (v4.2 single pool): registry metadata + active tab.
  * Views are re-materialized by the runtime on restore. */
@@ -77,14 +78,13 @@ const DEFAULTS = {
   historyWindowMs: 90 * 24 * 60 * 60 * 1000,
 } as const
 
-/** Sensitive query params stripped before persistence (mirrors runtime mask). */
-const SENSITIVE_QUERY_KEY = /(?:auth|code|credential|key|password|secret|signature|token)/iu
-
 /** Mask secret-shaped `k=v` pairs inside a URL fragment. OAuth implicit flows
  * carry `#access_token=…`/`#code=…` there, and a query-only scrub left them in
  * cleartext on disk. Non-sensitive pairs and plain route fragments are kept
- * byte-identical (the `?`/`/` prefixes are not part of the key pattern). */
-function maskSensitiveFragment(fragment: string): string {
+ * byte-identical (the `?`/`/` prefixes are not part of the key pattern).
+ * Exported so the runtime op-log mask (`runtime.ts maskBrowserSummary`) reuses
+ * this single implementation instead of keeping a second one (P1-5). */
+export function maskSensitiveFragment(fragment: string): string {
   const body = fragment.startsWith('#') ? fragment.slice(1) : fragment
   if (body === '' || !body.includes('=')) return fragment
   // 线性扫描替换(CodeQL js/polynomial-redos):原正则 /([^&#=?]+)=([^&]*)/gu
@@ -102,7 +102,7 @@ function maskSensitiveFragment(fragment: string): string {
     if (rawKey === '') return part
     let key = rawKey
     try { key = decodeURIComponent(rawKey) } catch { /* keep the raw key */ }
-    if (!SENSITIVE_QUERY_KEY.test(key)) return part
+    if (!SENSITIVE_KEY_PATTERN.test(key)) return part
     changed = true
     return `${part.slice(0, keyStart)}${rawKey}=****`
   })
@@ -118,7 +118,7 @@ export function stripSensitiveUrl(raw: string): string {
     if (url.username !== '') url.username = '****'
     if (url.password !== '') url.password = '****'
     for (const name of [...url.searchParams.keys()]) {
-      if (SENSITIVE_QUERY_KEY.test(name)) url.searchParams.set(name, '****')
+      if (SENSITIVE_KEY_PATTERN.test(name)) url.searchParams.set(name, '****')
     }
     if (url.hash !== '') url.hash = maskSensitiveFragment(url.hash)
     return url.href
