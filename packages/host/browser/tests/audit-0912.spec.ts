@@ -274,11 +274,11 @@ describe('P0-A 快照不得回传注入的凭证密码', () => {
 
 // -------------------------------------------------- FIX-03 (2026-09-12)
 
-describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
+describe('FIX-03 / R-4 注入过的凭证不得被读回模型', () => {
   // 同上：口令不含任何 secret 形状关键词 ⇒ 只有值级擦除能挡住。
   const SECRET = 'hunter2-xyz9-quartz'
 
-  it('runtime.eval 的返回值擦除本 tab 注入过的凭证值（P0-A 的等价信道）', async () => {
+  it('runtime.eval 在凭据窗口内整体被拒（P0-A 的等价信道被关闭，不是被擦除）', async () => {
     const { runtime, adapter, dir } = makeRuntime(async (id) => (id === 'corp-sso' ? { username: 'alice', password: SECRET } : null))
     opened.push({ runtime, dir })
     await runtime.open('https://login.example')
@@ -292,9 +292,16 @@ describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
     }
     expect(await runtime.fillCredentials(1, 'corp-sso')).toEqual({ username: true, password: true })
 
-    const out = await runtime.eval(1, "document.querySelector('#pw').value")
-    expect(out).not.toContain(SECRET)
-    expect(out).toBe('"****"')
+    // R-4 (2026-09-13): 值级擦除被证伪（btoa/slice/跨 realm），窗口内一律拒绝。
+    const err = await runtime.eval(1, "document.querySelector('#pw').value").catch((e: unknown) => e)
+    expect((err as { code?: string }).code).toBe('policy')
+    expect(String((err as Error).message)).toMatch(/credential window/u)
+    // 一次都没下发到页面
+    const evalCommands = adapter.lastView().transport.commands.filter((command) => command.method === 'Runtime.evaluate')
+    expect(evalCommands.some((command) => String(command.params?.expression ?? '').includes('#pw'))).toBe(false)
+    // 文本出口（值级擦除仍在的那条路）不含口令
+    const text = await runtime.text(1, undefined)
+    expect(text).not.toContain(SECRET)
   })
 
   it('口令嵌在更大文本里也只擦该段（值级精确匹配，不误伤其它文本）', async () => {
@@ -308,7 +315,7 @@ describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
       return { result: { value: `logged in as alice with ${SECRET} at 12:00` } }
     }
     await runtime.fillCredentials(1, 'corp-sso')
-    const out = await runtime.eval(1, 'document.body.innerText')
+    const out = await runtime.text(1, undefined)
     expect(out).not.toContain(SECRET)
     expect(out).toContain('logged in as alice with **** at 12:00')
   })
@@ -341,10 +348,14 @@ describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
     const exec = { agent: undefined, signal: new AbortController().signal }
 
     await tools.get('browser_fill_credentials')!.execute({ connectorId: 'corp-sso' }, exec)
-    const evalTool = tools.get('browser_eval')!
-    const value = await evalTool.execute({ expression: "document.querySelector('#pw').value" }, exec)
-    const rendered = evalTool.output.render({}, value).map((part) => part.text).join('\n')
-
+    // eval 出口：窗口内直接拒绝，错误文本里也不能带出口令。
+    const evalError = await tools.get('browser_eval')!.execute({ expression: "document.querySelector('#pw').value" }, exec).catch((e: unknown) => e)
+    expect((evalError as { code?: string }).code).toBe('policy')
+    expect(String((evalError as Error).message)).not.toContain(SECRET)
+    // 文本出口：返回值与 render 文本都不含口令（纵深）。
+    const textTool = tools.get('browser_get_text')!
+    const value = await textTool.execute({}, exec)
+    const rendered = textTool.output.render({}, value).map((part) => part.text).join('\n')
     expect(JSON.stringify(value)).not.toContain(SECRET)
     expect(rendered).not.toContain(SECRET)
     expect(rendered).toContain('****')

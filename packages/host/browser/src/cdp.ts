@@ -40,20 +40,20 @@ export interface CdpSessionOptions {
 
 /** One established CDP session over a transport. */
 export class CdpSession {
-  private readonly listeners = new Map<string, Set<(params: unknown) => void>>()
-  private readonly messageListener: (event: unknown, method: string, params: unknown) => void
+  private readonly listeners = new Map<string, Set<(params: unknown, sessionId?: string) => void>>()
+  private readonly messageListener: (event: unknown, method: string, params: unknown, sessionId?: string) => void
   private closed = false
 
   constructor(
     private readonly transport: CdpTransport,
     private readonly options: CdpSessionOptions = {},
   ) {
-    this.messageListener = (_event, method, params) => {
+    this.messageListener = (_event, method, params, sessionId) => {
       const set = this.listeners.get(method)
       if (set === undefined) return
       for (const handler of [...set]) {
         try {
-          handler(params)
+          handler(params, sessionId)
         } catch {
           // A listener must never break the CDP fan-out.
         }
@@ -88,8 +88,11 @@ export class CdpSession {
     return await withTimeout(wire, timeoutMs, method, callOptions.signal) as T
   }
 
-  /** Subscribe to one CDP method; returns a disposer. */
-  on(method: string, handler: (params: unknown) => void): () => void {
+  /** Subscribe to one CDP method; returns a disposer. `sessionId` (second
+   * argument) is the flat session the event came from, or `undefined` for the
+   * page session — required to keep per-session state apart (R-4: an OOPIF's
+   * default-world contexts only exist in that OOPIF's own session). */
+  on(method: string, handler: (params: unknown, sessionId?: string) => void): () => void {
     let set = this.listeners.get(method)
     if (set === undefined) {
       set = new Set()

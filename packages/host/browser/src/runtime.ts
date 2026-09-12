@@ -16,7 +16,8 @@ import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
-import { assertCredentialTabExpression, EVAL_EGRESS_BLOCKED_MARKER, validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
+import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
+import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
 import { browserError, BrowserError } from './errors.ts'
 import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
 import { realpathSync } from 'node:fs'
@@ -62,12 +63,29 @@ interface BrowserTab {
   disposers: Array<() => void>
   /**
    * Credential values handed to this tab by `fillCredentials` (P0-A depth
-   * layer). The snapshot probe never reads a password field's value anymore;
-   * this list is the second, value-exact line of defence: whatever source a
-   * future probe adds, a known injected secret can never reach the model. It
-   * dies with the tab (`destroyTab` drops the whole entry).
+   * layer). It is non-empty ONLY inside the credential-activity window
+   * (R-4, 2026-09-13): `fillCredentials` opens the window, a main-frame
+   * cross-document navigation closes it and empties this list, because the
+   * values are no longer in the page (see {@link BrowserRuntime.exitCredentialWindow}).
+   * The converse does not hold — a username-only injection opens the window with
+   * this list still empty (it holds passwords, whose redaction value is real
+   * while a short username is an ordinary word). Within the window
+   * `browser_eval` and `browser_screenshot` are refused outright; the text exits
+   * keep the value-exact redaction this list drives. It dies with the tab
+   * (`destroyTab` drops the whole entry).
    */
   filledSecrets: string[]
+  /**
+   * Credential-activity window (R-4, 2026-09-13): true from a successful
+   * `browser_fill_credentials` until the next main-frame cross-document
+   * navigation. While it is open, `browser_eval` and `browser_screenshot` are
+   * refused outright — the independent re-verification showed every value-level
+   * defence can be transformed around (`btoa`, `slice`, cross-realm aliases,
+   * pixels), so the *channel* is closed instead of the value. It is a separate
+   * flag from {@link filledSecrets} because a username-only injection also opens
+   * the window while contributing no redaction value.
+   */
+  credentialWindow: boolean
   /**
    * Out-of-process (cross-origin) subframes of this tab, keyed by their flat
    * CDP session id (R-4). Populated lazily by `ensureFrameTracking` and kept
@@ -436,7 +454,7 @@ export class BrowserRuntime {
       try { view.destroy() } catch { /* teardown never throws */ }
       throw cause
     }
-    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [], oopifFrames: new Map(), frameTrackingReady: false }
+    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [], credentialWindow: false, oopifFrames: new Map(), frameTrackingReady: false }
     this.tabs.set(id, tab)
     this.pool.registerTab(id, '', '')
 
@@ -482,7 +500,17 @@ export class BrowserRuntime {
         tab.loading = false
         this.updateTabState(tab)
       })
-      view.webContents.on('did-navigate', () => this.updateTabState(tab))
+      view.webContents.on('did-navigate', () => {
+        // A main-frame cross-document navigation is the end of the
+        // credential-activity window (R-4): the injected values are no longer in
+        // the document, so their read-back risk is gone with it. Belt and braces
+        // next to the CDP event below — Electron's `did-navigate` fires for the
+        // same navigation, and is a no-op when the window is already closed.
+        this.exitCredentialWindow(tab)
+        this.updateTabState(tab)
+      })
+      // `did-navigate-in-page` (same-document) deliberately does NOT close the
+      // window: the very same document (and the credentials in it) is still up.
       view.webContents.on('did-navigate-in-page', () => this.updateTabState(tab))
       view.webContents.on('page-title-updated', () => this.updateTabState(tab))
       view.webContents.on('page-favicon-updated', (_event: unknown, favicons: unknown) => {
@@ -498,6 +526,22 @@ export class BrowserRuntime {
           void wc.loadURL(target).catch(() => {})
         }
       })
+
+      // Credential-activity window, CDP half (R-4): the model-facing definition
+      // of "the tab navigated" is the protocol's, not Electron's. Only a
+      // main-frame (`parentId === undefined`) `Page.frameNavigated` closes the
+      // window; subframe navigations never do, and same-document navigations
+      // emit `Page.navigatedWithinDocument` instead, so they never do either.
+      tab.disposers.push(tab.cdp.on('Page.frameNavigated', (params) => {
+        const frame = (params as { frame?: { parentId?: string } }).frame
+        if (frame === undefined || frame.parentId !== undefined) return
+        this.exitCredentialWindow(tab)
+      }))
+      // Enable the Page domain ONCE, here (never from `fillCredentials`): if
+      // Chromium re-announced the current document on enable, doing it after an
+      // injection would immediately close a window that had just opened. Here no
+      // window can exist yet, so the notification is inert.
+      void tab.cdp.send('Page.enable').catch(() => { /* mock/older protocol: `did-navigate` still closes the window */ })
 
       const session = view.webContents.session
       tab.disposers.push(installPermissionGuard(session))
@@ -754,6 +798,35 @@ export class BrowserRuntime {
   tabState(id: number): BrowserTabState {
     const tab = this.tab(id)
     return this.projectTabState(tab)
+  }
+
+  /**
+   * The credential-activity window (R-4, 2026-09-13).
+   *
+   * A tab enters the window when `browser_fill_credentials` injects a stored
+   * credential into it, and leaves it on the next MAIN-FRAME CROSS-DOCUMENT
+   * navigation (`Page.frameNavigated` with no `parentId`, mirrored by
+   * Electron's `did-navigate`). Same-document navigations (`pushState`, `#hash`,
+   * `did-navigate-in-page`) do NOT end it: the same document, and the credential
+   * inside it, is still up.
+   *
+   * Leaving the window drops {@link BrowserTab.filledSecrets}: the justification
+   * is that the values went with the old document, which is also why the text
+   * exits stop redacting them — see the R-4 decision record. The window, not a
+   * value list, is the model-facing contract: inside it `browser_eval` and
+   * `browser_screenshot` are refused (see those methods), while every text exit
+   * keeps working under value + key redaction.
+   */
+  credentialWindowOpen(tabId: number): boolean {
+    const tab = this.tabs.get(tabId)
+    return tab !== undefined && tab.credentialWindow
+  }
+
+  /** Close the window (idempotent): called on every main-frame navigation, and
+   * by nothing else — the window must never close while its document is up. */
+  private exitCredentialWindow(tab: BrowserTab): void {
+    tab.credentialWindow = false
+    tab.filledSecrets.length = 0
   }
 
   /**
@@ -1095,6 +1168,13 @@ export class BrowserRuntime {
 
   async screenshot(tabId: number, signal?: AbortSignal): Promise<string> {
     const resolved = this.resolveTab(tabId)
+    // R-4 credential-activity window: checked BEFORE the capture `try`, so the
+    // policy refusal below is not rewritten into the generic "screenshot failed"
+    // wrapper (which would hide both the code and the reason).
+    if (this.credentialWindowOpen(resolved)) {
+      this.record('browser_screenshot', resolved, 'refused: credential window open', true)
+      throw browserError('policy', CREDENTIAL_WINDOW_SCREENSHOT_REFUSAL)
+    }
     let data: string
     try {
       data = await this.agentRun('browser_screenshot', async () => {
@@ -1154,21 +1234,26 @@ export class BrowserRuntime {
   }
 
   /**
-   * Eval guardrail (heuristic AST policy + result masking + credential-tab
-   * egress gate).
+   * Eval guardrail (heuristic AST policy + result masking + credential window).
    *
    * On an ordinary tab the validator stays a misuse guardrail, NOT a security
    * boundary: the AI may operate every part of the browser (fetch/XHR/arbitrary
    * JS included). Since FIX-03 the *returned* string additionally goes through
    * {@link redactFilledSecretsText}.
    *
-   * R-2 (2026-09-13) narrows that on the one tab class where value scrubbing is
-   * provably insufficient — a tab whose page holds credentials injected by
-   * `browser_fill_credentials`. There the expression (a) is refused statically
-   * when it names a network-write API, and (b) runs with those APIs disabled
-   * inside the page for the duration of the call, so a smuggled reference
-   * cannot reach the network either. Reads (including the `read*` helpers) keep
-   * working; the credential simply has no route out through `browser_eval`.
+   * R-4 (2026-09-13) replaces the R-2 "per-API refusal on credential tabs"
+   * layer with the credential-activity window: while the injected credential is
+   * still in the page, `browser_eval` is refused **entirely**. The R-2 layer was
+   * a heuristic (it refused the API names a model might use and shimmed the top
+   * realm for the duration of one call) and the independent re-verification
+   * walked around it — `document.querySelector('#f').contentWindow['fe'+'tch']`,
+   * `Object.getPrototypeOf(navigator)['send'+'Beacon']`, `setAttribute('src')`,
+   * and above all the read side (`btoa(pw)`, `[...pw].join('-')`, `pw.slice()`).
+   * Value-level defences cannot see a transform, so the channel — not the value
+   * — is what has to close. `assertCredentialTabExpression` /
+   * `wrapEvalExpression({denyEgress:true})` stay in `eval-policy.ts` as the
+   * documented R-2 vocabulary and as the second layer for any future eval entry
+   * point that is not behind this window; they are no longer on this path.
    */
   async eval(tabId: number, expression: string, frame?: number, signal?: AbortSignal): Promise<string> {
     if (!this.options.evalEnabled) {
@@ -1181,16 +1266,18 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const result = await this.agentRun('browser_eval', async () => {
       const tab = this.tab(resolved)
-      // R-2: a tab holding injected credentials gets the strict eval: no
-      // model-named network-write API (static refusal) and no live one inside
-      // the page (the shim installed by `wrapEvalExpression`).
-      const credentialTab = tab.filledSecrets.length > 0
-      if (credentialTab) assertCredentialTabExpression(expression)
+      // R-4 credential-activity window: while the injected credentials are still
+      // in this page, `browser_eval` is refused outright — the read-back itself
+      // is a channel (see the class doc above).
+      if (tab.credentialWindow) {
+        this.record('browser_eval', resolved, 'refused: credential window open', true)
+        throw browserError('policy', CREDENTIAL_WINDOW_EVAL_REFUSAL)
+      }
       // R-4: `frame: N` is a DOM position. Resolve it through the reconciled
       // index (same-process frames + out-of-process iframes) or refuse.
       const target = typeof frame === 'number' && frame > 0 ? await this.resolveFrame(tab, frame) : undefined
       const evalResult = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-        expression: wrapEvalExpression(expression, credentialTab ? { denyEgress: true } : {}),
+        expression: wrapEvalExpression(expression),
         returnByValue: true,
         // awaitPromise: true — a Promise result (fetch/XHR/async expression)
         // must be awaited by the renderer and serialized as its resolved value
@@ -1207,11 +1294,6 @@ export class BrowserRuntime {
         ...(target?.contextId === undefined ? {} : { contextId: target.contextId }),
       }, target?.sessionId === undefined ? {} : { sessionId: target.sessionId })
       if (evalResult.exceptionDetails !== undefined) {
-        // R-2: a blocked egress attempt is a policy outcome, not a page bug —
-        // report it as such instead of the generic "page script failed".
-        if (JSON.stringify(evalResult.exceptionDetails).includes(EVAL_EGRESS_BLOCKED_MARKER)) {
-          throw browserError('policy', `browser_eval: the expression tried to use a network API that is blocked on this tab — it received credentials through browser_fill_credentials, so an outbound request could carry them off the page. Read-only expressions and the read* helpers still work.`)
-        }
         throw browserError('eval-policy', 'browser: page script failed (exception)')
       }
       // FIX-03 (2026-09-12): `browser_eval` used to be the un-redacted sibling
@@ -1222,11 +1304,10 @@ export class BrowserRuntime {
       // `serializeEvalResult`'s keyword masking (a random password carries no
       // keyword for that mask to catch).
       //
-      // This is the third layer of the credential-tab gate (R-2): even a
-      // read-only expression that happens to echo the credential gets masked.
-      // The egress half is enforced above; the honest boundary that remains is
-      // a page which cached its own `fetch` reference before the call — that
-      // route needs the stricter "no eval at all on credential tabs"口径.
+      // Since R-4 the credential window refuses eval before this point, so
+      // `filledSecrets` is empty here on every tab that can reach it. The call
+      // is kept as the value-exact backstop for any future path that runs page
+      // JS without being behind the window.
       return redactFilledSecretsText(tab, serializeEvalResult(evalResult.result?.value))
     }, signal)
     this.record('browser_eval', resolved, `eval: ${expression.slice(0, 60)}`)
@@ -1241,7 +1322,9 @@ export class BrowserRuntime {
    * that already went through `runtime.eval` — redundant by design, so a
    * future runtime path or caller cannot hand the model a credential this tab
    * received through `fillCredentials`. Unknown/empty tabs pass the text
-   * through unchanged (this helper must never break a working call).
+   * through unchanged (this helper must never break a working call). Since R-4
+   * the list is non-empty only inside the credential window, where eval itself
+   * is refused — this is a backstop, not the enforcement point.
    *
    * Same honest boundary as `eval()`: this is not an egress firewall.
    */
@@ -1300,27 +1383,52 @@ export class BrowserRuntime {
         url: string
         parentId: string | undefined
         sessionId: string | undefined
+        /** DOM children, in DOM order (rebuilt when the OOPIF re-registers the
+         *  node from its own tree, so a frame is never listed twice). */
+        childIds: string[]
+        /** Root of an out-of-process frame: it IS addressed by its session, so
+         *  no `contextId` is resolved for it (evaluating with the session and no
+         *  context lands in that frame's own default world). */
+        sessionOnly: boolean
       }
       const registry = new Map<string, RegisteredFrame>()
-      const byParent = new Map<string | undefined, string[]>()
-      const addTree = (node: RawFrameNode, parentId: string | undefined, sessionId: string | undefined): string | undefined => {
+      const addTree = (node: RawFrameNode, parentId: string | undefined, sessionId: string | undefined, sessionOnly: boolean): string | undefined => {
         const id = node.frame?.id
         if (id === undefined) return undefined
-        for (const child of node.childFrames ?? []) addTree(child, id, sessionId)
-        registry.set(id, { frameId: id, url: node.frame?.url ?? '', parentId, sessionId })
-        const siblings = byParent.get(parentId)
-        if (siblings === undefined) byParent.set(parentId, [id])
-        else siblings.push(id)
+        const childIds: string[] = []
+        for (const child of node.childFrames ?? []) {
+          const childId = addTree(child, id, sessionId, false)
+          if (childId !== undefined) childIds.push(childId)
+        }
+        registry.set(id, { frameId: id, url: node.frame?.url ?? '', parentId, sessionId, childIds, sessionOnly })
         return id
       }
-      const rootId = addTree(tree.frameTree, undefined, undefined)
+      const rootId = addTree(tree.frameTree, undefined, undefined, false)
       if (rootId === undefined) throw browserError('not-found', 'browser: the page has no frame tree yet')
       // Out-of-process frames only need attaching when the document actually has
       // frame owners: a page without any iframe must not pay for the round trips.
       const rootOwners = await this.domFrameOwnerUrls(tab, {})
       await this.ensureFrameTracking(tab, registry.size > 1 || rootOwners.length > 0)
+      // Re-register every attached OOPIF from its OWN tree (authoritative
+      // session + parent). Doing it unconditionally — not only when the frame id
+      // is unknown — matters when a parent tree also mentions the remote frame:
+      // the OOPIF entry must still carry the OOPIF's session, otherwise its
+      // same-process children are resolved in the parent process and the whole
+      // index is refused (R-4, 2026-09-13).
       for (const [sessionId, frame] of tab.oopifFrames) {
-        if (!registry.has(frame.frameId)) addTree(frame.tree, frame.parentId, sessionId)
+        addTree(frame.tree, frame.parentId, sessionId, true)
+      }
+      // Link re-adds: an out-of-process frame is normally absent from its
+      // parent's `Page.getFrameTree` (that is WHY it needs its own session), so
+      // the re-registration above left it out of `parent.childIds` and the DOM
+      // reconciliation would count one frame owner too many and refuse the page.
+      // The OOPIF's own tree reports its `parentId`, so the edge is known — add
+      // it back, once.
+      for (const frame of registry.values()) {
+        if (frame.parentId === undefined) continue
+        const parent = registry.get(frame.parentId)
+        if (parent === undefined || parent.childIds.includes(frame.frameId)) continue
+        parent.childIds.push(frame.frameId)
       }
 
       const index: ResolvedFrame[] = []
@@ -1341,7 +1449,7 @@ export class BrowserRuntime {
             ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }),
             ...(contextId === undefined ? {} : { contextId }),
           })
-        const candidates: FrameCandidate[] = (byParent.get(frame.frameId) ?? []).map((id) => {
+        const candidates: FrameCandidate[] = frame.childIds.map((id) => {
           const child = registry.get(id)!
           return { frameId: child.frameId, url: child.url, ...(child.sessionId === undefined ? {} : { sessionId: child.sessionId }) }
         })
@@ -1350,9 +1458,13 @@ export class BrowserRuntime {
         for (const child of ordered) {
           const childNode = registry.get(child.frameId)
           if (childNode === undefined) continue
+          // A frame that is not the root of its own (out-of-process) session is
+          // addressed by the default-world context of THAT session: with only a
+          // session id and no context, CDP evaluates in the session's own main
+          // document, i.e. silently one frame up (the R-4 defect).
           let childContext: number | undefined
-          if (child.sessionId === undefined) {
-            childContext = await defaultWorldContextId(tab, child.frameId)
+          if (!childNode.sessionOnly) {
+            childContext = await defaultWorldContextId(tab, child.frameId, childNode.sessionId)
             // No silent fallback to an isolated world: that would restore the
             // P1-7 bug (page JS globals read as `undefined`) without any error.
             if (childContext === undefined) {
@@ -1848,7 +1960,14 @@ export class BrowserRuntime {
         throw browserError('not-found', 'browser: no matching login form found on this page')
       }
       // Remember what this tab was given (P0-A depth layer: runtime.snapshot
-      // redacts these values even if a future probe source reads them back).
+      // redacts these values even if a future probe source reads them back), and
+      // open the credential-activity window (R-4): from here until the next
+      // main-frame navigation, `browser_eval` and `browser_screenshot` are shut.
+      // The window opens on ANY successful fill — a username-only injection is
+      // still a credential in the DOM — while `filledSecrets` (the redaction
+      // list) only ever holds passwords: a short username is an ordinary word
+      // and masking it in page text would corrupt facts (R-3).
+      tab.credentialWindow = true
       if (value.password === true && typeof credential.password === 'string' && credential.password !== ''
         && !tab.filledSecrets.includes(credential.password)) {
         tab.filledSecrets.push(credential.password)
@@ -2347,6 +2466,19 @@ const KEY_VK: Record<string, number> = {
 
 const MASK = '****'
 
+/**
+ * Model-facing refusals of the credential-activity window (R-4, 2026-09-13).
+ *
+ * Exported so the regression tests and the real-machine probes assert on the
+ * shipped string instead of a copy of it, and so the release notes can quote
+ * what a user sees. Both name the tool, the cause and the way out.
+ */
+export const CREDENTIAL_WINDOW_EVAL_REFUSAL = 'browser: browser_eval is paused on this tab — credentials were injected here through browser_fill_credentials and are still in the page, so any script read-back could hand them to the model (a transformed value, a frame realm or an image is still a channel). Submit the form or navigate the tab to leave the credential window; browser_eval resumes automatically on the next document.'
+
+/** Screenshot half of the window refusal (the page can render a credential as
+ * text or a barcode, which no image redaction can undo). */
+export const CREDENTIAL_WINDOW_SCREENSHOT_REFUSAL = 'browser: browser_screenshot is paused on this tab — credentials were injected here through browser_fill_credentials and are still in the page, and a page can render them as text or a barcode that no image redaction can undo. Submit the form or navigate the tab to leave the credential window; screenshots resume automatically on the next document.'
+
 /** Redact credential-shaped parts of a browser op-log summary. Delegates to
  * `store.stripSensitiveText` (userinfo + sensitive query parameters + fragment
  * pairs) so the same URL never reads `****` in history and cleartext in the op
@@ -2368,17 +2500,35 @@ function maskBrowserSummary(summary: string): string {
  * prevents, because the leak (a short password echoed in prose) is ambiguous
  * by construction while the corruption is certain.
  *
- * A short secret is therefore still redacted in the two shapes that are not
- * ambiguous — the whole field, and a value-shaped occurrence (see
- * {@link maskShortSecretOccurrences}) — and left alone inside prose.
+ * A short secret is therefore still redacted in the shapes that are not
+ * ambiguous — the whole field, an assignment (`password=abc123`), a JSON pair
+ * (`"pw":"abc123"`) and a keyed wrapper (`token=[abc123]`) — and left alone in
+ * prose, INCLUDING prose that happens to bracket or quote it (`Item (abc123)
+ * shipped`, `Ref "abc123" noted`: R-4 closed that last residual by requiring a
+ * credential key name in front of a bracket/quote before it counts as a value).
  */
 export const MIN_EMBEDDED_SECRET_LENGTH = 8
 
-/** Characters that make a short occurrence look like a *value* on its left. */
-const VALUE_LEFT = new Set(['=', ':', '(', '[', '{', ',', '"', "'"])
+/** Characters that make a short occurrence look like a *value* on its left, on
+ * their own: `key=value`, `key: value`, `user:pass@host`. */
+const VALUE_LEFT_STRONG = new Set(['=', ':'])
+/** Characters that only *suggest* a value position: brackets, quotes and
+ * separators. Prose uses them too (`Item (abc123) shipped`, `Ref "abc123"
+ * noted`), so an occurrence wrapped in one of them is masked only when a
+ * credential KEY name sits in the fragment in front of it (R-4, 2026-09-13). */
+const VALUE_LEFT_WEAK = new Set(['(', '[', '{', ',', '"', "'"])
 /** Characters that make it look like a value on its right. `@` covers
- * userinfo (`user:abc123@host`) — the left-hand `:` alone is not enough. */
-const VALUE_RIGHT = new Set(['"', "'", ')', ']', '}', ',', ';', '&', '@'])
+ * userinfo (`user:abc123@host`) — the left-hand `:` alone is not enough — and
+ * the whitespace characters end a value the way a page's own markup does
+ * (`password=abc123\n…`: without them the newline made the occurrence look like
+ * prose and the credential was returned verbatim). */
+const VALUE_RIGHT = new Set(['"', "'", ')', ']', '}', ',', ';', '&', '@', '\n', '\r', '\t'])
+/** Structural characters that end the backward scan for a key name: the
+ * fragment in front of the value cannot cross them. `=`/`:` are deliberately
+ * absent — they are the separator the key name sits before. */
+const KEY_STOP = new Set([';', '{', '}', '<', '>', ',', '(', ')', '[', ']', '"', "'", '\n', '\r', '|'])
+/** How far back (characters) a wrapped occurrence looks for that key name. */
+const KEY_LOOKBACK = 48
 
 /** Characters skipped when looking for the delimiter next to an occurrence:
  * whitespace, and the backslash that JSON string escaping puts in front of a
@@ -2389,31 +2539,49 @@ function isSkippable(ch: string): boolean {
 }
 
 /** Nearest significant character index walking left from `from`, if any. */
-function nearestLeft(text: string, from: number): string | undefined {
+function nearestLeftIndex(text: string, from: number): number {
   for (let i = from; i >= 0; i--) {
+    if (!isSkippable(text[i]!)) return i
+  }
+  return -1
+}
+
+/**
+ * Nearest significant character walking right from `from`, if any.
+ *
+ * Only spaces (alignment before a delimiter) and the JSON string escape are
+ * skipped — NOT newlines: a line break is where a page's value ends, and
+ * skipping it made `password=abc123\nnext line` read as prose and hand the
+ * credential back verbatim (real-machine `credential-window-probe.mjs`, R-3).
+ */
+function nearestRight(text: string, from: number): string | undefined {
+  for (let i = from; i < text.length; i++) {
     const ch = text[i]!
-    if (!isSkippable(ch)) return ch
+    if (ch !== ' ' && ch !== '\\') return ch
   }
   return undefined
 }
 
-/** Nearest significant character walking right from `from`, if any. */
-function nearestRight(text: string, from: number): string | undefined {
-  for (let i = from; i < text.length; i++) {
-    const ch = text[i]!
-    if (!isSkippable(ch)) return ch
-  }
-  return undefined
+/** True when a credential KEY name (`password`, `token`, `sid`, …) sits in the
+ * fragment immediately in front of the delimiter at `delimiterIndex`. */
+function keyVocabularyBefore(text: string, delimiterIndex: number): boolean {
+  let start = delimiterIndex
+  const floor = Math.max(0, delimiterIndex - KEY_LOOKBACK)
+  while (start > floor && !KEY_STOP.has(text[start - 1]!)) start--
+  return start < delimiterIndex && SENSITIVE_KEY_PATTERN.test(text.slice(start, delimiterIndex))
 }
 
 /**
  * Redact the occurrences of a SHORT secret that are *value-shaped*:
- * `password=abc123`, `"pw":"abc123"`, `[abc123]`, `user:abc123@host`,
- * `?token=abc123&x=1`. Prose keeps its text (`order abc123 confirmed`), and so
- * does a longer word containing the value (`xabc123y`).
+ * `password=abc123`, `"pw":"abc123"`, `user:abc123@host`, `?token=abc123&x=1`,
+ * `token=[abc123]`. Prose keeps its text (`order abc123 confirmed`,
+ * `Item (abc123) shipped`, `Ref "abc123" noted`), and so does a longer word
+ * containing the value (`xabc123y`).
  *
- * The delimiter sets are deliberately narrow: every added delimiter widens the
- * false-positive surface back toward the bug this fixes.
+ * R-4 (2026-09-13) splits the left context in two, because the earlier single
+ * delimiter set rewrote facts: parentheses and quotes are punctuation in prose,
+ * so they only count as a value position when a credential key name precedes
+ * them. `=`/`:` stay unconditional — that shape is an assignment.
  */
 function maskShortSecretOccurrences(text: string, secret: string): string {
   const parts: string[] = []
@@ -2424,26 +2592,43 @@ function maskShortSecretOccurrences(text: string, secret: string): string {
       parts.push(text.slice(from))
       return parts.join('')
     }
-    const left = at === 0 ? undefined : nearestLeft(text, at - 1)
-    const right = at + secret.length >= text.length ? undefined : nearestRight(text, at + secret.length)
-    const valueShaped = (left === undefined || VALUE_LEFT.has(left)) && (right === undefined || VALUE_RIGHT.has(right))
-    parts.push(text.slice(from, at), valueShaped ? MASK : secret)
+    parts.push(text.slice(from, at), isValueShaped(text, at, secret.length) ? MASK : secret)
     from = at + secret.length
   }
+}
+
+/** Is the occurrence at `at` sitting where a *value* would sit? */
+function isValueShaped(text: string, at: number, length: number): boolean {
+  const right = at + length >= text.length ? undefined : nearestRight(text, at + length)
+  if (right !== undefined && !VALUE_RIGHT.has(right)) return false
+  const leftIndex = at === 0 ? -1 : nearestLeftIndex(text, at - 1)
+  if (leftIndex < 0) return true
+  const left = text[leftIndex]!
+  if (VALUE_LEFT_STRONG.has(left)) return true
+  if (!VALUE_LEFT_WEAK.has(left)) return false
+  // A quote right after a separator is a value (`"pw":"abc123"`, `pw: "abc123"`).
+  if (left === '"' || left === "'") {
+    const before = nearestLeftIndex(text, leftIndex - 1)
+    if (before >= 0 && VALUE_LEFT_STRONG.has(text[before]!)) return true
+  }
+  return keyVocabularyBefore(text, leftIndex)
 }
 
 /**
  * Value-level redaction of the secrets this tab received through
  * `fillCredentials` (P0-A depth layer, extended to `browser_eval` by FIX-03,
- * to `browser_get_text` and short-secret precision by R-1/R-3 on 2026-09-13).
+ * to `browser_get_text` and short-secret precision by R-1/R-3 on 2026-09-13,
+ * re-scoped by the R-4 credential window on the same day).
  * Exact-value matching: a page string that merely *talks* about passwords is
- * untouched, while an injected secret can never leave through a snapshot, an
- * eval result or the page text — no matter which probe/field/expression
- * produced it. A text that is a truncated head of a longer secret (the probe
- * caps text at 80 chars) is redacted as a whole.
+ * untouched, while an injected secret can never leave through a snapshot or the
+ * page text — no matter which probe/field/expression produced it. A text that is
+ * a truncated head of a longer secret (the probe caps text at 80 chars) is
+ * redacted as a whole.
  *
- * ONE implementation for all three funnels (`runtime.snapshot`,
- * `runtime.eval`, `runtime.text`), so they cannot drift apart again.
+ * ONE implementation for every text funnel (`runtime.snapshot`,
+ * `runtime.text`, `runtime.eval`'s result); since R-4 the list is non-empty only
+ * inside the credential window, where `browser_eval` is refused outright, so on
+ * the eval path this is a backstop rather than the enforcement point.
  */
 function redactFilledSecretsText(tab: BrowserTab, text: string): string {
   if (tab.filledSecrets.length === 0) return text
@@ -2513,22 +2698,48 @@ interface RawFrameNode {
  * of a frame can only be learned from `Runtime.executionContextCreated`
  * (`auxData.frameId` + `auxData.isDefault`), which `Runtime.enable` re-emits for
  * every existing context.
+ *
+ * `sessionId` (R-4, 2026-09-13): the flat CDP session that owns the frame. A
+ * frame inside an out-of-process iframe has its execution contexts in THAT
+ * session, so both the `Runtime.enable` that reports them and the events that
+ * carry them are session-scoped. Without this the nested frame's context was
+ * searched in the page session, found nowhere, and the whole index was refused.
  */
-async function defaultWorldContextId(tab: BrowserTab, frameId: string): Promise<number | undefined> {
-  const contexts: Array<{ id: number; frameId: string | undefined; isDefault: boolean }> = []
-  const dispose = tab.cdp.on('Runtime.executionContextCreated', (params) => {
+async function defaultWorldContextId(tab: BrowserTab, frameId: string, sessionId?: string): Promise<number | undefined> {
+  const contexts: Array<{ id: number; frameId: string | undefined; isDefault: boolean; session: string | undefined }> = []
+  const dispose = tab.cdp.on('Runtime.executionContextCreated', (params, eventSession) => {
     const context = (params as {
       context?: { id?: number; auxData?: { frameId?: string; isDefault?: boolean } }
     }).context
     if (context?.id === undefined) return
-    contexts.push({ id: context.id, frameId: context.auxData?.frameId, isDefault: context.auxData?.isDefault === true })
+    contexts.push({
+      id: context.id,
+      frameId: context.auxData?.frameId,
+      isDefault: context.auxData?.isDefault === true,
+      session: eventSession,
+    })
   })
+  const call = sessionId === undefined ? {} : { sessionId }
+  /**
+   * A frame id is announced by the session that can reach the frame, so a
+   * same-session context is the answer. An event that arrives with NO session
+   * attribution (a transport that does not report flat-session ids) is accepted
+   * only as a fallback — never preferred over an attributed one, which is how a
+   * context belonging to another process would otherwise be adopted.
+   */
+  const pick = (): number | undefined => {
+    const matches = (context: { frameId: string | undefined; isDefault: boolean }): boolean => context.frameId === frameId && context.isDefault
+    if (sessionId === undefined) return contexts.find(matches)?.id
+    const exact = contexts.find((context) => matches(context) && context.session === sessionId)
+    if (exact !== undefined) return exact.id
+    return contexts.find((context) => matches(context) && context.session === undefined)?.id
+  }
   const look = async (): Promise<number | undefined> => {
-    await tab.cdp.send('Runtime.enable')
+    await tab.cdp.send('Runtime.enable', {}, call)
     const deadline = Date.now() + FRAME_CONTEXT_WAIT_MS
     for (;;) {
-      const hit = contexts.find((context) => context.frameId === frameId && context.isDefault)
-      if (hit !== undefined) return hit.id
+      const hit = pick()
+      if (hit !== undefined) return hit
       if (Date.now() >= deadline) return undefined
       await new Promise((resolve) => setTimeout(resolve, FRAME_CONTEXT_POLL_MS))
     }
@@ -2545,7 +2756,7 @@ async function defaultWorldContextId(tab: BrowserTab, frameId: string): Promise<
     // this cycle the R-4 resolver would refuse every same-process subframe of a
     // page that also has an OOPIF.
     contexts.length = 0
-    try { await tab.cdp.send('Runtime.disable') } catch { /* not enabled */ }
+    try { await tab.cdp.send('Runtime.disable', {}, call) } catch { /* not enabled */ }
     return await look()
   } finally {
     dispose()

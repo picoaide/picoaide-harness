@@ -9,7 +9,7 @@
  *       is checked for cleartext credentials on a URL that genuinely carries
  *       them — the same string the pre-fix envelope shipped, read from the
  *       tab's own live state.
- *  R-2  a real `fetch` driven through `browser_eval` is shown to reach the
+ *  R-2/R-4  a real `fetch` driven through `browser_eval` is shown to reach the
  *       server BEFORE credentials are injected, then to be refused (statically
  *       and by the page-side shim, including through a page-authored relay
  *       function) after `browser_fill_credentials`, with the API restored
@@ -141,8 +141,13 @@ runProbe(async () => {
     rec.record('R3.red.bare-includes-would-corrupt-prose',
       oldRuleText.includes(`order **** confirmed`) && !oldRuleText.includes(`order ${SHORT} confirmed`),
       { oldRuleText: oldRuleText.slice(0, 200) })
-    const shortReadBack = await h.call('browser_eval', { tab: tabId, expression: "document.querySelector('#pw').value" })
-    rec.record('R3.short-secret.read-back-masked', !shortReadBack.result.includes(SHORT), { result: shortReadBack.result })
+    // R-4 口径：stored 回显（`stored: abc123`）在文本出口按值擦除；eval 读回在
+    // 凭据窗口内被整体拒绝（不再靠"擦返回值"）。
+    rec.record('R3.short-secret.stored-echo-masked', !text.text.includes(`stored: ${SHORT}`), { text: text.text.slice(0, 200) })
+    const shortReadBack = await h.call('browser_eval', { tab: tabId, expression: "document.querySelector('#pw').value" }).then(() => null, (error) => error)
+    rec.record('R3.short-secret.read-back-refused-in-window',
+      shortReadBack !== null && shortReadBack.code === 'policy' && /credential window/u.test(shortReadBack.message),
+      { error: { code: shortReadBack?.code, message: shortReadBack?.message } })
 
     await h.call('browser_fill_credentials', { tab: tabId, connectorId: 'long' })
     const longText = await h.call('browser_get_text', { tab: tabId })
@@ -158,13 +163,14 @@ runProbe(async () => {
     await sleep(600)
     rec.record('R2.red.uncCredentialed-tab-can-exfiltrate-via-eval', exfil.length === 1 && exfil[0].includes(encodeURIComponent(LONG)), { exfil: [...exfil], returned: relayBefore.result })
 
-    // GREEN: the same expression on the credential tab is refused and nothing
-    // reaches the network.
+    // GREEN (R-4 口径): the whole eval channel is refused on the credential tab —
+    // not just the network APIs — because the read-back itself is a channel
+    // (`btoa`, `slice`, a frame realm, a screenshot). Nothing reaches the network.
     exfil.length = 0
     const relayAfter = await h.call('browser_eval', { tab: tabId, expression: "__relay(document.querySelector('#pw').value)" }).then(() => null, (error) => error)
     await sleep(600)
-    rec.record('R2.green.credential-tab.blocked-by-page-shim',
-      relayAfter !== null && relayAfter.code === 'policy' && exfil.length === 0,
+    rec.record('R2.green.credential-tab.eval-refused-wholesale',
+      relayAfter !== null && relayAfter.code === 'policy' && /credential window/u.test(relayAfter.message) && exfil.length === 0,
       { error: { code: relayAfter?.code, message: relayAfter?.message }, exfil: [...exfil] })
 
     // RED premise part 2, on the live credential tab: the page really holds the
@@ -179,22 +185,20 @@ runProbe(async () => {
       { rawRead, exfil: [...exfil], note: 'bypasses the runtime gate on purpose: the page itself has no defence' })
     exfil.length = 0
 
-    const namedFetch = await h.call('browser_eval', { tab: tabId, expression: "fetch('/exfil?named=1')" }).then(() => null, (error) => error)
+    // Every eval shape is refused while the credential window is open, and not a
+    // single Runtime.evaluate reaches the page.
+    const before = rawTab.cdp === undefined ? 0 : 0
+    void before
+    for (const [name, expression] of [['named-fetch', "fetch('/exfil?named=1')"], ['xhr-name', 'typeof XMLHttpRequest'], ['read-only', "document.querySelectorAll('input').length"], ['transform', "btoa(document.querySelector('#pw').value)"]]) {
+      const refused = await h.call('browser_eval', { tab: tabId, expression }).then(() => null, (error) => error)
+      rec.record(`R2.green.credential-tab.${name}-refused`,
+        refused !== null && refused.code === 'policy' && /credential window/u.test(refused.message),
+        { error: { code: refused?.code, message: refused?.message } })
+    }
     await sleep(400)
-    rec.record('R2.green.credential-tab.named-api-refused-statically',
-      namedFetch !== null && namedFetch.code === 'policy' && exfil.length === 0,
-      { error: { code: namedFetch?.code, message: namedFetch?.message }, exfil: [...exfil] })
+    rec.record('R2.green.credential-tab.nothing-reached-the-network', exfil.length === 0, { exfil: [...exfil] })
 
-    const xhr = await h.call('browser_eval', { tab: tabId, expression: "typeof XMLHttpRequest" }).then(() => null, (error) => error)
-    rec.record('R2.green.credential-tab.xhr-named-anywhere-refused',
-      xhr !== null && xhr.code === 'policy' && /XMLHttpRequest|xmlhttprequest/u.test(xhr.message), { error: xhr?.message })
-    const beacon = await h.call('browser_eval', { tab: tabId, expression: "typeof navigator.sendBeacon" }).then(() => null, (error) => error)
-    rec.record('R2.green.credential-tab.sendBeacon-refused', beacon !== null && beacon.code === 'policy', { error: beacon?.message })
-
-    // Read-only access still works on the credential tab.
-    const stillReads = await h.call('browser_eval', { tab: tabId, expression: "document.querySelectorAll('input').length" })
-    rec.record('R2.green.credential-tab.reads-still-work', stillReads.result === '2', { result: stillReads.result })
-
+    // The page's own APIs are untouched (the refusals are all on the tool side).
     // The shim must restore the page's own APIs after the call.
     const restored = (await rawTab.cdp.send('Runtime.evaluate', { expression: 'typeof fetch', returnByValue: true })).result?.value
     const restoredXhr = (await rawTab.cdp.send('Runtime.evaluate', { expression: 'typeof XMLHttpRequest.prototype.open', returnByValue: true })).result?.value
