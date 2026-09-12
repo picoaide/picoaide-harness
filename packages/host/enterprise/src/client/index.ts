@@ -62,9 +62,16 @@ const BRAND_CSS = `
 /* Sidebar foot actions stack vertically above Settings (upstream container is a row). */
 [class$="_footerActions"] { flex-direction: column; align-items: stretch; }
 
-/* Hero headline + preview badge text (upstream locale not overridable). */
-[class$="_headlineText"] { font-size: 0; }
-[class$="_headlineText"]::after { content: var(--pico-hero-headline, "PicoAide Harness"); font-size: 26px; line-height: 32px; font-weight: 500; }
+/* Hero headline + preview badge text (upstream locale not overridable).
+ *
+ * 0.1.5-rc.2 把首屏标题的 CSS 类从 \`headlineText\` 改名为 \`titleGroup\`，并在其中
+ * 包了两层：\`<span class="_titleGroup_…"><span>{headline}</span><span class="_previewBadge_…">\`。
+ * 只改类名不够 —— 必须命中的是**第一个内层 span**，否则 \`font-size: 0\` 会把
+ * 「企业版」徽标一起吃掉（2026-09-12 打包版真机复现：规则空匹配时首屏显示上游
+ * 文案「探索未至之境」，而 \`--pico-hero-headline\` 明明有值）。
+ * 兼容旧类名：两个选择器并存，任一版本升级都不会静默失效。 */
+[class$="_headlineText"], [class$="_titleGroup"] > span:first-child { font-size: 0; }
+[class$="_headlineText"]::after, [class$="_titleGroup"] > span:first-child::after { content: var(--pico-hero-headline, "PicoAide Harness"); font-size: 26px; line-height: 32px; font-weight: 500; }
 [class$="_previewBadge"] { font-size: 0; }
 [class$="_previewBadge"]::after { content: var(--pico-hero-tagline, "企业版"); font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
 
