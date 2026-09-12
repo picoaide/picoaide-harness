@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { createRequire } from 'node:module'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import * as tar from 'tar'
+import { parse as parseYaml } from 'yaml'
 import {
   installPresetArchive,
   listInstalledPresets,
@@ -15,8 +18,28 @@ import {
 const COMPOSITION = `- id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: hi
+    prefix: hi
 `
+
+/**
+ * Load the rc2 `@deepseek-ai/dsh-persona` Config schema.
+ *
+ * Installed presets are mounted by the desktop profile, so the schema that
+ * judges a composition is the persona package installed for that profile's
+ * resolution root. It is reached through the `dsh-plugin-desktop` devDependency
+ * that is already declared here rather than through a dependency of this
+ * package: nothing in this package imports the row at runtime, and a new
+ * dependency edge would need a lockfile update.
+ * @returns the Config validator (throws when a row omits `prefix`).
+ */
+async function loadPersonaConfig(): Promise<(input: Record<string, unknown>) => { prefix: string }> {
+  const desktopManifest = createRequire(import.meta.url).resolve('dsh-plugin-desktop/package.json')
+  const require = createRequire(desktopManifest)
+  const persona = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-persona')).href) as {
+    Config: (input: Record<string, unknown>) => { prefix: string }
+  }
+  return persona.Config
+}
 
 /** Pack a directory into a gzipped tar buffer (relative paths, portable). */
 async function packDir(dir: string): Promise<Buffer> {
@@ -175,6 +198,25 @@ describe('packPreset', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('preset composition contract', () => {
+  it('writes the persona keys the rc2 Config parses (prefix, not the rc1 text)', async () => {
+    const Config = await loadPersonaConfig()
+    const rows = parseYaml(COMPOSITION) as Array<{ id?: string, name?: string, config?: Record<string, unknown> }>
+    const persona = rows.find(row => row.name === '@deepseek-ai/dsh-persona')
+    if (persona?.config === undefined) {
+      throw new Error('the fixture composition has no @deepseek-ai/dsh-persona row with a config')
+    }
+
+    // rc2 split the row's single `text` key into `prefix` (required) + `suffix`.
+    // Nothing validates a row's config at pack or install time, so a composition
+    // still carrying `text` installs cleanly and only fails when a session
+    // mounts the preset; parsing it against the row's own schema is the earliest
+    // gate this contract has.
+    expect(Config(persona.config).prefix).toBe('hi')
+    expect(() => Config({ text: 'hi' })).toThrow()
   })
 })
 
