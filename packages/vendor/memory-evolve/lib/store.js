@@ -32,11 +32,38 @@ const st = (key, params) => translate(STORE_DICT, key, params, getLocale())
 const stt = (key, params) => translate(STORE_TAIL_DICT, key, params, getLocale())
 import { spawnSync } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { extractEntryId, genEntryId, legacyIdFor, stripEntryId } from './sync/entryid.js'
+import { resolveSafeRepoTarget } from './sync/filesets.js'
 
 /** Entry delimiter, byte-compatible with Hermes MEMORY.md / USER.md. */
 export const ENTRY_DELIMITER = '\n§\n'
+
+/**
+ * 记忆落点安全断言（FIX-22 同源实现，2026-09-13）。
+ *
+ * store / todo / archive 的写回都是 `tmp + rename`：当**最终组件**是符号链接时
+ * rename 会替换链接本身（不穿透）；但当**祖先目录**是符号链接时（共享记忆分支
+ * 里一个 120000 条目即可让 checkout 把 `daily/` 或 `logs/` 变成指向仓库外的
+ * 链接），`dir/<file>.tmp.<pid>` 与 `dir/<file>` 都会被 OS 解析到仓库外，写盘
+ * 直接穿透——与 runSync 三路合并写回同一个机制、同一套断言。
+ *
+ * 行为收紧要登记：仓库内任何符号链接一律拒收（严格性换安全）。
+ *
+ * @param {string} rootDir - 记忆仓库根目录。
+ * @param {string} abs - 目标文件绝对路径。
+ * @returns {string | null} 安全落点；null = 拒收（符号链接 / 越出根目录）。
+ */
+export function safeStoreTarget(rootDir, abs) {
+  const rel = relative(resolve(rootDir), resolve(abs))
+  if (rel === '' || rel.startsWith('..')) return null
+  return resolveSafeRepoTarget(rootDir, rel.split(sep).join('/'))
+}
+
+/** 落点被拒时的统一异常（与 store.js 既有的 dsh-memory-evolve: 内部异常同款）。 */
+export function symlinkRefusedError(abs) {
+  return new Error(`dsh-memory-evolve: memory write target ${abs} sits under a symlink inside the memory repo (or escapes it) — write refused (symlinks inside the repo are always rejected; remove the symlink and retry)`)
+}
 
 /** A lock file older than this is considered abandoned (stale). */
 const STALE_LOCK_MS = 10_000
@@ -838,12 +865,18 @@ export class MemoryStore {
     // "删一条 = 删全文"的不可恢复路径也不会重新打开。
     const entries = parseEntries(text)
     if (suspectedMergedEntries(entries)) {
-      const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
+      const path = this.pathOf(target, agent)
+      const safe = safeStoreTarget(this.dir, path)
+      if (safe === null) return { kind: 'read-failed' }
+      const backup = `${safe}.bak.${Date.now()}`
       writeFileSync(backup, text)
       return { kind: 'drift', backup }
     }
     if (!isCanonical(text)) {
-      const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
+      const path = this.pathOf(target, agent)
+      const safe = safeStoreTarget(this.dir, path)
+      if (safe === null) return { kind: 'read-failed' }
+      const backup = `${safe}.bak.${Date.now()}`
       writeFileSync(backup, text)
       return { kind: 'drift', backup }
     }
@@ -853,9 +886,13 @@ export class MemoryStore {
   /** Atomically write entries to one target's file. */
   write(target, entries, agent) {
     const path = this.pathOf(target, agent)
-    const tmp = `${path}.tmp.${process.pid}`
+    // FIX-22 同源断言（2026-09-13）：祖先目录是符号链接时 tmp+rename 会整条
+    // 穿透到仓库外（`daily -> <仓库外>` 已实测写穿）——一律拒收，fail closed
+    const safe = safeStoreTarget(this.dir, path)
+    if (safe === null) throw symlinkRefusedError(path)
+    const tmp = `${safe}.tmp.${process.pid}`
     writeFileSync(tmp, serializeEntries(entries))
-    renameSync(tmp, path)
+    renameSync(tmp, safe)
   }
 
   /**

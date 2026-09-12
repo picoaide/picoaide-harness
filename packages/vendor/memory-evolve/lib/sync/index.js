@@ -27,10 +27,35 @@ import { translate, getLocale, getActiveLocale, SYNC_DICT } from '../i18n.js'
 
 /** Translate through SYNC_DICT in the active host locale. */
 const sxt = (key, params) => translate(SYNC_DICT, key, params, getLocale())
+
+/**
+ * 安全写 PROVENANCE（FIX-22 同源断言，2026-09-13）。
+ *
+ * PROVENANCE 是**被跟踪**的固定名文件：共享记忆分支里一个 120000 条目就能让
+ * 本机 checkout 把它实体化成符号链接，随后的 writeFileSync 会顺着链接改写
+ * **仓库外**的文件（本函数在 sync/index.js 里是唯一写 PROVENANCE 的入口）。
+ * 落点断言与 runSync 三路合并写回、resolveConflict 冲突写回共用
+ * filesets.js 的同一份实现（逐层 lstat 拒符号链接 + realpath 包含性）。
+ *
+ * @param {string} dir - 记忆仓库目录。
+ * @param {object} meta - PROVENANCE 对象。
+ * @returns {boolean} false = 拒收（调用方必须返回错误结果，不得静默成功）。
+ */
+function writeProvenanceSafe(dir, meta) {
+  const target = resolveSafeRepoTarget(dir, 'PROVENANCE')
+  if (target === null) return false
+  writeFileSync(target, `${JSON.stringify(meta)}\n`)
+  return true
+}
+
+/** 拒收 PROVENANCE 落点时的统一错误结果。 */
+function symlinkRefusedResult() {
+  return { kind: 'error', text: sxt('sync.symlinkRefused', { path: 'PROVENANCE' }) }
+}
 import { locateLegacyDir, normalizeRemoteUrl, resolveMainRemote, resolveProjectId, sanitizeRemoteUrl } from './identity.js'
 import { countConflicts, CONFLICTS_FILE, parseConflicts, resolveConflict } from './worker.js'
 import { deviceBConnect, ensureMemoryRepo, MODE_A_BRANCH, resolveFilesetFiles, sharedBranchFor } from './repo.js'
-import { GLOBAL_FILESET_KEYS, conflictsFileFor, globalBranchFor } from './filesets.js'
+import { GLOBAL_FILESET_KEYS, conflictsFileFor, globalBranchFor, resolveSafeRepoTarget } from './filesets.js'
 
 /** 全局轨 fileset ↔ 用户可见轨名映射（memory/user/daily/todo）。 */
 const GLOBAL_TRACK_NAMES = { 'memory-global': 'memory', 'user-global': 'user', 'daily-global': 'daily', 'todo-global': 'todo' }
@@ -366,7 +391,7 @@ export function installMemorySync(ctx, deps) {
             // 重新启用 = 三态 A/B（旧项目开关"开"）→ 同时复位轨位
             // （projectOptIn：三态取代旧轨开关，避免遗留 false 卡死同步）
             projectOptIn(info.provenance)
-            writeFileSync(join(info.dir, 'PROVENANCE'), `${JSON.stringify(info.provenance)}\n`)
+            if (!writeProvenanceSafe(info.dir, info.provenance)) return symlinkRefusedResult()
           }
           return { kind: 'success', text: sxt('sync.projectOn') }
         }
@@ -374,7 +399,7 @@ export function installMemorySync(ctx, deps) {
         const info = projectSyncInfo(config, cwd)
         if (info.provenance !== null) {
           info.provenance.enabled = false
-          writeFileSync(join(info.dir, 'PROVENANCE'), `${JSON.stringify(info.provenance)}\n`)
+          if (!writeProvenanceSafe(info.dir, info.provenance)) return symlinkRefusedResult()
         }
         return { kind: 'success', text: sxt('sync.projectOff') }
       },
@@ -383,7 +408,7 @@ export function installMemorySync(ctx, deps) {
         const info = projectSyncInfo(config, cwd)
         if (info.provenance === null) return { kind: 'error', text: sxt('sync.notInitialized') }
         const meta = { ...info.provenance, tracks: { ...(info.provenance.tracks ?? {}), project: on === true } }
-        writeFileSync(join(info.dir, 'PROVENANCE'), `${JSON.stringify(meta)}\n`)
+        if (!writeProvenanceSafe(info.dir, meta)) return symlinkRefusedResult()
         return { kind: 'success', text: on ? '项目记忆轨已纳入同步' : '项目记忆轨已退出同步（该轨保留本地，不再对账）' }
       },
       /** 停用同步（项目级，非全局开关；记忆全保留）。 */
@@ -541,7 +566,9 @@ function renderGlobalTracks(tracks) {
  * @returns {{ok: boolean, message: string}}
  */
 function updateGlobalTracks(memoryDir, mutate) {
-  const provPath = join(memoryDir, 'PROVENANCE')
+  // FIX-22（2026-09-13）：落点断言（tmp+rename 的 target 同样不能是符号链接）
+  const provPath = resolveSafeRepoTarget(memoryDir, 'PROVENANCE')
+  if (provPath === null) return { ok: false, message: sxt('sync.symlinkRefused', { path: 'PROVENANCE' }) }
   let result = { ok: false, message: '' }
   withLock(memoryDir, () => {
     const gMeta = readProvenance(memoryDir)
@@ -567,7 +594,9 @@ function updateGlobalTracks(memoryDir, mutate) {
  * @returns {{ok: boolean, message: string}}
  */
 function updateGlobalEnabled(memoryDir, enabled) {
-  const provPath = join(memoryDir, 'PROVENANCE')
+  // FIX-22（2026-09-13）：落点断言（同 updateGlobalTracks）
+  const provPath = resolveSafeRepoTarget(memoryDir, 'PROVENANCE')
+  if (provPath === null) return { ok: false, message: sxt('sync.symlinkRefused', { path: 'PROVENANCE' }) }
   let result = { ok: false, message: '' }
   withLock(memoryDir, () => {
     const gMeta = readProvenance(memoryDir)
@@ -659,7 +688,7 @@ export async function handleCommand(op, rest, cwd, { config, getRuntime, applyRu
           // projectOptIn 注释：三态取代旧轨开关，避免遗留 false 卡死同步）
           if (branchChanged || needOptIn) {
             projectOptIn(meta)
-            writeFileSync(join(dir, 'PROVENANCE'), `${JSON.stringify(meta)}\n`)
+            if (!writeProvenanceSafe(dir, meta)) return symlinkRefusedResult()
           }
           applyRuntimePatch({ syncEnabled: true })
           const gNote = await initGlobalRepo(config.memoryDir, url)
@@ -681,7 +710,7 @@ export async function handleCommand(op, rest, cwd, { config, getRuntime, applyRu
         const meta = readProvenance(dir)
         if (meta !== null && (meta.enabled === false || meta.tracks?.project !== true)) {
           projectOptIn(meta)
-          writeFileSync(join(dir, 'PROVENANCE'), `${JSON.stringify(meta)}\n`)
+          if (!writeProvenanceSafe(dir, meta)) return symlinkRefusedResult()
         }
         // adopt 路径不经过 ensureMemoryRepo 的 legacy 迁移段（Kimi P1-7）：
         // 检测到旧记忆目录时显式警告（数据未丢但可能"失联"）
@@ -701,7 +730,7 @@ export async function handleCommand(op, rest, cwd, { config, getRuntime, applyRu
       const meta = readProvenance(dir)
       if (meta !== null && (meta.enabled === false || meta.tracks?.project !== true)) {
         projectOptIn(meta)
-        writeFileSync(join(dir, 'PROVENANCE'), `${JSON.stringify(meta)}\n`)
+        if (!writeProvenanceSafe(dir, meta)) return symlinkRefusedResult()
       }
       const pushHint = boot.remoteBranchExists === false
         ? '远端尚无该分支——点「同步并推送」完成首次推送（推送需你同意）'
@@ -725,7 +754,7 @@ export async function handleCommand(op, rest, cwd, { config, getRuntime, applyRu
         // 意图，此处**自愈复位**并继续，不再拒绝（否则报「重新勾选同步
         // 范围」但新 UI 无该入口，拉取/推送永久死锁）
         meta.tracks.project = true
-        writeFileSync(join(dir, 'PROVENANCE'), `${JSON.stringify(meta)}\n`)
+        if (!writeProvenanceSafe(dir, meta)) return symlinkRefusedResult()
       }
       const push = rest.includes('--push')
       if (push) {
@@ -809,7 +838,7 @@ export async function handleCommand(op, rest, cwd, { config, getRuntime, applyRu
       if (meta === null) return { kind: 'error', text: sxt('sync.nothingToDisable') }
       meta.enabled = false
       meta.tracks = { ...(meta.tracks ?? {}), project: false }
-      writeFileSync(join(dir, 'PROVENANCE'), `${JSON.stringify(meta)}\n`)
+      if (!writeProvenanceSafe(dir, meta)) return symlinkRefusedResult()
       return { kind: 'success', text: sxt('sync.disabledLong') }
     }
 

@@ -33,7 +33,7 @@ import { ENTRY_DELIMITER } from '../store.js'
 import { ensureEntryIds } from './entryid.js'
 import { locateLegacyDir, normalizeRemoteUrl, sanitizeRemoteUrl } from './identity.js'
 import { TODO_HEADER } from '../todo.js'
-import { filesetSpec, isMemoryFile, isTodoPath, GLOBAL_FILESET_KEYS, globalBranchFor } from './filesets.js'
+import { filesetSpec, hasSymlinkComponent, isMemoryFile, isTodoPath, GLOBAL_FILESET_KEYS, globalBranchFor, resolveSafeRepoTarget } from './filesets.js'
 
 /** 网络命令超时（30s，GIT_TERMINAL_PROMPT=0 防凭证卡死）。 */
 const NETWORK_TIMEOUT_MS = 30_000
@@ -405,7 +405,13 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
 
   // ── 3. .gitignore（先于 add；审查 P1-12——deny-all + 白名单放行：
   //    TODOS.md 等外部模块文件永不入库，git status 也不显示）──
-  const gitignorePath = join(dir, '.gitignore')
+  // FIX-22（2026-09-13）：固定名元数据同样是**被跟踪**的名字——共享分支里
+  // 一个 120000 条目就能让 checkout 把它们实体化成符号链接，随后 writeFileSync
+  // 会顺着链接改写仓库外的文件。与 runSync/resolveConflict 同源断言。
+  const gitignorePath = resolveSafeRepoTarget(dir, '.gitignore')
+  if (gitignorePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitignore' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+  }
   const gitignoreContent = [
     '.memory.lock', '*.tmp.*', '',
     '# 同步白名单（deny-all）：只有下列文件进入记忆仓库', '*',
@@ -421,7 +427,10 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
   //   LF 全转 CRLF → 记忆文件分隔符被破坏、格式预检拦截同步）。`* -text`
   //   让任何设备 checkout 都不做换行转换；仓库级 config 双保险（覆盖
   //   用户全局/系统设置）。.gitattributes 经 STAGE_META 入库随仓库传播。──
-  const gitattributesPath = join(dir, '.gitattributes')
+  const gitattributesPath = resolveSafeRepoTarget(dir, '.gitattributes')
+  if (gitattributesPath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+  }
   if (!existsSync(gitattributesPath) || readFileSync(gitattributesPath, 'utf8') !== GITATTRIBUTES_CONTENT) {
     writeFileSync(gitattributesPath, GITATTRIBUTES_CONTENT)
   }
@@ -440,7 +449,10 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
   // ── 5. PROVENANCE：一行 JSON（合并前校验 projectId 用，施工图 §9）──
   // 已存在时解析校验（审查 P1-10）：projectId 不一致 = 目录被误用/接错，
   // 绝不继续（防 A 项目记忆并进 B 项目）。
-  const provenancePath = join(dir, 'PROVENANCE')
+  const provenancePath = resolveSafeRepoTarget(dir, 'PROVENANCE')
+  if (provenancePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: 'PROVENANCE' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+  }
   const existing = existsSync(provenancePath) ? readFileSync(provenancePath, 'utf8').trim() : ''
   if (existing !== '') {
     let meta = null
@@ -676,7 +688,11 @@ export async function ensureGlobalRepo({ dir, url }) {
 
   // ── 3. .gitignore（deny-all + 全局记忆文件白名单；projects/ 等内部目录
   //    不入库——项目记忆在各自的 projects/<id>/.git 仓库里）──
-  const gitignorePath = join(dir, '.gitignore')
+  // FIX-22（2026-09-13）：固定名元数据落点断言（同 ensureMemoryRepo）
+  const gitignorePath = resolveSafeRepoTarget(dir, '.gitignore')
+  if (gitignorePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitignore' }), committed: false, backfilled: report.backfilled }
+  }
   const gitignoreContent = [
     '.memory.lock', '*.tmp.*', '',
     '# 全局记忆同步白名单（deny-all）：只放行全局记忆文件', '*',
@@ -691,7 +707,10 @@ export async function ensureGlobalRepo({ dir, url }) {
   // ── 3b. .gitattributes + core.autocrlf false（Windows 换行事故修复，
   //   与 ensureMemoryRepo 同款——全局记忆仓库同样不能允许 checkout 把
   //   LF 转 CRLF，否则四个全局轨的合并/格式预检全部被 \r 破坏）。──
-  const gitattributesPath = join(dir, '.gitattributes')
+  const gitattributesPath = resolveSafeRepoTarget(dir, '.gitattributes')
+  if (gitattributesPath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: report.backfilled }
+  }
   if (!existsSync(gitattributesPath) || readFileSync(gitattributesPath, 'utf8') !== GITATTRIBUTES_CONTENT) {
     writeFileSync(gitattributesPath, GITATTRIBUTES_CONTENT)
   }
@@ -702,7 +721,10 @@ export async function ensureGlobalRepo({ dir, url }) {
   // **凭证安全（Codex 二轮 P0-1）**：PROVENANCE 是被跟踪文件、会进入远端
   // git 历史——原始 URL（可能含 token）绝不能写进去。displayName/url 一律
   // 存 sanitizeRemoteUrl 后的无凭证 URL；projectId 用归一化键（本就无凭证）。
-  const provenancePath = join(dir, 'PROVENANCE')
+  const provenancePath = resolveSafeRepoTarget(dir, 'PROVENANCE')
+  if (provenancePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: 'PROVENANCE' }), committed: false, backfilled: report.backfilled }
+  }
   const safeUrl = sanitizeRemoteUrl(url)
   if (!existsSync(provenancePath)) {
     const key = normalizeRemoteUrl(url) ?? safeUrl
@@ -766,8 +788,8 @@ export async function ensureGlobalRepo({ dir, url }) {
       const set = await runGit(dir, ['remote', 'set-url', 'origin', sanitizeRemoteUrl(url)])
       if (!set.ok) return { ok: false, message: srt('syncr.globalRemoteSetFail', { detail: set.stderr.trim().split('\n')[0] ?? '' }), committed: false, backfilled: report.backfilled }
       // 更新 PROVENANCE 身份（新 URL 指纹；轨开关保留）
-      const provPath = join(dir, 'PROVENANCE')
-      if (existsSync(provPath)) {
+      const provPath = resolveSafeRepoTarget(dir, 'PROVENANCE')
+      if (provPath !== null && existsSync(provPath)) {
         try {
           const meta = JSON.parse(readFileSync(provPath, 'utf8').trim())
           const safeUrl = sanitizeRemoteUrl(url)
@@ -830,6 +852,15 @@ function backfillEntryIds(dir, fileset = 'project') {
   const files = []
   const { memory } = resolveFilesetFiles(dir, fileset)
   for (const rel of memory) {
+    // FIX-22（2026-09-13，第三处写回出口）：本函数在 checkout 之后运行
+    // （ensureMemoryRepo / ensureGlobalRepo），枚举结果里的符号链接路径
+    // （共享分支 120000 条目 checkout 的结果，如 `logs -> <仓库外>`）会被
+    // statSync 跟随并整文件重写——同样写穿仓库外。与 runSync/resolveConflict
+    // 同源断言：逐层 lstat 拒符号链接 + realpath 包含性，拒收即跳过。
+    if (hasSymlinkComponent(dir, rel)) {
+      skipped += 1
+      continue
+    }
     const p = join(dir, rel)
     if (existsSync(p) && statSync(p).isFile()) files.push(p)
   }

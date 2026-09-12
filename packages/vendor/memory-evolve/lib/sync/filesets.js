@@ -19,8 +19,8 @@
  * 逻辑，merge.js 等模块可安全 import）。
  */
 
-import { lstatSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 
 /**
  * 项目级文件集规格（memory=记忆格式文件、todo=TODO 格式文件、
@@ -105,15 +105,146 @@ const LOGS_FILE_RE = /^logs\/[^/\\]+\.md$/
 export function isMemoryFile(path, fileset = 'project', rootDir) {
   if (!matchesFileset(path, fileset)) return false
   if (typeof rootDir !== 'string' || rootDir === '') return true
-  // 逐层检查已存在的路径组件（leaf + 各级祖先）：任何一层是符号链接即拒收。
-  // 不存在的组件（ENOENT）停止下钻——落点真实路径断言在 worker 侧还有一层。
+  return !hasSymlinkComponent(rootDir, path)
+}
+
+/* ---------------- FIX-22 落点安全断言（唯一实现，多处写回出口共用） ----------------
+ *
+ * **行为收紧要登记（2026-09-13）**：仓库内任何符号链接一律拒收 —— 不区分它
+ * 指向仓库内还是仓库外（严格性换安全）。理由：本插件自己的写回只有
+ * writeFileSync/renameSync，**从不创建符号链接**；仓库里出现的符号链接只可能
+ * 来自共享分支里被跟踪的 120000 条目（clone/checkout 会实体化成真符号链接）
+ * 或用户在磁盘上自行摆放。放过"指向仓库内"的链接等于给攻击者留一节阶梯
+ * （先把链接指向仓库内合法目录骗过检查，再在 TOCTOU 窗口内把它换成仓库外
+ * 目标），收益为零而风险为正，故一律拒收。
+ *
+ * 这一组函数是**唯一实现**：冲突侧车出口（resolveConflict）与三路合并写回
+ * 出口（runSync）以及固定名元数据出口（PROVENANCE/.gitignore/.gitattributes/
+ * CONFLICTS.md）必须调用同一份，不得各写一份。 */
+
+/** p 是否在 root 之内（含 root 自身）——纯字符串层包含性。 */
+export function isInsideRoot(root, p) {
+  return p === root || p.startsWith(root + sep)
+}
+
+/** 从 p 起向上找第一个存在的路径（不存在则返回 null）。 */
+export function nearestExistingAncestor(p) {
+  let current = p
+  for (;;) {
+    if (existsSync(current)) return current
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
+/**
+ * 逐层 lstat：path 的任意一层（leaf + 各级祖先）是符号链接即返回 true。
+ * 不做字符串包含性判断（调用方负责）——只看磁盘上真实存在的组件类型，
+ * lstat 对**悬空符号链接**同样有效（existsSync 对悬空链接为假，会漏）。
+ *
+ * 不存在的组件（ENOENT/ENOTDIR）→ 停止下钻并视为"未发现符号链接"（更深的
+ * 组件此刻不可能存在）；其它错误（EACCES 等）无法判定 → fail closed 返回
+ * true（拒收），把不可判定的落点交给上层的 realpath 包含性断言。
+ *
+ * @param {string} rootDir - 仓库根目录（相对路径的基准）。
+ * @param {string} path - 仓库相对路径（'/' 分隔）。
+ * @returns {boolean}
+ */
+export function hasSymlinkComponent(rootDir, path) {
   let current = rootDir
-  for (const part of path.split('/')) {
+  for (const part of String(path).split('/')) {
+    if (part === '') continue
     current = join(current, part)
     try {
-      if (lstatSync(current).isSymbolicLink()) return false
+      if (lstatSync(current).isSymbolicLink()) return true
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return false
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * 固定名/白名单落点的**安全解析**（FIX-22 第一层）：符号链接拒收 + 字符串
+ * 包含性 + realpath 包含性（仓库根 / 最近已存在祖先 / 目标文件本身）。
+ *
+ * 字符串 `resolve()` 挡不住 `logs -> /outside`：`resolve(root,'logs/x.md')`
+ * 以 root 开头，写盘却穿透到仓库外。
+ *
+ * @param {string} rootDir - 仓库目录。
+ * @param {string} relPath - 仓库相对路径（调用方负责模式/白名单校验）。
+ * @returns {string | null} 绝对落点；null = 拒收（fail closed）。
+ */
+export function resolveSafeRepoTarget(rootDir, relPath) {
+  if (typeof rootDir !== 'string' || rootDir === '') return null
+  if (typeof relPath !== 'string' || relPath === '') return null
+  if (hasSymlinkComponent(rootDir, relPath)) return null
+  let realRoot
+  try {
+    realRoot = realpathSync(resolve(rootDir))
+  } catch {
+    return null // 仓库不存在/不可读：fail closed
+  }
+  const abs = resolve(realRoot, relPath)
+  if (abs === realRoot || !isInsideRoot(realRoot, abs)) return null
+  if (!assertSafeRepoTarget(rootDir, abs)) return null
+  return abs
+}
+
+/**
+ * 记忆文件集落点（FIX-22 第一层 + 白名单）：模式白名单 + 符号链接拒收 +
+ * realpath 包含性。**三路合并写回与冲突侧车写回共用本函数**。
+ *
+ * @param {string} rootDir - 同步仓库目录。
+ * @param {string} relPath - 仓库相对路径。
+ * @param {string} [fileset='project'] - 文件集。
+ * @returns {string | null} 绝对落点；null = 白名单/包含性/符号链接校验失败。
+ */
+export function resolveFilesetTarget(rootDir, relPath, fileset = 'project') {
+  if (!isMemoryFile(relPath, fileset, rootDir)) return null
+  return resolveSafeRepoTarget(rootDir, relPath)
+}
+
+/**
+ * 落盘前的 **TOCTOU 复检**（FIX-22 第二层，与第一层同源）：校验与
+ * writeFileSync 之间存在窗口（另一进程/同步任务可以在 `logs` 位置放一个
+ * 符号链接，把目录换成指向仓库外的链接）。建目录之后、写盘之前再解析一次
+ * 真实路径，仍必须在仓库内、且路径上不得新出现符号链接。
+ *
+ * @param {string} rootDir - 仓库目录。
+ * @param {string} abs - 已经过第一层校验的绝对落点。
+ * @returns {boolean} true = 仍可安全写入。
+ */
+export function assertSafeRepoTarget(rootDir, abs) {
+  let realRoot
+  try {
+    realRoot = realpathSync(resolve(rootDir))
+  } catch {
+    return false
+  }
+  if (typeof abs !== 'string' || abs === '' || abs === realRoot) return false
+  if (!isInsideRoot(realRoot, abs)) return false
+  // 相对 realRoot 反推仓库相对路径，复检路径链上是否出现（新放置的）符号链接
+  // ——包括指向仓库**内**的链接（行为收紧要登记：一律拒收）。
+  const rel = relative(realRoot, abs)
+  if (rel === '' || rel.startsWith('..')) return false
+  if (hasSymlinkComponent(rootDir, rel.split(sep).join('/'))) return false
+  // 落点父目录（或最近的已存在祖先）真实路径：符号链接在这里现形。
+  const anchor = nearestExistingAncestor(dirname(abs))
+  if (anchor === null) return false
+  try {
+    if (!isInsideRoot(realRoot, realpathSync(anchor))) return false
+  } catch {
+    return false
+  }
+  // 目标文件本身已存在：自己就是符号链接（指向仓库外）时同样拒收。
+  if (existsSync(abs)) {
+    try {
+      if (!isInsideRoot(realRoot, realpathSync(abs))) return false
     } catch {
-      break
+      return false
     }
   }
   return true
