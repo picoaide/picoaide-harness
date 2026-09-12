@@ -351,3 +351,70 @@ describe('Gateway 网关配置页', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  // 审计 2026-09-13(三轮残留③):上一轮只加了「解析失败 ⇒ 拒绝保存」,于是管理员
+  // 被锁死:编辑区是空的,又没法把服务端那串坏 JSON 变成合法的空值。现在必须有一条
+  // **显式**清空路径(二次确认),且写 `peak_windows: ""` 必须是用户确认的结果。
+  describe('存量高峰时段不可解析时的显式清空(三轮残留③)', () => {
+    function unparsableStore() {
+      const puts: Array<Record<string, unknown>> = []
+      mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+        if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+          puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+          return { ok: true }
+        }
+        if (path === '/api/server/admin/gateway') {
+          return { default_model: 'deepseek-chat', rate_limit: '60', peak_windows: '{"start":"09:00"', retention_months: '6', default_thinking_level: 'max', server_base_url: '' }
+        }
+        return baseImpl(path, init)
+      })
+      return puts
+    }
+
+    it('确认前保存被拒;确认清空后保存成功且写入 peak_windows=""', async () => {
+      const puts = unparsableStore()
+      render(<Gateway />)
+      await screen.findByText('全局设置')
+      expect(screen.getByText(/高峰时段配置无法解析/)).toBeInTheDocument()
+
+      // ① 未确认清空:保存被拒,绝不 PUT(改前这就是死路:页面里没有清空入口)。
+      expect(screen.queryByRole('button', { name: '清空高峰时段配置' })).not.toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      expect(await screen.findByText(/已拒绝保存/)).toBeInTheDocument()
+      expect(puts.length).toBe(0)
+
+      // ② 点清空 ⇒ 出现二次确认对话框(不是直接生效)。
+      fireEvent.click(screen.getByRole('button', { name: '清空高峰时段配置' }))
+      const dialog = within(await screen.findByRole('dialog'))
+      expect(dialog.getByText(/确认清空高峰时段配置\?/)).toBeInTheDocument()
+      expect(puts.length).toBe(0) // 打开对话框本身不写任何东西
+
+      // ③ 取消 ⇒ 仍然拒绝保存(证明空值必须来自明确确认)。
+      fireEvent.click(dialog.getByRole('button', { name: '取消' }))
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      expect(puts.length).toBe(0)
+
+      // ④ 再次打开并确认 ⇒ 页面常驻标出「已确认清空」,保存成功。
+      fireEvent.click(screen.getByRole('button', { name: '清空高峰时段配置' }))
+      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '确认清空' }))
+      expect(await screen.findByText(/已确认清空高峰时段/)).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      await screen.findByText('已保存')
+      expect(puts.length).toBe(1)
+      expect(puts[0]!.peak_windows).toBe('')
+    })
+
+    it('确认清空后又重建时段 ⇒ 提交的是新时段(不是空值)', async () => {
+      const puts = unparsableStore()
+      render(<Gateway />)
+      await screen.findByText('全局设置')
+      fireEvent.click(screen.getByRole('button', { name: '清空高峰时段配置' }))
+      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '确认清空' }))
+      // 重建 = 放弃清空意图(确认标记作废),但列表非空本来就允许保存。
+      fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      await screen.findByText('已保存')
+      expect(puts.length).toBe(1)
+      expect(String(puts[0]!.peak_windows)).toContain('"start":"09:00"')
+    })
+  })
