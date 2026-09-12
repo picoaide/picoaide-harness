@@ -19,7 +19,7 @@
  * 逻辑，merge.js 等模块可安全 import）。
  */
 
-import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /**
@@ -286,6 +286,198 @@ export function isSymlinkFreeRepoTarget(rootDir, abs) {
   const rel = relative(root, resolve(abs))
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false
   return !hasSymlinkComponent(root, rel.split(sep).join('/'))
+}
+
+/* ---------------- FIX-26 落点写入原语（唯一实现，2026-09-13 第六轮） ----------------
+ *
+ * 第五轮对抗复核（`temp/r5-verify-server/memory/FINDINGS.md` §4）在断言之外又找到
+ * 两处 check-then-use 窗口，都出在**落点被断言、但真正被打开/写入的不是那个
+ * 路径**：
+ *   4a `tmp = <目标>.tmp.<pid>` 从未被断言 —— 攻击者按可见 pid 预置同名真符号
+ *      链接，`writeFileSync(tmp)` 跟随链接写穿仓库外，`renameSync` 再把链接搬到
+ *      目标文件名上（实测 `append` 返回 `ok:true`）。
+ *   4b 锁 `openSync(lockPath,'wx')` 之后按**路径**写锁内容 —— 打开与写入之间
+ *      祖先目录被换成符号链接时，锁 JSON 落在仓库外。
+ *
+ * 本组原语把"断言"与"打开/写入"绑在一起，任何写回都必须经过：
+ *   1) 打开前对**真实要写的那个路径**（临时文件路径 / 锁路径）做同一份断言；
+ *   2) `openSync(path,'wx')`（O_EXCL）——预置的同名文件/符号链接直接 EEXIST，
+ *      绝不跟随；
+ *   3) **按 fd 写入**，关闭前不再按路径解析；
+ *   4) 打开后校验 fd 与路径仍是同一个 inode（打开→写入窗口的祖先替换现形），
+ *      逃逸时回收我们刚创建的那个文件；
+ *   5) rename 前后各复检一次落点（写侧 realpath 包含性）。
+ */
+
+/**
+ * 只删"确实是我们刚创建的那个 inode"的文件。
+ *
+ * 打开后校验失败（祖先被换成符号链接）时用它回收逃逸落点：先 lstat 比对
+ * dev/ino，只有路径**当前仍解析到我们创建的那个文件**才 unlink —— 避免在
+ * 祖先被换走/换成别处的竞态里误删同名他人文件。
+ *
+ * 注意：攻击者把祖先换**回**真目录后，这条路径就找不到我们那个（落在仓库外
+ * 的）文件了——那是 `openExclusiveSafe` 里 `/proc/self/fd` 那条真实路径回收
+ * 负责的形态（实测 315,191 次 append 里仍有仓库外 `.memory.lock` 残留）。
+ *
+ * @param {string} abs - 打开用的绝对路径。
+ * @param {import('node:fs').Stats} createdStat - 打开时的 fstatSync 结果。
+ */
+export function removeCreatedFile(abs, createdStat) {
+  if (!createdStat) return
+  try {
+    const st = lstatSync(abs)
+    if (st.dev === createdStat.dev && st.ino === createdStat.ino) unlinkSync(abs)
+  } catch { /* 路径已不可解析/已被替换：不删 */ }
+}
+
+/**
+ * 从**已打开的 fd** 反查真实路径（唯一实现）。
+ *
+ * `/proc/self/fd/N`（Linux）/`/dev/fd/N`（macOS）是"这个 fd 到底开在哪"的
+ * 权威答案：祖先目录被换成符号链接（又被换回来）之后，按路径 lstat 已经找不到
+ * 落点，但 fd 仍指向那个 inode，realpath 读出来就是仓库外的真实位置——逃逸
+ * 回收只有靠它才不依赖"翻转后的路径仍指得回去"。
+ *
+ * @param {number} fd - 已打开的文件描述符。
+ * @returns {string | null} 真实绝对路径；平台不支持/文件已删除时 null。
+ */
+export function fdRealPath(fd) {
+  for (const base of ['/proc/self/fd/', '/dev/fd/']) {
+    try {
+      return realpathSync(`${base}${fd}`)
+    } catch { /* 平台无此入口或 fd 已失效 → 试下一个 */ }
+  }
+  return null
+}
+
+/**
+ * `O_EXCL` 打开落点 + 打开后校验（唯一实现）。
+ *
+ * @param {string} rootDir - 仓库根（断言基准）。
+ * @param {string} abs - 要创建的绝对路径。
+ * @param {'write'|'lock'} [mode='write'] - 前置断言：`write` 用写侧
+ *   `assertSafeRepoTarget`（realpath 包含性，要求仓库根已存在）；`lock` 用
+ *   `isSymlinkFreeRepoTarget`（容忍仓库根/目录尚未创建——首次写入前取锁）。
+ * @returns {{ok: true, fd: number, stat: import('node:fs').Stats}
+ *   | {ok: false, reason: 'exists' | 'unsafe', stat?: import('node:fs').Stats}}
+ *   `exists` = 落点已被占用（锁竞争，或攻击者/崩溃残留预置的同名条目）；
+ *   `unsafe` = 符号链接/越界（含"打开后祖先被换走"——逃逸落点已回收）。
+ */
+export function openExclusiveSafe(rootDir, abs, mode = 'write') {
+  const safe = mode === 'lock'
+    ? isSymlinkFreeRepoTarget(rootDir, abs)
+    : assertSafeRepoTarget(rootDir, abs)
+  if (!safe) return { ok: false, reason: 'unsafe' }
+  let fd
+  try {
+    fd = openSync(abs, 'wx') // O_CREAT|O_EXCL：预置的同名链接/文件 → EEXIST，绝不跟随
+  } catch (error) {
+    if (error.code === 'EEXIST') return { ok: false, reason: 'exists' }
+    throw error
+  }
+  let opened
+  try {
+    opened = fstatSync(fd)
+  } catch {
+    try { closeSync(fd) } catch { /* 已关闭 */ }
+    return { ok: false, reason: 'unsafe' }
+  }
+  // 打开后校验（4b 的核心）：先按 fd 反查真实路径（祖先被换走又换回来时，
+  // 只有它能定位逃逸落点），再按路径复核 inode 一致 + 路径链无符号链接。
+  let realRoot = null
+  try {
+    realRoot = realpathSync(resolve(rootDir))
+  } catch { realRoot = null }
+  const realOpen = fdRealPath(fd)
+  if (realRoot !== null && realOpen !== null && !isInsideRoot(realRoot, realOpen)) {
+    // 创建落到了仓库外：按 fd 真实路径回收（不依赖路径此刻是否还指得回去）
+    try { closeSync(fd) } catch { /* 已关闭 */ }
+    try { unlinkSync(realOpen) } catch { /* 已被移走/删除 */ }
+    return { ok: false, reason: 'unsafe', stat: opened }
+  }
+  let same = false
+  try {
+    const viaPath = statSync(abs)
+    same = viaPath.dev === opened.dev && viaPath.ino === opened.ino
+  } catch { same = false }
+  // 路径复核与**前置断言同一份实现**（不能混用：写侧落点是 realpath 基准的
+  // `resolveSafeRepoTarget` 结果，而"记忆目录本身是符号链接"是合法布局——
+  // `isSymlinkFreeRepoTarget` 按未解析的 root 做相对化，会把这种落点误判越界；
+  // 锁侧落点则是未解析的 join(dir,…)，只能用容忍 root 尚不存在的读侧断言）。
+  const pathSafe = mode === 'lock'
+    ? isSymlinkFreeRepoTarget(rootDir, abs)
+    : assertSafeRepoTarget(rootDir, abs)
+  if (!same || !pathSafe) {
+    try { closeSync(fd) } catch { /* 已关闭 */ }
+    removeCreatedFile(abs, opened) // 逃逸回收：仓库外不得留下我们创建的文件
+    return { ok: false, reason: 'unsafe', stat: opened }
+  }
+  return { ok: true, fd, stat: opened }
+}
+
+/**
+ * 原子写回（tmp + rename）的**唯一实现**：临时落点也断言 + O_EXCL 按 fd 写入
+ * + rename 前后各复检一次。
+ *
+ * 替换原先各处手写的 `writeFileSync(`${safe}.tmp.${pid}`) + renameSync(...)`：
+ * 那段代码只断言了**最终落点**，临时落点从未校验（第五轮 4a：预置同名真符号
+ * 链接即写穿仓库外并返回成功）。
+ *
+ * @param {string} rootDir - 仓库根（断言基准）。
+ * @param {string} targetAbs - 已过第一层断言的最终落点（realpath 基准）。
+ * @param {string | Buffer} data - 文件正文。
+ * @returns {{ok: true, path: string} | {ok: false, refusedPath: string}}
+ *   `ok:false` = 临时落点/最终落点被拒（符号链接、越界、预置同名条目）。
+ */
+export function writeFileAtomicSafe(rootDir, targetAbs, data) {
+  const tmp = `${targetAbs}.tmp.${process.pid}`
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const opened = openExclusiveSafe(rootDir, tmp, 'write')
+    if (opened.ok === true) {
+      try {
+        writeFileSync(opened.fd, data) // 按 fd 写入：关闭前不再按路径解析
+      } catch (error) {
+        try { closeSync(opened.fd) } catch { /* 已关闭 */ }
+        removeCreatedFile(tmp, opened.stat)
+        throw error
+      }
+      closeSync(opened.fd)
+      // rename 前复检：临时落点与最终落点都必须仍然安全（含"临时落点自己也
+      // 成了符号链接"的形态）
+      if (!assertSafeRepoTarget(rootDir, tmp) || !assertSafeRepoTarget(rootDir, targetAbs)) {
+        removeCreatedFile(tmp, opened.stat)
+        return { ok: false, refusedPath: targetAbs }
+      }
+      renameSync(tmp, targetAbs)
+      // rename 后复检：落点真实路径必须仍在仓库内——祖先目录在窗口内被换掉时
+      // fail-loud（绝不把写穿仓库外的结果报成 ok），并回收刚落地的那个文件
+      // （只删 inode 与我们对得上的那个：祖先被换走/换成别处时不动手）。
+      if (!assertSafeRepoTarget(rootDir, targetAbs)) {
+        removeCreatedFile(targetAbs, opened.stat)
+        return { ok: false, refusedPath: targetAbs }
+      }
+      return { ok: true, path: targetAbs }
+    }
+    if (opened.reason !== 'exists') return { ok: false, refusedPath: tmp }
+    // 预置同名临时文件：
+    //   - 符号链接/目录 = 攻击形态（或不可判定）→ 拒收，且不删改仓库内链接；
+    //   - 普通文件 = 崩溃残留 → 断言后清理，重试一次（不把正常写入修死）。
+    let st
+    try {
+      st = lstatSync(tmp)
+    } catch {
+      continue // 竞态里刚好消失：重试
+    }
+    if (!st.isFile()) return { ok: false, refusedPath: tmp }
+    if (!assertSafeRepoTarget(rootDir, tmp)) return { ok: false, refusedPath: tmp }
+    try {
+      unlinkSync(tmp)
+    } catch {
+      return { ok: false, refusedPath: tmp }
+    }
+  }
+  return { ok: false, refusedPath: tmp }
 }
 
 /**

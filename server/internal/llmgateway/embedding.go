@@ -225,14 +225,17 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 	// (或报 0/负值)按**请求输入字节**估算 prompt tokens —— 否则向量照常 200
 	// 交付、账上一行零费用(零落账)。口径与流式/非流式的字节估算是同一份
 	// estimateTokensFromBytes(4 字节/token),确定性且一次交付只落一行。
+	// estimated 标记(0063)必须如实写上:这一行的 token 是估算的,不是上游口径。
+	estimated := false
 	if tokens <= 0 {
 		if est := estimateEmbeddingPromptTokens(inputs); est > 0 {
 			log.Printf("gateway: embedding upstream reported no usage, byte-estimated prompt tokens: model=%s inputs=%d est=%d",
 				safeModelForLog(req.Model), len(inputs), est)
 			tokens = est
+			estimated = true
 		}
 	}
-	if _, err := serverstore.RecordUsageKind(a.DB, user.ID, req.Model, tokens, 0, "embedding"); err != nil {
+	if _, err := serverstore.RecordUsageKindEstimated(a.DB, user.ID, req.Model, tokens, 0, billingKindEmbedding, estimated); err != nil {
 		// FIX-05 + G5b:embedding 走同一条结算事务(RecordUsageKind →
 		// settleUsageCostTx)。**任何**结算失败都必须在这里拒绝 —— 事务已回滚,
 		// 继续 c.JSON 交付向量就是向量白拿、账上一分不扣。

@@ -146,7 +146,10 @@ var r4URLCorpus = []r4URLCase{
 	{"https://010.1.1.1/x", true, false, "WHATWG 八进制 IPv4 归一(010→8),Go 侧一律拒绝伪装 IP"},
 	{"https://0x7f.1./x", true, false, "WHATWG 十六进制归一 + 根点归一(→127.0.0.1),Go 侧拒绝伪装 IP"},
 	{"https://example.com123/x", true, true, ""},
-	{"https://1.2.3.4:0/x", true, true, ""},
+	// 2026-09-13 R5(审计 r5 §3 端口层):Go 侧新增 1–65535 端口范围校验(修
+	// `:99999` 被放行),端口 0 因此被拒 —— 客户端 `new URL()` 接受 `:0`(WHATWG
+	// 对 special scheme 把端口 0 归 null),属**服务端更严**的已登记差异。
+	{"https://1.2.3.4:0/x", true, false, "端口范围校验(1–65535):客户端接受 :0(WHATWG 归 null),服务端拒绝无法建连的端口 0"},
 	{"http://[::1]/x", true, true, ""},
 	{"https://0.0.0.0:443/x", false, false, ""},
 	// scheme 大小写:WHATWG 与 Go url.Parse 都归一成小写,两侧一致。

@@ -21,13 +21,13 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isCanonical, isProjectSyncEnabled, parseEntries, serializeEntries, readProvenance } from '../store.js'
 import { genEntryId, extractEntryId, extractTodoId, TODO_ID_RE } from './entryid.js'
 import { mergeEntries } from './merge.js'
 import { asyncSyncLock, asyncWithLock, extractTodoHeader, isMemoryFile, parseTodoEntries, readTreeFiles, resolveFilesetFiles, runGit, serializeTodoEntries, stagePaths } from './repo.js'
-import { assertSafeRepoTarget, conflictsFileFor, isTodoPath, resolveFilesetTarget, resolveSafeRepoTarget } from './filesets.js'
+import { assertSafeRepoTarget, conflictsFileFor, isTodoPath, resolveFilesetTarget, resolveSafeRepoTarget, writeFileAtomicSafe } from './filesets.js'
 import { translate, getLocale, SYNC_WORKER_DICT } from '../i18n.js'
 
 /** Translate through SYNC_WORKER_DICT in the active host locale. */
@@ -239,12 +239,14 @@ async function runSyncInner({ dir, remoteBranch, push = false, fileset = 'projec
       mkdirSync(dirname(abs), { recursive: true })
       // TOCTOU 复检（与 resolveConflict 同源断言）
       if (!assertSafeRepoTarget(dir, abs)) return { fatal: swt('syncw.symlinkRefused', { path }) }
-      const tmp = `${abs}.tmp.${process.pid}`
       const text = isTodoPath(path)
         ? serializeTodoEntries(entries, (existsSync(abs) ? extractTodoHeader(readFileSync(abs, 'utf8')) : undefined) ?? theirs.headers?.[path])
         : serializeEntries(entries)
-      writeFileSync(tmp, text)
-      renameSync(tmp, abs)
+      // FIX-26（第六轮）：临时落点同样断言 + O_EXCL 按 fd 写 + rename 前后复检
+      // （原实现只断言 `abs`，`<abs>.tmp.<pid>` 被预置真符号链接时 writeFileSync
+      // 会跟随链接写穿仓库外）
+      const written = writeFileAtomicSafe(dir, abs, text)
+      if (written.ok !== true) return { fatal: swt('syncw.symlinkRefused', { path }) }
     }
     // 冲突侧车（Codex 二轮 P0-2 修复）：按 fileset 独立侧车——多轨共享
     // 同一 .git 时，无冲突轨的同步绝不能删掉其他轨的冲突记录（工作树
@@ -253,7 +255,9 @@ async function runSyncInner({ dir, remoteBranch, push = false, fileset = 'projec
     // 校验）——共享分支可以把 CONFLICTS.md 变成符号链接，writeFileSync 会
     // 顺着它写到仓库外。
     if (result.conflicts.length > 0) {
-      writeFileSync(conflictsPath, renderConflicts(result.conflicts))
+      // FIX-26：固定名侧车也走原子写原语（临时落点断言 + O_EXCL 按 fd 写）
+      const wroteConflicts = writeFileAtomicSafe(dir, conflictsPath, renderConflicts(result.conflicts))
+      if (wroteConflicts.ok !== true) return { fatal: swt('syncw.symlinkRefused', { path: conflictsName }) }
     } else if (existsSync(conflictsPath)) {
       // rmSync 只删链接本身、不跟随（最终组件的 unlink 语义）——不会写穿；
       // 但走到这里说明该名不是符号链接（上面已断言），行为与历史一致
@@ -753,12 +757,12 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
         ...existingEntries,
         ...toWrite.map((cand) => (choice === 'both' && cand === target.theirs ? stripIdToNew(cand, isTodo) : cand)),
       ]
-      const tmp = `${abs}.tmp.${process.pid}`
       const text = isTodo
         ? serializeTodoEntries(entries, existsSync(abs) ? extractTodoHeader(readFileSync(abs, 'utf8')) : undefined)
         : serializeEntries(entries)
-      writeFileSync(tmp, text)
-      renameSync(tmp, abs)
+      // FIX-26：同上（临时落点断言 + O_EXCL 按 fd 写 + rename 前后复检）
+      const written = writeFileAtomicSafe(dir, abs, text)
+      if (written.ok !== true) return { ok: false, message: swt('syncw.symlinkRefused', { path: target.file }) }
     }
 
     // ── 2. 提交（临时 index 构建本轨树 + commit-tree；index 永不
@@ -783,9 +787,8 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
       rmSync(path, { force: true })
     } else {
       // 重建文件：编号重新从 1 起（稳定标识=新顺序）
-      const tmpConflicts = `${path}.tmp.${process.pid}`
-      writeFileSync(tmpConflicts, renderConflicts(remaining.map(({ entryKey, file, base, ours, theirs, reason }) => ({ entryKey, file, base, ours, theirs, reason }))))
-      renameSync(tmpConflicts, path)
+      const wrote = writeFileAtomicSafe(dir, path, renderConflicts(remaining.map(({ entryKey, file, base, ours, theirs, reason }) => ({ entryKey, file, base, ours, theirs, reason }))))
+      if (wrote.ok !== true) return { ok: false, message: swt('syncw.symlinkRefused', { path: conflictsName }) }
     }
 
     // ── 4. 共享 index 重置到新提交树（单轨项目仓库 git status 恢复干净）──

@@ -17,10 +17,10 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { resolveProjectDir } from './sync/identity.js'
-import { stripEntrySummary } from './store.js'
+import { isSymlinkFreeRepoTarget, isInsideRoot, stripEntrySummary, symlinkRefusedMessage } from './store.js'
 import { translate, getLocale } from './i18n.js'
 
 /**
@@ -48,15 +48,30 @@ const TITLE_DICT = {
 
 /**
  * Build the memory-files listing for one session's tab (read-only).
+ *
+ * 读侧断言（FIX-26，2026-09-13 第六轮）：记忆仓库内的每个落点（主轨
+ * `MEMORY.md / USER.md / KEY.md`、归档轨 `*-archive.md`、`daily/`）在读取前
+ * 都过一遍与 `ArchiveStore.entriesOf` **同源**的符号链接断言（同一份
+ * `isSymlinkFreeRepoTarget` + 同一条 i18n 文案）。本函数是
+ * `GET /memory-evolve/api/memory-files` 的唯一数据源，而这条路由此前是唯一
+ * 没接断言的归档读出口：实测共享分支的 120000 条目 checkout 成真符号链接后，
+ * 路由以 200 把仓库外文件内容原样下发给 GUI（第五轮复核 P1）。被拒时
+ * **fail-loud 抛错**（调用方 = HTTP 出口，静默空列表会掩盖攻击），由 api.js
+ * 统一转成明确错误响应，绝不 200 带仓库外内容。
+ *
+ * 仓库外落点（`AGENTS.md` 在 DSH_HOME，不属于记忆仓库）不做该断言。
+ *
  * @param {object} config - resolved plugin config.
  * @param {import('./store.js').MemoryStore} store - the memory store.
  * @param {string | undefined} cwd - the session's working directory; project
  *   memory is keyed by it (absent cwd → project entry marked unavailable).
  * @returns {Array<object>} the file rows, in display order:
  *   { key, title, path, exists, content, truncated, available }.
+ * @throws {Error} 记忆仓库内的落点是符号链接/越界时（文案 = sync.symlinkRefused）。
  */
 export function buildMemoryFiles(config, store, cwd) {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+  const memoryRoot = resolve(config.memoryDir)
   const projectAgent = cwd ? { session: { header: { cwd } } } : undefined
   const projectDir = cwd ? resolveProjectDir(config.memoryDir, cwd) : undefined
   const rows = [
@@ -96,6 +111,12 @@ export function buildMemoryFiles(config, store, cwd) {
     }
     if (row.path === undefined) return out
     out.path = row.path
+    // 记忆仓库内的落点先过断言（FIX-26）：符号链接/越界 → fail-loud，绝不读。
+    // 仓库外落点（AGENTS.md）不受本断言约束，照旧裸读。
+    if (isInsideRoot(memoryRoot, resolve(row.path)) && resolve(row.path) !== memoryRoot
+      && !isSymlinkFreeRepoTarget(memoryRoot, row.path)) {
+      throw new Error(symlinkRefusedMessage(memoryRoot, row.path))
+    }
     if (!existsSync(row.path)) return out
     let text
     try {

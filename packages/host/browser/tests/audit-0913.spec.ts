@@ -346,10 +346,11 @@ describe('R-2 注入凭据的 tab：eval 网络写面收敛', () => {
     // 子帧导航（frameNavigated 带 parentId）不算主帧导航。
     view.transport.emitNotification('Page.frameNavigated', { frame: { id: 'SUB', parentId: 'MAIN', url: 'https://ad.example' } })
     await expect(h.runtime.eval(1, '1 + 1')).rejects.toMatchObject({ code: 'policy' })
-    // 主帧跨文档导航（CDP 事件）：窗口关闭、已注入值集合清空、eval 恢复。
+    // 主帧跨文档导航（CDP 事件）：窗口关闭、eval 恢复；值集合按 R-5 口径**保留**
+    // （生命周期=tab），文本出口继续走值级擦除。
     view.transport.emitNotification('Page.frameNavigated', { frame: { id: 'MAIN', url: 'https://app.example/after' } })
     await expect(h.runtime.eval(1, '1 + 1')).resolves.toBe('2')
-    expect(h.runtime.tab(1).filledSecrets).toEqual([])
+    expect(h.runtime.tab(1).filledSecrets).toEqual([LONG_SECRET])
     expect(h.runtime.credentialWindowOpen(1)).toBe(false)
     // 截图恢复（不再被凭据窗口以 policy 拒绝）
     const shot = await h.runtime.screenshot(1).catch((e: unknown) => e)

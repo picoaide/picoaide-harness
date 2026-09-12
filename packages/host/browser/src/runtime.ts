@@ -47,6 +47,10 @@ const SCREENSHOT_PRIMARY_BUDGET_MS = 8_000
 const SCREENSHOT_FALLBACK_RESERVE_MS = 5_000
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
+/** Cap on remembered redacted download display paths (R-5): the store keeps the
+ * truthful handle, this map only holds the model-facing variant, and the
+ * download list itself is pruned by `downloadLimit`. */
+const DOWNLOAD_DISPLAY_PATH_LIMIT = 200
 
 interface BrowserTab {
   readonly id: number
@@ -62,17 +66,28 @@ interface BrowserTab {
   canGoForward: boolean
   disposers: Array<() => void>
   /**
-   * Credential values handed to this tab by `fillCredentials` (P0-A depth
-   * layer). It is non-empty ONLY inside the credential-activity window
-   * (R-4, 2026-09-13): `fillCredentials` opens the window, a main-frame
-   * cross-document navigation closes it and empties this list, because the
-   * values are no longer in the page (see {@link BrowserRuntime.exitCredentialWindow}).
+   * Credential values handed to this tab by `fillCredentials`. It is the value
+   * set every **text** exit of this tab is scrubbed with, and its lifetime is
+   * deliberately the TAB's lifetime (R-5, 2026-09-13): nothing clears it before
+   * `destroyTab` drops the whole entry.
+   *
+   * R-4 emptied this list together with the credential window on the first
+   * main-frame navigation, on the reasoning that "the values went with the old
+   * document". That premise does not hold against a hostile page: a script can
+   * copy the injected value into `sessionStorage`, a DOM node, a cookie, an
+   * image or a server round-trip and read it back AFTER the navigation — the
+   * independent re-verification did exactly that, and every text exit (page
+   * text, title, URL, history, downloads) came back in cleartext. Retention is
+   * therefore tab-scoped, not window-scoped: the window flag still governs
+   * eval/screenshot, the value list keeps governing the text funnels.
+   *
    * The converse does not hold — a username-only injection opens the window with
    * this list still empty (it holds passwords, whose redaction value is real
-   * while a short username is an ordinary word). Within the window
-   * `browser_eval` and `browser_screenshot` are refused outright; the text exits
-   * keep the value-exact redaction this list drives. It dies with the tab
-   * (`destroyTab` drops the whole entry).
+   * while a short username is an ordinary word).
+   *
+   * HONEST BOUNDARY (declared, not solved): the redaction matches the value
+   * **verbatim**. A page may transform it (base64, reversed, split into
+   * characters) before rendering and no value-level rule can see through that.
    */
   filledSecrets: string[]
   /**
@@ -155,6 +170,10 @@ export class BrowserRuntime {
   private nextTabId = 1
   private readonly ops: BrowserOpLogEntry[] = []
   private opSeq = 0
+  /** Redacted display paths of downloads, keyed by download id (R-5). The store
+   * keeps the real on-disk path for `downloads_open`; only the model-facing
+   * projection swaps this in. Bounded by {@link DOWNLOAD_DISPLAY_PATH_LIMIT}. */
+  private readonly downloadDisplayPaths = new Map<number, string>()
   private window: NativeBrowserWindow | null = null
   /** AI-control overlay view (transparent, z-top): hosts the AI indicator
    * capsule, the activity panel, the ⋮ menu, the viewers and the busy-mask
@@ -392,9 +411,25 @@ export class BrowserRuntime {
     })()
   }
 
-  /** Persist the tab ledger (host wires this on every state change). */
+  /** Persist the tab ledger (host wires this on every state change).
+   *
+   * R-5 (2026-09-13): the pool metadata is raw (`wc.getURL()`/`getTitle()`), so
+   * the tab's value set is applied here as well — the store's key-level rule
+   * alone let a page-chosen parameter name or a bare fragment reach
+   * `groups.jsonl` in cleartext, and the ledger is re-served to the shell on the
+   * next start. */
   saveLedger(): void {
-    this.store.saveGroupLedger(this.pool.snapshotLedger())
+    const ledger = this.pool.snapshotLedger()
+    const tabs = ledger.tabs?.map((entry) => {
+      const tab = this.tabs.get(entry.tabId)
+      if (tab === undefined) return entry
+      return {
+        ...entry,
+        url: redactFilledSecretsText(tab, entry.url, { verbatim: true }),
+        title: redactFilledSecretsText(tab, entry.title),
+      }
+    })
+    this.store.saveGroupLedger(tabs === undefined ? ledger : { ...ledger, tabs })
   }
 
   /** Swap the partition used by NEW tab views (user switch) and the store. */
@@ -417,15 +452,24 @@ export class BrowserRuntime {
   /**
    * Open a tab (agent path: serial + quota wait under the user gate; user
    * path: fail-fast quota, gate bypassed).
+   *
+   * `inheritSecretsFrom` (R-5, 2026-09-13): a tab opened by a credential-bearing
+   * page (`window.open` / `target=_blank`) inherits that tab's redaction VALUE
+   * set, not its credential window. The child document never received the
+   * credential, but the opener can put it in the popup URL (`/popup?pw=` + value)
+   * — the independent re-verification read it straight out of `browser_list_tabs`
+   * while the child tab sat there with an empty set (R-5 F7). Inheriting makes
+   * every child text exit value-scrubbed too; eval/screenshot stay available
+   * because nothing was injected into that document.
    */
-  async open(url: string | undefined, signal?: AbortSignal, user = false): Promise<BrowserTabState> {
+  async open(url: string | undefined, signal?: AbortSignal, user = false, inheritSecretsFrom?: number): Promise<BrowserTabState> {
     if (this.disposed) throw new Error('browser: runtime disposed')
     if (user) {
       if (!this.pool.tryReserveTab()) {
         throw browserError('quota', 'browser: tab limit reached — close a tab first')
       }
       try {
-        return await this.createTabReal(url, signal, undefined, 'user')
+        return await this.createTabReal(url, signal, undefined, 'user', inheritSecretsFrom)
       } catch (error) {
         this.pool.releaseReservation()
         throw error
@@ -434,7 +478,7 @@ export class BrowserRuntime {
     return await this.withAgentAttribution('browser_open', async () => {
       await this.pool.reserveTab(signal)
       try {
-        return await this.createTabReal(url, signal, undefined, 'ai')
+        return await this.createTabReal(url, signal, undefined, 'ai', inheritSecretsFrom)
       } catch (error) {
         this.pool.releaseReservation()
         throw error
@@ -442,7 +486,7 @@ export class BrowserRuntime {
     }, signal)
   }
 
-  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor): Promise<BrowserTabState> {
+  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor, inheritSecretsFrom?: number): Promise<BrowserTabState> {
     const id = fixedId ?? this.nextTabId++
     const view = this.adapter.createView(this.partition)
     // Every CDP command is bounded by the tool budget: a wedged renderer
@@ -455,6 +499,11 @@ export class BrowserRuntime {
       throw cause
     }
     const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [], credentialWindow: false, oopifFrames: new Map(), frameTrackingReady: false }
+    // R-5 (F7): inherit the opener's redaction value set (never its window).
+    if (inheritSecretsFrom !== undefined) {
+      const opener = this.tabs.get(inheritSecretsFrom)
+      if (opener !== undefined) tab.filledSecrets.push(...opener.filledSecrets)
+    }
     this.tabs.set(id, tab)
     this.pool.registerTab(id, '', '')
 
@@ -484,7 +533,10 @@ export class BrowserRuntime {
           return { action: 'deny' }
         }
         this.record('browser_window_open', id, `window.open → new tab: ${target}`, false, userInitiated ? 'user' : 'ai')
-        void this.open(target, undefined, userInitiated).catch((cause: unknown) => {
+        // R-5 (F7): the popup inherits this tab's redaction value set — the
+        // opener commonly puts the injected value in the popup URL, and an
+        // empty set on the child tab published it in cleartext.
+        void this.open(target, undefined, userInitiated, id).catch((cause: unknown) => {
           const message = cause instanceof Error ? cause.message : String(cause)
           this.record('browser_window_open', id, `window.open failed: ${message}`, true)
         })
@@ -762,7 +814,13 @@ export class BrowserRuntime {
       group: '',
       session: tabEntry?.ownerSession ?? '',
       actor,
-      summary: maskBrowserSummary(summary),
+      // Key-level first (credential-shaped names), then the tab's value set:
+      // a summary embeds the page URL verbatim (`navigate: …`), and that URL
+      // can carry an injected value under a page-chosen name (R-5). The op log
+      // is model-facing through the /ops route and the shell's activity panel.
+      summary: tabEntry === undefined
+        ? maskBrowserSummary(summary)
+        : redactFilledSecretsText(tabEntry, maskBrowserSummary(summary), { verbatim: true }),
       failed,
     })
     if (this.ops.length > OP_LOG_LIMIT) this.ops.shift()
@@ -810,12 +868,13 @@ export class BrowserRuntime {
    * `did-navigate-in-page`) do NOT end it: the same document, and the credential
    * inside it, is still up.
    *
-   * Leaving the window drops {@link BrowserTab.filledSecrets}: the justification
-   * is that the values went with the old document, which is also why the text
-   * exits stop redacting them — see the R-4 decision record. The window, not a
-   * value list, is the model-facing contract: inside it `browser_eval` and
-   * `browser_screenshot` are refused (see those methods), while every text exit
-   * keeps working under value + key redaction.
+   * Leaving the window does NOT drop {@link BrowserTab.filledSecrets} any more
+   * (R-5, 2026-09-13): the injected value can outlive the document (a script
+   * copies it into `sessionStorage`/DOM/cookies before navigating), so the value
+   * set is held for the tab's lifetime and keeps driving every text funnel. The
+   * window, not the value list, is the eval/screenshot contract: inside it those
+   * two channels are refused (see those methods), outside it they work again —
+   * with value redaction still applied to whatever they return.
    */
   credentialWindowOpen(tabId: number): boolean {
     const tab = this.tabs.get(tabId)
@@ -823,10 +882,10 @@ export class BrowserRuntime {
   }
 
   /** Close the window (idempotent): called on every main-frame navigation, and
-   * by nothing else — the window must never close while its document is up. */
+   * by nothing else — the window must never close while its document is up.
+   * `filledSecrets` is deliberately left alone (tab-scoped retention, R-5). */
   private exitCredentialWindow(tab: BrowserTab): void {
     tab.credentialWindow = false
-    tab.filledSecrets.length = 0
   }
 
   /**
@@ -845,15 +904,21 @@ export class BrowserRuntime {
    * credential-bearing address. Restoring a cleartext address bar needs a
    * deliberately separate (un-redacted) shell-only channel — the unsafe
    * default is not kept for convenience.
+   *
+   * R-5 (2026-09-13) adds the value-level pass on top of the key-level one, for
+   * all three fields. Key-level rules only see credential-*shaped* names, so a
+   * page that picks its own name (`history.replaceState('?pw=' + value)`, a
+   * bare `location.hash = value`) or none at all (`<a download=value + '.txt'>`)
+   * published the injected value as an ordinary URL, title or file name.
    */
   private projectTabState(tab: BrowserTab): BrowserTabState {
     return {
       id: tab.id,
-      url: stripSensitiveUrl(tab.url),
-      title: stripSensitiveText(tab.title),
+      url: redactFilledSecretsText(tab, stripSensitiveUrl(tab.url), { verbatim: true }),
+      title: redactFilledSecretsText(tab, stripSensitiveText(tab.title)),
       loading: tab.loading,
       visible: tab.id === this.pool.activeTab,
-      favicon: stripSensitiveUrl(tab.favicon),
+      favicon: redactFilledSecretsText(tab, stripSensitiveUrl(tab.favicon), { verbatim: true }),
       canGoBack: tab.canGoBack,
       canGoForward: tab.canGoForward,
     }
@@ -881,11 +946,17 @@ export class BrowserRuntime {
     this.refreshWindowTitle(tab)
   }
 
-  /** Follow the active tab's page title in the native window caption. */
+  /** Follow the active tab's page title in the native window caption.
+   *
+   * R-5: the caption is built from the raw `tab.title`, which a page can set to
+   * anything (`document.title = pw.value`) — it would then sit in the OS window
+   * list, screen shares and screenshots of the app. Same value-level redactor as
+   * the model-facing projection. */
   private refreshWindowTitle(tab: BrowserTab): void {
     if (this.window === null || this.window.isDestroyed()) return
     if (tab.id !== this.pool.activeTab) return
-    const title = tab.title !== '' ? tab.title : BROWSER_DEFAULT_TITLE
+    const shown = redactFilledSecretsText(tab, tab.title)
+    const title = shown !== '' ? shown : BROWSER_DEFAULT_TITLE
     this.window.setTitle(title === BROWSER_DEFAULT_TITLE ? title : `${title} — ${BROWSER_DEFAULT_TITLE}`)
   }
 
@@ -972,10 +1043,15 @@ export class BrowserRuntime {
     }
     this.updateTabState(tab)
     this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`, false, actor)
+    // R-5 (2026-09-13): the persisted history is a model-facing exit
+    // (`browser_history_search`, the shell's history panel, `<dir>/history.jsonl`),
+    // so it gets BOTH layers: the store's key-level rule and this tab's value set
+    // (a page-chosen parameter name or a path segment carries the value past the
+    // key vocabulary). Redacted at the write path so every reader agrees.
     this.store.addHistory({
       time: Date.now(),
-      url,
-      title: tab.title,
+      url: redactFilledSecretsText(tab, url, { verbatim: true }),
+      title: redactFilledSecretsText(tab, tab.title),
       actor,
       group: '',
     } as Omit<HistoryEntry, 'seq'>)
@@ -2125,7 +2201,9 @@ export class BrowserRuntime {
       const urlChanged = tab.url !== startUrl ? 'page navigated' : lastReason
       // R-1: the reason is the tool's return value; a CDP failure text can carry
       // the current URL, so the whole string goes through the text redactor.
-      return { ok: false, reason: stripSensitiveText(`wait_for ${options.condition} timed out — ${urlChanged}`) }
+      // R-6: plus this tab's value set — a page-chosen URL (`?pw=<value>`) is
+      // not credential-shaped, so the key vocabulary alone would let it through.
+      return { ok: false, reason: redactFilledSecretsText(tab, stripSensitiveText(`wait_for ${options.condition} timed out — ${urlChanged}`), { verbatim: true }) }
     }, signal)
   }
 
@@ -2161,9 +2239,11 @@ export class BrowserRuntime {
   addBookmark(tabId: number, title?: string, actor: RecordActor = 'ai'): { id: number; url: string; title: string } {
     const resolved = this.resolveTab(tabId)
     const tab = this.tab(resolved)
+    // R-5: bookmarks are persisted AND handed back to the model
+    // (`browser_bookmarks_list`), so the value set applies to both fields.
     const entry = this.store.addBookmark({
-      url: tab.url,
-      title: title ?? tab.title,
+      url: redactFilledSecretsText(tab, tab.url, { verbatim: true }),
+      title: redactFilledSecretsText(tab, title ?? tab.title),
       actor,
       group: '',
     })
@@ -2185,7 +2265,24 @@ export class BrowserRuntime {
   }
 
   downloads(filter: { status?: DownloadEntry['status'] | undefined; limit?: number | undefined } = {}): DownloadEntry[] {
-    return this.store.queryDownloads(filter)
+    // R-5 (2026-09-13): a download carries no tab identity (a session-level
+    // Electron event), so its value set is the union of the live tabs' sets —
+    // the tab that received the credential is live when it triggers a download.
+    // `fileName` was already redacted at the write path; `path` is the real
+    // on-disk handle (`downloads_open`, the file tools) and stays truthful in
+    // the store, so the model-facing projection swaps in the redacted display
+    // path recorded when the entry was written.
+    const secrets = this.liveSecrets()
+    return this.store.queryDownloads(filter).map((entry) => {
+      const displayPath = this.downloadDisplayPaths.get(entry.id)
+      const projected: DownloadEntry = displayPath === undefined ? entry : { ...entry, path: displayPath }
+      if (secrets.length === 0) return projected
+      return {
+        ...projected,
+        fileName: redactSecretsText(secrets, projected.fileName, { verbatim: true }),
+        path: redactSecretsText(secrets, projected.path, { verbatim: true }),
+      }
+    })
   }
 
   removeDownload(id: number): boolean {
@@ -2200,15 +2297,63 @@ export class BrowserRuntime {
       throw browserError('not-found', 'browser: this download has no finished file to open')
     }
     const result = await this.adapter.openPath(entry.path)
-    this.record('browser_download_open', 0, `open download: ${entry.path}`)
+    // R-6: attribute the op to the live tab (it used to be tab 0, which the op
+    // log cannot value-scrub) — the summary embeds the real path, which carries
+    // the download name.
+    this.record('browser_download_open', this.pool.activeTab ?? 0, `open download: ${entry.path}`)
     return result.error === undefined ? { ok: true } : { ok: false, error: result.error }
   }
 
-  /** Download recorder adapter for guard events. */
+  /** Download recorder adapter for guard events.
+   *
+   * R-5 (2026-09-13): the name comes from `Content-Disposition` or the URL
+   * basename, and a page can pick BOTH (`<a download=pw + '.txt'>`) — no
+   * key-shaped rule can see a value in it, so the live tabs' value set is
+   * applied at the write path (the store keeps the redacted name; the response
+   * headers are not a model-facing exit). `path` must stay the real handle for
+   * `downloads_open`, so its redacted variant is remembered separately and used
+   * by the model-facing projection (`runtime.downloads`). */
   private downloadRecorder(): { add: (entry: Omit<DownloadEntry, 'id' | 'createdAt'>) => number; update: (id: number, patch: Partial<Pick<DownloadEntry, 'status' | 'path' | 'size'>>) => void } {
     return {
-      add: (entry) => this.store.addDownload(entry).id,
-      update: (id, patch) => this.store.updateDownload(id, patch),
+      add: (entry) => {
+        const secrets = this.liveSecrets()
+        const record = this.store.addDownload(secrets.length === 0 ? entry : {
+          ...entry,
+          url: redactSecretsText(secrets, entry.url, { verbatim: true }),
+          fileName: redactSecretsText(secrets, entry.fileName, { verbatim: true }),
+        })
+        if (entry.path !== '') this.rememberDownloadPath(record.id, secrets, entry.path)
+        return record.id
+      },
+      update: (id, patch) => {
+        if (patch.path !== undefined && patch.path !== '') this.rememberDownloadPath(id, this.liveSecrets(), patch.path)
+        this.store.updateDownload(id, patch)
+      },
+    }
+  }
+
+  /** Union of the live tabs' injected-value sets (downloads/bookmarks have no
+   * single owning tab). Empty when nothing was injected in this browser. */
+  private liveSecrets(): string[] {
+    const out: string[] = []
+    for (const tab of this.tabs.values()) {
+      for (const secret of tab.filledSecrets) {
+        if (secret !== '' && !out.includes(secret)) out.push(secret)
+      }
+    }
+    return out
+  }
+
+  /** Remember the redacted display path of a download (bounded; the store keeps
+   * the truthful handle). */
+  private rememberDownloadPath(id: number, secrets: readonly string[], path: string): void {
+    if (secrets.length === 0) return
+    const redacted = redactSecretsText(secrets, path, { verbatim: true })
+    if (redacted === path) return
+    this.downloadDisplayPaths.set(id, redacted)
+    if (this.downloadDisplayPaths.size > DOWNLOAD_DISPLAY_PATH_LIMIT) {
+      const oldest = this.downloadDisplayPaths.keys().next()
+      if (oldest.done !== true) this.downloadDisplayPaths.delete(oldest.value)
     }
   }
 
@@ -2231,7 +2376,12 @@ export class BrowserRuntime {
       this.store.addHistory({
         // FIX-06: the summary title embeds the (possibly signed) URL verbatim;
         // redact it here so it never depends on the store having to clean up.
-        time: Date.now(), url, title: `download: ${stripSensitiveUrl(url)}`, actor: 'ai', group: '',
+        // R-5: plus the tab's value set, same as the navigate path.
+        time: Date.now(),
+        url: redactFilledSecretsText(tab, url, { verbatim: true }),
+        title: redactFilledSecretsText(tab, `download: ${stripSensitiveUrl(url)}`, { verbatim: true }),
+        actor: 'ai',
+        group: '',
       } as Omit<HistoryEntry, 'seq'>)
     }, signal)
   }
@@ -2599,12 +2749,20 @@ function maskShortSecretOccurrences(text: string, secret: string): string {
 
 /** Is the occurrence at `at` sitting where a *value* would sit? */
 function isValueShaped(text: string, at: number, length: number): boolean {
+  const leftIndex = at === 0 ? -1 : nearestLeftIndex(text, at - 1)
+  const left = leftIndex < 0 ? undefined : text[leftIndex]!
+  // R-5 (2026-09-13): an assignment delimiter is a value position on its own,
+  // whatever character follows the occurrence. The R-4 rule checked the RIGHT
+  // character first, and internal `innerText` folds the page's newline into a
+  // space — so `password=abc123\nnext line` arrived as `password=abc123 next
+  // line`, the character after the short password was an ordinary `n`, and the
+  // credential was returned verbatim (real-machine probe E, R-5). A longer word
+  // that merely starts with the value (`x=abc123y`) is over-masked in the same
+  // step: fail-closed, and the visible tail is recoverable from the page.
+  if (left !== undefined && VALUE_LEFT_STRONG.has(left)) return true
   const right = at + length >= text.length ? undefined : nearestRight(text, at + length)
   if (right !== undefined && !VALUE_RIGHT.has(right)) return false
-  const leftIndex = at === 0 ? -1 : nearestLeftIndex(text, at - 1)
-  if (leftIndex < 0) return true
-  const left = text[leftIndex]!
-  if (VALUE_LEFT_STRONG.has(left)) return true
+  if (left === undefined) return true
   if (!VALUE_LEFT_WEAK.has(left)) return false
   // A quote right after a separator is a value (`"pw":"abc123"`, `pw: "abc123"`).
   if (left === '"' || left === "'") {
@@ -2618,28 +2776,45 @@ function isValueShaped(text: string, at: number, length: number): boolean {
  * Value-level redaction of the secrets this tab received through
  * `fillCredentials` (P0-A depth layer, extended to `browser_eval` by FIX-03,
  * to `browser_get_text` and short-secret precision by R-1/R-3 on 2026-09-13,
- * re-scoped by the R-4 credential window on the same day).
+ * re-scoped by the R-4 credential window and made TAB-scoped by R-5).
+ *
  * Exact-value matching: a page string that merely *talks* about passwords is
  * untouched, while an injected secret can never leave through a snapshot or the
  * page text — no matter which probe/field/expression produced it. A text that is
  * a truncated head of a longer secret (the probe caps text at 80 chars) is
  * redacted as a whole.
  *
+ * `verbatim: true` (R-5) is for strings that cannot be prose: a URL, a download
+ * name/path, a file name. There a short secret is masked on EVERY occurrence
+ * rather than only in a value-shaped position — a page that chooses its own
+ * parameter name (`?pw=…`) or none at all (`#…`) must not turn the value into
+ * an ordinary-looking token. Titles, page text and eval results keep the
+ * prose-preserving short-secret rule, because those strings really can be prose.
+ *
  * ONE implementation for every text funnel (`runtime.snapshot`,
- * `runtime.text`, `runtime.eval`'s result); since R-4 the list is non-empty only
- * inside the credential window, where `browser_eval` is refused outright, so on
- * the eval path this is a backstop rather than the enforcement point.
+ * `runtime.text`, `runtime.eval`'s result, the tab projection, history/ledger,
+ * the op log, downloads). HONEST BOUNDARY: the match is verbatim — a page that
+ * transforms the value (base64, reversed, character-split) renders something
+ * this function cannot recognize; that residual is declared in the tool
+ * descriptions and asserted by `tests/probes/r6-outlet-probe.mjs`.
  */
-function redactFilledSecretsText(tab: BrowserTab, text: string): string {
-  if (tab.filledSecrets.length === 0) return text
+function redactFilledSecretsText(tab: BrowserTab, text: string, options: { verbatim?: boolean } = {}): string {
+  return redactSecretsText(tab.filledSecrets, text, options)
+}
+
+/** Secrets-array core of {@link redactFilledSecretsText}: also usable for exits
+ * with no single owning tab (a download is a session event, so its redaction set
+ * is the union of the live tabs' sets). */
+function redactSecretsText(secrets: readonly string[], text: string, options: { verbatim?: boolean } = {}): string {
+  if (secrets.length === 0) return text
   let out = text
-  for (const secret of tab.filledSecrets) {
+  for (const secret of secrets) {
     if (secret === '') continue
     if (out === secret) { out = MASK; continue }
     // A truncated head of a longer secret is unambiguous once it is long
     // enough to not be an ordinary word.
     if (out.length >= MIN_EMBEDDED_SECRET_LENGTH && secret.startsWith(out)) { out = MASK; continue }
-    if (secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
+    if (options.verbatim === true || secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
       if (out.includes(secret)) out = out.split(secret).join(MASK)
       continue
     }

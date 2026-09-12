@@ -37,8 +37,9 @@
  *   }
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { isSymlinkFreeRepoTarget, symlinkRefusedError, writeFileAtomicSafe } from './store.js'
 
 /** 插件模型配置文件（相对 memoryDir）。 */
 const MODELS_FILE = 'models.json'
@@ -60,8 +61,16 @@ function getPath(root, path) {
   return node
 }
 
-/** 读取 JSON（缺失/损坏回退默认结构）。 */
-function load(file) {
+/** 读取 JSON（缺失/损坏回退默认结构）。
+ *
+ * FIX-26 读侧断言（2026-09-13 第六轮）：models.json 在记忆根下，共享分支的
+ * 120000 条目能让它变成指向仓库外的链接——跟随读会把仓库外 JSON 当成模型
+ * 配置（enabled/note/thinking 白名单直接影响模型的可用性与路由展示）。
+ * 落点被拒 → 按"缺失"回退默认结构（与损坏同一形状）。
+ */
+function load(file, rootDir) {
+  const root = rootDir ?? dirname(file)
+  if (!isSymlinkFreeRepoTarget(root, file)) return { version: 1, models: {} }
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
     if (parsed && typeof parsed === 'object' && parsed.models && typeof parsed.models === 'object') {
@@ -83,9 +92,11 @@ export class ModelConfigStore {
   /**
    * @param {string} file - 配置文件绝对路径（<memoryDir>/models.json）。
    */
-  constructor(file) {
+  constructor(file, rootDir) {
     this.file = file
-    this.data = load(file)
+    // FIX-26：读/写断言基准（缺省 = 文件所在目录，即记忆根）
+    this.dir = rootDir ?? dirname(file)
+    this.data = load(file, this.dir)
   }
 
   /** 读取一个模型的配置 entry（无配置返回 undefined）。 */
@@ -146,10 +157,10 @@ export class ModelConfigStore {
    *  tmp 后又直接 writeFileSync 主文件，tmp 从未 rename：既非原子（半写
    *  损坏风险）又留垃圾 tmp 文件）。 */
   save() {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2))
-    renameSync(tmp, this.file)
+    mkdirSync(this.dir, { recursive: true })
+    // FIX-26：改走唯一写回原语（临时落点断言 + O_EXCL 按 fd 写 + rename 前后复检）
+    const written = writeFileAtomicSafe(this.dir, this.file, JSON.stringify(this.data, null, 2))
+    if (written.ok !== true) throw symlinkRefusedError(written.refusedPath)
   }
 }
 

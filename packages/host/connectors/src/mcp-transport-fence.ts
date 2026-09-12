@@ -1,6 +1,6 @@
 /**
  * Outbound redirect fence for the MCP **streamable-http** transport (audit R3,
- * residual N3 / high).
+ * residual N3 / high; audit R5: the GET(SSE) channel was still unfenced).
  *
  * `outbound.ts` fences every URL *this* package fetches, but the MCP channel is
  * not fetched here: the connector hands `{ url, headers }` to
@@ -16,19 +16,38 @@
  * The SDK gives no configuration seam for this (`createTransport` in the
  * installed `dsh-mcp-client` build passes only `requestInit: { headers }`), so
  * the fence is installed on the transport CLASS before any instance exists:
- * two prototype accessors make every instance's `_requestInit` carry
- * `redirect: 'manual'` and wrap its `_fetchWithInit` (the auth-provider path)
- * the same way. With `redirect: 'manual'` the SDK sees the real 3xx response
- * and turns it into a `StreamableHTTPError` from its own `!response.ok` branch,
- * so a redirect is a failed connection, never a followed one.
+ * THREE prototype accessors make every instance's `_requestInit` carry
+ * `redirect: 'manual'`, wrap its `_fetchWithInit` (the auth-provider path) and —
+ * R5 — wrap its `_fetch`. `_fetch` is the one that closed the SSE hole:
+ * `_startOrAuthSse()` calls `(this._fetch ?? fetch)(url, { method: 'GET',
+ * headers, signal })` and does **not** spread `_requestInit`, so fencing the
+ * init alone left the server-initiated SSE channel (opened automatically once
+ * `initialize` answers 200 and `notifications/initialized` answers 202, and
+ * again on every reconnect / `resumeStream`) following redirects with the full
+ * header set. When `_fetch` is empty the accessor stores a wrapper over the
+ * global `fetch`, so `(this._fetch ?? fetch)` can never fall back to it.
+ *
+ * With `redirect: 'manual'` the SDK sees the real 3xx response and turns it
+ * into a `StreamableHTTPError` from its own `!response.ok` branch (the GET path
+ * included), so a redirect is a failed connection, never a followed one.
+ *
+ * Every other outbound channel of this transport is covered by the same three
+ * accessors, because the SDK funnels all of them through `this._fetch` or
+ * `this._fetchWithInit`: `send()` POST (`...this._requestInit` + `_fetch`),
+ * `terminateSession()` DELETE (same), `resumeStream()`/reconnect (`_fetch` via
+ * `_startOrAuthSse`), and the auth-provider calls (`_fetchWithInit`, plus one
+ * `fetchFn: this._fetch` in the 403 upscoping branch — unreachable in this
+ * product because `createTransport` never passes an `authProvider`). The SSE
+ * `retry:` field only feeds a reconnection DELAY and the `endpoint` event
+ * belongs to the deprecated HTTP+SSE transport this one does not parse, so
+ * neither can name a new URL; `_url` is assigned once, in the constructor.
  *
  * Fail-loud: {@link ensureMcpTransportRedirectFence} verifies the seam
- * behaviourally (a probe instance must hand a `redirect: 'manual'` init to a
- * recording fetch) and throws
- * {@link McpTransportFenceUnavailableError} when it cannot — `registerMcp`
- * then refuses to register any streamable-http server instead of connecting
- * unfenced. The field names are SDK internals; the verification is what keeps a
- * future SDK build from silently disabling the fence.
+ * behaviourally and throws {@link McpTransportFenceUnavailableError} when it
+ * cannot — `registerMcp` then refuses to register any streamable-http server
+ * instead of connecting unfenced. The field names are SDK internals; the
+ * verification is what keeps a future SDK build from silently disabling the
+ * fence.
  *
  * Build coupling: `@modelcontextprotocol/sdk` must stay EXTERNAL in this
  * package's bundle (it is a declared dependency, and `tsdown.config.ts` lists
@@ -41,7 +60,7 @@
  *
  * @module
  */
-import { createRequire } from 'node:module'
+import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -57,6 +76,15 @@ export class McpTransportFenceUnavailableError extends Error {
 /** Per-instance storage behind the patched accessors (never a prototype field). */
 const rawRequestInit = new WeakMap<object, RequestInit | undefined>()
 const rawFetchWithInit = new WeakMap<object, unknown>()
+const rawFetch = new WeakMap<object, unknown>()
+
+/**
+ * Marks a `fetch` this module already wraps.
+ *
+ * Two jobs: a re-install never double-wraps, and the behavioural probe can tell
+ * a fenced fetch from a caller's raw one without calling it.
+ */
+const FENCED_FETCH = Symbol('picoaide.mcp.transport-fence.fenced-fetch')
 
 /** The SDK module `dsh-mcp-client` constructs its streamable-http transport from. */
 const SDK_TRANSPORT_SUBPATH = '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -65,6 +93,7 @@ const SDK_PACKAGE_MARKER = 'node_modules/@modelcontextprotocol/sdk'
 
 const REQUEST_INIT_FIELD = '_requestInit'
 const FETCH_WITH_INIT_FIELD = '_fetchWithInit'
+const FETCH_FIELD = '_fetch'
 /** Header the probe instance carries, so a leaked probe is recognizable. */
 const PROBE_HEADER = 'x-picoaide-transport-fence'
 /** Never contacted: the probe always supplies its own recording `fetch`. */
@@ -85,23 +114,52 @@ function sdkPackageRoot(path: string): string {
  * The identity is what makes the fence real: `createTransport` in
  * `dsh-mcp-client` builds `StreamableHTTPClientTransport` from its OWN import
  * of the SDK, so patching any other copy (an inlined one, or a nested install
- * with a conflicting version range) would silently protect nothing. Resolving
- * the subpath from the mcp-client package and comparing the package directory
- * turns that into a loud, fail-closed error.
+ * with a conflicting version range) would silently protect nothing.
+ *
+ * The comparison is the resolved FILE, not the package directory: the SDK ships
+ * BOTH `dist/esm` and `dist/cjs` under one package root, and patching the ESM
+ * class while the host loads the CJS one (or the reverse) would leave every
+ * channel unfenced while a directory comparison still said "same package" —
+ * measured in R5: the CJS copy of this class follows a redirect exactly like
+ * the unfenced ESM one. The parent URL is mcp-client's own entry, so the second
+ * resolution runs the ESM resolver over mcp-client's import conditions — the
+ * same answer its static `import` gets at runtime.
  */
 function assertTargetsTheMcpClientSdk(): void {
   let ours = ''
   let theirs = ''
   try {
     ours = fileURLToPath(import.meta.resolve(SDK_TRANSPORT_SUBPATH))
-    theirs = createRequire(fileURLToPath(import.meta.resolve(MCP_CLIENT_PACKAGE))).resolve(SDK_TRANSPORT_SUBPATH)
+    const mcpEntry = import.meta.resolve(MCP_CLIENT_PACKAGE)
+    theirs = fileURLToPath(resolveFromParent(SDK_TRANSPORT_SUBPATH, mcpEntry))
   } catch (error) {
     throw new McpTransportFenceUnavailableError(`无法定位 MCP streamable-http 传输实现: ${String(error)}`)
   }
-  if (sdkPackageRoot(ours) === '' || sdkPackageRoot(ours) !== sdkPackageRoot(theirs)) {
+  if (sdkPackageRoot(ours) === '' || realpathOf(ours) !== realpathOf(theirs)) {
     throw new McpTransportFenceUnavailableError(
       `MCP streamable-http 传输加固目标与 mcp-client 不一致（本包 ${ours} / mcp-client ${theirs}），拒绝注册`,
     )
+  }
+}
+
+/**
+ * Resolve `specifier` the way a `parent` module's own `import` would.
+ *
+ * `import.meta.resolve` takes the parent URL at runtime (Node ≥ 20.6); the
+ * TypeScript lib of this package only declares the one-argument form, hence the
+ * narrow cast.
+ */
+function resolveFromParent(specifier: string, parent: string): string {
+  const resolve = import.meta.resolve as unknown as (specifier: string, parent?: string) => string
+  return resolve(specifier, parent)
+}
+
+/** Physical path, so a symlinked install cannot make one file look like two. */
+function realpathOf(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
   }
 }
 
@@ -115,12 +173,22 @@ function protoOf(): Proto {
   return StreamableHTTPClientTransport.prototype as unknown as Proto
 }
 
-function patchField(field: string, wrap: (value: unknown) => unknown, store: WeakMap<object, unknown>): void {
+function patchField(
+  field: string,
+  wrap: (value: unknown) => unknown,
+  store: WeakMap<object, unknown>,
+  fallback?: () => unknown,
+): void {
   Object.defineProperty(protoOf(), field, {
     configurable: true,
     enumerable: false,
     get(this: object): unknown {
-      return store.get(this)
+      // The fallback only exists for `_fetch`: the SDK calls
+      // `(this._fetch ?? fetch)`, so a missing instance value must resolve to
+      // OUR wrapper (never to the global fetch). `_requestInit` deliberately
+      // has none — an SDK build that stops assigning it must fail the
+      // behavioural verification below, not be papered over.
+      return store.get(this) ?? fallback?.()
     },
     set(this: object, value: unknown): void {
       store.set(this, wrap(value))
@@ -134,10 +202,48 @@ function forceManual(init: RequestInit | undefined): RequestInit {
   return { ...(init ?? {}), redirect: 'manual' }
 }
 
+/** The global fetch, behind one indirection so the wrapper never relies on `this`. */
+const globalFetch: FetchLike = (input, init) => globalThis.fetch(input, init)
+
+/**
+ * Wrap a fetch so `redirect: 'manual'` is forced onto EVERY request it makes,
+ * whatever init the SDK passes (`_startOrAuthSse` passes none).
+ *
+ * An already-fenced fetch is returned untouched, so installing the fence twice
+ * cannot build a wrapper tower.
+ * @param base - the fetch to force, or undefined for the global one.
+ * @returns a marked, redirect-refusing fetch.
+ */
+function forcedRedirectFetch(base: FetchLike | undefined): FetchLike {
+  const target = base ?? globalFetch
+  if ((target as { [FENCED_FETCH]?: unknown })[FENCED_FETCH] === true) return target
+  const wrapped: FetchLike = (input, init) => target(input, forceManual(init))
+  Object.defineProperty(wrapped, FENCED_FETCH, { value: true, enumerable: false })
+  return wrapped
+}
+
+/** Whether one value is a fetch this module already fenced. */
+function isFencedFetch(value: unknown): boolean {
+  return typeof value === 'function' && (value as { [FENCED_FETCH]?: unknown })[FENCED_FETCH] === true
+}
+
+/**
+ * The one wrapper used when a transport was built without a `fetch` option —
+ * the production shape. Cached so every instance (and the getter fallback)
+ * shares one identity instead of minting a wrapper per read.
+ */
+let defaultFencedFetch: FetchLike | null = null
+
+function defaultFetchFence(): FetchLike {
+  defaultFencedFetch ??= forcedRedirectFetch(undefined)
+  return defaultFencedFetch
+}
+
 function patchTransportClass(): () => void {
   const proto = protoOf()
   const previousRequestInit = Object.getOwnPropertyDescriptor(proto, REQUEST_INIT_FIELD)
   const previousFetchWithInit = Object.getOwnPropertyDescriptor(proto, FETCH_WITH_INIT_FIELD)
+  const previousFetch = Object.getOwnPropertyDescriptor(proto, FETCH_FIELD)
   patchField(REQUEST_INIT_FIELD, value => forceManual(value as RequestInit | undefined), rawRequestInit as WeakMap<object, unknown>)
   patchField(
     FETCH_WITH_INIT_FIELD,
@@ -149,9 +255,20 @@ function patchTransportClass(): () => void {
     },
     rawFetchWithInit,
   )
+  // R5: `_startOrAuthSse()` builds its GET without `...this._requestInit`, so
+  // the init accessor cannot reach it. `_fetch` is the only fetch that path
+  // uses — fence it, and supply our own when the caller passed none (the
+  // production case: `createTransport` passes `requestInit` only).
+  patchField(
+    FETCH_FIELD,
+    value => (typeof value === 'function' ? forcedRedirectFetch(value as FetchLike) : defaultFetchFence()),
+    rawFetch as WeakMap<object, unknown>,
+    defaultFetchFence,
+  )
   return () => {
     restoreField(REQUEST_INIT_FIELD, previousRequestInit)
     restoreField(FETCH_WITH_INIT_FIELD, previousFetchWithInit)
+    restoreField(FETCH_FIELD, previousFetch)
   }
 }
 
@@ -162,33 +279,77 @@ function restoreField(field: string, descriptor: PropertyDescriptor | undefined)
 
 /**
  * Verify — behaviourally — that the patched class really hands
- * `redirect: 'manual'` to the fetch the SDK owns.
+ * `redirect: 'manual'` to the fetch the SDK owns, on **every** channel it owns.
  *
  * The probe builds a real transport with a recording `fetch` (no socket is
- * opened) and drives the same `send()` path that carries `initialize` and the
- * credential headers. Every failure mode of the seam (field renamed, class
- * field bypassing the accessor, SDK no longer spreading `_requestInit`) lands
- * on one of the three checks below.
+ * opened: the recorder answers by method) and drives the channels that carry
+ * credentials:
+ *
+ * 1. `send()` — the POST path that carries `initialize`, the rendered
+ *    credential headers and the body (`...this._requestInit`);
+ * 2. the SPEC CHAIN that opens the SSE stream — `notifications/initialized`
+ *    answered with `202` makes the SDK fire `_startOrAuthSse()` on its own;
+ * 3. `resumeStream()` — the reconnect/resume GET.
+ *
+ * (2) and (3) exist because R5 proved the hole: `_startOrAuthSse()` calls
+ * `(this._fetch ?? fetch)(url, { method: 'GET', … })` with NO `_requestInit`,
+ * so a version of this check that only drove `send()` reported `verified=true`
+ * while the SSE channel — the one that leaks as soon as a server answers
+ * `initialize` 200 + `initialized` 202 — was still unfenced. Both the
+ * "did the GET go through the fenced fetch" and the "was `redirect` forced on
+ * it" halves are asserted: a future SDK that calls the global `fetch` directly
+ * (or a subclass that re-points `_fetch`) fails here.
+ *
+ * Any failure lands on {@link McpTransportFenceUnavailableError}, which
+ * `registerMcp` turns into a refusal to register the server.
  */
 async function verifyFenceSeam(): Promise<void> {
-  const seen: Array<RequestInit | undefined> = []
+  const seen: Array<{ method: string; redirect: unknown }> = []
   const probeFetch: FetchLike = async (_input, init) => {
-    seen.push(init)
-    return new Response('', { status: 500 })
+    const method = init?.method ?? 'GET'
+    seen.push({ method, redirect: init?.redirect })
+    // 405 is the spec's "this server offers no SSE stream" answer, so the SSE
+    // path terminates without scheduling a reconnection; every redirect
+    // decision has already been taken by the fence when the recorder runs.
+    return new Response('', { status: method === 'GET' ? 405 : 202 })
   }
   const probe = new StreamableHTTPClientTransport(new URL(PROBE_URL), {
     requestInit: { headers: { [PROBE_HEADER]: '1' } },
     fetch: probeFetch,
   })
-  const requestInit = (probe as unknown as Record<string, unknown>)[REQUEST_INIT_FIELD] as RequestInit | undefined
+  const internals = probe as unknown as Record<string, unknown>
+  // A future SDK that switches these to class fields (`_fetch = …`) would
+  // create own data properties and silently bypass every accessor below.
+  for (const field of [REQUEST_INIT_FIELD, FETCH_WITH_INIT_FIELD, FETCH_FIELD]) {
+    if (Object.getOwnPropertyDescriptor(probe, field) !== undefined) {
+      throw new McpTransportFenceUnavailableError(
+        `MCP streamable-http 传输的 ${field} 已是实例自有属性（SDK 改用类字段，原型访问器被绕开）`,
+      )
+    }
+  }
+  const requestInit = internals[REQUEST_INIT_FIELD] as RequestInit | undefined
   if (requestInit?.redirect !== 'manual') {
     throw new McpTransportFenceUnavailableError(
       `MCP streamable-http 传输的 ${REQUEST_INIT_FIELD} 未被拦截（SDK 内部字段或构造方式已变更）`,
     )
   }
-  const fetchWithInit = (probe as unknown as Record<string, unknown>)[FETCH_WITH_INIT_FIELD]
+  const fetchWithInit = internals[FETCH_WITH_INIT_FIELD]
   if (typeof fetchWithInit !== 'function') {
     throw new McpTransportFenceUnavailableError(`MCP streamable-http 传输的 ${FETCH_WITH_INIT_FIELD} 不可拦截`)
+  }
+  const fetchField = internals[FETCH_FIELD]
+  if (!isFencedFetch(fetchField)) {
+    throw new McpTransportFenceUnavailableError(
+      `MCP streamable-http 传输的 ${FETCH_FIELD} 未被拦截（GET/SSE 通道会回落到默认 fetch 并跟随重定向）`,
+    )
+  }
+  // The production construction passes NO `fetch`: `(this._fetch ?? fetch)` must
+  // still resolve to our wrapper, never to the global fetch's follow default.
+  const bareFetch = (new StreamableHTTPClientTransport(new URL(PROBE_URL), {
+    requestInit: { headers: { [PROBE_HEADER]: '1' } },
+  }) as unknown as Record<string, unknown>)[FETCH_FIELD]
+  if (!isFencedFetch(bareFetch) || bareFetch === globalThis.fetch) {
+    throw new McpTransportFenceUnavailableError(`MCP streamable-http 传输未提供 ${FETCH_FIELD} 的加固包装（默认 fetch 会跟随重定向）`)
   }
   // The auth-provider path builds its own fetch: prove it is fenced too.
   seen.length = 0
@@ -199,11 +360,41 @@ async function verifyFenceSeam(): Promise<void> {
   // The request path that actually carries the credentials and the body.
   seen.length = 0
   await probe.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
-  if (seen.length === 0) {
-    throw new McpTransportFenceUnavailableError('MCP streamable-http 传输的 send() 未经过可拦截的 fetch')
-  }
-  if (seen[0]?.redirect !== 'manual') {
+  if (!seen.some(call => call.method === 'POST' && call.redirect === 'manual')) {
     throw new McpTransportFenceUnavailableError("MCP streamable-http 传输未强制 redirect:'manual'")
+  }
+  // THE SPEC CHAIN: `initialize` 200 → `notifications/initialized` 202 → the
+  // SDK opens the GET(SSE) stream by itself (R5 hole).
+  seen.length = 0
+  await probe.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as never).catch(() => undefined)
+  await settleProbe(() => seen.some(call => call.method === 'GET'))
+  const sse = seen.find(call => call.method === 'GET')
+  if (sse === undefined) {
+    throw new McpTransportFenceUnavailableError('MCP streamable-http 传输的 GET(SSE) 流未经过可拦截的 fetch（重定向栅栏对 SSE 通道无效）')
+  }
+  if (sse.redirect !== 'manual') {
+    throw new McpTransportFenceUnavailableError("MCP streamable-http 传输的 GET(SSE) 流未强制 redirect:'manual'")
+  }
+  // Reconnect/resume uses the same GET path, but is awaited — drive it too.
+  seen.length = 0
+  await probe.resumeStream('probe-event-id').catch(() => undefined)
+  const resumed = seen.find(call => call.method === 'GET')
+  if (resumed === undefined || resumed.redirect !== 'manual') {
+    throw new McpTransportFenceUnavailableError("MCP streamable-http 传输的 resumeStream() 未强制 redirect:'manual'")
+  }
+}
+
+/**
+ * Give the SDK's fire-and-forget SSE open a few task turns to reach the
+ * recording fetch, stopping as soon as `reached` says it arrived. Bounded, so an
+ * SDK that never opens the stream cannot hang the registration path — it fails
+ * the "GET was seen" assertion instead.
+ * @param reached - predicate polled between turns.
+ * @param turns - maximum task turns to wait.
+ */
+async function settleProbe(reached: () => boolean, turns = 20): Promise<void> {
+  for (let index = 0; index < turns && !reached(); index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
   }
 }
 

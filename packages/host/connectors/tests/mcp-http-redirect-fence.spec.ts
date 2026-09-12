@@ -42,6 +42,7 @@ import { apply } from '../src/index.ts'
 import { isOutboundUrlAllowed } from '../src/outbound.ts'
 import {
   ensureMcpTransportRedirectFence,
+  installMcpTransportRedirectFence,
   isMcpTransportRedirectFenceInstalled,
   isMcpTransportRedirectFenceVerified,
   McpTransportFenceUnavailableError,
@@ -307,13 +308,22 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
   })
 
 
-  it('resolves the same installed @modelcontextprotocol/sdk package as the mcp-client build', () => {
+  it('resolves the same installed SDK FILE as the mcp-client build (ESM, not the CJS twin)', () => {
     const ours = fileURLToPath(import.meta.resolve('@modelcontextprotocol/sdk/client/streamableHttp.js'))
-    const theirs = createRequire(MCP_CLIENT_ENTRY).resolve('@modelcontextprotocol/sdk/client/streamableHttp.js')
-    const rootOf = (path: string): string => path.slice(0, path.indexOf('node_modules/@modelcontextprotocol/sdk/') + 'node_modules/@modelcontextprotocol/sdk'.length)
-    console.log(`[N3] fence patches ${ours}\n[N3] mcp-client resolves ${theirs}`)
-    expect(rootOf(theirs)).toBe(rootOf(ours))
+    const mcpEntry = import.meta.resolve('@deepseek-ai/dsh-mcp-client')
+    // The answer mcp-client's OWN static import gets (ESM conditions), versus
+    // the one a CJS `require` would get from the same package directory.
+    const resolveFromParent = import.meta.resolve as unknown as (specifier: string, parent?: string) => string
+    const theirsEsm = fileURLToPath(resolveFromParent('@modelcontextprotocol/sdk/client/streamableHttp.js', mcpEntry))
+    const theirsCjs = createRequire(fileURLToPath(mcpEntry)).resolve('@modelcontextprotocol/sdk/client/streamableHttp.js')
+    console.log(`[N3] fence patches ${ours}\n[N3] mcp-client resolves (esm) ${theirsEsm}\n[N3] cjs twin ${theirsCjs}`)
     expect(ours).toContain('/dist/esm/')
+    // R5 tightened this from "same package directory" to "same file": both
+    // builds live under ONE package root, and the CJS class is a different
+    // object (patching it would fence nothing).
+    expect(theirsEsm).toBe(ours)
+    expect(theirsCjs).not.toBe(ours)
+    expect(() => installMcpTransportRedirectFence()).not.toThrow()
   })
 
   it('keeps the SDK external in the build (an inlined copy silently unfences the app)', async () => {

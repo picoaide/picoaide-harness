@@ -244,8 +244,11 @@ runProbe(async () => {
       return out.ok ? out : false
     }, { timeoutMs: 8000, label: 'eval resumes after navigation' }).catch(() => null)
     const afterNavUrl = h.runtime.tab(tab).url
+    // R-6 (2026-09-13): the window closes on navigation, the VALUE set stays for
+    // the tab's lifetime (a page can stash the value before navigating — see
+    // `r6-outlet-probe.mjs` F5/F6), so `filledSecrets` is expected to survive.
     rec.record('W.green.submit-navigation-exits-window',
-      exited !== null && exited.result === '2' && afterNavUrl.includes('/after') && h.runtime.tab(tab).filledSecrets.length === 0,
+      exited !== null && exited.result === '2' && afterNavUrl.includes('/after') && h.runtime.tab(tab).filledSecrets.length === 1,
       { exited, url: afterNavUrl, filledSecrets: h.runtime.tab(tab).filledSecrets.length })
     const shotAfter = await shotOut(tab)
     rec.record('W.green.screenshot-resumes-after-navigation', shotAfter.ok, { ok: shotAfter.ok, code: shotAfter.code, message: shotAfter.message })
