@@ -284,7 +284,12 @@ export function apply(ctx: Context, config: Config): void {
     const brandAssets = buildBrandWebAssets({
       profile: readDesktopChannelProfile(),
       brandWebDir: fileURLToPath(new URL('../build/web-brand/', import.meta.url)),
-      officialLogoPath: fileURLToPath(new URL('../../../brands/official/logo.svg', import.meta.url)),
+      // 官方兜底必须是**随包**的那一份（`brand-prepare.mjs` 落的官方几何）。
+      // 旧值是 `../../../brands/official/logo.svg` —— 仓库品牌目录不进包，
+      // 在 src/lib/app.asar 三套布局下都不存在（2026-09-12 审计 P1-12），
+      // 于是"渠道 logo 不可信时回落官方"这条链是死的。build/ 是打包态唯一
+      // 可靠的真源，与上面的 brandWebDir 同源。
+      officialLogoPath: fileURLToPath(new URL('../build/web-brand/official.svg', import.meta.url)),
     })
     const favicon = brandAssets.favicon
     if (favicon !== undefined) {

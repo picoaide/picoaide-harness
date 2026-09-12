@@ -331,9 +331,17 @@ official                          → .picoaide-harness        （逐字节不�
 `$DSH_HOME` / 显式配置仍然优先（e2e、便携安装、多 profile 依赖它）。
 
 **userData 目录名**（真源 `src/desktop-user-data.ts` 的
-`desktopUserDataDirectoryName`）：官方 = 产品名（不变）；品牌渠道 = 产品名；
-**产品名与官方逐字相同的渠道（beta）= `<产品名> (<渠道 id>)`** —— beta 复用官方
-品牌，不消歧就会与 official 撞在同一个 userData 上（单实例锁互斥）。
+`desktopUserDataDirectoryName`）：官方 = 产品名（不变）；**其余每个渠道 =
+`<产品名> (<渠道 id>)`**。2026-09-12 起非官方渠道**一律**带后缀（旧口径只在"产品名
+与官方逐字相同"时消歧，于是两个品牌渠道取同一个产品名 —— `acme` / `acme-staging` ——
+仍会撞在同一个 userData 上：单实例锁互斥 + 日志/更新状态/插件管理状态/浏览器书签与
+下载共享）。渠道 id 形状里没有括号，所以后缀唯一可解码、目录名由构造保证唯一。
+`desktop.product_name`（以及它回落来源 `identity.display_name`）同时加了**形状校验**
+（`isSafeProductName`：禁分隔符/控制字符/Windows 非法字符、不以点或空格结尾、1–64
+字符；畸形值回落中性占位），构建期同款校验在 `ci-channels.sh`。
+**升级影响**：品牌渠道的 userData 目录名会变一次，旧目录（日志、更新状态、插件管理
+状态、浏览器书签/历史/下载）留在原处、不自动搬运；官方与 beta 的目录名逐字节不变，
+公共渠道用户不受影响。
 
 **校验与门禁**：
 - `scripts/ci-channels.sh`：`desktop.home_dir` 形状校验；**品牌渠道必填**且不得等于

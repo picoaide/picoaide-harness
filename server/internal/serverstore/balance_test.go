@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 )
@@ -331,6 +332,206 @@ func TestUsageBackfillDeltaAndRefund(t *testing.T) {
 		t.Fatalf("refund 流水 = %d (%+v), want 1", refunds, items)
 	}
 	assertLedgerInvariant(t, db, uid)
+}
+
+// P0-B(审计 2026-09-12):上游负 token 不得变成 refund(凭空充值)。
+// 负 token 走进 costOfAt 会算出负费用,结算侧 delta = -cost > 0 → refund →
+// balance_money 增加;账本不变量 I1 仍自洽,事后审计看不出来。
+func TestNegativeTokensDoNotRefund(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	mustPricedModel(t, db, "neg-model", 1, 1) // 1 元/1M:负 token 会算出 -1 元
+	uid := mustBalanceUser(t, db, "neg-token-user")
+	if _, err := SetUserBalance(db, uid, 1, "充值", "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 一次落账路径(非流式 chat / embedding)
+	if _, err := RecordUsageKind(db, uid, "neg-model", -1_000_000, -1_000_000, "chat"); err != nil {
+		t.Fatalf("RecordUsageKind(负 token): %v", err)
+	}
+	// 2) pending 行 + 负 token 回填(流式 chat / Anthropic messages)
+	pend, err := RecordUsage(db, uid, "neg-model", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateUsageTokens(db, pend, -1_000_000, -1_000_000); err != nil {
+		t.Fatalf("UpdateUsageTokens(负 token): %v", err)
+	}
+
+	u, err := GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(u.BalanceMoney-1) > 1e-9 {
+		t.Fatalf("负 token 凭空充值: balance = %v, want 1", u.BalanceMoney)
+	}
+	items, _, err := BalanceLedgerPage(db, uid, "", 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range items {
+		if e.Kind == LedgerKindRefund {
+			t.Fatalf("负 token 产生 refund 流水: %+v", e)
+		}
+	}
+	// 负 token 也不得落库污染月用量/报表,cost 不得为负(负 cost 是 refund 的源头)
+	var pt, ct int64
+	var cost float64
+	if err := db.QueryRow(`SELECT prompt_tokens, completion_tokens, cost FROM usage WHERE id = ?`, pend).
+		Scan(&pt, &ct, &cost); err != nil {
+		t.Fatal(err)
+	}
+	if pt < 0 || ct < 0 || cost < 0 {
+		t.Fatalf("usage 落库为负: pt=%d ct=%d cost=%v", pt, ct, cost)
+	}
+	assertLedgerInvariant(t, db, uid)
+}
+
+// P0-C(审计 2026-09-12):并发消费不得透支余额。
+// 旧实现 `UPDATE ... balance_money + delta` 无下限:8 笔 1.00 消耗 + 1.00 余额
+// → balance_money = -7.00。修法要求「余额不足 → 回滚整个事务」(usage 行与
+// 扣款同事务),并与「未开通账户」区分开。
+func TestConcurrentUsageCannotOverdraft(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	mustPricedModel(t, db, "od-model", 1, 1) // 1_000_000 tokens = 1 元
+	uid := mustBalanceUser(t, db, "od-user")
+	if _, err := SetUserBalance(db, uid, 1, "充值", "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	const attempts = 8
+	var wg sync.WaitGroup
+	errs := make([]error, attempts)
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = RecordUsage(db, uid, "od-model", 1_000_000, 0)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var ok, insufficient int
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrInsufficientBalance):
+			insufficient++
+		default:
+			t.Fatalf("第 %d 笔返回意外错误: %v", i, err)
+		}
+	}
+	u, err := GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.BalanceMoney < -1e-9 {
+		t.Fatalf("并发透支: balance = %v(1.00 余额消费了 %d 笔 1.00)", u.BalanceMoney, attempts)
+	}
+	if ok != 1 || insufficient != attempts-1 {
+		t.Fatalf("成功 %d / 余额不足 %d, want 1 / %d", ok, insufficient, attempts-1)
+	}
+	// 回滚语义:失败的那几笔不得留下 usage 行(否则就是"记了账没扣钱")
+	var rows int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM usage WHERE user_id = ?`, uid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != int64(ok) {
+		t.Fatalf("usage 行 = %d, want %d(余额不足必须回滚整个事务)", rows, ok)
+	}
+	if math.Abs(u.BalanceMoney) > 1e-9 {
+		t.Fatalf("余额 = %v, want 0", u.BalanceMoney)
+	}
+	assertLedgerInvariant(t, db, uid)
+
+	// 未开通账户(余额 0 + 有费用)语义是"不扣不记",不得被当成余额不足。
+	off := mustBalanceUser(t, db, "od-off-user")
+	if _, err := RecordUsage(db, off, "od-model", 1_000_000, 0); err != nil {
+		t.Fatalf("未开通账户被误判为余额不足: %v", err)
+	}
+	if sum, _ := BalanceLedgerSum(db, off); sum != 0 {
+		t.Fatalf("未开通账户产生流水 = %v", sum)
+	}
+}
+
+// P0-C 回填路径(流式估算回填):结算超出余额时同样报错并回滚 ——
+// 已写入的 token/cost 回填必须一起撤销,余额不得变动。
+func TestBackfillCannotOverdraft(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	mustPricedModel(t, db, "bf-model", 1, 1)
+	uid := mustBalanceUser(t, db, "bf-user")
+	if _, err := SetUserBalance(db, uid, 0.5, "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	pend, err := RecordUsage(db, uid, "bf-model", 0, 0) // pending,cost 0
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 回填 1 元 > 余额 0.5 元 → 余额不足
+	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); !errors.Is(err, ErrInsufficientBalance) {
+		t.Fatalf("err = %v, want ErrInsufficientBalance", err)
+	}
+	u, err := GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(u.BalanceMoney-0.5) > 1e-9 {
+		t.Fatalf("余额 = %v, want 0.5", u.BalanceMoney)
+	}
+	// 整个事务回滚:回填的 token/cost 不得留下(否则 usage 与余额不一致)
+	var pt int64
+	var cost float64
+	if err := db.QueryRow(`SELECT prompt_tokens, cost FROM usage WHERE id = ?`, pend).Scan(&pt, &cost); err != nil {
+		t.Fatal(err)
+	}
+	if pt != 0 || cost != 0 {
+		t.Fatalf("回填未回滚: pt=%d cost=%v", pt, cost)
+	}
+	assertLedgerInvariant(t, db, uid)
+}
+
+// 下限只约束**扣减**:历史欠款账户(修复前透支遗留的负余额)的费用下调
+// 回补(refund)不能被下限卡住,否则账目永远回不到 0。
+func TestRefundStillAppliesOnLegacyNegativeBalance(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	mustPricedModel(t, db, "rf-model", 1, 1)
+	uid := mustBalanceUser(t, db, "rf-user")
+	if _, err := SetUserBalance(db, uid, 10, "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	pend, err := RecordUsage(db, uid, "rf-model", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil { // 扣 1 元
+		t.Fatal(err)
+	}
+	// 模拟修复前遗留的透支余额(生产库可能存在欠款账户)
+	if _, err := db.Exec(`UPDATE users SET balance_money = -5 WHERE id = ?`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateUsageTokens(db, pend, 500_000, 0); err != nil { // 费用下调 → 回补 0.5
+		t.Fatalf("欠款账户回补被下限卡住: %v", err)
+	}
+	u, err := GetUserByID(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(u.BalanceMoney-(-4.5)) > 1e-9 {
+		t.Fatalf("余额 = %v, want -4.5(负差额回补必须生效)", u.BalanceMoney)
+	}
+	// 欠款状态下新的消费仍被拒绝(不得继续加深欠款)
+	if _, err := RecordUsage(db, uid, "rf-model", 1_000_000, 0); !errors.Is(err, ErrInsufficientBalance) {
+		t.Fatalf("欠款账户继续消费: err = %v, want ErrInsufficientBalance", err)
+	}
 }
 
 // 闸门判定:已开通 + 分位余额 <= 0 → 拦;未开通 → 不拦;闸门关 → 不拦。

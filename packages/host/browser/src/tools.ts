@@ -477,7 +477,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_get_snapshot',
-    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll.',
+    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)".',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -652,7 +652,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
-      frame: { type: 'integer', description: 'Frame index (0 = main frame, default).' },
+      frame: { type: 'integer', description: 'Frame index (0 = main frame, default; 1 = first subframe…). The expression runs in that frame\'s own JavaScript world, exactly like frame 0 — page globals are visible.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string' } } },

@@ -67,11 +67,29 @@ export function filesetSpec(fileset) {
 const DAILY_LOG_RE = /^daily\/\d{4}-\d{2}-\d{2}\.md$/
 /** daily 待办文件路径模式（TODO 格式）。 */
 const DAILY_TODO_RE = /^daily\/\d{4}-\d{2}-\d{2}\.todo\.md$/
+/**
+ * logs/ 下的日志文件名模式（P1-9）：单层、纯文件名。
+ *
+ * 此前是 `path.startsWith('logs/') && path.endsWith('.md')`——`..`、绝对
+ * 路径段、子目录都能通过（`logs/../../victim/MEMORY.md` 判为合法同步
+ * 文件，冲突侧车的 `file` 字段据此写穿到仓库外）。`resolveFilesetFiles`
+ * 只从 `logs/` 目录**直接**枚举文件名，单层模式与真实生产路径完全一致；
+ * 同时排除反斜杠（Windows 风格分隔符在 POSIX 上也是普通字符，但不该
+ * 出现在仓库相对路径里）。
+ */
+const LOGS_FILE_RE = /^logs\/[^/\\]+\.md$/
 
 /**
  * 判断路径是否属于某 fileset 的同步记忆文件（按路径模式，不依赖磁盘存在
  * ——readTreeFiles 要判断远端树里的路径名，本地可能不存在）。
- * @param {string} path - 相对路径。
+ *
+ * **本函数是信任边界**（P1-9）：冲突侧车 CONFLICTS.md 的 `file` 字段唯一
+ * 的白名单校验点（worker.resolveConflict），命中后会被 `join(dir, file)`
+ * 落盘重写。因此所有模式都必须锚定且只匹配**仓库相对路径**，绝不接受
+ * `..` 段、绝对路径、子目录穿透（`resolveFilesetFiles` 生成的路径要么是
+ * 规格里的固定文件名，要么是目录单层枚举结果，与此完全一致）。
+ *
+ * @param {string} path - 仓库相对路径。
  * @param {string} [fileset='project'] - 文件集。
  * @returns {boolean}
  */
@@ -79,7 +97,7 @@ export function isMemoryFile(path, fileset = 'project') {
   const spec = filesetSpec(fileset)
   if (spec.memory.includes(path)) return true
   if (spec.todo.includes(path)) return true
-  if (spec.logs && path.startsWith('logs/') && path.endsWith('.md')) return true
+  if (spec.logs && LOGS_FILE_RE.test(path)) return true
   if (spec.memory.includes('daily') && DAILY_LOG_RE.test(path)) return true
   if (spec.todo.includes('daily') && DAILY_TODO_RE.test(path)) return true
   return false

@@ -3,6 +3,7 @@ package serverstore
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -180,6 +181,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 	return err
 }
 
+// balanceFloorEpsilon 余额下限判定的浮点容差(元):余额与差额都按微元
+// (1e-6)取整,双精度累加误差量级 ≲1e-9,故判定下限放宽到 -1e-9;
+// 任何达到 1 微元的真实透支都会被拒绝。
+const balanceFloorEpsilon = 1e-9
+
 // settleUsageCostTx 把某条 usage 行的**计费金额**收敛到 targetCost:
 // 与 usage 落账同事务调用,delta = -(targetCost - 已计费金额),因此
 //   - 首次计费:已计费 0 → 扣 targetCost(consume);
@@ -189,7 +195,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 // 未开通余额账户的用户不扣减(也不写流水)——见文件头开通语义。
 // 调用方必须先锁住 usage 行(SELECT ... FOR UPDATE),本函数按 usage_id
 // 汇总流水计算已计费金额,并发下不会重复扣款。
+//
+// P0-C(审计 2026-09-12):扣减带**余额下限**(条件更新,余额不足则 0 行),
+// 并发消费不可能把余额压成负数。0 行的两种原因必须区分:
+//   - 未开通余额账户 → 不扣不记,返回 nil(设计语义,事务照常提交);
+//   - 已开通但余额不足 → 返回 ErrInsufficientBalance,**调用方回滚整个
+//     事务**(usage 行与扣款同事务),不得静默跳过 —— 否则就是"记了账没扣钱"。
 func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) error {
+	// P0-B(审计 2026-09-12):负的计费金额只能来自负 token / 异常定价,
+	// 绝不能变成 refund(delta = -targetCost > 0 → 余额凭空增加)。
+	if targetCost < 0 || math.IsNaN(targetCost) || math.IsInf(targetCost, 0) {
+		return fmt.Errorf("%w: usage %d target cost %v", ErrValidation, usageID, targetCost)
+	}
 	var charged float64
 	if err := tx.QueryRow(`SELECT COALESCE(-SUM(amount),0) FROM balance_ledger WHERE usage_id = ?`, usageID).Scan(&charged); err != nil {
 		return err
@@ -198,11 +215,29 @@ func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) er
 	if delta == 0 {
 		return nil
 	}
+	// 条件更新在行锁下原子判定:已开通 且(扣减后不低于下限 或 本次为正值)。
+	// 差额为正(refund)时不受下限约束 —— 历史欠款账户的回补不能被下限卡住。
 	var after float64
 	err := tx.QueryRow(`UPDATE users SET balance_money = balance_money + ?, updated_at = `+NowExpr()+`
-WHERE id = ? AND balance_activated_at IS NOT NULL RETURNING balance_money`, delta, userID).Scan(&after)
+WHERE id = ? AND balance_activated_at IS NOT NULL
+  AND (balance_money + ? >= ? OR ? >= 0)
+RETURNING balance_money`, delta, userID, delta, -balanceFloorEpsilon, delta).Scan(&after)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil // 未开通余额账户:不扣不记
+		// 0 行:区分「未开通余额账户」与「余额不足」。开通位一旦置位不会回退,
+		// 故这里的复检不存在竞态误判。
+		var activated bool
+		qerr := tx.QueryRow(`SELECT balance_activated_at IS NOT NULL FROM users WHERE id = ?`, userID).Scan(&activated)
+		if errors.Is(qerr, sql.ErrNoRows) {
+			// usage.user_id 有 FK,正常不可达;真出现说明数据被外部破坏。
+			return fmt.Errorf("%w: user %d for usage %d", ErrNotFound, userID, usageID)
+		}
+		if qerr != nil {
+			return qerr
+		}
+		if !activated {
+			return nil // 未开通余额账户:不扣不记
+		}
+		return fmt.Errorf("%w: usage %d user %d cost %v exceeds balance", ErrInsufficientBalance, usageID, userID, targetCost)
 	}
 	if err != nil {
 		return err

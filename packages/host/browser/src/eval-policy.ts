@@ -31,6 +31,7 @@
 
 import acorn from './vendor/acorn.cjs'
 import { browserError } from './errors.ts'
+import { SECRET_VALUE } from './sensitive.ts'
 
 /** Max expression length (host-side bound, far below page cost). */
 export const MAX_EVAL_EXPRESSION = 8192
@@ -319,7 +320,9 @@ export function maskEvalResult(value: unknown, depth = 0): unknown {
   return value
 }
 
-const SECRET_VALUE = /(?:token|secret|password|passwd|authorization|api[_-]?key|session[_-]?id|access[_-]?key|refresh[_-]?token|bearer|private[_-]?key)/iu
+// SECRET_VALUE (credential-shaped key names / free-form values) lives in
+// `sensitive.ts` — single definition site shared with the URL/op-log masking
+// (P1-6: the two lists had drifted).
 const MASK = '****'
 
 /** One `name=value` cookie pair (value may be quoted; empty values allowed). */

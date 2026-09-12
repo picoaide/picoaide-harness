@@ -11,9 +11,30 @@ describe('desktopUserDataDirectoryName (随渠道的第二份数据根)', () => 
     expect(desktopUserDataDirectoryName(OFFICIAL_PRODUCT_NAME, 'official')).toBe(OFFICIAL_PRODUCT_NAME)
   })
 
-  it('keeps the brand channel product name as-is', () => {
-    // 品牌渠道的产品名就是它自己的品牌：目录名干净且能自查。
-    expect(desktopUserDataDirectoryName('Acme Harness', 'acme')).toBe('Acme Harness')
+  it('suffixes every non-official channel, so two brands can never share one directory', () => {
+    // 2026-09-12 审计 P1-13:旧口径只在"产品名与官方逐字相同"时补后缀,于是两个
+    // **不同的**品牌渠道只要取同一个产品名就共用同一个 userData(单实例锁互顶 +
+    // 日志/更新状态/插件管理状态/已下载安装包共享)。渠道 id 唯一,补上它就由构造
+    // 保证唯一 —— 不再依赖"渠道包作者恰好没重名"。
+    expect(desktopUserDataDirectoryName('Acme Harness', 'acme')).toBe('Acme Harness (acme)')
+    expect(desktopUserDataDirectoryName('Acme Harness', 'acme-staging')).toBe('Acme Harness (acme-staging)')
+    expect(desktopUserDataDirectoryName('Acme Harness', 'acme'))
+      .not.toBe(desktopUserDataDirectoryName('Acme Harness', 'acme-staging'))
+  })
+
+  it('never lets a channel name collide with another channel (injective construction)', () => {
+    // 同一组 (产品名, 渠道 id) 不可能拼出两个相同的目录名:渠道 id 形状固定
+    // (小写字母/数字/连字符,无括号),所以末尾那段 ` (<id>)` 唯一可解码。
+    const names = new Map<string, string>()
+    for (const product of ['Acme Harness', 'Acme', 'PicoAide Harness', 'Harness']) {
+      for (const id of ['acme', 'acme-staging', 'beta', 'zeta', 'acme-2']) {
+        const name = desktopUserDataDirectoryName(product, id)
+        const key = `${product}/${id}`
+        const previous = names.get(name)
+        expect(previous === undefined || previous === key).toBe(true)
+        names.set(name, key)
+      }
+    }
   })
 
   it('disambiguates a channel that reuses the official product name', () => {
@@ -45,8 +66,8 @@ describe('defaultDesktopUserDataDirectory (无 Electron 的等价实现)', () =>
 
   it('uses the channel-specific name when one is given', () => {
     // 渠道构建的 userData 必须与官方不同（否则单实例锁互相顶掉）。
-    expect(defaultDesktopUserDataDirectory('linux', { XDG_CONFIG_HOME: '/home/example/.config' }, '/home/example', 'Acme Harness'))
-      .toBe('/home/example/.config/Acme Harness')
+    expect(defaultDesktopUserDataDirectory('linux', { XDG_CONFIG_HOME: '/home/example/.config' }, '/home/example', 'Acme Harness (acme)'))
+      .toBe('/home/example/.config/Acme Harness (acme)')
   })
 
   it('fails loudly when Windows has no APPDATA', () => {

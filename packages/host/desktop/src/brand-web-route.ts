@@ -17,7 +17,11 @@
  * 资源来源（按优先级）：
  *  1. 随包渠道 logo（`build/channel.json` 的 `assets.logo_inline`，data: URI）；
  *  2. 构建期落盘的 `build/web-brand/favicon.svg`（官方构建＝`brands/official/logo.svg`）；
- *  3. 都没有时**不注册路由**，让上游 fallback 继续服务（宁可显示旧图形，也不裂图）。
+ *  3. 构建期落盘的 `build/web-brand/official.svg`（**始终是官方几何**，渠道 logo
+ *     被判定为不可信/损坏时的兜底；2026-09-12 审计 P1-12：它必须落在随包的
+ *     `build/` 里 —— 旧路径 `brands/official/logo.svg` 在任何布局下都不存在，
+ *     于是这条兜底是死代码）；
+ *  4. 都没有时**不注册路由**，让上游 fallback 继续服务（宁可显示旧图形，也不裂图）。
  *
  * SVG 是**渠道包内容**（构建期输入，但按仓库既有口径渠道包属不可信输入）：服务前
  * 做一次脚本特征检查，命中即丢弃并回落官方图形；响应同时带
@@ -39,8 +43,28 @@ export const BRAND_MANIFEST_PATH = '/manifest.webmanifest'
 /** 官方构建的短名（与 `@picoaide/dsh-enterprise` 的 `DEFAULT_CHANNEL.client.short_name` 同值）。 */
 export const OFFICIAL_SHORT_NAME = 'PicoAide'
 
-/** 渠道包内容里的脚本特征：命中即视为不可信，丢弃并回落。 */
-const SCRIPTISH_SVG = /<\s*script|<\s*foreignObject|on[a-z]+\s*=|javascript:/iu
+/**
+ * 渠道包内容里的脚本特征：命中即视为不可信，丢弃并回落。
+ *
+ * 事件处理属性那一条要求前面是**空白/引号/斜杠/文档开头**（2026-09-12 审计
+ * P1-12 的第二半）：裸的 `on[a-z]+\s*=` 会误伤 XML 声明里的 `standalone="no"`
+ * —— Inkscape 默认输出就带它，于是"合法渠道 logo 被当成可疑内容丢弃"又回到
+ * 标签页显示厂商图形。XML 里属性之间必须有空白，所以加上这个边界不会漏掉真正
+ * 的 `onload=`（`<svg onload=` / `<svg/onload=` 都仍然命中）。
+ */
+const SCRIPTISH_SVG = /<\s*script|<\s*foreignObject|(?:^|[\s"'/<])on[a-z]+\s*=|javascript:/iu
+
+/**
+ * "这是一份 SVG 文档"的最小判定，**与打包门禁同源**
+ * （`scripts/verify-packaged-runtime.ts` 的 `assertBrandAssetSvg` 用同一条正则）。
+ *
+ * 为什么不能用 `startsWith('<svg')`（2026-09-12 审计 P1-12）：图形工具重存 SVG 时
+ * 默认带 `<?xml …?>` 声明（Inkscape / Adobe Illustrator 还会加一行生成器注释），
+ * 首段不是 `<svg` —— 那份文件在**打包门禁放行**、运行时却被丢弃，于是渠道包的
+ * 标签页/PWA 图标回落到上游厂商图形，而 `manifest.name` 已经是渠道名。真正的
+ * 安全边界是下面的脚本特征检查与响应上的沙箱 CSP，不是文档头的形状。
+ */
+const SVG_DOCUMENT = /<svg[\s/>]/iu
 
 /** 一个可直接写进响应的静态资源。 */
 export interface BrandWebAsset {
@@ -84,7 +108,8 @@ export function svgFromDataUri(url: string | undefined): string | undefined {
  * @returns 可安全服务时返回原文，否则 undefined。
  */
 export function sanitizeBrandSvg(svg: string): string | undefined {
-  if (!svg.trimStart().startsWith('<svg')) return undefined
+  // 去掉 BOM 只是为了匹配;返回的仍是原文(逐字节服务渠道素材)。
+  if (!SVG_DOCUMENT.test(svg.replace(/^\uFEFF/u, ''))) return undefined
   if (SCRIPTISH_SVG.test(svg)) return undefined
   return svg
 }

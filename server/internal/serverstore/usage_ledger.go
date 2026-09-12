@@ -29,6 +29,22 @@ func yearKey(t time.Time) string {
 	return t.Format("2006")
 }
 
+// usageRelationIsPartition 探测 public.usage_<key> 的 pg_class 记录:
+// Valid=false = 不存在;Bool=true = 是 usage 的真分区;Bool=false = 同名孤儿表
+// (F11:被 DETACH 但未 DROP,探测必须与真分区区分)。
+func usageRelationIsPartition(db *sql.DB, key string) (sql.NullBool, error) {
+	var isPartition sql.NullBool
+	err := db.QueryRow(`SELECT c.relispartition FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&isPartition)
+	return isPartition, err
+}
+
+// staleDetachedTableErr 是同名孤儿表的固定错误(F11)。
+func staleDetachedTableErr(key string) error {
+	return fmt.Errorf("usage_%s exists but is not a partition (stale detached table); drop it manually", key)
+}
+
 // ensureUsagePartition 幂等创建某月的 usage 分区(如 usage_202608)。
 // 写路径(RecordUsage*)与账本生成均先调用,保证当月分区存在。
 // ensureUsagePartition guarantees the month partition exists before a usage
@@ -38,6 +54,12 @@ func yearKey(t time.Time) string {
 // cheap catalog probe (to_regclass, a syscache lookup) and only issues the DDL
 // when the partition is actually missing — correct across databases, unlike a
 // process-global month cache (each test uses its own temp database).
+//
+// P1-3(审计 2026-09-12):「探测 → 建表」之间没有锁,月初并发请求会同时判定
+// "分区不存在",后者报 42P07(IF NOT EXISTS 的存在性检查用语句快照,挡不住
+// 另一会话刚提交的同名分区)→ 该请求整条 usage 不落账(未计费的 200)。
+// 名字被抢占即达到目的,42P07 视为成功;但必须复检占用者是真分区,不能把
+// F11 的同名孤儿表一起吞掉。
 func ensureUsagePartition(db *sql.DB, month time.Time) error {
 	// 归一到北京月:写入路径传的是"真实瞬时"(2026-09-10 时区缺陷修复前按
 	// 进程 TZ 取月,UTC 容器在北京每月 1 日 00:00-08:00 会去建/查上个月分区,
@@ -48,15 +70,12 @@ func ensureUsagePartition(db *sql.DB, month time.Time) error {
 	// 旧实现只看 to_regclass:若某月分区被 DETACH 成功但 DROP 失败,孤儿表
 	// 仍在 catalog 中,探测会误判"已存在"而不再建分区,该月所有计量写入
 	// 直接报 "no partition of relation usage found for row"。
-	var relispartition sql.NullBool
-	probeErr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&relispartition)
-	if probeErr == nil && relispartition.Valid {
-		if relispartition.Bool {
+	isPartition, probeErr := usageRelationIsPartition(db, key)
+	if probeErr == nil && isPartition.Valid {
+		if isPartition.Bool {
 			return nil
 		}
-		return fmt.Errorf("usage_%s exists but is not a partition (stale detached table); drop it manually", key)
+		return staleDetachedTableErr(key)
 	}
 	if probeErr != nil && !errors.Is(probeErr, sql.ErrNoRows) {
 		return probeErr
@@ -70,6 +89,17 @@ WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&relispartitio
 		FOR VALUES FROM ('%s') TO ('%s')`, key,
 		pgInstantArg(BeijingDayInstant(start)), pgInstantArg(BeijingDayInstant(end)))
 	_, err := db.Exec(stmt)
+	if err != nil && isDuplicateRelationErr(err) {
+		// 并发竞态:另一会话已建好同名分区。复检确认(READ COMMITTED 下新
+		// 语句拿新快照,能看到对方已提交的分区);确认不了就保留原始错误。
+		again, perr := usageRelationIsPartition(db, key)
+		if perr == nil && again.Valid {
+			if again.Bool {
+				return nil
+			}
+			return staleDetachedTableErr(key)
+		}
+	}
 	return err
 }
 

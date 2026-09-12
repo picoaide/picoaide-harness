@@ -6,7 +6,7 @@
  * 却是它们。桌面用 exact 路由覆盖（上游前端挂在 fallback 席位，具名路由优先）。
  * 这里钉住：渠道优先、官方兜底、可疑 SVG 丢弃、manifest 用构建声明的产品名。
  */
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -21,10 +21,23 @@ import {
   svgFromDataUri,
 } from '../src/brand-web-route.ts'
 import { OFFICIAL_PRODUCT_NAME, type DesktopChannelProfile } from '../src/desktop-channel.ts'
+import {
+  PACKAGED_WEB_BRAND_FAVICON,
+  PACKAGED_WEB_BRAND_OFFICIAL,
+  REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+  assertBrandAssetSvg,
+} from '../scripts/verify-packaged-runtime.ts'
+
+const packageRoot = new URL('../', import.meta.url)
 
 const ORIGIN = 'http://127.0.0.1:45678'
 const OFFICIAL_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>'
 const CHANNEL_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>'
+/** 图形工具（Inkscape/Illustrator）重存 SVG 时的默认文件头：`<?xml?>` [+ 生成器注释]。 */
+const XML_DECLARED_SVG = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+  + '<!-- Generator: Adobe Illustrator 27.0.0, SVG Export Plug-In  -->\n'
+  + '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>'
+const BOM_XML_SVG = '\uFEFF<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>'
 
 const roots: string[] = []
 afterEach(() => {
@@ -172,5 +185,90 @@ describe('品牌静态资源路由', () => {
   it('路径常量与上游 manifest 里被覆盖的那两条一致', () => {
     expect(BRAND_FAVICON_PATH).toBe('/favicon.svg')
     expect(BRAND_MANIFEST_PATH).toBe('/manifest.webmanifest')
+  })
+})
+
+/**
+ * 运行时判定必须与**打包门禁**同款(2026-09-12 审计 P1-12):门禁用
+ * `/<svg[\s/>]/u` 放行带 `<?xml?>` 头的 SVG,而运行时的
+ * `startsWith('<svg')` 拒收同一份文件 —— 于是渠道 logo(图形工具重存即带
+ * `<?xml?>`)在打包期绿灯、在客户端被丢弃,标签页/PWA 图标回落到上游鱼形。
+ */
+describe('品牌 SVG 判定与打包门禁同源(P1-12)', () => {
+  it('接受带 XML 声明/注释/BOM 头的 SVG 文档', () => {
+    expect(sanitizeBrandSvg(XML_DECLARED_SVG)).toBe(XML_DECLARED_SVG)
+    expect(sanitizeBrandSvg(BOM_XML_SVG)).toBe(BOM_XML_SVG)
+    expect(sanitizeBrandSvg('<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"><svg/>')).not.toBeUndefined()
+  })
+
+  it('运行时与打包门禁对同一组样本给出一致结论', () => {
+    const samples = [
+      OFFICIAL_SVG,
+      CHANNEL_SVG,
+      XML_DECLARED_SVG,
+      BOM_XML_SVG,
+      '  \n<svg xmlns="http://www.w3.org/2000/svg"/>',
+      '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"><svg/>',
+      'not-an-svg',
+      '{"name":"Acme"}',
+      '<html><body/></html>',
+    ]
+    for (const sample of samples) {
+      const runtimeAccepts = sanitizeBrandSvg(sample) !== undefined
+      let gateAccepts = true
+      try {
+        assertBrandAssetSvg(sample, 'sample')
+      } catch {
+        gateAccepts = false
+      }
+      expect({ sample, runtimeAccepts }).toEqual({ sample, runtimeAccepts: gateAccepts })
+    }
+  })
+
+  it('带脚本特征的 SVG 两个判定都拒收(沙箱 CSP 之外的静态检查)', () => {
+    const hostile = '<svg onload="alert(1)"><script>alert(2)</script></svg>'
+    expect(sanitizeBrandSvg(hostile)).toBeUndefined()
+    // 事件属性判定的边界:XML 里属性之间必须有空白,所以裸的 `on[a-z]+=` 会误伤
+    // `standalone="no"`(Inkscape 默认的 XML 声明),必须加边界;而真正的 `onload=`
+    // 无论前面是空白、引号还是斜杠都要继续命中。
+    for (const sample of [
+      '<svg onload="alert(1)"/>',
+      "<svg onload='alert(1)'/>",
+      '<svg/onload="alert(1)"/>',
+      '<svg xmlns="http://www.w3.org/2000/svg" ONLOAD="alert(1)"/>',
+      '<a xlink:href="javascript:alert(1)"/>',
+      '<foreignObject/>',
+    ]) {
+      expect({ sample, rejected: sanitizeBrandSvg(sample) === undefined }).toEqual({ sample, rejected: true })
+    }
+    // XML 声明里的 standalone 不是事件属性。
+    expect(sanitizeBrandSvg('<?xml version="1.0" standalone="no"?><svg/>')).not.toBeUndefined()
+  })
+
+  it('渠道 logo 带 XML 声明时 favicon 仍然生效(不再回落上游鱼形)', () => {
+    const dirs = brandDirs({ staged: XML_DECLARED_SVG })
+    const assets = buildBrandWebAssets({
+      profile: profile({ logoURL: `data:image/svg+xml,${encodeURIComponent(XML_DECLARED_SVG)}` }),
+      ...dirs,
+    })
+    expect(assets.favicon?.body).toBe(XML_DECLARED_SVG)
+
+    // 渠道 logo 缺失、只有构建期落盘的那份(staged)时同样生效。
+    const stagedOnly = buildBrandWebAssets({ profile: profile(), ...brandDirs({ staged: XML_DECLARED_SVG }) })
+    expect(stagedOnly.favicon?.body).toBe(XML_DECLARED_SVG)
+  })
+
+  it('官方兜底指向打包态真实随包的 build/web-brand/official.svg', () => {
+    // 旧路径 `../../../brands/official/logo.svg` 在 src/lib/app.asar 三套布局下
+    // **都不存在**(仓库真源在 <repo>/brands/,而包内没有 brands/**)⇒ 兜底是死代码。
+    // 兜底必须落在 build/(唯一随包分发的品牌目录),且与 brandWebDir 同源。
+    const source = readFileSync(new URL('src/index.ts', packageRoot), 'utf8')
+    expect(source).toContain("new URL('../build/web-brand/official.svg', import.meta.url)")
+    expect(source).not.toContain("new URL('../../../brands/official/logo.svg'")
+  })
+
+  it('打包门禁要求两份品牌几何都随包(少了兜底就没有兜底)', () => {
+    expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toContain(PACKAGED_WEB_BRAND_FAVICON)
+    expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toContain(PACKAGED_WEB_BRAND_OFFICIAL)
   })
 })

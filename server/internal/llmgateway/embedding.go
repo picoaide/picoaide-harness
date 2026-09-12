@@ -64,7 +64,11 @@ type Embedder struct {
 }
 
 func NewEmbedder(db *sql.DB) *Embedder {
-	return &Embedder{db: db, client: &http.Client{Timeout: 60 * time.Second}}
+	// P1-4(审计 2026-09-12):出站 client 必须装**拨号期 IP 复检**,与
+	// chat/sse 用同一套 transport(handlers.go:61/64)。此前 Transport==nil
+	// → http.DefaultTransport:保存 provider 时的静态校验挡不住 DNS
+	// rebinding,带 provider API key 的请求会被发往云 metadata(169.254.169.254)。
+	return &Embedder{db: db, client: &http.Client{Timeout: 60 * time.Second, Transport: newUpstreamTransport()}}
 }
 
 // Embed returns one vector per input text (order preserved). Failover:
@@ -146,7 +150,9 @@ func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][
 		if lastErr != nil {
 			continue
 		}
-		return out, er.Usage.TotalTokens, nil
+		// P0-B(审计 2026-09-12):上游回报的负 token 归零(否则负费用 →
+		// refund → 余额凭空增加;响应体回显的 usage 也会是负数)。
+		return out, clampTokensNonNeg(er.Usage.TotalTokens), nil
 	}
 	return nil, 0, lastErr
 }

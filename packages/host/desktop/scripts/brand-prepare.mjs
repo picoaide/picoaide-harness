@@ -3,6 +3,8 @@
  *
  *   brands/official/          (authority for the official channel, committed)
  *     ├─ logo.svg             → generate-tray-icons   → build/tray-icon*.png
+ *     │                       → build/web-brand/favicon.svg（本次构建的品牌）
+ *     │                       → build/web-brand/official.svg（官方几何兜底,P1-12）
  *     ├─ logo-dark.svg        → (dark theme surface; not rasterized here)
  *     ├─ app-icon.png         → build/app-icon.png (win/linux icon + mac pipeline)
  *     │                       → generate-mac-app-icon → build/app-icon-mac.png
@@ -106,11 +108,18 @@ export async function prepareBrandAssets(options = {}) {
   // `/favicon.svg` 与 `/manifest.webmanifest`（见 src/brand-web-route.ts）；
   // 路由在打包产物里读不到仓库品牌目录，所以这里把**本次构建的品牌几何**
   // 落盘成 build/web-brand/favicon.svg（渠道 logo 优先，缺失则官方 logo）。
+  //
+  // 另外落一份**官方**几何成 build/web-brand/official.svg（2026-09-12 审计 P1-12）：
+  // 运行时候选链的最后一级是官方兜底，而它原先指向 `brands/official/logo.svg` ——
+  // 那个路径在 src/lib/app.asar 三套布局下都不存在（包内没有 brands/**），于是
+  // "渠道 logo 不可信时回落官方"这条链是死的。凡是随包分发的品牌图形都必须落在
+  // build/（electron-builder 的 buildResources），这里就是那个唯一真源。
   const webBrandDir = join(outputDir, 'web-brand')
   await mkdir(webBrandDir, { recursive: true })
   await copyFile(sources['logo.svg'], join(webBrandDir, 'favicon.svg'))
+  await copyFile(join(officialRoot, 'logo.svg'), join(webBrandDir, 'official.svg'))
 
-  const files = ['app-icon.png', 'app-icon-mac.png', 'web-brand/favicon.svg', ...trayFiles]
+  const files = ['app-icon.png', 'app-icon-mac.png', 'web-brand/favicon.svg', 'web-brand/official.svg', ...trayFiles]
   if (assisted !== undefined) files.push('assistedMessages.yml')
   return { channelId: context.channelId, files }
 }
