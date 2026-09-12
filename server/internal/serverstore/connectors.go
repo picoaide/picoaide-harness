@@ -59,7 +59,15 @@ func validateConnector(c *Connector) error {
 	if !ok || len(mcp) == 0 {
 		return ErrValidation
 	}
-	return validateConnectorMCP(mcp)
+	if err := validateConnectorMCP(mcp); err != nil {
+		return err
+	}
+	// tokenFields / settings 的 key 是**同一条注入通道**(客户端
+	// buildStdioEnv 会把凭据里 key 命中已声明字段名的值直接写进子进程 env),
+	// 必须与 mcp[].env 过同一套 denylist。2026-09-13:此前只校验 env,
+	// 一份 {"tokenFields":[{"key":"NODE_OPTIONS"}]} 的定义即可在每台员工
+	// 机器上向 MCP 子进程注入引导变量(与客户端 policy.ts 同源缺口)。
+	return validateConnectorCredentialFields(probe)
 }
 
 // 客户端会拿定义 JSON 直接 spawn 子进程/发起出站请求,所以服务端也必须校验
@@ -89,12 +97,13 @@ var (
 )
 
 // connectorEnvKeyAllowed: 与客户端 isDeniedEnvKey 同规则(Windows 环境变量名
-// 大小写不敏感,故统一大写比较)。
+// 大小写不敏感,故统一大写比较;两侧都先 trim,否则 " NODE_OPTIONS " 就是
+// 一条绕过路径)。
 func connectorEnvKeyAllowed(key string) bool {
-	if key == "" {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if upper == "" {
 		return false
 	}
-	upper := strings.ToUpper(key)
 	if connectorDeniedEnvKeys[upper] {
 		return false
 	}
@@ -104,6 +113,43 @@ func connectorEnvKeyAllowed(key string) bool {
 		}
 	}
 	return true
+}
+
+// connectorCredentialFieldLists 是凭据字段声明的两个容器(客户端
+// declaredCredentialKeys 读取的正是这两个列表)。
+var connectorCredentialFieldLists = []string{"tokenFields", "settings"}
+
+// validateConnectorCredentialFields 校验 tokenFields[] / settings[] 的元素形状,
+// 并拒绝任何 key 命中受保护环境键(denylist 与客户端 policy.ts 的
+// DENIED_ENV_KEYS + DSH_/ELECTRON_/PICOAIDE_ 前缀逐条对齐,由
+// TestConnectorDeniedEnvKeysMatchClientPolicy 守卫防漂移)。
+//
+// 为什么必须在这里拦:客户端把"定义里声明过的字段名"当成可信白名单
+// (declaredCredentialKeys → buildStdioEnv 的 env[key] = value),所以声明
+// NODE_OPTIONS / LD_PRELOAD / DSH_* 与直接写 mcp[].env 等价 —— 服务端 schema
+// 必须把两条通道一起堵住。
+func validateConnectorCredentialFields(probe map[string]any) error {
+	for _, list := range connectorCredentialFieldLists {
+		raw, present := probe[list]
+		if !present {
+			continue
+		}
+		items, ok := raw.([]any)
+		if !ok {
+			return ErrValidation
+		}
+		for _, item := range items {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return ErrValidation
+			}
+			key, ok := m["key"].(string)
+			if !ok || !connectorEnvKeyAllowed(key) {
+				return ErrValidation
+			}
+		}
+	}
+	return nil
 }
 
 // connectorURLAllowed: 出站策略的 Go 侧镜像(https,或回环 http;
@@ -122,6 +168,13 @@ func connectorURLAllowed(raw string) bool {
 		return false
 	}
 	host := parsed.Hostname()
+	if host == "" {
+		return false
+	}
+	// FQDN 根点归一(2026-09-13 审计 R3):`metadata.google.internal.` / `localhost.`
+	// 与不带点的写法解析到同一目标,不归一就能绕过下面的名单;与客户端
+	// classifyHost 的 `.replace(/\.$/,'')` 同口径。
+	host = strings.TrimSuffix(host, ".")
 	if host == "" {
 		return false
 	}
