@@ -111,17 +111,27 @@ export function maskSensitiveFragment(fragment: string): string {
 
 /** Strip sensitive URL parts before persistence (never throws): credential
  * query parameters, userinfo (`user:pass@host`) and secret-shaped fragment
- * pairs. Mirrors the runtime op-log masking (runtime maskBrowserSummary). */
+ * pairs. Mirrors the runtime op-log masking (runtime maskBrowserSummary).
+ *
+ * A URL that needs no masking is returned **byte-identical** (R-1, 2026-09-13):
+ * `new URL().href` canonicalizes (`https://example.com` → `https://example.com/`,
+ * adds `/` before `?`), and this function is now also the projection applied to
+ * every tab state the runtime hands out — canonicalizing there would rewrite
+ * ordinary URLs for no security gain. */
 export function stripSensitiveUrl(raw: string): string {
   try {
     const url = new URL(raw)
-    if (url.username !== '') url.username = '****'
-    if (url.password !== '') url.password = '****'
+    let changed = false
+    if (url.username !== '') { url.username = '****'; changed = true }
+    if (url.password !== '') { url.password = '****'; changed = true }
     for (const name of [...url.searchParams.keys()]) {
-      if (SENSITIVE_KEY_PATTERN.test(name)) url.searchParams.set(name, '****')
+      if (SENSITIVE_KEY_PATTERN.test(name)) { url.searchParams.set(name, '****'); changed = true }
     }
-    if (url.hash !== '') url.hash = maskSensitiveFragment(url.hash)
-    return url.href
+    if (url.hash !== '') {
+      const masked = maskSensitiveFragment(url.hash)
+      if (masked !== url.hash) { url.hash = masked; changed = true }
+    }
+    return changed ? url.href : raw
   } catch {
     return raw
   }
@@ -358,12 +368,32 @@ export class BrowserStore {
 
   addDownload(entry: Omit<DownloadEntry, 'id' | 'createdAt' | 'status'> & { status?: DownloadEntry['status'] }): DownloadEntry {
     const { status: statusOverride, ...rest } = entry
+    // R-1 (2026-09-13): `url` was the only redacted field. `fileName` comes
+    // from `Content-Disposition`/the URL basename and `path` embeds that name,
+    // so a signed download URL reached `browser_downloads_list` — and the disk
+    // — in cleartext beside a `****` url. Same text-level redactor, at the
+    // write path, so every reader (tool exit, shell panel, JSONL) agrees.
+    const url = stripSensitiveUrl(entry.url)
+    let fileName = stripSensitiveText(entry.fileName)
+    // A name derived from a credential-bearing URL keeps the credential in a
+    // *path segment* (`/dl/report-<token>.zip?token=…`), which no key-shaped
+    // rule can recognize. When the name is demonstrably taken from that URL,
+    // the name the model is shown is dropped.
+    //
+    // `path` deliberately stays truthful: it is the handle `downloads_open`
+    // and the file tools use to reach a real file on disk, and the same name is
+    // visible by listing the downloads directory, so masking it here would
+    // remove the capability without hiding the string. Recorded as a residual.
+    const fileNameFromCredentialUrl = url !== entry.url && fileName !== '' && entry.url.includes(fileName)
+    if (fileNameFromCredentialUrl) fileName = '****'
     const record: DownloadEntry = {
       ...rest,
       id: ++this.downloadSeq,
       createdAt: Date.now(),
       status: statusOverride ?? 'done',
-      url: stripSensitiveUrl(entry.url),
+      url,
+      fileName,
+      path: stripSensitiveText(entry.path),
     }
     this.downloads.push(record)
     this.append('downloads', record)
@@ -415,10 +445,14 @@ export class BrowserStore {
     // (`?code=` / `#access_token=`) must not sit in cleartext on disk when the
     // very same URL is masked in history. A restored token-bearing tab then
     // opens the masked URL — acceptable: those URLs are single-use anyway.
+    // R-1 (2026-09-13): `title` is redacted by the same rule — it is frequently
+    // the URL itself (no `<title>`, Electron's title fallback) and every other
+    // persisted surface (history/bookmarks) already stores the text-level
+    // redaction, so the ledger was the last cleartext column on disk.
     // A ledger without tab urls is stored untouched (shape preserved).
     const ledgerTabs: BrowserLedger['tabs'] | undefined = Array.isArray(ledger.tabs) ? ledger.tabs : undefined
     const sanitized: BrowserLedger = ledgerTabs !== undefined && ledgerTabs.length > 0
-      ? { ...ledger, tabs: ledgerTabs.map((tab) => ({ ...tab, url: stripSensitiveUrl(tab.url) })) }
+      ? { ...ledger, tabs: ledgerTabs.map((tab) => ({ ...tab, url: stripSensitiveUrl(tab.url ?? ''), title: stripSensitiveText(tab.title ?? '') })) }
       : ledger
     this.ledger = sanitized
     this.writeLedger(sanitized)

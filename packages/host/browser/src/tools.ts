@@ -648,11 +648,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed. It is a misuse guardrail, not a security boundary.',
+    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. IMPORTANT: on a tab that received credentials through browser_fill_credentials, network-write APIs (fetch/XMLHttpRequest/sendBeacon/WebSocket/EventSource/form.submit/Worker) are refused and disabled — reads and the read* helpers keep working. It is a misuse guardrail, not a security boundary.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
-      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
-      frame: { type: 'integer', description: 'Frame index (0 = main frame, default; 1 = first subframe…). The expression runs in that frame\'s own JavaScript world, exactly like frame 0 — page globals are visible.' },
+      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed except on credential tabs; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
+      frame: { type: 'integer', description: 'Frame index in DOM order (0 = main frame, default; 1 = first iframe in the page, including cross-origin ones). The expression runs in that frame\'s own JavaScript world, exactly like frame 0 — page globals are visible. If the page contains a frame the index cannot map 1:1, the call fails with an explicit error instead of using a neighbouring frame.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string' } } },

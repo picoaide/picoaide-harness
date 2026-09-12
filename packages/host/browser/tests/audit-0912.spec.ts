@@ -419,14 +419,22 @@ describe('P1-5 op log 的 URL fragment 与 history 同款脱敏', () => {
 // ------------------------------------------------------------------- P1-7
 
 describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
-  const FRAME_TREE = { frameTree: { frame: { id: 'MAIN' }, childFrames: [{ frame: { id: 'IFRAME-1' } }] } }
+  // R-4 (2026-09-13): `frame: N` 现在是"DOM 位置"。解析索引前 runtime 会先问每个
+  // 文档"你有几个 iframe/frame 属主、URL 是什么"（同源子帧必须能和
+  // Page.getFrameTree 的子帧一一对上），所以 fixture 的子帧要有 URL、DOM 探针
+  // 要回同样的 URL 列表——这正是真实 CDP 上的形状。
+  const FRAME_URL = 'https://pay.example/frame'
+  const FRAME_TREE = { frameTree: { frame: { id: 'MAIN' }, childFrames: [{ frame: { id: 'IFRAME-1', url: FRAME_URL } }] } }
+  const isDomProbe = (expression: unknown): boolean => String(expression ?? '').includes("querySelectorAll('iframe,frame')")
+  // 主文档有 1 个 iframe 属主；子帧文档里没有 iframe（真实形状）。
+  const domProbeValue = (params: Record<string, unknown> | undefined): string[] => (params?.['contextId'] === undefined ? [FRAME_URL] : [])
 
   it('frame 1 用默认世界 contextId 求值（页面 JS 全局可见），不建隔离世界', async () => {
     const { runtime, adapter, dir } = makeRuntime()
     opened.push({ runtime, dir })
     await runtime.open('https://a.example')
     const view = adapter.lastView()
-    view.transport.handler = (method) => {
+    view.transport.handler = (method, params) => {
       if (method === 'Page.getFrameTree') return FRAME_TREE
       if (method === 'Runtime.enable') {
         // 真实 CDP：enable 的响应与"既有 context"通知竞争，通知可能晚一拍。
@@ -437,12 +445,16 @@ describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
         }, 5)
         return {}
       }
-      if (method === 'Runtime.evaluate') return { result: { value: 'FROM-IFRAME-SCRIPT' } }
+      if (method === 'Runtime.evaluate') {
+        if (isDomProbe(params?.expression)) return { result: { value: domProbeValue(params) } }
+        return { result: { value: 'FROM-IFRAME-SCRIPT' } }
+      }
       return {}
     }
 
     await expect(runtime.eval(1, 'window.__APP__.token', 1)).resolves.toBe('"FROM-IFRAME-SCRIPT"')
-    const evaluate = view.transport.commands.find((c) => c.method === 'Runtime.evaluate')
+    // 真正求值的那条（带 contextId 的那条），DOM 探针不算。
+    const evaluate = view.transport.commands.find((c) => c.method === 'Runtime.evaluate' && c.params?.contextId !== undefined)
     expect(evaluate?.params?.contextId).toBe(42)
     expect(view.transport.commands.map((c) => c.method)).not.toContain('Page.createIsolatedWorld')
   })
@@ -452,15 +464,19 @@ describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
     opened.push({ runtime, dir })
     await runtime.open('https://a.example')
     const view = adapter.lastView()
-    view.transport.handler = (method) => {
+    view.transport.handler = (method, params) => {
       if (method === 'Page.getFrameTree') return FRAME_TREE
-      if (method === 'Runtime.evaluate') return { result: { value: 'SHOULD-NOT-RUN' } }
+      if (method === 'Runtime.evaluate') {
+        if (isDomProbe(params?.expression)) return { result: { value: domProbeValue(params) } }
+        return { result: { value: 'SHOULD-NOT-RUN' } }
+      }
       return {}
     }
     const err = await runtime.eval(1, 'window.__APP__', 1).catch((e: unknown) => e)
     expect((err as { code?: string }).code).toBe('not-found')
     expect(view.transport.commands.map((c) => c.method)).not.toContain('Page.createIsolatedWorld')
-    expect(view.transport.commands.map((c) => c.method)).not.toContain('Runtime.evaluate')
+    // 用户的表达式一次都没执行（只有 DOM 结构探针跑过）。
+    expect(view.transport.commands.filter((c) => c.method === 'Runtime.evaluate' && !isDomProbe(c.params?.expression))).toHaveLength(0)
   })
 
   it('frame 0 依旧不带 contextId（语义不变）', async () => {
@@ -475,11 +491,23 @@ describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
     expect(view.transport.commands.map((c) => c.method)).not.toContain('Page.getFrameTree')
   })
 
-  it('frame 越界仍然报 not-found', async () => {
+  it('frame 越界仍然报 not-found（并报出真实帧数）', async () => {
     const { runtime, adapter, dir } = makeRuntime()
     opened.push({ runtime, dir })
     await runtime.open('https://a.example')
-    adapter.lastView().transport.handler = (method) => (method === 'Page.getFrameTree' ? FRAME_TREE : {})
+    const view = adapter.lastView()
+    view.transport.handler = (method, params) => {
+      if (method === 'Page.getFrameTree') return FRAME_TREE
+      if (method === 'Runtime.enable') {
+        setTimeout(() => {
+          view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 7, auxData: { frameId: 'MAIN', isDefault: true } } })
+          view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 42, auxData: { frameId: 'IFRAME-1', isDefault: true } } })
+        }, 5)
+        return {}
+      }
+      if (method === 'Runtime.evaluate' && isDomProbe(params?.expression)) return { result: { value: domProbeValue(params) } }
+      return {}
+    }
     const err = await runtime.eval(1, 'window.__APP__', 9).catch((e: unknown) => e)
     expect((err as { code?: string }).code).toBe('not-found')
     expect((err as Error).message).toContain('does not exist')
