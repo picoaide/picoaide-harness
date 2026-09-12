@@ -923,34 +923,61 @@ export function apply(ctx: Context, config: Config): void {
   let warnedMissingProofFence = false
 
   /**
-   * 持有性证明(审计 2026-09-12 P1-3/FIX-18),**只给会话变更类路由**用。
+   * 持有性证明(审计 2026-09-12 P1-3/FIX-18;三轮残留②:2026-09-13 收紧 fail-open)。
    *
    * `guard()` 的注释已经自述其边界(`loopback.ts:60-64`):"a bare curl sends
    * neither header and is refused, but a curl with a forged Origin passes this
    * too"。也就是说:**本机任意进程**只要伪造 `Origin` 就能 `POST
    * /api/pico/auth/login` 把整个会话换到攻击者服务端(员工后续的对话与工具
-   * 调用都会打到那台机器)。会话变更(login/password/logout)必须再要求一项
-   * 只有"由本进程服务、经 launch token 换过票的浏览器页面"才持有的东西——
-   * 即上游 `connection` 服务的 BrowserAuth cookie(`dsh-auth-<authority>`:
-   * HttpOnly + SameSite=Strict + HMAC,由 GET /?token=… 交换而来)。
+   * 调用都会打到那台机器)。会话变更必须再要求一项只有"由本进程服务、经
+   * launch token 换过票的浏览器页面"才持有的东西——即上游 `connection` 服务的
+   * BrowserAuth cookie(`dsh-auth-<authority>`: HttpOnly + SameSite=Strict +
+   * HMAC,由 GET /?token=… 交换而来)。
    *
    * 复用上游机制,不新造:直接调 `connection.requestRejection()` —— 它做的正是
-   * "Host/Origin 围栏 + cookie 验签"两件事。组合里没有该服务(非 desktop 的
-   * 兼容组合)时明确降级为 `guard()` 并打一条 warn,而不是把登录整锁死。
+   * "Host/Origin 围栏 + cookie 验签"两件事。
+   *
+   * 服务缺席时的口径(本轮修正):
+   *   - `'required'`(高危:换 server / 换账号的 login、logout)——**fail-closed**。
+   *     拿不到持有性证明能力 ⇒ 谁都无法证明自己是那个真页面,此时退回 `guard()`
+   *     等于把"本机任意进程伪造 Origin"重新放进来(上一轮只打一条 warn,
+   *     是货真价实的 fail-open)。返回 503 + 明确错误码,让人看得见地失败。
+   *   - `'best-effort'`(低危:改密——必须先交出**旧密码**才能生效,本机
+   *     伪造 Origin 的进程拿不出凭据)——维持既有降级:warn 一次后走 `guard()`。
    * @param req - 本地 HTTP 请求(读 headers)。
    * @param res - 拒绝时写响应体的对象。
+   * @param level - 持有性证明缺失时的口径(见上)。
    * @returns true 表示可以继续处理。
    */
-  const proofOfPossession = (req: IncomingMessage, res: ServerResponse): boolean => {
+  const proofOfPossession = (
+    req: IncomingMessage,
+    res: ServerResponse,
+    level: 'required' | 'best-effort',
+  ): boolean => {
     const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') as ConnectionTrustFence | undefined
     if (fence === undefined || typeof fence.requestRejection !== 'function') {
+      if (level === 'required') {
+        ctx.logger?.warn?.('pico: connection service unavailable; refusing a high-risk session change (fail-closed)')
+        json(res, 503, {
+          error: 'browser session proof unavailable',
+          hint: 'reopen the application window from its launch URL before changing the session',
+        })
+        return false
+      }
       if (!warnedMissingProofFence) {
         warnedMissingProofFence = true
         ctx.logger?.warn?.('pico: connection service unavailable; session-changing routes fall back to the loopback fence')
       }
       return true
     }
-    const rejection = fence.requestRejection({ headers: req.headers })
+    let rejection: 401 | 403 | undefined
+    try {
+      rejection = fence.requestRejection({ headers: req.headers })
+    } catch (err) {
+      // 校验器自身抛错 = 无法证明 ⇒ 按拒绝处理(不把异常泄漏成 500)。
+      ctx.logger?.warn?.(`pico: browser proof check failed (${err instanceof Error ? err.message : String(err)})`)
+      rejection = 403
+    }
     if (rejection === undefined) return true
     ctx.logger?.warn?.(`pico: refused a session-changing request without browser proof (${String(rejection)})`)
     json(res, 403, {
@@ -1025,7 +1052,9 @@ export function apply(ctx: Context, config: Config): void {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
           // FIX-18:会话变更类路由额外要求持有性证明(见 proofOfPossession)。
-          if (!proofOfPossession(req, res)) return
+          // 残留②(2026-09-13):login 可换 server / 换账号 ⇒ 高危,fence 缺席时
+          // fail-closed(503),不再退回只有同源标记的 guard()。
+          if (!proofOfPossession(req, res, 'required')) return
           // 审计 2026-08-25 P2-2:body 上限 64KB(登录表单远小于此)。
           const raw = await collectBody(req, 64 * 1024).catch(() => null)
           if (raw === null) return json(res, 413, { error: 'body too large' })
@@ -1064,7 +1093,9 @@ export function apply(ctx: Context, config: Config): void {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
           // FIX-18:改密同样是会话变更类操作,要求持有性证明。
-          if (!proofOfPossession(req, res)) return
+          // 残留②(2026-09-13):改密必须先交出旧密码(本机伪造 Origin 的进程拿不出
+          // 凭据)⇒ 低危,维持既有降级口径(best-effort,不锁死)。
+          if (!proofOfPossession(req, res, 'best-effort')) return
           const raw = await collectBody(req, 64 * 1024).catch(() => null)
           if (raw === null) return json(res, 413, { error: 'body too large' })
           let body: { old_password?: unknown; new_password?: unknown }
@@ -1118,7 +1149,9 @@ export function apply(ctx: Context, config: Config): void {
           if (!guard(req, res)) return
           // FIX-18:登出也归"会话变更类"(防本机进程强制踢出)。产品内两个
           // 调用点(登录页、账号卡)都从本进程服务的页面发起,cookie 恒在。
-          if (!proofOfPossession(req, res)) return
+          // 残留②(2026-09-13):强制登出是拒绝服务攻击面 ⇒ 高危,fence 缺席时
+          // fail-closed(503),不用 guard() 放行。
+          if (!proofOfPossession(req, res, 'required')) return
           // Revoke the gateway token server-side before clearing locally
           // (M1): the server token must not outlive the local session.
           const s = session()
