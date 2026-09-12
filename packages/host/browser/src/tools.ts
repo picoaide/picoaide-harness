@@ -517,7 +517,16 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const elements = await runtime.snapshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
-      return { elements, url: state.url, title: state.title }
+      // R7（2026-09-13）P0：`selector` 由页面可控的 id/class 拼成（`el.id = password`
+      // 时就是 `#<口令>`），必须与 text 同口径做值级擦除，否则它是唯一还能逐字回传
+      // 口令的模型面出口。只擦模型看到的这一份：按编号点击走 `resolveTarget` 内部
+      // 的未擦除快照，交互不受影响（拿被擦除的 selector 当 CSS 选择器会失败，
+      // 属可接受代价）。
+      const safeElements = elements.map((element) => {
+        const selector = runtime.redactTabSecrets(tabId, element.selector)
+        return selector === element.selector ? element : { ...element, selector }
+      })
+      return { elements: safeElements, url: state.url, title: state.title }
     },
   }))
 
