@@ -135,7 +135,8 @@ export async function verifyChannelPackage(options: {
       + '（构建期与运行期必须同源，否则升级一次就换数据根）',
     )
     // 品牌渠道不得与官方共用一个数据根（跨渠道共享登录态/会话）；公共渠道
-    // （official/beta）显式声明官方目录是**刻意**的（beta 环境要经常跑测试）。
+    // （official/beta）显式声明官方目录是**刻意**的（beta 必须与正式版一致：
+    // 预发版是正式版的前置验证，登录态/设置/会话要延续，见 ci-channels.sh 的守卫）。
     const publicChannel = context.channelId === 'official' || context.channelId === 'beta'
     assert(
       publicChannel || stagedProfile.homeDir !== PRODUCT_DSH_HOME_DIR,
