@@ -85,6 +85,8 @@ aws() { command aws --endpoint-url "$ENDPOINT" "$@"; }
 IMMUTABLE='public, max-age=31536000, immutable'
 NO_CACHE='no-cache'
 # 保留最近 N 个版本(用户定案);版本序必须用 sort -V:字面序里 2.10.0 < 2.9.0。
+# 留存**总数**是该口径(`$VER` + 次新的 KEEP-1 个,见下面 prune 段),不是"KEEP 个
+# 之外再加本次版本"。
 KEEP=3
 
 TOTAL=0
@@ -119,15 +121,49 @@ while IFS= read -r channel; do
   fi
 
   # 2) 清理到最近 KEEP 个版本
-  aws s3 ls "$base/releases/" | awk '{print $2}' | sed 's#/##' | grep -E '^[0-9]' \
-    | sort -rV | tail -n +$((KEEP + 1)) | while IFS= read -r old; do
+  #
+  # `$VER`(本次刚上传)**永不参与淘汰**(2026-09-12 审计 P1-2):它在上一行刚进
+  # 这个远端目录,而旧实现只按排序位次截断,从不排除自己 —— 被删掉之后紧接着
+  # 写出的 `latest.json` 就指向一个空目录(客户按 `server.version` 取包 404,
+  # 而流水线全绿)。`sort -rV` 的语义让这件事在**正常发布序列**下就会发生:
+  # GNU version sort 把预发布排在正式版**之前**(`2.7.2-beta.6` > `2.7.2`),
+  # 正式版一出就被自己的预发布挤到第 KEEP+1 位。
+  #
+  # 保留口径不变(仍是最近 KEEP 个):淘汰集合 = 除 `$VER` 外按版本序排在
+  # 第 KEEP 位及以后的版本 ⇒ 留存 = `$VER` + 次新的 (KEEP-1) 个。这样留存
+  # **个数**与预发布/正式版的相对次序无关,`$VER` 也恒定在留存集合里。
+  # 排除用 `grep -xF`(整行精确匹配):`2.7.2` 不能误伤 `2.7.20`/`2.7.2-beta.1`。
+  #
+  # `|| true` 是必需的:排除 `$VER` 之后"没有更老的版本"是**正常**结果,而
+  # `grep -v` 无匹配时退出码为 1 —— 开头的 `set -o pipefail` 会把整条管道判成
+  # 失败,让"某渠道的第一次发布"直接中止。`||` 只兜住管道本身的退出码,stdout
+  # 仍是管道输出(`true` 不产生输出),所以版本列表照常拿到。
+  versions="$(aws s3 ls "$base/releases/" | awk '{print $2}' | sed 's#/##' \
+    | grep -E '^[0-9]' | grep -vxF "$VER" || true)"
+  printf '%s\n' "$versions" | sort -rV | tail -n +"$KEEP" \
+    | while IFS= read -r old; do
         [ -n "$old" ] || continue
         # 中性日志:渠道名不打印(只报版本号)。
         echo "prune old release (version ${old})"
         brand_run_best_effort aws s3 rm "$base/releases/$old/" --recursive
       done
 
-  # 3) 版本指针**最后**写:先资产后指针,读者永远不会看到指向空目录的清单。
+  # 3) 写指针前先确认本轮资产**真的在远端**:指纹向空目录是最坏的一类静默
+  # 故障(客户取包 404 而流水线全绿)。`aws s3 ls <对象键>` 对不存在的键
+  # **退出码为 0 且无输出**(按前缀列举),所以断言的是"有输出",不是退出码。
+  # 失败原因经 brand_sanitize 脱敏(对象键里带渠道 id)。
+  asset_key="$base/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+  set +e
+  asset_listing="$(aws s3 ls "$asset_key" 2>&1)"
+  asset_status=$?
+  set -e
+  if [ "$asset_status" -ne 0 ] || [ -z "$asset_listing" ]; then
+    [ -z "$asset_listing" ] || printf '%s\n' "$asset_listing" | brand_sanitize >&2
+    echo "::error::本轮上传的镜像包在更新服务器上不存在(releases/${VER}/),拒绝写 latest.json(避免指针指向 404)" >&2
+    exit 1
+  fi
+
+  # 4) 版本指针**最后**写:先资产后指针,读者永远不会看到指向空目录的清单。
   manifest="$(mktemp)"
   cat > "$manifest" <<JSON
 {

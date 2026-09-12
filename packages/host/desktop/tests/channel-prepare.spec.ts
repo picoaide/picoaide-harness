@@ -109,6 +109,23 @@ describe('prepareChannelPackaging', () => {
     expect(existsSync(join(appDir, 'assistedMessages.yml'))).toBe(true)
   })
 
+  it('官方几何始终落盘为 web-brand/official.svg(渠道 logo 被拒时的兜底,P1-12)', async () => {
+    const repo = await channelRepo({ channelId: 'example-brand', channel: brandChannel('example-brand') })
+    const appDir = tempDir('dsh-app-')
+
+    await prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: 'example-brand' }, repoRoot: repo, appDir })
+
+    // 随包的 favicon 是**渠道**几何。
+    const favicon = join(appDir, 'web-brand', 'favicon.svg')
+    expect(sha256(favicon)).toBe(sha256(join(repo, 'channels', 'example-brand', 'logo.svg')))
+    // 兜底那份必须是**官方**几何,且落在 build/(唯一随包分发的品牌目录)。
+    // 运行时候选链最后一级(src/index.ts 的 officialLogoPath)读的就是它:
+    // 渠道 logo 带脚本特征/损坏时,标签页应当回落**官方 mark**而不是上游厂商图形。
+    const fallback = join(appDir, 'web-brand', 'official.svg')
+    expect(existsSync(fallback)).toBe(true)
+    expect(sha256(fallback)).toBe(sha256(officialLogo))
+  })
+
   it('官方构建:清掉上一次渠道构建残留的 channel.json,图标回到官方', async () => {
     const repo = await channelRepo({ channelId: 'example-brand', channel: brandChannel('example-brand') })
     const appDir = tempDir('dsh-app-')

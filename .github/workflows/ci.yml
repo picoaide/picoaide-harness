@@ -315,11 +315,26 @@ jobs:
       # artifact 名保持**中性**(不含渠道名):公开仓的 artifact 列表是匿名可读的
       # (实测),名字里带渠道 id 就等于公开客户名。
       # 2026-09-10 审计后**内容也不再含品牌渠道**:品牌渠道的安装包经 R2 私密中转
-      # (见下面的 transfer 步骤),这里只剩 official/beta —— 它们的品牌本来就公开。
+      # (见上面的 transfer 步骤),这里只剩 official/beta —— 它们的品牌本来就公开。
+      #
+      # 2026-09-12 审计 P1-1:上面那句"只剩 official/beta"**只在 tag 上成立** ——
+      # transfer 步骤带 tag 守卫,分支/PR 上被跳过,品牌产物还留在 client-assets/。
+      # 所以这里必须自己带同源守卫(与 macOS job 的写法一致,见本文件 desktop-macos),
+      # 非 tag 时只上传 official;否则一个形如 `v9.9.9` 的**分支名**就能让客户品牌
+      # 安装包进入匿名可读的 artifact。只改 `scripts/ci-channels.sh` 不足以兜住
+      # "别的调用方往 client-assets/ 放东西",artifact 出口自己也要有门。
       - uses: actions/upload-artifact@v7
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: desktop-Linux
           path: client-assets/**
+          if-no-files-found: error
+      # 非 tag(PR/分支)也要有可下载产物:只传 official 那一份(品牌产物不在里面)。
+      - uses: actions/upload-artifact@v7
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          name: desktop-Linux
+          path: client-assets/official/**
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         if: always()
@@ -416,10 +431,20 @@ jobs:
           mkdir -p client-assets/official
           cp packages/host/desktop/dist/*Setup*.exe client-assets/official/
       # artifact 名中性(公开仓的 artifact 列表匿名可读,名字带渠道 id 即泄露客户名)。
+      # 守卫与 linux job / macOS job 同源(2026-09-12 审计 P1-1):品牌渠道产物经
+      # R2 中转、**只在 tag 上**被搬走,非 tag 时 client-assets/ 里仍有品牌目录
+      # ⇒ 无守卫的 upload 等于把客户品牌安装包公开。非 tag 只传 official。
       - uses: actions/upload-artifact@v7
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: desktop-Windows-installer
           path: client-assets/**
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          name: desktop-Windows-installer
+          path: client-assets/official/**
           if-no-files-found: error
 
   # macOS 单 job 三态:正式 tag(纯 vX.Y.Z)打包+签名+公证(可重试);预发 tag

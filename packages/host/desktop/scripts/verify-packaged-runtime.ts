@@ -64,6 +64,10 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 的逐字节副本,渠道构建 = 该渠道自己的 mark)。被服务的 favicon 曾经是上游鱼(P0-2),
   // 这里同时断言"存在"与"内容不带上游特征"(见 assertBrandAssetSvg)。
   'build/web-brand/favicon.svg',
+  // 官方兜底几何(P1-12):渠道 logo 被判定为不可信/损坏时,运行时回落到这一份
+  // (src/brand-web-route.ts 候选链的最后一级,路径来自 src/index.ts)。少了它,
+  // 打包态就没有兜底 —— 标签页直接回落到上游厂商图形。
+  'build/web-brand/official.svg',
   'node_modules/@deepseek-ai/dsh/package.json',
   // Upstream 0.1.2: shipped presets moved from @deepseek-ai/dsh/config to
   // the agent-presets package root `presets/` directory.
@@ -107,6 +111,23 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
  * a completely different drawing — moka's mark has no `scale(1.25)`).
  */
 export const PACKAGED_WEB_BRAND_FAVICON = 'build/web-brand/favicon.svg'
+
+/**
+ * Official brand geometry staged by `brand-prepare.mjs` on **every** build
+ * (channel builds included).
+ *
+ * 运行时用它做候选链的最后一级:`src/index.ts` 的 `officialLogoPath` →
+ * `build/web-brand/official.svg`(2026-09-12 审计 P1-12;旧值指向
+ * `brands/official/logo.svg`,那个路径在 src/lib/app.asar 三套布局下都不存在,
+ * 于是"渠道 logo 不可信时回落官方"是死代码)。
+ */
+export const PACKAGED_WEB_BRAND_OFFICIAL = 'build/web-brand/official.svg'
+
+/** 随包分发的品牌几何(存在性 + 内容都要过门禁)。 */
+export const PACKAGED_WEB_BRAND_ASSETS = [
+  PACKAGED_WEB_BRAND_FAVICON,
+  PACKAGED_WEB_BRAND_OFFICIAL,
+] as const
 
 /**
  * Upstream-only markers the packaged brand asset must never carry.
@@ -495,13 +516,16 @@ function readPackagedEntry(root: string, entry: string): string {
 /**
  * Verify the packaged brand geometry by reading it back out of the package
  * (archive or physical tree) and asserting it is our SVG, not the upstream
- * mark (P0-2/P0-3).
+ * mark (P0-2/P0-3)。两份都要:**被服务的 favicon** 与**官方兜底**(P1-12;
+ * 兜底那份必须是官方几何 —— 它正是"渠道图形不可信"时的回落目标)。
  * @param read - reads one package-relative entry.
  * @param where - location prefix for error messages.
  * @returns Nothing; failure rejects an upstream/unreadable brand asset.
  */
-function verifyWebBrandFavicon(read: (entry: string) => string, where: string): void {
-  assertBrandAssetSvg(read(PACKAGED_WEB_BRAND_FAVICON), `${where}:${PACKAGED_WEB_BRAND_FAVICON}`)
+function verifyWebBrandAssets(read: (entry: string) => string, where: string): void {
+  for (const entry of PACKAGED_WEB_BRAND_ASSETS) {
+    assertBrandAssetSvg(read(entry), `${where}:${entry}`)
+  }
 }
 
 /** Try to list one archive; an absent archive is the physical-layout signal. */
@@ -717,7 +741,7 @@ export function verifyPackagedRuntime(
   verifyUnpackedPackageResolution(asarPath, asarEntries)
   // 品牌静态素材:存在性由 REQUIRED_PACKAGED_RUNTIME_ENTRIES 保证,这里把内容读出来
   // 断言"是我方几何、不是上游鱼"(P0-2)。
-  verifyWebBrandFavicon(entry => readEntry(asarPath, entry), asarPath)
+  verifyWebBrandAssets(entry => readEntry(asarPath, entry), asarPath)
 }
 
 /**
@@ -766,7 +790,7 @@ function verifyPhysicalRuntime(
       `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required package exports: ${missingExports.map(entry => entry.archivePath).join(', ')}`,
     )
   }
-  verifyWebBrandFavicon(entry => readEntry(appRoot, entry), appRoot)
+  verifyWebBrandAssets(entry => readEntry(appRoot, entry), appRoot)
 }
 
 /** Package names smartUnpack legitimately keeps physical (native binaries). */

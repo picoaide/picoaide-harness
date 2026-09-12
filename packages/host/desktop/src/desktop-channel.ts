@@ -55,6 +55,49 @@ const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]*$/u
 export const NEUTRAL_BRAND_NAME = 'Harness'
 
 /**
+ * 产品名（`desktop.product_name`）的形状（2026-09-12 审计 P1-13）。
+ *
+ * 这个字段不只是显示名，它同时是**路径型字段**：渠道构建的 Electron userData
+ * 目录名（`desktop-user-data.ts`）与 mac 的 `<产品名>.app` 目录名都由它派生。
+ * 同批字段里它是唯一没有形状校验的（slug / app_id / deep_link_scheme / home_dir
+ * 都有），于是一份渠道包写 `"../evil"` 就能把整个数据根挪出 `appData`。
+ *
+ * 规则（与 home_dir / app_id 同口径）：1–64 字符；禁路径分隔符与控制字符；
+ * 禁 Windows 非法字符（`<>:"|?*`，Windows 上含它们的目录名直接建不出来）；
+ * 不以空白开头、不以点或空格结尾（`..`、`Acme.` 是它的子集）。
+ * 允许非 ASCII（中文产品名合法）与内部空格（`Acme Harness`）。
+ * 构建期同款校验在 `scripts/ci-channels.sh`（fail-loud 在客户机器之前）。
+ */
+const PRODUCT_NAME_PATTERN = /^[^\s/\\:*?"<>|\u0000-\u001F\u007F][^/\\:*?"<>|\u0000-\u001F\u007F]{0,63}$/u
+
+/**
+ * 是否是形状合法的产品名（`undefined`/`''`/畸形值一律 false）。
+ * @param value - 渠道包里的 `desktop.product_name`（不可信输入）。
+ * @returns 合法时为 true。
+ */
+export function isSafeProductName(value: unknown): value is string {
+  return typeof value === 'string' && PRODUCT_NAME_PATTERN.test(value) && !/[. ]$/u.test(value)
+}
+
+/**
+ * 依次取第一个形状合法的产品名（`desktop.product_name` → `identity.display_name`）。
+ *
+ * 为什么校验的是**最终取值**而不是只校验 product_name：`display_name` 是
+ * product_name 的回落来源，只校验前者的话 `display_name: "../evil"` 会从后门拿到
+ * 同一个路径型出口。两个都不合形状时给中性占位（`NEUTRAL_BRAND_NAME`）——
+ * 绝不回落到厂商名，也绝不让畸形值进路径。
+ * @param candidates - 候选值（按优先级）。
+ * @returns 产品名（永不为空串）。
+ */
+function safeProductName(...candidates: readonly unknown[]): string {
+  for (const candidate of candidates) {
+    const value = nonEmptyString(candidate)
+    if (value !== undefined && isSafeProductName(value)) return value
+  }
+  return NEUTRAL_BRAND_NAME
+}
+
+/**
  * 渠道包在客户端侧生效的品牌文案（登录前就要用，所以必须随包）。
  *
  * 与 `ChannelConfig`（服务端下发）**同形但不是同一来源**：这份是构建期随包
@@ -213,8 +256,10 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
   const desktopRecord = asRecord(desktop)
   const identityRecord = asRecord(identity)
   const copyRecord = asRecord(copy)
-  const productName = nonEmptyString(desktopRecord.product_name)
-    ?? nonEmptyString(identityRecord.display_name)
+  // 形状校验的是**最终取值**(P1-13):product_name → display_name 是取值链,只校验
+  // 前者的形状会让 `display_name: "../evil"` 从后门拿到同一个路径型出口(userData
+  // 目录名 / mac `.app` 目录名)。两个都不合形状 → 中性占位,绝不回落厂商名。
+  const productName = safeProductName(desktopRecord.product_name, identityRecord.display_name)
   const windowTitle = nonEmptyString(desktopRecord.window_title) ?? productName
   const rawScheme = nonEmptyString(desktopRecord.deep_link_scheme)
   // 形状不对就回落官方 scheme:一个畸形 scheme 会让浏览器回调彻底打不开客户端,

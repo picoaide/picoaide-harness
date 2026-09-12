@@ -166,6 +166,47 @@ describe('desktop channel profile', () => {
     expect(parseDesktopChannelProfile(channelValue({ desktop: { app_id: 'not an id' } }))?.appId).toBeUndefined()
   })
 
+  /**
+   * `desktop.product_name` 是**路径型字段**(Electron userData 目录名,见
+   * desktop-user-data.ts),同时又被 electron-builder 用作 mac `.app` 目录名 ——
+   * 它是同批字段里唯一没有形状校验的(2026-09-12 审计 P1-13)。畸形值必须被忽略
+   * (回落 display_name,再退中性占位),绝不许进路径。
+   */
+  it.each([
+    ['a path traversal', '../../evil'],
+    ['the parent directory', '..'],
+    ['an embedded separator', 'Acme/../../x'],
+    ['a windows separator', 'Acme\\Harness'],
+    ['a drive-ish prefix', 'C:Acme'],
+    ['a control character', 'Acme\u0000Harness'],
+    ['a trailing dot', 'Acme.'],
+    ['a newline', 'Acme\nHarness'],
+    ['too long', 'A'.repeat(65)],
+  ])('ignores a malformed product_name (%s)', (_case, productName) => {
+    const profile = parseDesktopChannelProfile(channelValue({ desktop: { product_name: productName } }))
+    // 回落链:product_name → identity.display_name(channelValue 里是 'Acme AI')
+    expect(profile?.productName).toBe('Acme AI')
+    // 绝不许把畸形值带进任何路径型出口。
+    expect(String(profile?.productName)).not.toContain('/')
+    expect(String(profile?.productName)).not.toContain('\\')
+  })
+
+  it('falls back to the neutral placeholder when neither product name is usable', () => {
+    // display_name 也是路径型出口的输入(它是 product_name 的回落来源),同样校验;
+    // 两个都不合形状时给中性占位 —— 绝不回落到厂商名,也绝不让畸形值进路径。
+    const profile = parseDesktopChannelProfile(channelValue({
+      identity: { display_name: '../evil' },
+      desktop: { product_name: '../evil' },
+    }))
+    expect(profile?.productName).toBe('Harness')
+  })
+
+  it('accepts product names that are safe path segments', () => {
+    for (const name of ['Acme Harness', 'Acme AI — 智能助手', 'PicoAide Harness', 'A1']) {
+      expect(parseDesktopChannelProfile(channelValue({ desktop: { product_name: name } }))?.productName).toBe(name)
+    }
+  })
+
   it.each([
     ['uppercase', 'ACME'],
     ['a space', 'acme ai'],
