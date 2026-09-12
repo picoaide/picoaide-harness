@@ -1,0 +1,41 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -104,6 +104,23 @@
+ 	}
+ 	throw new SearchError(`${toolName} produced more raw output than the subprocess seam retained within the ${rawOutputMaxBytes}-byte cap; ${narrow}`, "SEARCH_RAW_OUTPUT_OVERFLOW");
+ }
++/**
++* Desktop patch(PicoAide Harness):把 asar 归档**内部**的路径重写到 app.asar.unpacked。
++*
++* Electron 打包后 require.resolve 得到的是 resources/app.asar/node_modules/... 这样的
++* 归档内部路径;asar 是**文件**不是目录,原生二进制无法从里面 spawn(实测 ENOTDIR)。
++* 同一个二进制在 resources/app.asar.unpacked/ 下是一份真实文件(desktop 打包配置已把
++* bin/rg 与 bin/rg.exe 列入 asarUnpack),所以只要把它指过去就能跑。
++*
++* 仅在 unpacked 兄弟路径确实存在时重写;非打包环境(路径里没有 .asar 段)原样返回。
++* @param resolvedPath - require.resolve 得到的路径。
++* @returns 可被 spawn 的绝对路径。
++*/
++function unpackAsarPath(resolvedPath) {
++	const unpacked = resolvedPath.replace(/\.asar(?=[\\/])/u, ".asar.unpacked");
++	return unpacked !== resolvedPath && existsSync(unpacked) ? unpacked : resolvedPath;
++}
++
+ let rgPathPromise;
+ /**
+ * The packaged ripgrep binary path, resolved lazily once per process.
+@@ -122,7 +139,7 @@
+ 		const executable = parse(process.execPath);
+ 		const executableSidecar = process.platform === "win32" ? join(executable.dir, `${executable.name}-rg.exe`) : `${process.execPath}-rg`;
+ 		if ("pkg" in process && existsSync(executableSidecar)) return executableSidecar;
+-		return (await import("@vscode/ripgrep")).rgPath;
++		return unpackAsarPath((await import("@vscode/ripgrep")).rgPath);
+ 	});
+ 	return rgPathPromise;
+ }
+@@ -1268,4 +1285,4 @@
+ 	});
+ }
+ //#endregion
+-export { Config, GLOB_MAX_RESULTS, GLOB_VCS_EXCLUDES, GREP_MAX_LINE_BYTES, GREP_MAX_MATCHES, RAW_OUTPUT_MAX_BYTES, SEARCH_GRACE_MS, SEARCH_META_MAX_BYTES, SEARCH_STDERR_MAX_BYTES, SEARCH_TIMEOUT_MS, SearchError, apply, applyGlobTool, applyGrepTool, buildGlobCommand, buildGrepCommand, formatGlobOutput, formatGrepMatches, formatGrepOutput, inject, name, parseGlobArgs, parseGrepArgs, parseGrepMatches, presentGlobCall, presentGlobResult, presentGrepCall, presentGrepResult, previewLine, resolveRgPath, runRipgrep, sampleAcrossTopLevel, toWorkdirRelative, trySaveFormattedResult };
++export { Config, GLOB_MAX_RESULTS, GLOB_VCS_EXCLUDES, GREP_MAX_LINE_BYTES, GREP_MAX_MATCHES, RAW_OUTPUT_MAX_BYTES, SEARCH_GRACE_MS, SEARCH_META_MAX_BYTES, SEARCH_STDERR_MAX_BYTES, SEARCH_TIMEOUT_MS, SearchError, apply, applyGlobTool, applyGrepTool, buildGlobCommand, buildGrepCommand, formatGlobOutput, formatGrepMatches, formatGrepOutput, inject, name, parseGlobArgs, parseGrepArgs, parseGrepMatches, presentGlobCall, presentGlobResult, presentGrepCall, presentGrepResult, previewLine, resolveRgPath, runRipgrep, unpackAsarPath, sampleAcrossTopLevel, toWorkdirRelative, trySaveFormattedResult };
