@@ -80,9 +80,9 @@ func (a *API) handleResponses(c *gin.Context) {
 
 	var usageID int64
 	if req.Stream {
-		usageID, err = serverstore.RecordUsage(a.DB, user.ID, req.Model, 0, 0)
-		if err != nil {
-			log.Printf("gateway: record pending usage: %v", err)
+		var ok bool
+		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, "chat"); !ok {
+			return
 		}
 	}
 

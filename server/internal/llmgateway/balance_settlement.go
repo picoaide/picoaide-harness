@@ -1,9 +1,12 @@
 package llmgateway
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -65,4 +68,144 @@ func abortBalanceSettlementStream(c *gin.Context, fl http.Flusher) {
 	if fl != nil {
 		fl.Flush()
 	}
+}
+
+// ---------------------------------------------------------------------------
+// G5b(审计 2026-09-13):结算期**非余额类**错误同样不得静默交付
+// ---------------------------------------------------------------------------
+//
+// 上一轮 FIX-05 只认一个哨兵(isBalanceSettlementFailure):ErrInsufficientBalance
+// 升级成显式失败,其它结算错误(如真实 PG 上的编码/约束错误、死锁、连接抖动)
+// 仍然只 `log.Printf` 一行就继续把上游响应 200 交付 —— 而那次结算的事务已经
+// 回滚,所以同样是"上游真被调用、账上零落账零扣费",同一请求可无限重复。
+// 洞的判据不是"错误可不可怕",而是**这次调用的钱有没有落地**:没落地就不能交付。
+//
+// 分类与出口(唯一实现,四个交付路径共用):
+//
+//	1. ErrInsufficientBalance(钱不够)→ 429 BALANCE_EXHAUSTED。确定的业务
+//	   结论,重试无意义,也不该误导客户端"重试就会成功"。
+//	2. 其它任何错误 → 503 METERING_FAILED(fail-closed,不交付上游内容)。
+//	   流式:写一条 SSE error 事件并终止泵送。
+//
+// 为什么 fail-closed 不会因为 DB 抖动拖垮全站:
+//   - 认证(BearerAuth)与余额闸门(BalanceBlocked)用的是同一个连接池;PG 整体
+//     不可用时请求在**进网关之前**就已经失败,这里的拒绝不新增失效面;
+//   - 幂等的**回填**结算(updateUsageTokensSettled)带有限次重试,短抖动不会
+//     升级成用户可见失败;
+//   - 拒绝是**每请求**的:不持全局锁、不改共享状态、不熔断后续请求,抖动窗口
+//     之外立即恢复;
+//   - 非流式的**插入**结算刻意不重试(插入不幂等:COMMIT 结果未知时重试会写出
+//     第二行已计费 usage = 重复扣款),宁可拒绝一次,也不重复扣用户的钱。
+
+const (
+	// meteringFailedCode 是结算期非余额类失败的稳定错误码。
+	meteringFailedCode = "METERING_FAILED"
+	// meteringFailedMessage 是对外文案:上游已被调用过一次,必须让用户知道
+	// 本次没有交付结果(可重试)。
+	meteringFailedMessage = "计量结算失败,本次调用未完成:请稍后重试"
+)
+
+// rejectSettlementFailure 是**非流式**路径的统一出口。调用方必须立即 return。
+func rejectSettlementFailure(c *gin.Context, err error, where string) {
+	if isBalanceSettlementFailure(err) {
+		log.Printf("gateway: insufficient balance, rejecting %s before delivery: %v", where, err)
+		rejectBalanceSettlement(c)
+		return
+	}
+	log.Printf("gateway: settlement failed (%s), refusing to deliver upstream body: %v", where, err)
+	serverauth.WriteError(c, http.StatusServiceUnavailable, meteringFailedCode, meteringFailedMessage)
+}
+
+// abortSettlementFailureStream 是**流式**路径的统一出口:SSE 头已发出,写一条
+// error 事件并让调用方终止泵送(与既有 UPSTREAM/空闲超时事件同形状)。
+func abortSettlementFailureStream(c *gin.Context, fl http.Flusher, err error, where string) {
+	if isBalanceSettlementFailure(err) {
+		log.Printf("gateway: insufficient balance, aborting stream (%s): %v", where, err)
+		abortBalanceSettlementStream(c, fl)
+		return
+	}
+	log.Printf("gateway: settlement failed (%s), aborting stream: %v", where, err)
+	fmt.Fprintf(c.Writer, "data: %s\n\n",
+		`{"error":{"code":"`+meteringFailedCode+`","message":"`+meteringFailedMessage+`"}}`)
+	if fl != nil {
+		fl.Flush()
+	}
+}
+
+// settlementBackfillAttempts 是幂等回填结算的重试次数(含首次)。
+const settlementBackfillAttempts = 3
+
+// settlementBackfillBackoff 是重试间隔基数(第 n 次重试前等 n×基数)。
+const settlementBackfillBackoff = 40 * time.Millisecond
+
+// updateUsageTokensSettled 回填 usage 并结算。回填结算在本设计里是**幂等**的
+// (settleUsageCostTx 按 usage_id 的流水汇总把该行收敛到目标金额:重复执行差额
+// 为 0,不会重复扣款),所以瞬时错误(死锁/连接抖动)可以安全地有限重试 ——
+// 避免 DB 抖动把正常的流式请求误判成失败。余额不足不重试(重试没有意义)。
+func updateUsageTokensSettled(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64) error {
+	var err error
+	for attempt := 1; attempt <= settlementBackfillAttempts; attempt++ {
+		err = serverstore.UpdateUsageTokensCached(db, id, promptTokens, completionTokens, cacheTokens)
+		if err == nil {
+			return nil
+		}
+		if isBalanceSettlementFailure(err) {
+			return err
+		}
+		if attempt < settlementBackfillAttempts {
+			log.Printf("gateway: backfill settlement attempt %d/%d failed, retrying: %v",
+				attempt, settlementBackfillAttempts, err)
+			time.Sleep(settlementBackfillBackoff * time.Duration(attempt))
+		}
+	}
+	return err
+}
+
+// estimateStreamCompletionTokens 是流式「按转发字节估算」的**唯一实现**
+// (chat/completions/responses 与 anthropic messages 共用同一口径):
+// 约 4 字节/token,保守下限。输入侧无法从字节推算,由调用方决定传 0 或上游
+// 已回报的真实值。
+func estimateStreamCompletionTokens(forwardedBytes int64) int64 {
+	if forwardedBytes <= 0 {
+		return 0
+	}
+	return forwardedBytes / 4
+}
+
+// settleStreamFallback 是流式收尾兜底结算的**唯一实现**(G12,审计 2026-09-13)。
+//
+// 上游没有回报 usage、或只回报了输入侧(例如 Anthropic 流在 message_start 之后
+// 就断了)时,按**已经转发出去的字节数**估算 completion tokens 并回填 ——
+// 与 chat 流式 2026-08 起就有的口径完全同源(同一函数,不是第二份实现)。
+// 真实值优先:只补 completion 缺失的那一半(ct<=0 才填),不会把上游报的用量
+// 改大或改小;输入侧(cache/prompt)原样带出。
+//
+// 返回 settled=false 且 err==nil 表示这次流没有任何可计费内容(pending 行已删除)。
+// 返回 err != nil 时调用方必须 fail-closed(abortSettlementFailureStream)。
+func settleStreamFallback(db *sql.DB, usageID, forwardedBytes, promptTokens, completionTokens, cacheTokens int64) (bool, error) {
+	if completionTokens <= 0 {
+		completionTokens = estimateStreamCompletionTokens(forwardedBytes)
+	}
+	if promptTokens <= 0 && completionTokens <= 0 && cacheTokens <= 0 {
+		// 一个字节都没转发(连接失败/空流):删除 pending 行,不留痕迹。
+		return false, serverstore.DeleteUsage(db, usageID)
+	}
+	if err := updateUsageTokensSettled(db, usageID, promptTokens, completionTokens, cacheTokens); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// beginStreamUsage 为流式请求插入 pending usage 行(整条流的计量锚点)。
+// 写不进去就**在调用上游之前**拒绝:沿用 usageID=0 一路跑下去,整条流没有任何
+// 计量痕迹,等于免费交付(与 G5b 同一族,审计 r3 反向核查发现)。
+func (a *API) beginStreamUsage(c *gin.Context, userID int64, model, kind string) (int64, bool) {
+	usageID, err := serverstore.RecordUsageKind(a.DB, userID, model, 0, 0, kind)
+	if err != nil {
+		log.Printf("gateway: record pending usage (%s) failed, refusing stream before upstream: user=%d model=%s: %v",
+			kind, userID, safeModelForLog(model), err)
+		rejectSettlementFailure(c, err, "pending "+kind)
+		return 0, false
+	}
+	return usageID, true
 }

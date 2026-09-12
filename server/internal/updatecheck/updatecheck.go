@@ -405,11 +405,14 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 	// SetBuildVersion → Check),所以 beta/official 渠道跑的**就是**预发布
 	// 版本号 —— 这不是边缘情况,是常规发布状态。
 	//
-	// 改用 NormalizeVersion(接受预发布),比较仍走 CompareSemVer 的 core 语义:
+	// 改用 NormalizeVersion(接受预发布),比较走 CompareSemVer 的完整
+	// SemVer 优先级(core + 预发布段):
 	//   - 2.7.2-beta.7 → 2.8.0        : core 2.7.2 < 2.8.0 → true(正确提示)
-	//   - 2.7.2-beta.7 → 2.7.2-beta.8 : core 相等         → false(不提示)
-	//   - 2.7.1        → 2.7.1        : core 相等         → false
-	//   - 2.8.0        → 2.7.2-beta.7 : core 更大         → false(不提示降级)
+	//   - 2.7.2-beta.7 → 2.7.2-beta.8 : core 相等,beta.8 > beta.7 → true
+	//   - 2.7.2-beta.7 → 2.7.2        : 有预发布 < 无预发布   → true(转正)
+	//   - 2.7.2        → 2.7.2-beta.8 : 稳定版 > 同 core 预发布 → false
+	//   - 2.7.1        → 2.7.1        : 完全相等             → false
+	//   - 2.8.0        → 2.7.2-beta.7 : 更旧                 → false(不提示降级)
 	// 解析不出来(本地 dev 构建的 "dev" 等)仍保持 false:版本号不可比时
 	// **不提示**是安全方向(否则开发机会变成"永远可升级")。
 	if cur := NormalizeVersion(current); cur != "" {
@@ -538,33 +541,139 @@ func isNumeric(s string) bool {
 	return true
 }
 
-// CompareSemVer returns -1/0/1 for left vs right using SemVer precedence on
-// the core M.m.p triple (numeric, no leading-zero overflow). v 前缀与
-// 预发布段都按核心段比较:预发布不影响"是否值得升级"的判定(2.7.0-rc.1 与
-// 2.7.0 视为同一目标版本),否则 latest 写预发布时运维永远看不到升级提示。
-// 非法输入视为相等(0)。
+// CompareSemVer returns -1/0/1 for left vs right using full SemVer 2.0.0
+// precedence: core M.m.p 按数值比较(build metadata 忽略),core 相等时再比较
+// 预发布段 —— 无预发布优先级更高(= 稳定版 > 同 core 预发布),预发布标识符
+// 按 §11 逐段比较(纯数字按数值、字母数字按 ASCII、数字 < 字母、段数多者更大)。
+//
+// FIX-23-r3(审计 2026-09-13,P1):上一轮 FIX-23 只把 Check 的准入从
+// ParseCanonicalStableValid 换成 NormalizeVersion(接受预发布),比较本身仍是
+// **core-only**,于是 beta 渠道最常见的升级形态 ——
+//
+//	CompareSemVer("2.7.2-beta.8", "2.7.2-beta.7") == 0  ⇒ 永不提示更新
+//
+// —— 让预发布当前版本能提示跨 core 升级,却提示不了同 core 的下一次预发布。
+// 预发布段必须参与比较。
+//
+// 稳定版之间的行为逐条不变:仍只由 core 决定(2.5.1 vs 2.6.0 = -1);
+// 非法输入(dev 等)仍视为相等(0)—— 版本号不可比时"不提示"是安全方向。
 func CompareSemVer(left, right string) int {
-	lt, lok := parseCore(left)
-	rt, rok := parseCore(right)
+	lv, lok := parseVersionPrecedence(left)
+	rv, rok := parseVersionPrecedence(right)
 	if !lok || !rok {
 		return 0
 	}
+	if c := compareCoreSegments(lv.core, rv.core); c != 0 {
+		return c
+	}
+	return comparePrerelease(lv.pre, rv.pre)
+}
+
+// versionPrecedence 是参与优先级比较的两个部分:core 三段 + 预发布段原文。
+type versionPrecedence struct {
+	core [3]string
+	pre  string
+}
+
+// parseVersionPrecedence 解析版本号(容忍 v 前缀与 build metadata)。
+func parseVersionPrecedence(v string) (versionPrecedence, bool) {
+	var out versionPrecedence
+	core, ok := parseCore(v)
+	if !ok {
+		return out, false
+	}
+	out.core = core
+	out.pre = prereleaseOf(v)
+	return out, true
+}
+
+// prereleaseOf 取出版本号的预发布段(去掉 v 前缀与 build metadata);无预发布
+// 返回空串(空串在比较里代表"稳定版",优先级最高)。
+func prereleaseOf(v string) string {
+	s := strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if i := strings.IndexByte(s, '+'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		return s[i+1:]
+	}
+	return ""
+}
+
+// compareCoreSegments 比较 M.m.p 三段:先比位数再比字典序 = 无溢出的数值比较
+// (原有语义,保持逐字节不变)。
+func compareCoreSegments(l, r [3]string) int {
 	for i := 0; i < 3; i++ {
-		l, r := lt[i], rt[i]
-		if len(l) != len(r) {
-			if len(l) < len(r) {
+		a, b := l[i], r[i]
+		if len(a) != len(b) {
+			if len(a) < len(b) {
 				return -1
 			}
 			return 1
 		}
-		if l != r {
-			if l < r {
+		if a != b {
+			if a < b {
 				return -1
 			}
 			return 1
 		}
 	}
 	return 0
+}
+
+// comparePrerelease 按 SemVer 2.0.0 §11.3/§11.4 比较预发布段。空串 = 无预发布
+// (= 稳定版),优先级**高于**同 core 的任何预发布。
+func comparePrerelease(l, r string) int {
+	switch {
+	case l == "" && r == "":
+		return 0
+	case l == "":
+		return 1
+	case r == "":
+		return -1
+	}
+	lp, rp := strings.Split(l, "."), strings.Split(r, ".")
+	for i := 0; i < len(lp) && i < len(rp); i++ {
+		if c := comparePrereleaseIdentifier(lp[i], rp[i]); c != 0 {
+			return c
+		}
+	}
+	// 前缀全相等:段数多者更大(beta.1 > beta)。
+	switch {
+	case len(lp) < len(rp):
+		return -1
+	case len(lp) > len(rp):
+		return 1
+	}
+	return 0
+}
+
+// comparePrereleaseIdentifier 比较单个预发布标识符:
+//   - 纯数字按数值比较(用"位数 + 字典序"实现,避免整数溢出,beta.1000 > beta.999);
+//   - 纯数字 < 字母数字(beta.2 < beta.alpha);
+//   - 其它按 ASCII 字典序(beta < rc;alpha < beta)。
+func comparePrereleaseIdentifier(a, b string) int {
+	an, bn := isNumeric(a), isNumeric(b)
+	switch {
+	case an && bn:
+		if len(a) != len(b) {
+			if len(a) < len(b) {
+				return -1
+			}
+			return 1
+		}
+	case an:
+		return -1
+	case bn:
+		return 1
+	}
+	if a == b {
+		return 0
+	}
+	if a < b {
+		return -1
+	}
+	return 1
 }
 
 // parseCore 解析版本的核心 M.m.p 三段(容忍 v 前缀与预发布/build 段),
