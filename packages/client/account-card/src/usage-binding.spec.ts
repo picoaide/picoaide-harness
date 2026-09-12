@@ -40,7 +40,7 @@ describe('UsageService account binding (P2-22)', () => {
     expect(service.get().data).toBeNull()
     release?.()
     await inFlight
-    expect(service.get()).toEqual({ data: null, fetchedAt: 0, state: 'idle', error: null })
+    expect(service.get()).toEqual({ data: null, fetchedAt: 0, state: 'idle', error: null, authExpired: false })
   })
 
   it('does not hand account A in-flight request to account B', async () => {

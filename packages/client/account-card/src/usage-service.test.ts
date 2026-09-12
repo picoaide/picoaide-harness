@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { UsageService, type UsagePayload, type UsageFetcher } from './usage-service.ts'
+import { AuthError } from '@picoaide/dsh-enterprise/server-connector/auth'
+import { UsageService, isAuthExpired, type UsagePayload, type UsageFetcher } from './usage-service.ts'
 
 const SESSION = { serverURL: 'https://gw.example.com', username: 'alice', token: 'tok-1' }
 
@@ -32,7 +33,7 @@ function makeFetcher(impl?: UsageFetcher): { fn: UsageFetcher } & { calls: () =>
 describe('UsageService', () => {
   it('starts with an empty snapshot', () => {
     const service = new UsageService()
-    expect(service.get()).toEqual({ data: null, fetchedAt: 0, state: 'idle', error: null })
+    expect(service.get()).toEqual({ data: null, fetchedAt: 0, state: 'idle', error: null, authExpired: false })
   })
 
   it('refresh is a no-op while logged out', async () => {
@@ -128,5 +129,59 @@ describe('UsageService', () => {
     // The debounced fetch fired by refresh() was cancelled by clear().
     await new Promise(resolve => setTimeout(resolve, 120))
     expect(service.get().data).toBeNull()
+  })
+
+  // 审计 2026-09-12 P1-5(回归):令牌失效必须与网络抖动分开。
+  // 改前两者都走 `{...this.snapshot, state:'error'}` —— 旧余额被保留,
+  // 而 UI 的 stale 判据还要求 data===null ⇒ 过期金额照常渲染。
+  describe('authExpired 标记(FIX-21)', () => {
+    it('鉴权失败:丢弃旧数据并置 authExpired(不再静默展示过期余额)', async () => {
+      const service = new UsageService({
+        fetchFn: async () => { throw new AuthError('auth_expired') },
+      })
+      // 先成功一次,制造"有旧余额"的前置
+      const good = makeFetcher()
+      service['fetch'] = good.fn
+      await service.refreshNow(SESSION)
+      expect(service.get().data?.balance_money).toBe(90.8)
+
+      // 令牌失效:数据必须被丢弃(旧余额属于上一个有效令牌)
+      service['fetch'] = async () => { throw new AuthError('auth_expired') }
+      const snap = await service.refreshNow(SESSION)
+      expect(snap.authExpired).toBe(true)
+      expect(snap.data).toBeNull()
+      expect(snap.state).toBe('error')
+      expect(snap.error).toContain('登录已过期')
+    })
+
+    it('网络错误:保留旧快照且 authExpired=false(不把余额闪成空白)', async () => {
+      const service = new UsageService({ fetchFn: makeFetcher().fn })
+      await service.refreshNow(SESSION)
+      expect(service.get().data).not.toBeNull()
+
+      service['fetch'] = async () => { throw new AuthError('network', 'network down') }
+      const snap = await service.refreshNow(SESSION)
+      expect(snap.authExpired).toBe(false)
+      expect(snap.state).toBe('error')
+      expect(snap.data?.balance_money).toBe(90.8)
+    })
+
+    it('isAuthExpired:AuthError kind 优先,消息兜底覆盖裸 401', () => {
+      expect(isAuthExpired(new AuthError('auth_expired'))).toBe(true)
+      expect(isAuthExpired(new AuthError('network', 'network down'))).toBe(false)
+      expect(isAuthExpired(new Error('HTTP 401'))).toBe(true)
+      expect(isAuthExpired(new Error('Unauthorized'))).toBe(true)
+      expect(isAuthExpired(new Error('boom'))).toBe(false)
+    })
+
+    it('恢复成功一次即清除 authExpired', async () => {
+      const service = new UsageService({ fetchFn: async () => { throw new AuthError('auth_expired') } })
+      await service.refreshNow(SESSION)
+      expect(service.get().authExpired).toBe(true)
+      service['fetch'] = makeFetcher().fn
+      await service.refreshNow(SESSION)
+      expect(service.get().authExpired).toBe(false)
+      expect(service.get().data?.balance_money).toBe(90.8)
+    })
   })
 })

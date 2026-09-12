@@ -99,7 +99,7 @@ export default function UsageOverview() {
     <div className="space-y-6">
       <PageHeader title="用量总览" desc="企业整体消耗:上游账户余额 / 本月、今日、区间费用 / 消耗趋势 / 模型排行" />
 
-      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={() => void load(from, to)} />
+      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={(f, t) => void load(f, t)} />
 
       {error && <div className="text-sm text-destructive">{error}</div>}
 

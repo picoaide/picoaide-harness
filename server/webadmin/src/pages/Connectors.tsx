@@ -14,6 +14,7 @@ import { Textarea } from '../components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Plus, RefreshCw, Trash2, Pencil, Plug, Copy, ClipboardPaste, Wand2 } from 'lucide-react'
 import { useFlash } from '../lib/use-flash'
+import { uid as utilsUid } from '../lib/utils'
 
 /**
  * 连接器目录管理页(图形化)。
@@ -54,10 +55,11 @@ const AUTH_META: Record<AuthMode, { label: string; variant: 'secondary' | 'outli
   'server-side': { label: '服务端', variant: 'secondary' },
 }
 
-/** 行稳定 id(替换 index key,防删除中间行时 DOM/焦点错位)。 */
-function uid(): string {
-  return crypto.randomUUID()
-}
+/** 行稳定 id(替换 index key,防删除中间行时 DOM/焦点错位)。
+ *  实现提到 lib/utils(审计 2026-09-12 P1-2):`crypto.randomUUID()` 在非安全源
+ *  (纯 HTTP + LAN IP,文档化部署形态)不存在,而空表单在**首渲染**就调它
+ *  → 整页白屏。共享实现带 Date.now()+Math.random() 回落。 */
+const uid = utilsUid
 
 /** 键值对行(请求头/环境变量)。 */
 interface KVRow {

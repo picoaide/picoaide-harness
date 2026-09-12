@@ -297,3 +297,57 @@ describe('Gateway 网关配置页', () => {
     expect(await screen.findByText('高峰时段每行的开始时间必须早于结束时间')).toBeInTheDocument()
     expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/gateway', expect.objectContaining({ method: 'PUT' }))
   })
+
+  // 审计 2026-09-12 P1-2(回归):parsePeakWindows 曾把「解析失败」吞成 `[]`,
+  // 与「本来就没配峰谷价」不可区分 ⇒ 任意一次保存都会把存量写成空串
+  // (`peak_windows: ''`)并弹「已保存」——静默破坏计费口径。
+  it.each([
+    ['非法 JSON', 'not-json-at-all'],
+    ['非数组(对象)', '{"start":"09:00","end":"12:00"}'],
+    ['数组但元素结构不认得', '[{"from":"09:00","to":"12:00"}]'],
+  ])('高峰时段:存量无法解析(%s)时拒绝提交,绝不写空串', async (_label, stored) => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', peak_windows: stored, server_base_url: '' }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    // 页面显式提示解析失败(而不是装作「无峰谷价」)
+    expect(screen.getByText(/高峰时段配置无法解析/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(await screen.findByText(/已拒绝保存/)).toBeInTheDocument()
+    // 改前:这里会发出 PUT 且 body 含 `"peak_windows":""` + 弹出「已保存」
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/gateway', expect.objectContaining({ method: 'PUT' }))
+    expect(screen.queryByText('已保存')).toBeNull()
+  })
+
+  it('高峰时段:解析失败后显式重建时段即可保存(不把管理员锁死)', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/server/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', peak_windows: 'not-json', server_base_url: '' }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    const call = mockRequest.mock.calls.find((c) => c[0] === '/api/server/admin/gateway' && c[1]?.method === 'PUT')
+    expect(call).toBeTruthy()
+    expect(JSON.parse(call![1]!.body as string).peak_windows).toContain('"start":"09:00"')
+  })
+
+  it('非安全源(crypto.randomUUID 缺失)下网关页仍可渲染并保存', async () => {
+    vi.stubGlobal('crypto', {})
+    try {
+      render(<Gateway />)
+      await screen.findByText('全局设置')
+      fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
+      expect((screen.getByLabelText('高峰开始 1') as HTMLInputElement).value).toBe('09:00')
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      await screen.findByText('已保存')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })

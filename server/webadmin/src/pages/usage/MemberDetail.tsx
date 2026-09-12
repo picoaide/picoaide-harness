@@ -82,7 +82,7 @@ export default function UsageMemberDetail() {
         desc="单人的消耗画像:近 30 天按天费用、模型构成、最近请求(不含对话内容)"
         actions={<Link to="/usage/members"><Button size="sm" variant="outline"><ArrowLeft className="h-3.5 w-3.5" /> 返回成员列表</Button></Link>}
       />
-      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={() => void load(from, to)} />
+      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={(f, t) => void load(f, t)} />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
       <div className="flex flex-wrap items-center gap-2">

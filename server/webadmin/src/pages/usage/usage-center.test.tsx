@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { request } from '../../api'
+import { rangePreset, monthRange } from '../../lib/format'
 import Overview from './Overview'
 import Departments from './Departments'
 import Members from './Members'
@@ -96,6 +97,56 @@ describe('用量中心 · 总览', () => {
     expect(screen.getByText('消耗趋势')).toBeInTheDocument()
     expect(screen.getByText('模型消耗 TOP 10')).toBeInTheDocument()
     expect(screen.getAllByTestId('chart-mock').length).toBeGreaterThanOrEqual(2)
+  })
+
+  // 审计 2026-09-12 P1-1(回归):预设按钮曾 `setFrom/setTo` 后同步调
+  // **上一次渲染**的 onQuery 闭包 → 请求打到旧区间,而 KPI 标签(`desc={from} ~ {to}`)
+  // 用新值渲染。断言「点预设后最新请求的 from == 输入框当前值」。
+  it('预设按钮(近7天/近30天/本月)用新区间取数:请求参数 == 输入框值', async () => {
+    renderAt('/usage', <Overview />)
+    await screen.findByTestId('overview-kpis')
+
+    const overviewCalls = () => mockRequest.mock.calls
+      .map((c) => String(c[0]))
+      .filter((p) => p.includes('/usage/overview'))
+    // ES2020 目标(tsconfig lib 无 ES2022),不用 Array.prototype.at。
+    const latestOverviewCall = () => {
+      const calls = overviewCalls()
+      return calls[calls.length - 1]
+    }
+    const inputFrom = () => (screen.getByLabelText('起始日期') as HTMLInputElement).value
+    const inputTo = () => (screen.getByLabelText('结束日期') as HTMLInputElement).value
+
+    for (const [label, days] of [['近7天', 7], ['近30天', 30]] as const) {
+      const expected = rangePreset(days)
+      fireEvent.click(screen.getByRole('button', { name: label }))
+      await waitFor(() => {
+        // 改前:latest 恒等于点击**之前**的区间(闭包读到旧 state) → 断言红。
+        expect(latestOverviewCall()).toContain(`from=${expected.from}&to=${expected.to}`)
+      })
+      expect(inputFrom()).toBe(expected.from)
+      expect(inputTo()).toBe(expected.to)
+      expect(latestOverviewCall()).toContain(`from=${inputFrom()}&to=${inputTo()}`)
+    }
+
+    const month = monthRange()
+    fireEvent.click(screen.getByRole('button', { name: '本月' }))
+    await waitFor(() => {
+      expect(latestOverviewCall()).toContain(`from=${month.from}&to=${month.to}`)
+    })
+    expect(inputFrom()).toBe(month.from)
+  })
+
+  it('「查询」按钮用输入框当前值取数', async () => {
+    renderAt('/usage', <Overview />)
+    await screen.findByTestId('overview-kpis')
+    fireEvent.change(screen.getByLabelText('起始日期'), { target: { value: '2026-01-05' } })
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-02-06' } })
+    fireEvent.click(screen.getByRole('button', { name: '查询' }))
+    await waitFor(() => {
+      const calls = mockRequest.mock.calls.map((c) => String(c[0])).filter((p) => p.includes('/usage/overview'))
+      expect(calls[calls.length - 1]).toContain('from=2026-01-05&to=2026-02-06')
+    })
   })
 })
 
