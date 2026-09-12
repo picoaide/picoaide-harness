@@ -21,13 +21,13 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { isCanonical, isProjectSyncEnabled, parseEntries, serializeEntries, readProvenance } from '../store.js'
 import { genEntryId, extractEntryId, extractTodoId, TODO_ID_RE } from './entryid.js'
 import { mergeEntries } from './merge.js'
 import { asyncSyncLock, asyncWithLock, extractTodoHeader, isMemoryFile, parseTodoEntries, readTreeFiles, resolveFilesetFiles, runGit, serializeTodoEntries, stagePaths } from './repo.js'
-import { conflictsFileFor, isTodoPath } from './filesets.js'
+import { assertSafeRepoTarget, conflictsFileFor, isTodoPath, resolveFilesetTarget, resolveSafeRepoTarget } from './filesets.js'
 import { translate, getLocale, SYNC_WORKER_DICT } from '../i18n.js'
 
 /** Translate through SYNC_WORKER_DICT in the active host locale. */
@@ -193,10 +193,19 @@ async function runSyncInner({ dir, remoteBranch, push = false, fileset = 'projec
     // 事故修复）**：\r\n→\n 无损转换后可往返的文件不再中止，自动归一化
     // （合并写回时以 LF 覆盖）；真·手工编辑/混合行尾仍按原逻辑备份中止。
     const ours = readWorkingMemoryFiles(dir, fileset)
+    // **FIX-22 残留出口修复（2026-09-13）**：工作树枚举里出现符号链接路径
+    // （`logs -> <仓库外目录>`，共享分支 120000 条目 checkout 的结果）时，
+    // readdirSync 会跟着列出仓库外的文件、把它们当"本机版本"读进合并。
+    // 读取侧与写入侧同一断言：**一律拒收**，且在任何写盘之前中止。
+    if (ours.refused.length > 0) {
+      return { fatal: swt('syncw.symlinkRefused', { path: ours.refused[0] }) }
+    }
     if (ours.invalid.length > 0) {
       for (const inv of ours.invalid) {
+        const bakTarget = resolveFilesetTarget(dir, inv.path, fileset)
+        if (bakTarget === null) continue // 落点不安全（符号链接/越界）：跳过备份，本次同步已中止
         try {
-          copyFileSync(join(dir, inv.path), `${join(dir, inv.path)}.bak.${Date.now()}`)
+          copyFileSync(bakTarget, `${bakTarget}.bak.${Date.now()}`)
         } catch { /* 备份失败不阻断中止 */ }
       }
       return { fatal: `本地记忆文件格式异常（${ours.invalid[0].path}：${ours.invalid[0].reason}）——已备份原文件并停止同步，请整理后重试` }
@@ -206,9 +215,30 @@ async function runSyncInner({ dir, remoteBranch, push = false, fileset = 'projec
     const result = mergeEntries(base.files, ours.files, theirs.files)
     // 原子写回（tmp+rename，与 store.js write 同款）；TODO 文件带 header
     // 写回（P1-6：优先保留本机原 header，缺省用 TODO_HEADER 常量）
-    for (const [path, entries] of Object.entries(result.files)) {
-      const abs = join(dir, path)
-      mkdirSync(join(dir, dirname2(path)), { recursive: true })
+    //
+    // **FIX-22 残留出口修复（2026-09-13）**：此前这里直接用远端树的路径
+    // `join(dir, path)` 落盘，完全绕开冲突侧车那套断言——仓库内 `logs` 是
+    // 符号链接时，合并结果会穿透链接写进仓库外的目录（实测写穿成功）。
+    // 现与 resolveConflict 出口**同源**接入 filesets.js 的同一套断言：
+    //   a) resolveFilesetTarget：白名单 + 逐层 lstat 拒符号链接 + realpath
+    //      包含性断言（仓库根 / 最近已存在祖先 / 目标文件本身）；
+    //   b) assertSafeRepoTarget：mkdir 之后、writeFileSync 之前的 TOCTOU 复检。
+    // 且**先校验全部落点、再写第一个字节**：任何一个被拒都在零写盘的状态下
+    // 中止整次合并（否则前面的文件已落盘、后面的被拒会留下半成品工作树）。
+    // 冲突侧车（CONFLICTS.md 等固定名）也是本次合并的落点之一，一并先校验。
+    const conflictsName = conflictsFileFor(fileset)
+    const conflictsPath = resolveSafeRepoTarget(dir, conflictsName)
+    if (conflictsPath === null) return { fatal: swt('syncw.symlinkRefused', { path: conflictsName }) }
+    const writePlans = []
+    for (const path of Object.keys(result.files)) {
+      const abs = resolveFilesetTarget(dir, path, fileset)
+      if (abs === null) return { fatal: swt('syncw.symlinkRefused', { path }) }
+      writePlans.push([path, abs, result.files[path]])
+    }
+    for (const [path, abs, entries] of writePlans) {
+      mkdirSync(dirname(abs), { recursive: true })
+      // TOCTOU 复检（与 resolveConflict 同源断言）
+      if (!assertSafeRepoTarget(dir, abs)) return { fatal: swt('syncw.symlinkRefused', { path }) }
       const tmp = `${abs}.tmp.${process.pid}`
       const text = isTodoPath(path)
         ? serializeTodoEntries(entries, (existsSync(abs) ? extractTodoHeader(readFileSync(abs, 'utf8')) : undefined) ?? theirs.headers?.[path])
@@ -219,10 +249,14 @@ async function runSyncInner({ dir, remoteBranch, push = false, fileset = 'projec
     // 冲突侧车（Codex 二轮 P0-2 修复）：按 fileset 独立侧车——多轨共享
     // 同一 .git 时，无冲突轨的同步绝不能删掉其他轨的冲突记录（工作树
     // 清空 + 侧车丢失 = 数据永久丢）。有冲突写、无冲突删（删除随提交生效）
-    const conflictsPath = join(dir, conflictsFileFor(fileset))
+    // FIX-22（2026-09-13）：固定名出口同样走共享断言（落点已在上方统一
+    // 校验）——共享分支可以把 CONFLICTS.md 变成符号链接，writeFileSync 会
+    // 顺着它写到仓库外。
     if (result.conflicts.length > 0) {
       writeFileSync(conflictsPath, renderConflicts(result.conflicts))
     } else if (existsSync(conflictsPath)) {
+      // rmSync 只删链接本身、不跟随（最终组件的 unlink 语义）——不会写穿；
+      // 但走到这里说明该名不是符号链接（上面已断言），行为与历史一致
       rmSync(conflictsPath, { force: true })
     }
     // 提交（Codex 二轮 P1-1 重写）：**用临时 GIT_INDEX_FILE 构建本 fileset
@@ -362,9 +396,11 @@ export async function runStatus({ dir, remoteBranch, localBranch = 'main' }) {
 /** 工作树记忆文件读取（锁内调用；按文件集展开，全局轨二期并入一期）。
  * TODO 格式文件（TODOS.md/TODOS-life.md/TODOS-work.md/daily/*.todo.md）用
  * 专用解析（剥 header）。
- * 返回 { files, invalid, normalized }——invalid 为格式预检失败清单
+ * 返回 { files, invalid, normalized, refused }——invalid 为格式预检失败清单
  * （Codex P0-2：真·手工编辑/混合行尾的文件 parse→serialize 不能往返，
- * 绝不能被重写破坏）；normalized 为 **CRLF 自愈**记录（2026-08-11
+ * 绝不能被重写破坏）；refused 为**符号链接拒收**清单（FIX-22，2026-09-13：
+ * 仓库内任何符号链接一律拒收，`logs -> <仓库外>` 时 readdirSync 会列出仓库外
+ * 文件，必须在读入合并之前拦住）；normalized 为 **CRLF 自愈**记录（2026-08-11
  * Windows autocrlf 事故：.gitattributes 修复前初始化的仓库，工作树被
  * Windows Git 默认 core.autocrlf=true 在 checkout 时把 LF 全转 CRLF——
  * `\r\n→\n` 是**无损**转换，转后 canonical 即放行，合并写回阶段自然以
@@ -372,6 +408,7 @@ export async function runStatus({ dir, remoteBranch, localBranch = 'main' }) {
 function readWorkingMemoryFiles(dir, fileset = 'project') {
   const files = {}
   const invalid = []
+  const refused = []
   const normalized = []
   const readMemory = (p, name) => {
     const text = readFileSync(p, 'utf8')
@@ -402,15 +439,16 @@ function readWorkingMemoryFiles(dir, fileset = 'project') {
   const { memory, todo } = resolveFilesetFiles(dir, fileset)
   for (const rel of [...memory, ...todo]) {
     const p = join(dir, rel)
-    if (existsSync(p)) readMemory(p, rel)
+    if (!existsSync(p)) continue
+    // FIX-22 读侧拒收（2026-09-13，与写侧同一断言 isMemoryFile(...,rootDir)）：
+    // 路径链上有符号链接 → 不读、并让 runSync 在任何写盘之前中止。
+    if (!isMemoryFile(rel, fileset, dir)) {
+      refused.push(rel)
+      continue
+    }
+    readMemory(p, rel)
   }
-  return { files, invalid, normalized }
-}
-
-/** 路径的目录部分（兼容无目录的根级文件）。 */
-function dirname2(path) {
-  const i = path.lastIndexOf('/')
-  return i < 0 ? '.' : path.slice(0, i)
+  return { files, invalid, normalized, refused }
 }
 
 /**
@@ -619,23 +657,16 @@ export async function resolveConflict(p) {
   return asyncSyncLock(p.dir, () => resolveConflictInner(p))
 }
 
-/** p 是否在 root 之内（含 root 自身）。 */
-function isInsideRoot(root, p) {
-  return p === root || p.startsWith(root + sep)
-}
-
 /**
  * 解析冲突落点的仓库内绝对路径（FIX-22，2026-09-12）。返回 null = 拒收。
  *
- * 两层：
+ * **2026-09-13 去重**：原先这里是内联实现、runSync 三路合并写回另走一条
+ * 无断言的路径（FIX-22 覆盖不全）。现在两层断言都在 filesets.js 的共享实现
+ * 里，本函数只是白名单版的薄包装——冲突侧车出口与合并写回出口调用同一份：
  *   1. `isMemoryFile(file, fileset, rootDir)`：路径模式白名单 **+ 已存在的
  *      符号链接路径直接拒收**（`logs -> <仓库外>` 这类条目）；
  *   2. 逐层 `realpathSync` 包含性断言：仓库根 / 落点最近的已存在祖先 /
  *      目标文件本身（存在时）的真实路径都必须仍在仓库真实根之内。
- *
- * 字符串 `resolve()` 无法挡住 `logs -> /outside`：`resolve(root,'logs/x.md')`
- * 以 root 开头，写盘却穿透到仓库外。共享记忆分支里一个 120000 条目
- * （clone/checkout 会实体化成真符号链接）即可满足前置。
  *
  * @param {string} dir - 同步仓库目录。
  * @param {string} file - 侧车里的仓库相对路径。
@@ -643,48 +674,17 @@ function isInsideRoot(root, p) {
  * @returns {string | null} 绝对落点；null = 白名单/包含性校验失败。
  */
 function resolveConflictTarget(dir, file, fileset) {
-  if (!isMemoryFile(file, fileset, dir)) return null
-  let realRoot
-  try {
-    realRoot = realpathSync(resolve(dir))
-  } catch {
-    return null // 仓库不存在/不可读：fail closed
-  }
-  const abs = resolve(realRoot, file)
-  if (abs === realRoot || !isInsideRoot(realRoot, abs)) return null
-  // 落点父目录（或最近的已存在祖先）真实路径：符号链接在这里现形。
-  const anchor = nearestExistingAncestor(dirname(abs))
-  if (anchor === null) return null
-  try {
-    if (!isInsideRoot(realRoot, realpathSync(anchor))) return null
-  } catch {
-    return null
-  }
-  // 目标文件本身已存在：自己就是符号链接（指向仓库外）时同样拒收。
-  if (existsSync(abs)) {
-    try {
-      if (!isInsideRoot(realRoot, realpathSync(abs))) return null
-    } catch {
-      return null
-    }
-  }
-  return abs
-}
-
-/** 从 p 起向上找第一个存在的路径（不存在则返回 null）。 */
-function nearestExistingAncestor(p) {
-  let current = p
-  for (;;) {
-    if (existsSync(current)) return current
-    const parent = dirname(current)
-    if (parent === current) return null
-    current = parent
-  }
+  return resolveFilesetTarget(dir, file, fileset)
 }
 
 async function resolveConflictInner({ dir, index, choice, fileset = 'project', localBranch = 'main' }) {
   // 侧车按 fileset 独立（Codex 二轮 P0-2）
-  const path = join(dir, conflictsFileFor(fileset))
+  // FIX-22（2026-09-13）：侧车**自身**的落点也走共享断言——本函数结尾要用
+  // tmp+rename 重写侧车（删除已解决条目），且读写都按这个名字进行；共享分支
+  // 里一个 120000 条目就能让它变成指向仓库外的符号链接。
+  const conflictsName = conflictsFileFor(fileset)
+  const path = resolveSafeRepoTarget(dir, conflictsName)
+  if (path === null) return { ok: false, message: swt('syncw.symlinkRefused', { path: conflictsName }) }
   if (!existsSync(path)) return { ok: false, message: swt('syncw.noConflicts') }
   const text = readFileSync(path, 'utf8')
   const conflicts = parseConflicts(text)
@@ -723,29 +723,12 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
     // TODO 文件用专用解析/序列化（P1-6：优先保留本机原 header）
     // （abs 已在上方白名单/包含性校验处解析，全部落盘都走它）
     mkdirSync(dirname(abs), { recursive: true })
-    // FIX-22 TOCTOU 复检：校验与 writeFileSync 之间存在窗口（另一个进程/
-    // 同步任务可以在 `logs` 位置放一个符号链接，把目录换成指向仓库外的
-    // 链接）。建目录之后、写盘之前再解析一次真实路径，仍必须在仓库内。
-    {
-      const anchor = nearestExistingAncestor(dirname(abs))
-      let ok = anchor !== null
-      if (ok) {
-        try {
-          ok = isInsideRoot(realpathSync(resolve(dir)), realpathSync(anchor))
-        } catch {
-          ok = false
-        }
-      }
-      if (ok && existsSync(abs)) {
-        try {
-          ok = isInsideRoot(realpathSync(resolve(dir)), realpathSync(abs))
-        } catch {
-          ok = false
-        }
-      }
-      if (!ok) {
-        return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
-      }
+    // FIX-22 TOCTOU 复检（与 runSync 合并写回同源断言）：校验与 writeFileSync
+    // 之间存在窗口（另一个进程/同步任务可以在 `logs` 位置放一个符号链接，把
+    // 目录换成指向仓库外的链接）。建目录之后、写盘之前再解析一次真实路径，
+    // 仍必须在仓库内。
+    if (!assertSafeRepoTarget(dir, abs)) {
+      return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
     }
     const isTodo = isTodoPath(target.file)
     const existingEntries = existsSync(abs)

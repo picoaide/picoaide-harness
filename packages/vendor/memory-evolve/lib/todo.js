@@ -40,7 +40,7 @@ const tt = (key, params) => translate(TODO_DICT, key, params)
 const tmt = (key, params) => translate(TODO_MSG_DICT, key, params, getLocale())
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { ENTRY_DELIMITER, projectHash, scanThreat, serializeEntries, todayStamp, withLock } from './store.js'
+import { ENTRY_DELIMITER, projectHash, safeStoreTarget, scanThreat, serializeEntries, symlinkRefusedError, todayStamp, withLock } from './store.js'
 
 /** The four todo tracks. */
 export const TODO_TARGETS = ['life', 'work', 'project', 'daily']
@@ -270,11 +270,15 @@ export class TodoStore {
     const path = this.fileOf(target, cwd, date)
     const dir = dirname(path)
     mkdirSync(dir, { recursive: true })
+    // FIX-22 同源断言（2026-09-13）：`daily/` 目录是共享分支 120000 条目送来的
+    // 符号链接时，tmp+rename 会整条穿透到仓库外——写入前先断言落点安全
+    const safe = safeStoreTarget(this.dir, path)
+    if (safe === null) throw symlinkRefusedError(path)
     const body = items.map((item) => item.raw).join(ENTRY_DELIMITER)
     const text = `${TODO_HEADER}${body.length > 0 ? `\n§\n${body}\n` : ''}`
-    const tmp = `${path}.tmp.${process.pid}`
+    const tmp = `${safe}.tmp.${process.pid}`
     writeFileSync(tmp, text)
-    renameSync(tmp, path)
+    renameSync(tmp, safe)
   }
 
   /**
