@@ -68,7 +68,7 @@ export default function UsageModels() {
   return (
     <div className="space-y-6">
       <PageHeader title="模型分析" desc="哪些模型消耗了多少：单价、tokens、费用占比与渠道分布" />
-      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={() => void load(from, to)} />
+      <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={(f, t) => void load(f, t)} />
       {error && <div className="text-sm text-destructive">{error}</div>}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">

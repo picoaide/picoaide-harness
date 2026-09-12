@@ -147,19 +147,24 @@ export async function fetchUsageList(params: Record<string, string>): Promise<Us
 }
 
 // 统一时间范围过滤条(快捷区间 + 自定义日期 + 查询)
+//
+// 审计 2026-09-12 P1-1:预设按钮曾 `setFrom/setTo` 后同步调 `onQuery()`——
+// 那调用的是**父组件上一次渲染**的闭包,读到的还是旧 from/to(React 状态提交
+// 在事件处理器返回之后),于是「近7天」的标签是新值、请求却是旧区间。
+// 现在预设按钮把**新值直接传给回调**(onQuery(from, to)),四个调用点同一签名。
 export function RangeFilter({ from, to, setFrom, setTo, onQuery }: {
   from: string
   to: string
   setFrom: (v: string) => void
   setTo: (v: string) => void
-  onQuery: () => void
+  onQuery: (from: string, to: string) => void
 }) {
   return (
     <div className="flex flex-wrap items-end gap-3">
       <div className="flex gap-1">
-        <Button size="sm" variant="outline" onClick={() => { const r = rangePreset(7); setFrom(r.from); setTo(r.to); onQuery() }}>近7天</Button>
-        <Button size="sm" variant="outline" onClick={() => { const r = rangePreset(30); setFrom(r.from); setTo(r.to); onQuery() }}>近30天</Button>
-        <Button size="sm" variant="outline" onClick={() => { const r = monthRange(); setFrom(r.from); setTo(r.to); onQuery() }}>本月</Button>
+        <Button size="sm" variant="outline" onClick={() => { const r = rangePreset(7); setFrom(r.from); setTo(r.to); onQuery(r.from, r.to) }}>近7天</Button>
+        <Button size="sm" variant="outline" onClick={() => { const r = rangePreset(30); setFrom(r.from); setTo(r.to); onQuery(r.from, r.to) }}>近30天</Button>
+        <Button size="sm" variant="outline" onClick={() => { const r = monthRange(); setFrom(r.from); setTo(r.to); onQuery(r.from, r.to) }}>本月</Button>
       </div>
       <div>
         <Label className="mb-1 block text-sm text-muted-foreground" htmlFor="uc-from">起始日期</Label>
@@ -169,7 +174,7 @@ export function RangeFilter({ from, to, setFrom, setTo, onQuery }: {
         <Label className="mb-1 block text-sm text-muted-foreground" htmlFor="uc-to">结束日期</Label>
         <Input id="uc-to" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
       </div>
-      <Button onClick={onQuery}>查询</Button>
+      <Button onClick={() => onQuery(from, to)}>查询</Button>
     </div>
   )
 }

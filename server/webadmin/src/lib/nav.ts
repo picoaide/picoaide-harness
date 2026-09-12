@@ -18,7 +18,6 @@ export const PERM_USER_READ = 'user:read'
 export const PERM_DEPT_READ = 'dept:read'
 export const PERM_AUTH_READ = 'auth:read'
 export const PERM_GATEWAY_READ = 'gateway:read'
-export const PERM_ERRMON_READ = 'error-monitoring:read'
 export const PERM_USAGE_READ = 'usage:read'
 export const PERM_MARKET_READ = 'market:read'
 export const PERM_CAP_READ = 'capability:read'
@@ -42,7 +41,11 @@ export const NAV_ENTRIES: NavEntry[] = [
   { to: '/auth', label: '认证', icon: KeyRound, section: '管理', perms: [PERM_AUTH_READ] },
   // 运维分区(super_admin; auditor 仅有 usage:read)
   { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
-  { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_ERRMON_READ] },
+  // 错误监控页归 server-info 权限点(审计 2026-09-12 P1-3):它此前 gate 在
+  // `error-monitoring:read` 上,而该权限点 2026-09-08 已从 rbac.go 删除
+  // (rbac.go:43 注释),全仓再无人下发 → 连 super_admin 都看不到菜单项,
+  // 页面实际不可达。Go 真源里承载错误监控配置面的是 server-info:read。
+  { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_SERVERINFO_READ] },
   { to: '/usage', label: '用量中心', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
   // 2026-09-02:合并「市场 · 技能」与「能力中心」为单入口(客户端同构)。
   { to: '/capabilities', label: '能力中心', icon: Store, section: '运维', perms: [PERM_MARKET_READ, PERM_CAP_READ] },

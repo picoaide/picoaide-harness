@@ -19,6 +19,8 @@ interface UsageResponse {
   fetchedAt: number
   state: 'idle' | 'loading' | 'error'
   error: string | null
+  /** 审计 2026-09-12 P1-5:令牌失效(路由层 401)。 */
+  authExpired?: boolean
 }
 
 /** Card container: the sidebar foot area (below the Settings seat). */
@@ -230,7 +232,13 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
         ])
         if (cancelled) return
         setAuth(authBody as AuthState)
-        if (usageBody !== null) setUsage(usageBody as UsageResponse)
+        if (usageRes.status === 401) {
+          // 审计 2026-09-12 P1-5:令牌失效 —— 服务端不会再给余额,卡片必须
+          // 立刻转"余额不可用",而不是继续显示上一次成功取的金额。
+          setUsage({ data: null, fetchedAt: 0, state: 'error', error: 'auth expired', authExpired: true })
+        } else if (usageBody !== null) {
+          setUsage(usageBody as UsageResponse)
+        }
       } catch {
         /* keep the last known state on transient failures */
       }
@@ -272,7 +280,14 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
 
   const username = auth.username ?? '?'
   const data = usage?.data ?? null
-  const stale = usage !== null && usage.state === 'error' && data === null
+  // 审计 2026-09-12 P1-5:旧判据 `state === 'error' && data === null` 要求 data
+  // 恰好为 null —— 而失败路径**保留旧快照**(`{...this.snapshot}`),有旧数据
+  // 时 data 非空 ⇒ stale 恒 false ⇒ 卡片照常渲染过期余额(令牌失效后
+  // 这就是静默错数)。现在 state==='error' 即视为不可信并渲染占位,
+  // authExpired(路由层 401,旧数据已被丢弃)再兜一层。
+  // 取舍:网络抖动期间也不再显示上一次的金额(改为"余额获取失败"占位),
+  // 下一次成功轮询即恢复 —— 余额属于计费口径,宁可短暂留白不可展示错数。
+  const stale = usage !== null && (usage.state === 'error' || usage.authExpired === true)
 
   // ---- rail: single avatar dot with a username tooltip ----
   if (!wide) {

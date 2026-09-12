@@ -42,9 +42,10 @@ function response(): ServerResponse & { body: string } {
 function ctxFixture(session: { username: string; token: string; serverURL: string } | null) {
   const events = new Map<string, Set<(payload: unknown) => void>>()
   let registered: RouteEntry | undefined
+  const clear = vi.fn()
   return {
     ctx: {
-      picoSession: { getSession: () => session },
+      picoSession: { getSession: () => session, clear },
       on: vi.fn((event: string, listener: (payload: unknown) => void) => {
         if (!events.has(event)) events.set(event, new Set())
         events.get(event)!.add(listener)
@@ -62,6 +63,7 @@ function ctxFixture(session: { username: string; token: string; serverURL: strin
     } as unknown as Context,
     getRoute: () => registered!,
     emit: (event: string, payload: unknown) => { for (const l of [...(events.get(event) ?? [])]) l(payload) },
+    sessionCleared: clear,
   }
 }
 
@@ -118,5 +120,30 @@ describe('account-card host apply', () => {
     // No throw is the contract here; detailed coalescing lives in usage-service.test.ts.
     expect(ctx.on).toHaveBeenCalledWith('pico/session-changed', expect.any(Function))
     expect(ctx.on).toHaveBeenCalledWith('agent/status', expect.any(Function))
+  })
+
+  // 审计 2026-09-12 P1-5(回归):令牌失效后路由层必须回 401 并清会话,
+  // 而不是像改前那样 200 + 旧余额(account-card 注释承诺过该映射,但从未实现)。
+  it('令牌失效(?refresh=1 时网关 401)⇒ 401 + 清会话,不再交付旧余额', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: '登录已过期' } }),
+      { status: 401, headers: { 'content-type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const { ctx, getRoute, sessionCleared } = ctxFixture({ username: 'u', token: 'expired', serverURL: 'https://gw.example' })
+      apply(ctx)
+      const res = response()
+      await getRoute().handler(
+        request({ url: '/api/pico/account/usage?refresh=1', host: 'localhost:43120', origin: 'http://localhost:43120' }),
+        res,
+      )
+      expect(fetchMock).toHaveBeenCalled()
+      expect(res.statusCode).toBe(401)
+      expect(JSON.parse(res.body)).toEqual({ error: 'auth expired' })
+      expect(sessionCleared).toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

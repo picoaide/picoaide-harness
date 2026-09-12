@@ -6,7 +6,7 @@
  * @module @picoaide/dsh-account-card/usage-service
  */
 
-import { fetchJSON } from '@picoaide/dsh-enterprise/server-connector/auth'
+import { AuthError, fetchJSON } from '@picoaide/dsh-enterprise/server-connector/auth'
 import type { Session } from '@picoaide/dsh-enterprise/server-connector/config'
 import { parseUsagePayload, type UsagePayload } from './usage-contract.js'
 
@@ -24,10 +24,19 @@ export interface UsageSnapshot {
   fetchedAt: number
   state: SnapshotState
   error: string | null
+  /**
+   * 审计 2026-09-12 P1-5:令牌已失效(服务端 401 / AuthError kind
+   * 'auth_expired')时为 true。消费方据此**不再展示旧余额**(旧快照是上一个
+   * 有效令牌下取到的),路由层据此回 401 让渲染层隐藏卡片。
+   *
+   * 与普通网络错误的区别是关键:网络抖动保留旧快照是**想要**的行为
+   * (别把余额闪成空白),而鉴权失败保留旧快照是**缺陷**(静默展示过期金额)。
+   */
+  authExpired: boolean
 }
 
 /** Empty snapshot shown before the first successful fetch. */
-export const EMPTY_SNAPSHOT: UsageSnapshot = { data: null, fetchedAt: 0, state: 'idle', error: null }
+export const EMPTY_SNAPSHOT: UsageSnapshot = { data: null, fetchedAt: 0, state: 'idle', error: null, authExpired: false }
 
 /** fetchJSON-compatible gateway caller (test-injectable). `signal` lets the
  * service abort a request that belongs to a session the user just left. */
@@ -38,6 +47,21 @@ const DEFAULT_DEBOUNCE_MS = 300
 /** Identity of the account a request belongs to (server + user + token). */
 function sessionKey(session: Session): string {
   return `${session.serverURL}\u0000${session.username ?? ''}\u0000${session.token}`
+}
+
+/**
+ * Whether a failed usage fetch means "this token is no longer valid".
+ *
+ * `fetchJSON` raises `AuthError('auth_expired')` for HTTP 401 on the client
+ * surface; the message fallback covers a few server shapes that answer 401
+ * without the structured kind. Exported for the route layer and its tests.
+ * @param cause - thrown value from the usage fetch.
+ * @returns true when the session token must be treated as expired.
+ */
+export function isAuthExpired(cause: unknown): boolean {
+  if (cause instanceof AuthError) return cause.kind === 'auth_expired'
+  const message = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
+  return /\b401\b|auth_expired|未授权|登录已过期|Unauthorized/i.test(message)
 }
 
 /**
@@ -135,19 +159,35 @@ export class UsageService {
         // its aborted error over the newer request's state (P2-22).
         if (epoch === this.epoch && this.inflight === request) {
           this.snapshot = data === null
-            ? { data: null, fetchedAt: Date.now(), state: 'error', error: 'unexpected usage payload' }
-            : { data, fetchedAt: Date.now(), state: 'idle', error: null }
+            ? { data: null, fetchedAt: Date.now(), state: 'error', error: 'unexpected usage payload', authExpired: false }
+            : { data, fetchedAt: Date.now(), state: 'idle', error: null, authExpired: false }
         }
       } catch (cause) {
-        // 401/auth-expired surfaces here too: the route layer maps it to a
-        // 401 response so the card can hide; the previous snapshot is kept
-        // so a transient network blip never blanks the balance.
+        // 审计 2026-09-12 P1-5:鉴权失败必须与网络抖动分开。
+        //
+        // 旧实现把两者都折成 `state:'error'` 且**保留旧快照**,注释还宣称
+        // "the route layer maps it to a 401 so the card can hide" —— 该映射
+        // 从未实现(grep `auth_expired` 零命中),于是令牌失效后账号卡继续
+        // 静默展示上一个令牌下取到的余额。
+        //
+        // 现在:auth_expired/401 ⇒ 标记 authExpired 并**丢弃数据**(旧余额
+        // 不可信);其余(网络/服务端 5xx)⇒ 保留旧快照(避免把余额闪成空白)。
+        const expired = isAuthExpired(cause)
         if (epoch === this.epoch && this.inflight === request) {
-          this.snapshot = {
-            ...this.snapshot,
-            state: 'error',
-            error: cause instanceof Error ? cause.message : String(cause),
-          }
+          this.snapshot = expired
+            ? {
+                data: null,
+                fetchedAt: this.snapshot.fetchedAt,
+                state: 'error',
+                error: cause instanceof Error ? cause.message : String(cause),
+                authExpired: true,
+              }
+            : {
+                ...this.snapshot,
+                state: 'error',
+                error: cause instanceof Error ? cause.message : String(cause),
+                authExpired: false,
+              }
         }
       } finally {
         // Only the request that still owns the slot may clear it.
