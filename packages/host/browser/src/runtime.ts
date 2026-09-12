@@ -13,7 +13,7 @@ import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
-import { captureScreenshot } from './shots.ts'
+import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
@@ -1034,14 +1034,40 @@ export class BrowserRuntime {
     try {
       data = await this.agentRun('browser_screenshot', async () => {
         const tab = this.tab(resolved)
-        return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+        let primary: string
+        try {
+          return await captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality)
+        } catch (cause) {
+          primary = cause instanceof Error ? cause.message : String(cause)
+        }
+        // 2026-09-12: the browser window is created hidden by design, and a
+        // hidden window has no viz surface — `capturePage()` then fails with
+        // "Current display surface not available for capture". The renderer-side
+        // CDP path composites the frame without a surface, so screenshots keep
+        // working for an agent-driven (never shown) window.
+        try {
+          const fallback = await captureScreenshotViaCdp(
+            (method, params) => tab.cdp.send(method, params),
+            this.options.screenshotMaxWidth,
+            this.options.screenshotQuality,
+          )
+          this.record('browser_screenshot', resolved, `capturePage unavailable (${primary.slice(0, 120)}); captured via CDP fromSurface:false`)
+          return fallback
+        } catch (cause) {
+          const secondary = cause instanceof Error ? cause.message : String(cause)
+          // Both reasons are kept: the primary one is what the P2-31 guard
+          // ("empty image (0x0)") and real-device diagnostics key on.
+          throw new Error(`${primary}; renderer-side fallback: ${secondary}`)
+        }
       }, signal)
     } catch (cause) {
       // An empty capture (hidden window / background tab / zero-sized view)
       // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
       const message = cause instanceof Error ? cause.message : String(cause)
       this.record('browser_screenshot', resolved, `screenshot failed: ${message}`, true)
-      throw cause
+      throw new Error(
+        `browser: screenshot failed — ${message}; the tab must be able to render (open the 浏览器 window if it is closed, then retry)`,
+      )
     }
     this.record('browser_screenshot', resolved, 'screenshot captured')
     return data
@@ -1143,14 +1169,85 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     await this.agentRun('browser_click', async () => {
       const tab = this.tab(resolved)
-      await tab.cdp.send('Input.dispatchMouseEvent', {
-        type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
-      })
-      await tab.cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
-      })
+      // 2026-09-12: synthesized OS-level input (CDP `Input.dispatchMouseEvent`)
+      // needs an input-visible RenderWidgetHost. The browser window is created
+      // hidden by design (2026-09-08 product decision), and on a hidden window
+      // those events are accepted by the protocol yet never delivered to the
+      // page — the tool reported success while nothing happened (real-device
+      // report: links did not navigate, submit buttons did not submit, while
+      // DOM-level tools such as fill_form/select kept working).
+      //
+      // So: real input when the window can receive it, DOM-level activation
+      // (elementFromPoint + a full bubbling event sequence) otherwise. The
+      // dispatch path is recorded in the op log so the difference stays visible.
+      if (this.windowCanReceiveInput()) {
+        await tab.cdp.send('Input.dispatchMouseEvent', {
+          type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
+        })
+        await tab.cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
+        })
+        this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
+        return
+      }
+      const target = await this.activateAtPoint(tab, point)
+      this.record(
+        'browser_click',
+        resolved,
+        target === 'none'
+          ? `click at (${Math.round(point.x)}, ${Math.round(point.y)}) hit no element (hidden window: DOM dispatch)`
+          : `click at (${Math.round(point.x)}, ${Math.round(point.y)}) via DOM dispatch (hidden window)`,
+        target === 'none',
+      )
+      if (target === 'none') {
+        throw browserError('not-found', `browser: nothing to click at (${Math.round(point.x)}, ${Math.round(point.y)}) — the point is outside any element`)
+      }
     }, signal)
-    this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
+  }
+
+  /** Whether the browser window currently has a surface that receives input. */
+  private windowCanReceiveInput(): boolean {
+    if (this.window === null || this.window.isDestroyed()) return false
+    return this.window.isVisible()
+  }
+
+  /**
+   * DOM-level activation of whatever sits at a viewport point, used when the
+   * window cannot deliver real input (hidden window). `elementFromPoint` is
+   * layout-based, so it works without a compositor, and the dispatched sequence
+   * is a full bubbling pointer/mouse/click chain so handlers that listen for any
+   * of those (and activation behavior such as link navigation, checkbox toggle
+   * or form submission) still fire.
+   *
+   * @returns `'element'` when something was hit, `'none'` for an empty point.
+   */
+  private async activateAtPoint(tab: BrowserTab, point: { x: number; y: number }): Promise<'element' | 'none'> {
+    const x = Number(point.x)
+    const y = Number(point.y)
+    const result = await tab.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+      expression: `
+        (() => {
+          const x = ${JSON.stringify(x)};
+          const y = ${JSON.stringify(y)};
+          const el = document.elementFromPoint(x, y);
+          if (!el) return 'none';
+          if (typeof el.focus === 'function') { try { el.focus({ preventScroll: true }); } catch {} }
+          const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, detail: 1 };
+          const Pointer = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+          const sequence = [
+            () => el.dispatchEvent(new Pointer('pointerdown', { ...base, buttons: 1, isPrimary: true, pointerId: 1, pointerType: 'mouse' })),
+            () => el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 })),
+            () => el.dispatchEvent(new Pointer('pointerup', { ...base, buttons: 0, isPrimary: true, pointerId: 1, pointerType: 'mouse' })),
+            () => el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 })),
+            () => el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 })),
+          ];
+          for (const dispatch of sequence) dispatch();
+          return 'element';
+        })()
+      `,
+      returnByValue: true,
+    })
+    return result.result?.value === 'element' ? 'element' : 'none'
   }
 
   async typeInto(tabId: number, selector: string, text: string, clear = true, signal?: AbortSignal): Promise<void> {

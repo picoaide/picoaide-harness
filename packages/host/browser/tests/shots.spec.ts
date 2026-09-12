@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { NativeWebContents } from '../src/electron-adapter.ts'
-import { captureScreenshot } from '../src/shots.ts'
+import { captureScreenshot, captureScreenshotViaCdp } from '../src/shots.ts'
 
 interface FakeImage {
   size: { width: number; height: number }
@@ -63,5 +63,46 @@ describe('captureScreenshot', () => {
     const img = image(2000)
     await captureScreenshot(webContents(img), 0, 70)
     expect(img.resize).toHaveBeenCalledWith({ width: 1, quality: 'good' })
+  })
+})
+
+describe('captureScreenshotViaCdp（隐藏窗口兜底）', () => {
+  const png = Buffer.from('renderer-frame').toString('base64')
+
+  function sender(metrics: unknown, data: string | undefined = png) {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const send = async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      if (method === 'Page.getLayoutMetrics') return metrics
+      if (method === 'Page.captureScreenshot') return { data }
+      return {}
+    }
+    return { send, calls }
+  }
+
+  it('走渲染器侧抓帧并返回 JPEG data URL', async () => {
+    const { send, calls } = sender({ cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } })
+    const url = await captureScreenshotViaCdp(send, 1280, 70)
+    expect(url).toBe(`data:image/jpeg;base64,${png}`)
+    const capture = calls.find((c) => c.method === 'Page.captureScreenshot')
+    expect(capture?.params).toMatchObject({ format: 'jpeg', quality: 70, fromSurface: false })
+    expect(capture?.params?.clip).toBeUndefined()
+  })
+
+  it('没有布局信息时不加 clip（宁可不缩放也不报错）', async () => {
+    const { send, calls } = sender({})
+    await expect(captureScreenshotViaCdp(send, 1280, 70)).resolves.toMatch(/^data:image\/jpeg;base64,/u)
+    expect(calls.find((c) => c.method === 'Page.captureScreenshot')?.params?.clip).toBeUndefined()
+  })
+
+  it('渲染器没给图时报错（不返回空 data URL）', async () => {
+    const { send } = sender({ cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } }, '')
+    await expect(captureScreenshotViaCdp(send)).rejects.toThrow('renderer returned no image')
+  })
+
+  it('质量同样夹到 1..100', async () => {
+    const { send, calls } = sender({ cssLayoutViewport: { clientWidth: 100, clientHeight: 100 } })
+    await captureScreenshotViaCdp(send, 1280, 0)
+    expect(calls.find((c) => c.method === 'Page.captureScreenshot')?.params?.quality).toBe(1)
   })
 })
