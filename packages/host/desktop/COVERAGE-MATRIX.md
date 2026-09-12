@@ -26,7 +26,7 @@
 - verify-packaged-runtime：app.asar/unpacked 条目与 exports 完整性
 - verify-loader-boot / verify-profile-boot：Loader/配置组合 headless smoke
 - verify-runtime-closure：202 首个方节点闭环
-- verify-licenses / verify-notices：710 生产包许可（2 个 notice-required）+ 通告
+- verify-licenses / verify-notices：525 生产包许可（2 个 notice-required）+ 通告
 - verify-win-installer / verify-win-portable / verify-mac-smoke/release：三平台产物
 
 ## E2E 工具

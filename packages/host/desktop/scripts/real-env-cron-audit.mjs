@@ -120,8 +120,19 @@ try {
 
   // 4. Open the scheduled-job center from the sidebar.
   const cronOpen = await clickLabel('定时任务', 3500)
-  const cronView = await ev(`!!document.querySelector('[data-dsh-cron-view]')`)
-  reportStep('定时任务中心面板挂载', cronOpen === 'CLICKED' && cronView === true)
+  // 2026-09-12：改为可见性 + 让位断言（存在性对未激活也在 DOM 的容器是假绿）。
+  const cronView = await ev(`(() => {
+    const view = document.querySelector('[data-dsh-cron-view]')
+    const surface = document.querySelector('.dshDesktopConversationSurface')
+    if (view === null || surface === null) return false
+    const v = view.getBoundingClientRect(); const s = surface.getBoundingClientRect()
+    if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
+    if (v.height < s.height * 0.9) return false
+    return [...surface.children]
+      .filter(el => !el.hasAttribute('data-dsh-cron-view'))
+      .every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
+  })()`)
+  reportStep('定时任务中心面板占满中列（会话区已让位）', cronOpen === 'CLICKED' && cronView === true)
   await screenshot('c01-cron-center')
 
   // 5. Click "新建任务" to open the job editor dialog.

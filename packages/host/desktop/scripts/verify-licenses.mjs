@@ -12,7 +12,7 @@
 
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -160,13 +160,19 @@ if (failures.length > 0) {
 }
 
 const noticeOnly = manifests.filter(entry => NOTICE_LICENSES.has(entry.license))
-const noticesArg = process.argv.indexOf('--notices')
-if (noticesArg !== -1) {
-  const target = process.argv[noticesArg + 1]
-  if (target === undefined) {
-    process.stderr.write('verify-licenses: --notices requires a file path\n')
-    process.exit(1)
-  }
+
+/**
+ * Render the shipped third-party notice list.
+ *
+ * `--notices`(覆盖写)与 `--check-notices`(比对)共用这一份渲染:生成器与比对
+ * 基准只允许有一处实现,否则"生成器改了但基准没改"就是假绿。
+ * 注意保留历史语义:空行会被过滤掉、文件**不以换行结尾**(与仓库里现有的
+ * THIRD_PARTY_NOTICES.md 逐字节一致,避免重生成时产生无意义 diff)。
+ * @param entries - 依赖树里的包(`{ name, version, license }`)。
+ * @returns Markdown 文本。
+ */
+function renderNotices(entries) {
+  const noticeEntries = entries.filter(entry => NOTICE_LICENSES.has(entry.license))
   const lines = [
     '# Third-Party Notices',
     '',
@@ -176,16 +182,92 @@ if (noticesArg !== -1) {
     '',
     '| Package | Version | License |',
     '| --- | --- | --- |',
-    ...manifests
+    ...entries
+      .slice()
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(entry => `| ${entry.name} | ${entry.version ?? ''} | ${entry.license} |`),
     '',
-    noticeOnly.length === 0
+    noticeEntries.length === 0
       ? ''
-      : `> Notice-required licenses in use: ${[...new Set(noticeOnly.map(entry => entry.license))].join(', ')}. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.`,
+      : `> Notice-required licenses in use: ${[...new Set(noticeEntries.map(entry => entry.license))].join(', ')}. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.`,
     '',
   ].filter(line => line !== '')
-  writeFileSync(join(packageRoot, target), lines.join('\n'))
+  return lines.join('\n')
+}
+
+/** Resolve a CLI path argument(绝对路径原样使用,相对路径按包根解析)。 */
+function resolveNoticeTarget(target) {
+  return isAbsolute(target) ? target : join(packageRoot, target)
+}
+
+/** 行级差异摘要(只看"多/少 哪些行",给人可操作的错误信息)。 */
+function diffSummary(actualText, expectedText) {
+  const count = (text) => {
+    const map = new Map()
+    for (const line of text.split('\n')) map.set(line, (map.get(line) ?? 0) + 1)
+    return map
+  }
+  const actual = count(actualText)
+  const expected = count(expectedText)
+  const stale = []
+  const missing = []
+  for (const [line, times] of actual) {
+    const delta = times - (expected.get(line) ?? 0)
+    for (let index = 0; index < delta; index += 1) stale.push(line)
+  }
+  for (const [line, times] of expected) {
+    const delta = times - (actual.get(line) ?? 0)
+    for (let index = 0; index < delta; index += 1) missing.push(line)
+  }
+  return { stale, missing }
+}
+
+const noticesArg = process.argv.indexOf('--notices')
+const checkArg = process.argv.indexOf('--check-notices')
+if (noticesArg !== -1 && checkArg !== -1) {
+  process.stderr.write('verify-licenses: --notices 与 --check-notices 互斥\n')
+  process.exit(1)
+}
+if (noticesArg !== -1) {
+  const target = process.argv[noticesArg + 1]
+  if (target === undefined) {
+    process.stderr.write('verify-licenses: --notices requires a file path\n')
+    process.exit(1)
+  }
+  writeFileSync(resolveNoticeTarget(target), renderNotices(manifests))
+  process.stdout.write(`verify-licenses: 已写入 ${target}\n`)
+} else if (checkArg !== -1) {
+  const target = process.argv[checkArg + 1]
+  if (target === undefined) {
+    process.stderr.write('verify-licenses: --check-notices requires a file path\n')
+    process.exit(1)
+  }
+  const path = resolveNoticeTarget(target)
+  const expected = renderNotices(manifests)
+  let actual
+  try {
+    actual = readFileSync(path, 'utf8')
+  } catch {
+    process.stderr.write(
+      `verify-licenses: ${target} 不存在 —— 随包第三方通告清单是交付物的一部分,必须入库。`
+      + '生成:yarn workspace dsh-plugin-desktop verify:notices:write\n',
+    )
+    process.exit(1)
+  }
+  if (actual !== expected) {
+    const { stale, missing } = diffSummary(actual, expected)
+    const sample = (lines) => lines.slice(0, 5).map(line => `      ${line}`).join('\n')
+    process.stderr.write(
+      `verify-licenses: ${target} 与当前生产依赖树不一致(--check-notices)\n`
+      + `  提交版本 ${actual.split('\n').length - 1} 行 / 重新生成 ${expected.split('\n').length - 1} 行\n`
+      + `  已过期(提交里有、依赖树里没有)${stale.length} 行${stale.length > 0 ? `:\n${sample(stale)}` : ''}\n`
+      + `  缺失(依赖树里有、提交里没有)${missing.length} 行${missing.length > 0 ? `:\n${sample(missing)}` : ''}\n`
+      + '重新生成并提交:yarn workspace dsh-plugin-desktop verify:notices:write'
+      + '(旧版本/已删除包会让法务面失真,升级后必须重生成)\n',
+    )
+    process.exit(1)
+  }
+  process.stdout.write(`verify-licenses: ${target} 与生产依赖树一致(${expected.split('\n').length - 1} 行)\n`)
 }
 
 const total = seen.size - 1

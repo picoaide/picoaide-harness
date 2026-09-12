@@ -193,13 +193,20 @@ describe('generateTrayIcons', () => {
     expect(white).toBeGreaterThan(0)
   })
 
-  it('官方 logo 的产物与"替换 #000000"的旧行为逐字节一致', async () => {
+  it('官方 logo 的产物与"替换方块色"的旧行为逐字节一致', async () => {
     // 改造只放宽了输入约束，官方路径的产物不能变一丝一毫。
+    //
+    // 旧实现是 `source.replaceAll(BRAND_COLOR, 变体色)`，其中 BRAND_COLOR 硬编码
+    // 为 `#000000`；官方 logo 的方块本来就是 `#000000`，默认变体色（托盘渲染色）
+    // 也是 `#000000` —— 所以旧产物 == "源 SVG 直接缩放"。下面先钉住这个前提，
+    // 再逐字节比对（而不是写一句 replaceAll('#000000', '#000000') 的恒等替换：
+    // 那种写法既无信息量，又会被 CodeQL js/identity-replacement 判为笔误）。
     const out = tempDir('dsh-tray-official-')
     await generateTrayIcons({ source: officialLogo, buildRoot: out })
     const source = readFileSync(officialLogo, 'utf8')
+    expect(source).toContain('fill="#000000"')
     for (const [file, size] of [['tray-iconTemplate.png', 16], ['tray-icon-blue@2x.png', 32]] as const) {
-      const legacy = await sharp(Buffer.from(source.replaceAll('#000000', '#000000')))
+      const legacy = await sharp(Buffer.from(source))
         .resize({ width: size, height: size, fit: 'contain' })
         .png({ compressionLevel: 9 })
         .toBuffer()

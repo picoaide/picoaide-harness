@@ -57,12 +57,60 @@ describe('exportDiagnosticsZip', () => {
     mkdirSync(crashEvidence)
     writeFileSync(join(crashEvidence, 'active-run.json'), '{"version":"2.0.1"}\n')
 
-    const out = await exportDesktopDiagnostics(root, { appVersion: APP_VERSION })
+    const out = await exportDesktopDiagnostics(root, {
+      appVersion: APP_VERSION,
+      // Explicit root keeps the test off the developer's real <DSH_HOME>/sessions.
+      sessionsDir: join(root, 'sessions'),
+    })
 
     const zip = new AdmZip(out)
     expect(zip.readAsText('crash-evidence/active-run.json')).toBe('{"version":"2.0.1"}\n')
     expect(zip.readAsText('system-info.txt')).toContain('included-active-run-marker: true')
     expect(existsSync(join(root, 'logs'))).toBe(true)
+  })
+
+  it('adds session generation metadata without exporting the session logs themselves', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-sessions-'))
+    const logs = join(root, 'logs')
+    const sessions = join(root, 'sessions')
+    const session = join(sessions, '--data-repo--', 'session-migrated')
+    mkdirSync(logs)
+    mkdirSync(session, { recursive: true })
+    writeFileSync(join(logs, 'dsh-2026-08-16.log'), 'owned\n')
+    writeFileSync(join(session, 'session.jsonl.zstd'), 'private-v0-session-body')
+    writeFileSync(join(session, 'session.v3.jsonl.zstd'), 'private-v3-session-body')
+    writeFileSync(join(session, 'session.lock'), '')
+
+    const out = await exportDiagnosticsZip(logs, root, {
+      appVersion: APP_VERSION,
+      sessionsDir: sessions,
+    })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName)
+    expect(names).toContain('session-inventory.json')
+    expect(names).not.toContain('session.jsonl.zstd')
+    expect(names.some(name => name.includes('session.jsonl'))).toBe(false)
+    const inventory = JSON.parse(zip.readAsText('session-inventory.json')) as {
+      schemaVersion: number
+      available: boolean
+      sessions: Array<{ project: string, id: string, lockPresent: boolean, files: Array<{ name: string }> }>
+      truncated: boolean
+    }
+    expect(inventory.schemaVersion).toBe(1)
+    expect(inventory.available).toBe(true)
+    expect(inventory.truncated).toBe(false)
+    expect(inventory.sessions).toHaveLength(1)
+    expect(inventory.sessions[0]).toMatchObject({ project: '--data-repo--', id: 'session-migrated', lockPresent: true })
+    expect(inventory.sessions[0]?.files.map(file => file.name))
+      .toEqual(['session.jsonl.zstd', 'session.v3.jsonl.zstd'])
+    const info = zip.readAsText('system-info.txt')
+    expect(info).toContain('included-session-inventory: true')
+    expect(info).toContain('session-inventory-sessions: 1')
+    expect(info).toContain('session-inventory-files: 2')
+    expect(info).toContain('session-inventory-truncated: false')
+    expect(zip.readAsText('session-inventory.json')).not.toContain('private-v0-session-body')
+    expect(zip.readAsText('session-inventory.json')).not.toContain('private-v3-session-body')
   })
 
   it('includes local Crashpad minidumps but excludes unrelated crash files', async () => {

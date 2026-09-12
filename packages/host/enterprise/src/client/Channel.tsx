@@ -205,7 +205,11 @@ export function BrandName() {
   const name = resolveClientShortName(channel)
   return createElement(
     'span',
-    { title: name, style: BRAND_NAME_ROW_STYLE },
+    // 归属标记与 BraceMark 同源（见 BRAND_SEAT_ATTR 的说明）：品牌**名字**槽同样是
+    // single 占位槽，上游兜底会渲染 `brand.localBuild`（"DSH 本地构建"）—— 自动化要
+    // 判断"这一格是谁占的"只能靠这个属性（2026-09-12 打包版 e2e 实测：名字槽因缺标记
+    // 被判成 FOREIGN，与真实渲染无关）。
+    { title: name, style: BRAND_NAME_ROW_STYLE, [BRAND_SEAT_ATTR]: BRAND_SEAT_OWNER },
     createElement('span', { style: BRAND_NAME_TEXT_STYLE }, name),
     version != null && version !== ''
       ? createElement('span', {

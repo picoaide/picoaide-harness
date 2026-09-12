@@ -34,6 +34,12 @@ const GUARDS = [
   { name: 'check:layout', args: ['run', 'check:layout'], path: 'package.json / .agents/notes 布局' },
   { name: 'check:workflows', args: ['run', 'check:workflows'], path: '.github/workflows' },
   { name: 'check:ci-scripts', args: ['run', 'check:ci-scripts'], path: 'CI 脚本' },
+  // 2026-09-12 二次审查的清单类不变量(P1-4/P1-6/P2-9):
+  // 补丁 resolution 键成对完备、补丁在仓库外对 pristine tarball 干净应用、
+  // platform-modules 与 CI 归档清单等手工清单互相对拍。
+  { name: 'check:patch-resolutions', args: ['run', 'check:patch-resolutions'], path: 'resolutions ↔ patches/' },
+  { name: 'check:patches', args: ['run', 'check:patches'], path: 'patches/*.patch 仓库外 dry-run' },
+  { name: 'check:inventories', args: ['run', 'check:inventories'], path: '平台模块表 / CI 归档 / 包表' },
 ]
 
 /**

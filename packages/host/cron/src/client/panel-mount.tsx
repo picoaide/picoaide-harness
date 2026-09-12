@@ -41,6 +41,13 @@ function visibilityStyle(): HTMLStyleElement {
   // rule below and the panel could never show). While the center is active,
   // show the container and hide the conversation subtree. !important on the
   // hide side beats the shell's inline display:contents.
+  //
+  // 隐藏面必须**逐个列出真实存在的中列容器**（2026-09-12 打包版真机复现）：
+  // `[data-pane='conversation']` 在上游 rc1/rc2 全仓零命中（死选择器），
+  // `[class*='centerCol']` 只匹配上游 ui-layout 的 AppFrame —— 而桌面高级壳把
+  // 那一行禁用了、中列是 AdvancedFrame 的 `.dshDesktopConversationSurface`。
+  // 漏掉它时「定时任务」不再让位：会话区与面板各占一半高度（实测 407/407）。
+  // 新增中列实现时，这里与 CONVERSATION_COLUMN_SELECTOR 必须成对更新。
   style.textContent = [
     `[data-dsh-cron-view] {`,
     `  display: none;`,
@@ -48,7 +55,9 @@ function visibilityStyle(): HTMLStyleElement {
     `  width: 100%;`,
     `}`,
     `html[${CRON_ACTIVE_ATTR}] [data-pane='conversation'] > :not([data-dsh-cron-view]),`,
-    `html[${CRON_ACTIVE_ATTR}] [class*='centerCol'] > :not([data-dsh-cron-view]) {`,
+    `html[${CRON_ACTIVE_ATTR}] [class*='centerCol'] > :not([data-dsh-cron-view]),`,
+    `html[${CRON_ACTIVE_ATTR}] [class*='dshDesktopConversationSurface'] > :not([data-dsh-cron-view]),`,
+    `html[${CRON_ACTIVE_ATTR}] [class*='ConversationSurface'] > :not([data-dsh-cron-view]) {`,
     `  display: none !important;`,
     `}`,
     `html[${CRON_ACTIVE_ATTR}] [data-dsh-cron-view] {`,

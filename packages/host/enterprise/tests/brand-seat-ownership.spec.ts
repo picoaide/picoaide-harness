@@ -36,4 +36,18 @@ describe('品牌槽位归属标记', () => {
     expect(spread).toBe(2)
     expect(source).toContain('const seat = { [BRAND_SEAT_ATTR]: BRAND_SEAT_OWNER }')
   })
+
+  it('三个 single 品牌槽的占用者都带标记（mark / name / hero mark）', () => {
+    // 2026-09-12 打包版 e2e 实测：名字槽的占用者（BrandName）当时**没有**标记，
+    // 归属断言把它判成了 FOREIGN（与真实渲染无关，纯标记缺失）。这里按组件块检查，
+    // 避免只覆盖 mark 槽；同时钉住 e2e 的三槽清单，少一个槽就是少一层守卫。
+    const nameStart = source.indexOf('export function BrandName')
+    const badgeStart = source.indexOf('export function BrandBadge')
+    expect(nameStart).toBeGreaterThan(-1)
+    expect(badgeStart).toBeGreaterThan(nameStart)
+    expect(source.slice(nameStart, badgeStart)).toContain('[BRAND_SEAT_ATTR]: BRAND_SEAT_OWNER')
+    expect(probe).toContain('sidebar.brand.mark')
+    expect(probe).toContain('sidebar.brand.name')
+    expect(probe).toContain('conversation.hero.brand.mark')
+  })
 })

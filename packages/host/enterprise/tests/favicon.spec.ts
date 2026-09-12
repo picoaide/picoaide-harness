@@ -63,25 +63,29 @@ describe('installFavicon', () => {
     expect(inline.replace(/\s+/g, ' ').trim()).toBe(authored.replace(/\s+/g, ' ').trim())
   })
 
-  it('clouds the manifest icons when a manifest link is present', async () => {
-    const manifestData = { icons: [{ src: '/old.svg' }, { src: '/second.svg' }] }
+  it('leaves the manifest alone: /manifest.webmanifest is owned by the desktop host route', () => {
+    // 2026-09-12：原先这里断言"fetch manifest 后改 icons[].src"。那段代码是**死代码**
+    // （改的是 fetch 解析出来的副本，浏览器读的是它自己那次请求；改完既不写回也没人
+    // 消费），已从 installFavicon 删除；`/favicon.svg` 与 `/manifest.webmanifest` 现在
+    // 由桌面 host 的 exact 路由覆盖（`packages/host/desktop/src/brand-web-route.ts`，
+    // 有独立单测 + 打包版 e2e 断言）。本用例钉住"客户端脚本不再去动 manifest"这一
+    // 契约，避免有人把它加回来制造"看起来已经覆盖"的错觉。
     const manifest = { href: '/manifest.webmanifest' }
-    const fetch = vi.fn(async () => ({ json: async () => manifestData }))
-    vi.stubGlobal('document', fixtureDocument([], manifest))
+    const fetch = vi.fn(async () => ({ json: async () => ({ icons: [{ src: '/old.svg' }] }) }))
+    const links: FakeLink[] = [{ href: '/favicon.svg', rel: 'icon' }]
+    vi.stubGlobal('document', fixtureDocument(links, manifest))
     vi.stubGlobal('fetch', fetch)
     installFavicon()
-    await vi.waitFor(() => {
-      expect(manifestData.icons[0]!.src).toMatch(/^data:image\/svg\+xml,/)
-      expect(manifestData.icons[1]!.src).toMatch(/^data:image\/svg\+xml,/)
-    })
+    expect(fetch).not.toHaveBeenCalled()
+    expect(links[0]!.href).toMatch(/^data:image\/svg\+xml,/)
   })
 
-  it('is best-effort when the manifest fetch fails', async () => {
-    const manifest = { href: '/manifest.webmanifest' }
-    const fetch = vi.fn(async () => { throw new Error('offline') })
-    vi.stubGlobal('document', fixtureDocument([], manifest))
-    vi.stubGlobal('fetch', fetch)
-    expect(() => installFavicon()).not.toThrow()
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
+  it('only ever touches link[rel=icon] (no manifest query in the hot path)', () => {
+    const links: FakeLink[] = [{ href: '/favicon.svg', rel: 'icon' }]
+    const doc = fixtureDocument(links, null)
+    vi.stubGlobal('document', doc)
+    installFavicon()
+    expect(doc.querySelectorAll).toHaveBeenCalledWith('link[rel="icon"]')
+    expect(doc.querySelector).not.toHaveBeenCalled()
   })
 })

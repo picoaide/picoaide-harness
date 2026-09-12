@@ -39,21 +39,20 @@ const FAVICON_SVG = `
   </g>
 </svg>`
 
-/** Replace the upstream fish favicon with the brace mark. */
+/**
+ * Replace every `<link rel=icon>` href with the brace mark.
+ *
+ * 2026-09-12：原先那段"改 manifest 的 icons[].src"是**死代码**（改的是
+ * `fetch()` 解析出来的副本，浏览器读的是它自己那次请求；改完既不写回也没人消费），
+ * 已删除。桌面端的 `/favicon.svg` 与 `/manifest.webmanifest` 现在由 host 的 exact
+ * 路由覆盖（`packages/host/desktop/src/brand-web-route.ts`）；纯 web 形态
+ * （`dsh web`，非交付形态）仍会拿到上游 dist 的 manifest —— 那是上游前端包的分发
+ * 内容，本包无权覆盖，这里也不假装能覆盖。
+ */
 function installFavicon(): void {
   const href = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`
   for (const link of document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]')) {
     link.href = href
-  }
-  // Some shells read the manifest icon; keep the touch-icon path simple.
-  const manifest = document.querySelector<HTMLLinkElement>('link[rel="manifest"]')
-  if (manifest !== null) {
-    fetch(manifest.href)
-      .then(res => res.json())
-      .then((data: { icons?: { src?: string }[] }) => {
-        if (Array.isArray(data.icons)) data.icons.forEach(icon => { icon.src = href })
-      })
-      .catch(() => { /* favicon replacement is best-effort */ })
   }
 }
 

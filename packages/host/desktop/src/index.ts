@@ -37,6 +37,13 @@ import {
   type DesktopLoopNotifySessionResponse,
 } from './loop-notify-contract.ts'
 import { handleDesktopLoopNotifySessionRequest } from './loop-notify-route.ts'
+import {
+  BRAND_FAVICON_PATH,
+  BRAND_MANIFEST_PATH,
+  buildBrandWebAssets,
+  handleBrandAssetRequest,
+} from './brand-web-route.ts'
+import { readDesktopChannelProfile } from './desktop-channel.ts'
 import type { DesktopLocale, DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
@@ -256,6 +263,34 @@ export function apply(ctx: Context, config: Config): void {
     }),
     'dsh-plugin-desktop: renderer boot report route',
   )
+  // 品牌静态资源（favicon / manifest）覆盖上游 fallback 席位里那份厂商图形与厂商名。
+  // 只在真的解析到图形时注册图标路由：宁可继续服务上游文件，也不裂图。
+  {
+    const brandAssets = buildBrandWebAssets({
+      profile: readDesktopChannelProfile(),
+      brandWebDir: fileURLToPath(new URL('../build/web-brand/', import.meta.url)),
+      officialLogoPath: fileURLToPath(new URL('../../../brands/official/logo.svg', import.meta.url)),
+    })
+    const favicon = brandAssets.favicon
+    if (favicon !== undefined) {
+      ctx.effect(
+        () => ctx.webServer.register({
+          kind: 'exact',
+          path: BRAND_FAVICON_PATH,
+          handler: (req, res) => handleBrandAssetRequest(req, res, rendererOrigin, favicon),
+        }),
+        'dsh-plugin-desktop: brand favicon route',
+      )
+    }
+    ctx.effect(
+      () => ctx.webServer.register({
+        kind: 'exact',
+        path: BRAND_MANIFEST_PATH,
+        handler: (req, res) => handleBrandAssetRequest(req, res, rendererOrigin, brandAssets.manifest),
+      }),
+      'dsh-plugin-desktop: brand manifest route',
+    )
+  }
   if (runtime.platform === 'win32') {
     ctx.effect(
       () => ctx.webServer.register({
