@@ -211,15 +211,22 @@ test('patch requires read-before-write and replaces the whole SKILL.md', async (
 
 test('hasReadSkill scans the session log for skill_manage read calls', () => {
   const event = (name, args) => ({ type: 'tool/call', data: { name, arguments: JSON.stringify(args) } })
-  const agent = { session: { events: [
+  const log = [
     event('skill_manage', { action: 'read', name: 'alpha' }),
     event('skill_manage', { action: 'create', name: 'beta' }),
     event('skill', { name: 'gamma' }),
     { type: 'user/message', data: { message: { content: [] } } },
-  ] } }
+  ]
+  // 当前宿主（DSH 0.1.2-alpha.4+）：Session 只暴露 ownEvents()。
+  // 这条曾经缺失：老断言只用 `.events` 形状，于是访问器改名后 read-before-write
+  // 变成"永远没读过"，patch 被无条件拒绝，而单测仍然全绿
+  // （真机工具诊断报告 2026-09-12 —— 测了函数存在，没测它在真宿主上跑）。
+  const agent = { session: { ownEvents: () => log } }
   assert.equal(hasReadSkill(agent, 'skill_manage', 'alpha'), true)
   assert.equal(hasReadSkill(agent, 'skill_manage', 'beta'), false) // create is not a read
   assert.equal(hasReadSkill(agent, 'skill_manage', 'gamma'), false) // skill tool is a different tool
+  // 老宿主兼容：`.events` 数组仍然认账。
+  assert.equal(hasReadSkill({ session: { events: log } }, 'skill_manage', 'alpha'), true)
   assert.equal(hasReadSkill(undefined, 'skill_manage', 'alpha'), false)
   assert.equal(hasReadSkill({ session: {} }, 'skill_manage', 'alpha'), false)
 })

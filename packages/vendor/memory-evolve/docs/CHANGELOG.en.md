@@ -6,6 +6,21 @@ All version changes for this repository, in reverse chronological order.
 
 ---
 
+## 2026-09-12
+
+### Fixed
+
+- **`skill_manage action=patch` always answered "read it first"**: the read-before-write precondition `hasReadSkill()` read `agent.session.events`, but `Session` stopped exposing `.events` in DSH 0.1.2-alpha.4+ (the same rename behind the issue #42 fix on 2026-09-09). That value is always `undefined`, so the proof "this session read this skill" could **never** hold: a successful `skill_manage action=read` in the same turn was still followed by a rejected `patch`. It now uses the repository-wide three-tier fallback `agent.session.ownEvents?.() ?? agent.session.events` (older hosts fall back to `.events`). Why unit tests missed it: the `hasReadSkill` case in `tests/skills.test.js` built the **retired** `{ session: { events: [...] } }` shape itself, so it stayed green after the accessor rename — it tested that the function exists, not that it runs on the real host. That case now uses `ownEvents()` as the primary shape with `.events` kept as the compatibility tier.
+
+### Same root cause, fixed alongside
+
+- Two sites in `lib/notify.js` (session image-reference resolution for `de_channel_send`, and the image listing): with no readable log the first threw "cannot read this session's events" and the second always returned an empty image list.
+- `lib/session-orch.js` `#lastActiveAt()`: always `null`, so a session's last-activity time was wrong.
+- `lib/coi/attachments.js` `findImageRef()`: always `null`, so looking an image reference up by attachmentId failed.
+- `lib/advisor/index.js` `session/event` wiring: passed `undefined` as the event log to `observer.handleEvent()`, so `findLastMessageTurnEnd()` threw a TypeError from its `for...of` and review aborted on the `turn/end` path.
+
+---
+
 ## 2026-09-09
 
 ### Fixed

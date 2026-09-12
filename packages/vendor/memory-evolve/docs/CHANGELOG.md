@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-09-12
+
+### 修复
+
+- **`skill_manage action=patch` 永远报「必须先读取」**：read-before-write 前置检查 `hasReadSkill()` 读的是 `agent.session.events`，而 DSH 0.1.2-alpha.4+ 的 `Session` 已不再暴露 `.events` 数组（见 2026-09-09 的 issue #42 同源修复），该值恒为 `undefined`，于是「本会话读过这个技能」这条证明**永远不成立**——同一轮里 `skill_manage action=read` 成功返回后紧接着 `patch` 仍然被拒。改用全仓统一的三档兜底 `agent.session.ownEvents?.() ?? agent.session.events`（老宿主回退 `.events`）。为什么此前没被单测挡住：`tests/skills.test.js` 的 `hasReadSkill` 用例自己构造的是**已退役的** `{ session: { events: [...] } }` 形状，访问器改名后它照样全绿——测的是「这个函数在」，不是「它在真宿主上跑」。该用例已改为以 `ownEvents()` 为主形状、`.events` 作为兼容档。
+
+### 同根因顺带修复（同一访问器改名，同一次真机诊断暴露）
+
+- `lib/notify.js` 两处（`de_channel_send` 的会话图片引用解析与图片清单）：读不到日志 → 前者抛「无法读取本会话事件」，后者恒返回空图片列表。
+- `lib/session-orch.js` `#lastActiveAt()`：恒为 `null`，会话「最后活动时间」失真。
+- `lib/coi/attachments.js` `findImageRef()`：恒返回 `null`，按 attachmentId 反查图片引用失效。
+- `lib/advisor/index.js` `session/event` 装配层：把 `undefined` 当事件日志传给 `observer.handleEvent()`，`findLastMessageTurnEnd()` 内 `for...of` 抛 TypeError，评审在 `turn/end` 路径上中断。
+
+---
+
 ## 2026-09-09
 
 ### 修复
