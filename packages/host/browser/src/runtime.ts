@@ -2747,8 +2747,36 @@ function maskShortSecretOccurrences(text: string, secret: string): string {
   }
 }
 
-/** Is the occurrence at `at` sitting where a *value* would sit? */
-function isValueShaped(text: string, at: number, length: number): boolean {
+/**
+ * Verbatim-context variant for SHORT secrets (R7, 2026-09-13): a URL, path or
+ * file name has no prose, so a short value only counts when it occupies a whole
+ * token — bounded by separators or the ends of the string. `/test` and
+ * `?pw=test&x=1` are masked; `/test-report` and `mytest.com` are left alone
+ * (the previous whole-substring rule rewrote unrelated pages once the value set
+ * became tab-lifetime).
+ * @param text - URL / path / file-name-ish string.
+ * @param secret - injected value shorter than the embedded-secret threshold.
+ * @returns text with whole-token occurrences masked.
+ */
+function maskShortSecretTokens(text: string, secret: string): string {
+  const isWord = (ch: string | undefined): boolean => ch !== undefined && /[A-Za-z0-9_.-]/u.test(ch)
+  const parts: string[] = []
+  let from = 0
+  for (;;) {
+    const at = text.indexOf(secret, from)
+    if (at < 0) {
+      parts.push(text.slice(from))
+      return parts.join('')
+    }
+    const before = at === 0 ? undefined : text[at - 1]
+    const after = at + secret.length >= text.length ? undefined : text[at + secret.length]
+    const wholeToken = !isWord(before) && !isWord(after)
+    parts.push(text.slice(from, at), wholeToken ? MASK : secret)
+    from = at + secret.length
+  }
+}
+
+/** Is the occurrence at `at` sitting where a *value* would sit? */function isValueShaped(text: string, at: number, length: number): boolean {
   const leftIndex = at === 0 ? -1 : nearestLeftIndex(text, at - 1)
   const left = leftIndex < 0 ? undefined : text[leftIndex]!
   // R-5 (2026-09-13): an assignment delimiter is a value position on its own,
@@ -2819,14 +2847,15 @@ function redactSecretsText(secrets: readonly string[], text: string, options: { 
     if (out.length >= MIN_EMBEDDED_SECRET_LENGTH && secret.startsWith(out)) { out = MASK; continue }
     // R7（2026-09-13）：verbatim 语境（URL / 路径 / 文件名）曾对**任意长度**的值整串
     // 替换，于是 4 字符口令 `test` 会把同 tab 之后所有页面的 `/test-report` 擦成
-    // `/****-report`（值集合现在按 tab 生命周期保留，污染面被放大）。这里统一口径：
-    // 只有 ≥ MIN_EMBEDDED_SECRET_LENGTH 的值才逐字替换，短值走"值形态"判定
-    // （`password=test` 仍擦、散文里的 `test` 不动）。
+    // `/****-report`（值集合现在按 tab 生命周期保留，污染面被放大）。现在的口径：
+    //  · ≥ MIN_EMBEDDED_SECRET_LENGTH：仍逐字整串替换（verbatim 与散文一致）；
+    //  · <  MIN：verbatim 语境按**完整 token** 匹配（`/test`、`?pw=test&x=1` 会被擦，
+    //    `/test-report` 不会），散文语境仍走"值形态"判定（`password=test` 会擦）。
     if (secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
       if (out.includes(secret)) out = out.split(secret).join(MASK)
       continue
     }
-    out = maskShortSecretOccurrences(out, secret)
+    out = options.verbatim === true ? maskShortSecretTokens(out, secret) : maskShortSecretOccurrences(out, secret)
   }
   return out
 }
