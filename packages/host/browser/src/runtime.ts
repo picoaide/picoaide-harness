@@ -1403,11 +1403,19 @@ export class BrowserRuntime {
       const tab = this.tab(resolved)
       const startUrl = tab.url
       let lastReason = 'timeout'
+      // The condition spec travels as a CDP *argument*: the page-side source is
+      // the constant WAIT_FOR_FUNCTION_DECLARATION, so selector/text/URL values
+      // can never become page-side syntax (they are data, not code).
+      const payload = waitForPayload(options, startUrl)
       while (Date.now() < deadline) {
         if (signal !== undefined && signal.aborted) throw browserError('interrupted', 'browser: wait aborted')
         try {
-          const state = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
-            expression: evalExpressionFor(options, startUrl),
+          const state = await tab.cdp.send<EvalResult>('Runtime.callFunctionOn', {
+            functionDeclaration: WAIT_FOR_FUNCTION_DECLARATION,
+            // Re-resolved every poll: a navigation destroys the old object (and
+            // with it the id), which is exactly the state `url-change` waits on.
+            objectId: await pageGlobalObjectId(tab),
+            arguments: [{ value: payload }],
             returnByValue: true,
           })
           if (state.result?.value === true) {
@@ -1426,9 +1434,15 @@ export class BrowserRuntime {
     }, signal)
   }
 
-  /** Wait-for CDP expression builder (pure, testable). */
-  static waitExpression(options: WaitForOptions, startUrl = ''): string {
-    return evalExpressionFor(options, startUrl)
+  /** Page-side wait predicate source. Constant by construction — the values
+   * arrive through `Runtime.callFunctionOn` `arguments` (see `waitPayload`). */
+  static waitFunctionDeclaration(): string {
+    return WAIT_FOR_FUNCTION_DECLARATION
+  }
+
+  /** Wait-for payload builder (pure, testable). */
+  static waitPayload(options: WaitForOptions, startUrl = ''): WaitForPayload {
+    return waitForPayload(options, startUrl)
   }
 
   // -------------------------------------------------------------- user gate
@@ -1593,31 +1607,90 @@ export class BrowserRuntime {
   }
 }
 
-/** Build the wait-for evaluation expression (pure function). The `startUrl`
- * is the URL captured when the wait began — `url-change` compares against it
- * so the condition only succeeds on an ACTUAL navigation. */
-function evalExpressionFor(options: WaitForOptions, startUrl = ''): string {
-  const sel = options.selector !== undefined ? JSON.stringify(options.selector) : 'null'
-  const text = options.text !== undefined ? JSON.stringify(options.text) : 'null'
-  switch (options.condition) {
-    case 'element-present':
-      return `(() => { const el = document.querySelector(${sel}); return el !== null; })()`
-    case 'element-visible':
-      return `(() => { const el = document.querySelector(${sel}); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; })()`
+/** Everything the page-side wait predicate needs, as **data**.
+ *
+ * The six conditions are evaluated by `WAIT_FOR_FUNCTION_DECLARATION` inside the
+ * page, with this object passed through CDP `Runtime.callFunctionOn`
+ * `arguments`. Nothing here is ever concatenated into page-side source: a
+ * selector/text/URL value can only ever be a string value, never a syntax node
+ * (`js/bad-code-sanitization`). */
+export interface WaitForPayload {
+  condition: WaitForOptions['condition']
+  /** `null` when the condition has no selector — `querySelector(null)` yields null. */
+  selector: string | null
+  text: string | null
+  startUrl: string
+  networkIdleMs: number
+}
+
+/** The page-side wait predicate: a **constant** function body.
+ *
+ * `payload.selector` / `payload.text` / `payload.startUrl` are looked up as
+ * values only; the source text of this function never changes with the input,
+ * so there is no code-construction point at all. Kept byte-stable so tests can
+ * evaluate it under `node:vm` together with `waitForPayload`.
+ *
+ * DO NOT interpolate anything into this string: an interpolated
+ * selector/text/URL would turn the AI's tool input back into page-side syntax
+ * (`js/bad-code-sanitization`, alerts #40/#41/#43/#44). Add a field to
+ * `WaitForPayload` instead. */
+const WAIT_FOR_FUNCTION_DECLARATION = `function (payload) {
+  switch (payload.condition) {
+    case 'element-present': {
+      const el = document.querySelector(payload.selector);
+      return el !== null;
+    }
+    case 'element-visible': {
+      const el = document.querySelector(payload.selector);
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+    }
     case 'text-appear':
-      return `(() => (document.body ? document.body.innerText : '').includes(${text}))()`
+      return (document.body ? document.body.innerText : '').includes(payload.text);
     case 'url-change':
       // TRUE only when the page actually navigated away from the captured URL.
-      return `(() => location.href !== ${JSON.stringify(startUrl)})()`
-    case 'network-idle':
-      // TRUE once the last resource has been quiet for at least 800ms (or the
-      // document is already complete with no resource entries at all).
-      return `(() => { const rs = performance.getEntriesByType('resource'); if (rs.length === 0) return document.readyState === 'complete'; const last = rs[rs.length - 1]; return performance.now() - (last.responseEnd || 0) > ${String(NETWORK_IDLE_TICK_MS)}; })()`
+      return location.href !== payload.startUrl;
+    case 'network-idle': {
+      // TRUE once the last resource has been quiet for at least
+      // payload.networkIdleMs (or the document is already complete with no
+      // resource entries at all).
+      const rs = performance.getEntriesByType('resource');
+      if (rs.length === 0) return document.readyState === 'complete';
+      const last = rs[rs.length - 1];
+      return performance.now() - (last.responseEnd || 0) > payload.networkIdleMs;
+    }
     case 'settled':
-      return `(() => document.readyState === 'complete')()`
+      return document.readyState === 'complete';
     default:
-      return 'false'
+      return false;
   }
+}`
+
+/** Build the wait-for payload (pure function). The `startUrl` is the URL
+ * captured when the wait began — `url-change` compares against it so the
+ * condition only succeeds on an ACTUAL navigation. */
+function waitForPayload(options: WaitForOptions, startUrl = ''): WaitForPayload {
+  return {
+    condition: options.condition,
+    selector: options.selector ?? null,
+    text: options.text ?? null,
+    startUrl,
+    networkIdleMs: NETWORK_IDLE_TICK_MS,
+  }
+}
+
+/** `objectId` of the page's global object, so the constant predicate can run in
+ * the page's own world via `Runtime.callFunctionOn`. */
+async function pageGlobalObjectId(tab: BrowserTab): Promise<string> {
+  const global = await tab.cdp.send<{ result?: { objectId?: string } }>('Runtime.evaluate', {
+    expression: 'globalThis',
+  })
+  const objectId = global.result?.objectId
+  if (objectId === undefined) {
+    throw browserError('not-found', 'browser: page has no global object to evaluate against')
+  }
+  return objectId
 }
 
 const NETWORK_IDLE_TICK_MS = 800

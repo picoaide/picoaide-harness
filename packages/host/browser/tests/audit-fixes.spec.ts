@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { createContext, runInContext } from 'node:vm'
 import { BrowserRuntime } from '../src/runtime.ts'
 import { BrowserGuard } from '../src/guard.ts'
 import { BrowserStore } from '../src/store.ts'
@@ -248,17 +249,106 @@ describe('audit fixes: download guard idempotence', () => {
 
 // ---------------------------------------------------------- wait_for exprs
 
+/** 页面侧谓词看到的页面形状（只提供谓词真正读的那几项）。 */
+interface FakePage {
+  elements?: Record<string, { width?: number; height?: number; visibility?: string }>
+  bodyText?: string | null
+  href?: string
+  resources?: Array<{ responseEnd?: number }>
+  readyState?: string
+  now?: number
+}
+
+/** 造一个页面沙箱：document/location/performance 全由替身提供。 */
+function fakePage(spec: FakePage): Record<string, unknown> {
+  const elements = spec.elements ?? {}
+  return {
+    document: {
+      readyState: spec.readyState ?? 'complete',
+      body: spec.bodyText === null ? null : { innerText: spec.bodyText ?? '' },
+      querySelector: (selector: string) => {
+        const el = elements[selector]
+        if (el === undefined) return null
+        return {
+          visibility: el.visibility ?? 'visible',
+          getBoundingClientRect: () => ({ width: el.width ?? 10, height: el.height ?? 10 }),
+        }
+      },
+    },
+    location: { href: spec.href ?? 'https://page.example/' },
+    performance: {
+      getEntriesByType: () => spec.resources ?? [],
+      now: () => spec.now ?? 0,
+    },
+    getComputedStyle: (el: { visibility?: string }) => ({ visibility: el.visibility ?? 'visible' }),
+  }
+}
+
+/**
+ * 在 node:vm 里执行**页面侧真的会执行的那段源码** + 真的会随 CDP 传过去的
+ * payload：源码是常量（`waitFunctionDeclaration()`），值只以参数传入
+ * （`waitPayload()`）。返回结果与沙箱（用于断言注入载荷没有执行）。
+ */
+function runWait(
+  options: Parameters<typeof BrowserRuntime.waitPayload>[0],
+  startUrl: string,
+  spec: FakePage = {},
+): { ok: boolean; sandbox: Record<string, unknown> } {
+  const sandbox = fakePage(spec)
+  const context = createContext(sandbox)
+  const predicate = runInContext(`(${BrowserRuntime.waitFunctionDeclaration()})`, context) as (payload: unknown) => unknown
+  return { ok: predicate(BrowserRuntime.waitPayload(options, startUrl)) === true, sandbox }
+}
+
 describe('audit fixes: wait_for conditions', () => {
   it('url-change compares against the captured start URL (not constant-true)', () => {
-    const expr = BrowserRuntime.waitExpression({ condition: 'url-change' }, 'https://start.example/')
-    expect(expr).toContain('location.href !== "https://start.example/"')
-    // the old constant-true form must be gone
-    expect(expr).not.toContain('length > 0')
+    expect(runWait({ condition: 'url-change' }, 'https://start.example/', { href: 'https://start.example/' }).ok).toBe(false)
+    expect(runWait({ condition: 'url-change' }, 'https://start.example/', { href: 'https://moved.example/' }).ok).toBe(true)
   })
+
   it('network-idle checks resource timing (not constant-true)', () => {
-    const expr = BrowserRuntime.waitExpression({ condition: 'network-idle' })
-    expect(expr).toContain('responseEnd')
-    expect(expr).not.toContain('|| true')
+    // 没有资源条目 → 只看文档完成度。
+    expect(runWait({ condition: 'network-idle' }, '', { readyState: 'loading' }).ok).toBe(false)
+    expect(runWait({ condition: 'network-idle' }, '', { readyState: 'complete' }).ok).toBe(true)
+    // 最后一条资源的 responseEnd 距今不足 800ms → 还没静默；超过 → 静默。
+    expect(runWait({ condition: 'network-idle' }, '', { resources: [{ responseEnd: 100 }], now: 500 }).ok).toBe(false)
+    expect(runWait({ condition: 'network-idle' }, '', { resources: [{ responseEnd: 100 }], now: 1_000 }).ok).toBe(true)
+  })
+
+  it('element-present / element-visible / text-appear / settled keep their semantics', () => {
+    const page: FakePage = { elements: { '#a': { width: 5, height: 5 }, '#hidden': { width: 0, height: 0 } }, bodyText: 'ready now' }
+    expect(runWait({ condition: 'element-present', selector: '#a' }, '', page).ok).toBe(true)
+    expect(runWait({ condition: 'element-present', selector: '#nope' }, '', page).ok).toBe(false)
+    // 缺省 selector（null）与旧的 querySelector(null) 等价：找不到元素。
+    expect(runWait({ condition: 'element-present' }, '', page).ok).toBe(false)
+    expect(runWait({ condition: 'element-visible', selector: '#a' }, '', page).ok).toBe(true)
+    expect(runWait({ condition: 'element-visible', selector: '#hidden' }, '', page).ok).toBe(false)
+    expect(runWait({ condition: 'element-visible', selector: '#nope' }, '', page).ok).toBe(false)
+    expect(runWait({ condition: 'text-appear', text: 'ready' }, '', page).ok).toBe(true)
+    expect(runWait({ condition: 'text-appear', text: 'missing' }, '', page).ok).toBe(false)
+    expect(runWait({ condition: 'settled' }, '', { readyState: 'complete' }).ok).toBe(true)
+    expect(runWait({ condition: 'settled' }, '', { readyState: 'loading' }).ok).toBe(false)
+  })
+
+  it('入参只是值：注入型 selector/text/startUrl 不会逃逸成页面代码', () => {
+    // 每个载荷都带"若被拼进源码就会执行"的片段（旧实现正是这样拼的）。
+    const evilSelector = `#x'); globalThis.__pwned = true; //`
+    const evilText = `'); globalThis.__pwned = true; ('`
+    const evilUrl = `'); globalThis.__pwned = true; ('`
+    const page: FakePage = { elements: {}, bodyText: '', href: 'https://page.example/' }
+
+    expect(runWait({ condition: 'element-present', selector: evilSelector }, '', page).ok).toBe(false)
+    expect(runWait({ condition: 'element-visible', selector: evilSelector }, '', page).ok).toBe(false)
+    expect(runWait({ condition: 'text-appear', text: evilText }, '', page).ok).toBe(false)
+    // evilUrl 不是当前 href，所以条件为 true —— 但页面里不能因此多出任何全局变量。
+    const changed = runWait({ condition: 'url-change' }, evilUrl, page)
+    expect(changed.ok).toBe(true)
+    expect(changed.sandbox.__pwned).toBeUndefined()
+
+    // 页面侧源码与入参无关：同一份常量源码服务所有取值。
+    const declaration = BrowserRuntime.waitFunctionDeclaration()
+    expect(declaration).toBe(BrowserRuntime.waitFunctionDeclaration())
+    expect(declaration).not.toContain(evilSelector)
   })
 })
 
