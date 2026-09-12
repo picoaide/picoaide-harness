@@ -55,118 +55,18 @@ import { AliasStore } from './aliases.js'
 import { buildMemoryFiles } from './memory-tab.js'
 import { approvePendingSkill, listPendingSkills, rejectPendingSkill } from './skills.js'
 import { normalizeModelsPatch } from './models.js'
+import { guardRequest, readBody } from './http-guard.js'
 
 /** The pending-skill queue directory (under the memory dir). */
 function pendingSkillDir(deps) {
   return join(deps.config.memoryDir, 'pending-skills')
 }
 
-/** Cached request body: the unified pre-guard parses it once, routes reuse it. */
-const GUARDED_BODY = Symbol('memoryEvolveGuardedBody')
-
-/** Read the JSON request body (capped). */
-async function readBody(req, maxBytes = 64 * 1024) {
-  // 统一前置守卫（guardRequest）已解析过请求体 → 复用缓存：流已被消费，
-  // 再读会静默变成 {}（把「有体的写请求」变成空操作）。
-  if (req[GUARDED_BODY] !== undefined) return req[GUARDED_BODY]
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
-
-/**
- * 同源校验（保护本地写端点）：要求 Content-Type 精确为 JSON 媒体类型
- * （子串匹配会放过 text/plain;charset=json 之类，CodeX 复审 P1-5）；
- * 写操作强制要求 Origin 头存在且 host 与 Host 一致——跨站表单/脚本
- * 无法构造 JSON 体、且同源 fetch 必然携带 Origin。返回错误文案或 null。
- *
- * @param {object} req - node http 请求。
- * @param {object} body - 已解析的请求体（无体请求传 {}）。
- * @param {boolean} [bodyless] - 请求确实没有体（如浏览器发的 DELETE 不带
- *   Content-Type）时允许缺省 content-type；声明了就必须是 JSON。
- */
-function sameOriginGuard(req, body, bodyless = false) {
-  const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
-  if (contentType !== 'application/json' && !(bodyless && contentType === '')) {
-    return '请求必须为 application/json'
-  }
-  const host = String(req.headers.host ?? '')
-  const origin = String(req.headers.origin ?? '')
-  if (origin === '') return '缺少 Origin 头，已拒绝（写操作必须由 Web UI 发起）'
-  let originHost = ''
-  try {
-    originHost = new URL(origin).host
-  } catch {
-    return '跨站请求已拒绝'
-  }
-  if (originHost !== host) return '跨站请求已拒绝'
-  if (body === undefined || body === null || typeof body !== 'object' || Array.isArray(body)) {
-    return '请求体必须是 JSON 对象'
-  }
-  return null
-}
-
-/**
- * handler 的**统一前置守卫**（P1-11）：在路由分发之前按方法分类处理，
- * 覆盖本模块（lib/api.js）注册的全部 46 个 方法+路径 组合（13 GET +
- * 31 POST + 1 PUT + 1 DELETE，共 45 条路由分支），而不是像以前那样只挂
- * 在 1 个端点上。
- *
- *   - GET / HEAD（只读端点，含设计上公开的 /api/badge：GUI 轮询红点、
- *     Tab 注册探测都要能匿名取到）：放行。CSRF 侧只拒绝浏览器明确标注
- *     的跨站请求——GET 可能没有 Origin（不能用 Origin 判定同源），而
- *     `Sec-Fetch-Site` 是浏览器必然携带的 Fetch Metadata 头；非浏览器
- *     客户端不发该头 → 放行（同机进程不在权限边界内）。
- *   - 其它方法（POST/PUT/DELETE…，全部是写操作）：必须同源 —— Origin
- *     存在且与 Host 一致；有请求体时必须是 application/json 的 JSON 对象
- *     （跨站表单只能发 urlencoded/multipart/text-plain，跨站 fetch 带
- *     JSON 头会先触发预检且本服务无 CORS 许可）。
- *
- * 失败响应用 400 + `{ok:false, code:'bad-request'}`（与旧 /api/update
- * 内联守卫的错误契约一致）。
- *
- * @param {object} req - node http 请求。
- * @returns {Promise<{status: number, body: object} | null>} null = 放行。
- */
-async function guardRequest(req) {
-  const method = String(req.method ?? 'GET').toUpperCase()
-  if (method === 'GET' || method === 'HEAD') {
-    const site = String(req.headers['sec-fetch-site'] ?? '').trim().toLowerCase()
-    if (site === 'cross-site') {
-      return { status: 403, body: { ok: false, code: 'cross-site', error: '跨站请求已拒绝' } }
-    }
-    return null
-  }
-  // 有体判定：Content-Length > 0 或 chunked（transfer-encoding）。无体请求
-  // （浏览器 DELETE 不带 Content-Type/体）跳过 JSON 体校验但**仍要求
-  // Origin**——浏览器对所有非 GET/HEAD 请求都附带 Origin，跨站的无体
-  // POST/DELETE 因此同样被挡下。
-  const declared = Number(req.headers['content-length'] ?? 0)
-  const hasBody = (Number.isFinite(declared) && declared > 0) || req.headers['transfer-encoding'] !== undefined
-  let body = {}
-  if (hasBody) {
-    try {
-      body = await readBody(req)
-    } catch (error) {
-      const detail = error instanceof Error && error.message === 'body too large' ? '请求体过大' : '请求体不是合法 JSON'
-      return { status: 400, body: { ok: false, code: 'bad-request', error: detail } }
-    }
-  }
-  const message = sameOriginGuard(req, body, !hasBody)
-  if (message !== null) return { status: 400, body: { ok: false, code: 'bad-request', error: message } }
-  if (hasBody) req[GUARDED_BODY] = body
-  return null
-}
+// 统一请求守卫（同源 + JSON 体）在 lib/http-guard.js：本模块曾是其唯一实现
+// 点，FIX-04（2026-09-12）把它提成共享模块，8 个 sibling 注册点与
+// skills-manager 的本地栅栏都改为复用同一实现，杜绝第 2…N 份副本漂移。
+// `readBody` 也从那里导入：守卫已解析过请求体并缓存，路由侧必须复用缓存，
+// 否则流被消费后二次读取会静默变成 `{}`。
 
 /** Send a JSON response with the given status. */
 function sendJson(res, status, body) {

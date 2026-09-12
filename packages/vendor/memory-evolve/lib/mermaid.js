@@ -28,6 +28,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { applyRequestGuard } from './http-guard.js'
 
 /** 静态文件路径：插件根/vendor/mermaid.min.js（lib/ 的上一级）。 */
 const MERMAID_FILE = new URL('../vendor/mermaid.min.js', import.meta.url)
@@ -55,6 +56,9 @@ export function installMermaid(ctx) {
       kind: 'prefix',
       path: '/memory-evolve/mermaid',
       handler: async (req, res) => {
+        // FIX-04：统一前置守卫。本端点只有 GET（静态 vendor 资源）⇒ 守卫
+        // 只拒绝浏览器标注的跨站读取，匿名加载语义不变。
+        if (await applyRequestGuard(req, res)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         if (req.method === 'GET' && url.pathname === '/memory-evolve/mermaid/mermaid.min.js') {
           try {

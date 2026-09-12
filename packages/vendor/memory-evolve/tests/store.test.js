@@ -280,6 +280,76 @@ test('removeExact refuses drifted files and backs them up', () => {
   clean(dir)
 })
 
+// -------------------------------------------------- FIX-25 (2026-09-12)
+
+test('FIX-25 isCanonical：漏写 § 的多条目文件不再被判为规范', () => {
+  // 三条事实挤成一段（手工编辑漏写分隔符）：往返逐字节相等，但**不是**规范。
+  const merged = '[2026-08-01] A 事实\n[2026-08-02] B 事实\n[2026-08-03] C 事实\n'
+  assert.equal(isCanonical(merged), false, '多条目疑似必须判非规范')
+  assert.equal(parseEntries(merged).length, 1, '前置：解析层面确实只有 1 条（所以旧判定放行）')
+  // 部分粘连（两条漏了 §）同样命中：不能只看 length === 1。
+  const partial = '[2026-08-01] A\n[2026-08-02] B\n§\n[2026-08-03] C\n'
+  assert.equal(isCanonical(partial), false)
+  // 对照：规范 § 文件、无日期头的单条多行、空文件都保持规范。
+  assert.equal(isCanonical('[2026-08-01] A\n§\n[2026-08-02] B\n'), true)
+  assert.equal(isCanonical('第一条\n多行内容\n§\nsecond\n'), true)
+  assert.equal(isCanonical(''), true)
+})
+
+test('FIX-25 remove：无 § 三条目文件被拒 + 强制备份（改前只剩空行且零备份）', () => {
+  const dir = tempDir()
+  const store = new MemoryStore(dir)
+  const merged = '[2026-08-01] A 事实\n[2026-08-02] B 事实\n[2026-08-03] C 事实\n'
+  writeFileSync(join(dir, 'MEMORY.md'), merged)
+  const result = store.remove('memory', 'B 事实')
+  assert.equal(result.ok, false, '疑似多条目文件必须拒绝 remove（改前 ok:true 且 1 → 0 条）')
+  assert.ok(result.backup && result.backup.includes('.bak.'), '必须产生备份')
+  assert.equal(readFileSync(result.backup, 'utf8'), merged, '备份内容 = 原始文件全文')
+  assert.equal(readFileSync(join(dir, 'MEMORY.md'), 'utf8'), merged, '主文件零改动（A/C 不能消失）')
+  clean(dir)
+})
+
+test('FIX-25 update：同一形态文件的破坏性改写同样被拒（drift 分支）', () => {
+  const dir = tempDir()
+  const store = new MemoryStore(dir)
+  const merged = '[2026-08-01] A 事实\n[2026-08-02] B 事实\n[2026-08-03] C 事实\n'
+  writeFileSync(join(dir, 'MEMORY.md'), merged)
+  const result = store.updateEntryContent('memory', 'B 事实', '改后的 B')
+  assert.equal(result.ok, false)
+  assert.equal(readFileSync(join(dir, 'MEMORY.md'), 'utf8'), merged)
+  clean(dir)
+})
+
+test('FIX-25 add 是追加路径：疑似多条目文件仍可 add，且不丢原有内容', () => {
+  const dir = tempDir()
+  const store = new MemoryStore(dir)
+  const merged = '[2026-08-01] A 事实\n[2026-08-02] B 事实\n[2026-08-03] C 事实\n'
+  writeFileSync(join(dir, 'MEMORY.md'), merged)
+  const result = store.add('memory', '新追加的事实')
+  assert.equal(result.ok, true)
+  const raw = readFileSync(join(dir, 'MEMORY.md'), 'utf8')
+  for (const marker of ['A 事实', 'B 事实', 'C 事实', '新追加的事实']) {
+    assert.ok(raw.includes(marker), `追加后仍应包含「${marker}」`)
+  }
+  clean(dir)
+})
+
+test('FIX-25 规范文件不受影响：remove 仍按唯一命中删除单条', () => {
+  const dir = tempDir()
+  const store = new MemoryStore(dir)
+  store.add('memory', 'A 事实')
+  store.add('memory', 'B 事实')
+  store.add('memory', 'C 事实')
+  assert.equal(isCanonical(readFileSync(join(dir, 'MEMORY.md'), 'utf8')), true)
+  const result = store.remove('memory', 'B 事实')
+  assert.equal(result.ok, true)
+  const entries = store.entriesOf('memory')
+  assert.equal(entries.length, 2)
+  assert.ok(entries.some((e) => e.includes('A 事实')))
+  assert.ok(entries.some((e) => e.includes('C 事实')))
+  clean(dir)
+})
+
 test('archive removeExact deletes by whole-entry equality', () => {
   const dir = tempDir()
   const archive = new ArchiveStore(dir)
