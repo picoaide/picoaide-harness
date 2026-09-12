@@ -7,9 +7,11 @@ export type DesktopTrayLabelKey =
   | 'checkingForUpdates'
   | 'downloadingUpdate'
   | 'exportDiagnostics'
+  | 'installUpdate'
   | 'openDesktop'
   | 'quit'
   | 'updateAvailable'
+  | 'updateReady'
 
 /**
  * 官方渠道产品名：**没有渠道包**时（本地开发）的兜底。
@@ -25,18 +27,22 @@ const labels: Record<DesktopLocale, Record<DesktopTrayLabelKey, (value: string, 
     checkingForUpdates: () => 'Checking for Updates…',
     downloadingUpdate: (version, product) => `Downloading ${product} ${version}…`,
     exportDiagnostics: () => 'Export Diagnostics…',
+    installUpdate: (version, product) => `Install ${product} ${version} and Restart…`,
     openDesktop: productName => `Open ${productName}`,
     quit: () => 'Quit',
     updateAvailable: (version, product) => `${product} ${version} Available`,
+    updateReady: (version, product) => `${product} ${version} Ready to Install`,
   },
   zh: {
     checkForUpdates: () => '检查更新…',
     checkingForUpdates: () => '正在检查更新…',
     downloadingUpdate: (version, product) => `正在下载 ${product} ${version}…`,
     exportDiagnostics: () => '导出诊断信息…',
+    installUpdate: (version, product) => `安装 ${product} ${version} 并重启…`,
     openDesktop: productName => `打开 ${productName}`,
     quit: () => '退出',
     updateAvailable: (version, product) => `${product} ${version} 可用`,
+    updateReady: (version, product) => `${product} ${version} 已下载,可安装`,
   },
 }
 
