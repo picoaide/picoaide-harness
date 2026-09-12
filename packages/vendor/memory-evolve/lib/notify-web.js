@@ -28,6 +28,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
+import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const nt2 = (key, params) => translate(MISC2_DICT, key, params, getLocale())
@@ -50,22 +51,13 @@ export function newNotificationId() {
   return `ntf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-/** 读取 JSON 请求体（带上限）。 */
-async function readBody(req, maxBytes = 256 * 1024) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
+/** 读取 JSON 请求体（上限 256 KiB）。
+ *
+ * FIX-04：实现在共享守卫模块 `lib/http-guard.js`（守卫已解析的体会被缓存，
+ * 自带副本二次读流会静默拿到 `{}`）。
+ * @type {(req: import('node:http').IncomingMessage, maxBytes?: number) => Promise<object>}
+ */
+const readBody = (req, maxBytes = 256 * 1024) => sharedReadBody(req, maxBytes)
 
 /** 发送 JSON 响应。 */
 function sendJson(res, status, body) {
@@ -289,6 +281,9 @@ export function installNotifyWebApi(ctx, deps) {
       kind: 'prefix',
       path: '/memory-evolve/api/notifications',
       handler: async (req, res) => {
+        // FIX-04：统一前置守卫。此前跨站页面能 POST /read、/readAll、DELETE
+        // 任意改写站内通知的已读水位。
+        if (await applyRequestGuard(req, res, 256 * 1024)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
         const base = '/memory-evolve/api/notifications'

@@ -23,6 +23,8 @@
  * @module dsh-memory-evolve/ui-settings
  */
 
+import { applyRequestGuard } from './http-guard.js'
+
 /** 发送 JSON 响应。 */
 function sendJson(res, status, body) {
   const text = JSON.stringify(body)
@@ -51,6 +53,9 @@ export function installUiSettings(ctx, deps) {
       kind: 'prefix',
       path: '/memory-evolve/api/ui-settings',
       handler: async (req, res) => {
+        // FIX-04：统一前置守卫。本模块只有 GET（客户端探测/运行快照）⇒
+        // 守卫只拒绝浏览器标注的跨站读取，公开探测语义不变。
+        if (await applyRequestGuard(req, res)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         if (req.method === 'GET' && url.pathname === '/memory-evolve/api/ui-settings/state') {
           sendJson(res, 200, { enabled: true })

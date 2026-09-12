@@ -8,23 +8,16 @@
  * 接收者——房间解散后 room: 引用会失效，通知不依赖房间存在）。
  */
 import { URL } from 'node:url'
+import { applyRequestGuard, readBody as sharedReadBody } from '../http-guard.js'
 
-/** Read the JSON request body (capped). */
-async function readBody(req, maxBytes = 256 * 1024) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
+/**
+ * Read the JSON request body (capped at 256 KiB).
+ *
+ * FIX-04：实现在共享守卫模块 `../http-guard.js`（守卫会缓存已解析的体，
+ * 自带副本二次读流会静默拿到 `{}`）。
+ * @type {(req: import('node:http').IncomingMessage, maxBytes?: number) => Promise<object>}
+ */
+const readBody = (req, maxBytes = 256 * 1024) => sharedReadBody(req, maxBytes)
 
 function sendJson(res, status, body) {
   const text = JSON.stringify(body)
@@ -39,6 +32,8 @@ function sendJson(res, status, body) {
 export function installBroadcastApi(ctx, svc) {
   const base = '/memory-evolve/api/broadcast'
   const handler = async (req, res) => {
+    // FIX-04：统一前置守卫。此前跨站页面能 POST /dissolve、/kick 操作广播房间。
+    if (await applyRequestGuard(req, res, 256 * 1024)) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     try {

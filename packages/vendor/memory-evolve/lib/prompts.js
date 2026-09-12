@@ -25,6 +25,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { translate, getLocale, PROMPT_DICT } from './i18n.js'
+import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
 
 /** Translate through PROMPT_DICT in the active host locale. */
 const pt = (key, params) => translate(PROMPT_DICT, key, params, getLocale())
@@ -1122,24 +1123,14 @@ export function installPrompts(ctx, config) {
   // 3. Web API（web-only：TUI 上无 httpServer 时自然跳过）。
   ctx.inject(['webServer'], (webCtx) => {
     const handler = async (req, res) => {
+      // FIX-04：统一前置守卫（读放行、写要求同源 + JSON 体）。此前跨站简单
+      // 请求能把持久化提示词写进库里（下一轮注入面）。
+      if (await applyRequestGuard(req, res, 256 * 1024)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       const path = url.pathname
       const base = '/memory-evolve/api/prompts'
-      const readBody = async (maxBytes = 256 * 1024) => {
-        const chunks = []
-        let total = 0
-        for await (const chunk of req) {
-          total += chunk.length
-          if (total > maxBytes) throw new Error('body too large')
-          chunks.push(chunk)
-        }
-        if (chunks.length === 0) return {}
-        try {
-          return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        } catch {
-          throw new Error('invalid JSON body')
-        }
-      }
+      // FIX-04：守卫已消费并缓存请求体时复用缓存，否则流已空 → 静默 {}。
+      const readBody = (maxBytes = 256 * 1024) => sharedReadBody(req, maxBytes)
       const sendJson = (status, body) => {
         const text = JSON.stringify(body)
         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })

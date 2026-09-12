@@ -21,7 +21,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { isCanonical, isProjectSyncEnabled, parseEntries, serializeEntries, readProvenance } from '../store.js'
 import { genEntryId, extractEntryId, extractTodoId, TODO_ID_RE } from './entryid.js'
@@ -619,6 +619,69 @@ export async function resolveConflict(p) {
   return asyncSyncLock(p.dir, () => resolveConflictInner(p))
 }
 
+/** p 是否在 root 之内（含 root 自身）。 */
+function isInsideRoot(root, p) {
+  return p === root || p.startsWith(root + sep)
+}
+
+/**
+ * 解析冲突落点的仓库内绝对路径（FIX-22，2026-09-12）。返回 null = 拒收。
+ *
+ * 两层：
+ *   1. `isMemoryFile(file, fileset, rootDir)`：路径模式白名单 **+ 已存在的
+ *      符号链接路径直接拒收**（`logs -> <仓库外>` 这类条目）；
+ *   2. 逐层 `realpathSync` 包含性断言：仓库根 / 落点最近的已存在祖先 /
+ *      目标文件本身（存在时）的真实路径都必须仍在仓库真实根之内。
+ *
+ * 字符串 `resolve()` 无法挡住 `logs -> /outside`：`resolve(root,'logs/x.md')`
+ * 以 root 开头，写盘却穿透到仓库外。共享记忆分支里一个 120000 条目
+ * （clone/checkout 会实体化成真符号链接）即可满足前置。
+ *
+ * @param {string} dir - 同步仓库目录。
+ * @param {string} file - 侧车里的仓库相对路径。
+ * @param {string} fileset - 文件集。
+ * @returns {string | null} 绝对落点；null = 白名单/包含性校验失败。
+ */
+function resolveConflictTarget(dir, file, fileset) {
+  if (!isMemoryFile(file, fileset, dir)) return null
+  let realRoot
+  try {
+    realRoot = realpathSync(resolve(dir))
+  } catch {
+    return null // 仓库不存在/不可读：fail closed
+  }
+  const abs = resolve(realRoot, file)
+  if (abs === realRoot || !isInsideRoot(realRoot, abs)) return null
+  // 落点父目录（或最近的已存在祖先）真实路径：符号链接在这里现形。
+  const anchor = nearestExistingAncestor(dirname(abs))
+  if (anchor === null) return null
+  try {
+    if (!isInsideRoot(realRoot, realpathSync(anchor))) return null
+  } catch {
+    return null
+  }
+  // 目标文件本身已存在：自己就是符号链接（指向仓库外）时同样拒收。
+  if (existsSync(abs)) {
+    try {
+      if (!isInsideRoot(realRoot, realpathSync(abs))) return null
+    } catch {
+      return null
+    }
+  }
+  return abs
+}
+
+/** 从 p 起向上找第一个存在的路径（不存在则返回 null）。 */
+function nearestExistingAncestor(p) {
+  let current = p
+  for (;;) {
+    if (existsSync(current)) return current
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
 async function resolveConflictInner({ dir, index, choice, fileset = 'project', localBranch = 'main' }) {
   // 侧车按 fileset 独立（Codex 二轮 P0-2）
   const path = join(dir, conflictsFileFor(fileset))
@@ -635,20 +698,18 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
   if (choice !== 'both' && target[choice] === null) {
     return { ok: false, message: swt('syncw.choiceUnavailable', { index, choice }) }
   }
-  // 侧车路径白名单校验（Grok P2-5）：侧车的 file 字段只能指向本 fileset
-  // 的同步记忆文件（Codex 二轮 P0-2：按 fileset 校验）——防手工/异常侧车
-  // 写穿到任意路径
-  if (!isMemoryFile(target.file, fileset)) {
-    return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
-  }
   // 落点包含性断言（P1-9 第二层）：白名单模式已锚定单层文件名，但侧车的
   // file 字段来自**远端分支分发的 CONFLICTS.md**（可被手工/异常内容构造），
   // 落盘前再用 resolve() 复核一次——即使将来白名单被放宽，也绝不可能写
   // 到记忆仓库之外（旧实现把 `logs/../../victim/MEMORY.md` 判为合法，
   // join 出仓库外路径并整文件重写）。
-  const rootDir = resolve(dir)
-  const abs = resolve(rootDir, target.file)
-  if (abs === rootDir || !abs.startsWith(rootDir + sep)) {
+  //
+  // FIX-22（2026-09-12）：字符串 resolve() 挡不住**符号链接**——仓库内
+  // `logs -> <仓库外目录>` 时 `resolve(root, 'logs/x.md')` 仍以 root 开头，
+  // 实际写盘却穿透到仓库外（共享分支里一个 120000 条目即可满足前置）。
+  // 改为逐层 realpath 比较；`isMemoryFile` 再拒收"已存在的符号链接路径"。
+  const abs = resolveConflictTarget(dir, target.file, fileset)
+  if (abs === null) {
     return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
   }
 
@@ -662,6 +723,30 @@ async function resolveConflictInner({ dir, index, choice, fileset = 'project', l
     // TODO 文件用专用解析/序列化（P1-6：优先保留本机原 header）
     // （abs 已在上方白名单/包含性校验处解析，全部落盘都走它）
     mkdirSync(dirname(abs), { recursive: true })
+    // FIX-22 TOCTOU 复检：校验与 writeFileSync 之间存在窗口（另一个进程/
+    // 同步任务可以在 `logs` 位置放一个符号链接，把目录换成指向仓库外的
+    // 链接）。建目录之后、写盘之前再解析一次真实路径，仍必须在仓库内。
+    {
+      const anchor = nearestExistingAncestor(dirname(abs))
+      let ok = anchor !== null
+      if (ok) {
+        try {
+          ok = isInsideRoot(realpathSync(resolve(dir)), realpathSync(anchor))
+        } catch {
+          ok = false
+        }
+      }
+      if (ok && existsSync(abs)) {
+        try {
+          ok = isInsideRoot(realpathSync(resolve(dir)), realpathSync(abs))
+        } catch {
+          ok = false
+        }
+      }
+      if (!ok) {
+        return { ok: false, message: swt('syncw.fileNotWhitelisted', { index, file: target.file }) }
+      }
+    }
     const isTodo = isTodoPath(target.file)
     const existingEntries = existsSync(abs)
       ? (isTodo ? parseTodoEntries(readFileSync(abs, 'utf8')) : parseEntries(readFileSync(abs, 'utf8')))

@@ -20,6 +20,7 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
 
 /** 书签标签名最大字符数（过长会撑爆列表行，前端也做同等截断）。 */
 export const BOOKMARK_LABEL_MAX = 80
@@ -588,25 +589,14 @@ function sendJson(res, status, body) {
 
 /**
  * 读取 JSON 请求体（上限 64 KiB，与本插件其他 API 同量级）。
- * @param {import('node:http').IncomingMessage} req
- * @param {number} [maxBytes]
- * @returns {Promise<object>}
+ *
+ * FIX-04：实现搬到共享守卫模块 `lib/http-guard.js` —— 那里也是统一前置
+ * 守卫的解析入口，会缓存已消费的请求体；本模块沿用同一函数即可复用缓存
+ * （旧的自带副本在守卫之后二次读流会静默拿到 `{}`，把有体的写请求变成
+ * 空操作）。
+ * @type {(req: import('node:http').IncomingMessage, maxBytes?: number) => Promise<object>}
  */
-async function readBody(req, maxBytes = 64 * 1024) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
+const readBody = sharedReadBody
 
 /**
  * 安装会话书签模块的宿主端部分（HTTP API + 存储）。
@@ -638,6 +628,9 @@ export function installBookmarks(ctx, config) {
       kind: 'prefix',
       path: base,
       handler: async (req, res) => {
+        // FIX-04：统一前置守卫（只读放行、写操作要求同源 + JSON 体）。
+        // 跨站简单请求（Origin: evil + text/plain，无预检）曾能直接写书签。
+        if (await applyRequestGuard(req, res)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
         try {

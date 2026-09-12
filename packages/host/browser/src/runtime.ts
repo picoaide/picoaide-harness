@@ -15,9 +15,8 @@ import { BrowserGuard, installPermissionGuard } from './guard.ts'
 import { extractSnapshot, extractText } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { TabPool } from './pool.ts'
-import { BrowserStore, maskSensitiveFragment, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
+import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
-import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
 import { browserError, BrowserError } from './errors.ts'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
@@ -762,7 +761,12 @@ export class BrowserRuntime {
     const wc = tab.view.webContents
     if (wc.isDestroyed()) return
     tab.url = wc.getURL()
-    tab.title = wc.getTitle() || tab.url || ''
+    // FIX-06 (2026-09-12): the page title frequently *is* a URL (no `<title>`,
+    // a guard-rejected navigation, an Electron title fallback) and it feeds the
+    // persisted history, the native window caption and the model-facing
+    // state — while `tab.url` next to it was already redacted. Same text-level
+    // redactor as the store, applied once at the source.
+    tab.title = stripSensitiveText(wc.getTitle() || tab.url || '')
     tab.loading = wc.isLoading()
     try {
       tab.canGoBack = wc.canGoBack()
@@ -1112,9 +1116,17 @@ export class BrowserRuntime {
     )
   }
 
-  /** Eval guardrail (heuristic AST policy + result masking). The validator is
-   * a misuse guardrail, NOT a security boundary: the AI is allowed to operate
-   * every part of the browser (fetch/XHR/arbitrary JS included). */
+  /**
+   * Eval guardrail (heuristic AST policy + result masking).
+   *
+   * The validator is a misuse guardrail, NOT a security boundary: the AI is
+   * allowed to operate every part of the browser (fetch/XHR/arbitrary JS
+   * included). Since FIX-03 the *returned* string is additionally passed
+   * through {@link redactFilledSecretsText}, so a value this tab received via
+   * `fillCredentials` is not handed back through the eval channel — but that
+   * only closes the incidental read-back path, never an active exfiltration by
+   * the evaluated code (see the honesty note inside).
+   */
   async eval(tabId: number, expression: string, frame?: number, signal?: AbortSignal): Promise<string> {
     if (!this.options.evalEnabled) {
       throw browserError('policy', 'browser: browser_eval is disabled in this deployment')
@@ -1143,10 +1155,42 @@ export class BrowserRuntime {
       if (evalResult.exceptionDetails !== undefined) {
         throw browserError('eval-policy', 'browser: page script failed (exception)')
       }
-      return serializeEvalResult(evalResult.result?.value)
+      // FIX-03 (2026-09-12): `browser_eval` used to be the un-redacted sibling
+      // of `browser_get_snapshot` — `document.querySelector('#pw').value`
+      // handed the injected connector password straight back to the model.
+      // The serialized string goes through the SAME value-level redactor as the
+      // snapshot funnel (`redactFilledSecretsText`), applied after
+      // `serializeEvalResult`'s keyword masking (a random password carries no
+      // keyword for that mask to catch).
+      //
+      // Honest boundary: this closes the *incidental read-back* channel only.
+      // As the doc comment above says, this validator is a misuse guardrail,
+      // not a security boundary — the expression may use fetch/XHR/WebSocket,
+      // so code that can read a value can still send it out. Value-level
+      // scrubbing cannot close that; only a product decision ("no eval on tabs
+      // holding injected credentials") could.
+      return redactFilledSecretsText(tab, serializeEvalResult(evalResult.result?.value))
     }, signal)
     this.record('browser_eval', resolved, `eval: ${expression.slice(0, 60)}`)
     return result
+  }
+
+  /**
+   * Apply the value-level secret redaction of the snapshot/eval funnels to an
+   * arbitrary text produced from `tabId` (FIX-03 depth layer, 2026-09-12).
+   *
+   * Exposed so the tool layer can re-apply the exact same reducer to a value
+   * that already went through `runtime.eval` — redundant by design, so a
+   * future runtime path or caller cannot hand the model a credential this tab
+   * received through `fillCredentials`. Unknown/empty tabs pass the text
+   * through unchanged (this helper must never break a working call).
+   *
+   * Same honest boundary as `eval()`: this is not an egress firewall.
+   */
+  redactTabSecrets(tabId: number, text: string): string {
+    const tab = this.tabs.get(tabId)
+    if (tab === undefined || tab.filledSecrets.length === 0) return text
+    return redactFilledSecretsText(tab, text)
   }
 
   private async frameContextId(tab: BrowserTab, frameIndex: number): Promise<number | undefined> {
@@ -1837,7 +1881,9 @@ export class BrowserRuntime {
       const tab = this.tab(active)
       tab.view.webContents.downloadURL(url)
       this.store.addHistory({
-        time: Date.now(), url, title: `download: ${url}`, actor: 'ai', group: '',
+        // FIX-06: the summary title embeds the (possibly signed) URL verbatim;
+        // redact it here so it never depends on the store having to clean up.
+        time: Date.now(), url, title: `download: ${stripSensitiveUrl(url)}`, actor: 'ai', group: '',
       } as Omit<HistoryEntry, 'seq'>)
     }, signal)
   }
@@ -2071,52 +2117,45 @@ const KEY_VK: Record<string, number> = {
 }
 
 const MASK = '****'
-const SUMMARY_URL = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
-/** Redact credential-shaped parts of a browser op-log summary. Mirrors
- * `store.stripSensitiveUrl` (userinfo + sensitive query parameters + fragment
+/** Redact credential-shaped parts of a browser op-log summary. Delegates to
+ * `store.stripSensitiveText` (userinfo + sensitive query parameters + fragment
  * pairs) so the same URL never reads `****` in history and cleartext in the op
- * log / activity panel (P1-5). The fragment branch reuses
- * `store.maskSensitiveFragment` on purpose: two implementations had drifted. */
+ * log / activity panel (P1-5, and FIX-06 for titles). The scanner used to live
+ * here as a second copy; it now has exactly one implementation. */
 function maskBrowserSummary(summary: string): string {
-  return summary.replace(SUMMARY_URL, (raw) => {
-    let end = raw.length
-    while (end > 0 && (raw[end - 1] === ')' || raw[end - 1] === ',' || raw[end - 1] === '.' || raw[end - 1] === ';')) {
-      end -= 1
-    }
-    const trailing = raw.slice(end)
-    const value = raw.slice(0, end)
-    try {
-      const url = new URL(value)
-      if (url.username !== '') url.username = MASK
-      if (url.password !== '') url.password = MASK
-      for (const name of url.searchParams.keys()) {
-        if (SENSITIVE_KEY_PATTERN.test(name)) url.searchParams.set(name, MASK)
-      }
-      if (url.hash !== '') url.hash = maskSensitiveFragment(url.hash)
-      return `${url.href}${trailing}`
-    } catch {
-      return raw
-    }
-  })
+  return stripSensitiveText(summary)
 }
 
 /**
- * Redact credential values this tab received through `fillCredentials` (P0-A
- * depth layer). Exact-value matching: a page string that merely *talks* about
- * passwords is untouched, while an injected secret can never leave through a
- * snapshot — no matter which probe/field produced it. A text that is a
- * truncated head of a longer secret (the probe caps text at 80 chars) is
- * redacted as a whole.
+ * Value-level redaction of the secrets this tab received through
+ * `fillCredentials` (P0-A depth layer, extended to `browser_eval` by FIX-03).
+ * Exact-value matching: a page string that merely *talks* about passwords is
+ * untouched, while an injected secret can never leave through a snapshot or an
+ * eval result — no matter which probe/field/expression produced it. A text
+ * that is a truncated head of a longer secret (the probe caps text at 80
+ * chars) is redacted as a whole.
+ *
+ * ONE implementation for both funnels: `redactFilledSecrets` (element list) and
+ * the raw eval string both call this, so the snapshot and eval exits cannot
+ * drift apart again.
  */
+function redactFilledSecretsText(tab: BrowserTab, text: string): string {
+  if (tab.filledSecrets.length === 0) return text
+  let out = text
+  for (const secret of tab.filledSecrets) {
+    if (out.includes(secret)) out = out.split(secret).join(MASK)
+    else if (out.length >= 8 && secret.startsWith(out)) out = MASK
+  }
+  return out
+}
+
+/** Snapshot-shaped wrapper around {@link redactFilledSecretsText}: keeps the
+ * element objects untouched when nothing matched. */
 function redactFilledSecrets(tab: BrowserTab, elements: BrowserSnapshotElement[]): BrowserSnapshotElement[] {
   if (tab.filledSecrets.length === 0) return elements
   return elements.map((element) => {
-    let text = element.text
-    for (const secret of tab.filledSecrets) {
-      if (text.includes(secret)) text = text.split(secret).join(MASK)
-      else if (text.length >= 8 && secret.startsWith(text)) text = MASK
-    }
+    const text = redactFilledSecretsText(tab, element.text)
     return text === element.text ? element : { ...element, text }
   })
 }

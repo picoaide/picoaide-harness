@@ -378,7 +378,12 @@ async function bootApi() {
   const request = async (method, path, body) => {
     const res = await fetch(base + path, {
       method,
-      headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+      // FIX-04：写端点现在过统一同源守卫，必须带同源 Origin（浏览器对
+      // 非 GET/HEAD 一律附带；Node fetch 默认不发）。GET 带上也无副作用。
+      headers: {
+        origin: base,
+        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
     const data = await res.json().catch(() => ({}))
