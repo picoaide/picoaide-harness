@@ -13,9 +13,16 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { HostCronService } from './host-service.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
 
+/** Host-side collaborators of the tools. */
+export interface CronToolOptions {
+  /** Composed permission-preset roster, used to validate `cron_create.permission` (FIX-17). */
+  permissions?: () => readonly string[]
+}
+
 /** Cron tools host entry: registers the tools on the tools registry. */
-export function registerCronTools(ctx: Context, service: HostCronService): () => void {
+export function registerCronTools(ctx: Context, service: HostCronService, options: CronToolOptions = {}): () => void {
   const disposers: Array<() => void> = []
+  const permissionNames = (): readonly string[] => options.permissions?.() ?? []
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'cron_create',
@@ -38,6 +45,14 @@ export function registerCronTools(ctx: Context, service: HostCronService): () =>
       if (!isValidCron(args.cron)) throw new Error(`cron 表达式无效: ${args.cron}`)
       if (nextRunAtMs(args.cron, Date.now()) === undefined) throw new Error(`cron 表达式在五年内无匹配时刻: ${args.cron}`)
       if (args.prompt === undefined || args.prompt.trim() === '') throw new Error('必须提供 prompt（执行时发送给智能体会话的提示词）')
+      // FIX-17: `permission` names a preset of the composed permission service.
+      // Free text used to be accepted here and dropped by the executor; now an
+      // unknown name is rejected at creation time.
+      if (args.permission !== undefined) {
+        const roster = permissionNames()
+        if (roster.length === 0) throw new Error('权限预设服务不可用，无法指定 permission')
+        if (!roster.includes(args.permission)) throw new Error(`未知的权限预设: ${args.permission}（可用：${roster.join(', ')}）`)
+      }
 
       const id = `job-${crypto.randomUUID()}`
       service.registerJob({

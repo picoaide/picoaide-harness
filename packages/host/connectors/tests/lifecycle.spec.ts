@@ -4,6 +4,11 @@
  * retires the previous registration. Before the fix, two entry points could
  * interleave — the previous user's restore registered its MCP servers after
  * the new user's teardown, leaking connections and duplicating tools.
+ *
+ * FIX-02: the stdio definitions used here now need a local confirmation before
+ * their first spawn, which is orthogonal to the lifecycle ordering under test —
+ * the harness therefore answers the confirmation programmatically (the same
+ * "already approved" path an interactive user reaches after clicking 允许).
  */
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -74,7 +79,7 @@ function createHarness(connectors: ConnectorDef[], storeBaseDir: string): Harnes
     webServer: { register: () => () => {} },
   } as unknown as Context
 
-  apply(ctx, { connectors, storeBaseDir })
+  apply(ctx, { connectors, storeBaseDir, requestApproval: () => true })
   cleanups.push(async () => { for (const dispose of effectDisposers) dispose() })
   return {
     plugin,
