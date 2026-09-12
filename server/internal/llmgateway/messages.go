@@ -115,15 +115,15 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 	body = redactSecrets(body, secrets)
 	// N2(审计 r3 第四轮):与 /v1/chat/completions 非流式**同源** —— usage 缺失/
 	// null/空对象时也必须落一行可对账的估算费用,不能 200 交付却零落账。
-	// 缺/0 的 completion 侧按已交付字节估算(与流式同一个 fallbackCompletionTokens);
-	// 4xx 错误体不是交付内容 → 不估算(只有上游确实上报了 usage 才落账)。
-	pt, ct, cache, ok, _ := anthropicUsage(body)
-	delivered := resp.StatusCode < 400
-	if delivered {
-		ct = fallbackCompletionTokens(pt, ct, int64(len(body)))
-	}
-	if delivered || ok {
-		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cache, "search"); err != nil {
+	// 缺/0 的 completion 侧按已交付字节估算(同一个 estimateCompletionFallback,
+	// 带业务上限);4xx 错误体**不是**交付内容 → 一律不落账、不扣费,即使错误体
+	// 里带了 usage 对象(P2,审计 r5 §1 缺口 1:此前 `delivered || ok` 让 4xx 也照扣,
+	// 与流式 4xx 零扣费的行为分叉)。
+	pt, ct, cache, _, _ := anthropicUsage(body)
+	if resp.StatusCode < 400 {
+		var estimated bool
+		ct, estimated = estimateCompletionFallback(pt, ct, int64(len(body)))
+		if _, err := serverstore.RecordUsageKindCachedEstimated(a.DB, userID, model, pt, ct, cache, billingKindSearch, estimated); err != nil {
 			// FIX-05 + G5b:与 /v1/chat/completions 同源 —— **任何**结算失败都
 			// 必须在交付响应体之前拒绝,不能 log 后继续 200(事务已回滚)。
 			rejectSettlementFailure(c, err, "anthropic json")
@@ -206,7 +206,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 						cache = lcache
 					}
 					if usageID > 0 {
-						if uerr := updateUsageTokensSettled(a.DB, usageID, pt, ct, cache); uerr != nil {
+						if uerr := updateUsageTokensSettled(a.DB, usageID, pt, ct, cache, false); uerr != nil {
 							// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,状态码
 							// 改不了;写一条 error 事件后**终止泵送**。
 							if !clientGone {
@@ -326,7 +326,7 @@ func (a *API) handleMessages(c *gin.Context) {
 	var usageID int64
 	if req.Stream {
 		var ok bool
-		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, "search"); !ok {
+		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, billingKindSearch); !ok {
 			return
 		}
 	}

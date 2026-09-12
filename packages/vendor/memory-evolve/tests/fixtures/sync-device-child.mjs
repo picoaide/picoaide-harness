@@ -173,6 +173,47 @@ try {
       out.extra.threw = `${err?.name ?? 'Error'}: ${err?.message ?? String(err)}`
       out.result = { ok: false, threw: out.extra.threw }
     }
+  } else if (payload.op === 'memory-tab') {
+    // 记忆 Tab 数据路由（FIX-26 第六轮回归用）：真 HTTP 服务 + 真 handler
+    // （GET /memory-evolve/api/memory-files → memory-tab.js buildMemoryFiles）。
+    // payload { dir, cwd?, projectDir?, sessionId?, secret? }
+    const { installApi } = await import(pathToFileURL(join(pkg, 'lib', 'api.js')).href)
+    const store = await import(pathToFileURL(join(pkg, 'lib', 'store.js')).href)
+    const todoMod = await import(pathToFileURL(join(pkg, 'lib', 'todo.js')).href)
+    const { createServer } = await import('node:http')
+    const resolver = payload.projectDir ? () => payload.projectDir : undefined
+    const ms = new store.MemoryStore(payload.dir, resolver ? { projectDirResolver: resolver } : {})
+    const archive = new store.ArchiveStore(payload.dir, resolver ? { projectDirResolver: resolver } : {})
+    const queue = new store.SuggestionQueue(join(payload.dir, 'SUGGESTIONS.jsonl'))
+    const todoStore = new todoMod.TodoStore(payload.dir, resolver ?? null)
+    const ctx = { webServer: { register: ({ handler }) => { ctx.handler = handler; return () => {} } } }
+    installApi(ctx, {
+      store: ms, archive, queue, todoStore,
+      getRuntime: () => ({ todoEnabled: true }),
+      updateRuntime: () => ({}),
+      config: { memoryDir: payload.dir, skillDir: join(payload.dir, 'skills') },
+      resolveCwd: () => payload.cwd,
+    })
+    const server = createServer((req, res) => ctx.handler(req, res))
+    await new Promise((r) => server.listen(0, '127.0.0.1', r))
+    try {
+      const url = `http://127.0.0.1:${server.address().port}/memory-evolve/api/memory-files?sessionId=${payload.sessionId ?? 's1'}`
+      const res = await fetch(url)
+      const text = await res.text()
+      out.extra.status = res.status
+      out.extra.raw = text.slice(0, 4000)
+      try {
+        const parsed = JSON.parse(text)
+        out.extra.files = (parsed.files ?? []).map((f) => ({ key: f.key, path: f.path ?? null, exists: f.exists, available: f.available, content: f.content ?? '' }))
+        out.extra.error = parsed.error ?? null
+      } catch {
+        out.extra.files = null
+      }
+      out.result = { ok: res.status === 200, status: res.status }
+      out.ok = true
+    } finally {
+      await new Promise((r) => server.close(r))
+    }
   } else if (payload.op === 'lock') {
     // 锁路径断言设备操作（P2 假死回归）：真取锁（可选走 MemoryStore.add 生产路径），
     // 回报耗时与异常文案——"立即 fail-loud"与"空转 5s 超时"靠 elapsedMs 区分。

@@ -33,7 +33,7 @@ import { ENTRY_DELIMITER } from '../store.js'
 import { ensureEntryIds } from './entryid.js'
 import { locateLegacyDir, normalizeRemoteUrl, sanitizeRemoteUrl } from './identity.js'
 import { TODO_HEADER } from '../todo.js'
-import { filesetSpec, hasSymlinkComponent, isMemoryFile, isTodoPath, GLOBAL_FILESET_KEYS, globalBranchFor, resolveSafeRepoTarget } from './filesets.js'
+import { filesetSpec, hasSymlinkComponent, isMemoryFile, isTodoPath, GLOBAL_FILESET_KEYS, globalBranchFor, isSymlinkFreeRepoTarget, openExclusiveSafe, removeCreatedFile, resolveSafeRepoTarget, writeFileAtomicSafe } from './filesets.js'
 
 /** 网络命令超时（30s，GIT_TERMINAL_PROMPT=0 防凭证卡死）。 */
 const NETWORK_TIMEOUT_MS = 30_000
@@ -857,12 +857,16 @@ function backfillEntryIds(dir, fileset = 'project') {
     // （共享分支 120000 条目 checkout 的结果，如 `logs -> <仓库外>`）会被
     // statSync 跟随并整文件重写——同样写穿仓库外。与 runSync/resolveConflict
     // 同源断言：逐层 lstat 拒符号链接 + realpath 包含性，拒收即跳过。
-    if (hasSymlinkComponent(dir, rel)) {
+    //
+    // FIX-26（第六轮）：改用写侧同一份 resolveSafeRepoTarget 解析落点（realpath
+    // 基准）——原先的 `join(dir, rel)` 在"记忆目录本身是符号链接"的合法布局下
+    // 不在 realpath(root) 之下，会被下面的写入原语误判为越界而拒收。
+    const p = resolveSafeRepoTarget(dir, rel)
+    if (p === null || !existsSync(p) || !statSync(p).isFile()) {
       skipped += 1
       continue
     }
-    const p = join(dir, rel)
-    if (existsSync(p) && statSync(p).isFile()) files.push(p)
+    files.push(p)
   }
   for (const file of files) {
     let text
@@ -885,9 +889,14 @@ function backfillEntryIds(dir, fileset = 'project') {
     const { entries, backfilled: n } = ensureEntryIds(parseEntries(text))
     if (n === 0) continue
     // 原子写回（与 store.js write 同款：tmp + rename）
-    const tmp = `${file}.tmp.${process.pid}`
-    writeFileSync(tmp, serializeEntries(entries))
-    renameSync(tmp, file)
+    // FIX-26（第六轮）：临时落点同样断言 + O_EXCL 按 fd 写入 + rename 前后复检
+    // （第五轮 4a：`<file>.tmp.<pid>` 被预置真符号链接时 writeFileSync 跟随链接
+    // 写穿仓库外）。被拒（符号链接/预置同名条目）→ 跳过该文件，不整批中断。
+    const written = writeFileAtomicSafe(dir, file, serializeEntries(entries))
+    if (written.ok !== true) {
+      skipped += 1
+      continue
+    }
     backfilled += n
   }
   return { backfilled, skipped }
@@ -1059,21 +1068,25 @@ export async function asyncSyncLock(dir, fn) {
   mkdirSync(dir, { recursive: true })
   const deadline = Date.now() + 30000 // sync 含网络 fetch，给足 30s
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  let lockStat = null
   for (;;) {
-    let acquired = false
-    try {
-      const fd = openSync(lockPath, 'wx')
+    // FIX-26（第六轮）：与 store.withLock 同款——O_EXCL + 打开后校验 + 按 fd
+    // 写入锁内容（原先打开后按**路径**写，祖先目录被换成符号链接时锁 JSON
+    // 会落在仓库外）；逃逸落点由原语回收。
+    const opened = openExclusiveSafe(dir, lockPath, 'lock')
+    if (opened.ok === true) {
       try {
-        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        writeFileSync(opened.fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
       } finally {
-        closeSync(fd)
+        closeSync(opened.fd)
       }
-      acquired = true
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
+      lockStat = opened.stat
+      break
     }
-    if (acquired) break
-    if (isStaleLock(lockPath)) rmSync(lockPath, { force: true })
+    if (opened.reason !== 'exists') {
+      throw new Error(srt('syncr.symlinkRefused', { path: '.sync.lock' }))
+    }
+    if (isStaleLock(lockPath) && isSymlinkFreeRepoTarget(dir, lockPath)) rmSync(lockPath, { force: true })
     if (Date.now() >= deadline) {
       throw new Error('dsh-memory-evolve: timed out waiting for the sync lock')
     }
@@ -1082,7 +1095,8 @@ export async function asyncSyncLock(dir, fn) {
   try {
     return await fn()
   } finally {
-    rmSync(lockPath, { force: true })
+    // 只删我们自己创建的那个 inode（祖先被换走时不误删仓库外同名文件）
+    removeCreatedFile(lockPath, lockStat)
   }
 }
 
@@ -1091,23 +1105,26 @@ export async function asyncWithLock(dir, fn) {
   mkdirSync(dir, { recursive: true })
   const deadline = Date.now() + 5000 // 与 store.js LOCK_TIMEOUT_MS 对齐
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  let lockStat = null
   for (;;) {
-    let acquired = false
-    try {
-      const fd = openSync(lockPath, 'wx')
+    // FIX-26（第六轮）：同上（这条是 .memory.lock 的异步变体，与 store.withLock
+    // 共用同一个锁文件，写法必须一致）。
+    const opened = openExclusiveSafe(dir, lockPath, 'lock')
+    if (opened.ok === true) {
       try {
-        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        writeFileSync(opened.fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
       } finally {
-        closeSync(fd)
+        closeSync(opened.fd)
       }
-      acquired = true
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
+      lockStat = opened.stat
+      break
     }
-    if (acquired) break
+    if (opened.reason !== 'exists') {
+      throw new Error(srt('syncr.symlinkRefused', { path: '.memory.lock' }))
+    }
     // stale 判断与主进程同源（isStaleLock）：mtime 超时或 pid 已死
     // （断电中断残留）→ 立即清除，不等 10s
-    if (isStaleLock(lockPath)) rmSync(lockPath, { force: true })
+    if (isStaleLock(lockPath) && isSymlinkFreeRepoTarget(dir, lockPath)) rmSync(lockPath, { force: true })
     if (Date.now() >= deadline) {
       throw new Error('dsh-memory-evolve: timed out waiting for the memory lock')
     }
@@ -1116,6 +1133,7 @@ export async function asyncWithLock(dir, fn) {
   try {
     return await fn()
   } finally {
-    rmSync(lockPath, { force: true })
+    // 只删我们自己创建的那个 inode（同上）
+    removeCreatedFile(lockPath, lockStat)
   }
 }

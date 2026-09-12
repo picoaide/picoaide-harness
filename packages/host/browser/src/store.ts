@@ -10,7 +10,7 @@
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
-import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
+import { isExactSensitiveKey, SENSITIVE_KEY_PATTERN } from './sensitive.ts'
 
 /** Persisted tab ledger (v4.2 single pool): registry metadata + active tab.
  * Views are re-materialized by the runtime on restore. */
@@ -150,9 +150,38 @@ export function stripSensitiveUrl(raw: string): string {
  * before the vocabulary test. */
 const KEY_CHAR = /[A-Za-z0-9_.\-[\]%]/u
 /** Characters that end a value. */
-const VALUE_STOP = new Set([' ', '\t', '\n', '\r', '"', "'", '<', '>', '&', ';', '#', ')', ']', '}', ',', '(', '{', '|', '\\'])
+const VALUE_STOP = new Set([' ', '\t', '\n', '\r', '"', "'", '<', '>', '&', ';', '#', ')', ']', '}', ',', '(', '{', '|', '\\', '?'])
 /** Opening delimiters skipped between `=` and the value (`code="T"`). */
 const VALUE_OPEN = new Set(['"', "'", '(', '[', '{'])
+
+/**
+ * Separator spellings the scanner accepts at a position (R-5, 2026-09-13):
+ *
+ * - `=`, and the full-width `＝` (U+FF1D) a CJK page/IME produces;
+ * - the HTML entity forms `&#61;` / `&#061;` / `&#x3d;` / `&equals;`, which is
+ *   what a title or an op-log summary carries when the page wrote the pair into
+ *   markup instead of a text node;
+ * - `:` for object/JSON pairs (`{"code":"T14"}`). The colon is gated by
+ *   {@link isExactSensitiveKey} (or a quoted key) so ordinary prose
+ *   (`encoded: 0`, `decoder: x`) is not rewritten.
+ */
+const SEPARATOR_AT = /^(?:=|＝|&#0*61;|&#[xX]0*3d;|&equals;|:)/
+/** Whitespace allowed between a key and its separator, and between the
+ * separator and the value (`token = T12`). */
+const SEPARATOR_SPACE = new Set([' ', '\t'])
+
+/** True when the pair at `keyStart` sits inside an absolute URL, so a following
+ * `/` starts a path segment rather than continuing the value
+ * (`https://x/token=T12/next` — the old rule swallowed `/next` whole). */
+function insideAbsoluteUrl(text: string, keyStart: number): boolean {
+  let i = keyStart
+  while (i > 0) {
+    const ch = text[i - 1]!
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '"' || ch === "'" || ch === '<' || ch === '`') break
+    i--
+  }
+  return text.slice(i, keyStart).includes('://')
+}
 
 /** Decode a key repeatedly so `%2573id` → `%73id` → `sid` matches the
  * vocabulary. Bounded (3 rounds) and best-effort: a malformed escape keeps the
@@ -173,7 +202,7 @@ function decodeKeyForMatch(raw: string): string {
 
 /**
  * Mask credential-shaped `key=value` pairs in **arbitrary text** (R-4,
- * 2026-09-13).
+ * 2026-09-13; separator/JSON coverage and the URL-path boundary R-5).
  *
  * The pre-fix rule only ran on strings that contained `://` and only through
  * `new URL()`, so a page `<title>` — `token=T12`, `Sign in /cb?%73id=T11`,
@@ -181,12 +210,14 @@ function decodeKeyForMatch(raw: string): string {
  * and the JSONL files in cleartext; so did the double-encoded and
  * semicolon-separated URL forms. This scanner is delimiter-driven instead:
  *
- * - a **key** is the maximal run of {@link KEY_CHAR} immediately before `=`,
- *   matched against {@link SENSITIVE_KEY_PATTERN} after
- *   {@link decodeKeyForMatch} (so `%2573id=` counts as `sid=`);
+ * - a **key** is the maximal run of {@link KEY_CHAR} immediately before a
+ *   {@link SEPARATOR_AT} spelling (optionally separated by spaces), matched
+ *   against {@link SENSITIVE_KEY_PATTERN} after {@link decodeKeyForMatch} (so
+ *   `%2573id=` counts as `sid=`); a quoted key is accepted for the `:` form;
  * - a **value** starts after an optional opening delimiter, ends at the first
- *   {@link VALUE_STOP} character (or the end of the text) and must be non-empty;
- *   sentence punctuation that only trails the text (`…token=T12.`) stays text;
+ *   {@link VALUE_STOP} character (or `/` when the pair is inside an absolute
+ *   URL) and must be non-empty; sentence punctuation that only trails the text
+ *   (`…token=T12.`) stays text;
  * - only the value is replaced; keys, delimiters and the rest of the text stay
  *   byte-identical, so a text with nothing to mask is returned unchanged.
  *
@@ -196,27 +227,44 @@ function decodeKeyForMatch(raw: string): string {
  * is not.
  */
 export function maskSensitiveKeyValueText(raw: string): string {
-  if (raw === '' || !raw.includes('=')) return raw
+  if (raw === '') return raw
+  if (!raw.includes('=') && !raw.includes('＝') && !raw.includes(':') && !raw.includes('&')) return raw
   const parts: string[] = []
   let cursor = 0
   let index = 0
   while (index < raw.length) {
-    if (raw[index] !== '=') { index++; continue }
-    let start = index
+    const separator = SEPARATOR_AT.exec(raw.slice(index, index + 8))
+    if (separator === null) { index++; continue }
+    const spelling = separator[0]
+    const colon = spelling === ':'
+    // The key may be separated from its separator by spaces (`token = T12`).
+    let keyEnd = index
+    while (keyEnd > 0 && SEPARATOR_SPACE.has(raw[keyEnd - 1]!)) keyEnd--
+    // JSON object pair: `"code": "T14"`.
+    let quoted = false
+    if (keyEnd > 0 && (raw[keyEnd - 1] === '"' || raw[keyEnd - 1] === "'")) { quoted = true; keyEnd-- }
+    let start = keyEnd
     while (start > 0 && KEY_CHAR.test(raw[start - 1]!)) start--
-    if (start === index) { index++; continue }
-    if (!SENSITIVE_KEY_PATTERN.test(decodeKeyForMatch(raw.slice(start, index)))) { index++; continue }
-    let valueStart = index + 1
+    if (start === keyEnd) { index += spelling.length; continue }
+    const key = decodeKeyForMatch(raw.slice(start, keyEnd))
+    if (!SENSITIVE_KEY_PATTERN.test(key)) { index += spelling.length; continue }
+    // A colon is only a credential separator in the JSON shape (quoted key) or
+    // when the key IS a credential term — `key`/`code`/`sid` are ordinary
+    // English words as substrings of prose keys (`encoded:`, `decoder:`).
+    if (colon && !quoted && !isExactSensitiveKey(key)) { index += spelling.length; continue }
+    const urlContext = insideAbsoluteUrl(raw, start)
+    let valueStart = index + spelling.length
+    while (valueStart < raw.length && SEPARATOR_SPACE.has(raw[valueStart]!)) valueStart++
     if (valueStart < raw.length && VALUE_OPEN.has(raw[valueStart]!)) valueStart++
     let valueEnd = valueStart
-    while (valueEnd < raw.length && !VALUE_STOP.has(raw[valueEnd]!)) valueEnd++
+    while (valueEnd < raw.length && !VALUE_STOP.has(raw[valueEnd]!) && !(urlContext && raw[valueEnd] === '/')) valueEnd++
     // A value that runs to the end of the text may carry the sentence's full
     // stop (`see token=T12.`): the punctuation is prose, so it stays.
     let tail = valueEnd
     if (valueEnd === raw.length) {
       while (tail > valueStart + 1 && (raw[tail - 1] === '.' || raw[tail - 1] === ',' || raw[tail - 1] === '!' || raw[tail - 1] === '?')) tail--
     }
-    if (tail === valueStart) { index++; continue }
+    if (tail === valueStart) { index += spelling.length; continue }
     parts.push(raw.slice(cursor, valueStart), '****')
     cursor = tail
     index = tail

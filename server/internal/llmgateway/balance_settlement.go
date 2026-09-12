@@ -43,6 +43,19 @@ import (
 // 前置拦截)使用同一个稳定错误码。
 const balanceExhaustedCode = "BALANCE_EXHAUSTED"
 
+// 计费 kind = **端点标识**(P3,审计 r5 §1)。此前 /v1/completions 与
+// /v1/responses 都记成 "chat",按端点对账时分不开;embedding/search 早已分开。
+// 既有取值语义不变(历史行仍是 chat/embedding/search),只新增两个取值。
+// 白名单与 pending 清理集合在 serverstore(UsageRequestKind /
+// UsageKindPendingCleanup),由 TestBillingKindsRegisteredInServerstore 守卫。
+const (
+	billingKindChat        = "chat"        // /v1/chat/completions
+	billingKindCompletions = "completions" // /v1/completions(FIM Beta)
+	billingKindResponses   = "responses"   // /v1/responses
+	billingKindSearch      = "search"      // /v1/messages(Anthropic 兼容 + web_search)
+	billingKindEmbedding   = "embedding"   // /v1/embeddings
+)
+
 // balanceSettlementMessage 是结算期拦截的对外文案。与闸门文案略有区别:
 // 这里上游**已经被调用过一次**,必须让用户知道本次没有交付结果。
 const balanceSettlementMessage = "余额不足,本次调用未完成:请联系管理员充值"
@@ -143,10 +156,10 @@ const settlementBackfillBackoff = 40 * time.Millisecond
 // (settleUsageCostTx 按 usage_id 的流水汇总把该行收敛到目标金额:重复执行差额
 // 为 0,不会重复扣款),所以瞬时错误(死锁/连接抖动)可以安全地有限重试 ——
 // 避免 DB 抖动把正常的流式请求误判成失败。余额不足不重试(重试没有意义)。
-func updateUsageTokensSettled(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64) error {
+func updateUsageTokensSettled(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
 	var err error
 	for attempt := 1; attempt <= settlementBackfillAttempts; attempt++ {
-		err = serverstore.UpdateUsageTokensCached(db, id, promptTokens, completionTokens, cacheTokens)
+		err = serverstore.UpdateUsageTokensCachedEstimated(db, id, promptTokens, completionTokens, cacheTokens, estimated)
 		if err == nil {
 			return nil
 		}
@@ -202,22 +215,54 @@ func estimateEmbeddingPromptTokens(texts []string) int64 {
 // 饱和保护(G5a 同源):估算不得让 prompt+completion 越过 MaxInt64 ——
 // 落库列是 BIGINT,求和回绕/越界会让聚合与对账查询报错。
 func fallbackCompletionTokens(promptTokens, completionTokens, deliveredBytes int64) int64 {
+	n, _ := estimateCompletionFallback(promptTokens, completionTokens, deliveredBytes)
+	return n
+}
+
+// maxEstimatedCompletionTokens 是**估算**的业务上限(P2,审计 r5 §1 缺口 2:
+// 「估算无上限、可被上游双向操纵」)。
+//
+// 依据:估算只在"上游没报 completion 侧"时启动,按**已交付字节**折算
+// (4 字节/token),而上游响应体上限是 32 MiB ⇒ 无上限时单请求最多估出
+// 8,388,608 token。实测:上游在响应里塞 1 MiB 填充(debug/回显/base64/工具
+// 结果,都不是模型输出)就能把一次 "hi" 记成 262,174 token ≈ 2.10 元 ——
+// 交付字节数成了计费放大器;32 MiB 上限外推 ≈ 67 元/请求。
+//
+// 取值 65536(64K)= 本平台支持的最大模型输出量级(deepseek-reasoner 的 64K
+// 输出上限),折算 = 256 KiB 交付内容。理由:
+//   - 真实值优先:上游只要报了任何**正**值 completion,估算完全不启动,上限
+//     对正常链路零影响;上游报一个极小的正值(如 1)本来就会压制估算,这一点
+//     没有变化(那是"少收"方向,属产品选择的边界,见"仍未修"清单);
+//   - 少收方向:上游漏报 usage 时,宁可按物理上限少收,也不把不可信字节当账单;
+//   - 定量:最坏多收 ≤ 65536 × 8 元/1M ≈ 0.53 元/请求(无上限时 67 元/请求),
+//     且**只影响上游漏报 usage 的异常报文**,无法再被填充放大 5 个数量级。
+const maxEstimatedCompletionTokens int64 = 65536
+
+// estimateCompletionFallback 是字节估算的**唯一实现**(fallbackCompletionTokens
+// 与 settleStreamFallback 共用),额外返回 estimated 标记:true = 这个 token 数
+// 是服务端估算的,而不是上游上报值(0063 的 usage.estimated 列写它,事后对账
+// 必须能区分 —— 审计 r5 §1 缺口 3)。
+func estimateCompletionFallback(promptTokens, completionTokens, deliveredBytes int64) (tokens int64, estimated bool) {
 	if completionTokens > 0 {
-		return completionTokens
+		// 上游上报的正值原样保留:不估算、不覆盖、不叠加上限。
+		return completionTokens, false
 	}
-	estimated := estimateTokensFromBytes(deliveredBytes)
-	if estimated <= 0 {
-		return 0
+	estimatedTokens := estimateTokensFromBytes(deliveredBytes)
+	if estimatedTokens <= 0 {
+		return 0, false
+	}
+	if estimatedTokens > maxEstimatedCompletionTokens {
+		estimatedTokens = maxEstimatedCompletionTokens
 	}
 	if promptTokens > 0 {
-		if room := int64(math.MaxInt64) - promptTokens; estimated > room {
+		if room := int64(math.MaxInt64) - promptTokens; estimatedTokens > room {
 			if room <= 0 {
-				return 0
+				return 0, false
 			}
-			estimated = room
+			estimatedTokens = room
 		}
 	}
-	return estimated
+	return estimatedTokens, true
 }
 
 // settleStreamFallback 是流式收尾兜底结算的**唯一实现**(G12,审计 2026-09-13)。
@@ -233,12 +278,13 @@ func fallbackCompletionTokens(promptTokens, completionTokens, deliveredBytes int
 // 返回 settled=false 且 err==nil 表示这次流没有任何可计费内容(pending 行已删除)。
 // 返回 err != nil 时调用方必须 fail-closed(abortSettlementFailureStream)。
 func settleStreamFallback(db *sql.DB, usageID, forwardedBytes, promptTokens, completionTokens, cacheTokens int64) (bool, error) {
-	completionTokens = fallbackCompletionTokens(promptTokens, completionTokens, forwardedBytes)
+	var estimated bool
+	completionTokens, estimated = estimateCompletionFallback(promptTokens, completionTokens, forwardedBytes)
 	if promptTokens <= 0 && completionTokens <= 0 && cacheTokens <= 0 {
 		// 一个字节都没转发(连接失败/空流):删除 pending 行,不留痕迹。
 		return false, serverstore.DeleteUsage(db, usageID)
 	}
-	if err := updateUsageTokensSettled(db, usageID, promptTokens, completionTokens, cacheTokens); err != nil {
+	if err := updateUsageTokensSettled(db, usageID, promptTokens, completionTokens, cacheTokens, estimated); err != nil {
 		return false, err
 	}
 	return true, nil

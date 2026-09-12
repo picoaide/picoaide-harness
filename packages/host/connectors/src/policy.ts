@@ -94,12 +94,27 @@ export function normalizeEnvKey(key: string): string {
  * `Path` must be rejected exactly like `PATH`) and is made on the TRIMMED name,
  * so a whitespace variant cannot slip past. A blank name is never a usable
  * environment variable and is refused as well.
+ *
+ * A name CONTAINING `=` is refused outright, trailing included (R6). `=` is the
+ * `NAME=VALUE` separator of the process environment, so such a "name" is not a
+ * name: libuv renders the child environment as `NAME=VALUE` and a key that
+ * itself carries `=` shifts that boundary. The definition can therefore name ANY
+ * variable it likes — `{"NODE_OPTIONS=<payload>//": ""}` reaches the child as
+ * `NODE_OPTIONS=<payload>//=` — and this is measured, not theoretical: with a
+ * real `spawn`, the `--import=data:` payload in such a key executes in the child
+ * (the appended `=` lands in a trailing comment) while the plain `NODE_OPTIONS`
+ * spelling is refused by the denylist. A trailing `=` is also invisible in the
+ * local approval prompt, which lists key NAMES. Both the server catalog parser
+ * (reject the definition, fail-loud) and the runtime whitelist (drop the key)
+ * go through this one predicate.
  * @param key - environment variable name.
  * @returns true when the key must be dropped (or the definition rejected).
  */
 export function isDeniedEnvKey(key: string): boolean {
-  const upper = normalizeEnvKey(key).toUpperCase()
+  const normalized = normalizeEnvKey(key)
+  const upper = normalized.toUpperCase()
   if (upper === '') return true
+  if (normalized.includes('=')) return true
   return DENIED_ENV_KEYS.has(upper) || DENIED_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))
 }
 

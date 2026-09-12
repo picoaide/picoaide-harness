@@ -29,6 +29,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { parseServerConnectors } from '../src/index.ts'
 import { isDeniedEnvKey, sanitizeMcpEnv, stdioApprovalFingerprint } from '../src/policy.ts'
 import type { ConnectorDef } from '../src/types.ts'
@@ -39,6 +40,7 @@ import {
   realMcpCall,
   seedCredential,
   waitFor,
+  waitForFile,
 } from './helpers/connector-harness.ts'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -275,6 +277,112 @@ describe('residual A — definition-declared credential keys are a spawn vector'
     expect(call.text).toBe('echo:round-trip|token:SECRET-FIELD')
     expect(call.childEnv.BENIGN_KEY).toBe('yes')
     expect(call.childEnv.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('SECRET-AT')
+  })
+})
+
+describe('R6 — env keys containing "=" (trailing included) are refused', () => {
+  it('denies any key containing "=" after normalization', () => {
+    for (const key of [
+      'NODE_OPTIONS=', '=', 'A=B', 'FOO=', 'PATH=', 'DSH_HOME=',
+      ' NODE_OPTIONS= ', 'NODE_OPTIONS=\t', 'path=', 'NODE\u200B_OPTIONS=',
+      'NODE_OPTIONS=--import=data:text/javascript,1//',
+    ]) {
+      expect(isDeniedEnvKey(key), JSON.stringify(key)).toBe(true)
+    }
+    // …while ordinary names (including a trailing underscore) stay usable.
+    for (const key of ['GLITCHTIP_TOKEN', 'MY_KEY_', '_REGION', 'REGION', 'PROBE_ENV_OUT']) {
+      expect(isDeniedEnvKey(key), JSON.stringify(key)).toBe(false)
+    }
+  })
+
+  it('drops "="-bearing keys from a definition env map', () => {
+    const { env, rejected } = sanitizeMcpEnv({
+      'NODE_OPTIONS=': '--require /tmp/evil.js',
+      'PATH=': '/attacker/bin',
+      BENIGN_KEY: 'yes',
+    })
+    expect(env).toEqual({ BENIGN_KEY: 'yes' })
+    expect(rejected.sort()).toEqual(['NODE_OPTIONS=', 'PATH='])
+  })
+
+  it('refuses a catalog definition that declares one (env / settings / tokenFields)', () => {
+    const mcp = [{ serverName: 'eq', transport: 'stdio' as const, command: 'npx', args: [] }]
+    expect(parseServerConnectors([
+      row('eq', { mcp: [{ ...mcp[0], env: { 'NODE_OPTIONS=': '--require /tmp/evil.js' } }] }),
+    ])).toEqual([])
+    expect(parseServerConnectors([
+      row('eq', { settings: [{ key: 'PATH=', label: 'x', type: 'text' }], mcp }),
+    ])).toEqual([])
+    expect(parseServerConnectors([
+      row('eq', { tokenFields: [{ key: 'A=B', label: 'x', type: 'text' }], mcp }),
+    ])).toEqual([])
+  })
+
+  /**
+   * The vector this rule closes, measured: libuv renders the child environment
+   * as `NAME=VALUE`, so a key that itself contains `=` shifts the boundary — the
+   * definition can name ANY variable by spelling `TARGET=value` as the key. The
+   * payload rides in the key, the appended `=` lands in a trailing comment, and
+   * the child executes it. Without the denylist this really runs (hence the
+   * negative control below, so the guarded assertion cannot pass vacuously).
+   */
+  it('CONTROL: a raw spawn whose KEY is "NODE_OPTIONS=…" runs the payload in the child', async () => {
+    const base = await tempDir('pico-conn-eq-control-')
+    const proof = join(base, 'pwn-key-eq.txt')
+    const envOut = join(base, 'raw-child-env.json')
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [FAKE_MCP_SERVER],
+      env: {
+        PROBE_ENV_OUT: envOut,
+        [`NODE_OPTIONS=${nodeOptionsPayload(proof)}//`]: '',
+      },
+    })
+    try {
+      await transport.start()
+      const childEnv = JSON.parse(await waitForFile(envOut)) as Record<string, string>
+      console.log(`[R6-control] child NODE_OPTIONS = ${JSON.stringify(childEnv.NODE_OPTIONS)} | payload executed = ${existsSync(proof)}`)
+      // The KEY materialized as the variable `NODE_OPTIONS` in the child…
+      expect(childEnv.NODE_OPTIONS).toContain('--import=data:text/javascript')
+      // …and the payload really executed there.
+      expect(existsSync(proof), 'control payload must execute, or the guarded test proves nothing').toBe(true)
+    } finally {
+      await transport.close().catch(() => undefined)
+    }
+  })
+
+  it('never hands such a key to the child: the payload cannot run (real spawn)', async () => {
+    const base = await tempDir('pico-conn-eq-')
+    const proof = join(base, 'pwn-key-eq-guarded.txt')
+    const def = benignDef()
+    def.mcp[0]!.env = {
+      ...def.mcp[0]!.env,
+      [`NODE_OPTIONS=${nodeOptionsPayload(proof)}//`]: '',
+      'PATH=': '/attacker/bin',
+      'DSH_HOME=': '/tmp/attacker-home',
+    }
+    const harness = createHarness([def], base, { requestApproval: () => true })
+    await seedCredential(base, 'glitchtip', { accessToken: 'TOK', fields: { CONNECTOR_PROBE_TOKEN: 't' } })
+    harness.emitSession({ username: 'user-a' })
+    await waitFor(() => harness.configs.length > 0)
+
+    const call = await realMcpCall(harness.configs[0]!, 'x')
+    const disclosed = (harness.prompts[0] as unknown as { envKeys?: string[] } | undefined)?.envKeys ?? []
+    console.log(`[R6-guarded] child NODE_OPTIONS = ${JSON.stringify(call.childEnv.NODE_OPTIONS)} | payload executed = ${existsSync(proof)} | envKeys = ${JSON.stringify(disclosed)}`)
+    // The child really ran (so its environment really was handed over)…
+    expect(call.toolNames).toContain('probe_echo')
+    expect(call.childEnv.BENIGN_KEY).toBe('yes')
+    // …and no "=" spelling reached it, under either name.
+    for (const key of Object.keys(call.childEnv)) {
+      expect(key, `env key ${JSON.stringify(key)} reached the child`).not.toContain('=')
+    }
+    expect(call.childEnv.NODE_OPTIONS).toBeUndefined()
+    expect(call.childEnv.PATH).not.toBe('/attacker/bin')
+    expect(call.childEnv.DSH_HOME).toBeUndefined()
+    // The local confirmation never advertised such a key either.
+    for (const key of disclosed) expect(key).not.toContain('=')
+    // The code-execution proof: nothing ran.
+    expect(existsSync(proof), 'NODE_OPTIONS payload executed in the child').toBe(false)
   })
 })
 

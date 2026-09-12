@@ -86,7 +86,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 	var usageID int64
 	if req.Stream {
 		var ok bool
-		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, "chat"); !ok {
+		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, billingKindCompletions); !ok {
 			return
 		}
 	}
@@ -133,7 +133,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 		a.serveStream(c, resp, usageID, respSecrets)
 		return
 	}
-	a.serveJSON(c, resp, user.ID, req.Model, respSecrets)
+	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindCompletions)
 }
 
 // forwardEndpoint forwards raw body to an upstream OpenAI-style endpoint

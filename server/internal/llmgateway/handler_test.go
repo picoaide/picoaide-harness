@@ -654,7 +654,7 @@ func TestServeJSONDropsUntrustedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, uid, "m", nil)
+	a.serveJSON(c, resp, uid, "m", nil, billingKindChat)
 	if got := w.Body.String(); got != `{"ok":true}` {
 		t.Fatalf("上游响应体必须原样透传(否则本用例没走到白名单分支): %q", got)
 	}
@@ -819,7 +819,7 @@ func TestServeJSONRedactsUpstreamKeyEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, uid, "m", []string{secret})
+	a.serveJSON(c, resp, uid, "m", []string{secret}, billingKindChat)
 	body := w.Body.String()
 	if !strings.Contains(body, "echo ***") {
 		t.Fatalf("响应体必须透传且已脱敏(否则本用例没走到交付分支): %s", body)

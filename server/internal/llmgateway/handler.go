@@ -127,7 +127,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	var usageID int64
 	if req.Stream {
 		var ok bool
-		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, "chat"); !ok {
+		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, billingKindChat); !ok {
 			return
 		}
 	}
@@ -184,7 +184,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		a.serveStream(c, resp, usageID, respSecrets)
 		return
 	}
-	a.serveJSON(c, resp, user.ID, req.Model, respSecrets)
+	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindChat)
 }
 
 // maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
@@ -393,7 +393,8 @@ func redactHeaderValue(value string, secrets []string) string {
 
 // serveJSON passes a non-stream upstream response through and records usage.
 // secrets: 本次请求使用的上游官方 key——上游若在响应中回显,透传前脱敏。
-func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string) {
+// kind: 端点标识(计费 kind,见 billingKind*),不再硬编码 "chat"。
+func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string, kind string) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -426,25 +427,28 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 	// N2(审计 r3 第四轮):非流式交付**任何**形态都要有账 —— 上游 usage 缺失 /
 	// null / 空对象 / 只有 total_tokens(未知字段)时,此前直接跳过 RecordUsage,
 	// 内容 200 交付却零落账(embeddings 同族)。现在与流式**同源**兜底:
-	// 缺/0 的 completion 侧按已交付字节估算(fallbackCompletionTokens,与
-	// settleStreamFallback 同一个实现),prompt 侧不估算(响应字节推不出输入),
-	// 一次交付永远只落一行。4xx 上游错误体**不是**交付内容 → 不估算(保持
-	// 既有语义:只有上游确实上报了 usage 才落账)。
-	pt, ct, cch, uok, perr := parseUsage(body)
+	// 缺/0 的 completion 侧按已交付字节估算(estimateCompletionFallback,与
+	// settleStreamFallback 同一个实现,带业务上限 maxEstimatedCompletionTokens),
+	// prompt 侧不估算(响应字节推不出输入),一次交付永远只落一行。
+	//
+	// 4xx(含 4xx 错误体里**带 usage 对象**的形态)一律不落账、不扣费 —— 与
+	// 流式 4xx 同源(P2,审计 r5 §1 缺口 1)。此前条件是 `delivered || uok`,
+	// uok 让"上游 400 + 错误体带 usage"照扣:同一个上游 400,stream=true 零扣费、
+	// stream=false 扣全额,计费取决于客户端用哪种模式;上游(或中转)只要在**未
+	// 交付**的失败响应里塞一个 usage 就能收费。5xx 在 forward 层已 failover/丢弃。
+	pt, ct, cch, _, perr := parseUsage(body)
 	if perr != nil {
 		// 解析失败不是"没有用量":留痕便于定位上游报文异常。
 		log.Printf("gateway: parse usage from json body: %v", perr)
 	}
-	delivered := resp.StatusCode < 400
-	if delivered {
-		ct = fallbackCompletionTokens(pt, ct, int64(len(body)))
-	}
-	if delivered || uok {
-		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cch, "chat"); err != nil {
+	if resp.StatusCode < 400 {
+		var estimated bool
+		ct, estimated = estimateCompletionFallback(pt, ct, int64(len(body)))
+		if _, err := serverstore.RecordUsageKindCachedEstimated(a.DB, userID, model, pt, ct, cch, kind, estimated); err != nil {
 			// FIX-05 + G5b(审计 r3):**任何**结算失败都不得交付 —— 事务已回滚,
 			// 继续 200 交付就是"上游花了钱、账上一分没扣"的无限免费调用。
 			// 余额不足 → 429 BALANCE_EXHAUSTED;其它错误 → 503 METERING_FAILED。
-			rejectSettlementFailure(c, err, "chat json")
+			rejectSettlementFailure(c, err, kind+" json")
 			return
 		}
 	}
@@ -569,7 +573,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 							if cch > reportedCache {
 								reportedCache = cch
 							}
-							if uerr := updateUsageTokensSettled(a.DB, usageID, reportedPT, reportedCT, reportedCache); uerr != nil {
+							if uerr := updateUsageTokensSettled(a.DB, usageID, reportedPT, reportedCT, reportedCache, false); uerr != nil {
 								// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,
 								// 状态码改不了;写一条 error 事件后**终止泵送**,
 								// 不能继续 200 把余下内容白送出去。
@@ -778,13 +782,20 @@ func (u *usageFields) detailsCachedTokens() (int64, bool) {
 	return 0, false
 }
 
-// usageValue 取两套字段名里"有值的那个":chat 字段优先(保持既有语义不变),
-// 缺失时回落到 Responses 字段名;两者都缺 → 0(与"字段缺失即 0"的旧语义一致)。
+// usageValue 取两套字段名里"有值的那个":chat 字段**正值**优先(保持既有语义
+// 不变),缺失或 0 时回落到 Responses 字段名;两者都不可用 → 0(与"字段缺失即
+// 0"的旧语义一致)。
+//
+// P2(审计 r5 §1 缺口 3):此前是"primary 非 nil 就采信",于是
+// `{"prompt_tokens":0,"input_tokens":5000}` 取 0 —— 而 prompt 侧**不估算**
+// (响应字节推不出输入),整个输入侧免费;上游可控时这是稳定的少收通道。
+// 现在:primary>0 才优先,0/缺失/负值都回落另一套字段名;两者都 ≤0 才是 0。
+// 两套字段名同时给正值时仍以 chat 字段为准(既有语义不变)。
 func usageValue(primary, fallback *int64) int64 {
-	if primary != nil {
+	if primary != nil && *primary > 0 {
 		return *primary
 	}
-	if fallback != nil {
+	if fallback != nil && *fallback > 0 {
 		return *fallback
 	}
 	return 0
