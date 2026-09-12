@@ -1,0 +1,16 @@
+--- a/lib/runner-launch-COYGu0Dl.js
++++ b/lib/runner-launch-COYGu0Dl.js
+@@ -1451,6 +1451,13 @@
+ 	}
+ 	return {
+ 		...env,
++		// Desktop patch(PicoAide Harness):打包后的 Electron 宿主里 process.execPath 是 GUI 二进制。
++		// runner 子进程必须显式要求 Electron 以 Node 模式运行,否则它按"应用模式"启动
++		// (单实例锁→立刻退出码 0),runner 入口根本不会执行 —— 上层看到的就是
++		// "exited with exit code 0 before proving its managed range empty" 并 fail-closed。
++		// 作用域安全:只改 runner 自身的 env;用户命令的 env 由 targetEnvironment() 构造,
++		// 与本函数无关,所以 ELECTRON_RUN_AS_NODE 不会泄漏给被执行的命令。
++		...process.versions.electron === void 0 ? {} : { ELECTRON_RUN_AS_NODE: "1" },
+ 		[SUBPROCESS_RUNNER_ENV]: selection,
+ 		SYSTEMD_LOG_TARGET: "null",
+ 		...entry?.endsWith(".ts") === true ? { TSX_TSCONFIG_PATH: SOURCE_TSCONFIG_PATH } : {}
