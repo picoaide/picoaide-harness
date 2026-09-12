@@ -395,7 +395,7 @@ export function installAdvisor(ctx, config, deps = {}) {
 
   // ---- 事件接线（全 {global:true}：隔离作用域下也必须收到全部会话事件）----
   disposers.push(ctx.on('session/event', (session, event) => {
-    observer.handleEvent(session.id, session.events, event)
+    observer.handleEvent(session.id, session.ownEvents?.() ?? session.events, event)
   }, { global: true }))
   disposers.push(ctx.on('agent/created', ({ agent }) => {
     delivery.registerAgent(agent)
