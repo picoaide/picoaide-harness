@@ -3309,7 +3309,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-subprocess-local@npm:^0.1.5-rc.2":
+"@deepseek-ai/dsh-subprocess-local@npm:0.1.5-rc.2":
   version: 0.1.5-rc.2
   resolution: "@deepseek-ai/dsh-subprocess-local@npm:0.1.5-rc.2"
   dependencies:
@@ -3321,6 +3321,21 @@ __metadata:
     "@deepseek-ai/dsh-subprocess": ^0.1.5-rc.2
     "@deepseek-ai/dsh-timeout": ^0.1.5-rc.2
   checksum: 10c0/78f7679ffd1f04204b2c6b553340d4cb295aae119b437519cd0800cde2b0f558ded08af6a7aaf94a0bee02a62f9cd5087b1d0af897226e96b22770d3ce19b641
+  languageName: node
+  linkType: hard
+
+"@deepseek-ai/dsh-subprocess-local@patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
+  version: 0.1.5-rc.2
+  resolution: "@deepseek-ai/dsh-subprocess-local@patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch::version=0.1.5-rc.2&hash=9b396f&locator=picoaide-harness%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/dsh-win32-process": "npm:^0.1.5-rc.2"
+    koffi: "npm:^3.1.0"
+    node-pty: "npm:1.2.0-beta.15"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+    "@deepseek-ai/dsh-subprocess": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-timeout": ^0.1.5-rc.2
+  checksum: 10c0/6de9c2d4509d2feacfc3d1c2ae47401da1445537bb41989412a096927680a84371a6147cf99aa753396b3f238a45af64d7ed8f74f8679ff3f7e4bac8c719e95f
   languageName: node
   linkType: hard
 
